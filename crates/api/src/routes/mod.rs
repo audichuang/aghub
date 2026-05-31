@@ -7,6 +7,7 @@ pub mod market;
 pub mod mcps;
 pub mod plugins;
 pub mod skills;
+pub mod skills_update;
 pub mod sub_agents;
 
 use aghub_core::{

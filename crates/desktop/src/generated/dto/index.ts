@@ -93,6 +93,8 @@ export type { SkillResponse } from "./SkillResponse";
 export type { SkillTreeNodeKind } from "./SkillTreeNodeKind";
 export type { SkillTreeNodeResponse } from "./SkillTreeNodeResponse";
 export type { SkillTreeQuery } from "./SkillTreeQuery";
+export type { SkillUpdateResponse } from "./SkillUpdateResponse";
+export type { SkillUpdateStatusResponse } from "./SkillUpdateStatusResponse";
 export type { SkillsPathsDto } from "./SkillsPathsDto";
 export type { SubAgentCapabilitiesDto } from "./SubAgentCapabilitiesDto";
 export type { SubAgentResponse } from "./SubAgentResponse";

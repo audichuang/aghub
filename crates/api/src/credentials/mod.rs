@@ -5,7 +5,5 @@
 //! keyring or the network.
 
 // The resolver and binding store are consumed by the update-check orchestration
-// (Task F1.5). Until that lands, mark as allowed dead code so the blocking
-// `clippy -D warnings` lane stays green.
-#[allow(dead_code)]
+// (Task F1.5) via the `routes::skills_update` route.
 pub(crate) mod resolve;

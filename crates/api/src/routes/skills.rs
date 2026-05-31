@@ -1092,6 +1092,7 @@ pub fn get_global_skill_lock() -> ApiResult<GlobalSkillLockResponse> {
 			source_url: entry.source_url,
 			skill_path: entry.skill_path,
 			skill_folder_hash: entry.skill_folder_hash,
+			content_hash: entry.content_hash,
 			installed_at: entry.installed_at,
 			updated_at: entry.updated_at,
 			plugin_name: entry.plugin_name,
@@ -1196,11 +1197,12 @@ pub async fn git_scan_skills(
 		)
 	})?
 	.map_err(|e| {
-		ApiError::new(
-			Status::BadRequest,
-			format!("Failed to clone repository: {e}"),
-			"CLONE_FAILED",
-		)
+		// Strip any URL userinfo (user:token@) from the surfaced gix error so a
+		// token embedded in a clone URL never leaks into the API response/logs.
+		let msg = aghub_git::redact_url_userinfo(&format!(
+			"Failed to clone repository: {e}"
+		));
+		ApiError::new(Status::BadRequest, msg, "CLONE_FAILED")
 	})?;
 
 	// List remote branches (use cache from previous session if

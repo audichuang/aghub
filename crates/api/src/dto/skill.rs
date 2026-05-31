@@ -164,6 +164,9 @@ pub struct SkillLockEntryResponse {
 	pub skill_path: Option<String>,
 	#[serde(rename = "skillFolderHash")]
 	pub skill_folder_hash: String,
+	#[serde(rename = "contentHash", skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub content_hash: Option<String>,
 	#[serde(rename = "installedAt")]
 	pub installed_at: String,
 	#[serde(rename = "updatedAt")]
@@ -326,4 +329,105 @@ pub struct SkillTreeQuery {
 #[ts(export)]
 pub struct ProjectLockQuery {
 	pub project_path: Option<String>,
+}
+
+/// Per-skill update status surfaced by `GET /skills/check-updates`.
+///
+/// Tagged by `status` (camelCase): `upToDate`, `updateAvailable`,
+/// `uncheckable`. The `reason` on `uncheckable` is already redacted of any URL
+/// userinfo at the orchestration boundary.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum SkillUpdateStatusResponse {
+	UpToDate,
+	UpdateAvailable { current: String, available: String },
+	Uncheckable { reason: String },
+}
+
+impl From<aghub_core::skills::update::SkillUpdateStatus>
+	for SkillUpdateStatusResponse
+{
+	fn from(s: aghub_core::skills::update::SkillUpdateStatus) -> Self {
+		use aghub_core::skills::update::{
+			SkillUpdateStatus, UncheckableReason,
+		};
+		match s {
+			SkillUpdateStatus::UpToDate => SkillUpdateStatusResponse::UpToDate,
+			SkillUpdateStatus::UpdateAvailable { current, available } => {
+				SkillUpdateStatusResponse::UpdateAvailable {
+					current,
+					available,
+				}
+			}
+			SkillUpdateStatus::Uncheckable { reason } => {
+				let reason = match reason {
+					UncheckableReason::Auth => "auth",
+					UncheckableReason::Network => "network",
+					UncheckableReason::Local => "local",
+					UncheckableReason::Ssh => "ssh",
+					UncheckableReason::UnsupportedScheme => "unsupportedScheme",
+					UncheckableReason::NoPath => "noPath",
+					UncheckableReason::Timeout => "timeout",
+				};
+				SkillUpdateStatusResponse::Uncheckable {
+					reason: reason.to_string(),
+				}
+			}
+		}
+	}
+}
+
+/// One skill's name plus its flattened update status.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct SkillUpdateResponse {
+	pub name: String,
+	#[serde(flatten)]
+	pub status: SkillUpdateStatusResponse,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn update_available_serializes_with_status_tag_and_fields() {
+		let resp = SkillUpdateResponse {
+			name: "my-skill".to_string(),
+			status: SkillUpdateStatusResponse::UpdateAvailable {
+				current: "aaa".to_string(),
+				available: "bbb".to_string(),
+			},
+		};
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["status"], "updateAvailable");
+		assert_eq!(json["current"], "aaa");
+		assert_eq!(json["available"], "bbb");
+		assert_eq!(json["name"], "my-skill");
+	}
+
+	#[test]
+	fn uncheckable_serializes_reason_string() {
+		let resp = SkillUpdateResponse {
+			name: "s".to_string(),
+			status: SkillUpdateStatusResponse::Uncheckable {
+				reason: "auth".to_string(),
+			},
+		};
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["status"], "uncheckable");
+		assert_eq!(json["reason"], "auth");
+	}
+
+	#[test]
+	fn up_to_date_serializes_status_only() {
+		let resp = SkillUpdateResponse {
+			name: "s".to_string(),
+			status: SkillUpdateStatusResponse::UpToDate,
+		};
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["status"], "upToDate");
+	}
 }

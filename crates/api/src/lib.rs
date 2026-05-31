@@ -200,6 +200,7 @@ fn build_rocket(
 				routes::skills::git_scan_skills,
 				routes::skills::git_install_skills,
 				routes::skills::git_sync_skill,
+				routes::skills_update::check_skill_updates,
 				routes::plugins::list_plugins,
 				routes::plugins::get_plugin_detail,
 				routes::plugins::enable_plugin,
