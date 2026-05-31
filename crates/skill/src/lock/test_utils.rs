@@ -11,7 +11,7 @@ pub struct TestLockGuard {
 
 impl TestLockGuard {
 	pub fn new() -> Self {
-		let lock = TEST_MUTEX.lock().unwrap();
+		let lock = TEST_MUTEX.lock().unwrap_or_else(|e| e.into_inner());
 		let temp_dir = TempDir::new().unwrap();
 		let old_xdg = std::env::var("XDG_STATE_HOME").ok();
 		std::env::set_var("XDG_STATE_HOME", temp_dir.path());

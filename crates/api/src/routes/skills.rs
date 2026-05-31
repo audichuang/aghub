@@ -1674,6 +1674,13 @@ mod tests {
 			.block_on(fut)
 	}
 
+	// These by-path delete tests fake the home directory via env overrides. On
+	// Windows `dirs::home_dir()` resolves through `SHGetKnownFolderPath` (ignores
+	// env), so the temp home cannot be redirected and the allow-list roots never
+	// match the fixture, making the success assertions fail. The delete/containment
+	// logic is platform-agnostic and is covered on unix; gate these home-dependent
+	// tests and their helpers to unix (Windows is a documented limitation).
+	#[cfg(unix)]
 	fn write_claude_skill(
 		home: &std::path::Path,
 		name: &str,
@@ -1688,6 +1695,7 @@ mod tests {
 		dir
 	}
 
+	#[cfg(unix)]
 	fn by_path_req(
 		source_path: &std::path::Path,
 		confirm: Option<bool>,
@@ -1702,6 +1710,7 @@ mod tests {
 		}
 	}
 
+	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_dry_run_default_lists_paths_and_keeps_dir() {
 		with_isolated_env(|home, _state| {
@@ -1718,6 +1727,7 @@ mod tests {
 		});
 	}
 
+	#[cfg(unix)]
 	#[test]
 	fn delete_by_path_confirm_deletes_dir() {
 		with_isolated_env(|home, _state| {
@@ -1851,7 +1861,7 @@ mod tests {
 
 	#[test]
 	fn git_install_marks_same_primary_dir_agents_success() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let target_dir = temp.path().join("shared");
 		let source_dir = temp.path().join("source/hello-skill");
@@ -1877,7 +1887,7 @@ mod tests {
 
 	#[test]
 	fn reconcile_skill_prefers_primary_path_for_opencode() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let project_root = temp.path().join("project");
 		std::fs::create_dir_all(&project_root).unwrap();
