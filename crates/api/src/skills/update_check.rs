@@ -39,6 +39,11 @@ pub struct EntryInput {
 /// Group lock entries by [`SourceRef`] so each upstream is fetched once.
 ///
 /// Returns a map from coordinate to the list of skill names sharing it.
+///
+/// The production [`check_updates`] path groups inline (it needs the full
+/// [`EntryInput`], not just names); this name-only helper exists for the
+/// grouping unit test, hence the `#[cfg(test)]` gate.
+#[cfg(test)]
 pub fn group_by_source_ref<'a, I>(entries: I) -> HashMap<SourceRef, Vec<String>>
 where
 	I: IntoIterator<Item = (&'a str, SourceRef)>,
@@ -97,12 +102,16 @@ pub struct FetchedRepo {
 }
 
 /// Errors a [`Fetcher`] can surface, classified for `Uncheckable` mapping.
+///
+/// The variants are payload-free: any underlying message is redacted of URL
+/// userinfo by `aghub_git` and then discarded at the boundary, so a token can
+/// never leak through the error string into the response.
 #[derive(Debug)]
 pub enum FetchError {
-	/// Authentication failure (bad/missing token). Redacted upstream.
-	Auth(String),
-	/// Network / transport failure. Redacted upstream.
-	Network(String),
+	/// Authentication failure (bad/missing token).
+	Auth,
+	/// Network / transport failure.
+	Network,
 }
 
 /// Injected fetch boundary. The real implementation does a treeless/bare gix
@@ -257,10 +266,8 @@ pub async fn check_updates(
 			.await;
 			match fetch_res {
 				Err(_elapsed) => Err(UncheckableReason::Timeout),
-				Ok(Err(FetchError::Auth(_))) => Err(UncheckableReason::Auth),
-				Ok(Err(FetchError::Network(_))) => {
-					Err(UncheckableReason::Network)
-				}
+				Ok(Err(FetchError::Auth)) => Err(UncheckableReason::Auth),
+				Ok(Err(FetchError::Network)) => Err(UncheckableReason::Network),
 				Ok(Ok(repo)) => Ok(repo),
 			}
 		};
@@ -399,8 +406,8 @@ mod tests {
 			*self.calls.lock().unwrap() += 1;
 			if let Some(kind) = self.err {
 				return Err(match kind {
-					"auth" => FetchError::Auth("redacted".into()),
-					_ => FetchError::Network("redacted".into()),
+					"auth" => FetchError::Auth,
+					_ => FetchError::Network,
 				});
 			}
 			Ok(FetchedRepo {

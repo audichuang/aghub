@@ -58,6 +58,13 @@ pub(crate) fn load_source_bindings() -> Result<SourceBindings, String> {
 
 /// Persist the source→credential_id bindings to the keyring entry. An empty
 /// map deletes the entry. Mirrors `routes::credentials` storage behavior.
+///
+/// The write half of the bindings store. Only the read half
+/// (`load_source_bindings`) is wired into the update-check resolver so far; this
+/// `save` half completes the pair for the bindings-management route that lands
+/// in a later task. Scoped `allow(dead_code)` (not a module-wide one) keeps the
+/// blocking `clippy -D warnings` lane green without masking other dead code.
+#[allow(dead_code)]
 pub(crate) fn save_source_bindings(
 	bindings: &SourceBindings,
 ) -> Result<(), String> {

@@ -70,9 +70,9 @@ impl Fetcher for CloneFetcher {
 					|| lower.contains("403")
 					|| lower.contains("credential")
 				{
-					Err(FetchError::Auth(msg))
+					Err(FetchError::Auth)
 				} else {
-					Err(FetchError::Network(msg))
+					Err(FetchError::Network)
 				}
 			}
 		}
