@@ -1,0 +1,23 @@
+{
+  "version": 3,
+  "skills": {
+    "alpha": {
+      "source": "o/r",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/o/r",
+      "ref": "main",
+      "skillPath": "skills/alpha/SKILL.md",
+      "skillFolderHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "installedAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    },
+    "beta": {
+      "source": "o/r2",
+      "sourceType": "github",
+      "sourceUrl": "https://github.com/o/r2",
+      "skillFolderHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "installedAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  }
+}
