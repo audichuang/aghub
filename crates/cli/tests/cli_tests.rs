@@ -160,6 +160,13 @@ fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
 	cmd
 }
 
+// These delete tests rely on redirecting the home dir via env (HOME/USERPROFILE).
+// On Windows `dirs::home_dir()` goes through `SHGetKnownFolderPath` and ignores
+// those env vars, so the spawned aghub-cli resolves the real home and the temp
+// skill is never inside an allow-listed root -> the delete refuses and the
+// command exits non-zero. The delete logic is platform-agnostic and covered on
+// unix; gate these home-dependent tests (and the helper) to unix.
+#[cfg(unix)]
 fn write_claude_skill(
 	home: &std::path::Path,
 	name: &str,
@@ -184,6 +191,7 @@ fn seed_global_lock(state: &std::path::Path) -> std::path::PathBuf {
 	path
 }
 
+#[cfg(unix)]
 #[test]
 fn delete_skill_dry_run_is_default_and_lists_paths() {
 	let home = tempfile::TempDir::new().unwrap();
@@ -213,6 +221,7 @@ fn delete_skill_dry_run_is_default_and_lists_paths() {
 	assert!(skill_dir.exists(), "dry-run must not delete");
 }
 
+#[cfg(unix)]
 #[test]
 fn delete_skill_yes_removes_copy() {
 	let home = tempfile::TempDir::new().unwrap();
