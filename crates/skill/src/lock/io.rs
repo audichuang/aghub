@@ -1,5 +1,11 @@
 use super::types::SkillLockFile;
 use std::path::PathBuf;
+use std::sync::Mutex;
+
+/// Process-wide guard so concurrent writers never interleave or observe a
+/// partially written lock file. Combined with temp+rename, readers always see
+/// either the old or the fully written new file.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Get the path to the global skill lock file.
 /// Use $XDG_STATE_HOME/skills/.skill-lock.json if set.
@@ -48,6 +54,7 @@ pub fn read_skill_lock() -> SkillLockFile {
 /// Write the skill lock file.
 /// Creates the directory if it doesn't exist.
 pub fn write_skill_lock(lock: &SkillLockFile) -> std::io::Result<()> {
+	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 	let lock_path = get_skill_lock_path();
 
 	// Ensure directory exists
@@ -55,14 +62,49 @@ pub fn write_skill_lock(lock: &SkillLockFile) -> std::io::Result<()> {
 		std::fs::create_dir_all(parent)?;
 	}
 
+	// Preserve existing aghub formatting: 2-space pretty + trailing newline.
 	let content = serde_json::to_string_pretty(lock)? + "\n";
-	std::fs::write(lock_path, content)
+
+	// Atomic write: write to a temp file in the same directory, then rename
+	// over the target. rename(2) is atomic within a filesystem, so a reader
+	// never observes a truncated/partial lock file.
+	let tmp = lock_path.with_extension("json.tmp");
+	std::fs::write(&tmp, content)?;
+	std::fs::rename(&tmp, &lock_path)
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use crate::lock::test_utils::TestLockGuard;
+
+	fn sample_entry() -> super::super::types::SkillLockEntry {
+		super::super::types::SkillLockEntry {
+			source: "o/r".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/o/r".to_string(),
+			ref_name: None,
+			skill_path: None,
+			skill_folder_hash: String::new(),
+			content_hash: None,
+			installed_at: "t".to_string(),
+			updated_at: "t".to_string(),
+			plugin_name: None,
+		}
+	}
+
+	#[test]
+	fn write_skill_lock_is_atomic_no_partial() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let mut lock = super::super::types::SkillLockFile::default();
+		lock.skills.insert("a".into(), sample_entry());
+		super::write_skill_lock(&lock).unwrap();
+		// file is valid JSON immediately after write (no truncated state)
+		let path = super::get_skill_lock_path();
+		let raw = std::fs::read_to_string(&path).unwrap();
+		let _: super::super::types::SkillLockFile =
+			serde_json::from_str(&raw).unwrap();
+	}
 
 	#[test]
 	fn test_get_skill_lock_path_with_xdg() {

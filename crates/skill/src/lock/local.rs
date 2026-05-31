@@ -1,9 +1,15 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 const LOCAL_LOCK_FILE: &str = "skills-lock.json";
 const CURRENT_VERSION: u32 = 1;
+
+/// Process-wide guard so concurrent writers never interleave or observe a
+/// partially written lock file. Combined with temp+rename, readers always see
+/// either the old or the fully written new file.
+static WRITE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Represents a single skill entry in the local (project) lock file.
 ///
@@ -110,11 +116,17 @@ pub fn write_local_lock(
 	lock: &LocalSkillLockFile,
 	cwd: Option<&Path>,
 ) -> std::io::Result<()> {
+	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 	let lock_path = get_local_lock_path(cwd);
 
-	// BTreeMap is already sorted by key
+	// BTreeMap is already sorted by key. Preserve existing formatting:
+	// 2-space pretty + trailing newline.
 	let content = serde_json::to_string_pretty(lock)? + "\n";
-	std::fs::write(lock_path, content)
+
+	// Atomic write: temp file in the same directory, then rename over target.
+	let tmp = lock_path.with_extension("json.tmp");
+	std::fs::write(&tmp, content)?;
+	std::fs::rename(&tmp, &lock_path)
 }
 
 /// Add or update a skill entry in the local lock file.
