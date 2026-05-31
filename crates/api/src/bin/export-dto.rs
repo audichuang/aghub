@@ -57,10 +57,11 @@ use aghub_api::dto::{
 		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
 		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
 		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
-		ProjectSkillLockResponse, SkillContentQuery, SkillLockEntryResponse,
-		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
-		SkillTreeQuery, SkillUpdateResponse, SkillUpdateStatusResponse,
-		UpdateSkillRequest, ValidationError,
+		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
+		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
+		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
+		SkillUpdateResponse, SkillUpdateStatusResponse, UpdateSkillRequest,
+		ValidationError,
 	},
 	sub_agent::{
 		CreateSubAgentRequest, SubAgentResponse, UpdateSubAgentRequest,
@@ -199,6 +200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<GitInstallResultEntry>(&cfg)?;
 	export_type::<GitInstallResponse>(&cfg)?;
 	export_type::<DeleteSkillByPathResponse>(&cfg)?;
+	export_type::<PruneLockRequest>(&cfg)?;
+	export_type::<PruneLockResponse>(&cfg)?;
 	export_type::<SkillContentQuery>(&cfg)?;
 	export_type::<SkillTreeQuery>(&cfg)?;
 	export_type::<ProjectLockQuery>(&cfg)?;

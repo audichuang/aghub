@@ -83,6 +83,8 @@ export type { OperationBatchResponse } from "./OperationBatchResponse";
 export type { OperationResultDto } from "./OperationResultDto";
 export type { ProjectLockQuery } from "./ProjectLockQuery";
 export type { ProjectSkillLockResponse } from "./ProjectSkillLockResponse";
+export type { PruneLockRequest } from "./PruneLockRequest";
+export type { PruneLockResponse } from "./PruneLockResponse";
 export type { ReconcileRequest } from "./ReconcileRequest";
 export type { ResourceLocatorDto } from "./ResourceLocatorDto";
 export type { ScopeSupportDto } from "./ScopeSupportDto";

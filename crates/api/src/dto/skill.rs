@@ -215,6 +215,16 @@ pub struct DeleteSkillByPathRequest {
 	pub agents: Vec<String>,
 	pub scope: String,
 	pub project_root: Option<String>,
+	/// Reserved for future copy-layout multi-agent removal; currently the route
+	/// removes the single targeted path.
+	#[serde(default)]
+	#[ts(optional)]
+	pub all_agents: Option<bool>,
+	/// Must be `true` to actually delete. Absent/false → dry-run (lists paths,
+	/// removes nothing).
+	#[serde(default)]
+	#[ts(optional)]
+	pub confirm: Option<bool>,
 }
 
 #[derive(Debug, Serialize, TS)]
@@ -301,16 +311,43 @@ pub struct GitInstallResponse {
 	pub results: Vec<GitInstallResultEntry>,
 }
 
-#[derive(Debug, Serialize, TS)]
+#[derive(Debug, Default, Serialize, TS)]
 #[ts(export)]
 pub struct DeleteSkillByPathResponse {
 	pub success: bool,
+	/// True when this was a dry-run (nothing was deleted).
+	pub dry_run: bool,
+	/// The exact paths that were removed (or, in a dry-run, would be removed).
+	pub paths: Vec<String>,
+	/// Paths intentionally NOT removed (outside the allow-listed skills roots).
+	pub skipped: Vec<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub deleted_path: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub validation_errors: Option<Vec<ValidationError>>,
+}
+
+#[derive(Debug, Deserialize, TS)]
+#[ts(export)]
+pub struct PruneLockRequest {
+	/// `"global"` or `"project"`.
+	pub scope: String,
+	pub project_root: Option<String>,
+	/// Must be `true` to write; absent/false → dry-run (reports would-prune).
+	#[serde(default)]
+	#[ts(optional)]
+	pub confirm: Option<bool>,
+}
+
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct PruneLockResponse {
+	pub pruned: Vec<String>,
+	pub dry_run: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
 }
 
 #[derive(Debug, TS, rocket::FromForm)]

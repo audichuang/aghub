@@ -24,9 +24,10 @@ use crate::{
 		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
 		GlobalSkillLockResponse, InstallSkillRequest, InstallSkillResponse,
 		LocalSkillLockEntryResponse, ProjectLockQuery,
-		ProjectSkillLockResponse, SkillContentQuery, SkillLockEntryResponse,
-		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
-		SkillTreeQuery, UpdateSkillRequest, ValidationError,
+		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
+		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
+		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
+		UpdateSkillRequest, ValidationError,
 	},
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
@@ -190,9 +191,8 @@ pub async fn delete_skill_by_path(
 		_ => {
 			return Ok(Json(DeleteSkillByPathResponse {
 				success: false,
-				deleted_path: None,
 				error: Some(format!("Invalid scope: {}", req.scope)),
-				validation_errors: None,
+				..Default::default()
 			}));
 		}
 	};
@@ -202,11 +202,10 @@ pub async fn delete_skill_by_path(
 	{
 		return Ok(Json(DeleteSkillByPathResponse {
 			success: false,
-			deleted_path: None,
 			error: Some(
 				"project_root is required when scope is 'project'".to_string(),
 			),
-			validation_errors: None,
+			..Default::default()
 		}));
 	}
 
@@ -253,45 +252,163 @@ pub async fn delete_skill_by_path(
 	if !validation_errors.is_empty() {
 		return Ok(Json(DeleteSkillByPathResponse {
 			success: false,
-			deleted_path: None,
 			error: Some("Validation failed for one or more agents".to_string()),
 			validation_errors: Some(validation_errors),
+			..Default::default()
 		}));
 	}
 
 	if !skill_dir.exists() {
+		// Idempotent: nothing on disk to remove.
 		return Ok(Json(DeleteSkillByPathResponse {
 			success: true,
+			dry_run: false,
 			deleted_path: Some(skill_dir.display().to_string()),
-			error: None,
-			validation_errors: None,
+			..Default::default()
 		}));
 	}
 
 	if let Some(plugin_name) = detect_plugin_for_path(&skill_dir).await {
 		return Ok(Json(DeleteSkillByPathResponse {
 			success: false,
-			deleted_path: None,
 			error: Some(format!(
 				"Cannot delete plugin-managed skill from plugin '{plugin_name}'"
 			)),
-			validation_errors: None,
+			..Default::default()
+		}));
+	}
+
+	// Containment guard (canonicalize-escape protection): the resolved dir must
+	// stay inside an allow-listed skills root, even if `skill_dir` is a symlink.
+	let agent_dirs: Vec<std::path::PathBuf> = req
+		.agents
+		.iter()
+		.filter_map(|a| a.parse::<AgentType>().ok())
+		.flat_map(|a| {
+			aghub_core::create_adapter(a)
+				.get_skills_paths(project_root.as_deref(), resource_scope)
+		})
+		.collect();
+	let roots = aghub_core::skills::removal::allowed_skill_roots(
+		&agent_dirs,
+		project_root.as_deref(),
+	);
+	if aghub_core::skills::removal::assert_contained(&skill_dir, &roots)
+		.is_none()
+	{
+		return Ok(Json(DeleteSkillByPathResponse {
+			success: false,
+			error: Some(
+				"Refusing to delete: resolved path is outside the \
+				 allow-listed skills roots"
+					.to_string(),
+			),
+			skipped: vec![skill_dir.display().to_string()],
+			..Default::default()
+		}));
+	}
+
+	let confirm = req.confirm.unwrap_or(false);
+	if !confirm {
+		// Default dry-run: report the exact path, delete nothing.
+		return Ok(Json(DeleteSkillByPathResponse {
+			success: true,
+			dry_run: true,
+			paths: vec![skill_dir.display().to_string()],
+			..Default::default()
 		}));
 	}
 
 	match std::fs::remove_dir_all(&skill_dir) {
-		Ok(_) => Ok(Json(DeleteSkillByPathResponse {
-			success: true,
-			deleted_path: Some(skill_dir.display().to_string()),
-			error: None,
-			validation_errors: None,
-		})),
+		Ok(_) => {
+			// Disk-reconciled lock prune (best-effort: a scan error leaves the
+			// orphan entry but never fails the completed deletion).
+			prune_scope_lock(resource_scope, project_root.as_deref());
+			Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run: false,
+				paths: vec![skill_dir.display().to_string()],
+				deleted_path: Some(skill_dir.display().to_string()),
+				..Default::default()
+			}))
+		}
 		Err(e) => Ok(Json(DeleteSkillByPathResponse {
 			success: false,
-			deleted_path: None,
 			error: Some(format!("Failed to delete: {e}")),
-			validation_errors: None,
+			..Default::default()
 		})),
+	}
+}
+
+/// Disk-reconciled, lock-only prune (renamed to avoid colliding with
+/// `transfer::reconcile_skill` / `POST /skills/reconcile`). Defaults to a
+/// dry-run; `confirm: true` writes. Any disk-scan error aborts the prune and is
+/// reported in `error` with the lock left untouched.
+#[post("/skills/prune-lock", data = "<body>")]
+pub fn prune_lock_route(
+	body: Json<PruneLockRequest>,
+) -> ApiResult<PruneLockResponse> {
+	use aghub_core::skills::prune::{
+		preview_prune, prune_lock_scanning, PruneScope,
+	};
+	let req = body.into_inner();
+
+	let scope = match req.scope.as_str() {
+		"global" => PruneScope::Global,
+		"project" => PruneScope::Project,
+		other => {
+			return Ok(Json(PruneLockResponse {
+				pruned: vec![],
+				dry_run: true,
+				error: Some(format!("Invalid scope: {other}")),
+			}));
+		}
+	};
+	let project_root = req.project_root.as_ref().map(std::path::PathBuf::from);
+	let dry_run = !req.confirm.unwrap_or(false);
+
+	let result = if dry_run {
+		preview_prune(scope, project_root.as_deref())
+	} else {
+		prune_lock_scanning(scope, project_root.as_deref())
+	};
+
+	match result {
+		Ok(pruned) => Ok(Json(PruneLockResponse {
+			pruned,
+			dry_run,
+			error: None,
+		})),
+		Err(e) => Ok(Json(PruneLockResponse {
+			pruned: vec![],
+			dry_run,
+			error: Some(e.to_string()),
+		})),
+	}
+}
+
+/// Best-effort disk-reconciled lock prune for a scope after a deletion. A scan
+/// error (or missing project root) is swallowed — the orphan lock entry simply
+/// survives; deletion correctness does not depend on the prune succeeding.
+fn prune_scope_lock(
+	resource_scope: aghub_core::models::ResourceScope,
+	project_root: Option<&std::path::Path>,
+) {
+	use aghub_core::models::ResourceScope;
+	use aghub_core::skills::prune::{prune_lock_scanning, PruneScope};
+	if matches!(
+		resource_scope,
+		ResourceScope::GlobalOnly | ResourceScope::Both
+	) {
+		let _ = prune_lock_scanning(PruneScope::Global, None);
+	}
+	if matches!(
+		resource_scope,
+		ResourceScope::ProjectOnly | ResourceScope::Both
+	) {
+		if let Some(root) = project_root {
+			let _ = prune_lock_scanning(PruneScope::Project, Some(root));
+		}
 	}
 }
 
@@ -765,7 +882,7 @@ pub async fn delete_skill(
 	scope: ScopeParams,
 ) -> ApiNoContent {
 	let resolved = scope.resolve()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
@@ -778,7 +895,13 @@ pub async fn delete_skill(
 		ensure_skill_not_plugin_managed(skill, "delete").await?;
 	}
 	match manager.remove_skill(name) {
-		Ok(()) | Err(ConfigError::ResourceNotFound { .. }) => Ok(NoContent),
+		Ok(()) => {
+			// Reconcile the lock with disk now that this agent's copy is gone
+			// (best-effort: keeps the entry if another agent still has it).
+			prune_scope_lock(resource_scope, project_root.as_deref());
+			Ok(NoContent)
+		}
+		Err(ConfigError::ResourceNotFound { .. }) => Ok(NoContent),
 		Err(e) => Err(ApiError::from(e)),
 	}
 }
@@ -1513,6 +1636,201 @@ mod tests {
 	fn env_lock() -> &'static Mutex<()> {
 		static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 		LOCK.get_or_init(|| Mutex::new(()))
+	}
+
+	// ---- F2.5: delete (containment/dry-run/confirm/prune) + prune-lock ------
+
+	const ORPHAN_LOCK_JSON: &str = r#"{"version":3,"skills":{"orphan":{"source":"o/r","sourceType":"github","sourceUrl":"https://github.com/o/r","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#;
+
+	/// Run `f` with HOME + XDG_STATE_HOME pointed at fresh temp dirs (serialized
+	/// via env_lock) so the global lock + agent skills dirs are fully isolated.
+	fn with_isolated_env<T>(
+		f: impl FnOnce(&std::path::Path, &std::path::Path) -> T,
+	) -> T {
+		let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let home = tempdir().unwrap();
+		let state = tempdir().unwrap();
+		let old_home = std::env::var("HOME").ok();
+		let old_xdg = std::env::var("XDG_STATE_HOME").ok();
+		std::env::set_var("HOME", home.path());
+		std::env::set_var("XDG_STATE_HOME", state.path());
+		let result = f(home.path(), state.path());
+		match old_home {
+			Some(v) => std::env::set_var("HOME", v),
+			None => std::env::remove_var("HOME"),
+		}
+		match old_xdg {
+			Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+			None => std::env::remove_var("XDG_STATE_HOME"),
+		}
+		result
+	}
+
+	fn block_on<F: std::future::Future>(fut: F) -> F::Output {
+		rocket::tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(fut)
+	}
+
+	fn write_claude_skill(
+		home: &std::path::Path,
+		name: &str,
+	) -> std::path::PathBuf {
+		let dir = home.join(".claude/skills").join(name);
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: d\n---\n"),
+		)
+		.unwrap();
+		dir
+	}
+
+	fn by_path_req(
+		source_path: &std::path::Path,
+		confirm: Option<bool>,
+	) -> DeleteSkillByPathRequest {
+		DeleteSkillByPathRequest {
+			source_path: source_path.join("SKILL.md").display().to_string(),
+			agents: vec!["claude".to_string()],
+			scope: "global".to_string(),
+			project_root: None,
+			all_agents: None,
+			confirm,
+		}
+	}
+
+	#[test]
+	fn delete_by_path_dry_run_default_lists_paths_and_keeps_dir() {
+		with_isolated_env(|home, _state| {
+			let dir = write_claude_skill(home, "mytool");
+			let resp =
+				block_on(delete_skill_by_path(Json(by_path_req(&dir, None))))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+			assert!(resp.success);
+			assert!(resp.dry_run, "default must be dry-run");
+			assert!(resp.paths.iter().any(|p| p.ends_with("mytool")));
+			assert!(dir.exists(), "dry-run must not delete");
+		});
+	}
+
+	#[test]
+	fn delete_by_path_confirm_deletes_dir() {
+		with_isolated_env(|home, _state| {
+			let dir = write_claude_skill(home, "goner");
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&dir,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+			assert!(resp.success);
+			assert!(!resp.dry_run);
+			assert!(!dir.exists(), "confirm deletes the dir");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_symlink_escaping_root_is_refused() {
+		with_isolated_env(|home, _state| {
+			// A symlink inside the agent skills dir whose target escapes every
+			// allow-listed root must NOT be remove_dir_all'd.
+			let outside = home.join("outside/evil");
+			std::fs::create_dir_all(&outside).unwrap();
+			std::fs::write(outside.join("SKILL.md"), "x").unwrap();
+			let skills = home.join(".claude/skills");
+			std::fs::create_dir_all(&skills).unwrap();
+			let link = skills.join("evil");
+			std::os::unix::fs::symlink(&outside, &link).unwrap();
+
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&link,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+			assert!(
+				!resp.success,
+				"out-of-tree symlink target must be refused"
+			);
+			assert!(outside.exists(), "out-of-tree dir must survive");
+		});
+	}
+
+	fn prune_req(
+		scope: &str,
+		project_root: Option<String>,
+		confirm: Option<bool>,
+	) -> PruneLockRequest {
+		PruneLockRequest {
+			scope: scope.to_string(),
+			project_root,
+			confirm,
+		}
+	}
+
+	#[test]
+	fn prune_lock_route_dry_run_reports_orphan_without_mutating() {
+		with_isolated_env(|_home, state| {
+			let lock_dir = state.join("skills");
+			std::fs::create_dir_all(&lock_dir).unwrap();
+			let lock_path = lock_dir.join(".skill-lock.json");
+			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
+			let before = std::fs::read(&lock_path).unwrap();
+
+			let resp = prune_lock_route(Json(prune_req("global", None, None)))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+			assert!(resp.dry_run);
+			assert!(resp.error.is_none());
+			assert!(resp.pruned.iter().any(|n| n == "orphan"));
+			assert_eq!(std::fs::read(&lock_path).unwrap(), before);
+		});
+	}
+
+	#[test]
+	fn prune_lock_route_confirm_removes_orphan_entry() {
+		with_isolated_env(|_home, state| {
+			let lock_dir = state.join("skills");
+			std::fs::create_dir_all(&lock_dir).unwrap();
+			let lock_path = lock_dir.join(".skill-lock.json");
+			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
+
+			let resp =
+				prune_lock_route(Json(prune_req("global", None, Some(true))))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(!resp.dry_run);
+			assert!(resp.pruned.iter().any(|n| n == "orphan"));
+			let raw = std::fs::read_to_string(&lock_path).unwrap();
+			let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+			assert!(parsed["skills"].get("orphan").is_none());
+			assert_eq!(parsed["version"], 3);
+		});
+	}
+
+	#[test]
+	fn prune_lock_route_project_requires_project_root() {
+		with_isolated_env(|_home, _state| {
+			let resp =
+				prune_lock_route(Json(prune_req("project", None, Some(true))))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+			assert!(resp.error.is_some(), "project prune needs a project root");
+			assert!(resp.pruned.is_empty());
+		});
 	}
 
 	#[test]
