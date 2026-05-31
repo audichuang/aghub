@@ -70,6 +70,9 @@ impl GitError {
 	}
 }
 
+/// Result type alias for git operations.
+pub type Result<T> = std::result::Result<T, GitError>;
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -109,6 +112,3 @@ mod tests {
 		assert!(!shown.contains("ghp_SECRET") && !shown.contains("user:"));
 	}
 }
-
-/// Result type alias for git operations.
-pub type Result<T> = std::result::Result<T, GitError>;

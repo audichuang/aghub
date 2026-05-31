@@ -161,7 +161,13 @@ fn locked_keys(scope: PruneScope, project_root: Option<&Path>) -> Vec<String> {
 			skill::get_all_locked_skills().keys().cloned().collect()
 		}
 		PruneScope::Project => project_root
-			.map(|r| skill::read_local_lock(Some(r)).skills.keys().cloned().collect())
+			.map(|r| {
+				skill::read_local_lock(Some(r))
+					.skills
+					.keys()
+					.cloned()
+					.collect()
+			})
 			.unwrap_or_default(),
 	}
 }
