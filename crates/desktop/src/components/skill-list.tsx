@@ -10,8 +10,9 @@ import Fuse from "fuse.js";
 import { useMemo, useState } from "react";
 import { useMultiSelect } from "../hooks/use-multi-select";
 import { useTranslation } from "react-i18next";
-import type { SkillResponse } from "../generated/dto";
+import type { SkillResponse, SkillUpdateResponse } from "../generated/dto";
 import { AgentIcons } from "./agent-icons";
+import { SkillUpdateBadge } from "./skill-update-badge";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
@@ -43,6 +44,7 @@ interface SkillListProps {
 	projectPath?: string;
 	selectionMode?: "none" | "single" | "multiple";
 	isMultiSelectMode?: boolean;
+	updateStatuses?: ReadonlyMap<string, SkillUpdateResponse>;
 }
 
 export function SkillList({
@@ -55,6 +57,7 @@ export function SkillList({
 	projectPath,
 	selectionMode = "single",
 	isMultiSelectMode = false,
+	updateStatuses,
 }: SkillListProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -288,6 +291,9 @@ export function SkillList({
 					)}
 				</div>
 				<Label className="flex-1 truncate">{skillGroup.name}</Label>
+				<SkillUpdateBadge
+					status={updateStatuses?.get(skillGroup.name)}
+				/>
 				<AgentIcons items={skillGroup.items} overflowVariant="square" />
 			</div>
 		</ListBox.Item>

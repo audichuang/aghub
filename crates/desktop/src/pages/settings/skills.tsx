@@ -1,11 +1,12 @@
 import {
 	ArrowPathIcon,
+	ArrowPathRoundedSquareIcon,
 	CheckCircleIcon,
 	PlusIcon,
 	RectangleStackIcon,
 } from "@heroicons/react/24/solid";
-import { Button, Dropdown, Tooltip } from "@heroui/react";
-import { useSuspenseQuery } from "@tanstack/react-query";
+import { Button, Dropdown, Tooltip, toast } from "@heroui/react";
+import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -17,10 +18,13 @@ import { ListSearchHeader } from "../../components/list-search-header";
 import { MultiSelectFloatingBar } from "../../components/multi-select-floating-bar";
 import { SkillDetail } from "../../components/skill-detail";
 import { SkillList } from "../../components/skill-list";
-import type { SkillResponse } from "../../generated/dto";
+import type { SkillResponse, SkillUpdateResponse } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { cn } from "../../lib/utils";
-import { skillListQueryOptions } from "../../requests/skills";
+import {
+	checkSkillUpdatesMutationOptions,
+	skillListQueryOptions,
+} from "../../requests/skills";
 
 export default function SkillsPage() {
 	const { t } = useTranslation();
@@ -32,6 +36,19 @@ export default function SkillsPage() {
 	} = useSuspenseQuery({
 		...skillListQueryOptions({ api, scope: "global" }),
 	});
+	const checkUpdatesMutation = useMutation(
+		checkSkillUpdatesMutationOptions({
+			api,
+			onError: () => toast.danger(t("skillUpdateCheckError")),
+		}),
+	);
+	const updateStatuses = useMemo(
+		() =>
+			new Map<string, SkillUpdateResponse>(
+				(checkUpdatesMutation.data ?? []).map((s) => [s.name, s]),
+			),
+		[checkUpdatesMutation.data],
+	);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [selectedName, setSelectedName] = useQueryState("skill");
 	const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
@@ -224,6 +241,23 @@ export default function SkillsPage() {
 							)}
 						/>
 					</Button>
+					<Button
+						isIconOnly
+						variant="ghost"
+						size="sm"
+						className="shrink-0"
+						aria-label={t("checkForSkillUpdates")}
+						isDisabled={checkUpdatesMutation.isPending}
+						onPress={() => checkUpdatesMutation.mutate(false)}
+					>
+						<ArrowPathRoundedSquareIcon
+							className={cn(
+								"size-4",
+								checkUpdatesMutation.isPending &&
+									"animate-spin",
+							)}
+						/>
+					</Button>
 				</ListSearchHeader>
 
 				{/* Skills List */}
@@ -235,6 +269,7 @@ export default function SkillsPage() {
 					selectionMode="multiple"
 					isMultiSelectMode={isMultiSelectMode}
 					groupBySource={true}
+					updateStatuses={updateStatuses}
 				/>
 
 				{isMultiSelectMode && selectedKeys.size > 0 && (
