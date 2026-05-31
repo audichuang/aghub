@@ -22,6 +22,8 @@ target
 # heroui-agents-md
 .heroui-docs/
 /.sisyphus/drafts
+.superpowers/
+.codegraph/
 
 # Node.js
 node_modules/

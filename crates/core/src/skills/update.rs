@@ -31,8 +31,7 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	if p.is_absolute() {
 		return None;
 	}
-	if p
-		.components()
+	if p.components()
 		.any(|c| matches!(c, std::path::Component::ParentDir))
 	{
 		return None;
@@ -59,7 +58,9 @@ pub fn compare_hashes(
 	match stored {
 		// unknown or placeholder → auto-heal: no false UpdateAvailable
 		None => Ok(SkillUpdateStatus::UpToDate),
-		Some(h) if skill::is_placeholder_digest(h) => Ok(SkillUpdateStatus::UpToDate),
+		Some(h) if skill::is_placeholder_digest(h) => {
+			Ok(SkillUpdateStatus::UpToDate)
+		}
 		Some(h) if h == fresh => Ok(SkillUpdateStatus::UpToDate),
 		Some(h) => Ok(SkillUpdateStatus::UpdateAvailable {
 			current: h.to_string(),
@@ -92,7 +93,8 @@ mod tests {
 		let root = tempdir().unwrap();
 		fs::create_dir_all(root.path().join("skills/a")).unwrap();
 		fs::write(root.path().join("skills/a/SKILL.md"), b"x").unwrap();
-		let got = sanitize_skill_path(root.path(), "skills/a/SKILL.md").unwrap();
+		let got =
+			sanitize_skill_path(root.path(), "skills/a/SKILL.md").unwrap();
 		assert!(got.starts_with(root.path().canonicalize().unwrap()));
 	}
 	#[cfg(unix)]
@@ -136,7 +138,9 @@ mod tests {
 	fn placeholder_hash_auto_heals() {
 		let d = tempdir().unwrap();
 		fs::write(d.path().join("SKILL.md"), b"x").unwrap();
-		let st = compare_hashes(Some(skill::EMPTY_SKILLS_LOCK_DIGEST), d.path()).unwrap();
+		let st =
+			compare_hashes(Some(skill::EMPTY_SKILLS_LOCK_DIGEST), d.path())
+				.unwrap();
 		assert_eq!(st, SkillUpdateStatus::UpToDate);
 	}
 }
