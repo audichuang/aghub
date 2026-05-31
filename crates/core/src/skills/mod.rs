@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod prune;
 pub mod removal;
 pub mod update;
 
