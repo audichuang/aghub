@@ -390,6 +390,7 @@ export default {
 	skillUncheckableUnsupported: "无法检查：不支持此来源类型。",
 	skillUncheckableNoPath: "无法检查：请重新安装技能以记录来源路径。",
 	skillUncheckableGeneric: "无法检查此技能的来源。",
+	skillUncheckableTimeout: "无法检查：来源检查超时。",
 	skillNeedsCredential: "添加凭证",
 	skillNeedsCredentialTooltip: "此私有来源需要凭证。添加后重试。",
 	skillUpdateCheckError: "无法检查技能更新。",

@@ -28,10 +28,12 @@ function uncheckableTooltipKey(reason: string): string {
 		case "local":
 			return "skillUncheckableLocal";
 		case "ssh":
-		case "unsupported_scheme":
+		case "unsupportedScheme":
 			return "skillUncheckableUnsupported";
-		case "no_path":
+		case "noPath":
 			return "skillUncheckableNoPath";
+		case "timeout":
+			return "skillUncheckableTimeout";
 		default:
 			return "skillUncheckableGeneric";
 	}

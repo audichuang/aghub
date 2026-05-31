@@ -407,6 +407,7 @@ export default {
 	skillUncheckableNoPath:
 		"Can't check: reinstall the skill to record its source path.",
 	skillUncheckableGeneric: "Can't check this skill's source.",
+	skillUncheckableTimeout: "Can't check: the source check timed out.",
 	skillNeedsCredential: "Add credential",
 	skillNeedsCredentialTooltip:
 		"This private source needs a credential. Add one and retry.",
