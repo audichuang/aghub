@@ -270,6 +270,88 @@ impl ConfigManager {
 		self.save_current()
 	}
 
+	/// Layout-aware skill removal with a default dry-run.
+	///
+	/// Builds a [`RemovalPlan`](crate::skills::removal::RemovalPlan) (symlink
+	/// sweep + containment + canonical-keep checks), then deletes ONLY when it is
+	/// not a dry-run AND either the plan is non-destructive or `confirm` is set.
+	/// Deletion re-checks each path's type and containment at delete time (TOCTOU)
+	/// and tolerates already-removed paths. The lock is NOT pruned here — pruning
+	/// is a separate, explicit step (`skills::prune`).
+	pub fn remove_skill_planned(
+		&mut self,
+		name: &str,
+		all_agents: bool,
+		dry_run: bool,
+		confirm: bool,
+	) -> Result<crate::skills::removal::RemovalOutcome> {
+		use crate::skills::removal;
+
+		let config = self.config.as_ref().ok_or_else(|| {
+			ConfigError::InvalidConfig("No configuration loaded".to_string())
+		})?;
+		let skill = config
+			.skills
+			.iter()
+			.find(|s| s.name == name)
+			.cloned()
+			.ok_or_else(|| ConfigError::resource_not_found("skill", name))?;
+
+		let own_agent_dir = self.target_skills_dir();
+		let scope = self.scope;
+		let project_root = self.project_root.clone();
+		let all_agent_dirs =
+			removal::agent_skill_dirs_in_scope(scope, project_root.as_deref());
+		let roots = removal::allowed_skill_roots(
+			&all_agent_dirs,
+			project_root.as_deref(),
+		);
+		let mut plan = removal::plan_removal(
+			&skill,
+			own_agent_dir.as_deref(),
+			&all_agent_dirs,
+			project_root.as_deref(),
+			all_agents,
+		);
+
+		let executed = !dry_run && (!plan.needs_confirm || confirm);
+		if !executed {
+			return Ok(removal::RemovalOutcome {
+				plan,
+				executed: false,
+			});
+		}
+
+		info!(
+			"removing skill '{}' (layout={:?}, all_agents={})",
+			name, plan.layout, all_agents
+		);
+		let report =
+			removal::execute_removal(&plan, &roots).map_err(ConfigError::Io)?;
+		for p in &report.skipped {
+			warn!(
+				"skipped removal of '{}' (outside skills roots)",
+				p.display()
+			);
+		}
+		// Reflect what actually happened on disk in the returned plan.
+		plan.paths = report.removed;
+		plan.skipped.extend(report.skipped);
+
+		// Skills are disk-derived; drop the in-memory view (save_current persists
+		// MCPs, not skills, so this is a best-effort cache update).
+		let cfg = self.config_mut()?;
+		if let Some(idx) = cfg.skills.iter().position(|s| s.name == name) {
+			cfg.skills.remove(idx);
+		}
+		self.save_current()?;
+
+		Ok(removal::RemovalOutcome {
+			plan,
+			executed: true,
+		})
+	}
+
 	fn set_skill_enabled(&mut self, name: &str, enabled: bool) -> Result<()> {
 		let agent_name = self.adapter.name().to_string();
 		let config = self.config_mut()?;

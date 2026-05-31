@@ -241,6 +241,79 @@ fn push_contained(
 	}
 }
 
+/// Result of a planned removal request: the (post-execution) plan plus whether
+/// destructive deletion actually ran. `executed == false` means a dry-run or a
+/// destructive op awaiting an explicit confirm — nothing was deleted.
+#[derive(Debug, Clone)]
+pub struct RemovalOutcome {
+	pub plan: RemovalPlan,
+	pub executed: bool,
+}
+
+/// What `execute_removal` actually did on disk.
+#[derive(Debug, Default, Clone)]
+pub struct RemovalReport {
+	pub removed: Vec<PathBuf>,
+	/// Dirs refused at delete time because they escaped the allow-list (TOCTOU).
+	pub skipped: Vec<PathBuf>,
+}
+
+/// Execute a [`RemovalPlan`]'s deletions with delete-time safety re-checks:
+///
+/// - `lstat` each path (never follow the link): a symlink is unlinked with
+///   `remove_file` (its target is never touched); a directory is removed with
+///   `remove_dir_all` ONLY after re-asserting containment (TOCTOU guard); a file
+///   is removed.
+/// - A path that has already vanished is tolerated (idempotent).
+pub fn execute_removal(
+	plan: &RemovalPlan,
+	roots: &[PathBuf],
+) -> std::io::Result<RemovalReport> {
+	let mut report = RemovalReport::default();
+	for path in &plan.paths {
+		let meta = match std::fs::symlink_metadata(path) {
+			Ok(m) => m,
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+			Err(e) => return Err(e),
+		};
+		let ft = meta.file_type();
+		if ft.is_symlink() {
+			std::fs::remove_file(path)?; // unlink the link only
+			report.removed.push(path.clone());
+		} else if ft.is_dir() {
+			// Re-assert containment immediately before remove_dir_all.
+			if assert_contained(path, roots).is_some() {
+				std::fs::remove_dir_all(path)?;
+				report.removed.push(path.clone());
+			} else {
+				report.skipped.push(path.clone());
+			}
+		} else {
+			std::fs::remove_file(path)?;
+			report.removed.push(path.clone());
+		}
+	}
+	Ok(report)
+}
+
+/// Union of every agent's skill read dirs for a resource scope — the set the
+/// removal planner sweeps and the prune scanner reconciles against.
+pub fn agent_skill_dirs_in_scope(
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	let mut dirs: Vec<PathBuf> = Vec::new();
+	for agent in crate::models::AgentType::ALL {
+		let adapter = crate::create_adapter(*agent);
+		for dir in adapter.get_skills_paths(project_root, scope) {
+			if !dirs.contains(&dir) {
+				dirs.push(dir);
+			}
+		}
+	}
+	dirs
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -286,7 +359,8 @@ mod tests {
 		let agent = tempdir().unwrap();
 		let agent_skills = agent.path().join("skills");
 		std::fs::create_dir_all(&agent_skills).unwrap();
-		let roots = allowed_skill_roots(&[agent_skills.clone()], None);
+		let roots =
+			allowed_skill_roots(std::slice::from_ref(&agent_skills), None);
 		let canonical = agent_skills.canonicalize().unwrap();
 		assert!(
 			roots.contains(&canonical),
@@ -298,7 +372,7 @@ mod tests {
 	fn allowed_roots_skip_nonexistent_dirs() {
 		let agent = tempdir().unwrap();
 		let missing = agent.path().join("does-not-exist");
-		let roots = allowed_skill_roots(&[missing.clone()], None);
+		let roots = allowed_skill_roots(std::slice::from_ref(&missing), None);
 		assert!(
 			!roots.iter().any(|r| r.ends_with("does-not-exist")),
 			"non-existent dirs are not returned (canonicalize fails)"
@@ -502,5 +576,91 @@ mod tests {
 		assert!(plan.paths.contains(&claude.join("foo")));
 		assert!(plan.paths.contains(&cursor.join("foo")));
 		assert_eq!(plan.paths.len(), 2);
+	}
+
+	// ---- execute_removal (delete-time TOCTOU mechanics) --------------------
+
+	#[cfg(unix)]
+	#[test]
+	fn execute_removal_unlinks_symlink_and_preserves_target() {
+		let tmp = tempdir().unwrap();
+		let canonical = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&canonical);
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&canonical, &claude.join("foo"));
+		let plan = RemovalPlan {
+			layout: Layout::Symlink,
+			paths: vec![claude.join("foo")],
+			skipped: vec![],
+			needs_confirm: true,
+		};
+		let report =
+			execute_removal(&plan, std::slice::from_ref(&claude)).unwrap();
+		assert!(
+			std::fs::symlink_metadata(claude.join("foo")).is_err(),
+			"symlink unlinked"
+		);
+		assert!(canonical.join("SKILL.md").exists(), "target preserved");
+		assert_eq!(report.removed, vec![claude.join("foo")]);
+	}
+
+	#[test]
+	fn execute_removal_remove_dir_all_for_contained_dir() {
+		let tmp = tempdir().unwrap();
+		let skills = tmp.path().join("skills");
+		let foo = skills.join("foo");
+		write_skill_md(&foo);
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths: vec![foo.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+		};
+		execute_removal(&plan, std::slice::from_ref(&skills)).unwrap();
+		assert!(!foo.exists());
+	}
+
+	#[test]
+	fn execute_removal_skips_dir_outside_allowlist_toctou() {
+		let tmp = tempdir().unwrap();
+		let outside = tmp.path().join("outside/foo");
+		write_skill_md(&outside);
+		let skills = tmp.path().join("skills");
+		std::fs::create_dir_all(&skills).unwrap();
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths: vec![outside.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+		};
+		let report = execute_removal(&plan, &[skills]).unwrap();
+		assert!(outside.exists(), "out-of-allowlist dir must survive");
+		assert!(report.skipped.contains(&outside));
+		assert!(report.removed.is_empty());
+	}
+
+	#[test]
+	fn execute_removal_idempotent_when_path_missing() {
+		let tmp = tempdir().unwrap();
+		let missing = tmp.path().join("skills/gone");
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths: vec![missing],
+			skipped: vec![],
+			needs_confirm: false,
+		};
+		let report =
+			execute_removal(&plan, &[tmp.path().to_path_buf()]).unwrap();
+		assert!(report.removed.is_empty());
+	}
+
+	#[test]
+	fn agent_skill_dirs_in_scope_global_is_nonempty() {
+		let dirs = agent_skill_dirs_in_scope(
+			crate::models::ResourceScope::GlobalOnly,
+			None,
+		);
+		assert!(!dirs.is_empty(), "agents define global skill dirs");
 	}
 }

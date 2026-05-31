@@ -860,3 +860,72 @@ fn test_empty_skills_dir_loads_zero_skills() {
 		"Empty skills dir should yield no skills"
 	);
 }
+
+// ==================== F2: layout-aware removal (remove_skill_planned) ====================
+
+#[test]
+fn remove_skill_planned_dry_run_lists_paths_and_deletes_nothing() {
+	let test = TestConfig::new(AgentType::Claude).unwrap();
+	test.create_test_skill("dryrun-skill", Some("d")).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+
+	let skill_dir = test.skills_dir().join("dryrun-skill");
+	assert!(skill_dir.exists());
+
+	let outcome = manager
+		.remove_skill_planned("dryrun-skill", false, true, false)
+		.unwrap();
+
+	assert!(!outcome.executed, "dry-run must not delete");
+	assert!(
+		outcome.plan.paths.iter().any(|p| p == &skill_dir),
+		"dry-run lists the skill dir: {:?}",
+		outcome.plan.paths
+	);
+	assert!(skill_dir.exists(), "skill dir untouched by dry-run");
+}
+
+#[test]
+fn remove_skill_planned_copy_confirm_deletes_dir() {
+	let test = TestConfig::new(AgentType::Claude).unwrap();
+	test.create_test_skill("gone-skill", Some("d")).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	let skill_dir = test.skills_dir().join("gone-skill");
+	assert!(skill_dir.exists());
+
+	// Copy layout, single agent => needs_confirm == false => executes when not dry-run.
+	let outcome = manager
+		.remove_skill_planned("gone-skill", false, false, false)
+		.unwrap();
+
+	assert!(outcome.executed);
+	assert!(!skill_dir.exists(), "confirmed removal deletes the copy");
+}
+
+#[test]
+fn remove_skill_planned_all_agents_requires_confirm() {
+	let test = TestConfig::new(AgentType::Claude).unwrap();
+	test.create_test_skill("multi-skill", Some("d")).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	let skill_dir = test.skills_dir().join("multi-skill");
+
+	// --all-agents is destructive => needs confirm; without it nothing is deleted.
+	let outcome = manager
+		.remove_skill_planned("multi-skill", true, false, false)
+		.unwrap();
+	assert!(
+		!outcome.executed,
+		"all-agents without confirm must not delete"
+	);
+	assert!(skill_dir.exists());
+
+	// With confirm it executes.
+	let outcome = manager
+		.remove_skill_planned("multi-skill", true, false, true)
+		.unwrap();
+	assert!(outcome.executed);
+	assert!(!skill_dir.exists());
+}

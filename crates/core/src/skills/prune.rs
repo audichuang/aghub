@@ -19,8 +19,7 @@
 //! [`prune_lock_scanning`] is the production entry point that derives the
 //! per-scope dirs from the agent descriptors.
 
-use crate::create_adapter;
-use crate::models::{AgentType, ResourceScope};
+use crate::models::ResourceScope;
 use skill::{ScanError, ScanOptions};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -130,16 +129,7 @@ fn scope_skill_dirs(
 		PruneScope::Global => ResourceScope::GlobalOnly,
 		PruneScope::Project => ResourceScope::ProjectOnly,
 	};
-	let mut dirs: Vec<PathBuf> = Vec::new();
-	for agent in AgentType::ALL {
-		let adapter = create_adapter(*agent);
-		for dir in adapter.get_skills_paths(project_root, resource_scope) {
-			if !dirs.contains(&dir) {
-				dirs.push(dir);
-			}
-		}
-	}
-	dirs
+	super::removal::agent_skill_dirs_in_scope(resource_scope, project_root)
 }
 
 /// The production scanner: full-depth, gitignore-agnostic (a skill on disk is a
@@ -317,8 +307,11 @@ mod tests {
 		write_skill_md(&skills.join("alpha"), "alpha");
 		write_skill_md(&skills.join("beta"), "beta");
 
-		let got =
-			collect_disk_dir_names(&[skills.clone()], scan_skill_dir).unwrap();
+		let got = collect_disk_dir_names(
+			std::slice::from_ref(&skills),
+			scan_skill_dir,
+		)
+		.unwrap();
 
 		assert!(got.contains("alpha"));
 		assert!(got.contains("beta"));
