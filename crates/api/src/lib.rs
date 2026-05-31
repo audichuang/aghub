@@ -9,6 +9,7 @@ use rocket::{
 	Data, Request, Response,
 };
 
+pub(crate) mod credentials;
 pub mod dto;
 pub mod editor_detection;
 pub mod error;
