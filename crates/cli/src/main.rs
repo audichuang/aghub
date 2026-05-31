@@ -13,7 +13,7 @@ use aghub_core::{
 
 mod commands;
 
-use commands::{add, delete, disable, enable, get, plugin, update};
+use commands::{add, check, delete, disable, enable, get, plugin, update};
 
 /// Global verbose flag used by the eprintln_verbose macro
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -45,7 +45,7 @@ macro_rules! eprintln_verbose {
 #[command(version)]
 struct Cli {
 	/// Target agent: claude, opencode
-	#[arg(long, default_value = "claude")]
+	#[arg(short = 'a', long, default_value = "claude")]
 	agent: String,
 
 	/// Use global config (forces global-only scope)
@@ -57,7 +57,7 @@ struct Cli {
 	project: bool,
 
 	/// Show both project and global resources
-	#[arg(short, long)]
+	#[arg(long)]
 	all: bool,
 
 	/// Enable verbose output (to stderr)
@@ -200,6 +200,15 @@ enum Commands {
 		resource: ResourceType,
 		name: String,
 	},
+	/// Check installed skills for available updates (read-only)
+	Check {
+		#[arg(value_enum)]
+		resource: ResourceType,
+
+		/// Emit machine-readable JSON (default output is also JSON today)
+		#[arg(long)]
+		json: bool,
+	},
 	/// Manage Claude Code plugins
 	Plugin {
 		#[command(subcommand)]
@@ -290,9 +299,14 @@ fn main() -> Result<()> {
 			eprintln_verbose!("Configuration loaded successfully");
 		}
 		Err(e) => {
-			// If config not found and we're adding, that's okay - we'll create it
-			let is_add = matches!(cli.command, Commands::Add { .. });
-			if is_add {
+			// If config not found and we're adding, that's okay - we'll create it.
+			// `check` is read-only and reads the lock file, not the agent config,
+			// so a missing config is also fine.
+			let tolerate_missing = matches!(
+				cli.command,
+				Commands::Add { .. } | Commands::Check { .. }
+			);
+			if tolerate_missing {
 				eprintln_verbose!(
 					"No existing config found, will create new configuration"
 				);
@@ -370,6 +384,9 @@ fn main() -> Result<()> {
 		}
 		Commands::Describe { resource, name } => {
 			describe::execute(&manager, resource, name)
+		}
+		Commands::Check { resource, json } => {
+			check::execute(resource, scope, project_root.as_deref(), json)
 		}
 		Commands::Plugin { action } => {
 			// Plugin management is Claude-specific

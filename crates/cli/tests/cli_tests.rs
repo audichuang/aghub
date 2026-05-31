@@ -99,6 +99,25 @@ fn test_agent_all_non_get_command_fails() {
 }
 
 #[test]
+fn check_skills_outputs_json_array() {
+	// No network: with an empty/local-only lock, check returns an array (possibly
+	// with Uncheckable entries) and exits 0.
+	let dir = tempfile::tempdir().unwrap();
+	let out = aghub_cli()
+		.current_dir(dir.path())
+		.args(["-a", "claude", "check", "skills", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(v.is_array());
+}
+
+#[test]
 fn test_pi_add_mcp_fails_for_unsupported_agent() {
 	let out = aghub_cli()
 		.args([
