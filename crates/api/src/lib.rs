@@ -19,6 +19,8 @@ pub mod state;
 pub struct ApiOptions {
 	pub port: u16,
 	pub app_data_dir: Option<PathBuf>,
+	/// Path to the bundled `ccusage` sidecar; `None` falls back to env/PATH.
+	pub ccusage_bin: Option<PathBuf>,
 }
 
 impl ApiOptions {
@@ -26,6 +28,7 @@ impl ApiOptions {
 		Self {
 			port,
 			app_data_dir: None,
+			ccusage_bin: None,
 		}
 	}
 }
@@ -89,6 +92,7 @@ impl Fairing for ApiLogFairing {
 fn build_rocket(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
+	ccusage_bin: Option<PathBuf>,
 ) -> rocket::Rocket<rocket::Build> {
 	let cors = rocket_cors::CorsOptions {
 		allowed_origins: rocket_cors::AllOrSome::All,
@@ -119,6 +123,7 @@ fn build_rocket(
 			sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
 		})
 		.manage(crate::state::InferenceProviderState { app_data_dir })
+		.manage(crate::state::UsageState { ccusage_bin })
 		.mount(
 			"/api/v1",
 			routes![
@@ -219,6 +224,7 @@ fn build_rocket(
 				routes::plugins::cli_status,
 				routes::plugins::prune_plugins,
 				routes::plugins::validate_plugin,
+				routes::usage::usage_summary,
 			],
 		)
 		.register(
@@ -242,7 +248,7 @@ pub async fn start(options: ApiOptions) -> Result<(), rocket::Error> {
 		log_level: rocket::config::LogLevel::Normal,
 		..rocket::Config::default()
 	};
-	build_rocket(config, app_data_dir)
+	build_rocket(config, app_data_dir, options.ccusage_bin)
 		.launch()
 		.await
 		.inspect(|_rocket| {
@@ -266,6 +272,7 @@ mod tests {
 		let client = Client::tracked(build_rocket(
 			rocket::Config::default(),
 			default_app_data_dir(),
+			None,
 		))
 		.expect("client");
 
