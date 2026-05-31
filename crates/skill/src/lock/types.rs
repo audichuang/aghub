@@ -26,6 +26,15 @@ pub struct SkillLockEntry {
 	/// Fetched via GitHub Trees API by the telemetry server.
 	#[serde(rename = "skillFolderHash")]
 	pub skill_folder_hash: String,
+	/// aghub source SHA-256 (npx-compatible `compute_skill_folder_hash`). npx
+	/// leaves this absent; aghub stores the real hash here and keeps
+	/// `skill_folder_hash` empty. Missing → recompute (never an error).
+	#[serde(
+		rename = "contentHash",
+		skip_serializing_if = "Option::is_none",
+		default
+	)]
+	pub content_hash: Option<String>,
 	/// ISO timestamp when the skill was first installed
 	#[serde(rename = "installedAt")]
 	pub installed_at: String,
@@ -111,6 +120,52 @@ impl SkillLockEntry {
 			installed_at: now.clone(),
 			updated_at: now,
 			plugin_name,
+			content_hash: None,
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn sample_entry() -> SkillLockEntry {
+		SkillLockEntry {
+			source: "o/r".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/o/r".to_string(),
+			ref_name: None,
+			skill_path: None,
+			skill_folder_hash: String::new(),
+			installed_at: "t".to_string(),
+			updated_at: "t".to_string(),
+			plugin_name: None,
+			content_hash: None,
+		}
+	}
+
+	#[test]
+	fn entry_serializes_content_hash_as_camel_case() {
+		let mut e = sample_entry();
+		e.content_hash = Some("abc123".to_string());
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(json.contains("\"contentHash\":\"abc123\""));
+	}
+
+	#[test]
+	fn entry_omits_content_hash_when_none() {
+		let mut e = sample_entry();
+		e.content_hash = None;
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(!json.contains("contentHash"));
+	}
+
+	#[test]
+	fn entry_deserializes_without_content_hash_to_none() {
+		// npx-written entry has no contentHash; must not error.
+		let json = r#"{"source":"o/r","sourceType":"github","sourceUrl":"https://github.com/o/r","skillFolderHash":"","installedAt":"t","updatedAt":"t"}"#;
+		let e: super::SkillLockEntry = serde_json::from_str(json).unwrap();
+		assert_eq!(e.content_hash, None);
+		assert_eq!(e.skill_folder_hash, "");
 	}
 }
