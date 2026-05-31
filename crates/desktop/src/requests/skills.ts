@@ -17,6 +17,7 @@ import type {
 	OperationBatchResponse,
 	ReconcileRequest,
 	SkillResponse,
+	SkillUpdateResponse,
 	TransferRequest,
 } from "../generated/dto";
 import type { ApiClient } from "./client";
@@ -313,6 +314,27 @@ export function gitInstallSkillsMutationOptions({
 export function openSkillFolderMutationOptions({ api }: { api: ApiClient }) {
 	return mutationOptions({
 		mutationFn: (skillPath: string) => api.skills.openFolder(skillPath),
+	});
+}
+
+interface CheckSkillUpdatesMutationParams {
+	api: ApiClient;
+	onSuccess?: (data: SkillUpdateResponse[]) => void | Promise<void>;
+	onError?: (error: Error) => void;
+}
+
+/// Modeled as a mutation (not a query) because it is an explicit, network-heavy
+/// user action (clones each source) — this gives clean onSuccess/onError hooks
+/// without a fetch-on-render effect. The global skill lock is the input scope.
+export function checkSkillUpdatesMutationOptions({
+	api,
+	onSuccess,
+	onError,
+}: CheckSkillUpdatesMutationParams) {
+	return mutationOptions({
+		mutationFn: (offline?: boolean) => api.skills.checkUpdates(offline),
+		onSuccess,
+		onError,
 	});
 }
 

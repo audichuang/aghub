@@ -375,6 +375,24 @@ export default {
 	updateInstalledSuccess: "更新已安装成功",
 	restartToUpdate: "重启更新",
 	restartNow: "立即重启",
+	// --- 单一技能更新检查（F1 / Workstream D）---
+	checkForSkillUpdates: "检查更新",
+	checkingForSkillUpdates: "检查中…",
+	skillUpToDate: "已是最新",
+	skillUpToDateTooltip: "此技能与来源一致。",
+	skillUpdateAvailableBadge: "有更新",
+	skillUpdateAvailableTooltip:
+		"来源已变更：{{current}} → {{available}}。同步以更新。",
+	skillUncheckable: "无法检查",
+	skillUncheckableAuth: "无法检查：此来源需要凭证。",
+	skillUncheckableNetwork: "无法检查：无法连接到来源。",
+	skillUncheckableLocal: "无法检查：这是本地技能。",
+	skillUncheckableUnsupported: "无法检查：不支持此来源类型。",
+	skillUncheckableNoPath: "无法检查：请重新安装技能以记录来源路径。",
+	skillUncheckableGeneric: "无法检查此技能的来源。",
+	skillNeedsCredential: "添加凭证",
+	skillNeedsCredentialTooltip: "此私有来源需要凭证。添加后重试。",
+	skillUpdateCheckError: "无法检查技能更新。",
 	onboardingDescription: "随时重新打开欢迎页或任一引导流程。",
 
 	// Onboarding — Wizard

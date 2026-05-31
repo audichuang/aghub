@@ -12,7 +12,7 @@ import {
 	StarIcon as StarIconSolid,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import { Accordion, Button, Card, Chip, Tooltip } from "@heroui/react";
+import { Accordion, Button, Card, Chip, toast, Tooltip } from "@heroui/react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMemo, useState } from "react";
@@ -26,12 +26,15 @@ import { useCurrentCodeEditor } from "../hooks/use-integrations";
 import { cn, filterItemsByAgentIds } from "../lib/utils";
 import { openWithEditorMutationOptions } from "../requests/integrations";
 import {
+	checkSkillUpdatesMutationOptions,
 	globalSkillLockQueryOptions,
 	openSkillFolderMutationOptions,
 	projectSkillLockQueryOptions,
 	skillContentQueryOptions,
 	skillTreeQueryOptions,
 } from "../requests/skills";
+import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
+import { SkillUpdateBadge } from "./skill-update-badge";
 import { ManageSkillAgentsDialog } from "./manage-skill-agents-dialog";
 import {
 	DeleteSkillDialog,
@@ -68,6 +71,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	const [transferDialogOpen, setTransferDialogOpen] = useState(false);
 	const [manageDialogOpen, setManageDialogOpen] = useState(false);
 	const [syncDialogOpen, setSyncDialogOpen] = useState(false);
+	const [credDialogOpen, setCredDialogOpen] = useState(false);
 
 	const { isSkillStarred, toggleSkillStar } = useFavorites();
 	const isStarred = isSkillStarred(group.items[0].name);
@@ -94,6 +98,15 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 
 	const openInEditorMutation = useMutation(
 		openWithEditorMutationOptions({ api }),
+	);
+
+	// Read-only, network-heavy update check (reads the global skill lock and
+	// clones each source). Triggered explicitly; errors surface via toast.
+	const checkUpdatesMutation = useMutation(
+		checkSkillUpdatesMutationOptions({
+			api,
+			onError: () => toast.danger(t("skillUpdateCheckError")),
+		}),
 	);
 
 	const { data: globalLock } = useQuery({
@@ -126,7 +139,10 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 				return {
 					source: entry.source,
 					sourceType: entry.sourceType,
-					hash: entry.skillFolderHash,
+					// aghub stores the real source hash in contentHash and leaves
+					// skillFolderHash empty; npx-installed skills only have the
+					// (GitHub tree) skillFolderHash. Prefer whichever is present.
+					hash: entry.contentHash || entry.skillFolderHash,
 					sourceUrl: entry.sourceUrl,
 					skillPath: entry.skillPath ?? null,
 				};
@@ -169,6 +185,25 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 
 		return null;
 	}, [currentSkillSource]);
+
+	// This skill's entry in the last update-check result (undefined until a
+	// check has run, or for a skill absent from the global lock).
+	const updateStatus = checkUpdatesMutation.data?.find(
+		(s) => s.name === skill.name,
+	);
+
+	// Host used to prefill the credential name so the update-check host-fallback
+	// resolver (a credential whose name matches the host) can find it.
+	const credentialHost = useMemo(() => {
+		if (!sourceUrl) {
+			return "";
+		}
+		try {
+			return new URL(sourceUrl).host;
+		} catch {
+			return "";
+		}
+	}, [sourceUrl]);
 
 	const enabledAgentIds = useMemo(
 		() =>
@@ -401,7 +436,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 													{currentSkillSource.source}
 												</span>
 											</div>
-											<div className="mt-1 flex items-center text-xs text-muted">
+											<div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-muted">
 												<span className="font-mono">
 													<HashtagIcon className="inline size-3" />
 													{currentSkillSource.hash.slice(
@@ -409,6 +444,41 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 														8,
 													)}
 												</span>
+												{sourceUrl &&
+													(updateStatus ? (
+														<SkillUpdateBadge
+															status={
+																updateStatus
+															}
+															onResolveAuth={() =>
+																setCredDialogOpen(
+																	true,
+																)
+															}
+														/>
+													) : (
+														<Button
+															size="sm"
+															variant="ghost"
+															className="h-6 px-2 text-xs"
+															isDisabled={
+																checkUpdatesMutation.isPending
+															}
+															onPress={() =>
+																checkUpdatesMutation.mutate(
+																	false,
+																)
+															}
+														>
+															{checkUpdatesMutation.isPending
+																? t(
+																		"checkingForSkillUpdates",
+																	)
+																: t(
+																		"checkForSkillUpdates",
+																	)}
+														</Button>
+													))}
 											</div>
 										</div>
 										{sourceUrl && (
@@ -602,6 +672,19 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					projectPath={projectPath}
 				/>
 			)}
+
+			{/* Credential picker for an Uncheckable{auth} update check. Keyed by
+			    host so the form re-initializes its prefilled name on change. */}
+			<CreateCredentialDialog
+				key={credentialHost}
+				isOpen={credDialogOpen}
+				defaultName={credentialHost}
+				onClose={() => setCredDialogOpen(false)}
+				onSuccess={() => {
+					setCredDialogOpen(false);
+					checkUpdatesMutation.mutate(false);
+				}}
+			/>
 		</>
 	);
 }

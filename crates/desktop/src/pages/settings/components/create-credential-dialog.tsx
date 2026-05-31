@@ -23,6 +23,10 @@ interface CreateCredentialDialogProps {
 	isOpen: boolean;
 	onClose: () => void;
 	onSuccess: (newId: string) => void;
+	/** Prefill the credential name (e.g. the repo host, so the update-check
+	 * host-fallback resolver matches it). Callers that need this to re-apply on
+	 * change should `key` the dialog by the same value to re-init the form. */
+	defaultName?: string;
 }
 
 interface FormValues {
@@ -34,6 +38,7 @@ export function CreateCredentialDialog({
 	isOpen,
 	onClose,
 	onSuccess,
+	defaultName,
 }: CreateCredentialDialogProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -46,7 +51,7 @@ export function CreateCredentialDialog({
 	} = useForm<FormValues>({
 		mode: "onSubmit",
 		reValidateMode: "onChange",
-		defaultValues: { name: "", token: "" },
+		defaultValues: { name: defaultName ?? "", token: "" },
 	});
 	const createMutation = useMutation(
 		createCredentialMutationOptions({

@@ -51,6 +51,7 @@ import type {
 	ReconcileRequest,
 	SkillResponse,
 	SkillTreeNodeResponse,
+	SkillUpdateResponse,
 	SubAgentResponse,
 	ToolInfoDto,
 	TransferRequest,
@@ -276,6 +277,15 @@ export function createApi(baseUrl: string) {
 			},
 			gitSync(data: GitSyncRequest): Promise<GitSyncResponse> {
 				return client.post("skills/git/sync", { json: data }).json();
+			},
+			checkUpdates(offline = false): Promise<SkillUpdateResponse[]> {
+				// Network-heavy (clones each source); give it a long timeout.
+				return client
+					.get("skills/check-updates", {
+						searchParams: offline ? { offline: "true" } : {},
+						timeout: 120000,
+					})
+					.json();
 			},
 		},
 		mcps: {

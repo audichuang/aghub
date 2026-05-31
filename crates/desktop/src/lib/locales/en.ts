@@ -390,6 +390,27 @@ export default {
 	updateInstalledSuccess: "Update installed successfully",
 	restartToUpdate: "Restart to Update",
 	restartNow: "Restart Now",
+	// --- Per-skill update check (F1 / Workstream D) ---
+	checkForSkillUpdates: "Check for updates",
+	checkingForSkillUpdates: "Checking…",
+	skillUpToDate: "Up to date",
+	skillUpToDateTooltip: "This skill matches its source.",
+	skillUpdateAvailableBadge: "Update available",
+	skillUpdateAvailableTooltip:
+		"Source changed: {{current}} → {{available}}. Sync to update.",
+	skillUncheckable: "Can't check",
+	skillUncheckableAuth: "Can't check: the source needs a credential.",
+	skillUncheckableNetwork: "Can't check: the source is unreachable.",
+	skillUncheckableLocal: "Can't check: this is a local skill.",
+	skillUncheckableUnsupported:
+		"Can't check: this source type isn't supported.",
+	skillUncheckableNoPath:
+		"Can't check: reinstall the skill to record its source path.",
+	skillUncheckableGeneric: "Can't check this skill's source.",
+	skillNeedsCredential: "Add credential",
+	skillNeedsCredentialTooltip:
+		"This private source needs a credential. Add one and retry.",
+	skillUpdateCheckError: "Couldn't check for skill updates.",
 	onboardingDescription:
 		"Replay the welcome screen or either guided tour any time.",
 

@@ -374,6 +374,24 @@ export default {
 	updateInstalledSuccess: "更新已安裝成功",
 	restartToUpdate: "重新啟動以更新",
 	restartNow: "立即重新啟動",
+	// --- 單一技能更新檢查（F1 / Workstream D）---
+	checkForSkillUpdates: "檢查更新",
+	checkingForSkillUpdates: "檢查中…",
+	skillUpToDate: "已是最新",
+	skillUpToDateTooltip: "此技能與來源一致。",
+	skillUpdateAvailableBadge: "有更新",
+	skillUpdateAvailableTooltip:
+		"來源已變更：{{current}} → {{available}}。同步以更新。",
+	skillUncheckable: "無法檢查",
+	skillUncheckableAuth: "無法檢查：此來源需要憑證。",
+	skillUncheckableNetwork: "無法檢查：無法連線到來源。",
+	skillUncheckableLocal: "無法檢查：這是本機技能。",
+	skillUncheckableUnsupported: "無法檢查：不支援此來源類型。",
+	skillUncheckableNoPath: "無法檢查：請重新安裝技能以記錄來源路徑。",
+	skillUncheckableGeneric: "無法檢查此技能的來源。",
+	skillNeedsCredential: "新增憑證",
+	skillNeedsCredentialTooltip: "此私有來源需要憑證。新增後重試。",
+	skillUpdateCheckError: "無法檢查技能更新。",
 	onboardingDescription: "隨時重新開啟歡迎頁或任一導覽流程。",
 
 	// Onboarding — Wizard
