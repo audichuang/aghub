@@ -3,4 +3,21 @@ import type { CCPluginAuthorResponse } from "./CCPluginAuthorResponse";
 import type { CCPluginScopeResponse } from "./CCPluginScopeResponse";
 import type { CCPluginSourceInfoResponse } from "./CCPluginSourceInfoResponse";
 
-export type CCPluginResponse = { id: string, name: string, version: string, display_scope?: string, description: string | null, enabled: boolean, source: string, has_skills: boolean, has_hooks: boolean, has_mcp: boolean, author?: CCPluginAuthorResponse, repository?: string, license?: string, keywords?: Array<string>, source_info: CCPluginSourceInfoResponse, scopes: Array<CCPluginScopeResponse>, };
+export type CCPluginResponse = {
+	id: string;
+	name: string;
+	version: string;
+	display_scope?: string;
+	description: string | null;
+	enabled: boolean;
+	source: string;
+	has_skills: boolean;
+	has_hooks: boolean;
+	has_mcp: boolean;
+	author?: CCPluginAuthorResponse;
+	repository?: string;
+	license?: string;
+	keywords?: Array<string>;
+	source_info: CCPluginSourceInfoResponse;
+	scopes: Array<CCPluginScopeResponse>;
+};

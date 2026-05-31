@@ -7,4 +7,7 @@
  * `uncheckable`. The `reason` on `uncheckable` is already redacted of any URL
  * userinfo at the orchestration boundary.
  */
-export type SkillUpdateStatusResponse = { "status": "upToDate" } | { "status": "updateAvailable", current: string, available: string, } | { "status": "uncheckable", reason: string, };
+export type SkillUpdateStatusResponse =
+	| { status: "upToDate" }
+	| { status: "updateAvailable"; current: string; available: string }
+	| { status: "uncheckable"; reason: string };

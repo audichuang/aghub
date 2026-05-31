@@ -5,4 +5,14 @@ import type { AgentProviderModelResponse } from "./AgentProviderModelResponse";
 import type { AgentProviderSourceDto } from "./AgentProviderSourceDto";
 import type { InferenceProviderFormatDto } from "./InferenceProviderFormatDto";
 
-export type AgentProviderResponse = { id: string, source_provider_id: string | null, name: string, format: InferenceProviderFormatDto | null, api_base_url: string | null, credential: AgentProviderCredentialDto, models: Array<AgentProviderModelResponse>, source: AgentProviderSourceDto, matched_inference_provider: AgentProviderMatchedInferenceProviderResponse | null, };
+export type AgentProviderResponse = {
+	id: string;
+	source_provider_id: string | null;
+	name: string;
+	format: InferenceProviderFormatDto | null;
+	api_base_url: string | null;
+	credential: AgentProviderCredentialDto;
+	models: Array<AgentProviderModelResponse>;
+	source: AgentProviderSourceDto;
+	matched_inference_provider: AgentProviderMatchedInferenceProviderResponse | null;
+};

@@ -188,16 +188,16 @@ fetch in `crates/api`.
 2. **Fetch** the ref with a new `crates/git` **treeless/bare** helper
    (`fetch_ref_to_temp`) — no full worktree checkout (`clone.rs:115-128` does a
    full checkout today; this is new git-crate API, not "reuse plumbing").
-   - **ref handling:** `ref = None` → resolve the default branch via gix HEAD
-     symref (NOT the `git` binary — `detect_current_branch` at `skills.rs:1299`
-     shells out, violating the no-binary goal). Tags and pinned commit SHAs are
-     fetched directly; SHA-/tag-pinned skills are reported `UpToDate` (a pin is
-     intentional). Note `ref` is not universally `None` (`git_install_skills`
-     records the branch, `skills.rs:1335-1339`).
-   - **resilience:** a `(source, ref)` **result cache with a TTL**, a
-     **concurrency bound**, a **per-fetch timeout**, and an explicit
-     **offline/skip** path (network failure → `Uncheckable { network }`, refresh
-     continues).
+    - **ref handling:** `ref = None` → resolve the default branch via gix HEAD
+      symref (NOT the `git` binary — `detect_current_branch` at `skills.rs:1299`
+      shells out, violating the no-binary goal). Tags and pinned commit SHAs are
+      fetched directly; SHA-/tag-pinned skills are reported `UpToDate` (a pin is
+      intentional). Note `ref` is not universally `None` (`git_install_skills`
+      records the branch, `skills.rs:1335-1339`).
+    - **resilience:** a `(source, ref)` **result cache with a TTL**, a
+      **concurrency bound**, a **per-fetch timeout**, and an explicit
+      **offline/skip** path (network failure → `Uncheckable { network }`, refresh
+      continues).
 3. Locate each skill's folder via `skill_path`. **Sanitize first:** reject any
    `skill_path` that is absolute or contains `..`; canonicalize the joined path
    and verify it stays under the temp checkout root before reading. Recompute
@@ -277,14 +277,14 @@ Guards (this edits a VCS-committed file, so data loss is the risk):
 
 ## 5. Components / files
 
-| Crate | Change |
-|---|---|
-| `crates/skill` | New `hash.rs` (+ `sha2` dep, bounds, lstat); `install.rs` writes real **source** hash + `content_hash`, stops the placeholder, `write_project_install_lock` **signature changes** to take the source dir; `lock/types.rs` + `content_hash` (serde-optional); `lock/local.rs` + `skill_path`; wire `remove_skill_from_lock`/`remove_skill_from_local_lock`; update tests asserting the placeholder |
-| `crates/core` | New update module: **pure** hash/compare + `SkillUpdateStatus`; `manager/skill.rs` layout-aware removal (canonical=file→parent, containment, TOCTOU); prune helper using `scan_skills` |
-| `crates/git` | New treeless `fetch_ref_to_temp`; default-branch via gix HEAD symref; tag/SHA fetch; **redaction helper** (strip URL userinfo from errors); userinfo stripping in `source.rs` |
-| `crates/cli` | `--all-agents` + `--dry-run`/confirm on `delete`; `check`/`update`; `prune-lock` |
-| `crates/api` | **Credential resolution** (keychain + source binding) + fetch orchestration; update-check route; delete dry-run/confirm + removed-path summary; atomic lock writes; redaction applied to `skills.rs:1189` |
-| `crates/desktop` | Refresh triggers update-check (async loading/error/auth states); per-skill "update available" badge; **badge reads `content_hash`** (not the now-empty `skill_folder_hash`, `skill-detail.tsx:129,405-411`); credential picker on `Uncheckable{auth}` |
+| Crate            | Change                                                                                                                                                                                                                                                                                                                                                                                            |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `crates/skill`   | New `hash.rs` (+ `sha2` dep, bounds, lstat); `install.rs` writes real **source** hash + `content_hash`, stops the placeholder, `write_project_install_lock` **signature changes** to take the source dir; `lock/types.rs` + `content_hash` (serde-optional); `lock/local.rs` + `skill_path`; wire `remove_skill_from_lock`/`remove_skill_from_local_lock`; update tests asserting the placeholder |
+| `crates/core`    | New update module: **pure** hash/compare + `SkillUpdateStatus`; `manager/skill.rs` layout-aware removal (canonical=file→parent, containment, TOCTOU); prune helper using `scan_skills`                                                                                                                                                                                                            |
+| `crates/git`     | New treeless `fetch_ref_to_temp`; default-branch via gix HEAD symref; tag/SHA fetch; **redaction helper** (strip URL userinfo from errors); userinfo stripping in `source.rs`                                                                                                                                                                                                                     |
+| `crates/cli`     | `--all-agents` + `--dry-run`/confirm on `delete`; `check`/`update`; `prune-lock`                                                                                                                                                                                                                                                                                                                  |
+| `crates/api`     | **Credential resolution** (keychain + source binding) + fetch orchestration; update-check route; delete dry-run/confirm + removed-path summary; atomic lock writes; redaction applied to `skills.rs:1189`                                                                                                                                                                                         |
+| `crates/desktop` | Refresh triggers update-check (async loading/error/auth states); per-skill "update available" badge; **badge reads `content_hash`** (not the now-empty `skill_folder_hash`, `skill-detail.tsx:129,405-411`); credential picker on `Uncheckable{auth}`                                                                                                                                             |
 
 **`SkillUpdateStatus` DTO** (`UpToDate | UpdateAvailable | Uncheckable{reason}`)
 is defined in core and serialized for the API/desktop; the badge maps onto the

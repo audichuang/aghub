@@ -54,6 +54,7 @@ Add these to the project's CI workflow as part of `cargo test --workspace` (they
 ## File Structure
 
 **Create**
+
 - `crates/skill/src/hash.rs` — `compute_skill_folder_hash`, bounds constants, `HashError`, `is_placeholder_digest`.
 - `crates/skill/src/lock/path.rs` — `skill_path_from_repo_dir` (npx `add.ts:1568-1575` form) + `repo_relative_dir`.
 - `crates/skill/tests/fixtures/hash-parity-skill/…` — committed hashable fixture (no `.git`/`node_modules`).
@@ -72,6 +73,7 @@ Add these to the project's CI workflow as part of `cargo test --workspace` (they
 - `crates/desktop/src/components/skill-update-badge.tsx` — status badge + credential-picker affordance.
 
 **Modify**
+
 - `crates/skill/Cargo.toml` — add `sha2`.
 - `crates/skill/src/lib.rs`, `crates/skill/src/lock/mod.rs` — module wiring + re-exports.
 - `crates/skill/src/lock/types.rs` — `content_hash: Option<String>` on `SkillLockEntry`.
@@ -97,6 +99,7 @@ Everything in F1/F2 depends on a correct hasher and the schema fields, so P land
 ## Task P1: Folder hasher (`crates/skill/src/hash.rs`)
 
 **Files:**
+
 - Modify: `crates/skill/Cargo.toml`
 - Create: `crates/skill/src/hash.rs`
 - Modify: `crates/skill/src/lib.rs`
@@ -448,6 +451,7 @@ git commit -m "feat(skill): add npx-compatible compute_skill_folder_hash"
 ## Task P2: CI-blocking golden parity vs npx
 
 **Files:**
+
 - Create: `crates/skill/tests/fixtures/hash-parity-skill/` (committed files)
 - Create: `crates/skill/tests/hash_parity_golden.rs`
 
@@ -547,6 +551,7 @@ git commit -m "test(skill): CI-blocking npx hash-parity golden test"
 ## Task P3: Global lock — add optional `content_hash`
 
 **Files:**
+
 - Modify: `crates/skill/src/lock/types.rs`
 
 - [ ] **Step 1: Write failing serde tests**
@@ -616,6 +621,7 @@ git commit -m "feat(skill): add optional per-entry content_hash to global lock"
 ## Task P4: Project lock — add `skill_path` + the npx path helper
 
 **Files:**
+
 - Create: `crates/skill/src/lock/path.rs`
 - Modify: `crates/skill/src/lock/local.rs`, `crates/skill/src/lock/mod.rs`
 
@@ -753,6 +759,7 @@ git commit -m "feat(skill): add skill_path to project lock + npx path helper"
 ## Task P5: `write_project_install_lock` computes the real source hash
 
 **Files:**
+
 - Modify: `crates/skill/src/install.rs`
 - Modify: `crates/api/src/routes/skills.rs` (call site at ~473-523)
 
@@ -840,6 +847,7 @@ git commit -m "feat(skill): write real source hash + content_hash at install (dr
 ## Task P6: Placeholder auto-heal helper (pure)
 
 **Files:**
+
 - Modify: `crates/skill/src/hash.rs` (already has `is_placeholder_digest`)
 - Create logic consumed by F1 in `crates/core/src/skills/update.rs` (Task F1.3)
 
@@ -869,6 +877,7 @@ git commit -m "test(skill): assert placeholder-digest detection"
 ## Task P7: npx interop suite (round-trip, sync parity, lock-wipe boundary)
 
 **Files:**
+
 - Create: `crates/skill/tests/npx_interop.rs`
 - Create: `crates/skill/tests/fixtures/global-lock-npx-written.json`
 
@@ -878,27 +887,27 @@ git commit -m "test(skill): assert placeholder-digest detection"
 
 ```json
 {
-  "version": 3,
-  "skills": {
-    "alpha": {
-      "source": "o/r",
-      "sourceType": "github",
-      "sourceUrl": "https://github.com/o/r",
-      "ref": "main",
-      "skillPath": "skills/alpha/SKILL.md",
-      "skillFolderHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "installedAt": "2026-01-01T00:00:00.000Z",
-      "updatedAt": "2026-01-01T00:00:00.000Z"
-    },
-    "beta": {
-      "source": "o/r2",
-      "sourceType": "github",
-      "sourceUrl": "https://github.com/o/r2",
-      "skillFolderHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      "installedAt": "2026-01-01T00:00:00.000Z",
-      "updatedAt": "2026-01-01T00:00:00.000Z"
-    }
-  }
+	"version": 3,
+	"skills": {
+		"alpha": {
+			"source": "o/r",
+			"sourceType": "github",
+			"sourceUrl": "https://github.com/o/r",
+			"ref": "main",
+			"skillPath": "skills/alpha/SKILL.md",
+			"skillFolderHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"installedAt": "2026-01-01T00:00:00.000Z",
+			"updatedAt": "2026-01-01T00:00:00.000Z"
+		},
+		"beta": {
+			"source": "o/r2",
+			"sourceType": "github",
+			"sourceUrl": "https://github.com/o/r2",
+			"skillFolderHash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			"installedAt": "2026-01-01T00:00:00.000Z",
+			"updatedAt": "2026-01-01T00:00:00.000Z"
+		}
+	}
 }
 ```
 
@@ -983,6 +992,7 @@ git commit -m "test(skill): npx interop round-trip + sync-parity suite"
 ## Task P8: Atomic lock writes (temp + rename + mutex)
 
 **Files:**
+
 - Modify: `crates/skill/src/lock/io.rs`, `crates/skill/src/lock/local.rs`
 
 - [ ] **Step 1: Failing test — concurrent writers never see a partial file**
@@ -1043,6 +1053,7 @@ F1 tasks F1.1–F1.3 are independent of F2 and can run in parallel with F2. F1.4
 ## Task F1.1: Credential redaction helper + userinfo stripping
 
 **Files:**
+
 - Create: `crates/git/src/redact.rs`
 - Modify: `crates/git/src/lib.rs`, `crates/git/src/error.rs`, `crates/git/src/clone.rs`, `crates/git/src/source.rs`
 
@@ -1180,12 +1191,14 @@ git commit -m "feat(git): redact URL userinfo from errors and persisted source U
 ## Task F1.2: Treeless ref fetch + default-branch via gix HEAD symref (spike + build)
 
 **Files:**
+
 - Create: `crates/git/src/fetch.rs`
 - Modify: `crates/git/src/lib.rs`, `crates/git/Cargo.toml` (only if the spike needs a feature)
 
 - [ ] **Step 1: Spike — confirm the gix 0.83 API for a no-checkout fetch + HEAD symref**
 
 Run a throwaway probe (a temporary `#[test]` or `examples/` binary) that:
+
 1. `gix::prepare_clone(url, tmp)` → `fetch_only(progress, &should_interrupt)` (fetch without `main_worktree()`), and
 2. resolves the remote default branch from the fetch outcome's ref map / `repo.head_ref()` symref — **no `std::process::Command`**.
 
@@ -1281,6 +1294,7 @@ git commit -m "feat(git): treeless fetch_ref_to_temp + gix HEAD-symref default b
 ## Task F1.3: Pure update comparison in core (`SkillUpdateStatus`)
 
 **Files:**
+
 - Create: `crates/core/src/skills/update.rs`
 - Modify: `crates/core/src/skills/mod.rs`
 
@@ -1434,6 +1448,7 @@ git commit -m "feat(core): pure SkillUpdateStatus comparison with path sanitize 
 ## Task F1.4: Source→credential resolution (api, keyring binding)
 
 **Files:**
+
 - Create: `crates/api/src/credentials/resolve.rs`
 - Modify: `crates/api/src/routes/credentials.rs` (reuse `load_credentials`)
 
@@ -1510,6 +1525,7 @@ git commit -m "feat(api): source->credential resolution (keyring binding, host f
 ## Task F1.5: Update-check orchestration (group, cache+TTL, concurrency, timeout, offline)
 
 **Files:**
+
 - Create: `crates/api/src/skills/update_check.rs`
 - Modify: `crates/api/src/lib.rs`
 
@@ -1586,6 +1602,7 @@ git commit -m "feat(api): update-check orchestration (grouping, TTL cache, timeo
 ## Task F1.6: Replace `detect_current_branch` shell-out with gix
 
 **Files:**
+
 - Modify: `crates/api/src/routes/skills.rs` (~1299-1316, callers ~1335-1339)
 
 - [ ] **Step 1: Failing test**
@@ -1618,6 +1635,7 @@ git commit -m "refactor(api): resolve current branch via gix (no git binary)"
 ## Task F1.7: API route `GET /skills/check-updates` + DTO + redaction at surfacing site
 
 **Files:**
+
 - Create: `crates/api/src/routes/skills_update.rs`
 - Modify: `crates/api/src/dto/skill.rs`, `crates/api/src/routes/skills.rs` (~1186-1192), `crates/api/src/lib.rs`, `crates/api/src/bin/export-dto.rs`
 
@@ -1689,6 +1707,7 @@ git commit -m "feat(api): GET /skills/check-updates + SkillUpdateStatus DTO + re
 ## Task F1.8: CLI `check skills` (read-only)
 
 **Files:**
+
 - Create: `crates/cli/src/commands/check.rs`
 - Modify: `crates/cli/src/commands/mod.rs`, `crates/cli/src/cli.rs` (clap)
 
@@ -1735,6 +1754,7 @@ git commit -m "feat(cli): read-only `check skills` update detection"
 ## Task F2.1: Allow-listed roots + containment guard
 
 **Files:**
+
 - Create: `crates/core/src/skills/removal.rs`
 - Modify: `crates/core/src/skills/mod.rs`
 
@@ -1813,6 +1833,7 @@ git commit -m "feat(core): allow-listed skills roots + canonicalized containment
 ## Task F2.2: Removal planning (layout detection + canonical→parent + symlink sweep)
 
 **Files:**
+
 - Modify: `crates/core/src/skills/removal.rs`
 - Modify: `crates/core/src/transfer.rs` (reuse `resolve_skill_root`, `find_skill_locations_in_agents`)
 
@@ -1837,6 +1858,7 @@ pub struct RemovalPlan {
 ```
 
 Tests (use `TestConfig`-style temp agent dirs):
+
 - `plan_removal_symlink_layout_collects_canonical_and_all_symlinks` — canonical + 2 symlinks → `paths` has all three, `layout == Symlink`, `needs_confirm == true`.
 - `plan_removal_out_of_tree_symlink_is_skipped_not_deleted` — symlink → outside allow-list: canonical out-of-tree lands in `skipped`, NOT `paths`.
 - `plan_removal_copy_single_agent` — no `canonical_path`, default → only the target agent's copy in `paths`, `needs_confirm == false`.
@@ -1875,12 +1897,14 @@ git commit -m "feat(core): layout-aware removal planning with containment + syml
 ## Task F2.3: Disk-reconciled lock prune (`prune.rs`)
 
 **Files:**
+
 - Create: `crates/core/src/skills/prune.rs`
 - Modify: `crates/core/src/skills/mod.rs`
 
 - [ ] **Step 1: Failing tests**
 
 Create `crates/core/src/skills/prune.rs` with the test module first. Tests (use `TestConfig` + fake agent dirs):
+
 - `prune_removes_entries_with_no_disk_skill` — lock has `exists` (on disk) + `ghost` (not) → only `ghost` removed.
 - `prune_keeps_unlocked_disk_skill` — disk skill without lock entry → untouched, no entry created/removed.
 - `prune_scope_isolation_project_never_prunes_global` — project prune leaves a global-only entry intact.
@@ -1916,11 +1940,13 @@ git commit -m "feat(core): disk-reconciled, scope-isolated lock prune (scan-succ
 ## Task F2.4: Wire layout-aware removal into the manager (dry-run default + confirm + TOCTOU)
 
 **Files:**
+
 - Modify: `crates/core/src/manager/skill.rs`
 
 - [ ] **Step 1: Failing integration tests**
 
 Add to `crates/core/tests/integration_tests.rs` (using `TestConfig` + manual fixtures):
+
 - `symlink_layout_delete_removes_canonical_and_all_symlinks` (with confirm).
 - `symlink_out_of_tree_target_prevents_deletion` — out-of-tree untouched, lock unchanged.
 - `copy_layout_single_agent_removes_only_target`.
@@ -1976,18 +2002,21 @@ git commit -m "feat(core): layout-aware skill removal (dry-run default, confirm,
 ## Task F2.5: Both delete routes + prune wiring (api)
 
 **Files:**
+
 - Modify: `crates/api/src/routes/skills.rs` (`DELETE /skills/by-path` ~171-296; `DELETE /agents/<agent>/skills/<name>` ~753-776)
 - Modify: `crates/api/src/routes/skills_update.rs` (add `POST /skills/prune-lock`)
 
 - [ ] **Step 1: Failing api tests**
 
 Add `crates/api/tests/skill_delete_safety.rs`:
+
 - `delete_skill_respects_allowed_roots` — by-path outside allow-list → validation error, `remove_dir_all` never called, FS untouched.
 - `delete_by_path_dry_run_default_lists_paths` — default returns removed-path summary, deletes nothing.
 - `delete_by_path_confirm_executes` — `confirm=true` actually deletes + prunes the lock.
 - `delete_plugin_managed_rejected` — plugin-owned skill not deleted.
 
 Add `crates/api/tests/skill_prune.rs`:
+
 - `prune_lock_route_clears_manual_residue` — manual `rm` then `POST /skills/prune-lock` clears the entry.
 - `prune_lock_route_scope_isolation`.
 
@@ -2007,12 +2036,14 @@ git commit -m "feat(api): safe dual delete routes (dry-run/confirm) + prune-lock
 ## Task F2.6: CLI `--all-agents`/`--dry-run`/`--yes` on delete + `prune-lock`
 
 **Files:**
+
 - Create: `crates/cli/src/commands/prune.rs`
 - Modify: `crates/cli/src/commands/delete.rs`, `crates/cli/src/commands/mod.rs`, `crates/cli/src/cli.rs`
 
 - [ ] **Step 1: Failing CLI e2e tests**
 
 Add to `crates/cli/tests/cli_tests.rs`:
+
 - `delete_skill_dry_run_is_default_and_lists_paths` — `delete skills <name>` without `--yes` prints the path list and deletes nothing.
 - `delete_skill_all_agents_requires_yes` — `--all-agents` without `--yes` → non-zero exit / refusal.
 - `prune_lock_subcommand_runs` — `skills prune-lock` exits 0 and reports pruned names (JSON).
@@ -2037,6 +2068,7 @@ git commit -m "feat(cli): delete --all-agents/--dry-run/--yes + skills prune-loc
 ## Task D1: DTO regeneration + type-assertion gate
 
 **Files:**
+
 - Modify: `crates/desktop/src/generated/dto/*` (generated), `crates/api/src/bin/export-dto.rs`
 - Create: `crates/desktop/src/components/__tests__/dto-shape.test-d.ts` (type-level)
 
@@ -2058,7 +2090,8 @@ const _entry: SkillLockEntryResponse = {} as SkillLockEntryResponse;
 const _ch: string | undefined = _entry.contentHash;
 
 const _u: SkillUpdateResponse = {} as SkillUpdateResponse;
-void _ch; void _u;
+void _ch;
+void _u;
 ```
 
 - [ ] **Step 3: Run typecheck + commit**
@@ -2074,6 +2107,7 @@ git commit -m "chore(desktop): regenerate DTOs; type-level contentHash gate"
 ## Task D2: Badge reads `content_hash`
 
 **Files:**
+
 - Modify: `crates/desktop/src/components/skill-detail.tsx` (~121-148, ~405-411)
 
 - [ ] **Step 1: Change the data source**
@@ -2104,6 +2138,7 @@ git commit -m "fix(desktop): badge reads content_hash (skill_folder_hash now emp
 ## Task D3: Update-status badge + credential picker + async states
 
 **Files:**
+
 - Create: `crates/desktop/src/components/skill-update-badge.tsx`
 - Modify: `crates/desktop/src/components/skill-list.tsx` (~210-225)
 
@@ -2133,12 +2168,14 @@ git commit -m "feat(desktop): per-skill update badge + Uncheckable{auth} credent
 - [ ] **Step 1: Full workspace gate**
 
 Run:
+
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace -- -D warnings
 cargo test --workspace
 cd crates/desktop && bun run lint && bun run typecheck
 ```
+
 Expected: all green. The CI-blocking tests (golden parity, credential leak, containment, prune isolation, dry-run, sync parity) are part of `cargo test --workspace`.
 
 - [ ] **Step 2: Network/validation lane (manual, online)**

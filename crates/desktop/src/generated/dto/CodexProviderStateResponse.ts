@@ -2,4 +2,8 @@
 import type { AgentProviderResponse } from "./AgentProviderResponse";
 import type { CodexProfileResponse } from "./CodexProfileResponse";
 
-export type CodexProviderStateResponse = { active_profile_id: string, profiles: Array<CodexProfileResponse>, providers: Array<AgentProviderResponse>, };
+export type CodexProviderStateResponse = {
+	active_profile_id: string;
+	profiles: Array<CodexProfileResponse>;
+	providers: Array<AgentProviderResponse>;
+};

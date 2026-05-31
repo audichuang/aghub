@@ -25,6 +25,10 @@ coverage/
 .DS_Store
 Thumbs.db
 
+# Byte-exact skill test fixtures (hash-parity golden + npx-interop locks).
+# These are hashed/compared verbatim; reformatting them breaks the golden tests.
+crates/skill/tests/fixtures/
+
 # Tauri
 crates/desktop/src-tauri/gen/
 crates/desktop/src-tauri/target/

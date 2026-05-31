@@ -7,4 +7,25 @@ import type { CCPluginScopeResponse } from "./CCPluginScopeResponse";
 import type { CCPluginSkillInfo } from "./CCPluginSkillInfo";
 import type { CCPluginSourceInfoResponse } from "./CCPluginSourceInfoResponse";
 
-export type CCPluginDetailResponse = { manifest?: CCPluginManifestResponse, hooks?: CCPluginHooksManifestResponse, mcp_config?: CCPluginMcpConfigResponse, provided_skills: Array<CCPluginSkillInfo>, id: string, name: string, version: string, display_scope?: string, description: string | null, enabled: boolean, source: string, has_skills: boolean, has_hooks: boolean, has_mcp: boolean, author?: CCPluginAuthorResponse, repository?: string, license?: string, keywords?: Array<string>, source_info: CCPluginSourceInfoResponse, scopes: Array<CCPluginScopeResponse>, };
+export type CCPluginDetailResponse = {
+	manifest?: CCPluginManifestResponse;
+	hooks?: CCPluginHooksManifestResponse;
+	mcp_config?: CCPluginMcpConfigResponse;
+	provided_skills: Array<CCPluginSkillInfo>;
+	id: string;
+	name: string;
+	version: string;
+	display_scope?: string;
+	description: string | null;
+	enabled: boolean;
+	source: string;
+	has_skills: boolean;
+	has_hooks: boolean;
+	has_mcp: boolean;
+	author?: CCPluginAuthorResponse;
+	repository?: string;
+	license?: string;
+	keywords?: Array<string>;
+	source_info: CCPluginSourceInfoResponse;
+	scopes: Array<CCPluginScopeResponse>;
+};

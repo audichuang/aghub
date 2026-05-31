@@ -3,4 +3,15 @@
 /**
  * Response for a single global skill lock entry
  */
-export type SkillLockEntryResponse = { name: string, source: string, sourceType: string, sourceUrl: string, skillPath: string | null, skillFolderHash: string, contentHash?: string, installedAt: string, updatedAt: string, pluginName: string | null, };
+export type SkillLockEntryResponse = {
+	name: string;
+	source: string;
+	sourceType: string;
+	sourceUrl: string;
+	skillPath: string | null;
+	skillFolderHash: string;
+	contentHash?: string;
+	installedAt: string;
+	updatedAt: string;
+	pluginName: string | null;
+};
