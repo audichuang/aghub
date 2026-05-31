@@ -120,6 +120,12 @@ mod tests {
 	}
 
 	#[test]
+	fn placeholder_digest_detected() {
+		assert!(is_placeholder_digest(EMPTY_SKILLS_LOCK_DIGEST));
+		assert!(!is_placeholder_digest("abc"));
+	}
+
+	#[test]
 	fn empty_folder_hashes_to_empty_sha256() {
 		let dir = tempdir().unwrap();
 		assert_eq!(
