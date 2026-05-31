@@ -43,6 +43,7 @@
 pub mod clone;
 pub mod credentials;
 pub mod error;
+pub mod redact;
 pub mod remote;
 pub mod source;
 
@@ -50,6 +51,7 @@ pub mod source;
 pub use clone::{clone_to_path, clone_to_temp, CloneOptions};
 pub use credentials::{inject_credentials, read_credentials, Credentials};
 pub use error::{GitError, Result};
+pub use redact::redact_url_userinfo;
 pub use remote::{list_remote_branches, RemoteOptions};
 pub use source::{
 	normalize_repo_source_from_url, resolve_remote_source, RemoteSourceType,

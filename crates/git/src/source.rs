@@ -177,11 +177,17 @@ pub fn resolve_remote_source(
 			"http" | "https" => {
 				let source = normalize_repo_source_from_url(parsed.as_str())
 					.unwrap_or_else(|| parsed.to_string());
+				// Strip URL userinfo (user:token@) so credentials are never
+				// persisted into source_url / clone_url.
+				let mut clean = parsed.clone();
+				let _ = clean.set_username("");
+				let _ = clean.set_password(None);
+				let clean_str = clean.to_string();
 				return Ok(ResolvedRemoteSource {
 					source,
 					source_type: source_type_from_host(parsed.host_str()),
-					source_url: parsed.to_string(),
-					clone_url: parsed.to_string(),
+					source_url: clean_str.clone(),
+					clone_url: clean_str,
 				});
 			}
 			"github" => {
@@ -262,6 +268,21 @@ mod tests {
 			resolve_remote_source("github:vercel-labs/agent-skills").unwrap();
 		assert_eq!(source.source, "vercel-labs/agent-skills");
 		assert_eq!(source.source_type, RemoteSourceType::Github);
+	}
+
+	#[test]
+	fn resolve_remote_source_strips_userinfo() {
+		let r =
+			resolve_remote_source("https://user:ghp_SECRET@github.com/o/r.git")
+				.unwrap();
+		assert!(
+			!r.source_url.contains("ghp_SECRET")
+				&& !r.source_url.contains("user:")
+		);
+		assert!(
+			!r.clone_url.contains("ghp_SECRET")
+				&& !r.clone_url.contains("user:")
+		);
 	}
 
 	#[test]
