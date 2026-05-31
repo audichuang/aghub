@@ -163,6 +163,7 @@ pub fn write_project_install_lock(
 			ref_name: source.ref_name.clone(),
 			source_type: source.source_type.clone(),
 			computed_hash: EMPTY_SKILLS_LOCK_DIGEST.to_string(),
+			skill_path: None,
 		},
 		Some(cwd),
 	)

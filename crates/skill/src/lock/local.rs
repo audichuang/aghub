@@ -25,6 +25,14 @@ pub struct LocalSkillLockEntry {
 	/// computes the hash from actual file contents on disk.
 	#[serde(rename = "computedHash")]
 	pub computed_hash: String,
+	/// npx-style skill path: POSIX `<repo-relative-dir>/SKILL.md`, used by
+	/// npx `experimental_sync` to locate the skill within its source repo.
+	#[serde(
+		rename = "skillPath",
+		skip_serializing_if = "Option::is_none",
+		default
+	)]
+	pub skill_path: Option<String>,
 }
 
 /// The structure of the local (project-scoped) skill lock file.
@@ -142,6 +150,48 @@ mod tests {
 	use std::fs;
 	use tempfile::TempDir;
 
+	fn sample_local_entry() -> LocalSkillLockEntry {
+		LocalSkillLockEntry {
+			source: "org/repo".to_string(),
+			ref_name: None,
+			source_type: "github".to_string(),
+			computed_hash: "abc123".to_string(),
+			skill_path: None,
+		}
+	}
+
+	#[test]
+	fn local_entry_serializes_skill_path_camel_case() {
+		let mut e = sample_local_entry();
+		e.skill_path = Some("skills/pdf/SKILL.md".to_string());
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(json.contains("\"skillPath\":\"skills/pdf/SKILL.md\""));
+	}
+
+	#[test]
+	fn local_entry_omits_skill_path_when_none() {
+		let mut e = sample_local_entry();
+		e.skill_path = None;
+		assert!(!serde_json::to_string(&e).unwrap().contains("skillPath"));
+	}
+
+	#[test]
+	fn write_local_lock_has_trailing_newline_and_sorted_keys() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let tmp = tempfile::tempdir().unwrap();
+		let mut lock = super::LocalSkillLockFile::default();
+		lock.skills.insert("z".into(), sample_local_entry());
+		lock.skills.insert("a".into(), sample_local_entry());
+		super::write_local_lock(&lock, Some(tmp.path())).unwrap();
+		let raw = std::fs::read_to_string(tmp.path().join("skills-lock.json"))
+			.unwrap();
+		assert!(raw.ends_with("\n"));
+		assert!(!raw.ends_with("\n\n"));
+		let a = raw.find("\"a\"").unwrap();
+		let z = raw.find("\"z\"").unwrap();
+		assert!(a < z, "keys must be sorted (BTreeMap)");
+	}
+
 	#[test]
 	fn test_get_local_lock_path_with_cwd() {
 		let result = get_local_lock_path(Some(Path::new("/some/project")));
@@ -231,6 +281,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "zzz".to_string(),
+				skill_path: None,
 			},
 		);
 		lock.skills.insert(
@@ -240,6 +291,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "aaa".to_string(),
+				skill_path: None,
 			},
 		);
 		lock.skills.insert(
@@ -249,6 +301,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "mmm".to_string(),
+				skill_path: None,
 			},
 		);
 
@@ -274,6 +327,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "hash123".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -295,6 +349,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "old-hash".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -307,6 +362,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "new-hash".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -329,6 +385,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "aaa".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -341,6 +398,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "bbb".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -362,6 +420,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "hash".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -396,6 +455,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "aaa".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
@@ -414,6 +474,7 @@ mod tests {
 				ref_name: None,
 				source_type: "github".to_string(),
 				computed_hash: "bbb".to_string(),
+				skill_path: None,
 			},
 			Some(dir.path()),
 		)
