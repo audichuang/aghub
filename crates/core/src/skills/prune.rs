@@ -120,6 +120,52 @@ pub fn prune_lock_scanning(
 	prune_lock_from_dirs(scope, &dirs, project_root, scan_skill_dir)
 }
 
+/// Dry-run: report which lock entries WOULD be pruned, without mutating the lock.
+/// Uses an injectable scanner for deterministic tests.
+pub fn preview_prune_from_dirs<F>(
+	scope: PruneScope,
+	dirs: &[PathBuf],
+	project_root: Option<&Path>,
+	scan: F,
+) -> Result<Vec<String>, PruneError>
+where
+	F: Fn(&Path) -> Result<Vec<PathBuf>, ScanError>,
+{
+	if scope == PruneScope::Project && project_root.is_none() {
+		return Err(PruneError::MissingProjectRoot);
+	}
+	let disk = collect_disk_dir_names(dirs, scan)?;
+	let keys = locked_keys(scope, project_root);
+	Ok(keys
+		.into_iter()
+		.filter(|k| !disk.contains(&skill::sanitize_name(k)))
+		.collect())
+}
+
+/// Dry-run preview against the real per-scope dirs + scanner.
+pub fn preview_prune(
+	scope: PruneScope,
+	project_root: Option<&Path>,
+) -> Result<Vec<String>, PruneError> {
+	if scope == PruneScope::Project && project_root.is_none() {
+		return Err(PruneError::MissingProjectRoot);
+	}
+	let dirs = scope_skill_dirs(scope, project_root);
+	preview_prune_from_dirs(scope, &dirs, project_root, scan_skill_dir)
+}
+
+/// Current lock entry keys for a scope (no mutation).
+fn locked_keys(scope: PruneScope, project_root: Option<&Path>) -> Vec<String> {
+	match scope {
+		PruneScope::Global => {
+			skill::get_all_locked_skills().keys().cloned().collect()
+		}
+		PruneScope::Project => project_root
+			.map(|r| skill::read_local_lock(Some(r)).skills.keys().cloned().collect())
+			.unwrap_or_default(),
+	}
+}
+
 /// The union of every agent's skill read dirs for `scope`.
 fn scope_skill_dirs(
 	scope: PruneScope,
@@ -344,6 +390,27 @@ mod tests {
 		let after = std::fs::read(skill::get_skill_lock_path()).unwrap();
 		assert_eq!(before, after, "scan error must not mutate the lock");
 		assert!(skill::read_skill_lock().skills.contains_key("gone"));
+	}
+
+	#[test]
+	fn preview_prune_reports_orphans_without_mutating_lock() {
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock("present", global_entry()).unwrap();
+		skill::lock::add_skill_to_lock("orphan", global_entry()).unwrap();
+		let before = std::fs::read(skill::get_skill_lock_path()).unwrap();
+
+		let dir = tempdir().unwrap();
+		let would = preview_prune_from_dirs(
+			PruneScope::Global,
+			&[dir.path().to_path_buf()],
+			None,
+			|_d: &Path| Ok(vec![PathBuf::from("present")]),
+		)
+		.unwrap();
+
+		assert_eq!(would, vec!["orphan".to_string()]);
+		let after = std::fs::read(skill::get_skill_lock_path()).unwrap();
+		assert_eq!(before, after, "preview must not mutate the lock");
 	}
 
 	#[test]

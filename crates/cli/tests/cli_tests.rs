@@ -145,3 +145,147 @@ fn test_pi_add_mcp_fails_for_unsupported_agent() {
 		stderr
 	);
 }
+
+// ==================== F2: layout-aware delete + prune-lock ====================
+
+/// An aghub-cli command with an ISOLATED temp HOME + XDG_STATE_HOME so the
+/// destructive skill/lock tests below never touch the shared fixtures dir.
+fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
+	let mut cmd = Command::cargo_bin("aghub-cli").unwrap();
+	cmd.env("HOME", home);
+	cmd.env("USERPROFILE", home);
+	cmd.env("APPDATA", home);
+	cmd.env("XDG_STATE_HOME", state);
+	cmd.current_dir(home);
+	cmd
+}
+
+fn write_claude_skill(
+	home: &std::path::Path,
+	name: &str,
+) -> std::path::PathBuf {
+	let dir = home.join(".claude/skills").join(name);
+	std::fs::create_dir_all(&dir).unwrap();
+	std::fs::write(
+		dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: d\n---\n"),
+	)
+	.unwrap();
+	dir
+}
+
+const ORPHAN_LOCK: &str = r#"{"version":3,"skills":{"orphan":{"source":"o/r","sourceType":"github","sourceUrl":"https://github.com/o/r","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#;
+
+fn seed_global_lock(state: &std::path::Path) -> std::path::PathBuf {
+	let dir = state.join("skills");
+	std::fs::create_dir_all(&dir).unwrap();
+	let path = dir.join(".skill-lock.json");
+	std::fs::write(&path, ORPHAN_LOCK).unwrap();
+	path
+}
+
+#[test]
+fn delete_skill_dry_run_is_default_and_lists_paths() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "mytool"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["dryRun"], true);
+	assert_eq!(json["executed"], false);
+	let paths = json["paths"].as_array().unwrap();
+	assert!(
+		paths
+			.iter()
+			.any(|p| p.as_str().unwrap().ends_with("mytool")),
+		"paths: {paths:?}"
+	);
+	assert!(skill_dir.exists(), "dry-run must not delete");
+}
+
+#[test]
+fn delete_skill_yes_removes_copy() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "goner");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "goner", "--yes"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["executed"], true);
+	assert!(!skill_dir.exists(), "--yes removes the copy");
+}
+
+#[test]
+fn prune_lock_default_dry_run_reports_orphan_without_mutating() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let lock_path = seed_global_lock(state.path());
+	let before = std::fs::read(&lock_path).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "prune-lock"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["dryRun"], true);
+	assert!(json["pruned"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.any(|n| n == "orphan"));
+	assert_eq!(
+		std::fs::read(&lock_path).unwrap(),
+		before,
+		"dry-run must not mutate the lock"
+	);
+}
+
+#[test]
+fn prune_lock_yes_removes_orphan_entry() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let lock_path = seed_global_lock(state.path());
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "prune-lock", "--yes"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	let parsed: Value = serde_json::from_str(&raw).unwrap();
+	assert!(
+		parsed["skills"].get("orphan").is_none(),
+		"orphan must be pruned: {raw}"
+	);
+	assert_eq!(parsed["version"], 3, "version preserved");
+}

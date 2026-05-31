@@ -13,7 +13,9 @@ use aghub_core::{
 
 mod commands;
 
-use commands::{add, check, delete, disable, enable, get, plugin, update};
+use commands::{
+	add, check, delete, disable, enable, get, plugin, prune, update,
+};
 
 /// Global verbose flag used by the eprintln_verbose macro
 static VERBOSE: AtomicBool = AtomicBool::new(false);
@@ -181,6 +183,18 @@ enum Commands {
 		#[arg(value_enum)]
 		resource: ResourceType,
 		name: String,
+
+		/// For skills: remove the skill from EVERY agent (destructive; needs --yes)
+		#[arg(long = "all-agents")]
+		all_agents: bool,
+
+		/// For skills: only list what would be removed (this is the default)
+		#[arg(long = "dry-run")]
+		dry_run: bool,
+
+		/// For skills: actually perform the removal (without it, delete is a dry-run)
+		#[arg(short = 'y', long = "yes")]
+		yes: bool,
 	},
 	/// Disable a resource (keeps in config)
 	Disable {
@@ -204,6 +218,23 @@ enum Commands {
 	Check {
 		#[arg(value_enum)]
 		resource: ResourceType,
+
+		/// Emit machine-readable JSON (default output is also JSON today)
+		#[arg(long)]
+		json: bool,
+	},
+	/// Prune skill lock entries whose skill is no longer on disk (skills only).
+	///
+	/// Disk-driven and lock-only: never deletes skill files or edits agent config.
+	/// Defaults to a dry-run; pass --yes to write. Scope follows -g/-p/--all.
+	PruneLock {
+		/// Only report what would be pruned (this is the default)
+		#[arg(long = "dry-run")]
+		dry_run: bool,
+
+		/// Actually write the pruned lock (without it, prune-lock is a dry-run)
+		#[arg(short = 'y', long = "yes")]
+		yes: bool,
 
 		/// Emit machine-readable JSON (default output is also JSON today)
 		#[arg(long)]
@@ -304,7 +335,9 @@ fn main() -> Result<()> {
 			// so a missing config is also fine.
 			let tolerate_missing = matches!(
 				cli.command,
-				Commands::Add { .. } | Commands::Check { .. }
+				Commands::Add { .. }
+					| Commands::Check { .. }
+					| Commands::PruneLock { .. }
 			);
 			if tolerate_missing {
 				eprintln_verbose!(
@@ -373,9 +406,20 @@ fn main() -> Result<()> {
 			version,
 			tools,
 		),
-		Commands::Delete { resource, name } => {
-			delete::execute(&mut manager, resource, name)
-		}
+		Commands::Delete {
+			resource,
+			name,
+			all_agents,
+			dry_run,
+			yes,
+		} => delete::execute(
+			&mut manager,
+			resource,
+			name,
+			all_agents,
+			dry_run,
+			yes,
+		),
 		Commands::Disable { resource, name } => {
 			disable::execute(&mut manager, resource, name)
 		}
@@ -388,6 +432,12 @@ fn main() -> Result<()> {
 		Commands::Check { resource, json } => {
 			check::execute(resource, scope, project_root.as_deref(), json)
 		}
+		Commands::PruneLock { dry_run, yes, json } => prune::execute(
+			scope,
+			project_root.as_deref(),
+			dry_run || !yes,
+			json,
+		),
 		Commands::Plugin { action } => {
 			// Plugin management is Claude-specific
 			if agent_type != AgentType::Claude {

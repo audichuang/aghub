@@ -5,6 +5,7 @@ pub mod disable;
 pub mod enable;
 pub mod get;
 pub mod plugin;
+pub mod prune;
 pub mod update;
 
 use aghub_core::models::McpTransport;
