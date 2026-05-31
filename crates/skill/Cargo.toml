@@ -19,6 +19,7 @@ walkdir = "2.5"
 chrono = { version = "0.4", features = [ "serde" ] }
 dirs = { workspace = true }
 ignore = "0.4"
+sha2 = "0.10"
 
 [dev-dependencies]
 tempfile = { workspace = true }

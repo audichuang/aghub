@@ -23,6 +23,7 @@
 //! ```
 
 pub mod error;
+pub mod hash;
 pub mod install;
 pub mod lock;
 pub mod model;
@@ -34,6 +35,10 @@ pub mod validator;
 
 // Re-export commonly used items
 pub use error::SkillError;
+pub use hash::{
+	compute_skill_folder_hash, is_placeholder_digest, HashError,
+	EMPTY_SKILLS_LOCK_DIGEST,
+};
 pub use install::{
 	discover_repo_skills, lock_skill_file_path, write_global_install_lock,
 	write_project_install_lock, InstallLockSource, RepoDiscoveredSkill,
