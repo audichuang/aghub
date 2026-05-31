@@ -156,29 +156,39 @@ fn resolve_skill_file(path: &str) -> PathBuf {
 	}
 }
 
-fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
+/// Resolve a skill's on-disk root directory WITHOUT requiring it to exist.
+///
+/// Prefers `canonical_path` (the real master location for a symlinked skill),
+/// falls back to `source_path`. Both go through the same tilde-expansion
+/// (`resolve_skill_file`). When the resolved path is a `SKILL.md` file the
+/// PARENT directory is returned (the skill folder); a directory is returned
+/// as-is. Returns `None` only when the skill records no path at all.
+///
+/// This is the single shared resolver reused by `resolve_skill_root` (which
+/// adds an existence check) and the layout-aware removal planner, so the
+/// "canonical FILE path → take PARENT" rule (spec) lives in exactly one place.
+pub(crate) fn skill_root_unchecked(skill: &Skill) -> Option<PathBuf> {
 	let path = skill
 		.canonical_path
 		.as_deref()
 		.or(skill.source_path.as_deref())
-		.map(resolve_skill_file)
-		.ok_or_else(|| {
-			ConfigError::InvalidConfig(format!(
-				"Skill '{}' has no source path to copy from",
-				skill.name
-			))
-		})?;
+		.map(resolve_skill_file)?;
 
-	let root = if path.is_dir() {
+	Some(if path.is_dir() {
 		path
 	} else {
-		path.parent().map(Path::to_path_buf).ok_or_else(|| {
-			ConfigError::InvalidConfig(format!(
-				"Skill '{}' has invalid source path",
-				skill.name
-			))
-		})?
-	};
+		// A `SKILL.md` file (or a non-existent path) → its parent skill folder.
+		path.parent().map(Path::to_path_buf).unwrap_or(path)
+	})
+}
+
+fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
+	let root = skill_root_unchecked(skill).ok_or_else(|| {
+		ConfigError::InvalidConfig(format!(
+			"Skill '{}' has no source path to copy from",
+			skill.name
+		))
+	})?;
 
 	if !root.exists() {
 		return Err(ConfigError::InvalidConfig(format!(
