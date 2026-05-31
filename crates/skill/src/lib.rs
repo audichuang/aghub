@@ -47,12 +47,12 @@ pub use install::{
 pub use lock::global::{
 	get_all_locked_skills, get_skill_from_lock, get_skill_lock_path,
 	get_skills_by_source, read_skill_lock, remove_skill_from_lock,
-	DismissedPrompts, SkillLockEntry, SkillLockFile,
+	retain_locked_skills, DismissedPrompts, SkillLockEntry, SkillLockFile,
 };
 pub use lock::local::{
 	add_skill_to_local_lock, get_local_lock_path, read_local_lock,
-	remove_skill_from_local_lock, write_local_lock, LocalSkillLockEntry,
-	LocalSkillLockFile,
+	remove_skill_from_local_lock, retain_local_locked_skills, write_local_lock,
+	LocalSkillLockEntry, LocalSkillLockFile,
 };
 pub use model::{Skill, SkillSource};
 pub use package::{pack, read_skill_md, unpack};

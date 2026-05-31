@@ -156,11 +156,45 @@ pub fn remove_skill_from_local_lock(
 	}
 }
 
+/// Atomically prune the project lock down to the skills present on disk.
+///
+/// Mirror of the global `retain_locked_skills`: drops any entry whose
+/// `sanitize_name(key)` is absent from `present_dir_names`, preserves survivors
+/// (including `computedHash`/`skillPath`) byte-for-byte, keeps `version = 1` and
+/// the trailing newline, and does NOT rewrite the file when nothing is pruned.
+pub fn retain_local_locked_skills(
+	present_dir_names: &std::collections::BTreeSet<String>,
+	cwd: Option<&Path>,
+) -> std::io::Result<Vec<String>> {
+	let mut lock = read_local_lock(cwd);
+	let removed: Vec<String> = lock
+		.skills
+		.keys()
+		.filter(|key| {
+			!present_dir_names.contains(&crate::sanitize::sanitize_name(key))
+		})
+		.cloned()
+		.collect();
+	if removed.is_empty() {
+		return Ok(removed);
+	}
+	for key in &removed {
+		lock.skills.remove(key);
+	}
+	write_local_lock(&lock, cwd)?;
+	Ok(removed)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::collections::BTreeSet;
 	use std::fs;
 	use tempfile::TempDir;
+
+	fn present(names: &[&str]) -> BTreeSet<String> {
+		names.iter().map(|s| s.to_string()).collect()
+	}
 
 	fn sample_local_entry() -> LocalSkillLockEntry {
 		LocalSkillLockEntry {
@@ -453,6 +487,46 @@ mod tests {
 			remove_skill_from_local_lock("no-such-skill", Some(dir.path()))
 				.unwrap();
 		assert!(!removed);
+	}
+
+	#[test]
+	fn retain_local_drops_absent_keeps_present_and_preserves_fields() {
+		let dir = TempDir::new().unwrap();
+		let mut keep = sample_local_entry();
+		keep.computed_hash = "abc123".to_string();
+		keep.skill_path = Some("skills/keep/SKILL.md".to_string());
+		add_skill_to_local_lock("keep", keep, Some(dir.path())).unwrap();
+		add_skill_to_local_lock("gone", sample_local_entry(), Some(dir.path()))
+			.unwrap();
+
+		let removed =
+			retain_local_locked_skills(&present(&["keep"]), Some(dir.path()))
+				.unwrap();
+
+		assert_eq!(removed, vec!["gone".to_string()]);
+		let lock = read_local_lock(Some(dir.path()));
+		assert!(!lock.skills.contains_key("gone"));
+		let k = lock.skills.get("keep").unwrap();
+		assert_eq!(k.computed_hash, "abc123");
+		assert_eq!(k.skill_path, Some("skills/keep/SKILL.md".to_string()));
+		assert_eq!(lock.version, 1, "version stays 1");
+		let raw =
+			fs::read_to_string(dir.path().join("skills-lock.json")).unwrap();
+		assert!(raw.ends_with('\n') && !raw.ends_with("\n\n"));
+	}
+
+	#[test]
+	fn retain_local_noop_when_all_present_keeps_exact_bytes() {
+		let dir = TempDir::new().unwrap();
+		add_skill_to_local_lock("a", sample_local_entry(), Some(dir.path()))
+			.unwrap();
+		let path = dir.path().join("skills-lock.json");
+		let before = fs::read(&path).unwrap();
+		let removed =
+			retain_local_locked_skills(&present(&["a"]), Some(dir.path()))
+				.unwrap();
+		assert!(removed.is_empty());
+		assert_eq!(fs::read(&path).unwrap(), before);
 	}
 
 	#[test]

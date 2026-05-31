@@ -1,5 +1,5 @@
 use chrono::Utc;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{io, types};
 
@@ -36,6 +36,35 @@ pub fn remove_skill_from_lock(skill_name: &str) -> std::io::Result<bool> {
 	} else {
 		Ok(false)
 	}
+}
+
+/// Atomically prune the global lock down to the skills present on disk.
+///
+/// `present_dir_names` is the set of skill *folder* names found on disk (already
+/// in sanitized form). A lock entry is dropped when `sanitize_name(key)` is not
+/// in that set; surviving entries are preserved byte-for-byte. Performs a single
+/// read-modify-write (atomic temp+rename); the file is NOT rewritten when nothing
+/// is pruned, so an unchanged lock keeps its exact bytes. Returns the pruned keys.
+pub fn retain_locked_skills(
+	present_dir_names: &BTreeSet<String>,
+) -> std::io::Result<Vec<String>> {
+	let mut lock = read_skill_lock();
+	let removed: Vec<String> = lock
+		.skills
+		.keys()
+		.filter(|key| {
+			!present_dir_names.contains(&crate::sanitize::sanitize_name(key))
+		})
+		.cloned()
+		.collect();
+	if removed.is_empty() {
+		return Ok(removed); // nothing pruned → leave the file untouched
+	}
+	for key in &removed {
+		lock.skills.remove(key);
+	}
+	write_skill_lock(&lock)?;
+	Ok(removed)
 }
 
 /// Get a skill entry from the lock file.
@@ -253,5 +282,68 @@ mod tests {
 		assert_eq!(agents.len(), 2);
 		assert!(agents.contains(&"claude".to_string()));
 		assert!(agents.contains(&"cursor".to_string()));
+	}
+
+	fn present(names: &[&str]) -> BTreeSet<String> {
+		names.iter().map(|s| s.to_string()).collect()
+	}
+
+	#[test]
+	fn retain_locked_skills_drops_absent_keeps_present() {
+		let _guard = TestLockGuard::new();
+		add_skill_to_lock("keep", test_entry()).unwrap();
+		add_skill_to_lock("gone", test_entry()).unwrap();
+
+		let removed = retain_locked_skills(&present(&["keep"])).unwrap();
+
+		assert_eq!(removed, vec!["gone".to_string()]);
+		let lock = read_skill_lock();
+		assert!(lock.skills.contains_key("keep"));
+		assert!(!lock.skills.contains_key("gone"));
+	}
+
+	#[test]
+	fn retain_locked_skills_noop_when_all_present_does_not_rewrite() {
+		let _guard = TestLockGuard::new();
+		add_skill_to_lock("a", test_entry()).unwrap();
+		let path = get_skill_lock_path();
+		let before = std::fs::read(&path).unwrap();
+
+		let removed = retain_locked_skills(&present(&["a"])).unwrap();
+
+		assert!(removed.is_empty());
+		let after = std::fs::read(&path).unwrap();
+		assert_eq!(before, after, "unchanged lock must keep exact bytes");
+	}
+
+	#[test]
+	fn retain_locked_skills_preserves_surviving_entry_fields_byte_identical() {
+		let _guard = TestLockGuard::new();
+		let mut keep = test_entry();
+		keep.skill_folder_hash = "deadbeefdeadbeef".to_string();
+		keep.content_hash = None; // npx-shaped: no contentHash
+		add_skill_to_lock("keep", keep).unwrap();
+		add_skill_to_lock("gone", test_entry()).unwrap();
+
+		retain_locked_skills(&present(&["keep"])).unwrap();
+
+		let raw = std::fs::read_to_string(get_skill_lock_path()).unwrap();
+		assert!(!raw.contains("contentHash"), "must not inject contentHash");
+		let lock = read_skill_lock();
+		let k = lock.skills.get("keep").unwrap();
+		assert_eq!(k.skill_folder_hash, "deadbeefdeadbeef");
+		assert_eq!(k.content_hash, None);
+		assert_eq!(lock.version, 3, "version must stay 3");
+	}
+
+	#[test]
+	fn retain_locked_skills_matches_by_sanitized_key() {
+		let _guard = TestLockGuard::new();
+		// lock key "My Skill" sanitizes to "my-skill"; the on-disk folder name
+		// is the sanitized form, so it must be kept.
+		add_skill_to_lock("My Skill", test_entry()).unwrap();
+		let removed = retain_locked_skills(&present(&["my-skill"])).unwrap();
+		assert!(removed.is_empty());
+		assert!(read_skill_lock().skills.contains_key("My Skill"));
 	}
 }
