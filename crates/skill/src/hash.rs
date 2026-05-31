@@ -32,16 +32,20 @@ pub fn is_placeholder_digest(hash: &str) -> bool {
 ///
 /// Algorithm (local-lock.ts:108-147): collect files recursively, skip dirs named
 /// exactly `.git`/`node_modules`, lstat to skip symlinks (no descend), relative
-/// path with `\` → `/`, sort by Unicode code point, then for each file in order
-/// `update(relative_path_bytes)` + `update(file_bytes)` with no delimiter.
+/// path with `\` → `/`, sort with a UCA collator (JS `String.localeCompare`),
+/// then for each file in order `update(relative_path_bytes)` + `update(file_bytes)`
+/// with no delimiter.
 pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
 	let mut total_bytes: u64 = 0;
 	collect(dir, dir, 0, &mut files, &mut total_bytes)?;
 
-	// Code-point sort == JS localeCompare for ASCII (the common case); non-ASCII
-	// may diverge — accepted, guarded by recompute-on-mismatch in F1.
-	files.sort_by(|a, b| a.0.cmp(&b.0));
+	// Match npx `local-lock.ts:113` exactly: JS `String.localeCompare`, i.e. UCA
+	// collation (case-insensitive at the primary level). Code-point is WRONG here
+	// (e.g. "scripts/" vs "SKILL.md"). Residual exotic-locale divergence is covered
+	// by F1's recompute-on-mismatch safeguard.
+	let mut collator = feruca::Collator::default();
+	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
 
 	let mut hasher = Sha256::new();
 	for (rel, abs) in &files {
@@ -138,7 +142,7 @@ mod tests {
 	}
 
 	#[test]
-	fn files_sorted_by_codepoint() {
+	fn files_sorted_by_collation() {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("zebra.txt"), b"z").unwrap();
 		fs::write(dir.path().join("apple.txt"), b"a").unwrap();
@@ -191,11 +195,32 @@ mod tests {
 		// dist/__pycache__ must NOT be skipped
 		fs::create_dir_all(dir.path().join("dist")).unwrap();
 		fs::write(dir.path().join("dist/out.js"), b"keep").unwrap();
+		// localeCompare/UCA order: "dist/out.js" < "SKILL.md" (primary-level
+		// case-insensitive: 'd' < 's'). Code-point would (wrongly) put SKILL.md first.
 		let mut e = Sha256::new();
-		e.update(b"SKILL.md");
-		e.update(b"x");
 		e.update(b"dist/out.js");
 		e.update(b"keep");
+		e.update(b"SKILL.md");
+		e.update(b"x");
+		assert_eq!(
+			compute_skill_folder_hash(dir.path()).unwrap(),
+			format!("{:x}", e.finalize())
+		);
+	}
+
+	#[test]
+	fn collation_is_case_insensitive_primary_like_localecompare() {
+		// The defining divergence from code-point: a real skill layout.
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"s").unwrap();
+		fs::create_dir_all(dir.path().join("scripts")).unwrap();
+		fs::write(dir.path().join("scripts/run.sh"), b"r").unwrap();
+		// localeCompare order: "scripts/run.sh" < "SKILL.md".
+		let mut e = Sha256::new();
+		e.update(b"scripts/run.sh");
+		e.update(b"r");
+		e.update(b"SKILL.md");
+		e.update(b"s");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
 			format!("{:x}", e.finalize())
