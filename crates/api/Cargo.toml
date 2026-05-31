@@ -41,3 +41,6 @@ keyring = { version = "3", features = [
 uuid = { version = "1", features = [ "v4" ] }
 log = "0.4.30"
 reqwest = { version = "0.13", features = [ "json" ] }
+
+[dev-dependencies]
+gix = { version = "0.83", default-features = false }

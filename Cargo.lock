@@ -69,6 +69,7 @@ dependencies = [
  "aghub-git",
  "aghub-inference",
  "dirs",
+ "gix",
  "keyring",
  "log",
  "open",

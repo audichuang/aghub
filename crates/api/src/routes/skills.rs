@@ -1307,24 +1307,10 @@ pub async fn git_scan_skills(
 	}))
 }
 
-/// Try to detect the checked-out branch from the cloned repo.
+/// Try to detect the checked-out branch from the cloned repo via its gix `HEAD`
+/// symref. Never shells out to the `git` binary.
 fn detect_current_branch(repo_path: &std::path::Path) -> Option<String> {
-	let output = std::process::Command::new("git")
-		.args(["rev-parse", "--abbrev-ref", "HEAD"])
-		.current_dir(repo_path)
-		.output()
-		.ok()?;
-
-	if !output.status.success() {
-		return None;
-	}
-
-	let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-	if name.is_empty() || name == "HEAD" {
-		None
-	} else {
-		Some(name)
-	}
+	aghub_git::current_branch_at_path(repo_path)
 }
 
 #[post("/skills/git/install", data = "<body>")]
@@ -1606,6 +1592,29 @@ mod tests {
 			.join(".opencode/skills/repo-helper/assets/notes.txt")
 			.exists());
 		assert!(!project_root.join(".agents/skills/repo-helper").exists());
+	}
+
+	#[test]
+	fn detect_current_branch_uses_gix_not_subprocess() {
+		// Arrange a gix repo (no `git` binary), then assert the helper resolves
+		// the branch from the on-disk HEAD symref.
+		let temp = tempdir().unwrap();
+		let repo = gix::init(temp.path()).unwrap();
+		let head = repo.head_name().unwrap().unwrap();
+		let full = head.as_bstr().to_string();
+		let expected = full.strip_prefix("refs/heads/").unwrap_or(&full);
+
+		let detected = detect_current_branch(temp.path()).unwrap();
+		assert_eq!(detected, expected);
+		assert!(!detected.starts_with("refs/"));
+
+		// Guard: the source must not shell out to the `git` binary for branch
+		// detection.
+		let source = include_str!("skills.rs");
+		assert!(
+			!source.contains("Command::new(\"git\")"),
+			"branch detection must not shell out to the git binary"
+		);
 	}
 
 	#[test]

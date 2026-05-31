@@ -89,7 +89,9 @@ pub fn fetch_ref_to_temp(
 pub fn resolve_default_branch(repo: &gix::Repository) -> Result<String> {
 	let head_name = repo
 		.head_name()
-		.map_err(|e| GitError::clone_failed(format!("Reading HEAD failed: {e}")))?
+		.map_err(|e| {
+			GitError::clone_failed(format!("Reading HEAD failed: {e}"))
+		})?
 		.ok_or_else(|| {
 			GitError::clone_failed(
 				"Remote HEAD is detached; cannot resolve default branch"
@@ -100,6 +102,20 @@ pub fn resolve_default_branch(repo: &gix::Repository) -> Result<String> {
 	let full = head_name.as_bstr().to_string();
 	let branch = full.strip_prefix("refs/heads/").unwrap_or(&full);
 	Ok(branch.to_string())
+}
+
+/// Resolve the checked-out branch of a repository on disk via its `HEAD`
+/// symref. Opens the repo with gix (no subprocess) and returns the branch name
+/// with the `refs/heads/` prefix stripped. Returns `None` if the path is not a
+/// repository or `HEAD` is detached/empty.
+pub fn current_branch_at_path(repo_path: &std::path::Path) -> Option<String> {
+	let repo = gix::open(repo_path).ok()?;
+	let branch = resolve_default_branch(&repo).ok()?;
+	if branch.is_empty() {
+		None
+	} else {
+		Some(branch)
+	}
 }
 
 fn fetch_into_bare(
@@ -136,7 +152,9 @@ fn fetch_into_bare(
 	let oid = repo
 		.head_id()
 		.map_err(|e| {
-			GitError::clone_failed(format!("Resolving fetched HEAD failed: {e}"))
+			GitError::clone_failed(format!(
+				"Resolving fetched HEAD failed: {e}"
+			))
 		})?
 		.detach();
 
@@ -214,6 +232,30 @@ mod tests {
 		let branch = resolve_default_branch(&repo).unwrap();
 		assert!(!branch.is_empty());
 		assert!(!branch.starts_with("refs/"));
+	}
+
+	#[test]
+	fn current_branch_at_path_reads_head_symref_no_binary() {
+		// Build a repo on branch "main" via gix (no `git` binary), then assert
+		// the on-disk HEAD symref resolves to "main".
+		let tmp = TempDir::new().unwrap();
+		let repo = gix::init(tmp.path()).unwrap();
+
+		// A freshly-initialized repo has an unborn HEAD pointing at the default
+		// branch name; resolve_default_branch reads that symref directly.
+		let head = repo.head_name().unwrap().unwrap();
+		let full = head.as_bstr().to_string();
+		let expected = full.strip_prefix("refs/heads/").unwrap_or(&full);
+
+		let detected = current_branch_at_path(tmp.path()).unwrap();
+		assert_eq!(detected, expected);
+		assert!(!detected.starts_with("refs/"));
+	}
+
+	#[test]
+	fn current_branch_at_path_non_repo_returns_none() {
+		let tmp = TempDir::new().unwrap();
+		assert_eq!(current_branch_at_path(tmp.path()), None);
 	}
 
 	#[ignore = "network"]
