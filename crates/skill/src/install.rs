@@ -154,6 +154,7 @@ pub fn write_global_install_lock(
 pub fn write_project_install_lock(
 	skill_name: &str,
 	source: &InstallLockSource,
+	skill_path: Option<String>,
 	cwd: &Path,
 ) -> std::io::Result<()> {
 	local::add_skill_to_local_lock(
@@ -163,7 +164,7 @@ pub fn write_project_install_lock(
 			ref_name: source.ref_name.clone(),
 			source_type: source.source_type.clone(),
 			computed_hash: EMPTY_SKILLS_LOCK_DIGEST.to_string(),
-			skill_path: None,
+			skill_path,
 		},
 		Some(cwd),
 	)
@@ -194,14 +195,17 @@ mod tests {
 				source_url: "https://github.com/owner/repo.git".to_string(),
 				ref_name: Some("main".to_string()),
 			},
+			Some(lock_skill_file_path("skills/my-skill")),
 			dir.path(),
 		)
 		.unwrap();
 
 		let lock = local::read_local_lock(Some(dir.path()));
+		let entry = lock.skills.get("my-skill").unwrap();
+		assert_eq!(entry.computed_hash, EMPTY_SKILLS_LOCK_DIGEST);
 		assert_eq!(
-			lock.skills.get("my-skill").unwrap().computed_hash,
-			EMPTY_SKILLS_LOCK_DIGEST
+			entry.skill_path.as_deref(),
+			Some("skills/my-skill/SKILL.md")
 		);
 	}
 }

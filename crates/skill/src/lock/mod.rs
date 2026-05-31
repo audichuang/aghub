@@ -1,7 +1,6 @@
 pub mod global;
 mod io;
 pub mod local;
-pub mod path;
 mod types;
 
 #[cfg(test)]
@@ -14,5 +13,4 @@ pub use global::{
 	is_prompt_dismissed, remove_skill_from_lock, save_selected_agents,
 };
 pub use io::{get_skill_lock_path, read_skill_lock, write_skill_lock};
-pub use path::skill_path_from_repo_dir;
 pub use types::{DismissedPrompts, SkillLockEntry, SkillLockFile};

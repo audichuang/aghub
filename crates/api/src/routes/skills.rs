@@ -501,14 +501,19 @@ fn write_skill_install_lock(
 					"INVALID_PARAM",
 				)
 			})?;
-			skill::write_project_install_lock(skill_name, source, cwd)
-				.map_err(|e| {
-					ApiError::new(
-						Status::InternalServerError,
-						format!("Failed to update project skill lock: {e}"),
-						"SKILL_LOCK_ERROR",
-					)
-				})?;
+			skill::write_project_install_lock(
+				skill_name,
+				source,
+				lock_skill_path,
+				cwd,
+			)
+			.map_err(|e| {
+				ApiError::new(
+					Status::InternalServerError,
+					format!("Failed to update project skill lock: {e}"),
+					"SKILL_LOCK_ERROR",
+				)
+			})?;
 		}
 		ResourceScope::Both => {
 			return Err(ApiError::new(
