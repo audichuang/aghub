@@ -127,12 +127,23 @@ pub fn discover_repo_skills(
 	Ok(selected)
 }
 
+/// Compute the npx-compatible source-folder hash for an install.
+///
+/// Hashes the SOURCE repo subfolder (`source_dir`), not the post-copy
+/// installed dir. Maps a [`crate::hash::HashError`] into an
+/// [`std::io::Error`] so the install writers share one error type.
+fn compute_install_hash(source_dir: &Path) -> std::io::Result<String> {
+	crate::compute_skill_folder_hash(source_dir)
+		.map_err(|e| std::io::Error::other(e.to_string()))
+}
+
 pub fn write_global_install_lock(
 	skill_name: &str,
 	source: &InstallLockSource,
 	skill_path: Option<String>,
-	skill_folder_hash: Option<String>,
+	source_dir: &Path,
 ) -> std::io::Result<()> {
+	let content_hash = compute_install_hash(source_dir)?;
 	global::add_skill_to_lock(
 		skill_name,
 		SkillLockEntry {
@@ -141,12 +152,13 @@ pub fn write_global_install_lock(
 			source_url: source.source_url.clone(),
 			ref_name: source.ref_name.clone(),
 			skill_path,
-			skill_folder_hash: skill_folder_hash
-				.unwrap_or_else(|| EMPTY_SKILLS_LOCK_DIGEST.to_string()),
+			// Constraint 4: `skill_folder_hash` stays empty; the real hash
+			// lives in the optional per-entry `content_hash`.
+			skill_folder_hash: String::new(),
 			installed_at: String::new(),
 			updated_at: String::new(),
 			plugin_name: None,
-			content_hash: None,
+			content_hash: Some(content_hash),
 		},
 	)
 }
@@ -155,15 +167,17 @@ pub fn write_project_install_lock(
 	skill_name: &str,
 	source: &InstallLockSource,
 	skill_path: Option<String>,
+	source_dir: &Path,
 	cwd: &Path,
 ) -> std::io::Result<()> {
+	let computed_hash = compute_install_hash(source_dir)?;
 	local::add_skill_to_local_lock(
 		skill_name,
 		local::LocalSkillLockEntry {
 			source: source.source.clone(),
 			ref_name: source.ref_name.clone(),
 			source_type: source.source_type.clone(),
-			computed_hash: EMPTY_SKILLS_LOCK_DIGEST.to_string(),
+			computed_hash,
 			skill_path,
 		},
 		Some(cwd),
@@ -184,25 +198,39 @@ mod tests {
 		);
 	}
 
+	fn sample_source() -> InstallLockSource {
+		InstallLockSource {
+			source: "owner/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/owner/repo.git".to_string(),
+			ref_name: Some("main".to_string()),
+		}
+	}
+
 	#[test]
-	fn write_project_install_lock_uses_placeholder_hash() {
-		let dir = TempDir::new().unwrap();
+	fn write_project_install_lock_computes_real_hash() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let project = TempDir::new().unwrap();
+		let source = TempDir::new().unwrap(); // the SOURCE repo subfolder
+		std::fs::write(source.path().join("SKILL.md"), b"name: t\n").unwrap();
+
+		let src = sample_source();
 		write_project_install_lock(
-			"my-skill",
-			&InstallLockSource {
-				source: "owner/repo".to_string(),
-				source_type: "github".to_string(),
-				source_url: "https://github.com/owner/repo.git".to_string(),
-				ref_name: Some("main".to_string()),
-			},
+			"t",
+			&src,
 			Some(lock_skill_file_path("skills/my-skill")),
-			dir.path(),
+			source.path(),
+			project.path(),
 		)
 		.unwrap();
 
-		let lock = local::read_local_lock(Some(dir.path()));
-		let entry = lock.skills.get("my-skill").unwrap();
-		assert_eq!(entry.computed_hash, EMPTY_SKILLS_LOCK_DIGEST);
+		let lock = local::read_local_lock(Some(project.path()));
+		let entry = lock.skills.get("t").unwrap();
+		assert_ne!(entry.computed_hash, crate::hash::EMPTY_SKILLS_LOCK_DIGEST);
+		assert_eq!(
+			entry.computed_hash,
+			crate::compute_skill_folder_hash(source.path()).unwrap()
+		);
 		assert_eq!(
 			entry.skill_path.as_deref(),
 			Some("skills/my-skill/SKILL.md")

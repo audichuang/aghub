@@ -4,7 +4,7 @@ pub mod local;
 mod types;
 
 #[cfg(test)]
-mod test_utils;
+pub(crate) mod test_utils;
 
 // Re-export public API
 pub use global::{

@@ -367,8 +367,6 @@ fn install_git_skill_to_dir(
 type GitInstallAgentGroup = Vec<(String, AgentType)>;
 type GitInstallGroups = HashMap<std::path::PathBuf, GitInstallAgentGroup>;
 type GitInstallInvalidAgent = (String, Option<AgentType>, String);
-const EMPTY_SKILLS_LOCK_DIGEST: &str =
-	"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
 fn build_git_install_groups(
 	agents: &[String],
@@ -476,6 +474,7 @@ fn write_skill_install_lock(
 	project_root: Option<&std::path::Path>,
 	source: &skill::InstallLockSource,
 	lock_skill_path: Option<String>,
+	source_dir: &std::path::Path,
 ) -> Result<(), ApiError> {
 	match resource_scope {
 		ResourceScope::GlobalOnly => {
@@ -483,7 +482,7 @@ fn write_skill_install_lock(
 				skill_name,
 				source,
 				lock_skill_path,
-				Some(EMPTY_SKILLS_LOCK_DIGEST.to_string()),
+				source_dir,
 			)
 			.map_err(|e| {
 				ApiError::new(
@@ -505,6 +504,7 @@ fn write_skill_install_lock(
 				skill_name,
 				source,
 				lock_skill_path,
+				source_dir,
 				cwd,
 			)
 			.map_err(|e| {
@@ -683,6 +683,8 @@ pub fn import_skill(
 	let imported = manager
 		.add_skill_from_path(std::path::Path::new(&request.path))
 		.map_err(ApiError::from)?;
+	// Hash the local source folder (the SKILL.md's directory).
+	let source_dir = get_skill_root(expand_tilde_path(&request.path));
 	write_skill_install_lock(
 		&imported.name,
 		resource_scope,
@@ -694,6 +696,7 @@ pub fn import_skill(
 			ref_name: None,
 		},
 		None,
+		&source_dir,
 	)?;
 
 	Ok(Json(SkillResponse::from(&imported)))
@@ -980,12 +983,16 @@ pub async fn install_skill(
 			continue;
 		}
 
+		// Hash the SOURCE repo subfolder in the temp clone, not the
+		// post-copy installed dir.
+		let source_dir = get_skill_root(skill.full_path.clone());
 		write_skill_install_lock(
 			&skill.name,
 			resource_scope,
 			project_root.as_deref(),
 			&lock_source,
 			Some(skill::lock_skill_file_path(&skill.relative_dir)),
+			&source_dir,
 		)?;
 	}
 
@@ -1410,12 +1417,15 @@ pub async fn git_install_skills(
 				.ok()
 				.map(|skill| skill.name);
 			if let Some(skill_name) = parsed_name {
+				// Hash the SOURCE repo subfolder in the temp clone.
+				let source_dir = get_skill_root(full_path.clone());
 				write_skill_install_lock(
 					&skill_name,
 					resource_scope,
 					project_root.as_deref(),
 					&source,
 					Some(skill::lock_skill_file_path(&relative_dir)),
+					&source_dir,
 				)?;
 			}
 		}
