@@ -370,12 +370,57 @@ pub async fn delete_skill_by_path(
 			..Default::default()
 		}));
 	}
-	match manager.remove_skill_planned(
-		&skill_name,
-		req.all_agents.unwrap_or(false),
-		dry_run,
-		confirm,
-	) {
+	let path_is_symlink = std::fs::symlink_metadata(&skill_dir)
+		.map(|meta| meta.file_type().is_symlink())
+		.unwrap_or(false);
+	let canonical_layout = manager
+		.get_skill(&skill_name)
+		.and_then(|skill| skill.canonical_path.as_ref())
+		.is_some()
+		|| path_is_symlink;
+
+	if !canonical_layout {
+		let plan = aghub_core::skills::removal::RemovalPlan {
+			layout: aghub_core::skills::removal::Layout::Copy,
+			paths: vec![skill_dir.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+		};
+		if dry_run {
+			return Ok(Json(delete_response_from_outcome(
+				aghub_core::skills::removal::RemovalOutcome {
+					plan,
+					executed: false,
+				},
+			)));
+		}
+		let report =
+			match aghub_core::skills::removal::execute_removal(&plan, &roots) {
+				Ok(report) => report,
+				Err(e) => {
+					return Ok(Json(DeleteSkillByPathResponse {
+						success: false,
+						error: Some(format!("Failed to delete: {e}")),
+						..Default::default()
+					}));
+				}
+			};
+		let mut executed_plan = plan;
+		executed_plan.paths = report.removed;
+		executed_plan.skipped.extend(report.skipped);
+		executed_plan
+			.skipped
+			.extend(report.failed.into_iter().map(|(path, _)| path));
+		prune_scope_lock(resource_scope, project_root.as_deref());
+		return Ok(Json(delete_response_from_outcome(
+			aghub_core::skills::removal::RemovalOutcome {
+				plan: executed_plan,
+				executed: true,
+			},
+		)));
+	}
+
+	match manager.remove_skill_planned(&skill_name, false, dry_run, confirm) {
 		Ok(outcome) => {
 			if outcome.executed {
 				prune_scope_lock(resource_scope, project_root.as_deref());
@@ -467,10 +512,13 @@ fn get_parent_folder(path: std::path::PathBuf) -> std::path::PathBuf {
 }
 
 fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
-	if path.is_dir() {
-		path
-	} else {
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+	if is_skill_file {
 		get_parent_folder(path)
+	} else {
+		path
 	}
 }
 
@@ -542,7 +590,7 @@ fn resolve_git_install_target_dir(
 fn install_git_skill_to_dir(
 	full_path: &std::path::Path,
 	target_dir: &std::path::Path,
-) -> Result<String, ApiError> {
+) -> Result<(String, bool), ApiError> {
 	let parsed = skill::parser::parse(full_path).map_err(|e| {
 		ApiError::new(
 			Status::BadRequest,
@@ -554,12 +602,15 @@ fn install_git_skill_to_dir(
 	let safe_name = sanitize_name(&skill.name);
 	let dest_root = target_dir.join(&safe_name);
 
-	if !dest_root.exists() {
+	let copied = if !dest_root.exists() {
 		let source_root = get_skill_root(full_path.to_path_buf());
 		copy_dir_recursive(&source_root, &dest_root)?;
-	}
+		true
+	} else {
+		false
+	};
 
-	Ok(skill.name)
+	Ok((skill.name, copied))
 }
 
 type GitInstallAgentGroup = Vec<(String, AgentType)>;
@@ -1190,12 +1241,16 @@ pub async fn install_skill(
 
 	let mut has_errors = !invalid_agents.is_empty();
 	let mut installed_skill_names = std::collections::HashSet::new();
+	let mut copied_skill_names = std::collections::HashSet::new();
 
 	for skill in &selected_skills {
 		for (target_dir, agents) in &dir_groups {
 			match install_git_skill_to_dir(&skill.full_path, target_dir) {
-				Ok(skill_name) => {
-					installed_skill_names.insert(skill_name);
+				Ok((skill_name, copied)) => {
+					installed_skill_names.insert(skill_name.clone());
+					if copied {
+						copied_skill_names.insert(skill_name);
+					}
 					let _ = agents;
 				}
 				Err(_) => has_errors = true,
@@ -1204,7 +1259,7 @@ pub async fn install_skill(
 	}
 
 	for skill in &selected_skills {
-		if !installed_skill_names.contains(&skill.name) {
+		if !copied_skill_names.contains(&skill.name) {
 			continue;
 		}
 
@@ -1597,11 +1652,13 @@ pub async fn git_install_skills(
 	for skill_path in &req.skill_paths {
 		let full_path = temp_path.join(skill_path);
 		let mut installed = false;
+		let mut copied_any = false;
 
 		for (target_dir, agents) in &dir_groups {
 			match install_git_skill_to_dir(&full_path, target_dir) {
-				Ok(skill_name) => {
+				Ok((skill_name, copied)) => {
 					installed = true;
+					copied_any |= copied;
 					for (agent_str, _) in agents {
 						results.push(GitInstallResultEntry {
 							name: skill_name.clone(),
@@ -1624,7 +1681,7 @@ pub async fn git_install_skills(
 			}
 		}
 
-		if installed {
+		if installed && copied_any {
 			let relative_dir = skill_path.replace('\\', "/");
 			let parsed_name = skill::parser::parse(&full_path)
 				.ok()
@@ -1679,7 +1736,17 @@ pub async fn git_sync_skill(
 	};
 
 	// Full path of the SKILL.md (or skill dir) inside the clone
-	let cloned_skill_path = temp_path.join(&req.skill_path);
+	let cloned_skill_path = aghub_core::skills::update::sanitize_skill_path(
+		&temp_path,
+		&req.skill_path,
+	)
+	.ok_or_else(|| {
+		ApiError::new(
+			Status::BadRequest,
+			"skill_path must be a relative path inside the cloned repository",
+			"SKILL_PATH_INVALID",
+		)
+	})?;
 	let cloned_skill_dir = get_skill_root(cloned_skill_path.clone());
 
 	if !cloned_skill_dir.exists() {
@@ -1694,9 +1761,9 @@ pub async fn git_sync_skill(
 	}
 
 	let project_root = req.project_root.as_deref().map(PathBuf::from);
-	match req.scope.as_str() {
-		"global" => {}
-		"project" if project_root.is_some() => {}
+	let resource_scope = match req.scope.as_str() {
+		"global" => ResourceScope::GlobalOnly,
+		"project" if project_root.is_some() => ResourceScope::ProjectOnly,
 		"project" => {
 			return Err(ApiError::new(
 				Status::BadRequest,
@@ -1711,6 +1778,28 @@ pub async fn git_sync_skill(
 				"INVALID_SCOPE",
 			));
 		}
+	};
+
+	let locked = match resource_scope {
+		ResourceScope::GlobalOnly => {
+			skill::lock::global::get_skill_from_lock(&req.name).is_some()
+		}
+		ResourceScope::ProjectOnly => {
+			let root = project_root
+				.as_deref()
+				.expect("project root validated for project scope");
+			skill::lock::local::read_local_lock(Some(root))
+				.skills
+				.contains_key(&req.name)
+		}
+		ResourceScope::Both => false,
+	};
+	if !locked {
+		return Err(ApiError::new(
+			Status::NotFound,
+			format!("Skill '{}' is not present in the lock", req.name),
+			"SKILL_LOCK_ENTRY_NOT_FOUND",
+		));
 	}
 
 	// Parse skill name from the cloned copy
@@ -1726,19 +1815,35 @@ pub async fn git_sync_skill(
 			)
 		})?;
 
+	let target_dirs: Vec<PathBuf> = req
+		.source_paths
+		.iter()
+		.map(|source_path| get_skill_root(expand_tilde_path(source_path)))
+		.collect();
+	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+		resource_scope,
+		project_root.as_deref(),
+	);
+	aghub_core::skills::removal::assert_targets_contained(
+		&target_dirs,
+		&agent_dirs,
+		project_root.as_deref(),
+	)
+	.map_err(|e| {
+		ApiError::new(
+			Status::BadRequest,
+			format!("Refusing to sync out-of-tree target: {e}"),
+			"SKILL_TARGET_OUT_OF_TREE",
+		)
+	})?;
+
 	// Replace each installation path
-	for source_path in &req.source_paths {
-		let target_skill_md = expand_tilde_path(source_path);
-		let target_dir = get_skill_root(target_skill_md);
-
-		// Remove old content
-		if target_dir.exists() {
-			std::fs::remove_dir_all(&target_dir)
-				.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-		}
-
-		// Copy new content
-		copy_dir_recursive(&cloned_skill_dir, &target_dir)?;
+	for target_dir in &target_dirs {
+		aghub_core::skills::update::stage_and_swap_dir(
+			&cloned_skill_dir,
+			target_dir,
+		)
+		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
 	}
 
 	update_lock_hash(
@@ -2018,13 +2123,13 @@ mod tests {
 		let result =
 			install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
 				.unwrap_or_else(|e| panic!("{}", e.body.error));
-		assert_eq!(result, "hello-skill");
+		assert_eq!(result, ("hello-skill".to_string(), true));
 		assert!(target_dir.join("hello-skill/SKILL.md").exists());
 
 		let second =
 			install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
 				.unwrap_or_else(|e| panic!("{}", e.body.error));
-		assert_eq!(second, "hello-skill");
+		assert_eq!(second, ("hello-skill".to_string(), false));
 		assert!(target_dir.join("hello-skill/SKILL.md").exists());
 	}
 

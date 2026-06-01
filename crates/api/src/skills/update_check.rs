@@ -178,6 +178,8 @@ pub struct CheckDeps<'a> {
 	pub concurrency: usize,
 	/// Short-circuit every entry to `Uncheckable{Network}` without fetching.
 	pub offline: bool,
+	/// Maximum wall-clock time for the whole check orchestration.
+	pub overall_deadline: Duration,
 }
 
 /// `true` when `r` is a 40-char hex commit SHA (a pin → `UpToDate`, no fetch).
@@ -202,6 +204,12 @@ pub(crate) fn host_of(source: &str) -> Option<String> {
 	} else {
 		None
 	}
+}
+
+pub(crate) fn keychain_host_for_source(source: &str) -> Option<String> {
+	aghub_git::resolve_remote_source(source)
+		.ok()
+		.and_then(|resolved| host_of(&resolved.clone_url))
 }
 
 /// Classify one fetched group result for a single skill entry: sanitize its
@@ -286,9 +294,7 @@ fn terminal_output(
 			scope: member.scope.clone(),
 		},
 		status: status.clone(),
-		heal_hash: lock_hash_unknown(member.stored_hash.as_deref())
-			.then(|| member.local_hash.clone())
-			.flatten(),
+		heal_hash: None,
 	}
 }
 
@@ -334,15 +340,10 @@ pub async fn check_updates(
 	let semaphore =
 		Arc::new(tokio::sync::Semaphore::new(deps.concurrency.max(1)));
 	let now = Instant::now();
+	let mut jobs: Vec<FetchJob> = Vec::new();
 
 	for (sr, members) in groups {
-		// 1) Cache hit → reuse the group status for every member.
-		if let Some(cached) = deps.cache.get(&sr, now) {
-			out.extend(apply_cached_group(&members, &cached));
-			continue;
-		}
-
-		// 2) Offline → Uncheckable{Network}; do not cache (transient).
+		// 1) Offline → Uncheckable{Network}; do not cache (transient).
 		if deps.offline {
 			for m in &members {
 				out.push(terminal_output(
@@ -355,7 +356,7 @@ pub async fn check_updates(
 			continue;
 		}
 
-		// 3) Pinned SHA → UpToDate without fetching.
+		// 2) Pinned SHA → UpToDate without fetching.
 		if let Some(r) = &sr.ref_ {
 			if is_pinned_sha(r) {
 				deps.cache.put(
@@ -370,78 +371,127 @@ pub async fn check_updates(
 			}
 		}
 
-		// 3.5) Pre-classify the source. SSH/git@, local, and non-HTTPS sources
-		// cannot be checked via the HTTPS fetch path, so emit the spec-mandated
-		// Uncheckable{ssh|local|unsupportedScheme} directly instead of attempting
-		// a fetch that would misreport as `network`. The result is stable, so
-		// cache it like the other terminal outcomes.
-		if let Some(reason) = aghub_core::skills::update::precheck_source(
-			&members[0].source_type,
-			&sr.source,
-		) {
-			let status = SkillUpdateStatus::Uncheckable { reason };
-			deps.cache.put(
-				sr.clone(),
-				CachedGroup::Terminal(status.clone()),
-				now,
-			);
-			for m in &members {
-				out.push(terminal_output(m, &status));
+		let mut fetch_members = Vec::new();
+		for member in members {
+			if let Some(reason) = aghub_core::skills::update::precheck_source(
+				&member.source_type,
+				&sr.source,
+			) {
+				out.push(terminal_output(
+					&member,
+					&SkillUpdateStatus::Uncheckable { reason },
+				));
+			} else {
+				fetch_members.push(member);
 			}
+		}
+		if fetch_members.is_empty() {
 			continue;
 		}
 
-		// 4) Resolve a token (binding → host keychain) then fetch.
-		let token = deps
-			.resolver
-			.resolve(&sr.source, host_of(&sr.source).as_deref());
+		// 3) Cache hit → reuse the group status for every fetchable member.
+		if let Some(cached) = deps.cache.get(&sr, now) {
+			out.extend(apply_cached_group(&fetch_members, &cached));
+			continue;
+		}
 
-		let fetched = {
-			let _permit = semaphore.clone().acquire_owned().await;
-			let fetch_res = tokio::time::timeout(
-				deps.per_fetch,
-				do_fetch(Arc::clone(&deps.fetcher), sr.clone(), token),
+		let token = deps.resolver.resolve(
+			&sr.source,
+			keychain_host_for_source(&sr.source).as_deref(),
+		);
+		jobs.push(FetchJob {
+			sr,
+			members: fetch_members,
+			token,
+		});
+	}
+
+	let mut pending: HashMap<usize, (SourceRef, Vec<EntryInput>)> =
+		HashMap::new();
+	let mut set = tokio::task::JoinSet::new();
+	for (id, job) in jobs.into_iter().enumerate() {
+		pending.insert(id, (job.sr.clone(), job.members.clone()));
+		let fetcher = Arc::clone(&deps.fetcher);
+		let semaphore = Arc::clone(&semaphore);
+		let per_fetch = deps.per_fetch;
+		set.spawn(async move {
+			let _permit = semaphore.clone().acquire_owned().await.ok();
+			let result = tokio::time::timeout(
+				per_fetch,
+				do_fetch(fetcher, job.sr.clone(), job.token),
 			)
 			.await;
-			match fetch_res {
+			let fetched = match result {
 				Err(_elapsed) => Err(UncheckableReason::Timeout),
 				Ok(Err(FetchError::Auth)) => Err(UncheckableReason::Auth),
 				Ok(Err(FetchError::Network)) => Err(UncheckableReason::Network),
 				Ok(Ok(repo)) => Ok(repo),
-			}
-		};
+			};
+			(id, job.sr, job.members, fetched)
+		});
+	}
 
-		match fetched {
-			Err(reason) => {
-				let status = SkillUpdateStatus::Uncheckable { reason };
-				deps.cache.put(
-					sr.clone(),
-					CachedGroup::Terminal(status.clone()),
-					now,
-				);
-				for m in &members {
-					out.push(terminal_output(m, &status));
+	if tokio::time::timeout(deps.overall_deadline, async {
+		while let Some(joined) = set.join_next().await {
+			let Ok((id, sr, members, fetched)) = joined else {
+				continue;
+			};
+			pending.remove(&id);
+			match fetched {
+				Err(reason) => {
+					let status = SkillUpdateStatus::Uncheckable { reason };
+					deps.cache.put(
+						sr.clone(),
+						CachedGroup::Terminal(status.clone()),
+						now,
+					);
+					for m in &members {
+						out.push(terminal_output(m, &status));
+					}
+				}
+				Ok(repo) => {
+					let mut hashes: HashMap<Option<String>, HashProbe> =
+						HashMap::new();
+					for m in &members {
+						hashes.entry(m.skill_path.clone()).or_insert_with(
+							|| {
+								probe_skill_hash_in_repo(
+									&repo.root,
+									m.skill_path.as_deref(),
+								)
+							},
+						);
+					}
+					let cached = CachedGroup::Hashes(hashes);
+					out.extend(apply_cached_group(&members, &cached));
+					deps.cache.put(sr.clone(), cached, now);
 				}
 			}
-			Ok(repo) => {
-				let mut hashes: HashMap<Option<String>, HashProbe> =
-					HashMap::new();
-				for m in &members {
-					hashes.entry(m.skill_path.clone()).or_insert_with(|| {
-						probe_skill_hash_in_repo(
-							&repo.root,
-							m.skill_path.as_deref(),
-						)
-					});
-				}
-				let cached = CachedGroup::Hashes(hashes);
-				out.extend(apply_cached_group(&members, &cached));
-				deps.cache.put(sr.clone(), cached, now);
+		}
+	})
+	.await
+	.is_err()
+	{
+		set.abort_all();
+		for (_id, (_sr, members)) in pending {
+			for member in members {
+				out.push(terminal_output(
+					&member,
+					&SkillUpdateStatus::Uncheckable {
+						reason: UncheckableReason::Timeout,
+					},
+				));
 			}
 		}
 	}
 
 	out
+}
+
+struct FetchJob {
+	sr: SourceRef,
+	members: Vec<EntryInput>,
+	token: Option<String>,
 }
 
 /// Bridge the synchronous [`Fetcher`] into the async timeout path.
@@ -458,6 +508,7 @@ async fn do_fetch(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use std::sync::atomic::{AtomicUsize, Ordering};
 	use std::sync::Mutex;
 
 	#[test]
@@ -582,6 +633,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: true,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let out =
 			check_updates(vec![entry("a", "o/r", Some("main"))], deps).await;
@@ -594,6 +646,32 @@ mod tests {
 			}
 		);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "offline must not fetch");
+	}
+
+	#[tokio::test]
+	async fn offline_check_or_terminal_never_heals() {
+		let fetcher = Arc::new(StubFetcher {
+			root: None,
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher,
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: true,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut input = entry("a", "o/r", Some("main"));
+		input.local_hash = Some("abc".to_string());
+
+		let out = check_updates(vec![input], deps).await;
+
+		assert_eq!(out[0].heal_hash, None);
 	}
 
 	#[tokio::test]
@@ -612,6 +690,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let mut e = entry("local-skill", "/home/u/local-skill", None);
 		e.source_type = "local".into();
@@ -646,6 +725,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let out = check_updates(
 			vec![entry("s", "git@github.com:o/r.git", None)],
@@ -681,11 +761,13 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let sha = "0123456789abcdef0123456789abcdef01234567";
 		let out = check_updates(vec![entry("a", "o/r", Some(sha))], deps).await;
 		assert_eq!(out.len(), 1);
 		assert_eq!(out[0].status, SkillUpdateStatus::UpToDate);
+		assert_eq!(out[0].heal_hash, None);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "pin must not fetch");
 	}
 
@@ -705,6 +787,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let out =
 			check_updates(vec![entry("a", "o/r", Some("main"))], deps).await;
@@ -736,6 +819,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let mut a = entry("a", "o/r", Some("main"));
 		a.local_hash = Some(hash.clone());
@@ -776,6 +860,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let mut e = entry("a", "o/r", Some("main"));
 		e.skill_path = None;
@@ -813,6 +898,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let mut e = entry("a", "o/r", Some("main"));
 		e.local_hash = Some(local_hash.clone());
@@ -853,6 +939,7 @@ mod tests {
 			per_fetch: Duration::from_secs(5),
 			concurrency: 4,
 			offline: false,
+			overall_deadline: Duration::from_secs(30),
 		};
 		let mut a = entry("a", "o/r", Some("main"));
 		a.skill_path = Some("a/SKILL.md".into());
@@ -871,5 +958,106 @@ mod tests {
 				available: hash_b,
 			}
 		);
+	}
+
+	#[tokio::test]
+	async fn mixed_source_type_group_prechecks_per_member() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut local = entry("local", "o/r", Some("main"));
+		local.source_type = "local".to_string();
+		let mut github = entry("github", "o/r", Some("main"));
+		github.local_hash = Some(hash);
+
+		let out = check_updates(vec![local, github], deps).await;
+		let by_name: HashMap<_, _> =
+			out.into_iter().map(|o| (o.key.name.clone(), o)).collect();
+
+		assert_eq!(
+			by_name["local"].status,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Local
+			}
+		);
+		assert_eq!(by_name["github"].status, SkillUpdateStatus::UpToDate);
+		assert_eq!(*fetcher.calls.lock().unwrap(), 1);
+	}
+
+	struct ConcurrentFetcher {
+		root: PathBuf,
+		current: AtomicUsize,
+		max: AtomicUsize,
+	}
+
+	impl Fetcher for ConcurrentFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<FetchedRepo, FetchError> {
+			let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
+			self.max.fetch_max(current, Ordering::SeqCst);
+			std::thread::sleep(Duration::from_millis(100));
+			self.current.fetch_sub(1, Ordering::SeqCst);
+			Ok(FetchedRepo {
+				root: self.root.clone(),
+				_guard: None,
+			})
+		}
+	}
+
+	#[tokio::test]
+	async fn concurrency_runs_fetches_in_parallel() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fetcher = Arc::new(ConcurrentFetcher {
+			root: dir.path().to_path_buf(),
+			current: AtomicUsize::new(0),
+			max: AtomicUsize::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let entries = (0..8)
+			.map(|i| {
+				let mut e =
+					entry(&format!("skill-{i}"), &format!("o/r-{i}"), None);
+				e.local_hash = Some(hash.clone());
+				e
+			})
+			.collect();
+
+		let out = check_updates(entries, deps).await;
+
+		assert_eq!(out.len(), 8);
+		let max = fetcher.max.load(Ordering::SeqCst);
+		assert!(max > 1, "fetches should overlap, max={max}");
+		assert!(max <= 4, "semaphore should cap concurrency, max={max}");
 	}
 }

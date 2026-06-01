@@ -85,6 +85,24 @@ fn lock_source_bindings() -> std::sync::MutexGuard<'static, ()> {
 		.unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_credentials() -> std::sync::MutexGuard<'static, ()> {
+	SOURCE_BINDINGS_MUTEX
+		.lock()
+		.unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn credential_name_exists(creds: &[StoredCredential], name: &str) -> bool {
+	creds.iter().any(|credential| credential.name == name)
+}
+
+fn duplicate_credential_err(name: &str) -> crate::error::ApiError {
+	crate::error::ApiError::new(
+		Status::Conflict,
+		format!("A credential named '{name}' already exists"),
+		"CREDENTIAL_NAME_EXISTS",
+	)
+}
+
 #[get("/credentials")]
 pub fn list_credentials() -> ApiResult<Vec<CredentialResponse>> {
 	let creds = load_credentials().map_err(internal_err)?;
@@ -138,8 +156,12 @@ pub fn bind_source_credential(
 pub fn create_credential(
 	body: Json<CreateCredentialRequest>,
 ) -> ApiCreated<CredentialResponse> {
+	let _guard = lock_credentials();
 	let mut creds = load_credentials().map_err(internal_err)?;
 	info!("creating credential '{}'", body.name);
+	if credential_name_exists(&creds, &body.name) {
+		return Err(duplicate_credential_err(&body.name));
+	}
 	let new = StoredCredential {
 		id: uuid::Uuid::new_v4().to_string(),
 		name: body.name.clone(),
@@ -156,8 +178,17 @@ pub fn create_credential(
 	))
 }
 
-fn prune_deleted_credential_bindings(id: &str) {
-	let _guard = lock_source_bindings();
+#[delete("/credentials/<id>")]
+pub fn delete_credential(id: &str) -> ApiNoContent {
+	let _guard = lock_credentials();
+	let mut creds = load_credentials().map_err(internal_err)?;
+	let original_len = creds.len();
+	creds.retain(|c| c.id != id);
+	info!(
+		"deleting credential '{id}', removed={}",
+		original_len != creds.len()
+	);
+	store_credentials(&creds).map_err(internal_err)?;
 	let result = (|| {
 		let mut bindings = load_source_bindings()?;
 		if prune_bindings_for_credential(&mut bindings, id) {
@@ -169,19 +200,6 @@ fn prune_deleted_credential_bindings(id: &str) {
 	if let Err(error) = result {
 		warn!("failed to prune source credential bindings for {id}: {error}");
 	}
-}
-
-#[delete("/credentials/<id>")]
-pub fn delete_credential(id: &str) -> ApiNoContent {
-	let mut creds = load_credentials().map_err(internal_err)?;
-	let original_len = creds.len();
-	creds.retain(|c| c.id != id);
-	info!(
-		"deleting credential '{id}', removed={}",
-		original_len != creds.len()
-	);
-	store_credentials(&creds).map_err(internal_err)?;
-	prune_deleted_credential_bindings(id);
 	Ok(rocket::response::status::NoContent)
 }
 
@@ -197,5 +215,24 @@ mod tests {
 
 		assert_eq!(err.status, Status::NotFound);
 		assert_eq!(err.body.code, "CREDENTIAL_NOT_FOUND");
+	}
+
+	#[test]
+	fn duplicate_credential_name_rejected() {
+		let creds = vec![StoredCredential {
+			id: "c1".to_string(),
+			name: "github.com".to_string(),
+			token: "tok".to_string(),
+		}];
+
+		assert!(credential_name_exists(&creds, "github.com"));
+		let err = duplicate_credential_err("github.com");
+		assert_eq!(err.status, Status::Conflict);
+		assert_eq!(err.body.code, "CREDENTIAL_NAME_EXISTS");
+	}
+
+	#[test]
+	fn credential_store_lock_survives_poison_shape() {
+		let _guard = lock_credentials();
 	}
 }

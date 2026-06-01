@@ -342,6 +342,7 @@ pub struct DeleteSkillByPathResponse {
 
 #[derive(Debug, Deserialize, TS)]
 #[ts(export)]
+#[serde(rename_all = "camelCase")]
 pub struct PruneLockRequest {
 	/// `"global"` or `"project"`.
 	pub scope: String,
@@ -354,6 +355,7 @@ pub struct PruneLockRequest {
 
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
+#[serde(rename_all = "camelCase")]
 pub struct PruneLockResponse {
 	pub pruned: Vec<String>,
 	pub dry_run: bool,
@@ -506,5 +508,26 @@ mod tests {
 		};
 		let json = serde_json::to_value(&resp).unwrap();
 		assert_eq!(json["status"], "upToDate");
+	}
+
+	#[test]
+	fn prune_lock_request_response_use_camel_case() {
+		let request: PruneLockRequest =
+			serde_json::from_value(serde_json::json!({
+				"scope": "project",
+				"projectRoot": "/tmp/project",
+				"confirm": true,
+			}))
+			.unwrap();
+		assert_eq!(request.project_root.as_deref(), Some("/tmp/project"));
+
+		let response = PruneLockResponse {
+			pruned: vec!["s".to_string()],
+			dry_run: true,
+			error: None,
+		};
+		let json = serde_json::to_value(response).unwrap();
+		assert_eq!(json["dryRun"], true);
+		assert!(json.get("dry_run").is_none());
 	}
 }

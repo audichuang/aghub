@@ -32,7 +32,8 @@ pub(crate) fn resolve_token_for_source(
 	creds: &[crate::routes::credentials::StoredCredential],
 ) -> Option<String> {
 	// (1) Explicit binding: source → credential_id.
-	if let Some(cred_id) = bindings.0.get(source) {
+	let key = canonical_binding_key(source);
+	if let Some(cred_id) = bindings.0.get(&key) {
 		if let Some(c) = creds.iter().find(|c| &c.id == cred_id) {
 			return Some(c.token.clone());
 		}
@@ -58,6 +59,7 @@ pub(crate) fn bind_source_to_credential(
 	if source.trim().is_empty() {
 		return Err(SourceBindingError::EmptySource);
 	}
+	let key = canonical_binding_key(source);
 
 	if let Some(credential_id) = credential_id {
 		if !creds.iter().any(|c| c.id == credential_id) {
@@ -65,14 +67,16 @@ pub(crate) fn bind_source_to_credential(
 				credential_id.to_string(),
 			));
 		}
-		bindings
-			.0
-			.insert(source.to_string(), credential_id.to_string());
+		bindings.0.insert(key, credential_id.to_string());
 	} else {
-		bindings.0.remove(source);
+		bindings.0.remove(&key);
 	}
 
 	Ok(())
+}
+
+fn canonical_binding_key(source: &str) -> String {
+	source.trim().to_string()
 }
 
 pub(crate) fn list_source_binding_responses(
@@ -233,6 +237,20 @@ mod tests {
 			b.0.get("https://github.com/owner/repo").map(String::as_str),
 			Some("c1")
 		);
+	}
+
+	#[test]
+	fn bind_then_resolve_trims_source() {
+		let mut b = SourceBindings::default();
+		let creds = vec![cred("c1", "github.com", "TOK1")];
+		bind_source_to_credential(&mut b, " o/r ", Some("c1"), &creds).unwrap();
+
+		assert_eq!(
+			resolve_token_for_source("o/r", Some("github.com"), &b, &creds),
+			Some("TOK1".into())
+		);
+		assert!(b.0.contains_key("o/r"));
+		assert!(!b.0.contains_key(" o/r "));
 	}
 
 	#[test]

@@ -31,7 +31,7 @@ thiserror = { workspace = true }
 dirs = { workspace = true }
 ts-rs = { workspace = true }
 chrono = { version = "0.4", features = [ "serde" ] }
-gix = { version = "0.83", default-features = false }
+gix = "0.83"
 which = "8"
 open = "5"
 tempfile = "3"
@@ -43,5 +43,3 @@ keyring = { version = "3", features = [
 uuid = { version = "1", features = [ "v4" ] }
 log = "0.4.30"
 reqwest = { version = "0.13", features = [ "json" ] }
-
-[dev-dependencies]

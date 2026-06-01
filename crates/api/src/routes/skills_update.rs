@@ -11,14 +11,13 @@
 //! resolution. Every gix error string is redacted of URL userinfo upstream so a
 //! token can never leak into the response.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use aghub_core::models::{ResourceScope, Skill};
 use chrono::Utc;
-use gix::bstr::ByteSlice;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
@@ -29,13 +28,15 @@ use crate::dto::skill::{
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::skills::update_check::{
-	check_updates, host_of, CheckDeps, CheckOutput, EntryInput, FetchError,
-	FetchedRepo, Fetcher, ResultCache, SourceRef, TokenResolver,
+	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
+	EntryInput, FetchError, FetchedRepo, Fetcher, ResultCache, SourceRef,
+	TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
 /// bounded so a stuck remote cannot hang the request.
 const PER_FETCH: Duration = Duration::from_secs(30);
+const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
 /// Default bounded concurrency for upstream fetches.
 const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
@@ -59,6 +60,7 @@ impl Fetcher for GitFetcher {
 			&url,
 			source_ref.ref_.as_deref(),
 			creds.as_ref(),
+			Some(PER_FETCH),
 		)
 		.map_err(classify_fetch_error)?;
 		let repo = gix::open(bare.path()).map_err(|e| {
@@ -78,7 +80,7 @@ impl Fetcher for GitFetcher {
 		})?;
 		let materialized =
 			tempfile::TempDir::new().map_err(|_| FetchError::Network)?;
-		materialize_tree(&repo, tree.id, materialized.path())
+		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
 			.map_err(|_| FetchError::Network)?;
 		let root = materialized.path().to_path_buf();
 		Ok(FetchedRepo {
@@ -108,34 +110,6 @@ fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
 	}
 }
 
-fn materialize_tree(
-	repo: &gix::Repository,
-	tree_id: gix::ObjectId,
-	dest: &Path,
-) -> std::io::Result<()> {
-	std::fs::create_dir_all(dest)?;
-	let tree = repo
-		.find_tree(tree_id)
-		.map_err(|e| std::io::Error::other(e.to_string()))?;
-	for entry in tree.iter() {
-		let entry = entry.map_err(|e| std::io::Error::other(e.to_string()))?;
-		let name = entry.filename().to_str_lossy();
-		let target = dest.join(name.as_ref());
-		if entry.mode().is_tree() {
-			materialize_tree(repo, entry.object_id(), &target)?;
-		} else if entry.mode().is_blob() {
-			let object = entry
-				.object()
-				.map_err(|e| std::io::Error::other(e.to_string()))?;
-			if let Some(parent) = target.parent() {
-				std::fs::create_dir_all(parent)?;
-			}
-			std::fs::write(target, &object.data)?;
-		}
-	}
-	Ok(())
-}
-
 /// Production [`TokenResolver`]: wraps the F1.4 keyring source→credential
 /// binding + host keychain resolution. Loads the stored credentials and
 /// bindings lazily per resolve (cheap; keyring reads are local).
@@ -145,8 +119,8 @@ impl TokenResolver for KeyringResolver {
 	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
 		let creds =
 			crate::routes::credentials::load_credentials().unwrap_or_default();
-		let bindings =
-			crate::credentials::resolve::load_source_bindings().ok()?;
+		let bindings = crate::credentials::resolve::load_source_bindings()
+			.unwrap_or_default();
 		crate::credentials::resolve::resolve_token_for_source(
 			source, host, &bindings, &creds,
 		)
@@ -173,10 +147,13 @@ fn skill_root(skill: &Skill) -> Option<PathBuf> {
 	} else {
 		PathBuf::from(raw)
 	};
-	Some(if path.is_dir() {
-		path
-	} else {
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+	Some(if is_skill_file {
 		path.parent().map(Path::to_path_buf).unwrap_or(path)
+	} else {
+		path
 	})
 }
 
@@ -185,15 +162,28 @@ fn local_hashes_for_scope(
 	project_root: Option<&Path>,
 ) -> HashMap<String, String> {
 	let mut hashes = HashMap::new();
+	let mut ambiguous = HashSet::new();
 	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
 		for skill in agent.skills {
+			if ambiguous.contains(&skill.name) {
+				continue;
+			}
 			let Some(root) = skill_root(&skill) else {
 				continue;
 			};
 			let Ok(hash) = skill::compute_skill_folder_hash(&root) else {
 				continue;
 			};
-			hashes.entry(skill.name).or_insert(hash);
+			match hashes.get(&skill.name) {
+				Some(existing) if existing != &hash => {
+					hashes.remove(&skill.name);
+					ambiguous.insert(skill.name);
+				}
+				Some(_) => {}
+				None => {
+					hashes.insert(skill.name, hash);
+				}
+			}
 		}
 	}
 	hashes
@@ -245,29 +235,44 @@ fn project_lock_entries(
 
 fn lock_entries_for_scope(
 	scope: &ResolvedScope,
+	offline: bool,
 ) -> Result<(Vec<EntryInput>, Option<PathBuf>), ApiError> {
 	let mut entries = Vec::new();
 	match scope {
 		ResolvedScope::Global => {
-			let local = local_hashes_for_scope(ResourceScope::GlobalOnly, None);
+			let local = if offline {
+				HashMap::new()
+			} else {
+				local_hashes_for_scope(ResourceScope::GlobalOnly, None)
+			};
 			entries.extend(global_lock_entries(&local));
 			Ok((entries, None))
 		}
 		ResolvedScope::Project { root } => {
-			let local =
-				local_hashes_for_scope(ResourceScope::ProjectOnly, Some(root));
+			let local = if offline {
+				HashMap::new()
+			} else {
+				local_hashes_for_scope(ResourceScope::ProjectOnly, Some(root))
+			};
 			entries.extend(project_lock_entries(Some(root), &local));
 			Ok((entries, Some(root.clone())))
 		}
 		ResolvedScope::All { project_root } => {
-			let global =
-				local_hashes_for_scope(ResourceScope::GlobalOnly, None);
+			let global = if offline {
+				HashMap::new()
+			} else {
+				local_hashes_for_scope(ResourceScope::GlobalOnly, None)
+			};
 			entries.extend(global_lock_entries(&global));
 			if let Some(root) = project_root {
-				let local = local_hashes_for_scope(
-					ResourceScope::ProjectOnly,
-					Some(root),
-				);
+				let local = if offline {
+					HashMap::new()
+				} else {
+					local_hashes_for_scope(
+						ResourceScope::ProjectOnly,
+						Some(root),
+					)
+				};
 				entries.extend(project_lock_entries(Some(root), &local));
 			}
 			Ok((entries, project_root.clone()))
@@ -297,16 +302,26 @@ fn write_auto_healed_hashes(
 	}
 
 	if !global_heals.is_empty() {
-		let mut lock = skill::lock::global::read_skill_lock();
-		let now = Utc::now().to_rfc3339();
-		for (name, hash) in global_heals {
-			if let Some(entry) = lock.skills.get_mut(&name) {
-				entry.content_hash = Some(hash);
-				entry.skill_folder_hash.clear();
-				entry.updated_at = now.clone();
+		skill::lock::global::modify_skill_lock_changed(|lock| {
+			let now = Utc::now().to_rfc3339();
+			let mut changed = false;
+			for (name, hash) in &global_heals {
+				if let Some(entry) = lock.skills.get_mut(name) {
+					let needs_hash =
+						entry.content_hash.as_deref() != Some(hash.as_str());
+					let needs_folder_clear =
+						!entry.skill_folder_hash.is_empty();
+					if needs_hash || needs_folder_clear {
+						entry.content_hash = Some(hash.clone());
+						entry.skill_folder_hash.clear();
+						entry.updated_at = now.clone();
+						changed = true;
+					}
+				}
 			}
-		}
-		skill::lock::global::write_skill_lock(&lock).map_err(|e| {
+			((), changed)
+		})
+		.map_err(|e| {
 			ApiError::new(
 				Status::InternalServerError,
 				format!("Failed to auto-heal global skill lock: {e}"),
@@ -323,42 +338,27 @@ fn write_auto_healed_hashes(
 				"MISSING_PARAM",
 			)
 		})?;
-		let mut lock = skill::lock::local::read_local_lock(Some(root));
-		for (name, hash) in project_heals {
-			if let Some(entry) = lock.skills.get_mut(&name) {
-				entry.computed_hash = hash;
+		skill::lock::local::modify_local_lock_changed(Some(root), |lock| {
+			let mut changed = false;
+			for (name, hash) in &project_heals {
+				if let Some(entry) = lock.skills.get_mut(name) {
+					if entry.computed_hash != *hash {
+						entry.computed_hash = hash.clone();
+						changed = true;
+					}
+				}
 			}
-		}
-		skill::lock::local::write_local_lock(&lock, Some(root)).map_err(
-			|e| {
-				ApiError::new(
-					Status::InternalServerError,
-					format!("Failed to auto-heal project skill lock: {e}"),
-					"SKILL_LOCK_ERROR",
-				)
-			},
-		)?;
+			((), changed)
+		})
+		.map_err(|e| {
+			ApiError::new(
+				Status::InternalServerError,
+				format!("Failed to auto-heal project skill lock: {e}"),
+				"SKILL_LOCK_ERROR",
+			)
+		})?;
 	}
 
-	Ok(())
-}
-
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-	std::fs::create_dir_all(to)?;
-	for entry in std::fs::read_dir(from)? {
-		let entry = entry?;
-		let file_type = entry.file_type()?;
-		if file_type.is_symlink() {
-			continue;
-		}
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		if file_type.is_dir() {
-			copy_dir_recursive(&from_path, &to_path)?;
-		} else if file_type.is_file() {
-			std::fs::copy(&from_path, &to_path)?;
-		}
-	}
 	Ok(())
 }
 
@@ -439,29 +439,29 @@ pub(crate) fn update_lock_hash(
 	hash: &str,
 ) -> Result<(), String> {
 	match scope {
-		"global" => {
-			let mut lock = skill::lock::global::read_skill_lock();
+		"global" => skill::lock::global::modify_skill_lock(|lock| {
 			let Some(entry) = lock.skills.get_mut(name) else {
 				return Err("Skill is not in global lock".to_string());
 			};
 			entry.content_hash = Some(hash.to_string());
 			entry.skill_folder_hash.clear();
 			entry.updated_at = Utc::now().to_rfc3339();
-			skill::lock::global::write_skill_lock(&lock)
-				.map_err(|e| format!("Failed to update global lock: {e}"))
-		}
+			Ok(())
+		})
+		.map_err(|e| format!("Failed to update global lock: {e}"))?,
 		"project" => {
 			let Some(root) = project_root else {
 				return Err("project_root is required when scope is project"
 					.to_string());
 			};
-			let mut lock = skill::lock::local::read_local_lock(Some(root));
-			let Some(entry) = lock.skills.get_mut(name) else {
-				return Err("Skill is not in project lock".to_string());
-			};
-			entry.computed_hash = hash.to_string();
-			skill::lock::local::write_local_lock(&lock, Some(root))
-				.map_err(|e| format!("Failed to update project lock: {e}"))
+			skill::lock::local::modify_local_lock(Some(root), |lock| {
+				let Some(entry) = lock.skills.get_mut(name) else {
+					return Err("Skill is not in project lock".to_string());
+				};
+				entry.computed_hash = hash.to_string();
+				Ok(())
+			})
+			.map_err(|e| format!("Failed to update project lock: {e}"))?
 		}
 		_ => Err("scope must be global or project".to_string()),
 	}
@@ -499,7 +499,8 @@ pub async fn check_skill_updates(
 		project_root: query.project_root.clone(),
 	}
 	.resolve()?;
-	let (entries, project_root) = lock_entries_for_scope(&resolved)?;
+	let offline = query.offline.unwrap_or(false);
+	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 	let resolver = KeyringResolver;
@@ -510,7 +511,8 @@ pub async fn check_skill_updates(
 		cache: &mut cache,
 		per_fetch: PER_FETCH,
 		concurrency: CONCURRENCY,
-		offline: query.offline.unwrap_or(false),
+		offline,
+		overall_deadline: OVERALL_DEADLINE,
 	};
 
 	let outputs = check_updates(entries, deps).await;
@@ -587,8 +589,10 @@ pub async fn apply_skill_update(
 	}
 
 	let resolver = KeyringResolver;
-	let token =
-		resolver.resolve(&source.source, host_of(&source.source).as_deref());
+	let token = resolver.resolve(
+		&source.source,
+		keychain_host_for_source(&source.source).as_deref(),
+	);
 	let fetcher = GitFetcher;
 	let repo = match fetcher.fetch(
 		&SourceRef {
@@ -629,34 +633,33 @@ pub async fn apply_skill_update(
 		}
 	};
 
+	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+		resource_scope,
+		project_root.as_deref(),
+	);
+	if let Err(error) = aghub_core::skills::removal::assert_targets_contained(
+		&targets,
+		&agent_dirs,
+		project_root.as_deref(),
+	) {
+		return Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			&error.to_string(),
+		)));
+	}
+
 	let mut paths = Vec::new();
 	for target in &targets {
-		if target.exists() {
-			if target.is_dir() {
-				std::fs::remove_dir_all(target).map_err(|e| {
-					ApiError::new(
-						Status::InternalServerError,
-						format!("Failed to remove old skill: {e}"),
-						"SKILL_UPDATE_ERROR",
-					)
-				})?;
-			} else {
-				std::fs::remove_file(target).map_err(|e| {
-					ApiError::new(
-						Status::InternalServerError,
-						format!("Failed to remove old skill: {e}"),
-						"SKILL_UPDATE_ERROR",
-					)
-				})?;
-			}
+		if let Err(error) =
+			aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
+		{
+			return Ok(Json(apply_error(
+				&req.name,
+				&req.scope,
+				&format!("Failed to replace installed skill: {error}"),
+			)));
 		}
-		copy_dir_recursive(source_dir, target).map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Failed to copy updated skill: {e}"),
-				"SKILL_UPDATE_ERROR",
-			)
-		})?;
 		paths.push(target.display().to_string());
 	}
 
@@ -752,6 +755,7 @@ mod tests {
 			per_fetch: PER_FETCH,
 			concurrency: CONCURRENCY,
 			offline: true,
+			overall_deadline: OVERALL_DEADLINE,
 		};
 		let out = check_updates(entries, deps).await;
 		assert_eq!(out.len(), 1);
@@ -865,6 +869,7 @@ mod tests {
 			per_fetch: PER_FETCH,
 			concurrency: CONCURRENCY,
 			offline: false,
+			overall_deadline: OVERALL_DEADLINE,
 		};
 		let out = check_updates(entries, deps).await;
 		// No panic; some status was produced for the entry.
@@ -900,6 +905,7 @@ mod tests {
 			per_fetch: PER_FETCH,
 			concurrency: CONCURRENCY,
 			offline: false,
+			overall_deadline: OVERALL_DEADLINE,
 		};
 		let out = check_updates(entries, deps).await;
 		assert_eq!(out.len(), 1);
