@@ -21,16 +21,12 @@ pub fn redact_url_userinfo(s: &str) -> String {
 		let authority = &token[..authority_end];
 
 		let at = authority.rfind('@').or_else(|| {
-			let suspicious_userinfo =
-				authority.rsplit_once(':').is_some_and(|(_, suffix)| {
-					!suffix.is_empty()
-						&& !suffix.chars().all(|c| c.is_ascii_digit())
-				});
-			if suspicious_userinfo {
-				token.rfind('@')
-			} else {
-				None
-			}
+			let last_at = token.rfind('@')?;
+			let before_at = &token[..last_at];
+			let prefix_end =
+				before_at.find(['/', '?', '#']).unwrap_or(before_at.len());
+			let authority_prefix = &before_at[..prefix_end];
+			authority_prefix.contains(':').then_some(last_at)
 		});
 
 		if let Some(at) = at {
@@ -81,6 +77,23 @@ mod tests {
 		let r = redact_url_userinfo("https://u:p/a?b#c@host/x");
 		assert_eq!(r, "https://***@host/x");
 		assert!(!r.contains("p/a?b#c"));
+	}
+
+	#[test]
+	fn redacts_password_that_starts_with_delimiter() {
+		for secret in ["/secret", "?secret", "#secret"] {
+			let url = format!("https://u:{secret}@host/x");
+			let redacted = redact_url_userinfo(&url);
+			assert_eq!(redacted, "https://***@host/x");
+			assert!(!redacted.contains(secret));
+		}
+	}
+
+	#[test]
+	fn redacts_numeric_password_before_delimiter() {
+		let r = redact_url_userinfo("https://u:123/path@host/x");
+		assert_eq!(r, "https://***@host/x");
+		assert!(!r.contains("u:123"));
 	}
 
 	#[test]

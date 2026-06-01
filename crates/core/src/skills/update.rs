@@ -125,17 +125,71 @@ pub fn stage_and_swap_dir(
 
 	let swap_result = std::fs::rename(&staged, target_dir);
 	if let Err(error) = swap_result {
-		if had_target {
-			let _ = std::fs::rename(&backup, target_dir);
-		}
-		let _ = remove_path_any(&staging_root);
-		let _ = remove_path_any(&backup_root);
-		return Err(error);
+		return handle_failed_swap(
+			error,
+			had_target,
+			&backup,
+			target_dir,
+			&staging_root,
+			&backup_root,
+		);
 	}
 
 	let _ = remove_path_any(&backup_root);
 	let _ = remove_path_any(&staging_root);
 	Ok(())
+}
+
+fn handle_failed_swap(
+	error: std::io::Error,
+	had_target: bool,
+	backup: &Path,
+	target_dir: &Path,
+	staging_root: &Path,
+	backup_root: &Path,
+) -> std::io::Result<()> {
+	handle_failed_swap_with_rollback(
+		error,
+		had_target,
+		backup,
+		target_dir,
+		staging_root,
+		backup_root,
+		|from, to| std::fs::rename(from, to),
+	)
+}
+
+fn handle_failed_swap_with_rollback(
+	error: std::io::Error,
+	had_target: bool,
+	backup: &Path,
+	target_dir: &Path,
+	staging_root: &Path,
+	backup_root: &Path,
+	rollback: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+	let _ = remove_path_any(staging_root);
+	if !had_target {
+		let _ = remove_path_any(backup_root);
+		return Err(error);
+	}
+
+	if let Err(rollback_error) = rollback(backup, target_dir) {
+		return Err(std::io::Error::new(
+			error.kind(),
+			format!(
+				"failed to replace {}; rollback also failed, original \
+				 contents retained at {}: swap error: {}; rollback error: {}",
+				target_dir.display(),
+				backup.display(),
+				error,
+				rollback_error
+			),
+		));
+	}
+
+	let _ = remove_path_any(backup_root);
+	Err(error)
 }
 
 fn copy_dir_recursive_skip_symlinks(
@@ -316,5 +370,35 @@ mod tests {
 		stage_and_swap_dir(&source, &target).unwrap();
 
 		assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
+	}
+
+	#[test]
+	fn failed_swap_keeps_backup_when_rollback_fails() {
+		let tmp = tempdir().unwrap();
+		let staging_root = tmp.path().join("stage");
+		let backup_root = tmp.path().join("backup-root");
+		let backup = backup_root.join("target");
+		let target = tmp.path().join("target");
+		fs::create_dir(&staging_root).unwrap();
+		fs::create_dir_all(&backup).unwrap();
+		fs::write(backup.join("old.txt"), "old").unwrap();
+
+		let err = handle_failed_swap_with_rollback(
+			std::io::Error::new(std::io::ErrorKind::Other, "swap failed"),
+			true,
+			&backup,
+			&target,
+			&staging_root,
+			&backup_root,
+			|_, _| Err(std::io::Error::other("rollback failed")),
+		)
+		.unwrap_err();
+
+		let msg = err.to_string();
+		assert!(msg.contains("rollback also failed"));
+		assert!(msg.contains(&backup.display().to_string()));
+		assert!(backup.join("old.txt").exists());
+		assert!(backup_root.exists());
+		assert!(!staging_root.exists());
 	}
 }
