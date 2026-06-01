@@ -6,13 +6,13 @@
 //! SOURCE folder, never the post-copy installed dir.
 
 use sha2::{Digest, Sha256};
-use std::io;
+use std::io::{self, Read};
 use std::path::Path;
 
 /// Bounds guard (F1 hashes untrusted fetched content).
 pub const MAX_FILES: usize = 10_000;
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
-pub const MAX_DEPTH: usize = 10; // mirrors install.rs scan max_depth
+pub const MAX_DEPTH: usize = 64;
 
 /// SHA-256 of the empty input — the legacy aghub placeholder.
 pub const EMPTY_SKILLS_LOCK_DIGEST: &str =
@@ -52,12 +52,46 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
 
 	let mut hasher = Sha256::new();
+	let mut read_bytes = 0;
 	for (rel, abs) in &files {
-		let bytes = std::fs::read(abs)?;
 		hasher.update(rel.as_bytes());
-		hasher.update(&bytes);
+		update_hasher_from_file(
+			&mut hasher,
+			abs,
+			&mut read_bytes,
+			MAX_TOTAL_BYTES,
+		)?;
 	}
 	Ok(format!("{:x}", hasher.finalize()))
+}
+
+fn update_hasher_from_file(
+	hasher: &mut Sha256,
+	path: &Path,
+	total_bytes: &mut u64,
+	max_total_bytes: u64,
+) -> Result<(), HashError> {
+	let mut file = std::fs::File::open(path)?;
+	let mut buf = [0_u8; 16 * 1024];
+	loop {
+		let read = file.read(&mut buf)?;
+		if read == 0 {
+			break;
+		}
+		*total_bytes =
+			total_bytes.checked_add(read as u64).ok_or_else(|| {
+				HashError::Bounds(
+					"max total bytes accounting overflowed".to_string(),
+				)
+			})?;
+		if *total_bytes > max_total_bytes {
+			return Err(HashError::Bounds(format!(
+				"max total bytes {max_total_bytes} exceeded"
+			)));
+		}
+		hasher.update(&buf[..read]);
+	}
+	Ok(())
 }
 
 fn collect(
@@ -306,6 +340,41 @@ mod tests {
 			compute_skill_folder_hash(dir.path()).unwrap(),
 			compute_skill_folder_hash(dir.path()).unwrap()
 		);
+	}
+
+	#[test]
+	fn deep_tree_within_new_cap_hashes() {
+		let dir = tempdir().unwrap();
+		let mut current = dir.path().to_path_buf();
+		let mut parts = Vec::new();
+		for i in 0..15 {
+			let part = format!("d{i}");
+			current.push(&part);
+			parts.push(part);
+			fs::create_dir(&current).unwrap();
+		}
+		fs::write(current.join("SKILL.md"), b"deep").unwrap();
+		let rel = format!("{}/SKILL.md", parts.join("/"));
+		let mut e = Sha256::new();
+		e.update(rel.as_bytes());
+		e.update(b"deep");
+		assert_eq!(
+			compute_skill_folder_hash(dir.path()).unwrap(),
+			format!("{:x}", e.finalize())
+		);
+	}
+
+	#[test]
+	fn read_time_byte_cap_is_enforced() {
+		let dir = tempdir().unwrap();
+		let file = dir.path().join("large");
+		fs::write(&file, b"12345").unwrap();
+		let mut hasher = Sha256::new();
+		let mut total_bytes = 0;
+		assert!(matches!(
+			update_hasher_from_file(&mut hasher, &file, &mut total_bytes, 4),
+			Err(HashError::Bounds(_))
+		));
 	}
 
 	#[cfg(unix)]

@@ -1,5 +1,6 @@
 use super::types::SkillLockFile;
-use std::path::PathBuf;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Process-wide guard so concurrent writers never interleave or observe a
@@ -27,6 +28,10 @@ pub fn get_skill_lock_path() -> PathBuf {
 /// Returns an empty lock file structure if the file doesn't exist.
 /// Wipes the lock file if it's an old format (version < CURRENT_VERSION).
 pub fn read_skill_lock() -> SkillLockFile {
+	read_skill_lock_locked()
+}
+
+fn read_skill_lock_locked() -> SkillLockFile {
 	let lock_path = get_skill_lock_path();
 
 	match std::fs::read_to_string(&lock_path) {
@@ -55,22 +60,58 @@ pub fn read_skill_lock() -> SkillLockFile {
 /// Creates the directory if it doesn't exist.
 pub fn write_skill_lock(lock: &SkillLockFile) -> std::io::Result<()> {
 	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-	let lock_path = get_skill_lock_path();
+	write_skill_lock_locked(lock)
+}
 
-	// Ensure directory exists
-	if let Some(parent) = lock_path.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
+fn write_skill_lock_locked(lock: &SkillLockFile) -> std::io::Result<()> {
+	let lock_path = get_skill_lock_path();
 
 	// Preserve existing aghub formatting: 2-space pretty + trailing newline.
 	let content = serde_json::to_string_pretty(lock)? + "\n";
+	atomic_write_json(&lock_path, &content)
+}
 
-	// Atomic write: write to a temp file in the same directory, then rename
-	// over the target. rename(2) is atomic within a filesystem, so a reader
-	// never observes a truncated/partial lock file.
-	let tmp = lock_path.with_extension("json.tmp");
-	std::fs::write(&tmp, content)?;
-	std::fs::rename(&tmp, &lock_path)
+pub(crate) fn atomic_write_json(
+	path: &Path,
+	content: &str,
+) -> std::io::Result<()> {
+	if let Some(parent) = path.parent() {
+		std::fs::create_dir_all(parent)?;
+		let mut tmp = tempfile::Builder::new()
+			.prefix(".lock.")
+			.tempfile_in(parent)?;
+		tmp.write_all(content.as_bytes())?;
+		tmp.as_file().sync_all()?;
+		tmp.persist(path).map_err(|e| e.error)?;
+	} else {
+		let mut tmp = tempfile::Builder::new().prefix(".lock.").tempfile()?;
+		tmp.write_all(content.as_bytes())?;
+		tmp.as_file().sync_all()?;
+		tmp.persist(path).map_err(|e| e.error)?;
+	}
+	Ok(())
+}
+
+pub fn modify_skill_lock<R>(
+	f: impl FnOnce(&mut SkillLockFile) -> R,
+) -> std::io::Result<R> {
+	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let mut lock = read_skill_lock_locked();
+	let result = f(&mut lock);
+	write_skill_lock_locked(&lock)?;
+	Ok(result)
+}
+
+pub fn modify_skill_lock_changed<R>(
+	f: impl FnOnce(&mut SkillLockFile) -> (R, bool),
+) -> std::io::Result<R> {
+	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let mut lock = read_skill_lock_locked();
+	let (result, changed) = f(&mut lock);
+	if changed {
+		write_skill_lock_locked(&lock)?;
+	}
+	Ok(result)
 }
 
 #[cfg(test)]
@@ -104,6 +145,35 @@ mod tests {
 		let raw = std::fs::read_to_string(&path).unwrap();
 		let _: super::super::types::SkillLockFile =
 			serde_json::from_str(&raw).unwrap();
+	}
+
+	#[test]
+	fn write_skill_lock_uses_unique_tmp_no_fixed_collision() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let lock_path = get_skill_lock_path();
+		std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+		let legacy_tmp = lock_path.with_extension("json.tmp");
+		std::fs::create_dir_all(&legacy_tmp).unwrap();
+
+		let lock = super::super::types::SkillLockFile::default();
+		write_skill_lock(&lock).unwrap();
+
+		assert!(legacy_tmp.is_dir(), "legacy fixed tmp path was untouched");
+		assert!(lock_path.exists());
+	}
+
+	#[test]
+	fn modify_skill_lock_changed_writes_only_when_changed() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let lock = super::super::types::SkillLockFile::default();
+		write_skill_lock(&lock).unwrap();
+		let path = get_skill_lock_path();
+		let before = std::fs::read(&path).unwrap();
+
+		modify_skill_lock_changed(|_lock| ((), false)).unwrap();
+
+		let after = std::fs::read(&path).unwrap();
+		assert_eq!(before, after);
 	}
 
 	#[test]

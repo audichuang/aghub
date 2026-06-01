@@ -26,11 +26,6 @@ pub struct LocalSkillLockEntry {
 	/// The provider/source type (e.g., "github", "node_modules", "local")
 	#[serde(rename = "sourceType")]
 	pub source_type: String,
-	/// SHA-256 hash computed from all files in the skill folder.
-	/// Unlike the global lock which uses GitHub tree SHA, the local lock
-	/// computes the hash from actual file contents on disk.
-	#[serde(rename = "computedHash")]
-	pub computed_hash: String,
 	/// npx-style skill path: POSIX `<repo-relative-dir>/SKILL.md`, used by
 	/// npx `experimental_sync` to locate the skill within its source repo.
 	#[serde(
@@ -39,6 +34,11 @@ pub struct LocalSkillLockEntry {
 		default
 	)]
 	pub skill_path: Option<String>,
+	/// SHA-256 hash computed from all files in the skill folder.
+	/// Unlike the global lock which uses GitHub tree SHA, the local lock
+	/// computes the hash from actual file contents on disk.
+	#[serde(rename = "computedHash")]
+	pub computed_hash: String,
 }
 
 /// The structure of the local (project-scoped) skill lock file.
@@ -83,6 +83,10 @@ pub fn get_local_lock_path(cwd: Option<&Path>) -> PathBuf {
 /// Returns an empty lock file structure if the file doesn't exist
 /// or is corrupted (e.g., merge conflict markers).
 pub fn read_local_lock(cwd: Option<&Path>) -> LocalSkillLockFile {
+	read_local_lock_locked(cwd)
+}
+
+fn read_local_lock_locked(cwd: Option<&Path>) -> LocalSkillLockFile {
 	let lock_path = get_local_lock_path(cwd);
 
 	match std::fs::read_to_string(&lock_path) {
@@ -117,16 +121,43 @@ pub fn write_local_lock(
 	cwd: Option<&Path>,
 ) -> std::io::Result<()> {
 	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	write_local_lock_locked(lock, cwd)
+}
+
+fn write_local_lock_locked(
+	lock: &LocalSkillLockFile,
+	cwd: Option<&Path>,
+) -> std::io::Result<()> {
 	let lock_path = get_local_lock_path(cwd);
 
 	// BTreeMap is already sorted by key. Preserve existing formatting:
 	// 2-space pretty + trailing newline.
 	let content = serde_json::to_string_pretty(lock)? + "\n";
+	super::io::atomic_write_json(&lock_path, &content)
+}
 
-	// Atomic write: temp file in the same directory, then rename over target.
-	let tmp = lock_path.with_extension("json.tmp");
-	std::fs::write(&tmp, content)?;
-	std::fs::rename(&tmp, &lock_path)
+pub fn modify_local_lock<R>(
+	cwd: Option<&Path>,
+	f: impl FnOnce(&mut LocalSkillLockFile) -> R,
+) -> std::io::Result<R> {
+	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let mut lock = read_local_lock_locked(cwd);
+	let result = f(&mut lock);
+	write_local_lock_locked(&lock, cwd)?;
+	Ok(result)
+}
+
+pub fn modify_local_lock_changed<R>(
+	cwd: Option<&Path>,
+	f: impl FnOnce(&mut LocalSkillLockFile) -> (R, bool),
+) -> std::io::Result<R> {
+	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let mut lock = read_local_lock_locked(cwd);
+	let (result, changed) = f(&mut lock);
+	if changed {
+		write_local_lock_locked(&lock, cwd)?;
+	}
+	Ok(result)
 }
 
 /// Add or update a skill entry in the local lock file.
@@ -135,9 +166,9 @@ pub fn add_skill_to_local_lock(
 	entry: LocalSkillLockEntry,
 	cwd: Option<&Path>,
 ) -> std::io::Result<()> {
-	let mut lock = read_local_lock(cwd);
-	lock.skills.insert(skill_name.to_string(), entry);
-	write_local_lock(&lock, cwd)
+	modify_local_lock(cwd, |lock| {
+		lock.skills.insert(skill_name.to_string(), entry);
+	})
 }
 
 /// Remove a skill from the local lock file.
@@ -146,14 +177,10 @@ pub fn remove_skill_from_local_lock(
 	skill_name: &str,
 	cwd: Option<&Path>,
 ) -> std::io::Result<bool> {
-	let mut lock = read_local_lock(cwd);
-
-	if lock.skills.remove(skill_name).is_some() {
-		write_local_lock(&lock, cwd)?;
-		Ok(true)
-	} else {
-		Ok(false)
-	}
+	modify_local_lock_changed(cwd, |lock| {
+		let removed = lock.skills.remove(skill_name).is_some();
+		(removed, removed)
+	})
 }
 
 /// Atomically prune the project lock down to the skills present on disk.
@@ -166,23 +193,21 @@ pub fn retain_local_locked_skills(
 	present_dir_names: &std::collections::BTreeSet<String>,
 	cwd: Option<&Path>,
 ) -> std::io::Result<Vec<String>> {
-	let mut lock = read_local_lock(cwd);
-	let removed: Vec<String> = lock
-		.skills
-		.keys()
-		.filter(|key| {
-			!present_dir_names.contains(&crate::sanitize::sanitize_name(key))
-		})
-		.cloned()
-		.collect();
-	if removed.is_empty() {
-		return Ok(removed);
-	}
-	for key in &removed {
-		lock.skills.remove(key);
-	}
-	write_local_lock(&lock, cwd)?;
-	Ok(removed)
+	modify_local_lock_changed(cwd, |lock| {
+		let removed: Vec<String> = lock
+			.skills
+			.keys()
+			.filter(|key| {
+				!crate::sanitize::skill_present_on_disk(key, present_dir_names)
+			})
+			.cloned()
+			.collect();
+		for key in &removed {
+			lock.skills.remove(key);
+		}
+		let changed = !removed.is_empty();
+		(removed, changed)
+	})
 }
 
 #[cfg(test)]
@@ -215,6 +240,27 @@ mod tests {
 	}
 
 	#[test]
+	fn local_entry_key_order_matches_npx() {
+		let entry = LocalSkillLockEntry {
+			source: "org/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			source_type: "github".to_string(),
+			skill_path: Some("skills/pdf/SKILL.md".to_string()),
+			computed_hash: "abc123".to_string(),
+		};
+		let json = serde_json::to_string(&entry).unwrap();
+		let source = json.find("\"source\"").unwrap();
+		let ref_name = json.find("\"ref\"").unwrap();
+		let source_type = json.find("\"sourceType\"").unwrap();
+		let skill_path = json.find("\"skillPath\"").unwrap();
+		let computed_hash = json.find("\"computedHash\"").unwrap();
+		assert!(source < ref_name);
+		assert!(ref_name < source_type);
+		assert!(source_type < skill_path);
+		assert!(skill_path < computed_hash);
+	}
+
+	#[test]
 	fn local_entry_omits_skill_path_when_none() {
 		let mut e = sample_local_entry();
 		e.skill_path = None;
@@ -236,6 +282,19 @@ mod tests {
 		let a = raw.find("\"a\"").unwrap();
 		let z = raw.find("\"z\"").unwrap();
 		assert!(a < z, "keys must be sorted (BTreeMap)");
+	}
+
+	#[test]
+	fn write_local_lock_uses_unique_tmp_no_fixed_collision() {
+		let tmp = tempfile::tempdir().unwrap();
+		let legacy_tmp = tmp.path().join("skills-lock.json.tmp");
+		std::fs::create_dir_all(&legacy_tmp).unwrap();
+		let lock = super::LocalSkillLockFile::default();
+
+		super::write_local_lock(&lock, Some(tmp.path())).unwrap();
+
+		assert!(legacy_tmp.is_dir(), "legacy fixed tmp path was untouched");
+		assert!(tmp.path().join("skills-lock.json").exists());
 	}
 
 	#[test]
@@ -527,6 +586,28 @@ mod tests {
 				.unwrap();
 		assert!(removed.is_empty());
 		assert_eq!(fs::read(&path).unwrap(), before);
+	}
+
+	#[test]
+	fn retain_local_matches_legacy_sanitized_key() {
+		let dir = TempDir::new().unwrap();
+		add_skill_to_local_lock(
+			"İstanbul",
+			sample_local_entry(),
+			Some(dir.path()),
+		)
+		.unwrap();
+
+		let removed = retain_local_locked_skills(
+			&present(&["stanbul"]),
+			Some(dir.path()),
+		)
+		.unwrap();
+
+		assert!(removed.is_empty());
+		assert!(read_local_lock(Some(dir.path()))
+			.skills
+			.contains_key("İstanbul"));
 	}
 
 	#[test]

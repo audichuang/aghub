@@ -3,6 +3,8 @@
 //! Converts arbitrary strings into safe skill directory names.
 //! Mirrors the TypeScript `sanitizeName` function in `installer.ts`.
 
+use std::collections::BTreeSet;
+
 const MAX_NAME_LENGTH: usize = 255;
 
 /// Convert an arbitrary string into a safe skill directory name.
@@ -64,6 +66,52 @@ pub fn sanitize_name(input: &str) -> String {
 	} else {
 		result
 	}
+}
+
+/// Previous ASCII-only sanitizer used before Unicode lowercasing was fixed.
+///
+/// This is kept only for lock pruning so existing folders created by older
+/// aghub versions are recognized as present instead of dropped from locks.
+pub fn legacy_sanitize_name(input: &str) -> String {
+	let mut result = String::new();
+	let mut last_was_hyphen = false;
+
+	for c in input.chars() {
+		let c = c.to_ascii_lowercase();
+		if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+			result.push(c);
+			last_was_hyphen = false;
+		} else if !last_was_hyphen {
+			result.push('-');
+			last_was_hyphen = true;
+		}
+	}
+
+	let trimmed_start = result.trim_start_matches(['.', '-']);
+	let mut result = trimmed_start.to_string();
+
+	while result.ends_with('.') || result.ends_with('-') {
+		result.pop();
+	}
+
+	if result.len() > MAX_NAME_LENGTH {
+		result.truncate(MAX_NAME_LENGTH);
+		while result.ends_with('.') || result.ends_with('-') {
+			result.pop();
+		}
+	}
+
+	if result.is_empty() {
+		"unnamed-skill".to_string()
+	} else {
+		result
+	}
+}
+
+pub fn skill_present_on_disk(key: &str, present: &BTreeSet<String>) -> bool {
+	present.contains(&sanitize_name(key))
+		|| present.contains(&legacy_sanitize_name(key))
+		|| present.contains(key)
 }
 
 #[cfg(test)]
@@ -200,6 +248,32 @@ mod tests {
 		assert_eq!(sanitize_name("İstanbul"), "i-stanbul");
 		assert_eq!(sanitize_name("Kelvin"), "kelvin");
 		assert_eq!(sanitize_name("ẞeta"), "eta");
+	}
+
+	#[test]
+	fn legacy_sanitize_name_reproduces_prefix_folder() {
+		assert_eq!(legacy_sanitize_name("İstanbul"), "stanbul");
+		assert_eq!(legacy_sanitize_name("ẞeta"), "eta");
+	}
+
+	#[test]
+	fn legacy_equals_new_for_ascii() {
+		for value in ["My Skill", "vercel/next.js", "skill日本語"] {
+			assert_eq!(legacy_sanitize_name(value), sanitize_name(value));
+		}
+	}
+
+	#[test]
+	fn skill_present_on_disk_accepts_new_legacy_and_raw_names() {
+		let mut present = BTreeSet::new();
+		present.insert("i-stanbul".to_string());
+		assert!(skill_present_on_disk("İstanbul", &present));
+		present.clear();
+		present.insert("stanbul".to_string());
+		assert!(skill_present_on_disk("İstanbul", &present));
+		present.clear();
+		present.insert("İstanbul".to_string());
+		assert!(skill_present_on_disk("İstanbul", &present));
 	}
 
 	#[test]

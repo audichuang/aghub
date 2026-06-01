@@ -3,7 +3,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::{io, types};
 
-pub use io::{get_skill_lock_path, read_skill_lock, write_skill_lock};
+pub use io::{
+	get_skill_lock_path, modify_skill_lock, modify_skill_lock_changed,
+	read_skill_lock, write_skill_lock,
+};
 pub use types::{DismissedPrompts, SkillLockEntry, SkillLockFile};
 
 /// Add or update a skill entry in the lock file.
@@ -11,31 +14,27 @@ pub fn add_skill_to_lock(
 	skill_name: &str,
 	mut entry: SkillLockEntry,
 ) -> std::io::Result<()> {
-	let mut lock = read_skill_lock();
-	let now = Utc::now().to_rfc3339();
+	modify_skill_lock(|lock| {
+		let now = Utc::now().to_rfc3339();
 
-	if let Some(existing) = lock.skills.get(skill_name) {
-		// Preserve the original installedAt timestamp
-		entry.installed_at = existing.installed_at.clone();
-	} else {
-		entry.installed_at = now.clone();
-	}
-	entry.updated_at = now;
+		if let Some(existing) = lock.skills.get(skill_name) {
+			// Preserve the original installedAt timestamp
+			entry.installed_at = existing.installed_at.clone();
+		} else {
+			entry.installed_at = now.clone();
+		}
+		entry.updated_at = now;
 
-	lock.skills.insert(skill_name.to_string(), entry);
-	write_skill_lock(&lock)
+		lock.skills.insert(skill_name.to_string(), entry);
+	})
 }
 
 /// Remove a skill from the lock file.
 pub fn remove_skill_from_lock(skill_name: &str) -> std::io::Result<bool> {
-	let mut lock = read_skill_lock();
-
-	if lock.skills.remove(skill_name).is_some() {
-		write_skill_lock(&lock)?;
-		Ok(true)
-	} else {
-		Ok(false)
-	}
+	modify_skill_lock_changed(|lock| {
+		let removed = lock.skills.remove(skill_name).is_some();
+		(removed, removed)
+	})
 }
 
 /// Atomically prune the global lock down to the skills present on disk.
@@ -48,23 +47,21 @@ pub fn remove_skill_from_lock(skill_name: &str) -> std::io::Result<bool> {
 pub fn retain_locked_skills(
 	present_dir_names: &BTreeSet<String>,
 ) -> std::io::Result<Vec<String>> {
-	let mut lock = read_skill_lock();
-	let removed: Vec<String> = lock
-		.skills
-		.keys()
-		.filter(|key| {
-			!present_dir_names.contains(&crate::sanitize::sanitize_name(key))
-		})
-		.cloned()
-		.collect();
-	if removed.is_empty() {
-		return Ok(removed); // nothing pruned → leave the file untouched
-	}
-	for key in &removed {
-		lock.skills.remove(key);
-	}
-	write_skill_lock(&lock)?;
-	Ok(removed)
+	modify_skill_lock_changed(|lock| {
+		let removed: Vec<String> = lock
+			.skills
+			.keys()
+			.filter(|key| {
+				!crate::sanitize::skill_present_on_disk(key, present_dir_names)
+			})
+			.cloned()
+			.collect();
+		for key in &removed {
+			lock.skills.remove(key);
+		}
+		let changed = !removed.is_empty();
+		(removed, changed)
+	})
 }
 
 /// Get a skill entry from the lock file.
@@ -108,18 +105,17 @@ pub fn is_prompt_dismissed(prompt_key: &str) -> bool {
 
 /// Mark a prompt as dismissed.
 pub fn dismiss_prompt(prompt_key: &str) -> std::io::Result<()> {
-	let mut lock = read_skill_lock();
-	if lock.dismissed.is_none() {
-		lock.dismissed = Some(DismissedPrompts::default());
-	}
-
-	if let Some(ref mut dismissed) = lock.dismissed {
-		if prompt_key == "findSkillsPrompt" {
-			dismissed.find_skills_prompt = Some(true);
+	modify_skill_lock(|lock| {
+		if lock.dismissed.is_none() {
+			lock.dismissed = Some(DismissedPrompts::default());
 		}
-	}
 
-	write_skill_lock(&lock)
+		if let Some(ref mut dismissed) = lock.dismissed {
+			if prompt_key == "findSkillsPrompt" {
+				dismissed.find_skills_prompt = Some(true);
+			}
+		}
+	})
 }
 
 /// Get the last selected agents.
@@ -130,9 +126,9 @@ pub fn get_last_selected_agents() -> Option<Vec<String>> {
 
 /// Save the selected agents to the lock file.
 pub fn save_selected_agents(agents: Vec<String>) -> std::io::Result<()> {
-	let mut lock = read_skill_lock();
-	lock.last_selected_agents = Some(agents);
-	write_skill_lock(&lock)
+	modify_skill_lock(|lock| {
+		lock.last_selected_agents = Some(agents);
+	})
 }
 
 #[cfg(test)]
@@ -345,5 +341,36 @@ mod tests {
 		let removed = retain_locked_skills(&present(&["my-skill"])).unwrap();
 		assert!(removed.is_empty());
 		assert!(read_skill_lock().skills.contains_key("My Skill"));
+	}
+
+	#[test]
+	fn retain_locked_skills_matches_legacy_sanitized_key() {
+		let _guard = TestLockGuard::new();
+		add_skill_to_lock("İstanbul", test_entry()).unwrap();
+		let removed = retain_locked_skills(&present(&["stanbul"])).unwrap();
+		assert!(removed.is_empty());
+		assert!(read_skill_lock().skills.contains_key("İstanbul"));
+	}
+
+	#[test]
+	fn concurrent_rmw_no_lost_update() {
+		let _guard = TestLockGuard::new();
+		let threads = 16;
+		let barrier = std::sync::Arc::new(std::sync::Barrier::new(threads));
+		std::thread::scope(|scope| {
+			for i in 0..threads {
+				let barrier = barrier.clone();
+				scope.spawn(move || {
+					barrier.wait();
+					add_skill_to_lock(&format!("skill-{i}"), test_entry())
+						.unwrap();
+				});
+			}
+		});
+
+		let lock = read_skill_lock();
+		for i in 0..threads {
+			assert!(lock.skills.contains_key(&format!("skill-{i}")));
+		}
 	}
 }
