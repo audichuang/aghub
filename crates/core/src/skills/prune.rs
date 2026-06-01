@@ -20,7 +20,7 @@
 //! per-scope dirs from the agent descriptors.
 
 use crate::models::ResourceScope;
-use skill::{ScanError, ScanOptions};
+use skill::ScanError;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -117,7 +117,7 @@ pub fn prune_lock_scanning(
 		return Err(PruneError::MissingProjectRoot);
 	}
 	let dirs = scope_skill_dirs(scope, project_root);
-	prune_lock_from_dirs(scope, &dirs, project_root, scan_skill_dir)
+	prune_lock_from_dirs(scope, &dirs, project_root, top_level_skill_dirs)
 }
 
 /// Dry-run: report which lock entries WOULD be pruned, without mutating the lock.
@@ -138,7 +138,7 @@ where
 	let keys = locked_keys(scope, project_root);
 	Ok(keys
 		.into_iter()
-		.filter(|k| !disk.contains(&skill::sanitize_name(k)))
+		.filter(|k| !skill::skill_present_on_disk(k, &disk))
 		.collect())
 }
 
@@ -151,7 +151,7 @@ pub fn preview_prune(
 		return Err(PruneError::MissingProjectRoot);
 	}
 	let dirs = scope_skill_dirs(scope, project_root);
-	preview_prune_from_dirs(scope, &dirs, project_root, scan_skill_dir)
+	preview_prune_from_dirs(scope, &dirs, project_root, top_level_skill_dirs)
 }
 
 /// Current lock entry keys for a scope (no mutation).
@@ -184,18 +184,24 @@ fn scope_skill_dirs(
 	super::removal::agent_skill_dirs_in_scope(resource_scope, project_root)
 }
 
-/// The production scanner: full-depth, gitignore-agnostic (a skill on disk is a
-/// skill regardless of `.gitignore`).
-fn scan_skill_dir(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
-	skill::scan_skills(
-		dir,
-		ScanOptions {
-			max_depth: 10,
-			full_depth: true,
-			respect_gitignore: false,
-		},
-		vec![],
-	)
+fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
+	if !dir.exists() {
+		return Err(ScanError::PathNotFound(dir.to_path_buf()));
+	}
+	let mut dirs = Vec::new();
+	let entries = std::fs::read_dir(dir)
+		.map_err(|_| ScanError::PermissionDenied(dir.to_path_buf()))?;
+	for entry in entries {
+		let entry = entry
+			.map_err(|_| ScanError::PermissionDenied(dir.to_path_buf()))?;
+		let file_type = entry
+			.file_type()
+			.map_err(|_| ScanError::PermissionDenied(entry.path()))?;
+		if file_type.is_dir() {
+			dirs.push(entry.path());
+		}
+	}
+	Ok(dirs)
 }
 
 #[cfg(test)]
@@ -374,7 +380,7 @@ mod tests {
 
 		let got = collect_disk_dir_names(
 			std::slice::from_ref(&skills),
-			scan_skill_dir,
+			top_level_skill_dirs,
 		)
 		.unwrap();
 
@@ -383,10 +389,35 @@ mod tests {
 	}
 
 	#[test]
+	fn prune_disk_set_excludes_bundled_nested_subskill() {
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock("foo", global_entry()).unwrap();
+		skill::lock::add_skill_to_lock("bundled", global_entry()).unwrap();
+		let root = tempdir().unwrap();
+		let skills = root.path().join("skills");
+		write_skill_md(&skills.join("foo"), "foo");
+		write_skill_md(&skills.join("foo/bundled"), "bundled");
+
+		let pruned = prune_lock_from_dirs(
+			PruneScope::Global,
+			std::slice::from_ref(&skills),
+			None,
+			top_level_skill_dirs,
+		)
+		.unwrap();
+
+		assert_eq!(pruned, vec!["bundled".to_string()]);
+		let lock = skill::read_skill_lock();
+		assert!(lock.skills.contains_key("foo"));
+		assert!(!lock.skills.contains_key("bundled"));
+	}
+
+	#[test]
 	fn collect_disk_dir_names_skips_nonexistent_dirs() {
 		let root = tempdir().unwrap();
 		let missing = root.path().join("nope");
-		let got = collect_disk_dir_names(&[missing], scan_skill_dir).unwrap();
+		let got =
+			collect_disk_dir_names(&[missing], top_level_skill_dirs).unwrap();
 		assert!(got.is_empty());
 	}
 

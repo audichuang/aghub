@@ -61,6 +61,43 @@ pub fn assert_contained(target: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
 	None
 }
 
+pub fn assert_targets_contained(
+	targets: &[PathBuf],
+	agent_skill_dirs: &[PathBuf],
+	project_root: Option<&Path>,
+) -> std::io::Result<()> {
+	let roots = allowed_skill_roots(agent_skill_dirs, project_root);
+	for target in targets {
+		if assert_contained(target, &roots).is_some() {
+			continue;
+		}
+		if contained_nonexistent_target(target, &roots) {
+			continue;
+		}
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::PermissionDenied,
+			format!("target escapes allowed skill roots: {}", target.display()),
+		));
+	}
+	Ok(())
+}
+
+fn contained_nonexistent_target(target: &Path, roots: &[PathBuf]) -> bool {
+	if target.exists() {
+		return false;
+	}
+	let Some(parent) = target.parent() else {
+		return false;
+	};
+	let Ok(parent) = parent.canonicalize() else {
+		return false;
+	};
+	roots.iter().any(|root| {
+		let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+		parent.starts_with(root)
+	})
+}
+
 /// On-disk layout of an installed skill, deciding how it is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
@@ -135,22 +172,23 @@ fn plan_symlink_removal(
 	let mut skipped: Vec<PathBuf> = Vec::new();
 	let mut other_refs = false;
 	let mut unresolvable = false;
+	let mut targeted_anything = false;
 
 	for dir in all_agent_dirs {
 		let entry = dir.join(safe);
 		let Ok(meta) = std::fs::symlink_metadata(&entry) else {
 			continue;
 		};
-		if !meta.file_type().is_symlink() {
-			continue; // sweep only symlink views in this layout
-		}
 		let targeted =
 			all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
 		match entry.canonicalize() {
 			Ok(resolved) => {
 				if canonical_real.as_deref() == Some(resolved.as_path()) {
-					if targeted {
+					if meta.file_type().is_symlink() && targeted {
 						paths.push(entry);
+						targeted_anything = true;
+					} else if targeted {
+						targeted_anything = true;
 					} else {
 						other_refs = true;
 					}
@@ -161,8 +199,9 @@ fn plan_symlink_removal(
 			Err(_) => {
 				// Dangling/broken link: unlinking it is safe, but we cannot
 				// prove it does not reference the canonical, so keep canonical.
-				if targeted {
+				if meta.file_type().is_symlink() && targeted {
 					paths.push(entry);
+					targeted_anything = true;
 				}
 				unresolvable = true;
 			}
@@ -173,6 +212,9 @@ fn plan_symlink_removal(
 		let keep = other_refs || unresolvable;
 		if keep {
 			skipped.push(canon);
+		} else if !targeted_anything {
+			// No targeted link/direct-reader was found, so there is no removal
+			// effect to pair with deleting the canonical master.
 		} else if assert_contained(&canon, roots).is_some() {
 			paths.push(canon);
 		} else {
@@ -251,11 +293,12 @@ pub struct RemovalOutcome {
 }
 
 /// What `execute_removal` actually did on disk.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct RemovalReport {
 	pub removed: Vec<PathBuf>,
 	/// Dirs refused at delete time because they escaped the allow-list (TOCTOU).
 	pub skipped: Vec<PathBuf>,
+	pub failed: Vec<(PathBuf, std::io::Error)>,
 }
 
 /// Execute a [`RemovalPlan`]'s deletions with delete-time safety re-checks:
@@ -274,23 +317,32 @@ pub fn execute_removal(
 		let meta = match std::fs::symlink_metadata(path) {
 			Ok(m) => m,
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-			Err(e) => return Err(e),
+			Err(e) => {
+				report.failed.push((path.clone(), e));
+				continue;
+			}
 		};
 		let ft = meta.file_type();
 		if ft.is_symlink() {
-			std::fs::remove_file(path)?; // unlink the link only
-			report.removed.push(path.clone());
+			match std::fs::remove_file(path) {
+				Ok(()) => report.removed.push(path.clone()),
+				Err(e) => report.failed.push((path.clone(), e)),
+			}
 		} else if ft.is_dir() {
 			// Re-assert containment immediately before remove_dir_all.
 			if assert_contained(path, roots).is_some() {
-				std::fs::remove_dir_all(path)?;
-				report.removed.push(path.clone());
+				match std::fs::remove_dir_all(path) {
+					Ok(()) => report.removed.push(path.clone()),
+					Err(e) => report.failed.push((path.clone(), e)),
+				}
 			} else {
 				report.skipped.push(path.clone());
 			}
 		} else {
-			std::fs::remove_file(path)?;
-			report.removed.push(path.clone());
+			match std::fs::remove_file(path) {
+				Ok(()) => report.removed.push(path.clone()),
+				Err(e) => report.failed.push((path.clone(), e)),
+			}
 		}
 	}
 	Ok(report)
@@ -503,6 +555,61 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
+	fn plan_removal_keeps_canonical_when_direct_reader_still_references_it() {
+		let tmp = tempdir().unwrap();
+		let canonical = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&canonical);
+		let claude = tmp.path().join(".claude/skills");
+		let universal = tmp.path().join(".agents/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&canonical, &claude.join("foo"));
+		let agent_dirs = vec![claude.clone(), universal.clone()];
+		let skill = symlink_skill(&canonical, &claude);
+
+		let plan = plan_removal(
+			&skill,
+			Some(claude.as_path()),
+			&agent_dirs,
+			Some(tmp.path()),
+			false,
+		);
+
+		assert!(plan.paths.contains(&claude.join("foo")));
+		assert!(
+			!plan.paths.contains(&canonical),
+			"canonical kept while direct reader still resolves to it"
+		);
+		assert!(plan.skipped.iter().any(|p| p == &canonical));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn plan_removal_no_target_does_not_schedule_canonical() {
+		let tmp = tempdir().unwrap();
+		let canonical = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&canonical);
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		let agent_dirs = vec![claude.clone()];
+		let skill = symlink_skill(&canonical, &claude);
+
+		let plan = plan_removal(
+			&skill,
+			Some(claude.as_path()),
+			&agent_dirs,
+			Some(tmp.path()),
+			false,
+		);
+
+		assert!(plan.paths.is_empty());
+		assert!(
+			!plan.paths.contains(&canonical),
+			"canonical must not be scheduled when no target matched"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
 	fn plan_removal_canonicalize_failure_keeps_canonical_not_no_match() {
 		let tmp = tempdir().unwrap();
 		let canonical = tmp.path().join(".agents/skills/foo");
@@ -653,6 +760,51 @@ mod tests {
 		let report =
 			execute_removal(&plan, &[tmp.path().to_path_buf()]).unwrap();
 		assert!(report.removed.is_empty());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn execute_removal_continues_after_one_failure_and_reports() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempdir().unwrap();
+		let root = tmp.path().join("skills");
+		std::fs::create_dir_all(&root).unwrap();
+		let first = root.join("first");
+		let second = root.join("second");
+		std::fs::write(&first, "first").unwrap();
+		std::fs::write(&second, "second").unwrap();
+
+		let blocked_parent = tmp.path().join("blocked");
+		std::fs::create_dir_all(&blocked_parent).unwrap();
+		let blocked = blocked_parent.join("blocked");
+		std::fs::write(&blocked, "blocked").unwrap();
+		let original_perms =
+			std::fs::metadata(&blocked_parent).unwrap().permissions();
+		std::fs::set_permissions(
+			&blocked_parent,
+			std::fs::Permissions::from_mode(0o500),
+		)
+		.unwrap();
+
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths: vec![first.clone(), blocked.clone(), second.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+		};
+		let report =
+			execute_removal(&plan, &[root.clone(), blocked_parent.clone()])
+				.unwrap();
+		std::fs::set_permissions(&blocked_parent, original_perms).unwrap();
+
+		assert!(report.removed.contains(&first));
+		assert!(report.removed.contains(&second));
+		assert_eq!(report.failed.len(), 1);
+		assert_eq!(report.failed[0].0, blocked);
+		assert!(!first.exists());
+		assert!(!second.exists());
+		assert!(blocked.exists());
 	}
 
 	#[test]

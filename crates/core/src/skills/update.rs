@@ -2,6 +2,7 @@
 //! and a fetched source folder. (Fetch + creds live in crates/api.)
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UncheckableReason {
@@ -99,22 +100,93 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	}
 }
 
-/// Compare `stored` (content_hash/computed_hash) against the freshly recomputed
-/// `fetched_dir` hash. `stored == None` or placeholder → recompute-only (auto-heal):
-/// returns UpToDate when stored is unknown and recompute succeeds (no false positive).
-pub fn compare_hashes(
-	stored: Option<&str>,
-	fetched_dir: &Path,
-) -> Result<SkillUpdateStatus, std::io::Error> {
-	let fresh = skill::compute_skill_folder_hash(fetched_dir)
-		.map_err(|e| std::io::Error::other(e.to_string()))?;
-	match stored {
-		// unknown or placeholder → auto-heal: no false UpdateAvailable
-		None => Ok(SkillUpdateStatus::UpToDate),
-		Some(h) if skill::is_placeholder_digest(h) => {
-			Ok(SkillUpdateStatus::UpToDate)
+pub fn stage_and_swap_dir(
+	source_dir: &Path,
+	target_dir: &Path,
+) -> std::io::Result<()> {
+	let parent = target_dir.parent().ok_or_else(|| {
+		std::io::Error::new(
+			std::io::ErrorKind::InvalidInput,
+			format!("target has no parent: {}", target_dir.display()),
+		)
+	})?;
+	std::fs::create_dir_all(parent)?;
+
+	let staging_root = unique_temp_dir(parent, ".aghub-stage")?;
+	let staged = staging_root.join("skill");
+	copy_dir_recursive_skip_symlinks(source_dir, &staged)?;
+
+	let backup_root = unique_temp_dir(parent, ".aghub-backup")?;
+	let backup = backup_root.join("target");
+	let had_target = std::fs::symlink_metadata(target_dir).is_ok();
+	if had_target {
+		std::fs::rename(target_dir, &backup)?;
+	}
+
+	let swap_result = std::fs::rename(&staged, target_dir);
+	if let Err(error) = swap_result {
+		if had_target {
+			let _ = std::fs::rename(&backup, target_dir);
 		}
-		Some(h) => Ok(compare_known_hashes(h, &fresh)),
+		let _ = remove_path_any(&staging_root);
+		let _ = remove_path_any(&backup_root);
+		return Err(error);
+	}
+
+	let _ = remove_path_any(&backup_root);
+	let _ = remove_path_any(&staging_root);
+	Ok(())
+}
+
+fn copy_dir_recursive_skip_symlinks(
+	from: &Path,
+	to: &Path,
+) -> std::io::Result<()> {
+	std::fs::create_dir_all(to)?;
+	for entry in std::fs::read_dir(from)? {
+		let entry = entry?;
+		let file_type = entry.file_type()?;
+		if file_type.is_symlink() {
+			continue;
+		}
+		let from_path = entry.path();
+		let to_path = to.join(entry.file_name());
+		if file_type.is_dir() {
+			copy_dir_recursive_skip_symlinks(&from_path, &to_path)?;
+		} else if file_type.is_file() {
+			std::fs::copy(&from_path, &to_path)?;
+		}
+	}
+	Ok(())
+}
+
+fn unique_temp_dir(parent: &Path, prefix: &str) -> std::io::Result<PathBuf> {
+	static COUNTER: AtomicU64 = AtomicU64::new(0);
+	for _ in 0..100 {
+		let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+		let path = parent.join(format!("{prefix}-{}-{id}", std::process::id()));
+		match std::fs::create_dir(&path) {
+			Ok(()) => return Ok(path),
+			Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+			Err(e) => return Err(e),
+		}
+	}
+	Err(std::io::Error::new(
+		std::io::ErrorKind::AlreadyExists,
+		"could not create unique staging directory",
+	))
+}
+
+fn remove_path_any(path: &Path) -> std::io::Result<()> {
+	let meta = match std::fs::symlink_metadata(path) {
+		Ok(meta) => meta,
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+		Err(e) => return Err(e),
+	};
+	if meta.file_type().is_dir() && !meta.file_type().is_symlink() {
+		std::fs::remove_dir_all(path)
+	} else {
+		std::fs::remove_file(path)
 	}
 }
 
@@ -208,38 +280,41 @@ mod tests {
 	}
 
 	#[test]
-	fn same_content_is_up_to_date() {
-		let d = tempdir().unwrap();
-		fs::write(d.path().join("SKILL.md"), b"x").unwrap();
-		let h = skill::compute_skill_folder_hash(d.path()).unwrap();
-		assert_eq!(
-			compare_hashes(Some(&h), d.path()).unwrap(),
-			SkillUpdateStatus::UpToDate
-		);
+	fn stage_and_swap_dir_replaces_target_and_skips_symlinks() {
+		let parent = tempdir().unwrap();
+		let source = parent.path().join("source");
+		let target = parent.path().join("target");
+		fs::create_dir_all(source.join("nested")).unwrap();
+		fs::write(source.join("SKILL.md"), "new").unwrap();
+		fs::write(source.join("nested/file.txt"), "nested").unwrap();
+		#[cfg(unix)]
+		std::os::unix::fs::symlink(
+			parent.path().join("outside"),
+			source.join("link"),
+		)
+		.unwrap();
+		fs::create_dir_all(&target).unwrap();
+		fs::write(target.join("old.txt"), "old").unwrap();
+
+		stage_and_swap_dir(&source, &target).unwrap();
+
+		assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
+		assert!(target.join("nested/file.txt").exists());
+		assert!(!target.join("old.txt").exists());
+		#[cfg(unix)]
+		assert!(!target.join("link").exists());
 	}
+
 	#[test]
-	fn changed_content_is_update_available() {
-		let d = tempdir().unwrap();
-		fs::write(d.path().join("SKILL.md"), b"NEW").unwrap();
-		let st = compare_hashes(Some("oldhash"), d.path()).unwrap();
-		assert!(matches!(st, SkillUpdateStatus::UpdateAvailable { .. }));
-	}
-	#[test]
-	fn missing_hash_recomputes_no_false_positive() {
-		let d = tempdir().unwrap();
-		fs::write(d.path().join("SKILL.md"), b"x").unwrap();
-		assert_eq!(
-			compare_hashes(None, d.path()).unwrap(),
-			SkillUpdateStatus::UpToDate
-		);
-	}
-	#[test]
-	fn placeholder_hash_auto_heals() {
-		let d = tempdir().unwrap();
-		fs::write(d.path().join("SKILL.md"), b"x").unwrap();
-		let st =
-			compare_hashes(Some(skill::EMPTY_SKILLS_LOCK_DIGEST), d.path())
-				.unwrap();
-		assert_eq!(st, SkillUpdateStatus::UpToDate);
+	fn stage_and_swap_dir_creates_fresh_parent() {
+		let tmp = tempdir().unwrap();
+		let source = tmp.path().join("source");
+		let target = tmp.path().join("missing-parent/target");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(source.join("SKILL.md"), "new").unwrap();
+
+		stage_and_swap_dir(&source, &target).unwrap();
+
+		assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
 	}
 }

@@ -174,11 +174,14 @@ pub(crate) fn skill_root_unchecked(skill: &Skill) -> Option<PathBuf> {
 		.or(skill.source_path.as_deref())
 		.map(resolve_skill_file)?;
 
-	Some(if path.is_dir() {
-		path
-	} else {
-		// A `SKILL.md` file (or a non-existent path) → its parent skill folder.
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+
+	Some(if is_skill_file {
 		path.parent().map(Path::to_path_buf).unwrap_or(path)
+	} else {
+		path
 	})
 }
 
@@ -903,6 +906,16 @@ mod tests {
 		assert!(dest_root
 			.join(".cursor/skills/repo-helper/assets/notes.txt")
 			.exists());
+	}
+
+	#[test]
+	fn skill_root_unchecked_returns_nonexistent_dir_as_is() {
+		let temp = tempdir().unwrap();
+		let missing = temp.path().join(".agents/skills/foo");
+		let mut skill = Skill::new("foo");
+		skill.canonical_path = Some(missing.to_string_lossy().to_string());
+
+		assert_eq!(skill_root_unchecked(&skill), Some(missing));
 	}
 
 	#[test]

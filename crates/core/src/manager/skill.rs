@@ -334,9 +334,14 @@ impl ConfigManager {
 				p.display()
 			);
 		}
+		for (p, error) in &report.failed {
+			warn!("failed removal of '{}': {}", p.display(), error);
+		}
 		// Reflect what actually happened on disk in the returned plan.
 		plan.paths = report.removed;
 		plan.skipped.extend(report.skipped);
+		plan.skipped
+			.extend(report.failed.into_iter().map(|(path, _)| path));
 
 		// Skills are disk-derived; drop the in-memory view (save_current persists
 		// MCPs, not skills, so this is a best-effort cache update).
@@ -344,7 +349,6 @@ impl ConfigManager {
 		if let Some(idx) = cfg.skills.iter().position(|s| s.name == name) {
 			cfg.skills.remove(idx);
 		}
-		self.save_current()?;
 
 		Ok(removal::RemovalOutcome {
 			plan,
