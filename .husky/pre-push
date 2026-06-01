@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+set -e
+
+echo "Running format checks..."
+cargo fmt --all -- --check
+bun run format:check
+
+echo "Running Rust clippy..."
+cargo clippy --workspace -- -D warnings
+
+echo "Running desktop lint and typecheck..."
+cd crates/desktop
+bun run lint:check
+bun run typecheck
