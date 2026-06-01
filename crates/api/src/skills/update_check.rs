@@ -33,6 +33,9 @@ pub struct EntryInput {
 	pub scope: String,
 	/// Upstream coordinate.
 	pub source_ref: SourceRef,
+	/// Lock `source_type` (e.g. `github`/`local`). Drives pre-fetch source
+	/// classification: `local` → `Uncheckable{Local}` without a fetch.
+	pub source_type: String,
 	/// npx-form `<dir>/SKILL.md` (root → `SKILL.md`). `None` → `Uncheckable{NoPath}`.
 	pub skill_path: Option<String>,
 	/// Stored `content_hash`/`computed_hash`. `None`/placeholder → auto-heal.
@@ -367,6 +370,27 @@ pub async fn check_updates(
 			}
 		}
 
+		// 3.5) Pre-classify the source. SSH/git@, local, and non-HTTPS sources
+		// cannot be checked via the HTTPS fetch path, so emit the spec-mandated
+		// Uncheckable{ssh|local|unsupportedScheme} directly instead of attempting
+		// a fetch that would misreport as `network`. The result is stable, so
+		// cache it like the other terminal outcomes.
+		if let Some(reason) = aghub_core::skills::update::precheck_source(
+			&members[0].source_type,
+			&sr.source,
+		) {
+			let status = SkillUpdateStatus::Uncheckable { reason };
+			deps.cache.put(
+				sr.clone(),
+				CachedGroup::Terminal(status.clone()),
+				now,
+			);
+			for m in &members {
+				out.push(terminal_output(m, &status));
+			}
+			continue;
+		}
+
 		// 4) Resolve a token (binding → host keychain) then fetch.
 		let token = deps
 			.resolver
@@ -535,6 +559,7 @@ mod tests {
 				source: src.into(),
 				ref_: r.map(Into::into),
 			},
+			source_type: "github".into(),
 			skill_path: Some("SKILL.md".into()),
 			stored_hash: None,
 			local_hash: None,
@@ -569,6 +594,75 @@ mod tests {
 			}
 		);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "offline must not fetch");
+	}
+
+	#[tokio::test]
+	async fn local_source_type_is_uncheckable_without_fetch() {
+		let fetcher = Arc::new(StubFetcher {
+			root: None,
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+		};
+		let mut e = entry("local-skill", "/home/u/local-skill", None);
+		e.source_type = "local".into();
+		let out = check_updates(vec![e], deps).await;
+		assert_eq!(out.len(), 1);
+		assert_eq!(
+			out[0].status,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Local
+			}
+		);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			0,
+			"local source must not fetch"
+		);
+	}
+
+	#[tokio::test]
+	async fn ssh_source_is_uncheckable_without_fetch() {
+		let fetcher = Arc::new(StubFetcher {
+			root: None,
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+		};
+		let out = check_updates(
+			vec![entry("s", "git@github.com:o/r.git", None)],
+			deps,
+		)
+		.await;
+		assert_eq!(
+			out[0].status,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Ssh
+			}
+		);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			0,
+			"ssh source must not fetch"
+		);
 	}
 
 	#[tokio::test]
