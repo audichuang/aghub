@@ -100,6 +100,8 @@ export type { SkillTreeQuery } from "./SkillTreeQuery";
 export type { SkillUpdateResponse } from "./SkillUpdateResponse";
 export type { SkillUpdateStatusResponse } from "./SkillUpdateStatusResponse";
 export type { SkillsPathsDto } from "./SkillsPathsDto";
+export type { SourceCredentialBindingRequest } from "./SourceCredentialBindingRequest";
+export type { SourceCredentialBindingResponse } from "./SourceCredentialBindingResponse";
 export type { SubAgentCapabilitiesDto } from "./SubAgentCapabilitiesDto";
 export type { SubAgentResponse } from "./SubAgentResponse";
 export type { TargetDto } from "./TargetDto";

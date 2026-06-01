@@ -6,6 +6,8 @@ import {
 import type {
 	CreateCredentialRequest,
 	CredentialResponse,
+	SourceCredentialBindingRequest,
+	SourceCredentialBindingResponse,
 } from "../generated/dto";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys";
@@ -22,6 +24,17 @@ export function credentialsListQueryOptions({
 	return queryOptions({
 		queryKey: queryKeys.credentials.list(),
 		queryFn: () => api.credentials.list(),
+		enabled,
+	});
+}
+
+export function sourceCredentialBindingsQueryOptions({
+	api,
+	enabled,
+}: CredentialsQueryParams) {
+	return queryOptions({
+		queryKey: queryKeys.credentials.sourceBindings(),
+		queryFn: () => api.credentials.listSourceBindings(),
 		enabled,
 	});
 }
@@ -50,6 +63,30 @@ export function createCredentialMutationOptions({
 			await invalidateCredentialQueries(queryClient);
 			await onSuccess?.(data);
 		},
+	});
+}
+
+interface BindSourceCredentialMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: (data: SourceCredentialBindingResponse) => void | Promise<void>;
+	onError?: (error: Error) => void;
+}
+
+export function bindSourceCredentialMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+	onError,
+}: BindSourceCredentialMutationParams) {
+	return mutationOptions({
+		mutationFn: (body: SourceCredentialBindingRequest) =>
+			api.credentials.bindSource(body),
+		onSuccess: async (data) => {
+			await invalidateCredentialQueries(queryClient);
+			await onSuccess?.(data);
+		},
+		onError,
 	});
 }
 

@@ -54,6 +54,8 @@ import type {
 	SkillResponse,
 	SkillTreeNodeResponse,
 	SkillUpdateResponse,
+	SourceCredentialBindingRequest,
+	SourceCredentialBindingResponse,
 	SubAgentResponse,
 	ToolInfoDto,
 	TransferRequest,
@@ -545,8 +547,18 @@ export function createApi(baseUrl: string) {
 			list(): Promise<CredentialResponse[]> {
 				return client.get("credentials").json();
 			},
+			listSourceBindings(): Promise<SourceCredentialBindingResponse[]> {
+				return client.get("credentials/source-bindings").json();
+			},
 			create(body: CreateCredentialRequest): Promise<CredentialResponse> {
 				return client.post("credentials", { json: body }).json();
+			},
+			bindSource(
+				body: SourceCredentialBindingRequest,
+			): Promise<SourceCredentialBindingResponse> {
+				return client
+					.put("credentials/source-bindings", { json: body })
+					.json();
 			},
 			delete(id: string): Promise<void> {
 				return client.delete(`credentials/${id}`).then(() => undefined);

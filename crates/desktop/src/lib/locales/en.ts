@@ -113,6 +113,12 @@ export default {
 	validationCredentialNameRequired: "Enter a credential name.",
 	validationCredentialTokenRequired: "Enter a GitHub token.",
 	credentialTokenGenerate: "Generate on GitHub →",
+	bind: "Bind",
+	bindCredentialToSource: "Bind Credential to Source",
+	sourceCredentialBound: "Credential bound to source",
+	sourceCredentialBindingError: "Failed to bind credential to source",
+	createCredentialAndBind: "Add Credential and Bind",
+	noCredentialsAvailable: "No credentials available.",
 
 	// Settings
 	appearance: "Appearance",

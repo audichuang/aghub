@@ -57,6 +57,7 @@ export const queryKeys = {
 	credentials: {
 		all: () => ["credentials"] as const,
 		list: () => ["credentials", "list"] as const,
+		sourceBindings: () => ["credentials", "source-bindings"] as const,
 	},
 	inferenceProviders: {
 		all: () => ["inference-providers"] as const,

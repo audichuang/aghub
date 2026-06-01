@@ -106,6 +106,12 @@ export default {
 	validationCredentialNameRequired: "請輸入憑證名稱。",
 	validationCredentialTokenRequired: "請輸入 GitHub 權杖。",
 	credentialTokenGenerate: "在 GitHub 生成 →",
+	bind: "綁定",
+	bindCredentialToSource: "將憑證綁定到來源",
+	sourceCredentialBound: "憑證已綁定到來源",
+	sourceCredentialBindingError: "憑證綁定來源失敗",
+	createCredentialAndBind: "新增憑證並綁定",
+	noCredentialsAvailable: "目前沒有可用憑證。",
 
 	// Settings
 	appearance: "外觀",

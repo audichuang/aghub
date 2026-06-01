@@ -348,6 +348,23 @@ with bounds and a fixture-pinned collator; placeholder auto-heal; ref handling
 via gix symref/tag/SHA; treeless fetch with cache/TTL/timeout; credential
 redaction.
 
+**Implementation note (2026-06-01):**
+
+- Source→credential binding write path is implemented with
+  `GET /credentials/source-bindings` and
+  `PUT /credentials/source-bindings`, plus a desktop auth-resolution dialog.
+- Binding keys are the exact update-check source strings, not display URLs or
+  normalized repo shorthands. Global skills bind `sourceUrl`; project skills
+  bind the project lock `source`.
+- The same repo may require separate bindings across scopes because global
+  entries use URLs while project entries may use shorthand sources.
+- Full settings-page source binding management is not implemented yet.
+- True npx byte-for-byte hash parity remains deferred beyond the committed
+  fixture matrix.
+- Fetch timeout around `spawn_blocking` is not hard cancellation of the
+  underlying blocking git fetch.
+- Cross-process keyring/lock read-modify-write races remain known limitations.
+
 **Remaining (non-blocking) open items:**
 
 - **Full locale-independent hash parity:** deferred. Current parity is

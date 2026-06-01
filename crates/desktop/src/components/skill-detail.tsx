@@ -34,9 +34,9 @@ import {
 	skillContentQueryOptions,
 	skillTreeQueryOptions,
 } from "../requests/skills";
-import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { SkillUpdateBadge } from "./skill-update-badge";
 import { ManageSkillAgentsDialog } from "./manage-skill-agents-dialog";
+import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import {
 	DeleteSkillDialog,
 	DeleteSkillLocationDialog,
@@ -165,6 +165,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					// (GitHub tree) skillFolderHash. Prefer whichever is present.
 					hash: entry.contentHash || entry.skillFolderHash,
 					sourceUrl: entry.sourceUrl,
+					bindingSource: entry.sourceUrl,
 					skillPath: entry.skillPath ?? null,
 				};
 			}
@@ -177,6 +178,9 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					source: entry.source,
 					sourceType: entry.sourceType,
 					hash: entry.computedHash,
+					sourceUrl: null,
+					bindingSource: entry.source,
+					skillPath: null,
 				};
 			}
 		}
@@ -216,15 +220,15 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	// Host used to prefill the credential name so the update-check host-fallback
 	// resolver (a credential whose name matches the host) can find it.
 	const credentialHost = useMemo(() => {
-		if (!sourceUrl) {
+		if (!currentSkillSource?.bindingSource) {
 			return "";
 		}
 		try {
-			return new URL(sourceUrl).host;
+			return new URL(currentSkillSource.bindingSource).host;
 		} catch {
 			return "";
 		}
-	}, [sourceUrl]);
+	}, [currentSkillSource]);
 
 	const enabledAgentIds = useMemo(
 		() =>
@@ -471,11 +475,15 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 															status={
 																updateStatus
 															}
-															onResolveAuth={() =>
-																setCredDialogOpen(
-																	true,
-																)
-															}
+															onResolveAuth={() => {
+																if (
+																	currentSkillSource.bindingSource
+																) {
+																	setCredDialogOpen(
+																		true,
+																	);
+																}
+															}}
 														/>
 													) : (
 														<Button
@@ -726,21 +734,21 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 				/>
 			)}
 
-			{/* Credential picker for an Uncheckable{auth} update check. Keyed by
-			    host so the form re-initializes its prefilled name on change. */}
-			<CreateCredentialDialog
-				key={credentialHost}
-				isOpen={credDialogOpen}
-				defaultName={credentialHost}
-				onClose={() => setCredDialogOpen(false)}
-				onSuccess={() => {
-					setCredDialogOpen(false);
-					checkUpdatesMutation.mutate({
-						scope: primaryScope,
-						projectRoot: projectPath,
-					});
-				}}
-			/>
+			{currentSkillSource?.bindingSource && (
+				<SourceCredentialBindingDialog
+					key={currentSkillSource.bindingSource}
+					isOpen={credDialogOpen}
+					bindingSource={currentSkillSource.bindingSource}
+					defaultCredentialHost={credentialHost || undefined}
+					onClose={() => setCredDialogOpen(false)}
+					onBound={() =>
+						checkUpdatesMutation.mutate({
+							scope: primaryScope,
+							projectRoot: projectPath,
+						})
+					}
+				/>
+			)}
 		</>
 	);
 }

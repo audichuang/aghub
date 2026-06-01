@@ -162,6 +162,8 @@ fn build_rocket(
 				routes::integrations::open_with_editor,
 				routes::integrations::get_preferences,
 				routes::credentials::list_credentials,
+				routes::credentials::list_source_bindings_route,
+				routes::credentials::bind_source_credential,
 				routes::credentials::create_credential,
 				routes::credentials::delete_credential,
 				routes::inference::list_inference_providers,

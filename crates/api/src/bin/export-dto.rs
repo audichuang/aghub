@@ -11,7 +11,10 @@ use aghub_api::dto::{
 		SubAgentCapabilitiesDto,
 	},
 	common::ConfigSource,
-	credential::{CreateCredentialRequest, CredentialResponse},
+	credential::{
+		CreateCredentialRequest, CredentialResponse,
+		SourceCredentialBindingRequest, SourceCredentialBindingResponse,
+	},
 	inference::{
 		AgentProviderCredentialDto,
 		AgentProviderMatchedInferenceProviderResponse,
@@ -147,6 +150,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<ConfigSource>(&cfg)?;
 	export_type::<CreateCredentialRequest>(&cfg)?;
 	export_type::<CredentialResponse>(&cfg)?;
+	export_type::<SourceCredentialBindingRequest>(&cfg)?;
+	export_type::<SourceCredentialBindingResponse>(&cfg)?;
 	export_type::<AgentProviderSourceDto>(&cfg)?;
 	export_type::<AgentProviderCredentialDto>(&cfg)?;
 	export_type::<AgentProviderModelResponse>(&cfg)?;
