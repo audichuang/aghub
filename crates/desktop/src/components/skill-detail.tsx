@@ -243,7 +243,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 		() =>
 			new Set(
 				availableAgents
-					.filter((agent) => !agent.isDisabled)
+					.filter((agent) => agent.isUsable)
 					.map((agent) => agent.id),
 			),
 		[availableAgents],
