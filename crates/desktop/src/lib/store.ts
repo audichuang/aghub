@@ -1,4 +1,10 @@
 export { disableAgent, enableAgent, getDisabledAgents } from "./store/agents";
+export {
+	addConnection,
+	getConnections,
+	removeConnection,
+	updateConnection,
+} from "./store/connections";
 export { getStore, initStore } from "./store/index";
 export {
 	getIntegrationPreferences,
@@ -17,6 +23,7 @@ export {
 	setStarredSkills,
 } from "./store/stars";
 export type {
+	Connection,
 	IntegrationPreferences,
 	OnboardingProgress,
 	Project,

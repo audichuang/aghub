@@ -31,7 +31,7 @@ import SubAgentsPage from "./pages/settings/sub-agents";
 import SkillsShPage from "./pages/skills-sh";
 import SkillsSearchPage from "./pages/skills-sh/search";
 import { AgentAvailabilityProvider } from "./providers/agent-availability";
-import { ServerProvider } from "./providers/server";
+import { ConnectionProvider } from "./providers/connection";
 import { ThemeProvider } from "./providers/theme";
 import "./lib/i18n";
 
@@ -171,7 +171,7 @@ function App() {
 		<QueryClientProvider client={queryClient}>
 			<Toast.Provider placement="bottom end" />
 			<ThemeProvider>
-				<ServerProvider>
+				<ConnectionProvider>
 					<AgentAvailabilityProvider>
 						<NuqsAdapter>
 							<Router>
@@ -291,7 +291,7 @@ function App() {
 							</Router>
 						</NuqsAdapter>
 					</AgentAvailabilityProvider>
-				</ServerProvider>
+				</ConnectionProvider>
 			</ThemeProvider>
 		</QueryClientProvider>
 	);

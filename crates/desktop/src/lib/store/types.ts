@@ -14,6 +14,21 @@ export interface Project {
 	path: string;
 }
 
+/**
+ * A user-defined remote SSH connection persisted in the Tauri store.
+ * Mirrors the Rust `Connection` struct (camelCase JSON). The implicit
+ * Local connection (id "local") is synthesized in the provider and is
+ * NEVER persisted here.
+ */
+export interface Connection {
+	id: string;
+	label: string;
+	sshTarget: string;
+	user?: string;
+	port?: number;
+	remoteAghubPath?: string;
+}
+
 export interface IntegrationPreferences {
 	codeEditor?: CodeEditorType;
 }

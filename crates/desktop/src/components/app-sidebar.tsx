@@ -5,6 +5,7 @@ import { Link, useLocation } from "wouter";
 import { useSidebarNavigation } from "../hooks/use-sidebar-navigation";
 import { isSidebarHrefActive } from "../lib/sidebar-navigation";
 import { cn } from "../lib/utils";
+import { ConnectionSwitcher } from "./connection-switcher";
 import { ProjectList } from "./project-list";
 
 export function AppSidebar() {
@@ -19,6 +20,9 @@ export function AppSidebar() {
 			className="flex w-60 shrink-0 flex-col border-r border-border p-3"
 		>
 			<aside className="flex h-full flex-col">
+				<div className="mb-2">
+					<ConnectionSwitcher />
+				</div>
 				<nav className="flex flex-col gap-0.5">
 					{visibleSidebarItems.map((item) => {
 						const Icon = item.icon;

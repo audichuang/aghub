@@ -1,0 +1,55 @@
+import type { ReactNode } from "react";
+import { createContext, use } from "react";
+import type { ConnectionStatus } from "../lib/connection-logic";
+import type { Connection } from "../lib/store";
+
+export interface ConnectionContextValue {
+	/** Local + persisted remotes, Local always first. */
+	connections: Connection[];
+	/** The active connection id (default "local"). */
+	activeId: string;
+	/** The active connection, resolved from `connections`. */
+	activeConnection: Connection;
+	/** Projected 4-state status of the active connection's bring-up. */
+	status: ConnectionStatus;
+	/** Resolved local tunnel / server port, or null while connecting. */
+	port: number | null;
+	/** Resolved api baseUrl, or null while connecting. */
+	baseUrl: string | null;
+	/** Switch active connection (clears per-host data caches first). */
+	setActive: (id: string) => void;
+	addConnection: (connection: Omit<Connection, "id">) => Promise<Connection>;
+	updateConnection: (connection: Connection) => Promise<Connection>;
+	removeConnection: (id: string) => Promise<void>;
+	/** Probe a connection without mutating active state. */
+	testConnection: (connection: Connection) => Promise<TestResult>;
+	/** Tear down a remote tunnel + remote server. */
+	disconnect: (id: string) => Promise<void>;
+}
+
+/** Mirrors the Rust `TestResult` returned by `test_connection`. */
+export interface TestResult {
+	reachable: boolean;
+	apiPresent: boolean;
+	apiVersion: string | null;
+	compatible: boolean;
+	message: string;
+}
+
+export const ConnectionContext = createContext<ConnectionContextValue | null>(
+	null,
+);
+
+export function useConnectionContext(): ConnectionContextValue {
+	const ctx = use(ConnectionContext);
+	if (!ctx) {
+		throw new Error(
+			"useConnection must be used within <ConnectionProvider>",
+		);
+	}
+	return ctx;
+}
+
+export interface ConnectionProviderProps {
+	children: ReactNode;
+}
