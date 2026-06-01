@@ -321,6 +321,7 @@ export function openSkillFolderMutationOptions({ api }: { api: ApiClient }) {
 
 interface CheckSkillUpdatesMutationParams {
 	api: ApiClient;
+	queryClient: QueryClient;
 	onSuccess?: (data: SkillUpdateResponse[]) => void | Promise<void>;
 	onError?: (error: Error) => void;
 }
@@ -331,18 +332,32 @@ export interface CheckSkillUpdatesParams {
 	projectRoot?: string;
 }
 
+export function checkSkillUpdatesQueryKey(params?: CheckSkillUpdatesParams) {
+	return queryKeys.skills.updateChecks(
+		params?.scope ?? "global",
+		params?.projectRoot,
+	);
+}
+
 /// Modeled as a mutation (not a query) because it is an explicit, network-heavy
 /// user action (clones each source) — this gives clean onSuccess/onError hooks
 /// without a fetch-on-render effect. The global skill lock is the input scope.
 export function checkSkillUpdatesMutationOptions({
 	api,
+	queryClient,
 	onSuccess,
 	onError,
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
 		mutationFn: (params?: CheckSkillUpdatesParams) =>
 			api.skills.checkUpdates(params),
-		onSuccess,
+		onSuccess: async (data, variables) => {
+			queryClient.setQueryData(
+				checkSkillUpdatesQueryKey(variables),
+				data,
+			);
+			await onSuccess?.(data);
+		},
 		onError,
 	});
 }

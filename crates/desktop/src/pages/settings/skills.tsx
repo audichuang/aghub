@@ -6,7 +6,12 @@ import {
 	RectangleStackIcon,
 } from "@heroicons/react/24/solid";
 import { Button, Dropdown, Tooltip, toast } from "@heroui/react";
-import { useMutation, useSuspenseQuery } from "@tanstack/react-query";
+import {
+	useMutation,
+	useQuery,
+	useQueryClient,
+	useSuspenseQuery,
+} from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -23,12 +28,15 @@ import { useApi } from "../../hooks/use-api";
 import { cn } from "../../lib/utils";
 import {
 	checkSkillUpdatesMutationOptions,
+	checkSkillUpdatesQueryKey,
 	skillListQueryOptions,
 } from "../../requests/skills";
 
 export default function SkillsPage() {
 	const { t } = useTranslation();
 	const api = useApi();
+	const queryClient = useQueryClient();
+	const updateCheckParams = useMemo(() => ({ scope: "global" as const }), []);
 	const {
 		data: skills,
 		refetch,
@@ -39,15 +47,21 @@ export default function SkillsPage() {
 	const checkUpdatesMutation = useMutation(
 		checkSkillUpdatesMutationOptions({
 			api,
+			queryClient,
 			onError: () => toast.danger(t("skillUpdateCheckError")),
 		}),
 	);
+	const { data: cachedUpdateChecks } = useQuery({
+		queryKey: checkSkillUpdatesQueryKey(updateCheckParams),
+		queryFn: () => api.skills.checkUpdates(updateCheckParams),
+		enabled: false,
+	});
 	const updateStatuses = useMemo(
 		() =>
 			new Map<string, SkillUpdateResponse>(
-				(checkUpdatesMutation.data ?? []).map((s) => [s.name, s]),
+				(cachedUpdateChecks ?? []).map((s) => [s.name, s]),
 			),
-		[checkUpdatesMutation.data],
+		[cachedUpdateChecks],
 	);
 	const [searchQuery, setSearchQuery] = useState("");
 	const [selectedName, setSelectedName] = useQueryState("skill");
@@ -249,9 +263,7 @@ export default function SkillsPage() {
 						aria-label={t("checkForSkillUpdates")}
 						isDisabled={checkUpdatesMutation.isPending}
 						onPress={() =>
-							checkUpdatesMutation.mutate({
-								scope: "global",
-							})
+							checkUpdatesMutation.mutate(updateCheckParams)
 						}
 					>
 						<ArrowPathRoundedSquareIcon

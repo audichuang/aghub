@@ -2,6 +2,6 @@
 
 export type PruneLockResponse = {
 	pruned: Array<string>;
-	dry_run: boolean;
+	dryRun: boolean;
 	error: string | null;
 };

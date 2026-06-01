@@ -28,6 +28,7 @@ import { openWithEditorMutationOptions } from "../requests/integrations";
 import {
 	applySkillUpdateMutationOptions,
 	checkSkillUpdatesMutationOptions,
+	checkSkillUpdatesQueryKey,
 	globalSkillLockQueryOptions,
 	openSkillFolderMutationOptions,
 	projectSkillLockQueryOptions,
@@ -81,6 +82,10 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 
 	const skill = group.items[0];
 	const primaryScope = skill.source ?? "global";
+	const updateCheckParams = useMemo(
+		() => ({ scope: primaryScope, projectRoot: projectPath }),
+		[primaryScope, projectPath],
+	);
 	const trimmedSkillName = skill.name.trim();
 	const canSearchSkillsSh = trimmedSkillName.length >= 2;
 
@@ -107,6 +112,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	const checkUpdatesMutation = useMutation(
 		checkSkillUpdatesMutationOptions({
 			api,
+			queryClient,
 			onError: () => toast.danger(t("skillUpdateCheckError")),
 		}),
 	);
@@ -121,14 +127,17 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					return;
 				}
 				toast.success(t("skillSyncedSuccessfully"));
-				checkUpdatesMutation.mutate({
-					scope: primaryScope,
-					projectRoot: projectPath,
-				});
+				checkUpdatesMutation.mutate(updateCheckParams);
 			},
 			onError: () => toast.danger(t("skillUpdateApplyError")),
 		}),
 	);
+
+	const { data: cachedUpdateChecks } = useQuery({
+		queryKey: checkSkillUpdatesQueryKey(updateCheckParams),
+		queryFn: () => api.skills.checkUpdates(updateCheckParams),
+		enabled: false,
+	});
 
 	const { data: globalLock } = useQuery({
 		...globalSkillLockQueryOptions({ api }),
@@ -213,7 +222,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 
 	// This skill's entry in the last update-check result (undefined until a
 	// check has run, or for a skill absent from the global lock).
-	const updateStatus = checkUpdatesMutation.data?.find(
+	const updateStatus = cachedUpdateChecks?.find(
 		(s) => s.name === skill.name && s.scope === primaryScope,
 	);
 
@@ -495,11 +504,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 															}
 															onPress={() =>
 																checkUpdatesMutation.mutate(
-																	{
-																		scope: primaryScope,
-																		projectRoot:
-																			projectPath,
-																	},
+																	updateCheckParams,
 																)
 															}
 														>
@@ -742,10 +747,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					defaultCredentialHost={credentialHost || undefined}
 					onClose={() => setCredDialogOpen(false)}
 					onBound={() =>
-						checkUpdatesMutation.mutate({
-							scope: primaryScope,
-							projectRoot: projectPath,
-						})
+						checkUpdatesMutation.mutate(updateCheckParams)
 					}
 				/>
 			)}

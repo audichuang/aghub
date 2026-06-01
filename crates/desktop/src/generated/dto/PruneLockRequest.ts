@@ -5,7 +5,7 @@ export type PruneLockRequest = {
 	 * `"global"` or `"project"`.
 	 */
 	scope: string;
-	project_root: string | null;
+	projectRoot: string | null;
 	/**
 	 * Must be `true` to write; absent/false → dry-run (reports would-prune).
 	 */

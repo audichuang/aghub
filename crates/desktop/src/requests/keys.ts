@@ -22,6 +22,10 @@ export const queryKeys = {
 		) => ["skills", "list", scope, projectRoot ?? null] as const,
 		content: (path: string) => ["skills", "content", path] as const,
 		tree: (path: string) => ["skills", "tree", path] as const,
+		updateChecks: (
+			scope: "global" | "project" | "all" = "global",
+			projectRoot?: string,
+		) => ["skills", "check-updates", scope, projectRoot ?? null] as const,
 		lock: {
 			all: () => ["skills", "lock"] as const,
 			global: () => ["skills", "lock", "global"] as const,
