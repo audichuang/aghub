@@ -59,8 +59,7 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	const connections = useMemo(() => mergeConnections(remotes), [remotes]);
 
 	const activeConnection = useMemo(
-		() =>
-			connections.find((c) => c.id === activeId) ?? LOCAL_CONNECTION,
+		() => connections.find((c) => c.id === activeId) ?? LOCAL_CONNECTION,
 		[connections, activeId],
 	);
 

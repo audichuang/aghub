@@ -14,7 +14,7 @@ Companion to `2026-06-01-remote-ssh-management-design.md`.
 2. **No new dependencies.** api crate already has tokio `process`; hand-roll arg parsing
    (no clap). Desktop crate: `std::process` only. Connection ids via `crypto.randomUUID()`.
 3. **Shared Rust IPC types in `ssh.rs`:** `CommandOutput { status_code: Option<i32>,
-   stdout: String, stderr: String }`, `RunError` (plain enum impl `std::error::Error`,
+stdout: String, stderr: String }`, `RunError` (plain enum impl `std::error::Error`,
    **no thiserror**), `ChildHandle` (wraps `std::process::Child`, exposes `pid()` + `kill()`).
 4. **Connection Rust struct** carries `#[serde(rename_all = "camelCase")]` so the FE
    camelCase payload (`sshTarget`/`remoteAghubPath`) deserializes. Round-trip serde test.
@@ -39,7 +39,7 @@ Companion to `2026-06-01-remote-ssh-management-design.md`.
 
 ### Security hardening (from the security/lifecycle critics)
 
-- **Remote-shell injection is the top risk.** Argv arrays only protect the *local* ssh/scp
+- **Remote-shell injection is the top risk.** Argv arrays only protect the _local_ ssh/scp
   call; SSH's remote command is a single string re-parsed by the VM login shell. Any
   `remoteAghubPath` / connection id / log path interpolated into the remote `nohup …`
   command MUST be single-quote shell-escaped (`'` → `'\''`) and validated. Dedicated tests:
@@ -70,7 +70,7 @@ Companion to `2026-06-01-remote-ssh-management-design.md`.
   `error`/`disconnected` and offers reconnect.
 - **App-exit cleanup:** restructure `lib.rs` tail from `.run(generate_context!())` to
   `let app = builder.build(generate_context!())?; app.run(|app, event| match event {
-  RunEvent::ExitRequested { .. } | RunEvent::Exit => cleanup_all_remotes(app), _ => {} })`.
+RunEvent::ExitRequested { .. } | RunEvent::Exit => cleanup_all_remotes(app), _ => {} })`.
 - **Status projection:** Rust `ConnState` (Disconnected/Probing/Deploying/Starting/
   Tunneling/Connected/Error) projects to a 4-state FE status (idle/connecting/connected/
   error). Own the mapping in the provider.
@@ -106,14 +106,16 @@ members.
 ## Ordered work items (TDD: RED → GREEN → verify per item)
 
 > Verifier per Rust item: `cargo test -p <crate>` + `cargo clippy -p <crate> --all-targets`
-> + `cargo fmt --check`. Package name for the desktop crate is **`aghub`** (not aghub-desktop).
-> FE items: `./node_modules/.bin/tsc --noEmit` + `./node_modules/.bin/eslint <files>`
-> (+ `node --test` for extracted logic where available).
+>
+> - `cargo fmt --check`. Package name for the desktop crate is **`aghub`** (not aghub-desktop).
+>   FE items: `./node_modules/.bin/tsc --noEmit` + `./node_modules/.bin/eslint <files>`
+>   (+ `node --test` for extracted logic where available).
 
-### W1 — `aghub-api` binary CLI (crate `aghub-api`) — *no deps; land first*
+### W1 — `aghub-api` binary CLI (crate `aghub-api`) — _no deps; land first_
 
 Files: `crates/api/src/main.rs` (+ optional `crates/api/src/cli.rs` exported from lib for
 unit tests).
+
 - Pure `parse_args(args) -> Result<Config{port:u16(default 0), version:bool}, ParseError>`
   supporting `--port <n>`, `--port=<n>`, `--version`/`-V`.
 - `version_string() -> String` = `format!("aghub-api {}", env!("CARGO_PKG_VERSION"))` (1.1.1).
@@ -123,7 +125,7 @@ unit tests).
 - RED tests: arg parse happy/equals/version/-V/error; version_string format == env semver;
   pick_free_port > 0 and re-bindable; assert exact literal `AGHUB_API_PORT=` prefix.
 
-### W2 — SSH foundation `commands/ssh.rs` (crate `aghub`) — *no deps; parallel with W1*
+### W2 — SSH foundation `commands/ssh.rs` (crate `aghub`) — _no deps; parallel with W1_
 
 - `Connection` (snake_case fields, `#[serde(rename_all="camelCase")]`), `CommandOutput`,
   `RunError`, `ChildHandle`, `trait CommandRunner { run; spawn }`, `SystemRunner`
@@ -138,47 +140,49 @@ unit tests).
   `-P` vs `-p`; user via `-l` (ssh) / `user@target` (scp); all parsers + compatibility;
   MockRunner returns scripted output and records calls.
 
-### W3 — Remote bring-up logic `commands/remote.rs` (crate `aghub`) — *depends on W2*
+### W3 — Remote bring-up logic `commands/remote.rs` (crate `aghub`) — _depends on W2_
 
 - `ConnState`, `TestResult`, `ConnectError` (`RemoteApiMissing{install_hint}`,
   `Unreachable{stderr}`, `StartTimeout`, `TunnelFailed`) — all `Serialize`.
 - Generic over `<R: CommandRunner>` so it runs under MockRunner with no real ssh:
   `probe_connection`, `decide_deploy(test_result, same_platform, has_bundled_binary) ->
-  DeployDecision`, `start_remote` (issue start cmd, **bounded-attempts** poll of the log via
+DeployDecision`, `start_remote` (issue start cmd, **bounded-attempts** poll of the log via
   `parse_remote_port`, injectable attempts+delay; on timeout issue guarded kill →
   `StartTimeout`), `cleanup_remote` (guarded kill).
 - RED tests: probe (ok / unreachable-stderr / command-not-found); decide_deploy 3 branches;
   start_remote success; start_remote timeout **issues a guarded kill** (assert via Mock);
   cleanup issues guarded kill.
 
-### W4 — Tauri commands + state + lifecycle wiring (crate `aghub`) — *depends on W1,W2,W3*
+### W4 — Tauri commands + state + lifecycle wiring (crate `aghub`) — _depends on W1,W2,W3_
 
 Files: `commands/remote.rs` (command layer), `commands/mod.rs`, `commands/server.rs`
 (`find_available_port` → `pub(crate)`), `lib.rs`.
+
 - `RemoteState { handles: Mutex<HashMap<String, RemoteHandle>>, inProgress }` in `AppState`.
 - Sync commands `test_connection`, `connect_remote`, `disconnect_remote`, `remote_status`;
   connect = probe → (decide_deploy/scp|instruct) → start_remote → pick local free port →
   spawn tunnel (ChildHandle) → spawn watcher thread (emits `remote-disconnected`) → store
   handle (lock-discipline per the concurrency rule) → return local port.
 - Register all four in `generate_handler!`; restructure builder tail to `.build()?.run(|app,
-  event| …)` with `cleanup_all_remotes` on exit.
+event| …)` with `cleanup_all_remotes` on exit.
 - Tests: command-level state transitions via injected MockRunner where feasible;
   serde round-trip of `Connection`; assert `capabilities/default.json` unchanged.
 
-### W5 — FE connection layer (crate `aghub` desktop FE) — *depends on W4 signatures*
+### W5 — FE connection layer (crate `aghub` desktop FE) — _depends on W4 signatures_
 
 Files: `lib/store/connections.ts` (CRUD, `?? []`, `crypto.randomUUID`), `lib/store.ts`
 re-export, `lib/connection-logic.ts` (pure: status projection, baseUrl derivation, Local
 merge — node-testable), `contexts/connection.tsx`, `providers/connection.tsx`,
 `hooks/use-connection.ts`, `App.tsx` (swap provider, listen for `remote-disconnected`),
 delete `providers/server.tsx`. Keep `hooks/use-server.ts`/`use-api.ts` unchanged.
+
 - Honor the no-`useEffect`-for-side-effects rule: drive `start_server`/`connect_remote`
   via `useMutation`/`useQuery`, not raw `useEffect` (the old ServerProvider's `useEffect`
   is removed).
 - Tests (`node --test` where possible): store CRUD; status projection; baseUrl derivation;
   Local synthesis; cache-clear-on-switch logic.
 
-### W6 — Connection switcher UI (crate `aghub` desktop FE) — *depends on W5,W4*
+### W6 — Connection switcher UI (crate `aghub` desktop FE) — _depends on W5,W4_
 
 Files: `components/connection-switcher.tsx` (HeroUI v3 **Dropdown** with single-selection
 connection rows + a non-selectable "Manage connections…" action row + status dot), mounted
@@ -186,6 +190,7 @@ in `components/app-sidebar.tsx` inside `<aside>` before `<nav>`;
 `components/manage-connections-dialog.tsx` (HeroUI v3 Modal: label/sshTarget/user/port/
 remoteAghubPath form + **Test connection** button → `test_connection` + edit/remove);
 locale keys added to **all three** `lib/locales/{en,zh-Hans,zh-Hant}.ts`.
+
 - Consult HeroUI v3 docs via the `heroui-react` skill (`.heroui-docs/react` does not exist).
 - Use `cn` util; errors via Toast; ids via `crypto.randomUUID`.
 - Tests: pure form-validation fn (`node --test`); rendering is manual-only (no runner).

@@ -10,7 +10,10 @@ import {
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useConnection } from "../hooks/use-connection";
-import { LOCAL_CONNECTION, type ConnectionStatus } from "../lib/connection-logic";
+import {
+	LOCAL_CONNECTION,
+	type ConnectionStatus,
+} from "../lib/connection-logic";
 import { cn } from "../lib/utils";
 import { ManageConnectionsDialog } from "./manage-connections-dialog";
 

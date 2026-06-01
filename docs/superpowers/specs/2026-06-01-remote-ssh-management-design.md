@@ -16,13 +16,13 @@ auth, CLI support, parallel multi-host operations, editing `~/.ssh/config` from 
 
 ## 2. Core decisions (from brainstorming)
 
-| Decision | Choice |
-| --- | --- |
-| Use case | Remote *management* of the VM's own configs (not sync) |
-| Surface | Desktop app |
-| Transport | Run `aghub-api` **on the VM**, reach it via an **SSH tunnel**; the frontend swaps `baseUrl` |
-| SSH auth | Shell out to the **system `ssh`/`scp`**, reusing `~/.ssh/config`, `ssh-agent`, keys, `known_hosts`. **No credentials stored by the app.** |
-| Hosts | **Multiple** connections, with a switcher (Local + N remotes) |
+| Decision  | Choice                                                                                                                                    |
+| --------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| Use case  | Remote _management_ of the VM's own configs (not sync)                                                                                    |
+| Surface   | Desktop app                                                                                                                               |
+| Transport | Run `aghub-api` **on the VM**, reach it via an **SSH tunnel**; the frontend swaps `baseUrl`                                               |
+| SSH auth  | Shell out to the **system `ssh`/`scp`**, reusing `~/.ssh/config`, `ssh-agent`, keys, `known_hosts`. **No credentials stored by the app.** |
+| Hosts     | **Multiple** connections, with a switcher (Local + N remotes)                                                                             |
 
 ## 3. Why this transport
 
@@ -75,7 +75,7 @@ Pure, test-first functions (no I/O):
 - `build_scp_args(conn, local_path, remote_path) -> Vec<String>`
 - `build_tunnel_args(conn, local_port, remote_port) -> Vec<String>`
   (`ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes -L <local>:127.0.0.1:<remote> <target>`)
-- `parse_remote_port(stdout) -> Option<u16>`  — parses `AGHUB_API_PORT=<n>`
+- `parse_remote_port(stdout) -> Option<u16>` — parses `AGHUB_API_PORT=<n>`
 - `parse_api_version(stdout) -> Option<String>` + `is_version_compatible(local, remote) -> bool`
 - connection state transitions: `Disconnected → Probing → (Deploying) → Starting → Tunneling → Connected | Error`
 
@@ -130,8 +130,8 @@ launch itself stays integration-tested.)
 - `providers/server.tsx` → evolves into `providers/connection.tsx` (`ConnectionProvider`).
   It owns: connection list (from store), active connection id, per-connection status, and
   the resolved `baseUrl`.
-  - Local active → ensures local server via existing `start_server`, `baseUrl = http://localhost:<localPort>/api/v1`.
-  - Remote active → calls `invoke("connect_remote", { connection })`, `baseUrl = http://localhost:<tunnelPort>/api/v1`.
+    - Local active → ensures local server via existing `start_server`, `baseUrl = http://localhost:<localPort>/api/v1`.
+    - Remote active → calls `invoke("connect_remote", { connection })`, `baseUrl = http://localhost:<tunnelPort>/api/v1`.
 - **Backward compatibility:** `ConnectionProvider` still supplies the existing
   `ServerContext` value `{ port, baseUrl }`, so `useApi()` / `useServer()` keep working
   unchanged. A new `useConnection()` exposes the richer API (list, active, status,

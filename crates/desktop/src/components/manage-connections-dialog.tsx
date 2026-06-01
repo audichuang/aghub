@@ -118,7 +118,9 @@ export function ManageConnectionsDialog({
 			resetForm();
 		},
 		onError: (err) => {
-			toast.danger(err instanceof Error ? err.message : t("connSaveError"));
+			toast.danger(
+				err instanceof Error ? err.message : t("connSaveError"),
+			);
 		},
 	});
 
@@ -260,14 +262,10 @@ export function ManageConnectionsDialog({
 							>
 								<Label>{t("connFieldLabel")}</Label>
 								<Input
-									placeholder={t(
-										"connFieldLabelPlaceholder",
-									)}
+									placeholder={t("connFieldLabelPlaceholder")}
 								/>
 								{showErrors && errors.label != null && (
-									<FieldError>
-										{t(errors.label)}
-									</FieldError>
+									<FieldError>{t(errors.label)}</FieldError>
 								)}
 							</TextField>
 
