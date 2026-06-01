@@ -680,15 +680,11 @@ mod tests {
 	use super::*;
 	use crate::skills::update_check::EntryKey;
 	use aghub_core::skills::update::SkillUpdateStatus;
-	use std::sync::{Mutex, OnceLock};
-
-	fn env_lock() -> &'static Mutex<()> {
-		static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-		LOCK.get_or_init(|| Mutex::new(()))
-	}
 
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
-		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let _guard = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let state = tempfile::tempdir().unwrap();
 		let old_xdg = std::env::var("XDG_STATE_HOME").ok();
 		std::env::set_var("XDG_STATE_HOME", state.path());

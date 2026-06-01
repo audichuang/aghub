@@ -1775,13 +1775,7 @@ mod tests {
 	use aghub_core::transfer::{
 		reconcile_skill, InstallScope, ResourceLocator,
 	};
-	use std::sync::{Mutex, OnceLock};
 	use tempfile::tempdir;
-
-	fn env_lock() -> &'static Mutex<()> {
-		static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-		LOCK.get_or_init(|| Mutex::new(()))
-	}
 
 	// ---- F2.5: delete (containment/dry-run/confirm/prune) + prune-lock ------
 
@@ -1792,7 +1786,9 @@ mod tests {
 	fn with_isolated_env<T>(
 		f: impl FnOnce(&std::path::Path, &std::path::Path) -> T,
 	) -> T {
-		let _g = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let _g = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let home = tempdir().unwrap();
 		let state = tempdir().unwrap();
 		let old_home = std::env::var("HOME").ok();
@@ -2006,7 +2002,9 @@ mod tests {
 
 	#[test]
 	fn git_install_marks_same_primary_dir_agents_success() {
-		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let _guard = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let target_dir = temp.path().join("shared");
 		let source_dir = temp.path().join("source/hello-skill");
@@ -2032,7 +2030,9 @@ mod tests {
 
 	#[test]
 	fn reconcile_skill_prefers_primary_path_for_opencode() {
-		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let _guard = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let project_root = temp.path().join("project");
 		std::fs::create_dir_all(&project_root).unwrap();
