@@ -132,6 +132,11 @@ fn fetch_into_bare(
 	)
 	.map_err(|e| GitError::clone_failed(e.to_string()))?;
 
+	prep = prep.configure_connection(|connection| {
+		connection.set_credentials(noninteractive_credentials);
+		Ok(())
+	});
+
 	if let Some(branch) = ref_ {
 		prep = prep.with_ref_name(Some(branch)).map_err(
 			|e: gix::refs::name::Error| {
@@ -159,6 +164,31 @@ fn fetch_into_bare(
 		.detach();
 
 	Ok(oid)
+}
+
+#[allow(clippy::result_large_err)]
+fn noninteractive_credentials(
+	action: gix::credentials::helper::Action,
+) -> gix::credentials::protocol::Result {
+	use gix::credentials::{helper, protocol};
+
+	let helper::Action::Get(mut context) = action else {
+		return Ok(None);
+	};
+
+	context.destructure_url_in_place(false)?;
+	let outcome = helper::Outcome {
+		username: context.username.clone(),
+		password: context.password.clone(),
+		oauth_refresh_token: context.oauth_refresh_token.clone(),
+		quit: true,
+		next: context.clone().into(),
+	};
+
+	protocol::helper_outcome_to_result(
+		Some(outcome),
+		helper::Action::Get(context),
+	)
 }
 
 #[cfg(test)]
@@ -256,6 +286,36 @@ mod tests {
 	fn current_branch_at_path_non_repo_returns_none() {
 		let tmp = TempDir::new().unwrap();
 		assert_eq!(current_branch_at_path(tmp.path()), None);
+	}
+
+	#[test]
+	fn noninteractive_credentials_returns_embedded_url_credentials() {
+		let outcome = noninteractive_credentials(
+			gix::credentials::helper::Action::get_for_url(
+				"https://user:token@example.com/repo.git",
+			),
+		)
+		.unwrap()
+		.unwrap();
+
+		assert_eq!(outcome.identity.username, "user");
+		assert_eq!(outcome.identity.password, "token");
+	}
+
+	#[test]
+	fn noninteractive_credentials_fails_without_prompting() {
+		let err = noninteractive_credentials(
+			gix::credentials::helper::Action::get_for_url(
+				"https://example.com/repo.git",
+			),
+		)
+		.unwrap_err()
+		.to_string();
+
+		assert!(
+			err.contains("identity") || err.contains("handler asked to stop"),
+			"unexpected error: {err}"
+		);
 	}
 
 	#[ignore = "network"]
