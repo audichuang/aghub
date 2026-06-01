@@ -15,15 +15,27 @@ pub fn redact_url_userinfo(s: &str) -> String {
 		out.push_str(&rest[..rel + 3]);
 		rest = &rest[rel + 3..];
 
-		// Look for the userinfo terminator '@' before any path/query/fragment
-		// or whitespace boundary.
-		if let Some(boundary) = rest.find(|c: char| {
-			matches!(c, '@' | '/' | '?' | '#') || c.is_whitespace()
-		}) {
-			if rest.as_bytes()[boundary] == b'@' {
-				out.push_str("***@");
-				rest = &rest[boundary + 1..];
+		let whitespace = rest.find(char::is_whitespace).unwrap_or(rest.len());
+		let token = &rest[..whitespace];
+		let authority_end = token.find(['/', '?', '#']).unwrap_or(token.len());
+		let authority = &token[..authority_end];
+
+		let at = authority.rfind('@').or_else(|| {
+			let suspicious_userinfo =
+				authority.rsplit_once(':').is_some_and(|(_, suffix)| {
+					!suffix.is_empty()
+						&& !suffix.chars().all(|c| c.is_ascii_digit())
+				});
+			if suspicious_userinfo {
+				token.rfind('@')
+			} else {
+				None
 			}
+		});
+
+		if let Some(at) = at {
+			out.push_str("***@");
+			rest = &rest[at + 1..];
 		}
 	}
 
@@ -55,6 +67,20 @@ mod tests {
 		let s = "a https://u:p@h/x b https://v:q@h/y";
 		let r = redact_url_userinfo(s);
 		assert!(!r.contains("u:p") && !r.contains("v:q"));
+	}
+
+	#[test]
+	fn redacts_to_last_at_in_authority() {
+		let r = redact_url_userinfo("https://user:p@ss@host/x");
+		assert_eq!(r, "https://***@host/x");
+		assert!(!r.contains("p@ss"));
+	}
+
+	#[test]
+	fn redacts_password_with_path_chars_before_last_at() {
+		let r = redact_url_userinfo("https://u:p/a?b#c@host/x");
+		assert_eq!(r, "https://***@host/x");
+		assert!(!r.contains("p/a?b#c"));
 	}
 
 	#[test]

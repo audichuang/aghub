@@ -26,6 +26,7 @@ use tempfile::TempDir;
 
 use crate::credentials::{inject_credentials, Credentials};
 use crate::error::{GitError, Result};
+use std::time::Duration;
 
 /// The classification of a requested ref.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,6 +70,7 @@ pub fn fetch_ref_to_temp(
 	url: &str,
 	ref_: Option<&str>,
 	creds: Option<&Credentials>,
+	total_timeout: Option<Duration>,
 ) -> Result<(TempDir, gix::ObjectId)> {
 	let temp_dir =
 		TempDir::new().map_err(|e| GitError::TempDirFailed(e.to_string()))?;
@@ -80,7 +82,8 @@ pub fn fetch_ref_to_temp(
 		None => url.to_string(),
 	};
 
-	let oid = fetch_into_bare(&fetch_url, temp_dir.path(), ref_)?;
+	let oid =
+		fetch_into_bare(&fetch_url, temp_dir.path(), ref_, total_timeout)?;
 	Ok((temp_dir, oid))
 }
 
@@ -122,6 +125,7 @@ fn fetch_into_bare(
 	url: &str,
 	dest: &std::path::Path,
 	ref_: Option<&str>,
+	total_timeout: Option<Duration>,
 ) -> Result<gix::ObjectId> {
 	let mut prep = gix::clone::PrepareFetch::new(
 		url,
@@ -132,8 +136,17 @@ fn fetch_into_bare(
 	)
 	.map_err(|e| GitError::clone_failed(e.to_string()))?;
 
-	prep = prep.configure_connection(|connection| {
+	prep = prep.configure_connection(move |connection| {
 		connection.set_credentials(noninteractive_credentials);
+		if let Some(timeout) = total_timeout {
+			let options = gix::protocol::transport::client::blocking_io::http::reqwest::Options {
+				configure_request: Some(Box::new(move |request| {
+					*request.timeout_mut() = Some(timeout);
+					Ok(())
+				})),
+			};
+			connection.set_transport_options(Box::new(options));
+		}
 		Ok(())
 	});
 
@@ -253,6 +266,7 @@ mod tests {
 			"https://github.com/octocat/Hello-World.git",
 			None,
 			None,
+			None,
 		)
 		.unwrap();
 		assert!(tmp.path().exists());
@@ -324,6 +338,7 @@ mod tests {
 		let (tmp, oid) = fetch_ref_to_temp(
 			"https://github.com/octocat/Hello-World.git",
 			Some("master"),
+			None,
 			None,
 		)
 		.unwrap();

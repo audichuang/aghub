@@ -47,6 +47,7 @@ pub mod fetch;
 pub mod redact;
 pub mod remote;
 pub mod source;
+pub mod tree;
 
 // Re-export commonly used items
 pub use clone::{clone_to_path, clone_to_temp, CloneOptions};
@@ -62,3 +63,4 @@ pub use source::{
 	normalize_repo_source_from_url, resolve_remote_source, RemoteSourceType,
 	ResolvedRemoteSource, SourceError,
 };
+pub use tree::{is_safe_tree_entry_name, materialize_tree};

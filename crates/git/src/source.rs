@@ -204,10 +204,14 @@ pub fn resolve_remote_source(
 		}
 	}
 
-	if let Ok(parsed) = gix::url::parse(trimmed.as_bytes().as_bstr()) {
+	if let Ok(mut parsed) = gix::url::parse(trimmed.as_bytes().as_bstr()) {
 		if !matches!(parsed.scheme, gix::url::Scheme::File) {
 			let normalized = normalize_repo_source_from_url(trimmed)
 				.unwrap_or_else(|| trimmed.into());
+			parsed.password = None;
+			if !matches!(parsed.scheme, gix::url::Scheme::Ssh) {
+				parsed.user = None;
+			}
 			let source_url =
 				String::from_utf8_lossy(parsed.to_bstring().as_ref())
 					.into_owned();
@@ -283,6 +287,28 @@ mod tests {
 			!r.clone_url.contains("ghp_SECRET")
 				&& !r.clone_url.contains("user:")
 		);
+	}
+
+	#[test]
+	fn resolve_remote_source_strips_non_ssh_gix_userinfo() {
+		let r = resolve_remote_source("git://user:SECRET@github.com/o/r.git")
+			.unwrap();
+		assert_eq!(r.source_url, "git://github.com/o/r.git");
+		assert_eq!(r.clone_url, "git://github.com/o/r.git");
+	}
+
+	#[test]
+	fn resolve_remote_source_strips_password_from_ssh_but_keeps_user() {
+		let r = resolve_remote_source(
+			"ssh://git:SECRET@github.com/vercel-labs/agent-skills.git",
+		)
+		.unwrap();
+		assert_eq!(
+			r.source_url,
+			"ssh://git@github.com/vercel-labs/agent-skills.git"
+		);
+		assert_eq!(r.clone_url, r.source_url);
+		assert!(!r.source_url.contains("SECRET"));
 	}
 
 	#[test]
