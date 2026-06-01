@@ -81,14 +81,37 @@ pub(crate) fn atomic_write_json(
 			.prefix(".lock.")
 			.tempfile_in(parent)?;
 		tmp.write_all(content.as_bytes())?;
+		apply_json_file_mode(path, tmp.as_file())?;
 		tmp.as_file().sync_all()?;
 		tmp.persist(path).map_err(|e| e.error)?;
 	} else {
 		let mut tmp = tempfile::Builder::new().prefix(".lock.").tempfile()?;
 		tmp.write_all(content.as_bytes())?;
+		apply_json_file_mode(path, tmp.as_file())?;
 		tmp.as_file().sync_all()?;
 		tmp.persist(path).map_err(|e| e.error)?;
 	}
+	Ok(())
+}
+
+#[cfg(unix)]
+fn apply_json_file_mode(
+	path: &Path,
+	file: &std::fs::File,
+) -> std::io::Result<()> {
+	use std::os::unix::fs::PermissionsExt;
+
+	let mode = std::fs::metadata(path)
+		.map(|meta| meta.permissions().mode() & 0o777)
+		.unwrap_or(0o644);
+	file.set_permissions(std::fs::Permissions::from_mode(mode))
+}
+
+#[cfg(not(unix))]
+fn apply_json_file_mode(
+	_path: &Path,
+	_file: &std::fs::File,
+) -> std::io::Result<()> {
 	Ok(())
 }
 
@@ -97,8 +120,11 @@ pub fn modify_skill_lock<R>(
 ) -> std::io::Result<R> {
 	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 	let mut lock = read_skill_lock_locked();
+	let before = lock.clone();
 	let result = f(&mut lock);
-	write_skill_lock_locked(&lock)?;
+	if lock != before {
+		write_skill_lock_locked(&lock)?;
+	}
 	Ok(result)
 }
 
@@ -174,6 +200,39 @@ mod tests {
 
 		let after = std::fs::read(&path).unwrap();
 		assert_eq!(before, after);
+	}
+
+	#[test]
+	fn modify_skill_lock_noop_does_not_rewrite() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let lock = super::super::types::SkillLockFile::default();
+		write_skill_lock(&lock).unwrap();
+		let path = get_skill_lock_path();
+		let before = std::fs::read(&path).unwrap();
+
+		modify_skill_lock(|_lock| ()).unwrap();
+
+		let after = std::fs::read(&path).unwrap();
+		assert_eq!(before, after);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn atomic_write_json_preserves_existing_mode() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let path = get_skill_lock_path();
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(&path, b"{}\n").unwrap();
+		std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+			.unwrap();
+
+		atomic_write_json(&path, "{\"version\":3,\"skills\":{}}\n").unwrap();
+
+		let mode =
+			std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+		assert_eq!(mode, 0o640);
 	}
 
 	#[test]

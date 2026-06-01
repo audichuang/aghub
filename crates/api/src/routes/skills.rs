@@ -9,7 +9,11 @@ use aghub_core::{
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use skill::sanitize::sanitize_name;
-use std::{collections::HashMap, path::PathBuf, time::Duration};
+use std::{
+	collections::HashMap,
+	path::{Path, PathBuf},
+	time::Duration,
+};
 use tokio::time::timeout;
 
 use crate::{
@@ -720,10 +724,10 @@ fn install_lock_source_from_resolved(
 fn write_skill_install_lock(
 	skill_name: &str,
 	resource_scope: ResourceScope,
-	project_root: Option<&std::path::Path>,
+	project_root: Option<&Path>,
 	source: &skill::InstallLockSource,
 	lock_skill_path: Option<String>,
-	source_dir: &std::path::Path,
+	source_dir: &Path,
 ) -> Result<(), ApiError> {
 	match resource_scope {
 		ResourceScope::GlobalOnly => {
@@ -774,6 +778,33 @@ fn write_skill_install_lock(
 	}
 
 	Ok(())
+}
+
+fn skill_lock_contains(
+	skill_name: &str,
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> bool {
+	match resource_scope {
+		ResourceScope::GlobalOnly => {
+			skill::lock::global::get_skill_from_lock(skill_name).is_some()
+		}
+		ResourceScope::ProjectOnly => project_root.is_some_and(|root| {
+			skill::lock::local::read_local_lock(Some(root))
+				.skills
+				.contains_key(skill_name)
+		}),
+		ResourceScope::Both => false,
+	}
+}
+
+fn should_write_install_lock(
+	skill_name: &str,
+	copied_any: bool,
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> bool {
+	copied_any || !skill_lock_contains(skill_name, resource_scope, project_root)
 }
 
 fn detect_available_editor() -> Option<CodeEditorType> {
@@ -1259,7 +1290,15 @@ pub async fn install_skill(
 	}
 
 	for skill in &selected_skills {
-		if !copied_skill_names.contains(&skill.name) {
+		let copied = copied_skill_names.contains(&skill.name);
+		let should_write = installed_skill_names.contains(&skill.name)
+			&& should_write_install_lock(
+				&skill.name,
+				copied,
+				resource_scope,
+				project_root.as_deref(),
+			);
+		if !should_write {
 			continue;
 		}
 
@@ -1681,12 +1720,20 @@ pub async fn git_install_skills(
 			}
 		}
 
-		if installed && copied_any {
+		if installed {
 			let relative_dir = skill_path.replace('\\', "/");
 			let parsed_name = skill::parser::parse(&full_path)
 				.ok()
 				.map(|skill| skill.name);
 			if let Some(skill_name) = parsed_name {
+				if !should_write_install_lock(
+					&skill_name,
+					copied_any,
+					resource_scope,
+					project_root.as_deref(),
+				) {
+					continue;
+				}
 				// Hash the SOURCE repo subfolder in the temp clone.
 				let source_dir = get_skill_root(full_path.clone());
 				write_skill_install_lock(
@@ -2131,6 +2178,55 @@ mod tests {
 				.unwrap_or_else(|e| panic!("{}", e.body.error));
 		assert_eq!(second, ("hello-skill".to_string(), false));
 		assert!(target_dir.join("hello-skill/SKILL.md").exists());
+	}
+
+	#[test]
+	fn git_install_existing_folder_without_lock_writes_lock() {
+		let _guard = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let project = temp.path().join("project");
+		let target_dir = project.join(".claude/skills");
+		let source_dir = temp.path().join("source/hello-skill");
+		std::fs::create_dir_all(&source_dir).unwrap();
+		std::fs::write(
+			source_dir.join("SKILL.md"),
+			"---\nname: hello-skill\ndescription: hi\n---\n\n# Hello\n",
+		)
+		.unwrap();
+
+		install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
+			.unwrap_or_else(|e| panic!("{}", e.body.error));
+		let (skill_name, copied) =
+			install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
+				.unwrap_or_else(|e| panic!("{}", e.body.error));
+
+		assert!(!copied);
+		assert!(should_write_install_lock(
+			&skill_name,
+			copied,
+			ResourceScope::ProjectOnly,
+			Some(&project),
+		));
+
+		write_skill_install_lock(
+			&skill_name,
+			ResourceScope::ProjectOnly,
+			Some(&project),
+			&skill::InstallLockSource {
+				source: "owner/repo".to_string(),
+				source_type: "github".to_string(),
+				source_url: "https://github.com/owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+			},
+			Some(skill::lock_skill_file_path("hello-skill")),
+			&source_dir,
+		)
+		.unwrap_or_else(|e| panic!("{}", e.body.error));
+
+		let lock = skill::lock::local::read_local_lock(Some(&project));
+		assert!(lock.skills.contains_key("hello-skill"));
 	}
 
 	#[test]

@@ -46,7 +46,7 @@ pub struct LocalSkillLockEntry {
 ///
 /// Skills are sorted alphabetically by name when written to produce
 /// deterministic output and minimize merge conflicts.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LocalSkillLockFile {
 	/// Schema version for future migrations
 	pub version: u32,
@@ -142,8 +142,11 @@ pub fn modify_local_lock<R>(
 ) -> std::io::Result<R> {
 	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
 	let mut lock = read_local_lock_locked(cwd);
+	let before = lock.clone();
 	let result = f(&mut lock);
-	write_local_lock_locked(&lock, cwd)?;
+	if lock != before {
+		write_local_lock_locked(&lock, cwd)?;
+	}
 	Ok(result)
 }
 
@@ -295,6 +298,19 @@ mod tests {
 
 		assert!(legacy_tmp.is_dir(), "legacy fixed tmp path was untouched");
 		assert!(tmp.path().join("skills-lock.json").exists());
+	}
+
+	#[test]
+	fn modify_local_lock_noop_does_not_rewrite() {
+		let dir = TempDir::new().unwrap();
+		let lock = super::LocalSkillLockFile::default();
+		write_local_lock(&lock, Some(dir.path())).unwrap();
+		let path = dir.path().join("skills-lock.json");
+		let before = fs::read(&path).unwrap();
+
+		modify_local_lock(Some(dir.path()), |_lock| ()).unwrap();
+
+		assert_eq!(fs::read(&path).unwrap(), before);
 	}
 
 	#[test]

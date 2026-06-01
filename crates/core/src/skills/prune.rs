@@ -197,7 +197,7 @@ fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
 		let file_type = entry
 			.file_type()
 			.map_err(|_| ScanError::PermissionDenied(entry.path()))?;
-		if file_type.is_dir() {
+		if file_type.is_dir() && entry.path().join("SKILL.md").is_file() {
 			dirs.push(entry.path());
 		}
 	}
@@ -386,6 +386,24 @@ mod tests {
 
 		assert!(got.contains("alpha"));
 		assert!(got.contains("beta"));
+	}
+
+	#[test]
+	fn collect_disk_dir_names_skips_dirs_without_skill_md() {
+		let root = tempdir().unwrap();
+		let skills = root.path().join("skills");
+		write_skill_md(&skills.join("alpha"), "alpha");
+		std::fs::create_dir_all(skills.join("not-a-skill")).unwrap();
+		std::fs::write(skills.join("not-a-skill/README.md"), "x").unwrap();
+
+		let got = collect_disk_dir_names(
+			std::slice::from_ref(&skills),
+			top_level_skill_dirs,
+		)
+		.unwrap();
+
+		assert!(got.contains("alpha"));
+		assert!(!got.contains("not-a-skill"));
 	}
 
 	#[test]

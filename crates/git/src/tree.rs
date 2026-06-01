@@ -8,7 +8,7 @@ pub fn is_safe_tree_entry_name(name: &[u8]) -> bool {
 	if name.iter().any(|b| matches!(b, b'\0' | b'/' | b'\\')) {
 		return false;
 	}
-	if name.len() >= 2 && name[0].is_ascii_alphabetic() && name[1] == b':' {
+	if cfg!(windows) && name.contains(&b':') {
 		return false;
 	}
 	true
@@ -72,9 +72,19 @@ mod tests {
 		assert!(!is_safe_tree_entry_name(b"a\0b"));
 	}
 
+	#[cfg(windows)]
 	#[test]
-	fn safe_tree_entry_name_rejects_windows_drive() {
+	fn safe_tree_entry_name_rejects_windows_colon_names() {
 		assert!(!is_safe_tree_entry_name(b"C:"));
 		assert!(!is_safe_tree_entry_name(b"c:secret"));
+		assert!(!is_safe_tree_entry_name(b"a:b"));
+	}
+
+	#[cfg(not(windows))]
+	#[test]
+	fn safe_tree_entry_name_accepts_unix_colon_names() {
+		assert!(is_safe_tree_entry_name(b"C:"));
+		assert!(is_safe_tree_entry_name(b"c:secret"));
+		assert!(is_safe_tree_entry_name(b"a:b"));
 	}
 }
