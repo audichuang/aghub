@@ -127,7 +127,7 @@ pub fn discover_repo_skills(
 	Ok(selected)
 }
 
-/// Compute the npx-compatible source-folder hash for an install.
+/// Compute the source-folder hash for an install.
 ///
 /// Hashes the SOURCE repo subfolder (`source_dir`), not the post-copy
 /// installed dir. Maps a [`crate::hash::HashError`] into an

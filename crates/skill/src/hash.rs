@@ -1,6 +1,9 @@
-//! SHA-256 folder hashing, byte-for-byte compatible with npx `computeSkillFolderHash`
-//! (vercel-labs/skills `local-lock.ts:108-147`). Hash the SOURCE folder, never the
-//! post-copy installed dir.
+//! SHA-256 folder hashing for installed skill content.
+//!
+//! This intentionally follows npx `computeSkillFolderHash`
+//! (vercel-labs/skills `local-lock.ts:108-147`) except for known collation
+//! differences between JS `localeCompare` and Rust's UCA implementation. Hash the
+//! SOURCE folder, never the post-copy installed dir.
 
 use sha2::{Digest, Sha256};
 use std::io;
@@ -28,7 +31,8 @@ pub fn is_placeholder_digest(hash: &str) -> bool {
 	hash == EMPTY_SKILLS_LOCK_DIGEST
 }
 
-/// Reimplements npx `computeSkillFolderHash` byte-for-byte. Returns lowercase hex.
+/// Reimplements npx `computeSkillFolderHash` as closely as Rust allows.
+/// Returns lowercase hex.
 ///
 /// Algorithm (local-lock.ts:108-147): collect files recursively, skip dirs named
 /// exactly `.git`/`node_modules`, lstat to skip symlinks (no descend), relative
@@ -40,10 +44,10 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	let mut total_bytes: u64 = 0;
 	collect(dir, dir, 0, &mut files, &mut total_bytes)?;
 
-	// Match npx `local-lock.ts:113` exactly: JS `String.localeCompare`, i.e. UCA
-	// collation (case-insensitive at the primary level). Code-point is WRONG here
-	// (e.g. "scripts/" vs "SKILL.md"). Residual exotic-locale divergence is covered
-	// by F1's recompute-on-mismatch safeguard.
+	// Match the common `localeCompare` cases (for example, "scripts/" before
+	// "SKILL.md"). JS and UCA still diverge for numeric, accent, and some
+	// case/length-collision paths, so this must not be compared directly
+	// against npx-produced hashes for untrusted lock entries.
 	let mut collator = feruca::Collator::default();
 	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
 

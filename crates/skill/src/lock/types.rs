@@ -26,9 +26,9 @@ pub struct SkillLockEntry {
 	/// Fetched via GitHub Trees API by the telemetry server.
 	#[serde(rename = "skillFolderHash")]
 	pub skill_folder_hash: String,
-	/// aghub source SHA-256 (npx-compatible `compute_skill_folder_hash`). npx
-	/// leaves this absent; aghub stores the real hash here and keeps
-	/// `skill_folder_hash` empty. Missing → recompute (never an error).
+	/// aghub source SHA-256 folder hash. npx leaves this absent; aghub stores
+	/// the real hash here and keeps `skill_folder_hash` empty. Missing →
+	/// recompute (never an error).
 	#[serde(
 		rename = "contentHash",
 		skip_serializing_if = "Option::is_none",

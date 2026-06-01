@@ -238,6 +238,7 @@ fn update_lock_hash(
 					anyhow!("skill '{name}' is not in global lock")
 				})?;
 			entry.content_hash = Some(hash.to_string());
+			entry.skill_folder_hash.clear();
 			skill::lock::global::add_skill_to_lock(name, entry)?;
 		}
 		ResourceScope::ProjectOnly => {
@@ -262,5 +263,80 @@ fn scope_name(scope: ResourceScope) -> &'static str {
 		ResourceScope::GlobalOnly => "global",
 		ResourceScope::ProjectOnly => "project",
 		ResourceScope::Both => "all",
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::sync::{Mutex, MutexGuard, OnceLock};
+	use tempfile::{tempdir, TempDir};
+
+	struct GlobalLockGuard {
+		_temp: TempDir,
+		old: Option<String>,
+		_lock: MutexGuard<'static, ()>,
+	}
+
+	impl GlobalLockGuard {
+		fn new() -> Self {
+			static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+			let guard = LOCK
+				.get_or_init(|| Mutex::new(()))
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let temp = tempdir().unwrap();
+			let old = std::env::var("XDG_STATE_HOME").ok();
+			std::env::set_var("XDG_STATE_HOME", temp.path());
+			Self {
+				_temp: temp,
+				old,
+				_lock: guard,
+			}
+		}
+	}
+
+	impl Drop for GlobalLockGuard {
+		fn drop(&mut self) {
+			match &self.old {
+				Some(value) => std::env::set_var("XDG_STATE_HOME", value),
+				None => std::env::remove_var("XDG_STATE_HOME"),
+			}
+		}
+	}
+
+	fn global_entry() -> skill::SkillLockEntry {
+		skill::SkillLockEntry {
+			source: "owner/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/owner/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			skill_path: Some("SKILL.md".to_string()),
+			skill_folder_hash: "tree-v1".to_string(),
+			content_hash: None,
+			installed_at: "t".to_string(),
+			updated_at: "t".to_string(),
+			plugin_name: None,
+		}
+	}
+
+	#[test]
+	fn global_update_lock_hash_clears_npx_folder_hash() {
+		let _guard = GlobalLockGuard::new();
+		skill::lock::global::add_skill_to_lock("legacy", global_entry())
+			.unwrap();
+
+		update_lock_hash(
+			"legacy",
+			ResourceScope::GlobalOnly,
+			None,
+			"content-v2",
+		)
+		.unwrap();
+
+		let lock = skill::lock::global::read_skill_lock();
+		let entry = &lock.skills["legacy"];
+		assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
+		assert_eq!(entry.skill_folder_hash, "");
 	}
 }

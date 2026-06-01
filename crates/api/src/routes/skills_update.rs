@@ -302,6 +302,7 @@ fn write_auto_healed_hashes(
 		for (name, hash) in global_heals {
 			if let Some(entry) = lock.skills.get_mut(&name) {
 				entry.content_hash = Some(hash);
+				entry.skill_folder_hash.clear();
 				entry.updated_at = now.clone();
 			}
 		}
@@ -444,6 +445,7 @@ pub(crate) fn update_lock_hash(
 				return Err("Skill is not in global lock".to_string());
 			};
 			entry.content_hash = Some(hash.to_string());
+			entry.skill_folder_hash.clear();
 			entry.updated_at = Utc::now().to_rfc3339();
 			skill::lock::global::write_skill_lock(&lock)
 				.map_err(|e| format!("Failed to update global lock: {e}"))
@@ -763,7 +765,9 @@ mod tests {
 	fn auto_heal_writes_global_content_hash() {
 		with_isolated_state(|| {
 			let mut lock = skill::SkillLockFile::default();
-			lock.skills.insert("legacy".into(), global_entry());
+			let mut entry = global_entry();
+			entry.skill_folder_hash = "tree-v1".to_string();
+			lock.skills.insert("legacy".into(), entry);
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
 			assert!(write_auto_healed_hashes(
@@ -777,6 +781,25 @@ mod tests {
 				lock.skills["legacy"].content_hash.as_deref(),
 				Some("abc123")
 			);
+			assert_eq!(lock.skills["legacy"].skill_folder_hash, "");
+		});
+	}
+
+	#[test]
+	fn global_apply_update_hash_clears_npx_folder_hash() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_folder_hash = "tree-v1".to_string();
+			lock.skills.insert("legacy".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			update_lock_hash("legacy", "global", None, "content-v2").unwrap();
+
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["legacy"];
+			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
+			assert_eq!(entry.skill_folder_hash, "");
 		});
 	}
 

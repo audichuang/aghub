@@ -294,6 +294,19 @@ mod tests {
 	}
 
 	#[test]
+	fn prune_lock_global_keeps_npx_unicode_sanitized_folder() {
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock("İstanbul", global_entry()).unwrap();
+
+		let pruned =
+			prune_lock(PruneScope::Global, &names(&["i-stanbul"]), None)
+				.unwrap();
+
+		assert!(pruned.is_empty());
+		assert!(skill::read_skill_lock().skills.contains_key("İstanbul"));
+	}
+
+	#[test]
 	fn prune_lock_project_requires_project_root() {
 		let _g = GlobalLockGuard::new();
 		let err = prune_lock(PruneScope::Project, &names(&[]), None);

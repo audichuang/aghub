@@ -15,25 +15,28 @@ const MAX_NAME_LENGTH: usize = 255;
 /// - Collapse multiple consecutive hyphens into one
 /// - Remove leading dots and hyphens
 /// - Remove trailing dots and hyphens
-/// - Strip non-ASCII characters
+/// - Apply Unicode lowercasing before filtering to match JS `.toLowerCase()`
 /// - Truncate to 255 chars
 /// - Return `"unnamed-skill"` if result is empty
 pub fn sanitize_name(input: &str) -> String {
 	// Process character by character:
-	// - ASCII alphanumeric, `.`, `_` → keep (lowercased)
+	// - Unicode lowercase first, matching JS `String.toLowerCase()`.
+	// - ASCII alphanumeric, `.`, `_` → keep
 	// - Everything else (spaces, special chars, non-ASCII) → hyphen (collapsed)
 	let mut result = String::new();
 	let mut last_was_hyphen = false;
 
 	for c in input.chars() {
-		if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
-			result.push(c.to_ascii_lowercase());
-			last_was_hyphen = false;
-		} else {
-			// Non-ASCII, spaces, special chars, `/`, `\`, `@`, etc. → hyphen
-			if !last_was_hyphen {
-				result.push('-');
-				last_was_hyphen = true;
+		for c in c.to_lowercase() {
+			if c.is_ascii_alphanumeric() || c == '.' || c == '_' {
+				result.push(c);
+				last_was_hyphen = false;
+			} else {
+				// Non-ASCII, spaces, special chars, `/`, `\`, `@`, etc. → hyphen
+				if !last_was_hyphen {
+					result.push('-');
+					last_was_hyphen = true;
+				}
 			}
 		}
 	}
@@ -190,6 +193,13 @@ mod tests {
 		assert_eq!(sanitize_name("skill日本語"), "skill");
 		// 'é' is non-ASCII, '🎉' is non-ASCII; 'moji' and 'skill' remain
 		assert_eq!(sanitize_name("émoji🎉skill"), "moji-skill");
+	}
+
+	#[test]
+	fn test_unicode_lowercase_matches_js_before_ascii_filter() {
+		assert_eq!(sanitize_name("İstanbul"), "i-stanbul");
+		assert_eq!(sanitize_name("Kelvin"), "kelvin");
+		assert_eq!(sanitize_name("ẞeta"), "eta");
 	}
 
 	#[test]
