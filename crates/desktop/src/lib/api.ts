@@ -3,6 +3,8 @@ import type {
 	AgentAvailabilityDto,
 	AgentInfo,
 	AgentProviderResponse,
+	ApplySkillUpdateRequest,
+	ApplySkillUpdateResponse,
 	CCMarketplaceAddRequest,
 	CCMarketplaceListResponse,
 	CCMarketplaceMutationResponse,
@@ -211,6 +213,7 @@ export function createApi(baseUrl: string) {
 					.delete(`agents/${agent}/skills/${name}`, {
 						searchParams: {
 							scope,
+							confirm: "true",
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
@@ -278,11 +281,35 @@ export function createApi(baseUrl: string) {
 			gitSync(data: GitSyncRequest): Promise<GitSyncResponse> {
 				return client.post("skills/git/sync", { json: data }).json();
 			},
-			checkUpdates(offline = false): Promise<SkillUpdateResponse[]> {
+			checkUpdates({
+				offline = false,
+				scope = "global",
+				projectRoot,
+			}: {
+				offline?: boolean;
+				scope?: "global" | "project" | "all";
+				projectRoot?: string;
+			} = {}): Promise<SkillUpdateResponse[]> {
 				// Network-heavy (clones each source); give it a long timeout.
 				return client
 					.get("skills/check-updates", {
-						searchParams: offline ? { offline: "true" } : {},
+						searchParams: {
+							scope,
+							...(offline ? { offline: "true" } : {}),
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+						timeout: 120000,
+					})
+					.json();
+			},
+			applyUpdate(
+				body: ApplySkillUpdateRequest,
+			): Promise<ApplySkillUpdateResponse> {
+				return client
+					.post("skills/apply-update", {
+						json: body,
 						timeout: 120000,
 					})
 					.json();

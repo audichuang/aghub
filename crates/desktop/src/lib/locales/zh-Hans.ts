@@ -394,6 +394,7 @@ export default {
 	skillNeedsCredential: "添加凭证",
 	skillNeedsCredentialTooltip: "此私有来源需要凭证。添加后重试。",
 	skillUpdateCheckError: "无法检查技能更新。",
+	skillUpdateApplyError: "无法应用技能更新。",
 	onboardingDescription: "随时重新打开欢迎页或任一引导流程。",
 
 	// Onboarding — Wizard

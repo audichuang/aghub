@@ -51,10 +51,10 @@ use aghub_api::dto::{
 		CCPluginValidateResponse,
 	},
 	skill::{
-		CreateSkillRequest, DeleteSkillByPathRequest,
-		DeleteSkillByPathResponse, GitInstallRequest, GitInstallResponse,
-		GitInstallResultEntry, GitScanRequest, GitScanResponse,
-		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
+		ApplySkillUpdateRequest, ApplySkillUpdateResponse, CreateSkillRequest,
+		DeleteSkillByPathRequest, DeleteSkillByPathResponse, GitInstallRequest,
+		GitInstallResponse, GitInstallResultEntry, GitScanRequest,
+		GitScanResponse, GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
 		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
 		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
@@ -192,6 +192,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<DeleteSkillByPathRequest>(&cfg)?;
 	export_type::<SkillUpdateStatusResponse>(&cfg)?;
 	export_type::<SkillUpdateResponse>(&cfg)?;
+	export_type::<ApplySkillUpdateRequest>(&cfg)?;
+	export_type::<ApplySkillUpdateResponse>(&cfg)?;
 	export_type::<ValidationError>(&cfg)?;
 	export_type::<GitScanRequest>(&cfg)?;
 	export_type::<GitScanSkillEntry>(&cfg)?;

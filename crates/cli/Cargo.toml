@@ -14,6 +14,7 @@ path = "src/main.rs"
 aghub-core = { path = "../core" }
 aghub-agents = { path = "../agents" }
 aghub-cc-plugins = { path = "../cc-plugins" }
+aghub-git = { path = "../git" }
 skill = { path = "../skill" }
 
 clap = { workspace = true }
@@ -21,7 +22,10 @@ tabled = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+dirs = { workspace = true }
 tokio = { version = "1", features = [ "rt", "macros" ] }
+gix = { version = "0.83", default-features = false }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

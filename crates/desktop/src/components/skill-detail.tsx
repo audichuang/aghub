@@ -13,7 +13,7 @@ import {
 	TrashIcon,
 } from "@heroicons/react/24/solid";
 import { Accordion, Button, Card, Chip, toast, Tooltip } from "@heroui/react";
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -26,6 +26,7 @@ import { useCurrentCodeEditor } from "../hooks/use-integrations";
 import { cn, filterItemsByAgentIds } from "../lib/utils";
 import { openWithEditorMutationOptions } from "../requests/integrations";
 import {
+	applySkillUpdateMutationOptions,
 	checkSkillUpdatesMutationOptions,
 	globalSkillLockQueryOptions,
 	openSkillFolderMutationOptions,
@@ -63,6 +64,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	const [, setLocation] = useLocation();
 	const { allAgents, availableAgents } = useAgentAvailability();
 	const api = useApi();
+	const queryClient = useQueryClient();
 
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	const [locationToDelete, setLocationToDelete] =
@@ -106,6 +108,25 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 		checkSkillUpdatesMutationOptions({
 			api,
 			onError: () => toast.danger(t("skillUpdateCheckError")),
+		}),
+	);
+
+	const applyUpdateMutation = useMutation(
+		applySkillUpdateMutationOptions({
+			api,
+			queryClient,
+			onSuccess: (data) => {
+				if (!data.success) {
+					toast.danger(data.error ?? t("skillUpdateApplyError"));
+					return;
+				}
+				toast.success(t("skillSyncedSuccessfully"));
+				checkUpdatesMutation.mutate({
+					scope: primaryScope,
+					projectRoot: projectPath,
+				});
+			},
+			onError: () => toast.danger(t("skillUpdateApplyError")),
 		}),
 	);
 
@@ -189,7 +210,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	// This skill's entry in the last update-check result (undefined until a
 	// check has run, or for a skill absent from the global lock).
 	const updateStatus = checkUpdatesMutation.data?.find(
-		(s) => s.name === skill.name,
+		(s) => s.name === skill.name && s.scope === primaryScope,
 	);
 
 	// Host used to prefill the credential name so the update-check host-fallback
@@ -466,7 +487,11 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 															}
 															onPress={() =>
 																checkUpdatesMutation.mutate(
-																	false,
+																	{
+																		scope: primaryScope,
+																		projectRoot:
+																			projectPath,
+																	},
 																)
 															}
 														>
@@ -479,6 +504,34 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 																	)}
 														</Button>
 													))}
+												{updateStatus?.status ===
+													"updateAvailable" && (
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-6 px-2 text-xs"
+														isDisabled={
+															applyUpdateMutation.isPending
+														}
+														onPress={() =>
+															applyUpdateMutation.mutate(
+																{
+																	name: skill.name,
+																	scope: primaryScope,
+																	projectRoot:
+																		projectPath ??
+																		null,
+																	confirm: true,
+																},
+															)
+														}
+													>
+														<ArrowPathIcon className="size-3.5" />
+														{applyUpdateMutation.isPending
+															? t("applying")
+															: t("apply")}
+													</Button>
+												)}
 											</div>
 										</div>
 										{sourceUrl && (
@@ -682,7 +735,10 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 				onClose={() => setCredDialogOpen(false)}
 				onSuccess={() => {
 					setCredDialogOpen(false);
-					checkUpdatesMutation.mutate(false);
+					checkUpdatesMutation.mutate({
+						scope: primaryScope,
+						projectRoot: projectPath,
+					});
 				}}
 			/>
 		</>

@@ -1,7 +1,18 @@
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::manager::ConfigManager;
+use aghub_core::models::ResourceScope;
+use aghub_core::skills::prune::{prune_lock_scanning, PruneScope};
 use anyhow::Result;
 use serde_json::json;
+use std::path::Path;
+
+pub struct DeleteOptions<'a> {
+	pub scope: ResourceScope,
+	pub project_root: Option<&'a Path>,
+	pub all_agents: bool,
+	pub dry_run: bool,
+	pub yes: bool,
+}
 
 /// Delete a resource.
 ///
@@ -14,23 +25,49 @@ pub fn execute(
 	manager: &mut ConfigManager,
 	resource: ResourceType,
 	name: String,
-	all_agents: bool,
-	dry_run: bool,
-	yes: bool,
+	options: DeleteOptions<'_>,
 ) -> Result<()> {
 	match resource {
 		ResourceType::Skills => {
 			// Default is a dry-run; --yes performs the removal, --dry-run forces
 			// a preview even if --yes was also passed.
-			let is_dry_run = dry_run || !yes;
+			let is_dry_run = options.dry_run || !options.yes;
 			eprintln_verbose!(
 				"Removing skill '{}' (all_agents={}, dry_run={})",
 				name,
-				all_agents,
+				options.all_agents,
 				is_dry_run
 			);
-			let outcome = manager
-				.remove_skill_planned(&name, all_agents, is_dry_run, yes)?;
+			let outcome = manager.remove_skill_planned(
+				&name,
+				options.all_agents,
+				is_dry_run,
+				options.yes,
+			)?;
+			if outcome.executed {
+				match options.scope {
+					ResourceScope::GlobalOnly => {
+						let _ = prune_lock_scanning(PruneScope::Global, None);
+					}
+					ResourceScope::ProjectOnly => {
+						if let Some(root) = options.project_root {
+							let _ = prune_lock_scanning(
+								PruneScope::Project,
+								Some(root),
+							);
+						}
+					}
+					ResourceScope::Both => {
+						let _ = prune_lock_scanning(PruneScope::Global, None);
+						if let Some(root) = options.project_root {
+							let _ = prune_lock_scanning(
+								PruneScope::Project,
+								Some(root),
+							);
+						}
+					}
+				}
+			}
 			let paths: Vec<String> = outcome
 				.plan
 				.paths

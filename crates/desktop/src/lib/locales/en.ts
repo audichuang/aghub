@@ -412,6 +412,7 @@ export default {
 	skillNeedsCredentialTooltip:
 		"This private source needs a credential. Add one and retry.",
 	skillUpdateCheckError: "Couldn't check for skill updates.",
+	skillUpdateApplyError: "Couldn't apply the skill update.",
 	onboardingDescription:
 		"Replay the welcome screen or either guided tour any time.",
 

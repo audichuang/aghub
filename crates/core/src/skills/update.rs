@@ -21,6 +21,21 @@ pub enum SkillUpdateStatus {
 	Uncheckable { reason: UncheckableReason },
 }
 
+/// Compare two known content hashes.
+///
+/// Legacy/missing hashes are intentionally not handled here: callers must first
+/// compute a local baseline hash when the lock has no trustworthy value.
+pub fn compare_known_hashes(stored: &str, fresh: &str) -> SkillUpdateStatus {
+	if stored == fresh {
+		SkillUpdateStatus::UpToDate
+	} else {
+		SkillUpdateStatus::UpdateAvailable {
+			current: stored.to_string(),
+			available: fresh.to_string(),
+		}
+	}
+}
+
 /// Reject absolute paths and any `..`; join under `root`; canonicalize; verify the
 /// result stays under `root`. Returns the safe absolute skill dir, or None to reject.
 pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
@@ -61,11 +76,7 @@ pub fn compare_hashes(
 		Some(h) if skill::is_placeholder_digest(h) => {
 			Ok(SkillUpdateStatus::UpToDate)
 		}
-		Some(h) if h == fresh => Ok(SkillUpdateStatus::UpToDate),
-		Some(h) => Ok(SkillUpdateStatus::UpdateAvailable {
-			current: h.to_string(),
-			available: fresh,
-		}),
+		Some(h) => Ok(compare_known_hashes(h, &fresh)),
 	}
 }
 

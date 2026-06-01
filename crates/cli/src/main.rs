@@ -14,7 +14,8 @@ use aghub_core::{
 mod commands;
 
 use commands::{
-	add, check, delete, disable, enable, get, plugin, prune, update,
+	add, apply_update, check, delete, disable, enable, get, plugin, prune,
+	update,
 };
 
 /// Global verbose flag used by the eprintln_verbose macro
@@ -223,6 +224,20 @@ enum Commands {
 		#[arg(long)]
 		json: bool,
 	},
+	/// Apply an available skill update from the lock's source/ref/skillPath.
+	ApplyUpdate {
+		#[arg(value_enum)]
+		resource: ResourceType,
+		name: String,
+
+		/// Actually overwrite installed skill files.
+		#[arg(short = 'y', long = "yes")]
+		yes: bool,
+
+		/// Emit machine-readable JSON (default output is also JSON today)
+		#[arg(long)]
+		json: bool,
+	},
 	/// Prune skill lock entries whose skill is no longer on disk (skills only).
 	///
 	/// Disk-driven and lock-only: never deletes skill files or edits agent config.
@@ -416,9 +431,13 @@ fn main() -> Result<()> {
 			&mut manager,
 			resource,
 			name,
-			all_agents,
-			dry_run,
-			yes,
+			delete::DeleteOptions {
+				scope,
+				project_root: project_root.as_deref(),
+				all_agents,
+				dry_run,
+				yes,
+			},
 		),
 		Commands::Disable { resource, name } => {
 			disable::execute(&mut manager, resource, name)
@@ -432,6 +451,19 @@ fn main() -> Result<()> {
 		Commands::Check { resource, json } => {
 			check::execute(resource, scope, project_root.as_deref(), json)
 		}
+		Commands::ApplyUpdate {
+			resource,
+			name,
+			yes,
+			json,
+		} => apply_update::execute(
+			resource,
+			name,
+			scope,
+			project_root.as_deref(),
+			yes,
+			json,
+		),
 		Commands::PruneLock { dry_run, yes, json } => prune::execute(
 			scope,
 			project_root.as_deref(),

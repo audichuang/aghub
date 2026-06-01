@@ -3,7 +3,7 @@
 /**
  * One skill's name plus its flattened update status.
  */
-export type SkillUpdateResponse = { name: string } & (
+export type SkillUpdateResponse = { name: string; scope: string } & (
 	| { status: "upToDate" }
 	| { status: "updateAvailable"; current: string; available: string }
 	| { status: "uncheckable"; reason: string }

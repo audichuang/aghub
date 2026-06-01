@@ -41,8 +41,10 @@ in `skill-lock.ts`, `local-lock.ts`, `update.ts`, `blob.ts`, `sync.ts`,
   (`add.ts:804`).
 - **`computed_hash` (project lock) is behavior-bearing**, not cosmetic: npx
   `experimental_sync` recomputes the folder hash and compares it
-  (`sync.ts:202-203`) to decide skip-vs-reinstall. **Byte-for-byte hash parity
-  with npx's `computeSkillFolderHash` is therefore a correctness requirement.**
+  (`sync.ts:202-203`) to decide skip-vs-reinstall. Hash parity with npx's
+  `computeSkillFolderHash` is therefore a correctness requirement within the
+  committed fixture matrix; outside it, mismatches are handled by recompute and
+  apply-update rather than silently trusting a stale lock value.
 - **Never write a content hash into the global `skill_folder_hash`.** npx treats
   it as a GitHub tree SHA (`blob.ts:199-218`); a non-empty mismatch causes a
   false `UpdateAvailable` + reinstall in `npx skills update -g`. Leave it
@@ -93,8 +95,11 @@ version.
 
 ### P. Content hashing (`crates/skill/src/hash.rs`, new; add `sha2` dep)
 
-`compute_skill_folder_hash(dir) -> io::Result<String>` reimplements npx's
-`computeSkillFolderHash` (`local-lock.ts:108-147`) **byte-for-byte**:
+`compute_skill_folder_hash(dir) -> io::Result<String>` follows npx's
+`computeSkillFolderHash` (`local-lock.ts:108-147`) for the committed golden
+fixture. Exact byte-for-byte parity is guaranteed only for the filenames covered
+by the fixture suite; npx's unqualified `localeCompare` can itself vary by JS
+runtime/locale for some filenames.
 
 1. **Collect** files recursively from `dir`. Skip directories named exactly
    `.git` or `node_modules` (case-sensitive) — **only these two**, matching
@@ -102,12 +107,12 @@ version.
    Detect symlinks via `symlink_metadata` (lstat); **skip symlinks and never
    descend into symlinked directories** (`follow_links(false)`, as in
    `scan.rs:191`). `relative_path` = path relative to `dir` with `\` → `/`.
-2. **Sort** files by `relative_path`. Collation: a plain Unicode **code-point**
-   sort is byte-identical to JS `localeCompare` for ASCII filenames (the
-   overwhelmingly common case). For non-ASCII filenames it MAY diverge; we
-   accept that and rely on the recompute-on-mismatch safeguard below rather than
-   pulling in a full ICU collator. (If exact parity on non-ASCII is later
-   required, pin `icu_collator`/`feruca`.)
+2. **Sort** files by `relative_path` with the Rust collator used by
+   `crates/skill/src/hash.rs`. This is intentionally **not** described as
+   Unicode code-point sort: ASCII punctuation, case, and numeric-looking names
+   can differ from both code-point order and some `localeCompare` runtimes
+   (covered by dedicated fixtures). If broader parity becomes required, pin a
+   specific ICU/CLDR implementation and expand the fixture matrix.
 3. **Hash** with one SHA-256: per file in sorted order,
    `update(relative_path UTF-8 bytes)` then `update(raw file bytes)` — **no
    delimiter, no length prefix**.
@@ -304,9 +309,9 @@ existing source-grouped, sorted skill list (`skill-list.tsx:210-225`).
 ## 7. Testing
 
 - **Unit:** hash parity with npx — a **CI-blocking** golden cross-check over a
-  fixture (including **uppercase/lowercase/accented filenames** to exercise the
-  code-point-vs-`localeCompare` divergence and the recompute safeguard); hasher
-  bounds + symlink-skip; `skill_path` traversal rejection (absolute/`..`);
+  fixture (including **uppercase/lowercase/accented filenames**) plus explicit
+  ASCII punctuation, case, and numeric filename ordering tests; hasher bounds +
+  symlink-skip; `skill_path` traversal rejection (absolute/`..`);
   credential redaction (token never in error/lock output); prune scope isolation
   (a project refresh never prunes a global entry); prune aborts on scan error;
   placeholder auto-heal; layout detection (symlink vs copy).
@@ -339,15 +344,15 @@ existing source-grouped, sorted skill list (`skill-list.tsx:210-225`).
 keychain + auth prompt; never in the committed lock); destructive prune is
 scan-success-gated, per-scope, atomic, renamed `prune-lock`; symlink sweep is
 containment-checked; hash is over the source folder, `.git`/`node_modules` only,
-with bounds and code-point sort + recompute safeguard; placeholder auto-heal;
-ref handling via gix symref/tag/SHA; treeless fetch with cache/TTL/timeout;
-credential redaction.
+with bounds and a fixture-pinned collator; placeholder auto-heal; ref handling
+via gix symref/tag/SHA; treeless fetch with cache/TTL/timeout; credential
+redaction.
 
 **Remaining (non-blocking) open items:**
 
-- **ICU exact non-ASCII collation:** deferred — code-point sort + recompute
-  safeguard is accepted; revisit with `icu_collator`/`feruca` only if non-ASCII
-  skill filenames prove common.
+- **Full locale-independent hash parity:** deferred. Current parity is
+  fixture-pinned; revisit with a precisely pinned ICU/CLDR strategy if filenames
+  outside the fixture matrix become common.
 - **Windows:** normalize `\\?\` verbatim/UNC prefixes before canonical-path
   comparison; the symlink sweep is largely inert on Windows (copy layout);
   document as a known limitation for now.

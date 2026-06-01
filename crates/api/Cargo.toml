@@ -30,6 +30,8 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 dirs = { workspace = true }
 ts-rs = { workspace = true }
+chrono = { version = "0.4", features = [ "serde" ] }
+gix = { version = "0.83", default-features = false }
 which = "8"
 open = "5"
 tempfile = "3"
@@ -43,4 +45,3 @@ log = "0.4.30"
 reqwest = { version = "0.13", features = [ "json" ] }
 
 [dev-dependencies]
-gix = { version = "0.83", default-features = false }

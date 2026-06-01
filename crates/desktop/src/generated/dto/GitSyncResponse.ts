@@ -6,5 +6,6 @@
 export type GitSyncResponse = {
 	success: boolean;
 	name: string | null;
+	updated_hash: string | null;
 	error: string | null;
 };

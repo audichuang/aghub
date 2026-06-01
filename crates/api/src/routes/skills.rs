@@ -7,10 +7,9 @@ use aghub_core::{
 	registry, transfer,
 };
 use rocket::http::Status;
-use rocket::response::status::NoContent;
 use rocket::serde::json::Json;
 use skill::sanitize::sanitize_name;
-use std::{collections::HashMap, time::Duration};
+use std::{collections::HashMap, path::PathBuf, time::Duration};
 use tokio::time::timeout;
 
 use crate::{
@@ -32,11 +31,11 @@ use crate::{
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
-	error::{ApiCreated, ApiError, ApiNoContent, ApiResult},
-	extractors::{AgentParam, ScopeParams},
+	error::{ApiCreated, ApiError, ApiResult},
+	extractors::{AgentParam, ResolvedScope, ScopeParams},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
-		resolved_to_resource_scope,
+		resolved_to_resource_scope, skills_update::update_lock_hash,
 	},
 	state::{GitCloneSession, GitCloneSessions},
 };
@@ -46,6 +45,26 @@ pub(crate) struct SkillListParams {
 	scope: Option<String>,
 	project_root: Option<String>,
 	include_managed: Option<bool>,
+}
+
+#[derive(rocket::FromForm)]
+pub struct DeleteSkillParams {
+	scope: Option<String>,
+	project_root: Option<String>,
+	confirm: Option<bool>,
+	all_agents: Option<bool>,
+}
+
+impl DeleteSkillParams {
+	fn resolve_scope(
+		&self,
+	) -> Result<crate::extractors::ResolvedScope, ApiError> {
+		ScopeParams {
+			scope: self.scope.clone(),
+			project_root: self.project_root.clone(),
+		}
+		.resolve()
+	}
 }
 
 impl SkillListParams {
@@ -262,7 +281,7 @@ pub async fn delete_skill_by_path(
 		// Idempotent: nothing on disk to remove.
 		return Ok(Json(DeleteSkillByPathResponse {
 			success: true,
-			dry_run: false,
+			dry_run: !req.confirm.unwrap_or(false),
 			deleted_path: Some(skill_dir.display().to_string()),
 			..Default::default()
 		}));
@@ -309,28 +328,59 @@ pub async fn delete_skill_by_path(
 	}
 
 	let confirm = req.confirm.unwrap_or(false);
-	if !confirm {
-		// Default dry-run: report the exact path, delete nothing.
+	let dry_run = !confirm;
+	let skill_file = skill_dir.join("SKILL.md");
+	let skill_name = skill::parser::parse(&skill_file)
+		.map(|parsed| parsed.name)
+		.unwrap_or_else(|_| {
+			skill_dir
+				.file_name()
+				.and_then(|n| n.to_str())
+				.unwrap_or_default()
+				.to_string()
+		});
+	let Some(first_agent) =
+		req.agents.iter().find_map(|a| a.parse::<AgentType>().ok())
+	else {
 		return Ok(Json(DeleteSkillByPathResponse {
-			success: true,
-			dry_run: true,
-			paths: vec![skill_dir.display().to_string()],
+			success: false,
+			error: Some("No valid agent was provided".to_string()),
+			..Default::default()
+		}));
+	};
+	let resolved = match resource_scope {
+		ResourceScope::GlobalOnly => ResolvedScope::Global,
+		ResourceScope::ProjectOnly => ResolvedScope::Project {
+			root: project_root.clone().expect("validated project root"),
+		},
+		ResourceScope::Both => {
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: false,
+				error: Some("scope 'all' is not writable".to_string()),
+				..Default::default()
+			}));
+		}
+	};
+	let mut manager =
+		build_manager_from_resolved(&AgentParam(first_agent), &resolved)?;
+	if let Err(error) = manager.load() {
+		return Ok(Json(DeleteSkillByPathResponse {
+			success: false,
+			error: Some(format!("Failed to load agent skills: {error}")),
 			..Default::default()
 		}));
 	}
-
-	match std::fs::remove_dir_all(&skill_dir) {
-		Ok(_) => {
-			// Disk-reconciled lock prune (best-effort: a scan error leaves the
-			// orphan entry but never fails the completed deletion).
-			prune_scope_lock(resource_scope, project_root.as_deref());
-			Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run: false,
-				paths: vec![skill_dir.display().to_string()],
-				deleted_path: Some(skill_dir.display().to_string()),
-				..Default::default()
-			}))
+	match manager.remove_skill_planned(
+		&skill_name,
+		req.all_agents.unwrap_or(false),
+		dry_run,
+		confirm,
+	) {
+		Ok(outcome) => {
+			if outcome.executed {
+				prune_scope_lock(resource_scope, project_root.as_deref());
+			}
+			Ok(Json(delete_response_from_outcome(outcome)))
 		}
 		Err(e) => Ok(Json(DeleteSkillByPathResponse {
 			success: false,
@@ -421,6 +471,37 @@ fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
 		path
 	} else {
 		get_parent_folder(path)
+	}
+}
+
+fn delete_response_from_outcome(
+	outcome: aghub_core::skills::removal::RemovalOutcome,
+) -> DeleteSkillByPathResponse {
+	DeleteSkillByPathResponse {
+		success: true,
+		dry_run: !outcome.executed,
+		executed: outcome.executed,
+		needs_confirm: outcome.plan.needs_confirm,
+		paths: outcome
+			.plan
+			.paths
+			.iter()
+			.map(|p| p.display().to_string())
+			.collect(),
+		skipped: outcome
+			.plan
+			.skipped
+			.iter()
+			.map(|p| p.display().to_string())
+			.collect(),
+		deleted_path: outcome
+			.executed
+			.then(|| {
+				outcome.plan.paths.first().map(|p| p.display().to_string())
+			})
+			.flatten(),
+		error: None,
+		validation_errors: None,
 	}
 }
 
@@ -875,33 +956,54 @@ pub async fn update_skill(
 	Ok(Json(response))
 }
 
-#[delete("/agents/<agent>/skills/<name>?<scope..>")]
+#[delete("/agents/<agent>/skills/<name>?<params..>")]
 pub async fn delete_skill(
 	agent: AgentParam,
 	name: &str,
-	scope: ScopeParams,
-) -> ApiNoContent {
-	let resolved = scope.resolve()?;
+	params: DeleteSkillParams,
+) -> ApiResult<DeleteSkillByPathResponse> {
+	let resolved = params.resolve_scope()?;
 	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	match manager.load() {
 		Ok(_) => {}
-		Err(ConfigError::NotFound { .. }) => return Ok(NoContent),
+		Err(ConfigError::NotFound { .. }) => {
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run: !params.confirm.unwrap_or(false),
+				executed: false,
+				..Default::default()
+			}));
+		}
 		Err(e) => return Err(ApiError::from(e)),
 	}
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "delete").await?;
 	}
-	match manager.remove_skill(name) {
-		Ok(()) => {
-			// Reconcile the lock with disk now that this agent's copy is gone
-			// (best-effort: keeps the entry if another agent still has it).
-			prune_scope_lock(resource_scope, project_root.as_deref());
-			Ok(NoContent)
+	let confirm = params.confirm.unwrap_or(false);
+	let dry_run = !confirm;
+	match manager.remove_skill_planned(
+		name,
+		params.all_agents.unwrap_or(false),
+		dry_run,
+		confirm,
+	) {
+		Ok(outcome) => {
+			if outcome.executed {
+				prune_scope_lock(resource_scope, project_root.as_deref());
+			}
+			Ok(Json(delete_response_from_outcome(outcome)))
 		}
-		Err(ConfigError::ResourceNotFound { .. }) => Ok(NoContent),
+		Err(ConfigError::ResourceNotFound { .. }) => {
+			Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run,
+				executed: false,
+				..Default::default()
+			}))
+		}
 		Err(e) => Err(ApiError::from(e)),
 	}
 }
@@ -1591,10 +1693,38 @@ pub async fn git_sync_skill(
 		));
 	}
 
+	let project_root = req.project_root.as_deref().map(PathBuf::from);
+	match req.scope.as_str() {
+		"global" => {}
+		"project" if project_root.is_some() => {}
+		"project" => {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				"project_root is required when scope is project",
+				"MISSING_PARAM",
+			));
+		}
+		_ => {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				"scope must be global or project",
+				"INVALID_SCOPE",
+			));
+		}
+	}
+
 	// Parse skill name from the cloned copy
 	let skill_name: Option<String> = skill::parser::parse(&cloned_skill_path)
 		.ok()
 		.map(|p| p.name);
+	let updated_hash = skill::compute_skill_folder_hash(&cloned_skill_dir)
+		.map_err(|e| {
+			ApiError::new(
+				Status::InternalServerError,
+				format!("Failed to hash synced skill: {e}"),
+				"SKILL_SYNC_ERROR",
+			)
+		})?;
 
 	// Replace each installation path
 	for source_path in &req.source_paths {
@@ -1611,6 +1741,20 @@ pub async fn git_sync_skill(
 		copy_dir_recursive(&cloned_skill_dir, &target_dir)?;
 	}
 
+	update_lock_hash(
+		&req.name,
+		&req.scope,
+		project_root.as_deref(),
+		&updated_hash,
+	)
+	.map_err(|e| {
+		ApiError::new(
+			Status::InternalServerError,
+			format!("Failed to update skill lock after sync: {e}"),
+			"SKILL_LOCK_ERROR",
+		)
+	})?;
+
 	// Remove session (drops TempDir, cleans up disk)
 	{
 		let mut map = sessions.sessions.lock().unwrap();
@@ -1620,6 +1764,7 @@ pub async fn git_sync_skill(
 	Ok(Json(GitSyncResponse {
 		success: true,
 		name: skill_name,
+		updated_hash: Some(updated_hash),
 		error: None,
 	}))
 }

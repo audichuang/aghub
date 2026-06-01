@@ -1,4 +1,5 @@
 pub mod add;
+pub mod apply_update;
 pub mod check;
 pub mod delete;
 pub mod disable;

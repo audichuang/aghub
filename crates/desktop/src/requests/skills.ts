@@ -6,6 +6,8 @@ import {
 import type {
 	CreateSkillRequest,
 	DeleteSkillByPathRequest,
+	ApplySkillUpdateRequest,
+	ApplySkillUpdateResponse,
 	GitInstallRequest,
 	GitInstallResponse,
 	GitScanRequest,
@@ -323,6 +325,12 @@ interface CheckSkillUpdatesMutationParams {
 	onError?: (error: Error) => void;
 }
 
+export interface CheckSkillUpdatesParams {
+	offline?: boolean;
+	scope?: "global" | "project" | "all";
+	projectRoot?: string;
+}
+
 /// Modeled as a mutation (not a query) because it is an explicit, network-heavy
 /// user action (clones each source) — this gives clean onSuccess/onError hooks
 /// without a fetch-on-render effect. The global skill lock is the input scope.
@@ -332,8 +340,33 @@ export function checkSkillUpdatesMutationOptions({
 	onError,
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
-		mutationFn: (offline?: boolean) => api.skills.checkUpdates(offline),
+		mutationFn: (params?: CheckSkillUpdatesParams) =>
+			api.skills.checkUpdates(params),
 		onSuccess,
+		onError,
+	});
+}
+
+interface ApplySkillUpdateMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: (data: ApplySkillUpdateResponse) => void | Promise<void>;
+	onError?: (error: Error) => void;
+}
+
+export function applySkillUpdateMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+	onError,
+}: ApplySkillUpdateMutationParams) {
+	return mutationOptions({
+		mutationFn: (body: ApplySkillUpdateRequest) =>
+			api.skills.applyUpdate(body),
+		onSuccess: async (data) => {
+			await invalidateSkillQueries(queryClient);
+			await onSuccess?.(data);
+		},
 		onError,
 	});
 }

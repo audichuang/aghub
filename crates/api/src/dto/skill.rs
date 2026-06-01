@@ -279,6 +279,11 @@ pub struct GitInstallRequest {
 #[ts(export)]
 pub struct GitSyncRequest {
 	pub session_id: String,
+	/// Current installed skill name; used to update the matching lock entry.
+	pub name: String,
+	/// Lock scope for the installed skill (`global` or `project`).
+	pub scope: String,
+	pub project_root: Option<String>,
 	/// Relative path of the skill within the cloned repo (from scan result).
 	pub skill_path: String,
 	/// Tilde-prefixed `source_path` values of every installation to replace.
@@ -292,6 +297,8 @@ pub struct GitSyncResponse {
 	pub success: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub name: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub updated_hash: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -317,6 +324,10 @@ pub struct DeleteSkillByPathResponse {
 	pub success: bool,
 	/// True when this was a dry-run (nothing was deleted).
 	pub dry_run: bool,
+	/// True when deletion actually ran.
+	pub executed: bool,
+	/// True when this removal is destructive enough to require confirm=true.
+	pub needs_confirm: bool,
 	/// The exact paths that were removed (or, in a dry-run, would be removed).
 	pub paths: Vec<String>,
 	/// Paths intentionally NOT removed (outside the allow-listed skills roots).
@@ -421,8 +432,33 @@ impl From<aghub_core::skills::update::SkillUpdateStatus>
 #[serde(rename_all = "camelCase")]
 pub struct SkillUpdateResponse {
 	pub name: String,
+	pub scope: String,
 	#[serde(flatten)]
 	pub status: SkillUpdateStatusResponse,
+}
+
+/// Request to re-fetch and overwrite an installed skill from its lock source.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySkillUpdateRequest {
+	pub name: String,
+	pub scope: String,
+	pub project_root: Option<String>,
+	pub confirm: Option<bool>,
+}
+
+/// Response from `POST /skills/apply-update`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySkillUpdateResponse {
+	pub success: bool,
+	pub name: String,
+	pub scope: String,
+	pub updated_hash: Option<String>,
+	pub paths: Vec<String>,
+	pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -433,6 +469,7 @@ mod tests {
 	fn update_available_serializes_with_status_tag_and_fields() {
 		let resp = SkillUpdateResponse {
 			name: "my-skill".to_string(),
+			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::UpdateAvailable {
 				current: "aaa".to_string(),
 				available: "bbb".to_string(),
@@ -443,12 +480,14 @@ mod tests {
 		assert_eq!(json["current"], "aaa");
 		assert_eq!(json["available"], "bbb");
 		assert_eq!(json["name"], "my-skill");
+		assert_eq!(json["scope"], "global");
 	}
 
 	#[test]
 	fn uncheckable_serializes_reason_string() {
 		let resp = SkillUpdateResponse {
 			name: "s".to_string(),
+			scope: "project".to_string(),
 			status: SkillUpdateStatusResponse::Uncheckable {
 				reason: "auth".to_string(),
 			},
@@ -462,6 +501,7 @@ mod tests {
 	fn up_to_date_serializes_status_only() {
 		let resp = SkillUpdateResponse {
 			name: "s".to_string(),
+			scope: "global".to_string(),
 			status: SkillUpdateStatusResponse::UpToDate,
 		};
 		let json = serde_json::to_value(&resp).unwrap();

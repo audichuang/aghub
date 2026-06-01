@@ -234,6 +234,55 @@ mod tests {
 	}
 
 	#[test]
+	fn ascii_punctuation_order_matches_current_fixture() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("a.txt"), b"a").unwrap();
+		fs::write(dir.path().join("apple.txt"), b"apple").unwrap();
+		let mut e = Sha256::new();
+		e.update(b"apple.txt");
+		e.update(b"apple");
+		e.update(b"a.txt");
+		e.update(b"a");
+		assert_eq!(
+			compute_skill_folder_hash(dir.path()).unwrap(),
+			format!("{:x}", e.finalize())
+		);
+	}
+
+	#[test]
+	fn case_order_matches_current_fixture() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("z.md"), b"z").unwrap();
+		fs::write(dir.path().join("ZEBRA.md"), b"zebra").unwrap();
+		let mut e = Sha256::new();
+		e.update(b"ZEBRA.md");
+		e.update(b"zebra");
+		e.update(b"z.md");
+		e.update(b"z");
+		assert_eq!(
+			compute_skill_folder_hash(dir.path()).unwrap(),
+			format!("{:x}", e.finalize())
+		);
+	}
+
+	#[test]
+	fn numeric_filename_order_matches_current_fixture() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("1.md"), b"1").unwrap();
+		fs::write(dir.path().join("2.md"), b"2").unwrap();
+		fs::write(dir.path().join("10.md"), b"10").unwrap();
+		let mut e = Sha256::new();
+		for (path, body) in [("10.md", "10"), ("1.md", "1"), ("2.md", "2")] {
+			e.update(path.as_bytes());
+			e.update(body.as_bytes());
+		}
+		assert_eq!(
+			compute_skill_folder_hash(dir.path()).unwrap(),
+			format!("{:x}", e.finalize())
+		);
+	}
+
+	#[test]
 	fn returns_lowercase_hex_64() {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("x"), b"y").unwrap();

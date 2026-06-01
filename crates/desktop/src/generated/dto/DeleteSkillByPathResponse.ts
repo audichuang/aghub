@@ -8,6 +8,14 @@ export type DeleteSkillByPathResponse = {
 	 */
 	dry_run: boolean;
 	/**
+	 * True when deletion actually ran.
+	 */
+	executed: boolean;
+	/**
+	 * True when this removal is destructive enough to require confirm=true.
+	 */
+	needs_confirm: boolean;
+	/**
 	 * The exact paths that were removed (or, in a dry-run, would be removed).
 	 */
 	paths: Array<string>;

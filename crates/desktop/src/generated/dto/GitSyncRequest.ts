@@ -6,6 +6,15 @@
 export type GitSyncRequest = {
 	session_id: string;
 	/**
+	 * Current installed skill name; used to update the matching lock entry.
+	 */
+	name: string;
+	/**
+	 * Lock scope for the installed skill (`global` or `project`).
+	 */
+	scope: string;
+	project_root: string | null;
+	/**
 	 * Relative path of the skill within the cloned repo (from scan result).
 	 */
 	skill_path: string;

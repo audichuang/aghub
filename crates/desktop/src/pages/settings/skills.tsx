@@ -248,7 +248,11 @@ export default function SkillsPage() {
 						className="shrink-0"
 						aria-label={t("checkForSkillUpdates")}
 						isDisabled={checkUpdatesMutation.isPending}
-						onPress={() => checkUpdatesMutation.mutate(false)}
+						onPress={() =>
+							checkUpdatesMutation.mutate({
+								scope: "global",
+							})
+						}
 					>
 						<ArrowPathRoundedSquareIcon
 							className={cn(
