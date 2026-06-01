@@ -114,10 +114,8 @@ fn parse_config_content<F>(
 			"match" => {
 				flush_host_block(&mut current, hosts, seen);
 			}
-			"hostname" => {
-				if current.host_name.is_none() {
-					current.host_name = parts.next().map(clean_token);
-				}
+			"hostname" if current.host_name.is_none() => {
+				current.host_name = parts.next().map(clean_token);
 			}
 			"include" => {
 				flush_host_block(&mut current, hosts, seen);
