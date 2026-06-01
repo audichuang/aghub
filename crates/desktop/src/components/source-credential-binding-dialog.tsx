@@ -1,6 +1,6 @@
 import { Button, Label, ListBox, Modal, Select, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useApi } from "../hooks/use-api";
 import {
@@ -36,7 +36,9 @@ export function SourceCredentialBindingDialog({
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
-	const [selectedCredentialId, setSelectedCredentialId] = useState("");
+	const [selectedCredentialId, setSelectedCredentialId] = useState<
+		string | null
+	>(null);
 	const [createDialogOpen, setCreateDialogOpen] = useState(false);
 
 	const credentialHost = useMemo(
@@ -51,19 +53,16 @@ export function SourceCredentialBindingDialog({
 		...sourceCredentialBindingsQueryOptions({ api, enabled: isOpen }),
 	});
 
-	useEffect(() => {
+	const defaultCredentialId = useMemo(() => {
 		if (!isOpen) {
-			setSelectedCredentialId("");
-			setCreateDialogOpen(false);
-			return;
+			return "";
 		}
 
 		const existingBinding = sourceBindings.find(
 			(binding) => binding.source === bindingSource,
 		);
 		if (existingBinding?.credentialId) {
-			setSelectedCredentialId(existingBinding.credentialId);
-			return;
+			return existingBinding.credentialId;
 		}
 
 		if (credentialHost) {
@@ -71,13 +70,13 @@ export function SourceCredentialBindingDialog({
 				(credential) => credential.name === credentialHost,
 			);
 			if (hostCredential) {
-				setSelectedCredentialId(hostCredential.id);
-				return;
+				return hostCredential.id;
 			}
 		}
 
-		setSelectedCredentialId("");
+		return "";
 	}, [bindingSource, credentialHost, credentials, isOpen, sourceBindings]);
+	const activeCredentialId = selectedCredentialId ?? defaultCredentialId;
 
 	const bindMutation = useMutation(
 		bindSourceCredentialMutationOptions({
@@ -85,6 +84,8 @@ export function SourceCredentialBindingDialog({
 			queryClient,
 			onSuccess: async () => {
 				toast.success(t("sourceCredentialBound"));
+				setSelectedCredentialId(null);
+				setCreateDialogOpen(false);
 				onBound();
 				onClose();
 			},
@@ -104,6 +105,7 @@ export function SourceCredentialBindingDialog({
 			return;
 		}
 		setCreateDialogOpen(false);
+		setSelectedCredentialId(null);
 		onClose();
 	};
 
@@ -136,7 +138,7 @@ export function SourceCredentialBindingDialog({
 									className="w-full"
 									variant="secondary"
 									selectedKey={
-										selectedCredentialId || undefined
+										activeCredentialId || undefined
 									}
 									isDisabled={bindMutation.isPending}
 									onSelectionChange={(key) => {
@@ -189,11 +191,11 @@ export function SourceCredentialBindingDialog({
 							<Button
 								type="button"
 								isDisabled={
-									!selectedCredentialId ||
+									!activeCredentialId ||
 									bindMutation.isPending
 								}
 								onPress={() =>
-									bindCredential(selectedCredentialId)
+									bindCredential(activeCredentialId)
 								}
 							>
 								{t("bind")}
