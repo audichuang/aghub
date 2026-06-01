@@ -29,6 +29,8 @@ interface CreateProjectFormValues {
 	path: string;
 }
 
+const TRAILING_PATH_SEPARATOR_RE = /[/\\]+$/;
+
 export function CreateProjectDialog({
 	isOpen,
 	onClose,
@@ -55,7 +57,7 @@ export function CreateProjectDialog({
 	});
 
 	const fillNameFromPath = (path: string) => {
-		const trimmedPath = path.trim().replace(/[/\\]+$/, "");
+		const trimmedPath = path.trim().replace(TRAILING_PATH_SEPARATOR_RE, "");
 		const folderName = basename(trimmedPath) || "";
 		if (folderName && !getValues("name").trim()) {
 			setValue("name", folderName, {
@@ -319,19 +321,21 @@ export function CreateProjectDialog({
 					</Modal.Dialog>
 				</Modal.Container>
 			</Modal.Backdrop>
-			<RemoteDirectoryPickerDialog
-				isOpen={isRemotePickerOpen}
-				connection={activeConnection}
-				initialPath={getValues("path")}
-				onClose={() => setIsRemotePickerOpen(false)}
-				onSelect={(path) => {
-					setValue("path", path, {
-						shouldDirty: true,
-						shouldValidate: true,
-					});
-					fillNameFromPath(path);
-				}}
-			/>
+			{isRemotePickerOpen && (
+				<RemoteDirectoryPickerDialog
+					isOpen={isRemotePickerOpen}
+					connection={activeConnection}
+					initialPath={getValues("path")}
+					onClose={() => setIsRemotePickerOpen(false)}
+					onSelect={(path) => {
+						setValue("path", path, {
+							shouldDirty: true,
+							shouldValidate: true,
+						});
+						fillNameFromPath(path);
+					}}
+				/>
+			)}
 		</>
 	);
 }

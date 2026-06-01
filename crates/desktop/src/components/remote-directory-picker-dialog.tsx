@@ -16,7 +16,7 @@ import {
 } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Selection } from "react-aria-components";
 import type { Connection } from "../lib/store";
@@ -90,13 +90,6 @@ export function RemoteDirectoryPickerDialog({
 		normalizedInitialPath(initialPath),
 	);
 
-	useEffect(() => {
-		if (!isOpen) return;
-		const nextPath = normalizedInitialPath(initialPath);
-		setPathInput(nextPath);
-		setBrowsePath(nextPath);
-	}, [initialPath, isOpen]);
-
 	const directoryQuery = useQuery({
 		queryKey: ["remote-directories", connection.id, browsePath],
 		queryFn: () =>
@@ -107,12 +100,6 @@ export function RemoteDirectoryPickerDialog({
 		enabled: isOpen,
 		retry: false,
 	});
-
-	useEffect(() => {
-		if (directoryQuery.data?.path) {
-			setPathInput(directoryQuery.data.path);
-		}
-	}, [directoryQuery.data?.path]);
 
 	const goToPath = (path: string) => {
 		const nextPath = normalizedInitialPath(path);
