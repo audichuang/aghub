@@ -289,14 +289,13 @@ pub fn parse_pid(s: &str) -> Option<u32> {
 	parse_kv_after(s, "PID=").and_then(|v| v.parse::<u32>().ok())
 }
 
-/// Extract `<path>` (to end of line) from a `LOGPATH=<path>` line.
+/// Extract `<path>` (to end of line) from a `LOGPATH=<path>` line. The key must
+/// be at the start of a (trimmed) line or follow whitespace, so a longer token
+/// ending in `LOGPATH=` cannot be mis-parsed.
 pub fn parse_logpath(s: &str) -> Option<String> {
 	for line in s.lines() {
-		if let Some(rest) = line.strip_prefix("LOGPATH=") {
+		if let Some(rest) = key_value_rest(line, "LOGPATH=") {
 			return Some(rest.to_string());
-		}
-		if let Some(idx) = line.find("LOGPATH=") {
-			return Some(line[idx + "LOGPATH=".len()..].to_string());
 		}
 	}
 	None
@@ -324,11 +323,12 @@ pub fn is_version_compatible(local: &str, remote: &str) -> bool {
 	}
 }
 
-/// Find the first token after `key` on any line (whitespace/EOL terminated).
+/// Find the first whitespace/EOL-terminated token after `key` on any line, where
+/// `key` is anchored to the line start or to a whitespace boundary (so e.g.
+/// `OLDPID=9` is NOT matched when looking for `PID=`).
 fn parse_kv_after(s: &str, key: &str) -> Option<String> {
 	for line in s.lines() {
-		if let Some(idx) = line.find(key) {
-			let rest = &line[idx + key.len()..];
+		if let Some(rest) = key_value_rest(line, key) {
 			let token: String =
 				rest.chars().take_while(|c| !c.is_whitespace()).collect();
 			if !token.is_empty() {
@@ -337,6 +337,22 @@ fn parse_kv_after(s: &str, key: &str) -> Option<String> {
 		}
 	}
 	None
+}
+
+/// Return the substring after `key` on `line` iff `key` appears at the start of
+/// the trimmed line or immediately after whitespace (a left word boundary), so a
+/// longer token whose suffix is `key` (e.g. `OLDPID=` for `PID=`) is rejected.
+fn key_value_rest<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+	let trimmed = line.trim_start();
+	if let Some(rest) = trimmed.strip_prefix(key) {
+		return Some(rest);
+	}
+	let (before, after) = trimmed.split_once(key)?;
+	if before.ends_with(char::is_whitespace) {
+		Some(after)
+	} else {
+		None
+	}
 }
 
 /// Parse the `(major, minor)` pair from a semver-ish string.
@@ -707,6 +723,28 @@ mod tests {
 	fn parse_pid_none() {
 		assert_eq!(parse_pid("no pid"), None);
 		assert_eq!(parse_pid("PID="), None);
+	}
+
+	#[test]
+	fn parse_kv_is_left_anchored_not_substring() {
+		// A longer token ending in the key must NOT match; the real line wins.
+		assert_eq!(parse_pid("OLDPID=999\nPID=4242"), Some(4242));
+		assert_eq!(parse_pid("OLDPID=999"), None);
+		assert_eq!(
+			parse_remote_port("MY_AGHUB_API_PORT=1\nAGHUB_API_PORT=8123"),
+			Some(8123)
+		);
+		// Key after whitespace is still a valid match.
+		assert_eq!(parse_pid("  PID=7"), Some(7));
+		assert_eq!(parse_pid("note: PID=7"), Some(7));
+	}
+
+	#[test]
+	fn parse_logpath_is_left_anchored() {
+		assert_eq!(
+			parse_logpath("X_LOGPATH=/nope\nLOGPATH=/run/u/a.log"),
+			Some("/run/u/a.log".to_string())
+		);
 	}
 
 	#[test]

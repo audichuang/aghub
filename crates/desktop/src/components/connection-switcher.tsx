@@ -10,7 +10,7 @@ import {
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useConnection } from "../hooks/use-connection";
-import type { ConnectionStatus } from "../lib/connection-logic";
+import { LOCAL_CONNECTION, type ConnectionStatus } from "../lib/connection-logic";
 import { cn } from "../lib/utils";
 import { ManageConnectionsDialog } from "./manage-connections-dialog";
 
@@ -40,6 +40,11 @@ export function ConnectionSwitcher() {
 		useConnection();
 	const [isManageOpen, setIsManageOpen] = useState(false);
 
+	// The implicit Local connection carries a hardcoded label; render it via the
+	// localized key instead so it follows the UI language.
+	const labelOf = (c: { id: string; label: string }) =>
+		c.id === LOCAL_CONNECTION.id ? t("connLocal") : c.label;
+
 	// react-aria selection is a Set<Key>; the switcher is single-select so we
 	// read at most one key out of the change and ignore "all"/empty.
 	const handleSelectionChange = (keys: Selection) => {
@@ -61,7 +66,7 @@ export function ConnectionSwitcher() {
 					<span className="flex min-w-0 items-center gap-2">
 						<StatusDot status={status} />
 						<span className="truncate">
-							{activeConnection.label}
+							{labelOf(activeConnection)}
 						</span>
 					</span>
 					<ChevronUpDownIcon className="size-4 shrink-0 text-muted" />
@@ -84,7 +89,7 @@ export function ConnectionSwitcher() {
 								<Dropdown.Item
 									key={connection.id}
 									id={connection.id}
-									textValue={connection.label}
+									textValue={labelOf(connection)}
 								>
 									<Dropdown.ItemIndicator />
 									{/* The dot reflects bring-up status only for
@@ -96,7 +101,7 @@ export function ConnectionSwitcher() {
 												: "idle"
 										}
 									/>
-									<Label>{connection.label}</Label>
+									<Label>{labelOf(connection)}</Label>
 								</Dropdown.Item>
 							))}
 						</Dropdown.Section>

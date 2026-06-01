@@ -247,18 +247,36 @@ fn bring_up(
 		PORT_POLL_DELAY,
 	)?;
 
-	let local_port = find_available_port()
-		.map_err(|message| RemoteError::TunnelFailed { message })?;
+	// From here the remote server is already running: every early return MUST
+	// guarded-kill it, or it orphans on the VM (the RemoteHandle is only stored
+	// after bring_up returns Ok, so disconnect/cleanup can't reach it yet).
+	let local_port = match find_available_port() {
+		Ok(port) => port,
+		Err(message) => {
+			aghub_remote::bringup::cleanup_remote(
+				&runner,
+				connection,
+				started.remote_pid,
+			);
+			return Err(RemoteError::TunnelFailed { message });
+		}
+	};
 
 	let tunnel_args =
 		build_tunnel_args(connection, local_port, started.remote_port);
-	let mut tunnel =
-		Command::new("ssh")
-			.args(&tunnel_args)
-			.spawn()
-			.map_err(|e| RemoteError::TunnelFailed {
+	let mut tunnel = match Command::new("ssh").args(&tunnel_args).spawn() {
+		Ok(tunnel) => tunnel,
+		Err(e) => {
+			aghub_remote::bringup::cleanup_remote(
+				&runner,
+				connection,
+				started.remote_pid,
+			);
+			return Err(RemoteError::TunnelFailed {
 				message: e.to_string(),
-			})?;
+			});
+		}
+	};
 	let tunnel_pid = tunnel.id();
 
 	// Give the forward a moment; if ssh already exited, the forward failed.
@@ -332,9 +350,17 @@ fn spawn_tunnel_watcher(
 /// Kill the local tunnel (which wakes the watcher) and the remote server.
 fn teardown(handle: &RemoteHandle) {
 	handle.intentional.store(true, Ordering::SeqCst);
-	// Kill the local tunnel by pid; the watcher's wait() then returns.
-	let _ = Command::new("kill")
-		.arg(handle.tunnel_pid.to_string())
+	// Guarded kill of the local tunnel: verify the pid is still an ssh process
+	// before signalling, so a pid recycled after the watcher already reaped the
+	// child is never killed. Waking the tunnel's wait() also triggers the
+	// watcher's remote cleanup.
+	let _ = Command::new("sh")
+		.arg("-c")
+		.arg(format!(
+			"kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | \
+			 grep -q ssh && kill {pid}",
+			pid = handle.tunnel_pid
+		))
 		.status();
 	// Guarded remote kill (idempotent with the watcher's own cleanup).
 	let runner = SystemRunner;

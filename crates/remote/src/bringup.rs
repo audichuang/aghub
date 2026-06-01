@@ -125,21 +125,16 @@ fn resolved_path(conn: &Connection) -> String {
 		.unwrap_or_else(|| "aghub-api".to_string())
 }
 
-/// Heuristic: did this ssh invocation fail at the *transport* level (host
-/// unreachable, auth refused, BatchMode non-interactive failure) rather than at
-/// the *remote command* level?
-fn is_transport_failure(status_code: Option<i32>, stderr: &str) -> bool {
-	if status_code == Some(255) {
-		return true;
-	}
-	let lower = stderr.to_ascii_lowercase();
-	lower.contains("batchmode")
-		|| lower.contains("connection refused")
-		|| lower.contains("connection timed out")
-		|| lower.contains("could not resolve hostname")
-		|| lower.contains("no route to host")
-		|| lower.contains("permission denied")
-		|| lower.contains("host key verification failed")
+/// Did this ssh invocation fail at the *transport* level (host unreachable, auth
+/// refused, BatchMode failure, unknown/changed host key) rather than at the
+/// *remote command* level?
+///
+/// OpenSSH reports its OWN failures with exit code 255; any other code means the
+/// remote command actually ran, so its relayed stderr must NOT be read as a
+/// transport failure (e.g. a non-executable binary exits 126 with "permission
+/// denied"). A missing code (ssh killed by signal) is treated as transport-level.
+fn is_transport_failure(status_code: Option<i32>) -> bool {
+	matches!(status_code, Some(255) | None)
 }
 
 /// Probe a remote for a compatible `aghub-api`. Pure orchestration over the
@@ -163,7 +158,7 @@ pub fn probe_connection<R: CommandRunner>(
 		},
 		Ok(out) => {
 			// SSH transport failure → unreachable.
-			if is_transport_failure(out.status_code, &out.stderr) {
+			if is_transport_failure(out.status_code) {
 				return TestResult {
 					reachable: false,
 					api_present: false,
@@ -280,7 +275,7 @@ pub fn start_remote<R: CommandRunner>(
 		.run("ssh", &start_args)
 		.map_err(|e| ConnectError::TunnelFailed(e.to_string()))?;
 
-	if is_transport_failure(start_out.status_code, &start_out.stderr) {
+	if is_transport_failure(start_out.status_code) {
 		return Err(ConnectError::Unreachable {
 			stderr: start_out.stderr,
 		});
@@ -404,6 +399,46 @@ mod tests {
 		assert!(!res.api_present);
 		assert!(!res.compatible);
 		assert_eq!(res.message, stderr);
+	}
+
+	#[test]
+	fn probe_remote_permission_denied_is_reachable_not_transport_failure() {
+		// A non-executable remote binary exits 126 with "permission denied" on
+		// the REMOTE side. SSH transport actually succeeded, so the host is
+		// reachable; only the binary is unusable. (Regression: the old phrase
+		// match treated this as unreachable.)
+		let args = probe_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&args),
+			CommandOutput {
+				status_code: Some(126),
+				stdout: String::new(),
+				stderr: "bash: /usr/bin/aghub-api: Permission denied"
+					.to_string(),
+			},
+		);
+		let res = probe_connection(&runner, &conn(), LOCAL);
+		assert!(res.reachable, "ssh succeeded; host is reachable");
+		assert!(!res.api_present);
+		assert!(!res.compatible);
+	}
+
+	#[test]
+	fn probe_signal_killed_ssh_is_transport_failure() {
+		// No exit code (ssh killed by signal) is a local/transport problem.
+		let args = probe_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&args),
+			CommandOutput {
+				status_code: None,
+				stdout: String::new(),
+				stderr: String::new(),
+			},
+		);
+		let res = probe_connection(&runner, &conn(), LOCAL);
+		assert!(!res.reachable);
 	}
 
 	#[test]
