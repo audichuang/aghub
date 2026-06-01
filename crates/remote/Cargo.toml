@@ -1,0 +1,17 @@
+[package]
+name = "aghub-remote"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "SSH transport + remote aghub-api bring-up logic (tauri-free, unit-testable)"
+
+[lib]
+name = "aghub_remote"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }

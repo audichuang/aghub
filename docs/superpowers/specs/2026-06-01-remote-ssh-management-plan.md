@@ -89,6 +89,20 @@ Companion to `2026-06-01-remote-ssh-management-design.md`.
   built-in `node --test` (zero deps) where Node supports it, otherwise they are
   design-of-record. `tsc` + `eslint` are the mandatory FE gates.
 
+## Environment-forced deviation: extract pure logic into `aghub-remote`
+
+The desktop `aghub` crate does **not** compile in the dev sandbox (missing `pango`/`gtk`/
+`webkit2gtk` system libs; `cargo check -p aghub` → exit 101), so Rust TDD cannot run there
+for code living inside it. `aghub-api` **does** compile here. Resolution (also a cleaner
+architecture): all pure SSH/bring-up logic from W2+W3 moves into a **new lib-only workspace
+crate `crates/remote` (package `aghub-remote`)** with **no tauri dependency** (deps: `serde`
+only). It compiles and unit-tests in the sandbox → genuine RED/GREEN TDD. The desktop `aghub`
+crate keeps only the **thin tauri glue** (W4): commands, `RemoteState`, tunnel spawn, watcher
+thread, `lib.rs` wiring — which calls into `aghub-remote`. W4 and the FE (W5/W6) cannot be
+compiled here; W4 is minimal wiring verified by the user's full build, FE is gated by
+`tsc`+`eslint` (no GTK needed). Register `crates/remote` in the root `Cargo.toml` workspace
+members.
+
 ## Ordered work items (TDD: RED → GREEN → verify per item)
 
 > Verifier per Rust item: `cargo test -p <crate>` + `cargo clippy -p <crate> --all-targets`
