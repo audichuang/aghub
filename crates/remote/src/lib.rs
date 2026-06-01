@@ -11,7 +11,9 @@
 //! W3 (bring-up logic).
 
 pub mod bringup;
+pub mod fs;
 pub mod ssh;
+pub mod ssh_config;
 
 #[cfg(test)]
 pub(crate) mod test_support;

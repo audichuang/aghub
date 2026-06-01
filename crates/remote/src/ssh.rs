@@ -142,12 +142,19 @@ impl CommandRunner for SystemRunner {
 // Pure argv builders (positional args, NEVER a joined shell string)
 // ---------------------------------------------------------------------------
 
-/// Build the argv for `ssh <conn> <remote_cmd>`.
+/// Build the argv for `ssh <conn> bash -lc <decoded remote_cmd>`.
 ///
-/// `remote_cmd` is passed as a single positional element so a hostile
-/// `ssh_target` can never become its own argument.
+/// OpenSSH runs the command through the account's login shell. Users often use
+/// fish/zsh there, while our remote scripts are bash. The command seen by the
+/// login shell is a fixed bash wrapper plus a base64 payload, so the login shell
+/// never has to parse the real script's quoting, semicolons, or expansions.
 pub fn build_ssh_args(conn: &Connection, remote_cmd: &str) -> Vec<String> {
-	let mut args = vec!["-o".to_string(), "BatchMode=yes".to_string()];
+	let mut args = vec![
+		"-o".to_string(),
+		"BatchMode=yes".to_string(),
+		"-o".to_string(),
+		"ConnectTimeout=10".to_string(),
+	];
 	if let Some(port) = conn.port {
 		args.push("-p".to_string());
 		args.push(port.to_string());
@@ -157,8 +164,41 @@ pub fn build_ssh_args(conn: &Connection, remote_cmd: &str) -> Vec<String> {
 		args.push(user.clone());
 	}
 	args.push(conn.ssh_target.clone());
-	args.push(remote_cmd.to_string());
+	args.push(build_bash_wrapped_cmd(remote_cmd));
 	args
+}
+
+fn build_bash_wrapped_cmd(remote_cmd: &str) -> String {
+	let encoded = base64_encode(remote_cmd.as_bytes());
+	format!("bash -lc 'eval \"$(printf %s {encoded} | base64 -d)\"'")
+}
+
+fn base64_encode(bytes: &[u8]) -> String {
+	const TABLE: &[u8; 64] =
+		b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+	let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+	for chunk in bytes.chunks(3) {
+		let b0 = chunk[0];
+		let b1 = *chunk.get(1).unwrap_or(&0);
+		let b2 = *chunk.get(2).unwrap_or(&0);
+		out.push(TABLE[(b0 >> 2) as usize] as char);
+		out.push(
+			TABLE[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char,
+		);
+		if chunk.len() > 1 {
+			out.push(
+				TABLE[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char,
+			);
+		} else {
+			out.push('=');
+		}
+		if chunk.len() > 2 {
+			out.push(TABLE[(b2 & 0b0011_1111) as usize] as char);
+		} else {
+			out.push('=');
+		}
+	}
+	out
 }
 
 /// Build the argv for `scp <local> <user@target:remote>`.
@@ -169,7 +209,12 @@ pub fn build_scp_args(
 	local: &str,
 	remote: &str,
 ) -> Vec<String> {
-	let mut args = vec!["-o".to_string(), "BatchMode=yes".to_string()];
+	let mut args = vec![
+		"-o".to_string(),
+		"BatchMode=yes".to_string(),
+		"-o".to_string(),
+		"ConnectTimeout=10".to_string(),
+	];
 	if let Some(port) = conn.port {
 		args.push("-P".to_string());
 		args.push(port.to_string());
@@ -181,6 +226,11 @@ pub fn build_scp_args(
 	};
 	args.push(dest);
 	args
+}
+
+/// Remote upload target used before an install step moves it into place.
+pub fn remote_api_upload_path() -> &'static str {
+	".cache/aghub/aghub-api.upload"
 }
 
 /// Build the argv for an SSH loopback port-forward tunnel.
@@ -196,6 +246,8 @@ pub fn build_tunnel_args(
 		"-N".to_string(),
 		"-o".to_string(),
 		"BatchMode=yes".to_string(),
+		"-o".to_string(),
+		"ConnectTimeout=10".to_string(),
 		"-o".to_string(),
 		"ExitOnForwardFailure=yes".to_string(),
 		"-L".to_string(),
@@ -241,20 +293,88 @@ fn sanitize_id(id: &str) -> String {
 		.collect()
 }
 
+/// POSIX shell snippet that resolves the default `aghub-api` binary. Non-login
+/// SSH commands frequently miss `~/.cargo/bin`, especially with fish login
+/// shells, so check the common install locations before giving up.
+fn default_api_path_script() -> &'static str {
+	"if command -v aghub-api >/dev/null 2>&1; then \
+	     command -v aghub-api; \
+	 elif [ -x \"$HOME/.cargo/bin/aghub-api\" ]; then \
+	     printf '%s\\n' \"$HOME/.cargo/bin/aghub-api\"; \
+	 elif [ -x \"$HOME/.local/bin/aghub-api\" ]; then \
+	     printf '%s\\n' \"$HOME/.local/bin/aghub-api\"; \
+	 else \
+	     printf '%s\\n' aghub-api; \
+	 fi"
+}
+
+/// Build a POSIX assignment that stores the resolved aghub-api path in `$bin`.
+fn assign_api_bin_cmd(resolved_path: &str) -> String {
+	if resolved_path == "aghub-api" {
+		format!("bin=\"$({})\";", default_api_path_script())
+	} else {
+		format!("bin={};", shell_quote_single(resolved_path))
+	}
+}
+
+fn assign_install_target_cmd(resolved_path: &str) -> String {
+	if resolved_path == "aghub-api" {
+		"target=\"$HOME/.local/bin/aghub-api\";".to_string()
+	} else if let Some(rest) = resolved_path.strip_prefix("~/") {
+		format!("target=\"$HOME\"/{};", shell_quote_single(rest))
+	} else {
+		format!("target={};", shell_quote_single(resolved_path))
+	}
+}
+
+/// Compose the remote preparation command for an scp upload.
+pub fn build_remote_prepare_upload_cmd() -> String {
+	"mkdir -p \"$HOME/.cache/aghub\"".to_string()
+}
+
+/// Compose the remote install command that moves an uploaded binary into place.
+pub fn build_remote_finish_upload_cmd(resolved_path: &str) -> String {
+	let target_assignment = assign_install_target_cmd(resolved_path);
+	format!(
+		"{target_assignment} \
+	     mkdir -p \"$(dirname -- \"$target\")\"; \
+	     install -m 755 \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\"; \
+	     \"$target\" --version"
+	)
+}
+
+/// Compose a remote install command that builds `aghub-api` on the VM itself.
+pub fn build_remote_cargo_install_cmd(
+	git_url: &str,
+	branch: Option<&str>,
+) -> String {
+	let branch_arg = branch
+		.map(|branch| format!(" --branch {}", shell_quote_single(branch)))
+		.unwrap_or_default();
+	format!(
+		"command -v cargo >/dev/null 2>&1 || {{ echo 'cargo not found' >&2; exit 127; }}; \
+	     command -v git >/dev/null 2>&1 || {{ echo 'git not found' >&2; exit 127; }}; \
+	     cargo install --git {}{} aghub-api --bin aghub-api --force",
+		shell_quote_single(git_url),
+		branch_arg
+	)
+}
+
 /// Compose the single remote shell command that starts `aghub-api` detached.
 ///
 /// The resolved binary path is single-quote escaped, so any dangerous
 /// characters in it land inside the quoted region and stay inert. The command
 /// echoes `PID=<pid>` and `LOGPATH=<path>` so the caller can parse them.
 pub fn build_remote_start_cmd(resolved_path: &str, conn_id: &str) -> String {
-	let quoted_bin = shell_quote_single(resolved_path);
+	let bin_assignment = assign_api_bin_cmd(resolved_path);
 	let safe_id = sanitize_id(conn_id);
 	format!(
-		"d=\"${{XDG_RUNTIME_DIR:-$HOME/.cache/aghub}}\"; \
+		"{bin_assignment} \
+	     d=\"${{XDG_RUNTIME_DIR:-$HOME/.cache/aghub}}\"; \
          mkdir -p -m 700 \"$d\"; \
          log=\"$d/aghub-api.{safe_id}.log\"; \
          : > \"$log\"; chmod 600 \"$log\"; \
-         nohup sh -c 'exec {quoted_bin} --port 0' >\"$log\" 2>&1 & \
+         nohup bash -lc 'exec \"$1\" --port 0' bash \"$bin\" >\"$log\" 2>&1 & \
          echo PID=$!; echo LOGPATH=\"$log\""
 	)
 }
@@ -272,7 +392,7 @@ pub fn build_remote_kill_cmd(pid: u32) -> String {
 
 /// Compose the probe command `<bin> --version` with the path escaped.
 pub fn build_remote_probe_cmd(resolved_path: &str) -> String {
-	format!("{} --version", shell_quote_single(resolved_path))
+	format!("{} \"$bin\" --version", assign_api_bin_cmd(resolved_path))
 }
 
 // ---------------------------------------------------------------------------
@@ -394,6 +514,17 @@ mod tests {
 		}
 	}
 
+	fn assert_bash_wrapped(remote_cmd: &str) {
+		assert!(
+				remote_cmd.starts_with("bash -lc 'eval \"$(printf %s "),
+				"remote command should enter bash through a fixed wrapper: {remote_cmd}"
+			);
+		assert!(
+			remote_cmd.ends_with(" | base64 -d)\"'"),
+			"remote command should decode the script inside bash: {remote_cmd}"
+		);
+	}
+
 	// --- Connection serde round-trip (camelCase) ---------------------------
 
 	#[test]
@@ -443,27 +574,36 @@ mod tests {
 	fn ssh_args_full() {
 		let args = build_ssh_args(&conn_full(), "echo hi");
 		assert_eq!(
-			args,
-			vec![
+			&args[..8],
+			[
 				"-o",
 				"BatchMode=yes",
+				"-o",
+				"ConnectTimeout=10",
 				"-p",
 				"2222",
 				"-l",
-				"alice",
-				"my-vm",
-				"echo hi"
+				"alice"
 			]
 		);
+		assert_eq!(args[8], "my-vm");
+		assert_bash_wrapped(args.last().unwrap());
 	}
 
 	#[test]
 	fn ssh_args_minimal() {
 		let args = build_ssh_args(&conn_minimal(), "uname -a");
 		assert_eq!(
-			args,
-			vec!["-o", "BatchMode=yes", "example.com", "uname -a"]
+			&args[..5],
+			[
+				"-o",
+				"BatchMode=yes",
+				"-o",
+				"ConnectTimeout=10",
+				"example.com"
+			]
 		);
+		assert_bash_wrapped(args.last().unwrap());
 	}
 
 	#[test]
@@ -485,7 +625,22 @@ mod tests {
 	#[test]
 	fn ssh_args_remote_cmd_is_single_element() {
 		let args = build_ssh_args(&conn_minimal(), "a && b; c");
-		assert_eq!(args.last().unwrap(), "a && b; c");
+		assert_bash_wrapped(args.last().unwrap());
+	}
+
+	#[test]
+	fn ssh_args_wrap_remote_cmd_in_posix_shell() {
+		let args = build_ssh_args(&conn_minimal(), "echo hi");
+		assert_bash_wrapped(args.last().unwrap());
+	}
+
+	#[test]
+	fn ssh_args_do_not_expose_script_to_login_shell_parser() {
+		let args = build_ssh_args(&conn_minimal(), "echo 'hi' && echo fish");
+		let remote = args.last().unwrap();
+		assert_bash_wrapped(remote);
+		assert!(!remote.contains("echo 'hi'"));
+		assert!(!remote.contains("&& echo fish"));
 	}
 
 	// --- build_scp_args ----------------------------------------------------
@@ -499,6 +654,8 @@ mod tests {
 			vec![
 				"-o",
 				"BatchMode=yes",
+				"-o",
+				"ConnectTimeout=10",
 				"-P",
 				"2222",
 				"./bin",
@@ -512,7 +669,14 @@ mod tests {
 		let args = build_scp_args(&conn_minimal(), "./bin", "/tmp/x");
 		assert_eq!(
 			args,
-			vec!["-o", "BatchMode=yes", "./bin", "example.com:/tmp/x"]
+			vec![
+				"-o",
+				"BatchMode=yes",
+				"-o",
+				"ConnectTimeout=10",
+				"./bin",
+				"example.com:/tmp/x"
+			]
 		);
 	}
 
@@ -541,6 +705,8 @@ mod tests {
 				"-o",
 				"BatchMode=yes",
 				"-o",
+				"ConnectTimeout=10",
+				"-o",
 				"ExitOnForwardFailure=yes",
 				"-L",
 				"127.0.0.1:5000:127.0.0.1:8080",
@@ -562,6 +728,8 @@ mod tests {
 				"-N",
 				"-o",
 				"BatchMode=yes",
+				"-o",
+				"ConnectTimeout=10",
 				"-o",
 				"ExitOnForwardFailure=yes",
 				"-L",
@@ -631,6 +799,13 @@ mod tests {
 	}
 
 	#[test]
+	fn remote_start_cmd_resolves_default_api_from_common_paths() {
+		let cmd = build_remote_start_cmd("aghub-api", "vm-1");
+		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
+		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+	}
+
+	#[test]
 	fn remote_start_cmd_sanitizes_id_for_log_name() {
 		let cmd = build_remote_start_cmd("/bin/x", "../../etc/passwd; rm");
 		// Only [A-Za-z0-9_-] survive in the sanitized id.
@@ -679,14 +854,38 @@ mod tests {
 	fn remote_probe_cmd_quotes_path_and_appends_version() {
 		assert_eq!(
 			build_remote_probe_cmd("/opt/aghub-api"),
-			"'/opt/aghub-api' --version"
+			"bin='/opt/aghub-api'; \"$bin\" --version"
 		);
+	}
+
+	#[test]
+	fn remote_probe_cmd_resolves_default_api_from_common_paths() {
+		let cmd = build_remote_probe_cmd("aghub-api");
+		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
+		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+		assert!(cmd.contains("--version"));
 	}
 
 	#[test]
 	fn remote_probe_cmd_neutralizes_injection() {
 		let cmd = build_remote_probe_cmd("a; rm -rf /");
-		assert_eq!(cmd, "'a; rm -rf /' --version");
+		assert_eq!(cmd, "bin='a; rm -rf /'; \"$bin\" --version");
+	}
+
+	// --- build_remote_cargo_install_cmd -----------------------------------
+
+	#[test]
+	fn remote_cargo_install_cmd_uses_crate_spec_not_package_flag() {
+		let cmd = build_remote_cargo_install_cmd(
+			"https://example.com/aghub.git",
+			Some("feat/remote-ssh-management"),
+		);
+		assert!(cmd.contains(
+			"cargo install --git 'https://example.com/aghub.git' \
+		     --branch 'feat/remote-ssh-management' aghub-api \
+		     --bin aghub-api --force"
+		));
+		assert!(!cmd.contains("--package"));
 	}
 
 	// --- parsers -----------------------------------------------------------

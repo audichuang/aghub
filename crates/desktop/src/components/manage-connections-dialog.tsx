@@ -1,8 +1,17 @@
-import { PencilSquareIcon, TrashIcon } from "@heroicons/react/24/solid";
+import {
+	CheckCircleIcon,
+	ChevronDownIcon,
+	ExclamationTriangleIcon,
+	PencilSquareIcon,
+	TrashIcon,
+	XCircleIcon,
+} from "@heroicons/react/24/solid";
 import {
 	Button,
 	Description,
+	Dropdown,
 	FieldError,
+	Header,
 	Input,
 	Label,
 	Modal,
@@ -10,8 +19,9 @@ import {
 	TextField,
 	toast,
 } from "@heroui/react";
-import { useMutation } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useMutation, useQuery } from "@tanstack/react-query";
+import { invoke } from "@tauri-apps/api/core";
+import { type Key, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TestResult } from "../contexts/connection";
 import { useConnection } from "../hooks/use-connection";
@@ -32,6 +42,20 @@ interface ManageConnectionsDialogProps {
 	onClose: () => void;
 }
 
+interface SshConfigHost {
+	alias: string;
+	hostName?: string | null;
+}
+
+type TestStepStatus = "ok" | "warning" | "error" | "muted";
+
+interface TestStep {
+	key: string;
+	label: string;
+	detail: string;
+	status: TestStepStatus;
+}
+
 /** Format a TestResult into a translated toast message. */
 function toastTestResult(
 	result: TestResult,
@@ -39,6 +63,14 @@ function toastTestResult(
 ): void {
 	if (!result.reachable) {
 		toast.danger(t("connTestUnreachable", { message: result.message }));
+		return;
+	}
+	if (result.installAttempted && !result.installSucceeded) {
+		toast.danger(
+			t("connTestInstallFailed", {
+				message: result.installMessage ?? result.message,
+			}),
+		);
 		return;
 	}
 	if (!result.apiPresent) {
@@ -54,7 +86,130 @@ function toastTestResult(
 		);
 		return;
 	}
+	if (result.installAttempted && result.installSucceeded) {
+		toast.success(t("connTestInstalledOk", { message: result.message }));
+		return;
+	}
 	toast.success(t("connTestReachableOk", { message: result.message }));
+}
+
+function buildTestSteps(
+	result: TestResult,
+	t: (key: string, opts?: Record<string, unknown>) => string,
+): TestStep[] {
+	const apiStatus: TestStepStatus = !result.reachable
+		? "muted"
+		: result.apiPresent
+			? result.compatible
+				? "ok"
+				: "warning"
+			: "error";
+
+	const apiDetail = !result.reachable
+		? t("connTestStepSkipped")
+		: result.apiPresent
+			? result.apiVersion == null
+				? t("connTestStepApiPresent")
+				: t("connTestStepApiVersion", {
+						version: result.apiVersion,
+					})
+			: t("connTestStepApiMissing");
+
+	const installStatus: TestStepStatus = !result.reachable
+		? "muted"
+		: result.installAttempted
+			? result.installSucceeded
+				? "ok"
+				: "error"
+			: result.apiPresent
+				? "muted"
+				: "warning";
+
+	const installDetail = !result.reachable
+		? t("connTestStepSkipped")
+		: result.installAttempted
+			? result.installSucceeded
+				? t("connTestStepInstallOk")
+				: (result.installMessage ?? result.message)
+			: result.apiPresent
+				? t("connTestStepInstallNotNeeded")
+				: t("connTestStepInstallNotRun");
+
+	return [
+		{
+			key: "ssh",
+			label: t("connTestStepSsh"),
+			detail: result.reachable ? t("connTestStepSshOk") : result.message,
+			status: result.reachable ? "ok" : "error",
+		},
+		{
+			key: "api",
+			label: t("connTestStepApi"),
+			detail: apiDetail,
+			status: apiStatus,
+		},
+		{
+			key: "install",
+			label: t("connTestStepInstall"),
+			detail: installDetail,
+			status: installStatus,
+		},
+	];
+}
+
+function TestStepIcon({ status }: { status: TestStepStatus }) {
+	if (status === "ok") {
+		return (
+			<CheckCircleIcon className="mt-0.5 size-4 shrink-0 text-success" />
+		);
+	}
+	if (status === "warning") {
+		return (
+			<ExclamationTriangleIcon className="mt-0.5 size-4 shrink-0 text-warning" />
+		);
+	}
+	if (status === "error") {
+		return <XCircleIcon className="mt-0.5 size-4 shrink-0 text-danger" />;
+	}
+	return (
+		<span
+			className="mt-1 size-3 shrink-0 rounded-full bg-muted/40"
+			aria-hidden="true"
+		/>
+	);
+}
+
+function TestResultPanel({
+	result,
+	t,
+}: {
+	result: TestResult;
+	t: (key: string, opts?: Record<string, unknown>) => string;
+}) {
+	const steps = buildTestSteps(result, t);
+
+	return (
+		<div className="rounded-md border border-border bg-surface-secondary px-3 py-2.5">
+			<p className="text-sm font-medium text-foreground">
+				{t("connTestResultTitle")}
+			</p>
+			<div className="mt-2 flex flex-col gap-2">
+				{steps.map((step) => (
+					<div key={step.key} className="flex min-w-0 gap-2">
+						<TestStepIcon status={step.status} />
+						<div className="min-w-0">
+							<p className="text-sm font-medium text-foreground">
+								{step.label}
+							</p>
+							<p className="break-words text-xs text-muted">
+								{step.detail}
+							</p>
+						</div>
+					</div>
+				))}
+			</div>
+		</div>
+	);
 }
 
 export function ManageConnectionsDialog({
@@ -83,11 +238,21 @@ export function ManageConnectionsDialog({
 	);
 	// Validation errors are only shown after a save/test attempt.
 	const [showErrors, setShowErrors] = useState(false);
+	const [testResult, setTestResult] = useState<TestResult | null>(null);
+
+	const { data: sshConfigHosts = [], isPending: sshHostsLoading } = useQuery<
+		SshConfigHost[]
+	>({
+		queryKey: ["ssh-config-hosts"],
+		queryFn: () => invoke<SshConfigHost[]>("list_ssh_config_hosts"),
+		enabled: isOpen,
+	});
 
 	const errors = useMemo(() => validateConnectionForm(form), [form]);
 	const valid = isFormValid(form);
 
 	const setField = (key: keyof ConnectionFormState, value: string) => {
+		setTestResult(null);
 		setForm((prev) => ({ ...prev, [key]: value }));
 	};
 
@@ -95,6 +260,17 @@ export function ManageConnectionsDialog({
 		setEditingId(null);
 		setForm(EMPTY_CONNECTION_FORM);
 		setShowErrors(false);
+		setTestResult(null);
+	};
+
+	const selectSshAlias = (key: Key) => {
+		if (typeof key !== "string") return;
+		const host = sshConfigHosts.find(
+			(candidate) => candidate.alias === key,
+		);
+		if (host != null) {
+			setField("sshTarget", host.alias);
+		}
 	};
 
 	const startEdit = (connection: Connection) => {
@@ -144,8 +320,12 @@ export function ManageConnectionsDialog({
 			const payload = formToConnection(form);
 			return testConnection({ ...payload, id: editingId ?? "test" });
 		},
-		onSuccess: (result) => toastTestResult(result, t),
+		onSuccess: (result) => {
+			setTestResult(result);
+			toastTestResult(result, t);
+		},
 		onError: (err) => {
+			setTestResult(null);
 			toast.danger(
 				t("connTestFailed", {
 					message: err instanceof Error ? err.message : String(err),
@@ -163,6 +343,7 @@ export function ManageConnectionsDialog({
 	const handleTest = () => {
 		setShowErrors(true);
 		if (!valid) return;
+		setTestResult(null);
 		testMutation.mutate();
 	};
 
@@ -269,28 +450,82 @@ export function ManageConnectionsDialog({
 								)}
 							</TextField>
 
-							<TextField
-								isRequired
-								isInvalid={
-									showErrors && errors.sshTarget != null
-								}
-								value={form.sshTarget}
-								onChange={(value) =>
-									setField("sshTarget", value)
-								}
-							>
-								<Label>{t("connFieldSshTarget")}</Label>
-								<Input
-									placeholder={t(
-										"connFieldSshTargetPlaceholder",
+							<div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+								<TextField
+									isRequired
+									isInvalid={
+										showErrors && errors.sshTarget != null
+									}
+									value={form.sshTarget}
+									onChange={(value) =>
+										setField("sshTarget", value)
+									}
+								>
+									<Label>{t("connFieldSshTarget")}</Label>
+									<Input
+										placeholder={t(
+											"connFieldSshTargetPlaceholder",
+										)}
+									/>
+									{showErrors && errors.sshTarget != null && (
+										<FieldError>
+											{t(errors.sshTarget)}
+										</FieldError>
 									)}
-								/>
-								{showErrors && errors.sshTarget != null && (
-									<FieldError>
-										{t(errors.sshTarget)}
-									</FieldError>
-								)}
-							</TextField>
+								</TextField>
+
+								<Dropdown>
+									<Button
+										variant="secondary"
+										className="w-full sm:w-auto"
+										aria-label={t("connChooseSshAlias")}
+										isDisabled={
+											isBusy ||
+											sshHostsLoading ||
+											sshConfigHosts.length === 0
+										}
+									>
+										<span className="truncate">
+											{sshConfigHosts.length === 0
+												? t("connNoSshAliases")
+												: t("connChooseSshAlias")}
+										</span>
+										<ChevronDownIcon className="size-4 shrink-0 text-muted" />
+									</Button>
+									<Dropdown.Popover className="min-w-64 max-w-80">
+										<Dropdown.Menu
+											onAction={selectSshAlias}
+										>
+											<Dropdown.Section>
+												<Header>
+													{t("connSshAliases")}
+												</Header>
+												{sshConfigHosts.map((host) => (
+													<Dropdown.Item
+														key={host.alias}
+														id={host.alias}
+														textValue={host.alias}
+													>
+														<div className="min-w-0">
+															<Label>
+																{host.alias}
+															</Label>
+															{host.hostName !=
+																null && (
+																<Description className="truncate">
+																	{
+																		host.hostName
+																	}
+																</Description>
+															)}
+														</div>
+													</Dropdown.Item>
+												))}
+											</Dropdown.Section>
+										</Dropdown.Menu>
+									</Dropdown.Popover>
+								</Dropdown>
+							</div>
 
 							<TextField
 								value={form.user}
@@ -347,6 +582,10 @@ export function ManageConnectionsDialog({
 									{t("connFieldRemotePathPlaceholder")}
 								</Description>
 							</TextField>
+
+							{testResult != null && (
+								<TestResultPanel result={testResult} t={t} />
+							)}
 						</div>
 					</Modal.Body>
 

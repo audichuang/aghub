@@ -11,7 +11,9 @@ name = "aghub_remote"
 path = "src/lib.rs"
 
 [dependencies]
+dirs = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+tempfile = { workspace = true }

@@ -205,8 +205,10 @@ dependencies = [
 name = "aghub-remote"
 version = "1.1.1"
 dependencies = [
+ "dirs",
  "serde",
  "serde_json",
+ "tempfile",
 ]
 
 [[package]]

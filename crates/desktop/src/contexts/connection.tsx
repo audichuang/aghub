@@ -34,6 +34,9 @@ export interface TestResult {
 	apiVersion: string | null;
 	compatible: boolean;
 	message: string;
+	installAttempted: boolean;
+	installSucceeded: boolean;
+	installMessage?: string | null;
 }
 
 export const ConnectionContext = createContext<ConnectionContextValue | null>(

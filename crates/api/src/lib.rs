@@ -19,6 +19,10 @@ pub mod routes;
 pub(crate) mod skills;
 pub mod state;
 
+/// Version of the `aghub-api` binary/library, shared with the desktop remote
+/// compatibility check.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub struct ApiOptions {
 	pub port: u16,
 	pub app_data_dir: Option<PathBuf>,

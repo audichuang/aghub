@@ -35,6 +35,7 @@ const DATA_NAMESPACES = [
 	"skills",
 	"mcps",
 	"agents",
+	"projects",
 	"sub-agents",
 	"plugins",
 	"credentials",
@@ -45,6 +46,54 @@ const DATA_NAMESPACES = [
 
 interface RemoteDisconnectedPayload {
 	connectionId: string;
+}
+
+interface RemoteErrorPayload {
+	kind?: string;
+	stderr?: string;
+	installHint?: string;
+	remoteVersion?: string | null;
+	message?: string;
+}
+
+function remoteErrorMessage(error: unknown): string {
+	if (error instanceof Error) {
+		return error.message;
+	}
+	if (typeof error === "string") {
+		return error;
+	}
+	if (error == null || typeof error !== "object") {
+		return String(error);
+	}
+
+	const remote = error as RemoteErrorPayload;
+	switch (remote.kind) {
+		case "unreachable":
+			return remote.stderr ?? "SSH connection failed.";
+		case "remoteApiMissing":
+			return remote.installHint ?? "aghub-api is missing on the remote.";
+		case "incompatible":
+			return `Remote aghub-api version ${
+				remote.remoteVersion ?? "unknown"
+			} is incompatible.`;
+		case "startTimeout":
+			return "Remote aghub-api did not start in time.";
+		case "tunnelFailed":
+			return remote.message ?? "SSH tunnel failed.";
+		case "deployFailed":
+			return remote.message ?? "Remote aghub-api install failed.";
+		case "alreadyConnecting":
+			return "A connection attempt is already in progress.";
+		case "internal":
+			return remote.message ?? "Internal remote connection error.";
+		default:
+			try {
+				return JSON.stringify(error);
+			} catch {
+				return String(error);
+			}
+	}
 }
 
 export function ConnectionProvider({ children }: ConnectionProviderProps) {
@@ -168,7 +217,7 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 			<div className="flex h-screen items-center justify-center">
 				<p className="text-sm text-danger">
 					Failed to connect to {activeConnection.label}:{" "}
-					{String(serverQuery.error)}
+					{remoteErrorMessage(serverQuery.error)}
 				</p>
 			</div>
 		);

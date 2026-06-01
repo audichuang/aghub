@@ -13,23 +13,30 @@
 //! still receives a Promise from `invoke`.
 
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aghub_remote::bringup::{
-	probe_connection, start_remote, ConnectError, TestResult,
+	ensure_remote_api, probe_connection, start_remote, ConnectError,
+	RemoteInstallSource, TestResult,
+};
+use aghub_remote::fs::{
+	list_remote_directories as list_remote_directories_core,
+	RemoteDirectoryError, RemoteDirectoryListing,
 };
 use aghub_remote::ssh::{build_tunnel_args, Connection, SystemRunner};
+use aghub_remote::ssh_config::{read_default_ssh_config_hosts, SshConfigHost};
 use log::{info, warn};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::server::find_available_port;
 
-/// Local desktop version, used to gate remote `aghub-api` compatibility.
-const LOCAL_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// Local embedded API version, used to gate remote `aghub-api` compatibility.
+const LOCAL_VERSION: &str = aghub_api::VERSION;
 /// How many times to poll the remote log for the bound port.
 const PORT_POLL_ATTEMPTS: u32 = 40;
 /// Delay between port-poll attempts (~40 * 250ms = 10s budget).
@@ -76,8 +83,12 @@ pub enum RemoteError {
 	StartTimeout,
 	/// The local ssh tunnel failed to establish the port-forward.
 	TunnelFailed { message: String },
+	/// Automatic install/deploy of `aghub-api` failed.
+	DeployFailed { message: String },
 	/// A bring-up for this connection is already in progress.
 	AlreadyConnecting,
+	/// Remote directory browsing failed.
+	RemoteDirectoryFailed { message: String },
 	/// Anything else (spawn failures, poisoned locks, ...).
 	Internal { message: String },
 }
@@ -94,6 +105,24 @@ impl From<ConnectError> for RemoteError {
 			ConnectError::StartTimeout => RemoteError::StartTimeout,
 			ConnectError::TunnelFailed(message) => {
 				RemoteError::TunnelFailed { message }
+			}
+			ConnectError::DeployFailed(message) => {
+				RemoteError::DeployFailed { message }
+			}
+		}
+	}
+}
+
+impl From<RemoteDirectoryError> for RemoteError {
+	fn from(e: RemoteDirectoryError) -> Self {
+		match e {
+			RemoteDirectoryError::Unreachable { stderr } => {
+				RemoteError::Unreachable { stderr }
+			}
+			RemoteDirectoryError::NotDirectory { message }
+			| RemoteDirectoryError::CommandFailed { message }
+			| RemoteDirectoryError::Parse { message } => {
+				RemoteError::RemoteDirectoryFailed { message }
 			}
 		}
 	}
@@ -120,6 +149,23 @@ fn resolved_path(conn: &Connection) -> String {
 pub fn test_connection(connection: Connection) -> TestResult {
 	let runner = SystemRunner;
 	probe_connection(&runner, &connection, LOCAL_VERSION)
+}
+
+/// Return selectable aliases discovered from the user's local `~/.ssh/config`.
+#[tauri::command]
+pub fn list_ssh_config_hosts() -> Vec<SshConfigHost> {
+	read_default_ssh_config_hosts()
+}
+
+/// List immediate child directories on a remote VM for the project picker.
+#[tauri::command]
+pub fn list_remote_directories(
+	connection: Connection,
+	path: String,
+) -> Result<RemoteDirectoryListing, RemoteError> {
+	let runner = SystemRunner;
+	list_remote_directories_core(&runner, &connection, &path)
+		.map_err(Into::into)
 }
 
 /// Bring up the remote server and a tunnel; returns the **local** port the
@@ -221,18 +267,13 @@ fn bring_up(
 	let runner = SystemRunner;
 	let bin = resolved_path(connection);
 
-	let test = probe_connection(&runner, connection, LOCAL_VERSION);
-	if !test.reachable {
-		return Err(RemoteError::Unreachable {
-			stderr: test.message,
-		});
-	}
-	if !test.api_present {
-		// v1: detect-or-instruct. Auto-scp deploy is a documented v2 follow-up.
-		return Err(RemoteError::RemoteApiMissing {
-			install_hint: install_hint(),
-		});
-	}
+	let install_source = remote_install_source();
+	let test = ensure_remote_api(
+		&runner,
+		connection,
+		LOCAL_VERSION,
+		install_source.as_ref(),
+	)?;
 	if !test.compatible {
 		return Err(RemoteError::Incompatible {
 			remote_version: test.api_version,
@@ -315,6 +356,37 @@ fn bring_up(
 	})
 }
 
+fn remote_install_source() -> Option<RemoteInstallSource> {
+	if let Ok(path) = std::env::var("AGHUB_REMOTE_API_BINARY") {
+		let trimmed = path.trim();
+		if !trimmed.is_empty() {
+			return Some(RemoteInstallSource::LocalBinary(PathBuf::from(
+				trimmed,
+			)));
+		}
+	}
+
+	let url = std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
+		.ok()
+		.filter(|s| !s.trim().is_empty())
+		.or_else(|| git_output(&["remote", "get-url", "origin"]));
+	let url = url?;
+	let branch = std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
+		.ok()
+		.filter(|s| !s.trim().is_empty())
+		.or_else(|| git_output(&["branch", "--show-current"]));
+	Some(RemoteInstallSource::CargoGit { url, branch })
+}
+
+fn git_output(args: &[&str]) -> Option<String> {
+	let output = Command::new("git").args(args).output().ok()?;
+	if !output.status.success() {
+		return None;
+	}
+	let value = String::from_utf8_lossy(&output.stdout).trim().to_string();
+	(!value.is_empty()).then_some(value)
+}
+
 /// Watch the tunnel child; when it exits, clean up the remote server and — if
 /// the exit was unexpected — notify the frontend and drop the handle.
 fn spawn_tunnel_watcher(
@@ -369,11 +441,4 @@ fn teardown(handle: &RemoteHandle) {
 		&handle.connection,
 		handle.remote_pid,
 	);
-}
-
-/// Install hint shown when the VM has no compatible `aghub-api`.
-fn install_hint() -> String {
-	"Install aghub-api on the VM (e.g. `cargo install --path crates/api` or \
-	 `just install`) and ensure it is on PATH, then reconnect."
-		.to_string()
 }

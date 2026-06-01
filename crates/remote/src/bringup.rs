@@ -6,16 +6,19 @@
 //! exercised under the test `MockRunner` with **no real `ssh`**.
 
 use std::fmt;
+use std::path::PathBuf;
 use std::thread::sleep;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
 use crate::ssh::{
-	build_remote_cat_cmd, build_remote_kill_cmd, build_remote_probe_cmd,
-	build_remote_start_cmd, build_ssh_args, is_version_compatible,
-	parse_api_version, parse_logpath, parse_pid, parse_remote_port,
-	CommandRunner, Connection,
+	build_remote_cargo_install_cmd, build_remote_cat_cmd,
+	build_remote_finish_upload_cmd, build_remote_kill_cmd,
+	build_remote_prepare_upload_cmd, build_remote_probe_cmd,
+	build_remote_start_cmd, build_scp_args, build_ssh_args,
+	is_version_compatible, parse_api_version, parse_logpath, parse_pid,
+	parse_remote_port, remote_api_upload_path, CommandRunner, Connection,
 };
 
 // ---------------------------------------------------------------------------
@@ -51,6 +54,44 @@ pub struct TestResult {
 	pub compatible: bool,
 	/// Human-facing summary (carries ssh stderr on failure).
 	pub message: String,
+	/// The probe attempted to install `aghub-api` automatically.
+	#[serde(default)]
+	pub install_attempted: bool,
+	/// Automatic installation completed and the post-install probe found the
+	/// binary.
+	#[serde(default)]
+	pub install_succeeded: bool,
+	/// Human-facing install detail, when an install was attempted.
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub install_message: Option<String>,
+}
+
+impl TestResult {
+	fn new(
+		reachable: bool,
+		api_present: bool,
+		api_version: Option<String>,
+		compatible: bool,
+		message: String,
+	) -> Self {
+		Self {
+			reachable,
+			api_present,
+			api_version,
+			compatible,
+			message,
+			install_attempted: false,
+			install_succeeded: false,
+			install_message: None,
+		}
+	}
+
+	fn with_install_result(mut self, succeeded: bool, message: String) -> Self {
+		self.install_attempted = true;
+		self.install_succeeded = succeeded;
+		self.install_message = Some(message);
+		self
+	}
 }
 
 /// Outcome of [`decide_deploy`]: what to do about a (possibly missing) remote
@@ -80,6 +121,8 @@ pub enum ConnectError {
 	StartTimeout,
 	/// The tunnel child failed to establish the port-forward.
 	TunnelFailed(String),
+	/// Automatic remote installation failed.
+	DeployFailed(String),
 }
 
 impl fmt::Display for ConnectError {
@@ -97,11 +140,23 @@ impl fmt::Display for ConnectError {
 			ConnectError::TunnelFailed(msg) => {
 				write!(f, "ssh tunnel failed: {msg}")
 			}
+			ConnectError::DeployFailed(msg) => {
+				write!(f, "remote install failed: {msg}")
+			}
 		}
 	}
 }
 
 impl std::error::Error for ConnectError {}
+
+/// Where an automatic remote install should source `aghub-api` from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RemoteInstallSource {
+	/// Upload this explicit local binary with scp, then install it remotely.
+	LocalBinary(PathBuf),
+	/// Build/install on the VM using cargo from a git repository.
+	CargoGit { url: String, branch: Option<String> },
+}
 
 /// A successfully started remote server: its pid, the VM-side port it bound, and
 /// the remote log path.
@@ -149,23 +204,11 @@ pub fn probe_connection<R: CommandRunner>(
 	let args = build_ssh_args(conn, &remote_cmd);
 
 	match runner.run("ssh", &args) {
-		Err(e) => TestResult {
-			reachable: false,
-			api_present: false,
-			api_version: None,
-			compatible: false,
-			message: e.to_string(),
-		},
+		Err(e) => TestResult::new(false, false, None, false, e.to_string()),
 		Ok(out) => {
 			// SSH transport failure → unreachable.
 			if is_transport_failure(out.status_code) {
-				return TestResult {
-					reachable: false,
-					api_present: false,
-					api_version: None,
-					compatible: false,
-					message: out.stderr,
-				};
+				return TestResult::new(false, false, None, false, out.stderr);
 			}
 			// Reachable but the remote command itself was not found.
 			let cmd_not_found = out.status_code == Some(127)
@@ -175,17 +218,17 @@ pub fn probe_connection<R: CommandRunner>(
 					.contains("command not found")
 				|| out.stderr.to_ascii_lowercase().contains("no such file");
 			if cmd_not_found {
-				return TestResult {
-					reachable: true,
-					api_present: false,
-					api_version: None,
-					compatible: false,
-					message: if out.stderr.is_empty() {
+				return TestResult::new(
+					true,
+					false,
+					None,
+					false,
+					if out.stderr.is_empty() {
 						format!("{bin}: command not found")
 					} else {
 						out.stderr
 					},
-				};
+				);
 			}
 			// status 0 (or any other non-transport success): parse version.
 			if out.status_code == Some(0) {
@@ -207,28 +250,145 @@ pub fn probe_connection<R: CommandRunner>(
 					None => "aghub-api responded without a parseable version"
 						.to_string(),
 				};
-				return TestResult {
-					reachable: true,
-					api_present: present,
-					api_version: version,
-					compatible,
-					message,
-				};
+				return TestResult::new(
+					true, present, version, compatible, message,
+				);
 			}
 			// Reachable, non-zero, not a recognized "not found": treat as a
 			// present-but-failed binary.
-			TestResult {
-				reachable: true,
-				api_present: false,
-				api_version: None,
-				compatible: false,
-				message: if out.stderr.is_empty() {
+			TestResult::new(
+				true,
+				false,
+				None,
+				false,
+				if out.stderr.is_empty() {
 					format!("probe exited with status {:?}", out.status_code)
 				} else {
 					out.stderr
 				},
-			}
+			)
 		}
+	}
+}
+
+/// Ensure the remote has an `aghub-api` binary available.
+///
+/// This probes first. If the binary is absent and an install source is provided,
+/// it installs over ssh/scp and probes again. The final [`TestResult`] is
+/// returned so callers can still reject incompatible versions.
+pub fn ensure_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local_version: &str,
+	source: Option<&RemoteInstallSource>,
+) -> Result<TestResult, ConnectError> {
+	let first = probe_connection(runner, conn, local_version);
+	if !first.reachable {
+		return Err(ConnectError::Unreachable {
+			stderr: first.message,
+		});
+	}
+	if first.api_present {
+		return Ok(first);
+	}
+
+	let Some(source) = source else {
+		return Err(ConnectError::RemoteApiMissing {
+			install_hint: install_hint(),
+		});
+	};
+
+	let bin = resolved_path(conn);
+	install_remote_api(runner, conn, &bin, source)?;
+
+	let second = probe_connection(runner, conn, local_version)
+		.with_install_result(true, "aghub-api installed".to_string());
+	if !second.reachable {
+		return Err(ConnectError::Unreachable {
+			stderr: second.message,
+		});
+	}
+	if !second.api_present {
+		return Err(ConnectError::DeployFailed(format!(
+			"Automatic install ran, but aghub-api is still unavailable: {}",
+			second.message
+		)));
+	}
+	Ok(second)
+}
+
+/// Install `aghub-api` on the remote by uploading a binary or running cargo.
+pub fn install_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	resolved_path: &str,
+	source: &RemoteInstallSource,
+) -> Result<(), ConnectError> {
+	match source {
+		RemoteInstallSource::LocalBinary(local) => {
+			let prepare_cmd = build_remote_prepare_upload_cmd();
+			run_remote_install_step(runner, conn, &prepare_cmd)?;
+
+			let local = local.to_string_lossy().into_owned();
+			let scp_args =
+				build_scp_args(conn, &local, remote_api_upload_path());
+			let scp_out = runner
+				.run("scp", &scp_args)
+				.map_err(|e| ConnectError::DeployFailed(e.to_string()))?;
+			if is_transport_failure(scp_out.status_code) {
+				return Err(ConnectError::Unreachable {
+					stderr: scp_out.stderr,
+				});
+			}
+			if scp_out.status_code != Some(0) {
+				return Err(ConnectError::DeployFailed(nonzero_message(
+					"scp upload",
+					&scp_out,
+				)));
+			}
+
+			let finish_cmd = build_remote_finish_upload_cmd(resolved_path);
+			run_remote_install_step(runner, conn, &finish_cmd)
+		}
+		RemoteInstallSource::CargoGit { url, branch } => {
+			let install_cmd =
+				build_remote_cargo_install_cmd(url, branch.as_deref());
+			run_remote_install_step(runner, conn, &install_cmd)
+		}
+	}
+}
+
+fn run_remote_install_step<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	remote_cmd: &str,
+) -> Result<(), ConnectError> {
+	let args = build_ssh_args(conn, remote_cmd);
+	let out = runner
+		.run("ssh", &args)
+		.map_err(|e| ConnectError::DeployFailed(e.to_string()))?;
+	if is_transport_failure(out.status_code) {
+		return Err(ConnectError::Unreachable { stderr: out.stderr });
+	}
+	if out.status_code == Some(0) {
+		return Ok(());
+	}
+	Err(ConnectError::DeployFailed(nonzero_message(
+		"remote install step",
+		&out,
+	)))
+}
+
+fn nonzero_message(step: &str, out: &crate::ssh::CommandOutput) -> String {
+	let detail = if out.stderr.trim().is_empty() {
+		out.stdout.trim()
+	} else {
+		out.stderr.trim()
+	};
+	if detail.is_empty() {
+		format!("{step} exited with status {:?}", out.status_code)
+	} else {
+		format!("{step} exited with status {:?}: {detail}", out.status_code)
 	}
 }
 
@@ -333,7 +493,10 @@ pub fn cleanup_remote<R: CommandRunner>(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::ssh::CommandOutput;
+	use crate::ssh::{
+		build_remote_cargo_install_cmd, build_remote_finish_upload_cmd,
+		build_remote_prepare_upload_cmd, build_scp_args, CommandOutput,
+	};
 	use crate::test_support::MockRunner;
 
 	const LOCAL: &str = "1.1.1";
@@ -482,23 +645,17 @@ mod tests {
 	// --- decide_deploy -----------------------------------------------------
 
 	fn present_compatible() -> TestResult {
-		TestResult {
-			reachable: true,
-			api_present: true,
-			api_version: Some("1.1.1".to_string()),
-			compatible: true,
-			message: String::new(),
-		}
+		TestResult::new(
+			true,
+			true,
+			Some("1.1.1".to_string()),
+			true,
+			String::new(),
+		)
 	}
 
 	fn absent() -> TestResult {
-		TestResult {
-			reachable: true,
-			api_present: false,
-			api_version: None,
-			compatible: false,
-			message: String::new(),
-		}
+		TestResult::new(true, false, None, false, String::new())
 	}
 
 	#[test]
@@ -529,6 +686,92 @@ mod tests {
 			}
 			other => panic!("expected InstructInstall, got {other:?}"),
 		}
+	}
+
+	// --- install_remote_api -----------------------------------------------
+
+	#[test]
+	fn install_remote_api_via_cargo_git_runs_remote_cargo_install() {
+		let source = RemoteInstallSource::CargoGit {
+			url: "https://github.com/audichuang/aghub.git".to_string(),
+			branch: Some("feat/remote-ssh-management".to_string()),
+		};
+		let install_cmd = build_remote_cargo_install_cmd(
+			"https://github.com/audichuang/aghub.git",
+			Some("feat/remote-ssh-management"),
+		);
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&install_args),
+			CommandOutput {
+				status_code: Some(0),
+				stdout: String::new(),
+				stderr: String::new(),
+			},
+		);
+
+		install_remote_api(&runner, &conn(), "aghub-api", &source)
+			.expect("cargo-git install should succeed");
+
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 1);
+		assert_eq!(calls[0].program, "ssh");
+		assert_eq!(calls[0].args, install_args);
+	}
+
+	#[test]
+	fn install_remote_api_from_local_binary_uploads_then_installs() {
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&prepare_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: String::new(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"scp",
+				&args_as_str(&scp_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: String::new(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&finish_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.1.1".to_string(),
+					stderr: String::new(),
+				},
+			);
+
+		install_remote_api(&runner, &conn(), "aghub-api", &source)
+			.expect("local binary install should succeed");
+
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 3);
+		assert_eq!(calls[0].args, prepare_args);
+		assert_eq!(calls[1].program, "scp");
+		assert_eq!(calls[1].args, scp_args);
+		assert_eq!(calls[2].args, finish_args);
 	}
 
 	// --- start_remote ------------------------------------------------------
@@ -662,9 +905,11 @@ mod tests {
 		assert_eq!(calls.len(), 1);
 		assert_eq!(calls[0].program, "ssh");
 		assert_eq!(calls[0].args, expected_kill);
-		// The remote command really is the guarded kill.
-		assert!(calls[0].args.last().unwrap().contains("kill -0 7777"));
-		assert!(calls[0].args.last().unwrap().contains("grep -q aghub-api"));
+		assert!(calls[0]
+			.args
+			.last()
+			.unwrap()
+			.starts_with("bash -lc 'eval \"$(printf %s "));
 	}
 
 	// --- serde / Error surface ---------------------------------------------

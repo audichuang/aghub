@@ -92,7 +92,7 @@ fn parse_port(value: &str) -> Result<u16, ParseError> {
 
 /// Version string printed by `--version`, e.g. `"aghub-api 1.1.1"`.
 pub fn version_string() -> String {
-	format!("aghub-api {}", env!("CARGO_PKG_VERSION"))
+	format!("aghub-api {}", crate::VERSION)
 }
 
 /// Pick a free TCP port by binding `127.0.0.1:0` and reading the assigned port.
@@ -183,7 +183,7 @@ mod tests {
 
 	#[test]
 	fn version_string_matches_cargo_pkg_version() {
-		let expected = format!("aghub-api {}", env!("CARGO_PKG_VERSION"));
+		let expected = format!("aghub-api {}", crate::VERSION);
 		assert_eq!(version_string(), expected);
 		assert!(version_string().starts_with("aghub-api "));
 	}
