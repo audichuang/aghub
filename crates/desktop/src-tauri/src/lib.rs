@@ -1,6 +1,7 @@
 use crate::commands::{
-	clear_log_files, export_diagnostic_logs, get_log_dir_path, get_log_entries,
-	get_log_stats, start_server,
+	cleanup_all_remotes, clear_log_files, connect_remote, disconnect_remote,
+	export_diagnostic_logs, get_log_dir_path, get_log_entries, get_log_stats,
+	remote_status, start_server, test_connection, RemoteState,
 };
 use log::info;
 use tauri::{Manager, WebviewWindow};
@@ -136,6 +137,7 @@ pub fn run() {
 		.manage(AppState {
 			port: std::sync::Mutex::new(None),
 		})
+		.manage(RemoteState::default())
 		.plugin(tauri_plugin_deep_link::init())
 		.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
 			if let Some(window) = app.get_webview_window("main") {
@@ -185,7 +187,20 @@ pub fn run() {
 			get_log_entries,
 			get_log_stats,
 			clear_log_files,
+			test_connection,
+			connect_remote,
+			disconnect_remote,
+			remote_status,
 		])
-		.run(tauri::generate_context!())
-		.expect("error while running tauri application");
+		.build(tauri::generate_context!())
+		.expect("error while building tauri application")
+		.run(|app_handle, event| {
+			if let tauri::RunEvent::ExitRequested { .. }
+			| tauri::RunEvent::Exit = event
+			{
+				if let Some(state) = app_handle.try_state::<RemoteState>() {
+					cleanup_all_remotes(state.inner());
+				}
+			}
+		});
 }

@@ -24,6 +24,7 @@ name = "aghub"
 version = "0.0.0"
 dependencies = [
  "aghub-api",
+ "aghub-remote",
  "fix-path-env",
  "log",
  "serde",

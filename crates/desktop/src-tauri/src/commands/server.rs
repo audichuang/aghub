@@ -3,7 +3,7 @@ use aghub_api::{start, ApiOptions};
 use log::{debug, error, info};
 use tauri::Manager;
 
-fn find_available_port() -> Result<u16, String> {
+pub(crate) fn find_available_port() -> Result<u16, String> {
 	let listener = std::net::TcpListener::bind("127.0.0.1:0")
 		.map_err(|e| e.to_string())?;
 	let port = listener.local_addr().map_err(|e| e.to_string())?.port();
