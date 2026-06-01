@@ -526,6 +526,36 @@ fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
 	}
 }
 
+fn installed_skill_root(skill: &Skill) -> Option<PathBuf> {
+	let raw = skill
+		.canonical_path
+		.as_deref()
+		.or(skill.source_path.as_deref())?;
+	Some(get_skill_root(expand_tilde_path(raw)))
+}
+
+fn installed_skill_roots(
+	name: &str,
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	let mut roots = Vec::new();
+	for agent in load_all_agents(resource_scope, project_root) {
+		for skill in agent.skills {
+			if skill.name != name {
+				continue;
+			}
+			let Some(root) = installed_skill_root(&skill) else {
+				continue;
+			};
+			if !roots.contains(&root) {
+				roots.push(root);
+			}
+		}
+	}
+	roots
+}
+
 fn delete_response_from_outcome(
 	outcome: aghub_core::skills::removal::RemovalOutcome,
 ) -> DeleteSkillByPathResponse {
@@ -1758,10 +1788,8 @@ pub async fn git_install_skills(
 }
 
 /// Replace existing skill installations in-place from a previously-scanned
-/// git session.  Unlike `git_install_skills`, this endpoint accepts a list
-/// of absolute (tilde-prefixed) `source_path` values and replaces the
-/// directory at each one rather than deriving target directories from
-/// agent identifiers.
+/// git session. Targets are derived from the installed skill name on the server;
+/// client-provided paths are accepted only for backward-compatible requests.
 #[post("/skills/git/sync", data = "<body>")]
 pub async fn git_sync_skill(
 	body: Json<GitSyncRequest>,
@@ -1849,10 +1877,24 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	// Parse skill name from the cloned copy
-	let skill_name: Option<String> = skill::parser::parse(&cloned_skill_path)
-		.ok()
-		.map(|p| p.name);
+	let parsed_skill =
+		skill::parser::parse(&cloned_skill_path).map_err(|e| {
+			ApiError::new(
+				Status::BadRequest,
+				format!("Failed to parse synced skill: {e}"),
+				"SKILL_PARSE_FAILED",
+			)
+		})?;
+	if parsed_skill.name != req.name {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			format!(
+				"Synced skill name '{}' does not match installed skill '{}'",
+				parsed_skill.name, req.name
+			),
+			"SKILL_NAME_MISMATCH",
+		));
+	}
 	let updated_hash = skill::compute_skill_folder_hash(&cloned_skill_dir)
 		.map_err(|e| {
 			ApiError::new(
@@ -1862,16 +1904,26 @@ pub async fn git_sync_skill(
 			)
 		})?;
 
-	let target_dirs: Vec<PathBuf> = req
-		.source_paths
-		.iter()
-		.map(|source_path| get_skill_root(expand_tilde_path(source_path)))
-		.collect();
+	let target_dirs = installed_skill_roots(
+		&req.name,
+		resource_scope,
+		project_root.as_deref(),
+	);
+	if target_dirs.is_empty() {
+		return Err(ApiError::new(
+			Status::NotFound,
+			format!(
+				"Skill '{}' is locked but no installed copy was found",
+				req.name
+			),
+			"SKILL_NOT_INSTALLED",
+		));
+	}
 	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
 		resource_scope,
 		project_root.as_deref(),
 	);
-	aghub_core::skills::removal::assert_targets_contained(
+	aghub_core::skills::removal::assert_targets_strictly_contained(
 		&target_dirs,
 		&agent_dirs,
 		project_root.as_deref(),
@@ -1915,7 +1967,7 @@ pub async fn git_sync_skill(
 
 	Ok(Json(GitSyncResponse {
 		success: true,
-		name: skill_name,
+		name: Some(parsed_skill.name),
 		updated_hash: Some(updated_hash),
 		error: None,
 	}))
@@ -2227,6 +2279,173 @@ mod tests {
 
 		let lock = skill::lock::local::read_local_lock(Some(&project));
 		assert!(lock.skills.contains_key("hello-skill"));
+	}
+
+	#[test]
+	fn git_sync_ignores_root_source_path_and_preserves_siblings() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			let skills_root = project.join(".claude/skills");
+			let target = skills_root.join("sync-me");
+			let sibling = skills_root.join("other");
+			std::fs::create_dir_all(&target).unwrap();
+			std::fs::create_dir_all(&sibling).unwrap();
+			std::fs::write(
+				target.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: old\n---\n\nold\n",
+			)
+			.unwrap();
+			std::fs::write(
+				sibling.join("SKILL.md"),
+				"---\nname: other\ndescription: keep\n---\n\nkeep\n",
+			)
+			.unwrap();
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+
+			let clone = tempdir().unwrap();
+			let cloned_skill = clone.path().join("sync-me");
+			std::fs::create_dir_all(&cloned_skill).unwrap();
+			std::fs::write(
+				cloned_skill.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"sync-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "sync-session",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [skills_root.display().to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::Ok);
+			assert!(std::fs::read_to_string(target.join("SKILL.md"))
+				.unwrap()
+				.contains("new"));
+			assert!(
+				sibling.join("SKILL.md").exists(),
+				"sync must not replace the entire skills root"
+			);
+			assert!(std::fs::read_to_string(sibling.join("SKILL.md"))
+				.unwrap()
+				.contains("keep"));
+		});
+	}
+
+	#[test]
+	fn git_sync_rejects_source_skill_name_mismatch() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			let target = project.join(".claude/skills/sync-me");
+			std::fs::create_dir_all(&target).unwrap();
+			std::fs::write(
+				target.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: old\n---\n\nold\n",
+			)
+			.unwrap();
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("other/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+
+			let clone = tempdir().unwrap();
+			let cloned_skill = clone.path().join("other");
+			std::fs::create_dir_all(&cloned_skill).unwrap();
+			std::fs::write(
+				cloned_skill.join("SKILL.md"),
+				"---\nname: other\ndescription: wrong\n---\n\nwrong\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"sync-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "sync-session",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "other/SKILL.md",
+					"source_paths": [target.display().to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::BadRequest);
+			assert!(std::fs::read_to_string(target.join("SKILL.md"))
+				.unwrap()
+				.contains("old"));
+		});
 	}
 
 	#[test]

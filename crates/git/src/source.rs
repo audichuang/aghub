@@ -150,6 +150,18 @@ fn source_type_from_host(host: Option<&str>) -> RemoteSourceType {
 	}
 }
 
+fn strip_scp_like_password(source: &str) -> Option<String> {
+	if source.contains("://") {
+		return None;
+	}
+	let (userinfo, remote) = source.split_once('@')?;
+	let (user, password) = userinfo.split_once(':')?;
+	if user.is_empty() || password.is_empty() || !remote.contains(':') {
+		return None;
+	}
+	Some(format!("{user}@{remote}"))
+}
+
 pub fn normalize_repo_source_from_url(source_url: &str) -> Option<String> {
 	let trimmed = source_url.trim();
 
@@ -171,8 +183,10 @@ pub fn resolve_remote_source(
 	source: &str,
 ) -> Result<ResolvedRemoteSource, SourceError> {
 	let trimmed = source.trim();
+	let stripped_scp_password = strip_scp_like_password(trimmed);
+	let parse_input = stripped_scp_password.as_deref().unwrap_or(trimmed);
 
-	if let Ok(parsed) = Url::parse(trimmed) {
+	if let Ok(parsed) = Url::parse(parse_input) {
 		match parsed.scheme() {
 			"http" | "https" => {
 				let source = normalize_repo_source_from_url(parsed.as_str())
@@ -191,7 +205,7 @@ pub fn resolve_remote_source(
 				});
 			}
 			"github" => {
-				let (owner, repo) = parse_github_repo_shorthand(trimmed)?;
+				let (owner, repo) = parse_github_repo_shorthand(parse_input)?;
 				let clone_url = build_github_clone_url(&owner, &repo);
 				return Ok(ResolvedRemoteSource {
 					source: format!("{owner}/{repo}"),
@@ -204,10 +218,10 @@ pub fn resolve_remote_source(
 		}
 	}
 
-	if let Ok(mut parsed) = gix::url::parse(trimmed.as_bytes().as_bstr()) {
+	if let Ok(mut parsed) = gix::url::parse(parse_input.as_bytes().as_bstr()) {
 		if !matches!(parsed.scheme, gix::url::Scheme::File) {
-			let normalized = normalize_repo_source_from_url(trimmed)
-				.unwrap_or_else(|| trimmed.into());
+			let normalized = normalize_repo_source_from_url(parse_input)
+				.unwrap_or_else(|| parse_input.into());
 			parsed.password = None;
 			if !matches!(parsed.scheme, gix::url::Scheme::Ssh) {
 				parsed.user = None;
@@ -225,7 +239,7 @@ pub fn resolve_remote_source(
 		}
 	}
 
-	let (owner, repo) = parse_github_repo_shorthand(trimmed)?;
+	let (owner, repo) = parse_github_repo_shorthand(parse_input)?;
 	let clone_url = build_github_clone_url(&owner, &repo);
 	Ok(ResolvedRemoteSource {
 		source: format!("{owner}/{repo}"),
@@ -307,6 +321,17 @@ mod tests {
 			r.source_url,
 			"ssh://git@github.com/vercel-labs/agent-skills.git"
 		);
+		assert_eq!(r.clone_url, r.source_url);
+		assert!(!r.source_url.contains("SECRET"));
+	}
+
+	#[test]
+	fn resolve_remote_source_strips_scp_like_password() {
+		let r = resolve_remote_source(
+			"git:SECRET@github.com:vercel-labs/agent-skills.git",
+		)
+		.unwrap();
+		assert_eq!(r.source_url, "git@github.com:vercel-labs/agent-skills.git");
 		assert_eq!(r.clone_url, r.source_url);
 		assert!(!r.source_url.contains("SECRET"));
 	}

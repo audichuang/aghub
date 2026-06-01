@@ -61,6 +61,24 @@ pub fn assert_contained(target: &Path, roots: &[PathBuf]) -> Option<PathBuf> {
 	None
 }
 
+/// Canonicalize `target` and assert it is a strict descendant of one
+/// allow-listed root. Unlike [`assert_contained`], the root itself is rejected.
+pub fn assert_strictly_contained(
+	target: &Path,
+	roots: &[PathBuf],
+) -> Option<PathBuf> {
+	let canonical = target.canonicalize().ok()?;
+	for root in roots {
+		let root_canonical =
+			root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+		if canonical != root_canonical && canonical.starts_with(&root_canonical)
+		{
+			return Some(canonical);
+		}
+	}
+	None
+}
+
 pub fn assert_targets_contained(
 	targets: &[PathBuf],
 	agent_skill_dirs: &[PathBuf],
@@ -82,6 +100,30 @@ pub fn assert_targets_contained(
 	Ok(())
 }
 
+pub fn assert_targets_strictly_contained(
+	targets: &[PathBuf],
+	agent_skill_dirs: &[PathBuf],
+	project_root: Option<&Path>,
+) -> std::io::Result<()> {
+	let roots = allowed_skill_roots(agent_skill_dirs, project_root);
+	for target in targets {
+		if assert_strictly_contained(target, &roots).is_some() {
+			continue;
+		}
+		if contained_nonexistent_strict_target(target, &roots) {
+			continue;
+		}
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::PermissionDenied,
+			format!(
+				"target is not a skill directory under allowed skill roots: {}",
+				target.display()
+			),
+		));
+	}
+	Ok(())
+}
+
 fn contained_nonexistent_target(target: &Path, roots: &[PathBuf]) -> bool {
 	if target.exists() {
 		return false;
@@ -95,6 +137,25 @@ fn contained_nonexistent_target(target: &Path, roots: &[PathBuf]) -> bool {
 	roots.iter().any(|root| {
 		let root = root.canonicalize().unwrap_or_else(|_| root.clone());
 		parent.starts_with(root)
+	})
+}
+
+fn contained_nonexistent_strict_target(
+	target: &Path,
+	roots: &[PathBuf],
+) -> bool {
+	if target.exists() {
+		return false;
+	}
+	let Some(parent) = target.parent() else {
+		return false;
+	};
+	let Ok(parent) = parent.canonicalize() else {
+		return false;
+	};
+	roots.iter().any(|root| {
+		let root = root.canonicalize().unwrap_or_else(|_| root.clone());
+		parent.starts_with(&root)
 	})
 }
 
@@ -381,6 +442,26 @@ mod tests {
 			assert_contained(&sub, &roots),
 			Some(sub.canonicalize().unwrap())
 		);
+	}
+
+	#[test]
+	fn strict_containment_rejects_root_itself() {
+		let root = tempdir().unwrap();
+		let sub = root.path().join("skills/a");
+		std::fs::create_dir_all(&sub).unwrap();
+		let roots = vec![root.path().to_path_buf()];
+
+		assert_eq!(
+			assert_strictly_contained(&sub, &roots),
+			Some(sub.canonicalize().unwrap())
+		);
+		assert_eq!(assert_strictly_contained(root.path(), &roots), None);
+		assert!(assert_targets_strictly_contained(
+			&[root.path().to_path_buf()],
+			&roots,
+			None,
+		)
+		.is_err());
 	}
 
 	#[test]

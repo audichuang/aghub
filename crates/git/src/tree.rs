@@ -1,6 +1,8 @@
 use gix::bstr::ByteSlice;
 use std::path::Path;
 
+const MAX_TREE_DEPTH: usize = 64;
+
 pub fn is_safe_tree_entry_name(name: &[u8]) -> bool {
 	if name.is_empty() || name == b"." || name == b".." {
 		return false;
@@ -19,6 +21,16 @@ pub fn materialize_tree(
 	tree_id: gix::ObjectId,
 	dest: &Path,
 ) -> std::io::Result<()> {
+	materialize_tree_at_depth(repo, tree_id, dest, 0)
+}
+
+fn materialize_tree_at_depth(
+	repo: &gix::Repository,
+	tree_id: gix::ObjectId,
+	dest: &Path,
+	depth: usize,
+) -> std::io::Result<()> {
+	check_tree_depth(depth)?;
 	std::fs::create_dir_all(dest)?;
 	let tree = repo
 		.find_tree(tree_id)
@@ -34,7 +46,12 @@ pub fn materialize_tree(
 		}
 		let target = dest.join(name.to_str_lossy().as_ref());
 		if entry.mode().is_tree() {
-			materialize_tree(repo, entry.object_id(), &target)?;
+			materialize_tree_at_depth(
+				repo,
+				entry.object_id(),
+				&target,
+				depth + 1,
+			)?;
 		} else if entry.mode().is_blob() {
 			let object = entry
 				.object()
@@ -44,6 +61,16 @@ pub fn materialize_tree(
 			}
 			std::fs::write(target, &object.data)?;
 		}
+	}
+	Ok(())
+}
+
+fn check_tree_depth(depth: usize) -> std::io::Result<()> {
+	if depth > MAX_TREE_DEPTH {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::InvalidData,
+			format!("max git tree depth {MAX_TREE_DEPTH} exceeded"),
+		));
 	}
 	Ok(())
 }
@@ -86,5 +113,11 @@ mod tests {
 		assert!(is_safe_tree_entry_name(b"C:"));
 		assert!(is_safe_tree_entry_name(b"c:secret"));
 		assert!(is_safe_tree_entry_name(b"a:b"));
+	}
+
+	#[test]
+	fn tree_depth_limit_rejects_excessive_recursion() {
+		assert!(check_tree_depth(MAX_TREE_DEPTH).is_ok());
+		assert!(check_tree_depth(MAX_TREE_DEPTH + 1).is_err());
 	}
 }

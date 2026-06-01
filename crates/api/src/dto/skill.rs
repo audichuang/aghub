@@ -286,7 +286,7 @@ pub struct GitSyncRequest {
 	pub project_root: Option<String>,
 	/// Relative path of the skill within the cloned repo (from scan result).
 	pub skill_path: String,
-	/// Tilde-prefixed `source_path` values of every installation to replace.
+	/// Legacy client hint. The server derives replacement targets by `name`.
 	pub source_paths: Vec<String>,
 }
 
