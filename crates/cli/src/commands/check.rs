@@ -31,8 +31,10 @@ enum StatusView {
 /// One skill's name plus its flattened update status. Mirrors
 /// `aghub-api`'s `SkillUpdateResponse`.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct SkillUpdateView {
 	name: String,
+	scope: String,
 	#[serde(flatten)]
 	status: StatusView,
 }
@@ -74,6 +76,7 @@ pub fn execute(
 		for (name, entry) in locked {
 			views.push(SkillUpdateView {
 				name,
+				scope: "global".to_string(),
 				status: StatusView::Uncheckable {
 					reason: offline_reason(&entry.source_type).to_string(),
 				},
@@ -90,6 +93,7 @@ pub fn execute(
 		for (name, entry) in lock.skills {
 			views.push(SkillUpdateView {
 				name,
+				scope: "project".to_string(),
 				status: StatusView::Uncheckable {
 					reason: offline_reason(&entry.source_type).to_string(),
 				},

@@ -1,14 +1,19 @@
 use crate::ResourceType;
 use aghub_core::models::{ResourceScope, Skill};
 use anyhow::{anyhow, bail, Context, Result};
-use gix::bstr::ByteSlice;
 use serde_json::json;
 use std::path::{Path, PathBuf};
+use tempfile::TempDir;
 
 struct ApplySource {
 	source: String,
 	ref_name: Option<String>,
 	skill_path: String,
+}
+
+struct FetchedSource {
+	path: PathBuf,
+	_guard: TempDir,
 }
 
 pub fn execute(
@@ -32,31 +37,37 @@ pub fn execute(
 		bail!("skill '{name}' is locked but no installed copy was found");
 	}
 
-	let repo = fetch_source(&source)?;
+	let fetched = fetch_source(&source)?;
+	let repo = &fetched.path;
 	let skill_file = aghub_core::skills::update::sanitize_skill_path(
-		&repo,
+		repo,
 		&source.skill_path,
 	)
 	.ok_or_else(|| anyhow!("locked skillPath was not found in source"))?;
-	let source_dir = skill_file.parent().unwrap_or(&repo);
+	let source_dir = skill_file.parent().unwrap_or(repo);
 	let updated_hash = skill::compute_skill_folder_hash(source_dir)
 		.context("failed to hash fetched skill")?;
 
+	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+		scope,
+		project_root,
+	);
+	aghub_core::skills::removal::assert_targets_contained(
+		&targets,
+		&agent_dirs,
+		project_root,
+	)
+	.context("refusing to update a skill outside allowed skill roots")?;
+
 	let mut paths = Vec::new();
 	for target in &targets {
-		if target.exists() {
-			if target.is_dir() {
-				std::fs::remove_dir_all(target)
-			} else {
-				std::fs::remove_file(target)
-			}
+		aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
 			.with_context(|| {
-				format!("failed to remove old skill at {}", target.display())
+				format!(
+					"failed to replace installed skill at {}",
+					target.display()
+				)
 			})?;
-		}
-		copy_dir_recursive(source_dir, target).with_context(|| {
-			format!("failed to copy updated skill to {}", target.display())
-		})?;
 		paths.push(target.display().to_string());
 	}
 
@@ -117,7 +128,7 @@ fn apply_source_from_lock(
 	}
 }
 
-fn fetch_source(source: &ApplySource) -> Result<PathBuf> {
+fn fetch_source(source: &ApplySource) -> Result<FetchedSource> {
 	let resolved = aghub_git::resolve_remote_source(&source.source)
 		.context("failed to resolve remote source")?;
 	let creds = aghub_git::read_credentials();
@@ -125,6 +136,7 @@ fn fetch_source(source: &ApplySource) -> Result<PathBuf> {
 		&resolved.clone_url,
 		source.ref_name.as_deref(),
 		creds.as_ref(),
+		Some(std::time::Duration::from_secs(30)),
 	)
 	.context("failed to fetch source repository")?;
 	let repo = gix::open(bare.path()).context("failed to open fetched repo")?;
@@ -135,36 +147,11 @@ fn fetch_source(source: &ApplySource) -> Result<PathBuf> {
 		.peel_to_tree()
 		.context("failed to peel fetched tree")?;
 	let materialized = tempfile::TempDir::new()?;
-	materialize_tree(&repo, tree.id, materialized.path())?;
-	Ok(materialized.keep())
-}
-
-fn materialize_tree(
-	repo: &gix::Repository,
-	tree_id: gix::ObjectId,
-	dest: &Path,
-) -> std::io::Result<()> {
-	std::fs::create_dir_all(dest)?;
-	let tree = repo
-		.find_tree(tree_id)
-		.map_err(|e| std::io::Error::other(e.to_string()))?;
-	for entry in tree.iter() {
-		let entry = entry.map_err(|e| std::io::Error::other(e.to_string()))?;
-		let name = entry.filename().to_str_lossy();
-		let target = dest.join(name.as_ref());
-		if entry.mode().is_tree() {
-			materialize_tree(repo, entry.object_id(), &target)?;
-		} else if entry.mode().is_blob() {
-			let object = entry
-				.object()
-				.map_err(|e| std::io::Error::other(e.to_string()))?;
-			if let Some(parent) = target.parent() {
-				std::fs::create_dir_all(parent)?;
-			}
-			std::fs::write(target, &object.data)?;
-		}
-	}
-	Ok(())
+	aghub_git::materialize_tree(&repo, tree.id, materialized.path())?;
+	Ok(FetchedSource {
+		path: materialized.path().to_path_buf(),
+		_guard: materialized,
+	})
 }
 
 fn skill_root(skill: &Skill) -> Option<PathBuf> {
@@ -177,10 +164,13 @@ fn skill_root(skill: &Skill) -> Option<PathBuf> {
 	} else {
 		PathBuf::from(raw)
 	};
-	Some(if path.is_dir() {
-		path
-	} else {
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+	Some(if is_skill_file {
 		path.parent().map(Path::to_path_buf).unwrap_or(path)
+	} else {
+		path
 	})
 }
 
@@ -206,25 +196,6 @@ fn installed_skill_roots(
 	roots
 }
 
-fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-	std::fs::create_dir_all(to)?;
-	for entry in std::fs::read_dir(from)? {
-		let entry = entry?;
-		let file_type = entry.file_type()?;
-		if file_type.is_symlink() {
-			continue;
-		}
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		if file_type.is_dir() {
-			copy_dir_recursive(&from_path, &to_path)?;
-		} else if file_type.is_file() {
-			std::fs::copy(&from_path, &to_path)?;
-		}
-	}
-	Ok(())
-}
-
 fn update_lock_hash(
 	name: &str,
 	scope: ResourceScope,
@@ -233,23 +204,30 @@ fn update_lock_hash(
 ) -> Result<()> {
 	match scope {
 		ResourceScope::GlobalOnly => {
-			let mut entry = skill::lock::global::get_skill_from_lock(name)
-				.ok_or_else(|| {
-					anyhow!("skill '{name}' is not in global lock")
-				})?;
-			entry.content_hash = Some(hash.to_string());
-			entry.skill_folder_hash.clear();
-			skill::lock::global::add_skill_to_lock(name, entry)?;
+			skill::lock::global::modify_skill_lock(|lock| {
+				let Some(entry) = lock.skills.get_mut(name) else {
+					return Err(anyhow!(
+						"skill '{name}' is not in global lock"
+					));
+				};
+				entry.content_hash = Some(hash.to_string());
+				entry.skill_folder_hash.clear();
+				entry.updated_at = chrono::Utc::now().to_rfc3339();
+				Ok(())
+			})??;
 		}
 		ResourceScope::ProjectOnly => {
 			let root = project_root
 				.ok_or_else(|| anyhow!("project root is required"))?;
-			let mut lock = skill::lock::local::read_local_lock(Some(root));
-			let entry = lock.skills.get_mut(name).ok_or_else(|| {
-				anyhow!("skill '{name}' is not in project lock")
-			})?;
-			entry.computed_hash = hash.to_string();
-			skill::lock::local::write_local_lock(&lock, Some(root))?;
+			skill::lock::local::modify_local_lock(Some(root), |lock| {
+				let Some(entry) = lock.skills.get_mut(name) else {
+					return Err(anyhow!(
+						"skill '{name}' is not in project lock"
+					));
+				};
+				entry.computed_hash = hash.to_string();
+				Ok(())
+			})??;
 		}
 		ResourceScope::Both => {
 			bail!("apply-update requires --global or --project, not --all")

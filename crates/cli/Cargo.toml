@@ -26,6 +26,7 @@ dirs = { workspace = true }
 tokio = { version = "1", features = [ "rt", "macros" ] }
 gix = { version = "0.83", default-features = false }
 tempfile = { workspace = true }
+chrono = { version = "0.4", features = [ "serde" ] }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

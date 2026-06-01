@@ -10,7 +10,7 @@ use aghub_core::models::ResourceScope;
 use aghub_core::skills::prune::{
 	preview_prune, prune_lock_scanning, PruneScope,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde_json::json;
 use std::path::Path;
 
@@ -38,11 +38,29 @@ pub fn execute(
 	}
 
 	if want_project {
+		let Some(root) = project_root else {
+			if matches!(scope, ResourceScope::ProjectOnly) {
+				bail!(
+					"project root is required for project skill lock pruning"
+				);
+			}
+			eprintln_verbose!(
+				"Skipping project skill lock prune: no project root"
+			);
+			println!(
+				"{}",
+				serde_json::to_string_pretty(&json!({
+					"pruned": pruned,
+					"dryRun": dry_run,
+				}))?
+			);
+			return Ok(());
+		};
 		eprintln_verbose!("Pruning project skill lock (dry_run={dry_run})");
 		let names = if dry_run {
-			preview_prune(PruneScope::Project, project_root)?
+			preview_prune(PruneScope::Project, Some(root))?
 		} else {
-			prune_lock_scanning(PruneScope::Project, project_root)?
+			prune_lock_scanning(PruneScope::Project, Some(root))?
 		};
 		pruned.extend(names);
 	}
