@@ -17,9 +17,12 @@ src/
 ├── parser.rs        # parse() auto-detects format; parse_skill_md, parse_skill_dir, parse_skill_file
 ├── validator.rs     # validate() with path traversal protection
 ├── sanitize.rs      # sanitize_name() for safe directory names
-└── lock/            # Lock file management
-    ├── global.rs    # ~/.config/aghub/skills-lock.json
-    ├── local.rs     # .claude/skills-lock.json (project-local)
+├── hash.rs          # compute_skill_folder_hash() — npx-compatible SHA-256 of the SOURCE folder
+└── lock/            # Lock file management (npx `skills`-compatible)
+    ├── io.rs        # global path: $XDG_STATE_HOME/skills/.skill-lock.json → ~/.agents/.skill-lock.json (v3); atomic temp+rename under WRITE_LOCK
+    ├── types.rs     # SkillLockEntry (contentHash) / LocalSkillLockEntry (computedHash, skillPath)
+    ├── global.rs    # global-lock entry ops (add/remove/retain_locked_skills)
+    ├── local.rs     # project lock: <project>/skills-lock.json (v1)
     └── test_utils.rs # Mutex-based test isolation
 ```
 
@@ -50,6 +53,7 @@ cargo test -p skill
 - **Required field**: `name` and `description` in SKILL.md frontmatter (rejected if non-string)
 - **Source path**: `~` prefix for home-relative paths
 - **Lock entries**: Track `content_hash` (SHA-256) for integrity
+- **npx-compatible locks**: global `.skill-lock.json` (v3) + project `skills-lock.json` (v1) round-trip with `npx skills`; keep global `skill_folder_hash` EMPTY and store the real SHA in the additive `content_hash`/`computed_hash`; never bump the versions. `hash.rs` mirrors npx `computeSkillFolderHash` (parity is fixture-pinned, see `tests/hash_parity_golden.rs`)
 
 ## ANTI-PATTERNS
 
