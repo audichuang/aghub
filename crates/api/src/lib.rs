@@ -23,6 +23,9 @@ pub mod state;
 /// compatibility check.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 pub struct ApiOptions {
 	pub port: u16,
 	pub app_data_dir: Option<PathBuf>,

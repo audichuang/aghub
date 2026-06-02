@@ -1443,10 +1443,14 @@ pub async fn edit_skill_folder(
 
 	match detect_available_editor() {
 		Some(editor) => {
-			match std::process::Command::new(editor.cli_command())
-				.arg(&folder)
-				.spawn()
+			let mut cmd = std::process::Command::new(editor.cli_command());
+			cmd.arg(&folder);
+			#[cfg(windows)]
 			{
+				use std::os::windows::process::CommandExt;
+				cmd.creation_flags(crate::CREATE_NO_WINDOW);
+			}
+			match cmd.spawn() {
 				Ok(_) => Ok(()),
 				Err(e) => Err(format!("Failed to open editor: {e}")),
 			}
