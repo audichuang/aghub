@@ -384,7 +384,7 @@ mod tests {
 		fs::write(backup.join("old.txt"), "old").unwrap();
 
 		let err = handle_failed_swap_with_rollback(
-			std::io::Error::new(std::io::ErrorKind::Other, "swap failed"),
+			std::io::Error::other("swap failed"),
 			true,
 			&backup,
 			&target,

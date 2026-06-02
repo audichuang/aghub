@@ -74,7 +74,9 @@ jobs:
             - uses: actions/checkout@v6
             - name: Download actionlint
               shell: bash
-              run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+              run: |
+                  bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+                  echo "$HOME/bin" >> "$GITHUB_PATH"
             - name: Run actionlint
               shell: bash
               run: actionlint -color
