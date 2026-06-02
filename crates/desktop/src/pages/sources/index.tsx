@@ -1,5 +1,6 @@
 import {
 	ArrowDownTrayIcon,
+	ArrowPathIcon,
 	ArrowUpCircleIcon,
 	CheckCircleIcon,
 	GlobeAltIcon,
@@ -7,8 +8,13 @@ import {
 	PlusCircleIcon,
 	QuestionMarkCircleIcon,
 } from "@heroicons/react/24/solid";
-import { Alert, Button, Chip, Spinner } from "@heroui/react";
-import { useQueries, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
+import {
+	useMutation,
+	useQueries,
+	useQuery,
+	useQueryClient,
+} from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -19,10 +25,13 @@ import type {
 	SourcesListResponse,
 	SourceSummaryResponse,
 } from "../../generated/dto";
+import { useAgentAvailability } from "../../hooks/use-agent-availability";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
+import { supportsSkillMutation } from "../../lib/agent-capabilities";
 import { cn } from "../../lib/utils";
 import { queryKeys } from "../../requests/keys";
+import { applySkillUpdateMutationOptions } from "../../requests/skills";
 import {
 	sourceDiffQueryOptions,
 	sourcesListQueryOptions,
@@ -34,6 +43,8 @@ interface SourceRow extends SourceSummaryResponse {
 	projectRoot?: string;
 	projectName?: string;
 }
+
+const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
 
 export default function SourcesPage() {
 	const { t } = useTranslation();
@@ -239,6 +250,16 @@ interface SourceDetailProps {
 function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const { t } = useTranslation();
 	const api = useApi();
+	const queryClient = useQueryClient();
+	const { availableAgents } = useAgentAvailability();
+	const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(
+		null,
+	);
+	const [isApplyingAll, setIsApplyingAll] = useState(false);
+	const [isInstallingAll, setIsInstallingAll] = useState(false);
+	const [installingSkillPath, setInstallingSkillPath] = useState<
+		string | null
+	>(null);
 
 	const { data, isLoading, isFetching } = useQuery(
 		sourceDiffQueryOptions({
@@ -264,6 +285,168 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const outdated = grouped.get("installedOutdated") ?? [];
 	const current = grouped.get("installedCurrent") ?? [];
 	const uncheckable = grouped.get("uncheckable") ?? [];
+	const updateScope = row.rowScope;
+	const updateProjectRoot =
+		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
+	const installAgentIds = useMemo(
+		() =>
+			availableAgents
+				.filter(
+					(agent) =>
+						agent.isUsable &&
+						supportsSkillMutation(agent, updateScope),
+				)
+				.map((agent) => agent.id),
+		[availableAgents, updateScope],
+	);
+
+	const applyUpdateMutation = useMutation(
+		applySkillUpdateMutationOptions({
+			api,
+			queryClient,
+			onSuccess: async (data) => {
+				if (!data.success) {
+					toast.danger(data.error ?? t("skillUpdateApplyError"));
+					return;
+				}
+				toast.success(t("skillSyncedSuccessfully"));
+				await queryClient.invalidateQueries({
+					queryKey: queryKeys.skills.sources.all(),
+				});
+			},
+			onError: () => toast.danger(t("skillUpdateApplyError")),
+		}),
+	);
+
+	const updateRequestFor = (skill: SourceSkillDiff) => ({
+		name: skill.name,
+		scope: updateScope,
+		projectRoot: updateProjectRoot,
+		confirm: true,
+	});
+
+	const applyOneUpdate = (skill: SourceSkillDiff) => {
+		applyUpdateMutation.mutate(updateRequestFor(skill));
+	};
+
+	const applyAllUpdates = async (skills: SourceSkillDiff[]) => {
+		if (skills.length === 0 || isApplyingAll) return;
+
+		setIsApplyingAll(true);
+		let updated = 0;
+		let failed = 0;
+		try {
+			for (const skill of skills) {
+				try {
+					const result = await api.skills.applyUpdate(
+						updateRequestFor(skill),
+					);
+					if (result.success) {
+						updated += 1;
+					} else {
+						failed += 1;
+					}
+				} catch {
+					failed += 1;
+				}
+			}
+
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.sources.all(),
+			});
+
+			if (failed > 0) {
+				toast.danger(t("sourceUpdateSomeFailed", { count: failed }));
+			} else {
+				toast.success(t("sourceUpdatesApplied", { count: updated }));
+			}
+		} finally {
+			setIsApplyingAll(false);
+		}
+	};
+
+	const installPathFor = (skill: SourceSkillDiff) =>
+		skill.skillPath === "SKILL.md"
+			? "."
+			: skill.skillPath.replace(SKILL_FILE_SUFFIX_RE, "");
+
+	const installFromSource = async (skills: SourceSkillDiff[]) => {
+		if (
+			skills.length === 0 ||
+			isInstallingAll ||
+			installingSkillPath !== null
+		) {
+			return;
+		}
+		if (installAgentIds.length === 0) {
+			toast.danger(t("sourceInstallNoAgents"));
+			return;
+		}
+
+		const installAll = skills.length > 1;
+		if (installAll) {
+			setIsInstallingAll(true);
+		} else {
+			setInstallingSkillPath(skills[0]?.skillPath ?? null);
+		}
+
+		try {
+			const scan = await api.skills.gitScan({
+				url: row.sourceUrl,
+				credential_id: null,
+				branch: null,
+				session_id: null,
+			});
+			const wantedPaths = new Set(skills.map(installPathFor));
+			const scanPaths = new Set(scan.skills.map((skill) => skill.path));
+			const skillPaths = Array.from(wantedPaths).filter((path) =>
+				scanPaths.has(path),
+			);
+
+			if (skillPaths.length !== wantedPaths.size) {
+				throw new Error(t("sourceInstallFailed"));
+			}
+
+			const result = await api.skills.gitInstall({
+				session_id: scan.session_id,
+				skill_paths: skillPaths,
+				agents: installAgentIds,
+				scope: updateScope,
+				project_root: updateProjectRoot,
+				universal: true,
+			});
+			const failed = result.results.filter((entry) => !entry.success);
+
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.sources.all(),
+			});
+
+			if (failed.length > 0) {
+				toast.danger(
+					t("sourceInstallSomeFailed", { count: failed.length }),
+				);
+			} else {
+				toast.success(
+					t("sourceInstalled", { count: skillPaths.length }),
+				);
+			}
+		} catch (error) {
+			toast.danger(
+				error instanceof Error
+					? error.message
+					: t("sourceInstallFailed"),
+			);
+		} finally {
+			setIsInstallingAll(false);
+			setInstallingSkillPath(null);
+		}
+	};
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
@@ -318,6 +501,50 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 								<PlusCircleIcon className="size-4 text-accent" />
 							}
 							skills={notInstalled}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
+							sectionAction={
+								<Button
+									size="sm"
+									variant="ghost"
+									className="h-7 px-2 text-xs"
+									isDisabled={
+										isInstallingAll ||
+										installingSkillPath !== null
+									}
+									onPress={() =>
+										installFromSource(notInstalled)
+									}
+								>
+									<ArrowDownTrayIcon className="size-3.5" />
+									{isInstallingAll
+										? t("sourceInstalling")
+										: t("sourceInstallAll")}
+								</Button>
+							}
+							rowAction={(skill) => {
+								const isInstalling =
+									installingSkillPath === skill.skillPath;
+								return (
+									<Button
+										size="sm"
+										variant="secondary"
+										className="h-7 px-2 text-xs"
+										isDisabled={
+											isInstallingAll ||
+											installingSkillPath !== null
+										}
+										onPress={() =>
+											installFromSource([skill])
+										}
+									>
+										<ArrowDownTrayIcon className="size-3.5" />
+										{isInstalling
+											? t("sourceInstalling")
+											: t("sourceInstallSkill")}
+									</Button>
+								);
+							}}
 						/>
 						<SkillSection
 							title={t("sourceStateOutdated")}
@@ -325,6 +552,45 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 								<ArrowUpCircleIcon className="size-4 text-warning" />
 							}
 							skills={outdated}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
+							sectionAction={
+								<Button
+									size="sm"
+									variant="ghost"
+									className="h-7 px-2 text-xs"
+									isDisabled={
+										isApplyingAll ||
+										applyUpdateMutation.isPending
+									}
+									onPress={() => applyAllUpdates(outdated)}
+								>
+									<ArrowPathIcon className="size-3.5" />
+									{isApplyingAll
+										? t("sourceUpdating")
+										: t("sourceUpdateAll")}
+								</Button>
+							}
+							rowAction={(skill) => {
+								const isApplying =
+									applyUpdateMutation.isPending &&
+									applyUpdateMutation.variables?.name ===
+										skill.name;
+								return (
+									<Button
+										size="sm"
+										variant="secondary"
+										className="h-7 px-2 text-xs"
+										isDisabled={isApplyingAll || isApplying}
+										onPress={() => applyOneUpdate(skill)}
+									>
+										<ArrowPathIcon className="size-3.5" />
+										{isApplying
+											? t("sourceUpdating")
+											: t("sourceUpdateSkill")}
+									</Button>
+								);
+							}}
 						/>
 						<SkillSection
 							title={t("sourceStateCurrent")}
@@ -332,6 +598,8 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 								<CheckCircleIcon className="size-4 text-success" />
 							}
 							skills={current}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
 						/>
 						{uncheckable.length > 0 && (
 							<SkillSection
@@ -340,6 +608,8 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 									<QuestionMarkCircleIcon className="size-4 text-muted" />
 								}
 								skills={uncheckable}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
 								muted
 								showReason
 							/>
@@ -355,6 +625,10 @@ interface SkillSectionProps {
 	title: string;
 	icon: React.ReactNode;
 	skills: SourceSkillDiff[];
+	expandedSkillPath: string | null;
+	onToggleSkill: (skillPath: string | null) => void;
+	sectionAction?: React.ReactNode;
+	rowAction?: (skill: SourceSkillDiff) => React.ReactNode;
 	muted?: boolean;
 	showReason?: boolean;
 }
@@ -363,6 +637,10 @@ function SkillSection({
 	title,
 	icon,
 	skills,
+	expandedSkillPath,
+	onToggleSkill,
+	sectionAction,
+	rowAction,
 	muted = false,
 	showReason = false,
 }: SkillSectionProps) {
@@ -370,47 +648,106 @@ function SkillSection({
 
 	return (
 		<section>
-			<div className="mb-2 flex items-center gap-2">
-				{icon}
-				<h2
-					className={cn(
-						"text-sm font-semibold",
-						muted ? "text-muted" : "text-foreground",
-					)}
-				>
-					{title}
-				</h2>
-				<span className="text-xs text-muted">{skills.length}</span>
-			</div>
-			<ul className="space-y-2">
-				{skills.map((skill) => (
-					<li
-						key={skill.skillPath}
-						className="rounded-lg border border-border p-3"
+			<div className="mb-2 flex items-center justify-between gap-3">
+				<div className="flex min-w-0 items-center gap-2">
+					{icon}
+					<h2
+						className={cn(
+							"truncate text-sm font-semibold",
+							muted ? "text-muted" : "text-foreground",
+						)}
 					>
-						<div className="flex flex-wrap items-center gap-2">
-							<span className="font-medium text-foreground">
-								{skill.name}
-							</span>
-							{skill.version && (
-								<Chip size="sm" variant="secondary">
-									v{skill.version}
-								</Chip>
-							)}
-						</div>
-						{skill.description && (
-							<p className="mt-1 text-sm text-muted">
-								{skill.description}
-							</p>
-						)}
-						{showReason && skill.reason && (
-							<p className="mt-1 text-xs text-muted">
-								{skill.reason}
-							</p>
-						)}
-					</li>
+						{title}
+					</h2>
+					<span className="shrink-0 text-xs text-muted">
+						{skills.length}
+					</span>
+				</div>
+				{sectionAction}
+			</div>
+			<ul className="overflow-hidden rounded-lg border border-border">
+				{skills.map((skill) => (
+					<SkillRow
+						key={skill.skillPath}
+						skill={skill}
+						isExpanded={expandedSkillPath === skill.skillPath}
+						onToggle={() =>
+							onToggleSkill(
+								expandedSkillPath === skill.skillPath
+									? null
+									: skill.skillPath,
+							)
+						}
+						muted={muted}
+						showReason={showReason}
+						action={rowAction?.(skill)}
+					/>
 				))}
 			</ul>
 		</section>
+	);
+}
+
+interface SkillRowProps {
+	skill: SourceSkillDiff;
+	isExpanded: boolean;
+	onToggle: () => void;
+	action?: React.ReactNode;
+	muted?: boolean;
+	showReason?: boolean;
+}
+
+function SkillRow({
+	skill,
+	isExpanded,
+	onToggle,
+	action,
+	muted = false,
+	showReason = false,
+}: SkillRowProps) {
+	const detailText = skill.description || skill.skillPath;
+
+	return (
+		<li className="flex items-center gap-3 border-b border-border px-3 py-2.5 last:border-b-0 hover:bg-surface-secondary/70">
+			<button
+				type="button"
+				className="min-w-0 flex-1 text-left"
+				aria-expanded={isExpanded}
+				onClick={onToggle}
+			>
+				<div className="flex min-w-0 items-center gap-2">
+					<span
+						className={cn(
+							"truncate text-sm font-medium",
+							muted ? "text-muted" : "text-foreground",
+						)}
+					>
+						{skill.name}
+					</span>
+					{skill.version && (
+						<Chip size="sm" variant="secondary">
+							v{skill.version}
+						</Chip>
+					)}
+					<span className="truncate font-mono text-[11px] text-muted/80">
+						{skill.skillPath}
+					</span>
+				</div>
+				{detailText && (
+					<p
+						className={cn(
+							"mt-0.5 text-xs leading-5 text-muted",
+							!isExpanded && "line-clamp-1",
+						)}
+					>
+						{detailText}
+					</p>
+				)}
+				{showReason && skill.reason && (
+					<p className="mt-0.5 text-xs text-muted">{skill.reason}</p>
+				)}
+			</button>
+			{action && <div className="shrink-0">{action}</div>}
+		</li>
 	);
 }

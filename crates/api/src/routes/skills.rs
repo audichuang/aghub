@@ -17,6 +17,7 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
+	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
 	},
@@ -41,6 +42,7 @@ use crate::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope, skills_update::update_lock_hash,
 	},
+	skills::update_check::keychain_host_for_source,
 	state::{GitCloneSession, GitCloneSessions},
 };
 
@@ -1565,19 +1567,16 @@ pub async fn git_scan_skills(
 		};
 
 	let url = req.url.clone();
-	let branch = req.branch.clone();
+	let branch_for_clone = req.branch.clone();
 	let token_for_clone = credential_token.clone();
 
 	// Clone repo in a blocking thread (gix is synchronous)
-	let temp_dir = tokio::task::spawn_blocking(move || {
-		let mut options = aghub_git::CloneOptions::new(&url);
-		if let Some(token) = token_for_clone {
-			options = options.with_credentials("x-access-token", token);
-		}
-		if let Some(ref branch) = branch {
-			options = options.with_branch(branch);
-		}
-		aghub_git::clone_to_temp(options)
+	let (temp_dir, credential_token) = tokio::task::spawn_blocking(move || {
+		clone_for_git_scan_lazily_auth(
+			&url,
+			branch_for_clone.as_deref(),
+			token_for_clone,
+		)
 	})
 	.await
 	.map_err(|e| {
@@ -1588,8 +1587,8 @@ pub async fn git_scan_skills(
 		)
 	})?
 	.map_err(|e| {
-		// Strip any URL userinfo (user:token@) from the surfaced gix error so a
-		// token embedded in a clone URL never leaks into the API response/logs.
+		// Strip any URL userinfo (user:token@) from the surfaced gix error so
+		// a token embedded in a clone URL never leaks into the API response/logs.
 		let msg = aghub_git::redact_url_userinfo(&format!(
 			"Failed to clone repository: {e}"
 		));
@@ -1698,6 +1697,50 @@ pub async fn git_scan_skills(
 		branches,
 		current_branch,
 	}))
+}
+
+fn clone_for_git_scan_lazily_auth(
+	url: &str,
+	branch: Option<&str>,
+	credential_token: Option<String>,
+) -> aghub_git::Result<(tempfile::TempDir, Option<String>)> {
+	if let Some(token) = credential_token {
+		return clone_for_git_scan(url, branch, Some(&token))
+			.map(|temp_dir| (temp_dir, Some(token)));
+	}
+
+	match clone_for_git_scan(url, branch, None) {
+		Ok(temp_dir) => Ok((temp_dir, None)),
+		Err(first_error) => {
+			let Some(token) = token_for_git_scan_source(url) else {
+				return Err(first_error);
+			};
+			clone_for_git_scan(url, branch, Some(&token))
+				.map(|temp_dir| (temp_dir, Some(token)))
+		}
+	}
+}
+
+fn clone_for_git_scan(
+	url: &str,
+	branch: Option<&str>,
+	credential_token: Option<&str>,
+) -> aghub_git::Result<tempfile::TempDir> {
+	let mut options = aghub_git::CloneOptions::new(url);
+	if let Some(token) = credential_token {
+		options = options.with_credentials("x-access-token", token);
+	}
+	if let Some(branch) = branch {
+		options = options.with_branch(branch);
+	}
+	aghub_git::clone_to_temp(options)
+}
+
+fn token_for_git_scan_source(source: &str) -> Option<String> {
+	let bindings = load_source_bindings().unwrap_or_default();
+	let creds = crate::routes::credentials::load_credentials().ok()?;
+	let host = keychain_host_for_source(source);
+	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
 }
 
 /// Try to detect the checked-out branch from the cloned repo via its gix `HEAD`

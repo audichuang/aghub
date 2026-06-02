@@ -362,7 +362,7 @@ fn write_auto_healed_hashes(
 	Ok(())
 }
 
-fn installed_skill_roots(
+pub(crate) fn installed_skill_roots(
 	name: &str,
 	resource_scope: ResourceScope,
 	project_root: Option<&Path>,

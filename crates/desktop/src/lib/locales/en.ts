@@ -1044,5 +1044,18 @@ export default {
 	sourceStateCurrent: "Installed (latest)",
 	sourceStateUncheckable: "Uncheckable",
 	importFromThisSource: "Import from this source",
+	sourceUpdateSkill: "Update",
+	sourceUpdateAll: "Update all",
+	sourceUpdating: "Updating...",
+	sourceUpdatesApplied: "Updated {{count}} skills.",
+	sourceUpdateSomeFailed: "Couldn't update {{count}} skills.",
+	sourceInstallSkill: "Install",
+	sourceInstallAll: "Install all",
+	sourceInstalling: "Installing...",
+	sourceInstalled: "Installed {{count}} skills.",
+	sourceInstallSomeFailed: "Couldn't install {{count}} targets.",
+	sourceInstallFailed: "Failed to install skill.",
+	sourceInstallNoAgents:
+		"No available agents can install skills in this scope.",
 	selectSource: "Select a source",
 };

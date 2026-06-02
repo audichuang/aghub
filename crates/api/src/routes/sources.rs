@@ -13,7 +13,7 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 
 use crate::credentials::resolve::{
-	load_source_bindings, resolve_token_for_source, SourceBindings,
+	load_source_bindings, resolve_token_for_source,
 };
 use crate::dto::sources::{
 	CredentialStatus, SourceDiffResponse, SourceSkillDiff,
@@ -21,11 +21,12 @@ use crate::dto::sources::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
-use crate::routes::credentials::{load_credentials, StoredCredential};
-use crate::routes::skills_update::GitFetcher;
+use crate::routes::credentials::load_credentials;
+use crate::routes::skills_update::{installed_skill_roots, GitFetcher};
 use crate::skills::update_check::{
 	keychain_host_for_source, FetchError, Fetcher, SourceRef,
 };
+use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{
 	compare_known_hashes, precheck_source, SkillUpdateStatus, UncheckableReason,
 };
@@ -35,21 +36,19 @@ use aghub_core::skills::update::{
 #[get("/skills/sources?<query..>")]
 pub fn list_sources(query: ScopeParams) -> ApiResult<SourcesListResponse> {
 	let resolved = query.resolve()?;
-	let bindings = load_source_bindings().unwrap_or_default();
-	let creds = load_credentials().unwrap_or_default();
 
 	let mut sources = Vec::new();
 	match resolved {
 		ResolvedScope::Global => {
-			sources.extend(global_sources(&bindings, &creds));
+			sources.extend(global_sources());
 		}
 		ResolvedScope::Project { root } => {
-			sources.extend(project_sources(&root, &bindings, &creds));
+			sources.extend(project_sources(&root));
 		}
 		ResolvedScope::All { project_root } => {
-			sources.extend(global_sources(&bindings, &creds));
+			sources.extend(global_sources());
 			if let Some(root) = project_root {
-				sources.extend(project_sources(&root, &bindings, &creds));
+				sources.extend(project_sources(&root));
 			}
 		}
 	}
@@ -58,10 +57,7 @@ pub fn list_sources(query: ScopeParams) -> ApiResult<SourcesListResponse> {
 }
 
 /// Group the global lock's skills by source (the global lock carries `sourceUrl`).
-fn global_sources(
-	bindings: &SourceBindings,
-	creds: &[StoredCredential],
-) -> Vec<SourceSummaryResponse> {
+fn global_sources() -> Vec<SourceSummaryResponse> {
 	// source (owner/repo) -> (source_url, source_type, count)
 	let mut by_source: BTreeMap<String, (String, String, u32)> =
 		BTreeMap::new();
@@ -74,16 +70,14 @@ fn global_sources(
 	by_source
 		.into_iter()
 		.map(|(source, (source_url, source_type, skill_count))| {
-			let (credential_status, is_private) =
-				credential_status_for(&source, bindings, creds);
 			SourceSummaryResponse {
 				source,
 				source_url,
 				source_type,
 				scope: "global".to_string(),
 				skill_count,
-				is_private,
-				credential_status,
+				is_private: false,
+				credential_status: CredentialStatus::NotRequired,
 			}
 		})
 		.collect()
@@ -91,11 +85,7 @@ fn global_sources(
 
 /// Group a project lock's skills by source. The project lock omits `sourceUrl`,
 /// so the fetch URL is reconstructed from `owner/repo` (GitHub etc.).
-fn project_sources(
-	root: &Path,
-	bindings: &SourceBindings,
-	creds: &[StoredCredential],
-) -> Vec<SourceSummaryResponse> {
+fn project_sources(root: &Path) -> Vec<SourceSummaryResponse> {
 	let lock = skill::read_local_lock(Some(root));
 	// source (owner/repo) -> (source_type, count)
 	let mut by_source: BTreeMap<String, (String, u32)> = BTreeMap::new();
@@ -109,42 +99,17 @@ fn project_sources(
 		.into_iter()
 		.map(|(source, (source_type, skill_count))| {
 			let source_url = reconstruct_source_url(&source);
-			let (credential_status, is_private) =
-				credential_status_for(&source, bindings, creds);
 			SourceSummaryResponse {
 				source,
 				source_url,
 				source_type,
 				scope: "project".to_string(),
 				skill_count,
-				is_private,
-				credential_status,
+				is_private: false,
+				credential_status: CredentialStatus::NotRequired,
 			}
 		})
 		.collect()
-}
-
-/// Offline credential availability for a source: an explicit binding to an
-/// existing credential is `Bound`; otherwise a stored credential matching the
-/// source host is `HostMatch`; otherwise `Missing`. `is_private` is the
-/// best-effort offline guess (we only hold credentials for private sources).
-fn credential_status_for(
-	source: &str,
-	bindings: &SourceBindings,
-	creds: &[StoredCredential],
-) -> (CredentialStatus, bool) {
-	if let Some(cred_id) = bindings.0.get(source.trim()) {
-		if creds.iter().any(|c| c.id == *cred_id) {
-			return (CredentialStatus::Bound, true);
-		}
-	}
-	let host = keychain_host_for_source(source);
-	if resolve_token_for_source(source, host.as_deref(), bindings, creds)
-		.is_some()
-	{
-		return (CredentialStatus::HostMatch, true);
-	}
-	(CredentialStatus::Missing, false)
 }
 
 fn reconstruct_source_url(source: &str) -> String {
@@ -184,8 +149,14 @@ pub struct SourceDiffQuery {
 	git_ref: Option<String>,
 }
 
-/// skill_path -> (baseline content hash, scope label)
-type Baseline = BTreeMap<String, (String, String)>;
+struct BaselineEntry {
+	stored_hash: String,
+	local_hashes: Vec<String>,
+	scope_label: String,
+}
+
+/// skill_path -> installed baseline metadata
+type Baseline = BTreeMap<String, BaselineEntry>;
 
 enum DiffOutcome {
 	/// Private source with no usable credential; UI should offer to bind one.
@@ -193,6 +164,11 @@ enum DiffOutcome {
 	/// Transport/network failure fetching the source.
 	FetchFailed,
 	Ok(Vec<SourceSkillDiff>),
+}
+
+enum LazyFetchError {
+	NeedsCredential,
+	FetchFailed,
 }
 
 #[get("/skills/sources/diff?<query..>")]
@@ -225,24 +201,14 @@ pub async fn diff_source(
 		}));
 	}
 
-	// 3. Resolve a token for (possibly private) re-fetch.
-	let bindings = load_source_bindings().unwrap_or_default();
-	let creds = load_credentials().unwrap_or_default();
-	let host = keychain_host_for_source(&source);
-	let token =
-		resolve_token_for_source(&source, host.as_deref(), &bindings, &creds);
-
-	// 4. Fetch once + discover + classify on a blocking thread (sync git IO,
-	//    and the materialized temp dir must outlive discovery + hashing).
+	// 3. Fetch + discover + classify on a blocking thread (sync git IO, and the
+	//    materialized temp dir must outlive discovery + hashing). The fetch path
+	//    tries public/unauthenticated first and only touches Keychain after an
+	//    unauthenticated fetch failure.
 	let source_for_blk = source.clone();
 	let ref_for_blk = git_ref.clone();
 	let outcome = rocket::tokio::task::spawn_blocking(move || {
-		diff_blocking(
-			&source_for_blk,
-			ref_for_blk.as_deref(),
-			token.as_deref(),
-			&baseline,
-		)
+		diff_blocking(&source_for_blk, ref_for_blk.as_deref(), &baseline)
 	})
 	.await
 	.map_err(|e| {
@@ -297,7 +263,7 @@ fn lock_baseline_for_source(
 	};
 
 	if include_global {
-		for (_name, entry) in skill::get_all_locked_skills() {
+		for (name, entry) in skill::get_all_locked_skills() {
 			if !source_matches(want, &entry.source, Some(&entry.source_url)) {
 				continue;
 			}
@@ -306,13 +272,24 @@ fn lock_baseline_for_source(
 			}
 			if let Some(skill_path) = entry.skill_path.clone() {
 				let hash = entry.content_hash.clone().unwrap_or_default();
-				baseline.insert(skill_path, (hash, "global".to_string()));
+				baseline.insert(
+					skill_path,
+					BaselineEntry {
+						stored_hash: hash,
+						local_hashes: local_hashes_for_installed(
+							&name,
+							ResourceScope::GlobalOnly,
+							None,
+						),
+						scope_label: "global".to_string(),
+					},
+				);
 			}
 		}
 	}
 
 	if let Some(root) = project_root {
-		for (_name, entry) in skill::read_local_lock(Some(root)).skills {
+		for (name, entry) in skill::read_local_lock(Some(root)).skills {
 			if !source_matches(want, &entry.source, None) {
 				continue;
 			}
@@ -322,7 +299,15 @@ fn lock_baseline_for_source(
 			if let Some(skill_path) = entry.skill_path.clone() {
 				baseline.insert(
 					skill_path,
-					(entry.computed_hash, "project".to_string()),
+					BaselineEntry {
+						stored_hash: entry.computed_hash,
+						local_hashes: local_hashes_for_installed(
+							&name,
+							ResourceScope::ProjectOnly,
+							Some(root),
+						),
+						scope_label: "project".to_string(),
+					},
 				);
 			}
 		}
@@ -331,21 +316,33 @@ fn lock_baseline_for_source(
 	(baseline, source_type)
 }
 
+fn local_hashes_for_installed(
+	name: &str,
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<String> {
+	installed_skill_roots(name, resource_scope, project_root)
+		.into_iter()
+		.filter_map(|root| skill::compute_skill_folder_hash(&root).ok())
+		.collect()
+}
+
 /// Synchronous fetch → discover-all → classify. Runs on a blocking thread.
 fn diff_blocking(
 	source: &str,
 	git_ref: Option<&str>,
-	token: Option<&str>,
 	baseline: &Baseline,
 ) -> DiffOutcome {
 	let source_ref = SourceRef {
 		source: source.to_string(),
 		ref_: git_ref.map(|s| s.to_string()),
 	};
-	let fetched = match GitFetcher.fetch(&source_ref, token) {
+	let fetched = match fetch_source_lazily_auth(&source_ref) {
 		Ok(repo) => repo,
-		Err(FetchError::Auth) => return DiffOutcome::NeedsCredential,
-		Err(FetchError::Network) => return DiffOutcome::FetchFailed,
+		Err(LazyFetchError::NeedsCredential) => {
+			return DiffOutcome::NeedsCredential;
+		}
+		Err(LazyFetchError::FetchFailed) => return DiffOutcome::FetchFailed,
 	};
 	let root = fetched.root.as_path();
 
@@ -371,13 +368,9 @@ fn diff_blocking(
 				reason: None,
 				installed_paths: Vec::new(),
 			}),
-			Some((base_hash, scope_label)) => {
-				let skill_dir = d
-					.full_path
-					.parent()
-					.map(Path::to_path_buf)
-					.unwrap_or_else(|| root.to_path_buf());
-				let (state, reason) = classify_installed(base_hash, &skill_dir);
+			Some(entry) => {
+				let skill_dir = discovered_skill_root(&d.full_path);
+				let (state, reason) = classify_installed(entry, &skill_dir);
 				out.push(SourceSkillDiff {
 					name: d.name,
 					skill_path,
@@ -386,7 +379,7 @@ fn diff_blocking(
 					author,
 					state,
 					reason,
-					installed_paths: vec![scope_label.clone()],
+					installed_paths: vec![entry.scope_label.clone()],
 				});
 			}
 		}
@@ -395,29 +388,92 @@ fn diff_blocking(
 	DiffOutcome::Ok(out)
 }
 
+fn discovered_skill_root(path: &Path) -> std::path::PathBuf {
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+	if is_skill_file {
+		path.parent()
+			.map(Path::to_path_buf)
+			.unwrap_or_else(|| path.to_path_buf())
+	} else {
+		path.to_path_buf()
+	}
+}
+
+fn fetch_source_lazily_auth(
+	source_ref: &SourceRef,
+) -> Result<crate::skills::update_check::FetchedRepo, LazyFetchError> {
+	let fetcher = GitFetcher;
+	match fetcher.fetch(source_ref, None) {
+		Ok(repo) => Ok(repo),
+		Err(error) => {
+			let Some(token) = token_for_source(&source_ref.source) else {
+				return match error {
+					FetchError::Auth => Err(LazyFetchError::NeedsCredential),
+					FetchError::Network => Err(LazyFetchError::FetchFailed),
+				};
+			};
+			match fetcher.fetch(source_ref, Some(&token)) {
+				Ok(repo) => Ok(repo),
+				Err(FetchError::Auth) => Err(LazyFetchError::NeedsCredential),
+				Err(FetchError::Network) => Err(LazyFetchError::FetchFailed),
+			}
+		}
+	}
+}
+
+fn token_for_source(source: &str) -> Option<String> {
+	let bindings = load_source_bindings().unwrap_or_default();
+	let creds = load_credentials().unwrap_or_default();
+	let host = keychain_host_for_source(source);
+	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
+}
+
 /// Classify an already-installed skill by comparing its upstream folder hash to
-/// the recorded baseline. An empty/unknown baseline (legacy lock) is reported as
-/// current rather than nagging a false "update available".
+/// the installed baseline. Prefer actual installed folder hashes over the
+/// stored lock hash because some locks were produced by npx/JS collation, while
+/// this endpoint hashes fetched source with Rust collation. Comparing local
+/// Rust hashes to fetched Rust hash avoids false updates for unchanged skills.
 fn classify_installed(
-	base_hash: &str,
+	entry: &BaselineEntry,
 	skill_dir: &Path,
 ) -> (String, Option<String>) {
-	if base_hash.is_empty() {
-		return ("installedCurrent".to_string(), None);
+	let fresh = match skill::compute_skill_folder_hash(skill_dir) {
+		Ok(hash) => hash,
+		Err(_) => {
+			return ("uncheckable".to_string(), Some("local".to_string()))
+		}
+	};
+
+	if !entry.local_hashes.is_empty() {
+		if entry.local_hashes.iter().all(|hash| {
+			compare_known_hashes(hash, &fresh) == SkillUpdateStatus::UpToDate
+		}) {
+			return ("installedCurrent".to_string(), None);
+		}
+		return ("installedOutdated".to_string(), None);
 	}
-	match skill::compute_skill_folder_hash(skill_dir) {
-		Ok(fresh) => match compare_known_hashes(base_hash, &fresh) {
-			SkillUpdateStatus::UpToDate => {
-				("installedCurrent".to_string(), None)
-			}
-			SkillUpdateStatus::UpdateAvailable { .. } => {
-				("installedOutdated".to_string(), None)
-			}
-			SkillUpdateStatus::Uncheckable { reason } => {
-				("uncheckable".to_string(), Some(reason_str(reason)))
-			}
-		},
-		Err(_) => ("uncheckable".to_string(), Some("local".to_string())),
+
+	let baseline = if entry.stored_hash.is_empty()
+		|| skill::is_placeholder_digest(&entry.stored_hash)
+	{
+		None
+	} else {
+		Some(entry.stored_hash.as_str())
+	};
+	let Some(base_hash) = baseline else {
+		return ("installedCurrent".to_string(), None);
+	};
+
+	match compare_known_hashes(base_hash, &fresh) {
+		SkillUpdateStatus::UpToDate => ("installedCurrent".to_string(), None),
+		SkillUpdateStatus::UpdateAvailable { .. } => {
+			("installedOutdated".to_string(), None)
+		}
+		SkillUpdateStatus::Uncheckable { reason } => {
+			("uncheckable".to_string(), Some(reason_str(reason)))
+		}
 	}
 }
 
@@ -445,4 +501,94 @@ fn reason_str(reason: UncheckableReason) -> String {
 		UncheckableReason::Timeout => "timeout",
 	}
 	.to_string()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::fs;
+	use tempfile::tempdir;
+
+	#[test]
+	fn classify_prefers_local_hash_over_stale_stored_hash() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
+		let fresh = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let entry = BaselineEntry {
+			stored_hash: "stale-lock-hash".to_string(),
+			local_hashes: vec![fresh],
+			scope_label: "project".to_string(),
+		};
+
+		assert_eq!(
+			classify_installed(&entry, dir.path()),
+			("installedCurrent".to_string(), None)
+		);
+	}
+
+	#[test]
+	fn classify_falls_back_to_stored_hash_without_local_hash() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
+		let entry = BaselineEntry {
+			stored_hash: "stale-lock-hash".to_string(),
+			local_hashes: Vec::new(),
+			scope_label: "project".to_string(),
+		};
+
+		assert_eq!(
+			classify_installed(&entry, dir.path()),
+			("installedOutdated".to_string(), None)
+		);
+	}
+
+	#[test]
+	fn classify_unknown_lock_hash_as_current() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
+		let entry = BaselineEntry {
+			stored_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
+			local_hashes: Vec::new(),
+			scope_label: "project".to_string(),
+		};
+
+		assert_eq!(
+			classify_installed(&entry, dir.path()),
+			("installedCurrent".to_string(), None)
+		);
+	}
+
+	#[test]
+	fn classify_outdated_when_any_installed_hash_differs() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
+		let fresh = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let entry = BaselineEntry {
+			stored_hash: fresh.clone(),
+			local_hashes: vec![fresh, "older-install".to_string()],
+			scope_label: "project".to_string(),
+		};
+
+		assert_eq!(
+			classify_installed(&entry, dir.path()),
+			("installedOutdated".to_string(), None)
+		);
+	}
+
+	#[test]
+	fn discovered_skill_root_keeps_directory_paths() {
+		let dir = tempdir().unwrap();
+		let skill_dir = dir.path().join("skills/foo");
+
+		assert_eq!(discovered_skill_root(&skill_dir), skill_dir);
+	}
+
+	#[test]
+	fn discovered_skill_root_accepts_skill_file_paths() {
+		let dir = tempdir().unwrap();
+		let skill_dir = dir.path().join("skills/foo");
+		let skill_file = skill_dir.join("SKILL.md");
+
+		assert_eq!(discovered_skill_root(&skill_file), skill_dir);
+	}
 }
