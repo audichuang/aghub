@@ -14,7 +14,7 @@ Users who install skills from git repos (à la `npx skills`) want to:
    new ones — instead of running CLI commands and guessing.
 
 Separately, users coming from `npx skills` expect the **`.agents` master + per-agent
-symlink** on-disk layout, but want control over *which* agents can see a skill.
+symlink** on-disk layout, but want control over _which_ agents can see a skill.
 
 This work delivers both, as two linked features.
 
@@ -31,17 +31,18 @@ makes it visible to **all** those agents, regardless of which agent the user pic
 "Install only for Claude" must therefore **not** touch `.agents`.
 
 Conversely, the `npx skills` single-source-of-truth model (real file once in
-`.agents`, symlinks elsewhere) *requires* `.agents`. These two goals are
-fundamentally in tension for a *selective* install, so we support **two modes**:
+`.agents`, symlinks elsewhere) _requires_ `.agents`. These two goals are
+fundamentally in tension for a _selective_ install, so we support **two modes**:
 
-| Mode | Behaviour | Default? |
-| --- | --- | --- |
-| **Isolation** | Copy the skill into each selected agent's own skills dir; **never** touch `.agents`. | ✅ default |
-| **Universal** | Write the real file once into `.agents/skills/<name>`; symlink each selected agent whose dir doesn't already read `.agents` (e.g. Claude). Mirrors `npx skills`. | opt-in |
+| Mode          | Behaviour                                                                                                                                                        | Default?   |
+| ------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| **Isolation** | Copy the skill into each selected agent's own skills dir; **never** touch `.agents`.                                                                             | ✅ default |
+| **Universal** | Write the real file once into `.agents/skills/<name>`; symlink each selected agent whose dir doesn't already read `.agents` (e.g. Claude). Mirrors `npx skills`. | opt-in     |
 
 Notes:
+
 - Default is **copy** (isolation). Universal is explicitly opt-in (CLI `--universal`,
-  API `universal: true`, future desktop toggle). (This is the *opposite* of an early
+  API `universal: true`, future desktop toggle). (This is the _opposite_ of an early
   assumption that symlink should be the default — the `.agents` leak makes copy the
   safe default.)
 - Universal symlinks: **relative** for project scope (portable across machines /
@@ -82,9 +83,9 @@ A new top-level desktop page **"Sources"** (`🌐`, `/sources`).
 
 ### New HTTP API
 
-| Method + path | Purpose |
-| --- | --- |
-| `GET /skills/sources?scope=&project_root=` | Offline, lock-only. Group installed skills by source per scope → `SourcesListResponse`. |
+| Method + path                                                    | Purpose                                                                                                        |
+| ---------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `GET /skills/sources?scope=&project_root=`                       | Offline, lock-only. Group installed skills by source per scope → `SourcesListResponse`.                        |
 | `GET /skills/sources/diff?source=&scope=&project_root=&git_ref=` | Fetch the source once, list all its skills, diff vs lock → `SourceDiffResponse` (3-state + `needsCredential`). |
 
 DTOs: `SourceSummaryResponse`, `SourcesListResponse`, `SourceSkillDiff`,
@@ -103,15 +104,17 @@ auto-heal of the lock during a background scan).
 ## File map (what changed)
 
 **Core (`crates/core`)**
-- `src/skills/install_layout.rs` *(new)* — universal-mode primitive:
+
+- `src/skills/install_layout.rs` _(new)_ — universal-mode primitive:
   `universal_canonical_dir`, `install_universal`, `link_agents_to_canonical`
   (relative/absolute links, Windows copy-fallback, conflict-safe, idempotent).
 - `src/manager/skill.rs` — `add_skill_universal` / `add_skill_from_path_universal`
   (default `add_skill` copy behaviour unchanged).
 
 **API (`crates/api`)**
-- `src/routes/sources.rs` *(new)* — `list_sources`, `diff_source`.
-- `src/dto/sources.rs` *(new)* — the DTOs above.
+
+- `src/routes/sources.rs` _(new)_ — `list_sources`, `diff_source`.
+- `src/dto/sources.rs` _(new)_ — the DTOs above.
 - `src/routes/skills.rs` — `install_git_skill_universal` + `universal` branch in
   `git_install_skills`; `src/dto/skill.rs` — `GitInstallRequest.universal`.
 - `src/routes/skills_update.rs` — `GitFetcher` made `pub(crate)` for reuse.
