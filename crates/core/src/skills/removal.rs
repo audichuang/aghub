@@ -515,6 +515,7 @@ mod tests {
 	// ---- plan_removal -------------------------------------------------------
 
 	use crate::models::Skill;
+	#[cfg(unix)]
 	use std::path::PathBuf;
 
 	fn write_skill_md(dir: &Path) {

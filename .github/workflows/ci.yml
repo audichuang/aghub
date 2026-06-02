@@ -72,11 +72,14 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
-            - name: Download actionlint
+            - name: Download actionlint (pinned)
               shell: bash
               run: |
-                  bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
-                  echo "$HOME/bin" >> "$GITHUB_PATH"
+                  set -e
+                  ACTIONLINT_VERSION="1.7.12"
+                  curl -sSL -o /tmp/actionlint.tar.gz \
+                      "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+                  sudo tar -xzf /tmp/actionlint.tar.gz -C /usr/local/bin actionlint
             - name: Run actionlint
               shell: bash
               run: actionlint -color

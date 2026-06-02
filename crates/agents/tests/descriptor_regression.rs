@@ -867,6 +867,7 @@ fn test_global_skill_paths() {
 						);
 					} else if agent_type == AgentType::Codex {
 						// /etc/codex/skills is a Unix-only system path
+						#[allow(unused_mut)]
 						let mut expected_paths = vec![
 							home().join(".codex/skills"),
 							home().join(".agents/skills"),
