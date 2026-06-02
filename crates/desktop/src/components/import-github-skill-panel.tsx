@@ -43,6 +43,7 @@ import { AgentSelector } from "./agent-selector";
 interface ImportGithubSkillPanelProps {
 	onDone: () => void;
 	projectPath?: string;
+	initialUrl?: string;
 }
 
 const ADD_TOKEN_SENTINEL = "__add_token__";
@@ -69,6 +70,7 @@ function cardReached(card: 1 | 2 | 3, phase: Phase): boolean {
 export function ImportGithubSkillPanel({
 	onDone,
 	projectPath,
+	initialUrl = "",
 }: ImportGithubSkillPanelProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -124,7 +126,7 @@ export function ImportGithubSkillPanel({
 		mode: "onSubmit",
 		reValidateMode: "onChange",
 		defaultValues: {
-			url: "",
+			url: initialUrl,
 			credentialId: "",
 			selectedAgents: skillAgents[0] ? [skillAgents[0].id] : [],
 		},

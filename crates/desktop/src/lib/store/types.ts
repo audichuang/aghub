@@ -40,6 +40,7 @@ export const SIDEBAR_ITEM_IDS = [
 	"skillsSh",
 	"subAgents",
 	"plugins",
+	"sources",
 ] as const;
 
 export type SidebarItemId = (typeof SIDEBAR_ITEM_IDS)[number];

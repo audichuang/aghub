@@ -66,6 +66,10 @@ use aghub_api::dto::{
 		SkillUpdateResponse, SkillUpdateStatusResponse, UpdateSkillRequest,
 		ValidationError,
 	},
+	sources::{
+		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
+		SourceSummaryResponse, SourcesListResponse,
+	},
 	sub_agent::{
 		CreateSubAgentRequest, SubAgentResponse, UpdateSubAgentRequest,
 	},
@@ -206,6 +210,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<GitInstallRequest>(&cfg)?;
 	export_type::<GitInstallResultEntry>(&cfg)?;
 	export_type::<GitInstallResponse>(&cfg)?;
+	export_type::<SourceSummaryResponse>(&cfg)?;
+	export_type::<SourcesListResponse>(&cfg)?;
+	export_type::<CredentialStatus>(&cfg)?;
+	export_type::<SourceSkillDiff>(&cfg)?;
+	export_type::<SourceDiffResponse>(&cfg)?;
 	export_type::<DeleteSkillByPathResponse>(&cfg)?;
 	export_type::<PruneLockRequest>(&cfg)?;
 	export_type::<PruneLockResponse>(&cfg)?;

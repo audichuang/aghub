@@ -210,6 +210,8 @@ fn build_rocket(
 				routes::skills::git_sync_skill,
 				routes::skills_update::check_skill_updates,
 				routes::skills_update::apply_skill_update,
+				routes::sources::list_sources,
+				routes::sources::diff_source,
 				routes::plugins::list_plugins,
 				routes::plugins::get_plugin_detail,
 				routes::plugins::enable_plugin,

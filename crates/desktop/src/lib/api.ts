@@ -56,6 +56,8 @@ import type {
 	SkillUpdateResponse,
 	SourceCredentialBindingRequest,
 	SourceCredentialBindingResponse,
+	SourceDiffResponse,
+	SourcesListResponse,
 	SubAgentResponse,
 	ToolInfoDto,
 	TransferRequest,
@@ -312,6 +314,47 @@ export function createApi(baseUrl: string) {
 				return client
 					.post("skills/apply-update", {
 						json: body,
+						timeout: 120000,
+					})
+					.json();
+			},
+			getSources(
+				scope: "global" | "project" | "all" = "global",
+				projectRoot?: string,
+			): Promise<SourcesListResponse> {
+				return client
+					.get("skills/sources", {
+						searchParams: {
+							scope,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+					})
+					.json();
+			},
+			diffSource({
+				scope = "global",
+				projectRoot,
+				source,
+				gitRef,
+			}: {
+				scope?: "global" | "project" | "all";
+				projectRoot?: string;
+				source: string;
+				gitRef?: string;
+			}): Promise<SourceDiffResponse> {
+				// Network-heavy (clones the source); give it a long timeout.
+				return client
+					.get("skills/sources/diff", {
+						searchParams: {
+							scope,
+							source,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+							...(gitRef ? { git_ref: gitRef } : {}),
+						},
 						timeout: 120000,
 					})
 					.json();

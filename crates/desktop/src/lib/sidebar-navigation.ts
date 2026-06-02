@@ -1,6 +1,7 @@
 import {
 	BookOpenIcon,
 	CpuChipIcon,
+	GlobeAltIcon,
 	KeyIcon,
 	ServerIcon,
 	SquaresPlusIcon,
@@ -66,6 +67,12 @@ const SIDEBAR_ITEM_DEFINITIONS: Record<SidebarItemId, SidebarItemDefinition> = {
 		labelKey: "claudeCodePlugins",
 		href: "/cc-plugins",
 		icon: PuzzlePieceIcon,
+	},
+	sources: {
+		id: "sources",
+		labelKey: "sources",
+		href: "/sources",
+		icon: GlobeAltIcon,
 	},
 };
 

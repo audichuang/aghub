@@ -6,4 +6,11 @@ export type GitInstallRequest = {
 	agents: Array<string>;
 	scope: string;
 	project_root: string | null;
+	/**
+	 * When `Some(true)`, install in *universal* layout: write the real skill
+	 * once into `.agents/skills/<name>` and symlink each selected agent's skills
+	 * dir to it (npx-style). When `None`/`false` (default), each selected agent
+	 * gets an independent copy and `.agents` is never touched (isolation mode).
+	 */
+	universal?: boolean;
 };

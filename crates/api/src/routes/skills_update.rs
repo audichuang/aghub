@@ -45,7 +45,7 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 
 /// Production [`Fetcher`]: fetches the requested ref into a bare temp repo,
 /// then materializes the tree into a separate temp directory for hashing/apply.
-struct GitFetcher;
+pub(crate) struct GitFetcher;
 
 impl Fetcher for GitFetcher {
 	fn fetch(

@@ -116,6 +116,68 @@ impl ConfigManager {
 		self.save_current()
 	}
 
+	/// Add a skill in *universal* layout (opt-in): write the real `SKILL.md`
+	/// once into `.agents/skills/<name>` and symlink THIS agent's skills dir to
+	/// it (npx-style). Sets `canonical_path` so layout-aware removal recognises
+	/// the symlink. The default [`Self::add_skill`] copy behaviour is unchanged;
+	/// callers opt in (e.g. CLI `--universal`).
+	pub fn add_skill_universal(&mut self, skill: Skill) -> Result<()> {
+		let agent_name = self.adapter.name().to_string();
+		let agent_write_dir = self.target_skills_dir();
+		let project_root_for_canonical = match self.write_scope {
+			crate::models::ResourceScope::ProjectOnly => {
+				self.project_root.clone()
+			}
+			_ => None,
+		};
+		let canonical_dir =
+			crate::skills::install_layout::universal_canonical_dir(
+				project_root_for_canonical.as_deref(),
+			)
+			.ok_or_else(|| {
+				ConfigError::InvalidConfig(
+					"Cannot resolve .agents canonical skills directory".into(),
+				)
+			})?;
+		let use_relative = project_root_for_canonical.is_some();
+
+		let config = self.config_mut()?;
+		if config.skills.iter().any(|s| s.name == skill.name) {
+			return Err(ConfigError::resource_exists("skill", &skill.name));
+		}
+		info!(
+			"adding skill '{}' (universal layout) for agent '{}'",
+			skill.name, agent_name
+		);
+
+		let safe_name = sanitize_name(&skill.name);
+		let canonical = canonical_dir.join(&safe_name);
+		std::fs::create_dir_all(&canonical)?;
+		std::fs::write(canonical.join("SKILL.md"), format_skill(&skill, None))?;
+
+		// Symlink this agent's own skills dir to the master, unless its write dir
+		// IS the canonical dir (then the master already lives there).
+		if let Some(agent_dir) = &agent_write_dir {
+			if agent_dir != &canonical_dir {
+				crate::skills::install_layout::link_agents_to_canonical(
+					&canonical,
+					std::slice::from_ref(agent_dir),
+					use_relative,
+				)
+				.map_err(ConfigError::Io)?;
+			}
+		}
+
+		let canonical_md =
+			canonical.join("SKILL.md").to_string_lossy().to_string();
+		let mut fs_skill = skill.clone();
+		fs_skill.source_path = Some(canonical_md.clone());
+		fs_skill.canonical_path = Some(canonical_md);
+		config.skills.push(fs_skill);
+
+		self.save_current()
+	}
+
 	pub fn get_skill(&self, name: &str) -> Option<&Skill> {
 		self.config.as_ref()?.skills.iter().find(|s| s.name == name)
 	}
@@ -394,6 +456,26 @@ impl ConfigManager {
 		Ok(skill)
 	}
 
+	/// Universal-layout variant of [`Self::add_skill_from_path`]: parses the
+	/// skill then installs it via [`Self::add_skill_universal`] (`.agents` master
+	/// + per-agent symlink).
+	pub fn add_skill_from_path_universal(
+		&mut self,
+		path: &Path,
+	) -> Result<Skill> {
+		debug!(
+			"adding skill (universal) from path '{}' for agent '{}'",
+			path.display(),
+			self.adapter.name()
+		);
+		let skill_pkg = skill::parser::parse(path).map_err(|e| {
+			ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
+		})?;
+		let skill = convert_skill(skill_pkg);
+		self.add_skill_universal(skill.clone())?;
+		Ok(skill)
+	}
+
 	pub fn validate_skill_path(&self, path: &Path) -> Vec<String> {
 		let mut errors = Vec::new();
 		match skill::parser::parse(path) {
@@ -469,6 +551,36 @@ fn format_skill(skill: &Skill, existing_body: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_universal_writes_master_and_symlinks_agent() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("uni-skill");
+		skill.description = Some("universal test".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Real master lives under .agents/skills (NOT duplicated per agent).
+		assert!(root.join(".agents/skills/uni-skill/SKILL.md").exists());
+		// Claude's own dir holds a symlink that resolves to the master.
+		let link = root.join(".claude/skills/uni-skill");
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+		assert!(link.join("SKILL.md").exists());
+	}
 
 	#[test]
 	fn test_format_skill_preserves_body() {

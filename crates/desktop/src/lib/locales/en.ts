@@ -1029,4 +1029,20 @@ export default {
 	connRemoved: "Connection removed.",
 	connSaveError: "Failed to save connection.",
 	connRemoveError: "Failed to remove connection.",
+	sources: "Sources",
+	searchSources: "Search sources…",
+	sourcesEmpty:
+		"No sources yet. Install skills from a repo to see them here.",
+	scopeGlobal: "Global",
+	scopeProject: "Project",
+	needsCredential: "Needs credential",
+	needsCredentialHint:
+		"This source is private and no credential is available. Bind a credential to check it.",
+	checkingSource: "Checking source…",
+	sourceStateNotInstalled: "New (not installed)",
+	sourceStateOutdated: "Update available",
+	sourceStateCurrent: "Installed (latest)",
+	sourceStateUncheckable: "Uncheckable",
+	importFromThisSource: "Import from this source",
+	selectSource: "Select a source",
 };

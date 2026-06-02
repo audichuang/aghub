@@ -32,6 +32,35 @@ export const queryKeys = {
 			project: (projectPath?: string) =>
 				["skills", "lock", "project", projectPath ?? null] as const,
 		},
+		sources: {
+			all: () => ["skills", "sources"] as const,
+			list: (
+				scope: "global" | "project" | "all" = "global",
+				projectRoot?: string,
+			) =>
+				[
+					"skills",
+					"sources",
+					"list",
+					scope,
+					projectRoot ?? null,
+				] as const,
+			diff: (
+				source: string,
+				scope: "global" | "project" | "all" = "global",
+				projectRoot?: string,
+				gitRef?: string,
+			) =>
+				[
+					"skills",
+					"sources",
+					"diff",
+					source,
+					scope,
+					projectRoot ?? null,
+					gitRef ?? null,
+				] as const,
+		},
 	},
 	mcps: {
 		all: () => ["mcps"] as const,

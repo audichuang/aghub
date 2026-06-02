@@ -131,6 +131,13 @@ enum Commands {
 		/// For skill: Comma-separated list of tool names
 		#[arg(long, value_delimiter = ',')]
 		tools: Vec<String>,
+
+		/// For skill: universal layout — store the real file once in
+		/// `.agents/skills` and symlink the target agent (npx-style). Default is
+		/// an isolated copy in the agent's own skills dir (never touches
+		/// `.agents`).
+		#[arg(long)]
+		universal: bool,
 	},
 	/// Update an existing resource
 	Update {
@@ -380,6 +387,7 @@ fn main() -> Result<()> {
 			author,
 			version,
 			tools,
+			universal,
 		} => add::execute(
 			&mut manager,
 			resource,
@@ -394,6 +402,7 @@ fn main() -> Result<()> {
 			author,
 			version,
 			tools,
+			universal,
 		),
 		Commands::Update {
 			resource,

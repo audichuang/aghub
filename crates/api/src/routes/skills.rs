@@ -647,6 +647,48 @@ fn install_git_skill_to_dir(
 	Ok((skill.name, copied))
 }
 
+/// Universal-layout install: write the skill master once into
+/// `<canonical_skills_dir>/<name>` and symlink each selected agent's skills dir
+/// to it. Agents whose write dir *is* the canonical dir are skipped (the master
+/// already lives there); agents that merely read `.agents` still get a redundant
+/// but harmless link — [`aghub_core::skills::install_layout`] is idempotent and
+/// never clobbers an existing real directory. Returns `(name, wrote_master)`.
+fn install_git_skill_universal(
+	full_path: &std::path::Path,
+	agent_target_dirs: &[std::path::PathBuf],
+	canonical_skills_dir: &std::path::Path,
+	use_relative_links: bool,
+) -> Result<(String, bool), ApiError> {
+	let parsed = skill::parser::parse(full_path).map_err(|e| {
+		ApiError::new(
+			Status::BadRequest,
+			format!("Failed to parse skill: {e}"),
+			"SKILL_PARSE_FAILED",
+		)
+	})?;
+	let skill = convert_skill(parsed);
+	let safe_name = sanitize_name(&skill.name);
+	let canonical = canonical_skills_dir.join(&safe_name);
+	let wrote_master = !canonical.exists();
+	let source_root = get_skill_root(full_path.to_path_buf());
+
+	let symlink_dirs: Vec<std::path::PathBuf> = agent_target_dirs
+		.iter()
+		.filter(|dir| dir.as_path() != canonical_skills_dir)
+		.cloned()
+		.collect();
+
+	aghub_core::skills::install_layout::install_universal(
+		&source_root,
+		&canonical,
+		&symlink_dirs,
+		use_relative_links,
+	)
+	.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
+
+	Ok((skill.name, wrote_master))
+}
+
 type GitInstallAgentGroup = Vec<(String, AgentType)>;
 type GitInstallGroups = HashMap<std::path::PathBuf, GitInstallAgentGroup>;
 type GitInstallInvalidAgent = (String, Option<AgentType>, String);
@@ -1723,28 +1765,94 @@ pub async fn git_install_skills(
 		let mut installed = false;
 		let mut copied_any = false;
 
-		for (target_dir, agents) in &dir_groups {
-			match install_git_skill_to_dir(&full_path, target_dir) {
-				Ok((skill_name, copied)) => {
-					installed = true;
-					copied_any |= copied;
-					for (agent_str, _) in agents {
-						results.push(GitInstallResultEntry {
-							name: skill_name.clone(),
-							agent: agent_str.clone(),
-							success: true,
-							error: None,
-						});
-					}
-				}
-				Err(e) => {
+		if req.universal.unwrap_or(false) {
+			// Universal layout must follow the RESOLVED scope, not the mere
+			// presence of project_root: global → ~/.agents/skills, project →
+			// <root>/.agents/skills (matches the per-agent target dirs, which are
+			// resolved by `resource_scope`).
+			let canonical_project_root = match resource_scope {
+				ResourceScope::ProjectOnly => project_root.as_deref(),
+				_ => None,
+			};
+			let Some(canonical_skills_dir) =
+				aghub_core::skills::install_layout::universal_canonical_dir(
+					canonical_project_root,
+				)
+			else {
+				for agents in dir_groups.values() {
 					for (agent_str, _) in agents {
 						results.push(GitInstallResultEntry {
 							name: skill_path.clone(),
 							agent: agent_str.clone(),
 							success: false,
-							error: Some(e.body.error.clone()),
+							error: Some(
+								"Cannot resolve .agents canonical directory"
+									.to_string(),
+							),
 						});
+					}
+				}
+				continue;
+			};
+			let target_dirs: Vec<std::path::PathBuf> =
+				dir_groups.keys().cloned().collect();
+			match install_git_skill_universal(
+				&full_path,
+				&target_dirs,
+				&canonical_skills_dir,
+				matches!(resource_scope, ResourceScope::ProjectOnly),
+			) {
+				Ok((skill_name, wrote_master)) => {
+					installed = true;
+					copied_any |= wrote_master;
+					for agents in dir_groups.values() {
+						for (agent_str, _) in agents {
+							results.push(GitInstallResultEntry {
+								name: skill_name.clone(),
+								agent: agent_str.clone(),
+								success: true,
+								error: None,
+							});
+						}
+					}
+				}
+				Err(e) => {
+					for agents in dir_groups.values() {
+						for (agent_str, _) in agents {
+							results.push(GitInstallResultEntry {
+								name: skill_path.clone(),
+								agent: agent_str.clone(),
+								success: false,
+								error: Some(e.body.error.clone()),
+							});
+						}
+					}
+				}
+			}
+		} else {
+			for (target_dir, agents) in &dir_groups {
+				match install_git_skill_to_dir(&full_path, target_dir) {
+					Ok((skill_name, copied)) => {
+						installed = true;
+						copied_any |= copied;
+						for (agent_str, _) in agents {
+							results.push(GitInstallResultEntry {
+								name: skill_name.clone(),
+								agent: agent_str.clone(),
+								success: true,
+								error: None,
+							});
+						}
+					}
+					Err(e) => {
+						for (agent_str, _) in agents {
+							results.push(GitInstallResultEntry {
+								name: skill_path.clone(),
+								agent: agent_str.clone(),
+								success: false,
+								error: Some(e.body.error.clone()),
+							});
+						}
 					}
 				}
 			}

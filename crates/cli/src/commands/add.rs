@@ -23,16 +23,22 @@ pub fn execute(
 	author: Option<String>,
 	version: Option<String>,
 	tools: Vec<String>,
+	universal: bool,
 ) -> Result<()> {
 	match resource {
 		ResourceType::Skills => {
 			if let Some(from_path) = from {
 				// Import skill from path (directory, .skill file, or SKILL.md)
 				eprintln_verbose!(
-					"Importing skill from: {}",
-					from_path.display()
+					"Importing skill from: {}{}",
+					from_path.display(),
+					if universal { " (universal layout)" } else { "" }
 				);
-				let mut skill = manager.add_skill_from_path(&from_path)?;
+				let mut skill = if universal {
+					manager.add_skill_from_path_universal(&from_path)?
+				} else {
+					manager.add_skill_from_path(&from_path)?
+				};
 
 				// If explicit name provided, update the skill name
 				if let Some(custom_name) = name {
@@ -43,7 +49,11 @@ pub fn execute(
 					);
 					manager.remove_skill(&skill.name)?;
 					skill.name = custom_name;
-					manager.add_skill(skill.clone())?;
+					if universal {
+						manager.add_skill_universal(skill.clone())?;
+					} else {
+						manager.add_skill(skill.clone())?;
+					}
 				}
 
 				eprintln_verbose!("Skill '{}' added successfully", skill.name);
@@ -59,7 +69,11 @@ pub fn execute(
 				skill.author = author;
 				skill.version = version;
 				skill.tools = tools;
-				manager.add_skill(skill.clone())?;
+				if universal {
+					manager.add_skill_universal(skill.clone())?;
+				} else {
+					manager.add_skill(skill.clone())?;
+				}
 				eprintln_verbose!("Skill added successfully");
 				println!("{}", serde_json::to_string_pretty(&skill)?);
 			}

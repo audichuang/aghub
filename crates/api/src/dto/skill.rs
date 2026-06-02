@@ -272,6 +272,13 @@ pub struct GitInstallRequest {
 	pub agents: Vec<String>,
 	pub scope: String,
 	pub project_root: Option<String>,
+	/// When `Some(true)`, install in *universal* layout: write the real skill
+	/// once into `.agents/skills/<name>` and symlink each selected agent's skills
+	/// dir to it (npx-style). When `None`/`false` (default), each selected agent
+	/// gets an independent copy and `.agents` is never touched (isolation mode).
+	#[serde(default)]
+	#[ts(optional)]
+	pub universal: Option<bool>,
 }
 
 /// Request to sync (update in-place) an existing skill from a git session.

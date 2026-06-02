@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Aghub is a CLI tool (`aghub-cli`) for managing AI coding agent configurations. It supports 22 agents (Claude, OpenCode, Cursor, Windsurf, Copilot, RooCode, Cline, Gemini, Codex, Zed, Warp, and more), handling MCP servers and skills through a unified interface. Full agent list: `crates/core/src/models.rs` or `aghub-cli --help`.
+Aghub manages AI coding agent configurations across **23 agents** (Claude, OpenCode, Cursor, Windsurf, Copilot, RooCode, Cline, Gemini, Codex, Zed, Warp, and more), handling MCP servers, skills, and sub-agents through a unified interface. It is delivered through three surfaces: a CLI (`aghub-cli`), a Rocket HTTP API (`aghub-api`), and a Tauri desktop app (`crates/desktop`). It also manages inference providers, Claude Code plugins, and SSH-based remote deployment. Full agent list: the `AgentType` enum in `crates/agents/src/models.rs` (NOT `crates/core`) or `aghub-cli --help`.
+
+> **Features in flight:** see `docs/specs/` for active designs — e.g. `2026-06-02-sources-and-universal-install.md` (the "Sources" management page + `.agents`-symlink "universal" install mode) and `2026-05-31-skill-management-improvements.md`.
 
 ## Common Commands
 
@@ -37,12 +39,22 @@ Run a single test: `cargo test --package aghub-core test_name -- --exact`
 
 ### Workspace Structure
 
-- **`crates/core`** (`aghub-core`): Core library with models, config management, and agent adapters
+The workspace has **13 Rust member crates** (root `Cargo.toml`, version `1.1.1`) plus the desktop frontend. Dependency direction: `agents` → `core` → `cli`/`api`/`desktop`; the tool crates are used laterally.
+
+- **`crates/agents`** (`aghub-agents`): **The single source of truth for agent-specific behavior** — `AgentDescriptor` constants, the `AgentType` enum + normalized models (`AgentConfig`, `Skill`, `McpServer`), and the `format/` serializers. `aghub-core` re-exports this crate.
+- **`crates/core`** (`aghub-core`): Orchestration layer — re-exports `aghub-agents` and adds `ConfigManager`, the `registry`, adapter dispatch (`adapter.rs`/`adapters/`), skills discovery, and cross-agent `transfer`.
 - **`crates/cli`** (`aghub`): CLI binary (`aghub-cli`) with clap-based commands
-- **`crates/skills-sh`**: HTTP API client for skills.sh registry (`SKILLS_API_URL` env var overrides base URL)
-- **`crates/skills-ref`** (`skills-ref`): Parses SKILL.md files, validates `SkillProperties`, generates XML prompt blocks via `to_prompt()`
-- **`crates/skill`** (`skill`): Extends skills-ref with `.skill` zip format; `parse()` auto-detects directory/zip/SKILL.md. Called by `manager.add_skill_from_path()`
-- **`crates/api`** (`aghub-api`): Rocket v0.5 HTTP API server exposing agent config operations over HTTP
+- **`crates/api`** (`aghub-api`): Rocket v0.5 HTTP API server exposing agent config operations over HTTP (~85 routes under `/api/v1/`)
+- **`crates/desktop`** (`aghub-desktop`): Tauri v2 app — React 19 + TypeScript + HeroUI v3 + Tailwind v4 (package manager: **bun**); `src-tauri/` is the Rust backend, embeds `aghub-api` on localhost. See `crates/desktop/CLAUDE.md`.
+- **`crates/skill`** (`skill`): `.skill`/zip packaging + npx-compatible lock files (global `~/.agents/.skill-lock.json` v3, project `skills-lock.json` v1); `parse()` auto-detects directory/zip/SKILL.md; `discover_repo_skills`, content hashing. Called by `manager.add_skill_from_path()`.
+- **`crates/skills-sh`** (`skills-sh`): HTTP client for the skills.sh registry (`SKILLS_API_URL` env var overrides base URL); search only.
+- **`crates/inference`** (`aghub-inference`): Inference-provider management — SQLite metadata + platform keyring for API keys; adapts to Claude/OpenCode/Codex.
+- **`crates/remote`** (`aghub-remote`): SSH remote VM management (probe → install → start `aghub-api` → log polling), `~/.ssh/config` parsing; exposed via the desktop Tauri layer (NOT the HTTP API).
+- **`crates/cc-plugins`** (`aghub-cc-plugins`): Claude Code plugin lifecycle (install/marketplace).
+- **`crates/git`** (`aghub-git`): git clone/fetch with credential injection (`fetch_ref_to_temp`, `resolve_remote_source`, `materialize_tree`).
+- **`crates/json`** (`aghub-json`), **`crates/markdown`** (`aghub-markdown`): JSON/JSONC editing + YAML frontmatter parsing helpers.
+
+> `skills-ref` is an **external git dependency** (`AkaraChen/skills-ref`), not a local crate.
 
 ### Key Design Patterns
 
@@ -57,7 +69,7 @@ Run a single test: `cargo test --package aghub-core test_name -- --exact`
 
 ### Agent-Specific Behavior
 
-Agent behavior is defined entirely in `crates/core/src/agents/<name>.rs` descriptor constants. Key notes:
+Agent behavior is defined entirely in `crates/agents/src/agents/<name>.rs` descriptor constants (NOT in `crates/core`). Key notes:
 
 - **Claude**: skills are NOT stored in JSON; discovered from `~/.claude/skills/` SKILL.md files. URL-based MCPs silently skipped on serialize.
 - **OpenCode**: uses native format with `mcp` object key (not `mcp_servers` array). SSE and StreamableHttp transports are unified as `"type": "remote"` — SSE transport identity is lost on roundtrip. Reads skills only from the universal path (no agent-specific skills dir).
@@ -69,17 +81,24 @@ Agent behavior is defined entirely in `crates/core/src/agents/<name>.rs` descrip
 ### CLI Command Surface
 
 ```
-aghub-cli [-a <agent>] [-g|--global] [-p|--project] [-v|--verbose] <command>
+aghub-cli [-a <agent>] [-g|--global] [-p|--project] [--all] [-v|--verbose] <command>
 
 Commands:
   get    <skills|mcps>               # list resources
   add    <skills|mcps>               # --name, --from PATH, --command, --url, --transport,
                                      #   --header KEY:VALUE, --env KEY=VAL, --description,
-                                     #   --author, --version, --tools
+                                     #   --author, --version, --tools,
+                                     #   --universal (skills: write a .agents master + symlink the
+                                     #     target agent; default is an isolated copy that never touches .agents)
   update <skills|mcps> <name>        # same flags as add
-  delete <skills|mcps> <name>
+  delete <skills|mcps> <name>        # --all-agents, --dry-run (default), --yes to actually remove
   enable/disable <skills|mcps> <name> # soft toggle; only meaningful for OpenCode
-  describe <skills|mcps> <name>      # JSON output for a single resource
+  describe <skills|mcps> <name>      # JSON output for a single resource (handled inline in main.rs)
+  check                              # offline: list installed skills that have updates (read-only)
+  apply-update                       # apply a locked skill update
+  prune-lock                         # drop lock entries with no on-disk skill (dry-run by default; --yes)
+  plugin <list|install|uninstall|update|enable|disable|prune|validate>  # Claude Code plugins
+  plugin marketplace <add|remove|update|list>
   interactive                        # step-by-step wizard
 ```
 
@@ -91,12 +110,13 @@ Skills are loaded from directories containing `SKILL.md` files. The adapter pars
 
 ### Adding/Removing Agents
 
-Touch all of these when adding or removing an agent:
+Touch all of these when adding or removing an agent (note: descriptors live in `crates/agents`, the registry in `crates/core`):
 
-1. `crates/core/src/agents/` — create or delete the `<name>.rs` descriptor file
-2. `crates/core/src/agents/mod.rs` — add/remove `pub mod <name>;`
-3. `crates/core/src/registry/mod.rs` — add/remove `&agents::<name>::DESCRIPTOR` from `ALL_AGENTS`
-4. `crates/core/src/models.rs` — add/remove enum variant, `ALL` array entry, `as_str()` arm, `from_str()` arm
+1. `crates/agents/src/agents/<name>.rs` — create or delete the descriptor constant (`codex` is a subdirectory, not a single `.rs` file)
+2. `crates/agents/src/agents/mod.rs` — add/remove `pub mod <name>;`
+3. `crates/agents/src/agents/factory.rs` — add/remove the dispatch arm
+4. `crates/agents/src/models.rs` — add/remove the `AgentType` enum variant, `ALL` array entry, `as_str()` arm, `from_str()` arm
+5. `crates/core/src/registry/mod.rs` — add/remove `&agents::<name>::DESCRIPTOR` from `ALL_AGENTS` (the cross-crate step that's easy to miss)
 
 ### Testing
 

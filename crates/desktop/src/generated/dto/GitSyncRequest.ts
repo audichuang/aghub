@@ -19,7 +19,7 @@ export type GitSyncRequest = {
 	 */
 	skill_path: string;
 	/**
-	 * Tilde-prefixed `source_path` values of every installation to replace.
+	 * Legacy client hint. The server derives replacement targets by `name`.
 	 */
 	source_paths: Array<string>;
 };
