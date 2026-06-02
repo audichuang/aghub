@@ -109,15 +109,18 @@ jobs:
               run: |
                   VERSION="${VERSION#v}"
                   echo "Syncing version across files: $VERSION"
-                  if [[ "${{ matrix.os }}" == "macos"* ]]; then
-                    sed -i '' "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-                    sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/package.json
-                    sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json || true
-                  else
-                    sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-                    sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/package.json
-                    sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json || true
-                  fi
+                  case "${{ matrix.os }}" in
+                    macos*)
+                      sed -i '' "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+                      sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/package.json
+                      sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json || true
+                      ;;
+                    *)
+                      sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+                      sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/package.json
+                      sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json || true
+                      ;;
+                  esac
 
             - name: Build Tauri
               # TODO: pin to a specific tauri-action release for supply-chain integrity
@@ -146,16 +149,16 @@ jobs:
               run: |
                   if [ "${{ matrix.target }}" = "x86_64-pc-windows-msvc" ]; then
                       find target -type f -name "*setup.exe" -exec cp {} aghub-windows-setup.exe \;
-                      echo "GENERIC_ASSET=aghub-windows-setup.exe" >> $GITHUB_ENV
+                      echo "GENERIC_ASSET=aghub-windows-setup.exe" >> "$GITHUB_ENV"
                   elif [ "${{ matrix.target }}" = "x86_64-unknown-linux-gnu" ]; then
                       find target -type f -name "*.AppImage" -exec cp {} aghub-linux.AppImage \;
-                      echo "GENERIC_ASSET=aghub-linux.AppImage" >> $GITHUB_ENV
+                      echo "GENERIC_ASSET=aghub-linux.AppImage" >> "$GITHUB_ENV"
                   elif [ "${{ matrix.target }}" = "x86_64-apple-darwin" ]; then
                       find target -type f -name "*.dmg" -exec cp {} aghub_mac_intel.dmg \;
-                      echo "GENERIC_ASSET=aghub_mac_intel.dmg" >> $GITHUB_ENV
+                      echo "GENERIC_ASSET=aghub_mac_intel.dmg" >> "$GITHUB_ENV"
                   elif [ "${{ matrix.target }}" = "aarch64-apple-darwin" ]; then
                       find target -type f -name "*.dmg" -exec cp {} aghub_mac_arm.dmg \;
-                      echo "GENERIC_ASSET=aghub_mac_arm.dmg" >> $GITHUB_ENV
+                      echo "GENERIC_ASSET=aghub_mac_arm.dmg" >> "$GITHUB_ENV"
                   fi
 
             - name: Upload Generic Release Asset
@@ -208,11 +211,14 @@ jobs:
                   VERSION: ${{ github.event.inputs.version || github.ref_name }}
               run: |
                   VERSION="${VERSION#v}"
-                  if [[ "${{ matrix.os }}" == "macos"* ]]; then
-                    sed -i '' "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-                  else
-                    sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
-                  fi
+                  case "${{ matrix.os }}" in
+                    macos*)
+                      sed -i '' "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+                      ;;
+                    *)
+                      sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
+                      ;;
+                  esac
 
             - name: Build CLI
               run: cargo build --release -p aghub-cli --target ${{ matrix.target }}

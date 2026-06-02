@@ -91,7 +91,8 @@ jobs:
         if: |
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
-            needs.changes.outputs.docs == 'true'
+            needs.changes.outputs.docs == 'true' ||
+            needs.changes.outputs.workflows == 'true'
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
@@ -116,7 +117,7 @@ jobs:
     lint-rust:
         name: Rust Lint (${{ matrix.os }})
         needs: changes
-        if: needs.changes.outputs.rust == 'true'
+        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -169,7 +170,7 @@ jobs:
     lint-frontend:
         name: Frontend Lint
         needs: changes
-        if: needs.changes.outputs.desktop == 'true'
+        if: needs.changes.outputs.desktop == 'true' || needs.changes.outputs.workflows == 'true'
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
@@ -188,7 +189,10 @@ jobs:
     test:
         name: Test (${{ matrix.os }})
         needs: changes
-        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop == 'true'
+        if: |
+            needs.changes.outputs.rust == 'true' ||
+            needs.changes.outputs.desktop == 'true' ||
+            needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false
@@ -245,7 +249,10 @@ jobs:
     build:
         name: Build (${{ matrix.os }})
         needs: changes
-        if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.desktop == 'true'
+        if: |
+            needs.changes.outputs.rust == 'true' ||
+            needs.changes.outputs.desktop == 'true' ||
+            needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
         strategy:
             fail-fast: false

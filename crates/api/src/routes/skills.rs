@@ -2162,6 +2162,7 @@ mod tests {
 		result
 	}
 
+	#[cfg(unix)]
 	fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 		rocket::tokio::runtime::Builder::new_current_thread()
 			.enable_all()
