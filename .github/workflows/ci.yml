@@ -72,9 +72,12 @@ jobs:
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
-            - uses: raven-actions/actionlint@v1
-              with:
-                  flags: -color
+            - name: Download actionlint
+              shell: bash
+              run: bash <(curl -sSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+            - name: Run actionlint
+              shell: bash
+              run: actionlint -color
 
     # Format check (rustfmt + prettier)
     format:
@@ -141,6 +144,12 @@ jobs:
               with:
                   shared-key: ${{ runner.os }}-lint
                   cache-on-failure: true
+            - name: Install Linux system dependencies (GTK/webkit for Tauri)
+              if: matrix.os == 'ubuntu-latest'
+              shell: bash
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Install root deps (frozen)
               run: bun install --frozen-lockfile
             - name: Install desktop deps (frozen)
@@ -205,6 +214,12 @@ jobs:
               with:
                   shared-key: ${{ runner.os }}-test
                   cache-on-failure: true
+            - name: Install Linux system dependencies (GTK/webkit for Tauri)
+              if: matrix.os == 'ubuntu-latest'
+              shell: bash
+              run: |
+                  sudo apt-get update
+                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
             - name: Cargo fetch
               run: cargo fetch
             - name: Install root deps (frozen)
@@ -257,6 +272,7 @@ jobs:
             - name: Build CLI (release)
               run: just build
             - name: Smoke test CLI binary (verifies cross-platform build works)
+              shell: bash
               run: |
                   if [ "$RUNNER_OS" = "Windows" ]; then
                       ./target/release/aghub-cli.exe --version
