@@ -311,11 +311,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const updateProjectRoot =
 		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
 	const shouldCheckOrphans =
-		!isLoading &&
-		!isFetching &&
-		Boolean(data) &&
-		!data?.needsCredential &&
-		!hasVisibleSkills;
+		!isLoading && !isFetching && Boolean(data) && !data?.needsCredential;
 	const installAgentIds = useMemo(
 		() =>
 			availableAgents
@@ -356,6 +352,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			}),
 		enabled: shouldCheckOrphans,
 	});
+	const orphanLockCount = prunePreviewQuery.data?.pruned.length ?? 0;
 
 	const pruneLockMutation = useMutation({
 		mutationFn: () =>
@@ -683,11 +680,17 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 								</ToggleButton>
 							</ToggleButtonGroup>
 						</div>
+						{hasVisibleSkills && orphanLockCount > 0 && (
+							<SourceOrphanLockAlert
+								prunedCount={orphanLockCount}
+								isChecking={prunePreviewQuery.isFetching}
+								isCleaning={pruneLockMutation.isPending}
+								onClean={() => pruneLockMutation.mutate()}
+							/>
+						)}
 						{!hasVisibleSkills && (
 							<SourceEmptyState
-								prunedCount={
-									prunePreviewQuery.data?.pruned.length ?? 0
-								}
+								prunedCount={orphanLockCount}
 								isChecking={prunePreviewQuery.isFetching}
 								isCleaning={pruneLockMutation.isPending}
 								hasError={prunePreviewQuery.isError}
@@ -888,6 +891,49 @@ interface SourceEmptyStateProps {
 	onRetry: () => void;
 }
 
+interface SourceOrphanLockAlertProps {
+	prunedCount: number;
+	isChecking: boolean;
+	isCleaning: boolean;
+	onClean: () => void;
+}
+
+function SourceOrphanLockAlert({
+	prunedCount,
+	isChecking,
+	isCleaning,
+	onClean,
+}: SourceOrphanLockAlertProps) {
+	const { t } = useTranslation();
+	const orphanHint =
+		prunedCount === 1
+			? t("sourceOrphanHintOne", { count: prunedCount })
+			: t("sourceOrphanHintMany", { count: prunedCount });
+
+	return (
+		<Alert status="warning">
+			<Alert.Indicator />
+			<Alert.Content>
+				<Alert.Title>{t("sourceOrphanTitle")}</Alert.Title>
+				<Alert.Description>{orphanHint}</Alert.Description>
+				<div className="mt-3">
+					<Button
+						size="sm"
+						variant="secondary"
+						isDisabled={isChecking || isCleaning}
+						onPress={onClean}
+					>
+						<TrashIcon className="size-3.5" />
+						{isCleaning
+							? t("sourceCleaningOrphans")
+							: t("sourceCleanOrphans")}
+					</Button>
+				</div>
+			</Alert.Content>
+		</Alert>
+	);
+}
+
 function SourceEmptyState({
 	prunedCount,
 	isChecking,
@@ -920,43 +966,27 @@ function SourceEmptyState({
 		);
 	}
 
+	if (hasOrphans) {
+		return (
+			<SourceOrphanLockAlert
+				prunedCount={prunedCount}
+				isChecking={isChecking}
+				isCleaning={isCleaning}
+				onClean={onClean}
+			/>
+		);
+	}
+
 	return (
 		<Alert status="warning">
 			<Alert.Indicator />
 			<Alert.Content>
-				<Alert.Title>
-					{hasOrphans
-						? t("sourceOrphanTitle")
-						: t("sourceEmptyDiffTitle")}
-				</Alert.Title>
+				<Alert.Title>{t("sourceEmptyDiffTitle")}</Alert.Title>
 				<Alert.Description>
 					{isChecking
 						? t("sourceCheckingOrphans")
-						: hasOrphans
-							? prunedCount === 1
-								? t("sourceOrphanHintOne", {
-										count: prunedCount,
-									})
-								: t("sourceOrphanHintMany", {
-										count: prunedCount,
-									})
-							: t("sourceEmptyDiffHint")}
+						: t("sourceEmptyDiffHint")}
 				</Alert.Description>
-				{hasOrphans && (
-					<div className="mt-3">
-						<Button
-							size="sm"
-							variant="secondary"
-							isDisabled={isChecking || isCleaning}
-							onPress={onClean}
-						>
-							<TrashIcon className="size-3.5" />
-							{isCleaning
-								? t("sourceCleaningOrphans")
-								: t("sourceCleanOrphans")}
-						</Button>
-					</div>
-				)}
 			</Alert.Content>
 		</Alert>
 	);
