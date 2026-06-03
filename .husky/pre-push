@@ -1,6 +1,8 @@
 #!/usr/bin/env sh
 set -e
 
+export PATH="$HOME/.cargo/bin:$PATH"
+
 echo "Running format checks..."
 cargo fmt --all -- --check
 bun run format:check
