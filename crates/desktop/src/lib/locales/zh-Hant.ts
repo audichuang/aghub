@@ -417,6 +417,13 @@ export default {
 	onboardingStepProjectsTitle: "專案",
 	onboardingStepProjectsDescription:
 		"將 MCP 服務和技能限定到單一儲存庫。專案設定與全域設定完全隔離。",
+	settingsAutostartHeading: "開機自動啟動",
+	settingsAutostartDescription:
+		"在 Windows 開機時自動啟動 aghub，並保持在系統托盤可用。",
+	settingsAutostartToggleLabel: "Windows 開機時啟動 aghub",
+	settingsAutostartEnabled: "已啟用開機自動啟動",
+	settingsAutostartDisabled: "已關閉開機自動啟動",
+	settingsAutostartError: "更新開機自動啟動失敗",
 	onboardingSkip: "跳過",
 	onboardingBack: "返回",
 	onboardingNext: "下一步",

@@ -438,6 +438,13 @@ export default {
 	onboardingStepProjectsTitle: "Projects",
 	onboardingStepProjectsDescription:
 		"Scope MCP servers and skills to individual repositories. Keep project configs isolated from your global setup.",
+	settingsAutostartHeading: "Launch at startup",
+	settingsAutostartDescription:
+		"Start aghub automatically on Windows and keep it available from the system tray.",
+	settingsAutostartToggleLabel: "Launch aghub at Windows startup",
+	settingsAutostartEnabled: "Startup launch enabled",
+	settingsAutostartDisabled: "Startup launch disabled",
+	settingsAutostartError: "Failed to update startup launch",
 	onboardingSkip: "Skip",
 	onboardingBack: "Back",
 	onboardingNext: "Next",

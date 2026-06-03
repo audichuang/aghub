@@ -1,8 +1,8 @@
 use crate::commands::{
 	cleanup_all_remotes, clear_log_files, connect_remote, disconnect_remote,
 	export_diagnostic_logs, get_log_dir_path, get_log_entries, get_log_stats,
-	list_remote_directories, list_ssh_config_hosts, remote_status,
-	start_server, test_connection, RemoteState,
+	list_remote_directories, list_ssh_config_hosts, minimize_to_tray,
+	remote_status, start_server, test_connection, RemoteState,
 };
 use log::info;
 use tauri::{Manager, WebviewWindow};
@@ -61,6 +61,99 @@ fn focus_main_window(window: &WebviewWindow) {
 	let _ = window.show();
 	let _ = window.unminimize();
 	let _ = window.set_focus();
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+struct TrayText {
+	app_name: &'static str,
+	show: &'static str,
+	quit: &'static str,
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn localized_tray_text() -> TrayText {
+	let locale = sys_locale::get_locale()
+		.unwrap_or_default()
+		.replace('_', "-")
+		.to_ascii_lowercase();
+
+	if ["zh-hant", "zh-tw", "zh-hk", "zh-mo"]
+		.iter()
+		.any(|prefix| locale.starts_with(prefix))
+	{
+		return TrayText {
+			app_name: "aghub",
+			show: "顯示 aghub",
+			quit: "退出 aghub",
+		};
+	}
+
+	if locale.starts_with("zh") {
+		return TrayText {
+			app_name: "aghub",
+			show: "显示 aghub",
+			quit: "退出 aghub",
+		};
+	}
+
+	TrayText {
+		app_name: "aghub",
+		show: "Show aghub",
+		quit: "Quit aghub",
+	}
+}
+
+#[cfg(windows)]
+fn restore_main_window(app: &tauri::AppHandle) {
+	if let Some(window) = app.get_webview_window("main") {
+		focus_main_window(&window);
+	}
+}
+
+#[cfg(windows)]
+fn setup_windows_tray(app: &mut tauri::App) -> tauri::Result<()> {
+	use tauri::{
+		menu::MenuBuilder,
+		tray::{MouseButton, TrayIconBuilder, TrayIconEvent},
+	};
+
+	const SHOW_ID: &str = "show";
+	const QUIT_ID: &str = "quit";
+
+	let text = localized_tray_text();
+	let menu = MenuBuilder::new(app)
+		.text(SHOW_ID, text.show)
+		.separator()
+		.text(QUIT_ID, text.quit)
+		.build()?;
+
+	let mut tray = TrayIconBuilder::with_id("main")
+		.menu(&menu)
+		.show_menu_on_left_click(false)
+		.tooltip(text.app_name)
+		.on_menu_event(|app, event| match event.id().as_ref() {
+			SHOW_ID => restore_main_window(app),
+			QUIT_ID => app.exit(0),
+			_ => {}
+		})
+		.on_tray_icon_event(|tray, event| {
+			if matches!(
+				event,
+				TrayIconEvent::DoubleClick {
+					button: MouseButton::Left,
+					..
+				}
+			) {
+				restore_main_window(tray.app_handle());
+			}
+		});
+
+	if let Some(icon) = app.default_window_icon().cloned() {
+		tray = tray.icon(icon);
+	}
+
+	tray.build(app)?;
+	Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -152,6 +245,23 @@ pub fn run() {
 		.plugin(tauri_plugin_opener::init())
 		.plugin(tauri_plugin_dialog::init())
 		.plugin(tauri_plugin_store::Builder::default().build())
+		.plugin(
+			tauri_plugin_autostart::Builder::new()
+				.arg("--minimized")
+				.build(),
+		)
+		.on_window_event(|window, event| {
+			#[cfg(windows)]
+			if window.label() == "main" {
+				if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+					api.prevent_close();
+					let _ = window.hide();
+				}
+			}
+
+			#[cfg(not(windows))]
+			let _ = (window, event);
+		})
 		.setup(|app| {
 			info!("aghub desktop application setup started");
 			#[cfg(desktop)]
@@ -181,6 +291,18 @@ pub fn run() {
 				}
 			}
 
+			#[cfg(windows)]
+			{
+				setup_windows_tray(app)?;
+				if std::env::args().any(|arg| arg == "--minimized") {
+					if let Some(window) =
+						app.handle().get_webview_window("main")
+					{
+						let _ = window.hide();
+					}
+				}
+			}
+
 			info!("aghub desktop setup completed");
 			Ok(())
 		})
@@ -197,6 +319,7 @@ pub fn run() {
 			connect_remote,
 			disconnect_remote,
 			remote_status,
+			minimize_to_tray,
 		])
 		.build(tauri::generate_context!())
 		.expect("error while building tauri application")

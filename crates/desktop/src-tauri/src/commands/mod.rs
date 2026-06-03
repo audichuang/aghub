@@ -1,6 +1,7 @@
 pub mod logging;
 pub mod remote;
 pub mod server;
+pub mod window;
 
 pub use logging::{
 	clear_log_files, export_diagnostic_logs, get_log_dir_path, get_log_entries,
@@ -12,3 +13,4 @@ pub use remote::{
 	test_connection, RemoteState,
 };
 pub use server::start_server;
+pub use window::minimize_to_tray;

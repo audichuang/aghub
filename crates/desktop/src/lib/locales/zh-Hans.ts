@@ -418,6 +418,13 @@ export default {
 	onboardingStepProjectsTitle: "项目",
 	onboardingStepProjectsDescription:
 		"将 MCP 服务和技能限定到单个仓库。项目配置与全局设置完全隔离。",
+	settingsAutostartHeading: "开机自启动",
+	settingsAutostartDescription:
+		"在 Windows 开机时自动启动 aghub，并保持在系统托盘可用。",
+	settingsAutostartToggleLabel: "Windows 开机时启动 aghub",
+	settingsAutostartEnabled: "已启用开机自启动",
+	settingsAutostartDisabled: "已关闭开机自启动",
+	settingsAutostartError: "更新开机自启动失败",
 	onboardingSkip: "跳过",
 	onboardingBack: "返回",
 	onboardingNext: "下一步",
