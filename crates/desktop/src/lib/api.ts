@@ -50,6 +50,8 @@ import type {
 	CCPluginOpenSkillInEditorRequest,
 	CCPluginResponse,
 	ProjectSkillLockResponse,
+	PruneLockRequest,
+	PruneLockResponse,
 	ReconcileRequest,
 	SkillResponse,
 	SkillTreeNodeResponse,
@@ -273,6 +275,9 @@ export function createApi(baseUrl: string) {
 				body: DeleteSkillByPathRequest,
 			): Promise<DeleteSkillByPathResponse> {
 				return client.delete("skills/by-path", { json: body }).json();
+			},
+			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
+				return client.post("skills/prune-lock", { json: body }).json();
 			},
 			gitScan(data: GitScanRequest): Promise<GitScanResponse> {
 				return client

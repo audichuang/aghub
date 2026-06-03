@@ -1,6 +1,7 @@
 import {
 	ArrowPathIcon,
 	CheckCircleIcon,
+	ExclamationTriangleIcon,
 	LockClosedIcon,
 	QuestionMarkCircleIcon,
 } from "@heroicons/react/24/solid";
@@ -91,6 +92,30 @@ export function SkillUpdateBadge({
 					{t("skillUpdateAvailableTooltip", {
 						current: status.current.slice(0, 8),
 						available: status.available.slice(0, 8),
+					})}
+				</Tooltip.Content>
+			</Tooltip>
+		);
+	}
+
+	if (status.status === "renamed") {
+		return (
+			<Tooltip delay={0}>
+				<Tooltip.Trigger>
+					<span className="inline-flex">
+						<Chip size="sm" variant="soft" color="default">
+							<span className="flex items-center gap-1">
+								<ExclamationTriangleIcon className="size-3 text-warning" />
+								<span className="text-xs text-warning">
+									{t("skillRenamedBadge")}
+								</span>
+							</span>
+						</Chip>
+					</span>
+				</Tooltip.Trigger>
+				<Tooltip.Content>
+					{t("skillRenamedTooltip", {
+						newName: status.newName,
 					})}
 				</Tooltip.Content>
 			</Tooltip>

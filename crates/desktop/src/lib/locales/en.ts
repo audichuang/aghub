@@ -404,6 +404,9 @@ export default {
 	skillUpdateAvailableBadge: "Update available",
 	skillUpdateAvailableTooltip:
 		"Source changed: {{current}} → {{available}}. Sync to update.",
+	skillRenamedBadge: "Renamed",
+	skillRenamedTooltip:
+		"Source renamed this skill to {{newName}}. Delete the old skill and install the renamed skill.",
 	skillUncheckable: "Can't check",
 	skillUncheckableAuth: "Can't check: the source needs a credential.",
 	skillUncheckableNetwork: "Can't check: the source is unreachable.",
@@ -1039,21 +1042,54 @@ export default {
 	needsCredentialHint:
 		"This source is private and no credential is available. Bind a credential to check it.",
 	checkingSource: "Checking source…",
+	sourceEmptyDiffTitle: "Nothing to show",
+	sourceEmptyDiffHint:
+		"This source cannot be compared as a repository, or it has no installable skills to display.",
+	sourcePrunePreviewErrorTitle: "Couldn't check stale lock entries.",
+	sourcePrunePreviewErrorHint:
+		"There was an error while checking for stale lock entries. Retry to scan this source.",
+	sourceCheckingOrphans: "Checking stale lock entries...",
+	sourceOrphanTitle: "Stale lock entries found",
+	sourceOrphanHintOne:
+		"Found 1 stale lock entry in this scope. Cleaning removes lock metadata only.",
+	sourceOrphanHintMany:
+		"Found {{count}} stale lock entries in this scope. Cleaning removes lock metadata only.",
+	sourceCleanOrphans: "Clean Up",
+	sourceCleaningOrphans: "Cleaning...",
+	sourceOrphansCleanedOne: "Cleaned 1 stale lock entry.",
+	sourceOrphansCleanedMany: "Cleaned {{count}} stale lock entries.",
+	sourceOrphansCleanedZero:
+		"Already clean — no stale lock entries to remove.",
+	sourcePruneFailed: "Couldn't clean stale lock entries.",
 	sourceStateNotInstalled: "New (not installed)",
 	sourceStateOutdated: "Update available",
+	sourceStateRenamed: "Renamed",
 	sourceStateCurrent: "Installed (latest)",
 	sourceStateUncheckable: "Uncheckable",
+	sourceRenamedHint:
+		"Installed as {{oldName}}. Delete the old skill, then install {{newName}}.",
+	sourceRenamedDeleteOld: "Delete old",
+	sourceRenamedDeleting: "Deleting...",
+	sourceRenamedCopyInstall: "Copy install",
+	sourceRenamedCopying: "Copying...",
+	sourceRenamedDeleted: "Deleted `{{oldName}}`.",
+	sourceRenamedDeleteFailed: "Failed to delete `{{oldName}}`.",
+	sourceRenamedInstallCommandCopied:
+		"Copied command. Run: aghub-cli install `{{newName}}`.",
+	sourceCopyCommandFailed: "Failed to copy install command.",
 	importFromThisSource: "Import from this source",
 	sourceUpdateSkill: "Update",
 	sourceUpdateAll: "Update all",
 	sourceUpdating: "Updating...",
 	sourceUpdatesApplied: "Updated {{count}} skills.",
-	sourceUpdateSomeFailed: "Couldn't update {{count}} skills.",
+	sourceUpdateSomeFailedOne: "Couldn't update 1 skill.",
+	sourceUpdateSomeFailedMany: "Couldn't update {{count}} skills.",
 	sourceInstallSkill: "Install",
 	sourceInstallAll: "Install all",
 	sourceInstalling: "Installing...",
 	sourceInstalled: "Installed {{count}} skills.",
-	sourceInstallSomeFailed: "Couldn't install {{count}} targets.",
+	sourceInstallSomeFailedOne: "Couldn't install 1 target.",
+	sourceInstallSomeFailedMany: "Couldn't install {{count}} targets.",
 	sourceInstallFailed: "Failed to install skill.",
 	sourceInstallNoAgents:
 		"No available agents can install skills in this scope.",

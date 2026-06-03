@@ -32,6 +32,10 @@ export const queryKeys = {
 			project: (projectPath?: string) =>
 				["skills", "lock", "project", projectPath ?? null] as const,
 		},
+		pruneLock: (
+			scope: "global" | "project" | "all" = "global",
+			projectRoot?: string | null,
+		) => ["skills", "prune-lock", scope, projectRoot ?? null] as const,
 		sources: {
 			all: () => ["skills", "sources"] as const,
 			list: (

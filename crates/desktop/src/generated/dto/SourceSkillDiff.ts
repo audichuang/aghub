@@ -14,9 +14,14 @@ export type SourceSkillDiff = {
 	author?: string;
 	/**
 	 * One of: `notInstalled`, `installedCurrent`, `installedOutdated`,
-	 * `uncheckable`.
+	 * `renamed`, `uncheckable`.
 	 */
 	state: string;
+	/**
+	 * Previous lock key when the upstream skill at the same `skillPath` now has
+	 * a different `name`.
+	 */
+	previousName?: string;
 	/**
 	 * For `uncheckable`: redacted reason, aligned with
 	 * `SkillUpdateStatusResponse` (`auth`/`network`/`local`/`ssh`/
