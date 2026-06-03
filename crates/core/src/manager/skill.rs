@@ -9,6 +9,16 @@ use skill::sanitize::sanitize_name;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Shared preparation for the two universal-install entry points
+/// (`add_skill_universal` / `add_skill_from_path_universal`): resolves the
+/// `.agents` canonical directory plus the current agent's symlink target.
+struct UniversalPrep {
+	agent_name: String,
+	agent_write_dir: Option<PathBuf>,
+	canonical_dir: PathBuf,
+	use_relative: bool,
+}
+
 /// Resolve a source_path string (potentially with `~/` prefix) to an absolute PathBuf
 fn resolve_source_path(sp: &str) -> PathBuf {
 	if let Some(stripped) = sp.strip_prefix("~/") {
@@ -19,25 +29,6 @@ fn resolve_source_path(sp: &str) -> PathBuf {
 		}
 	} else {
 		PathBuf::from(sp)
-	}
-}
-
-/// Return the directory that should be treated as the skill source root.
-///
-/// For universal-mode installs the canonical is expected to contain the full
-/// skill tree (SKILL.md + assets + scripts …). If `path` points at the
-/// `SKILL.md` file itself we use its parent; otherwise `path` is already
-/// a directory and is returned directly.
-fn skill_source_root(path: &Path) -> PathBuf {
-	if path
-		.file_name()
-		.is_some_and(|n| n == std::ffi::OsStr::new("SKILL.md"))
-	{
-		path.parent()
-			.map(|p| p.to_path_buf())
-			.unwrap_or_else(|| path.to_path_buf())
-	} else {
-		path.to_path_buf()
 	}
 }
 
@@ -159,24 +150,12 @@ impl ConfigManager {
 	/// avoids silently clobbering edits to the canonical. The per-agent
 	/// symlink is still created (idempotently).
 	pub fn add_skill_universal(&mut self, skill: Skill) -> Result<()> {
-		let agent_name = self.adapter.name().to_string();
-		let agent_write_dir = self.target_skills_dir();
-		let project_root_for_canonical = match self.write_scope {
-			crate::models::ResourceScope::ProjectOnly => {
-				self.project_root.clone()
-			}
-			_ => None,
-		};
-		let canonical_dir =
-			crate::skills::install_layout::universal_canonical_dir(
-				project_root_for_canonical.as_deref(),
-			)
-			.ok_or_else(|| {
-				ConfigError::InvalidConfig(
-					"Cannot resolve .agents canonical skills directory".into(),
-				)
-			})?;
-		let use_relative = project_root_for_canonical.is_some();
+		let UniversalPrep {
+			agent_name,
+			agent_write_dir,
+			canonical_dir,
+			use_relative,
+		} = self.universal_install_prep()?;
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -532,24 +511,12 @@ impl ConfigManager {
 		})?;
 		let skill = convert_skill(skill_pkg);
 
-		let agent_name = self.adapter.name().to_string();
-		let agent_write_dir = self.target_skills_dir();
-		let project_root_for_canonical = match self.write_scope {
-			crate::models::ResourceScope::ProjectOnly => {
-				self.project_root.clone()
-			}
-			_ => None,
-		};
-		let canonical_dir =
-			crate::skills::install_layout::universal_canonical_dir(
-				project_root_for_canonical.as_deref(),
-			)
-			.ok_or_else(|| {
-				ConfigError::InvalidConfig(
-					"Cannot resolve .agents canonical skills directory".into(),
-				)
-			})?;
-		let use_relative = project_root_for_canonical.is_some();
+		let UniversalPrep {
+			agent_name,
+			agent_write_dir,
+			canonical_dir,
+			use_relative,
+		} = self.universal_install_prep()?;
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -566,7 +533,7 @@ impl ConfigManager {
 		// `install_universal` only copies source -> canonical when canonical
 		// is absent, so a pre-existing master is preserved (idempotent across
 		// multi-agent installs of the same skill).
-		let source_root = skill_source_root(path);
+		let source_root = crate::skills::skill_source_root(path);
 		let symlink_dirs: Vec<PathBuf> = match &agent_write_dir {
 			Some(d) if d.as_path() != canonical_dir.as_path() => {
 				vec![d.clone()]
@@ -607,6 +574,30 @@ impl ConfigManager {
 	fn target_skills_dir(&self) -> Option<PathBuf> {
 		self.adapter
 			.target_skills_dir(self.project_root.as_deref(), self.scope)
+	}
+
+	fn universal_install_prep(&self) -> Result<UniversalPrep> {
+		let project_root_for_canonical = match self.write_scope {
+			crate::models::ResourceScope::ProjectOnly => {
+				self.project_root.clone()
+			}
+			_ => None,
+		};
+		let canonical_dir =
+			crate::skills::install_layout::universal_canonical_dir(
+				project_root_for_canonical.as_deref(),
+			)
+			.ok_or_else(|| {
+				ConfigError::InvalidConfig(
+					"Cannot resolve .agents canonical skills directory".into(),
+				)
+			})?;
+		Ok(UniversalPrep {
+			agent_name: self.adapter.name().to_string(),
+			agent_write_dir: self.target_skills_dir(),
+			use_relative: project_root_for_canonical.is_some(),
+			canonical_dir,
+		})
 	}
 }
 
@@ -1142,24 +1133,5 @@ mod tests {
 				.any(|s| s.name == "shared-skill"),
 			"Cursor should discover shared-skill from .agents/skills/ on load"
 		);
-	}
-
-	// -----------------------------------------------------------------------
-	// Unit test for the skill_source_root helper
-	// -----------------------------------------------------------------------
-
-	#[test]
-	fn skill_source_root_resolves_skill_md_to_parent() {
-		let md = std::path::PathBuf::from("/tmp/my-skill/SKILL.md");
-		assert_eq!(
-			skill_source_root(&md),
-			std::path::PathBuf::from("/tmp/my-skill")
-		);
-	}
-
-	#[test]
-	fn skill_source_root_passes_through_directory() {
-		let dir = std::path::PathBuf::from("/tmp/my-skill");
-		assert_eq!(skill_source_root(&dir), dir);
 	}
 }
