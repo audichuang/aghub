@@ -968,9 +968,11 @@ mod tests {
 	/// Fetcher stub that returns a pre-built local directory as if it were
 	/// the upstream checkout. Used by the rename-guard integration test to
 	/// exercise the apply path without a real network call.
+	#[cfg(unix)]
 	struct LocalRepoFetcher {
 		root: PathBuf,
 	}
+	#[cfg(unix)]
 	impl Fetcher for LocalRepoFetcher {
 		fn fetch(
 			&self,
