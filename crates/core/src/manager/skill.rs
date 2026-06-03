@@ -22,37 +22,67 @@ fn resolve_source_path(sp: &str) -> PathBuf {
 	}
 }
 
+/// Return the directory that should be treated as the skill source root.
+///
+/// For universal-mode installs the canonical is expected to contain the full
+/// skill tree (SKILL.md + assets + scripts …). If `path` points at the
+/// `SKILL.md` file itself we use its parent; otherwise `path` is already
+/// a directory and is returned directly.
+fn skill_source_root(path: &Path) -> PathBuf {
+	if path
+		.file_name()
+		.is_some_and(|n| n == std::ffi::OsStr::new("SKILL.md"))
+	{
+		path.parent()
+			.map(|p| p.to_path_buf())
+			.unwrap_or_else(|| path.to_path_buf())
+	} else {
+		path.to_path_buf()
+	}
+}
+
 /// Remove a skill's file or directory from disk.
 ///
-/// Handles three cases:
-/// 1. Symlink — only unlink the symlink directory, leave the target intact
-/// 2. Named directory (e.g. `skills/my-skill/SKILL.md`) — remove entire dir
-/// 3. Standalone file — remove just the file
+/// `path` is the SKILL.md location resolved from `source_path`:
+/// - Copy layout: `path` is `<target_dir>/<safe_name>/SKILL.md` (a real file).
+/// - Universal layout: `path` is the canonical's SKILL.md (e.g.
+///   `<project>/.agents/skills/<safe_name>/SKILL.md`); the per-agent symlink
+///   that needs to be unlinked lives at `<target_dir>/<safe_name>`.
+///
+/// For universal skills we intentionally leave the canonical master intact
+/// (other agents or `npx skills` may still reference it). Full layout-aware
+/// removal of the canonical goes via
+/// [`ConfigManager::remove_skill_planned`] with `all_agents = true`.
 fn remove_skill_path(
 	path: &Path,
 	safe_name: &str,
 	is_symlink: bool,
+	target_dir: Option<&Path>,
 ) -> Result<()> {
 	if is_symlink {
-		let Some(parent) = path.parent() else {
-			return Ok(());
-		};
-		let is_link = parent
-			.symlink_metadata()
-			.map(|m| m.file_type().is_symlink())
-			.unwrap_or(false);
-		if is_link {
-			std::fs::remove_file(parent).map_err(|e| {
-				ConfigError::Io(std::io::Error::new(
-					e.kind(),
-					format!(
-						"Failed to remove symlink '{}': {}",
-						parent.display(),
-						e
-					),
-				))
-			})?;
+		// Universal layout: the symlink at `<target_dir>/<safe_name>` is what
+		// should disappear. `path.parent()` is the canonical dir (a real
+		// directory), not a link, so unlink via the target_dir-resolved path.
+		if let Some(target) = target_dir {
+			let link = target.join(safe_name);
+			let needs_unlink = std::fs::symlink_metadata(&link)
+				.map(|m| m.file_type().is_symlink())
+				.unwrap_or(false);
+			if needs_unlink {
+				std::fs::remove_file(&link).map_err(|e| {
+					ConfigError::Io(std::io::Error::new(
+						e.kind(),
+						format!(
+							"Failed to remove symlink '{}': {}",
+							link.display(),
+							e
+						),
+					))
+				})?;
+			}
 		}
+		// Idempotent: if the link is already gone (or was never created),
+		// symlink_metadata returns NotFound and we leave the canonical alone.
 		return Ok(());
 	}
 
@@ -121,6 +151,13 @@ impl ConfigManager {
 	/// it (npx-style). Sets `canonical_path` so layout-aware removal recognises
 	/// the symlink. The default [`Self::add_skill`] copy behaviour is unchanged;
 	/// callers opt in (e.g. CLI `--universal`).
+	///
+	/// If the canonical `<canonical_dir>/<safe_name>` already exists on disk
+	/// (because another agent installed the same skill, or an earlier
+	/// `--universal` call did), the existing master is **left intact** — this
+	/// mirrors the API path's `wrote_master = !canonical.exists()` rule and
+	/// avoids silently clobbering edits to the canonical. The per-agent
+	/// symlink is still created (idempotently).
 	pub fn add_skill_universal(&mut self, skill: Skill) -> Result<()> {
 		let agent_name = self.adapter.name().to_string();
 		let agent_write_dir = self.target_skills_dir();
@@ -152,8 +189,19 @@ impl ConfigManager {
 
 		let safe_name = sanitize_name(&skill.name);
 		let canonical = canonical_dir.join(&safe_name);
-		std::fs::create_dir_all(&canonical)?;
-		std::fs::write(canonical.join("SKILL.md"), format_skill(&skill, None))?;
+		if canonical.exists() {
+			warn!(
+				"canonical '{}' already exists; reusing without overwriting \
+				 SKILL.md (use `aghub update` to refresh content)",
+				canonical.display()
+			);
+		} else {
+			std::fs::create_dir_all(&canonical)?;
+			std::fs::write(
+				canonical.join("SKILL.md"),
+				format_skill(&skill, None),
+			)?;
+		}
 
 		// Symlink this agent's own skills dir to the master, unless its write dir
 		// IS the canonical dir (then the master already lives there).
@@ -318,13 +366,20 @@ impl ConfigManager {
 		let file_path = if let Some(sp) = &existing_skill.source_path {
 			Some(resolve_source_path(sp))
 		} else {
-			target_dir.map(|dir| dir.join(&safe_name).join("SKILL.md"))
+			target_dir
+				.as_ref()
+				.map(|dir| dir.join(&safe_name).join("SKILL.md"))
 		};
 		let is_symlink = existing_skill.canonical_path.is_some();
 
 		if let Some(path) = file_path {
 			if path.exists() {
-				remove_skill_path(&path, &safe_name, is_symlink)?;
+				remove_skill_path(
+					&path,
+					&safe_name,
+					is_symlink,
+					target_dir.as_deref(),
+				)?;
 			}
 		}
 
@@ -457,8 +512,12 @@ impl ConfigManager {
 	}
 
 	/// Universal-layout variant of [`Self::add_skill_from_path`]: parses the
-	/// skill then installs it via [`Self::add_skill_universal`] (`.agents` master
-	/// + per-agent symlink).
+	/// skill then installs it in `.agents/skills/<name>` (canonical) with a
+	/// per-agent symlink in this agent's skills dir. The full source tree
+	/// (`assets/`, `scripts/`, `examples/`, etc.) is copied to the canonical
+	/// — matching the API path's `install_git_skill_universal` behaviour. The
+	/// pre-fix implementation only wrote the synthesized `SKILL.md` and
+	/// silently dropped every other file the source contained.
 	pub fn add_skill_from_path_universal(
 		&mut self,
 		path: &Path,
@@ -472,7 +531,64 @@ impl ConfigManager {
 			ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
 		})?;
 		let skill = convert_skill(skill_pkg);
-		self.add_skill_universal(skill.clone())?;
+
+		let agent_name = self.adapter.name().to_string();
+		let agent_write_dir = self.target_skills_dir();
+		let project_root_for_canonical = match self.write_scope {
+			crate::models::ResourceScope::ProjectOnly => {
+				self.project_root.clone()
+			}
+			_ => None,
+		};
+		let canonical_dir =
+			crate::skills::install_layout::universal_canonical_dir(
+				project_root_for_canonical.as_deref(),
+			)
+			.ok_or_else(|| {
+				ConfigError::InvalidConfig(
+					"Cannot resolve .agents canonical skills directory".into(),
+				)
+			})?;
+		let use_relative = project_root_for_canonical.is_some();
+
+		let config = self.config_mut()?;
+		if config.skills.iter().any(|s| s.name == skill.name) {
+			return Err(ConfigError::resource_exists("skill", &skill.name));
+		}
+		info!(
+			"adding skill '{}' (universal layout, from path) for agent '{}'",
+			skill.name, agent_name
+		);
+
+		let safe_name = sanitize_name(&skill.name);
+		let canonical = canonical_dir.join(&safe_name);
+
+		// `install_universal` only copies source -> canonical when canonical
+		// is absent, so a pre-existing master is preserved (idempotent across
+		// multi-agent installs of the same skill).
+		let source_root = skill_source_root(path);
+		let symlink_dirs: Vec<PathBuf> = match &agent_write_dir {
+			Some(d) if d.as_path() != canonical_dir.as_path() => {
+				vec![d.clone()]
+			}
+			_ => Vec::new(),
+		};
+		crate::skills::install_layout::install_universal(
+			&source_root,
+			&canonical,
+			&symlink_dirs,
+			use_relative,
+		)
+		.map_err(ConfigError::Io)?;
+
+		let canonical_md =
+			canonical.join("SKILL.md").to_string_lossy().to_string();
+		let mut fs_skill = skill.clone();
+		fs_skill.source_path = Some(canonical_md.clone());
+		fs_skill.canonical_path = Some(canonical_md);
+		config.skills.push(fs_skill);
+
+		self.save_current()?;
 		Ok(skill)
 	}
 
@@ -644,5 +760,406 @@ mod tests {
 		.expect("Should produce valid YAML");
 		assert_eq!(reparsed["version"], "123");
 		assert_eq!(reparsed["author"], "true");
+	}
+
+	// -----------------------------------------------------------------------
+	// P0-K fix: remove_skill for universal mode was a no-op
+	// -----------------------------------------------------------------------
+
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_unlinks_agent_symlink_but_preserves_canonical() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		// Install a universal skill
+		let mut skill = Skill::new("rm-test");
+		skill.description = Some("test".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		let canonical = root.join(".agents/skills/rm-test/SKILL.md");
+		let link = root.join(".claude/skills/rm-test");
+		assert!(canonical.exists());
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+
+		// Remove the skill
+		mgr.remove_skill("rm-test").unwrap();
+
+		// Agent symlink should be gone
+		assert!(!link.exists());
+		// Canonical should still be there (single-agent removal keeps it)
+		assert!(canonical.exists());
+		// Config entry should be removed
+		assert!(mgr.config.as_ref().unwrap().skills.is_empty());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_universal_idempotent_when_symlink_already_gone() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("rm-idem");
+		skill.description = Some("test".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Manually remove the symlink before calling remove_skill
+		let link = root.join(".claude/skills/rm-idem");
+		assert!(link.exists());
+		std::fs::remove_file(&link).unwrap();
+		assert!(!link.exists());
+
+		// Should not error even though the symlink is already gone
+		mgr.remove_skill("rm-idem").unwrap();
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_preserves_canonical_for_multi_agent_ref() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+
+		// Claude installs first
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+		let mut skill = Skill::new("multi-ref");
+		skill.description = Some("test".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Cursor discovers the skill from .agents/skills/ on load (Cursor
+		// scans that directory). No need to install again — the canonical is
+		// shared and Cursor reads it directly.
+		let mut mgr2 = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(root),
+		);
+		mgr2.load().unwrap();
+		assert!(
+			mgr2.config
+				.as_ref()
+				.unwrap()
+				.skills
+				.iter()
+				.any(|s| s.name == "multi-ref"),
+			"Cursor should discover multi-ref from .agents/skills/ on load"
+		);
+
+		let canonical = root.join(".agents/skills/multi-ref/SKILL.md");
+		assert!(canonical.exists());
+
+		// Remove from Claude only
+		mgr.remove_skill("multi-ref").unwrap();
+
+		// Claude symlink gone, canonical preserved
+		assert!(!root.join(".claude/skills/multi-ref").exists());
+		assert!(canonical.exists());
+
+		// Cursor can still discover the skill (canonical is intact)
+		let mut mgr3 = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(root),
+		);
+		mgr3.load().unwrap();
+		assert!(
+			mgr3.config
+				.as_ref()
+				.unwrap()
+				.skills
+				.iter()
+				.any(|s| s.name == "multi-ref"),
+			"Cursor should still find multi-ref after Claude's removal"
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// P1-B fix: add_skill_universal silently overwrites existing canonical
+	// -----------------------------------------------------------------------
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_universal_does_not_overwrite_existing_canonical() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		// Manually pre-create the canonical with old content
+		let canonical = root.join(".agents/skills/preexist");
+		std::fs::create_dir_all(&canonical).unwrap();
+		std::fs::write(
+			canonical.join("SKILL.md"),
+			"---\nname: preexist\ndescription: old\n---\nOld content.\n",
+		)
+		.unwrap();
+
+		// Install a skill with the same sanitized name
+		let mut skill = Skill::new("preexist");
+		skill.description = Some("new".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// The SKILL.md should NOT have been overwritten
+		let content =
+			std::fs::read_to_string(canonical.join("SKILL.md")).unwrap();
+		assert!(
+			content.contains("Old content."),
+			"SKILL.md was overwritten: {content}"
+		);
+
+		// Symlink should still be created (idempotent)
+		let link = root.join(".claude/skills/preexist");
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_universal_fresh_install_writes_canonical() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("fresh");
+		skill.description = Some("fresh install".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		let canonical = root.join(".agents/skills/fresh/SKILL.md");
+		assert!(canonical.exists());
+		let content = std::fs::read_to_string(&canonical).unwrap();
+		assert!(content.contains("fresh install"));
+
+		let link = root.join(".claude/skills/fresh");
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+	}
+
+	// -----------------------------------------------------------------------
+	// P0-A fix: add_skill_from_path_universal dropped all non-SKILL.md assets
+	// -----------------------------------------------------------------------
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_from_path_universal_copies_full_source_tree() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		// Create a source skill with assets
+		let src = root.join("src/my-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: test\n---\nBody.\n",
+		)
+		.unwrap();
+		std::fs::create_dir_all(src.join("assets")).unwrap();
+		std::fs::write(src.join("assets/data.json"), "{}").unwrap();
+		std::fs::create_dir_all(src.join("scripts")).unwrap();
+		std::fs::write(src.join("scripts/setup.sh"), "#!/bin/sh\necho ok")
+			.unwrap();
+
+		let skill = mgr.add_skill_from_path_universal(&src).unwrap();
+		assert_eq!(skill.name, "my-skill");
+
+		// Canonical should have the full tree
+		let canonical = root.join(".agents/skills/my-skill");
+		assert!(canonical.join("SKILL.md").exists());
+		assert!(canonical.join("assets/data.json").exists());
+		assert!(canonical.join("scripts/setup.sh").exists());
+		assert_eq!(
+			std::fs::read_to_string(canonical.join("assets/data.json"))
+				.unwrap(),
+			"{}"
+		);
+
+		// Agent dir should be a symlink
+		let link = root.join(".claude/skills/my-skill");
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+
+		// Reading assets via the symlink should work
+		assert_eq!(
+			std::fs::read_to_string(link.join("assets/data.json")).unwrap(),
+			"{}"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_from_path_universal_accepts_skill_md_file() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		// Pass SKILL.md file directly (should use parent as source root)
+		let src = root.join("src/other-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: other-skill\ndescription: test\n---\n",
+		)
+		.unwrap();
+		std::fs::write(src.join("extra.txt"), "bonus").unwrap();
+
+		let skill_md = src.join("SKILL.md");
+		let skill = mgr.add_skill_from_path_universal(&skill_md).unwrap();
+		assert_eq!(skill.name, "other-skill");
+
+		// extra.txt should have been copied to canonical
+		let canonical = root.join(".agents/skills/other-skill");
+		assert!(canonical.join("extra.txt").exists());
+		assert_eq!(
+			std::fs::read_to_string(canonical.join("extra.txt")).unwrap(),
+			"bonus"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_from_path_universal_does_not_overwrite_existing_canonical() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+
+		// Pre-create canonical with old content
+		let canonical = root.join(".agents/skills/shared-skill");
+		std::fs::create_dir_all(&canonical).unwrap();
+		std::fs::write(
+			canonical.join("SKILL.md"),
+			"---\nname: shared-skill\ndescription: old\n---\nOld version.\n",
+		)
+		.unwrap();
+
+		// Source has updated content
+		let src = root.join("src/shared-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: shared-skill\ndescription: new\n---\nNew version.\n",
+		)
+		.unwrap();
+
+		// Claude installs from path — canonical already exists, should NOT
+		// be overwritten
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+		mgr.add_skill_from_path_universal(&src).unwrap();
+
+		let content =
+			std::fs::read_to_string(canonical.join("SKILL.md")).unwrap();
+		assert!(
+			content.contains("Old version."),
+			"Canonical should not be overwritten: {content}"
+		);
+
+		// Cursor discovers the skill from .agents/skills/ on load (Cursor
+		// scans that directory), confirming the canonical is intact and
+		// accessible to other agents.
+		let mut mgr2 = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(root),
+		);
+		mgr2.load().unwrap();
+		assert!(
+			mgr2.config
+				.as_ref()
+				.unwrap()
+				.skills
+				.iter()
+				.any(|s| s.name == "shared-skill"),
+			"Cursor should discover shared-skill from .agents/skills/ on load"
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// Unit test for the skill_source_root helper
+	// -----------------------------------------------------------------------
+
+	#[test]
+	fn skill_source_root_resolves_skill_md_to_parent() {
+		let md = std::path::PathBuf::from("/tmp/my-skill/SKILL.md");
+		assert_eq!(
+			skill_source_root(&md),
+			std::path::PathBuf::from("/tmp/my-skill")
+		);
+	}
+
+	#[test]
+	fn skill_source_root_passes_through_directory() {
+		let dir = std::path::PathBuf::from("/tmp/my-skill");
+		assert_eq!(skill_source_root(&dir), dir);
 	}
 }
