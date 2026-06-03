@@ -26,6 +26,11 @@ pub struct ResolvedRemoteSource {
 	pub source_type: RemoteSourceType,
 	pub source_url: String,
 	pub clone_url: String,
+	/// Lowercase host extracted from the source URL (e.g. `github.com`).
+	/// `None` for inputs where no host can be derived (e.g. `owner/repo`
+	/// shorthand that the caller already knows is GitHub-only — those resolve
+	/// to `Some("github.com")`; this is `None` only for unresolvable inputs).
+	pub host: Option<String>,
 }
 
 impl ResolvedRemoteSource {
@@ -202,6 +207,7 @@ pub fn resolve_remote_source(
 					source_type: source_type_from_host(parsed.host_str()),
 					source_url: clean_str.clone(),
 					clone_url: clean_str,
+					host: parsed.host_str().map(|h| h.to_lowercase()),
 				});
 			}
 			"github" => {
@@ -212,6 +218,7 @@ pub fn resolve_remote_source(
 					source_type: RemoteSourceType::Github,
 					source_url: clone_url.to_string(),
 					clone_url: clone_url.to_string(),
+					host: Some("github.com".to_string()),
 				});
 			}
 			_ => {}
@@ -235,6 +242,7 @@ pub fn resolve_remote_source(
 				source_type: source_type_from_host(parsed.host()),
 				source_url: source_url.clone(),
 				clone_url: source_url,
+				host: parsed.host().map(|h| h.to_lowercase()),
 			});
 		}
 	}
@@ -246,6 +254,7 @@ pub fn resolve_remote_source(
 		source_type: RemoteSourceType::Github,
 		source_url: clone_url.to_string(),
 		clone_url: clone_url.to_string(),
+		host: Some("github.com".to_string()),
 	})
 }
 
