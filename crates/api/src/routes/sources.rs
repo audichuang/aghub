@@ -376,7 +376,8 @@ fn diff_blocking(
 				installed_paths: Vec::new(),
 			}),
 			Some(entry) => {
-				let skill_dir = discovered_skill_root(&d.full_path);
+				let skill_dir =
+					aghub_core::skills::skill_source_root(&d.full_path);
 				let (state, previous_name, reason) =
 					classify_source_skill_diff(entry, &d.name, &skill_dir);
 				out.push(SourceSkillDiff {
@@ -413,19 +414,6 @@ fn classify_source_skill_diff(
 	}
 	let (state, reason) = classify_installed(entry, skill_dir);
 	(state, None, reason)
-}
-
-fn discovered_skill_root(path: &Path) -> std::path::PathBuf {
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	if is_skill_file {
-		path.parent()
-			.map(Path::to_path_buf)
-			.unwrap_or_else(|| path.to_path_buf())
-	} else {
-		path.to_path_buf()
-	}
 }
 
 fn fetch_source_lazily_auth(
@@ -630,22 +618,5 @@ mod tests {
 			classify_source_skill_diff(&entry, "new-skill", dir.path()),
 			("renamed".to_string(), Some("old-skill".to_string()), None)
 		);
-	}
-
-	#[test]
-	fn discovered_skill_root_keeps_directory_paths() {
-		let dir = tempdir().unwrap();
-		let skill_dir = dir.path().join("skills/foo");
-
-		assert_eq!(discovered_skill_root(&skill_dir), skill_dir);
-	}
-
-	#[test]
-	fn discovered_skill_root_accepts_skill_file_paths() {
-		let dir = tempdir().unwrap();
-		let skill_dir = dir.path().join("skills/foo");
-		let skill_file = skill_dir.join("SKILL.md");
-
-		assert_eq!(discovered_skill_root(&skill_file), skill_dir);
 	}
 }
