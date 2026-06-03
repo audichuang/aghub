@@ -10,4 +10,5 @@ export type ApplySkillUpdateResponse = {
 	updatedHash: string | null;
 	paths: Array<string>;
 	error: string | null;
+	code?: string;
 };

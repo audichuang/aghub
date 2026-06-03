@@ -42,6 +42,7 @@ use crate::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope, skills_update::update_lock_hash,
 	},
+	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
 	skills::update_check::keychain_host_for_source,
 	state::{GitCloneSession, GitCloneSessions},
 };
@@ -2039,11 +2040,8 @@ pub async fn git_sync_skill(
 	if parsed_skill.name != req.name {
 		return Err(ApiError::new(
 			Status::BadRequest,
-			format!(
-				"Synced skill name '{}' does not match installed skill '{}'",
-				parsed_skill.name, req.name
-			),
-			"SKILL_NAME_MISMATCH",
+			skill_renamed_message(&req.name, &parsed_skill.name),
+			SKILL_RENAMED_CODE,
 		));
 	}
 	let updated_hash = skill::compute_skill_folder_hash(&cloned_skill_dir)

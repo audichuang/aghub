@@ -391,15 +391,24 @@ pub struct ProjectLockQuery {
 /// Per-skill update status surfaced by `GET /skills/check-updates`.
 ///
 /// Tagged by `status` (camelCase): `upToDate`, `updateAvailable`,
-/// `uncheckable`. The `reason` on `uncheckable` is already redacted of any URL
-/// userinfo at the orchestration boundary.
+/// `renamed`, `uncheckable`. The `reason` on `uncheckable` is already
+/// redacted of any URL userinfo at the orchestration boundary.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 #[serde(tag = "status", rename_all = "camelCase")]
 pub enum SkillUpdateStatusResponse {
 	UpToDate,
-	UpdateAvailable { current: String, available: String },
-	Uncheckable { reason: String },
+	UpdateAvailable {
+		current: String,
+		available: String,
+	},
+	Renamed {
+		#[serde(rename = "newName")]
+		new_name: String,
+	},
+	Uncheckable {
+		reason: String,
+	},
 }
 
 impl From<aghub_core::skills::update::SkillUpdateStatus>
@@ -416,6 +425,9 @@ impl From<aghub_core::skills::update::SkillUpdateStatus>
 					current,
 					available,
 				}
+			}
+			SkillUpdateStatus::Renamed { new_name } => {
+				SkillUpdateStatusResponse::Renamed { new_name }
 			}
 			SkillUpdateStatus::Uncheckable { reason } => {
 				let reason = match reason {
@@ -468,6 +480,12 @@ pub struct ApplySkillUpdateResponse {
 	pub updated_hash: Option<String>,
 	pub paths: Vec<String>,
 	pub error: Option<String>,
+	/// Stable machine-readable error code (e.g. `SKILL_RENAMED_IN_SOURCE`).
+	/// Lets consumers distinguish a rename from a generic failure without
+	/// parsing the human-readable `error` string.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub code: Option<String>,
 }
 
 #[cfg(test)]
@@ -504,6 +522,20 @@ mod tests {
 		let json = serde_json::to_value(&resp).unwrap();
 		assert_eq!(json["status"], "uncheckable");
 		assert_eq!(json["reason"], "auth");
+	}
+
+	#[test]
+	fn renamed_serializes_new_name() {
+		let resp = SkillUpdateResponse {
+			name: "old".to_string(),
+			scope: "global".to_string(),
+			status: SkillUpdateStatusResponse::Renamed {
+				new_name: "new".to_string(),
+			},
+		};
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["status"], "renamed");
+		assert_eq!(json["newName"], "new");
 	}
 
 	#[test]

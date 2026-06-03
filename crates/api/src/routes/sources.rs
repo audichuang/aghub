@@ -23,6 +23,7 @@ use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::routes::credentials::load_credentials;
 use crate::routes::skills_update::{installed_skill_roots, GitFetcher};
+use crate::skills::rename::detect_rename;
 use crate::skills::update_check::{
 	keychain_host_for_source, FetchError, Fetcher, SourceRef,
 };
@@ -150,6 +151,7 @@ pub struct SourceDiffQuery {
 }
 
 struct BaselineEntry {
+	installed_name: String,
 	stored_hash: String,
 	local_hashes: Vec<String>,
 	scope_label: String,
@@ -272,15 +274,17 @@ fn lock_baseline_for_source(
 			}
 			if let Some(skill_path) = entry.skill_path.clone() {
 				let hash = entry.content_hash.clone().unwrap_or_default();
+				let local_hashes = local_hashes_for_installed(
+					&name,
+					ResourceScope::GlobalOnly,
+					None,
+				);
 				baseline.insert(
 					skill_path,
 					BaselineEntry {
+						installed_name: name,
 						stored_hash: hash,
-						local_hashes: local_hashes_for_installed(
-							&name,
-							ResourceScope::GlobalOnly,
-							None,
-						),
+						local_hashes,
 						scope_label: "global".to_string(),
 					},
 				);
@@ -297,15 +301,17 @@ fn lock_baseline_for_source(
 				source_type = entry.source_type.clone();
 			}
 			if let Some(skill_path) = entry.skill_path.clone() {
+				let local_hashes = local_hashes_for_installed(
+					&name,
+					ResourceScope::ProjectOnly,
+					Some(root),
+				);
 				baseline.insert(
 					skill_path,
 					BaselineEntry {
+						installed_name: name,
 						stored_hash: entry.computed_hash,
-						local_hashes: local_hashes_for_installed(
-							&name,
-							ResourceScope::ProjectOnly,
-							Some(root),
-						),
+						local_hashes,
 						scope_label: "project".to_string(),
 					},
 				);
@@ -365,12 +371,14 @@ fn diff_blocking(
 				version,
 				author,
 				state: "notInstalled".to_string(),
+				previous_name: None,
 				reason: None,
 				installed_paths: Vec::new(),
 			}),
 			Some(entry) => {
 				let skill_dir = discovered_skill_root(&d.full_path);
-				let (state, reason) = classify_installed(entry, &skill_dir);
+				let (state, previous_name, reason) =
+					classify_source_skill_diff(entry, &d.name, &skill_dir);
 				out.push(SourceSkillDiff {
 					name: d.name,
 					skill_path,
@@ -378,6 +386,7 @@ fn diff_blocking(
 					version,
 					author,
 					state,
+					previous_name,
 					reason,
 					installed_paths: vec![entry.scope_label.clone()],
 				});
@@ -386,6 +395,24 @@ fn diff_blocking(
 	}
 
 	DiffOutcome::Ok(out)
+}
+
+fn classify_source_skill_diff(
+	entry: &BaselineEntry,
+	discovered_name: &str,
+	skill_dir: &Path,
+) -> (String, Option<String>, Option<String>) {
+	if let Some(_new_name) =
+		detect_rename(discovered_name, &entry.installed_name)
+	{
+		return (
+			"renamed".to_string(),
+			Some(entry.installed_name.clone()),
+			None,
+		);
+	}
+	let (state, reason) = classify_installed(entry, skill_dir);
+	(state, None, reason)
 }
 
 fn discovered_skill_root(path: &Path) -> std::path::PathBuf {
@@ -466,6 +493,11 @@ fn classify_installed(
 		return ("installedCurrent".to_string(), None);
 	};
 
+	// The rename path short-circuits in `classify_source_skill_diff` before
+	// reaching this function (it inspects `entry.installed_name` vs the
+	// discovered name up front). `compare_known_hashes` itself never returns
+	// `Renamed` — it only yields `UpToDate` or `UpdateAvailable` — so the
+	// `Renamed` arm is unreachable here and intentionally omitted.
 	match compare_known_hashes(base_hash, &fresh) {
 		SkillUpdateStatus::UpToDate => ("installedCurrent".to_string(), None),
 		SkillUpdateStatus::UpdateAvailable { .. } => {
@@ -474,6 +506,10 @@ fn classify_installed(
 		SkillUpdateStatus::Uncheckable { reason } => {
 			("uncheckable".to_string(), Some(reason_str(reason)))
 		}
+		SkillUpdateStatus::Renamed { .. } => unreachable!(
+			"compare_known_hashes cannot return Renamed; rename detection \
+			 happens in classify_source_skill_diff before this match"
+		),
 	}
 }
 
@@ -515,6 +551,7 @@ mod tests {
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
 		let fresh = skill::compute_skill_folder_hash(dir.path()).unwrap();
 		let entry = BaselineEntry {
+			installed_name: "skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
 			local_hashes: vec![fresh],
 			scope_label: "project".to_string(),
@@ -531,6 +568,7 @@ mod tests {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
 		let entry = BaselineEntry {
+			installed_name: "skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
 			local_hashes: Vec::new(),
 			scope_label: "project".to_string(),
@@ -547,6 +585,7 @@ mod tests {
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
 		let entry = BaselineEntry {
+			installed_name: "skill".to_string(),
 			stored_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
 			local_hashes: Vec::new(),
 			scope_label: "project".to_string(),
@@ -564,6 +603,7 @@ mod tests {
 		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
 		let fresh = skill::compute_skill_folder_hash(dir.path()).unwrap();
 		let entry = BaselineEntry {
+			installed_name: "skill".to_string(),
 			stored_hash: fresh.clone(),
 			local_hashes: vec![fresh, "older-install".to_string()],
 			scope_label: "project".to_string(),
@@ -572,6 +612,23 @@ mod tests {
 		assert_eq!(
 			classify_installed(&entry, dir.path()),
 			("installedOutdated".to_string(), None)
+		);
+	}
+
+	#[test]
+	fn classify_source_diff_reports_renamed_before_hash_compare() {
+		let dir = tempdir().unwrap();
+		fs::write(dir.path().join("SKILL.md"), b"description: x").unwrap();
+		let entry = BaselineEntry {
+			installed_name: "old-skill".to_string(),
+			stored_hash: "stale-lock-hash".to_string(),
+			local_hashes: Vec::new(),
+			scope_label: "project".to_string(),
+		};
+
+		assert_eq!(
+			classify_source_skill_diff(&entry, "new-skill", dir.path()),
+			("renamed".to_string(), Some("old-skill".to_string()), None)
 		);
 	}
 

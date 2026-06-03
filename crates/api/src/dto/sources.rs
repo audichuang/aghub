@@ -73,8 +73,13 @@ pub struct SourceSkillDiff {
 	#[ts(optional)]
 	pub author: Option<String>,
 	/// One of: `notInstalled`, `installedCurrent`, `installedOutdated`,
-	/// `uncheckable`.
+	/// `renamed`, `uncheckable`.
 	pub state: String,
+	/// Previous lock key when the upstream skill at the same `skillPath` now has
+	/// a different `name`.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub previous_name: Option<String>,
 	/// For `uncheckable`: redacted reason, aligned with
 	/// `SkillUpdateStatusResponse` (`auth`/`network`/`local`/`ssh`/
 	/// `unsupportedScheme`/`noPath`/`timeout`).

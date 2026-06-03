@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::skills::rename::detect_rename;
 use aghub_core::skills::update::{
 	compare_known_hashes, sanitize_skill_path, SkillUpdateStatus,
 	UncheckableReason,
@@ -93,7 +94,7 @@ pub(crate) enum CachedGroup {
 
 #[derive(Clone, Debug)]
 pub(crate) enum HashProbe {
-	Fresh(String),
+	Fresh { hash: String, name: Option<String> },
 	Uncheckable(UncheckableReason),
 }
 
@@ -227,8 +228,9 @@ fn probe_skill_hash_in_repo(
 		return HashProbe::Uncheckable(UncheckableReason::NoPath);
 	};
 	let folder = skill_file.parent().unwrap_or(repo_root);
+	let name = skill::parse(&skill_file).ok().map(|skill| skill.name);
 	match skill::compute_skill_folder_hash(folder) {
-		Ok(hash) => HashProbe::Fresh(hash),
+		Ok(hash) => HashProbe::Fresh { hash, name },
 		Err(_) => HashProbe::Uncheckable(UncheckableReason::Local),
 	}
 }
@@ -258,7 +260,20 @@ fn classify_member_from_probe(
 			},
 			heal_hash: None,
 		},
-		HashProbe::Fresh(fresh_hash) => {
+		HashProbe::Fresh {
+			hash: fresh_hash,
+			name,
+		} => {
+			if let Some(parsed_name) = name {
+				if let Some(new_name) = detect_rename(parsed_name, &member.name)
+				{
+					return CheckOutput {
+						key,
+						status: SkillUpdateStatus::Renamed { new_name },
+						heal_hash: None,
+					};
+				}
+			}
 			let unknown = lock_hash_unknown(member.stored_hash.as_deref());
 			let baseline = if unknown {
 				member.local_hash.as_deref()
@@ -911,6 +926,115 @@ mod tests {
 				current: local_hash,
 				available: upstream_hash,
 			}
+		);
+	}
+
+	#[tokio::test]
+	async fn upstream_skill_name_change_reports_renamed() {
+		let upstream = tempfile::tempdir().unwrap();
+		std::fs::write(
+			upstream.path().join("SKILL.md"),
+			b"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+		)
+		.unwrap();
+		let fetcher = StubFetcher {
+			root: Some(upstream.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		};
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: Arc::new(fetcher),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+
+		let out =
+			check_updates(vec![entry("old-skill", "o/r", Some("main"))], deps)
+				.await;
+
+		assert_eq!(out.len(), 1);
+		assert_eq!(
+			out[0].status,
+			SkillUpdateStatus::Renamed {
+				new_name: "new-skill".to_string()
+			}
+		);
+		assert_eq!(out[0].heal_hash, None);
+	}
+
+	/// `HashProbe::Fresh` carries the parsed `name` inside the value (not in
+	/// the cache key, which is `SourceRef`), so a second `check_updates` call
+	/// within the TTL must reuse the cached probe and keep reporting the
+	/// rename without re-fetching.
+	#[tokio::test]
+	async fn cache_hit_preserves_rename_across_repeated_checks() {
+		let upstream = tempfile::tempdir().unwrap();
+		std::fs::write(
+			upstream.path().join("SKILL.md"),
+			b"---\nname: renamed-upstream\ndescription: d\n---\nbody\n",
+		)
+		.unwrap();
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(upstream.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+
+		// First call: populates the cache, must report `Renamed`.
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let first =
+			check_updates(vec![entry("old-skill", "o/r", Some("main"))], deps)
+				.await;
+		assert_eq!(
+			first[0].status,
+			SkillUpdateStatus::Renamed {
+				new_name: "renamed-upstream".to_string()
+			}
+		);
+		let calls_after_first = *fetcher.calls.lock().unwrap();
+		assert_eq!(calls_after_first, 1);
+
+		// Second call: must hit the cache (no additional fetch) and still
+		// report the same rename — the stale name on the lock entry is the
+		// authoritative trigger, the cache just reuses the upstream probe.
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let second =
+			check_updates(vec![entry("old-skill", "o/r", Some("main"))], deps)
+				.await;
+		assert_eq!(
+			second[0].status,
+			SkillUpdateStatus::Renamed {
+				new_name: "renamed-upstream".to_string()
+			}
+		);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			calls_after_first,
+			"second call must reuse the cached probe, not re-fetch"
 		);
 	}
 
