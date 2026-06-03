@@ -447,6 +447,13 @@ mod tests {
 		assert!(got.is_empty());
 	}
 
+	// Unix-only: the deterministic "inaccessible dir" proxy here is a path whose
+	// ancestor is a regular file, which yields ENOTDIR (-> try_exists Err) on
+	// Unix. Windows maps `<file>\sub` to Ok(false) (genuinely-absent), so the
+	// abort cannot be triggered this way there; the real Windows inaccessibility
+	// case (ACL/EACCES) needs privileged setup. The PRODUCTION try_exists() guard
+	// still applies cross-platform — only this test's simulation is Unix-specific.
+	#[cfg(unix)]
 	#[test]
 	fn collect_disk_dir_names_aborts_on_inaccessible_dir() {
 		// A path whose ancestor is a regular file is INACCESSIBLE (ENOTDIR), as
@@ -471,6 +478,8 @@ mod tests {
 		);
 	}
 
+	// Unix-only for the same reason as the previous test (ENOTDIR proxy).
+	#[cfg(unix)]
 	#[test]
 	fn prune_does_not_wipe_lock_when_a_scope_dir_is_inaccessible() {
 		let _g = GlobalLockGuard::new();
