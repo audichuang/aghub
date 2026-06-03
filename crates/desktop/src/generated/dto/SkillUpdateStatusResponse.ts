@@ -4,10 +4,11 @@
  * Per-skill update status surfaced by `GET /skills/check-updates`.
  *
  * Tagged by `status` (camelCase): `upToDate`, `updateAvailable`,
- * `uncheckable`. The `reason` on `uncheckable` is already redacted of any URL
- * userinfo at the orchestration boundary.
+ * `renamed`, `uncheckable`. The `reason` on `uncheckable` is already
+ * redacted of any URL userinfo at the orchestration boundary.
  */
 export type SkillUpdateStatusResponse =
 	| { status: "upToDate" }
 	| { status: "updateAvailable"; current: string; available: string }
+	| { status: "renamed"; newName: string }
 	| { status: "uncheckable"; reason: string };

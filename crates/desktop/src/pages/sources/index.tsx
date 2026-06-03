@@ -3,12 +3,16 @@ import {
 	ArrowPathIcon,
 	ArrowUpCircleIcon,
 	CheckCircleIcon,
+	ClipboardDocumentIcon,
+	ExclamationTriangleIcon,
 	GlobeAltIcon,
 	LockClosedIcon,
 	PlusCircleIcon,
 	QuestionMarkCircleIcon,
+	TrashIcon,
 } from "@heroicons/react/24/solid";
 import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
 	useMutation,
 	useQueries,
@@ -283,11 +287,19 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 
 	const notInstalled = grouped.get("notInstalled") ?? [];
 	const outdated = grouped.get("installedOutdated") ?? [];
+	const renamed = grouped.get("renamed") ?? [];
 	const current = grouped.get("installedCurrent") ?? [];
 	const uncheckable = grouped.get("uncheckable") ?? [];
+	const hasVisibleSkills = (data?.skills.length ?? 0) > 0;
 	const updateScope = row.rowScope;
 	const updateProjectRoot =
 		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
+	const shouldCheckOrphans =
+		!isLoading &&
+		!isFetching &&
+		Boolean(data) &&
+		!data?.needsCredential &&
+		!hasVisibleSkills;
 	const installAgentIds = useMemo(
 		() =>
 			availableAgents
@@ -317,6 +329,113 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			onError: () => toast.danger(t("skillUpdateApplyError")),
 		}),
 	);
+
+	const prunePreviewQuery = useQuery({
+		queryKey: queryKeys.skills.pruneLock(updateScope, updateProjectRoot),
+		queryFn: () =>
+			api.skills.pruneLock({
+				scope: updateScope,
+				projectRoot: updateProjectRoot,
+				confirm: false,
+			}),
+		enabled: shouldCheckOrphans,
+	});
+
+	const pruneLockMutation = useMutation({
+		mutationFn: () =>
+			api.skills.pruneLock({
+				scope: updateScope,
+				projectRoot: updateProjectRoot,
+				confirm: true,
+			}),
+		onSuccess: async (result) => {
+			if (result.error) {
+				toast.danger(result.error);
+				return;
+			}
+
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+
+			if (result.pruned.length === 0) {
+				toast.success(t("sourceOrphansCleanedZero"));
+			} else {
+				toast.success(
+					t("sourceOrphansCleanedMany", {
+						count: result.pruned.length,
+					}),
+				);
+			}
+		},
+		onError: () => toast.danger(t("sourcePruneFailed")),
+	});
+
+	const deleteRenamedSkillMutation = useMutation({
+		mutationFn: async (skill: SourceSkillDiff) => {
+			const oldName = skill.previousName;
+			if (!oldName) {
+				throw new Error("Missing previous name for renamed skill.");
+			}
+			const results = await Promise.allSettled(
+				installAgentIds.map((agentId) =>
+					api.skills.delete(
+						agentId,
+						oldName,
+						updateScope,
+						updateProjectRoot ?? undefined,
+					),
+				),
+			);
+			const failures = results.filter(
+				(result) => result.status === "rejected",
+			);
+			if (failures.length > 0) {
+				throw new Error(
+					(failures[0] as PromiseRejectedResult).reason instanceof
+						Error
+						? (failures[0] as PromiseRejectedResult).reason.message
+						: t("sourceRenamedDeleteFailed", { oldName }),
+				);
+			}
+		},
+		onSuccess: async (_data, skill) => {
+			if (!skill.previousName) return;
+			toast.success(
+				t("sourceRenamedDeleted", { oldName: skill.previousName }),
+			);
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+		},
+		onError: (error, skill) => {
+			if (skill.previousName) {
+				toast.danger(
+					error instanceof Error
+						? error.message
+						: t("sourceRenamedDeleteFailed", {
+								oldName: skill.previousName,
+							}),
+				);
+				return;
+			}
+			toast.danger(t("sourcePruneFailed"));
+		},
+	});
+
+	const copyRenamedInstallMutation = useMutation({
+		mutationFn: async (skill: SourceSkillDiff) => {
+			await writeText(`aghub-cli install ${skill.name}`);
+		},
+		onSuccess: (_data, skill) => {
+			toast.success(
+				t("sourceRenamedInstallCommandCopied", {
+					newName: skill.name,
+				}),
+			);
+		},
+		onError: () => toast.danger(t("sourceCopyCommandFailed")),
+	});
 
 	const updateRequestFor = (skill: SourceSkillDiff) => ({
 		name: skill.name,
@@ -359,7 +478,11 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			});
 
 			if (failed > 0) {
-				toast.danger(t("sourceUpdateSomeFailed", { count: failed }));
+				toast.danger(
+					failed === 1
+						? t("sourceUpdateSomeFailedOne", { count: failed })
+						: t("sourceUpdateSomeFailedMany", { count: failed }),
+				);
 			} else {
 				toast.success(t("sourceUpdatesApplied", { count: updated }));
 			}
@@ -429,7 +552,13 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 
 			if (failed.length > 0) {
 				toast.danger(
-					t("sourceInstallSomeFailed", { count: failed.length }),
+					failed.length === 1
+						? t("sourceInstallSomeFailedOne", {
+								count: failed.length,
+							})
+						: t("sourceInstallSomeFailedMany", {
+								count: failed.length,
+							}),
 				);
 			} else {
 				toast.success(
@@ -495,6 +624,18 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 					</Alert>
 				) : (
 					<div className="space-y-6">
+						{!hasVisibleSkills && (
+							<SourceEmptyState
+								prunedCount={
+									prunePreviewQuery.data?.pruned.length ?? 0
+								}
+								isChecking={prunePreviewQuery.isFetching}
+								isCleaning={pruneLockMutation.isPending}
+								hasError={prunePreviewQuery.isError}
+								onClean={() => pruneLockMutation.mutate()}
+								onRetry={() => prunePreviewQuery.refetch()}
+							/>
+						)}
 						<SkillSection
 							title={t("sourceStateNotInstalled")}
 							icon={
@@ -593,6 +734,64 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 							}}
 						/>
 						<SkillSection
+							title={t("sourceStateRenamed")}
+							icon={
+								<ExclamationTriangleIcon className="size-4 text-warning" />
+							}
+							skills={renamed}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
+							rowAction={(skill) => {
+								const isDeleting =
+									deleteRenamedSkillMutation.isPending &&
+									deleteRenamedSkillMutation.variables
+										?.skillPath === skill.skillPath;
+								const isCopying =
+									copyRenamedInstallMutation.isPending &&
+									copyRenamedInstallMutation.variables
+										?.skillPath === skill.skillPath;
+								const rowBusy = isDeleting || isCopying;
+								return (
+									<div className="flex items-center gap-1.5">
+										<Button
+											size="sm"
+											variant="secondary"
+											className="h-7 px-2 text-xs"
+											isDisabled={
+												!skill.previousName || rowBusy
+											}
+											onPress={() =>
+												deleteRenamedSkillMutation.mutate(
+													skill,
+												)
+											}
+										>
+											<TrashIcon className="size-3.5" />
+											{isDeleting
+												? t("sourceRenamedDeleting")
+												: t("sourceRenamedDeleteOld")}
+										</Button>
+										<Button
+											size="sm"
+											variant="ghost"
+											className="h-7 px-2 text-xs"
+											isDisabled={rowBusy}
+											onPress={() =>
+												copyRenamedInstallMutation.mutate(
+													skill,
+												)
+											}
+										>
+											<ClipboardDocumentIcon className="size-3.5" />
+											{isCopying
+												? t("sourceRenamedCopying")
+												: t("sourceRenamedCopyInstall")}
+										</Button>
+									</div>
+								);
+							}}
+						/>
+						<SkillSection
 							title={t("sourceStateCurrent")}
 							icon={
 								<CheckCircleIcon className="size-4 text-success" />
@@ -618,6 +817,89 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 				)}
 			</div>
 		</div>
+	);
+}
+
+interface SourceEmptyStateProps {
+	prunedCount: number;
+	isChecking: boolean;
+	isCleaning: boolean;
+	hasError: boolean;
+	onClean: () => void;
+	onRetry: () => void;
+}
+
+function SourceEmptyState({
+	prunedCount,
+	isChecking,
+	isCleaning,
+	hasError,
+	onClean,
+	onRetry,
+}: SourceEmptyStateProps) {
+	const { t } = useTranslation();
+	const hasOrphans = prunedCount > 0;
+
+	if (hasError) {
+		return (
+			<Alert status="danger">
+				<Alert.Indicator />
+				<Alert.Content>
+					<Alert.Title>
+						{t("sourcePrunePreviewErrorTitle")}
+					</Alert.Title>
+					<Alert.Description>
+						{t("sourcePrunePreviewErrorHint")}
+					</Alert.Description>
+					<div className="mt-3">
+						<Button size="sm" variant="secondary" onPress={onRetry}>
+							{t("retry")}
+						</Button>
+					</div>
+				</Alert.Content>
+			</Alert>
+		);
+	}
+
+	return (
+		<Alert status="warning">
+			<Alert.Indicator />
+			<Alert.Content>
+				<Alert.Title>
+					{hasOrphans
+						? t("sourceOrphanTitle")
+						: t("sourceEmptyDiffTitle")}
+				</Alert.Title>
+				<Alert.Description>
+					{isChecking
+						? t("sourceCheckingOrphans")
+						: hasOrphans
+							? prunedCount === 1
+								? t("sourceOrphanHintOne", {
+										count: prunedCount,
+									})
+								: t("sourceOrphanHintMany", {
+										count: prunedCount,
+									})
+							: t("sourceEmptyDiffHint")}
+				</Alert.Description>
+				{hasOrphans && (
+					<div className="mt-3">
+						<Button
+							size="sm"
+							variant="secondary"
+							isDisabled={isChecking || isCleaning}
+							onPress={onClean}
+						>
+							<TrashIcon className="size-3.5" />
+							{isCleaning
+								? t("sourceCleaningOrphans")
+								: t("sourceCleanOrphans")}
+						</Button>
+					</div>
+				)}
+			</Alert.Content>
+		</Alert>
 	);
 }
 
@@ -705,6 +987,7 @@ function SkillRow({
 	muted = false,
 	showReason = false,
 }: SkillRowProps) {
+	const { t } = useTranslation();
 	const detailText = skill.description || skill.skillPath;
 
 	return (
@@ -745,6 +1028,14 @@ function SkillRow({
 				)}
 				{showReason && skill.reason && (
 					<p className="mt-0.5 text-xs text-muted">{skill.reason}</p>
+				)}
+				{skill.state === "renamed" && skill.previousName && (
+					<p className="mt-0.5 text-xs text-warning">
+						{t("sourceRenamedHint", {
+							oldName: skill.previousName,
+							newName: skill.name,
+						})}
+					</p>
 				)}
 			</button>
 			{action && <div className="shrink-0">{action}</div>}
