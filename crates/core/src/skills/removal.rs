@@ -319,7 +319,17 @@ fn plan_copy_removal(
 	} else {
 		if let Some(root) = crate::transfer::skill_root_unchecked(skill) {
 			if root.exists() {
-				push_contained(root, roots, &mut paths, &mut skipped);
+				// Guard against orphaning a live symlink: when this dir is a
+				// shared universal master that ANOTHER in-scope agent view still
+				// symlinks into (e.g. a `.agents/skills/<name>` master read
+				// directly by this agent, but symlinked by Claude), keep it and
+				// report it instead of `remove_dir_all`-ing it. Plain per-agent
+				// copies have no inbound symlinks, so this never blocks them.
+				if dir_has_external_referrer(&root, all_agent_dirs, safe) {
+					skipped.push(root);
+				} else {
+					push_contained(root, roots, &mut paths, &mut skipped);
+				}
 			}
 		}
 		RemovalPlan {
@@ -329,6 +339,39 @@ fn plan_copy_removal(
 			needs_confirm: false,
 		}
 	}
+}
+
+/// True when some in-scope agent skills dir holds a symlink named `safe` that
+/// resolves to `target_dir` — i.e. `target_dir` is a shared master another view
+/// still references. A copy-layout removal must NOT `remove_dir_all` such a dir
+/// (it would orphan the live link); it keeps + reports it instead. The symlink
+/// layout already does this via its `other_refs` sweep — this is the copy-path
+/// equivalent for a master that was discovered as a real dir (canonical_path
+/// None) by a direct `.agents/skills` reader.
+pub fn dir_has_external_referrer(
+	target_dir: &Path,
+	all_agent_dirs: &[PathBuf],
+	safe: &str,
+) -> bool {
+	let Ok(target_real) = target_dir.canonicalize() else {
+		return false;
+	};
+	for dir in all_agent_dirs {
+		let entry = dir.join(safe);
+		let Ok(meta) = std::fs::symlink_metadata(&entry) else {
+			continue;
+		};
+		if !meta.file_type().is_symlink() {
+			continue;
+		}
+		if std::fs::canonicalize(&entry)
+			.map(|resolved| resolved == target_real)
+			.unwrap_or(false)
+		{
+			return true;
+		}
+	}
+	false
 }
 
 fn push_contained(
@@ -739,6 +782,49 @@ mod tests {
 		assert!(
 			!plan.paths.contains(&cursor.join("foo")),
 			"other agent copy untouched"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn plan_removal_copy_keeps_master_when_another_agent_symlinks_to_it() {
+		// P0: a universal `.agents/skills/<name>` master read DIRECTLY (as a real
+		// dir) by one agent has canonical_path=None -> classified Copy layout.
+		// A single-agent removal must NOT `remove_dir_all` that master while
+		// another agent's symlink still resolves to it (that would orphan the
+		// link + lose the shared skill for every other agent).
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&master);
+		let universal = tmp.path().join(".agents/skills");
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&master, &claude.join("foo"));
+
+		let agent_dirs = vec![universal.clone(), claude.clone()];
+		let mut skill = Skill::new("foo");
+		// Direct reader → source_path is the master, canonical_path is None.
+		skill.source_path =
+			Some(master.join("SKILL.md").to_string_lossy().to_string());
+
+		let plan = plan_removal(
+			&skill,
+			Some(universal.as_path()),
+			&agent_dirs,
+			Some(tmp.path()),
+			false,
+		);
+
+		assert_eq!(plan.layout, Layout::Copy);
+		assert!(
+			!plan.paths.contains(&master),
+			"must NOT delete a shared master another agent symlinks to: {:?}",
+			plan.paths
+		);
+		assert!(
+			plan.skipped.iter().any(|p| p == &master),
+			"kept master should be reported as skipped, got {:?}",
+			plan.skipped
 		);
 	}
 

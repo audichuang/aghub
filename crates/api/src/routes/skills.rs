@@ -387,6 +387,30 @@ pub async fn delete_skill_by_path(
 		|| path_is_symlink;
 
 	if !canonical_layout {
+		// Guard: this raw copy branch bypasses `plan_removal`'s referrer sweep,
+		// so re-apply it here. If the targeted dir is a shared universal master
+		// that ANOTHER in-scope agent still symlinks into (it was discovered as a
+		// real dir by a direct `.agents/skills` reader, hence canonical_path=None),
+		// refuse to `remove_dir_all` it — that would orphan the live symlink and
+		// lose the skill for every other agent.
+		let all_in_scope =
+			aghub_core::skills::removal::agent_skill_dirs_in_scope(
+				resource_scope,
+				project_root.as_deref(),
+			);
+		let safe_name = skill::sanitize::sanitize_name(&skill_name);
+		if aghub_core::skills::removal::dir_has_external_referrer(
+			&skill_dir,
+			&all_in_scope,
+			&safe_name,
+		) {
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run,
+				skipped: vec![skill_dir.display().to_string()],
+				..Default::default()
+			}));
+		}
 		let plan = aghub_core::skills::removal::RemovalPlan {
 			layout: aghub_core::skills::removal::Layout::Copy,
 			paths: vec![skill_dir.clone()],
@@ -2266,6 +2290,55 @@ mod tests {
 				"out-of-tree symlink target must be refused"
 			);
 			assert!(outside.exists(), "out-of-tree dir must survive");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_keeps_master_referenced_by_another_agent_symlink() {
+		with_isolated_env(|home, _state| {
+			// Project-scope universal master, read DIRECTLY (real dir) by cursor
+			// and symlinked by another agent (claude). Deleting it by-path for
+			// cursor must NOT remove the shared master (it would orphan claude's
+			// live symlink + lose the skill for every other agent).
+			let proj = home;
+			let master = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: shared\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let claude = proj.join(".claude/skills");
+			std::fs::create_dir_all(&claude).unwrap();
+			std::os::unix::fs::symlink(&master, claude.join("shared")).unwrap();
+
+			let req = DeleteSkillByPathRequest {
+				source_path: master.join("SKILL.md").display().to_string(),
+				agents: vec!["cursor".to_string()],
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp = block_on(delete_skill_by_path(Json(req)))
+				.ok()
+				.expect("handler returned ok")
+				.into_inner();
+
+			assert!(
+				master.join("SKILL.md").exists(),
+				"shared master must survive a single-agent by-path delete"
+			);
+			assert!(
+				claude.join("shared").join("SKILL.md").exists(),
+				"the other agent's symlink must still resolve to the master"
+			);
+			assert!(
+				resp.skipped.iter().any(|p| p.contains("shared")),
+				"the kept master should be reported as skipped, got {:?}",
+				resp.skipped
+			);
 		});
 	}
 

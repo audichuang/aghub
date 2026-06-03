@@ -11,7 +11,15 @@ import {
 	QuestionMarkCircleIcon,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
+import {
+	Alert,
+	Button,
+	Chip,
+	Spinner,
+	toast,
+	ToggleButton,
+	ToggleButtonGroup,
+} from "@heroui/react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
 	useMutation,
@@ -33,6 +41,11 @@ import { useAgentAvailability } from "../../hooks/use-agent-availability";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
 import { supportsSkillMutation } from "../../lib/agent-capabilities";
+import {
+	DEFAULT_INSTALL_LAYOUT,
+	type InstallLayout,
+	isUniversalLayout,
+} from "../../lib/install-layout";
 import { cn } from "../../lib/utils";
 import { queryKeys } from "../../requests/keys";
 import { applySkillUpdateMutationOptions } from "../../requests/skills";
@@ -261,6 +274,9 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	);
 	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
+	const [installLayout, setInstallLayout] = useState<InstallLayout>(
+		DEFAULT_INSTALL_LAYOUT,
+	);
 	const [installingSkillPath, setInstallingSkillPath] = useState<
 		string | null
 	>(null);
@@ -520,7 +536,10 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			const scan = await api.skills.gitScan({
 				url: row.sourceUrl,
 				credential_id: null,
-				branch: null,
+				// Install from the SAME ref the diff was computed against (the
+				// source's recorded tag/branch), so a tag-based install does not
+				// silently pull `main` and disagree with the 3-state diff.
+				branch: data?.gitRef ?? null,
 				session_id: null,
 			});
 			const wantedPaths = new Set(skills.map(installPathFor));
@@ -539,7 +558,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 				agents: installAgentIds,
 				scope: updateScope,
 				project_root: updateProjectRoot,
-				universal: true,
+				universal: isUniversalLayout(installLayout),
 			});
 			const failed = result.results.filter((entry) => !entry.success);
 
@@ -624,6 +643,43 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 					</Alert>
 				) : (
 					<div className="space-y-6">
+						<div className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
+							<div className="min-w-0 space-y-0.5">
+								<span className="text-sm font-medium text-foreground">
+									{t("installLayoutLabel")}
+								</span>
+								<span className="block text-xs text-muted">
+									{t("installLayoutHint")}
+								</span>
+							</div>
+							<ToggleButtonGroup
+								selectedKeys={[installLayout]}
+								onSelectionChange={(keys) => {
+									const next = [...keys][0];
+									if (next === "isolation" || next === "universal") {
+										setInstallLayout(next);
+									}
+								}}
+								selectionMode="single"
+								disallowEmptySelection
+								size="sm"
+								className="shrink-0"
+							>
+								<ToggleButton
+									id="isolation"
+									aria-label={t("installLayoutIsolation")}
+								>
+									{t("installLayoutIsolation")}
+								</ToggleButton>
+								<ToggleButtonGroup.Separator />
+								<ToggleButton
+									id="universal"
+									aria-label={t("installLayoutUniversal")}
+								>
+									{t("installLayoutUniversal")}
+								</ToggleButton>
+							</ToggleButtonGroup>
+						</div>
 						{!hasVisibleSkills && (
 							<SourceEmptyState
 								prunedCount={

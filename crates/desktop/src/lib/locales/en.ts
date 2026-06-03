@@ -1093,5 +1093,10 @@ export default {
 	sourceInstallFailed: "Failed to install skill.",
 	sourceInstallNoAgents:
 		"No available agents can install skills in this scope.",
+	installLayoutLabel: "Install layout",
+	installLayoutIsolation: "Isolation",
+	installLayoutUniversal: "Universal",
+	installLayoutHint:
+		"Isolation copies the skill into each selected agent. Universal writes one shared .agents master and symlinks each agent.",
 	selectSource: "Select a source",
 };

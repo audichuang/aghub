@@ -183,14 +183,19 @@ pub async fn diff_source(
 	};
 	let resolved = scope_params.resolve()?;
 	let source = query.source.trim().to_string();
-	let git_ref = query.git_ref.clone();
 
-	// 1. Lock baseline (skill_path -> hash) + the source's recorded type.
-	let (baseline, mut source_type) =
+	// 1. Lock baseline (skill_path -> hash) + the source's recorded type + ref.
+	let (baseline, mut source_type, recorded_ref) =
 		lock_baseline_for_source(&resolved, &source);
 	if source_type.is_empty() {
 		source_type = "github".to_string();
 	}
+
+	// Use the explicitly requested ref, else the source's RECORDED ref, else the
+	// repo default branch (None). Without this fallback, a skill installed from a
+	// tag or feature branch is diffed against the default branch's content,
+	// producing spurious notInstalled / installedOutdated results.
+	let git_ref = query.git_ref.clone().or(recorded_ref);
 
 	// 2. Skip sources we cannot fetch (local/ssh/unsupported) up front.
 	if precheck_source(&source_type, &source).is_some() {
@@ -249,9 +254,14 @@ pub async fn diff_source(
 fn lock_baseline_for_source(
 	resolved: &ResolvedScope,
 	source: &str,
-) -> (Baseline, String) {
+) -> (Baseline, String, Option<String>) {
 	let mut baseline = Baseline::new();
 	let mut source_type = String::new();
+	// First non-None recorded ref among the source's lock entries. A single
+	// source may in theory mix refs across skills, but the endpoint fetches one
+	// ref; the recorded ref is still far better than blindly using the default
+	// branch for a tag/feature-branch install.
+	let mut recorded_ref: Option<String> = None;
 	let want = source.trim();
 
 	let include_global =
@@ -271,6 +281,9 @@ fn lock_baseline_for_source(
 			}
 			if source_type.is_empty() {
 				source_type = entry.source_type.clone();
+			}
+			if recorded_ref.is_none() {
+				recorded_ref = entry.ref_name.clone();
 			}
 			if let Some(skill_path) = entry.skill_path.clone() {
 				let hash = entry.content_hash.clone().unwrap_or_default();
@@ -300,6 +313,9 @@ fn lock_baseline_for_source(
 			if source_type.is_empty() {
 				source_type = entry.source_type.clone();
 			}
+			if recorded_ref.is_none() {
+				recorded_ref = entry.ref_name.clone();
+			}
 			if let Some(skill_path) = entry.skill_path.clone() {
 				let local_hashes = local_hashes_for_installed(
 					&name,
@@ -319,7 +335,7 @@ fn lock_baseline_for_source(
 		}
 	}
 
-	(baseline, source_type)
+	(baseline, source_type, recorded_ref)
 }
 
 fn local_hashes_for_installed(
@@ -531,7 +547,72 @@ fn reason_str(reason: UncheckableReason) -> String {
 mod tests {
 	use super::*;
 	use std::fs;
-	use tempfile::tempdir;
+	use std::sync::{Mutex, MutexGuard, OnceLock};
+	use tempfile::{tempdir, TempDir};
+
+	/// Serializes + isolates the GLOBAL lock by pointing `XDG_STATE_HOME` at a
+	/// fresh temp dir.
+	struct GlobalLockGuard {
+		_temp: TempDir,
+		old: Option<String>,
+		_lock: MutexGuard<'static, ()>,
+	}
+
+	impl GlobalLockGuard {
+		fn new() -> Self {
+			static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+			let guard = LOCK
+				.get_or_init(|| Mutex::new(()))
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let temp = tempdir().unwrap();
+			let old = std::env::var("XDG_STATE_HOME").ok();
+			std::env::set_var("XDG_STATE_HOME", temp.path());
+			Self {
+				_temp: temp,
+				old,
+				_lock: guard,
+			}
+		}
+	}
+
+	impl Drop for GlobalLockGuard {
+		fn drop(&mut self) {
+			match &self.old {
+				Some(v) => std::env::set_var("XDG_STATE_HOME", v),
+				None => std::env::remove_var("XDG_STATE_HOME"),
+			}
+		}
+	}
+
+	#[test]
+	fn lock_baseline_captures_recorded_ref_for_fallback() {
+		// A skill installed from a tag/feature-branch records its ref; the diff
+		// must fall back to it (not the default branch) when no ref is requested,
+		// else a non-default-ref install is diffed against the wrong content.
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock(
+			"s",
+			skill::SkillLockEntry {
+				source: "owner/repo".to_string(),
+				source_type: "github".to_string(),
+				source_url: "https://github.com/owner/repo".to_string(),
+				ref_name: Some("v1.2.3".to_string()),
+				skill_path: Some("s/SKILL.md".to_string()),
+				skill_folder_hash: "h".to_string(),
+				content_hash: None,
+				installed_at: "t".to_string(),
+				updated_at: "t".to_string(),
+				plugin_name: None,
+			},
+		)
+		.unwrap();
+
+		let (_baseline, _source_type, recorded_ref) =
+			lock_baseline_for_source(&ResolvedScope::Global, "owner/repo");
+
+		assert_eq!(recorded_ref.as_deref(), Some("v1.2.3"));
+	}
 
 	#[test]
 	fn classify_prefers_local_hash_over_stale_stored_hash() {
