@@ -656,7 +656,10 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 								selectedKeys={[installLayout]}
 								onSelectionChange={(keys) => {
 									const next = [...keys][0];
-									if (next === "isolation" || next === "universal") {
+									if (
+										next === "isolation" ||
+										next === "universal"
+									) {
 										setInstallLayout(next);
 									}
 								}}

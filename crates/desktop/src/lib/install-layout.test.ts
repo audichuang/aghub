@@ -3,10 +3,7 @@ import assert from "node:assert/strict";
 // pure-logic test uses Node's built-in runner, matching connection-logic.test.ts.
 // eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
-import {
-	DEFAULT_INSTALL_LAYOUT,
-	isUniversalLayout,
-} from "./install-layout.ts";
+import { DEFAULT_INSTALL_LAYOUT, isUniversalLayout } from "./install-layout.ts";
 
 test("default install layout is isolation (copy), never universal", () => {
 	// The spec default is isolation: copy into each selected agent's own skills

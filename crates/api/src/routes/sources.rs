@@ -547,11 +547,13 @@ fn reason_str(reason: UncheckableReason) -> String {
 mod tests {
 	use super::*;
 	use std::fs;
-	use std::sync::{Mutex, MutexGuard, OnceLock};
+	use std::sync::MutexGuard;
 	use tempfile::{tempdir, TempDir};
 
 	/// Serializes + isolates the GLOBAL lock by pointing `XDG_STATE_HOME` at a
-	/// fresh temp dir.
+	/// fresh temp dir. Uses the crate-wide `test_env_lock()` (the SAME mutex as
+	/// `with_isolated_state`/`with_isolated_env`) so it never races other api
+	/// tests that mutate `XDG_STATE_HOME` in the shared test process.
 	struct GlobalLockGuard {
 		_temp: TempDir,
 		old: Option<String>,
@@ -560,9 +562,7 @@ mod tests {
 
 	impl GlobalLockGuard {
 		fn new() -> Self {
-			static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-			let guard = LOCK
-				.get_or_init(|| Mutex::new(()))
+			let guard = crate::routes::test_env_lock()
 				.lock()
 				.unwrap_or_else(|e| e.into_inner());
 			let temp = tempdir().unwrap();
