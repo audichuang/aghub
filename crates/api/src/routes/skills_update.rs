@@ -27,6 +27,9 @@ use crate::dto::skill::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
+use crate::skills::rename::{
+	detect_rename, skill_renamed_message, SKILL_RENAMED_CODE,
+};
 use crate::skills::update_check::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
 	EntryInput, FetchError, FetchedRepo, Fetcher, ResultCache, SourceRef,
@@ -472,6 +475,15 @@ fn apply_error(
 	scope: &str,
 	message: &str,
 ) -> ApplySkillUpdateResponse {
+	apply_error_with_code(name, scope, message, None)
+}
+
+fn apply_error_with_code(
+	name: &str,
+	scope: &str,
+	message: &str,
+	code: Option<&'static str>,
+) -> ApplySkillUpdateResponse {
 	ApplySkillUpdateResponse {
 		success: false,
 		name: name.to_string(),
@@ -479,6 +491,7 @@ fn apply_error(
 		updated_hash: None,
 		paths: Vec::new(),
 		error: Some(message.to_string()),
+		code: code.map(str::to_string),
 	}
 }
 
@@ -536,7 +549,16 @@ pub async fn check_skill_updates(
 pub async fn apply_skill_update(
 	body: Json<ApplySkillUpdateRequest>,
 ) -> ApiResult<ApplySkillUpdateResponse> {
-	let req = body.into_inner();
+	apply_skill_update_inner(body.into_inner(), &GitFetcher).await
+}
+
+/// Inner apply path that takes an injected [`Fetcher`] so the rename guard
+/// (and the rest of the happy-path wiring) is unit-testable without a real
+/// network. The route handler is a thin shim that supplies [`GitFetcher`].
+pub(crate) async fn apply_skill_update_inner(
+	req: ApplySkillUpdateRequest,
+	fetcher: &dyn Fetcher,
+) -> ApiResult<ApplySkillUpdateResponse> {
 	if !req.confirm.unwrap_or(false) {
 		return Ok(Json(apply_error(
 			&req.name,
@@ -593,7 +615,6 @@ pub async fn apply_skill_update(
 		&source.source,
 		keychain_host_for_source(&source.source).as_deref(),
 	);
-	let fetcher = GitFetcher;
 	let repo = match fetcher.fetch(
 		&SourceRef {
 			source: source.source.clone(),
@@ -622,6 +643,24 @@ pub async fn apply_skill_update(
 		)));
 	};
 	let source_dir = skill_file.parent().unwrap_or(&repo.root);
+	let parsed_skill = match skill::parse(&skill_file) {
+		Ok(skill) => skill,
+		Err(e) => {
+			return Ok(Json(apply_error(
+				&req.name,
+				&req.scope,
+				&format!("Failed to parse fetched skill: {e}"),
+			)));
+		}
+	};
+	if let Some(new_name) = detect_rename(&parsed_skill.name, &req.name) {
+		return Ok(Json(apply_error_with_code(
+			&req.name,
+			&req.scope,
+			&skill_renamed_message(&req.name, &new_name),
+			Some(SKILL_RENAMED_CODE),
+		)));
+	}
 	let updated_hash = match skill::compute_skill_folder_hash(source_dir) {
 		Ok(hash) => hash,
 		Err(e) => {
@@ -679,6 +718,7 @@ pub async fn apply_skill_update(
 		updated_hash: Some(updated_hash),
 		paths,
 		error: None,
+		code: None,
 	}))
 }
 
@@ -808,6 +848,16 @@ mod tests {
 	}
 
 	#[test]
+	fn renamed_message_tells_user_to_delete_and_install() {
+		let message = skill_renamed_message("old-skill", "new-skill");
+
+		assert!(message.contains("old-skill"));
+		assert!(message.contains("new-skill"));
+		assert!(message.contains("Delete the old skill"));
+		assert!(message.contains("install 'new-skill'"));
+	}
+
+	#[test]
 	fn auto_heal_writes_project_computed_hash_only() {
 		with_isolated_state(|| {
 			let project = tempfile::tempdir().unwrap();
@@ -913,5 +963,116 @@ mod tests {
 			out[0].status,
 			SkillUpdateStatus::Uncheckable { .. }
 		));
+	}
+
+	/// Fetcher stub that returns a pre-built local directory as if it were
+	/// the upstream checkout. Used by the rename-guard integration test to
+	/// exercise the apply path without a real network call.
+	#[cfg(unix)]
+	struct LocalRepoFetcher {
+		root: PathBuf,
+	}
+	#[cfg(unix)]
+	impl Fetcher for LocalRepoFetcher {
+		fn fetch(
+			&self,
+			_source_ref: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<FetchedRepo, FetchError> {
+			Ok(FetchedRepo {
+				root: self.root.clone(),
+				_guard: None,
+			})
+		}
+	}
+
+	/// The rename guard in `apply_skill_update` must reject the request
+	/// (success=false, with the shared `SKILL_RENAMED_CODE`) when the fetched
+	/// `SKILL.md` declares a name that differs from the lock entry. It must
+	/// also leave the installed target untouched.
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_update_renamed_guard_rejects_without_mutating() {
+		with_isolated_state(|| {
+			// We need an installed target so the apply path proceeds past
+			// the `targets.is_empty()` short-circuit. The lock then points
+			// at a real-feeling source; the fetch is intercepted by
+			// `LocalRepoFetcher` to return a SKILL.md with a different name.
+			let home = tempfile::tempdir().unwrap();
+			let installed_dir = home.path().join(".claude/skills/some-skill");
+			std::fs::create_dir_all(&installed_dir).unwrap();
+			let pre_existing =
+				"---\nname: some-skill\ndescription: original\n---\n\
+				pre-existing body that must remain untouched\n"
+					.to_string();
+			std::fs::write(installed_dir.join("SKILL.md"), &pre_existing)
+				.unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+
+			// Global lock: `some-skill` is the locked name.
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_path = Some("SKILL.md".to_string());
+			lock.skills.insert("some-skill".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// Fetched repo declares a DIFFERENT name in SKILL.md frontmatter.
+			let fetched = tempfile::tempdir().unwrap();
+			std::fs::write(
+				fetched.path().join("SKILL.md"),
+				"---\nname: different-skill\ndescription: renamed upstream\n---\nnew body\n",
+			)
+			.unwrap();
+
+			let fetcher = LocalRepoFetcher {
+				root: fetched.path().to_path_buf(),
+			};
+			let req = ApplySkillUpdateRequest {
+				name: "some-skill".to_string(),
+				scope: "global".to_string(),
+				project_root: None,
+				confirm: Some(true),
+			};
+
+			let resp =
+				match rocket::tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap()
+					.block_on(apply_skill_update_inner(req, &fetcher))
+				{
+					Ok(json) => json.into_inner(),
+					Err(error) => {
+						panic!("apply should return Ok: {}", error.body.error)
+					}
+				};
+
+			// Restore HOME before asserting, so other tests aren't disturbed.
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			assert!(!resp.success, "rename must be rejected");
+			assert_eq!(resp.code.as_deref(), Some(SKILL_RENAMED_CODE));
+			let err = resp.error.expect("error message required");
+			assert!(err.contains("some-skill"), "error: {err}");
+			assert!(err.contains("different-skill"), "error: {err}");
+			assert!(
+				err.contains("Delete") && err.contains("install"),
+				"advice missing: {err}"
+			);
+
+			// Lock hash must not have been written; the installed target
+			// must be byte-for-byte unchanged.
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["some-skill"];
+			assert!(entry.content_hash.is_none());
+			let still_there =
+				std::fs::read_to_string(installed_dir.join("SKILL.md"))
+					.unwrap();
+			assert_eq!(still_there, pre_existing);
+		});
 	}
 }

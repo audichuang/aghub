@@ -3,4 +3,5 @@
 
 // The orchestration is consumed by the `GET /skills/check-updates` route
 // (`routes::skills_update`).
+pub(crate) mod rename;
 pub(crate) mod update_check;

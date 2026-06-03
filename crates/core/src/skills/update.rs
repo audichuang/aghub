@@ -19,6 +19,7 @@ pub enum UncheckableReason {
 pub enum SkillUpdateStatus {
 	UpToDate,
 	UpdateAvailable { current: String, available: String },
+	Renamed { new_name: String },
 	Uncheckable { reason: UncheckableReason },
 }
 

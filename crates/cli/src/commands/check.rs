@@ -24,8 +24,17 @@ use std::path::Path;
 #[allow(dead_code)]
 enum StatusView {
 	UpToDate,
-	UpdateAvailable { current: String, available: String },
-	Uncheckable { reason: String },
+	UpdateAvailable {
+		current: String,
+		available: String,
+	},
+	Renamed {
+		#[serde(rename = "newName")]
+		new_name: String,
+	},
+	Uncheckable {
+		reason: String,
+	},
 }
 
 /// One skill's name plus its flattened update status. Mirrors
