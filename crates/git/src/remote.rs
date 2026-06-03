@@ -1,6 +1,9 @@
 //! Remote git URL resolution and ref discovery.
 
-use crate::credentials::{inject_credentials, read_credentials, Credentials};
+use crate::credentials::{
+	inject_credentials, noninteractive_credentials, read_credentials,
+	Credentials,
+};
 use crate::error::{GitError, Result};
 
 /// Options shared by remote git operations.
@@ -87,9 +90,10 @@ fn discover_remote_refs(
 			gix::remote::Direction::Fetch,
 		)
 		.map_err(|e| GitError::clone_failed(e.to_string()))?;
-	let connection = remote
+	let mut connection = remote
 		.connect(gix::remote::Direction::Fetch)
 		.map_err(|e| GitError::clone_failed(e.to_string()))?;
+	connection.set_credentials(noninteractive_credentials);
 	let (ref_map, _) = connection
 		.ref_map(
 			gix::progress::Discard,

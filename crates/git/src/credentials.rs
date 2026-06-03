@@ -104,6 +104,31 @@ pub fn inject_credentials(url: &str, creds: &Credentials) -> Result<String> {
 	Ok(with_creds.to_string())
 }
 
+#[allow(clippy::result_large_err)]
+pub(crate) fn noninteractive_credentials(
+	action: gix::credentials::helper::Action,
+) -> gix::credentials::protocol::Result {
+	use gix::credentials::{helper, protocol};
+
+	let helper::Action::Get(mut context) = action else {
+		return Ok(None);
+	};
+
+	context.destructure_url_in_place(false)?;
+	let outcome = helper::Outcome {
+		username: context.username.clone(),
+		password: context.password.clone(),
+		oauth_refresh_token: context.oauth_refresh_token.clone(),
+		quit: true,
+		next: context.clone().into(),
+	};
+
+	protocol::helper_outcome_to_result(
+		Some(outcome),
+		helper::Action::Get(context),
+	)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -175,5 +200,28 @@ mod tests {
 
 		env::remove_var(GIT_USERNAME_ENV);
 		env::remove_var(GIT_PASSWORD_ENV);
+	}
+
+	#[test]
+	fn noninteractive_credentials_quits_without_prompting() {
+		let action = gix::credentials::helper::Action::get_for_url(
+			"https://github.com/private/repo.git",
+		);
+
+		let err = noninteractive_credentials(action).unwrap_err();
+
+		assert!(matches!(err, gix::credentials::protocol::Error::Quit));
+	}
+
+	#[test]
+	fn noninteractive_credentials_uses_url_credentials() {
+		let action = gix::credentials::helper::Action::get_for_url(
+			"https://user:token@github.com/private/repo.git",
+		);
+
+		let outcome = noninteractive_credentials(action).unwrap().unwrap();
+
+		assert_eq!(outcome.identity.username, "user");
+		assert_eq!(outcome.identity.password, "token");
 	}
 }

@@ -6,7 +6,7 @@ use gix::clone::PrepareFetch;
 use gix::create::Kind;
 use tempfile::TempDir;
 
-use crate::credentials::Credentials;
+use crate::credentials::{noninteractive_credentials, Credentials};
 use crate::error::{GitError, Result};
 use crate::remote::{resolve_remote_url, RemoteOptions};
 
@@ -98,7 +98,11 @@ fn prepare_fetch(
 		Default::default(),
 		Default::default(),
 	)
-	.map_err(|e| GitError::clone_failed(e.to_string()))?;
+	.map_err(|e| GitError::clone_failed(e.to_string()))?
+	.configure_connection(|connection| {
+		connection.set_credentials(noninteractive_credentials);
+		Ok(())
+	});
 
 	match branch {
 		Some(branch) => prep.with_ref_name(Some(branch)).map_err(
