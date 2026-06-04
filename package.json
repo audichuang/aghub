@@ -20,6 +20,6 @@
 	},
 	"nano-staged": {
 		"*.rs": "rustfmt",
-		"*.{js,ts,jsx,tsx,json,md,yml,yaml,css,html}": "prettier --write"
+		"*.{js,ts,jsx,tsx,json,md,yml,yaml,css,html}": "node scripts/format-staged.mjs"
 	}
 }
