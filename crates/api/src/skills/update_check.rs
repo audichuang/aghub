@@ -61,6 +61,9 @@ pub struct CheckOutput {
 	pub status: SkillUpdateStatus,
 	/// Local hash that should be written back into the lock before returning.
 	pub heal_hash: Option<String>,
+	/// Resolved tip OID to write back into the GLOBAL lock's `refCommit` after a
+	/// fresh fetch, so the next check can preflight. `None` outside global fetches.
+	pub heal_oid: Option<String>,
 }
 
 /// Group lock entries by [`SourceRef`] so each upstream is fetched once.
@@ -136,6 +139,9 @@ impl ResultCache {
 pub struct FetchedRepo {
 	/// Root of the fetched source tree (the containment root for `skill_path`).
 	pub root: PathBuf,
+	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded for the
+	/// global-lock `refCommit` heal so the next check can preflight.
+	pub oid: String,
 	/// Keep-alive guard for a temp dir, dropped when the repo is no longer needed.
 	pub _guard: Option<Arc<tempfile::TempDir>>,
 }
@@ -317,6 +323,7 @@ fn classify_member_from_probe(
 				reason: reason.clone(),
 			},
 			heal_hash: None,
+			heal_oid: None,
 		},
 		HashProbe::Fresh(fresh_hash) => {
 			let unknown = lock_hash_unknown(member.stored_hash.as_deref());
@@ -332,6 +339,7 @@ fn classify_member_from_probe(
 						reason: UncheckableReason::Local,
 					},
 					heal_hash: None,
+					heal_oid: None,
 				};
 			};
 			let status = compare_known_hashes(baseline, fresh_hash);
@@ -339,6 +347,7 @@ fn classify_member_from_probe(
 				key,
 				status,
 				heal_hash: unknown.then(|| baseline.to_string()),
+				heal_oid: None,
 			}
 		}
 	}
@@ -355,6 +364,7 @@ fn terminal_output(
 		},
 		status: status.clone(),
 		heal_hash: None,
+		heal_oid: None,
 	}
 }
 
@@ -554,7 +564,16 @@ pub async fn check_updates(
 						);
 					}
 					let cached = CachedGroup::Hashes(hashes);
-					out.extend(apply_cached_group(&members, &cached));
+					let mut group_out = apply_cached_group(&members, &cached);
+					// Self-heal refCommit for freshly-fetched GLOBAL entries so the
+					// next check can preflight; the VCS-tracked project lock is
+					// never silently mutated by a read-style check.
+					for (output, member) in group_out.iter_mut().zip(&members) {
+						if member.scope == "global" {
+							output.heal_oid = Some(repo.oid.clone());
+						}
+					}
+					out.extend(group_out);
 					deps.cache.put(sr.clone(), cached, now);
 				}
 			}
@@ -620,6 +639,9 @@ mod tests {
 	use super::*;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 	use std::sync::Mutex;
+
+	/// Fixed tip OID the test fetchers report, so heal-oid wiring is assertable.
+	const STUB_FETCH_OID: &str = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
 
 	#[test]
 	fn groups_same_source_ref_once() {
@@ -707,6 +729,7 @@ mod tests {
 			}
 			Ok(FetchedRepo {
 				root: self.root.clone().unwrap(),
+				oid: STUB_FETCH_OID.to_string(),
 				_guard: None,
 			})
 		}
@@ -903,6 +926,37 @@ mod tests {
 			out[0].status,
 			SkillUpdateStatus::UpdateAvailable { .. }
 		));
+	}
+
+	#[tokio::test]
+	async fn fetch_heals_ref_commit_for_global_member() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher,
+			ref_resolver: None,
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut g = entry("g", "o/r", Some("main"));
+		g.stored_hash = Some(hash.clone());
+		g.local_hash = Some(hash);
+		let out = check_updates(vec![g], deps).await;
+		assert_eq!(out.len(), 1);
+		// A fresh fetch records the resolved tip so the next check can preflight.
+		assert_eq!(out[0].heal_oid, Some(STUB_FETCH_OID.to_string()));
 	}
 
 	#[tokio::test]
@@ -1317,6 +1371,7 @@ mod tests {
 			self.current.fetch_sub(1, Ordering::SeqCst);
 			Ok(FetchedRepo {
 				root: self.root.clone(),
+				oid: STUB_FETCH_OID.to_string(),
 				_guard: None,
 			})
 		}

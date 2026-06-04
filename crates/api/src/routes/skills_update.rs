@@ -85,6 +85,7 @@ impl Fetcher for GitFetcher {
 		let root = materialized.path().to_path_buf();
 		Ok(FetchedRepo {
 			root,
+			oid: oid.to_string(),
 			_guard: Some(Arc::new(materialized)),
 		})
 	}
@@ -310,23 +311,30 @@ fn write_auto_healed_hashes(
 	project_root: Option<&Path>,
 ) -> Result<(), ApiError> {
 	let mut global_heals = HashMap::new();
+	let mut global_oid_heals = HashMap::new();
 	let mut project_heals = HashMap::new();
 	for output in outputs {
-		let Some(hash) = &output.heal_hash else {
-			continue;
-		};
-		match output.key.scope.as_str() {
-			"global" => {
-				global_heals.insert(output.key.name.clone(), hash.clone());
+		if let Some(hash) = &output.heal_hash {
+			match output.key.scope.as_str() {
+				"global" => {
+					global_heals.insert(output.key.name.clone(), hash.clone());
+				}
+				"project" => {
+					project_heals.insert(output.key.name.clone(), hash.clone());
+				}
+				_ => {}
 			}
-			"project" => {
-				project_heals.insert(output.key.name.clone(), hash.clone());
+		}
+		// refCommit heal is GLOBAL-only (the project lock is VCS-tracked) and
+		// independent of heal_hash (a known-stored entry has no heal_hash).
+		if output.key.scope == "global" {
+			if let Some(oid) = &output.heal_oid {
+				global_oid_heals.insert(output.key.name.clone(), oid.clone());
 			}
-			_ => {}
 		}
 	}
 
-	if !global_heals.is_empty() {
+	if !global_heals.is_empty() || !global_oid_heals.is_empty() {
 		skill::lock::global::modify_skill_lock_changed(|lock| {
 			let now = Utc::now().to_rfc3339();
 			let mut changed = false;
@@ -339,6 +347,15 @@ fn write_auto_healed_hashes(
 					if needs_hash || needs_folder_clear {
 						entry.content_hash = Some(hash.clone());
 						entry.skill_folder_hash.clear();
+						entry.updated_at = now.clone();
+						changed = true;
+					}
+				}
+			}
+			for (name, oid) in &global_oid_heals {
+				if let Some(entry) = lock.skills.get_mut(name) {
+					if entry.ref_commit.as_deref() != Some(oid.as_str()) {
+						entry.ref_commit = Some(oid.clone());
 						entry.updated_at = now.clone();
 						changed = true;
 					}
@@ -753,6 +770,7 @@ mod tests {
 			},
 			status: SkillUpdateStatus::UpToDate,
 			heal_hash: Some(hash.to_string()),
+			heal_oid: None,
 		}
 	}
 
@@ -815,6 +833,29 @@ mod tests {
 				Some("abc123")
 			);
 			assert_eq!(lock.skills["legacy"].skill_folder_hash, "");
+		});
+	}
+
+	#[test]
+	fn auto_heal_writes_global_ref_commit() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// A freshly-fetched global member carries heal_oid (and no heal_hash);
+			// write_auto_healed_hashes must still persist refCommit.
+			let mut output = healed_output("legacy", "global", "ignored");
+			output.heal_hash = None;
+			output.heal_oid = Some("deadbeefcafef00d".to_string());
+
+			assert!(write_auto_healed_hashes(&[output], None).is_ok());
+
+			let lock = skill::lock::global::read_skill_lock();
+			assert_eq!(
+				lock.skills["legacy"].ref_commit.as_deref(),
+				Some("deadbeefcafef00d")
+			);
 		});
 	}
 
