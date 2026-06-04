@@ -58,7 +58,9 @@ pub use fetch::{
 	resolve_default_branch, RefKind,
 };
 pub use redact::redact_url_userinfo;
-pub use remote::{list_remote_branches, RemoteOptions};
+pub use remote::{
+	list_remote_branches, resolve_ref_oid, select_ref_oid, RemoteOptions,
+};
 pub use source::{
 	normalize_repo_source_from_url, resolve_remote_source, RemoteSourceType,
 	ResolvedRemoteSource, SourceError,

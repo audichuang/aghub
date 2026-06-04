@@ -83,7 +83,11 @@ fn discover_remote_refs(
 		.map_err(|e| GitError::clone_failed(e.to_string()))?;
 	let remote = remote
 		.with_refspecs(
-			Some("+refs/heads/*:refs/remotes/origin/*"),
+			[
+				"+refs/heads/*:refs/remotes/origin/*",
+				"+refs/tags/*:refs/remotes/origin/tags/*",
+				"+HEAD:refs/remotes/origin/HEAD",
+			],
 			gix::remote::Direction::Fetch,
 		)
 		.map_err(|e| GitError::clone_failed(e.to_string()))?;
@@ -116,47 +120,67 @@ pub fn select_ref_oid(
 	// The commit OID a fully-qualified ref resolves to: for annotated tags
 	// (`Peeled`) this is the peeled `object` (the commit), never the tag object.
 	let oid_for = |full: &str| -> Option<String> {
-		for r in refs {
-			match r {
-				Ref::Direct {
-					full_ref_name,
-					object,
-				}
-				| Ref::Peeled {
-					full_ref_name,
-					object,
-					..
-				} => {
-					if full_ref_name.to_str_lossy().as_ref() == full {
-						return Some(object.to_string());
-					}
-				}
-				_ => {}
+		refs.iter().find_map(|r| match r {
+			Ref::Direct {
+				full_ref_name,
+				object,
 			}
-		}
-		None
+			| Ref::Peeled {
+				full_ref_name,
+				object,
+				..
+			} if full_ref_name.to_str_lossy().as_ref() == full => {
+				Some(object.to_string())
+			}
+			_ => None,
+		})
 	};
 
 	match wanted {
 		Some(name) => oid_for(&format!("refs/heads/{name}"))
 			.or_else(|| oid_for(&format!("refs/tags/{name}"))),
 		None => {
-			// Follow the remote HEAD symref to its resolved tip.
+			// The remote default branch is whatever HEAD points at. HEAD may be
+			// advertised as Symbolic (symref capability) OR as a plain Direct
+			// ref; match it by name in any resolved variant.
 			for r in refs {
-				if let Ref::Symbolic {
-					full_ref_name,
-					object,
-					..
-				} = r
-				{
-					if full_ref_name.to_str_lossy().as_ref() == "HEAD" {
-						return Some(object.to_string());
+				let (full_ref_name, object) = match r {
+					Ref::Direct {
+						full_ref_name,
+						object,
 					}
+					| Ref::Peeled {
+						full_ref_name,
+						object,
+						..
+					}
+					| Ref::Symbolic {
+						full_ref_name,
+						object,
+						..
+					} => (full_ref_name, object),
+					Ref::Unborn { .. } => continue,
+				};
+				if full_ref_name.to_str_lossy().as_ref() == "HEAD" {
+					return Some(object.to_string());
 				}
 			}
 			None
 		}
 	}
+}
+
+/// Resolve the tip commit OID (40-hex) of `wanted` on a remote via a ref
+/// advertisement (no object download). `wanted` is a branch or tag name, or
+/// `None` for the remote default branch. Credentials in `options` are injected
+/// so private repos work. Returns `Ok(None)` when the ref is not advertised.
+pub fn resolve_ref_oid(
+	options: RemoteOptions<'_>,
+	wanted: Option<&str>,
+) -> Result<Option<String>> {
+	let url = resolve_remote_url(&options, false)?;
+	let refs = discover_remote_refs(url.as_str())?;
+	Ok(select_ref_oid(&refs, wanted))
 }
 
 pub(crate) fn branches_from_remote_refs(
@@ -267,6 +291,39 @@ mod tests {
 		assert_eq!(
 			select_ref_oid(&refs, None),
 			Some("cccccccccccccccccccccccccccccccccccccccc".to_string())
+		);
+	}
+
+	#[test]
+	#[ignore = "network"]
+	fn resolve_ref_oid_default_branch_over_network() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let oid = resolve_ref_oid(
+			RemoteOptions::new("https://github.com/octocat/Hello-World.git"),
+			None,
+		)
+		.unwrap()
+		.expect("default branch should resolve to a tip oid");
+		assert_eq!(oid.len(), 40);
+		assert!(oid.bytes().all(|b| b.is_ascii_hexdigit()));
+	}
+
+	#[test]
+	fn select_ref_oid_none_matches_head_advertised_as_direct() {
+		// Some servers advertise HEAD as a plain Direct ref (no symref cap),
+		// not Symbolic — None must still resolve it.
+		use gix::protocol::handshake::Ref;
+		let oid = gix::ObjectId::from_hex(
+			b"00000000000000000000000000000000deadbeef",
+		)
+		.unwrap();
+		let refs = vec![Ref::Direct {
+			full_ref_name: "HEAD".into(),
+			object: oid,
+		}];
+		assert_eq!(
+			select_ref_oid(&refs, None),
+			Some("00000000000000000000000000000000deadbeef".to_string())
 		);
 	}
 
