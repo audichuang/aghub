@@ -11,7 +11,15 @@ import {
 	QuestionMarkCircleIcon,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
+import {
+	Alert,
+	Button,
+	Chip,
+	Spinner,
+	toast,
+	ToggleButton,
+	ToggleButtonGroup,
+} from "@heroui/react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
 	useMutation,
@@ -33,6 +41,11 @@ import { useAgentAvailability } from "../../hooks/use-agent-availability";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
 import { supportsSkillMutation } from "../../lib/agent-capabilities";
+import {
+	DEFAULT_INSTALL_LAYOUT,
+	type InstallLayout,
+	isUniversalLayout,
+} from "../../lib/install-layout";
 import { cn } from "../../lib/utils";
 import { queryKeys } from "../../requests/keys";
 import { applySkillUpdateMutationOptions } from "../../requests/skills";
@@ -261,6 +274,9 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	);
 	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
+	const [installLayout, setInstallLayout] = useState<InstallLayout>(
+		DEFAULT_INSTALL_LAYOUT,
+	);
 	const [installingSkillPath, setInstallingSkillPath] = useState<
 		string | null
 	>(null);
@@ -295,11 +311,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const updateProjectRoot =
 		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
 	const shouldCheckOrphans =
-		!isLoading &&
-		!isFetching &&
-		Boolean(data) &&
-		!data?.needsCredential &&
-		!hasVisibleSkills;
+		!isLoading && !isFetching && Boolean(data) && !data?.needsCredential;
 	const installAgentIds = useMemo(
 		() =>
 			availableAgents
@@ -340,6 +352,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			}),
 		enabled: shouldCheckOrphans,
 	});
+	const orphanLockCount = prunePreviewQuery.data?.pruned.length ?? 0;
 
 	const pruneLockMutation = useMutation({
 		mutationFn: () =>
@@ -520,7 +533,10 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			const scan = await api.skills.gitScan({
 				url: row.sourceUrl,
 				credential_id: null,
-				branch: null,
+				// Install from the SAME ref the diff was computed against (the
+				// source's recorded tag/branch), so a tag-based install does not
+				// silently pull `main` and disagree with the 3-state diff.
+				branch: data?.gitRef ?? null,
 				session_id: null,
 			});
 			const wantedPaths = new Set(skills.map(installPathFor));
@@ -539,7 +555,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 				agents: installAgentIds,
 				scope: updateScope,
 				project_root: updateProjectRoot,
-				universal: true,
+				universal: isUniversalLayout(installLayout),
 			});
 			const failed = result.results.filter((entry) => !entry.success);
 
@@ -624,11 +640,57 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 					</Alert>
 				) : (
 					<div className="space-y-6">
+						<div className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
+							<div className="min-w-0 space-y-0.5">
+								<span className="text-sm font-medium text-foreground">
+									{t("installLayoutLabel")}
+								</span>
+								<span className="block text-xs text-muted">
+									{t("installLayoutHint")}
+								</span>
+							</div>
+							<ToggleButtonGroup
+								selectedKeys={[installLayout]}
+								onSelectionChange={(keys) => {
+									const next = [...keys][0];
+									if (
+										next === "isolation" ||
+										next === "universal"
+									) {
+										setInstallLayout(next);
+									}
+								}}
+								selectionMode="single"
+								disallowEmptySelection
+								size="sm"
+								className="shrink-0"
+							>
+								<ToggleButton
+									id="isolation"
+									aria-label={t("installLayoutIsolation")}
+								>
+									{t("installLayoutIsolation")}
+								</ToggleButton>
+								<ToggleButtonGroup.Separator />
+								<ToggleButton
+									id="universal"
+									aria-label={t("installLayoutUniversal")}
+								>
+									{t("installLayoutUniversal")}
+								</ToggleButton>
+							</ToggleButtonGroup>
+						</div>
+						{hasVisibleSkills && orphanLockCount > 0 && (
+							<SourceOrphanLockAlert
+								prunedCount={orphanLockCount}
+								isChecking={prunePreviewQuery.isFetching}
+								isCleaning={pruneLockMutation.isPending}
+								onClean={() => pruneLockMutation.mutate()}
+							/>
+						)}
 						{!hasVisibleSkills && (
 							<SourceEmptyState
-								prunedCount={
-									prunePreviewQuery.data?.pruned.length ?? 0
-								}
+								prunedCount={orphanLockCount}
 								isChecking={prunePreviewQuery.isFetching}
 								isCleaning={pruneLockMutation.isPending}
 								hasError={prunePreviewQuery.isError}
@@ -829,6 +891,49 @@ interface SourceEmptyStateProps {
 	onRetry: () => void;
 }
 
+interface SourceOrphanLockAlertProps {
+	prunedCount: number;
+	isChecking: boolean;
+	isCleaning: boolean;
+	onClean: () => void;
+}
+
+function SourceOrphanLockAlert({
+	prunedCount,
+	isChecking,
+	isCleaning,
+	onClean,
+}: SourceOrphanLockAlertProps) {
+	const { t } = useTranslation();
+	const orphanHint =
+		prunedCount === 1
+			? t("sourceOrphanHintOne", { count: prunedCount })
+			: t("sourceOrphanHintMany", { count: prunedCount });
+
+	return (
+		<Alert status="warning">
+			<Alert.Indicator />
+			<Alert.Content>
+				<Alert.Title>{t("sourceOrphanTitle")}</Alert.Title>
+				<Alert.Description>{orphanHint}</Alert.Description>
+				<div className="mt-3">
+					<Button
+						size="sm"
+						variant="secondary"
+						isDisabled={isChecking || isCleaning}
+						onPress={onClean}
+					>
+						<TrashIcon className="size-3.5" />
+						{isCleaning
+							? t("sourceCleaningOrphans")
+							: t("sourceCleanOrphans")}
+					</Button>
+				</div>
+			</Alert.Content>
+		</Alert>
+	);
+}
+
 function SourceEmptyState({
 	prunedCount,
 	isChecking,
@@ -861,43 +966,27 @@ function SourceEmptyState({
 		);
 	}
 
+	if (hasOrphans) {
+		return (
+			<SourceOrphanLockAlert
+				prunedCount={prunedCount}
+				isChecking={isChecking}
+				isCleaning={isCleaning}
+				onClean={onClean}
+			/>
+		);
+	}
+
 	return (
 		<Alert status="warning">
 			<Alert.Indicator />
 			<Alert.Content>
-				<Alert.Title>
-					{hasOrphans
-						? t("sourceOrphanTitle")
-						: t("sourceEmptyDiffTitle")}
-				</Alert.Title>
+				<Alert.Title>{t("sourceEmptyDiffTitle")}</Alert.Title>
 				<Alert.Description>
 					{isChecking
 						? t("sourceCheckingOrphans")
-						: hasOrphans
-							? prunedCount === 1
-								? t("sourceOrphanHintOne", {
-										count: prunedCount,
-									})
-								: t("sourceOrphanHintMany", {
-										count: prunedCount,
-									})
-							: t("sourceEmptyDiffHint")}
+						: t("sourceEmptyDiffHint")}
 				</Alert.Description>
-				{hasOrphans && (
-					<div className="mt-3">
-						<Button
-							size="sm"
-							variant="secondary"
-							isDisabled={isChecking || isCleaning}
-							onPress={onClean}
-						>
-							<TrashIcon className="size-3.5" />
-							{isCleaning
-								? t("sourceCleaningOrphans")
-								: t("sourceCleanOrphans")}
-						</Button>
-					</div>
-				)}
 			</Alert.Content>
 		</Alert>
 	);

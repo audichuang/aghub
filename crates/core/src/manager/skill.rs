@@ -49,6 +49,7 @@ fn remove_skill_path(
 	safe_name: &str,
 	is_symlink: bool,
 	target_dir: Option<&Path>,
+	roots: &[PathBuf],
 ) -> Result<()> {
 	if is_symlink {
 		// Universal layout: the symlink at `<target_dir>/<safe_name>` is what
@@ -84,6 +85,18 @@ fn remove_skill_path(
 	let is_named_dir =
 		parent.file_name().and_then(|n| n.to_str()) == Some(safe_name);
 	if is_named_dir {
+		// Containment guard: never `remove_dir_all` a directory that escapes the
+		// allow-listed skill roots (canonicalize-escape protection), mirroring
+		// the planned-removal path.
+		if crate::skills::removal::assert_contained(parent, roots).is_none() {
+			return Err(ConfigError::Io(std::io::Error::new(
+				std::io::ErrorKind::PermissionDenied,
+				format!(
+					"Refusing to remove '{}': outside allow-listed skill roots",
+					parent.display()
+				),
+			)));
+		}
 		std::fs::remove_dir_all(parent).map_err(|e| {
 			ConfigError::Io(std::io::Error::new(
 				e.kind(),
@@ -212,6 +225,12 @@ impl ConfigManager {
 	pub fn update_skill(&mut self, name: &str, skill: Skill) -> Result<()> {
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
+		// Captured before the mutable borrow below so the universal-rename relink
+		// (which needs the in-scope agent dirs + link style) can run without
+		// re-borrowing `self`.
+		let scope = self.scope;
+		let write_scope = self.write_scope;
+		let project_root = self.project_root.clone();
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})?;
@@ -251,6 +270,10 @@ impl ConfigManager {
 			};
 
 			let mut final_file_path = path.clone();
+			// A universal skill is rename-relinked (per-agent symlinks re-pointed)
+			// and keeps its symlink layout; a copy skill is just renamed in place.
+			let is_universal = existing_skill.canonical_path.is_some();
+			let mut relinked_universal = false;
 
 			// Handle rename
 			if name != skill.name {
@@ -259,21 +282,25 @@ impl ConfigManager {
 					if parent.file_name().and_then(|n| n.to_str())
 						== Some(&safe_old_name)
 					{
-						let new_parent = parent.with_file_name(&safe_new_name);
-						std::fs::rename(parent, &new_parent).map_err(|e| {
-							ConfigError::Io(std::io::Error::new(
-								e.kind(),
-								format!(
-									"Failed to rename skill \
-										 directory '{}' -> '{}': {}",
-									parent.display(),
-									new_parent.display(),
-									e
-								),
-							))
-						})?;
-						final_file_path =
-							new_parent.join(path.file_name().unwrap());
+						// project scope → relative links, global → absolute
+						// (mirrors `universal_install_prep`).
+						let use_relative = matches!(
+							write_scope,
+							crate::models::ResourceScope::ProjectOnly
+						) && project_root.is_some();
+						// Rename the master + relink referrers as one transaction:
+						// a failed relink rolls back so referrers never dangle.
+						final_file_path = rename_skill_master(
+							parent,
+							path.file_name().unwrap(),
+							&safe_old_name,
+							&safe_new_name,
+							is_universal,
+							scope,
+							project_root.as_deref(),
+							use_relative,
+						)?;
+						relinked_universal = is_universal;
 					} else if path.file_name().and_then(|n| n.to_str())
 						== Some(&format!("{safe_old_name}.md"))
 					{
@@ -309,6 +336,12 @@ impl ConfigManager {
 			if final_file_path == path {
 				fs_skill.source_path = existing_skill.source_path.clone();
 				fs_skill.canonical_path = existing_skill.canonical_path.clone();
+			} else if relinked_universal {
+				// Universal rename: source + canonical both point at the renamed
+				// master, preserving the symlink layout for later removal.
+				let md = final_file_path.to_string_lossy().to_string();
+				fs_skill.source_path = Some(md.clone());
+				fs_skill.canonical_path = Some(md);
 			} else {
 				fs_skill.source_path =
 					Some(final_file_path.to_string_lossy().to_string());
@@ -329,6 +362,19 @@ impl ConfigManager {
 	pub fn remove_skill(&mut self, name: &str) -> Result<()> {
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
+		// Allow-listed roots for the containment guard, computed before the
+		// mutable borrow below.
+		let roots = {
+			let all_agent_dirs =
+				crate::skills::removal::agent_skill_dirs_in_scope(
+					self.scope,
+					self.project_root.as_deref(),
+				);
+			crate::skills::removal::allowed_skill_roots(
+				&all_agent_dirs,
+				self.project_root.as_deref(),
+			)
+		};
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})?;
@@ -358,6 +404,7 @@ impl ConfigManager {
 					&safe_name,
 					is_symlink,
 					target_dir.as_deref(),
+					&roots,
 				)?;
 			}
 		}
@@ -601,6 +648,193 @@ impl ConfigManager {
 	}
 }
 
+/// In-scope agent skill dirs whose `<dir>/<safe_old>` entry is a symlink that
+/// resolves to `old_real` (the already-canonicalized old master) — i.e. the
+/// per-agent views that point at the universal master and must be re-pointed
+/// after the master is renamed. MUST be called BEFORE the master is renamed
+/// (the per-link `canonicalize` resolves through the still-present master).
+fn universal_relink_referrers(
+	old_real: &Path,
+	safe_old: &str,
+	agent_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
+	agent_dirs
+		.iter()
+		.filter(|dir| {
+			let link = dir.join(safe_old);
+			let Ok(meta) = std::fs::symlink_metadata(&link) else {
+				return false;
+			};
+			meta.file_type().is_symlink()
+				&& std::fs::canonicalize(&link)
+					.map(|resolved| resolved == *old_real)
+					.unwrap_or(false)
+		})
+		.cloned()
+		.collect()
+}
+
+/// After a universal master is renamed to `new_canonical`, unlink each agent's
+/// now-dangling old-name symlink and recreate a new-name symlink pointing at the
+/// renamed master (relative/absolute per `use_relative`). Keeps the symlink
+/// layout intact so the skill still works for every linked agent.
+fn universal_relink_agents(
+	new_canonical: &Path,
+	referrers: &[PathBuf],
+	safe_old: &str,
+	use_relative: bool,
+) -> Result<()> {
+	for dir in referrers {
+		let old_link = dir.join(safe_old);
+		if let Ok(meta) = std::fs::symlink_metadata(&old_link) {
+			if meta.file_type().is_symlink() {
+				std::fs::remove_file(&old_link).map_err(|e| {
+					ConfigError::Io(std::io::Error::new(
+						e.kind(),
+						format!(
+							"Failed to unlink stale symlink '{}': {}",
+							old_link.display(),
+							e
+						),
+					))
+				})?;
+			}
+		}
+	}
+	crate::skills::install_layout::link_agents_to_canonical(
+		new_canonical,
+		referrers,
+		use_relative,
+	)
+	.map_err(ConfigError::Io)?;
+	Ok(())
+}
+
+/// Rename a skill's master directory and, for a universal skill, re-point its
+/// referrers. The rename and the relink are one transaction: if the relink
+/// fails, the master is renamed back and the old-name symlinks restored, so a
+/// partial failure can never leave referrers dangling. The transaction boundary
+/// is deliberately rename + relink only — a later SKILL.md write or config save
+/// runs against an already-consistent filesystem (see
+/// docs/adr/0001-transactional-universal-skill-rename.md). Returns the SKILL.md
+/// path inside the renamed master.
+#[allow(clippy::too_many_arguments)]
+fn rename_skill_master(
+	old_master: &Path,
+	file_name: &std::ffi::OsStr,
+	safe_old: &str,
+	safe_new: &str,
+	is_universal: bool,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+	use_relative: bool,
+) -> Result<PathBuf> {
+	// Record the referrers BEFORE the rename: each per-link `canonicalize`
+	// resolves through the still-present master. Resolve the old master first
+	// and ABORT if it cannot be resolved — better to fail than to rename it and
+	// silently orphan every per-agent symlink.
+	let referrers = if is_universal {
+		let old_real = std::fs::canonicalize(old_master).map_err(|e| {
+			ConfigError::Io(std::io::Error::new(
+				e.kind(),
+				format!(
+					"Failed to resolve skill master '{}': {e}",
+					old_master.display()
+				),
+			))
+		})?;
+		let agent_dirs = crate::skills::removal::agent_skill_dirs_in_scope(
+			scope,
+			project_root,
+		);
+		universal_relink_referrers(&old_real, safe_old, &agent_dirs)
+	} else {
+		Vec::new()
+	};
+
+	let new_master = old_master.with_file_name(safe_new);
+	// Never rename onto an existing skill dir: `fs::rename` onto an empty target
+	// would silently clobber it — a real data-loss risk for the shared `.agents`
+	// universal master.
+	if new_master.exists() {
+		return Err(ConfigError::resource_exists("skill", safe_new));
+	}
+	std::fs::rename(old_master, &new_master).map_err(|e| {
+		ConfigError::Io(std::io::Error::new(
+			e.kind(),
+			format!(
+				"Failed to rename skill directory '{}' -> '{}': {e}",
+				old_master.display(),
+				new_master.display()
+			),
+		))
+	})?;
+
+	if is_universal {
+		if let Err(relink_err) = universal_relink_agents(
+			&new_master,
+			&referrers,
+			safe_old,
+			use_relative,
+		) {
+			return Err(rollback_master_rename(
+				&new_master,
+				old_master,
+				&referrers,
+				safe_new,
+				use_relative,
+				relink_err,
+			));
+		}
+	}
+	Ok(new_master.join(file_name))
+}
+
+/// Undo a partial universal rename: put the master back, drop any half-created
+/// new-name symlinks, and restore the old-name symlinks. Returns the original
+/// relink error on success; if the rollback itself fails, returns a compound
+/// error naming both failures and the master path that needs manual recovery.
+#[allow(clippy::too_many_arguments)]
+fn rollback_master_rename(
+	new_master: &Path,
+	old_master: &Path,
+	referrers: &[PathBuf],
+	safe_new: &str,
+	use_relative: bool,
+	relink_err: ConfigError,
+) -> ConfigError {
+	let do_rollback = || -> std::io::Result<()> {
+		// Put the master back first so old-name symlinks resolve again.
+		std::fs::rename(new_master, old_master)?;
+		// Remove any new-name symlinks the partial relink managed to create
+		// (they now point at the vanished new_master).
+		for dir in referrers {
+			let new_link = dir.join(safe_new);
+			if let Ok(meta) = std::fs::symlink_metadata(&new_link) {
+				if meta.file_type().is_symlink() {
+					std::fs::remove_file(&new_link)?;
+				}
+			}
+		}
+		// Recreate any old-name symlinks the partial relink removed; ones still
+		// present resolve to the restored master and are left untouched.
+		crate::skills::install_layout::link_agents_to_canonical(
+			old_master,
+			referrers,
+			use_relative,
+		)?;
+		Ok(())
+	};
+	match do_rollback() {
+		Ok(()) => relink_err,
+		Err(rb_err) => ConfigError::Io(std::io::Error::other(format!(
+			"skill relink failed ({relink_err}) and rollback also failed \
+			 ({rb_err}); the skill master may need manual recovery at '{}'",
+			old_master.display()
+		))),
+	}
+}
+
 /// Serialize frontmatter fields as structured YAML via serde_yaml
 fn serialize_frontmatter(skill: &Skill) -> String {
 	let mut map = BTreeMap::new();
@@ -687,6 +921,46 @@ mod tests {
 			.file_type()
 			.is_symlink());
 		assert!(link.join("SKILL.md").exists());
+	}
+
+	#[test]
+	fn remove_skill_path_refuses_dir_outside_allowed_roots() {
+		// Defense-in-depth: the legacy copy-removal helper must never
+		// `remove_dir_all` a directory that escapes the allow-listed skill roots,
+		// even if a crafted `source_path` points outside them.
+		let tmp = tempfile::tempdir().unwrap();
+		let outside = tmp.path().join("outside/foo");
+		std::fs::create_dir_all(&outside).unwrap();
+		std::fs::write(outside.join("SKILL.md"), "x").unwrap();
+		let allowed = tmp.path().join("allowed");
+		std::fs::create_dir_all(&allowed).unwrap();
+		let roots = vec![allowed];
+
+		let res = remove_skill_path(
+			&outside.join("SKILL.md"),
+			"foo",
+			false,
+			None,
+			&roots,
+		);
+
+		assert!(res.is_err(), "must refuse to remove a dir outside roots");
+		assert!(outside.exists(), "out-of-root dir must survive");
+	}
+
+	#[test]
+	fn remove_skill_path_removes_contained_dir() {
+		let tmp = tempfile::tempdir().unwrap();
+		let skills = tmp.path().join("skills");
+		let foo = skills.join("foo");
+		std::fs::create_dir_all(&foo).unwrap();
+		std::fs::write(foo.join("SKILL.md"), "x").unwrap();
+		let roots = vec![skills.clone()];
+
+		remove_skill_path(&foo.join("SKILL.md"), "foo", false, None, &roots)
+			.unwrap();
+
+		assert!(!foo.exists(), "a contained skill dir is removed normally");
 	}
 
 	#[test]
@@ -889,6 +1163,266 @@ mod tests {
 				.iter()
 				.any(|s| s.name == "multi-ref"),
 			"Cursor should still find multi-ref after Claude's removal"
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// P1 fix: renaming a universal skill must re-point the per-agent symlinks
+	// and preserve the symlink layout (canonical_path), not dangle + downgrade.
+	// -----------------------------------------------------------------------
+
+	#[cfg(unix)]
+	#[test]
+	fn update_skill_universal_rename_relinks_agents_and_keeps_canonical() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("old-uni");
+		skill.description = Some("universal".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Rename old-uni -> new-uni via the update path.
+		let mut renamed = Skill::new("new-uni");
+		renamed.description = Some("universal".to_string());
+		mgr.update_skill("old-uni", renamed).unwrap();
+
+		// Canonical master is renamed (old gone, new present).
+		assert!(root.join(".agents/skills/new-uni/SKILL.md").exists());
+		assert!(!root.join(".agents/skills/old-uni").exists());
+
+		// The old-name agent symlink is fully removed (not left dangling).
+		assert!(
+			std::fs::symlink_metadata(root.join(".claude/skills/old-uni"))
+				.is_err(),
+			"old-name symlink must be removed, not left dangling"
+		);
+
+		// A new-name agent symlink exists and resolves to the renamed master.
+		let new_link = root.join(".claude/skills/new-uni");
+		let meta = std::fs::symlink_metadata(&new_link)
+			.expect("new-name agent symlink must exist");
+		assert!(
+			meta.file_type().is_symlink(),
+			"new agent path must be a symlink"
+		);
+		assert!(
+			new_link.join("SKILL.md").exists(),
+			"symlink must resolve through to the renamed master"
+		);
+
+		// The layout stays "symlink": canonical_path is preserved (not None),
+		// so later layout-aware removal still classifies it correctly.
+		let s = mgr.get_skill("new-uni").expect("renamed skill in config");
+		assert!(
+			s.canonical_path.is_some(),
+			"canonical_path must be preserved on a universal rename"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn update_skill_rename_refuses_when_target_dir_already_exists() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("collide-old");
+		skill.description = Some("u".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// A DIFFERENT (e.g. another skill's) master already occupies the target
+		// name. `fs::rename` onto an empty target dir would silently succeed and
+		// clobber it; the rename must refuse instead.
+		std::fs::create_dir_all(root.join(".agents/skills/collide-new"))
+			.unwrap();
+
+		let res = mgr.update_skill("collide-old", Skill::new("collide-new"));
+
+		assert!(res.is_err(), "must refuse to rename onto an existing dir");
+		assert!(
+			root.join(".agents/skills/collide-old/SKILL.md").exists(),
+			"the original master must be preserved on conflict"
+		);
+	}
+
+	/// Whether 0o555 perms actually block writes for this process. Returns false
+	/// when running as root (perm bits are bypassed), so permission-injection
+	/// tests can skip instead of failing spuriously in root CI.
+	#[cfg(unix)]
+	fn perms_enforced(under: &std::path::Path) -> bool {
+		use std::os::unix::fs::PermissionsExt;
+		let probe = under.join(".perm-probe");
+		std::fs::create_dir(&probe).unwrap();
+		std::fs::set_permissions(
+			&probe,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+		let blocked = std::fs::write(probe.join("x"), b"x").is_err();
+		std::fs::set_permissions(
+			&probe,
+			std::fs::Permissions::from_mode(0o755),
+		)
+		.unwrap();
+		std::fs::remove_dir_all(&probe).ok();
+		blocked
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn update_skill_universal_rename_rolls_back_when_relink_fails() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		if !perms_enforced(root) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("roll-old");
+		skill.description = Some("u".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		let referrer_dir = root.join(".claude/skills");
+		assert!(
+			std::fs::symlink_metadata(referrer_dir.join("roll-old"))
+				.unwrap()
+				.file_type()
+				.is_symlink(),
+			"precondition: referrer symlink exists"
+		);
+
+		// Make the referrer dir read-only so the relink fails AFTER the master
+		// has been renamed — the partial-failure window the rollback must close.
+		let orig = std::fs::metadata(&referrer_dir).unwrap().permissions();
+		std::fs::set_permissions(
+			&referrer_dir,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let res = mgr.update_skill("roll-old", Skill::new("roll-new"));
+
+		// Restore perms before asserting so tempdir teardown always works.
+		std::fs::set_permissions(&referrer_dir, orig).unwrap();
+
+		assert!(res.is_err(), "a failed relink must surface as an error");
+		assert!(
+			root.join(".agents/skills/roll-old/SKILL.md").exists(),
+			"rollback must rename the master back to its old name"
+		);
+		assert!(
+			!root.join(".agents/skills/roll-new").exists(),
+			"no half-renamed master may be left behind"
+		);
+		let link = referrer_dir.join("roll-old");
+		assert!(
+			std::fs::symlink_metadata(&link)
+				.map(|m| m.file_type().is_symlink())
+				.unwrap_or(false),
+			"the surviving referrer symlink must remain"
+		);
+		assert!(
+			link.join("SKILL.md").exists(),
+			"the referrer must still resolve to the master (not dangling)"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn update_skill_universal_rename_rollback_restores_removed_referrer() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		if !perms_enforced(root) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("roll2-old");
+		skill.description = Some("u".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Add a SECOND referrer in RooCode's project skills dir (it sorts after
+		// Claude in AgentType::ALL, so Claude's symlink is removed first, then
+		// RooCode's removal fails — forcing the rollback to RESTORE Claude's
+		// already-removed symlink).
+		let master = root.join(".agents/skills/roll2-old");
+		let roo_dir = root.join(".roo/skills");
+		std::fs::create_dir_all(&roo_dir).unwrap();
+		std::os::unix::fs::symlink(&master, roo_dir.join("roll2-old")).unwrap();
+		assert_eq!(
+			std::fs::canonicalize(roo_dir.join("roll2-old")).unwrap(),
+			std::fs::canonicalize(&master).unwrap(),
+			"precondition: second referrer resolves to the master"
+		);
+
+		let claude_dir = root.join(".claude/skills");
+		let roo_orig = std::fs::metadata(&roo_dir).unwrap().permissions();
+		std::fs::set_permissions(
+			&roo_dir,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let res = mgr.update_skill("roll2-old", Skill::new("roll2-new"));
+
+		std::fs::set_permissions(&roo_dir, roo_orig).unwrap();
+
+		assert!(res.is_err(), "a failed relink must surface as an error");
+		assert!(
+			master.join("SKILL.md").exists(),
+			"rollback must rename the master back to its old name"
+		);
+		// The FIRST referrer (Claude) had its symlink removed before the failure;
+		// rollback must have recreated it pointing back at the master.
+		let claude_link = claude_dir.join("roll2-old");
+		assert!(
+			std::fs::symlink_metadata(&claude_link)
+				.map(|m| m.file_type().is_symlink())
+				.unwrap_or(false),
+			"the removed referrer symlink must be restored"
+		);
+		assert!(
+			claude_link.join("SKILL.md").exists(),
+			"the restored referrer must resolve to the master"
 		);
 	}
 

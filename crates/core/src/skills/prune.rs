@@ -77,8 +77,16 @@ where
 {
 	let mut names = BTreeSet::new();
 	for dir in dirs {
-		if !dir.exists() {
-			continue; // a missing agent dir simply holds no skills
+		match dir.try_exists() {
+			// Genuinely absent: a missing agent dir simply holds no skills.
+			Ok(false) => continue,
+			Ok(true) => {}
+			// Inaccessible (EACCES on a parent, ENOTDIR, a dropped network
+			// mount, …): we CANNOT prove the dir holds no skills, so abort the
+			// whole scan rather than treat it as empty. `Path::exists()` would
+			// collapse this into `false` and let a confirmed prune wipe the lock
+			// for skills that merely live in a currently-unreadable location.
+			Err(_) => return Err(ScanError::PermissionDenied(dir.clone())),
 		}
 		for path in scan(dir)? {
 			if let Some(name) = path.file_name().and_then(|s| s.to_str()) {
@@ -437,6 +445,67 @@ mod tests {
 		let got =
 			collect_disk_dir_names(&[missing], top_level_skill_dirs).unwrap();
 		assert!(got.is_empty());
+	}
+
+	// Unix-only: the deterministic "inaccessible dir" proxy here is a path whose
+	// ancestor is a regular file, which yields ENOTDIR (-> try_exists Err) on
+	// Unix. Windows maps `<file>\sub` to Ok(false) (genuinely-absent), so the
+	// abort cannot be triggered this way there; the real Windows inaccessibility
+	// case (ACL/EACCES) needs privileged setup. The PRODUCTION try_exists() guard
+	// still applies cross-platform — only this test's simulation is Unix-specific.
+	#[cfg(unix)]
+	#[test]
+	fn collect_disk_dir_names_aborts_on_inaccessible_dir() {
+		// A path whose ancestor is a regular file is INACCESSIBLE (ENOTDIR), as
+		// opposed to genuinely absent. It must abort the scan (so the caller
+		// never prunes), not be silently treated as "this dir holds no skills".
+		// `Path::exists()` collapses both to `false`; `try_exists()` distinguishes
+		// them. (ENOTDIR stands in deterministically for the real-world EACCES of
+		// an unreadable parent / dropped network mount, with no chmod needed.)
+		let root = tempdir().unwrap();
+		let file = root.path().join("not-a-dir");
+		std::fs::write(&file, "x").unwrap();
+		let inaccessible = file.join("subdir");
+
+		let res = collect_disk_dir_names(
+			std::slice::from_ref(&inaccessible),
+			top_level_skill_dirs,
+		);
+
+		assert!(
+			matches!(res, Err(ScanError::PermissionDenied(_))),
+			"inaccessible dir must abort the scan, got {res:?}"
+		);
+	}
+
+	// Unix-only for the same reason as the previous test (ENOTDIR proxy).
+	#[cfg(unix)]
+	#[test]
+	fn prune_does_not_wipe_lock_when_a_scope_dir_is_inaccessible() {
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock("keep", global_entry()).unwrap();
+		let before = std::fs::read(skill::get_skill_lock_path()).unwrap();
+
+		// Every configured scope dir is inaccessible (ENOTDIR via a file ancestor).
+		let root = tempdir().unwrap();
+		let file = root.path().join("not-a-dir");
+		std::fs::write(&file, "x").unwrap();
+		let inaccessible = file.join("subdir");
+
+		let res = prune_lock_from_dirs(
+			PruneScope::Global,
+			std::slice::from_ref(&inaccessible),
+			None,
+			top_level_skill_dirs,
+		);
+
+		assert!(matches!(res, Err(PruneError::Scan(_))));
+		let after = std::fs::read(skill::get_skill_lock_path()).unwrap();
+		assert_eq!(
+			before, after,
+			"an inaccessible scan must not mutate the lock"
+		);
+		assert!(skill::read_skill_lock().skills.contains_key("keep"));
 	}
 
 	#[test]

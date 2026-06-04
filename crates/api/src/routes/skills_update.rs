@@ -310,16 +310,7 @@ fn write_auto_healed_hashes(
 			let mut changed = false;
 			for (name, hash) in &global_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
-					let needs_hash =
-						entry.content_hash.as_deref() != Some(hash.as_str());
-					let needs_folder_clear =
-						!entry.skill_folder_hash.is_empty();
-					if needs_hash || needs_folder_clear {
-						entry.content_hash = Some(hash.clone());
-						entry.skill_folder_hash.clear();
-						entry.updated_at = now.clone();
-						changed = true;
-					}
+					changed |= entry.apply_content_hash(hash, &now);
 				}
 			}
 			((), changed)
@@ -345,10 +336,7 @@ fn write_auto_healed_hashes(
 			let mut changed = false;
 			for (name, hash) in &project_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
-					if entry.computed_hash != *hash {
-						entry.computed_hash = hash.clone();
-						changed = true;
-					}
+					changed |= entry.apply_computed_hash(hash);
 				}
 			}
 			((), changed)
@@ -446,9 +434,7 @@ pub(crate) fn update_lock_hash(
 			let Some(entry) = lock.skills.get_mut(name) else {
 				return Err("Skill is not in global lock".to_string());
 			};
-			entry.content_hash = Some(hash.to_string());
-			entry.skill_folder_hash.clear();
-			entry.updated_at = Utc::now().to_rfc3339();
+			entry.apply_content_hash(hash, &Utc::now().to_rfc3339());
 			Ok(())
 		})
 		.map_err(|e| format!("Failed to update global lock: {e}"))?,
@@ -461,7 +447,7 @@ pub(crate) fn update_lock_hash(
 				let Some(entry) = lock.skills.get_mut(name) else {
 					return Err("Skill is not in project lock".to_string());
 				};
-				entry.computed_hash = hash.to_string();
+				entry.apply_computed_hash(hash);
 				Ok(())
 			})
 			.map_err(|e| format!("Failed to update project lock: {e}"))?

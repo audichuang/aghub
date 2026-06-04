@@ -123,6 +123,22 @@ impl SkillLockEntry {
 			content_hash: None,
 		}
 	}
+
+	/// Record aghub's freshly computed Source hash, in the v3 lock's native
+	/// representation: store it in `content_hash`, empty `skill_folder_hash`
+	/// (the two are never both populated), and bump `updated_at` to `now`.
+	/// Returns whether anything changed.
+	pub fn apply_content_hash(&mut self, hash: &str, now: &str) -> bool {
+		let already_set = self.content_hash.as_deref() == Some(hash);
+		let folder_clean = self.skill_folder_hash.is_empty();
+		if already_set && folder_clean {
+			return false;
+		}
+		self.content_hash = Some(hash.to_string());
+		self.skill_folder_hash.clear();
+		self.updated_at = now.to_string();
+		true
+	}
 }
 
 #[cfg(test)]
@@ -167,5 +183,59 @@ mod tests {
 		let e: super::SkillLockEntry = serde_json::from_str(json).unwrap();
 		assert_eq!(e.content_hash, None);
 		assert_eq!(e.skill_folder_hash, "");
+	}
+
+	#[test]
+	fn apply_content_hash_sets_content_clears_folder_bumps_time() {
+		// An npx-written entry carries a GitHub tree SHA in skill_folder_hash.
+		// Applying aghub's source hash must store it in content_hash, empty the
+		// folder hash (the v3 mutual-exclusion invariant), and bump updated_at.
+		let mut e = sample_entry();
+		e.skill_folder_hash = "gh-tree-sha".to_string();
+		e.content_hash = None;
+		e.installed_at = "first".to_string();
+		e.updated_at = "old".to_string();
+
+		let changed =
+			e.apply_content_hash("source-sha", "2026-01-01T00:00:00Z");
+
+		assert!(changed);
+		assert_eq!(e.content_hash.as_deref(), Some("source-sha"));
+		assert_eq!(e.skill_folder_hash, "");
+		assert_eq!(e.updated_at, "2026-01-01T00:00:00Z");
+		assert_eq!(e.installed_at, "first", "install time is preserved");
+	}
+
+	#[test]
+	fn apply_content_hash_is_idempotent_when_already_in_desired_state() {
+		// Already carrying the same source hash with an empty folder hash: a
+		// re-apply must be a no-op and must NOT bump updated_at (auto-heal relies
+		// on this to avoid rewriting an unchanged lock file).
+		let mut e = sample_entry();
+		e.skill_folder_hash = String::new();
+		e.content_hash = Some("source-sha".to_string());
+		e.updated_at = "old".to_string();
+
+		let changed =
+			e.apply_content_hash("source-sha", "2026-02-02T00:00:00Z");
+
+		assert!(!changed);
+		assert_eq!(e.updated_at, "old", "no bump when nothing changed");
+	}
+
+	#[test]
+	fn apply_content_hash_changes_when_only_folder_hash_dirty() {
+		// Same content hash, but a stale folder hash still present → must clear it
+		// and report changed (the npx→aghub heal case).
+		let mut e = sample_entry();
+		e.skill_folder_hash = "stale".to_string();
+		e.content_hash = Some("source-sha".to_string());
+
+		let changed =
+			e.apply_content_hash("source-sha", "2026-03-03T00:00:00Z");
+
+		assert!(changed);
+		assert_eq!(e.skill_folder_hash, "");
+		assert_eq!(e.updated_at, "2026-03-03T00:00:00Z");
 	}
 }

@@ -44,6 +44,11 @@ pub fn execute(
 		&source.skill_path,
 	)
 	.ok_or_else(|| anyhow!("locked skillPath was not found in source"))?;
+	// Refuse to silently overwrite the installed skill when the upstream source
+	// renamed it (same skillPath, changed frontmatter `name`). This mirrors the
+	// hardened API apply path; the shared predicate lives in `aghub-core` so both
+	// surfaces enforce the same contract.
+	ensure_source_not_renamed(&skill_file, &name)?;
 	let source_dir = skill_file.parent().unwrap_or(repo);
 	let updated_hash = skill::compute_skill_folder_hash(source_dir)
 		.context("failed to hash fetched skill")?;
@@ -83,6 +88,27 @@ pub fn execute(
 			"error": null,
 		}))?
 	);
+	Ok(())
+}
+
+/// Parse the fetched `SKILL.md` and refuse the apply if the upstream frontmatter
+/// `name` no longer matches the locked name (an upstream rename). Reuses the
+/// shared `aghub-core` rename contract so the CLI, API apply, and API sync paths
+/// all behave identically.
+fn ensure_source_not_renamed(
+	skill_file: &Path,
+	locked_name: &str,
+) -> Result<()> {
+	let parsed =
+		skill::parse(skill_file).context("failed to parse fetched skill")?;
+	if let Some(new_name) =
+		aghub_core::skills::update::detect_rename(&parsed.name, locked_name)
+	{
+		bail!(aghub_core::skills::update::skill_renamed_message(
+			locked_name,
+			&new_name
+		));
+	}
 	Ok(())
 }
 
@@ -210,9 +236,8 @@ fn update_lock_hash(
 						"skill '{name}' is not in global lock"
 					));
 				};
-				entry.content_hash = Some(hash.to_string());
-				entry.skill_folder_hash.clear();
-				entry.updated_at = chrono::Utc::now().to_rfc3339();
+				entry
+					.apply_content_hash(hash, &chrono::Utc::now().to_rfc3339());
 				Ok(())
 			})??;
 		}
@@ -225,7 +250,7 @@ fn update_lock_hash(
 						"skill '{name}' is not in project lock"
 					));
 				};
-				entry.computed_hash = hash.to_string();
+				entry.apply_computed_hash(hash);
 				Ok(())
 			})??;
 		}
@@ -249,6 +274,36 @@ mod tests {
 	use super::*;
 	use std::sync::{Mutex, MutexGuard, OnceLock};
 	use tempfile::{tempdir, TempDir};
+
+	#[test]
+	fn ensure_source_not_renamed_bails_when_upstream_name_differs() {
+		let dir = tempdir().unwrap();
+		let skill_file = dir.path().join("SKILL.md");
+		std::fs::write(
+			&skill_file,
+			"---\nname: new-skill\ndescription: d\n---\nbody\n",
+		)
+		.unwrap();
+
+		let err =
+			ensure_source_not_renamed(&skill_file, "old-skill").unwrap_err();
+		let msg = err.to_string();
+		assert!(msg.contains("renamed"), "msg: {msg}");
+		assert!(msg.contains("new-skill"), "msg: {msg}");
+	}
+
+	#[test]
+	fn ensure_source_not_renamed_ok_when_names_match() {
+		let dir = tempdir().unwrap();
+		let skill_file = dir.path().join("SKILL.md");
+		std::fs::write(
+			&skill_file,
+			"---\nname: same-skill\ndescription: d\n---\nbody\n",
+		)
+		.unwrap();
+
+		assert!(ensure_source_not_renamed(&skill_file, "same-skill").is_ok());
+	}
 
 	struct GlobalLockGuard {
 		_temp: TempDir,

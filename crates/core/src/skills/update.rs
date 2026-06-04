@@ -23,6 +23,39 @@ pub enum SkillUpdateStatus {
 	Uncheckable { reason: UncheckableReason },
 }
 
+/// Shared rename-detection contract used by every update/apply/sync path
+/// (CLI `apply-update`, the API apply/sync routes, and the update-check
+/// pipeline). Centralising the predicate, the user-facing message, and the
+/// error code keeps all surfaces in lock-step: a skill renamed upstream is
+/// refused identically whether detected at check time, apply time, or sync
+/// time, and consumers branch on a single stable code.
+///
+/// Returns `Some(parsed_name)` when the upstream-parsed name differs from the
+/// expected (locked) name — i.e. the skill was renamed in the source — or
+/// `None` when the names match. Intentionally a cheap, exact comparison: the
+/// `SKILL.md` frontmatter parser is the authority on canonical form, so this
+/// does not trim or case-fold.
+pub fn detect_rename(parsed_name: &str, expected: &str) -> Option<String> {
+	if parsed_name == expected {
+		None
+	} else {
+		Some(parsed_name.to_string())
+	}
+}
+
+/// Canonical, user-facing rename message: the lock owner should delete the old
+/// skill and install under the new name.
+pub fn skill_renamed_message(old_name: &str, new_name: &str) -> String {
+	format!(
+		"Skill '{old_name}' was renamed to '{new_name}' in the source. \
+		 Delete the old skill and install '{new_name}' instead."
+	)
+}
+
+/// API error code returned for both apply-time and sync-time renames. Distinct
+/// from the legacy `SKILL_NAME_MISMATCH` so consumers can branch on one code.
+pub const SKILL_RENAMED_CODE: &str = "SKILL_RENAMED_IN_SOURCE";
+
 /// Compare two known content hashes.
 ///
 /// Legacy/missing hashes are intentionally not handled here: callers must first
@@ -250,6 +283,33 @@ mod tests {
 	use super::*;
 	use std::fs;
 	use tempfile::tempdir;
+
+	#[test]
+	fn detect_rename_returns_none_when_names_match() {
+		assert_eq!(detect_rename("foo", "foo"), None);
+	}
+
+	#[test]
+	fn detect_rename_returns_some_new_name_when_names_differ() {
+		assert_eq!(
+			detect_rename("new-name", "old-name"),
+			Some("new-name".to_string())
+		);
+	}
+
+	#[test]
+	fn skill_renamed_message_names_both_and_advises_delete_install() {
+		let msg = skill_renamed_message("old", "new");
+		assert!(msg.contains("old"));
+		assert!(msg.contains("new"));
+		assert!(msg.contains("Delete"));
+		assert!(msg.contains("install"));
+	}
+
+	#[test]
+	fn skill_renamed_code_is_the_stable_contract() {
+		assert_eq!(SKILL_RENAMED_CODE, "SKILL_RENAMED_IN_SOURCE");
+	}
 
 	#[test]
 	fn rejects_absolute_skill_path() {
