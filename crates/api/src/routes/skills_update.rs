@@ -29,8 +29,8 @@ use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::skills::update_check::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, FetchedRepo, Fetcher, ResultCache, SourceRef,
-	TokenResolver,
+	EntryInput, FetchError, FetchedRepo, Fetcher, RefResolver, ResultCache,
+	SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -107,6 +107,29 @@ fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
 		FetchError::Auth
 	} else {
 		FetchError::Network
+	}
+}
+
+/// Production [`RefResolver`]: a git ref advertisement (ls-refs, no object
+/// download) resolving the tip OID of the requested branch/tag/default-branch.
+/// Any error (incl. ref-not-found) maps to a soft failure so the orchestrator
+/// falls through to the full fetch.
+struct GitRefResolver;
+
+impl RefResolver for GitRefResolver {
+	fn resolve(
+		&self,
+		source_ref: &SourceRef,
+		token: Option<&str>,
+	) -> Result<String, FetchError> {
+		let url = normalize_fetch_url(&source_ref.source)?;
+		let mut opts = aghub_git::RemoteOptions::new(&url);
+		if let Some(token) = token {
+			opts = opts.with_credentials("x-access-token", token);
+		}
+		aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
+			.map_err(classify_fetch_error)?
+			.ok_or(FetchError::Network)
 	}
 }
 
@@ -207,6 +230,7 @@ fn global_lock_entries(
 			source_type: entry.source_type,
 			skill_path: entry.skill_path,
 			stored_hash: entry.content_hash,
+			ref_commit: entry.ref_commit,
 		})
 		.collect()
 }
@@ -229,6 +253,7 @@ fn project_lock_entries(
 			source_type: entry.source_type,
 			skill_path: entry.skill_path,
 			stored_hash: Some(entry.computed_hash),
+			ref_commit: None,
 		})
 		.collect()
 }
@@ -507,6 +532,7 @@ pub async fn check_skill_updates(
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
+		ref_resolver: Some(Arc::new(GitRefResolver)),
 		resolver: &resolver,
 		cache: &mut cache,
 		per_fetch: PER_FETCH,
@@ -745,11 +771,13 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 		let resolver = KeyringResolver;
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
@@ -859,11 +887,13 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 		let resolver = KeyringResolver;
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
@@ -895,11 +925,13 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 		let resolver = KeyringResolver;
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
