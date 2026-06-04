@@ -127,12 +127,16 @@ jobs:
               uses: tauri-apps/tauri-action@v0
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-                  APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-                  APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-                  APPLE_ID: ${{ secrets.APPLE_ID }}
-                  APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-                  APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+                  # Apple code-signing: leave commented while no Apple Developer certs exist.
+                  # Passing these as empty strings makes Tauri attempt `security import` on an
+                  # empty cert and fail the macOS build. Uncomment + set the secrets once you
+                  # have an Apple Developer account to ship signed/notarized dmgs.
+                  # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+                  # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+                  # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+                  # APPLE_ID: ${{ secrets.APPLE_ID }}
+                  # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+                  # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
               with:
