@@ -21,7 +21,9 @@ Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use 
   bumps `updatedAt`). They are the one home for the invariant.
 - **npx compatibility is load-bearing**: never bump the lock versions; keep
   `skillFolderHash` empty; hash parity is fixture-pinned
-  (`crates/skill/tests/hash_parity_golden.rs`). See `crates/skill/CLAUDE.md`.
+  (`crates/skill/tests/hash_parity_golden.rs`). See `crates/skill/CLAUDE.md` and
+  the [npx-skills-contract](../npx-skills-contract/SKILL.md) skill for the full
+  round-trip contract + known divergences.
 
 ## Install layout: universal vs copy
 
