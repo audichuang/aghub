@@ -14,6 +14,8 @@ Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use 
   **project** lock (`<proj>/skills-lock.json`, v1, intentionally timestamp-free).
 - The v3 entry holds a **mutual-exclusion invariant**: a Source hash lives in
   `contentHash` and `skillFolderHash` is kept **empty** — never both populated.
+  The project lock (v1) stores the same Source hash under `computedHash` and has
+  no folder-hash field.
 - **Never mutate these fields by hand.** Use `SkillLockEntry::apply_content_hash`
   / `LocalSkillLockEntry::apply_computed_hash` (idempotent; the global one also
   bumps `updatedAt`). They are the one home for the invariant.
@@ -27,7 +29,7 @@ Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use 
   Referrers. **Copy**: an isolated per-agent copy, no Master.
 - A skill is universal iff `canonical_path.is_some()`.
 - **Renaming or removing a Master must account for every Referrer.** Discover
-  referrers *before* the rename (canonicalize resolves through the live Master),
+  referrers _before_ the rename (canonicalize resolves through the live Master),
   then re-point them.
 - Rename is **transactional**: `rename_skill_master` rolls back on relink failure
   so a partial rename never leaves dangling Referrers. Boundary = rename + relink
@@ -42,8 +44,9 @@ Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use 
 - Adding/removing an agent touches **5 places** across `crates/agents` +
   `crates/core/src/registry` — the cross-crate registry step is the easy miss.
   See the root `CLAUDE.md` "Adding/Removing Agents" checklist.
-- Removal/prune/rename logic clusters in `crates/core/src/skills/`; the lock store
-  is `crates/skill/src/lock/`.
+- Removal/prune logic clusters in `crates/core/src/skills/`; the transactional
+  Master **rename** (`rename_skill_master`) lives in
+  `crates/core/src/manager/skill.rs`; the lock store is `crates/skill/src/lock/`.
 
 ## Testing
 
