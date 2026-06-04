@@ -3,8 +3,11 @@ import {
 	ArrowPathIcon,
 	ArrowUpCircleIcon,
 	CheckCircleIcon,
+	ChevronDownIcon,
+	ChevronRightIcon,
 	ClipboardDocumentIcon,
 	ExclamationTriangleIcon,
+	FolderIcon,
 	GlobeAltIcon,
 	LockClosedIcon,
 	PlusCircleIcon,
@@ -61,7 +64,21 @@ interface SourceRow extends SourceSummaryResponse {
 	projectName?: string;
 }
 
+interface SourceGroup {
+	key: string;
+	label: string;
+	rows: SourceRow[];
+}
+
 const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
+const TRAILING_SLASH_RE = /\/+$/;
+
+function sourceDisplayName(row: SourceRow): string {
+	if (row.sourceType !== "local") return row.source;
+
+	const trimmed = row.source.replace(TRAILING_SLASH_RE, "");
+	return trimmed.split("/").filter(Boolean).pop() ?? row.source;
+}
 
 export default function SourcesPage() {
 	const { t } = useTranslation();
@@ -73,6 +90,9 @@ export default function SourcesPage() {
 	const [searchQuery, setSearchQuery] = useState("");
 	const [selectedKey, setSelectedKey] = useQueryState("source");
 	const [isImporting, setIsImporting] = useState(false);
+	const [collapsedGroupKeys, setCollapsedGroupKeys] = useState<Set<string>>(
+		() => new Set(),
+	);
 
 	// Query the global scope plus each project scope.
 	const sourceQueries = useQueries({
@@ -117,6 +137,38 @@ export default function SourcesPage() {
 		return rows.filter((r) => r.source.toLowerCase().includes(q));
 	}, [rows, searchQuery]);
 
+	const groupedRows = useMemo<SourceGroup[]>(() => {
+		const groups: SourceGroup[] = [];
+		const byKey = new Map<string, SourceGroup>();
+
+		for (const row of filteredRows) {
+			const key =
+				row.rowScope === "global"
+					? "global"
+					: `project:${row.projectRoot ?? row.projectName ?? ""}`;
+			const label =
+				row.rowScope === "global"
+					? t("scopeGlobal")
+					: row.projectName
+						? `${t("scopeProject")} · ${row.projectName}`
+						: t("scopeProject");
+			const existing = byKey.get(key);
+
+			if (existing) {
+				existing.rows.push(row);
+				continue;
+			}
+
+			const group = { key, label, rows: [row] };
+			byKey.set(key, group);
+			groups.push(group);
+		}
+
+		return groups;
+	}, [filteredRows, t]);
+
+	const isSearchingSources = searchQuery.trim().length > 0;
+
 	const rowKey = (r: SourceRow) =>
 		`${r.rowScope}:${r.projectRoot ?? ""}:${r.source}`;
 
@@ -130,6 +182,18 @@ export default function SourcesPage() {
 	const handleSelectRow = (r: SourceRow) => {
 		setSelectedKey(rowKey(r));
 		setIsImporting(false);
+	};
+
+	const toggleGroup = (key: string) => {
+		setCollapsedGroupKeys((prev) => {
+			const next = new Set(prev);
+			if (next.has(key)) {
+				next.delete(key);
+			} else {
+				next.add(key);
+			}
+			return next;
+		});
 	};
 
 	const handleImportDone = () => {
@@ -160,70 +224,114 @@ export default function SourcesPage() {
 							{t("sourcesEmpty")}
 						</p>
 					) : (
-						<ul className="space-y-1 p-2">
-							{filteredRows.map((row) => {
-								const key = rowKey(row);
-								const isActive = key === selectedKey;
+						<div className="space-y-1.5 p-2">
+							{groupedRows.map((group) => {
+								const isExpanded =
+									isSearchingSources ||
+									!collapsedGroupKeys.has(group.key);
+								const GroupIcon = isExpanded
+									? ChevronDownIcon
+									: ChevronRightIcon;
+
 								return (
-									<li key={key}>
+									<section key={group.key}>
 										<button
 											type="button"
-											onClick={() => handleSelectRow(row)}
-											className={cn(
-												"flex w-full items-start gap-2 rounded-lg p-2 text-left transition-colors hover:bg-surface-secondary",
-												isActive &&
-													"bg-accent/10 text-accent",
-											)}
+											onClick={() =>
+												toggleGroup(group.key)
+											}
+											aria-expanded={isExpanded}
+											className="group flex h-9 w-full items-center gap-2 rounded-md px-2 text-left outline-none transition-colors hover:bg-surface-secondary focus-visible:ring-2 focus-visible:ring-accent/35"
 										>
-											<GlobeAltIcon className="mt-0.5 size-4 shrink-0 text-muted" />
-											<div className="min-w-0 flex-1">
-												<div className="flex items-center gap-1.5">
-													<span className="truncate font-medium text-foreground">
-														{row.source}
-													</span>
-													{row.isPrivate && (
-														<LockClosedIcon
-															className="size-3 shrink-0 text-muted"
-															aria-label={t(
-																"privateRepo",
-															)}
-														/>
-													)}
-												</div>
-												<div className="mt-1 flex flex-wrap items-center gap-1.5">
-													<Chip
-														size="sm"
-														variant="secondary"
-													>
-														{row.rowScope ===
-														"global"
-															? t("scopeGlobal")
-															: `${t(
-																	"scopeProject",
-																)} · ${row.projectName ?? ""}`}
-													</Chip>
-													<span className="text-xs text-muted">
-														{row.skillCount}
-													</span>
-													{row.credentialStatus ===
-														"missing" && (
-														<Chip
-															size="sm"
-															color="default"
-															variant="soft"
-														>
-															{t(
-																"needsCredential",
-															)}
-														</Chip>
-													)}
-												</div>
-											</div>
+											<GroupIcon className="size-4 shrink-0 text-muted transition-colors group-hover:text-foreground" />
+											<span className="min-w-0 flex-1 truncate text-sm font-semibold leading-5 text-muted transition-colors group-hover:text-foreground">
+												{group.label}
+											</span>
+											<span className="shrink-0 font-mono text-xs leading-5 text-muted tabular-nums">
+												{group.rows.length}
+											</span>
 										</button>
-									</li>
+										{isExpanded && (
+											<ul className="space-y-1">
+												{group.rows.map((row) => {
+													const key = rowKey(row);
+													const isActive =
+														key === selectedKey;
+													const SourceIcon =
+														row.sourceType ===
+														"local"
+															? FolderIcon
+															: GlobeAltIcon;
+
+													return (
+														<li key={key}>
+															<button
+																type="button"
+																onClick={() =>
+																	handleSelectRow(
+																		row,
+																	)
+																}
+																aria-current={
+																	isActive
+																		? "page"
+																		: undefined
+																}
+																className={cn(
+																	"group flex h-12 w-full items-center gap-3 rounded-xl px-3 text-left outline-none transition-colors hover:bg-surface-secondary focus-visible:ring-2 focus-visible:ring-accent/35",
+																	isActive &&
+																		"bg-surface",
+																)}
+															>
+																<SourceIcon
+																	className={cn(
+																		"size-5 shrink-0 text-muted transition-colors group-hover:text-foreground",
+																		isActive &&
+																			"text-foreground",
+																	)}
+																/>
+																<span
+																	className="min-w-0 flex-1 truncate text-base font-semibold leading-6 text-foreground"
+																	title={
+																		row.source
+																	}
+																>
+																	{sourceDisplayName(
+																		row,
+																	)}
+																</span>
+																{row.isPrivate && (
+																	<LockClosedIcon
+																		className="size-3.5 shrink-0 text-muted"
+																		aria-label={t(
+																			"privateRepo",
+																		)}
+																	/>
+																)}
+																{row.credentialStatus ===
+																	"missing" && (
+																	<ExclamationTriangleIcon
+																		className="size-4 shrink-0 text-warning"
+																		aria-label={t(
+																			"needsCredential",
+																		)}
+																	/>
+																)}
+																<span className="ml-auto shrink-0 rounded-full bg-surface-tertiary px-2 font-mono text-sm leading-7 text-muted tabular-nums">
+																	{
+																		row.skillCount
+																	}
+																</span>
+															</button>
+														</li>
+													);
+												})}
+											</ul>
+										)}
+									</section>
 								);
 							})}
-						</ul>
+						</div>
 					)}
 				</div>
 			</div>
