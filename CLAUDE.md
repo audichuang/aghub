@@ -8,7 +8,7 @@ Aghub manages AI coding agent configurations across **23 agents** (Claude, OpenC
 
 > **Features in flight:** see `docs/specs/` for active designs — e.g. `2026-06-02-sources-and-universal-install.md` (the "Sources" management page + `.agents`-symlink "universal" install mode) and `2026-05-31-skill-management-improvements.md`.
 
-> **Domain language & decisions:** [`CONTEXT.md`](CONTEXT.md) is the glossary (Source hash, Master, Referrer, Relink, …); [`docs/adr/`](docs/adr/) records load-bearing decisions (e.g. transactional skill rename). Deep, reusable knowledge lives in project skills under `.claude/skills/` — `aghub-skills` (skill subsystem invariants), `npx-skills-contract` (npx round-trip contract), `testing-fs-failures` (forcing fs failures in tests). Per-crate `CLAUDE.md` files are symlinks to that crate's `AGENTS.md`.
+> **Domain language & decisions:** [`CONTEXT.md`](CONTEXT.md) is the glossary (Source hash, Master, Referrer, Relink, …); [`docs/adr/`](docs/adr/) records load-bearing decisions (e.g. transactional skill rename). Deep, reusable knowledge lives in project skills under `.claude/skills/` — `aghub-skills` (skill subsystem invariants), `npx-skills-contract` (npx round-trip contract), `testing-fs-failures` (forcing fs failures in tests), `releasing-aghub` (tag-driven release runbook + troubleshooting). Per-crate `CLAUDE.md` files are symlinks to that crate's `AGENTS.md`.
 
 ## Common Commands
 
@@ -131,6 +131,15 @@ Additional test files:
 - `crates/core/tests/mcp_tests.rs`: MCP-specific behavior, transport types, deduplication
 - `crates/core/tests/test_agent_paths.rs`: XDG-compliant skills path configuration per agent
 - `crates/cli/tests/cli_tests.rs`: End-to-end CLI tests via `assert_cmd`
+
+## Release & Packaging
+
+- Releases are **tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml` → builds desktop bundles (macOS/Windows/Linux via `tauri-action`) + CLI, generates `latest.json`, updates the Homebrew tap. No manual build/upload.
+- **Version comes from the git tag** — CI `sed`s it into `Cargo.toml`, `crates/desktop/package.json`, `tauri.conf.json`. Don't hand-bump for a release; `just bump <ver>` only syncs those three manifests locally.
+- **Tauri updater**: the committed `tauri.conf.json` `pubkey` must pair with the `TAURI_SIGNING_PRIVATE_KEY` repo secret, and `endpoints` must point at _this_ repo's releases. The pubkey must never change once a build ships, or installed apps can't auto-update.
+- **Gotcha**: unset `APPLE_*` secrets resolve to empty strings and break the macOS build (`security import` on an empty cert). Keep them commented out in `release.yml` until real Apple certs exist — unsigned dmg builds fine otherwise.
+- The Homebrew tap is a **separate repo** written via the `HOMEBREW_TAP_TOKEN` PAT (the default `GITHUB_TOKEN` can't reach it).
+- `git push` is gated by a **pre-push hook**: prettier `--check` + clippy `-D warnings` + eslint + tsc.
 
 ## Configuration Paths Reference
 

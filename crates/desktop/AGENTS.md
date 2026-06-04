@@ -83,8 +83,8 @@ bun run tauri build  # Build Tauri app
 
 From `tauri.conf.json`:
 
-- Product name: `aghub-desktop`
-- Window: 1280x800, native titlebar
+- Product name: `aghub` (bundle id `com.akrc.aghub`)
+- Window: 1200x800 (min 1024x600), native titlebar
 - Permissions: window controls, opener, dialog, store
 
 ## ANTI-PATTERNS
