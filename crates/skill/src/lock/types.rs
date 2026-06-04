@@ -35,6 +35,15 @@ pub struct SkillLockEntry {
 		default
 	)]
 	pub content_hash: Option<String>,
+	/// aghub-only: repo-level commit OID (SHA-1 hex) of the branch/tag tip at
+	/// install/update time, for the cheap ls-refs update preflight. Identical
+	/// across members of the same source+ref group. Never read/written by npx.
+	#[serde(
+		rename = "refCommit",
+		skip_serializing_if = "Option::is_none",
+		default
+	)]
+	pub ref_commit: Option<String>,
 	/// ISO timestamp when the skill was first installed
 	#[serde(rename = "installedAt")]
 	pub installed_at: String,
@@ -121,6 +130,7 @@ impl SkillLockEntry {
 			updated_at: now,
 			plugin_name,
 			content_hash: None,
+			ref_commit: None,
 		}
 	}
 }
@@ -141,6 +151,7 @@ mod tests {
 			updated_at: "t".to_string(),
 			plugin_name: None,
 			content_hash: None,
+			ref_commit: None,
 		}
 	}
 
@@ -167,5 +178,28 @@ mod tests {
 		let e: super::SkillLockEntry = serde_json::from_str(json).unwrap();
 		assert_eq!(e.content_hash, None);
 		assert_eq!(e.skill_folder_hash, "");
+	}
+
+	#[test]
+	fn entry_serializes_ref_commit_as_camel_case() {
+		let mut e = sample_entry();
+		e.ref_commit = Some("deadbeef".to_string());
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(json.contains("\"refCommit\":\"deadbeef\""));
+	}
+
+	#[test]
+	fn entry_omits_ref_commit_when_none() {
+		let e = sample_entry();
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(!json.contains("refCommit"));
+	}
+
+	#[test]
+	fn entry_deserializes_without_ref_commit_to_none() {
+		// npx-written entry has no refCommit; must default to None, not error.
+		let json = r#"{"source":"o/r","sourceType":"github","sourceUrl":"https://github.com/o/r","skillFolderHash":"","installedAt":"t","updatedAt":"t"}"#;
+		let e: super::SkillLockEntry = serde_json::from_str(json).unwrap();
+		assert_eq!(e.ref_commit, None);
 	}
 }

@@ -712,6 +712,7 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			skill_folder_hash: String::new(),
 			content_hash: None,
+			ref_commit: None,
 			installed_at: "t".to_string(),
 			updated_at: "t".to_string(),
 			plugin_name: None,

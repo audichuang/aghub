@@ -159,6 +159,7 @@ pub fn write_global_install_lock(
 			updated_at: String::new(),
 			plugin_name: None,
 			content_hash: Some(content_hash),
+			ref_commit: None,
 		},
 	)
 }

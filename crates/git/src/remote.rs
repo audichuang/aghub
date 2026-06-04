@@ -100,6 +100,65 @@ fn discover_remote_refs(
 	Ok(ref_map.remote_refs)
 }
 
+/// Select the commit OID (40-hex) for `wanted` from an advertised ref list.
+///
+/// `wanted` is matched against `refs/heads/<wanted>` first, then
+/// `refs/tags/<wanted>` (annotated tags resolve to the peeled commit). `None`
+/// follows the remote `HEAD` symref to the tip of its target branch. Returns
+/// `None` when the ref is not advertised.
+pub fn select_ref_oid(
+	refs: &[gix::protocol::handshake::Ref],
+	wanted: Option<&str>,
+) -> Option<String> {
+	use gix::bstr::ByteSlice;
+	use gix::protocol::handshake::Ref;
+
+	// The commit OID a fully-qualified ref resolves to: for annotated tags
+	// (`Peeled`) this is the peeled `object` (the commit), never the tag object.
+	let oid_for = |full: &str| -> Option<String> {
+		for r in refs {
+			match r {
+				Ref::Direct {
+					full_ref_name,
+					object,
+				}
+				| Ref::Peeled {
+					full_ref_name,
+					object,
+					..
+				} => {
+					if full_ref_name.to_str_lossy().as_ref() == full {
+						return Some(object.to_string());
+					}
+				}
+				_ => {}
+			}
+		}
+		None
+	};
+
+	match wanted {
+		Some(name) => oid_for(&format!("refs/heads/{name}"))
+			.or_else(|| oid_for(&format!("refs/tags/{name}"))),
+		None => {
+			// Follow the remote HEAD symref to its resolved tip.
+			for r in refs {
+				if let Ref::Symbolic {
+					full_ref_name,
+					object,
+					..
+				} = r
+				{
+					if full_ref_name.to_str_lossy().as_ref() == "HEAD" {
+						return Some(object.to_string());
+					}
+				}
+			}
+			None
+		}
+	}
+}
+
 pub(crate) fn branches_from_remote_refs(
 	remote_refs: &[gix::protocol::handshake::Ref],
 ) -> Vec<String> {
@@ -144,6 +203,85 @@ mod tests {
 		.unwrap();
 		assert!(!branches.is_empty());
 		assert!(branches.contains(&"master".to_string()));
+	}
+
+	#[test]
+	fn select_ref_oid_matches_branch_head() {
+		use gix::protocol::handshake::Ref;
+		let oid = gix::ObjectId::from_hex(
+			b"1234567890abcdef1234567890abcdef12345678",
+		)
+		.unwrap();
+		let refs = vec![Ref::Direct {
+			full_ref_name: "refs/heads/main".into(),
+			object: oid,
+		}];
+		assert_eq!(
+			select_ref_oid(&refs, Some("main")),
+			Some("1234567890abcdef1234567890abcdef12345678".to_string())
+		);
+	}
+
+	#[test]
+	fn select_ref_oid_matches_annotated_tag_peeled() {
+		use gix::protocol::handshake::Ref;
+		let tag_obj = gix::ObjectId::from_hex(
+			b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		)
+		.unwrap();
+		let commit = gix::ObjectId::from_hex(
+			b"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		)
+		.unwrap();
+		let refs = vec![Ref::Peeled {
+			full_ref_name: "refs/tags/v1.0".into(),
+			tag: tag_obj,
+			object: commit,
+		}];
+		// The peeled commit, NOT the annotated tag object.
+		assert_eq!(
+			select_ref_oid(&refs, Some("v1.0")),
+			Some("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string())
+		);
+	}
+
+	#[test]
+	fn select_ref_oid_none_follows_head_symref() {
+		use gix::protocol::handshake::Ref;
+		let oid = gix::ObjectId::from_hex(
+			b"cccccccccccccccccccccccccccccccccccccccc",
+		)
+		.unwrap();
+		let refs = vec![
+			Ref::Symbolic {
+				full_ref_name: "HEAD".into(),
+				target: "refs/heads/main".into(),
+				tag: None,
+				object: oid,
+			},
+			Ref::Direct {
+				full_ref_name: "refs/heads/main".into(),
+				object: oid,
+			},
+		];
+		assert_eq!(
+			select_ref_oid(&refs, None),
+			Some("cccccccccccccccccccccccccccccccccccccccc".to_string())
+		);
+	}
+
+	#[test]
+	fn select_ref_oid_returns_none_when_absent() {
+		use gix::protocol::handshake::Ref;
+		let oid = gix::ObjectId::from_hex(
+			b"dddddddddddddddddddddddddddddddddddddddd",
+		)
+		.unwrap();
+		let refs = vec![Ref::Direct {
+			full_ref_name: "refs/heads/main".into(),
+			object: oid,
+		}];
+		assert_eq!(select_ref_oid(&refs, Some("nope")), None);
 	}
 
 	#[test]
