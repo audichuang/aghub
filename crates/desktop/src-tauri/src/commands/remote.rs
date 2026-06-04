@@ -13,6 +13,8 @@
 //! still receives a Promise from `invoke`.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -305,7 +307,11 @@ fn bring_up(
 
 	let tunnel_args =
 		build_tunnel_args(connection, local_port, started.remote_port);
-	let mut tunnel = match Command::new("ssh").args(&tunnel_args).spawn() {
+	let mut tunnel_cmd = Command::new("ssh");
+	tunnel_cmd.args(&tunnel_args);
+	#[cfg(windows)]
+	tunnel_cmd.creation_flags(crate::CREATE_NO_WINDOW);
+	let mut tunnel = match tunnel_cmd.spawn() {
 		Ok(tunnel) => tunnel,
 		Err(e) => {
 			aghub_remote::bringup::cleanup_remote(
@@ -379,7 +385,11 @@ fn remote_install_source() -> Option<RemoteInstallSource> {
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
-	let output = Command::new("git").args(args).output().ok()?;
+	let mut command = Command::new("git");
+	command.args(args);
+	#[cfg(windows)]
+	command.creation_flags(crate::CREATE_NO_WINDOW);
+	let output = command.output().ok()?;
 	if !output.status.success() {
 		return None;
 	}
@@ -426,14 +436,15 @@ fn teardown(handle: &RemoteHandle) {
 	// before signalling, so a pid recycled after the watcher already reaped the
 	// child is never killed. Waking the tunnel's wait() also triggers the
 	// watcher's remote cleanup.
-	let _ = Command::new("sh")
-		.arg("-c")
-		.arg(format!(
-			"kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | \
-			 grep -q ssh && kill {pid}",
-			pid = handle.tunnel_pid
-		))
-		.status();
+	let mut kill_cmd = Command::new("sh");
+	kill_cmd.arg("-c").arg(format!(
+		"kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | \
+		 grep -q ssh && kill {pid}",
+		pid = handle.tunnel_pid
+	));
+	#[cfg(windows)]
+	kill_cmd.creation_flags(crate::CREATE_NO_WINDOW);
+	let _ = kill_cmd.status();
 	// Guarded remote kill (idempotent with the watcher's own cleanup).
 	let runner = SystemRunner;
 	aghub_remote::bringup::cleanup_remote(

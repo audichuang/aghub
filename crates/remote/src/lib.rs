@@ -15,5 +15,11 @@ pub mod fs;
 pub mod ssh;
 pub mod ssh_config;
 
+/// Windows `CREATE_NO_WINDOW` process-creation flag. Applied to every external
+/// process this crate spawns (ssh/scp) so the windowless desktop GUI does not
+/// flash a console window on each remote operation. No-op off Windows.
+#[cfg(windows)]
+pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 #[cfg(test)]
 pub(crate) mod test_support;

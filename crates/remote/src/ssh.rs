@@ -5,6 +5,8 @@
 //! be exhaustively unit-tested in the dev sandbox.
 
 use std::fmt;
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::process::Child;
 
 use serde::{Deserialize, Serialize};
@@ -114,8 +116,11 @@ impl CommandRunner for SystemRunner {
 		program: &str,
 		args: &[String],
 	) -> Result<CommandOutput, RunError> {
-		let output = std::process::Command::new(program)
-			.args(args)
+		let mut command = std::process::Command::new(program);
+		command.args(args);
+		#[cfg(windows)]
+		command.creation_flags(crate::CREATE_NO_WINDOW);
+		let output = command
 			.output()
 			.map_err(|e| RunError::Spawn(e.to_string()))?;
 		Ok(CommandOutput {
@@ -130,8 +135,11 @@ impl CommandRunner for SystemRunner {
 		program: &str,
 		args: &[String],
 	) -> Result<ChildHandle, RunError> {
-		let child = std::process::Command::new(program)
-			.args(args)
+		let mut command = std::process::Command::new(program);
+		command.args(args);
+		#[cfg(windows)]
+		command.creation_flags(crate::CREATE_NO_WINDOW);
+		let child = command
 			.spawn()
 			.map_err(|e| RunError::Spawn(e.to_string()))?;
 		Ok(ChildHandle::new(child))
