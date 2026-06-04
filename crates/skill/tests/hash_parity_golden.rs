@@ -45,3 +45,31 @@ fn copy_dir(from: &std::path::Path, to: &std::path::Path) {
 		}
 	}
 }
+
+/// Golden captured from the REAL upstream `computeSkillFolderHash` (skills
+/// v1.5.x, run via `node --experimental-strip-types`) on a folder whose names
+/// are exactly the case-collision + numeric cases where feruca's default
+/// ("shifted") order diverged from npx `localeCompare`. Pins that aghub now
+/// orders these like npx (non-ignorable punctuation), not just simple names.
+const GOLDEN_EXOTIC: &str =
+	"fee6325b514e7168672298bbac49237ec3a99350c0741c1cbc18accd038f7f9f";
+
+#[test]
+fn hash_parity_exotic_filenames_match_npx() {
+	let tmp = tempfile::tempdir().unwrap();
+	let d = tmp.path();
+	for (name, body) in [
+		("1.md", "1"),
+		("2.md", "2"),
+		("10.md", "10"),
+		("z.md", "z"),
+		("ZEBRA.md", "zebra"),
+	] {
+		fs::write(d.join(name), body).unwrap();
+	}
+	assert_eq!(
+		compute_skill_folder_hash(d).unwrap(),
+		GOLDEN_EXOTIC,
+		"aghub hash must match npx localeCompare order for case/numeric names"
+	);
+}

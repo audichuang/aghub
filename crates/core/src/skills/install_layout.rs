@@ -212,16 +212,44 @@ fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
 	}
 }
 
+/// Names excluded when materializing a Master, mirroring upstream npx
+/// `copyDirectory` (installer.ts) so the Master hashes identically to npx.
+const EXCLUDE_FILES: &[&str] = &["metadata.json"];
+const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
+
 fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 	std::fs::create_dir_all(to)?;
 	for entry in std::fs::read_dir(from)? {
 		let entry = entry?;
+		let file_name = entry.file_name();
+		let name = file_name.to_string_lossy();
+		let file_type = entry.file_type()?;
+		if EXCLUDE_FILES.contains(&name.as_ref())
+			|| (file_type.is_dir() && EXCLUDE_DIRS.contains(&name.as_ref()))
+		{
+			continue;
+		}
 		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		if entry.file_type()?.is_dir() {
+		let to_path = to.join(&file_name);
+		if file_type.is_dir() {
 			copy_dir_recursive(&from_path, &to_path)?;
 		} else {
-			std::fs::copy(&from_path, &to_path)?;
+			// Dereference symlinks (matches upstream `cp { dereference: true }`):
+			// copy the target's content. A symlink to a directory is copied
+			// recursively; a broken symlink (e.g. an absolute path from another
+			// machine in a fetched skill) is skipped rather than aborting.
+			match std::fs::metadata(&from_path) {
+				Ok(meta) if meta.is_dir() => {
+					copy_dir_recursive(&from_path, &to_path)?
+				}
+				Ok(_) => {
+					std::fs::copy(&from_path, &to_path)?;
+				}
+				Err(e)
+					if e.kind() == io::ErrorKind::NotFound
+						&& file_type.is_symlink() => {}
+				Err(e) => return Err(e),
+			}
 		}
 	}
 	Ok(())
@@ -417,5 +445,74 @@ mod tests {
 				Some(home.join(".agents/skills"))
 			);
 		}
+	}
+
+	#[test]
+	fn copy_dir_recursive_excludes_vcs_cache_and_metadata() {
+		// Materializing a Master must match upstream npx `copyDirectory`: drop
+		// the .git/__pycache__/__pypackages__ dirs and metadata.json, else the
+		// Master carries junk and hashes differently from npx.
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		fs::create_dir_all(src.join(".git")).unwrap();
+		fs::write(src.join(".git/config"), "x").unwrap();
+		fs::create_dir_all(src.join("__pycache__")).unwrap();
+		fs::write(src.join("__pycache__/m.pyc"), "x").unwrap();
+		fs::create_dir_all(src.join("__pypackages__")).unwrap();
+		fs::write(src.join("__pypackages__/p"), "x").unwrap();
+		fs::write(src.join("metadata.json"), "{}").unwrap();
+		fs::write(src.join("SKILL.md"), "real").unwrap();
+		fs::create_dir_all(src.join("assets")).unwrap();
+		fs::write(src.join("assets/a.txt"), "keep").unwrap();
+
+		let dest = tmp.path().join("dest");
+		copy_dir_recursive(&src, &dest).unwrap();
+
+		assert!(dest.join("SKILL.md").exists());
+		assert!(dest.join("assets/a.txt").exists());
+		assert!(!dest.join(".git").exists(), ".git must be excluded");
+		assert!(!dest.join("__pycache__").exists(), "__pycache__ excluded");
+		assert!(
+			!dest.join("__pypackages__").exists(),
+			"__pypackages__ excluded"
+		);
+		assert!(
+			!dest.join("metadata.json").exists(),
+			"metadata.json must be excluded"
+		);
+	}
+
+	#[test]
+	fn copy_dir_recursive_skips_broken_symlink_and_dereferences() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		fs::create_dir_all(&src).unwrap();
+		fs::write(src.join("real.md"), "real").unwrap();
+		// Broken symlink → nonexistent target (e.g. an abs path from another
+		// machine in a fetched skill): must be skipped, not abort the copy.
+		symlink(src.join("nope-target"), src.join("dangling")).unwrap();
+		// Good symlink → a real file: must be dereferenced into a real copy.
+		fs::write(src.join("target.txt"), "deref-me").unwrap();
+		symlink(src.join("target.txt"), src.join("alias.txt")).unwrap();
+
+		let dest = tmp.path().join("dest");
+		copy_dir_recursive(&src, &dest)
+			.expect("a broken symlink must not abort the copy");
+
+		assert!(dest.join("real.md").exists());
+		assert!(
+			fs::symlink_metadata(dest.join("dangling")).is_err(),
+			"broken symlink must be skipped"
+		);
+		let alias = fs::symlink_metadata(dest.join("alias.txt")).unwrap();
+		assert!(
+			alias.file_type().is_file(),
+			"symlink must be dereferenced to a real file, not copied as a link"
+		);
+		assert_eq!(
+			fs::read_to_string(dest.join("alias.txt")).unwrap(),
+			"deref-me"
+		);
 	}
 }

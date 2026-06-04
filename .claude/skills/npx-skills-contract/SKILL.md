@@ -39,19 +39,20 @@ with `skillFolderHash` left empty), project `computedHash`, the transactional
 rename, apply-update, the upstream-rename guard, atomic+locked lock writes, prune,
 and the TOCTOU/containment-hardened removal.
 
-## ⚠ Known divergences (align here, or document the gap)
+## Aligned with upstream (were divergent — keep them aligned)
 
-- **Master materialization excludes** (real interop bug): upstream excludes
-  `metadata.json` + `.git`/`__pycache__`/`__pypackages__`, dereferences symlinks,
-  and skips broken ones when copying a source into the Master. aghub's
-  `copy_dir_recursive` (`crates/core/src/skills/install_layout.rs`) does a plain
-  copy with NO excludes → the Master can carry junk and hash differently from npx.
-  Mirror the upstream excludes + symlink handling.
-- **Hash sort collator** (parity gap): upstream sorts by `localeCompare` (ICU);
-  aghub uses feruca UCA (`crates/skill/src/hash.rs`). For case-colliding / numeric
-  / accented filenames the file order — and thus the hash — differs. Only the
-  shared project `computedHash` is exposed → at worst a spurious "update
-  available", never data loss. Treat a mismatching hash as recompute, never wipe.
+- **Master materialization excludes** — `copy_dir_recursive`
+  (`crates/core/src/skills/install_layout.rs`) now mirrors upstream
+  `copyDirectory`: skip `metadata.json` + `.git`/`__pycache__`/`__pypackages__`,
+  dereference symlinks, skip broken ones. Don't reintroduce a plain copy — the
+  Master must hash identically to npx.
+- **Hash sort collator** — `compute_skill_folder_hash` (`crates/skill/src/hash.rs`)
+  sorts with `feruca::Collator::new(Tailoring::Cldr(Locale::Root), false, true)`.
+  The `shifting = false` (non-ignorable punctuation) is load-bearing: feruca's
+  default (`shifting = true`) reorders punctuation / numeric / case-collision
+  paths vs `localeCompare`. Verified against real npx output in
+  `crates/skill/tests/hash_parity_golden.rs` (incl. the exotic `1/10/2`, `z/ZEBRA`
+  cases) — keep those goldens green.
 
 ## Cosmetic (round-trips; fix only for byte-diff minimization)
 

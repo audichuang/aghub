@@ -44,11 +44,16 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	let mut total_bytes: u64 = 0;
 	collect(dir, dir, 0, &mut files, &mut total_bytes)?;
 
-	// Match the common `localeCompare` cases (for example, "scripts/" before
-	// "SKILL.md"). JS and UCA still diverge for numeric, accent, and some
-	// case/length-collision paths, so this must not be compared directly
-	// against npx-produced hashes for untrusted lock entries.
-	let mut collator = feruca::Collator::default();
+	// Sort like npx `computeSkillFolderHash`, which uses JS `localeCompare`
+	// (ICU CLDR-root, punctuation NON-IGNORABLE). feruca's default uses the
+	// "shifted" approach (punctuation ignorable), which reorders punctuation /
+	// numeric / case-collision paths vs localeCompare; `shifting = false` selects
+	// the non-ignorable approach so the file order — and thus the hash — matches.
+	let mut collator = feruca::Collator::new(
+		feruca::Tailoring::Cldr(feruca::Locale::Root),
+		false,
+		true,
+	);
 	files.sort_by(|a, b| collator.collate(&a.0, &b.0));
 
 	let mut hasher = Sha256::new();
@@ -272,15 +277,17 @@ mod tests {
 	}
 
 	#[test]
-	fn ascii_punctuation_order_matches_current_fixture() {
+	fn ascii_punctuation_order_matches_localecompare() {
+		// localeCompare treats punctuation as non-ignorable: '.' < 'p', so
+		// "a.txt" sorts before "apple.txt" (verified via Node localeCompare).
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("a.txt"), b"a").unwrap();
 		fs::write(dir.path().join("apple.txt"), b"apple").unwrap();
 		let mut e = Sha256::new();
-		e.update(b"apple.txt");
-		e.update(b"apple");
 		e.update(b"a.txt");
 		e.update(b"a");
+		e.update(b"apple.txt");
+		e.update(b"apple");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
 			format!("{:x}", e.finalize())
@@ -288,15 +295,17 @@ mod tests {
 	}
 
 	#[test]
-	fn case_order_matches_current_fixture() {
+	fn case_order_matches_localecompare() {
+		// localeCompare puts lowercase before uppercase: "z.md" < "ZEBRA.md"
+		// (verified via Node localeCompare).
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("z.md"), b"z").unwrap();
 		fs::write(dir.path().join("ZEBRA.md"), b"zebra").unwrap();
 		let mut e = Sha256::new();
-		e.update(b"ZEBRA.md");
-		e.update(b"zebra");
 		e.update(b"z.md");
 		e.update(b"z");
+		e.update(b"ZEBRA.md");
+		e.update(b"zebra");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
 			format!("{:x}", e.finalize())
@@ -304,13 +313,15 @@ mod tests {
 	}
 
 	#[test]
-	fn numeric_filename_order_matches_current_fixture() {
+	fn numeric_filename_order_matches_localecompare() {
+		// localeCompare is plain (not numeric-aware): 1 < 10 < 2 because '.' is
+		// non-ignorable, so "1.md" < "10.md" (verified via Node localeCompare).
 		let dir = tempdir().unwrap();
 		fs::write(dir.path().join("1.md"), b"1").unwrap();
 		fs::write(dir.path().join("2.md"), b"2").unwrap();
 		fs::write(dir.path().join("10.md"), b"10").unwrap();
 		let mut e = Sha256::new();
-		for (path, body) in [("10.md", "10"), ("1.md", "1"), ("2.md", "2")] {
+		for (path, body) in [("1.md", "1"), ("10.md", "10"), ("2.md", "2")] {
 			e.update(path.as_bytes());
 			e.update(body.as_bytes());
 		}
