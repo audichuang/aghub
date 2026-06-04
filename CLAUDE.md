@@ -8,6 +8,8 @@ Aghub manages AI coding agent configurations across **23 agents** (Claude, OpenC
 
 > **Features in flight:** see `docs/specs/` for active designs — e.g. `2026-06-02-sources-and-universal-install.md` (the "Sources" management page + `.agents`-symlink "universal" install mode) and `2026-05-31-skill-management-improvements.md`.
 
+> **Domain language & decisions:** [`CONTEXT.md`](CONTEXT.md) is the glossary (Source hash, Master, Referrer, Relink, …); [`docs/adr/`](docs/adr/) records load-bearing decisions (e.g. transactional skill rename). Deep, reusable knowledge lives in project skills under `.claude/skills/` — `aghub-skills` (skill subsystem invariants), `npx-skills-contract` (npx round-trip contract), `testing-fs-failures` (forcing fs failures in tests). Per-crate `CLAUDE.md` files are symlinks to that crate's `AGENTS.md`.
+
 ## Common Commands
 
 Use `just` for task running:

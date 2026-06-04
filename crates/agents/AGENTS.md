@@ -11,7 +11,7 @@ crates/agents/src/
 ├── descriptor.rs       # AgentDescriptor struct + fn pointer type aliases
 ├── models.rs           # AgentConfig, AgentType, McpServer, McpTransport, Skill
 ├── errors.rs           # ConfigError, Result
-├── agents/             # One file per supported agent (24 total)
+├── agents/             # One descriptor per supported agent (AgentType::ALL = 23)
 │   ├── mod.rs          # pub mod declarations
 │   ├── factory.rs      # create_descriptor() dispatch
 │   ├── claude.rs       # Claude descriptor
