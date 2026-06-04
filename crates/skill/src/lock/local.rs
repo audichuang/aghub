@@ -41,6 +41,19 @@ pub struct LocalSkillLockEntry {
 	pub computed_hash: String,
 }
 
+impl LocalSkillLockEntry {
+	/// Record aghub's freshly computed Source hash into the v1 project lock's
+	/// `computed_hash`. The project lock is intentionally timestamp-free, so
+	/// there is nothing else to update. Returns whether anything changed.
+	pub fn apply_computed_hash(&mut self, hash: &str) -> bool {
+		if self.computed_hash == hash {
+			return false;
+		}
+		self.computed_hash = hash.to_string();
+		true
+	}
+}
+
 /// The structure of the local (project-scoped) skill lock file.
 /// This file is meant to be checked into version control.
 ///
@@ -268,6 +281,28 @@ mod tests {
 		let mut e = sample_local_entry();
 		e.skill_path = None;
 		assert!(!serde_json::to_string(&e).unwrap().contains("skillPath"));
+	}
+
+	#[test]
+	fn apply_computed_hash_sets_hash_and_reports_changed() {
+		let mut e = sample_local_entry();
+		e.computed_hash = "old".to_string();
+
+		let changed = e.apply_computed_hash("new-source-sha");
+
+		assert!(changed);
+		assert_eq!(e.computed_hash, "new-source-sha");
+	}
+
+	#[test]
+	fn apply_computed_hash_is_idempotent() {
+		let mut e = sample_local_entry();
+		e.computed_hash = "same".to_string();
+
+		let changed = e.apply_computed_hash("same");
+
+		assert!(!changed);
+		assert_eq!(e.computed_hash, "same");
 	}
 
 	#[test]

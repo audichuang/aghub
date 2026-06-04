@@ -236,9 +236,8 @@ fn update_lock_hash(
 						"skill '{name}' is not in global lock"
 					));
 				};
-				entry.content_hash = Some(hash.to_string());
-				entry.skill_folder_hash.clear();
-				entry.updated_at = chrono::Utc::now().to_rfc3339();
+				entry
+					.apply_content_hash(hash, &chrono::Utc::now().to_rfc3339());
 				Ok(())
 			})??;
 		}
@@ -251,7 +250,7 @@ fn update_lock_hash(
 						"skill '{name}' is not in project lock"
 					));
 				};
-				entry.computed_hash = hash.to_string();
+				entry.apply_computed_hash(hash);
 				Ok(())
 			})??;
 		}
