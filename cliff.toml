@@ -29,7 +29,7 @@ conventional_commits = true
 filter_unconventional = true
 split_commits = false
 commit_preprocessors = [
-	{ pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](https://github.com/akarachen/aghub/issues/${2}))" },
+	{ pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](https://github.com/audichuang/aghub/issues/${2}))" },
 ]
 commit_parsers = [
 	{ message = "^feat", group = "Features" },

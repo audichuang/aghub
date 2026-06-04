@@ -67,9 +67,9 @@
 			}
 		},
 		"updater": {
-			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDQ4OUQxMzVDMTc5NkVCMzgKUldRNDY1WVhYQk9kU0hMN3lGQnRXK0wzSDBXR1czdE1SRmpuK2VheUVnd2FMeVM1REFBZ1R4UksK",
+			"pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEM2MzM0RUMwNzRDNkQ4RkIKUldUNzJNWjB3RTR6eHJXdTlCMkJ0WW8vVGtyQ0N1MmdpLzhUWHc2WnRvRWRMMG1LRDVOczhvcjMK",
 			"endpoints": [
-				"https://github.com/akarachen/aghub/releases/latest/download/latest.json"
+				"https://github.com/audichuang/aghub/releases/latest/download/latest.json"
 			]
 		}
 	}

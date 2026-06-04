@@ -19,9 +19,9 @@ resolver = "2"
 [workspace.package]
 version = "1.1.1"
 edition = "2021"
-authors = [ "Eric Qu <akarachen>" ]
+authors = [ "audichuang" ]
 license = "MIT"
-repository = "https://github.com/akarachen/aghub"
+repository = "https://github.com/audichuang/aghub"
 
 [workspace.dependencies]
 # Core dependencies

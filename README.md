@@ -4,12 +4,12 @@
 
 **One hub for every AI coding agent.**
 
-[![Version](https://img.shields.io/github/v/release/akarachen/aghub?include_prereleases&label=release)](https://github.com/akarachen/aghub/releases)
-[![Downloads](https://img.shields.io/github/downloads/akarachen/aghub/total.svg)](https://github.com/akarachen/aghub/releases)
-[![Homebrew](https://img.shields.io/badge/homebrew-tap-orange?logo=homebrew)](https://github.com/AkaraChen/homebrew-tap)
-[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/akarachen/aghub/releases)
+[![Version](https://img.shields.io/github/v/release/audichuang/aghub?include_prereleases&label=release)](https://github.com/audichuang/aghub/releases)
+[![Downloads](https://img.shields.io/github/downloads/audichuang/aghub/total.svg)](https://github.com/audichuang/aghub/releases)
+[![Homebrew](https://img.shields.io/badge/homebrew-tap-orange?logo=homebrew)](https://github.com/audichuang/homebrew-tap)
+[![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20macOS%20%7C%20Linux-lightgrey.svg)](https://github.com/audichuang/aghub/releases)
 [![Built with Tauri](https://img.shields.io/badge/built%20with-Tauri%202-orange.svg)](https://tauri.app/)
-[![License](https://img.shields.io/github/license/akarachen/aghub)](https://github.com/akarachen/aghub/blob/main/LICENSE)
+[![License](https://img.shields.io/github/license/audichuang/aghub)](https://github.com/audichuang/aghub/blob/main/LICENSE)
 
 <a href="https://www.producthunt.com/products/aghub/reviews/new?utm_source=badge-product_review&utm_medium=badge&utm_source=badge-aghub" target="_blank"><img src="https://api.producthunt.com/widgets/embed-image/v1/product_review.svg?product_id=1193657&theme=light" alt="AGHub - The&#32;hub&#32;for&#32;every&#32;AI&#32;agent&#32;that&#32;isn&#39;t&#32;slop&#46; | Product Hunt" style="width: 250px; height: 54px;" width="250" height="54" /></a>
 
@@ -21,19 +21,19 @@
 
 ```bash
 # Install Desktop App
-brew install --cask akarachen/tap/aghub
+brew install --cask audichuang/tap/aghub
 ```
 
 ### Download
 
-| Platform               | Download                                                                                         |
-| ---------------------- | ------------------------------------------------------------------------------------------------ |
-| Windows (experimental) | [setup.exe](https://github.com/akarachen/aghub/releases/latest/download/aghub-windows-setup.exe) |
-| macOS (Intel)          | [dmg](https://github.com/akarachen/aghub/releases/latest/download/aghub_mac_intel.dmg)           |
-| macOS (Apple Silicon)  | [dmg](https://github.com/akarachen/aghub/releases/latest/download/aghub_mac_arm.dmg)             |
-| Linux                  | [AppImage](https://github.com/akarachen/aghub/releases/latest/download/aghub-linux.AppImage)     |
+| Platform               | Download                                                                                          |
+| ---------------------- | ------------------------------------------------------------------------------------------------- |
+| Windows (experimental) | [setup.exe](https://github.com/audichuang/aghub/releases/latest/download/aghub-windows-setup.exe) |
+| macOS (Intel)          | [dmg](https://github.com/audichuang/aghub/releases/latest/download/aghub_mac_intel.dmg)           |
+| macOS (Apple Silicon)  | [dmg](https://github.com/audichuang/aghub/releases/latest/download/aghub_mac_arm.dmg)             |
+| Linux                  | [AppImage](https://github.com/audichuang/aghub/releases/latest/download/aghub-linux.AppImage)     |
 
-Or visit [Releases](https://github.com/akarachen/aghub/releases) for all available downloads.
+Or visit [Releases](https://github.com/audichuang/aghub/releases) for all available downloads.
 
 ### System Requirements
 
@@ -87,7 +87,7 @@ Or visit [Releases](https://github.com/akarachen/aghub/releases) for all availab
 Contributions are welcome! To get started:
 
 ```bash
-git clone https://github.com/akarachen/aghub.git
+git clone https://github.com/audichuang/aghub.git
 cd aghub
 just desktop    # Debug build
 just test       # Run tests
@@ -102,10 +102,10 @@ This project is licensed under the [MIT License](LICENSE).
 
 ## Star History
 
-<a href="https://www.star-history.com/#AkaraChen/aghub&type=date&legend=top-left">
+<a href="https://www.star-history.com/#audichuang/aghub&type=date&legend=top-left">
  <picture>
-   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=AkaraChen/aghub&type=date&theme=dark&legend=top-left" />
-   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=AkaraChen/aghub&type=date&legend=top-left" />
-   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=AkaraChen/aghub&type=date&legend=top-left" />
+   <source media="(prefers-color-scheme: dark)" srcset="https://api.star-history.com/svg?repos=audichuang/aghub&type=date&theme=dark&legend=top-left" />
+   <source media="(prefers-color-scheme: light)" srcset="https://api.star-history.com/svg?repos=audichuang/aghub&type=date&legend=top-left" />
+   <img alt="Star History Chart" src="https://api.star-history.com/svg?repos=audichuang/aghub&type=date&legend=top-left" />
  </picture>
 </a>
