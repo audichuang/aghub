@@ -1,7 +1,7 @@
-//! Skill-specific server-side orchestration (not the HTTP routes, which live in
-//! `routes::skills`). Houses the F1 update-check pipeline.
-
-// The orchestration is consumed by the `GET /skills/check-updates` route
-// (`routes::skills_update`).
+//! Skill-specific server-side helpers (not the HTTP routes, which live in
+//! `routes::skills`).
+//!
+//! The F1 update-check orchestrator was extracted into the dedicated
+//! `skill-update` crate (shared by the api and the CLI); only the rename-guard
+//! re-export remains here.
 pub(crate) mod rename;
-pub(crate) mod update_check;

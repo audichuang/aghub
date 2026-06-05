@@ -43,9 +43,9 @@ use crate::{
 		resolved_to_resource_scope, skills_update::update_lock_hash,
 	},
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
-	skills::update_check::keychain_host_for_source,
 	state::{GitCloneSession, GitCloneSessions},
 };
+use skill_update::keychain_host_for_source;
 
 #[derive(rocket::FromForm)]
 pub(crate) struct SkillListParams {
@@ -827,6 +827,7 @@ fn write_skill_install_lock(
 	source: &skill::InstallLockSource,
 	lock_skill_path: Option<String>,
 	source_dir: &Path,
+	ref_commit: Option<String>,
 ) -> Result<(), ApiError> {
 	match resource_scope {
 		ResourceScope::GlobalOnly => {
@@ -835,6 +836,7 @@ fn write_skill_install_lock(
 				source,
 				lock_skill_path,
 				source_dir,
+				ref_commit,
 			)
 			.map_err(|e| {
 				ApiError::new(
@@ -858,6 +860,7 @@ fn write_skill_install_lock(
 				lock_skill_path,
 				source_dir,
 				cwd,
+				ref_commit,
 			)
 			.map_err(|e| {
 				ApiError::new(
@@ -1076,6 +1079,8 @@ pub fn import_skill(
 		},
 		None,
 		&source_dir,
+		// Local installs have no upstream commit OID.
+		None,
 	)?;
 
 	Ok(Json(SkillResponse::from(&imported)))
@@ -1388,6 +1393,15 @@ pub async fn install_skill(
 		}
 	}
 
+	// The clone checked out the default branch; record its tip OID so the first
+	// `check` can preflight via ls-refs without a full fetch. Repo-level, so it
+	// is shared by every skill discovered in this clone. Best-effort: a read
+	// failure simply leaves `refCommit` unset (the check then self-heals it).
+	let ref_commit = gix::open(temp_dir.path())
+		.ok()
+		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
+		.map(|oid| oid.to_string());
+
 	for skill in &selected_skills {
 		let copied = copied_skill_names.contains(&skill.name);
 		let should_write = installed_skill_names.contains(&skill.name)
@@ -1411,6 +1425,7 @@ pub async fn install_skill(
 			&lock_source,
 			Some(skill::lock_skill_file_path(&skill.relative_dir)),
 			&source_dir,
+			ref_commit.clone(),
 		)?;
 	}
 
@@ -1815,6 +1830,14 @@ pub async fn git_install_skills(
 
 	let mut results = Vec::new();
 
+	// Record the session clone's checked-out tip OID (repo-level, shared by all
+	// installed skills) so the first `check` can preflight via ls-refs.
+	// Best-effort: a read failure leaves `refCommit` unset.
+	let ref_commit = gix::open(&temp_path)
+		.ok()
+		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
+		.map(|oid| oid.to_string());
+
 	let (dir_groups, invalid_agents) = build_git_install_groups(
 		&req.agents,
 		resource_scope,
@@ -1953,6 +1976,7 @@ pub async fn git_install_skills(
 					&source,
 					Some(skill::lock_skill_file_path(&relative_dir)),
 					&source_dir,
+					ref_commit.clone(),
 				)?;
 			}
 		}
@@ -2122,11 +2146,15 @@ pub async fn git_sync_skill(
 		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
 	}
 
+	// The session-based sync clones into a session temp dir and does not carry a
+	// resolved tip OID, so it leaves `refCommit` untouched (None). install /
+	// apply-update remain the explicit refCommit write points.
 	update_lock_hash(
 		&req.name,
 		&req.scope,
 		project_root.as_deref(),
 		&updated_hash,
+		None,
 	)
 	.map_err(|e| {
 		ApiError::new(
@@ -2501,11 +2529,16 @@ mod tests {
 			},
 			Some(skill::lock_skill_file_path("hello-skill")),
 			&source_dir,
+			Some("deadbeefcafef00d".to_string()),
 		)
 		.unwrap_or_else(|e| panic!("{}", e.body.error));
 
 		let lock = skill::lock::local::read_local_lock(Some(&project));
 		assert!(lock.skills.contains_key("hello-skill"));
+		assert_eq!(
+			lock.skills["hello-skill"].ref_commit.as_deref(),
+			Some("deadbeefcafef00d"),
+		);
 	}
 
 	#[test]
@@ -2531,6 +2564,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					ref_commit: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),
@@ -2614,6 +2648,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					ref_commit: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),

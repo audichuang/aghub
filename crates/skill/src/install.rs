@@ -142,6 +142,7 @@ pub fn write_global_install_lock(
 	source: &InstallLockSource,
 	skill_path: Option<String>,
 	source_dir: &Path,
+	ref_commit: Option<String>,
 ) -> std::io::Result<()> {
 	let content_hash = compute_install_hash(source_dir)?;
 	global::add_skill_to_lock(
@@ -159,6 +160,7 @@ pub fn write_global_install_lock(
 			updated_at: String::new(),
 			plugin_name: None,
 			content_hash: Some(content_hash),
+			ref_commit,
 		},
 	)
 }
@@ -169,11 +171,13 @@ pub fn write_project_install_lock(
 	skill_path: Option<String>,
 	source_dir: &Path,
 	cwd: &Path,
+	ref_commit: Option<String>,
 ) -> std::io::Result<()> {
 	let computed_hash = compute_install_hash(source_dir)?;
 	local::add_skill_to_local_lock(
 		skill_name,
 		local::LocalSkillLockEntry {
+			ref_commit,
 			source: source.source.clone(),
 			ref_name: source.ref_name.clone(),
 			source_type: source.source_type.clone(),
@@ -208,6 +212,48 @@ mod tests {
 	}
 
 	#[test]
+	fn write_global_install_lock_records_ref_commit() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let source = TempDir::new().unwrap();
+		std::fs::write(source.path().join("SKILL.md"), b"name: t\n").unwrap();
+
+		write_global_install_lock(
+			"t",
+			&sample_source(),
+			Some(lock_skill_file_path("")),
+			source.path(),
+			Some("deadbeefcafef00d".to_string()),
+		)
+		.unwrap();
+
+		let lock = crate::lock::global::read_skill_lock();
+		let entry = lock.skills.get("t").unwrap();
+		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	#[test]
+	fn write_project_install_lock_records_ref_commit() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let project = TempDir::new().unwrap();
+		let source = TempDir::new().unwrap();
+		std::fs::write(source.path().join("SKILL.md"), b"name: t\n").unwrap();
+
+		write_project_install_lock(
+			"t",
+			&sample_source(),
+			Some(lock_skill_file_path("")),
+			source.path(),
+			project.path(),
+			Some("deadbeefcafef00d".to_string()),
+		)
+		.unwrap();
+
+		let lock = local::read_local_lock(Some(project.path()));
+		let entry = lock.skills.get("t").unwrap();
+		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	#[test]
 	fn write_project_install_lock_computes_real_hash() {
 		let _g = crate::lock::test_utils::TestLockGuard::new();
 		let project = TempDir::new().unwrap();
@@ -221,6 +267,7 @@ mod tests {
 			Some(lock_skill_file_path("skills/my-skill")),
 			source.path(),
 			project.path(),
+			None,
 		)
 		.unwrap();
 

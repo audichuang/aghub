@@ -262,6 +262,7 @@ mod tests {
 			skill_path: None,
 			skill_folder_hash: "h".to_string(),
 			content_hash: None,
+			ref_commit: None,
 			installed_at: "t".to_string(),
 			updated_at: "t".to_string(),
 			plugin_name: None,
@@ -334,6 +335,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"proj-only",
 			skill::LocalSkillLockEntry {
+				ref_commit: None,
 				source: "o/r".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -357,6 +359,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"proj-gone",
 			skill::LocalSkillLockEntry {
+				ref_commit: None,
 				source: "o/r".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),

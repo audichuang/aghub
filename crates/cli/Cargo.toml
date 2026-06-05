@@ -16,6 +16,7 @@ aghub-agents = { path = "../agents" }
 aghub-cc-plugins = { path = "../cc-plugins" }
 aghub-git = { path = "../git" }
 skill = { path = "../skill" }
+skill-update = { path = "../skill-update" }
 
 clap = { workspace = true }
 tabled = { workspace = true }
@@ -23,7 +24,13 @@ anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-tokio = { version = "1", features = [ "rt", "macros" ] }
+tokio = { version = "1", features = [
+	"rt",
+	"rt-multi-thread",
+	"macros",
+	"time",
+	"sync",
+] }
 gix = { version = "0.83", default-features = false }
 tempfile = { workspace = true }
 chrono = { version = "0.4", features = [ "serde" ] }

@@ -6,6 +6,7 @@ members = [
 	"crates/api",
 	"crates/skills-sh",
 	"crates/skill",
+	"crates/skill-update",
 	"crates/git",
 	"crates/json",
 	"crates/markdown",

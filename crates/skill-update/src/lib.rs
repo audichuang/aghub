@@ -5,16 +5,23 @@
 //! resolution live here. The fetch is injected via [`Fetcher`] so the
 //! grouping/cache/timeout/concurrency logic is unit-testable without a network
 //! (the real network paths are covered by the `#[ignore]` E2E tests in F1.7).
+//!
+//! Extracted from `crates/api` into its own crate so both the desktop API
+//! (`GET /skills/check-updates`) and the CLI (`aghub-cli check --online`) can
+//! share one orchestrator. Each surface supplies its own [`TokenResolver`]; the
+//! default git adapters ([`GitFetcher`]/[`GitRefResolver`]) live in [`mod@git`].
+
+mod git;
+pub use git::{GitFetcher, GitRefResolver};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crate::skills::rename::detect_rename;
 use aghub_core::skills::update::{
-	compare_known_hashes, sanitize_skill_path, SkillUpdateStatus,
-	UncheckableReason,
+	compare_known_hashes, detect_rename, sanitize_skill_path,
+	SkillUpdateStatus, UncheckableReason,
 };
 
 /// A unique upstream coordinate: a repo `source` plus an optional `ref`
@@ -44,6 +51,10 @@ pub struct EntryInput {
 	/// Hash of the currently installed local skill folder, computed by the route
 	/// before checking upstream. Used as the comparison baseline for legacy locks.
 	pub local_hash: Option<String>,
+	/// Stored repo-level commit OID (`refCommit`) from the lock, when present.
+	/// Drives the ls-refs preflight: an unchanged tip lets the group skip the
+	/// fetch. `None` (project lock / npx / legacy) → never a preflight skip.
+	pub ref_commit: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -58,6 +69,9 @@ pub struct CheckOutput {
 	pub status: SkillUpdateStatus,
 	/// Local hash that should be written back into the lock before returning.
 	pub heal_hash: Option<String>,
+	/// Resolved tip OID to write back into the GLOBAL lock's `refCommit` after a
+	/// fresh fetch, so the next check can preflight. `None` outside global fetches.
+	pub heal_oid: Option<String>,
 }
 
 /// Group lock entries by [`SourceRef`] so each upstream is fetched once.
@@ -133,6 +147,9 @@ impl ResultCache {
 pub struct FetchedRepo {
 	/// Root of the fetched source tree (the containment root for `skill_path`).
 	pub root: PathBuf,
+	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded for the
+	/// global-lock `refCommit` heal so the next check can preflight.
+	pub oid: String,
 	/// Keep-alive guard for a temp dir, dropped when the repo is no longer needed.
 	pub _guard: Option<Arc<tempfile::TempDir>>,
 }
@@ -168,9 +185,23 @@ pub trait TokenResolver: Send + Sync {
 	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String>;
 }
 
+/// Resolves the current tip commit OID of a `(source, ref)` via a git ref
+/// advertisement (ls-refs) — no object download. Returns the 40-hex OID. Used
+/// for the cheap preflight that skips the full fetch when nothing changed.
+pub trait RefResolver: Send + Sync {
+	fn resolve(
+		&self,
+		source_ref: &SourceRef,
+		token: Option<&str>,
+	) -> Result<String, FetchError>;
+}
+
 /// Orchestration knobs.
 pub struct CheckDeps<'a> {
 	pub fetcher: Arc<dyn Fetcher>,
+	/// Optional ls-refs preflight. `None` disables the preflight entirely (the
+	/// orchestrator always fetches), preserving the pre-preflight behavior.
+	pub ref_resolver: Option<Arc<dyn RefResolver>>,
 	pub resolver: &'a dyn TokenResolver,
 	pub cache: &'a mut ResultCache,
 	/// Per-fetch timeout.
@@ -207,7 +238,7 @@ pub(crate) fn host_of(source: &str) -> Option<String> {
 	}
 }
 
-pub(crate) fn keychain_host_for_source(source: &str) -> Option<String> {
+pub fn keychain_host_for_source(source: &str) -> Option<String> {
 	aghub_git::resolve_remote_source(source)
 		.ok()
 		.and_then(|resolved| host_of(&resolved.clone_url))
@@ -244,6 +275,51 @@ fn lock_hash_unknown(stored_hash: Option<&str>) -> bool {
 	}
 }
 
+/// Outcome of the ls-refs preflight for one `(source, ref)` group.
+pub(crate) enum PreflightResult {
+	/// Every member is provably up to date; reuse these synthesized per-skill
+	/// probes and skip the fetch entirely.
+	Skip(CachedGroup),
+	/// At least one member is not trustworthy; fall through to the full fetch.
+	Fetch,
+}
+
+/// Decide whether a `(source, ref)` group can skip the fetch given the remote
+/// tip OID. Skips ONLY when EVERY member has `ref_commit == Some(tip)`, a known
+/// (non-placeholder) `stored_hash`, and `local_hash == stored_hash` (the
+/// installed copy has not drifted). Any failure → `Fetch`.
+///
+/// `Skip` carries a synthesized `CachedGroup::Hashes` (`HashProbe::Fresh(stored)`
+/// per `skill_path`) so the normal `classify_member_from_probe` path runs
+/// unchanged — yielding `UpToDate` with `heal_hash: None` — instead of a blanket
+/// terminal status that would bypass the per-member heal logic.
+pub(crate) fn preflight_decision(
+	members: &[EntryInput],
+	tip_oid: &str,
+) -> PreflightResult {
+	let trustworthy = |m: &EntryInput| {
+		m.ref_commit.as_deref() == Some(tip_oid)
+			&& !lock_hash_unknown(m.stored_hash.as_deref())
+			&& m.local_hash.is_some()
+			&& m.local_hash == m.stored_hash
+	};
+	if !members.iter().all(trustworthy) {
+		return PreflightResult::Fetch;
+	}
+	let mut hashes: HashMap<Option<String>, HashProbe> = HashMap::new();
+	for m in members {
+		if let Some(stored) = m.stored_hash.clone() {
+			hashes
+				.entry(m.skill_path.clone())
+				.or_insert(HashProbe::Fresh {
+					hash: stored,
+					name: None,
+				});
+		}
+	}
+	PreflightResult::Skip(CachedGroup::Hashes(hashes))
+}
+
 fn classify_member_from_probe(
 	member: &EntryInput,
 	probe: &HashProbe,
@@ -259,6 +335,7 @@ fn classify_member_from_probe(
 				reason: reason.clone(),
 			},
 			heal_hash: None,
+			heal_oid: None,
 		},
 		HashProbe::Fresh {
 			hash: fresh_hash,
@@ -271,6 +348,7 @@ fn classify_member_from_probe(
 						key,
 						status: SkillUpdateStatus::Renamed { new_name },
 						heal_hash: None,
+						heal_oid: None,
 					};
 				}
 			}
@@ -287,6 +365,7 @@ fn classify_member_from_probe(
 						reason: UncheckableReason::Local,
 					},
 					heal_hash: None,
+					heal_oid: None,
 				};
 			};
 			let status = compare_known_hashes(baseline, fresh_hash);
@@ -294,6 +373,7 @@ fn classify_member_from_probe(
 				key,
 				status,
 				heal_hash: unknown.then(|| baseline.to_string()),
+				heal_oid: None,
 			}
 		}
 	}
@@ -310,6 +390,7 @@ fn terminal_output(
 		},
 		status: status.clone(),
 		heal_hash: None,
+		heal_oid: None,
 	}
 }
 
@@ -427,33 +508,64 @@ pub async fn check_updates(
 	for (id, job) in jobs.into_iter().enumerate() {
 		pending.insert(id, (job.sr.clone(), job.members.clone()));
 		let fetcher = Arc::clone(&deps.fetcher);
+		let ref_resolver = deps.ref_resolver.clone();
 		let semaphore = Arc::clone(&semaphore);
 		let per_fetch = deps.per_fetch;
 		set.spawn(async move {
 			let _permit = semaphore.clone().acquire_owned().await.ok();
+			// Cheap ls-refs preflight (bounded by the same per-fetch timeout):
+			// skip the fetch when the tip is unchanged AND every member is
+			// trustworthy. Any resolver error falls through to the full fetch.
+			if let Some(rr) = ref_resolver {
+				let tip = tokio::time::timeout(
+					per_fetch,
+					do_resolve(rr, job.sr.clone(), job.token.clone()),
+				)
+				.await;
+				if let Ok(Ok(tip)) = tip {
+					if let PreflightResult::Skip(cached) =
+						preflight_decision(&job.members, &tip)
+					{
+						return (
+							id,
+							job.sr,
+							job.members,
+							JobResult::Skip(cached),
+						);
+					}
+				}
+			}
 			let result = tokio::time::timeout(
 				per_fetch,
 				do_fetch(fetcher, job.sr.clone(), job.token),
 			)
 			.await;
-			let fetched = match result {
-				Err(_elapsed) => Err(UncheckableReason::Timeout),
-				Ok(Err(FetchError::Auth)) => Err(UncheckableReason::Auth),
-				Ok(Err(FetchError::Network)) => Err(UncheckableReason::Network),
-				Ok(Ok(repo)) => Ok(repo),
+			let outcome = match result {
+				Err(_elapsed) => JobResult::Failed(UncheckableReason::Timeout),
+				Ok(Err(FetchError::Auth)) => {
+					JobResult::Failed(UncheckableReason::Auth)
+				}
+				Ok(Err(FetchError::Network)) => {
+					JobResult::Failed(UncheckableReason::Network)
+				}
+				Ok(Ok(repo)) => JobResult::Fetched(repo),
 			};
-			(id, job.sr, job.members, fetched)
+			(id, job.sr, job.members, outcome)
 		});
 	}
 
 	if tokio::time::timeout(deps.overall_deadline, async {
 		while let Some(joined) = set.join_next().await {
-			let Ok((id, sr, members, fetched)) = joined else {
+			let Ok((id, sr, members, outcome)) = joined else {
 				continue;
 			};
 			pending.remove(&id);
-			match fetched {
-				Err(reason) => {
+			match outcome {
+				JobResult::Skip(cached) => {
+					out.extend(apply_cached_group(&members, &cached));
+					deps.cache.put(sr.clone(), cached, now);
+				}
+				JobResult::Failed(reason) => {
 					let status = SkillUpdateStatus::Uncheckable { reason };
 					deps.cache.put(
 						sr.clone(),
@@ -464,7 +576,7 @@ pub async fn check_updates(
 						out.push(terminal_output(m, &status));
 					}
 				}
-				Ok(repo) => {
+				JobResult::Fetched(repo) => {
 					let mut hashes: HashMap<Option<String>, HashProbe> =
 						HashMap::new();
 					for m in &members {
@@ -478,7 +590,16 @@ pub async fn check_updates(
 						);
 					}
 					let cached = CachedGroup::Hashes(hashes);
-					out.extend(apply_cached_group(&members, &cached));
+					let mut group_out = apply_cached_group(&members, &cached);
+					// Self-heal refCommit for freshly-fetched GLOBAL entries so the
+					// next check can preflight; the VCS-tracked project lock is
+					// never silently mutated by a read-style check.
+					for (output, member) in group_out.iter_mut().zip(&members) {
+						if member.scope == "global" {
+							output.heal_oid = Some(repo.oid.clone());
+						}
+					}
+					out.extend(group_out);
 					deps.cache.put(sr.clone(), cached, now);
 				}
 			}
@@ -503,6 +624,14 @@ pub async fn check_updates(
 	out
 }
 
+/// What a spawned per-group job produced: a preflight skip (reuse these probes),
+/// a real fetch result, or a classified failure.
+enum JobResult {
+	Skip(CachedGroup),
+	Fetched(FetchedRepo),
+	Failed(UncheckableReason),
+}
+
 struct FetchJob {
 	sr: SourceRef,
 	members: Vec<EntryInput>,
@@ -520,11 +649,25 @@ async fn do_fetch(
 		.unwrap_or(Err(FetchError::Network))
 }
 
+/// Bridge the synchronous [`RefResolver`] into the async timeout path.
+async fn do_resolve(
+	resolver: Arc<dyn RefResolver>,
+	sr: SourceRef,
+	token: Option<String>,
+) -> Result<String, FetchError> {
+	tokio::task::spawn_blocking(move || resolver.resolve(&sr, token.as_deref()))
+		.await
+		.unwrap_or(Err(FetchError::Network))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use std::sync::atomic::{AtomicUsize, Ordering};
 	use std::sync::Mutex;
+
+	/// Fixed tip OID the test fetchers report, so heal-oid wiring is assertable.
+	const STUB_FETCH_OID: &str = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
 
 	#[test]
 	fn groups_same_source_ref_once() {
@@ -612,6 +755,7 @@ mod tests {
 			}
 			Ok(FetchedRepo {
 				root: self.root.clone().unwrap(),
+				oid: STUB_FETCH_OID.to_string(),
 				_guard: None,
 			})
 		}
@@ -629,7 +773,216 @@ mod tests {
 			skill_path: Some("SKILL.md".into()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}
+	}
+
+	#[test]
+	fn preflight_decision_all_trustworthy_and_tip_match_returns_skip() {
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let mut a = entry("a", "o/r", Some("main"));
+		a.ref_commit = Some(tip.to_string());
+		a.stored_hash = Some("hash_a".to_string());
+		a.local_hash = Some("hash_a".to_string());
+		a.skill_path = Some("SKILL.md".into());
+		match preflight_decision(&[a], tip) {
+			PreflightResult::Skip(CachedGroup::Hashes(map)) => {
+				assert!(matches!(
+					map.get(&Some("SKILL.md".to_string())),
+					Some(HashProbe::Fresh { hash, .. }) if hash == "hash_a"
+				));
+			}
+			_ => panic!("expected Skip, got Fetch"),
+		}
+	}
+
+	fn trustworthy_member(tip: &str) -> EntryInput {
+		let mut m = entry("a", "o/r", Some("main"));
+		m.ref_commit = Some(tip.to_string());
+		m.stored_hash = Some("hash_a".to_string());
+		m.local_hash = Some("hash_a".to_string());
+		m
+	}
+
+	#[test]
+	fn preflight_decision_local_drift_returns_fetch() {
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let mut m = trustworthy_member(tip);
+		m.local_hash = Some("DRIFTED".to_string()); // installed copy edited
+		assert!(matches!(
+			preflight_decision(&[m], tip),
+			PreflightResult::Fetch
+		));
+	}
+
+	#[test]
+	fn preflight_decision_oid_mismatch_returns_fetch() {
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let mut m = trustworthy_member(tip);
+		m.ref_commit = Some("0000000000000000000000000000000000000000".into());
+		assert!(matches!(
+			preflight_decision(&[m], tip),
+			PreflightResult::Fetch
+		));
+	}
+
+	#[test]
+	fn preflight_decision_legacy_unknown_stored_returns_fetch() {
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let mut m = trustworthy_member(tip);
+		m.stored_hash = None; // legacy/npx entry: must fall through to heal
+		assert!(matches!(
+			preflight_decision(&[m], tip),
+			PreflightResult::Fetch
+		));
+	}
+
+	#[test]
+	fn preflight_decision_is_all_or_nothing_per_group() {
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let good = trustworthy_member(tip);
+		let mut bad = trustworthy_member(tip);
+		bad.ref_commit = None; // one untrustworthy member fails the whole group
+		assert!(matches!(
+			preflight_decision(&[good, bad], tip),
+			PreflightResult::Fetch
+		));
+	}
+
+	struct StubRefResolver {
+		oid: String,
+		err: Option<&'static str>,
+		calls: Mutex<usize>,
+	}
+	impl RefResolver for StubRefResolver {
+		fn resolve(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<String, FetchError> {
+			*self.calls.lock().unwrap() += 1;
+			match self.err {
+				Some("auth") => Err(FetchError::Auth),
+				Some(_) => Err(FetchError::Network),
+				None => Ok(self.oid.clone()),
+			}
+		}
+	}
+
+	#[tokio::test]
+	async fn preflight_hit_skips_fetch() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
+			oid: tip.to_string(),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			ref_resolver: Some(ref_resolver),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut a = entry("a", "o/r", Some("main"));
+		a.ref_commit = Some(tip.to_string());
+		a.stored_hash = Some(hash.clone());
+		a.local_hash = Some(hash);
+		let out = check_updates(vec![a], deps).await;
+		assert_eq!(out.len(), 1);
+		assert_eq!(out[0].status, SkillUpdateStatus::UpToDate);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			0,
+			"preflight hit must skip the fetch"
+		);
+	}
+
+	#[tokio::test]
+	async fn preflight_miss_drift_falls_through_to_fetch() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
+			oid: tip.to_string(),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			ref_resolver: Some(ref_resolver),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut a = entry("a", "o/r", Some("main"));
+		a.ref_commit = Some(tip.to_string());
+		a.stored_hash = Some("STORED_OLD".to_string());
+		a.local_hash = Some("DRIFTED".to_string());
+		let out = check_updates(vec![a], deps).await;
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			1,
+			"local drift must fall through to a real fetch"
+		);
+		assert!(matches!(
+			out[0].status,
+			SkillUpdateStatus::UpdateAvailable { .. }
+		));
+	}
+
+	#[tokio::test]
+	async fn fetch_heals_ref_commit_for_global_member() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher,
+			ref_resolver: None,
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut g = entry("g", "o/r", Some("main"));
+		g.stored_hash = Some(hash.clone());
+		g.local_hash = Some(hash);
+		let out = check_updates(vec![g], deps).await;
+		assert_eq!(out.len(), 1);
+		// A fresh fetch records the resolved tip so the next check can preflight.
+		assert_eq!(out[0].heal_oid, Some(STUB_FETCH_OID.to_string()));
 	}
 
 	#[tokio::test]
@@ -642,6 +995,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: fetcher.clone(),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -673,6 +1027,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
@@ -699,6 +1054,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: fetcher.clone(),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -734,6 +1090,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: fetcher.clone(),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -770,6 +1127,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: fetcher.clone(),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -796,6 +1154,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: Arc::new(fetcher),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -828,6 +1187,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: Arc::new(fetcher),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -869,6 +1229,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: Arc::new(fetcher),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -907,6 +1268,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: Arc::new(fetcher),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -946,6 +1308,7 @@ mod tests {
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
 			fetcher: Arc::new(fetcher),
+			ref_resolver: None,
 			resolver: &resolver,
 			cache: &mut cache,
 			per_fetch: Duration::from_secs(5),
@@ -991,6 +1354,7 @@ mod tests {
 		// First call: populates the cache, must report `Renamed`.
 		let deps = CheckDeps {
 			fetcher: fetcher.clone(),
+			ref_resolver: None,
 			resolver: &resolver,
 			cache: &mut cache,
 			per_fetch: Duration::from_secs(5),
@@ -1015,6 +1379,7 @@ mod tests {
 		// authoritative trigger, the cache just reuses the upstream probe.
 		let deps = CheckDeps {
 			fetcher: fetcher.clone(),
+			ref_resolver: None,
 			resolver: &resolver,
 			cache: &mut cache,
 			per_fetch: Duration::from_secs(5),
@@ -1057,6 +1422,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: Arc::new(fetcher),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -1097,6 +1463,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: fetcher.clone(),
 			resolver: &resolver,
 			cache: &mut cache,
@@ -1142,6 +1509,7 @@ mod tests {
 			self.current.fetch_sub(1, Ordering::SeqCst);
 			Ok(FetchedRepo {
 				root: self.root.clone(),
+				oid: STUB_FETCH_OID.to_string(),
 				_guard: None,
 			})
 		}
@@ -1160,6 +1528,7 @@ mod tests {
 		let resolver = StubResolver(None);
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher: fetcher.clone(),
 			resolver: &resolver,
 			cache: &mut cache,

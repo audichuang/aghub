@@ -22,14 +22,14 @@ use crate::dto::sources::{
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::routes::credentials::load_credentials;
-use crate::routes::skills_update::{installed_skill_roots, GitFetcher};
+use crate::routes::skills_update::installed_skill_roots;
 use crate::skills::rename::detect_rename;
-use crate::skills::update_check::{
-	keychain_host_for_source, FetchError, Fetcher, SourceRef,
-};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{
 	compare_known_hashes, precheck_source, SkillUpdateStatus, UncheckableReason,
+};
+use skill_update::{
+	keychain_host_for_source, FetchError, Fetcher, GitFetcher, SourceRef,
 };
 
 // ─────────────────────────── GET /skills/sources ───────────────────────────
@@ -434,7 +434,7 @@ fn classify_source_skill_diff(
 
 fn fetch_source_lazily_auth(
 	source_ref: &SourceRef,
-) -> Result<crate::skills::update_check::FetchedRepo, LazyFetchError> {
+) -> Result<skill_update::FetchedRepo, LazyFetchError> {
 	let fetcher = GitFetcher;
 	match fetcher.fetch(source_ref, None) {
 		Ok(repo) => Ok(repo),
@@ -601,6 +601,7 @@ mod tests {
 				skill_path: Some("s/SKILL.md".to_string()),
 				skill_folder_hash: "h".to_string(),
 				content_hash: None,
+				ref_commit: None,
 				installed_at: "t".to_string(),
 				updated_at: "t".to_string(),
 				plugin_name: None,

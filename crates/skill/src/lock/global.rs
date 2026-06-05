@@ -148,6 +148,7 @@ mod tests {
 			updated_at: "2024-01-01T00:00:00Z".to_string(),
 			plugin_name: None,
 			content_hash: None,
+			ref_commit: None,
 		}
 	}
 

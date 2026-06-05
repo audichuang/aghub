@@ -358,6 +358,30 @@ pub fn install_remote_api<R: CommandRunner>(
 	}
 }
 
+/// Force-redeploy a version-locked local `aghub-api` over a present-but-
+/// incompatible remote one. Best-effort kills the running process first (avoids
+/// `ETXTBSY` on the overwrite + orphaned servers), overwrites the binary
+/// (prepare → scp → atomic mv+chmod), then re-probes and returns the fresh
+/// result. The caller proceeds only when `compatible`.
+pub fn force_redeploy_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local_version: &str,
+	source: &RemoteInstallSource,
+) -> Result<TestResult, ConnectError> {
+	let bin = resolved_path(conn);
+	let pkill = build_ssh_args(conn, &crate::ssh::build_remote_pkill_cmd());
+	let _ = runner.run("ssh", &pkill);
+	install_remote_api(runner, conn, &bin, source)?;
+	let probe = probe_connection(runner, conn, local_version);
+	if !probe.reachable {
+		return Err(ConnectError::Unreachable {
+			stderr: probe.message,
+		});
+	}
+	Ok(probe.with_install_result(true, "aghub-api redeployed".to_string()))
+}
+
 fn run_remote_install_step<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -408,7 +432,7 @@ pub fn decide_deploy(
 }
 
 /// The user-facing install instruction returned when we cannot auto-deploy.
-fn install_hint() -> String {
+pub fn install_hint() -> String {
 	"aghub-api is not installed on the remote. Install it on the VM with \
      `cargo install --path crates/api` (or `just install`) and ensure it is on \
      your PATH, or set a remoteAghubPath for this connection."
@@ -718,6 +742,54 @@ mod tests {
 		assert_eq!(calls.len(), 1);
 		assert_eq!(calls[0].program, "ssh");
 		assert_eq!(calls[0].args, install_args);
+	}
+
+	#[test]
+	fn force_redeploy_pkills_overwrites_then_reprobes() {
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let pkill_args =
+			build_ssh_args(&conn(), &crate::ssh::build_remote_pkill_cmd());
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let probe_args = build_ssh_args(
+			&conn(),
+			&crate::ssh::build_remote_probe_cmd("aghub-api"),
+		);
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let ver = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.1".to_string(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&pkill_args), ok())
+			.script("ssh", &args_as_str(&prepare_args), ok())
+			.script("scp", &args_as_str(&scp_args), ok())
+			.script("ssh", &args_as_str(&finish_args), ver())
+			.script("ssh", &args_as_str(&probe_args), ver());
+
+		let result =
+			force_redeploy_remote_api(&runner, &conn(), "1.1.1", &source)
+				.unwrap();
+
+		assert!(result.compatible);
+		assert!(result.api_present);
+		// The stale process is killed BEFORE the overwrite.
+		let calls = runner.calls();
+		assert_eq!(calls[0].args, pkill_args, "pkill must be issued first");
 	}
 
 	#[test]

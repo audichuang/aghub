@@ -2,7 +2,7 @@
 //!
 //! Reads the global skill lock, projects each entry to the orchestrator's
 //! [`EntryInput`], then delegates to the pure-ish F1.5 runner
-//! ([`crate::skills::update_check::check_updates`]).
+//! ([`skill_update::check_updates`]).
 //!
 //! Network + credential resolution stay in this crate (never in `crates/core`).
 //! The [`Fetcher`] materializes a worktree into a [`tempfile::TempDir`] (the
@@ -30,10 +30,10 @@ use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::skills::rename::{
 	detect_rename, skill_renamed_message, SKILL_RENAMED_CODE,
 };
-use crate::skills::update_check::{
+use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, FetchedRepo, Fetcher, ResultCache, SourceRef,
-	TokenResolver,
+	EntryInput, FetchError, FetchedRepo, Fetcher, GitFetcher, GitRefResolver,
+	ResultCache, SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -45,73 +45,6 @@ const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Production [`Fetcher`]: fetches the requested ref into a bare temp repo,
-/// then materializes the tree into a separate temp directory for hashing/apply.
-pub(crate) struct GitFetcher;
-
-impl Fetcher for GitFetcher {
-	fn fetch(
-		&self,
-		source_ref: &SourceRef,
-		token: Option<&str>,
-	) -> Result<FetchedRepo, FetchError> {
-		let url = normalize_fetch_url(&source_ref.source)?;
-		let creds = token
-			.map(|token| aghub_git::Credentials::new("x-access-token", token));
-		let (bare, oid) = aghub_git::fetch_ref_to_temp(
-			&url,
-			source_ref.ref_.as_deref(),
-			creds.as_ref(),
-			Some(PER_FETCH),
-		)
-		.map_err(classify_fetch_error)?;
-		let repo = gix::open(bare.path()).map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let object = repo.find_object(oid).map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let tree = object.peel_to_tree().map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let materialized =
-			tempfile::TempDir::new().map_err(|_| FetchError::Network)?;
-		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
-			.map_err(|_| FetchError::Network)?;
-		let root = materialized.path().to_path_buf();
-		Ok(FetchedRepo {
-			root,
-			_guard: Some(Arc::new(materialized)),
-		})
-	}
-}
-
-fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
-	aghub_git::resolve_remote_source(source)
-		.map(|resolved| resolved.clone_url)
-		.map_err(|_| FetchError::Network)
-}
-
-fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
-	let msg = e.to_string();
-	let lower = msg.to_lowercase();
-	if lower.contains("auth")
-		|| lower.contains("401")
-		|| lower.contains("403")
-		|| lower.contains("credential")
-	{
-		FetchError::Auth
-	} else {
-		FetchError::Network
-	}
-}
 
 /// Production [`TokenResolver`]: wraps the F1.4 keyring source→credential
 /// binding + host keychain resolution. Loads the stored credentials and
@@ -210,6 +143,7 @@ fn global_lock_entries(
 			source_type: entry.source_type,
 			skill_path: entry.skill_path,
 			stored_hash: entry.content_hash,
+			ref_commit: entry.ref_commit,
 		})
 		.collect()
 }
@@ -232,6 +166,7 @@ fn project_lock_entries(
 			source_type: entry.source_type,
 			skill_path: entry.skill_path,
 			stored_hash: Some(entry.computed_hash),
+			ref_commit: entry.ref_commit,
 		})
 		.collect()
 }
@@ -288,29 +223,45 @@ fn write_auto_healed_hashes(
 	project_root: Option<&Path>,
 ) -> Result<(), ApiError> {
 	let mut global_heals = HashMap::new();
+	let mut global_oid_heals = HashMap::new();
 	let mut project_heals = HashMap::new();
 	for output in outputs {
-		let Some(hash) = &output.heal_hash else {
-			continue;
-		};
-		match output.key.scope.as_str() {
-			"global" => {
-				global_heals.insert(output.key.name.clone(), hash.clone());
+		if let Some(hash) = &output.heal_hash {
+			match output.key.scope.as_str() {
+				"global" => {
+					global_heals.insert(output.key.name.clone(), hash.clone());
+				}
+				"project" => {
+					project_heals.insert(output.key.name.clone(), hash.clone());
+				}
+				_ => {}
 			}
-			"project" => {
-				project_heals.insert(output.key.name.clone(), hash.clone());
+		}
+		// refCommit heal is GLOBAL-only (the project lock is VCS-tracked) and
+		// independent of heal_hash (a known-stored entry has no heal_hash).
+		if output.key.scope == "global" {
+			if let Some(oid) = &output.heal_oid {
+				global_oid_heals.insert(output.key.name.clone(), oid.clone());
 			}
-			_ => {}
 		}
 	}
 
-	if !global_heals.is_empty() {
+	if !global_heals.is_empty() || !global_oid_heals.is_empty() {
 		skill::lock::global::modify_skill_lock_changed(|lock| {
 			let now = Utc::now().to_rfc3339();
 			let mut changed = false;
 			for (name, hash) in &global_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
 					changed |= entry.apply_content_hash(hash, &now);
+				}
+			}
+			for (name, oid) in &global_oid_heals {
+				if let Some(entry) = lock.skills.get_mut(name) {
+					if entry.ref_commit.as_deref() != Some(oid.as_str()) {
+						entry.ref_commit = Some(oid.clone());
+						entry.updated_at = now.clone();
+						changed = true;
+					}
 				}
 			}
 			((), changed)
@@ -428,6 +379,7 @@ pub(crate) fn update_lock_hash(
 	scope: &str,
 	project_root: Option<&Path>,
 	hash: &str,
+	ref_commit: Option<&str>,
 ) -> Result<(), String> {
 	match scope {
 		"global" => skill::lock::global::modify_skill_lock(|lock| {
@@ -435,6 +387,9 @@ pub(crate) fn update_lock_hash(
 				return Err("Skill is not in global lock".to_string());
 			};
 			entry.apply_content_hash(hash, &Utc::now().to_rfc3339());
+			if let Some(oid) = ref_commit {
+				entry.ref_commit = Some(oid.to_string());
+			}
 			Ok(())
 		})
 		.map_err(|e| format!("Failed to update global lock: {e}"))?,
@@ -448,6 +403,9 @@ pub(crate) fn update_lock_hash(
 					return Err("Skill is not in project lock".to_string());
 				};
 				entry.apply_computed_hash(hash);
+				if let Some(oid) = ref_commit {
+					entry.ref_commit = Some(oid.to_string());
+				}
 				Ok(())
 			})
 			.map_err(|e| format!("Failed to update project lock: {e}"))?
@@ -506,6 +464,7 @@ pub async fn check_skill_updates(
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
+		ref_resolver: Some(Arc::new(GitRefResolver)),
 		resolver: &resolver,
 		cache: &mut cache,
 		per_fetch: PER_FETCH,
@@ -693,6 +652,7 @@ pub(crate) async fn apply_skill_update_inner(
 		&req.scope,
 		project_root.as_deref(),
 		&updated_hash,
+		Some(&repo.oid),
 	) {
 		return Ok(Json(apply_error(&req.name, &req.scope, &response)));
 	}
@@ -711,8 +671,8 @@ pub(crate) async fn apply_skill_update_inner(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::skills::update_check::EntryKey;
 	use aghub_core::skills::update::SkillUpdateStatus;
+	use skill_update::EntryKey;
 
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
 		let _guard = crate::routes::test_env_lock()
@@ -738,6 +698,7 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			skill_folder_hash: String::new(),
 			content_hash: None,
+			ref_commit: None,
 			installed_at: "t".to_string(),
 			updated_at: "t".to_string(),
 			plugin_name: None,
@@ -752,6 +713,7 @@ mod tests {
 			},
 			status: SkillUpdateStatus::UpToDate,
 			heal_hash: Some(hash.to_string()),
+			heal_oid: None,
 		}
 	}
 
@@ -770,11 +732,13 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 		let resolver = KeyringResolver;
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
@@ -816,6 +780,29 @@ mod tests {
 	}
 
 	#[test]
+	fn auto_heal_writes_global_ref_commit() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// A freshly-fetched global member carries heal_oid (and no heal_hash);
+			// write_auto_healed_hashes must still persist refCommit.
+			let mut output = healed_output("legacy", "global", "ignored");
+			output.heal_hash = None;
+			output.heal_oid = Some("deadbeefcafef00d".to_string());
+
+			assert!(write_auto_healed_hashes(&[output], None).is_ok());
+
+			let lock = skill::lock::global::read_skill_lock();
+			assert_eq!(
+				lock.skills["legacy"].ref_commit.as_deref(),
+				Some("deadbeefcafef00d")
+			);
+		});
+	}
+
+	#[test]
 	fn global_apply_update_hash_clears_npx_folder_hash() {
 		with_isolated_state(|| {
 			let mut lock = skill::SkillLockFile::default();
@@ -824,7 +811,8 @@ mod tests {
 			lock.skills.insert("legacy".into(), entry);
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
-			update_lock_hash("legacy", "global", None, "content-v2").unwrap();
+			update_lock_hash("legacy", "global", None, "content-v2", None)
+				.unwrap();
 
 			let lock = skill::lock::global::read_skill_lock();
 			let entry = &lock.skills["legacy"];
@@ -844,6 +832,53 @@ mod tests {
 	}
 
 	#[test]
+	fn project_lock_entries_reads_ref_commit() {
+		let project = tempfile::tempdir().unwrap();
+		let mut local = skill::LocalSkillLockFile::default();
+		local.skills.insert(
+			"s".into(),
+			skill::LocalSkillLockEntry {
+				source: "owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "github".to_string(),
+				computed_hash: "h".to_string(),
+				skill_path: Some("SKILL.md".to_string()),
+				ref_commit: Some("deadbeefcafef00d".to_string()),
+			},
+		);
+		skill::lock::local::write_local_lock(&local, Some(project.path()))
+			.unwrap();
+
+		let entries =
+			project_lock_entries(Some(project.path()), &HashMap::new());
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	#[test]
+	fn apply_update_writes_global_ref_commit() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			update_lock_hash(
+				"legacy",
+				"global",
+				None,
+				"content-v2",
+				Some("deadbeefcafef00d"),
+			)
+			.unwrap();
+
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["legacy"];
+			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
+			assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+		});
+	}
+
+	#[test]
 	fn auto_heal_writes_project_computed_hash_only() {
 		with_isolated_state(|| {
 			let project = tempfile::tempdir().unwrap();
@@ -851,6 +886,7 @@ mod tests {
 			local.skills.insert(
 				"legacy".into(),
 				skill::LocalSkillLockEntry {
+					ref_commit: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),
@@ -894,11 +930,13 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 		let resolver = KeyringResolver;
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
@@ -930,11 +968,13 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 		let resolver = KeyringResolver;
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
+			ref_resolver: None,
 			fetcher,
 			resolver: &resolver,
 			cache: &mut cache,
@@ -967,6 +1007,7 @@ mod tests {
 		) -> Result<FetchedRepo, FetchError> {
 			Ok(FetchedRepo {
 				root: self.root.clone(),
+				oid: String::new(),
 				_guard: None,
 			})
 		}

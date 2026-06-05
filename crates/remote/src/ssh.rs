@@ -346,7 +346,8 @@ pub fn build_remote_finish_upload_cmd(resolved_path: &str) -> String {
 	format!(
 		"{target_assignment} \
 	     mkdir -p \"$(dirname -- \"$target\")\"; \
-	     install -m 755 \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\"; \
+	     mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\"; \
+	     chmod 755 \"$target\"; \
 	     \"$target\" --version"
 	)
 }
@@ -396,6 +397,14 @@ pub fn build_remote_cat_cmd(log_path: &str) -> String {
 /// process command name contains `aghub-api` (defends against PID reuse).
 pub fn build_remote_kill_cmd(pid: u32) -> String {
 	format!("kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | grep -q aghub-api && kill {pid}")
+}
+
+/// Best-effort kill of any running `aghub-api` by exact process name, issued
+/// before a force-redeploy overwrites the binary — avoids `ETXTBSY` on the
+/// in-place replace and leaves no orphaned server. `|| true` so "no match"
+/// (exit 1) is not treated as a failure.
+pub fn build_remote_pkill_cmd() -> String {
+	"pkill -x aghub-api || true".to_string()
 }
 
 /// Compose the probe command `<bin> --version` with the path escaped.
@@ -449,6 +458,45 @@ pub fn is_version_compatible(local: &str, remote: &str) -> bool {
 		(Some(l), Some(r)) => l == r,
 		_ => false,
 	}
+}
+
+/// Normalize `uname -s`/`uname -m` output into the `std::env::consts::{OS, ARCH}`
+/// vocabulary so a remote platform can be compared to the desktop's own. Returns
+/// `None` for anything not mappable (the caller treats that as cross-platform).
+pub fn normalize_platform(
+	uname_s: &str,
+	uname_m: &str,
+) -> Option<(String, String)> {
+	let os = match uname_s.trim() {
+		"Darwin" => "macos",
+		"Linux" => "linux",
+		_ => return None,
+	};
+	let arch = match uname_m.trim() {
+		"arm64" | "aarch64" => "aarch64",
+		"x86_64" | "amd64" => "x86_64",
+		_ => return None,
+	};
+	Some((os.to_string(), arch.to_string()))
+}
+
+/// Probe the remote platform via `uname -sm`, normalized to the
+/// `std::env::consts` vocabulary. `None` on transport failure, a non-zero
+/// remote exit, or an unmappable platform — the caller treats that as "not the
+/// same platform" and refuses a cross-platform redeploy.
+pub fn probe_remote_platform<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+) -> Option<(String, String)> {
+	let args = build_ssh_args(conn, "uname -sm");
+	let out = runner.run("ssh", &args).ok()?;
+	if out.status_code != Some(0) {
+		return None;
+	}
+	let mut tokens = out.stdout.split_whitespace();
+	let s = tokens.next()?;
+	let m = tokens.next()?;
+	normalize_platform(s, m)
 }
 
 /// Find the first whitespace/EOL-terminated token after `key` on any line, where
@@ -1008,6 +1056,95 @@ mod tests {
 		assert!(!is_version_compatible("1.1.1", "1.2.0"));
 		assert!(!is_version_compatible("1.1.1", "2.1.1"));
 		assert!(!is_version_compatible("1.1.1", "garbage"));
+	}
+
+	#[test]
+	fn normalize_platform_maps_uname_to_consts_vocab() {
+		// `uname -sm` vocabulary → std::env::consts vocabulary.
+		assert_eq!(
+			normalize_platform("Darwin", "arm64"),
+			Some(("macos".to_string(), "aarch64".to_string()))
+		);
+		assert_eq!(
+			normalize_platform("Linux", "x86_64"),
+			Some(("linux".to_string(), "x86_64".to_string()))
+		);
+	}
+
+	#[test]
+	fn normalize_platform_rejects_unknown() {
+		assert_eq!(normalize_platform("Windows_NT", "x86_64"), None);
+		assert_eq!(normalize_platform("Linux", "riscv64"), None);
+		assert_eq!(normalize_platform("", ""), None);
+	}
+
+	#[test]
+	fn pkill_cmd_is_best_effort() {
+		assert_eq!(build_remote_pkill_cmd(), "pkill -x aghub-api || true");
+	}
+
+	fn plat_conn() -> Connection {
+		Connection {
+			id: "c".into(),
+			label: "c".into(),
+			ssh_target: "host".into(),
+			user: None,
+			port: None,
+			remote_aghub_path: None,
+		}
+	}
+
+	#[test]
+	fn probe_remote_platform_parses_and_normalizes() {
+		let conn = plat_conn();
+		let args_owned = build_ssh_args(&conn, "uname -sm");
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "Darwin arm64\n".into(),
+				stderr: String::new(),
+			},
+		);
+		assert_eq!(
+			probe_remote_platform(&runner, &conn),
+			Some(("macos".to_string(), "aarch64".to_string()))
+		);
+	}
+
+	#[test]
+	fn probe_remote_platform_none_on_transport_failure() {
+		let conn = plat_conn();
+		let args_owned = build_ssh_args(&conn, "uname -sm");
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(255),
+				stdout: String::new(),
+				stderr: "ssh: connect refused".into(),
+			},
+		);
+		assert_eq!(probe_remote_platform(&runner, &conn), None);
+	}
+
+	#[test]
+	fn finish_upload_cmd_uses_atomic_mv_not_install() {
+		let cmd = build_remote_finish_upload_cmd("aghub-api");
+		assert!(
+			cmd.contains(
+				"mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\""
+			),
+			"expected atomic mv, got: {cmd}"
+		);
+		assert!(cmd.contains("chmod 755 \"$target\""), "got: {cmd}");
+		assert!(
+			!cmd.contains("install -m 755"),
+			"install -m 755 risks ETXTBSY on a running binary"
+		);
 	}
 
 	// --- MockRunner --------------------------------------------------------

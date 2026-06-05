@@ -22,14 +22,17 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aghub_remote::bringup::{
-	ensure_remote_api, probe_connection, start_remote, ConnectError,
-	RemoteInstallSource, TestResult,
+	ensure_remote_api, force_redeploy_remote_api, install_hint,
+	probe_connection, start_remote, ConnectError, RemoteInstallSource,
+	StartedServer, TestResult,
 };
 use aghub_remote::fs::{
 	list_remote_directories as list_remote_directories_core,
 	RemoteDirectoryError, RemoteDirectoryListing,
 };
-use aghub_remote::ssh::{build_tunnel_args, Connection, SystemRunner};
+use aghub_remote::ssh::{
+	build_tunnel_args, probe_remote_platform, Connection, SystemRunner,
+};
 use aghub_remote::ssh_config::{read_default_ssh_config_hosts, SshConfigHost};
 use log::{info, warn};
 use serde::Serialize;
@@ -81,6 +84,13 @@ pub enum RemoteError {
 	RemoteApiMissing { install_hint: String },
 	/// A remote `aghub-api` was found but its version is incompatible.
 	Incompatible { remote_version: Option<String> },
+	/// Force-redeploy was requested but the remote's `(os, arch)` differs from
+	/// the desktop's, so the bundled/local binary would not run there. Carries
+	/// the probed platform (or `"unknown"`) and the manual install hint.
+	CrossPlatformRedeploy {
+		remote_platform: String,
+		hint: String,
+	},
 	/// The remote server never reported its port within the poll budget.
 	StartTimeout,
 	/// The local ssh tunnel failed to establish the port-forward.
@@ -153,6 +163,15 @@ pub fn test_connection(connection: Connection) -> TestResult {
 	probe_connection(&runner, &connection, LOCAL_VERSION)
 }
 
+/// The desktop's embedded `aghub-api` version (`aghub_api::VERSION`), i.e. the
+/// version `is_version_compatible` enforces against the remote. This is the
+/// **workspace** version, distinct from the Tauri app version reported by
+/// `@tauri-apps/api/app`'s `getVersion()`.
+#[tauri::command]
+pub fn local_api_version() -> &'static str {
+	LOCAL_VERSION
+}
+
 /// Return selectable aliases discovered from the user's local `~/.ssh/config`.
 #[tauri::command]
 pub fn list_ssh_config_hosts() -> Vec<SshConfigHost> {
@@ -194,6 +213,69 @@ pub fn connect_remote(
 
 	// Do the slow ssh work WITHOUT holding any lock.
 	let outcome = bring_up(&app, &connection);
+
+	// Release the in-progress slot regardless of result.
+	if let Ok(mut connecting) = state.connecting.lock() {
+		connecting.remove(&id);
+	}
+
+	let handle = outcome?;
+	let port = handle.local_port;
+	lock(&state.handles)?.insert(id, handle);
+	Ok(port)
+}
+
+/// Force-redeploy the desktop's `aghub-api` over an incompatible remote one,
+/// then connect; returns the **local** tunnel port. Only reachable from the
+/// incompatible/failed state: it refuses to clobber a live connection and is
+/// gated to the desktop's own `(os, arch)`.
+#[tauri::command]
+pub fn force_redeploy_remote(
+	state: State<'_, RemoteState>,
+	app: AppHandle,
+	connection: Connection,
+) -> Result<u16, RemoteError> {
+	let id = connection.id.clone();
+
+	// A live handle means there is a working connection — never tear it down.
+	if existing_local_port(&state, &id).is_some() {
+		return Err(RemoteError::AlreadyConnecting);
+	}
+
+	// Resolve the install source (dev fallback until bundling lands).
+	let source = remote_install_source().ok_or_else(|| {
+		RemoteError::RemoteApiMissing {
+			install_hint: install_hint(),
+		}
+	})?;
+
+	// Same-platform gate BEFORE any mutation: a wrong-arch binary would not run.
+	let runner = SystemRunner;
+	let probed = probe_remote_platform(&runner, &connection);
+	let same_platform = matches!(
+		&probed,
+		Some((os, arch))
+			if os == std::env::consts::OS && arch == std::env::consts::ARCH
+	);
+	if !same_platform {
+		let remote_platform = probed
+			.map(|(os, arch)| format!("{os}/{arch}"))
+			.unwrap_or_else(|| "unknown".to_string());
+		return Err(RemoteError::CrossPlatformRedeploy {
+			remote_platform,
+			hint: install_hint(),
+		});
+	}
+
+	// Claim the in-progress slot so a concurrent connect can't race us.
+	{
+		let mut connecting = lock(&state.connecting)?;
+		if !connecting.insert(id.clone()) {
+			return Err(RemoteError::AlreadyConnecting);
+		}
+	}
+
+	let outcome = force_redeploy(&app, &connection, &source);
 
 	// Release the in-progress slot regardless of result.
 	if let Ok(mut connecting) = state.connecting.lock() {
@@ -290,9 +372,23 @@ fn bring_up(
 		PORT_POLL_DELAY,
 	)?;
 
-	// From here the remote server is already running: every early return MUST
-	// guarded-kill it, or it orphans on the VM (the RemoteHandle is only stored
-	// after bring_up returns Ok, so disconnect/cleanup can't reach it yet).
+	finish_bring_up(app, connection, started)
+}
+
+/// Tail of the bring-up shared by [`connect_remote`] and [`force_redeploy_remote`]:
+/// allocate a local port, spawn the ssh tunnel, settle-check it, start the
+/// watcher, and return the [`RemoteHandle`].
+///
+/// **Invariant:** on entry the remote server is already running, so every early
+/// return MUST guarded-kill it (the `RemoteHandle` is only stored by the caller
+/// after this returns `Ok`, so disconnect/cleanup cannot reach it yet).
+fn finish_bring_up(
+	app: &AppHandle,
+	connection: &Connection,
+	started: StartedServer,
+) -> Result<RemoteHandle, RemoteError> {
+	let runner = SystemRunner;
+
 	let local_port = match find_available_port() {
 		Ok(port) => port,
 		Err(message) => {
@@ -360,6 +456,38 @@ fn bring_up(
 		connection: connection.clone(),
 		intentional,
 	})
+}
+
+/// Force-redeploy the desktop's version-locked `aghub-api` over a present-but-
+/// incompatible remote one, then start + tunnel + connect. Same-platform-gated
+/// (a wrong-arch binary would not run) and only reachable from the failed /
+/// incompatible state; it refuses to clobber a live connection.
+fn force_redeploy(
+	app: &AppHandle,
+	connection: &Connection,
+	source: &RemoteInstallSource,
+) -> Result<RemoteHandle, RemoteError> {
+	let runner = SystemRunner;
+	let test =
+		force_redeploy_remote_api(&runner, connection, LOCAL_VERSION, source)?;
+	if !test.compatible {
+		// Redeploy ran but the re-probe is still incompatible — surface it
+		// rather than starting the wrong binary.
+		return Err(RemoteError::Incompatible {
+			remote_version: test.api_version,
+		});
+	}
+
+	let bin = resolved_path(connection);
+	let started = start_remote(
+		&runner,
+		connection,
+		&bin,
+		PORT_POLL_ATTEMPTS,
+		PORT_POLL_DELAY,
+	)?;
+
+	finish_bring_up(app, connection, started)
 }
 
 fn remote_install_source() -> Option<RemoteInstallSource> {
