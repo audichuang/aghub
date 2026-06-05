@@ -19,7 +19,7 @@ tokio = { version = "1", features = [
 	"sync",
 ] }
 tempfile = { workspace = true }
-gix = "0.83"
+gix = "0.84"
 
 [dev-dependencies]
 tempfile = { workspace = true }
