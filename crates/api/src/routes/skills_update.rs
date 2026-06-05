@@ -254,7 +254,7 @@ fn project_lock_entries(
 			source_type: entry.source_type,
 			skill_path: entry.skill_path,
 			stored_hash: Some(entry.computed_hash),
-			ref_commit: None,
+			ref_commit: entry.ref_commit,
 		})
 		.collect()
 }
@@ -884,6 +884,30 @@ mod tests {
 			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
 			assert_eq!(entry.skill_folder_hash, "");
 		});
+	}
+
+	#[test]
+	fn project_lock_entries_reads_ref_commit() {
+		let project = tempfile::tempdir().unwrap();
+		let mut local = skill::LocalSkillLockFile::default();
+		local.skills.insert(
+			"s".into(),
+			skill::LocalSkillLockEntry {
+				source: "owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "github".to_string(),
+				computed_hash: "h".to_string(),
+				skill_path: Some("SKILL.md".to_string()),
+				ref_commit: Some("deadbeefcafef00d".to_string()),
+			},
+		);
+		skill::lock::local::write_local_lock(&local, Some(project.path()))
+			.unwrap();
+
+		let entries =
+			project_lock_entries(Some(project.path()), &HashMap::new());
+		assert_eq!(entries.len(), 1);
+		assert_eq!(entries[0].ref_commit.as_deref(), Some("deadbeefcafef00d"));
 	}
 
 	#[test]
