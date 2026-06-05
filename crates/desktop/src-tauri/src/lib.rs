@@ -1,8 +1,9 @@
 use crate::commands::{
 	cleanup_all_remotes, clear_log_files, connect_remote, disconnect_remote,
-	export_diagnostic_logs, get_log_dir_path, get_log_entries, get_log_stats,
-	list_remote_directories, list_ssh_config_hosts, remote_status,
-	start_server, test_connection, RemoteState,
+	export_diagnostic_logs, force_redeploy_remote, get_log_dir_path,
+	get_log_entries, get_log_stats, list_remote_directories,
+	list_ssh_config_hosts, remote_status, start_server, test_connection,
+	RemoteState,
 };
 use log::info;
 use tauri::{Manager, WebviewWindow};
@@ -193,6 +194,7 @@ pub fn run() {
 			list_remote_directories,
 			connect_remote,
 			disconnect_remote,
+			force_redeploy_remote,
 			remote_status,
 		])
 		.build(tauri::generate_context!())

@@ -8,7 +8,7 @@ pub use logging::{
 };
 pub use remote::{
 	cleanup_all_remotes, connect_remote, disconnect_remote,
-	list_remote_directories, list_ssh_config_hosts, remote_status,
-	test_connection, RemoteState,
+	force_redeploy_remote, list_remote_directories, list_ssh_config_hosts,
+	remote_status, test_connection, RemoteState,
 };
 pub use server::start_server;

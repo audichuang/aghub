@@ -432,7 +432,7 @@ pub fn decide_deploy(
 }
 
 /// The user-facing install instruction returned when we cannot auto-deploy.
-fn install_hint() -> String {
+pub fn install_hint() -> String {
 	"aghub-api is not installed on the remote. Install it on the VM with \
      `cargo install --path crates/api` (or `just install`) and ensure it is on \
      your PATH, or set a remoteAghubPath for this connection."
