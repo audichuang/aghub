@@ -32,8 +32,8 @@ use crate::skills::rename::{
 };
 use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, FetchedRepo, Fetcher, GitFetcher, GitRefResolver,
-	ResultCache, SourceRef, TokenResolver,
+	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
+	SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -1004,8 +1004,8 @@ mod tests {
 			&self,
 			_source_ref: &SourceRef,
 			_token: Option<&str>,
-		) -> Result<FetchedRepo, FetchError> {
-			Ok(FetchedRepo {
+		) -> Result<skill_update::FetchedRepo, FetchError> {
+			Ok(skill_update::FetchedRepo {
 				root: self.root.clone(),
 				oid: String::new(),
 				_guard: None,
