@@ -1,6 +1,5 @@
 import {
 	ArrowPathIcon,
-	ArrowPathRoundedSquareIcon,
 	CheckCircleIcon,
 	PlusIcon,
 	RectangleStackIcon,
@@ -74,6 +73,12 @@ export default function SkillsPage() {
 	const [panelMode, setPanelMode] = useState<
 		"create" | "import" | "import-github" | null
 	>(null);
+	const isRefreshingSkills = isFetching || checkUpdatesMutation.isPending;
+
+	const handleRefreshSkills = async () => {
+		await refetch();
+		checkUpdatesMutation.mutate(updateCheckParams);
+	};
 
 	const groupedSkills = useMemo(() => {
 		const map = new Map<string, SkillResponse[]>();
@@ -240,40 +245,27 @@ export default function SkillsPage() {
 							</Dropdown.Menu>
 						</Dropdown.Popover>
 					</Dropdown>
-					<Button
-						isIconOnly
-						variant="ghost"
-						size="sm"
-						className="shrink-0"
-						aria-label={t("refreshSkills")}
-						onPress={() => refetch()}
-					>
-						<ArrowPathIcon
-							className={cn(
-								"size-4",
-								isFetching && "animate-spin",
-							)}
-						/>
-					</Button>
-					<Button
-						isIconOnly
-						variant="ghost"
-						size="sm"
-						className="shrink-0"
-						aria-label={t("checkForSkillUpdates")}
-						isDisabled={checkUpdatesMutation.isPending}
-						onPress={() =>
-							checkUpdatesMutation.mutate(updateCheckParams)
-						}
-					>
-						<ArrowPathRoundedSquareIcon
-							className={cn(
-								"size-4",
-								checkUpdatesMutation.isPending &&
-									"animate-spin",
-							)}
-						/>
-					</Button>
+					<Tooltip delay={0}>
+						<Button
+							isIconOnly
+							variant="ghost"
+							size="sm"
+							className="shrink-0"
+							aria-label={t("refreshSkills")}
+							isDisabled={isRefreshingSkills}
+							onPress={() => {
+								void handleRefreshSkills();
+							}}
+						>
+							<ArrowPathIcon
+								className={cn(
+									"size-4",
+									isRefreshingSkills && "animate-spin",
+								)}
+							/>
+						</Button>
+						<Tooltip.Content>{t("refreshSkills")}</Tooltip.Content>
+					</Tooltip>
 				</ListSearchHeader>
 
 				{/* Skills List */}
