@@ -220,6 +220,12 @@ enum Commands {
 		#[arg(value_enum)]
 		resource: ResourceType,
 
+		/// Check upstream over the network: cheap ls-refs preflight, then a
+		/// treeless fetch only when the tip moved. Default is offline (remote
+		/// sources are reported `uncheckable`). Read-only on both locks.
+		#[arg(long, visible_alias = "check-remote")]
+		online: bool,
+
 		/// Emit machine-readable JSON (default output is also JSON today)
 		#[arg(long)]
 		json: bool,
@@ -448,9 +454,17 @@ fn main() -> Result<()> {
 		Commands::Describe { resource, name } => {
 			describe::execute(&manager, resource, name)
 		}
-		Commands::Check { resource, json } => {
-			check::execute(resource, scope, project_root.as_deref(), json)
-		}
+		Commands::Check {
+			resource,
+			online,
+			json,
+		} => check::execute(
+			resource,
+			scope,
+			project_root.as_deref(),
+			online,
+			json,
+		),
 		Commands::ApplyUpdate {
 			resource,
 			name,

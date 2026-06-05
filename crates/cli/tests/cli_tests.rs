@@ -118,6 +118,59 @@ fn check_skills_outputs_json_array() {
 }
 
 #[test]
+fn check_skills_online_empty_lock_outputs_empty_array() {
+	// `--online` with an isolated, empty global lock and no project lock has no
+	// entries to resolve, so the orchestrator returns `[]` and never touches the
+	// network — exercising the online plumbing (runtime + orchestrator +
+	// rendering) end-to-end without a remote.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "check", "skills", "--online", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(v.as_array().map(Vec::len), Some(0));
+}
+
+/// `--online` end-to-end against a real public repo: seed the global lock with
+/// one entry and assert the check emits a status for it without crashing or
+/// leaking a token. Ignored by default (needs network).
+#[ignore = "network"]
+#[test]
+fn check_skills_online_public_repo_emits_status() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let lock_dir = state.path().join("skills");
+	std::fs::create_dir_all(&lock_dir).unwrap();
+	std::fs::write(
+		lock_dir.join(".skill-lock.json"),
+		r#"{"version":3,"skills":{"hello":{"source":"octocat/Hello-World","sourceType":"github","sourceUrl":"https://github.com/octocat/Hello-World","skillPath":"SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#,
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a", "claude", "-g", "check", "skills", "--online", "--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = v.as_array().unwrap();
+	assert!(arr.iter().any(|e| e["name"] == "hello"));
+}
+
+#[test]
 fn test_pi_add_mcp_fails_for_unsupported_agent() {
 	let out = aghub_cli()
 		.args([

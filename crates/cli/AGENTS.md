@@ -50,6 +50,25 @@ cargo test -p aghub
 just install
 ```
 
+## SKILL UPDATE CHECK (`check skills`)
+
+`src/commands/check.rs` reports each locked skill's update status as a
+`status`-tagged JSON array. Two modes, both **read-only** (never mutate either
+lock):
+
+- **Default (offline)** — no network; remote sources are reported
+  `uncheckable` (`network`), local-only sources `local`.
+- **`--online`** (alias `--check-remote`) — runs the shared `skill-update`
+  orchestrator with an env (`GIT_USERNAME`/`GIT_PASSWORD`) `TokenResolver`: a
+  cheap ls-refs preflight skips the fetch when the upstream tip is unchanged
+  **and** the installed copy is unmodified, else a treeless fetch + hash compare.
+
+The orchestrator itself lives in `crates/skill-update` (shared with the desktop
+API); the CLI only injects its env token resolver and the default git adapters.
+The default offline JSON contract is pinned by `check_skills_outputs_json_array`
+in `tests/cli_tests.rs`; the online path has a network-free empty-lock test plus
+an `#[ignore = "network"]` end-to-end test.
+
 ## ANTI-PATTERNS
 
 - **Don't** use `println!` for diagnostic output — use `eprintln_verbose!` macro
