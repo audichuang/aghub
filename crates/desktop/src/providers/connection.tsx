@@ -1,4 +1,4 @@
-import { Spinner, toast } from "@heroui/react";
+import { AlertDialog, Button, Spinner, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -53,7 +53,17 @@ interface RemoteErrorPayload {
 	stderr?: string;
 	installHint?: string;
 	remoteVersion?: string | null;
+	remotePlatform?: string;
+	hint?: string;
 	message?: string;
+}
+
+/** Narrow an unknown invoke rejection to the kind-tagged RemoteError payload. */
+function asRemotePayload(error: unknown): RemoteErrorPayload | null {
+	if (error && typeof error === "object" && "kind" in error) {
+		return error as RemoteErrorPayload;
+	}
+	return null;
 }
 
 function remoteErrorMessage(error: unknown): string {
@@ -77,6 +87,13 @@ function remoteErrorMessage(error: unknown): string {
 			return `Remote aghub-api version ${
 				remote.remoteVersion ?? "unknown"
 			} is incompatible.`;
+		case "crossPlatformRedeploy":
+			return (
+				remote.hint ??
+				`Remote platform ${
+					remote.remotePlatform ?? "unknown"
+				} differs from this desktop; cannot redeploy.`
+			);
 		case "startTimeout":
 			return "Remote aghub-api did not start in time.";
 		case "tunnelFailed":
@@ -94,6 +111,144 @@ function remoteErrorMessage(error: unknown): string {
 				return String(error);
 			}
 	}
+}
+
+interface IncompatibleConnectionScreenProps {
+	connection: Connection;
+	remoteVersion: string | null;
+	/** Flip the cached server port so the provider re-renders into the
+	 * connected state (the tunnel is already open by then). */
+	onRedeployed: (port: number) => void;
+}
+
+/**
+ * Actionable replacement for the bare error screen when the remote `aghub-api`
+ * is version-incompatible: shows both versions and a confirmed force-redeploy
+ * that overwrites the remote binary with the desktop's bundled one.
+ *
+ * Self-contained (owns its mutation + confirm dialog) because the error branch
+ * renders BEFORE the ConnectionContext boundary. The persistent banner is the
+ * deliberate exception to the "errors via toast" rule; transient sub-failures
+ * still toast, and a cross-platform refusal is surfaced inline (it is an
+ * actionable "install manually" state, not a transient error).
+ */
+function IncompatibleConnectionScreen({
+	connection,
+	remoteVersion,
+	onRedeployed,
+}: IncompatibleConnectionScreenProps) {
+	const [confirmOpen, setConfirmOpen] = useState(false);
+
+	const { data: localVersion } = useQuery<string>({
+		queryKey: ["local-api-version"],
+		queryFn: () => invoke<string>("local_api_version"),
+	});
+
+	const redeploy = useMutation({
+		mutationFn: () =>
+			invoke<number>("force_redeploy_remote", { connection }),
+		onSuccess: (port) => {
+			setConfirmOpen(false);
+			onRedeployed(port);
+		},
+		onError: (error) => {
+			setConfirmOpen(false);
+			// Cross-platform refusal is rendered inline (persistent + actionable);
+			// every other failure is transient -> toast.
+			if (asRemotePayload(error)?.kind !== "crossPlatformRedeploy") {
+				toast.danger(remoteErrorMessage(error));
+			}
+		},
+	});
+
+	const redeployError = asRemotePayload(redeploy.error);
+	const crossPlatform =
+		redeployError?.kind === "crossPlatformRedeploy" ? redeployError : null;
+
+	return (
+		<div className="flex h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+			<div className="max-w-md space-y-2">
+				<h1 className="text-lg font-semibold text-foreground">
+					Remote aghub-api is incompatible
+				</h1>
+				<p className="text-sm text-muted">
+					{connection.label} is running aghub-api{" "}
+					<span className="font-mono">
+						{remoteVersion ?? "unknown"}
+					</span>
+					, but this desktop bundles{" "}
+					<span className="font-mono">{localVersion ?? "…"}</span>.
+				</p>
+			</div>
+
+			{crossPlatform ? (
+				<p className="max-w-md text-xs text-danger">
+					{crossPlatform.hint ??
+						"The remote platform differs from this desktop, so its bundled binary cannot run there. Install aghub-api on the VM manually."}
+				</p>
+			) : (
+				<Button
+					variant="primary"
+					onPress={() => setConfirmOpen(true)}
+					isDisabled={redeploy.isPending}
+				>
+					Force redeploy
+				</Button>
+			)}
+
+			<AlertDialog.Backdrop
+				isOpen={confirmOpen}
+				onOpenChange={setConfirmOpen}
+			>
+				<AlertDialog.Container>
+					<AlertDialog.Dialog className="sm:max-w-[420px]">
+						<AlertDialog.CloseTrigger />
+						<AlertDialog.Header>
+							<AlertDialog.Icon status="danger" />
+							<AlertDialog.Heading>
+								Force redeploy?
+							</AlertDialog.Heading>
+						</AlertDialog.Header>
+						<AlertDialog.Body>
+							<p className="text-sm text-muted">
+								This overwrites the remote aghub-api (including
+								your own fork) with the desktop's bundled build,
+								then restarts and reconnects. Continue?
+							</p>
+						</AlertDialog.Body>
+						<AlertDialog.Footer>
+							<Button
+								slot="close"
+								variant="tertiary"
+								onPress={() => setConfirmOpen(false)}
+								isDisabled={redeploy.isPending}
+							>
+								Cancel
+							</Button>
+							<Button
+								variant="danger"
+								onPress={() => redeploy.mutate()}
+								isDisabled={redeploy.isPending}
+							>
+								{redeploy.isPending ? (
+									<>
+										<Spinner
+											size="sm"
+											color="current"
+											className="mr-2"
+										/>
+										Redeploying…
+									</>
+								) : (
+									"Redeploy"
+								)}
+							</Button>
+						</AlertDialog.Footer>
+					</AlertDialog.Dialog>
+				</AlertDialog.Container>
+			</AlertDialog.Backdrop>
+		</div>
+	);
 }
 
 export function ConnectionProvider({ children }: ConnectionProviderProps) {
@@ -213,6 +368,18 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	// throws a RemoteError) must not spin forever — surface it like the old
 	// ServerProvider did. The richer toast/reconnect UI is W6.
 	if (serverQuery.isError) {
+		const payload = asRemotePayload(serverQuery.error);
+		if (payload?.kind === "incompatible") {
+			return (
+				<IncompatibleConnectionScreen
+					connection={activeConnection}
+					remoteVersion={payload.remoteVersion ?? null}
+					onRedeployed={(port) =>
+						queryClient.setQueryData(["server", activeId], port)
+					}
+				/>
+			);
+		}
 		return (
 			<div className="flex h-screen items-center justify-center">
 				<p className="text-sm text-danger">

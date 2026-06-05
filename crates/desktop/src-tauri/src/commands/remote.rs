@@ -161,6 +161,15 @@ pub fn test_connection(connection: Connection) -> TestResult {
 	probe_connection(&runner, &connection, LOCAL_VERSION)
 }
 
+/// The desktop's embedded `aghub-api` version (`aghub_api::VERSION`), i.e. the
+/// version `is_version_compatible` enforces against the remote. This is the
+/// **workspace** version, distinct from the Tauri app version reported by
+/// `@tauri-apps/api/app`'s `getVersion()`.
+#[tauri::command]
+pub fn local_api_version() -> &'static str {
+	LOCAL_VERSION
+}
+
 /// Return selectable aliases discovered from the user's local `~/.ssh/config`.
 #[tauri::command]
 pub fn list_ssh_config_hosts() -> Vec<SshConfigHost> {
