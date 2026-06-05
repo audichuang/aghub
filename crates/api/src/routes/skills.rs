@@ -1945,11 +1945,15 @@ pub async fn git_sync_skill(
 		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
 	}
 
+	// The session-based sync clones into a session temp dir and does not carry a
+	// resolved tip OID, so it leaves `refCommit` untouched (None). install /
+	// apply-update remain the explicit refCommit write points.
 	update_lock_hash(
 		&req.name,
 		&req.scope,
 		project_root.as_deref(),
 		&updated_hash,
+		None,
 	)
 	.map_err(|e| {
 		ApiError::new(

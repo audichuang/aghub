@@ -479,6 +479,7 @@ pub(crate) fn update_lock_hash(
 	scope: &str,
 	project_root: Option<&Path>,
 	hash: &str,
+	ref_commit: Option<&str>,
 ) -> Result<(), String> {
 	match scope {
 		"global" => skill::lock::global::modify_skill_lock(|lock| {
@@ -487,6 +488,9 @@ pub(crate) fn update_lock_hash(
 			};
 			entry.content_hash = Some(hash.to_string());
 			entry.skill_folder_hash.clear();
+			if let Some(oid) = ref_commit {
+				entry.ref_commit = Some(oid.to_string());
+			}
 			entry.updated_at = Utc::now().to_rfc3339();
 			Ok(())
 		})
@@ -501,6 +505,9 @@ pub(crate) fn update_lock_hash(
 					return Err("Skill is not in project lock".to_string());
 				};
 				entry.computed_hash = hash.to_string();
+				if let Some(oid) = ref_commit {
+					entry.ref_commit = Some(oid.to_string());
+				}
 				Ok(())
 			})
 			.map_err(|e| format!("Failed to update project lock: {e}"))?
@@ -711,6 +718,7 @@ pub async fn apply_skill_update(
 		&req.scope,
 		project_root.as_deref(),
 		&updated_hash,
+		Some(&repo.oid),
 	) {
 		return Ok(Json(apply_error(&req.name, &req.scope, &response)));
 	}
@@ -868,12 +876,36 @@ mod tests {
 			lock.skills.insert("legacy".into(), entry);
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
-			update_lock_hash("legacy", "global", None, "content-v2").unwrap();
+			update_lock_hash("legacy", "global", None, "content-v2", None)
+				.unwrap();
 
 			let lock = skill::lock::global::read_skill_lock();
 			let entry = &lock.skills["legacy"];
 			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
 			assert_eq!(entry.skill_folder_hash, "");
+		});
+	}
+
+	#[test]
+	fn apply_update_writes_global_ref_commit() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			update_lock_hash(
+				"legacy",
+				"global",
+				None,
+				"content-v2",
+				Some("deadbeefcafef00d"),
+			)
+			.unwrap();
+
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["legacy"];
+			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
+			assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
 		});
 	}
 
