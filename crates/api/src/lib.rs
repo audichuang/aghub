@@ -16,7 +16,6 @@ pub mod editor_detection;
 pub mod error;
 pub mod extractors;
 pub mod routes;
-pub(crate) mod skills;
 pub mod state;
 
 /// Version of the `aghub-api` binary/library, shared with the desktop remote

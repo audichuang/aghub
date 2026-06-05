@@ -5,6 +5,14 @@
 //! resolution live here. The fetch is injected via [`Fetcher`] so the
 //! grouping/cache/timeout/concurrency logic is unit-testable without a network
 //! (the real network paths are covered by the `#[ignore]` E2E tests in F1.7).
+//!
+//! Extracted from `crates/api` into its own crate so both the desktop API
+//! (`GET /skills/check-updates`) and the CLI (`aghub-cli check --online`) can
+//! share one orchestrator. Each surface supplies its own [`TokenResolver`]; the
+//! default git adapters ([`GitFetcher`]/[`GitRefResolver`]) live in [`mod@git`].
+
+mod git;
+pub use git::{GitFetcher, GitRefResolver};
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -230,7 +238,7 @@ pub(crate) fn host_of(source: &str) -> Option<String> {
 	}
 }
 
-pub(crate) fn keychain_host_for_source(source: &str) -> Option<String> {
+pub fn keychain_host_for_source(source: &str) -> Option<String> {
 	aghub_git::resolve_remote_source(source)
 		.ok()
 		.and_then(|resolved| host_of(&resolved.clone_url))

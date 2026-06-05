@@ -2,7 +2,7 @@
 //!
 //! Reads the global skill lock, projects each entry to the orchestrator's
 //! [`EntryInput`], then delegates to the pure-ish F1.5 runner
-//! ([`crate::skills::update_check::check_updates`]).
+//! ([`skill_update::check_updates`]).
 //!
 //! Network + credential resolution stay in this crate (never in `crates/core`).
 //! The [`Fetcher`] materializes a worktree into a [`tempfile::TempDir`] (the
@@ -27,9 +27,9 @@ use crate::dto::skill::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
-use crate::skills::update_check::{
+use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, FetchedRepo, Fetcher, RefResolver, ResultCache,
+	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
 	SourceRef, TokenResolver,
 };
 
@@ -42,97 +42,6 @@ const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Production [`Fetcher`]: fetches the requested ref into a bare temp repo,
-/// then materializes the tree into a separate temp directory for hashing/apply.
-struct GitFetcher;
-
-impl Fetcher for GitFetcher {
-	fn fetch(
-		&self,
-		source_ref: &SourceRef,
-		token: Option<&str>,
-	) -> Result<FetchedRepo, FetchError> {
-		let url = normalize_fetch_url(&source_ref.source)?;
-		let creds = token
-			.map(|token| aghub_git::Credentials::new("x-access-token", token));
-		let (bare, oid) = aghub_git::fetch_ref_to_temp(
-			&url,
-			source_ref.ref_.as_deref(),
-			creds.as_ref(),
-			Some(PER_FETCH),
-		)
-		.map_err(classify_fetch_error)?;
-		let repo = gix::open(bare.path()).map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let object = repo.find_object(oid).map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let tree = object.peel_to_tree().map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let materialized =
-			tempfile::TempDir::new().map_err(|_| FetchError::Network)?;
-		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
-			.map_err(|_| FetchError::Network)?;
-		let root = materialized.path().to_path_buf();
-		Ok(FetchedRepo {
-			root,
-			oid: oid.to_string(),
-			_guard: Some(Arc::new(materialized)),
-		})
-	}
-}
-
-fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
-	aghub_git::resolve_remote_source(source)
-		.map(|resolved| resolved.clone_url)
-		.map_err(|_| FetchError::Network)
-}
-
-fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
-	let msg = e.to_string();
-	let lower = msg.to_lowercase();
-	if lower.contains("auth")
-		|| lower.contains("401")
-		|| lower.contains("403")
-		|| lower.contains("credential")
-	{
-		FetchError::Auth
-	} else {
-		FetchError::Network
-	}
-}
-
-/// Production [`RefResolver`]: a git ref advertisement (ls-refs, no object
-/// download) resolving the tip OID of the requested branch/tag/default-branch.
-/// Any error (incl. ref-not-found) maps to a soft failure so the orchestrator
-/// falls through to the full fetch.
-struct GitRefResolver;
-
-impl RefResolver for GitRefResolver {
-	fn resolve(
-		&self,
-		source_ref: &SourceRef,
-		token: Option<&str>,
-	) -> Result<String, FetchError> {
-		let url = normalize_fetch_url(&source_ref.source)?;
-		let mut opts = aghub_git::RemoteOptions::new(&url);
-		if let Some(token) = token {
-			opts = opts.with_credentials("x-access-token", token);
-		}
-		aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
-			.map_err(classify_fetch_error)?
-			.ok_or(FetchError::Network)
-	}
-}
 
 /// Production [`TokenResolver`]: wraps the F1.4 keyring source→credential
 /// binding + host keychain resolution. Loads the stored credentials and
@@ -736,8 +645,8 @@ pub async fn apply_skill_update(
 #[cfg(test)]
 mod tests {
 	use super::*;
-	use crate::skills::update_check::EntryKey;
 	use aghub_core::skills::update::SkillUpdateStatus;
+	use skill_update::EntryKey;
 
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
 		let _guard = crate::routes::test_env_lock()

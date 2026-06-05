@@ -81,6 +81,7 @@ dependencies = [
  "serde",
  "serde_json",
  "skill",
+ "skill-update",
  "skills-sh",
  "tempfile",
  "thiserror 2.0.18",
@@ -7109,6 +7110,18 @@ dependencies = [
  "thiserror 2.0.18",
  "walkdir",
  "zip 8.6.0",
+]
+
+[[package]]
+name = "skill-update"
+version = "1.1.1"
+dependencies = [
+ "aghub-core",
+ "aghub-git",
+ "gix",
+ "skill",
+ "tempfile",
+ "tokio",
 ]
 
 [[package]]

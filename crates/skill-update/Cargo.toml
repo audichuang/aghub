@@ -1,0 +1,25 @@
+[package]
+name = "skill-update"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Skill update-check orchestrator (group, ls-refs preflight, treeless fetch, hash compare)"
+
+[dependencies]
+aghub-core = { path = "../core" }
+aghub-git = { path = "../git" }
+skill = { path = "../skill" }
+tokio = { version = "1", features = [
+	"rt",
+	"rt-multi-thread",
+	"macros",
+	"time",
+	"sync",
+] }
+tempfile = { workspace = true }
+gix = "0.83"
+
+[dev-dependencies]
+tempfile = { workspace = true }
