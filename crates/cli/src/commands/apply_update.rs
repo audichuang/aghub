@@ -13,6 +13,9 @@ struct ApplySource {
 
 struct FetchedSource {
 	path: PathBuf,
+	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded into the
+	/// lock's `refCommit` so the next `check` can preflight via ls-refs.
+	oid: String,
 	_guard: TempDir,
 }
 
@@ -71,7 +74,13 @@ pub fn execute(
 		paths.push(target.display().to_string());
 	}
 
-	update_lock_hash(&name, scope, project_root, &updated_hash)?;
+	update_lock_hash(
+		&name,
+		scope,
+		project_root,
+		&updated_hash,
+		Some(&fetched.oid),
+	)?;
 	println!(
 		"{}",
 		serde_json::to_string_pretty(&json!({
@@ -150,6 +159,7 @@ fn fetch_source(source: &ApplySource) -> Result<FetchedSource> {
 	aghub_git::materialize_tree(&repo, tree.id, materialized.path())?;
 	Ok(FetchedSource {
 		path: materialized.path().to_path_buf(),
+		oid: oid.to_string(),
 		_guard: materialized,
 	})
 }
@@ -201,6 +211,7 @@ fn update_lock_hash(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	hash: &str,
+	ref_commit: Option<&str>,
 ) -> Result<()> {
 	match scope {
 		ResourceScope::GlobalOnly => {
@@ -212,6 +223,9 @@ fn update_lock_hash(
 				};
 				entry.content_hash = Some(hash.to_string());
 				entry.skill_folder_hash.clear();
+				if let Some(oid) = ref_commit {
+					entry.ref_commit = Some(oid.to_string());
+				}
 				entry.updated_at = chrono::Utc::now().to_rfc3339();
 				Ok(())
 			})??;
@@ -226,6 +240,9 @@ fn update_lock_hash(
 					));
 				};
 				entry.computed_hash = hash.to_string();
+				if let Some(oid) = ref_commit {
+					entry.ref_commit = Some(oid.to_string());
+				}
 				Ok(())
 			})??;
 		}
@@ -310,6 +327,7 @@ mod tests {
 			ResourceScope::GlobalOnly,
 			None,
 			"content-v2",
+			None,
 		)
 		.unwrap();
 
@@ -317,5 +335,58 @@ mod tests {
 		let entry = &lock.skills["legacy"];
 		assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
 		assert_eq!(entry.skill_folder_hash, "");
+	}
+
+	#[test]
+	fn global_apply_update_writes_ref_commit() {
+		let _guard = GlobalLockGuard::new();
+		skill::lock::global::add_skill_to_lock("legacy", global_entry())
+			.unwrap();
+
+		update_lock_hash(
+			"legacy",
+			ResourceScope::GlobalOnly,
+			None,
+			"content-v2",
+			Some("deadbeefcafef00d"),
+		)
+		.unwrap();
+
+		let lock = skill::lock::global::read_skill_lock();
+		let entry = &lock.skills["legacy"];
+		assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
+		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	#[test]
+	fn project_apply_update_writes_ref_commit() {
+		let project = tempdir().unwrap();
+		skill::lock::local::add_skill_to_local_lock(
+			"legacy",
+			skill::lock::local::LocalSkillLockEntry {
+				source: "owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "github".to_string(),
+				computed_hash: "old".to_string(),
+				skill_path: Some("SKILL.md".to_string()),
+				ref_commit: None,
+			},
+			Some(project.path()),
+		)
+		.unwrap();
+
+		update_lock_hash(
+			"legacy",
+			ResourceScope::ProjectOnly,
+			Some(project.path()),
+			"content-v2",
+			Some("deadbeefcafef00d"),
+		)
+		.unwrap();
+
+		let lock = skill::lock::local::read_local_lock(Some(project.path()));
+		let entry = &lock.skills["legacy"];
+		assert_eq!(entry.computed_hash, "content-v2");
+		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
 	}
 }
