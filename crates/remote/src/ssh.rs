@@ -472,6 +472,25 @@ pub fn normalize_platform(
 	Some((os.to_string(), arch.to_string()))
 }
 
+/// Probe the remote platform via `uname -sm`, normalized to the
+/// `std::env::consts` vocabulary. `None` on transport failure, a non-zero
+/// remote exit, or an unmappable platform — the caller treats that as "not the
+/// same platform" and refuses a cross-platform redeploy.
+pub fn probe_remote_platform<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+) -> Option<(String, String)> {
+	let args = build_ssh_args(conn, "uname -sm");
+	let out = runner.run("ssh", &args).ok()?;
+	if out.status_code != Some(0) {
+		return None;
+	}
+	let mut tokens = out.stdout.split_whitespace();
+	let s = tokens.next()?;
+	let m = tokens.next()?;
+	normalize_platform(s, m)
+}
+
 /// Find the first whitespace/EOL-terminated token after `key` on any line, where
 /// `key` is anchored to the line start or to a whitespace boundary (so e.g.
 /// `OLDPID=9` is NOT matched when looking for `PID=`).
@@ -1054,6 +1073,54 @@ mod tests {
 	#[test]
 	fn pkill_cmd_is_best_effort() {
 		assert_eq!(build_remote_pkill_cmd(), "pkill -x aghub-api || true");
+	}
+
+	fn plat_conn() -> Connection {
+		Connection {
+			id: "c".into(),
+			label: "c".into(),
+			ssh_target: "host".into(),
+			user: None,
+			port: None,
+			remote_aghub_path: None,
+		}
+	}
+
+	#[test]
+	fn probe_remote_platform_parses_and_normalizes() {
+		let conn = plat_conn();
+		let args_owned = build_ssh_args(&conn, "uname -sm");
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "Darwin arm64\n".into(),
+				stderr: String::new(),
+			},
+		);
+		assert_eq!(
+			probe_remote_platform(&runner, &conn),
+			Some(("macos".to_string(), "aarch64".to_string()))
+		);
+	}
+
+	#[test]
+	fn probe_remote_platform_none_on_transport_failure() {
+		let conn = plat_conn();
+		let args_owned = build_ssh_args(&conn, "uname -sm");
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(255),
+				stdout: String::new(),
+				stderr: "ssh: connect refused".into(),
+			},
+		);
+		assert_eq!(probe_remote_platform(&runner, &conn), None);
 	}
 
 	#[test]
