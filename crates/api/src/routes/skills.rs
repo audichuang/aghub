@@ -2304,6 +2304,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					ref_commit: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),
@@ -2387,6 +2388,7 @@ mod tests {
 			skill::add_skill_to_local_lock(
 				"sync-me",
 				skill::LocalSkillLockEntry {
+					ref_commit: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),

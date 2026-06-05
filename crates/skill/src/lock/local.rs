@@ -39,6 +39,15 @@ pub struct LocalSkillLockEntry {
 	/// computes the hash from actual file contents on disk.
 	#[serde(rename = "computedHash")]
 	pub computed_hash: String,
+	/// aghub-only: repo-level commit OID (SHA-1 hex) of the branch/tag tip at
+	/// install/update time, for the cheap ls-refs update preflight. Identical
+	/// across members of the same source+ref group. Never read/written by npx.
+	#[serde(
+		rename = "refCommit",
+		skip_serializing_if = "Option::is_none",
+		default
+	)]
+	pub ref_commit: Option<String>,
 }
 
 /// The structure of the local (project-scoped) skill lock file.
@@ -226,6 +235,7 @@ mod tests {
 
 	fn sample_local_entry() -> LocalSkillLockEntry {
 		LocalSkillLockEntry {
+			ref_commit: None,
 			source: "org/repo".to_string(),
 			ref_name: None,
 			source_type: "github".to_string(),
@@ -250,6 +260,7 @@ mod tests {
 			source_type: "github".to_string(),
 			skill_path: Some("skills/pdf/SKILL.md".to_string()),
 			computed_hash: "abc123".to_string(),
+			ref_commit: None,
 		};
 		let json = serde_json::to_string(&entry).unwrap();
 		let source = json.find("\"source\"").unwrap();
@@ -268,6 +279,30 @@ mod tests {
 		let mut e = sample_local_entry();
 		e.skill_path = None;
 		assert!(!serde_json::to_string(&e).unwrap().contains("skillPath"));
+	}
+
+	#[test]
+	fn local_entry_serializes_ref_commit_as_camel_case() {
+		let mut e = sample_local_entry();
+		e.ref_commit = Some("deadbeef".to_string());
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(json.contains("\"refCommit\":\"deadbeef\""));
+	}
+
+	#[test]
+	fn local_entry_omits_ref_commit_when_none() {
+		let mut e = sample_local_entry();
+		e.ref_commit = None;
+		assert!(!serde_json::to_string(&e).unwrap().contains("refCommit"));
+	}
+
+	#[test]
+	fn local_entry_deserializes_without_ref_commit_to_none() {
+		// npx-written entry has no refCommit; must default to None, not error.
+		let json =
+			r#"{"source":"o/r","sourceType":"github","computedHash":"abc"}"#;
+		let e: super::LocalSkillLockEntry = serde_json::from_str(json).unwrap();
+		assert_eq!(e.ref_commit, None);
 	}
 
 	#[test]
@@ -398,6 +433,7 @@ mod tests {
 		lock.skills.insert(
 			"zebra-skill".to_string(),
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/z".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -408,6 +444,7 @@ mod tests {
 		lock.skills.insert(
 			"alpha-skill".to_string(),
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/a".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -418,6 +455,7 @@ mod tests {
 		lock.skills.insert(
 			"middle-skill".to_string(),
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/m".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -444,6 +482,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"new-skill",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -466,6 +505,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -479,6 +519,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -502,6 +543,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-a",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/a".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -515,6 +557,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-b",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/b".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -537,6 +580,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -634,6 +678,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-a",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/a".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),
@@ -653,6 +698,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-b",
 			LocalSkillLockEntry {
+				ref_commit: None,
 				source: "org/b".to_string(),
 				ref_name: None,
 				source_type: "github".to_string(),

@@ -885,6 +885,7 @@ mod tests {
 			local.skills.insert(
 				"legacy".into(),
 				skill::LocalSkillLockEntry {
+					ref_commit: None,
 					source: "owner/repo".to_string(),
 					ref_name: Some("main".to_string()),
 					source_type: "github".to_string(),

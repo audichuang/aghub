@@ -175,6 +175,7 @@ pub fn write_project_install_lock(
 	local::add_skill_to_local_lock(
 		skill_name,
 		local::LocalSkillLockEntry {
+			ref_commit: None,
 			source: source.source.clone(),
 			ref_name: source.ref_name.clone(),
 			source_type: source.source_type.clone(),
