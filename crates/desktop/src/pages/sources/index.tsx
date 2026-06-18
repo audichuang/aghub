@@ -412,6 +412,8 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const notInstalled = grouped.get("notInstalled") ?? [];
 	const outdated = grouped.get("installedOutdated") ?? [];
 	const renamed = grouped.get("renamed") ?? [];
+	const removed = grouped.get("removed") ?? [];
+	const deprecated = grouped.get("deprecated") ?? [];
 	const current = grouped.get("installedCurrent") ?? [];
 	const uncheckable = grouped.get("uncheckable") ?? [];
 	const hasVisibleSkills = (data?.skills.length ?? 0) > 0;
@@ -960,6 +962,27 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 									</div>
 								);
 							}}
+						/>
+						<SkillSection
+							title={t("sourceStateRemoved")}
+							icon={
+								<ExclamationTriangleIcon className="size-4 text-danger" />
+							}
+							skills={removed}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
+							muted
+							showReason
+						/>
+						<SkillSection
+							title={t("sourceStateDeprecated")}
+							icon={
+								<ExclamationTriangleIcon className="size-4 text-muted" />
+							}
+							skills={deprecated}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
+							muted
 						/>
 						<SkillSection
 							title={t("sourceStateCurrent")}

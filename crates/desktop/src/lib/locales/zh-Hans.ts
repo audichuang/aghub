@@ -1049,6 +1049,8 @@ export default {
 	sourceStateNotInstalled: "新增可装",
 	sourceStateOutdated: "有更新",
 	sourceStateRenamed: "已改名",
+	sourceStateRemoved: "上游已移除",
+	sourceStateDeprecated: "上游已废弃",
 	sourceStateCurrent: "已安装最新",
 	sourceStateUncheckable: "无法检查",
 	sourceRenamedHint:

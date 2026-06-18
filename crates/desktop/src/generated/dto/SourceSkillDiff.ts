@@ -14,7 +14,7 @@ export type SourceSkillDiff = {
 	author?: string;
 	/**
 	 * One of: `notInstalled`, `installedCurrent`, `installedOutdated`,
-	 * `renamed`, `uncheckable`.
+	 * `renamed`, `removed`, `deprecated`, `uncheckable`.
 	 */
 	state: string;
 	/**
@@ -23,7 +23,7 @@ export type SourceSkillDiff = {
 	 */
 	previousName?: string;
 	/**
-	 * For `uncheckable`: redacted reason, aligned with
+	 * For `uncheckable`/`removed`: redacted reason, aligned with
 	 * `SkillUpdateStatusResponse` (`auth`/`network`/`local`/`ssh`/
 	 * `unsupportedScheme`/`noPath`/`timeout`).
 	 */
