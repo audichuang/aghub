@@ -8,23 +8,21 @@ define_mcp_paths! {
 			  mcp_strategy::serialize_json_map_mcp_servers,
 }
 
+// npx-`skills` layout: Cursor owns ONLY its own per-agent dir (which holds
+// symlink Referrers) plus the universal `.agents/skills` Master. It must NOT
+// read another agent's private dir (`.claude/skills`, `.codex/skills`) — that
+// makes Cursor discover skills it does not own and plan destructive removals
+// against another agent's content. Mapping mirrors upstream `agents.ts`
+// (cursor → project `.agents/skills`, global `~/.cursor/skills`); the global
+// Master is `~/.agents/skills` per the npx interop contract.
 fn global_skills_paths() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();
 	};
-	vec![
-		home.join(".cursor/skills"),
-		home.join(".claude/skills"),
-		home.join(".codex/skills"),
-	]
+	vec![home.join(".cursor/skills"), home.join(".agents/skills")]
 }
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![
-		root.join(".cursor/skills"),
-		root.join(".agents/skills"),
-		root.join(".claude/skills"),
-		root.join(".codex/skills"),
-	]
+	vec![root.join(".cursor/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {

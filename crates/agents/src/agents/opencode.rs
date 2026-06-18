@@ -37,22 +37,24 @@ fn save_mcps(
 		mcp_strategy::SERIALIZE_JSON_OPCODE,
 	)
 }
+// npx-`skills` layout: OpenCode owns ONLY its own per-agent dir (symlink
+// Referrers) plus the universal `.agents/skills` Master. Reading Claude's
+// private `.claude/skills` made OpenCode misattribute universal skills through
+// Claude's Referrer symlinks (source_path landing in `.claude/skills`). Mapping
+// mirrors upstream `agents.ts` (opencode → project `.agents/skills`, global
+// `~/.config/opencode/skills`); the global Master is `~/.agents/skills` per the
+// npx interop contract.
 fn global_skills_paths() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();
 	};
 	vec![
 		home.join(".config/opencode/skills"),
-		home.join(".claude/skills"),
 		home.join(".agents/skills"),
 	]
 }
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![
-		root.join(".opencode/skills"),
-		root.join(".claude/skills"),
-		root.join(".agents/skills"),
-	]
+	vec![root.join(".opencode/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
