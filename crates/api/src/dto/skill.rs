@@ -374,12 +374,16 @@ pub struct PruneLockResponse {
 #[ts(export)]
 pub struct SkillContentQuery {
 	pub path: String,
+	pub scope: Option<String>,
+	pub project_root: Option<String>,
 }
 
 #[derive(Debug, TS, rocket::FromForm)]
 #[ts(export)]
 pub struct SkillTreeQuery {
 	pub path: String,
+	pub scope: Option<String>,
+	pub project_root: Option<String>,
 }
 
 #[derive(Debug, TS, rocket::FromForm)]

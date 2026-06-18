@@ -151,6 +151,8 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 		...skillContentQueryOptions({
 			api,
 			path: skill.source_path ?? undefined,
+			scope: primaryScope,
+			projectRoot: projectPath,
 		}),
 	});
 
@@ -158,6 +160,8 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 		...skillTreeQueryOptions({
 			api,
 			path: skill.source_path ?? undefined,
+			scope: primaryScope,
+			projectRoot: projectPath,
 		}),
 	});
 

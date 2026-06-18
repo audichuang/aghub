@@ -20,8 +20,16 @@ export const queryKeys = {
 			scope: "global" | "project" | "all" = "global",
 			projectRoot?: string,
 		) => ["skills", "list", scope, projectRoot ?? null] as const,
-		content: (path: string) => ["skills", "content", path] as const,
-		tree: (path: string) => ["skills", "tree", path] as const,
+		content: (
+			path: string,
+			scope: "global" | "project" = "global",
+			projectRoot?: string,
+		) => ["skills", "content", path, scope, projectRoot ?? null] as const,
+		tree: (
+			path: string,
+			scope: "global" | "project" = "global",
+			projectRoot?: string,
+		) => ["skills", "tree", path, scope, projectRoot ?? null] as const,
 		updateChecks: (
 			scope: "global" | "project" | "all" = "global",
 			projectRoot?: string,

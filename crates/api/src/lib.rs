@@ -307,4 +307,105 @@ mod tests {
 			Some("content-type"),
 		);
 	}
+
+	#[test]
+	fn skill_content_rejects_path_outside_skills_roots() {
+		let project = tempfile::tempdir().expect("project dir");
+		let skill_dir = project.path().join(".claude/skills/legit");
+		std::fs::create_dir_all(&skill_dir).expect("skill dir");
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: legit\ndescription: d\n---\n\n# Body\n",
+		)
+		.expect("write skill");
+
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let mut q = url::form_urlencoded::Serializer::new(String::new());
+		q.append_pair("path", "/etc/passwd");
+		q.append_pair("scope", "project");
+		q.append_pair("project_root", &project.path().to_string_lossy());
+		let uri = format!("/api/v1/skills/content?{}", q.finish());
+
+		let response = client.get(&uri).dispatch();
+		// assert_skill_read_allowed returns Status::Forbidden when the
+		// canonicalized path is outside the allow-listed roots.
+		assert_eq!(
+			response.status(),
+			Status::Forbidden,
+			"reading outside skills roots must be refused, not served"
+		);
+	}
+
+	#[test]
+	fn skill_tree_rejects_parent_dir_traversal() {
+		let project = tempfile::tempdir().expect("project dir");
+		let skill_dir = project.path().join(".claude/skills/legit");
+		std::fs::create_dir_all(&skill_dir).expect("skill dir");
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: legit\ndescription: d\n---\n\n# Body\n",
+		)
+		.expect("write skill");
+
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let escape = skill_dir
+			.join("../../../../../../etc")
+			.to_string_lossy()
+			.to_string();
+		let mut q = url::form_urlencoded::Serializer::new(String::new());
+		q.append_pair("path", &escape);
+		q.append_pair("scope", "project");
+		q.append_pair("project_root", &project.path().to_string_lossy());
+		let uri = format!("/api/v1/skills/tree?{}", q.finish());
+
+		let response = client.get(&uri).dispatch();
+		assert_eq!(
+			response.status(),
+			Status::Forbidden,
+			"traversal must be refused"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn skill_tree_rejects_symlink_escaping_root() {
+		use std::os::unix::fs::symlink;
+		let project = tempfile::tempdir().expect("project dir");
+		let skills = project.path().join(".claude/skills");
+		std::fs::create_dir_all(&skills).expect("skills dir");
+		let outside = tempfile::tempdir().expect("outside");
+		std::fs::create_dir_all(outside.path().join("secret"))
+			.expect("secret dir");
+		let evil = skills.join("evil");
+		symlink(outside.path().join("secret"), &evil).expect("symlink");
+
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let mut q = url::form_urlencoded::Serializer::new(String::new());
+		q.append_pair("path", &evil.to_string_lossy());
+		q.append_pair("scope", "project");
+		q.append_pair("project_root", &project.path().to_string_lossy());
+		let uri = format!("/api/v1/skills/tree?{}", q.finish());
+
+		let response = client.get(&uri).dispatch();
+		assert_eq!(
+			response.status(),
+			Status::Forbidden,
+			"a skills-root entry that is a symlink out of tree must be refused"
+		);
+	}
 }

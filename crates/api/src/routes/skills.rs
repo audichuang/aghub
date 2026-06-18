@@ -913,8 +913,18 @@ fn detect_available_editor() -> Option<CodeEditorType> {
 	crate::editor_detection::detect_any_installed_editor()
 }
 
+/// Build the skill file tree rooted at `path`.
+///
+/// Symlinks are NOT blanket-rejected: this fork's universal-install layout
+/// intentionally symlinks `<agent>/skills/<name>` at the `.agents/skills`
+/// master, so the master must show up in the tree. For each symlink entry we
+/// canonicalize the target and only recurse into it when it stays inside one of
+/// the allow-listed `roots`; a symlink escaping the roots is skipped silently
+/// (it never errors the whole tree). The caller has already asserted the
+/// top-level `path` is contained, so it is rendered even if it is itself a link.
 fn build_skill_tree_node(
 	path: &std::path::Path,
+	roots: &[PathBuf],
 ) -> Result<SkillTreeNodeResponse, ApiError> {
 	let metadata = std::fs::metadata(path).map_err(|e| {
 		ApiError::new(
@@ -939,6 +949,10 @@ fn build_skill_tree_node(
 				)
 			})?
 			.filter_map(|entry| entry.ok())
+			// Skip symlink entries whose canonical target escapes the roots,
+			// instead of erroring the whole tree (hides escaping links while
+			// keeping in-tree universal-install links).
+			.filter(|entry| entry_allowed(&entry.path(), roots))
 			.collect();
 
 		entries.sort_by(|a, b| {
@@ -957,7 +971,7 @@ fn build_skill_tree_node(
 
 		let children = entries
 			.into_iter()
-			.map(|entry| build_skill_tree_node(&entry.path()))
+			.map(|entry| build_skill_tree_node(&entry.path(), roots))
 			.collect::<Result<Vec<_>, _>>()?;
 
 		return Ok(SkillTreeNodeResponse {
@@ -974,6 +988,20 @@ fn build_skill_tree_node(
 		kind: SkillTreeNodeKind::File,
 		children: Vec::new(),
 	})
+}
+
+/// A directory entry is renderable in the skill tree if it is a real
+/// (non-symlink) entry, OR a symlink whose canonical target stays inside one of
+/// the allow-listed skills `roots` (the universal-install case). Escaping
+/// symlinks are silently excluded so they cannot leak out-of-tree paths.
+fn entry_allowed(path: &std::path::Path, roots: &[PathBuf]) -> bool {
+	let is_symlink = std::fs::symlink_metadata(path)
+		.map(|meta| meta.file_type().is_symlink())
+		.unwrap_or(false);
+	if !is_symlink {
+		return true;
+	}
+	aghub_core::skills::removal::assert_contained(path, roots).is_some()
 }
 
 fn check_skills_supported(
@@ -1483,10 +1511,74 @@ pub async fn edit_skill_folder(
 	}
 }
 
+/// Resolve the allow-listed skills roots for a (scope, project_root) pair.
+fn skill_read_roots(
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+		resource_scope,
+		project_root,
+	);
+	aghub_core::skills::removal::allowed_skill_roots(&agent_dirs, project_root)
+}
+
+/// Resolve the allow-listed skills roots for a (scope, project_root) pair and
+/// assert `path` canonicalizes to inside one of them. Mirrors the containment
+/// guard used by `delete_skill_by_path`, so content/tree reads cannot escape
+/// the skills tree (incl. via `..` or a symlink whose target is out of tree).
+///
+/// A path that does NOT exist yields `Status::NotFound` (with `not_found_code`)
+/// rather than Forbidden, so a missing/just-deleted skill reads as 404 — only a
+/// path that EXISTS yet resolves outside the roots is a 403. Mirrors how
+/// `removal::assert_targets_contained` distinguishes not-found targets.
+fn assert_skill_read_allowed(
+	path: &Path,
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+	not_found_code: &'static str,
+) -> Result<PathBuf, ApiError> {
+	let roots = skill_read_roots(resource_scope, project_root);
+	if let Some(canonical) =
+		aghub_core::skills::removal::assert_contained(path, &roots)
+	{
+		return Ok(canonical);
+	}
+	// `assert_contained` canonicalizes and returns None on ENOENT. Distinguish
+	// "does not exist" (→ 404) from "exists but escapes the roots" (→ 403).
+	if !path.exists() {
+		return Err(ApiError::new(
+			Status::NotFound,
+			"Skill path not found",
+			not_found_code,
+		));
+	}
+	Err(ApiError::new(
+		Status::Forbidden,
+		"Refusing to read: resolved path is outside the \
+		 allow-listed skills roots",
+		"SKILL_PATH_OUTSIDE_ROOT",
+	))
+}
+
 #[get("/skills/content?<query..>")]
 pub fn get_skill_content(query: SkillContentQuery) -> ApiResult<String> {
+	let resolved = ScopeParams {
+		scope: query.scope.clone(),
+		project_root: query.project_root.clone(),
+	}
+	.resolve()?;
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+
 	let path = expand_tilde_path(&query.path);
-	let content = std::fs::read_to_string(&path).map_err(|e| {
+	let safe_path = assert_skill_read_allowed(
+		&path,
+		resource_scope,
+		project_root.as_deref(),
+		"SKILL_FILE_NOT_FOUND",
+	)?;
+
+	let content = std::fs::read_to_string(&safe_path).map_err(|e| {
 		ApiError::new(
 			Status::NotFound,
 			format!("Failed to read skill file: {e}"),
@@ -1494,7 +1586,6 @@ pub fn get_skill_content(query: SkillContentQuery) -> ApiResult<String> {
 		)
 	})?;
 
-	// Use the proper skill parser to extract the body content
 	let skill = skill::parser::parse_skill_md(&content).map_err(|e| {
 		ApiError::new(
 			Status::BadRequest,
@@ -1510,9 +1601,27 @@ pub fn get_skill_content(query: SkillContentQuery) -> ApiResult<String> {
 pub fn get_skill_tree(
 	query: SkillTreeQuery,
 ) -> ApiResult<SkillTreeNodeResponse> {
+	let resolved = ScopeParams {
+		scope: query.scope.clone(),
+		project_root: query.project_root.clone(),
+	}
+	.resolve()?;
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+
 	let path = expand_tilde_path(&query.path);
 	let root = get_skill_root(path);
-	let tree = build_skill_tree_node(&root)?;
+	let safe_root = assert_skill_read_allowed(
+		&root,
+		resource_scope,
+		project_root.as_deref(),
+		"SKILL_PATH_NOT_FOUND",
+	)?;
+	// Thread the allow-listed roots down so symlink ENTRIES (e.g. the
+	// universal-install `<agent>/skills/foo -> .agents/skills/foo`) are
+	// included when their canonical target stays inside the roots, and silently
+	// skipped (not 400'd) when they escape.
+	let roots = skill_read_roots(resource_scope, project_root.as_deref());
+	let tree = build_skill_tree_node(&safe_root, &roots)?;
 	Ok(Json(tree))
 }
 
@@ -2797,5 +2906,175 @@ mod tests {
 		assert_eq!(error.status, Status::BadRequest);
 		assert_eq!(error.body.code, "BRANCHES_ERROR");
 		assert!(error.body.error.contains("Failed to list remote branches"));
+	}
+
+	// ---- M2: positive content/tree reads (over-strictness regression guard) -
+
+	/// A legitimate global-scope skill under `~/.claude/skills` must serve its
+	/// content (200), not be over-strictly refused. Uses `with_isolated_env` so
+	/// HOME points at a temp dir and concurrent HOME-mutating tests cannot race
+	/// the allow-list resolution.
+	#[cfg(unix)]
+	#[test]
+	fn skill_content_serves_legit_global_skill() {
+		with_isolated_env(|home, _| {
+			let skill_dir = home.join(".claude/skills/legit");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			let skill_md = skill_dir.join("SKILL.md");
+			std::fs::write(
+				&skill_md,
+				"---\nname: legit\ndescription: d\n---\n\n# Body\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+
+			let mut q = url::form_urlencoded::Serializer::new(String::new());
+			q.append_pair("path", &skill_md.to_string_lossy());
+			q.append_pair("scope", "global");
+			let uri = format!("/api/v1/skills/content?{}", q.finish());
+
+			let response = client.get(&uri).dispatch();
+			assert_eq!(
+				response.status(),
+				Status::Ok,
+				"a legitimate global skill read must be served, not refused"
+			);
+			let body = response.into_string().expect("body");
+			assert!(
+				body.contains("# Body"),
+				"served content should include the skill body, got: {body}"
+			);
+		});
+	}
+
+	/// A project-scope skill tree (scope=project + project_root) must return 200
+	/// and list the skill's files — INCLUDING the universal-install case where a
+	/// per-agent dir entry is a symlink at the `.agents/skills/<name>` master.
+	/// The symlink target stays inside the allow-listed `.agents/skills` root,
+	/// so it must be rendered, not 400'd (C3 regression guard).
+	#[cfg(unix)]
+	#[test]
+	fn skill_tree_serves_project_universal_symlink() {
+		use std::os::unix::fs::symlink;
+		with_isolated_env(|_, _| {
+			let project = tempdir().unwrap();
+			// Universal master: <project>/.agents/skills/foo
+			let master = project.path().join(".agents/skills/foo");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: foo\ndescription: d\n---\n\n# Body\n",
+			)
+			.unwrap();
+			std::fs::write(master.join("extra.md"), "extra").unwrap();
+			// Per-agent dir that symlinks into the master (universal install).
+			let agent_skills = project.path().join(".claude/skills");
+			std::fs::create_dir_all(&agent_skills).unwrap();
+			let link = agent_skills.join("foo");
+			symlink(&master, &link).unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+
+			// Read the tree of the per-agent skills DIR so `foo` is encountered
+			// as a symlink ENTRY during recursion. Under the old blanket
+			// rejection this 400'd the whole tree; now the entry is included
+			// (its target is the master inside `.agents/skills`) and recursed.
+			let mut q = url::form_urlencoded::Serializer::new(String::new());
+			q.append_pair("path", &agent_skills.to_string_lossy());
+			q.append_pair("scope", "project");
+			q.append_pair("project_root", &project.path().to_string_lossy());
+			let uri = format!("/api/v1/skills/tree?{}", q.finish());
+
+			let response = client.get(&uri).dispatch();
+			assert_eq!(
+				response.status(),
+				Status::Ok,
+				"a universal-install symlinked skill tree must be served, \
+				 not 400"
+			);
+			let body = response.into_string().expect("body");
+			assert!(
+				body.contains("foo")
+					&& body.contains("SKILL.md")
+					&& body.contains("extra.md"),
+				"tree should recurse the symlinked master's files, got: {body}"
+			);
+		});
+	}
+
+	/// A symlink ENTRY inside a skill dir whose target escapes the allow-listed
+	/// roots must be silently skipped — the tree still returns 200 and simply
+	/// omits the escaping entry (it does NOT 400 the whole tree, and does NOT
+	/// leak the out-of-tree path).
+	#[cfg(unix)]
+	#[test]
+	fn skill_tree_skips_escaping_symlink_entry() {
+		use std::os::unix::fs::symlink;
+		with_isolated_env(|_, _| {
+			let project = tempdir().unwrap();
+			let skill_dir = project.path().join(".claude/skills/foo");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			std::fs::write(
+				skill_dir.join("SKILL.md"),
+				"---\nname: foo\ndescription: d\n---\n\n# Body\n",
+			)
+			.unwrap();
+			// An entry symlink pointing OUT of the skills roots entirely.
+			let outside = tempdir().unwrap();
+			std::fs::write(outside.path().join("secret.txt"), "top secret")
+				.unwrap();
+			symlink(
+				outside.path().join("secret.txt"),
+				skill_dir.join("escape.txt"),
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+
+			let mut q = url::form_urlencoded::Serializer::new(String::new());
+			q.append_pair("path", &skill_dir.to_string_lossy());
+			q.append_pair("scope", "project");
+			q.append_pair("project_root", &project.path().to_string_lossy());
+			let uri = format!("/api/v1/skills/tree?{}", q.finish());
+
+			let response = client.get(&uri).dispatch();
+			assert_eq!(
+				response.status(),
+				Status::Ok,
+				"an escaping entry symlink must not 400 the whole tree"
+			);
+			let body = response.into_string().expect("body");
+			assert!(
+				body.contains("SKILL.md"),
+				"tree should still list real files, got: {body}"
+			);
+			assert!(
+				!body.contains("escape.txt")
+					&& !body.contains(
+						&outside.path().to_string_lossy().to_string()
+					),
+				"escaping symlink entry + its target path must be hidden, \
+				 got: {body}"
+			);
+		});
 	}
 }
