@@ -18,6 +18,7 @@ import {
 	Alert,
 	Button,
 	Chip,
+	Checkbox,
 	Spinner,
 	toast,
 	ToggleButton,
@@ -49,6 +50,11 @@ import {
 	type InstallLayout,
 	isUniversalLayout,
 } from "../../lib/install-layout";
+import {
+	allSkillPaths,
+	selectedSkills,
+	toggleSkillPath,
+} from "../../lib/source-skill-selection";
 import { cn } from "../../lib/utils";
 import { queryKeys } from "../../requests/keys";
 import { applySkillUpdateMutationOptions } from "../../requests/skills";
@@ -72,6 +78,7 @@ interface SourceGroup {
 
 const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
 const TRAILING_SLASH_RE = /\/+$/;
+const EMPTY_SOURCE_SKILL_DIFFS: SourceSkillDiff[] = [];
 
 function sourceDisplayName(row: SourceRow): string {
 	if (row.sourceType !== "local") return row.source;
@@ -389,6 +396,9 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const [installingSkillPath, setInstallingSkillPath] = useState<
 		string | null
 	>(null);
+	const [selectedInstallSkillPaths, setSelectedInstallSkillPaths] = useState<
+		Set<string>
+	>(() => new Set());
 
 	const { data, isLoading, isFetching } = useQuery(
 		sourceDiffQueryOptions({
@@ -410,13 +420,27 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		return byState;
 	}, [data]);
 
-	const notInstalled = grouped.get("notInstalled") ?? [];
-	const outdated = grouped.get("installedOutdated") ?? [];
-	const renamed = grouped.get("renamed") ?? [];
-	const removed = grouped.get("removed") ?? [];
-	const deprecated = grouped.get("deprecated") ?? [];
-	const current = grouped.get("installedCurrent") ?? [];
-	const uncheckable = grouped.get("uncheckable") ?? [];
+	const notInstalled =
+		grouped.get("notInstalled") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const outdated =
+		grouped.get("installedOutdated") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const renamed = grouped.get("renamed") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const removed = grouped.get("removed") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const deprecated = grouped.get("deprecated") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const current = grouped.get("installedCurrent") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const uncheckable = grouped.get("uncheckable") ?? EMPTY_SOURCE_SKILL_DIFFS;
+	const selectedInstallSkills = useMemo(
+		() => selectedSkills(notInstalled, selectedInstallSkillPaths),
+		[notInstalled, selectedInstallSkillPaths],
+	);
+	const allInstallSkillPaths = useMemo(
+		() => allSkillPaths(notInstalled),
+		[notInstalled],
+	);
+	const selectedInstallCount = selectedInstallSkills.length;
+	const hasSelectedInstallSkills = selectedInstallCount > 0;
+	const allInstallSkillsSelected =
+		notInstalled.length > 0 && selectedInstallCount === notInstalled.length;
 	const hasVisibleSkills = (data?.skills.length ?? 0) > 0;
 	const updateScope = row.rowScope;
 	const updateProjectRoot =
@@ -678,6 +702,20 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}
 	};
 
+	const toggleInstallSkillSelection = (skill: SourceSkillDiff) => {
+		setSelectedInstallSkillPaths((previous) =>
+			toggleSkillPath(previous, skill.skillPath),
+		);
+	};
+
+	const selectAllInstallSkills = () => {
+		setSelectedInstallSkillPaths(new Set(allInstallSkillPaths));
+	};
+
+	const clearSelectedInstallSkills = () => {
+		setSelectedInstallSkillPaths(new Set());
+	};
+
 	const installPathFor = (skill: SourceSkillDiff) =>
 		skill.skillPath === "SKILL.md"
 			? "."
@@ -881,23 +919,62 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 							expandedSkillPath={expandedSkillPath}
 							onToggleSkill={setExpandedSkillPath}
 							sectionAction={
-								<Button
-									size="sm"
-									variant="ghost"
-									className="h-7 px-2 text-xs"
-									isDisabled={
-										isInstallingAll ||
-										installingSkillPath !== null
-									}
-									onPress={() =>
-										installFromSource(notInstalled)
-									}
-								>
-									<ArrowDownTrayIcon className="size-3.5" />
-									{isInstallingAll
-										? t("sourceInstalling")
-										: t("sourceInstallAll")}
-								</Button>
+								<div className="flex shrink-0 items-center gap-1">
+									<Button
+										size="sm"
+										variant="ghost"
+										className="h-7 px-2 text-xs"
+										isDisabled={
+											isInstallingAll ||
+											installingSkillPath !== null
+										}
+										onPress={
+											allInstallSkillsSelected
+												? clearSelectedInstallSkills
+												: selectAllInstallSkills
+										}
+									>
+										{allInstallSkillsSelected
+											? t("sourceClearSelection")
+											: t("sourceSelectAll")}
+									</Button>
+									<Button
+										size="sm"
+										variant={
+											hasSelectedInstallSkills
+												? "secondary"
+												: "ghost"
+										}
+										className="h-7 px-2 text-xs"
+										isDisabled={
+											isInstallingAll ||
+											installingSkillPath !== null
+										}
+										onPress={() =>
+											installFromSource(
+												hasSelectedInstallSkills
+													? selectedInstallSkills
+													: notInstalled,
+											)
+										}
+									>
+										<ArrowDownTrayIcon className="size-3.5" />
+										{isInstallingAll ||
+										(hasSelectedInstallSkills &&
+											installingSkillPath !== null)
+											? t("sourceInstalling")
+											: hasSelectedInstallSkills
+												? t("sourceInstallSelected", {
+														count: selectedInstallCount,
+													})
+												: t("sourceInstallAll")}
+									</Button>
+								</div>
+							}
+							selectedSkillPaths={selectedInstallSkillPaths}
+							onToggleSelected={toggleInstallSkillSelection}
+							isSelectionDisabled={
+								isInstallingAll || installingSkillPath !== null
 							}
 							rowAction={(skill) => {
 								const isInstalling =
@@ -1240,6 +1317,9 @@ interface SkillSectionProps {
 	onToggleSkill: (skillPath: string | null) => void;
 	sectionAction?: React.ReactNode;
 	rowAction?: (skill: SourceSkillDiff) => React.ReactNode;
+	selectedSkillPaths?: ReadonlySet<string>;
+	onToggleSelected?: (skill: SourceSkillDiff) => void;
+	isSelectionDisabled?: boolean;
 	muted?: boolean;
 	showReason?: boolean;
 }
@@ -1252,6 +1332,9 @@ function SkillSection({
 	onToggleSkill,
 	sectionAction,
 	rowAction,
+	selectedSkillPaths,
+	onToggleSelected,
+	isSelectionDisabled = false,
 	muted = false,
 	showReason = false,
 }: SkillSectionProps) {
@@ -1292,6 +1375,13 @@ function SkillSection({
 						muted={muted}
 						showReason={showReason}
 						action={rowAction?.(skill)}
+						isSelected={selectedSkillPaths?.has(skill.skillPath)}
+						onToggleSelected={
+							onToggleSelected
+								? () => onToggleSelected(skill)
+								: undefined
+						}
+						isSelectionDisabled={isSelectionDisabled}
 					/>
 				))}
 			</ul>
@@ -1304,6 +1394,9 @@ interface SkillRowProps {
 	isExpanded: boolean;
 	onToggle: () => void;
 	action?: React.ReactNode;
+	isSelected?: boolean;
+	onToggleSelected?: () => void;
+	isSelectionDisabled?: boolean;
 	muted?: boolean;
 	showReason?: boolean;
 }
@@ -1313,6 +1406,9 @@ function SkillRow({
 	isExpanded,
 	onToggle,
 	action,
+	isSelected = false,
+	onToggleSelected,
+	isSelectionDisabled = false,
 	muted = false,
 	showReason = false,
 }: SkillRowProps) {
@@ -1321,6 +1417,23 @@ function SkillRow({
 
 	return (
 		<li className="flex items-center gap-3 border-b border-border px-3 py-2.5 last:border-b-0 hover:bg-surface-secondary/70">
+			{onToggleSelected && (
+				<Checkbox
+					value={skill.skillPath}
+					isSelected={isSelected}
+					isDisabled={isSelectionDisabled}
+					onChange={() => onToggleSelected()}
+					variant="secondary"
+					aria-label={t("sourceSelectSkill", {
+						name: skill.name,
+					})}
+					className="shrink-0"
+				>
+					<Checkbox.Control>
+						<Checkbox.Indicator />
+					</Checkbox.Control>
+				</Checkbox>
+			)}
 			<button
 				type="button"
 				className="min-w-0 flex-1 text-left"
