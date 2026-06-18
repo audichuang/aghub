@@ -16,6 +16,15 @@ on:
                 type: boolean
                 default: true
 
+# Serialize runs for the same tag so a re-pushed tag never builds/publishes
+# concurrently with an earlier run. cancel-in-progress is intentionally FALSE:
+# cancelling a release mid-build/publish would leave a half-populated GitHub
+# Release (partial assets / latest.json). To redo a tag, cancel the old run
+# manually (gh run cancel) per the releasing-aghub runbook, then re-tag.
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref }}
+    cancel-in-progress: false
+
 jobs:
     # Test gate: the tagged commit must pass the full test suite on all three
     # platforms before any release artifact is built or published. The Release
