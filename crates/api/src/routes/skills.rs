@@ -1675,6 +1675,41 @@ pub fn get_project_skill_lock(
 	}))
 }
 
+fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
+	let reject = || {
+		ApiError::new(
+			Status::BadRequest,
+			"GitHub credentials can only be used with github.com HTTPS URLs",
+			"INVALID_GITHUB_CREDENTIAL_URL",
+		)
+	};
+
+	let parsed = url::Url::parse(url).map_err(|_| reject())?;
+
+	let host = parsed.host_str().unwrap_or_default();
+	if parsed.scheme() == "https"
+		&& host.eq_ignore_ascii_case("github.com")
+		&& parsed.port().is_none()
+	{
+		return Ok(());
+	}
+
+	Err(reject())
+}
+
+/// Returns true when both URLs parse and share the same (ASCII
+/// case-insensitive) host. A parse failure or a missing host on either
+/// side yields false.
+fn same_host(a: &str, b: &str) -> bool {
+	let (Ok(a), Ok(b)) = (url::Url::parse(a), url::Url::parse(b)) else {
+		return false;
+	};
+	match (a.host_str(), b.host_str()) {
+		(Some(ha), Some(hb)) => ha.eq_ignore_ascii_case(hb),
+		_ => false,
+	}
+}
+
 #[post("/skills/git/scan", data = "<body>")]
 pub async fn git_scan_skills(
 	body: Json<GitScanRequest>,
@@ -1682,7 +1717,10 @@ pub async fn git_scan_skills(
 ) -> ApiResult<GitScanResponse> {
 	let req = body.into_inner();
 
-	// Resolve credential token — either from session or from request
+	// Resolve credential token — either from session or from request.
+	// The session reuse branch also captures the session's stored URL so the
+	// guard below can pin a reused token to its own repository host.
+	let mut session_url: Option<String> = None;
 	let credential_token: Option<String> =
 		if let Some(ref cred_id) = req.credential_id {
 			let creds = crate::routes::credentials::load_credentials()
@@ -1705,10 +1743,35 @@ pub async fn git_scan_skills(
 		} else if let Some(ref sid) = req.session_id {
 			// Reuse credential from existing session
 			let map = sessions.sessions.lock().unwrap();
-			map.get(sid).and_then(|s| s.credential_token.clone())
+			match map.get(sid) {
+				Some(s) => {
+					session_url = Some(s.url.clone());
+					s.credential_token.clone()
+				}
+				None => None,
+			}
 		} else {
 			None
 		};
+
+	// Guard the explicitly supplied credential to github.com, but pin a reused
+	// session token to its own repository host instead (session tokens may be
+	// host-scoped private credentials resolved lazily on the original scan).
+	// The lazy/host-scoped path resolved inside the clone below is left
+	// unguarded — it is already bound to the scanned host.
+	if credential_token.is_some() {
+		if req.credential_id.is_some() {
+			require_github_credential_url(&req.url)?;
+		} else if let Some(ref stored_url) = session_url {
+			if !same_host(&req.url, stored_url) {
+				return Err(ApiError::new(
+					Status::BadRequest,
+					"Session credential cannot be reused for a different host",
+					"SESSION_CREDENTIAL_HOST_MISMATCH",
+				));
+			}
+		}
+	}
 
 	// Retrieve cached branches from existing session if re-scanning
 	let cached_branches: Option<Vec<String>> =
@@ -3076,5 +3139,79 @@ mod tests {
 				 got: {body}"
 			);
 		});
+	}
+
+	#[test]
+	fn github_credential_url_accepts_github_https() {
+		assert!(require_github_credential_url(
+			"https://github.com/owner/repo.git",
+		)
+		.is_ok());
+	}
+
+	#[test]
+	fn github_credential_url_rejects_non_github_hosts() {
+		let err = require_github_credential_url("https://evil.example/x.git")
+			.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_rejects_github_lookalikes() {
+		let err = require_github_credential_url(
+			"https://github.com.attacker.example/x.git",
+		)
+		.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_rejects_non_https_github() {
+		let err = require_github_credential_url("http://github.com/x.git")
+			.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_rejects_non_default_port() {
+		let err = require_github_credential_url(
+			"https://github.com:8443/owner/repo.git",
+		)
+		.unwrap_err();
+
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_GITHUB_CREDENTIAL_URL");
+	}
+
+	#[test]
+	fn github_credential_url_accepts_default_port() {
+		assert!(require_github_credential_url(
+			"https://github.com:443/owner/repo.git",
+		)
+		.is_ok());
+	}
+
+	#[test]
+	fn same_host_true_for_matching_hosts() {
+		assert!(same_host(
+			"https://gitlab.internal/a.git",
+			"https://gitlab.internal/b.git",
+		));
+	}
+
+	#[test]
+	fn same_host_false_for_different_hosts() {
+		assert!(!same_host("https://github.com/a", "https://evil.com/a"));
+	}
+
+	#[test]
+	fn same_host_false_on_parse_failure() {
+		assert!(!same_host("not a url", "https://github.com/a"));
 	}
 }
