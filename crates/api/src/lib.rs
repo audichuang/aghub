@@ -332,12 +332,15 @@ mod tests {
 		let uri = format!("/api/v1/skills/content?{}", q.finish());
 
 		let response = client.get(&uri).dispatch();
-		// assert_skill_read_allowed returns Status::Forbidden when the
-		// canonicalized path is outside the allow-listed roots.
-		assert_eq!(
-			response.status(),
-			Status::Forbidden,
-			"reading outside skills roots must be refused, not served"
+		// Refused, never served: an existing out-of-root path canonicalizes
+		// outside the roots -> Forbidden; a path that does not exist on this
+		// platform (e.g. `/etc/passwd` on Windows) -> NotFound. Both are a
+		// refusal; only a 200 would be a security failure.
+		let status = response.status();
+		assert!(
+			status == Status::Forbidden || status == Status::NotFound,
+			"reading outside skills roots must be refused, not served; \
+			 got {status:?}"
 		);
 	}
 
@@ -369,10 +372,14 @@ mod tests {
 		let uri = format!("/api/v1/skills/tree?{}", q.finish());
 
 		let response = client.get(&uri).dispatch();
-		assert_eq!(
-			response.status(),
-			Status::Forbidden,
-			"traversal must be refused"
+		// Refused regardless of platform: the `..` target either resolves
+		// outside the roots (Forbidden) or to a non-existent path (NotFound);
+		// the escape depth lands differently on deeper macOS/Windows temp
+		// dirs, but it never resolves back inside the roots, so never 200.
+		let status = response.status();
+		assert!(
+			status == Status::Forbidden || status == Status::NotFound,
+			"traversal must be refused; got {status:?}"
 		);
 	}
 
@@ -402,10 +409,11 @@ mod tests {
 		let uri = format!("/api/v1/skills/tree?{}", q.finish());
 
 		let response = client.get(&uri).dispatch();
-		assert_eq!(
-			response.status(),
-			Status::Forbidden,
-			"a skills-root entry that is a symlink out of tree must be refused"
+		let status = response.status();
+		assert!(
+			status == Status::Forbidden || status == Status::NotFound,
+			"a skills-root entry that is a symlink out of tree must be \
+			 refused; got {status:?}"
 		);
 	}
 }
