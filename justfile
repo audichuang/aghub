@@ -36,6 +36,24 @@ lint:
     cargo clippy --workspace -- -D warnings
     cd ./crates/desktop && nr lint
 
+# Pre-release gate: run everything the CI / release test gate runs, locally.
+# Run this BEFORE you push or tag. The pre-push hook only does
+# prettier/clippy/eslint/tsc — it does NOT run tests, so tests can still fail
+# in CI after a clean push. This closes that gap.
+#
+# IMPORTANT: this runs on YOUR platform only. It CANNOT reproduce
+# macOS/Windows-specific behavior (e.g. /var -> /private symlink canonicalize,
+# path separators, case-insensitive FS). For real cross-platform confidence,
+# push and let CI's 3-OS matrix run — the Release is now gated on it. And when
+# you touch path/fs code, add a test that SIMULATES the platform condition on
+# Linux (e.g. operate through a symlinked temp dir to mimic macOS /private).
+preflight:
+    cargo fmt --all --check
+    cargo clippy --workspace --all-targets -- -D warnings
+    cd ./crates/desktop && bun run typecheck
+    cargo test --workspace
+    cargo test --workspace --doc
+
 # Clean build artifacts
 clean:
     cargo clean
