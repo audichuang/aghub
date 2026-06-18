@@ -530,6 +530,30 @@ mod tests {
 		assert_eq!(assert_contained(&link, &roots), None);
 	}
 
+	// macOS simulation: when the ROOT itself is reached through a symlink
+	// (like /tmp -> /private/tmp on macOS), assert_contained canonicalizes
+	// both target and root, so a legitimate path under that root is still
+	// accepted. Guards against the /var->/private prefix shift breaking
+	// containment for real skills — the class of bug that broke tarball
+	// extraction on macOS/Windows.
+	#[cfg(unix)]
+	#[test]
+	fn legit_target_under_symlinked_root_is_accepted() {
+		use std::os::unix::fs::symlink;
+		let real = tempdir().unwrap();
+		let link_parent = tempdir().unwrap();
+		let link_root = link_parent.path().join("root-link");
+		symlink(real.path(), &link_root).unwrap();
+		let sub = link_root.join("skills/a");
+		std::fs::create_dir_all(&sub).unwrap();
+		// Root supplied via the symlinked path (mimicking macOS /tmp).
+		let roots = vec![link_root.clone()];
+		assert_eq!(
+			assert_contained(&sub, &roots),
+			Some(sub.canonicalize().unwrap())
+		);
+	}
+
 	#[test]
 	fn allowed_roots_include_existing_agent_dirs() {
 		let agent = tempdir().unwrap();

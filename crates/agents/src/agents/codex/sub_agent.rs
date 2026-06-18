@@ -471,6 +471,39 @@ mod tests {
 		assert_eq!(fs::read_to_string(&victim).unwrap(), "do not overwrite");
 	}
 
+	// macOS simulation: the agents dir is a REAL directory reached through a
+	// symlinked PARENT (like /tmp -> /private/tmp). safe_canonical_dir
+	// canonicalizes the dir and the post-write check canonicalizes the file,
+	// so a legitimate save must still succeed and land in the real location —
+	// the /var->/private prefix shift must not break writes.
+	#[cfg(unix)]
+	#[test]
+	fn save_into_dir_under_symlinked_parent_succeeds() {
+		use std::os::unix::fs::symlink;
+
+		let real = TempDir::new().unwrap();
+		let link_parent = TempDir::new().unwrap();
+		let link = link_parent.path().join("link");
+		symlink(real.path(), &link).unwrap();
+		// Real dir, but the path to it goes through a symlinked parent.
+		let agents_dir = link.join("agents");
+		let agent = SubAgent {
+			name: "Helper".to_string(),
+			description: Some("d".to_string()),
+			instruction: Some("Do X.".to_string()),
+			source_path: None,
+			config_source: None,
+		};
+
+		save_to_dir(&agents_dir, &agent).unwrap();
+
+		// File lands at the REAL location and round-trips through load.
+		assert!(real.path().join("agents/helper.toml").exists());
+		let loaded = load_from_dir(&agents_dir);
+		assert_eq!(loaded.len(), 1);
+		assert_eq!(loaded[0].name, "Helper");
+	}
+
 	#[test]
 	fn sanitize_filename_basic() {
 		assert_eq!(sanitize_filename("My Agent!"), "my-agent");
