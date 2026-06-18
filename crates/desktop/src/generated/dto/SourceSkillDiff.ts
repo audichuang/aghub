@@ -18,8 +18,10 @@ export type SourceSkillDiff = {
 	 */
 	state: string;
 	/**
-	 * Previous lock key when the upstream skill at the same `skillPath` now has
-	 * a different `name`.
+	 * Previous installed skill name when this row is a `renamed` successor:
+	 * either the upstream skill at the same `skillPath` now declares a
+	 * different `name`, or a CHANGELOG entry maps a removed old name (whose
+	 * `skillPath` is gone) onto this successor.
 	 */
 	previousName?: string;
 	/**
