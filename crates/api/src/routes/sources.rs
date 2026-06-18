@@ -6,7 +6,7 @@
 //!   of its skills as not-installed / installed-current / installed-outdated /
 //!   uncheckable, so the UI can offer "install the new ones".
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 use rocket::http::Status;
@@ -374,30 +374,51 @@ fn diff_blocking(
 		Err(_) => return DiffOutcome::Ok(Vec::new()),
 	};
 
-	let mut out = Vec::with_capacity(discovered.len());
+	DiffOutcome::Ok(build_source_skill_diffs(root, discovered, baseline))
+}
+
+fn build_source_skill_diffs(
+	root: &Path,
+	discovered: Vec<skill::RepoDiscoveredSkill>,
+	baseline: &Baseline,
+) -> Vec<SourceSkillDiff> {
+	let mut out = Vec::with_capacity(discovered.len() + baseline.len());
+	let mut seen_paths = BTreeSet::new();
+	let mut indexes_by_name = BTreeMap::new();
 	for d in discovered {
 		let skill_path = skill::lock_skill_file_path(&d.relative_dir);
+		seen_paths.insert(skill_path.clone());
 		let (description, version, author) = parse_meta(&d.full_path);
+		let name = d.name;
 
 		match baseline.get(&skill_path) {
-			None => out.push(SourceSkillDiff {
-				name: d.name,
-				skill_path,
-				description,
-				version,
-				author,
-				state: "notInstalled".to_string(),
-				previous_name: None,
-				reason: None,
-				installed_paths: Vec::new(),
-			}),
+			None => {
+				let state = if is_deprecated_skill_path(&skill_path) {
+					"deprecated".to_string()
+				} else {
+					"notInstalled".to_string()
+				};
+				indexes_by_name.insert(name.clone(), out.len());
+				out.push(SourceSkillDiff {
+					name,
+					skill_path,
+					description,
+					version,
+					author,
+					state,
+					previous_name: None,
+					reason: None,
+					installed_paths: Vec::new(),
+				});
+			}
 			Some(entry) => {
 				let skill_dir =
 					aghub_core::skills::skill_source_root(&d.full_path);
 				let (state, previous_name, reason) =
-					classify_source_skill_diff(entry, &d.name, &skill_dir);
+					classify_source_skill_diff(entry, &name, &skill_dir);
+				indexes_by_name.insert(name.clone(), out.len());
 				out.push(SourceSkillDiff {
-					name: d.name,
+					name,
 					skill_path,
 					description,
 					version,
@@ -411,7 +432,76 @@ fn diff_blocking(
 		}
 	}
 
-	DiffOutcome::Ok(out)
+	let successors = skill_successors_from_changelog(root);
+	for (skill_path, entry) in baseline {
+		if seen_paths.contains(skill_path) {
+			continue;
+		}
+		if let Some(new_name) = successors.get(&entry.installed_name) {
+			if let Some(index) = indexes_by_name.get(new_name) {
+				let diff = &mut out[*index];
+				if diff.installed_paths.is_empty() {
+					diff.state = "renamed".to_string();
+					diff.previous_name = Some(entry.installed_name.clone());
+					diff.reason = None;
+					diff.installed_paths = vec![entry.scope_label.clone()];
+					continue;
+				}
+			}
+		}
+		out.push(SourceSkillDiff {
+			name: entry.installed_name.clone(),
+			skill_path: skill_path.clone(),
+			description: None,
+			version: None,
+			author: None,
+			state: "removed".to_string(),
+			previous_name: None,
+			reason: Some("noPath".to_string()),
+			installed_paths: vec![entry.scope_label.clone()],
+		});
+	}
+
+	out
+}
+
+fn skill_successors_from_changelog(root: &Path) -> BTreeMap<String, String> {
+	let Ok(content) = std::fs::read_to_string(root.join("CHANGELOG.md")) else {
+		return BTreeMap::new();
+	};
+	let mut successors = BTreeMap::new();
+	for line in content.lines() {
+		let lower = line.to_ascii_lowercase();
+		let terms = backtick_terms(line);
+		if terms.len() < 2 {
+			continue;
+		}
+		let has_rename = lower.contains("rename") && lower.contains(" to ");
+		let has_replace = lower.contains("replace") && lower.contains(" with ");
+		if has_rename || has_replace {
+			let old_name = terms[terms.len() - 2].clone();
+			let new_name = terms[terms.len() - 1].clone();
+			successors.entry(old_name).or_insert(new_name);
+		}
+	}
+	successors
+}
+
+fn backtick_terms(line: &str) -> Vec<String> {
+	line.split('`')
+		.enumerate()
+		.filter_map(|(index, part)| {
+			if index % 2 == 1 && !part.trim().is_empty() {
+				Some(part.trim().to_string())
+			} else {
+				None
+			}
+		})
+		.collect()
+}
+
+fn is_deprecated_skill_path(skill_path: &str) -> bool {
+	skill_path.split('/').any(|part| part == "deprecated")
 }
 
 fn classify_source_skill_diff(
@@ -435,6 +525,11 @@ fn classify_source_skill_diff(
 fn fetch_source_lazily_auth(
 	source_ref: &SourceRef,
 ) -> Result<skill_update::FetchedRepo, LazyFetchError> {
+	#[cfg(test)]
+	if let Some(result) = test_fetch_source_from_env() {
+		return result;
+	}
+
 	let fetcher = GitFetcher;
 	match fetcher.fetch(source_ref, None) {
 		Ok(repo) => Ok(repo),
@@ -452,6 +547,22 @@ fn fetch_source_lazily_auth(
 			}
 		}
 	}
+}
+
+#[cfg(test)]
+fn test_fetch_source_from_env(
+) -> Option<Result<skill_update::FetchedRepo, LazyFetchError>> {
+	let root = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT")?;
+	let root = std::path::PathBuf::from(root);
+	Some(if root.is_dir() {
+		Ok(skill_update::FetchedRepo {
+			root,
+			oid: "test-fetch-root".to_string(),
+			_guard: None,
+		})
+	} else {
+		Err(LazyFetchError::FetchFailed)
+	})
 }
 
 fn token_for_source(source: &str) -> Option<String> {
@@ -546,6 +657,10 @@ fn reason_str(reason: UncheckableReason) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use rocket::http::Status;
+	use rocket::local::blocking::Client;
+	use rocket::routes;
+	use serde_json::Value;
 	use std::fs;
 	use std::sync::MutexGuard;
 	use tempfile::{tempdir, TempDir};
@@ -585,6 +700,54 @@ mod tests {
 		}
 	}
 
+	struct EnvVarGuard {
+		key: &'static str,
+		old: Option<String>,
+	}
+
+	impl EnvVarGuard {
+		fn set(key: &'static str, value: &Path) -> Self {
+			let old = std::env::var(key).ok();
+			std::env::set_var(key, value);
+			Self { key, old }
+		}
+	}
+
+	impl Drop for EnvVarGuard {
+		fn drop(&mut self) {
+			match &self.old {
+				Some(v) => std::env::set_var(self.key, v),
+				None => std::env::remove_var(self.key),
+			}
+		}
+	}
+
+	fn global_entry(source: &str, skill_path: &str) -> skill::SkillLockEntry {
+		skill::SkillLockEntry {
+			source: source.to_string(),
+			source_type: "github".to_string(),
+			source_url: format!("https://github.com/{source}.git"),
+			ref_name: None,
+			skill_path: Some(skill_path.to_string()),
+			skill_folder_hash: "old-tree-hash".to_string(),
+			content_hash: Some("old-content-hash".to_string()),
+			ref_commit: None,
+			installed_at: "2026-01-01T00:00:00Z".to_string(),
+			updated_at: "2026-01-01T00:00:00Z".to_string(),
+			plugin_name: None,
+		}
+	}
+
+	fn write_skill(root: &Path, relative_dir: &str, name: &str) {
+		let dir = root.join(relative_dir);
+		fs::create_dir_all(&dir).unwrap();
+		fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: {name} skill\n---\n"),
+		)
+		.unwrap();
+	}
+
 	#[test]
 	fn lock_baseline_captures_recorded_ref_for_fallback() {
 		// A skill installed from a tag/feature-branch records its ref; the diff
@@ -613,6 +776,79 @@ mod tests {
 			lock_baseline_for_source(&ResolvedScope::Global, "owner/repo");
 
 		assert_eq!(recorded_ref.as_deref(), Some("v1.2.3"));
+	}
+
+	#[test]
+	fn diff_source_route_reports_breaking_skill_source_changes() {
+		let _global = GlobalLockGuard::new();
+		let source = "e2e-source";
+		let upstream = tempdir().unwrap();
+		fs::write(
+				upstream.path().join("CHANGELOG.md"),
+				"- [`47bde84`](https://github.com/mattpocock/skills/commit/47bde84) \
+				 Thanks - Rename the **`diagnose`** skill to \
+				 **`diagnosing-bugs`**.",
+			)
+			.unwrap();
+		write_skill(
+			upstream.path(),
+			"skills/engineering/diagnosing-bugs",
+			"diagnosing-bugs",
+		);
+		write_skill(upstream.path(), "skills/deprecated/qa", "qa");
+
+		skill::lock::add_skill_to_lock(
+			"diagnose",
+			global_entry(source, "skills/engineering/diagnose/SKILL.md"),
+		)
+		.unwrap();
+		skill::lock::add_skill_to_lock(
+			"obsolete",
+			global_entry(source, "skills/misc/obsolete/SKILL.md"),
+		)
+		.unwrap();
+
+		let _fetch_root =
+			EnvVarGuard::set("AGHUB_TEST_SOURCE_FETCH_ROOT", upstream.path());
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+
+		let response = client
+			.get(format!("/skills/sources/diff?scope=global&source={source}"))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::Ok);
+		let body = response.into_string().expect("response body");
+		let value: Value = serde_json::from_str(&body).expect("valid JSON");
+		assert_eq!(value["needsCredential"], false);
+
+		let skills = value["skills"]
+			.as_array()
+			.expect("skills should be an array");
+		let renamed = skills
+			.iter()
+			.find(|skill| skill["name"] == "diagnosing-bugs")
+			.expect("renamed skill should be returned");
+		assert_eq!(renamed["state"], "renamed");
+		assert_eq!(renamed["previousName"], "diagnose");
+		assert_eq!(renamed["installedPaths"], serde_json::json!(["global"]));
+
+		let deprecated = skills
+			.iter()
+			.find(|skill| skill["name"] == "qa")
+			.expect("deprecated repo skill should be returned");
+		assert_eq!(deprecated["state"], "deprecated");
+		assert_eq!(deprecated["skillPath"], "skills/deprecated/qa/SKILL.md");
+
+		let removed = skills
+			.iter()
+			.find(|skill| skill["skillPath"] == "skills/misc/obsolete/SKILL.md")
+			.expect("removed locked skill should be returned");
+		assert_eq!(removed["name"], "obsolete");
+		assert_eq!(removed["state"], "removed");
+		assert_eq!(removed["reason"], "noPath");
+		assert_eq!(removed["installedPaths"], serde_json::json!(["global"]));
 	}
 
 	#[test]
@@ -700,5 +936,186 @@ mod tests {
 			classify_source_skill_diff(&entry, "new-skill", dir.path()),
 			("renamed".to_string(), Some("old-skill".to_string()), None)
 		);
+	}
+
+	#[test]
+	fn source_diff_reports_locked_skill_removed_when_upstream_path_disappears()
+	{
+		let dir = tempdir().unwrap();
+		let skill_dir = dir.path().join("skills/engineering/diagnosing-bugs");
+		fs::create_dir_all(&skill_dir).unwrap();
+		let skill_file = skill_dir.join("SKILL.md");
+		fs::write(
+			&skill_file,
+			b"---\nname: diagnosing-bugs\ndescription: new name\n---\n",
+		)
+		.unwrap();
+
+		let mut baseline = Baseline::new();
+		baseline.insert(
+			"skills/engineering/diagnose/SKILL.md".to_string(),
+			BaselineEntry {
+				installed_name: "diagnose".to_string(),
+				stored_hash: "old-hash".to_string(),
+				local_hashes: Vec::new(),
+				scope_label: "global".to_string(),
+			},
+		);
+
+		let diffs = build_source_skill_diffs(
+			dir.path(),
+			vec![skill::RepoDiscoveredSkill {
+				name: "diagnosing-bugs".to_string(),
+				full_path: skill_file,
+				relative_dir: "skills/engineering/diagnosing-bugs".to_string(),
+			}],
+			&baseline,
+		);
+
+		let removed = diffs
+			.iter()
+			.find(|diff| {
+				diff.skill_path == "skills/engineering/diagnose/SKILL.md"
+			})
+			.expect("removed lock entry should be present");
+		assert_eq!(removed.name, "diagnose");
+		assert_eq!(removed.state, "removed");
+		assert_eq!(removed.reason.as_deref(), Some("noPath"));
+		assert_eq!(removed.installed_paths, vec!["global".to_string()]);
+
+		assert!(diffs.iter().any(|diff| {
+			diff.skill_path == "skills/engineering/diagnosing-bugs/SKILL.md"
+				&& diff.state == "notInstalled"
+		}));
+	}
+
+	#[test]
+	fn source_diff_marks_deprecated_repo_skills_separately() {
+		let dir = tempdir().unwrap();
+		let skill_dir = dir.path().join("skills/deprecated/qa");
+		fs::create_dir_all(&skill_dir).unwrap();
+		let skill_file = skill_dir.join("SKILL.md");
+		fs::write(&skill_file, b"---\nname: qa\ndescription: old\n---\n")
+			.unwrap();
+
+		let diffs = build_source_skill_diffs(
+			dir.path(),
+			vec![skill::RepoDiscoveredSkill {
+				name: "qa".to_string(),
+				full_path: skill_file,
+				relative_dir: "skills/deprecated/qa".to_string(),
+			}],
+			&Baseline::new(),
+		);
+
+		assert_eq!(diffs.len(), 1);
+		assert_eq!(diffs[0].name, "qa");
+		assert_eq!(diffs[0].state, "deprecated");
+		assert_eq!(diffs[0].skill_path, "skills/deprecated/qa/SKILL.md");
+	}
+
+	#[test]
+	fn source_diff_uses_changelog_to_report_moved_skill_as_renamed() {
+		let dir = tempdir().unwrap();
+		fs::write(
+				dir.path().join("CHANGELOG.md"),
+				"- [`47bde84`](https://github.com/mattpocock/skills/commit/47bde84) \
+				 Thanks - Rename the **`diagnose`** skill to \
+				 **`diagnosing-bugs`**.",
+			)
+			.unwrap();
+		let skill_dir = dir.path().join("skills/engineering/diagnosing-bugs");
+		fs::create_dir_all(&skill_dir).unwrap();
+		let skill_file = skill_dir.join("SKILL.md");
+		fs::write(
+			&skill_file,
+			b"---\nname: diagnosing-bugs\ndescription: new name\n---\n",
+		)
+		.unwrap();
+
+		let mut baseline = Baseline::new();
+		baseline.insert(
+			"skills/engineering/diagnose/SKILL.md".to_string(),
+			BaselineEntry {
+				installed_name: "diagnose".to_string(),
+				stored_hash: "old-hash".to_string(),
+				local_hashes: Vec::new(),
+				scope_label: "global".to_string(),
+			},
+		);
+
+		let diffs = build_source_skill_diffs(
+			dir.path(),
+			vec![skill::RepoDiscoveredSkill {
+				name: "diagnosing-bugs".to_string(),
+				full_path: skill_file,
+				relative_dir: "skills/engineering/diagnosing-bugs".to_string(),
+			}],
+			&baseline,
+		);
+
+		let renamed = diffs
+			.iter()
+			.find(|diff| diff.name == "diagnosing-bugs")
+			.expect("new skill should be present");
+		assert_eq!(renamed.state, "renamed");
+		assert_eq!(renamed.previous_name.as_deref(), Some("diagnose"));
+		assert_eq!(renamed.installed_paths, vec!["global".to_string()]);
+		assert!(!diffs.iter().any(|diff| {
+			diff.skill_path == "skills/engineering/diagnose/SKILL.md"
+		}));
+	}
+
+	#[test]
+	fn source_diff_uses_changelog_to_report_replaced_skill_as_renamed() {
+		let dir = tempdir().unwrap();
+		fs::write(
+				dir.path().join("CHANGELOG.md"),
+				"- [`47bde84`](https://github.com/mattpocock/skills/commit/47bde84) \
+				 Thanks - Replace **`write-a-skill`** with \
+				 **`writing-great-skills`**.",
+			)
+			.unwrap();
+		let skill_dir =
+			dir.path().join("skills/productivity/writing-great-skills");
+		fs::create_dir_all(&skill_dir).unwrap();
+		let skill_file = skill_dir.join("SKILL.md");
+		fs::write(
+			&skill_file,
+			b"---\nname: writing-great-skills\ndescription: new skill\n---\n",
+		)
+		.unwrap();
+
+		let mut baseline = Baseline::new();
+		baseline.insert(
+			"skills/productivity/write-a-skill/SKILL.md".to_string(),
+			BaselineEntry {
+				installed_name: "write-a-skill".to_string(),
+				stored_hash: "old-hash".to_string(),
+				local_hashes: Vec::new(),
+				scope_label: "global".to_string(),
+			},
+		);
+
+		let diffs = build_source_skill_diffs(
+			dir.path(),
+			vec![skill::RepoDiscoveredSkill {
+				name: "writing-great-skills".to_string(),
+				full_path: skill_file,
+				relative_dir: "skills/productivity/writing-great-skills"
+					.to_string(),
+			}],
+			&baseline,
+		);
+
+		let renamed = diffs
+			.iter()
+			.find(|diff| diff.name == "writing-great-skills")
+			.expect("replacement skill should be present");
+		assert_eq!(renamed.state, "renamed");
+		assert_eq!(renamed.previous_name.as_deref(), Some("write-a-skill"));
+		assert!(!diffs.iter().any(|diff| {
+			diff.skill_path == "skills/productivity/write-a-skill/SKILL.md"
+		}));
 	}
 }

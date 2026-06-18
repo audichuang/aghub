@@ -1071,6 +1071,8 @@ export default {
 	sourceStateNotInstalled: "New (not installed)",
 	sourceStateOutdated: "Update available",
 	sourceStateRenamed: "Renamed",
+	sourceStateRemoved: "Removed upstream",
+	sourceStateDeprecated: "Deprecated upstream",
 	sourceStateCurrent: "Installed (latest)",
 	sourceStateUncheckable: "Uncheckable",
 	sourceRenamedHint:
