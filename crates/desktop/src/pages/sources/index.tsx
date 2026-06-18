@@ -382,6 +382,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	);
 	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
+	const [isDeletingAllRemoved, setIsDeletingAllRemoved] = useState(false);
 	const [installLayout, setInstallLayout] = useState<InstallLayout>(
 		DEFAULT_INSTALL_LAYOUT,
 	);
@@ -494,33 +495,27 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		onError: () => toast.danger(t("sourcePruneFailed")),
 	});
 
+	const deleteInstalledSkillByName = async (name: string) => {
+		if (installAgentIds.length === 0) {
+			throw new Error(t("sourceRemoveNoAgents"));
+		}
+
+		await api.skills.delete(
+			installAgentIds[0],
+			name,
+			updateScope,
+			updateProjectRoot ?? undefined,
+			true,
+		);
+	};
+
 	const deleteRenamedSkillMutation = useMutation({
 		mutationFn: async (skill: SourceSkillDiff) => {
 			const oldName = skill.previousName;
 			if (!oldName) {
 				throw new Error("Missing previous name for renamed skill.");
 			}
-			const results = await Promise.allSettled(
-				installAgentIds.map((agentId) =>
-					api.skills.delete(
-						agentId,
-						oldName,
-						updateScope,
-						updateProjectRoot ?? undefined,
-					),
-				),
-			);
-			const failures = results.filter(
-				(result) => result.status === "rejected",
-			);
-			if (failures.length > 0) {
-				throw new Error(
-					(failures[0] as PromiseRejectedResult).reason instanceof
-						Error
-						? (failures[0] as PromiseRejectedResult).reason.message
-						: t("sourceRenamedDeleteFailed", { oldName }),
-				);
-			}
+			await deleteInstalledSkillByName(oldName);
 		},
 		onSuccess: async (_data, skill) => {
 			if (!skill.previousName) return;
@@ -543,6 +538,25 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 				return;
 			}
 			toast.danger(t("sourcePruneFailed"));
+		},
+	});
+
+	const deleteRemovedSkillMutation = useMutation({
+		mutationFn: async (skill: SourceSkillDiff) => {
+			await deleteInstalledSkillByName(skill.name);
+		},
+		onSuccess: async (_data, skill) => {
+			toast.success(t("sourceRemovedCleaned", { name: skill.name }));
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+		},
+		onError: (error, skill) => {
+			toast.danger(
+				error instanceof Error
+					? error.message
+					: t("sourceRemovedCleanFailed", { name: skill.name }),
+			);
 		},
 	});
 
@@ -611,6 +625,56 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			}
 		} finally {
 			setIsApplyingAll(false);
+		}
+	};
+
+	const deleteAllRemovedSkills = async (skills: SourceSkillDiff[]) => {
+		if (
+			skills.length === 0 ||
+			isDeletingAllRemoved ||
+			deleteRemovedSkillMutation.isPending
+		) {
+			return;
+		}
+		if (installAgentIds.length === 0) {
+			toast.danger(t("sourceRemoveNoAgents"));
+			return;
+		}
+
+		setIsDeletingAllRemoved(true);
+		let cleaned = 0;
+		let failed = 0;
+		try {
+			for (const skill of skills) {
+				try {
+					await deleteInstalledSkillByName(skill.name);
+					cleaned += 1;
+				} catch {
+					failed += 1;
+				}
+			}
+
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+
+			if (failed > 0) {
+				toast.danger(
+					failed === 1
+						? t("sourceRemovedCleanSomeFailedOne", {
+								count: failed,
+							})
+						: t("sourceRemovedCleanSomeFailedMany", {
+								count: failed,
+							}),
+				);
+			} else {
+				toast.success(
+					t("sourceRemovedCleanedMany", { count: cleaned }),
+				);
+			}
+		} finally {
+			setIsDeletingAllRemoved(false);
 		}
 	};
 
@@ -971,6 +1035,51 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 							skills={removed}
 							expandedSkillPath={expandedSkillPath}
 							onToggleSkill={setExpandedSkillPath}
+							sectionAction={
+								<Button
+									size="sm"
+									variant="ghost"
+									className="h-7 px-2 text-xs"
+									isDisabled={
+										isDeletingAllRemoved ||
+										deleteRemovedSkillMutation.isPending
+									}
+									onPress={() =>
+										deleteAllRemovedSkills(removed)
+									}
+								>
+									<TrashIcon className="size-3.5" />
+									{isDeletingAllRemoved
+										? t("sourceRemovedCleaning")
+										: t("sourceRemovedCleanAll")}
+								</Button>
+							}
+							rowAction={(skill) => {
+								const isDeleting =
+									deleteRemovedSkillMutation.isPending &&
+									deleteRemovedSkillMutation.variables
+										?.skillPath === skill.skillPath;
+								return (
+									<Button
+										size="sm"
+										variant="secondary"
+										className="h-7 px-2 text-xs"
+										isDisabled={
+											isDeletingAllRemoved || isDeleting
+										}
+										onPress={() =>
+											deleteRemovedSkillMutation.mutate(
+												skill,
+											)
+										}
+									>
+										<TrashIcon className="size-3.5" />
+										{isDeleting
+											? t("sourceRemovedCleaning")
+											: t("sourceRemovedCleanSkill")}
+									</Button>
+								);
+							}}
 							muted
 							showReason
 						/>

@@ -214,12 +214,14 @@ export function createApi(baseUrl: string) {
 				name: string,
 				scope: "global" | "project" = "global",
 				projectRoot?: string,
+				allAgents = false,
 			): Promise<void> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
 						searchParams: {
 							scope,
 							confirm: "true",
+							...(allAgents ? { all_agents: "true" } : {}),
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),

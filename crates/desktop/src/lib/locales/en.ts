@@ -1086,6 +1086,17 @@ export default {
 	sourceRenamedInstallCommandCopied:
 		"Copied command. Run: aghub-cli install `{{newName}}`.",
 	sourceCopyCommandFailed: "Failed to copy install command.",
+	sourceRemoveNoAgents:
+		"No available agents can remove skills in this scope.",
+	sourceRemovedCleanSkill: "Clean up",
+	sourceRemovedCleanAll: "Clean up all",
+	sourceRemovedCleaning: "Cleaning...",
+	sourceRemovedCleaned: "Cleaned `{{name}}`.",
+	sourceRemovedCleanedMany: "Cleaned {{count}} removed skills.",
+	sourceRemovedCleanFailed: "Failed to clean `{{name}}`.",
+	sourceRemovedCleanSomeFailedOne: "Couldn't clean 1 removed skill.",
+	sourceRemovedCleanSomeFailedMany:
+		"Couldn't clean {{count}} removed skills.",
 	importFromThisSource: "Import from this source",
 	sourceUpdateSkill: "Update",
 	sourceUpdateAll: "Update all",
