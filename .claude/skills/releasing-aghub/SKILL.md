@@ -6,12 +6,19 @@ description: Runbook for cutting a desktop + CLI release of this aghub fork (aud
 # Releasing aghub (this fork)
 
 Releases are **tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml`, which fans out to
-`changelog` → `build-tauri` (4 targets) + `build-cli` (4 targets) → `publish-homebrew`. There is no manual
-build or upload. This fork ships its **own** independent version line — start ≥ the highest existing tag.
+`test` (ubuntu/macOS/Windows gate) → `changelog` → `build-tauri` (4 targets) + `build-cli` (4 targets) → `publish-homebrew`.
+The `test` job gates everything — a tag whose tests fail on **any** platform produces **no** artifacts (added after a
+macOS/Windows-only bug shipped because the build compiled but tests were red). There is no manual build or upload.
+This fork ships its **own** independent version line — start ≥ the highest existing tag.
 
 ## Cut a release
 
 ```bash
+# 0. PRE-FLIGHT — never tag a commit whose tests aren't green on all platforms.
+just preflight                                   # local: fmt+clippy+typecheck+test+doc (the pre-push hook does NOT run tests)
+git push origin main                             # then let CI's 3-OS matrix run
+gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # must be GREEN before step 1
+
 # 1. pick the next version (independent monotonic semver; do NOT hand-edit manifests —
 #    CI seds the tag into Cargo.toml / desktop package.json / tauri.conf.json)
 git tag vX.Y.Z && git push origin vX.Y.Z
@@ -21,7 +28,11 @@ gh run list  --repo audichuang/aghub --workflow release.yml --limit 1
 gh run watch <run-id> --repo audichuang/aghub --exit-status
 ```
 
-`git push` is gated by a **pre-push hook** (prettier `--check` + clippy `-D warnings` + eslint + tsc) — expect a delay.
+The release `test` gate is a backstop, not a substitute for step 0 — tagging a red commit just wastes a release run.
+`git push` is gated by a **pre-push hook** (prettier `--check` + clippy `-D warnings` + eslint + tsc) — note it does
+**NOT** run tests; that gap is why `just preflight` exists. `just preflight` runs on your platform only and cannot
+reproduce macOS/Windows-specific behavior — for that, rely on the CI matrix and write tests that simulate the platform
+condition on Linux (e.g. operate through a symlinked temp dir to mimic macOS `/var` → `/private` canonicalize).
 
 ## Verify after green
 
