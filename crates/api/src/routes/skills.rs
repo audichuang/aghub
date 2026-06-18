@@ -1700,6 +1700,10 @@ fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
 /// Returns true when both URLs parse and share the same (ASCII
 /// case-insensitive) host. A parse failure or a missing host on either
 /// side yields false.
+///
+/// Compares the HOST ONLY and is port-agnostic by design: session
+/// credential pinning keys on host, not port, so the same host on a
+/// different port is treated as the same host.
 fn same_host(a: &str, b: &str) -> bool {
 	let (Ok(a), Ok(b)) = (url::Url::parse(a), url::Url::parse(b)) else {
 		return false;
@@ -3213,5 +3217,60 @@ mod tests {
 	#[test]
 	fn same_host_false_on_parse_failure() {
 		assert!(!same_host("not a url", "https://github.com/a"));
+	}
+
+	#[test]
+	fn same_host_is_port_agnostic() {
+		// Session pinning keys on host, not port; the same host on a
+		// different port must be treated as the same host (see same_host
+		// doc comment). This documents the intentional behavior.
+		assert!(same_host(
+			"https://git.internal:8080/a.git",
+			"https://git.internal:9090/b.git",
+		));
+	}
+
+	// A session token bound to one host must never be reused against a
+	// different host: the guard runs before any clone/spawn_blocking, so this
+	// is exercised end-to-end through the handler without any network.
+	#[test]
+	fn git_scan_rejects_session_credential_for_different_host() {
+		let app_data = tempdir().unwrap();
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client");
+
+		let sessions = client
+			.rocket()
+			.state::<GitCloneSessions>()
+			.expect("git clone sessions");
+		sessions.sessions.lock().unwrap().insert(
+			"test-session".to_string(),
+			GitCloneSession {
+				temp_dir: tempdir().unwrap(),
+				created_at: std::time::Instant::now(),
+				url: "https://gitlab.internal/repo.git".to_string(),
+				credential_token: Some("secret-token".to_string()),
+				branches: vec![],
+				current_branch: String::new(),
+			},
+		);
+
+		let response = client
+			.post("/api/v1/skills/git/scan")
+			.json(&serde_json::json!({
+				"url": "https://evil.example/repo.git",
+				"session_id": "test-session",
+			}))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::BadRequest);
+		let raw = response.into_string().expect("response body");
+		let parsed: serde_json::Value =
+			serde_json::from_str(&raw).expect("json body");
+		assert_eq!(parsed["code"], "SESSION_CREDENTIAL_HOST_MISMATCH");
 	}
 }
