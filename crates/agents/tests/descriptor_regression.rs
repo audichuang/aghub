@@ -801,18 +801,16 @@ fn test_global_skill_paths() {
 		(AgentType::Openclaw, Some(&[".openclaw/skills"])),
 		(
 			AgentType::OpenCode,
-			Some(&[
-				".config/opencode/skills",
-				".claude/skills",
-				".agents/skills",
-			]),
+			// Own dir + universal Master only — no foreign-agent private dirs.
+			Some(&[".config/opencode/skills", ".agents/skills"]),
 		),
 		(AgentType::Gemini, Some(&[".gemini/skills"])),
 		(AgentType::Cline, Some(&[".agents/skills"])),
 		(AgentType::Copilot, Some(&[".copilot/skills"])),
 		(
 			AgentType::Cursor,
-			Some(&[".cursor/skills", ".claude/skills", ".codex/skills"]),
+			// Own dir + universal Master only — no foreign-agent private dirs.
+			Some(&[".cursor/skills", ".agents/skills"]),
 		),
 		(
 			AgentType::Antigravity,
@@ -915,19 +913,15 @@ fn test_project_skill_paths() {
 		(AgentType::Openclaw, None), // Openclaw has no project skills
 		(
 			AgentType::OpenCode,
-			Some(&[".opencode/skills", ".claude/skills", ".agents/skills"]),
+			Some(&[".opencode/skills", ".agents/skills"]),
 		),
 		(AgentType::Gemini, Some(&[".agents/skills"])),
 		(AgentType::Cline, Some(&[".agents/skills"])),
 		(AgentType::Copilot, Some(&[".agents/skills"])),
 		(
 			AgentType::Cursor,
-			Some(&[
-				".cursor/skills",
-				".agents/skills",
-				".claude/skills",
-				".codex/skills",
-			]),
+			// Own dir + universal Master only — no foreign-agent private dirs.
+			Some(&[".cursor/skills", ".agents/skills"]),
 		),
 		(AgentType::Antigravity, Some(&[".agents/skills"])),
 		(AgentType::Kiro, Some(&[".kiro/skills"])),
