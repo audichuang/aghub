@@ -346,8 +346,14 @@ impl GitBasedInstaller {
 
 				let relative_path =
 					safe_archive_relative_path(Path::new(relative_path))?;
+				// Build the target from the CANONICAL root, not the raw
+				// target_dir: on macOS/Windows the raw dir (e.g. /var/...,
+				// /tmp) canonicalizes to a different prefix (/private/var/...),
+				// and the containment/strip_prefix checks below compare against
+				// canonical_target_dir — mixing the two breaks even legitimate
+				// extraction.
 				let target_path =
-					target_dir.join(relative_path.to_target_path());
+					canonical_target_dir.join(relative_path.to_target_path());
 				let entry_type = entry.header().entry_type();
 				ensure_safe_entry_type(
 					entry_type,
@@ -603,6 +609,42 @@ mod tests {
 			std::fs::read(temp_dir.path().join("deep/nested/dir/file.txt"))
 				.unwrap();
 		assert_eq!(content, b"nested content");
+	}
+
+	// Reproduces the macOS/Windows failure on Linux: when the extraction
+	// target is reached through a symlinked parent, target_dir.canonicalize()
+	// resolves to a different prefix (like /var -> /private/var on macOS).
+	// Legitimate extraction must still succeed — the target path has to be
+	// built from the canonical root so the containment checks line up.
+	#[cfg(unix)]
+	#[test]
+	fn extract_tarball_into_symlinked_target_dir() {
+		use std::os::unix::fs::symlink;
+
+		let temp_dir = tempdir().unwrap();
+		let real = temp_dir.path().join("real");
+		std::fs::create_dir_all(&real).unwrap();
+		let link = temp_dir.path().join("link");
+		symlink(&real, &link).unwrap();
+		let target = link.join("extract");
+
+		let bytes = build_tarball(|tar| {
+			append_file(
+				tar,
+				"repo-root-abc123/.claude-plugin/plugin.json",
+				br#"{"name":"repo-root"}"#,
+			);
+			append_file(
+				tar,
+				"repo-root-abc123/deep/nested/file.txt",
+				b"nested",
+			);
+		});
+
+		GitBasedInstaller::extract_tarball(&bytes, "", &target).unwrap();
+
+		assert!(real.join("extract/.claude-plugin/plugin.json").exists());
+		assert!(real.join("extract/deep/nested/file.txt").exists());
 	}
 
 	#[test]
