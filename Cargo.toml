@@ -59,6 +59,9 @@ serde_yaml = "0.9"
 toml = "1.0"
 toml_edit = "0.25"
 
+# FFI (O_NOFOLLOW for hardened file I/O)
+libc = "0.2"
+
 # Interactive CLI
 inquire = "0.9"
 
