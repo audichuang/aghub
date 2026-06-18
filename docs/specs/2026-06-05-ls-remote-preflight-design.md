@@ -39,7 +39,7 @@ from a "did anything change at all?" preflight that can skip the full fetch in t
   GitHub-only, rate-limited, and needs a token for private repos. The preflight uses
   git ref advertisement instead.
 - **No shallow/partial fetch rework** in this spec. Switching `fetch_ref_to_temp` to
-  `depth=1`/`blob:none` is a complementary optimization for the *changed* case; tracked as a
+  `depth=1`/`blob:none` is a complementary optimization for the _changed_ case; tracked as a
   follow-up, not blocking this work.
 - **No publishing, no MCP server.** Lifting the orchestrator out of `crates/api` makes a future
   MCP `check`/`update` tool cheap, but wiring MCP is out of scope here.
@@ -64,7 +64,7 @@ A git commit OID is a cryptographic hash over its tree + parents + metadata. The
   content merely causes the preflight to fall through to the full fetch, which then correctly
   reports `UpToDate`. Zero correctness impact; only a missed optimization.
 
-The one thing an OID match does **not** prove is that the *locally installed* copy is unmodified.
+The one thing an OID match does **not** prove is that the _locally installed_ copy is unmodified.
 That gap is closed by the trustworthiness gate (below).
 
 ## Architecture
@@ -129,10 +129,10 @@ pub ref_commit: Option<String>,
 - **aghub-only**, additive, optional. **No schema version bump.** Round-trips with npx exactly
   like the existing `contentHash` (npx ignores unknown fields; verified pattern via
   `entry_deserializes_without_content_hash_to_none`).
-- Semantics, documented inline: *"aghub-only optimization. Repo-level commit OID (SHA-1 hex) of
+- Semantics, documented inline: _"aghub-only optimization. Repo-level commit OID (SHA-1 hex) of
   the branch/tag tip at install/update time. Stored per-entry for simplicity; identical across all
-  members of the same `source`+`ref` group. Never read or written by npx."*
-- **Not** a replacement for `skillFolderHash` (a per-folder GitHub *tree* SHA, semantically
+  members of the same `source`+`ref` group. Never read or written by npx."_
+- **Not** a replacement for `skillFolderHash` (a per-folder GitHub _tree_ SHA, semantically
   distinct) nor `contentHash`/`computedHash` (aghub's SHA-256 of folder contents).
 
 ### 3. `skill-update` orchestrator + traits (`crates/skill-update/src/`)
@@ -141,13 +141,13 @@ pub ref_commit: Option<String>,
   `EntryInput` (gains a `ref_commit: Option<String>` field), `CheckOutput`, `Fetcher`,
   `TokenResolver`, and the concrete `GitFetcher`.
 - New `RefResolver` trait, symmetric to `Fetcher`:
-  ```
-  trait RefResolver: Send + Sync {
-      fn resolve(&self, source_ref: &SourceRef, token: Option<&str>)
-          -> Result<String, FetchError>;   // 40-hex tip OID
-  }
-  ```
-  with a default `GitRefResolver` wrapping `aghub_git::resolve_ref_oid`.
+    ```
+    trait RefResolver: Send + Sync {
+        fn resolve(&self, source_ref: &SourceRef, token: Option<&str>)
+            -> Result<String, FetchError>;   // 40-hex tip OID
+    }
+    ```
+    with a default `GitRefResolver` wrapping `aghub_git::resolve_ref_oid`.
 - `FetchedRepo` is **extended** to also carry the resolved commit `oid: String` (the `GitFetcher`
   already obtains it from `fetch_ref_to_temp`). This is the single source of truth for OID healing
   after a real fetch.
@@ -210,11 +210,11 @@ synchronous pre-spawn loop.
 `refCommit` is written at three points, but healing is **scoped by lock kind** to avoid dirtying
 version control:
 
-| Event | Global lock (`~/.agents`, untracked) | Project lock (`skills-lock.json`, **git-tracked**) |
-|---|---|---|
-| install | write `refCommit` | write `refCommit` |
-| apply-update (`apply_update.rs:135` already has the oid) | write `refCommit` (+ `content_hash`) | write `refCommit` (+ `computed_hash`) |
-| **check** (online) | self-heal: write `refCommit` + `content_hash` | **do NOT write `refCommit` by default** |
+| Event                                                    | Global lock (`~/.agents`, untracked)          | Project lock (`skills-lock.json`, **git-tracked**) |
+| -------------------------------------------------------- | --------------------------------------------- | -------------------------------------------------- |
+| install                                                  | write `refCommit`                             | write `refCommit`                                  |
+| apply-update (`apply_update.rs:135` already has the oid) | write `refCommit` (+ `content_hash`)          | write `refCommit` (+ `computed_hash`)              |
+| **check** (online)                                       | self-heal: write `refCommit` + `content_hash` | **do NOT write `refCommit` by default**            |
 
 - The project lock's `refCommit` is populated only by install/apply-update (explicit, mutating
   operations), so a read-style "check" never silently dirties a VCS-tracked file. The preflight
@@ -242,15 +242,15 @@ version control:
 
 ## Error handling & edge cases
 
-| Case | Behavior |
-|---|---|
-| `RefResolver` auth/network/unborn-HEAD/ref-not-found | Soft failure: fall through to full fetch (which yields the correct `Uncheckable{Auth/Network}` or a real comparison). Never a hard error or false `UpToDate`. |
-| ref is a tag (`v1.0`) | `resolve_ref_oid` matches `refs/tags/*`; annotated tags return the peeled commit `object`. |
-| ref = default branch (`None`) | Tip OID of HEAD's symbolic target from the advertisement. |
-| monorepo | Repo-level OID: any upstream commit triggers one fetch for that repo (one ls-refs proves it moved). A debug log records the tip-OID mismatch fallthrough so the limitation is observable. |
-| project vs global lock | Both carry `refCommit`; healing scoped per the table above. |
-| npx round-trip | `refCommit` serialized only when `Some`; unknown to npx; dropped-then-reheal is harmless. No version bump. |
-| concurrency / cache / timeouts | Unchanged: per-`SourceRef` grouping (one ls-refs per repo), request-scoped `ResultCache` + TTL, bounded concurrency, per-fetch timeout, overall deadline. |
+| Case                                                 | Behavior                                                                                                                                                                                  |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RefResolver` auth/network/unborn-HEAD/ref-not-found | Soft failure: fall through to full fetch (which yields the correct `Uncheckable{Auth/Network}` or a real comparison). Never a hard error or false `UpToDate`.                             |
+| ref is a tag (`v1.0`)                                | `resolve_ref_oid` matches `refs/tags/*`; annotated tags return the peeled commit `object`.                                                                                                |
+| ref = default branch (`None`)                        | Tip OID of HEAD's symbolic target from the advertisement.                                                                                                                                 |
+| monorepo                                             | Repo-level OID: any upstream commit triggers one fetch for that repo (one ls-refs proves it moved). A debug log records the tip-OID mismatch fallthrough so the limitation is observable. |
+| project vs global lock                               | Both carry `refCommit`; healing scoped per the table above.                                                                                                                               |
+| npx round-trip                                       | `refCommit` serialized only when `Some`; unknown to npx; dropped-then-reheal is harmless. No version bump.                                                                                |
+| concurrency / cache / timeouts                       | Unchanged: per-`SourceRef` grouping (one ls-refs per repo), request-scoped `ResultCache` + TTL, bounded concurrency, per-fetch timeout, overall deadline.                                 |
 
 ## Testing strategy
 
@@ -259,13 +259,13 @@ version control:
   → error; plus a `#[ignore = "network"]` test against `octocat/Hello-World` mirroring existing
   fetch tests. `branches_from_remote_refs` prefix-filter unit test (heads-only still correct).
 - **`crates/skill-update`**: a `StubRefResolver` (symmetric to the existing `StubFetcher`). Tests:
-  - all members trustworthy + OID match → **skip fetch** (assert `fetcher.calls == 0`), `UpToDate`;
-  - member with `local_hash != stored_hash` (drift) → **falls through to fetch**;
-  - member with absent/placeholder `stored_hash` (legacy) → falls through; heal still runs;
-  - OID mismatch → falls through; new OID healed from `FetchedRepo.oid`;
-  - `RefResolver` error → falls through (no false `UpToDate`);
-  - members with disagreeing `ref_commit` → falls through;
-  - `RefResolver` runs under the per-fetch timeout/semaphore (reuse the existing async harness).
+    - all members trustworthy + OID match → **skip fetch** (assert `fetcher.calls == 0`), `UpToDate`;
+    - member with `local_hash != stored_hash` (drift) → **falls through to fetch**;
+    - member with absent/placeholder `stored_hash` (legacy) → falls through; heal still runs;
+    - OID mismatch → falls through; new OID healed from `FetchedRepo.oid`;
+    - `RefResolver` error → falls through (no false `UpToDate`);
+    - members with disagreeing `ref_commit` → falls through;
+    - `RefResolver` runs under the per-fetch timeout/semaphore (reuse the existing async harness).
 - **`crates/skill`**: `refCommit` serializes camelCase / omitted when `None` / deserializes absent
   → `None`; npx round-trip — read an npx lock without `refCommit`, heal one entry, re-serialize,
   assert the field lands and untouched entries are byte-preserved (extend the existing `retain_*`
@@ -286,7 +286,7 @@ version control:
 
 ## Out of scope / follow-ups
 
-1. Shallow `depth=1` / partial fetch in `crates/git` to also shrink the *changed*-case download.
+1. Shallow `depth=1` / partial fetch in `crates/git` to also shrink the _changed_-case download.
 2. Persistent (cross-request) check cache so repeated checks within a session are instant.
 3. Optional `--heal-lock` / `?autoHeal=true` to populate the project lock's `refCommit` on check.
 4. Exposing the orchestrator as MCP `check`/`update` tools (the `skill-update` crate makes this

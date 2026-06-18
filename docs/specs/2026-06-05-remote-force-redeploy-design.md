@@ -18,9 +18,9 @@ remote binary it **probes the version** and enforces compatibility:
   is **present**, `ensure_remote_api` **early-returns `Ok(first)` regardless of compatibility**
   (`bringup.rs:291-293`). `bring_up` then checks `if !test.compatible` and constructs
   `RemoteError::Incompatible { remote_version }` **inline** (`commands/remote.rs:277-280`).
-  > Note: `decide_deploy` (`bringup.rs:396`) is **not on this path** — it has zero production call
-  > sites (only unit tests) and is dead code from the desktop's perspective. The auto-install only
-  > fires for an **absent** binary, never for present-but-incompatible.
+    > Note: `decide_deploy` (`bringup.rs:396`) is **not on this path** — it has zero production call
+    > sites (only unit tests) and is dead code from the desktop's perspective. The auto-install only
+    > fires for an **absent** binary, never for present-but-incompatible.
 
 A user running their **own fork** of `aghub-api` (e.g. `1.1.1`) against a desktop enforcing
 `2.0.1` therefore gets `aghub-api 1.1.1 (incompatible with 2.0.1)` and is **blocked** with no
@@ -92,6 +92,7 @@ fn force_redeploy_remote_api<R: CommandRunner>(
 ```
 
 Steps:
+
 1. **Kill the stale process first** (best-effort): a new `build_remote_pkill_cmd` issuing
    `pkill -x aghub-api || true`. This terminates the untracked incompatible process (whose pid we
    never captured) and avoids `ETXTBSY` on the overwrite.
@@ -148,8 +149,8 @@ no error-kind branch and no slot for a button, and children using the context ar
   incompatibility screen**: remote version, desktop version (`aghub_api::VERSION`), and a
   **「強制重新部署」button** (enabled only when same-platform; cross-platform → disabled + tooltip
   pointing at the manual `cargo install` hint).
-- Confirm dialog (HeroUI v3 `alert-dialog`): *"這會用 desktop 內建的 aghub-api 覆蓋遠端現有的
-  （包含你的 fork）。繼續？"*.
+- Confirm dialog (HeroUI v3 `alert-dialog`): _"這會用 desktop 內建的 aghub-api 覆蓋遠端現有的
+  （包含你的 fork）。繼續？"_.
 - The force-redeploy **`useMutation`** and the success handler
   **`queryClient.setQueryData(['server', activeId], port)`** (to flip `serverQuery` error→success
   and open the tunnel) must live **inside `ConnectionProvider`** (or a self-contained component
@@ -170,14 +171,14 @@ no error-kind branch and no slot for a button, and children using the context ar
 
 ## Error handling & edge cases
 
-| Case | Behavior |
-|---|---|
-| Cross-platform / unparseable/failed `uname` | `same_platform = false` → button disabled + tooltip; command returns `CrossPlatformRedeploy` + manual `install_hint()`. |
-| No resolvable source (dev build, no env/git) | `RemoteApiMissing { install_hint }` (existing). |
-| Old incompatible process running | `pkill -x aghub-api` (best-effort) before overwrite; atomic `mv` avoids `ETXTBSY` regardless. New server binds a fresh port (`start_remote` uses `--port 0`), so no port collision. |
-| Install-target ≠ probe-resolved path | Install to the probe-resolved path (or require `remoteAghubPath`) so the re-probe runs the new binary — otherwise "still incompatible after redeploy". |
-| Upload / `mv` / re-probe failure | `DeployFailed`; do not loop. If the overwrite already happened, the message states redeploy succeeded but start/probe failed. |
-| Concurrent connect + redeploy for same id | `connecting` dedup slot serializes them; an unexpected pre-existing live handle → refuse with `AlreadyConnecting` (do not clobber a working connection). |
+| Case                                         | Behavior                                                                                                                                                                            |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Cross-platform / unparseable/failed `uname`  | `same_platform = false` → button disabled + tooltip; command returns `CrossPlatformRedeploy` + manual `install_hint()`.                                                             |
+| No resolvable source (dev build, no env/git) | `RemoteApiMissing { install_hint }` (existing).                                                                                                                                     |
+| Old incompatible process running             | `pkill -x aghub-api` (best-effort) before overwrite; atomic `mv` avoids `ETXTBSY` regardless. New server binds a fresh port (`start_remote` uses `--port 0`), so no port collision. |
+| Install-target ≠ probe-resolved path         | Install to the probe-resolved path (or require `remoteAghubPath`) so the re-probe runs the new binary — otherwise "still incompatible after redeploy".                              |
+| Upload / `mv` / re-probe failure             | `DeployFailed`; do not loop. If the overwrite already happened, the message states redeploy succeeded but start/probe failed.                                                       |
+| Concurrent connect + redeploy for same id    | `connecting` dedup slot serializes them; an unexpected pre-existing live handle → refuse with `AlreadyConnecting` (do not clobber a working connection).                            |
 
 ## Security considerations
 
@@ -202,15 +203,10 @@ no error-kind branch and no slot for a button, and children using the context ar
 
 ## Testing strategy
 
-- **`crates/remote`** (with `MockRunner`):
-  - `probe_remote_platform` normalization: `Darwin/arm64 → macos/aarch64`, `Linux/x86_64`,
-    unparseable → `None`.
-  - `force_redeploy_remote_api` argv sequence: `pkill → (resolve target) → scp upload → mv+chmod →
-    probe`; returns a compatible `TestResult` when the mock reports a matching version.
-  - re-probe still incompatible → error surfaced, no start.
-  - install-target resolution picks the probe-resolved path.
-  - existing `parse_api_version` / `is_version_compatible` tests unchanged; update the
-    `install_remote_api`/finish-step argv test for the `mv`+`chmod` change.
+- **`crates/remote`** (with `MockRunner`): - `probe_remote_platform` normalization: `Darwin/arm64 → macos/aarch64`, `Linux/x86_64`,
+  unparseable → `None`. - `force_redeploy_remote_api` argv sequence: `pkill → (resolve target) → scp upload → mv+chmod →
+probe`; returns a compatible `TestResult` when the mock reports a matching version. - re-probe still incompatible → error surfaced, no start. - install-target resolution picks the probe-resolved path. - existing `parse_api_version` / `is_version_compatible` tests unchanged; update the
+  `install_remote_api`/finish-step argv test for the `mv`+`chmod` change.
 - **`crates/desktop` (frontend)**: incompatible screen renders with version info; button
   enabled/disabled by same-platform; confirm→mutation→`setQueryData` path; transient errors → toast.
 - **Command layer**: `finish_bring_up` extraction preserves the orphan-kill guard (the existing

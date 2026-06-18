@@ -44,10 +44,10 @@ make `remote_install_source()` prefer it. No behavior change to remote connect i
    resolves the suffixed file per target at bundle time.
 2. **Staging the binary in CI** (`.github/workflows/release.yml`, `build-tauri` job). Add, **after
    the `Sync Version` step and before `tauri-action`**:
-   - `cargo build -p aghub-api --release --target ${{ matrix.target }}`
-   - copy the result to `crates/desktop/src-tauri/binaries/aghub-api-${{ matrix.target }}`
-     (`.exe` on Windows).
-   Building from the same checkout after `Sync Version` is what makes the binary version-locked.
+    - `cargo build -p aghub-api --release --target ${{ matrix.target }}`
+    - copy the result to `crates/desktop/src-tauri/binaries/aghub-api-${{ matrix.target }}`
+      (`.exe` on Windows).
+      Building from the same checkout after `Sync Version` is what makes the binary version-locked.
 3. **Runtime resolution** (`commands/remote.rs`). When packaged, resolve the sidecar via the Tauri
    path API (`app.path().resolve("aghub-api", BaseDirectory::Resource)` / the sidecar resolver)
    and return it as `RemoteInstallSource::LocalBinary`. **Dev fallback unchanged**: if the bundled
@@ -78,6 +78,6 @@ The bundled `aghub-api` must match the workspace version, not the Tauri app vers
 
 ## Out of scope / follow-ups
 
-- Using the bundled binary to also fix the *absent*-binary auto-deploy path (today `decide_deploy`
+- Using the bundled binary to also fix the _absent_-binary auto-deploy path (today `decide_deploy`
   is unused in production; wiring it is separate).
 - Delta/compressed uploads.

@@ -20,7 +20,7 @@ machine** and push it to the connected remote.
 - The existing `POST /skills/transfer` (`transfer_skill_route`, `skills.rs:136`) transfers a skill
   **between agents on the same host** (`source` agent → `destinations` agents). It is **not**
   host-to-host: it never moves bytes across machines.
-- The remote install paths that *do* cross machines are **git-sourced**
+- The remote install paths that _do_ cross machines are **git-sourced**
   (`POST /skills/git/install`, `/skills/install`): they fetch from a repo the remote can reach.
   A skill that lives only in the user's local `~/.claude/skills/foo/` (never pushed to git) cannot
   be installed on the remote at all.
@@ -41,7 +41,7 @@ skill to be in a git repo.
 - **Syncing/diffing** — this is a one-shot push (overwrite-or-create), not a continuous sync.
 - **Transferring across two remotes** — only local → the single currently-connected remote.
 - **Re-using the git path** — git-sourced skills already have `/skills/git/install`; this feature
-  is specifically for **local-only** (non-git) skills. (A git-backed skill *may* still use this
+  is specifically for **local-only** (non-git) skills. (A git-backed skill _may_ still use this
   path; it just isn't the motivating case.)
 
 ## Recommended approach (to validate in brainstorming)
@@ -77,15 +77,13 @@ crates/desktop src-tauri Likely a Tauri command to pack the local skill folder i
 
 1. **Remote receive+install endpoint (`crates/api`).** A new
    `POST /skills/upload` (name TBD) accepting the `.skill` bytes plus `{ agents, scope,
-   project_root? , name? }`. Decode → temp file → `skill::unpack` → validate
+project_root? , name? }`. Decode → temp file → `skill::unpack` → validate
    (`skill::validate`, path-traversal guard) → `add_skill_from_path` per agent → write a
    `source_type: "local"` lock entry. Returns an `OperationBatchResponse`-shaped per-agent result
-   (mirror `transfer_skill_route`).
-   - **Wire encoding**: multipart vs base64-in-JSON — see Open Questions. Rocket supports both; the
-     rest of the API is JSON, so base64-in-JSON is the lower-friction default for small skills.
-   - **Size guard**: cap the accepted body (skills are small; reject multi-MB uploads).
+   (mirror `transfer_skill_route`). - **Wire encoding**: multipart vs base64-in-JSON — see Open Questions. Rocket supports both; the
+   rest of the API is JSON, so base64-in-JSON is the lower-friction default for small skills. - **Size guard**: cap the accepted body (skills are small; reject multi-MB uploads).
 2. **Local pack (`crates/desktop` src-tauri).** A Tauri command `pack_skill(source_path) ->
-   bytes/base64` that resolves the local skill folder (tilde-expand, the `skill_root` logic already
+bytes/base64` that resolves the local skill folder (tilde-expand, the `skill_root` logic already
    in `connection`/`skills_update`) and calls `skill::pack` into a temp file, returning the bytes.
    (The webview can't zip a local directory itself.)
 3. **FE action (`crates/desktop` src).** A "Send to remote host" entry next to "Add to agent" in
@@ -105,7 +103,7 @@ crates/desktop src-tauri Likely a Tauri command to pack the local skill folder i
 
 ## Open questions (resolve in brainstorming BEFORE TDD)
 
-1. **Where does the local skill come from?** The "active connection" is the *remote* while
+1. **Where does the local skill come from?** The "active connection" is the _remote_ while
    connected, so the local skill list isn't what the remote API serves. Do we (a) require the user
    to be on Local to pick the skill then choose a remote target, or (b) keep a separate "local
    skills" source available even while connected? This shapes the whole UX and which `baseUrl`
