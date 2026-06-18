@@ -100,6 +100,42 @@ fn ensure_canonical_child(child: &Path, root: &Path) -> Result<()> {
 	)
 }
 
+/// Create `path` under `canonical_root` one component at a time, refusing
+/// to create or descend through a symlink and confirming each level stays
+/// inside the root. Prevents a pre-existing symlink in the target from
+/// redirecting directory creation outside the extraction root.
+fn create_dir_all_no_symlink(path: &Path, canonical_root: &Path) -> Result<()> {
+	let rel = path.strip_prefix(canonical_root).map_err(|_| {
+		anyhow::anyhow!(
+			"Extraction path {} is not under root {}",
+			path.display(),
+			canonical_root.display()
+		)
+	})?;
+	let mut cur = canonical_root.to_path_buf();
+	for comp in rel.components() {
+		cur.push(comp);
+		match std::fs::symlink_metadata(&cur) {
+			Ok(meta) => {
+				if meta.file_type().is_symlink() || !meta.is_dir() {
+					anyhow::bail!(
+						"Unsafe extraction directory: {}",
+						cur.display()
+					);
+				}
+			}
+			Err(_) => {
+				std::fs::create_dir(&cur)?;
+			}
+		}
+		let canonical = cur.canonicalize().with_context(|| {
+			format!("Failed to canonicalize {}", cur.display())
+		})?;
+		ensure_canonical_child(&canonical, canonical_root)?;
+	}
+	Ok(())
+}
+
 /// Reject a target whose final component is a symlink, then create and
 /// canonicalize the parent dir and confirm it is inside the root.
 fn ensure_target_parent_safe(
@@ -121,7 +157,7 @@ fn ensure_target_parent_safe(
 			target_path.display()
 		)
 	})?;
-	std::fs::create_dir_all(parent)?;
+	create_dir_all_no_symlink(parent, canonical_root)?;
 	let canonical_parent = parent.canonicalize().with_context(|| {
 		format!("Failed to canonicalize parent {}", parent.display())
 	})?;
@@ -319,7 +355,10 @@ impl GitBasedInstaller {
 				)?;
 
 				if entry_type.is_dir() {
-					std::fs::create_dir_all(&target_path)?;
+					create_dir_all_no_symlink(
+						&target_path,
+						&canonical_target_dir,
+					)?;
 					let canonical_dir =
 						target_path.canonicalize().with_context(|| {
 							format!(
@@ -537,6 +576,33 @@ mod tests {
 
 		assert!(error.to_string().contains("Unsafe archive entry type"));
 		assert!(!temp_dir.path().join("hard-link").exists());
+	}
+
+	#[test]
+	fn extract_tarball_handles_deeply_nested_dirs() {
+		let temp_dir = tempdir().unwrap();
+		let bytes = build_tarball(|tar| {
+			append_file(
+				tar,
+				"repo-root-abc123/.claude-plugin/plugin.json",
+				br#"{"name":"repo-root"}"#,
+			);
+			append_file(
+				tar,
+				"repo-root-abc123/deep/nested/dir/file.txt",
+				b"nested content",
+			);
+		});
+
+		GitBasedInstaller::extract_tarball(&bytes, "", temp_dir.path())
+			.unwrap();
+
+		assert!(temp_dir.path().join(".claude-plugin/plugin.json").exists());
+		assert!(temp_dir.path().join("deep/nested/dir/file.txt").exists());
+		let content =
+			std::fs::read(temp_dir.path().join("deep/nested/dir/file.txt"))
+				.unwrap();
+		assert_eq!(content, b"nested content");
 	}
 
 	#[test]
