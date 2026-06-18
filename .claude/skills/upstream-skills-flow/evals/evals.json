@@ -1,0 +1,26 @@
+{
+	"skill_name": "upstream-skills-flow",
+	"evals": [
+		{
+			"id": 0,
+			"name": "folder-hash-parity",
+			"prompt": "I'm about to refactor how aghub computes the skill folder hash in crates/skill/src/hash.rs. Before I touch it, I need to understand exactly what the upstream vercel `skills` CLI does for its folder hash so I don't break cross-tool compatibility. Walk me through the upstream algorithm and call out anything subtle that aghub must keep byte-identical.",
+			"expected_output": "Explains upstream computeSkillFolderHash (local-lock.ts): recurse skipping .git/node_modules, files only, sort by relativePath via JS localeCompare, sha256 of relativePath+raw bytes with NO delimiter. Flags the subtle point that aghub's match depends on feruca Collator with shifting=false to reproduce localeCompare, and that copyDirectory/Master exclusions + the golden parity tests must stay aligned.",
+			"files": []
+		},
+		{
+			"id": 1,
+			"name": "install-universal-vs-copy",
+			"prompt": "When aghub installs a skill in universal mode, I want to know how it lines up with what `npx skills add` actually does for a single (skill, agent) pair. Walk me through the upstream install step by step and tell me which aghub function mirrors each step. Also: how does upstream decide whether to make a symlink vs a copy?",
+			"expected_output": "Walks upstream installSkillForAgent (installer.ts): sanitize+path-safety, copy mode vs symlink mode, materialize Master to canonicalDir, skip symlink for universal agents and for absent project agent dirs, createSymlink with copy-on-failure fallback. Maps to aghub add_skill (copy) / add_skill_universal -> install_universal -> link_agents_to_canonical / copy_dir_recursive, relative vs absolute links, and notes aghub default is copy while upstream default is symlink.",
+			"files": []
+		},
+		{
+			"id": 2,
+			"name": "update-rename-guard",
+			"prompt": "A teammate asked why aghub's `apply-update` refuses to update a skill that was renamed in its source, while `npx skills update` seems to just go ahead. Trace both update flows and explain the difference.",
+			"expected_output": "Explains upstream update.ts (updateGlobalSkills): fetch tree, hash-diff against skillFolderHash, then re-runs `add` via spawnSync — no rename guard, so a renamed skill can orphan the old Master/Referrers. Explains aghub: check (offline default / online orchestrator) + apply-update with detect_rename / ensure_source_not_renamed refusing the update (CLI message / API SKILL_RENAMED_IN_SOURCE) and stage_and_swap_dir atomic swap. Identifies the rename guard as the deliberate aghub safety addition.",
+			"files": []
+		}
+	]
+}
