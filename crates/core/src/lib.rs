@@ -50,13 +50,19 @@ pub fn convert_skill(skill_pkg: skill::Skill) -> models::Skill {
 		_ => None,
 	};
 
+	let content = if skill_pkg.content.is_empty() {
+		None
+	} else {
+		Some(skill_pkg.content)
+	};
+
 	models::Skill {
 		name: skill_pkg.name,
 		enabled: true,
 		description: Some(skill_pkg.description),
 		author: skill_pkg.author,
 		version: skill_pkg.version,
-		content: None,
+		content,
 		tools: skill_pkg
 			.allowed_tools
 			.map(|t| t.split(',').map(|s| s.trim().to_string()).collect())

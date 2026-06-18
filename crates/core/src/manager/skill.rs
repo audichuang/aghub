@@ -532,8 +532,58 @@ impl ConfigManager {
 		let skill_pkg = skill::parser::parse(path).map_err(|e| {
 			ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
 		})?;
-		let skill = convert_skill(skill_pkg);
-		self.add_skill(skill.clone())?;
+		let mut skill = convert_skill(skill_pkg);
+
+		let target_dir = self.target_skills_dir().ok_or_else(|| {
+			ConfigError::InvalidConfig(
+				"Agent does not support persistent skill creation \
+				 in the current scope"
+					.into(),
+			)
+		})?;
+		let safe_name = sanitize_name(&skill.name);
+		let skill_dir = target_dir.join(&safe_name);
+		let agent_name = self.adapter.name().to_string();
+
+		{
+			let config = self.config_mut()?;
+			if config.skills.iter().any(|s| s.name == skill.name) {
+				return Err(ConfigError::resource_exists("skill", &skill.name));
+			}
+			if skill_dir.exists() {
+				return Err(ConfigError::resource_exists(
+					"skill target",
+					skill_dir.display().to_string(),
+				));
+			}
+		}
+
+		info!(
+			"importing skill '{}' from '{}' for agent '{}'",
+			skill.name,
+			path.display(),
+			agent_name
+		);
+
+		// Copy the FULL source tree (scripts/, references/, assets/, original
+		// body) into the agent's own skills dir — the isolated copy layout.
+		// Reuses install_layout's npx-equivalent recursive copy (symlink-deref,
+		// .git/__pycache__ excluded) rather than re-synthesizing a thin
+		// SKILL.md, which dropped every non-frontmatter file.
+		let source_root = crate::skills::skill_source_root(path);
+		crate::skills::install_layout::install_universal(
+			&source_root,
+			&skill_dir,
+			&[],
+			false,
+		)
+		.map_err(ConfigError::Io)?;
+
+		skill.source_path =
+			Some(skill_dir.join("SKILL.md").to_string_lossy().to_string());
+		skill.canonical_path = None;
+		self.config_mut()?.skills.push(skill.clone());
+		self.save_current()?;
 		Ok(skill)
 	}
 
