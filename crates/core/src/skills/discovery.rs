@@ -1,4 +1,5 @@
 use crate::models::Skill;
+use crate::skills::linker::Linker;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -44,14 +45,14 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) {
 		match skill::parser::parse_skill_dir(&path) {
 			Ok(skill_pkg) => {
 				let mut skill = crate::convert_skill(skill_pkg);
-				// Detect symlink and record canonical path
-				if let Ok(meta) = path.symlink_metadata() {
-					if meta.file_type().is_symlink() {
-						if let Ok(resolved) = fs::canonicalize(&path) {
-							let canonical = resolved.join("SKILL.md");
-							skill.canonical_path =
-								crate::format_path_with_tilde(&canonical);
-						}
+				// Detect a link (unix symlink OR windows junction) and record the
+				// canonical path. A junction reports is_symlink()==false, so the
+				// bare file-type check missed it; Linker::is_link sees both.
+				if Linker::is_link(&path) {
+					if let Ok(resolved) = fs::canonicalize(&path) {
+						let canonical = resolved.join("SKILL.md");
+						skill.canonical_path =
+							crate::format_path_with_tilde(&canonical);
 					}
 				}
 				skills.push(skill);
