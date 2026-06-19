@@ -133,4 +133,27 @@ mod tests {
 		);
 		assert_eq!(plan.agent_id, "codex");
 	}
+
+	#[test]
+	fn global_native_reader_set_matches_descriptors() {
+		// Oracle (the AGENTS.md-documented global native set). This list is
+		// the TEST expectation only — the impl derives it from descriptors.
+		let expected_native = ["codex", "opencode", "cursor", "cline", "warp"];
+		for id in expected_native {
+			let plan = plan_for(id, ResourceScope::GlobalOnly, None);
+			assert_eq!(
+				plan.need,
+				LinkNeed::NativeReader,
+				"{id} should be a global NativeReader"
+			);
+		}
+		// A clear non-native agent at global: Claude reads only
+		// ~/.claude/skills.
+		let claude = plan_for("claude", ResourceScope::GlobalOnly, None);
+		assert!(
+			matches!(claude.need, LinkNeed::NeedsLink { .. }),
+			"claude @global should NeedsLink, got {:?}",
+			claude.need
+		);
+	}
 }
