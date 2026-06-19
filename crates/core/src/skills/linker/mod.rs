@@ -3,7 +3,6 @@
 //! create_windows_symlink / normalize_path. SM's iflow copy-mode is intentionally
 //! NOT ported: aghub bans copy as a skill-install outcome.
 
-#[allow(unused_imports)]
 use std::io;
 #[allow(unused_imports)]
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
@@ -44,6 +43,34 @@ impl Linker {
 			}
 		}
 		false
+	}
+
+	/// Remove a link without touching its target: on Windows `remove_dir` then
+	/// `remove_file` (a junction is a dir reparse point; a Unix symlink-to-dir
+	/// needs `remove_file`). Idempotent on a missing path. Ported from SM
+	/// `remove_symlink_or_junction`. Uses `remove_dir`, NEVER `remove_dir_all`,
+	/// so it only unlinks the reparse point and never recurses into the Master.
+	pub fn unlink(path: &Path) -> io::Result<()> {
+		let result = {
+			#[cfg(windows)]
+			{
+				std::fs::remove_dir(path)
+					.or_else(|_| std::fs::remove_file(path))
+			}
+			#[cfg(unix)]
+			{
+				std::fs::remove_file(path)
+			}
+			#[cfg(not(any(unix, windows)))]
+			{
+				std::fs::remove_file(path)
+			}
+		};
+		match result {
+			Ok(()) => Ok(()),
+			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+			Err(e) => Err(e),
+		}
 	}
 }
 
@@ -89,5 +116,37 @@ mod tests {
 		let link = tmp.path().join("link");
 		std::os::unix::fs::symlink(&target, &link).unwrap();
 		assert!(Linker::is_link(&link), "a unix symlink IS a link");
+	}
+
+	#[test]
+	fn unlink_is_idempotent_on_missing_path() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		Linker::unlink(&tmp.path().join("nope"))
+			.expect("unlinking a missing path is a no-op");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn unlink_removes_symlink_but_keeps_target() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let target = tmp.path().join("target");
+		std::fs::create_dir_all(&target).unwrap();
+		std::fs::write(target.join("keep.txt"), "keep").unwrap();
+		let link = tmp.path().join("link");
+		std::os::unix::fs::symlink(&target, &link).unwrap();
+
+		Linker::unlink(&link).unwrap();
+
+		assert!(!Linker::is_link(&link), "link must be gone");
+		assert!(
+			std::fs::symlink_metadata(&link).is_err(),
+			"link path must not exist"
+		);
+		assert!(
+			target.join("keep.txt").exists(),
+			"unlink must never touch the target"
+		);
 	}
 }
