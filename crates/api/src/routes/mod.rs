@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod catchers;
+pub mod coverage;
 pub mod credentials;
 pub mod inference;
 pub mod integrations;
