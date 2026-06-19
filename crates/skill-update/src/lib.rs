@@ -14,6 +14,8 @@
 mod git;
 pub use git::{GitFetcher, GitRefResolver};
 
+pub mod sources;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
