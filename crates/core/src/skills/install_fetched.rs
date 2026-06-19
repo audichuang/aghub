@@ -2,10 +2,9 @@
 //!
 //! This is the shared primitive behind both the API git-install route and the
 //! CLI `source sync` command: given a skill that has already been fetched into a
-//! local tree, install it into the resolved per-agent skills directories — as an
-//! isolated copy OR in the universal `.agents/skills` layout — and write the
-//! install lock. It performs NO network and NO credential resolution; fetch +
-//! auth live in the caller.
+//! local tree, install it into the resolved per-agent skills directories — in the
+//! universal `.agents/skills` layout — and write the install lock. It performs NO
+//! network and NO credential resolution; fetch + auth live in the caller.
 //!
 //! It returns PER-AGENT results so the API can rebuild its current per-agent
 //! success / invalid-agent response and the CLI can report which agents got the
@@ -14,10 +13,10 @@
 
 use std::path::Path;
 
-use crate::adapters::create_adapter;
 use crate::models::ResourceScope;
-use crate::skills::install_layout::{
-	install_universal, universal_canonical_dir,
+use crate::skills::linker::classify::{classify_agent, LinkNeed};
+use crate::skills::linker::{
+	install_universal, universal_canonical_dir, LinkTarget,
 };
 use crate::skills::skill_source_root;
 use crate::skills::update::{detect_rename, skill_renamed_message};
@@ -26,14 +25,9 @@ use skill::sanitize::sanitize_name;
 
 /// Recursively copy `from` into `to`, creating `to` (and parents) as needed.
 ///
-/// This is the VERBATIM isolated-copy semantics the API git-install route used
-/// (`crates/api/src/routes/skills.rs`): a plain deep copy that copies every
-/// entry with NO exclusion list (unlike [`install_layout`]'s Master copy, which
-/// drops `metadata.json`/`.git`/… to match npx). Moved into core so the API and
-/// the CLI share one implementation. Returns [`std::io::Result`] — core cannot
-/// depend on Rocket, so the API maps the error to its own type at the boundary.
-///
-/// [`install_layout`]: crate::skills::install_layout
+/// Used by the API's isolated-copy path for non-universal installs. Returns
+/// [`std::io::Result`] — core cannot depend on Rocket, so the API maps the
+/// error to its own type at the boundary.
 pub fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 	std::fs::create_dir_all(to)?;
 	for entry in std::fs::read_dir(from)? {
@@ -50,6 +44,10 @@ pub fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 	Ok(())
 }
 
+/// DEPRECATED shim — installs are always symlink-only now; this field is
+/// accepted but IGNORED (the dispatch always uses install_universal_layout).
+/// Removed in the final cleanup task once every caller drops it.
+///
 /// Layout to install the fetched skill in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SkillInstallLayout {
@@ -85,6 +83,8 @@ pub struct FetchedSkillInstallRequest<'a> {
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
 	pub target_agents: &'a [AgentType],
+	/// DEPRECATED shim — ignored; installs are always symlink-only now.
+	/// Removed in the final cleanup task once every caller drops it.
 	pub layout: SkillInstallLayout,
 	/// Rename guard: when `Some(n)`, the fetched frontmatter name MUST equal `n`
 	/// or the install is refused before any write.
@@ -218,45 +218,29 @@ pub fn install_fetched_skill_and_lock(
 			))
 		})?;
 
-	// `agent_results` reports per-agent install success (mirrors the API's
-	// per-skill `success` entries). `copied_any` is the SEPARATE lock-write
-	// signal: a *fresh* write on this run. For an isolated copy every fresh copy
-	// counts (API: `copied_any |= copied`); for the universal layout ONLY a
-	// newly-written master counts (API: `copied_any |= wrote_master`,
-	// skills.rs:2065) — an idempotent re-run where the master + links already
-	// exist must NOT be treated as a fresh install, so it does not rewrite the
-	// lock.
-	let (agent_results, copied_any) = match req.layout {
-		SkillInstallLayout::IsolatedCopy => {
-			let results = install_isolated(
-				&source_root,
-				&safe_name,
-				req.scope,
-				req.project_root,
-				req.target_agents,
-			)?;
-			let copied = results.iter().any(|r| r.installed);
-			(results, copied)
-		}
-		SkillInstallLayout::Universal => install_universal_layout(
-			&source_root,
-			&safe_name,
-			req.scope,
-			req.project_root,
-			req.target_agents,
-			req.use_relative_links,
-		)?,
+	// Symlink-only: req.layout is ignored (shim field, removed in Task 47a);
+	// the install is ALWAYS the universal master+link path.
+	let target = if req.use_relative_links {
+		LinkTarget::Relative
+	} else {
+		LinkTarget::Absolute
 	};
+	let (agent_results, wrote_master) = install_universal_layout(
+		&source_root,
+		&safe_name,
+		req.scope,
+		req.project_root,
+		req.target_agents,
+		target,
+	)?;
 
-	// Gate the lock write on at least one agent actually receiving the skill on
-	// THIS run, matching the API's outer `if installed { ... }` (skills.rs:2119):
-	// when every target is a soft failure AND no lock entry exists yet, no lock
-	// is written.
+	// Gate the lock write on the master being freshly written OR at least one
+	// agent actually receiving the skill on THIS run (Decision 11).
 	let installed_any = agent_results.iter().any(|r| r.installed);
-	let wrote_lock = installed_any
+	let wrote_lock = (wrote_master || installed_any)
 		&& should_write_install_lock(
 			&name,
-			copied_any,
+			wrote_master || installed_any,
 			req.scope,
 			req.project_root,
 		);
@@ -280,79 +264,19 @@ pub fn install_fetched_skill_and_lock(
 	})
 }
 
-/// Resolve the write dir for one agent, or `None` (reported as a soft skip).
-fn resolve_target_dir(
-	agent: AgentType,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Option<std::path::PathBuf> {
-	create_adapter(agent).target_skills_dir(project_root, scope)
-}
-
-fn install_isolated(
-	source_root: &Path,
-	safe_name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-	target_agents: &[AgentType],
-) -> Result<Vec<AgentInstallResult>, crate::ConfigError> {
-	let mut results = Vec::with_capacity(target_agents.len());
-	for &agent in target_agents {
-		let Some(dir) = resolve_target_dir(agent, scope, project_root) else {
-			results.push(AgentInstallResult {
-				agent,
-				installed: false,
-				error: Some(
-					"Agent does not support persistent skill creation in \
-					 this scope"
-						.to_string(),
-				),
-			});
-			continue;
-		};
-
-		// No-clobber: an existing dir is a success-no-op, never overwritten.
-		let dest = dir.join(safe_name);
-		if dest.exists() {
-			results.push(AgentInstallResult {
-				agent,
-				installed: false,
-				error: None,
-			});
-			continue;
-		}
-
-		match copy_dir_recursive(source_root, &dest) {
-			Ok(()) => results.push(AgentInstallResult {
-				agent,
-				installed: true,
-				error: None,
-			}),
-			Err(e) => results.push(AgentInstallResult {
-				agent,
-				installed: false,
-				error: Some(e.to_string()),
-			}),
-		}
-	}
-	Ok(results)
-}
-
 /// Returns the per-agent results plus `wrote_master` — `true` only when the
-/// canonical master was NEWLY written on this run. The API computes the same
-/// signal as `!canonical.exists()` BEFORE calling `install_universal`
-/// (`install_git_skill_universal`, skills.rs:686) and feeds it to the lock-write
-/// decision as `copied_any` (skills.rs:2065).
+/// canonical master was NEWLY written on this run. NativeReader agents are
+/// reported installed with NO link; NeedsLink agents are linked via the
+/// copy-free linker; Unsupported agents soft-fail. A per-agent LinkError is
+/// folded into that agent's row (Decision 10), never aborting the install.
 fn install_universal_layout(
 	source_root: &Path,
 	safe_name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	target_agents: &[AgentType],
-	use_relative_links: bool,
+	target: LinkTarget,
 ) -> Result<(Vec<AgentInstallResult>, bool), crate::ConfigError> {
-	// Universal canonical dir follows the RESOLVED scope: project → the project
-	// `.agents/skills`, global → `~/.agents/skills`.
 	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
 		project_root
 	} else {
@@ -360,7 +284,6 @@ fn install_universal_layout(
 	};
 	let Some(canonical_skills_dir) = universal_canonical_dir(canonical_root)
 	else {
-		// No resolvable canonical dir → every target agent is a soft failure.
 		let results = target_agents
 			.iter()
 			.map(|&agent| AgentInstallResult {
@@ -374,72 +297,107 @@ fn install_universal_layout(
 		return Ok((results, false));
 	};
 	let canonical = canonical_skills_dir.join(safe_name);
-	// Capture the fresh-master signal BEFORE `install_universal` materializes it,
-	// matching the API's `wrote_master = !canonical.exists()` (skills.rs:686).
 	let wrote_master = !canonical.exists();
 
-	// Resolve every target agent's write dir UP FRONT, in input order (as the
-	// isolated branch does). `dirs[i]` is the resolution for `target_agents[i]`:
-	// `Some(dir)` where `dir == canonical_skills_dir` means the agent reads the
-	// master directly (no link); any other `Some(dir)` is linked; `None` is a
-	// soft per-agent failure. `agent_results` is then emitted strictly 1:1 with
-	// `target_agents`, in input order — the API zips it against its
-	// `valid_agents` slice positionally (skills.rs:2019), so the order and
-	// grouping MUST match the input. Only the dirs of *linked* agents go to
-	// `install_universal`.
-	let dirs: Vec<Option<std::path::PathBuf>> = target_agents
+	// Classify every target agent against the canonical SKILLS-DIR (not the
+	// SKILL-DIR). `plans[i]` pairs 1:1 with `target_agents[i]`.
+	let plans: Vec<LinkNeed> = target_agents
 		.iter()
-		.map(|&agent| resolve_target_dir(agent, scope, project_root))
+		.map(|&agent| {
+			let descriptor = crate::registry::get(agent);
+			classify_agent(
+				descriptor,
+				scope,
+				project_root,
+				&canonical_skills_dir,
+			)
+			.need
+		})
 		.collect();
-	let symlink_dirs: Vec<std::path::PathBuf> = dirs
+	let symlink_dirs: Vec<std::path::PathBuf> = plans
 		.iter()
-		.filter_map(|d| d.clone())
-		.filter(|dir| *dir != canonical_skills_dir)
+		.filter_map(|need| match need {
+			LinkNeed::NeedsLink { agent_skills_dir } => {
+				Some(agent_skills_dir.clone())
+			}
+			_ => None,
+		})
 		.collect();
 
-	// On error EVERY input agent fails (mirrors the old API, which reported all
-	// targets as failed when the universal helper errored, skills.rs:2077). On
-	// success each agent's result reflects its resolution, in input order; a
-	// canonical-dir agent already sees the master so it is `installed: true`
-	// with `error: None`, an unresolvable dir stays a soft failure in place.
-	let results = match install_universal(
-		source_root,
-		&canonical,
-		&symlink_dirs,
-		use_relative_links,
-	) {
-		Ok(_report) => target_agents
+	// Copy-free install: materialize the Master (if absent) and link each
+	// NeedsLink agent. A pre-link invariant violation (NonAbsoluteTarget) or a
+	// Master-copy failure returns Err; per-agent link failures land in
+	// report.failed.
+	let report =
+		install_universal(source_root, &canonical, &symlink_dirs, target)
+			.map_err(|e| {
+				crate::ConfigError::Io(std::io::Error::other(e.to_string()))
+			})?;
+	// Per-agent link errors keyed by the agent's skills-dir (the link parent).
+	let failed_by_dir: std::collections::HashMap<std::path::PathBuf, String> =
+		report
+			.failed
 			.iter()
-			.zip(dirs.iter())
-			.map(|(&agent, dir)| match dir {
-				Some(_) => AgentInstallResult {
-					agent,
-					installed: true,
-					error: None,
-				},
-				None => AgentInstallResult {
-					agent,
-					installed: false,
-					error: Some(
-						"Agent does not support persistent skill creation \
-						 in this scope"
-							.to_string(),
-					),
-				},
+			.filter_map(|(link, err)| {
+				link.parent().map(|p| (p.to_path_buf(), err.to_string()))
 			})
-			.collect(),
-		Err(e) => {
-			let msg = e.to_string();
-			target_agents
-				.iter()
-				.map(|&agent| AgentInstallResult {
-					agent,
-					installed: false,
-					error: Some(msg.clone()),
-				})
-				.collect()
-		}
-	};
+			.collect();
+	// P1-D: a conflict (an occupied real dir, or a foreign link in the agent's
+	// skills-dir) is NOT a successful install — it was never clobbered. Fold
+	// report.conflicts by the agent skills-dir too, so a NeedsLink agent whose
+	// slot is occupied is reported `installed:false` with an error, never a
+	// silent `installed:true`.
+	let conflict_dirs: std::collections::HashSet<std::path::PathBuf> = report
+		.conflicts
+		.iter()
+		.filter_map(|link| link.parent().map(|p| p.to_path_buf()))
+		.collect();
+
+	let results = target_agents
+		.iter()
+		.zip(plans.iter())
+		.map(|(&agent, need)| match need {
+			LinkNeed::NativeReader => AgentInstallResult {
+				agent,
+				installed: true,
+				error: None,
+			},
+			LinkNeed::NeedsLink { agent_skills_dir } => {
+				if let Some(msg) = failed_by_dir.get(agent_skills_dir) {
+					AgentInstallResult {
+						agent,
+						installed: false,
+						error: Some(msg.clone()),
+					}
+				} else if conflict_dirs.contains(agent_skills_dir) {
+					AgentInstallResult {
+						agent,
+						installed: false,
+						error: Some(
+							"A real directory or a foreign link already \
+							 occupies this skill slot; it was not overwritten"
+								.to_string(),
+						),
+					}
+				} else {
+					AgentInstallResult {
+						agent,
+						installed: true,
+						error: None,
+					}
+				}
+			}
+			LinkNeed::Unsupported => AgentInstallResult {
+				agent,
+				installed: false,
+				error: Some(
+					"Agent does not support persistent skill creation in \
+					 this scope"
+						.to_string(),
+				),
+			},
+		})
+		.collect();
 
 	Ok((results, wrote_master))
 }
