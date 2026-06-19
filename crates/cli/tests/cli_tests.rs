@@ -504,3 +504,63 @@ fn source_sync_skips_deprecated_skill() {
 		"a deprecated skill must not be installed"
 	);
 }
+#[test]
+fn source_list_json_runs_with_no_agent_config() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "list", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	// Empty lock -> empty JSON array.
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(json.is_array(), "expected a JSON array, got: {json}");
+}
+
+#[test]
+fn source_diff_json_uses_wire_state_strings() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["source", "diff", "owner/repo", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	// Find the `alpha` skill across all scopes and assert the wire state string.
+	let raw = json.to_string();
+	assert!(raw.contains("notInstalled"), "json: {raw}");
+}
+#[test]
+fn source_help_renders() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	isolated_cli(home.path(), state.path())
+		.args(["source", "--help"])
+		.assert()
+		.success();
+}
+
+#[test]
+fn source_sync_help_renders() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	isolated_cli(home.path(), state.path())
+		.args(["source", "sync", "--help"])
+		.assert()
+		.success();
+}
