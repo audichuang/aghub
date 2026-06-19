@@ -106,6 +106,53 @@ fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
 	}
 }
 
+/// Names excluded when materializing a Master, mirroring upstream npx
+/// `copyDirectory` (installer.ts) so the Master hashes identically to npx.
+#[cfg_attr(not(test), allow(dead_code))]
+const EXCLUDE_FILES: &[&str] = &["metadata.json"];
+#[cfg_attr(not(test), allow(dead_code))]
+const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
+
+/// Recursively copy a skill source tree into the canonical Master directory,
+/// applying the npx exclude lists and dereferencing symlinks.
+///
+/// NOTE: this copy materializes the single Master only; it is NOT a per-agent
+/// copy fallback. The converged install model bans copy as a per-agent outcome.
+#[cfg_attr(not(test), allow(dead_code))]
+fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
+	std::fs::create_dir_all(to)?;
+	for entry in std::fs::read_dir(from)? {
+		let entry = entry?;
+		let file_name = entry.file_name();
+		let name = file_name.to_string_lossy();
+		let file_type = entry.file_type()?;
+		if EXCLUDE_FILES.contains(&name.as_ref())
+			|| (file_type.is_dir() && EXCLUDE_DIRS.contains(&name.as_ref()))
+		{
+			continue;
+		}
+		let from_path = entry.path();
+		let to_path = to.join(&file_name);
+		if file_type.is_dir() {
+			copy_dir_recursive(&from_path, &to_path)?;
+		} else {
+			match std::fs::metadata(&from_path) {
+				Ok(meta) if meta.is_dir() => {
+					copy_dir_recursive(&from_path, &to_path)?
+				}
+				Ok(_) => {
+					std::fs::copy(&from_path, &to_path)?;
+				}
+				Err(e)
+					if e.kind() == io::ErrorKind::NotFound
+						&& file_type.is_symlink() => {}
+				Err(e) => return Err(e),
+			}
+		}
+	}
+	Ok(())
+}
+
 /// Zero-sized, stateless namespace for the directory-link primitives.
 pub struct Linker;
 
@@ -258,5 +305,38 @@ mod tests {
 			target: PathBuf::from("rel/path"),
 		};
 		assert!(matches!(e, LinkError::NonAbsoluteTarget { .. }));
+	}
+
+	#[test]
+	fn copy_dir_recursive_excludes_vcs_cache_and_metadata() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		std::fs::create_dir_all(src.join(".git")).unwrap();
+		std::fs::write(src.join(".git/config"), "x").unwrap();
+		std::fs::create_dir_all(src.join("__pycache__")).unwrap();
+		std::fs::write(src.join("__pycache__/m.pyc"), "x").unwrap();
+		std::fs::create_dir_all(src.join("__pypackages__")).unwrap();
+		std::fs::write(src.join("__pypackages__/p"), "x").unwrap();
+		std::fs::write(src.join("metadata.json"), "{}").unwrap();
+		std::fs::write(src.join("SKILL.md"), "real").unwrap();
+		std::fs::create_dir_all(src.join("assets")).unwrap();
+		std::fs::write(src.join("assets/a.txt"), "keep").unwrap();
+
+		let dest = tmp.path().join("dest");
+		copy_dir_recursive(&src, &dest).unwrap();
+
+		assert!(dest.join("SKILL.md").exists());
+		assert!(dest.join("assets/a.txt").exists());
+		assert!(!dest.join(".git").exists(), ".git must be excluded");
+		assert!(!dest.join("__pycache__").exists(), "__pycache__ excluded");
+		assert!(
+			!dest.join("__pypackages__").exists(),
+			"__pypackages__ excluded"
+		);
+		assert!(
+			!dest.join("metadata.json").exists(),
+			"metadata.json must be excluded"
+		);
 	}
 }
