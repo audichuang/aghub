@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use crate::{FetchError, Fetcher, SourceRef, TokenResolver};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{
-	compare_known_hashes, detect_rename, SkillUpdateStatus, UncheckableReason,
+	compare_known_hashes, detect_rename, precheck_source, SkillUpdateStatus,
+	UncheckableReason,
 };
 
 #[derive(Clone, Debug)]
@@ -188,12 +189,27 @@ fn reconstruct_source_url(source: &str) -> String {
 		.unwrap_or_else(|_| source.to_string())
 }
 
+/// Fetch a source, lazily authenticating. Tries an unauthenticated fetch
+/// first; on any error, resolves a token (scoped to the source + keychain host)
+/// and retries ONCE with it. If no token is available the original error is
+/// returned. The caller maps `Auth`→needs-credential, `Network`→fetch-failed.
 pub fn fetch_source_with_resolver(
-	_source_ref: &SourceRef,
-	_fetcher: &dyn Fetcher,
-	_resolver: &dyn TokenResolver,
+	source_ref: &SourceRef,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
 ) -> Result<crate::FetchedRepo, FetchError> {
-	todo!("Task 1.4")
+	match fetcher.fetch(source_ref, None) {
+		Ok(repo) => Ok(repo),
+		Err(first_error) => {
+			let host = crate::keychain_host_for_source(&source_ref.source);
+			let Some(token) =
+				resolver.resolve(&source_ref.source, host.as_deref())
+			else {
+				return Err(first_error);
+			};
+			fetcher.fetch(source_ref, Some(&token))
+		}
+	}
 }
 
 /// Whether a lock entry belongs to the requested source. Matches on the
@@ -695,20 +711,48 @@ fn reason_str(reason: UncheckableReason) -> String {
 /// repo against it. Does NOT fetch (caller passes the already-fetched `root`),
 /// so the CLI reuses one `FetchedRepo` for every scope and for install.
 pub fn classify_scope(
-	_root: &Path,
-	_scope: &SourceScope,
-	_source: &str,
+	root: &Path,
+	scope: &SourceScope,
+	source: &str,
 ) -> Vec<SourceSkillDiff> {
-	todo!("Task 1.4")
+	let (baseline, _src_type, _ref) = baseline_for_scope(scope, source);
+	classify_repo_skills(root, &baseline)
 }
 
 /// PUBLIC API entry: merged-baseline, single-classification, flat output —
 /// byte-identical to the old route. Fetches internally via `deps`.
 pub fn diff_source(
-	_input: SourceDiffInput,
-	_deps: SourceDiffDeps<'_>,
+	input: SourceDiffInput,
+	deps: SourceDiffDeps<'_>,
 ) -> SourceDiffOutcome {
-	todo!("Task 1.4")
+	let source = input.source.trim().to_string();
+	let (baseline, mut source_type, recorded_ref) =
+		merged_baseline_for_source(&input.scopes, &source);
+	if source_type.is_empty() {
+		source_type = "github".to_string();
+	}
+
+	// Use the explicitly requested ref, else the source's RECORDED ref, else the
+	// repo default branch (None).
+	let git_ref = input.git_ref.clone().or(recorded_ref);
+
+	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
+	if let Some(reason) = precheck_source(&source_type, &source) {
+		return SourceDiffOutcome::UncheckableSource { git_ref, reason };
+	}
+
+	let source_ref = SourceRef {
+		source: source.clone(),
+		ref_: git_ref.clone(),
+	};
+	match fetch_source_with_resolver(&source_ref, deps.fetcher, deps.resolver) {
+		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential,
+		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
+		Ok(repo) => SourceDiffOutcome::Ok {
+			git_ref,
+			skills: classify_repo_skills(repo.root.as_path(), &baseline),
+		},
+	}
 }
 
 #[cfg(test)]
@@ -1232,5 +1276,85 @@ mod classify_tests {
 			successors.is_empty(),
 			"connective inside a backtick term / foreign clause must not map, got {successors:?}"
 		);
+	}
+}
+
+#[cfg(test)]
+mod diff_tests {
+	use super::*;
+	use std::fs;
+	use tempfile::TempDir;
+
+	/// A [`Fetcher`] that serves a fixed local dir as the fetched repo, ignoring
+	/// the source/token. The unauthenticated fetch always succeeds, so the token
+	/// resolver is never consulted.
+	struct DirFetcher {
+		root: std::path::PathBuf,
+	}
+	impl Fetcher for DirFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			Ok(crate::FetchedRepo {
+				root: self.root.clone(),
+				oid: "test-oid".to_string(),
+				_guard: None,
+			})
+		}
+	}
+
+	/// A [`TokenResolver`] that never has a token.
+	struct NoToken;
+	impl TokenResolver for NoToken {
+		fn resolve(&self, _s: &str, _h: Option<&str>) -> Option<String> {
+			None
+		}
+	}
+
+	fn write_skill(root: &Path, relative_dir: &str, name: &str) {
+		let dir = root.join(relative_dir);
+		fs::create_dir_all(&dir).unwrap();
+		fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: {name} skill\n---\n"),
+		)
+		.unwrap();
+	}
+
+	#[test]
+	fn diff_source_reports_not_installed() {
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+
+		let fetcher = DirFetcher {
+			root: upstream.path().to_path_buf(),
+		};
+		let resolver = NoToken;
+		let outcome = diff_source(
+			SourceDiffInput {
+				// A unique test source not present in any installed lock, so the
+				// baseline is empty and `alpha` resolves to NotInstalled.
+				source: "test-owner/diff-source-not-installed".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Global],
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		match outcome {
+			SourceDiffOutcome::Ok { skills, .. } => {
+				let alpha = skills
+					.iter()
+					.find(|s| s.name == "alpha")
+					.expect("alpha should be discovered");
+				assert_eq!(alpha.state, SourceSkillState::NotInstalled);
+			}
+			other => panic!("expected Ok, got {other:?}"),
+		}
 	}
 }
