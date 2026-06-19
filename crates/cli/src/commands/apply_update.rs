@@ -35,24 +35,70 @@ pub fn execute(
 		bail!("refusing to overwrite skill files without --yes");
 	}
 	let source = apply_source_from_lock(&name, scope, project_root)?;
-	let targets = installed_skill_roots(&name, scope, project_root);
-	if targets.is_empty() {
+	// Bail early (before paying for a fetch) when nothing is installed.
+	if installed_skill_roots(&name, scope, project_root).is_empty() {
 		bail!("skill '{name}' is locked but no installed copy was found");
 	}
 
 	let fetched = fetch_source(&source)?;
-	let repo = &fetched.path;
-	let skill_file = aghub_core::skills::update::sanitize_skill_path(
-		repo,
+	let paths = apply_skill_update_from_fetched(
+		&fetched.path,
 		&source.skill_path,
-	)
-	.ok_or_else(|| anyhow!("locked skillPath was not found in source"))?;
+		&name,
+		scope,
+		project_root,
+		Some(&fetched.oid),
+	)?;
+	let updated_hash = updated_hash_for_paths(&paths);
+	println!(
+		"{}",
+		serde_json::to_string_pretty(&json!({
+			"success": true,
+			"name": name,
+			"scope": scope_name(scope),
+			"updatedHash": updated_hash,
+			"paths": paths
+				.iter()
+				.map(|p| p.display().to_string())
+				.collect::<Vec<_>>(),
+			"error": null,
+		}))?
+	);
+	Ok(())
+}
+
+/// Apply a skill update from an **already-fetched** repo working tree, then
+/// update the scope's lock (content/computed hash + `refCommit`) exactly as
+/// [`execute`] does. Fetch-free so callers that already materialized the source
+/// (e.g. `source sync --update`) can reuse it without a second network round.
+///
+/// Mirrors the post-fetch body of [`execute`]: `sanitize_skill_path` →
+/// `ensure_source_not_renamed` → containment assert → `stage_and_swap_dir`
+/// loop → lock update. Returns the swapped install paths.
+pub fn apply_skill_update_from_fetched(
+	repo_root: &Path,
+	skill_path: &str,
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	ref_commit: Option<&str>,
+) -> Result<Vec<PathBuf>> {
+	let targets = installed_skill_roots(name, scope, project_root);
+	if targets.is_empty() {
+		bail!("skill '{name}' is locked but no installed copy was found");
+	}
+
+	let skill_file =
+		aghub_core::skills::update::sanitize_skill_path(repo_root, skill_path)
+			.ok_or_else(|| {
+				anyhow!("locked skillPath was not found in source")
+			})?;
 	// Refuse to silently overwrite the installed skill when the upstream source
 	// renamed it (same skillPath, changed frontmatter `name`). This mirrors the
 	// hardened API apply path; the shared predicate lives in `aghub-core` so both
 	// surfaces enforce the same contract.
-	ensure_source_not_renamed(&skill_file, &name)?;
-	let source_dir = skill_file.parent().unwrap_or(repo);
+	ensure_source_not_renamed(&skill_file, name)?;
+	let source_dir = skill_file.parent().unwrap_or(repo_root);
 	let updated_hash = skill::compute_skill_folder_hash(source_dir)
 		.context("failed to hash fetched skill")?;
 
@@ -76,28 +122,22 @@ pub fn execute(
 					target.display()
 				)
 			})?;
-		paths.push(target.display().to_string());
+		paths.push(target.clone());
 	}
 
-	update_lock_hash(
-		&name,
-		scope,
-		project_root,
-		&updated_hash,
-		Some(&fetched.oid),
-	)?;
-	println!(
-		"{}",
-		serde_json::to_string_pretty(&json!({
-			"success": true,
-			"name": name,
-			"scope": scope_name(scope),
-			"updatedHash": updated_hash,
-			"paths": paths,
-			"error": null,
-		}))?
-	);
-	Ok(())
+	update_lock_hash(name, scope, project_root, &updated_hash, ref_commit)?;
+	Ok(paths)
+}
+
+/// Recompute the folder hash for the JSON `updatedHash` field from a swapped
+/// install path. `execute` historically emitted the hash computed off the
+/// fetched source dir; after the swap that dir's content is now on disk at each
+/// target, so hashing the first target yields the identical value.
+fn updated_hash_for_paths(paths: &[PathBuf]) -> String {
+	paths
+		.first()
+		.and_then(|p| skill::compute_skill_folder_hash(p).ok())
+		.unwrap_or_default()
 }
 
 /// Parse the fetched `SKILL.md` and refuse the apply if the upstream frontmatter
