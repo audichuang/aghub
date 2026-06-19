@@ -647,10 +647,7 @@ fn universal_relink_referrers(
 		.iter()
 		.filter(|dir| {
 			let link = dir.join(safe_old);
-			let Ok(meta) = std::fs::symlink_metadata(&link) else {
-				return false;
-			};
-			meta.file_type().is_symlink()
+			Linker::is_link(&link)
 				&& std::fs::canonicalize(&link)
 					.map(|resolved| resolved == *old_real)
 					.unwrap_or(false)
@@ -671,19 +668,17 @@ fn universal_relink_agents(
 ) -> Result<()> {
 	for dir in referrers {
 		let old_link = dir.join(safe_old);
-		if let Ok(meta) = std::fs::symlink_metadata(&old_link) {
-			if meta.file_type().is_symlink() {
-				std::fs::remove_file(&old_link).map_err(|e| {
-					ConfigError::Io(std::io::Error::new(
-						e.kind(),
-						format!(
-							"Failed to unlink stale symlink '{}': {}",
-							old_link.display(),
-							e
-						),
-					))
-				})?;
-			}
+		if Linker::is_link(&old_link) {
+			Linker::unlink(&old_link).map_err(|e| {
+				ConfigError::Io(std::io::Error::new(
+					e.kind(),
+					format!(
+						"Failed to unlink stale link '{}': {}",
+						old_link.display(),
+						e
+					),
+				))
+			})?;
 		}
 	}
 	crate::skills::linker::link_agents_to_canonical(
@@ -799,10 +794,8 @@ fn rollback_master_rename(
 		// (they now point at the vanished new_master).
 		for dir in referrers {
 			let new_link = dir.join(safe_new);
-			if let Ok(meta) = std::fs::symlink_metadata(&new_link) {
-				if meta.file_type().is_symlink() {
-					std::fs::remove_file(&new_link)?;
-				}
+			if Linker::is_link(&new_link) {
+				Linker::unlink(&new_link)?;
 			}
 		}
 		// Recreate any old-name symlinks the partial relink removed; ones still
