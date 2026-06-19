@@ -1,3 +1,4 @@
+pub mod agent_coverage;
 pub mod agents;
 pub mod common;
 pub mod credential;
