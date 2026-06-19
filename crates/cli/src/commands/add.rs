@@ -71,10 +71,7 @@ pub fn execute(
 			)?;
 
 			let transport = mcp_transport.ok_or_else(|| {
-				anyhow!(
-					"Either --command or --url must be specified \
-					 for MCP servers"
-				)
+				anyhow!("Either --command or --url must be specified for MCP servers")
 			})?;
 
 			eprintln_verbose!("Adding MCP server: {}", mcp_name);
