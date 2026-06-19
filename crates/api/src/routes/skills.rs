@@ -235,7 +235,10 @@ pub async fn delete_skill_by_path(
 		}));
 	}
 
-	let project_root = req.project_root.as_ref().map(std::path::PathBuf::from);
+	let project_root = req
+		.project_root
+		.as_ref()
+		.map(|r| crate::extractors::absolutize_root(r));
 
 	let mut validation_errors = Vec::new();
 
@@ -2439,6 +2442,52 @@ mod tests {
 				resp.skipped.iter().any(|p| p.contains("shared")),
 				"the kept master should be reported as skipped, got {:?}",
 				resp.skipped
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_absolutizes_relative_project_root() {
+		with_isolated_env(|home, _state| {
+			// A project with a .claude marker + a symlinked install.
+			let proj = home.join("proj");
+			let master = proj.join(".agents/skills/linked");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: linked\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let skills = proj.join(".claude/skills");
+			std::fs::create_dir_all(&skills).unwrap();
+			let link = skills.join("linked");
+			std::os::unix::fs::symlink(&master, &link).unwrap();
+
+			// Drive delete with a RELATIVE project_root resolved against cwd.
+			let prev = std::env::current_dir().unwrap();
+			std::env::set_current_dir(home).unwrap();
+			// Build the request inline (scope=project, project_root="proj"
+			// relative, path = the link, confirm = true).
+			let req = DeleteSkillByPathRequest {
+				source_path: link.join("SKILL.md").display().to_string(),
+				agents: vec!["claude".to_string()],
+				scope: "project".to_string(),
+				project_root: Some("proj".to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp = block_on(delete_skill_by_path(Json(req)))
+				.ok()
+				.expect("handler ok")
+				.into_inner();
+			std::env::set_current_dir(prev).unwrap();
+
+			assert!(resp.success, "delete must resolve the relative root");
+			assert!(!link.exists(), "referrer link removed");
+			assert!(
+				master.join("SKILL.md").exists(),
+				"shared master must survive"
 			);
 		});
 	}
