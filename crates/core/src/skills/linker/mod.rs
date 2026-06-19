@@ -204,6 +204,94 @@ impl Linker {
 			Err(e) => Err(e),
 		}
 	}
+
+	/// Create `agent_skills_dir/<skill_name>` -> `master_dir` (the
+	/// `.agents/skills/<name>` canonical SKILL-DIR, which MUST already exist and
+	/// MUST be absolute). Creates `agent_skills_dir` if absent. lstat-inspects
+	/// the occupant WITHOUT following it (via [`Linker::is_link`], so a junction
+	/// is recognized): returns `AlreadyLinked` / `Conflict` without writing on
+	/// collision. On a clean target: Unix => symlink; Windows => symlink_dir,
+	/// else `cmd /C mklink /J <ABSOLUTE master>`; both fail =>
+	/// `LinkError::LinkUnsupported`. `master_dir` not absolute =>
+	/// `NonAbsoluteTarget`.
+	pub fn link(
+		master_dir: &Path,
+		agent_skills_dir: &Path,
+		skill_name: &str,
+		target: LinkTarget,
+	) -> Result<LinkOutcome, LinkError> {
+		if !master_dir.is_absolute() {
+			return Err(LinkError::NonAbsoluteTarget {
+				target: master_dir.to_path_buf(),
+			});
+		}
+		let link_path = agent_skills_dir.join(skill_name);
+		let master_real = std::fs::canonicalize(master_dir)
+			.unwrap_or_else(|_| master_dir.to_path_buf());
+
+		// Inspect the existing occupant WITHOUT following it.
+		match std::fs::symlink_metadata(&link_path) {
+			Ok(_) => {
+				if Self::is_link(&link_path) {
+					let resolves = std::fs::canonicalize(&link_path)
+						.map(|r| r == master_real)
+						.unwrap_or(false);
+					return Ok(if resolves {
+						LinkOutcome::AlreadyLinked
+					} else {
+						LinkOutcome::Conflict
+					});
+				}
+				return Ok(LinkOutcome::Conflict);
+			}
+			Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+			Err(e) => return Err(LinkError::Io(e)),
+		}
+
+		std::fs::create_dir_all(agent_skills_dir)?;
+
+		let requested = match target {
+			LinkTarget::Relative => relative_path(agent_skills_dir, master_dir),
+			LinkTarget::Absolute => master_dir.to_path_buf(),
+		};
+		create_link(&requested, master_dir, &link_path)?;
+		Ok(LinkOutcome::Linked)
+	}
+}
+
+/// Create a directory link at `link` pointing at `requested_target`
+/// (possibly relative on Unix), falling back on Windows to a junction using
+/// the absolute `abs_target`. Create-only: the caller has already verified the
+/// slot is empty and `abs_target` is absolute.
+#[cfg(unix)]
+fn create_link(
+	requested_target: &Path,
+	_abs_target: &Path,
+	link: &Path,
+) -> Result<(), LinkError> {
+	std::os::unix::fs::symlink(requested_target, link).map_err(|source| {
+		LinkError::LinkUnsupported {
+			target: requested_target.to_path_buf(),
+			link: link.to_path_buf(),
+			source,
+		}
+	})
+}
+
+#[cfg(not(any(unix, windows)))]
+fn create_link(
+	requested_target: &Path,
+	_abs_target: &Path,
+	link: &Path,
+) -> Result<(), LinkError> {
+	Err(LinkError::LinkUnsupported {
+		target: requested_target.to_path_buf(),
+		link: link.to_path_buf(),
+		source: io::Error::new(
+			io::ErrorKind::Unsupported,
+			"symlinks are not supported on this platform",
+		),
+	})
 }
 
 #[cfg(test)]
@@ -305,6 +393,43 @@ mod tests {
 			target: PathBuf::from("rel/path"),
 		};
 		assert!(matches!(e, LinkError::NonAbsoluteTarget { .. }));
+	}
+
+	#[test]
+	fn link_creates_a_real_link_resolving_to_master() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/my-skill");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(master.join("SKILL.md"), "real").unwrap();
+		let claude = tmp.path().join(".claude/skills");
+
+		let outcome =
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Absolute)
+				.unwrap();
+
+		assert_eq!(outcome, LinkOutcome::Linked);
+		let link = claude.join("my-skill");
+		assert!(Linker::is_link(&link), "must be a real link, not a copy");
+		// Write a sentinel into the Master AFTER linking, read it THROUGH the
+		// link — proves a true link, not a coincidentally-identical copy.
+		std::fs::write(master.join("sentinel.txt"), "via-link").unwrap();
+		assert_eq!(
+			std::fs::read_to_string(link.join("sentinel.txt")).unwrap(),
+			"via-link"
+		);
+	}
+
+	#[test]
+	fn link_rejects_non_absolute_master() {
+		let err = Linker::link(
+			Path::new("rel/master"),
+			Path::new("/tmp/agent/skills"),
+			"x",
+			LinkTarget::Absolute,
+		)
+		.unwrap_err();
+		assert!(matches!(err, LinkError::NonAbsoluteTarget { .. }));
 	}
 
 	#[test]
