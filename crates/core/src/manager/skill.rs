@@ -120,34 +120,13 @@ fn remove_skill_path(
 
 impl ConfigManager {
 	pub fn add_skill(&mut self, skill: Skill) -> Result<()> {
-		let target_dir = self.target_skills_dir();
-		let agent_name = self.adapter.name().to_string();
-		let config = self.config_mut()?;
-		if config.skills.iter().any(|s| s.name == skill.name) {
-			return Err(ConfigError::resource_exists("skill", &skill.name));
-		}
-		info!("adding skill '{}' for agent '{}'", skill.name, agent_name);
-
-		if let Some(dir) = target_dir {
-			let safe_name = sanitize_name(&skill.name);
-			let skill_dir = dir.join(&safe_name);
-			std::fs::create_dir_all(&skill_dir)?;
-			let content = format_skill(&skill, None);
-			std::fs::write(skill_dir.join("SKILL.md"), content)?;
-			let mut fs_skill = skill.clone();
-			fs_skill.source_path =
-				Some(skill_dir.join("SKILL.md").to_string_lossy().to_string());
-			fs_skill.canonical_path = None;
-			config.skills.push(fs_skill);
-		} else {
-			return Err(ConfigError::InvalidConfig(
-				"Agent does not support persistent skill creation \
-				 in the current scope"
-					.into(),
-			));
-		}
-
-		self.save_current()
+		// Symlink-only model (Locked Decision 1): manual skill creation writes a
+		// single .agents/skills/<name> Master and links THIS agent to it, exactly
+		// like every other install path. The old isolated agent-local copy body is
+		// removed; there is no copy install path. (`add_skill_universal` already
+		// holds the duplicate-name guard, the unsupported-scope error, and
+		// `save_current`; `universal_install_prep` resolves the agent name.)
+		self.add_skill_universal(skill)
 	}
 
 	/// Add a skill in *universal* layout (opt-in): write the real `SKILL.md`
@@ -199,12 +178,18 @@ impl ConfigManager {
 		// IS the canonical dir (then the master already lives there).
 		if let Some(agent_dir) = &agent_write_dir {
 			if agent_dir != &canonical_dir {
-				crate::skills::install_layout::link_agents_to_canonical(
+				crate::skills::linker::link_agents_to_canonical(
 					&canonical,
 					std::slice::from_ref(agent_dir),
-					use_relative,
+					if use_relative {
+						crate::skills::linker::LinkTarget::Relative
+					} else {
+						crate::skills::linker::LinkTarget::Absolute
+					},
 				)
-				.map_err(ConfigError::Io)?;
+				.map_err(|e| {
+					ConfigError::Io(std::io::Error::other(e.to_string()))
+				})?;
 			}
 		}
 
@@ -529,62 +514,10 @@ impl ConfigManager {
 			path.display(),
 			self.adapter.name()
 		);
-		let skill_pkg = skill::parser::parse(path).map_err(|e| {
-			ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
-		})?;
-		let mut skill = convert_skill(skill_pkg);
-
-		let target_dir = self.target_skills_dir().ok_or_else(|| {
-			ConfigError::InvalidConfig(
-				"Agent does not support persistent skill creation \
-				 in the current scope"
-					.into(),
-			)
-		})?;
-		let safe_name = sanitize_name(&skill.name);
-		let skill_dir = target_dir.join(&safe_name);
-		let agent_name = self.adapter.name().to_string();
-
-		{
-			let config = self.config_mut()?;
-			if config.skills.iter().any(|s| s.name == skill.name) {
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
-			if skill_dir.exists() {
-				return Err(ConfigError::resource_exists(
-					"skill target",
-					skill_dir.display().to_string(),
-				));
-			}
-		}
-
-		info!(
-			"importing skill '{}' from '{}' for agent '{}'",
-			skill.name,
-			path.display(),
-			agent_name
-		);
-
-		// Copy the FULL source tree (scripts/, references/, assets/, original
-		// body) into the agent's own skills dir — the isolated copy layout.
-		// Reuses install_layout's npx-equivalent recursive copy (symlink-deref,
-		// .git/__pycache__ excluded) rather than re-synthesizing a thin
-		// SKILL.md, which dropped every non-frontmatter file.
-		let source_root = crate::skills::skill_source_root(path);
-		crate::skills::install_layout::install_universal(
-			&source_root,
-			&skill_dir,
-			&[],
-			false,
-		)
-		.map_err(ConfigError::Io)?;
-
-		skill.source_path =
-			Some(skill_dir.join("SKILL.md").to_string_lossy().to_string());
-		skill.canonical_path = None;
-		self.config_mut()?.skills.push(skill.clone());
-		self.save_current()?;
-		Ok(skill)
+		// Symlink-only model (Locked Decision 1): every install-from-path writes
+		// a single .agents/skills/<name> Master and links THIS agent to it. The
+		// old isolated-copy body is removed; there is no copy install path.
+		self.add_skill_from_path_universal(path)
 	}
 
 	/// Universal-layout variant of [`Self::add_skill_from_path`]: parses the
@@ -637,13 +570,17 @@ impl ConfigManager {
 			}
 			_ => Vec::new(),
 		};
-		crate::skills::install_layout::install_universal(
+		crate::skills::linker::install_universal(
 			&source_root,
 			&canonical,
 			&symlink_dirs,
-			use_relative,
+			if use_relative {
+				crate::skills::linker::LinkTarget::Relative
+			} else {
+				crate::skills::linker::LinkTarget::Absolute
+			},
 		)
-		.map_err(ConfigError::Io)?;
+		.map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -680,15 +617,14 @@ impl ConfigManager {
 			}
 			_ => None,
 		};
-		let canonical_dir =
-			crate::skills::install_layout::universal_canonical_dir(
-				project_root_for_canonical.as_deref(),
+		let canonical_dir = crate::skills::linker::universal_canonical_dir(
+			project_root_for_canonical.as_deref(),
+		)
+		.ok_or_else(|| {
+			ConfigError::InvalidConfig(
+				"Cannot resolve .agents canonical skills directory".into(),
 			)
-			.ok_or_else(|| {
-				ConfigError::InvalidConfig(
-					"Cannot resolve .agents canonical skills directory".into(),
-				)
-			})?;
+		})?;
 		Ok(UniversalPrep {
 			agent_name: self.adapter.name().to_string(),
 			agent_write_dir: self.target_skills_dir(),
@@ -751,12 +687,16 @@ fn universal_relink_agents(
 			}
 		}
 	}
-	crate::skills::install_layout::link_agents_to_canonical(
+	crate::skills::linker::link_agents_to_canonical(
 		new_canonical,
 		referrers,
-		use_relative,
+		if use_relative {
+			crate::skills::linker::LinkTarget::Relative
+		} else {
+			crate::skills::linker::LinkTarget::Absolute
+		},
 	)
-	.map_err(ConfigError::Io)?;
+	.map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
 	Ok(())
 }
 
@@ -868,11 +808,16 @@ fn rollback_master_rename(
 		}
 		// Recreate any old-name symlinks the partial relink removed; ones still
 		// present resolve to the restored master and are left untouched.
-		crate::skills::install_layout::link_agents_to_canonical(
+		crate::skills::linker::link_agents_to_canonical(
 			old_master,
 			referrers,
-			use_relative,
-		)?;
+			if use_relative {
+				crate::skills::linker::LinkTarget::Relative
+			} else {
+				crate::skills::linker::LinkTarget::Absolute
+			},
+		)
+		.map_err(|e| std::io::Error::other(e.to_string()))?;
 		Ok(())
 	};
 	match do_rollback() {
@@ -971,6 +916,37 @@ mod tests {
 			.file_type()
 			.is_symlink());
 		assert!(link.join("SKILL.md").exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_writes_master_and_symlinks_agent() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("manual-skill");
+		skill.description = Some("manual test".to_string());
+		mgr.add_skill(skill).unwrap();
+
+		assert!(root.join(".agents/skills/manual-skill/SKILL.md").exists());
+		let link = root.join(".claude/skills/manual-skill");
+		assert!(std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+		assert!(link.join("SKILL.md").exists());
+
+		let saved = mgr.get_skill("manual-skill").unwrap();
+		assert!(saved.canonical_path.is_some());
 	}
 
 	#[test]

@@ -323,17 +323,22 @@ fn write_import_skill_with_resources(dir: &Path, name: &str, body: &str) {
 
 #[test]
 fn skill_import_directory_preserves_body_and_resources() {
-	let test =
-		aghub_core::testing::TestConfig::new(aghub_core::AgentType::Claude)
-			.unwrap();
-	let source_dir = test.temp_dir().join("source/imported-skill");
+	aghub_core::adapter::set_skills_path_override("claude", None);
+	let temp = tempfile::tempdir().unwrap();
+	let project_root = temp.path().join("project");
+	std::fs::create_dir_all(&project_root).unwrap();
+	let source_dir = temp.path().join("source/imported-skill");
 	write_import_skill_with_resources(
 		&source_dir,
 		"imported-skill",
 		"# Real imported instructions",
 	);
 
-	let mut manager = test.create_manager();
+	let mut manager = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(aghub_core::AgentType::Claude),
+		false,
+		Some(&project_root),
+	);
 	manager.load().unwrap();
 	let imported = manager.add_skill_from_path(&source_dir).unwrap();
 
@@ -344,7 +349,7 @@ fn skill_import_directory_preserves_body_and_resources() {
 		.unwrap()
 		.contains("# Real imported instructions"));
 
-	let target_dir = test.skills_dir().join("imported-skill");
+	let target_dir = project_root.join(".agents/skills/imported-skill");
 	let target_content =
 		std::fs::read_to_string(target_dir.join("SKILL.md")).unwrap();
 	assert!(target_content.contains("# Real imported instructions"));
@@ -352,35 +357,61 @@ fn skill_import_directory_preserves_body_and_resources() {
 	assert!(target_dir.join("references/guide.md").exists());
 	assert!(target_dir.join("assets/logo.txt").exists());
 
-	let mut reloaded = test.create_manager();
+	let agent_link = project_root.join(".claude/skills/imported-skill");
+	assert!(agent_link.join("SKILL.md").exists());
+	#[cfg(unix)]
+	assert!(std::fs::symlink_metadata(&agent_link)
+		.unwrap()
+		.file_type()
+		.is_symlink());
+
+	let mut reloaded = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(aghub_core::AgentType::Claude),
+		false,
+		Some(&project_root),
+	);
 	reloaded.load().unwrap();
 	let loaded = reloaded.get_skill("imported-skill").unwrap();
 	assert!(loaded.source_path.as_deref().unwrap().contains("SKILL.md"));
+	assert!(loaded.canonical_path.is_some());
 }
 
 #[test]
 fn skill_import_skill_md_file_copies_sibling_resources() {
-	let test =
-		aghub_core::testing::TestConfig::new(aghub_core::AgentType::Claude)
-			.unwrap();
-	let source_dir = test.temp_dir().join("source/md-skill");
+	aghub_core::adapter::set_skills_path_override("claude", None);
+	let temp = tempfile::tempdir().unwrap();
+	let project_root = temp.path().join("project");
+	std::fs::create_dir_all(&project_root).unwrap();
+	let source_dir = temp.path().join("source/md-skill");
 	write_import_skill_with_resources(
 		&source_dir,
 		"md-skill",
 		"# Body from SKILL.md path",
 	);
 
-	let mut manager = test.create_manager();
+	let mut manager = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(aghub_core::AgentType::Claude),
+		false,
+		Some(&project_root),
+	);
 	manager.load().unwrap();
 	let imported = manager
 		.add_skill_from_path(&source_dir.join("SKILL.md"))
 		.unwrap();
 
 	assert_eq!(imported.name, "md-skill");
-	let target_dir = test.skills_dir().join("md-skill");
+	let target_dir = project_root.join(".agents/skills/md-skill");
 	assert!(target_dir.join("scripts/setup.sh").exists());
 	assert!(target_dir.join("assets/logo.txt").exists());
 	let target_content =
 		std::fs::read_to_string(target_dir.join("SKILL.md")).unwrap();
 	assert!(target_content.contains("# Body from SKILL.md path"));
+
+	let agent_link = project_root.join(".claude/skills/md-skill");
+	assert!(agent_link.join("SKILL.md").exists());
+	#[cfg(unix)]
+	assert!(std::fs::symlink_metadata(&agent_link)
+		.unwrap()
+		.file_type()
+		.is_symlink());
 }
