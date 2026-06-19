@@ -195,6 +195,143 @@ fn universal_writes_master_to_canonical_and_links_agent() {
 }
 
 #[test]
+#[cfg(unix)]
+fn universal_returns_results_in_input_target_order() {
+	// Regression: the universal branch must return `agent_results` strictly 1:1
+	// with the input `target_agents`, in INPUT ORDER. The API zips this Vec
+	// against its `valid_agents` slice positionally (skills.rs:2019), so a
+	// canonical-first / linked-after grouping mislabels per-agent rows.
+	//
+	// We arrange a 3-agent slice [linked, canonical-dir, canonical-dir] where a
+	// LINKED agent sits FIRST and the canonical-dir agents come after. The buggy
+	// code pushed canonical-dir agents in-loop and the linked agents AFTER, so it
+	// returned [codex, antigravity, claude] — index 0 (codex) then mislabels
+	// claude's row. The fix returns the input order [claude, codex, antigravity].
+	//
+	// No `set_skills_path_override` here: that thread-local holds a SINGLE
+	// (agent, path) slot, so overriding several agents only keeps the last. We
+	// instead pick agents by their REAL project-scope write path. `codex` and
+	// `antigravity` both write to `<root>/.agents/skills` (== the universal
+	// canonical dir → no link), while `claude` writes to its own
+	// `<root>/.claude/skills` (→ linked).
+	let _g = GlobalLockGuard::new();
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+
+	// Input order: [claude(linked), codex(canonical), antigravity(canonical)].
+	let target_agents =
+		[AgentType::Claude, AgentType::Codex, AgentType::Antigravity];
+
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &target_agents,
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("universal install should succeed");
+
+	// 1:1 in input order: result[i].agent == target_agents[i].
+	assert_eq!(report.agent_results.len(), target_agents.len());
+	for (i, expected) in target_agents.iter().enumerate() {
+		assert_eq!(
+			report.agent_results[i].agent, *expected,
+			"agent_results[{i}] must be the same agent as target_agents[{i}] \
+			 (1:1 input order)"
+		);
+		assert!(
+			report.agent_results[i].installed,
+			"agent {expected:?} should be installed"
+		);
+		assert!(report.agent_results[i].error.is_none());
+	}
+}
+
+#[test]
+#[cfg(unix)]
+fn universal_install_universal_error_fails_all_agents() {
+	// On an `install_universal` error EVERY target agent must be reported as a
+	// failure (matching the old API, skills.rs:2077) — no agent (including a
+	// canonical-dir agent) may be marked installed, and no lock may be written.
+	//
+	// We force the failure by pre-creating the canonical dir's parent
+	// (`<root>/.agents`) as a REGULAR FILE: `install_universal` then fails on
+	// `create_dir_all(<root>/.agents/skills)` with ENOTDIR before any master is
+	// written.
+	let _g = GlobalLockGuard::new();
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+
+	// `.agents` is a file, not a dir → mkdir of `.agents/skills` fails.
+	std::fs::write(project_root.join(".agents"), b"not a dir").unwrap();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+
+	// One linked agent (`claude` → `.claude/skills`) and one canonical-dir agent
+	// (`codex` → `.agents/skills`), via their REAL write paths (no override — the
+	// thread-local has only one slot). This proves the canonical-dir agent is NOT
+	// spuriously marked installed on the error path.
+	let target_agents = [AgentType::Claude, AgentType::Codex];
+
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &target_agents,
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("universal install with an fs error still returns Ok with per-agent failures");
+
+	// 1:1 in input order, ALL failed, none installed.
+	assert_eq!(report.agent_results.len(), target_agents.len());
+	for (i, expected) in target_agents.iter().enumerate() {
+		assert_eq!(report.agent_results[i].agent, *expected);
+		assert!(
+			!report.agent_results[i].installed,
+			"agent {expected:?} must NOT be installed on the error path"
+		);
+		assert!(
+			report.agent_results[i].error.is_some(),
+			"agent {expected:?} must carry the error message"
+		);
+	}
+
+	// No lock written, no partial success.
+	assert!(
+		!report.wrote_lock,
+		"no lock should be written when install_universal errored"
+	);
+	assert!(
+		!report.agent_results.iter().any(|r| r.installed),
+		"no partial success row may exist on the error path"
+	);
+	assert!(
+		!skill::lock::local::read_local_lock(Some(&project_root))
+			.skills
+			.contains_key("alpha"),
+		"no project lock entry should be written on the error path"
+	);
+}
+
+#[test]
 fn project_scope_writes_project_lock() {
 	let _g = GlobalLockGuard::new();
 

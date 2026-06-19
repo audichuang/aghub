@@ -378,64 +378,68 @@ fn install_universal_layout(
 	// matching the API's `wrote_master = !canonical.exists()` (skills.rs:686).
 	let wrote_master = !canonical.exists();
 
-	// Map each agent to its resolved write dir; agents with no dir are soft
-	// failures. Agents whose dir IS the canonical dir see the master directly
-	// and need no link.
-	let mut results = Vec::with_capacity(target_agents.len());
-	let mut symlink_dirs = Vec::new();
-	let mut linked_agents = Vec::new();
-	for &agent in target_agents {
-		match resolve_target_dir(agent, scope, project_root) {
-			Some(dir) if dir == canonical_skills_dir => {
-				// Agent reads the master directly.
-				results.push(AgentInstallResult {
-					agent,
-					installed: true,
-					error: None,
-				});
-			}
-			Some(dir) => {
-				symlink_dirs.push(dir);
-				linked_agents.push(agent);
-			}
-			None => results.push(AgentInstallResult {
-				agent,
-				installed: false,
-				error: Some(
-					"Agent does not support persistent skill creation in \
-					 this scope"
-						.to_string(),
-				),
-			}),
-		}
-	}
+	// Resolve every target agent's write dir UP FRONT, in input order (as the
+	// isolated branch does). `dirs[i]` is the resolution for `target_agents[i]`:
+	// `Some(dir)` where `dir == canonical_skills_dir` means the agent reads the
+	// master directly (no link); any other `Some(dir)` is linked; `None` is a
+	// soft per-agent failure. `agent_results` is then emitted strictly 1:1 with
+	// `target_agents`, in input order — the API zips it against its
+	// `valid_agents` slice positionally (skills.rs:2019), so the order and
+	// grouping MUST match the input. Only the dirs of *linked* agents go to
+	// `install_universal`.
+	let dirs: Vec<Option<std::path::PathBuf>> = target_agents
+		.iter()
+		.map(|&agent| resolve_target_dir(agent, scope, project_root))
+		.collect();
+	let symlink_dirs: Vec<std::path::PathBuf> = dirs
+		.iter()
+		.filter_map(|d| d.clone())
+		.filter(|dir| *dir != canonical_skills_dir)
+		.collect();
 
-	match install_universal(
+	// On error EVERY input agent fails (mirrors the old API, which reported all
+	// targets as failed when the universal helper errored, skills.rs:2077). On
+	// success each agent's result reflects its resolution, in input order; a
+	// canonical-dir agent already sees the master so it is `installed: true`
+	// with `error: None`, an unresolvable dir stays a soft failure in place.
+	let results = match install_universal(
 		source_root,
 		&canonical,
 		&symlink_dirs,
 		use_relative_links,
 	) {
-		Ok(_report) => {
-			for agent in linked_agents {
-				results.push(AgentInstallResult {
+		Ok(_report) => target_agents
+			.iter()
+			.zip(dirs.iter())
+			.map(|(&agent, dir)| match dir {
+				Some(_) => AgentInstallResult {
 					agent,
 					installed: true,
 					error: None,
-				});
-			}
-		}
+				},
+				None => AgentInstallResult {
+					agent,
+					installed: false,
+					error: Some(
+						"Agent does not support persistent skill creation \
+						 in this scope"
+							.to_string(),
+					),
+				},
+			})
+			.collect(),
 		Err(e) => {
 			let msg = e.to_string();
-			for agent in linked_agents {
-				results.push(AgentInstallResult {
+			target_agents
+				.iter()
+				.map(|&agent| AgentInstallResult {
 					agent,
 					installed: false,
 					error: Some(msg.clone()),
-				});
-			}
+				})
+				.collect()
 		}
-	}
+	};
 
 	Ok((results, wrote_master))
 }
