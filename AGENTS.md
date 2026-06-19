@@ -25,6 +25,7 @@ Full agent list: the `AgentType` enum in `crates/agents/src/models.rs` (NOT `cra
 - **Features in flight**: `docs/specs/` — e.g. `2026-06-02-sources-and-universal-install.md` (the "Sources" page + `.agents`-symlink "universal" install) and `2026-05-31-skill-management-improvements.md`.
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) is the glossary (Source hash, Master, Referrer, Relink, …).
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/) (e.g. transactional skill rename).
+- **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — what we port / deliberately skip from `AkaraChen/aghub` (the **fork** upstream, distinct from the npx `skills` ecosystem upstream the skills above mirror).
 - **Deep, reusable knowledge** lives in project skills under `.claude/skills/`:
     - `aghub-skills` — skill-subsystem invariants
     - `npx-skills-contract` — the frozen npx round-trip contract
