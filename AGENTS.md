@@ -105,6 +105,7 @@ just start -- -a claude get skills   # List skills
 just install                   # Release build → ~/.cargo/bin/
 
 # Test
+just preflight                 # pre-release gate: fmt --check + clippy + typecheck + test + doc tests
 just test                      # All workspace tests
 just integration-test          # Integration tests only
 just test-with-validation      # Requires real CLIs (claude, opencode, …)
@@ -176,7 +177,8 @@ Integration tests in `crates/core/tests/integration_tests.rs` use a `TestConfig`
 
 ## Release & Packaging
 
-- **Tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml` → desktop bundles (macOS/Windows/Linux via `tauri-action`) + CLI, generates `latest.json`, updates the Homebrew tap. No manual build/upload. See the `releasing-aghub` skill.
+- **Tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml` → a 3-platform `test` gate (ubuntu/macOS/Windows `just test`) → desktop bundles (macOS/Windows/Linux via `tauri-action`) + CLI, generates `latest.json`, updates the Homebrew tap. No manual build/upload. See the `releasing-aghub` skill.
+- **Test-gated + serialized**: no artifact is built or published unless the tagged commit passes tests on **all 3 platforms**; a per-tag concurrency group (`cancel-in-progress: false`) prevents overlapping/half-published runs. Tag only CI-green commits — run `just preflight` locally first (the pre-push hook does **NOT** run tests). The build only compiles, so a platform-specific bug that passes on Linux but fails elsewhere is caught by the gate, not shipped.
 - **Version comes from the git tag** — CI `sed`s it into `Cargo.toml`, `crates/desktop/package.json`, `tauri.conf.json`. Don't hand-bump for a release; `just bump <ver>` only syncs those three manifests locally.
 - **Tauri updater**: the committed `tauri.conf.json` `pubkey` must pair with the `TAURI_SIGNING_PRIVATE_KEY` secret, and `endpoints` must point at _this_ repo's releases. The pubkey must never change once a build ships, or installed apps can't auto-update.
 - **Gotcha**: unset `APPLE_*` secrets resolve to empty strings and break the macOS build (`security import` on an empty cert). Keep them commented out in `release.yml` until real Apple certs exist — unsigned dmg builds fine otherwise.
