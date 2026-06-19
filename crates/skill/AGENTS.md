@@ -28,14 +28,14 @@ src/
 
 ## WHERE TO LOOK
 
-| Task                 | File                  | Notes                                                    |
-| -------------------- | --------------------- | -------------------------------------------------------- |
-| Pack skill to .skill | `src/package.rs:87`   | Excludes **pycache**, node_modules, .git, tests/ at root |
-| Parse any format     | `src/parser.rs:276`   | Auto-detects directory, .skill, .zip, .md                |
-| Validate skill       | `src/validator.rs:71` | Checks for path traversal (`..`) in resources            |
-| Sanitize name        | `src/sanitize.rs:21`  | Converts "My Skill!" → "my-skill"                        |
-| Global lock ops      | `src/lock/global.rs`  | Per-user skill registry                                  |
-| Local lock ops       | `src/lock/local.rs`   | Per-project skill registry                               |
+| Task                 | File                 | Notes                                                    |
+| -------------------- | -------------------- | -------------------------------------------------------- |
+| Pack skill to .skill | `src/package.rs`     | Excludes **pycache**, node_modules, .git, tests/ at root |
+| Parse any format     | `src/parser.rs`      | Auto-detects directory, .skill, .zip, .md                |
+| Validate skill       | `src/validator.rs`   | Checks for path traversal (`..`) in resources            |
+| Sanitize name        | `src/sanitize.rs`    | Converts "My Skill!" → "my-skill"                        |
+| Global lock ops      | `src/lock/global.rs` | Per-user skill registry                                  |
+| Local lock ops       | `src/lock/local.rs`  | Per-project skill registry                               |
 
 ## COMMANDS
 

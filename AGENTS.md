@@ -1,12 +1,23 @@
 # AGHUB KNOWLEDGE BASE
 
 **Project**: aghub — AI coding agent configuration management tool\
-**Stack**: Rust workspace (13 crates, root `Cargo.toml`) + Tauri v2 desktop + React 19/TypeScript\
+**Stack**: Rust workspace (root `Cargo.toml`) + Tauri v2 desktop + React 19/TypeScript\
 **Package manager**: cargo (Rust), **bun** (desktop frontend — never npm/yarn/pnpm)
 
 > This is the single source of truth for project context. The root `CLAUDE.md`
 > and every per-crate `CLAUDE.md` are one-line `@AGENTS.md` imports of the
 > sibling `AGENTS.md` (not symlinks).
+>
+> **What this file is for**: orienting you to the modules — what each crate is,
+> why it exists, how they depend on each other, and the invariants you must not
+> break. It is the **navigation layer**, deliberately coarse.
+>
+> **For file/symbol-level work, use CodeGraph** (`.codegraph/` is indexed): one
+> `codegraph_explore` call returns the verbatim source of the relevant symbols
+> plus their callers/callees — more accurate and current than any hand-written
+> list. This file does NOT enumerate files, line numbers, or symbols; those
+> drift. It carries the _why_ and _what-not-to-break_ that CodeGraph cannot
+> derive. `Cargo.toml` `[workspace].members` is the authoritative crate list.
 
 ## Overview
 
@@ -26,15 +37,13 @@ Full agent list: the `AgentType` enum in `crates/agents/src/models.rs` (NOT `cra
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) is the glossary (Source hash, Master, Referrer, Relink, …).
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/) (e.g. transactional skill rename).
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — what we port / deliberately skip from `AkaraChen/aghub` (the **fork** upstream, distinct from the npx `skills` ecosystem upstream the skills above mirror).
-- **Deep, reusable knowledge** lives in project skills under `.claude/skills/`:
-    - `aghub-skills` — skill-subsystem invariants
-    - `npx-skills-contract` — the frozen npx round-trip contract
-    - `upstream-skills-flow` — upstream vercel `skills` CLI lifecycle ↔ the aghub function mirroring each step
-    - `testing-fs-failures` — forcing fs failures in tests
-    - `releasing-aghub` — tag-driven release runbook + troubleshooting
+- **Deep, reusable domain knowledge** lives in project skills under `.claude/skills/` (skill-subsystem invariants, the frozen npx round-trip contract, the upstream vercel `skills` flow, forcing fs failures in tests, the release runbook). In Claude Code these **auto-register each session** — invoke them by name; this file does not re-list them. Other agents can read the `SKILL.md` files directly.
 - `.impeccable.md` — project code style guide (read before writing Rust); `cliff.toml` — git-cliff changelog config used by the release workflow.
 
 ## Structure
+
+Module map (what each crate is + why it exists). Not an exhaustive file listing
+— `Cargo.toml` is the authoritative member list; use CodeGraph for files/symbols.
 
 ```
 .
@@ -48,6 +57,9 @@ Full agent list: the `AgentType` enum in `crates/agents/src/models.rs` (NOT `cra
 │   ├── api/          # aghub-api: Rocket HTTP server (~85 routes)
 │   ├── desktop/      # aghub-desktop: Tauri v2 + React 19 + HeroUI v3 + Tailwind v4 (bun)
 │   ├── skill/        # skill: .skill/zip packaging + npx-compatible lock files, content hashing
+│   ├── skill-update/ # skill-update: shared update-check orchestrator (group →
+│   │                 #   ls-refs preflight → treeless fetch → hash compare); used
+│   │                 #   by BOTH the API check route and CLI `check --online`
 │   ├── skills-sh/    # skills-sh: skills.sh registry HTTP client (search only)
 │   ├── inference/    # aghub-inference: inference providers (SQLite meta + keyring)
 │   ├── remote/       # aghub-remote: SSH remote VM mgmt (desktop Tauri layer, NOT the API)
@@ -63,6 +75,9 @@ Full agent list: the `AgentType` enum in `crates/agents/src/models.rs` (NOT `cra
 Dependency direction: `agents` → `core` → `cli`/`api`/`desktop`; the tool crates are used laterally. `skills-ref` is an **external git dependency** (`AkaraChen/skills-ref`), not a local crate.
 
 ## Where to Look
+
+Coarse pointers to the right crate/module. For the exact symbol, its callers,
+and verbatim source, run `codegraph_explore` instead of reading by hand.
 
 | Task               | Location                          | Notes                            |
 | ------------------ | --------------------------------- | -------------------------------- |
