@@ -4,7 +4,6 @@
 //! NOT ported: aghub bans copy as a skill-install outcome.
 
 use std::io;
-#[allow(unused_imports)]
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
 
 /// Resolve the `.agents/skills` canonical SKILLS-DIR for a scope.
@@ -18,6 +17,92 @@ pub fn universal_canonical_dir(project_root: Option<&Path>) -> Option<PathBuf> {
 		None => {
 			dirs::home_dir().map(|home| home.join(".agents").join("skills"))
 		}
+	}
+}
+
+/// Whether a created link's stored target is relative (project scope, portable)
+/// or absolute (global scope). Windows junctions ALWAYS resolve to absolute
+/// even when `Relative` is requested (junctions cannot store a relative target).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkTarget {
+	Relative,
+	Absolute,
+}
+
+/// Outcome of a single link attempt against one agent skills-dir.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkOutcome {
+	/// Fresh link created (unix symlink / win symlink / win junction).
+	Linked,
+	/// A correct link to the same Master already existed (idempotent).
+	AlreadyLinked,
+	/// A foreign symlink/junction OR a real file/dir occupies the slot -
+	/// NEVER clobbered.
+	Conflict,
+}
+
+/// A link failure. Per-agent failures are folded into
+/// [`UniversalInstallReport::failed`] (Decision 10); they are NOT propagated as
+/// `Err` from the convenience layer except for pre-link invariant violations.
+#[derive(Debug, thiserror::Error)]
+pub enum LinkError {
+	/// BOTH native symlink AND `cmd /C mklink /J` failed on Windows (or symlink
+	/// is unsupported on a non-unix/non-windows platform). HARD per-agent
+	/// error - NO copy fallback.
+	#[error("could not link {link} -> {target}: {source}")]
+	LinkUnsupported {
+		target: PathBuf,
+		link: PathBuf,
+		source: io::Error,
+	},
+	/// Decision 6 violated: `abs_target` was not absolute, so a junction could
+	/// not be created safely.
+	#[error("junction target must be absolute: {target}")]
+	NonAbsoluteTarget { target: PathBuf },
+	#[error(transparent)]
+	Io(#[from] io::Error),
+}
+
+/// Normalize path separators to the platform native separator. On Windows
+/// `/`->`\` (feeds `cmd.exe` native separators); on Unix a no-op. Ported from
+/// SM `normalize_path`.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub(crate) fn normalize_path(path: &Path) -> PathBuf {
+	if MAIN_SEPARATOR == '\\' {
+		PathBuf::from(path.to_string_lossy().replace('/', "\\"))
+	} else {
+		path.to_path_buf()
+	}
+}
+
+/// Compute a relative path so a symlink created inside `from_dir` resolves to
+/// `to_path`. Both should be absolute. Falls back to the absolute `to_path`
+/// when the two share no common prefix (different roots).
+#[cfg_attr(not(test), allow(dead_code))]
+fn relative_path(from_dir: &Path, to_path: &Path) -> PathBuf {
+	let from: Vec<Component> = from_dir.components().collect();
+	let to: Vec<Component> = to_path.components().collect();
+
+	let mut common = 0;
+	while common < from.len() && common < to.len() && from[common] == to[common]
+	{
+		common += 1;
+	}
+	if common == 0 {
+		return to_path.to_path_buf();
+	}
+
+	let mut result = PathBuf::new();
+	for _ in common..from.len() {
+		result.push("..");
+	}
+	for component in &to[common..] {
+		result.push(component.as_os_str());
+	}
+	if result.as_os_str().is_empty() {
+		PathBuf::from(".")
+	} else {
+		result
 	}
 }
 
@@ -148,5 +233,30 @@ mod tests {
 			target.join("keep.txt").exists(),
 			"unlink must never touch the target"
 		);
+	}
+
+	#[test]
+	fn relative_path_computes_minimal_dotdot() {
+		assert_eq!(
+			relative_path(
+				Path::new("/root/.cursor/skills"),
+				Path::new("/root/.agents/skills/foo")
+			),
+			PathBuf::from("../../.agents/skills/foo")
+		);
+	}
+
+	#[test]
+	fn link_error_from_io_maps_to_io_variant() {
+		let e: LinkError = io::Error::new(io::ErrorKind::Other, "boom").into();
+		assert!(matches!(e, LinkError::Io(_)));
+	}
+
+	#[test]
+	fn non_absolute_target_constructs() {
+		let e = LinkError::NonAbsoluteTarget {
+			target: PathBuf::from("rel/path"),
+		};
+		assert!(matches!(e, LinkError::NonAbsoluteTarget { .. }));
 	}
 }
