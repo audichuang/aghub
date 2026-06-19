@@ -2866,7 +2866,11 @@ mod tests {
 		assert!(project_root
 			.join(".opencode/skills/repo-helper/assets/notes.txt")
 			.exists());
-		assert!(!project_root.join(".agents/skills/repo-helper").exists());
+		// Under the symlink-only model the source `add_skill` writes a
+		// `.agents/skills` Master by construction (Task 25), so the Master
+		// existing is expected. What this test pins is that reconcile copies
+		// into OpenCode's own primary path (asserted above).
+		assert!(project_root.join(".agents/skills/repo-helper").exists());
 	}
 
 	#[test]
