@@ -15,6 +15,9 @@ This fork ships its **own** independent version line — start ≥ the highest e
 
 ```bash
 # 0. PRE-FLIGHT — never tag a commit whose tests aren't green on all platforms.
+#    If this release includes any port from the fork upstream (AkaraChen/aghub),
+#    FIRST append a row to UPSTREAM.md (repo root) — upstream SHA ↔ our commit ↔
+#    crate — and bump its "Last full review" SHA. Keep the sync log complete.
 just preflight                                   # local: fmt+clippy+typecheck+test+doc (the pre-push hook does NOT run tests)
 git push origin main                             # then let CI's 3-OS matrix run
 gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # must be GREEN before step 1
@@ -33,6 +36,10 @@ The release `test` gate is a backstop, not a substitute for step 0 — tagging a
 **NOT** run tests; that gap is why `just preflight` exists. `just preflight` runs on your platform only and cannot
 reproduce macOS/Windows-specific behavior — for that, rely on the CI matrix and write tests that simulate the platform
 condition on Linux (e.g. operate through a symlinked temp dir to mimic macOS `/var` → `/private` canonicalize).
+
+**Upstream ports**: `UPSTREAM.md` (repo root) is the complete log of what this fork takes / defers / skips from
+`AkaraChen/aghub`. Any release that includes a port MUST add a row there before tagging — that is the durable record,
+not just the commit message. (Distinct from the npx `skills` ecosystem upstream tracked by `npx-skills-contract`.)
 
 ## Verify after green
 
