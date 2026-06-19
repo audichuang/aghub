@@ -305,7 +305,10 @@ pub enum SourceAction {
 		update: bool,
 		#[arg(long)]
 		install_missing: bool,
-		#[arg(long)]
+		/// DEPRECATED — no-op. `source sync` is always symlink-only now (a single
+		/// `.agents/skills/<name>` master plus per-agent links). Accepted so
+		/// existing scripts don't error, but ignored; there is no copy install.
+		#[arg(long, hide = true)]
 		universal: bool,
 		#[arg(long)]
 		yes: bool,

@@ -682,7 +682,7 @@ fn apply_install(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	target_agents: &[AgentType],
-	universal: bool,
+	_universal: bool,
 	lock_source: &skill::InstallLockSource,
 ) -> SyncActionView {
 	use aghub_core::skills::install_fetched::{
@@ -703,12 +703,6 @@ fn apply_install(
 		};
 	};
 
-	let layout = if universal {
-		SkillInstallLayout::Universal
-	} else {
-		SkillInstallLayout::IsolatedCopy
-	};
-
 	let req = FetchedSkillInstallRequest {
 		skill_file: &skill_file,
 		source: lock_source,
@@ -717,7 +711,7 @@ fn apply_install(
 		scope,
 		project_root,
 		target_agents,
-		layout,
+		layout: SkillInstallLayout::Universal,
 		expected_name: Some(&d.name),
 		use_relative_links: matches!(scope, ResourceScope::ProjectOnly),
 	};
