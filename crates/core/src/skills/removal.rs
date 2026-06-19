@@ -1006,4 +1006,59 @@ mod tests {
 		);
 		assert!(!dirs.is_empty(), "agents define global skill dirs");
 	}
+
+	// T-PLAN-JUNCTION-REFERRER: a targeted junction referrer is planned for
+	// unlink (not orphaned). windows-latest.
+	#[cfg(windows)]
+	#[test]
+	fn plan_symlink_removal_schedules_junction_referrer() {
+		use crate::skills::linker::create_junction;
+		let tmp = tempdir().unwrap();
+		let canonical = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&canonical);
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		let link = claude.join("foo");
+		create_junction(&canonical.canonicalize().unwrap(), &link).unwrap();
+
+		let agent_dirs = vec![claude.clone()];
+		let mut skill = Skill::new("foo");
+		skill.canonical_path =
+			Some(canonical.join("SKILL.md").to_string_lossy().to_string());
+		let plan = plan_removal(
+			&skill,
+			Some(claude.as_path()),
+			&agent_dirs,
+			Some(tmp.path()),
+			false,
+		);
+		assert_eq!(plan.layout, Layout::Symlink);
+		assert!(
+			plan.paths.contains(&link),
+			"junction referrer must be planned for unlink, got {:?}",
+			plan.paths
+		);
+	}
+
+	// T-EXTERNAL-JUNCTION-REFERRER: dir_has_external_referrer sees a junction,
+	// so a shared Master with a live junction referrer is NOT removed.
+	// windows-latest.
+	#[cfg(windows)]
+	#[test]
+	fn dir_has_external_referrer_detects_junction() {
+		use crate::skills::linker::create_junction;
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&master);
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		create_junction(&master.canonicalize().unwrap(), &claude.join("foo"))
+			.unwrap();
+
+		let agent_dirs = vec![claude.clone()];
+		assert!(
+			dir_has_external_referrer(&master, &agent_dirs, "foo"),
+			"a junction referrer must count as an external referrer"
+		);
+	}
 }
