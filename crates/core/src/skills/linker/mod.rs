@@ -295,7 +295,7 @@ mod tests {
 
 	#[test]
 	fn link_error_from_io_maps_to_io_variant() {
-		let e: LinkError = io::Error::new(io::ErrorKind::Other, "boom").into();
+		let e: LinkError = io::Error::other("boom").into();
 		assert!(matches!(e, LinkError::Io(_)));
 	}
 
