@@ -404,25 +404,12 @@ fn sync(args: SyncArgs) -> Result<()> {
 		);
 	}
 
-	if !args.update && !args.install_missing {
-		println!(
-			"Nothing to do: pass --update and/or --install-missing to choose \
-			 an action."
-		);
-		return Ok(());
-	}
-
 	let (scope, project_root, source_scope, scope_label) =
 		resolve_write_scope(&args)?;
 
-	// Parse the target agent the same way the top-level `-a` does.
-	let target = args
-		.agent
-		.parse::<AgentType>()
-		.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?;
-	let target_agents = [target];
-
 	// Fetch ONCE; reuse the repo for classification AND every install/update.
+	// Fetch + classify happen BEFORE the flag branch so the neither-flag
+	// informational path can print the same plan without a second fetch.
 	let repo = match sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: source.clone(),
@@ -443,6 +430,19 @@ fn sync(args: SyncArgs) -> Result<()> {
 
 	let diffs =
 		sources::classify_scope(repo.root.as_path(), &source_scope, &source);
+
+	// Neither flag: print the plan (per-state overview) and ask the user to
+	// choose an action. Read-only/informational — write NOTHING.
+	if !args.update && !args.install_missing {
+		return print_no_action_plan(&source, scope_label, &diffs, args.json);
+	}
+
+	// Parse the target agent the same way the top-level `-a` does.
+	let target = args
+		.agent
+		.parse::<AgentType>()
+		.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?;
+	let target_agents = [target];
 
 	// Build the plan. `--install-missing` targets only `NotInstalled` rows
 	// (excludes Deprecated/Renamed/Removed); `--update` targets
@@ -525,6 +525,89 @@ fn sync(args: SyncArgs) -> Result<()> {
 			println!("Nothing to do.");
 		}
 	}
+	Ok(())
+}
+
+/// Per-state counts of a scope's classified skills, for the no-action plan.
+#[derive(Serialize, Default)]
+struct PlanCounts {
+	#[serde(rename = "notInstalled")]
+	not_installed: u32,
+	#[serde(rename = "installedOutdated")]
+	installed_outdated: u32,
+	#[serde(rename = "installedCurrent")]
+	installed_current: u32,
+	deprecated: u32,
+	other: u32,
+}
+
+#[derive(Serialize)]
+struct NoActionPlanView {
+	source: String,
+	scope: &'static str,
+	#[serde(rename = "actionSelected")]
+	action_selected: bool,
+	counts: PlanCounts,
+	skills: Vec<DiffSkillView>,
+}
+
+fn count_states(diffs: &[SourceSkillDiff]) -> PlanCounts {
+	use skill_update::sources::SourceSkillState as St;
+	let mut c = PlanCounts::default();
+	for d in diffs {
+		match d.state {
+			St::NotInstalled => c.not_installed += 1,
+			St::InstalledOutdated => c.installed_outdated += 1,
+			St::InstalledCurrent => c.installed_current += 1,
+			St::Deprecated => c.deprecated += 1,
+			_ => c.other += 1,
+		}
+	}
+	c
+}
+
+/// `sync` with neither `--update` nor `--install-missing`: print the plan (the
+/// per-skill state overview, same rows `diff` prints) and the per-state counts,
+/// then ask the user to choose an action. Writes NOTHING.
+fn print_no_action_plan(
+	source: &str,
+	scope_label: &'static str,
+	diffs: &[SourceSkillDiff],
+	json: bool,
+) -> Result<()> {
+	let counts = count_states(diffs);
+
+	if json {
+		let view = NoActionPlanView {
+			source: source.to_string(),
+			scope: scope_label,
+			action_selected: false,
+			counts,
+			skills: diffs.iter().map(diff_skill_to_view).collect(),
+		};
+		println!("{}", serde_json::to_string_pretty(&view)?);
+		return Ok(());
+	}
+
+	let mut builder = Builder::default();
+	builder.push_record(["STATE", "NAME", "SKILL_PATH"]);
+	for d in diffs {
+		builder.push_record([
+			d.state.as_wire().to_string(),
+			d.name.clone(),
+			d.skill_path.clone(),
+		]);
+	}
+	let mut table = builder.build();
+	table.with(Style::sharp());
+	println!("{table}");
+
+	println!(
+		"No action selected. Pass --install-missing to install the {} \
+		 not-installed skill(s) and/or --update to update the {} outdated \
+		 skill(s).",
+		counts.not_installed, counts.installed_outdated
+	);
 	Ok(())
 }
 

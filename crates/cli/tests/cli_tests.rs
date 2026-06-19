@@ -504,6 +504,54 @@ fn source_sync_skips_deprecated_skill() {
 		"a deprecated skill must not be installed"
 	);
 }
+#[cfg(unix)]
+#[test]
+fn source_sync_no_action_flag_prints_plan_and_guidance() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-g", "source", "sync", "owner/repo"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	// The plan: the per-skill state overview lists `alpha`.
+	assert!(
+		stdout.contains("alpha"),
+		"plan must list the skill: {stdout}"
+	);
+	// The guidance: no action selected, pointing at --install-missing.
+	assert!(
+		stdout.contains("No action selected"),
+		"missing guidance: {stdout}"
+	);
+	assert!(
+		stdout.contains("--install-missing"),
+		"missing flag guidance: {stdout}"
+	);
+
+	// Wrote NOTHING: no agent skill dir entry, no global lock.
+	let agent_skill = home.path().join(".claude/skills/alpha");
+	assert!(
+		!agent_skill.exists(),
+		"no-action sync must not install the skill"
+	);
+	let lock = state.path().join("skills/.skill-lock.json");
+	assert!(
+		!lock.exists(),
+		"no-action sync must not create the global lock"
+	);
+}
+
 #[test]
 fn source_list_json_runs_with_no_agent_config() {
 	let home = tempfile::TempDir::new().unwrap();
