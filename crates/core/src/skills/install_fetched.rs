@@ -421,3 +421,61 @@ fn install_universal_layout(
 
 	Ok((results, wrote_master))
 }
+
+#[cfg(all(test, unix))]
+mod nocopy_tests {
+	use super::*;
+	use crate::skills::linker::Linker;
+	use std::fs;
+	use tempfile::tempdir;
+
+	// T-NOCOPY (install_fetched): a NeedsLink agent receives a real symlink
+	// to the Master, never a copy. Writing a sentinel into the Master AFTER
+	// install and reading it back THROUGH the link proves it is a link.
+	#[test]
+	fn install_fetched_links_master_never_copies() {
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src/my-skill");
+		fs::create_dir_all(&src).unwrap();
+		fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: d\n---\nbody",
+		)
+		.unwrap();
+		let root = tmp.path().canonicalize().unwrap();
+		let lock_source = skill::InstallLockSource {
+			source: "local/test".to_string(),
+			source_type: "local".to_string(),
+			source_url: "file:///local/test".to_string(),
+			ref_name: None,
+		};
+		let req = FetchedSkillInstallRequest {
+			skill_file: &src.join("SKILL.md"),
+			source: &lock_source,
+			lock_skill_path: "my-skill/SKILL.md".to_string(),
+			ref_commit: None,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&root),
+			target_agents: &[AgentType::Claude],
+			expected_name: None,
+			// Shim fields (ignored by the always-universal dispatch; Task 47a
+			// swaps them for `target: LinkTarget`).
+			// `use_relative_links: true` preserves the project-scope
+			// relative-link behavior under test.
+			layout: SkillInstallLayout::Universal,
+			use_relative_links: true,
+		};
+		let report = install_fetched_skill_and_lock(req).unwrap();
+		assert_eq!(report.name, "my-skill");
+
+		let canonical = root.join(".agents/skills/my-skill");
+		let link = root.join(".claude/skills/my-skill");
+		assert!(Linker::is_link(&link), "agent dir must hold a link");
+		fs::write(canonical.join("sentinel.txt"), "live").unwrap();
+		assert_eq!(
+			fs::read_to_string(link.join("sentinel.txt")).unwrap(),
+			"live",
+			"reading through the link must see the Master => not a copy"
+		);
+	}
+}
