@@ -988,6 +988,44 @@ mod tests {
 		assert!(!foo.exists(), "a contained skill dir is removed normally");
 	}
 
+	// T-REMOVE-SKILL-PATH-JUNCTION: a junction referrer is unlinked on remove,
+	// and the shared Master directory + its files survive (remove_dir, not
+	// remove_dir_all). Runs on windows-latest (junctions need no admin).
+	#[cfg(windows)]
+	#[test]
+	fn remove_skill_path_unlinks_junction_keeps_master() {
+		use crate::skills::linker::create_junction;
+		let tmp = tempfile::tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/foo");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(master.join("SKILL.md"), "---\nname: foo\n---\n")
+			.unwrap();
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		let link = claude.join("foo");
+		let abs_master = master.canonicalize().unwrap();
+		create_junction(&abs_master, &link).unwrap();
+
+		let roots = vec![tmp.path().to_path_buf()];
+		remove_skill_path(
+			&master.join("SKILL.md"),
+			"foo",
+			true, // is_link
+			Some(claude.as_path()),
+			&roots,
+		)
+		.unwrap();
+
+		assert!(
+			std::fs::symlink_metadata(&link).is_err(),
+			"junction must be unlinked"
+		);
+		assert!(
+			master.join("SKILL.md").exists(),
+			"shared Master must survive (remove_dir, not remove_dir_all)"
+		);
+	}
+
 	#[test]
 	fn test_format_skill_preserves_body() {
 		let mut skill = Skill::new("test-skill");
