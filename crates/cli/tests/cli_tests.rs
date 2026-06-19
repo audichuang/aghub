@@ -678,3 +678,78 @@ fn source_sync_help_renders() {
 		.assert()
 		.success();
 }
+
+// Symlink-only install: `aghub add skill --from <dir>` writes a single
+// .agents/skills/<name> master and a link in the agent's own dir — never an
+// isolated copy. The legacy `--universal` flag is accepted but ignored (no
+// unknown-arg error, identical result), proving the deprecation no-op.
+#[cfg(unix)]
+#[test]
+fn cli_add_skill_from_path_is_symlink_only() {
+	let tmp = tempfile::tempdir().unwrap();
+	let project = tmp.path();
+	// Agent marker so project-root detection picks this dir.
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+	let src = project.join("src/my-skill");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: my-skill\ndescription: d\n---\nbody",
+	)
+	.unwrap();
+
+	// Project scope; isolate HOME so nothing leaks to the real ~/.agents.
+	let mut cmd = assert_cmd::Command::cargo_bin("aghub-cli").unwrap();
+	cmd.env("HOME", project)
+		.env("USERPROFILE", project)
+		.env("APPDATA", project)
+		.current_dir(project)
+		.args(["-a", "claude", "-p", "add", "skill", "--from"])
+		.arg(src.join("SKILL.md"));
+	cmd.assert().success();
+
+	let canonical = project.join(".agents/skills/my-skill");
+	let link = project.join(".claude/skills/my-skill");
+	assert!(
+		canonical.join("SKILL.md").exists(),
+		"a .agents master must be materialized"
+	);
+	assert!(
+		std::fs::symlink_metadata(&link)
+			.map(|m| m.file_type().is_symlink())
+			.unwrap_or(false),
+		"the agent dir must hold a link, not a copy"
+	);
+
+	// Legacy `--universal` flag: accepted (no unknown-arg error). Use a fresh
+	// skill name so the duplicate-name guard does not reject it.
+	let src2 = project.join("src/other-skill");
+	std::fs::create_dir_all(&src2).unwrap();
+	std::fs::write(
+		src2.join("SKILL.md"),
+		"---\nname: other-skill\ndescription: d\n---\nbody",
+	)
+	.unwrap();
+	let mut cmd2 = assert_cmd::Command::cargo_bin("aghub-cli").unwrap();
+	cmd2.env("HOME", project)
+		.env("USERPROFILE", project)
+		.env("APPDATA", project)
+		.current_dir(project)
+		.args([
+			"-a",
+			"claude",
+			"-p",
+			"add",
+			"skill",
+			"--universal",
+			"--from",
+		])
+		.arg(src2.join("SKILL.md"));
+	cmd2.assert().success();
+	assert!(
+		std::fs::symlink_metadata(project.join(".claude/skills/other-skill"),)
+			.map(|m| m.file_type().is_symlink())
+			.unwrap_or(false),
+		"--universal must be accepted and produce the same symlink result"
+	);
+}
