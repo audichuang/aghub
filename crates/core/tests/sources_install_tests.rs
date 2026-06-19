@@ -134,3 +134,147 @@ fn isolated_copy_installs_writes_global_lock_and_per_agent_result() {
 			.unwrap()
 	);
 }
+
+#[test]
+#[cfg(unix)]
+fn universal_writes_master_to_canonical_and_links_agent() {
+	let _g = GlobalLockGuard::new();
+
+	// Project-scope universal install so the canonical dir is a temp project
+	// root (no dependence on the real home dir).
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+
+	// Claude does NOT read `.agents` at project scope, so it gets a symlink.
+	let agent_dir = project_root.join(".claude/skills");
+	set_skills_path_override("claude", Some(agent_dir.clone()));
+
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("cafef00ddeadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("universal install should succeed");
+
+	set_skills_path_override("claude", None);
+
+	// Master lives once in the canonical `.agents/skills/alpha`.
+	let canonical = project_root.join(".agents/skills/alpha");
+	assert!(
+		canonical.join("SKILL.md").exists(),
+		"master SKILL.md should be in the canonical dir"
+	);
+
+	// The agent dir is a symlink resolving to the master content.
+	let link = agent_dir.join("alpha");
+	assert!(
+		std::fs::symlink_metadata(&link)
+			.unwrap()
+			.file_type()
+			.is_symlink(),
+		"agent dir entry should be a symlink"
+	);
+	assert!(
+		link.join("SKILL.md").exists(),
+		"symlink should resolve to the master"
+	);
+
+	assert_eq!(report.agent_results.len(), 1);
+	assert!(report.agent_results[0].installed);
+}
+
+#[test]
+fn project_scope_writes_project_lock() {
+	let _g = GlobalLockGuard::new();
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "beta", "beta");
+
+	let agent_dir = project_root.join(".claude/skills");
+	set_skills_path_override("claude", Some(agent_dir));
+
+	let source = sample_source();
+	install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "beta/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::IsolatedCopy,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("project install should succeed");
+
+	set_skills_path_override("claude", None);
+
+	let lock = skill::lock::local::read_local_lock(Some(&project_root));
+	let entry = lock
+		.skills
+		.get("beta")
+		.expect("beta should be in the project lock");
+	assert_eq!(entry.source, source.source);
+	assert_eq!(entry.skill_path.as_deref(), Some("beta/SKILL.md"));
+}
+
+#[test]
+fn rename_guard_rejects_mismatch_and_writes_nothing() {
+	let _g = GlobalLockGuard::new();
+
+	// Frontmatter name is "beta" but the caller expected "alpha".
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "beta");
+
+	let agent_dir = tempdir().unwrap();
+	set_skills_path_override("claude", Some(agent_dir.path().to_path_buf()));
+
+	let source = sample_source();
+	let err = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::IsolatedCopy,
+		expected_name: Some("alpha"),
+		use_relative_links: false,
+	})
+	.expect_err("rename mismatch must be refused");
+
+	set_skills_path_override("claude", None);
+
+	// Shared rename message mentions the new (found) name.
+	assert!(
+		err.to_string().contains("renamed"),
+		"error should be the shared rename message, got: {err}"
+	);
+
+	// Nothing was written: no copy, no lock entry.
+	assert!(
+		!agent_dir.path().join("alpha").exists()
+			&& !agent_dir.path().join("beta").exists(),
+		"no skill dir should be created on a refused rename"
+	);
+	assert!(
+		skill::lock::global::get_skill_from_lock("beta").is_none(),
+		"no global lock entry should be written on a refused rename"
+	);
+}

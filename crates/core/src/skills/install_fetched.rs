@@ -94,6 +94,7 @@ pub struct FetchedSkillInstallRequest<'a> {
 }
 
 /// Result of [`install_fetched_skill_and_lock`].
+#[derive(Clone, Debug)]
 pub struct FetchedSkillInstallReport {
 	/// Parsed (canonical) skill name.
 	pub name: String,
