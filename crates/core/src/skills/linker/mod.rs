@@ -809,6 +809,40 @@ mod tests {
 		assert!(report.failed.is_empty());
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn relative_links_use_dotdot_global_links_are_absolute() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let src = make_source(&root);
+		let canonical = root.join(".agents/skills/my-skill");
+		let claude = root.join(".claude/skills");
+
+		install_universal(
+			&src,
+			&canonical,
+			std::slice::from_ref(&claude),
+			LinkTarget::Relative,
+		)
+		.unwrap();
+		let rel = std::fs::read_link(claude.join("my-skill")).unwrap();
+		assert!(rel.is_relative(), "expected relative link, got {rel:?}");
+		assert_eq!(rel, PathBuf::from("../../.agents/skills/my-skill"));
+
+		let cursor = root.join(".cursor/skills");
+		install_universal(
+			&src,
+			&canonical,
+			std::slice::from_ref(&cursor),
+			LinkTarget::Absolute,
+		)
+		.unwrap();
+		let abs = std::fs::read_link(cursor.join("my-skill")).unwrap();
+		assert!(abs.is_absolute(), "expected absolute link, got {abs:?}");
+		assert_eq!(abs, canonical);
+	}
+
 	#[cfg(windows)]
 	mod windows_specific {
 		use super::super::*;
