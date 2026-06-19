@@ -1,4 +1,5 @@
 pub mod discovery;
+pub mod install_fetched;
 pub mod install_layout;
 pub mod prune;
 pub mod removal;

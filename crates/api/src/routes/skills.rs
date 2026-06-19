@@ -614,29 +614,16 @@ fn delete_response_from_outcome(
 	}
 }
 
+/// Isolated-copy of a fetched skill dir. Delegates to the shared core
+/// implementation (decision #5: API and CLI use ONE copy behavior); the core
+/// fn returns `io::Result`, so we map its error to [`ApiError`] at this
+/// boundary (core cannot depend on Rocket).
 fn copy_dir_recursive(
 	from: &std::path::Path,
 	to: &std::path::Path,
 ) -> Result<(), ApiError> {
-	std::fs::create_dir_all(to)
-		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-	for entry in std::fs::read_dir(from)
-		.map_err(|e| ApiError::from(ConfigError::Io(e)))?
-	{
-		let entry = entry.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		let file_type = entry
-			.file_type()
-			.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-		if file_type.is_dir() {
-			copy_dir_recursive(&from_path, &to_path)?;
-		} else {
-			std::fs::copy(&from_path, &to_path)
-				.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-		}
-	}
-	Ok(())
+	aghub_core::skills::install_fetched::copy_dir_recursive(from, to)
+		.map_err(|e| ApiError::from(ConfigError::Io(e)))
 }
 
 fn resolve_git_install_target_dir(
