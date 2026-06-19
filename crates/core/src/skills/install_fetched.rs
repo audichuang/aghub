@@ -196,6 +196,19 @@ pub fn install_fetched_skill_and_lock(
 		}
 	}
 
+	// Scope guard: only Global / Project installs are supported. Reject BEFORE
+	// any source-root resolution / copy / link / lock work so an unsupported
+	// scope can never leave a partial side effect (e.g. a written universal
+	// master). The API rejects `Both` at the same point via `resource_scope`.
+	if !matches!(
+		req.scope,
+		ResourceScope::GlobalOnly | ResourceScope::ProjectOnly
+	) {
+		return Err(crate::ConfigError::InvalidConfig(
+			"Combined skill scope is not supported for installs".to_string(),
+		));
+	}
+
 	let source_root = skill_source_root(req.skill_file);
 	let safe_name = sanitize_name(&name);
 	let installed_hash = skill::compute_skill_folder_hash(&source_root)
@@ -205,14 +218,26 @@ pub fn install_fetched_skill_and_lock(
 			))
 		})?;
 
-	let agent_results = match req.layout {
-		SkillInstallLayout::IsolatedCopy => install_isolated(
-			&source_root,
-			&safe_name,
-			req.scope,
-			req.project_root,
-			req.target_agents,
-		)?,
+	// `agent_results` reports per-agent install success (mirrors the API's
+	// per-skill `success` entries). `copied_any` is the SEPARATE lock-write
+	// signal: a *fresh* write on this run. For an isolated copy every fresh copy
+	// counts (API: `copied_any |= copied`); for the universal layout ONLY a
+	// newly-written master counts (API: `copied_any |= wrote_master`,
+	// skills.rs:2065) — an idempotent re-run where the master + links already
+	// exist must NOT be treated as a fresh install, so it does not rewrite the
+	// lock.
+	let (agent_results, copied_any) = match req.layout {
+		SkillInstallLayout::IsolatedCopy => {
+			let results = install_isolated(
+				&source_root,
+				&safe_name,
+				req.scope,
+				req.project_root,
+				req.target_agents,
+			)?;
+			let copied = results.iter().any(|r| r.installed);
+			(results, copied)
+		}
 		SkillInstallLayout::Universal => install_universal_layout(
 			&source_root,
 			&safe_name,
@@ -223,13 +248,18 @@ pub fn install_fetched_skill_and_lock(
 		)?,
 	};
 
+	// Gate the lock write on at least one agent actually receiving the skill on
+	// THIS run, matching the API's outer `if installed { ... }` (skills.rs:2119):
+	// when every target is a soft failure AND no lock entry exists yet, no lock
+	// is written.
 	let installed_any = agent_results.iter().any(|r| r.installed);
-	let wrote_lock = should_write_install_lock(
-		&name,
-		installed_any,
-		req.scope,
-		req.project_root,
-	);
+	let wrote_lock = installed_any
+		&& should_write_install_lock(
+			&name,
+			copied_any,
+			req.scope,
+			req.project_root,
+		);
 	if wrote_lock {
 		write_install_lock(
 			&name,
@@ -308,6 +338,11 @@ fn install_isolated(
 	Ok(results)
 }
 
+/// Returns the per-agent results plus `wrote_master` — `true` only when the
+/// canonical master was NEWLY written on this run. The API computes the same
+/// signal as `!canonical.exists()` BEFORE calling `install_universal`
+/// (`install_git_skill_universal`, skills.rs:686) and feeds it to the lock-write
+/// decision as `copied_any` (skills.rs:2065).
 fn install_universal_layout(
 	source_root: &Path,
 	safe_name: &str,
@@ -315,7 +350,7 @@ fn install_universal_layout(
 	project_root: Option<&Path>,
 	target_agents: &[AgentType],
 	use_relative_links: bool,
-) -> Result<Vec<AgentInstallResult>, crate::ConfigError> {
+) -> Result<(Vec<AgentInstallResult>, bool), crate::ConfigError> {
 	// Universal canonical dir follows the RESOLVED scope: project → the project
 	// `.agents/skills`, global → `~/.agents/skills`.
 	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
@@ -326,7 +361,7 @@ fn install_universal_layout(
 	let Some(canonical_skills_dir) = universal_canonical_dir(canonical_root)
 	else {
 		// No resolvable canonical dir → every target agent is a soft failure.
-		return Ok(target_agents
+		let results = target_agents
 			.iter()
 			.map(|&agent| AgentInstallResult {
 				agent,
@@ -335,9 +370,13 @@ fn install_universal_layout(
 					"Cannot resolve .agents canonical directory".to_string(),
 				),
 			})
-			.collect());
+			.collect();
+		return Ok((results, false));
 	};
 	let canonical = canonical_skills_dir.join(safe_name);
+	// Capture the fresh-master signal BEFORE `install_universal` materializes it,
+	// matching the API's `wrote_master = !canonical.exists()` (skills.rs:686).
+	let wrote_master = !canonical.exists();
 
 	// Map each agent to its resolved write dir; agents with no dir are soft
 	// failures. Agents whose dir IS the canonical dir see the master directly
@@ -398,5 +437,5 @@ fn install_universal_layout(
 		}
 	}
 
-	Ok(results)
+	Ok((results, wrote_master))
 }

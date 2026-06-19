@@ -234,6 +234,166 @@ fn project_scope_writes_project_lock() {
 }
 
 #[test]
+fn zero_installs_with_no_existing_lock_writes_no_lock() {
+	// Bug A: every target is a soft failure (no resolvable skills dir) AND there
+	// is no pre-existing lock entry → no lock must be written. The API guards
+	// the whole lock-write block behind `if installed { ... }` (skills.rs:2119).
+	let _g = GlobalLockGuard::new();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "gamma", "gamma");
+
+	// AugmentCode does not support skill creation in ANY scope, so its target
+	// dir resolves to `None` → a soft failure, never an install. No override is
+	// set for it, so nothing touches a real directory.
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "gamma/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		target_agents: &[AgentType::AugmentCode],
+		layout: SkillInstallLayout::IsolatedCopy,
+		expected_name: None,
+		use_relative_links: false,
+	})
+	.expect("install with only soft failures still returns Ok");
+
+	// No agent installed, and no pre-existing lock entry → no lock written.
+	assert!(
+		!report.agent_results.iter().any(|r| r.installed),
+		"no agent should have installed"
+	);
+	assert!(
+		!report.wrote_lock,
+		"no lock should be written when zero agents installed and no entry \
+		 pre-existed"
+	);
+	assert!(
+		skill::lock::global::get_skill_from_lock("gamma").is_none(),
+		"no global lock entry should be written"
+	);
+}
+
+#[test]
+#[cfg(unix)]
+fn universal_idempotent_rerun_does_not_rewrite_lock() {
+	// Bug B: a second universal run where the master + links already exist must
+	// NOT be treated as a fresh install. The API derives the lock-write signal
+	// from `wrote_master` (skills.rs:2065), so the idempotent re-run reports no
+	// fresh master write and does not rewrite the lock.
+	let _g = GlobalLockGuard::new();
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+
+	let agent_dir = project_root.join(".claude/skills");
+	set_skills_path_override("claude", Some(agent_dir.clone()));
+
+	let source = sample_source();
+	let make_req = || FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	};
+
+	let first = install_fetched_skill_and_lock(make_req())
+		.expect("first universal install should succeed");
+	assert!(first.wrote_lock, "first run writes the lock");
+
+	let lock_path = project_root.join("skills-lock.json");
+	let after_first = std::fs::read_to_string(&lock_path)
+		.expect("lock file should exist after the first run");
+
+	let second = install_fetched_skill_and_lock(make_req())
+		.expect("second universal install should succeed");
+
+	set_skills_path_override("claude", None);
+
+	// The master + link already existed, so the second run is NOT a fresh
+	// install: no lock rewrite.
+	assert!(
+		!second.wrote_lock,
+		"idempotent re-run must not rewrite the lock"
+	);
+	let after_second = std::fs::read_to_string(&lock_path)
+		.expect("lock file should still exist");
+	assert_eq!(
+		after_first, after_second,
+		"lock content must be unchanged on an idempotent re-run"
+	);
+}
+
+#[test]
+#[cfg(unix)]
+fn unsupported_scope_rejected_before_any_write() {
+	// Bug C: `ResourceScope::Both` is unsupported and must be rejected at the TOP
+	// of the function, before the universal master is copied — no partial side
+	// effect. For a non-Project scope the universal canonical resolves under the
+	// HOME dir (`~/.agents/skills`), so we isolate HOME to a temp dir (the
+	// GlobalLockGuard mutex serializes env mutation) and assert that path stays
+	// untouched. Before the fix the master is copied THERE before the Err.
+	let _g = GlobalLockGuard::new();
+
+	let home = tempdir().unwrap();
+	let old_home = std::env::var("HOME").ok();
+	std::env::set_var("HOME", home.path());
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+
+	let source = sample_source();
+	let err = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::Both,
+		project_root: None,
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: false,
+	})
+	.expect_err("Combined scope must be refused");
+
+	let home_canonical = home.path().join(".agents/skills/alpha");
+	let home_agents = home.path().join(".agents");
+	match &old_home {
+		Some(v) => std::env::set_var("HOME", v),
+		None => std::env::remove_var("HOME"),
+	}
+
+	assert!(
+		err.to_string().contains("scope")
+			|| err.to_string().contains("Combined"),
+		"error should be the unsupported-scope message, got: {err}"
+	);
+
+	// No partial master was written to the universal canonical dir.
+	assert!(
+		!home_canonical.exists(),
+		"no partial universal master should be written before the scope check"
+	);
+	assert!(
+		!home_agents.exists(),
+		"the .agents dir must not be created at all on a rejected scope"
+	);
+}
+
+#[test]
 fn rename_guard_rejects_mismatch_and_writes_nothing() {
 	let _g = GlobalLockGuard::new();
 
