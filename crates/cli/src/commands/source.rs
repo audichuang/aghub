@@ -251,11 +251,16 @@ fn diff(
 	let scopes = resolve_read_scopes(global, project)?;
 	let source = source.trim().to_string();
 
+	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
+	// helper — the SAME resolution the API `diff_source` runs — so the CLI checks
+	// the recorded ref (not the default branch) and prechecks with the recorded
+	// source_type (not a hard-coded "github"). No fetch happens here.
+	let meta = sources::resolve_source_meta(&source, &scopes, git_ref);
+
 	// Skip sources we cannot fetch (local/ssh/unsupported scheme) up front,
-	// before paying for a fetch. The CLI treats every non-`local` source as
-	// `github`-ish; `precheck_source` only rejects on the source string here.
+	// before paying for a fetch — honoring the precheck the API path honors.
 	if let Some(reason) =
-		aghub_core::skills::update::precheck_source("github", &source)
+		aghub_core::skills::update::precheck_source(&meta.source_type, &source)
 	{
 		bail!(
 			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
@@ -266,7 +271,7 @@ fn diff(
 	let repo = match sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: source.clone(),
-			ref_: git_ref.map(str::to_string),
+			ref_: meta.effective_ref.clone(),
 		},
 		&CliFetcher,
 		&EnvTokenResolver,
@@ -395,8 +400,21 @@ fn resolve_write_scope(
 fn sync(args: SyncArgs) -> Result<()> {
 	let source = args.source.trim().to_string();
 
+	let (scope, project_root, source_scope, scope_label) =
+		resolve_write_scope(&args)?;
+
+	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
+	// helper (the SAME resolution the API runs) BEFORE the single fetch, so sync
+	// fetches/installs from the recorded ref — not the default branch — and
+	// prechecks with the recorded source_type rather than a hard-coded "github".
+	let meta = sources::resolve_source_meta(
+		&source,
+		std::slice::from_ref(&source_scope),
+		args.git_ref,
+	);
+
 	if let Some(reason) =
-		aghub_core::skills::update::precheck_source("github", &source)
+		aghub_core::skills::update::precheck_source(&meta.source_type, &source)
 	{
 		bail!(
 			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
@@ -404,16 +422,13 @@ fn sync(args: SyncArgs) -> Result<()> {
 		);
 	}
 
-	let (scope, project_root, source_scope, scope_label) =
-		resolve_write_scope(&args)?;
-
 	// Fetch ONCE; reuse the repo for classification AND every install/update.
 	// Fetch + classify happen BEFORE the flag branch so the neither-flag
 	// informational path can print the same plan without a second fetch.
 	let repo = match sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: source.clone(),
-			ref_: args.git_ref.map(str::to_string),
+			ref_: meta.effective_ref.clone(),
 		},
 		&CliFetcher,
 		&EnvTokenResolver,
@@ -469,11 +484,23 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// `aghub_git`; we never re-implement it.
 	let resolved = aghub_git::resolve_remote_source(&source)
 		.map_err(|e| anyhow::anyhow!("invalid source '{source}': {e}"))?;
+	// Record the RESOLVED ref (explicit `--ref` OR the source's recorded lock
+	// ref), not just the explicit flag — so re-installing a source pinned to a
+	// tag/branch persists that pin, matching what the API records.
+	//
+	// Residual API divergence: when neither an explicit `--ref` nor a recorded
+	// ref exists, the CLI records `None` here, whereas the API records the scan
+	// session's resolved default-branch name (`session.current_branch`). The
+	// CLI's `FetchedRepo` exposes only the tip OID (`repo.oid`), not the
+	// branch/ref name, so the default-branch name is not cheaply available
+	// without a second ls-refs round-trip; we record `None` rather than invent a
+	// branch name. Both still fetch the same tree (the default branch), and the
+	// recorded-ref fallback simply has nothing to fall back to in this case.
 	let lock_source = skill::InstallLockSource {
 		source: resolved.lock_source(),
 		source_type: resolved.source_type.as_str().to_string(),
 		source_url: resolved.source_url.clone(),
-		ref_name: args.git_ref.map(str::to_string),
+		ref_name: meta.effective_ref.clone(),
 	};
 
 	let mut actions: Vec<SyncActionView> = Vec::new();

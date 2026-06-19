@@ -378,6 +378,98 @@ pub(crate) fn baseline_for_scope(
 	(baseline, source_type, recorded_ref)
 }
 
+/// Discover only the recorded `source_type` + `ref_name` for a source across
+/// the given scopes, WITHOUT building a baseline (no folder hashing, no fetch).
+/// Mirrors the merged-baseline scan order (global first, then project) so the
+/// "first non-empty wins" result matches [`merged_baseline_for_source`].
+/// Returns `(source_type, recorded_ref)` — both empty/None when the source is
+/// not present in any lock.
+fn recorded_meta_for_source(
+	scopes: &[SourceScope],
+	source: &str,
+) -> (String, Option<String>) {
+	let mut source_type = String::new();
+	let mut recorded_ref: Option<String> = None;
+	let want = source.trim();
+	let mut visit = |entry_source: &str,
+	                 entry_source_url: Option<&str>,
+	                 entry_source_type: &str,
+	                 entry_ref: Option<&str>| {
+		if !source_matches(want, entry_source, entry_source_url) {
+			return;
+		}
+		if source_type.is_empty() {
+			source_type = entry_source_type.to_string();
+		}
+		if recorded_ref.is_none() {
+			recorded_ref = entry_ref.map(str::to_string);
+		}
+	};
+	// Global first, then project — same order as `merged_baseline_for_source`.
+	for scope in scopes {
+		if matches!(scope, SourceScope::Global) {
+			for (_name, entry) in skill::get_all_locked_skills() {
+				visit(
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+					entry.ref_name.as_deref(),
+				);
+			}
+		}
+	}
+	for scope in scopes {
+		if let SourceScope::Project { root } = scope {
+			for (_name, entry) in skill::read_local_lock(Some(root)).skills {
+				visit(
+					&entry.source,
+					None,
+					&entry.source_type,
+					entry.ref_name.as_deref(),
+				);
+			}
+		}
+	}
+	(source_type, recorded_ref)
+}
+
+/// The resolved fetch metadata for a source, derived from the lock entries
+/// (NO fetch). Lets the CLI — which fetches once itself — agree with the API
+/// `diff_source` on `(source_type, effective_ref)` BEFORE the single fetch.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSourceMeta {
+	/// The lock's recorded source type, defaulted to `"github"` when empty —
+	/// the same default `diff_source` applies before its `precheck_source`.
+	pub source_type: String,
+	/// Explicit `--ref` override, else the source's recorded lock ref, else
+	/// `None` (the upstream default branch).
+	pub effective_ref: Option<String>,
+}
+
+/// Resolve `(source_type, effective_ref)` for a source across `scopes` from the
+/// lock entries, with NO fetch. This is the SINGLE resolution path: the API
+/// [`diff_source`] calls it internally, and the CLI calls it before its own
+/// fetch so both surfaces resolve identically.
+///
+/// `effective_ref = explicit_ref OR recorded lock ref OR None`; `source_type`
+/// is the lock's recorded type, defaulted to `"github"` when empty.
+pub fn resolve_source_meta(
+	source: &str,
+	scopes: &[SourceScope],
+	explicit_ref: Option<&str>,
+) -> ResolvedSourceMeta {
+	let (mut source_type, recorded_ref) =
+		recorded_meta_for_source(scopes, source);
+	if source_type.is_empty() {
+		source_type = "github".to_string();
+	}
+	let effective_ref = explicit_ref.map(str::to_string).or(recorded_ref);
+	ResolvedSourceMeta {
+		source_type,
+		effective_ref,
+	}
+}
+
 /// Internal: classify discovered repo skills against a prebuilt baseline.
 /// `Baseline`/`BaselineEntry` stay `pub(crate)` so they never leak across the
 /// crate boundary; cross-crate callers use [`classify_scope`] / [`diff_source`].
@@ -731,18 +823,18 @@ pub fn diff_source(
 	deps: SourceDiffDeps<'_>,
 ) -> SourceDiffOutcome {
 	let source = input.source.trim().to_string();
-	let (baseline, mut source_type, recorded_ref) =
+	let (baseline, _src_type, _recorded_ref) =
 		merged_baseline_for_source(&input.scopes, &source);
-	if source_type.is_empty() {
-		source_type = "github".to_string();
-	}
 
-	// Use the explicitly requested ref, else the source's RECORDED ref, else the
-	// repo default branch (None).
-	let git_ref = input.git_ref.clone().or(recorded_ref);
+	// Resolve `(source_type, effective_ref)` via the SHARED helper so the API
+	// and CLI agree on the fetch coordinate. `effective_ref` = explicit query
+	// ref, else the source's RECORDED ref, else None (the repo default branch).
+	let meta =
+		resolve_source_meta(&source, &input.scopes, input.git_ref.as_deref());
+	let git_ref = meta.effective_ref;
 
 	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
-	if let Some(reason) = precheck_source(&source_type, &source) {
+	if let Some(reason) = precheck_source(&meta.source_type, &source) {
 		return SourceDiffOutcome::UncheckableSource { git_ref, reason };
 	}
 
@@ -1341,13 +1433,24 @@ mod diff_tests {
 
 	/// Write a project lock entry recording a non-default ref for `source`.
 	fn write_project_lock_entry(root: &Path, source: &str, ref_name: &str) {
+		write_project_lock_entry_typed(root, source, Some(ref_name), "github");
+	}
+
+	/// Write a project lock entry with an explicit `source_type` and an optional
+	/// recorded ref.
+	fn write_project_lock_entry_typed(
+		root: &Path,
+		source: &str,
+		ref_name: Option<&str>,
+		source_type: &str,
+	) {
 		let mut lock = skill::LocalSkillLockFile::new();
 		lock.skills.insert(
 			"s".to_string(),
 			skill::LocalSkillLockEntry {
 				source: source.to_string(),
-				ref_name: Some(ref_name.to_string()),
-				source_type: "github".to_string(),
+				ref_name: ref_name.map(str::to_string),
+				source_type: source_type.to_string(),
 				skill_path: Some("s/SKILL.md".to_string()),
 				computed_hash: "h".to_string(),
 				ref_commit: None,
@@ -1467,5 +1570,122 @@ mod diff_tests {
 			Some(Some("v9.9.9".to_string())),
 			"fetch must be issued at the recorded ref, not the default branch"
 		);
+	}
+
+	#[test]
+	fn resolve_source_meta_explicit_ref_wins_over_recorded() {
+		// explicit > recorded: a passed `--ref` overrides the lock's recorded
+		// ref entirely.
+		let project = TempDir::new().unwrap();
+		let source = "owner/meta-explicit";
+		write_project_lock_entry(project.path(), source, "v1");
+
+		let meta = resolve_source_meta(
+			source,
+			&[SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+			Some("feature-x"),
+		);
+
+		assert_eq!(meta.effective_ref.as_deref(), Some("feature-x"));
+		assert_eq!(meta.source_type, "github");
+	}
+
+	#[test]
+	fn resolve_source_meta_recorded_ref_used_when_no_explicit() {
+		// recorded > None: with no `--ref`, the recorded lock ref is used.
+		let project = TempDir::new().unwrap();
+		let source = "owner/meta-recorded";
+		write_project_lock_entry(project.path(), source, "v2");
+
+		let meta = resolve_source_meta(
+			source,
+			&[SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+			None,
+		);
+
+		assert_eq!(meta.effective_ref.as_deref(), Some("v2"));
+	}
+
+	#[test]
+	fn resolve_source_meta_none_when_neither_explicit_nor_recorded() {
+		// No explicit ref AND no recorded ref => None (default branch). This is
+		// the case where the CLI records None on install while the API records
+		// the scan session's resolved default-branch name (documented residual
+		// in `crates/cli/src/commands/source.rs`).
+		let project = TempDir::new().unwrap();
+		let source = "owner/meta-none";
+		write_project_lock_entry_typed(project.path(), source, None, "github");
+
+		let meta = resolve_source_meta(
+			source,
+			&[SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+			None,
+		);
+
+		assert_eq!(meta.effective_ref, None);
+	}
+
+	#[test]
+	fn resolve_source_meta_passes_through_recorded_source_type() {
+		// A lock recording source_type "git" (not "github") must surface "git",
+		// not the "github" default.
+		let project = TempDir::new().unwrap();
+		let source = "git@example.com:owner/meta-git.git";
+		write_project_lock_entry_typed(project.path(), source, None, "git");
+
+		let meta = resolve_source_meta(
+			source,
+			&[SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+			None,
+		);
+
+		assert_eq!(meta.source_type, "git");
+	}
+
+	#[test]
+	fn resolve_source_meta_defaults_source_type_to_github_when_absent() {
+		// A source not present in any lock => empty recorded type, defaulted to
+		// "github" (matching the default `diff_source` applies before its
+		// `precheck_source`).
+		let meta = resolve_source_meta(
+			"owner/meta-absent",
+			&[SourceScope::Global],
+			None,
+		);
+
+		assert_eq!(meta.source_type, "github");
+		assert_eq!(meta.effective_ref, None);
+	}
+
+	#[test]
+	fn resolve_source_meta_local_source_prechecks_uncheckable() {
+		// A lock recording source_type "local" must surface "local", which
+		// `precheck_source` then rejects as uncheckable (no fetch).
+		use aghub_core::skills::update::{precheck_source, UncheckableReason};
+		let project = TempDir::new().unwrap();
+		let source = "/some/local/path";
+		write_project_lock_entry_typed(project.path(), source, None, "local");
+
+		let meta = resolve_source_meta(
+			source,
+			&[SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+			None,
+		);
+
+		assert_eq!(meta.source_type, "local");
+		assert!(matches!(
+			precheck_source(&meta.source_type, source),
+			Some(UncheckableReason::Local)
+		));
 	}
 }

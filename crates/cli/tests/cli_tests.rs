@@ -470,6 +470,71 @@ fn source_sync_yes_installs_missing() {
 	assert!(raw.contains("owner/repo"), "source list: {raw}");
 }
 
+/// Seed a global lock entry for `source` recording a non-default `ref` and a
+/// `skillPath` that does NOT match the discovered skill (so the discovered
+/// skill classifies as notInstalled and `--install-missing` fires). Mirrors the
+/// fields the CLI/API write so the recorded-ref fallback has something to read.
+fn seed_global_lock_with_ref(
+	state: &std::path::Path,
+	source: &str,
+	ref_name: &str,
+) -> std::path::PathBuf {
+	let dir = state.join("skills");
+	std::fs::create_dir_all(&dir).unwrap();
+	let path = dir.join(".skill-lock.json");
+	let body = format!(
+		r#"{{"version":3,"skills":{{"other":{{"source":"{source}","sourceType":"github","sourceUrl":"https://github.com/{source}","ref":"{ref_name}","skillPath":"unrelated/SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}}}}"#
+	);
+	std::fs::write(&path, body).unwrap();
+	path
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_yes_records_recorded_ref_on_install() {
+	// Finding 2 (ref_name parity): a source already in the lock with a recorded
+	// `ref` (and NO `--ref` flag) must persist that recorded ref on the freshly
+	// installed skill's lock entry — matching what the API records — NOT None.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	let lock_path = seed_global_lock_with_ref(state.path(), "owner/repo", "v2");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let agent_skill = home.path().join(".claude/skills/alpha/SKILL.md");
+	assert!(agent_skill.exists(), "--yes must install the skill");
+
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	let parsed: Value = serde_json::from_str(&raw).unwrap();
+	let alpha = &parsed["skills"]["alpha"];
+	assert!(!alpha.is_null(), "alpha entry must be written: {raw}");
+	assert_eq!(
+		alpha["ref"].as_str(),
+		Some("v2"),
+		"installed entry must persist the recorded ref, not None: {raw}"
+	);
+}
+
 #[cfg(unix)]
 #[test]
 fn source_sync_skips_deprecated_skill() {
