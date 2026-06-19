@@ -20,19 +20,20 @@ messages, but this is the discoverable, durable home.
 - `git remote`: `upstream = https://github.com/AkaraChen/aghub.git`.
 - **merge-base** with upstream: `ca48d93`.
 - **Last full review**: upstream `main` @ `714b971` — **52 upstream-only commits** since
-  `ca48d93` (2026-06). Tally: 5 ported now · 5 already-present · 4 deferred (security)
-  · 1 deferred (release CI) · 3 skipped (product) · 2 upstream-tests · 1 partial · 2
-  upstream-internal · 29 dependency bumps. Every one is dispositioned below.
+  `ca48d93` (2026-06). Tally: 6 ported · 5 already-present · 4 deferred (security)
+  · 3 skipped (product) · 2 upstream-tests · 1 partial · 2 upstream-internal · 29
+  dependency bumps. Every one is dispositioned below.
 
-## ✅ Ported in this fork's v2.1.3 / v2.1.4 work
+## ✅ Ported from upstream (active backport work)
 
-| Upstream           | Our commit | Crate      | What                                                                                                                            |
-| ------------------ | ---------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `3ad9f1c`          | `b5a7857`  | core       | copy-mode skill import preserves the full source tree (scripts/refs/assets/body), not just a synthesized `SKILL.md`             |
-| `52a938c`          | `37ca1e7`  | cc-plugins | tarball extraction path validation (zip-slip / `..` / absolute / symlink / hardlink)                                            |
-| `ffeec65`          | `a1ee462`  | agents     | Codex sub-agent I/O hardening (O_NOFOLLOW read + staging-temp/rename write)                                                     |
-| `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`) |
-| `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                 |
+| Upstream           | Our commit | Crate      | What                                                                                                                                         |
+| ------------------ | ---------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `3ad9f1c`          | `b5a7857`  | core       | copy-mode skill import preserves the full source tree (scripts/refs/assets/body), not just a synthesized `SKILL.md`                          |
+| `52a938c`          | `37ca1e7`  | cc-plugins | tarball extraction path validation (zip-slip / `..` / absolute / symlink / hardlink)                                                         |
+| `ffeec65`          | `a1ee462`  | agents     | Codex sub-agent I/O hardening (O_NOFOLLOW read + staging-temp/rename write)                                                                  |
+| `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`)              |
+| `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                              |
+| `398c7e8`          | `31da70c`  | ci         | validate Homebrew release tag format in `release.yml` before touching the tap (also fixes the prior `aghub vv<tag>` commit-message double-v) |
 
 ## ✅ Already present in this fork (implemented earlier, independent of the v2.1.3/2.1.4 work)
 
@@ -64,12 +65,6 @@ exact patch-id matches — they were re-implemented in our own commits:
 | (CORS tightening — part of the same change)                           | Tied to the token-auth work above; deferred together.                                                                                                                                             |
 | `1858167` validate GitHub marketplace manifests (cc-plugins)          | Low blast radius; not yet ported. Reasonable next port — `crates/cc-plugins/.../marketplace/source.rs` lacks the host check.                                                                      |
 | `9ba3a64` harden deep-link MCP import review (desktop consent UI)     | Frontend executable-MCP consent guard; not yet ported.                                                                                                                                            |
-
-## ⏸️ Deferred — release / CI hardening
-
-| Upstream                                     | Why not yet                                                                                                                                                               |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `398c7e8` validate Homebrew release tag (CI) | Release-tag-format validation for the Homebrew job. Our `release.yml` doesn't have it yet — low risk on a personal tap, but a reasonable hardening. Port when convenient. |
 
 ## ⏭️ Skipped — product choices (revisit per roadmap)
 
