@@ -5,6 +5,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::skills::linker::Linker;
+
 /// Collect the allow-listed skills roots for a scope.
 ///
 /// Includes the universal global root (`$XDG_CONFIG_HOME/agents/skills` or
@@ -427,8 +429,8 @@ pub fn execute_removal(
 			}
 		};
 		let ft = meta.file_type();
-		if ft.is_symlink() {
-			match std::fs::remove_file(path) {
+		if Linker::is_link(path) {
+			match Linker::unlink(path) {
 				Ok(()) => report.removed.push(path.clone()),
 				Err(e) => report.failed.push((path.clone(), e)),
 			}
