@@ -474,6 +474,7 @@ fn source_sync_yes_installs_missing() {
 /// `skillPath` that does NOT match the discovered skill (so the discovered
 /// skill classifies as notInstalled and `--install-missing` fires). Mirrors the
 /// fields the CLI/API write so the recorded-ref fallback has something to read.
+#[cfg(unix)]
 fn seed_global_lock_with_ref(
 	state: &std::path::Path,
 	source: &str,
