@@ -351,3 +351,15 @@ fn prune_lock_yes_removes_orphan_entry() {
 	);
 	assert_eq!(parsed["version"], 3, "version preserved");
 }
+// ==================== Task 3.2-3.5: `source` subcommand ====================
+
+#[test]
+fn source_list_runs_with_no_agent_config() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	isolated_cli(home.path(), state.path())
+		.args(["source", "list"])
+		.assert()
+		.success();
+}
