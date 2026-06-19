@@ -239,7 +239,7 @@ fn plan_symlink_removal(
 
 	for dir in all_agent_dirs {
 		let entry = dir.join(safe);
-		let Ok(meta) = std::fs::symlink_metadata(&entry) else {
+		let Ok(_meta) = std::fs::symlink_metadata(&entry) else {
 			continue;
 		};
 		let targeted =
@@ -247,7 +247,7 @@ fn plan_symlink_removal(
 		match entry.canonicalize() {
 			Ok(resolved) => {
 				if canonical_real.as_deref() == Some(resolved.as_path()) {
-					if meta.file_type().is_symlink() && targeted {
+					if Linker::is_link(&entry) && targeted {
 						paths.push(entry);
 						targeted_anything = true;
 					} else if targeted {
@@ -262,7 +262,7 @@ fn plan_symlink_removal(
 			Err(_) => {
 				// Dangling/broken link: unlinking it is safe, but we cannot
 				// prove it does not reference the canonical, so keep canonical.
-				if meta.file_type().is_symlink() && targeted {
+				if Linker::is_link(&entry) && targeted {
 					paths.push(entry);
 					targeted_anything = true;
 				}
@@ -360,10 +360,7 @@ pub fn dir_has_external_referrer(
 	};
 	for dir in all_agent_dirs {
 		let entry = dir.join(safe);
-		let Ok(meta) = std::fs::symlink_metadata(&entry) else {
-			continue;
-		};
-		if !meta.file_type().is_symlink() {
+		if !Linker::is_link(&entry) {
 			continue;
 		}
 		if std::fs::canonicalize(&entry)
