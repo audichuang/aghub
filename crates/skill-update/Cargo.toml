@@ -11,6 +11,7 @@ description = "Skill update-check orchestrator (group, ls-refs preflight, treele
 aghub-core = { path = "../core" }
 aghub-git = { path = "../git" }
 skill = { path = "../skill" }
+dirs = { workspace = true }
 tokio = { version = "1", features = [
 	"rt",
 	"rt-multi-thread",

@@ -22,14 +22,14 @@ use crate::dto::sources::{
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::routes::credentials::load_credentials;
-use crate::routes::skills_update::installed_skill_roots;
 use crate::skills::rename::detect_rename;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{
 	compare_known_hashes, precheck_source, SkillUpdateStatus, UncheckableReason,
 };
 use skill_update::{
-	keychain_host_for_source, FetchError, Fetcher, GitFetcher, SourceRef,
+	installed_skill_roots, keychain_host_for_source, FetchError, Fetcher,
+	GitFetcher, SourceRef,
 };
 
 // ─────────────────────────── GET /skills/sources ───────────────────────────

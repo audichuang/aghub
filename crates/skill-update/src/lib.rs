@@ -21,10 +21,61 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use aghub_core::models::{ResourceScope, Skill};
 use aghub_core::skills::update::{
 	compare_known_hashes, detect_rename, sanitize_skill_path,
 	SkillUpdateStatus, UncheckableReason,
 };
+use std::path::Path;
+
+/// Resolve the on-disk root directory of an installed skill from its model
+/// (`canonical_path` preferred, else `source_path`), expanding a leading `~/`
+/// and stepping up from a `SKILL.md` file to its containing folder.
+fn skill_root(skill: &Skill) -> Option<PathBuf> {
+	let raw = skill
+		.canonical_path
+		.as_deref()
+		.or(skill.source_path.as_deref())?;
+	let path = if let Some(stripped) = raw.strip_prefix("~/") {
+		dirs::home_dir().map(|home| home.join(stripped))?
+	} else {
+		PathBuf::from(raw)
+	};
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+	Some(if is_skill_file {
+		path.parent().map(Path::to_path_buf).unwrap_or(path)
+	} else {
+		path
+	})
+}
+
+/// Resolve the on-disk roots of every installed skill named `name` in the given
+/// scope. A lock→disk resolver: loads all agents' skills, filters by name, and
+/// returns each distinct skill folder root. Shared by the API
+/// (`/skills/sources/diff`, `/skills/check-updates`) and the CLI.
+pub fn installed_skill_roots(
+	name: &str,
+	resource_scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	let mut roots = Vec::new();
+	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
+		for skill in agent.skills {
+			if skill.name != name {
+				continue;
+			}
+			let Some(root) = skill_root(&skill) else {
+				continue;
+			};
+			if !roots.contains(&root) {
+				roots.push(root);
+			}
+		}
+	}
+	roots
+}
 
 /// A unique upstream coordinate: a repo `source` plus an optional `ref`
 /// (branch/tag/SHA). Entries sharing a `SourceRef` are fetched at most once.

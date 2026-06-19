@@ -304,28 +304,6 @@ fn write_auto_healed_hashes(
 	Ok(())
 }
 
-pub(crate) fn installed_skill_roots(
-	name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	let mut roots = Vec::new();
-	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
-			if skill.name != name {
-				continue;
-			}
-			let Some(root) = skill_root(&skill) else {
-				continue;
-			};
-			if !roots.contains(&root) {
-				roots.push(root);
-			}
-		}
-	}
-	roots
-}
-
 struct ApplySource {
 	source: String,
 	ref_name: Option<String>,
@@ -542,7 +520,7 @@ pub(crate) async fn apply_skill_update_inner(
 			return Ok(Json(apply_error(&req.name, &req.scope, &error)));
 		}
 	};
-	let targets = installed_skill_roots(
+	let targets = skill_update::installed_skill_roots(
 		&req.name,
 		resource_scope,
 		project_root.as_deref(),

@@ -7022,6 +7022,7 @@ version = "1.1.1"
 dependencies = [
  "aghub-core",
  "aghub-git",
+ "dirs 6.0.0",
  "gix",
  "skill",
  "tempfile",
