@@ -44,15 +44,54 @@ pub struct AgentLinkPlan {
 
 /// Classify ONE agent against a scope + project_root + the canonical master
 /// SKILLS-DIR (`.agents/skills`).
+fn canonicalize_lenient(p: &Path) -> PathBuf {
+	std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
 pub fn classify_agent(
 	descriptor: &AgentDescriptor,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	master_skills_dir: &Path,
 ) -> AgentLinkPlan {
-	let _ = (descriptor, scope, project_root, master_skills_dir);
-	let _ = AgentType::from_str("claude");
-	unimplemented!()
+	let (read_paths, write_dir) = match AgentType::from_str(descriptor.id) {
+		Ok(agent_type) => {
+			let adapter = crate::create_adapter(agent_type);
+			(
+				adapter.get_skills_paths(project_root, scope),
+				adapter.target_skills_dir(project_root, scope),
+			)
+		}
+		Err(_) => (
+			descriptor.skill_read_paths(project_root, scope),
+			descriptor.skill_write_path(project_root, scope),
+		),
+	};
+
+	let canon = canonicalize_lenient(master_skills_dir);
+	let reads_master =
+		read_paths.iter().any(|p| canonicalize_lenient(p) == canon);
+	let writes_master =
+		write_dir.as_ref().map(|p| canonicalize_lenient(p)) == Some(canon);
+
+	let need = if reads_master || writes_master {
+		LinkNeed::NativeReader
+	} else if let Some(dir) = write_dir {
+		LinkNeed::NeedsLink {
+			agent_skills_dir: dir,
+		}
+	} else {
+		LinkNeed::Unsupported
+	};
+
+	AgentLinkPlan {
+		agent_id: descriptor.id,
+		need,
+		installed: crate::availability::check_agent_availability(descriptor)
+			.is_available,
+		reads_master,
+		writes_master,
+	}
 }
 
 /// Classify ALL registered agents (`registry::ALL_AGENTS`).
@@ -63,4 +102,35 @@ pub fn classify_all(
 ) -> Vec<AgentLinkPlan> {
 	let _ = (scope, project_root, master_skills_dir);
 	unimplemented!()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::registry;
+	use crate::skills::linker::universal_canonical_dir;
+
+	fn plan_for(
+		id: &str,
+		scope: ResourceScope,
+		project_root: Option<&Path>,
+	) -> AgentLinkPlan {
+		let master = universal_canonical_dir(project_root).unwrap();
+		let descriptor = registry::ALL_AGENTS
+			.iter()
+			.find(|d| d.id == id)
+			.unwrap_or_else(|| panic!("no descriptor for {id}"));
+		classify_agent(descriptor, scope, project_root, &master)
+	}
+
+	#[test]
+	fn codex_global_is_native_reader() {
+		let plan = plan_for("codex", ResourceScope::GlobalOnly, None);
+		assert_eq!(
+			plan.need,
+			LinkNeed::NativeReader,
+			"codex reads ~/.agents/skills at global"
+		);
+		assert_eq!(plan.agent_id, "codex");
+	}
 }
