@@ -533,4 +533,49 @@ mod tests {
 			"foreign link must still resolve to its original target"
 		);
 	}
+
+	#[cfg(unix)]
+	#[test]
+	fn link_hard_errors_when_symlink_create_is_denied() {
+		use std::os::unix::fs::PermissionsExt;
+		use tempfile::tempdir;
+		// EACCES does not apply to root — skip there (matches removal.rs).
+		if unsafe { libc::geteuid() } == 0 {
+			return;
+		}
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/my-skill");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(master.join("SKILL.md"), "real").unwrap();
+		// Pre-create the agent dir 0o500 so creating the link inside EACCESes.
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		let original = std::fs::metadata(&claude).unwrap().permissions();
+		std::fs::set_permissions(
+			&claude,
+			std::fs::Permissions::from_mode(0o500),
+		)
+		.unwrap();
+
+		let result =
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Absolute);
+
+		std::fs::set_permissions(&claude, original).unwrap();
+
+		let err = result.unwrap_err();
+		assert!(
+			matches!(err, LinkError::LinkUnsupported { .. }),
+			"denied symlink must be a hard LinkUnsupported, got {err:?}"
+		);
+		// No link created; Master (written first) intact — no copy fallback.
+		assert!(
+			std::fs::symlink_metadata(claude.join("my-skill")).is_err(),
+			"no link must exist after a hard error (no copy fallback)"
+		);
+		assert_eq!(
+			std::fs::read_to_string(master.join("SKILL.md")).unwrap(),
+			"real",
+			"Master must be intact"
+		);
+	}
 }

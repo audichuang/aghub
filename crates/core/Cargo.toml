@@ -21,6 +21,7 @@ log = "0.4.31"
 [dev-dependencies]
 aghub-agents = { path = "../agents" }
 tempfile = { workspace = true }
+libc = { workspace = true }
 
 [features]
 default = [ "testing" ]
