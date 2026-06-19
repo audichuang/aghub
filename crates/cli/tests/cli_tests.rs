@@ -363,3 +363,41 @@ fn source_list_runs_with_no_agent_config() {
 		.assert()
 		.success();
 }
+
+/// Write a source dir containing one skill `<name>/SKILL.md` with frontmatter.
+fn write_source_skill(
+	root: &std::path::Path,
+	dir: &str,
+	name: &str,
+) -> std::path::PathBuf {
+	let skill_dir = root.join(dir);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
+	)
+	.unwrap();
+	skill_dir
+}
+
+#[test]
+fn source_diff_reports_not_installed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["source", "diff", "owner/repo"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(stdout.contains("alpha"), "stdout: {stdout}");
+	assert!(stdout.contains("notInstalled"), "stdout: {stdout}");
+}
