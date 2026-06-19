@@ -188,4 +188,29 @@ mod tests {
 			);
 		}
 	}
+
+	#[test]
+	fn agent_without_skill_support_is_unsupported() {
+		// jetbrains-ai has no skills scopes => no write dir, no master read.
+		let plan = plan_for("jetbrains-ai", ResourceScope::GlobalOnly, None);
+		assert_eq!(
+			plan.need,
+			LinkNeed::Unsupported,
+			"jetbrains-ai @global should be Unsupported (no skills dir)"
+		);
+		let plan_p = {
+			let tmp = tempfile::tempdir().unwrap();
+			let root = std::fs::canonicalize(tmp.path()).unwrap();
+			plan_for(
+				"jetbrains-ai",
+				ResourceScope::ProjectOnly,
+				Some(root.as_path()),
+			)
+		};
+		assert_eq!(
+			plan_p.need,
+			LinkNeed::Unsupported,
+			"jetbrains-ai @project should be Unsupported"
+		);
+	}
 }
