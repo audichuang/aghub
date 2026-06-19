@@ -325,14 +325,26 @@ fn install_universal_layout(
 		.collect();
 
 	// Copy-free install: materialize the Master (if absent) and link each
-	// NeedsLink agent. A pre-link invariant violation (NonAbsoluteTarget) or a
-	// Master-copy failure returns Err; per-agent link failures land in
-	// report.failed.
+	// NeedsLink agent. A hard Master-copy failure (e.g. ENOTDIR on the
+	// canonical parent) is converted to per-agent failures rather than
+	// propagated as Err; callers always get Ok with per-agent results.
 	let report =
-		install_universal(source_root, &canonical, &symlink_dirs, target)
-			.map_err(|e| {
-				crate::ConfigError::Io(std::io::Error::other(e.to_string()))
-			})?;
+		match install_universal(source_root, &canonical, &symlink_dirs, target)
+		{
+			Ok(r) => r,
+			Err(e) => {
+				let msg = e.to_string();
+				let results = target_agents
+					.iter()
+					.map(|&agent| AgentInstallResult {
+						agent,
+						installed: false,
+						error: Some(msg.clone()),
+					})
+					.collect();
+				return Ok((results, false));
+			}
+		};
 	// Per-agent link errors keyed by the agent's skills-dir (the link parent).
 	let failed_by_dir: std::collections::HashMap<std::path::PathBuf, String> =
 		report
@@ -349,6 +361,11 @@ fn install_universal_layout(
 	// silent `installed:true`.
 	let conflict_dirs: std::collections::HashSet<std::path::PathBuf> = report
 		.conflicts
+		.iter()
+		.filter_map(|link| link.parent().map(|p| p.to_path_buf()))
+		.collect();
+	let linked_dirs: std::collections::HashSet<std::path::PathBuf> = report
+		.linked
 		.iter()
 		.filter_map(|link| link.parent().map(|p| p.to_path_buf()))
 		.collect();
@@ -380,9 +397,12 @@ fn install_universal_layout(
 						),
 					}
 				} else {
+					// Fresh link in `report.linked` -> installed:true.
+					// Correct existing link in `report.already_linked` ->
+					// installed:false (idempotent, not a new install).
 					AgentInstallResult {
 						agent,
-						installed: true,
+						installed: linked_dirs.contains(agent_skills_dir),
 						error: None,
 					}
 				}

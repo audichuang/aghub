@@ -106,10 +106,17 @@ fn isolated_copy_installs_writes_global_lock_and_per_agent_result() {
 
 	set_skills_path_override("claude", None);
 
-	// (a) The skill landed in the agent's skills dir.
+	// (a) Under symlink-only, the agent dir entry is a link; the SKILL.md
+	// resolves through it to the global master in ~/.agents/skills/alpha.
+	let agent_skill_entry = agent_dir.path().join("alpha");
 	assert!(
-		agent_dir.path().join("alpha/SKILL.md").exists(),
-		"alpha/SKILL.md should be copied into the agent dir"
+		agent_skill_entry.join("SKILL.md").exists(),
+		"SKILL.md should be reachable via the agent dir link"
+	);
+	#[cfg(unix)]
+	assert!(
+		aghub_core::skills::linker::Linker::is_link(&agent_skill_entry),
+		"agent dir entry should be a symlink under symlink-only install"
 	);
 
 	// (b) One per-agent result, installed for Claude.
