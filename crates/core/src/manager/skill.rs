@@ -941,6 +941,86 @@ mod tests {
 		assert!(saved.canonical_path.is_some());
 	}
 
+	// no-copy regression: add_skill_from_path writes a .agents Master and a
+	// link in the agent dir, never a private copy (Locked Decision 1).
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_from_path_links_master_not_copy() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use crate::skills::linker::Linker;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		// Create a source skill directory with SKILL.md
+		let src = tmp.path().join("src/my-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: d\n---\nbody",
+		)
+		.unwrap();
+
+		mgr.add_skill_from_path(&src.join("SKILL.md")).unwrap();
+
+		let canonical = root.join(".agents/skills/my-skill");
+		let link = root.join(".claude/skills/my-skill");
+		assert!(canonical.join("SKILL.md").exists(), "Master materialized");
+		assert!(
+			Linker::is_link(&link),
+			"agent dir must hold a link to the Master, not a copy"
+		);
+	}
+
+	// GAP-2 no-copy regression: add_skill (manual-create) writes a .agents
+	// Master and a link in the agent dir, never a private copy, and records
+	// canonical_path (link provenance) -- proving the Task 25 add_skill ->
+	// add_skill_universal delegation (Locked Decision 1).
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_manual_create_links_master_not_copy() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use crate::skills::linker::Linker;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("manual-skill");
+		skill.description = Some("manual create test".to_string());
+		mgr.add_skill(skill).unwrap();
+
+		let canonical = root.join(".agents/skills/manual-skill");
+		let link = root.join(".claude/skills/manual-skill");
+		assert!(
+			canonical.join("SKILL.md").exists(),
+			"manual-create must materialize a .agents Master"
+		);
+		assert!(
+			Linker::is_link(&link),
+			"manual-create must link the agent dir to the Master, not copy"
+		);
+		// Link provenance, not copy provenance.
+		let recorded = mgr.get_skill("manual-skill").unwrap();
+		assert!(
+			recorded.canonical_path.is_some(),
+			"manual-create must record canonical_path (link provenance)"
+		);
+	}
+
 	#[test]
 	fn remove_skill_path_refuses_dir_outside_allowed_roots() {
 		// Defense-in-depth: the legacy copy-removal helper must never
