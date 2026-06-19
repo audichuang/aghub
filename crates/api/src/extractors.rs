@@ -34,6 +34,21 @@ pub struct ScopeParams {
 	pub project_root: Option<String>,
 }
 
+/// Resolve a possibly-relative project root to an ABSOLUTE path so the
+/// universal-master canonical dir is absolute (junction targets require it —
+/// spec Decision 6 / P0-C). Uses `canonicalize` when the path exists, else
+/// joins onto the current dir without requiring existence.
+pub fn absolutize_root(root: &str) -> PathBuf {
+	let p = PathBuf::from(root);
+	if p.is_absolute() {
+		return p;
+	}
+	if let Ok(canon) = std::fs::canonicalize(&p) {
+		return canon;
+	}
+	std::env::current_dir().map(|cwd| cwd.join(&p)).unwrap_or(p)
+}
+
 impl ScopeParams {
 	pub fn resolve(&self) -> Result<ResolvedScope, ApiError> {
 		let scope = self.scope.as_deref().unwrap_or("global");
@@ -48,7 +63,7 @@ impl ScopeParams {
 					)
 				})?;
 				Ok(ResolvedScope::Project {
-					root: PathBuf::from(root),
+					root: absolutize_root(root),
 				})
 			}
 			"all" => {
@@ -69,6 +84,27 @@ impl ScopeParams {
 				),
 				"INVALID_PARAM",
 			)),
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn resolve_project_absolutizes_relative_root() {
+		let params = ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some("relative/proj".to_string()),
+		};
+		match params.resolve().unwrap_or_else(|_| panic!("resolves")) {
+			ResolvedScope::Project { root } => assert!(
+				root.is_absolute(),
+				"project root must be absolutized, got {}",
+				root.display()
+			),
+			_ => panic!("expected Project scope"),
 		}
 	}
 }
