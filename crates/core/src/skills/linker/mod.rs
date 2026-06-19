@@ -278,6 +278,70 @@ fn create_link(
 	})
 }
 
+#[cfg(windows)]
+fn create_link(
+	requested_target: &Path,
+	abs_target: &Path,
+	link: &Path,
+) -> Result<(), LinkError> {
+	// Native symlink first (needs Dev Mode/admin); honors relative target.
+	if std::os::windows::fs::symlink_dir(requested_target, link).is_ok() {
+		return Ok(());
+	}
+	// Fallback: directory junction (no admin). MUST use the absolute target.
+	create_junction(abs_target, link)
+}
+
+/// Create a directory junction at `link` pointing at the ABSOLUTE `abs_target`
+/// via `cmd /C mklink /J`. Extracted as a named fn so tests can force the
+/// junction path regardless of Developer Mode. Ported/adapted from SM
+/// `create_windows_symlink` (junction arm); SM's pre-clean and GBK decoding are
+/// dropped (the caller guarantees an empty, non-clobbered slot). Create-only.
+#[cfg(windows)]
+pub(crate) fn create_junction(
+	abs_target: &Path,
+	link: &Path,
+) -> Result<(), LinkError> {
+	use std::os::windows::process::CommandExt;
+	use std::process::Command;
+
+	let link_norm = normalize_path(link);
+	let target_norm = normalize_path(abs_target);
+	let output = Command::new("cmd")
+		.args(["/C", "mklink", "/J"])
+		.arg(&link_norm)
+		.arg(&target_norm)
+		.creation_flags(0x08000000) // CREATE_NO_WINDOW
+		.output();
+
+	match output {
+		Ok(out) if out.status.success() => Ok(()),
+		Ok(out) => {
+			let stderr = String::from_utf8_lossy(&out.stderr);
+			let stdout = String::from_utf8_lossy(&out.stdout);
+			Err(LinkError::LinkUnsupported {
+				target: abs_target.to_path_buf(),
+				link: link.to_path_buf(),
+				source: io::Error::new(
+					io::ErrorKind::Other,
+					format!(
+						"mklink /J {} {} failed: {} {}",
+						link_norm.display(),
+						target_norm.display(),
+						stderr.trim(),
+						stdout.trim()
+					),
+				),
+			})
+		}
+		Err(source) => Err(LinkError::LinkUnsupported {
+			target: abs_target.to_path_buf(),
+			link: link.to_path_buf(),
+			source,
+		}),
+	}
+}
+
 #[cfg(not(any(unix, windows)))]
 fn create_link(
 	requested_target: &Path,
@@ -577,5 +641,46 @@ mod tests {
 			"real",
 			"Master must be intact"
 		);
+	}
+
+	#[cfg(windows)]
+	mod windows_specific {
+		use super::super::*;
+		use tempfile::tempdir;
+
+		// T-WIN-JUNCTION-DETECT: force the junction path directly so a junction
+		// is exercised even when Developer Mode would let symlink_dir succeed.
+		#[test]
+		fn create_junction_makes_a_reparse_point_recognized_by_is_link() {
+			let tmp = tempdir().unwrap();
+			let master = std::fs::canonicalize(tmp.path())
+				.unwrap()
+				.join(".agents\\skills\\my-skill");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(master.join("SKILL.md"), "real").unwrap();
+			let claude = std::fs::canonicalize(tmp.path())
+				.unwrap()
+				.join(".claude\\skills");
+			std::fs::create_dir_all(&claude).unwrap();
+			let link = claude.join("my-skill");
+
+			create_junction(&master, &link).unwrap();
+
+			assert!(Linker::is_link(&link), "junction must be a link");
+			assert!(
+				!std::fs::symlink_metadata(&link)
+					.unwrap()
+					.file_type()
+					.is_symlink(),
+				"a junction reports is_symlink()==false (0x0400 branch)"
+			);
+			// T-WIN-JUNCTION-REMOVE: unlink removes the junction, keeps Master.
+			Linker::unlink(&link).unwrap();
+			assert!(!Linker::is_link(&link), "junction must be gone");
+			assert!(
+				master.join("SKILL.md").exists(),
+				"Master must survive unlink (remove_dir, not remove_dir_all)"
+			);
+		}
 	}
 }
