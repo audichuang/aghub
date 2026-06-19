@@ -59,7 +59,10 @@ Module map (what each crate is + why it exists). Not an exhaustive file listing
 │   ├── skill/        # skill: .skill/zip packaging + npx-compatible lock files, content hashing
 │   ├── skill-update/ # skill-update: shared update-check orchestrator (group →
 │   │                 #   ls-refs preflight → treeless fetch → hash compare); used
-│   │                 #   by BOTH the API check route and CLI `check --online`
+│   │                 #   by BOTH the API check route and CLI `check --online`.
+│   │                 #   ALSO hosts the Sources domain service (`sources` mod:
+│   │                 #   list/diff/classify + injected Fetcher/TokenResolver),
+│   │                 #   consumed by the API sources routes AND CLI `source`
 │   ├── skills-sh/    # skills-sh: skills.sh registry HTTP client (search only)
 │   ├── inference/    # aghub-inference: inference providers (SQLite meta + keyring)
 │   ├── remote/       # aghub-remote: SSH remote VM mgmt (desktop Tauri layer, NOT the API)
@@ -154,6 +157,14 @@ aghub-cli [-a <agent>] [-g|--global] [-p|--project] [--all] [-v|--verbose] <comm
   check                               # offline: list installed skills with updates (read-only)
   apply-update                        # apply a locked skill update
   prune-lock                          # drop lock entries with no on-disk skill (dry-run by default; --yes)
+  source list                         # list installed sources (current project + global); --json
+  source diff <source>                # read-only per-skill state vs installed
+                                      #   (notInstalled/installedCurrent/installedOutdated/renamed/removed/
+                                      #    deprecated/uncheckable); --ref R, --json
+  source sync  <source>               # --install-missing (notInstalled only, excludes deprecated/renamed/removed)
+                                      #   and/or --update (installedOutdated only); dry-run default, --yes to apply;
+                                      #   scope -g|-p, install agent via -a <agent>, --universal, --ref R, --json.
+                                      #   credentials: GIT_PASSWORD / GITHUB_TOKEN (token-only)
   plugin <list|install|uninstall|update|enable|disable|prune|validate>   # Claude Code plugins
   plugin marketplace <add|remove|update|list>
   interactive                         # step-by-step wizard
