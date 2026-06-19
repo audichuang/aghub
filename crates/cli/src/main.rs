@@ -132,11 +132,11 @@ enum Commands {
 		#[arg(long, value_delimiter = ',')]
 		tools: Vec<String>,
 
-		/// For skill: universal layout — store the real file once in
-		/// `.agents/skills` and symlink the target agent (npx-style). Default is
-		/// an isolated copy in the agent's own skills dir (never touches
-		/// `.agents`).
-		#[arg(long)]
+		/// DEPRECATED — no-op. Installs are always symlink-only now: a single
+		/// `.agents/skills/<name>` master plus a per-agent link (npx-style). The
+		/// flag is accepted (so existing scripts don't error) but ignored; there
+		/// is no copy install path.
+		#[arg(long, hide = true)]
 		universal: bool,
 	},
 	/// Update an existing resource
