@@ -401,3 +401,106 @@ fn source_diff_reports_not_installed() {
 	assert!(stdout.contains("alpha"), "stdout: {stdout}");
 	assert!(stdout.contains("notInstalled"), "stdout: {stdout}");
 }
+
+#[cfg(unix)]
+#[test]
+fn source_sync_dry_run_writes_nothing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-g", "source", "sync", "owner/repo", "--install-missing"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// Nothing written: no claude skills dir entry, no global lock.
+	let agent_skill = home.path().join(".claude/skills/alpha");
+	assert!(!agent_skill.exists(), "dry-run must not install the skill");
+	let lock = state.path().join("skills/.skill-lock.json");
+	assert!(!lock.exists(), "dry-run must not create the global lock");
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_yes_installs_missing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let agent_skill = home.path().join(".claude/skills/alpha/SKILL.md");
+	assert!(agent_skill.exists(), "--yes must install the skill");
+
+	// A follow-up `source list` shows the source.
+	let list = isolated_cli(home.path(), state.path())
+		.args(["source", "list", "--json"])
+		.output()
+		.unwrap();
+	assert!(list.status.success());
+	let json: Value = serde_json::from_slice(&list.stdout).unwrap();
+	let raw = json.to_string();
+	assert!(raw.contains("owner/repo"), "source list: {raw}");
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_skips_deprecated_skill() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "deprecated/foo", "foo");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let agent_skill = home.path().join(".claude/skills/foo");
+	assert!(
+		!agent_skill.exists(),
+		"a deprecated skill must not be installed"
+	);
+}
