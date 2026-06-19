@@ -115,4 +115,18 @@ mod tests {
 			.expect("scope=all rejected");
 		assert_eq!(err.status, rocket::http::Status::BadRequest);
 	}
+
+	#[test]
+	fn coverage_route_is_mounted() {
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				crate::default_app_data_dir(),
+			))
+			.expect("rocket builds");
+		let resp = client
+			.get("/api/v1/skills/coverage?scope=global")
+			.dispatch();
+		assert_eq!(resp.status(), rocket::http::Status::Ok);
+	}
 }

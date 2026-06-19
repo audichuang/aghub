@@ -40,7 +40,7 @@ impl ApiOptions {
 	}
 }
 
-fn default_app_data_dir() -> PathBuf {
+pub(crate) fn default_app_data_dir() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(std::env::temp_dir)
 		.join("aghub")
@@ -96,7 +96,7 @@ impl Fairing for ApiLogFairing {
 	}
 }
 
-fn build_rocket(
+pub(crate) fn build_rocket(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
 ) -> rocket::Rocket<rocket::Build> {
@@ -215,6 +215,7 @@ fn build_rocket(
 				routes::skills_update::apply_skill_update,
 				routes::sources::list_sources,
 				routes::sources::diff_source,
+				routes::coverage::skills_coverage,
 				routes::plugins::list_plugins,
 				routes::plugins::get_plugin_detail,
 				routes::plugins::enable_plugin,
