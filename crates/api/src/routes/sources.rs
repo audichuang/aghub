@@ -155,7 +155,6 @@ pub async fn diff_source(
 	let resolved = scope_params.resolve()?;
 	let scopes = scopes_for(&resolved);
 	let source = query.source.trim().to_string();
-	let query_git_ref = query.git_ref.clone();
 
 	// Fetch + discover + classify on a blocking thread (sync git IO, and the
 	// materialized temp dir must outlive discovery + hashing). The shared
@@ -163,7 +162,7 @@ pub async fn diff_source(
 	// Keychain token after a failure.
 	let input = SourceDiffInput {
 		source: source.clone(),
-		git_ref: query_git_ref.clone(),
+		git_ref: query.git_ref.clone(),
 		scopes,
 	};
 	let outcome = rocket::tokio::task::spawn_blocking(move || {
@@ -194,13 +193,15 @@ pub async fn diff_source(
 				skills: skills.into_iter().map(map_diff_to_dto).collect(),
 			}))
 		}
-		SourceDiffOutcome::NeedsCredential => Ok(Json(SourceDiffResponse {
-			source,
-			git_ref: query_git_ref,
-			session_id: None,
-			needs_credential: true,
-			skills: Vec::new(),
-		})),
+		SourceDiffOutcome::NeedsCredential { git_ref } => {
+			Ok(Json(SourceDiffResponse {
+				source,
+				git_ref,
+				session_id: None,
+				needs_credential: true,
+				skills: Vec::new(),
+			}))
+		}
 		SourceDiffOutcome::FetchFailed => Err(ApiError::new(
 			Status::BadGateway,
 			"Failed to fetch source repository",

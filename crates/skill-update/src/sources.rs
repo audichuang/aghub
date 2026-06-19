@@ -92,7 +92,12 @@ pub enum SourceDiffOutcome {
 		git_ref: Option<String>,
 		skills: Vec<SourceSkillDiff>,
 	},
-	NeedsCredential,
+	/// Resolved `git_ref` (query override -> recorded ref -> None) -- same as
+	/// `Ok`, so the API response keeps the recorded-ref fallback on a
+	/// credential miss.
+	NeedsCredential {
+		git_ref: Option<String>,
+	},
 	FetchFailed,
 	/// Local/ssh/unsupported scheme — known before any fetch. Carries the
 	/// resolved git_ref too (the old route returned it on the early-out).
@@ -746,7 +751,7 @@ pub fn diff_source(
 		ref_: git_ref.clone(),
 	};
 	match fetch_source_with_resolver(&source_ref, deps.fetcher, deps.resolver) {
-		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential,
+		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential { git_ref },
 		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
 		Ok(repo) => SourceDiffOutcome::Ok {
 			git_ref,
@@ -1313,6 +1318,44 @@ mod diff_tests {
 		}
 	}
 
+	/// A [`Fetcher`] that records the `ref_` it was asked to fetch so a test
+	/// can assert the resolved ref handed to the fetch (recorded-ref fallback).
+	struct RefCapturingFetcher {
+		root: std::path::PathBuf,
+		seen_ref: std::sync::Mutex<Option<Option<String>>>,
+	}
+	impl Fetcher for RefCapturingFetcher {
+		fn fetch(
+			&self,
+			sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			*self.seen_ref.lock().unwrap() = Some(sr.ref_.clone());
+			Ok(crate::FetchedRepo {
+				root: self.root.clone(),
+				oid: "test-oid".to_string(),
+				_guard: None,
+			})
+		}
+	}
+
+	/// Write a project lock entry recording a non-default ref for `source`.
+	fn write_project_lock_entry(root: &Path, source: &str, ref_name: &str) {
+		let mut lock = skill::LocalSkillLockFile::new();
+		lock.skills.insert(
+			"s".to_string(),
+			skill::LocalSkillLockEntry {
+				source: source.to_string(),
+				ref_name: Some(ref_name.to_string()),
+				source_type: "github".to_string(),
+				skill_path: Some("s/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			},
+		);
+		skill::write_local_lock(&lock, Some(root)).unwrap();
+	}
+
 	fn write_skill(root: &Path, relative_dir: &str, name: &str) {
 		let dir = root.join(relative_dir);
 		fs::create_dir_all(&dir).unwrap();
@@ -1356,5 +1399,73 @@ mod diff_tests {
 			}
 			other => panic!("expected Ok, got {other:?}"),
 		}
+	}
+
+	#[test]
+	fn merged_baseline_surfaces_recorded_ref_for_fallback() {
+		// A skill installed from a tag/feature-branch records its ref; the
+		// baseline builder must surface it so `diff_source` can fall back to
+		// it when no explicit ref is requested.
+		let project = TempDir::new().unwrap();
+		let source = "owner/recorded-ref-baseline";
+		write_project_lock_entry(project.path(), source, "v1.2.3");
+
+		let (_baseline, _source_type, recorded_ref) =
+			merged_baseline_for_source(
+				&[SourceScope::Project {
+					root: project.path().to_path_buf(),
+				}],
+				source,
+			);
+
+		assert_eq!(recorded_ref.as_deref(), Some("v1.2.3"));
+	}
+
+	#[test]
+	fn diff_source_falls_back_to_recorded_ref_when_input_ref_none() {
+		// input git_ref None + a lock entry with a recorded ref => the resolved
+		// git_ref (surfaced on the outcome AND handed to the fetch) must be the
+		// recorded ref, not None / the default branch. Without the fallback the
+		// fetch would receive None and the outcome would carry None.
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+		let project = TempDir::new().unwrap();
+		let source = "owner/recorded-ref-diff";
+		write_project_lock_entry(project.path(), source, "v9.9.9");
+
+		let fetcher = RefCapturingFetcher {
+			root: upstream.path().to_path_buf(),
+			seen_ref: std::sync::Mutex::new(None),
+		};
+		let resolver = NoToken;
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: source.to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Project {
+					root: project.path().to_path_buf(),
+				}],
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		match outcome {
+			SourceDiffOutcome::Ok { git_ref, .. } => {
+				assert_eq!(
+					git_ref.as_deref(),
+					Some("v9.9.9"),
+					"outcome must carry the recorded ref as the resolved ref"
+				);
+			}
+			other => panic!("expected Ok, got {other:?}"),
+		}
+		assert_eq!(
+			fetcher.seen_ref.lock().unwrap().clone(),
+			Some(Some("v9.9.9".to_string())),
+			"fetch must be issued at the recorded ref, not the default branch"
+		);
 	}
 }
