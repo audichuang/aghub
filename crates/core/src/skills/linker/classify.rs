@@ -259,4 +259,31 @@ mod tests {
 		);
 		assert_totality(&plans);
 	}
+
+	#[test]
+	fn classify_canonicalizes_both_sides() {
+		let tmp = tempfile::tempdir().unwrap();
+		// Deliberately use the RAW (possibly /var-symlinked) temp path as the
+		// project_root, but a CANONICALIZED master skills-dir.
+		let raw_root = tmp.path();
+		let canon_root = std::fs::canonicalize(raw_root).unwrap();
+		let master =
+			universal_canonical_dir(Some(canon_root.as_path())).unwrap();
+		let codex = registry::ALL_AGENTS
+			.iter()
+			.find(|d| d.id == "codex")
+			.unwrap();
+		let plan = classify_agent(
+			codex,
+			ResourceScope::ProjectOnly,
+			Some(raw_root),
+			&master,
+		);
+		assert_eq!(
+			plan.need,
+			LinkNeed::NativeReader,
+			"codex @project must be NativeReader even when project_root is the \
+			 raw (un-canonicalized) temp path and master is canonicalized"
+		);
+	}
 }
