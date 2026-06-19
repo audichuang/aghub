@@ -118,7 +118,6 @@ const EXCLUDE_DIRS: &[&str] = &[".git", "__pycache__", "__pypackages__"];
 ///
 /// NOTE: this copy materializes the single Master only; it is NOT a per-agent
 /// copy fallback. The converged install model bans copy as a per-agent outcome.
-#[cfg_attr(not(test), allow(dead_code))]
 fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 	std::fs::create_dir_all(to)?;
 	for entry in std::fs::read_dir(from)? {
@@ -151,6 +150,95 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 		}
 	}
 	Ok(())
+}
+
+/// What a symlink-only install did on disk. There is NO `copied_fallback`
+/// field — the converged model bans copy. Per-agent hard failures land in
+/// `failed` (Decision 10), never as an `Err` from the convenience layer.
+#[derive(Debug, Default)]
+pub struct UniversalInstallReport {
+	/// `.agents/skills/<name>` master SKILL-DIR.
+	pub canonical: PathBuf,
+	/// Agent skills-dirs where a fresh link to the master was created.
+	pub linked: Vec<PathBuf>,
+	/// Agent skills-dirs where a correct link already existed (idempotent).
+	pub already_linked: Vec<PathBuf>,
+	/// Agent skills-dirs left untouched: a real file/dir or foreign link
+	/// occupied the slot (never clobbered).
+	pub conflicts: Vec<PathBuf>,
+	/// Per-agent hard link failures (Decision 10): NOT propagated as `Err`.
+	pub failed: Vec<(PathBuf, LinkError)>,
+}
+
+/// Materialize the Master from `source_root` (npx-identical copy +
+/// exclusions) if absent, then link each agent skills-dir. A per-agent
+/// link hard-error is collected into `report.failed`, NOT returned as
+/// `Err`. `Err(LinkError)` is reserved for pre-link invariant violations
+/// (`NonAbsoluteTarget`) or the Master copy itself failing.
+pub fn install_universal(
+	source_root: &Path,
+	canonical: &Path,
+	agent_skills_dirs: &[PathBuf],
+	target: LinkTarget,
+) -> Result<UniversalInstallReport, LinkError> {
+	if !canonical.is_absolute() {
+		return Err(LinkError::NonAbsoluteTarget {
+			target: canonical.to_path_buf(),
+		});
+	}
+	if !canonical.exists() {
+		if let Some(parent) = canonical.parent() {
+			std::fs::create_dir_all(parent)?;
+		}
+		copy_dir_recursive(source_root, canonical)?;
+	}
+	link_agents_to_canonical(canonical, agent_skills_dirs, target)
+}
+
+/// Link each agent skills-dir to an already-materialized Master. Same
+/// per-agent-soft-fail contract as [`install_universal`].
+pub fn link_agents_to_canonical(
+	canonical: &Path,
+	agent_skills_dirs: &[PathBuf],
+	target: LinkTarget,
+) -> Result<UniversalInstallReport, LinkError> {
+	if !canonical.is_absolute() {
+		return Err(LinkError::NonAbsoluteTarget {
+			target: canonical.to_path_buf(),
+		});
+	}
+	let name = canonical
+		.file_name()
+		.ok_or_else(|| {
+			LinkError::Io(io::Error::new(
+				io::ErrorKind::InvalidInput,
+				format!(
+					"canonical path has no final component: {}",
+					canonical.display()
+				),
+			))
+		})?
+		.to_string_lossy()
+		.into_owned();
+
+	let mut report = UniversalInstallReport {
+		canonical: canonical.to_path_buf(),
+		..Default::default()
+	};
+
+	for agent_dir in agent_skills_dirs {
+		let link_path = agent_dir.join(&name);
+		match Linker::link(canonical, agent_dir, &name, target) {
+			Ok(LinkOutcome::Linked) => report.linked.push(link_path),
+			Ok(LinkOutcome::AlreadyLinked) => {
+				report.already_linked.push(link_path)
+			}
+			Ok(LinkOutcome::Conflict) => report.conflicts.push(link_path),
+			Err(e) => report.failed.push((link_path, e)),
+		}
+	}
+
+	Ok(report)
 }
 
 /// Zero-sized, stateless namespace for the directory-link primitives.
@@ -641,6 +729,84 @@ mod tests {
 			"real",
 			"Master must be intact"
 		);
+	}
+
+	fn make_source(base: &Path) -> PathBuf {
+		let src = base.join("src/my-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: x\n---\nbody",
+		)
+		.unwrap();
+		std::fs::create_dir_all(src.join("assets")).unwrap();
+		std::fs::write(src.join("assets/a.txt"), "hello").unwrap();
+		src
+	}
+
+	#[test]
+	fn install_universal_materializes_master_and_links_each_agent() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let src = make_source(&root);
+		let canonical = root.join(".agents/skills/my-skill");
+		let claude = root.join(".claude/skills");
+
+		let report = install_universal(
+			&src,
+			&canonical,
+			std::slice::from_ref(&claude),
+			LinkTarget::Absolute,
+		)
+		.unwrap();
+
+		assert!(canonical.join("SKILL.md").exists());
+		assert!(canonical.join("assets/a.txt").exists());
+		let link = claude.join("my-skill");
+		assert!(Linker::is_link(&link));
+		assert_eq!(report.linked, vec![link]);
+		assert!(report.already_linked.is_empty());
+		assert!(report.conflicts.is_empty());
+		assert!(report.failed.is_empty());
+		assert_eq!(report.canonical, canonical);
+	}
+
+	#[test]
+	fn install_universal_rejects_non_absolute_canonical() {
+		let report = install_universal(
+			Path::new("/does/not/matter"),
+			Path::new("rel/.agents/skills/x"),
+			&[PathBuf::from("/tmp/agent")],
+			LinkTarget::Absolute,
+		);
+		let err = report.unwrap_err();
+		assert!(matches!(err, LinkError::NonAbsoluteTarget { .. }));
+	}
+
+	#[test]
+	fn link_agents_to_canonical_folds_per_agent_into_report() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let canonical = root.join(".agents/skills/my-skill");
+		std::fs::create_dir_all(&canonical).unwrap();
+		std::fs::write(canonical.join("SKILL.md"), "real").unwrap();
+		let claude = root.join(".claude/skills");
+		let occupied = claude.join("my-skill");
+		std::fs::create_dir_all(&occupied).unwrap();
+		std::fs::write(occupied.join("SKILL.md"), "pre").unwrap();
+
+		let report = link_agents_to_canonical(
+			&canonical,
+			std::slice::from_ref(&claude),
+			LinkTarget::Absolute,
+		)
+		.unwrap();
+
+		assert!(report.linked.is_empty());
+		assert_eq!(report.conflicts, vec![occupied]);
+		assert!(report.failed.is_empty());
 	}
 
 	#[cfg(windows)]
