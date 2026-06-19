@@ -464,4 +464,73 @@ mod tests {
 			"metadata.json must be excluded"
 		);
 	}
+
+	#[test]
+	fn link_is_idempotent_on_existing_correct_link() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/my-skill");
+		std::fs::create_dir_all(&master).unwrap();
+		let claude = tmp.path().join(".claude/skills");
+
+		let first =
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Absolute)
+				.unwrap();
+		let second =
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Absolute)
+				.unwrap();
+
+		assert_eq!(first, LinkOutcome::Linked);
+		assert_eq!(second, LinkOutcome::AlreadyLinked);
+	}
+
+	#[test]
+	fn link_never_clobbers_a_real_directory() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/my-skill");
+		std::fs::create_dir_all(&master).unwrap();
+		let claude = tmp.path().join(".claude/skills");
+		let occupied = claude.join("my-skill");
+		std::fs::create_dir_all(&occupied).unwrap();
+		std::fs::write(occupied.join("SKILL.md"), "pre-existing").unwrap();
+
+		let outcome =
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Absolute)
+				.unwrap();
+
+		assert_eq!(outcome, LinkOutcome::Conflict);
+		assert!(!Linker::is_link(&occupied), "must stay a real dir");
+		assert_eq!(
+			std::fs::read_to_string(occupied.join("SKILL.md")).unwrap(),
+			"pre-existing"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn link_never_clobbers_a_foreign_link() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/my-skill");
+		std::fs::create_dir_all(&master).unwrap();
+		let other = tmp.path().join("somewhere-else");
+		std::fs::create_dir_all(&other).unwrap();
+		std::fs::write(other.join("foreign.txt"), "foreign").unwrap();
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		let slot = claude.join("my-skill");
+		std::os::unix::fs::symlink(&other, &slot).unwrap();
+
+		let outcome =
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Absolute)
+				.unwrap();
+
+		assert_eq!(outcome, LinkOutcome::Conflict);
+		assert_eq!(
+			std::fs::read_to_string(slot.join("foreign.txt")).unwrap(),
+			"foreign",
+			"foreign link must still resolve to its original target"
+		);
+	}
 }
