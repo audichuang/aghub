@@ -273,6 +273,45 @@ enum Commands {
 		#[command(subcommand)]
 		action: plugin::PluginAction,
 	},
+	/// Manage skill sources (git repos you've installed skills from)
+	Source {
+		#[command(subcommand)]
+		action: SourceAction,
+	},
+}
+
+/// Actions for the `source` subcommand group.
+#[derive(clap::Subcommand)]
+pub enum SourceAction {
+	/// List installed skill sources
+	List {
+		#[arg(long)]
+		json: bool,
+	},
+	/// Show how a source differs from its installed skills
+	Diff {
+		source: String,
+		#[arg(long = "ref", alias = "git-ref")]
+		git_ref: Option<String>,
+		#[arg(long)]
+		json: bool,
+	},
+	/// Sync installed skills with a source
+	Sync {
+		source: String,
+		#[arg(long = "ref", alias = "git-ref")]
+		git_ref: Option<String>,
+		#[arg(long)]
+		update: bool,
+		#[arg(long)]
+		install_missing: bool,
+		#[arg(long)]
+		universal: bool,
+		#[arg(long)]
+		yes: bool,
+		#[arg(long)]
+		json: bool,
+	},
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
@@ -288,6 +327,19 @@ fn main() -> Result<()> {
 
 	// Set global verbose flag
 	set_verbose(cli.verbose);
+
+	// `source` operates on installed skills / git sources, not on a single
+	// agent's config. Dispatch it BEFORE the `-a all` special-case and the
+	// adapter/ConfigManager setup so it never fails on a missing agent config.
+	if let Commands::Source { action } = &cli.command {
+		return commands::source::execute(
+			action,
+			cli.global,
+			cli.project,
+			cli.all,
+			&cli.agent,
+		);
+	}
 
 	// Handle --agent all: iterate all registered agents
 	if cli.agent == "all" {
@@ -501,6 +553,10 @@ fn main() -> Result<()> {
 				));
 			}
 			plugin::execute(action)
+		}
+		// Dispatched earlier in `main`, before adapter/manager setup.
+		Commands::Source { .. } => {
+			unreachable!("`source` is dispatched before agent-config setup")
 		}
 	}
 }
