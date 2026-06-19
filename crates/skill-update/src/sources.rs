@@ -113,8 +113,76 @@ pub struct SourceDiffDeps<'a> {
 	pub resolver: &'a dyn TokenResolver,
 }
 
-pub fn list_sources(_input: SourceListInput) -> Vec<SourceSummary> {
-	todo!("Task 1.2")
+pub fn list_sources(input: SourceListInput) -> Vec<SourceSummary> {
+	let mut sources = Vec::new();
+	for scope in &input.scopes {
+		match scope {
+			SourceScope::Global => sources.extend(global_sources()),
+			SourceScope::Project { root } => {
+				sources.extend(project_sources(root))
+			}
+		}
+	}
+	sources
+}
+
+/// Group the global lock's skills by source (the global lock carries
+/// `sourceUrl`).
+fn global_sources() -> Vec<SourceSummary> {
+	// source (owner/repo) -> (source_url, source_type, count)
+	let mut by_source: BTreeMap<String, (String, String, u32)> =
+		BTreeMap::new();
+	for (_name, entry) in skill::get_all_locked_skills() {
+		let agg = by_source.entry(entry.source.clone()).or_insert_with(|| {
+			(entry.source_url.clone(), entry.source_type.clone(), 0)
+		});
+		agg.2 += 1;
+	}
+	by_source
+		.into_iter()
+		.map(
+			|(source, (source_url, source_type, skill_count))| SourceSummary {
+				source,
+				source_url,
+				source_type,
+				scope: SourceScopeKind::Global,
+				skill_count,
+			},
+		)
+		.collect()
+}
+
+/// Group a project lock's skills by source. The project lock omits `sourceUrl`,
+/// so the fetch URL is reconstructed from `owner/repo` (GitHub etc.).
+fn project_sources(root: &Path) -> Vec<SourceSummary> {
+	let lock = skill::read_local_lock(Some(root));
+	// source (owner/repo) -> (source_type, count)
+	let mut by_source: BTreeMap<String, (String, u32)> = BTreeMap::new();
+	for (_name, entry) in lock.skills {
+		let agg = by_source
+			.entry(entry.source.clone())
+			.or_insert_with(|| (entry.source_type.clone(), 0));
+		agg.1 += 1;
+	}
+	by_source
+		.into_iter()
+		.map(|(source, (source_type, skill_count))| {
+			let source_url = reconstruct_source_url(&source);
+			SourceSummary {
+				source,
+				source_url,
+				source_type,
+				scope: SourceScopeKind::Project,
+				skill_count,
+			}
+		})
+		.collect()
+}
+
+fn reconstruct_source_url(source: &str) -> String {
+	aghub_git::resolve_remote_source(source)
+		.map(|resolved| resolved.clone_url)
+		.unwrap_or_else(|_| source.to_string())
 }
 
 pub fn fetch_source_with_resolver(
@@ -153,4 +221,16 @@ pub fn diff_source(
 	_deps: SourceDiffDeps<'_>,
 ) -> SourceDiffOutcome {
 	todo!("Task 1.4")
+}
+
+#[cfg(test)]
+mod list_tests {
+	use super::*;
+	#[test]
+	fn list_sources_global_only_all_global_scope() {
+		let out = list_sources(SourceListInput {
+			scopes: vec![SourceScope::Global],
+		});
+		assert!(out.iter().all(|s| s.scope == SourceScopeKind::Global));
+	}
 }
