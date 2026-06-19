@@ -1,9 +1,9 @@
 # Upstream Sync Log
 
 A living, **complete** record of how this fork has handled every upstream-only
-commit — ported, deferred, skipped, or N/A — so nothing is silently forgotten.
-Append/maintain this on every sync. Provenance also lives in commit messages, but
-this is the discoverable, durable home.
+commit — ported, already-present, deferred, skipped, or N/A — so nothing is
+silently forgotten. Maintain this on every sync. Provenance also lives in commit
+messages, but this is the discoverable, durable home.
 
 ## ⚠️ Two different "upstreams" — don't confuse them
 
@@ -19,18 +19,33 @@ this is the discoverable, durable home.
 - This fork ships its **own** version line (currently `v2.1.x`), independent of upstream.
 - `git remote`: `upstream = https://github.com/AkaraChen/aghub.git`.
 - **merge-base** with upstream: `ca48d93`.
-- **Last full review**: upstream `main` @ `714b971` — **50 upstream-only commits** since
-  `ca48d93` (2026-06). Every one is dispositioned below.
+- **Last full review**: upstream `main` @ `714b971` — **52 upstream-only commits** since
+  `ca48d93` (2026-06). Tally: 5 ported now · 5 already-present · 4 deferred (security)
+  · 1 deferred (release CI) · 3 skipped (product) · 2 upstream-tests · 1 partial · 2
+  upstream-internal · 29 dependency bumps. Every one is dispositioned below.
 
-## ✅ Ported
+## ✅ Ported in this fork's v2.1.3 / v2.1.4 work
 
-| When                   | Upstream           | Our commit | Crate      | What                                                                                                                            |
-| ---------------------- | ------------------ | ---------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| 2026-06 (v2.1.3/2.1.4) | `3ad9f1c`          | `b5a7857`  | core       | copy-mode skill import preserves the full source tree (scripts/refs/assets/body), not just a synthesized `SKILL.md`             |
-| 2026-06                | `52a938c`          | `37ca1e7`  | cc-plugins | tarball extraction path validation (zip-slip / `..` / absolute / symlink / hardlink)                                            |
-| 2026-06                | `ffeec65`          | `a1ee462`  | agents     | Codex sub-agent I/O hardening (O_NOFOLLOW read + staging-temp/rename write)                                                     |
-| 2026-06                | `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`) |
-| 2026-06                | `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                 |
+| Upstream           | Our commit | Crate      | What                                                                                                                            |
+| ------------------ | ---------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `3ad9f1c`          | `b5a7857`  | core       | copy-mode skill import preserves the full source tree (scripts/refs/assets/body), not just a synthesized `SKILL.md`             |
+| `52a938c`          | `37ca1e7`  | cc-plugins | tarball extraction path validation (zip-slip / `..` / absolute / symlink / hardlink)                                            |
+| `ffeec65`          | `a1ee462`  | agents     | Codex sub-agent I/O hardening (O_NOFOLLOW read + staging-temp/rename write)                                                     |
+| `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`) |
+| `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                 |
+
+## ✅ Already present in this fork (implemented earlier, independent of the v2.1.3/2.1.4 work)
+
+Verified by code inspection (`git show` on both sides), not titles. These are NOT
+exact patch-id matches — they were re-implemented in our own commits:
+
+| Upstream  | Our commit | What                                                                            |
+| --------- | ---------- | ------------------------------------------------------------------------------- |
+| `bcba0fd` | `2d420a1`  | Windows tray + autostart (tray setup + autostart plugin + UI toggle)            |
+| `1cf2386` | `bff88ba`  | stop console windows flashing on Windows subprocess spawns (`CREATE_NO_WINDOW`) |
+| `99d9b9d` | `ac7a455`  | market table installs header single-line                                        |
+| `da760f4` | `fd07e07`  | show real install counts + sort market by installs                              |
+| `426628e` | `199a280`  | sort enabled plugins on top of the plugin list                                  |
 
 ## ✅ Our hardening beyond upstream (found via review / CI, not in upstream)
 
@@ -47,17 +62,22 @@ this is the discoverable, durable home.
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `43acac8` API token auth (`ApiAuth`) + `109e343` `TrustedLocalOrigin` | Collides with this fork's multi-connection / SSH-remote server model (token injection over the SSH tunnel). The API is same-host-trusted for now — see `crates/api/AGENTS.md` CORS note. Revisit. |
 | (CORS tightening — part of the same change)                           | Tied to the token-auth work above; deferred together.                                                                                                                                             |
-| `1858167` validate GitHub marketplace manifests (cc-plugins)          | Low blast radius; not yet ported. Reasonable next port.                                                                                                                                           |
-| `9ba3a64` harden deep-link MCP import review (desktop consent UI)     | Frontend UX guard; not yet ported.                                                                                                                                                                |
+| `1858167` validate GitHub marketplace manifests (cc-plugins)          | Low blast radius; not yet ported. Reasonable next port — `crates/cc-plugins/.../marketplace/source.rs` lacks the host check.                                                                      |
+| `9ba3a64` harden deep-link MCP import review (desktop consent UI)     | Frontend executable-MCP consent guard; not yet ported.                                                                                                                                            |
+
+## ⏸️ Deferred — release / CI hardening
+
+| Upstream                                     | Why not yet                                                                                                                                                               |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `398c7e8` validate Homebrew release tag (CI) | Release-tag-format validation for the Homebrew job. Our `release.yml` doesn't have it yet — low risk on a personal tap, but a reasonable hardening. Port when convenient. |
 
 ## ⏭️ Skipped — product choices (revisit per roadmap)
 
-| Upstream                                          | Note                                                     |
-| ------------------------------------------------- | -------------------------------------------------------- |
-| `324b2ba` inference: agent provider model routing | Feature; self-contained but not a product priority here. |
-| `3af4a98` desktop: PostHog analytics              | We don't want bundled analytics by default.              |
-| `e8f94ab` desktop: 'auto-check updates' setting   | Optional UX; skipped.                                    |
-| `bcba0fd` Windows tray + autostart                | Platform UX; skipped.                                    |
+| Upstream                                          | Note                                                                         |
+| ------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `324b2ba` inference: agent provider model routing | Feature; self-contained but not a product priority here.                     |
+| `3af4a98` desktop: PostHog analytics              | We don't want bundled analytics by default (no PostHog symbols in our tree). |
+| `e8f94ab` desktop: 'auto-check updates' setting   | Optional UX; skipped.                                                        |
 
 ## 🧪 Upstream tests — covered by our own, not separately ported
 
@@ -66,16 +86,11 @@ this is the discoverable, durable home.
 | `f04f142` route-level mutation coverage | We wrote our own route-level tests alongside the ported fixes (`crates/api` mod tests). |
 | `f34a95c` harden route mutation tests   | Same — superseded by our test coverage for the ported routes.                           |
 
-## 🖥️ Desktop / release polish — not ported (low priority; verify before porting, some may already exist independently)
+## 🟡 Partially present — revisit if needed
 
-| Upstream                                                             |
-| -------------------------------------------------------------------- |
-| `88dc33e` keep starred skills on top across ungrouped lists          |
-| `1cf2386` stop console windows flashing on Windows subprocess spawns |
-| `99d9b9d` keep market table installs header single-line              |
-| `da760f4` show real install counts + sort market by installs         |
-| `426628e` sort enabled plugins on top of plugin list                 |
-| `398c7e8` validate homebrew release tag (CI)                         |
+| Upstream                                                    | Status                                                                                                         |
+| ----------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `88dc33e` keep starred skills on top across ungrouped lists | Only partially similar; our code still keeps single-item / unknown ungrouped lists separate. Not a full match. |
 
 ## 🔧 Upstream-internal — N/A to this fork
 
@@ -84,12 +99,12 @@ this is the discoverable, durable home.
 | `b014ccb` init: skill           | Upstream repo housekeeping.                           |
 | `e1080c2` chore: release v1.2.2 | Upstream's own release commit (our line is separate). |
 
-## 📦 Dependency bumps — not individually tracked
+## 📦 Dependency bumps — not individually tracked (29)
 
-The remaining ~25 commits are `chore(deps*)` version bumps plus `d5668ed`
-(KIT-43 catalog centralization) and `5b44a26` (align react-dom with react). We
-bump dependencies on our own cadence; not mirrored one-for-one. Re-evaluate in bulk
-during a sync if a security advisory or a needed feature lands upstream.
+27 `chore(deps*)` version bumps + `d5668ed` (KIT-43 catalog centralization) +
+`5b44a26` (align react-dom with react). We bump dependencies on our own cadence;
+not mirrored one-for-one. Re-evaluate in bulk during a sync if a security advisory
+or a needed feature lands upstream.
 
 ## Fork-divergence adaptations (why our ports are not verbatim copies)
 
@@ -108,11 +123,14 @@ assert_contained}` instead of upstream's parallel `copy_dir_recursive` / `canoni
 
 ```bash
 git fetch upstream main
-git log --no-merges --oneline ca48d93..upstream/main     # full upstream-only list
+git log --no-merges --oneline ca48d93..upstream/main     # full upstream-only list + count
+git log --no-merges --cherry-pick --right-only ca48d93...upstream/main   # not-yet-equivalent
 git show <sha>                                            # inspect a candidate
-# Port (reuse our infra where it diverges) → run `just preflight` → push → CI green
-# on all 3 platforms → then:
-#   1. add a row to the ✅ Ported table (upstream SHA ↔ our commit)
-#   2. move/adjust its row out of the other sections
-#   3. bump "Last full review" + merge-base SHAs above
+# For "is it already here?" check our own history by content, not by title:
+git log --oneline -S '<distinctive snippet>' -- <path>
+# Port (reuse our infra where it diverges) → `just preflight` → push → CI green
+# on all 3 platforms → then update this file:
+#   1. add a row to ✅ Ported (upstream SHA ↔ our commit) OR ✅ Already-present
+#   2. remove it from the other sections
+#   3. bump "Last full review" SHA + the tally count above
 ```
