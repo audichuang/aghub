@@ -156,4 +156,36 @@ mod tests {
 			claude.need
 		);
 	}
+
+	#[test]
+	fn amp_kimi_global_needs_link_but_project_is_native() {
+		// At GLOBAL scope the universal flag appends the XDG dir
+		// (~/.config/agents/skills), NOT ~/.agents/skills, so Amp/Kimi do NOT
+		// read the global master and must be linked.
+		for id in ["amp", "kimi"] {
+			let plan = plan_for(id, ResourceScope::GlobalOnly, None);
+			assert!(
+				matches!(plan.need, LinkNeed::NeedsLink { .. }),
+				"{id} @global should NeedsLink (XDG != ~/.agents/skills), \
+				 got {:?}",
+				plan.need
+			);
+		}
+
+		// At PROJECT scope the universal flag appends
+		// project_root/.agents/skills == the canonical master, so they ARE
+		// NativeReaders.
+		let tmp = tempfile::tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		for id in ["amp", "kimi"] {
+			let plan =
+				plan_for(id, ResourceScope::ProjectOnly, Some(root.as_path()));
+			assert_eq!(
+				plan.need,
+				LinkNeed::NativeReader,
+				"{id} @project should be NativeReader (project .agents/skills \
+				 == canonical)"
+			);
+		}
+	}
 }
