@@ -100,8 +100,12 @@ pub fn classify_all(
 	project_root: Option<&Path>,
 	master_skills_dir: &Path,
 ) -> Vec<AgentLinkPlan> {
-	let _ = (scope, project_root, master_skills_dir);
-	unimplemented!()
+	crate::registry::ALL_AGENTS
+		.iter()
+		.map(|descriptor| {
+			classify_agent(descriptor, scope, project_root, master_skills_dir)
+		})
+		.collect()
 }
 
 #[cfg(test)]
@@ -212,5 +216,47 @@ mod tests {
 			LinkNeed::Unsupported,
 			"jetbrains-ai @project should be Unsupported"
 		);
+	}
+
+	fn assert_totality(plans: &[AgentLinkPlan]) {
+		assert_eq!(
+			plans.len(),
+			registry::ALL_AGENTS.len(),
+			"classify_all must cover every registered agent"
+		);
+		for plan in plans {
+			let auto_covered = matches!(plan.need, LinkNeed::NativeReader);
+			let needs_link = matches!(plan.need, LinkNeed::NeedsLink { .. });
+			let unsupported = matches!(plan.need, LinkNeed::Unsupported);
+			let count = [auto_covered, needs_link, unsupported]
+				.iter()
+				.filter(|b| **b)
+				.count();
+			assert_eq!(
+				count, 1,
+				"agent {} must be in exactly one bucket, got {:?}",
+				plan.agent_id, plan.need
+			);
+		}
+	}
+
+	#[test]
+	fn classify_all_is_total_at_global() {
+		let master = universal_canonical_dir(None).unwrap();
+		let plans = classify_all(ResourceScope::GlobalOnly, None, &master);
+		assert_totality(&plans);
+	}
+
+	#[test]
+	fn classify_all_is_total_at_project() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let master = universal_canonical_dir(Some(root.as_path())).unwrap();
+		let plans = classify_all(
+			ResourceScope::ProjectOnly,
+			Some(root.as_path()),
+			&master,
+		);
+		assert_totality(&plans);
 	}
 }
