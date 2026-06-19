@@ -93,4 +93,35 @@ mod tests {
 		assert!(names.contains(&"skill-b"));
 		assert_eq!(skills.len(), 2);
 	}
+
+	// T-DISCOVERY-JUNCTION-CANONICAL: a junction install is recognized as a
+	// referrer (canonical_path set), not rediscovered as a plain copy.
+	// windows-latest.
+	#[cfg(windows)]
+	#[test]
+	fn discovery_sets_canonical_path_for_junction() {
+		use crate::skills::linker::create_junction;
+		let tmp = tempfile::tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/foo");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(
+			master.join("SKILL.md"),
+			"---\nname: foo\ndescription: d\n---\n",
+		)
+		.unwrap();
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		create_junction(&master.canonicalize().unwrap(), &claude.join("foo"))
+			.unwrap();
+
+		let skills = load_skills_from_dir(&claude);
+		let foo = skills
+			.iter()
+			.find(|s| s.name == "foo")
+			.expect("junction install must be discovered");
+		assert!(
+			foo.canonical_path.is_some(),
+			"a junction must set canonical_path (recognized as a referrer)"
+		);
+	}
 }
