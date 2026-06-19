@@ -1,4 +1,5 @@
 use super::ConfigManager;
+use crate::skills::linker::Linker;
 use crate::{
 	convert_skill,
 	errors::{ConfigError, Result},
@@ -47,25 +48,23 @@ fn resolve_source_path(sp: &str) -> PathBuf {
 fn remove_skill_path(
 	path: &Path,
 	safe_name: &str,
-	is_symlink: bool,
+	is_link: bool,
 	target_dir: Option<&Path>,
 	roots: &[PathBuf],
 ) -> Result<()> {
-	if is_symlink {
+	if is_link {
 		// Universal layout: the symlink at `<target_dir>/<safe_name>` is what
 		// should disappear. `path.parent()` is the canonical dir (a real
 		// directory), not a link, so unlink via the target_dir-resolved path.
 		if let Some(target) = target_dir {
 			let link = target.join(safe_name);
-			let needs_unlink = std::fs::symlink_metadata(&link)
-				.map(|m| m.file_type().is_symlink())
-				.unwrap_or(false);
+			let needs_unlink = Linker::is_link(&link);
 			if needs_unlink {
-				std::fs::remove_file(&link).map_err(|e| {
+				Linker::unlink(&link).map_err(|e| {
 					ConfigError::Io(std::io::Error::new(
 						e.kind(),
 						format!(
-							"Failed to remove symlink '{}': {}",
+							"Failed to remove link '{}': {}",
 							link.display(),
 							e
 						),
@@ -380,14 +379,14 @@ impl ConfigManager {
 				.as_ref()
 				.map(|dir| dir.join(&safe_name).join("SKILL.md"))
 		};
-		let is_symlink = existing_skill.canonical_path.is_some();
+		let is_link = existing_skill.canonical_path.is_some();
 
 		if let Some(path) = file_path {
 			if path.exists() {
 				remove_skill_path(
 					&path,
 					&safe_name,
-					is_symlink,
+					is_link,
 					target_dir.as_deref(),
 					&roots,
 				)?;
