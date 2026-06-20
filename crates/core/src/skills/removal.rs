@@ -1061,4 +1061,95 @@ mod tests {
 			"a junction referrer must count as an external referrer"
 		);
 	}
+
+	#[cfg(unix)]
+	#[test]
+	fn plan_removal_symlink_gc_canonical_when_last_referrer_removed() {
+		let tmp = tempdir().unwrap();
+		let canonical = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&canonical);
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&canonical, &claude.join("foo"));
+		// Only this single agent's dir; no universal .agents/skills included.
+		let agent_dirs = vec![claude.clone()];
+		let skill = symlink_skill(&canonical, &claude);
+
+		let plan = plan_removal(
+			&skill,
+			Some(claude.as_path()),
+			&agent_dirs,
+			Some(tmp.path()),
+			false,
+		);
+
+		assert!(
+			plan.paths.contains(&canonical),
+			"last referrer removed → canonical GC'd into paths, \
+			 got paths={:?} skipped={:?}",
+			plan.paths,
+			plan.skipped,
+		);
+		assert!(
+			plan.paths.contains(&claude.join("foo")),
+			"referrer symlink must be in paths",
+		);
+		assert!(
+			plan.skipped.is_empty(),
+			"nothing should be skipped: {:?}",
+			plan.skipped,
+		);
+
+		// execute_removal must actually remove both the symlink and the Master.
+		let roots = allowed_skill_roots(&agent_dirs, Some(tmp.path()));
+		let report = execute_removal(&plan, &roots).unwrap();
+		assert!(report.failed.is_empty(), "no failures: {:?}", report.failed,);
+		assert!(
+			!canonical.exists(),
+			"orphan canonical Master must be removed on disk",
+		);
+		assert!(
+			!claude.join("foo").exists(),
+			"referrer symlink must be unlinked on disk",
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn plan_removal_symlink_keeps_canonical_when_one_of_two_referrers_remains()
+	{
+		let tmp = tempdir().unwrap();
+		let (canonical, agent_dirs) = symlink_layout(tmp.path());
+		let claude = &agent_dirs[0];
+		let skill = symlink_skill(&canonical, claude);
+
+		// Remove only claude; cursor symlink remains → canonical must be kept.
+		let plan = plan_removal(
+			&skill,
+			Some(claude.as_path()),
+			&agent_dirs,
+			Some(tmp.path()),
+			false,
+		);
+
+		assert!(
+			!plan.paths.contains(&canonical),
+			"canonical must NOT be GC'd while another referrer remains: \
+			 paths={:?}",
+			plan.paths,
+		);
+		assert!(
+			plan.skipped.iter().any(|p| p == &canonical),
+			"canonical must be in skipped when referrer remains: {:?}",
+			plan.skipped,
+		);
+		assert!(
+			plan.paths.contains(&claude.join("foo")),
+			"targeted claude symlink must be scheduled for removal",
+		);
+		assert!(
+			!plan.paths.contains(&agent_dirs[1].join("foo")),
+			"untargeted cursor symlink must NOT be scheduled",
+		);
+	}
 }
