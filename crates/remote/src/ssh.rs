@@ -162,6 +162,8 @@ pub fn build_ssh_args(conn: &Connection, remote_cmd: &str) -> Vec<String> {
 		"BatchMode=yes".to_string(),
 		"-o".to_string(),
 		"ConnectTimeout=10".to_string(),
+		"-o".to_string(),
+		"StrictHostKeyChecking=accept-new".to_string(),
 	];
 	if let Some(port) = conn.port {
 		args.push("-p".to_string());
@@ -222,6 +224,8 @@ pub fn build_scp_args(
 		"BatchMode=yes".to_string(),
 		"-o".to_string(),
 		"ConnectTimeout=10".to_string(),
+		"-o".to_string(),
+		"StrictHostKeyChecking=accept-new".to_string(),
 	];
 	if let Some(port) = conn.port {
 		args.push("-P".to_string());
@@ -256,6 +260,8 @@ pub fn build_tunnel_args(
 		"BatchMode=yes".to_string(),
 		"-o".to_string(),
 		"ConnectTimeout=10".to_string(),
+		"-o".to_string(),
+		"StrictHostKeyChecking=accept-new".to_string(),
 		"-o".to_string(),
 		"ExitOnForwardFailure=yes".to_string(),
 		"-L".to_string(),
@@ -345,9 +351,9 @@ pub fn build_remote_finish_upload_cmd(resolved_path: &str) -> String {
 	let target_assignment = assign_install_target_cmd(resolved_path);
 	format!(
 		"{target_assignment} \
-	     mkdir -p \"$(dirname -- \"$target\")\"; \
-	     mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\"; \
-	     chmod 755 \"$target\"; \
+	     mkdir -p \"$(dirname -- \"$target\")\" && \
+	     mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\" && \
+	     chmod 755 \"$target\" && \
 	     \"$target\" --version"
 	)
 }
@@ -630,19 +636,21 @@ mod tests {
 	fn ssh_args_full() {
 		let args = build_ssh_args(&conn_full(), "echo hi");
 		assert_eq!(
-			&args[..8],
+			&args[..args.len() - 1],
 			[
 				"-o",
 				"BatchMode=yes",
 				"-o",
 				"ConnectTimeout=10",
+				"-o",
+				"StrictHostKeyChecking=accept-new",
 				"-p",
 				"2222",
 				"-l",
-				"alice"
+				"alice",
+				"my-vm",
 			]
 		);
-		assert_eq!(args[8], "my-vm");
 		assert_bash_wrapped(args.last().unwrap());
 	}
 
@@ -650,13 +658,15 @@ mod tests {
 	fn ssh_args_minimal() {
 		let args = build_ssh_args(&conn_minimal(), "uname -a");
 		assert_eq!(
-			&args[..5],
+			&args[..args.len() - 1],
 			[
 				"-o",
 				"BatchMode=yes",
 				"-o",
 				"ConnectTimeout=10",
-				"example.com"
+				"-o",
+				"StrictHostKeyChecking=accept-new",
+				"example.com",
 			]
 		);
 		assert_bash_wrapped(args.last().unwrap());
@@ -666,6 +676,7 @@ mod tests {
 	fn ssh_args_contain_batchmode() {
 		let args = build_ssh_args(&conn_minimal(), "x");
 		assert!(args.iter().any(|a| a == "BatchMode=yes"));
+		assert!(args.iter().any(|a| a == "StrictHostKeyChecking=accept-new"));
 	}
 
 	#[test]
@@ -712,6 +723,8 @@ mod tests {
 				"BatchMode=yes",
 				"-o",
 				"ConnectTimeout=10",
+				"-o",
+				"StrictHostKeyChecking=accept-new",
 				"-P",
 				"2222",
 				"./bin",
@@ -730,6 +743,8 @@ mod tests {
 				"BatchMode=yes",
 				"-o",
 				"ConnectTimeout=10",
+				"-o",
+				"StrictHostKeyChecking=accept-new",
 				"./bin",
 				"example.com:/tmp/x"
 			]
@@ -763,6 +778,8 @@ mod tests {
 				"-o",
 				"ConnectTimeout=10",
 				"-o",
+				"StrictHostKeyChecking=accept-new",
+				"-o",
 				"ExitOnForwardFailure=yes",
 				"-L",
 				"127.0.0.1:5000:127.0.0.1:8080",
@@ -786,6 +803,8 @@ mod tests {
 				"BatchMode=yes",
 				"-o",
 				"ConnectTimeout=10",
+				"-o",
+				"StrictHostKeyChecking=accept-new",
 				"-o",
 				"ExitOnForwardFailure=yes",
 				"-L",
@@ -1144,6 +1163,16 @@ mod tests {
 		assert!(
 			!cmd.contains("install -m 755"),
 			"install -m 755 risks ETXTBSY on a running binary"
+		);
+		// Mutating steps must be chained with && so a failed mv aborts
+		// before chmod/--version execute.
+		assert!(
+			cmd.contains(
+				"mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\" && \
+			     chmod 755 \"$target\" && \
+			     \"$target\" --version"
+			),
+			"steps must be && chained, got: {cmd}"
 		);
 	}
 
