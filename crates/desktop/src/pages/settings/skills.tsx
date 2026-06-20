@@ -116,7 +116,11 @@ export default function SkillsPage() {
 	// Per Codex correction: do NOT invalidateQueries here — the mutation's
 	// onSuccess writes the shared cache (checkSkillUpdatesMutationOptions line
 	// ~361). Double-invalidating would fire two network checks.
+	// Early-return guard: prevents re-entrant duplicate checks + toasts when
+	// the user clicks "recheck" while a check (auto or manual) is already
+	// running (Codex CR P1).
 	const handleRefreshSkills = async () => {
+		if (isRefreshingSkills) return;
 		await refetch();
 		checkUpdatesMutation.mutate(updateCheckParams);
 	};
@@ -329,7 +333,7 @@ export default function SkillsPage() {
 								})
 							: t("lastCheckedNever")}
 					</span>
-					{!isAutoChecking && (
+					{!isRefreshingSkills && (
 						<button
 							type="button"
 							className="text-xs text-accent hover:underline"
