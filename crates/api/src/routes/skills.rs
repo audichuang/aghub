@@ -1949,8 +1949,10 @@ pub async fn git_install_skills(
 
 	let resource_scope = parse_install_scope(&req.scope)?;
 
-	let project_root: Option<std::path::PathBuf> =
-		req.project_root.as_ref().map(std::path::PathBuf::from);
+	let project_root: Option<std::path::PathBuf> = req
+		.project_root
+		.as_ref()
+		.map(|r| crate::extractors::absolutize_root(r));
 
 	let mut results = Vec::new();
 
@@ -1989,7 +1991,7 @@ pub async fn git_install_skills(
 		valid_agents.iter().map(|(_, agent)| *agent).collect();
 
 	let layout =
-		aghub_core::skills::install_fetched::SkillInstallLayout::IsolatedCopy;
+		aghub_core::skills::install_fetched::SkillInstallLayout::Universal;
 
 	for skill_path in &req.skill_paths {
 		let full_path = temp_path.join(skill_path);
@@ -3215,5 +3217,76 @@ mod tests {
 		let parsed: serde_json::Value =
 			serde_json::from_str(&raw).expect("json body");
 		assert_eq!(parsed["code"], "SESSION_CREDENTIAL_HOST_MISMATCH");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn git_install_writes_npx_lock_symlink_only() {
+		with_isolated_env(|home, state| {
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let app_sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("sessions state");
+			{
+				let mut map = app_sessions.sessions.lock().unwrap();
+				let td = tempdir().unwrap();
+				let dst = td.path().join("my-skill");
+				std::fs::create_dir_all(&dst).unwrap();
+				std::fs::write(
+					dst.join("SKILL.md"),
+					"---\nname: my-skill\ndescription: d\n---\n",
+				)
+				.unwrap();
+				map.insert(
+					"sess-1".to_string(),
+					GitCloneSession {
+						temp_dir: td,
+						created_at: std::time::Instant::now(),
+						url: "https://github.com/o/r".to_string(),
+						credential_token: None,
+						branches: vec![],
+						current_branch: "main".to_string(),
+					},
+				);
+			}
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&serde_json::json!({
+					"session_id": "sess-1",
+					"skill_paths": ["my-skill"],
+					"agents": ["claude"],
+					"scope": "global",
+					"project_root": null
+				}))
+				.dispatch();
+			assert_eq!(
+				response.status(),
+				rocket::http::Status::Ok,
+				"handler returned ok"
+			);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().expect("body"))
+					.expect("json");
+			let results = body["results"].as_array().expect("results array");
+			assert!(
+				results.iter().any(|r| r["agent"] == "claude"),
+				"per-agent row present"
+			);
+			let master = home.join(".agents/skills/my-skill/SKILL.md");
+			assert!(master.exists(), "universal master written: {master:?}");
+			let lock = state.join("skills/.skill-lock.json");
+			let lock_alt = home.join(".agents/.skill-lock.json");
+			assert!(
+				lock.exists() || lock_alt.exists(),
+				"a global skill install lock was written"
+			);
+		});
 	}
 }
