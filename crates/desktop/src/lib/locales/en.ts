@@ -828,7 +828,7 @@ export default {
 	projectSkills: "Project Skills",
 	metadata: "Metadata",
 	installedFrom: "Installed From",
-	viewSkillSource: "View source",
+	viewSkillSource: "View in Sources",
 	syncFromSource: "Sync from source",
 	syncSkill: "Sync Skill",
 	syncingSkill: "Syncing...",

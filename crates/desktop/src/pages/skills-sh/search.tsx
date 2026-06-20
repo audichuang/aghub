@@ -1,6 +1,6 @@
 import { MagnifyingGlassIcon } from "@heroicons/react/24/solid";
 import { Button, Chip, Spinner } from "@heroui/react";
-import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -16,7 +16,10 @@ import {
 import type { MarketSkill } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { marketSearchInfiniteQueryOptions } from "../../requests/market";
-import { globalSkillLockQueryOptions } from "../../requests/skills";
+import {
+	globalSkillLockQueryOptions,
+	projectSkillLockQueryOptions,
+} from "../../requests/skills";
 import { InstallModal } from "./components/install-modal";
 import { SkillsHeader } from "./components/skills-header";
 import { useSkillInstall } from "./hooks/use-skill-install";
@@ -74,14 +77,29 @@ export default function SkillsSearchPage() {
 
 	const { data: globalLock } = useQuery(globalSkillLockQueryOptions({ api }));
 
+	// Also query each project's lock so project-installed skills show the badge.
+	// useQueries is required here — no hooks in loops, no useEffect.
+	const projectLockResults = useQueries({
+		queries: projects.map((project) =>
+			projectSkillLockQueryOptions({ api, projectPath: project.path }),
+		),
+	});
+
 	const installedSet = useMemo(() => {
 		const set = new Set<string>();
+		// Global lock entries
 		for (const entry of globalLock?.skills ?? []) {
 			// Key: "<source>|<name>" matching MarketSkill fields
 			set.add(`${entry.source}|${entry.name}`);
 		}
+		// Project lock entries for every registered project
+		for (const result of projectLockResults) {
+			for (const entry of result.data?.skills ?? []) {
+				set.add(`${entry.source}|${entry.name}`);
+			}
+		}
 		return set;
-	}, [globalLock]);
+	}, [globalLock, projectLockResults]);
 
 	const compactFormatter = useMemo(
 		() =>

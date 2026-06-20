@@ -93,6 +93,11 @@ export function InstallModal({
 						}
 					: null
 			}
+			descriptionSlot={
+				<p className="text-sm text-muted">
+					{t("selectAgentsForSkill")}
+				</p>
+			}
 			agentPickerSlot={agentPicker}
 			extraPickerSlot={installAllCheckbox}
 			installResults={installResults}

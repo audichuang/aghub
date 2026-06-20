@@ -795,7 +795,7 @@ export default {
 	projectSkills: "專案技能",
 	metadata: "中繼資料",
 	installedFrom: "安裝來源",
-	viewSkillSource: "查看來源",
+	viewSkillSource: "在來源中檢視",
 	syncFromSource: "從來源同步",
 	syncSkill: "同步 Skill",
 	syncingSkill: "同步中...",

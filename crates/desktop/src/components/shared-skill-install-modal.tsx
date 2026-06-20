@@ -6,7 +6,20 @@ import { InstallTargetSelector } from "./install-target-selector";
 import { ResultStatusItem } from "./result-status-item";
 import { SkillInfoCard } from "./skill-info-card";
 
-export interface SharedSkillInstallModalProps {
+/**
+ * Props for the target-selector section.
+ * All required when showTargetSelector is true; omitted entirely when false.
+ */
+interface TargetSelectorProps {
+	installToProject: boolean;
+	canInstallToProject: boolean;
+	onInstallToProjectChange: (v: boolean) => void;
+	selectedProjectId: string | null;
+	onSelectedProjectIdChange: (id: string | null) => void;
+	projects: Project[];
+}
+
+export type SharedSkillInstallModalProps = {
 	isOpen: boolean;
 	onClose: () => void;
 	/** Modal heading; defaults to t("installSkill") */
@@ -19,11 +32,19 @@ export interface SharedSkillInstallModalProps {
 	skillInfo?: { source: string; name?: string } | null;
 	/** The "select agents" body — rendered when installResults is empty */
 	agentPickerSlot: React.ReactNode;
+	/**
+	 * Optional prompt rendered above the agent picker. When omitted, no prompt
+	 * is shown (e.g. ManageSkillAgentsDialog already has its own label inside
+	 * SkillsAgentList). Pass a React node from the skills-sh caller to restore
+	 * the "Select agents for this skill" copy.
+	 */
+	descriptionSlot?: React.ReactNode;
 	/** When truthy, the results phase replaces the picker */
 	installResults: InstallResult[];
 	isInstalling: boolean;
 	/**
-	 * When false, InstallTargetSelector is not rendered at all.
+	 * When false, InstallTargetSelector is not rendered at all and the
+	 * target-selector props below are NOT required.
 	 * Defaults to true. Pass false for callers (e.g. ManageSkillAgentsDialog)
 	 * that derive scope from the skill's own location and should not show the
 	 * project/scope picker.
@@ -32,13 +53,6 @@ export interface SharedSkillInstallModalProps {
 	 * it only disables the checkbox. Use this prop to hide it entirely.
 	 */
 	showTargetSelector?: boolean;
-	/** Project/scope target selector */
-	installToProject: boolean;
-	canInstallToProject: boolean;
-	onInstallToProjectChange: (v: boolean) => void;
-	selectedProjectId: string | null;
-	onSelectedProjectIdChange: (id: string | null) => void;
-	projects: Project[];
 	/** Confirm button label; defaults to t("install") */
 	confirmLabel?: string;
 	/** Confirm button disabled predicate (in addition to isInstalling) */
@@ -46,30 +60,48 @@ export interface SharedSkillInstallModalProps {
 	onConfirm: () => void;
 	/** Anything extra to render in the picker body (e.g. "install all" checkbox) */
 	extraPickerSlot?: React.ReactNode;
-}
+} & (
+	| { showTargetSelector: false }
+	| ({ showTargetSelector?: true } & TargetSelectorProps)
+);
 
-export function SharedSkillInstallModal({
-	isOpen,
-	onClose,
-	heading,
-	skillInfo,
-	agentPickerSlot,
-	installResults,
-	isInstalling,
-	showTargetSelector = true,
-	installToProject,
-	canInstallToProject,
-	onInstallToProjectChange,
-	selectedProjectId,
-	onSelectedProjectIdChange,
-	projects,
-	confirmLabel,
-	isConfirmDisabled = false,
-	onConfirm,
-	extraPickerSlot,
-}: SharedSkillInstallModalProps) {
+export function SharedSkillInstallModal(props: SharedSkillInstallModalProps) {
 	const { t } = useTranslation();
+	const {
+		isOpen,
+		onClose,
+		heading,
+		skillInfo,
+		agentPickerSlot,
+		descriptionSlot,
+		installResults,
+		isInstalling,
+		showTargetSelector = true,
+		confirmLabel,
+		isConfirmDisabled = false,
+		onConfirm,
+		extraPickerSlot,
+	} = props;
+
 	const isResultsPhase = installResults.length > 0;
+
+	// Extract target-selector props only when showTargetSelector is true
+	const targetSelectorProps =
+		showTargetSelector !== false
+			? {
+					installToProject: (props as TargetSelectorProps)
+						.installToProject,
+					canInstallToProject: (props as TargetSelectorProps)
+						.canInstallToProject,
+					onInstallToProjectChange: (props as TargetSelectorProps)
+						.onInstallToProjectChange,
+					selectedProjectId: (props as TargetSelectorProps)
+						.selectedProjectId,
+					onSelectedProjectIdChange: (props as TargetSelectorProps)
+						.onSelectedProjectIdChange,
+					projects: (props as TargetSelectorProps).projects,
+				}
+			: null;
 
 	return (
 		<Modal.Backdrop isOpen={isOpen} onOpenChange={onClose}>
@@ -94,29 +126,32 @@ export function SharedSkillInstallModal({
 
 							{!isResultsPhase && (
 								<>
-									<p className="text-sm text-muted">
-										{t("selectAgentsForSkill")}
-									</p>
+									{descriptionSlot}
 									{agentPickerSlot}
 									{extraPickerSlot}
-									{showTargetSelector && (
-										<InstallTargetSelector
-											installToProject={installToProject}
-											onInstallToProjectChange={
-												onInstallToProjectChange
-											}
-											selectedProjectId={
-												selectedProjectId
-											}
-											onSelectedProjectIdChange={
-												onSelectedProjectIdChange
-											}
-											projects={projects}
-											canInstallToProject={
-												canInstallToProject
-											}
-										/>
-									)}
+									{showTargetSelector &&
+										targetSelectorProps && (
+											<InstallTargetSelector
+												installToProject={
+													targetSelectorProps.installToProject
+												}
+												onInstallToProjectChange={
+													targetSelectorProps.onInstallToProjectChange
+												}
+												selectedProjectId={
+													targetSelectorProps.selectedProjectId
+												}
+												onSelectedProjectIdChange={
+													targetSelectorProps.onSelectedProjectIdChange
+												}
+												projects={
+													targetSelectorProps.projects
+												}
+												canInstallToProject={
+													targetSelectorProps.canInstallToProject
+												}
+											/>
+										)}
 								</>
 							)}
 

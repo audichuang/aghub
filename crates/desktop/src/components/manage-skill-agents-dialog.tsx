@@ -217,12 +217,6 @@ export function ManageSkillAgentsDialog({
 			installResults={NO_RESULTS}
 			isInstalling={isApplying}
 			showTargetSelector={false}
-			installToProject={scope === "project"}
-			canInstallToProject={false}
-			onInstallToProjectChange={() => {}}
-			selectedProjectId={null}
-			onSelectedProjectIdChange={() => {}}
-			projects={[]}
 			confirmLabel={isApplying ? t("applying") : t("applyChanges")}
 			isConfirmDisabled={!hasChanges}
 			onConfirm={handleApply}
