@@ -12,7 +12,7 @@ import { useMultiSelect } from "../hooks/use-multi-select";
 import { useTranslation } from "react-i18next";
 import type { SkillResponse, SkillUpdateResponse } from "../generated/dto";
 import { AgentIcons } from "./agent-icons";
-import { SkillUpdateBadge } from "./skill-update-badge";
+import { SkillStatusBadge } from "./skill-update-badge";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
@@ -45,6 +45,9 @@ interface SkillListProps {
 	selectionMode?: "none" | "single" | "multiple";
 	isMultiSelectMode?: boolean;
 	updateStatuses?: ReadonlyMap<string, SkillUpdateResponse>;
+	/** Passed to SkillStatusBadge so auth-uncheckable skills are actionable
+	 * in the list (not just in the detail panel). */
+	onResolveAuth?: (skillName: string) => void;
 }
 
 export function SkillList({
@@ -58,6 +61,7 @@ export function SkillList({
 	selectionMode = "single",
 	isMultiSelectMode = false,
 	updateStatuses,
+	onResolveAuth,
 }: SkillListProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -291,8 +295,13 @@ export function SkillList({
 					)}
 				</div>
 				<Label className="flex-1 truncate">{skillGroup.name}</Label>
-				<SkillUpdateBadge
+				<SkillStatusBadge
 					status={updateStatuses?.get(skillGroup.name)}
+					onResolveAuth={
+						onResolveAuth
+							? () => onResolveAuth(skillGroup.name)
+							: undefined
+					}
 				/>
 				<AgentIcons items={skillGroup.items} overflowVariant="square" />
 			</div>
