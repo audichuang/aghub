@@ -10,7 +10,8 @@ pub use logging::{
 pub use remote::{
 	cleanup_all_remotes, connect_remote, disconnect_remote,
 	force_redeploy_remote, list_remote_directories, list_ssh_config_hosts,
-	local_api_version, remote_status, test_connection, RemoteState,
+	local_api_version, remote_install_source_available, remote_status,
+	test_connection, RemoteState,
 };
 pub use server::start_server;
 pub use window::minimize_to_tray;

@@ -34,6 +34,7 @@ import {
 	isFormValid,
 	validateConnectionForm,
 } from "../lib/connection-form";
+import { remoteOutputSummary } from "../lib/remote-errors";
 import type { Connection } from "../lib/store";
 import { cn } from "../lib/utils";
 
@@ -62,35 +63,53 @@ function toastTestResult(
 	t: (key: string, opts?: Record<string, unknown>) => string,
 ): void {
 	if (!result.reachable) {
-		toast.danger(t("connTestUnreachable", { message: result.message }));
+		toast.danger(
+			t("connTestUnreachable", {
+				message: remoteOutputSummary(result.message),
+			}),
+		);
 		return;
 	}
 	if (result.installAttempted && !result.installSucceeded) {
 		toast.danger(
 			t("connTestInstallFailed", {
-				message: result.installMessage ?? result.message,
+				message: remoteOutputSummary(
+					result.installMessage ?? result.message,
+				),
 			}),
 		);
 		return;
 	}
 	if (!result.apiPresent) {
-		toast.danger(t("connTestApiMissing", { message: result.message }));
+		toast.danger(
+			t("connTestApiMissing", {
+				message: remoteOutputSummary(result.message),
+			}),
+		);
 		return;
 	}
 	if (!result.compatible) {
 		toast.warning(
 			t("connTestIncompatible", {
 				version: result.apiVersion ?? "?",
-				message: result.message,
+				message: remoteOutputSummary(result.message),
 			}),
 		);
 		return;
 	}
 	if (result.installAttempted && result.installSucceeded) {
-		toast.success(t("connTestInstalledOk", { message: result.message }));
+		toast.success(
+			t("connTestInstalledOk", {
+				message: remoteOutputSummary(result.message),
+			}),
+		);
 		return;
 	}
-	toast.success(t("connTestReachableOk", { message: result.message }));
+	toast.success(
+		t("connTestReachableOk", {
+			message: remoteOutputSummary(result.message),
+		}),
+	);
 }
 
 function buildTestSteps(
@@ -130,7 +149,7 @@ function buildTestSteps(
 		: result.installAttempted
 			? result.installSucceeded
 				? t("connTestStepInstallOk")
-				: (result.installMessage ?? result.message)
+				: remoteOutputSummary(result.installMessage ?? result.message)
 			: result.apiPresent
 				? t("connTestStepInstallNotNeeded")
 				: t("connTestStepInstallNotRun");
@@ -139,7 +158,9 @@ function buildTestSteps(
 		{
 			key: "ssh",
 			label: t("connTestStepSsh"),
-			detail: result.reachable ? t("connTestStepSshOk") : result.message,
+			detail: result.reachable
+				? t("connTestStepSshOk")
+				: remoteOutputSummary(result.message),
 			status: result.reachable ? "ok" : "error",
 		},
 		{
@@ -321,6 +342,7 @@ export function ManageConnectionsDialog({
 			return testConnection({ ...payload, id: editingId ?? "test" });
 		},
 		onSuccess: (result) => {
+			console.debug("Remote connection test result", result);
 			setTestResult(result);
 			toastTestResult(result, t);
 		},

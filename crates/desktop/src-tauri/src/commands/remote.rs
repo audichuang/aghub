@@ -650,6 +650,14 @@ fn teardown(handle: &RemoteHandle) {
 	);
 }
 
+/// Whether this build can resolve a source to deploy `aghub-api` to a remote.
+/// False in shipped builds with no dev env var / git checkout, so the UI can
+/// hide the otherwise-dead "Force redeploy" affordance.
+#[tauri::command]
+pub fn remote_install_source_available() -> bool {
+	remote_install_source().is_some()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
