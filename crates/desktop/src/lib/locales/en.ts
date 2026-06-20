@@ -399,8 +399,6 @@ export default {
 	// --- Per-skill update check (F1 / Workstream D) ---
 	checkForSkillUpdates: "Check for updates",
 	checkingForSkillUpdates: "Checking…",
-	skillUpToDate: "Up to date",
-	skillUpToDateTooltip: "This skill matches its source.",
 	skillUpdateAvailableBadge: "Update available",
 	skillUpdateAvailableTooltip:
 		"Source changed: {{current}} → {{available}}. Sync to update.",
@@ -425,6 +423,9 @@ export default {
 	/** Toast when check completes and N skills have updates. */
 	skillCheckCompleteWithUpdates:
 		"Check complete — {{count}} update(s) available",
+	/** Toast when check completes but some skills could not be checked. */
+	skillCheckCompleteSomeUncheckable:
+		"Check complete — {{count}} skill(s) could not be verified",
 	/** Toast when check completes and everything is current. */
 	skillCheckCompleteAllGood: "All skills are up to date",
 	/** List header label. {{time}} is a human-readable relative string

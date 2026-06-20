@@ -56,11 +56,26 @@ import { TransferDialog } from "./transfer-dialog";
 interface SkillDetailProps {
 	group: SkillGroup;
 	projectPath?: string;
+	/**
+	 * When `true`, the credential binding dialog opens immediately on mount.
+	 * Used by skills.tsx when the user clicks "Add credential" in the list for
+	 * an auth-uncheckable skill — selecting the skill sets this flag so the
+	 * detail panel opens the dialog right away.
+	 */
+	openCredDialog?: boolean;
+	/** Called when the credential binding dialog closes, so the parent can
+	 * clear its `pendingAuthSkill` state. */
+	onCredDialogClose?: () => void;
 }
 
 const GITHUB_PREFIX_REGEX = /^github\//;
 
-export function SkillDetail({ group, projectPath }: SkillDetailProps) {
+export function SkillDetail({
+	group,
+	projectPath,
+	openCredDialog = false,
+	onCredDialogClose,
+}: SkillDetailProps) {
 	const { t } = useTranslation();
 	const [, setLocation] = useLocation();
 	const { allAgents, availableAgents } = useAgentAvailability();
@@ -74,7 +89,9 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	const [transferDialogOpen, setTransferDialogOpen] = useState(false);
 	const [manageDialogOpen, setManageDialogOpen] = useState(false);
 	const [syncDialogOpen, setSyncDialogOpen] = useState(false);
-	const [credDialogOpen, setCredDialogOpen] = useState(false);
+	// Initialize from openCredDialog so auth-uncheckable skills opened from
+	// the list immediately show the credential binding dialog.
+	const [credDialogOpen, setCredDialogOpen] = useState(openCredDialog);
 
 	const { isSkillStarred, toggleSkillStar } = useFavorites();
 	const isStarred = isSkillStarred(group.items[0].name);
@@ -790,7 +807,10 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					isOpen={credDialogOpen}
 					bindingSource={currentSkillSource.bindingSource}
 					defaultCredentialHost={credentialHost || undefined}
-					onClose={() => setCredDialogOpen(false)}
+					onClose={() => {
+						setCredDialogOpen(false);
+						onCredDialogClose?.();
+					}}
 					onBound={() =>
 						checkUpdatesMutation.mutate(updateCheckParams)
 					}

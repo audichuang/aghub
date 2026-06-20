@@ -384,8 +384,6 @@ export default {
 	// --- 单一技能更新检查（F1 / Workstream D）---
 	checkForSkillUpdates: "检查更新",
 	checkingForSkillUpdates: "检查中…",
-	skillUpToDate: "已是最新",
-	skillUpToDateTooltip: "此技能与来源一致。",
 	skillUpdateAvailableBadge: "有更新",
 	skillUpdateAvailableTooltip:
 		"来源已变更：{{current}} → {{available}}。同步以更新。",
@@ -405,6 +403,7 @@ export default {
 	skillUpdateCheckError: "无法检查技能更新。",
 	skillUpdateApplyError: "无法应用技能更新。",
 	skillCheckCompleteWithUpdates: "检查完成，{{count}} 个可更新",
+	skillCheckCompleteSomeUncheckable: "检查完成，{{count}} 个技能无法验证",
 	skillCheckCompleteAllGood: "全部都是最新版本",
 	lastCheckedAgo: "上次检查 {{time}} 前",
 	lastCheckedNever: "从未检查",

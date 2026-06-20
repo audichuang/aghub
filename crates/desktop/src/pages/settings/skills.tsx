@@ -32,7 +32,7 @@ import {
 } from "../../requests/skills";
 
 export default function SkillsPage() {
-	const { t } = useTranslation();
+	const { t, i18n } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
 	const updateCheckParams = useMemo(() => ({ scope: "global" as const }), []);
@@ -78,13 +78,25 @@ export default function SkillsPage() {
 						s.status === "updateAvailable" ||
 						s.status === "renamed",
 				).length;
+				const uncheckableCount = data.filter(
+					(s) => s.status === "uncheckable",
+				).length;
 				if (updateCount > 0) {
 					toast.info(
 						t("skillCheckCompleteWithUpdates", {
 							count: updateCount,
 						}),
 					);
+				} else if (uncheckableCount > 0) {
+					// Some skills could not be checked (auth/network/local) —
+					// do NOT claim "all good" when we cannot verify them all.
+					toast.warning(
+						t("skillCheckCompleteSomeUncheckable", {
+							count: uncheckableCount,
+						}),
+					);
 				} else {
+					// Every skill was reachable and is up to date.
 					toast.success(t("skillCheckCompleteAllGood"));
 				}
 			},
@@ -106,6 +118,11 @@ export default function SkillsPage() {
 	);
 	const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
 	const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
+	// pendingAuthSkill: when set, the SkillDetail for this skill will open the
+	// credential dialog as soon as it renders. Cleared by SkillDetail itself.
+	const [pendingAuthSkill, setPendingAuthSkill] = useState<string | null>(
+		null,
+	);
 
 	const [panelMode, setPanelMode] = useState<
 		"create" | "import" | "import-github" | null
@@ -125,15 +142,20 @@ export default function SkillsPage() {
 		checkUpdatesMutation.mutate(updateCheckParams);
 	};
 
-	/** Returns a human-readable relative string ("3 分鐘", "1 小時", …). */
+	/** Returns a human-readable relative string using the current UI locale. */
 	const formatRelativeTime = (date: Date): string => {
 		const diffMs = Date.now() - date.getTime();
-		const diffMin = Math.floor(diffMs / 60_000);
-		if (diffMin < 1) return "剛才";
-		if (diffMin < 60) return `${diffMin} 分鐘`;
-		const diffHr = Math.floor(diffMin / 60);
-		if (diffHr < 24) return `${diffHr} 小時`;
-		return `${Math.floor(diffHr / 24)} 天`;
+		const diffSec = Math.round(diffMs / 1_000);
+		const diffMin = Math.round(diffMs / 60_000);
+		const diffHr = Math.round(diffMs / 3_600_000);
+		const diffDay = Math.round(diffMs / 86_400_000);
+		const rtf = new Intl.RelativeTimeFormat(i18n.language, {
+			numeric: "auto",
+		});
+		if (diffSec < 60) return rtf.format(-diffSec, "second");
+		if (diffMin < 60) return rtf.format(-diffMin, "minute");
+		if (diffHr < 24) return rtf.format(-diffHr, "hour");
+		return rtf.format(-diffDay, "day");
 	};
 
 	const groupedSkills = useMemo(() => {
@@ -357,9 +379,10 @@ export default function SkillsPage() {
 					groupBySource={true}
 					updateStatuses={updateStatuses}
 					onResolveAuth={(skillName: string) => {
-						// Selecting the skill opens the detail panel where
-						// SourceCredentialBindingDialog is already wired.
+						// Select the skill to open the detail panel, and
+						// signal it to open the credential dialog immediately.
 						void setSelectedName(skillName);
+						setPendingAuthSkill(skillName);
 					}}
 				/>
 
@@ -380,7 +403,18 @@ export default function SkillsPage() {
 				) : panelMode === "import-github" ? (
 					<ImportGithubSkillPanel onDone={() => setPanelMode(null)} />
 				) : activeGroup ? (
-					<SkillDetail group={activeGroup} />
+					<SkillDetail
+						key={
+							pendingAuthSkill === activeGroup.name
+								? `${activeGroup.name}-cred`
+								: activeGroup.name
+						}
+						group={activeGroup}
+						openCredDialog={pendingAuthSkill === activeGroup.name}
+						onCredDialogClose={() => {
+							setPendingAuthSkill(null);
+						}}
+					/>
 				) : (
 					<div className="flex h-full flex-col items-center justify-center gap-4">
 						<div className="text-center">
