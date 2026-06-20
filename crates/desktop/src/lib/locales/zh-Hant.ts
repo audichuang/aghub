@@ -1102,4 +1102,15 @@ export default {
 	sourceInstallNoLinkTargets: "此處沒有 Agent 需要連結 — 只會寫入主檔。",
 	agentCoveredBadge: "已涵蓋",
 	selectSource: "選擇一個來源",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} 可更新",
+	summaryInstallable: "{{count}} 可安裝",
+	summaryRenamed: "{{count}} 已改名",
+	summaryUnchecked: "{{count}} 無法檢查",
+	summaryLatest: "{{count}} 最新",
+	// SourceDetail action headings
+	sourceNeedsAction: "需要動作",
+	sourceAllLatest: "所有技能均為最新版本。",
+	// Credential binding
+	credentialBind: "綁定憑證",
 };

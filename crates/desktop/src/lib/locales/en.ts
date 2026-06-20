@@ -1139,4 +1139,15 @@ export default {
 		"No agents need a link here — the master is written on its own.",
 	agentCoveredBadge: "Covered",
 	selectSource: "Select a source",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} updatable",
+	summaryInstallable: "{{count}} installable",
+	summaryRenamed: "{{count}} renamed",
+	summaryUnchecked: "{{count}} uncheckable",
+	summaryLatest: "{{count}} up to date",
+	// SourceDetail action headings
+	sourceNeedsAction: "Needs action",
+	sourceAllLatest: "All skills are up to date.",
+	// Credential binding
+	credentialBind: "Bind credential",
 };
