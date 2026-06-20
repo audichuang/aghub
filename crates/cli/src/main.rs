@@ -45,7 +45,7 @@ macro_rules! eprintln_verbose {
 #[derive(Parser)]
 #[command(name = "aghub-cli")]
 #[command(about = "Manage Code Agent configurations")]
-#[command(version)]
+#[command(version = env!("AGHUB_CLI_VERSION"))]
 struct Cli {
 	/// Target agent: claude, opencode
 	#[arg(short = 'a', long, default_value = "claude")]
