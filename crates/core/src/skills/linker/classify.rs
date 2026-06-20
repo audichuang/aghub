@@ -45,7 +45,34 @@ pub struct AgentLinkPlan {
 /// Classify ONE agent against a scope + project_root + the canonical master
 /// SKILLS-DIR (`.agents/skills`).
 fn canonicalize_lenient(p: &Path) -> PathBuf {
-	std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+	if let Ok(c) = std::fs::canonicalize(p) {
+		return c;
+	}
+	// `p` (or its leaf) may not exist yet — e.g. `<root>/.agents/skills` before
+	// any install. Plain canonicalize() then fails and leaves the raw path,
+	// which won't match a canonicalized counterpart (macOS `/var`->`/private`,
+	// Windows 8.3 short names / `\\?\` UNC). Canonicalize the longest EXISTING
+	// ancestor and re-append the non-existent remainder so both sides normalize
+	// identically.
+	let mut ancestor = p;
+	let mut tail: Vec<std::ffi::OsString> = Vec::new();
+	loop {
+		match std::fs::canonicalize(ancestor) {
+			Ok(mut out) => {
+				for part in tail.iter().rev() {
+					out.push(part);
+				}
+				return out;
+			}
+			Err(_) => match (ancestor.parent(), ancestor.file_name()) {
+				(Some(parent), Some(name)) => {
+					tail.push(name.to_os_string());
+					ancestor = parent;
+				}
+				_ => return p.to_path_buf(),
+			},
+		}
+	}
 }
 
 pub fn classify_agent(

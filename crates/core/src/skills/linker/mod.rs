@@ -892,14 +892,12 @@ mod tests {
 
 			create_junction(&master, &link).unwrap();
 
+			// The real invariant is that is_link recognizes the junction. Whether
+			// std's is_symlink() reports a `mklink /J` junction as a symlink is
+			// environment-dependent (some Windows + Rust versions DO), so we do
+			// NOT assert on is_symlink() here — is_link covers both the symlink
+			// and the 0x0400 reparse-point branch.
 			assert!(Linker::is_link(&link), "junction must be a link");
-			assert!(
-				!std::fs::symlink_metadata(&link)
-					.unwrap()
-					.file_type()
-					.is_symlink(),
-				"a junction reports is_symlink()==false (0x0400 branch)"
-			);
 			// T-WIN-JUNCTION-REMOVE: unlink removes the junction, keeps Master.
 			Linker::unlink(&link).unwrap();
 			assert!(!Linker::is_link(&link), "junction must be gone");
