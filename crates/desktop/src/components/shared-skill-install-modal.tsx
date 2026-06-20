@@ -83,58 +83,61 @@ export function SharedSkillInstallModal({
 					</Modal.Header>
 
 					<Modal.Body className="p-4">
-						{!isResultsPhase && (
-							<div className="space-y-4">
-								{skillInfo?.source && (
-									<SkillInfoCard
-										name={skillInfo.name}
-										source={skillInfo.source}
-										className="mb-0"
-									/>
-								)}
-								<p className="text-sm text-muted">
-									{t("selectAgentsForSkill")}
-								</p>
-								{agentPickerSlot}
-								{extraPickerSlot}
-								{showTargetSelector && (
-									<InstallTargetSelector
-										installToProject={installToProject}
-										onInstallToProjectChange={
-											onInstallToProjectChange
-										}
-										selectedProjectId={selectedProjectId}
-										onSelectedProjectIdChange={
-											onSelectedProjectIdChange
-										}
-										projects={projects}
-										canInstallToProject={
-											canInstallToProject
-										}
-									/>
-								)}
-							</div>
-						)}
+						<div className="space-y-4">
+							{skillInfo?.source && (
+								<SkillInfoCard
+									name={skillInfo.name}
+									source={skillInfo.source}
+									className="mb-0"
+								/>
+							)}
 
-						{isResultsPhase && (
-							<div className="space-y-3">
-								{installResults.map((result) => (
-									<ResultStatusItem
-										key={result.agentId}
-										displayName={result.displayName}
-										status={result.status}
-										statusText={
-											result.status === "pending"
-												? t("installing")
-												: result.status === "success"
-													? t("installSuccess")
-													: ""
-										}
-										error={result.error}
-									/>
-								))}
-							</div>
-						)}
+							{!isResultsPhase && (
+								<>
+									<p className="text-sm text-muted">
+										{t("selectAgentsForSkill")}
+									</p>
+									{agentPickerSlot}
+									{extraPickerSlot}
+									{showTargetSelector && (
+										<InstallTargetSelector
+											installToProject={installToProject}
+											onInstallToProjectChange={
+												onInstallToProjectChange
+											}
+											selectedProjectId={selectedProjectId}
+											onSelectedProjectIdChange={
+												onSelectedProjectIdChange
+											}
+											projects={projects}
+											canInstallToProject={
+												canInstallToProject
+											}
+										/>
+									)}
+								</>
+							)}
+
+							{isResultsPhase && (
+								<div className="space-y-3">
+									{installResults.map((result) => (
+										<ResultStatusItem
+											key={result.agentId}
+											displayName={result.displayName}
+											status={result.status}
+											statusText={
+												result.status === "pending"
+													? t("installing")
+													: result.status === "success"
+														? t("installSuccess")
+														: ""
+											}
+											error={result.error}
+										/>
+									))}
+								</div>
+							)}
+						</div>
 					</Modal.Body>
 
 					<Modal.Footer>
