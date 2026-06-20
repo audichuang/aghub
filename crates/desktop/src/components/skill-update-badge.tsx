@@ -97,8 +97,8 @@ export function SkillStatusBadge({
 					<span className="inline-flex">
 						<Chip size="sm" variant="soft" color="default">
 							<span className="flex items-center gap-1">
-								<ExclamationTriangleIcon className="size-3 text-secondary" />
-								<span className="text-xs text-secondary">
+								<ExclamationTriangleIcon className="size-3 text-warning" />
+								<span className="text-xs text-warning">
 									{t("skillRenamedBadge")}
 								</span>
 							</span>
