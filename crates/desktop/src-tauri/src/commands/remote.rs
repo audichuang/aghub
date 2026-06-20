@@ -78,11 +78,12 @@ pub struct RemoteState {
 
 /// RAII claim on a connection's in-flight `connecting` slot.
 ///
-/// [`SlotGuard::claim`] inserts the id (erroring with [`RemoteError::AlreadyConnecting`]
-/// if another bring-up already holds it) and [`Drop`] removes it — so the slot
-/// is released on every exit path, including early `?` returns and a panic in
-/// the slow ssh work. Keep the guard alive until AFTER the handle is stored in
-/// `state.handles`, so no concurrent caller can observe "free slot, no handle".
+/// [`SlotGuard::claim`] inserts the id (erroring with
+/// [`RemoteError::AlreadyConnecting`] if another bring-up already holds it)
+/// and [`Drop`] removes it — so the slot is released on every exit path,
+/// including early `?` returns and a panic in the slow ssh work. Keep the
+/// guard alive until AFTER the handle is stored in `state.handles`, so no
+/// concurrent caller can observe "free slot, no handle".
 struct SlotGuard<'a> {
 	set: &'a Mutex<HashSet<String>>,
 	id: String,
@@ -373,7 +374,8 @@ fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 /// Store a freshly brought-up handle, or — if `state.handles` is poisoned —
-/// tear the new tunnel + remote server down and report [`RemoteError::Internal`].
+/// tear the new tunnel + remote server down and report
+/// [`RemoteError::Internal`].
 ///
 /// The handle is not yet reachable by disconnect/cleanup (the caller only owns
 /// it locally), so on a poisoned-lock failure we are the only owner and must
