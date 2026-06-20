@@ -1988,11 +1988,8 @@ pub async fn git_install_skills(
 	let target_agents: Vec<AgentType> =
 		valid_agents.iter().map(|(_, agent)| *agent).collect();
 
-	let layout = if req.universal.unwrap_or(false) {
-		aghub_core::skills::install_fetched::SkillInstallLayout::Universal
-	} else {
-		aghub_core::skills::install_fetched::SkillInstallLayout::IsolatedCopy
-	};
+	let layout =
+		aghub_core::skills::install_fetched::SkillInstallLayout::IsolatedCopy;
 
 	for skill_path in &req.skill_paths {
 		let full_path = temp_path.join(skill_path);

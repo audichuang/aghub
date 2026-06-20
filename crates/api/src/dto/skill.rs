@@ -272,13 +272,6 @@ pub struct GitInstallRequest {
 	pub agents: Vec<String>,
 	pub scope: String,
 	pub project_root: Option<String>,
-	/// When `Some(true)`, install in *universal* layout: write the real skill
-	/// once into `.agents/skills/<name>` and symlink each selected agent's skills
-	/// dir to it (npx-style). When `None`/`false` (default), each selected agent
-	/// gets an independent copy and `.agents` is never touched (isolation mode).
-	#[serde(default)]
-	#[ts(optional)]
-	pub universal: Option<bool>,
 }
 
 /// Request to sync (update in-place) an existing skill from a git session.
@@ -572,5 +565,29 @@ mod tests {
 		let json = serde_json::to_value(response).unwrap();
 		assert_eq!(json["dryRun"], true);
 		assert!(json.get("dry_run").is_none());
+	}
+
+	#[test]
+	fn git_install_request_ignores_legacy_universal_field() {
+		// No deny_unknown_fields => a legacy client sending "universal" still
+		// deserializes (field dropped), and the struct no longer has it.
+		let json = r#"{
+			"session_id":"s",
+			"skill_paths":[],
+			"agents":[],
+			"scope":"global",
+			"project_root":null,
+			"universal":true
+		}"#;
+		let req: GitInstallRequest =
+			serde_json::from_str(json).expect("parses, ignoring universal");
+		let req = GitInstallRequest {
+			session_id: req.session_id,
+			skill_paths: req.skill_paths,
+			agents: req.agents,
+			scope: req.scope,
+			project_root: req.project_root,
+		};
+		assert_eq!(req.session_id, "s");
 	}
 }
