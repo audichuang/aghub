@@ -133,7 +133,7 @@ export function SkillStatusBadge({
 						<Chip size="sm" variant="tertiary" color="default">
 							<span className="flex items-center gap-1">
 								<LockClosedIcon className="size-3 text-muted" />
-								<span className="text-xs">
+								<span className="text-xs text-muted">
 									{t("skillNeedsCredential")}
 								</span>
 							</span>
