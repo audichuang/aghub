@@ -163,8 +163,8 @@ pub enum RemoteInstallSource {
 	CargoGit { url: String, branch: Option<String> },
 }
 
-/// A successfully started remote server: its pid, the VM-side port it bound, and
-/// the remote log path.
+/// A successfully started remote server: its pid, the VM-side port it
+/// bound, and the remote log path.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartedServer {
@@ -178,21 +178,23 @@ pub struct StartedServer {
 // ---------------------------------------------------------------------------
 
 /// Resolve the remote binary path for a connection: the user-configured
-/// `remoteAghubPath` or the default `aghub-api` (resolved on the remote `PATH`).
+/// `remoteAghubPath` or the default `aghub-api` (resolved on the remote
+/// `PATH`).
 fn resolved_path(conn: &Connection) -> String {
 	conn.remote_aghub_path
 		.clone()
 		.unwrap_or_else(|| "aghub-api".to_string())
 }
 
-/// Did this ssh invocation fail at the *transport* level (host unreachable, auth
-/// refused, BatchMode failure, unknown/changed host key) rather than at the
-/// *remote command* level?
+/// Did this ssh invocation fail at the *transport* level (host unreachable,
+/// auth refused, BatchMode failure, unknown/changed host key) rather than
+/// at the *remote command* level?
 ///
-/// OpenSSH reports its OWN failures with exit code 255; any other code means the
-/// remote command actually ran, so its relayed stderr must NOT be read as a
-/// transport failure (e.g. a non-executable binary exits 126 with "permission
-/// denied"). A missing code (ssh killed by signal) is treated as transport-level.
+/// OpenSSH reports its OWN failures with exit code 255; any other code
+/// means the remote command actually ran, so its relayed stderr must NOT
+/// be read as a transport failure (e.g. a non-executable binary exits 126
+/// with "permission denied"). A missing code (ssh killed by signal) is
+/// treated as transport-level.
 fn is_transport_failure(status_code: Option<i32>) -> bool {
 	matches!(status_code, Some(255) | None)
 }
@@ -278,7 +280,8 @@ pub fn probe_connection<R: CommandRunner>(
 
 /// Ensure the remote has an `aghub-api` binary available.
 ///
-/// This probes first. If the binary is absent and an install source is provided,
+/// This probes first. If the binary is absent and an install source is
+/// provided,
 /// it installs over ssh/scp and probes again. The final [`TestResult`] is
 /// returned so callers can still reject incompatible versions.
 pub fn ensure_remote_api<R: CommandRunner>(

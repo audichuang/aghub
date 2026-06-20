@@ -175,8 +175,8 @@ pub fn parse_remote_directory_listing(
 
 	// Parent `..` always comes first. Show the CLEAN lexical parent of the PWD
 	// (e.g. "/home" instead of "/home/alice/..") as its path so the picker's
-	// secondary text reads cleanly; navigation still works because `cd` resolves
-	// the clean parent identically. Keep the displayed name "..".
+	// secondary text reads cleanly; navigation still works because `cd`
+	// resolves the clean parent identically. Keep the displayed name "..".
 	if let Some(mut p) = parent {
 		if let Some(lexical_parent) = std::path::Path::new(&path).parent() {
 			p.path = lexical_parent.to_string_lossy().into_owned();

@@ -178,8 +178,9 @@ impl CommandRunner for SystemRunner {
 ///
 /// OpenSSH runs the command through the account's login shell. Users often use
 /// fish/zsh there, while our remote scripts are bash. The command seen by the
-/// login shell is a fixed bash wrapper plus a base64 payload, so the login shell
-/// never has to parse the real script's quoting, semicolons, or expansions.
+/// login shell is a fixed bash wrapper plus a base64 payload, so the
+/// login shell never has to parse the real script's quoting, semicolons,
+/// or expansions.
 pub fn build_ssh_args(conn: &Connection, remote_cmd: &str) -> Vec<String> {
 	let mut args = vec![
 		"-o".to_string(),
@@ -482,8 +483,9 @@ pub fn is_version_compatible(local: &str, remote: &str) -> bool {
 	}
 }
 
-/// Normalize `uname -s`/`uname -m` output into the `std::env::consts::{OS, ARCH}`
-/// vocabulary so a remote platform can be compared to the desktop's own. Returns
+/// Normalize `uname -s`/`uname -m` output into the
+/// `std::env::consts::{OS, ARCH}` vocabulary so a remote platform can be
+/// compared to the desktop's own. Returns
 /// `None` for anything not mappable (the caller treats that as cross-platform).
 pub fn normalize_platform(
 	uname_s: &str,
@@ -521,9 +523,9 @@ pub fn probe_remote_platform<R: CommandRunner>(
 	normalize_platform(s, m)
 }
 
-/// Find the first whitespace/EOL-terminated token after `key` on any line, where
-/// `key` is anchored to the line start or to a whitespace boundary (so e.g.
-/// `OLDPID=9` is NOT matched when looking for `PID=`).
+/// Find the first whitespace/EOL-terminated token after `key` on any
+/// line, where `key` is anchored to the line start or to a whitespace
+/// boundary (so e.g. `OLDPID=9` is NOT matched when looking for `PID=`).
 fn parse_kv_after(s: &str, key: &str) -> Option<String> {
 	for line in s.lines() {
 		if let Some(rest) = key_value_rest(line, key) {
@@ -537,9 +539,10 @@ fn parse_kv_after(s: &str, key: &str) -> Option<String> {
 	None
 }
 
-/// Return the substring after `key` on `line` iff `key` appears at the start of
-/// the trimmed line or immediately after whitespace (a left word boundary), so a
-/// longer token whose suffix is `key` (e.g. `OLDPID=` for `PID=`) is rejected.
+/// Return the substring after `key` on `line` iff `key` appears at the
+/// start of the trimmed line or immediately after whitespace (a left word
+/// boundary), so a longer token whose suffix is `key` (e.g. `OLDPID=`
+/// for `PID=`) is rejected.
 fn key_value_rest<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 	let trimmed = line.trim_start();
 	if let Some(rest) = trimmed.strip_prefix(key) {

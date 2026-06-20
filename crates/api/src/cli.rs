@@ -56,8 +56,8 @@ impl std::error::Error for ParseError {}
 /// Parse CLI arguments (including `argv[0]`, which is skipped).
 ///
 /// Supports `--port <n>`, `--port=<n>`, `--version`, and `-V`. Returns
-/// [`ParseError`] for unknown flags, missing values, or out-of-range/non-numeric
-/// ports.
+/// [`ParseError`] for unknown flags, missing values, or
+/// out-of-range/non-numeric ports.
 pub fn parse_args(args: Vec<String>) -> Result<Config, ParseError> {
 	let mut config = Config::default();
 	let mut iter = args.into_iter().skip(1);
