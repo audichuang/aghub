@@ -236,6 +236,10 @@ pub fn install_fetched_skill_and_lock(
 
 	// Gate the lock write on the master being freshly written OR at least one
 	// agent actually receiving the skill on THIS run (Decision 11).
+	// NOTE: the gate passes (wrote_master||installed_any) as the helper's
+	// `installed_any` arg; when the outer guard is false (both false) the
+	// `&&` short-circuits before calling the helper, so
+	// `skill_lock_contains` is never reached — that branch is dead here.
 	let installed_any = agent_results.iter().any(|r| r.installed);
 	let wrote_lock = (wrote_master || installed_any)
 		&& should_write_install_lock(

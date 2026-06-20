@@ -379,17 +379,21 @@ pub async fn delete_skill_by_path(
 			..Default::default()
 		}));
 	}
-	let path_is_symlink =
-		aghub_core::skills::linker::Linker::is_link(&skill_dir);
+	let path_is_link = aghub_core::skills::linker::Linker::is_link(&skill_dir);
 	let canonical_layout = manager
 		.get_skill(&skill_name)
 		.and_then(|skill| skill.canonical_path.as_ref())
 		.is_some()
-		|| path_is_symlink;
+		|| path_is_link;
 
 	if !canonical_layout {
-		// Guard: this raw copy branch bypasses `plan_removal`'s referrer sweep,
-		// so re-apply it here. If the targeted dir is a shared universal master
+		// Guard: this non-link branch bypasses `plan_removal`'s referrer sweep
+		// (`Linker::is_link` covers symlinks AND Windows junctions), so
+		// re-apply it here. If the targeted dir is a shared universal master
+		// that ANOTHER in-scope agent still symlinks into (it was discovered as a
+		// real dir by a direct `.agents/skills` reader, hence canonical_path=None),
+		// refuse to `remove_dir_all` it — that would orphan the live symlink and
+		// lose the skill for every other agent.
 		// that ANOTHER in-scope agent still symlinks into (it was discovered as a
 		// real dir by a direct `.agents/skills` reader, hence canonical_path=None),
 		// refuse to `remove_dir_all` it — that would orphan the live symlink and

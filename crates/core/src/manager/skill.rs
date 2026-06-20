@@ -128,11 +128,12 @@ impl ConfigManager {
 		self.add_skill_universal(skill)
 	}
 
-	/// Add a skill in *universal* layout (opt-in): write the real `SKILL.md`
-	/// once into `.agents/skills/<name>` and symlink THIS agent's skills dir to
-	/// it (npx-style). Sets `canonical_path` so layout-aware removal recognises
-	/// the symlink. The default [`Self::add_skill`] copy behaviour is unchanged;
-	/// callers opt in (e.g. CLI `--universal`).
+	/// Add a skill in *universal* layout: write the real `SKILL.md` once into
+	/// `.agents/skills/<name>` and symlink THIS agent's skills dir to it
+	/// (npx-style). Sets `canonical_path` so layout-aware removal recognises
+	/// the symlink. Both [`Self::add_skill`] and [`Self::add_skill_from_path`]
+	/// now use this symlink-only path (Locked Decision 1); `--universal` is a
+	/// deprecated no-op.
 	///
 	/// If the canonical `<canonical_dir>/<safe_name>` already exists on disk
 	/// (because another agent installed the same skill, or an earlier
@@ -519,13 +520,13 @@ impl ConfigManager {
 		self.add_skill_from_path_universal(path)
 	}
 
-	/// Universal-layout variant of [`Self::add_skill_from_path`]: parses the
-	/// skill then installs it in `.agents/skills/<name>` (canonical) with a
-	/// per-agent symlink in this agent's skills dir. The full source tree
-	/// (`assets/`, `scripts/`, `examples/`, etc.) is copied to the canonical
-	/// — matching the API path's `install_git_skill_universal` behaviour. The
-	/// pre-fix implementation only wrote the synthesized `SKILL.md` and
-	/// silently dropped every other file the source contained.
+	/// Symlink-only install from a local path (Locked Decision 1): parses the
+	/// skill then writes the real source tree once into
+	/// `.agents/skills/<name>` (canonical) and symlinks THIS agent's skills
+	/// dir to it. Both [`Self::add_skill_from_path`] and [`Self::add_skill`]
+	/// now delegate here; `--universal` is a deprecated no-op. The full
+	/// source tree (`assets/`, `scripts/`, `examples/`, etc.) is preserved
+	/// — matching the API path's `install_git_skill_universal` behaviour.
 	pub fn add_skill_from_path_universal(
 		&mut self,
 		path: &Path,

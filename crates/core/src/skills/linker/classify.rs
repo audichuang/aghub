@@ -62,6 +62,9 @@ pub fn classify_agent(
 				adapter.target_skills_dir(project_root, scope),
 			)
 		}
+		// Defensive fallback for unknown ids (all 23 registry ids resolve via
+		// from_str today); uses descriptor paths directly, intentionally
+		// bypassing the SKILLS_PATH_OVERRIDE test hook.
 		Err(_) => (
 			descriptor.skill_read_paths(project_root, scope),
 			descriptor.skill_write_path(project_root, scope),
