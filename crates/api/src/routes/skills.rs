@@ -2029,6 +2029,56 @@ fn detect_current_branch(repo_path: &std::path::Path) -> Option<String> {
 	aghub_git::current_branch_at_path(repo_path)
 }
 
+/// Partition `agents` (raw strings from the request) into valid/invalid
+/// entries in request order. Invalid entries carry the error message to
+/// surface back to the caller.
+///
+/// Valid: the agent string parses AND `resolve_git_install_target_dir`
+///        returns `Some` for `scope` + `project_root`.
+/// Invalid: unknown agent string OR no skills dir for this scope.
+#[allow(clippy::type_complexity)]
+fn partition_install_agents_in_request_order(
+	agents: &[String],
+	scope: ResourceScope,
+	project_root: Option<&std::path::Path>,
+) -> (Vec<(String, AgentType)>, Vec<(String, String)>) {
+	let project_root_buf: Option<std::path::PathBuf> =
+		project_root.map(|p| p.to_path_buf());
+	let mut valid: Vec<(String, AgentType)> = Vec::new();
+	let mut invalid: Vec<(String, String)> = Vec::new();
+	for agent_str in agents {
+		match agent_str.parse::<AgentType>() {
+			Ok(agent_type) => {
+				if resolve_git_install_target_dir(
+					agent_type,
+					scope,
+					project_root_buf.as_ref(),
+				)
+				.is_some()
+				{
+					valid.push((agent_str.clone(), agent_type));
+				} else {
+					invalid.push((
+						agent_str.clone(),
+						format!(
+							"Agent '{}' does not support persistent \
+							 skill creation in this scope",
+							agent_str
+						),
+					));
+				}
+			}
+			Err(_) => {
+				invalid.push((
+					agent_str.clone(),
+					format!("Unknown agent '{agent_str}'"),
+				));
+			}
+		}
+	}
+	(valid, invalid)
+}
+
 #[post("/skills/git/install", data = "<body>")]
 pub async fn git_install_skills(
 	body: Json<GitInstallRequest>,
@@ -2076,38 +2126,12 @@ pub async fn git_install_skills(
 		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
 		.map(|oid| oid.to_string());
 
-	let mut invalid_agents: Vec<(String, String)> = Vec::new();
-	let mut valid_agents: Vec<(String, AgentType)> = Vec::new();
-	for agent_str in &req.agents {
-		match agent_str.parse::<AgentType>() {
-			Ok(agent_type) => {
-				if resolve_git_install_target_dir(
-					agent_type,
-					resource_scope,
-					project_root.as_ref(),
-				)
-				.is_some()
-				{
-					valid_agents.push((agent_str.clone(), agent_type));
-				} else {
-					invalid_agents.push((
-						agent_str.clone(),
-						format!(
-							"Agent '{}' does not support persistent skill \
-							 creation in this scope",
-							agent_str
-						),
-					));
-				}
-			}
-			Err(_) => {
-				invalid_agents.push((
-					agent_str.clone(),
-					format!("Unknown agent '{agent_str}'"),
-				));
-			}
-		}
-	}
+	let (valid_agents, invalid_agents) =
+		partition_install_agents_in_request_order(
+			&req.agents,
+			resource_scope,
+			project_root.as_deref(),
+		);
 
 	for (agent_str, error) in &invalid_agents {
 		for skill_path in &req.skill_paths {
@@ -3713,37 +3737,25 @@ mod tests {
 		let req_agents = vec!["claude".to_string(), "opencode".to_string()];
 		let resource_scope = ResourceScope::ProjectOnly;
 
-		let mut invalid: Vec<(String, String)> = Vec::new();
-		let mut valid: Vec<(String, AgentType)> = Vec::new();
-		for agent_str in &req_agents {
-			match agent_str.parse::<AgentType>() {
-				Ok(agent_type) => {
-					if resolve_git_install_target_dir(
-						agent_type,
-						resource_scope,
-						Some(&project_root),
-					)
-					.is_some()
-					{
-						valid.push((agent_str.clone(), agent_type));
-					} else {
-						invalid.push((
-							agent_str.clone(),
-							format!(
-								"Agent '{}' unsupported in scope",
-								agent_str
-							),
-						));
-					}
-				}
-				Err(_) => {
-					invalid.push((
-						agent_str.clone(),
-						format!("Unknown agent '{agent_str}'"),
-					));
-				}
-			}
-		}
+		let (valid, invalid) = partition_install_agents_in_request_order(
+			&req_agents,
+			resource_scope,
+			Some(project_root.as_path()),
+		);
+
+		// also verify unknown agents go to invalid
+		let (v2, inv2) = partition_install_agents_in_request_order(
+			&["claude".to_string(), "not-a-real-agent".to_string()],
+			resource_scope,
+			Some(project_root.as_path()),
+		);
+		assert_eq!(v2.len(), 1, "only claude is valid");
+		assert_eq!(inv2.len(), 1, "not-a-real-agent is invalid");
+		assert!(
+			inv2[0].1.contains("Unknown agent"),
+			"wrong error: {}",
+			inv2[0].1,
+		);
 
 		assert!(invalid.is_empty(), "unexpected invalids: {:?}", invalid);
 		assert_eq!(valid.len(), 2);
