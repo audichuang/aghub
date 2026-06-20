@@ -368,6 +368,47 @@ export function checkSkillUpdatesMutationOptions({
 	});
 }
 
+interface CheckSkillUpdatesQueryParams {
+	api: ApiClient;
+	/** When false the query does not fire (use to suppress when offline). */
+	enabled?: boolean;
+	params?: CheckSkillUpdatesParams;
+	/**
+	 * Throttle threshold in ms. Default 10 minutes — matches the spec's
+	 * "staleTime = throttle" pattern so React Query skips a re-fetch if the
+	 * last result is younger than this.
+	 *
+	 * §12-C1: preflight is near-zero-cost only in steady-state (ref_commit
+	 * populated, local not drifted). Throttle + offline suppression are
+	 * REQUIRED, not optional.
+	 */
+	staleTime?: number;
+}
+
+/**
+ * `useQuery`-compatible options for `GET /skills/check-updates`.
+ *
+ * Use this for the **auto-check-on-page-enter** path. The mutation variant
+ * (`checkSkillUpdatesMutationOptions`) is kept for the manual refresh
+ * button where explicit loading state matters.
+ *
+ * The check writes back to the skill lock (auto-heals ref_commit/hash) —
+ * this side-effect is accepted per spec §4.3.
+ */
+export function checkSkillUpdatesQueryOptions({
+	api,
+	enabled = true,
+	params,
+	staleTime = 600_000, // 10 minutes
+}: CheckSkillUpdatesQueryParams) {
+	return queryOptions({
+		queryKey: checkSkillUpdatesQueryKey(params),
+		queryFn: () => api.skills.checkUpdates(params),
+		enabled,
+		staleTime,
+	});
+}
+
 interface ApplySkillUpdateMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
