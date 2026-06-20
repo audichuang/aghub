@@ -24,7 +24,7 @@ import {
 	toast,
 } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Controller, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import type {
@@ -95,7 +95,10 @@ export function ImportGithubSkillPanel({
 	);
 
 	const scope = projectPath ? "project" : "global";
-	const { coverage } = useSkillCoverage(scope, projectPath ?? null);
+	const { coverage, isLoading: isCoverageLoading } = useSkillCoverage(
+		scope,
+		projectPath ?? null,
+	);
 	const { autoCovered, linkTargets } = useMemo(
 		() => partitionByCoverage(skillAgents, coverage),
 		[skillAgents, coverage],
@@ -122,6 +125,7 @@ export function ImportGithubSkillPanel({
 	const [previewSkill, setPreviewSkill] = useState<GitScanSkillEntry | null>(
 		null,
 	);
+	const [coverageSeeded, setCoverageSeeded] = useState(false);
 
 	const { data: credentials = [] } = useQuery({
 		...credentialsListQueryOptions({ api, enabled: isPrivateRepo }),
@@ -144,6 +148,20 @@ export function ImportGithubSkillPanel({
 	});
 
 	const urlValue = useWatch({ control, name: "url" });
+
+	useEffect(() => {
+		if (isCoverageLoading || coverageSeeded) return;
+
+		setValue(
+			"selectedAgents",
+			linkTargets.map((a) => a.id),
+		);
+		const coverageSeededTimeout = window.setTimeout(() => {
+			setCoverageSeeded(true);
+		}, 0);
+
+		return () => window.clearTimeout(coverageSeededTimeout);
+	}, [coverageSeeded, isCoverageLoading, linkTargets, setValue]);
 
 	const scanMutation = useMutation({
 		mutationFn: (values: InputFormValues) =>
@@ -243,6 +261,7 @@ export function ImportGithubSkillPanel({
 
 	const handleImportAnother = () => {
 		reset();
+		setCoverageSeeded(false);
 		setIsPrivateRepo(false);
 		setScannedSkills([]);
 		setSelectedPaths(new Set());
@@ -829,6 +848,7 @@ export function ImportGithubSkillPanel({
 									control={control}
 									rules={{
 										validate: (value) =>
+											isCoverageLoading ||
 											linkTargets.length === 0 ||
 											value.length > 0
 												? true
@@ -842,11 +862,14 @@ export function ImportGithubSkillPanel({
 													selectedKeys={
 														new Set(field.value)
 													}
-													onSelectionChange={(keys) =>
+													onSelectionChange={(
+														keys,
+													) => {
+														setCoverageSeeded(true);
 														field.onChange([
 															...keys,
-														])
-													}
+														]);
+													}}
 													label={t(
 														"sourceInstallLinkTargetsTitle",
 													)}
@@ -915,7 +938,8 @@ export function ImportGithubSkillPanel({
 										<Button
 											isDisabled={
 												selectedPaths.size === 0 ||
-												isBranchSwitching
+												isBranchSwitching ||
+												isCoverageLoading
 											}
 											onPress={() => {
 												handleSubmit((values) => {
@@ -925,7 +949,21 @@ export function ImportGithubSkillPanel({
 												})();
 											}}
 										>
-											{t("installSelected")}
+											{isCoverageLoading ? (
+												<span className="flex items-center gap-2">
+													<Spinner
+														size="sm"
+														color="current"
+													/>
+													<span>
+														{t(
+															"loadingDestinations",
+														)}
+													</span>
+												</span>
+											) : (
+												t("installSelected")
+											)}
 										</Button>
 									</div>
 								)}
