@@ -1,6 +1,7 @@
 import ky, { isHTTPError } from "ky";
 import type {
 	AgentAvailabilityDto,
+	AgentSkillCoverageDto,
 	AgentInfo,
 	AgentProviderResponse,
 	ApplySkillUpdateRequest,
@@ -148,6 +149,21 @@ export function createApi(baseUrl: string) {
 			},
 			availability(): Promise<AgentAvailabilityDto[]> {
 				return client.get("agents/availability").json();
+			},
+			skillCoverage(
+				scope: "global" | "project",
+				projectRoot?: string | null,
+			): Promise<AgentSkillCoverageDto[]> {
+				return client
+					.get("skills/coverage", {
+						searchParams: {
+							scope,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+					})
+					.json();
 			},
 		},
 		skills: {

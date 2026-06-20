@@ -12,6 +12,8 @@ export const queryKeys = {
 		all: () => ["agents"] as const,
 		list: () => ["agents", "list"] as const,
 		availability: () => ["agents", "availability"] as const,
+		coverage: (scope: string, projectRoot?: string | null) =>
+			["agents", "coverage", scope, projectRoot ?? null] as const,
 	},
 	skills: {
 		all: () => ["skills"] as const,
