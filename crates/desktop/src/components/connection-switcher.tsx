@@ -1,4 +1,8 @@
-import { ChevronUpDownIcon, Cog6ToothIcon } from "@heroicons/react/24/solid";
+import {
+	ArrowLeftStartOnRectangleIcon,
+	ChevronUpDownIcon,
+	Cog6ToothIcon,
+} from "@heroicons/react/24/solid";
 import {
 	Button,
 	Dropdown,
@@ -19,6 +23,8 @@ import { ManageConnectionsDialog } from "./manage-connections-dialog";
 
 /** Sentinel key for the non-selectable "Manage connections…" action row. */
 const MANAGE_ACTION = "__manage__";
+/** Sentinel key for the Disconnect action row. */
+const DISCONNECT_ACTION = "__disconnect__";
 
 /** Tailwind classes for the status dot, keyed by the 4-state status. */
 const STATUS_DOT: Record<ConnectionStatus, string> = {
@@ -39,9 +45,30 @@ function StatusDot({ status }: { status: ConnectionStatus }) {
 
 export function ConnectionSwitcher() {
 	const { t } = useTranslation();
-	const { connections, activeId, activeConnection, status, setActive } =
-		useConnection();
+	const {
+		connections,
+		activeId,
+		activeConnection,
+		status,
+		setActive,
+		disconnect,
+	} = useConnection();
 	const [isManageOpen, setIsManageOpen] = useState(false);
+	const [isDisconnecting, setIsDisconnecting] = useState(false);
+
+	/** True when the active connection is a live remote (not Local). */
+	const isActiveRemote = activeId !== LOCAL_CONNECTION.id;
+
+	const handleDisconnect = async () => {
+		if (!isActiveRemote || isDisconnecting) return;
+		setIsDisconnecting(true);
+		try {
+			await disconnect(activeId);
+		} finally {
+			setIsDisconnecting(false);
+			setActive(LOCAL_CONNECTION.id);
+		}
+	};
 
 	// The implicit Local connection carries a hardcoded label; render it via the
 	// localized key instead so it follows the UI language.
@@ -79,6 +106,8 @@ export function ConnectionSwitcher() {
 						onAction={(key) => {
 							if (key === MANAGE_ACTION) {
 								setIsManageOpen(true);
+							} else if (key === DISCONNECT_ACTION) {
+								void handleDisconnect();
 							}
 						}}
 					>
@@ -109,6 +138,27 @@ export function ConnectionSwitcher() {
 							))}
 						</Dropdown.Section>
 						<Separator />
+						{isActiveRemote && (
+							<>
+								<Dropdown.Item
+									id={DISCONNECT_ACTION}
+									textValue={
+										isDisconnecting
+											? t("connDisconnecting")
+											: t("connDisconnect")
+									}
+									isDisabled={isDisconnecting}
+								>
+									<ArrowLeftStartOnRectangleIcon className="size-4 text-danger" />
+									<Label className="text-danger">
+										{isDisconnecting
+											? t("connDisconnecting")
+											: t("connDisconnect")}
+									</Label>
+								</Dropdown.Item>
+								<Separator />
+							</>
+						)}
 						<Dropdown.Item
 							id={MANAGE_ACTION}
 							textValue={t("connManageConnections")}

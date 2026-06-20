@@ -1008,6 +1008,8 @@ export default {
 	connTestStepInstallNotNeeded: "已存在，无需安装",
 	connTestStepInstallNotRun: "未执行",
 	connTestStepSkipped: "未执行",
+	connDisconnect: "断开连接",
+	connDisconnecting: "断开中…",
 	connSave: "保存",
 	connRemove: "删除",
 	connEdit: "编辑",
