@@ -1090,10 +1090,13 @@ export default {
 	sourceInstallSomeFailedMany: "有 {{count}} 個安裝目標失敗。",
 	sourceInstallFailed: "安裝技能失敗。",
 	sourceInstallNoAgents: "此範圍沒有可安裝技能的可用 Agent。",
-	installLayoutLabel: "安裝佈局",
-	installLayoutIsolation: "隔離",
-	installLayoutUniversal: "通用",
-	installLayoutHint:
-		"隔離模式會將技能複製到每個選定的 Agent；通用模式則寫入一份共用的 .agents 主檔，並為每個 Agent 建立軟連結。",
+	sourceInstallCoveredTitle: "已涵蓋",
+	sourceInstallCoveredHint:
+		"這些 Agent 會直接讀取共用的 .agents 主檔，因此不會建立連結。",
+	sourceInstallLinkTargetsTitle: "將建立連結",
+	sourceInstallLinkTargetsHint:
+		"這些 Agent 會取得指向共用 .agents 主檔的軟連結。",
+	sourceInstallNoLinkTargets: "此處沒有 Agent 需要連結 — 只會寫入主檔。",
+	agentCoveredBadge: "已涵蓋",
 	selectSource: "選擇一個來源",
 };
