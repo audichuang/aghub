@@ -3409,20 +3409,50 @@ mod tests {
 				"---\nname: my-skill\ndescription: d\n---\n",
 			)
 			.unwrap();
-			let run = |args: &[&str]| {
-				std::process::Command::new("git")
-					.args(args)
-					.current_dir(&work)
-					.env("GIT_AUTHOR_NAME", "t")
-					.env("GIT_AUTHOR_EMAIL", "t@t")
-					.env("GIT_COMMITTER_NAME", "t")
-					.env("GIT_COMMITTER_EMAIL", "t@t")
-					.output()
-					.unwrap();
-			};
-			run(&["init", "-q"]);
-			run(&["add", "."]);
-			run(&["commit", "-qm", "init"]);
+			// Build the git fixture with gix (no `git` subprocess).
+			{
+				use gix::objs::tree::{Entry, EntryKind};
+				let repo = gix::init(&work).unwrap();
+				let blob_id = repo
+					.write_blob(b"---\nname: my-skill\ndescription: d\n---\n")
+					.unwrap()
+					.detach();
+				// Subtree: my-skill/ containing SKILL.md
+				let subtree_id = repo
+					.write_object(&gix::objs::Tree {
+						entries: vec![Entry {
+							mode: EntryKind::Blob.into(),
+							filename: "SKILL.md".into(),
+							oid: blob_id,
+						}],
+					})
+					.unwrap()
+					.detach();
+				// Root tree containing the my-skill/ subdirectory
+				let tree_id = repo
+					.write_object(&gix::objs::Tree {
+						entries: vec![Entry {
+							mode: EntryKind::Tree.into(),
+							filename: "my-skill".into(),
+							oid: subtree_id,
+						}],
+					})
+					.unwrap()
+					.detach();
+				let sig = gix::actor::SignatureRef::from_bytes(
+					b"t <t@t> 1000000000 +0000",
+				)
+				.unwrap();
+				repo.commit_as(
+					sig,
+					sig,
+					"HEAD",
+					"init",
+					tree_id,
+					std::iter::empty::<gix::ObjectId>(),
+				)
+				.unwrap();
+			}
 
 			let req = InstallSkillRequest {
 				source: format!("file://{}", work.display()),
@@ -3557,20 +3587,50 @@ mod tests {
 				"---\nname: my-skill\ndescription: d\n---\n",
 			)
 			.unwrap();
-			let run = |args: &[&str]| {
-				std::process::Command::new("git")
-					.args(args)
-					.current_dir(&work)
-					.env("GIT_AUTHOR_NAME", "t")
-					.env("GIT_AUTHOR_EMAIL", "t@t")
-					.env("GIT_COMMITTER_NAME", "t")
-					.env("GIT_COMMITTER_EMAIL", "t@t")
-					.output()
-					.unwrap();
-			};
-			run(&["init", "-q"]);
-			run(&["add", "."]);
-			run(&["commit", "-qm", "init"]);
+			// Build the git fixture with gix (no `git` subprocess).
+			{
+				use gix::objs::tree::{Entry, EntryKind};
+				let repo = gix::init(&work).unwrap();
+				let blob_id = repo
+					.write_blob(b"---\nname: my-skill\ndescription: d\n---\n")
+					.unwrap()
+					.detach();
+				// Subtree: my-skill/ containing SKILL.md
+				let subtree_id = repo
+					.write_object(&gix::objs::Tree {
+						entries: vec![Entry {
+							mode: EntryKind::Blob.into(),
+							filename: "SKILL.md".into(),
+							oid: blob_id,
+						}],
+					})
+					.unwrap()
+					.detach();
+				// Root tree containing the my-skill/ subdirectory
+				let tree_id = repo
+					.write_object(&gix::objs::Tree {
+						entries: vec![Entry {
+							mode: EntryKind::Tree.into(),
+							filename: "my-skill".into(),
+							oid: subtree_id,
+						}],
+					})
+					.unwrap()
+					.detach();
+				let sig = gix::actor::SignatureRef::from_bytes(
+					b"t <t@t> 1000000000 +0000",
+				)
+				.unwrap();
+				repo.commit_as(
+					sig,
+					sig,
+					"HEAD",
+					"init",
+					tree_id,
+					std::iter::empty::<gix::ObjectId>(),
+				)
+				.unwrap();
+			}
 
 			let prev = std::env::current_dir().unwrap();
 			std::env::set_current_dir(home).unwrap();
