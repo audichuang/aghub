@@ -8,8 +8,6 @@ use aghub_core::{
 };
 use rocket::http::Status;
 use rocket::serde::json::Json;
-#[cfg(test)]
-use std::collections::HashMap;
 use std::{
 	path::{Path, PathBuf},
 	time::Duration,
@@ -616,19 +614,6 @@ fn delete_response_from_outcome(
 	}
 }
 
-/// Isolated-copy of a fetched skill dir. Delegates to the shared core
-/// implementation (decision #5: API and CLI use ONE copy behavior); the core
-/// fn returns `io::Result`, so we map its error to [`ApiError`] at this
-/// boundary (core cannot depend on Rocket).
-#[cfg(test)]
-fn copy_dir_recursive(
-	from: &std::path::Path,
-	to: &std::path::Path,
-) -> Result<(), ApiError> {
-	aghub_core::skills::install_fetched::copy_dir_recursive(from, to)
-		.map_err(|e| ApiError::from(ConfigError::Io(e)))
-}
-
 fn resolve_git_install_target_dir(
 	agent_type: AgentType,
 	resource_scope: ResourceScope,
@@ -636,88 +621,6 @@ fn resolve_git_install_target_dir(
 ) -> Option<std::path::PathBuf> {
 	create_adapter(agent_type)
 		.target_skills_dir(project_root.map(|p| p.as_path()), resource_scope)
-}
-
-#[cfg(test)]
-fn install_git_skill_to_dir(
-	full_path: &std::path::Path,
-	target_dir: &std::path::Path,
-) -> Result<(String, bool), ApiError> {
-	let parsed = skill::parser::parse(full_path).map_err(|e| {
-		ApiError::new(
-			Status::BadRequest,
-			format!("Failed to parse skill: {e}"),
-			"SKILL_PARSE_FAILED",
-		)
-	})?;
-	let skill = aghub_core::convert_skill(parsed);
-	let safe_name = skill::sanitize::sanitize_name(&skill.name);
-	let dest_root = target_dir.join(&safe_name);
-
-	let copied = if !dest_root.exists() {
-		let source_root = get_skill_root(full_path.to_path_buf());
-		copy_dir_recursive(&source_root, &dest_root)?;
-		true
-	} else {
-		false
-	};
-
-	Ok((skill.name, copied))
-}
-
-#[cfg(test)]
-type GitInstallAgentGroup = Vec<(String, AgentType)>;
-#[cfg(test)]
-type GitInstallGroups = HashMap<std::path::PathBuf, GitInstallAgentGroup>;
-#[cfg(test)]
-type GitInstallInvalidAgent = (String, Option<AgentType>, String);
-
-#[cfg(test)]
-fn build_git_install_groups(
-	agents: &[String],
-	resource_scope: ResourceScope,
-	project_root: Option<&std::path::PathBuf>,
-) -> (GitInstallGroups, Vec<GitInstallInvalidAgent>) {
-	let mut groups = HashMap::new();
-	let mut invalid = Vec::new();
-
-	for agent_str in agents {
-		let agent_type: AgentType = match agent_str.parse() {
-			Ok(agent) => agent,
-			Err(_) => {
-				invalid.push((
-					agent_str.clone(),
-					None,
-					format!("Unknown agent '{agent_str}'"),
-				));
-				continue;
-			}
-		};
-
-		let Some(target_dir) = resolve_git_install_target_dir(
-			agent_type,
-			resource_scope,
-			project_root,
-		) else {
-			invalid.push((
-				agent_str.clone(),
-				Some(agent_type),
-				format!(
-					"Agent '{}' does not support persistent skill creation \
-					 in this scope",
-					agent_str
-				),
-			));
-			continue;
-		};
-
-		groups
-			.entry(target_dir)
-			.or_insert_with(Vec::new)
-			.push((agent_str.clone(), agent_type));
-	}
-
-	(groups, invalid)
 }
 
 fn parse_install_scope(scope: &str) -> Result<ResourceScope, ApiError> {
@@ -895,35 +798,6 @@ fn clone_skill_source_to_temp(
 		.main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
 		.map_err(|e| format!("Checkout failed: {e}"))?;
 	Ok(temp_dir)
-}
-
-#[cfg(test)]
-fn skill_lock_contains(
-	skill_name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> bool {
-	match resource_scope {
-		ResourceScope::GlobalOnly => {
-			skill::lock::global::get_skill_from_lock(skill_name).is_some()
-		}
-		ResourceScope::ProjectOnly => project_root.is_some_and(|root| {
-			skill::lock::local::read_local_lock(Some(root))
-				.skills
-				.contains_key(skill_name)
-		}),
-		ResourceScope::Both => false,
-	}
-}
-
-#[cfg(test)]
-fn should_write_install_lock(
-	skill_name: &str,
-	copied_any: bool,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> bool {
-	copied_any || !skill_lock_contains(skill_name, resource_scope, project_root)
 }
 
 fn detect_available_editor() -> Option<CodeEditorType> {
@@ -2717,102 +2591,61 @@ mod tests {
 		});
 	}
 
+	// GAP-4: import_skill inherits the symlink-only model via
+	// add_skill_from_path -- it must materialize a .agents Master + a link
+	// (never an isolated copy) and still write the install lock from the
+	// SOURCE folder (spec line 447).
+	#[cfg(unix)]
 	#[test]
-	fn git_install_groups_agents_by_primary_target_dir() {
-		let project_root = std::path::PathBuf::from("/tmp/demo");
-		let (groups, invalid) = build_git_install_groups(
-			&["claude".into(), "opencode".into(), "codex".into()],
-			ResourceScope::ProjectOnly,
-			Some(&project_root),
-		);
+	fn import_skill_links_master_and_writes_lock() {
+		with_isolated_env(|home, _state| {
+			// Create source skill outside the project
+			let source_skill = home.join("source-skills/my-import-skill");
+			std::fs::create_dir_all(&source_skill).unwrap();
+			std::fs::write(
+					source_skill.join("SKILL.md"),
+					"---\nname: my-import-skill\ndescription: test\n---\n\n# My Import Skill\n",
+				)
+				.unwrap();
 
-		assert!(invalid.is_empty());
-		assert_eq!(groups.len(), 3);
-		assert!(groups.contains_key(&project_root.join(".claude/skills")));
-		assert!(groups.contains_key(&project_root.join(".opencode/skills")));
-		assert!(groups.contains_key(&project_root.join(".agents/skills")));
-	}
+			// Build a project with a .claude marker
+			let project = home.join("myproject");
+			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
 
-	#[test]
-	fn git_install_marks_same_primary_dir_agents_success() {
-		let _guard = crate::routes::test_env_lock()
-			.lock()
-			.unwrap_or_else(|e| e.into_inner());
-		let temp = tempdir().unwrap();
-		let target_dir = temp.path().join("shared");
-		let source_dir = temp.path().join("source/hello-skill");
-		std::fs::create_dir_all(&source_dir).unwrap();
-		std::fs::write(
-			source_dir.join("SKILL.md"),
-			"---\nname: hello-skill\ndescription: hi\n---\n\n# Hello\n",
-		)
-		.unwrap();
+			let agent = AgentParam(AgentType::Claude);
+			let scope = ScopeParams {
+				scope: Some("project".to_string()),
+				project_root: Some(project.display().to_string()),
+			};
+			let body = Json(crate::dto::skill::ImportSkillRequest {
+				path: source_skill.join("SKILL.md").display().to_string(),
+			});
 
-		let result =
-			install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
-				.unwrap_or_else(|e| panic!("{}", e.body.error));
-		assert_eq!(result, ("hello-skill".to_string(), true));
-		assert!(target_dir.join("hello-skill/SKILL.md").exists());
+			import_skill(agent, scope, body)
+				.ok()
+				.expect("import_skill returned ok");
 
-		let second =
-			install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
-				.unwrap_or_else(|e| panic!("{}", e.body.error));
-		assert_eq!(second, ("hello-skill".to_string(), false));
-		assert!(target_dir.join("hello-skill/SKILL.md").exists());
-	}
-
-	#[test]
-	fn git_install_existing_folder_without_lock_writes_lock() {
-		let _guard = crate::routes::test_env_lock()
-			.lock()
-			.unwrap_or_else(|e| e.into_inner());
-		let temp = tempdir().unwrap();
-		let project = temp.path().join("project");
-		let target_dir = project.join(".claude/skills");
-		let source_dir = temp.path().join("source/hello-skill");
-		std::fs::create_dir_all(&source_dir).unwrap();
-		std::fs::write(
-			source_dir.join("SKILL.md"),
-			"---\nname: hello-skill\ndescription: hi\n---\n\n# Hello\n",
-		)
-		.unwrap();
-
-		install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
-			.unwrap_or_else(|e| panic!("{}", e.body.error));
-		let (skill_name, copied) =
-			install_git_skill_to_dir(&source_dir.join("SKILL.md"), &target_dir)
-				.unwrap_or_else(|e| panic!("{}", e.body.error));
-
-		assert!(!copied);
-		assert!(should_write_install_lock(
-			&skill_name,
-			copied,
-			ResourceScope::ProjectOnly,
-			Some(&project),
-		));
-
-		write_skill_install_lock(
-			&skill_name,
-			ResourceScope::ProjectOnly,
-			Some(&project),
-			&skill::InstallLockSource {
-				source: "owner/repo".to_string(),
-				source_type: "github".to_string(),
-				source_url: "https://github.com/owner/repo".to_string(),
-				ref_name: Some("main".to_string()),
-			},
-			Some(skill::lock_skill_file_path("hello-skill")),
-			&source_dir,
-			Some("deadbeefcafef00d".to_string()),
-		)
-		.unwrap_or_else(|e| panic!("{}", e.body.error));
-
-		let lock = skill::lock::local::read_local_lock(Some(&project));
-		assert!(lock.skills.contains_key("hello-skill"));
-		assert_eq!(
-			lock.skills["hello-skill"].ref_commit.as_deref(),
-			Some("deadbeefcafef00d"),
-		);
+			// 1. .agents Master exists
+			assert!(
+				project
+					.join(".agents/skills/my-import-skill/SKILL.md")
+					.exists(),
+				".agents master must exist",
+			);
+			// 2. Claude link is a symlink (symlink-only model)
+			assert!(
+				aghub_core::skills::linker::Linker::is_link(
+					&project.join(".claude/skills/my-import-skill"),
+				),
+				"claude skills entry must be a symlink",
+			);
+			// 3. Project lock contains the skill
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert!(
+				lock.skills.contains_key("my-import-skill"),
+				"project lock must contain the skill",
+			);
+		});
 	}
 
 	#[test]
