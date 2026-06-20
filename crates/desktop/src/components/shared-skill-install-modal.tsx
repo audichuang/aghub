@@ -1,6 +1,5 @@
 import { Button, Modal } from "@heroui/react";
 import { useTranslation } from "react-i18next";
-import type { MarketSkill } from "../generated/dto";
 import type { InstallResult } from "../lib/install-utils";
 import type { Project } from "../lib/store";
 import { InstallTargetSelector } from "./install-target-selector";
@@ -12,8 +11,12 @@ export interface SharedSkillInstallModalProps {
 	onClose: () => void;
 	/** Modal heading; defaults to t("installSkill") */
 	heading?: string;
-	/** Optional skill summary card shown above the agent picker */
-	selectedSkill?: MarketSkill | null;
+	/**
+	 * Optional skill info card shown above the agent picker.
+	 * Rendered whenever `source` is present; `name` is optional so callers
+	 * can show the source row while omitting the skill name (e.g. installAll).
+	 */
+	skillInfo?: { source: string; name?: string } | null;
 	/** The "select agents" body — rendered when installResults is empty */
 	agentPickerSlot: React.ReactNode;
 	/** When truthy, the results phase replaces the picker */
@@ -49,7 +52,7 @@ export function SharedSkillInstallModal({
 	isOpen,
 	onClose,
 	heading,
-	selectedSkill,
+	skillInfo,
 	agentPickerSlot,
 	installResults,
 	isInstalling,
@@ -82,10 +85,10 @@ export function SharedSkillInstallModal({
 					<Modal.Body className="p-4">
 						{!isResultsPhase && (
 							<div className="space-y-4">
-								{selectedSkill && (
+								{skillInfo?.source && (
 									<SkillInfoCard
-										name={selectedSkill.name}
-										source={selectedSkill.source}
+										name={skillInfo.name}
+										source={skillInfo.source}
 										className="mb-0"
 									/>
 								)}
