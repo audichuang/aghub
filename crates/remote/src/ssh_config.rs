@@ -105,9 +105,14 @@ fn parse_config_content<F>(
 		match keyword.to_ascii_lowercase().as_str() {
 			"host" => {
 				flush_host_block(&mut current, hosts, seen);
-				current.aliases = parts
+				// Use quote-aware tokenizer so aliases like "my host"
+				// (with a space) are preserved as a single token.
+				// HostName and Include are left on split_whitespace
+				// because those values are not space-bearing.
+				let rest = line[keyword.len()..].trim_start();
+				current.aliases = split_host_tokens(rest)
+					.into_iter()
 					.filter(|alias| is_selectable_alias(alias))
-					.map(clean_token)
 					.collect();
 				current.host_name = None;
 			}
@@ -161,6 +166,52 @@ fn is_selectable_alias(alias: &str) -> bool {
 
 fn clean_token(token: &str) -> String {
 	token.trim_matches('"').to_string()
+}
+
+/// Split a `Host` line value into tokens, respecting single and double
+/// quotes. Quoted strings may contain whitespace; the surrounding quotes
+/// are stripped. Used only for the `Host` keyword because `HostName` and
+/// `Include` values are not expected to contain spaces.
+fn split_host_tokens(line: &str) -> Vec<String> {
+	let mut tokens = Vec::new();
+	let mut current = String::new();
+	let mut in_single = false;
+	let mut in_double = false;
+	let chars: Vec<char> = line.chars().collect();
+	let mut i = 0;
+	while i < chars.len() {
+		let c = chars[i];
+		if in_single {
+			if c == '\'' {
+				in_single = false;
+			} else {
+				current.push(c);
+			}
+		} else if in_double {
+			if c == '"' {
+				in_double = false;
+			} else {
+				current.push(c);
+			}
+		} else {
+			match c {
+				'\'' => in_single = true,
+				'"' => in_double = true,
+				' ' | '\t' => {
+					if !current.is_empty() {
+						tokens.push(current.clone());
+						current.clear();
+					}
+				}
+				_ => current.push(c),
+			}
+		}
+		i += 1;
+	}
+	if !current.is_empty() {
+		tokens.push(current);
+	}
+	tokens
 }
 
 fn expand_include_paths(
@@ -305,6 +356,26 @@ Host good-host
 				alias: "good-host".to_string(),
 				host_name: Some("ignored.example.com".to_string()),
 			}]
+		);
+	}
+
+	#[test]
+	fn parses_quoted_host_alias_with_space() {
+		let hosts = parse_ssh_config_hosts(
+			"Host \"my host\" plain\n  HostName example.com\n",
+		);
+		assert_eq!(
+			hosts,
+			vec![
+				SshConfigHost {
+					alias: "my host".to_string(),
+					host_name: Some("example.com".to_string()),
+				},
+				SshConfigHost {
+					alias: "plain".to_string(),
+					host_name: Some("example.com".to_string()),
+				},
+			]
 		);
 	}
 
