@@ -1,6 +1,5 @@
 import {
 	ArrowPathIcon,
-	CheckCircleIcon,
 	ExclamationTriangleIcon,
 	LockClosedIcon,
 	QuestionMarkCircleIcon,
@@ -9,17 +8,19 @@ import { Chip, Tooltip } from "@heroui/react";
 import { useTranslation } from "react-i18next";
 import type { SkillUpdateResponse } from "../generated/dto";
 
-interface SkillUpdateBadgeProps {
-	/** The per-skill status from `GET /skills/check-updates`, or undefined when
-	 * no check has run yet (the badge renders nothing in that case). */
+interface SkillStatusBadgeProps {
+	/**
+	 * Per-skill status from `GET /skills/check-updates`, or undefined when
+	 * no check has run yet. `undefined` and `upToDate` both render nothing —
+	 * only actionable states render a badge (§12-C5: no version/date in
+	 * Phase 1; hash tooltip only).
+	 */
 	status?: SkillUpdateResponse;
-	/** Called when an `uncheckable { reason: "auth" }` badge is activated so the
-	 * caller can open a credential picker and retry. */
+	/** Called when an `uncheckable { reason: "auth" }` badge is activated. */
 	onResolveAuth?: () => void;
 }
 
-/** Human-readable tooltip text for an `uncheckable` reason. Falls back to a
- * generic message so an unknown reason still renders something useful. */
+/** Human-readable tooltip key for an `uncheckable` reason. */
 function uncheckableTooltipKey(reason: string): string {
 	switch (reason) {
 		case "auth":
@@ -40,37 +41,28 @@ function uncheckableTooltipKey(reason: string): string {
 	}
 }
 
-/** Renders a skill's update status as a compact HeroUI Chip + Tooltip. An
- * `auth`-blocked check is actionable (opens the credential picker via
- * `onResolveAuth`); other states are informational. */
-export function SkillUpdateBadge({
+/**
+ * Renders a skill's update status as a compact HeroUI Chip + Tooltip.
+ *
+ * - `undefined` → null (check not run yet)
+ * - `upToDate`  → null (no visual noise for the common case; §spec D3)
+ * - `updateAvailable` → yellow "可更新"
+ * - `renamed`   → purple "已改名"
+ * - `uncheckable(auth)` → always shows a credential button (disabled when
+ *   `onResolveAuth` is not provided)
+ * - `uncheckable(other)` → muted "無法檢查"
+ *
+ * Phase 1 only shows hash in tooltip (no version/date — §12-C5).
+ */
+export function SkillStatusBadge({
 	status,
 	onResolveAuth,
-}: SkillUpdateBadgeProps) {
+}: SkillStatusBadgeProps) {
 	const { t } = useTranslation();
 
-	if (!status) {
+	// undefined = no check run; upToDate = all good → both silent
+	if (!status || status.status === "upToDate") {
 		return null;
-	}
-
-	if (status.status === "upToDate") {
-		return (
-			<Tooltip delay={0}>
-				<Tooltip.Trigger>
-					<span className="inline-flex">
-						<Chip size="sm" variant="soft" color="default">
-							<span className="flex items-center gap-1">
-								<CheckCircleIcon className="size-3 text-success" />
-								<span className="text-xs">
-									{t("skillUpToDate")}
-								</span>
-							</span>
-						</Chip>
-					</span>
-				</Tooltip.Trigger>
-				<Tooltip.Content>{t("skillUpToDateTooltip")}</Tooltip.Content>
-			</Tooltip>
-		);
 	}
 
 	if (status.status === "updateAvailable") {
@@ -105,8 +97,8 @@ export function SkillUpdateBadge({
 					<span className="inline-flex">
 						<Chip size="sm" variant="soft" color="default">
 							<span className="flex items-center gap-1">
-								<ExclamationTriangleIcon className="size-3 text-warning" />
-								<span className="text-xs text-warning">
+								<ExclamationTriangleIcon className="size-3 text-secondary" />
+								<span className="text-xs text-secondary">
 									{t("skillRenamedBadge")}
 								</span>
 							</span>
@@ -124,16 +116,19 @@ export function SkillUpdateBadge({
 
 	// uncheckable
 	const reason = status.reason;
-	const tooltip = t(uncheckableTooltipKey(reason));
+	const tooltipText = t(uncheckableTooltipKey(reason));
 
-	if (reason === "auth" && onResolveAuth) {
+	// auth: ALWAYS show credential button — even without onResolveAuth
+	// (disabled when the caller cannot handle it; §12-C5 / §4.2)
+	if (reason === "auth") {
 		return (
 			<Tooltip delay={0}>
 				<Tooltip.Trigger>
 					<button
 						type="button"
 						onClick={onResolveAuth}
-						className="inline-flex cursor-pointer"
+						className="inline-flex cursor-pointer disabled:cursor-default"
+						disabled={!onResolveAuth}
 					>
 						<Chip size="sm" variant="tertiary" color="default">
 							<span className="flex items-center gap-1">
@@ -166,7 +161,10 @@ export function SkillUpdateBadge({
 					</Chip>
 				</span>
 			</Tooltip.Trigger>
-			<Tooltip.Content>{tooltip}</Tooltip.Content>
+			<Tooltip.Content>{tooltipText}</Tooltip.Content>
 		</Tooltip>
 	);
 }
+
+/** @deprecated Use `SkillStatusBadge` instead. Kept for migration (T6 removes this). */
+export const SkillUpdateBadge = SkillStatusBadge;
