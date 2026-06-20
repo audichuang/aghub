@@ -56,6 +56,7 @@ Or visit [Releases](https://github.com/audichuang/aghub/releases) for all availa
 
 - Import `.skill` packages or author skills with SKILL.md frontmatter
 - Share skills across agents via the universal skills directory
+- Skill installs are always symlink/junction to a shared `.agents/skills` master; no isolated-copy install mode
 - SHA-256 content verification and source provenance tracking
 - Browse and install from the skills.sh marketplace
 

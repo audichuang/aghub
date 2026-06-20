@@ -753,3 +753,69 @@ fn cli_add_skill_from_path_is_symlink_only() {
 		"--universal must be accepted and produce the same symlink result"
 	);
 }
+
+/// `--universal` is deprecated: the flag is accepted (exit 0), prints a
+/// one-line deprecation notice to stderr, and still produces the
+/// master + per-agent symlink (no isolated copy).
+#[cfg(unix)]
+#[test]
+fn add_skill_universal_flag_prints_deprecation_notice() {
+	let tmp = tempfile::tempdir().unwrap();
+	let project = tmp.path();
+	// Agent marker so project-root detection picks this dir.
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+	let src = project.join("src/dep-skill");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: dep-skill\ndescription: d\n---\nbody",
+	)
+	.unwrap();
+
+	let out = assert_cmd::Command::cargo_bin("aghub-cli")
+		.unwrap()
+		.env("HOME", project)
+		.env("USERPROFILE", project)
+		.env("APPDATA", project)
+		.current_dir(project)
+		.args([
+			"-a",
+			"claude",
+			"-p",
+			"add",
+			"skill",
+			"--universal",
+			"--from",
+		])
+		.arg(src.join("SKILL.md"))
+		.output()
+		.unwrap();
+
+	// exits 0
+	assert!(
+		out.status.success(),
+		"--universal must exit 0; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// deprecation notice on stderr
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("--universal is deprecated"),
+		"expected deprecation notice on stderr, got: {stderr}"
+	);
+
+	// master + per-agent symlink produced (not a copy)
+	let master = project.join(".agents/skills/dep-skill");
+	let link = project.join(".claude/skills/dep-skill");
+	assert!(
+		master.join("SKILL.md").exists(),
+		".agents master must be materialized"
+	);
+	assert!(
+		std::fs::symlink_metadata(&link)
+			.map(|m| m.file_type().is_symlink())
+			.unwrap_or(false),
+		"the agent dir must hold a symlink, not a copy"
+	);
+}

@@ -23,8 +23,15 @@ pub fn execute(
 	author: Option<String>,
 	version: Option<String>,
 	tools: Vec<String>,
-	_universal: bool,
+	universal: bool,
 ) -> Result<()> {
+	if universal {
+		eprintln!(
+			"warning: --universal is deprecated and ignored; \
+			 skill installs are always symlink-only \
+			 (.agents/skills master + per-agent link)"
+		);
+	}
 	match resource {
 		ResourceType::Skills => {
 			if let Some(from_path) = from {
