@@ -435,7 +435,8 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 	let bin = resolved_path(conn);
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
-			// Stage before the swap: a staging failure must not down the server.
+			// Stage before the swap: a staging failure must not
+			// down the server.
 			stage_remote_api_upload(runner, conn, local)?;
 			finish_remote_api_upload(runner, conn, &bin)?;
 		}
@@ -971,9 +972,9 @@ mod tests {
 
 		assert!(result.compatible);
 		assert!(result.api_present);
-		// Strict ordering: the new binary is fully STAGED (prepare + scp), then
-		// the staged upload is moved into place (atomic `mv`), then we re-probe.
-		// No pkill — the old incompatible server is left a harmless orphan.
+		// Strict ordering: the new binary is fully STAGED (prepare + scp),
+		// then the staged upload is moved into place (atomic `mv`), then we
+		// re-probe. No pkill; the old incompatible server is left orphaned.
 		let calls = runner.calls();
 		assert_eq!(calls.len(), 4);
 		assert_eq!(calls[0].args, prepare_args, "prepare first");
@@ -985,8 +986,8 @@ mod tests {
 
 	#[test]
 	fn force_redeploy_staging_failure_aborts_before_finish() {
-		// If staging fails (here: scp upload errors), the swap must NOT happen —
-		// the remote keeps serving the old binary, no atomic `mv` runs.
+		// If staging fails (here: scp upload errors), the swap must NOT
+		// happen — the remote keeps serving the old binary, no `mv` runs.
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
