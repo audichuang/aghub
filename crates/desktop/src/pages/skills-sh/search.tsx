@@ -72,9 +72,7 @@ export default function SkillsSearchPage() {
 		handleCloseInstallModal,
 	} = useSkillInstall();
 
-	const { data: globalLock } = useQuery(
-		globalSkillLockQueryOptions({ api }),
-	);
+	const { data: globalLock } = useQuery(globalSkillLockQueryOptions({ api }));
 
 	const installedSet = useMemo(() => {
 		const set = new Set<string>();

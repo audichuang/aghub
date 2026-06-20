@@ -105,7 +105,9 @@ export function SharedSkillInstallModal({
 											onInstallToProjectChange={
 												onInstallToProjectChange
 											}
-											selectedProjectId={selectedProjectId}
+											selectedProjectId={
+												selectedProjectId
+											}
 											onSelectedProjectIdChange={
 												onSelectedProjectIdChange
 											}
@@ -128,7 +130,8 @@ export function SharedSkillInstallModal({
 											statusText={
 												result.status === "pending"
 													? t("installing")
-													: result.status === "success"
+													: result.status ===
+														  "success"
 														? t("installSuccess")
 														: ""
 											}

@@ -188,12 +188,7 @@ export function ManageSkillAgentsDialog({
 	const agentPicker = !hasValidGroup ? (
 		<p className="text-sm text-muted">{t("invalidConfiguration")}</p>
 	) : (
-		<div
-			className={cn(
-				"transition-opacity",
-				isApplying && "opacity-50",
-			)}
-		>
+		<div className={cn("transition-opacity", isApplying && "opacity-50")}>
 			<SkillsAgentList
 				agents={usableAgents}
 				selectedKeys={selectedAgents}

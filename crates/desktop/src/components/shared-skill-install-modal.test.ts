@@ -19,20 +19,20 @@ type _ShowTargetSelectorBoolean = Awaited<
 		: never
 >;
 
-// Verify that installResults is truly required — not just non-undefined in
-// Required<Props> (which would pass even if the prop became optional).
-// If installResults were optional, {} would extend Pick<Props, 'installResults'>
-// and the conditional would yield `never`, failing to assign to `true`.
-type _InstallResultsRequired =
-	{} extends Pick<SharedSkillInstallModalProps, "installResults">
+// Verify that installResults and agentPickerSlot are truly required props.
+// Technique: a required prop key is present in Required<Props> but absent in
+// Partial<Props> when you try to construct an empty object satisfying
+// Pick<Required<Props>, K>. We use `Record<string, never>` (lint-clean
+// equivalent of `{}`) to check "is this Pick satisfiable with no keys?".
+// If the prop is optional, Record<string,never> extends the Pick (any object
+// does), and the conditional yields `never`.  If required, it does not extend
+// and yields `true`.
+type _IsRequired<K extends keyof SharedSkillInstallModalProps> =
+	Record<string, never> extends Pick<SharedSkillInstallModalProps, K>
 		? never
 		: true;
-
-// Verify that agentPickerSlot is truly required by the same technique.
-type _AgentPickerSlotRequired =
-	{} extends Pick<SharedSkillInstallModalProps, "agentPickerSlot">
-		? never
-		: true;
+type _InstallResultsRequired = _IsRequired<"installResults">;
+type _AgentPickerSlotRequired = _IsRequired<"agentPickerSlot">;
 
 // Verify that skillInfo is optional (Codex P2 fix — allows name to be omitted
 // so the source row is shown without the skill name for installAll callers).

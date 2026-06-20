@@ -607,7 +607,9 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 															<ArrowPathIcon className="size-4" />
 														</Button>
 														<Tooltip.Content>
-															{t("syncFromSource")}
+															{t(
+																"syncFromSource",
+															)}
 														</Tooltip.Content>
 													</Tooltip>
 													<Tooltip delay={0}>
@@ -620,7 +622,9 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 																"openInBrowser",
 															)}
 															onPress={() =>
-																openUrl(sourceUrl)
+																openUrl(
+																	sourceUrl,
+																)
 															}
 														>
 															<LinkIcon className="size-4" />

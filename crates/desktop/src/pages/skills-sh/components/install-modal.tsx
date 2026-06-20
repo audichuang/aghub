@@ -89,9 +89,7 @@ export function InstallModal({
 				selectedSkill
 					? {
 							source: selectedSkill.source,
-							name: installAll
-								? undefined
-								: selectedSkill.name,
+							name: installAll ? undefined : selectedSkill.name,
 						}
 					: null
 			}
