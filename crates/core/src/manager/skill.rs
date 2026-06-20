@@ -151,6 +151,33 @@ impl ConfigManager {
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
+			// Classify the already-installed state before deciding to error.
+			let safe = sanitize_name(&skill.name);
+			let canonical = canonical_dir.join(&safe);
+			// (a) NativeReader: agent's write-dir IS the canonical master dir —
+			//     it sees the skill directly, nothing to create.
+			let native = agent_write_dir
+				.as_ref()
+				.map(|d| d == &canonical_dir)
+				.unwrap_or(false);
+			if native {
+				return Ok(());
+			}
+			// (b) Correct link already exists at the agent slot (AlreadyLinked).
+			if let Some(ref agent_dir) = agent_write_dir {
+				let slot = agent_dir.join(&safe);
+				if Linker::is_link(&slot) {
+					let master_real = std::fs::canonicalize(&canonical)
+						.unwrap_or_else(|_| canonical.clone());
+					if std::fs::canonicalize(&slot)
+						.map(|r| r == master_real)
+						.unwrap_or(false)
+					{
+						return Ok(());
+					}
+				}
+			}
+			// (c) Real foreign occupant or not yet linked: keep strict error.
 			return Err(ConfigError::resource_exists("skill", &skill.name));
 		}
 		info!(
@@ -178,7 +205,7 @@ impl ConfigManager {
 		// IS the canonical dir (then the master already lives there).
 		if let Some(agent_dir) = &agent_write_dir {
 			if agent_dir != &canonical_dir {
-				crate::skills::linker::link_agents_to_canonical(
+				let report = crate::skills::linker::link_agents_to_canonical(
 					&canonical,
 					std::slice::from_ref(agent_dir),
 					if use_relative {
@@ -190,6 +217,12 @@ impl ConfigManager {
 				.map_err(|e| {
 					ConfigError::Io(std::io::Error::other(e.to_string()))
 				})?;
+				if !report.conflicts.is_empty() {
+					return Err(ConfigError::resource_exists(
+						"skill",
+						&skill.name,
+					));
+				}
 			}
 		}
 
@@ -550,6 +583,28 @@ impl ConfigManager {
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
+			let safe = sanitize_name(&skill.name);
+			let canonical = canonical_dir.join(&safe);
+			let native = agent_write_dir
+				.as_ref()
+				.map(|d| d == &canonical_dir)
+				.unwrap_or(false);
+			if native {
+				return Ok(skill.clone());
+			}
+			if let Some(ref agent_dir) = agent_write_dir {
+				let slot = agent_dir.join(&safe);
+				if Linker::is_link(&slot) {
+					let master_real = std::fs::canonicalize(&canonical)
+						.unwrap_or_else(|_| canonical.clone());
+					if std::fs::canonicalize(&slot)
+						.map(|r| r == master_real)
+						.unwrap_or(false)
+					{
+						return Ok(skill.clone());
+					}
+				}
+			}
 			return Err(ConfigError::resource_exists("skill", &skill.name));
 		}
 		info!(
@@ -570,7 +625,7 @@ impl ConfigManager {
 			}
 			_ => Vec::new(),
 		};
-		crate::skills::linker::install_universal(
+		let report = crate::skills::linker::install_universal(
 			&source_root,
 			&canonical,
 			&symlink_dirs,
@@ -581,6 +636,9 @@ impl ConfigManager {
 			},
 		)
 		.map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
+		if !report.conflicts.is_empty() {
+			return Err(ConfigError::resource_exists("skill", &skill.name));
+		}
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -909,6 +967,83 @@ mod tests {
 			.file_type()
 			.is_symlink());
 		assert!(link.join("SKILL.md").exists());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_universal_idempotent_readd_is_noop() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use crate::skills::linker::Linker;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("idem-skill");
+		skill.description = Some("idempotent test".to_string());
+
+		// First install must succeed.
+		mgr.add_skill_universal(skill.clone()).unwrap();
+
+		let master = root.join(".agents/skills/idem-skill");
+		let link = root.join(".claude/skills/idem-skill");
+		assert!(
+			master.join("SKILL.md").exists(),
+			"master must exist after first add"
+		);
+		assert!(Linker::is_link(&link), "link must exist after first add");
+
+		// Second install — same skill name — must be a no-op Ok(()), not error.
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Master and link must still be intact.
+		assert!(
+			master.join("SKILL.md").exists(),
+			"master must survive re-add"
+		);
+		assert!(Linker::is_link(&link), "link must survive re-add");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_universal_real_conflict_still_errors() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("conflict-skill");
+		skill.description = Some("conflict test".to_string());
+
+		// Pre-place a REAL directory (not a link) at the agent's slot.
+		let slot = root.join(".claude/skills/conflict-skill");
+		std::fs::create_dir_all(&slot).unwrap();
+		std::fs::write(slot.join("SKILL.md"), "foreign").unwrap();
+
+		// add must error — real dir occupies the slot.
+		let res = mgr.add_skill_universal(skill);
+		assert!(
+			res.is_err(),
+			"must error when a real foreign dir occupies the agent slot"
+		);
+		// Foreign content must survive (no-clobber).
+		assert_eq!(
+			std::fs::read_to_string(slot.join("SKILL.md")).unwrap(),
+			"foreign"
+		);
 	}
 
 	#[cfg(unix)]
