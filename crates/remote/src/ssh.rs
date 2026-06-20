@@ -7,7 +7,8 @@
 use std::fmt;
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::process::Child;
+use std::process::{Child, ExitStatus};
+use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
 
@@ -66,25 +67,48 @@ impl fmt::Display for RunError {
 impl std::error::Error for RunError {}
 
 /// A handle to a long-lived spawned child (e.g. the SSH tunnel).
-#[derive(Debug)]
+///
+/// The child is owned behind an `Arc<Mutex<_>>` so the handle is cheaply
+/// [`Clone`]able and can be shared between the owning [`RemoteHandle`] and the
+/// watcher thread. Methods take a short-lived lock and NEVER hold it across a
+/// blocking wait — the watcher polls with [`ChildHandle::try_wait`] instead.
+#[derive(Debug, Clone)]
 pub struct ChildHandle {
-	child: Child,
+	child: Arc<Mutex<Child>>,
 }
 
 impl ChildHandle {
 	/// Wrap a freshly spawned [`Child`].
 	pub fn new(child: Child) -> Self {
-		Self { child }
+		Self {
+			child: Arc::new(Mutex::new(child)),
+		}
 	}
 
-	/// The OS process id, if still known.
+	/// The OS process id (the kernel pid is stable for the [`Child`]'s
+	/// lifetime, even after it exits, so this never blocks meaningfully).
 	pub fn pid(&self) -> Option<u32> {
-		Some(self.child.id())
+		Some(self.lock().id())
 	}
 
-	/// Send a kill signal to the child.
-	pub fn kill(&mut self) -> std::io::Result<()> {
-		self.child.kill()
+	/// Send a kill signal to the child. Cross-platform (`Child::kill` maps to
+	/// `SIGKILL` on Unix and `TerminateProcess` on Windows), and because we
+	/// hold the live [`Child`] the OS pid cannot be reused out from under us.
+	pub fn kill(&self) -> std::io::Result<()> {
+		self.lock().kill()
+	}
+
+	/// Non-blocking exit check. Returns `Some(status)` once the child has
+	/// exited, `None` while it is still running. Never blocks while holding the
+	/// lock, so a concurrent [`ChildHandle::kill`] can always make progress.
+	pub fn try_wait(&self) -> std::io::Result<Option<ExitStatus>> {
+		self.lock().try_wait()
+	}
+
+	/// Lock the inner mutex, recovering a poisoned lock via `into_inner` — a
+	/// panic in another holder must not strand the tunnel child forever.
+	fn lock(&self) -> std::sync::MutexGuard<'_, Child> {
+		self.child.lock().unwrap_or_else(|e| e.into_inner())
 	}
 }
 
@@ -1190,5 +1214,45 @@ mod tests {
 		let e: Box<dyn std::error::Error> =
 			Box::new(RunError::Spawn("boom".to_string()));
 		assert!(e.to_string().contains("boom"));
+	}
+
+	// --- ChildHandle kill ---------------------------------------------------
+
+	#[cfg(unix)]
+	#[test]
+	fn child_handle_kill_terminates_live_child() {
+		use std::thread::sleep;
+		use std::time::Duration;
+
+		let child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let handle = ChildHandle::new(child);
+
+		// A freshly spawned long-running child is still alive.
+		assert_eq!(
+			handle.try_wait().expect("try_wait before kill"),
+			None,
+			"child should still be running before kill"
+		);
+
+		handle.kill().expect("kill");
+
+		// Poll until the child is reaped (kill is async; the kernel needs a
+		// moment, and Child::try_wait must reap the zombie).
+		let mut waited = Duration::ZERO;
+		let step = Duration::from_millis(25);
+		loop {
+			if handle.try_wait().expect("try_wait after kill").is_some() {
+				break;
+			}
+			assert!(
+				waited < Duration::from_secs(5),
+				"child did not exit within 5s after kill"
+			);
+			sleep(step);
+			waited += step;
+		}
 	}
 }
