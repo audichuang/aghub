@@ -110,9 +110,8 @@ mod tests {
 			scope: Some("all".to_string()),
 			project_root: None,
 		};
-		let err = block_on(skills_coverage(params))
-			.err()
-			.expect("scope=all rejected");
+		let err =
+			block_on(skills_coverage(params)).expect_err("scope=all rejected");
 		assert_eq!(err.status, rocket::http::Status::BadRequest);
 	}
 
