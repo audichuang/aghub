@@ -8,8 +8,9 @@ use aghub_core::{
 };
 use rocket::http::Status;
 use rocket::serde::json::Json;
+#[cfg(test)]
+use std::collections::HashMap;
 use std::{
-	collections::HashMap,
 	path::{Path, PathBuf},
 	time::Duration,
 };
@@ -664,10 +665,14 @@ fn install_git_skill_to_dir(
 	Ok((skill.name, copied))
 }
 
+#[cfg(test)]
 type GitInstallAgentGroup = Vec<(String, AgentType)>;
+#[cfg(test)]
 type GitInstallGroups = HashMap<std::path::PathBuf, GitInstallAgentGroup>;
+#[cfg(test)]
 type GitInstallInvalidAgent = (String, Option<AgentType>, String);
 
+#[cfg(test)]
 fn build_git_install_groups(
 	agents: &[String],
 	resource_scope: ResourceScope,
@@ -2071,13 +2076,40 @@ pub async fn git_install_skills(
 		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
 		.map(|oid| oid.to_string());
 
-	let (dir_groups, invalid_agents) = build_git_install_groups(
-		&req.agents,
-		resource_scope,
-		project_root.as_ref(),
-	);
+	let mut invalid_agents: Vec<(String, String)> = Vec::new();
+	let mut valid_agents: Vec<(String, AgentType)> = Vec::new();
+	for agent_str in &req.agents {
+		match agent_str.parse::<AgentType>() {
+			Ok(agent_type) => {
+				if resolve_git_install_target_dir(
+					agent_type,
+					resource_scope,
+					project_root.as_ref(),
+				)
+				.is_some()
+				{
+					valid_agents.push((agent_str.clone(), agent_type));
+				} else {
+					invalid_agents.push((
+						agent_str.clone(),
+						format!(
+							"Agent '{}' does not support persistent skill \
+							 creation in this scope",
+							agent_str
+						),
+					));
+				}
+			}
+			Err(_) => {
+				invalid_agents.push((
+					agent_str.clone(),
+					format!("Unknown agent '{agent_str}'"),
+				));
+			}
+		}
+	}
 
-	for (agent_str, _, error) in invalid_agents {
+	for (agent_str, error) in &invalid_agents {
 		for skill_path in &req.skill_paths {
 			results.push(GitInstallResultEntry {
 				name: skill_path.clone(),
@@ -2088,12 +2120,6 @@ pub async fn git_install_skills(
 		}
 	}
 
-	// Flatten the resolved agent groups into the ordered list the core install
-	// primitive takes. Pairing `(agent_str, AgentType)` lets us translate the
-	// per-agent `AgentInstallResult` back into the API's per-agent (string-id)
-	// response rows in the same order.
-	let valid_agents: Vec<(String, AgentType)> =
-		dir_groups.into_values().flatten().collect();
 	let target_agents: Vec<AgentType> =
 		valid_agents.iter().map(|(_, agent)| *agent).collect();
 
@@ -3661,5 +3687,139 @@ mod tests {
 				"master written at absolutized project root"
 			);
 		});
+	}
+
+	#[test]
+	fn git_install_skills_agent_label_order_matches_request() {
+		// Two agents with different target dirs: each result row must carry
+		// the agent id whose install result it is reporting, not a positional
+		// accident.
+		let _guard = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+
+		let temp = tempdir().unwrap();
+		let project_root = temp.path().join("project");
+
+		let clone_dir = temp.path().join("clone");
+		let skill_src = clone_dir.join("hello-skill");
+		std::fs::create_dir_all(&skill_src).unwrap();
+		std::fs::write(
+			skill_src.join("SKILL.md"),
+			"---\nname: hello-skill\ndescription: test\n---\n\n# Hello\n",
+		)
+		.unwrap();
+
+		let req_agents = vec!["claude".to_string(), "opencode".to_string()];
+		let resource_scope = ResourceScope::ProjectOnly;
+
+		let mut invalid: Vec<(String, String)> = Vec::new();
+		let mut valid: Vec<(String, AgentType)> = Vec::new();
+		for agent_str in &req_agents {
+			match agent_str.parse::<AgentType>() {
+				Ok(agent_type) => {
+					if resolve_git_install_target_dir(
+						agent_type,
+						resource_scope,
+						Some(&project_root),
+					)
+					.is_some()
+					{
+						valid.push((agent_str.clone(), agent_type));
+					} else {
+						invalid.push((
+							agent_str.clone(),
+							format!(
+								"Agent '{}' unsupported in scope",
+								agent_str
+							),
+						));
+					}
+				}
+				Err(_) => {
+					invalid.push((
+						agent_str.clone(),
+						format!("Unknown agent '{agent_str}'"),
+					));
+				}
+			}
+		}
+
+		assert!(invalid.is_empty(), "unexpected invalids: {:?}", invalid);
+		assert_eq!(valid.len(), 2);
+		assert_eq!(valid[0].0, "claude");
+		assert_eq!(valid[1].0, "opencode");
+
+		let target_agents: Vec<AgentType> =
+			valid.iter().map(|(_, a)| *a).collect();
+
+		let lock_source = skill::InstallLockSource {
+			source: "owner/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/owner/repo".to_string(),
+			ref_name: Some("main".to_string()),
+		};
+		let skill_file = skill_src.join("SKILL.md");
+		let request =
+			aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
+				skill_file: &skill_file,
+				source: &lock_source,
+				lock_skill_path: skill::lock_skill_file_path("hello-skill"),
+				ref_commit: None,
+				scope: resource_scope,
+				project_root: Some(project_root.as_path()),
+				target_agents: &target_agents,
+				layout: aghub_core::skills::install_fetched::
+					SkillInstallLayout::Universal,
+				expected_name: None,
+				use_relative_links: true,
+			};
+
+		let report =
+			aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
+				request,
+			)
+			.expect("install should succeed");
+
+		assert_eq!(
+			report.agent_results.len(),
+			valid.len(),
+			"result count mismatch"
+		);
+		for ((agent_str, agent_type), agent_result) in
+			valid.iter().zip(&report.agent_results)
+		{
+			assert_eq!(
+				agent_result.agent, *agent_type,
+				"agent result {:?} does not match label {}",
+				agent_result.agent, agent_str
+			);
+
+			let expected_dir = resolve_git_install_target_dir(
+				*agent_type,
+				resource_scope,
+				Some(&project_root),
+			)
+			.expect("dir must resolve");
+			let installed_path = expected_dir.join("hello-skill/SKILL.md");
+			let master_path =
+				project_root.join(".agents/skills/hello-skill/SKILL.md");
+			if agent_result.error.is_none() {
+				assert!(
+					installed_path.exists() || master_path.exists(),
+					"skill not found at {} or {} for agent {}",
+					installed_path.display(),
+					master_path.display(),
+					agent_str,
+				);
+			}
+
+			let parsed: AgentType = agent_str.parse().unwrap();
+			assert_eq!(
+				parsed, *agent_type,
+				"agent label '{}' does not match type {:?}",
+				agent_str, agent_type
+			);
+		}
 	}
 }
