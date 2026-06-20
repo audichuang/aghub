@@ -36,15 +36,15 @@ src/
 ## COMMANDS
 
 ```bash
-# Build this crate only
-cargo build -p aghub
+# Build this crate only (package is `aghub-cli`; `-p aghub` is the desktop src-tauri crate!)
+cargo build -p aghub-cli
 
 # Run with args
-cargo run -p aghub -- get skills
-cargo run -p aghub -- add mcp my-server --command "npx -y @modelcontextprotocol/server-filesystem /path"
+cargo run -p aghub-cli -- get skills
+cargo run -p aghub-cli -- add mcp my-server --command "npx -y @modelcontextprotocol/server-filesystem /path"
 
 # Test this crate only
-cargo test -p aghub
+cargo test -p aghub-cli                    # integration tests: cargo test -p aghub-cli --test cli_tests
 
 # Install locally (from workspace root)
 just install

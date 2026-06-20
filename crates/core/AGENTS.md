@@ -69,6 +69,8 @@ cargo test -p aghub-core --features agent-validation  # Tests requiring real CLI
 
 `TestConfig` creates isolated temp dirs. Per-agent path overrides via `set_skills_path_override(agent_id, path)` (thread-local).
 
+Tests that mutate `HOME`/`XDG_*` **or** read `dirs::home_dir()` (e.g. agent-path / coverage tests) must hold the shared `env_lock` (core) / `test_env_lock` (api) — the race only surfaces under `cargo test --workspace`, not `-p <crate>`.
+
 ## ANTI-PATTERNS
 
 - NEVER add agent descriptors here — they belong in `crates/agents/src/agents/`

@@ -176,6 +176,8 @@ Resource type aliases: `skills`/`skill`, `mcps`/`mcp`.
 
 Skills load from directories containing a `SKILL.md`; the adapter parses YAML frontmatter (between `---` markers) for name, description, author, version. `Skill.source_path: Option<String>` records where the skill was loaded from. `skills-lock.json` tracks skill dependencies with content hashes.
 
+**Skill-install link decision** goes through `classify_agent` / `agent_link_need` (`crates/core/src/skills/linker/classify.rs`): a NativeReader (reads `.agents/skills` directly) gets the Master only — **no** per-agent link. Both install paths must use it — the CLI add path (`manager::skill::add_skill_universal` / `add_skill_from_path_universal`) and the fetched/desktop path (`install_universal_layout`); keep them consistent (they diverged once when the CLI used a narrower `agent_write_dir == canonical_dir` check).
+
 ## Adding / Removing an Agent
 
 Touch ALL of these (descriptors live in `crates/agents`, the registry in `crates/core`):
