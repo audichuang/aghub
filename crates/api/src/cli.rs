@@ -5,8 +5,6 @@
 //! line prefix is a cross-crate contract consumed by the desktop SSH bring-up
 //! parser, so it lives here as a public constant and is asserted in tests.
 
-use std::net::TcpListener;
-
 /// Exact stdout line prefix the binary emits to report its chosen port.
 ///
 /// The desktop remote-bring-up parser reads `AGHUB_API_PORT=<n>` from the
@@ -93,17 +91,6 @@ fn parse_port(value: &str) -> Result<u16, ParseError> {
 /// Version string printed by `--version`, e.g. `"aghub-api 1.1.1"`.
 pub fn version_string() -> String {
 	format!("aghub-api {}", crate::VERSION)
-}
-
-/// Pick a free TCP port by binding `127.0.0.1:0` and reading the assigned port.
-///
-/// Mirrors the desktop `find_available_port` helper. The listener is dropped
-/// before returning, so the port is immediately re-bindable (with the usual
-/// TOCTOU caveat).
-pub fn pick_free_port() -> std::io::Result<u16> {
-	let listener = TcpListener::bind("127.0.0.1:0")?;
-	let port = listener.local_addr()?.port();
-	Ok(port)
 }
 
 #[cfg(test)]
@@ -197,15 +184,5 @@ mod tests {
 	#[test]
 	fn port_line_prefix_is_locked_literal() {
 		assert_eq!(PORT_LINE_PREFIX, "AGHUB_API_PORT=");
-	}
-
-	#[test]
-	fn pick_free_port_is_nonzero_and_rebindable() {
-		let port = pick_free_port().expect("pick free port");
-		assert!(port > 0);
-		// Immediately re-bindable after the helper drops its listener.
-		let listener =
-			TcpListener::bind(("127.0.0.1", port)).expect("re-bind freed port");
-		drop(listener);
 	}
 }

@@ -151,6 +151,14 @@ impl From<ConnectError> for RemoteError {
 			ConnectError::Unreachable { stderr } => {
 				RemoteError::Unreachable { stderr }
 			}
+			ConnectError::CrossPlatformDeploy { remote_platform } => {
+				// Converge the connect path on the same persistent
+				// "install manually" banner the redeploy path already shows.
+				RemoteError::CrossPlatformRedeploy {
+					remote_platform,
+					hint: install_hint(),
+				}
+			}
 			ConnectError::StartTimeout => RemoteError::StartTimeout,
 			ConnectError::TunnelFailed(message) => {
 				RemoteError::TunnelFailed { message }
@@ -276,22 +284,30 @@ pub fn force_redeploy_remote(
 		}
 	})?;
 
-	// Same-platform gate BEFORE any mutation: a wrong-arch binary would not run.
-	let runner = SystemRunner;
-	let probed = probe_remote_platform(&runner, &connection);
-	let same_platform = matches!(
-		&probed,
-		Some((os, arch))
-			if os == std::env::consts::OS && arch == std::env::consts::ARCH
-	);
-	if !same_platform {
-		let remote_platform = probed
-			.map(|(os, arch)| format!("{os}/{arch}"))
-			.unwrap_or_else(|| "unknown".to_string());
-		return Err(RemoteError::CrossPlatformRedeploy {
-			remote_platform,
-			hint: install_hint(),
-		});
+	// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
+	// binary: a wrong-arch binary would not run on the VM. `CargoGit` compiles
+	// ON the VM, so it is arch-safe for ANY remote platform — skip the probe and
+	// the refusal entirely (this is the common Mac-desktop -> Linux-VM case).
+	// Mirrors the connect path (`ensure_remote_api`), which gates only
+	// `LocalBinary`.
+	if matches!(source, RemoteInstallSource::LocalBinary(_)) {
+		let runner = SystemRunner;
+		let probed = probe_remote_platform(&runner, &connection);
+		let same_platform = matches!(
+			&probed,
+			Some((os, arch))
+				if os == std::env::consts::OS
+					&& arch == std::env::consts::ARCH
+		);
+		if !same_platform {
+			let remote_platform = probed
+				.map(|(os, arch)| format!("{os}/{arch}"))
+				.unwrap_or_else(|| "unknown".to_string());
+			return Err(RemoteError::CrossPlatformRedeploy {
+				remote_platform,
+				hint: install_hint(),
+			});
+		}
 	}
 
 	// Claim the in-progress slot so a concurrent connect can't race us; the
