@@ -1089,7 +1089,6 @@ export default {
 	sourceSelectSkill: "选择 {{name}}",
 	sourceInstalling: "安装中...",
 	sourceInstalled: "已安装 {{count}} 个技能。",
-	sourceInstallSomeFailed: "有 {{count}} 个安装目标失败。",
 	sourceInstallSomeFailedOne: "有 1 个安装目标失败。",
 	sourceInstallSomeFailedMany: "有 {{count}} 个安装目标失败。",
 	sourceInstallFailed: "安装技能失败。",
