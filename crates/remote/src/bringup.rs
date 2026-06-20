@@ -412,9 +412,10 @@ fn finish_remote_api_upload<R: CommandRunner>(
 /// server is left as a harmless orphan: it stays bound to its ephemeral
 /// (`--port 0`) port that this redeploy never tunnels to, and the next
 /// connection starts its OWN fresh `--port 0` server against the new binary.
-/// Replacing the binary in place is safe on its own — `finish_remote_api_upload`
-/// does an atomic `mv` of the staged upload, which the kernel handles cleanly
-/// even while the old process holds the previous inode open (no `ETXTBSY`). A
+/// Replacing the binary in place is safe on its own —
+/// `finish_remote_api_upload` does an atomic `mv` of the staged upload, which
+/// the kernel handles cleanly even while the old process holds the previous
+/// inode open (no `ETXTBSY`). A
 /// `pkill`-by-name/path here would inevitably be collateral: we have no pid for
 /// the incompatible server (this connection did not start it), so any by-path
 /// kill on a shared host would also reap a sibling connection's server running
@@ -486,9 +487,10 @@ fn nonzero_message(step: &str, out: &crate::ssh::CommandOutput) -> String {
 	}
 }
 
-/// Attach a command's relayed output to a context message (stderr first, falling
-/// back to stdout). Unlike [`nonzero_message`] this carries no status code — it
-/// is for cases where the command exited 0 but produced unparseable output.
+/// Attach a command's relayed output to a context message (stderr first,
+/// falling back to stdout). Unlike [`nonzero_message`] this carries no status
+/// code — it is for cases where the command exited 0 but produced unparseable
+/// output.
 fn command_output_message(
 	context: &str,
 	out: &crate::ssh::CommandOutput,
