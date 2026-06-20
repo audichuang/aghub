@@ -14,16 +14,7 @@ import {
 	QuestionMarkCircleIcon,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import {
-	Alert,
-	Button,
-	Chip,
-	Checkbox,
-	Spinner,
-	toast,
-	ToggleButton,
-	ToggleButtonGroup,
-} from "@heroui/react";
+import { Alert, Button, Chip, Checkbox, Spinner, toast } from "@heroui/react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import {
 	useMutation,
@@ -45,11 +36,6 @@ import { useAgentAvailability } from "../../hooks/use-agent-availability";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
 import { supportsSkillMutation } from "../../lib/agent-capabilities";
-import {
-	DEFAULT_INSTALL_LAYOUT,
-	type InstallLayout,
-	isUniversalLayout,
-} from "../../lib/install-layout";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -390,9 +376,6 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
 	const [isDeletingAllRemoved, setIsDeletingAllRemoved] = useState(false);
-	const [installLayout, setInstallLayout] = useState<InstallLayout>(
-		DEFAULT_INSTALL_LAYOUT,
-	);
 	const [installingSkillPath, setInstallingSkillPath] = useState<
 		string | null
 	>(null);
@@ -447,7 +430,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
 	const shouldCheckOrphans =
 		!isLoading && !isFetching && Boolean(data) && !data?.needsCredential;
-	const installAgentIds = useMemo(
+	const installableAgentIds = useMemo(
 		() =>
 			availableAgents
 				.filter(
@@ -520,12 +503,12 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	});
 
 	const deleteInstalledSkillByName = async (name: string) => {
-		if (installAgentIds.length === 0) {
+		if (installableAgentIds.length === 0) {
 			throw new Error(t("sourceRemoveNoAgents"));
 		}
 
 		await api.skills.delete(
-			installAgentIds[0],
+			installableAgentIds[0],
 			name,
 			updateScope,
 			updateProjectRoot ?? undefined,
@@ -660,7 +643,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		) {
 			return;
 		}
-		if (installAgentIds.length === 0) {
+		if (installableAgentIds.length === 0) {
 			toast.danger(t("sourceRemoveNoAgents"));
 			return;
 		}
@@ -729,11 +712,6 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		) {
 			return;
 		}
-		if (installAgentIds.length === 0) {
-			toast.danger(t("sourceInstallNoAgents"));
-			return;
-		}
-
 		const installAll = skills.length > 1;
 		if (installAll) {
 			setIsInstallingAll(true);
@@ -764,10 +742,9 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			const result = await api.skills.gitInstall({
 				session_id: scan.session_id,
 				skill_paths: skillPaths,
-				agents: installAgentIds,
+				agents: installableAgentIds,
 				scope: updateScope,
 				project_root: updateProjectRoot,
-				universal: isUniversalLayout(installLayout),
 			});
 			const failed = result.results.filter((entry) => !entry.success);
 
@@ -852,46 +829,6 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 					</Alert>
 				) : (
 					<div className="space-y-6">
-						<div className="flex items-start justify-between gap-3 rounded-lg border border-border p-3">
-							<div className="min-w-0 space-y-0.5">
-								<span className="text-sm font-medium text-foreground">
-									{t("installLayoutLabel")}
-								</span>
-								<span className="block text-xs text-muted">
-									{t("installLayoutHint")}
-								</span>
-							</div>
-							<ToggleButtonGroup
-								selectedKeys={[installLayout]}
-								onSelectionChange={(keys) => {
-									const next = [...keys][0];
-									if (
-										next === "isolation" ||
-										next === "universal"
-									) {
-										setInstallLayout(next);
-									}
-								}}
-								selectionMode="single"
-								disallowEmptySelection
-								size="sm"
-								className="shrink-0"
-							>
-								<ToggleButton
-									id="isolation"
-									aria-label={t("installLayoutIsolation")}
-								>
-									{t("installLayoutIsolation")}
-								</ToggleButton>
-								<ToggleButtonGroup.Separator />
-								<ToggleButton
-									id="universal"
-									aria-label={t("installLayoutUniversal")}
-								>
-									{t("installLayoutUniversal")}
-								</ToggleButton>
-							</ToggleButtonGroup>
-						</div>
 						{hasVisibleSkills && orphanLockCount > 0 && (
 							<SourceOrphanLockAlert
 								prunedCount={orphanLockCount}
