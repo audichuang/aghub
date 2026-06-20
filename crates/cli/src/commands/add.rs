@@ -8,6 +8,20 @@ use std::path::PathBuf;
 
 use super::parse_mcp_transport;
 
+/// After a skill add, tell the user when the target agent reads the
+/// `.agents/skills` master directly (a NativeReader) and so got the master only,
+/// with no per-agent symlink — the CLI equivalent of the desktop "already
+/// covered" chip.
+fn note_if_native_reader(manager: &ConfigManager) {
+	if manager.skill_target_is_native_reader() {
+		eprintln!(
+			"note: agent '{}' reads the .agents/skills master directly; \
+			 no per-agent link was created (already covered)",
+			manager.agent_name()
+		);
+	}
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
 	manager: &mut ConfigManager,
@@ -53,6 +67,7 @@ pub fn execute(
 				}
 
 				eprintln_verbose!("Skill '{}' added successfully", skill.name);
+				note_if_native_reader(manager);
 				println!("{}", serde_json::to_string_pretty(&skill)?);
 			} else {
 				let skill_name = name.ok_or_else(|| {
@@ -66,6 +81,7 @@ pub fn execute(
 				skill.tools = tools;
 				manager.add_skill(skill.clone())?;
 				eprintln_verbose!("Skill added successfully");
+				note_if_native_reader(manager);
 				println!("{}", serde_json::to_string_pretty(&skill)?);
 			}
 		}

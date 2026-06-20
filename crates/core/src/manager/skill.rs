@@ -18,6 +18,11 @@ struct UniversalPrep {
 	agent_write_dir: Option<PathBuf>,
 	canonical_dir: PathBuf,
 	use_relative: bool,
+	/// How THIS agent relates to the `.agents/skills` Master at this scope.
+	/// `NativeReader` → it reads the Master directly, so no per-agent link is
+	/// created (parity with the fetched/desktop install path). Computed via the
+	/// shared classifier, not the narrow `agent_write_dir == canonical_dir` test.
+	link_need: crate::skills::linker::LinkNeed,
 }
 
 /// Resolve a source_path string (potentially with `~/` prefix) to an absolute PathBuf
@@ -147,6 +152,7 @@ impl ConfigManager {
 			agent_write_dir,
 			canonical_dir,
 			use_relative,
+			link_need,
 		} = self.universal_install_prep()?;
 
 		let config = self.config_mut()?;
@@ -154,13 +160,13 @@ impl ConfigManager {
 			// Classify the already-installed state before deciding to error.
 			let safe = sanitize_name(&skill.name);
 			let canonical = canonical_dir.join(&safe);
-			// (a) NativeReader: agent's write-dir IS the canonical master dir —
-			//     it sees the skill directly, nothing to create.
-			let native = agent_write_dir
-				.as_ref()
-				.map(|d| d == &canonical_dir)
-				.unwrap_or(false);
-			if native {
+			// (a) NativeReader: the agent reads the Master directly (its write-dir
+			//     IS the Master, or its read paths include it), so it already sees
+			//     the skill — re-add is an idempotent no-op.
+			if matches!(
+				link_need,
+				crate::skills::linker::LinkNeed::NativeReader
+			) {
 				return Ok(());
 			}
 			// (b) Correct link already exists at the agent slot (AlreadyLinked).
@@ -201,10 +207,15 @@ impl ConfigManager {
 			)?;
 		}
 
-		// Symlink this agent's own skills dir to the master, unless its write dir
-		// IS the canonical dir (then the master already lives there).
-		if let Some(agent_dir) = &agent_write_dir {
-			if agent_dir != &canonical_dir {
+		// Link this agent's own skills dir to the Master ONLY when it needs a
+		// link. A NativeReader reads `.agents/skills` directly (no redundant
+		// per-agent link — parity with the fetched/desktop install path); an
+		// Unsupported agent has no writable skills dir.
+		if matches!(
+			link_need,
+			crate::skills::linker::LinkNeed::NeedsLink { .. }
+		) {
+			if let Some(agent_dir) = &agent_write_dir {
 				let report = crate::skills::linker::link_agents_to_canonical(
 					&canonical,
 					std::slice::from_ref(agent_dir),
@@ -579,17 +590,18 @@ impl ConfigManager {
 			agent_write_dir,
 			canonical_dir,
 			use_relative,
+			link_need,
 		} = self.universal_install_prep()?;
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
 			let safe = sanitize_name(&skill.name);
 			let canonical = canonical_dir.join(&safe);
-			let native = agent_write_dir
-				.as_ref()
-				.map(|d| d == &canonical_dir)
-				.unwrap_or(false);
-			if native {
+			// NativeReader: reads the Master directly → re-add is a no-op.
+			if matches!(
+				link_need,
+				crate::skills::linker::LinkNeed::NativeReader
+			) {
 				return Ok(skill.clone());
 			}
 			if let Some(ref agent_dir) = agent_write_dir {
@@ -619,9 +631,11 @@ impl ConfigManager {
 		// is absent, so a pre-existing master is preserved (idempotent across
 		// multi-agent installs of the same skill).
 		let source_root = crate::skills::skill_source_root(path);
-		let symlink_dirs: Vec<PathBuf> = match &agent_write_dir {
-			Some(d) if d.as_path() != canonical_dir.as_path() => {
-				vec![d.clone()]
+		// Link only a NeedsLink agent; a NativeReader reads the Master directly
+		// (no redundant per-agent link — parity with the fetched/desktop path).
+		let symlink_dirs: Vec<PathBuf> = match &link_need {
+			crate::skills::linker::LinkNeed::NeedsLink { agent_skills_dir } => {
+				vec![agent_skills_dir.clone()]
 			}
 			_ => Vec::new(),
 		};
@@ -683,12 +697,39 @@ impl ConfigManager {
 				"Cannot resolve .agents canonical skills directory".into(),
 			)
 		})?;
+		// Classify THIS agent against the Master with the same scope/root that
+		// derived `canonical_dir`, mirroring the fetched/desktop install path. A
+		// read-only-master NativeReader (e.g. OpenCode, which writes
+		// `.opencode/skills` but reads `.agents/skills`) is detected here — the
+		// narrow `agent_write_dir == canonical_dir` test used to miss it.
+		let descriptor = crate::registry::get(self.agent_type());
+		let link_need = crate::skills::linker::agent_link_need(
+			descriptor,
+			self.write_scope,
+			self.project_root.as_deref(),
+			&canonical_dir,
+		);
 		Ok(UniversalPrep {
 			agent_name: self.adapter.name().to_string(),
 			agent_write_dir: self.target_skills_dir(),
 			use_relative: project_root_for_canonical.is_some(),
 			canonical_dir,
+			link_need,
 		})
+	}
+
+	/// Whether THIS manager's agent reads the `.agents/skills` Master directly at
+	/// its scope (a NativeReader) and so receives the Master only, with no
+	/// per-agent link. Used by the CLI to report "already covered" after an add.
+	pub fn skill_target_is_native_reader(&self) -> bool {
+		self.universal_install_prep()
+			.map(|prep| {
+				matches!(
+					prep.link_need,
+					crate::skills::linker::LinkNeed::NativeReader
+				)
+			})
+			.unwrap_or(false)
 	}
 }
 
@@ -1155,6 +1196,47 @@ mod tests {
 			recorded.canonical_path.is_some(),
 			"manual-create must record canonical_path (link provenance)"
 		);
+	}
+
+	// T3: a project NativeReader (OpenCode reads `.agents/skills` directly) must
+	// receive the Master ONLY — no redundant per-agent symlink in its own dir —
+	// matching the fetched/desktop install path's classify-based behaviour. The
+	// old `agent_write_dir == canonical_dir` check missed read-only-master
+	// NativeReaders (OpenCode writes `.opencode/skills` but reads `.agents`).
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_native_reader_writes_master_without_link() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::OpenCode),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("native-skill");
+		skill.description = Some("native reader test".to_string());
+		mgr.add_skill(skill).unwrap();
+
+		// Master materialized once under `.agents/skills`.
+		assert!(root.join(".agents/skills/native-skill/SKILL.md").exists());
+		// OpenCode reads the Master directly → NO link in its own skills dir.
+		assert!(
+			!root.join(".opencode/skills/native-skill").exists(),
+			"NativeReader must not get a redundant per-agent link"
+		);
+		// Still recorded with universal provenance.
+		assert!(mgr
+			.get_skill("native-skill")
+			.unwrap()
+			.canonical_path
+			.is_some());
+		// And the classifier agrees this agent needs no link.
+		assert!(mgr.skill_target_is_native_reader());
 	}
 
 	#[test]

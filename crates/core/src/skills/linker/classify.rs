@@ -75,12 +75,16 @@ fn canonicalize_lenient(p: &Path) -> PathBuf {
 	}
 }
 
-pub fn classify_agent(
+/// Path-only classification: the `(reads_master, writes_master, need)` facts for
+/// one agent against a scope, WITHOUT the agent-availability subprocess probe.
+/// Shared by [`classify_agent`] (which adds `installed`) and [`agent_link_need`]
+/// (the install path, which only needs the `need` and must stay cheap).
+fn classify_paths(
 	descriptor: &AgentDescriptor,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	master_skills_dir: &Path,
-) -> AgentLinkPlan {
+) -> (bool, bool, LinkNeed) {
 	let (read_paths, write_dir) = match AgentType::from_str(descriptor.id) {
 		Ok(agent_type) => {
 			let adapter = crate::create_adapter(agent_type);
@@ -113,6 +117,30 @@ pub fn classify_agent(
 	} else {
 		LinkNeed::Unsupported
 	};
+
+	(reads_master, writes_master, need)
+}
+
+/// The [`LinkNeed`] for one agent at a scope, WITHOUT the availability probe.
+/// Use this on the install path where only the need (link vs skip) matters; use
+/// [`classify_agent`] when the `installed`/diagnostic booleans are also needed.
+pub fn agent_link_need(
+	descriptor: &AgentDescriptor,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	master_skills_dir: &Path,
+) -> LinkNeed {
+	classify_paths(descriptor, scope, project_root, master_skills_dir).2
+}
+
+pub fn classify_agent(
+	descriptor: &AgentDescriptor,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	master_skills_dir: &Path,
+) -> AgentLinkPlan {
+	let (reads_master, writes_master, need) =
+		classify_paths(descriptor, scope, project_root, master_skills_dir);
 
 	AgentLinkPlan {
 		agent_id: descriptor.id,

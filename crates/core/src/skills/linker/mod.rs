@@ -4,7 +4,9 @@
 //! NOT ported: aghub bans copy as a skill-install outcome.
 
 pub mod classify;
-pub use classify::{classify_agent, classify_all, AgentLinkPlan, LinkNeed};
+pub use classify::{
+	agent_link_need, classify_agent, classify_all, AgentLinkPlan, LinkNeed,
+};
 
 use std::io;
 use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};

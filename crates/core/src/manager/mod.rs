@@ -64,6 +64,16 @@ impl ConfigManager {
 		self.adapter.name()
 	}
 
+	/// The [`AgentType`](crate::models::AgentType) backing this manager, resolved
+	/// from the adapter's id. Falls back to `Claude` for an unknown id, mirroring
+	/// `registry::get`'s silent fallback.
+	pub fn agent_type(&self) -> crate::models::AgentType {
+		self.adapter
+			.name()
+			.parse()
+			.unwrap_or(crate::models::AgentType::Claude)
+	}
+
 	pub fn load(&mut self) -> Result<&AgentConfig> {
 		debug!(
 			"loading config for agent '{}' with scope {:?}",
