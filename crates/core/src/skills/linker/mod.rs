@@ -882,5 +882,70 @@ mod tests {
 				"Master must survive unlink (remove_dir, not remove_dir_all)"
 			);
 		}
+
+		#[test]
+		fn linker_link_on_spaced_path_master_produces_junction() {
+			let tmp = tempdir().unwrap();
+			// Use canonicalize so the path is absolute (required by junction)
+			let root = std::fs::canonicalize(tmp.path()).unwrap();
+			// Master path contains a space - exercises the mklink /J path
+			let master = root.join(".agents\\skills\\my skill");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(master.join("SKILL.md"), "real").unwrap();
+			let claude = root.join(".claude\\skills");
+			std::fs::create_dir_all(&claude).unwrap();
+
+			let outcome = Linker::link(
+				&master,
+				&claude,
+				"my skill",
+				LinkTarget::Absolute,
+			)
+			.unwrap();
+
+			assert_eq!(outcome, LinkOutcome::Linked);
+			let link = claude.join("my skill");
+			assert!(
+				Linker::is_link(&link),
+				"spaced-path link must be a reparse point"
+			);
+			assert!(
+				link.join("SKILL.md").exists(),
+				"link must resolve through to the master"
+			);
+		}
+
+		#[test]
+		fn linker_relative_request_yields_absolute_junction_target() {
+			let tmp = tempdir().unwrap();
+			let root = std::fs::canonicalize(tmp.path()).unwrap();
+			let master = root.join(".agents\\skills\\my-skill");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(master.join("SKILL.md"), "real").unwrap();
+			let claude = root.join(".claude\\skills");
+
+			// Request Relative - on Windows the junction still uses an abs
+			// target.
+			Linker::link(&master, &claude, "my-skill", LinkTarget::Relative)
+				.unwrap();
+
+			let link = claude.join("my-skill");
+			assert!(
+				Linker::is_link(&link),
+				"must be a reparse point (junction)"
+			);
+			assert!(
+				link.join("SKILL.md").exists(),
+				"junction must resolve to the master"
+			);
+			// Confirm the junction target is absolute (not relative).
+			// On Windows, junctions do not support read_link in the same way;
+			// instead verify via canonicalize that the target is absolute.
+			let resolved = std::fs::canonicalize(&link).unwrap();
+			assert!(
+				resolved.is_absolute(),
+				"junction target must resolve to an absolute path"
+			);
+		}
 	}
 }

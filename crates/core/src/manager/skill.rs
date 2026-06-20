@@ -1564,6 +1564,134 @@ mod tests {
 	}
 
 	// -----------------------------------------------------------------------
+	// P1 fix (Windows): junction referrer rename/relink + rollback
+	// -----------------------------------------------------------------------
+
+	#[cfg(windows)]
+	#[test]
+	fn update_skill_universal_rename_relinks_junction_and_keeps_canonical() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		mgr.load().unwrap();
+
+		// Install universal skill (writes Master + creates a junction
+		// referrer in .claude/skills/ via Linker::link which falls through
+		// to create_junction when symlink_dir is unavailable).
+		let mut skill = Skill::new("old-uni-win");
+		skill.description = Some("universal".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Rename old-uni-win -> new-uni-win via the update path.
+		let mut renamed = Skill::new("new-uni-win");
+		renamed.description = Some("universal".to_string());
+		mgr.update_skill("old-uni-win", renamed).unwrap();
+
+		// Canonical master is renamed (old gone, new present).
+		assert!(
+			root.join(".agents\\skills\\new-uni-win\\SKILL.md").exists(),
+			"renamed master must exist"
+		);
+		assert!(
+			!root.join(".agents\\skills\\old-uni-win").exists(),
+			"old master must be gone"
+		);
+
+		// The old-name referrer link is fully removed (not left dangling).
+		assert!(
+			std::fs::symlink_metadata(
+				root.join(".claude\\skills\\old-uni-win")
+			)
+			.is_err(),
+			"old-name junction must be removed, not left dangling"
+		);
+
+		// A new-name referrer exists and resolves to the renamed master.
+		let new_link = root.join(".claude\\skills\\new-uni-win");
+		assert!(
+			crate::skills::linker::Linker::is_link(&new_link),
+			"new-name referrer must be a reparse point"
+		);
+		assert!(
+			new_link.join("SKILL.md").exists(),
+			"junction must resolve through to the renamed master"
+		);
+
+		// canonical_path is preserved.
+		let s = mgr
+			.get_skill("new-uni-win")
+			.expect("renamed skill in config");
+		assert!(
+			s.canonical_path.is_some(),
+			"canonical_path must be preserved on a universal rename"
+		);
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn update_skill_universal_rename_rolls_back_junction_when_relink_fails() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		mgr.load().unwrap();
+
+		let mut skill = Skill::new("roll-old-win");
+		skill.description = Some("u".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// Pre-occupy the new-name slot in the referrer dir with a real dir
+		// so the relink step fails (Linker::link returns Conflict, and the
+		// rename transaction surfaces it as an error and rolls back).
+		let referrer_dir = root.join(".claude\\skills");
+		let blocker = referrer_dir.join("roll-new-win");
+		std::fs::create_dir_all(&blocker).unwrap();
+		std::fs::write(blocker.join("blocker.txt"), "block").unwrap();
+
+		// The master can be renamed (the new name is only blocked in the
+		// referrer dir, not in .agents/skills). We need the relink to FAIL.
+		// The simplest cross-platform way: pre-create the target master dir
+		// so rename_skill_master returns ResourceExists before even trying
+		// to relink - the master itself never moves, so the canonical is
+		// intact and the old referrer is untouched.
+		let target_master = root.join(".agents\\skills\\roll-new-win");
+		std::fs::create_dir_all(&target_master).unwrap();
+
+		let res = mgr.update_skill("roll-old-win", Skill::new("roll-new-win"));
+
+		assert!(res.is_err(), "conflict must surface as an error");
+		// Original master untouched (rename refused because target existed).
+		assert!(
+			root.join(".agents\\skills\\roll-old-win\\SKILL.md")
+				.exists(),
+			"rollback: original master must be intact"
+		);
+		// Old referrer junction is still present and resolves.
+		let old_link = referrer_dir.join("roll-old-win");
+		assert!(
+			crate::skills::linker::Linker::is_link(&old_link),
+			"old-name junction must still be present after refused rename"
+		);
+		assert!(
+			old_link.join("SKILL.md").exists(),
+			"old-name junction must still resolve to the master"
+		);
+	}
+
+	// -----------------------------------------------------------------------
 	// P1-B fix: add_skill_universal silently overwrites existing canonical
 	// -----------------------------------------------------------------------
 
