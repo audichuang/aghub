@@ -2475,6 +2475,11 @@ mod tests {
 	#[test]
 	fn delete_by_path_absolutizes_relative_project_root() {
 		with_isolated_env(|home, _state| {
+			// Canonicalize the temp home so cwd-resolution (macOS /var ->
+			// /private/var) matches the install paths and the absolutized
+			// project root the handler computes from getcwd.
+			let home = home.canonicalize().unwrap();
+			let home = home.as_path();
 			// A project with a .claude marker + a symlinked install.
 			let proj = home.join("proj");
 			let master = proj.join(".agents/skills/linked");
@@ -3388,40 +3393,12 @@ mod tests {
 		});
 	}
 
-	// T-DELETE-BY-PATH-JUNCTION: a junction install takes the canonical-layout
-	// branch (recognized via Linker::is_link) and is not orphaned; the shared
-	// Master survives. windows-latest.
-	#[cfg(windows)]
-	#[test]
-	fn delete_by_path_junction_install_uses_canonical_layout() {
-		use aghub_core::skills::linker::create_junction;
-		with_isolated_env(|home, _state| {
-			let master = home.join(".agents/skills/linked");
-			std::fs::create_dir_all(&master).unwrap();
-			std::fs::write(
-				master.join("SKILL.md"),
-				"---\nname: linked\ndescription: d\n---\n",
-			)
-			.unwrap();
-			let skills = home.join(".claude/skills");
-			std::fs::create_dir_all(&skills).unwrap();
-			let link = skills.join("linked");
-			create_junction(&master.canonicalize().unwrap(), &link).unwrap();
-
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&link,
-				Some(true),
-			))))
-			.ok()
-			.expect("handler ok")
-			.into_inner();
-			assert!(resp.success);
-			assert!(
-				master.join("SKILL.md").exists(),
-				"shared master must survive junction delete"
-			);
-		});
-	}
+	// NOTE: there is intentionally NO windows by-path junction-delete test here.
+	// The by-path delete tests redirect HOME via env overrides, which Windows
+	// `dirs::home_dir()` ignores (it uses SHGetKnownFolderPath — see the cfg(unix)
+	// gate on these helpers above), so they cannot run on windows-latest.
+	// Junction-aware delete is covered at the core level (Linker::is_link reparse
+	// detection + the removal.rs / manager::skill windows junction tests).
 
 	// P1-E2: entry_allowed routes its link probe through Linker::is_link, so a
 	// link (unix symlink / windows junction) is subjected to the containment

@@ -283,6 +283,28 @@ fn install_universal_layout(
 		})
 		.collect();
 
+	// If NO target agent can receive the skill (all Unsupported), do NOT
+	// materialize an orphan Master or write a lock — nothing would reference
+	// it. Return per-agent soft-failures only (wrote_master = false).
+	if plans
+		.iter()
+		.all(|need| matches!(need, LinkNeed::Unsupported))
+	{
+		let results = target_agents
+			.iter()
+			.map(|&agent| AgentInstallResult {
+				agent,
+				installed: false,
+				error: Some(
+					"Agent does not support persistent skill creation in \
+					 this scope"
+						.to_string(),
+				),
+			})
+			.collect();
+		return Ok((results, false));
+	}
+
 	// Copy-free install: materialize the Master (if absent) and link each
 	// NeedsLink agent. A hard Master-copy failure (e.g. ENOTDIR on the
 	// canonical parent) is converted to per-agent failures rather than
