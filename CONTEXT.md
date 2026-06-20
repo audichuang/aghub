@@ -38,3 +38,21 @@ _Avoid_: "link", "alias".
 
 **Relink**:
 Re-pointing a Master's Referrers after the Master moves: unlink the old-name symlinks and recreate symlinks at the new name. A failed Relink leaves dangling Referrers and is the failure a transactional rename must roll back.
+
+## Remote / VM orchestration
+
+**Remote connection (VM)**:
+A saved SSH target the desktop can bring `aghub-api` up on and tunnel to on localhost, so every existing feature (skills, MCPs, sub-agents, …) runs against the VM through the same UI. Switching the active connection re-points the API base URL — there are no per-feature remote code paths.
+_Avoid_: "remote server" for the saved connection (the server is the `aghub-api` process the bring-up starts on the VM).
+
+**Bring-up**:
+The connect sequence `probe → ensure_remote_api (install if missing) → start_remote → ssh -L tunnel → switch active`. Teardown kills the local tunnel child via a cross-platform `Child::kill()` and guarded-kills the remote `aghub-api` by pid.
+_Avoid_: "deploy" for the whole flow — install/deploy is only the `ensure_remote_api` / `force_redeploy_remote_api` step.
+
+**Desktop-only boundary (by design)**:
+Remote/VM orchestration is exposed **only** through the desktop (Tauri commands + React). There is intentionally **no** CLI subcommand and **no** `/api/v1` route, and `crates/cli`/`crates/api` do not depend on `aghub-remote`. The boundary is deliberate: the HTTP API is the artifact being deployed and tunneled to, so it cannot orchestrate its own deployment. The tauri-free `aghub-remote` crate (probe/ensure/start/cleanup over an injected `CommandRunner`) is shaped so a thin `aghub-cli remote` shell _could_ drive it later if headless management is ever wanted.
+_Avoid_: assuming remote management is scriptable/headless today — it is not.
+
+**Auto-deploy vs pre-installed (shipped builds)**:
+Connecting to a VM that already has a compatible `aghub-api` works in any build (`ensure_remote_api` returns early on `api_present` before reading an install source). **Auto-install on first connect** and **force-redeploy** need a resolvable install source, which a packaged desktop currently lacks (the version-locked-binary bundling prerequisite has not landed), so those two conveniences are dev-tree-only and the UI gates the redeploy button off when no source is available.
+_Avoid_: "the desktop deploys aghub-api to any VM" — only a dev tree (or a pre-installed VM) does today.
