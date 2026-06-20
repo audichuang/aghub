@@ -14,8 +14,8 @@ use aghub_core::adapter::set_skills_path_override;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::install_fetched::{
 	install_fetched_skill_and_lock, FetchedSkillInstallRequest,
-	SkillInstallLayout,
 };
+use aghub_core::skills::linker::LinkTarget;
 use aghub_core::AgentType;
 use tempfile::{tempdir, TempDir};
 
@@ -98,9 +98,8 @@ fn isolated_copy_installs_writes_global_lock_and_per_agent_result() {
 		scope: ResourceScope::GlobalOnly,
 		project_root: None,
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::IsolatedCopy,
 		expected_name: None,
-		use_relative_links: false,
+		target: LinkTarget::Absolute,
 	})
 	.expect("install should succeed");
 
@@ -168,9 +167,8 @@ fn universal_writes_master_to_canonical_and_links_agent() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("universal install should succeed");
 
@@ -242,9 +240,8 @@ fn universal_returns_results_in_input_target_order() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
 		target_agents: &target_agents,
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("universal install should succeed");
 
@@ -301,9 +298,8 @@ fn universal_install_universal_error_fails_all_agents() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
 		target_agents: &target_agents,
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("universal install with an fs error still returns Ok with per-agent failures");
 
@@ -360,9 +356,8 @@ fn project_scope_writes_project_lock() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::IsolatedCopy,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("project install should succeed");
 
@@ -399,9 +394,8 @@ fn zero_installs_with_no_existing_lock_writes_no_lock() {
 		scope: ResourceScope::GlobalOnly,
 		project_root: None,
 		target_agents: &[AgentType::AugmentCode],
-		layout: SkillInstallLayout::IsolatedCopy,
 		expected_name: None,
-		use_relative_links: false,
+		target: LinkTarget::Absolute,
 	})
 	.expect("install with only soft failures still returns Ok");
 
@@ -448,9 +442,8 @@ fn universal_idempotent_rerun_does_not_rewrite_lock() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	};
 
 	let first = install_fetched_skill_and_lock(make_req())
@@ -507,9 +500,8 @@ fn unsupported_scope_rejected_before_any_write() {
 		scope: ResourceScope::Both,
 		project_root: None,
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: false,
+		target: LinkTarget::Absolute,
 	})
 	.expect_err("Combined scope must be refused");
 
@@ -557,9 +549,8 @@ fn rename_guard_rejects_mismatch_and_writes_nothing() {
 		scope: ResourceScope::GlobalOnly,
 		project_root: None,
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::IsolatedCopy,
 		expected_name: Some("alpha"),
-		use_relative_links: false,
+		target: LinkTarget::Absolute,
 	})
 	.expect_err("rename mismatch must be refused");
 
@@ -620,9 +611,8 @@ fn lock_written_when_master_written_but_all_agent_links_fail() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("install should return Ok with per-agent link failures");
 
@@ -688,9 +678,8 @@ fn conflict_fold_real_dir_and_foreign_link_are_not_clobbered() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root_a),
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("install should fold the real-dir conflict");
 
@@ -730,9 +719,8 @@ fn conflict_fold_real_dir_and_foreign_link_are_not_clobbered() {
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root_b),
 		target_agents: &[AgentType::Claude],
-		layout: SkillInstallLayout::Universal,
 		expected_name: None,
-		use_relative_links: true,
+		target: LinkTarget::Relative,
 	})
 	.expect("install should fold the foreign-link conflict");
 

@@ -1329,12 +1329,6 @@ pub async fn install_skill(
 		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
 		.map(|oid| oid.to_string());
 
-	// Shim fields (ignored by the always-universal dispatch; Task 47a converts
-	// every consumer to `target: LinkTarget` at once). use_relative_links
-	// preserves the project=relative / global=absolute link form.
-	let use_relative_links =
-		matches!(resource_scope, ResourceScope::ProjectOnly);
-
 	let mut agent_rows: Vec<GitInstallResultEntry> = invalid_rows;
 	let mut any_installed = false;
 	for skill in &selected_skills {
@@ -1350,9 +1344,12 @@ pub async fn install_skill(
 				project_root: project_root.as_deref(),
 				target_agents: &agent_types,
 				expected_name: None,
-				layout:
-					aghub_core::skills::install_fetched::SkillInstallLayout::Universal,
-				use_relative_links,
+				target: if matches!(resource_scope, ResourceScope::ProjectOnly)
+				{
+					aghub_core::skills::linker::LinkTarget::Relative
+				} else {
+					aghub_core::skills::linker::LinkTarget::Absolute
+				},
 			};
 		match aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
 			request,
@@ -2021,9 +2018,6 @@ pub async fn git_install_skills(
 	let target_agents: Vec<AgentType> =
 		valid_agents.iter().map(|(_, agent)| *agent).collect();
 
-	let layout =
-		aghub_core::skills::install_fetched::SkillInstallLayout::Universal;
-
 	for skill_path in &req.skill_paths {
 		let full_path = temp_path.join(skill_path);
 		let relative_dir = skill_path.replace('\\', "/");
@@ -2037,12 +2031,13 @@ pub async fn git_install_skills(
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
 				target_agents: &target_agents,
-				layout,
 				expected_name: None,
-				use_relative_links: matches!(
-					resource_scope,
-					ResourceScope::ProjectOnly
-				),
+				target: if matches!(resource_scope, ResourceScope::ProjectOnly)
+				{
+					aghub_core::skills::linker::LinkTarget::Relative
+				} else {
+					aghub_core::skills::linker::LinkTarget::Absolute
+				},
 			};
 
 		match aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
@@ -3614,10 +3609,8 @@ mod tests {
 				scope: resource_scope,
 				project_root: Some(project_root.as_path()),
 				target_agents: &target_agents,
-				layout: aghub_core::skills::install_fetched::
-					SkillInstallLayout::Universal,
 				expected_name: None,
-				use_relative_links: true,
+				target: aghub_core::skills::linker::LinkTarget::Relative,
 			};
 
 		let report =

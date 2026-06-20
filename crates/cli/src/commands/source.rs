@@ -687,8 +687,8 @@ fn apply_install(
 ) -> SyncActionView {
 	use aghub_core::skills::install_fetched::{
 		install_fetched_skill_and_lock, FetchedSkillInstallRequest,
-		SkillInstallLayout,
 	};
+	use aghub_core::skills::linker::LinkTarget;
 
 	let Some(skill_file) = aghub_core::skills::update::sanitize_skill_path(
 		repo.root.as_path(),
@@ -711,9 +711,12 @@ fn apply_install(
 		scope,
 		project_root,
 		target_agents,
-		layout: SkillInstallLayout::Universal,
 		expected_name: Some(&d.name),
-		use_relative_links: matches!(scope, ResourceScope::ProjectOnly),
+		target: if matches!(scope, ResourceScope::ProjectOnly) {
+			LinkTarget::Relative
+		} else {
+			LinkTarget::Absolute
+		},
 	};
 
 	match install_fetched_skill_and_lock(req) {

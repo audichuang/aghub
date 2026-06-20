@@ -44,21 +44,6 @@ pub fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
 	Ok(())
 }
 
-/// DEPRECATED shim — installs are always symlink-only now; this field is
-/// accepted but IGNORED (the dispatch always uses install_universal_layout).
-/// Removed in the final cleanup task once every caller drops it.
-///
-/// Layout to install the fetched skill in.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SkillInstallLayout {
-	/// Copy the skill into each agent's own skills dir (never touches
-	/// `.agents`). No-clobber: an existing dir is left untouched.
-	IsolatedCopy,
-	/// Materialize the master once in the `.agents/skills` canonical dir and
-	/// symlink each target agent dir to it.
-	Universal,
-}
-
 /// What happened for one target agent.
 #[derive(Clone, Debug)]
 pub struct AgentInstallResult {
@@ -83,14 +68,12 @@ pub struct FetchedSkillInstallRequest<'a> {
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
 	pub target_agents: &'a [AgentType],
-	/// DEPRECATED shim — ignored; installs are always symlink-only now.
-	/// Removed in the final cleanup task once every caller drops it.
-	pub layout: SkillInstallLayout,
 	/// Rename guard: when `Some(n)`, the fetched frontmatter name MUST equal `n`
 	/// or the install is refused before any write.
 	pub expected_name: Option<&'a str>,
-	/// Universal link style: relative links (project) vs absolute (global).
-	pub use_relative_links: bool,
+	/// Link style: relative links (project scope, portable) vs absolute
+	/// (global scope). Junctions always resolve absolute regardless.
+	pub target: LinkTarget,
 }
 
 /// Result of [`install_fetched_skill_and_lock`].
@@ -218,20 +201,13 @@ pub fn install_fetched_skill_and_lock(
 			))
 		})?;
 
-	// Symlink-only: req.layout is ignored (shim field, removed in Task 47a);
-	// the install is ALWAYS the universal master+link path.
-	let target = if req.use_relative_links {
-		LinkTarget::Relative
-	} else {
-		LinkTarget::Absolute
-	};
 	let (agent_results, wrote_master) = install_universal_layout(
 		&source_root,
 		&safe_name,
 		req.scope,
 		req.project_root,
 		req.target_agents,
-		target,
+		req.target,
 	)?;
 
 	// Gate the lock write on the master being freshly written OR at least one
@@ -462,12 +438,7 @@ mod nocopy_tests {
 			project_root: Some(&root),
 			target_agents: &[AgentType::Claude],
 			expected_name: None,
-			// Shim fields (ignored by the always-universal dispatch; Task 47a
-			// swaps them for `target: LinkTarget`).
-			// `use_relative_links: true` preserves the project-scope
-			// relative-link behavior under test.
-			layout: SkillInstallLayout::Universal,
-			use_relative_links: true,
+			target: LinkTarget::Relative,
 		};
 		let report = install_fetched_skill_and_lock(req).unwrap();
 		assert_eq!(report.name, "my-skill");
