@@ -250,7 +250,20 @@ pub(crate) fn build_rocket(
 		)
 }
 
+/// Callback invoked exactly once, AFTER Rocket has bound its listener, with the
+/// real bound port. With an ephemeral `port: 0` the bound port is only known
+/// post-bind, so a caller that must report the port (e.g. the SSH bring-up
+/// parser) has to wait for liftoff rather than guess beforehand.
+pub type PortReporter = std::sync::Arc<dyn Fn(u16) + Send + Sync + 'static>;
+
 pub async fn start(options: ApiOptions) -> Result<(), rocket::Error> {
+	start_with_port_reporter(options, None).await
+}
+
+pub async fn start_with_port_reporter(
+	options: ApiOptions,
+	reporter: Option<PortReporter>,
+) -> Result<(), rocket::Error> {
 	info!("starting aghub API server on 127.0.0.1:{}", options.port);
 	let app_data_dir =
 		options.app_data_dir.unwrap_or_else(default_app_data_dir);
@@ -260,7 +273,20 @@ pub async fn start(options: ApiOptions) -> Result<(), rocket::Error> {
 		log_level: rocket::config::LogLevel::Normal,
 		..rocket::Config::default()
 	};
-	build_rocket(config, app_data_dir)
+	let mut rocket = build_rocket(config, app_data_dir);
+	if let Some(reporter) = reporter {
+		// `on_liftoff` runs after the listener is bound, so `config().port` is
+		// the real port even when we requested an ephemeral `0`.
+		rocket = rocket.attach(rocket::fairing::AdHoc::on_liftoff(
+			"aghub-api port reporter",
+			move |rocket| {
+				Box::pin(async move {
+					reporter(rocket.config().port);
+				})
+			},
+		));
+	}
+	rocket
 		.launch()
 		.await
 		.inspect(|_rocket| {
@@ -416,5 +442,44 @@ mod tests {
 			"a skills-root entry that is a symlink out of tree must be \
 			 refused; got {status:?}"
 		);
+	}
+
+	#[tokio::test]
+	async fn port_reporter_fires_after_bind_with_real_ephemeral_port() {
+		use super::{start_with_port_reporter, ApiOptions};
+		use std::sync::{Arc, Mutex};
+
+		// The reporter forwards the bound port once, post-liftoff.
+		let (tx, rx) = tokio::sync::oneshot::channel::<u16>();
+		let tx = Arc::new(Mutex::new(Some(tx)));
+		let reporter: super::PortReporter = Arc::new(move |port: u16| {
+			if let Some(tx) = tx.lock().unwrap().take() {
+				let _ = tx.send(port);
+			}
+		});
+
+		let server = tokio::spawn(async move {
+			// Port 0 -> the OS assigns an ephemeral port at bind time.
+			let _ = start_with_port_reporter(
+				ApiOptions {
+					port: 0,
+					app_data_dir: Some(default_app_data_dir()),
+				},
+				Some(reporter),
+			)
+			.await;
+		});
+
+		// Liftoff (and thus the report) must arrive promptly.
+		let port = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+			.await
+			.expect("port reporter should fire before the timeout")
+			.expect("reporter should send a port");
+		// An ephemeral bind never yields port 0; we got the real bound port.
+		assert!(port > 0, "expected a real bound port, got {port}");
+
+		// Tear the server down.
+		server.abort();
+		let _ = server.await;
 	}
 }

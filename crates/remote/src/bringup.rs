@@ -2,7 +2,7 @@
 //!
 //! Pure, `tauri`-free orchestration over the [`crate::ssh`] foundation. Every
 //! function is generic over `<R: CommandRunner>` so the whole bring-up sequence
-//! (probe → deploy decision → start + bounded log poll → cleanup) can be
+//! (probe → ensure/redeploy → start + bounded log poll → cleanup) can be
 //! exercised under the test `MockRunner` with **no real `ssh`**.
 
 use std::fmt;
@@ -18,7 +18,8 @@ use crate::ssh::{
 	build_remote_prepare_upload_cmd, build_remote_probe_cmd,
 	build_remote_start_cmd, build_scp_args, build_ssh_args,
 	is_version_compatible, parse_api_version, parse_logpath, parse_pid,
-	parse_remote_port, remote_api_upload_path, CommandRunner, Connection,
+	parse_remote_port, probe_remote_platform, remote_api_upload_path,
+	CommandRunner, Connection,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,19 +93,6 @@ impl TestResult {
 		self.install_message = Some(message);
 		self
 	}
-}
-
-/// Outcome of [`decide_deploy`]: what to do about a (possibly missing) remote
-/// binary before starting it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub enum DeployDecision {
-	/// A compatible binary is already present; do nothing.
-	Skip,
-	/// Same platform + a bundled binary is available; `scp` it over.
-	Scp,
-	/// Cannot auto-deploy; instruct the user (carries the install hint).
-	InstructInstall(String),
 }
 
 /// Structured bring-up failure. Crosses IPC, so it derives serde; it is also a
@@ -298,6 +286,29 @@ pub fn ensure_remote_api<R: CommandRunner>(
 		});
 	};
 
+	// A bundled local binary is architecture-specific: uploading it to a remote
+	// of a different OS/arch would `scp` a binary that simply cannot run. Gate
+	// it on the connect path too (the redeploy path gates separately). CargoGit
+	// is NOT gated — it compiles on the VM, so any platform is fine.
+	if let RemoteInstallSource::LocalBinary(_) = source {
+		let local = (std::env::consts::OS, std::env::consts::ARCH);
+		let remote = probe_remote_platform(runner, conn);
+		let matches = remote
+			.as_ref()
+			.map(|(os, arch)| os == local.0 && arch == local.1)
+			.unwrap_or(false);
+		if !matches {
+			let remote_platform = remote
+				.map(|(os, arch)| format!("{os}/{arch}"))
+				.unwrap_or_else(|| "unknown".to_string());
+			return Err(ConnectError::DeployFailed(format!(
+				"cannot deploy a local aghub-api binary to remote platform \
+				 {remote_platform}: built for {}/{}",
+				local.0, local.1
+			)));
+		}
+	}
+
 	let bin = resolved_path(conn);
 	install_remote_api(runner, conn, &bin, source)?;
 
@@ -326,29 +337,8 @@ pub fn install_remote_api<R: CommandRunner>(
 ) -> Result<(), ConnectError> {
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
-			let prepare_cmd = build_remote_prepare_upload_cmd();
-			run_remote_install_step(runner, conn, &prepare_cmd)?;
-
-			let local = local.to_string_lossy().into_owned();
-			let scp_args =
-				build_scp_args(conn, &local, remote_api_upload_path());
-			let scp_out = runner
-				.run("scp", &scp_args)
-				.map_err(|e| ConnectError::DeployFailed(e.to_string()))?;
-			if is_transport_failure(scp_out.status_code) {
-				return Err(ConnectError::Unreachable {
-					stderr: scp_out.stderr,
-				});
-			}
-			if scp_out.status_code != Some(0) {
-				return Err(ConnectError::DeployFailed(nonzero_message(
-					"scp upload",
-					&scp_out,
-				)));
-			}
-
-			let finish_cmd = build_remote_finish_upload_cmd(resolved_path);
-			run_remote_install_step(runner, conn, &finish_cmd)
+			stage_remote_api_upload(runner, conn, local)?;
+			finish_remote_api_upload(runner, conn, resolved_path)
 		}
 		RemoteInstallSource::CargoGit { url, branch } => {
 			let install_cmd =
@@ -358,11 +348,70 @@ pub fn install_remote_api<R: CommandRunner>(
 	}
 }
 
+/// Stage a local binary on the remote: `mkdir -p` the cache dir, then `scp` the
+/// binary to its `.upload` staging path. Does NOT move it into place — call
+/// [`finish_remote_api_upload`] for the atomic swap. Splitting the upload from
+/// the swap lets a redeploy stage the new binary BEFORE killing the running
+/// server, so a staging failure can never leave the remote with no server.
+fn stage_remote_api_upload<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local: &std::path::Path,
+) -> Result<(), ConnectError> {
+	let prepare_cmd = build_remote_prepare_upload_cmd();
+	run_remote_install_step(runner, conn, &prepare_cmd)?;
+
+	let local = local.to_string_lossy().into_owned();
+	let scp_args = build_scp_args(conn, &local, remote_api_upload_path());
+	let scp_out = runner
+		.run("scp", &scp_args)
+		.map_err(|e| ConnectError::DeployFailed(e.to_string()))?;
+	if is_transport_failure(scp_out.status_code) {
+		return Err(ConnectError::Unreachable {
+			stderr: scp_out.stderr,
+		});
+	}
+	if scp_out.status_code != Some(0) {
+		return Err(ConnectError::DeployFailed(nonzero_message(
+			"scp upload",
+			&scp_out,
+		)));
+	}
+	Ok(())
+}
+
+/// Move a previously-staged upload into its final path (atomic `mv` + `chmod` +
+/// a version self-check). Pairs with [`stage_remote_api_upload`].
+fn finish_remote_api_upload<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	resolved_path: &str,
+) -> Result<(), ConnectError> {
+	let finish_cmd = build_remote_finish_upload_cmd(resolved_path);
+	run_remote_install_step(runner, conn, &finish_cmd)
+}
+
 /// Force-redeploy a version-locked local `aghub-api` over a present-but-
-/// incompatible remote one. Best-effort kills the running process first (avoids
-/// `ETXTBSY` on the overwrite + orphaned servers), overwrites the binary
-/// (prepare → scp → atomic mv+chmod), then re-probes and returns the fresh
-/// result. The caller proceeds only when `compatible`.
+/// incompatible remote one, then re-probe and return the fresh result. The
+/// caller proceeds only when `compatible`.
+///
+/// We deliberately do NOT kill the running server first. The old, incompatible
+/// server is left as a harmless orphan: it stays bound to its ephemeral
+/// (`--port 0`) port that this redeploy never tunnels to, and the next
+/// connection starts its OWN fresh `--port 0` server against the new binary.
+/// Replacing the binary in place is safe on its own — `finish_remote_api_upload`
+/// does an atomic `mv` of the staged upload, which the kernel handles cleanly
+/// even while the old process holds the previous inode open (no `ETXTBSY`). A
+/// `pkill`-by-name/path here would inevitably be collateral: we have no pid for
+/// the incompatible server (this connection did not start it), so any by-path
+/// kill on a shared host would also reap a sibling connection's server running
+/// the same binary path (the original self-DoS). Compatibility is still
+/// confirmed regardless of the orphan, because the re-probe runs
+/// `$target --version` — a fresh exec of the NEW binary. For a `LocalBinary`
+/// source the new binary is STAGED first (prepare → scp) and only THEN moved
+/// into place (atomic `mv`), so a failed/slow upload aborts with the old server
+/// still serving — the remote is never left with no server. `CargoGit` builds
+/// in place on the VM.
 pub fn force_redeploy_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -370,9 +419,17 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 	source: &RemoteInstallSource,
 ) -> Result<TestResult, ConnectError> {
 	let bin = resolved_path(conn);
-	let pkill = build_ssh_args(conn, &crate::ssh::build_remote_pkill_cmd());
-	let _ = runner.run("ssh", &pkill);
-	install_remote_api(runner, conn, &bin, source)?;
+	match source {
+		RemoteInstallSource::LocalBinary(local) => {
+			// Stage before the swap: a staging failure must not down the server.
+			stage_remote_api_upload(runner, conn, local)?;
+			finish_remote_api_upload(runner, conn, &bin)?;
+		}
+		RemoteInstallSource::CargoGit { .. } => {
+			// Cargo builds in place on the VM.
+			install_remote_api(runner, conn, &bin, source)?;
+		}
+	}
 	let probe = probe_connection(runner, conn, local_version);
 	if !probe.reachable {
 		return Err(ConnectError::Unreachable {
@@ -416,19 +473,23 @@ fn nonzero_message(step: &str, out: &crate::ssh::CommandOutput) -> String {
 	}
 }
 
-/// Decide what to do about the remote binary before starting it.
-pub fn decide_deploy(
-	test: &TestResult,
-	same_platform: bool,
-	has_bundled_binary: bool,
-) -> DeployDecision {
-	if test.api_present && test.compatible {
-		return DeployDecision::Skip;
+/// Attach a command's relayed output to a context message (stderr first, falling
+/// back to stdout). Unlike [`nonzero_message`] this carries no status code — it
+/// is for cases where the command exited 0 but produced unparseable output.
+fn command_output_message(
+	context: &str,
+	out: &crate::ssh::CommandOutput,
+) -> String {
+	let detail = if out.stderr.trim().is_empty() {
+		out.stdout.trim()
+	} else {
+		out.stderr.trim()
+	};
+	if detail.is_empty() {
+		context.to_string()
+	} else {
+		format!("{context}: {detail}")
 	}
-	if !test.api_present && same_platform && has_bundled_binary {
-		return DeployDecision::Scp;
-	}
-	DeployDecision::InstructInstall(install_hint())
 }
 
 /// The user-facing install instruction returned when we cannot auto-deploy.
@@ -443,9 +504,11 @@ pub fn install_hint() -> String {
 ///
 /// Issues the detached start command, parses the pid + log path it echoes, then
 /// polls `cat <log>` up to `poll_attempts` times (sleeping `delay` between
-/// tries) for an `AGHUB_API_PORT=<n>` line. On exhaustion it issues a guarded
-/// remote kill and returns [`ConnectError::StartTimeout`]. Tests pass
-/// `delay = Duration::ZERO` for instant runs.
+/// tries) for an `AGHUB_API_PORT=<n>` line. Every failure path returns a
+/// [`ConnectError::DeployFailed`] carrying the actual remote cause (start
+/// stderr / unparseable output / last log contents) instead of an opaque
+/// timeout, and any orphaned server is reaped with a guarded kill first. Tests
+/// pass `delay = Duration::ZERO` for instant runs.
 pub fn start_remote<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -464,19 +527,39 @@ pub fn start_remote<R: CommandRunner>(
 			stderr: start_out.stderr,
 		});
 	}
+	// The start command ran but failed: surface its real stderr/exit status.
+	if start_out.status_code != Some(0) {
+		return Err(ConnectError::DeployFailed(nonzero_message(
+			"remote start",
+			&start_out,
+		)));
+	}
 
 	let pid = match parse_pid(&start_out.stdout) {
 		Some(pid) => pid,
-		None => return Err(ConnectError::StartTimeout),
+		None => {
+			return Err(ConnectError::DeployFailed(command_output_message(
+				"remote start did not report a PID",
+				&start_out,
+			)));
+		}
 	};
 	let log_path = match parse_logpath(&start_out.stdout) {
 		Some(path) => path,
-		None => return Err(ConnectError::StartTimeout),
+		None => {
+			// We have a pid but no log to poll — reap it before bailing.
+			cleanup_remote(runner, conn, pid);
+			return Err(ConnectError::DeployFailed(command_output_message(
+				"remote start did not report a LOGPATH",
+				&start_out,
+			)));
+		}
 	};
 
 	let cat_cmd = build_remote_cat_cmd(&log_path);
 	let cat_args = build_ssh_args(conn, &cat_cmd);
 
+	let mut last_detail = String::new();
 	for attempt in 0..poll_attempts {
 		if let Ok(out) = runner.run("ssh", &cat_args) {
 			if let Some(remote_port) = parse_remote_port(&out.stdout) {
@@ -486,6 +569,11 @@ pub fn start_remote<R: CommandRunner>(
 					log_path,
 				});
 			}
+			last_detail = if out.stderr.trim().is_empty() {
+				out.stdout.trim().to_string()
+			} else {
+				out.stderr.trim().to_string()
+			};
 		}
 		// Don't sleep after the final attempt.
 		if attempt + 1 < poll_attempts {
@@ -493,9 +581,15 @@ pub fn start_remote<R: CommandRunner>(
 		}
 	}
 
-	// Exhausted: clean up the orphaned server, then report the timeout.
+	// Exhausted: clean up the orphaned server, then report with the last log we
+	// managed to read so the failure is diagnosable rather than opaque.
 	cleanup_remote(runner, conn, pid);
-	Err(ConnectError::StartTimeout)
+	let msg = if last_detail.is_empty() {
+		"remote start did not report a port in time".to_string()
+	} else {
+		format!("remote start did not report a port in time: {last_detail}")
+	};
+	Err(ConnectError::DeployFailed(msg))
 }
 
 /// Issue the guarded remote kill for `pid` over ssh. Best-effort: errors are
@@ -666,7 +760,7 @@ mod tests {
 		assert!(!res.compatible);
 	}
 
-	// --- decide_deploy -----------------------------------------------------
+	// --- TestResult fixture (shared by serde + ensure_remote_api tests) ----
 
 	fn present_compatible() -> TestResult {
 		TestResult::new(
@@ -678,41 +772,60 @@ mod tests {
 		)
 	}
 
-	fn absent() -> TestResult {
-		TestResult::new(true, false, None, false, String::new())
-	}
-
-	#[test]
-	fn decide_deploy_skip_when_present_and_compatible() {
-		let d = decide_deploy(&present_compatible(), false, false);
-		assert_eq!(d, DeployDecision::Skip);
-	}
-
-	#[test]
-	fn decide_deploy_scp_when_absent_same_platform_with_binary() {
-		let d = decide_deploy(&absent(), true, true);
-		assert_eq!(d, DeployDecision::Scp);
-	}
-
-	#[test]
-	fn decide_deploy_instruct_otherwise() {
-		// Absent, cross-platform → instruct.
-		match decide_deploy(&absent(), false, true) {
-			DeployDecision::InstructInstall(hint) => {
-				assert!(hint.contains("cargo install --path crates/api"));
-			}
-			other => panic!("expected InstructInstall, got {other:?}"),
-		}
-		// Absent, same platform but no bundled binary → instruct.
-		match decide_deploy(&absent(), true, false) {
-			DeployDecision::InstructInstall(hint) => {
-				assert!(hint.contains("install"));
-			}
-			other => panic!("expected InstructInstall, got {other:?}"),
-		}
-	}
-
 	// --- install_remote_api -----------------------------------------------
+
+	// --- ensure_remote_api -------------------------------------------------
+
+	#[test]
+	fn ensure_remote_api_local_binary_cross_platform_refuses_before_scp() {
+		// Probe: reachable but the binary is missing (command not found).
+		let probe = probe_args();
+		// Platform probe (`uname -sm`) reports an unmappable platform, so the
+		// resolved remote platform does not equal the local OS/arch.
+		let uname_args = build_ssh_args(&conn(), "uname -sm");
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(127),
+					stdout: String::new(),
+					stderr: "bash: aghub-api: command not found".to_string(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&uname_args),
+				CommandOutput {
+					status_code: Some(0),
+					// Windows_NT does not map to the consts vocabulary -> None,
+					// which the gate treats as "not the same platform".
+					stdout: "Windows_NT x86_64\n".to_string(),
+					stderr: String::new(),
+				},
+			);
+
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let err = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
+			.expect_err("cross-platform local binary must be refused");
+		match err {
+			ConnectError::DeployFailed(msg) => {
+				assert!(
+					msg.contains("cannot deploy a local aghub-api binary"),
+					"got {msg:?}"
+				);
+			}
+			other => panic!("expected DeployFailed, got {other:?}"),
+		}
+
+		// The gate fires BEFORE any mutation: no scp (and no prepare/finish)
+		// ever ran.
+		let calls = runner.calls();
+		assert!(
+			!calls.iter().any(|c| c.program == "scp"),
+			"no scp may run on a cross-platform refusal: {calls:?}"
+		);
+	}
 
 	#[test]
 	fn install_remote_api_via_cargo_git_runs_remote_cargo_install() {
@@ -745,10 +858,8 @@ mod tests {
 	}
 
 	#[test]
-	fn force_redeploy_pkills_overwrites_then_reprobes() {
+	fn force_redeploy_stages_then_finishes_then_probes() {
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
-		let pkill_args =
-			build_ssh_args(&conn(), &crate::ssh::build_remote_pkill_cmd());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
 		let scp_args = build_scp_args(
@@ -775,7 +886,6 @@ mod tests {
 			stderr: String::new(),
 		};
 		let runner = MockRunner::new()
-			.script("ssh", &args_as_str(&pkill_args), ok())
 			.script("ssh", &args_as_str(&prepare_args), ok())
 			.script("scp", &args_as_str(&scp_args), ok())
 			.script("ssh", &args_as_str(&finish_args), ver())
@@ -787,9 +897,64 @@ mod tests {
 
 		assert!(result.compatible);
 		assert!(result.api_present);
-		// The stale process is killed BEFORE the overwrite.
+		// Strict ordering: the new binary is fully STAGED (prepare + scp), then
+		// the staged upload is moved into place (atomic `mv`), then we re-probe.
+		// No pkill — the old incompatible server is left a harmless orphan.
 		let calls = runner.calls();
-		assert_eq!(calls[0].args, pkill_args, "pkill must be issued first");
+		assert_eq!(calls.len(), 4);
+		assert_eq!(calls[0].args, prepare_args, "prepare first");
+		assert_eq!(calls[1].program, "scp");
+		assert_eq!(calls[1].args, scp_args, "scp upload second");
+		assert_eq!(calls[2].args, finish_args, "finish (atomic mv) third");
+		assert_eq!(calls[3].args, probe_args, "re-probe last");
+	}
+
+	#[test]
+	fn force_redeploy_staging_failure_aborts_before_finish() {
+		// If staging fails (here: scp upload errors), the swap must NOT happen —
+		// the remote keeps serving the old binary, no atomic `mv` runs.
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&prepare_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: String::new(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"scp",
+				&args_as_str(&scp_args),
+				CommandOutput {
+					status_code: Some(1),
+					stdout: String::new(),
+					stderr: "scp: connection lost".to_string(),
+				},
+			);
+
+		let err = force_redeploy_remote_api(&runner, &conn(), "1.1.1", &source)
+			.expect_err("staging failure must propagate");
+		assert!(matches!(err, ConnectError::DeployFailed(_)), "got {err:?}");
+
+		// No finish (atomic mv) ever ran: the old server is untouched.
+		let calls = runner.calls();
+		assert!(
+			!calls.iter().any(|c| c.args == finish_args),
+			"finish must NOT run when staging failed: {calls:?}"
+		);
 	}
 
 	#[test]
@@ -928,7 +1093,13 @@ mod tests {
 		let err =
 			start_remote(&runner, &conn(), "aghub-api", 3, Duration::ZERO)
 				.expect_err("start should time out");
-		assert_eq!(err, ConnectError::StartTimeout);
+		// Now a DeployFailed carrying the diagnosable cause, not an opaque
+		// StartTimeout.
+		assert!(
+			matches!(err, ConnectError::DeployFailed(ref m)
+				if m.contains("did not report a port in time")),
+			"got {err:?}"
+		);
 
 		// A guarded kill of pid 4242 must have been issued.
 		let expected_kill = kill_args(4242);
@@ -940,7 +1111,46 @@ mod tests {
 	}
 
 	#[test]
-	fn start_remote_missing_logpath_times_out() {
+	fn start_remote_timeout_carries_last_log_detail() {
+		let log = "/run/u/aghub.log";
+		let start = start_args();
+		let cat = cat_args(log);
+		// The log never shows a port, but it DOES carry a panic line that we
+		// must surface in the failure message.
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&start),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: format!("PID=4242\nLOGPATH={log}"),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&cat),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "thread 'main' panicked: boom".to_string(),
+					stderr: String::new(),
+				},
+			);
+
+		let err =
+			start_remote(&runner, &conn(), "aghub-api", 2, Duration::ZERO)
+				.expect_err("port never appears");
+		match err {
+			ConnectError::DeployFailed(msg) => {
+				assert!(msg.contains("did not report a port in time"));
+				assert!(msg.contains("boom"), "should carry last log: {msg}");
+			}
+			other => panic!("expected DeployFailed, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn start_remote_missing_logpath_is_deploy_failed_and_reaps_pid() {
 		let start = start_args();
 		let runner = MockRunner::new().script(
 			"ssh",
@@ -954,8 +1164,74 @@ mod tests {
 		);
 		let err =
 			start_remote(&runner, &conn(), "aghub-api", 3, Duration::ZERO)
-				.expect_err("missing logpath should time out");
-		assert_eq!(err, ConnectError::StartTimeout);
+				.expect_err("missing logpath should fail");
+		assert!(
+			matches!(err, ConnectError::DeployFailed(ref m)
+				if m.contains("did not report a LOGPATH")),
+			"got {err:?}"
+		);
+		// The dangling pid must be reaped via a guarded kill.
+		let expected_kill = kill_args(999);
+		let calls = runner.calls();
+		assert!(
+			calls
+				.iter()
+				.any(|c| c.program == "ssh" && c.args == expected_kill),
+			"expected a guarded-kill ssh call for pid 999: {calls:?}"
+		);
+	}
+
+	#[test]
+	fn start_remote_nonzero_exit_returns_deploy_failed_with_stderr() {
+		// The start command RAN but exited non-zero (e.g. binary missing a lib)
+		// — surface its stderr, not an opaque timeout.
+		let start = start_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&start),
+			CommandOutput {
+				status_code: Some(127),
+				stdout: String::new(),
+				stderr: "aghub-api: error while loading shared libraries"
+					.to_string(),
+			},
+		);
+		let err =
+			start_remote(&runner, &conn(), "aghub-api", 3, Duration::ZERO)
+				.expect_err("non-zero start should fail");
+		match err {
+			ConnectError::DeployFailed(msg) => {
+				assert!(msg.contains("remote start"), "got {msg:?}");
+				assert!(
+					msg.contains("shared libraries"),
+					"should carry stderr: {msg}"
+				);
+			}
+			other => panic!("expected DeployFailed, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn start_remote_missing_pid_is_deploy_failed() {
+		// status 0 but no PID line at all.
+		let start = start_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&start),
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "weird output, no pid".to_string(),
+				stderr: String::new(),
+			},
+		);
+		let err =
+			start_remote(&runner, &conn(), "aghub-api", 3, Duration::ZERO)
+				.expect_err("missing pid should fail");
+		assert!(
+			matches!(err, ConnectError::DeployFailed(ref m)
+				if m.contains("did not report a PID")),
+			"got {err:?}"
+		);
 	}
 
 	// --- cleanup_remote ----------------------------------------------------

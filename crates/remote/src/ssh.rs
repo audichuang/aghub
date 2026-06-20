@@ -429,14 +429,6 @@ pub fn build_remote_kill_cmd(pid: u32) -> String {
 	format!("kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | grep -q aghub-api && kill {pid}")
 }
 
-/// Best-effort kill of any running `aghub-api` by exact process name, issued
-/// before a force-redeploy overwrites the binary — avoids `ETXTBSY` on the
-/// in-place replace and leaves no orphaned server. `|| true` so "no match"
-/// (exit 1) is not treated as a failure.
-pub fn build_remote_pkill_cmd() -> String {
-	"pkill -x aghub-api || true".to_string()
-}
-
 /// Compose the probe command `<bin> --version` with the path escaped.
 pub fn build_remote_probe_cmd(resolved_path: &str) -> String {
 	format!("{} \"$bin\" --version", assign_api_bin_cmd(resolved_path))
@@ -1119,11 +1111,6 @@ mod tests {
 		assert_eq!(normalize_platform("Windows_NT", "x86_64"), None);
 		assert_eq!(normalize_platform("Linux", "riscv64"), None);
 		assert_eq!(normalize_platform("", ""), None);
-	}
-
-	#[test]
-	fn pkill_cmd_is_best_effort() {
-		assert_eq!(build_remote_pkill_cmd(), "pkill -x aghub-api || true");
 	}
 
 	fn plat_conn() -> Connection {
