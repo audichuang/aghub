@@ -1093,7 +1093,6 @@ export default {
 	sourceInstallSomeFailedOne: "有 1 个安装目标失败。",
 	sourceInstallSomeFailedMany: "有 {{count}} 个安装目标失败。",
 	sourceInstallFailed: "安装技能失败。",
-	sourceInstallNoAgents: "此范围没有可安装技能的可用 Agent。",
 	sourceInstallCoveredTitle: "已覆盖",
 	sourceInstallCoveredHint:
 		"这些 Agent 会直接读取共享的 .agents 主文件，因此不会创建链接。",
