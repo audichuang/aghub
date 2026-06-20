@@ -582,3 +582,77 @@ fn rename_guard_rejects_mismatch_and_writes_nothing() {
 		"no global lock entry should be written on a refused rename"
 	);
 }
+
+#[test]
+#[cfg(unix)]
+fn lock_written_when_master_written_but_all_agent_links_fail() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let _g = GlobalLockGuard::new();
+
+	// SAFETY: getuid has no preconditions and only reads process identity.
+	if unsafe { libc::getuid() } == 0 {
+		return;
+	}
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+
+	let agent_dir = project_root.join(".claude/skills");
+	std::fs::create_dir_all(&agent_dir).unwrap();
+	std::fs::set_permissions(
+		&agent_dir,
+		std::fs::Permissions::from_mode(0o555),
+	)
+	.unwrap();
+
+	set_skills_path_override("claude", Some(agent_dir.clone()));
+
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("install should return Ok with per-agent link failures");
+
+	set_skills_path_override("claude", None);
+
+	assert_eq!(report.agent_results.len(), 1);
+	let agent_result = &report.agent_results[0];
+	assert_eq!(agent_result.agent, AgentType::Claude);
+	assert!(
+		!agent_result.installed,
+		"claude should not install when the per-agent link fails"
+	);
+	assert!(
+		agent_result.error.is_some(),
+		"link failure should be reported on the agent row"
+	);
+	assert!(
+		report.wrote_lock,
+		"Decision 11: a freshly written master must write the lock"
+	);
+
+	let lock = skill::lock::local::read_local_lock(Some(&project_root));
+	assert!(
+		lock.skills.contains_key("alpha"),
+		"project lock should contain the freshly materialized master"
+	);
+
+	std::fs::set_permissions(
+		&agent_dir,
+		std::fs::Permissions::from_mode(0o755),
+	)
+	.unwrap();
+}
