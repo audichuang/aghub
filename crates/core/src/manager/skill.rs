@@ -1639,6 +1639,14 @@ mod tests {
 	fn update_skill_universal_rename_rolls_back_junction_when_relink_fails() {
 		use crate::create_adapter;
 		use crate::models::AgentType;
+		use std::os::windows::fs::OpenOptionsExt;
+
+		// FILE_FLAG_BACKUP_SEMANTICS lets us open a directory handle;
+		// FILE_FLAG_OPEN_REPARSE_POINT opens the junction itself, not its
+		// target — so the handle prevents remove_dir from succeeding while
+		// the junction still resolves (rollback can recreate it).
+		const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+		const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
 		let tmp = tempfile::tempdir().unwrap();
 		let root = std::fs::canonicalize(tmp.path()).unwrap();
@@ -1653,41 +1661,51 @@ mod tests {
 		skill.description = Some("u".to_string());
 		mgr.add_skill_universal(skill).unwrap();
 
-		// Pre-occupy the new-name slot in the referrer dir with a real dir
-		// so the relink step fails (Linker::link returns Conflict, and the
-		// rename transaction surfaces it as an error and rolls back).
+		// Precondition: the old-name junction is present.
 		let referrer_dir = root.join(".claude\\skills");
-		let blocker = referrer_dir.join("roll-new-win");
-		std::fs::create_dir_all(&blocker).unwrap();
-		std::fs::write(blocker.join("blocker.txt"), "block").unwrap();
-
-		// The master can be renamed (the new name is only blocked in the
-		// referrer dir, not in .agents/skills). We need the relink to FAIL.
-		// The simplest cross-platform way: pre-create the target master dir
-		// so rename_skill_master returns ResourceExists before even trying
-		// to relink - the master itself never moves, so the canonical is
-		// intact and the old referrer is untouched.
-		let target_master = root.join(".agents\\skills\\roll-new-win");
-		std::fs::create_dir_all(&target_master).unwrap();
-
-		let res = mgr.update_skill("roll-old-win", Skill::new("roll-new-win"));
-
-		assert!(res.is_err(), "conflict must surface as an error");
-		// Original master untouched (rename refused because target existed).
-		assert!(
-			root.join(".agents\\skills\\roll-old-win\\SKILL.md")
-				.exists(),
-			"rollback: original master must be intact"
-		);
-		// Old referrer junction is still present and resolves.
 		let old_link = referrer_dir.join("roll-old-win");
 		assert!(
 			crate::skills::linker::Linker::is_link(&old_link),
-			"old-name junction must still be present after refused rename"
+			"precondition: old-name junction must exist"
+		);
+
+		// Hold the junction open so remove_dir fails (ERROR_SHARING_VIOLATION).
+		// This forces universal_relink_agents to error AFTER the master rename
+		// succeeds — exactly the partial-failure window rollback_master_rename
+		// is designed to close.
+		let _junction_guard = std::fs::OpenOptions::new()
+			.read(true)
+			.custom_flags(
+				FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+			)
+			.open(&old_link)
+			.unwrap();
+
+		let res = mgr.update_skill("roll-old-win", Skill::new("roll-new-win"));
+
+		// Drop the guard before asserting so teardown always works.
+		drop(_junction_guard);
+
+		assert!(res.is_err(), "a failed relink must surface as an error");
+		// Rollback must have renamed the master back to its old name.
+		assert!(
+			root.join(".agents\\skills\\roll-old-win\\SKILL.md")
+				.exists(),
+			"rollback: master must be renamed back to the old name"
+		);
+		// No half-renamed master may be left behind.
+		assert!(
+			!root.join(".agents\\skills\\roll-new-win").exists(),
+			"rollback: no half-renamed master may remain"
+		);
+		// Old-name junction must still be present and resolve to the master.
+		assert!(
+			crate::skills::linker::Linker::is_link(&old_link),
+			"rollback: old-name junction must be restored"
 		);
 		assert!(
 			old_link.join("SKILL.md").exists(),
-			"old-name junction must still resolve to the master"
+			"rollback: restored junction must resolve to the master"
 		);
 	}
 
