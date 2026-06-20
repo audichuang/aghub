@@ -153,9 +153,10 @@ export function SharedSkillInstallModal({
 										isConfirmDisabled || isInstalling
 									}
 								>
-									{isInstalling
-										? t("installing")
-										: (confirmLabel ?? t("install"))}
+									{confirmLabel ??
+										(isInstalling
+											? t("installing")
+											: t("install"))}
 								</Button>
 							</>
 						)}
