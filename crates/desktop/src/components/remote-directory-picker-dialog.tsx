@@ -19,6 +19,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { Selection } from "react-aria-components";
+import { remoteErrorMessage } from "../lib/remote-errors";
 import type { Connection } from "../lib/store";
 
 interface RemoteDirectoryEntry {
@@ -37,37 +38,6 @@ interface RemoteDirectoryPickerDialogProps {
 	initialPath: string;
 	onClose: () => void;
 	onSelect: (path: string) => void;
-}
-
-interface RemoteErrorPayload {
-	kind?: string;
-	stderr?: string;
-	message?: string;
-}
-
-function remoteErrorMessage(error: unknown): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	if (typeof error === "string") {
-		return error;
-	}
-	if (error == null || typeof error !== "object") {
-		return String(error);
-	}
-
-	const remote = error as RemoteErrorPayload;
-	if (remote.stderr) {
-		return remote.stderr;
-	}
-	if (remote.message) {
-		return remote.message;
-	}
-	try {
-		return JSON.stringify(error);
-	} catch {
-		return String(error);
-	}
 }
 
 function normalizedInitialPath(path: string): string {

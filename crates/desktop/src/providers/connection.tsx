@@ -1,4 +1,4 @@
-import { AlertDialog, Button, Spinner, toast } from "@heroui/react";
+import { Alert, AlertDialog, Button, Spinner, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -17,6 +17,10 @@ import {
 	mergeConnections,
 	projectStatus,
 } from "../lib/connection-logic";
+import {
+	asRemotePayload,
+	remoteErrorMessage,
+} from "../lib/remote-errors";
 import type { Connection } from "../lib/store";
 import {
 	addConnection as addConnectionToStore,
@@ -48,71 +52,6 @@ interface RemoteDisconnectedPayload {
 	connectionId: string;
 }
 
-interface RemoteErrorPayload {
-	kind?: string;
-	stderr?: string;
-	installHint?: string;
-	remoteVersion?: string | null;
-	remotePlatform?: string;
-	hint?: string;
-	message?: string;
-}
-
-/** Narrow an unknown invoke rejection to the kind-tagged RemoteError payload. */
-function asRemotePayload(error: unknown): RemoteErrorPayload | null {
-	if (error && typeof error === "object" && "kind" in error) {
-		return error as RemoteErrorPayload;
-	}
-	return null;
-}
-
-function remoteErrorMessage(error: unknown): string {
-	if (error instanceof Error) {
-		return error.message;
-	}
-	if (typeof error === "string") {
-		return error;
-	}
-	if (error == null || typeof error !== "object") {
-		return String(error);
-	}
-
-	const remote = error as RemoteErrorPayload;
-	switch (remote.kind) {
-		case "unreachable":
-			return remote.stderr ?? "SSH connection failed.";
-		case "remoteApiMissing":
-			return remote.installHint ?? "aghub-api is missing on the remote.";
-		case "incompatible":
-			return `Remote aghub-api version ${
-				remote.remoteVersion ?? "unknown"
-			} is incompatible.`;
-		case "crossPlatformRedeploy":
-			return (
-				remote.hint ??
-				`Remote platform ${
-					remote.remotePlatform ?? "unknown"
-				} differs from this desktop; cannot redeploy.`
-			);
-		case "startTimeout":
-			return "Remote aghub-api did not start in time.";
-		case "tunnelFailed":
-			return remote.message ?? "SSH tunnel failed.";
-		case "deployFailed":
-			return remote.message ?? "Remote aghub-api install failed.";
-		case "alreadyConnecting":
-			return "A connection attempt is already in progress.";
-		case "internal":
-			return remote.message ?? "Internal remote connection error.";
-		default:
-			try {
-				return JSON.stringify(error);
-			} catch {
-				return String(error);
-			}
-	}
-}
-
 interface IncompatibleConnectionScreenProps {
 	connection: Connection;
 	remoteVersion: string | null;
@@ -142,6 +81,12 @@ function IncompatibleConnectionScreen({
 	const { data: localVersion } = useQuery<string>({
 		queryKey: ["local-api-version"],
 		queryFn: () => invoke<string>("local_api_version"),
+	});
+
+	const { data: installSourceAvailable } = useQuery<boolean>({
+		queryKey: ["remote-install-source-available"],
+		queryFn: () => invoke<boolean>("remote_install_source_available"),
+		staleTime: Number.POSITIVE_INFINITY,
 	});
 
 	const redeploy = useMutation({
@@ -186,6 +131,16 @@ function IncompatibleConnectionScreen({
 					{crossPlatform.hint ??
 						"The remote platform differs from this desktop, so its bundled binary cannot run there. Install aghub-api on the VM manually."}
 				</p>
+			) : installSourceAvailable === false ? (
+				<Alert status="warning" className="max-w-md">
+					<Alert.Indicator />
+					<Alert.Content>
+						<Alert.Description>
+							Auto-deploy isn&apos;t available in this build —
+							install aghub-api on the VM manually.
+						</Alert.Description>
+					</Alert.Content>
+				</Alert>
 			) : (
 				<Button
 					variant="primary"
