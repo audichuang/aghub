@@ -1,6 +1,6 @@
 use aghub_cc_plugins::claude::ClaudePluginManager;
 use aghub_core::{
-	convert_skill, create_adapter,
+	create_adapter,
 	errors::ConfigError,
 	load_all_agents,
 	models::{AgentType, ResourceScope, Skill},
@@ -8,7 +8,6 @@ use aghub_core::{
 };
 use rocket::http::Status;
 use rocket::serde::json::Json;
-use skill::sanitize::sanitize_name;
 use std::{
 	collections::HashMap,
 	path::{Path, PathBuf},
@@ -621,6 +620,7 @@ fn delete_response_from_outcome(
 /// implementation (decision #5: API and CLI use ONE copy behavior); the core
 /// fn returns `io::Result`, so we map its error to [`ApiError`] at this
 /// boundary (core cannot depend on Rocket).
+#[cfg(test)]
 fn copy_dir_recursive(
 	from: &std::path::Path,
 	to: &std::path::Path,
@@ -638,6 +638,7 @@ fn resolve_git_install_target_dir(
 		.target_skills_dir(project_root.map(|p| p.as_path()), resource_scope)
 }
 
+#[cfg(test)]
 fn install_git_skill_to_dir(
 	full_path: &std::path::Path,
 	target_dir: &std::path::Path,
@@ -649,8 +650,8 @@ fn install_git_skill_to_dir(
 			"SKILL_PARSE_FAILED",
 		)
 	})?;
-	let skill = convert_skill(parsed);
-	let safe_name = sanitize_name(&skill.name);
+	let skill = aghub_core::convert_skill(parsed);
+	let safe_name = skill::sanitize::sanitize_name(&skill.name);
 	let dest_root = target_dir.join(&safe_name);
 
 	let copied = if !dest_root.exists() {
@@ -756,6 +757,36 @@ fn map_repo_discovery_error(error: skill::RepoDiscoveryError) -> ApiError {
 	}
 }
 
+#[cfg(test)]
+fn file_install_source(
+	source: &str,
+) -> Result<Option<(String, skill::InstallLockSource)>, ApiError> {
+	let trimmed = source.trim();
+	let Ok(url) = url::Url::parse(trimmed) else {
+		return Ok(None);
+	};
+	if url.scheme() != "file" {
+		return Ok(None);
+	}
+	let path = url.to_file_path().map_err(|_| {
+		ApiError::new(
+			Status::BadRequest,
+			format!("Invalid file skill source '{trimmed}'"),
+			"INVALID_SKILL_SOURCE",
+		)
+	})?;
+	let clone_url = trimmed.to_string();
+	Ok(Some((
+		clone_url.clone(),
+		skill::InstallLockSource {
+			source: path.display().to_string(),
+			source_type: "local".to_string(),
+			source_url: clone_url,
+			ref_name: None,
+		},
+	)))
+}
+
 fn install_lock_source_from_resolved(
 	source: &aghub_git::ResolvedRemoteSource,
 	ref_name: Option<String>,
@@ -830,6 +861,39 @@ fn write_skill_install_lock(
 	Ok(())
 }
 
+fn clone_skill_source_to_temp(
+	clone_url: &str,
+	is_file_source: bool,
+) -> Result<tempfile::TempDir, String> {
+	if !is_file_source {
+		return aghub_git::clone_to_temp(aghub_git::CloneOptions::new(
+			clone_url,
+		))
+		.map_err(|e| e.to_string());
+	}
+
+	let temp_dir = tempfile::TempDir::new().map_err(|e| e.to_string())?;
+	let mut prep = gix::clone::PrepareFetch::new(
+		clone_url,
+		temp_dir.path(),
+		gix::create::Kind::WithWorktree,
+		Default::default(),
+		Default::default(),
+	)
+	.map_err(|e| e.to_string())?;
+	let (mut checkout, _) = prep
+		.fetch_then_checkout(
+			gix::progress::Discard,
+			&gix::interrupt::IS_INTERRUPTED,
+		)
+		.map_err(|e| format!("Fetch failed: {e}"))?;
+	checkout
+		.main_worktree(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)
+		.map_err(|e| format!("Checkout failed: {e}"))?;
+	Ok(temp_dir)
+}
+
+#[cfg(test)]
 fn skill_lock_contains(
 	skill_name: &str,
 	resource_scope: ResourceScope,
@@ -848,6 +912,7 @@ fn skill_lock_contains(
 	}
 }
 
+#[cfg(test)]
 fn should_write_install_lock(
 	skill_name: &str,
 	copied_any: bool,
@@ -1289,7 +1354,10 @@ pub async fn install_skill(
 	let req = body.into_inner();
 	let resource_scope = parse_install_scope(&req.scope)?;
 
-	let project_root = req.project_path.as_ref().map(std::path::PathBuf::from);
+	let project_root = req
+		.project_path
+		.as_ref()
+		.map(|r| crate::extractors::absolutize_root(r));
 	if resource_scope == ResourceScope::ProjectOnly && project_root.is_none() {
 		return Err(ApiError::new(
 			Status::BadRequest,
@@ -1298,18 +1366,35 @@ pub async fn install_skill(
 		));
 	}
 
-	let source = aghub_git::resolve_remote_source(&req.source)
-		.map_err(map_remote_source_error)?;
-	let clone_url = source.clone_url.clone();
-	let lock_source = install_lock_source_from_resolved(&source, None);
+	let (clone_url, lock_source, is_file_source) =
+		match aghub_git::resolve_remote_source(&req.source) {
+			Ok(source) => {
+				let clone_url = source.clone_url.clone();
+				let lock_source =
+					install_lock_source_from_resolved(&source, None);
+				(clone_url, lock_source, false)
+			}
+			Err(error) => {
+				#[cfg(test)]
+				{
+					if let Some((clone_url, lock_source)) =
+						file_install_source(&req.source)?
+					{
+						(clone_url, lock_source, true)
+					} else {
+						return Err(map_remote_source_error(error));
+					}
+				}
+				#[cfg(not(test))]
+				return Err(map_remote_source_error(error));
+			}
+		};
 
 	let clone_url_for_task = clone_url.clone();
 	let temp_dir = match timeout(
 		Duration::from_secs(300),
 		tokio::task::spawn_blocking(move || {
-			aghub_git::clone_to_temp(aghub_git::CloneOptions::new(
-				&clone_url_for_task,
-			))
+			clone_skill_source_to_temp(&clone_url_for_task, is_file_source)
 		}),
 	)
 	.await
@@ -1344,70 +1429,94 @@ pub async fn install_skill(
 		req.install_all.unwrap_or(false),
 	)
 	.map_err(map_repo_discovery_error)?;
-	let (dir_groups, invalid_agents) = build_git_install_groups(
-		&req.agents,
-		resource_scope,
-		project_root.as_ref(),
-	);
 
-	let mut has_errors = !invalid_agents.is_empty();
-	let mut installed_skill_names = std::collections::HashSet::new();
-	let mut copied_skill_names = std::collections::HashSet::new();
-
-	for skill in &selected_skills {
-		for (target_dir, agents) in &dir_groups {
-			match install_git_skill_to_dir(&skill.full_path, target_dir) {
-				Ok((skill_name, copied)) => {
-					installed_skill_names.insert(skill_name.clone());
-					if copied {
-						copied_skill_names.insert(skill_name);
-					}
-					let _ = agents;
-				}
-				Err(_) => has_errors = true,
-			}
+	// Resolve requested agents; unknown agents become per-agent failure rows.
+	let mut invalid_rows: Vec<GitInstallResultEntry> = Vec::new();
+	let mut target_agents: Vec<(String, AgentType)> = Vec::new();
+	for agent_str in &req.agents {
+		match agent_str.parse::<AgentType>() {
+			Ok(a) => target_agents.push((agent_str.clone(), a)),
+			Err(_) => invalid_rows.push(GitInstallResultEntry {
+				name: String::new(),
+				agent: agent_str.clone(),
+				success: false,
+				error: Some(format!("Unknown agent '{agent_str}'")),
+			}),
 		}
 	}
+	let agent_types: Vec<AgentType> =
+		target_agents.iter().map(|(_, a)| *a).collect();
 
-	// The clone checked out the default branch; record its tip OID so the first
-	// `check` can preflight via ls-refs without a full fetch. Repo-level, so it
-	// is shared by every skill discovered in this clone. Best-effort: a read
-	// failure simply leaves `refCommit` unset (the check then self-heals it).
 	let ref_commit = gix::open(temp_dir.path())
 		.ok()
 		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
 		.map(|oid| oid.to_string());
 
-	for skill in &selected_skills {
-		let copied = copied_skill_names.contains(&skill.name);
-		let should_write = installed_skill_names.contains(&skill.name)
-			&& should_write_install_lock(
-				&skill.name,
-				copied,
-				resource_scope,
-				project_root.as_deref(),
-			);
-		if !should_write {
-			continue;
-		}
+	// Shim fields (ignored by the always-universal dispatch; Task 47a converts
+	// every consumer to `target: LinkTarget` at once). use_relative_links
+	// preserves the project=relative / global=absolute link form.
+	let use_relative_links =
+		matches!(resource_scope, ResourceScope::ProjectOnly);
 
-		// Hash the SOURCE repo subfolder in the temp clone, not the
-		// post-copy installed dir.
-		let source_dir = get_skill_root(skill.full_path.clone());
-		write_skill_install_lock(
-			&skill.name,
-			resource_scope,
-			project_root.as_deref(),
-			&lock_source,
-			Some(skill::lock_skill_file_path(&skill.relative_dir)),
-			&source_dir,
-			ref_commit.clone(),
-		)?;
+	let mut agent_rows: Vec<GitInstallResultEntry> = invalid_rows;
+	let mut any_installed = false;
+	for skill in &selected_skills {
+		let request =
+			aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
+				skill_file: &skill.full_path,
+				source: &lock_source,
+				lock_skill_path: skill::lock_skill_file_path(
+					&skill.relative_dir,
+				),
+				ref_commit: ref_commit.clone(),
+				scope: resource_scope,
+				project_root: project_root.as_deref(),
+				target_agents: &agent_types,
+				expected_name: None,
+				layout:
+					aghub_core::skills::install_fetched::SkillInstallLayout::Universal,
+				use_relative_links,
+			};
+		match aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
+			request,
+		) {
+			Ok(report) => {
+				for ((agent_str, _), agent_result) in
+					target_agents.iter().zip(report.agent_results)
+				{
+					let success = agent_result.error.is_none();
+					any_installed |= agent_result.installed;
+					agent_rows.push(GitInstallResultEntry {
+						name: if success {
+							report.name.clone()
+						} else {
+							skill.name.clone()
+						},
+						agent: agent_str.clone(),
+						success,
+						error: agent_result.error,
+					});
+				}
+			}
+			Err(e) => {
+				let message = ApiError::from(e).body.error;
+				for (agent_str, _) in &target_agents {
+					agent_rows.push(GitInstallResultEntry {
+						name: skill.name.clone(),
+						agent: agent_str.clone(),
+						success: false,
+						error: Some(message.clone()),
+					});
+				}
+			}
+		}
 	}
 
-	let success = !has_errors && !installed_skill_names.is_empty();
-
-	Ok(Json(InstallSkillResponse { success }))
+	let success = any_installed && agent_rows.iter().all(|r| r.success);
+	Ok(Json(InstallSkillResponse {
+		success,
+		agents: agent_rows,
+	}))
 }
 
 #[post("/skills/open", format = "json", data = "<request>")]
@@ -3286,6 +3395,57 @@ mod tests {
 			assert!(
 				lock.exists() || lock_alt.exists(),
 				"a global skill install lock was written"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_returns_per_agent_rows_symlink_only() {
+		with_isolated_env(|home, _state| {
+			let work = home.join("work");
+			let skill_dir = work.join("my-skill");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			std::fs::write(
+				skill_dir.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let run = |args: &[&str]| {
+				std::process::Command::new("git")
+					.args(args)
+					.current_dir(&work)
+					.env("GIT_AUTHOR_NAME", "t")
+					.env("GIT_AUTHOR_EMAIL", "t@t")
+					.env("GIT_COMMITTER_NAME", "t")
+					.env("GIT_COMMITTER_EMAIL", "t@t")
+					.output()
+					.unwrap();
+			};
+			run(&["init", "-q"]);
+			run(&["add", "."]);
+			run(&["commit", "-qm", "init"]);
+
+			let req = InstallSkillRequest {
+				source: format!("file://{}", work.display()),
+				agents: vec!["claude".to_string()],
+				skills: vec!["my-skill".to_string()],
+				scope: "global".to_string(),
+				project_path: None,
+				install_all: Some(false),
+			};
+			let resp = block_on(install_skill(Json(req)))
+				.ok()
+				.expect("handler ok")
+				.into_inner();
+			assert!(resp.success, "install succeeded");
+			assert!(
+				resp.agents.iter().any(|a| a.agent == "claude"),
+				"per-agent rows present"
+			);
+			assert!(
+				home.join(".agents/skills/my-skill/SKILL.md").exists(),
+				"master materialized (symlink-only)"
 			);
 		});
 	}

@@ -148,6 +148,10 @@ pub struct InstallSkillRequest {
 #[ts(export)]
 pub struct InstallSkillResponse {
 	pub success: bool,
+	/// Per-agent install outcome rows (Decision 10: link failures are per-agent
+	/// soft-fails, so an aggregate boolean cannot say WHICH agent failed).
+	/// Reuses the git-install row shape for parity with `/skills/git/install`.
+	pub agents: Vec<GitInstallResultEntry>,
 }
 
 /// Response for a single global skill lock entry
