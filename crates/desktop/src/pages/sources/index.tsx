@@ -35,13 +35,17 @@ import type {
 import { useAgentAvailability } from "../../hooks/use-agent-availability";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
-import { supportsSkillMutation } from "../../lib/agent-capabilities";
+import {
+	partitionByCoverage,
+	supportsSkillMutation,
+} from "../../lib/agent-capabilities";
 import {
 	allSkillPaths,
 	selectedSkills,
 	toggleSkillPath,
 } from "../../lib/source-skill-selection";
 import { cn } from "../../lib/utils";
+import { useSkillCoverage } from "../../requests/agents";
 import { queryKeys } from "../../requests/keys";
 import { applySkillUpdateMutationOptions } from "../../requests/skills";
 import {
@@ -430,16 +434,31 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
 	const shouldCheckOrphans =
 		!isLoading && !isFetching && Boolean(data) && !data?.needsCredential;
-	const installableAgentIds = useMemo(
+	const installableAgents = useMemo(
 		() =>
-			availableAgents
-				.filter(
-					(agent) =>
-						agent.isUsable &&
-						supportsSkillMutation(agent, updateScope),
-				)
-				.map((agent) => agent.id),
+			availableAgents.filter(
+				(agent) =>
+					agent.isUsable && supportsSkillMutation(agent, updateScope),
+			),
 		[availableAgents, updateScope],
+	);
+	// Keep installableAgentIds for the DELETE path (must stay on the full set)
+	const installableAgentIds = useMemo(
+		() => installableAgents.map((agent) => agent.id),
+		[installableAgents],
+	);
+
+	const { coverage, isLoading: isCoverageLoading } = useSkillCoverage(
+		updateScope,
+		updateProjectRoot,
+	);
+	const { autoCovered, linkTargets } = useMemo(
+		() => partitionByCoverage(installableAgents, coverage),
+		[installableAgents, coverage],
+	);
+	const linkTargetAgentIds = useMemo(
+		() => linkTargets.map((a) => a.id),
+		[linkTargets],
 	);
 
 	const applyUpdateMutation = useMutation(
@@ -742,7 +761,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			const result = await api.skills.gitInstall({
 				session_id: scan.session_id,
 				skill_paths: skillPaths,
-				agents: installableAgentIds,
+				agents: linkTargetAgentIds,
 				scope: updateScope,
 				project_root: updateProjectRoot,
 			});
@@ -863,7 +882,8 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 										className="h-7 px-2 text-xs"
 										isDisabled={
 											isInstallingAll ||
-											installingSkillPath !== null
+											installingSkillPath !== null ||
+											isCoverageLoading
 										}
 										onPress={
 											allInstallSkillsSelected
@@ -885,7 +905,8 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 										className="h-7 px-2 text-xs"
 										isDisabled={
 											isInstallingAll ||
-											installingSkillPath !== null
+											installingSkillPath !== null ||
+											isCoverageLoading
 										}
 										onPress={() =>
 											installFromSource(
@@ -911,7 +932,9 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 							selectedSkillPaths={selectedInstallSkillPaths}
 							onToggleSelected={toggleInstallSkillSelection}
 							isSelectionDisabled={
-								isInstallingAll || installingSkillPath !== null
+								isInstallingAll ||
+								installingSkillPath !== null ||
+								isCoverageLoading
 							}
 							rowAction={(skill) => {
 								const isInstalling =
@@ -923,7 +946,8 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 										className="h-7 px-2 text-xs"
 										isDisabled={
 											isInstallingAll ||
-											installingSkillPath !== null
+											installingSkillPath !== null ||
+											isCoverageLoading
 										}
 										onPress={() =>
 											installFromSource([skill])
@@ -937,6 +961,36 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 								);
 							}}
 						/>
+						{(autoCovered.length > 0 || linkTargets.length > 0) &&
+							notInstalled.length > 0 && (
+								<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+									<span>
+										{linkTargets.length}{" "}
+										{t("sourceInstallLinkTargetsTitle")} /{" "}
+										{autoCovered.length}{" "}
+										{t("sourceInstallCoveredTitle")}
+									</span>
+									{autoCovered.length > 0 && (
+										<>
+											<span className="mx-1 text-muted/50">
+												·
+											</span>
+											<span className="text-muted">
+												{t("agentCoveredBadge")}:
+											</span>
+											{autoCovered.map((agent) => (
+												<Chip
+													key={agent.id}
+													size="sm"
+													variant="secondary"
+												>
+													{agent.display_name}
+												</Chip>
+											))}
+										</>
+									)}
+								</div>
+							)}
 						<SkillSection
 							title={t("sourceStateOutdated")}
 							icon={
