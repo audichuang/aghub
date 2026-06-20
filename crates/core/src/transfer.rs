@@ -4,6 +4,7 @@ use crate::{
 	manager::ConfigManager,
 	models::{AgentType, McpServer, Skill, SubAgent},
 	registry,
+	skills::linker::Linker,
 };
 use log::{info, warn};
 use skill::sanitize::sanitize_name;
@@ -740,7 +741,12 @@ pub fn reconcile_skill(
 
 	// Process each actual location for deletion
 	for (skill_path, agent) in skill_locations {
-		let delete_error = match fs::remove_dir_all(&skill_path) {
+		let delete_result = if Linker::is_link(&skill_path) {
+			Linker::unlink(&skill_path)
+		} else {
+			fs::remove_dir_all(&skill_path)
+		};
+		let delete_error = match delete_result {
 			Ok(()) => None,
 			Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
 			Err(e) => Some(e),
@@ -957,6 +963,63 @@ mod tests {
 		);
 		manager.load().unwrap();
 		assert!(manager.get_skill("repo-helper").is_none());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_unlinks_symlink_referrer_keeps_master() {
+		use crate::adapter::set_skills_path_override;
+
+		struct SkillsPathOverrideReset;
+
+		impl Drop for SkillsPathOverrideReset {
+			fn drop(&mut self) {
+				set_skills_path_override("claude", None);
+			}
+		}
+
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let master = root.join(".agents/skills/my-skill");
+		let claude_skills = root.join(".claude/skills");
+		let referrer = claude_skills.join("my-skill");
+		let skill_md =
+			"---\nname: my-skill\ndescription: Shared\n---\n\n# My Skill\n";
+
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), skill_md).unwrap();
+		fs::create_dir_all(&claude_skills).unwrap();
+		std::os::unix::fs::symlink(&master, &referrer).unwrap();
+		set_skills_path_override("claude", Some(claude_skills));
+		let _reset_override = SkillsPathOverrideReset;
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+		assert!(manager.get_skill("my-skill").is_some());
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "my-skill".to_string(),
+			},
+			vec![],
+			vec![AgentType::Claude],
+		)
+		.unwrap();
+
+		assert_eq!(result.results.len(), 1);
+		assert_eq!(result.results[0].action, OperationAction::Delete);
+		assert!(std::fs::symlink_metadata(&referrer).is_err());
+		let master_skill = master.join("SKILL.md");
+		assert!(master_skill.exists());
+		assert_eq!(fs::read_to_string(master_skill).unwrap(), skill_md);
 	}
 
 	#[test]
