@@ -27,7 +27,7 @@ import { useApi } from "../../hooks/use-api";
 import { cn } from "../../lib/utils";
 import {
 	checkSkillUpdatesMutationOptions,
-	checkSkillUpdatesQueryKey,
+	checkSkillUpdatesQueryOptions,
 	skillListQueryOptions,
 } from "../../requests/skills";
 
@@ -43,18 +43,55 @@ export default function SkillsPage() {
 	} = useSuspenseQuery({
 		...skillListQueryOptions({ api, scope: "global" }),
 	});
+
+	// Auto-check: fires on mount if data is stale (>10 min) and online.
+	// navigator.onLine suppresses the check when offline to avoid turning
+	// every skill into uncheckable(network). Toast is silent for auto-check.
+	const {
+		data: cachedUpdateChecks,
+		isFetching: isAutoChecking,
+		dataUpdatedAt: checksUpdatedAt,
+	} = useQuery(
+		checkSkillUpdatesQueryOptions({
+			api,
+			params: updateCheckParams,
+			enabled: navigator.onLine,
+		}),
+	);
+
+	// Derive lastCheckedDate from TanStack Query v5's dataUpdatedAt (ms since
+	// epoch, 0 when never fetched). No useState needed — pure derivation.
+	const lastCheckedDate = useMemo(
+		() => (checksUpdatedAt > 0 ? new Date(checksUpdatedAt) : null),
+		[checksUpdatedAt],
+	);
+
+	// Manual refresh mutation — keeps explicit isPending for the button spinner.
+	// Toast fires here (manual only); auto-check is silent per spec §4.3.
 	const checkUpdatesMutation = useMutation(
 		checkSkillUpdatesMutationOptions({
 			api,
 			queryClient,
+			onSuccess: (data) => {
+				const updateCount = data.filter(
+					(s) =>
+						s.status === "updateAvailable" ||
+						s.status === "renamed",
+				).length;
+				if (updateCount > 0) {
+					toast.info(
+						t("skillCheckCompleteWithUpdates", {
+							count: updateCount,
+						}),
+					);
+				} else {
+					toast.success(t("skillCheckCompleteAllGood"));
+				}
+			},
 			onError: () => toast.danger(t("skillUpdateCheckError")),
 		}),
 	);
-	const { data: cachedUpdateChecks } = useQuery({
-		queryKey: checkSkillUpdatesQueryKey(updateCheckParams),
-		queryFn: () => api.skills.checkUpdates(updateCheckParams),
-		enabled: false,
-	});
+
 	const updateStatuses = useMemo(
 		() =>
 			new Map<string, SkillUpdateResponse>(
@@ -73,11 +110,26 @@ export default function SkillsPage() {
 	const [panelMode, setPanelMode] = useState<
 		"create" | "import" | "import-github" | null
 	>(null);
-	const isRefreshingSkills = isFetching || checkUpdatesMutation.isPending;
+	const isRefreshingSkills =
+		isFetching || checkUpdatesMutation.isPending || isAutoChecking;
 
+	// Per Codex correction: do NOT invalidateQueries here — the mutation's
+	// onSuccess writes the shared cache (checkSkillUpdatesMutationOptions line
+	// ~361). Double-invalidating would fire two network checks.
 	const handleRefreshSkills = async () => {
 		await refetch();
 		checkUpdatesMutation.mutate(updateCheckParams);
+	};
+
+	/** Returns a human-readable relative string ("3 分鐘", "1 小時", …). */
+	const formatRelativeTime = (date: Date): string => {
+		const diffMs = Date.now() - date.getTime();
+		const diffMin = Math.floor(diffMs / 60_000);
+		if (diffMin < 1) return "剛才";
+		if (diffMin < 60) return `${diffMin} 分鐘`;
+		const diffHr = Math.floor(diffMin / 60);
+		if (diffHr < 24) return `${diffHr} 小時`;
+		return `${Math.floor(diffHr / 24)} 天`;
 	};
 
 	const groupedSkills = useMemo(() => {
@@ -268,6 +320,28 @@ export default function SkillsPage() {
 					</Tooltip>
 				</ListSearchHeader>
 
+				{/* Last-checked timestamp row */}
+				<div className="flex items-center justify-between border-b border-separator px-3 py-1.5">
+					<span className="text-xs text-muted">
+						{lastCheckedDate
+							? t("lastCheckedAgo", {
+									time: formatRelativeTime(lastCheckedDate),
+								})
+							: t("lastCheckedNever")}
+					</span>
+					{!isAutoChecking && (
+						<button
+							type="button"
+							className="text-xs text-accent hover:underline"
+							onClick={() => {
+								void handleRefreshSkills();
+							}}
+						>
+							{t("recheck")}
+						</button>
+					)}
+				</div>
+
 				{/* Skills List */}
 				<SkillList
 					skills={skills}
@@ -278,6 +352,11 @@ export default function SkillsPage() {
 					isMultiSelectMode={isMultiSelectMode}
 					groupBySource={true}
 					updateStatuses={updateStatuses}
+					onResolveAuth={(skillName: string) => {
+						// Selecting the skill opens the detail panel where
+						// SourceCredentialBindingDialog is already wired.
+						void setSelectedName(skillName);
+					}}
 				/>
 
 				{isMultiSelectMode && selectedKeys.size > 0 && (
