@@ -413,16 +413,13 @@ pub(crate) fn create_junction(
 			Err(LinkError::LinkUnsupported {
 				target: abs_target.to_path_buf(),
 				link: link.to_path_buf(),
-				source: io::Error::new(
-					io::ErrorKind::Other,
-					format!(
-						"mklink /J {} {} failed: {} {}",
-						link_norm.display(),
-						target_norm.display(),
-						stderr.trim(),
-						stdout.trim()
-					),
-				),
+				source: io::Error::other(format!(
+					"mklink /J {} {} failed: {} {}",
+					link_norm.display(),
+					target_norm.display(),
+					stderr.trim(),
+					stdout.trim()
+				)),
 			})
 		}
 		Err(source) => Err(LinkError::LinkUnsupported {
