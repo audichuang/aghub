@@ -173,8 +173,14 @@ pub fn parse_remote_directory_listing(
 	// Sort regular entries by name (byte order = LC_ALL=C sort).
 	entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
 
-	// Parent `..` always comes first.
-	if let Some(p) = parent {
+	// Parent `..` always comes first. Show the CLEAN lexical parent of the PWD
+	// (e.g. "/home" instead of "/home/alice/..") as its path so the picker's
+	// secondary text reads cleanly; navigation still works because `cd` resolves
+	// the clean parent identically. Keep the displayed name "..".
+	if let Some(mut p) = parent {
+		if let Some(lexical_parent) = std::path::Path::new(&path).parent() {
+			p.path = lexical_parent.to_string_lossy().into_owned();
+		}
 		entries.insert(0, p);
 	}
 
@@ -245,7 +251,9 @@ mod tests {
 			vec![
 				RemoteDirectoryEntry {
 					name: "..".to_string(),
-					path: "/home/alice/..".to_string(),
+					// The `..` entry shows the CLEAN lexical parent of the PWD,
+					// not the literal "<pwd>/.." the remote emits.
+					path: "/home".to_string(),
 				},
 				RemoteDirectoryEntry {
 					name: "src".to_string(),

@@ -105,7 +105,15 @@ pub enum ConnectError {
 	RemoteApiMissing { install_hint: String },
 	/// SSH transport failed (auth / connectivity); carries ssh stderr.
 	Unreachable { stderr: String },
-	/// The server never reported its port within the poll budget.
+	/// A bundled/local `aghub-api` binary cannot be deployed because the
+	/// remote's `(os, arch)` differs from the desktop's. Carries the probed
+	/// remote platform (`"os/arch"`, or `"unknown"`) so the desktop can map
+	/// this to the actionable "install manually" banner.
+	#[serde(rename_all = "camelCase")]
+	CrossPlatformDeploy { remote_platform: String },
+	/// Intentionally retained for the desktop `From<ConnectError>` mapping;
+	/// currently never constructed (`start_remote` now returns `DeployFailed`
+	/// with the real stderr on every failure path).
 	StartTimeout,
 	/// The tunnel child failed to establish the port-forward.
 	TunnelFailed(String),
@@ -121,6 +129,15 @@ impl fmt::Display for ConnectError {
 			}
 			ConnectError::Unreachable { stderr } => {
 				write!(f, "remote is unreachable: {stderr}")
+			}
+			ConnectError::CrossPlatformDeploy { remote_platform } => {
+				write!(
+					f,
+					"cannot deploy a local aghub-api binary to remote \
+					 platform {remote_platform}: built for {}/{}",
+					std::env::consts::OS,
+					std::env::consts::ARCH
+				)
 			}
 			ConnectError::StartTimeout => {
 				write!(f, "remote aghub-api did not report a port in time")
@@ -301,11 +318,7 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			let remote_platform = remote
 				.map(|(os, arch)| format!("{os}/{arch}"))
 				.unwrap_or_else(|| "unknown".to_string());
-			return Err(ConnectError::DeployFailed(format!(
-				"cannot deploy a local aghub-api binary to remote platform \
-				 {remote_platform}: built for {}/{}",
-				local.0, local.1
-			)));
+			return Err(ConnectError::CrossPlatformDeploy { remote_platform });
 		}
 	}
 
@@ -809,13 +822,15 @@ mod tests {
 		let err = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
 			.expect_err("cross-platform local binary must be refused");
 		match err {
-			ConnectError::DeployFailed(msg) => {
-				assert!(
-					msg.contains("cannot deploy a local aghub-api binary"),
-					"got {msg:?}"
+			ConnectError::CrossPlatformDeploy { remote_platform } => {
+				// `Windows_NT x86_64` does not map to the consts vocabulary, so
+				// the probed platform resolves to "unknown".
+				assert_eq!(
+					remote_platform, "unknown",
+					"got {remote_platform:?}"
 				);
 			}
-			other => panic!("expected DeployFailed, got {other:?}"),
+			other => panic!("expected CrossPlatformDeploy, got {other:?}"),
 		}
 
 		// The gate fires BEFORE any mutation: no scp (and no prepare/finish)
@@ -825,6 +840,63 @@ mod tests {
 			!calls.iter().any(|c| c.program == "scp"),
 			"no scp may run on a cross-platform refusal: {calls:?}"
 		);
+	}
+
+	#[test]
+	fn ensure_remote_api_present_compatible_returns_ok_without_install() {
+		// A shipped build against a VM that already has a compatible aghub-api:
+		// the first probe finds it present + compatible, so we return Ok and
+		// NEVER attempt an install — even though a source IS available.
+		let args = probe_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&args),
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "aghub-api 1.1.1".to_string(),
+				stderr: String::new(),
+			},
+		);
+		let source = RemoteInstallSource::CargoGit {
+			url: "https://github.com/audichuang/aghub.git".to_string(),
+			branch: None,
+		};
+
+		let result = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
+			.expect("present + compatible api should return Ok");
+		assert!(result.api_present);
+		assert!(result.compatible);
+		assert!(!result.install_attempted, "no install should be attempted");
+
+		// Exactly one ssh call: the single probe. No scp, no install step.
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
+		assert!(!calls.iter().any(|c| c.program == "scp"));
+	}
+
+	#[test]
+	fn ensure_remote_api_absent_and_no_source_is_remote_api_missing() {
+		// Reachable, but the binary is absent and no install source is given.
+		let args = probe_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&args),
+			CommandOutput {
+				status_code: Some(127),
+				stdout: String::new(),
+				stderr: "bash: aghub-api: command not found".to_string(),
+			},
+		);
+
+		let err = ensure_remote_api(&runner, &conn(), LOCAL, None)
+			.expect_err("absent api with no source must fail");
+		assert!(
+			matches!(err, ConnectError::RemoteApiMissing { .. }),
+			"got {err:?}"
+		);
+		// No install was attempted: only the single probe ran.
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
 	}
 
 	#[test]
