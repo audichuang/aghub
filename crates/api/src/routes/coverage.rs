@@ -78,6 +78,13 @@ mod tests {
 
 	#[test]
 	fn global_scope_buckets_codex_native_claude_needs_link() {
+		// This asserts on `auto_covered`, which is derived from the real
+		// `dirs::home_dir()` (codex @global reads `~/.agents/skills`). Other api
+		// tests transiently repoint HOME/XDG to temp dirs under `test_env_lock`;
+		// hold the SAME lock here so none can race our home read mid-classify.
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let params = ScopeParams {
 			scope: Some("global".to_string()),
 			project_root: None,
