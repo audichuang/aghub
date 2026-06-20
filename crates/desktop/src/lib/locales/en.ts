@@ -1030,6 +1030,8 @@ export default {
 	connTestStepInstallNotNeeded: "Already present; no install needed",
 	connTestStepInstallNotRun: "Not run",
 	connTestStepSkipped: "Not run",
+	connDisconnect: "Disconnect",
+	connDisconnecting: "Disconnecting…",
 	connSave: "Save",
 	connRemove: "Remove",
 	connEdit: "Edit",

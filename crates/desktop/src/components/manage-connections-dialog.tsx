@@ -1,4 +1,5 @@
 import {
+	ArrowLeftStartOnRectangleIcon,
 	CheckCircleIcon,
 	ChevronDownIcon,
 	ExclamationTriangleIcon,
@@ -240,10 +241,12 @@ export function ManageConnectionsDialog({
 	const { t } = useTranslation();
 	const {
 		connections,
+		activeId,
 		addConnection,
 		updateConnection,
 		removeConnection,
 		testConnection,
+		disconnect,
 	} = useConnection();
 
 	// Only user remotes are editable; the implicit Local connection is not.
@@ -322,12 +325,31 @@ export function ManageConnectionsDialog({
 	});
 
 	const removeMutation = useMutation({
-		mutationFn: (id: string) => removeConnection(id),
+		mutationFn: async (id: string) => {
+			// If deleting the active remote, tear it down first so the
+			// tunnel + remote server are cleaned up.
+			if (id === activeId && id !== LOCAL_CONNECTION.id) {
+				await disconnect(id);
+			}
+			return removeConnection(id);
+		},
 		onSuccess: (_data, id) => {
 			toast.success(t("connRemoved"));
 			if (editingId === id) {
 				resetForm();
 			}
+		},
+		onError: (err) => {
+			toast.danger(
+				err instanceof Error ? err.message : t("connRemoveError"),
+			);
+		},
+	});
+
+	const disconnectMutation = useMutation({
+		mutationFn: (id: string) => disconnect(id),
+		onSuccess: () => {
+			toast.success(t("connDisconnect"));
 		},
 		onError: (err) => {
 			toast.danger(
@@ -372,7 +394,8 @@ export function ManageConnectionsDialog({
 	const isBusy =
 		saveMutation.isPending ||
 		removeMutation.isPending ||
-		testMutation.isPending;
+		testMutation.isPending ||
+		disconnectMutation.isPending;
 
 	const handleOpenChange = (open: boolean) => {
 		if (!open) {
@@ -418,6 +441,28 @@ export function ManageConnectionsDialog({
 											</p>
 										</div>
 										<div className="flex shrink-0 gap-1">
+											{connection.id === activeId && (
+												<Button
+													isIconOnly
+													size="sm"
+													variant="tertiary"
+													aria-label={
+														disconnectMutation.isPending
+															? t(
+																	"connDisconnecting",
+																)
+															: t("connDisconnect")
+													}
+													isDisabled={isBusy}
+													onPress={() =>
+														disconnectMutation.mutate(
+															connection.id,
+														)
+													}
+												>
+													<ArrowLeftStartOnRectangleIcon className="size-4 text-danger" />
+												</Button>
+											)}
 											<Button
 												isIconOnly
 												size="sm"

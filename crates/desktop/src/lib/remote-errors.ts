@@ -57,6 +57,9 @@ export function remoteErrorMessage(error: unknown): string {
 		case "internal":
 			return remote.message ?? "Internal remote connection error.";
 		default:
+			if (remote.message != null) return remote.message;
+			if (remote.stderr != null) return remote.stderr;
+			if (remote.hint != null) return remote.hint;
 			try {
 				return JSON.stringify(error);
 			} catch {
