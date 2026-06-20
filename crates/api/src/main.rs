@@ -1,10 +1,9 @@
 use std::io::Write;
 use std::process::ExitCode;
+use std::sync::Arc;
 
-use aghub_api::cli::{
-	parse_args, pick_free_port, version_string, Config, PORT_LINE_PREFIX,
-};
-use aghub_api::{start, ApiOptions};
+use aghub_api::cli::{parse_args, version_string, PORT_LINE_PREFIX};
+use aghub_api::{start_with_port_reporter, ApiOptions};
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -21,23 +20,23 @@ async fn main() -> ExitCode {
 		return ExitCode::SUCCESS;
 	}
 
-	let port = match resolve_port(&config) {
-		Ok(port) => port,
-		Err(error) => {
-			eprintln!("failed to pick a free port: {error}");
-			return ExitCode::FAILURE;
-		}
-	};
+	// Emit the port line only AFTER Rocket has bound its listener, so an SSH
+	// caller polling the log learns the real port (correct even for an
+	// ephemeral `--port 0`) and never races a bind that may still fail.
+	let reporter = Arc::new(|port: u16| {
+		println!("{PORT_LINE_PREFIX}{port}");
+		let _ = std::io::stdout().flush();
+	});
 
-	// Emit the port line and flush so an SSH caller reading the log can parse
-	// it before the (potentially long-lived) server starts.
-	println!("{PORT_LINE_PREFIX}{port}");
-	let _ = std::io::stdout().flush();
-
-	match start(ApiOptions {
-		port,
-		app_data_dir: None,
-	})
+	match start_with_port_reporter(
+		ApiOptions {
+			// Pass the requested port straight through; `0` means let the OS
+			// assign an ephemeral port at bind time.
+			port: config.port,
+			app_data_dir: None,
+		},
+		Some(reporter),
+	)
 	.await
 	{
 		Ok(()) => ExitCode::SUCCESS,
@@ -45,13 +44,5 @@ async fn main() -> ExitCode {
 			eprintln!("server error: {error}");
 			ExitCode::FAILURE
 		}
-	}
-}
-
-fn resolve_port(config: &Config) -> std::io::Result<u16> {
-	if config.port == 0 {
-		pick_free_port()
-	} else {
-		Ok(config.port)
 	}
 }
