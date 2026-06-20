@@ -553,6 +553,39 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 										</div>
 										{sourceUrl && (
 											<div className="flex shrink-0 items-center gap-1">
+												{currentSkillSource?.source && (
+													<Tooltip delay={0}>
+														<Button
+															isIconOnly
+															variant="ghost"
+															size="sm"
+															className="size-8 text-muted"
+															aria-label={t(
+																"viewSkillSource",
+															)}
+															onPress={() => {
+																const scope =
+																	group
+																		.items[0]
+																		?.source ===
+																	"project"
+																		? "project"
+																		: "global";
+																const key = `${scope}:${projectPath ?? ""}:${currentSkillSource.source}`;
+																setLocation(
+																	`/sources?source=${encodeURIComponent(key)}`,
+																);
+															}}
+														>
+															<GlobeAltIcon className="size-4" />
+														</Button>
+														<Tooltip.Content>
+															{t(
+																"viewSkillSource",
+															)}
+														</Tooltip.Content>
+													</Tooltip>
+												)}
 												<Tooltip delay={0}>
 													<Button
 														isIconOnly

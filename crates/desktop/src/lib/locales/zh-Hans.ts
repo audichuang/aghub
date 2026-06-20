@@ -801,6 +801,7 @@ export default {
 	projectSkills: "项目技能",
 	metadata: "元数据",
 	installedFrom: "安装来源",
+	viewSkillSource: "查看来源",
 	syncFromSource: "从来源同步",
 	syncSkill: "同步 Skill",
 	syncingSkill: "同步中...",
