@@ -73,8 +73,9 @@ start *args:
 desktop:
     cd ./crates/desktop && nr start
 
-# Bump version across all manifests
+# Bump version across all manifests (perl -i is portable across GNU/BSD;
+# `sed -i ''` was macOS-only and errored on Linux)
 bump version:
-    sed -i '' 's/^version = .*/version = "{{version}}"/' Cargo.toml
-    sed -i '' 's/"version": ".*"/"version": "{{version}}"/' crates/desktop/package.json
-    sed -i '' 's/"version": ".*"/"version": "{{version}}"/' crates/desktop/src-tauri/tauri.conf.json || true
+    perl -i -pe 's/^version = .*/version = "{{version}}"/' Cargo.toml
+    perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/package.json
+    perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/src-tauri/tauri.conf.json
