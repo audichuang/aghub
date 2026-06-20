@@ -21,6 +21,10 @@ coverage/
 *.swp
 *.swo
 
+# Claude Code scratch worktrees (transient checkouts of other branches — never
+# lint them; they carry their own branch's files, including byte-exact fixtures).
+.claude/worktrees/
+
 # OS
 .DS_Store
 Thumbs.db

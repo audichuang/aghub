@@ -72,7 +72,7 @@ export function remoteErrorMessage(error: unknown): string {
 export function remoteOutputSummary(value: string | null | undefined): string {
 	if (!value) return "";
 	// eslint-disable-next-line no-control-regex
-	const stripped = value.replace(/\x1B\[[0-9;]*[A-Za-z]/g, "");
+	const stripped = value.replace(/\x1B\[[0-9;]*[a-z]/gi, "");
 	const lines = stripped.split("\n");
 	for (let i = lines.length - 1; i >= 0; i--) {
 		const trimmed = lines[i]?.trim();

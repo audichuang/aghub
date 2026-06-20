@@ -364,7 +364,6 @@ export function ManageConnectionsDialog({
 			return testConnection({ ...payload, id: editingId ?? "test" });
 		},
 		onSuccess: (result) => {
-			console.debug("Remote connection test result", result);
 			setTestResult(result);
 			toastTestResult(result, t);
 		},
@@ -451,7 +450,9 @@ export function ManageConnectionsDialog({
 															? t(
 																	"connDisconnecting",
 																)
-															: t("connDisconnect")
+															: t(
+																	"connDisconnect",
+																)
 													}
 													isDisabled={isBusy}
 													onPress={() =>
