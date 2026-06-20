@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { info } from "@tauri-apps/plugin-log";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import type {
 	ConnectionProviderProps,
 	ConnectionContextValue,
@@ -205,6 +206,7 @@ function IncompatibleConnectionScreen({
 
 export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	const queryClient = useQueryClient();
+	const { t } = useTranslation();
 	const [activeId, setActiveId] = useState<string>(LOCAL_CONNECTION.id);
 
 	const { data: remotes = [] } = useQuery<Connection[]>({
@@ -306,7 +308,18 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 				const { connectionId } = event.payload;
 				void info(`Remote tunnel disconnected: ${connectionId}`);
 				if (connectionId === activeId) {
-					toast.danger("Remote connection lost. Switched to Local.");
+					const droppedExists = connections.some(
+						(c) => c.id === connectionId,
+					);
+					toast.danger(t("connDisconnectedToast"), {
+						description: t("connDisconnectedToastDesc"),
+						...(droppedExists && {
+							actionProps: {
+								children: t("connReconnect"),
+								onPress: () => setActive(connectionId),
+							},
+						}),
+					});
 					setActive(LOCAL_CONNECTION.id);
 				}
 			},
@@ -314,6 +327,28 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		return () => {
 			void unlisten.then((fn) => fn());
 		};
+	}, [activeId, connections, setActive, t]);
+
+	// Pull-fallback: when the window regains focus and the active connection
+	// is a remote, verify the tunnel is still live. If the backend reports it
+	// gone, silently fall back to Local — the remote-disconnected event may
+	// have been missed while the window was hidden.
+	useEffect(() => {
+		if (activeId === LOCAL_CONNECTION.id) return;
+		const handleFocus = () => {
+			void invoke<boolean>("remote_status", {
+				connectionId: activeId,
+			}).then((alive) => {
+				if (!alive) {
+					void info(
+						`remote_status: tunnel gone for ${activeId}, falling back to Local`,
+					);
+					setActive(LOCAL_CONNECTION.id);
+				}
+			});
+		};
+		window.addEventListener("focus", handleFocus);
+		return () => window.removeEventListener("focus", handleFocus);
 	}, [activeId, setActive]);
 
 	// A failed bring-up (e.g. local start_server fails, or connect_remote
