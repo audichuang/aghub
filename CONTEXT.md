@@ -28,8 +28,12 @@ _Avoid_: "symlink mode" / "linked skill" as the canonical name.
 The single `.agents/skills/<name>` directory that a Universal install's per-agent symlinks resolve to. Renaming or removing it is the operation that must account for every Referrer.
 _Avoid_: "canonical dir" (that is the storage key), "source".
 
+**Master GC (on removal)**:
+Removing a skill deletes the Master **only** when the removal targets the view that reads the Master directly **and** no other view still references it. Removing one linking agent's Referrer (the common `delete -a <agent>` case) unlinks that Referrer but **keeps** the Master, because `.agents/skills` is itself in the swept agent-dir union — every project NativeReader (Codex, OpenCode, Cursor, Cline, Warp, …) reads the Master directly, so it counts as a live reference. The Master is GC'd only once the last such reference goes (e.g. deleting via the NativeReader whose skills dir _is_ `.agents/skills`).
+_Avoid_: "removing the last referrer GCs the Master" — that overstates it; a lone linker removal does not, and the `.agents/skills` reader always counts as a referrer. The authoritative rule lives in `plan_symlink_removal` (`crates/core/src/skills/removal.rs`).
+
 **Referrer**:
-An agent's skills entry that is a symlink resolving to a Master. When the Master is renamed or removed, its Referrers must be re-pointed or pruned.
+An agent's skills entry that is a symlink resolving to a Master. When the Master is renamed or removed, its Referrers must be re-pointed or pruned. For GC purposes a project NativeReader that reads `.agents/skills` directly (no symlink) also counts as a referrer that keeps the Master alive.
 _Avoid_: "link", "alias".
 
 **Relink**:
