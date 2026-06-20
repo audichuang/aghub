@@ -399,25 +399,6 @@ pub fn build_remote_kill_cmd(pid: u32) -> String {
 	format!("kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | grep -q aghub-api && kill {pid}")
 }
 
-/// Best-effort kill of the running `aghub-api` for THIS connection, issued
-/// before a force-redeploy finishes the in-place overwrite — avoids leaving an
-/// orphaned old server bound to the VM port.
-///
-/// Scoped two ways so it never reaps an unrelated process:
-/// - `-U "$(id -u)"` restricts to the current login user.
-/// - `-f "^$bin( |$)"` matches the full command line anchored at the resolved
-///   binary path. The server runs as `<bin> --port 0` (see
-///   [`build_remote_start_cmd`]), so the trailing `( |$)` matches it whether or
-///   not arguments follow. `-x` is deliberately NOT used: it would require the
-///   whole cmdline to equal `$bin`, which never holds for `<bin> --port 0`.
-///
-/// The exit status is meaningful to the caller (0 = killed, 1 = no match, both
-/// success), so there is no `|| true` swallow here.
-pub fn build_remote_pkill_cmd(resolved_path: &str) -> String {
-	let bin = assign_api_bin_cmd(resolved_path);
-	format!("{bin} pkill -U \"$(id -u)\" -f \"^$bin( |$)\"")
-}
-
 /// Compose the probe command `<bin> --version` with the path escaped.
 pub fn build_remote_probe_cmd(resolved_path: &str) -> String {
 	format!("{} \"$bin\" --version", assign_api_bin_cmd(resolved_path))
@@ -1087,39 +1068,6 @@ mod tests {
 		assert_eq!(normalize_platform("Windows_NT", "x86_64"), None);
 		assert_eq!(normalize_platform("Linux", "riscv64"), None);
 		assert_eq!(normalize_platform("", ""), None);
-	}
-
-	#[test]
-	fn pkill_cmd_is_scoped_to_user_and_bin() {
-		// Explicit path: $bin is the quoted literal, pattern is anchored to it.
-		let cmd = build_remote_pkill_cmd("/opt/aghub-api");
-		assert_eq!(
-			cmd,
-			"bin='/opt/aghub-api'; \
-			 pkill -U \"$(id -u)\" -f \"^$bin( |$)\""
-		);
-		// Scoped to the current user and anchored at the resolved binary; no
-		// `-x` (the live cmdline is `<bin> --port 0`, never bare `<bin>`).
-		assert!(cmd.contains("pkill -U \"$(id -u)\""));
-		assert!(cmd.contains("-f \"^$bin( |$)\""));
-		assert!(!cmd.contains("pkill -x"));
-		assert!(!cmd.contains("|| true"));
-	}
-
-	#[test]
-	fn pkill_cmd_resolves_default_api_from_common_paths() {
-		let cmd = build_remote_pkill_cmd("aghub-api");
-		// The default path resolves $bin the same way the probe/start do.
-		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
-		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
-		assert!(cmd.contains("pkill -U \"$(id -u)\" -f \"^$bin( |$)\""));
-	}
-
-	#[test]
-	fn pkill_cmd_neutralizes_injection_in_path() {
-		let cmd = build_remote_pkill_cmd("a; rm -rf /");
-		// The hostile path is single-quote escaped into $bin, inert.
-		assert!(cmd.contains("bin='a; rm -rf /';"));
 	}
 
 	fn plat_conn() -> Connection {

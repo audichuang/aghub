@@ -15,11 +15,11 @@ use serde::{Deserialize, Serialize};
 use crate::ssh::{
 	build_remote_cargo_install_cmd, build_remote_cat_cmd,
 	build_remote_finish_upload_cmd, build_remote_kill_cmd,
-	build_remote_pkill_cmd, build_remote_prepare_upload_cmd,
-	build_remote_probe_cmd, build_remote_start_cmd, build_scp_args,
-	build_ssh_args, is_version_compatible, parse_api_version, parse_logpath,
-	parse_pid, parse_remote_port, probe_remote_platform,
-	remote_api_upload_path, CommandRunner, Connection,
+	build_remote_prepare_upload_cmd, build_remote_probe_cmd,
+	build_remote_start_cmd, build_scp_args, build_ssh_args,
+	is_version_compatible, parse_api_version, parse_logpath, parse_pid,
+	parse_remote_port, probe_remote_platform, remote_api_upload_path,
+	CommandRunner, Connection,
 };
 
 // ---------------------------------------------------------------------------
@@ -391,47 +391,27 @@ fn finish_remote_api_upload<R: CommandRunner>(
 	run_remote_install_step(runner, conn, &finish_cmd)
 }
 
-/// Best-effort kill of the running `aghub-api` for this connection before a
-/// redeploy finishes the swap. Maps a runner error / transport failure to the
-/// usual `ConnectError`, but treats BOTH a successful kill (exit 0) and "no
-/// matching process" (`pkill` exit 1) as success — there may simply be nothing
-/// running. Any other non-zero exit is a real failure.
-fn run_remote_pkill_step<R: CommandRunner>(
-	runner: &R,
-	conn: &Connection,
-	resolved_path: &str,
-) -> Result<(), ConnectError> {
-	let cmd = build_remote_pkill_cmd(resolved_path);
-	let args = build_ssh_args(conn, &cmd);
-	let out = runner
-		.run("ssh", &args)
-		.map_err(|e| ConnectError::DeployFailed(e.to_string()))?;
-	if is_transport_failure(out.status_code) {
-		return Err(ConnectError::Unreachable { stderr: out.stderr });
-	}
-	// 0 = killed, 1 = no match — both fine for a best-effort pre-redeploy kill.
-	if matches!(out.status_code, Some(0) | Some(1)) {
-		return Ok(());
-	}
-	Err(ConnectError::DeployFailed(nonzero_message(
-		"remote pre-redeploy kill",
-		&out,
-	)))
-}
-
 /// Force-redeploy a version-locked local `aghub-api` over a present-but-
 /// incompatible remote one, then re-probe and return the fresh result. The
 /// caller proceeds only when `compatible`.
 ///
-/// Ordering is the safety property here. For a `LocalBinary` source the new
-/// binary is STAGED first (prepare → scp), THEN the running server is killed,
-/// and only THEN is the staged upload moved into place (atomic `mv`). Staging
-/// before the kill means a failed/slow upload aborts with the old server still
-/// running — the remote is never left with no server. The atomic `mv` handles
-/// replacement safety on its own; the pre-swap kill exists only to avoid
-/// orphaning the old server (the renamed/replaced binary would otherwise keep
-/// running on the VM port). `CargoGit` builds on the VM, so it installs first
-/// and kills afterward.
+/// We deliberately do NOT kill the running server first. The old, incompatible
+/// server is left as a harmless orphan: it stays bound to its ephemeral
+/// (`--port 0`) port that this redeploy never tunnels to, and the next
+/// connection starts its OWN fresh `--port 0` server against the new binary.
+/// Replacing the binary in place is safe on its own — `finish_remote_api_upload`
+/// does an atomic `mv` of the staged upload, which the kernel handles cleanly
+/// even while the old process holds the previous inode open (no `ETXTBSY`). A
+/// `pkill`-by-name/path here would inevitably be collateral: we have no pid for
+/// the incompatible server (this connection did not start it), so any by-path
+/// kill on a shared host would also reap a sibling connection's server running
+/// the same binary path (the original self-DoS). Compatibility is still
+/// confirmed regardless of the orphan, because the re-probe runs
+/// `$target --version` — a fresh exec of the NEW binary. For a `LocalBinary`
+/// source the new binary is STAGED first (prepare → scp) and only THEN moved
+/// into place (atomic `mv`), so a failed/slow upload aborts with the old server
+/// still serving — the remote is never left with no server. `CargoGit` builds
+/// in place on the VM.
 pub fn force_redeploy_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -441,15 +421,13 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 	let bin = resolved_path(conn);
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
-			// Stage BEFORE the kill: a staging failure must not down the server.
+			// Stage before the swap: a staging failure must not down the server.
 			stage_remote_api_upload(runner, conn, local)?;
-			run_remote_pkill_step(runner, conn, &bin)?;
 			finish_remote_api_upload(runner, conn, &bin)?;
 		}
 		RemoteInstallSource::CargoGit { .. } => {
-			// Cargo builds in place; install first, then reap the old server.
+			// Cargo builds in place on the VM.
 			install_remote_api(runner, conn, &bin, source)?;
-			run_remote_pkill_step(runner, conn, &bin)?;
 		}
 	}
 	let probe = probe_connection(runner, conn, local_version);
@@ -880,7 +858,7 @@ mod tests {
 	}
 
 	#[test]
-	fn force_redeploy_stages_then_pkills_then_finishes_then_probes() {
+	fn force_redeploy_stages_then_finishes_then_probes() {
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
@@ -889,8 +867,6 @@ mod tests {
 			"/tmp/aghub-api",
 			crate::ssh::remote_api_upload_path(),
 		);
-		let pkill_args =
-			build_ssh_args(&conn(), &build_remote_pkill_cmd("aghub-api"));
 		let finish_args = build_ssh_args(
 			&conn(),
 			&build_remote_finish_upload_cmd("aghub-api"),
@@ -912,7 +888,6 @@ mod tests {
 		let runner = MockRunner::new()
 			.script("ssh", &args_as_str(&prepare_args), ok())
 			.script("scp", &args_as_str(&scp_args), ok())
-			.script("ssh", &args_as_str(&pkill_args), ok())
 			.script("ssh", &args_as_str(&finish_args), ver())
 			.script("ssh", &args_as_str(&probe_args), ver());
 
@@ -922,26 +897,22 @@ mod tests {
 
 		assert!(result.compatible);
 		assert!(result.api_present);
-		// Strict ordering: the new binary is fully STAGED (prepare + scp)
-		// BEFORE the running server is killed, then the staged upload is moved
-		// into place, then we re-probe.
+		// Strict ordering: the new binary is fully STAGED (prepare + scp), then
+		// the staged upload is moved into place (atomic `mv`), then we re-probe.
+		// No pkill — the old incompatible server is left a harmless orphan.
 		let calls = runner.calls();
-		assert_eq!(calls.len(), 5);
+		assert_eq!(calls.len(), 4);
 		assert_eq!(calls[0].args, prepare_args, "prepare first");
 		assert_eq!(calls[1].program, "scp");
 		assert_eq!(calls[1].args, scp_args, "scp upload second");
-		assert_eq!(
-			calls[2].args, pkill_args,
-			"scoped pkill only AFTER staging"
-		);
-		assert_eq!(calls[3].args, finish_args, "finish (atomic mv) fourth");
-		assert_eq!(calls[4].args, probe_args, "re-probe last");
+		assert_eq!(calls[2].args, finish_args, "finish (atomic mv) third");
+		assert_eq!(calls[3].args, probe_args, "re-probe last");
 	}
 
 	#[test]
-	fn force_redeploy_staging_failure_does_not_pkill() {
-		// If staging fails (here: scp upload errors), the running server must
-		// NOT be killed — the remote keeps serving the old binary.
+	fn force_redeploy_staging_failure_aborts_before_finish() {
+		// If staging fails (here: scp upload errors), the swap must NOT happen —
+		// the remote keeps serving the old binary, no atomic `mv` runs.
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
@@ -950,8 +921,10 @@ mod tests {
 			"/tmp/aghub-api",
 			crate::ssh::remote_api_upload_path(),
 		);
-		let pkill_args =
-			build_ssh_args(&conn(), &build_remote_pkill_cmd("aghub-api"));
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
 		let runner = MockRunner::new()
 			.script(
 				"ssh",
@@ -976,66 +949,11 @@ mod tests {
 			.expect_err("staging failure must propagate");
 		assert!(matches!(err, ConnectError::DeployFailed(_)), "got {err:?}");
 
-		// No pkill (and no finish) ever ran: the old server is untouched.
-		let calls = runner.calls();
-		assert!(
-			!calls.iter().any(|c| c.args == pkill_args),
-			"pkill must NOT run when staging failed: {calls:?}"
-		);
-	}
-
-	#[test]
-	fn force_redeploy_pkill_failure_is_returned() {
-		// Staging succeeds, but the pre-redeploy kill itself fails with a real
-		// (non 0/1) error — that must abort the redeploy before the swap.
-		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
-		let prepare_args =
-			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let pkill_args =
-			build_ssh_args(&conn(), &build_remote_pkill_cmd("aghub-api"));
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
-		let ok = || CommandOutput {
-			status_code: Some(0),
-			stdout: String::new(),
-			stderr: String::new(),
-		};
-		let runner = MockRunner::new()
-			.script("ssh", &args_as_str(&prepare_args), ok())
-			.script("scp", &args_as_str(&scp_args), ok())
-			.script(
-				"ssh",
-				&args_as_str(&pkill_args),
-				CommandOutput {
-					status_code: Some(2),
-					stdout: String::new(),
-					stderr: "pkill: operation not permitted".to_string(),
-				},
-			);
-
-		let err = force_redeploy_remote_api(&runner, &conn(), "1.1.1", &source)
-			.expect_err("pkill failure must propagate");
-		match err {
-			ConnectError::DeployFailed(msg) => {
-				assert!(
-					msg.contains("remote pre-redeploy kill"),
-					"got {msg:?}"
-				);
-			}
-			other => panic!("expected DeployFailed, got {other:?}"),
-		}
-		// The atomic swap must NOT have run after a failed kill.
+		// No finish (atomic mv) ever ran: the old server is untouched.
 		let calls = runner.calls();
 		assert!(
 			!calls.iter().any(|c| c.args == finish_args),
-			"finish must NOT run when the pkill failed: {calls:?}"
+			"finish must NOT run when staging failed: {calls:?}"
 		);
 	}
 
