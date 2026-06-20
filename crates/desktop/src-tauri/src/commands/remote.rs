@@ -2,8 +2,9 @@
 //!
 //! All the testable transport + bring-up logic lives in the tauri-free
 //! `aghub-remote` crate (unit-tested with a `MockRunner`). This module is the
-//! thin glue: it deserializes the `Connection` payload from the frontend, drives
-//! the bring-up via a real [`SystemRunner`], owns the local tunnel child + a
+//! thin glue: it deserializes the `Connection` payload from the frontend,
+//! drives the bring-up via a real [`SystemRunner`], owns the local tunnel
+//! child + a
 //! watcher thread that reports unexpected disconnects, and tracks live handles
 //! so they can be torn down on disconnect and on app exit.
 //!
@@ -200,8 +201,8 @@ fn resolved_path(conn: &Connection) -> String {
 		.unwrap_or_else(|| "aghub-api".to_string())
 }
 
-/// Probe a connection without mutating anything. Reports reachability, whether a
-/// compatible `aghub-api` is present, and a human-facing message.
+/// Probe a connection without mutating anything. Reports reachability,
+/// whether a compatible `aghub-api` is present, and a human-facing message.
 #[tauri::command]
 pub fn test_connection(connection: Connection) -> TestResult {
 	let runner = SystemRunner;
@@ -286,8 +287,9 @@ pub fn force_redeploy_remote(
 
 	// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
 	// binary: a wrong-arch binary would not run on the VM. `CargoGit` compiles
-	// ON the VM, so it is arch-safe for ANY remote platform — skip the probe and
-	// the refusal entirely (this is the common Mac-desktop -> Linux-VM case).
+	// ON the VM, so it is arch-safe for ANY remote platform — skip the
+	// probe and the refusal entirely (this is the common
+	// Mac-desktop -> Linux-VM case).
 	// Mirrors the connect path (`ensure_remote_api`), which gates only
 	// `LocalBinary`.
 	if matches!(source, RemoteInstallSource::LocalBinary(_)) {
@@ -452,9 +454,9 @@ fn bring_up(
 	finish_bring_up(app, connection, started)
 }
 
-/// Tail of the bring-up shared by [`connect_remote`] and [`force_redeploy_remote`]:
-/// allocate a local port, spawn the ssh tunnel, settle-check it, start the
-/// watcher, and return the [`RemoteHandle`].
+/// Tail of the bring-up shared by [`connect_remote`] and
+/// [`force_redeploy_remote`]: allocate a local port, spawn the ssh tunnel,
+/// settle-check it, start the watcher, and return the [`RemoteHandle`].
 ///
 /// **Invariant:** on entry the remote server is already running, so every early
 /// return MUST guarded-kill it (the `RemoteHandle` is only stored by the caller
