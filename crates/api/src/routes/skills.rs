@@ -3542,4 +3542,64 @@ mod tests {
 			"an escaping link must be excluded"
 		);
 	}
+
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_relative_project_root_is_absolutized() {
+		with_isolated_env(|home, _state| {
+			let proj = home.join("proj");
+			std::fs::create_dir_all(proj.join(".claude")).unwrap();
+			let work = home.join("work");
+			let skill_dir = work.join("my-skill");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			std::fs::write(
+				skill_dir.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let run = |args: &[&str]| {
+				std::process::Command::new("git")
+					.args(args)
+					.current_dir(&work)
+					.env("GIT_AUTHOR_NAME", "t")
+					.env("GIT_AUTHOR_EMAIL", "t@t")
+					.env("GIT_COMMITTER_NAME", "t")
+					.env("GIT_COMMITTER_EMAIL", "t@t")
+					.output()
+					.unwrap();
+			};
+			run(&["init", "-q"]);
+			run(&["add", "."]);
+			run(&["commit", "-qm", "init"]);
+
+			let prev = std::env::current_dir().unwrap();
+			std::env::set_current_dir(home).unwrap();
+			let req = InstallSkillRequest {
+				source: format!("file://{}", work.display()),
+				agents: vec!["claude".to_string()],
+				skills: vec!["my-skill".to_string()],
+				scope: "project".to_string(),
+				project_path: Some("proj".to_string()),
+				install_all: Some(false),
+			};
+			let resp = block_on(install_skill(Json(req)))
+				.ok()
+				.expect("handler ok")
+				.into_inner();
+			std::env::set_current_dir(prev).unwrap();
+
+			assert!(
+				resp.agents.iter().all(|a| a
+					.error
+					.as_deref()
+					.map(|e| !e.contains("absolute"))
+					.unwrap_or(true)),
+				"no NonAbsoluteTarget error rows"
+			);
+			assert!(
+				proj.join(".agents/skills/my-skill/SKILL.md").exists(),
+				"master written at absolutized project root"
+			);
+		});
+	}
 }
