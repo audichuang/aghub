@@ -83,13 +83,21 @@ export function useSkillInstall() {
 				install_all: installAll,
 			});
 
-			const updatedResults = pendingResults.map((result) => ({
-				...result,
-				status: (response.success ? "success" : "error") as
-					| "success"
-					| "error",
-				error: response.success ? undefined : t("skillInstallFailed"),
-			}));
+			const updatedResults = pendingResults.map((result) => {
+				const entry = response.agents.find(
+					(a) => a.agent === result.agentId,
+				);
+				const succeeded = entry ? entry.success : response.success;
+				return {
+					...result,
+					status: (succeeded ? "success" : "error") as
+						| "success"
+						| "error",
+					error: succeeded
+						? undefined
+						: (entry?.error ?? t("skillInstallFailed")),
+				};
+			});
 
 			setInstallResults(updatedResults);
 		} catch (err) {
