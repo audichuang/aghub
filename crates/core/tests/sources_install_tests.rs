@@ -656,3 +656,101 @@ fn lock_written_when_master_written_but_all_agent_links_fail() {
 	)
 	.unwrap();
 }
+
+#[test]
+#[cfg(unix)]
+fn conflict_fold_real_dir_and_foreign_link_are_not_clobbered() {
+	use aghub_core::skills::linker::Linker;
+	use std::fs;
+	use std::os::unix::fs::symlink;
+
+	let _g = GlobalLockGuard::new();
+
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "my-skill", "my-skill");
+	let source = sample_source();
+
+	// Sub-case A: a pre-existing real directory occupies the agent slot.
+	let project_a = tempdir().unwrap();
+	let project_root_a = project_a.path().to_path_buf();
+	let agent_dir_a = project_root_a.join(".claude/skills");
+	let occupied_dir_a = agent_dir_a.join("my-skill");
+	fs::create_dir_all(&occupied_dir_a).unwrap();
+	fs::write(occupied_dir_a.join("sentinel.txt"), "sentinel").unwrap();
+
+	set_skills_path_override("claude", Some(agent_dir_a.clone()));
+
+	let report_a = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "my-skill/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root_a),
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("install should fold the real-dir conflict");
+
+	set_skills_path_override("claude", None);
+
+	assert_eq!(report_a.agent_results.len(), 1);
+	assert!(!report_a.agent_results[0].installed);
+	assert!(report_a.agent_results[0]
+		.error
+		.as_deref()
+		.unwrap_or("")
+		.contains("occupies"));
+	assert_eq!(
+		fs::read_to_string(agent_dir_a.join("my-skill/sentinel.txt")).unwrap(),
+		"sentinel"
+	);
+
+	// Sub-case B: a pre-existing foreign symlink occupies the agent slot.
+	let project_b = tempdir().unwrap();
+	let project_root_b = project_b.path().to_path_buf();
+	let unrelated = tempdir().unwrap();
+	let unrelated_dir = unrelated.path().to_path_buf();
+	fs::write(unrelated_dir.join("unrelated.txt"), "unrelated").unwrap();
+
+	let agent_dir_b = project_root_b.join(".claude/skills");
+	fs::create_dir_all(&agent_dir_b).unwrap();
+	let link_b = agent_dir_b.join("my-skill");
+	symlink(&unrelated_dir, &link_b).unwrap();
+
+	set_skills_path_override("claude", Some(agent_dir_b.clone()));
+
+	let report_b = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "my-skill/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root_b),
+		target_agents: &[AgentType::Claude],
+		layout: SkillInstallLayout::Universal,
+		expected_name: None,
+		use_relative_links: true,
+	})
+	.expect("install should fold the foreign-link conflict");
+
+	set_skills_path_override("claude", None);
+
+	assert_eq!(report_b.agent_results.len(), 1);
+	assert!(!report_b.agent_results[0].installed);
+	assert!(report_b.agent_results[0]
+		.error
+		.as_deref()
+		.unwrap_or("")
+		.contains("occupies"));
+	assert!(
+		Linker::is_link(&link_b),
+		"foreign symlink should still be a symlink"
+	);
+	assert!(
+		link_b.join("unrelated.txt").exists(),
+		"foreign symlink should still resolve to unrelated content"
+	);
+}
