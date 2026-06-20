@@ -1115,12 +1115,14 @@ export default {
 	sourceInstallSomeFailedOne: "Couldn't install 1 target.",
 	sourceInstallSomeFailedMany: "Couldn't install {{count}} targets.",
 	sourceInstallFailed: "Failed to install skill.",
-	sourceInstallNoAgents:
-		"No available agents can install skills in this scope.",
-	installLayoutLabel: "Install layout",
-	installLayoutIsolation: "Isolation",
-	installLayoutUniversal: "Universal",
-	installLayoutHint:
-		"Isolation copies the skill into each selected agent. Universal writes one shared .agents master and symlinks each agent.",
+	sourceInstallCoveredTitle: "Already covered",
+	sourceInstallCoveredHint:
+		"These agents read the shared .agents master directly, so no link is created.",
+	sourceInstallLinkTargetsTitle: "Will be linked",
+	sourceInstallLinkTargetsHint:
+		"These agents get a symlink to the shared .agents master.",
+	sourceInstallNoLinkTargets:
+		"No agents need a link here — the master is written on its own.",
+	agentCoveredBadge: "Covered",
 	selectSource: "Select a source",
 };
