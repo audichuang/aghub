@@ -379,9 +379,8 @@ pub async fn delete_skill_by_path(
 			..Default::default()
 		}));
 	}
-	let path_is_symlink = std::fs::symlink_metadata(&skill_dir)
-		.map(|meta| meta.file_type().is_symlink())
-		.unwrap_or(false);
+	let path_is_symlink =
+		aghub_core::skills::linker::Linker::is_link(&skill_dir);
 	let canonical_layout = manager
 		.get_skill(&skill_name)
 		.and_then(|skill| skill.canonical_path.as_ref())
@@ -3446,6 +3445,38 @@ mod tests {
 			assert!(
 				home.join(".agents/skills/my-skill/SKILL.md").exists(),
 				"master materialized (symlink-only)"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_symlinked_install_uses_canonical_layout() {
+		with_isolated_env(|home, _state| {
+			let master = home.join(".agents/skills/linked");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: linked\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let skills = home.join(".claude/skills");
+			std::fs::create_dir_all(&skills).unwrap();
+			let link = skills.join("linked");
+			std::os::unix::fs::symlink(&master, &link).unwrap();
+
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&link,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler ok")
+			.into_inner();
+			assert!(resp.success);
+			assert!(!link.exists(), "referrer link removed");
+			assert!(
+				master.join("SKILL.md").exists(),
+				"shared master must NOT be deleted"
 			);
 		});
 	}
