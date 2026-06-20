@@ -551,9 +551,10 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 												)}
 											</div>
 										</div>
-										{sourceUrl && (
-											<div className="flex shrink-0 items-center gap-1">
-												{currentSkillSource?.source && (
+										<div className="flex shrink-0 items-center gap-1">
+											{currentSkillSource?.source &&
+												currentSkillSource.sourceType?.toLowerCase() !==
+													"local" && (
 													<Tooltip delay={0}>
 														<Button
 															isIconOnly
@@ -586,48 +587,51 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 														</Tooltip.Content>
 													</Tooltip>
 												)}
-												<Tooltip delay={0}>
-													<Button
-														isIconOnly
-														variant="ghost"
-														size="sm"
-														className="size-8 text-muted"
-														aria-label={t(
-															"syncFromSource",
-														)}
-														onPress={() =>
-															setSyncDialogOpen(
-																true,
-															)
-														}
-													>
-														<ArrowPathIcon className="size-4" />
-													</Button>
-													<Tooltip.Content>
-														{t("syncFromSource")}
-													</Tooltip.Content>
-												</Tooltip>
-												<Tooltip delay={0}>
-													<Button
-														isIconOnly
-														variant="ghost"
-														size="sm"
-														className="size-8 text-muted"
-														aria-label={t(
-															"openInBrowser",
-														)}
-														onPress={() =>
-															openUrl(sourceUrl)
-														}
-													>
-														<LinkIcon className="size-4" />
-													</Button>
-													<Tooltip.Content>
-														{t("openInBrowser")}
-													</Tooltip.Content>
-												</Tooltip>
-											</div>
-										)}
+											{sourceUrl && (
+												<>
+													<Tooltip delay={0}>
+														<Button
+															isIconOnly
+															variant="ghost"
+															size="sm"
+															className="size-8 text-muted"
+															aria-label={t(
+																"syncFromSource",
+															)}
+															onPress={() =>
+																setSyncDialogOpen(
+																	true,
+																)
+															}
+														>
+															<ArrowPathIcon className="size-4" />
+														</Button>
+														<Tooltip.Content>
+															{t("syncFromSource")}
+														</Tooltip.Content>
+													</Tooltip>
+													<Tooltip delay={0}>
+														<Button
+															isIconOnly
+															variant="ghost"
+															size="sm"
+															className="size-8 text-muted"
+															aria-label={t(
+																"openInBrowser",
+															)}
+															onPress={() =>
+																openUrl(sourceUrl)
+															}
+														>
+															<LinkIcon className="size-4" />
+														</Button>
+														<Tooltip.Content>
+															{t("openInBrowser")}
+														</Tooltip.Content>
+													</Tooltip>
+												</>
+											)}
+										</div>
 									</div>
 								</div>
 							)}
