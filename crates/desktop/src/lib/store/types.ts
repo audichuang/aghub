@@ -40,7 +40,6 @@ export const SIDEBAR_ITEM_IDS = [
 	"skillsSh",
 	"subAgents",
 	"plugins",
-	"sources",
 ] as const;
 
 export type SidebarItemId = (typeof SIDEBAR_ITEM_IDS)[number];
@@ -50,7 +49,7 @@ export interface SidebarItemPreference {
 	visible: boolean;
 }
 
-export const CURRENT_VERSION = 6;
+export const CURRENT_VERSION = 7;
 
 export const DEFAULT_ONBOARDING_PROGRESS: OnboardingProgress = {
 	hasSeenWelcome: false,
