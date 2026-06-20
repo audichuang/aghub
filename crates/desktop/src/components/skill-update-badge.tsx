@@ -165,6 +165,3 @@ export function SkillStatusBadge({
 		</Tooltip>
 	);
 }
-
-/** @deprecated Use `SkillStatusBadge` instead. Kept for migration (T6 removes this). */
-export const SkillUpdateBadge = SkillStatusBadge;

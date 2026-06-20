@@ -35,7 +35,7 @@ import {
 	skillContentQueryOptions,
 	skillTreeQueryOptions,
 } from "../requests/skills";
-import { SkillUpdateBadge } from "./skill-update-badge";
+import { SkillStatusBadge } from "./skill-update-badge";
 import { ManageSkillAgentsDialog } from "./manage-skill-agents-dialog";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import {
@@ -484,7 +484,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 												</span>
 												{sourceUrl &&
 													(updateStatus ? (
-														<SkillUpdateBadge
+														<SkillStatusBadge
 															status={
 																updateStatus
 															}
