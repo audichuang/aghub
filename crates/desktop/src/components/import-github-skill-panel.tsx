@@ -33,7 +33,11 @@ import type {
 } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
-import { supportsSkillMutation } from "../lib/agent-capabilities";
+import {
+	partitionByCoverage,
+	supportsSkillMutation,
+} from "../lib/agent-capabilities";
+import { useSkillCoverage } from "../requests/agents";
 import { cn } from "../lib/utils";
 import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { credentialsListQueryOptions } from "../requests/credentials";
@@ -90,6 +94,13 @@ export function ImportGithubSkillPanel({
 		[availableAgents, projectPath],
 	);
 
+	const scope = projectPath ? "project" : "global";
+	const { coverage } = useSkillCoverage(scope, projectPath ?? null);
+	const { autoCovered, linkTargets } = useMemo(
+		() => partitionByCoverage(skillAgents, coverage),
+		[skillAgents, coverage],
+	);
+
 	const [phase, setPhase] = useState<Phase>("scanning");
 	const [card1Open, setCard1Open] = useState(true);
 	const [card2Open, setCard2Open] = useState(false);
@@ -128,7 +139,7 @@ export function ImportGithubSkillPanel({
 		defaultValues: {
 			url: initialUrl,
 			credentialId: "",
-			selectedAgents: skillAgents[0] ? [skillAgents[0].id] : [],
+			selectedAgents: linkTargets[0] ? [linkTargets[0].id] : [],
 		},
 	});
 
@@ -566,8 +577,7 @@ export function ImportGithubSkillPanel({
 											type="submit"
 											isDisabled={
 												scanMutation.isPending ||
-												isSubmitting ||
-												skillAgents.length === 0
+												isSubmitting
 											}
 										>
 											{scanMutation.isPending ? (
@@ -819,29 +829,78 @@ export function ImportGithubSkillPanel({
 									control={control}
 									rules={{
 										validate: (value) =>
+											linkTargets.length === 0 ||
 											value.length > 0
 												? true
 												: t("validationAgentsRequired"),
 									}}
 									render={({ field, fieldState }) => (
-										<AgentSelector
-											agents={skillAgents}
-											selectedKeys={new Set(field.value)}
-											onSelectionChange={(keys) =>
-												field.onChange([...keys])
-											}
-											label={t("targetAgent")}
-											emptyMessage={t(
-												"noAgentsAvailable",
+										<div className="space-y-4">
+											{linkTargets.length > 0 ? (
+												<AgentSelector
+													agents={linkTargets}
+													selectedKeys={
+														new Set(field.value)
+													}
+													onSelectionChange={(keys) =>
+														field.onChange([
+															...keys,
+														])
+													}
+													label={t(
+														"sourceInstallLinkTargetsTitle",
+													)}
+													emptyMessage={t(
+														"noAgentsAvailable",
+													)}
+													emptyHelpText={t(
+														"sourceInstallLinkTargetsHint",
+													)}
+													variant="secondary"
+													errorMessage={
+														fieldState.error
+															?.message
+													}
+												/>
+											) : (
+												<p className="text-xs text-muted">
+													{t(
+														"sourceInstallNoLinkTargets",
+													)}
+												</p>
 											)}
-											emptyHelpText={t(
-												"noAgentsAvailableHelp",
+											{autoCovered.length > 0 && (
+												<div className="space-y-1.5">
+													<span className="text-sm font-medium text-foreground">
+														{t(
+															"sourceInstallCoveredTitle",
+														)}
+													</span>
+													<span className="block text-xs text-muted">
+														{t(
+															"sourceInstallCoveredHint",
+														)}
+													</span>
+													<div className="flex flex-wrap gap-1.5 pt-1">
+														{autoCovered.map(
+															(agent) => (
+																<Chip
+																	key={
+																		agent.id
+																	}
+																	size="sm"
+																	variant="secondary"
+																>
+																	{
+																		agent.display_name
+																	}
+																</Chip>
+															),
+														)}
+													</div>
+												</div>
 											)}
-											variant="secondary"
-											errorMessage={
-												fieldState.error?.message
-											}
-										/>
+										</div>
 									)}
 								/>
 
