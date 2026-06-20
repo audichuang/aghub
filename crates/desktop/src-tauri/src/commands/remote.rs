@@ -18,7 +18,7 @@ use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use aghub_remote::bringup::{
@@ -31,7 +31,8 @@ use aghub_remote::fs::{
 	RemoteDirectoryError, RemoteDirectoryListing,
 };
 use aghub_remote::ssh::{
-	build_tunnel_args, probe_remote_platform, Connection, SystemRunner,
+	build_tunnel_args, probe_remote_platform, ChildHandle, CommandRunner,
+	Connection, SystemRunner,
 };
 use aghub_remote::ssh_config::{read_default_ssh_config_hosts, SshConfigHost};
 use log::{info, warn};
@@ -52,8 +53,10 @@ const TUNNEL_SETTLE: Duration = Duration::from_millis(400);
 /// A live remote connection: the local tunnel process, the remote server pid,
 /// and the connection it belongs to.
 struct RemoteHandle {
-	/// PID of the local `ssh -L` tunnel process (used for teardown).
-	tunnel_pid: u32,
+	/// Handle to the local `ssh -L` tunnel child. Cloned into the watcher
+	/// thread; teardown calls `tunnel.kill()` (cross-platform, and holding the
+	/// live child closes the pid-reuse window).
+	tunnel: ChildHandle,
 	/// PID of the `aghub-api` process on the VM (guarded-killed on teardown).
 	remote_pid: u32,
 	/// The local port the tunnel listens on (== the frontend baseUrl port).
@@ -71,6 +74,40 @@ pub struct RemoteState {
 	handles: Mutex<HashMap<String, RemoteHandle>>,
 	/// Connection ids whose bring-up is currently in flight (dedup guard).
 	connecting: Mutex<HashSet<String>>,
+}
+
+/// RAII claim on a connection's in-flight `connecting` slot.
+///
+/// [`SlotGuard::claim`] inserts the id (erroring with
+/// [`RemoteError::AlreadyConnecting`] if another bring-up already holds it)
+/// and [`Drop`] removes it — so the slot is released on every exit path,
+/// including early `?` returns and a panic in the slow ssh work. Keep the
+/// guard alive until AFTER the handle is stored in `state.handles`, so no
+/// concurrent caller can observe "free slot, no handle".
+struct SlotGuard<'a> {
+	set: &'a Mutex<HashSet<String>>,
+	id: String,
+}
+
+impl<'a> SlotGuard<'a> {
+	/// Claim `id` in `set`, or return [`RemoteError::AlreadyConnecting`] if it
+	/// is already claimed.
+	fn claim(
+		set: &'a Mutex<HashSet<String>>,
+		id: String,
+	) -> Result<Self, RemoteError> {
+		if !lock(set)?.insert(id.clone()) {
+			return Err(RemoteError::AlreadyConnecting);
+		}
+		Ok(Self { set, id })
+	}
+}
+
+impl Drop for SlotGuard<'_> {
+	fn drop(&mut self) {
+		// Poison-recovering remove: a panic elsewhere must not leak the slot.
+		lock_recover(self.set).remove(&self.id);
+	}
 }
 
 /// Structured, serializable error returned to the frontend so the UI can show
@@ -200,29 +237,19 @@ pub fn connect_remote(
 	let id = connection.id.clone();
 
 	// Already connected? Reuse the existing tunnel.
-	if let Some(port) = existing_local_port(&state, &id) {
+	if let Some(port) = existing_local_port(&state, &id)? {
 		return Ok(port);
 	}
-	// Claim an in-progress slot so concurrent calls don't double-bring-up.
-	{
-		let mut connecting = lock(&state.connecting)?;
-		if !connecting.insert(id.clone()) {
-			return Err(RemoteError::AlreadyConnecting);
-		}
-	}
+	// Claim an in-progress slot so concurrent calls don't double-bring-up; the
+	// guard releases it on every exit path (including a panic in `bring_up`).
+	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
 	// Do the slow ssh work WITHOUT holding any lock.
-	let outcome = bring_up(&app, &connection);
-
-	// Release the in-progress slot regardless of result.
-	if let Ok(mut connecting) = state.connecting.lock() {
-		connecting.remove(&id);
-	}
-
-	let handle = outcome?;
+	let handle = bring_up(&app, &connection)?;
 	let port = handle.local_port;
-	lock(&state.handles)?.insert(id, handle);
+	insert_handle_or_teardown(&state, id, handle)?;
 	Ok(port)
+	// `_slot` drops here, after the handle is stored.
 }
 
 /// Force-redeploy the desktop's `aghub-api` over an incompatible remote one,
@@ -238,7 +265,7 @@ pub fn force_redeploy_remote(
 	let id = connection.id.clone();
 
 	// A live handle means there is a working connection — never tear it down.
-	if existing_local_port(&state, &id).is_some() {
+	if existing_local_port(&state, &id)?.is_some() {
 		return Err(RemoteError::AlreadyConnecting);
 	}
 
@@ -267,25 +294,15 @@ pub fn force_redeploy_remote(
 		});
 	}
 
-	// Claim the in-progress slot so a concurrent connect can't race us.
-	{
-		let mut connecting = lock(&state.connecting)?;
-		if !connecting.insert(id.clone()) {
-			return Err(RemoteError::AlreadyConnecting);
-		}
-	}
+	// Claim the in-progress slot so a concurrent connect can't race us; the
+	// guard releases it on every exit path (including a panic mid-redeploy).
+	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
-	let outcome = force_redeploy(&app, &connection, &source);
-
-	// Release the in-progress slot regardless of result.
-	if let Ok(mut connecting) = state.connecting.lock() {
-		connecting.remove(&id);
-	}
-
-	let handle = outcome?;
+	let handle = force_redeploy(&app, &connection, &source)?;
 	let port = handle.local_port;
-	lock(&state.handles)?.insert(id, handle);
+	insert_handle_or_teardown(&state, id, handle)?;
 	Ok(port)
+	// `_slot` drops here, after the handle is stored.
 }
 
 /// Tear down a connection: kill the local tunnel and the remote server.
@@ -307,19 +324,19 @@ pub fn remote_status(
 	state: State<'_, RemoteState>,
 	connection_id: String,
 ) -> bool {
-	state
-		.handles
-		.lock()
-		.map(|h| h.contains_key(&connection_id))
-		.unwrap_or(false)
+	// Poison-recover: a poisoned lock must not silently report "disconnected"
+	// for a connection that is in fact still live.
+	lock_recover(&state.handles).contains_key(&connection_id)
 }
 
 /// Kill every live remote connection. Called on app exit.
 pub fn cleanup_all_remotes(state: &RemoteState) {
-	let handles: Vec<RemoteHandle> = match state.handles.lock() {
-		Ok(mut guard) => guard.drain().map(|(_, h)| h).collect(),
-		Err(_) => return,
-	};
+	// Poison-recover and still drain: app-exit cleanup must tear down every
+	// live tunnel + remote server even if a lock holder panicked.
+	let handles: Vec<RemoteHandle> = lock_recover(&state.handles)
+		.drain()
+		.map(|(_, h)| h)
+		.collect();
 	for handle in &handles {
 		teardown(handle);
 	}
@@ -329,17 +346,61 @@ pub fn cleanup_all_remotes(state: &RemoteState) {
 // internals
 // ---------------------------------------------------------------------------
 
+/// Local port of an already-live connection, or `None` if not connected.
+///
+/// Returns `Err` on a poisoned lock so connect/force_redeploy surface
+/// [`RemoteError::Internal`] instead of silently treating a poisoned (and thus
+/// indeterminate) state as "disconnected" and racing a second bring-up.
 fn existing_local_port(
 	state: &State<'_, RemoteState>,
 	id: &str,
-) -> Option<u16> {
-	state.handles.lock().ok()?.get(id).map(|h| h.local_port)
+) -> Result<Option<u16>, RemoteError> {
+	Ok(lock(&state.handles)?.get(id).map(|h| h.local_port))
 }
 
-fn lock<T>(m: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, RemoteError> {
+/// User-facing lock: a poisoned lock becomes [`RemoteError::Internal`] so the
+/// caller can abort the operation cleanly.
+fn lock<T>(m: &Mutex<T>) -> Result<MutexGuard<'_, T>, RemoteError> {
 	m.lock().map_err(|e| RemoteError::Internal {
 		message: format!("state lock poisoned: {e}"),
 	})
+}
+
+/// Poison-recovering lock for teardown / cleanup paths that MUST make progress
+/// even after a panic poisoned the mutex (app-exit cleanup, the watcher's
+/// handle removal, the slot guard's drop). Recovers via `into_inner`.
+fn lock_recover<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+	m.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Store a freshly brought-up handle, or — if `state.handles` is poisoned —
+/// tear the new tunnel + remote server down and report
+/// [`RemoteError::Internal`].
+///
+/// The handle is not yet reachable by disconnect/cleanup (the caller only owns
+/// it locally), so on a poisoned-lock failure we are the only owner and must
+/// clean it up here rather than leak the tunnel and remote process.
+fn insert_handle_or_teardown(
+	state: &State<'_, RemoteState>,
+	id: String,
+	handle: RemoteHandle,
+) -> Result<(), RemoteError> {
+	match state.handles.lock() {
+		Ok(mut handles) => {
+			handles.insert(id, handle);
+			Ok(())
+		}
+		Err(poisoned) => {
+			// Recover the map so future calls still work, store nothing, and
+			// tear down the orphan we were about to register.
+			let _guard = poisoned.into_inner();
+			teardown(&handle);
+			Err(RemoteError::Internal {
+				message: "state lock poisoned while registering connection"
+					.to_string(),
+			})
+		}
+	}
 }
 
 /// The full bring-up sequence (probe → start → tunnel → watcher). No shared
@@ -403,11 +464,10 @@ fn finish_bring_up(
 
 	let tunnel_args =
 		build_tunnel_args(connection, local_port, started.remote_port);
-	let mut tunnel_cmd = Command::new("ssh");
-	tunnel_cmd.args(&tunnel_args);
-	#[cfg(windows)]
-	tunnel_cmd.creation_flags(crate::CREATE_NO_WINDOW);
-	let mut tunnel = match tunnel_cmd.spawn() {
+	// Spawn through the runner so the `#[cfg(windows)] CREATE_NO_WINDOW` flag
+	// (applied in `SystemRunner::spawn`) is preserved and we get a cloneable,
+	// kill-able `ChildHandle` instead of a raw pid.
+	let tunnel = match runner.spawn("ssh", &tunnel_args) {
 		Ok(tunnel) => tunnel,
 		Err(e) => {
 			aghub_remote::bringup::cleanup_remote(
@@ -420,7 +480,6 @@ fn finish_bring_up(
 			});
 		}
 	};
-	let tunnel_pid = tunnel.id();
 
 	// Give the forward a moment; if ssh already exited, the forward failed.
 	std::thread::sleep(TUNNEL_SETTLE);
@@ -440,7 +499,7 @@ fn finish_bring_up(
 	spawn_tunnel_watcher(
 		app.clone(),
 		connection.clone(),
-		tunnel,
+		tunnel.clone(),
 		started.remote_pid,
 		intentional.clone(),
 	);
@@ -450,7 +509,7 @@ fn finish_bring_up(
 		connection.id, local_port, started.remote_port
 	);
 	Ok(RemoteHandle {
-		tunnel_pid,
+		tunnel,
 		remote_pid: started.remote_pid,
 		local_port,
 		connection: connection.clone(),
@@ -525,18 +584,34 @@ fn git_output(args: &[&str]) -> Option<String> {
 	(!value.is_empty()).then_some(value)
 }
 
+/// How often the watcher polls the tunnel child for exit.
+const WATCHER_POLL_DELAY: Duration = Duration::from_millis(250);
+
 /// Watch the tunnel child; when it exits, clean up the remote server and — if
 /// the exit was unexpected — notify the frontend and drop the handle.
+///
+/// Polls with `try_wait()` instead of a blocking `wait()`: the child lives
+/// behind a shared `Mutex<Child>` (the [`RemoteHandle`] holds a clone), so a
+/// blocking wait here would hold the lock and deadlock a concurrent
+/// `teardown` → `tunnel.kill()`.
 fn spawn_tunnel_watcher(
 	app: AppHandle,
 	connection: Connection,
-	mut tunnel: std::process::Child,
+	tunnel: ChildHandle,
 	remote_pid: u32,
 	intentional: Arc<AtomicBool>,
 ) {
 	let connection_id = connection.id.clone();
 	std::thread::spawn(move || {
-		let _ = tunnel.wait();
+		loop {
+			match tunnel.try_wait() {
+				Ok(Some(_)) => break,
+				// Still running, or a transient errno — sleep and retry.
+				Ok(None) | Err(_) => {
+					std::thread::sleep(WATCHER_POLL_DELAY);
+				}
+			}
+		}
 		let runner = SystemRunner;
 		aghub_remote::bringup::cleanup_remote(&runner, &connection, remote_pid);
 
@@ -549,9 +624,9 @@ fn spawn_tunnel_watcher(
 				},
 			);
 			if let Some(state) = app.try_state::<RemoteState>() {
-				if let Ok(mut handles) = state.handles.lock() {
-					handles.remove(&connection_id);
-				}
+				// Poison-recover so an unexpected disconnect still drops the
+				// dead handle even after a panic poisoned the map.
+				lock_recover(&state.handles).remove(&connection_id);
 			}
 		}
 	});
@@ -560,19 +635,12 @@ fn spawn_tunnel_watcher(
 /// Kill the local tunnel (which wakes the watcher) and the remote server.
 fn teardown(handle: &RemoteHandle) {
 	handle.intentional.store(true, Ordering::SeqCst);
-	// Guarded kill of the local tunnel: verify the pid is still an ssh process
-	// before signalling, so a pid recycled after the watcher already reaped the
-	// child is never killed. Waking the tunnel's wait() also triggers the
-	// watcher's remote cleanup.
-	let mut kill_cmd = Command::new("sh");
-	kill_cmd.arg("-c").arg(format!(
-		"kill -0 {pid} 2>/dev/null && ps -o comm= -p {pid} | \
-		 grep -q ssh && kill {pid}",
-		pid = handle.tunnel_pid
-	));
-	#[cfg(windows)]
-	kill_cmd.creation_flags(crate::CREATE_NO_WINDOW);
-	let _ = kill_cmd.status();
+	// Kill the local tunnel directly via the owned `Child`. This is
+	// cross-platform (`SIGKILL` on Unix, `TerminateProcess` on Windows) and,
+	// because we still hold the live child, there is no pid-reuse window — we
+	// always signal exactly this process, never a recycled pid. Killing it also
+	// wakes the watcher's `try_wait` poll, which then runs the remote cleanup.
+	let _ = handle.tunnel.kill();
 	// Guarded remote kill (idempotent with the watcher's own cleanup).
 	let runner = SystemRunner;
 	aghub_remote::bringup::cleanup_remote(
@@ -580,4 +648,76 @@ fn teardown(handle: &RemoteHandle) {
 		&handle.connection,
 		handle.remote_pid,
 	);
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	/// The slot guard releases its claim even when the work between claim and
+	/// drop panics — otherwise a panicked bring-up would wedge a connection in
+	/// the perpetual `AlreadyConnecting` state.
+	#[test]
+	fn slot_guard_drop_removes_slot_after_panic() {
+		let set: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+		let id = "vm-1".to_string();
+
+		let result =
+			std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let _slot = SlotGuard::claim(&set, id.clone()).unwrap();
+				panic!("bring-up blew up");
+			}));
+		assert!(result.is_err(), "the closure should have panicked");
+
+		// The set was poisoned by the panic; `lock_recover` still sees it, and
+		// the guard's Drop must have removed the id.
+		assert!(
+			!lock_recover(&set).contains(&id),
+			"slot must be released after a panic"
+		);
+	}
+
+	/// A second claim on an already-held id is rejected.
+	#[test]
+	fn slot_guard_rejects_duplicate() {
+		let set: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+		let id = "vm-1".to_string();
+
+		let first = SlotGuard::claim(&set, id.clone()).unwrap();
+		let second = SlotGuard::claim(&set, id.clone());
+		assert!(
+			matches!(second, Err(RemoteError::AlreadyConnecting)),
+			"a duplicate claim must be AlreadyConnecting"
+		);
+
+		drop(first);
+		// Once released, the id can be claimed again.
+		assert!(SlotGuard::claim(&set, id).is_ok());
+	}
+
+	/// `lock_recover` hands back the inner data even after the mutex was
+	/// poisoned by a panic while a guard was held.
+	#[test]
+	fn lock_recover_returns_inner_after_poison() {
+		let m: Mutex<HashSet<String>> = Mutex::new(HashSet::new());
+
+		let result =
+			std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+				let mut guard = m.lock().unwrap();
+				guard.insert("present".to_string());
+				panic!("poison the mutex");
+			}));
+		assert!(result.is_err(), "the closure should have panicked");
+
+		// The standard `lock()` would return Err here; `lock_recover` must not.
+		let recovered = lock_recover(&m);
+		assert!(
+			recovered.contains("present"),
+			"recovered data should retain the pre-panic insert"
+		);
+	}
 }
