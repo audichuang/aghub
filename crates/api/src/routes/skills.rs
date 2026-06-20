@@ -3480,6 +3480,41 @@ mod tests {
 		});
 	}
 
+	// T-DELETE-BY-PATH-JUNCTION: a junction install takes the canonical-layout
+	// branch (recognized via Linker::is_link) and is not orphaned; the shared
+	// Master survives. windows-latest.
+	#[cfg(windows)]
+	#[test]
+	fn delete_by_path_junction_install_uses_canonical_layout() {
+		use aghub_core::skills::linker::create_junction;
+		with_isolated_env(|home, _state| {
+			let master = home.join(".agents/skills/linked");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: linked\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let skills = home.join(".claude/skills");
+			std::fs::create_dir_all(&skills).unwrap();
+			let link = skills.join("linked");
+			create_junction(&master.canonicalize().unwrap(), &link).unwrap();
+
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&link,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler ok")
+			.into_inner();
+			assert!(resp.success);
+			assert!(
+				master.join("SKILL.md").exists(),
+				"shared master must survive junction delete"
+			);
+		});
+	}
+
 	// P1-E2: entry_allowed routes its link probe through Linker::is_link, so a
 	// link (unix symlink / windows junction) is subjected to the containment
 	// guard. A link that ESCAPES the allow-listed roots is excluded; a link
