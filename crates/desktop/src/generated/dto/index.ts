@@ -5,6 +5,7 @@ export type { AgentProviderMatchedInferenceProviderResponse } from "./AgentProvi
 export type { AgentProviderModelResponse } from "./AgentProviderModelResponse";
 export type { AgentProviderResponse } from "./AgentProviderResponse";
 export type { AgentProviderSourceDto } from "./AgentProviderSourceDto";
+export type { AgentSkillCoverageDto } from "./AgentSkillCoverageDto";
 export type { ApplySkillUpdateRequest } from "./ApplySkillUpdateRequest";
 export type { ApplySkillUpdateResponse } from "./ApplySkillUpdateResponse";
 export type { CCMarketplaceAddRequest } from "./CCMarketplaceAddRequest";

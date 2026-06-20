@@ -5,6 +5,7 @@ use std::{
 };
 
 use aghub_api::dto::{
+	agent_coverage::AgentSkillCoverageDto,
 	agents::{
 		AgentAvailabilityDto, AgentInfo, CapabilitiesDto, McpCapabilitiesDto,
 		ScopeSupportDto, SkillCapabilitiesDto, SkillsPathsDto,
@@ -231,6 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<OperationBatchResponse>(&cfg)?;
 	export_type::<GitSyncRequest>(&cfg)?;
 	export_type::<GitSyncResponse>(&cfg)?;
+	export_type::<AgentSkillCoverageDto>(&cfg)?;
 	export_type::<CreateSubAgentRequest>(&cfg)?;
 	export_type::<UpdateSubAgentRequest>(&cfg)?;
 	export_type::<SubAgentResponse>(&cfg)?;

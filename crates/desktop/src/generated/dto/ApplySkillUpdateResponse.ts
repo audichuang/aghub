@@ -10,5 +10,10 @@ export type ApplySkillUpdateResponse = {
 	updatedHash: string | null;
 	paths: Array<string>;
 	error: string | null;
+	/**
+	 * Stable machine-readable error code (e.g. `SKILL_RENAMED_IN_SOURCE`).
+	 * Lets consumers distinguish a rename from a generic failure without
+	 * parsing the human-readable `error` string.
+	 */
 	code?: string;
 };
