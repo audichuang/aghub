@@ -23,27 +23,6 @@ use crate::skills::update::{detect_rename, skill_renamed_message};
 use aghub_agents::models::AgentType;
 use skill::sanitize::sanitize_name;
 
-/// Recursively copy `from` into `to`, creating `to` (and parents) as needed.
-///
-/// Used by the API's isolated-copy path for non-universal installs. Returns
-/// [`std::io::Result`] — core cannot depend on Rocket, so the API maps the
-/// error to its own type at the boundary.
-pub fn copy_dir_recursive(from: &Path, to: &Path) -> std::io::Result<()> {
-	std::fs::create_dir_all(to)?;
-	for entry in std::fs::read_dir(from)? {
-		let entry = entry?;
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		let file_type = entry.file_type()?;
-		if file_type.is_dir() {
-			copy_dir_recursive(&from_path, &to_path)?;
-		} else {
-			std::fs::copy(&from_path, &to_path)?;
-		}
-	}
-	Ok(())
-}
-
 /// What happened for one target agent.
 #[derive(Clone, Debug)]
 pub struct AgentInstallResult {
