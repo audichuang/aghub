@@ -403,6 +403,11 @@ export default {
 	skillNeedsCredentialTooltip: "此私有來源需要憑證。新增後重試。",
 	skillUpdateCheckError: "無法檢查技能更新。",
 	skillUpdateApplyError: "無法套用技能更新。",
+	skillCheckCompleteWithUpdates: "檢查完成，{{count}} 個可更新",
+	skillCheckCompleteAllGood: "全部都是最新",
+	lastCheckedAgo: "上次檢查 {{time}} 前",
+	lastCheckedNever: "尚未檢查",
+	recheck: "重新檢查",
 	onboardingDescription: "隨時重新開啟歡迎頁或任一導覽流程。",
 
 	// Onboarding — Wizard

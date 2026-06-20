@@ -422,6 +422,18 @@ export default {
 		"This private source needs a credential. Add one and retry.",
 	skillUpdateCheckError: "Couldn't check for skill updates.",
 	skillUpdateApplyError: "Couldn't apply the skill update.",
+	/** Toast when check completes and N skills have updates. */
+	skillCheckCompleteWithUpdates:
+		"Check complete — {{count}} update(s) available",
+	/** Toast when check completes and everything is current. */
+	skillCheckCompleteAllGood: "All skills are up to date",
+	/** List header label. {{time}} is a human-readable relative string
+	 *  like "3 minutes ago" produced by the component. */
+	lastCheckedAgo: "Last checked {{time}} ago",
+	/** Shown when check has never run this session. */
+	lastCheckedNever: "Never checked",
+	/** Button label to re-run the check manually. */
+	recheck: "Recheck",
 	onboardingDescription:
 		"Replay the welcome screen or either guided tour any time.",
 
