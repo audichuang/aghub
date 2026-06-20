@@ -1007,10 +1007,9 @@ fn build_skill_tree_node(
 /// the allow-listed skills `roots` (the universal-install case). Escaping
 /// symlinks are silently excluded so they cannot leak out-of-tree paths.
 fn entry_allowed(path: &std::path::Path, roots: &[PathBuf]) -> bool {
-	let is_symlink = std::fs::symlink_metadata(path)
-		.map(|meta| meta.file_type().is_symlink())
-		.unwrap_or(false);
-	if !is_symlink {
+	// Recognize a windows junction too (is_symlink() == false for junctions);
+	// without this a junction entry would skip the containment guard (P1-E2).
+	if !aghub_core::skills::linker::Linker::is_link(path) {
 		return true;
 	}
 	aghub_core::skills::removal::assert_contained(path, roots).is_some()
@@ -3479,5 +3478,33 @@ mod tests {
 				"shared master must NOT be deleted"
 			);
 		});
+	}
+
+	// P1-E2: entry_allowed routes its link probe through Linker::is_link, so a
+	// link (unix symlink / windows junction) is subjected to the containment
+	// guard. A link that ESCAPES the allow-listed roots is excluded; a link
+	// that stays inside is allowed; a plain real entry is always allowed.
+	#[cfg(unix)]
+	#[test]
+	fn entry_allowed_excludes_escaping_link_keeps_contained() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path().join("root");
+		std::fs::create_dir_all(&root).unwrap();
+		std::fs::write(root.join("real.txt"), "x").unwrap();
+		// An escaping symlink: target outside the allow-listed root.
+		let outside = tmp.path().join("outside");
+		std::fs::create_dir_all(&outside).unwrap();
+		let escaping = root.join("escape");
+		std::os::unix::fs::symlink(&outside, &escaping).unwrap();
+		let roots = vec![root.clone()];
+
+		assert!(
+			entry_allowed(&root.join("real.txt"), &roots),
+			"a plain real entry is always allowed"
+		);
+		assert!(
+			!entry_allowed(&escaping, &roots),
+			"an escaping link must be excluded"
+		);
 	}
 }
