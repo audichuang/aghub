@@ -966,6 +966,7 @@ mod tests {
 	}
 
 	#[cfg(unix)]
+	// Smoke test only — the real data-loss guard is the Windows junction test below.
 	#[test]
 	fn reconcile_skill_unlinks_symlink_referrer_keeps_master() {
 		use crate::adapter::set_skills_path_override;
@@ -1020,6 +1021,85 @@ mod tests {
 		let master_skill = master.join("SKILL.md");
 		assert!(master_skill.exists());
 		assert_eq!(fs::read_to_string(master_skill).unwrap(), skill_md);
+	}
+
+	// T-RECONCILE-WIN-JUNCTION: the real data-loss guard.
+	// remove_dir_all on a Windows JUNCTION follows the reparse point into the
+	// shared Master and deletes its contents.  This test would FAIL if the fix
+	// reverted to remove_dir_all.  The unix test above is a smoke test only.
+	#[cfg(windows)]
+	#[test]
+	fn reconcile_skill_junction_referrer_removed_master_survives() {
+		use crate::adapter::set_skills_path_override;
+		use crate::skills::linker::create_junction;
+
+		struct SkillsPathOverrideReset;
+
+		impl Drop for SkillsPathOverrideReset {
+			fn drop(&mut self) {
+				set_skills_path_override("claude", None);
+			}
+		}
+
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let master = root.join(".agents/skills/my-skill");
+		let sentinel = master.join("sentinel.txt");
+		let claude_skills = root.join(".claude/skills");
+		let referrer = claude_skills.join("my-skill");
+		let skill_md =
+			"---\nname: my-skill\ndescription: Shared\n---\n\n# My Skill\n";
+
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), skill_md).unwrap();
+		fs::write(&sentinel, "keep-me").unwrap();
+		fs::create_dir_all(&claude_skills).unwrap();
+
+		// Build a Windows JUNCTION: referrer -> master.
+		let abs_master = master.canonicalize().unwrap();
+		create_junction(&abs_master, &referrer).unwrap();
+
+		set_skills_path_override("claude", Some(claude_skills));
+		let _reset_override = SkillsPathOverrideReset;
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+		assert!(manager.get_skill("my-skill").is_some());
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "my-skill".to_string(),
+			},
+			vec![],
+			vec![AgentType::Claude],
+		)
+		.unwrap();
+
+		assert_eq!(result.results.len(), 1);
+		assert_eq!(result.results[0].action, OperationAction::Delete);
+		// The junction referrer must be gone.
+		assert!(
+			std::fs::symlink_metadata(&referrer).is_err(),
+			"junction referrer must be removed"
+		);
+		// The shared Master directory and its contents must survive.
+		assert!(
+			master.join("SKILL.md").exists(),
+			"Master SKILL.md must survive"
+		);
+		assert!(
+			sentinel.exists(),
+			"sentinel file inside master must survive (remove_dir_all \
+			 would have wiped it)"
+		);
 	}
 
 	#[test]
