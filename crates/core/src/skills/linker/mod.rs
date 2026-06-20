@@ -772,6 +772,32 @@ mod tests {
 		assert_eq!(report.canonical, canonical);
 	}
 
+	// T-MASTER-HASH-STABLE: linking N agents to a materialized Master must
+	// never change the Master's folder hash (links live OUTSIDE the Master;
+	// the npx round-trip contract, Decision 7, depends on this).
+	#[test]
+	fn linking_agents_does_not_mutate_master_folder_hash() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		let src = make_source(&root);
+		let canonical = root.join(".agents/skills/my-skill");
+		// Materialize the Master once (copy + npx exclusions), no links yet.
+		install_universal(&src, &canonical, &[], LinkTarget::Absolute).unwrap();
+		let before = skill::compute_skill_folder_hash(&canonical).unwrap();
+
+		// Now link three agents to the SAME Master.
+		let agents: Vec<std::path::PathBuf> = ["claude", "zed", "windsurf"]
+			.iter()
+			.map(|a| root.join(format!(".{a}/skills")))
+			.collect();
+		link_agents_to_canonical(&canonical, &agents, LinkTarget::Absolute)
+			.unwrap();
+		let after = skill::compute_skill_folder_hash(&canonical).unwrap();
+
+		assert_eq!(before, after, "linking must not mutate the Master hash");
+	}
+
 	#[test]
 	fn install_universal_rejects_non_absolute_canonical() {
 		let report = install_universal(

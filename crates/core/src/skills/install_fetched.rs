@@ -432,4 +432,65 @@ mod nocopy_tests {
 			"reading through the link must see the Master => not a copy"
 		);
 	}
+
+	// T-LOCK-PARITY-LINK-VS-COPY: the FULL install-lock entry written by
+	// the symlink-only (link-era) path is byte-identical to the copy-era
+	// fixture, because both eras hash the SOURCE folder and write the same
+	// schema. Pins the round-trip contract (Decision 7) at the FULL-ENTRY
+	// level (every field + key order), not just the folder hash.
+	#[test]
+	fn install_lock_entry_byte_identical_to_copy_era_fixture() {
+		let tmp = tempdir().unwrap();
+		let root = tmp.path().canonicalize().unwrap();
+		// Fixed SKILL.md bytes -> deterministic hash.
+		let src = root.join("src/my-skill");
+		fs::create_dir_all(&src).unwrap();
+		fs::write(
+			src.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: d\n---\nbody",
+		)
+		.unwrap();
+
+		// Compute the expected hash from the SOURCE folder (same path
+		// both eras use).
+		let expected_hash = skill::compute_skill_folder_hash(&src).unwrap();
+
+		let lock_source = skill::InstallLockSource {
+			source: "local/test".to_string(),
+			source_type: "local".to_string(),
+			source_url: "file:///local/test".to_string(),
+			ref_name: None,
+		};
+		let req = FetchedSkillInstallRequest {
+			skill_file: &src.join("SKILL.md"),
+			source: &lock_source,
+			lock_skill_path: "my-skill/SKILL.md".to_string(),
+			ref_commit: None,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&root),
+			target_agents: &[AgentType::Claude],
+			expected_name: None,
+			target: LinkTarget::Relative,
+		};
+		let report = install_fetched_skill_and_lock(req).unwrap();
+		assert!(report.wrote_lock, "lock must be written");
+
+		// Read back the written entry.
+		let lock = skill::lock::local::read_local_lock(Some(&root));
+		let entry = lock.skills.get("my-skill").expect("entry must exist");
+		let got = serde_json::to_value(entry).unwrap();
+
+		// The copy-era fixture: every field the project lock carries.
+		// refCommit is absent (None => skip_serializing_if), so NOT in JSON.
+		let want = serde_json::json!({
+			"source": "local/test",
+			"sourceType": "local",
+			"skillPath": "my-skill/SKILL.md",
+			"computedHash": expected_hash,
+		});
+		assert_eq!(
+			got, want,
+			"link-era lock entry must match copy-era byte-for-byte"
+		);
+	}
 }
