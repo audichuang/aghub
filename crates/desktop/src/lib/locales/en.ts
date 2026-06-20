@@ -1032,6 +1032,10 @@ export default {
 	connTestStepSkipped: "Not run",
 	connDisconnect: "Disconnect",
 	connDisconnecting: "Disconnecting…",
+	connReconnect: "Reconnect",
+	connDisconnectedToast: "Remote connection lost. Switched to Local.",
+	connDisconnectedToastDesc:
+		"The tunnel to the remote host dropped unexpectedly.",
 	connSave: "Save",
 	connRemove: "Remove",
 	connEdit: "Edit",
