@@ -24,6 +24,8 @@ target
 /.sisyphus/drafts
 .superpowers/
 .codegraph/
+# Claude Code scratch worktrees (transient git worktrees of other branches)
+.claude/worktrees/
 
 # Node.js
 node_modules/
