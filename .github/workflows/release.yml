@@ -183,14 +183,70 @@ jobs:
                     macos*)
                       sed -i '' "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
                       sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/package.json
-                      sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json || true
+                      sed -i '' "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json
                       ;;
                     *)
                       sed -i "s/^version = .*/version = \"$VERSION\"/" Cargo.toml
                       sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/package.json
-                      sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json || true
+                      sed -i "s/\"version\": \".*\"/\"version\": \"$VERSION\"/" crates/desktop/src-tauri/tauri.conf.json
                       ;;
                   esac
+                  # sed exits 0 even on no-match, so prove the sync actually took.
+                  # package.json has NO "version" field, so do NOT assert it; its
+                  # sed is a harmless no-op left in place.
+                  grep -q "^version = \"$VERSION\"$" Cargo.toml \
+                    || { echo "Cargo.toml version not synced to $VERSION" >&2; exit 1; }
+                  grep -q "\"version\": \"$VERSION\"" crates/desktop/src-tauri/tauri.conf.json \
+                    || { echo "tauri.conf.json version not synced to $VERSION" >&2; exit 1; }
+                  echo "Version sync asserted: $VERSION"
+
+            - name: Stage version-locked aghub-api (per target)
+              shell: bash
+              env:
+                  VERSION: ${{ github.event.inputs.version || github.ref_name }}
+              run: |
+                  set -euo pipefail
+                  VERSION="${VERSION#v}"
+                  TARGET="${{ matrix.target }}"
+                  BIN="aghub-api"
+                  if [ "$TARGET" = "x86_64-pc-windows-msvc" ]; then
+                      BIN="aghub-api.exe"
+                  fi
+                  STAGE="crates/desktop/src-tauri/binaries"
+                  rm -rf "$STAGE"
+                  mkdir -p "$STAGE"
+                  # Built AFTER Sync Version, so it is version-locked to the tag.
+                  cargo build -p aghub-api --release --target "$TARGET"
+                  cp "target/$TARGET/release/$BIN" "$STAGE/$BIN"
+                  test -f "$STAGE/$BIN" \
+                    || { echo "sidecar not staged at $STAGE/$BIN" >&2; exit 1; }
+
+                  # Host-arch-aware smoke. Both aarch64-apple-darwin and
+                  # x86_64-apple-darwin build on the same arm64 macos-latest
+                  # runner; running the x86_64 binary relies on Rosetta, which is
+                  # NOT guaranteed. Only EXECUTE the binary when its target arch
+                  # matches the runner host arch; otherwise verify via the synced
+                  # Cargo.toml version string + file existence (never execute).
+                  HOST_ARCH="$(uname -m)"   # arm64 / aarch64 / x86_64
+                  case "$TARGET" in
+                    aarch64-*) TGT_ARCH="arm64" ;;
+                    x86_64-*)  TGT_ARCH="x86_64" ;;
+                    *)         TGT_ARCH="unknown" ;;
+                  esac
+                  norm() { case "$1" in aarch64) echo arm64 ;; *) echo "$1" ;; esac; }
+                  if [ "$(norm "$HOST_ARCH")" = "$(norm "$TGT_ARCH")" ]; then
+                      echo "Native target ($TARGET on $HOST_ARCH): executing --version"
+                      OUT="$("$STAGE/$BIN" --version)"
+                      echo "sidecar reports: $OUT"
+                      WANT_MM="$(printf '%s\n' "$VERSION" | cut -d. -f1-2)"
+                      GOT_MM="$(printf '%s\n' "$OUT" | sed -n 's/^aghub-api \([0-9]*\.[0-9]*\).*/\1/p')"
+                      [ -n "$GOT_MM" ] && [ "$GOT_MM" = "$WANT_MM" ] \
+                        || { echo "sidecar version $GOT_MM != synced $WANT_MM" >&2; exit 1; }
+                  else
+                      echo "Non-native target ($TARGET on $HOST_ARCH): file+version-string check, not executing"
+                      grep -q "^version = \"$VERSION\"$" Cargo.toml \
+                        || { echo "Cargo.toml not at $VERSION for non-native smoke" >&2; exit 1; }
+                  fi
 
             - name: Build Tauri
               # TODO: pin to a specific tauri-action release for supply-chain integrity
@@ -214,7 +270,7 @@ jobs:
                   releaseName: "aghub ${{ github.event.inputs.version || github.ref_name }}"
                   releaseDraft: false
                   prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
-                  args: --target ${{ matrix.target }}
+                  args: --target ${{ matrix.target }} --config src-tauri/tauri.bundle.conf.json
                   includeUpdaterJson: true
                   projectPath: crates/desktop
 
