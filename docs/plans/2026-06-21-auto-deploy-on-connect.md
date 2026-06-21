@@ -829,7 +829,7 @@ A one-command local path to an installable desktop build with the embedded sidec
         cp "target/release/$BIN" "$STAGE/$BIN"
         echo "Staged $STAGE/$BIN"
         cd crates/desktop
-        bun run tauri build -- --config src-tauri/tauri.bundle.conf.json
+        bun run tauri build --config src-tauri/tauri.bundle.conf.json
         # The bundle now embeds the sidecar; drop the staged copy so the working
         # tree stays clean and a later `bun run dev` cannot pick up a stale file.
         cd ../..
@@ -837,7 +837,7 @@ A one-command local path to an installable desktop build with the embedded sidec
         echo "Removed staging dir $STAGE (the built bundle already contains it)"
     ```
 
-    `bun run tauri build -- --config ...` forwards `--config` to the tauri CLI; the path is relative to `crates/desktop` (the `cd`'d cwd), so `src-tauri/tauri.bundle.conf.json` resolves. The recipe removes `$STAGE` at the end (after `cd ../..` back to the repo root) so no staged binary lingers in the tree.
+    Do NOT add a `--` separator: `bun run tauri build -- --config ...` would make tauri forward `--config` to the underlying `cargo build`, where cargo parses the `.json` path as a `--config` dotted-key TOML expression and fails (`failed to parse value from --config argument ... as a dotted key expression`). Without the `--`, `--config` is consumed by the tauri CLI (which accepts a path to a JSON/JSON5/TOML file), and the path is relative to `crates/desktop` (the `cd`'d cwd), so `src-tauri/tauri.bundle.conf.json` resolves. The recipe removes `$STAGE` at the end (after `cd ../..` back to the repo root) so no staged binary lingers in the tree.
 
 - [ ] **Step 2: Verify the recipe parses and the host-triple detection works.**
 
