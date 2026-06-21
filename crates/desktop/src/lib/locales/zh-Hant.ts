@@ -1021,12 +1021,13 @@ export default {
 	connReinstalling: "重新安裝中…",
 	connForceReinstallConfirmTitle: "強制重新安裝 aghub-api？",
 	connForceReinstallConfirmBody:
-		"這會停止遠端正在執行的 aghub-api，覆寫解析後的 binary 路徑，然後再次偵測。",
+		"這會先中斷目前的遠端連線，再於 VM 上重新安裝 aghub-api；首次安裝可能需要幾分鐘。",
 	connForceReinstallAction: "重新安裝",
 	connReinstallFailed: "重新安裝失敗：{{message}}",
+	connReinstalledOk: "已重新安裝 aghub-api。{{message}}",
 	connReinstallProgressTitle: "正在重新安裝遠端 aghub-api",
 	connReinstallProgressDetail:
-		"VM 正在執行安裝命令。第一次 cargo build 可能需要幾分鐘。",
+		"正在 VM 上重新安裝 aghub-api，首次安裝可能需要幾分鐘。",
 	connTestReachableOk: "可連線。{{message}}",
 	connTestInstalledOk: "可連線，已安裝 aghub-api。{{message}}",
 	connTestInstallFailed: "可連線，但自動安裝 aghub-api 失敗。{{message}}",

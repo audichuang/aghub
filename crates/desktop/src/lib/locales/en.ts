@@ -1059,12 +1059,13 @@ export default {
 	connReinstalling: "Reinstalling…",
 	connForceReinstallConfirmTitle: "Force reinstall aghub-api?",
 	connForceReinstallConfirmBody:
-		"This kills any running remote aghub-api process, overwrites the resolved binary path, then probes again.",
+		"This disconnects the current remote session, then reinstalls aghub-api on the VM. The first install can take a few minutes.",
 	connForceReinstallAction: "Reinstall",
 	connReinstallFailed: "Reinstall failed: {{message}}",
+	connReinstalledOk: "aghub-api reinstalled. {{message}}",
 	connReinstallProgressTitle: "Reinstalling remote aghub-api",
 	connReinstallProgressDetail:
-		"The VM is running the install command. First-time cargo builds can take several minutes.",
+		"Reinstalling aghub-api on the VM. The first install can take a few minutes.",
 	connTestReachableOk: "Reachable. {{message}}",
 	connTestInstalledOk: "Reachable, and aghub-api was installed. {{message}}",
 	connTestInstallFailed:

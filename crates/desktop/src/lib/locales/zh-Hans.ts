@@ -1025,12 +1025,13 @@ export default {
 	connReinstalling: "重新安装中…",
 	connForceReinstallConfirmTitle: "强制重新安装 aghub-api？",
 	connForceReinstallConfirmBody:
-		"这会停止远程正在运行的 aghub-api，覆盖解析后的 binary 路径，然后再次检测。",
+		"这会先中断当前的远程连接，再在 VM 上重新安装 aghub-api；首次安装可能需要几分钟。",
 	connForceReinstallAction: "重新安装",
 	connReinstallFailed: "重新安装失败：{{message}}",
+	connReinstalledOk: "已重新安装 aghub-api。{{message}}",
 	connReinstallProgressTitle: "正在重新安装远程 aghub-api",
 	connReinstallProgressDetail:
-		"VM 正在执行安装命令。第一次 cargo build 可能需要几分钟。",
+		"正在 VM 上重新安装 aghub-api，首次安装可能需要几分钟。",
 	connTestReachableOk: "可连接。{{message}}",
 	connTestInstalledOk: "可连接，已安装 aghub-api。{{message}}",
 	connTestInstallFailed: "可连接，但自动安装 aghub-api 失败。{{message}}",

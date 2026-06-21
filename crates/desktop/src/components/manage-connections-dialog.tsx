@@ -73,6 +73,7 @@ function safeToast(action: () => void): void {
 function toastTestResult(
 	result: TestResult,
 	t: (key: string, opts?: Record<string, unknown>) => string,
+	mode: "test" | "reinstall" = "test",
 ): void {
 	if (!result.reachable) {
 		safeToast(() =>
@@ -111,6 +112,16 @@ function toastTestResult(
 			toast.warning(
 				t("connTestIncompatible", {
 					version: result.apiVersion ?? "?",
+					message: remoteOutputSummary(result.message),
+				}),
+			),
+		);
+		return;
+	}
+	if (mode === "reinstall") {
+		safeToast(() =>
+			toast.success(
+				t("connReinstalledOk", {
 					message: remoteOutputSummary(result.message),
 				}),
 			),
@@ -503,7 +514,7 @@ export function ManageConnectionsDialog({
 		onSuccess: (result) => {
 			setConfirmReinstallOpen(false);
 			setTestResult(result);
-			toastTestResult(result, t);
+			toastTestResult(result, t, "reinstall");
 		},
 		onError: (err) => {
 			setConfirmReinstallOpen(false);
@@ -868,7 +879,9 @@ export function ManageConnectionsDialog({
 							<AlertDialog.Dialog className="sm:max-w-[420px]">
 								<AlertDialog.CloseTrigger />
 								<AlertDialog.Header>
-									<AlertDialog.Icon status="danger" />
+									<AlertDialog.Icon status="danger">
+										<ExclamationTriangleIcon className="size-5" />
+									</AlertDialog.Icon>
 									<AlertDialog.Heading>
 										{t("connForceReinstallConfirmTitle")}
 									</AlertDialog.Heading>
