@@ -334,14 +334,13 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			let remote_platform = remote
 				.map(|(os, arch)| format!("{os}/{arch}"))
 				.unwrap_or_else(|| "unknown".to_string());
-			// Cross-platform: cannot deploy the bundled binary.
-			//   present-but-incompatible => Ok(first) (Incompatible screen),
-			//   absent                    => CrossPlatformDeploy.
-			return if first.api_present {
-				Ok(first)
-			} else {
-				Err(ConnectError::CrossPlatformDeploy { remote_platform })
-			};
+			// Cross-platform: a wrong-arch bundled binary cannot run on the VM,
+			// so refuse the deploy for BOTH the absent and the present-but-
+			// incompatible remote and let the desktop surface the manual-install
+			// hint (via CrossPlatformRedeploy). Returning `Ok(first)` for the
+			// present case would instead render an actionable "Force redeploy"
+			// button that can only fail the very same cross-platform gate.
+			return Err(ConnectError::CrossPlatformDeploy { remote_platform });
 		}
 	}
 
@@ -379,6 +378,19 @@ pub fn install_remote_api<R: CommandRunner>(
 			finish_remote_api_upload(runner, conn, resolved_path)
 		}
 		RemoteInstallSource::CargoGit { url, branch } => {
+			// `cargo install` always writes to ~/.cargo/bin/aghub-api; it cannot
+			// target a custom path. If the connection pins an explicit remote
+			// path, a cargo build would land where the post-install probe never
+			// looks — a confusing "installed, but still unavailable". Refuse up
+			// front with an actionable message instead.
+			if resolved_path != "aghub-api" {
+				return Err(ConnectError::DeployFailed(format!(
+					"cannot auto-deploy via cargo-git to the custom remote path \
+					 '{resolved_path}': cargo install only writes to \
+					 ~/.cargo/bin/aghub-api. Clear the custom path to auto-deploy, \
+					 or install aghub-api at '{resolved_path}' on the VM manually."
+				)));
+			}
 			let install_cmd =
 				build_remote_cargo_install_cmd(url, branch.as_deref());
 			run_remote_install_step(runner, conn, &install_cmd)
@@ -1054,12 +1066,12 @@ mod tests {
 	}
 
 	#[test]
-	fn ensure_present_incompatible_local_binary_cross_platform_returns_ok_first(
-	) {
+	fn ensure_present_incompatible_local_binary_cross_platform_refuses() {
 		// Present-but-incompatible + LocalBinary source + CROSS-platform
-		// remote: cannot deploy the wrong-arch binary, so return Ok(first)
-		// (Incompatible screen) WITHOUT scp. Distinct from the absent case,
-		// which returns CrossPlatformDeploy.
+		// remote: cannot deploy the wrong-arch binary, so refuse with
+		// CrossPlatformDeploy (same as the absent case) WITHOUT scp, so the
+		// desktop shows the manual-install hint instead of a Force-redeploy
+		// button that could only fail the same gate.
 		let probe = probe_args();
 		let uname_args = build_ssh_args(&conn(), "uname -sm");
 		let runner = MockRunner::new()
@@ -1083,17 +1095,16 @@ mod tests {
 					stderr: String::new(),
 				},
 			);
-		let result =
+		let err =
 			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
-				.expect("cross-platform incompatible returns Ok(first)");
-		assert!(result.api_present);
-		assert!(!result.compatible);
-		assert!(!result.install_attempted, "no install across platforms");
+				.expect_err("cross-platform incompatible must refuse");
+		assert!(
+			matches!(err, ConnectError::CrossPlatformDeploy { .. }),
+			"expected CrossPlatformDeploy, got {err:?}"
+		);
 
-		// Assert the platform probe actually RAN before refusing — this is
-		// what makes the test red against the OLD short-circuit (which
-		// returned Ok(first) without ever probing uname). Without it, the
-		// test passes even if the present-short-circuit is never removed.
+		// The platform probe must have RUN before refusing, and no scp upload
+		// may happen for a wrong-arch binary.
 		let calls = runner.calls();
 		assert!(
 			calls
@@ -1207,6 +1218,31 @@ mod tests {
 		assert_eq!(calls.len(), 1);
 		assert_eq!(calls[0].program, "ssh");
 		assert_eq!(calls[0].args, install_args);
+	}
+
+	#[test]
+	fn install_remote_api_cargo_git_refuses_explicit_custom_path() {
+		// `cargo install` only writes to ~/.cargo/bin/aghub-api, so a CargoGit
+		// deploy to an explicit custom path is refused up front (no remote
+		// command runs) instead of installing where the post-install probe
+		// would never look.
+		let source = RemoteInstallSource::CargoGit {
+			url: "https://github.com/audichuang/aghub.git".to_string(),
+			branch: None,
+		};
+		let runner = MockRunner::new();
+		let err =
+			install_remote_api(&runner, &conn(), "/opt/aghub-api", &source)
+				.expect_err("cargo-git + custom path must be refused");
+		assert!(
+			matches!(err, ConnectError::DeployFailed(_)),
+			"expected DeployFailed, got {err:?}"
+		);
+		assert!(
+			runner.calls().is_empty(),
+			"must refuse before running any remote command: {:?}",
+			runner.calls()
+		);
 	}
 
 	#[test]
