@@ -240,8 +240,10 @@ jobs:
                       echo "sidecar reports: $OUT"
                       WANT_MM="$(printf '%s\n' "$VERSION" | cut -d. -f1-2)"
                       GOT_MM="$(printf '%s\n' "$OUT" | sed -n 's/^aghub-api \([0-9]*\.[0-9]*\).*/\1/p')"
-                      [ -n "$GOT_MM" ] && [ "$GOT_MM" = "$WANT_MM" ] \
-                        || { echo "sidecar version $GOT_MM != synced $WANT_MM" >&2; exit 1; }
+                      if [ -z "$GOT_MM" ] || [ "$GOT_MM" != "$WANT_MM" ]; then
+                          echo "sidecar version $GOT_MM != synced $WANT_MM" >&2
+                          exit 1
+                      fi
                   else
                       echo "Non-native target ($TARGET on $HOST_ARCH): file+version-string check, not executing"
                       grep -q "^version = \"$VERSION\"$" Cargo.toml \

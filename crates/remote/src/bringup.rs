@@ -696,6 +696,11 @@ mod tests {
 	/// `uname -sm` stdout mapping to THIS host's (os, arch) so the
 	/// same-platform gate passes wherever the test runs. Mirrors the mapping
 	/// in `probe_remote_platform` (Linux/Darwin + x86_64/arm64/aarch64).
+	///
+	/// Only the same-platform tests use this, and those are cfg-gated off
+	/// Windows (whose uname vocabulary `normalize_platform` does not map), so
+	/// gate the helper too or it is dead code on Windows (`-D warnings`).
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
 	fn local_uname_stdout() -> String {
 		let os = match std::env::consts::OS {
 			"linux" => "Linux",
