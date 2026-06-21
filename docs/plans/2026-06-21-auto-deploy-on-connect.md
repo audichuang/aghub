@@ -829,7 +829,7 @@ A one-command local path to an installable desktop build with the embedded sidec
         cp "target/release/$BIN" "$STAGE/$BIN"
         echo "Staged $STAGE/$BIN"
         cd crates/desktop
-        bun run tauri build --config src-tauri/tauri.bundle.conf.json
+        bun run tauri build --config src-tauri/tauri.bundle.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'
         # The bundle now embeds the sidecar; drop the staged copy so the working
         # tree stays clean and a later `bun run dev` cannot pick up a stale file.
         cd ../..
@@ -837,7 +837,7 @@ A one-command local path to an installable desktop build with the embedded sidec
         echo "Removed staging dir $STAGE (the built bundle already contains it)"
     ```
 
-    Do NOT add a `--` separator: `bun run tauri build -- --config ...` would make tauri forward `--config` to the underlying `cargo build`, where cargo parses the `.json` path as a `--config` dotted-key TOML expression and fails (`failed to parse value from --config argument ... as a dotted key expression`). Without the `--`, `--config` is consumed by the tauri CLI (which accepts a path to a JSON/JSON5/TOML file), and the path is relative to `crates/desktop` (the `cd`'d cwd), so `src-tauri/tauri.bundle.conf.json` resolves. The recipe removes `$STAGE` at the end (after `cd ../..` back to the repo root) so no staged binary lingers in the tree.
+    Do NOT add a `--` separator: `bun run tauri build -- --config ...` would make tauri forward `--config` to the underlying `cargo build`, where cargo parses the `.json` path as a `--config` dotted-key TOML expression and fails (`failed to parse value from --config argument ... as a dotted key expression`). Without the `--`, `--config` is consumed by the tauri CLI (which accepts a path to a JSON/JSON5/TOML file), and the path is relative to `crates/desktop` (the `cd`'d cwd), so `src-tauri/tauri.bundle.conf.json` resolves. A SECOND `--config '{"bundle":{"createUpdaterArtifacts":false}}'` is appended (the two overlays merge over `tauri.conf.json` in order) so a LOCAL build does not require the `TAURI_SIGNING_PRIVATE_KEY` secret: the committed config sets `createUpdaterArtifacts: true` + a `pubkey` for the release auto-updater, which makes `tauri build` fail at the signing step when no private key is present. CI sets the key and keeps signing on; local installs don't need a signed updater artifact, and the produced `.deb`/`.rpm`/`.AppImage` are identical either way. The recipe removes `$STAGE` at the end (after `cd ../..` back to the repo root) so no staged binary lingers in the tree.
 
 - [ ] **Step 2: Verify the recipe parses and the host-triple detection works.**
 
