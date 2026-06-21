@@ -38,6 +38,7 @@ use aghub_remote::ssh::{
 use aghub_remote::ssh_config::{read_default_ssh_config_hosts, SshConfigHost};
 use log::{info, warn};
 use serde::Serialize;
+use tauri::path::BaseDirectory;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use crate::commands::server::find_available_port;
@@ -279,7 +280,7 @@ pub fn force_redeploy_remote(
 	}
 
 	// Resolve the install source (dev fallback until bundling lands).
-	let source = remote_install_source().ok_or_else(|| {
+	let source = remote_install_source(&app).ok_or_else(|| {
 		RemoteError::RemoteApiMissing {
 			install_hint: install_hint(),
 		}
@@ -430,7 +431,7 @@ fn bring_up(
 	let runner = SystemRunner;
 	let bin = resolved_path(connection);
 
-	let install_source = remote_install_source();
+	let install_source = remote_install_source(app);
 	let test = ensure_remote_api(
 		&runner,
 		connection,
@@ -567,26 +568,65 @@ fn force_redeploy(
 	finish_bring_up(app, connection, started)
 }
 
-fn remote_install_source() -> Option<RemoteInstallSource> {
-	if let Ok(path) = std::env::var("AGHUB_REMOTE_API_BINARY") {
-		let trimmed = path.trim();
+/// Resolve the bundled, version-locked `aghub-api` shipped as a Tauri
+/// resource, or `None` in a dev build where it was never bundled. The
+/// `.exists()` gate keeps `bun run start` from the repo on the env/cargo-git
+/// fallback (the resource was never staged there). The executable bit is NOT
+/// handled here — the remote finish step (`crates/remote/src/ssh.rs`) chmods.
+fn bundled_api_path(app: &AppHandle) -> Option<PathBuf> {
+	let name = if cfg!(windows) {
+		"binaries/aghub-api.exe"
+	} else {
+		"binaries/aghub-api"
+	};
+	let path = app.path().resolve(name, BaseDirectory::Resource).ok()?;
+	path.exists().then_some(path)
+}
+
+/// Pure precedence: bundled `LocalBinary` -> env `LocalBinary` -> `CargoGit`.
+/// Extracted from [`remote_install_source`] so the bundled-first ordering is
+/// unit-testable without an `AppHandle`. A blank `env_binary` is ignored.
+fn pick_install_source(
+	bundled: Option<PathBuf>,
+	env_binary: Option<String>,
+	git_url: Option<String>,
+	git_branch: Option<String>,
+) -> Option<RemoteInstallSource> {
+	if let Some(path) = bundled {
+		return Some(RemoteInstallSource::LocalBinary(path));
+	}
+	if let Some(raw) = env_binary {
+		let trimmed = raw.trim();
 		if !trimmed.is_empty() {
 			return Some(RemoteInstallSource::LocalBinary(PathBuf::from(
 				trimmed,
 			)));
 		}
 	}
+	let url = git_url?;
+	Some(RemoteInstallSource::CargoGit {
+		url,
+		branch: git_branch,
+	})
+}
 
-	let url = std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
+/// Resolve where an automatic remote install should source `aghub-api`: the
+/// bundled resource first (shipped builds), then the dev env override, then
+/// the git checkout (`cargo install --git`). Thin wrapper that performs the
+/// I/O (resource resolve + env/git reads) and delegates ordering to the pure
+/// [`pick_install_source`].
+fn remote_install_source(app: &AppHandle) -> Option<RemoteInstallSource> {
+	let bundled = bundled_api_path(app);
+	let env_binary = std::env::var("AGHUB_REMOTE_API_BINARY").ok();
+	let git_url = std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
 		.ok()
 		.filter(|s| !s.trim().is_empty())
 		.or_else(|| git_output(&["remote", "get-url", "origin"]));
-	let url = url?;
-	let branch = std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
+	let git_branch = std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
 		.ok()
 		.filter(|s| !s.trim().is_empty())
 		.or_else(|| git_output(&["branch", "--show-current"]));
-	Some(RemoteInstallSource::CargoGit { url, branch })
+	pick_install_source(bundled, env_binary, git_url, git_branch)
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
@@ -669,11 +709,12 @@ fn teardown(handle: &RemoteHandle) {
 }
 
 /// Whether this build can resolve a source to deploy `aghub-api` to a remote.
-/// False in shipped builds with no dev env var / git checkout, so the UI can
-/// hide the otherwise-dead "Force redeploy" affordance.
+/// True in a bundled build (the embedded resource resolves) or a dev build
+/// with an env var / git checkout; false in a shipped build with none, so the
+/// UI can hide the otherwise-dead "Force redeploy" affordance.
 #[tauri::command]
-pub fn remote_install_source_available() -> bool {
-	remote_install_source().is_some()
+pub fn remote_install_source_available(app: AppHandle) -> bool {
+	remote_install_source(&app).is_some()
 }
 
 // ---------------------------------------------------------------------------
@@ -744,6 +785,85 @@ mod tests {
 		assert!(
 			recovered.contains("present"),
 			"recovered data should retain the pre-panic insert"
+		);
+	}
+
+	// --- pick_install_source precedence (pure, no AppHandle) --------------
+
+	#[test]
+	fn pick_source_prefers_bundled_over_env_and_git() {
+		let src = pick_install_source(
+			Some(PathBuf::from("/Applications/aghub.app/.../aghub-api")),
+			Some("/dev/override/aghub-api".to_string()),
+			Some("https://github.com/audichuang/aghub.git".to_string()),
+			Some("main".to_string()),
+		);
+		assert_eq!(
+			src,
+			Some(RemoteInstallSource::LocalBinary(PathBuf::from(
+				"/Applications/aghub.app/.../aghub-api"
+			))),
+			"a bundled binary wins over env + git"
+		);
+	}
+
+	#[test]
+	fn pick_source_falls_back_to_env_binary_when_unbundled() {
+		let src = pick_install_source(
+			None,
+			Some("/dev/override/aghub-api".to_string()),
+			Some("https://example.com/aghub.git".to_string()),
+			None,
+		);
+		assert_eq!(
+			src,
+			Some(RemoteInstallSource::LocalBinary(PathBuf::from(
+				"/dev/override/aghub-api"
+			))),
+			"env binary wins over git when unbundled"
+		);
+	}
+
+	#[test]
+	fn pick_source_falls_back_to_cargo_git_when_no_binary() {
+		let src = pick_install_source(
+			None,
+			None,
+			Some("https://example.com/aghub.git".to_string()),
+			Some("feat/x".to_string()),
+		);
+		assert_eq!(
+			src,
+			Some(RemoteInstallSource::CargoGit {
+				url: "https://example.com/aghub.git".to_string(),
+				branch: Some("feat/x".to_string()),
+			}),
+			"cargo-git is the last resort"
+		);
+	}
+
+	#[test]
+	fn pick_source_is_none_when_nothing_resolves() {
+		assert_eq!(pick_install_source(None, None, None, None), None);
+	}
+
+	#[test]
+	fn pick_source_ignores_blank_env_binary() {
+		// A blank/whitespace env var must not be treated as a real path; it
+		// falls through to git.
+		let src = pick_install_source(
+			None,
+			Some("   ".to_string()),
+			Some("https://example.com/aghub.git".to_string()),
+			None,
+		);
+		assert_eq!(
+			src,
+			Some(RemoteInstallSource::CargoGit {
+				url: "https://example.com/aghub.git".to_string(),
+				branch: None,
+			}),
+			"a blank env binary is ignored, falling through to git"
 		);
 	}
 }
