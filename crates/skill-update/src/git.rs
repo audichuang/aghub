@@ -54,12 +54,33 @@ impl Fetcher for GitFetcher {
 		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
 			.map_err(|_| FetchError::Network)?;
 		let root = materialized.path().to_path_buf();
+		let upstream_commit_time = read_commit_time(&repo, oid);
 		Ok(FetchedRepo {
 			root,
 			oid: oid.to_string(),
+			upstream_commit_time,
 			_guard: Some(Arc::new(materialized)),
 		})
 	}
+}
+
+/// Best-effort RFC 3339 author-time of the tip commit at `oid`.
+///
+/// Returns `None` on any failure (object missing, not a commit, unparsable
+/// time) so a missing timestamp never aborts the fetch.
+fn read_commit_time(
+	repo: &gix::Repository,
+	oid: gix::ObjectId,
+) -> Option<String> {
+	let commit = repo.find_object(oid).ok()?.try_into_commit().ok()?;
+	// In gix 0.84 `SignatureRef.time` is the raw `&str`; `.time()` parses it
+	// into a `gix_date::Time` exposing `seconds` (unix epoch) and `offset`
+	// (seconds east of UTC).
+	let time = commit.author().ok()?.time().ok()?;
+	let offset = chrono::FixedOffset::east_opt(time.offset)?;
+	let dt = chrono::DateTime::from_timestamp(time.seconds, 0)?
+		.with_timezone(&offset);
+	Some(dt.to_rfc3339())
 }
 
 fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {

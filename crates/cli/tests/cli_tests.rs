@@ -618,6 +618,278 @@ fn source_sync_no_action_flag_prints_plan_and_guidance() {
 	);
 }
 
+/// Seed a global lock entry under `name` recording the source coordinates an
+/// accept-rename needs (`source`/`sourceUrl`/`skillPath`). `skill_path` points
+/// at the renamed skill's location inside the fetched source tree.
+#[cfg(unix)]
+fn seed_global_lock_entry(
+	state: &std::path::Path,
+	name: &str,
+	source: &str,
+	skill_path: &str,
+) -> std::path::PathBuf {
+	let dir = state.join("skills");
+	std::fs::create_dir_all(&dir).unwrap();
+	let path = dir.join(".skill-lock.json");
+	let body = format!(
+		r#"{{"version":3,"skills":{{"{name}":{{"source":"{source}","sourceType":"github","sourceUrl":"https://github.com/{source}","skillPath":"{skill_path}","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}}}}"#
+	);
+	std::fs::write(&path, body).unwrap();
+	path
+}
+
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_installs_new_removes_old() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// Old skill is installed under the Claude agent dir.
+	let old_dir = home.path().join(".claude/skills/old-skill");
+	std::fs::create_dir_all(&old_dir).unwrap();
+	std::fs::write(
+		old_dir.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+
+	// Global lock records the source coordinates for the old name. The locked
+	// skillPath points at where the RENAMED skill lives in the fetched source.
+	let lock_path = seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	// The fetched source: `new-dir/SKILL.md` now declares `name: new-skill`.
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	let new_skill_dir = fetch_root.path().join("new-dir");
+	std::fs::create_dir_all(&new_skill_dir).unwrap();
+	std::fs::write(
+		new_skill_dir.join("SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	assert!(
+		home.path()
+			.join(".claude/skills/new-skill/SKILL.md")
+			.exists(),
+		"new skill must be installed"
+	);
+	assert!(
+		!home.path().join(".claude/skills/old-skill").exists(),
+		"old skill must be removed"
+	);
+
+	// Lock transitioned from old-skill to new-skill.
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	let parsed: Value = serde_json::from_str(&raw).unwrap();
+	assert!(
+		parsed["skills"]["old-skill"].is_null(),
+		"old lock entry must be removed: {raw}"
+	);
+	assert!(
+		!parsed["skills"]["new-skill"].is_null(),
+		"new lock entry must be written: {raw}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_dry_run_writes_nothing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let old_dir = home.path().join(".claude/skills/old-skill");
+	std::fs::create_dir_all(&old_dir).unwrap();
+	std::fs::write(
+		old_dir.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+	let lock_path = seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	let new_skill_dir = fetch_root.path().join("new-dir");
+	std::fs::create_dir_all(&new_skill_dir).unwrap();
+	std::fs::write(
+		new_skill_dir.join("SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// Dry-run mutates nothing: old skill stays, new skill is not installed.
+	assert!(
+		home.path().join(".claude/skills/old-skill").exists(),
+		"dry-run must not remove the old skill"
+	);
+	assert!(
+		!home.path().join(".claude/skills/new-skill").exists(),
+		"dry-run must not install the new skill"
+	);
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		raw.contains("old-skill"),
+		"dry-run must keep the old lock entry"
+	);
+	assert!(
+		!raw.contains("new-skill"),
+		"dry-run must not write new entry"
+	);
+}
+
+/// P0-2 guard (b): accept-rename must refuse when the new name is ALREADY
+/// installed (on-disk dir), leaving the pre-existing skill untouched. Without
+/// the guard the install would clobber it.
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_rejects_when_new_name_installed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let old_dir = home.path().join(".claude/skills/old-skill");
+	std::fs::create_dir_all(&old_dir).unwrap();
+	std::fs::write(
+		old_dir.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+	// New skill ALREADY present with sentinel content.
+	let new_dir = home.path().join(".claude/skills/new-skill");
+	std::fs::create_dir_all(&new_dir).unwrap();
+	let pre_existing =
+		"---\nname: new-skill\ndescription: PRE-EXISTING\n---\nkeep\n";
+	std::fs::write(new_dir.join("SKILL.md"), pre_existing).unwrap();
+
+	let lock_path = seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	let new_skill_src = fetch_root.path().join("new-dir");
+	std::fs::create_dir_all(&new_skill_src).unwrap();
+	std::fs::write(
+		new_skill_src.join("SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"must refuse to clobber an existing new-skill; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	// Pre-existing new-skill dir must be untouched.
+	let still = std::fs::read_to_string(new_dir.join("SKILL.md")).unwrap();
+	assert_eq!(still, pre_existing, "new-skill must not be clobbered");
+	// Old skill + its lock entry remain (nothing mutated).
+	assert!(old_dir.exists(), "old skill dir must remain");
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		raw.contains("old-skill"),
+		"old lock entry must remain: {raw}"
+	);
+}
+
+/// P0-2 guard (a): a degenerate rename whose old/new names sanitize to the same
+/// on-disk dir must be rejected up front (before any fetch/mutation).
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_rejects_degenerate_sanitized_collision() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// "old skill" and "old-skill" both sanitize to "old-skill".
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old skill",
+			"old-skill",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"degenerate rename must be rejected; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("same on-disk skill"),
+		"expected degenerate-rename error, got: {stderr}"
+	);
+}
+
 #[test]
 fn source_list_json_runs_with_no_agent_config() {
 	let home = tempfile::TempDir::new().unwrap();

@@ -402,6 +402,12 @@ pub enum SkillUpdateStatusResponse {
 	UpdateAvailable {
 		current: String,
 		available: String,
+		#[serde(
+			rename = "upstreamCommitTime",
+			skip_serializing_if = "Option::is_none"
+		)]
+		#[ts(optional)]
+		upstream_commit_time: Option<String>,
 	},
 	Renamed {
 		#[serde(rename = "newName")]
@@ -421,12 +427,15 @@ impl From<aghub_core::skills::update::SkillUpdateStatus>
 		};
 		match s {
 			SkillUpdateStatus::UpToDate => SkillUpdateStatusResponse::UpToDate,
-			SkillUpdateStatus::UpdateAvailable { current, available } => {
-				SkillUpdateStatusResponse::UpdateAvailable {
-					current,
-					available,
-				}
-			}
+			SkillUpdateStatus::UpdateAvailable {
+				current,
+				available,
+				upstream_commit_time,
+			} => SkillUpdateStatusResponse::UpdateAvailable {
+				current,
+				available,
+				upstream_commit_time,
+			},
 			SkillUpdateStatus::Renamed { new_name } => {
 				SkillUpdateStatusResponse::Renamed { new_name }
 			}
@@ -489,6 +498,43 @@ pub struct ApplySkillUpdateResponse {
 	pub code: Option<String>,
 }
 
+/// Request to atomically rename an installed skill:
+/// install upstream-current under `new_name` + delete `old_name`.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptRenameRequest {
+	/// Locked name of the installed skill to replace.
+	pub old_name: String,
+	/// New upstream name (from the `renamed.newName` field).
+	pub new_name: String,
+	pub scope: String,
+	pub project_root: Option<String>,
+	/// Must be `true` to execute.  Absent / false → dry-run description only.
+	pub confirm: Option<bool>,
+}
+
+/// Response from `POST /skills/accept-rename`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptRenameResponse {
+	pub success: bool,
+	pub old_name: String,
+	pub new_name: String,
+	pub scope: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub installed_hash: Option<String>,
+	pub paths: Vec<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub error: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub code: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -501,6 +547,7 @@ mod tests {
 			status: SkillUpdateStatusResponse::UpdateAvailable {
 				current: "aaa".to_string(),
 				available: "bbb".to_string(),
+				upstream_commit_time: None,
 			},
 		};
 		let json = serde_json::to_value(&resp).unwrap();
@@ -509,6 +556,41 @@ mod tests {
 		assert_eq!(json["available"], "bbb");
 		assert_eq!(json["name"], "my-skill");
 		assert_eq!(json["scope"], "global");
+	}
+
+	#[test]
+	fn update_available_with_commit_time_serializes() {
+		let resp = SkillUpdateResponse {
+			name: "s".to_string(),
+			scope: "global".to_string(),
+			status: SkillUpdateStatusResponse::UpdateAvailable {
+				current: "aaa".to_string(),
+				available: "bbb".to_string(),
+				upstream_commit_time: Some("2026-06-20T10:00:00Z".to_string()),
+			},
+		};
+		let val = serde_json::to_value(&resp).unwrap();
+		assert_eq!(val["status"], "updateAvailable");
+		assert_eq!(val["upstreamCommitTime"], "2026-06-20T10:00:00Z");
+	}
+
+	#[test]
+	fn update_available_without_commit_time_omits_field() {
+		let resp = SkillUpdateResponse {
+			name: "s".to_string(),
+			scope: "global".to_string(),
+			status: SkillUpdateStatusResponse::UpdateAvailable {
+				current: "aaa".to_string(),
+				available: "bbb".to_string(),
+				upstream_commit_time: None,
+			},
+		};
+		let val = serde_json::to_value(&resp).unwrap();
+		assert!(
+			val.get("upstreamCommitTime").is_none()
+				|| val["upstreamCommitTime"].is_null(),
+			"absent time must be omitted"
+		);
 	}
 
 	#[test]
@@ -593,5 +675,36 @@ mod tests {
 			project_root: req.project_root,
 		};
 		assert_eq!(req.session_id, "s");
+	}
+
+	#[test]
+	fn accept_rename_request_deserializes() {
+		let json =
+			r#"{"oldName":"a","newName":"b","scope":"global","confirm":true}"#;
+		let req: AcceptRenameRequest =
+			serde_json::from_str(json).expect("must deserialise");
+		assert_eq!(req.old_name, "a");
+		assert_eq!(req.new_name, "b");
+		assert_eq!(req.scope, "global");
+		assert_eq!(req.confirm, Some(true));
+	}
+
+	#[test]
+	fn accept_rename_response_serializes_success() {
+		let resp = AcceptRenameResponse {
+			success: true,
+			old_name: "a".to_string(),
+			new_name: "b".to_string(),
+			scope: "global".to_string(),
+			installed_hash: Some("abc123".to_string()),
+			paths: vec!["/some/path".to_string()],
+			error: None,
+			code: None,
+		};
+		let val = serde_json::to_value(&resp).unwrap();
+		assert_eq!(val["success"], true);
+		assert_eq!(val["oldName"], "a");
+		assert_eq!(val["newName"], "b");
+		assert!(val.get("error").is_none() || val["error"].is_null());
 	}
 }

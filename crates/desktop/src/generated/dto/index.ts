@@ -1,3 +1,5 @@
+export type { AcceptRenameRequest } from "./AcceptRenameRequest";
+export type { AcceptRenameResponse } from "./AcceptRenameResponse";
 export type { AgentAvailabilityDto } from "./AgentAvailabilityDto";
 export type { AgentInfo } from "./AgentInfo";
 export type { AgentProviderCredentialDto } from "./AgentProviderCredentialDto";
@@ -106,6 +108,7 @@ export type { SourceCredentialBindingRequest } from "./SourceCredentialBindingRe
 export type { SourceCredentialBindingResponse } from "./SourceCredentialBindingResponse";
 export type { SourceDiffResponse } from "./SourceDiffResponse";
 export type { SourceSkillDiff } from "./SourceSkillDiff";
+export type { SourceSkillStateDto } from "./SourceSkillStateDto";
 export type { SourceSummaryResponse } from "./SourceSummaryResponse";
 export type { SourcesListResponse } from "./SourcesListResponse";
 export type { SubAgentCapabilitiesDto } from "./SubAgentCapabilitiesDto";

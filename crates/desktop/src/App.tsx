@@ -30,7 +30,6 @@ import SkillsPage from "./pages/settings/skills";
 import SubAgentsPage from "./pages/settings/sub-agents";
 import SkillsShPage from "./pages/skills-sh";
 import SkillsSearchPage from "./pages/skills-sh/search";
-import SourcesPage from "./pages/sources";
 import { AgentAvailabilityProvider } from "./providers/agent-availability";
 import { ConnectionProvider } from "./providers/connection";
 import { ThemeProvider } from "./providers/theme";
@@ -68,6 +67,15 @@ function DefaultSidebarRoute() {
 	}
 
 	return <Redirect to={defaultHref} />;
+}
+
+function SourcesRedirect() {
+	const params = new URLSearchParams(window.location.search);
+	const source = params.get("source");
+	const to = source
+		? `/skills?view=source&source=${encodeURIComponent(source)}`
+		: "/skills?view=source";
+	return <Redirect to={to} />;
 }
 
 function App() {
@@ -282,17 +290,7 @@ function App() {
 										</MainLayout>
 									</Route>
 									<Route path="/sources">
-										<MainLayout>
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<SourcesPage />
-												</Suspense>
-											</ErrorBoundary>
-										</MainLayout>
+										<SourcesRedirect />
 									</Route>
 									<Route>
 										<DefaultSidebarRoute />

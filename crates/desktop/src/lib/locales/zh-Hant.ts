@@ -383,8 +383,6 @@ export default {
 	// --- 單一技能更新檢查（F1 / Workstream D）---
 	checkForSkillUpdates: "檢查更新",
 	checkingForSkillUpdates: "檢查中…",
-	skillUpToDate: "已是最新",
-	skillUpToDateTooltip: "此技能與來源一致。",
 	skillUpdateAvailableBadge: "有更新",
 	skillUpdateAvailableTooltip:
 		"來源已變更：{{current}} → {{available}}。同步以更新。",
@@ -403,6 +401,12 @@ export default {
 	skillNeedsCredentialTooltip: "此私有來源需要憑證。新增後重試。",
 	skillUpdateCheckError: "無法檢查技能更新。",
 	skillUpdateApplyError: "無法套用技能更新。",
+	skillCheckCompleteWithUpdates: "檢查完成，{{count}} 個可更新",
+	skillCheckCompleteSomeUncheckable: "檢查完成，{{count}} 個技能無法驗證",
+	skillCheckCompleteAllGood: "全部都是最新",
+	lastCheckedAgo: "上次檢查 {{time}} 前",
+	lastCheckedNever: "尚未檢查",
+	recheck: "重新檢查",
 	onboardingDescription: "隨時重新開啟歡迎頁或任一導覽流程。",
 
 	// Onboarding — Wizard
@@ -439,9 +443,9 @@ export default {
 	onboardingMcpTitle: "全域 MCP 服務",
 	onboardingMcpDescription:
 		"這裡管理的是共用型 MCP 服務定義，你可以把它們分配給一到多個 Agent。",
-	onboardingSkillsTitle: "已安裝技能",
+	onboardingSkillsTitle: "技能與來源",
 	onboardingSkillsDescription:
-		"在這裡檢查本機技能內容，並管理目前 Agent 已經具備的能力。",
+		"依 Agent 或依來源瀏覽與管理技能。在同一個頁面執行更新檢查、安裝新技能，並處理已改名或已移除的條目。",
 	onboardingSettingsTitle: "設定入口始終在這裡",
 	onboardingSettingsDescription:
 		"外觀、Agent 可用性、編輯器整合，以及這些導覽控制都集中在這裡。",
@@ -795,6 +799,7 @@ export default {
 	projectSkills: "專案技能",
 	metadata: "中繼資料",
 	installedFrom: "安裝來源",
+	viewSkillSource: "在來源中檢視",
 	syncFromSource: "從來源同步",
 	syncSkill: "同步 Skill",
 	syncingSkill: "同步中...",
@@ -1102,4 +1107,21 @@ export default {
 	sourceInstallNoLinkTargets: "此處沒有 Agent 需要連結 — 只會寫入主檔。",
 	agentCoveredBadge: "已涵蓋",
 	selectSource: "選擇一個來源",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} 可更新",
+	summaryInstallable: "{{count}} 可安裝",
+	summaryRenamed: "{{count}} 已改名",
+	summaryUnchecked: "{{count}} 無法檢查",
+	summaryLatest: "{{count}} 最新",
+	// SourceDetail action headings
+	sourceNeedsAction: "需要動作",
+	sourceAllLatest: "所有技能均為最新版本。",
+	// Credential binding
+	credentialBind: "綁定憑證",
+	// Phase 2 — Unified skills page
+	skillCenter: "技能",
+	viewByAgent: "依 Agent",
+	viewBySource: "依來源",
+	scopeSwitchGlobal: "全域",
+	scopeSwitchProject: "專案",
 };

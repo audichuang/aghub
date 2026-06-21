@@ -399,8 +399,6 @@ export default {
 	// --- Per-skill update check (F1 / Workstream D) ---
 	checkForSkillUpdates: "Check for updates",
 	checkingForSkillUpdates: "Checking…",
-	skillUpToDate: "Up to date",
-	skillUpToDateTooltip: "This skill matches its source.",
 	skillUpdateAvailableBadge: "Update available",
 	skillUpdateAvailableTooltip:
 		"Source changed: {{current}} → {{available}}. Sync to update.",
@@ -422,6 +420,21 @@ export default {
 		"This private source needs a credential. Add one and retry.",
 	skillUpdateCheckError: "Couldn't check for skill updates.",
 	skillUpdateApplyError: "Couldn't apply the skill update.",
+	/** Toast when check completes and N skills have updates. */
+	skillCheckCompleteWithUpdates:
+		"Check complete — {{count}} update(s) available",
+	/** Toast when check completes but some skills could not be checked. */
+	skillCheckCompleteSomeUncheckable:
+		"Check complete — {{count}} skill(s) could not be verified",
+	/** Toast when check completes and everything is current. */
+	skillCheckCompleteAllGood: "All skills are up to date",
+	/** List header label. {{time}} is a human-readable relative string
+	 *  like "3 minutes ago" produced by the component. */
+	lastCheckedAgo: "Last checked {{time}} ago",
+	/** Shown when check has never run this session. */
+	lastCheckedNever: "Never checked",
+	/** Button label to re-run the check manually. */
+	recheck: "Recheck",
 	onboardingDescription:
 		"Replay the welcome screen or either guided tour any time.",
 
@@ -460,9 +473,9 @@ export default {
 	onboardingMcpTitle: "Global MCP servers",
 	onboardingMcpDescription:
 		"This page is for shared MCP server definitions you want available to one or more agents across your machine.",
-	onboardingSkillsTitle: "Installed skills",
+	onboardingSkillsTitle: "Skills & Sources",
 	onboardingSkillsDescription:
-		"Review local skills, inspect their contents, and manage what is already available to your agents.",
+		"Browse and manage skills by Agent or by Source. Run update checks, install new skills, and handle renamed or removed entries — all in one place.",
 	onboardingSettingsTitle: "Settings stay close by",
 	onboardingSettingsDescription:
 		"Appearance, agent availability, editor integrations, and these onboarding controls all live here.",
@@ -828,6 +841,7 @@ export default {
 	projectSkills: "Project Skills",
 	metadata: "Metadata",
 	installedFrom: "Installed From",
+	viewSkillSource: "View in Sources",
 	syncFromSource: "Sync from source",
 	syncSkill: "Sync Skill",
 	syncingSkill: "Syncing...",
@@ -1131,4 +1145,21 @@ export default {
 		"No agents need a link here — the master is written on its own.",
 	agentCoveredBadge: "Covered",
 	selectSource: "Select a source",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} updatable",
+	summaryInstallable: "{{count}} installable",
+	summaryRenamed: "{{count}} renamed",
+	summaryUnchecked: "{{count}} uncheckable",
+	summaryLatest: "{{count}} up to date",
+	// SourceDetail action headings
+	sourceNeedsAction: "Needs action",
+	sourceAllLatest: "All skills are up to date.",
+	// Credential binding
+	credentialBind: "Bind credential",
+	// Phase 2 — Unified skills page
+	skillCenter: "Skills",
+	viewByAgent: "By Agent",
+	viewBySource: "By Source",
+	scopeSwitchGlobal: "Global",
+	scopeSwitchProject: "Project",
 };

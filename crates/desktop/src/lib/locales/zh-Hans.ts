@@ -384,8 +384,6 @@ export default {
 	// --- 单一技能更新检查（F1 / Workstream D）---
 	checkForSkillUpdates: "检查更新",
 	checkingForSkillUpdates: "检查中…",
-	skillUpToDate: "已是最新",
-	skillUpToDateTooltip: "此技能与来源一致。",
 	skillUpdateAvailableBadge: "有更新",
 	skillUpdateAvailableTooltip:
 		"来源已变更：{{current}} → {{available}}。同步以更新。",
@@ -404,6 +402,12 @@ export default {
 	skillNeedsCredentialTooltip: "此私有来源需要凭证。添加后重试。",
 	skillUpdateCheckError: "无法检查技能更新。",
 	skillUpdateApplyError: "无法应用技能更新。",
+	skillCheckCompleteWithUpdates: "检查完成，{{count}} 个可更新",
+	skillCheckCompleteSomeUncheckable: "检查完成，{{count}} 个技能无法验证",
+	skillCheckCompleteAllGood: "全部都是最新版本",
+	lastCheckedAgo: "上次检查 {{time}} 前",
+	lastCheckedNever: "从未检查",
+	recheck: "重新检查",
 	onboardingDescription: "随时重新打开欢迎页或任一引导流程。",
 
 	// Onboarding — Wizard
@@ -440,9 +444,9 @@ export default {
 	onboardingMcpTitle: "全局 MCP 服务",
 	onboardingMcpDescription:
 		"这里管理的是共享型 MCP 服务定义，你可以把它们分配给一到多个 Agent。",
-	onboardingSkillsTitle: "已安装技能",
+	onboardingSkillsTitle: "技能与来源",
 	onboardingSkillsDescription:
-		"在这里检查本地技能内容，并管理当前 Agent 已经具备的能力。",
+		"按 Agent 或按来源浏览和管理技能。在同一页面执行更新检查、安装新技能，并处理已改名或已删除的条目。",
 	onboardingSettingsTitle: "设置入口始终在这里",
 	onboardingSettingsDescription:
 		"外观、Agent 可用性、编辑器集成，以及这些引导控制都集中在这里。",
@@ -801,6 +805,7 @@ export default {
 	projectSkills: "项目技能",
 	metadata: "元数据",
 	installedFrom: "安装来源",
+	viewSkillSource: "在来源中查看",
 	syncFromSource: "从来源同步",
 	syncSkill: "同步 Skill",
 	syncingSkill: "同步中...",
@@ -1106,4 +1111,21 @@ export default {
 	sourceInstallNoLinkTargets: "此处没有 Agent 需要链接 — 只会写入主文件。",
 	agentCoveredBadge: "已覆盖",
 	selectSource: "选择一个来源",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} 可更新",
+	summaryInstallable: "{{count}} 可安装",
+	summaryRenamed: "{{count}} 已改名",
+	summaryUnchecked: "{{count}} 无法检查",
+	summaryLatest: "{{count}} 最新",
+	// SourceDetail action headings
+	sourceNeedsAction: "需要操作",
+	sourceAllLatest: "所有技能均为最新版本。",
+	// Credential binding
+	credentialBind: "绑定凭证",
+	// Phase 2 — Unified skills page
+	skillCenter: "技能",
+	viewByAgent: "按 Agent",
+	viewBySource: "按来源",
+	scopeSwitchGlobal: "全局",
+	scopeSwitchProject: "项目",
 };

@@ -203,6 +203,9 @@ pub struct FetchedRepo {
 	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded for the
 	/// global-lock `refCommit` heal so the next check can preflight.
 	pub oid: String,
+	/// RFC 3339 author-time of the fetched tip commit. Best-effort: `None`
+	/// when the commit time cannot be read (shallow fetch, old gix, error).
+	pub upstream_commit_time: Option<String>,
 	/// Keep-alive guard for a temp dir, dropped when the repo is no longer needed.
 	pub _guard: Option<Arc<tempfile::TempDir>>,
 }
@@ -376,6 +379,7 @@ pub(crate) fn preflight_decision(
 fn classify_member_from_probe(
 	member: &EntryInput,
 	probe: &HashProbe,
+	upstream_commit_time: Option<String>,
 ) -> CheckOutput {
 	let key = EntryKey {
 		name: member.name.clone(),
@@ -421,7 +425,11 @@ fn classify_member_from_probe(
 					heal_oid: None,
 				};
 			};
-			let status = compare_known_hashes(baseline, fresh_hash);
+			let status = compare_known_hashes(
+				baseline,
+				fresh_hash,
+				upstream_commit_time,
+			);
 			CheckOutput {
 				key,
 				status,
@@ -450,6 +458,7 @@ fn terminal_output(
 fn apply_cached_group(
 	members: &[EntryInput],
 	cached: &CachedGroup,
+	upstream_commit_time: Option<String>,
 ) -> Vec<CheckOutput> {
 	match cached {
 		CachedGroup::Terminal(status) => members
@@ -462,7 +471,11 @@ fn apply_cached_group(
 				let probe = hashes.get(&member.skill_path).cloned().unwrap_or(
 					HashProbe::Uncheckable(UncheckableReason::NoPath),
 				);
-				classify_member_from_probe(member, &probe)
+				classify_member_from_probe(
+					member,
+					&probe,
+					upstream_commit_time.clone(),
+				)
 			})
 			.collect(),
 	}
@@ -540,7 +553,7 @@ pub async fn check_updates(
 
 		// 3) Cache hit → reuse the group status for every fetchable member.
 		if let Some(cached) = deps.cache.get(&sr, now) {
-			out.extend(apply_cached_group(&fetch_members, &cached));
+			out.extend(apply_cached_group(&fetch_members, &cached, None));
 			continue;
 		}
 
@@ -615,7 +628,7 @@ pub async fn check_updates(
 			pending.remove(&id);
 			match outcome {
 				JobResult::Skip(cached) => {
-					out.extend(apply_cached_group(&members, &cached));
+					out.extend(apply_cached_group(&members, &cached, None));
 					deps.cache.put(sr.clone(), cached, now);
 				}
 				JobResult::Failed(reason) => {
@@ -643,7 +656,11 @@ pub async fn check_updates(
 						);
 					}
 					let cached = CachedGroup::Hashes(hashes);
-					let mut group_out = apply_cached_group(&members, &cached);
+					let mut group_out = apply_cached_group(
+						&members,
+						&cached,
+						repo.upstream_commit_time.clone(),
+					);
 					// Self-heal refCommit for freshly-fetched GLOBAL entries so the
 					// next check can preflight; the VCS-tracked project lock is
 					// never silently mutated by a read-style check.
@@ -809,6 +826,7 @@ mod tests {
 			Ok(FetchedRepo {
 				root: self.root.clone().unwrap(),
 				oid: STUB_FETCH_OID.to_string(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}
@@ -1340,6 +1358,7 @@ mod tests {
 			SkillUpdateStatus::UpdateAvailable {
 				current: local_hash,
 				available: upstream_hash,
+				upstream_commit_time: None,
 			}
 		);
 	}
@@ -1499,6 +1518,7 @@ mod tests {
 			SkillUpdateStatus::UpdateAvailable {
 				current: "old".into(),
 				available: hash_b,
+				upstream_commit_time: None,
 			}
 		);
 	}
@@ -1563,6 +1583,7 @@ mod tests {
 			Ok(FetchedRepo {
 				root: self.root.clone(),
 				oid: STUB_FETCH_OID.to_string(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}

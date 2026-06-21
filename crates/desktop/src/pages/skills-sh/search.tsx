@@ -1,6 +1,6 @@
 import { MagnifyingGlassIcon } from "@heroicons/react/24/solid";
-import { Button, Spinner } from "@heroui/react";
-import { useInfiniteQuery } from "@tanstack/react-query";
+import { Button, Chip, Spinner } from "@heroui/react";
+import { useInfiniteQuery, useQueries, useQuery } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -16,6 +16,10 @@ import {
 import type { MarketSkill } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { marketSearchInfiniteQueryOptions } from "../../requests/market";
+import {
+	globalSkillLockQueryOptions,
+	projectSkillLockQueryOptions,
+} from "../../requests/skills";
 import { InstallModal } from "./components/install-modal";
 import { SkillsHeader } from "./components/skills-header";
 import { useSkillInstall } from "./hooks/use-skill-install";
@@ -70,6 +74,32 @@ export default function SkillsSearchPage() {
 		handleInstall,
 		handleCloseInstallModal,
 	} = useSkillInstall();
+
+	const { data: globalLock } = useQuery(globalSkillLockQueryOptions({ api }));
+
+	// Also query each project's lock so project-installed skills show the badge.
+	// useQueries is required here — no hooks in loops, no useEffect.
+	const projectLockResults = useQueries({
+		queries: projects.map((project) =>
+			projectSkillLockQueryOptions({ api, projectPath: project.path }),
+		),
+	});
+
+	const installedSet = useMemo(() => {
+		const set = new Set<string>();
+		// Global lock entries
+		for (const entry of globalLock?.skills ?? []) {
+			// Key: "<source>|<name>" matching MarketSkill fields
+			set.add(`${entry.source}|${entry.name}`);
+		}
+		// Project lock entries for every registered project
+		for (const result of projectLockResults) {
+			for (const entry of result.data?.skills ?? []) {
+				set.add(`${entry.source}|${entry.name}`);
+			}
+		}
+		return set;
+	}, [globalLock, projectLockResults]);
 
 	const compactFormatter = useMemo(
 		() =>
@@ -170,38 +200,58 @@ export default function SkillsSearchPage() {
 						fixedItemHeight={ROW_HEIGHT}
 						style={{ height: "100%" }}
 						components={tableComponents}
-						itemContent={(_index, skill) => (
-							<>
-								<td className="p-2 align-middle">
-									<span className="font-medium">
-										{skill.name}
-									</span>
-								</td>
-								<td className="p-2 align-middle">
-									<span className="text-muted">
-										{compactFormatter.format(
-											skill.installs,
-										)}
-									</span>
-								</td>
-								<td className="p-2 align-middle">
-									<span className="text-muted text-sm">
-										{skill.source}
-									</span>
-								</td>
-								<td className="p-2 align-middle">
-									<Button
-										size="sm"
-										variant="tertiary"
-										onPress={() =>
-											handleInstallClick(skill)
-										}
-									>
-										{t("install")}
-									</Button>
-								</td>
-							</>
-						)}
+						itemContent={(_index, skill) => {
+							const isInstalled = installedSet.has(
+								`${skill.source}|${skill.name}`,
+							);
+							return (
+								<>
+									<td className="p-2 align-middle">
+										<div className="flex items-center gap-2">
+											<span className="font-medium">
+												{skill.name}
+											</span>
+											{isInstalled && (
+												<Chip
+													size="sm"
+													variant="soft"
+													color="default"
+												>
+													<span className="flex items-center gap-1">
+														<span className="text-xs text-success">
+															{t("installed")}
+														</span>
+													</span>
+												</Chip>
+											)}
+										</div>
+									</td>
+									<td className="p-2 align-middle">
+										<span className="text-muted">
+											{compactFormatter.format(
+												skill.installs,
+											)}
+										</span>
+									</td>
+									<td className="p-2 align-middle">
+										<span className="text-muted text-sm">
+											{skill.source}
+										</span>
+									</td>
+									<td className="p-2 align-middle">
+										<Button
+											size="sm"
+											variant="tertiary"
+											onPress={() =>
+												handleInstallClick(skill)
+											}
+										>
+											{t("install")}
+										</Button>
+									</td>
+								</>
+							);
+						}}
 					>
 						<thead>
 							<tr>

@@ -18,9 +18,18 @@ pub enum UncheckableReason {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillUpdateStatus {
 	UpToDate,
-	UpdateAvailable { current: String, available: String },
-	Renamed { new_name: String },
-	Uncheckable { reason: UncheckableReason },
+	UpdateAvailable {
+		current: String,
+		available: String,
+		/// RFC 3339 author-time of the upstream tip commit. Best-effort.
+		upstream_commit_time: Option<String>,
+	},
+	Renamed {
+		new_name: String,
+	},
+	Uncheckable {
+		reason: UncheckableReason,
+	},
 }
 
 /// Shared rename-detection contract used by every update/apply/sync path
@@ -60,13 +69,18 @@ pub const SKILL_RENAMED_CODE: &str = "SKILL_RENAMED_IN_SOURCE";
 ///
 /// Legacy/missing hashes are intentionally not handled here: callers must first
 /// compute a local baseline hash when the lock has no trustworthy value.
-pub fn compare_known_hashes(stored: &str, fresh: &str) -> SkillUpdateStatus {
+pub fn compare_known_hashes(
+	stored: &str,
+	fresh: &str,
+	upstream_commit_time: Option<String>,
+) -> SkillUpdateStatus {
 	if stored == fresh {
 		SkillUpdateStatus::UpToDate
 	} else {
 		SkillUpdateStatus::UpdateAvailable {
 			current: stored.to_string(),
 			available: fresh.to_string(),
+			upstream_commit_time,
 		}
 	}
 }

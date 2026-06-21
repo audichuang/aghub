@@ -55,10 +55,11 @@ use aghub_api::dto::{
 		CCPluginValidateResponse,
 	},
 	skill::{
-		ApplySkillUpdateRequest, ApplySkillUpdateResponse, CreateSkillRequest,
-		DeleteSkillByPathRequest, DeleteSkillByPathResponse, GitInstallRequest,
-		GitInstallResponse, GitInstallResultEntry, GitScanRequest,
-		GitScanResponse, GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
+		AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
+		ApplySkillUpdateResponse, CreateSkillRequest, DeleteSkillByPathRequest,
+		DeleteSkillByPathResponse, GitInstallRequest, GitInstallResponse,
+		GitInstallResultEntry, GitScanRequest, GitScanResponse,
+		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
 		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
 		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
@@ -69,7 +70,7 @@ use aghub_api::dto::{
 	},
 	sources::{
 		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
-		SourceSummaryResponse, SourcesListResponse,
+		SourceSkillStateDto, SourceSummaryResponse, SourcesListResponse,
 	},
 	sub_agent::{
 		CreateSubAgentRequest, SubAgentResponse, UpdateSubAgentRequest,
@@ -204,6 +205,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<SkillUpdateResponse>(&cfg)?;
 	export_type::<ApplySkillUpdateRequest>(&cfg)?;
 	export_type::<ApplySkillUpdateResponse>(&cfg)?;
+	export_type::<AcceptRenameRequest>(&cfg)?;
+	export_type::<AcceptRenameResponse>(&cfg)?;
 	export_type::<ValidationError>(&cfg)?;
 	export_type::<GitScanRequest>(&cfg)?;
 	export_type::<GitScanSkillEntry>(&cfg)?;
@@ -214,6 +217,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<SourceSummaryResponse>(&cfg)?;
 	export_type::<SourcesListResponse>(&cfg)?;
 	export_type::<CredentialStatus>(&cfg)?;
+	export_type::<SourceSkillStateDto>(&cfg)?;
 	export_type::<SourceSkillDiff>(&cfg)?;
 	export_type::<SourceDiffResponse>(&cfg)?;
 	export_type::<DeleteSkillByPathResponse>(&cfg)?;

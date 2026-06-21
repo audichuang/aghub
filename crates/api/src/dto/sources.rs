@@ -25,6 +25,38 @@ pub enum CredentialStatus {
 	NotRequired,
 }
 
+/// TypeScript-exported union mirroring
+/// `skill_update::sources::SourceSkillState::as_wire()`. Declared here (in the
+/// API DTO crate, which has ts-rs) rather than in `skill-update` (which does
+/// not) — approach B from the Phase 3 plan §12-C4/GAP5.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceSkillStateDto {
+	NotInstalled,
+	InstalledCurrent,
+	InstalledOutdated,
+	Renamed,
+	Removed,
+	Deprecated,
+	Uncheckable,
+}
+
+impl From<&skill_update::sources::SourceSkillState> for SourceSkillStateDto {
+	fn from(s: &skill_update::sources::SourceSkillState) -> Self {
+		use skill_update::sources::SourceSkillState;
+		match s {
+			SourceSkillState::NotInstalled => Self::NotInstalled,
+			SourceSkillState::InstalledCurrent => Self::InstalledCurrent,
+			SourceSkillState::InstalledOutdated => Self::InstalledOutdated,
+			SourceSkillState::Renamed => Self::Renamed,
+			SourceSkillState::Removed => Self::Removed,
+			SourceSkillState::Deprecated => Self::Deprecated,
+			SourceSkillState::Uncheckable => Self::Uncheckable,
+		}
+	}
+}
+
 /// One aggregated source row in the overview (one repo within one scope).
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -72,9 +104,10 @@ pub struct SourceSkillDiff {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub author: Option<String>,
+	/// Typed state enum (ts-rs generates a TS union, not `string`).
 	/// One of: `notInstalled`, `installedCurrent`, `installedOutdated`,
 	/// `renamed`, `removed`, `deprecated`, `uncheckable`.
-	pub state: String,
+	pub state: SourceSkillStateDto,
 	/// Previous installed skill name when this row is a `renamed` successor:
 	/// either the upstream skill at the same `skillPath` now declares a
 	/// different `name`, or a CHANGELOG entry maps a removed old name (whose
@@ -90,6 +123,11 @@ pub struct SourceSkillDiff {
 	pub reason: Option<String>,
 	/// Scopes/agents where this skill is already installed (display hint).
 	pub installed_paths: Vec<String>,
+	/// RFC 3339 timestamp of the upstream tip commit at diff time.
+	/// Present only for `installedOutdated` rows.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub upstream_commit_time: Option<String>,
 }
 
 /// Response for `GET /skills/sources/diff`.
@@ -110,4 +148,61 @@ pub struct SourceDiffResponse {
 	/// diff could not be computed and the UI should offer to bind one.
 	pub needs_credential: bool,
 	pub skills: Vec<SourceSkillDiff>,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn source_skill_state_dto_serializes_to_camel_case_strings() {
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::NotInstalled).unwrap(),
+			r#""notInstalled""#
+		);
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::InstalledCurrent)
+				.unwrap(),
+			r#""installedCurrent""#
+		);
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::InstalledOutdated)
+				.unwrap(),
+			r#""installedOutdated""#
+		);
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::Renamed).unwrap(),
+			r#""renamed""#
+		);
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::Removed).unwrap(),
+			r#""removed""#
+		);
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::Deprecated).unwrap(),
+			r#""deprecated""#
+		);
+		assert_eq!(
+			serde_json::to_string(&SourceSkillStateDto::Uncheckable).unwrap(),
+			r#""uncheckable""#
+		);
+	}
+
+	#[test]
+	fn source_skill_diff_state_field_is_not_plain_string() {
+		let diff = SourceSkillDiff {
+			name: "foo".to_string(),
+			skill_path: "foo/SKILL.md".to_string(),
+			description: None,
+			version: None,
+			author: None,
+			state: SourceSkillStateDto::InstalledCurrent,
+			previous_name: None,
+			reason: None,
+			installed_paths: vec![],
+			upstream_commit_time: None,
+		};
+		let val = serde_json::to_value(&diff).unwrap();
+		assert_eq!(val["state"], "installedCurrent");
+	}
 }

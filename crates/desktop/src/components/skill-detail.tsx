@@ -35,7 +35,7 @@ import {
 	skillContentQueryOptions,
 	skillTreeQueryOptions,
 } from "../requests/skills";
-import { SkillUpdateBadge } from "./skill-update-badge";
+import { SkillStatusBadge } from "./skill-update-badge";
 import { ManageSkillAgentsDialog } from "./manage-skill-agents-dialog";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import {
@@ -56,11 +56,26 @@ import { TransferDialog } from "./transfer-dialog";
 interface SkillDetailProps {
 	group: SkillGroup;
 	projectPath?: string;
+	/**
+	 * When `true`, the credential binding dialog opens immediately on mount.
+	 * Used by skills.tsx when the user clicks "Add credential" in the list for
+	 * an auth-uncheckable skill — selecting the skill sets this flag so the
+	 * detail panel opens the dialog right away.
+	 */
+	openCredDialog?: boolean;
+	/** Called when the credential binding dialog closes, so the parent can
+	 * clear its `pendingAuthSkill` state. */
+	onCredDialogClose?: () => void;
 }
 
 const GITHUB_PREFIX_REGEX = /^github\//;
 
-export function SkillDetail({ group, projectPath }: SkillDetailProps) {
+export function SkillDetail({
+	group,
+	projectPath,
+	openCredDialog = false,
+	onCredDialogClose,
+}: SkillDetailProps) {
 	const { t } = useTranslation();
 	const [, setLocation] = useLocation();
 	const { allAgents, availableAgents } = useAgentAvailability();
@@ -74,7 +89,9 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 	const [transferDialogOpen, setTransferDialogOpen] = useState(false);
 	const [manageDialogOpen, setManageDialogOpen] = useState(false);
 	const [syncDialogOpen, setSyncDialogOpen] = useState(false);
-	const [credDialogOpen, setCredDialogOpen] = useState(false);
+	// Initialize from openCredDialog so auth-uncheckable skills opened from
+	// the list immediately show the credential binding dialog.
+	const [credDialogOpen, setCredDialogOpen] = useState(openCredDialog);
 
 	const { isSkillStarred, toggleSkillStar } = useFavorites();
 	const isStarred = isSkillStarred(group.items[0].name);
@@ -484,7 +501,7 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 												</span>
 												{sourceUrl &&
 													(updateStatus ? (
-														<SkillUpdateBadge
+														<SkillStatusBadge
 															status={
 																updateStatus
 															}
@@ -551,50 +568,91 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 												)}
 											</div>
 										</div>
-										{sourceUrl && (
-											<div className="flex shrink-0 items-center gap-1">
-												<Tooltip delay={0}>
-													<Button
-														isIconOnly
-														variant="ghost"
-														size="sm"
-														className="size-8 text-muted"
-														aria-label={t(
-															"syncFromSource",
-														)}
-														onPress={() =>
-															setSyncDialogOpen(
-																true,
-															)
-														}
-													>
-														<ArrowPathIcon className="size-4" />
-													</Button>
-													<Tooltip.Content>
-														{t("syncFromSource")}
-													</Tooltip.Content>
-												</Tooltip>
-												<Tooltip delay={0}>
-													<Button
-														isIconOnly
-														variant="ghost"
-														size="sm"
-														className="size-8 text-muted"
-														aria-label={t(
-															"openInBrowser",
-														)}
-														onPress={() =>
-															openUrl(sourceUrl)
-														}
-													>
-														<LinkIcon className="size-4" />
-													</Button>
-													<Tooltip.Content>
-														{t("openInBrowser")}
-													</Tooltip.Content>
-												</Tooltip>
-											</div>
-										)}
+										<div className="flex shrink-0 items-center gap-1">
+											{currentSkillSource?.source &&
+												currentSkillSource.sourceType?.toLowerCase() !==
+													"local" && (
+													<Tooltip delay={0}>
+														<Button
+															isIconOnly
+															variant="ghost"
+															size="sm"
+															className="size-8 text-muted"
+															aria-label={t(
+																"viewSkillSource",
+															)}
+															onPress={() => {
+																const scope =
+																	group
+																		.items[0]
+																		?.source ===
+																	"project"
+																		? "project"
+																		: "global";
+																const key = `${scope}:${projectPath ?? ""}:${currentSkillSource.source}`;
+																setLocation(
+																	`/sources?source=${encodeURIComponent(key)}`,
+																);
+															}}
+														>
+															<GlobeAltIcon className="size-4" />
+														</Button>
+														<Tooltip.Content>
+															{t(
+																"viewSkillSource",
+															)}
+														</Tooltip.Content>
+													</Tooltip>
+												)}
+											{sourceUrl && (
+												<>
+													<Tooltip delay={0}>
+														<Button
+															isIconOnly
+															variant="ghost"
+															size="sm"
+															className="size-8 text-muted"
+															aria-label={t(
+																"syncFromSource",
+															)}
+															onPress={() =>
+																setSyncDialogOpen(
+																	true,
+																)
+															}
+														>
+															<ArrowPathIcon className="size-4" />
+														</Button>
+														<Tooltip.Content>
+															{t(
+																"syncFromSource",
+															)}
+														</Tooltip.Content>
+													</Tooltip>
+													<Tooltip delay={0}>
+														<Button
+															isIconOnly
+															variant="ghost"
+															size="sm"
+															className="size-8 text-muted"
+															aria-label={t(
+																"openInBrowser",
+															)}
+															onPress={() =>
+																openUrl(
+																	sourceUrl,
+																)
+															}
+														>
+															<LinkIcon className="size-4" />
+														</Button>
+														<Tooltip.Content>
+															{t("openInBrowser")}
+														</Tooltip.Content>
+													</Tooltip>
+												</>
+											)}
+										</div>
 									</div>
 								</div>
 							)}
@@ -749,7 +807,10 @@ export function SkillDetail({ group, projectPath }: SkillDetailProps) {
 					isOpen={credDialogOpen}
 					bindingSource={currentSkillSource.bindingSource}
 					defaultCredentialHost={credentialHost || undefined}
-					onClose={() => setCredDialogOpen(false)}
+					onClose={() => {
+						setCredDialogOpen(false);
+						onCredDialogClose?.();
+					}}
 					onBound={() =>
 						checkUpdatesMutation.mutate(updateCheckParams)
 					}

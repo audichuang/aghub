@@ -315,6 +315,21 @@ pub enum SourceAction {
 		#[arg(long)]
 		json: bool,
 	},
+	/// Accept an upstream rename: install the new name and remove the old one
+	/// as a single transaction (rolls back on any failure).
+	AcceptRename {
+		/// Locked name of the skill that was renamed upstream.
+		old_name: String,
+		/// New upstream name (from the source's `renamed.newName`).
+		new_name: String,
+		#[arg(long = "ref", alias = "git-ref")]
+		git_ref: Option<String>,
+		/// Commit changes. Default is a dry run.
+		#[arg(long)]
+		yes: bool,
+		#[arg(long)]
+		json: bool,
+	},
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]
