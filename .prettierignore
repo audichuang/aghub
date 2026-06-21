@@ -36,6 +36,7 @@ crates/skill/tests/fixtures/
 # Tauri
 crates/desktop/src-tauri/gen/
 crates/desktop/src-tauri/target/
+crates/desktop/src-tauri/binaries/
 
 # Logs
 *.log

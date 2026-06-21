@@ -35,3 +35,7 @@ build/
 
 # ts-rs generated TypeScript bindings (build artifact)
 crates/api/bindings/
+
+# Bundled aghub-api sidecar staged by CI / the `just desktop-bundle` recipe
+# (never committed).
+crates/desktop/src-tauri/binaries/
