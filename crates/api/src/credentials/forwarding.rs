@@ -95,6 +95,11 @@ impl<'r> FromRequest<'r> for ForwardedGitTokens {
 pub(crate) struct ForwardedTokenResolver(BTreeMap<String, String>);
 
 impl TokenResolver for ForwardedTokenResolver {
+	/// Matches with the legacy host-scoped keyring strictness on purpose:
+	/// `lookup_keys` / `binding_keys_match_lookup` are host-scoped, not
+	/// port/scheme-specific. The stricter `(scheme, host, port)` origin pin
+	/// is applied additionally by `git_scan_skills` (`forwarded_token_for_url`
+	/// in `routes/skills.rs`), so the asymmetry here is deliberate.
 	fn resolve(&self, source: &str, _host: Option<&str>) -> Option<String> {
 		let source_keys = lookup_keys(source);
 		self.0

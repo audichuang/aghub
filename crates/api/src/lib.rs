@@ -71,7 +71,8 @@ impl Fairing for ApiLogFairing {
 	// carries raw git tokens, so it must never reach a log sink. As long as
 	// this fairing does not log `request.headers()`, that header (and any
 	// future secret header) is safe by construction. The
-	// `api_log_fairing_never_logs_headers` test asserts this invariant.
+	// `api_log_fairing_never_logs_forwarded_token_header` test asserts this
+	// invariant.
 	async fn on_request(&self, request: &mut Request<'_>, _: &mut Data<'_>) {
 		info!(
 			"api request started: {} {}",
