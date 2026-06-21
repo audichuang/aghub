@@ -292,6 +292,12 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		[],
 	);
 
+	const reinstallRemoteApi = useCallback(
+		(connection: Connection) =>
+			invoke<TestResult>("reinstall_remote_api", { connection }),
+		[],
+	);
+
 	const disconnect = useCallback(
 		(id: string) => invoke<void>("disconnect_remote", { connectionId: id }),
 		[],
@@ -397,6 +403,7 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		updateConnection,
 		removeConnection,
 		testConnection,
+		reinstallRemoteApi,
 		disconnect,
 	};
 

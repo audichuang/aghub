@@ -990,6 +990,16 @@ export default {
 	connInvalidPort: "連接埠必須是 1 到 65535 之間的整數。",
 	connTestConnection: "測試連線",
 	connTesting: "測試中…",
+	connForceReinstall: "強制重新安裝",
+	connReinstalling: "重新安裝中…",
+	connForceReinstallConfirmTitle: "強制重新安裝 aghub-api？",
+	connForceReinstallConfirmBody:
+		"這會停止遠端正在執行的 aghub-api，覆寫解析後的 binary 路徑，然後再次偵測。",
+	connForceReinstallAction: "重新安裝",
+	connReinstallFailed: "重新安裝失敗：{{message}}",
+	connReinstallProgressTitle: "正在重新安裝遠端 aghub-api",
+	connReinstallProgressDetail:
+		"VM 正在執行安裝命令。第一次 cargo build 可能需要幾分鐘。",
 	connTestReachableOk: "可連線。{{message}}",
 	connTestInstalledOk: "可連線，已安裝 aghub-api。{{message}}",
 	connTestInstallFailed: "可連線，但自動安裝 aghub-api 失敗。{{message}}",

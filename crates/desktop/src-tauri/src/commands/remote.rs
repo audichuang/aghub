@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use aghub_remote::bringup::{
 	ensure_remote_api, force_redeploy_remote_api, install_hint,
-	probe_connection, start_remote, ConnectError, RemoteInstallSource,
-	StartedServer, TestResult,
+	probe_connection, reinstall_remote_api as reinstall_remote_api_core,
+	start_remote, ConnectError, RemoteInstallSource, StartedServer, TestResult,
 };
 use aghub_remote::fs::{
 	list_remote_directories as list_remote_directories_core,
@@ -210,6 +210,39 @@ pub fn test_connection(connection: Connection) -> TestResult {
 	probe_connection(&runner, &connection, LOCAL_VERSION)
 }
 
+/// Force-reinstall `aghub-api` on the remote and return a fresh probe result.
+///
+/// This is deliberately separate from [`force_redeploy_remote`]: the connection
+/// manager needs a test-panel action that mutates the remote binary without
+/// opening a tunnel or switching the active connection.
+#[tauri::command]
+pub fn reinstall_remote_api(
+	state: State<'_, RemoteState>,
+	app: AppHandle,
+	connection: Connection,
+) -> Result<TestResult, RemoteError> {
+	let id = connection.id.clone();
+
+	if existing_local_port(&state, &id)?.is_some() {
+		return Err(RemoteError::AlreadyConnecting);
+	}
+
+	let source = remote_install_source(&app).ok_or_else(|| {
+		RemoteError::RemoteApiMissing {
+			install_hint: install_hint(),
+		}
+	})?;
+
+	let runner = SystemRunner;
+	require_same_platform_for_local_binary(&runner, &connection, &source)?;
+	let _slot = SlotGuard::claim(&state.connecting, id)?;
+
+	let outcome =
+		reinstall_remote_api_core(&runner, &connection, LOCAL_VERSION, &source);
+
+	outcome.map_err(RemoteError::from)
+}
+
 /// The desktop's embedded `aghub-api` version (`aghub_api::VERSION`), i.e. the
 /// version `is_version_compatible` enforces against the remote. This is the
 /// **workspace** version, distinct from the Tauri app version reported by
@@ -293,25 +326,8 @@ pub fn force_redeploy_remote(
 	// Mac-desktop -> Linux-VM case).
 	// Mirrors the connect path (`ensure_remote_api`), which gates only
 	// `LocalBinary`.
-	if matches!(source, RemoteInstallSource::LocalBinary(_)) {
-		let runner = SystemRunner;
-		let probed = probe_remote_platform(&runner, &connection);
-		let same_platform = matches!(
-			&probed,
-			Some((os, arch))
-				if os == std::env::consts::OS
-					&& arch == std::env::consts::ARCH
-		);
-		if !same_platform {
-			let remote_platform = probed
-				.map(|(os, arch)| format!("{os}/{arch}"))
-				.unwrap_or_else(|| "unknown".to_string());
-			return Err(RemoteError::CrossPlatformRedeploy {
-				remote_platform,
-				hint: install_hint(),
-			});
-		}
-	}
+	let runner = SystemRunner;
+	require_same_platform_for_local_binary(&runner, &connection, &source)?;
 
 	// Claim the in-progress slot so a concurrent connect can't race us; the
 	// guard releases it on every exit path (including a panic mid-redeploy).
@@ -420,6 +436,34 @@ fn insert_handle_or_teardown(
 			})
 		}
 	}
+}
+
+fn require_same_platform_for_local_binary(
+	runner: &SystemRunner,
+	connection: &Connection,
+	source: &RemoteInstallSource,
+) -> Result<(), RemoteError> {
+	if !matches!(source, RemoteInstallSource::LocalBinary(_)) {
+		return Ok(());
+	}
+
+	let probed = probe_remote_platform(runner, connection);
+	let same_platform = matches!(
+		&probed,
+		Some((os, arch))
+			if os == std::env::consts::OS && arch == std::env::consts::ARCH
+	);
+	if same_platform {
+		return Ok(());
+	}
+
+	let remote_platform = probed
+		.map(|(os, arch)| format!("{os}/{arch}"))
+		.unwrap_or_else(|| "unknown".to_string());
+	Err(RemoteError::CrossPlatformRedeploy {
+		remote_platform,
+		hint: install_hint(),
+	})
 }
 
 /// The full bring-up sequence (probe → start → tunnel → watcher). No shared

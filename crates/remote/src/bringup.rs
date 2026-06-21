@@ -469,6 +469,40 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 	local_version: &str,
 	source: &RemoteInstallSource,
 ) -> Result<TestResult, ConnectError> {
+	force_install_remote_api(
+		runner,
+		conn,
+		local_version,
+		source,
+		"aghub-api redeployed",
+	)
+}
+
+/// Force-reinstall `aghub-api` on the remote and re-probe. This is intended for
+/// explicit user action from the connection-management test panel, so it does
+/// not skip just because a compatible binary is already present.
+pub fn reinstall_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local_version: &str,
+	source: &RemoteInstallSource,
+) -> Result<TestResult, ConnectError> {
+	force_install_remote_api(
+		runner,
+		conn,
+		local_version,
+		source,
+		"aghub-api reinstalled",
+	)
+}
+
+fn force_install_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local_version: &str,
+	source: &RemoteInstallSource,
+	install_message: &str,
+) -> Result<TestResult, ConnectError> {
 	let bin = resolved_path(conn);
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
@@ -488,7 +522,7 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 			stderr: probe.message,
 		});
 	}
-	Ok(probe.with_install_result(true, "aghub-api redeployed".to_string()))
+	Ok(probe.with_install_result(true, install_message.to_string()))
 }
 
 fn run_remote_install_step<R: CommandRunner>(
@@ -1348,6 +1382,58 @@ mod tests {
 			!calls.iter().any(|c| c.args == finish_args),
 			"finish must NOT run when staging failed: {calls:?}"
 		);
+	}
+
+	#[test]
+	fn reinstall_remote_api_forces_install_even_when_present() {
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let probe_args = build_ssh_args(
+			&conn(),
+			&crate::ssh::build_remote_probe_cmd("aghub-api"),
+		);
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let ver = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.1".to_string(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&prepare_args), ok())
+			.script("scp", &args_as_str(&scp_args), ok())
+			.script("ssh", &args_as_str(&finish_args), ver())
+			.script("ssh", &args_as_str(&probe_args), ver());
+
+		let result =
+			reinstall_remote_api(&runner, &conn(), "1.1.1", &source).unwrap();
+
+		assert!(result.compatible);
+		assert!(result.install_attempted);
+		assert!(result.install_succeeded);
+		assert_eq!(
+			result.install_message.as_deref(),
+			Some("aghub-api reinstalled")
+		);
+		let calls = runner.calls();
+		assert_eq!(
+			calls[0].args, prepare_args,
+			"upload must be staged before the binary is swapped"
+		);
+		assert_eq!(calls.len(), 4);
 	}
 
 	#[test]

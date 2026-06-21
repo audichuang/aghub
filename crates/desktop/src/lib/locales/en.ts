@@ -1024,6 +1024,16 @@ export default {
 	connInvalidPort: "Port must be a whole number between 1 and 65535.",
 	connTestConnection: "Test connection",
 	connTesting: "Testing…",
+	connForceReinstall: "Force reinstall",
+	connReinstalling: "Reinstalling…",
+	connForceReinstallConfirmTitle: "Force reinstall aghub-api?",
+	connForceReinstallConfirmBody:
+		"This kills any running remote aghub-api process, overwrites the resolved binary path, then probes again.",
+	connForceReinstallAction: "Reinstall",
+	connReinstallFailed: "Reinstall failed: {{message}}",
+	connReinstallProgressTitle: "Reinstalling remote aghub-api",
+	connReinstallProgressDetail:
+		"The VM is running the install command. First-time cargo builds can take several minutes.",
 	connTestReachableOk: "Reachable. {{message}}",
 	connTestInstalledOk: "Reachable, and aghub-api was installed. {{message}}",
 	connTestInstallFailed:

@@ -37,9 +37,7 @@ pub struct ClaudeCli {
 
 impl ClaudeCli {
 	pub fn new() -> Result<Self> {
-		let binary = which::which("claude").context(
-			"claude CLI not found in PATH. Install Claude Code: https://code.claude.com/docs/setup",
-		)?;
+		let binary = resolve_claude_binary()?;
 		Ok(Self { binary })
 	}
 
@@ -257,6 +255,53 @@ impl ClaudeCli {
 	}
 }
 
+fn resolve_claude_binary() -> Result<PathBuf> {
+	if let Ok(binary) = which::which("claude") {
+		return Ok(binary);
+	}
+
+	find_existing_executable_candidate(common_claude_binary_candidates())
+		.context(
+			"claude CLI not found in PATH or common install locations. Install Claude Code: https://code.claude.com/docs/setup",
+		)
+}
+
+fn common_claude_binary_candidates() -> Vec<PathBuf> {
+	let mut candidates = Vec::new();
+	if let Some(home) = dirs::home_dir() {
+		candidates.push(home.join(".local/bin/claude"));
+		candidates.push(home.join(".npm-global/bin/claude"));
+		candidates.push(home.join(".bun/bin/claude"));
+		candidates.push(home.join(".volta/bin/claude"));
+		candidates.push(home.join(".nvm/current/bin/claude"));
+	}
+	candidates.push(PathBuf::from("/opt/homebrew/bin/claude"));
+	candidates.push(PathBuf::from("/usr/local/bin/claude"));
+	candidates.push(PathBuf::from("/home/linuxbrew/.linuxbrew/bin/claude"));
+	candidates
+}
+
+fn find_existing_executable_candidate(
+	candidates: impl IntoIterator<Item = PathBuf>,
+) -> Option<PathBuf> {
+	candidates.into_iter().find(|path| is_executable_file(path))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+	use std::os::unix::fs::PermissionsExt;
+
+	let Ok(metadata) = path.metadata() else {
+		return false;
+	};
+	metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+	path.is_file()
+}
+
 /// Extract the message after the `✘` marker in stderr output.
 ///
 /// CLI errors are formatted as `✘ Failed to <action>: <reason>`. We strip the
@@ -313,5 +358,43 @@ mod tests {
 				"unexpected error message: {message}"
 			);
 		}
+	}
+
+	#[test]
+	fn fallback_candidates_include_homebrew_and_linuxbrew_claude() {
+		let candidates = common_claude_binary_candidates();
+		assert!(
+			candidates
+				.iter()
+				.any(|path| path == Path::new("/opt/homebrew/bin/claude")),
+			"macOS Homebrew claude path missing from candidates"
+		);
+		assert!(
+			candidates.iter().any(|path| path
+				== Path::new("/home/linuxbrew/.linuxbrew/bin/claude")),
+			"Linuxbrew claude path missing from candidates"
+		);
+	}
+
+	#[test]
+	fn fallback_selects_first_executable_candidate() {
+		let tmp = tempfile::tempdir().unwrap();
+		let missing = tmp.path().join("missing-claude");
+		let executable = tmp.path().join("claude");
+		std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+		#[cfg(unix)]
+		{
+			use std::os::unix::fs::PermissionsExt;
+			let mut perms =
+				std::fs::metadata(&executable).unwrap().permissions();
+			perms.set_mode(0o755);
+			std::fs::set_permissions(&executable, perms).unwrap();
+		}
+
+		let found =
+			find_existing_executable_candidate([missing, executable.clone()])
+				.unwrap();
+
+		assert_eq!(found, executable);
 	}
 }

@@ -23,6 +23,8 @@ export interface ConnectionContextValue {
 	removeConnection: (id: string) => Promise<void>;
 	/** Probe a connection without mutating active state. */
 	testConnection: (connection: Connection) => Promise<TestResult>;
+	/** Force-reinstall remote aghub-api, then return the fresh probe result. */
+	reinstallRemoteApi: (connection: Connection) => Promise<TestResult>;
 	/** Tear down a remote tunnel + remote server. */
 	disconnect: (id: string) => Promise<void>;
 }

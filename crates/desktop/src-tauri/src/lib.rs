@@ -3,8 +3,8 @@ use crate::commands::{
 	export_diagnostic_logs, force_redeploy_remote, get_log_dir_path,
 	get_log_entries, get_log_stats, list_remote_directories,
 	list_ssh_config_hosts, local_api_version, minimize_to_tray,
-	remote_install_source_available, remote_status, start_server,
-	test_connection, RemoteState,
+	reinstall_remote_api, remote_install_source_available, remote_status,
+	start_server, test_connection, RemoteState,
 };
 use log::info;
 use tauri::{Manager, WebviewWindow};
@@ -323,6 +323,7 @@ pub fn run() {
 			disconnect_remote,
 			force_redeploy_remote,
 			remote_install_source_available,
+			reinstall_remote_api,
 			remote_status,
 			minimize_to_tray,
 		])

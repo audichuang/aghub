@@ -1,5 +1,6 @@
 import {
 	ArrowLeftStartOnRectangleIcon,
+	ArrowPathIcon,
 	CheckCircleIcon,
 	ChevronDownIcon,
 	ExclamationTriangleIcon,
@@ -8,6 +9,7 @@ import {
 	XCircleIcon,
 } from "@heroicons/react/24/solid";
 import {
+	AlertDialog,
 	Button,
 	Description,
 	Dropdown,
@@ -17,6 +19,7 @@ import {
 	Label,
 	Modal,
 	NumberField,
+	Spinner,
 	TextField,
 	toast,
 } from "@heroui/react";
@@ -59,58 +62,106 @@ interface TestStep {
 }
 
 /** Format a TestResult into a translated toast message. */
+function safeToast(action: () => void): void {
+	try {
+		action();
+	} catch {
+		// HeroUI toast view transitions can fail while the app window is hidden.
+	}
+}
+
 function toastTestResult(
 	result: TestResult,
 	t: (key: string, opts?: Record<string, unknown>) => string,
 ): void {
 	if (!result.reachable) {
-		toast.danger(
-			t("connTestUnreachable", {
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.danger(
+				t("connTestUnreachable", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
 	if (result.installAttempted && !result.installSucceeded) {
-		toast.danger(
-			t("connTestInstallFailed", {
-				message: remoteOutputSummary(
-					result.installMessage ?? result.message,
-				),
-			}),
+		safeToast(() =>
+			toast.danger(
+				t("connTestInstallFailed", {
+					message: remoteOutputSummary(
+						result.installMessage ?? result.message,
+					),
+				}),
+			),
 		);
 		return;
 	}
 	if (!result.apiPresent) {
-		toast.danger(
-			t("connTestApiMissing", {
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.danger(
+				t("connTestApiMissing", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
 	if (!result.compatible) {
-		toast.warning(
-			t("connTestIncompatible", {
-				version: result.apiVersion ?? "?",
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.warning(
+				t("connTestIncompatible", {
+					version: result.apiVersion ?? "?",
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
 	if (result.installAttempted && result.installSucceeded) {
-		toast.success(
-			t("connTestInstalledOk", {
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.success(
+				t("connTestInstalledOk", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
-	toast.success(
-		t("connTestReachableOk", {
-			message: remoteOutputSummary(result.message),
-		}),
+	safeToast(() =>
+		toast.success(
+			t("connTestReachableOk", {
+				message: remoteOutputSummary(result.message),
+			}),
+		),
 	);
+}
+
+function formatInvokeError(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (typeof error === "string") return error;
+	if (error == null || typeof error !== "object") return String(error);
+
+	const payload = error as {
+		message?: unknown;
+		stderr?: unknown;
+		installHint?: unknown;
+		hint?: unknown;
+	};
+	const message = [
+		payload.message,
+		payload.stderr,
+		payload.installHint,
+		payload.hint,
+	].find((value): value is string => {
+		return typeof value === "string" && value.trim() !== "";
+	});
+	if (message != null) return message;
+
+	try {
+		return JSON.stringify(error);
+	} catch {
+		return String(error);
+	}
 }
 
 function buildTestSteps(
@@ -234,6 +285,32 @@ function TestResultPanel({
 	);
 }
 
+function ReinstallProgressPanel({
+	t,
+}: {
+	t: (key: string, opts?: Record<string, unknown>) => string;
+}) {
+	return (
+		<div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2.5">
+			<div className="flex gap-2">
+				<Spinner
+					size="sm"
+					color="current"
+					className="mt-0.5 shrink-0 text-warning"
+				/>
+				<div className="min-w-0">
+					<p className="text-sm font-medium text-foreground">
+						{t("connReinstallProgressTitle")}
+					</p>
+					<p className="break-words text-xs text-muted">
+						{t("connReinstallProgressDetail")}
+					</p>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 export function ManageConnectionsDialog({
 	isOpen,
 	onClose,
@@ -247,6 +324,7 @@ export function ManageConnectionsDialog({
 		removeConnection,
 		testConnection,
 		disconnect,
+		reinstallRemoteApi,
 	} = useConnection();
 
 	// Only user remotes are editable; the implicit Local connection is not.
@@ -263,6 +341,7 @@ export function ManageConnectionsDialog({
 	// Validation errors are only shown after a save/test attempt.
 	const [showErrors, setShowErrors] = useState(false);
 	const [testResult, setTestResult] = useState<TestResult | null>(null);
+	const [confirmReinstallOpen, setConfirmReinstallOpen] = useState(false);
 
 	const { data: sshConfigHosts = [], isPending: sshHostsLoading } = useQuery<
 		SshConfigHost[]
@@ -285,6 +364,7 @@ export function ManageConnectionsDialog({
 		setForm(EMPTY_CONNECTION_FORM);
 		setShowErrors(false);
 		setTestResult(null);
+		setConfirmReinstallOpen(false);
 	};
 
 	const selectSshAlias = (key: Key) => {
@@ -314,12 +394,18 @@ export function ManageConnectionsDialog({
 			return "add" as const;
 		},
 		onSuccess: (kind) => {
-			toast.success(t(kind === "update" ? "connUpdated" : "connAdded"));
+			safeToast(() =>
+				toast.success(
+					t(kind === "update" ? "connUpdated" : "connAdded"),
+				),
+			);
 			resetForm();
 		},
 		onError: (err) => {
-			toast.danger(
-				err instanceof Error ? err.message : t("connSaveError"),
+			safeToast(() =>
+				toast.danger(
+					err instanceof Error ? err.message : t("connSaveError"),
+				),
 			);
 		},
 	});
@@ -334,14 +420,16 @@ export function ManageConnectionsDialog({
 			return removeConnection(id);
 		},
 		onSuccess: (_data, id) => {
-			toast.success(t("connRemoved"));
+			safeToast(() => toast.success(t("connRemoved")));
 			if (editingId === id) {
 				resetForm();
 			}
 		},
 		onError: (err) => {
-			toast.danger(
-				err instanceof Error ? err.message : t("connRemoveError"),
+			safeToast(() =>
+				toast.danger(
+					err instanceof Error ? err.message : t("connRemoveError"),
+				),
 			);
 		},
 	});
@@ -349,30 +437,57 @@ export function ManageConnectionsDialog({
 	const disconnectMutation = useMutation({
 		mutationFn: (id: string) => disconnect(id),
 		onSuccess: () => {
-			toast.success(t("connDisconnect"));
+			safeToast(() => toast.success(t("connDisconnect")));
 		},
 		onError: (err) => {
-			toast.danger(
-				err instanceof Error ? err.message : t("connRemoveError"),
+			safeToast(() =>
+				toast.danger(
+					err instanceof Error ? err.message : t("connRemoveError"),
+				),
 			);
 		},
 	});
 
+	const buildPayload = () => {
+		const payload = formToConnection(form);
+		return { ...payload, id: editingId ?? "test" };
+	};
+
 	const testMutation = useMutation({
-		mutationFn: () => {
-			const payload = formToConnection(form);
-			return testConnection({ ...payload, id: editingId ?? "test" });
-		},
+		mutationFn: () => testConnection(buildPayload()),
 		onSuccess: (result) => {
 			setTestResult(result);
 			toastTestResult(result, t);
 		},
 		onError: (err) => {
 			setTestResult(null);
-			toast.danger(
-				t("connTestFailed", {
-					message: err instanceof Error ? err.message : String(err),
-				}),
+			safeToast(() =>
+				toast.danger(
+					t("connTestFailed", {
+						message:
+							err instanceof Error ? err.message : String(err),
+					}),
+				),
+			);
+		},
+	});
+
+	const reinstallMutation = useMutation({
+		mutationFn: () => reinstallRemoteApi(buildPayload()),
+		onSuccess: (result) => {
+			setConfirmReinstallOpen(false);
+			setTestResult(result);
+			toastTestResult(result, t);
+		},
+		onError: (err) => {
+			setConfirmReinstallOpen(false);
+			setTestResult(null);
+			safeToast(() =>
+				toast.danger(
+					t("connReinstallFailed", {
+						message: formatInvokeError(err),
+					}),
+				),
 			);
 		},
 	});
@@ -390,11 +505,24 @@ export function ManageConnectionsDialog({
 		testMutation.mutate();
 	};
 
+	const handleReinstallRequest = () => {
+		setShowErrors(true);
+		if (!valid) return;
+		setConfirmReinstallOpen(true);
+	};
+
+	const handleReinstall = () => {
+		setConfirmReinstallOpen(false);
+		setTestResult(null);
+		reinstallMutation.mutate();
+	};
+
 	const isBusy =
 		saveMutation.isPending ||
 		removeMutation.isPending ||
 		testMutation.isPending ||
-		disconnectMutation.isPending;
+		disconnectMutation.isPending ||
+		reinstallMutation.isPending;
 
 	const handleOpenChange = (open: boolean) => {
 		if (!open) {
@@ -651,13 +779,25 @@ export function ManageConnectionsDialog({
 								</Description>
 							</TextField>
 
-							{testResult != null && (
+							{reinstallMutation.isPending ? (
+								<ReinstallProgressPanel t={t} />
+							) : testResult != null ? (
 								<TestResultPanel result={testResult} t={t} />
-							)}
+							) : null}
 						</div>
 					</Modal.Body>
 
 					<Modal.Footer className="flex-wrap">
+						<Button
+							variant="danger"
+							isDisabled={isBusy}
+							onPress={handleReinstallRequest}
+						>
+							<ArrowPathIcon className="size-4" />
+							{reinstallMutation.isPending
+								? t("connReinstalling")
+								: t("connForceReinstall")}
+						</Button>
 						<Button
 							variant="secondary"
 							isDisabled={isBusy}
@@ -671,6 +811,58 @@ export function ManageConnectionsDialog({
 							{t("connSave")}
 						</Button>
 					</Modal.Footer>
+
+					<AlertDialog.Backdrop
+						isOpen={confirmReinstallOpen}
+						onOpenChange={setConfirmReinstallOpen}
+					>
+						<AlertDialog.Container>
+							<AlertDialog.Dialog className="sm:max-w-[420px]">
+								<AlertDialog.CloseTrigger />
+								<AlertDialog.Header>
+									<AlertDialog.Icon status="danger" />
+									<AlertDialog.Heading>
+										{t("connForceReinstallConfirmTitle")}
+									</AlertDialog.Heading>
+								</AlertDialog.Header>
+								<AlertDialog.Body>
+									<p className="text-sm text-muted">
+										{t("connForceReinstallConfirmBody")}
+									</p>
+								</AlertDialog.Body>
+								<AlertDialog.Footer>
+									<Button
+										slot="close"
+										variant="tertiary"
+										onPress={() =>
+											setConfirmReinstallOpen(false)
+										}
+										isDisabled={reinstallMutation.isPending}
+									>
+										{t("cancel")}
+									</Button>
+									<Button
+										variant="danger"
+										onPress={handleReinstall}
+										isDisabled={reinstallMutation.isPending}
+									>
+										{reinstallMutation.isPending ? (
+											<>
+												<Spinner
+													size="sm"
+													color="current"
+													className="mr-2"
+												/>
+												{t("connReinstalling")}
+											</>
+										) : (
+											t("connForceReinstallAction")
+										)}
+									</Button>
+								</AlertDialog.Footer>
+							</AlertDialog.Dialog>
+						</AlertDialog.Container>
+					</AlertDialog.Backdrop>
 				</Modal.Dialog>
 			</Modal.Container>
 		</Modal.Backdrop>
