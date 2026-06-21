@@ -45,6 +45,7 @@ uuid = { version = "1", features = [ "v4" ] }
 log = "0.4.31"
 reqwest = { version = "0.13", features = [ "json" ] }
 url = { workspace = true }
+base64 = { workspace = true }
 
 [dev-dependencies]
 url = { workspace = true }

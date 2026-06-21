@@ -112,7 +112,7 @@ const LOCAL_KEY_PREFIX: &str = "local::";
 ///   `local::<trimmed>`. Two unresolvable sources with the same trimmed
 ///   string still match (preserving the legacy behaviour), but they cannot
 ///   collide with any host-prefixed key.
-fn lookup_keys(source: &str) -> BTreeSet<String> {
+pub(crate) fn lookup_keys(source: &str) -> BTreeSet<String> {
 	let mut keys = BTreeSet::new();
 	let trimmed = canonical_binding_key(source);
 	if trimmed.is_empty() {
@@ -135,7 +135,7 @@ fn lookup_keys(source: &str) -> BTreeSet<String> {
 }
 
 /// `true` iff a stored binding's keys intersect with the lookup's keys.
-fn binding_keys_match_lookup(
+pub(crate) fn binding_keys_match_lookup(
 	bound_source: &str,
 	source_keys: &BTreeSet<String>,
 ) -> bool {
