@@ -103,7 +103,13 @@ desktop-bundle:
     cp "target/release/$BIN" "$STAGE/$BIN"
     echo "Staged $STAGE/$BIN"
     cd crates/desktop
-    bun run tauri build --config src-tauri/tauri.bundle.conf.json
+    # Two `--config` overlays merge over tauri.conf.json (in order):
+    #  1. the committed resources overlay (embeds the staged aghub-api), and
+    #  2. createUpdaterArtifacts=false so a LOCAL build does not require the
+    #     TAURI_SIGNING_PRIVATE_KEY secret (the committed config sets it true +
+    #     a pubkey for the release updater; CI signs, local installs don't need
+    #     it). The produced .deb/.rpm/.AppImage are identical either way.
+    bun run tauri build --config src-tauri/tauri.bundle.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'
     # The bundle now embeds the sidecar; drop the staged copy so the working
     # tree stays clean and a later `bun run dev` cannot pick up a stale file.
     cd ../..
