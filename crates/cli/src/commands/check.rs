@@ -91,9 +91,9 @@ fn uncheckable_reason_str(reason: UncheckableReason) -> &'static str {
 fn status_view(status: SkillUpdateStatus) -> StatusView {
 	match status {
 		SkillUpdateStatus::UpToDate => StatusView::UpToDate,
-		SkillUpdateStatus::UpdateAvailable { current, available } => {
-			StatusView::UpdateAvailable { current, available }
-		}
+		SkillUpdateStatus::UpdateAvailable {
+			current, available, ..
+		} => StatusView::UpdateAvailable { current, available },
 		SkillUpdateStatus::Renamed { new_name } => {
 			StatusView::Renamed { new_name }
 		}
@@ -368,6 +368,7 @@ mod tests {
 		let json = status_json(SkillUpdateStatus::UpdateAvailable {
 			current: "a".to_string(),
 			available: "b".to_string(),
+			upstream_commit_time: None,
 		});
 		assert_eq!(json["status"], "updateAvailable");
 		assert_eq!(json["current"], "a");

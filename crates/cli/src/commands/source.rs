@@ -56,6 +56,7 @@ impl skill_update::Fetcher for CliFetcher {
 				Ok(skill_update::FetchedRepo {
 					root,
 					oid: "test-fetch-root".into(),
+					upstream_commit_time: None,
 					_guard: None,
 				})
 			} else {

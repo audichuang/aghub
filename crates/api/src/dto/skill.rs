@@ -402,6 +402,12 @@ pub enum SkillUpdateStatusResponse {
 	UpdateAvailable {
 		current: String,
 		available: String,
+		#[serde(
+			rename = "upstreamCommitTime",
+			skip_serializing_if = "Option::is_none"
+		)]
+		#[ts(optional)]
+		upstream_commit_time: Option<String>,
 	},
 	Renamed {
 		#[serde(rename = "newName")]
@@ -421,12 +427,15 @@ impl From<aghub_core::skills::update::SkillUpdateStatus>
 		};
 		match s {
 			SkillUpdateStatus::UpToDate => SkillUpdateStatusResponse::UpToDate,
-			SkillUpdateStatus::UpdateAvailable { current, available } => {
-				SkillUpdateStatusResponse::UpdateAvailable {
-					current,
-					available,
-				}
-			}
+			SkillUpdateStatus::UpdateAvailable {
+				current,
+				available,
+				upstream_commit_time,
+			} => SkillUpdateStatusResponse::UpdateAvailable {
+				current,
+				available,
+				upstream_commit_time,
+			},
 			SkillUpdateStatus::Renamed { new_name } => {
 				SkillUpdateStatusResponse::Renamed { new_name }
 			}
@@ -538,6 +547,7 @@ mod tests {
 			status: SkillUpdateStatusResponse::UpdateAvailable {
 				current: "aaa".to_string(),
 				available: "bbb".to_string(),
+				upstream_commit_time: None,
 			},
 		};
 		let json = serde_json::to_value(&resp).unwrap();
@@ -546,6 +556,41 @@ mod tests {
 		assert_eq!(json["available"], "bbb");
 		assert_eq!(json["name"], "my-skill");
 		assert_eq!(json["scope"], "global");
+	}
+
+	#[test]
+	fn update_available_with_commit_time_serializes() {
+		let resp = SkillUpdateResponse {
+			name: "s".to_string(),
+			scope: "global".to_string(),
+			status: SkillUpdateStatusResponse::UpdateAvailable {
+				current: "aaa".to_string(),
+				available: "bbb".to_string(),
+				upstream_commit_time: Some("2026-06-20T10:00:00Z".to_string()),
+			},
+		};
+		let val = serde_json::to_value(&resp).unwrap();
+		assert_eq!(val["status"], "updateAvailable");
+		assert_eq!(val["upstreamCommitTime"], "2026-06-20T10:00:00Z");
+	}
+
+	#[test]
+	fn update_available_without_commit_time_omits_field() {
+		let resp = SkillUpdateResponse {
+			name: "s".to_string(),
+			scope: "global".to_string(),
+			status: SkillUpdateStatusResponse::UpdateAvailable {
+				current: "aaa".to_string(),
+				available: "bbb".to_string(),
+				upstream_commit_time: None,
+			},
+		};
+		let val = serde_json::to_value(&resp).unwrap();
+		assert!(
+			val.get("upstreamCommitTime").is_none()
+				|| val["upstreamCommitTime"].is_null(),
+			"absent time must be omitted"
+		);
 	}
 
 	#[test]

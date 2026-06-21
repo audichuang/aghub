@@ -986,6 +986,7 @@ mod tests {
 			Ok(skill_update::FetchedRepo {
 				root: self.root.clone(),
 				oid: String::new(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}

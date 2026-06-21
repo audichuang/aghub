@@ -72,6 +72,9 @@ pub struct SourceSkillDiff {
 	pub reason: Option<String>,
 	/// Scope labels where this skill is installed ("global"/"project").
 	pub installed_paths: Vec<String>,
+	/// RFC 3339 author-time of the upstream tip commit. Set only when the
+	/// skill is `InstalledOutdated`; `None` otherwise. Best-effort.
+	pub upstream_commit_time: Option<String>,
 }
 
 /// skill_path -> installed baseline metadata.
@@ -482,19 +485,21 @@ pub fn resolve_source_meta(
 pub(crate) fn classify_repo_skills(
 	root: &Path,
 	baseline: &Baseline,
+	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
 	let Ok(discovered) = skill::discover_repo_skills(root, &[], true) else {
 		// No SKILL.md in the repo → nothing to offer (old route returned an
 		// empty diff, bypassing the removed/changelog pass).
 		return Vec::new();
 	};
-	build_source_skill_diffs(root, discovered, baseline)
+	build_source_skill_diffs(root, discovered, baseline, upstream_commit_time)
 }
 
 fn build_source_skill_diffs(
 	root: &Path,
 	discovered: Vec<skill::RepoDiscoveredSkill>,
 	baseline: &Baseline,
+	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
 	use std::collections::BTreeSet;
 	let mut out = Vec::with_capacity(discovered.len() + baseline.len());
@@ -529,6 +534,7 @@ fn build_source_skill_diffs(
 					previous_name: None,
 					reason,
 					installed_paths: Vec::new(),
+					upstream_commit_time: None,
 				});
 			}
 			Some(entry) => {
@@ -539,6 +545,15 @@ fn build_source_skill_diffs(
 				if indexes_by_name.insert(name.clone(), out.len()).is_some() {
 					ambiguous_names.insert(name.clone());
 				}
+				// The upstream commit time is meaningful only for an
+				// out-of-date install ("updated N days ago"); all other states
+				// leave it `None`.
+				let commit_time =
+					if state == SourceSkillState::InstalledOutdated {
+						upstream_commit_time.clone()
+					} else {
+						None
+					};
 				out.push(SourceSkillDiff {
 					name,
 					skill_path,
@@ -549,6 +564,7 @@ fn build_source_skill_diffs(
 					previous_name,
 					reason,
 					installed_paths: vec![entry.scope_label.clone()],
+					upstream_commit_time: commit_time,
 				});
 			}
 		}
@@ -588,6 +604,7 @@ fn build_source_skill_diffs(
 			previous_name: None,
 			reason: Some("noPath".to_string()),
 			installed_paths: vec![entry.scope_label.clone()],
+			upstream_commit_time: None,
 		});
 	}
 
@@ -738,7 +755,8 @@ fn classify_installed(
 
 	if !entry.local_hashes.is_empty() {
 		if entry.local_hashes.iter().all(|hash| {
-			compare_known_hashes(hash, &fresh) == SkillUpdateStatus::UpToDate
+			compare_known_hashes(hash, &fresh, None)
+				== SkillUpdateStatus::UpToDate
 		}) {
 			return (SourceSkillState::InstalledCurrent, None);
 		}
@@ -761,7 +779,7 @@ fn classify_installed(
 	// discovered name up front). `compare_known_hashes` itself never returns
 	// `Renamed` — it only yields `UpToDate` or `UpdateAvailable` — so the
 	// `Renamed` arm is unreachable here and intentionally omitted.
-	match compare_known_hashes(base_hash, &fresh) {
+	match compare_known_hashes(base_hash, &fresh, None) {
 		SkillUpdateStatus::UpToDate => {
 			(SourceSkillState::InstalledCurrent, None)
 		}
@@ -813,7 +831,7 @@ pub fn classify_scope(
 	source: &str,
 ) -> Vec<SourceSkillDiff> {
 	let (baseline, _src_type, _ref) = baseline_for_scope(scope, source);
-	classify_repo_skills(root, &baseline)
+	classify_repo_skills(root, &baseline, None)
 }
 
 /// PUBLIC API entry: merged-baseline, single-classification, flat output —
@@ -847,7 +865,11 @@ pub fn diff_source(
 		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
 		Ok(repo) => SourceDiffOutcome::Ok {
 			git_ref,
-			skills: classify_repo_skills(repo.root.as_path(), &baseline),
+			skills: classify_repo_skills(
+				repo.root.as_path(),
+				&baseline,
+				repo.upstream_commit_time.clone(),
+			),
 		},
 	}
 }
@@ -1003,6 +1025,7 @@ mod classify_tests {
 				relative_dir: "skills/engineering/diagnosing-bugs".to_string(),
 			}],
 			&baseline,
+			None,
 		);
 
 		let removed = diffs
@@ -1039,6 +1062,7 @@ mod classify_tests {
 				relative_dir: "skills/deprecated/qa".to_string(),
 			}],
 			&Baseline::new(),
+			None,
 		);
 
 		assert_eq!(diffs.len(), 1);
@@ -1085,6 +1109,7 @@ mod classify_tests {
 				relative_dir: "skills/engineering/diagnosing-bugs".to_string(),
 			}],
 			&baseline,
+			None,
 		);
 
 		let renamed = diffs
@@ -1139,6 +1164,7 @@ mod classify_tests {
 					.to_string(),
 			}],
 			&baseline,
+			None,
 		);
 
 		let renamed = diffs
@@ -1239,6 +1265,7 @@ mod classify_tests {
 				},
 			],
 			&baseline,
+			None,
 		);
 
 		assert!(
@@ -1287,6 +1314,7 @@ mod classify_tests {
 				relative_dir: "skills/deprecated/qa".to_string(),
 			}],
 			&baseline,
+			None,
 		);
 
 		let qa = diffs
@@ -1397,6 +1425,7 @@ mod diff_tests {
 			Ok(crate::FetchedRepo {
 				root: self.root.clone(),
 				oid: "test-oid".to_string(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}
@@ -1426,6 +1455,7 @@ mod diff_tests {
 			Ok(crate::FetchedRepo {
 				root: self.root.clone(),
 				oid: "test-oid".to_string(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}
