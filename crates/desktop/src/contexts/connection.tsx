@@ -36,6 +36,14 @@ export interface TestResult {
 	apiVersion: string | null;
 	compatible: boolean;
 	message: string;
+	/**
+	 * The remote `aghub-api` advertises controller-side git-credential
+	 * forwarding (the `X-Aghub-Git-Tokens` header), probed over SSH via
+	 * `--capabilities`. Fail-safe: `false` whenever support cannot be
+	 * confirmed (old binary, transport failure, missing marker). Task 6 gates
+	 * forwarding on this being `true`.
+	 */
+	supportsCredentialForwarding: boolean;
 	installAttempted: boolean;
 	installSucceeded: boolean;
 	installMessage?: string | null;

@@ -2,7 +2,9 @@ use std::io::Write;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use aghub_api::cli::{parse_args, version_string, PORT_LINE_PREFIX};
+use aghub_api::cli::{
+	capabilities_string, parse_args, version_string, PORT_LINE_PREFIX,
+};
 use aghub_api::{start_with_port_reporter, ApiOptions};
 
 #[tokio::main]
@@ -17,6 +19,15 @@ async fn main() -> ExitCode {
 
 	if config.version {
 		println!("{}", version_string());
+		return ExitCode::SUCCESS;
+	}
+
+	// Advertise wire capabilities WITHOUT starting the server, so the desktop
+	// remote bring-up can detect feature support over SSH. An old binary
+	// predating this flag returns a parse error above, which the probe treats
+	// as "capability unsupported".
+	if config.capabilities {
+		println!("{}", capabilities_string());
 		return ExitCode::SUCCESS;
 	}
 

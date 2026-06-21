@@ -508,6 +508,43 @@ pub fn build_remote_probe_cmd(resolved_path: &str) -> String {
 	format!("{} \"$bin\" --version", assign_api_bin_cmd(resolved_path))
 }
 
+/// Stdout line prefix `aghub-api --capabilities` emits. Cross-crate contract
+/// mirrored from `aghub_api::cli::CAPABILITIES_LINE_PREFIX` (this crate does
+/// NOT depend on `aghub-api`, exactly like the `AGHUB_API_PORT=` contract). A
+/// test in each crate locks the literal so drift breaks a test.
+pub const CAPABILITY_LINE_PREFIX: &str = "AGHUB_API_CAPABILITIES=";
+
+/// Capability token advertising controller-side git-credential forwarding
+/// (mirrors `aghub_api::cli::CAP_GIT_CREDENTIAL_FORWARDING`).
+pub const CAP_GIT_CREDENTIAL_FORWARDING: &str = "git-credential-forwarding";
+
+/// Compose the capability probe `<bin> --capabilities` with the path escaped.
+///
+/// An `aghub-api` predating this feature has no `--capabilities` flag, so it
+/// exits non-zero / prints an unknown-flag error — the caller treats that as
+/// "capability unsupported" (fail-safe).
+pub fn build_remote_capabilities_cmd(resolved_path: &str) -> String {
+	format!(
+		"{} \"$bin\" --capabilities",
+		assign_api_bin_cmd(resolved_path)
+	)
+}
+
+/// Does `s` advertise the named capability `token`? True only when a
+/// well-formed `AGHUB_API_CAPABILITIES=` line (left-anchored at line start or
+/// after whitespace) lists `token` among its space-separated tokens. Anything
+/// else — no line, empty list, a different token — is `false`.
+pub fn capability_line_advertises(s: &str, token: &str) -> bool {
+	for line in s.lines() {
+		if let Some(rest) = key_value_rest(line, CAPABILITY_LINE_PREFIX) {
+			if rest.split_whitespace().any(|t| t == token) {
+				return true;
+			}
+		}
+	}
+	false
+}
+
 // ---------------------------------------------------------------------------
 // Stdout parsers
 // ---------------------------------------------------------------------------
@@ -594,6 +631,33 @@ pub fn probe_remote_platform<R: CommandRunner>(
 	let s = tokens.next()?;
 	let m = tokens.next()?;
 	normalize_platform(s, m)
+}
+
+/// Probe whether the remote `aghub-api` advertises git-credential forwarding,
+/// over SSH and WITHOUT a running HTTP server, by running `<bin>
+/// --capabilities` and looking for the [`CAP_GIT_CREDENTIAL_FORWARDING`] token.
+///
+/// **Fail-safe:** returns `false` on ANY uncertainty — transport failure, a
+/// non-zero remote exit (an old binary that lacks the flag prints an
+/// unknown-flag error and exits non-zero), or output missing the marker. It
+/// never falsely claims support, so the desktop only forwards the credential
+/// header to a remote that genuinely honors it.
+pub fn probe_supports_credential_forwarding<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	resolved_path: &str,
+) -> bool {
+	let remote_cmd = build_remote_capabilities_cmd(resolved_path);
+	let args = build_ssh_args(conn, &remote_cmd);
+	let Ok(out) = runner.run("ssh", &args) else {
+		return false;
+	};
+	// Only trust a clean exit; a non-zero status (incl. ssh transport 255 or an
+	// old binary's unknown-flag error) means we cannot confirm support.
+	if out.status_code != Some(0) {
+		return false;
+	}
+	capability_line_advertises(&out.stdout, CAP_GIT_CREDENTIAL_FORWARDING)
 }
 
 /// Find the first whitespace/EOL-terminated token after `key` on any
@@ -1047,6 +1111,205 @@ mod tests {
 			build_remote_probe_cmd("~/.local/bin/aghub-api"),
 			"bin=\"$HOME\"/'.local/bin/aghub-api'; \"$bin\" --version"
 		);
+	}
+
+	// --- build_remote_capabilities_cmd / capability parsing ---------------
+
+	#[test]
+	fn capabilities_cmd_quotes_path_and_appends_flag() {
+		assert_eq!(
+			build_remote_capabilities_cmd("/opt/aghub-api"),
+			"bin='/opt/aghub-api'; \"$bin\" --capabilities"
+		);
+	}
+
+	#[test]
+	fn capabilities_cmd_resolves_default_api_from_common_paths() {
+		let cmd = build_remote_capabilities_cmd("aghub-api");
+		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
+		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+		assert!(cmd.contains("--capabilities"));
+	}
+
+	#[test]
+	fn capabilities_cmd_neutralizes_injection() {
+		let cmd = build_remote_capabilities_cmd("a; rm -rf /");
+		assert_eq!(cmd, "bin='a; rm -rf /'; \"$bin\" --capabilities");
+	}
+
+	#[test]
+	fn capability_line_prefix_and_token_are_locked_literals() {
+		// Cross-crate contract mirrored from aghub_api::cli — must stay byte
+		// identical to what the binary emits.
+		assert_eq!(CAPABILITY_LINE_PREFIX, "AGHUB_API_CAPABILITIES=");
+		assert_eq!(CAP_GIT_CREDENTIAL_FORWARDING, "git-credential-forwarding");
+	}
+
+	#[test]
+	fn capability_line_advertises_matches_present_token() {
+		assert!(capability_line_advertises(
+			"AGHUB_API_CAPABILITIES=git-credential-forwarding",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+		// Multiple tokens, target among them.
+		assert!(capability_line_advertises(
+			"AGHUB_API_CAPABILITIES=foo git-credential-forwarding bar",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+		// Multiline banner before the capability line.
+		assert!(capability_line_advertises(
+			"some banner\nAGHUB_API_CAPABILITIES=git-credential-forwarding",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+	}
+
+	#[test]
+	fn capability_line_advertises_rejects_absent_or_malformed() {
+		// No capability line at all (old binary's unknown-flag stderr leaks
+		// nothing useful to stdout).
+		assert!(!capability_line_advertises(
+			"error: unrecognized argument --capabilities",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+		// Empty token list.
+		assert!(!capability_line_advertises(
+			"AGHUB_API_CAPABILITIES=",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+		// A different token only.
+		assert!(!capability_line_advertises(
+			"AGHUB_API_CAPABILITIES=some-other-feature",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+		// A prefix-suffix collision must NOT match (left word boundary).
+		assert!(!capability_line_advertises(
+			"X_AGHUB_API_CAPABILITIES=git-credential-forwarding",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+		// A substring of the token is not the token.
+		assert!(!capability_line_advertises(
+			"AGHUB_API_CAPABILITIES=git-credential",
+			CAP_GIT_CREDENTIAL_FORWARDING
+		));
+	}
+
+	fn cap_conn() -> Connection {
+		Connection {
+			id: "c".into(),
+			label: "c".into(),
+			ssh_target: "host".into(),
+			user: None,
+			port: None,
+			remote_aghub_path: None,
+		}
+	}
+
+	#[test]
+	fn probe_credential_forwarding_true_when_marker_present() {
+		let conn = cap_conn();
+		let cmd = build_remote_capabilities_cmd("aghub-api");
+		let args_owned = build_ssh_args(&conn, &cmd);
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "AGHUB_API_CAPABILITIES=git-credential-forwarding\n"
+					.into(),
+				stderr: String::new(),
+			},
+		);
+		assert!(probe_supports_credential_forwarding(
+			&runner,
+			&conn,
+			"aghub-api"
+		));
+	}
+
+	#[test]
+	fn probe_credential_forwarding_false_for_old_binary_unknown_flag() {
+		// An old aghub-api lacks `--capabilities`: the hand-rolled parser
+		// returns an UnknownFlag error and the binary exits non-zero, printing
+		// the error to stderr. No capability line on stdout -> false.
+		let conn = cap_conn();
+		let cmd = build_remote_capabilities_cmd("aghub-api");
+		let args_owned = build_ssh_args(&conn, &cmd);
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(1),
+				stdout: String::new(),
+				stderr: "unknown flag: --capabilities".into(),
+			},
+		);
+		assert!(!probe_supports_credential_forwarding(
+			&runner,
+			&conn,
+			"aghub-api"
+		));
+	}
+
+	#[test]
+	fn probe_credential_forwarding_false_on_zero_exit_but_no_marker() {
+		// Defensive: a clean exit whose stdout lacks the marker (e.g. a future
+		// binary that prints an unrelated line) must still be treated as
+		// unsupported.
+		let conn = cap_conn();
+		let cmd = build_remote_capabilities_cmd("aghub-api");
+		let args_owned = build_ssh_args(&conn, &cmd);
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "aghub-api 1.0.0\n".into(),
+				stderr: String::new(),
+			},
+		);
+		assert!(!probe_supports_credential_forwarding(
+			&runner,
+			&conn,
+			"aghub-api"
+		));
+	}
+
+	#[test]
+	fn probe_credential_forwarding_false_on_transport_failure() {
+		let conn = cap_conn();
+		let cmd = build_remote_capabilities_cmd("aghub-api");
+		let args_owned = build_ssh_args(&conn, &cmd);
+		let args: Vec<&str> = args_owned.iter().map(String::as_str).collect();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args,
+			CommandOutput {
+				status_code: Some(255),
+				stdout: String::new(),
+				stderr: "ssh: connect to host failed".into(),
+			},
+		);
+		assert!(!probe_supports_credential_forwarding(
+			&runner,
+			&conn,
+			"aghub-api"
+		));
+	}
+
+	#[test]
+	fn probe_credential_forwarding_false_when_runner_errors() {
+		// An unscripted MockRunner call returns Err (runner-level failure);
+		// the probe must fail safe.
+		let conn = cap_conn();
+		let runner = MockRunner::new();
+		assert!(!probe_supports_credential_forwarding(
+			&runner,
+			&conn,
+			"aghub-api"
+		));
 	}
 
 	#[test]
