@@ -956,8 +956,12 @@ struct SkillSnapshot {
 /// (possibly relative). On Unix one syscall handles both file and dir targets;
 /// on Windows the kind must be chosen, so resolve `target` relative to `link`'s
 /// parent and pick `symlink_dir`/`symlink_file` by the resolved metadata
-/// (defaulting to a file link when the target cannot be stat'd). Mirrors the
-/// API helper; keeps snapshot/restore compiling on the Windows release build.
+/// (defaulting to a file link when the target cannot be stat'd). For a directory
+/// target on Windows we mirror the project linker's create-fallback: native
+/// `symlink_dir` first (needs Dev Mode/admin), else a directory junction via
+/// `mklink /J` using the ABSOLUTE resolved target — so a junction Referrer
+/// round-trips through snapshot/restore even without admin. Mirrors the API
+/// helper; keeps snapshot/restore compiling on the Windows release build.
 fn xplat_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 	#[cfg(unix)]
 	{
@@ -974,26 +978,63 @@ fn xplat_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
 			.map(|m| m.is_dir())
 			.unwrap_or(false)
 		{
-			std::os::windows::fs::symlink_dir(target, link)
+			if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+				return Ok(());
+			}
+			// Fallback: directory junction (no admin). A junction cannot store a
+			// relative target, so use the absolute resolved path.
+			create_junction(&resolved, link)
 		} else {
 			std::os::windows::fs::symlink_file(target, link)
 		}
 	}
 }
 
-/// Recursively copy `src` (a real directory) into `dst`.
+/// Create a directory junction at `link` pointing at the ABSOLUTE `abs_target`
+/// via `cmd /C mklink /J`. Mirrors the project linker's `create_junction`
+/// (which is crate-private to `aghub-core`): the junction fallback the linker
+/// uses when native `symlink_dir` is unavailable. Create-only.
+#[cfg(windows)]
+fn create_junction(abs_target: &Path, link: &Path) -> std::io::Result<()> {
+	use std::os::windows::process::CommandExt;
+	use std::process::Command;
+
+	let out = Command::new("cmd")
+		.args(["/C", "mklink", "/J"])
+		.arg(link)
+		.arg(abs_target)
+		.creation_flags(0x08000000) // CREATE_NO_WINDOW
+		.output()?;
+	if out.status.success() {
+		Ok(())
+	} else {
+		Err(std::io::Error::other(format!(
+			"mklink /J {} {} failed: {} {}",
+			link.display(),
+			abs_target.display(),
+			String::from_utf8_lossy(&out.stderr).trim(),
+			String::from_utf8_lossy(&out.stdout).trim()
+		)))
+	}
+}
+
+/// Recursively copy `src` (a real directory) into `dst`. A reparse point
+/// (Unix symlink OR Windows symlink/junction — detected via the project linker's
+/// [`Linker::is_link`], not bare `is_symlink()`) is re-created as a link, never
+/// deep-copied as a real directory.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+	use aghub_core::skills::linker::Linker;
 	std::fs::create_dir_all(dst)?;
 	for entry in std::fs::read_dir(src)? {
 		let entry = entry?;
 		let file_type = entry.file_type()?;
 		let from = entry.path();
 		let to = dst.join(entry.file_name());
-		if file_type.is_dir() {
-			copy_dir_recursive(&from, &to)?;
-		} else if file_type.is_symlink() {
+		if Linker::is_link(&from) {
 			let target = std::fs::read_link(&from)?;
 			xplat_symlink(&target, &to)?;
+		} else if file_type.is_dir() {
+			copy_dir_recursive(&from, &to)?;
 		} else {
 			std::fs::copy(&from, &to)?;
 		}
@@ -1041,7 +1082,11 @@ fn snapshot_old_skill(
 			continue;
 		};
 		let backup = tmp.path().join(format!("snap-{idx}"));
-		let result = if meta.file_type().is_symlink() {
+		// A reparse point (Unix symlink OR Windows symlink/junction) is captured
+		// by recording its target and re-creating it as a link — NEVER
+		// deep-copied as a real directory. `Linker::is_link` covers junctions
+		// (FILE_ATTRIBUTE_REPARSE_POINT), which bare `is_symlink()` may miss.
+		let result = if aghub_core::skills::linker::Linker::is_link(&live) {
 			std::fs::read_link(&live)
 				.and_then(|target| xplat_symlink(&target, &backup))
 		} else if meta.is_dir() {
@@ -1098,9 +1143,16 @@ fn new_name_exists_in_scope(
 
 /// Restore every captured location from a snapshot (best-effort rollback).
 fn restore_snapshot(snapshot: &SkillSnapshot) {
+	use aghub_core::skills::linker::Linker;
 	for (live, backup) in &snapshot.entries {
-		if let Ok(meta) = std::fs::symlink_metadata(live) {
-			if meta.file_type().is_symlink() || meta.is_file() {
+		// Clear whatever (partial) state is at `live` before restoring. A
+		// reparse point (Unix symlink OR Windows symlink/junction) is unlinked
+		// with `Linker::unlink` (Windows `remove_dir`, junction-safe), NEVER
+		// `remove_dir_all` — recursing into a junction would delete the Master.
+		if Linker::is_link(live) {
+			let _ = Linker::unlink(live);
+		} else if let Ok(meta) = std::fs::symlink_metadata(live) {
+			if meta.is_file() {
 				let _ = std::fs::remove_file(live);
 			} else if meta.is_dir() {
 				let _ = std::fs::remove_dir_all(live);
@@ -1109,7 +1161,7 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 		let Ok(meta) = std::fs::symlink_metadata(backup) else {
 			continue;
 		};
-		let _ = if meta.file_type().is_symlink() {
+		let _ = if Linker::is_link(backup) {
 			std::fs::read_link(backup)
 				.and_then(|target| xplat_symlink(&target, live))
 		} else if meta.is_dir() {
@@ -1135,10 +1187,14 @@ fn rollback_rename_install(
 	);
 	for dir in agent_dirs {
 		let target = dir.join(&safe);
-		if let Ok(meta) = std::fs::symlink_metadata(&target) {
-			if meta.file_type().is_symlink() {
-				let _ = std::fs::remove_file(&target);
-			} else if meta.is_dir()
+		// A reparse point (Unix symlink OR Windows symlink/junction) is unlinked
+		// directly with `Linker::unlink` (Windows `remove_dir`, junction-safe) —
+		// NEVER `remove_dir_all`, which would recurse into a junction's Master. A
+		// real dir is removed only if contained.
+		if aghub_core::skills::linker::Linker::is_link(&target) {
+			let _ = aghub_core::skills::linker::Linker::unlink(&target);
+		} else if let Ok(meta) = std::fs::symlink_metadata(&target) {
+			if meta.is_dir()
 				&& aghub_core::skills::removal::assert_contained(
 					&target, &roots,
 				)
