@@ -489,6 +489,43 @@ pub struct ApplySkillUpdateResponse {
 	pub code: Option<String>,
 }
 
+/// Request to atomically rename an installed skill:
+/// install upstream-current under `new_name` + delete `old_name`.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptRenameRequest {
+	/// Locked name of the installed skill to replace.
+	pub old_name: String,
+	/// New upstream name (from the `renamed.newName` field).
+	pub new_name: String,
+	pub scope: String,
+	pub project_root: Option<String>,
+	/// Must be `true` to execute.  Absent / false → dry-run description only.
+	pub confirm: Option<bool>,
+}
+
+/// Response from `POST /skills/accept-rename`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct AcceptRenameResponse {
+	pub success: bool,
+	pub old_name: String,
+	pub new_name: String,
+	pub scope: String,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub installed_hash: Option<String>,
+	pub paths: Vec<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub error: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub code: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -593,5 +630,36 @@ mod tests {
 			project_root: req.project_root,
 		};
 		assert_eq!(req.session_id, "s");
+	}
+
+	#[test]
+	fn accept_rename_request_deserializes() {
+		let json =
+			r#"{"oldName":"a","newName":"b","scope":"global","confirm":true}"#;
+		let req: AcceptRenameRequest =
+			serde_json::from_str(json).expect("must deserialise");
+		assert_eq!(req.old_name, "a");
+		assert_eq!(req.new_name, "b");
+		assert_eq!(req.scope, "global");
+		assert_eq!(req.confirm, Some(true));
+	}
+
+	#[test]
+	fn accept_rename_response_serializes_success() {
+		let resp = AcceptRenameResponse {
+			success: true,
+			old_name: "a".to_string(),
+			new_name: "b".to_string(),
+			scope: "global".to_string(),
+			installed_hash: Some("abc123".to_string()),
+			paths: vec!["/some/path".to_string()],
+			error: None,
+			code: None,
+		};
+		let val = serde_json::to_value(&resp).unwrap();
+		assert_eq!(val["success"], true);
+		assert_eq!(val["oldName"], "a");
+		assert_eq!(val["newName"], "b");
+		assert!(val.get("error").is_none() || val["error"].is_null());
 	}
 }
