@@ -17,7 +17,6 @@ pub(crate) mod origin;
 pub(crate) mod public;
 
 // Forwarded git-credential primitives (resolver + request guard + chain).
-// Built here as reusable pieces; route/CORS wiring lands in a later task, so
-// the items are not yet referenced from any route.
-#[allow(dead_code)]
+// Wired into the sources/diff, check-updates, apply-update, and git-scan
+// routes (remote git-credential forwarding).
 pub(crate) mod forwarding;

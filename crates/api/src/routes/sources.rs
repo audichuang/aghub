@@ -14,6 +14,7 @@
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
+use crate::credentials::forwarding::{ChainResolver, ForwardedGitTokens};
 use crate::credentials::resolve::{
 	load_source_bindings, resolve_token_for_source,
 };
@@ -69,11 +70,21 @@ fn token_for_source(source: &str) -> Option<String> {
 	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
 }
 
+/// Test-only recorder for the token the diff fetch was invoked with. The diff
+/// runs on a `spawn_blocking` thread distinct from the test thread, so this is a
+/// process-global slot (not a thread-local). The `AGHUB_TEST_SOURCE_FETCH_ROOT`
+/// tests serialize on the crate-wide env lock, so a single slot is sufficient.
+#[cfg(test)]
+static LAST_FETCH_TOKEN: std::sync::Mutex<Option<Option<String>>> =
+	std::sync::Mutex::new(None);
+
 /// Production fetch is [`GitFetcher`]. Under `cfg(test)` an env hook
 /// (`AGHUB_TEST_SOURCE_FETCH_ROOT`) lets the route-level HTTP-shape tests point
 /// the diff at a local dir instead of hitting the network — preserving the old
 /// route's `test_fetch_source_from_env` behavior now that the route delegates
-/// to the shared `diff_source`.
+/// to the shared `diff_source`. In test mode it also records the token the fetch
+/// was called with so the forwarding tests can assert which credential reached
+/// the fetch.
 struct ApiFetcher;
 
 impl Fetcher for ApiFetcher {
@@ -84,6 +95,16 @@ impl Fetcher for ApiFetcher {
 	) -> Result<FetchedRepo, FetchError> {
 		#[cfg(test)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
+			// When `AGHUB_TEST_REQUIRE_TOKEN` is set, the unauthenticated fetch
+			// fails so the lazy-auth path resolves a token and retries — letting
+			// the forwarding tests observe which credential reaches the fetch.
+			let require_token =
+				std::env::var_os("AGHUB_TEST_REQUIRE_TOKEN").is_some();
+			if require_token && token.is_none() {
+				return Err(FetchError::Auth);
+			}
+			*LAST_FETCH_TOKEN.lock().unwrap_or_else(|e| e.into_inner()) =
+				Some(token.map(str::to_string));
 			let root = std::path::PathBuf::from(root);
 			return if root.is_dir() {
 				Ok(FetchedRepo {
@@ -148,6 +169,7 @@ pub struct SourceDiffQuery {
 #[get("/skills/sources/diff?<query..>")]
 pub async fn diff_source(
 	query: SourceDiffQuery,
+	forwarded: ForwardedGitTokens,
 ) -> ApiResult<SourceDiffResponse> {
 	let scope_params = ScopeParams {
 		scope: query.scope.clone(),
@@ -166,12 +188,17 @@ pub async fn diff_source(
 		git_ref: query.git_ref.clone(),
 		scopes,
 	};
+	// Forwarded tokens (header) take precedence over the local keyring: a remote
+	// api has no keyring of its own, so the controller-resolved token must win.
+	// An absent/empty header degrades to the keyring path (backward compatible).
+	let forwarded_resolver = forwarded.into_resolver();
 	let outcome = rocket::tokio::task::spawn_blocking(move || {
+		let chain = ChainResolver::new(forwarded_resolver, &KeyringResolver);
 		sources::diff_source(
 			input,
 			SourceDiffDeps {
 				fetcher: &ApiFetcher,
-				resolver: &KeyringResolver,
+				resolver: &chain,
 			},
 		)
 	})
@@ -293,6 +320,12 @@ mod tests {
 			std::env::set_var(key, value);
 			Self { key, old }
 		}
+
+		fn set_str(key: &'static str, value: &str) -> Self {
+			let old = std::env::var(key).ok();
+			std::env::set_var(key, value);
+			Self { key, old }
+		}
 	}
 
 	impl Drop for EnvVarGuard {
@@ -401,5 +434,146 @@ mod tests {
 		assert_eq!(removed["state"], "removed");
 		assert_eq!(removed["reason"], "noPath");
 		assert_eq!(removed["installedPaths"], serde_json::json!(["global"]));
+	}
+
+	// ─── remote git-credential forwarding (X-Aghub-Git-Tokens) ──────────────
+
+	/// Base64-encode a JSON `source → token` map for the forward header.
+	fn encode_tokens(pairs: &[(&str, &str)]) -> String {
+		use base64::engine::general_purpose::STANDARD as BASE64;
+		use base64::Engine as _;
+		let map: std::collections::BTreeMap<&str, &str> =
+			pairs.iter().copied().collect();
+		BASE64.encode(serde_json::to_vec(&map).unwrap())
+	}
+
+	/// Read + clear the recorded fetch token (the token the diff fetch was
+	/// actually invoked with). `Some(Some(t))` = fetched with token `t`;
+	/// `Some(None)` = fetched unauthenticated; `None` = fetch never recorded.
+	fn take_recorded_token() -> Option<Option<String>> {
+		super::LAST_FETCH_TOKEN
+			.lock()
+			.unwrap_or_else(|e| e.into_inner())
+			.take()
+	}
+
+	/// Seed a single-skill upstream + a lock entry for `source`, returning the
+	/// upstream temp dir (kept alive by the caller for the fetch root).
+	fn seed_source(source: &str) -> TempDir {
+		let upstream = tempdir().unwrap();
+		write_skill(upstream.path(), "skills/demo", "demo");
+		skill::lock::add_skill_to_lock(
+			"demo",
+			global_entry(source, "skills/demo/SKILL.md"),
+		)
+		.unwrap();
+		upstream
+	}
+
+	#[test]
+	fn diff_with_forwarded_header_uses_forwarded_token_for_fetch() {
+		let _global = GlobalLockGuard::new();
+		let source = "owner/private-repo";
+		let upstream = seed_source(source);
+
+		let _fetch_root =
+			EnvVarGuard::set("AGHUB_TEST_SOURCE_FETCH_ROOT", upstream.path());
+		// Force the lazy-auth retry so the resolved token reaches the fetch.
+		let _require = EnvVarGuard::set_str("AGHUB_TEST_REQUIRE_TOKEN", "1");
+		let _ = take_recorded_token();
+
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+		let header = encode_tokens(&[(source, "FWD-TOKEN")]);
+		let response = client
+			.get(format!("/skills/sources/diff?scope=global&source={source}"))
+			.header(rocket::http::Header::new("X-Aghub-Git-Tokens", header))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::Ok);
+		let body = response.into_string().expect("response body");
+		let value: Value = serde_json::from_str(&body).expect("valid JSON");
+		// The forwarded token satisfied the auth-required fetch, so the source
+		// is NOT reported as needing a credential.
+		assert_eq!(value["needsCredential"], false);
+		// The forwarded token is exactly what reached the fetch.
+		assert_eq!(
+			take_recorded_token(),
+			Some(Some("FWD-TOKEN".to_string())),
+			"the forwarded token must reach the fetch"
+		);
+	}
+
+	#[test]
+	fn diff_without_header_keeps_keyring_path() {
+		let _global = GlobalLockGuard::new();
+		let source = "owner/private-repo";
+		let upstream = seed_source(source);
+
+		let _fetch_root =
+			EnvVarGuard::set("AGHUB_TEST_SOURCE_FETCH_ROOT", upstream.path());
+		// Auth required, but NO forward header → the keyring resolver runs and
+		// (with an empty test keyring) yields no token → needs_credential.
+		let _require = EnvVarGuard::set_str("AGHUB_TEST_REQUIRE_TOKEN", "1");
+		let _ = take_recorded_token();
+
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+		let response = client
+			.get(format!("/skills/sources/diff?scope=global&source={source}"))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::Ok);
+		let body = response.into_string().expect("response body");
+		let value: Value = serde_json::from_str(&body).expect("valid JSON");
+		// No forwarded token, empty keyring → unchanged keyring behaviour.
+		assert_eq!(value["needsCredential"], true);
+		// The fetch was only ever attempted unauthenticated (no token recorded
+		// because the unauthenticated attempt short-circuits to Auth error).
+		assert_eq!(
+			take_recorded_token(),
+			None,
+			"no token should reach the fetch without a forward header"
+		);
+	}
+
+	#[test]
+	fn diff_does_not_attach_cross_origin_forwarded_token() {
+		let _global = GlobalLockGuard::new();
+		// The request is for a github.com source, but the header carries a
+		// gitlab.com source token. Host-scoped matching keeps the two apart, so
+		// the github.com diff must NOT pick up the gitlab token.
+		let source = "owner/repo";
+		let upstream = seed_source(source);
+
+		let _fetch_root =
+			EnvVarGuard::set("AGHUB_TEST_SOURCE_FETCH_ROOT", upstream.path());
+		let _require = EnvVarGuard::set_str("AGHUB_TEST_REQUIRE_TOKEN", "1");
+		let _ = take_recorded_token();
+
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+		// Token bound to a DIFFERENT origin (gitlab.com) than the request.
+		let header =
+			encode_tokens(&[("https://gitlab.com/owner/repo.git", "GL-TOKEN")]);
+		let response = client
+			.get(format!("/skills/sources/diff?scope=global&source={source}"))
+			.header(rocket::http::Header::new("X-Aghub-Git-Tokens", header))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::Ok);
+		let body = response.into_string().expect("response body");
+		let value: Value = serde_json::from_str(&body).expect("valid JSON");
+		// The cross-origin token is not attached; with an empty keyring the
+		// auth-required fetch yields needs_credential, NOT a token-fed success.
+		assert_eq!(value["needsCredential"], true);
+		assert_eq!(
+			take_recorded_token(),
+			None,
+			"a token for a different origin must not reach the fetch"
+		);
 	}
 }

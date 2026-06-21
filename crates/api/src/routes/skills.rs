@@ -15,6 +15,7 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
+	credentials::forwarding::ForwardedGitTokens,
 	credentials::origin::{origin_of, origins_match, ResolvedOrigin},
 	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
@@ -1646,52 +1647,70 @@ fn same_origin(a: &str, b: &str) -> bool {
 pub async fn git_scan_skills(
 	body: Json<GitScanRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
+	forwarded: ForwardedGitTokens,
 ) -> ApiResult<GitScanResponse> {
 	let req = body.into_inner();
 
-	// Resolve credential token — either from session or from request.
+	// Remote git-credential forwarding: if the controller forwarded a token for
+	// this URL's source, it takes precedence over the `credential_id` keyring
+	// lookup / session reuse (a remote api has no keyring of its own). The token
+	// is origin-pinned to the request URL (Task 2 / D8) so a token resolved for
+	// origin A is never attached to an origin-B request. Once used, it is cached
+	// in the scan session below exactly like any other token, so branch rescans
+	// inherit it.
+	let forwarded_token = forwarded_token_for_url(&forwarded, &req.url);
+	// Tracks whether the resolved token came from the forwarded header, so the
+	// non-forwarded host-pin guards below are skipped for it.
+	let forwarded_used = forwarded_token.is_some();
+
+	// Resolve credential token — forwarded first, then request, then session.
 	// The session reuse branch also captures the session's stored URL so the
 	// guard below can pin a reused token to its own repository host.
 	let mut session_url: Option<String> = None;
-	let credential_token: Option<String> =
-		if let Some(ref cred_id) = req.credential_id {
-			let creds = crate::routes::credentials::load_credentials()
-				.map_err(|e| {
-					ApiError::new(
-						Status::InternalServerError,
-						format!("Failed to read credentials: {e}"),
-						"KEYCHAIN_ERROR",
-					)
-				})?;
-			let cred =
-				creds.iter().find(|c| c.id == *cred_id).ok_or_else(|| {
-					ApiError::new(
-						Status::NotFound,
-						"Credential not found",
-						"CREDENTIAL_NOT_FOUND",
-					)
-				})?;
-			Some(cred.token.clone())
-		} else if let Some(ref sid) = req.session_id {
-			// Reuse credential from existing session
-			let map = sessions.sessions.lock().unwrap();
-			match map.get(sid) {
-				Some(s) => {
-					session_url = Some(s.url.clone());
-					s.credential_token.clone()
-				}
-				None => None,
+	let credential_token: Option<String> = if let Some(token) = forwarded_token
+	{
+		Some(token)
+	} else if let Some(ref cred_id) = req.credential_id {
+		let creds =
+			crate::routes::credentials::load_credentials().map_err(|e| {
+				ApiError::new(
+					Status::InternalServerError,
+					format!("Failed to read credentials: {e}"),
+					"KEYCHAIN_ERROR",
+				)
+			})?;
+		let cred =
+			creds.iter().find(|c| c.id == *cred_id).ok_or_else(|| {
+				ApiError::new(
+					Status::NotFound,
+					"Credential not found",
+					"CREDENTIAL_NOT_FOUND",
+				)
+			})?;
+		Some(cred.token.clone())
+	} else if let Some(ref sid) = req.session_id {
+		// Reuse credential from existing session
+		let map = sessions.sessions.lock().unwrap();
+		match map.get(sid) {
+			Some(s) => {
+				session_url = Some(s.url.clone());
+				s.credential_token.clone()
 			}
-		} else {
-			None
-		};
+			None => None,
+		}
+	} else {
+		None
+	};
 
-	// Guard the explicitly supplied credential to github.com, but pin a reused
-	// session token to its own repository host instead (session tokens may be
-	// host-scoped private credentials resolved lazily on the original scan).
-	// The lazy/host-scoped path resolved inside the clone below is left
-	// unguarded — it is already bound to the scanned host.
-	if credential_token.is_some() {
+	// A forwarded token is already origin-pinned to `req.url` by
+	// `forwarded_token_for_url`, and is NOT restricted to github.com, so it
+	// bypasses the non-forwarded guards below. Only the request/session paths
+	// remain subject to: the explicit-credential github.com pin, and the
+	// reused-session same-origin pin (session tokens may be host-scoped private
+	// credentials resolved lazily on the original scan). The lazy/host-scoped
+	// path resolved inside the clone below is left unguarded — it is already
+	// bound to the scanned host.
+	if credential_token.is_some() && !forwarded_used {
 		if req.credential_id.is_some() {
 			require_github_credential_url(&req.url)?;
 		} else if let Some(ref stored_url) = session_url {
@@ -1889,6 +1908,38 @@ fn token_for_git_scan_source(source: &str) -> Option<String> {
 	let creds = crate::routes::credentials::load_credentials().ok()?;
 	let host = keychain_host_for_source(source);
 	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
+}
+
+/// Resolve a forwarded git token for `url` and origin-pin it to that URL.
+///
+/// The `forwarded` map (parsed from `X-Aghub-Git-Tokens`) is keyed by source.
+/// A forwarded source matches `url` using the same cross-URL-form, host-scoped
+/// matching the keyring bindings use (`lookup_keys` /
+/// `binding_keys_match_lookup`). On top of that we apply the Task 2 / D8 origin
+/// pin: the request URL's resolved clone-URL origin `(scheme, host, port)` must
+/// equal the matched forwarded source's resolved origin, so a token resolved
+/// for one origin is never attached to a different origin (e.g. a self-hosted
+/// forge on a different port — host-scoped matching alone would not catch this).
+/// Returns `None` (degrade to the keyring path) on any miss or mismatch — never
+/// a hard error, so an absent/benign header is transparent.
+fn forwarded_token_for_url(
+	forwarded: &ForwardedGitTokens,
+	url: &str,
+) -> Option<String> {
+	use crate::credentials::resolve::{binding_keys_match_lookup, lookup_keys};
+	let url_keys = lookup_keys(url);
+	if url_keys.is_empty() {
+		return None;
+	}
+	let url_clone = aghub_git::resolve_remote_source(url).ok()?.clone_url;
+	forwarded.0.iter().find_map(|(forwarded_source, token)| {
+		let host_scoped_match =
+			binding_keys_match_lookup(forwarded_source, &url_keys);
+		let origin_pinned = aghub_git::resolve_remote_source(forwarded_source)
+			.ok()
+			.is_some_and(|r| origins_match(&url_clone, &r.clone_url));
+		(host_scoped_match && origin_pinned).then(|| token.clone())
+	})
 }
 
 /// Try to detect the checked-out branch from the cloned repo via its gix `HEAD`
@@ -3170,6 +3221,80 @@ mod tests {
 			"https://git.internal/a.git",
 			"https://git.internal:443/b.git",
 		));
+	}
+
+	// ─── forwarded_token_for_url: host-scoped match + D8 origin pin ─────────
+
+	fn forwarded(pairs: &[(&str, &str)]) -> ForwardedGitTokens {
+		ForwardedGitTokens(
+			pairs
+				.iter()
+				.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+				.collect(),
+		)
+	}
+
+	#[test]
+	fn forwarded_token_matches_same_github_source() {
+		// Forwarded as the bare shorthand; the request uses the full URL. Both
+		// resolve to the same github.com origin, so the token is attached.
+		let map = forwarded(&[("owner/repo", "TOK")]);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_not_attached_cross_host() {
+		// A github.com forwarded token must not satisfy a gitlab.com request of
+		// the same `owner/repo` shape (host is encoded in the key set).
+		let map = forwarded(&[("owner/repo", "GHTOK")]);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://gitlab.com/owner/repo.git"),
+			None
+		);
+	}
+
+	#[test]
+	fn forwarded_token_not_attached_same_host_different_port() {
+		// D8: a token forwarded for a self-hosted forge on one port must NOT be
+		// attached to a request for the SAME host on a different port.
+		let map =
+			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
+		assert_eq!(
+			forwarded_token_for_url(
+				&map,
+				"https://git.internal:9090/owner/repo.git"
+			),
+			None
+		);
+	}
+
+	#[test]
+	fn forwarded_token_attached_same_host_same_port() {
+		// The positive counterpart to the D8 negative: a self-hosted forge on a
+		// custom port DOES match when the request is for the SAME origin. This
+		// proves the port-mismatch rejection above is the origin pin, not a
+		// resolve failure on custom-port URLs.
+		let map =
+			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
+		assert_eq!(
+			forwarded_token_for_url(
+				&map,
+				"https://git.internal:8443/owner/repo.git"
+			),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_none_for_empty_map() {
+		let map = forwarded(&[]);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			None
+		);
 	}
 
 	// A session token bound to one host must never be reused against a

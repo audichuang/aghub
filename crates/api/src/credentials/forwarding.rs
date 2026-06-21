@@ -32,7 +32,7 @@ const FORWARDED_TOKENS_HEADER: &str = "X-Aghub-Git-Tokens";
 /// keeps the API backward compatible: clients that do not forward tokens are
 /// indistinguishable from today's behavior.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ForwardedGitTokens(pub BTreeMap<String, String>);
+pub struct ForwardedGitTokens(pub(crate) BTreeMap<String, String>);
 
 impl ForwardedGitTokens {
 	/// Parse the raw header value into a `source → token` map.

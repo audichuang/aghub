@@ -21,6 +21,7 @@ use chrono::Utc;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
+use crate::credentials::forwarding::{ChainResolver, ForwardedGitTokens};
 use crate::dto::skill::{
 	AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
@@ -428,6 +429,7 @@ fn fetch_error_text(error: FetchError) -> &'static str {
 #[get("/skills/check-updates?<query..>")]
 pub async fn check_skill_updates(
 	query: CheckUpdatesParams,
+	forwarded: ForwardedGitTokens,
 ) -> ApiResult<Vec<SkillUpdateResponse>> {
 	let resolved = ScopeParams {
 		scope: query.scope.clone(),
@@ -438,7 +440,10 @@ pub async fn check_skill_updates(
 	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-	let resolver = KeyringResolver;
+	// Forwarded tokens (header) take precedence over the local keyring; an
+	// absent/empty header degrades to the keyring path (backward compatible).
+	let keyring = KeyringResolver;
+	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
@@ -471,16 +476,23 @@ pub async fn check_skill_updates(
 #[post("/skills/apply-update", data = "<body>")]
 pub async fn apply_skill_update(
 	body: Json<ApplySkillUpdateRequest>,
+	forwarded: ForwardedGitTokens,
 ) -> ApiResult<ApplySkillUpdateResponse> {
-	apply_skill_update_inner(body.into_inner(), &GitFetcher).await
+	// Forwarded tokens (header) take precedence over the local keyring; an
+	// absent/empty header degrades to the keyring path (backward compatible).
+	let keyring = KeyringResolver;
+	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
+	apply_skill_update_inner(body.into_inner(), &GitFetcher, &resolver).await
 }
 
-/// Inner apply path that takes an injected [`Fetcher`] so the rename guard
-/// (and the rest of the happy-path wiring) is unit-testable without a real
-/// network. The route handler is a thin shim that supplies [`GitFetcher`].
+/// Inner apply path that takes an injected [`Fetcher`] + [`TokenResolver`] so
+/// the rename guard (and the rest of the happy-path wiring) is unit-testable
+/// without a real network. The route handler is a thin shim that supplies
+/// [`GitFetcher`] + the forwarded/keyring [`ChainResolver`].
 pub(crate) async fn apply_skill_update_inner(
 	req: ApplySkillUpdateRequest,
 	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
 ) -> ApiResult<ApplySkillUpdateResponse> {
 	if !req.confirm.unwrap_or(false) {
 		return Ok(Json(apply_error(
@@ -533,7 +545,6 @@ pub(crate) async fn apply_skill_update_inner(
 		)));
 	}
 
-	let resolver = KeyringResolver;
 	let token = resolver.resolve(
 		&source.source,
 		keychain_host_for_source(&source.source).as_deref(),
@@ -1916,13 +1927,15 @@ mod tests {
 				confirm: Some(true),
 			};
 
+			let resolver = KeyringResolver;
 			let resp =
 				match rocket::tokio::runtime::Builder::new_current_thread()
 					.enable_all()
 					.build()
 					.unwrap()
-					.block_on(apply_skill_update_inner(req, &fetcher))
-				{
+					.block_on(apply_skill_update_inner(
+						req, &fetcher, &resolver,
+					)) {
 					Ok(json) => json.into_inner(),
 					Err(error) => {
 						panic!("apply should return Ok: {}", error.body.error)
