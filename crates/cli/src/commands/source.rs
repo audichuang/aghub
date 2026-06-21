@@ -240,6 +240,13 @@ struct DiffSkillView {
 	reason: Option<String>,
 	#[serde(rename = "previousName", skip_serializing_if = "Option::is_none")]
 	previous_name: Option<String>,
+	/// RFC 3339 author-time of the upstream tip; populated only for
+	/// `installedOutdated` rows (mirrors the API/domain contract).
+	#[serde(
+		rename = "upstreamCommitTime",
+		skip_serializing_if = "Option::is_none"
+	)]
+	upstream_commit_time: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -255,6 +262,7 @@ fn diff_skill_to_view(d: &SourceSkillDiff) -> DiffSkillView {
 		skill_path: d.skill_path.clone(),
 		reason: d.reason.clone(),
 		previous_name: d.previous_name.clone(),
+		upstream_commit_time: d.upstream_commit_time.clone(),
 	}
 }
 
@@ -306,8 +314,12 @@ fn diff(
 	let per_scope: Vec<(&SourceScope, Vec<SourceSkillDiff>)> = scopes
 		.iter()
 		.map(|scope| {
-			let diffs =
-				sources::classify_scope(repo.root.as_path(), scope, &source);
+			let diffs = sources::classify_scope(
+				repo.root.as_path(),
+				scope,
+				&source,
+				repo.upstream_commit_time.clone(),
+			);
 			(scope, diffs)
 		})
 		.collect();
@@ -467,8 +479,12 @@ fn sync(args: SyncArgs) -> Result<()> {
 		}
 	};
 
-	let diffs =
-		sources::classify_scope(repo.root.as_path(), &source_scope, &source);
+	let diffs = sources::classify_scope(
+		repo.root.as_path(),
+		&source_scope,
+		&source,
+		repo.upstream_commit_time.clone(),
+	);
 
 	// Neither flag: print the plan (per-state overview) and ask the user to
 	// choose an action. Read-only/informational — write NOTHING.
@@ -936,6 +952,35 @@ struct SkillSnapshot {
 	entries: Vec<(PathBuf, PathBuf)>,
 }
 
+/// Cross-platform symlink: create a link at `link` pointing at `target`
+/// (possibly relative). On Unix one syscall handles both file and dir targets;
+/// on Windows the kind must be chosen, so resolve `target` relative to `link`'s
+/// parent and pick `symlink_dir`/`symlink_file` by the resolved metadata
+/// (defaulting to a file link when the target cannot be stat'd). Mirrors the
+/// API helper; keeps snapshot/restore compiling on the Windows release build.
+fn xplat_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+	#[cfg(unix)]
+	{
+		std::os::unix::fs::symlink(target, link)
+	}
+	#[cfg(windows)]
+	{
+		let resolved = if target.is_absolute() {
+			target.to_path_buf()
+		} else {
+			link.parent().unwrap_or_else(|| Path::new(".")).join(target)
+		};
+		if std::fs::metadata(&resolved)
+			.map(|m| m.is_dir())
+			.unwrap_or(false)
+		{
+			std::os::windows::fs::symlink_dir(target, link)
+		} else {
+			std::os::windows::fs::symlink_file(target, link)
+		}
+	}
+}
+
 /// Recursively copy `src` (a real directory) into `dst`.
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 	std::fs::create_dir_all(dst)?;
@@ -948,7 +993,7 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 			copy_dir_recursive(&from, &to)?;
 		} else if file_type.is_symlink() {
 			let target = std::fs::read_link(&from)?;
-			std::os::unix::fs::symlink(&target, &to)?;
+			xplat_symlink(&target, &to)?;
 		} else {
 			std::fs::copy(&from, &to)?;
 		}
@@ -958,14 +1003,20 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 /// Capture the old-name skill across the in-scope agent dirs + the universal
 /// master into a temp backup. Symlinks are preserved; real dirs are deep-copied.
+///
+/// MUST run BEFORE any mutation. A failure to create the backup tempdir, or to
+/// copy/readlink an EXISTING old target, aborts the operation (returns `Err`) so
+/// a backup failure can never become permanent old-skill loss when a later step
+/// fails. Genuinely-absent paths are skipped (nothing to back up).
 fn snapshot_old_skill(
 	name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	agent_dirs: &[PathBuf],
-) -> Option<SkillSnapshot> {
+) -> Result<SkillSnapshot> {
 	let safe = skill::sanitize_name(name);
-	let tmp = tempfile::tempdir().ok()?;
+	let tmp =
+		tempfile::tempdir().context("failed to create snapshot backup dir")?;
 	let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let mut captured = std::collections::HashSet::new();
 
@@ -990,20 +1041,59 @@ fn snapshot_old_skill(
 			continue;
 		};
 		let backup = tmp.path().join(format!("snap-{idx}"));
-		let ok = if meta.file_type().is_symlink() {
+		let result = if meta.file_type().is_symlink() {
 			std::fs::read_link(&live)
-				.and_then(|target| std::os::unix::fs::symlink(&target, &backup))
+				.and_then(|target| xplat_symlink(&target, &backup))
 		} else if meta.is_dir() {
 			copy_dir_recursive(&live, &backup)
 		} else {
 			std::fs::copy(&live, &backup).map(|_| ())
 		};
-		if ok.is_ok() {
-			entries.push((live, backup));
-		}
+		result.context("failed to snapshot old skill before rename")?;
+		entries.push((live, backup));
 	}
 
-	Some(SkillSnapshot { _tmp: tmp, entries })
+	Ok(SkillSnapshot { _tmp: tmp, entries })
+}
+
+/// Whether `new_name` already has a lock entry OR an on-disk skill dir in the
+/// target scope. Used to refuse clobbering pre-existing data (P0-2), which would
+/// make the "remove all new_name paths" rollback delete data this transaction
+/// did not create. Mirrors the API's `new_name_exists_in_scope`.
+fn new_name_exists_in_scope(
+	new_name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	agent_dirs: &[PathBuf],
+) -> bool {
+	let in_lock = match scope {
+		ResourceScope::GlobalOnly => {
+			skill::lock::global::get_skill_from_lock(new_name).is_some()
+		}
+		ResourceScope::ProjectOnly => project_root.is_some_and(|root| {
+			skill::lock::local::read_local_lock(Some(root))
+				.skills
+				.contains_key(new_name)
+		}),
+		_ => false,
+	};
+	if in_lock {
+		return true;
+	}
+	let safe = skill::sanitize_name(new_name);
+	let mut targets: Vec<PathBuf> =
+		agent_dirs.iter().map(|d| d.join(&safe)).collect();
+	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
+		project_root
+	} else {
+		None
+	};
+	if let Some(master) =
+		aghub_core::skills::linker::universal_canonical_dir(canonical_root)
+	{
+		targets.push(master.join(&safe));
+	}
+	targets.iter().any(|p| std::fs::symlink_metadata(p).is_ok())
 }
 
 /// Restore every captured location from a snapshot (best-effort rollback).
@@ -1021,7 +1111,7 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 		};
 		let _ = if meta.file_type().is_symlink() {
 			std::fs::read_link(backup)
-				.and_then(|target| std::os::unix::fs::symlink(&target, live))
+				.and_then(|target| xplat_symlink(&target, live))
 		} else if meta.is_dir() {
 			copy_dir_recursive(backup, live)
 		} else {
@@ -1125,6 +1215,18 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		return Ok(());
 	}
 
+	// P0-2 guard (a): a degenerate rename whose names sanitize to the same
+	// on-disk dir would have the install write the very dir the removal then
+	// deletes. Refuse before any fetch/mutation.
+	if skill::sanitize_name(args.old_name)
+		== skill::sanitize_name(args.new_name)
+	{
+		bail!(
+			"old_name and new_name resolve to the same on-disk skill \
+			 directory; choose a distinct rename target"
+		);
+	}
+
 	// 1. Read the OLD-name lock entry for source coordinates.
 	let source =
 		rename_source_from_lock(args.old_name, scope, project_root.as_deref())?;
@@ -1197,13 +1299,32 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		project_root.as_deref(),
 	);
 
+	// P0-2 guard (b): refuse if the new name ALREADY exists (lock entry or
+	// on-disk dir) in this scope. The rollback/cleanup deletes EVERY new_name
+	// path; if new_name pre-existed, that would destroy data this transaction
+	// did not create. Requiring new_name to be absent makes the cleanup safe.
+	if new_name_exists_in_scope(
+		args.new_name,
+		scope,
+		project_root.as_deref(),
+		&agent_dirs,
+	) {
+		bail!(
+			"A skill named '{}' already exists in this scope (lock entry or \
+			 on-disk directory); pick a rename target that does not already \
+			 exist",
+			args.new_name
+		);
+	}
+
 	// 6. SNAPSHOT the old-name dirs + clone the old lock entry BEFORE mutating.
+	//    A snapshot failure (P0-3) aborts BEFORE install — nothing mutated.
 	let snapshot = snapshot_old_skill(
 		args.old_name,
 		scope,
 		project_root.as_deref(),
 		&agent_dirs,
-	);
+	)?;
 	let old_global_entry: Option<skill::SkillLockEntry> =
 		if matches!(scope, ResourceScope::GlobalOnly) {
 			skill::read_skill_lock().skills.get(args.old_name).cloned()
@@ -1222,7 +1343,31 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 			None
 		};
 
-	// 7. Install the new-named skill. Nothing is mutated yet on failure.
+	// Helper: roll the WHOLE transaction back to its pre-mutation state. Defined
+	// BEFORE install so every post-snapshot failure path (P0-1: including the
+	// install Err / no-agent arms) runs the SAME rollback.
+	let rollback_all = || {
+		rollback_rename_install(
+			args.new_name,
+			scope,
+			project_root.as_deref(),
+			&agent_dirs,
+		);
+		let _ =
+			remove_lock_entry(args.new_name, scope, project_root.as_deref());
+		restore_snapshot(&snapshot);
+		restore_lock_entry(
+			args.old_name,
+			scope,
+			project_root.as_deref(),
+			old_global_entry.as_ref(),
+			old_local_entry.as_ref(),
+		);
+	};
+
+	// 7. Install the new-named skill. A failure AFTER this point rolls back via
+	//    `rollback_all` (install writes the master/link before the lock, so an
+	//    Err may have left a half-installed new_name — P0-1).
 	let install_source = skill::InstallLockSource {
 		source: source.source.clone(),
 		source_type: source.source_type.clone(),
@@ -1244,22 +1389,23 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 			LinkTarget::Absolute
 		},
 	};
-	let install_report = install_fetched_skill_and_lock(install_req)
-		.map_err(|e| anyhow::anyhow!("failed to install renamed skill: {e}"))?;
+	let install_report = match install_fetched_skill_and_lock(install_req) {
+		Ok(r) => r,
+		Err(e) => {
+			// P0-1: install_fetched writes the master/link BEFORE the lock, so
+			// an Err here may have left a half-installed new_name. Run the full
+			// rollback (cleanup new_name + restore old) before bailing.
+			rollback_all();
+			bail!("failed to install renamed skill: {e}");
+		}
+	};
 	if !install_report.agent_results.iter().any(|r| r.installed) {
 		let detail = install_report
 			.agent_results
 			.iter()
 			.find_map(|r| r.error.clone())
 			.unwrap_or_else(|| "no agent received the skill".to_string());
-		rollback_rename_install(
-			args.new_name,
-			scope,
-			project_root.as_deref(),
-			&agent_dirs,
-		);
-		let _ =
-			remove_lock_entry(args.new_name, scope, project_root.as_deref());
+		rollback_all();
 		bail!("failed to install renamed skill: {detail}");
 	}
 
@@ -1296,28 +1442,6 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		&agent_dirs,
 		project_root.as_deref(),
 	);
-
-	// Roll the whole transaction back to its pre-mutation state.
-	let rollback_all = || {
-		rollback_rename_install(
-			args.new_name,
-			scope,
-			project_root.as_deref(),
-			&agent_dirs,
-		);
-		let _ =
-			remove_lock_entry(args.new_name, scope, project_root.as_deref());
-		if let Some(snapshot) = &snapshot {
-			restore_snapshot(snapshot);
-		}
-		restore_lock_entry(
-			args.old_name,
-			scope,
-			project_root.as_deref(),
-			old_global_entry.as_ref(),
-			old_local_entry.as_ref(),
-		);
-	};
 
 	let removal_report = match aghub_core::skills::removal::execute_removal(
 		&removal_plan,

@@ -829,9 +829,10 @@ pub fn classify_scope(
 	root: &Path,
 	scope: &SourceScope,
 	source: &str,
+	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
 	let (baseline, _src_type, _ref) = baseline_for_scope(scope, source);
-	classify_repo_skills(root, &baseline, None)
+	classify_repo_skills(root, &baseline, upstream_commit_time)
 }
 
 /// PUBLIC API entry: merged-baseline, single-classification, flat output —
