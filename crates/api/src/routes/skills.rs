@@ -15,6 +15,7 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
+	credentials::origin::{origin_of, origins_match, ResolvedOrigin},
 	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
@@ -1615,34 +1616,30 @@ fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
 		)
 	};
 
-	let parsed = url::Url::parse(url).map_err(|_| reject())?;
-
-	let host = parsed.host_str().unwrap_or_default();
-	if parsed.scheme() == "https"
-		&& host.eq_ignore_ascii_case("github.com")
-		&& parsed.port().is_none()
-	{
-		return Ok(());
+	// Pin to the github.com HTTPS origin. `origin_of` folds the default port
+	// in, so `https://github.com` and `https://github.com:443` both match,
+	// while `http://`, a non-default port, or any other host is rejected.
+	let github_https = ResolvedOrigin {
+		scheme: "https".to_string(),
+		host: "github.com".to_string(),
+		port: Some(443),
+	};
+	match origin_of(url) {
+		Some(origin) if origin == github_https => Ok(()),
+		_ => Err(reject()),
 	}
-
-	Err(reject())
 }
 
-/// Returns true when both URLs parse and share the same (ASCII
-/// case-insensitive) host. A parse failure or a missing host on either
-/// side yields false.
+/// Returns true when both URLs parse to the same normalized origin
+/// `(scheme, host, port)`. A parse failure or a missing host on either side
+/// yields false.
 ///
-/// Compares the HOST ONLY and is port-agnostic by design: session
-/// credential pinning keys on host, not port, so the same host on a
-/// different port is treated as the same host.
-fn same_host(a: &str, b: &str) -> bool {
-	let (Ok(a), Ok(b)) = (url::Url::parse(a), url::Url::parse(b)) else {
-		return false;
-	};
-	match (a.host_str(), b.host_str()) {
-		(Some(ha), Some(hb)) => ha.eq_ignore_ascii_case(hb),
-		_ => false,
-	}
+/// Pins on the FULL origin: the same host on a different port (or a different
+/// scheme) is NOT a match. Session credentials may be scoped to a specific
+/// `(scheme, host, port)`, so a token bound to one origin must never be reused
+/// against a different port of the same host.
+fn same_origin(a: &str, b: &str) -> bool {
+	origins_match(a, b)
 }
 
 #[post("/skills/git/scan", data = "<body>")]
@@ -1698,7 +1695,7 @@ pub async fn git_scan_skills(
 		if req.credential_id.is_some() {
 			require_github_credential_url(&req.url)?;
 		} else if let Some(ref stored_url) = session_url {
-			if !same_host(&req.url, stored_url) {
+			if !same_origin(&req.url, stored_url) {
 				return Err(ApiError::new(
 					Status::BadRequest,
 					"Session credential cannot be reused for a different host",
@@ -3137,31 +3134,41 @@ mod tests {
 	}
 
 	#[test]
-	fn same_host_true_for_matching_hosts() {
-		assert!(same_host(
+	fn same_origin_true_for_matching_origins() {
+		assert!(same_origin(
 			"https://gitlab.internal/a.git",
 			"https://gitlab.internal/b.git",
 		));
 	}
 
 	#[test]
-	fn same_host_false_for_different_hosts() {
-		assert!(!same_host("https://github.com/a", "https://evil.com/a"));
+	fn same_origin_false_for_different_hosts() {
+		assert!(!same_origin("https://github.com/a", "https://evil.com/a"));
 	}
 
 	#[test]
-	fn same_host_false_on_parse_failure() {
-		assert!(!same_host("not a url", "https://github.com/a"));
+	fn same_origin_false_on_parse_failure() {
+		assert!(!same_origin("not a url", "https://github.com/a"));
 	}
 
 	#[test]
-	fn same_host_is_port_agnostic() {
-		// Session pinning keys on host, not port; the same host on a
-		// different port must be treated as the same host (see same_host
-		// doc comment). This documents the intentional behavior.
-		assert!(same_host(
+	fn same_origin_false_for_same_host_different_port() {
+		// Session pinning now keys on the full origin: the same host on a
+		// different explicit port is a DIFFERENT origin and must NOT match,
+		// so a token bound to one port can't be reused against another.
+		assert!(!same_origin(
 			"https://git.internal:8080/a.git",
 			"https://git.internal:9090/b.git",
+		));
+	}
+
+	#[test]
+	fn same_origin_true_for_default_port_forms() {
+		// `https://h` and `https://h:443` are the same origin (default port
+		// folds in), so this remains a match.
+		assert!(same_origin(
+			"https://git.internal/a.git",
+			"https://git.internal:443/b.git",
 		));
 	}
 

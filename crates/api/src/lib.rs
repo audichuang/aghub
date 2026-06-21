@@ -19,6 +19,14 @@ pub mod routes;
 pub(crate) mod skills;
 pub mod state;
 
+// Controller-side credential resolution for the desktop `src-tauri` layer
+// (remote git-credential forwarding). The `credentials` module itself stays
+// crate-private; only these wrappers + their origin types are public.
+pub use crate::credentials::origin::ResolvedOrigin;
+pub use crate::credentials::public::{
+	list_bound_sources, resolve_git_token_for_source, ResolvedToken,
+};
+
 /// Version of the `aghub-api` binary/library, shared with the desktop remote
 /// compatibility check.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
