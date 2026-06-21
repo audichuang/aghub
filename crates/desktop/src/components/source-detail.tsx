@@ -1324,8 +1324,12 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 							defaultCollapsed
 						/>
 
-						{/* All-clear empty state */}
+						{/* All-clear empty state — only when truly NO non-current rows exist.
+						    Non-auth uncheckable rows are excluded from hasNeedsAction, so
+						    we must also guard uncheckableNonAuth to avoid a false "all up to
+						    date" while the same panel shows unchecked rows. */}
 						{!hasNeedsAction &&
+							uncheckableNonAuth.length === 0 &&
 							!isLoading &&
 							current.length > 0 && (
 								<div className="rounded-lg border border-success/30 bg-success/5 px-4 py-3">

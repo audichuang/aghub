@@ -315,16 +315,52 @@ export default function SkillsPage() {
 		void setView(newView);
 	};
 
-	// ── Scope state ──
-	const [scope, setScope] = useState<"global" | "project">("global");
+	// ── Scope / project state — derived from URL source key on initial load ──
+	// Parse scope and projectRoot from a composite source key "scope:projectRoot:source".
+	const parseScopeFromKey = (key: string | null): "global" | "project" =>
+		key?.startsWith("project:") ? "project" : "global";
+	const parseProjectFromKey = (key: string | null): string | null => {
+		if (!key?.startsWith("project:")) return null;
+		// key format: "project:<projectRoot>:<source>" where projectRoot may be empty
+		const afterPrefix = key.slice("project:".length);
+		const colonIdx = afterPrefix.indexOf(":");
+		return colonIdx === -1 ? null : afterPrefix.slice(0, colonIdx) || null;
+	};
+
+	const [scope, setScope] = useState<"global" | "project">(() =>
+		parseScopeFromKey(selectedSourceKey),
+	);
 	const [selectedProjectPath, setSelectedProjectPath] = useState<
 		string | null
-	>(null);
+	>(() => parseProjectFromKey(selectedSourceKey));
 
 	const handleScopeChange = (newScope: "global" | "project") => {
 		setScope(newScope);
 		if (newScope === "global") {
 			setSelectedProjectPath(null);
+			// Clear selected source if it belonged to project scope
+			if (selectedSourceKey?.startsWith("project:")) {
+				void setSelectedSourceKey(null);
+			}
+		} else {
+			// Switching to project scope: clear source if it was global
+			if (
+				selectedSourceKey !== null &&
+				!selectedSourceKey.startsWith("project:")
+			) {
+				void setSelectedSourceKey(null);
+			}
+		}
+	};
+
+	const handleProjectChange = (path: string) => {
+		setSelectedProjectPath(path);
+		// Clear selected source if it belonged to a different project
+		if (selectedSourceKey !== null) {
+			const keyProject = parseProjectFromKey(selectedSourceKey);
+			if (keyProject !== path) {
+				void setSelectedSourceKey(null);
+			}
 		}
 	};
 
@@ -427,7 +463,8 @@ export default function SkillsPage() {
 		isFetching || checkUpdatesMutation.isPending || isAutoChecking;
 
 	const handleRefreshSkills = async () => {
-		if (isRefreshingSkills) return;
+		// Guard: do not fire project-scoped API calls without a project selected.
+		if (isRefreshingSkills || !projectIsReady) return;
 		await refetch();
 		checkUpdatesMutation.mutate(updateCheckParams);
 	};
@@ -515,6 +552,17 @@ export default function SkillsPage() {
 
 	// ── Source-view state ──
 	const [sourceImporting, setSourceImporting] = useState(false);
+
+	// When selecting a source, also sync the scope/project segments from the key.
+	// Key format: "scope:projectRoot:source"
+	const handleSourceSelect = (key: string) => {
+		void setSelectedSourceKey(key);
+		setSourceImporting(false);
+		const keyScope = parseScopeFromKey(key);
+		const keyProject = parseProjectFromKey(key);
+		setScope(keyScope);
+		setSelectedProjectPath(keyProject);
+	};
 	const { data: projects = [] } = useProjects();
 
 	// Load all sources so we can resolve a full SourceRow from the URL key.
@@ -577,7 +625,7 @@ export default function SkillsPage() {
 							variant="ghost"
 							size="sm"
 							aria-label={t("refreshSkills")}
-							isDisabled={isRefreshingSkills}
+							isDisabled={isRefreshingSkills || !projectIsReady}
 							onPress={() => {
 								void handleRefreshSkills();
 							}}
@@ -632,7 +680,7 @@ export default function SkillsPage() {
 						scope={scope}
 						onScopeChange={handleScopeChange}
 						selectedProjectPath={selectedProjectPath}
-						onProjectChange={setSelectedProjectPath}
+						onProjectChange={handleProjectChange}
 					/>
 
 					{view === "agent" ? (
@@ -806,10 +854,7 @@ export default function SkillsPage() {
 								scope={scope}
 								projectPath={selectedProjectPath}
 								selectedKey={selectedSourceKey}
-								onSelectKey={(key) => {
-									void setSelectedSourceKey(key);
-									setSourceImporting(false);
-								}}
+								onSelectKey={handleSourceSelect}
 								searchQuery={searchQuery}
 							/>
 						</>
