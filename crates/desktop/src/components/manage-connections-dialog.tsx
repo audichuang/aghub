@@ -25,7 +25,7 @@ import {
 } from "@heroui/react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { type Key, useMemo, useState } from "react";
+import { type Key, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TestResult } from "../contexts/connection";
 import { useConnection } from "../hooks/use-connection";
@@ -543,6 +543,14 @@ export function ManageConnectionsDialog({
 		reinstallMutation.mutate();
 	};
 
+	// Bring the result/progress panel into view the moment it mounts, so the
+	// outcome is visible without manually scrolling the dialog body. A stable
+	// callback ref only fires on mount/unmount — and the panel unmounts on any
+	// field edit (setField clears testResult), so each fresh test re-triggers it.
+	const scrollResultIntoView = useCallback((el: HTMLDivElement | null) => {
+		el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+	}, []);
+
 	const isBusy =
 		saveMutation.isPending ||
 		removeMutation.isPending ||
@@ -560,13 +568,13 @@ export function ManageConnectionsDialog({
 	return (
 		<Modal.Backdrop isOpen={isOpen} onOpenChange={handleOpenChange}>
 			<Modal.Container>
-				<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-md sm:max-w-lg">
+				<Modal.Dialog className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden sm:max-w-lg">
 					<Modal.CloseTrigger />
 					<Modal.Header>
 						<Modal.Heading>{t("connManageTitle")}</Modal.Heading>
 					</Modal.Header>
 
-					<Modal.Body className="flex flex-col gap-5 p-4">
+					<Modal.Body className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-4">
 						<div className="flex flex-col gap-2">
 							{remotes.length === 0 ? (
 								<p className="text-sm text-muted">
@@ -805,29 +813,39 @@ export function ManageConnectionsDialog({
 								</Description>
 							</TextField>
 
-							{reinstallMutation.isPending ? (
-								<ReinstallProgressPanel t={t} />
-							) : testResult != null ? (
-								<TestResultPanel
-									result={testResult}
-									t={t}
-									localVersion={localApiVersion}
-								/>
-							) : null}
+							<div className="flex justify-end">
+								<Button
+									variant="tertiary"
+									size="sm"
+									className="text-danger"
+									isDisabled={isBusy}
+									onPress={handleReinstallRequest}
+								>
+									<ArrowPathIcon className="size-4" />
+									{reinstallMutation.isPending
+										? t("connReinstalling")
+										: t("connForceReinstall")}
+								</Button>
+							</div>
+
+							{(reinstallMutation.isPending ||
+								testResult != null) && (
+								<div ref={scrollResultIntoView}>
+									{reinstallMutation.isPending ? (
+										<ReinstallProgressPanel t={t} />
+									) : testResult != null ? (
+										<TestResultPanel
+											result={testResult}
+											t={t}
+											localVersion={localApiVersion}
+										/>
+									) : null}
+								</div>
+							)}
 						</div>
 					</Modal.Body>
 
-					<Modal.Footer className="flex-wrap">
-						<Button
-							variant="danger"
-							isDisabled={isBusy}
-							onPress={handleReinstallRequest}
-						>
-							<ArrowPathIcon className="size-4" />
-							{reinstallMutation.isPending
-								? t("connReinstalling")
-								: t("connForceReinstall")}
-						</Button>
+					<Modal.Footer>
 						<Button
 							variant="secondary"
 							isDisabled={isBusy}
