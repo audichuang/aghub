@@ -18,7 +18,7 @@ use crate::credentials::resolve::{
 	load_source_bindings, resolve_token_for_source,
 };
 use crate::dto::sources::{
-	CredentialStatus, SourceDiffResponse, SourceSkillDiff,
+	CredentialStatus, SourceDiffResponse, SourceSkillDiff, SourceSkillStateDto,
 	SourceSummaryResponse, SourcesListResponse,
 };
 use crate::error::{ApiError, ApiResult};
@@ -226,10 +226,12 @@ fn map_diff_to_dto(d: DomainSkillDiff) -> SourceSkillDiff {
 		description: d.description,
 		version: d.version,
 		author: d.author,
-		state: d.state.as_wire().to_string(),
+		state: SourceSkillStateDto::from(&d.state),
 		previous_name: d.previous_name,
 		reason: d.reason,
 		installed_paths: d.installed_paths,
+		// Wired in Task 3 once the domain diff carries the commit time.
+		upstream_commit_time: None,
 	}
 }
 
