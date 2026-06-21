@@ -82,6 +82,14 @@ interface ApiErrorBody {
 	code?: string;
 }
 
+/**
+ * Optional per-request headers for remote git-credential forwarding. When the
+ * active connection is a capable remote, the request layer builds this with the
+ * `X-Aghub-Git-Tokens` header (see `lib/git-token-forwarding.ts`); otherwise it
+ * is omitted entirely. NEVER persisted — built transiently per request.
+ */
+export type GitForwardHeaders = Record<string, string>;
+
 export function createApi(baseUrl: string) {
 	const client = ky.create({
 		prefix: baseUrl,
@@ -317,26 +325,58 @@ export function createApi(baseUrl: string) {
 			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
 				return client.post("skills/prune-lock", { json: body }).json();
 			},
-			gitScan(data: GitScanRequest): Promise<GitScanResponse> {
+			gitScan(
+				data: GitScanRequest,
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<GitScanResponse> {
 				return client
-					.post("skills/git/scan", { json: data, timeout: 120000 })
+					.post("skills/git/scan", {
+						json: data,
+						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
+					})
 					.json();
 			},
-			gitInstall(data: GitInstallRequest): Promise<GitInstallResponse> {
-				return client.post("skills/git/install", { json: data }).json();
+			gitInstall(
+				data: GitInstallRequest,
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<GitInstallResponse> {
+				return client
+					.post("skills/git/install", {
+						json: data,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
+					})
+					.json();
 			},
-			gitSync(data: GitSyncRequest): Promise<GitSyncResponse> {
-				return client.post("skills/git/sync", { json: data }).json();
+			gitSync(
+				data: GitSyncRequest,
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<GitSyncResponse> {
+				return client
+					.post("skills/git/sync", {
+						json: data,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
+					})
+					.json();
 			},
-			checkUpdates({
-				offline = false,
-				scope = "global",
-				projectRoot,
-			}: {
-				offline?: boolean;
-				scope?: "global" | "project" | "all";
-				projectRoot?: string;
-			} = {}): Promise<SkillUpdateResponse[]> {
+			checkUpdates(
+				{
+					offline = false,
+					scope = "global",
+					projectRoot,
+				}: {
+					offline?: boolean;
+					scope?: "global" | "project" | "all";
+					projectRoot?: string;
+				} = {},
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<SkillUpdateResponse[]> {
 				// Network-heavy (clones each source); give it a long timeout.
 				return client
 					.get("skills/check-updates", {
@@ -348,6 +388,9 @@ export function createApi(baseUrl: string) {
 								: {}),
 						},
 						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
 					})
 					.json();
 			},
@@ -376,17 +419,20 @@ export function createApi(baseUrl: string) {
 					})
 					.json();
 			},
-			diffSource({
-				scope = "global",
-				projectRoot,
-				source,
-				gitRef,
-			}: {
-				scope?: "global" | "project" | "all";
-				projectRoot?: string;
-				source: string;
-				gitRef?: string;
-			}): Promise<SourceDiffResponse> {
+			diffSource(
+				{
+					scope = "global",
+					projectRoot,
+					source,
+					gitRef,
+				}: {
+					scope?: "global" | "project" | "all";
+					projectRoot?: string;
+					source: string;
+					gitRef?: string;
+				},
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<SourceDiffResponse> {
 				// Network-heavy (clones the source); give it a long timeout.
 				return client
 					.get("skills/sources/diff", {
@@ -399,6 +445,9 @@ export function createApi(baseUrl: string) {
 							...(gitRef ? { git_ref: gitRef } : {}),
 						},
 						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
 					})
 					.json();
 			},

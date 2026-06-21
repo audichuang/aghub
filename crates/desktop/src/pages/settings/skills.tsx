@@ -41,6 +41,7 @@ import type {
 	SourcesListResponse,
 } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
+import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
 import { cn } from "../../lib/utils";
 import {
@@ -290,6 +291,7 @@ function SourceListPanel({
 export default function SkillsPage() {
 	const { t, i18n } = useTranslation();
 	const api = useApi();
+	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
 	const queryClient = useQueryClient();
 
 	// ── URL state (nuqs) ──
@@ -394,6 +396,7 @@ export default function SkillsPage() {
 			api,
 			params: updateCheckParams,
 			enabled: navigator.onLine && projectIsReady,
+			forwardForBoundSources,
 		}),
 	);
 
@@ -408,6 +411,7 @@ export default function SkillsPage() {
 		checkSkillUpdatesMutationOptions({
 			api,
 			queryClient,
+			forwardForBoundSources,
 			onSuccess: (data) => {
 				const updateCount = data.filter(
 					(s) =>

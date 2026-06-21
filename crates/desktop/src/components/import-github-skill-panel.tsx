@@ -42,6 +42,7 @@ import { cn } from "../lib/utils";
 import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { credentialsListQueryOptions } from "../requests/credentials";
 import { gitInstallSkillsMutationOptions } from "../requests/skills";
+import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { AgentSelector } from "./agent-selector";
 
 interface ImportGithubSkillPanelProps {
@@ -79,6 +80,7 @@ export function ImportGithubSkillPanel({
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
+	const { forSource: forwardForSource } = useGitForwarding();
 	const { availableAgents } = useAgentAvailability();
 
 	const skillAgents = useMemo(
@@ -164,13 +166,19 @@ export function ImportGithubSkillPanel({
 	}, [coverageSeeded, isCoverageLoading, linkTargets, setValue]);
 
 	const scanMutation = useMutation({
-		mutationFn: (values: InputFormValues) =>
-			api.skills.gitScan({
-				url: values.url.trim(),
-				credential_id: values.credentialId || null,
-				branch: null,
-				session_id: null,
-			}),
+		mutationFn: async (values: InputFormValues) => {
+			const url = values.url.trim();
+			const headers = await forwardForSource(url);
+			return api.skills.gitScan(
+				{
+					url,
+					credential_id: values.credentialId || null,
+					branch: null,
+					session_id: null,
+				},
+				headers,
+			);
+		},
 		onSuccess: (data) => {
 			setScanError(null);
 			setScannedSkills(data.skills);
@@ -193,13 +201,19 @@ export function ImportGithubSkillPanel({
 	});
 
 	const branchScanMutation = useMutation({
-		mutationFn: (branch: string) =>
-			api.skills.gitScan({
-				url: urlValue.trim(),
-				credential_id: null,
-				branch,
-				session_id: sessionId,
-			}),
+		mutationFn: async (branch: string) => {
+			const url = urlValue.trim();
+			const headers = await forwardForSource(url);
+			return api.skills.gitScan(
+				{
+					url,
+					credential_id: null,
+					branch,
+					session_id: sessionId,
+				},
+				headers,
+			);
+		},
 		onSuccess: (data) => {
 			setScannedSkills(data.skills);
 			setSessionId(data.session_id);
@@ -220,6 +234,7 @@ export function ImportGithubSkillPanel({
 		gitInstallSkillsMutationOptions({
 			api,
 			queryClient,
+			forwardForSource,
 			onSuccess: async (data) => {
 				setInstallError(null);
 				setInstallResults(data.results);
@@ -242,11 +257,14 @@ export function ImportGithubSkillPanel({
 		setPhase("installing");
 		installMutation.mutate(
 			{
-				session_id: sessionId,
-				skill_paths: Array.from(selectedPaths),
-				agents,
-				scope: projectPath ? "project" : "global",
-				project_root: projectPath ?? null,
+				body: {
+					session_id: sessionId,
+					skill_paths: Array.from(selectedPaths),
+					agents,
+					scope: projectPath ? "project" : "global",
+					project_root: projectPath ?? null,
+				},
+				sourceUrl: urlValue.trim(),
 			},
 			{
 				onError: (error) => {

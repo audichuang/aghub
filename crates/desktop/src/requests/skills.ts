@@ -22,8 +22,27 @@ import type {
 	SkillUpdateResponse,
 	TransferRequest,
 } from "../generated/dto";
+import type { GitForwardHeaders } from "../lib/api";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys";
+
+/**
+ * Resolve the per-request forward header for a known single source, or
+ * undefined when forwarding is not engaged. Supplied by `useGitForwarding`.
+ * Resolved transiently inside the mutationFn so the token never enters the
+ * cache, a query key, or a stored mutation variable.
+ */
+export type ForwardForSource = (
+	source: string,
+) => Promise<GitForwardHeaders | undefined>;
+
+/**
+ * Resolve the per-request forward header for `check-updates` (bound sources),
+ * or undefined when forwarding is not engaged. Supplied by `useGitForwarding`.
+ */
+export type ForwardForBoundSources = () => Promise<
+	GitForwardHeaders | undefined
+>;
 
 interface SkillListQueryParams {
 	api: ApiClient;
@@ -293,9 +312,19 @@ export function transferSkillsMutationOptions({
 	});
 }
 
-export function gitScanSkillsMutationOptions({ api }: { api: ApiClient }) {
+export function gitScanSkillsMutationOptions({
+	api,
+	forwardForSource,
+}: {
+	api: ApiClient;
+	forwardForSource?: ForwardForSource;
+}) {
 	return mutationOptions({
-		mutationFn: (body: GitScanRequest) => api.skills.gitScan(body),
+		mutationFn: async (body: GitScanRequest) => {
+			// The scan body carries the clone URL — resolve+forward against it.
+			const headers = await forwardForSource?.(body.url);
+			return api.skills.gitScan(body, headers);
+		},
 	});
 }
 
@@ -303,15 +332,33 @@ interface GitInstallSkillsMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
 	onSuccess?: (data: GitInstallResponse) => void | Promise<void>;
+	forwardForSource?: ForwardForSource;
+}
+
+/**
+ * Variables for the git-install mutation. `sourceUrl` (optional) is the clone
+ * URL the session was scanned from — the install body itself only carries a
+ * `session_id`, so the URL is threaded here purely to resolve the forward
+ * header. Not persisted.
+ */
+export interface GitInstallSkillsVariables {
+	body: GitInstallRequest;
+	sourceUrl?: string;
 }
 
 export function gitInstallSkillsMutationOptions({
 	api,
 	queryClient,
 	onSuccess,
+	forwardForSource,
 }: GitInstallSkillsMutationParams) {
 	return mutationOptions({
-		mutationFn: (body: GitInstallRequest) => api.skills.gitInstall(body),
+		mutationFn: async ({ body, sourceUrl }: GitInstallSkillsVariables) => {
+			const headers = sourceUrl
+				? await forwardForSource?.(sourceUrl)
+				: undefined;
+			return api.skills.gitInstall(body, headers);
+		},
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);
@@ -330,6 +377,12 @@ interface CheckSkillUpdatesMutationParams {
 	queryClient: QueryClient;
 	onSuccess?: (data: SkillUpdateResponse[]) => void | Promise<void>;
 	onError?: (error: Error) => void;
+	/**
+	 * Resolver for the bound-source forward header (remote mode). `check-updates`
+	 * spans many sources, so the FE enumerates explicitly-bound sources and
+	 * forwards a token per bound source. Omitted in Local mode.
+	 */
+	forwardForBoundSources?: ForwardForBoundSources;
 }
 
 export interface CheckSkillUpdatesParams {
@@ -353,10 +406,13 @@ export function checkSkillUpdatesMutationOptions({
 	queryClient,
 	onSuccess,
 	onError,
+	forwardForBoundSources,
 }: CheckSkillUpdatesMutationParams) {
 	return mutationOptions({
-		mutationFn: (params?: CheckSkillUpdatesParams) =>
-			api.skills.checkUpdates(params),
+		mutationFn: async (params?: CheckSkillUpdatesParams) => {
+			const headers = await forwardForBoundSources?.();
+			return api.skills.checkUpdates(params, headers);
+		},
 		onSuccess: async (data, variables) => {
 			queryClient.setQueryData(
 				checkSkillUpdatesQueryKey(variables),
@@ -373,6 +429,8 @@ interface CheckSkillUpdatesQueryParams {
 	/** When false the query does not fire (use to suppress when offline). */
 	enabled?: boolean;
 	params?: CheckSkillUpdatesParams;
+	/** Bound-source forward-header resolver (remote mode). Omitted locally. */
+	forwardForBoundSources?: ForwardForBoundSources;
 	/**
 	 * Throttle threshold in ms. Default 10 minutes — matches the spec's
 	 * "staleTime = throttle" pattern so React Query skips a re-fetch if the
@@ -400,10 +458,14 @@ export function checkSkillUpdatesQueryOptions({
 	enabled = true,
 	params,
 	staleTime = 600_000, // 10 minutes
+	forwardForBoundSources,
 }: CheckSkillUpdatesQueryParams) {
 	return queryOptions({
 		queryKey: checkSkillUpdatesQueryKey(params),
-		queryFn: () => api.skills.checkUpdates(params),
+		queryFn: async () => {
+			const headers = await forwardForBoundSources?.();
+			return api.skills.checkUpdates(params, headers);
+		},
 		enabled,
 		staleTime,
 	});
@@ -437,15 +499,32 @@ interface GitSyncSkillMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
 	onSuccess?: (data: GitSyncResponse) => void | Promise<void>;
+	forwardForSource?: ForwardForSource;
+}
+
+/**
+ * Variables for the git-sync mutation. `sourceUrl` (optional) is the clone URL
+ * the session was scanned from — threaded only to resolve the forward header
+ * (the sync body carries a `session_id`, not the URL). Not persisted.
+ */
+export interface GitSyncSkillVariables {
+	body: GitSyncRequest;
+	sourceUrl?: string;
 }
 
 export function gitSyncSkillMutationOptions({
 	api,
 	queryClient,
 	onSuccess,
+	forwardForSource,
 }: GitSyncSkillMutationParams) {
 	return mutationOptions({
-		mutationFn: (body: GitSyncRequest) => api.skills.gitSync(body),
+		mutationFn: async ({ body, sourceUrl }: GitSyncSkillVariables) => {
+			const headers = sourceUrl
+				? await forwardForSource?.(sourceUrl)
+				: undefined;
+			return api.skills.gitSync(body, headers);
+		},
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);

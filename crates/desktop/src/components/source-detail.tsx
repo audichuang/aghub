@@ -21,6 +21,7 @@ import { SourceSkillRow } from "./source-skill-row";
 import type { SourceSkillDiff } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
+import { useGitForwarding } from "../hooks/use-git-forwarding";
 import {
 	partitionByCoverage,
 	supportsSkillMutation,
@@ -303,6 +304,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
+	const { forSource: forwardForSource } = useGitForwarding();
 	const { availableAgents } = useAgentAvailability();
 	const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(
 		null,
@@ -326,6 +328,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			projectRoot:
 				row.rowScope === "project" ? row.projectRoot : undefined,
 			enabled: true,
+			forwardForSource,
 		}),
 	);
 
@@ -652,12 +655,18 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}
 
 		try {
-			const scan = await api.skills.gitScan({
-				url: row.sourceUrl,
-				credential_id: null,
-				branch: data?.gitRef ?? null,
-				session_id: null,
-			});
+			// Resolve the forward header transiently (remote mode only); pinned
+			// to the source's clone URL. Discarded after the request.
+			const forwardHeaders = await forwardForSource(row.sourceUrl);
+			const scan = await api.skills.gitScan(
+				{
+					url: row.sourceUrl,
+					credential_id: null,
+					branch: data?.gitRef ?? null,
+					session_id: null,
+				},
+				forwardHeaders,
+			);
 			const wantedPaths = new Set(skills.map(installPathFor));
 			const scanPaths = new Set(scan.skills.map((skill) => skill.path));
 			const skillPaths = Array.from(wantedPaths).filter((path) =>
@@ -668,13 +677,16 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				throw new Error(t("sourceInstallFailed"));
 			}
 
-			const result = await api.skills.gitInstall({
-				session_id: scan.session_id,
-				skill_paths: skillPaths,
-				agents: linkTargetAgentIds,
-				scope: updateScope,
-				project_root: updateProjectRoot,
-			});
+			const result = await api.skills.gitInstall(
+				{
+					session_id: scan.session_id,
+					skill_paths: skillPaths,
+					agents: linkTargetAgentIds,
+					scope: updateScope,
+					project_root: updateProjectRoot,
+				},
+				forwardHeaders,
+			);
 			const failed = result.results.filter((entry) => !entry.success);
 
 			await queryClient.invalidateQueries({

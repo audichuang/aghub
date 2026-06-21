@@ -445,6 +445,29 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	const port = serverQuery.data ?? null;
 	const baseUrl = port === null ? null : baseUrlFromPort(port);
 
+	// Surface the active remote's credential-forwarding capability (Task 6).
+	// The capability is computed by the SSH `aghub-api --capabilities` probe in
+	// bring-up, but `connect_remote` returns only the tunnel port, so re-read it
+	// via the (probe-only) `test_connection` command once the tunnel is up.
+	// Cached per connection id with an infinite staleTime — a remote's binary
+	// does not change capability mid-session. Local never forwards.
+	const isActiveRemote = activeId !== LOCAL_CONNECTION.id;
+	const capabilityQuery = useQuery<boolean>({
+		queryKey: ["server", activeId, "supports-credential-forwarding"],
+		queryFn: async () => {
+			const result = await invoke<TestResult>("test_connection", {
+				connection: activeConnection,
+			});
+			return result.supportsCredentialForwarding;
+		},
+		// Only probe a connected remote; Local is structurally non-forwarding.
+		enabled: isActiveRemote && port !== null,
+		staleTime: Number.POSITIVE_INFINITY,
+	});
+	// Fail-safe: anything other than a confirmed `true` does not forward.
+	const supportsCredentialForwarding =
+		isActiveRemote && capabilityQuery.data === true;
+
 	const setActive = useCallback(
 		(id: string) => {
 			// Event handler (NOT a useEffect): drop per-host data caches so the
@@ -614,6 +637,7 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		status,
 		port,
 		baseUrl,
+		supportsCredentialForwarding,
 		setActive,
 		addConnection,
 		updateConnection,

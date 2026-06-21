@@ -16,6 +16,13 @@ export interface ConnectionContextValue {
 	port: number | null;
 	/** Resolved api baseUrl, or null while connecting. */
 	baseUrl: string | null;
+	/**
+	 * Whether the ACTIVE connection is a remote that advertises controller-side
+	 * git-credential forwarding (the `X-Aghub-Git-Tokens` header). Always
+	 * `false` for Local and fail-safe `false` whenever support cannot be
+	 * confirmed. Task 6 gates header injection on this.
+	 */
+	supportsCredentialForwarding: boolean;
 	/** Switch active connection (clears per-host data caches first). */
 	setActive: (id: string) => void;
 	addConnection: (connection: Omit<Connection, "id">) => Promise<Connection>;

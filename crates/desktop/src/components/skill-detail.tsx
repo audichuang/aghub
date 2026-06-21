@@ -21,6 +21,7 @@ import { siGithub } from "simple-icons";
 import { useLocation } from "wouter";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
+import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { useFavorites } from "../hooks/use-favorites";
 import { useCurrentCodeEditor } from "../hooks/use-integrations";
 import { cn, filterItemsByAgentIds } from "../lib/utils";
@@ -80,6 +81,7 @@ export function SkillDetail({
 	const [, setLocation] = useLocation();
 	const { allAgents, availableAgents } = useAgentAvailability();
 	const api = useApi();
+	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
 	const queryClient = useQueryClient();
 
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -130,6 +132,7 @@ export function SkillDetail({
 		checkSkillUpdatesMutationOptions({
 			api,
 			queryClient,
+			forwardForBoundSources,
 			onError: () => toast.danger(t("skillUpdateCheckError")),
 		}),
 	);
@@ -152,7 +155,10 @@ export function SkillDetail({
 
 	const { data: cachedUpdateChecks } = useQuery({
 		queryKey: checkSkillUpdatesQueryKey(updateCheckParams),
-		queryFn: () => api.skills.checkUpdates(updateCheckParams),
+		queryFn: async () => {
+			const headers = await forwardForBoundSources();
+			return api.skills.checkUpdates(updateCheckParams, headers);
+		},
 		enabled: false,
 	});
 
