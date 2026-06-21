@@ -79,3 +79,32 @@ bump version:
     perl -i -pe 's/^version = .*/version = "{{version}}"/' Cargo.toml
     perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/package.json
     perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/src-tauri/tauri.conf.json
+
+# Produce an installable desktop bundle with the version-locked aghub-api
+# embedded as a Tauri resource (mirrors the release CI staging). Cleans +
+# stages crates/desktop/src-tauri/binaries/aghub-api[.exe] for the HOST
+# triple, then runs the bundle build with the committed --config overlay.
+# The committed tauri.conf.json is never modified; plain `just desktop` /
+# `bun run dev` stay on the cargo-git fallback (no staged sidecar).
+desktop-bundle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+    echo "Host triple: $HOST_TRIPLE"
+    BIN="aghub-api"
+    case "$HOST_TRIPLE" in
+      *windows*) BIN="aghub-api.exe" ;;
+    esac
+    STAGE="crates/desktop/src-tauri/binaries"
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    cargo build -p aghub-api --release
+    cp "target/release/$BIN" "$STAGE/$BIN"
+    echo "Staged $STAGE/$BIN"
+    cd crates/desktop
+    bun run tauri build -- --config src-tauri/tauri.bundle.conf.json
+    # The bundle now embeds the sidecar; drop the staged copy so the working
+    # tree stays clean and a later `bun run dev` cannot pick up a stale file.
+    cd ../..
+    rm -rf "$STAGE"
+    echo "Removed staging dir $STAGE (the built bundle already contains it)"
