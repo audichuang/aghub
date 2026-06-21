@@ -19,7 +19,6 @@ import {
 	useQueries,
 	useQuery,
 	useQueryClient,
-	useSuspenseQuery,
 } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
@@ -92,7 +91,7 @@ function ScopeSwitch({
 					className={cn(
 						"rounded-md px-3 py-1 text-xs font-medium transition-colors",
 						scope === "global"
-							? "bg-white text-foreground shadow-sm"
+							? "bg-surface text-foreground shadow-sm"
 							: "text-muted hover:text-foreground",
 					)}
 					onClick={() => onScopeChange("global")}
@@ -105,7 +104,7 @@ function ScopeSwitch({
 					className={cn(
 						"rounded-md px-3 py-1 text-xs font-medium transition-colors",
 						scope === "project"
-							? "bg-white text-foreground shadow-sm"
+							? "bg-surface text-foreground shadow-sm"
 							: "text-muted hover:text-foreground",
 						projects.length === 0 &&
 							"cursor-not-allowed opacity-40",
@@ -171,6 +170,9 @@ function SourceListPanel({
 	const api = useApi();
 	const { data: projects = [] } = useProjects();
 
+	// Guard: do not query project sources until a project is actually selected.
+	const projectIsReady = scope !== "project" || projectPath !== null;
+
 	const sourceQueries = useQueries({
 		queries:
 			scope === "global"
@@ -182,6 +184,7 @@ function SourceListPanel({
 								api,
 								scope: "project",
 								projectRoot: p.path,
+								enabled: projectIsReady,
 							}),
 						),
 	});
@@ -219,6 +222,15 @@ function SourceListPanel({
 		if (!q) return rows;
 		return rows.filter((r) => r.source.toLowerCase().includes(q));
 	}, [rows, searchQuery]);
+
+	// Show "select a project" prompt before firing any project-scoped query.
+	if (scope === "project" && projectPath === null) {
+		return (
+			<p className="px-4 py-8 text-center text-sm text-muted">
+				{t("selectProject")}
+			</p>
+		);
+	}
 
 	if (isLoading) {
 		return (
@@ -317,6 +329,9 @@ export default function SkillsPage() {
 	};
 
 	// ── Skills data ──
+	// Guard: do not fire project-scoped skill query until a project is selected.
+	const projectIsReady = scope !== "project" || selectedProjectPath !== null;
+
 	const skillQueryProjectRoot = useMemo(
 		() =>
 			scope === "project"
@@ -326,14 +341,15 @@ export default function SkillsPage() {
 	);
 
 	const {
-		data: skills,
+		data: skills = [],
 		refetch,
 		isFetching,
-	} = useSuspenseQuery({
+	} = useQuery({
 		...skillListQueryOptions({
 			api,
 			scope,
 			projectRoot: skillQueryProjectRoot,
+			enabled: projectIsReady,
 		}),
 	});
 
@@ -345,8 +361,8 @@ export default function SkillsPage() {
 		[scope, skillQueryProjectRoot],
 	);
 
-	// Auto-check: fires on mount if data is stale (>10 min) and online.
-	// navigator.onLine suppresses the check when offline.
+	// Auto-check: fires on mount if data is stale (>10 min), online,
+	// and a project is actually selected when in project scope.
 	const {
 		data: cachedUpdateChecks,
 		isFetching: isAutoChecking,
@@ -355,7 +371,7 @@ export default function SkillsPage() {
 		checkSkillUpdatesQueryOptions({
 			api,
 			params: updateCheckParams,
-			enabled: navigator.onLine,
+			enabled: navigator.onLine && projectIsReady,
 		}),
 	);
 
@@ -586,7 +602,7 @@ export default function SkillsPage() {
 						className={cn(
 							"rounded-md px-3 py-1 text-xs font-medium transition-colors",
 							view === "agent"
-								? "bg-white text-foreground shadow-sm"
+								? "bg-surface text-foreground shadow-sm"
 								: "text-muted hover:text-foreground",
 						)}
 						onClick={() => handleSetView("agent")}
@@ -598,7 +614,7 @@ export default function SkillsPage() {
 						className={cn(
 							"rounded-md px-3 py-1 text-xs font-medium transition-colors",
 							view === "source"
-								? "bg-white text-foreground shadow-sm"
+								? "bg-surface text-foreground shadow-sm"
 								: "text-muted hover:text-foreground",
 						)}
 						onClick={() => handleSetView("source")}
@@ -802,18 +818,27 @@ export default function SkillsPage() {
 
 				{/* Right panel: detail */}
 				<div className="relative flex-1 overflow-hidden">
-					{view === "agent" ? (
+					{view === "agent" && !projectIsReady ? (
+						<div className="flex h-full flex-col items-center justify-center gap-4">
+							<p className="text-sm text-muted">
+								{t("selectProject")}
+							</p>
+						</div>
+					) : view === "agent" ? (
 						panelMode === "create" ? (
 							<CreateSkillPanel
 								onDone={() => setPanelMode(null)}
+								projectPath={selectedProjectPath ?? undefined}
 							/>
 						) : panelMode === "import" ? (
 							<ImportSkillPanel
 								onDone={() => setPanelMode(null)}
+								projectPath={selectedProjectPath ?? undefined}
 							/>
 						) : panelMode === "import-github" ? (
 							<ImportGithubSkillPanel
 								onDone={() => setPanelMode(null)}
+								projectPath={selectedProjectPath ?? undefined}
 							/>
 						) : activeGroup ? (
 							<SkillDetail
@@ -823,6 +848,7 @@ export default function SkillsPage() {
 										: activeGroup.name
 								}
 								group={activeGroup}
+								projectPath={selectedProjectPath ?? undefined}
 								openCredDialog={
 									pendingAuthSkill === activeGroup.name
 								}
