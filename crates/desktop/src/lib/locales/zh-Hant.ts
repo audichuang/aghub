@@ -404,7 +404,7 @@ export default {
 	skillCheckCompleteWithUpdates: "檢查完成，{{count}} 個可更新",
 	skillCheckCompleteSomeUncheckable: "檢查完成，{{count}} 個技能無法驗證",
 	skillCheckCompleteAllGood: "全部都是最新",
-	lastCheckedAgo: "上次檢查 {{time}} 前",
+	lastCheckedAgo: "上次檢查 {{time}}",
 	lastCheckedNever: "尚未檢查",
 	recheck: "重新檢查",
 	onboardingDescription: "隨時重新開啟歡迎頁或任一導覽流程。",
@@ -1132,6 +1132,7 @@ export default {
 	skillCenter: "技能",
 	viewByAgent: "依 Agent",
 	viewBySource: "依來源",
+	scope: "範圍",
 	scopeSwitchGlobal: "全域",
 	scopeSwitchProject: "專案",
 };

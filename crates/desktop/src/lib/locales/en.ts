@@ -430,7 +430,7 @@ export default {
 	skillCheckCompleteAllGood: "All skills are up to date",
 	/** List header label. {{time}} is a human-readable relative string
 	 *  like "3 minutes ago" produced by the component. */
-	lastCheckedAgo: "Last checked {{time}} ago",
+	lastCheckedAgo: "Last checked {{time}}",
 	/** Shown when check has never run this session. */
 	lastCheckedNever: "Never checked",
 	/** Button label to re-run the check manually. */
@@ -1170,6 +1170,7 @@ export default {
 	skillCenter: "Skills",
 	viewByAgent: "By Agent",
 	viewBySource: "By Source",
+	scope: "Scope",
 	scopeSwitchGlobal: "Global",
 	scopeSwitchProject: "Project",
 };

@@ -11,6 +11,8 @@ import {
 	ListBox,
 	Select,
 	Spinner,
+	ToggleButton,
+	ToggleButtonGroup,
 	Tooltip,
 	toast,
 } from "@heroui/react";
@@ -65,87 +67,81 @@ function sourceRowKey(r: SourceRow) {
 	return `${r.rowScope}:${r.projectRoot ?? ""}:${r.source}`;
 }
 
-// ─── Scope switch ─────────────────────────────────────────────────────────────
+// ─── Scope control ────────────────────────────────────────────────────────────
 
-interface ScopeSwitchProps {
+const PROJECT_KEY_PREFIX = "project:";
+
+interface ScopeControlProps {
 	scope: "global" | "project";
-	onScopeChange: (scope: "global" | "project") => void;
 	selectedProjectPath: string | null;
-	onProjectChange: (path: string) => void;
+	onChange: (scope: "global" | "project", projectPath: string | null) => void;
 }
 
-function ScopeSwitch({
+/**
+ * Single dropdown that selects the active scope: "Global" or one of the open
+ * projects. Replaces the old segmented switch + separate project Select — one
+ * control, one choice, far less header chrome in the narrow list column.
+ */
+function ScopeControl({
 	scope,
-	onScopeChange,
 	selectedProjectPath,
-	onProjectChange,
-}: ScopeSwitchProps) {
+	onChange,
+}: ScopeControlProps) {
 	const { t } = useTranslation();
 	const { data: projects = [] } = useProjects();
 
+	// Map (scope, projectPath) → a single Select key. A project scope with no
+	// resolved path (e.g. restored from a stale URL) falls back to no selection
+	// so the trigger shows the placeholder rather than a phantom value.
+	const selectedKey =
+		scope === "global"
+			? "global"
+			: selectedProjectPath
+				? `${PROJECT_KEY_PREFIX}${selectedProjectPath}`
+				: undefined;
+
 	return (
-		<div className="flex items-center gap-2 border-b border-border px-3 py-2">
-			<div className="flex rounded-lg bg-surface-secondary p-0.5">
-				<button
-					type="button"
-					className={cn(
-						"rounded-md px-3 py-1 text-xs font-medium transition-colors",
-						scope === "global"
-							? "bg-surface text-foreground shadow-sm"
-							: "text-muted hover:text-foreground",
-					)}
-					onClick={() => onScopeChange("global")}
-				>
-					{t("scopeSwitchGlobal")}
-				</button>
-				<button
-					type="button"
-					disabled={projects.length === 0}
-					className={cn(
-						"rounded-md px-3 py-1 text-xs font-medium transition-colors",
-						scope === "project"
-							? "bg-surface text-foreground shadow-sm"
-							: "text-muted hover:text-foreground",
-						projects.length === 0 &&
-							"cursor-not-allowed opacity-40",
-					)}
-					onClick={() => {
-						if (projects.length > 0) onScopeChange("project");
-					}}
-				>
-					{t("scopeSwitchProject")}
-				</button>
-			</div>
-			{scope === "project" && projects.length > 0 && (
-				<Select
-					className="min-w-0 flex-1"
-					variant="secondary"
-					selectedKey={selectedProjectPath ?? undefined}
-					onSelectionChange={(key) => {
-						if (key) onProjectChange(String(key));
-					}}
-				>
-					<Select.Trigger>
-						<Select.Value />
-						<Select.Indicator />
-					</Select.Trigger>
-					<Select.Popover>
-						<ListBox>
-							{projects.map((p) => (
-								<ListBox.Item
-									key={p.path}
-									id={p.path}
-									textValue={p.name}
-								>
-									{p.name}
-									<ListBox.ItemIndicator />
-								</ListBox.Item>
-							))}
-						</ListBox>
-					</Select.Popover>
-				</Select>
-			)}
-		</div>
+		<Select
+			aria-label={t("scope")}
+			className="min-w-0 max-w-[48%]"
+			variant="secondary"
+			selectedKey={selectedKey}
+			placeholder={t("scopeSwitchProject")}
+			onSelectionChange={(key) => {
+				const k = String(key);
+				if (k === "global") {
+					onChange("global", null);
+				} else if (k.startsWith(PROJECT_KEY_PREFIX)) {
+					onChange("project", k.slice(PROJECT_KEY_PREFIX.length));
+				}
+			}}
+		>
+			<Select.Trigger>
+				<Select.Value />
+				<Select.Indicator />
+			</Select.Trigger>
+			<Select.Popover>
+				<ListBox>
+					<ListBox.Item
+						id="global"
+						textValue={t("scopeSwitchGlobal")}
+					>
+						{t("scopeSwitchGlobal")}
+						<ListBox.ItemIndicator />
+					</ListBox.Item>
+					{projects.map((p) => (
+						<ListBox.Item
+							key={p.path}
+							id={`${PROJECT_KEY_PREFIX}${p.path}`}
+							textValue={p.name}
+						>
+							{p.name}
+							<ListBox.ItemIndicator />
+						</ListBox.Item>
+					))}
+				</ListBox>
+			</Select.Popover>
+		</Select>
 	);
 }
 
@@ -334,31 +330,21 @@ export default function SkillsPage() {
 		string | null
 	>(() => parseProjectFromKey(selectedSourceKey));
 
-	const handleScopeChange = (newScope: "global" | "project") => {
+	const handleScopeSelect = (
+		newScope: "global" | "project",
+		newProjectPath: string | null,
+	) => {
 		setScope(newScope);
-		if (newScope === "global") {
-			setSelectedProjectPath(null);
-			// Clear selected source if it belonged to project scope
-			if (selectedSourceKey?.startsWith("project:")) {
-				void setSelectedSourceKey(null);
-			}
-		} else {
-			// Switching to project scope: clear source if it was global
-			if (
-				selectedSourceKey !== null &&
-				!selectedSourceKey.startsWith("project:")
-			) {
-				void setSelectedSourceKey(null);
-			}
-		}
-	};
-
-	const handleProjectChange = (path: string) => {
-		setSelectedProjectPath(path);
-		// Clear selected source if it belonged to a different project
+		setSelectedProjectPath(newProjectPath);
+		// Clear a selected source that no longer belongs to the new scope/project.
 		if (selectedSourceKey !== null) {
-			const keyProject = parseProjectFromKey(selectedSourceKey);
-			if (keyProject !== path) {
+			if (newScope === "global") {
+				if (selectedSourceKey.startsWith(PROJECT_KEY_PREFIX)) {
+					void setSelectedSourceKey(null);
+				}
+			} else if (
+				parseProjectFromKey(selectedSourceKey) !== newProjectPath
+			) {
 				void setSelectedSourceKey(null);
 			}
 		}
@@ -604,84 +590,75 @@ export default function SkillsPage() {
 		);
 	}, [selectedSourceKey, allSourcesQuery, projects]);
 
-	return (
-		<div className="flex h-full flex-col">
-			{/* Page header with last-checked and recheck */}
-			<div className="flex shrink-0 items-center justify-between gap-3 border-b border-border px-4 py-2.5">
-				<h1 className="text-base font-semibold text-foreground">
-					{t("skillCenter")}
-				</h1>
-				<div className="flex items-center gap-2">
-					<span className="text-xs text-muted">
+	// Refresh control, shared by the agent + source toolbars. The last-checked
+	// time lives in its tooltip so it never competes for room in the narrow
+	// header row.
+	const refreshButton = (
+		<Tooltip delay={0}>
+			<Button
+				isIconOnly
+				variant="ghost"
+				size="sm"
+				className="shrink-0"
+				aria-label={t("refreshSkills")}
+				isDisabled={isRefreshingSkills || !projectIsReady}
+				onPress={() => {
+					void handleRefreshSkills();
+				}}
+			>
+				<ArrowPathIcon
+					className={cn(
+						"size-4",
+						isRefreshingSkills && "animate-spin",
+					)}
+				/>
+			</Button>
+			<Tooltip.Content>
+				<div className="flex flex-col gap-0.5">
+					<span>{t("refreshSkills")}</span>
+					<span className="opacity-70">
 						{lastCheckedDate
 							? t("lastCheckedAgo", {
 									time: formatRelativeTime(lastCheckedDate),
 								})
 							: t("lastCheckedNever")}
 					</span>
-					<Tooltip delay={0}>
-						<Button
-							isIconOnly
-							variant="ghost"
-							size="sm"
-							aria-label={t("refreshSkills")}
-							isDisabled={isRefreshingSkills || !projectIsReady}
-							onPress={() => {
-								void handleRefreshSkills();
-							}}
-						>
-							<ArrowPathIcon
-								className={cn(
-									"size-4",
-									isRefreshingSkills && "animate-spin",
-								)}
-							/>
-						</Button>
-						<Tooltip.Content>{t("refreshSkills")}</Tooltip.Content>
-					</Tooltip>
 				</div>
-			</div>
+			</Tooltip.Content>
+		</Tooltip>
+	);
 
-			{/* View-by toggle */}
-			<div className="flex shrink-0 items-center gap-3 border-b border-border px-4 py-2">
-				<div className="flex rounded-lg bg-surface-secondary p-0.5">
-					<button
-						type="button"
-						className={cn(
-							"rounded-md px-3 py-1 text-xs font-medium transition-colors",
-							view === "agent"
-								? "bg-surface text-foreground shadow-sm"
-								: "text-muted hover:text-foreground",
-						)}
-						onClick={() => handleSetView("agent")}
-					>
-						{t("viewByAgent")}
-					</button>
-					<button
-						type="button"
-						className={cn(
-							"rounded-md px-3 py-1 text-xs font-medium transition-colors",
-							view === "source"
-								? "bg-surface text-foreground shadow-sm"
-								: "text-muted hover:text-foreground",
-						)}
-						onClick={() => handleSetView("source")}
-					>
-						{t("viewBySource")}
-					</button>
-				</div>
-			</div>
-
+	return (
+		<div className="flex h-full flex-col">
 			<div className="flex min-h-0 flex-1">
 				{/* Left panel: list */}
 				<div className="relative flex w-80 shrink-0 flex-col border-r border-border">
-					{/* Scope switch */}
-					<ScopeSwitch
-						scope={scope}
-						onScopeChange={handleScopeChange}
-						selectedProjectPath={selectedProjectPath}
-						onProjectChange={handleProjectChange}
-					/>
+					{/* Row A — view + scope (replaces the old full-width
+					    header + view-toggle + segmented scope rows) */}
+					<div className="flex items-center justify-between gap-2 px-3 pt-3">
+						<ToggleButtonGroup
+							selectedKeys={[view]}
+							onSelectionChange={(keys) =>
+								handleSetView([...keys][0] as ViewMode)
+							}
+							selectionMode="single"
+							disallowEmptySelection
+							size="sm"
+						>
+							<ToggleButton id="agent">
+								{t("viewByAgent")}
+							</ToggleButton>
+							<ToggleButtonGroup.Separator />
+							<ToggleButton id="source">
+								{t("viewBySource")}
+							</ToggleButton>
+						</ToggleButtonGroup>
+						<ScopeControl
+							scope={scope}
+							selectedProjectPath={selectedProjectPath}
+							onChange={handleScopeSelect}
+						/>
+					</div>
 
 					{view === "agent" ? (
 						<>
@@ -810,6 +787,7 @@ export default function SkillsPage() {
 										</Dropdown.Menu>
 									</Dropdown.Popover>
 								</Dropdown>
+								{refreshButton}
 							</ListSearchHeader>
 
 							<SkillList
@@ -849,7 +827,9 @@ export default function SkillsPage() {
 								onSearchChange={setSearchQuery}
 								placeholder={t("searchSources")}
 								ariaLabel={t("searchSources")}
-							/>
+							>
+								{refreshButton}
+							</ListSearchHeader>
 							<SourceListPanel
 								scope={scope}
 								projectPath={selectedProjectPath}
