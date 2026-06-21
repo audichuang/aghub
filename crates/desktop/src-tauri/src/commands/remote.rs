@@ -51,10 +51,13 @@ const PORT_POLL_ATTEMPTS: u32 = 40;
 const PORT_POLL_DELAY: Duration = Duration::from_millis(250);
 /// Grace period after spawning the tunnel before we check it stayed up.
 const TUNNEL_SETTLE: Duration = Duration::from_millis(400);
-/// Public repository used by packaged builds to compile a matching remote
-/// `aghub-api` on cross-platform VMs.
+/// Public repository used as the last-resort cargo fallback for remote installs.
 const DEFAULT_REMOTE_INSTALL_GIT_URL: &str =
 	"https://github.com/audichuang/aghub.git";
+/// Release asset root used for cross-platform Linux VM installs. The `.deb`
+/// contains the CI-versioned Linux `aghub-api` Tauri resource.
+const DEFAULT_REMOTE_RELEASE_BASE_URL: &str =
+	"https://github.com/audichuang/aghub/releases/download";
 
 /// A live remote connection: the local tunnel process, the remote server pid,
 /// and the connection it belongs to.
@@ -239,10 +242,26 @@ pub fn reinstall_remote_api(
 
 	let runner = SystemRunner;
 	let source = deployable_install_source(&runner, &connection, source)?;
+	info!(
+		"remote '{}': force reinstall aghub-api using {}",
+		connection.id,
+		install_source_summary(&source)
+	);
 	let _slot = SlotGuard::claim(&state.connecting, id)?;
 
 	let outcome =
 		reinstall_remote_api_core(&runner, &connection, LOCAL_VERSION, &source);
+	if let Ok(result) = &outcome {
+		info!(
+			"remote '{}': force reinstall finished: version={:?}, \
+			 compatible={}, install_attempted={}, install_succeeded={}",
+			connection.id,
+			result.api_version,
+			result.compatible,
+			result.install_attempted,
+			result.install_succeeded
+		);
+	}
 
 	outcome.map_err(RemoteError::from)
 }
@@ -324,10 +343,10 @@ pub fn force_redeploy_remote(
 	})?;
 
 	// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
-	// binary: a wrong-arch binary would not run on the VM. `CargoGit` compiles
-	// ON the VM, so it is arch-safe for ANY remote platform — skip the
-	// probe and the refusal entirely (this is the common
-	// Mac-desktop -> Linux-VM case).
+	// binary: a wrong-arch binary would not run on the VM. VM-native install
+	// sources (`ReleaseDeb`, `CargoGit`) are arch-safe for the supported remote
+	// platform, so skip the refusal once `deployable_install_source` has picked
+	// one for the common Mac-desktop -> Linux-VM case.
 	// Mirrors the connect path (`ensure_remote_api`), which gates only
 	// `LocalBinary`.
 	let runner = SystemRunner;
@@ -461,7 +480,25 @@ fn deployable_install_source(
 		return Ok(source);
 	}
 
+	if let Some(fallback) = remote_release_deb_install_source(&probed) {
+		info!(
+			"remote '{}': local install binary is not deployable to remote \
+			 platform {:?}; falling back to {}",
+			connection.id,
+			probed,
+			install_source_summary(&fallback)
+		);
+		return Ok(fallback);
+	}
+
 	if let Some(fallback) = remote_git_install_source() {
+		info!(
+			"remote '{}': no release asset install source for remote \
+			 platform {:?}; falling back to {}",
+			connection.id,
+			probed,
+			install_source_summary(&fallback)
+		);
 		return Ok(fallback);
 	}
 
@@ -483,15 +520,39 @@ fn bring_up(
 	let runner = SystemRunner;
 	let bin = resolved_path(connection);
 
+	info!(
+		"remote '{}': ensuring aghub-api '{}' for local version {}",
+		connection.id, bin, LOCAL_VERSION
+	);
 	let install_source = remote_install_source(app)
 		.map(|source| deployable_install_source(&runner, connection, source))
 		.transpose()?;
+	match &install_source {
+		Some(source) => info!(
+			"remote '{}': install source resolved to {}",
+			connection.id,
+			install_source_summary(source)
+		),
+		None => info!(
+			"remote '{}': no install source available; probe only",
+			connection.id
+		),
+	}
 	let test = ensure_remote_api(
 		&runner,
 		connection,
 		LOCAL_VERSION,
 		install_source.as_ref(),
 	)?;
+	info!(
+		"remote '{}': aghub-api ensure finished: version={:?}, \
+		 compatible={}, install_attempted={}, install_succeeded={}",
+		connection.id,
+		test.api_version,
+		test.compatible,
+		test.install_attempted,
+		test.install_succeeded
+	);
 	if !test.compatible {
 		return Err(RemoteError::Incompatible {
 			remote_version: test.api_version,
@@ -680,6 +741,44 @@ fn remote_install_source(app: &AppHandle) -> Option<RemoteInstallSource> {
 		remote_git_url(),
 		remote_git_branch(),
 		remote_git_tag(),
+	)
+}
+
+fn install_source_summary(source: &RemoteInstallSource) -> String {
+	match source {
+		RemoteInstallSource::LocalBinary(_) => "local-binary".to_string(),
+		RemoteInstallSource::CargoGit { url, branch, tag } => {
+			format!("cargo-git url={url} branch={branch:?} tag={tag:?}")
+		}
+		RemoteInstallSource::ReleaseDeb { url } => {
+			format!("release-deb url={url}")
+		}
+	}
+}
+
+fn remote_release_deb_install_source(
+	probed: &Option<(String, String)>,
+) -> Option<RemoteInstallSource> {
+	let (os, arch) = probed.as_ref()?;
+	let deb_arch = release_deb_arch(os, arch)?;
+	Some(RemoteInstallSource::ReleaseDeb {
+		url: release_deb_url(LOCAL_VERSION, deb_arch),
+	})
+}
+
+fn release_deb_arch(os: &str, arch: &str) -> Option<&'static str> {
+	if os != "linux" {
+		return None;
+	}
+	match arch {
+		"x86_64" | "amd64" => Some("amd64"),
+		_ => None,
+	}
+}
+
+fn release_deb_url(version: &str, deb_arch: &str) -> String {
+	format!(
+		"{DEFAULT_REMOTE_RELEASE_BASE_URL}/v{version}/aghub_{version}_{deb_arch}.deb"
 	)
 }
 
@@ -958,6 +1057,38 @@ mod tests {
 				tag: None,
 			}),
 			"a blank env binary is ignored, falling through to git"
+		);
+	}
+
+	#[test]
+	fn release_deb_source_targets_linux_x86_64_release_asset() {
+		let source = remote_release_deb_install_source(&Some((
+			"linux".to_string(),
+			"x86_64".to_string(),
+		)));
+		assert_eq!(
+			source,
+			Some(RemoteInstallSource::ReleaseDeb {
+				url: release_deb_url(LOCAL_VERSION, "amd64"),
+			})
+		);
+	}
+
+	#[test]
+	fn release_deb_source_ignores_unsupported_platforms() {
+		assert_eq!(
+			remote_release_deb_install_source(&Some((
+				"darwin".to_string(),
+				"x86_64".to_string(),
+			))),
+			None
+		);
+		assert_eq!(
+			remote_release_deb_install_source(&Some((
+				"linux".to_string(),
+				"aarch64".to_string(),
+			))),
+			None
 		);
 	}
 }

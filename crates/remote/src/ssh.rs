@@ -412,6 +412,44 @@ pub fn build_remote_finish_upload_cmd(resolved_path: &str) -> String {
 	)
 }
 
+/// Compose a remote install command that downloads a Linux `.deb` release
+/// bundle, extracts the packaged `aghub-api`, and installs it at the same path
+/// the probe/start commands resolve.
+pub fn build_remote_release_deb_install_cmd(
+	deb_url: &str,
+	resolved_path: &str,
+) -> String {
+	let target_assignment = assign_install_target_cmd(resolved_path);
+	let quoted_url = shell_quote_single(deb_url);
+	format!(
+		"{target_assignment} \
+	     command -v dpkg-deb >/dev/null 2>&1 || {{ echo 'dpkg-deb not found' >&2; exit 127; }}; \
+	     tmp=\"$(mktemp -d)\"; \
+	     cleanup() {{ rm -rf \"$tmp\"; }}; \
+	     trap cleanup EXIT; \
+	     deb=\"$tmp/aghub.deb\"; \
+	     if command -v curl >/dev/null 2>&1; then \
+	         curl -fsSL --connect-timeout 10 --max-time 120 -o \"$deb\" {quoted_url}; \
+	     elif command -v wget >/dev/null 2>&1; then \
+	         wget -q -T 120 -O \"$deb\" {quoted_url}; \
+	     else \
+	         echo 'curl or wget not found' >&2; exit 127; \
+	     fi; \
+	     root=\"$tmp/root\"; mkdir -p \"$root\"; \
+	     dpkg-deb -x \"$deb\" \"$root\"; \
+	     bin=\"$(find \"$root\" -type f \\( -path '*/resources/binaries/aghub-api' -o -path '*/binaries/aghub-api' \\) | head -n 1)\"; \
+	     if [ -z \"$bin\" ]; then bin=\"$(find \"$root\" -type f -name aghub-api | head -n 1)\"; fi; \
+	     if [ -z \"$bin\" ]; then echo 'aghub-api not found in release package' >&2; exit 1; fi; \
+	     target_dir=\"$(dirname -- \"$target\")\"; \
+	     mkdir -p \"$target_dir\" && \
+	     stage=\"$(mktemp \"$target_dir/.aghub-api.XXXXXX\")\" && \
+	     cp \"$bin\" \"$stage\" && \
+	     chmod 755 \"$stage\" && \
+	     mv \"$stage\" \"$target\" && \
+	     \"$target\" --version"
+	)
+}
+
 /// Compose a remote install command that builds `aghub-api` on the VM itself.
 pub fn build_remote_cargo_install_cmd(
 	git_url: &str,
@@ -1068,6 +1106,36 @@ mod tests {
 		     --tag 'v2.3.1' aghub-api --bin aghub-api --force"
 		));
 		assert!(!cmd.contains("--branch"));
+	}
+
+	#[test]
+	fn remote_release_deb_install_cmd_extracts_packaged_api() {
+		let cmd = build_remote_release_deb_install_cmd(
+			"https://github.com/audichuang/aghub/releases/download/v2.3.2/aghub_2.3.2_amd64.deb",
+			"aghub-api",
+		);
+		assert!(cmd.contains("dpkg-deb -x \"$deb\" \"$root\""));
+		assert!(cmd.contains("curl -fsSL --connect-timeout 10 --max-time 120"));
+		assert!(cmd.contains("wget -q -T 120 -O \"$deb\""));
+		assert!(cmd.contains("resources/binaries/aghub-api"));
+		assert!(cmd
+			.contains("stage=\"$(mktemp \"$target_dir/.aghub-api.XXXXXX\")\""));
+		assert!(cmd.contains("cp \"$bin\" \"$stage\""));
+		assert!(cmd.contains("mv \"$stage\" \"$target\""));
+		assert!(cmd.contains("\"$target\" --version"));
+		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+	}
+
+	#[test]
+	fn remote_release_deb_install_cmd_expands_custom_tilde_path() {
+		let cmd = build_remote_release_deb_install_cmd(
+			"https://example.com/aghub.deb",
+			"~/.local/bin/aghub-api",
+		);
+		assert!(
+			cmd.contains("target=\"$HOME\"/'.local/bin/aghub-api';"),
+			"release-deb install must use the same tilde expansion as probe: {cmd}"
+		);
 	}
 
 	// --- parsers -----------------------------------------------------------

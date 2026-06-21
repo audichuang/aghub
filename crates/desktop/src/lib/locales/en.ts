@@ -1003,6 +1003,37 @@ export default {
 	connStatusConnecting: "Connecting…",
 	connStatusConnected: "Connected",
 	connStatusError: "Error",
+	connPendingEyebrow: "Preparing connection",
+	connPendingLocalTitle: "Starting Local",
+	connPendingRemoteTitle: "Connecting to {{label}}",
+	connPendingLocalDescription:
+		"Starting the bundled local aghub-api. Local data loads after it is ready.",
+	connPendingRemoteDescription:
+		"Opening the SSH tunnel and making sure remote aghub-api is available. If install or update is needed, this stays here until the remote command finishes.",
+	connPendingTarget: "Target",
+	connPendingElapsed: "Elapsed",
+	connPendingElapsedValue: "{{seconds}}s",
+	connPendingStepLocalApi: "Start local aghub-api",
+	connPendingStepLocalApiDetail: "Starting the desktop-bundled API.",
+	connPendingStepSsh: "Open SSH connection",
+	connPendingStepSshDetail:
+		"Connecting to the remote host over SSH and preparing the local tunnel.",
+	connPendingStepApi: "Check aghub-api",
+	connPendingStepApiDetail:
+		"Confirming the remote aghub-api exists and is version-compatible.",
+	connPendingStepInstall: "Install when needed",
+	connPendingStepInstallDetail:
+		"If aghub-api is missing or incompatible on the remote, it will be installed or updated automatically. This can take a few minutes.",
+	connPendingStepData: "Load data",
+	connPendingStepLocalDataDetail:
+		"Local configuration data loads after startup completes.",
+	connPendingStepRemoteDataDetail:
+		"This host's configuration data reloads after connection completes.",
+	connPendingLongWait:
+		"Waited {{seconds}}s. This usually means the remote is compiling or downloading. If it stays unchanged for more than 5 minutes, switch back to Local and retry.",
+	connErrorTitle: "Failed to connect to {{label}}",
+	connRetry: "Retry",
+	connUseLocal: "Use Local",
 	connManageTitle: "Manage connections",
 	connNoRemotes: "No remote connections yet.",
 	connAddConnection: "Add connection",
@@ -1048,12 +1079,19 @@ export default {
 	connTestStepApi: "aghub-api",
 	connTestStepApiPresent: "Installed",
 	connTestStepApiVersion: "Installed {{version}}",
+	connTestStepApiCompatibleVersion:
+		"Installed {{version}}, version-compatible",
+	connTestStepApiIncompatibleVersion:
+		"Installed {{version}}, but this desktop needs {{expected}}",
 	connTestStepApiMissing: "Not installed or not executable",
 	connTestStepInstall: "Automatic install",
 	connTestStepInstallOk: "Installed and detected again",
 	connTestStepInstallNotNeeded: "Already present; no install needed",
+	connTestStepInstallNeedsUpdate:
+		"Test connection does not modify the VM; switching to this connection or pressing Force reinstall will update it to {{expected}}.",
 	connTestStepInstallNotRun: "Not run",
 	connTestStepSkipped: "Not run",
+	connTestExpectedApiVersion: "This desktop needs aghub-api {{version}}",
 	connDisconnect: "Disconnect",
 	connDisconnecting: "Disconnecting…",
 	connReconnect: "Reconnect",

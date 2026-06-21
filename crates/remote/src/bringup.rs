@@ -16,10 +16,10 @@ use crate::ssh::{
 	build_remote_cargo_install_cmd, build_remote_cat_cmd,
 	build_remote_finish_upload_cmd, build_remote_kill_cmd,
 	build_remote_prepare_upload_cmd, build_remote_probe_cmd,
-	build_remote_start_cmd, build_scp_args, build_ssh_args,
-	is_version_compatible, parse_api_version, parse_logpath, parse_pid,
-	parse_remote_port, probe_remote_platform, remote_api_upload_path,
-	CommandRunner, Connection,
+	build_remote_release_deb_install_cmd, build_remote_start_cmd,
+	build_scp_args, build_ssh_args, is_version_compatible, parse_api_version,
+	parse_logpath, parse_pid, parse_remote_port, probe_remote_platform,
+	remote_api_upload_path, CommandRunner, Connection,
 };
 
 // ---------------------------------------------------------------------------
@@ -165,6 +165,8 @@ pub enum RemoteInstallSource {
 		branch: Option<String>,
 		tag: Option<String>,
 	},
+	/// Download and extract a release `.deb` on the VM.
+	ReleaseDeb { url: String },
 }
 
 /// A successfully started remote server: its pid, the VM-side port it
@@ -402,6 +404,11 @@ pub fn install_remote_api<R: CommandRunner>(
 			);
 			run_remote_install_step(runner, conn, &install_cmd)
 		}
+		RemoteInstallSource::ReleaseDeb { url } => {
+			let install_cmd =
+				build_remote_release_deb_install_cmd(url, resolved_path);
+			run_remote_install_step(runner, conn, &install_cmd)
+		}
 	}
 }
 
@@ -518,8 +525,9 @@ fn force_install_remote_api<R: CommandRunner>(
 			stage_remote_api_upload(runner, conn, local)?;
 			finish_remote_api_upload(runner, conn, &bin)?;
 		}
-		RemoteInstallSource::CargoGit { .. } => {
-			// Cargo builds in place on the VM.
+		RemoteInstallSource::CargoGit { .. }
+		| RemoteInstallSource::ReleaseDeb { .. } => {
+			// These sources install in place on the VM.
 			install_remote_api(runner, conn, &bin, source)?;
 		}
 	}
@@ -1262,6 +1270,36 @@ mod tests {
 
 		install_remote_api(&runner, &conn(), "aghub-api", &source)
 			.expect("cargo-git install should succeed");
+
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 1);
+		assert_eq!(calls[0].program, "ssh");
+		assert_eq!(calls[0].args, install_args);
+	}
+
+	#[test]
+	fn install_remote_api_via_release_deb_runs_remote_deb_extract() {
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: "https://github.com/audichuang/aghub/releases/download/v2.3.2/aghub_2.3.2_amd64.deb"
+				.to_string(),
+		};
+		let install_cmd = build_remote_release_deb_install_cmd(
+			"https://github.com/audichuang/aghub/releases/download/v2.3.2/aghub_2.3.2_amd64.deb",
+			"~/.local/bin/aghub-api",
+		);
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&install_args),
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "aghub-api 2.3.2".to_string(),
+				stderr: String::new(),
+			},
+		);
+
+		install_remote_api(&runner, &conn(), "~/.local/bin/aghub-api", &source)
+			.expect("release .deb install should succeed");
 
 		let calls = runner.calls();
 		assert_eq!(calls.len(), 1);

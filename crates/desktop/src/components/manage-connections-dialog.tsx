@@ -167,7 +167,9 @@ function formatInvokeError(error: unknown): string {
 function buildTestSteps(
 	result: TestResult,
 	t: (key: string, opts?: Record<string, unknown>) => string,
+	localVersion?: string,
 ): TestStep[] {
+	const expectedVersion = localVersion ?? "?";
 	const apiStatus: TestStepStatus = !result.reachable
 		? "muted"
 		: result.apiPresent
@@ -181,9 +183,14 @@ function buildTestSteps(
 		: result.apiPresent
 			? result.apiVersion == null
 				? t("connTestStepApiPresent")
-				: t("connTestStepApiVersion", {
-						version: result.apiVersion,
-					})
+				: result.compatible
+					? t("connTestStepApiCompatibleVersion", {
+							version: result.apiVersion,
+						})
+					: t("connTestStepApiIncompatibleVersion", {
+							version: result.apiVersion,
+							expected: expectedVersion,
+						})
 			: t("connTestStepApiMissing");
 
 	const installStatus: TestStepStatus = !result.reachable
@@ -192,7 +199,7 @@ function buildTestSteps(
 			? result.installSucceeded
 				? "ok"
 				: "error"
-			: result.apiPresent
+			: result.apiPresent && result.compatible
 				? "muted"
 				: "warning";
 
@@ -202,9 +209,13 @@ function buildTestSteps(
 			? result.installSucceeded
 				? t("connTestStepInstallOk")
 				: remoteOutputSummary(result.installMessage ?? result.message)
-			: result.apiPresent
+			: result.apiPresent && result.compatible
 				? t("connTestStepInstallNotNeeded")
-				: t("connTestStepInstallNotRun");
+				: result.apiPresent
+					? t("connTestStepInstallNeedsUpdate", {
+							expected: expectedVersion,
+						})
+					: t("connTestStepInstallNotRun");
 
 	return [
 		{
@@ -255,17 +266,26 @@ function TestStepIcon({ status }: { status: TestStepStatus }) {
 function TestResultPanel({
 	result,
 	t,
+	localVersion,
 }: {
 	result: TestResult;
 	t: (key: string, opts?: Record<string, unknown>) => string;
+	localVersion?: string;
 }) {
-	const steps = buildTestSteps(result, t);
+	const steps = buildTestSteps(result, t, localVersion);
 
 	return (
 		<div className="rounded-md border border-border bg-surface-secondary px-3 py-2.5">
 			<p className="text-sm font-medium text-foreground">
 				{t("connTestResultTitle")}
 			</p>
+			{localVersion != null && (
+				<p className="mt-0.5 text-xs text-muted">
+					{t("connTestExpectedApiVersion", {
+						version: localVersion,
+					})}
+				</p>
+			)}
 			<div className="mt-2 flex flex-col gap-2">
 				{steps.map((step) => (
 					<div key={step.key} className="flex min-w-0 gap-2">
@@ -348,6 +368,12 @@ export function ManageConnectionsDialog({
 	>({
 		queryKey: ["ssh-config-hosts"],
 		queryFn: () => invoke<SshConfigHost[]>("list_ssh_config_hosts"),
+		enabled: isOpen,
+	});
+
+	const { data: localApiVersion } = useQuery<string>({
+		queryKey: ["local-api-version"],
+		queryFn: () => invoke<string>("local_api_version"),
 		enabled: isOpen,
 	});
 
@@ -782,7 +808,11 @@ export function ManageConnectionsDialog({
 							{reinstallMutation.isPending ? (
 								<ReinstallProgressPanel t={t} />
 							) : testResult != null ? (
-								<TestResultPanel result={testResult} t={t} />
+								<TestResultPanel
+									result={testResult}
+									t={t}
+									localVersion={localApiVersion}
+								/>
 							) : null}
 						</div>
 					</Modal.Body>
