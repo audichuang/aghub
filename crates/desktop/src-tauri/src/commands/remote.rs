@@ -51,6 +51,10 @@ const PORT_POLL_ATTEMPTS: u32 = 40;
 const PORT_POLL_DELAY: Duration = Duration::from_millis(250);
 /// Grace period after spawning the tunnel before we check it stayed up.
 const TUNNEL_SETTLE: Duration = Duration::from_millis(400);
+/// Public repository used by packaged builds to compile a matching remote
+/// `aghub-api` on cross-platform VMs.
+const DEFAULT_REMOTE_INSTALL_GIT_URL: &str =
+	"https://github.com/audichuang/aghub.git";
 
 /// A live remote connection: the local tunnel process, the remote server pid,
 /// and the connection it belongs to.
@@ -234,7 +238,7 @@ pub fn reinstall_remote_api(
 	})?;
 
 	let runner = SystemRunner;
-	require_same_platform_for_local_binary(&runner, &connection, &source)?;
+	let source = deployable_install_source(&runner, &connection, source)?;
 	let _slot = SlotGuard::claim(&state.connecting, id)?;
 
 	let outcome =
@@ -327,7 +331,7 @@ pub fn force_redeploy_remote(
 	// Mirrors the connect path (`ensure_remote_api`), which gates only
 	// `LocalBinary`.
 	let runner = SystemRunner;
-	require_same_platform_for_local_binary(&runner, &connection, &source)?;
+	let source = deployable_install_source(&runner, &connection, source)?;
 
 	// Claim the in-progress slot so a concurrent connect can't race us; the
 	// guard releases it on every exit path (including a panic mid-redeploy).
@@ -438,13 +442,13 @@ fn insert_handle_or_teardown(
 	}
 }
 
-fn require_same_platform_for_local_binary(
+fn deployable_install_source(
 	runner: &SystemRunner,
 	connection: &Connection,
-	source: &RemoteInstallSource,
-) -> Result<(), RemoteError> {
+	source: RemoteInstallSource,
+) -> Result<RemoteInstallSource, RemoteError> {
 	if !matches!(source, RemoteInstallSource::LocalBinary(_)) {
-		return Ok(());
+		return Ok(source);
 	}
 
 	let probed = probe_remote_platform(runner, connection);
@@ -454,7 +458,11 @@ fn require_same_platform_for_local_binary(
 			if os == std::env::consts::OS && arch == std::env::consts::ARCH
 	);
 	if same_platform {
-		return Ok(());
+		return Ok(source);
+	}
+
+	if let Some(fallback) = remote_git_install_source() {
+		return Ok(fallback);
 	}
 
 	let remote_platform = probed
@@ -475,7 +483,9 @@ fn bring_up(
 	let runner = SystemRunner;
 	let bin = resolved_path(connection);
 
-	let install_source = remote_install_source(app);
+	let install_source = remote_install_source(app)
+		.map(|source| deployable_install_source(&runner, connection, source))
+		.transpose()?;
 	let test = ensure_remote_api(
 		&runner,
 		connection,
@@ -635,6 +645,7 @@ fn pick_install_source(
 	env_binary: Option<String>,
 	git_url: Option<String>,
 	git_branch: Option<String>,
+	git_tag: Option<String>,
 ) -> Option<RemoteInstallSource> {
 	if let Some(path) = bundled {
 		return Some(RemoteInstallSource::LocalBinary(path));
@@ -651,6 +662,7 @@ fn pick_install_source(
 	Some(RemoteInstallSource::CargoGit {
 		url,
 		branch: git_branch,
+		tag: git_tag,
 	})
 }
 
@@ -662,15 +674,47 @@ fn pick_install_source(
 fn remote_install_source(app: &AppHandle) -> Option<RemoteInstallSource> {
 	let bundled = bundled_api_path(app);
 	let env_binary = std::env::var("AGHUB_REMOTE_API_BINARY").ok();
-	let git_url = std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
+	pick_install_source(
+		bundled,
+		env_binary,
+		remote_git_url(),
+		remote_git_branch(),
+		remote_git_tag(),
+	)
+}
+
+fn remote_git_install_source() -> Option<RemoteInstallSource> {
+	let url = remote_git_url()?;
+	Some(RemoteInstallSource::CargoGit {
+		url,
+		branch: remote_git_branch(),
+		tag: remote_git_tag(),
+	})
+}
+
+fn remote_git_url() -> Option<String> {
+	std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
 		.ok()
 		.filter(|s| !s.trim().is_empty())
-		.or_else(|| git_output(&["remote", "get-url", "origin"]));
-	let git_branch = std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
+		.or_else(|| git_output(&["remote", "get-url", "origin"]))
+		.or_else(|| Some(DEFAULT_REMOTE_INSTALL_GIT_URL.to_string()))
+}
+
+fn remote_git_branch() -> Option<String> {
+	std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
 		.ok()
 		.filter(|s| !s.trim().is_empty())
-		.or_else(|| git_output(&["branch", "--show-current"]));
-	pick_install_source(bundled, env_binary, git_url, git_branch)
+		.or_else(|| git_output(&["branch", "--show-current"]))
+}
+
+fn remote_git_tag() -> Option<String> {
+	if remote_git_branch().is_some() {
+		return None;
+	}
+	std::env::var("AGHUB_REMOTE_INSTALL_GIT_TAG")
+		.ok()
+		.filter(|s| !s.trim().is_empty())
+		.or_else(|| Some(format!("v{LOCAL_VERSION}")))
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
@@ -841,6 +885,7 @@ mod tests {
 			Some("/dev/override/aghub-api".to_string()),
 			Some("https://github.com/audichuang/aghub.git".to_string()),
 			Some("main".to_string()),
+			None,
 		);
 		assert_eq!(
 			src,
@@ -857,6 +902,7 @@ mod tests {
 			None,
 			Some("/dev/override/aghub-api".to_string()),
 			Some("https://example.com/aghub.git".to_string()),
+			None,
 			None,
 		);
 		assert_eq!(
@@ -875,12 +921,14 @@ mod tests {
 			None,
 			Some("https://example.com/aghub.git".to_string()),
 			Some("feat/x".to_string()),
+			None,
 		);
 		assert_eq!(
 			src,
 			Some(RemoteInstallSource::CargoGit {
 				url: "https://example.com/aghub.git".to_string(),
 				branch: Some("feat/x".to_string()),
+				tag: None,
 			}),
 			"cargo-git is the last resort"
 		);
@@ -888,7 +936,7 @@ mod tests {
 
 	#[test]
 	fn pick_source_is_none_when_nothing_resolves() {
-		assert_eq!(pick_install_source(None, None, None, None), None);
+		assert_eq!(pick_install_source(None, None, None, None, None), None);
 	}
 
 	#[test]
@@ -900,12 +948,14 @@ mod tests {
 			Some("   ".to_string()),
 			Some("https://example.com/aghub.git".to_string()),
 			None,
+			None,
 		);
 		assert_eq!(
 			src,
 			Some(RemoteInstallSource::CargoGit {
 				url: "https://example.com/aghub.git".to_string(),
 				branch: None,
+				tag: None,
 			}),
 			"a blank env binary is ignored, falling through to git"
 		);

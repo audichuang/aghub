@@ -416,16 +416,22 @@ pub fn build_remote_finish_upload_cmd(resolved_path: &str) -> String {
 pub fn build_remote_cargo_install_cmd(
 	git_url: &str,
 	branch: Option<&str>,
+	tag: Option<&str>,
 ) -> String {
-	let branch_arg = branch
+	let ref_arg = branch
 		.map(|branch| format!(" --branch {}", shell_quote_single(branch)))
+		.or_else(|| {
+			tag.map(|tag| format!(" --tag {}", shell_quote_single(tag)))
+		})
 		.unwrap_or_default();
 	format!(
-		"command -v cargo >/dev/null 2>&1 || {{ echo 'cargo not found' >&2; exit 127; }}; \
+		"cargo_bin=\"$(command -v cargo || true)\"; \
+	     if [ -z \"$cargo_bin\" ] && [ -x \"$HOME/.cargo/bin/cargo\" ]; then cargo_bin=\"$HOME/.cargo/bin/cargo\"; fi; \
+	     if [ -z \"$cargo_bin\" ]; then echo 'cargo not found' >&2; exit 127; fi; \
 	     command -v git >/dev/null 2>&1 || {{ echo 'git not found' >&2; exit 127; }}; \
-	     cargo install --git {}{} aghub-api --bin aghub-api --force",
+	     \"$cargo_bin\" install --git {}{} aghub-api --bin aghub-api --force",
 		shell_quote_single(git_url),
-		branch_arg
+		ref_arg
 	)
 }
 
@@ -1039,13 +1045,29 @@ mod tests {
 		let cmd = build_remote_cargo_install_cmd(
 			"https://example.com/aghub.git",
 			Some("feat/remote-ssh-management"),
+			None,
 		);
 		assert!(cmd.contains(
-			"cargo install --git 'https://example.com/aghub.git' \
+			"\"$cargo_bin\" install --git 'https://example.com/aghub.git' \
 		     --branch 'feat/remote-ssh-management' aghub-api \
 		     --bin aghub-api --force"
 		));
+		assert!(cmd.contains("$HOME/.cargo/bin/cargo"));
 		assert!(!cmd.contains("--package"));
+	}
+
+	#[test]
+	fn remote_cargo_install_cmd_can_pin_tag() {
+		let cmd = build_remote_cargo_install_cmd(
+			"https://example.com/aghub.git",
+			None,
+			Some("v2.3.1"),
+		);
+		assert!(cmd.contains(
+			"\"$cargo_bin\" install --git 'https://example.com/aghub.git' \
+		     --tag 'v2.3.1' aghub-api --bin aghub-api --force"
+		));
+		assert!(!cmd.contains("--branch"));
 	}
 
 	// --- parsers -----------------------------------------------------------

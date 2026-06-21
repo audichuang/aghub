@@ -160,7 +160,11 @@ pub enum RemoteInstallSource {
 	/// Upload this explicit local binary with scp, then install it remotely.
 	LocalBinary(PathBuf),
 	/// Build/install on the VM using cargo from a git repository.
-	CargoGit { url: String, branch: Option<String> },
+	CargoGit {
+		url: String,
+		branch: Option<String>,
+		tag: Option<String>,
+	},
 }
 
 /// A successfully started remote server: its pid, the VM-side port it
@@ -377,7 +381,7 @@ pub fn install_remote_api<R: CommandRunner>(
 			stage_remote_api_upload(runner, conn, local)?;
 			finish_remote_api_upload(runner, conn, resolved_path)
 		}
-		RemoteInstallSource::CargoGit { url, branch } => {
+		RemoteInstallSource::CargoGit { url, branch, tag } => {
 			// `cargo install` always writes to ~/.cargo/bin/aghub-api; it cannot
 			// target a custom path. If the connection pins an explicit remote
 			// path, a cargo build would land where the post-install probe never
@@ -391,8 +395,11 @@ pub fn install_remote_api<R: CommandRunner>(
 					 or install aghub-api at '{resolved_path}' on the VM manually."
 				)));
 			}
-			let install_cmd =
-				build_remote_cargo_install_cmd(url, branch.as_deref());
+			let install_cmd = build_remote_cargo_install_cmd(
+				url,
+				branch.as_deref(),
+				tag.as_deref(),
+			);
 			run_remote_install_step(runner, conn, &install_cmd)
 		}
 	}
@@ -956,6 +963,7 @@ mod tests {
 		let source = RemoteInstallSource::CargoGit {
 			url: "https://github.com/audichuang/aghub.git".to_string(),
 			branch: None,
+			tag: Some("v1.1.1".to_string()),
 		};
 
 		let result = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
@@ -1234,10 +1242,12 @@ mod tests {
 		let source = RemoteInstallSource::CargoGit {
 			url: "https://github.com/audichuang/aghub.git".to_string(),
 			branch: Some("feat/remote-ssh-management".to_string()),
+			tag: None,
 		};
 		let install_cmd = build_remote_cargo_install_cmd(
 			"https://github.com/audichuang/aghub.git",
 			Some("feat/remote-ssh-management"),
+			None,
 		);
 		let install_args = build_ssh_args(&conn(), &install_cmd);
 		let runner = MockRunner::new().script(
@@ -1268,6 +1278,7 @@ mod tests {
 		let source = RemoteInstallSource::CargoGit {
 			url: "https://github.com/audichuang/aghub.git".to_string(),
 			branch: None,
+			tag: Some("v1.1.1".to_string()),
 		};
 		let runner = MockRunner::new();
 		let err =
