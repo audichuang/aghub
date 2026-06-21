@@ -356,9 +356,28 @@ fn assign_api_bin_cmd(resolved_path: &str) -> String {
 	}
 }
 
+/// POSIX shell snippet that resolves WHERE to install the default `aghub-api`:
+/// overwrite the existing binary the probe would resolve (so a
+/// `cargo install`-ed `~/.cargo/bin/aghub-api` is upgraded IN PLACE rather than
+/// shadowed by a new `~/.local/bin` copy), falling back to
+/// `~/.local/bin/aghub-api` for a fresh install. Mirrors
+/// [`default_api_path_script`] but its final fallback is a concrete writable
+/// path, not the bare command name.
+fn default_install_target_script() -> &'static str {
+	"if command -v aghub-api >/dev/null 2>&1; then \
+	     command -v aghub-api; \
+	 elif [ -x \"$HOME/.cargo/bin/aghub-api\" ]; then \
+	     printf '%s\\n' \"$HOME/.cargo/bin/aghub-api\"; \
+	 elif [ -x \"$HOME/.local/bin/aghub-api\" ]; then \
+	     printf '%s\\n' \"$HOME/.local/bin/aghub-api\"; \
+	 else \
+	     printf '%s\\n' \"$HOME/.local/bin/aghub-api\"; \
+	 fi"
+}
+
 fn assign_install_target_cmd(resolved_path: &str) -> String {
 	if resolved_path == "aghub-api" {
-		"target=\"$HOME/.local/bin/aghub-api\";".to_string()
+		format!("target=\"$({})\";", default_install_target_script())
 	} else if let Some(rest) = resolved_path.strip_prefix("~/") {
 		format!("target=\"$HOME\"/{};", shell_quote_single(rest))
 	} else {
@@ -1187,6 +1206,51 @@ mod tests {
 			     \"$target\" --version"
 			),
 			"steps must be && chained, got: {cmd}"
+		);
+	}
+
+	#[test]
+	fn finish_upload_default_overwrites_resolved_existing_path() {
+		// The default install target must follow the SAME resolution as the
+		// probe (command -v -> ~/.cargo/bin -> ~/.local/bin) so a
+		// cargo-installed binary is upgraded IN PLACE, not shadowed by a new
+		// ~/.local/bin copy. Falls back to ~/.local/bin only for a fresh
+		// install.
+		let cmd = build_remote_finish_upload_cmd("aghub-api");
+		assert!(
+			cmd.contains("command -v aghub-api"),
+			"target must follow the resolved path: {cmd}"
+		);
+		assert!(
+			cmd.contains("$HOME/.cargo/bin/aghub-api"),
+			"must consider cargo-bin: {cmd}"
+		);
+		assert!(
+			cmd.contains("$HOME/.local/bin/aghub-api"),
+			"must fall back to local-bin: {cmd}"
+		);
+		assert!(
+			cmd.contains(
+				"mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\""
+			),
+			"still moves upload into $target: {cmd}"
+		);
+		assert!(cmd.contains("chmod 755 \"$target\""), "still chmods: {cmd}");
+	}
+
+	#[test]
+	fn finish_upload_explicit_paths_used_verbatim() {
+		// An explicit tilde path expands $HOME but is otherwise verbatim.
+		let tilde = build_remote_finish_upload_cmd("~/bin/aghub-api");
+		assert!(
+			tilde.contains("target=\"$HOME\"/'bin/aghub-api';"),
+			"tilde path must expand $HOME verbatim: {tilde}"
+		);
+		// An absolute / other path is single-quoted verbatim.
+		let abs = build_remote_finish_upload_cmd("/abs/aghub-api");
+		assert!(
+			abs.contains("target='/abs/aghub-api';"),
+			"absolute path must be verbatim: {abs}"
 		);
 	}
 
