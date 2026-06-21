@@ -22,8 +22,8 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 
 use crate::dto::skill::{
-	ApplySkillUpdateRequest, ApplySkillUpdateResponse, SkillUpdateResponse,
-	SkillUpdateStatusResponse,
+	AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
+	ApplySkillUpdateResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
@@ -646,6 +646,661 @@ pub(crate) async fn apply_skill_update_inner(
 	}))
 }
 
+fn accept_rename_error(
+	old_name: &str,
+	new_name: &str,
+	scope: &str,
+	message: &str,
+) -> AcceptRenameResponse {
+	AcceptRenameResponse {
+		success: false,
+		old_name: old_name.to_string(),
+		new_name: new_name.to_string(),
+		scope: scope.to_string(),
+		installed_hash: None,
+		paths: Vec::new(),
+		error: Some(message.to_string()),
+		code: None,
+	}
+}
+
+/// Source coordinates for the OLD-name lock entry, including the fields needed
+/// to re-install under the new name (`source_type` / `source_url` are not
+/// surfaced by [`apply_source_from_lock`]).
+struct RenameLockSource {
+	source: String,
+	source_type: String,
+	source_url: String,
+	ref_name: Option<String>,
+	skill_path: String,
+}
+
+fn rename_source_from_lock(
+	name: &str,
+	scope: &str,
+	project_root: Option<&Path>,
+) -> Result<RenameLockSource, String> {
+	match scope {
+		"global" => {
+			let lock = skill::lock::global::read_skill_lock();
+			let Some(entry) = lock.skills.get(name) else {
+				return Err("Skill is not in global lock".to_string());
+			};
+			let Some(skill_path) = entry.skill_path.clone() else {
+				return Err("Locked skill has no skillPath".to_string());
+			};
+			Ok(RenameLockSource {
+				source: entry.source.clone(),
+				source_type: entry.source_type.clone(),
+				source_url: entry.source_url.clone(),
+				ref_name: entry.ref_name.clone(),
+				skill_path,
+			})
+		}
+		"project" => {
+			let Some(root) = project_root else {
+				return Err("project_root is required when scope is project"
+					.to_string());
+			};
+			let lock = skill::lock::local::read_local_lock(Some(root));
+			let Some(entry) = lock.skills.get(name) else {
+				return Err("Skill is not in project lock".to_string());
+			};
+			let Some(skill_path) = entry.skill_path.clone() else {
+				return Err("Locked skill has no skillPath".to_string());
+			};
+			Ok(RenameLockSource {
+				// Project entries store only `source`; reuse it as the URL.
+				source: entry.source.clone(),
+				source_type: entry.source_type.clone(),
+				source_url: entry.source.clone(),
+				ref_name: entry.ref_name.clone(),
+				skill_path,
+			})
+		}
+		_ => Err("scope must be global or project".to_string()),
+	}
+}
+
+/// Remove a skill entry from the appropriate scope's lock. The closure is
+/// NON-fallible (it returns `()`); a `modify_*` no-op (entry already absent)
+/// does not rewrite the file, so this only errors on a real I/O failure.
+fn remove_lock_entry(
+	name: &str,
+	scope: &str,
+	project_root: Option<&Path>,
+) -> Result<(), String> {
+	match scope {
+		"global" => skill::lock::global::modify_skill_lock(|lock| {
+			lock.skills.remove(name);
+		})
+		.map_err(|e| format!("global lock write failed: {e}")),
+		"project" => {
+			let root = project_root.ok_or_else(|| {
+				"project_root required for project scope".to_string()
+			})?;
+			skill::lock::local::modify_local_lock(Some(root), |lock| {
+				lock.skills.remove(name);
+			})
+			.map_err(|e| format!("project lock write failed: {e}"))
+		}
+		_ => Err("scope must be global or project".to_string()),
+	}
+}
+
+/// Restore a previously-removed lock entry (rollback). Re-inserts the cloned
+/// entry under `name` in the appropriate scope's lock.
+fn restore_lock_entry(
+	name: &str,
+	scope: &str,
+	project_root: Option<&Path>,
+	global_entry: Option<&skill::SkillLockEntry>,
+	local_entry: Option<&skill::LocalSkillLockEntry>,
+) -> Result<(), String> {
+	match scope {
+		"global" => {
+			let Some(entry) = global_entry else {
+				return Ok(());
+			};
+			let entry = entry.clone();
+			let name = name.to_string();
+			skill::lock::global::modify_skill_lock(move |lock| {
+				lock.skills.insert(name, entry);
+			})
+			.map_err(|e| format!("global lock restore failed: {e}"))
+		}
+		"project" => {
+			let root = project_root.ok_or_else(|| {
+				"project_root required for project scope".to_string()
+			})?;
+			let Some(entry) = local_entry else {
+				return Ok(());
+			};
+			let entry = entry.clone();
+			let name = name.to_string();
+			skill::lock::local::modify_local_lock(Some(root), move |lock| {
+				lock.skills.insert(name, entry);
+			})
+			.map_err(|e| format!("project lock restore failed: {e}"))
+		}
+		_ => Err("scope must be global or project".to_string()),
+	}
+}
+
+/// A filesystem snapshot of one skill name across the in-scope agent dirs +
+/// the universal master, recursively copied into a temp backup so a failed
+/// rename transaction can be rolled back to its pre-mutation state.
+struct SkillSnapshot {
+	/// `_tmp` owns the backup tree; dropping it deletes the backup.
+	_tmp: tempfile::TempDir,
+	/// `(live_path, backup_path)` pairs for every captured location.
+	entries: Vec<(PathBuf, PathBuf)>,
+}
+
+/// Recursively copy `src` (a real directory) into `dst`.
+fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
+	std::fs::create_dir_all(dst)?;
+	for entry in std::fs::read_dir(src)? {
+		let entry = entry?;
+		let file_type = entry.file_type()?;
+		let from = entry.path();
+		let to = dst.join(entry.file_name());
+		if file_type.is_dir() {
+			copy_dir_recursive(&from, &to)?;
+		} else if file_type.is_symlink() {
+			let target = std::fs::read_link(&from)?;
+			std::os::unix::fs::symlink(&target, &to)?;
+		} else {
+			std::fs::copy(&from, &to)?;
+		}
+	}
+	Ok(())
+}
+
+/// Capture the old-name skill across the in-scope agent dirs + the universal
+/// master into a temp backup. Symlinks are preserved as symlinks; real dirs are
+/// deep-copied. Returns `None` only if the backup tempdir cannot be created.
+fn snapshot_old_skill(
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	agent_dirs: &[PathBuf],
+) -> Option<SkillSnapshot> {
+	let safe = skill::sanitize::sanitize_name(name);
+	let tmp = tempfile::tempdir().ok()?;
+	let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
+	let mut captured = std::collections::HashSet::new();
+
+	let mut targets: Vec<PathBuf> =
+		agent_dirs.iter().map(|d| d.join(&safe)).collect();
+	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
+		project_root
+	} else {
+		None
+	};
+	if let Some(master) =
+		aghub_core::skills::linker::universal_canonical_dir(canonical_root)
+	{
+		targets.push(master.join(&safe));
+	}
+
+	for (idx, live) in targets.into_iter().enumerate() {
+		if !captured.insert(live.clone()) {
+			continue;
+		}
+		let Ok(meta) = std::fs::symlink_metadata(&live) else {
+			continue;
+		};
+		let backup = tmp.path().join(format!("snap-{idx}"));
+		let ok = if meta.file_type().is_symlink() {
+			std::fs::read_link(&live)
+				.and_then(|target| std::os::unix::fs::symlink(&target, &backup))
+		} else if meta.is_dir() {
+			copy_dir_recursive(&live, &backup)
+		} else {
+			std::fs::copy(&live, &backup).map(|_| ())
+		};
+		if ok.is_ok() {
+			entries.push((live, backup));
+		}
+	}
+
+	Some(SkillSnapshot { _tmp: tmp, entries })
+}
+
+/// Restore every captured location from a snapshot (best-effort rollback).
+fn restore_snapshot(snapshot: &SkillSnapshot) {
+	for (live, backup) in &snapshot.entries {
+		// Clear whatever (partial) state is at `live` before restoring.
+		if let Ok(meta) = std::fs::symlink_metadata(live) {
+			if meta.file_type().is_symlink() || meta.is_file() {
+				let _ = std::fs::remove_file(live);
+			} else if meta.is_dir() {
+				let _ = std::fs::remove_dir_all(live);
+			}
+		}
+		let Ok(meta) = std::fs::symlink_metadata(backup) else {
+			continue;
+		};
+		let _ = if meta.file_type().is_symlink() {
+			std::fs::read_link(backup)
+				.and_then(|target| std::os::unix::fs::symlink(&target, live))
+		} else if meta.is_dir() {
+			copy_dir_recursive(backup, live)
+		} else {
+			std::fs::copy(backup, live).map(|_| ())
+		};
+	}
+}
+
+/// Best-effort rollback of the just-installed new-name dirs (and the universal
+/// master if it was freshly created), re-asserting containment before each
+/// `remove_dir_all` (TOCTOU guard).
+fn rollback_rename_install(
+	new_name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	agent_dirs: &[PathBuf],
+) {
+	let safe = skill::sanitize::sanitize_name(new_name);
+	let roots = aghub_core::skills::removal::allowed_skill_roots(
+		agent_dirs,
+		project_root,
+	);
+	for dir in agent_dirs {
+		let target = dir.join(&safe);
+		// A link is unlinked directly; a real dir is removed only if contained.
+		if let Ok(meta) = std::fs::symlink_metadata(&target) {
+			if meta.file_type().is_symlink() {
+				let _ = std::fs::remove_file(&target);
+			} else if meta.is_dir()
+				&& aghub_core::skills::removal::assert_contained(
+					&target, &roots,
+				)
+				.is_some()
+			{
+				let _ = std::fs::remove_dir_all(&target);
+			} else if meta.is_file() {
+				let _ = std::fs::remove_file(&target);
+			}
+		}
+	}
+	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
+		project_root
+	} else {
+		None
+	};
+	if let Some(canonical_dir) =
+		aghub_core::skills::linker::universal_canonical_dir(canonical_root)
+	{
+		let canonical = canonical_dir.join(&safe);
+		if canonical.exists()
+			&& aghub_core::skills::removal::assert_contained(&canonical, &roots)
+				.is_some()
+		{
+			let _ = std::fs::remove_dir_all(&canonical);
+		}
+	}
+}
+
+/// `POST /skills/accept-rename` — atomic rename: install the new name, delete
+/// the old name, update both lock entries. A single transaction: any failure
+/// after the new-name install rolls the install back and restores the old name
+/// (dirs + lock) to its pre-transaction state.
+#[post("/skills/accept-rename", data = "<body>")]
+pub async fn accept_skill_rename(
+	body: Json<AcceptRenameRequest>,
+) -> ApiResult<AcceptRenameResponse> {
+	accept_rename_inner(body.into_inner(), &GitFetcher).await
+}
+
+pub(crate) async fn accept_rename_inner(
+	req: AcceptRenameRequest,
+	fetcher: &dyn Fetcher,
+) -> ApiResult<AcceptRenameResponse> {
+	if !req.confirm.unwrap_or(false) {
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			"confirm=true is required to accept a skill rename",
+		)));
+	}
+	let project_root = req.project_root.as_deref().map(PathBuf::from);
+	let resource_scope = match req.scope.as_str() {
+		"global" => ResourceScope::GlobalOnly,
+		"project" => ResourceScope::ProjectOnly,
+		_ => {
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				"scope must be global or project",
+			)));
+		}
+	};
+	if resource_scope == ResourceScope::ProjectOnly && project_root.is_none() {
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			"project_root is required when scope is project",
+		)));
+	}
+
+	// 1. Read the OLD-name lock entry for source coordinates.
+	let source = match rename_source_from_lock(
+		&req.old_name,
+		&req.scope,
+		project_root.as_deref(),
+	) {
+		Ok(s) => s,
+		Err(e) => {
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				&e,
+			)));
+		}
+	};
+
+	// 2. Target agents = those that ACTUALLY have the old name installed (never
+	//    `AgentType::ALL`, which would spread the skill to agents that never
+	//    had it). Mirrors apply-update only touching installed roots.
+	let target_agents: Vec<aghub_core::models::AgentType> =
+		aghub_core::load_all_agents(resource_scope, project_root.as_deref())
+			.into_iter()
+			.filter(|r| r.skills.iter().any(|s| s.name == req.old_name))
+			.filter_map(|r| r.agent_id.parse().ok())
+			.collect();
+	if target_agents.is_empty() {
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			"Skill is locked but no installed copy was found",
+		)));
+	}
+
+	// 3. Fetch upstream (same credential path as apply-update).
+	let resolver = KeyringResolver;
+	let token = resolver.resolve(
+		&source.source,
+		keychain_host_for_source(&source.source).as_deref(),
+	);
+	let repo = match fetcher.fetch(
+		&SourceRef {
+			source: source.source_url.clone(),
+			ref_: source.ref_name.clone(),
+		},
+		token.as_deref(),
+	) {
+		Ok(r) => r,
+		Err(e) => {
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				fetch_error_text(e),
+			)));
+		}
+	};
+
+	// 4. Locate the skill file in the fetched tree (containment check).
+	let Some(skill_file) = aghub_core::skills::update::sanitize_skill_path(
+		&repo.root,
+		&source.skill_path,
+	) else {
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			"Locked skillPath was not found in fetched source",
+		)));
+	};
+
+	// 5. Verify the fetched name matches new_name (confirms this rename).
+	let parsed_skill = match skill::parse(&skill_file) {
+		Ok(s) => s,
+		Err(e) => {
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				&format!("Failed to parse fetched skill: {e}"),
+			)));
+		}
+	};
+	if parsed_skill.name != req.new_name {
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			&format!(
+				"Fetched SKILL.md declares name '{}', expected '{}'. \
+				 Verify the new_name matches the upstream source.",
+				parsed_skill.name, req.new_name,
+			),
+		)));
+	}
+
+	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+		resource_scope,
+		project_root.as_deref(),
+	);
+
+	// 6. SNAPSHOT the old-name dirs + clone the old lock entry BEFORE mutating.
+	let snapshot = snapshot_old_skill(
+		&req.old_name,
+		resource_scope,
+		project_root.as_deref(),
+		&agent_dirs,
+	);
+	let old_global_entry: Option<skill::SkillLockEntry> =
+		if req.scope == "global" {
+			skill::lock::global::read_skill_lock()
+				.skills
+				.get(&req.old_name)
+				.cloned()
+		} else {
+			None
+		};
+	let old_local_entry: Option<skill::LocalSkillLockEntry> =
+		if req.scope == "project" {
+			project_root.as_deref().and_then(|root| {
+				skill::lock::local::read_local_lock(Some(root))
+					.skills
+					.get(&req.old_name)
+					.cloned()
+			})
+		} else {
+			None
+		};
+
+	// 7. Install the new-named skill. On failure the old skill is still intact
+	//    (nothing mutated yet) — return without rollback.
+	let install_source = skill::InstallLockSource {
+		source: source.source.clone(),
+		source_type: source.source_type.clone(),
+		source_url: source.source_url.clone(),
+		ref_name: source.ref_name.clone(),
+	};
+	let install_req =
+		aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
+			skill_file: &skill_file,
+			source: &install_source,
+			lock_skill_path: source.skill_path.clone(),
+			ref_commit: Some(repo.oid.clone()),
+			scope: resource_scope,
+			project_root: project_root.as_deref(),
+			target_agents: &target_agents,
+			expected_name: Some(&req.new_name),
+			target: if matches!(resource_scope, ResourceScope::ProjectOnly) {
+				aghub_core::skills::linker::LinkTarget::Relative
+			} else {
+				aghub_core::skills::linker::LinkTarget::Absolute
+			},
+		};
+	let install_report =
+		match aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
+			install_req,
+		) {
+			Ok(r) => r,
+			Err(e) => {
+				return Ok(Json(accept_rename_error(
+					&req.old_name,
+					&req.new_name,
+					&req.scope,
+					&format!("Failed to install renamed skill: {e}"),
+				)));
+			}
+		};
+	// If no agent actually received the skill, treat as a failed install: roll
+	// back any freshly-written lock/master and bail (old skill is untouched).
+	if !install_report.agent_results.iter().any(|r| r.installed) {
+		let detail = install_report
+			.agent_results
+			.iter()
+			.find_map(|r| r.error.clone())
+			.unwrap_or_else(|| "no agent received the skill".to_string());
+		rollback_rename_install(
+			&req.new_name,
+			resource_scope,
+			project_root.as_deref(),
+			&agent_dirs,
+		);
+		let _ = remove_lock_entry(
+			&req.new_name,
+			&req.scope,
+			project_root.as_deref(),
+		);
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			&format!("Failed to install renamed skill: {detail}"),
+		)));
+	}
+
+	let installed_paths: Vec<String> = install_report
+		.agent_results
+		.iter()
+		.filter(|r| r.installed)
+		.filter_map(|r| {
+			aghub_core::create_adapter(r.agent)
+				.get_skills_paths(project_root.as_deref(), resource_scope)
+				.first()
+				.map(|p| p.join(&req.new_name).display().to_string())
+		})
+		.collect();
+
+	// 8. Remove the old-name dirs. A removal failure rolls back the whole txn.
+	let mut old_skill = aghub_core::models::Skill::new(&req.old_name);
+	if let Some(dir) = agent_dirs.first() {
+		old_skill.source_path = Some(
+			dir.join(&req.old_name)
+				.join("SKILL.md")
+				.display()
+				.to_string(),
+		);
+	}
+	let removal_plan = aghub_core::skills::removal::plan_removal(
+		&old_skill,
+		None,
+		&agent_dirs,
+		project_root.as_deref(),
+		true,
+	);
+	let removal_roots = aghub_core::skills::removal::allowed_skill_roots(
+		&agent_dirs,
+		project_root.as_deref(),
+	);
+
+	// Helper: roll the whole transaction back to its pre-mutation state.
+	let rollback_all = || {
+		rollback_rename_install(
+			&req.new_name,
+			resource_scope,
+			project_root.as_deref(),
+			&agent_dirs,
+		);
+		let _ = remove_lock_entry(
+			&req.new_name,
+			&req.scope,
+			project_root.as_deref(),
+		);
+		if let Some(snapshot) = &snapshot {
+			restore_snapshot(snapshot);
+		}
+		let _ = restore_lock_entry(
+			&req.old_name,
+			&req.scope,
+			project_root.as_deref(),
+			old_global_entry.as_ref(),
+			old_local_entry.as_ref(),
+		);
+	};
+
+	let removal_report = match aghub_core::skills::removal::execute_removal(
+		&removal_plan,
+		&removal_roots,
+	) {
+		Ok(r) => r,
+		Err(e) => {
+			rollback_all();
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				&format!("Failed to remove old skill '{}': {e}", req.old_name),
+			)));
+		}
+	};
+	if !removal_report.failed.is_empty() {
+		let failed_msgs: Vec<String> = removal_report
+			.failed
+			.iter()
+			.map(|(p, e)| format!("{}: {e}", p.display()))
+			.collect();
+		rollback_all();
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			&format!(
+				"Partial removal failure for old skill: {}",
+				failed_msgs.join("; ")
+			),
+		)));
+	}
+
+	// 9. Remove the old-name lock entry. NOT log-and-continue: a failure here
+	//    means the transaction did not fully commit -> roll everything back.
+	if let Err(e) =
+		remove_lock_entry(&req.old_name, &req.scope, project_root.as_deref())
+	{
+		rollback_all();
+		return Ok(Json(accept_rename_error(
+			&req.old_name,
+			&req.new_name,
+			&req.scope,
+			&format!("Failed to remove old lock entry '{}': {e}", req.old_name),
+		)));
+	}
+
+	Ok(Json(AcceptRenameResponse {
+		success: true,
+		old_name: req.old_name,
+		new_name: req.new_name,
+		scope: req.scope,
+		installed_hash: Some(install_report.installed_hash),
+		paths: installed_paths,
+		error: None,
+		code: None,
+	}))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -680,6 +1335,27 @@ mod tests {
 			installed_at: "t".to_string(),
 			updated_at: "t".to_string(),
 			plugin_name: None,
+		}
+	}
+
+	/// Run `accept_rename_inner` on a current-thread runtime and unwrap the
+	/// JSON body, panicking on the (never-returned) `ApiError` path since
+	/// `ApiError` does not implement `Debug`.
+	#[cfg(unix)]
+	fn run_accept_rename(
+		req: crate::dto::skill::AcceptRenameRequest,
+		fetcher: &dyn Fetcher,
+	) -> crate::dto::skill::AcceptRenameResponse {
+		match rocket::tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(accept_rename_inner(req, fetcher))
+		{
+			Ok(json) => json.into_inner(),
+			Err(error) => {
+				panic!("accept_rename should return Ok: {}", error.body.error)
+			}
 		}
 	}
 
@@ -1079,6 +1755,202 @@ mod tests {
 				std::fs::read_to_string(installed_dir.join("SKILL.md"))
 					.unwrap();
 			assert_eq!(still_there, pre_existing);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn accept_rename_inner_rejects_without_confirm() {
+		use crate::dto::skill::AcceptRenameRequest;
+		let req = AcceptRenameRequest {
+			old_name: "old".to_string(),
+			new_name: "new".to_string(),
+			scope: "global".to_string(),
+			project_root: None,
+			confirm: Some(false),
+		};
+		let fetcher = LocalRepoFetcher {
+			root: std::path::PathBuf::from("/tmp"),
+		};
+		let resp = run_accept_rename(req, &fetcher);
+		assert!(!resp.success);
+		assert!(resp.error.as_deref().unwrap_or("").contains("confirm"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn accept_rename_inner_installs_new_and_removes_old() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			// Install old skill
+			let old_dir = home.path().join(".claude/skills/old-skill");
+			std::fs::create_dir_all(&old_dir).unwrap();
+			std::fs::write(
+				old_dir.join("SKILL.md"),
+				"---\nname: old-skill\ndescription: original\n---\n",
+			)
+			.unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+
+			// Lock entry for old-skill
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_path = Some("new-skill/SKILL.md".to_string());
+			lock.skills.insert("old-skill".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// Fetched repo has SKILL.md with new name
+			let fetched = tempfile::tempdir().unwrap();
+			let new_skill_dir = fetched.path().join("new-skill");
+			std::fs::create_dir_all(&new_skill_dir).unwrap();
+			std::fs::write(
+				new_skill_dir.join("SKILL.md"),
+				"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+			)
+			.unwrap();
+			let fetcher = LocalRepoFetcher {
+				root: fetched.path().to_path_buf(),
+			};
+
+			let req = crate::dto::skill::AcceptRenameRequest {
+				old_name: "old-skill".to_string(),
+				new_name: "new-skill".to_string(),
+				scope: "global".to_string(),
+				project_root: None,
+				confirm: Some(true),
+			};
+			let resp = run_accept_rename(req, &fetcher);
+
+			match old_home {
+				Some(v) => std::env::set_var("HOME", v),
+				None => std::env::remove_var("HOME"),
+			}
+
+			assert!(resp.success, "error: {:?}", resp.error);
+			assert_eq!(resp.old_name, "old-skill");
+			assert_eq!(resp.new_name, "new-skill");
+
+			// New skill dir should exist
+			assert!(
+				home.path().join(".claude/skills/new-skill").exists(),
+				"new skill dir must be installed"
+			);
+			// Old skill dir should be removed
+			assert!(
+				!home.path().join(".claude/skills/old-skill").exists(),
+				"old skill dir must be removed"
+			);
+
+			// Lock: new-skill present, old-skill absent
+			let lock = skill::lock::global::read_skill_lock();
+			assert!(lock.skills.contains_key("new-skill"), "new-skill in lock");
+			assert!(
+				!lock.skills.contains_key("old-skill"),
+				"old-skill removed from lock"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn accept_rename_inner_rollback_on_removal_failure() {
+		// Make the old-skill agent dir read-only so the transaction fails
+		// (either at install or at removal). Either way the end state must be
+		// the pre-transaction state: old-skill in the lock, new-skill absent,
+		// and the old-skill dir still on disk. Skipped under root, where mode
+		// 0o500 is ignored and writes still succeed.
+		use std::os::unix::fs::PermissionsExt;
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let old_dir = home.path().join(".claude/skills/old-skill");
+			std::fs::create_dir_all(&old_dir).unwrap();
+			std::fs::write(
+				old_dir.join("SKILL.md"),
+				"---\nname: old-skill\ndescription: original\n---\n",
+			)
+			.unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_path = Some("new-skill/SKILL.md".to_string());
+			lock.skills.insert("old-skill".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			let fetched = tempfile::tempdir().unwrap();
+			let new_skill_dir = fetched.path().join("new-skill");
+			std::fs::create_dir_all(&new_skill_dir).unwrap();
+			std::fs::write(
+				new_skill_dir.join("SKILL.md"),
+				"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+			)
+			.unwrap();
+
+			// Root probe: a process running as root ignores 0o500, so the
+			// failure we rely on never happens — skip rather than false-pass.
+			let skills_dir = home.path().join(".claude/skills");
+			let original_perms =
+				std::fs::metadata(&skills_dir).unwrap().permissions();
+			std::fs::set_permissions(
+				&skills_dir,
+				std::fs::Permissions::from_mode(0o500),
+			)
+			.unwrap();
+			let probe = skills_dir.join(".rename-root-probe");
+			let is_root = std::fs::write(&probe, b"x").is_ok();
+			if is_root {
+				let _ = std::fs::remove_file(&probe);
+				std::fs::set_permissions(&skills_dir, original_perms).unwrap();
+				match old_home {
+					Some(v) => std::env::set_var("HOME", v),
+					None => std::env::remove_var("HOME"),
+				}
+				eprintln!("skipping under root: 0o500 is not enforced");
+				return;
+			}
+
+			let fetcher = LocalRepoFetcher {
+				root: fetched.path().to_path_buf(),
+			};
+			let req = crate::dto::skill::AcceptRenameRequest {
+				old_name: "old-skill".to_string(),
+				new_name: "new-skill".to_string(),
+				scope: "global".to_string(),
+				project_root: None,
+				confirm: Some(true),
+			};
+			let resp = run_accept_rename(req, &fetcher);
+
+			// Restore permissions before asserting so other tests aren't
+			// disturbed and the tempdir can be cleaned up.
+			std::fs::set_permissions(&skills_dir, original_perms).unwrap();
+			match old_home {
+				Some(v) => std::env::set_var("HOME", v),
+				None => std::env::remove_var("HOME"),
+			}
+
+			// The op must fail (install or removal under the locked dir).
+			assert!(
+				!resp.success,
+				"must fail when the old-skill dir cannot be mutated"
+			);
+			// The old-skill dir must still be present (restored / never lost).
+			assert!(
+				old_dir.exists(),
+				"old skill dir must remain after a failed transaction"
+			);
+			// The lock must remain with only old-skill (no partial state).
+			let lock = skill::lock::global::read_skill_lock();
+			assert!(
+				lock.skills.contains_key("old-skill"),
+				"lock must be restored to old-skill only"
+			);
+			assert!(
+				!lock.skills.contains_key("new-skill"),
+				"new-skill must not be in lock after rollback"
+			);
 		});
 	}
 }
