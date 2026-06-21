@@ -473,9 +473,9 @@ export default {
 	onboardingMcpTitle: "Global MCP servers",
 	onboardingMcpDescription:
 		"This page is for shared MCP server definitions you want available to one or more agents across your machine.",
-	onboardingSkillsTitle: "Installed skills",
+	onboardingSkillsTitle: "Skills & Sources",
 	onboardingSkillsDescription:
-		"Review local skills, inspect their contents, and manage what is already available to your agents.",
+		"Browse and manage skills by Agent or by Source. Run update checks, install new skills, and handle renamed or removed entries — all in one place.",
 	onboardingSettingsTitle: "Settings stay close by",
 	onboardingSettingsDescription:
 		"Appearance, agent availability, editor integrations, and these onboarding controls all live here.",

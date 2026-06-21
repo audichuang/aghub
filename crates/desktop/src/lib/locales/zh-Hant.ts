@@ -443,9 +443,9 @@ export default {
 	onboardingMcpTitle: "全域 MCP 服務",
 	onboardingMcpDescription:
 		"這裡管理的是共用型 MCP 服務定義，你可以把它們分配給一到多個 Agent。",
-	onboardingSkillsTitle: "已安裝技能",
+	onboardingSkillsTitle: "技能與來源",
 	onboardingSkillsDescription:
-		"在這裡檢查本機技能內容，並管理目前 Agent 已經具備的能力。",
+		"依 Agent 或依來源瀏覽與管理技能。在同一個頁面執行更新檢查、安裝新技能，並處理已改名或已移除的條目。",
 	onboardingSettingsTitle: "設定入口始終在這裡",
 	onboardingSettingsDescription:
 		"外觀、Agent 可用性、編輯器整合，以及這些導覽控制都集中在這裡。",
