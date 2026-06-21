@@ -348,9 +348,19 @@ fn default_api_path_script() -> &'static str {
 }
 
 /// Build a POSIX assignment that stores the resolved aghub-api path in `$bin`.
+///
+/// An explicit `~/…` path expands `$HOME` so the probe and start resolve the
+/// SAME location the install target writes to (see
+/// [`assign_install_target_cmd`]); without this, an explicit
+/// `~/.local/bin/aghub-api` would be installed to `$HOME/.local/bin/aghub-api`
+/// but probed/started as a literal `~/…` token the remote shell never expands,
+/// so a freshly installed binary would never be found. Any other path is
+/// single-quote escaped verbatim.
 fn assign_api_bin_cmd(resolved_path: &str) -> String {
 	if resolved_path == "aghub-api" {
 		format!("bin=\"$({})\";", default_api_path_script())
+	} else if let Some(rest) = resolved_path.strip_prefix("~/") {
+		format!("bin=\"$HOME\"/{};", shell_quote_single(rest))
 	} else {
 		format!("bin={};", shell_quote_single(resolved_path))
 	}
@@ -983,6 +993,43 @@ mod tests {
 	fn remote_probe_cmd_neutralizes_injection() {
 		let cmd = build_remote_probe_cmd("a; rm -rf /");
 		assert_eq!(cmd, "bin='a; rm -rf /'; \"$bin\" --version");
+	}
+
+	#[test]
+	fn remote_probe_cmd_expands_explicit_tilde_path() {
+		// An explicit `~/…` path must expand `$HOME` (single-quoted remainder),
+		// not be passed as a literal `~/…` token the remote shell won't expand.
+		assert_eq!(
+			build_remote_probe_cmd("~/.local/bin/aghub-api"),
+			"bin=\"$HOME\"/'.local/bin/aghub-api'; \"$bin\" --version"
+		);
+	}
+
+	#[test]
+	fn remote_start_cmd_expands_explicit_tilde_path() {
+		let cmd = build_remote_start_cmd("~/.local/bin/aghub-api", "vm-1");
+		assert!(
+			cmd.contains("bin=\"$HOME\"/'.local/bin/aghub-api';"),
+			"start must expand the tilde to $HOME: {cmd}"
+		);
+	}
+
+	#[test]
+	fn probe_and_install_target_agree_on_tilde_expansion() {
+		// Regression: the probe/start path and the install target must expand
+		// `~/` the SAME way, or an explicit `~/.local/bin/aghub-api` is
+		// installed to `$HOME/.local/bin/aghub-api` but probed as a literal
+		// `~/…` and never found — a successful install that can't connect.
+		let probe = build_remote_probe_cmd("~/.local/bin/aghub-api");
+		let finish = build_remote_finish_upload_cmd("~/.local/bin/aghub-api");
+		assert!(
+			probe.contains("bin=\"$HOME\"/'.local/bin/aghub-api';"),
+			"probe must expand the tilde to $HOME: {probe}"
+		);
+		assert!(
+			finish.contains("target=\"$HOME\"/'.local/bin/aghub-api';"),
+			"finish must expand the tilde to $HOME: {finish}"
+		);
 	}
 
 	// --- build_remote_cargo_install_cmd -----------------------------------
