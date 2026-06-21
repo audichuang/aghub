@@ -1117,4 +1117,10 @@ export default {
 	sourceAllLatest: "所有技能均为最新版本。",
 	// Credential binding
 	credentialBind: "绑定凭证",
+	// Phase 2 — Unified skills page
+	skillCenter: "技能",
+	viewByAgent: "按 Agent",
+	viewBySource: "按来源",
+	scopeSwitchGlobal: "全局",
+	scopeSwitchProject: "项目",
 };

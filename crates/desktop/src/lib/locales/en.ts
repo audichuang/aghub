@@ -1150,4 +1150,10 @@ export default {
 	sourceAllLatest: "All skills are up to date.",
 	// Credential binding
 	credentialBind: "Bind credential",
+	// Phase 2 — Unified skills page
+	skillCenter: "Skills",
+	viewByAgent: "By Agent",
+	viewBySource: "By Source",
+	scopeSwitchGlobal: "Global",
+	scopeSwitchProject: "Project",
 };
