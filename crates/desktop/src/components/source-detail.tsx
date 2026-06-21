@@ -13,11 +13,7 @@ import {
 } from "@heroicons/react/24/solid";
 import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import {
-	useMutation,
-	useQuery,
-	useQueryClient,
-} from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
@@ -266,11 +262,7 @@ function SourceEmptyState({
 						{t("sourcePrunePreviewErrorHint")}
 					</Alert.Description>
 					<div className="mt-3">
-						<Button
-							size="sm"
-							variant="secondary"
-							onPress={onRetry}
-						>
+						<Button size="sm" variant="secondary" onPress={onRetry}>
 							{t("retry")}
 						</Button>
 					</div>
@@ -365,8 +357,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const selectedInstallCount = selectedInstallSkills.length;
 	const hasSelectedInstallSkills = selectedInstallCount > 0;
 	const allInstallSkillsSelected =
-		notInstalled.length > 0 &&
-		selectedInstallCount === notInstalled.length;
+		notInstalled.length > 0 && selectedInstallCount === notInstalled.length;
 	const hasVisibleSkills = (data?.skills.length ?? 0) > 0;
 	const updateScope = row.rowScope;
 	const updateProjectRoot =
@@ -378,8 +369,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		() =>
 			availableAgents.filter(
 				(agent) =>
-					agent.isUsable &&
-					supportsSkillMutation(agent, updateScope),
+					agent.isUsable && supportsSkillMutation(agent, updateScope),
 			),
 		[availableAgents, updateScope],
 	);
@@ -618,8 +608,12 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			if (failed > 0) {
 				toast.danger(
 					failed === 1
-						? t("sourceRemovedCleanSomeFailedOne", { count: failed })
-						: t("sourceRemovedCleanSomeFailedMany", { count: failed }),
+						? t("sourceRemovedCleanSomeFailedOne", {
+								count: failed,
+							})
+						: t("sourceRemovedCleanSomeFailedMany", {
+								count: failed,
+							}),
 				);
 			} else {
 				toast.success(
@@ -717,7 +711,18 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}
 	};
 
-	// "Needs action" bucket: all states that require user intervention
+	// Split uncheckable into auth-blocked (actionable) vs other (info-only)
+	const uncheckableAuth = useMemo(
+		() => uncheckable.filter((s) => s.reason === "auth"),
+		[uncheckable],
+	);
+	const uncheckableNonAuth = useMemo(
+		() => uncheckable.filter((s) => s.reason !== "auth"),
+		[uncheckable],
+	);
+
+	// "Needs action" bucket: only states where user can take an action.
+	// Non-auth uncheckable rows are NOT actionable — excluded from this list.
 	const needsActionSkills = useMemo(
 		() => [
 			...outdated,
@@ -725,21 +730,14 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			...renamed,
 			...removed,
 			...deprecated,
-			...uncheckable,
+			...uncheckableAuth,
 		],
-		[outdated, notInstalled, renamed, removed, deprecated, uncheckable],
+		[outdated, notInstalled, renamed, removed, deprecated, uncheckableAuth],
 	);
 
 	const hasNeedsAction = needsActionSkills.length > 0;
 
-	// Suppress "unused variable" lint — these are kept for future use but
-	// currently only used indirectly via needsActionSkills length guard.
-	void allInstallSkillsSelected;
-	void allInstallSkillPaths;
-	void deleteAllRemovedSkills;
-
-	const SourceIcon =
-		row.sourceType === "local" ? FolderIcon : GlobeAltIcon;
+	const SourceIcon = row.sourceType === "local" ? FolderIcon : GlobeAltIcon;
 
 	// P2 correction: use sourceUrl for dialog so host resolution works
 	const credentialBindingSource = row.sourceUrl || row.source;
@@ -809,19 +807,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 								</div>
 							</Alert.Content>
 						</Alert>
-						{/* Dialog mounted inside the needsCredential branch */}
-						<SourceCredentialBindingDialog
-							isOpen={isCredentialDialogOpen}
-							bindingSource={credentialBindingSource}
-							onClose={() => setIsCredentialDialogOpen(false)}
-							onBound={async () => {
-								setIsCredentialDialogOpen(false);
-								await queryClient.invalidateQueries({
-									queryKey:
-										queryKeys.skills.sources.all(),
-								});
-							}}
-						/>
+						{/* Dialog is mounted once at root level — just trigger open above */}
 					</div>
 				) : (
 					<div className="space-y-6">
@@ -889,34 +875,86 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											</Button>
 										)}
 										{notInstalled.length > 0 && (
+											<>
+												<button
+													type="button"
+													className="h-7 rounded px-2 text-xs text-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+													disabled={
+														isInstallingAll ||
+														installingSkillPath !==
+															null
+													}
+													onClick={() =>
+														setSelectedInstallSkillPaths(
+															allInstallSkillsSelected
+																? new Set()
+																: new Set(
+																		allInstallSkillPaths,
+																	),
+														)
+													}
+												>
+													{allInstallSkillsSelected
+														? t(
+																"sourceClearSelection",
+															)
+														: t("sourceSelectAll")}
+												</button>
+												<Button
+													size="sm"
+													variant="ghost"
+													className="h-7 px-2 text-xs"
+													isDisabled={
+														isInstallingAll ||
+														installingSkillPath !==
+															null ||
+														isCoverageLoading
+													}
+													onPress={() =>
+														installFromSource(
+															hasSelectedInstallSkills
+																? selectedInstallSkills
+																: notInstalled,
+														)
+													}
+												>
+													<ArrowDownTrayIcon className="size-3.5" />
+													{isInstallingAll
+														? t("sourceInstalling")
+														: hasSelectedInstallSkills
+															? t(
+																	"sourceInstallSelected",
+																	{
+																		count: selectedInstallCount,
+																	},
+																)
+															: t(
+																	"sourceInstallAll",
+																)}
+												</Button>
+											</>
+										)}
+										{removed.length > 0 && (
 											<Button
 												size="sm"
 												variant="ghost"
 												className="h-7 px-2 text-xs"
 												isDisabled={
-													isInstallingAll ||
-													installingSkillPath !== null ||
-													isCoverageLoading
+													isDeletingAllRemoved ||
+													deleteRemovedSkillMutation.isPending
 												}
 												onPress={() =>
-													installFromSource(
-														hasSelectedInstallSkills
-															? selectedInstallSkills
-															: notInstalled,
+													deleteAllRemovedSkills(
+														removed,
 													)
 												}
 											>
-												<ArrowDownTrayIcon className="size-3.5" />
-												{isInstallingAll
-													? t("sourceInstalling")
-													: hasSelectedInstallSkills
-														? t(
-																"sourceInstallSelected",
-																{
-																	count: selectedInstallCount,
-																},
-															)
-														: t("sourceInstallAll")}
+												<TrashIcon className="size-3.5" />
+												{isDeletingAllRemoved
+													? t("sourceRemovedCleaning")
+													: t(
+															"sourceRemovedCleanAll",
+														)}
 											</Button>
 										)}
 									</div>
@@ -954,12 +992,16 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 															isApplying
 														}
 														onPress={() =>
-															applyOneUpdate(skill)
+															applyOneUpdate(
+																skill,
+															)
 														}
 													>
 														<ArrowPathIcon className="size-3.5" />
 														{isApplying
-															? t("sourceUpdating")
+															? t(
+																	"sourceUpdating",
+																)
 															: t(
 																	"sourceUpdateSkill",
 																)}
@@ -1019,7 +1061,9 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 													>
 														<ArrowDownTrayIcon className="size-3.5" />
 														{isInstalling
-															? t("sourceInstalling")
+															? t(
+																	"sourceInstalling",
+																)
 															: t(
 																	"sourceInstallSkill",
 																)}
@@ -1028,6 +1072,9 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											/>
 										);
 									})}
+									{/* TODO(Phase 3): replace with one-click accept-rename once
+									    POST /skills/accept-rename exists. For now, keep the
+									    existing two-step flow: delete old + copy install cmd. */}
 									{renamed.map((skill) => {
 										const isDeleting =
 											deleteRenamedSkillMutation.isPending &&
@@ -1156,26 +1203,62 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											/>
 										);
 									})}
-									{deprecated.map((skill) => (
-										<SourceSkillRow
-											key={skill.skillPath}
-											skill={skill}
-											isExpanded={
-												expandedSkillPath ===
-												skill.skillPath
-											}
-											onToggle={() =>
-												setExpandedSkillPath(
+									{deprecated.map((skill) => {
+										const isDeleting =
+											deleteRemovedSkillMutation.isPending &&
+											deleteRemovedSkillMutation.variables
+												?.skillPath === skill.skillPath;
+										return (
+											<SourceSkillRow
+												key={skill.skillPath}
+												skill={skill}
+												isExpanded={
 													expandedSkillPath ===
-														skill.skillPath
-														? null
-														: skill.skillPath,
-												)
-											}
-											muted
-										/>
-									))}
-									{uncheckable.map((skill) => (
+													skill.skillPath
+												}
+												onToggle={() =>
+													setExpandedSkillPath(
+														expandedSkillPath ===
+															skill.skillPath
+															? null
+															: skill.skillPath,
+													)
+												}
+												muted
+												showReason
+												action={
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														isDisabled={
+															isDeletingAllRemoved ||
+															isDeleting
+														}
+														onPress={() =>
+															deleteRemovedSkillMutation.mutate(
+																skill,
+															)
+														}
+													>
+														<TrashIcon className="size-3.5" />
+														{isDeleting
+															? t(
+																	"sourceRemovedCleaning",
+																)
+															: t(
+																	"sourceRemovedCleanSkill",
+																)}
+													</Button>
+												}
+											/>
+										);
+									})}
+									{/* Only auth-blocked uncheckable rows are
+									    actionable (credential binding). Non-auth
+									    uncheckable rows are rendered below as
+									    an info note, not action rows. */}
+									{uncheckableAuth.map((skill) => (
 										<SourceSkillRow
 											key={skill.skillPath}
 											skill={skill}
@@ -1194,25 +1277,39 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											muted
 											showReason
 											action={
-												skill.reason === "auth" ? (
-													<Button
-														size="sm"
-														variant="secondary"
-														className="h-7 px-2 text-xs"
-														onPress={() =>
-															setIsCredentialDialogOpen(
-																true,
-															)
-														}
-													>
-														{t("credentialBind")}
-													</Button>
-												) : undefined
+												<Button
+													size="sm"
+													variant="secondary"
+													className="h-7 px-2 text-xs"
+													onPress={() =>
+														setIsCredentialDialogOpen(
+															true,
+														)
+													}
+												>
+													{t("credentialBind")}
+												</Button>
 											}
 										/>
 									))}
 								</ul>
 							</section>
+						)}
+
+						{/* Non-auth uncheckable: info-only, no action */}
+						{uncheckableNonAuth.length > 0 && (
+							<SkillSection
+								title={t("summaryUnchecked", {
+									count: uncheckableNonAuth.length,
+								})}
+								icon={
+									<ExclamationTriangleIcon className="size-4 text-muted" />
+								}
+								skills={uncheckableNonAuth}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								muted
+							/>
 						)}
 
 						{/* "Installed (latest)" — collapsed by default */}
@@ -1228,16 +1325,18 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 						/>
 
 						{/* All-clear empty state */}
-						{!hasNeedsAction && !isLoading && current.length > 0 && (
-							<div className="rounded-lg border border-success/30 bg-success/5 px-4 py-3">
-								<div className="flex items-center gap-2">
-									<CheckCircleIcon className="size-4 shrink-0 text-success" />
-									<p className="text-sm text-success">
-										{t("sourceAllLatest")}
-									</p>
+						{!hasNeedsAction &&
+							!isLoading &&
+							current.length > 0 && (
+								<div className="rounded-lg border border-success/30 bg-success/5 px-4 py-3">
+									<div className="flex items-center gap-2">
+										<CheckCircleIcon className="size-4 shrink-0 text-success" />
+										<p className="text-sm text-success">
+											{t("sourceAllLatest")}
+										</p>
+									</div>
 								</div>
-							</div>
-						)}
+							)}
 
 						{/* Agent coverage hint */}
 						{(autoCovered.length > 0 || linkTargets.length > 0) &&
