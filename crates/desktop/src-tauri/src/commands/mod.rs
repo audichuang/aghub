@@ -1,8 +1,10 @@
+pub mod credentials;
 pub mod logging;
 pub mod remote;
 pub mod server;
 pub mod window;
 
+pub use credentials::{list_bound_sources, resolve_git_token};
 pub use logging::{
 	clear_log_files, export_diagnostic_logs, get_log_dir_path, get_log_entries,
 	get_log_stats,
