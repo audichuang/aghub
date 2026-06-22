@@ -156,18 +156,28 @@ if [ "$ASSUME_YES" != "1" ]; then
 fi
 
 # 4. tag + push to the fork --------------------------------------------------
+# Record the highest existing release-run id BEFORE pushing the tag. databaseId
+# is monotonic, so the run our push triggers is the first one with a strictly
+# greater id. Without this, a re-release (delete tag + re-push) races: a stale
+# run for the same tag/sha still lingers in the list and `first` locks onto it
+# before the fresh run registers — which is exactly how an earlier test
+# mistakenly watched (and tried to rerun) a cancelled previous run.
+PRIOR_RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
+	--json databaseId --jq '.[0].databaseId // 0' 2>/dev/null || echo 0)"
+
 git tag "$TAG"
 git push "$REMOTE" "$TAG"
 ok "pushed $TAG to $REMOTE — release.yml triggered"
 
 # 5. watch release.yml; auto-rerun once on a transient dispatch flake --------
-# Actions can take a while to register the tag run under load, so poll instead
-# of a single best-effort lookup.
+# Poll for the run THIS push triggered: same head sha + push event + a newer id
+# than any that existed before the push. Actions can take a while to register
+# under load, so keep polling rather than accepting the first stale match.
 RUN_ID=""
 for _ in $(seq 1 20); do
-	RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 10 \
-		--json databaseId,headBranch,event \
-		--jq "[.[] | select(.headBranch==\"$TAG\" and .event==\"push\")] | first | .databaseId" 2>/dev/null || echo "")"
+	RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 15 \
+		--json databaseId,headSha,event \
+		--jq "[.[] | select(.headSha==\"$HEAD_SHA\" and .event==\"push\" and (.databaseId > $PRIOR_RUN_ID))] | sort_by(.databaseId) | last | .databaseId" 2>/dev/null || echo "")"
 	[ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ] && break
 	info "  waiting for release.yml run to register..."
 	sleep 6
