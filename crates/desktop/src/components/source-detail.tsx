@@ -343,6 +343,10 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const renamed = grouped.get("renamed") ?? EMPTY_DIFFS;
 	const removed = grouped.get("removed") ?? EMPTY_DIFFS;
 	const deprecated = grouped.get("deprecated") ?? EMPTY_DIFFS;
+	const installedDeprecated = useMemo(
+		() => deprecated.filter((skill) => skill.installedPaths.length > 0),
+		[deprecated],
+	);
 	const current = grouped.get("installedCurrent") ?? EMPTY_DIFFS;
 	const uncheckable = grouped.get("uncheckable") ?? EMPTY_DIFFS;
 
@@ -735,10 +739,17 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			...notInstalled,
 			...renamed,
 			...removed,
-			...deprecated,
+			...installedDeprecated,
 			...uncheckableAuth,
 		],
-		[outdated, notInstalled, renamed, removed, deprecated, uncheckableAuth],
+		[
+			outdated,
+			notInstalled,
+			renamed,
+			removed,
+			installedDeprecated,
+			uncheckableAuth,
+		],
 	);
 
 	const hasNeedsAction = needsActionSkills.length > 0;
@@ -1209,7 +1220,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											/>
 										);
 									})}
-									{deprecated.map((skill) => {
+									{installedDeprecated.map((skill) => {
 										const isDeleting =
 											deleteRemovedSkillMutation.isPending &&
 											deleteRemovedSkillMutation.variables
