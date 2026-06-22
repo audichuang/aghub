@@ -1010,6 +1010,7 @@ export default {
 	connFieldUser: "使用者",
 	connFieldUserPlaceholder: "選填，會覆寫 ssh config 設定",
 	connFieldPort: "連接埠",
+	connFieldPortPlaceholder: "選填，例如 22",
 	connFieldRemotePath: "遠端 aghub-api 路徑",
 	connFieldRemotePathPlaceholder: "選填，例如 ~/.local/bin/aghub-api",
 	connRequiredLabel: "請填寫名稱。",

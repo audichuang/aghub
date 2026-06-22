@@ -1014,6 +1014,7 @@ export default {
 	connFieldUser: "用户",
 	connFieldUserPlaceholder: "可选，覆盖 ssh config 设置",
 	connFieldPort: "端口",
+	connFieldPortPlaceholder: "选填，例如 22",
 	connFieldRemotePath: "远程 aghub-api 路径",
 	connFieldRemotePathPlaceholder: "可选，例如 ~/.local/bin/aghub-api",
 	connRequiredLabel: "请填写名称。",

@@ -19,6 +19,7 @@ import {
 	Label,
 	Modal,
 	NumberField,
+	ScrollShadow,
 	Spinner,
 	TextField,
 	toast,
@@ -585,275 +586,307 @@ export function ManageConnectionsDialog({
 						<Modal.Heading>{t("connManageTitle")}</Modal.Heading>
 					</Modal.Header>
 
-					<Modal.Body className="flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto p-4">
-						<div className="flex flex-col gap-2">
-							{remotes.length === 0 ? (
-								<p className="text-sm text-muted">
-									{t("connNoRemotes")}
-								</p>
-							) : (
-								remotes.map((connection) => (
-									<div
-										key={connection.id}
-										className={cn(
-											`
+					<Modal.Body className="flex min-h-0 flex-1 flex-col p-0">
+						<ScrollShadow
+							hideScrollBar
+							size={24}
+							className="flex min-h-0 flex-1 flex-col gap-5 p-4"
+						>
+							<div className="flex flex-col gap-2">
+								{remotes.length === 0 ? (
+									<p className="text-sm text-muted">
+										{t("connNoRemotes")}
+									</p>
+								) : (
+									remotes.map((connection) => (
+										<div
+											key={connection.id}
+											className={cn(
+												`
 											flex items-center justify-between gap-2
 											rounded-md border border-border px-3 py-2
 											`,
-											editingId === connection.id &&
-												"border-accent",
-										)}
-									>
-										<div className="min-w-0">
-											<p className="truncate text-sm font-medium text-foreground">
-												{connection.label}
-											</p>
-											<p className="truncate text-xs text-muted">
-												{connection.sshTarget}
-											</p>
-										</div>
-										<div className="flex shrink-0 gap-1">
-											{connection.id === activeId && (
+												editingId === connection.id &&
+													"border-accent",
+											)}
+										>
+											<div className="min-w-0">
+												<p className="truncate text-sm font-medium text-foreground">
+													{connection.label}
+												</p>
+												<p className="truncate text-xs text-muted">
+													{connection.sshTarget}
+												</p>
+											</div>
+											<div className="flex shrink-0 gap-1">
+												{connection.id === activeId && (
+													<Button
+														isIconOnly
+														size="sm"
+														variant="tertiary"
+														aria-label={
+															disconnectMutation.isPending
+																? t(
+																		"connDisconnecting",
+																	)
+																: t(
+																		"connDisconnect",
+																	)
+														}
+														isDisabled={isBusy}
+														onPress={() =>
+															disconnectMutation.mutate(
+																connection.id,
+															)
+														}
+													>
+														<ArrowLeftStartOnRectangleIcon className="size-4 text-danger" />
+													</Button>
+												)}
 												<Button
 													isIconOnly
 													size="sm"
 													variant="tertiary"
-													aria-label={
-														disconnectMutation.isPending
-															? t(
-																	"connDisconnecting",
-																)
-															: t(
-																	"connDisconnect",
-																)
-													}
+													aria-label={t("connEdit")}
 													isDisabled={isBusy}
 													onPress={() =>
-														disconnectMutation.mutate(
+														startEdit(connection)
+													}
+												>
+													<PencilSquareIcon className="size-4" />
+												</Button>
+												<Button
+													isIconOnly
+													size="sm"
+													variant="tertiary"
+													aria-label={t("connRemove")}
+													isDisabled={isBusy}
+													onPress={() =>
+														removeMutation.mutate(
 															connection.id,
 														)
 													}
 												>
-													<ArrowLeftStartOnRectangleIcon className="size-4 text-danger" />
+													<TrashIcon className="size-4 text-danger" />
 												</Button>
-											)}
-											<Button
-												isIconOnly
-												size="sm"
-												variant="tertiary"
-												aria-label={t("connEdit")}
-												isDisabled={isBusy}
-												onPress={() =>
-													startEdit(connection)
-												}
-											>
-												<PencilSquareIcon className="size-4" />
-											</Button>
-											<Button
-												isIconOnly
-												size="sm"
-												variant="tertiary"
-												aria-label={t("connRemove")}
-												isDisabled={isBusy}
-												onPress={() =>
-													removeMutation.mutate(
-														connection.id,
-													)
-												}
-											>
-												<TrashIcon className="size-4 text-danger" />
-											</Button>
+											</div>
 										</div>
-									</div>
-								))
-							)}
-						</div>
-
-						<div className="flex flex-col gap-3 border-t border-border pt-4">
-							<p className="text-sm font-medium text-foreground">
-								{editingId !== null
-									? t("connEditConnection")
-									: t("connAddConnection")}
-							</p>
-
-							<TextField
-								isRequired
-								isInvalid={showErrors && errors.label != null}
-								value={form.label}
-								onChange={(value) => setField("label", value)}
-							>
-								<Label>{t("connFieldLabel")}</Label>
-								<Input
-									placeholder={t("connFieldLabelPlaceholder")}
-								/>
-								{showErrors && errors.label != null && (
-									<FieldError>{t(errors.label)}</FieldError>
+									))
 								)}
-							</TextField>
+							</div>
 
-							<div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+							<div className="flex flex-col gap-3 border-t border-border pt-4">
+								<p className="text-sm font-medium text-foreground">
+									{editingId !== null
+										? t("connEditConnection")
+										: t("connAddConnection")}
+								</p>
+
 								<TextField
 									isRequired
 									isInvalid={
-										showErrors && errors.sshTarget != null
+										showErrors && errors.label != null
 									}
-									value={form.sshTarget}
+									value={form.label}
 									onChange={(value) =>
-										setField("sshTarget", value)
+										setField("label", value)
 									}
 								>
-									<Label>{t("connFieldSshTarget")}</Label>
+									<Label>{t("connFieldLabel")}</Label>
 									<Input
 										placeholder={t(
-											"connFieldSshTargetPlaceholder",
+											"connFieldLabelPlaceholder",
 										)}
 									/>
-									{showErrors && errors.sshTarget != null && (
+									{showErrors && errors.label != null && (
 										<FieldError>
-											{t(errors.sshTarget)}
+											{t(errors.label)}
 										</FieldError>
 									)}
 								</TextField>
 
-								<Dropdown>
-									<Button
-										variant="secondary"
-										className="w-full sm:w-auto"
-										aria-label={t("connChooseSshAlias")}
-										isDisabled={
-											isBusy ||
-											sshHostsLoading ||
-											sshConfigHosts.length === 0
+								<div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+									<TextField
+										isRequired
+										isInvalid={
+											showErrors &&
+											errors.sshTarget != null
+										}
+										value={form.sshTarget}
+										onChange={(value) =>
+											setField("sshTarget", value)
 										}
 									>
-										<span className="truncate">
-											{sshConfigHosts.length === 0
-												? t("connNoSshAliases")
-												: t("connChooseSshAlias")}
-										</span>
-										<ChevronDownIcon className="size-4 shrink-0 text-muted" />
-									</Button>
-									<Dropdown.Popover className="min-w-64 max-w-80">
-										<Dropdown.Menu
-											onAction={selectSshAlias}
-										>
-											<Dropdown.Section>
-												<Header>
-													{t("connSshAliases")}
-												</Header>
-												{sshConfigHosts.map((host) => (
-													<Dropdown.Item
-														key={host.alias}
-														id={host.alias}
-														textValue={host.alias}
-													>
-														<div className="min-w-0">
-															<Label>
-																{host.alias}
-															</Label>
-															{host.hostName !=
-																null && (
-																<Description className="truncate">
-																	{
-																		host.hostName
-																	}
-																</Description>
-															)}
-														</div>
-													</Dropdown.Item>
-												))}
-											</Dropdown.Section>
-										</Dropdown.Menu>
-									</Dropdown.Popover>
-								</Dropdown>
-							</div>
-
-							<TextField
-								value={form.user}
-								onChange={(value) => setField("user", value)}
-							>
-								<Label>{t("connFieldUser")}</Label>
-								<Input
-									placeholder={t("connFieldUserPlaceholder")}
-								/>
-							</TextField>
-
-							<NumberField
-								minValue={1}
-								maxValue={65535}
-								isInvalid={showErrors && errors.port != null}
-								value={
-									form.port === ""
-										? Number.NaN
-										: Number(form.port)
-								}
-								onChange={(value) =>
-									setField(
-										"port",
-										Number.isNaN(value)
-											? ""
-											: String(value),
-									)
-								}
-							>
-								<Label>{t("connFieldPort")}</Label>
-								<NumberField.Group>
-									<NumberField.DecrementButton />
-									<NumberField.Input />
-									<NumberField.IncrementButton />
-								</NumberField.Group>
-								{showErrors && errors.port != null && (
-									<FieldError>{t(errors.port)}</FieldError>
-								)}
-							</NumberField>
-
-							<TextField
-								value={form.remoteAghubPath}
-								onChange={(value) =>
-									setField("remoteAghubPath", value)
-								}
-							>
-								<Label>{t("connFieldRemotePath")}</Label>
-								<Input
-									placeholder={t(
-										"connFieldRemotePathPlaceholder",
-									)}
-								/>
-								<Description>
-									{t("connFieldRemotePathPlaceholder")}
-								</Description>
-							</TextField>
-
-							<div className="flex justify-end">
-								<Button
-									variant="tertiary"
-									size="sm"
-									className="text-danger"
-									isDisabled={isBusy}
-									onPress={handleReinstallRequest}
-								>
-									<ArrowPathIcon className="size-4" />
-									{reinstallMutation.isPending
-										? t("connReinstalling")
-										: t("connForceReinstall")}
-								</Button>
-							</div>
-
-							{(reinstallMutation.isPending ||
-								testResult != null) && (
-								<div ref={scrollResultIntoView}>
-									{reinstallMutation.isPending ? (
-										<ReinstallProgressPanel t={t} />
-									) : testResult != null ? (
-										<TestResultPanel
-											result={testResult}
-											t={t}
-											localVersion={localApiVersion}
+										<Label>{t("connFieldSshTarget")}</Label>
+										<Input
+											placeholder={t(
+												"connFieldSshTargetPlaceholder",
+											)}
 										/>
-									) : null}
+										{showErrors &&
+											errors.sshTarget != null && (
+												<FieldError>
+													{t(errors.sshTarget)}
+												</FieldError>
+											)}
+									</TextField>
+
+									<Dropdown>
+										<Button
+											variant="secondary"
+											className="w-full sm:w-auto"
+											aria-label={t("connChooseSshAlias")}
+											isDisabled={
+												isBusy ||
+												sshHostsLoading ||
+												sshConfigHosts.length === 0
+											}
+										>
+											<span className="truncate">
+												{sshConfigHosts.length === 0
+													? t("connNoSshAliases")
+													: t("connChooseSshAlias")}
+											</span>
+											<ChevronDownIcon className="size-4 shrink-0 text-muted" />
+										</Button>
+										<Dropdown.Popover className="min-w-64 max-w-80">
+											<Dropdown.Menu
+												onAction={selectSshAlias}
+											>
+												<Dropdown.Section>
+													<Header>
+														{t("connSshAliases")}
+													</Header>
+													{sshConfigHosts.map(
+														(host) => (
+															<Dropdown.Item
+																key={host.alias}
+																id={host.alias}
+																textValue={
+																	host.alias
+																}
+															>
+																<div className="min-w-0">
+																	<Label>
+																		{
+																			host.alias
+																		}
+																	</Label>
+																	{host.hostName !=
+																		null && (
+																		<Description className="truncate">
+																			{
+																				host.hostName
+																			}
+																		</Description>
+																	)}
+																</div>
+															</Dropdown.Item>
+														),
+													)}
+												</Dropdown.Section>
+											</Dropdown.Menu>
+										</Dropdown.Popover>
+									</Dropdown>
 								</div>
-							)}
-						</div>
+
+								<TextField
+									value={form.user}
+									onChange={(value) =>
+										setField("user", value)
+									}
+								>
+									<Label>{t("connFieldUser")}</Label>
+									<Input
+										placeholder={t(
+											"connFieldUserPlaceholder",
+										)}
+									/>
+								</TextField>
+
+								<NumberField
+									minValue={1}
+									maxValue={65535}
+									className="sm:max-w-[12rem]"
+									isInvalid={
+										showErrors && errors.port != null
+									}
+									value={
+										form.port === ""
+											? Number.NaN
+											: Number(form.port)
+									}
+									onChange={(value) =>
+										setField(
+											"port",
+											Number.isNaN(value)
+												? ""
+												: String(value),
+										)
+									}
+								>
+									<Label>{t("connFieldPort")}</Label>
+									<NumberField.Group>
+										<NumberField.DecrementButton />
+										<NumberField.Input
+											placeholder={t(
+												"connFieldPortPlaceholder",
+											)}
+										/>
+										<NumberField.IncrementButton />
+									</NumberField.Group>
+									{showErrors && errors.port != null && (
+										<FieldError>
+											{t(errors.port)}
+										</FieldError>
+									)}
+								</NumberField>
+
+								<TextField
+									value={form.remoteAghubPath}
+									onChange={(value) =>
+										setField("remoteAghubPath", value)
+									}
+								>
+									<Label>{t("connFieldRemotePath")}</Label>
+									<Input
+										placeholder={t(
+											"connFieldRemotePathPlaceholder",
+										)}
+									/>
+								</TextField>
+
+								<div className="flex justify-end">
+									<Button
+										variant="tertiary"
+										size="sm"
+										className="text-danger"
+										isDisabled={isBusy}
+										onPress={handleReinstallRequest}
+									>
+										<ArrowPathIcon className="size-4" />
+										{reinstallMutation.isPending
+											? t("connReinstalling")
+											: t("connForceReinstall")}
+									</Button>
+								</div>
+
+								{(reinstallMutation.isPending ||
+									testResult != null) && (
+									<div ref={scrollResultIntoView}>
+										{reinstallMutation.isPending ? (
+											<ReinstallProgressPanel t={t} />
+										) : testResult != null ? (
+											<TestResultPanel
+												result={testResult}
+												t={t}
+												localVersion={localApiVersion}
+											/>
+										) : null}
+									</div>
+								)}
+							</div>
+						</ScrollShadow>
 					</Modal.Body>
 
 					<Modal.Footer>

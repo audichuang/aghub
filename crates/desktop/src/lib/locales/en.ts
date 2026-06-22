@@ -1048,6 +1048,7 @@ export default {
 	connFieldUser: "User",
 	connFieldUserPlaceholder: "optional, overrides ssh config",
 	connFieldPort: "Port",
+	connFieldPortPlaceholder: "Optional, e.g. 22",
 	connFieldRemotePath: "Remote aghub-api path",
 	connFieldRemotePathPlaceholder: "optional, e.g. ~/.local/bin/aghub-api",
 	connRequiredLabel: "Label is required.",
