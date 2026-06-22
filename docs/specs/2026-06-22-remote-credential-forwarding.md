@@ -311,6 +311,17 @@ HTTP headers pass through unchanged.
 
 ## Open items deferred
 
+- **Project-scope non-GitHub source coordinate (Codex 2nd external pass, P1-c
+  residual).** Forwarding now uses the clone URL as the coordinate for global /
+  check-updates / apply / the Sources UI. But **project** lock entries store only
+  `entry.source` (no `source_url`), and `lock_source()` normalizes a non-`git@`
+  HTTPS URL to `owner/repo` (`crates/git/src/source.rs`), which reconstructs as
+  `github.com`. So a **project-scope, non-GitHub, private** source can still
+  mis-resolve. Fixing it means persisting `source_url` in the project lock (or
+  preserving a URL-shaped `source` for non-GitHub HTTPS) — a **lock-schema**
+  change that touches the frozen npx round-trip contract, so it is intentionally
+  out of this feature's scope. GitHub sources and all global-scope sources are
+  unaffected.
 - `check-updates` POST+body fallback if the token map exceeds header limits.
 - Real private/credential classification on `GET /skills/sources` (would let
   forwarding cover host-fallback-credential sources too, beyond explicit
