@@ -1970,6 +1970,125 @@ mod tests {
 		});
 	}
 
+	/// Recording fetcher: captures the token the apply path resolved + passed
+	/// to the fetch, then returns the locked skill unchanged so the apply
+	/// succeeds. Proves which credential reached the fetch.
+	#[cfg(unix)]
+	struct RecordingFetcher {
+		root: PathBuf,
+		seen_token: std::sync::Mutex<Option<Option<String>>>,
+	}
+	#[cfg(unix)]
+	impl Fetcher for RecordingFetcher {
+		fn fetch(
+			&self,
+			_source_ref: &SourceRef,
+			token: Option<&str>,
+		) -> Result<skill_update::FetchedRepo, FetchError> {
+			*self.seen_token.lock().unwrap() = Some(token.map(str::to_string));
+			Ok(skill_update::FetchedRepo {
+				root: self.root.clone(),
+				oid: String::new(),
+				upstream_commit_time: None,
+				_guard: None,
+			})
+		}
+	}
+
+	/// P1-b: a forwarded `X-Aghub-Git-Tokens` entry (the new `{token,origin}`
+	/// shape) must reach the apply-update fetch via the [`ChainResolver`], with
+	/// the controller-resolved origin matching the locked source.
+	#[cfg(unix)]
+	#[test]
+	fn apply_update_uses_forwarded_token_for_fetch() {
+		use crate::credentials::forwarding::{ForwardedEntry, ForwardedOrigin};
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let installed_dir = home.path().join(".claude/skills/some-skill");
+			std::fs::create_dir_all(&installed_dir).unwrap();
+			std::fs::write(
+				installed_dir.join("SKILL.md"),
+				"---\nname: some-skill\ndescription: original\n---\nold body\n",
+			)
+			.unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+
+			// Locked source resolves to https://github.com/owner/repo.
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_path = Some("SKILL.md".to_string());
+			lock.skills.insert("some-skill".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// Fetched repo keeps the SAME name so the rename guard passes and the
+			// fetch is actually consulted.
+			let fetched = tempfile::tempdir().unwrap();
+			std::fs::write(
+				fetched.path().join("SKILL.md"),
+				"---\nname: some-skill\ndescription: updated\n---\nnew body\n",
+			)
+			.unwrap();
+
+			let fetcher = RecordingFetcher {
+				root: fetched.path().to_path_buf(),
+				seen_token: std::sync::Mutex::new(None),
+			};
+
+			// Forwarded header carries a github.com-pinned token for the source.
+			let mut map = std::collections::BTreeMap::new();
+			map.insert(
+				"owner/repo".to_string(),
+				ForwardedEntry {
+					token: "FWD-TOKEN".to_string(),
+					origin: Some(ForwardedOrigin {
+						scheme: "https".to_string(),
+						host: "github.com".to_string(),
+						port: Some(443),
+					}),
+				},
+			);
+			let forwarded = ForwardedGitTokens(map);
+			let keyring = KeyringResolver;
+			let resolver =
+				ChainResolver::new(forwarded.into_resolver(), &keyring);
+
+			let req = ApplySkillUpdateRequest {
+				name: "some-skill".to_string(),
+				scope: "global".to_string(),
+				project_root: None,
+				confirm: Some(true),
+			};
+
+			let resp =
+				match rocket::tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap()
+					.block_on(apply_skill_update_inner(
+						req, &fetcher, &resolver,
+					)) {
+					Ok(json) => json.into_inner(),
+					Err(error) => {
+						panic!("apply should return Ok: {}", error.body.error)
+					}
+				};
+
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			assert!(resp.success, "apply should succeed: {:?}", resp.error);
+			let seen = fetcher.seen_token.lock().unwrap().clone();
+			assert_eq!(
+				seen,
+				Some(Some("FWD-TOKEN".to_string())),
+				"the forwarded token must reach the apply fetch"
+			);
+		});
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn accept_rename_inner_rejects_without_confirm() {

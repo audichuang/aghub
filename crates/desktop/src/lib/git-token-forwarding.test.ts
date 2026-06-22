@@ -8,6 +8,7 @@ import { test } from "node:test";
 import {
 	boundSourceTokenMap,
 	encodeGitTokensHeader,
+	type ForwardedTokenMap,
 	GIT_TOKENS_HEADER,
 	gitTokensHeader,
 	type InvokeFn,
@@ -18,17 +19,40 @@ import {
 
 // ─── encodeGitTokensHeader ──────────────────────────────────────────────────
 
-test("encodeGitTokensHeader round-trips via standard base64 (atob/JSON)", () => {
-	const map = { "github.com/a/b": "ghp_TOKEN123" };
+test("encodeGitTokensHeader emits the { token, origin } shape (standard base64)", () => {
+	// The new wire contract: each value is { token, origin } where origin is the
+	// controller-resolved (scheme, host, port) or null. Decoding with the
+	// STANDARD alphabet (atob) confirms parity with the Rust decoder.
+	const map: ForwardedTokenMap = {
+		"github.com/a/b": {
+			token: "ghp_TOKEN123",
+			origin: { scheme: "https", host: "github.com", port: 443 },
+		},
+	};
 	const encoded = encodeGitTokensHeader(map);
-	// Decode with the STANDARD alphabet (atob) to confirm parity with the Rust
-	// decoder which uses the standard alphabet too.
 	const decoded = JSON.parse(atob(encoded));
 	assert.deepEqual(decoded, map);
+	// Spot-check the exact shape the Rust ForwardedEntry/ForwardedOrigin parses.
+	assert.equal(decoded["github.com/a/b"].token, "ghp_TOKEN123");
+	assert.deepEqual(decoded["github.com/a/b"].origin, {
+		scheme: "https",
+		host: "github.com",
+		port: 443,
+	});
+});
+
+test("encodeGitTokensHeader carries a null origin for unresolvable sources", () => {
+	const map: ForwardedTokenMap = {
+		"local/skill": { token: "TOK", origin: null },
+	};
+	const encoded = encodeGitTokensHeader(map);
+	const decoded = JSON.parse(atob(encoded));
+	assert.deepEqual(decoded, map);
+	assert.equal(decoded["local/skill"].origin, null);
 });
 
 /** Decode standard-base64(UTF-8 JSON) back to the original map, like Rust does. */
-function decodeGitTokensHeader(encoded: string): Record<string, string> {
+function decodeGitTokensHeader(encoded: string): ForwardedTokenMap {
 	const binary = atob(encoded);
 	const bytes = Uint8Array.from(binary, (c) => c.charCodeAt(0));
 	return JSON.parse(new TextDecoder().decode(bytes));
@@ -37,7 +61,9 @@ function decodeGitTokensHeader(encoded: string): Record<string, string> {
 test("encodeGitTokensHeader uses the STANDARD alphabet (not url-safe)", () => {
 	// A payload chosen so its base64 contains '+' and '/' (which url-safe base64
 	// would render as '-' and '_'). Confirms we emit the standard alphabet.
-	const map = { s: "ÿÿûï¾" };
+	const map: ForwardedTokenMap = {
+		s: { token: "ÿÿûï¾", origin: null },
+	};
 	const encoded = encodeGitTokensHeader(map);
 	assert.ok(
 		encoded.includes("+") || encoded.includes("/"),
@@ -50,7 +76,9 @@ test("encodeGitTokensHeader uses the STANDARD alphabet (not url-safe)", () => {
 });
 
 test("encodeGitTokensHeader is UTF-8 safe for non-Latin1 content", () => {
-	const map = { "源/技能": "令牌-✓-😀" };
+	const map: ForwardedTokenMap = {
+		"源/技能": { token: "令牌-✓-😀", origin: null },
+	};
 	const encoded = encodeGitTokensHeader(map);
 	assert.deepEqual(decodeGitTokensHeader(encoded), map);
 });
@@ -66,7 +94,9 @@ test("gitTokensHeader returns undefined for an empty map (no header attached)", 
 });
 
 test("gitTokensHeader builds the X-Aghub-Git-Tokens header for a non-empty map", () => {
-	const map = { src: "tok" };
+	const map: ForwardedTokenMap = {
+		src: { token: "tok", origin: null },
+	};
 	const header = gitTokensHeader(map);
 	assert.ok(header);
 	assert.deepEqual(Object.keys(header), [GIT_TOKENS_HEADER]);
@@ -132,11 +162,14 @@ function mockResolveInvoke(
 	}) as InvokeFn;
 }
 
-test("resolveForwardedTokens includes resolved tokens and SKIPS nulls", async () => {
+test("resolveForwardedTokens carries token + origin and SKIPS nulls", async () => {
 	const calls: string[] = [];
 	const invoke = mockResolveInvoke(
 		{
-			"src-a": { token: "TOK_A", origin: null },
+			"src-a": {
+				token: "TOK_A",
+				origin: { scheme: "https", host: "github.com", port: 443 },
+			},
 			"src-b": null, // no credential -> skipped
 			"src-c": { token: "TOK_C", origin: null },
 		},
@@ -148,7 +181,14 @@ test("resolveForwardedTokens includes resolved tokens and SKIPS nulls", async ()
 		invoke,
 	);
 
-	assert.deepEqual(map, { "src-a": "TOK_A", "src-c": "TOK_C" });
+	// The origin is carried through verbatim so the remote can origin-pin.
+	assert.deepEqual(map, {
+		"src-a": {
+			token: "TOK_A",
+			origin: { scheme: "https", host: "github.com", port: 443 },
+		},
+		"src-c": { token: "TOK_C", origin: null },
+	});
 	// All three sources were probed (the null one is just omitted from the map).
 	assert.deepEqual(calls, ["src-a", "src-b", "src-c"]);
 });
@@ -157,6 +197,23 @@ test("resolveForwardedTokens skips a resolved-but-empty token", async () => {
 	const calls: string[] = [];
 	const invoke = mockResolveInvoke(
 		{ "src-a": { token: "", origin: null } },
+		calls,
+	);
+	const map = await resolveForwardedTokens(["src-a"], invoke);
+	assert.deepEqual(map, {});
+});
+
+test("resolveForwardedTokens never leaks the origin without a token", async () => {
+	// A resolved-but-empty token is skipped entirely (no { token:"", origin })
+	// so the map never carries an entry whose token is falsy.
+	const calls: string[] = [];
+	const invoke = mockResolveInvoke(
+		{
+			"src-a": {
+				token: "",
+				origin: { scheme: "https", host: "github.com", port: 443 },
+			},
+		},
 		calls,
 	);
 	const map = await resolveForwardedTokens(["src-a"], invoke);
@@ -191,7 +248,10 @@ test("boundSourceTokenMap enumerates bound sources then resolves each", async ()
 
 	const map = await boundSourceTokenMap(invoke);
 
-	assert.deepEqual(map, { "bound-a": "A", "bound-c": "C" });
+	assert.deepEqual(map, {
+		"bound-a": { token: "A", origin: null },
+		"bound-c": { token: "C", origin: null },
+	});
 	assert.deepEqual(calls, ["bound-a", "bound-b", "bound-c"]);
 });
 
@@ -216,4 +276,110 @@ test("boundSourceTokenMap header is omitted (undefined) when no bound tokens res
 	assert.deepEqual(map, {});
 	// And the header builder turns an empty map into "no header".
 	assert.equal(gitTokensHeader(map), undefined);
+});
+
+// ─── apply-update / install-sync forward composition ────────────────────────
+//
+// These model what the request layer (`useGitForwarding.forSource` →
+// `applySkillUpdateMutationOptions`) does: resolve a single-source forward
+// header keyed by the clone URL, but ONLY when forwarding is enabled. The
+// install/sync paths deliberately have NO such builder — proved below.
+
+/**
+ * Mirror of `useGitForwarding.forSource`: gate on the connection state, then
+ * resolve+encode a single-source header keyed by the source's clone URL.
+ */
+async function forSource(
+	source: string,
+	gate: { activeConnectionId: string; supportsCredentialForwarding: boolean },
+	invokeFn: InvokeFn,
+): Promise<Record<string, string> | undefined> {
+	if (!shouldForwardGitTokens(gate)) return undefined;
+	const map = await resolveForwardedTokens([source], invokeFn);
+	return gitTokensHeader(map);
+}
+
+test("apply-update forwards a single-source header when remote + capable", async () => {
+	const calls: string[] = [];
+	const cloneUrl = "https://git.internal:8443/owner/repo.git";
+	const invoke = mockResolveInvoke(
+		{
+			[cloneUrl]: {
+				token: "APPLY_TOK",
+				origin: { scheme: "https", host: "git.internal", port: 8443 },
+			},
+		},
+		calls,
+	);
+
+	const header = await forSource(
+		cloneUrl,
+		{ activeConnectionId: "vm-1", supportsCredentialForwarding: true },
+		invoke,
+	);
+
+	assert.ok(header, "apply must attach the header when forwarding is on");
+	// The header carries the new { token, origin } shape, keyed by the clone URL.
+	assert.deepEqual(JSON.parse(atob(header[GIT_TOKENS_HEADER])), {
+		[cloneUrl]: {
+			token: "APPLY_TOK",
+			origin: { scheme: "https", host: "git.internal", port: 8443 },
+		},
+	});
+	// Resolution happened against the CLONE URL (P1-c), not a bare owner/repo.
+	assert.deepEqual(calls, [cloneUrl]);
+});
+
+test("apply-update sends NO header in Local mode (gating off)", async () => {
+	const calls: string[] = [];
+	const invoke = mockResolveInvoke(
+		{ "owner/repo": { token: "T", origin: null } },
+		calls,
+	);
+
+	const header = await forSource(
+		"owner/repo",
+		{ activeConnectionId: "local", supportsCredentialForwarding: true },
+		invoke,
+	);
+
+	assert.equal(header, undefined, "Local mode must not forward");
+	// Gating short-circuits before any resolve_git_token probe.
+	assert.deepEqual(calls, []);
+});
+
+test("apply-update sends NO header for a non-capable remote", async () => {
+	const calls: string[] = [];
+	const invoke = mockResolveInvoke(
+		{ "owner/repo": { token: "T", origin: null } },
+		calls,
+	);
+
+	const header = await forSource(
+		"owner/repo",
+		{ activeConnectionId: "vm-1", supportsCredentialForwarding: false },
+		invoke,
+	);
+
+	assert.equal(header, undefined);
+	assert.deepEqual(calls, []);
+});
+
+test("install/sync have no forward-header builder (P3 contract)", () => {
+	// install/sync reuse the scan session's server-side cached token, so the FE
+	// module exposes NO single-shot install/sync header builder. The only
+	// per-source builder is `forSource` (used by scan/diff/apply); `gitInstall`
+	// and `gitSync` in `lib/api.ts` no longer accept a forwardedTokens arg.
+	// (A static assertion: the module surface intentionally omits such helpers.)
+	const surface = Object.keys({
+		encodeGitTokensHeader,
+		gitTokensHeader,
+		resolveForwardedTokens,
+		boundSourceTokenMap,
+		shouldForwardGitTokens,
+	});
+	assert.ok(
+		!surface.some((k) => /install|sync/i.test(k)),
+		"no install/sync-specific forward builder may exist",
+	);
 });

@@ -339,31 +339,15 @@ export function createApi(baseUrl: string) {
 					})
 					.json();
 			},
-			gitInstall(
-				data: GitInstallRequest,
-				forwardedTokens?: GitForwardHeaders,
-			): Promise<GitInstallResponse> {
-				return client
-					.post("skills/git/install", {
-						json: data,
-						...(forwardedTokens
-							? { headers: forwardedTokens }
-							: {}),
-					})
-					.json();
+			gitInstall(data: GitInstallRequest): Promise<GitInstallResponse> {
+				// No forward header: install reuses the scan session's
+				// server-side cached token and does NOT read X-Aghub-Git-Tokens.
+				return client.post("skills/git/install", { json: data }).json();
 			},
-			gitSync(
-				data: GitSyncRequest,
-				forwardedTokens?: GitForwardHeaders,
-			): Promise<GitSyncResponse> {
-				return client
-					.post("skills/git/sync", {
-						json: data,
-						...(forwardedTokens
-							? { headers: forwardedTokens }
-							: {}),
-					})
-					.json();
+			gitSync(data: GitSyncRequest): Promise<GitSyncResponse> {
+				// No forward header: sync reuses the scan session's server-side
+				// cached token and does NOT read X-Aghub-Git-Tokens.
+				return client.post("skills/git/sync", { json: data }).json();
 			},
 			checkUpdates(
 				{
@@ -396,11 +380,17 @@ export function createApi(baseUrl: string) {
 			},
 			applyUpdate(
 				body: ApplySkillUpdateRequest,
+				forwardedTokens?: GitForwardHeaders,
 			): Promise<ApplySkillUpdateResponse> {
+				// apply-update re-fetches the source server-side, so the remote
+				// origin-pins the forwarded token like check-updates/diff.
 				return client
 					.post("skills/apply-update", {
 						json: body,
 						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
 					})
 					.json();
 			},

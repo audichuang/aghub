@@ -81,7 +81,10 @@ export function SkillDetail({
 	const [, setLocation] = useLocation();
 	const { allAgents, availableAgents } = useAgentAvailability();
 	const api = useApi();
-	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
+	const {
+		forBoundSources: forwardForBoundSources,
+		forSource: forwardForSource,
+	} = useGitForwarding();
 	const queryClient = useQueryClient();
 
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
@@ -141,6 +144,7 @@ export function SkillDetail({
 		applySkillUpdateMutationOptions({
 			api,
 			queryClient,
+			forwardForSource,
 			onSuccess: (data) => {
 				if (!data.success) {
 					toast.danger(data.error ?? t("skillUpdateApplyError"));
@@ -556,12 +560,18 @@ export function SkillDetail({
 														onPress={() =>
 															applyUpdateMutation.mutate(
 																{
-																	name: skill.name,
-																	scope: primaryScope,
-																	projectRoot:
-																		projectPath ??
-																		null,
-																	confirm: true,
+																	body: {
+																		name: skill.name,
+																		scope: primaryScope,
+																		projectRoot:
+																			projectPath ??
+																			null,
+																		confirm: true,
+																	},
+																	// P1-b/P1-c: forward keyed by clone URL.
+																	sourceUrl:
+																		sourceUrl ??
+																		undefined,
 																},
 															)
 														}

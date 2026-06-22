@@ -1931,14 +1931,29 @@ fn forwarded_token_for_url(
 	if url_keys.is_empty() {
 		return None;
 	}
-	let url_clone = aghub_git::resolve_remote_source(url).ok()?.clone_url;
-	forwarded.0.iter().find_map(|(forwarded_source, token)| {
-		let host_scoped_match =
-			binding_keys_match_lookup(forwarded_source, &url_keys);
-		let origin_pinned = aghub_git::resolve_remote_source(forwarded_source)
-			.ok()
-			.is_some_and(|r| origins_match(&url_clone, &r.clone_url));
-		(host_scoped_match && origin_pinned).then(|| token.clone())
+	let url_origin =
+		origin_of(&aghub_git::resolve_remote_source(url).ok()?.clone_url);
+	forwarded.0.iter().find_map(|(forwarded_source, entry)| {
+		if !binding_keys_match_lookup(forwarded_source, &url_keys) {
+			return None;
+		}
+		// Origin pin. Prefer the entry's controller-resolved origin (the new
+		// header shape carries it); fall back to re-resolving the forwarded
+		// source when the entry omits it. The scan path stays strict: a token is
+		// attached ONLY when the request URL and the forwarded entry share the
+		// SAME `(scheme, host, port)`. (If either origin is unknown the pin
+		// cannot be satisfied here, so the token is not attached — the scan
+		// route's own keyring/session path then applies.)
+		let entry_origin =
+			entry.origin.clone().map(ResolvedOrigin::from).or_else(|| {
+				aghub_git::resolve_remote_source(forwarded_source)
+					.ok()
+					.and_then(|r| origin_of(&r.clone_url))
+			});
+		match (&url_origin, &entry_origin) {
+			(Some(a), Some(b)) if a == b => Some(entry.token.clone()),
+			_ => None,
+		}
 	})
 }
 
@@ -3226,10 +3241,22 @@ mod tests {
 	// ─── forwarded_token_for_url: host-scoped match + D8 origin pin ─────────
 
 	fn forwarded(pairs: &[(&str, &str)]) -> ForwardedGitTokens {
+		use crate::credentials::forwarding::ForwardedEntry;
+		// Entries with NO explicit origin: `forwarded_token_for_url` then
+		// re-resolves the forwarded source's clone-URL origin, exercising the
+		// host-scoped + origin-pin path independently of the wire origin.
 		ForwardedGitTokens(
 			pairs
 				.iter()
-				.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+				.map(|(k, v)| {
+					(
+						(*k).to_string(),
+						ForwardedEntry {
+							token: (*v).to_string(),
+							origin: None,
+						},
+					)
+				})
 				.collect(),
 		)
 	}
@@ -3293,6 +3320,69 @@ mod tests {
 		let map = forwarded(&[]);
 		assert_eq!(
 			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			None
+		);
+	}
+
+	/// Build a single-entry map carrying an explicit wire `origin`, exercising
+	/// the new `{ token, origin }` shape on the scan path.
+	fn forwarded_with_origin(
+		source: &str,
+		token: &str,
+		scheme: &str,
+		host: &str,
+		port: Option<u16>,
+	) -> ForwardedGitTokens {
+		use crate::credentials::forwarding::{ForwardedEntry, ForwardedOrigin};
+		let mut m = std::collections::BTreeMap::new();
+		m.insert(
+			source.to_string(),
+			ForwardedEntry {
+				token: token.to_string(),
+				origin: Some(ForwardedOrigin {
+					scheme: scheme.to_string(),
+					host: host.to_string(),
+					port,
+				}),
+			},
+		);
+		ForwardedGitTokens(m)
+	}
+
+	#[test]
+	fn forwarded_token_uses_entry_origin_to_pin() {
+		// The entry carries its own controller-resolved origin (matching the
+		// request), so the token is attached using the wire origin.
+		let map = forwarded_with_origin(
+			"owner/repo",
+			"TOK",
+			"https",
+			"github.com",
+			Some(443),
+		);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_entry_origin_mismatch_rejected() {
+		// The entry's wire origin pins a DIFFERENT port than the request: the
+		// scan path must not attach the token even though the host-scoped key
+		// would match.
+		let map = forwarded_with_origin(
+			"https://git.internal:8443/owner/repo.git",
+			"TOK",
+			"https",
+			"git.internal",
+			Some(8443),
+		);
+		assert_eq!(
+			forwarded_token_for_url(
+				&map,
+				"https://git.internal:9090/owner/repo.git"
+			),
 			None
 		);
 	}

@@ -131,7 +131,6 @@ export function SyncGithubSkillDialog({
 		gitSyncSkillMutationOptions({
 			api,
 			queryClient,
-			forwardForSource,
 			onSuccess: () => {
 				setPhase("done");
 				toast.success(t("skillSyncedSuccessfully"));
@@ -156,6 +155,8 @@ export function SyncGithubSkillDialog({
 		if (!matchedSkill) return;
 		setSyncError(null);
 		setPhase("syncing");
+		// P3: sync reuses the scan session's server-side cached token, so no
+		// forward header — only the scan above carries it.
 		syncMutation.mutate(
 			{
 				body: {
@@ -166,7 +167,6 @@ export function SyncGithubSkillDialog({
 					skill_path: matchedSkill.path,
 					source_paths: sourcePaths,
 				},
-				sourceUrl,
 			},
 			{
 				onError: (error) => {

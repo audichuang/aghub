@@ -2,44 +2,98 @@
 //!
 //! When a desktop client drives a *remote* aghub-api (over an SSH tunnel), the
 //! remote process has no access to the user's local keyring. The client may
-//! instead forward a per-request set of `source → token` pairs in the
-//! `X-Aghub-Git-Tokens` header (base64-encoded JSON). These primitives parse
-//! that header into a [`TokenResolver`] that the update/sources orchestration
-//! can consult *before* the keyring-backed resolver.
+//! instead forward a per-request set of `source → { token, origin }` entries in
+//! the `X-Aghub-Git-Tokens` header (base64-encoded JSON). These primitives
+//! parse that header into a [`TokenResolver`] that the update/sources
+//! orchestration can consult *before* the keyring-backed resolver.
+//!
+//! Wire contract (must match the TS encoder in
+//! `crates/desktop/src/lib/git-token-forwarding.ts`):
+//!
+//! ```json
+//! { "<sourceKey>": { "token": "<tok>",
+//!   "origin": { "scheme": "...", "host": "...", "port": <number|null> } | null } }
+//! ```
+//!
+//! The `origin` is the controller-resolved `(scheme, host, port)` the token is
+//! pinned to; it lets the resolver reject handing a token to a same-host but
+//! different-`(scheme,port)` request (origin pinning, D8).
 //!
 //! Security invariants:
 //! - A token is never logged. The only `warn!` here (malformed header) must
 //!   not include the header value.
 //! - Absent / malformed header degrades to an empty map → the resolver returns
 //!   `None` → callers behave exactly as they do today (backward compatible).
+//! - The `origin` field is non-sensitive metadata; only the `token` is secret.
 
 use std::collections::BTreeMap;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use rocket::request::{self, FromRequest, Request};
+use serde::Deserialize;
 use skill_update::TokenResolver;
 
+use crate::credentials::origin::{origin_of, ResolvedOrigin};
 use crate::credentials::resolve::{binding_keys_match_lookup, lookup_keys};
 
-/// Header carrying the base64-encoded JSON `source → token` map.
+/// Header carrying the base64-encoded JSON `source → { token, origin }` map.
 const FORWARDED_TOKENS_HEADER: &str = "X-Aghub-Git-Tokens";
 
-/// Request guard: the forwarded `source → token` map for this request.
+/// A single forwarded entry: the resolved token plus the origin it is pinned to.
+///
+/// `origin` mirrors [`ResolvedOrigin`] and is the controller-resolved
+/// `(scheme, host, port)` the token was scoped to. It is `None` for sources the
+/// controller could not resolve to a host-bearing URL (e.g. local paths), in
+/// which case the resolver falls back to the permissive host-scoped behaviour.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ForwardedEntry {
+	/// The forwarded credential token. Never logged or persisted.
+	pub(crate) token: String,
+	/// The origin the token is pinned to, when the controller could derive one.
+	#[serde(default)]
+	pub(crate) origin: Option<ForwardedOrigin>,
+}
+
+/// The wire shape of a forwarded entry's origin. Deserialized from the header
+/// and converted to the crate-internal [`ResolvedOrigin`] for comparison.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct ForwardedOrigin {
+	pub(crate) scheme: String,
+	pub(crate) host: String,
+	#[serde(default)]
+	pub(crate) port: Option<u16>,
+}
+
+impl From<ForwardedOrigin> for ResolvedOrigin {
+	fn from(o: ForwardedOrigin) -> Self {
+		ResolvedOrigin {
+			// The controller already lowercases scheme/host, but normalize again
+			// defensively so comparison against `origin_of` (which lowercases)
+			// never fails on case alone.
+			scheme: o.scheme.to_ascii_lowercase(),
+			host: o.host.to_ascii_lowercase(),
+			port: o.port,
+		}
+	}
+}
+
+/// Request guard: the forwarded `source → { token, origin }` map for this
+/// request.
 ///
 /// The `FromRequest` outcome is **always** [`request::Outcome::Success`]; an
 /// absent or malformed header degrades to an empty map (never a 400). This
 /// keeps the API backward compatible: clients that do not forward tokens are
 /// indistinguishable from today's behavior.
 #[derive(Debug, Default, Clone)]
-pub struct ForwardedGitTokens(pub(crate) BTreeMap<String, String>);
+pub struct ForwardedGitTokens(pub(crate) BTreeMap<String, ForwardedEntry>);
 
 impl ForwardedGitTokens {
-	/// Parse the raw header value into a `source → token` map.
+	/// Parse the raw header value into a `source → { token, origin }` map.
 	///
 	/// Any failure (base64 or JSON) degrades to an empty map and logs a
 	/// `warn!` that never includes the header value (tokens must not leak).
-	fn parse_header(raw: &str) -> BTreeMap<String, String> {
+	fn parse_header(raw: &str) -> BTreeMap<String, ForwardedEntry> {
 		let decoded = match BASE64.decode(raw.trim()) {
 			Ok(bytes) => bytes,
 			Err(_) => {
@@ -50,7 +104,9 @@ impl ForwardedGitTokens {
 				return BTreeMap::new();
 			}
 		};
-		match serde_json::from_slice::<BTreeMap<String, String>>(&decoded) {
+		match serde_json::from_slice::<BTreeMap<String, ForwardedEntry>>(
+			&decoded,
+		) {
 			Ok(map) => map,
 			Err(_) => {
 				log::warn!(
@@ -84,30 +140,58 @@ impl<'r> FromRequest<'r> for ForwardedGitTokens {
 	}
 }
 
-/// [`TokenResolver`] backed by a forwarded `source → token` map.
+/// Derive the requested `source`'s normalized origin, mirroring how the
+/// controller derived each entry's origin: resolve the source through
+/// `aghub_git` (which understands shorthands like `owner/repo`) and normalize
+/// its `clone_url`. `None` when the source does not resolve to a host-bearing
+/// URL (e.g. a local path) — the resolver then degrades to the permissive
+/// host-scoped behaviour.
+fn requested_origin(source: &str) -> Option<ResolvedOrigin> {
+	let resolved = aghub_git::resolve_remote_source(source).ok()?;
+	origin_of(&resolved.clone_url)
+}
+
+/// [`TokenResolver`] backed by a forwarded `source → { token, origin }` map.
 ///
-/// Matching is by `source` only, using the SAME cross-URL-form matching the
-/// keyring bindings use (`owner/repo` ⇔ `https://github.com/owner/repo.git`
-/// ⇔ `git@github.com:owner/repo.git`, host-scoped). The `host` argument is
-/// intentionally unused — the forwarded map is keyed by source, and the
-/// cross-form key set already encodes the host.
+/// Matching is by `source`, using the SAME cross-URL-form matching the keyring
+/// bindings use (`owner/repo` ⇔ `https://github.com/owner/repo.git`
+/// ⇔ `git@github.com:owner/repo.git`, host-scoped) — then a `(scheme,host,port)`
+/// origin pin on top. The `host` argument is intentionally unused; the
+/// forwarded map is keyed by source and the cross-form key set already encodes
+/// the host.
 #[derive(Debug, Default, Clone)]
-pub(crate) struct ForwardedTokenResolver(BTreeMap<String, String>);
+pub(crate) struct ForwardedTokenResolver(BTreeMap<String, ForwardedEntry>);
 
 impl TokenResolver for ForwardedTokenResolver {
-	/// Matches with the legacy host-scoped keyring strictness on purpose:
-	/// `lookup_keys` / `binding_keys_match_lookup` are host-scoped, not
-	/// port/scheme-specific. The stricter `(scheme, host, port)` origin pin
-	/// is applied additionally by `git_scan_skills` (`forwarded_token_for_url`
-	/// in `routes/skills.rs`), so the asymmetry here is deliberate.
+	/// Resolve a forwarded token for `source`, origin-pinned to the requested
+	/// source's `(scheme, host, port)`.
+	///
+	/// 1. Find the entry whose source matches `source` under the legacy
+	///    host-scoped key match (cross-URL form, unchanged — `lookup_keys` /
+	///    `binding_keys_match_lookup`).
+	/// 2. Derive the requested source's origin via `requested_origin`.
+	/// 3. If the matched entry's `origin` is `Some` AND the requested origin is
+	///    `Some` AND they do NOT match → return `None` (the [`ChainResolver`]
+	///    then falls back to the keyring). Otherwise return the token.
+	///    When either origin is unknown the pin is permissive — it falls back to
+	///    the legacy host-scoped behaviour so a previously-working case (e.g. a
+	///    plain github.com source) is never newly broken.
 	fn resolve(&self, source: &str, _host: Option<&str>) -> Option<String> {
 		let source_keys = lookup_keys(source);
-		self.0
-			.iter()
-			.find(|(forwarded_source, _)| {
-				binding_keys_match_lookup(forwarded_source, &source_keys)
-			})
-			.map(|(_, token)| token.clone())
+		let (_, entry) = self.0.iter().find(|(forwarded_source, _)| {
+			binding_keys_match_lookup(forwarded_source, &source_keys)
+		})?;
+
+		// Origin pin: only reject when BOTH origins are known and differ. An
+		// unknown origin on either side is permissive (legacy host-scoped).
+		if let (Some(entry_origin), Some(req_origin)) =
+			(entry.origin.clone(), requested_origin(source))
+		{
+			if ResolvedOrigin::from(entry_origin) != req_origin {
+				return None;
+			}
+		}
+		Some(entry.token.clone())
 	}
 }
 
@@ -139,11 +223,45 @@ impl<P: TokenResolver> TokenResolver for ChainResolver<'_, P> {
 mod tests {
 	use super::*;
 
-	fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+	/// Build an entry map with NO origin (permissive — legacy host-scoped pin).
+	fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, ForwardedEntry> {
 		pairs
 			.iter()
-			.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+			.map(|(k, v)| {
+				(
+					(*k).to_string(),
+					ForwardedEntry {
+						token: (*v).to_string(),
+						origin: None,
+					},
+				)
+			})
 			.collect()
+	}
+
+	/// Build a single-entry map carrying an explicit origin for the source.
+	fn map_with_origin(
+		source: &str,
+		token: &str,
+		origin: ForwardedOrigin,
+	) -> BTreeMap<String, ForwardedEntry> {
+		let mut m = BTreeMap::new();
+		m.insert(
+			source.to_string(),
+			ForwardedEntry {
+				token: token.to_string(),
+				origin: Some(origin),
+			},
+		);
+		m
+	}
+
+	fn origin(scheme: &str, host: &str, port: Option<u16>) -> ForwardedOrigin {
+		ForwardedOrigin {
+			scheme: scheme.to_string(),
+			host: host.to_string(),
+			port,
+		}
 	}
 
 	// --- header parsing ----------------------------------------------------
@@ -155,10 +273,27 @@ mod tests {
 
 	#[test]
 	fn valid_base64_json_yields_map() {
-		let json = r#"{"owner/repo":"TOK1"}"#;
+		// The new `{ token, origin }` shape (origin present).
+		let json = r#"{"owner/repo":{"token":"TOK1","origin":{"scheme":"https","host":"github.com","port":443}}}"#;
 		let encoded = BASE64.encode(json);
 		let parsed = ForwardedGitTokens::parse_header(&encoded);
-		assert_eq!(parsed.get("owner/repo").map(String::as_str), Some("TOK1"));
+		let entry = parsed.get("owner/repo").expect("entry");
+		assert_eq!(entry.token, "TOK1");
+		let origin = entry.origin.as_ref().expect("origin");
+		assert_eq!(origin.scheme, "https");
+		assert_eq!(origin.host, "github.com");
+		assert_eq!(origin.port, Some(443));
+	}
+
+	#[test]
+	fn valid_base64_json_with_null_origin_yields_entry() {
+		// `origin: null` is the local-path / unresolvable case.
+		let json = r#"{"local/skill":{"token":"TOK2","origin":null}}"#;
+		let encoded = BASE64.encode(json);
+		let parsed = ForwardedGitTokens::parse_header(&encoded);
+		let entry = parsed.get("local/skill").expect("entry");
+		assert_eq!(entry.token, "TOK2");
+		assert!(entry.origin.is_none());
 	}
 
 	#[test]
@@ -169,8 +304,17 @@ mod tests {
 
 	#[test]
 	fn bad_json_yields_empty_map() {
-		// Valid base64, but the decoded bytes are not a JSON string→string map.
+		// Valid base64, but the decoded bytes are not the entry-map shape.
 		let encoded = BASE64.encode("[1, 2, 3]");
+		assert!(ForwardedGitTokens::parse_header(&encoded).is_empty());
+	}
+
+	#[test]
+	fn legacy_bare_string_shape_yields_empty_map() {
+		// The OLD wire shape (`source → bare token string`) is no longer a
+		// valid entry map, so it degrades to empty (never a 400). The TS encoder
+		// is updated in lockstep, so this only matters for stale clients.
+		let encoded = BASE64.encode(r#"{"owner/repo":"TOK1"}"#);
 		assert!(ForwardedGitTokens::parse_header(&encoded).is_empty());
 	}
 
@@ -214,6 +358,65 @@ mod tests {
 		);
 	}
 
+	// --- origin pinning (D8) -----------------------------------------------
+
+	#[test]
+	fn resolver_rejects_same_host_different_port() {
+		// Entry pinned to a self-hosted forge on port 8443; the request is for
+		// the SAME host on a DIFFERENT port. Host-scoped matching would match,
+		// but the origin pin must reject (→ None → keyring fallback).
+		let r = ForwardedTokenResolver(map_with_origin(
+			"https://git.internal:8443/owner/repo.git",
+			"TOK",
+			origin("https", "git.internal", Some(8443)),
+		));
+		assert_eq!(
+			r.resolve("https://git.internal:9090/owner/repo.git", None),
+			None,
+			"a token pinned to one port must not be reused on another"
+		);
+	}
+
+	#[test]
+	fn resolver_accepts_matching_origin() {
+		// The positive counterpart: the SAME `(scheme, host, port)` matches.
+		let r = ForwardedTokenResolver(map_with_origin(
+			"https://git.internal:8443/owner/repo.git",
+			"TOK",
+			origin("https", "git.internal", Some(8443)),
+		));
+		assert_eq!(
+			r.resolve("https://git.internal:8443/owner/repo.git", None),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn resolver_accepts_matching_origin_default_port_folded() {
+		// Entry carries the explicit default https port; the request omits it.
+		// `origin_of` folds 443 in, so both normalize to the same origin.
+		let r = ForwardedTokenResolver(map_with_origin(
+			"owner/repo",
+			"TOK",
+			origin("https", "github.com", Some(443)),
+		));
+		assert_eq!(
+			r.resolve("https://github.com/owner/repo.git", None),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn resolver_unknown_entry_origin_is_permissive() {
+		// Entry has NO origin (local/unresolvable on the controller). The pin is
+		// permissive: the host-scoped match alone returns the token (legacy).
+		let r = ForwardedTokenResolver(map(&[("owner/repo", "TOK")]));
+		assert_eq!(
+			r.resolve("https://github.com/owner/repo.git", Some("github.com")),
+			Some("TOK".to_string())
+		);
+	}
+
 	// --- ChainResolver precedence ------------------------------------------
 
 	struct StubResolver(Option<String>);
@@ -221,6 +424,23 @@ mod tests {
 		fn resolve(&self, _s: &str, _h: Option<&str>) -> Option<String> {
 			self.0.clone()
 		}
+	}
+
+	#[test]
+	fn chain_falls_back_to_keyring_on_origin_mismatch() {
+		// The origin-mismatch path must hand off to the keyring fallback rather
+		// than leaking the wrong-origin forwarded token.
+		let primary = ForwardedTokenResolver(map_with_origin(
+			"https://git.internal:8443/owner/repo.git",
+			"FWD",
+			origin("https", "git.internal", Some(8443)),
+		));
+		let fallback = StubResolver(Some("KEYRING".to_string()));
+		let chain = ChainResolver::new(primary, &fallback);
+		assert_eq!(
+			chain.resolve("https://git.internal:9090/owner/repo.git", None),
+			Some("KEYRING".to_string())
+		);
 	}
 
 	#[test]

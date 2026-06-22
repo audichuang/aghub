@@ -438,12 +438,36 @@ mod tests {
 
 	// ─── remote git-credential forwarding (X-Aghub-Git-Tokens) ──────────────
 
-	/// Base64-encode a JSON `source → token` map for the forward header.
+	/// Base64-encode the forward header in the `{ token, origin }` wire shape.
+	///
+	/// The origin is derived from each source's resolved clone URL, mirroring
+	/// what the controller forwards. This keeps the route-level tests exercising
+	/// the real decode + origin-pin path end-to-end.
 	fn encode_tokens(pairs: &[(&str, &str)]) -> String {
 		use base64::engine::general_purpose::STANDARD as BASE64;
 		use base64::Engine as _;
-		let map: std::collections::BTreeMap<&str, &str> =
-			pairs.iter().copied().collect();
+		let map: serde_json::Map<String, serde_json::Value> = pairs
+			.iter()
+			.map(|(source, token)| {
+				let origin = aghub_git::resolve_remote_source(source)
+					.ok()
+					.and_then(|r| {
+						crate::credentials::origin::origin_of(&r.clone_url)
+					})
+					.map(|o| {
+						serde_json::json!({
+							"scheme": o.scheme,
+							"host": o.host,
+							"port": o.port,
+						})
+					})
+					.unwrap_or(serde_json::Value::Null);
+				(
+					(*source).to_string(),
+					serde_json::json!({ "token": token, "origin": origin }),
+				)
+			})
+			.collect();
 		BASE64.encode(serde_json::to_vec(&map).unwrap())
 	}
 

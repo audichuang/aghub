@@ -234,7 +234,6 @@ export function ImportGithubSkillPanel({
 		gitInstallSkillsMutationOptions({
 			api,
 			queryClient,
-			forwardForSource,
 			onSuccess: async (data) => {
 				setInstallError(null);
 				setInstallResults(data.results);
@@ -255,6 +254,8 @@ export function ImportGithubSkillPanel({
 		setCard2Open(false);
 		setCard3Open(true);
 		setPhase("installing");
+		// P3: install reuses the scan session's server-side cached token, so no
+		// forward header — only the scan above carries it.
 		installMutation.mutate(
 			{
 				body: {
@@ -264,7 +265,6 @@ export function ImportGithubSkillPanel({
 					scope: projectPath ? "project" : "global",
 					project_root: projectPath ?? null,
 				},
-				sourceUrl: urlValue.trim(),
 			},
 			{
 				onError: (error) => {

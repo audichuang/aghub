@@ -320,10 +320,17 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	>(() => new Set());
 	const [isCredentialDialogOpen, setIsCredentialDialogOpen] = useState(false);
 
+	// P1-c: use the recorded clone URL as the network/credential coordinate.
+	// `row.source` (owner/repo) re-resolves non-GitHub hosts as github.com, so
+	// the diff/fetch + forward map key must use the real clone URL. `row.source`
+	// stays for display/grouping only. Fall back to `row.source` for entries
+	// that have no recorded URL (e.g. local sources).
+	const diffSource = row.sourceUrl || row.source;
+
 	const { data, isLoading, isFetching } = useQuery(
 		sourceDiffQueryOptions({
 			api,
-			source: row.source,
+			source: diffSource,
 			scope: row.rowScope,
 			projectRoot:
 				row.rowScope === "project" ? row.projectRoot : undefined,
@@ -398,6 +405,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		applySkillUpdateMutationOptions({
 			api,
 			queryClient,
+			forwardForSource,
 			onSuccess: async (result) => {
 				if (!result.success) {
 					toast.danger(result.error ?? t("skillUpdateApplyError"));
@@ -538,7 +546,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	});
 
 	const applyOneUpdate = (skill: SourceSkillDiff) => {
-		applyUpdateMutation.mutate(updateRequestFor(skill));
+		// P1-b/P1-c: forward the controller token, keyed by the clone URL.
+		applyUpdateMutation.mutate({
+			body: updateRequestFor(skill),
+			sourceUrl: diffSource,
+		});
 	};
 
 	const applyAllUpdates = async (skills: SourceSkillDiff[]) => {
@@ -546,11 +558,15 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		setIsApplyingAll(true);
 		let updated = 0;
 		let failed = 0;
+		// Resolve the forward header once for the source and reuse it for each
+		// apply in the loop (same source → same origin-pinned token).
+		const forwardHeaders = await forwardForSource(diffSource);
 		try {
 			for (const skill of skills) {
 				try {
 					const result = await api.skills.applyUpdate(
 						updateRequestFor(skill),
+						forwardHeaders,
 					);
 					if (result.success) {
 						updated += 1;
@@ -677,16 +693,15 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				throw new Error(t("sourceInstallFailed"));
 			}
 
-			const result = await api.skills.gitInstall(
-				{
-					session_id: scan.session_id,
-					skill_paths: skillPaths,
-					agents: linkTargetAgentIds,
-					scope: updateScope,
-					project_root: updateProjectRoot,
-				},
-				forwardHeaders,
-			);
+			// P3: install reuses the scan session's server-side cached token, so
+			// no forward header is sent here (only the scan above carries it).
+			const result = await api.skills.gitInstall({
+				session_id: scan.session_id,
+				skill_paths: skillPaths,
+				agents: linkTargetAgentIds,
+				scope: updateScope,
+				project_root: updateProjectRoot,
+			});
 			const failed = result.results.filter((entry) => !entry.success);
 
 			await queryClient.invalidateQueries({
@@ -976,8 +991,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 									{outdated.map((skill) => {
 										const isApplying =
 											applyUpdateMutation.isPending &&
-											applyUpdateMutation.variables
-												?.name === skill.name;
+											applyUpdateMutation.variables?.body
+												.name === skill.name;
 										return (
 											<SourceSkillRow
 												key={skill.skillPath}

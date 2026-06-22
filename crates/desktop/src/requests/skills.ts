@@ -332,33 +332,25 @@ interface GitInstallSkillsMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
 	onSuccess?: (data: GitInstallResponse) => void | Promise<void>;
-	forwardForSource?: ForwardForSource;
 }
 
 /**
- * Variables for the git-install mutation. `sourceUrl` (optional) is the clone
- * URL the session was scanned from — the install body itself only carries a
- * `session_id`, so the URL is threaded here purely to resolve the forward
- * header. Not persisted.
+ * Variables for the git-install mutation. The install body carries only a
+ * `session_id`; the server reuses the scan session's cached token, so install
+ * does NOT forward a git-credential header.
  */
 export interface GitInstallSkillsVariables {
 	body: GitInstallRequest;
-	sourceUrl?: string;
 }
 
 export function gitInstallSkillsMutationOptions({
 	api,
 	queryClient,
 	onSuccess,
-	forwardForSource,
 }: GitInstallSkillsMutationParams) {
 	return mutationOptions({
-		mutationFn: async ({ body, sourceUrl }: GitInstallSkillsVariables) => {
-			const headers = sourceUrl
-				? await forwardForSource?.(sourceUrl)
-				: undefined;
-			return api.skills.gitInstall(body, headers);
-		},
+		mutationFn: async ({ body }: GitInstallSkillsVariables) =>
+			api.skills.gitInstall(body),
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);
@@ -476,6 +468,22 @@ interface ApplySkillUpdateMutationParams {
 	queryClient: QueryClient;
 	onSuccess?: (data: ApplySkillUpdateResponse) => void | Promise<void>;
 	onError?: (error: Error) => void;
+	/**
+	 * Resolver for the single-source forward header (remote mode). apply-update
+	 * re-fetches the source server-side, so the controller-resolved token must
+	 * reach the remote — keyed by the source's clone URL (P1-c). Omitted locally.
+	 */
+	forwardForSource?: ForwardForSource;
+}
+
+/**
+ * Variables for the apply-update mutation. `sourceUrl` (optional) is the clone
+ * URL of the source being applied — threaded only to resolve the forward header
+ * (the apply body carries the skill name/scope, not the URL). Not persisted.
+ */
+export interface ApplySkillUpdateVariables {
+	body: ApplySkillUpdateRequest;
+	sourceUrl?: string;
 }
 
 export function applySkillUpdateMutationOptions({
@@ -483,10 +491,15 @@ export function applySkillUpdateMutationOptions({
 	queryClient,
 	onSuccess,
 	onError,
+	forwardForSource,
 }: ApplySkillUpdateMutationParams) {
 	return mutationOptions({
-		mutationFn: (body: ApplySkillUpdateRequest) =>
-			api.skills.applyUpdate(body),
+		mutationFn: async ({ body, sourceUrl }: ApplySkillUpdateVariables) => {
+			const headers = sourceUrl
+				? await forwardForSource?.(sourceUrl)
+				: undefined;
+			return api.skills.applyUpdate(body, headers);
+		},
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);
@@ -499,32 +512,25 @@ interface GitSyncSkillMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
 	onSuccess?: (data: GitSyncResponse) => void | Promise<void>;
-	forwardForSource?: ForwardForSource;
 }
 
 /**
- * Variables for the git-sync mutation. `sourceUrl` (optional) is the clone URL
- * the session was scanned from — threaded only to resolve the forward header
- * (the sync body carries a `session_id`, not the URL). Not persisted.
+ * Variables for the git-sync mutation. The sync body carries a `session_id`;
+ * the server reuses the scan session's cached token, so sync does NOT forward a
+ * git-credential header.
  */
 export interface GitSyncSkillVariables {
 	body: GitSyncRequest;
-	sourceUrl?: string;
 }
 
 export function gitSyncSkillMutationOptions({
 	api,
 	queryClient,
 	onSuccess,
-	forwardForSource,
 }: GitSyncSkillMutationParams) {
 	return mutationOptions({
-		mutationFn: async ({ body, sourceUrl }: GitSyncSkillVariables) => {
-			const headers = sourceUrl
-				? await forwardForSource?.(sourceUrl)
-				: undefined;
-			return api.skills.gitSync(body, headers);
-		},
+		mutationFn: async ({ body }: GitSyncSkillVariables) =>
+			api.skills.gitSync(body),
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);
