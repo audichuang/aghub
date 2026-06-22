@@ -307,8 +307,13 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			stderr: first.message,
 		});
 	}
-	// Present AND compatible -> nothing to do (unchanged fast path).
-	if first.api_present && first.compatible {
+	// Present + exact -> nothing to do. If an install source exists and only the
+	// patch differs, upgrade so remote-side bug fixes ship with patch releases.
+	if first.api_present
+		&& first.compatible
+		&& (first.api_version.as_deref() == Some(local_version)
+			|| source.is_none())
+	{
 		return Ok(first);
 	}
 
@@ -984,6 +989,50 @@ mod tests {
 		let calls = runner.calls();
 		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
 		assert!(!calls.iter().any(|c| c.program == "scp"));
+	}
+
+	#[test]
+	fn ensure_remote_api_compatible_patch_mismatch_installs_when_source_exists()
+	{
+		// Same major.minor stays wire-compatible, but a shipped patch release may
+		// contain remote-side fixes. When an install source is available, bring-up
+		// should upgrade to the exact local patch instead of silently reusing the
+		// older compatible binary.
+		let probe = probe_args();
+		let url = "https://example.com/aghub_1.1.1_amd64.deb";
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: url.to_string(),
+		};
+		let install_cmd =
+			build_remote_release_deb_install_cmd(url, "aghub-api");
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let old_patch = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.0".to_string(),
+			stderr: String::new(),
+		};
+		let installed = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.1".to_string(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&probe), old_patch())
+			.script("ssh", &args_as_str(&install_args), installed());
+
+		let result = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
+			.expect("compatible patch mismatch should still upgrade");
+
+		assert!(result.compatible);
+		assert!(
+			result.install_attempted,
+			"patch mismatch with install source must install"
+		);
+		let calls = runner.calls();
+		assert!(
+			calls.iter().any(|c| c.args == install_args),
+			"release-deb install command must run: {calls:?}"
+		);
 	}
 
 	#[test]
