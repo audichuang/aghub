@@ -118,3 +118,38 @@ desktop-bundle:
     # The bundle now embeds the sidecar; the EXIT trap removes the staging dir
     # so the working tree stays clean and `bun run dev` stays on the fallback.
     echo "Bundle built; staging dir will be removed on exit."
+
+# Build a LOCAL macOS (Apple Silicon) .dmg and install it to /Applications for
+# fast manual testing — skips the whole tag -> CI -> download round-trip. Mirrors
+# `desktop-bundle` sidecar staging but emits ONLY the dmg for the host arch, then
+# installs the app and prints the dmg path.
+#
+# macOS / Apple Silicon only (host build == arm64 there). Needs the release
+# toolchain (rustup, bun, sccache). The build is UNSIGNED and has no updater
+# artifacts — it is for LOCAL testing only; ship real builds via `just`-tagged
+# releases, never this dmg.
+[macos]
+desktop-dmg:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    STAGE="$(pwd)/crates/desktop/src-tauri/binaries"
+    trap 'rm -rf "$STAGE"' EXIT
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    cargo build -p aghub-api --release
+    cp "target/release/aghub-api" "$STAGE/aghub-api"
+    echo "Staged sidecar: $STAGE/aghub-api"
+    (cd crates/desktop && bun run tauri build --bundles dmg \
+      --config src-tauri/tauri.bundle.conf.json \
+      --config '{"bundle":{"createUpdaterArtifacts":false}}')
+    APP="target/release/bundle/macos/aghub.app"
+    DMG="$(ls -t target/release/bundle/dmg/aghub_*.dmg | head -1)"
+    echo "Installing $APP -> /Applications/aghub.app (replacing any existing copy)"
+    rm -rf "/Applications/aghub.app"
+    cp -R "$APP" "/Applications/aghub.app"
+    # Locally-built apps are not quarantined, but strip it defensively so the
+    # first launch does not hit Gatekeeper.
+    xattr -dr com.apple.quarantine "/Applications/aghub.app" 2>/dev/null || true
+    echo "Installed: /Applications/aghub.app"
+    echo "DMG:       $(pwd)/$DMG"
+    open "/Applications/aghub.app"
