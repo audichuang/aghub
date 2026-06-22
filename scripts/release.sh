@@ -23,6 +23,29 @@ err() { printf '\033[31m✗ %s\033[0m\n' "$*" >&2; }
 ok() { printf '\033[32m✓ %s\033[0m\n' "$*"; }
 info() { printf '\033[36m• %s\033[0m\n' "$*"; }
 
+# Watch a workflow run to completion, then succeed/fail on its REAL conclusion.
+# `gh run watch --exit-status` can exit non-zero on a transient API hiccup (seen
+# in the wild: HTTP 401 fetching annotations) while the run is perfectly fine —
+# so its exit code is NOT a reliable "did the run fail" signal. Instead: let
+# watch block, but after it returns, re-check the run's actual status; if it is
+# not terminal yet (watch bailed early), wait and re-watch. Only the run's own
+# `conclusion` decides the return value. seq is a generous backstop — normally
+# `gh run watch` blocks for the whole run and this loops just once.
+watch_run() {
+	run_id="$1"
+	for _ in $(seq 1 120); do
+		gh run watch "$run_id" --repo "$REPO" >/dev/null 2>&1 || true
+		st="$(gh run view "$run_id" --repo "$REPO" --json status --jq .status 2>/dev/null || echo "")"
+		if [ "$st" = "completed" ]; then
+			cc="$(gh run view "$run_id" --repo "$REPO" --json conclusion --jq .conclusion 2>/dev/null || echo "")"
+			if [ "$cc" = "success" ]; then return 0; else return 1; fi
+		fi
+		sleep 15
+	done
+	err "watch_run: timed out waiting for run $run_id to reach a terminal state"
+	return 1
+}
+
 VERSION="${1:-}"
 ASSUME_YES=0
 [ "${2:-}" = "--yes" ] && ASSUME_YES=1
@@ -155,11 +178,13 @@ done
 }
 info "release run: $RUN_ID — watching to completion..."
 
-if ! gh run watch "$RUN_ID" --repo "$REPO" --exit-status; then
-	# Distinguish a transient dispatch flake (jobs stuck "queued"/cancelled,
-	# nothing actually concluded "failure") from a real test/build failure (a
-	# job whose conclusion is "failure"). Only the former is worth an auto-rerun
-	# — rerunning a real failure just wastes ~20 min reproducing it.
+if ! watch_run "$RUN_ID"; then
+	# The RUN itself reached a non-success terminal state (watch_run already
+	# confirmed it is terminal — a transient watch API hiccup alone cannot land
+	# us here). Distinguish a transient dispatch flake (jobs stuck
+	# "queued"/cancelled, nothing concluded "failure") from a real test/build
+	# failure (a job whose conclusion is "failure"). Only the former is worth an
+	# auto-rerun — rerunning a real failure just wastes ~20 min reproducing it.
 	PUBLISHED="$(gh release view "$TAG" --repo "$REPO" --json url --jq .url 2>/dev/null || true)"
 	REAL_FAIL="$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
 		--jq '[.jobs[] | select(.conclusion=="failure")] | length' 2>/dev/null || echo 0)"
@@ -172,9 +197,12 @@ if ! gh run watch "$RUN_ID" --repo "$REPO" --exit-status; then
 		exit 1
 	else
 		err "release run failed with no job concluding 'failure' (transient dispatch flake) — rerunning once..."
-		gh run rerun "$RUN_ID" --repo "$REPO"
+		gh run rerun "$RUN_ID" --repo "$REPO" || {
+			err "could not rerun $RUN_ID — re-check manually: gh run view $RUN_ID --repo $REPO"
+			exit 1
+		}
 		sleep 8
-		if ! gh run watch "$RUN_ID" --repo "$REPO" --exit-status; then
+		if ! watch_run "$RUN_ID"; then
 			err "rerun failed too. Inspect: gh run view $RUN_ID --repo $REPO --log-failed"
 			exit 1
 		fi
