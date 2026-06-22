@@ -80,6 +80,14 @@ bump version:
     perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/package.json
     perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/src-tauri/tauri.conf.json
 
+# Cut a release: YOU pick the version, the script does the rest — verifies the
+# HEAD commit's ci.yml is green on the fork, tags vX.Y.Z, pushes it to `fork`
+# (never origin/upstream), watches release.yml (auto-reruns once on a transient
+# CI flake), then verifies the published artifacts. Pass --yes to skip the
+# confirm prompt. See scripts/release.sh + the releasing-aghub skill.
+release version *flags:
+    bash scripts/release.sh {{version}} {{flags}}
+
 # Detailed notes: stages crates/desktop/src-tauri/binaries/aghub-api[.exe]
 # for the HOST triple, then runs the bundle build with the committed
 # --config overlay (mirrors the release CI staging). The committed
