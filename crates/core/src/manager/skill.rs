@@ -459,15 +459,7 @@ impl ConfigManager {
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		use crate::skills::removal;
 
-		let config = self.config.as_ref().ok_or_else(|| {
-			ConfigError::InvalidConfig("No configuration loaded".to_string())
-		})?;
-		let skill = config
-			.skills
-			.iter()
-			.find(|s| s.name == name)
-			.cloned()
-			.ok_or_else(|| ConfigError::resource_not_found("skill", name))?;
+		let skill = self.skill_for_planned_removal(name, all_agents)?;
 
 		let own_agent_dir = self.target_skills_dir();
 		let scope = self.scope;
@@ -526,6 +518,37 @@ impl ConfigManager {
 			plan,
 			executed: true,
 		})
+	}
+
+	fn skill_for_planned_removal(
+		&self,
+		name: &str,
+		all_agents: bool,
+	) -> Result<Skill> {
+		let config = self.config.as_ref().ok_or_else(|| {
+			ConfigError::InvalidConfig("No configuration loaded".to_string())
+		})?;
+		if let Some(skill) = config.skills.iter().find(|s| s.name == name) {
+			return Ok(skill.clone());
+		}
+
+		if all_agents {
+			for resources in
+				crate::load_all_agents(self.scope, self.project_root.as_deref())
+			{
+				if let Some(skill) =
+					resources.skills.into_iter().find(|s| s.name == name)
+				{
+					debug!(
+						"using '{}' skill from agent '{}' for all-agent removal",
+						name, resources.agent_id
+					);
+					return Ok(skill);
+				}
+			}
+		}
+
+		Err(ConfigError::resource_not_found("skill", name))
 	}
 
 	fn set_skill_enabled(&mut self, name: &str, enabled: bool) -> Result<()> {
