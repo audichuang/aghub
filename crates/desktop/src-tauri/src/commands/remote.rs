@@ -70,11 +70,34 @@ struct RemoteHandle {
 	remote_pid: u32,
 	/// The local port the tunnel listens on (== the frontend baseUrl port).
 	local_port: u16,
+	/// Whether the remote `aghub-api` advertised controller-side git-credential
+	/// forwarding during bring-up. Cached on the handle so a reused connection
+	/// reports the SAME capability it was brought up with, and so the frontend
+	/// learns it AT THE SAME TIME as the tunnel port (no separate late probe).
+	/// Fail-safe `false` whenever the bring-up probe could not confirm it.
+	supports_credential_forwarding: bool,
 	/// The connection definition (needed to re-issue ssh for remote cleanup).
 	connection: Connection,
 	/// Set before an intentional teardown so the watcher suppresses the
 	/// `remote-disconnected` event.
 	intentional: Arc<AtomicBool>,
+}
+
+/// What [`connect_remote`] / [`force_redeploy_remote`] return to the frontend:
+/// the **local** tunnel port AND the remote's git-credential-forwarding
+/// capability, resolved together at bring-up time. Returning the capability
+/// here (rather than via a separate later probe) closes the race where the
+/// first remote git-auth queries could run unforwarded and cache an auth
+/// failure before a late capability probe flipped to `true`.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectResult {
+	/// The local port the tunnel listens on (== the frontend baseUrl port).
+	pub port: u16,
+	/// The remote advertises controller-side git-credential forwarding (the
+	/// `X-Aghub-Git-Tokens` header). Fail-safe `false` whenever support could
+	/// not be confirmed; always `false` for Local (which never reaches here).
+	pub supports_credential_forwarding: bool,
 }
 
 /// Managed Tauri state holding every live remote connection.
@@ -230,7 +253,7 @@ pub fn reinstall_remote_api(
 ) -> Result<TestResult, RemoteError> {
 	let id = connection.id.clone();
 
-	if existing_local_port(&state, &id)?.is_some() {
+	if existing_connect_result(&state, &id)?.is_some() {
 		return Err(RemoteError::AlreadyConnecting);
 	}
 
@@ -293,18 +316,21 @@ pub fn list_remote_directories(
 }
 
 /// Bring up the remote server and a tunnel; returns the **local** port the
-/// frontend should point its `baseUrl` at. Idempotent per connection id.
+/// frontend should point its `baseUrl` at, plus the remote's git-credential
+/// forwarding capability resolved during the same bring-up. Idempotent per
+/// connection id (a reused tunnel reports the capability it was brought up
+/// with).
 #[tauri::command]
 pub fn connect_remote(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
-) -> Result<u16, RemoteError> {
+) -> Result<ConnectResult, RemoteError> {
 	let id = connection.id.clone();
 
-	// Already connected? Reuse the existing tunnel.
-	if let Some(port) = existing_local_port(&state, &id)? {
-		return Ok(port);
+	// Already connected? Reuse the existing tunnel + its cached capability.
+	if let Some(result) = existing_connect_result(&state, &id)? {
+		return Ok(result);
 	}
 	// Claim an in-progress slot so concurrent calls don't double-bring-up; the
 	// guard releases it on every exit path (including a panic in `bring_up`).
@@ -312,14 +338,18 @@ pub fn connect_remote(
 
 	// Do the slow ssh work WITHOUT holding any lock.
 	let handle = bring_up(&app, &connection)?;
-	let port = handle.local_port;
+	let result = ConnectResult {
+		port: handle.local_port,
+		supports_credential_forwarding: handle.supports_credential_forwarding,
+	};
 	insert_handle_or_teardown(&state, id, handle)?;
-	Ok(port)
+	Ok(result)
 	// `_slot` drops here, after the handle is stored.
 }
 
 /// Force-redeploy the desktop's `aghub-api` over an incompatible remote one,
-/// then connect; returns the **local** tunnel port. Only reachable from the
+/// then connect; returns the **local** tunnel port plus the remote's
+/// git-credential forwarding capability. Only reachable from the
 /// incompatible/failed state: it refuses to clobber a live connection and is
 /// gated to the desktop's own `(os, arch)`.
 #[tauri::command]
@@ -327,11 +357,11 @@ pub fn force_redeploy_remote(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
-) -> Result<u16, RemoteError> {
+) -> Result<ConnectResult, RemoteError> {
 	let id = connection.id.clone();
 
 	// A live handle means there is a working connection — never tear it down.
-	if existing_local_port(&state, &id)?.is_some() {
+	if existing_connect_result(&state, &id)?.is_some() {
 		return Err(RemoteError::AlreadyConnecting);
 	}
 
@@ -357,9 +387,12 @@ pub fn force_redeploy_remote(
 	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
 	let handle = force_redeploy(&app, &connection, &source)?;
-	let port = handle.local_port;
+	let result = ConnectResult {
+		port: handle.local_port,
+		supports_credential_forwarding: handle.supports_credential_forwarding,
+	};
 	insert_handle_or_teardown(&state, id, handle)?;
-	Ok(port)
+	Ok(result)
 	// `_slot` drops here, after the handle is stored.
 }
 
@@ -404,16 +437,20 @@ pub fn cleanup_all_remotes(state: &RemoteState) {
 // internals
 // ---------------------------------------------------------------------------
 
-/// Local port of an already-live connection, or `None` if not connected.
+/// The cached [`ConnectResult`] (port + capability) of an already-live
+/// connection, or `None` if not connected.
 ///
 /// Returns `Err` on a poisoned lock so connect/force_redeploy surface
 /// [`RemoteError::Internal`] instead of silently treating a poisoned (and thus
 /// indeterminate) state as "disconnected" and racing a second bring-up.
-fn existing_local_port(
+fn existing_connect_result(
 	state: &State<'_, RemoteState>,
 	id: &str,
-) -> Result<Option<u16>, RemoteError> {
-	Ok(lock(&state.handles)?.get(id).map(|h| h.local_port))
+) -> Result<Option<ConnectResult>, RemoteError> {
+	Ok(lock(&state.handles)?.get(id).map(|h| ConnectResult {
+		port: h.local_port,
+		supports_credential_forwarding: h.supports_credential_forwarding,
+	}))
 }
 
 /// User-facing lock: a poisoned lock becomes [`RemoteError::Internal`] so the
@@ -559,6 +596,7 @@ fn bring_up(
 		});
 	}
 
+	let supports_credential_forwarding = test.supports_credential_forwarding;
 	let started = start_remote(
 		&runner,
 		connection,
@@ -567,12 +605,16 @@ fn bring_up(
 		PORT_POLL_DELAY,
 	)?;
 
-	finish_bring_up(app, connection, started)
+	finish_bring_up(app, connection, started, supports_credential_forwarding)
 }
 
 /// Tail of the bring-up shared by [`connect_remote`] and
 /// [`force_redeploy_remote`]: allocate a local port, spawn the ssh tunnel,
 /// settle-check it, start the watcher, and return the [`RemoteHandle`].
+///
+/// `supports_credential_forwarding` is carried in from the bring-up probe so
+/// the stored handle (and thus the frontend) learns the capability AT THE SAME
+/// TIME as the tunnel port.
 ///
 /// **Invariant:** on entry the remote server is already running, so every early
 /// return MUST guarded-kill it (the `RemoteHandle` is only stored by the caller
@@ -581,6 +623,7 @@ fn finish_bring_up(
 	app: &AppHandle,
 	connection: &Connection,
 	started: StartedServer,
+	supports_credential_forwarding: bool,
 ) -> Result<RemoteHandle, RemoteError> {
 	let runner = SystemRunner;
 
@@ -646,6 +689,7 @@ fn finish_bring_up(
 		tunnel,
 		remote_pid: started.remote_pid,
 		local_port,
+		supports_credential_forwarding,
 		connection: connection.clone(),
 		intentional,
 	})
@@ -671,6 +715,7 @@ fn force_redeploy(
 		});
 	}
 
+	let supports_credential_forwarding = test.supports_credential_forwarding;
 	let bin = resolved_path(connection);
 	let started = start_remote(
 		&runner,
@@ -680,7 +725,7 @@ fn force_redeploy(
 		PORT_POLL_DELAY,
 	)?;
 
-	finish_bring_up(app, connection, started)
+	finish_bring_up(app, connection, started, supports_credential_forwarding)
 }
 
 /// Resolve the bundled, version-locked `aghub-api` shipped as a Tauri
@@ -1090,5 +1135,37 @@ mod tests {
 			))),
 			None
 		);
+	}
+
+	// --- ConnectResult wire contract --------------------------------------
+
+	/// `connect_remote`/`force_redeploy_remote` now return the capability
+	/// ALONGSIDE the port, so the frontend learns `supportsCredentialForwarding`
+	/// at the same time as `baseUrl` (closing the gating race). The serialized
+	/// shape must be the camelCase `{ port, supportsCredentialForwarding }` the
+	/// hand-written TS `ConnectResult` binds to.
+	#[test]
+	fn connect_result_serializes_port_and_capability_camel_case() {
+		let json = serde_json::to_value(ConnectResult {
+			port: 51234,
+			supports_credential_forwarding: true,
+		})
+		.expect("ConnectResult should serialize");
+		assert_eq!(json["port"], 51234);
+		assert_eq!(json["supportsCredentialForwarding"], true);
+		// No snake_case key leaks across IPC.
+		assert!(json.get("supports_credential_forwarding").is_none());
+	}
+
+	/// Fail-safe: a non-forwarding remote carries `false` through verbatim, so
+	/// the frontend gate stays off for an old/uncapable binary.
+	#[test]
+	fn connect_result_carries_failsafe_false_capability() {
+		let json = serde_json::to_value(ConnectResult {
+			port: 7000,
+			supports_credential_forwarding: false,
+		})
+		.expect("ConnectResult should serialize");
+		assert_eq!(json["supportsCredentialForwarding"], false);
 	}
 }

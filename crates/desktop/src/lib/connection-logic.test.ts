@@ -7,6 +7,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	baseUrlFromPort,
+	type ConnectResult,
+	deriveSupportsCredentialForwarding,
 	LOCAL_CONNECTION,
 	mergeConnections,
 	projectStatus,
@@ -77,4 +79,46 @@ test("projectStatus: data 0 is a valid connected port", () => {
 	// 0 should never be a real port here, but the projection keys on
 	// `typeof data === 'number'`, so this documents the behavior.
 	assert.equal(projectStatus(makeState({ data: 0 })), "connected");
+});
+
+// ─── deriveSupportsCredentialForwarding (capability-gating race fix) ─────────
+//
+// The capability now rides on the SAME `connect_remote` result as the port, so
+// it is available at the moment `baseUrl` resolves — there is no window where a
+// forwarding-eligible query (sources diff, check-updates) runs unforwarded
+// against a capable remote and caches an auth failure before a separate, later
+// probe flips the flag. These prove the derivation reads the bring-up result,
+// not a late probe, and stays fail-safe `false` otherwise.
+
+const capable: ConnectResult = {
+	port: 50001,
+	supportsCredentialForwarding: true,
+};
+const notCapable: ConnectResult = {
+	port: 50002,
+	supportsCredentialForwarding: false,
+};
+
+test("forwarding: capable the instant the bring-up result is present (no late probe)", () => {
+	// The data is the SAME object the port came from, so the capability is known
+	// atomically with `baseUrl` — the race the fix closes.
+	assert.equal(deriveSupportsCredentialForwarding("vm-1", capable), true);
+});
+
+test("forwarding: false for Local even if a result somehow says true", () => {
+	assert.equal(
+		deriveSupportsCredentialForwarding(LOCAL_CONNECTION.id, capable),
+		false,
+	);
+});
+
+test("forwarding: false for a remote whose bring-up did NOT advertise support", () => {
+	assert.equal(deriveSupportsCredentialForwarding("vm-1", notCapable), false);
+});
+
+test("forwarding: fail-safe false while the remote bring-up is unresolved", () => {
+	// No window: until the result lands (undefined/null), the gate is off — so a
+	// first query that races ahead cannot forward to an unconfirmed remote.
+	assert.equal(deriveSupportsCredentialForwarding("vm-1", undefined), false);
+	assert.equal(deriveSupportsCredentialForwarding("vm-1", null), false);
 });

@@ -31,6 +31,39 @@ export function baseUrlFromPort(port: number): string {
 	return `http://localhost:${port}/api/v1`;
 }
 
+/**
+ * Bring-up result returned by `connect_remote` (and `force_redeploy_remote`):
+ * the local tunnel port AND the remote's git-credential-forwarding capability,
+ * resolved together. Mirrors the Rust `ConnectResult`. The local
+ * `start_server` path synthesizes one with `supportsCredentialForwarding:
+ * false` so both branches share a single cache shape.
+ */
+export interface ConnectResult {
+	port: number;
+	supportsCredentialForwarding: boolean;
+}
+
+/**
+ * Derive whether the ACTIVE connection should forward git credentials, from
+ * the bring-up result that `connect_remote` returns ALONGSIDE the port.
+ *
+ * Because the capability rides on the same `serverQuery` result as the port,
+ * it is known the instant `baseUrl` is — there is no window where a
+ * forwarding-eligible query runs unforwarded against a capable remote and
+ * caches an auth failure before a separate, later probe flips the flag.
+ *
+ * Fail-safe: `false` for Local, and `false` for any result that does not
+ * carry a confirmed `supportsCredentialForwarding === true` (unresolved bring-
+ * up, an old/uncapable binary, or an errored connection).
+ */
+export function deriveSupportsCredentialForwarding(
+	activeConnectionId: string,
+	serverData: ConnectResult | null | undefined,
+): boolean {
+	if (activeConnectionId === LOCAL_CONNECTION.id) return false;
+	return serverData?.supportsCredentialForwarding === true;
+}
+
 /** The 4-state status the FE projects from a react-query state. */
 export type ConnectionStatus = "idle" | "connecting" | "connected" | "error";
 

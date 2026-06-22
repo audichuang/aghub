@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import { createContext, use } from "react";
-import type { ConnectionStatus } from "../lib/connection-logic";
+import type { ConnectionStatus, ConnectResult } from "../lib/connection-logic";
 import type { Connection } from "../lib/store";
+
+export type { ConnectResult };
 
 export interface ConnectionContextValue {
 	/** Local + persisted remotes, Local always first. */

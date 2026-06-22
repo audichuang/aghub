@@ -8,12 +8,14 @@ import { useTranslation } from "react-i18next";
 import type {
 	ConnectionProviderProps,
 	ConnectionContextValue,
+	ConnectResult,
 	TestResult,
 } from "../contexts/connection";
 import { ConnectionContext } from "../contexts/connection";
 import { ServerContext } from "../contexts/server";
 import {
 	baseUrlFromPort,
+	deriveSupportsCredentialForwarding,
 	LOCAL_CONNECTION,
 	mergeConnections,
 	projectStatus,
@@ -55,9 +57,10 @@ interface RemoteDisconnectedPayload {
 interface IncompatibleConnectionScreenProps {
 	connection: Connection;
 	remoteVersion: string | null;
-	/** Flip the cached server port so the provider re-renders into the
-	 * connected state (the tunnel is already open by then). */
-	onRedeployed: (port: number) => void;
+	/** Flip the cached server bring-up result so the provider re-renders into
+	 * the connected state (the tunnel is already open by then). Carries the
+	 * forwarding capability so it lands atomically with the port. */
+	onRedeployed: (result: ConnectResult) => void;
 }
 
 interface ConnectionPendingScreenProps {
@@ -294,10 +297,10 @@ function IncompatibleConnectionScreen({
 
 	const redeploy = useMutation({
 		mutationFn: () =>
-			invoke<number>("force_redeploy_remote", { connection }),
-		onSuccess: (port) => {
+			invoke<ConnectResult>("force_redeploy_remote", { connection }),
+		onSuccess: (result) => {
 			setConfirmOpen(false);
-			onRedeployed(port);
+			onRedeployed(result);
 		},
 		onError: (error) => {
 			setConfirmOpen(false);
@@ -426,47 +429,40 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		[connections, activeId],
 	);
 
-	// Resolve the active connection's local port: local -> start_server,
-	// remote -> connect_remote (returns the local tunnel port). Keyed by the
-	// active connection id so each host has its own cached bring-up result.
-	const serverQuery = useQuery<number>({
+	// Resolve the active connection's bring-up result: local -> start_server
+	// (port only, never forwards), remote -> connect_remote (port AND the
+	// git-credential-forwarding capability, resolved together at bring-up
+	// time). Keyed by the active connection id so each host has its own cached
+	// bring-up result. Returning the capability HERE — atomically with the
+	// port — closes the race where the first remote git-auth queries could run
+	// unforwarded against a capable remote and cache an auth failure before a
+	// separate, later capability probe flipped to `true`.
+	const serverQuery = useQuery<ConnectResult>({
 		queryKey: ["server", activeId],
-		queryFn: () => {
+		queryFn: async (): Promise<ConnectResult> => {
 			if (activeConnection.id === LOCAL_CONNECTION.id) {
-				return invoke<number>("start_server");
+				const port = await invoke<number>("start_server");
+				// Local is structurally non-forwarding.
+				return { port, supportsCredentialForwarding: false };
 			}
-			return invoke<number>("connect_remote", {
+			return invoke<ConnectResult>("connect_remote", {
 				connection: activeConnection,
 			});
 		},
 	});
 
-	const status = projectStatus(serverQuery);
-	const port = serverQuery.data ?? null;
+	const port = serverQuery.data?.port ?? null;
+	const status = projectStatus({ ...serverQuery, data: port });
 	const baseUrl = port === null ? null : baseUrlFromPort(port);
 
-	// Surface the active remote's credential-forwarding capability (Task 6).
-	// The capability is computed by the SSH `aghub-api --capabilities` probe in
-	// bring-up, but `connect_remote` returns only the tunnel port, so re-read it
-	// via the (probe-only) `test_connection` command once the tunnel is up.
-	// Cached per connection id with an infinite staleTime — a remote's binary
-	// does not change capability mid-session. Local never forwards.
-	const isActiveRemote = activeId !== LOCAL_CONNECTION.id;
-	const capabilityQuery = useQuery<boolean>({
-		queryKey: ["server", activeId, "supports-credential-forwarding"],
-		queryFn: async () => {
-			const result = await invoke<TestResult>("test_connection", {
-				connection: activeConnection,
-			});
-			return result.supportsCredentialForwarding;
-		},
-		// Only probe a connected remote; Local is structurally non-forwarding.
-		enabled: isActiveRemote && port !== null,
-		staleTime: Number.POSITIVE_INFINITY,
-	});
-	// Fail-safe: anything other than a confirmed `true` does not forward.
-	const supportsCredentialForwarding =
-		isActiveRemote && capabilityQuery.data === true;
+	// Fail-safe: forward only when the active connection is a remote whose
+	// bring-up result confirmed support. Local (and any unresolved/old/error
+	// bring-up) yields `false`. Derived from `serverQuery.data` so it is known
+	// the moment `baseUrl` is — never lagging behind a separate probe.
+	const supportsCredentialForwarding = deriveSupportsCredentialForwarding(
+		activeId,
+		serverQuery.data,
+	);
 
 	const setActive = useCallback(
 		(id: string) => {
@@ -601,8 +597,11 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 				<IncompatibleConnectionScreen
 					connection={activeConnection}
 					remoteVersion={payload.remoteVersion ?? null}
-					onRedeployed={(port) =>
-						queryClient.setQueryData(["server", activeId], port)
+					onRedeployed={(result) =>
+						queryClient.setQueryData<ConnectResult>(
+							["server", activeId],
+							result,
+						)
 					}
 				/>
 			);
