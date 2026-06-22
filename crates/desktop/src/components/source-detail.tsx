@@ -453,13 +453,19 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		if (installableAgentIds.length === 0) {
 			throw new Error(t("sourceRemoveNoAgents"));
 		}
-		await api.skills.delete(
+		const result = await api.skills.delete(
 			installableAgentIds[0],
 			name,
 			updateScope,
 			updateProjectRoot ?? undefined,
 			true,
 		);
+		if (result.error) {
+			throw new Error(result.error);
+		}
+		if (!result.executed) {
+			throw new Error(t("sourceRemovedCleanFailed", { name }));
+		}
 	};
 
 	const deleteRenamedSkillMutation = useMutation({

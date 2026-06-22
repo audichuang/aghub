@@ -77,12 +77,14 @@ export function BulkDeleteDialog({
 						);
 					} else {
 						promises.push(
-							api.skills.delete(
-								item.agent,
-								group.key,
-								scope,
-								projectRoot,
-							),
+							api.skills
+								.delete(
+									item.agent,
+									group.key,
+									scope,
+									projectRoot,
+								)
+								.then(() => undefined),
 						);
 					}
 					deleteInfo.push({

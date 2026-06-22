@@ -231,7 +231,7 @@ export function createApi(baseUrl: string) {
 				scope: "global" | "project" = "global",
 				projectRoot?: string,
 				allAgents = false,
-			): Promise<void> {
+			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
 						searchParams: {
@@ -243,7 +243,7 @@ export function createApi(baseUrl: string) {
 								: {}),
 						},
 					})
-					.then(() => undefined);
+					.json();
 			},
 			openFolder(skillPath: string): Promise<void> {
 				return client

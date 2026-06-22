@@ -4,8 +4,10 @@
 //! using temporary configurations to avoid polluting the global environment.
 
 use aghub_core::{
+	create_adapter,
 	models::{AgentType, McpServer, McpTransport, Skill},
 	testing::{TestConfig, TestConfigBuilder},
+	ConfigManager,
 };
 use std::collections::HashMap;
 
@@ -928,4 +930,51 @@ fn remove_skill_planned_all_agents_requires_confirm() {
 		.unwrap();
 	assert!(outcome.executed);
 	assert!(!skill_dir.exists());
+}
+
+#[test]
+fn remove_skill_planned_all_agents_falls_back_to_other_agent_visibility() {
+	let tmp = tempfile::tempdir().unwrap();
+	let project_root = tmp.path();
+	let skill_dir = project_root
+		.join(".agents")
+		.join("skills")
+		.join("orphan-cleanup");
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		"---\nname: orphan-cleanup\ndescription: d\n---\n\n# orphan-cleanup\n",
+	)
+	.unwrap();
+
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(project_root),
+	);
+	manager.load().unwrap();
+	assert!(
+		manager
+			.config()
+			.unwrap()
+			.skills
+			.iter()
+			.all(|skill| skill.name != "orphan-cleanup"),
+		"test setup requires the delegated agent to not see the skill"
+	);
+
+	let outcome = manager
+		.remove_skill_planned("orphan-cleanup", true, false, true)
+		.unwrap();
+
+	assert!(outcome.executed);
+	assert!(
+		!skill_dir.exists(),
+		"all-agent removal deletes the visible copy"
+	);
+	assert!(
+		outcome.plan.paths.iter().any(|path| path == &skill_dir),
+		"removal plan should include the skill dir: {:?}",
+		outcome.plan.paths
+	);
 }
