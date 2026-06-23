@@ -1,20 +1,48 @@
 "use client";
 
-import {
-	CheckCircleIcon,
-	ExclamationCircleIcon,
-	MagnifyingGlassIcon,
-} from "@heroicons/react/24/solid";
-import { Button, Spinner, Table } from "@heroui/react";
-import { useMemo } from "react";
+import { ChevronDownIcon } from "@heroicons/react/24/outline";
+import { ExclamationCircleIcon, GlobeAltIcon } from "@heroicons/react/24/solid";
+import { Accordion, Button, Spinner } from "@heroui/react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { CCPluginMarketResponse } from "../../generated/dto";
-import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
+import { siGithub } from "simple-icons";
+import type {
+	CCPluginMarketResponse,
+	CCPluginResponse,
+} from "../../generated/dto";
+import { groupByMarketplace } from "../../lib/group-plugins-by-marketplace";
+import { MarketAvailableRow, MarketInstalledRow } from "./market-plugin-row";
 
-import { formatPluginVersion } from "../../lib/plugin-version";
+const GITHUB_REPO_RE = /github\.com\/([^/]+\/[^/]+?)(?:\.git)?\/?$/;
+const HTTP_PREFIX_RE = /^https?:\/\//;
+
+// Group by the marketplace name (one stable value per marketplace, so the
+// official-pin in groupByMarketplace fires just like Part A). The header label
+// prefers the source repo from `github_url`, but official-marketplace plugins
+// carry a per-plugin `…/tree/main/<name>` url — trim at `/tree/` to land on the
+// repo root; fall back to the marketplace name when no repo resolves.
+function marketplaceHeader(
+	githubUrl: string,
+	marketplace: string,
+): { label: string; isGithub: boolean } {
+	const repoUrl = githubUrl ? githubUrl.split("/tree/")[0]! : "";
+	if (repoUrl) {
+		const match = repoUrl.match(GITHUB_REPO_RE);
+		if (match) {
+			return { label: match[1]!, isGithub: true };
+		}
+		return {
+			label: repoUrl.replace(HTTP_PREFIX_RE, ""),
+			isGithub: false,
+		};
+	}
+	return { label: marketplace || "—", isGithub: false };
+}
 
 interface PluginMarketTableProps {
 	plugins: CCPluginMarketResponse[];
+	installedById: Map<string, CCPluginResponse>;
+	installScope: "global" | "project" | "local";
 	isLoading: boolean;
 	isError: boolean;
 	error: unknown;
@@ -22,38 +50,14 @@ interface PluginMarketTableProps {
 	compactFormatter: Intl.NumberFormat;
 	onRetry: () => void;
 	onInstall: (pluginId: string) => void;
+	onInstallMany: (pluginIds: string[]) => void;
 	installStates: Record<string, "installing" | "installed">;
-}
-
-type TableInstallState = "idle" | "installing" | "installed";
-
-interface PluginMarketRow {
-	id: string;
-	plugin: CCPluginMarketResponse;
-	installState: TableInstallState;
-}
-
-function buildPluginMeta(
-	plugin: CCPluginMarketResponse,
-	t: (key: string) => string,
-) {
-	const values: string[] = [];
-
-	if (plugin.has_mcp) {
-		values.push(t("pluginCapabilityMcp"));
-	}
-	if (plugin.has_skills) {
-		values.push(t("pluginCapabilitySkills"));
-	}
-	if (plugin.has_hooks) {
-		values.push(t("pluginCapabilityHooks"));
-	}
-
-	return values.join(" · ");
 }
 
 export function PluginMarketTable({
 	plugins,
+	installedById,
+	installScope,
 	isLoading,
 	isError,
 	error,
@@ -61,196 +65,240 @@ export function PluginMarketTable({
 	compactFormatter,
 	onRetry,
 	onInstall,
+	onInstallMany,
 	installStates,
 }: PluginMarketTableProps) {
 	const { t } = useTranslation();
-	const tableRows = useMemo<PluginMarketRow[]>(
-		() =>
-			plugins.map((plugin) => ({
-				id: plugin.id,
-				plugin,
-				installState: installStates[plugin.id] ?? "idle",
-			})),
-		[plugins, installStates],
+	const [selectedIds, setSelectedIds] = useState<Set<string>>(
+		() => new Set(),
+	);
+	const [manualExpanded, setManualExpanded] = useState<Set<string> | null>(
+		null,
 	);
 
-	return (
-		<div className="flex min-h-[16rem] max-h-[52vh] flex-col overflow-hidden rounded-lg bg-surface">
-			{isLoading ? (
-				<div className="flex flex-1 items-center justify-center">
-					<Spinner size="lg" />
-				</div>
-			) : isError ? (
-				<div className="flex flex-1 flex-col items-center justify-center p-6 text-center">
-					<ExclamationCircleIcon className="mb-2 size-8 text-danger" />
-					<p className="text-sm text-muted">
-						{error instanceof Error
-							? error.message
-							: t("unknownError")}
-					</p>
-					<Button
-						variant="secondary"
-						size="sm"
-						onPress={onRetry}
-						className="mt-4"
-					>
-						{t("retry")}
-					</Button>
-				</div>
-			) : plugins.length === 0 ? (
-				<div className="flex flex-1 items-center justify-center">
-					<Empty className="border-0">
-						<EmptyHeader>
-							<EmptyMedia>
-								<MagnifyingGlassIcon className="size-8 text-muted" />
-							</EmptyMedia>
-							<EmptyTitle className="text-sm font-normal text-muted">
-								{searchQuery
-									? t("noPluginsFound")
-									: t("noPluginsAvailable")}
-							</EmptyTitle>
-						</EmptyHeader>
-					</Empty>
-				</div>
-			) : (
-				<div className="min-h-0 flex-1 overflow-hidden">
-					<Table className="h-full">
-						<Table.ScrollContainer className="h-full overflow-auto rounded-[inherit] [scrollbar-gutter:stable]">
-							<Table.Content aria-label={t("pluginMarket")}>
-								<Table.Header>
-									<Table.Column
-										isRowHeader
-										className="w-[58%]"
-									>
-										{t("name")}
-									</Table.Column>
-									<Table.Column className="w-[112px] text-right">
-										<span className="whitespace-nowrap">
-											{t("installs")}
-										</span>
-									</Table.Column>
-									<Table.Column className="w-[136px]">
-										{t("author")}
-									</Table.Column>
-									<Table.Column className="w-[104px] text-right">
-										<span className="sr-only">
-											{t("install")}
-										</span>
-									</Table.Column>
-								</Table.Header>
-								<Table.Body items={tableRows}>
-									{({ id, plugin, installState }) => {
-										const isInstalling =
-											installState === "installing";
-										const isInstalled =
-											installState === "installed";
-										const pluginMeta = buildPluginMeta(
-											plugin,
-											t,
-										);
+	const groups = useMemo(
+		() =>
+			groupByMarketplace(
+				plugins,
+				(entry) => entry.marketplace,
+				(entry) =>
+					marketplaceHeader(entry.github_url, entry.marketplace),
+			),
+		[plugins],
+	);
 
-										return (
-											<Table.Row id={id}>
-												<Table.Cell>
-													<div className="min-w-0 space-y-1 py-0.5">
-														<div className="flex min-w-0 items-center gap-2">
-															<span className="truncate text-sm font-semibold text-foreground">
-																{plugin.name}
-															</span>
-														</div>
-														{plugin.description && (
-															<p className="line-clamp-2 text-xs leading-5 text-muted">
-																{
-																	plugin.description
-																}
-															</p>
-														)}
-														{pluginMeta && (
-															<p className="line-clamp-1 text-[11px] text-muted">
-																{pluginMeta}
-															</p>
-														)}
-													</div>
-												</Table.Cell>
-												<Table.Cell>
-													<div className="flex justify-end py-0.5">
-														<span className="whitespace-nowrap text-sm tabular-nums text-muted">
-															{plugin.installs > 0
-																? compactFormatter.format(
-																		plugin.installs,
-																	)
-																: "—"}
-														</span>
-													</div>
-												</Table.Cell>
-												<Table.Cell>
-													<div className="flex flex-col gap-1 py-0.5">
-														<span
-															className={
-																plugin.author
-																	? "truncate text-sm font-medium text-foreground"
-																	: "truncate text-sm font-medium text-muted"
-															}
-														>
-															{plugin.author ||
-																t("unknown")}
-														</span>
-														<span className="font-mono text-xs text-muted">
-															{formatPluginVersion(
-																plugin.version,
-															)}
-														</span>
-													</div>
-												</Table.Cell>
-												<Table.Cell>
-													<div className="flex justify-end py-0.5">
-														<Button
-															size="sm"
-															variant="tertiary"
-															className="h-8 min-w-[92px] justify-center gap-1.5 whitespace-nowrap px-3 transition-colors duration-200"
-															onPress={() =>
-																onInstall(
-																	plugin.id,
-																)
-															}
-															isPending={
-																isInstalling
-															}
-															isDisabled={
-																isInstalled
-															}
-														>
-															<span className="flex items-center gap-1.5">
-																{isInstalling ? (
-																	<Spinner
-																		color="current"
-																		size="sm"
-																	/>
-																) : isInstalled ? (
-																	<CheckCircleIcon className="size-3.5" />
-																) : null}
-																{isInstalling
-																	? t(
-																			"installing",
-																		)
-																	: isInstalled
-																		? t(
-																				"installed",
-																			)
-																		: t(
-																				"install",
-																			)}
-															</span>
-														</Button>
-													</div>
-												</Table.Cell>
-											</Table.Row>
+	const allGroupKeys = useMemo(
+		() => groups.map((group) => group.key),
+		[groups],
+	);
+
+	// Default collapsed, but expand any group that still has not-installed
+	// plugins (or the first group if none do). Search forces all open.
+	const defaultExpanded = useMemo(() => {
+		const withUninstalled = groups
+			.filter((group) =>
+				group.items.some((entry) => !installedById.has(entry.id)),
+			)
+			.map((group) => group.key);
+		if (withUninstalled.length > 0) {
+			return withUninstalled;
+		}
+		return groups.length > 0 ? [groups[0]!.key] : [];
+	}, [groups, installedById]);
+
+	const expandedKeys = useMemo<Set<string>>(() => {
+		if (searchQuery) {
+			return new Set(allGroupKeys);
+		}
+		return manualExpanded ?? new Set(defaultExpanded);
+	}, [searchQuery, manualExpanded, defaultExpanded, allGroupKeys]);
+
+	const handleExpandedChange = (keys: Set<React.Key>) => {
+		if (searchQuery) {
+			return;
+		}
+		setManualExpanded(new Set([...keys].map((key) => String(key))));
+	};
+
+	// Not-installed plugins currently shown (across all groups).
+	const installableIds = useMemo(
+		() =>
+			plugins
+				.filter(
+					(entry) =>
+						!installedById.has(entry.id) &&
+						installStates[entry.id] !== "installed",
+				)
+				.map((entry) => entry.id),
+		[plugins, installedById, installStates],
+	);
+	const installableIdSet = useMemo(
+		() => new Set(installableIds),
+		[installableIds],
+	);
+
+	const selectedInstallable = useMemo(
+		() => [...selectedIds].filter((id) => installableIdSet.has(id)),
+		[selectedIds, installableIdSet],
+	);
+
+	const toggleSelected = (id: string, selected: boolean) => {
+		setSelectedIds((prev) => {
+			const next = new Set(prev);
+			if (selected) {
+				next.add(id);
+			} else {
+				next.delete(id);
+			}
+			return next;
+		});
+	};
+
+	if (isLoading) {
+		return (
+			<div className="flex flex-1 items-center justify-center py-12">
+				<Spinner size="lg" />
+			</div>
+		);
+	}
+
+	if (isError) {
+		return (
+			<div className="flex flex-1 flex-col items-center justify-center gap-3 py-12">
+				<ExclamationCircleIcon className="size-10 text-danger" />
+				<p className="text-sm text-muted">
+					{error instanceof Error ? error.message : t("unknownError")}
+				</p>
+				<Button variant="secondary" size="sm" onPress={onRetry}>
+					{t("retry")}
+				</Button>
+			</div>
+		);
+	}
+
+	if (plugins.length === 0) {
+		return (
+			<div className="flex flex-1 flex-col items-center justify-center gap-2 py-12">
+				<p className="text-sm text-muted">{t("noPluginsFound")}</p>
+			</div>
+		);
+	}
+
+	return (
+		<div className="flex min-h-0 flex-1 flex-col">
+			<div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]">
+				<Accordion
+					allowsMultipleExpanded
+					expandedKeys={expandedKeys}
+					onExpandedChange={handleExpandedChange}
+					className="p-1"
+				>
+					{groups.map((group) => (
+						<Accordion.Item key={group.key} id={group.key}>
+							<Accordion.Heading>
+								<Accordion.Trigger>
+									<div className="flex w-full items-center gap-2">
+										{group.isGithub ? (
+											<svg
+												role="img"
+												aria-hidden="true"
+												className="size-3.5 shrink-0 text-muted"
+												viewBox="0 0 24 24"
+												fill="currentColor"
+											>
+												<path d={siGithub.path} />
+											</svg>
+										) : (
+											<GlobeAltIcon className="size-3.5 shrink-0 text-muted" />
+										)}
+										<span className="min-w-0 flex-1 truncate text-left text-xs font-medium text-muted">
+											{group.label}
+										</span>
+										<span className="shrink-0 text-xs text-muted">
+											{group.items.length}
+										</span>
+										<Accordion.Indicator>
+											<ChevronDownIcon className="size-4" />
+										</Accordion.Indicator>
+									</div>
+								</Accordion.Trigger>
+							</Accordion.Heading>
+							<Accordion.Panel>
+								<div className="flex flex-col">
+									{group.items.map((entry) => {
+										const installed = installedById.get(
+											entry.id,
 										);
-									}}
-								</Table.Body>
-							</Table.Content>
-						</Table.ScrollContainer>
-					</Table>
+										return installed ? (
+											<MarketInstalledRow
+												key={entry.id}
+												entry={entry}
+												installed={installed}
+												installScope={installScope}
+											/>
+										) : (
+											<MarketAvailableRow
+												key={entry.id}
+												entry={entry}
+												compactFormatter={
+													compactFormatter
+												}
+												isSelected={selectedIds.has(
+													entry.id,
+												)}
+												onSelectChange={(sel) =>
+													toggleSelected(
+														entry.id,
+														sel,
+													)
+												}
+												onInstall={onInstall}
+												installState={
+													installStates[entry.id]
+												}
+											/>
+										);
+									})}
+								</div>
+							</Accordion.Panel>
+						</Accordion.Item>
+					))}
+				</Accordion>
+			</div>
+			{installableIds.length > 0 && (
+				<div className="flex shrink-0 items-center justify-between gap-2 border-t border-separator/70 px-3 py-2">
+					<span className="text-xs text-muted">
+						{selectedInstallable.length > 0
+							? t("pluginSelectedCount", {
+									count: selectedInstallable.length,
+								})
+							: t("pluginInstallableCount", {
+									count: installableIds.length,
+								})}
+					</span>
+					<div className="flex items-center gap-2">
+						<Button
+							variant="secondary"
+							size="sm"
+							isDisabled={selectedInstallable.length === 0}
+							onPress={() => {
+								onInstallMany(selectedInstallable);
+								setSelectedIds(new Set());
+							}}
+						>
+							{t("pluginInstallSelected")}
+						</Button>
+						<Button
+							variant="primary"
+							size="sm"
+							onPress={() => {
+								onInstallMany(installableIds);
+								setSelectedIds(new Set());
+							}}
+						>
+							{t("pluginInstallAll")}
+						</Button>
+					</div>
 				</div>
 			)}
 		</div>

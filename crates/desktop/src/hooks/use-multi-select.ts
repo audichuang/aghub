@@ -14,6 +14,15 @@ export interface UseMultiSelectReturn<T extends string> {
 	createSelectionHandler: (
 		orderedKeys: T[],
 	) => (keys: "all" | Set<React.Key>) => void;
+	/**
+	 * Like `createSelectionHandler`, but for grouped lists where several
+	 * ListBoxes share one global selection. The handler only owns its group's
+	 * slice: selections outside `orderedKeys` are preserved, so one group's
+	 * change never clobbers another group's.
+	 */
+	createGroupedSelectionHandler: (
+		orderedKeys: T[],
+	) => (keys: "all" | Set<React.Key>) => void;
 }
 
 /**
@@ -101,5 +110,74 @@ export function useMultiSelect<T extends string>(
 		[selectedKeys, onSelectionChange, isMultiSelectMode],
 	);
 
-	return { createSelectionHandler };
+	const createGroupedSelectionHandler = useCallback(
+		(orderedKeys: T[]) => (keys: "all" | Set<React.Key>) => {
+			if (keys === "all") return;
+			const groupKeySet = new Set(orderedKeys);
+			const incoming = new Set(Array.from(keys).map(String) as T[]);
+			const prevInGroup = new Set(
+				[...selectedKeys].filter((k) => groupKeySet.has(k)),
+			);
+			const added = [...incoming].find((k) => !prevInGroup.has(k));
+			const removed = [...prevInGroup].find((k) => !incoming.has(k));
+			const clicked = (added ?? removed) as T | undefined;
+
+			// Selections outside this group are always preserved.
+			const outside = [...selectedKeys].filter(
+				(k) => !groupKeySet.has(k),
+			) as T[];
+
+			if (!clicked) {
+				onSelectionChange(new Set([...outside, ...incoming]));
+				return;
+			}
+
+			if (
+				modifiersRef.current.shift &&
+				lastClickedRef.current &&
+				groupKeySet.has(lastClickedRef.current)
+			) {
+				const start = orderedKeys.indexOf(lastClickedRef.current);
+				const end = orderedKeys.indexOf(clicked);
+				const range =
+					start !== -1 && end !== -1
+						? orderedKeys.slice(
+								Math.min(start, end),
+								Math.max(start, end) + 1,
+							)
+						: [clicked];
+				onSelectionChange(
+					new Set([...outside, ...prevInGroup, ...range]),
+					clicked,
+				);
+			} else if (!isMultiSelectMode && !modifiersRef.current.meta) {
+				// Single-select: only the clicked item across all groups.
+				lastClickedRef.current = clicked;
+				onSelectionChange(new Set([clicked]), clicked);
+				return;
+			} else {
+				const groupFinal = new Set(prevInGroup);
+				if (groupFinal.has(clicked)) {
+					groupFinal.delete(clicked);
+				} else {
+					groupFinal.add(clicked);
+				}
+				if (!modifiersRef.current.shift) {
+					lastClickedRef.current = clicked;
+				}
+				onSelectionChange(
+					new Set([...outside, ...groupFinal]),
+					clicked,
+				);
+				return;
+			}
+
+			if (!modifiersRef.current.shift) {
+				lastClickedRef.current = clicked;
+			}
+		},
+		[selectedKeys, onSelectionChange, isMultiSelectMode],
+	);
+
+	return { createSelectionHandler, createGroupedSelectionHandler };
 }

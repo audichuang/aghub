@@ -1,4 +1,10 @@
 export default {
+	pluginStateInstalled: "已安裝",
+	select: "選取",
+	pluginSelectedCount: "已選 {{count}} 個",
+	pluginInstallableCount: "{{count}} 個可安裝",
+	pluginInstallSelected: "安裝選取",
+	pluginInstallAll: "全部安裝",
 	// Common
 	settings: "設定",
 	skills: "技能",

@@ -401,6 +401,7 @@ pub struct CCPluginMarketResponse {
 	pub description: String,
 	pub version: String,
 	pub author: String,
+	pub marketplace: String,
 	pub github_url: String,
 	pub installs: i64,
 	pub installed: bool,

@@ -1,4 +1,10 @@
 export default {
+	pluginStateInstalled: "Installed",
+	select: "Select",
+	pluginSelectedCount: "{{count}} selected",
+	pluginInstallableCount: "{{count}} available to install",
+	pluginInstallSelected: "Install selected",
+	pluginInstallAll: "Install all",
 	// Common
 	settings: "Settings",
 	skills: "Skills",

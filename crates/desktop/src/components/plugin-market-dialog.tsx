@@ -12,10 +12,12 @@ import {
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useDeferredValue, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import type { CCPluginResponse } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
 import { usePluginInstallState } from "../hooks/use-plugin-install-state";
 import {
 	installPluginMutationOptions,
+	pluginListQueryOptions,
 	pluginMarketQueryOptions,
 } from "../requests/plugins";
 import { PluginMarketTable } from "./plugin-market/market-table";
@@ -67,6 +69,18 @@ export function PluginMarketDialog({
 		error,
 	} = useQuery(pluginMarketQueryOptions({ api, enabled: isOpen }));
 
+	const { data: installedData } = useQuery({
+		...pluginListQueryOptions({ api }),
+		enabled: isOpen,
+	});
+	const installedById = useMemo(() => {
+		const map = new Map<string, CCPluginResponse>();
+		for (const plugin of installedData?.plugins ?? []) {
+			map.set(plugin.id, plugin);
+		}
+		return map;
+	}, [installedData]);
+
 	const errorMessage = (value: unknown) =>
 		value instanceof Error ? value.message : t("unknownError");
 
@@ -102,13 +116,8 @@ export function PluginMarketDialog({
 		[plugins, installScope],
 	);
 
-	const marketPlugins = useMemo(
-		() =>
-			plugins.filter(
-				(plugin) => !plugin.installed_scopes?.includes(installScope),
-			),
-		[plugins, installScope],
-	);
+	// Show all plugins (installed included); each row tags its own state.
+	const marketPlugins = plugins;
 
 	const categories = useMemo(() => {
 		const values = new Set<string>();
@@ -190,6 +199,26 @@ export function PluginMarketDialog({
 		});
 	};
 
+	const handleInstallMany = async (pluginIds: string[]) => {
+		// Sequential to avoid concurrent `claude plugin install` process
+		// contention; each mutation's onSuccess/onError handles state + toast.
+		for (const pluginId of pluginIds) {
+			const plugin = marketPlugins.find((entry) => entry.id === pluginId);
+			if (!plugin || installStateById[pluginId]) {
+				continue;
+			}
+			markInstalling(pluginId, plugin);
+			try {
+				await installMutation.mutateAsync({
+					plugin_id: pluginId,
+					scope: installScope,
+				});
+			} catch {
+				// onError already cleared state + surfaced a toast
+			}
+		}
+	};
+
 	const resetFilters = () => {
 		setSearchQuery("");
 		setSelectedCategory(null);
@@ -222,10 +251,7 @@ export function PluginMarketDialog({
 									aria-label={t("pluginMarketTabs")}
 									className="inline-flex w-auto"
 								>
-									<Tabs.Tab
-										id="plugins"
-										className="min-w-max"
-									>
+									<Tabs.Tab id="plugins" className="min-w-max">
 										<span className="whitespace-nowrap">
 											{t("pluginMarketTabPlugins")}
 										</span>
@@ -316,6 +342,8 @@ export function PluginMarketDialog({
 
 								<PluginMarketTable
 									plugins={filteredPlugins}
+									installedById={installedById}
+									installScope={installScope}
 									isLoading={isLoading}
 									isError={isError}
 									error={error}
@@ -323,6 +351,7 @@ export function PluginMarketDialog({
 									compactFormatter={compactFormatter}
 									onRetry={refetch}
 									onInstall={handleInstall}
+									onInstallMany={handleInstallMany}
 									installStates={installStateById}
 								/>
 							</Tabs.Panel>
