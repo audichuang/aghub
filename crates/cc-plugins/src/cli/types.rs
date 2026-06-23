@@ -41,6 +41,9 @@ pub enum CliMarketplaceSource {
 	Url {
 		url: String,
 	},
+	/// Local directory marketplace. The CLI emits `"source": "directory"`
+	/// with a `path`; `"local"` is kept as an alias for resilience.
+	#[serde(rename = "directory", alias = "local")]
 	Local {
 		path: String,
 	},
@@ -195,6 +198,38 @@ mod tests {
 			}
 			_ => panic!("expected url source"),
 		}
+	}
+
+	#[test]
+	fn deserialize_marketplace_directory() {
+		// The CLI emits `"source": "directory"` for a local-dir marketplace
+		// (e.g. a Google Drive folder). Regression: this used to fail the whole
+		// `marketplace list` parse, breaking the Marketplaces tab.
+		let json = r#"{
+			"name": "audi-agent-tool",
+			"source": "directory",
+			"path": "/Users/audi/GoogleDrive/audi-agent-tool",
+			"installLocation": "/Users/audi/GoogleDrive/audi-agent-tool"
+		}"#;
+		let mp: CliMarketplace = serde_json::from_str(json).unwrap();
+		match mp.source {
+			CliMarketplaceSource::Local { path } => {
+				assert_eq!(path, "/Users/audi/GoogleDrive/audi-agent-tool");
+			}
+			_ => panic!("expected local source"),
+		}
+	}
+
+	#[test]
+	fn deserialize_marketplace_local_alias() {
+		let json = r#"{
+			"name": "x",
+			"source": "local",
+			"path": "/tmp/x",
+			"installLocation": "/tmp/x"
+		}"#;
+		let mp: CliMarketplace = serde_json::from_str(json).unwrap();
+		assert!(matches!(mp.source, CliMarketplaceSource::Local { .. }));
 	}
 
 	#[test]
