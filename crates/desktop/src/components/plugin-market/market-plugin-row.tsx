@@ -127,6 +127,7 @@ export function MarketInstalledRow({
 					<Tooltip.Content>{t("uninstallPlugin")}</Tooltip.Content>
 				</Tooltip>
 				<Switch
+					className="w-10 shrink-0"
 					isSelected={installed.enabled}
 					isDisabled={isToggling}
 					onChange={() => {
@@ -196,6 +197,7 @@ export function MarketAvailableRow({
 					<CheckCircleIcon className="size-5 text-success" />
 				) : (
 					<Button
+						fullWidth
 						variant="secondary"
 						size="sm"
 						isDisabled={installState === "installing"}
