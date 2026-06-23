@@ -43,10 +43,9 @@ export function MarketInstalledRow({
 	const { t } = useTranslation();
 
 	const currentScope = ((installed.display_scope &&
-		installed.scopes.some((s) => s.scope === installed.display_scope)
-			? installed.display_scope
-			: installed.scopes[0]?.scope) ??
-		installScope) as PluginScopeValue;
+	installed.scopes.some((s) => s.scope === installed.display_scope)
+		? installed.display_scope
+		: installed.scopes[0]?.scope) ?? installScope) as PluginScopeValue;
 	const currentScopeInfo =
 		installed.scopes.find((s) => s.scope === currentScope) ??
 		installed.scopes[0] ??

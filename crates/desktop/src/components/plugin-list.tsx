@@ -209,7 +209,9 @@ export function PluginList({
 							: t("noPluginsInstalled")}
 					</p>
 					{searchQuery && (
-						<p className="mt-1 text-xs text-muted">"{searchQuery}"</p>
+						<p className="mt-1 text-xs text-muted">
+							"{searchQuery}"
+						</p>
 					)}
 				</div>
 			) : (
@@ -245,7 +247,9 @@ export function PluginList({
 														viewBox="0 0 24 24"
 														fill="currentColor"
 													>
-														<path d={siGithub.path} />
+														<path
+															d={siGithub.path}
+														/>
 													</svg>
 												) : (
 													<GlobeAltIcon className="size-3.5 shrink-0 text-muted" />

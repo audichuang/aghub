@@ -251,7 +251,10 @@ export function PluginMarketDialog({
 									aria-label={t("pluginMarketTabs")}
 									className="inline-flex w-auto"
 								>
-									<Tabs.Tab id="plugins" className="min-w-max">
+									<Tabs.Tab
+										id="plugins"
+										className="min-w-max"
+									>
 										<span className="whitespace-nowrap">
 											{t("pluginMarketTabPlugins")}
 										</span>
