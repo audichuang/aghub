@@ -35,10 +35,12 @@ export function MarketInstalledRow({
 	entry,
 	installed,
 	installScope,
+	compactFormatter,
 }: {
 	entry: CCPluginMarketResponse;
 	installed: CCPluginResponse;
 	installScope: PluginScopeValue;
+	compactFormatter: Intl.NumberFormat;
 }) {
 	const { t } = useTranslation();
 
@@ -86,7 +88,10 @@ export function MarketInstalledRow({
 					</p>
 				)}
 			</div>
-			<div className="flex w-36 shrink-0 items-center justify-end gap-1">
+			<span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted">
+				{compactFormatter.format(entry.installs)}
+			</span>
+			<div className="flex w-28 shrink-0 items-center justify-end gap-1">
 				{canUpdate && (
 					<Tooltip delay={0}>
 						<Button
@@ -183,10 +188,10 @@ export function MarketAvailableRow({
 					</p>
 				)}
 			</div>
-			<div className="flex w-36 shrink-0 items-center justify-end gap-1">
-				<span className="text-xs tabular-nums text-muted">
-					{compactFormatter.format(entry.installs)}
-				</span>
+			<span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted">
+				{compactFormatter.format(entry.installs)}
+			</span>
+			<div className="flex w-28 shrink-0 items-center justify-end gap-1">
 				{installState === "installed" ? (
 					<CheckCircleIcon className="size-5 text-success" />
 				) : (

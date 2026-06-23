@@ -235,6 +235,9 @@ export function PluginMarketTable({
 												entry={entry}
 												installed={installed}
 												installScope={installScope}
+												compactFormatter={
+													compactFormatter
+												}
 											/>
 										) : (
 											<MarketAvailableRow
