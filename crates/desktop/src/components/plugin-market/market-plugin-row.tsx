@@ -177,8 +177,12 @@ export function MarketAvailableRow({
 				onChange={onSelectChange}
 				aria-label={t("select")}
 				isDisabled={installState === "installed"}
-				className="shrink-0"
-			/>
+				className="size-4 shrink-0"
+			>
+				<Checkbox.Control>
+					<Checkbox.Indicator />
+				</Checkbox.Control>
+			</Checkbox>
 			<div className="min-w-0 flex-1">
 				<span className="truncate text-sm font-medium text-foreground">
 					{entry.name}
