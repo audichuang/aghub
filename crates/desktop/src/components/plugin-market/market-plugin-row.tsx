@@ -86,7 +86,7 @@ export function MarketInstalledRow({
 					</p>
 				)}
 			</div>
-			<div className="flex shrink-0 items-center gap-1">
+			<div className="flex w-36 shrink-0 items-center justify-end gap-1">
 				{canUpdate && (
 					<Tooltip delay={0}>
 						<Button
@@ -183,7 +183,7 @@ export function MarketAvailableRow({
 					</p>
 				)}
 			</div>
-			<div className="flex shrink-0 items-center gap-1">
+			<div className="flex w-36 shrink-0 items-center justify-end gap-1">
 				<span className="text-xs tabular-nums text-muted">
 					{compactFormatter.format(entry.installs)}
 				</span>
