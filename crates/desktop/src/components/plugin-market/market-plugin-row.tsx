@@ -68,7 +68,9 @@ export function MarketInstalledRow({
 	const canUpdate = installed.source_info.can_reinstall;
 
 	return (
-		<div className="flex items-center gap-2 px-2 py-1.5">
+		<div className="flex items-center gap-2 px-4 py-1.5">
+			{/* Reserve the checkbox column so installed/available titles align. */}
+			<div aria-hidden className="size-4 shrink-0" />
 			<div className="min-w-0 flex-1">
 				<div className="flex items-center gap-2">
 					<span className="truncate text-sm font-medium text-foreground">
@@ -163,7 +165,7 @@ export function MarketAvailableRow({
 	const { t } = useTranslation();
 
 	return (
-		<div className="flex items-center gap-2 px-2 py-1.5">
+		<div className="flex items-center gap-2 px-4 py-1.5">
 			<Checkbox
 				isSelected={isSelected}
 				onChange={onSelectChange}
@@ -199,7 +201,7 @@ export function MarketAvailableRow({
 						) : (
 							<ArrowDownTrayIcon className="size-4" />
 						)}
-						{t("pluginInstall")}
+						{t("install")}
 					</Button>
 				)}
 			</div>
