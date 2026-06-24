@@ -20,7 +20,7 @@ messages, but this is the discoverable, durable home.
 - `git remote`: `upstream = https://github.com/AkaraChen/aghub.git`.
 - **merge-base** with upstream: `ca48d93`.
 - **Last full review**: upstream `main` @ `714b971` — **52 upstream-only commits** since
-  `ca48d93` (2026-06). Tally: 6 ported · 5 already-present · 4 deferred (security)
+  `ca48d93` (2026-06). Tally: 8 ported · 5 already-present · 2 deferred (security)
   · 3 skipped (product) · 2 upstream-tests · 1 partial · 2 upstream-internal · 29
   dependency bumps. Every one is dispositioned below.
 
@@ -34,6 +34,8 @@ messages, but this is the discoverable, durable home.
 | `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`)              |
 | `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                              |
 | `398c7e8`          | `31da70c`  | ci         | validate Homebrew release tag format in `release.yml` before touching the tap (also fixes the prior `aghub vv<tag>` commit-message double-v) |
+| `1858167`          | `b87566b0`  | cc-plugins | marketplace `github_owner_repo` only resolves owner/repo when the source host is genuinely GitHub (filter on `RemoteSourceType::Github`) — a non-github plugin URL no longer mis-resolves to a github raw-manifest fetch. Ports verbatim; our `aghub-git` already exposes `source_type` |
+| `9ba3a64`          | `b87566b0`  | desktop    | deep-link MCP import review hardening — per-field transport review (command/args/env or url/headers/timeout) + a warning Alert and a mandatory consent checkbox that gates Install for stdio (executable) MCPs. `aghub://` links are an external attack surface |
 
 ## ✅ Already present in this fork (implemented earlier, independent of the v2.1.3/2.1.4 work)
 
@@ -63,8 +65,6 @@ exact patch-id matches — they were re-implemented in our own commits:
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `43acac8` API token auth (`ApiAuth`) + `109e343` `TrustedLocalOrigin` | Collides with this fork's multi-connection / SSH-remote server model (token injection over the SSH tunnel). The API is same-host-trusted for now — see `crates/api/AGENTS.md` CORS note. Revisit. |
 | (CORS tightening — part of the same change)                           | Tied to the token-auth work above; deferred together.                                                                                                                                             |
-| `1858167` validate GitHub marketplace manifests (cc-plugins)          | Low blast radius; not yet ported. Reasonable next port — `crates/cc-plugins/.../marketplace/source.rs` lacks the host check.                                                                      |
-| `9ba3a64` harden deep-link MCP import review (desktop consent UI)     | Frontend executable-MCP consent guard; not yet ported.                                                                                                                                            |
 
 ## ⏭️ Skipped — product choices (revisit per roadmap)
 
