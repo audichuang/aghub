@@ -273,6 +273,39 @@ fn find_skill_locations_in_agents(
 	locations
 }
 
+/// Remove a discovered skill directory, refusing any path that canonicalizes
+/// outside the allow-listed skill roots (symlinked-parent / canonicalize-escape
+/// guard, mirroring `manager::skill` removal). `roots` must include this
+/// agent's own skill dirs, or a legitimately-installed per-agent skill would be
+/// refused.
+fn guarded_remove_skill_dir(
+	skill_path: &Path,
+	agent: AgentType,
+	scope: InstallScope,
+	project_root: Option<&Path>,
+) -> std::io::Result<()> {
+	let resource_scope = match scope {
+		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
+		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
+	};
+	let agent_skill_dirs =
+		create_adapter(agent).get_skills_paths(project_root, resource_scope);
+	let roots = crate::skills::removal::allowed_skill_roots(
+		&agent_skill_dirs,
+		project_root,
+	);
+	if crate::skills::removal::assert_contained(skill_path, &roots).is_none() {
+		return Err(std::io::Error::new(
+			std::io::ErrorKind::PermissionDenied,
+			format!(
+				"Refusing to remove '{}': outside skill roots",
+				skill_path.display()
+			),
+		));
+	}
+	fs::remove_dir_all(skill_path)
+}
+
 fn group_agents_by_target_dir(
 	agents: &[AgentType],
 	scope: InstallScope,
@@ -744,7 +777,12 @@ pub fn reconcile_skill(
 		let delete_result = if Linker::is_link(&skill_path) {
 			Linker::unlink(&skill_path)
 		} else {
-			fs::remove_dir_all(&skill_path)
+			guarded_remove_skill_dir(
+				&skill_path,
+				agent,
+				target_scope,
+				target_project_root.as_deref(),
+			)
 		};
 		let delete_error = match delete_result {
 			Ok(()) => None,
