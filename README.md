@@ -41,6 +41,26 @@ Or visit [Releases](https://github.com/audichuang/aghub/releases) for all availa
 - macOS: macOS 12 (Monterey) and above
 - Linux: Ubuntu 22.04+ / Debian 11+ / Fedora 34+ and other mainstream distributions
 
+### macOS: "aghub is damaged and can't be opened"
+
+The macOS builds are **not signed with an Apple Developer certificate**, so
+Gatekeeper quarantines the app on first download and shows a "damaged" warning.
+The app is fine — just clear the quarantine attribute after moving it to
+`/Applications`:
+
+```bash
+xattr -cr /Applications/aghub.app
+```
+
+If that doesn't help, remove the attribute explicitly:
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/aghub.app
+```
+
+Then open the app normally. (Adjust the path if you haven't moved it to
+`/Applications` yet.)
+
 ---
 
 ## Features
