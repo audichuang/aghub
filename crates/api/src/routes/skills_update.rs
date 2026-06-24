@@ -16,7 +16,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use aghub_core::models::{ResourceScope, Skill};
+use aghub_core::models::ResourceScope;
+use aghub_core::skills::removal::skill_root;
 use chrono::Utc;
 use rocket::http::Status;
 use rocket::serde::json::Json;
@@ -28,9 +29,7 @@ use crate::dto::skill::{
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
-use crate::skills::rename::{
-	detect_rename, skill_renamed_message, SKILL_RENAMED_CODE,
-};
+use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
 use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
 	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
@@ -72,26 +71,6 @@ pub struct CheckUpdatesParams {
 	offline: Option<bool>,
 	scope: Option<String>,
 	project_root: Option<String>,
-}
-
-fn skill_root(skill: &Skill) -> Option<PathBuf> {
-	let raw = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	let path = if let Some(stripped) = raw.strip_prefix("~/") {
-		dirs::home_dir().map(|home| home.join(stripped))?
-	} else {
-		PathBuf::from(raw)
-	};
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	Some(if is_skill_file {
-		path.parent().map(Path::to_path_buf).unwrap_or(path)
-	} else {
-		path
-	})
 }
 
 fn local_hashes_for_scope(
@@ -353,46 +332,6 @@ fn apply_source_from_lock(
 	}
 }
 
-pub(crate) fn update_lock_hash(
-	name: &str,
-	scope: &str,
-	project_root: Option<&Path>,
-	hash: &str,
-	ref_commit: Option<&str>,
-) -> Result<(), String> {
-	match scope {
-		"global" => skill::lock::global::modify_skill_lock(|lock| {
-			let Some(entry) = lock.skills.get_mut(name) else {
-				return Err("Skill is not in global lock".to_string());
-			};
-			entry.apply_content_hash(hash, &Utc::now().to_rfc3339());
-			if let Some(oid) = ref_commit {
-				entry.ref_commit = Some(oid.to_string());
-			}
-			Ok(())
-		})
-		.map_err(|e| format!("Failed to update global lock: {e}"))?,
-		"project" => {
-			let Some(root) = project_root else {
-				return Err("project_root is required when scope is project"
-					.to_string());
-			};
-			skill::lock::local::modify_local_lock(Some(root), |lock| {
-				let Some(entry) = lock.skills.get_mut(name) else {
-					return Err("Skill is not in project lock".to_string());
-				};
-				entry.apply_computed_hash(hash);
-				if let Some(oid) = ref_commit {
-					entry.ref_commit = Some(oid.to_string());
-				}
-				Ok(())
-			})
-			.map_err(|e| format!("Failed to update project lock: {e}"))?
-		}
-		_ => Err("scope must be global or project".to_string()),
-	}
-}
-
 fn apply_error(
 	name: &str,
 	scope: &str,
@@ -577,84 +516,40 @@ pub(crate) async fn apply_skill_update_inner(
 		)));
 	};
 	let source_dir = skill_file.parent().unwrap_or(&repo.root);
-	let parsed_skill = match skill::parse(&skill_file) {
-		Ok(skill) => skill,
-		Err(e) => {
-			return Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				&format!("Failed to parse fetched skill: {e}"),
-			)));
-		}
+
+	use aghub_core::skills::resync::{
+		resync_installed_skill, ResyncError, ResyncRequest,
 	};
-	if let Some(new_name) = detect_rename(&parsed_skill.name, &req.name) {
-		return Ok(Json(apply_error_with_code(
-			&req.name,
-			&req.scope,
-			&skill_renamed_message(&req.name, &new_name),
-			Some(SKILL_RENAMED_CODE),
-		)));
-	}
-	let updated_hash = match skill::compute_skill_folder_hash(source_dir) {
-		Ok(hash) => hash,
-		Err(e) => {
-			return Ok(Json(apply_error(
+	match resync_installed_skill(ResyncRequest {
+		source_dir,
+		name: &req.name,
+		scope: resource_scope,
+		project_root: project_root.as_deref(),
+		ref_commit: Some(&repo.oid),
+	}) {
+		Ok(report) => Ok(Json(ApplySkillUpdateResponse {
+			success: true,
+			name: req.name,
+			scope: req.scope,
+			updated_hash: Some(report.updated_hash),
+			paths: report
+				.swapped
+				.iter()
+				.map(|p| p.display().to_string())
+				.collect(),
+			error: None,
+			code: None,
+		})),
+		Err(ResyncError::Renamed { new_name }) => {
+			Ok(Json(apply_error_with_code(
 				&req.name,
 				&req.scope,
-				&format!("Failed to hash fetched skill: {e}"),
-			)));
+				&skill_renamed_message(&req.name, &new_name),
+				Some(SKILL_RENAMED_CODE),
+			)))
 		}
-	};
-
-	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
-		resource_scope,
-		project_root.as_deref(),
-	);
-	if let Err(error) = aghub_core::skills::removal::assert_targets_contained(
-		&targets,
-		&agent_dirs,
-		project_root.as_deref(),
-	) {
-		return Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			&error.to_string(),
-		)));
+		Err(e) => Ok(Json(apply_error(&req.name, &req.scope, &e.to_string()))),
 	}
-
-	let mut paths = Vec::new();
-	for target in &targets {
-		if let Err(error) =
-			aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
-		{
-			return Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				&format!("Failed to replace installed skill: {error}"),
-			)));
-		}
-		paths.push(target.display().to_string());
-	}
-
-	if let Err(response) = update_lock_hash(
-		&req.name,
-		&req.scope,
-		project_root.as_deref(),
-		&updated_hash,
-		Some(&repo.oid),
-	) {
-		return Ok(Json(apply_error(&req.name, &req.scope, &response)));
-	}
-
-	Ok(Json(ApplySkillUpdateResponse {
-		success: true,
-		name: req.name,
-		scope: req.scope,
-		updated_hash: Some(updated_hash),
-		paths,
-		error: None,
-		code: None,
-	}))
 }
 
 fn accept_rename_error(
@@ -1514,6 +1409,7 @@ pub(crate) async fn accept_rename_inner(
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use aghub_core::skills::lock::update_lock_hash;
 	use aghub_core::skills::update::SkillUpdateStatus;
 	use skill_update::EntryKey;
 
@@ -1675,8 +1571,14 @@ mod tests {
 			lock.skills.insert("legacy".into(), entry);
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
-			update_lock_hash("legacy", "global", None, "content-v2", None)
-				.unwrap();
+			update_lock_hash(
+				"legacy",
+				ResourceScope::GlobalOnly,
+				None,
+				"content-v2",
+				None,
+			)
+			.unwrap();
 
 			let lock = skill::lock::global::read_skill_lock();
 			let entry = &lock.skills["legacy"];
@@ -1728,7 +1630,7 @@ mod tests {
 
 			update_lock_hash(
 				"legacy",
-				"global",
+				ResourceScope::GlobalOnly,
 				None,
 				"content-v2",
 				Some("deadbeefcafef00d"),
@@ -1739,6 +1641,34 @@ mod tests {
 			let entry = &lock.skills["legacy"];
 			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
 			assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+		});
+	}
+
+	#[test]
+	fn update_lock_hash_none_clears_stale_ref_commit() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.ref_commit = Some("staleoldoid".to_string());
+			lock.skills.insert("legacy".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// A content rewrite with no resolvable OID must CLEAR the recorded
+			// refCommit: preserving the old tip next to freshly-swapped content
+			// would let a later ls-refs preflight falsely skip the fetch.
+			update_lock_hash(
+				"legacy",
+				ResourceScope::GlobalOnly,
+				None,
+				"content-v2",
+				None,
+			)
+			.unwrap();
+
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["legacy"];
+			assert_eq!(entry.content_hash.as_deref(), Some("content-v2"));
+			assert_eq!(entry.ref_commit, None);
 		});
 	}
 
@@ -2085,6 +2015,76 @@ mod tests {
 				seen,
 				Some(Some("FWD-TOKEN".to_string())),
 				"the forwarded token must reach the apply fetch"
+			);
+		});
+	}
+
+	/// Global-scope happy path through the apply route: a matching-name source
+	/// must swap the installed copy AND advance the global lock hash — i.e.
+	/// resync's GlobalOnly swap+lock branch, asserting the on-disk and lock
+	/// effects (not just `success`).
+	#[cfg(unix)]
+	#[test]
+	fn apply_update_global_swaps_content_and_advances_lock() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let installed_dir = home.path().join(".claude/skills/some-skill");
+			std::fs::create_dir_all(&installed_dir).unwrap();
+			std::fs::write(
+				installed_dir.join("SKILL.md"),
+				"---\nname: some-skill\ndescription: original\n---\nold body\n",
+			)
+			.unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_path = Some("SKILL.md".to_string());
+			lock.skills.insert("some-skill".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			let fetched = tempfile::tempdir().unwrap();
+			std::fs::write(
+				fetched.path().join("SKILL.md"),
+				"---\nname: some-skill\ndescription: updated\n---\nnew body\n",
+			)
+			.unwrap();
+			let fetcher = LocalRepoFetcher {
+				root: fetched.path().to_path_buf(),
+			};
+			let resolver = KeyringResolver;
+			let req = ApplySkillUpdateRequest {
+				name: "some-skill".to_string(),
+				scope: "global".to_string(),
+				project_root: None,
+				confirm: Some(true),
+			};
+			let result = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap()
+				.block_on(apply_skill_update_inner(req, &fetcher, &resolver));
+
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			let resp = match result {
+				Ok(json) => json.into_inner(),
+				Err(error) => {
+					panic!("apply should return Ok: {}", error.body.error)
+				}
+			};
+			assert!(resp.success, "apply should succeed: {:?}", resp.error);
+			assert!(std::fs::read_to_string(installed_dir.join("SKILL.md"))
+				.unwrap()
+				.contains("new body"));
+			let lock = skill::lock::global::read_skill_lock();
+			assert!(
+				lock.skills["some-skill"].content_hash.is_some(),
+				"global lock hash must advance after a successful apply"
 			);
 		});
 	}

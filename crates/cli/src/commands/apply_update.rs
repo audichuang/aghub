@@ -1,5 +1,6 @@
 use crate::ResourceType;
-use aghub_core::models::{ResourceScope, Skill};
+use aghub_core::models::ResourceScope;
+use aghub_core::skills::removal::installed_skill_roots;
 use anyhow::{anyhow, bail, Context, Result};
 use serde_json::json;
 use std::path::{Path, PathBuf};
@@ -72,9 +73,9 @@ pub fn execute(
 /// [`execute`] does. Fetch-free so callers that already materialized the source
 /// (e.g. `source sync --update`) can reuse it without a second network round.
 ///
-/// Mirrors the post-fetch body of [`execute`]: `sanitize_skill_path` →
-/// `ensure_source_not_renamed` → containment assert → `stage_and_swap_dir`
-/// loop → lock update. Returns the swapped install paths.
+/// Sanitizes the locked skillPath to a source dir, then delegates the rename
+/// guard → containment → best-effort swap → lock transaction to the shared core
+/// resync. Returns the swapped install paths.
 pub fn apply_skill_update_from_fetched(
 	repo_root: &Path,
 	skill_path: &str,
@@ -83,50 +84,34 @@ pub fn apply_skill_update_from_fetched(
 	project_root: Option<&Path>,
 	ref_commit: Option<&str>,
 ) -> Result<Vec<PathBuf>> {
-	let targets = installed_skill_roots(name, scope, project_root);
-	if targets.is_empty() {
-		bail!("skill '{name}' is locked but no installed copy was found");
-	}
+	use aghub_core::skills::resync::{
+		resync_installed_skill, ResyncError, ResyncRequest,
+	};
 
 	let skill_file =
 		aghub_core::skills::update::sanitize_skill_path(repo_root, skill_path)
 			.ok_or_else(|| {
 				anyhow!("locked skillPath was not found in source")
 			})?;
-	// Refuse to silently overwrite the installed skill when the upstream source
-	// renamed it (same skillPath, changed frontmatter `name`). This mirrors the
-	// hardened API apply path; the shared predicate lives in `aghub-core` so both
-	// surfaces enforce the same contract.
-	ensure_source_not_renamed(&skill_file, name)?;
 	let source_dir = skill_file.parent().unwrap_or(repo_root);
-	let updated_hash = skill::compute_skill_folder_hash(source_dir)
-		.context("failed to hash fetched skill")?;
 
-	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
+	let report = resync_installed_skill(ResyncRequest {
+		source_dir,
+		name,
 		scope,
 		project_root,
-	);
-	aghub_core::skills::removal::assert_targets_contained(
-		&targets,
-		&agent_dirs,
-		project_root,
-	)
-	.context("refusing to update a skill outside allowed skill roots")?;
-
-	let mut paths = Vec::new();
-	for target in &targets {
-		aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
-			.with_context(|| {
-				format!(
-					"failed to replace installed skill at {}",
-					target.display()
-				)
-			})?;
-		paths.push(target.clone());
-	}
-
-	update_lock_hash(name, scope, project_root, &updated_hash, ref_commit)?;
-	Ok(paths)
+		ref_commit,
+	})
+	.map_err(|e| match e {
+		ResyncError::NotInstalled => {
+			anyhow!("skill '{name}' is locked but no installed copy was found")
+		}
+		ResyncError::Renamed { new_name } => anyhow!(
+			aghub_core::skills::update::skill_renamed_message(name, &new_name)
+		),
+		other => anyhow!(other.to_string()),
+	})?;
+	Ok(report.swapped)
 }
 
 /// Recompute the folder hash for the JSON `updatedHash` field from a swapped
@@ -138,27 +123,6 @@ fn updated_hash_for_paths(paths: &[PathBuf]) -> String {
 		.first()
 		.and_then(|p| skill::compute_skill_folder_hash(p).ok())
 		.unwrap_or_default()
-}
-
-/// Parse the fetched `SKILL.md` and refuse the apply if the upstream frontmatter
-/// `name` no longer matches the locked name (an upstream rename). Reuses the
-/// shared `aghub-core` rename contract so the CLI, API apply, and API sync paths
-/// all behave identically.
-fn ensure_source_not_renamed(
-	skill_file: &Path,
-	locked_name: &str,
-) -> Result<()> {
-	let parsed =
-		skill::parse(skill_file).context("failed to parse fetched skill")?;
-	if let Some(new_name) =
-		aghub_core::skills::update::detect_rename(&parsed.name, locked_name)
-	{
-		bail!(aghub_core::skills::update::skill_renamed_message(
-			locked_name,
-			&new_name
-		));
-	}
-	Ok(())
 }
 
 fn apply_source_from_lock(
@@ -230,94 +194,6 @@ fn fetch_source(source: &ApplySource) -> Result<FetchedSource> {
 	})
 }
 
-fn skill_root(skill: &Skill) -> Option<PathBuf> {
-	let raw = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	let path = if let Some(stripped) = raw.strip_prefix("~/") {
-		dirs::home_dir().map(|home| home.join(stripped))?
-	} else {
-		PathBuf::from(raw)
-	};
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	Some(if is_skill_file {
-		path.parent().map(Path::to_path_buf).unwrap_or(path)
-	} else {
-		path
-	})
-}
-
-fn installed_skill_roots(
-	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	let mut roots = Vec::new();
-	for agent in aghub_core::load_all_agents(scope, project_root) {
-		for skill in agent.skills {
-			if skill.name != name {
-				continue;
-			}
-			let Some(root) = skill_root(&skill) else {
-				continue;
-			};
-			if !roots.contains(&root) {
-				roots.push(root);
-			}
-		}
-	}
-	roots
-}
-
-fn update_lock_hash(
-	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-	hash: &str,
-	ref_commit: Option<&str>,
-) -> Result<()> {
-	match scope {
-		ResourceScope::GlobalOnly => {
-			skill::lock::global::modify_skill_lock(|lock| {
-				let Some(entry) = lock.skills.get_mut(name) else {
-					return Err(anyhow!(
-						"skill '{name}' is not in global lock"
-					));
-				};
-				entry
-					.apply_content_hash(hash, &chrono::Utc::now().to_rfc3339());
-				if let Some(oid) = ref_commit {
-					entry.ref_commit = Some(oid.to_string());
-				}
-				Ok(())
-			})??;
-		}
-		ResourceScope::ProjectOnly => {
-			let root = project_root
-				.ok_or_else(|| anyhow!("project root is required"))?;
-			skill::lock::local::modify_local_lock(Some(root), |lock| {
-				let Some(entry) = lock.skills.get_mut(name) else {
-					return Err(anyhow!(
-						"skill '{name}' is not in project lock"
-					));
-				};
-				entry.apply_computed_hash(hash);
-				if let Some(oid) = ref_commit {
-					entry.ref_commit = Some(oid.to_string());
-				}
-				Ok(())
-			})??;
-		}
-		ResourceScope::Both => {
-			bail!("apply-update requires --global or --project, not --all")
-		}
-	}
-	Ok(())
-}
-
 fn scope_name(scope: ResourceScope) -> &'static str {
 	match scope {
 		ResourceScope::GlobalOnly => "global",
@@ -329,38 +205,9 @@ fn scope_name(scope: ResourceScope) -> &'static str {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use aghub_core::skills::lock::update_lock_hash;
 	use std::sync::{Mutex, MutexGuard, OnceLock};
 	use tempfile::{tempdir, TempDir};
-
-	#[test]
-	fn ensure_source_not_renamed_bails_when_upstream_name_differs() {
-		let dir = tempdir().unwrap();
-		let skill_file = dir.path().join("SKILL.md");
-		std::fs::write(
-			&skill_file,
-			"---\nname: new-skill\ndescription: d\n---\nbody\n",
-		)
-		.unwrap();
-
-		let err =
-			ensure_source_not_renamed(&skill_file, "old-skill").unwrap_err();
-		let msg = err.to_string();
-		assert!(msg.contains("renamed"), "msg: {msg}");
-		assert!(msg.contains("new-skill"), "msg: {msg}");
-	}
-
-	#[test]
-	fn ensure_source_not_renamed_ok_when_names_match() {
-		let dir = tempdir().unwrap();
-		let skill_file = dir.path().join("SKILL.md");
-		std::fs::write(
-			&skill_file,
-			"---\nname: same-skill\ndescription: d\n---\nbody\n",
-		)
-		.unwrap();
-
-		assert!(ensure_source_not_renamed(&skill_file, "same-skill").is_ok());
-	}
 
 	struct GlobalLockGuard {
 		_temp: TempDir,
@@ -483,5 +330,77 @@ mod tests {
 		let entry = &lock.skills["legacy"];
 		assert_eq!(entry.computed_hash, "content-v2");
 		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	fn write_skill_md(dir: &std::path::Path, name: &str, body: &str) {
+		std::fs::create_dir_all(dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: d\n---\n\n{body}\n"),
+		)
+		.unwrap();
+	}
+
+	// The CLI wrapper maps resync's NotInstalled to the documented message.
+	#[test]
+	fn apply_from_fetched_not_installed_errors() {
+		let tmp = tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let repo = tmp.path().join("repo");
+		write_skill_md(&repo.join("ghost"), "ghost", "x");
+
+		let err = apply_skill_update_from_fetched(
+			&repo,
+			"ghost/SKILL.md",
+			"ghost",
+			ResourceScope::ProjectOnly,
+			Some(&project),
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("no installed copy"), "err: {err}");
+	}
+
+	// The CLI wrapper maps resync's Renamed to the shared rename message and
+	// leaves the installed copy untouched.
+	#[test]
+	fn apply_from_fetched_renamed_errors_and_keeps_install() {
+		let tmp = tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let installed = project.join(".claude/skills/keep");
+		write_skill_md(&installed, "keep", "old");
+		skill::add_skill_to_local_lock(
+			"keep",
+			skill::LocalSkillLockEntry {
+				source: "owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "github".to_string(),
+				computed_hash: "old".to_string(),
+				skill_path: Some("keep/SKILL.md".to_string()),
+				ref_commit: None,
+			},
+			Some(&project),
+		)
+		.unwrap();
+		let repo = tmp.path().join("repo");
+		write_skill_md(&repo.join("keep"), "keep-v2", "new");
+
+		let err = apply_skill_update_from_fetched(
+			&repo,
+			"keep/SKILL.md",
+			"keep",
+			ResourceScope::ProjectOnly,
+			Some(&project),
+			None,
+		)
+		.unwrap_err();
+		let msg = err.to_string();
+		assert!(
+			msg.contains("keep") && msg.contains("keep-v2"),
+			"msg: {msg}"
+		);
+		assert!(std::fs::read_to_string(installed.join("SKILL.md"))
+			.unwrap()
+			.contains("old"));
 	}
 }

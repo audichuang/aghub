@@ -5,5 +5,5 @@
 //! This module re-exports them so the existing api call sites are unchanged.
 
 pub use aghub_core::skills::update::{
-	detect_rename, skill_renamed_message, SKILL_RENAMED_CODE,
+	skill_renamed_message, SKILL_RENAMED_CODE,
 };

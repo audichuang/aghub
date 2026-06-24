@@ -40,7 +40,7 @@ use crate::{
 	extractors::{AgentParam, ResolvedScope, ScopeParams},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
-		resolved_to_resource_scope, skills_update::update_lock_hash,
+		resolved_to_resource_scope,
 	},
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
 	state::{GitCloneSession, GitCloneSessions},
@@ -553,36 +553,6 @@ fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
 	} else {
 		path
 	}
-}
-
-fn installed_skill_root(skill: &Skill) -> Option<PathBuf> {
-	let raw = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	Some(get_skill_root(expand_tilde_path(raw)))
-}
-
-fn installed_skill_roots(
-	name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	let mut roots = Vec::new();
-	for agent in load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
-			if skill.name != name {
-				continue;
-			}
-			let Some(root) = installed_skill_root(&skill) else {
-				continue;
-			};
-			if !roots.contains(&root) {
-				roots.push(root);
-			}
-		}
-	}
-	roots
 }
 
 fn delete_response_from_outcome(
@@ -1464,7 +1434,7 @@ fn skill_read_roots(
 /// A path that does NOT exist yields `Status::NotFound` (with `not_found_code`)
 /// rather than Forbidden, so a missing/just-deleted skill reads as 404 — only a
 /// path that EXISTS yet resolves outside the roots is a 403. Mirrors how
-/// `removal::assert_targets_contained` distinguishes not-found targets.
+/// `removal::assert_targets_strictly_contained` distinguishes not-found targets.
 fn assert_skill_read_allowed(
 	path: &Path,
 	resource_scope: ResourceScope,
@@ -2241,87 +2211,61 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	let parsed_skill =
-		skill::parser::parse(&cloned_skill_path).map_err(|e| {
-			ApiError::new(
-				Status::BadRequest,
-				format!("Failed to parse synced skill: {e}"),
-				"SKILL_PARSE_FAILED",
-			)
-		})?;
-	if parsed_skill.name != req.name {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			skill_renamed_message(&req.name, &parsed_skill.name),
-			SKILL_RENAMED_CODE,
-		));
-	}
-	let updated_hash = skill::compute_skill_folder_hash(&cloned_skill_dir)
-		.map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Failed to hash synced skill: {e}"),
-				"SKILL_SYNC_ERROR",
-			)
-		})?;
+	// Best-effort: record the session clone's checked-out tip OID (repo-level,
+	// shared by every skill in the clone) so a later `check` can preflight via
+	// ls-refs. A read failure (e.g. the session dir is not a git repo) leaves
+	// `refCommit` unset, matching install / apply-update's best-effort behavior.
+	let ref_commit = gix::open(&temp_path)
+		.ok()
+		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
+		.map(|oid| oid.to_string());
 
-	let target_dirs = installed_skill_roots(
-		&req.name,
-		resource_scope,
-		project_root.as_deref(),
-	);
-	if target_dirs.is_empty() {
-		return Err(ApiError::new(
+	// The post-session transaction (rename guard → containment → swap → lock) is
+	// the shared core resync; the route owns only the session lifecycle.
+	use aghub_core::skills::resync::{
+		resync_installed_skill, ResyncError, ResyncRequest,
+	};
+	let report = resync_installed_skill(ResyncRequest {
+		source_dir: &cloned_skill_dir,
+		name: &req.name,
+		scope: resource_scope,
+		project_root: project_root.as_deref(),
+		ref_commit: ref_commit.as_deref(),
+	})
+	.map_err(|e| match e {
+		ResyncError::NotInstalled => ApiError::new(
 			Status::NotFound,
 			format!(
 				"Skill '{}' is locked but no installed copy was found",
 				req.name
 			),
 			"SKILL_NOT_INSTALLED",
-		));
-	}
-	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
-		resource_scope,
-		project_root.as_deref(),
-	);
-	aghub_core::skills::removal::assert_targets_strictly_contained(
-		&target_dirs,
-		&agent_dirs,
-		project_root.as_deref(),
-	)
-	.map_err(|e| {
-		ApiError::new(
+		),
+		ResyncError::Renamed { new_name } => ApiError::new(
 			Status::BadRequest,
-			format!("Refusing to sync out-of-tree target: {e}"),
+			skill_renamed_message(&req.name, &new_name),
+			SKILL_RENAMED_CODE,
+		),
+		ResyncError::Parse(msg) => ApiError::new(
+			Status::BadRequest,
+			format!("Failed to parse synced skill: {msg}"),
+			"SKILL_PARSE_FAILED",
+		),
+		ResyncError::OutOfTree(msg) => ApiError::new(
+			Status::BadRequest,
+			format!("Refusing to sync out-of-tree target: {msg}"),
 			"SKILL_TARGET_OUT_OF_TREE",
-		)
-	})?;
-
-	// Replace each installation path
-	for target_dir in &target_dirs {
-		aghub_core::skills::update::stage_and_swap_dir(
-			&cloned_skill_dir,
-			target_dir,
-		)
-		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-	}
-
-	// The session-based sync clones into a session temp dir and does not carry a
-	// resolved tip OID, so it leaves `refCommit` untouched (None). install /
-	// apply-update remain the explicit refCommit write points.
-	update_lock_hash(
-		&req.name,
-		&req.scope,
-		project_root.as_deref(),
-		&updated_hash,
-		None,
-	)
-	.map_err(|e| {
-		ApiError::new(
+		),
+		ResyncError::Hash(msg) | ResyncError::Swap(msg) => ApiError::new(
 			Status::InternalServerError,
-			format!("Failed to update skill lock after sync: {e}"),
+			format!("Failed to sync skill: {msg}"),
+			"SKILL_SYNC_ERROR",
+		),
+		ResyncError::LockUpdate(msg) => ApiError::new(
+			Status::InternalServerError,
+			format!("Failed to update skill lock after sync: {msg}"),
 			"SKILL_LOCK_ERROR",
-		)
+		),
 	})?;
 
 	// Remove session (drops TempDir, cleans up disk)
@@ -2332,8 +2276,8 @@ pub async fn git_sync_skill(
 
 	Ok(Json(GitSyncResponse {
 		success: true,
-		name: Some(parsed_skill.name),
-		updated_hash: Some(updated_hash),
+		name: Some(req.name.clone()),
+		updated_hash: Some(report.updated_hash),
 		error: None,
 	}))
 }
@@ -2800,6 +2744,191 @@ mod tests {
 			assert!(std::fs::read_to_string(sibling.join("SKILL.md"))
 				.unwrap()
 				.contains("keep"));
+		});
+	}
+
+	#[test]
+	fn git_sync_records_ref_commit_from_session_head() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			let skills_root = project.join(".claude/skills");
+			let target = skills_root.join("sync-me");
+			std::fs::create_dir_all(&target).unwrap();
+			std::fs::write(
+				target.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: old\n---\n\nold\n",
+			)
+			.unwrap();
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+
+			// Session temp dir is a REAL git repo with a HEAD commit, so the
+			// route can resolve a tip OID to record as `refCommit`.
+			let clone = tempdir().unwrap();
+			let cloned_skill = clone.path().join("sync-me");
+			std::fs::create_dir_all(&cloned_skill).unwrap();
+			std::fs::write(
+				cloned_skill.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+			)
+			.unwrap();
+			// Build the HEAD commit via gix (no `git` subprocess — this file must
+			// stay git-CLI-free per `detect_current_branch_uses_gix_not_subprocess`)
+			// so the route can resolve a tip OID to record as `refCommit`.
+			let head = {
+				let repo = gix::init(clone.path()).unwrap();
+				let tree_id = repo
+					.write_object(&gix::objs::Tree {
+						entries: Vec::new(),
+					})
+					.unwrap()
+					.detach();
+				let sig = gix::actor::SignatureRef::from_bytes(
+					b"t <t@t> 1000000000 +0000",
+				)
+				.unwrap();
+				repo.commit_as(
+					sig,
+					sig,
+					"HEAD",
+					"init",
+					tree_id,
+					std::iter::empty::<gix::ObjectId>(),
+				)
+				.unwrap()
+				.detach()
+				.to_string()
+			};
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"sync-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "sync-session",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [skills_root.display().to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::Ok);
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert_eq!(
+				lock.skills["sync-me"].ref_commit.as_deref(),
+				Some(head.as_str()),
+				"git_sync must record the session repo HEAD as refCommit",
+			);
+		});
+	}
+
+	#[test]
+	fn git_sync_locked_but_uninstalled_maps_to_skill_not_installed() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			// Locked, but NO installed copy on disk: resync must report
+			// NotInstalled, which git-sync maps to SKILL_NOT_INSTALLED (404).
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+
+			let clone = tempdir().unwrap();
+			let cloned_skill = clone.path().join("sync-me");
+			std::fs::create_dir_all(&cloned_skill).unwrap();
+			std::fs::write(
+				cloned_skill.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"sync-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "sync-session",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [project
+						.join(".claude/skills")
+						.display()
+						.to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::NotFound);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "SKILL_NOT_INSTALLED");
 		});
 	}
 

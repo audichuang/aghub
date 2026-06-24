@@ -17,7 +17,8 @@
 //! desktop API owns global-lock self-heal; the project lock is VCS-tracked).
 
 use crate::{eprintln_verbose, ResourceType};
-use aghub_core::models::{ResourceScope, Skill};
+use aghub_core::models::ResourceScope;
+use aghub_core::skills::removal::skill_root;
 use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::Result;
 use serde::Serialize;
@@ -26,7 +27,7 @@ use skill_update::{
 	ResultCache, SourceRef, TokenResolver,
 };
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -237,28 +238,6 @@ fn execute_online(
 
 	println!("{}", serde_json::to_string_pretty(&views)?);
 	Ok(())
-}
-
-/// Resolve a skill's on-disk folder root from its recorded path (tilde-expanded;
-/// a trailing `SKILL.md` is stripped to its parent). Mirrors the API route.
-fn skill_root(skill: &Skill) -> Option<PathBuf> {
-	let raw = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	let path = if let Some(stripped) = raw.strip_prefix("~/") {
-		dirs::home_dir().map(|home| home.join(stripped))?
-	} else {
-		PathBuf::from(raw)
-	};
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	Some(if is_skill_file {
-		path.parent().map(Path::to_path_buf).unwrap_or(path)
-	} else {
-		path
-	})
 }
 
 /// Hash each installed skill folder so the C1 trustworthiness gate has a

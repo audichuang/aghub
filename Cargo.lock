@@ -147,6 +147,7 @@ name = "aghub-core"
 version = "1.1.1"
 dependencies = [
  "aghub-agents",
+ "chrono",
  "dirs 6.0.0",
  "libc",
  "log",

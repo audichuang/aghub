@@ -46,6 +46,58 @@ pub fn allowed_skill_roots(
 	roots
 }
 
+/// Resolve the on-disk root directory of an installed skill from its model
+/// (`canonical_path` preferred, else `source_path`), expanding a leading `~/`
+/// and stepping up from a `SKILL.md` file to its containing folder. The single
+/// home shared by `installed_skill_roots` and the hash-baseline scans in the
+/// CLI `check` and the API check-updates path.
+pub fn skill_root(skill: &crate::models::Skill) -> Option<PathBuf> {
+	let raw = skill
+		.canonical_path
+		.as_deref()
+		.or(skill.source_path.as_deref())?;
+	let path = if let Some(stripped) = raw.strip_prefix("~/") {
+		dirs::home_dir().map(|home| home.join(stripped))?
+	} else {
+		PathBuf::from(raw)
+	};
+	let is_skill_file = path
+		.file_name()
+		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
+	Some(if is_skill_file {
+		path.parent().map(Path::to_path_buf).unwrap_or(path)
+	} else {
+		path
+	})
+}
+
+/// Resolve the on-disk roots of every installed skill named `name` in the given
+/// scope. A lock→disk resolver: loads all agents' skills, filters by name, and
+/// returns each distinct skill folder root. The single home shared by the CLI
+/// (`apply-update`), the API (git-sync / sources / check-updates), and the
+/// `skill-update` sources service.
+pub fn installed_skill_roots(
+	name: &str,
+	resource_scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	let mut roots = Vec::new();
+	for agent in crate::load_all_agents(resource_scope, project_root) {
+		for skill in agent.skills {
+			if skill.name != name {
+				continue;
+			}
+			let Some(root) = skill_root(&skill) else {
+				continue;
+			};
+			if !roots.contains(&root) {
+				roots.push(root);
+			}
+		}
+	}
+	roots
+}
+
 /// Canonicalize `target` and assert it is a descendant of one allow-listed root.
 /// Returns the canonical path if contained, else `None` (caller skips + warns).
 ///
@@ -81,27 +133,6 @@ pub fn assert_strictly_contained(
 	None
 }
 
-pub fn assert_targets_contained(
-	targets: &[PathBuf],
-	agent_skill_dirs: &[PathBuf],
-	project_root: Option<&Path>,
-) -> std::io::Result<()> {
-	let roots = allowed_skill_roots(agent_skill_dirs, project_root);
-	for target in targets {
-		if assert_contained(target, &roots).is_some() {
-			continue;
-		}
-		if contained_nonexistent_target(target, &roots) {
-			continue;
-		}
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::PermissionDenied,
-			format!("target escapes allowed skill roots: {}", target.display()),
-		));
-	}
-	Ok(())
-}
-
 pub fn assert_targets_strictly_contained(
 	targets: &[PathBuf],
 	agent_skill_dirs: &[PathBuf],
@@ -124,22 +155,6 @@ pub fn assert_targets_strictly_contained(
 		));
 	}
 	Ok(())
-}
-
-fn contained_nonexistent_target(target: &Path, roots: &[PathBuf]) -> bool {
-	if target.exists() {
-		return false;
-	}
-	let Some(parent) = target.parent() else {
-		return false;
-	};
-	let Ok(parent) = parent.canonicalize() else {
-		return false;
-	};
-	roots.iter().any(|root| {
-		let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-		parent.starts_with(root)
-	})
 }
 
 fn contained_nonexistent_strict_target(

@@ -39,6 +39,10 @@ _Avoid_: "link", "alias".
 **Relink**:
 Re-pointing a Master's Referrers after the Master moves: unlink the old-name symlinks and recreate symlinks at the new name. A failed Relink leaves dangling Referrers and is the failure a transactional rename must roll back.
 
+**Resync (an installed skill)**:
+Replacing an installed skill's on-disk content from a freshly-fetched source folder and updating its Source hash in the lock — **without** changing the install layout. For a Universal install the Master is swapped and the symlink Referrers are left untouched (symlink targets are skipped). The single operation behind `aghub apply-update`, `source sync --update`, and the API apply-update / git-sync routes. Distinct from an install (which creates the layout) and from Relink (which re-points Referrers after a rename). Every installed target is swapped before the lock advances: any per-target swap failure aborts and leaves the lock unchanged, because a partial swap with an advanced lock would let a later update-check read a stale target as up-to-date (differing per-agent hashes are dropped as ambiguous, so the lock is the sole baseline).
+_Avoid_: "update" as the canonical name — it collides with the update-check orchestrator (`skill-update`).
+
 ## Remote / VM orchestration
 
 **Remote connection (VM)**:
