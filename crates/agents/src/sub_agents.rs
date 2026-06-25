@@ -31,7 +31,7 @@ struct SubAgentFrontmatter {
 /// crate and uses the document body as the instruction.  When the file has no
 /// frontmatter the file stem is used as the name.
 pub fn parse_sub_agent_file(path: &Path) -> Option<SubAgent> {
-	if ensure_no_symlink_components(path).is_err() || !is_regular_file(path) {
+	if !is_regular_file(path) {
 		return None;
 	}
 	let content = fs::read_to_string(path).ok()?;
@@ -105,6 +105,12 @@ fn sanitize_filename(name: &str) -> String {
 	out.trim_matches('-').to_string()
 }
 
+// Symlink hardening is LEAF-level by design: a sub-agent `.md` file (or the
+// agents dir) that is itself a symlink is refused, so a planted symlink can't
+// leak or overwrite an out-of-tree target. We deliberately do NOT reject
+// symlinked *ancestors* — those are benign and outside the tool's control
+// (e.g. macOS `/var`→`/private`, a symlinked `$HOME` or project dir), and an
+// attacker who controls an ancestor of the user's own config dir has already won.
 fn is_regular_file(path: &Path) -> bool {
 	let Ok(meta) = fs::symlink_metadata(path) else {
 		return false;
@@ -113,27 +119,8 @@ fn is_regular_file(path: &Path) -> bool {
 	file_type.is_file() && !file_type.is_symlink()
 }
 
-fn ensure_no_symlink_components(path: &Path) -> Result<()> {
-	let mut current = PathBuf::new();
-	for component in path.components() {
-		current.push(component.as_os_str());
-		let Ok(meta) = fs::symlink_metadata(&current) else {
-			continue;
-		};
-		if meta.file_type().is_symlink() {
-			return Err(ConfigError::InvalidConfig(format!(
-				"Refusing to use symlinked sub-agent path: {}",
-				current.display()
-			)));
-		}
-	}
-	Ok(())
-}
-
 fn ensure_safe_sub_agent_dir(dir: &Path) -> Result<()> {
-	ensure_no_symlink_components(dir)?;
 	fs::create_dir_all(dir)?;
-	ensure_no_symlink_components(dir)?;
 	let meta = fs::symlink_metadata(dir)?;
 	let file_type = meta.file_type();
 	if !file_type.is_dir() || file_type.is_symlink() {
@@ -206,9 +193,6 @@ fn write_sub_agent_file(file: &Path, content: &str) -> Result<()> {
 
 /// Load sub-agents from a directory of `*.md` files.
 pub fn load_sub_agents_from_dir(dir: &Path) -> Vec<SubAgent> {
-	if ensure_no_symlink_components(dir).is_err() {
-		return Vec::new();
-	}
 	let Ok(meta) = fs::symlink_metadata(dir) else {
 		return Vec::new();
 	};
@@ -241,6 +225,44 @@ pub fn save_sub_agent_to_dir(dir: &Path, agent: &SubAgent) -> Result<()> {
 
 // ── Scoped load / save ───────────────────────────────────────────────────────
 
+/// Project-scope containment: refuse a sub-agent dir that escapes the project
+/// root once symlinks are resolved (e.g. an untrusted clone whose `.claude` /
+/// `.opencode` is a symlink redirecting reads/writes out of tree). Canonicalizing
+/// BOTH sides keeps benign system symlinks safe — macOS `/var`→`/private`, or a
+/// symlinked project dir the user chose, resolve consistently on both sides. The
+/// deepest existing ancestor is probed so a not-yet-created agents dir is still
+/// checked before anything is written. Global scope is intentionally NOT
+/// contained: `~/.claude` is the user's own and may legitimately be a symlink.
+fn ensure_within_project_root(dir: &Path, project_root: &Path) -> Result<()> {
+	let root = project_root.canonicalize().map_err(|e| {
+		ConfigError::InvalidConfig(format!("project root unavailable: {e}"))
+	})?;
+	let mut probe = dir;
+	loop {
+		match probe.canonicalize() {
+			Ok(real) if real.starts_with(&root) => return Ok(()),
+			Ok(_) => {
+				return Err(ConfigError::InvalidConfig(format!(
+					"Refusing sub-agent dir outside the project root: {}",
+					dir.display()
+				)))
+			}
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+				match probe.parent() {
+					Some(parent) => probe = parent,
+					None => {
+						return Err(ConfigError::InvalidConfig(format!(
+							"Sub-agent dir has no existing ancestor: {}",
+							dir.display()
+						)))
+					}
+				}
+			}
+			Err(e) => return Err(e.into()),
+		}
+	}
+}
+
 /// Load sub-agents from the directory determined by `scope`.
 pub fn load_scoped_sub_agents(
 	project_root: Option<&Path>,
@@ -256,11 +278,17 @@ pub fn load_scoped_sub_agents(
 			Ok(load_sub_agents_from_dir(&dir))
 		}
 		ResourceScope::ProjectOnly => {
-			let Some(dir) =
-				project_root.and_then(|root| project_dir.and_then(|f| f(root)))
-			else {
+			let Some(root) = project_root else {
 				return Ok(Vec::new());
 			};
+			let Some(dir) = project_dir.and_then(|f| f(root)) else {
+				return Ok(Vec::new());
+			};
+			// Don't read sub-agents from a dir that escapes the project root
+			// (e.g. an untrusted clone's symlinked `.claude`).
+			if ensure_within_project_root(&dir, root).is_err() {
+				return Ok(Vec::new());
+			}
 			Ok(load_sub_agents_from_dir(&dir))
 		}
 		ResourceScope::Both => Err(ConfigError::InvalidConfig(
@@ -298,6 +326,14 @@ pub fn save_scoped_sub_agents(
 			scope
 		))
 	})?;
+	// Project scope: refuse to write into a dir that escapes the project root
+	// (an untrusted clone's symlinked `.claude`/`.opencode`). Global is the
+	// user's own and may legitimately be symlinked, so it is not contained.
+	if matches!(scope, ResourceScope::ProjectOnly) {
+		if let Some(root) = project_root {
+			ensure_within_project_root(&dir, root)?;
+		}
+	}
 	for agent in agents {
 		save_sub_agent_to_dir(&dir, agent)?;
 	}
@@ -407,5 +443,85 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(fs::read_to_string(&target).unwrap(), "ORIGINAL");
+	}
+
+	// Regression: a symlinked ANCESTOR of the agents dir (e.g. macOS
+	// `/var`→`/private`, or a symlinked `$HOME`) must NOT break sub-agent I/O.
+	// The earlier whole-absolute-path symlink walk rejected this and turned the
+	// macOS CI red; protection is leaf-level, so an ancestor symlink is fine.
+	#[cfg(unix)]
+	#[test]
+	fn works_through_symlinked_ancestor_dir() {
+		use std::os::unix::fs::symlink;
+
+		let root = TempDir::new().unwrap();
+		let real = root.path().join("real");
+		fs::create_dir(&real).unwrap();
+		// `link` is a symlinked ancestor; the agents dir lives beneath it.
+		let link = root.path().join("link");
+		symlink(&real, &link).unwrap();
+		let agents_dir = link.join("agents");
+
+		let agent = SubAgent {
+			name: "Ancestor Agent".to_string(),
+			description: Some("d".to_string()),
+			instruction: Some("body".to_string()),
+			source_path: None,
+			config_source: None,
+		};
+
+		// Save must succeed despite the symlinked ancestor, and load back.
+		save_sub_agent_to_dir(&agents_dir, &agent).unwrap();
+		let loaded = load_sub_agents_from_dir(&agents_dir);
+		assert_eq!(loaded.len(), 1);
+		assert_eq!(loaded[0].name, "Ancestor Agent");
+	}
+
+	// Project-scope containment: a symlinked `.claude` escaping the project
+	// (untrusted-clone write-escape) must be refused.
+	#[cfg(unix)]
+	#[test]
+	fn within_root_rejects_symlinked_config_dir() {
+		use std::os::unix::fs::symlink;
+
+		let tmp = TempDir::new().unwrap();
+		let outside = tmp.path().join("outside");
+		fs::create_dir(&outside).unwrap();
+		let project = tmp.path().join("project");
+		fs::create_dir(&project).unwrap();
+		symlink(&outside, project.join(".claude")).unwrap();
+
+		let agents_dir = project.join(".claude/agents");
+		let err =
+			ensure_within_project_root(&agents_dir, &project).unwrap_err();
+		assert!(matches!(err, ConfigError::InvalidConfig(_)));
+	}
+
+	// A real `.claude` (even before the agents dir exists) is allowed.
+	#[test]
+	fn within_root_allows_real_config_dir() {
+		let tmp = TempDir::new().unwrap();
+		let project = tmp.path().join("project");
+		fs::create_dir_all(project.join(".claude")).unwrap();
+		let agents_dir = project.join(".claude/agents"); // not yet created
+		assert!(ensure_within_project_root(&agents_dir, &project).is_ok());
+	}
+
+	// macOS-safety: reaching the project root THROUGH a symlink (mimics
+	// `/var`→`/private`, or a symlinked project dir) must still be allowed —
+	// both sides canonicalize consistently.
+	#[cfg(unix)]
+	#[test]
+	fn within_root_allows_symlinked_project_root() {
+		use std::os::unix::fs::symlink;
+
+		let tmp = TempDir::new().unwrap();
+		let real_project = tmp.path().join("real");
+		fs::create_dir_all(real_project.join(".claude")).unwrap();
+		let link_root = tmp.path().join("link");
+		symlink(&real_project, &link_root).unwrap();
+
+		let agents_dir = link_root.join(".claude/agents");
+		assert!(ensure_within_project_root(&agents_dir, &link_root).is_ok());
 	}
 }
