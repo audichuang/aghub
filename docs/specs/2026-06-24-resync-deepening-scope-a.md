@@ -15,15 +15,16 @@ hash → containment assert → `stage_and_swap_dir` → lock-hash write):
 
 The low-level swap primitive `stage_and_swap_dir` (`crates/core/src/skills/update.rs:151`,
 "replaces target and skips symlinks") is already shared. What is **not** shared is the
-destructive-transaction *caller knowledge* around it, and it has drifted:
+destructive-transaction _caller knowledge_ around it, and it has drifted:
 
-| Concern    | CLI                          | API apply-update             | API git-sync                         |
-| ---------- | ---------------------------- | ---------------------------- | ------------------------------------ |
-| Rename guard | shared `detect_rename`     | shared `detect_rename`       | raw `parsed.name != req.name` (bypass) |
+| Concern      | CLI                                  | API apply-update                     | API git-sync                                 |
+| ------------ | ------------------------------------ | ------------------------------------ | -------------------------------------------- |
+| Rename guard | shared `detect_rename`               | shared `detect_rename`               | raw `parsed.name != req.name` (bypass)       |
 | Containment  | `assert_targets_contained` (lenient) | `assert_targets_contained` (lenient) | `assert_targets_strictly_contained` (strict) |
-| refCommit    | passes OID                 | passes OID                   | passes `None` (lazy — OID is readable) |
+| refCommit    | passes OID                           | passes OID                           | passes `None` (lazy — OID is readable)       |
 
 Plus two helpers are duplicated across surfaces:
+
 - `installed_skill_roots` — canonical in `crates/skill-update/src/lib.rs:58`, but private
   copies in `crates/cli/src/commands/apply_update.rs:253` and `crates/api/src/routes/skills.rs:566`.
 - `update_lock_hash` — copies in `crates/cli/src/commands/apply_update.rs:275` and
@@ -45,7 +46,7 @@ Plus two helpers are duplicated across surfaces:
   the stable rename message/code contract); `ref_commit` stays an `Option` and each caller
   passes `Some(oid)` when it has one.
 - **Multi-target swap: attempt all, but any failure aborts before the lock advances.**
-  Adversarial review (Codex) caught that advancing the lock on a *partial* swap is unsound:
+  Adversarial review (Codex) caught that advancing the lock on a _partial_ swap is unsound:
   the update-check drops differing per-agent hashes as ambiguous and falls back to the lock,
   so a failed target would silently read as up-to-date. Universal installs resolve to a single
   canonical Master target (N=1); N>1 only for isolated-copy installs. The deep module reports
@@ -58,6 +59,7 @@ Plus two helpers are duplicated across surfaces:
 ## Work (sequenced, independently shippable, test-gated)
 
 ### PR 1 — Converge safety guards (highest value / lowest risk; no new API)
+
 - `git_sync_skill`: replace raw rename compare with shared `detect_rename` path (stable
   `SKILL_RENAMED` code + message).
 - CLI `apply_skill_update_from_fetched` and API `apply_skill_update_inner`:
@@ -69,15 +71,18 @@ Plus two helpers are duplicated across surfaces:
   root-target; git-sync writes `refCommit` when available.
 
 ### PR 2 — Single home for `installed_skill_roots`
+
 - Move into `aghub-core`, co-located with the root-resolution family in `removal.rs`
   (`agent_skill_dirs_in_scope`, `allowed_skill_roots`). Delete the CLI + API private copies;
   `skill-update`'s version calls the core one.
 
 ### PR 3 — Single home for `update_lock_hash`
+
 - Move the lock-update orchestration into core (entry methods `apply_content_hash` /
   `apply_computed_hash` already live in `crates/skill`). Delete the CLI + API copies.
 
 ### PR 4 — Deep module `core::skills::resync::resync_installed_skill`
+
 ```rust
 pub struct ResyncRequest<'a> {
     pub source_dir: &'a Path,       // already-sanitized fetched skill dir
@@ -97,6 +102,7 @@ pub enum ResyncError {
 }
 pub fn resync_installed_skill(req: ResyncRequest) -> Result<ResyncReport, ResyncError>;
 ```
+
 - Sequence: `installed_skill_roots` (PR2, empty→NotInstalled) → parse +
   `detect_rename` → `compute_skill_folder_hash` →
   `assert_targets_strictly_contained` (PR1) → swap every target (any failure
@@ -108,9 +114,11 @@ pub fn resync_installed_skill(req: ResyncRequest) -> Result<ResyncReport, Resync
   Delete the now-redundant per-surface duplicated tests.
 
 ### PR 5 — Do not implement `plan_actions`
+
 - Record the trigger condition (above) and stop.
 
 ## Deletion test
+
 - Delete PR4's `resync_installed_skill` → destructive-transaction caller knowledge returns to
   three sites (passes — earns its keep).
 - Delete PR2/PR3 homes → two private copies regrow (passes).

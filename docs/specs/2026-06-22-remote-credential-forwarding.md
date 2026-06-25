@@ -6,6 +6,7 @@
 > **Revision note (post Codex review).** The original design resolved the token
 > via a new unauthenticated HTTP endpoint and forwarded tokens for every source.
 > Codex flagged three P1 issues; this revision adopts them:
+>
 > 1. **Token resolution moved off HTTP onto a Tauri command** (D2 → B1) — removes
 >    the web-reachable raw-token endpoint entirely, and (bonus) removes the need
 >    to expose `localBaseUrl` to the renderer.
@@ -73,16 +74,16 @@ by the VM and never persisted there.
 
 ## Decision log
 
-| #   | Decision                                                                              | Alternatives considered                                  | Why                                                                                                                |
-| --- | ------------------------------------------------------------------------------------- | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| D1  | **Controller-side resolution + per-request forwarding** over the tunnel               | B: persist on VM (+file store); C: SSH-agent forwarding  | Keeps the VM stateless, single source of truth, sidesteps headless-keyring, fits the `TokenResolver` seam.          |
-| D2  | **(revised) Resolve via a Tauri command**, renderer attaches the forward header       | A: HTTP `resolved-token` endpoint; A′: HTTP + session secret; B2: Tauri proxy / native request | Codex P1: an unauthenticated, all-origin, `credentials:true` localhost API must not expose a raw-token HTTP endpoint (a local web page that scans the port could exfiltrate it). A Tauri command is not web-reachable, needs no bespoke API auth, and is a minimal delta. B2 (token never in renderer) was rejected as not worth duplicating request logic in Rust for a renderer that runs the app's own trusted code. |
-| D3  | **Cover all git-auth remote paths** (sources/diff, check-updates, git scan/install/sync) | sources/diff only                                        | A half-fix where diff works but "install" fails is worse UX than no fix.                                            |
-| D4  | **(refined) Minimal-privilege / per-source**, and for `check-updates` forward **only sources with an explicit binding** | Forward the whole creds+bundle; forward for every source incl. host-fallback | Codex P1: the FE cannot identify private sources from the current sources list. Only explicit bindings are enumerable controller-side, and limiting to them is the strictest least-privilege.    |
-| D5  | **Dedicated header** `X-Aghub-Git-Tokens` (base64 JSON `{source: token}`) added to the CORS allowlist | Reuse `Authorization: Bearer …`                          | Avoids colliding with a future `ApiAuth` on `Authorization`; one-line CORS change, intentful. (Still required: the renderer→remote request carries this custom header.) |
-| D6  | **Explicit per-request injection** in the request layer (source is known)             | Global `ky` `beforeRequest` interceptor                  | An interceptor couples endpoint allowlist / source param into the client factory and is hard to test.              |
-| D7  | **Remote feature/protocol gate** — forwarding only engaged against a remote known to support it | Rely on existing `major.minor` compat                    | Codex P1: existing compat accepts equal `major.minor`; an old patch-level remote would silently ignore the header. Gate on a capability/min-protocol-version, or force a minor bump. |
-| D8  | **Host-pin to normalized origin** `(scheme, host, port)`, generalized from github.com-only | Reuse port-agnostic `same_host`                          | Codex P2: self-hosted GitLab on a non-default port must not be conflated; pin the forwarded token to the source's resolved clone-URL origin. |
+| #   | Decision                                                                                                                | Alternatives considered                                                                        | Why                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| --- | ----------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D1  | **Controller-side resolution + per-request forwarding** over the tunnel                                                 | B: persist on VM (+file store); C: SSH-agent forwarding                                        | Keeps the VM stateless, single source of truth, sidesteps headless-keyring, fits the `TokenResolver` seam.                                                                                                                                                                                                                                                                                                              |
+| D2  | **(revised) Resolve via a Tauri command**, renderer attaches the forward header                                         | A: HTTP `resolved-token` endpoint; A′: HTTP + session secret; B2: Tauri proxy / native request | Codex P1: an unauthenticated, all-origin, `credentials:true` localhost API must not expose a raw-token HTTP endpoint (a local web page that scans the port could exfiltrate it). A Tauri command is not web-reachable, needs no bespoke API auth, and is a minimal delta. B2 (token never in renderer) was rejected as not worth duplicating request logic in Rust for a renderer that runs the app's own trusted code. |
+| D3  | **Cover all git-auth remote paths** (sources/diff, check-updates, git scan/install/sync)                                | sources/diff only                                                                              | A half-fix where diff works but "install" fails is worse UX than no fix.                                                                                                                                                                                                                                                                                                                                                |
+| D4  | **(refined) Minimal-privilege / per-source**, and for `check-updates` forward **only sources with an explicit binding** | Forward the whole creds+bundle; forward for every source incl. host-fallback                   | Codex P1: the FE cannot identify private sources from the current sources list. Only explicit bindings are enumerable controller-side, and limiting to them is the strictest least-privilege.                                                                                                                                                                                                                           |
+| D5  | **Dedicated header** `X-Aghub-Git-Tokens` (base64 JSON `{source: token}`) added to the CORS allowlist                   | Reuse `Authorization: Bearer …`                                                                | Avoids colliding with a future `ApiAuth` on `Authorization`; one-line CORS change, intentful. (Still required: the renderer→remote request carries this custom header.)                                                                                                                                                                                                                                                 |
+| D6  | **Explicit per-request injection** in the request layer (source is known)                                               | Global `ky` `beforeRequest` interceptor                                                        | An interceptor couples endpoint allowlist / source param into the client factory and is hard to test.                                                                                                                                                                                                                                                                                                                   |
+| D7  | **Remote feature/protocol gate** — forwarding only engaged against a remote known to support it                         | Rely on existing `major.minor` compat                                                          | Codex P1: existing compat accepts equal `major.minor`; an old patch-level remote would silently ignore the header. Gate on a capability/min-protocol-version, or force a minor bump.                                                                                                                                                                                                                                    |
+| D8  | **Host-pin to normalized origin** `(scheme, host, port)`, generalized from github.com-only                              | Reuse port-agnostic `same_host`                                                                | Codex P2: self-hosted GitLab on a non-default port must not be conflated; pin the forwarded token to the source's resolved clone-URL origin.                                                                                                                                                                                                                                                                            |
 
 ---
 
@@ -100,13 +101,13 @@ Three elements (names are the implementation proposal):
    **in-process** (NOT an HTTP call to the local api — that would reintroduce a
    localBaseUrl dependency) so the FE can enumerate explicitly-bound sources for
    `check-updates`.
-   - **Origin-aware (Codex 2nd-pass P2):** the return must carry the source's
-     resolved clone-URL **origin** `(scheme, host, port)`, not just a host
-     string. Today `keychain_host_for_source()` returns host-only and the
-     host-fallback in `resolve_token_for_source` matches `cred.name == host`
-     (`crates/api/src/credentials/resolve.rs`); D8 pinning needs origin, so this
-     wrapper introduces an origin-aware resolved-token type rather than reusing
-     the host-only helper verbatim.
+    - **Origin-aware (Codex 2nd-pass P2):** the return must carry the source's
+      resolved clone-URL **origin** `(scheme, host, port)`, not just a host
+      string. Today `keychain_host_for_source()` returns host-only and the
+      host-fallback in `resolve_token_for_source` matches `cred.name == host`
+      (`crates/api/src/credentials/resolve.rs`); D8 pinning needs origin, so this
+      wrapper introduces an origin-aware resolved-token type rather than reusing
+      the host-only helper verbatim.
 2. **Forward header** `X-Aghub-Git-Tokens: <base64(JSON {source: token})>`,
    attached by the renderer to the request sent to the **remote** api. One
    uniform mechanism: single-source routes carry one entry, `check-updates`
@@ -155,7 +156,7 @@ resolution is a Tauri command, not a local HTTP call):
    preflight once listed.
 2. **The remote api must actually support the feature (operational, gated by D7).**
    Compatibility today is equal `major.minor` only (`crates/remote/src/ssh.rs`
-   version check; `commands/remote.rs` rejects only *incompatible* remotes). An
+   version check; `commands/remote.rs` rejects only _incompatible_ remotes). An
    old same-`major.minor` remote would be accepted and **silently ignore** the
    header. Forwarding must be engaged only against a remote that advertises the
    capability — extend the existing SSH `aghub-api --version` probe and carry the
@@ -170,7 +171,7 @@ HTTP headers pass through unchanged.
 ## Backend changes (`aghub-api` + desktop `src-tauri`)
 
 - **A. Resolution (no HTTP endpoint).** Add `pub fn
-  resolve_git_token_for_source(source: &str) -> Option<ResolvedToken>` to
+resolve_git_token_for_source(source: &str) -> Option<ResolvedToken>` to
   `aghub-api` wrapping the existing resolver; `ResolvedToken` carries
   `{ token, origin: (scheme, host, port) }` (origin-aware — see §E / Codex
   2nd-pass P2), not a bare host. The existing resolver internals stay
@@ -179,11 +180,11 @@ HTTP headers pass through unchanged.
   Mac keyring / bindings store **in-process**. **No new HTTP route, no raw token
   over HTTP, no localBaseUrl dependency.**
 - **B. Forwarding mechanism (shared, remote side):**
-  - `ForwardedGitTokens` request guard — parse `X-Aghub-Git-Tokens` (base64 JSON
-    map); absent → empty map; malformed → empty map + `warn!` (graceful, no 400).
-  - `ForwardedTokenResolver` impl `skill_update::TokenResolver` — match `source`
-    in the map via the existing `lookup_keys` / `binding_keys_match_lookup`.
-  - `ChainResolver(forwarded, KeyringResolver)` — header first, keyring fallback.
+    - `ForwardedGitTokens` request guard — parse `X-Aghub-Git-Tokens` (base64 JSON
+      map); absent → empty map; malformed → empty map + `warn!` (graceful, no 400).
+    - `ForwardedTokenResolver` impl `skill_update::TokenResolver` — match `source`
+      in the map via the existing `lookup_keys` / `binding_keys_match_lookup`.
+    - `ChainResolver(forwarded, KeyringResolver)` — header first, keyring fallback.
 - **C. Resolver routes:** swap the injected resolver from `KeyringResolver` to
   `ChainResolver` in `sources.rs::diff_source`,
   `skills_update.rs::check_updates`, and the single-source apply resolve
@@ -344,7 +345,7 @@ HTTP headers pass through unchanged.
 - **P2 centralized FE injection** → extend API methods / forwarding-aware module.
 - **P2 host pinning** → origin-level `(scheme, host, port)` (D8).
 - **P3 install/sync reuse wording** → corrected (temp-dir reuse; gain is on scan
-  + branch ops).
+    - branch ops).
 
 ### Second pass (2026-06-22) — no new P1; tightened
 
