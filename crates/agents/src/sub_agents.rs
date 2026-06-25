@@ -312,7 +312,10 @@ mod tests {
 	#[test]
 	fn parse_file_with_frontmatter() {
 		let dir = TempDir::new().unwrap();
-		let path = dir.path().join("my-agent.md");
+		// macOS TempDir sits under /var (a symlink to /private/var); canonicalize
+		// so the symlink-component guard in parse/save does not reject the path.
+		let dir_path = dir.path().canonicalize().unwrap();
+		let path = dir_path.join("my-agent.md");
 		fs::write(
 			&path,
 			"---\nname: My Agent\ndescription: does stuff\n---\nDo the thing.",
@@ -328,7 +331,9 @@ mod tests {
 	#[test]
 	fn parse_file_without_frontmatter() {
 		let dir = TempDir::new().unwrap();
-		let path = dir.path().join("plain.md");
+		// Canonicalize to drop the macOS /var symlink (see above).
+		let dir_path = dir.path().canonicalize().unwrap();
+		let path = dir_path.join("plain.md");
 		fs::write(&path, "Just plain text.").unwrap();
 
 		let agent = parse_sub_agent_file(&path).unwrap();
@@ -339,6 +344,8 @@ mod tests {
 	#[test]
 	fn roundtrip_save_load() {
 		let dir = TempDir::new().unwrap();
+		// Canonicalize to drop the macOS /var symlink (see above).
+		let dir_path = dir.path().canonicalize().unwrap();
 		let agent = SubAgent {
 			name: "Test Agent".to_string(),
 			description: Some("desc: with colon".to_string()),
@@ -346,9 +353,9 @@ mod tests {
 			source_path: None,
 			config_source: None,
 		};
-		save_sub_agent_to_dir(dir.path(), &agent).unwrap();
+		save_sub_agent_to_dir(&dir_path, &agent).unwrap();
 
-		let loaded = load_sub_agents_from_dir(dir.path());
+		let loaded = load_sub_agents_from_dir(&dir_path);
 		assert_eq!(loaded.len(), 1);
 		assert_eq!(loaded[0].name, "Test Agent");
 		assert_eq!(loaded[0].description, Some("desc: with colon".to_string()));
