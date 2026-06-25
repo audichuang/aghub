@@ -184,6 +184,23 @@ pub fn normalize_repo_source_from_url(source_url: &str) -> Option<String> {
 	normalize_repo_path(Path::new(&repo_path))
 }
 
+/// Normalize an Azure DevOps Server / TFS clone URL.
+///
+/// TFS serves repos at `.../_git/<repo>` and rejects the conventional trailing
+/// `.git` suffix — it treats `ops-tools.git` as a repo literally named that and
+/// returns TF401019. Strip a trailing `.git` for `/_git/`-style URLs only;
+/// GitHub/GitLab (which accept or require `.git`) are returned unchanged.
+pub fn normalize_tfs_clone_url(url: &str) -> String {
+	if !url.contains("/_git/") {
+		return url.to_string();
+	}
+	let trimmed = url.trim_end_matches('/');
+	trimmed
+		.strip_suffix(".git")
+		.map(str::to_string)
+		.unwrap_or_else(|| url.to_string())
+}
+
 pub fn resolve_remote_source(
 	source: &str,
 ) -> Result<ResolvedRemoteSource, SourceError> {
@@ -343,6 +360,37 @@ mod tests {
 		assert_eq!(r.source_url, "git@github.com:vercel-labs/agent-skills.git");
 		assert_eq!(r.clone_url, r.source_url);
 		assert!(!r.source_url.contains("SECRET"));
+	}
+
+	#[test]
+	fn strips_dotgit_from_tfs_urls() {
+		assert_eq!(
+			normalize_tfs_clone_url(
+				"https://pialm01/tfs/DefaultCollection/IVTLXITP01-ITP/_git/ops-tools.git"
+			),
+			"https://pialm01/tfs/DefaultCollection/IVTLXITP01-ITP/_git/ops-tools"
+		);
+		assert_eq!(
+			normalize_tfs_clone_url("https://host/col/_git/repo.git/"),
+			"https://host/col/_git/repo"
+		);
+		assert_eq!(
+			normalize_tfs_clone_url("https://host/col/_git/repo.git//"),
+			"https://host/col/_git/repo"
+		);
+	}
+
+	#[test]
+	fn leaves_non_tfs_urls_untouched() {
+		assert_eq!(
+			normalize_tfs_clone_url("https://host/col/_git/repo"),
+			"https://host/col/_git/repo"
+		);
+		assert_eq!(
+			normalize_tfs_clone_url("https://github.com/owner/repo.git"),
+			"https://github.com/owner/repo.git"
+		);
+		assert_eq!(normalize_tfs_clone_url(""), "");
 	}
 
 	#[test]

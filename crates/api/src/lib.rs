@@ -229,6 +229,7 @@ pub(crate) fn build_rocket(
 				routes::skills::get_project_skill_lock,
 				routes::skills::delete_skill_by_path,
 				routes::skills::prune_lock_route,
+				routes::skills::git_credential_status,
 				routes::skills::git_scan_skills,
 				routes::skills::git_install_skills,
 				routes::skills::git_sync_skill,

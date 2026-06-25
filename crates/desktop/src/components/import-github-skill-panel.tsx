@@ -151,6 +151,45 @@ export function ImportGithubSkillPanel({
 
 	const urlValue = useWatch({ control, name: "url" });
 
+	// Probe the credential helper only after the URL field is committed (on
+	// blur), not on every keystroke — each probe spawns `git credential fill`.
+	const [probeUrl, setProbeUrl] = useState("");
+	const isProbeUrlValidHttps = useMemo(() => {
+		try {
+			return new URL(probeUrl).protocol === "https:";
+		} catch {
+			return false;
+		}
+	}, [probeUrl]);
+
+	// Pre-flight: does the machine running aghub-api already have a Git
+	// credential for this URL? Only relevant when not supplying an aghub token
+	// (otherwise the system-git credential path isn't used).
+	const { data: credStatus } = useQuery({
+		queryKey: ["gitCredentialStatus", probeUrl],
+		queryFn: () => api.skills.gitCredentialStatus(probeUrl),
+		enabled: isProbeUrlValidHttps && !isPrivateRepo,
+		staleTime: 60_000,
+	});
+
+	const platformName =
+		credStatus?.platform === "windows"
+			? "Windows"
+			: credStatus?.platform === "macos"
+				? "macOS"
+				: credStatus?.platform === "linux"
+					? "Linux"
+					: "";
+
+	const credMessage =
+		credStatus?.status === "available"
+			? t("gitCredAvailable", { host: credStatus.host ?? "" })
+			: credStatus?.status === "git_unavailable"
+				? t("gitCredUnavailable")
+				: credStatus?.status === "missing"
+					? t("gitCredMissing", { host: credStatus.host ?? "" })
+					: "";
+
 	useEffect(() => {
 		if (isCoverageLoading || coverageSeeded) return;
 
@@ -281,6 +320,7 @@ export function ImportGithubSkillPanel({
 		reset();
 		setCoverageSeeded(false);
 		setIsPrivateRepo(false);
+		setProbeUrl("");
 		setScannedSkills([]);
 		setSelectedPaths(new Set());
 		setSessionId("");
@@ -302,6 +342,7 @@ export function ImportGithubSkillPanel({
 	const handleCard1Toggle = () => {
 		if (!card1Open) {
 			// Reset all downstream state
+			setProbeUrl("");
 			setScannedSkills([]);
 			setSelectedPaths(new Set());
 			setSessionId("");
@@ -473,9 +514,12 @@ export function ImportGithubSkillPanel({
 															onChange={
 																field.onChange
 															}
-															onBlur={
-																field.onBlur
-															}
+															onBlur={() => {
+																field.onBlur();
+																setProbeUrl(
+																	field.value.trim(),
+																);
+															}}
 															placeholder={t(
 																"githubRepoUrlPlaceholder",
 															)}
@@ -495,6 +539,33 @@ export function ImportGithubSkillPanel({
 											/>
 										</Fieldset.Group>
 									</Fieldset>
+
+									{/* System-git credential pre-flight hint */}
+									{!isPrivateRepo &&
+										isProbeUrlValidHttps &&
+										credStatus && (
+											<Alert
+												status={
+													credStatus.status ===
+													"available"
+														? "success"
+														: "warning"
+												}
+											>
+												<Alert.Indicator />
+												<Alert.Content>
+													<Alert.Description>
+														{platformName && (
+															<strong>
+																{platformName}{" "}
+																·{" "}
+															</strong>
+														)}
+														{credMessage}
+													</Alert.Description>
+												</Alert.Content>
+											</Alert>
+										)}
 
 									{/* Private repo checkbox */}
 									<Checkbox

@@ -543,6 +543,12 @@ export default {
 	scanningRepo: "掃描中...",
 	scanFailed: "掃描倉庫失敗",
 	scanFailedHint: "請檢查您使用的令牌是否正確，或 SSO 是否已正確配置。",
+	gitCredAvailable:
+		"已偵測到本機存有 {{host}} 的 Git 憑證，憑證留空直接掃描即可。",
+	gitCredMissing:
+		"若此倉庫需要憑證：本機找不到 {{host}} 的非互動 Git 憑證。可先在本機登入一次，或勾選「私有倉庫」填入 Token。公開倉庫可忽略此提示。",
+	gitCredUnavailable:
+		"本機未安裝 git；若倉庫需要憑證，請勾選「私有倉庫」填入 Token。公開倉庫仍可直接掃描。",
 	noSkillsFoundInRepo: "此倉庫中未找到任何 skills。",
 	selectSkillsToInstall: "選擇要安裝的 skills",
 	branch: "分支",

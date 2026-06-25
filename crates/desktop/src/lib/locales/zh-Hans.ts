@@ -544,6 +544,12 @@ export default {
 	scanningRepo: "扫描中...",
 	scanFailed: "扫描仓库失败",
 	scanFailedHint: "请检查您使用的令牌是否正确，或 SSO 是否已正确配置。",
+	gitCredAvailable:
+		"已检测到本机存有 {{host}} 的 Git 凭证，凭证留空直接扫描即可。",
+	gitCredMissing:
+		"若此仓库需要凭证：本机找不到 {{host}} 的非交互 Git 凭证。可先在本机登录一次，或勾选「私有仓库」填入 Token。公开仓库可忽略此提示。",
+	gitCredUnavailable:
+		"本机未安装 git；若仓库需要凭证，请勾选「私有仓库」填入 Token。公开仓库仍可直接扫描。",
 	noSkillsFoundInRepo: "此仓库中未找到任何技能。",
 	selectSkillsToInstall: "选择要安装的技能",
 	branch: "分支",

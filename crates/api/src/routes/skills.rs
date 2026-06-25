@@ -23,11 +23,12 @@ use crate::{
 	},
 	dto::skill::{
 		CreateSkillRequest, DeleteSkillByPathRequest,
-		DeleteSkillByPathResponse, GitInstallRequest, GitInstallResponse,
-		GitInstallResultEntry, GitScanRequest, GitScanResponse,
-		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
-		GlobalSkillLockResponse, InstallSkillRequest, InstallSkillResponse,
-		LocalSkillLockEntryResponse, ProjectLockQuery,
+		DeleteSkillByPathResponse, GitCredentialStatus,
+		GitCredentialStatusQuery, GitCredentialStatusResponse,
+		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
+		GitScanRequest, GitScanResponse, GitScanSkillEntry, GitSyncRequest,
+		GitSyncResponse, GlobalSkillLockResponse, InstallSkillRequest,
+		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
 		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
 		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
@@ -1613,13 +1614,88 @@ fn same_origin(a: &str, b: &str) -> bool {
 	origins_match(a, b)
 }
 
+fn current_platform() -> &'static str {
+	if cfg!(target_os = "windows") {
+		"windows"
+	} else if cfg!(target_os = "macos") {
+		"macos"
+	} else if cfg!(target_os = "linux") {
+		"linux"
+	} else {
+		"other"
+	}
+}
+
+/// Non-interactive pre-flight: can the machine running aghub-api resolve a Git
+/// credential for this URL via the system credential helpers? Mirrors the clone
+/// path (same `.git` normalization + `useHttpPath`) so its verdict predicts
+/// whether an unattended scan will authenticate.
+#[get("/skills/git/credential-status?<query..>")]
+pub async fn git_credential_status(
+	query: GitCredentialStatusQuery,
+) -> ApiResult<GitCredentialStatusResponse> {
+	let url = aghub_git::normalize_tfs_clone_url(&query.url);
+
+	// Control characters could inject into the line-based credential protocol;
+	// embedded userinfo would leak a secret through the request URL. Reject both.
+	if url.contains(|c: char| c.is_control()) {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"URL contains control characters",
+			"INVALID_URL",
+		));
+	}
+	let parsed = url::Url::parse(&url).ok();
+	if parsed
+		.as_ref()
+		.is_some_and(|u| !u.username().is_empty() || u.password().is_some())
+	{
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"URL must not embed credentials",
+			"URL_HAS_CREDENTIALS",
+		));
+	}
+	let host = parsed.and_then(|u| u.host_str().map(str::to_string));
+
+	let probe_url = url.clone();
+	let status = tokio::task::spawn_blocking(move || {
+		if !aghub_git::system_git_available() {
+			GitCredentialStatus::GitUnavailable
+		} else if aghub_git::probe_credential(&probe_url) {
+			GitCredentialStatus::Available
+		} else {
+			GitCredentialStatus::Missing
+		}
+	})
+	.await
+	.map_err(|e| {
+		ApiError::new(
+			Status::InternalServerError,
+			format!("Credential probe task panicked: {e}"),
+			"CREDENTIAL_PROBE_ERROR",
+		)
+	})?;
+
+	Ok(Json(GitCredentialStatusResponse {
+		status,
+		platform: current_platform().to_string(),
+		host,
+	}))
+}
+
 #[post("/skills/git/scan", data = "<body>")]
 pub async fn git_scan_skills(
 	body: Json<GitScanRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
 	forwarded: ForwardedGitTokens,
 ) -> ApiResult<GitScanResponse> {
-	let req = body.into_inner();
+	let mut req = body.into_inner();
+	// Azure DevOps Server / TFS rejects the trailing `.git` on `/_git/<repo>`
+	// URLs (TF401019). Normalize once here so every downstream use — credential
+	// resolution, clone, branch listing, session identity — uses the accepted
+	// URL form.
+	req.url = aghub_git::normalize_tfs_clone_url(&req.url);
 
 	// Remote git-credential forwarding: if the controller forwarded a token for
 	// this URL's source, it takes precedence over the `credential_id` keyring
@@ -1737,12 +1813,24 @@ pub async fn git_scan_skills(
 	let branch_url = req.url.clone();
 	let credential_token_for_branches = credential_token.clone();
 	let branches = list_branches_for_scan(cached_branches, move || {
-		let options = match credential_token_for_branches {
-			Some(token) => aghub_git::RemoteOptions::new(&branch_url)
-				.with_credentials("x-access-token", token),
-			None => aghub_git::RemoteOptions::new(&branch_url),
-		};
-		aghub_git::list_remote_branches(options)
+		match credential_token_for_branches {
+			Some(token) => aghub_git::list_remote_branches(
+				aghub_git::RemoteOptions::new(&branch_url)
+					.with_credentials("x-access-token", token),
+			),
+			// No token: try gix unauthenticated, then fall back to the system
+			// `git` binary so the OS credential helper authenticates — matching
+			// the clone path so branch listing succeeds for the same repos.
+			None => match aghub_git::list_remote_branches(
+				aghub_git::RemoteOptions::new(&branch_url),
+			) {
+				Ok(branches) => Ok(branches),
+				Err(_) if aghub_git::system_git_available() => {
+					aghub_git::list_remote_branches_system_git(&branch_url)
+				}
+				Err(e) => Err(e),
+			},
+		}
 	})
 	.await?;
 
@@ -1849,11 +1937,22 @@ fn clone_for_git_scan_lazily_auth(
 	match clone_for_git_scan(url, branch, None) {
 		Ok(temp_dir) => Ok((temp_dir, None)),
 		Err(first_error) => {
-			let Some(token) = token_for_git_scan_source(url) else {
-				return Err(first_error);
-			};
-			clone_for_git_scan(url, branch, Some(&token))
-				.map(|temp_dir| (temp_dir, Some(token)))
+			// Host-scoped aghub keyring token, if one is bound to this source.
+			if let Some(token) = token_for_git_scan_source(url) {
+				return clone_for_git_scan(url, branch, Some(&token))
+					.map(|temp_dir| (temp_dir, Some(token)));
+			}
+			// Last resort: the system `git` binary, so the OS credential helper
+			// (Windows Credential Manager / Git Credential Manager, NTLM/Kerberos
+			// for on-prem hosts such as Azure DevOps Server / TFS) can
+			// authenticate. gix cannot use those helpers; there is no token to
+			// cache since the helper holds it. Its error is also more
+			// actionable than gix's, so surface it when git is present.
+			if aghub_git::system_git_available() {
+				return aghub_git::clone_to_temp_system_git(url, branch)
+					.map(|temp_dir| (temp_dir, None));
+			}
+			Err(first_error)
 		}
 	}
 }

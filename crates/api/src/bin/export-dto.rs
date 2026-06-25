@@ -57,16 +57,17 @@ use aghub_api::dto::{
 	skill::{
 		AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 		ApplySkillUpdateResponse, CreateSkillRequest, DeleteSkillByPathRequest,
-		DeleteSkillByPathResponse, GitInstallRequest, GitInstallResponse,
-		GitInstallResultEntry, GitScanRequest, GitScanResponse,
-		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
-		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
-		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
-		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
-		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
-		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
-		SkillUpdateResponse, SkillUpdateStatusResponse, UpdateSkillRequest,
-		ValidationError,
+		DeleteSkillByPathResponse, GitCredentialStatus,
+		GitCredentialStatusQuery, GitCredentialStatusResponse,
+		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
+		GitScanRequest, GitScanResponse, GitScanSkillEntry, GitSyncRequest,
+		GitSyncResponse, GlobalSkillLockResponse, ImportSkillRequest,
+		InstallSkillRequest, InstallSkillResponse, LocalSkillLockEntryResponse,
+		ProjectLockQuery, ProjectSkillLockResponse, PruneLockRequest,
+		PruneLockResponse, SkillContentQuery, SkillLockEntryResponse,
+		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
+		SkillTreeQuery, SkillUpdateResponse, SkillUpdateStatusResponse,
+		UpdateSkillRequest, ValidationError,
 	},
 	sources::{
 		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
@@ -208,6 +209,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<AcceptRenameRequest>(&cfg)?;
 	export_type::<AcceptRenameResponse>(&cfg)?;
 	export_type::<ValidationError>(&cfg)?;
+	export_type::<GitCredentialStatus>(&cfg)?;
+	export_type::<GitCredentialStatusQuery>(&cfg)?;
+	export_type::<GitCredentialStatusResponse>(&cfg)?;
 	export_type::<GitScanRequest>(&cfg)?;
 	export_type::<GitScanSkillEntry>(&cfg)?;
 	export_type::<GitScanResponse>(&cfg)?;

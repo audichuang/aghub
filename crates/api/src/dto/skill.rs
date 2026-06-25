@@ -249,6 +249,37 @@ pub struct GitScanRequest {
 	pub session_id: Option<String>,
 }
 
+/// Query for probing whether system git can resolve credentials for a URL.
+#[derive(Debug, TS, rocket::FromForm)]
+#[ts(export)]
+pub struct GitCredentialStatusQuery {
+	pub url: String,
+}
+
+/// Outcome of the non-interactive credential pre-flight check.
+#[derive(Debug, Serialize, TS)]
+#[serde(rename_all = "snake_case")]
+#[ts(export)]
+pub enum GitCredentialStatus {
+	/// A credential helper returned a credential without prompting.
+	Available,
+	/// `git` is present but no non-interactive credential was found.
+	Missing,
+	/// No usable `git` binary on PATH.
+	GitUnavailable,
+}
+
+/// Result of a non-interactive credential pre-flight check.
+#[derive(Debug, Serialize, TS)]
+#[ts(export)]
+pub struct GitCredentialStatusResponse {
+	pub status: GitCredentialStatus,
+	/// Server OS: `"windows"` | `"macos"` | `"linux"` | `"other"`.
+	pub platform: String,
+	/// Host parsed from the URL, for display.
+	pub host: Option<String>,
+}
+
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct GitScanSkillEntry {

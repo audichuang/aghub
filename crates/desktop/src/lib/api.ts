@@ -26,6 +26,7 @@ import type {
 	CredentialResponse,
 	DeleteSkillByPathRequest,
 	DeleteSkillByPathResponse,
+	GitCredentialStatusResponse,
 	GitInstallRequest,
 	GitInstallResponse,
 	GitScanRequest,
@@ -324,6 +325,15 @@ export function createApi(baseUrl: string) {
 			},
 			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
 				return client.post("skills/prune-lock", { json: body }).json();
+			},
+			gitCredentialStatus(
+				url: string,
+			): Promise<GitCredentialStatusResponse> {
+				return client
+					.get("skills/git/credential-status", {
+						searchParams: { url },
+					})
+					.json();
 			},
 			gitScan(
 				data: GitScanRequest,

@@ -574,6 +574,12 @@ export default {
 	scanFailed: "Failed to scan repository",
 	scanFailedHint:
 		"Please check you are using the correct token or that SSO is configured correctly.",
+	gitCredAvailable:
+		"A saved Git credential for {{host}} was found on this machine — leave credentials empty and just scan.",
+	gitCredMissing:
+		'If this repo needs credentials: no non-interactive Git credential for {{host}} was found on this machine. Sign in once here, or tick "Private repo" and add a token. Public repos can ignore this.',
+	gitCredUnavailable:
+		'git is not installed here. If the repo needs credentials, tick "Private repo" and add a token. Public repos still scan fine.',
 	noSkillsFoundInRepo: "No skills found in this repository.",
 	selectSkillsToInstall: "Select skills to install",
 	branch: "Branch",
