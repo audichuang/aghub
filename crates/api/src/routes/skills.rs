@@ -1929,9 +1929,14 @@ fn clone_for_git_scan_lazily_auth(
 	branch: Option<&str>,
 	credential_token: Option<String>,
 ) -> aghub_git::Result<(tempfile::TempDir, Option<String>)> {
-	if let Some(token) = credential_token {
-		return clone_for_git_scan(url, branch, Some(&token))
-			.map(|temp_dir| (temp_dir, Some(token)));
+	// An explicit token (forwarded / selected / reused session) is tried first,
+	// but a REJECTED token must not be the final answer: a stale/wrong aghub
+	// token (e.g. a GitHub PAT against a TFS host) has to fall through to the
+	// system-git path below, where the OS credential helper may succeed.
+	if let Some(token) = &credential_token {
+		if let Ok(temp_dir) = clone_for_git_scan(url, branch, Some(token)) {
+			return Ok((temp_dir, Some(token.clone())));
+		}
 	}
 
 	match clone_for_git_scan(url, branch, None) {
@@ -1939,15 +1944,18 @@ fn clone_for_git_scan_lazily_auth(
 		Err(first_error) => {
 			// Host-scoped aghub keyring token, if one is bound to this source.
 			if let Some(token) = token_for_git_scan_source(url) {
-				return clone_for_git_scan(url, branch, Some(&token))
-					.map(|temp_dir| (temp_dir, Some(token)));
+				if let Ok(temp_dir) =
+					clone_for_git_scan(url, branch, Some(&token))
+				{
+					return Ok((temp_dir, Some(token)));
+				}
 			}
 			// Last resort: the system `git` binary, so the OS credential helper
 			// (Windows Credential Manager / Git Credential Manager, NTLM/Kerberos
 			// for on-prem hosts such as Azure DevOps Server / TFS) can
 			// authenticate. gix cannot use those helpers; there is no token to
-			// cache since the helper holds it. Its error is also more
-			// actionable than gix's, so surface it when git is present.
+			// cache since the helper holds it. Reached even when an aghub token
+			// was tried and rejected above, so a wrong token never blocks it.
 			if aghub_git::system_git_available() {
 				return aghub_git::clone_to_temp_system_git(url, branch)
 					.map(|temp_dir| (temp_dir, None));
