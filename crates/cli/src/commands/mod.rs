@@ -1,18 +1,42 @@
 pub mod add;
 pub mod apply_update;
 pub mod check;
+pub mod coverage;
 pub mod delete;
 pub mod disable;
 pub mod enable;
 pub mod get;
+pub mod inference;
 pub mod plugin;
 pub mod prune;
 pub mod source;
+pub mod transfer;
 pub mod update;
 
 use aghub_core::models::McpTransport;
 use anyhow::Result;
 use std::collections::HashMap;
+use std::path::PathBuf;
+
+/// App data directory shared by the CLI, desktop, and HTTP API.
+///
+/// Byte-identical to `api::default_app_data_dir` so all three surfaces open the
+/// same SQLite db and credential-keyring namespace — a key stored by the
+/// desktop is readable by the CLI and vice-versa.
+// ponytail: mirrors api::default_app_data_dir; keep in sync.
+pub(crate) fn app_data_dir() -> PathBuf {
+	dirs::data_dir()
+		.unwrap_or_else(std::env::temp_dir)
+		.join("aghub")
+}
+
+/// Inference provider store rooted at [`app_data_dir`].
+///
+/// Reuses the native credential backend, so providers created via the desktop
+/// or API are visible to the CLI without any extra keyring wiring.
+pub(crate) fn inference_store() -> aghub_inference::InferenceProviderStore {
+	aghub_inference::InferenceProviderStore::new(app_data_dir())
+}
 
 /// Parse MCP transport from command-line arguments.
 ///
@@ -144,5 +168,29 @@ mod tests {
 			.unwrap()
 			.unwrap();
 		assert_eq!(m.get("X-Foo").unwrap(), "http://h");
+	}
+
+	#[test]
+	fn app_data_dir_matches_api_default_formula() {
+		// Must stay byte-identical to api::default_app_data_dir so the CLI,
+		// desktop, and API share one SQLite db + keyring namespace.
+		let expected = dirs::data_dir()
+			.unwrap_or_else(std::env::temp_dir)
+			.join("aghub");
+		assert_eq!(app_data_dir(), expected);
+	}
+
+	#[test]
+	fn app_data_dir_ends_in_aghub() {
+		assert_eq!(
+			app_data_dir().file_name().and_then(|n| n.to_str()),
+			Some("aghub")
+		);
+	}
+
+	#[test]
+	fn inference_store_is_rooted_at_app_data_dir() {
+		let store = inference_store();
+		assert_eq!(store.app_data_dir(), app_data_dir().as_path());
 	}
 }

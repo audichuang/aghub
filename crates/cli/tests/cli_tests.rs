@@ -2075,3 +2075,768 @@ fn describe_skill_outputs_skillview_shape() {
 		"content not on SkillView: {json}"
 	);
 }
+
+// ==================== #6: inference inventory CRUD ====================
+//
+// The inference store roots at `dirs::data_dir()/aghub` (= XDG_DATA_HOME on
+// Linux, ~/Library/Application Support on macOS). Point both at a tempdir so the
+// SQLite db is throwaway and never touches the user's real inventory. API keys
+// live in the OS keyring (NativeCredentialStore), which may be unavailable in
+// headless CI — `add` is the first op to touch it, so when it fails with a
+// keyring error we skip the key-touching asserts rather than fail the gate.
+
+/// An aghub-cli command with an ISOLATED data dir (XDG_DATA_HOME + HOME) so the
+/// inference SQLite db + keyring namespace are throwaway.
+fn inference_cli(data: &std::path::Path) -> Command {
+	let mut cmd = Command::cargo_bin("aghub-cli").unwrap();
+	cmd.env("XDG_DATA_HOME", data);
+	cmd.env("HOME", data);
+	cmd.env("USERPROFILE", data);
+	cmd.current_dir(data);
+	cmd
+}
+
+/// True when stderr names a keyring failure — the headless-CI escape hatch.
+fn is_keyring_error(stderr: &str) -> bool {
+	stderr.contains("keyring")
+}
+
+/// Add a provider; returns its id, or `None` when the keyring is unavailable
+/// (so the caller skips key-touching asserts on that platform).
+fn add_provider(data: &std::path::Path, latin: &str) -> Option<String> {
+	let out = inference_cli(data)
+		.args([
+			"inference",
+			"add",
+			"--latin-name",
+			latin,
+			"--display-name",
+			"Disp",
+			"--format",
+			"anthropic",
+			"--api-base-url",
+			"https://api.example.com",
+			"--api-key",
+			"sk-test-secret-value",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	if !out.status.success() {
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		if is_keyring_error(&stderr) {
+			return None;
+		}
+		panic!("inference add failed: {stderr}");
+	}
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["latin_name"], latin, "add --json echoes latin_name");
+	Some(json["id"].as_str().expect("add --json carries id").into())
+}
+
+#[test]
+fn inference_add_then_list_shows_provider() {
+	let data = tempfile::tempdir().unwrap();
+	let Some(_id) = add_provider(data.path(), "acme") else {
+		eprintln!("keyring unavailable; skipping inference key asserts");
+		return;
+	};
+
+	// Table output lists it.
+	let table = inference_cli(data.path())
+		.args(["inference", "list"])
+		.output()
+		.unwrap();
+	assert!(
+		table.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&table.stderr)
+	);
+	let text = String::from_utf8_lossy(&table.stdout);
+	assert!(text.contains("acme"), "table must list acme: {text}");
+
+	// JSON output parses as an array containing acme.
+	let out = inference_cli(data.path())
+		.args(["inference", "list", "--json"])
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("list --json is an array");
+	assert!(
+		arr.iter().any(|p| p["latin_name"] == "acme"),
+		"list --json must contain acme: {json}"
+	);
+}
+
+#[test]
+fn inference_get_returns_provider() {
+	let data = tempfile::tempdir().unwrap();
+	let Some(id) = add_provider(data.path(), "acme") else {
+		return;
+	};
+
+	let out = inference_cli(data.path())
+		.args(["inference", "get", &id, "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["id"], id);
+	assert_eq!(json["latin_name"], "acme");
+	// The masked key is preview-only; the raw secret must never appear.
+	assert!(
+		!String::from_utf8_lossy(&out.stdout).contains("sk-test-secret-value"),
+		"raw api key must never be printed"
+	);
+}
+
+#[test]
+fn inference_update_changes_display_name() {
+	let data = tempfile::tempdir().unwrap();
+	let Some(id) = add_provider(data.path(), "acme") else {
+		return;
+	};
+
+	let out = inference_cli(data.path())
+		.args([
+			"inference",
+			"update",
+			&id,
+			"--display-name",
+			"Renamed",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["display_name"], "Renamed");
+}
+
+#[test]
+fn inference_delete_yes_removes_then_list_empty() {
+	let data = tempfile::tempdir().unwrap();
+	let Some(id) = add_provider(data.path(), "acme") else {
+		return;
+	};
+
+	let del = inference_cli(data.path())
+		.args(["inference", "delete", &id, "--yes", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		del.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&del.stderr)
+	);
+
+	let out = inference_cli(data.path())
+		.args(["inference", "list", "--json"])
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		json.as_array().map(Vec::len),
+		Some(0),
+		"delete --yes leaves the inventory empty: {json}"
+	);
+}
+
+#[test]
+fn inference_delete_without_yes_is_rejected() {
+	let data = tempfile::tempdir().unwrap();
+	let Some(id) = add_provider(data.path(), "acme") else {
+		return;
+	};
+
+	let del = inference_cli(data.path())
+		.args(["inference", "delete", &id])
+		.output()
+		.unwrap();
+	assert!(
+		!del.status.success(),
+		"delete without --yes must be rejected"
+	);
+	let stderr = String::from_utf8_lossy(&del.stderr);
+	assert!(
+		stderr.contains("--yes"),
+		"error must point at the --yes guard: {stderr}"
+	);
+
+	// The non-executed branch must leave the provider intact.
+	let out = inference_cli(data.path())
+		.args(["inference", "list", "--json"])
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(
+		json.as_array().unwrap().iter().any(|p| p["id"] == id),
+		"rejected delete must NOT remove the provider: {json}"
+	);
+}
+
+#[test]
+fn inference_add_missing_api_key_errors_clearly() {
+	// No --api-key, no stdin, no env => a clear error before any keyring touch.
+	// This is metadata-stable across platforms (no keyring involved).
+	let data = tempfile::tempdir().unwrap();
+	let out = inference_cli(data.path())
+		.env_remove("AGHUB_INFERENCE_API_KEY")
+		.args([
+			"inference",
+			"add",
+			"--latin-name",
+			"acme",
+			"--display-name",
+			"Disp",
+			"--format",
+			"anthropic",
+			"--api-base-url",
+			"https://api.example.com",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "missing api key must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("api key") || stderr.contains("api-key"),
+		"error must name the missing api key: {stderr}"
+	);
+}
+
+#[test]
+fn inference_add_invalid_format_errors() {
+	// An unknown --format value is rejected by InferenceProviderFormat::FromStr
+	// before any store/keyring work; platform-stable.
+	let data = tempfile::tempdir().unwrap();
+	let out = inference_cli(data.path())
+		.args([
+			"inference",
+			"add",
+			"--latin-name",
+			"acme",
+			"--display-name",
+			"Disp",
+			"--format",
+			"not-a-format",
+			"--api-base-url",
+			"https://api.example.com",
+			"--api-key",
+			"sk-test",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "invalid format must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("format"),
+		"error must name the bad format: {stderr}"
+	);
+}
+
+#[test]
+fn inference_get_missing_id_errors() {
+	// A get for an id that was never created surfaces the store NotFound error.
+	let data = tempfile::tempdir().unwrap();
+	let out = inference_cli(data.path())
+		.args(["inference", "get", "does-not-exist", "--json"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "get on a missing id must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("not found") || stderr.contains("does-not-exist"),
+		"error must surface the missing id: {stderr}"
+	);
+}
+
+#[test]
+fn inference_add_api_key_from_env() {
+	// The api key resolves from AGHUB_INFERENCE_API_KEY when --api-key is absent.
+	let data = tempfile::tempdir().unwrap();
+	let out = inference_cli(data.path())
+		.env("AGHUB_INFERENCE_API_KEY", "sk-from-env-secret")
+		.args([
+			"inference",
+			"add",
+			"--latin-name",
+			"acme",
+			"--display-name",
+			"Disp",
+			"--format",
+			"anthropic",
+			"--api-base-url",
+			"https://api.example.com",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	if !out.status.success() {
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			is_keyring_error(&stderr),
+			"only a keyring failure is allowed here: {stderr}"
+		);
+		return;
+	}
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["latin_name"], "acme");
+	// The raw env secret must never be echoed back.
+	assert!(
+		!String::from_utf8_lossy(&out.stdout).contains("sk-from-env-secret"),
+		"raw env api key must never be printed"
+	);
+}
+
+// ==================== Task 30: transfer + reconcile ====================
+//
+// Thin CLI adapters over `aghub_core::transfer`. The core fns are already tested
+// inline in transfer.rs; these e2e tests pin only the CLI wiring: scope/agent
+// arg parsing, the OperationBatchResult rendering, the project-root requirement,
+// and the non-zero exit on a failed batch. They build an isolated project (a
+// `.claude/` agent marker + a project skill) and run from that cwd so `-p`
+// resolves the temp project, never the user's real tree.
+
+/// Build an isolated temp project containing a Claude project skill named
+/// `skill`. The `.claude/` dir is itself an agent marker, so `find_project_root`
+/// detects the project from this cwd. Returns the project root TempDir.
+fn transfer_project(skill: &str) -> tempfile::TempDir {
+	let project = tempfile::TempDir::new().unwrap();
+	let dir = project.path().join(".claude/skills").join(skill);
+	std::fs::create_dir_all(&dir).unwrap();
+	std::fs::write(
+		dir.join("SKILL.md"),
+		format!("---\nname: {skill}\ndescription: d\n---\nbody\n"),
+	)
+	.unwrap();
+	project
+}
+
+/// An aghub-cli command rooted at `project` (cwd + redirected HOME) so transfer
+/// scope resolution and any global lookups stay inside the throwaway dir.
+fn transfer_cli(project: &std::path::Path) -> Command {
+	let mut cmd = Command::cargo_bin("aghub-cli").unwrap();
+	cmd.env("HOME", project);
+	cmd.env("USERPROFILE", project);
+	cmd.env("APPDATA", project);
+	cmd.current_dir(project);
+	cmd
+}
+
+#[test]
+fn transfer_skill_copies_claude_to_opencode_project() {
+	let project = transfer_project("repo-helper");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		project
+			.path()
+			.join(".opencode/skills/repo-helper/SKILL.md")
+			.exists(),
+		"transfer must copy the skill into OpenCode's project skills dir"
+	);
+}
+
+#[test]
+fn transfer_skill_json_reports_success_for_target() {
+	let project = transfer_project("repo-helper");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("transfer --json is an array");
+	let row = arr
+		.iter()
+		.find(|r| r["agent"] == "opencode")
+		.expect("opencode row present");
+	assert_eq!(row["success"], true);
+	assert_eq!(row["action"], "copy");
+}
+
+#[test]
+fn transfer_skill_second_run_fails_resource_exists() {
+	let project = transfer_project("repo-helper");
+
+	// First transfer succeeds.
+	let first = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+	assert!(first.status.success());
+
+	// Second transfer of the same skill into the same target fails (the
+	// destination already exists) and the CLI exits non-zero on a failed batch.
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"a failed batch must exit non-zero; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
+		.expect("opencode row present");
+	assert_eq!(row["success"], false);
+	assert!(
+		row["error"].as_str().is_some(),
+		"a failed row must carry an error string: {row}"
+	);
+}
+
+#[test]
+fn transfer_skill_project_without_root_errors() {
+	// `-p` with no project marker anywhere up-tree: scope is Project but there is
+	// no project_root. The Project-scoped source skill is then unresolvable, so
+	// transfer fails before any copy — proving the no-root path is rejected, not
+	// silently treated as global. (A destination-only missing root surfaces
+	// `validate_target`'s "project root is required"; the CLI shares one scope
+	// across source+targets, so the source-load failure fires first.)
+	let empty = tempfile::TempDir::new().unwrap();
+
+	let out = transfer_cli(empty.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"project transfer without a project root must fail"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("not found") || stderr.contains("project root"),
+		"error must surface the no-root failure: {stderr}"
+	);
+}
+
+#[test]
+fn reconcile_skill_reports_batch_summary() {
+	let project = transfer_project("repo-helper");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--add",
+			"opencode",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("reconcile --json is an array");
+	assert!(
+		arr.iter()
+			.any(|r| r["agent"] == "opencode" && r["success"] == true),
+		"reconcile --add opencode must copy into OpenCode: {json}"
+	);
+	assert!(
+		project
+			.path()
+			.join(".opencode/skills/repo-helper/SKILL.md")
+			.exists(),
+		"reconcile --add must materialize the OpenCode skill"
+	);
+}
+
+// ── `coverage` — read-only classify_all projection ──────────────────────────
+
+/// An aghub-cli command with HOME redirected to a throwaway dir so the global
+/// coverage classify reads `<tmp>/.agents/skills` (and per-agent global dirs)
+/// instead of the developer's real home.
+fn coverage_cli(home: &std::path::Path) -> Command {
+	let mut cmd = Command::cargo_bin("aghub-cli").unwrap();
+	cmd.env("HOME", home);
+	cmd.env("USERPROFILE", home);
+	cmd.env("APPDATA", home);
+	cmd.current_dir(home);
+	cmd
+}
+
+#[test]
+fn coverage_global_json_codex_native_claude_needs_link() {
+	// Mirrors api `global_scope_buckets_codex_native_claude_needs_link`: codex
+	// @global reads `~/.agents/skills` (the master) so it is auto_covered with no
+	// link; claude @global has a private `~/.claude/skills` so it NeedsLink.
+	let home = tempfile::TempDir::new().unwrap();
+
+	let out = coverage_cli(home.path())
+		.args(["-g", "coverage", "--json"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("coverage --json is an array");
+
+	let codex = arr
+		.iter()
+		.find(|r| r["agent"] == "codex")
+		.expect("codex row present");
+	assert_eq!(codex["scope"], "global");
+	assert_eq!(
+		codex["auto_covered"], true,
+		"codex @global reads .agents/skills: {codex}"
+	);
+	assert_eq!(codex["needs_link"], false);
+	assert_eq!(codex["supported"], true);
+	assert_eq!(codex["reads_master"], true);
+
+	let claude = arr
+		.iter()
+		.find(|r| r["agent"] == "claude")
+		.expect("claude row present");
+	assert_eq!(
+		claude["needs_link"], true,
+		"claude @global has a private skills dir => NeedsLink: {claude}"
+	);
+	assert_eq!(claude["auto_covered"], false);
+	assert_eq!(claude["supported"], true);
+}
+
+#[test]
+fn coverage_project_json_classifies_against_project_master() {
+	// Project scope with a real project_root: opencode reads `<root>/.agents/
+	// skills` at project scope (auto_covered), claude still needs a link. The
+	// `.claude/` dir makes `find_project_root` detect the project from cwd.
+	let project = transfer_project("anything");
+
+	let out = coverage_cli(project.path())
+		.args(["-p", "coverage", "--json"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("coverage --json is an array");
+
+	let opencode = arr
+		.iter()
+		.find(|r| r["agent"] == "opencode")
+		.expect("opencode row present");
+	assert_eq!(opencode["scope"], "project");
+	assert_eq!(
+		opencode["auto_covered"], true,
+		"opencode @project reads <root>/.agents/skills: {opencode}"
+	);
+	let claude = arr
+		.iter()
+		.find(|r| r["agent"] == "claude")
+		.expect("claude row present");
+	assert_eq!(
+		claude["needs_link"], true,
+		"claude @project has a private skills dir => NeedsLink: {claude}"
+	);
+}
+
+#[test]
+fn coverage_project_without_root_errors() {
+	// `-p` with no agent marker up-tree: scope is Project but there is no
+	// project_root, so the master skills-dir is unresolvable and coverage must
+	// fail with a clear message rather than silently classifying global.
+	let empty = tempfile::TempDir::new().unwrap();
+
+	let out = coverage_cli(empty.path())
+		.args(["-p", "coverage", "--json"])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"project coverage without a project root must fail; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("project root"),
+		"error must surface the missing project root: {stderr}"
+	);
+}
+
+#[test]
+fn coverage_rejects_all_scope() {
+	// Coverage only supports global|project (mirrors api `coverage_rejects_
+	// scope_all`); `--all` (ResourceScope::Both) must be rejected with a clear
+	// error, not silently coerced.
+	let home = tempfile::TempDir::new().unwrap();
+
+	let out = coverage_cli(home.path())
+		.args(["--all", "coverage", "--json"])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"coverage with --all must be rejected; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("global") && stderr.contains("project"),
+		"error must name the supported scopes: {stderr}"
+	);
+}
+
+#[test]
+fn coverage_default_table_lists_agents() {
+	// No -g/-p: defaults to global scope and prints a human table (no --json)
+	// listing the registered agents with the coverage columns.
+	let home = tempfile::TempDir::new().unwrap();
+
+	let out = coverage_cli(home.path())
+		.args(["coverage"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		stdout.contains("AGENT") && stdout.contains("AUTO COVERED"),
+		"table header must list the coverage columns: {stdout}"
+	);
+	assert!(
+		stdout.contains("claude") && stdout.contains("codex"),
+		"table must list registered agents: {stdout}"
+	);
+}
+
+// ── Docs: '## CLI Command Surface' must enumerate the Phase-7 subcommands ─────
+
+/// Slice the `## CLI Command Surface` section out of the repo-root AGENTS.md.
+/// Keeps the assertion scoped to that block so a stray mention elsewhere in the
+/// doc can't make the test pass.
+fn cli_command_surface_block() -> String {
+	let agents_md = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+		.join("../../AGENTS.md")
+		.canonicalize()
+		.unwrap();
+	let text = std::fs::read_to_string(&agents_md).unwrap();
+	let start = text
+		.find("## CLI Command Surface")
+		.expect("AGENTS.md must have a '## CLI Command Surface' section");
+	let rest = &text[start..];
+	// Section ends at the next top-level heading.
+	let end = rest[1..].find("\n## ").map(|i| i + 1).unwrap_or(rest.len());
+	rest[..end].to_string()
+}
+
+#[test]
+fn agents_md_command_surface_lists_phase7_subcommands() {
+	// Every Phase-7 subcommand dispatched in main.rs must be enumerated in the
+	// CLI command-surface block so the doc stays in sync with the binary.
+	let block = cli_command_surface_block();
+	for cmd in ["inference", "transfer", "reconcile", "coverage"] {
+		assert!(
+			block.contains(cmd),
+			"'## CLI Command Surface' must document the `{cmd}` subcommand; \
+			 block:\n{block}"
+		);
+	}
+}

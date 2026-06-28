@@ -14,8 +14,8 @@ use aghub_core::{
 mod commands;
 
 use commands::{
-	add, apply_update, check, delete, disable, enable, get, plugin, prune,
-	update,
+	add, apply_update, check, delete, disable, enable, get, inference, plugin,
+	prune, transfer, update,
 };
 
 /// Global verbose flag used by the eprintln_verbose macro
@@ -291,6 +291,27 @@ enum Commands {
 		#[command(subcommand)]
 		action: SourceAction,
 	},
+	/// Manage the inference provider inventory (LLM endpoints + keys)
+	Inference {
+		#[command(subcommand)]
+		action: inference::InferenceAction,
+	},
+	/// Copy a resource from one agent into one or more target agents
+	Transfer {
+		#[command(subcommand)]
+		action: transfer::TransferAction,
+	},
+	/// Add/remove a resource across agents to match a desired set
+	Reconcile {
+		#[command(subcommand)]
+		action: transfer::ReconcileAction,
+	},
+	/// Show per-agent skill coverage of the .agents/skills master (read-only)
+	Coverage {
+		/// Emit a machine-readable JSON array instead of a table
+		#[arg(long)]
+		json: bool,
+	},
 }
 
 /// Actions for the `source` subcommand group.
@@ -395,6 +416,41 @@ fn main() -> Result<()> {
 			cli.project,
 			cli.all,
 			&cli.agent,
+		);
+	}
+
+	// Inference inventory is not agent-scoped (it's the shared provider store +
+	// keyring). Dispatch it before the adapter/ConfigManager setup too.
+	if let Commands::Inference { action } = &cli.command {
+		return commands::inference::execute(action);
+	}
+
+	// `transfer` / `reconcile` span MULTIPLE agents (source + targets), so they
+	// resolve their own per-target scope and are dispatched before the
+	// single-agent adapter/ConfigManager setup.
+	if let Commands::Transfer { action } = &cli.command {
+		return commands::transfer::execute_transfer(
+			action,
+			cli.global,
+			cli.project,
+		);
+	}
+	if let Commands::Reconcile { action } = &cli.command {
+		return commands::transfer::execute_reconcile(
+			action,
+			cli.global,
+			cli.project,
+		);
+	}
+
+	// `coverage` classifies EVERY registered agent against the per-scope master,
+	// so it is not single-agent scoped; dispatch it before the adapter setup.
+	if let Commands::Coverage { json } = &cli.command {
+		return commands::coverage::execute(
+			cli.global,
+			cli.project,
+			cli.all,
+			*json,
 		);
 	}
 
@@ -618,6 +674,18 @@ fn main() -> Result<()> {
 		// Dispatched earlier in `main`, before adapter/manager setup.
 		Commands::Source { .. } => {
 			unreachable!("`source` is dispatched before agent-config setup")
+		}
+		Commands::Inference { .. } => {
+			unreachable!("`inference` is dispatched before agent-config setup")
+		}
+		Commands::Transfer { .. } => {
+			unreachable!("`transfer` is dispatched before agent-config setup")
+		}
+		Commands::Reconcile { .. } => {
+			unreachable!("`reconcile` is dispatched before agent-config setup")
+		}
+		Commands::Coverage { .. } => {
+			unreachable!("`coverage` is dispatched before agent-config setup")
 		}
 	}
 }

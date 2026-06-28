@@ -165,6 +165,17 @@ aghub-cli [-a <agent>] [-g|--global] [-p|--project] [--all] [-v|--verbose] <comm
                                       #   and/or --update (installedOutdated only); dry-run default, --yes to apply;
                                       #   scope -g|-p, install agent via -a <agent>, --universal, --ref R, --json.
                                       #   credentials: GIT_PASSWORD / GITHUB_TOKEN (token-only)
+  inference <list|get|add|update|delete|key>   # inference provider inventory CRUD
+                                      #   (shared SQLite store + OS-keyring keys; not agent-scoped).
+                                      #   add: --latin-name --display-name --format --api-base-url
+                                      #   --model (repeatable), key from --api-key/stdin/$AGHUB_INFERENCE_API_KEY;
+                                      #   delete needs --yes; keys are write-only (never printed); --json
+  transfer <skill|mcp|sub-agent>      # copy a resource from --from-agent into --to <agent>
+                                      #   (repeatable); scope -g|-p; non-zero exit on any failure; --json
+  reconcile <skill|mcp|sub-agent>     # --from-agent --name, then --add / --remove <agent>
+                                      #   (repeatable) to match a desired agent set; scope -g|-p; --json
+  coverage                            # read-only per-agent skill coverage of the
+                                      #   .agents/skills master; scope -g|-p (rejects --all); --json
   plugin <list|install|uninstall|update|enable|disable|prune|validate>   # Claude Code plugins
   plugin marketplace <add|remove|update|list>
   interactive                         # step-by-step wizard

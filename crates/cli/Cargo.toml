@@ -13,6 +13,7 @@ path = "src/main.rs"
 [dependencies]
 aghub-core = { path = "../core" }
 aghub-agents = { path = "../agents" }
+aghub-inference = { path = "../inference" }
 aghub-cc-plugins = { path = "../cc-plugins" }
 aghub-git = { path = "../git" }
 skill = { path = "../skill" }

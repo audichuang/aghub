@@ -124,6 +124,7 @@ dependencies = [
  "aghub-cc-plugins",
  "aghub-core",
  "aghub-git",
+ "aghub-inference",
  "anyhow",
  "assert_cmd",
  "chrono",
