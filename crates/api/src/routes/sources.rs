@@ -14,22 +14,18 @@
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
-use crate::credentials::resolve::{
-	load_source_bindings, resolve_token_for_source,
-};
 use crate::dto::sources::{
 	CredentialStatus, SourceDiffResponse, SourceSkillDiff,
 	SourceSummaryResponse, SourcesListResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
-use crate::routes::credentials::load_credentials;
 use skill_update::sources::{
 	self, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome, SourceScope,
 	SourceScopeKind, SourceSkillDiff as DomainSkillDiff, SourceSummary,
 };
 use skill_update::{
-	keychain_host_for_source, FetchError, FetchedRepo, Fetcher, GitFetcher,
+	FetchError, FetchedRepo, Fetcher, GitFetcher, KeyringTokenResolver,
 	SourceRef,
 };
 
@@ -50,23 +46,6 @@ fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
 			scopes
 		}
 	}
-}
-
-/// Keychain-backed token resolver: re-fetches private sources using the same
-/// source→credential binding logic as the rest of the API.
-struct KeyringResolver;
-
-impl skill_update::TokenResolver for KeyringResolver {
-	fn resolve(&self, source: &str, _host: Option<&str>) -> Option<String> {
-		token_for_source(source)
-	}
-}
-
-fn token_for_source(source: &str) -> Option<String> {
-	let bindings = load_source_bindings().unwrap_or_default();
-	let creds = load_credentials().unwrap_or_default();
-	let host = keychain_host_for_source(source);
-	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
 }
 
 /// Production fetch is [`GitFetcher`]. Under `cfg(test)` an env hook
@@ -170,7 +149,7 @@ pub async fn diff_source(
 			input,
 			SourceDiffDeps {
 				fetcher: &ApiFetcher,
-				resolver: &KeyringResolver,
+				resolver: &KeyringTokenResolver::default(),
 			},
 		)
 	})

@@ -1151,6 +1151,231 @@ fn source_sync_help_renders() {
 		.success();
 }
 
+// ============ Task 23 [#1] T3: `source credential` subcommand ============
+
+/// `true` if stderr names a keychain/keyring failure — the headless-CI case
+/// where there is no OS backend. These tests accept that path as a clean exit
+/// (not a panic), since the release `just test` gate runs without a keychain.
+fn looks_like_keychain_error(stderr: &str) -> bool {
+	let s = stderr.to_lowercase();
+	s.contains("keychain") || s.contains("keyring")
+}
+
+#[test]
+fn source_credential_help_renders() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "--help"])
+		.assert()
+		.success();
+}
+
+#[test]
+fn source_credential_list_json_empty_or_keychain_error() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "list", "--json"])
+		.output()
+		.unwrap();
+
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+
+	// Never a panic: assert_cmd surfaces a process abort as a signal, not a
+	// clean exit. Either way the binary must not crash hard.
+	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
+
+	if out.status.success() {
+		// With a working keychain the output is a JSON array. It may not be `[]`
+		// because the OS keychain is shared across this user (not isolated by
+		// the temp HOME), so a sibling test may have seeded an entry; the
+		// contract is "valid JSON array" (and no token ever printed), not empty.
+		let json: Value = serde_json::from_slice(&out.stdout)
+			.unwrap_or_else(|e| panic!("stdout not JSON: {stdout} ({e})"));
+		assert!(json.is_array(), "expected a JSON array: {json}");
+	} else {
+		// No keychain backend (headless CI): a clean, named error — not a panic.
+		assert!(
+			looks_like_keychain_error(&stderr),
+			"non-keychain failure: {stderr}"
+		);
+	}
+}
+
+#[test]
+fn source_credential_list_bindings_json_empty_or_keychain_error() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "list-bindings", "--json"])
+		.output()
+		.unwrap();
+
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
+
+	if out.status.success() {
+		// Valid JSON array; not necessarily empty (the keychain bindings entry
+		// is shared across this OS user, so a sibling test may have seeded one).
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert!(json.is_array(), "expected a JSON array: {json}");
+	} else {
+		assert!(
+			looks_like_keychain_error(&stderr),
+			"non-keychain failure: {stderr}"
+		);
+	}
+}
+
+#[test]
+fn source_credential_add_without_token_errors_cleanly() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// No --token, no AGHUB_SOURCE_TOKEN, stdin is the test harness's (not a
+	// pipe carrying a token) — must error, never silently store an empty token.
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "add", "github.com"])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "missing token must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
+	assert!(
+		stderr.to_lowercase().contains("token"),
+		"error should mention the missing token: {stderr}"
+	);
+}
+
+#[test]
+fn source_credential_add_env_token_then_list_or_keychain_error() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// Add reads the token from AGHUB_SOURCE_TOKEN when --token is absent (so the
+	// secret never lands in argv). With a working keychain the round-trip then
+	// shows the name in `list`; without one we accept a clean keychain error.
+	let add = isolated_cli(home.path(), state.path())
+		.env("AGHUB_SOURCE_TOKEN", "ghp_secret_value")
+		.args(["source", "credential", "add", "github.com"])
+		.output()
+		.unwrap();
+
+	let add_err = String::from_utf8_lossy(&add.stderr);
+	assert!(!add_err.contains("panicked"), "must not panic: {add_err}");
+
+	if !add.status.success() {
+		assert!(
+			looks_like_keychain_error(&add_err),
+			"non-keychain add failure: {add_err}"
+		);
+		return;
+	}
+
+	// `add` prints the new credential's id (and ONLY the id — the raw token is
+	// write-only and must never appear in stdout/stderr).
+	let add_out = String::from_utf8_lossy(&add.stdout);
+	assert!(
+		!add_out.contains("ghp_secret_value")
+			&& !add_err.contains("ghp_secret_value"),
+		"token leaked: out={add_out} err={add_err}"
+	);
+	let new_id = add_out.trim().to_string();
+	assert!(!new_id.is_empty(), "add must print the new id");
+
+	let list = isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "list", "--json"])
+		.output()
+		.unwrap();
+	assert!(list.status.success(), "list after add must succeed");
+	let json: Value = serde_json::from_slice(&list.stdout).unwrap();
+	// The added id is present by exact match (the keychain is shared across this
+	// OS user, so assert OUR id, not the whole array).
+	let found =
+		json.as_array().unwrap().iter().any(|c| {
+			c.get("id").and_then(|v| v.as_str()) == Some(new_id.as_str())
+		});
+	assert!(found, "added credential id missing: {json}");
+	// Token is write-only: it must not appear in the list either.
+	let raw = json.to_string();
+	assert!(
+		!raw.contains("ghp_secret_value"),
+		"token leaked in list: {raw}"
+	);
+
+	// Clean up: the OS keychain is shared (not isolated by temp HOME), so remove
+	// what this test created instead of leaving it behind.
+	let _ = isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "remove", &new_id])
+		.output()
+		.unwrap();
+}
+
+#[test]
+fn source_credential_remove_requires_id() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// `remove` with no id is a clap usage error (exit 2), never a panic.
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "credential", "remove"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "remove needs an id");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
+}
+
+#[test]
+fn source_credential_bind_unknown_credential_errors() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// Binding a source to a non-existent credential id surfaces a clean
+	// "not found" error (or a keychain error on a backend-less box) — no panic.
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"source",
+			"credential",
+			"bind",
+			"owner/repo",
+			"--credential-id",
+			"does-not-exist",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"binding to a missing credential fails"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
+	assert!(
+		stderr.contains("not found") || looks_like_keychain_error(&stderr),
+		"expected not-found or keychain error: {stderr}"
+	);
+}
+
+#[test]
+fn source_diff_help_still_lists_flags() {
+	// No regression to the Diff surface from adding the Credential variant.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "diff", "--help"])
+		.output()
+		.unwrap();
+	assert!(out.status.success(), "diff --help must render");
+	let help = String::from_utf8_lossy(&out.stdout);
+	assert!(help.contains("--ref"), "diff still has --ref: {help}");
+	assert!(help.contains("--json"), "diff still has --json: {help}");
+}
+
 // Symlink-only install: `aghub add skill --from <dir>` writes a single
 // .agents/skills/<name> master and a link in the agent's own dir — never an
 // isolated copy. The legacy `--universal` flag is accepted but ignored (no

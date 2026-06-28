@@ -17,25 +17,22 @@ use serde::Serialize;
 use skill_update::sources::{
 	self, SourceScope, SourceScopeKind, SourceSkillDiff, SourceSummary,
 };
-use skill_update::{FetchError, SourceRef};
+use skill_update::{BindError, FetchError, SourceCredentialStore, SourceRef};
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
-use crate::SourceAction;
+use crate::{CredentialAction, SourceAction};
 
 // ─────────────────────────── credential / fetch ────────────────────────────
 
-/// Token resolver for CLI source auth: a token in `GIT_PASSWORD`
-/// (or `GITHUB_TOKEN`). `GitFetcher` consumes it as the `x-access-token`
-/// password — there is no username/password basic-auth path. Returns `None`
-/// when neither is set (the first unauthenticated fetch attempt stands).
-struct EnvTokenResolver;
-impl skill_update::TokenResolver for EnvTokenResolver {
-	fn resolve(&self, _source: &str, _host: Option<&str>) -> Option<String> {
-		std::env::var("GIT_PASSWORD")
-			.or_else(|_| std::env::var("GITHUB_TOKEN"))
-			.ok()
-	}
+/// Token resolver for CLI source auth: the shared env-then-keyring resolver.
+/// It tries `GIT_PASSWORD` / `GITHUB_TOKEN` from the environment first, then
+/// falls back to a bound/host-matched credential in the OS keychain — the same
+/// store the desktop app uses. `GitFetcher` consumes the token as the
+/// `x-access-token` password; an unresolved token leaves the first fetch
+/// unauthenticated.
+fn cli_resolver() -> skill_update::EnvThenKeyringResolver {
+	skill_update::EnvThenKeyringResolver::default()
 }
 
 /// Production fetch is `skill_update::GitFetcher`. Under debug builds ONLY, a
@@ -152,6 +149,9 @@ pub fn execute(
 			all,
 			agent,
 		}),
+		// Credentials live in the OS keychain, not in any scope's config, so
+		// the scope/agent flags don't apply here.
+		SourceAction::Credential { action } => credential(action),
 	}
 }
 
@@ -274,7 +274,7 @@ fn diff(
 			ref_: meta.effective_ref.clone(),
 		},
 		&CliFetcher,
-		&EnvTokenResolver,
+		&cli_resolver(),
 	) {
 		Ok(repo) => repo,
 		Err(FetchError::Auth) => bail!(
@@ -438,7 +438,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 			ref_: meta.effective_ref.clone(),
 		},
 		&CliFetcher,
-		&EnvTokenResolver,
+		&cli_resolver(),
 	) {
 		Ok(repo) => repo,
 		Err(FetchError::Auth) => bail!(
@@ -780,5 +780,156 @@ fn apply_update_row(
 			applied: false,
 			error: Some(e.to_string()),
 		},
+	}
+}
+
+// ────────────────────────── source credential ──────────────────────────────
+
+/// Env var carrying the token for `source credential add` when `--token` is
+/// absent and stdin is a terminal — keeps the secret off argv (where `ps` /
+/// shell history would expose it).
+const SOURCE_TOKEN_ENV: &str = "AGHUB_SOURCE_TOKEN";
+
+#[derive(Serialize)]
+struct CredentialView {
+	id: String,
+	name: String,
+}
+
+#[derive(Serialize)]
+struct BindingView {
+	source: String,
+	#[serde(rename = "credentialId")]
+	credential_id: String,
+}
+
+/// Read the token for `add`: `--token`, else piped stdin, else
+/// `$AGHUB_SOURCE_TOKEN`. The token is NEVER taken from a positional argv (it
+/// would leak via `ps`/history). Errors clearly when none is available.
+fn read_add_token(flag: Option<&str>) -> Result<String> {
+	use std::io::{IsTerminal, Read};
+
+	if let Some(t) = flag {
+		return Ok(t.to_string());
+	}
+	// Piped stdin (not a TTY): read the token from it.
+	if !std::io::stdin().is_terminal() {
+		let mut buf = String::new();
+		std::io::stdin().read_to_string(&mut buf)?;
+		let token = buf.trim();
+		if !token.is_empty() {
+			return Ok(token.to_string());
+		}
+	}
+	if let Ok(t) = std::env::var(SOURCE_TOKEN_ENV) {
+		if !t.is_empty() {
+			return Ok(t);
+		}
+	}
+	bail!(
+		"no token provided: pass --token, pipe it on stdin, or set \
+		 ${SOURCE_TOKEN_ENV} (the token is never read from a positional \
+		 argument so it can't leak via the process list)"
+	)
+}
+
+/// Dispatch a `source credential` action over the shared keychain-backed
+/// [`SourceCredentialStore`] — the SAME store the desktop app uses. Tokens are
+/// write-only and never printed back. A keychain failure surfaces via `?`
+/// (anyhow) as a clear error, never a silent swallow.
+fn credential(action: &CredentialAction) -> Result<()> {
+	let store = SourceCredentialStore;
+	match action {
+		CredentialAction::List { json } => {
+			let creds = store.list()?;
+			let views: Vec<CredentialView> = creds
+				.into_iter()
+				.map(|c| CredentialView {
+					id: c.id,
+					name: c.name,
+				})
+				.collect();
+			if *json {
+				println!("{}", serde_json::to_string_pretty(&views)?);
+				return Ok(());
+			}
+			if views.is_empty() {
+				println!("No stored credentials.");
+				return Ok(());
+			}
+			let mut builder = Builder::default();
+			builder.push_record(["ID", "NAME"]);
+			for c in &views {
+				builder.push_record([c.id.clone(), c.name.clone()]);
+			}
+			let mut table = builder.build();
+			table.with(Style::sharp());
+			println!("{table}");
+			Ok(())
+		}
+		CredentialAction::Add { name, token } => {
+			let token = read_add_token(token.as_deref())?;
+			let created = store.create(name, &token)?;
+			// Print the id only; the token is write-only and never echoed.
+			println!("{}", created.id);
+			Ok(())
+		}
+		CredentialAction::Remove { id } => {
+			if store.delete(id)? {
+				println!("removed {id}");
+			} else {
+				bail!("no credential with id '{id}'");
+			}
+			Ok(())
+		}
+		CredentialAction::Bind {
+			source,
+			credential_id,
+		} => {
+			store.bind(source, credential_id.as_deref()).map_err(
+				|e| match e {
+					BindError::EmptySource => {
+						anyhow::anyhow!("source must not be empty")
+					}
+					BindError::CredentialNotFound(id) => {
+						anyhow::anyhow!("credential not found: '{id}'")
+					}
+				},
+			)?;
+			match credential_id {
+				Some(id) => println!("bound '{source}' -> {id}"),
+				None => println!("cleared binding for '{source}'"),
+			}
+			Ok(())
+		}
+		CredentialAction::ListBindings { json } => {
+			let bindings = store.list_bindings()?;
+			let views: Vec<BindingView> = bindings
+				.0
+				.into_iter()
+				.map(|(source, credential_id)| BindingView {
+					source,
+					credential_id,
+				})
+				.collect();
+			if *json {
+				println!("{}", serde_json::to_string_pretty(&views)?);
+				return Ok(());
+			}
+			if views.is_empty() {
+				println!("No source bindings.");
+				return Ok(());
+			}
+			let mut builder = Builder::default();
+			builder.push_record(["SOURCE", "CREDENTIAL_ID"]);
+			for b in &views {
+				builder
+					.push_record([b.source.clone(), b.credential_id.clone()]);
+			}
+			let mut table = builder.build();
+			table.with(Style::sharp());
+			println!("{table}");
+			Ok(())
+		}
 	}
 }

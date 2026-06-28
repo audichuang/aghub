@@ -14,6 +14,13 @@
 mod git;
 pub use git::{GitFetcher, GitRefResolver};
 
+pub mod credentials;
+pub use credentials::{
+	BindError, CredentialError, EnvThenKeyringResolver, EnvTokenResolver,
+	KeyringTokenResolver, SourceBindings, SourceCredentialStore,
+	StoredCredential,
+};
+
 pub mod sources;
 
 use std::collections::HashMap;

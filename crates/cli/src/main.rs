@@ -328,6 +328,47 @@ pub enum SourceAction {
 		#[arg(long)]
 		json: bool,
 	},
+	/// Manage stored source credentials (private-repo tokens) + bindings.
+	///
+	/// Tokens are kept in the OS keychain — the SAME store the desktop app
+	/// uses, so a credential added here is usable there and vice versa. Tokens
+	/// are write-only: they are never printed back.
+	Credential {
+		#[command(subcommand)]
+		action: CredentialAction,
+	},
+}
+
+/// Actions for `source credential`. Tokens are write-only: never echoed.
+#[derive(clap::Subcommand)]
+pub enum CredentialAction {
+	/// List stored credentials (id + name only; never the token).
+	List {
+		#[arg(long)]
+		json: bool,
+	},
+	/// Store a credential. The token is read from `--token`, else stdin, else
+	/// `$AGHUB_SOURCE_TOKEN` — never passed on argv, where it would leak.
+	Add {
+		/// Display name (use the host, e.g. `github.com`, for host fallback).
+		name: String,
+		/// The token. Prefer stdin or `$AGHUB_SOURCE_TOKEN` so it stays off argv.
+		#[arg(long)]
+		token: Option<String>,
+	},
+	/// Remove a credential by id (also clears any bindings to it).
+	Remove { id: String },
+	/// Bind a source to a credential id (omit `--credential-id` to clear).
+	Bind {
+		source: String,
+		#[arg(long = "credential-id")]
+		credential_id: Option<String>,
+	},
+	/// List source→credential bindings.
+	ListBindings {
+		#[arg(long)]
+		json: bool,
+	},
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug)]

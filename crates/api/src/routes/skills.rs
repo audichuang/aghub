@@ -15,7 +15,6 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
-	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
 	},
@@ -43,7 +42,7 @@ use crate::{
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
 	state::{GitCloneSession, GitCloneSessions},
 };
-use skill_update::keychain_host_for_source;
+use skill_update::{keychain_host_for_source, SourceCredentialStore};
 
 #[derive(rocket::FromForm)]
 pub(crate) struct SkillListParams {
@@ -1616,14 +1615,13 @@ pub async fn git_scan_skills(
 	let mut session_url: Option<String> = None;
 	let credential_token: Option<String> =
 		if let Some(ref cred_id) = req.credential_id {
-			let creds = crate::routes::credentials::load_credentials()
-				.map_err(|e| {
-					ApiError::new(
-						Status::InternalServerError,
-						format!("Failed to read credentials: {e}"),
-						"KEYCHAIN_ERROR",
-					)
-				})?;
+			let creds = SourceCredentialStore.list().map_err(|e| {
+				ApiError::new(
+					Status::InternalServerError,
+					format!("Failed to read credentials: {e}"),
+					"KEYCHAIN_ERROR",
+				)
+			})?;
 			let cred =
 				creds.iter().find(|c| c.id == *cred_id).ok_or_else(|| {
 					ApiError::new(
@@ -1846,10 +1844,11 @@ fn clone_for_git_scan(
 }
 
 fn token_for_git_scan_source(source: &str) -> Option<String> {
-	let bindings = load_source_bindings().unwrap_or_default();
-	let creds = crate::routes::credentials::load_credentials().ok()?;
 	let host = keychain_host_for_source(source);
-	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
+	SourceCredentialStore
+		.resolve_token(source, host.as_deref())
+		.ok()
+		.flatten()
 }
 
 /// Try to detect the checked-out branch from the cloned repo via its gix `HEAD`

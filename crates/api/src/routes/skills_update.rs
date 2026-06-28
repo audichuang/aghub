@@ -7,9 +7,9 @@
 //! Network + credential resolution stay in this crate (never in `crates/core`).
 //! The [`Fetcher`] materializes a worktree into a [`tempfile::TempDir`] (the
 //! documented worst-case fallback — a checkout into a temp dir, never the `git`
-//! binary), and the [`TokenResolver`] wraps the F1.4 keyring/keychain
-//! resolution. Every gix error string is redacted of URL userinfo upstream so a
-//! token can never leak into the response.
+//! binary), and the [`KeyringTokenResolver`] (shared from `skill-update`) wraps
+//! the keyring/keychain resolution. Every gix error string is redacted of URL
+//! userinfo upstream so a token can never leak into the response.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -32,8 +32,8 @@ use crate::skills::rename::{
 };
 use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
-	SourceRef, TokenResolver,
+	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver,
+	KeyringTokenResolver, ResultCache, SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -45,23 +45,6 @@ const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Production [`TokenResolver`]: wraps the F1.4 keyring source→credential
-/// binding + host keychain resolution. Loads the stored credentials and
-/// bindings lazily per resolve (cheap; keyring reads are local).
-struct KeyringResolver;
-
-impl TokenResolver for KeyringResolver {
-	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
-		let creds =
-			crate::routes::credentials::load_credentials().unwrap_or_default();
-		let bindings = crate::credentials::resolve::load_source_bindings()
-			.unwrap_or_default();
-		crate::credentials::resolve::resolve_token_for_source(
-			source, host, &bindings, &creds,
-		)
-	}
-}
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -438,7 +421,7 @@ pub async fn check_skill_updates(
 	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-	let resolver = KeyringResolver;
+	let resolver = KeyringTokenResolver::default();
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
@@ -533,7 +516,7 @@ pub(crate) async fn apply_skill_update_inner(
 		)));
 	}
 
-	let resolver = KeyringResolver;
+	let resolver = KeyringTokenResolver::default();
 	let token = resolver.resolve(
 		&source.source,
 		keychain_host_for_source(&source.source).as_deref(),
@@ -713,7 +696,7 @@ mod tests {
 			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-		let resolver = KeyringResolver;
+		let resolver = KeyringTokenResolver::default();
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
 			ref_resolver: None,
@@ -911,7 +894,7 @@ mod tests {
 			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-		let resolver = KeyringResolver;
+		let resolver = KeyringTokenResolver::default();
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
 			ref_resolver: None,
@@ -949,7 +932,7 @@ mod tests {
 			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-		let resolver = KeyringResolver;
+		let resolver = KeyringTokenResolver::default();
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
 			ref_resolver: None,
