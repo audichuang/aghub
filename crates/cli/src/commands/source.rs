@@ -857,7 +857,19 @@ fn credential(action: &CredentialAction) -> Result<()> {
 		}
 		CredentialAction::Add { name, token } => {
 			let token = read_add_token(token.as_deref())?;
-			let created = store.create(name, &token)?;
+			// Enforce the same unique-name policy as the API (finding #2): the
+			// store's `create_unique` does the dup check + insert atomically.
+			let created =
+				store.create_unique(name, &token).map_err(|e| match e {
+					skill_update::CreateError::Duplicate(name) => {
+						anyhow::anyhow!(
+							"a credential named '{name}' already exists"
+						)
+					}
+					skill_update::CreateError::Store(inner) => {
+						anyhow::anyhow!(inner)
+					}
+				})?;
 			// Print the id only; the token is write-only and never echoed.
 			println!("{}", created.id);
 			Ok(())
@@ -882,6 +894,7 @@ fn credential(action: &CredentialAction) -> Result<()> {
 					BindError::CredentialNotFound(id) => {
 						anyhow::anyhow!("credential not found: '{id}'")
 					}
+					BindError::Store(inner) => anyhow::anyhow!(inner),
 				},
 			)?;
 			match credential_id {

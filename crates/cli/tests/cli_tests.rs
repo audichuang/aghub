@@ -1383,9 +1383,22 @@ fn source_credential_add_env_token_then_list_or_keychain_error() {
 	// Add reads the token from AGHUB_SOURCE_TOKEN when --token is absent (so the
 	// secret never lands in argv). With a working keychain the round-trip then
 	// shows the name in `list`; without one we accept a clean keychain error.
+	//
+	// The OS keychain is shared across this OS user, and credential names are
+	// unique — so a fixed name (e.g. "github.com") could already exist and make
+	// `add` fail as a duplicate, not as the behavior under test. Use a name
+	// unique to this run and clean it up by the returned id (finding #4).
+	let cred_name = format!(
+		"aghub-test-{}-{}",
+		std::process::id(),
+		std::time::SystemTime::now()
+			.duration_since(std::time::UNIX_EPOCH)
+			.unwrap()
+			.as_nanos()
+	);
 	let add = isolated_cli(home.path(), state.path())
 		.env("AGHUB_SOURCE_TOKEN", "ghp_secret_value")
-		.args(["source", "credential", "add", "github.com"])
+		.args(["source", "credential", "add", &cred_name])
 		.output()
 		.unwrap();
 

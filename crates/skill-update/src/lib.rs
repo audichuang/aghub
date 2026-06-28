@@ -16,9 +16,9 @@ pub use git::{GitFetcher, GitRefResolver};
 
 pub mod credentials;
 pub use credentials::{
-	BindError, CredentialError, EnvThenKeyringResolver, EnvTokenResolver,
-	KeyringTokenResolver, SourceBindings, SourceCredentialStore,
-	StoredCredential,
+	BindError, CreateError, CredentialError, EnvThenKeyringResolver,
+	EnvTokenResolver, KeyringTokenResolver, SourceBindings,
+	SourceCredentialStore, StoredCredential,
 };
 
 pub mod sources;

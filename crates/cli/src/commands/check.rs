@@ -8,8 +8,10 @@
 //! `local` for local-only sources).
 //!
 //! **`--online` (alias `--check-remote`).** Opt-in network check that runs the
-//! shared [`skill_update`] orchestrator with a `GIT_USERNAME`/`GIT_PASSWORD`
-//! token resolver: a cheap ls-refs preflight skips the fetch when the upstream
+//! shared [`skill_update`] orchestrator with the shared
+//! [`skill_update::EnvThenKeyringResolver`] (env `GIT_PASSWORD`/`GITHUB_TOKEN`
+//! first, then the keyring source-credential store — the SAME seam the desktop
+//! API uses): a cheap ls-refs preflight skips the fetch when the upstream
 //! tip is unchanged and the installed copy is provably unmodified, otherwise a
 //! treeless fetch + hash compare yields real `upToDate`/`updateAvailable`.
 //!
@@ -22,8 +24,8 @@ use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::Result;
 use serde::Serialize;
 use skill_update::{
-	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcher, GitRefResolver,
-	ResultCache, SourceRef, TokenResolver,
+	check_updates, CheckDeps, EntryInput, EnvThenKeyringResolver, Fetcher,
+	GitFetcher, GitRefResolver, ResultCache, SourceRef,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -170,17 +172,6 @@ const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
 const CONCURRENCY: usize = 4;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// CLI [`TokenResolver`]: resolves a token from `GIT_USERNAME`/`GIT_PASSWORD`
-/// (consistent with `apply-update`'s credential handling). The password/PAT is
-/// used as the token regardless of source/host.
-struct EnvTokenResolver;
-
-impl TokenResolver for EnvTokenResolver {
-	fn resolve(&self, _source: &str, _host: Option<&str>) -> Option<String> {
-		aghub_git::read_credentials().map(|creds| creds.password)
-	}
-}
-
 /// `--online` update check: run the shared `skill-update` orchestrator with the
 /// env token resolver and the default git adapters. **Read-only** — it never
 /// heals either lock (the desktop API owns global-lock self-heal; the CLI
@@ -207,7 +198,11 @@ fn execute_online(
 	eprintln_verbose!("Checking {} locked skill(s) online", entries.len());
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-	let resolver = EnvTokenResolver;
+	// One shared resolver seam (finding #3): env (`GIT_PASSWORD`/`GITHUB_TOKEN`)
+	// first, then the keyring source-credential store — so a credential bound in
+	// the desktop app is usable by the CLI online check too. This replaces the
+	// old env-only local resolver that ignored stored credentials.
+	let resolver = EnvThenKeyringResolver::default();
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
@@ -347,6 +342,30 @@ fn project_lock_entries(
 mod tests {
 	use super::*;
 	use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
+	use skill_update::TokenResolver;
+
+	/// finding #3: the online check must use the SHARED resolver seam, not a
+	/// CLI-local env-only resolver. The old local resolver was backed by
+	/// `aghub_git::read_credentials`, which returns a token ONLY when BOTH
+	/// `GIT_USERNAME` and `GIT_PASSWORD` are set. The shared resolver yields a
+	/// token from `GIT_PASSWORD` alone — so this test passes with the shared
+	/// resolver and would FAIL (None) with the old local one.
+	#[test]
+	fn online_check_uses_shared_resolver_git_password_only() {
+		// Serialize against other env-mutating tests via a process-wide guard.
+		static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+		let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+		std::env::remove_var("GIT_USERNAME");
+		std::env::remove_var("GITHUB_TOKEN");
+		std::env::set_var("GIT_PASSWORD", "PWONLY");
+
+		let token = EnvThenKeyringResolver::default()
+			.resolve("o/r", Some("github.com"));
+
+		std::env::remove_var("GIT_PASSWORD");
+		assert_eq!(token, Some("PWONLY".to_string()));
+	}
 
 	fn status_json(status: SkillUpdateStatus) -> serde_json::Value {
 		let view = SkillUpdateView {

@@ -9,7 +9,9 @@ use log::{debug, info, warn};
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
-use skill_update::{BindError, CredentialError, SourceCredentialStore};
+use skill_update::{
+	BindError, CreateError, CredentialError, SourceCredentialStore,
+};
 
 use crate::credentials::resolve::{
 	list_source_binding_responses, source_binding_response,
@@ -44,15 +46,21 @@ fn source_binding_err(err: BindError) -> crate::error::ApiError {
 			"Credential not found",
 			"CREDENTIAL_NOT_FOUND",
 		),
+		// A real keychain/serde failure during bind is a 500, NOT a 404
+		// (finding #1): conflating it with not-found hid keychain failures.
+		BindError::Store(inner) => internal_err(inner),
 	}
 }
 
-fn duplicate_credential_err(name: &str) -> crate::error::ApiError {
-	crate::error::ApiError::new(
-		Status::Conflict,
-		format!("A credential named '{name}' already exists"),
-		"CREDENTIAL_NAME_EXISTS",
-	)
+fn create_credential_err(err: CreateError) -> crate::error::ApiError {
+	match err {
+		CreateError::Duplicate(name) => crate::error::ApiError::new(
+			Status::Conflict,
+			format!("A credential named '{name}' already exists"),
+			"CREDENTIAL_NAME_EXISTS",
+		),
+		CreateError::Store(inner) => internal_err(inner),
+	}
 }
 
 #[get("/credentials")]
@@ -109,15 +117,13 @@ pub fn create_credential(
 ) -> ApiCreated<CredentialResponse> {
 	let store = SourceCredentialStore;
 	info!("creating credential '{}'", body.name);
-	// HTTP-only policy: the store stays HTTP-agnostic, so the 409 dup-name
-	// guard lives here. `name_exists` + `create` share the store's keyring lock
-	// so a concurrent create cannot slip a duplicate past this check.
-	if store.name_exists(&body.name).map_err(internal_err)? {
-		return Err(duplicate_credential_err(&body.name));
-	}
+	// The dup-name check + insert run under ONE keyring lock inside the store
+	// (`create_unique`), so a concurrent create cannot slip a duplicate past the
+	// check (finding #2). The HTTP-only 409 mapping lives here; a keychain
+	// failure maps to 500/KEYCHAIN_ERROR.
 	let new = store
-		.create(&body.name, &body.token)
-		.map_err(internal_err)?;
+		.create_unique(&body.name, &body.token)
+		.map_err(create_credential_err)?;
 	Ok((
 		Status::Created,
 		Json(CredentialResponse {
@@ -167,13 +173,35 @@ mod tests {
 
 	#[test]
 	fn duplicate_credential_name_rejected() {
-		let err = duplicate_credential_err("github.com");
+		let err =
+			create_credential_err(CreateError::Duplicate("github.com".into()));
 		assert_eq!(err.status, Status::Conflict);
 		assert_eq!(err.body.code, "CREDENTIAL_NAME_EXISTS");
 		assert_eq!(
 			err.body.error,
 			"A credential named 'github.com' already exists"
 		);
+	}
+
+	#[test]
+	fn create_store_failure_maps_to_keychain_error() {
+		// finding #2/#1: a keychain failure during create is a 500, not a 409.
+		let err = create_credential_err(CreateError::Store(
+			CredentialError::Keyring("boom".into()),
+		));
+		assert_eq!(err.status, Status::InternalServerError);
+		assert_eq!(err.body.code, "KEYCHAIN_ERROR");
+	}
+
+	#[test]
+	fn bind_store_failure_maps_to_keychain_error_not_not_found() {
+		// finding #1: a keychain failure during bind must surface as
+		// 500/KEYCHAIN_ERROR, never the misleading 404/CREDENTIAL_NOT_FOUND.
+		let err = source_binding_err(BindError::Store(
+			CredentialError::Keyring("boom".into()),
+		));
+		assert_eq!(err.status, Status::InternalServerError);
+		assert_eq!(err.body.code, "KEYCHAIN_ERROR");
 	}
 
 	#[test]

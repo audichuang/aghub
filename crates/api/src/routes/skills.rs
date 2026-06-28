@@ -42,7 +42,9 @@ use crate::{
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
 	state::{GitCloneSession, GitCloneSessions},
 };
-use skill_update::{keychain_host_for_source, SourceCredentialStore};
+use skill_update::{
+	keychain_host_for_source, SourceCredentialStore, TokenResolver,
+};
 
 #[derive(rocket::FromForm)]
 pub(crate) struct SkillListParams {
@@ -1833,11 +1835,12 @@ fn clone_for_git_scan(
 }
 
 fn token_for_git_scan_source(source: &str) -> Option<String> {
+	// Route through the shared resolver seam so a keychain failure is LOGGED
+	// (not silently swallowed by `.ok().flatten()`) before degrading to None —
+	// the same hidden-keychain-failure class finding #1 removed (finding #4).
 	let host = keychain_host_for_source(source);
-	SourceCredentialStore
-		.resolve_token(source, host.as_deref())
-		.ok()
-		.flatten()
+	skill_update::KeyringTokenResolver::default()
+		.resolve(source, host.as_deref())
 }
 
 /// Try to detect the checked-out branch from the cloned repo via its gix `HEAD`

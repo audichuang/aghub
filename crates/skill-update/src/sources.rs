@@ -2150,4 +2150,239 @@ mod scan_tests {
 
 		assert_eq!(scan.git_ref.as_deref(), Some("feature-x"));
 	}
+
+	// --- central retry seam: fetch_source_with_resolver (finding #5) ------
+
+	/// Fails the UNAUTHENTICATED fetch, then succeeds ONLY when handed the
+	/// expected token on the retry. Records every token it was offered so a test
+	/// can assert the retry actually carried the resolved token. Also records the
+	/// `(source, host)` the resolver was asked for, via a shared cell.
+	struct TokenGatedFetcher {
+		root: std::path::PathBuf,
+		expected: &'static str,
+		seen_tokens: std::sync::Mutex<Vec<Option<String>>>,
+	}
+	impl Fetcher for TokenGatedFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			token: Option<&str>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			self.seen_tokens
+				.lock()
+				.unwrap()
+				.push(token.map(str::to_string));
+			match token {
+				Some(t) if t == self.expected => Ok(crate::FetchedRepo {
+					root: self.root.clone(),
+					oid: "test-oid".to_string(),
+					_guard: None,
+				}),
+				// No token (first attempt) or a wrong token (retry) → Auth.
+				_ => Err(FetchError::Auth),
+			}
+		}
+	}
+
+	/// A resolver that always supplies a fixed token and records the
+	/// `(source, host)` arguments it was called with.
+	struct RecordingResolver {
+		token: Option<String>,
+		seen_args: std::sync::Mutex<Option<(String, Option<String>)>>,
+	}
+	impl TokenResolver for RecordingResolver {
+		fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
+			*self.seen_args.lock().unwrap() =
+				Some((source.to_string(), host.map(str::to_string)));
+			self.token.clone()
+		}
+	}
+
+	#[test]
+	fn fetch_with_resolver_retries_with_resolved_token() {
+		// finding #5: first (unauth) fetch fails; the resolver supplies the
+		// expected token; the ONE retry succeeds.
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+		let fetcher = TokenGatedFetcher {
+			root: upstream.path().to_path_buf(),
+			expected: "GOODTOK",
+			seen_tokens: std::sync::Mutex::new(Vec::new()),
+		};
+		let resolver = RecordingResolver {
+			token: Some("GOODTOK".to_string()),
+			seen_args: std::sync::Mutex::new(None),
+		};
+		let sr = SourceRef {
+			source: "owner/retry-ok".to_string(),
+			ref_: None,
+		};
+
+		let repo = fetch_source_with_resolver(&sr, &fetcher, &resolver)
+			.expect("retry with resolved token must succeed");
+		assert_eq!(repo.root, upstream.path());
+
+		// Exactly two attempts: unauth (None) then the resolved token.
+		let seen = fetcher.seen_tokens.lock().unwrap();
+		assert_eq!(seen.len(), 2);
+		assert_eq!(seen[0], None);
+		assert_eq!(seen[1], Some("GOODTOK".to_string()));
+
+		// The resolver was asked for THIS source and its keychain host.
+		let args = resolver.seen_args.lock().unwrap().clone();
+		let (source, host) = args.expect("resolver must be consulted");
+		assert_eq!(source, "owner/retry-ok");
+		assert_eq!(host.as_deref(), Some("github.com"));
+	}
+
+	#[test]
+	fn fetch_with_resolver_no_token_returns_first_error() {
+		// finding #5: unauth fetch fails and the resolver has NO token → the
+		// original error is returned and the fetch is NOT retried.
+		let upstream = TempDir::new().unwrap();
+		let fetcher = TokenGatedFetcher {
+			root: upstream.path().to_path_buf(),
+			expected: "GOODTOK",
+			seen_tokens: std::sync::Mutex::new(Vec::new()),
+		};
+		let resolver = NoToken;
+		let sr = SourceRef {
+			source: "owner/retry-no-token".to_string(),
+			ref_: None,
+		};
+
+		match fetch_source_with_resolver(&sr, &fetcher, &resolver) {
+			Err(FetchError::Auth) => {}
+			Err(other) => panic!("expected Auth, got {other:?}"),
+			Ok(_) => panic!("expected the first error, got Ok"),
+		}
+		// Only the unauth attempt happened; no retry without a token.
+		assert_eq!(fetcher.seen_tokens.lock().unwrap().len(), 1);
+	}
+
+	#[test]
+	fn fetch_with_resolver_wrong_token_retry_fails() {
+		// finding #5: the resolver supplies a WRONG token; the single retry is
+		// attempted and fails — there is no second retry.
+		let upstream = TempDir::new().unwrap();
+		let fetcher = TokenGatedFetcher {
+			root: upstream.path().to_path_buf(),
+			expected: "GOODTOK",
+			seen_tokens: std::sync::Mutex::new(Vec::new()),
+		};
+		let resolver = RecordingResolver {
+			token: Some("WRONGTOK".to_string()),
+			seen_args: std::sync::Mutex::new(None),
+		};
+		let sr = SourceRef {
+			source: "owner/retry-wrong".to_string(),
+			ref_: None,
+		};
+
+		match fetch_source_with_resolver(&sr, &fetcher, &resolver) {
+			Err(FetchError::Auth) => {}
+			Err(other) => panic!("expected Auth, got {other:?}"),
+			Ok(_) => panic!("expected wrong-token retry to fail"),
+		}
+		// Two attempts total: unauth (None) + the one wrong-token retry.
+		let seen = fetcher.seen_tokens.lock().unwrap();
+		assert_eq!(seen.len(), 2);
+		assert_eq!(seen[1], Some("WRONGTOK".to_string()));
+	}
+
+	#[test]
+	fn diff_source_retries_with_resolved_token() {
+		// finding #5: the retry seam works end-to-end through diff_source — an
+		// unauth fetch failure + a resolver token yields a successful diff.
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+		let fetcher = TokenGatedFetcher {
+			root: upstream.path().to_path_buf(),
+			expected: "GOODTOK",
+			seen_tokens: std::sync::Mutex::new(Vec::new()),
+		};
+		let resolver = RecordingResolver {
+			token: Some("GOODTOK".to_string()),
+			seen_args: std::sync::Mutex::new(None),
+		};
+
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "owner/diff-retry".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Global],
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		match outcome {
+			SourceDiffOutcome::Ok { skills, .. } => {
+				assert!(skills.iter().any(|s| s.name == "alpha"));
+			}
+			other => panic!("expected Ok after retry, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn diff_source_no_token_maps_to_needs_credential() {
+		// finding #5: an unauth Auth failure with no resolver token surfaces as
+		// NeedsCredential (the caller's auth-needed mapping), not FetchFailed.
+		let upstream = TempDir::new().unwrap();
+		let fetcher = TokenGatedFetcher {
+			root: upstream.path().to_path_buf(),
+			expected: "GOODTOK",
+			seen_tokens: std::sync::Mutex::new(Vec::new()),
+		};
+		let resolver = NoToken;
+
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "owner/diff-needs-cred".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Global],
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		match outcome {
+			SourceDiffOutcome::NeedsCredential { .. } => {}
+			other => panic!("expected NeedsCredential, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn scan_for_sync_retries_with_resolved_token() {
+		// finding #5: the retry seam works through scan_for_sync too.
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+		let fetcher = TokenGatedFetcher {
+			root: upstream.path().to_path_buf(),
+			expected: "GOODTOK",
+			seen_tokens: std::sync::Mutex::new(Vec::new()),
+		};
+		let resolver = RecordingResolver {
+			token: Some("GOODTOK".to_string()),
+			seen_args: std::sync::Mutex::new(None),
+		};
+
+		let scan = scan_for_sync(
+			"owner/scan-retry",
+			None,
+			&SourceScope::Global,
+			SourceSyncDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		)
+		.expect("scan should succeed after retry");
+		assert_eq!(scan.repo.root, upstream.path());
+		// Unauth attempt + resolved-token retry.
+		assert_eq!(fetcher.seen_tokens.lock().unwrap().len(), 2);
+	}
 }

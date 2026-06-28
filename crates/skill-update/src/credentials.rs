@@ -33,7 +33,7 @@ fn lock_keyring() -> std::sync::MutexGuard<'static, ()> {
 /// A real credential-store error. Replaces the old `String`/`None`-swallowing:
 /// keyring `NoEntry` still maps to "empty", but any other keyring or serde
 /// failure surfaces as a [`CredentialError`] for callers to report.
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CredentialError {
 	Keyring(String),
 	Serde(String),
@@ -54,11 +54,17 @@ impl std::fmt::Display for CredentialError {
 
 impl std::error::Error for CredentialError {}
 
-/// Binding validation errors (HTTP-agnostic; callers map to 400/404).
+/// Binding validation errors (HTTP-agnostic; callers map to 400/404/500).
+///
+/// `Store` carries a real keychain/serde failure DISTINCTLY from the
+/// validation variants: a keyring read/write failure during `bind` must NOT be
+/// reported as "credential not found" (which would 404), it must surface as a
+/// 500/`KEYCHAIN_ERROR`. See finding #1.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindError {
 	EmptySource,
 	CredentialNotFound(String),
+	Store(CredentialError),
 }
 
 impl std::fmt::Display for BindError {
@@ -68,11 +74,47 @@ impl std::fmt::Display for BindError {
 			BindError::CredentialNotFound(id) => {
 				write!(f, "credential not found: {id}")
 			}
+			BindError::Store(err) => write!(f, "{err}"),
 		}
 	}
 }
 
 impl std::error::Error for BindError {}
+
+impl From<CredentialError> for BindError {
+	fn from(err: CredentialError) -> Self {
+		BindError::Store(err)
+	}
+}
+
+/// Outcome of [`SourceCredentialStore::create_unique`]: either the dup-name
+/// check failed (`Duplicate`) or the keychain itself errored (`Store`). The
+/// dup-name check + insert run under ONE keyring lock, so a concurrent create
+/// cannot slip a duplicate past the check (finding #2).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateError {
+	Duplicate(String),
+	Store(CredentialError),
+}
+
+impl std::fmt::Display for CreateError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			CreateError::Duplicate(name) => {
+				write!(f, "a credential named '{name}' already exists")
+			}
+			CreateError::Store(err) => write!(f, "{err}"),
+		}
+	}
+}
+
+impl std::error::Error for CreateError {}
+
+impl From<CredentialError> for CreateError {
+	fn from(err: CredentialError) -> Self {
+		CreateError::Store(err)
+	}
+}
 
 /// One stored source credential (a named token), serialized as a JSON array in
 /// the `aghub`/`github_credentials` keyring entry.
@@ -88,6 +130,55 @@ pub struct StoredCredential {
 /// `source → credential_id`.
 #[derive(Default, Serialize, Deserialize)]
 pub struct SourceBindings(pub BTreeMap<String, String>);
+
+// --- storage backend (injectable seam) -----------------------------------
+
+/// The persistence seam behind the store: load/save the credential list and the
+/// source-binding map. Production uses [`KeyringBackend`]; tests inject a fake
+/// (in-memory, or one that fails on demand) so the store's error-mapping and
+/// locking contracts are exercised without a real keychain. Findings #1/#2/#6
+/// asked for exactly this injectable backend.
+pub(crate) trait CredentialBackend {
+	fn load_credentials(
+		&self,
+	) -> Result<Vec<StoredCredential>, CredentialError>;
+	fn store_credentials(
+		&self,
+		creds: &[StoredCredential],
+	) -> Result<(), CredentialError>;
+	fn load_bindings(&self) -> Result<SourceBindings, CredentialError>;
+	fn save_bindings(
+		&self,
+		bindings: &SourceBindings,
+	) -> Result<(), CredentialError>;
+}
+
+/// Production backend: the two `aghub` keyring entries.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct KeyringBackend;
+
+impl CredentialBackend for KeyringBackend {
+	fn load_credentials(
+		&self,
+	) -> Result<Vec<StoredCredential>, CredentialError> {
+		load_credentials()
+	}
+	fn store_credentials(
+		&self,
+		creds: &[StoredCredential],
+	) -> Result<(), CredentialError> {
+		store_credentials(creds)
+	}
+	fn load_bindings(&self) -> Result<SourceBindings, CredentialError> {
+		load_source_bindings()
+	}
+	fn save_bindings(
+		&self,
+		bindings: &SourceBindings,
+	) -> Result<(), CredentialError> {
+		save_source_bindings(bindings)
+	}
+}
 
 // --- keyring entry helpers -----------------------------------------------
 
@@ -310,92 +401,122 @@ fn prune_bindings_for_credential(
 	bindings.0.len() != original_len
 }
 
-// --- the store (one façade over the two keyring entries) -----------------
+// --- the store (one façade over the storage backend) ---------------------
 
 /// One store over the two keyring entries
-/// (`aghub`/`github_credentials` + `aghub`/`skill_source_bindings`). A unit
-/// struct: the keyring IS the backing store.
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SourceCredentialStore;
+/// (`aghub`/`github_credentials` + `aghub`/`skill_source_bindings`). Generic
+/// over a [`CredentialBackend`] so tests can inject a fake; production callers
+/// use the [`SourceCredentialStore`] unit alias backed by the real keyring.
+///
+/// Every read-modify-write method takes the in-process [`lock_keyring`] guard
+/// so the load→validate→save cycle is atomic against other in-process callers
+/// (cross-process keyring races remain a documented limitation).
+pub(crate) struct Store<B: CredentialBackend> {
+	backend: B,
+}
 
-impl SourceCredentialStore {
-	/// List all stored credentials.
-	pub fn list(&self) -> Result<Vec<StoredCredential>, CredentialError> {
-		load_credentials()
+impl<B: CredentialBackend> Store<B> {
+	pub(crate) fn with_backend(backend: B) -> Self {
+		Self { backend }
 	}
 
-	/// Create a credential with a random v4 uuid id. Does NOT enforce a
-	/// duplicate-name policy: the HTTP/CLI surface decides whether to 409 (the
-	/// store stays HTTP-agnostic). Callers wanting dup detection should
-	/// [`Self::list`] + check first.
-	pub fn create(
+	/// List all stored credentials.
+	pub fn list(&self) -> Result<Vec<StoredCredential>, CredentialError> {
+		self.backend.load_credentials()
+	}
+
+	/// Create a credential with a random v4 uuid id, enforcing the unique-name
+	/// policy under ONE keyring lock so a concurrent create cannot slip a
+	/// duplicate past the check. The HTTP/CLI surface maps [`CreateError`] to
+	/// its own 409/500 codes (the store stays HTTP-agnostic).
+	pub fn create_unique(
 		&self,
 		name: &str,
 		token: &str,
-	) -> Result<StoredCredential, CredentialError> {
+	) -> Result<StoredCredential, CreateError> {
 		let _guard = lock_keyring();
-		let mut creds = load_credentials()?;
+		let mut creds = self.backend.load_credentials()?;
+		if credential_name_exists(&creds, name) {
+			return Err(CreateError::Duplicate(name.to_string()));
+		}
 		let new = StoredCredential {
 			id: uuid::Uuid::new_v4().to_string(),
 			name: name.to_string(),
 			token: token.to_string(),
 		};
 		creds.push(new.clone());
-		store_credentials(&creds)?;
+		self.backend.store_credentials(&creds)?;
 		Ok(new)
-	}
-
-	/// `true` iff a credential with `name` already exists. Lets the HTTP/CLI
-	/// surface enforce the 409 dup-name policy without re-listing.
-	pub fn name_exists(&self, name: &str) -> Result<bool, CredentialError> {
-		Ok(credential_name_exists(&self.list()?, name))
 	}
 
 	/// Delete a credential by id; also prunes any bindings that pointed at it.
 	/// Returns `true` if a credential was removed.
+	///
+	/// The credential delete and the binding prune run under ONE lock. A
+	/// binding-prune persistence failure is logged and treated as **non-fatal**
+	/// (the credential delete still succeeds), matching the route contract that
+	/// a prune failure must not 500 a successful delete (finding #6).
 	pub fn delete(&self, id: &str) -> Result<bool, CredentialError> {
 		let _guard = lock_keyring();
-		let mut creds = load_credentials()?;
+		let mut creds = self.backend.load_credentials()?;
 		let original_len = creds.len();
 		creds.retain(|c| c.id != id);
 		let removed = original_len != creds.len();
-		store_credentials(&creds)?;
+		self.backend.store_credentials(&creds)?;
 
-		let mut bindings = load_source_bindings()?;
-		if prune_bindings_for_credential(&mut bindings, id) {
-			save_source_bindings(&bindings)?;
+		// Best-effort binding prune: the credential is already gone, so a load
+		// or save failure here must NOT turn a successful delete into an error.
+		match self.backend.load_bindings() {
+			Ok(mut bindings) => {
+				if prune_bindings_for_credential(&mut bindings, id) {
+					if let Err(error) = self.backend.save_bindings(&bindings) {
+						log::warn!(
+							"credential {id} deleted; pruning its bindings \
+							 failed (non-fatal): {error}"
+						);
+					}
+				}
+			}
+			Err(error) => log::warn!(
+				"credential {id} deleted; loading bindings to prune failed \
+				 (non-fatal): {error}"
+			),
 		}
 		Ok(removed)
 	}
 
 	/// List the source→credential_id bindings.
 	pub fn list_bindings(&self) -> Result<SourceBindings, CredentialError> {
-		load_source_bindings()
+		self.backend.load_bindings()
 	}
 
 	/// Bind (or, with `credential_id == None`, clear) a source. Validates the
-	/// credential exists before binding; persists the result.
+	/// credential exists before binding; persists the result. A real keychain
+	/// failure surfaces as [`BindError::Store`] (NOT `CredentialNotFound`), so
+	/// the API returns 500/`KEYCHAIN_ERROR` rather than a misleading 404
+	/// (finding #1). On any failure the persisted state is left unmutated.
 	pub fn bind(
 		&self,
 		source: &str,
 		credential_id: Option<&str>,
 	) -> Result<(), BindError> {
 		let _guard = lock_keyring();
-		// A keyring failure here is reported as if the credential were not
-		// found, keeping `bind` infallible-by-BindError; the CRUD path that
-		// wants a distinct keychain error uses `list`/`create`/`delete`.
-		let mut bindings = load_source_bindings()
-			.map_err(|e| BindError::CredentialNotFound(e.to_string()))?;
-		let creds = load_credentials()
-			.map_err(|e| BindError::CredentialNotFound(e.to_string()))?;
+		let mut bindings = self.backend.load_bindings()?;
+		// Clearing a binding needs no credential validation, so don't load the
+		// credential list (a creds keychain/serde failure must not block an
+		// unbind). Only load when a credential_id must be validated (finding #2).
+		let creds = if credential_id.is_some() {
+			self.backend.load_credentials()?
+		} else {
+			Vec::new()
+		};
 		bind_source_to_credential(
 			&mut bindings,
 			source,
 			credential_id,
 			&creds,
 		)?;
-		save_source_bindings(&bindings)
-			.map_err(|e| BindError::CredentialNotFound(e.to_string()))?;
+		self.backend.save_bindings(&bindings)?;
 		Ok(())
 	}
 
@@ -407,9 +528,63 @@ impl SourceCredentialStore {
 		source: &str,
 		host: Option<&str>,
 	) -> Result<Option<String>, CredentialError> {
-		let bindings = load_source_bindings()?;
-		let creds = load_credentials()?;
+		let bindings = self.backend.load_bindings()?;
+		let creds = self.backend.load_credentials()?;
 		Ok(resolve_token_for_source(source, host, &bindings, &creds))
+	}
+}
+
+/// The production store: a unit value backed by the real keyring. Kept as a
+/// zero-arg constructible unit struct so existing call sites
+/// (`SourceCredentialStore.list()`, …) are unchanged.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SourceCredentialStore;
+
+impl SourceCredentialStore {
+	fn store(&self) -> Store<KeyringBackend> {
+		Store::with_backend(KeyringBackend)
+	}
+
+	/// List all stored credentials.
+	pub fn list(&self) -> Result<Vec<StoredCredential>, CredentialError> {
+		self.store().list()
+	}
+
+	/// Create a credential, enforcing the unique-name policy atomically.
+	pub fn create_unique(
+		&self,
+		name: &str,
+		token: &str,
+	) -> Result<StoredCredential, CreateError> {
+		self.store().create_unique(name, token)
+	}
+
+	/// Delete a credential by id (best-effort binding prune; see [`Store::delete`]).
+	pub fn delete(&self, id: &str) -> Result<bool, CredentialError> {
+		self.store().delete(id)
+	}
+
+	/// List the source→credential_id bindings.
+	pub fn list_bindings(&self) -> Result<SourceBindings, CredentialError> {
+		self.store().list_bindings()
+	}
+
+	/// Bind (or clear) a source → credential mapping.
+	pub fn bind(
+		&self,
+		source: &str,
+		credential_id: Option<&str>,
+	) -> Result<(), BindError> {
+		self.store().bind(source, credential_id)
+	}
+
+	/// Resolve a token for `source` (binding-then-host fallback).
+	pub fn resolve_token(
+		&self,
+		source: &str,
+		host: Option<&str>,
+	) -> Result<Option<String>, CredentialError> {
+		self.store().resolve_token(source, host)
 	}
 }
 
@@ -473,15 +648,258 @@ pub struct EnvThenKeyringResolver {
 
 impl TokenResolver for EnvThenKeyringResolver {
 	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
-		EnvTokenResolver::env_token()
-			.or_else(|| self.keyring.resolve(source, host))
+		env_then(&self.keyring, source, host)
 	}
+}
+
+/// Env-first precedence, then a fallback [`TokenResolver`]. Factored out so the
+/// fallback half is testable with an injected resolver (the production fallback
+/// is the keyring, which a CI box can't exercise) — env set must short-circuit
+/// (fallback never consulted); env unset must consult the fallback (finding #3).
+fn env_then(
+	fallback: &dyn TokenResolver,
+	source: &str,
+	host: Option<&str>,
+) -> Option<String> {
+	EnvTokenResolver::env_token().or_else(|| fallback.resolve(source, host))
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
 	use std::sync::{Mutex, OnceLock};
+
+	/// In-memory [`CredentialBackend`] for store tests. Each load/save op can be
+	/// independently forced to fail with a fixed [`CredentialError`] so the
+	/// store's error-mapping / non-mutation / non-fatal contracts are testable
+	/// without a real keychain (findings #1, #2, #6).
+	#[derive(Default)]
+	struct FakeBackend {
+		creds: Mutex<Vec<StoredCredential>>,
+		bindings: Mutex<SourceBindings>,
+		fail_load_creds: Option<CredentialError>,
+		fail_store_creds: Option<CredentialError>,
+		fail_load_bindings: Option<CredentialError>,
+		fail_save_bindings: Option<CredentialError>,
+	}
+
+	impl FakeBackend {
+		fn with_creds(creds: Vec<StoredCredential>) -> Self {
+			Self {
+				creds: Mutex::new(creds),
+				..Self::default()
+			}
+		}
+	}
+
+	impl CredentialBackend for FakeBackend {
+		fn load_credentials(
+			&self,
+		) -> Result<Vec<StoredCredential>, CredentialError> {
+			if let Some(e) = &self.fail_load_creds {
+				return Err(e.clone());
+			}
+			Ok(self.creds.lock().unwrap().clone())
+		}
+		fn store_credentials(
+			&self,
+			creds: &[StoredCredential],
+		) -> Result<(), CredentialError> {
+			if let Some(e) = &self.fail_store_creds {
+				return Err(e.clone());
+			}
+			*self.creds.lock().unwrap() = creds.to_vec();
+			Ok(())
+		}
+		fn load_bindings(&self) -> Result<SourceBindings, CredentialError> {
+			if let Some(e) = &self.fail_load_bindings {
+				return Err(e.clone());
+			}
+			Ok(SourceBindings(self.bindings.lock().unwrap().0.clone()))
+		}
+		fn save_bindings(
+			&self,
+			bindings: &SourceBindings,
+		) -> Result<(), CredentialError> {
+			if let Some(e) = &self.fail_save_bindings {
+				return Err(e.clone());
+			}
+			*self.bindings.lock().unwrap() = SourceBindings(bindings.0.clone());
+			Ok(())
+		}
+	}
+
+	// --- store error-mapping / atomicity (injectable backend) ------------
+
+	#[test]
+	fn bind_keychain_failure_surfaces_as_store_not_not_found() {
+		// finding #1: a keyring failure loading bindings during `bind` must
+		// surface as BindError::Store (→ 500/KEYCHAIN_ERROR), NOT as
+		// CredentialNotFound (which the API maps to a misleading 404).
+		let backend = FakeBackend {
+			fail_load_bindings: Some(CredentialError::Keyring("boom".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		let err = store.bind("o/r", None).unwrap_err();
+		assert_eq!(
+			err,
+			BindError::Store(CredentialError::Keyring("boom".into()))
+		);
+	}
+
+	#[test]
+	fn bind_credential_load_failure_surfaces_as_store() {
+		// finding #1: failing to load the credential list during `bind` is a
+		// store error, not "credential not found".
+		let backend = FakeBackend {
+			fail_load_creds: Some(CredentialError::Serde("bad".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		let err = store.bind("o/r", Some("c1")).unwrap_err();
+		assert_eq!(err, BindError::Store(CredentialError::Serde("bad".into())));
+	}
+
+	#[test]
+	fn bind_missing_credential_still_maps_to_not_found() {
+		// finding #1 partner: a genuinely missing credential is still 404, not
+		// conflated with a store error.
+		let store = Store::with_backend(FakeBackend::with_creds(vec![]));
+		let err = store.bind("o/r", Some("gone")).unwrap_err();
+		assert_eq!(err, BindError::CredentialNotFound("gone".into()));
+	}
+
+	#[test]
+	fn bind_save_failure_surfaces_as_store_and_does_not_mutate() {
+		// finding #1: a save failure surfaces as Store, and the persisted
+		// bindings are not mutated (the in-memory map saw no successful write).
+		let backend = FakeBackend {
+			creds: Mutex::new(vec![cred("c1", "github.com", "T")]),
+			fail_save_bindings: Some(CredentialError::Keyring("disk".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		let err = store.bind("o/r", Some("c1")).unwrap_err();
+		assert_eq!(
+			err,
+			BindError::Store(CredentialError::Keyring("disk".into()))
+		);
+		assert!(
+			store.list_bindings().unwrap().0.is_empty(),
+			"failed save must leave persisted bindings unmutated"
+		);
+	}
+
+	#[test]
+	fn create_unique_rejects_duplicate_name_under_one_lock() {
+		// finding #2: the dup-name check + insert are one atomic op on the
+		// store, so the policy can't be bypassed by re-listing.
+		let store = Store::with_backend(FakeBackend::with_creds(vec![cred(
+			"c1",
+			"github.com",
+			"T",
+		)]));
+		let err = store.create_unique("github.com", "T2").unwrap_err();
+		assert_eq!(err, CreateError::Duplicate("github.com".into()));
+		// The store is unchanged (still exactly one credential).
+		assert_eq!(store.list().unwrap().len(), 1);
+	}
+
+	#[test]
+	fn create_unique_allows_new_name() {
+		let store = Store::with_backend(FakeBackend::with_creds(vec![cred(
+			"c1",
+			"github.com",
+			"T",
+		)]));
+		let new = store.create_unique("gitlab.com", "T2").unwrap();
+		assert_eq!(new.name, "gitlab.com");
+		assert_eq!(store.list().unwrap().len(), 2);
+	}
+
+	#[test]
+	fn create_unique_maps_store_failure() {
+		let backend = FakeBackend {
+			fail_store_creds: Some(CredentialError::Keyring("nope".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		let err = store.create_unique("github.com", "T").unwrap_err();
+		assert_eq!(
+			err,
+			CreateError::Store(CredentialError::Keyring("nope".into()))
+		);
+	}
+
+	#[test]
+	fn delete_prune_save_failure_is_non_fatal() {
+		// finding #6: the credential is deleted, then a binding-prune save
+		// failure must NOT turn the successful delete into an error (the route
+		// documents prune failure as non-fatal).
+		let mut bindings = SourceBindings::default();
+		bindings.0.insert("o/r".into(), "c1".into());
+		let backend = FakeBackend {
+			creds: Mutex::new(vec![cred("c1", "github.com", "T")]),
+			bindings: Mutex::new(bindings),
+			fail_save_bindings: Some(CredentialError::Keyring("disk".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		// Delete succeeds (returns removed=true) despite the prune save failing.
+		assert!(store.delete("c1").unwrap());
+		// The credential really is gone.
+		assert!(store.list().unwrap().is_empty());
+	}
+
+	#[test]
+	fn delete_prune_load_failure_is_non_fatal() {
+		// finding #1: if LOADING the bindings to prune fails after the credential
+		// is already deleted, the delete must still report success (non-fatal),
+		// not surface the bindings-load error.
+		let backend = FakeBackend {
+			creds: Mutex::new(vec![cred("c1", "github.com", "T")]),
+			fail_load_bindings: Some(CredentialError::Keyring("boom".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		assert!(store.delete("c1").unwrap());
+		assert!(store.list().unwrap().is_empty());
+	}
+
+	#[test]
+	fn clear_binding_succeeds_when_credential_load_fails() {
+		// finding #2: clearing a binding (credential_id == None) needs no
+		// credential validation, so a credentials keychain/serde failure must NOT
+		// block the unbind.
+		let mut bindings = SourceBindings::default();
+		bindings.0.insert("owner/repo".into(), "c1".into());
+		let backend = FakeBackend {
+			bindings: Mutex::new(bindings),
+			fail_load_creds: Some(CredentialError::Keyring("boom".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		store.bind("owner/repo", None).unwrap();
+		assert!(
+			store.list_bindings().unwrap().0.is_empty(),
+			"the binding should have been cleared"
+		);
+	}
+
+	#[test]
+	fn delete_propagates_credential_store_failure() {
+		// The credential store-write failure (not the prune) is still fatal:
+		// if we can't persist the credential removal, the delete must error.
+		let backend = FakeBackend {
+			creds: Mutex::new(vec![cred("c1", "github.com", "T")]),
+			fail_store_creds: Some(CredentialError::Keyring("ro".into())),
+			..FakeBackend::default()
+		};
+		let store = Store::with_backend(backend);
+		let err = store.delete("c1").unwrap_err();
+		assert_eq!(err, CredentialError::Keyring("ro".into()));
+	}
 
 	fn cred(id: &str, name: &str, token: &str) -> StoredCredential {
 		StoredCredential {
@@ -878,6 +1296,68 @@ mod tests {
 		);
 
 		std::env::remove_var("GIT_PASSWORD");
+	}
+
+	/// A fallback [`TokenResolver`] that records whether it was consulted and
+	/// returns a fixed token. Lets us prove `env_then`'s two halves (finding #3).
+	struct RecordingResolver {
+		token: Option<String>,
+		called: std::sync::atomic::AtomicBool,
+	}
+
+	impl TokenResolver for RecordingResolver {
+		fn resolve(
+			&self,
+			_source: &str,
+			_host: Option<&str>,
+		) -> Option<String> {
+			self.called.store(true, std::sync::atomic::Ordering::SeqCst);
+			self.token.clone()
+		}
+	}
+
+	#[test]
+	fn env_then_consults_fallback_when_env_unset() {
+		// finding #3: with env unset, the keyring (here: fake) fallback IS
+		// consulted and its token is returned.
+		let _guard = env_lock().lock().unwrap();
+		std::env::remove_var("GIT_PASSWORD");
+		std::env::remove_var("GITHUB_TOKEN");
+
+		let fallback = RecordingResolver {
+			token: Some("KEYTOK".into()),
+			called: std::sync::atomic::AtomicBool::new(false),
+		};
+		assert_eq!(
+			env_then(&fallback, "o/r", Some("github.com")),
+			Some("KEYTOK".into())
+		);
+		assert!(
+			fallback.called.load(std::sync::atomic::Ordering::SeqCst),
+			"fallback must be consulted when env is unset"
+		);
+	}
+
+	#[test]
+	fn env_then_skips_fallback_when_env_set() {
+		// finding #3: with env set, the env value wins AND the fallback is never
+		// consulted (so an env token short-circuits the keyring entirely).
+		let _guard = env_lock().lock().unwrap();
+		std::env::remove_var("GITHUB_TOKEN");
+		std::env::set_var("GIT_PASSWORD", "ENVWINS");
+
+		let fallback = RecordingResolver {
+			token: Some("KEYTOK".into()),
+			called: std::sync::atomic::AtomicBool::new(false),
+		};
+		let got = env_then(&fallback, "o/r", Some("github.com"));
+		std::env::remove_var("GIT_PASSWORD");
+
+		assert_eq!(got, Some("ENVWINS".into()));
+		assert!(
+			!fallback.called.load(std::sync::atomic::Ordering::SeqCst),
+			"fallback must NOT be consulted when env is set"
+		);
 	}
 
 	#[test]
