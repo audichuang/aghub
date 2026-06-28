@@ -2262,7 +2262,9 @@ mod tests {
 		result
 	}
 
-	#[cfg(unix)]
+	// Cross-platform: a plain tokio current-thread runtime wrapper, nothing
+	// unix-specific. Kept always-compiled because the (non-unix) OpenCode-project
+	// create_skill test uses it on every platform, so it is never dead code.
 	fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 		rocket::tokio::runtime::Builder::new_current_thread()
 			.enable_all()
@@ -2415,6 +2417,12 @@ mod tests {
 	// therefore dry_run=true EVEN with confirm=true (nothing ran), plus an
 	// explicit `deleted_path: null`. The route used to hand-build the response
 	// and reported dry_run=false under confirm=true.
+	//
+	// Unix-gated: uses `write_claude_skill`, which redirects HOME — but Windows
+	// `dirs::home_dir()` resolves via SHGetKnownFolderPath and ignores the
+	// override, so the Claude config seed would land in the real home, not the
+	// temp dir. The no-op logic is platform-agnostic and covered here on unix.
+	#[cfg(unix)]
 	#[test]
 	fn delete_skill_missing_skill_is_noop_dry_run_even_with_confirm() {
 		with_isolated_env(|home, _state| {
@@ -2449,6 +2457,12 @@ mod tests {
 
 	// Missing config (manager.load() -> NotFound) is also a no-op and must
 	// report the same shape via the shared helper: dry_run=true under confirm.
+	//
+	// Unix-gated: NotFound only holds when HOME is redirected to an empty temp
+	// dir so Claude's `~/.claude` config is absent. Windows `dirs::home_dir()`
+	// ignores the HOME override and would read the real home, so the assertion
+	// is unreliable there. The no-op shape is platform-agnostic; covered on unix.
+	#[cfg(unix)]
 	#[test]
 	fn delete_skill_missing_config_is_noop_dry_run_even_with_confirm() {
 		with_isolated_env(|_home, _state| {
@@ -2482,6 +2496,13 @@ mod tests {
 	// per-agent-linking agent (Claude) reports false (key omitted), while a
 	// NativeReader (OpenCode at project scope, reads `.agents/skills` directly)
 	// reports true. Both go through the REAL handler.
+	//
+	// The Claude case is unix-gated: a global add writes to
+	// `dirs::home_dir()/.claude/skills`, and Windows `dirs::home_dir()` ignores
+	// the HOME override (SHGetKnownFolderPath), so it would pollute the real
+	// home. The OpenCode-project case below writes only under the temp
+	// project_root (no `dirs::home_dir()`), so it stays cross-platform — and is
+	// the always-compiled caller that keeps `block_on` alive on Windows.
 	#[cfg(unix)]
 	#[test]
 	fn create_skill_native_reader_false_for_claude() {
@@ -2519,7 +2540,6 @@ mod tests {
 		});
 	}
 
-	#[cfg(unix)]
 	#[test]
 	fn create_skill_native_reader_true_for_opencode_project() {
 		with_isolated_env(|home, _state| {

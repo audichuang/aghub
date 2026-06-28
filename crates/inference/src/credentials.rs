@@ -49,11 +49,26 @@ impl CredentialStore for NativeCredentialStore {
 		Ok(())
 	}
 
+	/// Delete is **idempotent and best-effort across platforms**.
+	///
+	/// Removing a provider must succeed even if its keychain entry is absent or
+	/// the backend is unreachable — the inventory removal is the real
+	/// operation; the key is being discarded either way. `NoEntry` is the
+	/// "already gone" case (Linux secret-service); other backends (e.g. the
+	/// macOS keychain) report an absent/locked entry as a *different* error, so
+	/// we log and swallow any error rather than fail the delete. `get`/`set`
+	/// keep surfacing errors — only delete is best-effort.
 	fn delete_api_key(&self, provider_id: &str) -> Result<()> {
 		let entry = Self::entry(provider_id)?;
 		match entry.delete_credential() {
 			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-			Err(error) => Err(error.into()),
+			Err(error) => {
+				log::warn!(
+					"ignoring keyring delete error for provider {provider_id}: \
+					 {error}"
+				);
+				Ok(())
+			}
 		}
 	}
 }
