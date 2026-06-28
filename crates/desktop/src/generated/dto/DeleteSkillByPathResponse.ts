@@ -23,6 +23,11 @@ export type DeleteSkillByPathResponse = {
 	 * Paths intentionally NOT removed (outside the allow-listed skills roots).
 	 */
 	skipped: Array<string>;
+	/**
+	 * Absolute path actually removed (only when `executed`); `null` otherwise.
+	 * Always serialized (no skip) so the runtime matches both the shared
+	 * `RemovalView` wire shape and the generated `deleted_path: string | null`.
+	 */
 	deleted_path: string | null;
 	/**
 	 * Lock keys (skill names — never raw paths) dropped by the post-delete

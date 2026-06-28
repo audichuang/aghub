@@ -304,7 +304,7 @@ fn delete_skill_yes_prunes_and_reports() {
 	let state = tempfile::TempDir::new().unwrap();
 	let skill_dir = write_claude_skill(home.path(), "goner");
 	// An orphan lock entry (no on-disk skill) the executed prune must drop and
-	// the JSON must report under `prunedLockEntries`.
+	// the JSON must report under `pruned_lock_entries`.
 	seed_global_lock(state.path());
 
 	let out = isolated_cli(home.path(), state.path())
@@ -320,12 +320,17 @@ fn delete_skill_yes_prunes_and_reports() {
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert_eq!(json["executed"], true);
 	assert!(!skill_dir.exists(), "--yes removes the copy");
-	let pruned = json["prunedLockEntries"]
+	let pruned = json["pruned_lock_entries"]
 		.as_array()
-		.expect("prunedLockEntries present on executed delete");
+		.expect("pruned_lock_entries present on executed delete");
 	assert!(
 		pruned.iter().any(|n| n == "orphan"),
 		"orphan lock entry must be reported pruned: {pruned:?}"
+	);
+	// One wire shape with the API/desktop DTO: never the legacy camelCase key.
+	assert!(
+		json.get("prunedLockEntries").is_none(),
+		"prune keys must be snake_case to match the API DeleteSkillByPathResponse"
 	);
 }
 
@@ -634,8 +639,8 @@ fn perms_enforced(under: &std::path::Path) -> bool {
 }
 
 /// A prune write failure is non-fatal: the skill is still deleted and the JSON
-/// surfaces `pruneError` (read-only lock dir forces the post-delete lock write
-/// to fail). Pins the `PruneStatus::Failed` -> `pruneError` serialization.
+/// surfaces `prune_error` (read-only lock dir forces the post-delete lock write
+/// to fail). Pins the `PruneStatus::Failed` -> `prune_error` serialization.
 #[cfg(unix)]
 #[test]
 fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
@@ -675,8 +680,13 @@ fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
 		"--yes deletes the skill even if prune fails"
 	);
 	assert!(
-		json["pruneError"].is_string(),
-		"prune failure must surface pruneError: {json}"
+		json["prune_error"].is_string(),
+		"prune failure must surface prune_error: {json}"
+	);
+	// One wire shape with the API/desktop DTO: never the legacy camelCase key.
+	assert!(
+		json.get("pruneError").is_none(),
+		"prune_error must be snake_case to match the API DeleteSkillByPathResponse"
 	);
 }
 

@@ -266,15 +266,10 @@ pub fn delete_sub_agent(
 	manager.load().map_err(ApiError::from)?;
 	match manager.remove_sub_agent_planned(&name, dry_run, confirm) {
 		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
-		// Missing sub-agent is not an error: dry-run-shaped Ok, mirroring the
-		// skill/MCP delete routes.
+		// Missing sub-agent is not an error: no-op success through the shared
+		// removal seam, mirroring the skill/MCP delete routes.
 		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
-				executed: false,
-				..Default::default()
-			}))
+			Ok(Json(crate::routes::noop_removal_response(vec![], vec![])))
 		}
 		Err(e) => Err(ApiError::from(e)),
 	}
@@ -409,6 +404,10 @@ mod tests {
 
 		assert!(resp.success);
 		assert!(!resp.executed, "nothing to remove");
+		assert!(
+			resp.deleted_path.is_none(),
+			"no-op missing delete must leave deleted_path null"
+		);
 		assert!(sub_agent_exists(root, "present"), "real agent untouched");
 	}
 

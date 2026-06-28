@@ -224,24 +224,17 @@ pub fn delete_mcp(
 		// (success:true, executed:false) so the wire shape is uniform across
 		// the skill/MCP/sub-agent delete routes.
 		Err(ConfigError::NotFound { .. }) => {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
-				executed: false,
-				..Default::default()
-			}));
+			return Ok(Json(crate::routes::noop_removal_response(
+				vec![],
+				vec![],
+			)));
 		}
 		Err(e) => return Err(ApiError::from(e)),
 	}
 	match manager.remove_mcp_planned(name, dry_run, confirm) {
 		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
 		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
-				executed: false,
-				..Default::default()
-			}))
+			Ok(Json(crate::routes::noop_removal_response(vec![], vec![])))
 		}
 		Err(e) => Err(ApiError::from(e)),
 	}
@@ -554,6 +547,10 @@ mod tests {
 
 		assert!(resp.success);
 		assert!(!resp.executed, "nothing to remove");
+		assert!(
+			resp.deleted_path.is_none(),
+			"no-op missing delete must leave deleted_path null"
+		);
 		assert!(mcp_exists(root, "present"), "the real mcp is untouched");
 	}
 
@@ -576,6 +573,10 @@ mod tests {
 		assert!(resp.success);
 		assert!(resp.dry_run);
 		assert!(!resp.executed);
+		assert!(
+			resp.deleted_path.is_none(),
+			"no-op leaves deleted_path null"
+		);
 	}
 
 	#[test]

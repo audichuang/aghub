@@ -285,13 +285,10 @@ pub async fn delete_skill_by_path(
 	}
 
 	if !skill_dir.exists() {
-		// Idempotent: nothing on disk to remove.
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: true,
-			dry_run: !req.confirm.unwrap_or(false),
-			deleted_path: Some(skill_dir.display().to_string()),
-			..Default::default()
-		}));
+		// Idempotent: nothing on disk to remove. Route through the shared
+		// removal seam so the wire shape can't drift — `deleted_path` stays null
+		// because nothing executed (the old hand-built body wrongly set it).
+		return Ok(Json(crate::routes::noop_removal_response(vec![], vec![])));
 	}
 
 	if let Some(plugin_name) = detect_plugin_for_path(&skill_dir).await {
@@ -403,12 +400,12 @@ pub async fn delete_skill_by_path(
 			&all_in_scope,
 			&safe_name,
 		) {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
-				skipped: vec![skill_dir.display().to_string()],
-				..Default::default()
-			}));
+			// Kept (skipped) because another in-scope agent still symlinks this
+			// master. No-op success through the shared removal seam.
+			return Ok(Json(crate::routes::noop_removal_response(
+				vec![],
+				vec![skill_dir.clone()],
+			)));
 		}
 		let plan = aghub_core::skills::removal::RemovalPlan {
 			layout: aghub_core::skills::removal::Layout::Copy,
@@ -1034,12 +1031,10 @@ pub async fn delete_skill(
 	match manager.load() {
 		Ok(_) => {}
 		Err(ConfigError::NotFound { .. }) => {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run: !params.confirm.unwrap_or(false),
-				executed: false,
-				..Default::default()
-			}));
+			return Ok(Json(crate::routes::noop_removal_response(
+				vec![],
+				vec![],
+			)));
 		}
 		Err(e) => return Err(ApiError::from(e)),
 	}
@@ -1058,12 +1053,7 @@ pub async fn delete_skill(
 		// the handler must NOT prune again.
 		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
 		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
-				executed: false,
-				..Default::default()
-			}))
+			Ok(Json(crate::routes::noop_removal_response(vec![], vec![])))
 		}
 		Err(e) => Err(ApiError::from(e)),
 	}
@@ -2350,6 +2340,33 @@ mod tests {
 		});
 	}
 
+	// Regression: deleting a path that is not on disk must be an idempotent
+	// no-op routed through the shared RemovalView — `deleted_path` MUST be null
+	// because nothing executed. The old hand-built branch wrongly echoed the
+	// missing path into `deleted_path` while `executed` stayed false.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_missing_is_noop_with_null_deleted_path() {
+		with_isolated_env(|home, _state| {
+			// A valid-but-absent skill dir under the allow-listed claude root.
+			let dir = home.join(".claude/skills").join("ghost");
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&dir,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+			assert!(resp.success);
+			assert!(!resp.executed, "nothing on disk to remove");
+			assert!(
+				resp.deleted_path.is_none(),
+				"deleted_path must be null when nothing executed"
+			);
+			assert!(resp.paths.is_empty());
+		});
+	}
+
 	// The delete_skill handler must NOT prune the lock itself — that moved into
 	// remove_skill_planned. This proves the manager-side prune still fires
 	// through the API path: an orphan global-lock entry (no dir on disk) is gone
@@ -2387,6 +2404,74 @@ mod tests {
 			assert!(
 				parsed["skills"].get("orphan").is_none(),
 				"manager-side prune must drop the orphan lock entry"
+			);
+		});
+	}
+
+	// A no-op delete-by-name (missing skill) must go through the shared
+	// noop_removal_response seam like MCP/sub-agent routes: executed=false and
+	// therefore dry_run=true EVEN with confirm=true (nothing ran), plus an
+	// explicit `deleted_path: null`. The route used to hand-build the response
+	// and reported dry_run=false under confirm=true.
+	#[test]
+	fn delete_skill_missing_skill_is_noop_dry_run_even_with_confirm() {
+		with_isolated_env(|home, _state| {
+			// Claude config dir exists (load succeeds) but the skill does not.
+			write_claude_skill(home, "present");
+
+			let resp = block_on(delete_skill(
+				AgentParam(AgentType::Claude),
+				"absent",
+				DeleteSkillParams {
+					scope: Some("global".to_string()),
+					project_root: None,
+					confirm: Some(true),
+					all_agents: None,
+				},
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+
+			assert!(resp.success);
+			assert!(!resp.executed, "nothing was removed");
+			assert!(resp.dry_run, "no-op must report dry_run even on confirm");
+			let json = serde_json::to_value(&resp).unwrap();
+			assert_eq!(
+				json["deleted_path"],
+				serde_json::Value::Null,
+				"no-op must emit deleted_path: null"
+			);
+		});
+	}
+
+	// Missing config (manager.load() -> NotFound) is also a no-op and must
+	// report the same shape via the shared helper: dry_run=true under confirm.
+	#[test]
+	fn delete_skill_missing_config_is_noop_dry_run_even_with_confirm() {
+		with_isolated_env(|_home, _state| {
+			let resp = block_on(delete_skill(
+				AgentParam(AgentType::Claude),
+				"absent",
+				DeleteSkillParams {
+					scope: Some("global".to_string()),
+					project_root: None,
+					confirm: Some(true),
+					all_agents: None,
+				},
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+
+			assert!(resp.success);
+			assert!(!resp.executed, "nothing was removed");
+			assert!(resp.dry_run, "no-op must report dry_run even on confirm");
+			let json = serde_json::to_value(&resp).unwrap();
+			assert_eq!(
+				json["deleted_path"],
+				serde_json::Value::Null,
+				"no-op must emit deleted_path: null"
 			);
 		});
 	}

@@ -13,17 +13,27 @@ use crate::models::{ConfigSource, Skill};
 use serde::Serialize;
 
 /// Wire view of a [`Skill`] plus the `native_reader` install advisory.
+///
+/// The `skip_serializing_if` attributes here must mirror the api
+/// `SkillResponse` exactly (`canonical_path`/`source`/`agent` skipped when
+/// `None`; `source_path`/`description`/`author`/`version` serialize as null) so
+/// the CLI (which serializes this view directly) and the API wrapper are one
+/// wire shape. The `skill_view_and_response_serialize_the_same_wire_shape`
+/// test in `crates/api` pins that parity.
 #[derive(Debug, Clone, Serialize)]
 pub struct SkillView {
 	pub name: String,
 	pub enabled: bool,
 	pub source_path: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub canonical_path: Option<String>,
 	pub description: Option<String>,
 	pub author: Option<String>,
 	pub version: Option<String>,
 	pub tools: Vec<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub source: Option<ConfigSource>,
+	#[serde(skip_serializing_if = "Option::is_none")]
 	pub agent: Option<String>,
 	/// Advisory: the target agent is a NativeReader (reads the `.agents`
 	/// master directly), so a universal install writes only the master with

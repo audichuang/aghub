@@ -82,11 +82,13 @@ pub fn execute(
 }
 
 /// Render a skill removal's [`PruneStatus`] onto the JSON `payload`, matching
-/// the API's `DeleteSkillByPathResponse` fields:
+/// the API's `DeleteSkillByPathResponse` fields. Keys are **snake_case**
+/// (`pruned_lock_entries`/`prune_error`) so the CLI and the API/desktop DTO are
+/// one wire shape — the same convention the shared `RemovalView` uses:
 ///
 /// - `NotRun` → no keys (no prune was attempted).
-/// - `Pruned(keys)` → `prunedLockEntries` (empty = ran, nothing orphaned).
-/// - `Failed { reason, pruned }` → `pruneError` plus `prunedLockEntries` for
+/// - `Pruned(keys)` → `pruned_lock_entries` (empty = ran, nothing orphaned).
+/// - `Failed { reason, pruned }` → `prune_error` plus `pruned_lock_entries` for
 ///   the keys dropped BEFORE the failure. The list is ALWAYS emitted (even
 ///   when empty) so the CLI and API agree on the `Failed` shape; a `Both`-scope
 ///   prune can leave a non-empty partial here.
@@ -94,11 +96,11 @@ fn apply_prune_fields(payload: &mut serde_json::Value, prune: &PruneStatus) {
 	match prune {
 		PruneStatus::NotRun => {}
 		PruneStatus::Pruned(keys) => {
-			payload["prunedLockEntries"] = json!(keys);
+			payload["pruned_lock_entries"] = json!(keys);
 		}
 		PruneStatus::Failed { reason, pruned } => {
-			payload["pruneError"] = json!(reason);
-			payload["prunedLockEntries"] = json!(pruned);
+			payload["prune_error"] = json!(reason);
+			payload["pruned_lock_entries"] = json!(pruned);
 		}
 	}
 }
@@ -111,8 +113,8 @@ mod tests {
 	fn prune_not_run_adds_no_keys() {
 		let mut payload = json!({});
 		apply_prune_fields(&mut payload, &PruneStatus::NotRun);
-		assert!(payload.get("prunedLockEntries").is_none());
-		assert!(payload.get("pruneError").is_none());
+		assert!(payload.get("pruned_lock_entries").is_none());
+		assert!(payload.get("prune_error").is_none());
 	}
 
 	#[test]
@@ -120,8 +122,10 @@ mod tests {
 		let mut payload = json!({});
 		let prune = PruneStatus::Pruned(vec!["a".into(), "b".into()]);
 		apply_prune_fields(&mut payload, &prune);
-		assert_eq!(payload["prunedLockEntries"], json!(["a", "b"]));
-		assert!(payload.get("pruneError").is_none());
+		assert_eq!(payload["pruned_lock_entries"], json!(["a", "b"]));
+		assert!(payload.get("prune_error").is_none());
+		// One wire shape with the API: never emit the legacy camelCase keys.
+		assert!(payload.get("prunedLockEntries").is_none());
 	}
 
 	#[test]
@@ -134,21 +138,23 @@ mod tests {
 			pruned: vec!["g1".into()],
 		};
 		apply_prune_fields(&mut payload, &prune);
-		assert_eq!(payload["pruneError"], json!("boom"));
-		assert_eq!(payload["prunedLockEntries"], json!(["g1"]));
+		assert_eq!(payload["prune_error"], json!("boom"));
+		assert_eq!(payload["pruned_lock_entries"], json!(["g1"]));
+		assert!(payload.get("pruneError").is_none());
+		assert!(payload.get("prunedLockEntries").is_none());
 	}
 
 	#[test]
 	fn prune_failed_empty_keys_still_emits_empty_lock_entries() {
 		// Consistency with the API: `Failed { pruned: [] }` emits an empty
-		// `prunedLockEntries` plus the error, not a missing field.
+		// `pruned_lock_entries` plus the error, not a missing field.
 		let mut payload = json!({});
 		let prune = PruneStatus::Failed {
 			reason: "boom".into(),
 			pruned: vec![],
 		};
 		apply_prune_fields(&mut payload, &prune);
-		assert_eq!(payload["pruneError"], json!("boom"));
-		assert_eq!(payload["prunedLockEntries"], json!([]));
+		assert_eq!(payload["prune_error"], json!("boom"));
+		assert_eq!(payload["pruned_lock_entries"], json!([]));
 	}
 }

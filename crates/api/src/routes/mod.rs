@@ -48,6 +48,27 @@ pub(crate) fn removal_response(
 	response
 }
 
+/// Removal-shaped success body for a **no-op** delete (nothing on disk to
+/// remove, or the targeted dir is a shared master kept for another agent). Goes
+/// through the same `RemovalView` seam as a real removal so these edge branches
+/// can't drift from the wire shape — in particular `deleted_path` stays `null`
+/// because `executed` is false.
+pub(crate) fn noop_removal_response(
+	paths: Vec<PathBuf>,
+	skipped: Vec<PathBuf>,
+) -> DeleteSkillByPathResponse {
+	removal_response(RemovalOutcome {
+		plan: aghub_core::skills::removal::RemovalPlan {
+			layout: aghub_core::skills::removal::Layout::Copy,
+			paths,
+			skipped,
+			needs_confirm: false,
+		},
+		executed: false,
+		prune: PruneStatus::NotRun,
+	})
+}
+
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
 	static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> =
