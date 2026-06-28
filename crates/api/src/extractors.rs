@@ -50,6 +50,20 @@ pub fn absolutize_root(root: &str) -> PathBuf {
 }
 
 impl ScopeParams {
+	/// Resolve the request scope. A MISSING `scope` defaults to `global` — this
+	/// is INTENTIONALLY different from the CLI, whose unscoped `source
+	/// list`/`diff` default to `All` (global + the detected project).
+	///
+	/// The two surfaces differ on purpose: the CLI runs in a user's working
+	/// directory and can cheaply detect a project root, so "everything in
+	/// scope here" (`All`) is the useful default. The API is a stateless
+	/// localhost server with no meaningful cwd — `All` would have to guess a
+	/// project root from the server process's directory, which is not the
+	/// caller's project. The desktop client (the only real consumer) always
+	/// sends an explicit `scope`, so this default only affects raw HTTP
+	/// callers, for whom `global` is the safe, unambiguous choice.
+	/// `routes::sources::tests::missing_scope_defaults_to_global_not_all` pins
+	/// this; the CLI's `All` default lives in `resolve_read_scopes`.
 	pub fn resolve(&self) -> Result<ResolvedScope, ApiError> {
 		let scope = self.scope.as_deref().unwrap_or("global");
 		match scope {

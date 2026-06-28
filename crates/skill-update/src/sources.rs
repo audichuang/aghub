@@ -206,9 +206,66 @@ pub struct SourceDiffInput {
 	pub scopes: Vec<SourceScope>,
 }
 
-pub struct SourceDiffDeps<'a> {
+/// The injected fetch boundary shared by every Sources flow (`diff_source`,
+/// `scan_for_sync`). Both surfaces pass the SAME pair (a `Fetcher` + a
+/// `TokenResolver`); only the classification shape downstream differs, so there
+/// is one deps type, not one per entry point.
+pub struct SourceDeps<'a> {
 	pub fetcher: &'a dyn Fetcher,
 	pub resolver: &'a dyn TokenResolver,
+}
+
+/// Backwards-compatible alias for the unified [`SourceDeps`]. Kept so the API
+/// route name reads naturally; new code should use `SourceDeps`.
+pub type SourceDiffDeps<'a> = SourceDeps<'a>;
+/// Backwards-compatible alias for the unified [`SourceDeps`]. Kept so the CLI
+/// sync call site reads naturally; new code should use `SourceDeps`.
+pub type SourceSyncDeps<'a> = SourceDeps<'a>;
+
+/// Failure of the shared resolve → precheck → fetch prologue. Both
+/// [`diff_source`] and [`scan_for_sync`] map it to their own output shape; it
+/// carries the resolved [`ResolvedSourceMeta`] so callers that report the
+/// effective ref on a failure (the API) still can.
+pub enum FetchPrologueError {
+	/// Local/ssh/unsupported scheme — known before any fetch.
+	Uncheckable {
+		meta: ResolvedSourceMeta,
+		reason: UncheckableReason,
+	},
+	/// Authentication failed (even after a token retry).
+	Auth { meta: ResolvedSourceMeta },
+	/// Network/transport failure.
+	Network { meta: ResolvedSourceMeta },
+}
+
+/// The ONE shared prologue every Sources fetch runs: resolve
+/// `(source_type, effective_ref)` from the lock entries (no fetch), skip
+/// un-fetchable schemes up front, then fetch ONCE (lazily authenticating).
+/// Returns the fetched repo plus the resolved meta; both entry points map the
+/// outcome onto their own result shape. This is the single resolution +
+/// precheck + fetch path the duplicated `diff_source`/`scan_for_sync` prologues
+/// collapsed into.
+pub fn resolve_precheck_fetch(
+	source: &str,
+	scopes: &[SourceScope],
+	explicit_ref: Option<&str>,
+	deps: &SourceDeps<'_>,
+) -> Result<(crate::FetchedRepo, ResolvedSourceMeta), FetchPrologueError> {
+	let meta = resolve_source_meta(source, scopes, explicit_ref);
+
+	if let Some(reason) = precheck_source(&meta.source_type, source) {
+		return Err(FetchPrologueError::Uncheckable { meta, reason });
+	}
+
+	let source_ref = SourceRef {
+		source: source.to_string(),
+		ref_: meta.effective_ref.clone(),
+	};
+	match fetch_source_with_resolver(&source_ref, deps.fetcher, deps.resolver) {
+		Ok(repo) => Ok((repo, meta)),
+		Err(FetchError::Auth) => Err(FetchPrologueError::Auth { meta }),
+		Err(FetchError::Network) => Err(FetchPrologueError::Network { meta }),
+	}
 }
 
 pub fn list_sources(input: SourceListInput) -> Vec<SourceSummary> {
@@ -915,38 +972,36 @@ pub fn diff_source(
 	let (baseline, _src_type, _recorded_ref) =
 		merged_baseline_for_source(&input.scopes, &source);
 
-	// Resolve `(source_type, effective_ref)` via the SHARED helper so the API
-	// and CLI agree on the fetch coordinate. `effective_ref` = explicit query
-	// ref, else the source's RECORDED ref, else None (the repo default branch).
-	let meta =
-		resolve_source_meta(&source, &input.scopes, input.git_ref.as_deref());
-	let git_ref = meta.effective_ref;
-
-	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
-	if let Some(reason) = precheck_source(&meta.source_type, &source) {
-		return SourceDiffOutcome::UncheckableSource { git_ref, reason };
-	}
-
-	let source_ref = SourceRef {
-		source: source.clone(),
-		ref_: git_ref.clone(),
-	};
-	match fetch_source_with_resolver(&source_ref, deps.fetcher, deps.resolver) {
-		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential { git_ref },
-		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
-		Ok(repo) => SourceDiffOutcome::Ok {
-			git_ref,
+	// Resolve → precheck → fetch via the ONE shared prologue (the SAME path
+	// `scan_for_sync` runs). `effective_ref` = explicit query ref, else the
+	// source's RECORDED ref, else None (the repo default branch). The prologue
+	// carries the resolved meta back on every failure so the recorded-ref
+	// fallback survives a credential miss / uncheckable early-out.
+	match resolve_precheck_fetch(
+		&source,
+		&input.scopes,
+		input.git_ref.as_deref(),
+		&deps,
+	) {
+		Ok((repo, meta)) => SourceDiffOutcome::Ok {
+			git_ref: meta.effective_ref,
 			skills: classify_repo_skills(repo.root.as_path(), &baseline),
 		},
+		Err(FetchPrologueError::Uncheckable { meta, reason }) => {
+			SourceDiffOutcome::UncheckableSource {
+				git_ref: meta.effective_ref,
+				reason,
+			}
+		}
+		Err(FetchPrologueError::Auth { meta }) => {
+			SourceDiffOutcome::NeedsCredential {
+				git_ref: meta.effective_ref,
+			}
+		}
+		Err(FetchPrologueError::Network { .. }) => {
+			SourceDiffOutcome::FetchFailed
+		}
 	}
-}
-
-/// Injected fetch boundary for `sync`, symmetric to [`SourceDiffDeps`]. The CLI
-/// passes its env-then-keyring resolver and debug fetch hook; a real API sync
-/// route (none exists today) would pass its own pair.
-pub struct SourceSyncDeps<'a> {
-	pub fetcher: &'a dyn Fetcher,
-	pub resolver: &'a dyn TokenResolver,
 }
 
 /// The read-only result of [`scan_for_sync`]: the fetched repo (reused for
@@ -983,31 +1038,23 @@ pub fn scan_for_sync(
 ) -> Result<SyncScan, SyncScanError> {
 	let source = source.trim();
 
-	// Resolve `(source_type, effective_ref)` from the lock entries via the
-	// SHARED helper (the SAME resolution the API runs) so sync fetches/installs
-	// from the recorded ref — not the default branch — and prechecks with the
-	// recorded source_type rather than a hard-coded "github".
-	let meta =
-		resolve_source_meta(source, std::slice::from_ref(scope), git_ref);
-
-	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
-	if let Some(reason) = precheck_source(&meta.source_type, source) {
-		return Err(SyncScanError::Uncheckable(reason));
-	}
-
-	let source_ref = SourceRef {
-		source: source.to_string(),
-		ref_: meta.effective_ref.clone(),
-	};
-	let repo = match fetch_source_with_resolver(
-		&source_ref,
-		deps.fetcher,
-		deps.resolver,
-	) {
-		Ok(repo) => repo,
-		Err(FetchError::Auth) => return Err(SyncScanError::NeedsCredential),
-		Err(FetchError::Network) => return Err(SyncScanError::FetchFailed),
-	};
+	// Resolve → precheck → fetch via the ONE shared prologue (the SAME path
+	// `diff_source` runs) so sync fetches/installs from the recorded ref — not
+	// the default branch — and prechecks with the recorded source_type rather
+	// than a hard-coded "github".
+	let (repo, meta) = resolve_precheck_fetch(
+		source,
+		std::slice::from_ref(scope),
+		git_ref,
+		&deps,
+	)
+	.map_err(|e| match e {
+		FetchPrologueError::Uncheckable { reason, .. } => {
+			SyncScanError::Uncheckable(reason)
+		}
+		FetchPrologueError::Auth { .. } => SyncScanError::NeedsCredential,
+		FetchPrologueError::Network { .. } => SyncScanError::FetchFailed,
+	})?;
 
 	let diffs = classify_scope(repo.root.as_path(), scope, source);
 	Ok(SyncScan {

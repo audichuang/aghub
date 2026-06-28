@@ -49,7 +49,13 @@ fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
 			(ScopeSelector::All, project_root.clone())
 		}
 	};
-	sources::read_scopes(sel, project_root).unwrap_or_default()
+	// INVARIANT: `ScopeParams::resolve` already rejects `?scope=project` with no
+	// resolvable `project_root`, so `read_scopes` can never hit its
+	// `ProjectRootRequired` arm here. `expect` surfaces an invariant violation
+	// loudly instead of silently degrading to an empty scope list (which would
+	// return an empty result and swallow the bug).
+	sources::read_scopes(sel, project_root)
+		.expect("scope already validated by ScopeParams::resolve")
 }
 
 /// Production fetch is [`GitFetcher`]. Under `cfg(test)` an env hook
@@ -327,6 +333,58 @@ mod tests {
 			SourceScope::Project { root: r } => assert_eq!(*r, root),
 			other => panic!("expected Project scope, got {other:?}"),
 		}
+	}
+
+	/// `Project { root }` maps to a single project scope carrying the root —
+	/// the boundary `scopes_for` must not silently drop it (the old
+	/// `unwrap_or_default()` would have, had the shared mapper ever erred).
+	#[test]
+	fn scopes_for_project_is_project_only() {
+		let root = PathBuf::from("/tmp/aghub-scope-test-project");
+		let scopes = scopes_for(&ResolvedScope::Project { root: root.clone() });
+
+		assert_eq!(scopes.len(), 1);
+		match &scopes[0] {
+			SourceScope::Project { root: r } => assert_eq!(*r, root),
+			other => panic!("expected Project scope, got {other:?}"),
+		}
+	}
+
+	/// `All { project_root: None }` (no project detected) maps to global only —
+	/// never an empty list. Locks the no-root arm so a regression that swallowed
+	/// the mapper into an empty default would surface here.
+	#[test]
+	fn scopes_for_all_without_root_is_global_only() {
+		let scopes = scopes_for(&ResolvedScope::All { project_root: None });
+
+		assert_eq!(scopes.len(), 1);
+		assert!(matches!(scopes[0], SourceScope::Global));
+	}
+
+	/// Finding 2 (cross-surface default-scope parity): a Sources request with NO
+	/// `scope` resolves to GLOBAL only — never `All` — on the API. This is the
+	/// INTENTIONAL divergence from the CLI (whose unscoped default is `All`);
+	/// see `ScopeParams::resolve` for the rationale. Pinning it here ensures a
+	/// future "make them match" change is a deliberate, test-breaking edit
+	/// rather than a silent behavior shift for raw HTTP callers.
+	#[test]
+	fn missing_scope_defaults_to_global_not_all() {
+		let resolved = ScopeParams {
+			scope: None,
+			project_root: None,
+		}
+		.resolve()
+		.unwrap_or_else(|_| panic!("missing scope resolves"));
+
+		assert!(
+			matches!(resolved, ResolvedScope::Global),
+			"API must default a missing scope to Global (not All), \
+			 intentionally unlike the CLI"
+		);
+
+		let scopes = scopes_for(&resolved);
+		assert_eq!(scopes.len(), 1, "global-only, never the All fan-out");
+		assert!(matches!(scopes[0], SourceScope::Global));
 	}
 
 	#[test]

@@ -971,6 +971,154 @@ fn source_sync_dry_run_writes_nothing() {
 
 #[cfg(unix)]
 #[test]
+fn source_sync_project_scope_reports_project_and_skips_global_lock() {
+	// Finding 2 (project-scope boundary): `source sync -p` must map the
+	// `Project` selector through the shared `write_scope` mapper back to the
+	// CLI's `ProjectOnly` scope, carry the detected project root, and emit the
+	// "project" label — never touching the global lock. The shared mapper unit
+	// test only covers the pure function; this locks the CLI end to end.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	// `.claude/` is an agent marker, so `find_project_root` detects the root.
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let mut cmd = isolated_cli(home.path(), state.path());
+	cmd.current_dir(project.path());
+	let out = cmd
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-p",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		json["scope"].as_str(),
+		Some("project"),
+		"project-scope sync must report the project label: {json}"
+	);
+
+	// Dry-run by default: writes nothing to either lock.
+	let global_lock = state.path().join("skills/.skill-lock.json");
+	assert!(
+		!global_lock.exists(),
+		"project-scope sync must never touch the global lock"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_project_scope_yes_writes_project_lock_not_global() {
+	// Finding 3 (project-scope WRITE path): `source sync -p --yes` must apply
+	// to the PROJECT scope — writing `<project>/skills-lock.json` and the
+	// project agent dir — and NEVER touch the global lock. The dry-run test
+	// above exercises only the read prologue; this locks the ResourceScope /
+	// project_root wiring on the actual `--yes` apply branch.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let mut cmd = isolated_cli(home.path(), state.path());
+	cmd.current_dir(project.path());
+	let out = cmd
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// Project lock written at the project root, recording the skill.
+	let project_lock = project.path().join("skills-lock.json");
+	assert!(
+		project_lock.exists(),
+		"project-scope --yes must write the PROJECT lock"
+	);
+	let raw = std::fs::read_to_string(&project_lock).unwrap();
+	let parsed: Value = serde_json::from_str(&raw).unwrap();
+	assert!(
+		!parsed["skills"]["alpha"].is_null(),
+		"alpha must be recorded in the project lock: {raw}"
+	);
+
+	// The global lock must NOT exist — project scope writes only the project.
+	let global_lock = state.path().join("skills/.skill-lock.json");
+	assert!(
+		!global_lock.exists(),
+		"project-scope --yes must never write the global lock"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_project_scope_without_project_root_errors() {
+	// Finding 3 (project-scope, no root): `source sync -p` from a directory
+	// with no agent marker has no project root to write to. The shared
+	// `write_scope` mapper rejects it (`ProjectRootRequired`) and the CLI
+	// must surface that as a failure — not silently fall back to global.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// A bare cwd with NO agent marker => `find_project_root` returns None.
+	let bare = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let mut cmd = isolated_cli(home.path(), state.path());
+	cmd.current_dir(bare.path());
+	let out = cmd
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-p", "source", "sync", "owner/repo", "--install-missing"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"`-p` with no project root must fail, not default to global"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("no project root"),
+		"expected the project-root-required error: {stderr}"
+	);
+
+	// Nothing written to the global lock as a side effect.
+	let global_lock = state.path().join("skills/.skill-lock.json");
+	assert!(
+		!global_lock.exists(),
+		"a rejected project-scope sync must not write the global lock"
+	);
+}
+
+#[cfg(unix)]
+#[test]
 fn source_sync_yes_installs_missing() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
