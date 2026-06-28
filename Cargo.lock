@@ -177,6 +177,7 @@ dependencies = [
  "aghub-json",
  "dirs 6.0.0",
  "keyring",
+ "log",
  "serde",
  "serde_json",
  "sqlx",

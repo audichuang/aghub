@@ -17,11 +17,10 @@ use aghub_core::paths::find_project_root;
 use aghub_core::transfer::{
 	reconcile_mcp, reconcile_skill, reconcile_sub_agent, transfer_mcp,
 	transfer_skill, transfer_sub_agent, InstallScope, InstallTarget,
-	OperationBatchResult, ResourceLocator,
+	OperationBatchResult, OperationBatchView, ResourceLocator,
 };
 use anyhow::{bail, Result};
 use clap::Subcommand;
-use serde_json::json;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -184,27 +183,17 @@ pub fn execute_reconcile(
 // `resolve_scope` maps the top-level -g/-p flags into `InstallScope` directly so
 // the two enums never get mixed.
 
-/// Render an [`OperationBatchResult`] as a table (default) or a JSON array
-/// (`--json`), then fail with a non-zero exit when any target failed.
+/// Render an [`OperationBatchResult`] as a table (default) or JSON (`--json`),
+/// then fail with a non-zero exit when any target failed.
 ///
-/// `OperationResult` is not `Serialize`, so `--json` builds `{agent, action,
-/// success, error}` objects via `serde_json::json!` — the same fields the API's
-/// `OperationResultDto` exposes.
+/// `--json` serializes the SHARED `OperationBatchView` (core), the exact type
+/// the API's `OperationBatchResponse` mirrors — so both surfaces emit one wire
+/// shape (`{success_count, failed_count, results:[…]}`, scope lowercase,
+/// `project_root`/`error` omitted when absent) defined in one place.
 fn render(result: &OperationBatchResult, json: bool) -> Result<()> {
 	if json {
-		let rows: Vec<_> = result
-			.results
-			.iter()
-			.map(|r| {
-				json!({
-					"agent": r.target.agent.as_str(),
-					"action": r.action.to_string(),
-					"success": r.success,
-					"error": r.error,
-				})
-			})
-			.collect();
-		println!("{}", serde_json::to_string_pretty(&rows)?);
+		let view = OperationBatchView::from(result);
+		println!("{}", serde_json::to_string_pretty(&view)?);
 	} else {
 		let mut builder = Builder::default();
 		builder.push_record(["AGENT", "ACTION", "OK", "ERROR"]);

@@ -628,99 +628,6 @@ pub fn update_inference_provider(
 	Ok(Json(updated.into()))
 }
 
-fn remove_claude_provider_references(
-	store: &InferenceProviderStore,
-	provider: &InferenceProvider,
-) -> Result<(), ApiError> {
-	let adapter = claude_adapter()?;
-	let binding_ids = store
-		.list_agent_bindings("claude")
-		.map_err(ApiError::from)?
-		.into_iter()
-		.filter(|row| row.inference_provider_id == provider.id)
-		.map(|row| row.id)
-		.collect::<Vec<_>>();
-
-	for binding_id in binding_ids {
-		adapter
-			.remove_binding(store, &binding_id)
-			.map_err(ApiError::from)?;
-	}
-
-	Ok(())
-}
-
-fn remove_codex_provider_references(
-	store: &InferenceProviderStore,
-	provider: &InferenceProvider,
-) -> Result<(), ApiError> {
-	let adapter = codex_adapter()?;
-	let binding_ids = store
-		.list_agent_bindings("codex")
-		.map_err(ApiError::from)?
-		.into_iter()
-		.filter(|row| row.inference_provider_id == provider.id)
-		.map(|row| row.id)
-		.collect::<Vec<_>>();
-
-	for binding_id in binding_ids {
-		adapter
-			.remove_provider(store, &binding_id)
-			.map_err(ApiError::from)?;
-	}
-
-	Ok(())
-}
-
-fn remove_opencode_provider_references(
-	store: &InferenceProviderStore,
-	provider: &InferenceProvider,
-) -> Result<(), ApiError> {
-	let Some(api_key) =
-		store.get_api_key(&provider.id).map_err(ApiError::from)?
-	else {
-		return Ok(());
-	};
-
-	let adapter = opencode_adapter()?;
-	let inventory = vec![(
-		OpenCodeProviderAdapter::normalize_inventory_provider(provider),
-		api_key,
-	)];
-	let mut provider_ids = Vec::new();
-	for binding in adapter.load_providers().map_err(ApiError::from)?.providers {
-		let agent_api_key =
-			adapter.api_key(&binding.id).map_err(ApiError::from)?;
-		if find_matching_inventory_provider(
-			&inventory,
-			&binding,
-			agent_api_key,
-		)?
-		.is_some() && !provider_ids.iter().any(|id| id == &binding.id)
-		{
-			provider_ids.push(binding.id);
-		}
-	}
-
-	for provider_id in provider_ids {
-		adapter
-			.remove_provider(&provider_id)
-			.map_err(ApiError::from)?;
-	}
-
-	Ok(())
-}
-
-fn remove_agent_provider_references(
-	store: &InferenceProviderStore,
-	provider: &InferenceProvider,
-) -> Result<(), ApiError> {
-	remove_claude_provider_references(store, provider)?;
-	remove_codex_provider_references(store, provider)?;
-	remove_opencode_provider_references(store, provider)?;
-	Ok(())
-}
-
 #[delete("/inference/providers/<latin_name>")]
 pub fn delete_inference_provider(
 	state: &State<InferenceProviderState>,
@@ -728,8 +635,11 @@ pub fn delete_inference_provider(
 ) -> ApiNoContent {
 	let store = store(state);
 	let provider = find_by_latin_name(&store, latin_name)?;
-	remove_agent_provider_references(&store, &provider)?;
-	store.delete(&provider.id).map_err(ApiError::from)?;
+	// Shared use case: tears down every agent reference, then deletes the
+	// provider. The CLI routes its delete through the same fn so neither
+	// surface can leave an agent config pointing at a removed provider.
+	aghub_inference::delete_provider_cascade(&store, &provider)
+		.map_err(ApiError::from)?;
 	Ok(NoContent)
 }
 
@@ -922,4 +832,118 @@ pub fn clear_codex_state(
 		.clear_active_provider(&store)
 		.map_err(ApiError::from)?;
 	Ok(NoContent)
+}
+
+#[cfg(test)]
+mod tests {
+	use aghub_inference::{
+		CreateInferenceProvider, InferenceProviderFormat,
+		InferenceProviderRepository, InferenceProviderStore,
+	};
+
+	/// Finding #2: route coverage for `delete_inference_provider`. Proves the
+	/// DELETE route is mounted, drives the shared cascade end-to-end (its
+	/// `*ProviderAdapter::global()` calls must not error), returns 204, and clears
+	/// both the binding and the inventory row. The cascade's per-agent file
+	/// cleanup branches are asserted directly at the `delete_provider_references`
+	/// seam (see crates/inference/src/cascade.rs) with real temp-rooted file
+	/// adapters — that is the discriminating coverage; this test pins the wiring.
+	///
+	/// HOME is repointed to an empty temp dir (under `test_env_lock`) so the
+	/// cascade's `global()` adapters read throwaway config, never the real home.
+	/// No keyring entry is ever written (the seed key lives only in the in-test
+	/// MemoryCredentialStore), so the route's NativeCredentialStore just sees
+	/// NoEntry — keyring-free, like the CLI tests.
+	#[test]
+	fn delete_route_cascades_agent_bindings() {
+		use std::sync::{Arc, Mutex};
+
+		#[derive(Debug, Clone, Default)]
+		struct MemoryCredentialStore {
+			values: Arc<Mutex<std::collections::HashMap<String, String>>>,
+		}
+		impl aghub_inference::CredentialStore for MemoryCredentialStore {
+			fn get_api_key(
+				&self,
+				id: &str,
+			) -> aghub_inference::Result<Option<String>> {
+				Ok(self.values.lock().unwrap().get(id).cloned())
+			}
+			fn set_api_key(
+				&self,
+				id: &str,
+				key: &str,
+			) -> aghub_inference::Result<()> {
+				self.values
+					.lock()
+					.unwrap()
+					.insert(id.to_string(), key.to_string());
+				Ok(())
+			}
+			fn delete_api_key(&self, id: &str) -> aghub_inference::Result<()> {
+				self.values.lock().unwrap().remove(id);
+				Ok(())
+			}
+		}
+
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let home = tempfile::tempdir().unwrap();
+		let old_home = std::env::var("HOME").ok();
+		std::env::set_var("HOME", home.path());
+
+		let data = tempfile::tempdir().unwrap();
+		// Seed via a SQLite-only store: the api key goes to memory (dropped with
+		// this store), so the route's keyring never has an entry.
+		let seed = InferenceProviderStore::with_credentials(
+			data.path(),
+			MemoryCredentialStore::default(),
+		);
+		let provider = seed
+			.create(CreateInferenceProvider {
+				latin_name: "acme".to_string(),
+				display_name: "Acme".to_string(),
+				format: InferenceProviderFormat::OpenAiResponses,
+				api_base_url: "https://api.example.com/v1".to_string(),
+				preset: None,
+				api_key: "secret".to_string(),
+				models: Vec::new(),
+			})
+			.unwrap();
+		seed.create_agent_binding("claude", &provider.id, None)
+			.unwrap();
+		assert_eq!(
+			seed.list_agent_bindings("claude").unwrap().len(),
+			1,
+			"precondition: one claude binding references the provider"
+		);
+
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				data.path().to_path_buf(),
+			))
+			.expect("rocket builds");
+		let resp = client.delete("/api/v1/inference/providers/acme").dispatch();
+		assert_eq!(
+			resp.status(),
+			rocket::http::Status::NoContent,
+			"delete route returns 204"
+		);
+
+		assert!(
+			seed.list_agent_bindings("claude").unwrap().is_empty(),
+			"the delete route must cascade away the claude binding"
+		);
+		assert!(
+			seed.get(&provider.id).is_err(),
+			"the delete route must remove the inventory row too"
+		);
+
+		match old_home {
+			Some(v) => std::env::set_var("HOME", v),
+			None => std::env::remove_var("HOME"),
+		}
+	}
 }

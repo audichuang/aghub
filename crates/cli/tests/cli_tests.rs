@@ -2382,32 +2382,36 @@ fn add_skill_output_native_reader_true_for_opencode() {
 
 // ==================== #6: inference inventory CRUD ====================
 //
-// The inference store roots at `dirs::data_dir()/aghub` (= XDG_DATA_HOME on
-// Linux, ~/Library/Application Support on macOS). Point both at a tempdir so the
-// SQLite db is throwaway and never touches the user's real inventory. API keys
-// live in the OS keyring (NativeCredentialStore), which may be unavailable in
-// headless CI — `add` is the first op to touch it, so when it fails with a
-// keyring error we skip the key-touching asserts rather than fail the gate.
+// The inference store roots at `dirs::data_dir()/aghub` in production, but the
+// CLI honors `$AGHUB_DATA_DIR` to override that — so these tests pin the root to
+// a throwaway tempdir DIRECTLY (no per-platform XDG_DATA_HOME vs
+// ~/Library/Application Support guessing). API keys live in the OS keyring
+// (unavailable in headless CI), so the CLI also honors
+// `$AGHUB_TEST_CREDENTIAL_FILE` to use a plaintext file-backed credential store
+// instead. Together this makes the inference CLI fully exercisable cross-platform
+// with NO keyring and NO skip-on-failure escape hatches.
 
-/// An aghub-cli command with an ISOLATED data dir (XDG_DATA_HOME + HOME) so the
-/// inference SQLite db + keyring namespace are throwaway.
+/// The credential file every `inference_cli` for one tempdir shares — the
+/// headless replacement for a shared keyring namespace.
+fn cred_file(data: &std::path::Path) -> std::path::PathBuf {
+	data.join("creds.json")
+}
+
+/// An aghub-cli command with an ISOLATED data dir + file-backed credential store
+/// so the inference SQLite db and API keys are throwaway and keyring-free.
 fn inference_cli(data: &std::path::Path) -> Command {
 	let mut cmd = Command::cargo_bin("aghub-cli").unwrap();
-	cmd.env("XDG_DATA_HOME", data);
+	cmd.env("AGHUB_DATA_DIR", data);
+	cmd.env("AGHUB_TEST_CREDENTIAL_FILE", cred_file(data));
 	cmd.env("HOME", data);
 	cmd.env("USERPROFILE", data);
 	cmd.current_dir(data);
 	cmd
 }
 
-/// True when stderr names a keyring failure — the headless-CI escape hatch.
-fn is_keyring_error(stderr: &str) -> bool {
-	stderr.contains("keyring")
-}
-
-/// Add a provider; returns its id, or `None` when the keyring is unavailable
-/// (so the caller skips key-touching asserts on that platform).
-fn add_provider(data: &std::path::Path, latin: &str) -> Option<String> {
+/// Add a provider and return its id. Fails the test on any error — no keyring
+/// escape hatch, because the file-backed credential store always works.
+fn add_provider(data: &std::path::Path, latin: &str) -> String {
 	let out = inference_cli(data)
 		.args([
 			"inference",
@@ -2426,25 +2430,20 @@ fn add_provider(data: &std::path::Path, latin: &str) -> Option<String> {
 		])
 		.output()
 		.unwrap();
-	if !out.status.success() {
-		let stderr = String::from_utf8_lossy(&out.stderr);
-		if is_keyring_error(&stderr) {
-			return None;
-		}
-		panic!("inference add failed: {stderr}");
-	}
+	assert!(
+		out.status.success(),
+		"inference add failed: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert_eq!(json["latin_name"], latin, "add --json echoes latin_name");
-	Some(json["id"].as_str().expect("add --json carries id").into())
+	json["id"].as_str().expect("add --json carries id").into()
 }
 
 #[test]
 fn inference_add_then_list_shows_provider() {
 	let data = tempfile::tempdir().unwrap();
-	let Some(_id) = add_provider(data.path(), "acme") else {
-		eprintln!("keyring unavailable; skipping inference key asserts");
-		return;
-	};
+	let _id = add_provider(data.path(), "acme");
 
 	// Table output lists it.
 	let table = inference_cli(data.path())
@@ -2476,9 +2475,7 @@ fn inference_add_then_list_shows_provider() {
 #[test]
 fn inference_get_returns_provider() {
 	let data = tempfile::tempdir().unwrap();
-	let Some(id) = add_provider(data.path(), "acme") else {
-		return;
-	};
+	let id = add_provider(data.path(), "acme");
 
 	let out = inference_cli(data.path())
 		.args(["inference", "get", &id, "--json"])
@@ -2502,9 +2499,7 @@ fn inference_get_returns_provider() {
 #[test]
 fn inference_update_changes_display_name() {
 	let data = tempfile::tempdir().unwrap();
-	let Some(id) = add_provider(data.path(), "acme") else {
-		return;
-	};
+	let id = add_provider(data.path(), "acme");
 
 	let out = inference_cli(data.path())
 		.args([
@@ -2529,9 +2524,7 @@ fn inference_update_changes_display_name() {
 #[test]
 fn inference_delete_yes_removes_then_list_empty() {
 	let data = tempfile::tempdir().unwrap();
-	let Some(id) = add_provider(data.path(), "acme") else {
-		return;
-	};
+	let id = add_provider(data.path(), "acme");
 
 	let del = inference_cli(data.path())
 		.args(["inference", "delete", &id, "--yes", "--json"])
@@ -2557,11 +2550,50 @@ fn inference_delete_yes_removes_then_list_empty() {
 }
 
 #[test]
+fn inference_delete_cascades_agent_bindings() {
+	// Finding #1 regression: CLI delete must run the same agent-reference
+	// cleanup the API delete route does. We seed a Claude binding row pointing
+	// at the provider (the binding table the API/desktop write), delete the
+	// provider via the CLI, then prove the dangling binding is gone — not left
+	// pointing at a removed provider. The CLI roots its store at
+	// `$AGHUB_DATA_DIR` (= `data.path()`, set by `inference_cli`), so we open the
+	// same SQLite db directly here. Binding rows live in SQLite, not the keyring,
+	// so the credential backend is irrelevant for this assertion.
+	use aghub_inference::InferenceProviderStore;
+
+	let data = tempfile::tempdir().unwrap();
+	let id = add_provider(data.path(), "acme");
+
+	let store = InferenceProviderStore::new(data.path());
+	store
+		.create_agent_binding("claude", &id, None)
+		.expect("seed claude binding");
+	assert_eq!(
+		store.list_agent_bindings("claude").unwrap().len(),
+		1,
+		"precondition: one claude binding references the provider"
+	);
+
+	let del = inference_cli(data.path())
+		.args(["inference", "delete", &id, "--yes", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		del.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&del.stderr)
+	);
+
+	assert!(
+		store.list_agent_bindings("claude").unwrap().is_empty(),
+		"CLI delete must remove the agent binding, not leave it dangling"
+	);
+}
+
+#[test]
 fn inference_delete_without_yes_is_rejected() {
 	let data = tempfile::tempdir().unwrap();
-	let Some(id) = add_provider(data.path(), "acme") else {
-		return;
-	};
+	let id = add_provider(data.path(), "acme");
 
 	let del = inference_cli(data.path())
 		.args(["inference", "delete", &id])
@@ -2686,20 +2718,135 @@ fn inference_add_api_key_from_env() {
 		])
 		.output()
 		.unwrap();
-	if !out.status.success() {
-		let stderr = String::from_utf8_lossy(&out.stderr);
-		assert!(
-			is_keyring_error(&stderr),
-			"only a keyring failure is allowed here: {stderr}"
-		);
-		return;
-	}
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert_eq!(json["latin_name"], "acme");
 	// The raw env secret must never be echoed back.
 	assert!(
 		!String::from_utf8_lossy(&out.stdout).contains("sk-from-env-secret"),
 		"raw env api key must never be printed"
+	);
+}
+
+#[test]
+fn inference_add_api_key_from_stdin() {
+	// With no --api-key and no env, a piped stdin key is used. Mirrors the
+	// resolve_api_key stdin branch.
+	let data = tempfile::tempdir().unwrap();
+	let out = inference_cli(data.path())
+		.env_remove("AGHUB_INFERENCE_API_KEY")
+		.args([
+			"inference",
+			"add",
+			"--latin-name",
+			"acme",
+			"--display-name",
+			"Disp",
+			"--format",
+			"anthropic",
+			"--api-base-url",
+			"https://api.example.com",
+			"--json",
+		])
+		.write_stdin("sk-from-stdin-secret\n")
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["latin_name"], "acme");
+	assert!(
+		!String::from_utf8_lossy(&out.stdout).contains("sk-from-stdin-secret"),
+		"raw stdin api key must never be printed"
+	);
+}
+
+#[test]
+fn inference_key_reports_presence_without_leaking() {
+	// The `key` subcommand prints the masked preview + stored=true, never the
+	// raw secret.
+	let data = tempfile::tempdir().unwrap();
+	let id = add_provider(data.path(), "acme");
+
+	let out = inference_cli(data.path())
+		.args(["inference", "key", &id])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		stdout.contains("stored=true"),
+		"key must report presence: {stdout}"
+	);
+	assert!(
+		!stdout.contains("sk-test-secret-value"),
+		"key must never print the raw secret: {stdout}"
+	);
+}
+
+#[test]
+fn inference_update_each_branch_applies() {
+	// Exercises the update arms beyond display-name: format, base URL, preset,
+	// api-key replacement, and the model list.
+	let data = tempfile::tempdir().unwrap();
+	let id = add_provider(data.path(), "acme");
+
+	let out = inference_cli(data.path())
+		.args([
+			"inference",
+			"update",
+			&id,
+			"--format",
+			"openai-responses",
+			"--api-base-url",
+			"https://updated.example.com/v1",
+			"--preset",
+			"my-preset",
+			"--api-key",
+			"sk-rotated-secret",
+			"--model",
+			"gpt-x",
+			"--model",
+			"gpt-y",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["api_base_url"], "https://updated.example.com/v1");
+	assert_eq!(json["preset"], "my-preset");
+	assert_eq!(json["format"], "openai_responses");
+	let models: Vec<&str> = json["models"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.map(|m| m.as_str().unwrap())
+		.collect();
+	assert_eq!(
+		models,
+		vec!["gpt-x", "gpt-y"],
+		"model list must be replaced"
+	);
+	// The rotated raw key must never be echoed back.
+	assert!(
+		!String::from_utf8_lossy(&out.stdout).contains("sk-rotated-secret"),
+		"rotated api key must never be printed"
 	);
 }
 
@@ -2797,13 +2944,56 @@ fn transfer_skill_json_reports_success_for_target() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-	let arr = json.as_array().expect("transfer --json is an array");
-	let row = arr
-		.iter()
-		.find(|r| r["agent"] == "opencode")
+	let row = json["results"]
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
 		.expect("opencode row present");
 	assert_eq!(row["success"], true);
 	assert_eq!(row["action"], "copy");
+}
+
+#[test]
+fn transfer_json_shape_matches_api_dto() {
+	// Finding #3: CLI and API must emit ONE shape. The API's
+	// OperationBatchResponse is `{success_count, failed_count, results:[{agent,
+	// scope, project_root, action, success, error}]}`. The CLI --json must
+	// match it field-for-field (incl. the batch wrapper + per-row scope), not a
+	// bare array of {agent, action, success, error}.
+	let project = transfer_project("repo-helper");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(
+		json.get("success_count").and_then(Value::as_u64).is_some(),
+		"batch wrapper must carry success_count: {json}"
+	);
+	assert!(
+		json.get("failed_count").and_then(Value::as_u64).is_some(),
+		"batch wrapper must carry failed_count: {json}"
+	);
+	let row = json["results"]
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
+		.expect("results array with opencode row");
+	assert_eq!(row["scope"], "project", "per-row scope like the API DTO");
+	assert_eq!(row["action"], "copy");
+	assert_eq!(row["success"], true);
 }
 
 #[test]
@@ -2850,7 +3040,7 @@ fn transfer_skill_second_run_fails_resource_exists() {
 		String::from_utf8_lossy(&out.stdout)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-	let row = json
+	let row = json["results"]
 		.as_array()
 		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
 		.expect("opencode row present");
@@ -2858,6 +3048,38 @@ fn transfer_skill_second_run_fails_resource_exists() {
 	assert!(
 		row["error"].as_str().is_some(),
 		"a failed row must carry an error string: {row}"
+	);
+}
+
+#[test]
+fn transfer_skill_empty_to_is_rejected() {
+	// Finding #4: `transfer skill ... --json` with no --to must NOT print `[]`
+	// and exit 0 — an empty destination list is an actionable error.
+	let project = transfer_project("repo-helper");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"transfer with no --to must fail; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("destination") || stderr.contains("target"),
+		"error must name the missing destination: {stderr}"
 	);
 }
 
@@ -2923,9 +3145,12 @@ fn reconcile_skill_reports_batch_summary() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-	let arr = json.as_array().expect("reconcile --json is an array");
+	let results = json["results"]
+		.as_array()
+		.expect("reconcile --json has results");
 	assert!(
-		arr.iter()
+		results
+			.iter()
 			.any(|r| r["agent"] == "opencode" && r["success"] == true),
 		"reconcile --add opencode must copy into OpenCode: {json}"
 	);
@@ -2935,6 +3160,222 @@ fn reconcile_skill_reports_batch_summary() {
 			.join(".opencode/skills/repo-helper/SKILL.md")
 			.exists(),
 		"reconcile --add must materialize the OpenCode skill"
+	);
+}
+
+// ── MCP + sub-agent transfer/reconcile arms (finding #2 coverage) ────────────
+//
+// The skill arm above is the tracer; these pin the OTHER two resource kinds the
+// `transfer`/`reconcile` dispatch added, so a kind getting dropped from the
+// match (or wired to the wrong core fn) is caught.
+
+/// Seed a Claude project MCP via the CLI itself, then return the project dir.
+fn mcp_project() -> tempfile::TempDir {
+	let project = transfer_project("placeholder-skill");
+	let add = transfer_cli(project.path())
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"add",
+			"mcp",
+			"--name",
+			"filesystem",
+			"--command",
+			"npx mcp-filesystem",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add mcp failed: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+	project
+}
+
+#[test]
+fn transfer_mcp_copies_claude_to_cursor_project() {
+	let project = mcp_project();
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--to",
+			"cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json["results"]
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "cursor"))
+		.expect("cursor row present");
+	assert_eq!(row["success"], true, "mcp transfer must succeed: {json}");
+	assert_eq!(row["action"], "copy");
+}
+
+#[test]
+fn reconcile_mcp_add_then_remove() {
+	let project = mcp_project();
+
+	// --add cursor copies the MCP in.
+	let add = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--add",
+			"cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+	let json: Value = serde_json::from_slice(&add.stdout).unwrap();
+	assert!(
+		json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|r| r["agent"] == "cursor"
+				&& r["action"] == "copy"
+				&& r["success"] == true),
+		"reconcile --add must copy into cursor: {json}"
+	);
+
+	// --remove cursor deletes it back out (Delete action).
+	let rm = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--remove",
+			"cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		rm.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&rm.stderr)
+	);
+	let json: Value = serde_json::from_slice(&rm.stdout).unwrap();
+	assert!(
+		json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|r| r["agent"] == "cursor" && r["action"] == "delete"),
+		"reconcile --remove must delete from cursor: {json}"
+	);
+}
+
+/// Seed a Claude project sub-agent file, then return the project dir.
+fn sub_agent_project(name: &str) -> tempfile::TempDir {
+	let project = transfer_project("placeholder-skill");
+	let dir = project.path().join(".claude/agents");
+	std::fs::create_dir_all(&dir).unwrap();
+	std::fs::write(
+		dir.join(format!("{name}.md")),
+		format!("---\nname: {name}\ndescription: d\n---\nYou are a {name}.\n"),
+	)
+	.unwrap();
+	project
+}
+
+#[test]
+fn transfer_sub_agent_copies_claude_to_opencode_project() {
+	let project = sub_agent_project("coder");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"sub-agent",
+			"--from-agent",
+			"claude",
+			"--name",
+			"coder",
+			"--to",
+			"opencode",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json["results"]
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
+		.expect("opencode row present");
+	assert_eq!(
+		row["success"], true,
+		"sub-agent transfer must succeed: {json}"
+	);
+}
+
+#[test]
+fn reconcile_sub_agent_add_reports_copy() {
+	let project = sub_agent_project("coder");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"sub-agent",
+			"--from-agent",
+			"claude",
+			"--name",
+			"coder",
+			"--add",
+			"opencode",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(
+		json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|r| r["agent"] == "opencode" && r["success"] == true),
+		"reconcile --add opencode must copy the sub-agent: {json}"
 	);
 }
 
@@ -2950,6 +3391,30 @@ fn coverage_cli(home: &std::path::Path) -> Command {
 	cmd.env("APPDATA", home);
 	cmd.current_dir(home);
 	cmd
+}
+
+#[test]
+fn coverage_json_uses_id_key_like_api_dto() {
+	// Finding #3: the API's AgentSkillCoverageDto keys the agent as `id`. The
+	// CLI must use the same key, not `agent`, so the two surfaces agree.
+	let home = tempfile::TempDir::new().unwrap();
+
+	let out = coverage_cli(home.path())
+		.args(["-g", "coverage", "--json"])
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = &json.as_array().expect("coverage --json is an array")[0];
+	assert!(
+		row.get("id").and_then(Value::as_str).is_some(),
+		"coverage row must key the agent as `id` (API DTO shape): {row}"
+	);
+	assert!(
+		row.get("agent").is_none(),
+		"coverage row must NOT carry the drifted `agent` key: {row}"
+	);
 }
 
 #[test]
@@ -2974,7 +3439,7 @@ fn coverage_global_json_codex_native_claude_needs_link() {
 
 	let codex = arr
 		.iter()
-		.find(|r| r["agent"] == "codex")
+		.find(|r| r["id"] == "codex")
 		.expect("codex row present");
 	assert_eq!(codex["scope"], "global");
 	assert_eq!(
@@ -2987,7 +3452,7 @@ fn coverage_global_json_codex_native_claude_needs_link() {
 
 	let claude = arr
 		.iter()
-		.find(|r| r["agent"] == "claude")
+		.find(|r| r["id"] == "claude")
 		.expect("claude row present");
 	assert_eq!(
 		claude["needs_link"], true,
@@ -3019,7 +3484,7 @@ fn coverage_project_json_classifies_against_project_master() {
 
 	let opencode = arr
 		.iter()
-		.find(|r| r["agent"] == "opencode")
+		.find(|r| r["id"] == "opencode")
 		.expect("opencode row present");
 	assert_eq!(opencode["scope"], "project");
 	assert_eq!(
@@ -3028,7 +3493,7 @@ fn coverage_project_json_classifies_against_project_master() {
 	);
 	let claude = arr
 		.iter()
-		.find(|r| r["agent"] == "claude")
+		.find(|r| r["id"] == "claude")
 		.expect("claude row present");
 	assert_eq!(
 		claude["needs_link"], true,

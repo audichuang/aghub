@@ -284,8 +284,8 @@ fn update(
 
 // ──────────────────────────────── delete / key ─────────────────────────────
 
-fn delete(
-	store: &impl InferenceProviderRepository,
+fn delete<C: aghub_inference::CredentialStore>(
+	store: &aghub_inference::InferenceProviderStore<C>,
 	id: &str,
 	yes: bool,
 	json: bool,
@@ -296,7 +296,13 @@ fn delete(
 			 (this also removes its stored API key)"
 		);
 	}
-	let provider = store.delete(id).map_err(|e| anyhow!(e.to_string()))?;
+	// Shared use case (same as the API delete route): tear down every agent
+	// reference (Claude/Codex/OpenCode bindings + config), THEN remove the
+	// provider — never just `store.delete`, which would leave agent configs
+	// pointing at a deleted provider.
+	let provider = store.get(id).map_err(|e| anyhow!(e.to_string()))?;
+	aghub_inference::delete_provider_cascade(store, &provider)
+		.map_err(|e| anyhow!(e.to_string()))?;
 	print_provider(&provider, json)
 }
 

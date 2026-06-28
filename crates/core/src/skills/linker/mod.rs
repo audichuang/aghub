@@ -5,7 +5,8 @@
 
 pub mod classify;
 pub use classify::{
-	agent_link_need, classify_agent, classify_all, AgentLinkPlan, LinkNeed,
+	agent_link_need, classify_agent, classify_all, AgentLinkPlan,
+	AgentSkillCoverageView, LinkNeed,
 };
 
 use std::io;

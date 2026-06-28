@@ -3,19 +3,18 @@
 //! Classifies every registered agent against the canonical `.agents/skills`
 //! master SKILLS-DIR for the requested scope and prints a per-agent coverage
 //! table (or JSON). A pure passthrough over `aghub_core::skills::linker`: it
-//! adds no write path and mirrors the same `LinkNeed` derivation the HTTP API's
-//! `skills_coverage` route uses (`NativeReader`=>auto_covered, `NeedsLink`=>
-//! needs_link, `Unsupported`=>!supported), so the two surfaces agree.
-//
-// ponytail: print the json! values + a tabled table directly; AgentLinkPlan is
-// not Serialize and dragging the api coverage DTO into the CLI buys nothing.
+//! adds no write path. The `--json` shape comes from the SHARED
+//! `AgentSkillCoverageView` (core), the exact type the HTTP API's
+//! `AgentSkillCoverageDto` mirrors — so the two surfaces emit one wire shape
+//! defined in one place and can never drift.
 
 use aghub_core::models::ResourceScope;
 use aghub_core::paths::find_project_root;
 use aghub_core::skills::linker::classify::{classify_all, LinkNeed};
-use aghub_core::skills::linker::universal_canonical_dir;
+use aghub_core::skills::linker::{
+	universal_canonical_dir, AgentSkillCoverageView,
+};
 use anyhow::{bail, Result};
-use serde_json::json;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -71,17 +70,7 @@ pub fn execute(
 	if json {
 		let rows: Vec<_> = plans
 			.iter()
-			.map(|p| {
-				json!({
-					"agent": p.agent_id,
-					"scope": scope_str,
-					"reads_master": p.reads_master,
-					"writes_master": p.writes_master,
-					"needs_link": matches!(p.need, LinkNeed::NeedsLink { .. }),
-					"auto_covered": matches!(p.need, LinkNeed::NativeReader),
-					"supported": !matches!(p.need, LinkNeed::Unsupported),
-				})
-			})
+			.map(|p| AgentSkillCoverageView::from_plan(p, scope_str))
 			.collect();
 		println!("{}", serde_json::to_string_pretty(&rows)?);
 		return Ok(());

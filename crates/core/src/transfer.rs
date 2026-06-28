@@ -71,6 +71,66 @@ impl OperationBatchResult {
 	}
 }
 
+/// Serializable wire view of an [`OperationBatchResult`].
+///
+/// `OperationResult`/`InstallTarget`/`OperationAction` are deliberately NOT
+/// `Serialize` (they carry filesystem paths), so this view is the SINGLE place
+/// the batch wire shape is defined. Both surfaces use it: the API derives a
+/// `ts-rs` DTO that mirrors it for type generation, and the CLI serializes it
+/// directly — so neither hand-rolls a second mapping that could drift.
+///
+/// Field encoding is fixed and load-bearing (both surfaces agreed on it):
+/// `scope` is lowercase, `action` is `"copy"`/`"delete"`, and
+/// `project_root`/`error` are omitted when absent.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationResultView {
+	pub agent: String,
+	pub scope: &'static str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub project_root: Option<String>,
+	pub action: String,
+	pub success: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
+}
+
+impl From<&OperationResult> for OperationResultView {
+	fn from(r: &OperationResult) -> Self {
+		OperationResultView {
+			agent: r.target.agent.as_str().to_string(),
+			scope: match r.target.scope {
+				InstallScope::Global => "global",
+				InstallScope::Project => "project",
+			},
+			project_root: r
+				.target
+				.project_root
+				.as_ref()
+				.map(|p| p.display().to_string()),
+			action: r.action.to_string(),
+			success: r.success,
+			error: r.error.clone(),
+		}
+	}
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationBatchView {
+	pub success_count: usize,
+	pub failed_count: usize,
+	pub results: Vec<OperationResultView>,
+}
+
+impl From<&OperationBatchResult> for OperationBatchView {
+	fn from(batch: &OperationBatchResult) -> Self {
+		OperationBatchView {
+			success_count: batch.success_count(),
+			failed_count: batch.failed_count(),
+			results: batch.results.iter().map(Into::into).collect(),
+		}
+	}
+}
+
 fn build_manager(target: &InstallTarget) -> ConfigManager {
 	let adapter = create_adapter(target.agent);
 	match target.scope {
@@ -313,6 +373,20 @@ fn unique_targets(targets: Vec<InstallTarget>) -> Vec<InstallTarget> {
 	unique
 }
 
+/// Reject a transfer that names no destinations. An empty `--to` is almost
+/// always a mistake; without this guard `transfer_*` returns `Ok([])` and the
+/// caller exits 0 having copied nothing (finding #4). Both surfaces route
+/// through `transfer_*`, so the guard lives here once.
+fn ensure_destinations(destinations: &[InstallTarget]) -> Result<()> {
+	if destinations.is_empty() {
+		return Err(ConfigError::InvalidConfig(
+			"no destination agents given; specify at least one target"
+				.to_string(),
+		));
+	}
+	Ok(())
+}
+
 fn log_operation_outcome(
 	resource: &str,
 	name: &str,
@@ -343,6 +417,7 @@ pub fn transfer_mcp(
 ) -> Result<OperationBatchResult> {
 	let mcp = load_source_mcp(&source)?;
 	let destinations = unique_targets(destinations);
+	ensure_destinations(&destinations)?;
 	info!(
 		"transferring MCP '{}' to {} destination(s)",
 		mcp.name,
@@ -472,6 +547,7 @@ pub fn transfer_sub_agent(
 ) -> Result<OperationBatchResult> {
 	let sub_agent = load_source_sub_agent(&source)?;
 	let destinations = unique_targets(destinations);
+	ensure_destinations(&destinations)?;
 	info!(
 		"transferring sub-agent '{}' to {} destination(s)",
 		sub_agent.name,
@@ -621,6 +697,7 @@ pub fn transfer_skill(
 	let source_root = resolve_skill_root(&skill)?;
 	let safe_name = sanitize_name(&skill.name);
 	let destinations = unique_targets(destinations);
+	ensure_destinations(&destinations)?;
 	info!(
 		"transferring skill '{}' from '{}' to {} destination(s)",
 		skill.name,
@@ -825,6 +902,45 @@ mod tests {
 		);
 		dest_manager.load().unwrap();
 		assert!(dest_manager.get_mcp("filesystem").is_some());
+	}
+
+	#[test]
+	fn transfer_mcp_empty_destinations_is_rejected() {
+		// Finding #4: a transfer with no destinations is a no-op the caller
+		// almost certainly did not intend. It must be an actionable error, not
+		// a silent `Ok` with an empty result set (which exits 0).
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let source_root = temp.path().join("source");
+		fs::create_dir_all(&source_root).unwrap();
+
+		let mut source_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&source_root),
+		);
+		source_manager.load().unwrap();
+		source_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
+			))
+			.unwrap();
+
+		let result = transfer_mcp(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(source_root.clone()),
+				name: "filesystem".to_string(),
+			},
+			vec![], // no destinations
+		);
+
+		assert!(
+			result.is_err(),
+			"empty destination list must be a hard error, not Ok([])"
+		);
 	}
 
 	#[test]

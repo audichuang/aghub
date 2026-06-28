@@ -42,6 +42,41 @@ pub struct AgentLinkPlan {
 	pub writes_master: bool,
 }
 
+/// Serializable wire view of an [`AgentLinkPlan`] for the skills-coverage
+/// surface.
+///
+/// `AgentLinkPlan`/`LinkNeed` are domain types (one carries a filesystem path),
+/// so this view is the SINGLE place the coverage wire shape is defined. The API
+/// derives a `ts-rs` DTO that mirrors it, and the CLI serializes it directly, so
+/// neither hand-rolls a second mapping. `needs_link`/`auto_covered`/`supported`
+/// are the FE-partitioning projection of the `LinkNeed` 3-state; the agent is
+/// keyed as `id` and `scope` is the lowercase scope label.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AgentSkillCoverageView {
+	pub id: String,
+	pub scope: String,
+	pub reads_master: bool,
+	pub writes_master: bool,
+	pub needs_link: bool,
+	pub auto_covered: bool,
+	pub supported: bool,
+}
+
+impl AgentSkillCoverageView {
+	/// Project a classified plan into the coverage wire view for `scope`.
+	pub fn from_plan(plan: &AgentLinkPlan, scope: &str) -> Self {
+		AgentSkillCoverageView {
+			id: plan.agent_id.to_string(),
+			scope: scope.to_string(),
+			reads_master: plan.reads_master,
+			writes_master: plan.writes_master,
+			needs_link: matches!(plan.need, LinkNeed::NeedsLink { .. }),
+			auto_covered: matches!(plan.need, LinkNeed::NativeReader),
+			supported: !matches!(plan.need, LinkNeed::Unsupported),
+		}
+	}
+}
+
 /// Classify ONE agent against a scope + project_root + the canonical master
 /// SKILLS-DIR (`.agents/skills`).
 fn canonicalize_lenient(p: &Path) -> PathBuf {
