@@ -21,31 +21,35 @@ use crate::dto::sources::{
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams};
 use skill_update::sources::{
-	self, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome, SourceScope,
-	SourceScopeKind, SourceSkillDiff as DomainSkillDiff, SourceSummary,
+	self, ScopeSelector, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome,
+	SourceScope, SourceScopeKind, SourceSkillDiff as DomainSkillDiff,
+	SourceSummary,
 };
 use skill_update::{
 	FetchError, FetchedRepo, Fetcher, GitFetcher, KeyringTokenResolver,
 	SourceRef,
 };
 
-/// Resolve a request scope into the domain's per-scope list. Mirrors the old
-/// route: `Global` → `[Global]`, `Project` → `[Project]`, `All` → `[Global]`
-/// plus the project scope when a project root is known.
+/// Resolve a request scope into the domain's per-scope list by delegating to
+/// the shared [`sources::read_scopes`] mapper, so the API and CLI agree on what
+/// each scope selector means: `Global` → `[Global]`, `Project` → `[Project]`,
+/// `All` → `[Global]` plus the project scope when a project root is known.
+///
+/// `Project` without a root cannot occur here: [`ScopeParams::resolve`] already
+/// rejects `?scope=project` with no resolvable `project_root`, so `read_scopes`
+/// never hits its `ProjectRootRequired` arm and the mapping is infallible at
+/// this boundary (the old `scopes_for` never returned an error).
 fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
-	match resolved {
-		ResolvedScope::Global => vec![SourceScope::Global],
+	let (sel, project_root) = match resolved {
+		ResolvedScope::Global => (ScopeSelector::Global, None),
 		ResolvedScope::Project { root } => {
-			vec![SourceScope::Project { root: root.clone() }]
+			(ScopeSelector::Project, Some(root.clone()))
 		}
 		ResolvedScope::All { project_root } => {
-			let mut scopes = vec![SourceScope::Global];
-			if let Some(root) = project_root {
-				scopes.push(SourceScope::Project { root: root.clone() });
-			}
-			scopes
+			(ScopeSelector::All, project_root.clone())
 		}
-	}
+	};
+	sources::read_scopes(sel, project_root).unwrap_or_default()
 }
 
 /// Production fetch is [`GitFetcher`]. Under `cfg(test)` an env hook
@@ -220,7 +224,7 @@ mod tests {
 	use rocket::routes;
 	use serde_json::Value;
 	use std::fs;
-	use std::path::Path;
+	use std::path::{Path, PathBuf};
 	use std::sync::MutexGuard;
 	use tempfile::{tempdir, TempDir};
 
@@ -305,6 +309,24 @@ mod tests {
 			format!("---\nname: {name}\ndescription: {name} skill\n---\n"),
 		)
 		.unwrap();
+	}
+
+	/// `All { Some(root) }` is the only scope that maps to more than one
+	/// `SourceScope`; lock it so the delegation to `sources::read_scopes`
+	/// keeps producing `[Global, Project { root }]` in that order.
+	#[test]
+	fn scopes_for_all_includes_global_and_project() {
+		let root = PathBuf::from("/tmp/aghub-scope-test");
+		let scopes = scopes_for(&ResolvedScope::All {
+			project_root: Some(root.clone()),
+		});
+
+		assert_eq!(scopes.len(), 2);
+		assert!(matches!(scopes[0], SourceScope::Global));
+		match &scopes[1] {
+			SourceScope::Project { root: r } => assert_eq!(*r, root),
+			other => panic!("expected Project scope, got {other:?}"),
+		}
 	}
 
 	#[test]

@@ -1151,6 +1151,60 @@ fn source_sync_help_renders() {
 		.success();
 }
 
+// ===== Task 25 [#2]: scope-mapper end-to-end message contract =====
+// These pin the three `source sync` scope rejections to their exact CLI
+// messages so the collapse onto `skill_update::sources::write_scope`
+// (ScopeError Display) stays behavior-preserving end to end.
+
+#[test]
+fn source_sync_all_is_rejected() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--all", "source", "sync", "owner/repo", "--install-missing"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "--all must be rejected for sync");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(stderr.contains("--all is not allowed"), "stderr: {stderr}");
+}
+
+#[test]
+fn source_sync_without_scope_is_rejected() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["source", "sync", "owner/repo", "--install-missing"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "no scope must be rejected for sync");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(stderr.contains("needs a scope"), "stderr: {stderr}");
+}
+
+#[test]
+fn source_sync_both_flags_is_rejected() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-p",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "both -g/-p must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("choose either -g or -p"),
+		"stderr: {stderr}"
+	);
+}
+
 // ============ Task 23 [#1] T3: `source credential` subcommand ============
 
 /// `true` if stderr names a keychain/keyring failure — the headless-CI case

@@ -24,6 +24,95 @@ pub enum SourceScopeKind {
 	Project,
 }
 
+/// Which scope(s) a `list`/`diff`/`sync` invocation targets, before the
+/// project root is known. Callers map their flags onto this: `-g` => `Global`,
+/// `-p` => `Project`, neither => `All`. The mapper functions below turn it into
+/// concrete [`SourceScope`]s, so CLI and API share one scope policy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ScopeSelector {
+	Global,
+	Project,
+	All,
+}
+
+/// Why a [`ScopeSelector`] could not be resolved to a scope. The `Display`
+/// strings are the exact CLI `bail!` messages so the end-to-end CLI contract is
+/// preserved when these surface through `anyhow`.
+#[derive(Debug)]
+pub enum ScopeError {
+	/// `Project` (or `-p`) was requested but no project root was detected.
+	ProjectRootRequired,
+	/// `All` (`--all`) is meaningless for a single write scope (`sync`).
+	AllNotAllowedForWrite,
+	/// `sync` was invoked with no scope flag at all.
+	ScopeRequired,
+}
+
+impl std::fmt::Display for ScopeError {
+	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		match self {
+			Self::ProjectRootRequired => f.write_str(
+				"no project root found (need an agent marker like .claude/, \
+				 .opencode/, .mcp.json, …)",
+			),
+			Self::AllNotAllowedForWrite => f.write_str(
+				"`source sync` needs exactly one scope; --all is not allowed",
+			),
+			Self::ScopeRequired => f.write_str(
+				"`source sync` needs a scope: pass -g (global) or -p (project)",
+			),
+		}
+	}
+}
+
+impl std::error::Error for ScopeError {}
+
+/// Resolve the read scopes for `list`/`diff`. `Global` => `[Global]`;
+/// `Project` => `[Project { root }]` (errors when `project_root` is `None`);
+/// `All` => `[Global]` plus the project scope when a root is known. Pure: the
+/// caller detects the root and passes it in.
+pub fn read_scopes(
+	sel: ScopeSelector,
+	project_root: Option<PathBuf>,
+) -> Result<Vec<SourceScope>, ScopeError> {
+	match sel {
+		ScopeSelector::Global => Ok(vec![SourceScope::Global]),
+		ScopeSelector::Project => match project_root {
+			Some(root) => Ok(vec![SourceScope::Project { root }]),
+			None => Err(ScopeError::ProjectRootRequired),
+		},
+		ScopeSelector::All => {
+			let mut scopes = vec![SourceScope::Global];
+			if let Some(root) = project_root {
+				scopes.push(SourceScope::Project { root });
+			}
+			Ok(scopes)
+		}
+	}
+}
+
+/// Resolve the single write scope for `sync`. Exactly one of `Global`/`Project`
+/// is valid; `All` is rejected. Returns the concrete [`SourceScope`] plus a
+/// [`SourceScopeKind`] tag the caller maps to its own `ResourceScope`/label.
+/// Pure: no IO; the caller passes the detected root.
+pub fn write_scope(
+	sel: ScopeSelector,
+	project_root: Option<PathBuf>,
+) -> Result<(SourceScope, SourceScopeKind), ScopeError> {
+	match sel {
+		ScopeSelector::Global => {
+			Ok((SourceScope::Global, SourceScopeKind::Global))
+		}
+		ScopeSelector::Project => match project_root {
+			Some(root) => {
+				Ok((SourceScope::Project { root }, SourceScopeKind::Project))
+			}
+			None => Err(ScopeError::ProjectRootRequired),
+		},
+		ScopeSelector::All => Err(ScopeError::AllNotAllowedForWrite),
+	}
+}
+
 #[derive(Clone, Debug)]
 pub struct SourceSummary {
 	pub source: String,
@@ -850,6 +939,83 @@ pub fn diff_source(
 			skills: classify_repo_skills(repo.root.as_path(), &baseline),
 		},
 	}
+}
+
+/// Injected fetch boundary for `sync`, symmetric to [`SourceDiffDeps`]. The CLI
+/// passes its env-then-keyring resolver and debug fetch hook; a real API sync
+/// route (none exists today) would pass its own pair.
+pub struct SourceSyncDeps<'a> {
+	pub fetcher: &'a dyn Fetcher,
+	pub resolver: &'a dyn TokenResolver,
+}
+
+/// The read-only result of [`scan_for_sync`]: the fetched repo (reused for
+/// every install/update) plus the classified per-skill diffs for the one write
+/// scope, and the resolved fetch coordinate the caller records on the lock.
+pub struct SyncScan {
+	pub repo: crate::FetchedRepo,
+	pub diffs: Vec<SourceSkillDiff>,
+	pub git_ref: Option<String>,
+	pub source_type: String,
+}
+
+/// Why [`scan_for_sync`] could not produce a [`SyncScan`]. Mirrors the
+/// pre-fetch/fetch failure shapes the CLI bails on: `Uncheckable` (local/ssh/
+/// unsupported scheme, known before any fetch), `NeedsCredential` (auth
+/// failure), `FetchFailed` (network/transport).
+#[derive(Debug)]
+pub enum SyncScanError {
+	Uncheckable(UncheckableReason),
+	NeedsCredential,
+	FetchFailed,
+}
+
+/// PUBLIC CLI entry for `sync`: resolve the fetch coordinate, precheck, fetch
+/// ONCE, and classify against the single write `scope` — the read-only prologue
+/// of `source sync`. The caller plans + applies (install/lock-writing stays in
+/// core behind `ConfigManager`); this never touches lock files or the `.agents`
+/// layout. Symmetric to [`diff_source`], but single-scope and non-merged.
+pub fn scan_for_sync(
+	source: &str,
+	git_ref: Option<&str>,
+	scope: &SourceScope,
+	deps: SourceSyncDeps<'_>,
+) -> Result<SyncScan, SyncScanError> {
+	let source = source.trim();
+
+	// Resolve `(source_type, effective_ref)` from the lock entries via the
+	// SHARED helper (the SAME resolution the API runs) so sync fetches/installs
+	// from the recorded ref — not the default branch — and prechecks with the
+	// recorded source_type rather than a hard-coded "github".
+	let meta =
+		resolve_source_meta(source, std::slice::from_ref(scope), git_ref);
+
+	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
+	if let Some(reason) = precheck_source(&meta.source_type, source) {
+		return Err(SyncScanError::Uncheckable(reason));
+	}
+
+	let source_ref = SourceRef {
+		source: source.to_string(),
+		ref_: meta.effective_ref.clone(),
+	};
+	let repo = match fetch_source_with_resolver(
+		&source_ref,
+		deps.fetcher,
+		deps.resolver,
+	) {
+		Ok(repo) => repo,
+		Err(FetchError::Auth) => return Err(SyncScanError::NeedsCredential),
+		Err(FetchError::Network) => return Err(SyncScanError::FetchFailed),
+	};
+
+	let diffs = classify_scope(repo.root.as_path(), scope, source);
+	Ok(SyncScan {
+		repo,
+		diffs,
+		git_ref: meta.effective_ref,
+		source_type: meta.source_type,
+	})
 }
 
 #[cfg(test)]
@@ -1687,5 +1853,301 @@ mod diff_tests {
 			precheck_source(&meta.source_type, source),
 			Some(UncheckableReason::Local)
 		));
+	}
+}
+
+#[cfg(test)]
+mod scope_tests {
+	use super::*;
+
+	fn project_root() -> PathBuf {
+		PathBuf::from("/tmp/aghub-scope-test")
+	}
+
+	#[test]
+	fn read_scopes_global_is_global_only() {
+		let scopes = read_scopes(ScopeSelector::Global, None).unwrap();
+		assert!(matches!(scopes.as_slice(), [SourceScope::Global]));
+	}
+
+	#[test]
+	fn read_scopes_project_with_root_is_project_only() {
+		let root = project_root();
+		let scopes =
+			read_scopes(ScopeSelector::Project, Some(root.clone())).unwrap();
+		assert!(
+			matches!(scopes.as_slice(), [SourceScope::Project { root: r }] if *r == root)
+		);
+	}
+
+	#[test]
+	fn read_scopes_project_without_root_errs() {
+		let err = read_scopes(ScopeSelector::Project, None).unwrap_err();
+		assert!(matches!(err, ScopeError::ProjectRootRequired));
+	}
+
+	#[test]
+	fn read_scopes_all_with_root_is_global_then_project() {
+		let root = project_root();
+		let scopes =
+			read_scopes(ScopeSelector::All, Some(root.clone())).unwrap();
+		assert!(
+			matches!(scopes.as_slice(), [SourceScope::Global, SourceScope::Project { root: r }] if *r == root)
+		);
+	}
+
+	#[test]
+	fn read_scopes_all_without_root_is_global_only() {
+		let scopes = read_scopes(ScopeSelector::All, None).unwrap();
+		assert!(matches!(scopes.as_slice(), [SourceScope::Global]));
+	}
+
+	#[test]
+	fn write_scope_global_is_global() {
+		let (scope, kind) = write_scope(ScopeSelector::Global, None).unwrap();
+		assert!(matches!(scope, SourceScope::Global));
+		assert_eq!(kind, SourceScopeKind::Global);
+	}
+
+	#[test]
+	fn write_scope_project_with_root_is_project() {
+		let root = project_root();
+		let (scope, kind) =
+			write_scope(ScopeSelector::Project, Some(root.clone())).unwrap();
+		assert!(matches!(scope, SourceScope::Project { root: r } if r == root));
+		assert_eq!(kind, SourceScopeKind::Project);
+	}
+
+	#[test]
+	fn write_scope_project_without_root_errs() {
+		let err = write_scope(ScopeSelector::Project, None).unwrap_err();
+		assert!(matches!(err, ScopeError::ProjectRootRequired));
+	}
+
+	#[test]
+	fn write_scope_all_is_rejected() {
+		let err = write_scope(ScopeSelector::All, None).unwrap_err();
+		assert!(matches!(err, ScopeError::AllNotAllowedForWrite));
+	}
+
+	#[test]
+	fn scope_error_display_matches_cli_strings() {
+		assert_eq!(
+			ScopeError::ProjectRootRequired.to_string(),
+			"no project root found (need an agent marker like .claude/, \
+			 .opencode/, .mcp.json, …)"
+		);
+		assert_eq!(
+			ScopeError::AllNotAllowedForWrite.to_string(),
+			"`source sync` needs exactly one scope; --all is not allowed"
+		);
+		assert_eq!(
+			ScopeError::ScopeRequired.to_string(),
+			"`source sync` needs a scope: pass -g (global) or -p (project)"
+		);
+	}
+}
+
+#[cfg(test)]
+mod scan_tests {
+	use super::*;
+	use std::fs;
+	use tempfile::TempDir;
+
+	/// Serves a fixed local dir; the unauthenticated fetch always succeeds.
+	struct DirFetcher {
+		root: std::path::PathBuf,
+	}
+	impl Fetcher for DirFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			Ok(crate::FetchedRepo {
+				root: self.root.clone(),
+				oid: "test-oid".to_string(),
+				_guard: None,
+			})
+		}
+	}
+
+	/// Always fails with a fixed [`FetchError`]; the resolver is then consulted
+	/// and (with [`NoToken`]) the retry never happens, so the first error wins.
+	struct FailFetcher {
+		err: &'static str, // "auth" | "network"
+	}
+	impl Fetcher for FailFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			Err(match self.err {
+				"auth" => FetchError::Auth,
+				_ => FetchError::Network,
+			})
+		}
+	}
+
+	/// A [`TokenResolver`] that never has a token.
+	struct NoToken;
+	impl TokenResolver for NoToken {
+		fn resolve(&self, _s: &str, _h: Option<&str>) -> Option<String> {
+			None
+		}
+	}
+
+	fn write_skill(root: &Path, relative_dir: &str, name: &str) {
+		let dir = root.join(relative_dir);
+		fs::create_dir_all(&dir).unwrap();
+		fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: {name} skill\n---\n"),
+		)
+		.unwrap();
+	}
+
+	#[test]
+	fn scan_for_sync_happy_path_classifies_not_installed() {
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+
+		let fetcher = DirFetcher {
+			root: upstream.path().to_path_buf(),
+		};
+		let resolver = NoToken;
+		// A unique source absent from any installed lock => empty baseline =>
+		// `alpha` resolves to NotInstalled, source_type defaults to "github".
+		let scan = scan_for_sync(
+			"test-owner/scan-not-installed",
+			None,
+			&SourceScope::Global,
+			SourceSyncDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		)
+		.expect("scan should succeed");
+
+		let alpha = scan
+			.diffs
+			.iter()
+			.find(|s| s.name == "alpha")
+			.expect("alpha should be discovered");
+		assert_eq!(alpha.state, SourceSkillState::NotInstalled);
+		assert_eq!(scan.source_type, "github");
+		assert_eq!(scan.git_ref, None);
+		assert_eq!(scan.repo.root, upstream.path());
+	}
+
+	#[test]
+	fn scan_for_sync_uncheckable_source_skips_fetch() {
+		// A lock recording source_type "local" => precheck rejects it before any
+		// fetch; the fetcher must never be consulted.
+		let project = TempDir::new().unwrap();
+		let source = "/some/local/path";
+		let mut lock = skill::LocalSkillLockFile::new();
+		lock.skills.insert(
+			"s".to_string(),
+			skill::LocalSkillLockEntry {
+				source: source.to_string(),
+				ref_name: None,
+				source_type: "local".to_string(),
+				skill_path: Some("s/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			},
+		);
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		let fetcher = FailFetcher { err: "network" };
+		let resolver = NoToken;
+		let scope = SourceScope::Project {
+			root: project.path().to_path_buf(),
+		};
+		let result = scan_for_sync(
+			source,
+			None,
+			&scope,
+			SourceSyncDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		// `SyncScan` holds a non-Debug `FetchedRepo`, so match instead of
+		// `expect_err` (which would require `T: Debug`).
+		match result {
+			Err(SyncScanError::Uncheckable(UncheckableReason::Local)) => {}
+			Err(other) => panic!("expected Uncheckable(Local), got {other:?}"),
+			Ok(_) => panic!("expected Uncheckable(Local), got Ok"),
+		}
+	}
+
+	#[test]
+	fn scan_for_sync_auth_error_maps_to_needs_credential() {
+		let fetcher = FailFetcher { err: "auth" };
+		let resolver = NoToken;
+		let result = scan_for_sync(
+			"owner/scan-auth",
+			None,
+			&SourceScope::Global,
+			SourceSyncDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		match result {
+			Err(SyncScanError::NeedsCredential) => {}
+			Err(other) => panic!("expected NeedsCredential, got {other:?}"),
+			Ok(_) => panic!("expected NeedsCredential, got Ok"),
+		}
+	}
+
+	#[test]
+	fn scan_for_sync_network_error_maps_to_fetch_failed() {
+		let fetcher = FailFetcher { err: "network" };
+		let resolver = NoToken;
+		let result = scan_for_sync(
+			"owner/scan-network",
+			None,
+			&SourceScope::Global,
+			SourceSyncDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		);
+
+		match result {
+			Err(SyncScanError::FetchFailed) => {}
+			Err(other) => panic!("expected FetchFailed, got {other:?}"),
+			Ok(_) => panic!("expected FetchFailed, got Ok"),
+		}
+	}
+
+	#[test]
+	fn scan_for_sync_explicit_ref_is_surfaced() {
+		// An explicit git_ref overrides the (absent) recorded ref and is both
+		// fetched and surfaced on the scan.
+		let upstream = TempDir::new().unwrap();
+		write_skill(upstream.path(), "alpha", "alpha");
+		let fetcher = DirFetcher {
+			root: upstream.path().to_path_buf(),
+		};
+		let resolver = NoToken;
+		let scan = scan_for_sync(
+			"owner/scan-explicit-ref",
+			Some("feature-x"),
+			&SourceScope::Global,
+			SourceSyncDeps {
+				fetcher: &fetcher,
+				resolver: &resolver,
+			},
+		)
+		.expect("scan should succeed");
+
+		assert_eq!(scan.git_ref.as_deref(), Some("feature-x"));
 	}
 }

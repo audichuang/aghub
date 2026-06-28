@@ -12,10 +12,11 @@ use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::paths::find_project_root;
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 use serde::Serialize;
 use skill_update::sources::{
-	self, SourceScope, SourceScopeKind, SourceSkillDiff, SourceSummary,
+	self, ScopeError, ScopeSelector, SourceScope, SourceScopeKind,
+	SourceSkillDiff, SourceSummary,
 };
 use skill_update::{BindError, FetchError, SourceCredentialStore, SourceRef};
 use tabled::builder::Builder;
@@ -67,29 +68,22 @@ impl skill_update::Fetcher for CliFetcher {
 
 /// Resolve the read scopes for `list`/`diff` from the global flags:
 /// `-g` → global only; `-p` → project only; otherwise global plus the current
-/// project (when a project root is detected).
+/// project (when a project root is detected). Detects the project root once,
+/// then delegates the policy to the shared `sources::read_scopes` mapper so the
+/// CLI and API agree on what each scope selector means.
 fn resolve_read_scopes(
 	global: bool,
 	project: bool,
 ) -> Result<Vec<SourceScope>> {
-	if global {
-		return Ok(vec![SourceScope::Global]);
-	}
 	let project_root = current_project_root()?;
-	if project {
-		return match project_root {
-			Some(root) => Ok(vec![SourceScope::Project { root }]),
-			None => bail!(
-				"no project root found (need an agent marker like .claude/, \
-				 .opencode/, .mcp.json, …)"
-			),
-		};
-	}
-	let mut scopes = vec![SourceScope::Global];
-	if let Some(root) = project_root {
-		scopes.push(SourceScope::Project { root });
-	}
-	Ok(scopes)
+	let sel = if global {
+		ScopeSelector::Global
+	} else if project {
+		ScopeSelector::Project
+	} else {
+		ScopeSelector::All
+	};
+	sources::read_scopes(sel, project_root).map_err(|e| anyhow!(e))
 }
 
 fn current_project_root() -> Result<Option<PathBuf>> {
@@ -251,6 +245,12 @@ fn diff(
 	let scopes = resolve_read_scopes(global, project)?;
 	let source = source.trim().to_string();
 
+	// ponytail: `diff` is multi-scope (one fetch, classify against every scope),
+	// so the single-scope `scan_for_sync` seam does not fit; the resolve/precheck/
+	// fetch prologue stays inlined here. `scan_for_sync` targets the single-write-
+	// scope `sync` duplication, the real win — extracting a multi-scope variant for
+	// one caller would be more surface than it saves.
+	//
 	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
 	// helper — the SAME resolution the API `diff_source` runs — so the CLI checks
 	// the recorded ref (not the default branch) and prechecks with the recorded
@@ -362,39 +362,37 @@ struct SyncOutcomeView {
 }
 
 /// Resolve the single writing scope for `sync`. Exactly one of `-g`/`-p` must
-/// be chosen; `--all` and an unscoped invocation are rejected.
+/// be chosen; `--all` and an unscoped invocation are rejected. The CLI keeps
+/// the "both -g and -p" guard (the shared mapper has no two-flag case) and then
+/// delegates to `sources::write_scope`, mapping its `SourceScopeKind` back to
+/// the CLI's `ResourceScope` + label at this boundary.
 fn resolve_write_scope(
 	args: &SyncArgs,
 ) -> Result<(ResourceScope, Option<PathBuf>, SourceScope, &'static str)> {
-	if args.all {
-		bail!("`source sync` needs exactly one scope; --all is not allowed");
-	}
 	if args.global && args.project {
 		bail!("choose either -g or -p, not both");
 	}
-	if args.global {
-		return Ok((
-			ResourceScope::GlobalOnly,
-			None,
-			SourceScope::Global,
-			"global",
-		));
-	}
-	if args.project {
-		let root = current_project_root()?.ok_or_else(|| {
-			anyhow::anyhow!(
-				"no project root found (need an agent marker like .claude/, \
-				 .opencode/, .mcp.json, …)"
-			)
-		})?;
-		return Ok((
-			ResourceScope::ProjectOnly,
-			Some(root.clone()),
-			SourceScope::Project { root },
-			"project",
-		));
-	}
-	bail!("`source sync` needs a scope: pass -g (global) or -p (project)")
+	let sel = if args.all {
+		ScopeSelector::All
+	} else if args.global {
+		ScopeSelector::Global
+	} else if args.project {
+		ScopeSelector::Project
+	} else {
+		return Err(anyhow!(ScopeError::ScopeRequired));
+	};
+	let (source_scope, kind) =
+		sources::write_scope(sel, current_project_root()?)
+			.map_err(|e| anyhow!(e))?;
+	let scope = match kind {
+		SourceScopeKind::Global => ResourceScope::GlobalOnly,
+		SourceScopeKind::Project => ResourceScope::ProjectOnly,
+	};
+	let project_root = match &source_scope {
+		SourceScope::Project { root } => Some(root.clone()),
+		SourceScope::Global => None,
+	};
+	Ok((scope, project_root, source_scope, scope_kind_str(kind)))
 }
 
 fn sync(args: SyncArgs) -> Result<()> {
@@ -410,48 +408,38 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let (scope, project_root, source_scope, scope_label) =
 		resolve_write_scope(&args)?;
 
-	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
-	// helper (the SAME resolution the API runs) BEFORE the single fetch, so sync
-	// fetches/installs from the recorded ref — not the default branch — and
-	// prechecks with the recorded source_type rather than a hard-coded "github".
-	let meta = sources::resolve_source_meta(
+	// Resolve the fetch coordinate, precheck, fetch ONCE, and classify against
+	// the single write scope — all behind the shared `scan_for_sync` seam (the
+	// SAME resolve/precheck/fetch the API runs). The repo is reused for
+	// classification AND every install/update; the scan runs BEFORE the flag
+	// branch so the neither-flag informational path prints the plan without a
+	// second fetch.
+	let cli_resolver = cli_resolver();
+	let scan = match sources::scan_for_sync(
 		&source,
-		std::slice::from_ref(&source_scope),
 		args.git_ref,
-	);
-
-	if let Some(reason) =
-		aghub_core::skills::update::precheck_source(&meta.source_type, &source)
-	{
-		bail!(
+		&source_scope,
+		sources::SourceSyncDeps {
+			fetcher: &CliFetcher,
+			resolver: &cli_resolver,
+		},
+	) {
+		Ok(scan) => scan,
+		Err(sources::SyncScanError::Uncheckable(reason)) => bail!(
 			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
 			 owner/repo git sources are supported"
-		);
-	}
-
-	// Fetch ONCE; reuse the repo for classification AND every install/update.
-	// Fetch + classify happen BEFORE the flag branch so the neither-flag
-	// informational path can print the same plan without a second fetch.
-	let repo = match sources::fetch_source_with_resolver(
-		&SourceRef {
-			source: source.clone(),
-			ref_: meta.effective_ref.clone(),
-		},
-		&CliFetcher,
-		&cli_resolver(),
-	) {
-		Ok(repo) => repo,
-		Err(FetchError::Auth) => bail!(
+		),
+		Err(sources::SyncScanError::NeedsCredential) => bail!(
 			"This source needs a credential. Set GIT_PASSWORD / GITHUB_TOKEN, \
 			 or bind a credential in the desktop app."
 		),
-		Err(FetchError::Network) => {
+		Err(sources::SyncScanError::FetchFailed) => {
 			bail!("Failed to fetch source repository '{source}'")
 		}
 	};
-
-	let diffs =
-		sources::classify_scope(repo.root.as_path(), &source_scope, &source);
+	let repo = scan.repo;
+	let diffs = scan.diffs;
+	let scan_ref = scan.git_ref;
 
 	// Neither flag: print the plan (per-state overview) and ask the user to
 	// choose an action. Read-only/informational — write NOTHING.
@@ -507,7 +495,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		source: resolved.lock_source(),
 		source_type: resolved.source_type.as_str().to_string(),
 		source_url: resolved.source_url.clone(),
-		ref_name: meta.effective_ref.clone(),
+		ref_name: scan_ref.clone(),
 	};
 
 	let mut actions: Vec<SyncActionView> = Vec::new();
