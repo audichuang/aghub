@@ -75,13 +75,19 @@ fn resolve_read_scopes(
 	global: bool,
 	project: bool,
 ) -> Result<Vec<SourceScope>> {
-	let project_root = current_project_root()?;
 	let sel = if global {
 		ScopeSelector::Global
 	} else if project {
 		ScopeSelector::Project
 	} else {
 		ScopeSelector::All
+	};
+	// Only Project/All read the project; resolve the root (a `current_dir`
+	// syscall) ONLY then. Global-only must not touch the cwd — so `-g` works from
+	// a broken/deleted cwd and never fails on project-root resolution.
+	let project_root = match sel {
+		ScopeSelector::Global => None,
+		ScopeSelector::Project | ScopeSelector::All => current_project_root()?,
 	};
 	sources::read_scopes(sel, project_root).map_err(|e| anyhow!(e))
 }
@@ -381,9 +387,16 @@ fn resolve_write_scope(
 	} else {
 		return Err(anyhow!(ScopeError::ScopeRequired));
 	};
+	// Only Project resolves the project root (a `current_dir` syscall). Global
+	// writes the global scope and `All` is rejected outright — neither needs the
+	// cwd, so the `--all` rejection and Global sync work from a broken/deleted
+	// cwd instead of dying on project-root resolution first.
+	let project_root = match sel {
+		ScopeSelector::Project => current_project_root()?,
+		ScopeSelector::Global | ScopeSelector::All => None,
+	};
 	let (source_scope, kind) =
-		sources::write_scope(sel, current_project_root()?)
-			.map_err(|e| anyhow!(e))?;
+		sources::write_scope(sel, project_root).map_err(|e| anyhow!(e))?;
 	let scope = match kind {
 		SourceScopeKind::Global => ResourceScope::GlobalOnly,
 		SourceScopeKind::Project => ResourceScope::ProjectOnly,

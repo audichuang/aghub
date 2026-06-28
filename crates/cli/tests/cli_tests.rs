@@ -905,6 +905,139 @@ fn source_list_runs_with_no_agent_config() {
 		.success();
 }
 
+/// Codex finding (global/`--all` source paths must not require a project root):
+/// the old code called `current_project_root()` — a `current_dir()`/`getcwd()`
+/// syscall — UNCONDITIONALLY, so from a broken/deleted cwd even a global-only
+/// invocation died with "No such file or directory" before it could do the
+/// global-only work (or, for `--all sync`, before the `--all` rejection).
+///
+/// These tests reproduce that exact "deleted cwd" condition: spawn the binary
+/// with a cwd that exists at fork (so `chdir` succeeds) but is removed in
+/// `pre_exec` before exec, so the child's `getcwd()` returns ENOENT. A correct
+/// global path must NOT touch the cwd and so must succeed (or, for `--all sync`,
+/// fail for the RIGHT reason). Unix-only: `pre_exec`/deleted-cwd is POSIX.
+#[cfg(unix)]
+fn cli_in_deleted_cwd(
+	home: &std::path::Path,
+	state: &std::path::Path,
+	fetch_root: Option<&std::path::Path>,
+	args: &[&str],
+) -> std::process::Output {
+	use std::os::unix::process::CommandExt;
+
+	let gone = tempfile::TempDir::new().unwrap();
+	let gone_path = gone.path().to_path_buf();
+
+	let mut cmd =
+		std::process::Command::new(assert_cmd::cargo::cargo_bin("aghub-cli"));
+	cmd.env("HOME", home)
+		.env("USERPROFILE", home)
+		.env("APPDATA", home)
+		.env("XDG_STATE_HOME", state)
+		.current_dir(&gone_path)
+		.args(args);
+	if let Some(root) = fetch_root {
+		cmd.env("AGHUB_TEST_SOURCE_FETCH_ROOT", root);
+	}
+	// SAFETY: `pre_exec` runs in the forked child before exec; removing the cwd
+	// here makes `getcwd()` ENOENT for the child without racing the parent.
+	unsafe {
+		cmd.pre_exec(move || {
+			std::fs::remove_dir(&gone_path).ok();
+			Ok(())
+		});
+	}
+	cmd.output().unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn source_list_global_does_not_touch_cwd() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = cli_in_deleted_cwd(
+		home.path(),
+		state.path(),
+		None,
+		&["-g", "source", "list"],
+	);
+	assert!(
+		out.status.success(),
+		"`-g source list` must not resolve a project root: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_diff_global_does_not_touch_cwd() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	let out = cli_in_deleted_cwd(
+		home.path(),
+		state.path(),
+		Some(src.path()),
+		&["-g", "source", "diff", "owner/repo"],
+	);
+	assert!(
+		out.status.success(),
+		"`-g source diff` must not resolve a project root: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_global_does_not_touch_cwd() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	let out = cli_in_deleted_cwd(
+		home.path(),
+		state.path(),
+		Some(src.path()),
+		&["-g", "source", "sync", "owner/repo", "--install-missing"],
+	);
+	assert!(
+		out.status.success(),
+		"`-g source sync` must not resolve a project root: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+/// `--all source sync` is rejected (`--all` is meaningless for a single write
+/// scope). That rejection must happen BEFORE any cwd IO: from a deleted cwd the
+/// old code hit `current_dir()` ENOENT and failed with the wrong error before
+/// reaching the `AllNotAllowedForWrite` guard. Assert it fails for the RIGHT
+/// reason (the scope message), not "No such file or directory".
+#[cfg(unix)]
+#[test]
+fn source_sync_all_rejected_before_cwd_io() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	let out = cli_in_deleted_cwd(
+		home.path(),
+		state.path(),
+		Some(src.path()),
+		&["--all", "source", "sync", "owner/repo", "--install-missing"],
+	);
+	assert!(
+		!out.status.success(),
+		"`--all source sync` must be rejected"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("--all is not allowed"),
+		"must fail with the scope error, not a cwd 'No such file or \
+		 directory': {stderr}"
+	);
+}
+
 /// Write a source dir containing one skill `<name>/SKILL.md` with frontmatter.
 fn write_source_skill(
 	root: &std::path::Path,
