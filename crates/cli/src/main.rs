@@ -531,6 +531,7 @@ fn main() -> Result<()> {
 				Commands::Add { .. }
 					| Commands::Check { .. }
 					| Commands::PruneLock { .. }
+					| Commands::Delete { .. }
 			);
 			if tolerate_missing {
 				eprintln_verbose!(

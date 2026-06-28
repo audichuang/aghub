@@ -444,6 +444,143 @@ mod tests {
 		);
 	}
 
+	// --- DELETE MCP / sub-agent over the real HTTP wire (#5 audit) ----------
+	//
+	// The route-module tests call the handlers directly, which proves the seam
+	// but NOT the wire change: the routes returned 204 NoContent before #5 and
+	// now return 200 + the removal JSON. These dispatch through a mounted Rocket
+	// client so the status code, `confirm` query parsing, route mounting and the
+	// on-disk effect are all exercised end-to-end.
+
+	/// Seed one Claude MCP over HTTP into a project-scoped temp root.
+	fn seed_mcp_http(client: &Client, root: &std::path::Path) {
+		let body = serde_json::json!({
+			"name": "wire",
+			"transport": { "type": "stdio", "command": "echo", "args": ["hi"] },
+		})
+		.to_string();
+		let uri = format!(
+			"/api/v1/agents/claude/mcps?scope=project&project_root={}",
+			urlencoding(&root.to_string_lossy()),
+		);
+		let resp = client
+			.post(&uri)
+			.header(rocket::http::ContentType::JSON)
+			.body(body)
+			.dispatch();
+		assert_eq!(resp.status(), Status::Created, "seed mcp must succeed");
+	}
+
+	/// Minimal query-component percent-encoder (avoids a serializer import).
+	fn urlencoding(s: &str) -> String {
+		let mut q = url::form_urlencoded::Serializer::new(String::new());
+		q.append_pair("v", s);
+		// "v=" prefix stripped -> just the encoded value.
+		q.finish().trim_start_matches("v=").to_string()
+	}
+
+	#[test]
+	fn delete_mcp_wire_dry_run_returns_200_json_and_keeps_entry() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+		seed_mcp_http(&client, root);
+
+		let uri = format!(
+			"/api/v1/agents/claude/mcps/wire?scope=project&project_root={}",
+			urlencoding(&root.to_string_lossy()),
+		);
+		// No `confirm` => default dry-run.
+		let resp = client.delete(&uri).dispatch();
+		// Pre-#5 this was 204 NoContent; the wire change is 200 + JSON.
+		assert_eq!(resp.status(), Status::Ok, "delete must be 200, not 204");
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["success"], true);
+		assert_eq!(json["dry_run"], true);
+		assert_eq!(json["executed"], false);
+		assert!(json["deleted_path"].is_null());
+		// The MCP config file still holds the entry after a dry-run.
+		let cfg =
+			std::fs::read_to_string(root.join(".mcp.json")).unwrap_or_default();
+		assert!(cfg.contains("wire"), "dry-run must leave the mcp on disk");
+	}
+
+	#[test]
+	fn delete_mcp_wire_confirm_returns_200_and_removes_entry() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+		seed_mcp_http(&client, root);
+
+		let uri = format!(
+			"/api/v1/agents/claude/mcps/wire?scope=project&project_root={}&confirm=true",
+			urlencoding(&root.to_string_lossy()),
+		);
+		let resp = client.delete(&uri).dispatch();
+		assert_eq!(resp.status(), Status::Ok);
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["success"], true);
+		assert_eq!(json["executed"], true, "confirm=true must execute");
+		assert_eq!(json["dry_run"], false);
+		// The entry is gone from disk.
+		let cfg =
+			std::fs::read_to_string(root.join(".mcp.json")).unwrap_or_default();
+		assert!(!cfg.contains("wire"), "confirm=true must remove the mcp");
+	}
+
+	#[test]
+	fn delete_sub_agent_wire_confirm_returns_200_and_removes_file() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let body = serde_json::json!({
+			"name": "wire",
+			"description": "d",
+			"instruction": "do things",
+		})
+		.to_string();
+		let create_uri = format!(
+			"/api/v1/agents/claude/sub-agents?scope=project&project_root={}",
+			urlencoding(&root.to_string_lossy()),
+		);
+		let created = client
+			.post(&create_uri)
+			.header(rocket::http::ContentType::JSON)
+			.body(body)
+			.dispatch();
+		assert_eq!(created.status(), Status::Created, "seed sub-agent");
+		let file = root.join(".claude/agents/wire.md");
+		assert!(file.exists(), "precondition: backing file written");
+
+		let del_uri = format!(
+			"/api/v1/agents/claude/sub-agents/wire?scope=project&project_root={}&confirm=true",
+			urlencoding(&root.to_string_lossy()),
+		);
+		let resp = client.delete(&del_uri).dispatch();
+		// Pre-#5 this was 204 NoContent; the wire change is 200 + JSON.
+		assert_eq!(resp.status(), Status::Ok, "delete must be 200, not 204");
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["success"], true);
+		assert_eq!(json["executed"], true);
+		assert!(!file.exists(), "confirm=true must remove the backing file");
+	}
+
 	#[tokio::test]
 	async fn port_reporter_fires_after_bind_with_real_ephemeral_port() {
 		use super::{start_with_port_reporter, ApiOptions};

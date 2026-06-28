@@ -25,6 +25,7 @@ import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
 import { AgentIcon } from "../lib/agent-icons";
+import { deleteWithDryRun } from "../lib/delete-preview";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { serializeMcpImportJson } from "../lib/mcp-utils";
 import { cn, filterItemsByAgentIds, sortAgentObjects } from "../lib/utils";
@@ -105,12 +106,14 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 			return Promise.all(
 				g.items.map((item) => {
 					const scope = item.source ?? "global";
-					return api.mcps.delete(
-						item.name,
-						item.agent ?? "default",
-						scope,
-						projectPath,
-						true,
+					return deleteWithDryRun((confirm) =>
+						api.mcps.delete(
+							item.name,
+							item.agent ?? "default",
+							scope,
+							projectPath,
+							confirm,
+						),
 					);
 				}),
 			);

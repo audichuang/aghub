@@ -21,6 +21,7 @@ import type { McpResponse, SkillResponse } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
 import { bulkFailureItemsLabel } from "../../lib/bulk-errors";
+import { deleteWithDryRun } from "../../lib/delete-preview";
 import { getMcpMergeKey, getSubAgentMergeKey } from "../../lib/utils";
 import { mcpListQueryOptions } from "../../requests/mcps";
 import { skillListQueryOptions } from "../../requests/skills";
@@ -258,12 +259,14 @@ export default function ProjectDetailPage() {
 		);
 		const results = await Promise.allSettled(
 			itemsWithAgent.map((item) =>
-				api.subAgents.delete(
-					item.name,
-					item.agent,
-					"project",
-					project?.path,
-					true,
+				deleteWithDryRun((confirm) =>
+					api.subAgents.delete(
+						item.name,
+						item.agent,
+						"project",
+						project?.path,
+						confirm,
+					),
 				),
 			),
 		);

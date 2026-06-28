@@ -121,7 +121,7 @@ impl ConfigManager {
 		// config-only agent (never written to disk) has no path.
 		let paths: Vec<PathBuf> =
 			source_path.iter().map(PathBuf::from).collect();
-		let mut plan = RemovalPlan {
+		let plan = RemovalPlan {
 			layout: Layout::Copy,
 			paths,
 			skipped: vec![],
@@ -147,6 +147,26 @@ impl ConfigManager {
 			});
 		}
 
+		// Delete the backing file FIRST, before mutating/saving in-memory state.
+		// Unlike skills, `save_scoped_sub_agents` does NOT delete stale files
+		// (crates/agents/src/sub_agents.rs), so a file left on disk after an
+		// in-memory removal reappears as a phantom agent on the next reload. If
+		// the delete fails with a real error we must surface it and leave state
+		// untouched (agent stays loaded + on disk) rather than report a false
+		// success. An already-gone file is idempotent success. This is why the
+		// skill-style "move failed paths to skipped" contract does NOT apply
+		// here — there is no save step that would clean up the orphan.
+		for path in &plan.paths {
+			match std::fs::remove_file(path) {
+				Ok(()) => {}
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+				Err(e) => {
+					warn!("failed removal of '{}': {}", path.display(), e);
+					return Err(ConfigError::Io(e));
+				}
+			}
+		}
+
 		{
 			let config = self.config_mut()?;
 			config.sub_agents.retain(|a| a.name != name);
@@ -159,28 +179,6 @@ impl ConfigManager {
 			self.write_scope
 		);
 		self.save_sub_agents_current()?;
-
-		// Delete the backing file (for directory-based storage like Claude) and
-		// reflect what actually happened on disk in the returned plan, mirroring
-		// `remove_skill_planned`: a path that could not be removed moves to
-		// `skipped` so the derived `deleted_path` never names a file still on
-		// disk (no false success). An already-gone file is idempotent success.
-		let mut removed = Vec::with_capacity(plan.paths.len());
-		let mut failed = Vec::new();
-		for path in plan.paths.drain(..) {
-			match std::fs::remove_file(&path) {
-				Ok(()) => removed.push(path),
-				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-					removed.push(path)
-				}
-				Err(e) => {
-					warn!("failed removal of '{}': {}", path.display(), e);
-					failed.push(path);
-				}
-			}
-		}
-		plan.paths = removed;
-		plan.skipped.extend(failed);
 
 		Ok(RemovalOutcome {
 			plan,

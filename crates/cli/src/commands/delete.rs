@@ -1,6 +1,7 @@
 use crate::{eprintln_verbose, ResourceType};
+use aghub_core::errors::ConfigError;
 use aghub_core::manager::ConfigManager;
-use aghub_core::skills::removal::PruneStatus;
+use aghub_core::skills::removal::{PruneStatus, RemovalOutcome};
 use anyhow::Result;
 use serde_json::json;
 
@@ -36,13 +37,17 @@ pub fn execute(
 				is_dry_run
 			);
 			// The lock prune happens inside remove_skill_planned on execute;
-			// its result is reported via outcome.prune.
-			let outcome = manager.remove_skill_planned(
-				&name,
-				options.all_agents,
-				is_dry_run,
-				options.yes,
-			)?;
+			// its result is reported via outcome.prune. A missing config or a
+			// missing skill is an idempotent no-op (matches the API), not an
+			// error — see `plan_or_noop`.
+			let outcome = plan_or_noop(manager, |m| {
+				m.remove_skill_planned(
+					&name,
+					options.all_agents,
+					is_dry_run,
+					options.yes,
+				)
+			})?;
 			// Serialize the shared core builder so the removal fields
 			// (success/dry_run/executed/needs_confirm/paths/skipped/
 			// deleted_path) live once and stay snake_case, matching the API +
@@ -64,8 +69,11 @@ pub fn execute(
 				name,
 				is_dry_run
 			);
-			let outcome =
-				manager.remove_mcp_planned(&name, is_dry_run, options.yes)?;
+			// Missing config / missing MCP is an idempotent no-op (matches the
+			// API), not an error — see `plan_or_noop`.
+			let outcome = plan_or_noop(manager, |m| {
+				m.remove_mcp_planned(&name, is_dry_run, options.yes)
+			})?;
 			// Reuse the shared core RemovalView so the removal fields stay
 			// snake_case and byte-identical to the skills branch + the API +
 			// desktop DeleteSkillByPathResponse; layer the CLI {type,name}
@@ -79,6 +87,33 @@ pub fn execute(
 	}
 
 	Ok(())
+}
+
+/// Run a planned-removal closure, mapping the two "already gone" cases to a
+/// shared no-op [`RemovalOutcome`] (`success:true, executed:false`) so the CLI
+/// matches the API's idempotent-delete contract instead of erroring (#5 audit):
+///
+/// - **No config loaded** (the file never existed; `main.rs` tolerated the
+///   missing config for `delete`): nothing to remove.
+/// - **`ResourceNotFound`**: the config loaded but has no such resource.
+///
+/// All other errors propagate. The no-op shape comes from the same
+/// `RemovalOutcome::noop()` the API's `noop_removal_response` uses, so the two
+/// surfaces serialize byte-identically.
+fn plan_or_noop(
+	manager: &mut ConfigManager,
+	plan: impl FnOnce(
+		&mut ConfigManager,
+	) -> aghub_core::errors::Result<RemovalOutcome>,
+) -> Result<RemovalOutcome> {
+	if manager.config().is_none() {
+		return Ok(RemovalOutcome::noop());
+	}
+	match plan(manager) {
+		Ok(outcome) => Ok(outcome),
+		Err(ConfigError::ResourceNotFound { .. }) => Ok(RemovalOutcome::noop()),
+		Err(e) => Err(e.into()),
+	}
 }
 
 /// Render a skill removal's [`PruneStatus`] onto the JSON `payload`, matching

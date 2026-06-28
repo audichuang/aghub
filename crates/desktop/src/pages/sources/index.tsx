@@ -39,6 +39,7 @@ import {
 	partitionByCoverage,
 	supportsSkillMutation,
 } from "../../lib/agent-capabilities";
+import { deleteWithDryRun } from "../../lib/delete-preview";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -526,13 +527,15 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			throw new Error(t("sourceRemoveNoAgents"));
 		}
 
-		await api.skills.delete(
-			installableAgentIds[0],
-			name,
-			updateScope,
-			updateProjectRoot ?? undefined,
-			true,
-			true,
+		await deleteWithDryRun((confirm) =>
+			api.skills.delete(
+				installableAgentIds[0],
+				name,
+				updateScope,
+				updateProjectRoot ?? undefined,
+				true,
+				confirm,
+			),
 		);
 	};
 

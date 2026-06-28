@@ -36,6 +36,7 @@ import {
 	BulkOperationError,
 	bulkFailureItemsLabel,
 } from "../../lib/bulk-errors";
+import { deleteWithDryRun } from "../../lib/delete-preview";
 import {
 	filterItemsByAgentIds,
 	getSubAgentMergeKey,
@@ -229,12 +230,14 @@ export default function SubAgentsPage() {
 			);
 			const results = await Promise.allSettled(
 				itemsWithAgent.map((item) =>
-					api.subAgents.delete(
-						item.name,
-						item.agent,
-						item.source === "project" ? "project" : "global",
-						undefined,
-						true,
+					deleteWithDryRun((confirm) =>
+						api.subAgents.delete(
+							item.name,
+							item.agent,
+							item.source === "project" ? "project" : "global",
+							undefined,
+							confirm,
+						),
 					),
 				),
 			);

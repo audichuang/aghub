@@ -11,6 +11,7 @@ import type {
 	TransferRequest,
 	UpdateMcpRequest,
 } from "../generated/dto";
+import { deleteWithDryRun } from "../lib/delete-preview";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys";
 
@@ -136,7 +137,9 @@ export function deleteMcpMutationOptions({
 }: DeleteMcpMutationParams) {
 	return mutationOptions({
 		mutationFn: ({ name, agent, scope, projectRoot }: DeleteMcpVariables) =>
-			api.mcps.delete(name, agent, scope, projectRoot, true),
+			deleteWithDryRun((confirm) =>
+				api.mcps.delete(name, agent, scope, projectRoot, confirm),
+			),
 		onSuccess: async () => {
 			await invalidateMcpQueries(queryClient);
 			await onSuccess?.();

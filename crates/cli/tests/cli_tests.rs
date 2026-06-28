@@ -447,6 +447,65 @@ fn cli_delete_mcp_yes_removes() {
 	);
 }
 
+#[test]
+fn cli_delete_mcp_missing_config_is_noop_ok() {
+	// Audit (#5): the API answers DELETE on a missing config with an
+	// idempotent no-op success body; the CLI must NOT error. No MCP was ever
+	// added, so no config file exists.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "mcps", "ghost", "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"missing config delete must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["type"], "mcp");
+	assert_eq!(json["name"], "ghost");
+	assert_eq!(json["success"], true);
+	assert_eq!(json["executed"], false);
+	assert_eq!(json["paths"], serde_json::json!([]));
+	assert_eq!(json["skipped"], serde_json::json!([]));
+}
+
+#[test]
+fn cli_delete_mcp_missing_name_is_noop_ok() {
+	// Audit (#5): config exists but the named MCP does not. Match the API's
+	// idempotent no-op (success:true, executed:false), not a ResourceNotFound
+	// error. An unrelated MCP is seeded so the config file is present.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	seed_mcp(home.path(), state.path(), "other");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "mcps", "ghost", "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"missing MCP name delete must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["type"], "mcp");
+	assert_eq!(json["name"], "ghost");
+	assert_eq!(json["success"], true);
+	assert_eq!(json["executed"], false);
+
+	// The unrelated MCP is untouched by the no-op.
+	assert!(
+		mcp_listed(home.path(), state.path(), "other"),
+		"no-op delete must not touch other MCPs"
+	);
+}
+
 // ==================== #4: SkillView command-surface contract ====================
 //
 // get/update/describe/add all now emit the core SkillView shape (snake_case,

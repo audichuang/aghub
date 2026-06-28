@@ -422,6 +422,27 @@ pub struct RemovalOutcome {
 	pub prune: PruneStatus,
 }
 
+impl RemovalOutcome {
+	/// Idempotent-delete no-op: nothing on disk to remove (missing config or
+	/// missing resource). One shared constructor so the CLI and API serialize
+	/// the SAME `success:true, executed:false, dry_run:true` wire shape for the
+	/// "already gone" path across skill/MCP/sub-agent deletes — they must not
+	/// drift (API was lenient, CLI errored). `deleted_path` stays null because
+	/// `executed` is false.
+	pub fn noop() -> Self {
+		RemovalOutcome {
+			plan: RemovalPlan {
+				layout: Layout::Copy,
+				paths: vec![],
+				skipped: vec![],
+				needs_confirm: false,
+			},
+			executed: false,
+			prune: PruneStatus::NotRun,
+		}
+	}
+}
+
 /// What `execute_removal` actually did on disk.
 #[derive(Debug, Default)]
 pub struct RemovalReport {

@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import type { ConfigSource } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
 import { BulkOperationError, bulkFailureItemsLabel } from "../lib/bulk-errors";
+import { deleteWithDryRun } from "../lib/delete-preview";
 import { invalidateMcpQueries } from "../requests/mcps";
 import { invalidateSkillQueries } from "../requests/skills";
 
@@ -55,6 +56,7 @@ export function BulkDeleteDialog({
 				const groupResourceType = group.resourceType ?? resourceType;
 				for (const item of group.items) {
 					if (!item.agent) continue;
+					const agent = item.agent;
 					const scope: "global" | "project" = item.source ?? "global";
 					const projectRoot =
 						scope === "project" ? projectPath : undefined;
@@ -68,28 +70,28 @@ export function BulkDeleteDialog({
 					seen.add(dedupKey);
 					if (groupResourceType === "mcp") {
 						promises.push(
-							api.mcps
-								.delete(
+							deleteWithDryRun((confirm) =>
+								api.mcps.delete(
 									item.name,
-									item.agent,
+									agent,
 									scope,
 									projectRoot,
-									true,
-								)
-								.then(() => undefined),
+									confirm,
+								),
+							).then(() => undefined),
 						);
 					} else {
 						promises.push(
-							api.skills
-								.delete(
-									item.agent,
+							deleteWithDryRun((confirm) =>
+								api.skills.delete(
+									agent,
 									group.key,
 									scope,
 									projectRoot,
 									false,
-									true,
-								)
-								.then(() => undefined),
+									confirm,
+								),
+							).then(() => undefined),
 						);
 					}
 					deleteInfo.push({

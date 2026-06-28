@@ -134,11 +134,11 @@ fn remove_sub_agent_planned_config_only_has_empty_paths() {
 }
 
 #[test]
-fn remove_sub_agent_planned_failed_delete_is_not_false_success() {
-	// Regression: a backing-file deletion failure must NOT be reported as a
-	// deleted path. Mirroring the skill removal contract, a path that could not
-	// be removed moves out of `plan.paths` into `plan.skipped`, so the derived
-	// `deleted_path` (first of `paths`) never names a file still on disk.
+fn remove_sub_agent_planned_failed_delete_errors_without_mutating() {
+	// A backing-file deletion failure must surface as an actionable error and
+	// NOT mutate in-memory state. Sub-agents differ from skills: there is no
+	// post-delete save that cleans up stale files, so a "report skipped and
+	// succeed" contract would leave the file on disk to reappear on reload.
 	//
 	// ENOTDIR trick: point the agent's source_path at `<file>/agent.md` where
 	// `<file>` is a regular file, so `remove_file` fails with NotADirectory
@@ -164,28 +164,64 @@ fn remove_sub_agent_planned_failed_delete_is_not_false_success() {
 	agent.source_path = Some(undeletable.to_string_lossy().into_owned());
 	mgr.add_sub_agent(agent).unwrap();
 
-	let outcome = mgr
+	let err = mgr
 		.remove_sub_agent_planned("corrupt", false, true)
-		.unwrap();
+		.unwrap_err();
+	assert!(
+		matches!(err, ConfigError::Io(_)),
+		"undeletable backing file must surface an IO error, got {err:?}"
+	);
+	assert!(
+		mgr.get_sub_agent("corrupt").is_some(),
+		"a failed delete must not drop the agent from memory"
+	);
+}
 
-	assert!(outcome.executed, "deletion was attempted");
+#[test]
+fn remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent() {
+	// Regression (Codex blocking): when the backing `.md` is REAL (written by
+	// add/save) but its deletion fails, the manager must NOT report success.
+	// Because `save_scoped_sub_agents` never deletes stale files, an orphaned
+	// `.md` left behind reappears on reload — so a failed delete that mutated
+	// + saved in-memory state would falsely claim the agent is gone while it
+	// silently returns. The fix deletes the file FIRST: a non-NotFound error
+	// surfaces as an error and leaves the agent loaded + on disk (consistent).
+	//
+	// Force the delete to fail without chmod (root-safe): replace the backing
+	// file with a directory at the same path so `remove_file` hits ENOTDIR/
+	// IsADirectory deterministically.
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let mut mgr = manager_with_persisted_agent(root, "reviewer");
+	let file = agent_md_path(root, "reviewer");
+	assert!(file.exists(), "precondition: real backing file written");
+
+	// Swap the file for a directory so remove_file can never succeed.
+	std::fs::remove_file(&file).unwrap();
+	std::fs::create_dir(&file).unwrap();
 	assert!(
-		!outcome.plan.paths.contains(&undeletable),
-		"a path that could not be deleted must leave plan.paths"
+		std::fs::remove_file(&file).is_err(),
+		"precondition: remove_file fails on a directory"
 	);
+
+	let err = mgr
+		.remove_sub_agent_planned("reviewer", false, true)
+		.unwrap_err();
 	assert!(
-		outcome.plan.skipped.contains(&undeletable),
-		"the undeletable backing file must surface in plan.skipped"
+		matches!(err, ConfigError::Io(_)),
+		"undeletable backing file must surface an actionable IO error, \
+		 got {err:?}"
 	);
-	// RemovalView derives deleted_path from plan.paths.first(); it must not name
-	// a file that is still on disk.
-	let view = aghub_core::dto::RemovalView::from(&outcome);
+
+	// State preserved: agent still loaded in memory, and the backing path is
+	// still on disk. Crucially the delete happens BEFORE the in-memory removal
+	// + save, so the failure leaves no stale orphan that a later save would
+	// fail to clean up and that would reappear on reload.
 	assert!(
-		view.deleted_path.is_none(),
-		"no path was actually deleted → deleted_path must be null, \
-		 got {:?}",
-		view.deleted_path
+		mgr.get_sub_agent("reviewer").is_some(),
+		"failed delete must leave the agent in memory"
 	);
+	assert!(file.exists(), "backing path must remain on disk");
 }
 
 #[test]
