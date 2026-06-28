@@ -45,8 +45,10 @@ pub struct TransferArgs {
 	/// Name of the resource to copy.
 	#[arg(long)]
 	name: String,
-	/// Target agent (repeatable) to copy the resource into.
-	#[arg(long = "to", value_parser = parse_agent)]
+	/// Target agent (repeatable) to copy the resource into. At least one is
+	/// required — a transfer to no destinations is meaningless (the core guard
+	/// rejects it too; this just fails fast at parse with a usage error).
+	#[arg(long = "to", value_parser = parse_agent, required = true, num_args = 1..)]
 	to: Vec<AgentType>,
 	#[arg(long)]
 	json: bool,

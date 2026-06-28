@@ -3076,9 +3076,13 @@ fn transfer_skill_empty_to_is_rejected() {
 		"transfer with no --to must fail; stdout: {}",
 		String::from_utf8_lossy(&out.stdout)
 	);
+	// clap fails fast at parse (`--to` is `required`); the usage error names the
+	// missing destination flag so the user knows what to add.
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(
-		stderr.contains("destination") || stderr.contains("target"),
+		stderr.contains("--to")
+			|| stderr.contains("destination")
+			|| stderr.contains("target"),
 		"error must name the missing destination: {stderr}"
 	);
 }
