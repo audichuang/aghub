@@ -343,6 +343,8 @@ fn delete_skill_yes_prunes_and_reports() {
 
 /// Seed an MCP via `add mcps`, returning the isolated HOME/STATE temp dirs so
 /// the follow-up delete + get run against the same config.
+// Only used by #[cfg(unix)] tests (Windows global MCP config isn't HOME-isolated).
+#[cfg(unix)]
 fn seed_mcp(home: &std::path::Path, state: &std::path::Path, name: &str) {
 	let add = isolated_cli(home, state)
 		.args([
@@ -376,6 +378,7 @@ fn mcp_listed(
 	json.as_array().unwrap().iter().any(|m| m["name"] == name)
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn cli_delete_mcp_dry_run_default() {
 	// No --yes => dry-run: JSON reports dry_run:true/executed:false and the
@@ -418,6 +421,7 @@ fn cli_delete_mcp_dry_run_default() {
 	);
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn cli_delete_mcp_yes_removes() {
 	// --yes executes: JSON reports executed:true and the MCP is gone.
@@ -447,6 +451,7 @@ fn cli_delete_mcp_yes_removes() {
 	);
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn cli_delete_mcp_missing_config_is_noop_ok() {
 	// Audit (#5): the API answers DELETE on a missing config with an
@@ -474,6 +479,7 @@ fn cli_delete_mcp_missing_config_is_noop_ok() {
 	assert_eq!(json["skipped"], serde_json::json!([]));
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn cli_delete_mcp_missing_name_is_noop_ok() {
 	// Audit (#5): config exists but the named MCP does not. Match the API's
@@ -2099,6 +2105,7 @@ fn add_mcp_zero_timeout_is_rejected() {
 	);
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn add_mcp_url_with_timeout_succeeds_and_sets_it() {
 	let home = tempfile::tempdir().unwrap();
@@ -2157,6 +2164,7 @@ fn add_mcp_unknown_transport_is_rejected() {
 	);
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn update_mcp_timeout_flag_overrides_existing() {
 	// Seed an MCP, then update its timeout via --timeout; the new value wins.
@@ -2199,6 +2207,7 @@ fn update_mcp_timeout_flag_overrides_existing() {
 	);
 }
 
+#[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn update_mcp_zero_timeout_is_rejected() {
 	// The update path has its own timeout code (effective_timeout +
