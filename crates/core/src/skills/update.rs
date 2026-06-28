@@ -234,9 +234,42 @@ pub fn stage_and_swap_dir(
 		);
 	}
 
-	let _ = remove_path_any(&backup_root);
-	let _ = remove_path_any(&staging_root);
-	Ok(())
+	// The swap succeeded — target_dir now holds the new contents — but the
+	// staging/backup temps must still be swept. A failure here means we'd be
+	// claiming success while leaking a .aghub-stage-*/.aghub-backup-* orphan,
+	// so surface it instead of swallowing it with `let _`.
+	cleanup_swap_temps(&staging_root, &backup_root)
+}
+
+/// Sweep the post-swap temp roots. The swap itself already succeeded, so this
+/// is best-effort cleanup — but a failure must not be silently swallowed: it
+/// would leave an orphan while the caller is told everything is fine. Returns
+/// the first removal error (with the offending path named), or `Ok(())`.
+fn cleanup_swap_temps(
+	staging_root: &Path,
+	backup_root: &Path,
+) -> std::io::Result<()> {
+	let mut first_error: Option<std::io::Error> = None;
+	for root in [backup_root, staging_root] {
+		if let Err(e) = remove_path_any(root) {
+			log::warn!(
+				"failed to remove skill-swap temp {}: {e}",
+				root.display()
+			);
+			let e = std::io::Error::new(
+				e.kind(),
+				format!(
+					"swap succeeded but cleanup of {} failed: {e}",
+					root.display()
+				),
+			);
+			first_error.get_or_insert(e);
+		}
+	}
+	match first_error {
+		Some(e) => Err(e),
+		None => Ok(()),
+	}
 }
 
 fn handle_failed_swap(
@@ -269,10 +302,12 @@ fn handle_failed_swap_with_rollback(
 ) -> std::io::Result<()> {
 	// Fresh install (no prior target): the staged copy is the only orphan and
 	// it is swept above; nothing was backed up. Sweep the empty backup root too
-	// so no .aghub-stage-*/.aghub-backup-* survives the failure.
-	let _ = remove_path_any(staging_root);
+	// so no .aghub-stage-*/.aghub-backup-* survives the failure. The swap error
+	// is the real failure we must return, so a cleanup error here only warns —
+	// it must not mask `error`.
+	warn_on_cleanup_failure(staging_root);
 	if !had_target {
-		let _ = remove_path_any(backup_root);
+		warn_on_cleanup_failure(backup_root);
 		return Err(error);
 	}
 
@@ -296,8 +331,20 @@ fn handle_failed_swap_with_rollback(
 
 	// Rollback succeeded: original contents are back at target_dir, so neither
 	// the staging nor the backup root is needed — sweep both, leaving no orphan.
-	let _ = remove_path_any(backup_root);
+	// As above, a cleanup error only warns; `error` is the failure to report.
+	warn_on_cleanup_failure(backup_root);
 	Err(error)
+}
+
+/// Best-effort temp removal whose ONLY job is to never silently swallow a
+/// cleanup failure: it logs at warn level and otherwise ignores the result.
+/// Used on the swap-failure paths, where the swap error itself is the value the
+/// caller must see — so a cleanup error here is surfaced via the log, not by
+/// masking the original error.
+fn warn_on_cleanup_failure(path: &Path) {
+	if let Err(e) = remove_path_any(path) {
+		log::warn!("failed to remove skill-swap temp {}: {e}", path.display());
+	}
 }
 
 fn copy_dir_recursive_skip_symlinks(
@@ -623,6 +670,123 @@ mod tests {
 			.filter(|n| n.starts_with(".aghub-stage"))
 			.collect();
 		assert!(leftovers.is_empty(), "staging orphans left: {leftovers:?}");
+	}
+
+	/// Frozen npx round-trip: after a successful GLOBAL apply-update, the lock
+	/// entry must carry the REAL updated folder hash in `contentHash`, leave the
+	/// legacy `skillFolderHash` empty (the v3 mutual-exclusion invariant), and
+	/// record `refCommit`. Guards against a half-migrated entry that would make
+	/// an aghub-written lock unreadable by `npx skills`.
+	#[test]
+	fn global_apply_update_pins_frozen_lock_contract() {
+		use crate::skills::prune::test_lock::GlobalLockGuard;
+
+		let _guard = GlobalLockGuard::new();
+
+		// A real skill folder + its real Source hash — the value apply-update
+		// recomputes from the freshly swapped target. Asserting against this
+		// (not just `is_some()`) catches a stub/empty hash being written.
+		let folder = tempdir().unwrap();
+		fs::write(
+			folder.path().join("SKILL.md"),
+			"---\nname: my-skill\ndescription: d\n---\nbody\n",
+		)
+		.unwrap();
+		let updated_hash =
+			skill::compute_skill_folder_hash(folder.path()).unwrap();
+
+		// Seed an npx-written entry: legacy folder hash populated, no contentHash.
+		skill::lock::global::add_skill_to_lock(
+			"my-skill",
+			skill::SkillLockEntry {
+				source: "owner/repo".to_string(),
+				source_type: "github".to_string(),
+				source_url: "https://github.com/owner/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				skill_path: Some("SKILL.md".to_string()),
+				skill_folder_hash: "stale-gh-tree-sha".to_string(),
+				content_hash: None,
+				ref_commit: None,
+				installed_at: "t".to_string(),
+				updated_at: "t".to_string(),
+				plugin_name: None,
+			},
+		)
+		.unwrap();
+
+		// The exact frozen-contract mutation the global apply-update performs:
+		// apply_content_hash (sets contentHash + clears skillFolderHash) plus the
+		// refCommit write.
+		let ref_commit = "deadbeefcafef00ddeadbeefcafef00ddeadbeef";
+		skill::lock::global::modify_skill_lock(|lock| {
+			let entry = lock.skills.get_mut("my-skill").unwrap();
+			entry.apply_content_hash(&updated_hash, "2026-06-28T00:00:00Z");
+			entry.ref_commit = Some(ref_commit.to_string());
+		})
+		.unwrap();
+
+		let lock = skill::lock::global::read_skill_lock();
+		let entry = &lock.skills["my-skill"];
+		assert_eq!(
+			entry.content_hash.as_deref(),
+			Some(updated_hash.as_str()),
+			"contentHash must equal the recomputed folder hash"
+		);
+		assert_eq!(
+			entry.skill_folder_hash, "",
+			"legacy skillFolderHash must be cleared (v3 invariant)"
+		);
+		assert_eq!(
+			entry.ref_commit.as_deref(),
+			Some(ref_commit),
+			"refCommit must be recorded for the next ls-refs preflight"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn successful_swap_surfaces_cleanup_failure_not_silently() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempdir().unwrap();
+
+		// Root bypasses 0o555 perms — the cleanup would succeed and the path
+		// under test never runs.
+		if !perms_enforced(tmp.path()) {
+			eprintln!("skip: running as root, 0o555 not enforced");
+			return;
+		}
+
+		// A backup root that cannot be removed (read-only dir with a child):
+		// remove_dir_all needs write on the dir to unlink the child, so the
+		// post-swap cleanup of this leftover fails.
+		let backup_root = tmp.path().join("backup-root");
+		fs::create_dir_all(backup_root.join("target")).unwrap();
+		fs::write(backup_root.join("target/old.txt"), "old").unwrap();
+		fs::set_permissions(&backup_root, fs::Permissions::from_mode(0o555))
+			.unwrap();
+
+		let staging_root = tmp.path().join("stage");
+		fs::create_dir(&staging_root).unwrap();
+
+		let res = cleanup_swap_temps(&staging_root, &backup_root);
+
+		// Restore perms BEFORE asserting so a failure can't leak the temp dir.
+		fs::set_permissions(&backup_root, fs::Permissions::from_mode(0o755))
+			.unwrap();
+
+		// A cleanup failure on the success path must NOT be swallowed: the
+		// caller's Ok(()) would otherwise hide the orphan it just leaked.
+		assert!(
+			res.is_err(),
+			"cleanup failure on the success path was silently swallowed"
+		);
+		// The leftover the caller was told nothing about must be named.
+		let msg = res.unwrap_err().to_string();
+		assert!(
+			msg.contains(&backup_root.display().to_string()),
+			"orphan path missing from error: {msg}"
+		);
 	}
 
 	#[cfg(unix)]
