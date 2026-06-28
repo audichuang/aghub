@@ -262,7 +262,8 @@ fn delete_skill_dry_run_is_default_and_lists_paths() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-	assert_eq!(json["dryRun"], true);
+	// Task 10: delete JSON is now the snake_case RemovalView shape.
+	assert_eq!(json["dry_run"], true);
 	assert_eq!(json["executed"], false);
 	let paths = json["paths"].as_array().unwrap();
 	assert!(
@@ -326,6 +327,182 @@ fn delete_skill_yes_prunes_and_reports() {
 		pruned.iter().any(|n| n == "orphan"),
 		"orphan lock entry must be reported pruned: {pruned:?}"
 	);
+}
+
+// ==================== #4: SkillView command-surface contract ====================
+//
+// get/update/describe/add all now emit the core SkillView shape (snake_case,
+// native_reader present, raw Skill `content` absent). These pin the exact wire
+// keys so the changed command surfaces can't silently revert to the raw Skill
+// serialization. Unix-gated for the same HOME-redirection reason as the delete
+// tests above.
+
+/// Assert a JSON object is a SkillView: snake_case keys, `native_reader`
+/// present (the #4 advisory), and the raw-Skill-only `content` field absent.
+#[cfg(unix)]
+fn assert_skill_view_shape(obj: &Value) {
+	assert!(
+		obj.get("source_path").is_some(),
+		"snake_case source_path key"
+	);
+	assert!(
+		obj.get("native_reader").is_some(),
+		"native_reader advisory present"
+	);
+	assert!(
+		obj.get("content").is_none(),
+		"raw Skill `content` must not leak into the view"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn get_skills_outputs_skill_view_shape() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "get", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("get skills is a JSON array");
+	let entry = arr
+		.iter()
+		.find(|s| s["name"] == "mytool")
+		.expect("mytool in output");
+	assert_skill_view_shape(entry);
+	assert_eq!(entry["native_reader"], false);
+	assert_eq!(entry["agent"], Value::Null, "single-agent get has no agent");
+}
+
+#[cfg(unix)]
+#[test]
+fn get_skills_all_agents_tags_agent_and_native_reader() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--agent", "all", "get", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let arr = json.as_array().expect("get skills is a JSON array");
+	let entry = arr
+		.iter()
+		.find(|s| s["name"] == "mytool" && s["agent"] == "claude")
+		.expect("mytool/claude entry in --agent all output");
+	assert_skill_view_shape(entry);
+	assert_eq!(entry["agent"], "claude", "--agent all tags the agent");
+}
+
+#[cfg(unix)]
+#[test]
+fn update_skill_outputs_skill_view_shape() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"update",
+			"skills",
+			"mytool",
+			"--description",
+			"newdesc",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_skill_view_shape(&json);
+	assert_eq!(json["name"], "mytool");
+	assert_eq!(json["description"], "newdesc");
+	// update does no install prep, so the advisory stays false.
+	assert_eq!(json["native_reader"], false);
+}
+
+#[cfg(unix)]
+#[test]
+fn describe_skill_outputs_skill_view_shape() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "describe", "skills", "mytool"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_skill_view_shape(&json);
+	assert_eq!(json["name"], "mytool");
+}
+
+#[cfg(unix)]
+#[test]
+fn add_skill_from_path_outputs_skill_view_with_native_reader() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// A source skill on disk to import from.
+	let src = home.path().join("src/myimport");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: myimport\ndescription: imported\n---\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"skills",
+			"--from",
+			src.to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	// The --from branch must emit the SkillView DTO, not the raw Skill.
+	assert_skill_view_shape(&json);
+	assert_eq!(json["name"], "myimport");
+	assert_eq!(json["description"], "imported");
+	// Claude is not a NativeReader, so an isolated copy install => false.
+	assert_eq!(json["native_reader"], false);
 }
 
 /// Root bypasses `0o555`, so probe + skip (CI often runs as root).
@@ -1218,5 +1395,203 @@ fn update_mcp_zero_timeout_is_rejected() {
 	assert!(
 		stderr.contains("timeout must be greater than 0"),
 		"stderr must explain the rejection, got: {stderr}"
+	);
+}
+
+// ============ Task 10: CLI emits core RemovalView/SkillView builders ============
+
+/// CONTRACT (Task 10): CLI `delete skills` now serializes the shared
+/// `aghub_core::dto::RemovalView`, so the JSON keys are snake_case
+/// (`dry_run`/`needs_confirm`) matching the API + desktop, NOT the old camelCase
+/// `dryRun`/`needsConfirm`. This pins the breaking key flip.
+#[cfg(unix)]
+#[test]
+fn delete_skill_dry_run_outputs_snake_case_keys() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "snaketool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "snaketool"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	// New snake_case keys from RemovalView.
+	assert_eq!(json["dry_run"], true, "json: {json}");
+	assert_eq!(json["executed"], false, "json: {json}");
+	assert_eq!(json["needs_confirm"], false, "json: {json}");
+	// Old camelCase keys must be gone.
+	assert!(
+		json.get("dryRun").is_none(),
+		"dryRun must be removed: {json}"
+	);
+	assert!(
+		json.get("needsConfirm").is_none(),
+		"needsConfirm must be removed: {json}"
+	);
+	// CLI-only envelope keys are still present.
+	assert_eq!(json["type"], "skill");
+	assert_eq!(json["name"], "snaketool");
+	let paths = json["paths"].as_array().unwrap();
+	assert!(
+		paths
+			.iter()
+			.any(|p| p.as_str().unwrap().ends_with("snaketool")),
+		"paths: {paths:?}"
+	);
+	assert!(skill_dir.exists(), "dry-run must not delete");
+}
+
+/// CLI `add skill` output is now a `SkillView`, which carries the
+/// `native_reader` advisory field. For Claude at global scope the agent is NOT a
+/// NativeReader, so the field is present and `false`.
+#[cfg(unix)]
+#[test]
+fn add_skill_output_includes_native_reader_field() {
+	let tmp = tempfile::tempdir().unwrap();
+	let project = tmp.path();
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+
+	let out = assert_cmd::Command::cargo_bin("aghub-cli")
+		.unwrap()
+		.env("HOME", project)
+		.env("USERPROFILE", project)
+		.env("APPDATA", project)
+		.current_dir(project)
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"skill",
+			"--name",
+			"nrtool",
+			"--description",
+			"d",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["name"], "nrtool");
+	assert_eq!(
+		json["native_reader"], false,
+		"claude global add is not a NativeReader: {json}"
+	);
+	// SkillView shape: source_path key present, raw-Skill `content` absent.
+	assert!(json.get("source_path").is_some(), "json: {json}");
+	assert!(
+		json.get("content").is_none(),
+		"content not on SkillView: {json}"
+	);
+}
+
+/// The other branch of the `native_reader` advisory: OpenCode at global scope
+/// reads the `~/.agents/skills` master directly (a NativeReader), so the
+/// `add skill` SkillView reports `native_reader: true`.
+#[cfg(unix)]
+#[test]
+fn add_skill_output_native_reader_true_for_opencode() {
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path();
+	std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+
+	let out = assert_cmd::Command::cargo_bin("aghub-cli")
+		.unwrap()
+		.env("HOME", home)
+		.env("USERPROFILE", home)
+		.env("APPDATA", home)
+		.current_dir(home)
+		.args([
+			"-a",
+			"opencode",
+			"add",
+			"skill",
+			"--name",
+			"ocnrtool",
+			"--description",
+			"d",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		json["native_reader"], true,
+		"opencode global is a NativeReader: {json}"
+	);
+}
+
+/// CLI `describe skill` now emits the same `SkillView` shape as `add`/API:
+/// `source_path` present, the raw-`Skill` `content` field absent.
+#[cfg(unix)]
+#[test]
+fn describe_skill_outputs_skillview_shape() {
+	let tmp = tempfile::tempdir().unwrap();
+	let project = tmp.path();
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+
+	// Seed a skill to describe.
+	assert!(assert_cmd::Command::cargo_bin("aghub-cli")
+		.unwrap()
+		.env("HOME", project)
+		.env("USERPROFILE", project)
+		.env("APPDATA", project)
+		.current_dir(project)
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"skill",
+			"--name",
+			"desctool",
+			"--description",
+			"d",
+		])
+		.output()
+		.unwrap()
+		.status
+		.success());
+
+	let out = assert_cmd::Command::cargo_bin("aghub-cli")
+		.unwrap()
+		.env("HOME", project)
+		.env("USERPROFILE", project)
+		.env("APPDATA", project)
+		.current_dir(project)
+		.args(["-a", "claude", "describe", "skill", "desctool"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["name"], "desctool");
+	assert!(json.get("source_path").is_some(), "json: {json}");
+	assert!(
+		json.get("native_reader").is_some(),
+		"SkillView always carries native_reader: {json}"
+	);
+	assert!(
+		json.get("content").is_none(),
+		"content not on SkillView: {json}"
 	);
 }

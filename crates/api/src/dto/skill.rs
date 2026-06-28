@@ -83,6 +83,11 @@ pub struct SkillResponse {
 	pub source: Option<ConfigSource>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub agent: Option<String>,
+	/// Advisory: the target agent reads the `.agents` master directly
+	/// (NativeReader), so a universal install writes only the master with no
+	/// per-agent link. Always serialized (default false) so the wire matches the
+	/// generated `native_reader: boolean` ts-rs type — no DTO drift.
+	pub native_reader: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -110,25 +115,58 @@ impl From<Skill> for SkillResponse {
 
 impl SkillResponse {
 	pub fn from_agent_skill(skill: Skill, agent_id: &str) -> Self {
-		let mut response = Self::from(&skill);
-		response.agent = Some(agent_id.to_string());
-		response
+		SkillResponse::from(
+			&aghub_core::dto::SkillView::from(&skill).with_agent(agent_id),
+		)
 	}
 }
 
 impl From<&Skill> for SkillResponse {
 	fn from(s: &Skill) -> Self {
+		// Delegate the field mapping to the one core SkillView seam; this
+		// wrapper only maps ConfigSource and the native_reader advisory.
+		SkillResponse::from(&aghub_core::dto::SkillView::from(s))
+	}
+}
+
+/// Thin ts-rs wrapper over the core [`SkillView`]: the field list lives once in
+/// `aghub_core::dto`, so this only maps `ConfigSource` and carries the
+/// `native_reader` advisory across.
+impl From<&aghub_core::dto::SkillView> for SkillResponse {
+	fn from(v: &aghub_core::dto::SkillView) -> Self {
 		SkillResponse {
-			name: s.name.clone(),
-			enabled: s.enabled,
-			source_path: s.source_path.clone(),
-			canonical_path: s.canonical_path.clone(),
-			description: s.description.clone(),
-			author: s.author.clone(),
-			version: s.version.clone(),
-			tools: s.tools.clone(),
-			source: s.config_source.map(Into::into),
-			agent: None,
+			name: v.name.clone(),
+			enabled: v.enabled,
+			source_path: v.source_path.clone(),
+			canonical_path: v.canonical_path.clone(),
+			description: v.description.clone(),
+			author: v.author.clone(),
+			version: v.version.clone(),
+			tools: v.tools.clone(),
+			source: v.source.map(Into::into),
+			agent: v.agent.clone(),
+			native_reader: v.native_reader,
+		}
+	}
+}
+
+/// Thin ts-rs wrapper over the core [`RemovalView`]: the 7 shared
+/// removal-outcome fields copy across. `error`/`validation_errors` and the
+/// lock-prune fields are api-only (core does not own them) and default to None.
+impl From<&aghub_core::dto::RemovalView> for DeleteSkillByPathResponse {
+	fn from(v: &aghub_core::dto::RemovalView) -> Self {
+		DeleteSkillByPathResponse {
+			success: v.success,
+			dry_run: v.dry_run,
+			executed: v.executed,
+			needs_confirm: v.needs_confirm,
+			paths: v.paths.clone(),
+			skipped: v.skipped.clone(),
+			deleted_path: v.deleted_path.clone(),
+			pruned_lock_entries: None,
+			prune_error: None,
+			error: None,
+			validation_errors: None,
 		}
 	}
 }
@@ -502,6 +540,69 @@ pub struct ApplySkillUpdateResponse {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn delete_response_from_removal_view_matches_outcome() {
+		// The api DeleteSkillByPathResponse must be a thin wrapper over the core
+		// RemovalView: the 7 shared fields copy across, and the serde json keeps
+		// the snake_case keys the desktop consumes (dry_run/needs_confirm).
+		let view = aghub_core::dto::RemovalView {
+			success: true,
+			dry_run: false,
+			executed: true,
+			needs_confirm: true,
+			paths: vec!["/a/foo".to_string()],
+			skipped: vec!["/a/bar".to_string()],
+			deleted_path: Some("/a/foo".to_string()),
+		};
+		let resp = DeleteSkillByPathResponse::from(&view);
+		assert!(resp.success);
+		assert!(!resp.dry_run);
+		assert!(resp.executed);
+		assert!(resp.needs_confirm);
+		assert_eq!(resp.paths, vec!["/a/foo".to_string()]);
+		assert_eq!(resp.skipped, vec!["/a/bar".to_string()]);
+		assert_eq!(resp.deleted_path.as_deref(), Some("/a/foo"));
+		// API-only error fields are not owned by core; default to None.
+		assert!(resp.error.is_none());
+		assert!(resp.validation_errors.is_none());
+		assert!(resp.pruned_lock_entries.is_none());
+		assert!(resp.prune_error.is_none());
+
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["dry_run"], serde_json::json!(false));
+		assert_eq!(json["needs_confirm"], serde_json::json!(true));
+		assert!(json.get("dryRun").is_none(), "must stay snake_case");
+		assert!(json.get("needsConfirm").is_none(), "must stay snake_case");
+	}
+
+	#[test]
+	fn skill_response_serializes_native_reader_false() {
+		// native_reader is always serialized so the wire matches the generated
+		// `native_reader: boolean` ts-rs type (default false, no drift).
+		let skill = aghub_core::models::Skill::new("foo");
+		let resp = SkillResponse::from(&skill);
+		assert!(!resp.native_reader);
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(
+			json["native_reader"],
+			serde_json::json!(false),
+			"native_reader must be present (= false)"
+		);
+	}
+
+	#[test]
+	fn skill_response_from_view_carries_native_reader() {
+		// Building from a core SkillView with the advisory set surfaces the
+		// `native_reader` key (= true).
+		let skill = aghub_core::models::Skill::new("foo");
+		let view =
+			aghub_core::dto::SkillView::from(&skill).with_native_reader(true);
+		let resp = SkillResponse::from(&view);
+		assert!(resp.native_reader);
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["native_reader"], serde_json::json!(true));
+	}
 
 	#[test]
 	fn update_available_serializes_with_status_tag_and_fields() {

@@ -1,26 +1,8 @@
 use crate::{eprintln_verbose, ResourceType};
+use aghub_core::dto::SkillView;
 use aghub_core::manager::ConfigManager;
 use anyhow::{Context, Result};
 use serde::Serialize;
-
-#[derive(Serialize)]
-pub(crate) struct SkillView {
-	name: String,
-	enabled: bool,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	source_path: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	description: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	author: Option<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	version: Option<String>,
-	#[serde(skip_serializing_if = "Vec::is_empty")]
-	tools: Vec<String>,
-	/// Agent identifier (only set when using --agent all)
-	#[serde(skip_serializing_if = "Option::is_none")]
-	agent: Option<&'static str>,
-}
 
 #[derive(Serialize)]
 pub(crate) struct McpView {
@@ -31,22 +13,6 @@ pub(crate) struct McpView {
 	/// Agent identifier (only set when using --agent all)
 	#[serde(skip_serializing_if = "Option::is_none")]
 	agent: Option<&'static str>,
-}
-
-pub(crate) fn skill_to_view(
-	s: &aghub_core::models::Skill,
-	agent: Option<&'static str>,
-) -> SkillView {
-	SkillView {
-		name: s.name.clone(),
-		enabled: s.enabled,
-		source_path: s.source_path.clone(),
-		description: s.description.clone(),
-		author: s.author.clone(),
-		version: s.version.clone(),
-		tools: s.tools.clone(),
-		agent,
-	}
 }
 
 pub(crate) fn mcp_to_view(
@@ -74,11 +40,8 @@ pub fn execute(manager: &ConfigManager, resource: ResourceType) -> Result<()> {
 
 	match resource {
 		ResourceType::Skills => {
-			let views: Vec<SkillView> = config
-				.skills
-				.iter()
-				.map(|s| skill_to_view(s, None))
-				.collect();
+			let views: Vec<SkillView> =
+				config.skills.iter().map(SkillView::from).collect();
 			eprintln_verbose!("Found {} skills", views.len());
 			println!("{}", serde_json::to_string_pretty(&views)?);
 		}
@@ -106,7 +69,7 @@ pub fn execute_all(
 					let agent_id = r.agent_id;
 					r.skills
 						.into_iter()
-						.map(move |s| skill_to_view(&s, Some(agent_id)))
+						.map(move |s| SkillView::from(&s).with_agent(agent_id))
 				})
 				.collect();
 			eprintln_verbose!("Found {} skills across all agents", views.len());

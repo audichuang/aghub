@@ -58,7 +58,10 @@ pub fn execute(
 
 			manager.update_skill(&name, skill.clone())?;
 			eprintln_verbose!("Skill updated successfully");
-			println!("{}", serde_json::to_string_pretty(&skill)?);
+			// Same SkillView shape as add/describe/get; update does no
+			// install prep, so native_reader stays false.
+			let view = aghub_core::dto::SkillView::from(&skill);
+			println!("{}", serde_json::to_string_pretty(&view)?);
 		}
 		ResourceType::Mcps => {
 			eprintln_verbose!("Updating MCP server: {}", name);

@@ -632,7 +632,10 @@ mod describe {
 					.find(|s| s.name == name)
 					.with_context(|| format!("Skill '{}' not found", name))?;
 				eprintln_verbose!("Found skill: {}", skill.name);
-				println!("{}", serde_json::to_string_pretty(skill)?);
+				// Same SkillView shape as `add`/API. describe does no install
+				// prep, so native_reader stays false.
+				let view = aghub_core::dto::SkillView::from(skill);
+				println!("{}", serde_json::to_string_pretty(&view)?);
 			}
 			ResourceType::Mcps => {
 				let mcp =

@@ -16,7 +16,8 @@ pub struct DeleteOptions {
 /// `--yes` (or with `--dry-run`) it only reports the paths that would be
 /// removed. `--all-agents` extends a copy-layout removal across every agent and
 /// is destructive, so it too requires `--yes`. The emitted JSON carries
-/// `dryRun`, the exact `paths`, and any `skipped` (out-of-allowlist) paths.
+/// `dry_run`, the exact `paths`, and any `skipped` (out-of-allowlist) paths
+/// (snake_case, from the shared `aghub_core::dto::RemovalView`).
 pub fn execute(
 	manager: &mut ConfigManager,
 	resource: ResourceType,
@@ -42,27 +43,15 @@ pub fn execute(
 				is_dry_run,
 				options.yes,
 			)?;
-			let paths: Vec<String> = outcome
-				.plan
-				.paths
-				.iter()
-				.map(|p| p.display().to_string())
-				.collect();
-			let skipped: Vec<String> = outcome
-				.plan
-				.skipped
-				.iter()
-				.map(|p| p.display().to_string())
-				.collect();
-			let mut payload = json!({
-				"type": "skill",
-				"name": name,
-				"dryRun": !outcome.executed,
-				"executed": outcome.executed,
-				"needsConfirm": outcome.plan.needs_confirm,
-				"paths": paths,
-				"skipped": skipped,
-			});
+			// Serialize the shared core builder so the removal fields
+			// (success/dry_run/executed/needs_confirm/paths/skipped/
+			// deleted_path) live once and stay snake_case, matching the API +
+			// desktop DeleteSkillByPathResponse. Then layer the CLI-only
+			// {type,name} envelope and the prune status on top.
+			let view = aghub_core::dto::RemovalView::from(&outcome);
+			let mut payload = serde_json::to_value(&view)?;
+			payload["type"] = json!("skill");
+			payload["name"] = json!(name);
 			apply_prune_fields(&mut payload, &outcome.prune);
 			println!("{}", serde_json::to_string_pretty(&payload)?);
 		}

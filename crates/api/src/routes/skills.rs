@@ -573,41 +573,23 @@ fn delete_response_from_outcome(
 	outcome: aghub_core::skills::removal::RemovalOutcome,
 ) -> DeleteSkillByPathResponse {
 	use aghub_core::skills::removal::PruneStatus;
-	// Surface the post-delete lock prune through the response: Pruned → the
-	// dropped keys; Failed → the partial keys plus the error; NotRun → nothing.
+	// The 7 shared removal-outcome fields (success/dry_run/executed/
+	// needs_confirm/paths/skipped/deleted_path) plus the PathBuf->String and
+	// deleted_path derivation are owned ONCE by the core RemovalView.
+	let mut response = DeleteSkillByPathResponse::from(
+		&aghub_core::dto::RemovalView::from(&outcome),
+	);
+	// Layer the api-only lock-prune fields the core view does not own: Pruned →
+	// the dropped keys; Failed → the partial keys plus the error; NotRun →
+	// nothing.
 	let (pruned_lock_entries, prune_error) = match outcome.prune {
 		PruneStatus::NotRun => (None, None),
 		PruneStatus::Pruned(keys) => (Some(keys), None),
 		PruneStatus::Failed { reason, pruned } => (Some(pruned), Some(reason)),
 	};
-	DeleteSkillByPathResponse {
-		success: true,
-		dry_run: !outcome.executed,
-		executed: outcome.executed,
-		needs_confirm: outcome.plan.needs_confirm,
-		paths: outcome
-			.plan
-			.paths
-			.iter()
-			.map(|p| p.display().to_string())
-			.collect(),
-		skipped: outcome
-			.plan
-			.skipped
-			.iter()
-			.map(|p| p.display().to_string())
-			.collect(),
-		deleted_path: outcome
-			.executed
-			.then(|| {
-				outcome.plan.paths.first().map(|p| p.display().to_string())
-			})
-			.flatten(),
-		pruned_lock_entries,
-		prune_error,
-		error: None,
-		validation_errors: None,
-	}
+	response.pruned_lock_entries = pruned_lock_entries;
+	response.prune_error = prune_error;
+	response
 }
 
 fn resolve_git_install_target_dir(
@@ -955,8 +937,11 @@ pub async fn create_skill(
 		Err(e) => return Err(ApiError::from(e)),
 	}
 	let skill = Skill::from(body.into_inner());
-	let response = SkillResponse::from(&skill);
+	let mut response = SkillResponse::from(&skill);
 	manager.add_skill(skill).map_err(ApiError::from)?;
+	// Surface the advisory the CLI already shows: a NativeReader target gets the
+	// `.agents` master only, with no per-agent link.
+	response.native_reader = manager.skill_target_is_native_reader();
 	Ok((Status::Created, Json(response)))
 }
 
@@ -997,7 +982,9 @@ pub fn import_skill(
 		None,
 	)?;
 
-	Ok(Json(SkillResponse::from(&imported)))
+	let mut response = SkillResponse::from(&imported);
+	response.native_reader = manager.skill_target_is_native_reader();
+	Ok(Json(response))
 }
 
 #[get("/agents/<agent>/skills/<name>?<scope..>")]
@@ -2425,6 +2412,171 @@ mod tests {
 				parsed["skills"].get("orphan").is_none(),
 				"manager-side prune must drop the orphan lock entry"
 			);
+		});
+	}
+
+	// create_skill must surface the `native_reader` advisory the CLI shows: a
+	// per-agent-linking agent (Claude) reports false (key omitted), while a
+	// NativeReader (OpenCode at project scope, reads `.agents/skills` directly)
+	// reports true. Both go through the REAL handler.
+	#[cfg(unix)]
+	#[test]
+	fn create_skill_native_reader_false_for_claude() {
+		with_isolated_env(|_home, _state| {
+			let resp = block_on(create_skill(
+				AgentParam(AgentType::Claude),
+				ScopeParams {
+					scope: Some("global".to_string()),
+					project_root: None,
+				},
+				Json(CreateSkillRequest {
+					name: "linked".to_string(),
+					description: Some("d".to_string()),
+					author: None,
+					version: None,
+					content: None,
+					tools: None,
+				}),
+			))
+			.ok()
+			.expect("handler ok")
+			.1
+			.into_inner();
+
+			assert!(
+				!resp.native_reader,
+				"Claude links per-agent → not a native reader"
+			);
+			let json = serde_json::to_value(&resp).unwrap();
+			assert_eq!(
+				json["native_reader"],
+				serde_json::json!(false),
+				"native_reader present (= false)"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn create_skill_native_reader_true_for_opencode_project() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("proj");
+			std::fs::create_dir_all(project.join(".opencode")).unwrap();
+
+			let resp = block_on(create_skill(
+				AgentParam(AgentType::OpenCode),
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some(project.display().to_string()),
+				},
+				Json(CreateSkillRequest {
+					name: "native".to_string(),
+					description: Some("d".to_string()),
+					author: None,
+					version: None,
+					content: None,
+					tools: None,
+				}),
+			))
+			.ok()
+			.expect("handler ok")
+			.1
+			.into_inner();
+
+			assert!(
+				resp.native_reader,
+				"OpenCode reads .agents/skills directly → native reader"
+			);
+			let json = serde_json::to_value(&resp).unwrap();
+			assert_eq!(json["native_reader"], serde_json::json!(true));
+		});
+	}
+
+	// import_skill must surface the same `native_reader` advisory as create:
+	// Claude (per-agent link) reports false / key omitted, OpenCode at project
+	// scope (reads `.agents/skills` directly) reports true. Both go through the
+	// REAL handler with a real on-disk source skill folder.
+	#[cfg(unix)]
+	fn write_source_skill(name: &str) -> tempfile::TempDir {
+		let src = tempdir().unwrap();
+		let dir = src.path().join(name);
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: d\n---\n"),
+		)
+		.unwrap();
+		src
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn import_skill_native_reader_false_for_claude() {
+		with_isolated_env(|_home, _state| {
+			let src = write_source_skill("imported");
+			let resp = import_skill(
+				AgentParam(AgentType::Claude),
+				ScopeParams {
+					scope: Some("global".to_string()),
+					project_root: None,
+				},
+				Json(crate::dto::skill::ImportSkillRequest {
+					path: src
+						.path()
+						.join("imported/SKILL.md")
+						.display()
+						.to_string(),
+				}),
+			)
+			.ok()
+			.expect("handler ok")
+			.into_inner();
+
+			assert!(
+				!resp.native_reader,
+				"Claude links per-agent → not a native reader"
+			);
+			let json = serde_json::to_value(&resp).unwrap();
+			assert_eq!(
+				json["native_reader"],
+				serde_json::json!(false),
+				"native_reader present (= false)"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn import_skill_native_reader_true_for_opencode_project() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("proj");
+			std::fs::create_dir_all(project.join(".opencode")).unwrap();
+			let src = write_source_skill("imported");
+
+			let resp = import_skill(
+				AgentParam(AgentType::OpenCode),
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some(project.display().to_string()),
+				},
+				Json(crate::dto::skill::ImportSkillRequest {
+					path: src
+						.path()
+						.join("imported/SKILL.md")
+						.display()
+						.to_string(),
+				}),
+			)
+			.ok()
+			.expect("handler ok")
+			.into_inner();
+
+			assert!(
+				resp.native_reader,
+				"OpenCode reads .agents/skills directly → native reader"
+			);
+			let json = serde_json::to_value(&resp).unwrap();
+			assert_eq!(json["native_reader"], serde_json::json!(true));
 		});
 	}
 

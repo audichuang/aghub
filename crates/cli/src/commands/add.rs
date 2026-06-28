@@ -69,7 +69,11 @@ pub fn execute(
 
 				eprintln_verbose!("Skill '{}' added successfully", skill.name);
 				note_if_native_reader(manager);
-				println!("{}", serde_json::to_string_pretty(&skill)?);
+				let view = aghub_core::dto::SkillView::from(&skill)
+					.with_native_reader(
+						manager.skill_target_is_native_reader(),
+					);
+				println!("{}", serde_json::to_string_pretty(&view)?);
 			} else {
 				let skill_name = name.ok_or_else(|| {
 					anyhow!("--name is required when not using --from")
@@ -83,7 +87,11 @@ pub fn execute(
 				manager.add_skill(skill.clone())?;
 				eprintln_verbose!("Skill added successfully");
 				note_if_native_reader(manager);
-				println!("{}", serde_json::to_string_pretty(&skill)?);
+				let view = aghub_core::dto::SkillView::from(&skill)
+					.with_native_reader(
+						manager.skill_target_is_native_reader(),
+					);
+				println!("{}", serde_json::to_string_pretty(&view)?);
 			}
 		}
 		ResourceType::Mcps => {
