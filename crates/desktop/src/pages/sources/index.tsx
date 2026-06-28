@@ -39,7 +39,7 @@ import {
 	partitionByCoverage,
 	supportsSkillMutation,
 } from "../../lib/agent-capabilities";
-import { deleteWithDryRun } from "../../lib/delete-preview";
+import { runConfirmedDelete, runDryRun } from "../../lib/delete-preview";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -527,7 +527,10 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			throw new Error(t("sourceRemoveNoAgents"));
 		}
 
-		await deleteWithDryRun((confirm) =>
+		// Source cleanup buttons act on an already-displayed diff row, so the
+		// dry-run is a safety preflight (a failed preview short-circuits before
+		// destruction) rather than a separate confirm dialog.
+		const deleteFn = (confirm: boolean) =>
 			api.skills.delete(
 				installableAgentIds[0],
 				name,
@@ -535,8 +538,9 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 				updateProjectRoot ?? undefined,
 				true,
 				confirm,
-			),
-		);
+			);
+		await runDryRun(deleteFn);
+		await runConfirmedDelete(deleteFn);
 	};
 
 	const deleteRenamedSkillMutation = useMutation({

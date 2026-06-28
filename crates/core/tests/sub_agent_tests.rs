@@ -7,10 +7,28 @@
 
 use aghub_core::{
 	create_adapter,
+	manager::sub_agent::SubAgentPatch,
 	models::{AgentType, SubAgent},
 	skills::removal::{Layout, PruneStatus},
 	ConfigError, ConfigManager,
 };
+
+/// Root probe: a `0o555` dir blocks creating/removing entries inside it unless
+/// we are root (which bypasses the bits). Returns false so the test self-skips
+/// under root/CI rather than asserting on a permission that isn't enforced.
+#[cfg(unix)]
+fn perms_enforced(under: &std::path::Path) -> bool {
+	use std::os::unix::fs::PermissionsExt;
+	let p = under.join(".perm-probe");
+	std::fs::create_dir(&p).unwrap();
+	std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+	let blocked = std::fs::write(p.join("x"), b"x").is_err();
+	std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))
+		.unwrap();
+	std::fs::remove_dir_all(&p).ok();
+	blocked
+}
 
 /// Build a project-scoped Claude manager rooted at `root` with `name` already
 /// added + persisted, then reloaded so `source_path` is populated from disk.
@@ -256,6 +274,79 @@ fn remove_sub_agent_wrapper_still_deletes_immediately() {
 
 	assert!(!file.exists(), "wrapper must delete the backing file");
 	assert!(mgr.get_sub_agent("reviewer").is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn update_sub_agent_rename_stale_file_delete_failure_errors() {
+	// Regression (Codex blocking): a rename writes the new-name `.md` then
+	// deletes the OLD file. Because `save_scoped_sub_agents` never deletes stale
+	// files, a swallowed old-file delete failure leaves the old `.md` on disk to
+	// reappear as a phantom agent on reload while the API reports success. The
+	// fix surfaces a non-NotFound delete failure as an actionable error.
+	//
+	// Isolate the OLD file's delete from the new-name write: the rename writes
+	// the new `.md` into the canonical `.claude/agents` dir (must stay writable)
+	// and deletes the old file at the agent's `source_path`. Park the old file
+	// in a SEPARATE `0o555` dir so only the unlink is blocked, on an EXISTING
+	// file. Root-skip + restore perms before asserting.
+	use std::os::unix::fs::PermissionsExt;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	if !perms_enforced(root) {
+		eprintln!("skip: root bypasses 0o555");
+		return;
+	}
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+
+	// A real, existing old file inside a dir we will lock against unlink.
+	let locked_dir = root.join("locked");
+	std::fs::create_dir(&locked_dir).unwrap();
+	let old_file = locked_dir.join("reviewer.md");
+	std::fs::write(&old_file, "stale").unwrap();
+
+	let mut agent = SubAgent::new("reviewer");
+	agent.source_path = Some(old_file.to_string_lossy().into_owned());
+	mgr.add_sub_agent(agent).unwrap();
+
+	let orig = std::fs::metadata(&locked_dir).unwrap().permissions();
+	std::fs::set_permissions(
+		&locked_dir,
+		std::fs::Permissions::from_mode(0o555),
+	)
+	.unwrap();
+
+	let res = mgr.update_sub_agent(
+		"reviewer",
+		SubAgentPatch {
+			name: Some("auditor".to_string()),
+			description: None,
+			instruction: None,
+		},
+	);
+
+	// RESTORE perms before any assertion so a failure can't leak the temp dir.
+	std::fs::set_permissions(&locked_dir, orig).unwrap();
+
+	let err = res.expect_err(
+		"a failed stale-file delete on rename must surface, not be swallowed",
+	);
+	assert!(
+		matches!(err, ConfigError::Io(_)),
+		"undeletable stale file must surface an IO error, got {err:?}"
+	);
+	// The orphan old file is still on disk — surfacing the error lets the caller
+	// know it lingers rather than silently claiming success.
+	assert!(
+		old_file.exists(),
+		"stale file remains; the error is what tells the caller it lingers"
+	);
 }
 
 #[test]

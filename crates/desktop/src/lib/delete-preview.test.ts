@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import type { DeleteSkillByPathResponse } from "../generated/dto";
-import { deleteWithDryRun } from "./delete-preview.ts";
+import { runConfirmedDelete, runDryRun } from "./delete-preview.ts";
 
 function res(
 	over: Partial<DeleteSkillByPathResponse>,
@@ -24,41 +24,39 @@ function res(
 	} as DeleteSkillByPathResponse;
 }
 
-test("runs dry-run first, then executes with confirm=true", async () => {
+test("runDryRun previews with confirm=false and returns the paths", async () => {
 	const calls: boolean[] = [];
-	await deleteWithDryRun(async (confirm) => {
+	const preview = await runDryRun(async (confirm) => {
 		calls.push(confirm);
-		return res({ dry_run: !confirm, executed: confirm });
+		return res({ dry_run: true, paths: ["/a", "/b"] });
 	});
-	assert.deepEqual(calls, [false, true]);
+	assert.deepEqual(calls, [false], "dry-run must not execute");
+	assert.deepEqual(preview.paths, ["/a", "/b"]);
 });
 
-test("needs_confirm dry-run still proceeds to the confirmed delete", async () => {
-	// Regression (#5 audit): all-agents / symlink-layout skill removal previews
-	// with needs_confirm=true. The caller already gathered the user's OK in its
-	// confirm dialog, so the second phase IS that confirmation — it must NOT
-	// throw "additional confirmation" and abandon the delete.
+test("a failed dry-run throws before anything destructive", async () => {
+	await assert.rejects(
+		runDryRun(async () => res({ success: false, error: "boom" })),
+		/boom/,
+	);
+});
+
+test("runConfirmedDelete executes with confirm=true", async () => {
 	const calls: boolean[] = [];
-	const out = await deleteWithDryRun(async (confirm) => {
+	const out = await runConfirmedDelete(async (confirm) => {
 		calls.push(confirm);
-		return res({
-			needs_confirm: true,
-			dry_run: !confirm,
-			executed: confirm,
-		});
+		return res({ dry_run: false, executed: confirm });
 	});
-	assert.deepEqual(calls, [false, true], "must run both phases");
+	assert.deepEqual(calls, [true]);
 	assert.equal(out.executed, true);
 });
 
-test("a failed dry-run short-circuits before the destructive call", async () => {
-	const calls: boolean[] = [];
-	await assert.rejects(
-		deleteWithDryRun(async (confirm) => {
-			calls.push(confirm);
-			return res({ success: false, error: "boom" });
-		}),
-		/boom/,
+test("needs_confirm is the normal confirmed path, never an error", async () => {
+	// Regression (#5 audit): all-agents / symlink-layout removal previews with
+	// needs_confirm=true. The user already confirmed in the dialog, so the
+	// confirmed phase must proceed — it must NOT throw "additional confirmation".
+	const out = await runConfirmedDelete(async (confirm) =>
+		res({ needs_confirm: true, dry_run: !confirm, executed: confirm }),
 	);
-	assert.deepEqual(calls, [false], "must not call confirm=true on failure");
+	assert.equal(out.executed, true);
 });

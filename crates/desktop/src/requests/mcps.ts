@@ -11,7 +11,6 @@ import type {
 	TransferRequest,
 	UpdateMcpRequest,
 } from "../generated/dto";
-import { deleteWithDryRun } from "../lib/delete-preview";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys";
 
@@ -113,36 +112,6 @@ export function updateMcpMutationOptions({
 		onSuccess: async (data, variables) => {
 			await invalidateMcpQueries(queryClient);
 			await onSuccess?.(data, variables);
-		},
-	});
-}
-
-interface DeleteMcpVariables {
-	name: string;
-	agent: string;
-	scope: "global" | "project";
-	projectRoot?: string;
-}
-
-interface DeleteMcpMutationParams {
-	api: ApiClient;
-	queryClient: QueryClient;
-	onSuccess?: () => void | Promise<void>;
-}
-
-export function deleteMcpMutationOptions({
-	api,
-	queryClient,
-	onSuccess,
-}: DeleteMcpMutationParams) {
-	return mutationOptions({
-		mutationFn: ({ name, agent, scope, projectRoot }: DeleteMcpVariables) =>
-			deleteWithDryRun((confirm) =>
-				api.mcps.delete(name, agent, scope, projectRoot, confirm),
-			),
-		onSuccess: async () => {
-			await invalidateMcpQueries(queryClient);
-			await onSuccess?.();
 		},
 	});
 }

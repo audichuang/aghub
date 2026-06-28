@@ -538,16 +538,11 @@ mod tests {
 		assert!(!cfg.contains("wire"), "confirm=true must remove the mcp");
 	}
 
-	#[test]
-	fn delete_sub_agent_wire_confirm_returns_200_and_removes_file() {
-		let project = tempfile::tempdir().expect("project dir");
-		let root = project.path();
-		let client = Client::tracked(build_rocket(
-			rocket::Config::default(),
-			default_app_data_dir(),
-		))
-		.expect("client");
-
+	/// Seed one Claude sub-agent over HTTP, returning its backing file path.
+	fn seed_sub_agent_http(
+		client: &Client,
+		root: &std::path::Path,
+	) -> std::path::PathBuf {
 		let body = serde_json::json!({
 			"name": "wire",
 			"description": "d",
@@ -566,6 +561,50 @@ mod tests {
 		assert_eq!(created.status(), Status::Created, "seed sub-agent");
 		let file = root.join(".claude/agents/wire.md");
 		assert!(file.exists(), "precondition: backing file written");
+		file
+	}
+
+	#[test]
+	fn delete_sub_agent_wire_dry_run_returns_200_json_and_keeps_file() {
+		// Proves the default (no `confirm`) over the wire is a dry-run: 200 + JSON
+		// with executed:false and the backing file untouched — the counterpart to
+		// the confirm test below, matching the MCP route's dry-run vs confirm pair.
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+		let file = seed_sub_agent_http(&client, root);
+
+		let del_uri = format!(
+			"/api/v1/agents/claude/sub-agents/wire?scope=project&project_root={}",
+			urlencoding(&root.to_string_lossy()),
+		);
+		// No `confirm` => default dry-run.
+		let resp = client.delete(&del_uri).dispatch();
+		assert_eq!(resp.status(), Status::Ok, "delete must be 200, not 204");
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["success"], true);
+		assert_eq!(json["dry_run"], true);
+		assert_eq!(json["executed"], false);
+		assert!(json["deleted_path"].is_null());
+		assert!(file.exists(), "dry-run must leave the backing file on disk");
+	}
+
+	#[test]
+	fn delete_sub_agent_wire_confirm_returns_200_and_removes_file() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let file = seed_sub_agent_http(&client, root);
 
 		let del_uri = format!(
 			"/api/v1/agents/claude/sub-agents/wire?scope=project&project_root={}&confirm=true",

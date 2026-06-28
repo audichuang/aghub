@@ -84,10 +84,25 @@ impl ConfigManager {
 		self.save_sub_agents_current()?;
 
 		// Remove stale file when the name changed (a new file was written
-		// under the new name by save_sub_agents_current).
+		// under the new name by save_sub_agents_current). `save_scoped_sub_agents`
+		// does NOT delete stale files, so a left-behind old `.md` reappears as a
+		// phantom agent on reload. A non-NotFound delete failure is therefore
+		// actionable — surface it (do not report success) so the caller knows the
+		// orphan lingers; an already-gone file is idempotent success. Mirrors the
+		// removal contract in `remove_sub_agent_planned`.
 		if name_changed {
 			if let Some(old_path) = old_source_path {
-				let _ = std::fs::remove_file(old_path);
+				match std::fs::remove_file(&old_path) {
+					Ok(()) => {}
+					Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+					Err(e) => {
+						warn!(
+							"failed to delete stale sub-agent file '{}': {}",
+							old_path, e
+						);
+						return Err(ConfigError::Io(e));
+					}
+				}
 			}
 		}
 

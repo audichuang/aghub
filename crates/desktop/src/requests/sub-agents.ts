@@ -11,7 +11,6 @@ import type {
 	TransferRequest,
 	UpdateSubAgentRequest,
 } from "../generated/dto";
-import { deleteWithDryRun } from "../lib/delete-preview";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys";
 
@@ -114,41 +113,6 @@ export function updateSubAgentMutationOptions({
 		onSuccess: async (data, variables) => {
 			await invalidateSubAgentQueries(queryClient);
 			await onSuccess?.(data, variables);
-		},
-	});
-}
-
-interface DeleteSubAgentVariables {
-	name: string;
-	agent: string;
-	scope: "global" | "project";
-	projectRoot?: string;
-}
-
-interface DeleteSubAgentMutationParams {
-	api: ApiClient;
-	queryClient: QueryClient;
-	onSuccess?: () => void | Promise<void>;
-}
-
-export function deleteSubAgentMutationOptions({
-	api,
-	queryClient,
-	onSuccess,
-}: DeleteSubAgentMutationParams) {
-	return mutationOptions({
-		mutationFn: ({
-			name,
-			agent,
-			scope,
-			projectRoot,
-		}: DeleteSubAgentVariables) =>
-			deleteWithDryRun((confirm) =>
-				api.subAgents.delete(name, agent, scope, projectRoot, confirm),
-			),
-		onSuccess: async () => {
-			await invalidateSubAgentQueries(queryClient);
-			await onSuccess?.();
 		},
 	});
 }

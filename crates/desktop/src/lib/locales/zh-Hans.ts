@@ -597,6 +597,10 @@ export default {
 	deleteMcpMultipleConfirm:
 		"将从 {{count}} 个代理中移除「{{name}}」（{{agents}}）。此操作无法撤销。",
 	deleting: "删除中...",
+	deletePreviewLoading: "正在确认将移除的内容...",
+	deletePreviewPaths: "将移除 {{count}} 个路径",
+	deletePreviewNothing: "磁盘上没有可移除的内容。",
+	deletePreviewSkipped: "已跳过 {{count}} 个路径（不在受管目录内）",
 	editMcpServer: "编辑 MCP 服务器",
 	multipleAgents: "多个代理",
 	changeWillApplyToAgents: "此更改将应用于 {{count}} 个代理：{{agents}}",
