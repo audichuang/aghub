@@ -125,6 +125,7 @@ pub fn create_mcp(
 	let resolved = scope.resolve()?;
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_mcp_supported(&agent, resource_scope)?;
+	body.validate()?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	match manager.load() {
@@ -175,6 +176,7 @@ pub fn update_mcp(
 	let resolved = scope.resolve()?;
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_mcp_supported(&agent, resource_scope)?;
+	body.validate()?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	manager.load().map_err(ApiError::from)?;
@@ -295,5 +297,112 @@ mod tests {
 		assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
 		assert!(err.body.error.contains("does not support MCP servers"));
 		assert!(err.body.error.contains("pi"));
+	}
+
+	#[test]
+	fn test_create_mcp_rejects_zero_timeout() {
+		let result = create_mcp(
+			AgentParam(AgentType::Claude),
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(CreateMcpRequest {
+				name: "zero".to_string(),
+				transport: TransportDto::Stdio {
+					command: "echo".to_string(),
+					args: vec![],
+					env: None,
+					timeout: None,
+				},
+				timeout: Some(0),
+			}),
+		);
+
+		let err = result.expect_err("zero timeout should reject");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "VALIDATION_FAILED");
+		assert!(err.body.error.contains("timeout"));
+	}
+
+	#[test]
+	fn test_create_mcp_rejects_zero_transport_timeout() {
+		let result = create_mcp(
+			AgentParam(AgentType::Claude),
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(CreateMcpRequest {
+				name: "zero-transport".to_string(),
+				transport: TransportDto::Stdio {
+					command: "echo".to_string(),
+					args: vec![],
+					env: None,
+					timeout: Some(0),
+				},
+				timeout: None,
+			}),
+		);
+
+		let err = result.expect_err("zero transport timeout should reject");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "VALIDATION_FAILED");
+		assert!(err.body.error.contains("timeout"));
+	}
+
+	#[test]
+	fn test_update_mcp_rejects_zero_timeout() {
+		use crate::dto::mcp::UpdateMcpRequest;
+
+		let result = update_mcp(
+			AgentParam(AgentType::Claude),
+			"any",
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(UpdateMcpRequest {
+				name: None,
+				transport: None,
+				enabled: None,
+				timeout: Some(0),
+			}),
+		);
+
+		let err = result.expect_err("zero timeout should reject");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "VALIDATION_FAILED");
+		assert!(err.body.error.contains("timeout"));
+	}
+
+	#[test]
+	fn test_update_mcp_rejects_zero_transport_timeout() {
+		use crate::dto::mcp::UpdateMcpRequest;
+
+		let result = update_mcp(
+			AgentParam(AgentType::Claude),
+			"any",
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(UpdateMcpRequest {
+				name: None,
+				transport: Some(TransportDto::Stdio {
+					command: "echo".to_string(),
+					args: vec![],
+					env: None,
+					timeout: Some(0),
+				}),
+				enabled: None,
+				timeout: None,
+			}),
+		);
+
+		let err = result.expect_err("zero transport timeout should reject");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "VALIDATION_FAILED");
+		assert!(err.body.error.contains("timeout"));
 	}
 }

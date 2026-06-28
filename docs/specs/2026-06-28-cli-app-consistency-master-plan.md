@@ -131,9 +131,22 @@ impl McpTransport {
 
 **移到接縫後面的東西:** The branching + (currently absent) compatibility/timeout validation moves from the CLI-local parse_mcp_transport into McpTransport::from_inputs in core. The CLI keeps parse_headers/parse_env_vars (KEY:VALUE / KEY=VALUE string parsing — clap-format concerns) and just delegates. The shared transport-type default string moves to a core const so CLI clap default, API DTO, and desktop can all reference the same value rather than re-declaring 'streamable-http' independently.
 
+> **Allowed-files note (physical paths):** this plan refers to `core::models`
+> logically, but `McpServer`/`McpTransport`/`AgentType` physically live in
+> `crates/agents/src/models.rs` (re-exported by `aghub-core` per AGENTS.md).
+> So the Phase 0 edit set is: `crates/agents/src/models.rs` (the const +
+> `from_inputs` + the shared `reject_zero_timeout` rule), `crates/api/src/dto/mcp.rs`
+> and `crates/api/src/routes/mcps.rs` (DTO `validate()` delegating to the core
+> rule + route wiring + tests), `crates/cli/src/{main.rs,commands/mod.rs,
+commands/add.rs,commands/update.rs}` (the `--timeout` flag + delegation), and
+> `crates/cli/tests/cli_tests.rs` (end-to-end cases). This note (not the
+> narrower `crates/core/src/models.rs` shorthand) is the authoritative
+> allowed-file set for the Phase 0 PR; the touched diff matches it exactly,
+> plus this plan doc.
+
 #### Task 1: [#7] Add DEFAULT_REMOTE_TRANSPORT const + McpTransport::from_inputs validating constructor in core
 
-檔案:`crates/core/src/models.rs`
+檔案:`crates/agents/src/models.rs` (logical `core::models`)
 
 - [ ] Add `pub const DEFAULT_REMOTE_TRANSPORT: &str = "streamable-http";` near the McpTransport enum.
 - [ ] Add `impl McpTransport { pub fn from_inputs(command, url, transport_type:&str, headers:Option<HashMap<String,String>>, env:Option<HashMap<String,String>>, timeout:Option<u64>) -> crate::errors::Result<Option<McpTransport>> }`.
@@ -168,7 +181,7 @@ impl McpTransport {
 
 檔案:`crates/api/src/dto/mcp.rs`
 
-- [ ] The tagged DTO cannot express command+url or stray-headers, so only the timeout rule is shared. Add a small validate() on CreateMcpRequest and UpdateMcpRequest (or validate inside create_mcp/update_mcp routes) that rejects timeout==Some(0) and any per-transport timeout==Some(0) inside TransportDto, returning ApiError UnprocessableEntity with code VALIDATION_FAILED.
+- [ ] The tagged DTO cannot express command+url or stray-headers, so only the timeout rule is shared. To avoid a SECOND validation path (per Codex review), the rule lives in ONE place: `aghub_core::models::reject_zero_timeout` (also called by `from_inputs`). Add a `validate()` on CreateMcpRequest and UpdateMcpRequest that calls that core fn for the request-level and per-transport timeout. It returns `ConfigError::ValidationFailed`, which the existing `From<ConfigError> for ApiError` maps to 422 `VALIDATION_FAILED` — no hand-rolled `ApiError::new`.
 - [ ] Wire it: in crates/api/src/routes/mcps.rs create_mcp (mcps.rs:120) call req.validate()? before McpServer::from; in update_mcp (mcps.rs:169) call body.validate()? before apply_to. (Confirm ApiError UnprocessableEntity constructor shape via the existing check_mcp_supported at mcps.rs:21.)
 - [ ] Do NOT regenerate ts-rs DTOs unless a #[derive(TS)] struct's SHAPE changes — adding a validate() method changes no fields, so no DTO regen needed. Only if you add a new field run `bun run generate:dto` then prettier (see risks).
 

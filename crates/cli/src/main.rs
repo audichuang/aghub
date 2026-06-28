@@ -104,7 +104,7 @@ enum Commands {
 			short,
 			long,
 			value_name = "TYPE",
-			default_value = "streamable-http"
+			default_value = aghub_core::models::DEFAULT_REMOTE_TRANSPORT
 		)]
 		transport: String,
 
@@ -115,6 +115,10 @@ enum Commands {
 		/// For MCP with command: Environment variables (e.g., "KEY=value")
 		#[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
 		env_vars: Vec<String>,
+
+		/// For MCP: request timeout in seconds
+		#[arg(long, value_name = "SECONDS")]
+		timeout: Option<u64>,
 
 		/// For skill: Description
 		#[arg(short, long)]
@@ -158,7 +162,7 @@ enum Commands {
 			short,
 			long,
 			value_name = "TYPE",
-			default_value = "streamable-http"
+			default_value = aghub_core::models::DEFAULT_REMOTE_TRANSPORT
 		)]
 		transport: String,
 
@@ -169,6 +173,10 @@ enum Commands {
 		/// For MCP with command: Environment variables
 		#[arg(short = 'e', long = "env", value_name = "KEY=VALUE")]
 		env_vars: Vec<String>,
+
+		/// For MCP: request timeout in seconds
+		#[arg(long, value_name = "SECONDS")]
+		timeout: Option<u64>,
 
 		/// For skill: Description
 		#[arg(short, long)]
@@ -444,6 +452,7 @@ fn main() -> Result<()> {
 			transport,
 			headers,
 			env_vars,
+			timeout,
 			description,
 			author,
 			version,
@@ -459,6 +468,7 @@ fn main() -> Result<()> {
 			transport,
 			headers,
 			env_vars,
+			timeout,
 			description,
 			author,
 			version,
@@ -473,6 +483,7 @@ fn main() -> Result<()> {
 			transport,
 			headers,
 			env_vars,
+			timeout,
 			description,
 			author,
 			version,
@@ -486,6 +497,7 @@ fn main() -> Result<()> {
 			transport,
 			headers,
 			env_vars,
+			timeout,
 			description,
 			author,
 			version,

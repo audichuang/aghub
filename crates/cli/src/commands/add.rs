@@ -33,6 +33,7 @@ pub fn execute(
 	transport: String,
 	headers: Vec<String>,
 	env_vars: Vec<String>,
+	timeout: Option<u64>,
 	description: Option<String>,
 	author: Option<String>,
 	version: Option<String>,
@@ -90,7 +91,7 @@ pub fn execute(
 				.ok_or_else(|| anyhow!("--name is required for MCP servers"))?;
 
 			let mcp_transport = parse_mcp_transport(
-				command, url, &transport, headers, env_vars, None,
+				command, url, &transport, headers, env_vars, timeout,
 			)?;
 
 			let transport = mcp_transport.ok_or_else(|| {

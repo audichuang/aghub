@@ -6,6 +6,16 @@ use anyhow::Result;
 
 use super::parse_mcp_transport;
 
+/// Patch the per-transport `timeout` field in place (used when only
+/// `--timeout` is given on an MCP update, with no new `--command`/`--url`).
+fn set_transport_timeout(transport: &mut McpTransport, value: Option<u64>) {
+	match transport {
+		McpTransport::Stdio { timeout, .. }
+		| McpTransport::Sse { timeout, .. }
+		| McpTransport::StreamableHttp { timeout, .. } => *timeout = value,
+	}
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn execute(
 	manager: &mut ConfigManager,
@@ -16,6 +26,7 @@ pub fn execute(
 	transport: String,
 	headers: Vec<String>,
 	env_vars: Vec<String>,
+	timeout: Option<u64>,
 	description: Option<String>,
 	author: Option<String>,
 	version: Option<String>,
@@ -58,23 +69,28 @@ pub fn execute(
 
 			let mut mcp = existing.clone();
 
-			// Preserve existing timeout
+			// Preserve existing timeout unless --timeout overrides it.
 			let existing_timeout = match &mcp.transport {
 				McpTransport::Stdio { timeout, .. } => *timeout,
 				McpTransport::Sse { timeout, .. } => *timeout,
 				McpTransport::StreamableHttp { timeout, .. } => *timeout,
 			};
+			let effective_timeout = timeout.or(existing_timeout);
 
-			// Update transport if command or URL provided
+			// Rebuild the transport when --command/--url are given; this also
+			// validates timeout (incl. timeout==0) on that path.
 			if let Some(new_transport) = parse_mcp_transport(
 				command,
 				url,
 				&transport,
 				headers,
 				env_vars,
-				existing_timeout,
+				effective_timeout,
 			)? {
 				mcp.transport = new_transport;
+			} else if timeout.is_some() {
+				// --timeout alone: patch the existing transport in place.
+				set_transport_timeout(&mut mcp.transport, effective_timeout);
 			}
 
 			manager.update_mcp(&name, mcp.clone())?;

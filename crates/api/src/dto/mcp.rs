@@ -1,9 +1,10 @@
-use aghub_core::models::{McpServer, McpTransport};
+use aghub_core::models::{reject_zero_timeout, McpServer, McpTransport};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use ts_rs::TS;
 
 use crate::dto::common::ConfigSource;
+use crate::error::ApiError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
@@ -32,6 +33,17 @@ pub enum TransportDto {
 		#[serde(skip_serializing_if = "Option::is_none")]
 		timeout: Option<u64>,
 	},
+}
+
+impl TransportDto {
+	/// Per-transport timeout (the `timeout` field inside the variant).
+	fn timeout(&self) -> Option<u64> {
+		match self {
+			TransportDto::Stdio { timeout, .. }
+			| TransportDto::Sse { timeout, .. }
+			| TransportDto::StreamableHttp { timeout, .. } => *timeout,
+		}
+	}
 }
 
 impl From<&McpTransport> for TransportDto {
@@ -114,6 +126,17 @@ pub struct CreateMcpRequest {
 	pub timeout: Option<u64>,
 }
 
+impl CreateMcpRequest {
+	/// Reject zero timeouts (request-level and per-transport) via the single
+	/// shared `reject_zero_timeout` rule in core, so the API agrees with the
+	/// CLI. `ConfigError::ValidationFailed` maps to a 422 `VALIDATION_FAILED`.
+	pub fn validate(&self) -> Result<(), ApiError> {
+		reject_zero_timeout(self.timeout)?;
+		reject_zero_timeout(self.transport.timeout())?;
+		Ok(())
+	}
+}
+
 impl From<CreateMcpRequest> for McpServer {
 	fn from(req: CreateMcpRequest) -> Self {
 		McpServer {
@@ -136,6 +159,17 @@ pub struct UpdateMcpRequest {
 }
 
 impl UpdateMcpRequest {
+	/// Reject zero timeouts (request-level and per-transport, when a transport
+	/// is supplied) via the single shared `reject_zero_timeout` rule in core,
+	/// so the API agrees with the CLI.
+	pub fn validate(&self) -> Result<(), ApiError> {
+		reject_zero_timeout(self.timeout)?;
+		if let Some(transport) = &self.transport {
+			reject_zero_timeout(transport.timeout())?;
+		}
+		Ok(())
+	}
+
 	pub fn apply_to(self, existing: McpServer) -> McpServer {
 		McpServer {
 			name: self.name.unwrap_or(existing.name),

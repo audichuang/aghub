@@ -819,3 +819,310 @@ fn add_skill_universal_flag_prints_deprecation_notice() {
 		"the agent dir must hold a symlink, not a copy"
 	);
 }
+
+// ==================== #7: MCP transport flag validation + --timeout ====
+
+#[test]
+fn add_mcp_command_with_header_is_rejected() {
+	// --header is only valid with --url; a stdio (--command) MCP must reject it
+	// instead of silently dropping it.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--command",
+			"echo",
+			"--header",
+			"A:B",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "must reject --header with --command");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("--header is only valid with --url"),
+		"stderr must explain the rejection, got: {stderr}"
+	);
+}
+
+#[test]
+fn add_mcp_url_with_env_is_rejected() {
+	// --env is only valid with --command; a url MCP must reject it.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a", "claude", "add", "mcps", "--name", "m", "--url", "http://h",
+			"--env", "K=V",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "must reject --env with --url");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("--env is only valid with --command"),
+		"stderr must explain the rejection, got: {stderr}"
+	);
+}
+
+#[test]
+fn add_mcp_command_and_url_is_rejected() {
+	// clap's mutually-exclusive group already forbids this; pin the behavior.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--command",
+			"echo",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"--command and --url together must be rejected"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("--command") && stderr.contains("--url"),
+		"rejection must name both flags, got: {stderr}"
+	);
+}
+
+#[test]
+fn add_mcp_command_with_malformed_header_is_rejected() {
+	// A malformed --header (no colon) must error, not be silently dropped.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--command",
+			"echo",
+			"--header",
+			"bad",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "malformed --header must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("KEY:VALUE"),
+		"stderr must name the expected format, got: {stderr}"
+	);
+}
+
+#[test]
+fn add_mcp_command_with_malformed_env_is_rejected() {
+	// A malformed --env (no equals) must error, not be silently dropped.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--command",
+			"echo",
+			"--env",
+			"BAD",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "malformed --env must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("KEY=VALUE"),
+		"stderr must name the expected format, got: {stderr}"
+	);
+}
+
+#[test]
+fn add_mcp_zero_timeout_is_rejected() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--url",
+			"http://h",
+			"--timeout",
+			"0",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "--timeout 0 must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("timeout must be greater than 0"),
+		"stderr must explain the rejection, got: {stderr}"
+	);
+}
+
+#[test]
+fn add_mcp_url_with_timeout_succeeds_and_sets_it() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--url",
+			"http://h",
+			"--timeout",
+			"30",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"valid --timeout must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		v["transport"]["timeout"], 30,
+		"printed transport must carry timeout:30, got: {v}"
+	);
+}
+
+#[test]
+fn add_mcp_unknown_transport_is_rejected() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--url",
+			"http://h",
+			"--transport",
+			"bogus",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "unknown transport must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("unknown transport type"),
+		"stderr must explain the rejection, got: {stderr}"
+	);
+}
+
+#[test]
+fn update_mcp_timeout_flag_overrides_existing() {
+	// Seed an MCP, then update its timeout via --timeout; the new value wins.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--url",
+			"http://h",
+			"--timeout",
+			"10",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "update", "mcps", "m", "--timeout", "45"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"update --timeout must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		v["transport"]["timeout"], 45,
+		"updated transport must carry timeout:45, got: {v}"
+	);
+}
+
+#[test]
+fn update_mcp_zero_timeout_is_rejected() {
+	// The update path has its own timeout code (effective_timeout +
+	// set_transport_timeout). --timeout 0 alone (no --command/--url) still
+	// routes through parse_mcp_transport -> from_inputs, which rejects a zero
+	// timeout BEFORE returning Ok(None). Pin that so the rejection can't
+	// silently regress if the update path stops calling from_inputs.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--url",
+			"http://h",
+			"--timeout",
+			"10",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "update", "mcps", "m", "--timeout", "0"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "update --timeout 0 must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("timeout must be greater than 0"),
+		"stderr must explain the rejection, got: {stderr}"
+	);
+}
