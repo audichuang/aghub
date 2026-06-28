@@ -231,13 +231,11 @@ pub fn delete_mcp(
 		}
 		Err(e) => return Err(ApiError::from(e)),
 	}
-	match manager.remove_mcp_planned(name, dry_run, confirm) {
-		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
-		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(crate::routes::noop_removal_response(vec![], vec![])))
-		}
-		Err(e) => Err(ApiError::from(e)),
-	}
+	// Idempotent-delete contract (a missing MCP is a success no-op, any other
+	// error propagates) is owned once in `routes::removal_or_noop`.
+	crate::routes::removal_or_noop(
+		manager.remove_mcp_planned(name, dry_run, confirm),
+	)
 }
 
 #[post("/agents/<agent>/mcps/<name>/enable?<scope..>")]

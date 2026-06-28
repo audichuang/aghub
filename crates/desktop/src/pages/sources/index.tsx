@@ -23,8 +23,9 @@ import {
 	useQueryClient,
 } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { DeletePreviewDialog } from "../../components/delete-preview-dialog";
 import { ImportGithubSkillPanel } from "../../components/import-github-skill-panel";
 import { ListSearchHeader } from "../../components/list-search-header";
 import type {
@@ -39,7 +40,7 @@ import {
 	partitionByCoverage,
 	supportsSkillMutation,
 } from "../../lib/agent-capabilities";
-import { runConfirmedDelete, runDryRun } from "../../lib/delete-preview";
+import type { DeleteFn } from "../../lib/delete-preview";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -53,6 +54,21 @@ import {
 	sourceDiffQueryOptions,
 	sourcesListQueryOptions,
 } from "../../requests/sources";
+
+/**
+ * One open instance of the source-cleanup DeletePreviewDialog: the skill
+ * name(s) to remove plus the toasts to fire on success / partial failure.
+ * `names[i]` aligns with the dialog's `deleteFns[i]`, so `onFailed` indices
+ * map straight back to a skill name.
+ */
+interface RemoveTarget {
+	names: string[];
+	heading: string;
+	description: string;
+	confirmLabel: string;
+	onConfirmed: () => void | Promise<void>;
+	onFailed: (failed: number[]) => void;
+}
 
 interface SourceRow extends SourceSummaryResponse {
 	/** "global" or the project path for project-scope rows. */
@@ -380,7 +396,10 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	);
 	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
-	const [isDeletingAllRemoved, setIsDeletingAllRemoved] = useState(false);
+	// Destructive source-cleanup (renamed/removed skills) goes through the shared
+	// DeletePreviewDialog: the user sees the real paths a confirm=true delete
+	// would touch (all-agents) before it runs. `null` = no dialog open.
+	const [removeTarget, setRemoveTarget] = useState<RemoveTarget | null>(null);
 	const [installingSkillPath, setInstallingSkillPath] = useState<
 		string | null
 	>(null);
@@ -522,77 +541,74 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		onError: () => toast.danger(t("sourcePruneFailed")),
 	});
 
-	const deleteInstalledSkillByName = async (name: string) => {
-		if (installableAgentIds.length === 0) {
-			throw new Error(t("sourceRemoveNoAgents"));
-		}
+	// A bound all-agents delete for one installed skill name. The dialog runs it
+	// once with confirm=false (preview) and, only after the user confirms, with
+	// confirm=true — so cleanup never deletes without showing the paths first.
+	const buildDeleteFn = useCallback(
+		(name: string): DeleteFn =>
+			(confirm) =>
+				api.skills.delete(
+					installableAgentIds[0],
+					name,
+					updateScope,
+					updateProjectRoot ?? undefined,
+					true,
+					confirm,
+				),
+		[api, installableAgentIds, updateScope, updateProjectRoot],
+	);
 
-		// Source cleanup buttons act on an already-displayed diff row, so the
-		// dry-run is a safety preflight (a failed preview short-circuits before
-		// destruction) rather than a separate confirm dialog.
-		const deleteFn = (confirm: boolean) =>
-			api.skills.delete(
-				installableAgentIds[0],
-				name,
-				updateScope,
-				updateProjectRoot ?? undefined,
-				true,
-				confirm,
-			);
-		await runDryRun(deleteFn);
-		await runConfirmedDelete(deleteFn);
+	// Memoized so DeletePreviewDialog's open-time dry-run effect fires once per
+	// target, not on every render (its `deleteFns` dep must be stable).
+	const removeDeleteFns = useMemo<DeleteFn[]>(
+		() => removeTarget?.names.map(buildDeleteFn) ?? [],
+		[removeTarget, buildDeleteFn],
+	);
+
+	const openRemoveDialog = (target: RemoveTarget) => {
+		if (installableAgentIds.length === 0) {
+			toast.danger(t("sourceRemoveNoAgents"));
+			return;
+		}
+		setRemoveTarget(target);
 	};
 
-	const deleteRenamedSkillMutation = useMutation({
-		mutationFn: async (skill: SourceSkillDiff) => {
-			const oldName = skill.previousName;
-			if (!oldName) {
-				throw new Error("Missing previous name for renamed skill.");
-			}
-			await deleteInstalledSkillByName(oldName);
-		},
-		onSuccess: async (_data, skill) => {
-			if (!skill.previousName) return;
-			toast.success(
-				t("sourceRenamedDeleted", { oldName: skill.previousName }),
-			);
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.all(),
-			});
-		},
-		onError: (error, skill) => {
-			if (skill.previousName) {
-				toast.danger(
-					error instanceof Error
-						? error.message
-						: t("sourceRenamedDeleteFailed", {
-								oldName: skill.previousName,
-							}),
-				);
-				return;
-			}
-			toast.danger(t("sourcePruneFailed"));
-		},
-	});
+	const invalidateSkills = () =>
+		queryClient.invalidateQueries({ queryKey: queryKeys.skills.all() });
 
-	const deleteRemovedSkillMutation = useMutation({
-		mutationFn: async (skill: SourceSkillDiff) => {
-			await deleteInstalledSkillByName(skill.name);
-		},
-		onSuccess: async (_data, skill) => {
-			toast.success(t("sourceRemovedCleaned", { name: skill.name }));
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.all(),
-			});
-		},
-		onError: (error, skill) => {
-			toast.danger(
-				error instanceof Error
-					? error.message
-					: t("sourceRemovedCleanFailed", { name: skill.name }),
-			);
-		},
-	});
+	const openRemoveRenamedDialog = (skill: SourceSkillDiff) => {
+		const oldName = skill.previousName;
+		if (!oldName) return;
+		openRemoveDialog({
+			names: [oldName],
+			heading: t("sourceRenamedDeleteOld"),
+			description: t("sourceRenamedDeleted", { oldName }),
+			confirmLabel: t("sourceRenamedDeleteOld"),
+			onConfirmed: async () => {
+				toast.success(t("sourceRenamedDeleted", { oldName }));
+				await invalidateSkills();
+			},
+			onFailed: () =>
+				toast.danger(t("sourceRenamedDeleteFailed", { oldName })),
+		});
+	};
+
+	const openRemoveRemovedDialog = (skill: SourceSkillDiff) => {
+		openRemoveDialog({
+			names: [skill.name],
+			heading: t("sourceRemovedCleanSkill"),
+			description: t("sourceRemovedCleaned", { name: skill.name }),
+			confirmLabel: t("sourceRemovedCleanSkill"),
+			onConfirmed: async () => {
+				toast.success(t("sourceRemovedCleaned", { name: skill.name }));
+				await invalidateSkills();
+			},
+			onFailed: () =>
+				toast.danger(
+					t("sourceRemovedCleanFailed", { name: skill.name }),
+				),
+		});
+	};
 
 	const copyRenamedInstallMutation = useMutation({
 		mutationFn: async (skill: SourceSkillDiff) => {
@@ -662,54 +678,33 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}
 	};
 
-	const deleteAllRemovedSkills = async (skills: SourceSkillDiff[]) => {
-		if (
-			skills.length === 0 ||
-			isDeletingAllRemoved ||
-			deleteRemovedSkillMutation.isPending
-		) {
-			return;
-		}
-		if (installableAgentIds.length === 0) {
-			toast.danger(t("sourceRemoveNoAgents"));
-			return;
-		}
-
-		setIsDeletingAllRemoved(true);
-		let cleaned = 0;
-		let failed = 0;
-		try {
-			for (const skill of skills) {
-				try {
-					await deleteInstalledSkillByName(skill.name);
-					cleaned += 1;
-				} catch {
-					failed += 1;
-				}
-			}
-
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.all(),
-			});
-
-			if (failed > 0) {
+	const openRemoveAllRemovedDialog = (skills: SourceSkillDiff[]) => {
+		if (skills.length === 0) return;
+		const names = skills.map((s) => s.name);
+		openRemoveDialog({
+			names,
+			heading: t("sourceRemovedCleanAll"),
+			description: t("sourceRemovedCleanedMany", { count: names.length }),
+			confirmLabel: t("sourceRemovedCleanAll"),
+			onConfirmed: async () => {
+				toast.success(
+					t("sourceRemovedCleanedMany", { count: names.length }),
+				);
+				await invalidateSkills();
+			},
+			onFailed: async (failed) => {
+				await invalidateSkills();
 				toast.danger(
-					failed === 1
+					failed.length === 1
 						? t("sourceRemovedCleanSomeFailedOne", {
-								count: failed,
+								count: failed.length,
 							})
 						: t("sourceRemovedCleanSomeFailedMany", {
-								count: failed,
+								count: failed.length,
 							}),
 				);
-			} else {
-				toast.success(
-					t("sourceRemovedCleanedMany", { count: cleaned }),
-				);
-			}
-		} finally {
-			setIsDeletingAllRemoved(false);
-		}
+			},
+		});
 	};
 
 	const toggleInstallSkillSelection = (skill: SourceSkillDiff) => {
@@ -810,391 +805,394 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 	};
 
 	return (
-		<div className="flex h-full flex-col overflow-hidden">
-			{/* Header */}
-			<div className="flex items-start justify-between gap-3 border-b border-border p-4">
-				<div className="min-w-0">
-					<div className="flex items-center gap-2">
-						<GlobeAltIcon className="size-5 shrink-0 text-muted" />
-						<h1 className="truncate text-lg font-semibold text-foreground">
-							{row.source}
-						</h1>
-						<Chip size="sm" variant="secondary">
-							{row.rowScope === "global"
-								? t("scopeGlobal")
-								: `${t("scopeProject")} · ${row.projectName ?? ""}`}
-						</Chip>
-					</div>
-					<p className="mt-1 truncate font-mono text-xs text-muted">
-						{row.sourceUrl}
-					</p>
-				</div>
-				<Button className="shrink-0" onPress={onImport}>
-					<ArrowDownTrayIcon className="size-4" />
-					{t("importFromThisSource")}
-				</Button>
-			</div>
-
-			{/* Body */}
-			<div className="min-h-0 flex-1 overflow-y-auto p-4">
-				{isLoading || isFetching ? (
-					<div className="flex flex-col items-center gap-3 py-12">
-						<Spinner size="lg" />
-						<p className="text-sm text-muted">
-							{t("checkingSource")}
+		<>
+			<div className="flex h-full flex-col overflow-hidden">
+				{/* Header */}
+				<div className="flex items-start justify-between gap-3 border-b border-border p-4">
+					<div className="min-w-0">
+						<div className="flex items-center gap-2">
+							<GlobeAltIcon className="size-5 shrink-0 text-muted" />
+							<h1 className="truncate text-lg font-semibold text-foreground">
+								{row.source}
+							</h1>
+							<Chip size="sm" variant="secondary">
+								{row.rowScope === "global"
+									? t("scopeGlobal")
+									: `${t("scopeProject")} · ${row.projectName ?? ""}`}
+							</Chip>
+						</div>
+						<p className="mt-1 truncate font-mono text-xs text-muted">
+							{row.sourceUrl}
 						</p>
 					</div>
-				) : data?.needsCredential ? (
-					<Alert status="warning">
-						<Alert.Indicator />
-						<Alert.Content>
-							<Alert.Title>{t("needsCredential")}</Alert.Title>
-							<Alert.Description>
-								{t("needsCredentialHint")}
-							</Alert.Description>
-						</Alert.Content>
-					</Alert>
-				) : (
-					<div className="space-y-6">
-						{hasVisibleSkills && orphanLockCount > 0 && (
-							<SourceOrphanLockAlert
-								prunedCount={orphanLockCount}
-								isChecking={prunePreviewQuery.isFetching}
-								isCleaning={pruneLockMutation.isPending}
-								onClean={() => pruneLockMutation.mutate()}
-							/>
-						)}
-						{!hasVisibleSkills && (
-							<SourceEmptyState
-								prunedCount={orphanLockCount}
-								isChecking={prunePreviewQuery.isFetching}
-								isCleaning={pruneLockMutation.isPending}
-								hasError={prunePreviewQuery.isError}
-								onClean={() => pruneLockMutation.mutate()}
-								onRetry={() => prunePreviewQuery.refetch()}
-							/>
-						)}
-						<SkillSection
-							title={t("sourceStateNotInstalled")}
-							icon={
-								<PlusCircleIcon className="size-4 text-accent" />
-							}
-							skills={notInstalled}
-							expandedSkillPath={expandedSkillPath}
-							onToggleSkill={setExpandedSkillPath}
-							sectionAction={
-								<div className="flex shrink-0 items-center gap-1">
-									<Button
-										size="sm"
-										variant="ghost"
-										className="h-7 px-2 text-xs"
-										isDisabled={
-											isInstallingAll ||
-											installingSkillPath !== null ||
-											isCoverageLoading
-										}
-										onPress={
-											allInstallSkillsSelected
-												? clearSelectedInstallSkills
-												: selectAllInstallSkills
-										}
-									>
-										{allInstallSkillsSelected
-											? t("sourceClearSelection")
-											: t("sourceSelectAll")}
-									</Button>
-									<Button
-										size="sm"
-										variant={
-											hasSelectedInstallSkills
-												? "secondary"
-												: "ghost"
-										}
-										className="h-7 px-2 text-xs"
-										isDisabled={
-											isInstallingAll ||
-											installingSkillPath !== null ||
-											isCoverageLoading
-										}
-										onPress={() =>
-											installFromSource(
-												hasSelectedInstallSkills
-													? selectedInstallSkills
-													: notInstalled,
-											)
-										}
-									>
-										<ArrowDownTrayIcon className="size-3.5" />
-										{isInstallingAll ||
-										(hasSelectedInstallSkills &&
-											installingSkillPath !== null)
-											? t("sourceInstalling")
-											: hasSelectedInstallSkills
-												? t("sourceInstallSelected", {
-														count: selectedInstallCount,
-													})
-												: t("sourceInstallAll")}
-									</Button>
-								</div>
-							}
-							selectedSkillPaths={selectedInstallSkillPaths}
-							onToggleSelected={toggleInstallSkillSelection}
-							isSelectionDisabled={
-								isInstallingAll ||
-								installingSkillPath !== null ||
-								isCoverageLoading
-							}
-							rowAction={(skill) => {
-								const isInstalling =
-									installingSkillPath === skill.skillPath;
-								return (
-									<Button
-										size="sm"
-										variant="secondary"
-										className="h-7 px-2 text-xs"
-										isDisabled={
-											isInstallingAll ||
-											installingSkillPath !== null ||
-											isCoverageLoading
-										}
-										onPress={() =>
-											installFromSource([skill])
-										}
-									>
-										<ArrowDownTrayIcon className="size-3.5" />
-										{isInstalling
-											? t("sourceInstalling")
-											: t("sourceInstallSkill")}
-									</Button>
-								);
-							}}
-						/>
-						{(autoCovered.length > 0 || linkTargets.length > 0) &&
-							notInstalled.length > 0 && (
-								<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
-									<span>
-										{linkTargets.length}{" "}
-										{t("sourceInstallLinkTargetsTitle")} /{" "}
-										{autoCovered.length}{" "}
-										{t("sourceInstallCoveredTitle")}
-									</span>
-									{autoCovered.length > 0 && (
-										<>
-											<span className="mx-1 text-muted/50">
-												·
-											</span>
-											<span className="text-muted">
-												{t("agentCoveredBadge")}:
-											</span>
-											{autoCovered.map((agent) => (
-												<Chip
-													key={agent.id}
-													size="sm"
-													variant="secondary"
-												>
-													{agent.display_name}
-												</Chip>
-											))}
-										</>
-									)}
-								</div>
+					<Button className="shrink-0" onPress={onImport}>
+						<ArrowDownTrayIcon className="size-4" />
+						{t("importFromThisSource")}
+					</Button>
+				</div>
+
+				{/* Body */}
+				<div className="min-h-0 flex-1 overflow-y-auto p-4">
+					{isLoading || isFetching ? (
+						<div className="flex flex-col items-center gap-3 py-12">
+							<Spinner size="lg" />
+							<p className="text-sm text-muted">
+								{t("checkingSource")}
+							</p>
+						</div>
+					) : data?.needsCredential ? (
+						<Alert status="warning">
+							<Alert.Indicator />
+							<Alert.Content>
+								<Alert.Title>
+									{t("needsCredential")}
+								</Alert.Title>
+								<Alert.Description>
+									{t("needsCredentialHint")}
+								</Alert.Description>
+							</Alert.Content>
+						</Alert>
+					) : (
+						<div className="space-y-6">
+							{hasVisibleSkills && orphanLockCount > 0 && (
+								<SourceOrphanLockAlert
+									prunedCount={orphanLockCount}
+									isChecking={prunePreviewQuery.isFetching}
+									isCleaning={pruneLockMutation.isPending}
+									onClean={() => pruneLockMutation.mutate()}
+								/>
 							)}
-						<SkillSection
-							title={t("sourceStateOutdated")}
-							icon={
-								<ArrowUpCircleIcon className="size-4 text-warning" />
-							}
-							skills={outdated}
-							expandedSkillPath={expandedSkillPath}
-							onToggleSkill={setExpandedSkillPath}
-							sectionAction={
-								<Button
-									size="sm"
-									variant="ghost"
-									className="h-7 px-2 text-xs"
-									isDisabled={
-										isApplyingAll ||
-										applyUpdateMutation.isPending
-									}
-									onPress={() => applyAllUpdates(outdated)}
-								>
-									<ArrowPathIcon className="size-3.5" />
-									{isApplyingAll
-										? t("sourceUpdating")
-										: t("sourceUpdateAll")}
-								</Button>
-							}
-							rowAction={(skill) => {
-								const isApplying =
-									applyUpdateMutation.isPending &&
-									applyUpdateMutation.variables?.name ===
-										skill.name;
-								return (
-									<Button
-										size="sm"
-										variant="secondary"
-										className="h-7 px-2 text-xs"
-										isDisabled={isApplyingAll || isApplying}
-										onPress={() => applyOneUpdate(skill)}
-									>
-										<ArrowPathIcon className="size-3.5" />
-										{isApplying
-											? t("sourceUpdating")
-											: t("sourceUpdateSkill")}
-									</Button>
-								);
-							}}
-						/>
-						<SkillSection
-							title={t("sourceStateRenamed")}
-							icon={
-								<ExclamationTriangleIcon className="size-4 text-warning" />
-							}
-							skills={renamed}
-							expandedSkillPath={expandedSkillPath}
-							onToggleSkill={setExpandedSkillPath}
-							rowAction={(skill) => {
-								const isDeleting =
-									deleteRenamedSkillMutation.isPending &&
-									deleteRenamedSkillMutation.variables
-										?.skillPath === skill.skillPath;
-								const isCopying =
-									copyRenamedInstallMutation.isPending &&
-									copyRenamedInstallMutation.variables
-										?.skillPath === skill.skillPath;
-								const rowBusy = isDeleting || isCopying;
-								return (
-									<div className="flex items-center gap-1.5">
+							{!hasVisibleSkills && (
+								<SourceEmptyState
+									prunedCount={orphanLockCount}
+									isChecking={prunePreviewQuery.isFetching}
+									isCleaning={pruneLockMutation.isPending}
+									hasError={prunePreviewQuery.isError}
+									onClean={() => pruneLockMutation.mutate()}
+									onRetry={() => prunePreviewQuery.refetch()}
+								/>
+							)}
+							<SkillSection
+								title={t("sourceStateNotInstalled")}
+								icon={
+									<PlusCircleIcon className="size-4 text-accent" />
+								}
+								skills={notInstalled}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								sectionAction={
+									<div className="flex shrink-0 items-center gap-1">
+										<Button
+											size="sm"
+											variant="ghost"
+											className="h-7 px-2 text-xs"
+											isDisabled={
+												isInstallingAll ||
+												installingSkillPath !== null ||
+												isCoverageLoading
+											}
+											onPress={
+												allInstallSkillsSelected
+													? clearSelectedInstallSkills
+													: selectAllInstallSkills
+											}
+										>
+											{allInstallSkillsSelected
+												? t("sourceClearSelection")
+												: t("sourceSelectAll")}
+										</Button>
+										<Button
+											size="sm"
+											variant={
+												hasSelectedInstallSkills
+													? "secondary"
+													: "ghost"
+											}
+											className="h-7 px-2 text-xs"
+											isDisabled={
+												isInstallingAll ||
+												installingSkillPath !== null ||
+												isCoverageLoading
+											}
+											onPress={() =>
+												installFromSource(
+													hasSelectedInstallSkills
+														? selectedInstallSkills
+														: notInstalled,
+												)
+											}
+										>
+											<ArrowDownTrayIcon className="size-3.5" />
+											{isInstallingAll ||
+											(hasSelectedInstallSkills &&
+												installingSkillPath !== null)
+												? t("sourceInstalling")
+												: hasSelectedInstallSkills
+													? t(
+															"sourceInstallSelected",
+															{
+																count: selectedInstallCount,
+															},
+														)
+													: t("sourceInstallAll")}
+										</Button>
+									</div>
+								}
+								selectedSkillPaths={selectedInstallSkillPaths}
+								onToggleSelected={toggleInstallSkillSelection}
+								isSelectionDisabled={
+									isInstallingAll ||
+									installingSkillPath !== null ||
+									isCoverageLoading
+								}
+								rowAction={(skill) => {
+									const isInstalling =
+										installingSkillPath === skill.skillPath;
+									return (
 										<Button
 											size="sm"
 											variant="secondary"
 											className="h-7 px-2 text-xs"
 											isDisabled={
-												!skill.previousName || rowBusy
+												isInstallingAll ||
+												installingSkillPath !== null ||
+												isCoverageLoading
 											}
 											onPress={() =>
-												deleteRenamedSkillMutation.mutate(
-													skill,
-												)
+												installFromSource([skill])
 											}
 										>
-											<TrashIcon className="size-3.5" />
-											{isDeleting
-												? t("sourceRenamedDeleting")
-												: t("sourceRenamedDeleteOld")}
+											<ArrowDownTrayIcon className="size-3.5" />
+											{isInstalling
+												? t("sourceInstalling")
+												: t("sourceInstallSkill")}
 										</Button>
+									);
+								}}
+							/>
+							{(autoCovered.length > 0 ||
+								linkTargets.length > 0) &&
+								notInstalled.length > 0 && (
+									<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+										<span>
+											{linkTargets.length}{" "}
+											{t("sourceInstallLinkTargetsTitle")}{" "}
+											/ {autoCovered.length}{" "}
+											{t("sourceInstallCoveredTitle")}
+										</span>
+										{autoCovered.length > 0 && (
+											<>
+												<span className="mx-1 text-muted/50">
+													·
+												</span>
+												<span className="text-muted">
+													{t("agentCoveredBadge")}:
+												</span>
+												{autoCovered.map((agent) => (
+													<Chip
+														key={agent.id}
+														size="sm"
+														variant="secondary"
+													>
+														{agent.display_name}
+													</Chip>
+												))}
+											</>
+										)}
+									</div>
+								)}
+							<SkillSection
+								title={t("sourceStateOutdated")}
+								icon={
+									<ArrowUpCircleIcon className="size-4 text-warning" />
+								}
+								skills={outdated}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								sectionAction={
+									<Button
+										size="sm"
+										variant="ghost"
+										className="h-7 px-2 text-xs"
+										isDisabled={
+											isApplyingAll ||
+											applyUpdateMutation.isPending
+										}
+										onPress={() =>
+											applyAllUpdates(outdated)
+										}
+									>
+										<ArrowPathIcon className="size-3.5" />
+										{isApplyingAll
+											? t("sourceUpdating")
+											: t("sourceUpdateAll")}
+									</Button>
+								}
+								rowAction={(skill) => {
+									const isApplying =
+										applyUpdateMutation.isPending &&
+										applyUpdateMutation.variables?.name ===
+											skill.name;
+									return (
 										<Button
 											size="sm"
-											variant="ghost"
+											variant="secondary"
 											className="h-7 px-2 text-xs"
-											isDisabled={rowBusy}
+											isDisabled={
+												isApplyingAll || isApplying
+											}
 											onPress={() =>
-												copyRenamedInstallMutation.mutate(
-													skill,
-												)
+												applyOneUpdate(skill)
 											}
 										>
-											<ClipboardDocumentIcon className="size-3.5" />
-											{isCopying
-												? t("sourceRenamedCopying")
-												: t("sourceRenamedCopyInstall")}
+											<ArrowPathIcon className="size-3.5" />
+											{isApplying
+												? t("sourceUpdating")
+												: t("sourceUpdateSkill")}
 										</Button>
-									</div>
-								);
-							}}
-						/>
-						<SkillSection
-							title={t("sourceStateRemoved")}
-							icon={
-								<ExclamationTriangleIcon className="size-4 text-danger" />
-							}
-							skills={removed}
-							expandedSkillPath={expandedSkillPath}
-							onToggleSkill={setExpandedSkillPath}
-							sectionAction={
-								<Button
-									size="sm"
-									variant="ghost"
-									className="h-7 px-2 text-xs"
-									isDisabled={
-										isDeletingAllRemoved ||
-										deleteRemovedSkillMutation.isPending
-									}
-									onPress={() =>
-										deleteAllRemovedSkills(removed)
-									}
-								>
-									<TrashIcon className="size-3.5" />
-									{isDeletingAllRemoved
-										? t("sourceRemovedCleaning")
-										: t("sourceRemovedCleanAll")}
-								</Button>
-							}
-							rowAction={(skill) => {
-								const isDeleting =
-									deleteRemovedSkillMutation.isPending &&
-									deleteRemovedSkillMutation.variables
-										?.skillPath === skill.skillPath;
-								return (
+									);
+								}}
+							/>
+							<SkillSection
+								title={t("sourceStateRenamed")}
+								icon={
+									<ExclamationTriangleIcon className="size-4 text-warning" />
+								}
+								skills={renamed}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								rowAction={(skill) => {
+									const isCopying =
+										copyRenamedInstallMutation.isPending &&
+										copyRenamedInstallMutation.variables
+											?.skillPath === skill.skillPath;
+									return (
+										<div className="flex items-center gap-1.5">
+											<Button
+												size="sm"
+												variant="secondary"
+												className="h-7 px-2 text-xs"
+												isDisabled={
+													!skill.previousName ||
+													isCopying
+												}
+												onPress={() =>
+													openRemoveRenamedDialog(
+														skill,
+													)
+												}
+											>
+												<TrashIcon className="size-3.5" />
+												{t("sourceRenamedDeleteOld")}
+											</Button>
+											<Button
+												size="sm"
+												variant="ghost"
+												className="h-7 px-2 text-xs"
+												isDisabled={isCopying}
+												onPress={() =>
+													copyRenamedInstallMutation.mutate(
+														skill,
+													)
+												}
+											>
+												<ClipboardDocumentIcon className="size-3.5" />
+												{isCopying
+													? t("sourceRenamedCopying")
+													: t(
+															"sourceRenamedCopyInstall",
+														)}
+											</Button>
+										</div>
+									);
+								}}
+							/>
+							<SkillSection
+								title={t("sourceStateRemoved")}
+								icon={
+									<ExclamationTriangleIcon className="size-4 text-danger" />
+								}
+								skills={removed}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								sectionAction={
+									<Button
+										size="sm"
+										variant="ghost"
+										className="h-7 px-2 text-xs"
+										onPress={() =>
+											openRemoveAllRemovedDialog(removed)
+										}
+									>
+										<TrashIcon className="size-3.5" />
+										{t("sourceRemovedCleanAll")}
+									</Button>
+								}
+								rowAction={(skill) => (
 									<Button
 										size="sm"
 										variant="secondary"
 										className="h-7 px-2 text-xs"
-										isDisabled={
-											isDeletingAllRemoved || isDeleting
-										}
 										onPress={() =>
-											deleteRemovedSkillMutation.mutate(
-												skill,
-											)
+											openRemoveRemovedDialog(skill)
 										}
 									>
 										<TrashIcon className="size-3.5" />
-										{isDeleting
-											? t("sourceRemovedCleaning")
-											: t("sourceRemovedCleanSkill")}
+										{t("sourceRemovedCleanSkill")}
 									</Button>
-								);
-							}}
-							muted
-							showReason
-						/>
-						<SkillSection
-							title={t("sourceStateDeprecated")}
-							icon={
-								<ExclamationTriangleIcon className="size-4 text-muted" />
-							}
-							skills={deprecated}
-							expandedSkillPath={expandedSkillPath}
-							onToggleSkill={setExpandedSkillPath}
-							muted
-						/>
-						<SkillSection
-							title={t("sourceStateCurrent")}
-							icon={
-								<CheckCircleIcon className="size-4 text-success" />
-							}
-							skills={current}
-							expandedSkillPath={expandedSkillPath}
-							onToggleSkill={setExpandedSkillPath}
-						/>
-						{uncheckable.length > 0 && (
-							<SkillSection
-								title={t("sourceStateUncheckable")}
-								icon={
-									<QuestionMarkCircleIcon className="size-4 text-muted" />
-								}
-								skills={uncheckable}
-								expandedSkillPath={expandedSkillPath}
-								onToggleSkill={setExpandedSkillPath}
+								)}
 								muted
 								showReason
 							/>
-						)}
-					</div>
-				)}
+							<SkillSection
+								title={t("sourceStateDeprecated")}
+								icon={
+									<ExclamationTriangleIcon className="size-4 text-muted" />
+								}
+								skills={deprecated}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								muted
+							/>
+							<SkillSection
+								title={t("sourceStateCurrent")}
+								icon={
+									<CheckCircleIcon className="size-4 text-success" />
+								}
+								skills={current}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+							/>
+							{uncheckable.length > 0 && (
+								<SkillSection
+									title={t("sourceStateUncheckable")}
+									icon={
+										<QuestionMarkCircleIcon className="size-4 text-muted" />
+									}
+									skills={uncheckable}
+									expandedSkillPath={expandedSkillPath}
+									onToggleSkill={setExpandedSkillPath}
+									muted
+									showReason
+								/>
+							)}
+						</div>
+					)}
+				</div>
 			</div>
-		</div>
+			{removeTarget && (
+				<DeletePreviewDialog
+					isOpen
+					onClose={() => setRemoveTarget(null)}
+					deleteFns={removeDeleteFns}
+					heading={removeTarget.heading}
+					description={removeTarget.description}
+					confirmLabel={removeTarget.confirmLabel}
+					onConfirmed={removeTarget.onConfirmed}
+					onFailed={removeTarget.onFailed}
+				/>
+			)}
+		</>
 	);
 }
 

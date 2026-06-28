@@ -62,11 +62,58 @@ function aggregate(views: RemovalView[]): DeletePreview {
 	return { paths: [...paths], skipped: [...skipped] };
 }
 
-type PreviewState =
+/**
+ * Preview phase of the gate: dry-run every item (confirm=false) and aggregate
+ * the real paths. Rejects if ANY dry-run fails — the caller must then NOT reach
+ * the confirm phase. This is the seam a destructive call site must go through
+ * instead of jumping straight to confirm=true.
+ */
+export async function previewAll(fns: DeleteFn[]): Promise<DeletePreview> {
+	const views = await Promise.all(fns.map(runDryRun));
+	return aggregate(views);
+}
+
+/**
+ * Confirm phase of the gate: execute every item (confirm=true). Resolves with
+ * the indices that failed (empty = all succeeded) so callers can name what
+ * didn't go, instead of throwing on the first failure.
+ */
+export async function confirmAll(fns: DeleteFn[]): Promise<number[]> {
+	const results = await Promise.allSettled(fns.map(runConfirmedDelete));
+	return results
+		.map((r, i) => (r.status === "rejected" ? i : -1))
+		.filter((i) => i >= 0);
+}
+
+export type PreviewState =
 	| { status: "idle" }
 	| { status: "loading" }
 	| { status: "ready"; preview: DeletePreview }
 	| { status: "error"; message: string };
+
+/**
+ * The confirm-button gate: confirm=true may run ONLY after the preview reached
+ * "ready" (a successful dry-run) and no delete is already in flight. Pure so the
+ * ordering invariant — confirm can never precede a successful preview — is
+ * tested without a renderer; `DeletePreviewDialog` binds its danger button's
+ * `isDisabled` to `!canConfirm(...)`.
+ */
+export function canConfirm(state: PreviewState, isDeleting: boolean): boolean {
+	return state.status === "ready" && !isDeleting;
+}
+
+/**
+ * Resolve the confirm phase's outcome from the failed-item indices `confirmAll`
+ * returned. Pure so the branch — onFailed fires (and onConfirmed does NOT) when
+ * any delete failed, else onConfirmed runs — is tested without a renderer.
+ */
+export function confirmOutcome(
+	failedIndices: number[],
+): { ok: true } | { ok: false; failed: number[] } {
+	return failedIndices.length > 0
+		? { ok: false, failed: failedIndices }
+		: { ok: true };
+}
 
 /**
  * Drives the two-step delete for one set of items. Call `load(fns)` when the
@@ -83,8 +130,7 @@ export function useDeletePreview() {
 	const load = useCallback(async (fns: DeleteFn[]) => {
 		setState({ status: "loading" });
 		try {
-			const views = await Promise.all(fns.map(runDryRun));
-			setState({ status: "ready", preview: aggregate(views) });
+			setState({ status: "ready", preview: await previewAll(fns) });
 		} catch (error) {
 			setState({
 				status: "error",
@@ -108,12 +154,7 @@ export function useDeletePreview() {
 	const confirm = useCallback(async (fns: DeleteFn[]): Promise<number[]> => {
 		setIsDeleting(true);
 		try {
-			const results = await Promise.allSettled(
-				fns.map(runConfirmedDelete),
-			);
-			return results
-				.map((r, i) => (r.status === "rejected" ? i : -1))
-				.filter((i) => i >= 0);
+			return await confirmAll(fns);
 		} finally {
 			setIsDeleting(false);
 		}

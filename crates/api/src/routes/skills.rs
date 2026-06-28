@@ -1046,20 +1046,16 @@ pub async fn delete_skill(
 	}
 	let confirm = params.confirm.unwrap_or(false);
 	let dry_run = !confirm;
-	match manager.remove_skill_planned(
+	// remove_skill_planned prunes the per-scope lock itself on execute, so the
+	// handler must NOT prune again. Idempotent-delete (a missing skill is a
+	// success no-op, any other error propagates) is owned once in
+	// `routes::removal_or_noop`.
+	crate::routes::removal_or_noop(manager.remove_skill_planned(
 		name,
 		params.all_agents.unwrap_or(false),
 		dry_run,
 		confirm,
-	) {
-		// remove_skill_planned prunes the per-scope lock itself on execute, so
-		// the handler must NOT prune again.
-		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
-		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(crate::routes::noop_removal_response(vec![], vec![])))
-		}
-		Err(e) => Err(ApiError::from(e)),
-	}
+	))
 }
 
 #[post("/agents/<agent>/skills/<name>/enable?<scope..>")]

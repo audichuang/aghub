@@ -1,7 +1,12 @@
 import { AlertDialog, Button, Spinner } from "@heroui/react";
 import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
-import { type DeleteFn, useDeletePreview } from "../lib/delete-preview";
+import {
+	canConfirm,
+	confirmOutcome,
+	type DeleteFn,
+	useDeletePreview,
+} from "../lib/delete-preview";
 
 export interface DeletePreviewDialogProps {
 	isOpen: boolean;
@@ -59,9 +64,9 @@ export function DeletePreviewDialog({
 	}, [isOpen, deleteFns, load, reset]);
 
 	const handleConfirm = async () => {
-		const failed = await confirm(deleteFns);
-		if (failed.length > 0) {
-			onFailed?.(failed);
+		const outcome = confirmOutcome(await confirm(deleteFns));
+		if (!outcome.ok) {
+			onFailed?.(outcome.failed);
 			onClose();
 			return;
 		}
@@ -70,7 +75,6 @@ export function DeletePreviewDialog({
 	};
 
 	const ready = state.status === "ready";
-	const busy = state.status === "loading" || isDeleting;
 
 	return (
 		<AlertDialog.Backdrop isOpen={isOpen} onOpenChange={onClose}>
@@ -158,7 +162,7 @@ export function DeletePreviewDialog({
 						<Button
 							variant="danger"
 							onPress={handleConfirm}
-							isDisabled={busy || !ready}
+							isDisabled={!canConfirm(state, isDeleting)}
 							className="min-w-[120px]"
 						>
 							{isDeleting ? (

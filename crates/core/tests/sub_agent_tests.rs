@@ -195,31 +195,109 @@ fn remove_sub_agent_planned_failed_delete_errors_without_mutating() {
 	);
 }
 
+#[cfg(unix)]
 #[test]
 fn remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent() {
-	// Regression (Codex blocking): when the backing `.md` is REAL (written by
-	// add/save) but its deletion fails, the manager must NOT report success.
-	// Because `save_scoped_sub_agents` never deletes stale files, an orphaned
-	// `.md` left behind reappears on reload — so a failed delete that mutated
-	// + saved in-memory state would falsely claim the agent is gone while it
-	// silently returns. The fix deletes the file FIRST: a non-NotFound error
+	// Regression (Codex blocking): when the backing `.md` is REAL but its
+	// removal fails, the manager must NOT report success. Because
+	// `save_scoped_sub_agents` never deletes stale files, an orphaned `.md` left
+	// behind reappears on reload — so a failed removal that mutated + saved
+	// in-memory state would falsely claim the agent is gone. The transactional
+	// removal moves the file out FIRST (tombstone); a non-NotFound failure
 	// surfaces as an error and leaves the agent loaded + on disk (consistent).
 	//
-	// Force the delete to fail without chmod (root-safe): replace the backing
-	// file with a directory at the same path so `remove_file` hits ENOTDIR/
-	// IsADirectory deterministically.
+	// Force the removal to fail (root-safe): park the real backing file in a
+	// `0o555` dir so the tombstone rename inside it is blocked. A directory
+	// swap no longer works — rename succeeds on a directory — so we block the
+	// unlink/rename via dir perms, mirroring the rename-stale-file test below.
+	use std::os::unix::fs::PermissionsExt;
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	if !perms_enforced(root) {
+		eprintln!("skip: root bypasses 0o555");
+		return;
+	}
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+
+	// A real, existing backing file inside a dir we lock against rename/unlink.
+	let locked_dir = root.join("locked");
+	std::fs::create_dir(&locked_dir).unwrap();
+	let file = locked_dir.join("reviewer.md");
+	std::fs::write(&file, "real").unwrap();
+
+	let mut agent = SubAgent::new("reviewer");
+	agent.source_path = Some(file.to_string_lossy().into_owned());
+	mgr.add_sub_agent(agent).unwrap();
+
+	let orig = std::fs::metadata(&locked_dir).unwrap().permissions();
+	std::fs::set_permissions(
+		&locked_dir,
+		std::fs::Permissions::from_mode(0o555),
+	)
+	.unwrap();
+
+	let res = mgr.remove_sub_agent_planned("reviewer", false, true);
+
+	// RESTORE perms before asserting so a failure can't leak the temp dir.
+	std::fs::set_permissions(&locked_dir, orig).unwrap();
+
+	let err = res.expect_err(
+		"an unremovable backing file must surface, not report success",
+	);
+	assert!(
+		matches!(err, ConfigError::Io(_)),
+		"unremovable backing file must surface an actionable IO error, \
+		 got {err:?}"
+	);
+
+	// State preserved: agent still loaded + the backing file still on disk, so
+	// the reported failure leaves no stale orphan that reappears on reload.
+	assert!(
+		mgr.get_sub_agent("reviewer").is_some(),
+		"failed removal must leave the agent in memory"
+	);
+	assert!(file.exists(), "backing path must remain on disk");
+}
+
+#[test]
+fn remove_sub_agent_planned_save_failure_restores_deleted_file() {
+	// Regression (Codex blocking): the delete was NOT rollback-safe. It removed
+	// the backing file FIRST, then mutated memory and saved. If the save fails
+	// after the file is already gone, the API returns an error but the file is
+	// permanently lost — the user is told it failed yet their sub-agent is
+	// destroyed. The fix makes delete+save transactional: on save failure the
+	// removed file is restored and the agent stays loaded, so a reported failure
+	// means nothing changed.
+	//
+	// Force the save to fail AFTER the target's file is removed: keep a second
+	// agent loaded and pre-create ITS backing path as a directory, so the
+	// save's `fs::write` to "<dir>/keeper.md" hits IsADirectory/ENOTDIR
+	// deterministically (root-safe — no chmod).
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
 	let mut mgr = manager_with_persisted_agent(root, "reviewer");
-	let file = agent_md_path(root, "reviewer");
-	assert!(file.exists(), "precondition: real backing file written");
-
-	// Swap the file for a directory so remove_file can never succeed.
-	std::fs::remove_file(&file).unwrap();
-	std::fs::create_dir(&file).unwrap();
+	let target_file = agent_md_path(root, "reviewer");
 	assert!(
-		std::fs::remove_file(&file).is_err(),
-		"precondition: remove_file fails on a directory"
+		target_file.exists(),
+		"precondition: target backing file written"
+	);
+
+	// A second agent that stays loaded; its save write is what we sabotage.
+	mgr.add_sub_agent(SubAgent::new("keeper")).unwrap();
+	let keeper_file = agent_md_path(root, "keeper");
+	// Replace the keeper's file with a directory so `fs::write` to it fails
+	// during save, AFTER the target file has already been removed.
+	std::fs::remove_file(&keeper_file).unwrap();
+	std::fs::create_dir(&keeper_file).unwrap();
+	assert!(
+		std::fs::write(&keeper_file, b"x").is_err(),
+		"precondition: save write to keeper must fail"
 	);
 
 	let err = mgr
@@ -227,19 +305,20 @@ fn remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent() {
 		.unwrap_err();
 	assert!(
 		matches!(err, ConfigError::Io(_)),
-		"undeletable backing file must surface an actionable IO error, \
+		"a save failure after file removal must surface as an IO error, \
 		 got {err:?}"
 	);
 
-	// State preserved: agent still loaded in memory, and the backing path is
-	// still on disk. Crucially the delete happens BEFORE the in-memory removal
-	// + save, so the failure leaves no stale orphan that a later save would
-	// fail to clean up and that would reappear on reload.
+	// Transactional: the target file is RESTORED and the agent stays loaded, so
+	// the reported failure means no data was lost.
+	assert!(
+		target_file.exists(),
+		"save failure must restore the deleted backing file (no data loss)"
+	);
 	assert!(
 		mgr.get_sub_agent("reviewer").is_some(),
-		"failed delete must leave the agent in memory"
+		"save failure must leave the agent loaded in memory"
 	);
-	assert!(file.exists(), "backing path must remain on disk");
 }
 
 #[test]

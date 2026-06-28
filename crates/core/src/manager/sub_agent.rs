@@ -162,26 +162,39 @@ impl ConfigManager {
 			});
 		}
 
-		// Delete the backing file FIRST, before mutating/saving in-memory state.
-		// Unlike skills, `save_scoped_sub_agents` does NOT delete stale files
-		// (crates/agents/src/sub_agents.rs), so a file left on disk after an
-		// in-memory removal reappears as a phantom agent on the next reload. If
-		// the delete fails with a real error we must surface it and leave state
-		// untouched (agent stays loaded + on disk) rather than report a false
-		// success. An already-gone file is idempotent success. This is why the
-		// skill-style "move failed paths to skipped" contract does NOT apply
-		// here — there is no save step that would clean up the orphan.
+		// Move the backing file to a tombstone FIRST, before mutating/saving
+		// in-memory state. Unlike skills, `save_scoped_sub_agents` does NOT
+		// delete stale files (crates/agents/src/sub_agents.rs), so a file left on
+		// disk after an in-memory removal reappears as a phantom agent on the
+		// next reload — and conversely, deleting it outright before the save
+		// would lose the user's data if the save then fails. So this is
+		// transactional: rename → mutate + save → on success drop the tombstone,
+		// on save failure RESTORE it and re-insert the agent, so a reported
+		// failure means nothing changed. A non-NotFound rename error surfaces and
+		// leaves state untouched; an already-gone file is idempotent success.
+		let mut tombstones: Vec<(PathBuf, PathBuf)> = Vec::new();
 		for path in &plan.paths {
-			match std::fs::remove_file(path) {
-				Ok(()) => {}
+			let tomb = path.with_extension("md.aghub-tomb");
+			match std::fs::rename(path, &tomb) {
+				Ok(()) => tombstones.push((path.clone(), tomb)),
 				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
 				Err(e) => {
 					warn!("failed removal of '{}': {}", path.display(), e);
+					// Restore any earlier tombstones before bailing.
+					for (orig, tomb) in &tombstones {
+						let _ = std::fs::rename(tomb, orig);
+					}
 					return Err(ConfigError::Io(e));
 				}
 			}
 		}
 
+		// Snapshot the agent so we can re-insert it if the save fails.
+		let removed = self
+			.config
+			.as_ref()
+			.and_then(|c| c.sub_agents.iter().find(|a| a.name == name))
+			.cloned();
 		{
 			let config = self.config_mut()?;
 			config.sub_agents.retain(|a| a.name != name);
@@ -193,7 +206,23 @@ impl ConfigManager {
 			self.adapter.name(),
 			self.write_scope
 		);
-		self.save_sub_agents_current()?;
+		if let Err(e) = self.save_sub_agents_current() {
+			// Roll back: restore the on-disk file(s) and the in-memory agent so a
+			// reported failure leaves no data lost and no phantom orphan.
+			for (orig, tomb) in &tombstones {
+				let _ = std::fs::rename(tomb, orig);
+			}
+			if let (Some(agent), Some(config)) = (removed, self.config.as_mut())
+			{
+				config.sub_agents.push(agent);
+			}
+			return Err(e);
+		}
+
+		// Save succeeded — drop the tombstones permanently.
+		for (_, tomb) in &tombstones {
+			let _ = std::fs::remove_file(tomb);
+		}
 
 		Ok(RemovalOutcome {
 			plan,

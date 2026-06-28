@@ -264,15 +264,12 @@ pub fn delete_sub_agent(
 	let dry_run = !confirm;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	manager.load().map_err(ApiError::from)?;
-	match manager.remove_sub_agent_planned(&name, dry_run, confirm) {
-		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
-		// Missing sub-agent is not an error: no-op success through the shared
-		// removal seam, mirroring the skill/MCP delete routes.
-		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(crate::routes::noop_removal_response(vec![], vec![])))
-		}
-		Err(e) => Err(ApiError::from(e)),
-	}
+	// Idempotent-delete contract (a missing sub-agent is a success no-op, any
+	// other error propagates) is owned once in `routes::removal_or_noop`,
+	// mirroring the skill/MCP delete routes.
+	crate::routes::removal_or_noop(
+		manager.remove_sub_agent_planned(&name, dry_run, confirm),
+	)
 }
 
 #[cfg(test)]
