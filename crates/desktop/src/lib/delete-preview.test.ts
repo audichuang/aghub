@@ -7,6 +7,7 @@ import type { DeleteSkillByPathResponse } from "../generated/dto";
 import {
 	canConfirm,
 	confirmAll,
+	confirmDelete,
 	confirmOutcome,
 	type DeleteFn,
 	type PreviewState,
@@ -178,5 +179,97 @@ test("the gate sequence: a failed preview must abort before any confirm", async 
 	assert.ok(
 		!ok.calls.includes(true),
 		"no fn may be executed with confirm=true when preview failed",
+	);
+});
+
+// --- The confirm-gate controller (#5 audit) -----------------------------------
+// `confirmDelete` is the EXACT pure controller DeletePreviewDialog's danger
+// button runs. These tests would FAIL if a call site (the sources-page bug)
+// reverted to running the destructive executor without a successful preview.
+// We pass a spy executor so "did confirm=true run?" is directly observable
+// without a React renderer.
+
+const readyState: PreviewState = {
+	status: "ready",
+	preview: { paths: ["/a"], skipped: [] },
+};
+
+/** Records whether the destructive executor was invoked, and its result. */
+function execSpy(failed: number[] = []) {
+	const calls: DeleteFn[][] = [];
+	const exec = async (fns: DeleteFn[]) => {
+		calls.push(fns);
+		return failed;
+	};
+	return { exec, calls };
+}
+
+test("confirmDelete runs the destructive executor ONLY when the preview is ready", async () => {
+	const e = execSpy();
+	const events: string[] = [];
+	const ran = await confirmDelete(readyState, false, [spy().fn], e.exec, {
+		onConfirmed: () => void events.push("confirmed"),
+		onFailed: () => void events.push("failed"),
+		onClose: () => void events.push("close"),
+	});
+	assert.equal(
+		ran,
+		true,
+		"the gate must run the destructive phase when ready",
+	);
+	assert.equal(e.calls.length, 1, "executor invoked exactly once");
+	assert.deepEqual(events, ["confirmed", "close"]);
+});
+
+for (const blocked of [
+	{ status: "idle" } as PreviewState,
+	{ status: "loading" } as PreviewState,
+	{ status: "error", message: "preview failed" } as PreviewState,
+]) {
+	test(`confirmDelete NEVER runs confirm=true on a ${blocked.status} state`, async () => {
+		const e = execSpy();
+		const events: string[] = [];
+		const ran = await confirmDelete(blocked, false, [spy().fn], e.exec, {
+			onConfirmed: () => void events.push("confirmed"),
+			onFailed: () => void events.push("failed"),
+			onClose: () => void events.push("close"),
+		});
+		assert.equal(ran, false, "the gate must block a non-ready confirm");
+		assert.equal(
+			e.calls.length,
+			0,
+			"the destructive executor must NOT be invoked without a ready preview",
+		);
+		assert.deepEqual(events, [], "no callback fires when the gate blocks");
+	});
+}
+
+test("confirmDelete blocks a second confirm while one is already in flight", async () => {
+	const e = execSpy();
+	const ran = await confirmDelete(readyState, true, [spy().fn], e.exec, {
+		onConfirmed: () => {},
+		onClose: () => {},
+	});
+	assert.equal(ran, false);
+	assert.equal(e.calls.length, 0, "no double-fire while deleting");
+});
+
+test("confirmDelete reports partial failures via onFailed (not onConfirmed)", async () => {
+	const e = execSpy([1]); // item 1 failed
+	const events: string[] = [];
+	let reported: number[] | undefined;
+	await confirmDelete(readyState, false, [spy().fn, spy().fn], e.exec, {
+		onConfirmed: () => void events.push("confirmed"),
+		onFailed: (f) => {
+			events.push("failed");
+			reported = f;
+		},
+		onClose: () => void events.push("close"),
+	});
+	assert.deepEqual(events, ["failed", "close"], "onConfirmed must not fire");
+	assert.deepEqual(
+		reported,
+		[1],
+		"the failed index is reported to the caller",
 	);
 });

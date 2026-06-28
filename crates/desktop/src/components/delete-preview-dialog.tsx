@@ -3,7 +3,7 @@ import { useEffect } from "react";
 import { useTranslation } from "react-i18next";
 import {
 	canConfirm,
-	confirmOutcome,
+	confirmDelete,
 	type DeleteFn,
 	useDeletePreview,
 } from "../lib/delete-preview";
@@ -63,16 +63,16 @@ export function DeletePreviewDialog({
 		}
 	}, [isOpen, deleteFns, load, reset]);
 
-	const handleConfirm = async () => {
-		const outcome = confirmOutcome(await confirm(deleteFns));
-		if (!outcome.ok) {
-			onFailed?.(outcome.failed);
-			onClose();
-			return;
-		}
-		await onConfirmed();
-		onClose();
-	};
+	// The destructive confirm goes through the pure `confirmDelete` gate so it can
+	// NEVER run confirm=true before a successful preview (the #5 contract), unit-
+	// tested without a renderer. `confirm` is the hook's in-flight-tracking
+	// executor (drives the spinner); the gate invokes it only past the gate.
+	const handleConfirm = () =>
+		confirmDelete(state, isDeleting, deleteFns, confirm, {
+			onConfirmed,
+			onFailed,
+			onClose,
+		});
 
 	const ready = state.status === "ready";
 

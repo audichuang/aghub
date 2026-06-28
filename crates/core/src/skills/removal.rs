@@ -1067,6 +1067,20 @@ mod tests {
 	}
 
 	#[test]
+	fn noop_is_idempotent_delete_success_shape() {
+		// Pins the idempotent-delete contract (the single `RemovalOutcome::noop`
+		// the CLI `plan_or_noop` and the API no-op both serialize): deleting an
+		// absent resource is a SUCCESS no-op — executed:false, no paths, so the
+		// wire `deleted_path` stays null. NOT an error.
+		let n = RemovalOutcome::noop();
+		assert!(!n.executed, "a no-op delete must not report execution");
+		assert!(n.plan.paths.is_empty(), "no-op deletes nothing");
+		assert!(n.plan.skipped.is_empty());
+		assert!(!n.plan.needs_confirm);
+		assert_eq!(n.prune, PruneStatus::NotRun);
+	}
+
+	#[test]
 	fn agent_skill_dirs_in_scope_global_is_nonempty() {
 		let dirs = agent_skill_dirs_in_scope(
 			crate::models::ResourceScope::GlobalOnly,

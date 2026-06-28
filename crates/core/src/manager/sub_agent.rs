@@ -180,10 +180,12 @@ impl ConfigManager {
 				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
 				Err(e) => {
 					warn!("failed removal of '{}': {}", path.display(), e);
-					// Restore any earlier tombstones before bailing.
-					for (orig, tomb) in &tombstones {
-						let _ = std::fs::rename(tomb, orig);
-					}
+					// Best-effort restore of earlier tombstones before
+					// bailing. The original rename error is the actionable
+					// root cause we return; a restore that itself fails
+					// leaves that file parked as a tomb, so warn (don't
+					// swallow) so the orphan stays visible in logs.
+					restore_tombstones(&tombstones);
 					return Err(ConfigError::Io(e));
 				}
 			}
@@ -208,10 +210,10 @@ impl ConfigManager {
 		);
 		if let Err(e) = self.save_sub_agents_current() {
 			// Roll back: restore the on-disk file(s) and the in-memory agent so a
-			// reported failure leaves no data lost and no phantom orphan.
-			for (orig, tomb) in &tombstones {
-				let _ = std::fs::rename(tomb, orig);
-			}
+			// reported failure leaves no data lost and no phantom orphan. The save
+			// error is the actionable root cause; a restore that itself fails is
+			// surfaced via warn! (it leaves a parked tomb) rather than swallowed.
+			restore_tombstones(&tombstones);
 			if let (Some(agent), Some(config)) = (removed, self.config.as_mut())
 			{
 				config.sub_agents.push(agent);
@@ -219,9 +221,23 @@ impl ConfigManager {
 			return Err(e);
 		}
 
-		// Save succeeded — drop the tombstones permanently.
+		// Save succeeded — drop the tombstones permanently. A leftover
+		// `.md.aghub-tomb` is litter, not data loss (the agent IS gone), so a
+		// cleanup failure must NOT be reported as a clean success: surface it as
+		// an actionable error (an already-gone tomb is benign NotFound).
 		for (_, tomb) in &tombstones {
-			let _ = std::fs::remove_file(tomb);
+			match std::fs::remove_file(tomb) {
+				Ok(()) => {}
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+				Err(e) => {
+					warn!(
+						"failed to clean up tombstone '{}': {}",
+						tomb.display(),
+						e
+					);
+					return Err(ConfigError::Io(e));
+				}
+			}
 		}
 
 		Ok(RemovalOutcome {
@@ -234,6 +250,24 @@ impl ConfigManager {
 	/// Remove a sub-agent by name and persist via the adapter.
 	pub fn remove_sub_agent(&mut self, name: &str) -> Result<()> {
 		self.remove_sub_agent_planned(name, false, true).map(|_| ())
+	}
+}
+
+/// Best-effort restore of `(orig, tomb)` pairs on a removal error path: rename
+/// each tombstone back to its original. Used only when an earlier error is
+/// already being returned, so a restore that itself fails is logged (the file
+/// stays parked as a `.aghub-tomb`) rather than swallowed — the returned error
+/// is the actionable root cause, the warn surfaces the parked orphan.
+fn restore_tombstones(tombstones: &[(PathBuf, PathBuf)]) {
+	for (orig, tomb) in tombstones {
+		if let Err(e) = std::fs::rename(tomb, orig) {
+			warn!(
+				"failed to restore tombstone '{}' -> '{}': {}",
+				tomb.display(),
+				orig.display(),
+				e
+			);
+		}
 	}
 }
 

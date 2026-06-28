@@ -115,6 +115,53 @@ export function confirmOutcome(
 		: { ok: true };
 }
 
+export interface ConfirmGateCallbacks {
+	/** Fired after every confirmed delete succeeds. */
+	onConfirmed: () => void | Promise<void>;
+	/** Fired with the failed-item indices when one or more deletes fail. */
+	onFailed?: (failedIndices: number[]) => void;
+	/** Closes the dialog after the confirm phase resolves either way. */
+	onClose: () => void;
+}
+
+/**
+ * The destructive executor: runs every confirm=true delete and returns the
+ * failed-item indices. The hook's `confirm` is exactly this wrapped in
+ * in-flight tracking; the gate takes it as a parameter so a test can pass a
+ * spy and assert the gate never invokes it on a non-ready state.
+ */
+export type ConfirmExecutor = (fns: DeleteFn[]) => Promise<number[]>;
+
+/**
+ * The dialog's confirm-button handler, extracted pure so the open->confirm
+ * ordering contract is unit-tested without a renderer. This is the seam the #5
+ * bug violated: it MUST refuse to invoke the destructive executor (confirm=true)
+ * unless the preview reached "ready" (a successful dry-run) and no delete is in
+ * flight — the same `canConfirm` gate the danger button binds to. A call site
+ * that jumps straight to delete(confirm=true) without a preview is exactly this
+ * returning before `runConfirm` is reached.
+ *
+ * Returns `true` if it ran the destructive phase, `false` if the gate blocked
+ * it — so a test can prove confirm=true never fires on a non-ready state.
+ */
+export async function confirmDelete(
+	state: PreviewState,
+	isDeleting: boolean,
+	fns: DeleteFn[],
+	runConfirm: ConfirmExecutor,
+	cb: ConfirmGateCallbacks,
+): Promise<boolean> {
+	if (!canConfirm(state, isDeleting)) return false;
+	const outcome = confirmOutcome(await runConfirm(fns));
+	if (!outcome.ok) {
+		cb.onFailed?.(outcome.failed);
+	} else {
+		await cb.onConfirmed();
+	}
+	cb.onClose();
+	return true;
+}
+
 /**
  * Drives the two-step delete for one set of items. Call `load(fns)` when the
  * confirm dialog opens to run the dry-runs and surface the real paths; call

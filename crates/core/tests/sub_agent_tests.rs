@@ -429,6 +429,51 @@ fn update_sub_agent_rename_stale_file_delete_failure_errors() {
 }
 
 #[test]
+fn remove_sub_agent_planned_tombstone_cleanup_failure_is_not_clean_success() {
+	// Site-3 regression: after a successful tombstone rename + save, the
+	// post-success cleanup must NOT swallow a `remove_file` failure and report
+	// a clean `executed:true` success. A surviving `.aghub-tomb` is litter the
+	// caller should learn about, so a non-NotFound cleanup error surfaces.
+	//
+	// Deterministic, root-safe: point source_path at a DIRECTORY. The rename to
+	// the tomb then makes the tomb a directory too, so `remove_file(tomb)` fails
+	// with EISDIR while the rename + save still succeed.
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+
+	// Backing "file" is actually a directory: rename moves it to a tomb dir,
+	// which `remove_file` cannot delete.
+	let backing_dir = root.join("backing.md");
+	std::fs::create_dir(&backing_dir).unwrap();
+	let tomb = root.join("backing.md.aghub-tomb");
+
+	let mut agent = SubAgent::new("reviewer");
+	agent.source_path = Some(backing_dir.to_string_lossy().into_owned());
+	mgr.add_sub_agent(agent).unwrap();
+
+	let err = mgr
+		.remove_sub_agent_planned("reviewer", false, true)
+		.expect_err("a tombstone cleanup failure must not be a clean success");
+	assert!(
+		matches!(err, ConfigError::Io(_)),
+		"cleanup failure must surface an actionable IO error, got {err:?}"
+	);
+	// The removal itself happened (file moved out + saved): the leftover tomb
+	// is exactly the litter the surfaced error tells the caller about.
+	assert!(tomb.exists(), "the un-cleaned tombstone is left on disk");
+	assert!(
+		mgr.get_sub_agent("reviewer").is_none(),
+		"the agent was genuinely removed before cleanup failed"
+	);
+}
+
+#[test]
 fn remove_sub_agent_wrapper_missing_is_not_found() {
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
