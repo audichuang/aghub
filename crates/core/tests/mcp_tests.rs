@@ -1620,6 +1620,144 @@ fn test_no_empty_string_mcp_key_produced() {
 	}
 }
 
+// ==================== Group 8: planned MCP removal (confirm gate) ====
+// Phase 3 #5 Task 1: remove_mcp_planned + reroute remove_mcp through it.
+
+/// Dry-run (dry_run=true) plans the removal but deletes nothing: executed is
+/// false, the plan names the rewritten config file, and the MCP survives a
+/// reload from disk.
+#[test]
+fn test_remove_mcp_planned_dry_run_keeps_entry() {
+	use aghub_core::skills::removal::{Layout, PruneStatus};
+
+	let test = TestConfig::new(AgentType::Cursor).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	manager.add_mcp(mcp_stdio("keep-me")).unwrap();
+
+	let outcome = manager.remove_mcp_planned("keep-me", true, false).unwrap();
+
+	assert!(!outcome.executed, "dry-run must not execute");
+	assert_eq!(outcome.plan.layout, Layout::Copy);
+	assert!(!outcome.plan.needs_confirm, "MCP removal never gates");
+	assert_eq!(
+		outcome.plan.paths.len(),
+		1,
+		"plan names exactly the config file that would be rewritten"
+	);
+	assert_eq!(
+		outcome.plan.paths[0],
+		test.config_path(),
+		"planned path is the on-disk config file save_current writes to"
+	);
+	assert!(outcome.plan.skipped.is_empty());
+	assert_eq!(outcome.prune, PruneStatus::NotRun);
+
+	// Reload from disk: the MCP must still be present.
+	manager.load().unwrap();
+	assert!(manager
+		.config()
+		.unwrap()
+		.mcps
+		.iter()
+		.any(|m| m.name == "keep-me"));
+}
+
+/// Confirmed execution (dry_run=false, confirm=true) deletes the MCP and
+/// reports executed=true with the rewritten config path.
+#[test]
+fn test_remove_mcp_planned_executes() {
+	use aghub_core::skills::removal::Layout;
+
+	let test = TestConfig::new(AgentType::Cursor).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	manager.add_mcp(mcp_stdio("drop-me")).unwrap();
+	manager.add_mcp(mcp_stdio("survivor")).unwrap();
+
+	let outcome = manager.remove_mcp_planned("drop-me", false, true).unwrap();
+
+	assert!(outcome.executed, "confirmed removal must execute");
+	assert_eq!(outcome.plan.layout, Layout::Copy);
+	assert_eq!(outcome.plan.paths, vec![test.config_path().to_path_buf()]);
+
+	manager.load().unwrap();
+	let config = manager.config().unwrap();
+	assert!(config.mcps.iter().all(|m| m.name != "drop-me"));
+	assert!(config.mcps.iter().any(|m| m.name == "survivor"));
+}
+
+/// dry_run=false but confirm=false still executes — MCP removal sets
+/// needs_confirm=false so the gate `!dry_run && (!needs_confirm || confirm)`
+/// reduces to `!dry_run`. Guards against accidentally gating MCP removal.
+#[test]
+fn test_remove_mcp_planned_no_confirm_still_executes_when_not_dry_run() {
+	let test = TestConfig::new(AgentType::Cursor).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	manager.add_mcp(mcp_stdio("drop-me")).unwrap();
+
+	let outcome = manager.remove_mcp_planned("drop-me", false, false).unwrap();
+
+	assert!(
+		outcome.executed,
+		"needs_confirm=false → confirm is irrelevant when not a dry-run"
+	);
+	manager.load().unwrap();
+	assert!(manager.config().unwrap().mcps.is_empty());
+}
+
+/// A missing MCP is a ResourceNotFound error before any plan is built — same
+/// contract as the legacy remove_mcp.
+#[test]
+fn test_remove_mcp_planned_not_found_errors() {
+	let test = TestConfig::new(AgentType::Cursor).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+
+	let err = manager
+		.remove_mcp_planned("nonexistent", false, true)
+		.unwrap_err();
+	assert!(
+		err.to_string().contains("not found"),
+		"missing MCP should report not found, got: {err}"
+	);
+}
+
+/// An agent that cannot persist MCPs (skills/sub-agent-only) rejects the
+/// planned removal with UnsupportedOperation, before touching the plan path.
+#[test]
+fn test_remove_mcp_planned_unsupported_agent_errors() {
+	// Pi does not support MCP operations.
+	let test = TestConfig::new(AgentType::Pi).unwrap();
+	let mut manager = test.create_manager();
+	let _ = manager.load();
+
+	let err = manager
+		.remove_mcp_planned("anything", false, true)
+		.unwrap_err();
+	assert!(
+		matches!(err, ConfigError::UnsupportedOperation(_)),
+		"non-MCP agent should reject planned removal, got: {err}"
+	);
+}
+
+/// The legacy remove_mcp wrapper still deletes immediately (delegates to the
+/// planner with dry_run=false, confirm=true). Guards the reroute against
+/// regressing the 21 existing callers.
+#[test]
+fn test_remove_mcp_still_immediate() {
+	let test = TestConfig::new(AgentType::Cursor).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	manager.add_mcp(mcp_stdio("legacy")).unwrap();
+
+	manager.remove_mcp("legacy").unwrap();
+
+	manager.load().unwrap();
+	assert!(manager.config().unwrap().mcps.is_empty());
+}
+
 #[test]
 fn test_load_scoped_mcps_without_path_returns_empty_for_concrete_scopes() {
 	let global = load_scoped_mcps(

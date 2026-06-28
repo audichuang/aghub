@@ -142,7 +142,7 @@ export function deleteSubAgentMutationOptions({
 			scope,
 			projectRoot,
 		}: DeleteSubAgentVariables) =>
-			api.subAgents.delete(name, agent, scope, projectRoot),
+			api.subAgents.delete(name, agent, scope, projectRoot, true),
 		onSuccess: async () => {
 			await invalidateSubAgentQueries(queryClient);
 			await onSuccess?.();

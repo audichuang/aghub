@@ -68,21 +68,28 @@ export function BulkDeleteDialog({
 					seen.add(dedupKey);
 					if (groupResourceType === "mcp") {
 						promises.push(
-							api.mcps.delete(
-								item.name,
-								item.agent,
-								scope,
-								projectRoot,
-							),
+							api.mcps
+								.delete(
+									item.name,
+									item.agent,
+									scope,
+									projectRoot,
+									true,
+								)
+								.then(() => undefined),
 						);
 					} else {
 						promises.push(
-							api.skills.delete(
-								item.agent,
-								group.key,
-								scope,
-								projectRoot,
-							),
+							api.skills
+								.delete(
+									item.agent,
+									group.key,
+									scope,
+									projectRoot,
+									false,
+									true,
+								)
+								.then(() => undefined),
 						);
 					}
 					deleteInfo.push({

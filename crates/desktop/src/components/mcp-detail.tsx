@@ -110,6 +110,7 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 						item.agent ?? "default",
 						scope,
 						projectPath,
+						true,
 					);
 				}),
 			);

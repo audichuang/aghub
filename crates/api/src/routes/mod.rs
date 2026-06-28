@@ -13,14 +13,40 @@ pub mod sources;
 pub mod sub_agents;
 
 use aghub_core::{
-	create_adapter, manager::ConfigManager, models::ResourceScope,
+	create_adapter,
+	manager::ConfigManager,
+	models::ResourceScope,
+	skills::removal::{PruneStatus, RemovalOutcome},
 };
 use rocket::http::Status;
 use rocket::response::status::NoContent;
 use std::path::PathBuf;
 
+use crate::dto::skill::DeleteSkillByPathResponse;
 use crate::error::ApiError;
 use crate::extractors::{AgentParam, ResolvedScope};
+
+/// Map a [`RemovalOutcome`] to the shared [`DeleteSkillByPathResponse`] wire
+/// shape. Owned ONCE here so the skill, MCP and sub-agent delete routes all
+/// serialize identically. The 7 core removal-outcome fields (success/dry_run/
+/// executed/needs_confirm/paths/skipped/deleted_path) and the PathBuf->String
+/// derivation live in `aghub_core::dto::RemovalView`; this layers the api-only
+/// lock-prune fields on top (always None for MCP/sub-agent, which never prune).
+pub(crate) fn removal_response(
+	outcome: RemovalOutcome,
+) -> DeleteSkillByPathResponse {
+	let mut response = DeleteSkillByPathResponse::from(
+		&aghub_core::dto::RemovalView::from(&outcome),
+	);
+	let (pruned_lock_entries, prune_error) = match outcome.prune {
+		PruneStatus::NotRun => (None, None),
+		PruneStatus::Pruned(keys) => (Some(keys), None),
+		PruneStatus::Failed { reason, pruned } => (Some(pruned), Some(reason)),
+	};
+	response.pruned_lock_entries = pruned_lock_entries;
+	response.prune_error = prune_error;
+	response
+}
 
 #[cfg(test)]
 pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {

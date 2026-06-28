@@ -1,8 +1,10 @@
 use crate::{
 	errors::{ConfigError, Result},
 	models::SubAgent,
+	skills::removal::{Layout, PruneStatus, RemovalOutcome, RemovalPlan},
 };
 use log::info;
+use std::path::PathBuf;
 
 use super::ConfigManager;
 
@@ -92,8 +94,22 @@ impl ConfigManager {
 		Ok(())
 	}
 
-	/// Remove a sub-agent by name and persist via the adapter.
-	pub fn remove_sub_agent(&mut self, name: &str) -> Result<()> {
+	/// Plan (and optionally execute) removal of a sub-agent, mirroring the
+	/// skill `remove_skill_planned` dry-run/confirm gate so all three resource
+	/// types flow through one [`RemovalOutcome`] DTO.
+	///
+	/// Sub-agent removal is a flat operation: the plan is a `Layout::Copy` plan
+	/// whose paths are the backing source `.md` file (empty for a config-only
+	/// agent that was never persisted). It is never destructive of shared data,
+	/// so `needs_confirm` is always false — the gate reduces to
+	/// `executed == !dry_run`. The `dry_run`/`confirm` plumbing exists for a
+	/// UNIFORM wire+CLI shape, not because sub-agent removal gates.
+	pub fn remove_sub_agent_planned(
+		&mut self,
+		name: &str,
+		dry_run: bool,
+		confirm: bool,
+	) -> Result<RemovalOutcome> {
 		// Capture the source path before mutating so we can delete the file.
 		let source_path = self
 			.config
@@ -101,13 +117,39 @@ impl ConfigManager {
 			.and_then(|c| c.sub_agents.iter().find(|a| a.name == name))
 			.and_then(|a| a.source_path.clone());
 
+		// The plan describes the backing file that would be deleted. A
+		// config-only agent (never written to disk) has no path.
+		let paths: Vec<PathBuf> =
+			source_path.iter().map(PathBuf::from).collect();
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			paths,
+			skipped: vec![],
+			needs_confirm: false,
+		};
+
+		// Determine presence up front so a dry-run still surfaces NotFound
+		// (mirrors remove_skill_planned, which finds the skill before gating).
+		if !self
+			.config
+			.as_ref()
+			.is_some_and(|c| c.sub_agents.iter().any(|a| a.name == name))
+		{
+			return Err(ConfigError::resource_not_found("sub_agent", name));
+		}
+
+		let executed = !dry_run && (!plan.needs_confirm || confirm);
+		if !executed {
+			return Ok(RemovalOutcome {
+				plan,
+				executed: false,
+				prune: PruneStatus::NotRun,
+			});
+		}
+
 		{
 			let config = self.config_mut()?;
-			let before = config.sub_agents.len();
 			config.sub_agents.retain(|a| a.name != name);
-			if config.sub_agents.len() == before {
-				return Err(ConfigError::resource_not_found("sub_agent", name));
-			}
 		}
 
 		info!(
@@ -119,11 +161,20 @@ impl ConfigManager {
 		self.save_sub_agents_current()?;
 
 		// Delete the backing file (for directory-based storage like Claude).
-		if let Some(path) = source_path {
+		for path in &plan.paths {
 			let _ = std::fs::remove_file(path);
 		}
 
-		Ok(())
+		Ok(RemovalOutcome {
+			plan,
+			executed: true,
+			prune: PruneStatus::NotRun,
+		})
+	}
+
+	/// Remove a sub-agent by name and persist via the adapter.
+	pub fn remove_sub_agent(&mut self, name: &str) -> Result<()> {
+		self.remove_sub_agent_planned(name, false, true).map(|_| ())
 	}
 }
 

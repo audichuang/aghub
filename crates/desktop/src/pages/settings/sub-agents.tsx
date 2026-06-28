@@ -233,6 +233,8 @@ export default function SubAgentsPage() {
 						item.name,
 						item.agent,
 						item.source === "project" ? "project" : "global",
+						undefined,
+						true,
 					),
 				),
 			);

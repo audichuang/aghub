@@ -56,15 +56,25 @@ pub fn execute(
 			println!("{}", serde_json::to_string_pretty(&payload)?);
 		}
 		ResourceType::Mcps => {
-			eprintln_verbose!("Deleting MCP server: {}", name);
-			manager.remove_mcp(&name)?;
-			eprintln_verbose!("MCP server deleted successfully");
-			println!(
-				"{}",
-				serde_json::to_string_pretty(
-					&json!({"deleted": true, "name": name, "type": "mcp" })
-				)?
+			// Same gate as skills: default dry-run, --yes executes, --dry-run
+			// forces a preview even alongside --yes.
+			let is_dry_run = options.dry_run || !options.yes;
+			eprintln_verbose!(
+				"Removing MCP server '{}' (dry_run={})",
+				name,
+				is_dry_run
 			);
+			let outcome =
+				manager.remove_mcp_planned(&name, is_dry_run, options.yes)?;
+			// Reuse the shared core RemovalView so the removal fields stay
+			// snake_case and byte-identical to the skills branch + the API +
+			// desktop DeleteSkillByPathResponse; layer the CLI {type,name}
+			// envelope on top. MCP removal has no lock prune.
+			let view = aghub_core::dto::RemovalView::from(&outcome);
+			let mut payload = serde_json::to_value(&view)?;
+			payload["type"] = json!("mcp");
+			payload["name"] = json!(name);
+			println!("{}", serde_json::to_string_pretty(&payload)?);
 		}
 	}
 

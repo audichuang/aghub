@@ -418,7 +418,7 @@ pub async fn delete_skill_by_path(
 			needs_confirm: false,
 		};
 		if dry_run {
-			return Ok(Json(delete_response_from_outcome(
+			return Ok(Json(crate::routes::removal_response(
 				aghub_core::skills::removal::RemovalOutcome {
 					plan,
 					executed: false,
@@ -455,7 +455,7 @@ pub async fn delete_skill_by_path(
 			resource_scope,
 			project_root.as_deref(),
 		);
-		return Ok(Json(delete_response_from_outcome(
+		return Ok(Json(crate::routes::removal_response(
 			aghub_core::skills::removal::RemovalOutcome {
 				plan: executed_plan,
 				executed: true,
@@ -468,7 +468,7 @@ pub async fn delete_skill_by_path(
 		// remove_skill_planned prunes the per-scope lock itself on execute; the
 		// caller must not prune again (unlike the non-link Copy branch above,
 		// which bypasses the manager and therefore still prunes inline).
-		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
+		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
 		Err(e) => Ok(Json(DeleteSkillByPathResponse {
 			success: false,
 			error: Some(format!("Failed to delete: {e}")),
@@ -567,29 +567,6 @@ fn installed_skill_roots(
 		}
 	}
 	roots
-}
-
-fn delete_response_from_outcome(
-	outcome: aghub_core::skills::removal::RemovalOutcome,
-) -> DeleteSkillByPathResponse {
-	use aghub_core::skills::removal::PruneStatus;
-	// The 7 shared removal-outcome fields (success/dry_run/executed/
-	// needs_confirm/paths/skipped/deleted_path) plus the PathBuf->String and
-	// deleted_path derivation are owned ONCE by the core RemovalView.
-	let mut response = DeleteSkillByPathResponse::from(
-		&aghub_core::dto::RemovalView::from(&outcome),
-	);
-	// Layer the api-only lock-prune fields the core view does not own: Pruned →
-	// the dropped keys; Failed → the partial keys plus the error; NotRun →
-	// nothing.
-	let (pruned_lock_entries, prune_error) = match outcome.prune {
-		PruneStatus::NotRun => (None, None),
-		PruneStatus::Pruned(keys) => (Some(keys), None),
-		PruneStatus::Failed { reason, pruned } => (Some(pruned), Some(reason)),
-	};
-	response.pruned_lock_entries = pruned_lock_entries;
-	response.prune_error = prune_error;
-	response
 }
 
 fn resolve_git_install_target_dir(
@@ -1080,7 +1057,7 @@ pub async fn delete_skill(
 	) {
 		// remove_skill_planned prunes the per-scope lock itself on execute, so
 		// the handler must NOT prune again.
-		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
+		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
 		Err(ConfigError::ResourceNotFound { .. }) => {
 			Ok(Json(DeleteSkillByPathResponse {
 				success: true,

@@ -263,6 +263,7 @@ export default function ProjectDetailPage() {
 					item.agent,
 					"project",
 					project?.path,
+					true,
 				),
 			),
 		);

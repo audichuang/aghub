@@ -231,19 +231,20 @@ export function createApi(baseUrl: string) {
 				scope: "global" | "project" = "global",
 				projectRoot?: string,
 				allAgents = false,
-			): Promise<void> {
+				confirm = false,
+			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
 						searchParams: {
 							scope,
-							confirm: "true",
+							confirm: String(confirm),
 							...(allAgents ? { all_agents: "true" } : {}),
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
 						},
 					})
-					.then(() => undefined);
+					.json();
 			},
 			openFolder(skillPath: string): Promise<void> {
 				return client
@@ -472,17 +473,19 @@ export function createApi(baseUrl: string) {
 				agent: string,
 				scope: "global" | "project",
 				projectRoot?: string,
-			): Promise<void> {
+				confirm = false,
+			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/mcps/${name}`, {
 						searchParams: {
 							scope,
+							confirm: String(confirm),
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
 						},
 					})
-					.then(() => undefined);
+					.json();
 			},
 			transfer(body: TransferRequest): Promise<OperationBatchResponse> {
 				return client.post("mcps/transfer", { json: body }).json();
@@ -582,17 +585,19 @@ export function createApi(baseUrl: string) {
 				agent: string,
 				scope: "global" | "project",
 				projectRoot?: string,
-			): Promise<void> {
+				confirm = false,
+			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/sub-agents/${name}`, {
 						searchParams: {
 							scope,
+							confirm: String(confirm),
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
 						},
 					})
-					.then(() => undefined);
+					.json();
 			},
 			transfer(body: TransferRequest): Promise<OperationBatchResponse> {
 				return client

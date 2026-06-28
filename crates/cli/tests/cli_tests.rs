@@ -329,6 +329,119 @@ fn delete_skill_yes_prunes_and_reports() {
 	);
 }
 
+// ==================== #5: MCP delete dry-run/confirm gate ====================
+//
+// MCP delete now routes through `remove_mcp_planned` with the same
+// `--yes`/`--dry-run` gate + snake_case `RemovalView` JSON shape as skills
+// (Task 14). MCP removal is a flat config-file rewrite (no symlink/allowlist),
+// so these are platform-agnostic — NOT unix-gated.
+
+/// Seed an MCP via `add mcps`, returning the isolated HOME/STATE temp dirs so
+/// the follow-up delete + get run against the same config.
+fn seed_mcp(home: &std::path::Path, state: &std::path::Path, name: &str) {
+	let add = isolated_cli(home, state)
+		.args([
+			"-a", "claude", "add", "mcps", "--name", name, "--url", "http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add must succeed; stderr: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+}
+
+/// True when `get mcps` lists an MCP named `name` for the given env.
+fn mcp_listed(
+	home: &std::path::Path,
+	state: &std::path::Path,
+	name: &str,
+) -> bool {
+	let out = isolated_cli(home, state)
+		.args(["-a", "claude", "get", "mcps"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"get mcps must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	json.as_array().unwrap().iter().any(|m| m["name"] == name)
+}
+
+#[test]
+fn cli_delete_mcp_dry_run_default() {
+	// No --yes => dry-run: JSON reports dry_run:true/executed:false and the
+	// MCP is still listed afterward (non-executed branch leaves state intact).
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	seed_mcp(home.path(), state.path(), "m");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "mcps", "m"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	// Same snake_case RemovalView keys as skills, + {type,name} envelope.
+	assert_eq!(json["type"], "mcp");
+	assert_eq!(json["name"], "m");
+	assert_eq!(json["dry_run"], true);
+	assert_eq!(json["executed"], false);
+	assert_eq!(json["needs_confirm"], false);
+	assert!(json["paths"].is_array(), "paths must be an array: {json}");
+	assert!(
+		json["skipped"].is_array(),
+		"skipped must be an array: {json}"
+	);
+	// dryRun camelCase must NOT leak (the snake_case flip, parity with skills).
+	assert!(
+		json.get("dryRun").is_none(),
+		"dryRun must be absent: {json}"
+	);
+
+	assert!(
+		mcp_listed(home.path(), state.path(), "m"),
+		"dry-run must leave the MCP installed"
+	);
+}
+
+#[test]
+fn cli_delete_mcp_yes_removes() {
+	// --yes executes: JSON reports executed:true and the MCP is gone.
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	seed_mcp(home.path(), state.path(), "goner");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "mcps", "goner", "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["type"], "mcp");
+	assert_eq!(json["name"], "goner");
+	assert_eq!(json["executed"], true);
+	assert_eq!(json["dry_run"], false);
+
+	assert!(
+		!mcp_listed(home.path(), state.path(), "goner"),
+		"--yes must remove the MCP"
+	);
+}
+
 // ==================== #4: SkillView command-surface contract ====================
 //
 // get/update/describe/add all now emit the core SkillView shape (snake_case,

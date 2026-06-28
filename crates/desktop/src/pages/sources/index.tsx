@@ -532,6 +532,7 @@ function SourceDetail({ row, onImport }: SourceDetailProps) {
 			updateScope,
 			updateProjectRoot ?? undefined,
 			true,
+			true,
 		);
 	};
 
