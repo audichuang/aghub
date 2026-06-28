@@ -3,7 +3,7 @@ use crate::{
 	models::SubAgent,
 	skills::removal::{Layout, PruneStatus, RemovalOutcome, RemovalPlan},
 };
-use log::info;
+use log::{info, warn};
 use std::path::PathBuf;
 
 use super::ConfigManager;
@@ -121,7 +121,7 @@ impl ConfigManager {
 		// config-only agent (never written to disk) has no path.
 		let paths: Vec<PathBuf> =
 			source_path.iter().map(PathBuf::from).collect();
-		let plan = RemovalPlan {
+		let mut plan = RemovalPlan {
 			layout: Layout::Copy,
 			paths,
 			skipped: vec![],
@@ -160,10 +160,27 @@ impl ConfigManager {
 		);
 		self.save_sub_agents_current()?;
 
-		// Delete the backing file (for directory-based storage like Claude).
-		for path in &plan.paths {
-			let _ = std::fs::remove_file(path);
+		// Delete the backing file (for directory-based storage like Claude) and
+		// reflect what actually happened on disk in the returned plan, mirroring
+		// `remove_skill_planned`: a path that could not be removed moves to
+		// `skipped` so the derived `deleted_path` never names a file still on
+		// disk (no false success). An already-gone file is idempotent success.
+		let mut removed = Vec::with_capacity(plan.paths.len());
+		let mut failed = Vec::new();
+		for path in plan.paths.drain(..) {
+			match std::fs::remove_file(&path) {
+				Ok(()) => removed.push(path),
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+					removed.push(path)
+				}
+				Err(e) => {
+					warn!("failed removal of '{}': {}", path.display(), e);
+					failed.push(path);
+				}
+			}
 		}
+		plan.paths = removed;
+		plan.skipped.extend(failed);
 
 		Ok(RemovalOutcome {
 			plan,

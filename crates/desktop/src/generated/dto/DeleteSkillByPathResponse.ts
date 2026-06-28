@@ -35,12 +35,12 @@ export type DeleteSkillByPathResponse = {
 	 * orphaned; `None` means no prune was attempted (dry-run/unconfirmed). On a
 	 * prune failure this carries the keys dropped BEFORE the failure (partial).
 	 */
-	pruned_lock_entries: Array<string> | null;
+	pruned_lock_entries?: Array<string>;
 	/**
 	 * Set when the post-delete lock prune failed. The deletion still happened
 	 * (prune is non-fatal); this reports why the lock could not be reconciled.
 	 */
-	prune_error: string | null;
-	error: string | null;
-	validation_errors: Array<ValidationError> | null;
+	prune_error?: string;
+	error?: string;
+	validation_errors?: Array<ValidationError>;
 };

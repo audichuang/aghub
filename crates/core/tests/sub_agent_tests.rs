@@ -134,6 +134,61 @@ fn remove_sub_agent_planned_config_only_has_empty_paths() {
 }
 
 #[test]
+fn remove_sub_agent_planned_failed_delete_is_not_false_success() {
+	// Regression: a backing-file deletion failure must NOT be reported as a
+	// deleted path. Mirroring the skill removal contract, a path that could not
+	// be removed moves out of `plan.paths` into `plan.skipped`, so the derived
+	// `deleted_path` (first of `paths`) never names a file still on disk.
+	//
+	// ENOTDIR trick: point the agent's source_path at `<file>/agent.md` where
+	// `<file>` is a regular file, so `remove_file` fails with NotADirectory
+	// deterministically (root-safe — no chmod).
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+
+	let blocker = root.join("not-a-dir");
+	std::fs::write(&blocker, "x").unwrap();
+	let undeletable = blocker.join("agent.md");
+	assert!(
+		std::fs::remove_file(&undeletable).is_err(),
+		"precondition: ENOTDIR makes remove_file fail"
+	);
+
+	let mut agent = SubAgent::new("corrupt");
+	agent.source_path = Some(undeletable.to_string_lossy().into_owned());
+	mgr.add_sub_agent(agent).unwrap();
+
+	let outcome = mgr
+		.remove_sub_agent_planned("corrupt", false, true)
+		.unwrap();
+
+	assert!(outcome.executed, "deletion was attempted");
+	assert!(
+		!outcome.plan.paths.contains(&undeletable),
+		"a path that could not be deleted must leave plan.paths"
+	);
+	assert!(
+		outcome.plan.skipped.contains(&undeletable),
+		"the undeletable backing file must surface in plan.skipped"
+	);
+	// RemovalView derives deleted_path from plan.paths.first(); it must not name
+	// a file that is still on disk.
+	let view = aghub_core::dto::RemovalView::from(&outcome);
+	assert!(
+		view.deleted_path.is_none(),
+		"no path was actually deleted → deleted_path must be null, \
+		 got {:?}",
+		view.deleted_path
+	);
+}
+
+#[test]
 fn remove_sub_agent_planned_missing_is_not_found() {
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();

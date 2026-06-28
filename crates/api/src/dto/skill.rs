@@ -74,14 +74,17 @@ pub struct SkillResponse {
 	pub enabled: bool,
 	pub source_path: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub canonical_path: Option<String>,
 	pub description: Option<String>,
 	pub author: Option<String>,
 	pub version: Option<String>,
 	pub tools: Vec<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub source: Option<ConfigSource>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub agent: Option<String>,
 	/// Advisory: the target agent reads the `.agents` master directly
 	/// (NativeReader), so a universal install writes only the master with no
@@ -383,14 +386,18 @@ pub struct DeleteSkillByPathResponse {
 	/// orphaned; `None` means no prune was attempted (dry-run/unconfirmed). On a
 	/// prune failure this carries the keys dropped BEFORE the failure (partial).
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub pruned_lock_entries: Option<Vec<String>>,
 	/// Set when the post-delete lock prune failed. The deletion still happened
 	/// (prune is non-fatal); this reports why the lock could not be reconciled.
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub prune_error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub validation_errors: Option<Vec<ValidationError>>,
 }
 
@@ -542,6 +549,56 @@ pub struct ApplySkillUpdateResponse {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use ts_rs::TS;
+
+	/// Guard: serde optionality must match ts-rs optionality. A field that serde
+	/// omits when `None` (`skip_serializing_if`) MUST be declared `field?:` in the
+	/// generated TS — otherwise the runtime drops a key the type says is always
+	/// present, and a consumer reads `undefined` where it expects `T | null`.
+	fn assert_serde_matches_ts<T: serde::Serialize + TS>(value: &T) {
+		let json = serde_json::to_value(value).unwrap();
+		let obj = json.as_object().expect("struct serializes to an object");
+		let decl = T::decl(&ts_rs::Config::default());
+		// Members are `name: type` / `name?: type`, separated by `,`/`;`/newline
+		// in the generated decl. A field the TS declares REQUIRED (no `?`) must be
+		// emitted by serde for this all-None value; otherwise serde optionality
+		// and ts-rs optionality diverge.
+		for member in decl.split([',', ';', '\n']).map(str::trim) {
+			let Some((lhs, _ty)) = member.split_once(':') else {
+				continue; // not a `name: type` member (JSDoc, braces, …)
+			};
+			let lhs = lhs.trim();
+			if lhs.is_empty()
+				|| lhs.contains(' ')
+				|| lhs.contains('"')
+				|| lhs.contains('|')
+				|| lhs.contains('/')
+			{
+				continue; // not a bare identifier member
+			}
+			if lhs.ends_with('?') {
+				continue; // optional in TS — serde may omit, no divergence
+			}
+			assert!(
+				obj.contains_key(lhs),
+				"field `{lhs}` is required in TS (`{lhs}: …`) but serde omitted \
+				 it; add `#[ts(optional)]` or stop skipping it.\nTS: {decl}",
+			);
+		}
+	}
+
+	#[test]
+	fn skill_response_serde_optionality_matches_ts() {
+		// All-None optionals: any field serde skips must be `?` in the TS decl.
+		let resp = SkillResponse::from(&aghub_core::models::Skill::new("x"));
+		assert_serde_matches_ts(&resp);
+	}
+
+	#[test]
+	fn delete_skill_by_path_response_serde_optionality_matches_ts() {
+		let resp = DeleteSkillByPathResponse::default();
+		assert_serde_matches_ts(&resp);
+	}
 
 	#[test]
 	fn delete_response_from_removal_view_matches_outcome() {

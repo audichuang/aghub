@@ -5,13 +5,13 @@ export type SkillResponse = {
 	name: string;
 	enabled: boolean;
 	source_path: string | null;
-	canonical_path: string | null;
+	canonical_path?: string;
 	description: string | null;
 	author: string | null;
 	version: string | null;
 	tools: Array<string>;
-	source: ConfigSource | null;
-	agent: string | null;
+	source?: ConfigSource;
+	agent?: string;
 	/**
 	 * Advisory: the target agent reads the `.agents` master directly
 	 * (NativeReader), so a universal install writes only the master with no
