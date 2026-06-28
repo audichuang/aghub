@@ -151,6 +151,12 @@ fn remove_sub_agent_planned_config_only_has_empty_paths() {
 	assert!(mgr.get_sub_agent("ephemeral").is_none());
 }
 
+// Unix-only: the ENOTDIR trick (remove_file on `<file>/agent.md`) yields a
+// non-NotFound IO error only on unix. On Windows that path resolves to a
+// NotFound, which the best-effort delete correctly treats as success — so the
+// failure can't be forced there. The same contract is covered cross-platform
+// on unix by remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent.
+#[cfg(unix)]
 #[test]
 fn remove_sub_agent_planned_failed_delete_errors_without_mutating() {
 	// A backing-file deletion failure must surface as an actionable error and
