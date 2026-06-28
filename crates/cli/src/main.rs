@@ -255,6 +255,11 @@ enum Commands {
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
 
+		/// Run all the fetch + rename-guard + containment checks and report the
+		/// targets that WOULD be swapped, without mutating files or the lock.
+		#[arg(long = "dry-run")]
+		dry_run: bool,
+
 		/// Emit machine-readable JSON (default output is also JSON today)
 		#[arg(long)]
 		json: bool,
@@ -543,6 +548,7 @@ fn main() -> Result<()> {
 			resource,
 			name,
 			yes,
+			dry_run,
 			json,
 		} => apply_update::execute(
 			resource,
@@ -550,6 +556,7 @@ fn main() -> Result<()> {
 			scope,
 			project_root.as_deref(),
 			yes,
+			dry_run,
 			json,
 		),
 		Commands::PruneLock { dry_run, yes, json } => prune::execute(

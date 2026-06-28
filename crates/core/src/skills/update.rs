@@ -134,6 +134,71 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	}
 }
 
+/// Structured reason a transactional skill swap/rename could not complete, so
+/// callers render a reason + one actionable next step instead of a bare
+/// "may need manual recovery" string. The universal-rename path
+/// (`manager::skill::rollback_master_rename`) maps onto the same enum.
+#[derive(Debug, Clone)]
+pub enum RecoveryHint {
+	/// EBUSY/EACCES/PermissionDenied on a rename — something holds the path.
+	LockHeld { path: PathBuf },
+	/// A path vanished mid-operation (NotFound).
+	MissingDir { path: PathBuf },
+	/// A dangling/foreign symlink is blocking a relink.
+	BrokenSymlink { link: PathBuf },
+	/// The rollback itself failed — `recover_from` is the only surviving copy
+	/// of the original contents and must be moved back to `restore_to` by hand.
+	ManualRestore {
+		recover_from: PathBuf,
+		restore_to: PathBuf,
+	},
+}
+
+impl RecoveryHint {
+	/// Classify an io error against the path it was operating on. Kind-based
+	/// (not errno) so it compiles + maps consistently on all 3 platforms.
+	pub fn from_io(err: &std::io::Error, ctx_path: &Path) -> Self {
+		match err.kind() {
+			std::io::ErrorKind::PermissionDenied => RecoveryHint::LockHeld {
+				path: ctx_path.to_path_buf(),
+			},
+			std::io::ErrorKind::NotFound => RecoveryHint::MissingDir {
+				path: ctx_path.to_path_buf(),
+			},
+			_ => RecoveryHint::ManualRestore {
+				recover_from: ctx_path.to_path_buf(),
+				restore_to: ctx_path.to_path_buf(),
+			},
+		}
+	}
+
+	/// One actionable line. The only raw interpolation is the path(s).
+	pub fn next_step(&self) -> String {
+		match self {
+			RecoveryHint::LockHeld { path } => format!(
+				"close any process holding {} and retry",
+				path.display()
+			),
+			RecoveryHint::MissingDir { path } => format!(
+				"{} disappeared mid-operation; retry the install",
+				path.display()
+			),
+			RecoveryHint::BrokenSymlink { link } => {
+				format!("remove the broken link {} and retry", link.display())
+			}
+			RecoveryHint::ManualRestore {
+				recover_from,
+				restore_to,
+			} => format!(
+				"original contents retained at {}; move them back to {} \
+				 to recover",
+				recover_from.display(),
+				restore_to.display()
+			),
+		}
+	}
+}
+
 pub fn stage_and_swap_dir(
 	source_dir: &Path,
 	target_dir: &Path,
@@ -202,6 +267,9 @@ fn handle_failed_swap_with_rollback(
 	backup_root: &Path,
 	rollback: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
+	// Fresh install (no prior target): the staged copy is the only orphan and
+	// it is swept above; nothing was backed up. Sweep the empty backup root too
+	// so no .aghub-stage-*/.aghub-backup-* survives the failure.
 	let _ = remove_path_any(staging_root);
 	if !had_target {
 		let _ = remove_path_any(backup_root);
@@ -209,19 +277,25 @@ fn handle_failed_swap_with_rollback(
 	}
 
 	if let Err(rollback_error) = rollback(backup, target_dir) {
+		// Rollback failed: the backup is now the ONLY copy of the original
+		// contents, so keep it and report WHERE + the next step structurally.
+		let hint = RecoveryHint::ManualRestore {
+			recover_from: backup.to_path_buf(),
+			restore_to: target_dir.to_path_buf(),
+		};
 		return Err(std::io::Error::new(
 			error.kind(),
 			format!(
-				"failed to replace {}; rollback also failed, original \
-				 contents retained at {}: swap error: {}; rollback error: {}",
+				"failed to replace {}; rollback also failed ({}); {}",
 				target_dir.display(),
-				backup.display(),
-				error,
-				rollback_error
+				rollback_error,
+				hint.next_step(),
 			),
 		));
 	}
 
+	// Rollback succeeded: original contents are back at target_dir, so neither
+	// the staging nor the backup root is needed — sweep both, leaving no orphan.
 	let _ = remove_path_any(backup_root);
 	Err(error)
 }
@@ -455,11 +529,112 @@ mod tests {
 		)
 		.unwrap_err();
 
+		// The message is now built from RecoveryHint::ManualRestore so it names
+		// both the recover-from (backup) and restore-to (target) paths plus an
+		// actionable next step.
 		let msg = err.to_string();
-		assert!(msg.contains("rollback also failed"));
-		assert!(msg.contains(&backup.display().to_string()));
+		assert!(
+			msg.contains(&backup.display().to_string()),
+			"recover_from path missing from: {msg}"
+		);
+		assert!(
+			msg.contains(&target.display().to_string()),
+			"restore_to path missing from: {msg}"
+		);
+		assert!(
+			msg.contains("move"),
+			"missing actionable next step in: {msg}"
+		);
 		assert!(backup.join("old.txt").exists());
 		assert!(backup_root.exists());
 		assert!(!staging_root.exists());
+	}
+
+	#[test]
+	fn recovered_swap_failure_leaves_no_orphans() {
+		let tmp = tempdir().unwrap();
+		let staging_root = tmp.path().join("stage");
+		let backup_root = tmp.path().join("backup-root");
+		let backup = backup_root.join("target");
+		let target = tmp.path().join("target");
+		fs::create_dir(&staging_root).unwrap();
+		fs::create_dir_all(&backup).unwrap();
+		fs::write(backup.join("old.txt"), "old").unwrap();
+
+		// Rollback SUCCEEDS: the original contents are restored to target.
+		let err = handle_failed_swap_with_rollback(
+			std::io::Error::other("swap failed"),
+			true,
+			&backup,
+			&target,
+			&staging_root,
+			&backup_root,
+			|from, to| std::fs::rename(from, to),
+		)
+		.unwrap_err();
+
+		assert_eq!(err.to_string(), "swap failed");
+		assert!(target.join("old.txt").exists());
+		// No .aghub-stage-* / .aghub-backup-* survives a recovered failure.
+		assert!(!staging_root.exists(), "staging orphan survived recovery");
+		assert!(!backup_root.exists(), "backup orphan survived recovery");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn failed_swap_no_prior_target_sweeps_staging() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempdir().unwrap();
+
+		// Root bypasses 0o555 perms — skip there, otherwise the swap rename
+		// would succeed and the error path under test never runs.
+		if !perms_enforced(tmp.path()) {
+			eprintln!("skip: running as root, 0o555 not enforced");
+			return;
+		}
+
+		let source = tmp.path().join("source");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(source.join("SKILL.md"), "new").unwrap();
+
+		// target's parent exists but is read-only, so create_dir_all of the
+		// parent is a no-op (already there) yet the final swap rename INTO it
+		// fails — fresh install (had_target = false).
+		let parent = tmp.path().join("ro-parent");
+		fs::create_dir_all(&parent).unwrap();
+		let target = parent.join("target");
+		let orig = fs::metadata(&parent).unwrap().permissions();
+		fs::set_permissions(&parent, fs::Permissions::from_mode(0o555))
+			.unwrap();
+
+		let res = stage_and_swap_dir(&source, &target);
+
+		// Restore perms BEFORE asserting so a failure can't leak the temp dir.
+		fs::set_permissions(&parent, orig).unwrap();
+
+		assert!(res.is_err(), "expected swap into read-only parent to fail");
+		assert!(!target.exists(), "target must not exist on failed install");
+		// No .aghub-stage-* orphan survives the fresh-install failure path.
+		let leftovers: Vec<_> = fs::read_dir(&parent)
+			.unwrap()
+			.filter_map(|e| e.ok())
+			.map(|e| e.file_name().to_string_lossy().into_owned())
+			.filter(|n| n.starts_with(".aghub-stage"))
+			.collect();
+		assert!(leftovers.is_empty(), "staging orphans left: {leftovers:?}");
+	}
+
+	#[cfg(unix)]
+	fn perms_enforced(under: &Path) -> bool {
+		use std::os::unix::fs::PermissionsExt;
+		let p = under.join(format!(".perm-probe-{}", std::process::id()));
+		let _ = fs::remove_dir_all(&p);
+		fs::create_dir(&p).unwrap();
+		fs::set_permissions(&p, fs::Permissions::from_mode(0o555)).unwrap();
+		let blocked = fs::write(p.join("x"), b"x").is_err();
+		fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+		let _ = fs::remove_dir_all(&p);
+		blocked
 	}
 }

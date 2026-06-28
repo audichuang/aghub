@@ -735,6 +735,94 @@ fn prune_lock_yes_removes_orphan_entry() {
 	);
 	assert_eq!(parsed["version"], 3, "version preserved");
 }
+
+// ==================== Task #8 T5: apply-update --dry-run ====================
+
+/// Seed a global lock entry whose `source` cannot be resolved offline (a
+/// `file://` URL is not a valid GitHub shorthand and is skipped as a File
+/// scheme), so `apply-update` fails deterministically at the resolve step
+/// WITHOUT any network round-trip — letting us assert the pre-fetch flag gates.
+#[cfg(unix)]
+fn seed_unresolvable_global_lock(
+	state: &std::path::Path,
+	name: &str,
+) -> std::path::PathBuf {
+	let dir = state.join("skills");
+	std::fs::create_dir_all(&dir).unwrap();
+	let path = dir.join(".skill-lock.json");
+	let body = format!(
+		r#"{{"version":3,"skills":{{"{name}":{{"source":"file:///definitely/not/a/repo","sourceType":"git","sourceUrl":"file:///definitely/not/a/repo","skillPath":"SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}}}}"#
+	);
+	std::fs::write(&path, body).unwrap();
+	path
+}
+
+/// `--dry-run` must NOT require `--yes` (a dry-run mutates nothing). With an
+/// installed skill + lock present it gets PAST the `--yes` gate and the
+/// installed-copy check, then fails at the offline resolve step — proving the
+/// flag bypassed the `--yes` requirement (no "without --yes" message), and the
+/// installed SKILL.md stays byte-unchanged.
+#[cfg(unix)]
+#[test]
+fn apply_update_dry_run_does_not_require_yes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "mytool");
+	let before = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+	seed_unresolvable_global_lock(state.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude",
+			"-g",
+			"apply-update",
+			"skills",
+			"mytool",
+			"--dry-run",
+		])
+		.output()
+		.unwrap();
+
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		!out.status.success(),
+		"offline resolve must fail, but flag-gate must be passed: {stderr}"
+	);
+	assert!(
+		!stderr.contains("without --yes"),
+		"--dry-run must bypass the --yes gate: {stderr}"
+	);
+	assert!(
+		stderr.contains("resolve remote source"),
+		"expected failure at the resolve step: {stderr}"
+	);
+	let after = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
+	assert_eq!(after, before, "dry-run must not mutate the installed skill");
+}
+
+/// Without `--dry-run` and without `--yes`, apply-update still refuses up front.
+#[cfg(unix)]
+#[test]
+fn apply_update_without_yes_or_dry_run_refuses() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "mytool");
+	seed_unresolvable_global_lock(state.path(), "mytool");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "-g", "apply-update", "skills", "mytool"])
+		.output()
+		.unwrap();
+
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(!out.status.success(), "must refuse: {stderr}");
+	assert!(
+		stderr.contains("without --yes"),
+		"expected the --yes refusal: {stderr}"
+	);
+}
+
 // ==================== Task 3.2-3.5: `source` subcommand ====================
 
 #[test]

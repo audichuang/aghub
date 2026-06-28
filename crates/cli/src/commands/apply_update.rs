@@ -25,13 +25,15 @@ pub fn execute(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	yes: bool,
+	dry_run: bool,
 	_json: bool,
 ) -> Result<()> {
 	match resource {
 		ResourceType::Skills => {}
 		ResourceType::Mcps => bail!("`apply-update` only supports skills"),
 	}
-	if !yes {
+	// A dry-run mutates nothing, so it does not need --yes.
+	if !yes && !dry_run {
 		bail!("refusing to overwrite skill files without --yes");
 	}
 	let source = apply_source_from_lock(&name, scope, project_root)?;
@@ -48,14 +50,23 @@ pub fn execute(
 		scope,
 		project_root,
 		Some(&fetched.oid),
+		dry_run,
 	)?;
-	let updated_hash = updated_hash_for_paths(&paths);
+	// On a dry-run nothing was swapped, so hashing a target would read stale
+	// content; the swap was skipped, so report no recomputed hash.
+	let updated_hash = if dry_run {
+		String::new()
+	} else {
+		updated_hash_for_paths(&paths)
+	};
 	println!(
 		"{}",
 		serde_json::to_string_pretty(&json!({
 			"success": true,
+			"dryRun": dry_run,
 			"name": name,
 			"scope": scope_name(scope),
+			"oid": fetched.oid,
 			"updatedHash": updated_hash,
 			"paths": paths
 				.iter()
@@ -75,6 +86,13 @@ pub fn execute(
 /// Mirrors the post-fetch body of [`execute`]: `sanitize_skill_path` →
 /// `ensure_source_not_renamed` → containment assert → `stage_and_swap_dir`
 /// loop → lock update. Returns the swapped install paths.
+///
+/// When `dry_run` is set, runs the full set of read-only guards
+/// (`sanitize_skill_path`, `ensure_source_not_renamed`, containment assert) and
+/// returns the targets it WOULD swap, but RETURNS before any
+/// `stage_and_swap_dir`/`update_lock_hash` — so installed files and the lock are
+/// left byte-for-byte untouched. The rename refusal still fires in dry-run.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_skill_update_from_fetched(
 	repo_root: &Path,
 	skill_path: &str,
@@ -82,6 +100,7 @@ pub fn apply_skill_update_from_fetched(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	ref_commit: Option<&str>,
+	dry_run: bool,
 ) -> Result<Vec<PathBuf>> {
 	let targets = installed_skill_roots(name, scope, project_root);
 	if targets.is_empty() {
@@ -112,6 +131,12 @@ pub fn apply_skill_update_from_fetched(
 		project_root,
 	)
 	.context("refusing to update a skill outside allowed skill roots")?;
+
+	// Dry-run: every read-only guard above has passed; report the targets
+	// without mutating any installed file or the lock.
+	if dry_run {
+		return Ok(targets);
+	}
 
 	let mut paths = Vec::new();
 	for target in &targets {
@@ -482,6 +507,175 @@ mod tests {
 		let lock = skill::lock::local::read_local_lock(Some(project.path()));
 		let entry = &lock.skills["legacy"];
 		assert_eq!(entry.computed_hash, "content-v2");
+		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	/// `GlobalLockGuard` only isolates `XDG_STATE_HOME` (the lock dir). The
+	/// dry-run tests also need an isolated `HOME` so the installed Claude skill
+	/// under `~/.claude/skills/<name>` is discovered from a tempdir, not the
+	/// developer's real home. Restores `HOME` on drop.
+	struct HomeGuard {
+		_temp: TempDir,
+		old: Option<String>,
+	}
+
+	impl HomeGuard {
+		fn new() -> (Self, PathBuf) {
+			let temp = tempdir().unwrap();
+			let home = temp.path().to_path_buf();
+			let old = std::env::var("HOME").ok();
+			std::env::set_var("HOME", &home);
+			(Self { _temp: temp, old }, home)
+		}
+	}
+
+	impl Drop for HomeGuard {
+		fn drop(&mut self) {
+			match &self.old {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+		}
+	}
+
+	/// Install a Claude-scoped skill at `~/.claude/skills/<name>/SKILL.md` with
+	/// the given body and return its folder path (the swap target).
+	fn install_claude_skill(home: &Path, name: &str, body: &str) -> PathBuf {
+		let dir = home.join(".claude/skills").join(name);
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(dir.join("SKILL.md"), body).unwrap();
+		dir
+	}
+
+	/// A fetched source working tree containing a single `SKILL.md` declaring
+	/// `name` with the given body. Returned `TempDir` keeps it alive.
+	fn fetched_source(name: &str, body: &str) -> (TempDir, PathBuf) {
+		let dir = tempdir().unwrap();
+		std::fs::write(
+			dir.path().join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: {body}\n---\n{body}\n"),
+		)
+		.unwrap();
+		let root = dir.path().to_path_buf();
+		(dir, root)
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn dry_run_reports_targets_without_mutating() {
+		let _guard = GlobalLockGuard::new();
+		let (_home_guard, home) = HomeGuard::new();
+
+		let installed_body =
+			"---\nname: mytool\ndescription: original\n---\nold body\n";
+		let installed = install_claude_skill(&home, "mytool", installed_body);
+		skill::lock::global::add_skill_to_lock("mytool", global_entry())
+			.unwrap();
+
+		// Upstream has the SAME name but new content; a real apply would swap.
+		let (_src_guard, src_root) =
+			fetched_source("mytool", "renamed-content-upstream");
+
+		let paths = apply_skill_update_from_fetched(
+			&src_root,
+			"SKILL.md",
+			"mytool",
+			ResourceScope::GlobalOnly,
+			None,
+			Some("deadbeefcafef00d"),
+			true,
+		)
+		.unwrap();
+
+		// Reports the target it WOULD swap.
+		assert_eq!(paths, vec![installed.clone()]);
+
+		// Installed SKILL.md is byte-for-byte unchanged.
+		let still =
+			std::fs::read_to_string(installed.join("SKILL.md")).unwrap();
+		assert_eq!(still, installed_body);
+
+		// Lock hash + ref_commit untouched.
+		let lock = skill::lock::global::read_skill_lock();
+		let entry = &lock.skills["mytool"];
+		assert!(entry.content_hash.is_none(), "dry-run must not write hash");
+		assert!(entry.ref_commit.is_none(), "dry-run must not write oid");
+		assert_eq!(entry.skill_folder_hash, "tree-v1");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn dry_run_on_renamed_upstream_still_refuses() {
+		let _guard = GlobalLockGuard::new();
+		let (_home_guard, home) = HomeGuard::new();
+
+		let installed_body =
+			"---\nname: mytool\ndescription: original\n---\nold body\n";
+		let installed = install_claude_skill(&home, "mytool", installed_body);
+		skill::lock::global::add_skill_to_lock("mytool", global_entry())
+			.unwrap();
+
+		// Upstream renamed the skill (same skillPath, different frontmatter name).
+		let (_src_guard, src_root) =
+			fetched_source("renamed-tool", "renamed upstream");
+
+		let err = apply_skill_update_from_fetched(
+			&src_root,
+			"SKILL.md",
+			"mytool",
+			ResourceScope::GlobalOnly,
+			None,
+			None,
+			true,
+		)
+		.unwrap_err();
+		let msg = err.to_string();
+		assert!(msg.contains("renamed"), "msg: {msg}");
+		assert!(msg.contains("renamed-tool"), "msg: {msg}");
+
+		// Still no mutation on the refusal path.
+		let still =
+			std::fs::read_to_string(installed.join("SKILL.md")).unwrap();
+		assert_eq!(still, installed_body);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_update_mutates_when_not_dry_run() {
+		// Pins that dry_run=false still performs the swap + lock write, so the
+		// gate is the ONLY behavior change (the non-executed branch leaves state
+		// untouched; this is the executed branch).
+		let _guard = GlobalLockGuard::new();
+		let (_home_guard, home) = HomeGuard::new();
+
+		let installed = install_claude_skill(
+			&home,
+			"mytool",
+			"---\nname: mytool\ndescription: original\n---\nold body\n",
+		);
+		skill::lock::global::add_skill_to_lock("mytool", global_entry())
+			.unwrap();
+
+		let (_src_guard, src_root) = fetched_source("mytool", "new upstream");
+
+		apply_skill_update_from_fetched(
+			&src_root,
+			"SKILL.md",
+			"mytool",
+			ResourceScope::GlobalOnly,
+			None,
+			Some("deadbeefcafef00d"),
+			false,
+		)
+		.unwrap();
+
+		let after =
+			std::fs::read_to_string(installed.join("SKILL.md")).unwrap();
+		assert!(after.contains("new upstream"), "swap must apply: {after}");
+
+		let lock = skill::lock::global::read_skill_lock();
+		let entry = &lock.skills["mytool"];
+		assert!(entry.content_hash.is_some(), "apply must write hash");
 		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
 	}
 }

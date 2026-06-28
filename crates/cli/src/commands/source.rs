@@ -762,6 +762,9 @@ fn apply_update_row(
 		scope,
 		project_root,
 		Some(&repo.oid),
+		// `source sync` gates its own dry-run before reaching here; this row is
+		// only built on the apply path, so always perform the swap.
+		false,
 	) {
 		Ok(paths) => SyncActionView {
 			action: "update",

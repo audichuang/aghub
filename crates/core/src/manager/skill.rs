@@ -154,6 +154,11 @@ impl ConfigManager {
 			use_relative,
 			link_need,
 		} = self.universal_install_prep()?;
+		// Capture materializer inputs BEFORE the mutable `config` borrow so the
+		// shared materializer can run during the install.
+		let scope = self.write_scope;
+		let project_root = self.project_root.clone();
+		let agent_type = self.agent_type();
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -193,6 +198,9 @@ impl ConfigManager {
 
 		let safe_name = sanitize_name(&skill.name);
 		let canonical = canonical_dir.join(&safe_name);
+		// This path has a `Skill` struct, not a source tree, so the from-struct
+		// SKILL.md is serialized here (intrinsic to this entry point). A
+		// pre-existing master is reused without overwriting.
 		if canonical.exists() {
 			warn!(
 				"canonical '{}' already exists; reusing without overwriting \
@@ -207,35 +215,25 @@ impl ConfigManager {
 			)?;
 		}
 
-		// Link this agent's own skills dir to the Master ONLY when it needs a
-		// link. A NativeReader reads `.agents/skills` directly (no redundant
-		// per-agent link — parity with the fetched/desktop install path); an
-		// Unsupported agent has no writable skills dir.
-		if matches!(
-			link_need,
-			crate::skills::linker::LinkNeed::NeedsLink { .. }
-		) {
-			if let Some(agent_dir) = &agent_write_dir {
-				let report = crate::skills::linker::link_agents_to_canonical(
-					&canonical,
-					std::slice::from_ref(agent_dir),
-					if use_relative {
-						crate::skills::linker::LinkTarget::Relative
-					} else {
-						crate::skills::linker::LinkTarget::Absolute
-					},
-				)
-				.map_err(|e| {
-					ConfigError::Io(std::io::Error::other(e.to_string()))
-				})?;
-				if !report.conflicts.is_empty() {
-					return Err(ConfigError::resource_exists(
-						"skill",
-						&skill.name,
-					));
-				}
-			}
-		}
+		// Classify + link via the ONE shared materializer. The Master already
+		// exists (written above), so the materializer's copy branch is skipped
+		// and only the unified classify-then-link logic runs — the SAME code the
+		// fetched/desktop path uses, so the two can no longer diverge.
+		let target_link = if use_relative {
+			crate::skills::linker::LinkTarget::Relative
+		} else {
+			crate::skills::linker::LinkTarget::Absolute
+		};
+		let (results, _wrote_master) =
+			crate::skills::install_fetched::materialize_universal_master(
+				&canonical,
+				&safe_name,
+				scope,
+				project_root.as_deref(),
+				std::slice::from_ref(&agent_type),
+				target_link,
+			)?;
+		Self::ensure_single_agent_installed(&results, &link_need, &skill.name)?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -610,6 +608,11 @@ impl ConfigManager {
 			use_relative,
 			link_need,
 		} = self.universal_install_prep()?;
+		// Capture the materializer inputs BEFORE borrowing `config` mutably so
+		// the shared materializer can run while the config check is in flight.
+		let scope = self.write_scope;
+		let project_root = self.project_root.clone();
+		let agent_type = self.agent_type();
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -645,32 +648,26 @@ impl ConfigManager {
 		let safe_name = sanitize_name(&skill.name);
 		let canonical = canonical_dir.join(&safe_name);
 
-		// `install_universal` only copies source -> canonical when canonical
-		// is absent, so a pre-existing master is preserved (idempotent across
-		// multi-agent installs of the same skill).
+		// ONE materializer: the same `materialize_universal_master` the
+		// fetched/desktop path uses. It copies source -> canonical only when
+		// canonical is absent (a pre-existing master is preserved) and links
+		// only a NeedsLink agent (a NativeReader reads the Master directly).
 		let source_root = crate::skills::skill_source_root(path);
-		// Link only a NeedsLink agent; a NativeReader reads the Master directly
-		// (no redundant per-agent link — parity with the fetched/desktop path).
-		let symlink_dirs: Vec<PathBuf> = match &link_need {
-			crate::skills::linker::LinkNeed::NeedsLink { agent_skills_dir } => {
-				vec![agent_skills_dir.clone()]
-			}
-			_ => Vec::new(),
+		let target_link = if use_relative {
+			crate::skills::linker::LinkTarget::Relative
+		} else {
+			crate::skills::linker::LinkTarget::Absolute
 		};
-		let report = crate::skills::linker::install_universal(
-			&source_root,
-			&canonical,
-			&symlink_dirs,
-			if use_relative {
-				crate::skills::linker::LinkTarget::Relative
-			} else {
-				crate::skills::linker::LinkTarget::Absolute
-			},
-		)
-		.map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
-		if !report.conflicts.is_empty() {
-			return Err(ConfigError::resource_exists("skill", &skill.name));
-		}
+		let (results, _wrote_master) =
+			crate::skills::install_fetched::materialize_universal_master(
+				&source_root,
+				&safe_name,
+				scope,
+				project_root.as_deref(),
+				std::slice::from_ref(&agent_type),
+				target_link,
+			)?;
+		Self::ensure_single_agent_installed(&results, &link_need, &skill.name)?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -681,6 +678,32 @@ impl ConfigManager {
 
 		self.save_current()?;
 		Ok(skill)
+	}
+
+	/// Map the single-agent result from `materialize_universal_master` onto the
+	/// CLI add path's historical error contract.
+	///
+	/// The add path linked ONLY a `NeedsLink` agent and errored when that link
+	/// hit a real foreign occupant (the old `report.conflicts` check) or a hard
+	/// link failure. A `NativeReader` reads the Master directly and an
+	/// `Unsupported` agent had no writable dir — neither was ever an error
+	/// (the skill is still recorded against the Master). So enforce the
+	/// error-free result ONLY for a `NeedsLink` agent, exactly as before.
+	fn ensure_single_agent_installed(
+		results: &[crate::skills::install_fetched::AgentInstallResult],
+		link_need: &crate::skills::linker::LinkNeed,
+		skill_name: &str,
+	) -> Result<()> {
+		if !matches!(
+			link_need,
+			crate::skills::linker::LinkNeed::NeedsLink { .. }
+		) {
+			return Ok(());
+		}
+		match results.first() {
+			Some(r) if r.error.is_none() => Ok(()),
+			_ => Err(ConfigError::resource_exists("skill", skill_name)),
+		}
 	}
 
 	pub fn validate_skill_path(&self, path: &Path) -> Vec<String> {
@@ -894,8 +917,12 @@ fn rename_skill_master(
 
 /// Undo a partial universal rename: put the master back, drop any half-created
 /// new-name symlinks, and restore the old-name symlinks. Returns the original
-/// relink error on success; if the rollback itself fails, returns a compound
-/// error naming both failures and the master path that needs manual recovery.
+/// relink error on success. If the rollback itself fails, returns a compound
+/// error naming both failures plus a structured [`RecoveryHint`] next step:
+/// `ManualRestore` (master still at the new name — the only surviving copy)
+/// when the master-restore rename fails, or `BrokenSymlink` (master safely
+/// restored, a stale link blocks the relink) when a link op fails.
+/// (see [`crate::skills::update::RecoveryHint`])
 #[allow(clippy::too_many_arguments)]
 fn rollback_master_rename(
 	new_master: &Path,
@@ -905,15 +932,26 @@ fn rollback_master_rename(
 	use_relative: bool,
 	relink_err: ConfigError,
 ) -> ConfigError {
-	let do_rollback = || -> std::io::Result<()> {
+	// Which step of the rollback failed, so the caller can pick the right
+	// RecoveryHint: a failed master-restore leaves the only copy at new_master
+	// (ManualRestore); a failed unlink/relink means the master is safely back
+	// but a stale/foreign link blocks the relink (BrokenSymlink).
+	enum RbFail {
+		Restore(std::io::Error),
+		Relink { err: std::io::Error, link: PathBuf },
+	}
+	let do_rollback = || -> std::result::Result<(), RbFail> {
 		// Put the master back first so old-name symlinks resolve again.
-		std::fs::rename(new_master, old_master)?;
+		std::fs::rename(new_master, old_master).map_err(RbFail::Restore)?;
 		// Remove any new-name symlinks the partial relink managed to create
 		// (they now point at the vanished new_master).
 		for dir in referrers {
 			let new_link = dir.join(safe_new);
 			if Linker::is_link(&new_link) {
-				Linker::unlink(&new_link)?;
+				Linker::unlink(&new_link).map_err(|err| RbFail::Relink {
+					err,
+					link: new_link.clone(),
+				})?;
 			}
 		}
 		// Recreate any old-name symlinks the partial relink removed; ones still
@@ -927,16 +965,38 @@ fn rollback_master_rename(
 				crate::skills::linker::LinkTarget::Absolute
 			},
 		)
-		.map_err(|e| std::io::Error::other(e.to_string()))?;
+		.map_err(|e| RbFail::Relink {
+			err: std::io::Error::other(e.to_string()),
+			link: old_master.to_path_buf(),
+		})?;
 		Ok(())
 	};
 	match do_rollback() {
 		Ok(()) => relink_err,
-		Err(rb_err) => ConfigError::Io(std::io::Error::other(format!(
-			"skill relink failed ({relink_err}) and rollback also failed \
-			 ({rb_err}); the skill master may need manual recovery at '{}'",
-			old_master.display()
-		))),
+		// Master could not be restored: it is the ONLY surviving copy at
+		// new_master and must be moved back to old_master by hand.
+		Err(RbFail::Restore(rb_err)) => {
+			let hint = crate::skills::update::RecoveryHint::ManualRestore {
+				recover_from: new_master.to_path_buf(),
+				restore_to: old_master.to_path_buf(),
+			};
+			ConfigError::Io(std::io::Error::other(format!(
+				"skill relink failed ({relink_err}) and rollback also \
+				 failed ({rb_err}); {}",
+				hint.next_step()
+			)))
+		}
+		// Master is safely restored, but a dangling/foreign link blocks the
+		// relink — point at the offending link, data is not at risk.
+		Err(RbFail::Relink { err: rb_err, link }) => {
+			let hint =
+				crate::skills::update::RecoveryHint::BrokenSymlink { link };
+			ConfigError::Io(std::io::Error::other(format!(
+				"skill relink failed ({relink_err}) and rollback also \
+				 failed ({rb_err}); {}",
+				hint.next_step()
+			)))
+		}
 	}
 }
 
@@ -1705,7 +1765,21 @@ mod tests {
 		// Restore perms before asserting so tempdir teardown always works.
 		std::fs::set_permissions(&referrer_dir, orig).unwrap();
 
-		assert!(res.is_err(), "a failed relink must surface as an error");
+		let err = res.expect_err("a failed relink must surface as an error");
+		// The rollback SUCCEEDS here (the master is renamed back and
+		// `link_agents_to_canonical` folds per-link failures into its report
+		// rather than erroring), so the original relink failure is returned
+		// UNCHANGED — not re-wrapped as a recovery hint. The message must name
+		// the stale link it failed on and must NOT claim manual restore.
+		let msg = err.to_string();
+		assert!(
+			msg.contains("roll-old"),
+			"the original relink error must name the failing link: {msg}"
+		);
+		assert!(
+			!msg.contains("move them back"),
+			"a recovered rollback must not emit ManualRestore wording: {msg}"
+		);
 		assert!(
 			root.join(".agents/skills/roll-old/SKILL.md").exists(),
 			"rollback must rename the master back to its old name"
@@ -1795,6 +1869,152 @@ mod tests {
 		assert!(
 			claude_link.join("SKILL.md").exists(),
 			"the restored referrer must resolve to the master"
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// T2 (#8): structured rollback reason via RecoveryHint.
+	// -----------------------------------------------------------------------
+
+	/// Rollback's own master-restore rename fails (its parent is read-only), so
+	/// the master is the ONLY surviving copy and stays at `new_master`. The
+	/// error must carry RecoveryHint::ManualRestore wording naming BOTH the
+	/// recover-from (new_master) and restore-to (old_master) paths plus an
+	/// actionable next step. Driven through the real `rollback_master_rename`.
+	#[cfg(unix)]
+	#[test]
+	fn rename_rollback_failure_reports_manual_restore() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		if !perms_enforced(root) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		// The renamed master holds the only copy of the contents.
+		let skills_dir = root.join(".agents/skills");
+		let old_master = skills_dir.join("recover-old");
+		let new_master = skills_dir.join("recover-new");
+		std::fs::create_dir_all(&new_master).unwrap();
+		std::fs::write(new_master.join("SKILL.md"), "real").unwrap();
+
+		// Read-only parent: the rollback's `rename(new_master, old_master)`
+		// cannot create the old-name entry, so the restore step itself fails.
+		let orig = std::fs::metadata(&skills_dir).unwrap().permissions();
+		std::fs::set_permissions(
+			&skills_dir,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let err = rollback_master_rename(
+			&new_master,
+			&old_master,
+			&[],
+			"recover-new",
+			false,
+			ConfigError::Io(std::io::Error::other("relink boom")),
+		);
+
+		// Restore perms before asserting so tempdir teardown always works.
+		std::fs::set_permissions(&skills_dir, orig).unwrap();
+
+		let msg = err.to_string();
+		assert!(
+			msg.contains(&new_master.display().to_string()),
+			"recover_from (new_master) path missing from: {msg}"
+		);
+		assert!(
+			msg.contains(&old_master.display().to_string()),
+			"restore_to (old_master) path missing from: {msg}"
+		);
+		assert!(
+			msg.contains("relink boom"),
+			"the original relink failure must still be named: {msg}"
+		);
+		assert!(
+			msg.contains("move them back"),
+			"missing ManualRestore next step in: {msg}"
+		);
+		// The master must still be the renamed copy (rollback could not move it).
+		assert!(
+			new_master.join("SKILL.md").exists(),
+			"the only surviving copy must remain at new_master"
+		);
+	}
+
+	/// Rollback restores the master successfully, but a leftover new-name
+	/// referrer symlink can't be removed (its dir is read-only), so the relink
+	/// step of the rollback fails. Data is safe (master is back at old_master);
+	/// the error must report RecoveryHint::BrokenSymlink for the offending link,
+	/// NOT ManualRestore.
+	#[cfg(unix)]
+	#[test]
+	fn rename_rollback_relink_failure_reports_broken_symlink() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		if !perms_enforced(root) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		let skills_dir = root.join(".agents/skills");
+		let old_master = skills_dir.join("brk-old");
+		let new_master = skills_dir.join("brk-new");
+		std::fs::create_dir_all(&new_master).unwrap();
+		std::fs::write(new_master.join("SKILL.md"), "real").unwrap();
+
+		// A referrer dir holding a stale NEW-name symlink the rollback must
+		// remove; the dir is read-only so the `unlink` fails AFTER the master
+		// is renamed back.
+		let referrer = root.join(".claude/skills");
+		std::fs::create_dir_all(&referrer).unwrap();
+		std::os::unix::fs::symlink(&new_master, referrer.join("brk-new"))
+			.unwrap();
+		let orig = std::fs::metadata(&referrer).unwrap().permissions();
+		std::fs::set_permissions(
+			&referrer,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let err = rollback_master_rename(
+			&new_master,
+			&old_master,
+			std::slice::from_ref(&referrer),
+			"brk-new",
+			false,
+			ConfigError::Io(std::io::Error::other("relink boom")),
+		);
+
+		// Restore perms before asserting so tempdir teardown always works.
+		std::fs::set_permissions(&referrer, orig).unwrap();
+
+		let msg = err.to_string();
+		assert!(
+			msg.contains("broken link"),
+			"missing BrokenSymlink next step in: {msg}"
+		);
+		assert!(
+			msg.contains(&referrer.join("brk-new").display().to_string()),
+			"the offending link path must be named: {msg}"
+		);
+		assert!(
+			!msg.contains("move them back"),
+			"a restored master must not emit ManualRestore wording: {msg}"
+		);
+		// The master must be safely back at its old name.
+		assert!(
+			old_master.join("SKILL.md").exists(),
+			"rollback must have restored the master to old_master"
+		);
+		assert!(
+			!new_master.exists(),
+			"no half-renamed master may survive a recovered rollback"
 		);
 	}
 
@@ -2869,5 +3089,180 @@ mod tests {
 			local.skills.contains_key("orphan-project-xyz"),
 			"a failed project prune must leave the project lock unchanged"
 		);
+	}
+
+	// T3: exhaustive branch coverage of the helper that maps the shared
+	// materializer's single-agent result onto the CLI add path's historical
+	// error contract. NeedsLink-ok -> Ok; NeedsLink-error -> Err(resource_exists);
+	// NativeReader / Unsupported -> Ok regardless of the result (the agent reads
+	// the Master directly, or had no writable dir — neither was ever an error).
+	#[test]
+	fn ensure_single_agent_installed_covers_every_branch() {
+		use crate::models::AgentType;
+		use crate::skills::install_fetched::AgentInstallResult;
+		use crate::skills::linker::LinkNeed;
+
+		let needs_link = LinkNeed::NeedsLink {
+			agent_skills_dir: PathBuf::from("/x"),
+		};
+
+		// NeedsLink + error-free result -> Ok.
+		let ok = [AgentInstallResult {
+			agent: AgentType::Claude,
+			installed: true,
+			error: None,
+		}];
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&ok,
+			&needs_link,
+			"s"
+		)
+		.is_ok());
+
+		// NeedsLink + a soft failure (occupied slot / link error) -> Err.
+		let conflict = [AgentInstallResult {
+			agent: AgentType::Claude,
+			installed: false,
+			error: Some("slot occupied".to_string()),
+		}];
+		let err = ConfigManager::ensure_single_agent_installed(
+			&conflict,
+			&needs_link,
+			"my-skill",
+		)
+		.unwrap_err();
+		assert!(
+			matches!(err, ConfigError::ResourceExists { .. }),
+			"a NeedsLink soft-failure must surface resource_exists, got {err:?}"
+		);
+
+		// NeedsLink + empty results (defensive) -> Err.
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&[],
+			&needs_link,
+			"s"
+		)
+		.is_err());
+
+		// NativeReader -> Ok even with a soft-failure result (never an error).
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&conflict,
+			&LinkNeed::NativeReader,
+			"s"
+		)
+		.is_ok());
+
+		// Unsupported -> Ok even with a soft-failure result (no writable dir;
+		// the Master is still recorded — old behaviour preserved).
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&conflict,
+			&LinkNeed::Unsupported,
+			"s"
+		)
+		.is_ok());
+	}
+
+	// T3 parity guard: the CLI add-from-path materialization and the
+	// fetched/desktop materialization must produce a BYTE-IDENTICAL
+	// `.agents/skills/<name>/SKILL.md` and the same agent link shape for the
+	// same source skill — so the two install paths can never diverge again
+	// (they once did when the CLI used a narrower link check). Both copy the
+	// source tree verbatim; only the canonical SKILL.md bytes + link shape are
+	// asserted, not the lock (the lock contract is pinned elsewhere).
+	#[cfg(unix)]
+	#[test]
+	fn cli_add_and_fetched_install_produce_identical_master_and_link() {
+		use crate::create_adapter;
+		use crate::models::{AgentType, ResourceScope};
+		use crate::skills::install_fetched::{
+			install_fetched_skill_and_lock, FetchedSkillInstallRequest,
+		};
+		use crate::skills::linker::{LinkTarget, Linker};
+
+		// One source skill, copied verbatim by both paths. Non-canonical
+		// frontmatter ordering + a body + an asset so a re-serialization (which
+		// would NOT be byte-identical) is detectable.
+		let src_tmp = tempfile::tempdir().unwrap();
+		let src = src_tmp.path().join("parity-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		let skill_md =
+			"---\ndescription: parity\nname: parity-skill\n---\nThe body.\n";
+		std::fs::write(src.join("SKILL.md"), skill_md).unwrap();
+		std::fs::create_dir_all(src.join("assets")).unwrap();
+		std::fs::write(src.join("assets/data.json"), "{}").unwrap();
+
+		// Path A: CLI add-from-path universal install.
+		let cli_root_tmp = tempfile::tempdir().unwrap();
+		let cli_root = cli_root_tmp.path().canonicalize().unwrap();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&cli_root),
+		);
+		mgr.load().unwrap();
+		mgr.add_skill_from_path_universal(&src).unwrap();
+
+		// Path B: fetched/desktop universal install of the same source.
+		let fetched_root_tmp = tempfile::tempdir().unwrap();
+		let fetched_root = fetched_root_tmp.path().canonicalize().unwrap();
+		let lock_source = skill::InstallLockSource {
+			source: "local/test".to_string(),
+			source_type: "local".to_string(),
+			source_url: "file:///local/test".to_string(),
+			ref_name: None,
+		};
+		let req = FetchedSkillInstallRequest {
+			skill_file: &src.join("SKILL.md"),
+			source: &lock_source,
+			lock_skill_path: "parity-skill/SKILL.md".to_string(),
+			ref_commit: None,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&fetched_root),
+			target_agents: &[AgentType::Claude],
+			expected_name: None,
+			target: LinkTarget::Relative,
+		};
+		install_fetched_skill_and_lock(req).unwrap();
+
+		// The canonical Master SKILL.md must be byte-identical across paths.
+		let cli_master = cli_root.join(".agents/skills/parity-skill/SKILL.md");
+		let fetched_master =
+			fetched_root.join(".agents/skills/parity-skill/SKILL.md");
+		let cli_bytes = std::fs::read(&cli_master).unwrap();
+		let fetched_bytes = std::fs::read(&fetched_master).unwrap();
+		assert_eq!(
+			cli_bytes, fetched_bytes,
+			"CLI-add and fetched-install master SKILL.md must be \
+			 byte-identical"
+		);
+		assert_eq!(
+			cli_bytes,
+			skill_md.as_bytes(),
+			"both paths must copy the source SKILL.md verbatim"
+		);
+
+		// The asset must survive on both (whole-tree copy, not SKILL.md only).
+		assert_eq!(
+			std::fs::read_to_string(
+				cli_root.join(".agents/skills/parity-skill/assets/data.json")
+			)
+			.unwrap(),
+			std::fs::read_to_string(
+				fetched_root
+					.join(".agents/skills/parity-skill/assets/data.json")
+			)
+			.unwrap(),
+		);
+
+		// Identical link shape: each agent dir holds a symlink to its Master.
+		let cli_link = cli_root.join(".claude/skills/parity-skill");
+		let fetched_link = fetched_root.join(".claude/skills/parity-skill");
+		assert!(Linker::is_link(&cli_link), "CLI add must leave a link");
+		assert!(
+			Linker::is_link(&fetched_link),
+			"fetched install must leave a link"
+		);
+		assert!(cli_link.join("SKILL.md").exists());
+		assert!(fetched_link.join("SKILL.md").exists());
 	}
 }
