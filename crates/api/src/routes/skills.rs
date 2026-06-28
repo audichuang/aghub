@@ -422,6 +422,7 @@ pub async fn delete_skill_by_path(
 				aghub_core::skills::removal::RemovalOutcome {
 					plan,
 					executed: false,
+					prune: aghub_core::skills::removal::PruneStatus::NotRun,
 				},
 			)));
 		}
@@ -442,22 +443,32 @@ pub async fn delete_skill_by_path(
 		executed_plan
 			.skipped
 			.extend(report.failed.into_iter().map(|(path, _)| path));
-		prune_scope_lock(resource_scope, project_root.as_deref());
+		// Core-owned prune (same seam the manager's `remove_skill_planned`
+		// uses). The copy branch only reaches here with a single writable
+		// scope (`Both` is rejected upstream), so this is GlobalOnly or
+		// ProjectOnly. The handler only RENDERS the returned PruneStatus.
+		// DEFERRED: routing this whole by-path removal through a manager
+		// planned-removal returning RemovalOutcome waits for the planned-
+		// removal generalization (candidate #5 / Phase 3) — this route owns
+		// API-layer path-containment that must not move into core.
+		let prune = aghub_core::skills::prune::prune_lock_for_scope(
+			resource_scope,
+			project_root.as_deref(),
+		);
 		return Ok(Json(delete_response_from_outcome(
 			aghub_core::skills::removal::RemovalOutcome {
 				plan: executed_plan,
 				executed: true,
+				prune,
 			},
 		)));
 	}
 
 	match manager.remove_skill_planned(&skill_name, false, dry_run, confirm) {
-		Ok(outcome) => {
-			if outcome.executed {
-				prune_scope_lock(resource_scope, project_root.as_deref());
-			}
-			Ok(Json(delete_response_from_outcome(outcome)))
-		}
+		// remove_skill_planned prunes the per-scope lock itself on execute; the
+		// caller must not prune again (unlike the non-link Copy branch above,
+		// which bypasses the manager and therefore still prunes inline).
+		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
 		Err(e) => Ok(Json(DeleteSkillByPathResponse {
 			success: false,
 			error: Some(format!("Failed to delete: {e}")),
@@ -513,31 +524,6 @@ pub fn prune_lock_route(
 	}
 }
 
-/// Best-effort disk-reconciled lock prune for a scope after a deletion. A scan
-/// error (or missing project root) is swallowed — the orphan lock entry simply
-/// survives; deletion correctness does not depend on the prune succeeding.
-fn prune_scope_lock(
-	resource_scope: aghub_core::models::ResourceScope,
-	project_root: Option<&std::path::Path>,
-) {
-	use aghub_core::models::ResourceScope;
-	use aghub_core::skills::prune::{prune_lock_scanning, PruneScope};
-	if matches!(
-		resource_scope,
-		ResourceScope::GlobalOnly | ResourceScope::Both
-	) {
-		let _ = prune_lock_scanning(PruneScope::Global, None);
-	}
-	if matches!(
-		resource_scope,
-		ResourceScope::ProjectOnly | ResourceScope::Both
-	) {
-		if let Some(root) = project_root {
-			let _ = prune_lock_scanning(PruneScope::Project, Some(root));
-		}
-	}
-}
-
 fn get_parent_folder(path: std::path::PathBuf) -> std::path::PathBuf {
 	path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
 }
@@ -586,6 +572,14 @@ fn installed_skill_roots(
 fn delete_response_from_outcome(
 	outcome: aghub_core::skills::removal::RemovalOutcome,
 ) -> DeleteSkillByPathResponse {
+	use aghub_core::skills::removal::PruneStatus;
+	// Surface the post-delete lock prune through the response: Pruned → the
+	// dropped keys; Failed → the partial keys plus the error; NotRun → nothing.
+	let (pruned_lock_entries, prune_error) = match outcome.prune {
+		PruneStatus::NotRun => (None, None),
+		PruneStatus::Pruned(keys) => (Some(keys), None),
+		PruneStatus::Failed { reason, pruned } => (Some(pruned), Some(reason)),
+	};
 	DeleteSkillByPathResponse {
 		success: true,
 		dry_run: !outcome.executed,
@@ -609,6 +603,8 @@ fn delete_response_from_outcome(
 				outcome.plan.paths.first().map(|p| p.display().to_string())
 			})
 			.flatten(),
+		pruned_lock_entries,
+		prune_error,
 		error: None,
 		validation_errors: None,
 	}
@@ -1067,7 +1063,8 @@ pub async fn delete_skill(
 	params: DeleteSkillParams,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let resolved = params.resolve_scope()?;
-	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+	// project_root is unused: remove_skill_planned prunes the lock internally.
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
@@ -1094,12 +1091,9 @@ pub async fn delete_skill(
 		dry_run,
 		confirm,
 	) {
-		Ok(outcome) => {
-			if outcome.executed {
-				prune_scope_lock(resource_scope, project_root.as_deref());
-			}
-			Ok(Json(delete_response_from_outcome(outcome)))
-		}
+		// remove_skill_planned prunes the per-scope lock itself on execute, so
+		// the handler must NOT prune again.
+		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
 		Err(ConfigError::ResourceNotFound { .. }) => {
 			Ok(Json(DeleteSkillByPathResponse {
 				success: true,
@@ -2390,6 +2384,144 @@ mod tests {
 			assert!(resp.success);
 			assert!(!resp.dry_run);
 			assert!(!dir.exists(), "confirm deletes the dir");
+		});
+	}
+
+	// The delete_skill handler must NOT prune the lock itself — that moved into
+	// remove_skill_planned. This proves the manager-side prune still fires
+	// through the API path: an orphan global-lock entry (no dir on disk) is gone
+	// after a confirmed delete. Would regress if both the handler prune AND the
+	// manager prune were removed.
+	#[cfg(unix)]
+	#[test]
+	fn delete_skill_executes_and_lock_pruned() {
+		with_isolated_env(|home, state| {
+			let dir = write_claude_skill(home, "goner");
+			let lock_dir = state.join("skills");
+			std::fs::create_dir_all(&lock_dir).unwrap();
+			let lock_path = lock_dir.join(".skill-lock.json");
+			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
+
+			let resp = block_on(delete_skill(
+				AgentParam(AgentType::Claude),
+				"goner",
+				DeleteSkillParams {
+					scope: Some("global".to_string()),
+					project_root: None,
+					confirm: Some(true),
+					all_agents: None,
+				},
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+
+			assert!(resp.success);
+			assert!(resp.executed);
+			assert!(!dir.exists(), "confirm deletes the dir");
+			let raw = std::fs::read_to_string(&lock_path).unwrap();
+			let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+			assert!(
+				parsed["skills"].get("orphan").is_none(),
+				"manager-side prune must drop the orphan lock entry"
+			);
+		});
+	}
+
+	// Issue #2 + #3: the by-path copy branch must surface the post-delete lock
+	// prune through the response — both the dropped keys (Pruned) and a prune
+	// failure (Failed). It now routes through the core-owned
+	// `prune::prune_lock_for_scope` seam; the handler only RENDERS the result.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_surfaces_pruned_lock_entries() {
+		with_isolated_env(|home, state| {
+			let dir = write_claude_skill(home, "goner");
+			let lock_dir = state.join("skills");
+			std::fs::create_dir_all(&lock_dir).unwrap();
+			let lock_path = lock_dir.join(".skill-lock.json");
+			// An orphan with no dir on disk: a real prune drops it.
+			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
+
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&dir,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+
+			assert!(resp.success);
+			assert!(resp.executed);
+			assert!(!dir.exists(), "confirm deletes the dir");
+			let pruned = resp
+				.pruned_lock_entries
+				.expect("a successful prune must report its dropped keys");
+			assert!(
+				pruned.contains(&"orphan".to_string()),
+				"the dropped orphan must be surfaced, got {pruned:?}"
+			);
+			assert!(resp.prune_error.is_none(), "no error on a clean prune");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_surfaces_prune_error() {
+		use std::os::unix::fs::PermissionsExt;
+		with_isolated_env(|home, state| {
+			let dir = write_claude_skill(home, "goner");
+			let lock_dir = state.join("skills");
+			std::fs::create_dir_all(&lock_dir).unwrap();
+			let lock_path = lock_dir.join(".skill-lock.json");
+			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
+
+			// Make the lock dir read-only so the prune's atomic write fails.
+			let probe = lock_dir.join(".perm-probe");
+			std::fs::create_dir(&probe).unwrap();
+			std::fs::set_permissions(
+				&probe,
+				std::fs::Permissions::from_mode(0o555),
+			)
+			.unwrap();
+			let enforced = std::fs::write(probe.join("x"), b"x").is_err();
+			std::fs::set_permissions(
+				&probe,
+				std::fs::Permissions::from_mode(0o755),
+			)
+			.unwrap();
+			std::fs::remove_dir_all(&probe).ok();
+			if !enforced {
+				eprintln!("skip: perms not enforced (root)");
+				return;
+			}
+			let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
+			std::fs::set_permissions(
+				&lock_dir,
+				std::fs::Permissions::from_mode(0o555),
+			)
+			.unwrap();
+
+			let resp = block_on(delete_skill_by_path(Json(by_path_req(
+				&dir,
+				Some(true),
+			))))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+
+			std::fs::set_permissions(&lock_dir, orig).unwrap();
+
+			assert!(
+				resp.success,
+				"deletion still succeeds, prune is non-fatal"
+			);
+			assert!(resp.executed);
+			assert!(!dir.exists(), "the skill is deleted before the prune");
+			assert!(
+				resp.prune_error.is_some(),
+				"a failed prune must surface its error"
+			);
 		});
 	}
 

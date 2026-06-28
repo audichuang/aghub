@@ -338,6 +338,16 @@ pub struct DeleteSkillByPathResponse {
 	pub skipped: Vec<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub deleted_path: Option<String>,
+	/// Lock keys (skill names — never raw paths) dropped by the post-delete
+	/// disk-reconciled prune. `Some([])` means the prune ran and found nothing
+	/// orphaned; `None` means no prune was attempted (dry-run/unconfirmed). On a
+	/// prune failure this carries the keys dropped BEFORE the failure (partial).
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub pruned_lock_entries: Option<Vec<String>>,
+	/// Set when the post-delete lock prune failed. The deletion still happened
+	/// (prune is non-fatal); this reports why the lock could not be reconciled.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub prune_error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]

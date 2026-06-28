@@ -514,8 +514,6 @@ fn main() -> Result<()> {
 			resource,
 			name,
 			delete::DeleteOptions {
-				scope,
-				project_root: project_root.as_deref(),
 				all_agents,
 				dry_run,
 				yes,

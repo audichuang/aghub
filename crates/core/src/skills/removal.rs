@@ -386,13 +386,40 @@ fn push_contained(
 	}
 }
 
+/// Outcome of the post-delete lock prune attached to a [`RemovalOutcome`].
+///
+/// `NotRun` on a dry-run or non-executed removal; `Pruned(keys)` lists the lock
+/// entries dropped (may be empty when nothing was orphaned); `Failed` means the
+/// prune scan/write errored (non-fatal — the deletion already happened).
+///
+/// `Failed.pruned` is the truthful partial-mutation record: for a single-scope
+/// prune it is always empty (the lock was left unchanged), but a `Both` prune
+/// reconciles two *independent* locks (global + project) in sequence, so the
+/// global lock can already be pruned when the project prune fails. The dropped
+/// global keys are reported in `pruned` rather than silently lost behind the
+/// error — never claim "lock unchanged" when it wasn't.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum PruneStatus {
+	/// No prune attempted (dry-run / nothing executed).
+	#[default]
+	NotRun,
+	/// Prune ran; the pruned lock keys (empty = nothing orphaned).
+	Pruned(Vec<String>),
+	/// Prune attempted but failed. `pruned` lists keys actually dropped before
+	/// the failure (empty for a single-scope prune; possibly non-empty for the
+	/// `Both` scope when the first lock pruned before the second errored).
+	Failed { reason: String, pruned: Vec<String> },
+}
+
 /// Result of a planned removal request: the (post-execution) plan plus whether
 /// destructive deletion actually ran. `executed == false` means a dry-run or a
-/// destructive op awaiting an explicit confirm — nothing was deleted.
+/// destructive op awaiting an explicit confirm — nothing was deleted. `prune`
+/// records the post-delete lock prune (see [`PruneStatus`]).
 #[derive(Debug, Clone)]
 pub struct RemovalOutcome {
 	pub plan: RemovalPlan,
 	pub executed: bool,
+	pub prune: PruneStatus,
 }
 
 /// What `execute_removal` actually did on disk.
@@ -996,6 +1023,26 @@ mod tests {
 		assert!(!first.exists());
 		assert!(!second.exists());
 		assert!(blocked.exists());
+	}
+
+	#[test]
+	fn prune_status_default_is_not_run() {
+		assert_eq!(PruneStatus::default(), PruneStatus::NotRun);
+	}
+
+	#[test]
+	fn removal_outcome_carries_prune_field() {
+		let outcome = RemovalOutcome {
+			plan: RemovalPlan {
+				layout: Layout::Copy,
+				paths: vec![],
+				skipped: vec![],
+				needs_confirm: false,
+			},
+			executed: false,
+			prune: PruneStatus::Pruned(vec!["a".to_string()]),
+		};
+		assert_eq!(outcome.prune, PruneStatus::Pruned(vec!["a".to_string()]));
 	}
 
 	#[test]

@@ -296,6 +296,100 @@ fn delete_skill_yes_removes_copy() {
 	assert!(!skill_dir.exists(), "--yes removes the copy");
 }
 
+#[cfg(unix)]
+#[test]
+fn delete_skill_yes_prunes_and_reports() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "goner");
+	// An orphan lock entry (no on-disk skill) the executed prune must drop and
+	// the JSON must report under `prunedLockEntries`.
+	seed_global_lock(state.path());
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "goner", "--yes"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["executed"], true);
+	assert!(!skill_dir.exists(), "--yes removes the copy");
+	let pruned = json["prunedLockEntries"]
+		.as_array()
+		.expect("prunedLockEntries present on executed delete");
+	assert!(
+		pruned.iter().any(|n| n == "orphan"),
+		"orphan lock entry must be reported pruned: {pruned:?}"
+	);
+}
+
+/// Root bypasses `0o555`, so probe + skip (CI often runs as root).
+#[cfg(unix)]
+fn perms_enforced(under: &std::path::Path) -> bool {
+	use std::os::unix::fs::PermissionsExt;
+	let p = under.join(".perm-probe");
+	std::fs::create_dir(&p).unwrap();
+	std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+	let blocked = std::fs::write(p.join("x"), b"x").is_err();
+	std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755))
+		.unwrap();
+	std::fs::remove_dir_all(&p).ok();
+	blocked
+}
+
+/// A prune write failure is non-fatal: the skill is still deleted and the JSON
+/// surfaces `pruneError` (read-only lock dir forces the post-delete lock write
+/// to fail). Pins the `PruneStatus::Failed` -> `pruneError` serialization.
+#[cfg(unix)]
+#[test]
+fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "goner");
+	let lock_path = seed_global_lock(state.path());
+	let lock_dir = lock_path.parent().unwrap().to_path_buf();
+
+	if !perms_enforced(&lock_dir) {
+		eprintln!("skip: perms not enforced (root)");
+		return;
+	}
+	let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
+	std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "goner", "--yes"])
+		.output()
+		.unwrap();
+
+	// Restore before asserting so a failed assert never leaks the temp dir.
+	std::fs::set_permissions(&lock_dir, orig).unwrap();
+
+	assert!(
+		out.status.success(),
+		"a prune failure is non-fatal; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["executed"], true);
+	assert!(
+		!skill_dir.exists(),
+		"--yes deletes the skill even if prune fails"
+	);
+	assert!(
+		json["pruneError"].is_string(),
+		"prune failure must surface pruneError: {json}"
+	);
+}
+
 #[test]
 fn prune_lock_default_dry_run_reports_orphan_without_mutating() {
 	let home = tempfile::TempDir::new().unwrap();

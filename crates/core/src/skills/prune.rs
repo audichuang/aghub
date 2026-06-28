@@ -128,6 +128,101 @@ pub fn prune_lock_scanning(
 	prune_lock_from_dirs(scope, &dirs, project_root, top_level_skill_dirs)
 }
 
+/// Map a single prune result into a [`PruneStatus`]: success → `Pruned(keys)`,
+/// error → `Failed` with an empty `pruned` (a single-scope prune leaves its
+/// lock unchanged on error).
+fn prune_status(
+	result: Result<Vec<String>, PruneError>,
+) -> crate::skills::removal::PruneStatus {
+	use crate::skills::removal::PruneStatus;
+	match result {
+		Ok(keys) => PruneStatus::Pruned(keys),
+		Err(e) => PruneStatus::Failed {
+			reason: e.to_string(),
+			pruned: Vec::new(),
+		},
+	}
+}
+
+/// Fold the global prune result with a LAZY project prune (the `Both` scope)
+/// into one [`PruneStatus`]. The project prune is a closure that runs ONLY when
+/// the global prune succeeded — a global failure short-circuits before the
+/// project lock is touched at all (no side effect, `pruned` empty), so a failed
+/// global prune can never silently mutate the project lock. The two locks are
+/// independent and pruned in sequence, so a project failure AFTER a global
+/// success is a partial mutation — reported as
+/// `Failed { reason, pruned: <global keys already dropped> }`, never as a
+/// `Pruned` (the project lock errored) nor as a bare `Failed` that falsely
+/// claims nothing changed.
+fn combine_prune(
+	global: Result<Vec<String>, PruneError>,
+	project: Option<impl FnOnce() -> Result<Vec<String>, PruneError>>,
+) -> crate::skills::removal::PruneStatus {
+	use crate::skills::removal::PruneStatus;
+	let mut keys = match global {
+		Ok(k) => k,
+		Err(e) => {
+			// Short-circuit: do NOT run the project prune, leaving its lock
+			// untouched.
+			return PruneStatus::Failed {
+				reason: e.to_string(),
+				pruned: Vec::new(),
+			};
+		}
+	};
+	if let Some(project) = project {
+		match project() {
+			Ok(k) => keys.extend(k),
+			Err(e) => {
+				// Global already pruned `keys`; do not lose that fact.
+				return PruneStatus::Failed {
+					reason: e.to_string(),
+					pruned: keys,
+				};
+			}
+		}
+	}
+	PruneStatus::Pruned(keys)
+}
+
+/// Reconcile the per-scope lock(s) against disk after a removal and report the
+/// outcome as a [`PruneStatus`]. This is the single core-owned seam every
+/// delete path routes through (the manager's `remove_skill_planned` AND the
+/// API by-path copy branch) so the prune logic lives in exactly one place.
+///
+/// Scope mapping: `GlobalOnly` → Global lock; `ProjectOnly` → Project lock
+/// (`NotRun` without a root, since there is no project lock to reconcile);
+/// `Both` → global then a LAZY project prune ([`combine_prune`]), so a global
+/// failure never mutates the project lock. Non-fatal: a single-scope failure
+/// leaves that lock unchanged (`Failed { pruned: [] }`); a `Both` failure after
+/// the global succeeded records the partial mutation in `Failed.pruned`.
+pub fn prune_lock_for_scope(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> crate::skills::removal::PruneStatus {
+	use crate::skills::removal::PruneStatus;
+	match scope {
+		ResourceScope::GlobalOnly => {
+			prune_status(prune_lock_scanning(PruneScope::Global, None))
+		}
+		ResourceScope::ProjectOnly => match project_root {
+			Some(r) => {
+				prune_status(prune_lock_scanning(PruneScope::Project, Some(r)))
+			}
+			None => PruneStatus::NotRun,
+		},
+		ResourceScope::Both => {
+			let global = prune_lock_scanning(PruneScope::Global, None);
+			// Lazy: the project prune runs ONLY if `global` succeeded, so a
+			// global failure never mutates the project lock.
+			let project = project_root.map(|r| {
+				move || prune_lock_scanning(PruneScope::Project, Some(r))
+			});
+			combine_prune(global, project)
+		}
+	}
+}
+
 /// Dry-run: report which lock entries WOULD be pruned, without mutating the lock.
 /// Uses an injectable scanner for deterministic tests.
 pub fn preview_prune_from_dirs<F>(
@@ -212,28 +307,31 @@ fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
 	Ok(dirs)
 }
 
+/// Test-only global-lock isolation, shared across every core test mod that
+/// touches the global skill lock (here + `manager::skill`). It MUST be a single
+/// definition so all callers serialize on the SAME mutex — two separate `static
+/// LOCK`s would race on the shared `XDG_STATE_HOME` global lock.
 #[cfg(test)]
-mod tests {
-	use super::*;
+pub(crate) mod test_lock {
 	use std::sync::{Mutex, MutexGuard, OnceLock};
-	use tempfile::{tempdir, TempDir};
+	use tempfile::TempDir;
 
 	/// Serializes + isolates the GLOBAL lock by pointing `XDG_STATE_HOME` at a
 	/// fresh temp dir (core cannot import skill's `pub(crate)` TestLockGuard).
-	struct GlobalLockGuard {
+	pub(crate) struct GlobalLockGuard {
 		_temp: TempDir,
 		old: Option<String>,
 		_lock: MutexGuard<'static, ()>,
 	}
 
 	impl GlobalLockGuard {
-		fn new() -> Self {
+		pub(crate) fn new() -> Self {
 			static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 			let guard = LOCK
 				.get_or_init(|| Mutex::new(()))
 				.lock()
 				.unwrap_or_else(|e| e.into_inner());
-			let temp = tempdir().unwrap();
+			let temp = tempfile::tempdir().unwrap();
 			let old = std::env::var("XDG_STATE_HOME").ok();
 			std::env::set_var("XDG_STATE_HOME", temp.path());
 			Self {
@@ -252,6 +350,13 @@ mod tests {
 			}
 		}
 	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::test_lock::GlobalLockGuard;
+	use super::*;
+	use tempfile::tempdir;
 
 	fn global_entry() -> skill::SkillLockEntry {
 		skill::SkillLockEntry {
@@ -280,6 +385,130 @@ mod tests {
 			format!("---\nname: {name}\ndescription: d\n---\n"),
 		)
 		.unwrap();
+	}
+
+	// combine_prune / prune_status: the per-scope fold that
+	// `prune_lock_for_scope` builds on. `Both` folds two INDEPENDENT lock
+	// prunes; a project failure after a global success is a partial mutation
+	// and must NOT masquerade as a bare Failed (which contractually means
+	// "lock unchanged") — the already-dropped global keys are reported.
+	use crate::skills::removal::PruneStatus;
+
+	#[test]
+	fn combine_prune_both_success_concatenates_keys() {
+		let out = combine_prune(
+			Ok(vec!["g1".into()]),
+			Some(|| Ok(vec!["p1".into()])),
+		);
+		assert_eq!(out, PruneStatus::Pruned(vec!["g1".into(), "p1".into()]));
+	}
+
+	#[test]
+	fn combine_prune_project_failure_after_global_success_reports_partial() {
+		// Global pruned g1 (lock already mutated); project errored. The outcome
+		// must surface BOTH the error and the global keys that were dropped —
+		// not a Failed that pretends the lock is untouched.
+		let out = combine_prune(
+			Ok(vec!["g1".into()]),
+			Some(|| Err(PruneError::MissingProjectRoot)),
+		);
+		match out {
+			PruneStatus::Failed { reason, pruned } => {
+				assert!(!reason.is_empty());
+				assert_eq!(
+					pruned,
+					vec!["g1".to_string()],
+					"global keys pruned before project failure must be reported"
+				);
+			}
+			other => {
+				panic!("expected Failed with partial pruned, got {other:?}")
+			}
+		}
+	}
+
+	#[test]
+	fn combine_prune_global_failure_short_circuits_with_empty_pruned() {
+		// Global errored: the project closure must NEVER run (it would mutate
+		// the project lock). Assert both the reported status AND that the
+		// closure was not invoked.
+		let mut project_ran = false;
+		let out = combine_prune(
+			Err(PruneError::MissingProjectRoot),
+			Some(|| {
+				project_ran = true;
+				Ok(vec![])
+			}),
+		);
+		assert!(
+			!project_ran,
+			"global failure must short-circuit before the project prune"
+		);
+		assert_eq!(
+			out,
+			PruneStatus::Failed {
+				reason: PruneError::MissingProjectRoot.to_string(),
+				pruned: Vec::new(),
+			}
+		);
+	}
+
+	#[test]
+	fn prune_status_failure_reports_empty_pruned() {
+		// Single-scope failure leaves the lock unchanged: pruned is empty.
+		let out = prune_status(Err(PruneError::MissingProjectRoot));
+		assert_eq!(
+			out,
+			PruneStatus::Failed {
+				reason: PruneError::MissingProjectRoot.to_string(),
+				pruned: Vec::new(),
+			}
+		);
+	}
+
+	#[test]
+	fn prune_lock_for_scope_project_without_root_is_not_run() {
+		// ProjectOnly with no root: no project lock to reconcile, so the seam
+		// reports NotRun rather than attempting (and failing) a prune. (Must be
+		// ProjectOnly — `Both` would prune the shared global lock here, and
+		// this test holds no GlobalLockGuard. Both+None is covered below.)
+		let out = prune_lock_for_scope(ResourceScope::ProjectOnly, None);
+		assert_eq!(out, PruneStatus::NotRun);
+	}
+
+	#[test]
+	fn prune_lock_for_scope_global_drops_orphan() {
+		// End-to-end through the core seam: an orphan global lock entry (no dir
+		// on disk) is dropped and surfaced as Pruned.
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock("orphan", global_entry()).unwrap();
+
+		let out = prune_lock_for_scope(ResourceScope::GlobalOnly, None);
+		match out {
+			PruneStatus::Pruned(keys) => assert!(
+				keys.contains(&"orphan".to_string()),
+				"orphan must be dropped, got {keys:?}"
+			),
+			other => panic!("expected Pruned, got {other:?}"),
+		}
+		assert!(!skill::read_skill_lock().skills.contains_key("orphan"));
+	}
+
+	#[test]
+	fn prune_lock_for_scope_both_without_root_prunes_global_only() {
+		// Both scope with NO project root: the global lock IS reconciled, but
+		// the project branch is skipped entirely (no root to locate a project
+		// lock). Result is a plain Pruned of the global keys — no NotRun, no
+		// panic, no attempt to touch a project lock.
+		let _g = GlobalLockGuard::new();
+		skill::lock::add_skill_to_lock("orphan-global", global_entry())
+			.unwrap();
+
+		let out = prune_lock_for_scope(ResourceScope::Both, None);
+		assert_eq!(out, PruneStatus::Pruned(vec!["orphan-global".to_string()]));
+		assert!(!skill::read_skill_lock()
+			.skills
+			.contains_key("orphan-global"));
 	}
 
 	#[test]
