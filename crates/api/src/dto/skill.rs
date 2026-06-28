@@ -608,9 +608,13 @@ mod tests {
 				resp_json.get("deleted_path").is_some(),
 				"response must always emit deleted_path (no skip on None)"
 			);
+			// The whole object must match, not just deleted_path: the api-only
+			// pruned_lock_entries/prune_error/error/validation_errors all skip
+			// when None, so a thin wrapper over the 7-field RemovalView is
+			// byte-identical for both the None and Some(deleted_path) cases.
 			assert_eq!(
-				view_json["deleted_path"], resp_json["deleted_path"],
-				"deleted_path must serialize identically (None -> null)"
+				view_json, resp_json,
+				"RemovalView and DeleteSkillByPathResponse must be one wire shape"
 			);
 		}
 	}
@@ -646,18 +650,48 @@ mod tests {
 			"SkillView and SkillResponse must be one wire shape"
 		);
 
-		// And with the optional fields populated, they still match.
+		// With EVERY field populated they must still be byte-identical, so a
+		// dropped/renamed field in either wrapper fails this test (not just the
+		// optional canonical_path/source/agent trio).
 		let mut skill = aghub_core::models::Skill::new("bar");
+		skill.source_path = Some("~/.claude/skills/bar/SKILL.md".to_string());
+		skill.description = Some("desc".to_string());
+		skill.author = Some("auth".to_string());
+		skill.version = Some("1.2.3".to_string());
+		skill.tools = vec!["read".to_string(), "write".to_string()];
 		skill.canonical_path = Some(".agents/skills/bar".to_string());
 		skill.config_source = Some(aghub_core::models::ConfigSource::Global);
-		let view =
-			aghub_core::dto::SkillView::from(&skill).with_agent("claude");
+		let view = aghub_core::dto::SkillView::from(&skill)
+			.with_agent("claude")
+			.with_native_reader(true);
 		let resp = SkillResponse::from(&view);
+		let view_json = serde_json::to_value(&view).unwrap();
+		let resp_json = serde_json::to_value(&resp).unwrap();
 		assert_eq!(
-			serde_json::to_value(&view).unwrap(),
-			serde_json::to_value(&resp).unwrap(),
+			view_json, resp_json,
 			"populated SkillView and SkillResponse must be one wire shape"
 		);
+		// Every wire field must actually be present (guards against a wrapper
+		// silently dropping one while both still happen to compare equal as the
+		// shorter object).
+		for key in [
+			"name",
+			"enabled",
+			"source_path",
+			"canonical_path",
+			"description",
+			"author",
+			"version",
+			"tools",
+			"source",
+			"agent",
+			"native_reader",
+		] {
+			assert!(
+				resp_json.get(key).is_some(),
+				"populated wire shape must carry `{key}`"
+			);
+		}
 	}
 
 	#[test]

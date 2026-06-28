@@ -910,12 +910,13 @@ pub async fn create_skill(
 		Err(e) => return Err(ApiError::from(e)),
 	}
 	let skill = Skill::from(body.into_inner());
-	let mut response = SkillResponse::from(&skill);
+	let view = aghub_core::dto::SkillView::from(&skill);
 	manager.add_skill(skill).map_err(ApiError::from)?;
 	// Surface the advisory the CLI already shows: a NativeReader target gets the
-	// `.agents` master only, with no per-agent link.
-	response.native_reader = manager.skill_target_is_native_reader();
-	Ok((Status::Created, Json(response)))
+	// `.agents` master only, with no per-agent link. Carry it through the single
+	// SkillView seam so create/import can't drift from the wire shape.
+	let view = view.with_native_reader(manager.skill_target_is_native_reader());
+	Ok((Status::Created, Json(SkillResponse::from(&view))))
 }
 
 #[post("/agents/<agent>/skills/import?<scope..>", data = "<body>")]
@@ -955,9 +956,11 @@ pub fn import_skill(
 		None,
 	)?;
 
-	let mut response = SkillResponse::from(&imported);
-	response.native_reader = manager.skill_target_is_native_reader();
-	Ok(Json(response))
+	// Same single SkillView seam as create_skill: carry the NativeReader
+	// advisory through the view, never by mutating the response after the fact.
+	let view = aghub_core::dto::SkillView::from(&imported)
+		.with_native_reader(manager.skill_target_is_native_reader());
+	Ok(Json(SkillResponse::from(&view)))
 }
 
 #[get("/agents/<agent>/skills/<name>?<scope..>")]

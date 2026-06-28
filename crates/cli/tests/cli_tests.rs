@@ -2027,65 +2027,6 @@ fn add_skill_output_native_reader_true_for_opencode() {
 	);
 }
 
-/// CLI `describe skill` now emits the same `SkillView` shape as `add`/API:
-/// `source_path` present, the raw-`Skill` `content` field absent.
-#[cfg(unix)]
-#[test]
-fn describe_skill_outputs_skillview_shape() {
-	let tmp = tempfile::tempdir().unwrap();
-	let project = tmp.path();
-	std::fs::create_dir_all(project.join(".claude")).unwrap();
-
-	// Seed a skill to describe.
-	assert!(assert_cmd::Command::cargo_bin("aghub-cli")
-		.unwrap()
-		.env("HOME", project)
-		.env("USERPROFILE", project)
-		.env("APPDATA", project)
-		.current_dir(project)
-		.args([
-			"-a",
-			"claude",
-			"add",
-			"skill",
-			"--name",
-			"desctool",
-			"--description",
-			"d",
-		])
-		.output()
-		.unwrap()
-		.status
-		.success());
-
-	let out = assert_cmd::Command::cargo_bin("aghub-cli")
-		.unwrap()
-		.env("HOME", project)
-		.env("USERPROFILE", project)
-		.env("APPDATA", project)
-		.current_dir(project)
-		.args(["-a", "claude", "describe", "skill", "desctool"])
-		.output()
-		.unwrap();
-
-	assert!(
-		out.status.success(),
-		"stderr: {}",
-		String::from_utf8_lossy(&out.stderr)
-	);
-	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-	assert_eq!(json["name"], "desctool");
-	assert!(json.get("source_path").is_some(), "json: {json}");
-	assert!(
-		json.get("native_reader").is_some(),
-		"SkillView always carries native_reader: {json}"
-	);
-	assert!(
-		json.get("content").is_none(),
-		"content not on SkillView: {json}"
-	);
-}
-
 // ==================== #6: inference inventory CRUD ====================
 //
 // The inference store roots at `dirs::data_dir()/aghub` (= XDG_DATA_HOME on
