@@ -4,6 +4,39 @@
 @import "./styles/form.css";
 @import "./styles/onboarding.css";
 
+/*
+ * Global scrollbar styling. The `--scrollbar` theme token (theme.css) was
+ * defined but never applied, so the raw native WebView scrollbar showed
+ * through — chunky and off-theme. Use the token + a transparent border trick
+ * for a thin, floating thumb. Firefox-style props cover WebKitGTK; the
+ * `::-webkit-*` rules cover WKWebView (macOS) and WebView2 (Windows).
+ */
+* {
+	scrollbar-width: thin;
+	scrollbar-color: var(--scrollbar) transparent;
+}
+
+::-webkit-scrollbar {
+	width: 12px;
+	height: 12px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+	background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+	background-color: var(--scrollbar);
+	border-radius: 9999px;
+	border: 3px solid transparent;
+	background-clip: padding-box;
+}
+
+::-webkit-scrollbar-thumb:hover {
+	background-color: var(--muted);
+}
+
 @layer utilities {
 	.grid-rows-expand {
 		grid-template-rows: 1fr;
