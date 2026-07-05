@@ -148,6 +148,42 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 	}
 }
 
+/// Structured reason a transactional skill swap/rename could not complete, so
+/// callers render a reason + one actionable next step instead of a bare
+/// "may need manual recovery" string. The universal-rename path
+/// (`manager::skill::rollback_master_rename`) maps onto the same enum.
+#[derive(Debug, Clone)]
+pub enum RecoveryHint {
+	/// A dangling/foreign symlink is blocking a relink.
+	BrokenSymlink { link: PathBuf },
+	/// The rollback itself failed — `recover_from` is the only surviving copy
+	/// of the original contents and must be moved back to `restore_to` by hand.
+	ManualRestore {
+		recover_from: PathBuf,
+		restore_to: PathBuf,
+	},
+}
+
+impl RecoveryHint {
+	/// One actionable line. The only raw interpolation is the path(s).
+	pub fn next_step(&self) -> String {
+		match self {
+			RecoveryHint::BrokenSymlink { link } => {
+				format!("remove the broken link {} and retry", link.display())
+			}
+			RecoveryHint::ManualRestore {
+				recover_from,
+				restore_to,
+			} => format!(
+				"original contents retained at {}; move them back to {} \
+				 to recover",
+				recover_from.display(),
+				restore_to.display()
+			),
+		}
+	}
+}
+
 pub fn stage_and_swap_dir(
 	source_dir: &Path,
 	target_dir: &Path,

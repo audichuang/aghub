@@ -25,7 +25,7 @@ impl Fetcher for GitFetcher {
 		token: Option<&str>,
 	) -> Result<FetchedRepo, FetchError> {
 		let url = normalize_fetch_url(&source_ref.source)?;
-		let creds = token
+		let creds = https_only_token(&url, token)
 			.map(|token| aghub_git::Credentials::new("x-access-token", token));
 		let (bare, oid) = aghub_git::fetch_ref_to_temp(
 			&url,
@@ -89,6 +89,15 @@ fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
 		.map_err(|_| FetchError::Network)
 }
 
+/// Tokens are HTTPS-only: `aghub_git::inject_credentials` rejects every
+/// other scheme, so passing a token alongside an ssh/scp/git URL turns a
+/// fetch that could succeed over the transport's own auth (ssh agent) into
+/// a guaranteed error. Drop the token instead and let the unauthenticated
+/// attempt stand.
+fn https_only_token<'t>(url: &str, token: Option<&'t str>) -> Option<&'t str> {
+	token.filter(|_| url.starts_with("https://"))
+}
+
 fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
 	let msg = e.to_string();
 	let lower = msg.to_lowercase();
@@ -117,11 +126,37 @@ impl RefResolver for GitRefResolver {
 	) -> Result<String, FetchError> {
 		let url = normalize_fetch_url(&source_ref.source)?;
 		let mut opts = aghub_git::RemoteOptions::new(&url);
-		if let Some(token) = token {
+		if let Some(token) = https_only_token(&url, token) {
 			opts = opts.with_credentials("x-access-token", token);
 		}
 		aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
 			.map_err(classify_fetch_error)?
 			.ok_or(FetchError::Network)
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::https_only_token;
+
+	#[test]
+	fn token_is_dropped_for_non_https_urls() {
+		let token = Some("tok");
+		assert_eq!(
+			https_only_token("https://github.com/o/r.git", token),
+			Some("tok")
+		);
+		for url in [
+			"git@github.com:o/r.git",
+			"ssh://git@github.com/o/r.git",
+			"git://github.com/o/r.git",
+			"http://github.com/o/r.git",
+		] {
+			assert_eq!(
+				https_only_token(url, token),
+				None,
+				"token must not be attached to {url}"
+			);
+		}
 	}
 }

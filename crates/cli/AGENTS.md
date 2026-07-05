@@ -59,7 +59,8 @@ lock):
 - **Default (offline)** — no network; remote sources are reported
   `uncheckable` (`network`), local-only sources `local`.
 - **`--online`** (alias `--check-remote`) — runs the shared `skill-update`
-  orchestrator with an env (`GIT_USERNAME`/`GIT_PASSWORD`) `TokenResolver`: a
+  orchestrator with the same env `TokenResolver` as the `source` commands
+  (`GIT_PASSWORD` on any host; `GITHUB_TOKEN` bound to github.com): a
   cheap ls-refs preflight skips the fetch when the upstream tip is unchanged
   **and** the installed copy is unmodified, else a treeless fetch + hash compare.
 

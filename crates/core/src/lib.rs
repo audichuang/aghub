@@ -6,6 +6,7 @@ pub mod adapter;
 pub mod adapters;
 pub mod all_agents;
 pub mod availability;
+pub mod dto;
 pub mod manager;
 pub mod paths;
 pub mod registry;

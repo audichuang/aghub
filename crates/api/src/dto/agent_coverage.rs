@@ -42,4 +42,40 @@ mod tests {
 			r#"{"id":"claude","scope":"global","reads_master":false,"writes_master":false,"needs_link":true,"auto_covered":false,"supported":true}"#
 		);
 	}
+
+	/// Finding #4: this ts-rs DTO and the shared core `AgentSkillCoverageView`
+	/// (which the CLI serializes) must emit BYTE-IDENTICAL JSON — the
+	/// single-source contract. The core view's field order/names are the
+	/// authority; if the two drift, this fails.
+	#[test]
+	fn dto_matches_shared_core_view_byte_for_byte() {
+		use aghub_core::skills::linker::classify::{AgentLinkPlan, LinkNeed};
+		let plan = AgentLinkPlan {
+			agent_id: "claude",
+			need: LinkNeed::NeedsLink {
+				agent_skills_dir: std::path::PathBuf::from("/x"),
+			},
+			installed: false,
+			reads_master: false,
+			writes_master: true,
+		};
+		let view =
+			aghub_core::skills::linker::AgentSkillCoverageView::from_plan(
+				&plan, "global",
+			);
+		let dto = AgentSkillCoverageDto {
+			id: view.id.clone(),
+			scope: view.scope.clone(),
+			reads_master: view.reads_master,
+			writes_master: view.writes_master,
+			needs_link: view.needs_link,
+			auto_covered: view.auto_covered,
+			supported: view.supported,
+		};
+		assert_eq!(
+			serde_json::to_string(&dto).unwrap(),
+			serde_json::to_string(&view).unwrap(),
+			"API DTO and shared core view must serialize identically"
+		);
+	}
 }

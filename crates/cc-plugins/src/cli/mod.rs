@@ -26,6 +26,27 @@ pub(crate) fn cli_scope(scope: InstallScope) -> &'static str {
 	}
 }
 
+/// Deserialize each element of a JSON array independently, skipping (and
+/// logging) any entry that fails. The `claude` CLI's JSON shape (e.g. new
+/// `source` discriminants like `directory`) evolves faster than these typed
+/// views; a single unrecognized entry must NOT blank the whole list (which is
+/// exactly how a directory-source marketplace once broke `marketplace list`).
+fn lenient_collect<T: serde::de::DeserializeOwned>(
+	values: Vec<serde_json::Value>,
+	what: &str,
+) -> Vec<T> {
+	values
+		.into_iter()
+		.filter_map(|value| match serde_json::from_value::<T>(value.clone()) {
+			Ok(parsed) => Some(parsed),
+			Err(e) => {
+				log::warn!("skipping unparseable {what} entry: {e}");
+				None
+			}
+		})
+		.collect()
+}
+
 /// Outer ceiling for any single CLI invocation. The CLI itself enforces
 /// per-operation timeouts (git defaults to 120s); this guards against the
 /// process never returning.
@@ -110,9 +131,20 @@ impl ClaudeCli {
 		let output = self
 			.spawn(&["plugin", "list", "--json", "--available"])
 			.await?;
-		serde_json::from_slice(&output.stdout).context(
+		let root: serde_json::Value = serde_json::from_slice(&output.stdout)
+			.context(
 			"failed to parse `claude plugin list --json --available` output",
-		)
+		)?;
+		let take = |key: &str| -> Vec<serde_json::Value> {
+			root.get(key)
+				.and_then(|v| v.as_array())
+				.cloned()
+				.unwrap_or_default()
+		};
+		Ok(CliPluginCatalog {
+			installed: lenient_collect(take("installed"), "installed plugin"),
+			available: lenient_collect(take("available"), "available plugin"),
+		})
 	}
 
 	pub async fn plugin_enable(
@@ -172,9 +204,13 @@ impl ClaudeCli {
 		let output = self
 			.spawn(&["plugin", "marketplace", "list", "--json"])
 			.await?;
-		serde_json::from_slice(&output.stdout).context(
-			"failed to parse `claude plugin marketplace list --json` output",
+		let values: Vec<serde_json::Value> = serde_json::from_slice(
+			&output.stdout,
 		)
+		.context(
+			"failed to parse `claude plugin marketplace list --json` output",
+		)?;
+		Ok(lenient_collect(values, "marketplace"))
 	}
 
 	/// Accepts `owner/repo`, git URLs, local paths, or `marketplace.json` URLs.
@@ -338,6 +374,23 @@ mod tests {
 	#[test]
 	fn parse_cli_error_returns_none_for_glyph_without_message() {
 		assert!(parse_cli_error("✘   ").is_none());
+	}
+
+	#[test]
+	fn lenient_collect_skips_bad_entries_keeps_good() {
+		use crate::cli::types::CliMarketplace;
+		// One github entry (good), one entry with an unknown future source tag
+		// (bad). The good one must survive; the whole list must NOT blank out.
+		let values: Vec<serde_json::Value> = serde_json::from_str(
+			r#"[
+				{"name":"ok","source":"github","repo":"o/r","installLocation":"/x"},
+				{"name":"future","source":"some-new-kind","blob":1,"installLocation":"/y"}
+			]"#,
+		)
+		.unwrap();
+		let kept: Vec<CliMarketplace> = lenient_collect(values, "marketplace");
+		assert_eq!(kept.len(), 1, "the unknown entry is skipped, not fatal");
+		assert_eq!(kept[0].name, "ok");
 	}
 
 	#[test]

@@ -74,15 +74,23 @@ pub struct SkillResponse {
 	pub enabled: bool,
 	pub source_path: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub canonical_path: Option<String>,
 	pub description: Option<String>,
 	pub author: Option<String>,
 	pub version: Option<String>,
 	pub tools: Vec<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub source: Option<ConfigSource>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub agent: Option<String>,
+	/// Advisory: the target agent reads the `.agents` master directly
+	/// (NativeReader), so a universal install writes only the master with no
+	/// per-agent link. Always serialized (default false) so the wire matches the
+	/// generated `native_reader: boolean` ts-rs type — no DTO drift.
+	pub native_reader: bool,
 }
 
 #[derive(Debug, Clone, Serialize, TS)]
@@ -110,25 +118,58 @@ impl From<Skill> for SkillResponse {
 
 impl SkillResponse {
 	pub fn from_agent_skill(skill: Skill, agent_id: &str) -> Self {
-		let mut response = Self::from(&skill);
-		response.agent = Some(agent_id.to_string());
-		response
+		SkillResponse::from(
+			&aghub_core::dto::SkillView::from(&skill).with_agent(agent_id),
+		)
 	}
 }
 
 impl From<&Skill> for SkillResponse {
 	fn from(s: &Skill) -> Self {
+		// Delegate the field mapping to the one core SkillView seam; this
+		// wrapper only maps ConfigSource and the native_reader advisory.
+		SkillResponse::from(&aghub_core::dto::SkillView::from(s))
+	}
+}
+
+/// Thin ts-rs wrapper over the core [`SkillView`]: the field list lives once in
+/// `aghub_core::dto`, so this only maps `ConfigSource` and carries the
+/// `native_reader` advisory across.
+impl From<&aghub_core::dto::SkillView> for SkillResponse {
+	fn from(v: &aghub_core::dto::SkillView) -> Self {
 		SkillResponse {
-			name: s.name.clone(),
-			enabled: s.enabled,
-			source_path: s.source_path.clone(),
-			canonical_path: s.canonical_path.clone(),
-			description: s.description.clone(),
-			author: s.author.clone(),
-			version: s.version.clone(),
-			tools: s.tools.clone(),
-			source: s.config_source.map(Into::into),
-			agent: None,
+			name: v.name.clone(),
+			enabled: v.enabled,
+			source_path: v.source_path.clone(),
+			canonical_path: v.canonical_path.clone(),
+			description: v.description.clone(),
+			author: v.author.clone(),
+			version: v.version.clone(),
+			tools: v.tools.clone(),
+			source: v.source.map(Into::into),
+			agent: v.agent.clone(),
+			native_reader: v.native_reader,
+		}
+	}
+}
+
+/// Thin ts-rs wrapper over the core [`RemovalView`]: the 7 shared
+/// removal-outcome fields copy across. `error`/`validation_errors` and the
+/// lock-prune fields are api-only (core does not own them) and default to None.
+impl From<&aghub_core::dto::RemovalView> for DeleteSkillByPathResponse {
+	fn from(v: &aghub_core::dto::RemovalView) -> Self {
+		DeleteSkillByPathResponse {
+			success: v.success,
+			dry_run: v.dry_run,
+			executed: v.executed,
+			needs_confirm: v.needs_confirm,
+			paths: v.paths.clone(),
+			skipped: v.skipped.clone(),
+			deleted_path: v.deleted_path.clone(),
+			pruned_lock_entries: None,
+			prune_error: None,
+			error: None,
+			validation_errors: None,
 		}
 	}
 }
@@ -367,11 +408,27 @@ pub struct DeleteSkillByPathResponse {
 	pub paths: Vec<String>,
 	/// Paths intentionally NOT removed (outside the allow-listed skills roots).
 	pub skipped: Vec<String>,
-	#[serde(skip_serializing_if = "Option::is_none")]
+	/// Absolute path actually removed (only when `executed`); `null` otherwise.
+	/// Always serialized (no skip) so the runtime matches both the shared
+	/// `RemovalView` wire shape and the generated `deleted_path: string | null`.
 	pub deleted_path: Option<String>,
+	/// Lock keys (skill names — never raw paths) dropped by the post-delete
+	/// disk-reconciled prune. `Some([])` means the prune ran and found nothing
+	/// orphaned; `None` means no prune was attempted (dry-run/unconfirmed). On a
+	/// prune failure this carries the keys dropped BEFORE the failure (partial).
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub pruned_lock_entries: Option<Vec<String>>,
+	/// Set when the post-delete lock prune failed. The deletion still happened
+	/// (prune is non-fatal); this reports why the lock could not be reconciled.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub prune_error: Option<String>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub error: Option<String>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub validation_errors: Option<Vec<ValidationError>>,
 }
 
@@ -569,6 +626,220 @@ pub struct AcceptRenameResponse {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use ts_rs::TS;
+
+	/// Guard: serde optionality must match ts-rs optionality. A field that serde
+	/// omits when `None` (`skip_serializing_if`) MUST be declared `field?:` in the
+	/// generated TS — otherwise the runtime drops a key the type says is always
+	/// present, and a consumer reads `undefined` where it expects `T | null`.
+	fn assert_serde_matches_ts<T: serde::Serialize + TS>(value: &T) {
+		let json = serde_json::to_value(value).unwrap();
+		let obj = json.as_object().expect("struct serializes to an object");
+		let decl = T::decl(&ts_rs::Config::default());
+		// Members are `name: type` / `name?: type`, separated by `,`/`;`/newline
+		// in the generated decl. A field the TS declares REQUIRED (no `?`) must be
+		// emitted by serde for this all-None value; otherwise serde optionality
+		// and ts-rs optionality diverge.
+		for member in decl.split([',', ';', '\n']).map(str::trim) {
+			let Some((lhs, _ty)) = member.split_once(':') else {
+				continue; // not a `name: type` member (JSDoc, braces, …)
+			};
+			let lhs = lhs.trim();
+			if lhs.is_empty()
+				|| lhs.contains(' ')
+				|| lhs.contains('"')
+				|| lhs.contains('|')
+				|| lhs.contains('/')
+			{
+				continue; // not a bare identifier member
+			}
+			if lhs.ends_with('?') {
+				continue; // optional in TS — serde may omit, no divergence
+			}
+			assert!(
+				obj.contains_key(lhs),
+				"field `{lhs}` is required in TS (`{lhs}: …`) but serde omitted \
+				 it; add `#[ts(optional)]` or stop skipping it.\nTS: {decl}",
+			);
+		}
+	}
+
+	#[test]
+	fn skill_response_serde_optionality_matches_ts() {
+		// All-None optionals: any field serde skips must be `?` in the TS decl.
+		let resp = SkillResponse::from(&aghub_core::models::Skill::new("x"));
+		assert_serde_matches_ts(&resp);
+	}
+
+	#[test]
+	fn delete_skill_by_path_response_serde_optionality_matches_ts() {
+		let resp = DeleteSkillByPathResponse::default();
+		assert_serde_matches_ts(&resp);
+	}
+
+	#[test]
+	fn delete_response_from_removal_view_matches_outcome() {
+		// The api DeleteSkillByPathResponse must be a thin wrapper over the core
+		// RemovalView: the 7 shared fields copy across, and the serde json keeps
+		// the snake_case keys the desktop consumes (dry_run/needs_confirm).
+		let view = aghub_core::dto::RemovalView {
+			success: true,
+			dry_run: false,
+			executed: true,
+			needs_confirm: true,
+			paths: vec!["/a/foo".to_string()],
+			skipped: vec!["/a/bar".to_string()],
+			deleted_path: Some("/a/foo".to_string()),
+		};
+		let resp = DeleteSkillByPathResponse::from(&view);
+		assert!(resp.success);
+		assert!(!resp.dry_run);
+		assert!(resp.executed);
+		assert!(resp.needs_confirm);
+		assert_eq!(resp.paths, vec!["/a/foo".to_string()]);
+		assert_eq!(resp.skipped, vec!["/a/bar".to_string()]);
+		assert_eq!(resp.deleted_path.as_deref(), Some("/a/foo"));
+		// API-only error fields are not owned by core; default to None.
+		assert!(resp.error.is_none());
+		assert!(resp.validation_errors.is_none());
+		assert!(resp.pruned_lock_entries.is_none());
+		assert!(resp.prune_error.is_none());
+
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["dry_run"], serde_json::json!(false));
+		assert_eq!(json["needs_confirm"], serde_json::json!(true));
+		assert!(json.get("dryRun").is_none(), "must stay snake_case");
+		assert!(json.get("needsConfirm").is_none(), "must stay snake_case");
+	}
+
+	#[test]
+	fn removal_view_and_response_serialize_one_deleted_path_shape() {
+		// One wire shape for `deleted_path`: serializing the core RemovalView
+		// directly (CLI) must produce the same `deleted_path` key as the API
+		// DeleteSkillByPathResponse wrapping it — for BOTH Some and None. They
+		// diverged when the API skipped `deleted_path` on None while RemovalView
+		// (and the generated `deleted_path: string | null`) always emitted it.
+		for deleted_path in [None, Some("/a/foo".to_string())] {
+			let view = aghub_core::dto::RemovalView {
+				success: true,
+				dry_run: deleted_path.is_none(),
+				executed: deleted_path.is_some(),
+				needs_confirm: false,
+				paths: vec![],
+				skipped: vec![],
+				deleted_path: deleted_path.clone(),
+			};
+			let resp = DeleteSkillByPathResponse::from(&view);
+			let view_json = serde_json::to_value(&view).unwrap();
+			let resp_json = serde_json::to_value(&resp).unwrap();
+			// The key must be present in both, even when None (= null), to
+			// match the ts-rs `deleted_path: string | null` contract.
+			assert!(
+				view_json.get("deleted_path").is_some(),
+				"RemovalView must always emit deleted_path"
+			);
+			assert!(
+				resp_json.get("deleted_path").is_some(),
+				"response must always emit deleted_path (no skip on None)"
+			);
+			// The whole object must match, not just deleted_path: the api-only
+			// pruned_lock_entries/prune_error/error/validation_errors all skip
+			// when None, so a thin wrapper over the 7-field RemovalView is
+			// byte-identical for both the None and Some(deleted_path) cases.
+			assert_eq!(
+				view_json, resp_json,
+				"RemovalView and DeleteSkillByPathResponse must be one wire shape"
+			);
+		}
+	}
+
+	#[test]
+	fn skill_response_serializes_native_reader_false() {
+		// native_reader is always serialized so the wire matches the generated
+		// `native_reader: boolean` ts-rs type (default false, no drift).
+		let skill = aghub_core::models::Skill::new("foo");
+		let resp = SkillResponse::from(&skill);
+		assert!(!resp.native_reader);
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(
+			json["native_reader"],
+			serde_json::json!(false),
+			"native_reader must be present (= false)"
+		);
+	}
+
+	#[test]
+	fn skill_view_and_response_serialize_the_same_wire_shape() {
+		// The candidate's promise is one wire shape: serializing the core
+		// SkillView directly (the CLI path) must produce byte-identical JSON to
+		// the API SkillResponse wrapping it. They diverged when SkillView
+		// emitted explicit nulls for canonical_path/source/agent while
+		// SkillResponse skipped them when None.
+		let skill = aghub_core::models::Skill::new("foo");
+		let view = aghub_core::dto::SkillView::from(&skill);
+		let resp = SkillResponse::from(&view);
+		assert_eq!(
+			serde_json::to_value(&view).unwrap(),
+			serde_json::to_value(&resp).unwrap(),
+			"SkillView and SkillResponse must be one wire shape"
+		);
+
+		// With EVERY field populated they must still be byte-identical, so a
+		// dropped/renamed field in either wrapper fails this test (not just the
+		// optional canonical_path/source/agent trio).
+		let mut skill = aghub_core::models::Skill::new("bar");
+		skill.source_path = Some("~/.claude/skills/bar/SKILL.md".to_string());
+		skill.description = Some("desc".to_string());
+		skill.author = Some("auth".to_string());
+		skill.version = Some("1.2.3".to_string());
+		skill.tools = vec!["read".to_string(), "write".to_string()];
+		skill.canonical_path = Some(".agents/skills/bar".to_string());
+		skill.config_source = Some(aghub_core::models::ConfigSource::Global);
+		let view = aghub_core::dto::SkillView::from(&skill)
+			.with_agent("claude")
+			.with_native_reader(true);
+		let resp = SkillResponse::from(&view);
+		let view_json = serde_json::to_value(&view).unwrap();
+		let resp_json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(
+			view_json, resp_json,
+			"populated SkillView and SkillResponse must be one wire shape"
+		);
+		// Every wire field must actually be present (guards against a wrapper
+		// silently dropping one while both still happen to compare equal as the
+		// shorter object).
+		for key in [
+			"name",
+			"enabled",
+			"source_path",
+			"canonical_path",
+			"description",
+			"author",
+			"version",
+			"tools",
+			"source",
+			"agent",
+			"native_reader",
+		] {
+			assert!(
+				resp_json.get(key).is_some(),
+				"populated wire shape must carry `{key}`"
+			);
+		}
+	}
+
+	#[test]
+	fn skill_response_from_view_carries_native_reader() {
+		// Building from a core SkillView with the advisory set surfaces the
+		// `native_reader` key (= true).
+		let skill = aghub_core::models::Skill::new("foo");
+		let view =
+			aghub_core::dto::SkillView::from(&skill).with_native_reader(true);
+		let resp = SkillResponse::from(&view);
+		assert!(resp.native_reader);
+		let json = serde_json::to_value(&resp).unwrap();
+		assert_eq!(json["native_reader"], serde_json::json!(true));
+	}
 
 	#[test]
 	fn update_available_serializes_with_status_tag_and_fields() {

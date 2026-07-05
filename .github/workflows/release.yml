@@ -114,7 +114,7 @@ jobs:
                   name: "aghub ${{ github.event.inputs.version || github.ref_name }}"
                   body_path: CHANGES.md
                   draft: false
-                  prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+                  prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
 
     build-tauri:
         needs: [test, changelog]
@@ -271,8 +271,16 @@ jobs:
                   tagName: ${{ github.event.inputs.version || github.ref_name }}
                   releaseName: "aghub ${{ github.event.inputs.version || github.ref_name }}"
                   releaseDraft: false
-                  prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
-                  args: --target ${{ matrix.target }} --config src-tauri/tauri.bundle.conf.json
+                  prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
+                  # Windows MSI (WiX) rejects a non-numeric pre-release identifier
+                  # (e.g. -rc.1): "pre-release identifier ... must be numeric-only".
+                  # NSIS handles it fine, so for pre-release tags build NSIS only on
+                  # Windows (keeps setup.exe + the updater artifact; stable tags still
+                  # get the MSI). Other platforms/stable use the configured targets.
+                  # Both arms pass the bundle overlay so the staged aghub-api
+                  # sidecar ships inside the desktop bundle (see "Stage
+                  # version-locked aghub-api" above).
+                  args: ${{ (matrix.target == 'x86_64-pc-windows-msvc' && contains(github.ref_name, '-')) && format('--target {0} --bundles nsis --config src-tauri/tauri.bundle.conf.json', matrix.target) || format('--target {0} --config src-tauri/tauri.bundle.conf.json', matrix.target) }}
                   includeUpdaterJson: true
                   projectPath: crates/desktop
 
@@ -381,12 +389,16 @@ jobs:
               uses: softprops/action-gh-release@v3
               with:
                   tag_name: ${{ github.event.inputs.version || github.ref_name }}
-                  prerelease: ${{ github.event_name == 'workflow_dispatch' && inputs.prerelease || false }}
+                  prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
                   files: aghub-cli-*
 
     publish-homebrew:
         name: Update Homebrew Tap
         needs: [build-tauri, build-cli]
+        # Skip the stable Homebrew bump for pre-releases (tags with a '-' suffix,
+        # e.g. vX.Y.Z-rc.N). RC testers download the prerelease assets directly;
+        # `brew install aghub` must keep pointing at the last STABLE version.
+        if: ${{ !contains(github.event.inputs.version || github.ref_name, '-') }}
         runs-on: ubuntu-latest
         env:
             RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
@@ -498,3 +510,32 @@ jobs:
                   git add aghub-cli.rb Casks/aghub.rb
                   git commit -m "Update Homebrew formula and cask for aghub ${RELEASE_TAG}" || echo "No changes to commit"
                   git push
+
+    # Belt-and-suspenders for pre-releases (vX.Y.Z-rc.N): explicitly re-assert
+    # the GitHub Release as a prerelease and NOT "latest", after all build/upload
+    # steps. A release builder can flip the prerelease flag back to false (orca
+    # hit exactly this — an RC briefly became "latest"), which would let the
+    # Tauri updater (endpoint = releases/latest/download/latest.json) push the RC
+    # to every installed stable app. Gating on the tag shape, not the flag, is
+    # the robust contract.
+    finalize-prerelease:
+        name: Mark RC as prerelease (not latest)
+        needs: [build-tauri, build-cli]
+        # !cancelled(): run even when a build job failed — a builder may have
+        # already flipped the release to latest before the failure, and skipping
+        # this job would leave the RC pinned at releases/latest (which the Tauri
+        # updater serves to every stable user).
+        if: ${{ !cancelled() && contains(github.event.inputs.version || github.ref_name, '-') }}
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        env:
+            RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - name: Force prerelease + not-latest
+              run: |
+                  gh release edit "$RELEASE_TAG" \
+                      --repo "${{ github.repository }}" \
+                      --prerelease \
+                      --latest=false

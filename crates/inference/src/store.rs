@@ -237,6 +237,35 @@ impl<C: CredentialStore> InferenceProviderStore<C> {
 	}
 }
 
+/// Build the WARN message for a failed rollback step, or `None` when it
+/// succeeded. Pure so the message contract can be unit-tested without a logger.
+fn rollback_failure_message(
+	op: &str,
+	id: &str,
+	result: &Result<()>,
+) -> Option<String> {
+	result.as_ref().err().map(|error| {
+		format!(
+			"inference provider {id}: rollback step '{op}' failed after a \
+			 primary error; stored state may be inconsistent: {error}"
+		)
+	})
+}
+
+/// Log a best-effort rollback/cleanup failure instead of silently dropping it.
+///
+/// These run only after a PRIMARY operation already failed: the primary error is
+/// what the caller gets back (a rollback can't change that), but a rollback that
+/// ALSO fails leaves stored state inconsistent (e.g. a keyring key that couldn't
+/// be restored after a DB error). Swallowing it with `let _` hid that second
+/// failure behind the first; logging at WARN makes it observable. `op` names the
+/// rollback action; `id` is the provider it targeted.
+fn log_rollback_failure(op: &str, id: &str, result: Result<()>) {
+	if let Some(message) = rollback_failure_message(op, id, &result) {
+		log::warn!("{message}");
+	}
+}
+
 fn map_row(row: sqlx::sqlite::SqliteRow) -> Result<InferenceProvider> {
 	let format_str: String = row.try_get("format")?;
 	let format = format_str.parse::<InferenceProviderFormat>()?;
@@ -334,12 +363,24 @@ impl<C: CredentialStore> InferenceProviderRepository
 			.await;
 
 			if let Err(error) = result {
-				let _ = self.credentials.delete_api_key(&provider.id);
-				let _ =
+				log_rollback_failure(
+					"delete_api_key",
+					&provider.id,
+					self.credentials.delete_api_key(&provider.id),
+				);
+				let row_rollback =
 					sqlx::query("DELETE FROM inference_providers WHERE id = ?")
 						.bind(&provider.id)
 						.execute(&mut conn)
 						.await;
+				if let Err(rollback) = row_rollback {
+					log::warn!(
+						"inference provider {}: rollback step \
+						 'delete_row' failed after a primary error; an orphan \
+						 row may remain: {rollback}",
+						provider.id
+					);
+				}
 				return Err(error);
 			}
 
@@ -427,12 +468,16 @@ impl<C: CredentialStore> InferenceProviderRepository
 			if let Err(error) = result {
 				if let Some(previous) = previous_api_key {
 					match previous {
-						Some(key) => {
-							let _ = self.credentials.set_api_key(id, &key);
-						}
-						None => {
-							let _ = self.credentials.delete_api_key(id);
-						}
+						Some(key) => log_rollback_failure(
+							"restore_api_key",
+							id,
+							self.credentials.set_api_key(id, &key),
+						),
+						None => log_rollback_failure(
+							"delete_api_key",
+							id,
+							self.credentials.delete_api_key(id),
+						),
 					}
 				}
 				return Err(error);
@@ -458,7 +503,11 @@ impl<C: CredentialStore> InferenceProviderRepository
 
 			if let Err(error) = result {
 				if let Some(key) = previous_api_key {
-					let _ = self.credentials.set_api_key(id, &key);
+					log_rollback_failure(
+						"restore_api_key",
+						id,
+						self.credentials.set_api_key(id, &key),
+					);
 				}
 				return Err(error.into());
 			}
@@ -491,12 +540,16 @@ impl<C: CredentialStore> InferenceProviderRepository
 
 			if let Err(error) = result {
 				match previous {
-					Some(key) => {
-						let _ = self.credentials.set_api_key(id, &key);
-					}
-					None => {
-						let _ = self.credentials.delete_api_key(id);
-					}
+					Some(key) => log_rollback_failure(
+						"restore_api_key",
+						id,
+						self.credentials.set_api_key(id, &key),
+					),
+					None => log_rollback_failure(
+						"delete_api_key",
+						id,
+						self.credentials.delete_api_key(id),
+					),
 				}
 				return Err(error.into());
 			}
@@ -522,7 +575,11 @@ impl<C: CredentialStore> InferenceProviderRepository
 
 			if let Err(error) = result {
 				if let Some(key) = previous {
-					let _ = self.credentials.set_api_key(id, &key);
+					log_rollback_failure(
+						"restore_api_key",
+						id,
+						self.credentials.set_api_key(id, &key),
+					);
 				}
 				return Err(error.into());
 			}
@@ -1465,5 +1522,38 @@ mod tests {
 			.unwrap_err();
 
 		assert!(matches!(error, InferenceProviderError::EmptyModelName));
+	}
+
+	// ── Finding #3: rollback-failure observability ──────────────────────────
+	//
+	// The store's best-effort rollback steps used to be `let _ = ...`, hiding a
+	// keyring rollback failure behind the primary DB error. They now route
+	// through `log_rollback_failure` → `rollback_failure_message`, which surfaces
+	// the dropped failure at WARN. The message builder is pure, so we assert its
+	// contract directly (op + id + cause on Err; nothing on Ok) without a logger.
+
+	#[test]
+	fn rollback_failure_message_surfaces_op_id_and_cause() {
+		let message = rollback_failure_message(
+			"restore_api_key",
+			"prov-123",
+			&Err(InferenceProviderError::Keyring("boom".to_string())),
+		)
+		.expect("a failed rollback must produce a message");
+		assert!(
+			message.contains("restore_api_key"),
+			"names the op: {message}"
+		);
+		assert!(message.contains("prov-123"), "names the id: {message}");
+		assert!(message.contains("boom"), "carries the cause: {message}");
+	}
+
+	#[test]
+	fn rollback_ok_produces_no_message() {
+		assert!(
+			rollback_failure_message("restore_api_key", "prov-456", &Ok(()))
+				.is_none(),
+			"a successful rollback must be silent"
+		);
 	}
 }

@@ -166,3 +166,73 @@ impl From<OperationBatchResult> for OperationBatchResponse {
 		}
 	}
 }
+
+#[cfg(test)]
+mod tests {
+	use aghub_core::transfer::{OperationBatchView, OperationResultView};
+
+	use super::*;
+
+	/// Finding #4: the API DTO (ts-rs) and the shared core `OperationBatchView`
+	/// (which the CLI serializes) must emit BYTE-IDENTICAL JSON. This is the
+	/// single-source contract — if the two mappings ever drift, this fails.
+	#[test]
+	fn dto_matches_shared_core_view_byte_for_byte() {
+		use std::path::PathBuf;
+		let batch = OperationBatchResult {
+			results: vec![
+				OperationResult {
+					target: InstallTarget {
+						agent: "claude".parse().unwrap(),
+						scope: InstallScope::Project,
+						project_root: Some(PathBuf::from("/tmp/proj")),
+					},
+					action: OperationAction::Copy,
+					success: true,
+					error: None,
+				},
+				OperationResult {
+					target: InstallTarget {
+						agent: "opencode".parse().unwrap(),
+						scope: InstallScope::Global,
+						project_root: None,
+					},
+					action: OperationAction::Delete,
+					success: false,
+					error: Some("nope".to_string()),
+				},
+			],
+		};
+
+		let dto_json =
+			serde_json::to_string(&OperationBatchResponse::from(batch.clone()))
+				.unwrap();
+		let view_json =
+			serde_json::to_string(&OperationBatchView::from(&batch)).unwrap();
+		assert_eq!(
+			dto_json, view_json,
+			"API DTO and shared core view must serialize identically"
+		);
+	}
+
+	#[test]
+	fn result_dto_matches_result_view() {
+		use std::path::PathBuf;
+		let result = OperationResult {
+			target: InstallTarget {
+				agent: "cursor".parse().unwrap(),
+				scope: InstallScope::Project,
+				project_root: Some(PathBuf::from("/x")),
+			},
+			action: OperationAction::Copy,
+			success: true,
+			error: None,
+		};
+		let dto =
+			serde_json::to_string(&OperationResultDto::from(result.clone()))
+				.unwrap();
+		let view =
+			serde_json::to_string(&OperationResultView::from(&result)).unwrap();
+		assert_eq!(dto, view);
+	}
+}

@@ -180,7 +180,7 @@ pub fn install_fetched_skill_and_lock(
 			))
 		})?;
 
-	let (agent_results, wrote_master) = install_universal_layout(
+	let (agent_results, wrote_master) = materialize_universal_master(
 		&source_root,
 		&safe_name,
 		req.scope,
@@ -223,12 +223,19 @@ pub fn install_fetched_skill_and_lock(
 	})
 }
 
+/// The ONE universal-install materializer shared by every install path: the
+/// fetched/desktop install ([`install_fetched_skill_and_lock`]) AND the CLI
+/// `aghub add skill` path (`ConfigManager::add_skill_universal` /
+/// `add_skill_from_path_universal`). Materializes the `.agents/skills/<name>`
+/// Master from `source_root` (copy-free linker; copied only when absent) and
+/// links each `NeedsLink` agent.
+///
 /// Returns the per-agent results plus `wrote_master` — `true` only when the
 /// canonical master was NEWLY written on this run. NativeReader agents are
 /// reported installed with NO link; NeedsLink agents are linked via the
 /// copy-free linker; Unsupported agents soft-fail. A per-agent LinkError is
 /// folded into that agent's row (Decision 10), never aborting the install.
-fn install_universal_layout(
+pub fn materialize_universal_master(
 	source_root: &Path,
 	safe_name: &str,
 	scope: ResourceScope,

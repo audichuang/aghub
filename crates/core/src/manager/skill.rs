@@ -154,6 +154,11 @@ impl ConfigManager {
 			use_relative,
 			link_need,
 		} = self.universal_install_prep()?;
+		// Capture materializer inputs BEFORE the mutable `config` borrow so the
+		// shared materializer can run during the install.
+		let scope = self.write_scope;
+		let project_root = self.project_root.clone();
+		let agent_type = self.agent_type();
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -193,6 +198,9 @@ impl ConfigManager {
 
 		let safe_name = sanitize_name(&skill.name);
 		let canonical = canonical_dir.join(&safe_name);
+		// This path has a `Skill` struct, not a source tree, so the from-struct
+		// SKILL.md is serialized here (intrinsic to this entry point). A
+		// pre-existing master is reused without overwriting.
 		if canonical.exists() {
 			warn!(
 				"canonical '{}' already exists; reusing without overwriting \
@@ -207,35 +215,25 @@ impl ConfigManager {
 			)?;
 		}
 
-		// Link this agent's own skills dir to the Master ONLY when it needs a
-		// link. A NativeReader reads `.agents/skills` directly (no redundant
-		// per-agent link — parity with the fetched/desktop install path); an
-		// Unsupported agent has no writable skills dir.
-		if matches!(
-			link_need,
-			crate::skills::linker::LinkNeed::NeedsLink { .. }
-		) {
-			if let Some(agent_dir) = &agent_write_dir {
-				let report = crate::skills::linker::link_agents_to_canonical(
-					&canonical,
-					std::slice::from_ref(agent_dir),
-					if use_relative {
-						crate::skills::linker::LinkTarget::Relative
-					} else {
-						crate::skills::linker::LinkTarget::Absolute
-					},
-				)
-				.map_err(|e| {
-					ConfigError::Io(std::io::Error::other(e.to_string()))
-				})?;
-				if !report.conflicts.is_empty() {
-					return Err(ConfigError::resource_exists(
-						"skill",
-						&skill.name,
-					));
-				}
-			}
-		}
+		// Classify + link via the ONE shared materializer. The Master already
+		// exists (written above), so the materializer's copy branch is skipped
+		// and only the unified classify-then-link logic runs — the SAME code the
+		// fetched/desktop path uses, so the two can no longer diverge.
+		let target_link = if use_relative {
+			crate::skills::linker::LinkTarget::Relative
+		} else {
+			crate::skills::linker::LinkTarget::Absolute
+		};
+		let (results, _wrote_master) =
+			crate::skills::install_fetched::materialize_universal_master(
+				&canonical,
+				&safe_name,
+				scope,
+				project_root.as_deref(),
+				std::slice::from_ref(&agent_type),
+				target_link,
+			)?;
+		Self::ensure_single_agent_installed(&results, &link_need, &skill.name)?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -448,8 +446,15 @@ impl ConfigManager {
 	/// sweep + containment + canonical-keep checks), then deletes ONLY when it is
 	/// not a dry-run AND either the plan is non-destructive or `confirm` is set.
 	/// Deletion re-checks each path's type and containment at delete time (TOCTOU)
-	/// and tolerates already-removed paths. The lock is NOT pruned here — pruning
-	/// is a separate, explicit step (`skills::prune`).
+	/// and tolerates already-removed paths. On execution the per-scope skill lock
+	/// IS pruned here and the result is reported in [`RemovalOutcome::prune`]
+	/// (`NotRun` on a dry-run/unconfirmed op, `Pruned`/`Failed` on execute). A
+	/// prune failure is non-fatal — the deletion already happened — but it does
+	/// NOT always leave the lock untouched: a single-scope (`GlobalOnly` /
+	/// `ProjectOnly`) failure leaves that one lock unchanged, whereas a `Both`
+	/// prune reconciles two independent locks in sequence, so a project failure
+	/// after the global lock was already pruned records that partial mutation in
+	/// `Failed.pruned`.
 	pub fn remove_skill_planned(
 		&mut self,
 		name: &str,
@@ -483,6 +488,7 @@ impl ConfigManager {
 			return Ok(removal::RemovalOutcome {
 				plan,
 				executed: false,
+				prune: removal::PruneStatus::NotRun,
 			});
 		}
 
@@ -514,9 +520,19 @@ impl ConfigManager {
 			cfg.skills.remove(idx);
 		}
 
+		// Reconcile the per-scope lock against disk now the skill is gone,
+		// through the single core-owned seam (also used by the API by-path copy
+		// branch). It handles GlobalOnly/ProjectOnly/Both with the same lazy
+		// semantics and is non-fatal on error.
+		let prune = crate::skills::prune::prune_lock_for_scope(
+			self.scope,
+			self.project_root.as_deref(),
+		);
+
 		Ok(removal::RemovalOutcome {
 			plan,
 			executed: true,
+			prune,
 		})
 	}
 
@@ -615,6 +631,11 @@ impl ConfigManager {
 			use_relative,
 			link_need,
 		} = self.universal_install_prep()?;
+		// Capture the materializer inputs BEFORE borrowing `config` mutably so
+		// the shared materializer can run while the config check is in flight.
+		let scope = self.write_scope;
+		let project_root = self.project_root.clone();
+		let agent_type = self.agent_type();
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -650,32 +671,26 @@ impl ConfigManager {
 		let safe_name = sanitize_name(&skill.name);
 		let canonical = canonical_dir.join(&safe_name);
 
-		// `install_universal` only copies source -> canonical when canonical
-		// is absent, so a pre-existing master is preserved (idempotent across
-		// multi-agent installs of the same skill).
+		// ONE materializer: the same `materialize_universal_master` the
+		// fetched/desktop path uses. It copies source -> canonical only when
+		// canonical is absent (a pre-existing master is preserved) and links
+		// only a NeedsLink agent (a NativeReader reads the Master directly).
 		let source_root = crate::skills::skill_source_root(path);
-		// Link only a NeedsLink agent; a NativeReader reads the Master directly
-		// (no redundant per-agent link — parity with the fetched/desktop path).
-		let symlink_dirs: Vec<PathBuf> = match &link_need {
-			crate::skills::linker::LinkNeed::NeedsLink { agent_skills_dir } => {
-				vec![agent_skills_dir.clone()]
-			}
-			_ => Vec::new(),
+		let target_link = if use_relative {
+			crate::skills::linker::LinkTarget::Relative
+		} else {
+			crate::skills::linker::LinkTarget::Absolute
 		};
-		let report = crate::skills::linker::install_universal(
-			&source_root,
-			&canonical,
-			&symlink_dirs,
-			if use_relative {
-				crate::skills::linker::LinkTarget::Relative
-			} else {
-				crate::skills::linker::LinkTarget::Absolute
-			},
-		)
-		.map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
-		if !report.conflicts.is_empty() {
-			return Err(ConfigError::resource_exists("skill", &skill.name));
-		}
+		let (results, _wrote_master) =
+			crate::skills::install_fetched::materialize_universal_master(
+				&source_root,
+				&safe_name,
+				scope,
+				project_root.as_deref(),
+				std::slice::from_ref(&agent_type),
+				target_link,
+			)?;
+		Self::ensure_single_agent_installed(&results, &link_need, &skill.name)?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -686,6 +701,32 @@ impl ConfigManager {
 
 		self.save_current()?;
 		Ok(skill)
+	}
+
+	/// Map the single-agent result from `materialize_universal_master` onto the
+	/// CLI add path's historical error contract.
+	///
+	/// The add path linked ONLY a `NeedsLink` agent and errored when that link
+	/// hit a real foreign occupant (the old `report.conflicts` check) or a hard
+	/// link failure. A `NativeReader` reads the Master directly and an
+	/// `Unsupported` agent had no writable dir — neither was ever an error
+	/// (the skill is still recorded against the Master). So enforce the
+	/// error-free result ONLY for a `NeedsLink` agent, exactly as before.
+	fn ensure_single_agent_installed(
+		results: &[crate::skills::install_fetched::AgentInstallResult],
+		link_need: &crate::skills::linker::LinkNeed,
+		skill_name: &str,
+	) -> Result<()> {
+		if !matches!(
+			link_need,
+			crate::skills::linker::LinkNeed::NeedsLink { .. }
+		) {
+			return Ok(());
+		}
+		match results.first() {
+			Some(r) if r.error.is_none() => Ok(()),
+			_ => Err(ConfigError::resource_exists("skill", skill_name)),
+		}
 	}
 
 	pub fn validate_skill_path(&self, path: &Path) -> Vec<String> {
@@ -899,8 +940,12 @@ fn rename_skill_master(
 
 /// Undo a partial universal rename: put the master back, drop any half-created
 /// new-name symlinks, and restore the old-name symlinks. Returns the original
-/// relink error on success; if the rollback itself fails, returns a compound
-/// error naming both failures and the master path that needs manual recovery.
+/// relink error on success. If the rollback itself fails, returns a compound
+/// error naming both failures plus a structured [`RecoveryHint`] next step:
+/// `ManualRestore` (master still at the new name — the only surviving copy)
+/// when the master-restore rename fails, or `BrokenSymlink` (master safely
+/// restored, a stale link blocks the relink) when a link op fails.
+/// (see [`crate::skills::update::RecoveryHint`])
 #[allow(clippy::too_many_arguments)]
 fn rollback_master_rename(
 	new_master: &Path,
@@ -910,15 +955,26 @@ fn rollback_master_rename(
 	use_relative: bool,
 	relink_err: ConfigError,
 ) -> ConfigError {
-	let do_rollback = || -> std::io::Result<()> {
+	// Which step of the rollback failed, so the caller can pick the right
+	// RecoveryHint: a failed master-restore leaves the only copy at new_master
+	// (ManualRestore); a failed unlink/relink means the master is safely back
+	// but a stale/foreign link blocks the relink (BrokenSymlink).
+	enum RbFail {
+		Restore(std::io::Error),
+		Relink { err: std::io::Error, link: PathBuf },
+	}
+	let do_rollback = || -> std::result::Result<(), RbFail> {
 		// Put the master back first so old-name symlinks resolve again.
-		std::fs::rename(new_master, old_master)?;
+		std::fs::rename(new_master, old_master).map_err(RbFail::Restore)?;
 		// Remove any new-name symlinks the partial relink managed to create
 		// (they now point at the vanished new_master).
 		for dir in referrers {
 			let new_link = dir.join(safe_new);
 			if Linker::is_link(&new_link) {
-				Linker::unlink(&new_link)?;
+				Linker::unlink(&new_link).map_err(|err| RbFail::Relink {
+					err,
+					link: new_link.clone(),
+				})?;
 			}
 		}
 		// Recreate any old-name symlinks the partial relink removed; ones still
@@ -932,16 +988,38 @@ fn rollback_master_rename(
 				crate::skills::linker::LinkTarget::Absolute
 			},
 		)
-		.map_err(|e| std::io::Error::other(e.to_string()))?;
+		.map_err(|e| RbFail::Relink {
+			err: std::io::Error::other(e.to_string()),
+			link: old_master.to_path_buf(),
+		})?;
 		Ok(())
 	};
 	match do_rollback() {
 		Ok(()) => relink_err,
-		Err(rb_err) => ConfigError::Io(std::io::Error::other(format!(
-			"skill relink failed ({relink_err}) and rollback also failed \
-			 ({rb_err}); the skill master may need manual recovery at '{}'",
-			old_master.display()
-		))),
+		// Master could not be restored: it is the ONLY surviving copy at
+		// new_master and must be moved back to old_master by hand.
+		Err(RbFail::Restore(rb_err)) => {
+			let hint = crate::skills::update::RecoveryHint::ManualRestore {
+				recover_from: new_master.to_path_buf(),
+				restore_to: old_master.to_path_buf(),
+			};
+			ConfigError::Io(std::io::Error::other(format!(
+				"skill relink failed ({relink_err}) and rollback also \
+				 failed ({rb_err}); {}",
+				hint.next_step()
+			)))
+		}
+		// Master is safely restored, but a dangling/foreign link blocks the
+		// relink — point at the offending link, data is not at risk.
+		Err(RbFail::Relink { err: rb_err, link }) => {
+			let hint =
+				crate::skills::update::RecoveryHint::BrokenSymlink { link };
+			ConfigError::Io(std::io::Error::other(format!(
+				"skill relink failed ({relink_err}) and rollback also \
+				 failed ({rb_err}); {}",
+				hint.next_step()
+			)))
+		}
 	}
 }
 
@@ -1710,7 +1788,21 @@ mod tests {
 		// Restore perms before asserting so tempdir teardown always works.
 		std::fs::set_permissions(&referrer_dir, orig).unwrap();
 
-		assert!(res.is_err(), "a failed relink must surface as an error");
+		let err = res.expect_err("a failed relink must surface as an error");
+		// The rollback SUCCEEDS here (the master is renamed back and
+		// `link_agents_to_canonical` folds per-link failures into its report
+		// rather than erroring), so the original relink failure is returned
+		// UNCHANGED — not re-wrapped as a recovery hint. The message must name
+		// the stale link it failed on and must NOT claim manual restore.
+		let msg = err.to_string();
+		assert!(
+			msg.contains("roll-old"),
+			"the original relink error must name the failing link: {msg}"
+		);
+		assert!(
+			!msg.contains("move them back"),
+			"a recovered rollback must not emit ManualRestore wording: {msg}"
+		);
 		assert!(
 			root.join(".agents/skills/roll-old/SKILL.md").exists(),
 			"rollback must rename the master back to its old name"
@@ -1800,6 +1892,152 @@ mod tests {
 		assert!(
 			claude_link.join("SKILL.md").exists(),
 			"the restored referrer must resolve to the master"
+		);
+	}
+
+	// -----------------------------------------------------------------------
+	// T2 (#8): structured rollback reason via RecoveryHint.
+	// -----------------------------------------------------------------------
+
+	/// Rollback's own master-restore rename fails (its parent is read-only), so
+	/// the master is the ONLY surviving copy and stays at `new_master`. The
+	/// error must carry RecoveryHint::ManualRestore wording naming BOTH the
+	/// recover-from (new_master) and restore-to (old_master) paths plus an
+	/// actionable next step. Driven through the real `rollback_master_rename`.
+	#[cfg(unix)]
+	#[test]
+	fn rename_rollback_failure_reports_manual_restore() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		if !perms_enforced(root) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		// The renamed master holds the only copy of the contents.
+		let skills_dir = root.join(".agents/skills");
+		let old_master = skills_dir.join("recover-old");
+		let new_master = skills_dir.join("recover-new");
+		std::fs::create_dir_all(&new_master).unwrap();
+		std::fs::write(new_master.join("SKILL.md"), "real").unwrap();
+
+		// Read-only parent: the rollback's `rename(new_master, old_master)`
+		// cannot create the old-name entry, so the restore step itself fails.
+		let orig = std::fs::metadata(&skills_dir).unwrap().permissions();
+		std::fs::set_permissions(
+			&skills_dir,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let err = rollback_master_rename(
+			&new_master,
+			&old_master,
+			&[],
+			"recover-new",
+			false,
+			ConfigError::Io(std::io::Error::other("relink boom")),
+		);
+
+		// Restore perms before asserting so tempdir teardown always works.
+		std::fs::set_permissions(&skills_dir, orig).unwrap();
+
+		let msg = err.to_string();
+		assert!(
+			msg.contains(&new_master.display().to_string()),
+			"recover_from (new_master) path missing from: {msg}"
+		);
+		assert!(
+			msg.contains(&old_master.display().to_string()),
+			"restore_to (old_master) path missing from: {msg}"
+		);
+		assert!(
+			msg.contains("relink boom"),
+			"the original relink failure must still be named: {msg}"
+		);
+		assert!(
+			msg.contains("move them back"),
+			"missing ManualRestore next step in: {msg}"
+		);
+		// The master must still be the renamed copy (rollback could not move it).
+		assert!(
+			new_master.join("SKILL.md").exists(),
+			"the only surviving copy must remain at new_master"
+		);
+	}
+
+	/// Rollback restores the master successfully, but a leftover new-name
+	/// referrer symlink can't be removed (its dir is read-only), so the relink
+	/// step of the rollback fails. Data is safe (master is back at old_master);
+	/// the error must report RecoveryHint::BrokenSymlink for the offending link,
+	/// NOT ManualRestore.
+	#[cfg(unix)]
+	#[test]
+	fn rename_rollback_relink_failure_reports_broken_symlink() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		if !perms_enforced(root) {
+			eprintln!("skipping: 0o555 not enforced (running as root)");
+			return;
+		}
+
+		let skills_dir = root.join(".agents/skills");
+		let old_master = skills_dir.join("brk-old");
+		let new_master = skills_dir.join("brk-new");
+		std::fs::create_dir_all(&new_master).unwrap();
+		std::fs::write(new_master.join("SKILL.md"), "real").unwrap();
+
+		// A referrer dir holding a stale NEW-name symlink the rollback must
+		// remove; the dir is read-only so the `unlink` fails AFTER the master
+		// is renamed back.
+		let referrer = root.join(".claude/skills");
+		std::fs::create_dir_all(&referrer).unwrap();
+		std::os::unix::fs::symlink(&new_master, referrer.join("brk-new"))
+			.unwrap();
+		let orig = std::fs::metadata(&referrer).unwrap().permissions();
+		std::fs::set_permissions(
+			&referrer,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let err = rollback_master_rename(
+			&new_master,
+			&old_master,
+			std::slice::from_ref(&referrer),
+			"brk-new",
+			false,
+			ConfigError::Io(std::io::Error::other("relink boom")),
+		);
+
+		// Restore perms before asserting so tempdir teardown always works.
+		std::fs::set_permissions(&referrer, orig).unwrap();
+
+		let msg = err.to_string();
+		assert!(
+			msg.contains("broken link"),
+			"missing BrokenSymlink next step in: {msg}"
+		);
+		assert!(
+			msg.contains(&referrer.join("brk-new").display().to_string()),
+			"the offending link path must be named: {msg}"
+		);
+		assert!(
+			!msg.contains("move them back"),
+			"a restored master must not emit ManualRestore wording: {msg}"
+		);
+		// The master must be safely back at its old name.
+		assert!(
+			old_master.join("SKILL.md").exists(),
+			"rollback must have restored the master to old_master"
+		);
+		assert!(
+			!new_master.exists(),
+			"no half-renamed master may survive a recovered rollback"
 		);
 	}
 
@@ -2115,5 +2353,939 @@ mod tests {
 				.any(|s| s.name == "shared-skill"),
 			"Cursor should discover shared-skill from .agents/skills/ on load"
 		);
+	}
+
+	// -----------------------------------------------------------------------
+	// Task 5: remove_skill_planned owns the post-delete lock prune.
+	// -----------------------------------------------------------------------
+
+	// Reuse the ONE shared global-lock guard so these tests serialize on the
+	// same mutex as the prune.rs tests (separate static LOCKs would race on the
+	// shared XDG_STATE_HOME global lock when the whole suite runs in-process).
+	use crate::skills::prune::test_lock::GlobalLockGuard;
+
+	fn locked_entry() -> skill::SkillLockEntry {
+		skill::SkillLockEntry {
+			source: "o/r".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/o/r".to_string(),
+			ref_name: None,
+			skill_path: None,
+			skill_folder_hash: "h".to_string(),
+			content_hash: None,
+			ref_commit: None,
+			installed_at: "t".to_string(),
+			updated_at: "t".to_string(),
+			plugin_name: None,
+		}
+	}
+
+	#[test]
+	fn remove_skill_planned_prunes_lock_on_execute() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let _g = GlobalLockGuard::new();
+		let tmp = tempfile::tempdir().unwrap();
+		let skills_dir = tmp.path().join("skills");
+		std::fs::create_dir_all(&skills_dir).unwrap();
+		// A real skill on disk so execute actually deletes something.
+		let skill_dir = skills_dir.join("prune-me-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: prune-me-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+
+		// Lock entry for the skill being removed (gets pruned once gone) plus an
+		// orphan that is never on disk (also pruned).
+		skill::lock::add_skill_to_lock("prune-me-skill", locked_entry())
+			.unwrap();
+		skill::lock::add_skill_to_lock(
+			"orphan-never-on-disk-xyz",
+			locked_entry(),
+		)
+		.unwrap();
+
+		let mut mgr =
+			ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+		mgr.load().unwrap();
+
+		let outcome = mgr
+			.remove_skill_planned("prune-me-skill", false, false, true)
+			.unwrap();
+
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "copy single-agent removal executes");
+		let pruned = match &outcome.prune {
+			crate::skills::removal::PruneStatus::Pruned(keys) => keys,
+			other => panic!("prune must run on execute, got {other:?}"),
+		};
+		// The reported keys must name the orphan that was actually dropped — not
+		// just "some prune ran". The removed skill is disk-derived and may be
+		// gone from the in-memory view before the scan, but the never-on-disk
+		// orphan must always be reported as pruned.
+		assert!(
+			pruned.contains(&"orphan-never-on-disk-xyz".to_string()),
+			"reported pruned keys must include the dropped orphan, got {pruned:?}"
+		);
+		let lock = skill::read_skill_lock();
+		assert!(
+			!lock.skills.contains_key("prune-me-skill"),
+			"removed skill's lock entry must be pruned"
+		);
+		assert!(
+			!lock.skills.contains_key("orphan-never-on-disk-xyz"),
+			"orphan lock entry must be pruned"
+		);
+	}
+
+	/// Regression for the `PruneStatus::Failed` path through the REAL manager
+	/// (not synthetic `prune_status`/`combine_prune` inputs): force the
+	/// post-delete lock write to fail and assert the skill is still deleted, the
+	/// lock is left unchanged, and the outcome is `Failed { reason, pruned }`. A
+	/// prune failure is non-fatal — deletion already happened.
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_planned_failed_prune_keeps_lock_and_deletes_skill() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use std::os::unix::fs::PermissionsExt;
+
+		let _g = GlobalLockGuard::new();
+		// GlobalLockGuard points XDG_STATE_HOME at a fresh temp dir; the lock
+		// lives at $XDG_STATE_HOME/skills/.skill-lock.json.
+		let state = std::env::var("XDG_STATE_HOME").unwrap();
+		let lock_dir = std::path::Path::new(&state).join("skills");
+
+		let tmp = tempfile::tempdir().unwrap();
+		let skills_dir = tmp.path().join("skills");
+		let skill_dir = skills_dir.join("fail-prune-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: fail-prune-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+
+		// Seed an orphan a successful prune WOULD drop, then make the lock dir
+		// read-only so the prune's atomic temp+rename write fails (Io error).
+		skill::lock::add_skill_to_lock(
+			"orphan-never-on-disk-xyz",
+			locked_entry(),
+		)
+		.unwrap();
+		if !perms_enforced(&lock_dir) {
+			crate::adapter::set_skills_path_override("claude", None);
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
+		std::fs::set_permissions(
+			&lock_dir,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let mut mgr =
+			ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("fail-prune-skill", false, false, true)
+			.unwrap();
+
+		// RESTORE perms before any assertion so a failed assert never leaks an
+		// unremovable temp dir.
+		std::fs::set_permissions(&lock_dir, orig).unwrap();
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "deletion runs even if the prune fails");
+		assert!(
+			!skill_dir.exists(),
+			"the skill is deleted before the prune is attempted"
+		);
+		match outcome.prune {
+			crate::skills::removal::PruneStatus::Failed { reason, pruned } => {
+				assert!(!reason.is_empty(), "failure reason is reported");
+				assert!(
+					pruned.is_empty(),
+					"single-scope write failure drops nothing: {pruned:?}"
+				);
+			}
+			other => panic!("expected Failed, got {other:?}"),
+		}
+		let lock = skill::read_skill_lock();
+		assert!(
+			lock.skills.contains_key("orphan-never-on-disk-xyz"),
+			"a failed prune must leave the lock unchanged"
+		);
+	}
+
+	#[test]
+	fn remove_skill_planned_dry_run_leaves_prune_notrun() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let _g = GlobalLockGuard::new();
+		let tmp = tempfile::tempdir().unwrap();
+		let skills_dir = tmp.path().join("skills");
+		std::fs::create_dir_all(&skills_dir).unwrap();
+		let skill_dir = skills_dir.join("keep-me-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: keep-me-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+
+		// Orphan present in the lock: a real prune WOULD drop it; a dry-run must
+		// not, proving prune never ran.
+		skill::lock::add_skill_to_lock(
+			"orphan-never-on-disk-xyz",
+			locked_entry(),
+		)
+		.unwrap();
+
+		let mut mgr =
+			ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+		mgr.load().unwrap();
+
+		let outcome = mgr
+			.remove_skill_planned("keep-me-skill", false, true, false)
+			.unwrap();
+
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(!outcome.executed, "dry-run must not delete");
+		assert_eq!(
+			outcome.prune,
+			crate::skills::removal::PruneStatus::NotRun,
+			"dry-run leaves prune NotRun"
+		);
+		let lock = skill::read_skill_lock();
+		assert!(
+			lock.skills.contains_key("orphan-never-on-disk-xyz"),
+			"dry-run must not prune the lock"
+		);
+	}
+
+	/// The confirm-gated branch (destructive op, NOT yet confirmed) is also a
+	/// non-executed path: it must leave `prune == NotRun` and the lock untouched,
+	/// exactly like a dry-run. Distinct from the dry-run test because the gate is
+	/// `needs_confirm && !confirm` (all-agents), not `dry_run`.
+	#[test]
+	fn remove_skill_planned_unconfirmed_destructive_leaves_prune_notrun() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let _g = GlobalLockGuard::new();
+		let tmp = tempfile::tempdir().unwrap();
+		let skills_dir = tmp.path().join("skills");
+		let skill_dir = skills_dir.join("gated-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: gated-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		// Orphan a successful prune WOULD drop — proves the gated branch never
+		// reaches the prune.
+		skill::lock::add_skill_to_lock(
+			"orphan-never-on-disk-xyz",
+			locked_entry(),
+		)
+		.unwrap();
+
+		let mut mgr =
+			ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+		mgr.load().unwrap();
+		// all_agents=true => needs_confirm; confirm=false => gated, not executed.
+		let outcome = mgr
+			.remove_skill_planned("gated-skill", true, false, false)
+			.unwrap();
+
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(!outcome.executed, "unconfirmed destructive op must not run");
+		assert_eq!(
+			outcome.prune,
+			crate::skills::removal::PruneStatus::NotRun,
+			"gated (unconfirmed) op leaves prune NotRun"
+		);
+		assert!(skill_dir.exists(), "gated op must not delete");
+		let lock = skill::read_skill_lock();
+		assert!(
+			lock.skills.contains_key("orphan-never-on-disk-xyz"),
+			"gated op must not prune the lock"
+		);
+	}
+
+	// The pure combine_prune / prune_status folds now live with the
+	// prune_lock_for_scope seam they feed (crate::skills::prune tests).
+	// The cases below exercise the seam through the REAL manager.
+	use crate::skills::removal::PruneStatus;
+
+	#[test]
+	fn remove_skill_planned_project_scope_without_root_leaves_prune_notrun() {
+		// ProjectOnly scope with no project root: the manager must NOT attempt a
+		// project prune (it has no lock to reconcile) — matching the old caller
+		// behavior. Prune is NotRun and the global lock is untouched even though
+		// an orphan sits in it.
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let _g = GlobalLockGuard::new();
+		let tmp = tempfile::tempdir().unwrap();
+		let skills_dir = tmp.path().join("skills");
+		let skill_dir = skills_dir.join("proj-no-root-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: proj-no-root-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		skill::lock::add_skill_to_lock(
+			"orphan-never-on-disk-xyz",
+			locked_entry(),
+		)
+		.unwrap();
+
+		// global=false, project_root=None => ResourceScope::ProjectOnly, no root.
+		let mut mgr =
+			ConfigManager::new(create_adapter(AgentType::Claude), false, None);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("proj-no-root-skill", false, false, true)
+			.unwrap();
+
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "removal still executes");
+		assert_eq!(
+			outcome.prune,
+			PruneStatus::NotRun,
+			"project prune without a root must be NotRun, got {:?}",
+			outcome.prune
+		);
+		let lock = skill::read_skill_lock();
+		assert!(
+			lock.skills.contains_key("orphan-never-on-disk-xyz"),
+			"no prune ran, so the global lock is untouched"
+		);
+	}
+
+	fn local_entry() -> skill::lock::local::LocalSkillLockEntry {
+		skill::lock::local::LocalSkillLockEntry {
+			source: "o/r".to_string(),
+			ref_name: None,
+			source_type: "github".to_string(),
+			computed_hash: "h".to_string(),
+			skill_path: None,
+			ref_commit: None,
+		}
+	}
+
+	#[test]
+	fn remove_skill_planned_both_scope_prunes_global_and_project_locks() {
+		// Both scope reconciles two independent locks (global + project). Seed an
+		// orphan in each, execute the removal, and assert the returned Pruned keys
+		// name BOTH dropped orphans and that both locks are updated on disk.
+		use crate::create_adapter;
+		use crate::models::{AgentType, ResourceScope};
+
+		let _g = GlobalLockGuard::new();
+		let project = tempfile::tempdir().unwrap();
+		let skills_dir = project.path().join("skills");
+		let skill_dir = skills_dir.join("both-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: both-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		// One orphan per lock — neither is on disk, so a real prune drops both.
+		skill::lock::add_skill_to_lock("orphan-global-xyz", locked_entry())
+			.unwrap();
+		skill::lock::local::add_skill_to_local_lock(
+			"orphan-project-xyz",
+			local_entry(),
+			Some(project.path()),
+		)
+		.unwrap();
+
+		// scope=Both with a project root; write_scope=ProjectOnly (global=false).
+		let mut mgr = ConfigManager::with_scope(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(project.path()),
+			ResourceScope::Both,
+		);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("both-skill", false, false, true)
+			.unwrap();
+
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "Both-scope removal executes");
+		let pruned = match &outcome.prune {
+			PruneStatus::Pruned(keys) => keys,
+			other => panic!("expected Pruned, got {other:?}"),
+		};
+		assert!(
+			pruned.contains(&"orphan-global-xyz".to_string()),
+			"global orphan must be reported pruned, got {pruned:?}"
+		);
+		assert!(
+			pruned.contains(&"orphan-project-xyz".to_string()),
+			"project orphan must be reported pruned, got {pruned:?}"
+		);
+		let global = skill::read_skill_lock();
+		assert!(
+			!global.skills.contains_key("orphan-global-xyz"),
+			"global lock orphan must be pruned on disk"
+		);
+		let local = skill::lock::local::read_local_lock(Some(project.path()));
+		assert!(
+			!local.skills.contains_key("orphan-project-xyz"),
+			"project lock orphan must be pruned on disk"
+		);
+	}
+
+	/// Regression (issue #1): `Both` must short-circuit on a GLOBAL prune
+	/// failure — the project lock must be left UNTOUCHED, not mutated behind a
+	/// `Failed { pruned: [] }`. Force the GLOBAL lock write to fail (read-only
+	/// global lock dir) while a project orphan sits ready to drop, then assert
+	/// the project lock still holds its orphan and prune is `Failed` with an
+	/// empty `pruned`.
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_planned_both_global_failure_leaves_project_lock_untouched()
+	{
+		use crate::create_adapter;
+		use crate::models::{AgentType, ResourceScope};
+		use std::os::unix::fs::PermissionsExt;
+
+		let _g = GlobalLockGuard::new();
+		let state = std::env::var("XDG_STATE_HOME").unwrap();
+		let lock_dir = std::path::Path::new(&state).join("skills");
+
+		let project = tempfile::tempdir().unwrap();
+		let skills_dir = project.path().join("skills");
+		let skill_dir = skills_dir.join("both-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: both-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		// Seed an orphan in EACH lock; neither is on disk so a real prune would
+		// drop both. The project orphan must SURVIVE because the global prune
+		// fails first and the project prune must never run.
+		skill::lock::add_skill_to_lock("orphan-global-xyz", locked_entry())
+			.unwrap();
+		skill::lock::local::add_skill_to_local_lock(
+			"orphan-project-xyz",
+			local_entry(),
+			Some(project.path()),
+		)
+		.unwrap();
+
+		if !perms_enforced(&lock_dir) {
+			crate::adapter::set_skills_path_override("claude", None);
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		// Make the GLOBAL lock dir read-only so its atomic temp+rename fails.
+		let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
+		std::fs::set_permissions(
+			&lock_dir,
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let mut mgr = ConfigManager::with_scope(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(project.path()),
+			ResourceScope::Both,
+		);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("both-skill", false, false, true)
+			.unwrap();
+
+		std::fs::set_permissions(&lock_dir, orig).unwrap();
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "Both-scope removal still executes");
+		match outcome.prune {
+			PruneStatus::Failed { reason, pruned } => {
+				assert!(
+					!reason.is_empty(),
+					"global failure reason is reported"
+				);
+				assert!(
+					pruned.is_empty(),
+					"global failed before pruning anything: {pruned:?}"
+				);
+			}
+			other => panic!("expected Failed on global failure, got {other:?}"),
+		}
+		let local = skill::lock::local::read_local_lock(Some(project.path()));
+		assert!(
+			local.skills.contains_key("orphan-project-xyz"),
+			"global failure must short-circuit: the project lock is untouched"
+		);
+	}
+
+	/// Regression (issue #4): the global-success / project-FAIL partial path
+	/// through the REAL `remove_skill_planned` (not synthetic `combine_prune`
+	/// inputs). Force the PROJECT lock write to fail AFTER the global prune
+	/// succeeds, then assert the global lock WAS mutated and prune is
+	/// `Failed { pruned: [<global key>] }`.
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_planned_both_project_failure_reports_partial_global_pruned()
+	{
+		use crate::create_adapter;
+		use crate::models::{AgentType, ResourceScope};
+		use std::os::unix::fs::PermissionsExt;
+
+		let _g = GlobalLockGuard::new();
+
+		let project = tempfile::tempdir().unwrap();
+		let skills_dir = project.path().join("skills");
+		let skill_dir = skills_dir.join("both-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: both-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		// Global orphan WILL be pruned; project orphan would be pruned too, but
+		// the project lock write fails so the project lock stays intact.
+		skill::lock::add_skill_to_lock("orphan-global-xyz", locked_entry())
+			.unwrap();
+		skill::lock::local::add_skill_to_local_lock(
+			"orphan-project-xyz",
+			local_entry(),
+			Some(project.path()),
+		)
+		.unwrap();
+
+		if !perms_enforced(project.path()) {
+			crate::adapter::set_skills_path_override("claude", None);
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		// The project lock is `<root>/skills-lock.json`; making the project root
+		// read-only blocks the atomic temp+rename inside it (the global lock
+		// lives under XDG_STATE_HOME and stays writable, so global succeeds).
+		let orig = std::fs::metadata(project.path()).unwrap().permissions();
+		std::fs::set_permissions(
+			project.path(),
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		let mut mgr = ConfigManager::with_scope(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(project.path()),
+			ResourceScope::Both,
+		);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("both-skill", false, false, true)
+			.unwrap();
+
+		std::fs::set_permissions(project.path(), orig).unwrap();
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "Both-scope removal still executes");
+		match outcome.prune {
+			PruneStatus::Failed { reason, pruned } => {
+				assert!(
+					!reason.is_empty(),
+					"project failure reason is reported"
+				);
+				assert_eq!(
+					pruned,
+					vec!["orphan-global-xyz".to_string()],
+					"the global keys dropped before the project failure must \
+					 be reported, got {pruned:?}"
+				);
+			}
+			other => panic!("expected partial Failed, got {other:?}"),
+		}
+		let global = skill::read_skill_lock();
+		assert!(
+			!global.skills.contains_key("orphan-global-xyz"),
+			"the global lock WAS mutated before the project failure"
+		);
+	}
+
+	#[test]
+	fn remove_skill_planned_project_scope_with_root_prunes_project_lock() {
+		// ProjectOnly scope WITH a root: the project lock is reconciled and the
+		// dropped orphan is reported. (The no-root variant is covered above.)
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let _g = GlobalLockGuard::new();
+		let project = tempfile::tempdir().unwrap();
+		let skills_dir = project.path().join("skills");
+		let skill_dir = skills_dir.join("proj-root-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: proj-root-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		skill::lock::local::add_skill_to_local_lock(
+			"orphan-project-xyz",
+			local_entry(),
+			Some(project.path()),
+		)
+		.unwrap();
+
+		// global=false + a project root => ResourceScope::ProjectOnly with a root.
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(project.path()),
+		);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("proj-root-skill", false, false, true)
+			.unwrap();
+
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "ProjectOnly removal executes");
+		let pruned = match &outcome.prune {
+			PruneStatus::Pruned(keys) => keys,
+			other => panic!("expected Pruned, got {other:?}"),
+		};
+		assert!(
+			pruned.contains(&"orphan-project-xyz".to_string()),
+			"project orphan must be reported pruned, got {pruned:?}"
+		);
+		let local = skill::lock::local::read_local_lock(Some(project.path()));
+		assert!(
+			!local.skills.contains_key("orphan-project-xyz"),
+			"project lock orphan must be pruned on disk"
+		);
+	}
+
+	/// ProjectOnly scope WITH a root where the PROJECT lock write FAILS: the
+	/// prune is non-fatal, so the skill is still removed, the single-scope
+	/// failure drops nothing (`Failed { pruned: [] }`), and the project lock
+	/// stays intact. Mirrors the Both-project-failure technique (RO root).
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_planned_project_scope_with_root_failed_prune_keeps_lock() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+		use std::os::unix::fs::PermissionsExt;
+
+		let _g = GlobalLockGuard::new();
+		let project = tempfile::tempdir().unwrap();
+		let skills_dir = project.path().join("skills");
+		let skill_dir = skills_dir.join("proj-fail-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: proj-fail-skill\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		crate::adapter::set_skills_path_override(
+			"claude",
+			Some(skills_dir.clone()),
+		);
+		// Orphan a successful project prune WOULD drop — but the write fails,
+		// so it must survive in the project lock.
+		skill::lock::local::add_skill_to_local_lock(
+			"orphan-project-xyz",
+			local_entry(),
+			Some(project.path()),
+		)
+		.unwrap();
+
+		if !perms_enforced(project.path()) {
+			crate::adapter::set_skills_path_override("claude", None);
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		// The project lock is `<root>/skills-lock.json`; a read-only root
+		// blocks the atomic temp+rename inside it (skills_dir was created
+		// beforehand, so the skill itself is still deletable under it).
+		let orig = std::fs::metadata(project.path()).unwrap().permissions();
+		std::fs::set_permissions(
+			project.path(),
+			std::fs::Permissions::from_mode(0o555),
+		)
+		.unwrap();
+
+		// global=false + a project root => ProjectOnly scope with a root.
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(project.path()),
+		);
+		mgr.load().unwrap();
+		let outcome = mgr
+			.remove_skill_planned("proj-fail-skill", false, false, true)
+			.unwrap();
+
+		// RESTORE perms before any assertion so a failed assert never leaks an
+		// unremovable temp dir.
+		std::fs::set_permissions(project.path(), orig).unwrap();
+		crate::adapter::set_skills_path_override("claude", None);
+
+		assert!(outcome.executed, "deletion runs even if the prune fails");
+		assert!(
+			!skill_dir.exists(),
+			"the skill is deleted before the prune is attempted"
+		);
+		match outcome.prune {
+			PruneStatus::Failed { reason, pruned } => {
+				assert!(!reason.is_empty(), "failure reason is reported");
+				assert!(
+					pruned.is_empty(),
+					"single-scope write failure drops nothing: {pruned:?}"
+				);
+			}
+			other => panic!("expected Failed, got {other:?}"),
+		}
+		let local = skill::lock::local::read_local_lock(Some(project.path()));
+		assert!(
+			local.skills.contains_key("orphan-project-xyz"),
+			"a failed project prune must leave the project lock unchanged"
+		);
+	}
+
+	// T3: exhaustive branch coverage of the helper that maps the shared
+	// materializer's single-agent result onto the CLI add path's historical
+	// error contract. NeedsLink-ok -> Ok; NeedsLink-error -> Err(resource_exists);
+	// NativeReader / Unsupported -> Ok regardless of the result (the agent reads
+	// the Master directly, or had no writable dir — neither was ever an error).
+	#[test]
+	fn ensure_single_agent_installed_covers_every_branch() {
+		use crate::models::AgentType;
+		use crate::skills::install_fetched::AgentInstallResult;
+		use crate::skills::linker::LinkNeed;
+
+		let needs_link = LinkNeed::NeedsLink {
+			agent_skills_dir: PathBuf::from("/x"),
+		};
+
+		// NeedsLink + error-free result -> Ok.
+		let ok = [AgentInstallResult {
+			agent: AgentType::Claude,
+			installed: true,
+			error: None,
+		}];
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&ok,
+			&needs_link,
+			"s"
+		)
+		.is_ok());
+
+		// NeedsLink + a soft failure (occupied slot / link error) -> Err.
+		let conflict = [AgentInstallResult {
+			agent: AgentType::Claude,
+			installed: false,
+			error: Some("slot occupied".to_string()),
+		}];
+		let err = ConfigManager::ensure_single_agent_installed(
+			&conflict,
+			&needs_link,
+			"my-skill",
+		)
+		.unwrap_err();
+		assert!(
+			matches!(err, ConfigError::ResourceExists { .. }),
+			"a NeedsLink soft-failure must surface resource_exists, got {err:?}"
+		);
+
+		// NeedsLink + empty results (defensive) -> Err.
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&[],
+			&needs_link,
+			"s"
+		)
+		.is_err());
+
+		// NativeReader -> Ok even with a soft-failure result (never an error).
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&conflict,
+			&LinkNeed::NativeReader,
+			"s"
+		)
+		.is_ok());
+
+		// Unsupported -> Ok even with a soft-failure result (no writable dir;
+		// the Master is still recorded — old behaviour preserved).
+		assert!(ConfigManager::ensure_single_agent_installed(
+			&conflict,
+			&LinkNeed::Unsupported,
+			"s"
+		)
+		.is_ok());
+	}
+
+	// T3 parity guard: the CLI add-from-path materialization and the
+	// fetched/desktop materialization must produce a BYTE-IDENTICAL
+	// `.agents/skills/<name>/SKILL.md` and the same agent link shape for the
+	// same source skill — so the two install paths can never diverge again
+	// (they once did when the CLI used a narrower link check). Both copy the
+	// source tree verbatim; only the canonical SKILL.md bytes + link shape are
+	// asserted, not the lock (the lock contract is pinned elsewhere).
+	#[cfg(unix)]
+	#[test]
+	fn cli_add_and_fetched_install_produce_identical_master_and_link() {
+		use crate::create_adapter;
+		use crate::models::{AgentType, ResourceScope};
+		use crate::skills::install_fetched::{
+			install_fetched_skill_and_lock, FetchedSkillInstallRequest,
+		};
+		use crate::skills::linker::{LinkTarget, Linker};
+
+		// One source skill, copied verbatim by both paths. Non-canonical
+		// frontmatter ordering + a body + an asset so a re-serialization (which
+		// would NOT be byte-identical) is detectable.
+		let src_tmp = tempfile::tempdir().unwrap();
+		let src = src_tmp.path().join("parity-skill");
+		std::fs::create_dir_all(&src).unwrap();
+		let skill_md =
+			"---\ndescription: parity\nname: parity-skill\n---\nThe body.\n";
+		std::fs::write(src.join("SKILL.md"), skill_md).unwrap();
+		std::fs::create_dir_all(src.join("assets")).unwrap();
+		std::fs::write(src.join("assets/data.json"), "{}").unwrap();
+
+		// Path A: CLI add-from-path universal install.
+		let cli_root_tmp = tempfile::tempdir().unwrap();
+		let cli_root = cli_root_tmp.path().canonicalize().unwrap();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&cli_root),
+		);
+		mgr.load().unwrap();
+		mgr.add_skill_from_path_universal(&src).unwrap();
+
+		// Path B: fetched/desktop universal install of the same source.
+		let fetched_root_tmp = tempfile::tempdir().unwrap();
+		let fetched_root = fetched_root_tmp.path().canonicalize().unwrap();
+		let lock_source = skill::InstallLockSource {
+			source: "local/test".to_string(),
+			source_type: "local".to_string(),
+			source_url: "file:///local/test".to_string(),
+			ref_name: None,
+		};
+		let req = FetchedSkillInstallRequest {
+			skill_file: &src.join("SKILL.md"),
+			source: &lock_source,
+			lock_skill_path: "parity-skill/SKILL.md".to_string(),
+			ref_commit: None,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&fetched_root),
+			target_agents: &[AgentType::Claude],
+			expected_name: None,
+			target: LinkTarget::Relative,
+		};
+		install_fetched_skill_and_lock(req).unwrap();
+
+		// The canonical Master SKILL.md must be byte-identical across paths.
+		let cli_master = cli_root.join(".agents/skills/parity-skill/SKILL.md");
+		let fetched_master =
+			fetched_root.join(".agents/skills/parity-skill/SKILL.md");
+		let cli_bytes = std::fs::read(&cli_master).unwrap();
+		let fetched_bytes = std::fs::read(&fetched_master).unwrap();
+		assert_eq!(
+			cli_bytes, fetched_bytes,
+			"CLI-add and fetched-install master SKILL.md must be \
+			 byte-identical"
+		);
+		assert_eq!(
+			cli_bytes,
+			skill_md.as_bytes(),
+			"both paths must copy the source SKILL.md verbatim"
+		);
+
+		// The asset must survive on both (whole-tree copy, not SKILL.md only).
+		assert_eq!(
+			std::fs::read_to_string(
+				cli_root.join(".agents/skills/parity-skill/assets/data.json")
+			)
+			.unwrap(),
+			std::fs::read_to_string(
+				fetched_root
+					.join(".agents/skills/parity-skill/assets/data.json")
+			)
+			.unwrap(),
+		);
+
+		// Identical link shape: each agent dir holds a symlink to its Master.
+		let cli_link = cli_root.join(".claude/skills/parity-skill");
+		let fetched_link = fetched_root.join(".claude/skills/parity-skill");
+		assert!(Linker::is_link(&cli_link), "CLI add must leave a link");
+		assert!(
+			Linker::is_link(&fetched_link),
+			"fetched install must leave a link"
+		);
+		assert!(cli_link.join("SKILL.md").exists());
+		assert!(fetched_link.join("SKILL.md").exists());
 	}
 }

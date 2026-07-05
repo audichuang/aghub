@@ -25,17 +25,50 @@ use crate::SourceAction;
 
 // ─────────────────────────── credential / fetch ────────────────────────────
 
-/// Token resolver for CLI source auth: a token in `GIT_PASSWORD`
-/// (or `GITHUB_TOKEN`). `GitFetcher` consumes it as the `x-access-token`
-/// password — there is no username/password basic-auth path. Returns `None`
-/// when neither is set (the first unauthenticated fetch attempt stands).
-struct EnvTokenResolver;
+/// Token resolver for CLI source auth. `GIT_PASSWORD` is explicit user
+/// intent and applies to ANY host (self-hosted GitLab / TFS / local test
+/// remotes must keep working). `GITHUB_TOKEN` is GitHub-specific by name,
+/// so it is only offered when the source host is github.com or a subdomain
+/// — the fetch-then-retry-with-token flow would otherwise send the PAT to
+/// an arbitrary host after the first failure. Empty/whitespace env values
+/// count as unset. `GitFetcher` consumes the token as the `x-access-token`
+/// password — there is no username/password basic-auth path. Returns
+/// `None` when nothing applies (the unauthenticated attempt stands).
+pub(crate) struct EnvTokenResolver;
 impl skill_update::TokenResolver for EnvTokenResolver {
-	fn resolve(&self, _source: &str, _host: Option<&str>) -> Option<String> {
-		std::env::var("GIT_PASSWORD")
-			.or_else(|_| std::env::var("GITHUB_TOKEN"))
-			.ok()
+	fn resolve(&self, _source: &str, host: Option<&str>) -> Option<String> {
+		select_env_token(
+			std::env::var("GIT_PASSWORD").ok(),
+			std::env::var("GITHUB_TOKEN").ok(),
+			host,
+		)
 	}
+}
+
+/// Pure token-selection policy behind [`EnvTokenResolver`] (extracted so it
+/// can be unit-tested without touching process env).
+fn select_env_token(
+	git_password: Option<String>,
+	github_token: Option<String>,
+	host: Option<&str>,
+) -> Option<String> {
+	let non_empty = |t: Option<String>| t.filter(|t| !t.trim().is_empty());
+	if let Some(token) = non_empty(git_password) {
+		return Some(token);
+	}
+	if host.is_some_and(is_github_host) {
+		return non_empty(github_token);
+	}
+	None
+}
+
+fn is_github_host(host: &str) -> bool {
+	let host = host.to_ascii_lowercase();
+	// A trailing root dot is the same FQDN (`github.com.` == `github.com`);
+	// strip it BEFORE matching so the suffix check still rejects
+	// `github.com.evil.com.`.
+	let host = host.trim_end_matches('.');
+	host == "github.com" || host.ends_with(".github.com")
 }
 
 /// Production fetch is `skill_update::GitFetcher`. Under debug builds ONLY, a
@@ -76,6 +109,9 @@ fn resolve_read_scopes(
 	global: bool,
 	project: bool,
 ) -> Result<Vec<SourceScope>> {
+	if global && project {
+		bail!("choose either -g or -p, not both");
+	}
 	if global {
 		return Ok(vec![SourceScope::Global]);
 	}
@@ -1302,21 +1338,18 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		);
 	}
 
-	// 3. Fetch upstream (test hook honored by `CliFetcher`).
+	// 3. Fetch upstream (test hook honored by `CliFetcher`) via the shared
+	//    lazy-auth path: unauthenticated first, token retry on failure —
+	//    same semantics (and host-bound token policy) as `source diff`/`sync`.
 	let effective_ref =
 		args.git_ref.map(str::to_string).or(source.ref_name.clone());
-	let token = <EnvTokenResolver as skill_update::TokenResolver>::resolve(
-		&EnvTokenResolver,
-		&source.source_url,
-		None,
-	);
-	let repo = <CliFetcher as skill_update::Fetcher>::fetch(
-		&CliFetcher,
+	let repo = sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: source.source_url.clone(),
 			ref_: effective_ref.clone(),
 		},
-		token.as_deref(),
+		&CliFetcher,
+		&EnvTokenResolver,
 	)
 	.map_err(|e| match e {
 		FetchError::Auth => anyhow::anyhow!(
@@ -1552,4 +1585,68 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		);
 	}
 	Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+	use super::select_env_token;
+
+	fn s(v: &str) -> Option<String> {
+		Some(v.to_string())
+	}
+
+	#[test]
+	fn git_password_applies_to_any_host() {
+		for host in [Some("github.com"), Some("tfs.corp.local"), None] {
+			assert_eq!(
+				select_env_token(s("pw"), s("gh"), host),
+				s("pw"),
+				"GIT_PASSWORD must win on host {host:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn github_token_is_bound_to_github_hosts() {
+		assert_eq!(
+			select_env_token(None, s("gh"), Some("github.com")),
+			s("gh")
+		);
+		assert_eq!(
+			select_env_token(None, s("gh"), Some("API.GitHub.com")),
+			s("gh")
+		);
+		// FQDN trailing root dot is the same host.
+		assert_eq!(
+			select_env_token(None, s("gh"), Some("github.com.")),
+			s("gh")
+		);
+		assert_eq!(
+			select_env_token(None, s("gh"), Some("api.github.com.")),
+			s("gh")
+		);
+		for host in [
+			Some("gitlab.com"),
+			Some("evil-github.com"),
+			Some("github.com.evil.com"),
+			Some("github.com.evil.com."),
+			None,
+		] {
+			assert_eq!(
+				select_env_token(None, s("gh"), host),
+				None,
+				"GITHUB_TOKEN must not leak to host {host:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn empty_or_whitespace_tokens_count_as_unset() {
+		assert_eq!(
+			select_env_token(s(""), s("gh"), Some("github.com")),
+			s("gh"),
+			"empty GIT_PASSWORD falls through to GITHUB_TOKEN"
+		);
+		assert_eq!(select_env_token(s(" "), s("\t"), Some("github.com")), None);
+	}
 }

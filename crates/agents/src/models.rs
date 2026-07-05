@@ -97,6 +97,23 @@ impl McpServer {
 	}
 }
 
+/// Default remote (URL-based) transport type.
+///
+/// Shared by the CLI clap default, the API DTO, and desktop so the
+/// "streamable-http" literal lives in exactly one place.
+pub const DEFAULT_REMOTE_TRANSPORT: &str = "streamable-http";
+
+/// Reject a `Some(0)` timeout. The single owner of the timeout rule, shared by
+/// [`McpTransport::from_inputs`] and the API DTO so both surfaces agree.
+pub fn reject_zero_timeout(timeout: Option<u64>) -> crate::errors::Result<()> {
+	if matches!(timeout, Some(0)) {
+		return Err(crate::errors::ConfigError::ValidationFailed(
+			"timeout must be greater than 0".to_string(),
+		));
+	}
+	Ok(())
+}
+
 /// Transport configuration for MCP servers
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -193,6 +210,124 @@ impl McpTransport {
 			headers: Some(headers),
 			timeout: None,
 		}
+	}
+
+	/// One validating constructor shared by the CLI and API surfaces.
+	///
+	/// Rejects incompatible flag combinations instead of silently dropping
+	/// them, and validates `timeout`. `transport_type` is only consulted on
+	/// the url path. Returns `Ok(None)` when neither `command` nor `url` is
+	/// given (the caller decides whether that is an error).
+	#[allow(clippy::too_many_arguments)]
+	pub fn from_inputs(
+		command: Option<String>,
+		url: Option<String>,
+		transport_type: &str,
+		headers: Option<HashMap<String, String>>,
+		env: Option<HashMap<String, String>>,
+		timeout: Option<u64>,
+	) -> crate::errors::Result<Option<McpTransport>> {
+		reject_zero_timeout(timeout)?;
+		if command.is_some() && url.is_some() {
+			return Err(crate::errors::ConfigError::ValidationFailed(
+				"--command and --url are mutually exclusive".to_string(),
+			));
+		}
+
+		if let Some(command) = command {
+			if headers.is_some_and(|h| !h.is_empty()) {
+				return Err(crate::errors::ConfigError::ValidationFailed(
+					"--header is only valid with --url".to_string(),
+				));
+			}
+			let mut parts = command.split_whitespace().map(String::from);
+			let Some(program) = parts.next() else {
+				return Err(crate::errors::ConfigError::ValidationFailed(
+					"command cannot be empty".to_string(),
+				));
+			};
+			let args: Vec<String> = parts.collect();
+			return Ok(Some(McpTransport::Stdio {
+				command: program,
+				args,
+				env,
+				timeout,
+			}));
+		}
+
+		if let Some(url) = url {
+			if env.is_some_and(|e| !e.is_empty()) {
+				return Err(crate::errors::ConfigError::ValidationFailed(
+					"--env is only valid with --command".to_string(),
+				));
+			}
+			if url.trim().is_empty() {
+				return Err(crate::errors::ConfigError::ValidationFailed(
+					"url cannot be empty".to_string(),
+				));
+			}
+			return match transport_type {
+				"sse" => Ok(Some(McpTransport::Sse {
+					url,
+					headers,
+					timeout,
+				})),
+				"streamable-http" => Ok(Some(McpTransport::StreamableHttp {
+					url,
+					headers,
+					timeout,
+				})),
+				other => {
+					Err(crate::errors::ConfigError::ValidationFailed(format!(
+						"unknown transport type '{other}' \
+						(expected sse or streamable-http)"
+					)))
+				}
+			};
+		}
+
+		// Neither command nor url: stray --header / --env would be silently
+		// dropped, so reject them instead of returning Ok(None).
+		if headers.is_some_and(|h| !h.is_empty()) {
+			return Err(crate::errors::ConfigError::ValidationFailed(
+				"--header is only valid with --url".to_string(),
+			));
+		}
+		if env.is_some_and(|e| !e.is_empty()) {
+			return Err(crate::errors::ConfigError::ValidationFailed(
+				"--env is only valid with --command".to_string(),
+			));
+		}
+
+		Ok(None)
+	}
+
+	/// Reject structurally-empty values that would build an unusable MCP: an
+	/// empty stdio command or an empty remote URL. The single shared rule for
+	/// both surfaces — the CLI reaches it through `from_inputs` (which builds a
+	/// transport, so its own empty-command / empty-url guards already fire) and
+	/// the API calls it from `CreateMcpRequest`/`UpdateMcpRequest::validate`,
+	/// which otherwise build a transport straight from JSON with no value check.
+	pub fn validate_values(&self) -> Result<(), crate::errors::ConfigError> {
+		use crate::errors::ConfigError;
+		match self {
+			McpTransport::Stdio { command, .. } => {
+				if command.trim().is_empty() {
+					return Err(ConfigError::ValidationFailed(
+						"command cannot be empty".to_string(),
+					));
+				}
+			}
+			McpTransport::Sse { url, .. }
+			| McpTransport::StreamableHttp { url, .. } => {
+				if url.trim().is_empty() {
+					return Err(ConfigError::ValidationFailed(
+						"url cannot be empty".to_string(),
+					));
+				}
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -487,10 +622,282 @@ mod tests {
 		assert!(json.contains("\"timeout\":60"));
 	}
 
+	fn headers(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+		pairs
+			.iter()
+			.map(|(k, v)| (k.to_string(), v.to_string()))
+			.collect()
+	}
+
+	#[test]
+	fn from_inputs_stdio_rejects_headers() {
+		let err = McpTransport::from_inputs(
+			Some("npx".to_string()),
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			Some(headers(&[("A", "B")])),
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("--header"));
+	}
+
+	#[test]
+	fn from_inputs_url_rejects_env() {
+		let err = McpTransport::from_inputs(
+			None,
+			Some("http://h".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			Some(headers(&[("K", "V")])),
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("--env"));
+	}
+
+	#[test]
+	fn from_inputs_rejects_command_and_url() {
+		let err = McpTransport::from_inputs(
+			Some("npx".to_string()),
+			Some("http://h".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("mutually exclusive"));
+	}
+
+	#[test]
+	fn from_inputs_rejects_zero_timeout() {
+		let err = McpTransport::from_inputs(
+			None,
+			Some("http://h".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			None,
+			Some(0),
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("timeout"));
+	}
+
+	#[test]
+	fn from_inputs_unknown_transport_type_errs() {
+		let err = McpTransport::from_inputs(
+			None,
+			Some("http://h".to_string()),
+			"bogus",
+			None,
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("bogus"));
+	}
+
+	#[test]
+	fn from_inputs_url_default_streamable_and_sse_ok() {
+		let streamable = McpTransport::from_inputs(
+			None,
+			Some("http://h".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			Some(headers(&[("A", "B")])),
+			None,
+			Some(30),
+		)
+		.unwrap()
+		.unwrap();
+		assert!(matches!(
+			streamable,
+			McpTransport::StreamableHttp {
+				timeout: Some(30),
+				..
+			}
+		));
+
+		let sse = McpTransport::from_inputs(
+			None,
+			Some("http://h".to_string()),
+			"sse",
+			None,
+			None,
+			None,
+		)
+		.unwrap()
+		.unwrap();
+		assert!(matches!(sse, McpTransport::Sse { .. }));
+	}
+
+	#[test]
+	fn from_inputs_none_when_no_command_or_url() {
+		let result = McpTransport::from_inputs(
+			None,
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			None,
+			None,
+		)
+		.unwrap();
+		assert!(result.is_none());
+	}
+
+	#[test]
+	fn from_inputs_rejects_stray_headers_without_url() {
+		// --header with neither --url nor --command must error, not be
+		// silently dropped via the Ok(None) path.
+		let err = McpTransport::from_inputs(
+			None,
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			Some(headers(&[("A", "B")])),
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("--header"));
+	}
+
+	#[test]
+	fn from_inputs_rejects_stray_env_without_command() {
+		let err = McpTransport::from_inputs(
+			None,
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			Some(headers(&[("K", "V")])),
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("--env"));
+	}
+
+	#[test]
+	fn from_inputs_stdio_empty_command_errs() {
+		let err = McpTransport::from_inputs(
+			Some("   ".to_string()),
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(err.to_string().contains("command"));
+	}
+
+	#[test]
+	fn from_inputs_stdio_splits_command_and_keeps_env() {
+		let env = headers(&[("TOKEN", "x")]);
+		let transport = McpTransport::from_inputs(
+			Some("npx -y server".to_string()),
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			Some(env.clone()),
+			Some(45),
+		)
+		.unwrap()
+		.unwrap();
+		match transport {
+			McpTransport::Stdio {
+				command,
+				args,
+				env: got_env,
+				timeout,
+			} => {
+				assert_eq!(command, "npx");
+				assert_eq!(args, vec!["-y", "server"]);
+				assert_eq!(got_env, Some(env));
+				assert_eq!(timeout, Some(45));
+			}
+			other => panic!("expected stdio, got {other:?}"),
+		}
+	}
+
+	#[test]
+	fn from_inputs_stdio_empty_headers_map_allowed() {
+		// An empty (non-None) headers map must not trip the stdio guard.
+		let transport = McpTransport::from_inputs(
+			Some("npx".to_string()),
+			None,
+			DEFAULT_REMOTE_TRANSPORT,
+			Some(HashMap::new()),
+			None,
+			None,
+		)
+		.unwrap()
+		.unwrap();
+		assert!(matches!(transport, McpTransport::Stdio { .. }));
+	}
+
+	#[test]
+	fn from_inputs_url_empty_env_map_allowed() {
+		let transport = McpTransport::from_inputs(
+			None,
+			Some("http://h".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			Some(HashMap::new()),
+			None,
+		)
+		.unwrap()
+		.unwrap();
+		assert!(matches!(transport, McpTransport::StreamableHttp { .. }));
+	}
+
 	#[test]
 	fn test_agent_config_default() {
 		let config = AgentConfig::new();
 		assert!(config.skills.is_empty());
 		assert!(config.mcps.is_empty());
+	}
+
+	#[test]
+	fn from_inputs_url_empty_string_errs() {
+		// `--url ""` must be rejected, mirroring the empty-command guard.
+		let err = McpTransport::from_inputs(
+			None,
+			Some("".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("url")
+		));
+	}
+
+	#[test]
+	fn validate_values_rejects_empty_command_and_url() {
+		let empty_cmd = McpTransport::Stdio {
+			command: "  ".to_string(),
+			args: vec![],
+			env: None,
+			timeout: None,
+		};
+		assert!(empty_cmd.validate_values().is_err());
+
+		let empty_url = McpTransport::StreamableHttp {
+			url: "".to_string(),
+			headers: None,
+			timeout: None,
+		};
+		assert!(empty_url.validate_values().is_err());
+
+		let ok = McpTransport::Stdio {
+			command: "npx".to_string(),
+			args: vec![],
+			env: None,
+			timeout: None,
+		};
+		assert!(ok.validate_values().is_ok());
 	}
 }

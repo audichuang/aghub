@@ -5,8 +5,10 @@ use crate::dto::agent_coverage::AgentSkillCoverageDto;
 use crate::error::ApiResult;
 use crate::extractors::{ResolvedScope, ScopeParams};
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::linker::classify::{classify_all, LinkNeed};
-use aghub_core::skills::linker::universal_canonical_dir;
+use aghub_core::skills::linker::classify::classify_all;
+use aghub_core::skills::linker::{
+	universal_canonical_dir, AgentSkillCoverageView,
+};
 
 /// `GET /api/v1/skills/coverage?scope=<global|project>&project_root=<path?>`
 ///
@@ -44,20 +46,20 @@ pub async fn skills_coverage(
 		})?;
 
 	let plans = classify_all(scope, project_root, &master_skills_dir);
+	// Build through the SHARED core view so the API and CLI project a plan
+	// identically (single-source); then wrap it in the ts-rs DTO for export.
 	let dtos = plans
 		.into_iter()
 		.map(|plan| {
-			let auto_covered = matches!(plan.need, LinkNeed::NativeReader);
-			let needs_link = matches!(plan.need, LinkNeed::NeedsLink { .. });
-			let supported = !matches!(plan.need, LinkNeed::Unsupported);
+			let view = AgentSkillCoverageView::from_plan(&plan, scope_str);
 			AgentSkillCoverageDto {
-				id: plan.agent_id.to_string(),
-				scope: scope_str.to_string(),
-				reads_master: plan.reads_master,
-				writes_master: plan.writes_master,
-				needs_link,
-				auto_covered,
-				supported,
+				id: view.id,
+				scope: view.scope,
+				reads_master: view.reads_master,
+				writes_master: view.writes_master,
+				needs_link: view.needs_link,
+				auto_covered: view.auto_covered,
+				supported: view.supported,
 			}
 		})
 		.collect();

@@ -425,6 +425,7 @@ pub async fn delete_skill_by_path(
 				aghub_core::skills::removal::RemovalOutcome {
 					plan,
 					executed: false,
+					prune: aghub_core::skills::removal::PruneStatus::NotRun,
 				},
 			)));
 		}
@@ -445,22 +446,26 @@ pub async fn delete_skill_by_path(
 		executed_plan
 			.skipped
 			.extend(report.failed.into_iter().map(|(path, _)| path));
-		prune_scope_lock(resource_scope, project_root.as_deref());
+		// Reconcile the per-scope lock against disk through the SAME core-owned
+		// seam the manager uses, and report its real PruneStatus (not NotRun) so
+		// `pruned_lock_entries`/`prune_error` truthfully reflect the cleanup.
+		let prune = aghub_core::skills::prune::prune_lock_for_scope(
+			resource_scope,
+			project_root.as_deref(),
+		);
 		return Ok(Json(delete_response_from_outcome(
 			aghub_core::skills::removal::RemovalOutcome {
 				plan: executed_plan,
 				executed: true,
+				prune,
 			},
 		)));
 	}
 
 	match manager.remove_skill_planned(&skill_name, false, dry_run, confirm) {
-		Ok(outcome) => {
-			if outcome.executed {
-				prune_scope_lock(resource_scope, project_root.as_deref());
-			}
-			Ok(Json(delete_response_from_outcome(outcome)))
-		}
+		// `remove_skill_planned` already prunes the lock (core-owned seam) and
+		// records the status in `outcome.prune`; no route-level re-prune.
+		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
 		Err(e) => Ok(Json(DeleteSkillByPathResponse {
 			success: false,
 			error: Some(format!("Failed to delete: {e}")),
@@ -516,31 +521,6 @@ pub fn prune_lock_route(
 	}
 }
 
-/// Best-effort disk-reconciled lock prune for a scope after a deletion. A scan
-/// error (or missing project root) is swallowed — the orphan lock entry simply
-/// survives; deletion correctness does not depend on the prune succeeding.
-fn prune_scope_lock(
-	resource_scope: aghub_core::models::ResourceScope,
-	project_root: Option<&std::path::Path>,
-) {
-	use aghub_core::models::ResourceScope;
-	use aghub_core::skills::prune::{prune_lock_scanning, PruneScope};
-	if matches!(
-		resource_scope,
-		ResourceScope::GlobalOnly | ResourceScope::Both
-	) {
-		let _ = prune_lock_scanning(PruneScope::Global, None);
-	}
-	if matches!(
-		resource_scope,
-		ResourceScope::ProjectOnly | ResourceScope::Both
-	) {
-		if let Some(root) = project_root {
-			let _ = prune_lock_scanning(PruneScope::Project, Some(root));
-		}
-	}
-}
-
 fn get_parent_folder(path: std::path::PathBuf) -> std::path::PathBuf {
 	path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
 }
@@ -582,6 +562,21 @@ fn delete_response_from_outcome(
 				outcome.plan.paths.first().map(|p| p.display().to_string())
 			})
 			.flatten(),
+		pruned_lock_entries: match &outcome.prune {
+			aghub_core::skills::removal::PruneStatus::NotRun => None,
+			aghub_core::skills::removal::PruneStatus::Pruned(keys) => {
+				Some(keys.clone())
+			}
+			aghub_core::skills::removal::PruneStatus::Failed {
+				pruned, ..
+			} => Some(pruned.clone()),
+		},
+		prune_error: match &outcome.prune {
+			aghub_core::skills::removal::PruneStatus::Failed {
+				reason, ..
+			} => Some(reason.clone()),
+			_ => None,
+		},
 		error: None,
 		validation_errors: None,
 	}
@@ -1040,7 +1035,7 @@ pub async fn delete_skill(
 	params: DeleteSkillParams,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let resolved = params.resolve_scope()?;
-	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
@@ -1067,12 +1062,9 @@ pub async fn delete_skill(
 		dry_run,
 		confirm,
 	) {
-		Ok(outcome) => {
-			if outcome.executed {
-				prune_scope_lock(resource_scope, project_root.as_deref());
-			}
-			Ok(Json(delete_response_from_outcome(outcome)))
-		}
+		// `remove_skill_planned` already prunes the lock and records the status
+		// in `outcome.prune`; no route-level re-prune.
+		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
 		Err(ConfigError::ResourceNotFound { .. }) => {
 			Ok(Json(DeleteSkillByPathResponse {
 				success: true,

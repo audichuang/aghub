@@ -4,7 +4,6 @@ use crate::{
 	manager::ConfigManager,
 	models::{AgentType, McpServer, Skill, SubAgent},
 	registry,
-	skills::linker::Linker,
 };
 use log::{info, warn};
 use skill::sanitize::sanitize_name;
@@ -68,6 +67,66 @@ impl OperationBatchResult {
 
 	pub fn failed_count(&self) -> usize {
 		self.results.iter().filter(|r| !r.success).count()
+	}
+}
+
+/// Serializable wire view of an [`OperationBatchResult`].
+///
+/// `OperationResult`/`InstallTarget`/`OperationAction` are deliberately NOT
+/// `Serialize` (they carry filesystem paths), so this view is the SINGLE place
+/// the batch wire shape is defined. Both surfaces use it: the API derives a
+/// `ts-rs` DTO that mirrors it for type generation, and the CLI serializes it
+/// directly — so neither hand-rolls a second mapping that could drift.
+///
+/// Field encoding is fixed and load-bearing (both surfaces agreed on it):
+/// `scope` is lowercase, `action` is `"copy"`/`"delete"`, and
+/// `project_root`/`error` are omitted when absent.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationResultView {
+	pub agent: String,
+	pub scope: &'static str,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub project_root: Option<String>,
+	pub action: String,
+	pub success: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
+}
+
+impl From<&OperationResult> for OperationResultView {
+	fn from(r: &OperationResult) -> Self {
+		OperationResultView {
+			agent: r.target.agent.as_str().to_string(),
+			scope: match r.target.scope {
+				InstallScope::Global => "global",
+				InstallScope::Project => "project",
+			},
+			project_root: r
+				.target
+				.project_root
+				.as_ref()
+				.map(|p| p.display().to_string()),
+			action: r.action.to_string(),
+			success: r.success,
+			error: r.error.clone(),
+		}
+	}
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct OperationBatchView {
+	pub success_count: usize,
+	pub failed_count: usize,
+	pub results: Vec<OperationResultView>,
+}
+
+impl From<&OperationBatchResult> for OperationBatchView {
+	fn from(batch: &OperationBatchResult) -> Self {
+		OperationBatchView {
+			success_count: batch.success_count(),
+			failed_count: batch.failed_count(),
+			results: batch.results.iter().map(Into::into).collect(),
+		}
 	}
 }
 
@@ -239,73 +298,6 @@ fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
 	})
 }
 
-/// Find where a skill actually exists in each agent's skills directories.
-/// Returns (skill_path, agent) pairs for locations where the skill exists.
-/// TODO: Only find one, maybe we should remove all?
-fn find_skill_locations_in_agents(
-	skill_name: &str,
-	agents: &[AgentType],
-	scope: InstallScope,
-	project_root: Option<&PathBuf>,
-) -> Vec<(PathBuf, AgentType)> {
-	let safe_name = sanitize_name(skill_name);
-	let mut locations = Vec::new();
-
-	for agent in agents {
-		let adapter = create_adapter(*agent);
-		let resource_scope = match scope {
-			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-		};
-		let skills_dirs = adapter.get_skills_paths(
-			project_root.map(|p| p.as_path()),
-			resource_scope,
-		);
-
-		for dir in skills_dirs {
-			let skill_path = dir.join(&safe_name);
-			if skill_path.exists() {
-				locations.push((skill_path, *agent));
-			}
-		}
-	}
-
-	locations
-}
-
-/// Remove a discovered skill directory, refusing any path that canonicalizes
-/// outside the allow-listed skill roots (symlinked-parent / canonicalize-escape
-/// guard, mirroring `manager::skill` removal). `roots` must include this
-/// agent's own skill dirs, or a legitimately-installed per-agent skill would be
-/// refused.
-fn guarded_remove_skill_dir(
-	skill_path: &Path,
-	agent: AgentType,
-	scope: InstallScope,
-	project_root: Option<&Path>,
-) -> std::io::Result<()> {
-	let resource_scope = match scope {
-		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-	};
-	let agent_skill_dirs =
-		create_adapter(agent).get_skills_paths(project_root, resource_scope);
-	let roots = crate::skills::removal::allowed_skill_roots(
-		&agent_skill_dirs,
-		project_root,
-	);
-	if crate::skills::removal::assert_contained(skill_path, &roots).is_none() {
-		return Err(std::io::Error::new(
-			std::io::ErrorKind::PermissionDenied,
-			format!(
-				"Refusing to remove '{}': outside skill roots",
-				skill_path.display()
-			),
-		));
-	}
-	fs::remove_dir_all(skill_path)
-}
-
 fn group_agents_by_target_dir(
 	agents: &[AgentType],
 	scope: InstallScope,
@@ -346,6 +338,36 @@ fn unique_targets(targets: Vec<InstallTarget>) -> Vec<InstallTarget> {
 	unique
 }
 
+/// Reject a transfer that names no destinations. An empty `--to` is almost
+/// always a mistake; without this guard `transfer_*` returns `Ok([])` and the
+/// caller exits 0 having copied nothing (finding #4). Both surfaces route
+/// through `transfer_*`, so the guard lives here once.
+fn ensure_destinations(destinations: &[InstallTarget]) -> Result<()> {
+	if destinations.is_empty() {
+		return Err(ConfigError::InvalidConfig(
+			"no destination agents given; specify at least one target"
+				.to_string(),
+		));
+	}
+	Ok(())
+}
+
+/// Reject a reconcile that names the same agent in both `--add` and `--remove`.
+/// The add loop runs before the remove loop, so `--add X --remove X` would
+/// silently net to a delete and exit 0. Both surfaces (CLI + API) route through
+/// `reconcile_*`, so the guard lives here once.
+fn ensure_disjoint(added: &[AgentType], removed: &[AgentType]) -> Result<()> {
+	for agent in added {
+		if removed.contains(agent) {
+			return Err(ConfigError::InvalidConfig(format!(
+				"agent '{}' appears in both add and remove",
+				agent.as_str()
+			)));
+		}
+	}
+	Ok(())
+}
+
 fn log_operation_outcome(
 	resource: &str,
 	name: &str,
@@ -376,6 +398,7 @@ pub fn transfer_mcp(
 ) -> Result<OperationBatchResult> {
 	let mcp = load_source_mcp(&source)?;
 	let destinations = unique_targets(destinations);
+	ensure_destinations(&destinations)?;
 	info!(
 		"transferring MCP '{}' to {} destination(s)",
 		mcp.name,
@@ -415,6 +438,7 @@ pub fn reconcile_mcp(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 ) -> Result<OperationBatchResult> {
+	ensure_disjoint(&added, &removed)?;
 	let mcp = load_source_mcp(&source)?;
 	info!(
 		"reconciling MCP '{}' with {} added and {} removed agent(s)",
@@ -505,6 +529,7 @@ pub fn transfer_sub_agent(
 ) -> Result<OperationBatchResult> {
 	let sub_agent = load_source_sub_agent(&source)?;
 	let destinations = unique_targets(destinations);
+	ensure_destinations(&destinations)?;
 	info!(
 		"transferring sub-agent '{}' to {} destination(s)",
 		sub_agent.name,
@@ -559,6 +584,7 @@ pub fn reconcile_sub_agent(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 ) -> Result<OperationBatchResult> {
+	ensure_disjoint(&added, &removed)?;
 	let sub_agent = load_source_sub_agent(&source)?;
 	info!(
 		"reconciling sub-agent '{}' with {} added and {} removed agent(s)",
@@ -654,6 +680,7 @@ pub fn transfer_skill(
 	let source_root = resolve_skill_root(&skill)?;
 	let safe_name = sanitize_name(&skill.name);
 	let destinations = unique_targets(destinations);
+	ensure_destinations(&destinations)?;
 	info!(
 		"transferring skill '{}' from '{}' to {} destination(s)",
 		skill.name,
@@ -703,6 +730,7 @@ pub fn reconcile_skill(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 ) -> Result<OperationBatchResult> {
+	ensure_disjoint(&added, &removed)?;
 	let skill = load_source_skill(&source)?;
 	let source_root = resolve_skill_root(&skill)?;
 	let safe_name = sanitize_name(&skill.name);
@@ -764,41 +792,48 @@ pub fn reconcile_skill(
 		}
 	}
 
-	// Find actual locations of the skill in removed agents' directories
-	let skill_locations = find_skill_locations_in_agents(
-		&skill.name,
-		&removed,
-		target_scope,
-		target_project_root.as_ref(),
-	);
-
-	// Process each actual location for deletion
-	for (skill_path, agent) in skill_locations {
-		let delete_result = if Linker::is_link(&skill_path) {
-			Linker::unlink(&skill_path)
-		} else {
-			guarded_remove_skill_dir(
-				&skill_path,
-				agent,
-				target_scope,
-				target_project_root.as_deref(),
-			)
+	// Remove per agent through the planned-removal seam (#5) — the same
+	// classifier every delete surface uses (symlink sweep, shared-master
+	// referrer keep, containment, lock prune). Never blind-delete paths
+	// found via READ dirs: a NativeReader's read dirs include the shared
+	// `.agents/skills` master, and `remove_dir_all`-ing it would orphan
+	// every other agent's referrer.
+	for agent in removed {
+		let target = InstallTarget {
+			agent,
+			scope: target_scope,
+			project_root: target_project_root.clone(),
 		};
-		let delete_error = match delete_result {
-			Ok(()) => None,
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-			Err(e) => Some(e),
-		};
+		let outcome = (|| -> Result<()> {
+			validate_target(&target)?;
+			let mut manager = build_manager(&target);
+			ensure_loaded(&mut manager)?;
+			match manager.remove_skill_planned(
+				&skill.name,
+				false, // single-agent removal, never an all-agents sweep
+				false, // not a dry-run — the CLI/desktop gate confirmation
+				true,  // execute; the plan still keeps shared masters
+			) {
+				Ok(_) => Ok(()),
+				// Already absent from this agent = the desired state;
+				// keep the old NotFound tolerance.
+				Err(ConfigError::ResourceNotFound { .. }) => Ok(()),
+				Err(err) => Err(err),
+			}
+		})();
+		log_operation_outcome(
+			"skill",
+			&skill.name,
+			OperationAction::Delete,
+			&target,
+			&outcome,
+		);
 
 		results.push(OperationResult {
-			target: InstallTarget {
-				agent,
-				scope: target_scope,
-				project_root: target_project_root.clone(),
-			},
+			target,
 			action: OperationAction::Delete,
-			success: delete_error.is_none(),
-			error: delete_error.as_ref().map(|e| e.to_string()),
+			success: outcome.is_ok(),
+			error: outcome.err().map(|err| err.to_string()),
 		});
 	}
 
@@ -863,6 +898,45 @@ mod tests {
 		);
 		dest_manager.load().unwrap();
 		assert!(dest_manager.get_mcp("filesystem").is_some());
+	}
+
+	#[test]
+	fn transfer_mcp_empty_destinations_is_rejected() {
+		// Finding #4: a transfer with no destinations is a no-op the caller
+		// almost certainly did not intend. It must be an actionable error, not
+		// a silent `Ok` with an empty result set (which exits 0).
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let source_root = temp.path().join("source");
+		fs::create_dir_all(&source_root).unwrap();
+
+		let mut source_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&source_root),
+		);
+		source_manager.load().unwrap();
+		source_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
+			))
+			.unwrap();
+
+		let result = transfer_mcp(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(source_root.clone()),
+				name: "filesystem".to_string(),
+			},
+			vec![], // no destinations
+		);
+
+		assert!(
+			result.is_err(),
+			"empty destination list must be a hard error, not Ok([])"
+		);
 	}
 
 	#[test]
@@ -1059,6 +1133,74 @@ mod tests {
 		let master_skill = master.join("SKILL.md");
 		assert!(master_skill.exists());
 		assert_eq!(fs::read_to_string(master_skill).unwrap(), skill_md);
+	}
+
+	// T-RECONCILE-NATIVE-READER: reconcile --remove for a NativeReader agent
+	// (cursor reads `.agents/skills` directly) must NOT delete the shared
+	// Master another agent still symlinks. The pre-seam code found the Master
+	// via cursor's READ dirs and `remove_dir_all`'d it — data loss for every
+	// referrer. This test fails if the removal path stops going through
+	// `remove_skill_planned`'s classifier.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_remove_native_reader_keeps_shared_master() {
+		use crate::adapter::set_skills_path_override;
+
+		struct SkillsPathOverrideReset;
+
+		impl Drop for SkillsPathOverrideReset {
+			fn drop(&mut self) {
+				set_skills_path_override("claude", None);
+			}
+		}
+
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let master = root.join(".agents/skills/my-skill");
+		let sentinel = master.join("sentinel.txt");
+		let claude_skills = root.join(".claude/skills");
+		let referrer = claude_skills.join("my-skill");
+		let skill_md =
+			"---\nname: my-skill\ndescription: Shared\n---\n\n# My Skill\n";
+
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), skill_md).unwrap();
+		fs::write(&sentinel, "keep-me").unwrap();
+		fs::create_dir_all(&claude_skills).unwrap();
+		std::os::unix::fs::symlink(&master, &referrer).unwrap();
+		set_skills_path_override("claude", Some(claude_skills));
+		let _reset_override = SkillsPathOverrideReset;
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "my-skill".to_string(),
+			},
+			vec![],
+			vec![AgentType::Cursor],
+		)
+		.unwrap();
+
+		assert_eq!(result.results.len(), 1);
+		assert_eq!(result.results[0].action, OperationAction::Delete);
+		// The shared Master and its contents must survive.
+		assert!(
+			master.join("SKILL.md").exists(),
+			"Master SKILL.md must survive a NativeReader remove"
+		);
+		assert!(
+			sentinel.exists(),
+			"sentinel inside master must survive (remove_dir_all would \
+			 have wiped it)"
+		);
+		// Claude's referrer must still resolve to the live Master.
+		assert!(
+			fs::canonicalize(&referrer).is_ok(),
+			"claude referrer symlink must stay intact"
+		);
 	}
 
 	// T-RECONCILE-WIN-JUNCTION: the real data-loss guard.
@@ -1497,5 +1639,27 @@ mod tests {
 		// Should only process once due to deduplication
 		assert_eq!(result.results.len(), 1);
 		assert_eq!(result.success_count(), 1);
+	}
+
+	#[test]
+	fn ensure_disjoint_rejects_agent_in_both_add_and_remove() {
+		// `--add cursor --remove cursor` would net to a silent delete + exit 0
+		// without this guard.
+		let err = ensure_disjoint(
+			&[AgentType::Cursor, AgentType::Claude],
+			&[AgentType::Cline, AgentType::Cursor],
+		)
+		.unwrap_err();
+		assert!(
+			matches!(err, ConfigError::InvalidConfig(msg) if msg.contains("cursor")),
+			"overlap must be rejected naming the agent"
+		);
+
+		// Disjoint add/remove sets are fine.
+		assert!(ensure_disjoint(
+			&[AgentType::Cursor],
+			&[AgentType::Cline, AgentType::Claude],
+		)
+		.is_ok());
 	}
 }

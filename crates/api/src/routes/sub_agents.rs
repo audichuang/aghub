@@ -2,17 +2,17 @@ use aghub_core::{
 	errors::ConfigError, load_all_agents, models::SubAgent, transfer,
 };
 use rocket::http::Status;
-use rocket::response::status::NoContent;
 use rocket::serde::json::Json;
 
 use crate::{
+	dto::skill::DeleteSkillByPathResponse,
 	dto::sub_agent::{
 		CreateSubAgentRequest, SubAgentResponse, UpdateSubAgentRequest,
 	},
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
-	error::{ApiCreated, ApiError, ApiNoContent, ApiResult},
+	error::{ApiCreated, ApiError, ApiResult},
 	extractors::{AgentParam, ScopeParams},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
@@ -237,18 +237,193 @@ pub fn update_sub_agent(
 	Ok(Json(updated))
 }
 
-#[delete("/agents/<agent>/sub-agents/<name>?<scope..>")]
+/// Query params for `delete_sub_agent`. Mirrors `DeleteMcpParams`: the same
+/// dry-run/confirm gate (no `all_agents` — sub-agent removal is single-scope).
+#[derive(rocket::FromForm)]
+pub struct DeleteSubAgentParams {
+	scope: Option<String>,
+	project_root: Option<String>,
+	confirm: Option<bool>,
+}
+
+#[delete("/agents/<agent>/sub-agents/<name>?<params..>")]
 pub fn delete_sub_agent(
 	agent: AgentParam,
 	name: String,
-	scope: ScopeParams,
-) -> ApiNoContent {
-	let resolved = scope.resolve()?;
+	params: DeleteSubAgentParams,
+) -> ApiResult<DeleteSkillByPathResponse> {
+	let resolved = ScopeParams {
+		scope: params.scope.clone(),
+		project_root: params.project_root.clone(),
+	}
+	.resolve()?;
 	require_writable_scope(&resolved)?;
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_sub_agent_supported(&agent, resource_scope)?;
+	let confirm = params.confirm.unwrap_or(false);
+	let dry_run = !confirm;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	manager.load().map_err(ApiError::from)?;
-	manager.remove_sub_agent(&name).map_err(ApiError::from)?;
-	Ok(NoContent)
+	// Idempotent-delete contract (a missing sub-agent is a success no-op, any
+	// other error propagates) is owned once in `routes::removal_or_noop`,
+	// mirroring the skill/MCP delete routes.
+	crate::routes::removal_or_noop(
+		manager.remove_sub_agent_planned(&name, dry_run, confirm),
+	)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::dto::sub_agent::CreateSubAgentRequest;
+	use aghub_core::models::AgentType;
+
+	/// Seed one Claude sub-agent in a project-scoped temp root so delete tests
+	/// have real on-disk state without touching the real home dir.
+	fn seed_sub_agent(root: &std::path::Path, name: &str) {
+		create_sub_agent(
+			AgentParam(AgentType::Claude),
+			ScopeParams {
+				scope: Some("project".to_string()),
+				project_root: Some(root.display().to_string()),
+			},
+			Json(CreateSubAgentRequest {
+				name: name.to_string(),
+				description: "d".to_string(),
+				instruction: "do things".to_string(),
+			}),
+		)
+		.ok()
+		.expect("seed sub-agent");
+	}
+
+	fn agent_file(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+		root.join(".claude/agents").join(format!("{name}.md"))
+	}
+
+	fn sub_agent_exists(root: &std::path::Path, name: &str) -> bool {
+		list_sub_agents(
+			AgentParam(AgentType::Claude),
+			ScopeParams {
+				scope: Some("project".to_string()),
+				project_root: Some(root.display().to_string()),
+			},
+		)
+		.ok()
+		.expect("list sub-agents")
+		.into_inner()
+		.iter()
+		.any(|a| a.name == name)
+	}
+
+	fn del_params(
+		root: &std::path::Path,
+		confirm: Option<bool>,
+	) -> DeleteSubAgentParams {
+		DeleteSubAgentParams {
+			scope: Some("project".to_string()),
+			project_root: Some(root.display().to_string()),
+			confirm,
+		}
+	}
+
+	#[test]
+	fn delete_sub_agent_dry_run_default_keeps_agent_and_file() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		seed_sub_agent(root, "reviewer");
+		let file = agent_file(root, "reviewer");
+		assert!(file.exists(), "precondition: backing file written");
+
+		let resp = delete_sub_agent(
+			AgentParam(AgentType::Claude),
+			"reviewer".to_string(),
+			del_params(root, None),
+		)
+		.ok()
+		.expect("dry-run ok")
+		.into_inner();
+
+		assert!(resp.success);
+		assert!(resp.dry_run, "default (confirm=None) must be a dry-run");
+		assert!(!resp.executed, "dry-run must not execute");
+		assert_eq!(resp.paths.len(), 1, "plan names the backing file");
+		assert!(resp.deleted_path.is_none(), "nothing deleted on dry-run");
+		assert!(file.exists(), "dry-run must leave the file on disk");
+		assert!(sub_agent_exists(root, "reviewer"), "agent still present");
+	}
+
+	#[test]
+	fn delete_sub_agent_confirm_removes_agent_and_file() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		seed_sub_agent(root, "goner");
+		let file = agent_file(root, "goner");
+		assert!(file.exists());
+
+		let resp = delete_sub_agent(
+			AgentParam(AgentType::Claude),
+			"goner".to_string(),
+			del_params(root, Some(true)),
+		)
+		.ok()
+		.expect("confirm ok")
+		.into_inner();
+
+		assert!(resp.success);
+		assert!(!resp.dry_run);
+		assert!(resp.executed, "confirm=true must execute");
+		assert_eq!(
+			resp.deleted_path.as_deref(),
+			Some(file.display().to_string().as_str()),
+			"deleted_path is the backing file"
+		);
+		assert!(!file.exists(), "confirm deletes the backing file");
+		assert!(!sub_agent_exists(root, "goner"), "agent gone");
+	}
+
+	#[test]
+	fn delete_sub_agent_missing_is_dry_run_shaped_ok() {
+		// Missing name is not an error: dry-run-shaped success body, matching
+		// the skill/MCP delete routes.
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		seed_sub_agent(root, "present");
+
+		let resp = delete_sub_agent(
+			AgentParam(AgentType::Claude),
+			"absent".to_string(),
+			del_params(root, Some(true)),
+		)
+		.ok()
+		.expect("missing is ok")
+		.into_inner();
+
+		assert!(resp.success);
+		assert!(!resp.executed, "nothing to remove");
+		assert!(
+			resp.deleted_path.is_none(),
+			"no-op missing delete must leave deleted_path null"
+		);
+		assert!(sub_agent_exists(root, "present"), "real agent untouched");
+	}
+
+	#[test]
+	fn delete_sub_agent_rejects_unsupported_scope() {
+		// 'all' is read-only — require_writable_scope rejects before planning.
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let err = delete_sub_agent(
+			AgentParam(AgentType::Claude),
+			"x".to_string(),
+			DeleteSubAgentParams {
+				scope: Some("all".to_string()),
+				project_root: Some(root.display().to_string()),
+				confirm: Some(true),
+			},
+		)
+		.expect_err("all scope rejects write");
+		assert_eq!(err.status, Status::MethodNotAllowed);
+		assert_eq!(err.body.code, "READ_ONLY_SCOPE");
+	}
 }

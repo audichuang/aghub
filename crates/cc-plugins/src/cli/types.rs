@@ -41,8 +41,10 @@ pub enum CliMarketplaceSource {
 	Url {
 		url: String,
 	},
-	/// Local directory marketplace. The CLI emits `"source": "directory"`
-	/// with a `path`; `"local"` is kept as an alias for resilience.
+	/// Local directory marketplace. The `claude` CLI emits `"source":
+	/// "directory"` (not `"local"`) with a `path`; `"local"` is kept as an
+	/// alias so a directory-source marketplace doesn't fail the whole
+	/// `marketplace list --json` parse.
 	#[serde(rename = "directory", alias = "local")]
 	Local {
 		path: String,
@@ -202,9 +204,9 @@ mod tests {
 
 	#[test]
 	fn deserialize_marketplace_directory() {
-		// The CLI emits `"source": "directory"` for a local-dir marketplace
-		// (e.g. a Google Drive folder). Regression: this used to fail the whole
-		// `marketplace list` parse, breaking the Marketplaces tab.
+		// The `claude` CLI emits `"source": "directory"` for a local-dir
+		// marketplace (e.g. a Google Drive folder). Regression: this used to
+		// fail the whole `marketplace list` parse, breaking the Marketplaces tab.
 		let json = r#"{
 			"name": "audi-agent-tool",
 			"source": "directory",
@@ -216,8 +218,21 @@ mod tests {
 			CliMarketplaceSource::Local { path } => {
 				assert_eq!(path, "/Users/audi/GoogleDrive/audi-agent-tool");
 			}
-			_ => panic!("expected local source"),
+			_ => panic!("expected local/directory source"),
 		}
+	}
+
+	#[test]
+	fn deserialize_marketplace_list_with_mixed_sources() {
+		// A whole list with a directory entry mixed in must parse (the real
+		// failure: one directory entry broke the entire `marketplace list`).
+		let json = r#"[
+			{"name":"a","source":"github","repo":"o/r","installLocation":"/x/a"},
+			{"name":"b","source":"directory","path":"/p/b","installLocation":"/p/b"}
+		]"#;
+		let list: Vec<CliMarketplace> = serde_json::from_str(json).unwrap();
+		assert_eq!(list.len(), 2);
+		assert!(matches!(list[1].source, CliMarketplaceSource::Local { .. }));
 	}
 
 	#[test]

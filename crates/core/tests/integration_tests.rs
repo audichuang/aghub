@@ -922,6 +922,13 @@ fn remove_skill_planned_all_agents_requires_confirm() {
 		!outcome.executed,
 		"all-agents without confirm must not delete"
 	);
+	// The confirm-gated (unconfirmed) branch is non-executed, so the lock prune
+	// must not run — same contract as a dry-run.
+	assert_eq!(
+		outcome.prune,
+		aghub_core::skills::removal::PruneStatus::NotRun,
+		"unconfirmed destructive op leaves prune NotRun"
+	);
 	assert!(skill_dir.exists());
 
 	// With confirm it executes.

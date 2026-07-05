@@ -23,7 +23,24 @@ export type DeleteSkillByPathResponse = {
 	 * Paths intentionally NOT removed (outside the allow-listed skills roots).
 	 */
 	skipped: Array<string>;
+	/**
+	 * Absolute path actually removed (only when `executed`); `null` otherwise.
+	 * Always serialized (no skip) so the runtime matches both the shared
+	 * `RemovalView` wire shape and the generated `deleted_path: string | null`.
+	 */
 	deleted_path: string | null;
-	error: string | null;
-	validation_errors: Array<ValidationError> | null;
+	/**
+	 * Lock keys (skill names — never raw paths) dropped by the post-delete
+	 * disk-reconciled prune. `Some([])` means the prune ran and found nothing
+	 * orphaned; `None` means no prune was attempted (dry-run/unconfirmed). On a
+	 * prune failure this carries the keys dropped BEFORE the failure (partial).
+	 */
+	pruned_lock_entries?: Array<string>;
+	/**
+	 * Set when the post-delete lock prune failed. The deletion still happened
+	 * (prune is non-fatal); this reports why the lock could not be reconciled.
+	 */
+	prune_error?: string;
+	error?: string;
+	validation_errors?: Array<ValidationError>;
 };

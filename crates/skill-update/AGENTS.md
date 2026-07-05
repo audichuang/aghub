@@ -32,7 +32,7 @@ crates/skill-update/src/
 | Entry point                  | `src/lib.rs` `check_updates()`     | Async; takes `CheckDeps` + entries                 |
 | Group entries by repo/ref    | `src/lib.rs` `group_by_source_ref` | Fetch each `SourceRef` at most once                |
 | Result caching               | `src/lib.rs` `ResultCache`         | TTL cache keyed by `SourceRef`                     |
-| Inject auth                  | `src/lib.rs` `TokenResolver`       | CLI = env `GIT_USERNAME`/`GIT_PASSWORD`; API = own |
+| Inject auth                  | `src/lib.rs` `TokenResolver`       | CLI = env `GIT_PASSWORD`/`GITHUB_TOKEN`; API = own |
 | Real network fetch / ls-refs | `src/git.rs`                       | `GitFetcher` (treeless) / `GitRefResolver`         |
 | Hash compare / rename detect | `aghub_core::skills::update`       | `compare_known_hashes`, `detect_rename` (pure)     |
 
