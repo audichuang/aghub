@@ -154,10 +154,6 @@ pub fn sanitize_skill_path(root: &Path, skill_path: &str) -> Option<PathBuf> {
 /// (`manager::skill::rollback_master_rename`) maps onto the same enum.
 #[derive(Debug, Clone)]
 pub enum RecoveryHint {
-	/// EBUSY/EACCES/PermissionDenied on a rename — something holds the path.
-	LockHeld { path: PathBuf },
-	/// A path vanished mid-operation (NotFound).
-	MissingDir { path: PathBuf },
 	/// A dangling/foreign symlink is blocking a relink.
 	BrokenSymlink { link: PathBuf },
 	/// The rollback itself failed — `recover_from` is the only surviving copy
@@ -172,14 +168,6 @@ impl RecoveryHint {
 	/// One actionable line. The only raw interpolation is the path(s).
 	pub fn next_step(&self) -> String {
 		match self {
-			RecoveryHint::LockHeld { path } => format!(
-				"close any process holding {} and retry",
-				path.display()
-			),
-			RecoveryHint::MissingDir { path } => format!(
-				"{} disappeared mid-operation; retry the install",
-				path.display()
-			),
 			RecoveryHint::BrokenSymlink { link } => {
 				format!("remove the broken link {} and retry", link.display())
 			}

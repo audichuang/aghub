@@ -644,10 +644,6 @@ export default {
 	deleteMcpMultipleConfirm:
 		'This removes "{{name}}" from {{count}} agents ({{agents}}). This can\'t be undone.',
 	deleting: "Deleting...",
-	deletePreviewLoading: "Checking what will be removed...",
-	deletePreviewPaths: "{{count}} path(s) will be removed",
-	deletePreviewNothing: "Nothing to remove on disk.",
-	deletePreviewSkipped: "{{count}} path(s) skipped (outside managed roots)",
 	editMcpServer: "Edit MCP Server",
 	multipleAgents: "Multiple Agents",
 	changeWillApplyToAgents:
