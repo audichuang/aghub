@@ -43,6 +43,10 @@ export function DeleteSkillLocationDialog({
 		item && item.installations.length > 0
 			? {
 					source_path: item.sourcePath,
+					// The by-path route gates on confirm (unwrap_or(false) =>
+					// dry-run returning success:true), so without this the
+					// delete silently no-ops yet the success check passes.
+					confirm: true,
 					agents: item.installations.map(
 						(installation) => installation.agent,
 					),

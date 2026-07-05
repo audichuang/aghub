@@ -526,6 +526,11 @@ export function createApi(baseUrl: string) {
 					.delete(`agents/${agent}/mcps/${name}`, {
 						searchParams: {
 							scope,
+							// The backend gates on confirm (unwrap_or(false) =>
+							// dry-run). This client method ALWAYS executes — a
+							// preview would be a separate call — so pin it, or
+							// the delete silently no-ops and still toasts success.
+							confirm: "true",
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
@@ -636,6 +641,10 @@ export function createApi(baseUrl: string) {
 					.delete(`agents/${agent}/sub-agents/${name}`, {
 						searchParams: {
 							scope,
+							// See mcps.delete: the backend defaults to dry-run
+							// without confirm, so pin it or the delete no-ops
+							// while reporting success.
+							confirm: "true",
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
