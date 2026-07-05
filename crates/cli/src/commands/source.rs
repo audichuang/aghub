@@ -64,6 +64,10 @@ fn select_env_token(
 
 fn is_github_host(host: &str) -> bool {
 	let host = host.to_ascii_lowercase();
+	// A trailing root dot is the same FQDN (`github.com.` == `github.com`);
+	// strip it BEFORE matching so the suffix check still rejects
+	// `github.com.evil.com.`.
+	let host = host.trim_end_matches('.');
 	host == "github.com" || host.ends_with(".github.com")
 }
 
@@ -1340,7 +1344,7 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	let token = <EnvTokenResolver as skill_update::TokenResolver>::resolve(
 		&EnvTokenResolver,
 		&source.source_url,
-		None,
+		skill_update::keychain_host_for_source(&source.source_url).as_deref(),
 	);
 	let repo = <CliFetcher as skill_update::Fetcher>::fetch(
 		&CliFetcher,
@@ -1615,7 +1619,22 @@ mod tests {
 			select_env_token(None, s("gh"), Some("API.GitHub.com")),
 			s("gh")
 		);
-		for host in [Some("gitlab.com"), Some("evil-github.com"), None] {
+		// FQDN trailing root dot is the same host.
+		assert_eq!(
+			select_env_token(None, s("gh"), Some("github.com.")),
+			s("gh")
+		);
+		assert_eq!(
+			select_env_token(None, s("gh"), Some("api.github.com.")),
+			s("gh")
+		);
+		for host in [
+			Some("gitlab.com"),
+			Some("evil-github.com"),
+			Some("github.com.evil.com"),
+			Some("github.com.evil.com."),
+			None,
+		] {
 			assert_eq!(
 				select_env_token(None, s("gh"), host),
 				None,
