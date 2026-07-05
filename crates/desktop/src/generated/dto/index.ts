@@ -1,3 +1,5 @@
+export type { AcceptRenameRequest } from "./AcceptRenameRequest";
+export type { AcceptRenameResponse } from "./AcceptRenameResponse";
 export type { AgentAvailabilityDto } from "./AgentAvailabilityDto";
 export type { AgentInfo } from "./AgentInfo";
 export type { AgentProviderCredentialDto } from "./AgentProviderCredentialDto";
@@ -59,6 +61,9 @@ export type { CredentialStatus } from "./CredentialStatus";
 export type { DeleteSkillByPathRequest } from "./DeleteSkillByPathRequest";
 export type { DeleteSkillByPathResponse } from "./DeleteSkillByPathResponse";
 export type { EditSkillFolderRequest } from "./EditSkillFolderRequest";
+export type { GitCredentialStatus } from "./GitCredentialStatus";
+export type { GitCredentialStatusQuery } from "./GitCredentialStatusQuery";
+export type { GitCredentialStatusResponse } from "./GitCredentialStatusResponse";
 export type { GitInstallRequest } from "./GitInstallRequest";
 export type { GitInstallResponse } from "./GitInstallResponse";
 export type { GitInstallResultEntry } from "./GitInstallResultEntry";
@@ -106,6 +111,7 @@ export type { SourceCredentialBindingRequest } from "./SourceCredentialBindingRe
 export type { SourceCredentialBindingResponse } from "./SourceCredentialBindingResponse";
 export type { SourceDiffResponse } from "./SourceDiffResponse";
 export type { SourceSkillDiff } from "./SourceSkillDiff";
+export type { SourceSkillStateDto } from "./SourceSkillStateDto";
 export type { SourceSummaryResponse } from "./SourceSummaryResponse";
 export type { SourcesListResponse } from "./SourcesListResponse";
 export type { SubAgentCapabilitiesDto } from "./SubAgentCapabilitiesDto";

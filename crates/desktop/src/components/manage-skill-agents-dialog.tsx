@@ -1,14 +1,16 @@
-import { Button, Modal, toast } from "@heroui/react";
+import { toast } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { supportsSkillMutation } from "../lib/agent-capabilities";
+import type { InstallResult } from "../lib/install-utils";
 import type { Scope } from "../lib/skills-path-group";
 import { cn } from "../lib/utils";
 import { reconcileSkillsMutationOptions } from "../requests/skills";
 import type { AgentDiffLabel, AgentState } from "./agent-list";
+import { SharedSkillInstallModal } from "./shared-skill-install-modal";
 import type { SkillGroup } from "./skill-detail-helpers";
 import { SkillsAgentList } from "./skills-agent-list";
 
@@ -183,60 +185,41 @@ export function ManageSkillAgentsDialog({
 		return disabled;
 	}, [usableAgents]);
 
+	const agentPicker = !hasValidGroup ? (
+		<p className="text-sm text-muted">{t("invalidConfiguration")}</p>
+	) : (
+		<div className={cn("transition-opacity", isApplying && "opacity-50")}>
+			<SkillsAgentList
+				agents={usableAgents}
+				selectedKeys={selectedAgents}
+				onSelectionChange={handleSelectionChange}
+				scope={scope}
+				agentStates={agentStates}
+				diffLabels={diffLabels}
+				disabled={isApplying}
+				disabledAgents={disabledAgents}
+				label={t("selectAgentsForSkill")}
+				emptyMessage={t("noTargetAgents")}
+			/>
+		</div>
+	);
+
+	// ManageSkillAgentsDialog uses inline agentStates for per-row feedback;
+	// it never enters the results phase of SharedSkillInstallModal.
+	const NO_RESULTS: InstallResult[] = [];
+
 	return (
-		<Modal.Backdrop isOpen={isOpen} onOpenChange={onCloseAndReset}>
-			<Modal.Container>
-				<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-md sm:max-w-lg">
-					<Modal.CloseTrigger />
-					<Modal.Header>
-						<Modal.Heading>{t("manageAgents")}</Modal.Heading>
-					</Modal.Header>
-
-					<Modal.Body className="p-4">
-						{!hasValidGroup ? (
-							<p className="text-sm text-muted">
-								{t("invalidConfiguration")}
-							</p>
-						) : (
-							<div
-								className={cn(
-									"transition-opacity",
-									isApplying && "opacity-50",
-								)}
-							>
-								<SkillsAgentList
-									agents={usableAgents}
-									selectedKeys={selectedAgents}
-									onSelectionChange={handleSelectionChange}
-									scope={scope}
-									agentStates={agentStates}
-									diffLabels={diffLabels}
-									disabled={isApplying}
-									disabledAgents={disabledAgents}
-									label={t("selectAgentsForSkill")}
-									emptyMessage={t("noTargetAgents")}
-								/>
-							</div>
-						)}
-					</Modal.Body>
-
-					<Modal.Footer>
-						<Button
-							slot="close"
-							variant="secondary"
-							isDisabled={isApplying}
-						>
-							{t("cancel")}
-						</Button>
-						<Button
-							onPress={handleApply}
-							isDisabled={!hasChanges || isApplying}
-						>
-							{isApplying ? t("applying") : t("applyChanges")}
-						</Button>
-					</Modal.Footer>
-				</Modal.Dialog>
-			</Modal.Container>
-		</Modal.Backdrop>
+		<SharedSkillInstallModal
+			isOpen={isOpen}
+			onClose={onCloseAndReset}
+			heading={t("manageAgents")}
+			agentPickerSlot={agentPicker}
+			installResults={NO_RESULTS}
+			isInstalling={isApplying}
+			showTargetSelector={false}
+			confirmLabel={isApplying ? t("applying") : t("applyChanges")}
+			isConfirmDisabled={!hasChanges}
+			onConfirm={handleApply}
+		/>
 	);
 }

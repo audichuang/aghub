@@ -117,6 +117,39 @@ export function updateSubAgentMutationOptions({
 	});
 }
 
+interface DeleteSubAgentVariables {
+	name: string;
+	agent: string;
+	scope: "global" | "project";
+	projectRoot?: string;
+}
+
+interface DeleteSubAgentMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: () => void | Promise<void>;
+}
+
+export function deleteSubAgentMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+}: DeleteSubAgentMutationParams) {
+	return mutationOptions({
+		mutationFn: ({
+			name,
+			agent,
+			scope,
+			projectRoot,
+		}: DeleteSubAgentVariables) =>
+			api.subAgents.delete(name, agent, scope, projectRoot),
+		onSuccess: async () => {
+			await invalidateSubAgentQueries(queryClient);
+			await onSuccess?.();
+		},
+	});
+}
+
 interface TransferSubAgentsMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;

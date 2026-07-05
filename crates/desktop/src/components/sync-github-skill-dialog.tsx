@@ -21,6 +21,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { GitScanSkillEntry } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
+import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { credentialsListQueryOptions } from "../requests/credentials";
 import { gitSyncSkillMutationOptions } from "../requests/skills";
@@ -49,6 +50,7 @@ export function SyncGithubSkillDialog({
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
+	const { forSource: forwardForSource } = useGitForwarding();
 
 	const [phase, setPhase] = useState<
 		"idle" | "scanning" | "scanned" | "syncing" | "done"
@@ -98,13 +100,18 @@ export function SyncGithubSkillDialog({
 	const scope = group.items[0].source ?? "global";
 
 	const scanMutation = useMutation({
-		mutationFn: (branch?: string) =>
-			api.skills.gitScan({
-				url: sourceUrl,
-				credential_id: credentialId || null,
-				branch: branch ?? null,
-				session_id: branch ? sessionId : null,
-			}),
+		mutationFn: async (branch?: string) => {
+			const headers = await forwardForSource(sourceUrl);
+			return api.skills.gitScan(
+				{
+					url: sourceUrl,
+					credential_id: credentialId || null,
+					branch: branch ?? null,
+					session_id: branch ? sessionId : null,
+				},
+				headers,
+			);
+		},
 		onSuccess: (data) => {
 			setScanError(null);
 			setSessionId(data.session_id);
@@ -148,14 +155,18 @@ export function SyncGithubSkillDialog({
 		if (!matchedSkill) return;
 		setSyncError(null);
 		setPhase("syncing");
+		// P3: sync reuses the scan session's server-side cached token, so no
+		// forward header — only the scan above carries it.
 		syncMutation.mutate(
 			{
-				session_id: sessionId,
-				name: group.items[0].name,
-				scope,
-				project_root: projectPath ?? null,
-				skill_path: matchedSkill.path,
-				source_paths: sourcePaths,
+				body: {
+					session_id: sessionId,
+					name: group.items[0].name,
+					scope,
+					project_root: projectPath ?? null,
+					skill_path: matchedSkill.path,
+					source_paths: sourcePaths,
+				},
 			},
 			{
 				onError: (error) => {

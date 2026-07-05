@@ -832,51 +832,7 @@ fn seed_unresolvable_global_lock(
 	path
 }
 
-/// `--dry-run` must NOT require `--yes` (a dry-run mutates nothing). With an
-/// installed skill + lock present it gets PAST the `--yes` gate and the
-/// installed-copy check, then fails at the offline resolve step — proving the
-/// flag bypassed the `--yes` requirement (no "without --yes" message), and the
-/// installed SKILL.md stays byte-unchanged.
-#[cfg(unix)]
-#[test]
-fn apply_update_dry_run_does_not_require_yes() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-	let skill_dir = write_claude_skill(home.path(), "mytool");
-	let before = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-	seed_unresolvable_global_lock(state.path(), "mytool");
-
-	let out = isolated_cli(home.path(), state.path())
-		.args([
-			"-a",
-			"claude",
-			"-g",
-			"apply-update",
-			"skills",
-			"mytool",
-			"--dry-run",
-		])
-		.output()
-		.unwrap();
-
-	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(
-		!out.status.success(),
-		"offline resolve must fail, but flag-gate must be passed: {stderr}"
-	);
-	assert!(
-		!stderr.contains("without --yes"),
-		"--dry-run must bypass the --yes gate: {stderr}"
-	);
-	assert!(
-		stderr.contains("resolve remote source"),
-		"expected failure at the resolve step: {stderr}"
-	);
-	let after = std::fs::read_to_string(skill_dir.join("SKILL.md")).unwrap();
-	assert_eq!(after, before, "dry-run must not mutate the installed skill");
-}
-
-/// Without `--dry-run` and without `--yes`, apply-update still refuses up front.
+/// Without `--yes`, apply-update refuses up front.
 #[cfg(unix)]
 #[test]
 fn apply_update_without_yes_or_dry_run_refuses() {
@@ -1446,6 +1402,278 @@ fn source_sync_no_action_flag_prints_plan_and_guidance() {
 	);
 }
 
+/// Seed a global lock entry under `name` recording the source coordinates an
+/// accept-rename needs (`source`/`sourceUrl`/`skillPath`). `skill_path` points
+/// at the renamed skill's location inside the fetched source tree.
+#[cfg(unix)]
+fn seed_global_lock_entry(
+	state: &std::path::Path,
+	name: &str,
+	source: &str,
+	skill_path: &str,
+) -> std::path::PathBuf {
+	let dir = state.join("skills");
+	std::fs::create_dir_all(&dir).unwrap();
+	let path = dir.join(".skill-lock.json");
+	let body = format!(
+		r#"{{"version":3,"skills":{{"{name}":{{"source":"{source}","sourceType":"github","sourceUrl":"https://github.com/{source}","skillPath":"{skill_path}","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}}}}"#
+	);
+	std::fs::write(&path, body).unwrap();
+	path
+}
+
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_installs_new_removes_old() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// Old skill is installed under the Claude agent dir.
+	let old_dir = home.path().join(".claude/skills/old-skill");
+	std::fs::create_dir_all(&old_dir).unwrap();
+	std::fs::write(
+		old_dir.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+
+	// Global lock records the source coordinates for the old name. The locked
+	// skillPath points at where the RENAMED skill lives in the fetched source.
+	let lock_path = seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	// The fetched source: `new-dir/SKILL.md` now declares `name: new-skill`.
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	let new_skill_dir = fetch_root.path().join("new-dir");
+	std::fs::create_dir_all(&new_skill_dir).unwrap();
+	std::fs::write(
+		new_skill_dir.join("SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	assert!(
+		home.path()
+			.join(".claude/skills/new-skill/SKILL.md")
+			.exists(),
+		"new skill must be installed"
+	);
+	assert!(
+		!home.path().join(".claude/skills/old-skill").exists(),
+		"old skill must be removed"
+	);
+
+	// Lock transitioned from old-skill to new-skill.
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	let parsed: Value = serde_json::from_str(&raw).unwrap();
+	assert!(
+		parsed["skills"]["old-skill"].is_null(),
+		"old lock entry must be removed: {raw}"
+	);
+	assert!(
+		!parsed["skills"]["new-skill"].is_null(),
+		"new lock entry must be written: {raw}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_dry_run_writes_nothing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let old_dir = home.path().join(".claude/skills/old-skill");
+	std::fs::create_dir_all(&old_dir).unwrap();
+	std::fs::write(
+		old_dir.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+	let lock_path = seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	let new_skill_dir = fetch_root.path().join("new-dir");
+	std::fs::create_dir_all(&new_skill_dir).unwrap();
+	std::fs::write(
+		new_skill_dir.join("SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// Dry-run mutates nothing: old skill stays, new skill is not installed.
+	assert!(
+		home.path().join(".claude/skills/old-skill").exists(),
+		"dry-run must not remove the old skill"
+	);
+	assert!(
+		!home.path().join(".claude/skills/new-skill").exists(),
+		"dry-run must not install the new skill"
+	);
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		raw.contains("old-skill"),
+		"dry-run must keep the old lock entry"
+	);
+	assert!(
+		!raw.contains("new-skill"),
+		"dry-run must not write new entry"
+	);
+}
+
+/// P0-2 guard (b): accept-rename must refuse when the new name is ALREADY
+/// installed (on-disk dir), leaving the pre-existing skill untouched. Without
+/// the guard the install would clobber it.
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_rejects_when_new_name_installed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let old_dir = home.path().join(".claude/skills/old-skill");
+	std::fs::create_dir_all(&old_dir).unwrap();
+	std::fs::write(
+		old_dir.join("SKILL.md"),
+		"---\nname: old-skill\ndescription: original\n---\nbody\n",
+	)
+	.unwrap();
+	// New skill ALREADY present with sentinel content.
+	let new_dir = home.path().join(".claude/skills/new-skill");
+	std::fs::create_dir_all(&new_dir).unwrap();
+	let pre_existing =
+		"---\nname: new-skill\ndescription: PRE-EXISTING\n---\nkeep\n";
+	std::fs::write(new_dir.join("SKILL.md"), pre_existing).unwrap();
+
+	let lock_path = seed_global_lock_entry(
+		state.path(),
+		"old-skill",
+		"owner/repo",
+		"new-dir/SKILL.md",
+	);
+
+	let fetch_root = tempfile::TempDir::new().unwrap();
+	let new_skill_src = fetch_root.path().join("new-dir");
+	std::fs::create_dir_all(&new_skill_src).unwrap();
+	std::fs::write(
+		new_skill_src.join("SKILL.md"),
+		"---\nname: new-skill\ndescription: renamed\n---\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", fetch_root.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old-skill",
+			"new-skill",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"must refuse to clobber an existing new-skill; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	// Pre-existing new-skill dir must be untouched.
+	let still = std::fs::read_to_string(new_dir.join("SKILL.md")).unwrap();
+	assert_eq!(still, pre_existing, "new-skill must not be clobbered");
+	// Old skill + its lock entry remain (nothing mutated).
+	assert!(old_dir.exists(), "old skill dir must remain");
+	let raw = std::fs::read_to_string(&lock_path).unwrap();
+	assert!(
+		raw.contains("old-skill"),
+		"old lock entry must remain: {raw}"
+	);
+}
+
+/// P0-2 guard (a): a degenerate rename whose old/new names sanitize to the same
+/// on-disk dir must be rejected up front (before any fetch/mutation).
+#[cfg(unix)]
+#[test]
+fn source_accept_rename_rejects_degenerate_sanitized_collision() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// "old skill" and "old-skill" both sanitize to "old-skill".
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"accept-rename",
+			"old skill",
+			"old-skill",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"degenerate rename must be rejected; stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("same on-disk skill"),
+		"expected degenerate-rename error, got: {stderr}"
+	);
+}
+
 #[test]
 fn source_list_json_runs_with_no_agent_config() {
 	let home = tempfile::TempDir::new().unwrap();
@@ -1558,229 +1786,6 @@ fn source_sync_both_flags_is_rejected() {
 	assert!(
 		stderr.contains("choose either -g or -p"),
 		"stderr: {stderr}"
-	);
-}
-
-// ============ Task 23 [#1] T3: `source credential` subcommand ============
-
-/// `true` if stderr names a keychain/keyring failure — the headless-CI case
-/// where there is no OS backend. These tests accept that path as a clean exit
-/// (not a panic), since the release `just test` gate runs without a keychain.
-fn looks_like_keychain_error(stderr: &str) -> bool {
-	let s = stderr.to_lowercase();
-	s.contains("keychain") || s.contains("keyring")
-}
-
-#[test]
-fn source_credential_help_renders() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-	isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "--help"])
-		.assert()
-		.success();
-}
-
-#[test]
-fn source_credential_list_json_empty_or_keychain_error() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-
-	let out = isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "list", "--json"])
-		.output()
-		.unwrap();
-
-	let stdout = String::from_utf8_lossy(&out.stdout);
-	let stderr = String::from_utf8_lossy(&out.stderr);
-
-	// Never a panic: assert_cmd surfaces a process abort as a signal, not a
-	// clean exit. Either way the binary must not crash hard.
-	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
-
-	if out.status.success() {
-		// With a working keychain the output is a JSON array. It may not be `[]`
-		// because the OS keychain is shared across this user (not isolated by
-		// the temp HOME), so a sibling test may have seeded an entry; the
-		// contract is "valid JSON array" (and no token ever printed), not empty.
-		let json: Value = serde_json::from_slice(&out.stdout)
-			.unwrap_or_else(|e| panic!("stdout not JSON: {stdout} ({e})"));
-		assert!(json.is_array(), "expected a JSON array: {json}");
-	} else {
-		// No keychain backend (headless CI): a clean, named error — not a panic.
-		assert!(
-			looks_like_keychain_error(&stderr),
-			"non-keychain failure: {stderr}"
-		);
-	}
-}
-
-#[test]
-fn source_credential_list_bindings_json_empty_or_keychain_error() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-
-	let out = isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "list-bindings", "--json"])
-		.output()
-		.unwrap();
-
-	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
-
-	if out.status.success() {
-		// Valid JSON array; not necessarily empty (the keychain bindings entry
-		// is shared across this OS user, so a sibling test may have seeded one).
-		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-		assert!(json.is_array(), "expected a JSON array: {json}");
-	} else {
-		assert!(
-			looks_like_keychain_error(&stderr),
-			"non-keychain failure: {stderr}"
-		);
-	}
-}
-
-#[test]
-fn source_credential_add_without_token_errors_cleanly() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-
-	// No --token, no AGHUB_SOURCE_TOKEN, stdin is the test harness's (not a
-	// pipe carrying a token) — must error, never silently store an empty token.
-	let out = isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "add", "github.com"])
-		.output()
-		.unwrap();
-
-	assert!(!out.status.success(), "missing token must fail");
-	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
-	assert!(
-		stderr.to_lowercase().contains("token"),
-		"error should mention the missing token: {stderr}"
-	);
-}
-
-#[test]
-fn source_credential_add_env_token_then_list_or_keychain_error() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-
-	// Add reads the token from AGHUB_SOURCE_TOKEN when --token is absent (so the
-	// secret never lands in argv). With a working keychain the round-trip then
-	// shows the name in `list`; without one we accept a clean keychain error.
-	//
-	// The OS keychain is shared across this OS user, and credential names are
-	// unique — so a fixed name (e.g. "github.com") could already exist and make
-	// `add` fail as a duplicate, not as the behavior under test. Use a name
-	// unique to this run and clean it up by the returned id (finding #4).
-	let cred_name = format!(
-		"aghub-test-{}-{}",
-		std::process::id(),
-		std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.unwrap()
-			.as_nanos()
-	);
-	let add = isolated_cli(home.path(), state.path())
-		.env("AGHUB_SOURCE_TOKEN", "ghp_secret_value")
-		.args(["source", "credential", "add", &cred_name])
-		.output()
-		.unwrap();
-
-	let add_err = String::from_utf8_lossy(&add.stderr);
-	assert!(!add_err.contains("panicked"), "must not panic: {add_err}");
-
-	if !add.status.success() {
-		assert!(
-			looks_like_keychain_error(&add_err),
-			"non-keychain add failure: {add_err}"
-		);
-		return;
-	}
-
-	// `add` prints the new credential's id (and ONLY the id — the raw token is
-	// write-only and must never appear in stdout/stderr).
-	let add_out = String::from_utf8_lossy(&add.stdout);
-	assert!(
-		!add_out.contains("ghp_secret_value")
-			&& !add_err.contains("ghp_secret_value"),
-		"token leaked: out={add_out} err={add_err}"
-	);
-	let new_id = add_out.trim().to_string();
-	assert!(!new_id.is_empty(), "add must print the new id");
-
-	let list = isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "list", "--json"])
-		.output()
-		.unwrap();
-	assert!(list.status.success(), "list after add must succeed");
-	let json: Value = serde_json::from_slice(&list.stdout).unwrap();
-	// The added id is present by exact match (the keychain is shared across this
-	// OS user, so assert OUR id, not the whole array).
-	let found =
-		json.as_array().unwrap().iter().any(|c| {
-			c.get("id").and_then(|v| v.as_str()) == Some(new_id.as_str())
-		});
-	assert!(found, "added credential id missing: {json}");
-	// Token is write-only: it must not appear in the list either.
-	let raw = json.to_string();
-	assert!(
-		!raw.contains("ghp_secret_value"),
-		"token leaked in list: {raw}"
-	);
-
-	// Clean up: the OS keychain is shared (not isolated by temp HOME), so remove
-	// what this test created instead of leaving it behind.
-	let _ = isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "remove", &new_id])
-		.output()
-		.unwrap();
-}
-
-#[test]
-fn source_credential_remove_requires_id() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-
-	// `remove` with no id is a clap usage error (exit 2), never a panic.
-	let out = isolated_cli(home.path(), state.path())
-		.args(["source", "credential", "remove"])
-		.output()
-		.unwrap();
-	assert!(!out.status.success(), "remove needs an id");
-	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
-}
-
-#[test]
-fn source_credential_bind_unknown_credential_errors() {
-	let home = tempfile::TempDir::new().unwrap();
-	let state = tempfile::TempDir::new().unwrap();
-
-	// Binding a source to a non-existent credential id surfaces a clean
-	// "not found" error (or a keychain error on a backend-less box) — no panic.
-	let out = isolated_cli(home.path(), state.path())
-		.args([
-			"source",
-			"credential",
-			"bind",
-			"owner/repo",
-			"--credential-id",
-			"does-not-exist",
-		])
-		.output()
-		.unwrap();
-	assert!(
-		!out.status.success(),
-		"binding to a missing credential fails"
-	);
-	let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
-	assert!(!stderr.contains("panicked"), "must not panic: {stderr}");
-	assert!(
-		stderr.contains("not found") || looks_like_keychain_error(&stderr),
-		"expected not-found or keychain error: {stderr}"
 	);
 }
 

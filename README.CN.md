@@ -43,6 +43,22 @@ brew install --cask akarachen/tap/aghub
 - macOS: macOS 12 (Monterey) 及以上
 - Linux: Ubuntu 22.04+ / Debian 11+ / Fedora 34+ 及其他主流发行版
 
+### macOS：提示「aghub 已损坏，无法打开」
+
+macOS 版本**未使用 Apple 开发者证书签名**，因此首次下载时会被 Gatekeeper 加上隔离标记并弹出「已损坏」提示。App 本身没有问题——把它移动到 `/Applications` 后清除隔离属性即可：
+
+```bash
+xattr -cr /Applications/aghub.app
+```
+
+如果仍无法打开，再显式移除隔离属性：
+
+```bash
+sudo xattr -dr com.apple.quarantine /Applications/aghub.app
+```
+
+之后正常打开即可。（如果还没移动到 `/Applications`，请把路径换成实际位置。）
+
 ## 功能
 
 **统一 MCP 管理**

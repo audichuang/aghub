@@ -1,14 +1,12 @@
-import { useMemo } from "react";
-import { useQueryClient } from "@tanstack/react-query";
-import { toast } from "@heroui/react";
+import { ExclamationTriangleIcon } from "@heroicons/react/24/solid";
+import { Button, Modal, Spinner, toast } from "@heroui/react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useTranslation } from "react-i18next";
 import type { ConfigSource } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
-import { bulkFailureItemsLabel } from "../lib/bulk-errors";
-import type { DeleteFn } from "../lib/delete-preview";
+import { BulkOperationError, bulkFailureItemsLabel } from "../lib/bulk-errors";
 import { invalidateMcpQueries } from "../requests/mcps";
 import { invalidateSkillQueries } from "../requests/skills";
-import { DeletePreviewDialog } from "./delete-preview-dialog";
 
 interface BulkDeleteItem {
 	name: string;
@@ -44,55 +42,103 @@ export function BulkDeleteDialog({
 	const api = useApi();
 	const queryClient = useQueryClient();
 
-	// Build one delete closure per de-duped item; keep its name/agent in lockstep
-	// (same index) so a confirm-phase failure can be named precisely.
-	const { deleteFns, info } = useMemo(() => {
-		const fns: DeleteFn[] = [];
-		const info: Array<{ name: string; agent: string }> = [];
-		const seen = new Set<string>();
-		for (const group of groups) {
-			const groupResourceType = group.resourceType ?? resourceType;
-			for (const item of group.items) {
-				if (!item.agent) continue;
-				const agent = item.agent;
-				const scope: "global" | "project" = item.source ?? "global";
-				const projectRoot =
-					scope === "project" ? projectPath : undefined;
-				const dedupKey =
-					groupResourceType === "skill" && item.source_path
-						? `skill:${item.source_path}:${scope}`
-						: groupResourceType === "skill"
-							? `skill:${item.agent}:${group.key}:${scope}`
-							: `${groupResourceType}:${item.agent}:${item.name}:${scope}`;
-				if (seen.has(dedupKey)) continue;
-				seen.add(dedupKey);
-				if (groupResourceType === "mcp") {
-					fns.push((confirm) =>
-						api.mcps.delete(
-							item.name,
-							agent,
-							scope,
-							projectRoot,
-							confirm,
-						),
-					);
-				} else {
-					fns.push((confirm) =>
-						api.skills.delete(
-							agent,
-							group.key,
-							scope,
-							projectRoot,
-							false,
-							confirm,
-						),
-					);
+	const deleteMutation = useMutation({
+		mutationFn: async () => {
+			const promises: Promise<void>[] = [];
+			const deleteInfo: Array<{
+				name: string;
+				agent: string;
+				scope: string;
+			}> = [];
+			const seen = new Set<string>();
+			for (const group of groups) {
+				const groupResourceType = group.resourceType ?? resourceType;
+				for (const item of group.items) {
+					if (!item.agent) continue;
+					const scope: "global" | "project" = item.source ?? "global";
+					const projectRoot =
+						scope === "project" ? projectPath : undefined;
+					const dedupKey =
+						groupResourceType === "skill" && item.source_path
+							? `skill:${item.source_path}:${scope}`
+							: groupResourceType === "skill"
+								? `skill:${item.agent}:${group.key}:${scope}`
+								: `${groupResourceType}:${item.agent}:${item.name}:${scope}`;
+					if (seen.has(dedupKey)) continue;
+					seen.add(dedupKey);
+					if (groupResourceType === "mcp") {
+						promises.push(
+							api.mcps.delete(
+								item.name,
+								item.agent,
+								scope,
+								projectRoot,
+							),
+						);
+					} else {
+						promises.push(
+							api.skills
+								.delete(
+									item.agent,
+									group.key,
+									scope,
+									projectRoot,
+								)
+								.then(() => undefined),
+						);
+					}
+					deleteInfo.push({
+						name: item.name,
+						agent: item.agent,
+						scope,
+					});
 				}
-				info.push({ name: item.name, agent });
 			}
-		}
-		return { deleteFns: fns, info };
-	}, [groups, resourceType, projectPath, api]);
+			const results = await Promise.allSettled(promises);
+			const failures = results
+				.map((r, i) => ({ result: r, info: deleteInfo[i] }))
+				.filter(({ result }) => result.status === "rejected")
+				.map(({ result, info }) => ({
+					...info,
+					reason: (result as PromiseRejectedResult).reason,
+				}));
+			if (failures.length > 0) {
+				console.error(
+					`${resourceType} bulk delete failures:`,
+					failures,
+				);
+				throw new BulkOperationError(
+					failures.map(({ name, agent }) => ({ name, agent })),
+				);
+			}
+			return { deleted: promises.length };
+		},
+		onSuccess: async () => {
+			if (resourceType === "mcp" || resourceType === "mixed") {
+				await invalidateMcpQueries(queryClient);
+			}
+			if (resourceType === "skill" || resourceType === "mixed") {
+				await invalidateSkillQueries(queryClient);
+			}
+			onSuccess();
+			onClose();
+		},
+		onError: (error) => {
+			console.error("Bulk delete mutation error:", error);
+			if (error instanceof BulkOperationError) {
+				toast.danger(
+					t(
+						"bulkDeleteFailedItems",
+						bulkFailureItemsLabel(error.failures),
+					),
+				);
+				return;
+			}
+			toast.danger(
+				error instanceof Error ? error.message : t("bulkDeleteFailed"),
+			);
+		},
+	});
 
 	const confirmKey =
 		resourceType === "mcp"
@@ -101,38 +147,53 @@ export function BulkDeleteDialog({
 				? "bulkDeleteSkillConfirm"
 				: "bulkDeleteMixedConfirm";
 
-	const invalidate = async () => {
-		if (resourceType === "mcp" || resourceType === "mixed") {
-			await invalidateMcpQueries(queryClient);
-		}
-		if (resourceType === "skill" || resourceType === "mixed") {
-			await invalidateSkillQueries(queryClient);
-		}
-	};
-
 	return (
-		<DeletePreviewDialog
-			isOpen={isOpen}
-			onClose={onClose}
-			deleteFns={deleteFns}
-			heading={t("bulkDeleteConfirmTitle")}
-			description={t(confirmKey, { count: groups.length })}
-			confirmLabel={t("deleteSelected")}
-			onConfirmed={async () => {
-				await invalidate();
-				onSuccess();
-			}}
-			onFailed={async (failed) => {
-				await invalidate();
-				const failures = failed.map((i) => info[i]);
-				console.error(
-					`${resourceType} bulk delete failures:`,
-					failures,
-				);
-				toast.danger(
-					t("bulkDeleteFailedItems", bulkFailureItemsLabel(failures)),
-				);
-			}}
-		/>
+		<Modal.Backdrop isOpen={isOpen} onOpenChange={onClose}>
+			<Modal.Container>
+				<Modal.Dialog>
+					<Modal.CloseTrigger />
+					<Modal.Header>
+						<div className="flex items-center gap-2">
+							<ExclamationTriangleIcon className="size-5 text-warning" />
+							<Modal.Heading>
+								{t("bulkDeleteConfirmTitle")}
+							</Modal.Heading>
+						</div>
+					</Modal.Header>
+					<Modal.Body>
+						<p className="text-sm text-muted">
+							{t(confirmKey, {
+								count: groups.length,
+							})}
+						</p>
+					</Modal.Body>
+					<Modal.Footer>
+						<Button
+							slot="close"
+							variant="secondary"
+							size="md"
+							onPress={onClose}
+							isDisabled={deleteMutation.isPending}
+							className="min-h-[44px]"
+						>
+							{t("cancel")}
+						</Button>
+						<Button
+							variant="danger"
+							size="md"
+							onPress={() => deleteMutation.mutate()}
+							isDisabled={deleteMutation.isPending}
+							className="min-h-[44px] min-w-[120px]"
+						>
+							{deleteMutation.isPending ? (
+								<Spinner size="sm" color="current" />
+							) : (
+								t("deleteSelected")
+							)}
+						</Button>
+					</Modal.Footer>
+				</Modal.Dialog>
+			</Modal.Container>
+		</Modal.Backdrop>
 	);
 }

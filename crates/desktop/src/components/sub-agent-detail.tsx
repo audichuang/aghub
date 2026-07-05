@@ -1,22 +1,25 @@
 import {
 	ChevronDownIcon,
 	DocumentDuplicateIcon,
+	ExclamationTriangleIcon,
 	PencilIcon,
 	PlusIcon,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import { Accordion, Button, Card, Chip, Tooltip, toast } from "@heroui/react";
-import { useQueryClient } from "@tanstack/react-query";
+import {
+	Accordion,
+	Button,
+	Card,
+	Chip,
+	Modal,
+	Spinner,
+	Tooltip,
+} from "@heroui/react";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
-import { useApi } from "../hooks/use-api";
 import { AgentIcon } from "../lib/agent-icons";
-import { bulkFailureItemsLabel } from "../lib/bulk-errors";
-import type { DeleteFn } from "../lib/delete-preview";
 import { filterItemsByAgentIds, sortAgentObjects } from "../lib/utils";
-import { invalidateSubAgentQueries } from "../requests/sub-agents";
-import { DeletePreviewDialog } from "./delete-preview-dialog";
 import type { SubAgentGroup } from "./manage-sub-agent-agents-dialog";
 import { ManageSubAgentAgentsDialog } from "./manage-sub-agent-agents-dialog";
 import { formatAgentName } from "./skill-detail-helpers";
@@ -27,49 +30,25 @@ export type { SubAgentGroup };
 interface SubAgentDetailProps {
 	group: SubAgentGroup;
 	onEdit: () => void;
-	/** Fired after the group is fully deleted, so the parent can reset its panel. */
-	onDeleted: () => void;
+	onDelete: () => void;
+	isDeleting: boolean;
 	projectPath?: string;
 }
 
 export function SubAgentDetail({
 	group,
 	onEdit,
-	onDeleted,
+	onDelete,
+	isDeleting,
 	projectPath,
 }: SubAgentDetailProps) {
 	const { t } = useTranslation();
-	const api = useApi();
-	const queryClient = useQueryClient();
 	const { allAgents, availableAgents } = useAgentAvailability();
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	const [transferDialogOpen, setTransferDialogOpen] = useState(false);
 	const [manageDialogOpen, setManageDialogOpen] = useState(false);
 
 	const primary = group.items[0];
-
-	const itemsWithAgent = useMemo(
-		() =>
-			group.items.filter(
-				(item): item is typeof item & { agent: string } => !!item.agent,
-			),
-		[group.items],
-	);
-
-	const deleteFns = useMemo<DeleteFn[]>(
-		() =>
-			itemsWithAgent.map(
-				(item) => (confirm) =>
-					api.subAgents.delete(
-						item.name,
-						item.agent,
-						item.source === "project" ? "project" : "global",
-						item.source === "project" ? projectPath : undefined,
-						confirm,
-					),
-			),
-		[itemsWithAgent, api, projectPath],
-	);
 	const enabledAgentIds = useMemo(
 		() =>
 			new Set(
@@ -229,32 +208,59 @@ export function SubAgentDetail({
 				</div>
 			</div>
 
-			<DeletePreviewDialog
+			<Modal.Backdrop
 				isOpen={deleteDialogOpen}
-				onClose={() => setDeleteDialogOpen(false)}
-				deleteFns={deleteFns}
-				heading={t("deleteSubAgent")}
-				description={t("deleteSubAgentConfirm", { name: primary.name })}
-				confirmLabel={t("deleteSubAgent")}
-				onConfirmed={async () => {
-					await invalidateSubAgentQueries(queryClient);
-					toast.success(t("subAgentDeleted"));
-					onDeleted();
-				}}
-				onFailed={async (failed) => {
-					await invalidateSubAgentQueries(queryClient);
-					const failures = failed.map((i) => ({
-						name: itemsWithAgent[i].name,
-						agent: itemsWithAgent[i].agent,
-					}));
-					toast.danger(
-						t(
-							"bulkDeleteFailedItems",
-							bulkFailureItemsLabel(failures),
-						),
-					);
-				}}
-			/>
+				onOpenChange={setDeleteDialogOpen}
+			>
+				<Modal.Container>
+					<Modal.Dialog>
+						<Modal.CloseTrigger />
+						<Modal.Header>
+							<div className="flex items-center gap-2">
+								<ExclamationTriangleIcon className="size-5 text-warning" />
+								<Modal.Heading>
+									{t("deleteSubAgent")}
+								</Modal.Heading>
+							</div>
+						</Modal.Header>
+						<Modal.Body>
+							<p className="text-sm text-muted">
+								{t("deleteSubAgentConfirm", {
+									name: primary.name,
+								})}
+							</p>
+						</Modal.Body>
+						<Modal.Footer>
+							<Button
+								slot="close"
+								variant="secondary"
+								size="md"
+								isDisabled={isDeleting}
+								className="min-h-[44px]"
+								onPress={() => setDeleteDialogOpen(false)}
+							>
+								{t("cancel")}
+							</Button>
+							<Button
+								variant="danger"
+								size="md"
+								isDisabled={isDeleting}
+								className="min-h-[44px] min-w-[120px]"
+								onPress={() => {
+									onDelete();
+									setDeleteDialogOpen(false);
+								}}
+							>
+								{isDeleting ? (
+									<Spinner size="sm" />
+								) : (
+									t("deleteSubAgent")
+								)}
+							</Button>
+						</Modal.Footer>
+					</Modal.Dialog>
+				</Modal.Container>
+			</Modal.Backdrop>
 
 			{primary.agent && (
 				<TransferDialog

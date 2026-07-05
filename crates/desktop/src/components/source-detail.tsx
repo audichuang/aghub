@@ -1,0 +1,1438 @@
+import {
+	ArrowDownTrayIcon,
+	ArrowPathIcon,
+	CheckCircleIcon,
+	ChevronDownIcon,
+	ChevronRightIcon,
+	ClipboardDocumentIcon,
+	ExclamationTriangleIcon,
+	FolderIcon,
+	GlobeAltIcon,
+	LockClosedIcon,
+	TrashIcon,
+} from "@heroicons/react/24/solid";
+import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
+import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
+import { SourceSkillRow } from "./source-skill-row";
+import type { SourceSkillDiff } from "../generated/dto";
+import { useAgentAvailability } from "../hooks/use-agent-availability";
+import { useApi } from "../hooks/use-api";
+import { useGitForwarding } from "../hooks/use-git-forwarding";
+import {
+	partitionByCoverage,
+	supportsSkillMutation,
+} from "../lib/agent-capabilities";
+import {
+	allSkillPaths,
+	selectedSkills,
+	toggleSkillPath,
+} from "../lib/source-skill-selection";
+import { cn } from "../lib/utils";
+import { useSkillCoverage } from "../requests/agents";
+import { queryKeys } from "../requests/keys";
+import { applySkillUpdateMutationOptions } from "../requests/skills";
+import { sourceDiffQueryOptions } from "../requests/sources";
+
+const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
+const EMPTY_DIFFS: SourceSkillDiff[] = [];
+
+export interface SourceRow {
+	source: string;
+	sourceUrl: string;
+	sourceType: string;
+	isPrivate?: boolean;
+	credentialStatus?: string;
+	skillCount: number;
+	rowScope: "global" | "project";
+	projectRoot?: string;
+	projectName?: string;
+}
+
+interface SourceDetailProps {
+	row: SourceRow;
+	onImport: () => void;
+}
+
+// ─── Summary bar counts ──────────────────────────────────────────────────────
+
+interface SummaryBarProps {
+	notInstalledCount: number;
+	outdatedCount: number;
+	renamedCount: number;
+	uncheckableCount: number;
+	currentCount: number;
+	isLoading: boolean;
+}
+
+function SummaryBar({
+	notInstalledCount,
+	outdatedCount,
+	renamedCount,
+	uncheckableCount,
+	currentCount,
+	isLoading,
+}: SummaryBarProps) {
+	const { t } = useTranslation();
+	if (isLoading) return null;
+
+	return (
+		<div className="flex flex-wrap gap-2 rounded-lg bg-surface-secondary px-4 py-2.5">
+			{outdatedCount > 0 && (
+				<Chip size="sm" variant="secondary">
+					{t("summaryUpdatable", { count: outdatedCount })}
+				</Chip>
+			)}
+			{notInstalledCount > 0 && (
+				<Chip size="sm" variant="secondary">
+					{t("summaryInstallable", { count: notInstalledCount })}
+				</Chip>
+			)}
+			{renamedCount > 0 && (
+				<Chip size="sm" variant="secondary">
+					{t("summaryRenamed", { count: renamedCount })}
+				</Chip>
+			)}
+			{uncheckableCount > 0 && (
+				<Chip size="sm" variant="secondary">
+					{t("summaryUnchecked", { count: uncheckableCount })}
+				</Chip>
+			)}
+			{currentCount > 0 && (
+				<Chip size="sm" variant="secondary">
+					{t("summaryLatest", { count: currentCount })}
+				</Chip>
+			)}
+		</div>
+	);
+}
+
+// ─── SkillSection (local — collapsible section with skill rows) ──────────────
+
+interface SkillSectionProps {
+	title: string;
+	icon: React.ReactNode;
+	skills: SourceSkillDiff[];
+	expandedSkillPath: string | null;
+	onToggleSkill: (skillPath: string | null) => void;
+	muted?: boolean;
+	defaultCollapsed?: boolean;
+}
+
+function SkillSection({
+	title,
+	icon,
+	skills,
+	expandedSkillPath,
+	onToggleSkill,
+	muted = false,
+	defaultCollapsed = false,
+}: SkillSectionProps) {
+	const [collapsed, setCollapsed] = useState(defaultCollapsed);
+
+	if (skills.length === 0) return null;
+
+	return (
+		<section>
+			<div className="mb-2 flex items-center justify-between gap-3">
+				<button
+					type="button"
+					className="flex min-w-0 items-center gap-2"
+					onClick={() => setCollapsed((c) => !c)}
+					aria-expanded={!collapsed}
+				>
+					{collapsed ? (
+						<ChevronRightIcon className="size-4 shrink-0 text-muted" />
+					) : (
+						<ChevronDownIcon className="size-4 shrink-0 text-muted" />
+					)}
+					{icon}
+					<h2
+						className={cn(
+							"truncate text-sm font-semibold",
+							muted ? "text-muted" : "text-foreground",
+						)}
+					>
+						{title}
+					</h2>
+					<span className="shrink-0 text-xs text-muted">
+						{skills.length}
+					</span>
+				</button>
+			</div>
+			{!collapsed && (
+				<ul className="overflow-hidden rounded-lg border border-border">
+					{skills.map((skill) => (
+						<SourceSkillRow
+							key={skill.skillPath}
+							skill={skill}
+							isExpanded={expandedSkillPath === skill.skillPath}
+							onToggle={() =>
+								onToggleSkill(
+									expandedSkillPath === skill.skillPath
+										? null
+										: skill.skillPath,
+								)
+							}
+							muted={muted}
+						/>
+					))}
+				</ul>
+			)}
+		</section>
+	);
+}
+
+// ─── SourceOrphanLockAlert / SourceEmptyState ─────────────────────────────────
+
+interface SourceOrphanLockAlertProps {
+	prunedCount: number;
+	isChecking: boolean;
+	isCleaning: boolean;
+	onClean: () => void;
+}
+
+function SourceOrphanLockAlert({
+	prunedCount,
+	isChecking,
+	isCleaning,
+	onClean,
+}: SourceOrphanLockAlertProps) {
+	const { t } = useTranslation();
+	const orphanHint =
+		prunedCount === 1
+			? t("sourceOrphanHintOne", { count: prunedCount })
+			: t("sourceOrphanHintMany", { count: prunedCount });
+
+	return (
+		<Alert status="warning">
+			<Alert.Indicator />
+			<Alert.Content>
+				<Alert.Title>{t("sourceOrphanTitle")}</Alert.Title>
+				<Alert.Description>{orphanHint}</Alert.Description>
+				<div className="mt-3">
+					<Button
+						size="sm"
+						variant="secondary"
+						isDisabled={isChecking || isCleaning}
+						onPress={onClean}
+					>
+						<TrashIcon className="size-3.5" />
+						{isCleaning
+							? t("sourceCleaningOrphans")
+							: t("sourceCleanOrphans")}
+					</Button>
+				</div>
+			</Alert.Content>
+		</Alert>
+	);
+}
+
+interface SourceEmptyStateProps {
+	prunedCount: number;
+	isChecking: boolean;
+	isCleaning: boolean;
+	hasError: boolean;
+	onClean: () => void;
+	onRetry: () => void;
+}
+
+function SourceEmptyState({
+	prunedCount,
+	isChecking,
+	isCleaning,
+	hasError,
+	onClean,
+	onRetry,
+}: SourceEmptyStateProps) {
+	const { t } = useTranslation();
+	const hasOrphans = prunedCount > 0;
+
+	if (hasError) {
+		return (
+			<Alert status="danger">
+				<Alert.Indicator />
+				<Alert.Content>
+					<Alert.Title>
+						{t("sourcePrunePreviewErrorTitle")}
+					</Alert.Title>
+					<Alert.Description>
+						{t("sourcePrunePreviewErrorHint")}
+					</Alert.Description>
+					<div className="mt-3">
+						<Button size="sm" variant="secondary" onPress={onRetry}>
+							{t("retry")}
+						</Button>
+					</div>
+				</Alert.Content>
+			</Alert>
+		);
+	}
+
+	if (hasOrphans) {
+		return (
+			<SourceOrphanLockAlert
+				prunedCount={prunedCount}
+				isChecking={isChecking}
+				isCleaning={isCleaning}
+				onClean={onClean}
+			/>
+		);
+	}
+
+	return (
+		<Alert status="warning">
+			<Alert.Indicator />
+			<Alert.Content>
+				<Alert.Title>{t("sourceEmptyDiffTitle")}</Alert.Title>
+				<Alert.Description>
+					{isChecking
+						? t("sourceCheckingOrphans")
+						: t("sourceEmptyDiffHint")}
+				</Alert.Description>
+			</Alert.Content>
+		</Alert>
+	);
+}
+
+// ─── SourceDetail (main export) ──────────────────────────────────────────────
+
+export function SourceDetail({ row, onImport }: SourceDetailProps) {
+	const { t } = useTranslation();
+	const api = useApi();
+	const queryClient = useQueryClient();
+	const { forSource: forwardForSource } = useGitForwarding();
+	const { availableAgents } = useAgentAvailability();
+	const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(
+		null,
+	);
+	const [isApplyingAll, setIsApplyingAll] = useState(false);
+	const [isInstallingAll, setIsInstallingAll] = useState(false);
+	const [isDeletingAllRemoved, setIsDeletingAllRemoved] = useState(false);
+	const [installingSkillPath, setInstallingSkillPath] = useState<
+		string | null
+	>(null);
+	const [selectedInstallSkillPaths, setSelectedInstallSkillPaths] = useState<
+		Set<string>
+	>(() => new Set());
+	const [isCredentialDialogOpen, setIsCredentialDialogOpen] = useState(false);
+
+	// P1-c: use the recorded clone URL as the network/credential coordinate.
+	// `row.source` (owner/repo) re-resolves non-GitHub hosts as github.com, so
+	// the diff/fetch + forward map key must use the real clone URL. `row.source`
+	// stays for display/grouping only. Fall back to `row.source` for entries
+	// that have no recorded URL (e.g. local sources).
+	const diffSource = row.sourceUrl || row.source;
+
+	const { data, isLoading, isFetching } = useQuery(
+		sourceDiffQueryOptions({
+			api,
+			source: diffSource,
+			scope: row.rowScope,
+			projectRoot:
+				row.rowScope === "project" ? row.projectRoot : undefined,
+			enabled: true,
+			forwardForSource,
+		}),
+	);
+
+	const grouped = useMemo(() => {
+		const byState = new Map<string, SourceSkillDiff[]>();
+		for (const skill of data?.skills ?? []) {
+			const existing = byState.get(skill.state) ?? [];
+			byState.set(skill.state, [...existing, skill]);
+		}
+		return byState;
+	}, [data]);
+
+	const notInstalled = grouped.get("notInstalled") ?? EMPTY_DIFFS;
+	const outdated = grouped.get("installedOutdated") ?? EMPTY_DIFFS;
+	const renamed = grouped.get("renamed") ?? EMPTY_DIFFS;
+	const removed = grouped.get("removed") ?? EMPTY_DIFFS;
+	const deprecated = grouped.get("deprecated") ?? EMPTY_DIFFS;
+	const installedDeprecated = useMemo(
+		() => deprecated.filter((skill) => skill.installedPaths.length > 0),
+		[deprecated],
+	);
+	const current = grouped.get("installedCurrent") ?? EMPTY_DIFFS;
+	const uncheckable = grouped.get("uncheckable") ?? EMPTY_DIFFS;
+
+	const selectedInstallSkills = useMemo(
+		() => selectedSkills(notInstalled, selectedInstallSkillPaths),
+		[notInstalled, selectedInstallSkillPaths],
+	);
+	const allInstallSkillPaths = useMemo(
+		() => allSkillPaths(notInstalled),
+		[notInstalled],
+	);
+	const selectedInstallCount = selectedInstallSkills.length;
+	const hasSelectedInstallSkills = selectedInstallCount > 0;
+	const allInstallSkillsSelected =
+		notInstalled.length > 0 && selectedInstallCount === notInstalled.length;
+	const hasVisibleSkills = (data?.skills.length ?? 0) > 0;
+	const updateScope = row.rowScope;
+	const updateProjectRoot =
+		row.rowScope === "project" ? (row.projectRoot ?? null) : null;
+	const shouldCheckOrphans =
+		!isLoading && !isFetching && Boolean(data) && !data?.needsCredential;
+
+	const installableAgents = useMemo(
+		() =>
+			availableAgents.filter(
+				(agent) =>
+					agent.isUsable && supportsSkillMutation(agent, updateScope),
+			),
+		[availableAgents, updateScope],
+	);
+	const installableAgentIds = useMemo(
+		() => installableAgents.map((agent) => agent.id),
+		[installableAgents],
+	);
+
+	const { coverage, isLoading: isCoverageLoading } = useSkillCoverage(
+		updateScope,
+		updateProjectRoot,
+	);
+	const { autoCovered, linkTargets } = useMemo(
+		() => partitionByCoverage(installableAgents, coverage),
+		[installableAgents, coverage],
+	);
+	const linkTargetAgentIds = useMemo(
+		() => linkTargets.map((a) => a.id),
+		[linkTargets],
+	);
+
+	const applyUpdateMutation = useMutation(
+		applySkillUpdateMutationOptions({
+			api,
+			queryClient,
+			forwardForSource,
+			onSuccess: async (result) => {
+				if (!result.success) {
+					toast.danger(result.error ?? t("skillUpdateApplyError"));
+					return;
+				}
+				toast.success(t("skillSyncedSuccessfully"));
+				await queryClient.invalidateQueries({
+					queryKey: queryKeys.skills.sources.all(),
+				});
+			},
+			onError: () => toast.danger(t("skillUpdateApplyError")),
+		}),
+	);
+
+	const prunePreviewQuery = useQuery({
+		queryKey: queryKeys.skills.pruneLock(updateScope, updateProjectRoot),
+		queryFn: () =>
+			api.skills.pruneLock({
+				scope: updateScope,
+				projectRoot: updateProjectRoot,
+				confirm: false,
+			}),
+		enabled: shouldCheckOrphans,
+	});
+	const orphanLockCount = prunePreviewQuery.data?.pruned.length ?? 0;
+
+	const pruneLockMutation = useMutation({
+		mutationFn: () =>
+			api.skills.pruneLock({
+				scope: updateScope,
+				projectRoot: updateProjectRoot,
+				confirm: true,
+			}),
+		onSuccess: async (result) => {
+			if (result.error) {
+				toast.danger(result.error);
+				return;
+			}
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			if (result.pruned.length === 0) {
+				toast.success(t("sourceOrphansCleanedZero"));
+			} else {
+				toast.success(
+					t("sourceOrphansCleanedMany", {
+						count: result.pruned.length,
+					}),
+				);
+			}
+		},
+		onError: () => toast.danger(t("sourcePruneFailed")),
+	});
+
+	const deleteInstalledSkillByName = async (name: string) => {
+		if (installableAgentIds.length === 0) {
+			throw new Error(t("sourceRemoveNoAgents"));
+		}
+		const result = await api.skills.delete(
+			installableAgentIds[0],
+			name,
+			updateScope,
+			updateProjectRoot ?? undefined,
+			true,
+		);
+		if (result.error) {
+			throw new Error(result.error);
+		}
+		if (!result.executed) {
+			throw new Error(t("sourceRemovedCleanFailed", { name }));
+		}
+	};
+
+	const deleteRenamedSkillMutation = useMutation({
+		mutationFn: async (skill: SourceSkillDiff) => {
+			const oldName = skill.previousName;
+			if (!oldName) {
+				throw new Error("Missing previous name for renamed skill.");
+			}
+			await deleteInstalledSkillByName(oldName);
+		},
+		onSuccess: async (_data, skill) => {
+			if (!skill.previousName) return;
+			toast.success(
+				t("sourceRenamedDeleted", { oldName: skill.previousName }),
+			);
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+		},
+		onError: (error, skill) => {
+			if (skill.previousName) {
+				toast.danger(
+					error instanceof Error
+						? error.message
+						: t("sourceRenamedDeleteFailed", {
+								oldName: skill.previousName,
+							}),
+				);
+				return;
+			}
+			toast.danger(t("sourcePruneFailed"));
+		},
+	});
+
+	const deleteRemovedSkillMutation = useMutation({
+		mutationFn: async (skill: SourceSkillDiff) => {
+			await deleteInstalledSkillByName(skill.name);
+		},
+		onSuccess: async (_data, skill) => {
+			toast.success(t("sourceRemovedCleaned", { name: skill.name }));
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+		},
+		onError: (error, skill) => {
+			toast.danger(
+				error instanceof Error
+					? error.message
+					: t("sourceRemovedCleanFailed", { name: skill.name }),
+			);
+		},
+	});
+
+	const copyRenamedInstallMutation = useMutation({
+		mutationFn: async (skill: SourceSkillDiff) => {
+			await writeText(`aghub-cli install ${skill.name}`);
+		},
+		onSuccess: (_data, skill) => {
+			toast.success(
+				t("sourceRenamedInstallCommandCopied", {
+					newName: skill.name,
+				}),
+			);
+		},
+		onError: () => toast.danger(t("sourceCopyCommandFailed")),
+	});
+
+	const updateRequestFor = (skill: SourceSkillDiff) => ({
+		name: skill.name,
+		scope: updateScope,
+		projectRoot: updateProjectRoot,
+		confirm: true,
+	});
+
+	const applyOneUpdate = (skill: SourceSkillDiff) => {
+		// P1-b/P1-c: forward the controller token, keyed by the clone URL.
+		applyUpdateMutation.mutate({
+			body: updateRequestFor(skill),
+			sourceUrl: diffSource,
+		});
+	};
+
+	const applyAllUpdates = async (skills: SourceSkillDiff[]) => {
+		if (skills.length === 0 || isApplyingAll) return;
+		setIsApplyingAll(true);
+		let updated = 0;
+		let failed = 0;
+		// Resolve the forward header once for the source and reuse it for each
+		// apply in the loop (same source → same origin-pinned token).
+		const forwardHeaders = await forwardForSource(diffSource);
+		try {
+			for (const skill of skills) {
+				try {
+					const result = await api.skills.applyUpdate(
+						updateRequestFor(skill),
+						forwardHeaders,
+					);
+					if (result.success) {
+						updated += 1;
+					} else {
+						failed += 1;
+					}
+				} catch {
+					failed += 1;
+				}
+			}
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.sources.all(),
+			});
+			if (failed > 0) {
+				toast.danger(
+					failed === 1
+						? t("sourceUpdateSomeFailedOne", { count: failed })
+						: t("sourceUpdateSomeFailedMany", { count: failed }),
+				);
+			} else {
+				toast.success(t("sourceUpdatesApplied", { count: updated }));
+			}
+		} finally {
+			setIsApplyingAll(false);
+		}
+	};
+
+	const deleteAllRemovedSkills = async (skills: SourceSkillDiff[]) => {
+		if (
+			skills.length === 0 ||
+			isDeletingAllRemoved ||
+			deleteRemovedSkillMutation.isPending
+		) {
+			return;
+		}
+		if (installableAgentIds.length === 0) {
+			toast.danger(t("sourceRemoveNoAgents"));
+			return;
+		}
+		setIsDeletingAllRemoved(true);
+		let cleaned = 0;
+		let failed = 0;
+		try {
+			for (const skill of skills) {
+				try {
+					await deleteInstalledSkillByName(skill.name);
+					cleaned += 1;
+				} catch {
+					failed += 1;
+				}
+			}
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			if (failed > 0) {
+				toast.danger(
+					failed === 1
+						? t("sourceRemovedCleanSomeFailedOne", {
+								count: failed,
+							})
+						: t("sourceRemovedCleanSomeFailedMany", {
+								count: failed,
+							}),
+				);
+			} else {
+				toast.success(
+					t("sourceRemovedCleanedMany", { count: cleaned }),
+				);
+			}
+		} finally {
+			setIsDeletingAllRemoved(false);
+		}
+	};
+
+	const toggleInstallSkillSelection = (skill: SourceSkillDiff) => {
+		setSelectedInstallSkillPaths((previous) =>
+			toggleSkillPath(previous, skill.skillPath),
+		);
+	};
+
+	const installPathFor = (skill: SourceSkillDiff) =>
+		skill.skillPath === "SKILL.md"
+			? "."
+			: skill.skillPath.replace(SKILL_FILE_SUFFIX_RE, "");
+
+	const installFromSource = async (skills: SourceSkillDiff[]) => {
+		if (
+			skills.length === 0 ||
+			isInstallingAll ||
+			installingSkillPath !== null
+		) {
+			return;
+		}
+		const installAll = skills.length > 1;
+		if (installAll) {
+			setIsInstallingAll(true);
+		} else {
+			setInstallingSkillPath(skills[0]?.skillPath ?? null);
+		}
+
+		try {
+			// Resolve the forward header transiently (remote mode only); pinned
+			// to the source's clone URL. Discarded after the request.
+			const forwardHeaders = await forwardForSource(row.sourceUrl);
+			const scan = await api.skills.gitScan(
+				{
+					url: row.sourceUrl,
+					credential_id: null,
+					branch: data?.gitRef ?? null,
+					session_id: null,
+				},
+				forwardHeaders,
+			);
+			const wantedPaths = new Set(skills.map(installPathFor));
+			const scanPaths = new Set(scan.skills.map((skill) => skill.path));
+			const skillPaths = Array.from(wantedPaths).filter((path) =>
+				scanPaths.has(path),
+			);
+
+			if (skillPaths.length !== wantedPaths.size) {
+				throw new Error(t("sourceInstallFailed"));
+			}
+
+			// P3: install reuses the scan session's server-side cached token, so
+			// no forward header is sent here (only the scan above carries it).
+			const result = await api.skills.gitInstall({
+				session_id: scan.session_id,
+				skill_paths: skillPaths,
+				agents: linkTargetAgentIds,
+				scope: updateScope,
+				project_root: updateProjectRoot,
+			});
+			const failed = result.results.filter((entry) => !entry.success);
+
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.sources.all(),
+			});
+
+			if (failed.length > 0) {
+				toast.danger(
+					failed.length === 1
+						? t("sourceInstallSomeFailedOne", {
+								count: failed.length,
+							})
+						: t("sourceInstallSomeFailedMany", {
+								count: failed.length,
+							}),
+				);
+			} else {
+				toast.success(
+					t("sourceInstalled", { count: skillPaths.length }),
+				);
+			}
+		} catch (error) {
+			toast.danger(
+				error instanceof Error
+					? error.message
+					: t("sourceInstallFailed"),
+			);
+		} finally {
+			setIsInstallingAll(false);
+			setInstallingSkillPath(null);
+		}
+	};
+
+	// Split uncheckable into auth-blocked (actionable) vs other (info-only)
+	const uncheckableAuth = useMemo(
+		() => uncheckable.filter((s) => s.reason === "auth"),
+		[uncheckable],
+	);
+	const uncheckableNonAuth = useMemo(
+		() => uncheckable.filter((s) => s.reason !== "auth"),
+		[uncheckable],
+	);
+
+	// "Needs action" bucket: only states where user can take an action.
+	// Non-auth uncheckable rows are NOT actionable — excluded from this list.
+	const needsActionSkills = useMemo(
+		() => [
+			...outdated,
+			...notInstalled,
+			...renamed,
+			...removed,
+			...installedDeprecated,
+			...uncheckableAuth,
+		],
+		[
+			outdated,
+			notInstalled,
+			renamed,
+			removed,
+			installedDeprecated,
+			uncheckableAuth,
+		],
+	);
+
+	const hasNeedsAction = needsActionSkills.length > 0;
+
+	const SourceIcon = row.sourceType === "local" ? FolderIcon : GlobeAltIcon;
+
+	// P2 correction: use sourceUrl for dialog so host resolution works
+	const credentialBindingSource = row.sourceUrl || row.source;
+
+	return (
+		<div className="flex h-full flex-col overflow-hidden">
+			{/* Header */}
+			<div className="flex items-start justify-between gap-3 border-b border-border p-4">
+				<div className="min-w-0">
+					<div className="flex items-center gap-2">
+						<SourceIcon className="size-5 shrink-0 text-muted" />
+						<h1 className="truncate text-lg font-semibold text-foreground">
+							{row.source}
+						</h1>
+						{row.isPrivate && (
+							<LockClosedIcon
+								className="size-3.5 shrink-0 text-muted"
+								aria-label={t("privateRepo")}
+							/>
+						)}
+						<Chip size="sm" variant="secondary">
+							{row.rowScope === "global"
+								? t("scopeGlobal")
+								: `${t("scopeProject")} · ${row.projectName ?? ""}`}
+						</Chip>
+					</div>
+					<p className="mt-1 truncate font-mono text-xs text-muted">
+						{row.sourceUrl}
+					</p>
+				</div>
+				<Button className="shrink-0" onPress={onImport}>
+					<ArrowDownTrayIcon className="size-4" />
+					{t("importFromThisSource")}
+				</Button>
+			</div>
+
+			{/* Body */}
+			<div className="min-h-0 flex-1 overflow-y-auto p-4">
+				{isLoading || isFetching ? (
+					<div className="flex flex-col items-center gap-3 py-12">
+						<Spinner size="lg" />
+						<p className="text-sm text-muted">
+							{t("checkingSource")}
+						</p>
+					</div>
+				) : data?.needsCredential ? (
+					<div className="space-y-4">
+						<Alert status="warning">
+							<Alert.Indicator />
+							<Alert.Content>
+								<Alert.Title>
+									{t("needsCredential")}
+								</Alert.Title>
+								<Alert.Description>
+									{t("needsCredentialHint")}
+								</Alert.Description>
+								<div className="mt-3">
+									<Button
+										size="sm"
+										variant="secondary"
+										onPress={() =>
+											setIsCredentialDialogOpen(true)
+										}
+									>
+										{t("credentialBind")}
+									</Button>
+								</div>
+							</Alert.Content>
+						</Alert>
+						{/* Dialog is mounted once at root level — just trigger open above */}
+					</div>
+				) : (
+					<div className="space-y-6">
+						{/* Summary bar — per-source counts */}
+						<SummaryBar
+							notInstalledCount={notInstalled.length}
+							outdatedCount={outdated.length}
+							renamedCount={renamed.length}
+							uncheckableCount={uncheckable.length}
+							currentCount={current.length}
+							isLoading={isLoading}
+						/>
+
+						{hasVisibleSkills && orphanLockCount > 0 && (
+							<SourceOrphanLockAlert
+								prunedCount={orphanLockCount}
+								isChecking={prunePreviewQuery.isFetching}
+								isCleaning={pruneLockMutation.isPending}
+								onClean={() => pruneLockMutation.mutate()}
+							/>
+						)}
+						{!hasVisibleSkills && (
+							<SourceEmptyState
+								prunedCount={orphanLockCount}
+								isChecking={prunePreviewQuery.isFetching}
+								isCleaning={pruneLockMutation.isPending}
+								hasError={prunePreviewQuery.isError}
+								onClean={() => pruneLockMutation.mutate()}
+								onRetry={() => prunePreviewQuery.refetch()}
+							/>
+						)}
+
+						{/* "Needs action" card — all actionable states mixed */}
+						{hasNeedsAction && (
+							<section>
+								<div className="mb-2 flex items-center justify-between gap-3">
+									<div className="flex items-center gap-2">
+										<ExclamationTriangleIcon className="size-4 text-warning" />
+										<h2 className="truncate text-sm font-semibold text-foreground">
+											{t("sourceNeedsAction")}
+										</h2>
+										<span className="text-xs text-muted">
+											{needsActionSkills.length}
+										</span>
+									</div>
+									{/* Batch buttons */}
+									<div className="flex items-center gap-1">
+										{outdated.length > 0 && (
+											<Button
+												size="sm"
+												variant="ghost"
+												className="h-7 px-2 text-xs"
+												isDisabled={
+													isApplyingAll ||
+													applyUpdateMutation.isPending
+												}
+												onPress={() =>
+													applyAllUpdates(outdated)
+												}
+											>
+												<ArrowPathIcon className="size-3.5" />
+												{isApplyingAll
+													? t("sourceUpdating")
+													: t("sourceUpdateAll")}
+											</Button>
+										)}
+										{notInstalled.length > 0 && (
+											<>
+												<button
+													type="button"
+													className="h-7 rounded px-2 text-xs text-muted hover:text-foreground focus-visible:outline-2 focus-visible:outline-offset-2 disabled:cursor-not-allowed disabled:opacity-50"
+													disabled={
+														isInstallingAll ||
+														installingSkillPath !==
+															null
+													}
+													onClick={() =>
+														setSelectedInstallSkillPaths(
+															allInstallSkillsSelected
+																? new Set()
+																: new Set(
+																		allInstallSkillPaths,
+																	),
+														)
+													}
+												>
+													{allInstallSkillsSelected
+														? t(
+																"sourceClearSelection",
+															)
+														: t("sourceSelectAll")}
+												</button>
+												<Button
+													size="sm"
+													variant="ghost"
+													className="h-7 px-2 text-xs"
+													isDisabled={
+														isInstallingAll ||
+														installingSkillPath !==
+															null ||
+														isCoverageLoading
+													}
+													onPress={() =>
+														installFromSource(
+															hasSelectedInstallSkills
+																? selectedInstallSkills
+																: notInstalled,
+														)
+													}
+												>
+													<ArrowDownTrayIcon className="size-3.5" />
+													{isInstallingAll
+														? t("sourceInstalling")
+														: hasSelectedInstallSkills
+															? t(
+																	"sourceInstallSelected",
+																	{
+																		count: selectedInstallCount,
+																	},
+																)
+															: t(
+																	"sourceInstallAll",
+																)}
+												</Button>
+											</>
+										)}
+										{removed.length > 0 && (
+											<Button
+												size="sm"
+												variant="ghost"
+												className="h-7 px-2 text-xs"
+												isDisabled={
+													isDeletingAllRemoved ||
+													deleteRemovedSkillMutation.isPending
+												}
+												onPress={() =>
+													deleteAllRemovedSkills(
+														removed,
+													)
+												}
+											>
+												<TrashIcon className="size-3.5" />
+												{isDeletingAllRemoved
+													? t("sourceRemovedCleaning")
+													: t(
+															"sourceRemovedCleanAll",
+														)}
+											</Button>
+										)}
+									</div>
+								</div>
+
+								<ul className="overflow-hidden rounded-lg border border-border">
+									{outdated.map((skill) => {
+										const isApplying =
+											applyUpdateMutation.isPending &&
+											applyUpdateMutation.variables?.body
+												.name === skill.name;
+										return (
+											<SourceSkillRow
+												key={skill.skillPath}
+												skill={skill}
+												isExpanded={
+													expandedSkillPath ===
+													skill.skillPath
+												}
+												onToggle={() =>
+													setExpandedSkillPath(
+														expandedSkillPath ===
+															skill.skillPath
+															? null
+															: skill.skillPath,
+													)
+												}
+												action={
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														isDisabled={
+															isApplyingAll ||
+															isApplying
+														}
+														onPress={() =>
+															applyOneUpdate(
+																skill,
+															)
+														}
+													>
+														<ArrowPathIcon className="size-3.5" />
+														{isApplying
+															? t(
+																	"sourceUpdating",
+																)
+															: t(
+																	"sourceUpdateSkill",
+																)}
+													</Button>
+												}
+											/>
+										);
+									})}
+									{notInstalled.map((skill) => {
+										const isInstalling =
+											installingSkillPath ===
+											skill.skillPath;
+										return (
+											<SourceSkillRow
+												key={skill.skillPath}
+												skill={skill}
+												isExpanded={
+													expandedSkillPath ===
+													skill.skillPath
+												}
+												onToggle={() =>
+													setExpandedSkillPath(
+														expandedSkillPath ===
+															skill.skillPath
+															? null
+															: skill.skillPath,
+													)
+												}
+												isSelected={selectedInstallSkillPaths.has(
+													skill.skillPath,
+												)}
+												onToggleSelected={() =>
+													toggleInstallSkillSelection(
+														skill,
+													)
+												}
+												isSelectionDisabled={
+													isInstallingAll ||
+													installingSkillPath !== null
+												}
+												action={
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														isDisabled={
+															isInstallingAll ||
+															installingSkillPath !==
+																null ||
+															isCoverageLoading
+														}
+														onPress={() =>
+															installFromSource([
+																skill,
+															])
+														}
+													>
+														<ArrowDownTrayIcon className="size-3.5" />
+														{isInstalling
+															? t(
+																	"sourceInstalling",
+																)
+															: t(
+																	"sourceInstallSkill",
+																)}
+													</Button>
+												}
+											/>
+										);
+									})}
+									{/* TODO(Phase 3): replace with one-click accept-rename once
+									    POST /skills/accept-rename exists. For now, keep the
+									    existing two-step flow: delete old + copy install cmd. */}
+									{renamed.map((skill) => {
+										const isDeleting =
+											deleteRenamedSkillMutation.isPending &&
+											deleteRenamedSkillMutation.variables
+												?.skillPath === skill.skillPath;
+										const isCopying =
+											copyRenamedInstallMutation.isPending &&
+											copyRenamedInstallMutation.variables
+												?.skillPath === skill.skillPath;
+										const rowBusy = isDeleting || isCopying;
+										return (
+											<SourceSkillRow
+												key={skill.skillPath}
+												skill={skill}
+												isExpanded={
+													expandedSkillPath ===
+													skill.skillPath
+												}
+												onToggle={() =>
+													setExpandedSkillPath(
+														expandedSkillPath ===
+															skill.skillPath
+															? null
+															: skill.skillPath,
+													)
+												}
+												showReason
+												action={
+													<div className="flex items-center gap-1.5">
+														<Button
+															size="sm"
+															variant="secondary"
+															className="h-7 px-2 text-xs"
+															isDisabled={
+																!skill.previousName ||
+																rowBusy
+															}
+															onPress={() =>
+																deleteRenamedSkillMutation.mutate(
+																	skill,
+																)
+															}
+														>
+															<TrashIcon className="size-3.5" />
+															{isDeleting
+																? t(
+																		"sourceRenamedDeleting",
+																	)
+																: t(
+																		"sourceRenamedDeleteOld",
+																	)}
+														</Button>
+														<Button
+															size="sm"
+															variant="ghost"
+															className="h-7 px-2 text-xs"
+															isDisabled={rowBusy}
+															onPress={() =>
+																copyRenamedInstallMutation.mutate(
+																	skill,
+																)
+															}
+														>
+															<ClipboardDocumentIcon className="size-3.5" />
+															{isCopying
+																? t(
+																		"sourceRenamedCopying",
+																	)
+																: t(
+																		"sourceRenamedCopyInstall",
+																	)}
+														</Button>
+													</div>
+												}
+											/>
+										);
+									})}
+									{removed.map((skill) => {
+										const isDeleting =
+											deleteRemovedSkillMutation.isPending &&
+											deleteRemovedSkillMutation.variables
+												?.skillPath === skill.skillPath;
+										return (
+											<SourceSkillRow
+												key={skill.skillPath}
+												skill={skill}
+												isExpanded={
+													expandedSkillPath ===
+													skill.skillPath
+												}
+												onToggle={() =>
+													setExpandedSkillPath(
+														expandedSkillPath ===
+															skill.skillPath
+															? null
+															: skill.skillPath,
+													)
+												}
+												muted
+												showReason
+												action={
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														isDisabled={
+															isDeletingAllRemoved ||
+															isDeleting
+														}
+														onPress={() =>
+															deleteRemovedSkillMutation.mutate(
+																skill,
+															)
+														}
+													>
+														<TrashIcon className="size-3.5" />
+														{isDeleting
+															? t(
+																	"sourceRemovedCleaning",
+																)
+															: t(
+																	"sourceRemovedCleanSkill",
+																)}
+													</Button>
+												}
+											/>
+										);
+									})}
+									{installedDeprecated.map((skill) => {
+										const isDeleting =
+											deleteRemovedSkillMutation.isPending &&
+											deleteRemovedSkillMutation.variables
+												?.skillPath === skill.skillPath;
+										return (
+											<SourceSkillRow
+												key={skill.skillPath}
+												skill={skill}
+												isExpanded={
+													expandedSkillPath ===
+													skill.skillPath
+												}
+												onToggle={() =>
+													setExpandedSkillPath(
+														expandedSkillPath ===
+															skill.skillPath
+															? null
+															: skill.skillPath,
+													)
+												}
+												muted
+												showReason
+												action={
+													<Button
+														size="sm"
+														variant="secondary"
+														className="h-7 px-2 text-xs"
+														isDisabled={
+															isDeletingAllRemoved ||
+															isDeleting
+														}
+														onPress={() =>
+															deleteRemovedSkillMutation.mutate(
+																skill,
+															)
+														}
+													>
+														<TrashIcon className="size-3.5" />
+														{isDeleting
+															? t(
+																	"sourceRemovedCleaning",
+																)
+															: t(
+																	"sourceRemovedCleanSkill",
+																)}
+													</Button>
+												}
+											/>
+										);
+									})}
+									{/* Only auth-blocked uncheckable rows are
+									    actionable (credential binding). Non-auth
+									    uncheckable rows are rendered below as
+									    an info note, not action rows. */}
+									{uncheckableAuth.map((skill) => (
+										<SourceSkillRow
+											key={skill.skillPath}
+											skill={skill}
+											isExpanded={
+												expandedSkillPath ===
+												skill.skillPath
+											}
+											onToggle={() =>
+												setExpandedSkillPath(
+													expandedSkillPath ===
+														skill.skillPath
+														? null
+														: skill.skillPath,
+												)
+											}
+											muted
+											showReason
+											action={
+												<Button
+													size="sm"
+													variant="secondary"
+													className="h-7 px-2 text-xs"
+													onPress={() =>
+														setIsCredentialDialogOpen(
+															true,
+														)
+													}
+												>
+													{t("credentialBind")}
+												</Button>
+											}
+										/>
+									))}
+								</ul>
+							</section>
+						)}
+
+						{/* Non-auth uncheckable: info-only, no action */}
+						{uncheckableNonAuth.length > 0 && (
+							<SkillSection
+								title={t("summaryUnchecked", {
+									count: uncheckableNonAuth.length,
+								})}
+								icon={
+									<ExclamationTriangleIcon className="size-4 text-muted" />
+								}
+								skills={uncheckableNonAuth}
+								expandedSkillPath={expandedSkillPath}
+								onToggleSkill={setExpandedSkillPath}
+								muted
+							/>
+						)}
+
+						{/* "Installed (latest)" — collapsed by default */}
+						<SkillSection
+							title={t("sourceStateCurrent")}
+							icon={
+								<CheckCircleIcon className="size-4 text-success" />
+							}
+							skills={current}
+							expandedSkillPath={expandedSkillPath}
+							onToggleSkill={setExpandedSkillPath}
+							defaultCollapsed
+						/>
+
+						{/* All-clear empty state — only when truly NO non-current rows exist.
+						    Non-auth uncheckable rows are excluded from hasNeedsAction, so
+						    we must also guard uncheckableNonAuth to avoid a false "all up to
+						    date" while the same panel shows unchecked rows. */}
+						{!hasNeedsAction &&
+							uncheckableNonAuth.length === 0 &&
+							!isLoading &&
+							current.length > 0 && (
+								<div className="rounded-lg border border-success/30 bg-success/5 px-4 py-3">
+									<div className="flex items-center gap-2">
+										<CheckCircleIcon className="size-4 shrink-0 text-success" />
+										<p className="text-sm text-success">
+											{t("sourceAllLatest")}
+										</p>
+									</div>
+								</div>
+							)}
+
+						{/* Agent coverage hint */}
+						{(autoCovered.length > 0 || linkTargets.length > 0) &&
+							notInstalled.length > 0 && (
+								<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+									<span>
+										{linkTargets.length}{" "}
+										{t("sourceInstallLinkTargetsTitle")} /{" "}
+										{autoCovered.length}{" "}
+										{t("sourceInstallCoveredTitle")}
+									</span>
+									{autoCovered.length > 0 && (
+										<>
+											<span className="mx-1 text-muted/50">
+												·
+											</span>
+											<span className="text-muted">
+												{t("agentCoveredBadge")}:
+											</span>
+											{autoCovered.map((agent) => (
+												<Chip
+													key={agent.id}
+													size="sm"
+													variant="secondary"
+												>
+													{agent.display_name}
+												</Chip>
+											))}
+										</>
+									)}
+								</div>
+							)}
+					</div>
+				)}
+			</div>
+
+			{/* Credential dialog also mounts at root level for uncheckable rows */}
+			<SourceCredentialBindingDialog
+				isOpen={isCredentialDialogOpen}
+				bindingSource={credentialBindingSource}
+				onClose={() => setIsCredentialDialogOpen(false)}
+				onBound={async () => {
+					setIsCredentialDialogOpen(false);
+					await queryClient.invalidateQueries({
+						queryKey: queryKeys.skills.sources.all(),
+					});
+				}}
+			/>
+		</div>
+	);
+}

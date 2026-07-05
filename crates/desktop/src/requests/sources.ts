@@ -1,7 +1,17 @@
 import { queryOptions } from "@tanstack/react-query";
 import type { SourceDiffResponse, SourcesListResponse } from "../generated/dto";
+import type { GitForwardHeaders } from "../lib/api";
 import type { ApiClient } from "./client";
 import { queryKeys } from "./keys";
+
+/**
+ * Resolve the per-request forward header for a single known source, or
+ * undefined when forwarding is not engaged. Supplied by `useGitForwarding`.
+ * Resolved transiently inside the queryFn so the token never enters the cache.
+ */
+export type ForwardForSource = (
+	source: string,
+) => Promise<GitForwardHeaders | undefined>;
 
 interface SourcesListQueryParams {
 	api: ApiClient;
@@ -36,6 +46,12 @@ interface SourceDiffQueryParams {
 	gitRef?: string;
 	enabled?: boolean;
 	staleTime?: number;
+	/**
+	 * Optional forward-header resolver (remote mode). Omitted in Local mode.
+	 * NOT part of the query key — the token is resolved transiently and must
+	 * never be cached or keyed on.
+	 */
+	forwardForSource?: ForwardForSource;
 }
 
 /** Fetch a single source and diff each skill (3-state). Network-heavy. */
@@ -47,6 +63,7 @@ export function sourceDiffQueryOptions({
 	gitRef,
 	enabled = true,
 	staleTime = 60_000,
+	forwardForSource,
 }: SourceDiffQueryParams) {
 	return queryOptions({
 		queryKey: queryKeys.skills.sources.diff(
@@ -55,8 +72,13 @@ export function sourceDiffQueryOptions({
 			projectRoot,
 			gitRef,
 		),
-		queryFn: (): Promise<SourceDiffResponse> =>
-			api.skills.diffSource({ scope, projectRoot, source, gitRef }),
+		queryFn: async (): Promise<SourceDiffResponse> => {
+			const headers = await forwardForSource?.(source);
+			return api.skills.diffSource(
+				{ scope, projectRoot, source, gitRef },
+				headers,
+			);
+		},
 		enabled: enabled && Boolean(source),
 		staleTime,
 	});

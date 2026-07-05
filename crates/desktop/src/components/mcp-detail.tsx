@@ -2,13 +2,22 @@ import { StarIcon as StarIconOutline } from "@heroicons/react/24/outline";
 import {
 	CheckCircleIcon,
 	DocumentDuplicateIcon,
+	ExclamationTriangleIcon,
 	PencilIcon,
 	PlusIcon,
 	StarIcon as StarIconSolid,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import { Button, Card, Chip, Tooltip, toast } from "@heroui/react";
-import { useQueryClient } from "@tanstack/react-query";
+import {
+	Button,
+	Card,
+	Chip,
+	Modal,
+	Spinner,
+	Tooltip,
+	toast,
+} from "@heroui/react";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo, useReducer } from "react";
 import { useTranslation } from "react-i18next";
 import type { McpResponse, TransportDto } from "../generated/dto";
@@ -20,7 +29,6 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { serializeMcpImportJson } from "../lib/mcp-utils";
 import { cn, filterItemsByAgentIds, sortAgentObjects } from "../lib/utils";
 import { invalidateMcpQueries } from "../requests/mcps";
-import { DeletePreviewDialog } from "./delete-preview-dialog";
 import { KeyValueList } from "./key-value-list";
 import { ManageAgentsDialog } from "./manage-agents-dialog";
 import { CodeBlock, MetaRow } from "./meta-blocks";
@@ -92,20 +100,32 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 	const api = useApi();
 	const queryClient = useQueryClient();
 
-	const deleteFns = useMemo(
-		() =>
-			group.items.map(
-				(item) => (confirm: boolean) =>
-					api.mcps.delete(
+	const deleteMutation = useMutation({
+		mutationFn: (g: McpGroup) => {
+			return Promise.all(
+				g.items.map((item) => {
+					const scope = item.source ?? "global";
+					return api.mcps.delete(
 						item.name,
 						item.agent ?? "default",
-						item.source ?? "global",
+						scope,
 						projectPath,
-						confirm,
-					),
-			),
-		[group.items, api, projectPath],
-	);
+					);
+				}),
+			);
+		},
+		onSuccess: () => {
+			void invalidateMcpQueries(queryClient);
+			dispatch({ type: "set_delete_dialog", value: false });
+			toast.success(t("deleteMcpSuccess"));
+		},
+		onError: (error) => {
+			console.error("Failed to delete MCP servers:", error);
+			toast.danger(
+				error instanceof Error ? error.message : t("deleteMcpError"),
+			);
+		},
+	});
 
 	const { isMcpStarred, toggleMcpStar } = useFavorites();
 	const isStarred = isMcpStarred(group.mergeKey);
@@ -438,34 +458,75 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 				</div>
 			</div>
 
-			{/* Delete Confirmation Dialog (two-step: dry-run preview then confirm) */}
-			<DeletePreviewDialog
+			{/* Delete Confirmation Dialog */}
+			<Modal.Backdrop
 				isOpen={uiState.deleteDialogOpen}
-				onClose={() =>
-					dispatch({ type: "set_delete_dialog", value: false })
+				onOpenChange={(value) =>
+					dispatch({
+						type: "set_delete_dialog",
+						value,
+					})
 				}
-				deleteFns={deleteFns}
-				heading={t("deleteMcpServer")}
-				description={
-					group.items.length > 1
-						? t("deleteMcpMultipleConfirm", {
-								name: group.items[0].name,
-								count: group.items.length,
-								agents: group.items
-									.map((i) => getAgentName(i))
-									.join(", "),
-							})
-						: t("deleteMcpServerConfirm", {
-								name: group.items[0].name,
-							})
-				}
-				confirmLabel={t("deleteMcpServer")}
-				onConfirmed={async () => {
-					await invalidateMcpQueries(queryClient);
-					toast.success(t("deleteMcpSuccess"));
-				}}
-				onFailed={() => toast.danger(t("deleteMcpError"))}
-			/>
+			>
+				<Modal.Container>
+					<Modal.Dialog>
+						<Modal.CloseTrigger />
+						<Modal.Header>
+							<div className="flex items-center gap-2">
+								<ExclamationTriangleIcon className="size-5 text-warning" />
+								<Modal.Heading>
+									{t("deleteMcpServer")}
+								</Modal.Heading>
+							</div>
+						</Modal.Header>
+						<Modal.Body>
+							<p className="text-sm text-muted">
+								{group.items.length > 1
+									? t("deleteMcpMultipleConfirm", {
+											name: group.items[0].name,
+											count: group.items.length,
+											agents: group.items
+												.map((i) => getAgentName(i))
+												.join(", "),
+										})
+									: t("deleteMcpServerConfirm", {
+											name: group.items[0].name,
+										})}
+							</p>
+						</Modal.Body>
+						<Modal.Footer>
+							<Button
+								slot="close"
+								variant="secondary"
+								size="md"
+								onPress={() =>
+									dispatch({
+										type: "set_delete_dialog",
+										value: false,
+									})
+								}
+								isDisabled={deleteMutation.isPending}
+								className="min-h-[44px]"
+							>
+								{t("cancel")}
+							</Button>
+							<Button
+								variant="danger"
+								size="md"
+								onPress={() => deleteMutation.mutate(group)}
+								isDisabled={deleteMutation.isPending}
+								className="min-h-[44px] min-w-[120px]"
+							>
+								{deleteMutation.isPending ? (
+									<Spinner size="sm" />
+								) : (
+									t("deleteMcpServer")
+								)}
+							</Button>
+						</Modal.Footer>
+					</Modal.Dialog>
+				</Modal.Container>
+			</Modal.Backdrop>
 
 			{/* Manage Agents Dialog */}
 			<ManageAgentsDialog

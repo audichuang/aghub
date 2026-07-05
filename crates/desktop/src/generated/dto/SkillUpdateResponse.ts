@@ -5,7 +5,12 @@
  */
 export type SkillUpdateResponse = { name: string; scope: string } & (
 	| { status: "upToDate" }
-	| { status: "updateAvailable"; current: string; available: string }
+	| {
+			status: "updateAvailable";
+			current: string;
+			available: string;
+			upstreamCommitTime?: string;
+	  }
 	| { status: "renamed"; newName: string }
 	| { status: "uncheckable"; reason: string }
 );

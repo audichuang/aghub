@@ -47,6 +47,7 @@ pub mod fetch;
 pub mod redact;
 pub mod remote;
 pub mod source;
+pub mod system_git;
 pub mod tree;
 
 // Re-export commonly used items
@@ -62,7 +63,11 @@ pub use remote::{
 	list_remote_branches, resolve_ref_oid, select_ref_oid, RemoteOptions,
 };
 pub use source::{
-	normalize_repo_source_from_url, resolve_remote_source, RemoteSourceType,
-	ResolvedRemoteSource, SourceError,
+	normalize_repo_source_from_url, normalize_tfs_clone_url,
+	resolve_remote_source, RemoteSourceType, ResolvedRemoteSource, SourceError,
+};
+pub use system_git::{
+	clone_to_temp_system_git, list_remote_branches_system_git,
+	probe_credential, system_git_available,
 };
 pub use tree::{is_safe_tree_entry_name, materialize_tree};

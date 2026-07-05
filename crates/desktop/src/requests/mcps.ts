@@ -116,6 +116,34 @@ export function updateMcpMutationOptions({
 	});
 }
 
+interface DeleteMcpVariables {
+	name: string;
+	agent: string;
+	scope: "global" | "project";
+	projectRoot?: string;
+}
+
+interface DeleteMcpMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: () => void | Promise<void>;
+}
+
+export function deleteMcpMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+}: DeleteMcpMutationParams) {
+	return mutationOptions({
+		mutationFn: ({ name, agent, scope, projectRoot }: DeleteMcpVariables) =>
+			api.mcps.delete(name, agent, scope, projectRoot),
+		onSuccess: async () => {
+			await invalidateMcpQueries(queryClient);
+			await onSuccess?.();
+		},
+	});
+}
+
 interface ReconcileMcpsMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;

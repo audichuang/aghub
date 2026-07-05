@@ -46,6 +46,7 @@ colored = "3.0"
 # HTTP dependencies
 reqwest = { version = "0.13", features = [ "json" ] }
 url = "2.5"
+base64 = "0.22"
 
 # Testing dependencies
 tempfile = "3.10"

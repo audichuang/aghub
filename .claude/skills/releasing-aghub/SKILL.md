@@ -5,6 +5,26 @@ description: Runbook for cutting a desktop + CLI release of this aghub fork (aud
 
 # Releasing aghub (this fork)
 
+## TL;DR — for a normal forward release, run one command
+
+```bash
+just release X.Y.Z          # e.g. just release 2.3.8   (add --yes to skip the confirm)
+```
+
+`just release` wraps `scripts/release.sh`, which automates the whole mechanical
+flow so the model doesn't burn tokens re-deriving it each time and can't fumble
+the gotchas: it validates the version, **pushes to `fork` (never origin =
+upstream)**, waits for the HEAD commit's `ci.yml` to go **green** before tagging,
+tags `vX.Y.Z`, watches `release.yml` (**auto-reruns once** on a transient CI
+dispatch flake — jobs stuck `queued` with nothing published), then verifies the
+artifacts (`latest.json` URLs, Homebrew cask sha256). You still pick the version
+and confirm go/no-go — a tag triggers a real public release.
+
+The rest of this file is the **reference** behind that script — read it to
+understand the model, debug a failure the script surfaces, or do something the
+script does not cover (notably **re-releasing a botched tag**, which needs a
+manual delete + retag — see the last section).
+
 Releases are **tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml`, which fans out to
 `test` (ubuntu/macOS/Windows gate) → `changelog` → `build-tauri` (4 targets) + `build-cli` (4 targets) → `publish-homebrew`.
 The `test` job gates everything — a tag whose tests fail on **any** platform produces **no** artifacts (added after a

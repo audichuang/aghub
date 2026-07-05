@@ -24,8 +24,8 @@ use std::time::Duration;
 
 use aghub_remote::bringup::{
 	ensure_remote_api, force_redeploy_remote_api, install_hint,
-	probe_connection, start_remote, ConnectError, RemoteInstallSource,
-	StartedServer, TestResult,
+	probe_connection, reinstall_remote_api as reinstall_remote_api_core,
+	start_remote, ConnectError, RemoteInstallSource, StartedServer, TestResult,
 };
 use aghub_remote::fs::{
 	list_remote_directories as list_remote_directories_core,
@@ -51,6 +51,13 @@ const PORT_POLL_ATTEMPTS: u32 = 40;
 const PORT_POLL_DELAY: Duration = Duration::from_millis(250);
 /// Grace period after spawning the tunnel before we check it stayed up.
 const TUNNEL_SETTLE: Duration = Duration::from_millis(400);
+/// Public repository used as the last-resort cargo fallback for remote installs.
+const DEFAULT_REMOTE_INSTALL_GIT_URL: &str =
+	"https://github.com/audichuang/aghub.git";
+/// Release asset root used for cross-platform Linux VM installs. The `.deb`
+/// contains the CI-versioned Linux `aghub-api` Tauri resource.
+const DEFAULT_REMOTE_RELEASE_BASE_URL: &str =
+	"https://github.com/audichuang/aghub/releases/download";
 
 /// A live remote connection: the local tunnel process, the remote server pid,
 /// and the connection it belongs to.
@@ -63,11 +70,34 @@ struct RemoteHandle {
 	remote_pid: u32,
 	/// The local port the tunnel listens on (== the frontend baseUrl port).
 	local_port: u16,
+	/// Whether the remote `aghub-api` advertised controller-side git-credential
+	/// forwarding during bring-up. Cached on the handle so a reused connection
+	/// reports the SAME capability it was brought up with, and so the frontend
+	/// learns it AT THE SAME TIME as the tunnel port (no separate late probe).
+	/// Fail-safe `false` whenever the bring-up probe could not confirm it.
+	supports_credential_forwarding: bool,
 	/// The connection definition (needed to re-issue ssh for remote cleanup).
 	connection: Connection,
 	/// Set before an intentional teardown so the watcher suppresses the
 	/// `remote-disconnected` event.
 	intentional: Arc<AtomicBool>,
+}
+
+/// What [`connect_remote`] / [`force_redeploy_remote`] return to the frontend:
+/// the **local** tunnel port AND the remote's git-credential-forwarding
+/// capability, resolved together at bring-up time. Returning the capability
+/// here (rather than via a separate later probe) closes the race where the
+/// first remote git-auth queries could run unforwarded and cache an auth
+/// failure before a late capability probe flipped to `true`.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConnectResult {
+	/// The local port the tunnel listens on (== the frontend baseUrl port).
+	pub port: u16,
+	/// The remote advertises controller-side git-credential forwarding (the
+	/// `X-Aghub-Git-Tokens` header). Fail-safe `false` whenever support could
+	/// not be confirmed; always `false` for Local (which never reaches here).
+	pub supports_credential_forwarding: bool,
 }
 
 /// Managed Tauri state holding every live remote connection.
@@ -210,6 +240,55 @@ pub fn test_connection(connection: Connection) -> TestResult {
 	probe_connection(&runner, &connection, LOCAL_VERSION)
 }
 
+/// Force-reinstall `aghub-api` on the remote and return a fresh probe result.
+///
+/// This is deliberately separate from [`force_redeploy_remote`]: the connection
+/// manager needs a test-panel action that mutates the remote binary without
+/// opening a tunnel or switching the active connection.
+#[tauri::command]
+pub fn reinstall_remote_api(
+	state: State<'_, RemoteState>,
+	app: AppHandle,
+	connection: Connection,
+) -> Result<TestResult, RemoteError> {
+	let id = connection.id.clone();
+
+	if existing_connect_result(&state, &id)?.is_some() {
+		return Err(RemoteError::AlreadyConnecting);
+	}
+
+	let source = remote_install_source(&app).ok_or_else(|| {
+		RemoteError::RemoteApiMissing {
+			install_hint: install_hint(),
+		}
+	})?;
+
+	let runner = SystemRunner;
+	let source = deployable_install_source(&runner, &connection, source)?;
+	info!(
+		"remote '{}': force reinstall aghub-api using {}",
+		connection.id,
+		install_source_summary(&source)
+	);
+	let _slot = SlotGuard::claim(&state.connecting, id)?;
+
+	let outcome =
+		reinstall_remote_api_core(&runner, &connection, LOCAL_VERSION, &source);
+	if let Ok(result) = &outcome {
+		info!(
+			"remote '{}': force reinstall finished: version={:?}, \
+			 compatible={}, install_attempted={}, install_succeeded={}",
+			connection.id,
+			result.api_version,
+			result.compatible,
+			result.install_attempted,
+			result.install_succeeded
+		);
+	}
+
+	outcome.map_err(RemoteError::from)
+}
+
 /// The desktop's embedded `aghub-api` version (`aghub_api::VERSION`), i.e. the
 /// version `is_version_compatible` enforces against the remote. This is the
 /// **workspace** version, distinct from the Tauri app version reported by
@@ -237,18 +316,21 @@ pub fn list_remote_directories(
 }
 
 /// Bring up the remote server and a tunnel; returns the **local** port the
-/// frontend should point its `baseUrl` at. Idempotent per connection id.
+/// frontend should point its `baseUrl` at, plus the remote's git-credential
+/// forwarding capability resolved during the same bring-up. Idempotent per
+/// connection id (a reused tunnel reports the capability it was brought up
+/// with).
 #[tauri::command]
 pub fn connect_remote(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
-) -> Result<u16, RemoteError> {
+) -> Result<ConnectResult, RemoteError> {
 	let id = connection.id.clone();
 
-	// Already connected? Reuse the existing tunnel.
-	if let Some(port) = existing_local_port(&state, &id)? {
-		return Ok(port);
+	// Already connected? Reuse the existing tunnel + its cached capability.
+	if let Some(result) = existing_connect_result(&state, &id)? {
+		return Ok(result);
 	}
 	// Claim an in-progress slot so concurrent calls don't double-bring-up; the
 	// guard releases it on every exit path (including a panic in `bring_up`).
@@ -256,14 +338,18 @@ pub fn connect_remote(
 
 	// Do the slow ssh work WITHOUT holding any lock.
 	let handle = bring_up(&app, &connection)?;
-	let port = handle.local_port;
+	let result = ConnectResult {
+		port: handle.local_port,
+		supports_credential_forwarding: handle.supports_credential_forwarding,
+	};
 	insert_handle_or_teardown(&state, id, handle)?;
-	Ok(port)
+	Ok(result)
 	// `_slot` drops here, after the handle is stored.
 }
 
 /// Force-redeploy the desktop's `aghub-api` over an incompatible remote one,
-/// then connect; returns the **local** tunnel port. Only reachable from the
+/// then connect; returns the **local** tunnel port plus the remote's
+/// git-credential forwarding capability. Only reachable from the
 /// incompatible/failed state: it refuses to clobber a live connection and is
 /// gated to the desktop's own `(os, arch)`.
 #[tauri::command]
@@ -271,11 +357,11 @@ pub fn force_redeploy_remote(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
-) -> Result<u16, RemoteError> {
+) -> Result<ConnectResult, RemoteError> {
 	let id = connection.id.clone();
 
 	// A live handle means there is a working connection — never tear it down.
-	if existing_local_port(&state, &id)?.is_some() {
+	if existing_connect_result(&state, &id)?.is_some() {
 		return Err(RemoteError::AlreadyConnecting);
 	}
 
@@ -287,40 +373,26 @@ pub fn force_redeploy_remote(
 	})?;
 
 	// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
-	// binary: a wrong-arch binary would not run on the VM. `CargoGit` compiles
-	// ON the VM, so it is arch-safe for ANY remote platform — skip the
-	// probe and the refusal entirely (this is the common
-	// Mac-desktop -> Linux-VM case).
+	// binary: a wrong-arch binary would not run on the VM. VM-native install
+	// sources (`ReleaseDeb`, `CargoGit`) are arch-safe for the supported remote
+	// platform, so skip the refusal once `deployable_install_source` has picked
+	// one for the common Mac-desktop -> Linux-VM case.
 	// Mirrors the connect path (`ensure_remote_api`), which gates only
 	// `LocalBinary`.
-	if matches!(source, RemoteInstallSource::LocalBinary(_)) {
-		let runner = SystemRunner;
-		let probed = probe_remote_platform(&runner, &connection);
-		let same_platform = matches!(
-			&probed,
-			Some((os, arch))
-				if os == std::env::consts::OS
-					&& arch == std::env::consts::ARCH
-		);
-		if !same_platform {
-			let remote_platform = probed
-				.map(|(os, arch)| format!("{os}/{arch}"))
-				.unwrap_or_else(|| "unknown".to_string());
-			return Err(RemoteError::CrossPlatformRedeploy {
-				remote_platform,
-				hint: install_hint(),
-			});
-		}
-	}
+	let runner = SystemRunner;
+	let source = deployable_install_source(&runner, &connection, source)?;
 
 	// Claim the in-progress slot so a concurrent connect can't race us; the
 	// guard releases it on every exit path (including a panic mid-redeploy).
 	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
 	let handle = force_redeploy(&app, &connection, &source)?;
-	let port = handle.local_port;
+	let result = ConnectResult {
+		port: handle.local_port,
+		supports_credential_forwarding: handle.supports_credential_forwarding,
+	};
 	insert_handle_or_teardown(&state, id, handle)?;
-	Ok(port)
+	Ok(result)
 	// `_slot` drops here, after the handle is stored.
 }
 
@@ -365,16 +437,20 @@ pub fn cleanup_all_remotes(state: &RemoteState) {
 // internals
 // ---------------------------------------------------------------------------
 
-/// Local port of an already-live connection, or `None` if not connected.
+/// The cached [`ConnectResult`] (port + capability) of an already-live
+/// connection, or `None` if not connected.
 ///
 /// Returns `Err` on a poisoned lock so connect/force_redeploy surface
 /// [`RemoteError::Internal`] instead of silently treating a poisoned (and thus
 /// indeterminate) state as "disconnected" and racing a second bring-up.
-fn existing_local_port(
+fn existing_connect_result(
 	state: &State<'_, RemoteState>,
 	id: &str,
-) -> Result<Option<u16>, RemoteError> {
-	Ok(lock(&state.handles)?.get(id).map(|h| h.local_port))
+) -> Result<Option<ConnectResult>, RemoteError> {
+	Ok(lock(&state.handles)?.get(id).map(|h| ConnectResult {
+		port: h.local_port,
+		supports_credential_forwarding: h.supports_credential_forwarding,
+	}))
 }
 
 /// User-facing lock: a poisoned lock becomes [`RemoteError::Internal`] so the
@@ -422,6 +498,56 @@ fn insert_handle_or_teardown(
 	}
 }
 
+fn deployable_install_source(
+	runner: &SystemRunner,
+	connection: &Connection,
+	source: RemoteInstallSource,
+) -> Result<RemoteInstallSource, RemoteError> {
+	if !matches!(source, RemoteInstallSource::LocalBinary(_)) {
+		return Ok(source);
+	}
+
+	let probed = probe_remote_platform(runner, connection);
+	let same_platform = matches!(
+		&probed,
+		Some((os, arch))
+			if os == std::env::consts::OS && arch == std::env::consts::ARCH
+	);
+	if same_platform {
+		return Ok(source);
+	}
+
+	if let Some(fallback) = remote_release_deb_install_source(&probed) {
+		info!(
+			"remote '{}': local install binary is not deployable to remote \
+			 platform {:?}; falling back to {}",
+			connection.id,
+			probed,
+			install_source_summary(&fallback)
+		);
+		return Ok(fallback);
+	}
+
+	if let Some(fallback) = remote_git_install_source() {
+		info!(
+			"remote '{}': no release asset install source for remote \
+			 platform {:?}; falling back to {}",
+			connection.id,
+			probed,
+			install_source_summary(&fallback)
+		);
+		return Ok(fallback);
+	}
+
+	let remote_platform = probed
+		.map(|(os, arch)| format!("{os}/{arch}"))
+		.unwrap_or_else(|| "unknown".to_string());
+	Err(RemoteError::CrossPlatformRedeploy {
+		remote_platform,
+		hint: install_hint(),
+	})
+}
+
 /// The full bring-up sequence (probe → start → tunnel → watcher). No shared
 /// locks are held here.
 fn bring_up(
@@ -431,19 +557,46 @@ fn bring_up(
 	let runner = SystemRunner;
 	let bin = resolved_path(connection);
 
-	let install_source = remote_install_source(app);
+	info!(
+		"remote '{}': ensuring aghub-api '{}' for local version {}",
+		connection.id, bin, LOCAL_VERSION
+	);
+	let install_source = remote_install_source(app)
+		.map(|source| deployable_install_source(&runner, connection, source))
+		.transpose()?;
+	match &install_source {
+		Some(source) => info!(
+			"remote '{}': install source resolved to {}",
+			connection.id,
+			install_source_summary(source)
+		),
+		None => info!(
+			"remote '{}': no install source available; probe only",
+			connection.id
+		),
+	}
 	let test = ensure_remote_api(
 		&runner,
 		connection,
 		LOCAL_VERSION,
 		install_source.as_ref(),
 	)?;
+	info!(
+		"remote '{}': aghub-api ensure finished: version={:?}, \
+		 compatible={}, install_attempted={}, install_succeeded={}",
+		connection.id,
+		test.api_version,
+		test.compatible,
+		test.install_attempted,
+		test.install_succeeded
+	);
 	if !test.compatible {
 		return Err(RemoteError::Incompatible {
 			remote_version: test.api_version,
 		});
 	}
 
+	let supports_credential_forwarding = test.supports_credential_forwarding;
 	let started = start_remote(
 		&runner,
 		connection,
@@ -452,12 +605,16 @@ fn bring_up(
 		PORT_POLL_DELAY,
 	)?;
 
-	finish_bring_up(app, connection, started)
+	finish_bring_up(app, connection, started, supports_credential_forwarding)
 }
 
 /// Tail of the bring-up shared by [`connect_remote`] and
 /// [`force_redeploy_remote`]: allocate a local port, spawn the ssh tunnel,
 /// settle-check it, start the watcher, and return the [`RemoteHandle`].
+///
+/// `supports_credential_forwarding` is carried in from the bring-up probe so
+/// the stored handle (and thus the frontend) learns the capability AT THE SAME
+/// TIME as the tunnel port.
 ///
 /// **Invariant:** on entry the remote server is already running, so every early
 /// return MUST guarded-kill it (the `RemoteHandle` is only stored by the caller
@@ -466,6 +623,7 @@ fn finish_bring_up(
 	app: &AppHandle,
 	connection: &Connection,
 	started: StartedServer,
+	supports_credential_forwarding: bool,
 ) -> Result<RemoteHandle, RemoteError> {
 	let runner = SystemRunner;
 
@@ -531,6 +689,7 @@ fn finish_bring_up(
 		tunnel,
 		remote_pid: started.remote_pid,
 		local_port,
+		supports_credential_forwarding,
 		connection: connection.clone(),
 		intentional,
 	})
@@ -556,6 +715,7 @@ fn force_redeploy(
 		});
 	}
 
+	let supports_credential_forwarding = test.supports_credential_forwarding;
 	let bin = resolved_path(connection);
 	let started = start_remote(
 		&runner,
@@ -565,7 +725,7 @@ fn force_redeploy(
 		PORT_POLL_DELAY,
 	)?;
 
-	finish_bring_up(app, connection, started)
+	finish_bring_up(app, connection, started, supports_credential_forwarding)
 }
 
 /// Resolve the bundled, version-locked `aghub-api` shipped as a Tauri
@@ -591,6 +751,7 @@ fn pick_install_source(
 	env_binary: Option<String>,
 	git_url: Option<String>,
 	git_branch: Option<String>,
+	git_tag: Option<String>,
 ) -> Option<RemoteInstallSource> {
 	if let Some(path) = bundled {
 		return Some(RemoteInstallSource::LocalBinary(path));
@@ -607,6 +768,7 @@ fn pick_install_source(
 	Some(RemoteInstallSource::CargoGit {
 		url,
 		branch: git_branch,
+		tag: git_tag,
 	})
 }
 
@@ -618,15 +780,85 @@ fn pick_install_source(
 fn remote_install_source(app: &AppHandle) -> Option<RemoteInstallSource> {
 	let bundled = bundled_api_path(app);
 	let env_binary = std::env::var("AGHUB_REMOTE_API_BINARY").ok();
-	let git_url = std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
+	pick_install_source(
+		bundled,
+		env_binary,
+		remote_git_url(),
+		remote_git_branch(),
+		remote_git_tag(),
+	)
+}
+
+fn install_source_summary(source: &RemoteInstallSource) -> String {
+	match source {
+		RemoteInstallSource::LocalBinary(_) => "local-binary".to_string(),
+		RemoteInstallSource::CargoGit { url, branch, tag } => {
+			format!("cargo-git url={url} branch={branch:?} tag={tag:?}")
+		}
+		RemoteInstallSource::ReleaseDeb { url } => {
+			format!("release-deb url={url}")
+		}
+	}
+}
+
+fn remote_release_deb_install_source(
+	probed: &Option<(String, String)>,
+) -> Option<RemoteInstallSource> {
+	let (os, arch) = probed.as_ref()?;
+	let deb_arch = release_deb_arch(os, arch)?;
+	Some(RemoteInstallSource::ReleaseDeb {
+		url: release_deb_url(LOCAL_VERSION, deb_arch),
+	})
+}
+
+fn release_deb_arch(os: &str, arch: &str) -> Option<&'static str> {
+	if os != "linux" {
+		return None;
+	}
+	match arch {
+		"x86_64" | "amd64" => Some("amd64"),
+		_ => None,
+	}
+}
+
+fn release_deb_url(version: &str, deb_arch: &str) -> String {
+	format!(
+		"{DEFAULT_REMOTE_RELEASE_BASE_URL}/v{version}/aghub_{version}_{deb_arch}.deb"
+	)
+}
+
+fn remote_git_install_source() -> Option<RemoteInstallSource> {
+	let url = remote_git_url()?;
+	Some(RemoteInstallSource::CargoGit {
+		url,
+		branch: remote_git_branch(),
+		tag: remote_git_tag(),
+	})
+}
+
+fn remote_git_url() -> Option<String> {
+	std::env::var("AGHUB_REMOTE_INSTALL_GIT_URL")
 		.ok()
 		.filter(|s| !s.trim().is_empty())
-		.or_else(|| git_output(&["remote", "get-url", "origin"]));
-	let git_branch = std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
+		.or_else(|| git_output(&["remote", "get-url", "origin"]))
+		.or_else(|| Some(DEFAULT_REMOTE_INSTALL_GIT_URL.to_string()))
+}
+
+fn remote_git_branch() -> Option<String> {
+	std::env::var("AGHUB_REMOTE_INSTALL_GIT_BRANCH")
 		.ok()
 		.filter(|s| !s.trim().is_empty())
-		.or_else(|| git_output(&["branch", "--show-current"]));
-	pick_install_source(bundled, env_binary, git_url, git_branch)
+		.or_else(|| git_output(&["branch", "--show-current"]))
+}
+
+fn remote_git_tag() -> Option<String> {
+	if remote_git_branch().is_some() {
+		return None;
+	}
+	std::env::var("AGHUB_REMOTE_INSTALL_GIT_TAG")
+		.ok()
+		.filter(|s| !s.trim().is_empty())
+		.or_else(|| Some(format!("v{LOCAL_VERSION}")))
 }
 
 fn git_output(args: &[&str]) -> Option<String> {
@@ -797,6 +1029,7 @@ mod tests {
 			Some("/dev/override/aghub-api".to_string()),
 			Some("https://github.com/audichuang/aghub.git".to_string()),
 			Some("main".to_string()),
+			None,
 		);
 		assert_eq!(
 			src,
@@ -813,6 +1046,7 @@ mod tests {
 			None,
 			Some("/dev/override/aghub-api".to_string()),
 			Some("https://example.com/aghub.git".to_string()),
+			None,
 			None,
 		);
 		assert_eq!(
@@ -831,12 +1065,14 @@ mod tests {
 			None,
 			Some("https://example.com/aghub.git".to_string()),
 			Some("feat/x".to_string()),
+			None,
 		);
 		assert_eq!(
 			src,
 			Some(RemoteInstallSource::CargoGit {
 				url: "https://example.com/aghub.git".to_string(),
 				branch: Some("feat/x".to_string()),
+				tag: None,
 			}),
 			"cargo-git is the last resort"
 		);
@@ -844,7 +1080,7 @@ mod tests {
 
 	#[test]
 	fn pick_source_is_none_when_nothing_resolves() {
-		assert_eq!(pick_install_source(None, None, None, None), None);
+		assert_eq!(pick_install_source(None, None, None, None, None), None);
 	}
 
 	#[test]
@@ -856,14 +1092,80 @@ mod tests {
 			Some("   ".to_string()),
 			Some("https://example.com/aghub.git".to_string()),
 			None,
+			None,
 		);
 		assert_eq!(
 			src,
 			Some(RemoteInstallSource::CargoGit {
 				url: "https://example.com/aghub.git".to_string(),
 				branch: None,
+				tag: None,
 			}),
 			"a blank env binary is ignored, falling through to git"
 		);
+	}
+
+	#[test]
+	fn release_deb_source_targets_linux_x86_64_release_asset() {
+		let source = remote_release_deb_install_source(&Some((
+			"linux".to_string(),
+			"x86_64".to_string(),
+		)));
+		assert_eq!(
+			source,
+			Some(RemoteInstallSource::ReleaseDeb {
+				url: release_deb_url(LOCAL_VERSION, "amd64"),
+			})
+		);
+	}
+
+	#[test]
+	fn release_deb_source_ignores_unsupported_platforms() {
+		assert_eq!(
+			remote_release_deb_install_source(&Some((
+				"darwin".to_string(),
+				"x86_64".to_string(),
+			))),
+			None
+		);
+		assert_eq!(
+			remote_release_deb_install_source(&Some((
+				"linux".to_string(),
+				"aarch64".to_string(),
+			))),
+			None
+		);
+	}
+
+	// --- ConnectResult wire contract --------------------------------------
+
+	/// `connect_remote`/`force_redeploy_remote` now return the capability
+	/// ALONGSIDE the port, so the frontend learns `supportsCredentialForwarding`
+	/// at the same time as `baseUrl` (closing the gating race). The serialized
+	/// shape must be the camelCase `{ port, supportsCredentialForwarding }` the
+	/// hand-written TS `ConnectResult` binds to.
+	#[test]
+	fn connect_result_serializes_port_and_capability_camel_case() {
+		let json = serde_json::to_value(ConnectResult {
+			port: 51234,
+			supports_credential_forwarding: true,
+		})
+		.expect("ConnectResult should serialize");
+		assert_eq!(json["port"], 51234);
+		assert_eq!(json["supportsCredentialForwarding"], true);
+		// No snake_case key leaks across IPC.
+		assert!(json.get("supports_credential_forwarding").is_none());
+	}
+
+	/// Fail-safe: a non-forwarding remote carries `false` through verbatim, so
+	/// the frontend gate stays off for an old/uncapable binary.
+	#[test]
+	fn connect_result_carries_failsafe_false_capability() {
+		let json = serde_json::to_value(ConnectResult {
+			port: 7000,
+			supports_credential_forwarding: false,
+		})
+		.expect("ConnectResult should serialize");
+		assert_eq!(json["supportsCredentialForwarding"], false);
 	}
 }

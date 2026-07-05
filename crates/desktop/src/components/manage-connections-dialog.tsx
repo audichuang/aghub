@@ -1,5 +1,6 @@
 import {
 	ArrowLeftStartOnRectangleIcon,
+	ArrowPathIcon,
 	CheckCircleIcon,
 	ChevronDownIcon,
 	ExclamationTriangleIcon,
@@ -8,6 +9,7 @@ import {
 	XCircleIcon,
 } from "@heroicons/react/24/solid";
 import {
+	AlertDialog,
 	Button,
 	Description,
 	Dropdown,
@@ -17,12 +19,14 @@ import {
 	Label,
 	Modal,
 	NumberField,
+	ScrollShadow,
+	Spinner,
 	TextField,
 	toast,
 } from "@heroui/react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
-import { type Key, useMemo, useState } from "react";
+import { type Key, useCallback, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TestResult } from "../contexts/connection";
 import { useConnection } from "../hooks/use-connection";
@@ -59,64 +63,125 @@ interface TestStep {
 }
 
 /** Format a TestResult into a translated toast message. */
+function safeToast(action: () => void): void {
+	try {
+		action();
+	} catch {
+		// HeroUI toast view transitions can fail while the app window is hidden.
+	}
+}
+
 function toastTestResult(
 	result: TestResult,
 	t: (key: string, opts?: Record<string, unknown>) => string,
+	mode: "test" | "reinstall" = "test",
 ): void {
 	if (!result.reachable) {
-		toast.danger(
-			t("connTestUnreachable", {
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.danger(
+				t("connTestUnreachable", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
 	if (result.installAttempted && !result.installSucceeded) {
-		toast.danger(
-			t("connTestInstallFailed", {
-				message: remoteOutputSummary(
-					result.installMessage ?? result.message,
-				),
-			}),
+		safeToast(() =>
+			toast.danger(
+				t("connTestInstallFailed", {
+					message: remoteOutputSummary(
+						result.installMessage ?? result.message,
+					),
+				}),
+			),
 		);
 		return;
 	}
 	if (!result.apiPresent) {
-		toast.danger(
-			t("connTestApiMissing", {
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.danger(
+				t("connTestApiMissing", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
 	if (!result.compatible) {
-		toast.warning(
-			t("connTestIncompatible", {
-				version: result.apiVersion ?? "?",
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.warning(
+				t("connTestIncompatible", {
+					version: result.apiVersion ?? "?",
+					message: remoteOutputSummary(result.message),
+				}),
+			),
+		);
+		return;
+	}
+	if (mode === "reinstall") {
+		safeToast(() =>
+			toast.success(
+				t("connReinstalledOk", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
 	if (result.installAttempted && result.installSucceeded) {
-		toast.success(
-			t("connTestInstalledOk", {
-				message: remoteOutputSummary(result.message),
-			}),
+		safeToast(() =>
+			toast.success(
+				t("connTestInstalledOk", {
+					message: remoteOutputSummary(result.message),
+				}),
+			),
 		);
 		return;
 	}
-	toast.success(
-		t("connTestReachableOk", {
-			message: remoteOutputSummary(result.message),
-		}),
+	safeToast(() =>
+		toast.success(
+			t("connTestReachableOk", {
+				message: remoteOutputSummary(result.message),
+			}),
+		),
 	);
+}
+
+function formatInvokeError(error: unknown): string {
+	if (error instanceof Error) return error.message;
+	if (typeof error === "string") return error;
+	if (error == null || typeof error !== "object") return String(error);
+
+	const payload = error as {
+		message?: unknown;
+		stderr?: unknown;
+		installHint?: unknown;
+		hint?: unknown;
+	};
+	const message = [
+		payload.message,
+		payload.stderr,
+		payload.installHint,
+		payload.hint,
+	].find((value): value is string => {
+		return typeof value === "string" && value.trim() !== "";
+	});
+	if (message != null) return message;
+
+	try {
+		return JSON.stringify(error);
+	} catch {
+		return String(error);
+	}
 }
 
 function buildTestSteps(
 	result: TestResult,
 	t: (key: string, opts?: Record<string, unknown>) => string,
+	localVersion?: string,
 ): TestStep[] {
+	const expectedVersion = localVersion ?? "?";
 	const apiStatus: TestStepStatus = !result.reachable
 		? "muted"
 		: result.apiPresent
@@ -130,9 +195,14 @@ function buildTestSteps(
 		: result.apiPresent
 			? result.apiVersion == null
 				? t("connTestStepApiPresent")
-				: t("connTestStepApiVersion", {
-						version: result.apiVersion,
-					})
+				: result.compatible
+					? t("connTestStepApiCompatibleVersion", {
+							version: result.apiVersion,
+						})
+					: t("connTestStepApiIncompatibleVersion", {
+							version: result.apiVersion,
+							expected: expectedVersion,
+						})
 			: t("connTestStepApiMissing");
 
 	const installStatus: TestStepStatus = !result.reachable
@@ -141,7 +211,7 @@ function buildTestSteps(
 			? result.installSucceeded
 				? "ok"
 				: "error"
-			: result.apiPresent
+			: result.apiPresent && result.compatible
 				? "muted"
 				: "warning";
 
@@ -151,9 +221,13 @@ function buildTestSteps(
 			? result.installSucceeded
 				? t("connTestStepInstallOk")
 				: remoteOutputSummary(result.installMessage ?? result.message)
-			: result.apiPresent
+			: result.apiPresent && result.compatible
 				? t("connTestStepInstallNotNeeded")
-				: t("connTestStepInstallNotRun");
+				: result.apiPresent
+					? t("connTestStepInstallNeedsUpdate", {
+							expected: expectedVersion,
+						})
+					: t("connTestStepInstallNotRun");
 
 	return [
 		{
@@ -204,17 +278,26 @@ function TestStepIcon({ status }: { status: TestStepStatus }) {
 function TestResultPanel({
 	result,
 	t,
+	localVersion,
 }: {
 	result: TestResult;
 	t: (key: string, opts?: Record<string, unknown>) => string;
+	localVersion?: string;
 }) {
-	const steps = buildTestSteps(result, t);
+	const steps = buildTestSteps(result, t, localVersion);
 
 	return (
 		<div className="rounded-md border border-border bg-surface-secondary px-3 py-2.5">
 			<p className="text-sm font-medium text-foreground">
 				{t("connTestResultTitle")}
 			</p>
+			{localVersion != null && (
+				<p className="mt-0.5 text-xs text-muted">
+					{t("connTestExpectedApiVersion", {
+						version: localVersion,
+					})}
+				</p>
+			)}
 			<div className="mt-2 flex flex-col gap-2">
 				{steps.map((step) => (
 					<div key={step.key} className="flex min-w-0 gap-2">
@@ -234,6 +317,32 @@ function TestResultPanel({
 	);
 }
 
+function ReinstallProgressPanel({
+	t,
+}: {
+	t: (key: string, opts?: Record<string, unknown>) => string;
+}) {
+	return (
+		<div className="rounded-md border border-warning/40 bg-warning/10 px-3 py-2.5">
+			<div className="flex gap-2">
+				<Spinner
+					size="sm"
+					color="current"
+					className="mt-0.5 shrink-0 text-warning"
+				/>
+				<div className="min-w-0">
+					<p className="text-sm font-medium text-foreground">
+						{t("connReinstallProgressTitle")}
+					</p>
+					<p className="break-words text-xs text-muted">
+						{t("connReinstallProgressDetail")}
+					</p>
+				</div>
+			</div>
+		</div>
+	);
+}
+
 export function ManageConnectionsDialog({
 	isOpen,
 	onClose,
@@ -247,6 +356,7 @@ export function ManageConnectionsDialog({
 		removeConnection,
 		testConnection,
 		disconnect,
+		reinstallRemoteApi,
 	} = useConnection();
 
 	// Only user remotes are editable; the implicit Local connection is not.
@@ -263,12 +373,19 @@ export function ManageConnectionsDialog({
 	// Validation errors are only shown after a save/test attempt.
 	const [showErrors, setShowErrors] = useState(false);
 	const [testResult, setTestResult] = useState<TestResult | null>(null);
+	const [confirmReinstallOpen, setConfirmReinstallOpen] = useState(false);
 
 	const { data: sshConfigHosts = [], isPending: sshHostsLoading } = useQuery<
 		SshConfigHost[]
 	>({
 		queryKey: ["ssh-config-hosts"],
 		queryFn: () => invoke<SshConfigHost[]>("list_ssh_config_hosts"),
+		enabled: isOpen,
+	});
+
+	const { data: localApiVersion } = useQuery<string>({
+		queryKey: ["local-api-version"],
+		queryFn: () => invoke<string>("local_api_version"),
 		enabled: isOpen,
 	});
 
@@ -285,6 +402,7 @@ export function ManageConnectionsDialog({
 		setForm(EMPTY_CONNECTION_FORM);
 		setShowErrors(false);
 		setTestResult(null);
+		setConfirmReinstallOpen(false);
 	};
 
 	const selectSshAlias = (key: Key) => {
@@ -314,12 +432,18 @@ export function ManageConnectionsDialog({
 			return "add" as const;
 		},
 		onSuccess: (kind) => {
-			toast.success(t(kind === "update" ? "connUpdated" : "connAdded"));
+			safeToast(() =>
+				toast.success(
+					t(kind === "update" ? "connUpdated" : "connAdded"),
+				),
+			);
 			resetForm();
 		},
 		onError: (err) => {
-			toast.danger(
-				err instanceof Error ? err.message : t("connSaveError"),
+			safeToast(() =>
+				toast.danger(
+					err instanceof Error ? err.message : t("connSaveError"),
+				),
 			);
 		},
 	});
@@ -334,14 +458,16 @@ export function ManageConnectionsDialog({
 			return removeConnection(id);
 		},
 		onSuccess: (_data, id) => {
-			toast.success(t("connRemoved"));
+			safeToast(() => toast.success(t("connRemoved")));
 			if (editingId === id) {
 				resetForm();
 			}
 		},
 		onError: (err) => {
-			toast.danger(
-				err instanceof Error ? err.message : t("connRemoveError"),
+			safeToast(() =>
+				toast.danger(
+					err instanceof Error ? err.message : t("connRemoveError"),
+				),
 			);
 		},
 	});
@@ -349,30 +475,57 @@ export function ManageConnectionsDialog({
 	const disconnectMutation = useMutation({
 		mutationFn: (id: string) => disconnect(id),
 		onSuccess: () => {
-			toast.success(t("connDisconnect"));
+			safeToast(() => toast.success(t("connDisconnect")));
 		},
 		onError: (err) => {
-			toast.danger(
-				err instanceof Error ? err.message : t("connRemoveError"),
+			safeToast(() =>
+				toast.danger(
+					err instanceof Error ? err.message : t("connRemoveError"),
+				),
 			);
 		},
 	});
 
+	const buildPayload = () => {
+		const payload = formToConnection(form);
+		return { ...payload, id: editingId ?? "test" };
+	};
+
 	const testMutation = useMutation({
-		mutationFn: () => {
-			const payload = formToConnection(form);
-			return testConnection({ ...payload, id: editingId ?? "test" });
-		},
+		mutationFn: () => testConnection(buildPayload()),
 		onSuccess: (result) => {
 			setTestResult(result);
 			toastTestResult(result, t);
 		},
 		onError: (err) => {
 			setTestResult(null);
-			toast.danger(
-				t("connTestFailed", {
-					message: err instanceof Error ? err.message : String(err),
-				}),
+			safeToast(() =>
+				toast.danger(
+					t("connTestFailed", {
+						message:
+							err instanceof Error ? err.message : String(err),
+					}),
+				),
+			);
+		},
+	});
+
+	const reinstallMutation = useMutation({
+		mutationFn: () => reinstallRemoteApi(buildPayload()),
+		onSuccess: (result) => {
+			setConfirmReinstallOpen(false);
+			setTestResult(result);
+			toastTestResult(result, t, "reinstall");
+		},
+		onError: (err) => {
+			setConfirmReinstallOpen(false);
+			setTestResult(null);
+			safeToast(() =>
+				toast.danger(
+					t("connReinstallFailed", {
+						message: formatInvokeError(err),
+					}),
+				),
 			);
 		},
 	});
@@ -390,11 +543,32 @@ export function ManageConnectionsDialog({
 		testMutation.mutate();
 	};
 
+	const handleReinstallRequest = () => {
+		setShowErrors(true);
+		if (!valid) return;
+		setConfirmReinstallOpen(true);
+	};
+
+	const handleReinstall = () => {
+		setConfirmReinstallOpen(false);
+		setTestResult(null);
+		reinstallMutation.mutate();
+	};
+
+	// Bring the result/progress panel into view the moment it mounts, so the
+	// outcome is visible without manually scrolling the dialog body. A stable
+	// callback ref only fires on mount/unmount — and the panel unmounts on any
+	// field edit (setField clears testResult), so each fresh test re-triggers it.
+	const scrollResultIntoView = useCallback((el: HTMLDivElement | null) => {
+		el?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+	}, []);
+
 	const isBusy =
 		saveMutation.isPending ||
 		removeMutation.isPending ||
 		testMutation.isPending ||
-		disconnectMutation.isPending;
+		disconnectMutation.isPending ||
+		reinstallMutation.isPending;
 
 	const handleOpenChange = (open: boolean) => {
 		if (!open) {
@@ -406,258 +580,316 @@ export function ManageConnectionsDialog({
 	return (
 		<Modal.Backdrop isOpen={isOpen} onOpenChange={handleOpenChange}>
 			<Modal.Container>
-				<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-md sm:max-w-lg">
+				<Modal.Dialog className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden sm:max-w-lg">
 					<Modal.CloseTrigger />
 					<Modal.Header>
 						<Modal.Heading>{t("connManageTitle")}</Modal.Heading>
 					</Modal.Header>
 
-					<Modal.Body className="flex flex-col gap-5 p-4">
-						<div className="flex flex-col gap-2">
-							{remotes.length === 0 ? (
-								<p className="text-sm text-muted">
-									{t("connNoRemotes")}
-								</p>
-							) : (
-								remotes.map((connection) => (
-									<div
-										key={connection.id}
-										className={cn(
-											`
+					<Modal.Body className="flex min-h-0 flex-1 flex-col p-0">
+						<ScrollShadow
+							hideScrollBar
+							size={24}
+							className="flex min-h-0 flex-1 flex-col gap-5 p-4"
+						>
+							<div className="flex flex-col gap-2">
+								{remotes.length === 0 ? (
+									<p className="text-sm text-muted">
+										{t("connNoRemotes")}
+									</p>
+								) : (
+									remotes.map((connection) => (
+										<div
+											key={connection.id}
+											className={cn(
+												`
 											flex items-center justify-between gap-2
 											rounded-md border border-border px-3 py-2
 											`,
-											editingId === connection.id &&
-												"border-accent",
-										)}
-									>
-										<div className="min-w-0">
-											<p className="truncate text-sm font-medium text-foreground">
-												{connection.label}
-											</p>
-											<p className="truncate text-xs text-muted">
-												{connection.sshTarget}
-											</p>
-										</div>
-										<div className="flex shrink-0 gap-1">
-											{connection.id === activeId && (
+												editingId === connection.id &&
+													"border-accent",
+											)}
+										>
+											<div className="min-w-0">
+												<p className="truncate text-sm font-medium text-foreground">
+													{connection.label}
+												</p>
+												<p className="truncate text-xs text-muted">
+													{connection.sshTarget}
+												</p>
+											</div>
+											<div className="flex shrink-0 gap-1">
+												{connection.id === activeId && (
+													<Button
+														isIconOnly
+														size="sm"
+														variant="tertiary"
+														aria-label={
+															disconnectMutation.isPending
+																? t(
+																		"connDisconnecting",
+																	)
+																: t(
+																		"connDisconnect",
+																	)
+														}
+														isDisabled={isBusy}
+														onPress={() =>
+															disconnectMutation.mutate(
+																connection.id,
+															)
+														}
+													>
+														<ArrowLeftStartOnRectangleIcon className="size-4 text-danger" />
+													</Button>
+												)}
 												<Button
 													isIconOnly
 													size="sm"
 													variant="tertiary"
-													aria-label={
-														disconnectMutation.isPending
-															? t(
-																	"connDisconnecting",
-																)
-															: t(
-																	"connDisconnect",
-																)
-													}
+													aria-label={t("connEdit")}
 													isDisabled={isBusy}
 													onPress={() =>
-														disconnectMutation.mutate(
+														startEdit(connection)
+													}
+												>
+													<PencilSquareIcon className="size-4" />
+												</Button>
+												<Button
+													isIconOnly
+													size="sm"
+													variant="tertiary"
+													aria-label={t("connRemove")}
+													isDisabled={isBusy}
+													onPress={() =>
+														removeMutation.mutate(
 															connection.id,
 														)
 													}
 												>
-													<ArrowLeftStartOnRectangleIcon className="size-4 text-danger" />
+													<TrashIcon className="size-4 text-danger" />
 												</Button>
-											)}
-											<Button
-												isIconOnly
-												size="sm"
-												variant="tertiary"
-												aria-label={t("connEdit")}
-												isDisabled={isBusy}
-												onPress={() =>
-													startEdit(connection)
-												}
-											>
-												<PencilSquareIcon className="size-4" />
-											</Button>
-											<Button
-												isIconOnly
-												size="sm"
-												variant="tertiary"
-												aria-label={t("connRemove")}
-												isDisabled={isBusy}
-												onPress={() =>
-													removeMutation.mutate(
-														connection.id,
-													)
-												}
-											>
-												<TrashIcon className="size-4 text-danger" />
-											</Button>
+											</div>
 										</div>
-									</div>
-								))
-							)}
-						</div>
-
-						<div className="flex flex-col gap-3 border-t border-border pt-4">
-							<p className="text-sm font-medium text-foreground">
-								{editingId !== null
-									? t("connEditConnection")
-									: t("connAddConnection")}
-							</p>
-
-							<TextField
-								isRequired
-								isInvalid={showErrors && errors.label != null}
-								value={form.label}
-								onChange={(value) => setField("label", value)}
-							>
-								<Label>{t("connFieldLabel")}</Label>
-								<Input
-									placeholder={t("connFieldLabelPlaceholder")}
-								/>
-								{showErrors && errors.label != null && (
-									<FieldError>{t(errors.label)}</FieldError>
+									))
 								)}
-							</TextField>
+							</div>
 
-							<div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+							<div className="flex flex-col gap-3 border-t border-border pt-4">
+								<p className="text-sm font-medium text-foreground">
+									{editingId !== null
+										? t("connEditConnection")
+										: t("connAddConnection")}
+								</p>
+
 								<TextField
 									isRequired
 									isInvalid={
-										showErrors && errors.sshTarget != null
+										showErrors && errors.label != null
 									}
-									value={form.sshTarget}
+									value={form.label}
 									onChange={(value) =>
-										setField("sshTarget", value)
+										setField("label", value)
 									}
 								>
-									<Label>{t("connFieldSshTarget")}</Label>
+									<Label>{t("connFieldLabel")}</Label>
 									<Input
 										placeholder={t(
-											"connFieldSshTargetPlaceholder",
+											"connFieldLabelPlaceholder",
 										)}
 									/>
-									{showErrors && errors.sshTarget != null && (
+									{showErrors && errors.label != null && (
 										<FieldError>
-											{t(errors.sshTarget)}
+											{t(errors.label)}
 										</FieldError>
 									)}
 								</TextField>
 
-								<Dropdown>
-									<Button
-										variant="secondary"
-										className="w-full sm:w-auto"
-										aria-label={t("connChooseSshAlias")}
-										isDisabled={
-											isBusy ||
-											sshHostsLoading ||
-											sshConfigHosts.length === 0
+								<div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end">
+									<TextField
+										isRequired
+										isInvalid={
+											showErrors &&
+											errors.sshTarget != null
+										}
+										value={form.sshTarget}
+										onChange={(value) =>
+											setField("sshTarget", value)
 										}
 									>
-										<span className="truncate">
-											{sshConfigHosts.length === 0
-												? t("connNoSshAliases")
-												: t("connChooseSshAlias")}
-										</span>
-										<ChevronDownIcon className="size-4 shrink-0 text-muted" />
-									</Button>
-									<Dropdown.Popover className="min-w-64 max-w-80">
-										<Dropdown.Menu
-											onAction={selectSshAlias}
+										<Label>{t("connFieldSshTarget")}</Label>
+										<Input
+											placeholder={t(
+												"connFieldSshTargetPlaceholder",
+											)}
+										/>
+										{showErrors &&
+											errors.sshTarget != null && (
+												<FieldError>
+													{t(errors.sshTarget)}
+												</FieldError>
+											)}
+									</TextField>
+
+									<Dropdown>
+										<Button
+											variant="secondary"
+											className="w-full sm:w-auto"
+											aria-label={t("connChooseSshAlias")}
+											isDisabled={
+												isBusy ||
+												sshHostsLoading ||
+												sshConfigHosts.length === 0
+											}
 										>
-											<Dropdown.Section>
-												<Header>
-													{t("connSshAliases")}
-												</Header>
-												{sshConfigHosts.map((host) => (
-													<Dropdown.Item
-														key={host.alias}
-														id={host.alias}
-														textValue={host.alias}
-													>
-														<div className="min-w-0">
-															<Label>
-																{host.alias}
-															</Label>
-															{host.hostName !=
-																null && (
-																<Description className="truncate">
-																	{
-																		host.hostName
-																	}
-																</Description>
-															)}
-														</div>
-													</Dropdown.Item>
-												))}
-											</Dropdown.Section>
-										</Dropdown.Menu>
-									</Dropdown.Popover>
-								</Dropdown>
-							</div>
+											<span className="truncate">
+												{sshConfigHosts.length === 0
+													? t("connNoSshAliases")
+													: t("connChooseSshAlias")}
+											</span>
+											<ChevronDownIcon className="size-4 shrink-0 text-muted" />
+										</Button>
+										<Dropdown.Popover className="min-w-64 max-w-80">
+											<Dropdown.Menu
+												onAction={selectSshAlias}
+											>
+												<Dropdown.Section>
+													<Header>
+														{t("connSshAliases")}
+													</Header>
+													{sshConfigHosts.map(
+														(host) => (
+															<Dropdown.Item
+																key={host.alias}
+																id={host.alias}
+																textValue={
+																	host.alias
+																}
+															>
+																<div className="min-w-0">
+																	<Label>
+																		{
+																			host.alias
+																		}
+																	</Label>
+																	{host.hostName !=
+																		null && (
+																		<Description className="truncate">
+																			{
+																				host.hostName
+																			}
+																		</Description>
+																	)}
+																</div>
+															</Dropdown.Item>
+														),
+													)}
+												</Dropdown.Section>
+											</Dropdown.Menu>
+										</Dropdown.Popover>
+									</Dropdown>
+								</div>
 
-							<TextField
-								value={form.user}
-								onChange={(value) => setField("user", value)}
-							>
-								<Label>{t("connFieldUser")}</Label>
-								<Input
-									placeholder={t("connFieldUserPlaceholder")}
-								/>
-							</TextField>
+								<TextField
+									value={form.user}
+									onChange={(value) =>
+										setField("user", value)
+									}
+								>
+									<Label>{t("connFieldUser")}</Label>
+									<Input
+										placeholder={t(
+											"connFieldUserPlaceholder",
+										)}
+									/>
+								</TextField>
 
-							<NumberField
-								minValue={1}
-								maxValue={65535}
-								isInvalid={showErrors && errors.port != null}
-								value={
-									form.port === ""
-										? Number.NaN
-										: Number(form.port)
-								}
-								onChange={(value) =>
-									setField(
-										"port",
-										Number.isNaN(value)
-											? ""
-											: String(value),
-									)
-								}
-							>
-								<Label>{t("connFieldPort")}</Label>
-								<NumberField.Group>
-									<NumberField.DecrementButton />
-									<NumberField.Input />
-									<NumberField.IncrementButton />
-								</NumberField.Group>
-								{showErrors && errors.port != null && (
-									<FieldError>{t(errors.port)}</FieldError>
-								)}
-							</NumberField>
-
-							<TextField
-								value={form.remoteAghubPath}
-								onChange={(value) =>
-									setField("remoteAghubPath", value)
-								}
-							>
-								<Label>{t("connFieldRemotePath")}</Label>
-								<Input
-									placeholder={t(
-										"connFieldRemotePathPlaceholder",
+								<NumberField
+									minValue={1}
+									maxValue={65535}
+									className="sm:max-w-[12rem]"
+									isInvalid={
+										showErrors && errors.port != null
+									}
+									value={
+										form.port === ""
+											? Number.NaN
+											: Number(form.port)
+									}
+									onChange={(value) =>
+										setField(
+											"port",
+											Number.isNaN(value)
+												? ""
+												: String(value),
+										)
+									}
+								>
+									<Label>{t("connFieldPort")}</Label>
+									<NumberField.Group>
+										<NumberField.DecrementButton />
+										<NumberField.Input
+											placeholder={t(
+												"connFieldPortPlaceholder",
+											)}
+										/>
+										<NumberField.IncrementButton />
+									</NumberField.Group>
+									{showErrors && errors.port != null && (
+										<FieldError>
+											{t(errors.port)}
+										</FieldError>
 									)}
-								/>
-								<Description>
-									{t("connFieldRemotePathPlaceholder")}
-								</Description>
-							</TextField>
+								</NumberField>
 
-							{testResult != null && (
-								<TestResultPanel result={testResult} t={t} />
-							)}
-						</div>
+								<TextField
+									value={form.remoteAghubPath}
+									onChange={(value) =>
+										setField("remoteAghubPath", value)
+									}
+								>
+									<Label>{t("connFieldRemotePath")}</Label>
+									<Input
+										placeholder={t(
+											"connFieldRemotePathPlaceholder",
+										)}
+									/>
+								</TextField>
+
+								<div className="flex justify-end">
+									<Button
+										variant="tertiary"
+										size="sm"
+										className="text-danger"
+										isDisabled={isBusy}
+										onPress={handleReinstallRequest}
+									>
+										<ArrowPathIcon className="size-4" />
+										{reinstallMutation.isPending
+											? t("connReinstalling")
+											: t("connForceReinstall")}
+									</Button>
+								</div>
+
+								{(reinstallMutation.isPending ||
+									testResult != null) && (
+									<div ref={scrollResultIntoView}>
+										{reinstallMutation.isPending ? (
+											<ReinstallProgressPanel t={t} />
+										) : testResult != null ? (
+											<TestResultPanel
+												result={testResult}
+												t={t}
+												localVersion={localApiVersion}
+											/>
+										) : null}
+									</div>
+								)}
+							</div>
+						</ScrollShadow>
 					</Modal.Body>
 
-					<Modal.Footer className="flex-wrap">
+					<Modal.Footer>
 						<Button
 							variant="secondary"
 							isDisabled={isBusy}
@@ -671,6 +903,60 @@ export function ManageConnectionsDialog({
 							{t("connSave")}
 						</Button>
 					</Modal.Footer>
+
+					<AlertDialog.Backdrop
+						isOpen={confirmReinstallOpen}
+						onOpenChange={setConfirmReinstallOpen}
+					>
+						<AlertDialog.Container>
+							<AlertDialog.Dialog className="sm:max-w-[420px]">
+								<AlertDialog.CloseTrigger />
+								<AlertDialog.Header>
+									<AlertDialog.Icon status="danger">
+										<ExclamationTriangleIcon className="size-5" />
+									</AlertDialog.Icon>
+									<AlertDialog.Heading>
+										{t("connForceReinstallConfirmTitle")}
+									</AlertDialog.Heading>
+								</AlertDialog.Header>
+								<AlertDialog.Body>
+									<p className="text-sm text-muted">
+										{t("connForceReinstallConfirmBody")}
+									</p>
+								</AlertDialog.Body>
+								<AlertDialog.Footer>
+									<Button
+										slot="close"
+										variant="tertiary"
+										onPress={() =>
+											setConfirmReinstallOpen(false)
+										}
+										isDisabled={reinstallMutation.isPending}
+									>
+										{t("cancel")}
+									</Button>
+									<Button
+										variant="danger"
+										onPress={handleReinstall}
+										isDisabled={reinstallMutation.isPending}
+									>
+										{reinstallMutation.isPending ? (
+											<>
+												<Spinner
+													size="sm"
+													color="current"
+													className="mr-2"
+												/>
+												{t("connReinstalling")}
+											</>
+										) : (
+											t("connForceReinstallAction")
+										)}
+									</Button>
+								</AlertDialog.Footer>
+							</AlertDialog.Dialog>
+						</AlertDialog.Container>
+					</AlertDialog.Backdrop>
 				</Modal.Dialog>
 			</Modal.Container>
 		</Modal.Backdrop>

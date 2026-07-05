@@ -8,12 +8,14 @@ import { useTranslation } from "react-i18next";
 import type {
 	ConnectionProviderProps,
 	ConnectionContextValue,
+	ConnectResult,
 	TestResult,
 } from "../contexts/connection";
 import { ConnectionContext } from "../contexts/connection";
 import { ServerContext } from "../contexts/server";
 import {
 	baseUrlFromPort,
+	deriveSupportsCredentialForwarding,
 	LOCAL_CONNECTION,
 	mergeConnections,
 	projectStatus,
@@ -30,8 +32,10 @@ import {
 /**
  * Per-host data query namespaces (roots from requests/keys.ts) that must be
  * dropped when switching the active connection, so one host's data never
- * bleeds into another's. Deliberately excludes ["connections"] and
- * ["server", ...] which are connection-management state, not per-host data.
+ * bleeds into another's. Deliberately excludes ["connections"] and the
+ * ["server", ...] cache; the selected target's server cache is reset
+ * separately so the switch enters a visible bring-up state instead of
+ * rendering against a stale tunnel port.
  */
 const DATA_NAMESPACES = [
 	"skills",
@@ -53,9 +57,213 @@ interface RemoteDisconnectedPayload {
 interface IncompatibleConnectionScreenProps {
 	connection: Connection;
 	remoteVersion: string | null;
-	/** Flip the cached server port so the provider re-renders into the
-	 * connected state (the tunnel is already open by then). */
-	onRedeployed: (port: number) => void;
+	/** Flip the cached server bring-up result so the provider re-renders into
+	 * the connected state (the tunnel is already open by then). Carries the
+	 * forwarding capability so it lands atomically with the port. */
+	onRedeployed: (result: ConnectResult) => void;
+}
+
+interface ConnectionPendingScreenProps {
+	connection: Connection;
+	onUseLocal: () => void;
+}
+
+interface ConnectionErrorScreenProps {
+	connection: Connection;
+	message: string;
+	isRetrying: boolean;
+	onRetry: () => void;
+	onUseLocal: () => void;
+}
+
+function ConnectionPendingScreen({
+	connection,
+	onUseLocal,
+}: ConnectionPendingScreenProps) {
+	const { t } = useTranslation();
+	const [elapsedSeconds, setElapsedSeconds] = useState(0);
+	const isLocal = connection.id === LOCAL_CONNECTION.id;
+	const displayLabel = isLocal ? t("connLocal") : connection.label;
+	const target = isLocal ? "localhost" : connection.sshTarget;
+	const steps = isLocal
+		? [
+				{
+					key: "local-api",
+					label: t("connPendingStepLocalApi"),
+					detail: t("connPendingStepLocalApiDetail"),
+				},
+				{
+					key: "local-data",
+					label: t("connPendingStepData"),
+					detail: t("connPendingStepLocalDataDetail"),
+				},
+			]
+		: [
+				{
+					key: "ssh",
+					label: t("connPendingStepSsh"),
+					detail: t("connPendingStepSshDetail"),
+				},
+				{
+					key: "api",
+					label: t("connPendingStepApi"),
+					detail: t("connPendingStepApiDetail"),
+				},
+				{
+					key: "install",
+					label: t("connPendingStepInstall"),
+					detail: t("connPendingStepInstallDetail"),
+				},
+				{
+					key: "data",
+					label: t("connPendingStepData"),
+					detail: t("connPendingStepRemoteDataDetail"),
+				},
+			];
+
+	useEffect(() => {
+		const startedAt = Date.now();
+		const interval = window.setInterval(() => {
+			setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+		}, 1000);
+		return () => window.clearInterval(interval);
+	}, [connection.id]);
+
+	return (
+		<div className="flex h-screen items-center justify-center bg-background px-6">
+			<div className="w-full max-w-xl rounded-lg border border-border bg-surface px-5 py-5 shadow-sm">
+				<div className="flex items-start gap-4">
+					<div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-md bg-surface-secondary">
+						<Spinner size="sm" />
+					</div>
+					<div className="min-w-0 flex-1">
+						<p className="text-xs font-medium uppercase text-muted">
+							{t("connPendingEyebrow")}
+						</p>
+						<h1 className="mt-1 text-lg font-semibold text-foreground">
+							{isLocal
+								? t("connPendingLocalTitle")
+								: t("connPendingRemoteTitle", {
+										label: displayLabel,
+									})}
+						</h1>
+						<p className="mt-2 text-sm leading-6 text-muted">
+							{isLocal
+								? t("connPendingLocalDescription")
+								: t("connPendingRemoteDescription")}
+						</p>
+					</div>
+				</div>
+
+				<div className="mt-5 grid gap-3 border-t border-border pt-4 text-xs sm:grid-cols-2">
+					<div>
+						<p className="font-medium text-muted">
+							{t("connPendingTarget")}
+						</p>
+						<p className="mt-1 truncate font-mono text-foreground">
+							{target}
+						</p>
+					</div>
+					<div>
+						<p className="font-medium text-muted">
+							{t("connPendingElapsed")}
+						</p>
+						<p className="mt-1 font-mono text-foreground">
+							{t("connPendingElapsedValue", {
+								seconds: elapsedSeconds,
+							})}
+						</p>
+					</div>
+				</div>
+
+				<div className="mt-5 space-y-3">
+					{steps.map((step, index) => (
+						<div key={step.key} className="flex gap-3">
+							<span
+								className="mt-1 flex size-5 shrink-0 items-center justify-center rounded-full border border-border text-[10px] font-medium text-muted"
+								aria-hidden="true"
+							>
+								{index + 1}
+							</span>
+							<div className="min-w-0">
+								<p className="text-sm font-medium text-foreground">
+									{step.label}
+								</p>
+								<p className="mt-0.5 break-words text-xs leading-5 text-muted">
+									{step.detail}
+								</p>
+							</div>
+						</div>
+					))}
+				</div>
+
+				{elapsedSeconds >= 90 && (
+					<div className="mt-5 rounded-md border border-warning/30 bg-warning/10 px-3 py-2 text-xs leading-5 text-warning">
+						{t("connPendingLongWait", {
+							seconds: elapsedSeconds,
+						})}
+					</div>
+				)}
+
+				{!isLocal && (
+					<div className="mt-5 flex justify-end border-t border-border pt-4">
+						<Button variant="tertiary" onPress={onUseLocal}>
+							{t("connUseLocal")}
+						</Button>
+					</div>
+				)}
+			</div>
+		</div>
+	);
+}
+
+function ConnectionErrorScreen({
+	connection,
+	message,
+	isRetrying,
+	onRetry,
+	onUseLocal,
+}: ConnectionErrorScreenProps) {
+	const { t } = useTranslation();
+	const isLocal = connection.id === LOCAL_CONNECTION.id;
+	const displayLabel = isLocal ? t("connLocal") : connection.label;
+
+	return (
+		<div className="flex h-screen items-center justify-center bg-background px-6">
+			<div className="w-full max-w-xl rounded-lg border border-danger/30 bg-surface px-5 py-5 shadow-sm">
+				<p className="text-xs font-medium uppercase text-danger">
+					{t("connStatusError")}
+				</p>
+				<h1 className="mt-1 text-lg font-semibold text-foreground">
+					{t("connErrorTitle", { label: displayLabel })}
+				</h1>
+				<p className="mt-2 break-words text-sm leading-6 text-muted">
+					{message}
+				</p>
+				<div className="mt-5 flex flex-wrap justify-end gap-2 border-t border-border pt-4">
+					{!isLocal && (
+						<Button variant="tertiary" onPress={onUseLocal}>
+							{t("connUseLocal")}
+						</Button>
+					)}
+					<Button
+						variant="primary"
+						onPress={onRetry}
+						isDisabled={isRetrying}
+					>
+						{isRetrying && (
+							<Spinner
+								size="sm"
+								color="current"
+								className="mr-2"
+							/>
+						)}
+						{t("connRetry")}
+					</Button>
+				</div>
+			</div>
+		</div>
+	);
 }
 
 /**
@@ -89,10 +297,10 @@ function IncompatibleConnectionScreen({
 
 	const redeploy = useMutation({
 		mutationFn: () =>
-			invoke<number>("force_redeploy_remote", { connection }),
-		onSuccess: (port) => {
+			invoke<ConnectResult>("force_redeploy_remote", { connection }),
+		onSuccess: (result) => {
 			setConfirmOpen(false);
-			onRedeployed(port);
+			onRedeployed(result);
 		},
 		onError: (error) => {
 			setConfirmOpen(false);
@@ -221,32 +429,54 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		[connections, activeId],
 	);
 
-	// Resolve the active connection's local port: local -> start_server,
-	// remote -> connect_remote (returns the local tunnel port). Keyed by the
-	// active connection id so each host has its own cached bring-up result.
-	const serverQuery = useQuery<number>({
+	// Resolve the active connection's bring-up result: local -> start_server
+	// (port only, never forwards), remote -> connect_remote (port AND the
+	// git-credential-forwarding capability, resolved together at bring-up
+	// time). Keyed by the active connection id so each host has its own cached
+	// bring-up result. Returning the capability HERE — atomically with the
+	// port — closes the race where the first remote git-auth queries could run
+	// unforwarded against a capable remote and cache an auth failure before a
+	// separate, later capability probe flipped to `true`.
+	const serverQuery = useQuery<ConnectResult>({
 		queryKey: ["server", activeId],
-		queryFn: () => {
+		queryFn: async (): Promise<ConnectResult> => {
 			if (activeConnection.id === LOCAL_CONNECTION.id) {
-				return invoke<number>("start_server");
+				const port = await invoke<number>("start_server");
+				// Local is structurally non-forwarding.
+				return { port, supportsCredentialForwarding: false };
 			}
-			return invoke<number>("connect_remote", {
+			return invoke<ConnectResult>("connect_remote", {
 				connection: activeConnection,
 			});
 		},
 	});
 
-	const status = projectStatus(serverQuery);
-	const port = serverQuery.data ?? null;
+	const port = serverQuery.data?.port ?? null;
+	const status = projectStatus({ ...serverQuery, data: port });
 	const baseUrl = port === null ? null : baseUrlFromPort(port);
+
+	// Fail-safe: forward only when the active connection is a remote whose
+	// bring-up result confirmed support. Local (and any unresolved/old/error
+	// bring-up) yields `false`. Derived from `serverQuery.data` so it is known
+	// the moment `baseUrl` is — never lagging behind a separate probe.
+	const supportsCredentialForwarding = deriveSupportsCredentialForwarding(
+		activeId,
+		serverQuery.data,
+	);
 
 	const setActive = useCallback(
 		(id: string) => {
 			// Event handler (NOT a useEffect): drop per-host data caches so the
-			// new target re-fetches cleanly, then commit the active id.
+			// new target re-fetches cleanly. Also drop that target's bring-up
+			// cache so a reused remote port cannot hide an active reconnect or
+			// auto-install behind stale page content.
 			for (const ns of DATA_NAMESPACES) {
 				queryClient.removeQueries({ queryKey: [ns] });
 			}
+			queryClient.removeQueries({
+				queryKey: ["server", id],
+				exact: true,
+			});
 			setActiveId(id);
 		},
 		[queryClient],
@@ -289,6 +519,12 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	const testConnection = useCallback(
 		(connection: Connection) =>
 			invoke<TestResult>("test_connection", { connection }),
+		[],
+	);
+
+	const reinstallRemoteApi = useCallback(
+		(connection: Connection) =>
+			invoke<TestResult>("reinstall_remote_api", { connection }),
 		[],
 	);
 
@@ -361,27 +597,35 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 				<IncompatibleConnectionScreen
 					connection={activeConnection}
 					remoteVersion={payload.remoteVersion ?? null}
-					onRedeployed={(port) =>
-						queryClient.setQueryData(["server", activeId], port)
+					onRedeployed={(result) =>
+						queryClient.setQueryData<ConnectResult>(
+							["server", activeId],
+							result,
+						)
 					}
 				/>
 			);
 		}
 		return (
-			<div className="flex h-screen items-center justify-center">
-				<p className="text-sm text-danger">
-					Failed to connect to {activeConnection.label}:{" "}
-					{remoteErrorMessage(serverQuery.error)}
-				</p>
-			</div>
+			<ConnectionErrorScreen
+				connection={activeConnection}
+				message={remoteErrorMessage(serverQuery.error)}
+				isRetrying={serverQuery.isFetching}
+				onRetry={() => {
+					void serverQuery.refetch();
+				}}
+				onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
+			/>
 		);
 	}
 
 	if (baseUrl === null || port === null) {
 		return (
-			<div className="flex h-screen items-center justify-center">
-				<Spinner size="lg" />
-			</div>
+			<ConnectionPendingScreen
+				key={activeConnection.id}
+				connection={activeConnection}
+				onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
+			/>
 		);
 	}
 
@@ -392,11 +636,13 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		status,
 		port,
 		baseUrl,
+		supportsCredentialForwarding,
 		setActive,
 		addConnection,
 		updateConnection,
 		removeConnection,
 		testConnection,
+		reinstallRemoteApi,
 		disconnect,
 	};
 

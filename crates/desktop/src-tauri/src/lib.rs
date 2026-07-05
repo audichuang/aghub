@@ -1,10 +1,11 @@
 use crate::commands::{
 	cleanup_all_remotes, clear_log_files, connect_remote, disconnect_remote,
 	export_diagnostic_logs, force_redeploy_remote, get_log_dir_path,
-	get_log_entries, get_log_stats, list_remote_directories,
-	list_ssh_config_hosts, local_api_version, minimize_to_tray,
-	remote_install_source_available, remote_status, start_server,
-	test_connection, RemoteState,
+	get_log_entries, get_log_stats, list_bound_sources,
+	list_remote_directories, list_ssh_config_hosts, local_api_version,
+	minimize_to_tray, reinstall_remote_api, remote_install_source_available,
+	remote_status, resolve_git_token, start_server, test_connection,
+	RemoteState,
 };
 use log::info;
 use tauri::{Manager, WebviewWindow};
@@ -323,8 +324,11 @@ pub fn run() {
 			disconnect_remote,
 			force_redeploy_remote,
 			remote_install_source_available,
+			reinstall_remote_api,
 			remote_status,
 			minimize_to_tray,
+			resolve_git_token,
+			list_bound_sources,
 		])
 		.build(tauri::generate_context!())
 		.expect("error while building tauri application")

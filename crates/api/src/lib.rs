@@ -19,6 +19,14 @@ pub mod routes;
 pub(crate) mod skills;
 pub mod state;
 
+// Controller-side credential resolution for the desktop `src-tauri` layer
+// (remote git-credential forwarding). The `credentials` module itself stays
+// crate-private; only these wrappers + their origin types are public.
+pub use crate::credentials::origin::ResolvedOrigin;
+pub use crate::credentials::public::{
+	list_bound_sources, resolve_git_token_for_source, ResolvedToken,
+};
+
 /// Version of the `aghub-api` binary/library, shared with the desktop remote
 /// compatibility check.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -57,6 +65,14 @@ impl Fairing for ApiLogFairing {
 		}
 	}
 
+	// SECURITY INVARIANT (remote git-credential forwarding): this fairing logs
+	// ONLY the method, URI, and response status — never request/response
+	// headers and never the body. The `X-Aghub-Git-Tokens` forward header
+	// carries raw git tokens, so it must never reach a log sink. As long as
+	// this fairing does not log `request.headers()`, that header (and any
+	// future secret header) is safe by construction. The
+	// `api_log_fairing_never_logs_forwarded_token_header` test asserts this
+	// invariant.
 	async fn on_request(&self, request: &mut Request<'_>, _: &mut Data<'_>) {
 		info!(
 			"api request started: {} {}",
@@ -116,6 +132,11 @@ pub(crate) fn build_rocket(
 			"Authorization",
 			"Accept",
 			"Content-Type",
+			// Remote git-credential forwarding: the desktop attaches a
+			// per-request `source → token` map to a remote api over the SSH
+			// tunnel. The webview call is cross-origin, so the custom header
+			// must be allow-listed or the preflight blocks it.
+			"X-Aghub-Git-Tokens",
 		]),
 		allow_credentials: true,
 		..Default::default()
@@ -208,11 +229,13 @@ pub(crate) fn build_rocket(
 				routes::skills::get_project_skill_lock,
 				routes::skills::delete_skill_by_path,
 				routes::skills::prune_lock_route,
+				routes::skills::git_credential_status,
 				routes::skills::git_scan_skills,
 				routes::skills::git_install_skills,
 				routes::skills::git_sync_skill,
 				routes::skills_update::check_skill_updates,
 				routes::skills_update::apply_skill_update,
+				routes::skills_update::accept_skill_rename,
 				routes::sources::list_sources,
 				routes::sources::diff_source,
 				routes::coverage::skills_coverage,
@@ -304,6 +327,80 @@ mod tests {
 	use super::{build_rocket, default_app_data_dir};
 	use rocket::http::{Header, Status};
 	use rocket::local::blocking::Client;
+
+	/// Process-global capturing logger. Records every formatted log message so a
+	/// test can assert a secret (the `X-Aghub-Git-Tokens` value) never appears in
+	/// any log line. The buffer only grows; tests search for their own unique
+	/// token, so parallel test noise cannot cause a false pass/fail.
+	static LOG_BUFFER: std::sync::Mutex<Vec<String>> =
+		std::sync::Mutex::new(Vec::new());
+
+	struct CapturingLogger;
+	impl log::Log for CapturingLogger {
+		fn enabled(&self, _: &log::Metadata) -> bool {
+			true
+		}
+		fn log(&self, record: &log::Record) {
+			LOG_BUFFER
+				.lock()
+				.unwrap_or_else(|e| e.into_inner())
+				.push(format!("{}", record.args()));
+		}
+		fn flush(&self) {}
+	}
+
+	/// Install the capturing logger once for the whole test binary. Ignoring the
+	/// `SetLoggerError` keeps this safe if another test/crate already installed a
+	/// logger — the assertion below searches for a unique token regardless.
+	fn install_capturing_logger() {
+		static INSTALL: std::sync::Once = std::sync::Once::new();
+		INSTALL.call_once(|| {
+			let _ = log::set_logger(&CapturingLogger);
+			log::set_max_level(log::LevelFilter::Trace);
+		});
+	}
+
+	/// Regression test for the log-redaction invariant on `ApiLogFairing`: the
+	/// `X-Aghub-Git-Tokens` header value must NEVER be logged. The fairing logs
+	/// only method/URI/status, so the secret can never reach a log sink; this
+	/// test sends a request carrying a unique token and asserts it appears in no
+	/// captured log line (so a future change that starts logging headers fails).
+	#[test]
+	fn api_log_fairing_never_logs_forwarded_token_header() {
+		install_capturing_logger();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		const SECRET: &str = "SUPER-SECRET-GIT-TOKEN-9f3a2b";
+		let header_value = {
+			use base64::engine::general_purpose::STANDARD as BASE64;
+			use base64::Engine as _;
+			BASE64.encode(format!("{{\"owner/repo\":\"{SECRET}\"}}"))
+		};
+
+		// Any mounted route triggers the request/response logging fairing.
+		let _ = client
+			.get("/api/v1/agents")
+			.header(Header::new("X-Aghub-Git-Tokens", header_value.clone()))
+			.dispatch();
+
+		let logs = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
+		assert!(
+			!logs.iter().any(|line| line.contains(SECRET)),
+			"the raw forwarded token must never be logged"
+		);
+		assert!(
+			!logs.iter().any(|line| line.contains(&header_value)),
+			"the encoded forward header value must never be logged"
+		);
+		assert!(
+			!logs.iter().any(|line| line.contains("X-Aghub-Git-Tokens")),
+			"the forward header name must not appear in logs either"
+		);
+	}
 
 	#[test]
 	fn plugin_preflight_routes_return_cors_response() {

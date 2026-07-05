@@ -72,9 +72,11 @@ dependencies = [
  "aghub-core",
  "aghub-git",
  "aghub-inference",
+ "base64 0.22.1",
  "chrono",
  "dirs 6.0.0",
  "gix",
+ "keyring",
  "log",
  "open",
  "reqwest",
@@ -146,6 +148,7 @@ name = "aghub-core"
 version = "1.1.1"
 dependencies = [
  "aghub-agents",
+ "chrono",
  "dirs 6.0.0",
  "libc",
  "log",
@@ -7024,16 +7027,12 @@ version = "1.1.1"
 dependencies = [
  "aghub-core",
  "aghub-git",
+ "chrono",
  "dirs 6.0.0",
  "gix",
- "keyring",
- "log",
- "serde",
- "serde_json",
  "skill",
  "tempfile",
  "tokio",
- "uuid",
 ]
 
 [[package]]

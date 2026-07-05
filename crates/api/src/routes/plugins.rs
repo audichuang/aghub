@@ -773,6 +773,7 @@ pub async fn list_plugin_market() -> ApiResult<Vec<CCPluginMarketResponse>> {
 				description: p.description.clone(),
 				version: p.display_version().into_owned(),
 				author: p.display_author().unwrap_or_default(),
+				marketplace: p.marketplace.clone(),
 				github_url: p.github_url().unwrap_or_default(),
 				installs: p.install_count.unwrap_or(0) as i64,
 				installed: p.installed,

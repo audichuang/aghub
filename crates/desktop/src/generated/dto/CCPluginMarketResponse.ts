@@ -6,6 +6,7 @@ export type CCPluginMarketResponse = {
 	description: string;
 	version: string;
 	author: string;
+	marketplace: string;
 	github_url: string;
 	installs: number;
 	installed: boolean;

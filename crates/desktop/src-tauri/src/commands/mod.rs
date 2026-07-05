@@ -1,8 +1,10 @@
+pub mod credentials;
 pub mod logging;
 pub mod remote;
 pub mod server;
 pub mod window;
 
+pub use credentials::{list_bound_sources, resolve_git_token};
 pub use logging::{
 	clear_log_files, export_diagnostic_logs, get_log_dir_path, get_log_entries,
 	get_log_stats,
@@ -10,8 +12,8 @@ pub use logging::{
 pub use remote::{
 	cleanup_all_remotes, connect_remote, disconnect_remote,
 	force_redeploy_remote, list_remote_directories, list_ssh_config_hosts,
-	local_api_version, remote_install_source_available, remote_status,
-	test_connection, RemoteState,
+	local_api_version, reinstall_remote_api, remote_install_source_available,
+	remote_status, test_connection, RemoteState,
 };
 pub use server::start_server;
 pub use window::minimize_to_tray;

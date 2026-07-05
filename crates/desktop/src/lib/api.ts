@@ -26,6 +26,7 @@ import type {
 	CredentialResponse,
 	DeleteSkillByPathRequest,
 	DeleteSkillByPathResponse,
+	GitCredentialStatusResponse,
 	GitInstallRequest,
 	GitInstallResponse,
 	GitScanRequest,
@@ -81,6 +82,14 @@ interface ApiErrorBody {
 	error?: string;
 	code?: string;
 }
+
+/**
+ * Optional per-request headers for remote git-credential forwarding. When the
+ * active connection is a capable remote, the request layer builds this with the
+ * `X-Aghub-Git-Tokens` header (see `lib/git-token-forwarding.ts`); otherwise it
+ * is omitted entirely. NEVER persisted — built transiently per request.
+ */
+export type GitForwardHeaders = Record<string, string>;
 
 export function createApi(baseUrl: string) {
 	const client = ky.create({
@@ -231,13 +240,12 @@ export function createApi(baseUrl: string) {
 				scope: "global" | "project" = "global",
 				projectRoot?: string,
 				allAgents = false,
-				confirm = false,
 			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
 						searchParams: {
 							scope,
-							confirm: String(confirm),
+							confirm: "true",
 							...(allAgents ? { all_agents: "true" } : {}),
 							...(projectRoot
 								? { project_root: projectRoot }
@@ -318,26 +326,51 @@ export function createApi(baseUrl: string) {
 			pruneLock(body: PruneLockRequest): Promise<PruneLockResponse> {
 				return client.post("skills/prune-lock", { json: body }).json();
 			},
-			gitScan(data: GitScanRequest): Promise<GitScanResponse> {
+			gitCredentialStatus(
+				url: string,
+			): Promise<GitCredentialStatusResponse> {
 				return client
-					.post("skills/git/scan", { json: data, timeout: 120000 })
+					.get("skills/git/credential-status", {
+						searchParams: { url },
+					})
+					.json();
+			},
+			gitScan(
+				data: GitScanRequest,
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<GitScanResponse> {
+				return client
+					.post("skills/git/scan", {
+						json: data,
+						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
+					})
 					.json();
 			},
 			gitInstall(data: GitInstallRequest): Promise<GitInstallResponse> {
+				// No forward header: install reuses the scan session's
+				// server-side cached token and does NOT read X-Aghub-Git-Tokens.
 				return client.post("skills/git/install", { json: data }).json();
 			},
 			gitSync(data: GitSyncRequest): Promise<GitSyncResponse> {
+				// No forward header: sync reuses the scan session's server-side
+				// cached token and does NOT read X-Aghub-Git-Tokens.
 				return client.post("skills/git/sync", { json: data }).json();
 			},
-			checkUpdates({
-				offline = false,
-				scope = "global",
-				projectRoot,
-			}: {
-				offline?: boolean;
-				scope?: "global" | "project" | "all";
-				projectRoot?: string;
-			} = {}): Promise<SkillUpdateResponse[]> {
+			checkUpdates(
+				{
+					offline = false,
+					scope = "global",
+					projectRoot,
+				}: {
+					offline?: boolean;
+					scope?: "global" | "project" | "all";
+					projectRoot?: string;
+				} = {},
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<SkillUpdateResponse[]> {
 				// Network-heavy (clones each source); give it a long timeout.
 				return client
 					.get("skills/check-updates", {
@@ -349,16 +382,25 @@ export function createApi(baseUrl: string) {
 								: {}),
 						},
 						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
 					})
 					.json();
 			},
 			applyUpdate(
 				body: ApplySkillUpdateRequest,
+				forwardedTokens?: GitForwardHeaders,
 			): Promise<ApplySkillUpdateResponse> {
+				// apply-update re-fetches the source server-side, so the remote
+				// origin-pins the forwarded token like check-updates/diff.
 				return client
 					.post("skills/apply-update", {
 						json: body,
 						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
 					})
 					.json();
 			},
@@ -377,17 +419,20 @@ export function createApi(baseUrl: string) {
 					})
 					.json();
 			},
-			diffSource({
-				scope = "global",
-				projectRoot,
-				source,
-				gitRef,
-			}: {
-				scope?: "global" | "project" | "all";
-				projectRoot?: string;
-				source: string;
-				gitRef?: string;
-			}): Promise<SourceDiffResponse> {
+			diffSource(
+				{
+					scope = "global",
+					projectRoot,
+					source,
+					gitRef,
+				}: {
+					scope?: "global" | "project" | "all";
+					projectRoot?: string;
+					source: string;
+					gitRef?: string;
+				},
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<SourceDiffResponse> {
 				// Network-heavy (clones the source); give it a long timeout.
 				return client
 					.get("skills/sources/diff", {
@@ -400,6 +445,9 @@ export function createApi(baseUrl: string) {
 							...(gitRef ? { git_ref: gitRef } : {}),
 						},
 						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
 					})
 					.json();
 			},
@@ -473,19 +521,17 @@ export function createApi(baseUrl: string) {
 				agent: string,
 				scope: "global" | "project",
 				projectRoot?: string,
-				confirm = false,
-			): Promise<DeleteSkillByPathResponse> {
+			): Promise<void> {
 				return client
 					.delete(`agents/${agent}/mcps/${name}`, {
 						searchParams: {
 							scope,
-							confirm: String(confirm),
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
 						},
 					})
-					.json();
+					.then(() => undefined);
 			},
 			transfer(body: TransferRequest): Promise<OperationBatchResponse> {
 				return client.post("mcps/transfer", { json: body }).json();
@@ -585,19 +631,17 @@ export function createApi(baseUrl: string) {
 				agent: string,
 				scope: "global" | "project",
 				projectRoot?: string,
-				confirm = false,
-			): Promise<DeleteSkillByPathResponse> {
+			): Promise<void> {
 				return client
 					.delete(`agents/${agent}/sub-agents/${name}`, {
 						searchParams: {
 							scope,
-							confirm: String(confirm),
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
 						},
 					})
-					.json();
+					.then(() => undefined);
 			},
 			transfer(body: TransferRequest): Promise<OperationBatchResponse> {
 				return client

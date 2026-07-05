@@ -42,6 +42,7 @@ import { cn } from "../lib/utils";
 import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { credentialsListQueryOptions } from "../requests/credentials";
 import { gitInstallSkillsMutationOptions } from "../requests/skills";
+import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { AgentSelector } from "./agent-selector";
 
 interface ImportGithubSkillPanelProps {
@@ -79,6 +80,7 @@ export function ImportGithubSkillPanel({
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
+	const { forSource: forwardForSource } = useGitForwarding();
 	const { availableAgents } = useAgentAvailability();
 
 	const skillAgents = useMemo(
@@ -149,6 +151,45 @@ export function ImportGithubSkillPanel({
 
 	const urlValue = useWatch({ control, name: "url" });
 
+	// Probe the credential helper only after the URL field is committed (on
+	// blur), not on every keystroke — each probe spawns `git credential fill`.
+	const [probeUrl, setProbeUrl] = useState("");
+	const isProbeUrlValidHttps = useMemo(() => {
+		try {
+			return new URL(probeUrl).protocol === "https:";
+		} catch {
+			return false;
+		}
+	}, [probeUrl]);
+
+	// Pre-flight: does the machine running aghub-api already have a Git
+	// credential for this URL? Only relevant when not supplying an aghub token
+	// (otherwise the system-git credential path isn't used).
+	const { data: credStatus } = useQuery({
+		queryKey: ["gitCredentialStatus", probeUrl],
+		queryFn: () => api.skills.gitCredentialStatus(probeUrl),
+		enabled: isProbeUrlValidHttps && !isPrivateRepo,
+		staleTime: 60_000,
+	});
+
+	const platformName =
+		credStatus?.platform === "windows"
+			? "Windows"
+			: credStatus?.platform === "macos"
+				? "macOS"
+				: credStatus?.platform === "linux"
+					? "Linux"
+					: "";
+
+	const credMessage =
+		credStatus?.status === "available"
+			? t("gitCredAvailable", { host: credStatus.host ?? "" })
+			: credStatus?.status === "git_unavailable"
+				? t("gitCredUnavailable")
+				: credStatus?.status === "missing"
+					? t("gitCredMissing", { host: credStatus.host ?? "" })
+					: "";
+
 	useEffect(() => {
 		if (isCoverageLoading || coverageSeeded) return;
 
@@ -164,13 +205,19 @@ export function ImportGithubSkillPanel({
 	}, [coverageSeeded, isCoverageLoading, linkTargets, setValue]);
 
 	const scanMutation = useMutation({
-		mutationFn: (values: InputFormValues) =>
-			api.skills.gitScan({
-				url: values.url.trim(),
-				credential_id: values.credentialId || null,
-				branch: null,
-				session_id: null,
-			}),
+		mutationFn: async (values: InputFormValues) => {
+			const url = values.url.trim();
+			const headers = await forwardForSource(url);
+			return api.skills.gitScan(
+				{
+					url,
+					credential_id: values.credentialId || null,
+					branch: null,
+					session_id: null,
+				},
+				headers,
+			);
+		},
 		onSuccess: (data) => {
 			setScanError(null);
 			setScannedSkills(data.skills);
@@ -193,13 +240,19 @@ export function ImportGithubSkillPanel({
 	});
 
 	const branchScanMutation = useMutation({
-		mutationFn: (branch: string) =>
-			api.skills.gitScan({
-				url: urlValue.trim(),
-				credential_id: null,
-				branch,
-				session_id: sessionId,
-			}),
+		mutationFn: async (branch: string) => {
+			const url = urlValue.trim();
+			const headers = await forwardForSource(url);
+			return api.skills.gitScan(
+				{
+					url,
+					credential_id: null,
+					branch,
+					session_id: sessionId,
+				},
+				headers,
+			);
+		},
 		onSuccess: (data) => {
 			setScannedSkills(data.skills);
 			setSessionId(data.session_id);
@@ -240,13 +293,17 @@ export function ImportGithubSkillPanel({
 		setCard2Open(false);
 		setCard3Open(true);
 		setPhase("installing");
+		// P3: install reuses the scan session's server-side cached token, so no
+		// forward header — only the scan above carries it.
 		installMutation.mutate(
 			{
-				session_id: sessionId,
-				skill_paths: Array.from(selectedPaths),
-				agents,
-				scope: projectPath ? "project" : "global",
-				project_root: projectPath ?? null,
+				body: {
+					session_id: sessionId,
+					skill_paths: Array.from(selectedPaths),
+					agents,
+					scope: projectPath ? "project" : "global",
+					project_root: projectPath ?? null,
+				},
 			},
 			{
 				onError: (error) => {
@@ -263,6 +320,7 @@ export function ImportGithubSkillPanel({
 		reset();
 		setCoverageSeeded(false);
 		setIsPrivateRepo(false);
+		setProbeUrl("");
 		setScannedSkills([]);
 		setSelectedPaths(new Set());
 		setSessionId("");
@@ -284,6 +342,7 @@ export function ImportGithubSkillPanel({
 	const handleCard1Toggle = () => {
 		if (!card1Open) {
 			// Reset all downstream state
+			setProbeUrl("");
 			setScannedSkills([]);
 			setSelectedPaths(new Set());
 			setSessionId("");
@@ -455,9 +514,12 @@ export function ImportGithubSkillPanel({
 															onChange={
 																field.onChange
 															}
-															onBlur={
-																field.onBlur
-															}
+															onBlur={() => {
+																field.onBlur();
+																setProbeUrl(
+																	field.value.trim(),
+																);
+															}}
 															placeholder={t(
 																"githubRepoUrlPlaceholder",
 															)}
@@ -477,6 +539,33 @@ export function ImportGithubSkillPanel({
 											/>
 										</Fieldset.Group>
 									</Fieldset>
+
+									{/* System-git credential pre-flight hint */}
+									{!isPrivateRepo &&
+										isProbeUrlValidHttps &&
+										credStatus && (
+											<Alert
+												status={
+													credStatus.status ===
+													"available"
+														? "success"
+														: "warning"
+												}
+											>
+												<Alert.Indicator />
+												<Alert.Content>
+													<Alert.Description>
+														{platformName && (
+															<strong>
+																{platformName}{" "}
+																·{" "}
+															</strong>
+														)}
+														{credMessage}
+													</Alert.Description>
+												</Alert.Content>
+											</Alert>
+										)}
 
 									{/* Private repo checkbox */}
 									<Checkbox

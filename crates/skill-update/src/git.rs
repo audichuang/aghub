@@ -8,9 +8,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::{
-	FetchError, FetchedRepo, Fetcher, RefResolution, RefResolver, SourceRef,
-};
+use crate::{FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef};
 
 /// Per-fetch HTTP request timeout for the treeless clone. Generous enough for a
 /// small skill repo but bounded so a stuck remote cannot hang the fetch.
@@ -56,12 +54,33 @@ impl Fetcher for GitFetcher {
 		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
 			.map_err(|_| FetchError::Network)?;
 		let root = materialized.path().to_path_buf();
+		let upstream_commit_time = read_commit_time(&repo, oid);
 		Ok(FetchedRepo {
 			root,
 			oid: oid.to_string(),
+			upstream_commit_time,
 			_guard: Some(Arc::new(materialized)),
 		})
 	}
+}
+
+/// Best-effort RFC 3339 author-time of the tip commit at `oid`.
+///
+/// Returns `None` on any failure (object missing, not a commit, unparsable
+/// time) so a missing timestamp never aborts the fetch.
+fn read_commit_time(
+	repo: &gix::Repository,
+	oid: gix::ObjectId,
+) -> Option<String> {
+	let commit = repo.find_object(oid).ok()?.try_into_commit().ok()?;
+	// In gix 0.84 `SignatureRef.time` is the raw `&str`; `.time()` parses it
+	// into a `gix_date::Time` exposing `seconds` (unix epoch) and `offset`
+	// (seconds east of UTC).
+	let time = commit.author().ok()?.time().ok()?;
+	let offset = chrono::FixedOffset::east_opt(time.offset)?;
+	let dt = chrono::DateTime::from_timestamp(time.seconds, 0)?
+		.with_timezone(&offset);
+	Some(dt.to_rfc3339())
 }
 
 fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
@@ -86,9 +105,8 @@ fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
 
 /// Production [`RefResolver`]: a git ref advertisement (ls-refs, no object
 /// download) resolving the tip OID of the requested branch/tag/default-branch.
-/// A missing ref is [`RefResolution::NoRef`] and a transport/auth error is
-/// [`RefResolution::Failed`]; both fall through to the full fetch, but only the
-/// latter is treated as a failure (NoRef never records a fabricated oid).
+/// Any error (incl. ref-not-found) maps to a soft failure so the orchestrator
+/// falls through to the full fetch.
 pub struct GitRefResolver;
 
 impl RefResolver for GitRefResolver {
@@ -96,71 +114,14 @@ impl RefResolver for GitRefResolver {
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
-	) -> RefResolution {
-		let url = match normalize_fetch_url(&source_ref.source) {
-			Ok(url) => url,
-			Err(err) => return RefResolution::Failed(err),
-		};
+	) -> Result<String, FetchError> {
+		let url = normalize_fetch_url(&source_ref.source)?;
 		let mut opts = aghub_git::RemoteOptions::new(&url);
 		if let Some(token) = token {
 			opts = opts.with_credentials("x-access-token", token);
 		}
-		classify_ref_resolution(
-			aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
-				.map_err(classify_fetch_error),
-		)
-	}
-}
-
-/// Map an `aghub_git::resolve_ref_oid` outcome onto a [`RefResolution`].
-///
-/// `Ok(Some(oid))` is a resolved tip; `Ok(None)` means the ref was simply not
-/// advertised (NOT an error — distinct soft signal so the orchestrator falls
-/// through to a full fetch without recording a fabricated oid); `Err` is a real
-/// transport/auth failure already classified by [`classify_fetch_error`].
-fn classify_ref_resolution(
-	resolved: Result<Option<String>, FetchError>,
-) -> RefResolution {
-	match resolved {
-		Ok(Some(oid)) => RefResolution::Resolved(oid),
-		Ok(None) => RefResolution::NoRef,
-		Err(err) => RefResolution::Failed(err),
-	}
-}
-
-#[cfg(test)]
-mod tests {
-	use super::*;
-
-	#[test]
-	fn resolved_oid_maps_to_resolved() {
-		let oid = "abc123def456abc123def456abc123def456abc1".to_string();
-		match classify_ref_resolution(Ok(Some(oid.clone()))) {
-			RefResolution::Resolved(got) => assert_eq!(got, oid),
-			other => panic!("expected Resolved, got {other:?}"),
-		}
-	}
-
-	#[test]
-	fn absent_ref_maps_to_no_ref_not_failure() {
-		// Ok(None) from resolve_ref_oid means the ref simply was not advertised.
-		// It MUST be NoRef (a soft fall-through signal), never a fabricated
-		// Failed(Network) — that is the whole point of T4.
-		assert!(matches!(
-			classify_ref_resolution(Ok(None)),
-			RefResolution::NoRef
-		));
-	}
-
-	#[test]
-	fn transport_error_maps_to_failed() {
-		assert!(matches!(
-			classify_ref_resolution(Err(FetchError::Network)),
-			RefResolution::Failed(FetchError::Network)
-		));
-		assert!(matches!(
-			classify_ref_resolution(Err(FetchError::Auth)),
-			RefResolution::Failed(FetchError::Auth)
-		));
+		aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
+			.map_err(classify_fetch_error)?
+			.ok_or(FetchError::Network)
 	}
 }

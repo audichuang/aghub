@@ -309,9 +309,14 @@ fn remove_sub_agent_planned_save_failure_restores_deleted_file() {
 	let err = mgr
 		.remove_sub_agent_planned("reviewer", false, true)
 		.unwrap_err();
+	// A save failure after file removal must surface as an error (not silent
+	// success). The write to the directory-shaped keeper path fails either as a
+	// raw IO error or, via the sub-agent symlink/overwrite hardening, as an
+	// InvalidConfig "refusing to overwrite unsafe file" — both are save
+	// failures that must trigger the transactional restore below.
 	assert!(
-		matches!(err, ConfigError::Io(_)),
-		"a save failure after file removal must surface as an IO error, \
+		matches!(err, ConfigError::Io(_) | ConfigError::InvalidConfig(_)),
+		"a save failure after file removal must surface as an error, \
 		 got {err:?}"
 	);
 

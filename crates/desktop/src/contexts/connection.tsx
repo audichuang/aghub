@@ -1,7 +1,9 @@
 import type { ReactNode } from "react";
 import { createContext, use } from "react";
-import type { ConnectionStatus } from "../lib/connection-logic";
+import type { ConnectionStatus, ConnectResult } from "../lib/connection-logic";
 import type { Connection } from "../lib/store";
+
+export type { ConnectResult };
 
 export interface ConnectionContextValue {
 	/** Local + persisted remotes, Local always first. */
@@ -16,6 +18,13 @@ export interface ConnectionContextValue {
 	port: number | null;
 	/** Resolved api baseUrl, or null while connecting. */
 	baseUrl: string | null;
+	/**
+	 * Whether the ACTIVE connection is a remote that advertises controller-side
+	 * git-credential forwarding (the `X-Aghub-Git-Tokens` header). Always
+	 * `false` for Local and fail-safe `false` whenever support cannot be
+	 * confirmed. Task 6 gates header injection on this.
+	 */
+	supportsCredentialForwarding: boolean;
 	/** Switch active connection (clears per-host data caches first). */
 	setActive: (id: string) => void;
 	addConnection: (connection: Omit<Connection, "id">) => Promise<Connection>;
@@ -23,6 +32,8 @@ export interface ConnectionContextValue {
 	removeConnection: (id: string) => Promise<void>;
 	/** Probe a connection without mutating active state. */
 	testConnection: (connection: Connection) => Promise<TestResult>;
+	/** Force-reinstall remote aghub-api, then return the fresh probe result. */
+	reinstallRemoteApi: (connection: Connection) => Promise<TestResult>;
 	/** Tear down a remote tunnel + remote server. */
 	disconnect: (id: string) => Promise<void>;
 }
@@ -34,6 +45,14 @@ export interface TestResult {
 	apiVersion: string | null;
 	compatible: boolean;
 	message: string;
+	/**
+	 * The remote `aghub-api` advertises controller-side git-credential
+	 * forwarding (the `X-Aghub-Git-Tokens` header), probed over SSH via
+	 * `--capabilities`. Fail-safe: `false` whenever support cannot be
+	 * confirmed (old binary, transport failure, missing marker). Task 6 gates
+	 * forwarding on this being `true`.
+	 */
+	supportsCredentialForwarding: boolean;
 	installAttempted: boolean;
 	installSucceeded: boolean;
 	installMessage?: string | null;

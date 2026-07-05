@@ -1,8 +1,10 @@
 pub mod discovery;
 pub mod install_fetched;
 pub mod linker;
+pub mod lock;
 pub mod prune;
 pub mod removal;
+pub mod resync;
 pub mod update;
 
 pub use discovery::{load_skills_from_dir, load_skills_from_dirs};

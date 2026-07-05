@@ -16,9 +16,10 @@ use crate::ssh::{
 	build_remote_cargo_install_cmd, build_remote_cat_cmd,
 	build_remote_finish_upload_cmd, build_remote_kill_cmd,
 	build_remote_prepare_upload_cmd, build_remote_probe_cmd,
-	build_remote_start_cmd, build_scp_args, build_ssh_args,
-	is_version_compatible, parse_api_version, parse_logpath, parse_pid,
-	parse_remote_port, probe_remote_platform, remote_api_upload_path,
+	build_remote_release_deb_install_cmd, build_remote_start_cmd,
+	build_scp_args, build_ssh_args, is_version_compatible, parse_api_version,
+	parse_logpath, parse_pid, parse_remote_port, probe_remote_platform,
+	probe_supports_credential_forwarding, remote_api_upload_path,
 	CommandRunner, Connection,
 };
 
@@ -55,6 +56,15 @@ pub struct TestResult {
 	pub compatible: bool,
 	/// Human-facing summary (carries ssh stderr on failure).
 	pub message: String,
+	/// The remote `aghub-api` advertises controller-side git-credential
+	/// forwarding (the `X-Aghub-Git-Tokens` header). Probed over SSH via
+	/// `--capabilities`; **fail-safe** — `false` whenever support cannot be
+	/// confirmed (old binary, transport failure, missing marker), so the
+	/// desktop only forwards credentials to a remote that genuinely honors
+	/// them. Always `false` when the remote is unreachable or the api is
+	/// absent.
+	#[serde(default)]
+	pub supports_credential_forwarding: bool,
 	/// The probe attempted to install `aghub-api` automatically.
 	#[serde(default)]
 	pub install_attempted: bool,
@@ -81,10 +91,16 @@ impl TestResult {
 			api_version,
 			compatible,
 			message,
+			supports_credential_forwarding: false,
 			install_attempted: false,
 			install_succeeded: false,
 			install_message: None,
 		}
+	}
+
+	fn with_credential_forwarding(mut self, supported: bool) -> Self {
+		self.supports_credential_forwarding = supported;
+		self
 	}
 
 	fn with_install_result(mut self, succeeded: bool, message: String) -> Self {
@@ -160,7 +176,13 @@ pub enum RemoteInstallSource {
 	/// Upload this explicit local binary with scp, then install it remotely.
 	LocalBinary(PathBuf),
 	/// Build/install on the VM using cargo from a git repository.
-	CargoGit { url: String, branch: Option<String> },
+	CargoGit {
+		url: String,
+		branch: Option<String>,
+		tag: Option<String>,
+	},
+	/// Download and extract a release `.deb` on the VM.
+	ReleaseDeb { url: String },
 }
 
 /// A successfully started remote server: its pid, the VM-side port it
@@ -257,9 +279,16 @@ pub fn probe_connection<R: CommandRunner>(
 					None => "aghub-api responded without a parseable version"
 						.to_string(),
 				};
+				// Additive capability probe (D7): a second `--capabilities`
+				// round-trip, only worth running when the binary is actually
+				// present. Fail-safe inside the probe, and irrelevant when
+				// absent, so an absent/garbled response stays `false`.
+				let supports_forwarding = present
+					&& probe_supports_credential_forwarding(runner, conn, &bin);
 				return TestResult::new(
 					true, present, version, compatible, message,
-				);
+				)
+				.with_credential_forwarding(supports_forwarding);
 			}
 			// Reachable, non-zero, not a recognized "not found": treat as a
 			// present-but-failed binary.
@@ -301,8 +330,13 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			stderr: first.message,
 		});
 	}
-	// Present AND compatible -> nothing to do (unchanged fast path).
-	if first.api_present && first.compatible {
+	// Present + exact -> nothing to do. If an install source exists and only the
+	// patch differs, upgrade so remote-side bug fixes ship with patch releases.
+	if first.api_present
+		&& first.compatible
+		&& (first.api_version.as_deref() == Some(local_version)
+			|| source.is_none())
+	{
 		return Ok(first);
 	}
 
@@ -377,7 +411,7 @@ pub fn install_remote_api<R: CommandRunner>(
 			stage_remote_api_upload(runner, conn, local)?;
 			finish_remote_api_upload(runner, conn, resolved_path)
 		}
-		RemoteInstallSource::CargoGit { url, branch } => {
+		RemoteInstallSource::CargoGit { url, branch, tag } => {
 			// `cargo install` always writes to ~/.cargo/bin/aghub-api; it cannot
 			// target a custom path. If the connection pins an explicit remote
 			// path, a cargo build would land where the post-install probe never
@@ -391,8 +425,16 @@ pub fn install_remote_api<R: CommandRunner>(
 					 or install aghub-api at '{resolved_path}' on the VM manually."
 				)));
 			}
+			let install_cmd = build_remote_cargo_install_cmd(
+				url,
+				branch.as_deref(),
+				tag.as_deref(),
+			);
+			run_remote_install_step(runner, conn, &install_cmd)
+		}
+		RemoteInstallSource::ReleaseDeb { url } => {
 			let install_cmd =
-				build_remote_cargo_install_cmd(url, branch.as_deref());
+				build_remote_release_deb_install_cmd(url, resolved_path);
 			run_remote_install_step(runner, conn, &install_cmd)
 		}
 	}
@@ -469,6 +511,40 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 	local_version: &str,
 	source: &RemoteInstallSource,
 ) -> Result<TestResult, ConnectError> {
+	force_install_remote_api(
+		runner,
+		conn,
+		local_version,
+		source,
+		"aghub-api redeployed",
+	)
+}
+
+/// Force-reinstall `aghub-api` on the remote and re-probe. This is intended for
+/// explicit user action from the connection-management test panel, so it does
+/// not skip just because a compatible binary is already present.
+pub fn reinstall_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local_version: &str,
+	source: &RemoteInstallSource,
+) -> Result<TestResult, ConnectError> {
+	force_install_remote_api(
+		runner,
+		conn,
+		local_version,
+		source,
+		"aghub-api reinstalled",
+	)
+}
+
+fn force_install_remote_api<R: CommandRunner>(
+	runner: &R,
+	conn: &Connection,
+	local_version: &str,
+	source: &RemoteInstallSource,
+	install_message: &str,
+) -> Result<TestResult, ConnectError> {
 	let bin = resolved_path(conn);
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
@@ -477,8 +553,9 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 			stage_remote_api_upload(runner, conn, local)?;
 			finish_remote_api_upload(runner, conn, &bin)?;
 		}
-		RemoteInstallSource::CargoGit { .. } => {
-			// Cargo builds in place on the VM.
+		RemoteInstallSource::CargoGit { .. }
+		| RemoteInstallSource::ReleaseDeb { .. } => {
+			// These sources install in place on the VM.
 			install_remote_api(runner, conn, &bin, source)?;
 		}
 	}
@@ -488,7 +565,7 @@ pub fn force_redeploy_remote_api<R: CommandRunner>(
 			stderr: probe.message,
 		});
 	}
-	Ok(probe.with_install_result(true, "aghub-api redeployed".to_string()))
+	Ok(probe.with_install_result(true, install_message.to_string()))
 }
 
 fn run_remote_install_step<R: CommandRunner>(
@@ -689,6 +766,25 @@ mod tests {
 		build_ssh_args(&conn(), &remote_cmd)
 	}
 
+	/// The exact ssh argv the capability probe builds for [`conn`]. The
+	/// version probe now issues this SECOND round-trip whenever the binary is
+	/// present, so any test scripting a present-binary probe must also script
+	/// (or deliberately leave unscripted -> fail-safe false) this key.
+	fn capabilities_args() -> Vec<String> {
+		let remote_cmd = crate::ssh::build_remote_capabilities_cmd("aghub-api");
+		build_ssh_args(&conn(), &remote_cmd)
+	}
+
+	/// A scripted `--capabilities` output advertising forwarding support.
+	fn capabilities_ok() -> CommandOutput {
+		CommandOutput {
+			status_code: Some(0),
+			stdout: "AGHUB_API_CAPABILITIES=git-credential-forwarding\n"
+				.to_string(),
+			stderr: String::new(),
+		}
+	}
+
 	fn args_as_str(args: &[String]) -> Vec<&str> {
 		args.iter().map(|s| s.as_str()).collect()
 	}
@@ -720,20 +816,84 @@ mod tests {
 	#[test]
 	fn probe_ok_reports_present_compatible() {
 		let args = probe_args();
-		let runner = MockRunner::new().script(
-			"ssh",
-			&args_as_str(&args),
-			CommandOutput {
-				status_code: Some(0),
-				stdout: "aghub-api 1.1.1".to_string(),
-				stderr: String::new(),
-			},
-		);
+		let caps = capabilities_args();
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.1.1".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&caps), capabilities_ok());
 		let res = probe_connection(&runner, &conn(), LOCAL);
 		assert!(res.reachable);
 		assert!(res.api_present);
 		assert_eq!(res.api_version.as_deref(), Some("1.1.1"));
 		assert!(res.compatible);
+		// A capable remote advertises the marker -> forwarding engaged.
+		assert!(res.supports_credential_forwarding);
+	}
+
+	#[test]
+	fn probe_present_old_remote_reports_no_credential_forwarding() {
+		// An OLD remote: version probe succeeds (present + compatible), but the
+		// capability probe hits the binary's unknown-flag error (non-zero
+		// exit). Fail-safe: forwarding NOT engaged even though the version is
+		// otherwise compatible.
+		let args = probe_args();
+		let caps = capabilities_args();
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.1.1".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&caps),
+				CommandOutput {
+					status_code: Some(1),
+					stdout: String::new(),
+					stderr: "unknown flag: --capabilities".to_string(),
+				},
+			);
+		let res = probe_connection(&runner, &conn(), LOCAL);
+		assert!(res.reachable);
+		assert!(res.api_present);
+		assert!(res.compatible, "same major.minor stays compatible");
+		assert!(
+			!res.supports_credential_forwarding,
+			"an old same-version remote must NOT be treated as forwarding-capable"
+		);
+	}
+
+	#[test]
+	fn probe_absent_binary_reports_no_credential_forwarding() {
+		// Binary absent (command not found): no capability probe runs and the
+		// flag stays false.
+		let args = probe_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&args),
+			CommandOutput {
+				status_code: Some(127),
+				stdout: String::new(),
+				stderr: "bash: aghub-api: command not found".to_string(),
+			},
+		);
+		let res = probe_connection(&runner, &conn(), LOCAL);
+		assert!(res.reachable);
+		assert!(!res.api_present);
+		assert!(!res.supports_credential_forwarding);
+		// Only the version probe ran; no capability probe for an absent binary.
+		assert_eq!(runner.calls().len(), 1);
 	}
 
 	#[test]
@@ -910,30 +1070,83 @@ mod tests {
 		// the first probe finds it present + compatible, so we return Ok and
 		// NEVER attempt an install — even though a source IS available.
 		let args = probe_args();
-		let runner = MockRunner::new().script(
-			"ssh",
-			&args_as_str(&args),
-			CommandOutput {
-				status_code: Some(0),
-				stdout: "aghub-api 1.1.1".to_string(),
-				stderr: String::new(),
-			},
-		);
+		let caps = capabilities_args();
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.1.1".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&caps), capabilities_ok());
 		let source = RemoteInstallSource::CargoGit {
 			url: "https://github.com/audichuang/aghub.git".to_string(),
 			branch: None,
+			tag: Some("v1.1.1".to_string()),
 		};
 
 		let result = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
 			.expect("present + compatible api should return Ok");
 		assert!(result.api_present);
 		assert!(result.compatible);
+		assert!(result.supports_credential_forwarding);
 		assert!(!result.install_attempted, "no install should be attempted");
 
-		// Exactly one ssh call: the single probe. No scp, no install step.
+		// The version probe + its additive capability probe; no scp / install.
 		let calls = runner.calls();
-		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
+		assert_eq!(
+			calls.len(),
+			2,
+			"version probe + capability probe only: {calls:?}"
+		);
 		assert!(!calls.iter().any(|c| c.program == "scp"));
+	}
+
+	#[test]
+	fn ensure_remote_api_compatible_patch_mismatch_installs_when_source_exists()
+	{
+		// Same major.minor stays wire-compatible, but a shipped patch release may
+		// contain remote-side fixes. When an install source is available, bring-up
+		// should upgrade to the exact local patch instead of silently reusing the
+		// older compatible binary.
+		let probe = probe_args();
+		let url = "https://example.com/aghub_1.1.1_amd64.deb";
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: url.to_string(),
+		};
+		let install_cmd =
+			build_remote_release_deb_install_cmd(url, "aghub-api");
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let old_patch = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.0".to_string(),
+			stderr: String::new(),
+		};
+		let installed = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.1".to_string(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&probe), old_patch())
+			.script("ssh", &args_as_str(&install_args), installed());
+
+		let result = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
+			.expect("compatible patch mismatch should still upgrade");
+
+		assert!(result.compatible);
+		assert!(
+			result.install_attempted,
+			"patch mismatch with install source must install"
+		);
+		let calls = runner.calls();
+		assert!(
+			calls.iter().any(|c| c.args == install_args),
+			"release-deb install command must run: {calls:?}"
+		);
 	}
 
 	#[test]
@@ -1048,25 +1261,35 @@ mod tests {
 	fn ensure_present_incompatible_no_source_returns_ok_first() {
 		// Present-but-incompatible + NO source: unchanged behaviour — return
 		// Ok(first) so the caller surfaces the Incompatible screen. No
-		// platform probe, no scp, only the single probe runs.
+		// platform probe, no scp; the version probe + its additive capability
+		// probe run (two ssh round-trips), but no mutation.
 		let probe = probe_args();
-		let runner = MockRunner::new().script(
-			"ssh",
-			&args_as_str(&probe),
-			CommandOutput {
-				status_code: Some(0),
-				stdout: "aghub-api 1.0.0".to_string(),
-				stderr: String::new(),
-			},
-		);
+		let caps = capabilities_args();
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.0.0".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&caps), capabilities_ok());
 		let result = ensure_remote_api(&runner, &conn(), LOCAL, None)
 			.expect("present-but-incompatible + no source returns Ok(first)");
 		assert!(result.api_present);
 		assert!(!result.compatible);
 		assert!(!result.install_attempted, "no install with no source");
+		// Capability is probed independently of version compatibility.
+		assert!(result.supports_credential_forwarding);
 
 		let calls = runner.calls();
-		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
+		assert_eq!(
+			calls.len(),
+			2,
+			"version probe + capability probe only: {calls:?}"
+		);
 		assert!(!calls.iter().any(|c| c.program == "scp"));
 	}
 
@@ -1200,10 +1423,12 @@ mod tests {
 		let source = RemoteInstallSource::CargoGit {
 			url: "https://github.com/audichuang/aghub.git".to_string(),
 			branch: Some("feat/remote-ssh-management".to_string()),
+			tag: None,
 		};
 		let install_cmd = build_remote_cargo_install_cmd(
 			"https://github.com/audichuang/aghub.git",
 			Some("feat/remote-ssh-management"),
+			None,
 		);
 		let install_args = build_ssh_args(&conn(), &install_cmd);
 		let runner = MockRunner::new().script(
@@ -1226,6 +1451,36 @@ mod tests {
 	}
 
 	#[test]
+	fn install_remote_api_via_release_deb_runs_remote_deb_extract() {
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: "https://github.com/audichuang/aghub/releases/download/v2.3.2/aghub_2.3.2_amd64.deb"
+				.to_string(),
+		};
+		let install_cmd = build_remote_release_deb_install_cmd(
+			"https://github.com/audichuang/aghub/releases/download/v2.3.2/aghub_2.3.2_amd64.deb",
+			"~/.local/bin/aghub-api",
+		);
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&install_args),
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "aghub-api 2.3.2".to_string(),
+				stderr: String::new(),
+			},
+		);
+
+		install_remote_api(&runner, &conn(), "~/.local/bin/aghub-api", &source)
+			.expect("release .deb install should succeed");
+
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 1);
+		assert_eq!(calls[0].program, "ssh");
+		assert_eq!(calls[0].args, install_args);
+	}
+
+	#[test]
 	fn install_remote_api_cargo_git_refuses_explicit_custom_path() {
 		// `cargo install` only writes to ~/.cargo/bin/aghub-api, so a CargoGit
 		// deploy to an explicit custom path is refused up front (no remote
@@ -1234,6 +1489,7 @@ mod tests {
 		let source = RemoteInstallSource::CargoGit {
 			url: "https://github.com/audichuang/aghub.git".to_string(),
 			branch: None,
+			tag: Some("v1.1.1".to_string()),
 		};
 		let runner = MockRunner::new();
 		let err =
@@ -1278,11 +1534,13 @@ mod tests {
 			stdout: "aghub-api 1.1.1".to_string(),
 			stderr: String::new(),
 		};
+		let caps_args = capabilities_args();
 		let runner = MockRunner::new()
 			.script("ssh", &args_as_str(&prepare_args), ok())
 			.script("scp", &args_as_str(&scp_args), ok())
 			.script("ssh", &args_as_str(&finish_args), ver())
-			.script("ssh", &args_as_str(&probe_args), ver());
+			.script("ssh", &args_as_str(&probe_args), ver())
+			.script("ssh", &args_as_str(&caps_args), capabilities_ok());
 
 		let result =
 			force_redeploy_remote_api(&runner, &conn(), "1.1.1", &source)
@@ -1290,16 +1548,19 @@ mod tests {
 
 		assert!(result.compatible);
 		assert!(result.api_present);
+		assert!(result.supports_credential_forwarding);
 		// Strict ordering: the new binary is fully STAGED (prepare + scp),
 		// then the staged upload is moved into place (atomic `mv`), then we
-		// re-probe. No pkill; the old incompatible server is left orphaned.
+		// re-probe (version probe + its additive capability probe). No pkill;
+		// the old incompatible server is left orphaned.
 		let calls = runner.calls();
-		assert_eq!(calls.len(), 4);
+		assert_eq!(calls.len(), 5);
 		assert_eq!(calls[0].args, prepare_args, "prepare first");
 		assert_eq!(calls[1].program, "scp");
 		assert_eq!(calls[1].args, scp_args, "scp upload second");
 		assert_eq!(calls[2].args, finish_args, "finish (atomic mv) third");
-		assert_eq!(calls[3].args, probe_args, "re-probe last");
+		assert_eq!(calls[3].args, probe_args, "re-probe (version) fourth");
+		assert_eq!(calls[4].args, caps_args, "capability probe last");
 	}
 
 	#[test]
@@ -1348,6 +1609,62 @@ mod tests {
 			!calls.iter().any(|c| c.args == finish_args),
 			"finish must NOT run when staging failed: {calls:?}"
 		);
+	}
+
+	#[test]
+	fn reinstall_remote_api_forces_install_even_when_present() {
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let probe_args = build_ssh_args(
+			&conn(),
+			&crate::ssh::build_remote_probe_cmd("aghub-api"),
+		);
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let ver = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.1".to_string(),
+			stderr: String::new(),
+		};
+		let caps_args = capabilities_args();
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&prepare_args), ok())
+			.script("scp", &args_as_str(&scp_args), ok())
+			.script("ssh", &args_as_str(&finish_args), ver())
+			.script("ssh", &args_as_str(&probe_args), ver())
+			.script("ssh", &args_as_str(&caps_args), capabilities_ok());
+
+		let result =
+			reinstall_remote_api(&runner, &conn(), "1.1.1", &source).unwrap();
+
+		assert!(result.compatible);
+		assert!(result.install_attempted);
+		assert!(result.install_succeeded);
+		assert!(result.supports_credential_forwarding);
+		assert_eq!(
+			result.install_message.as_deref(),
+			Some("aghub-api reinstalled")
+		);
+		let calls = runner.calls();
+		assert_eq!(
+			calls[0].args, prepare_args,
+			"upload must be staged before the binary is swapped"
+		);
+		// prepare + scp + finish + re-probe (version) + capability probe.
+		assert_eq!(calls.len(), 5);
 	}
 
 	#[test]
@@ -1676,6 +1993,12 @@ mod tests {
 		assert!(json.get("apiPresent").is_some());
 		assert!(json.get("apiVersion").is_some());
 		assert!(json.get("api_present").is_none());
+		// The capability marker crosses IPC as camelCase for the TS side.
+		assert_eq!(
+			json.get("supportsCredentialForwarding"),
+			Some(&false.into())
+		);
+		assert!(json.get("supports_credential_forwarding").is_none());
 	}
 
 	#[test]

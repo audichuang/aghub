@@ -1,15 +1,26 @@
 import {
 	ArrowPathIcon,
 	CheckCircleIcon,
+	GlobeAltIcon,
 	PlusIcon,
 	RectangleStackIcon,
 } from "@heroicons/react/24/solid";
-import { Button, Dropdown, Tooltip, toast } from "@heroui/react";
+import {
+	Button,
+	Dropdown,
+	ListBox,
+	Select,
+	Spinner,
+	ToggleButton,
+	ToggleButtonGroup,
+	Tooltip,
+	toast,
+} from "@heroui/react";
 import {
 	useMutation,
+	useQueries,
 	useQuery,
 	useQueryClient,
-	useSuspenseQuery,
 } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
@@ -22,39 +33,414 @@ import { ListSearchHeader } from "../../components/list-search-header";
 import { MultiSelectFloatingBar } from "../../components/multi-select-floating-bar";
 import { SkillDetail } from "../../components/skill-detail";
 import { SkillList } from "../../components/skill-list";
-import type { SkillResponse, SkillUpdateResponse } from "../../generated/dto";
+import { SourceDetail } from "../../components/source-detail";
+import type { SourceRow } from "../../components/source-detail";
+import type {
+	SkillResponse,
+	SkillUpdateResponse,
+	SourcesListResponse,
+} from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
+import { useGitForwarding } from "../../hooks/use-git-forwarding";
+import { useProjects } from "../../hooks/use-projects";
 import { cn } from "../../lib/utils";
 import {
 	checkSkillUpdatesMutationOptions,
-	checkSkillUpdatesQueryKey,
+	checkSkillUpdatesQueryOptions,
 	skillListQueryOptions,
 } from "../../requests/skills";
+import { sourcesListQueryOptions } from "../../requests/sources";
+import { queryKeys } from "../../requests/keys";
 
-export default function SkillsPage() {
+// ─── Types ───────────────────────────────────────────────────────────────────
+
+type ViewMode = "agent" | "source";
+
+const TRAILING_SLASH_RE = /\/+$/;
+
+function sourceDisplayName(row: SourceRow): string {
+	if (row.sourceType !== "local") return row.source;
+	const trimmed = row.source.replace(TRAILING_SLASH_RE, "");
+	return trimmed.split("/").filter(Boolean).pop() ?? row.source;
+}
+
+function sourceRowKey(r: SourceRow) {
+	return `${r.rowScope}:${r.projectRoot ?? ""}:${r.source}`;
+}
+
+// ─── Scope control ────────────────────────────────────────────────────────────
+
+const PROJECT_KEY_PREFIX = "project:";
+
+interface ScopeControlProps {
+	scope: "global" | "project";
+	selectedProjectPath: string | null;
+	onChange: (scope: "global" | "project", projectPath: string | null) => void;
+}
+
+/**
+ * Single dropdown that selects the active scope: "Global" or one of the open
+ * projects. Replaces the old segmented switch + separate project Select — one
+ * control, one choice, far less header chrome in the narrow list column.
+ */
+function ScopeControl({
+	scope,
+	selectedProjectPath,
+	onChange,
+}: ScopeControlProps) {
+	const { t } = useTranslation();
+	const { data: projects = [] } = useProjects();
+
+	// Map (scope, projectPath) → a single Select key. A project scope with no
+	// resolved path (e.g. restored from a stale URL) falls back to no selection
+	// so the trigger shows the placeholder rather than a phantom value.
+	const selectedKey =
+		scope === "global"
+			? "global"
+			: selectedProjectPath
+				? `${PROJECT_KEY_PREFIX}${selectedProjectPath}`
+				: undefined;
+
+	return (
+		<Select
+			aria-label={t("scope")}
+			className="min-w-0 max-w-[48%]"
+			variant="secondary"
+			selectedKey={selectedKey}
+			placeholder={t("scopeSwitchProject")}
+			onSelectionChange={(key) => {
+				const k = String(key);
+				if (k === "global") {
+					onChange("global", null);
+				} else if (k.startsWith(PROJECT_KEY_PREFIX)) {
+					onChange("project", k.slice(PROJECT_KEY_PREFIX.length));
+				}
+			}}
+		>
+			<Select.Trigger>
+				<Select.Value />
+				<Select.Indicator />
+			</Select.Trigger>
+			<Select.Popover>
+				<ListBox>
+					<ListBox.Item
+						id="global"
+						textValue={t("scopeSwitchGlobal")}
+					>
+						{t("scopeSwitchGlobal")}
+						<ListBox.ItemIndicator />
+					</ListBox.Item>
+					{projects.map((p) => (
+						<ListBox.Item
+							key={p.path}
+							id={`${PROJECT_KEY_PREFIX}${p.path}`}
+							textValue={p.name}
+						>
+							{p.name}
+							<ListBox.ItemIndicator />
+						</ListBox.Item>
+					))}
+				</ListBox>
+			</Select.Popover>
+		</Select>
+	);
+}
+
+// ─── Source list panel (view=source) ─────────────────────────────────────────
+
+interface SourceListPanelProps {
+	scope: "global" | "project";
+	projectPath: string | null;
+	selectedKey: string | null;
+	onSelectKey: (key: string) => void;
+	searchQuery: string;
+}
+
+function SourceListPanel({
+	scope,
+	projectPath,
+	selectedKey,
+	onSelectKey,
+	searchQuery,
+}: SourceListPanelProps) {
 	const { t } = useTranslation();
 	const api = useApi();
+	const { data: projects = [] } = useProjects();
+
+	// Guard: do not query project sources until a project is actually selected.
+	const projectIsReady = scope !== "project" || projectPath !== null;
+
+	const sourceQueries = useQueries({
+		queries:
+			scope === "global"
+				? [sourcesListQueryOptions({ api, scope: "global" })]
+				: projects
+						.filter((p) => !projectPath || p.path === projectPath)
+						.map((p) =>
+							sourcesListQueryOptions({
+								api,
+								scope: "project",
+								projectRoot: p.path,
+								enabled: projectIsReady,
+							}),
+						),
+	});
+
+	const isLoading = sourceQueries.some((q) => q.isLoading);
+
+	const rows = useMemo<SourceRow[]>(() => {
+		if (scope === "global") {
+			const data = sourceQueries[0]?.data as
+				| SourcesListResponse
+				| undefined;
+			return (data?.sources ?? []).map((s) => ({
+				...s,
+				rowScope: "global" as const,
+			}));
+		}
+		const filtered = projectPath
+			? projects.filter((p) => p.path === projectPath)
+			: projects;
+		return filtered.flatMap((project, index) => {
+			const data = sourceQueries[index]?.data as
+				| SourcesListResponse
+				| undefined;
+			return (data?.sources ?? []).map((s) => ({
+				...s,
+				rowScope: "project" as const,
+				projectRoot: project.path,
+				projectName: project.name,
+			}));
+		});
+	}, [sourceQueries, projects, scope, projectPath]);
+
+	const filteredRows = useMemo(() => {
+		const q = searchQuery.trim().toLowerCase();
+		if (!q) return rows;
+		return rows.filter((r) => r.source.toLowerCase().includes(q));
+	}, [rows, searchQuery]);
+
+	// Show "select a project" prompt before firing any project-scoped query.
+	if (scope === "project" && projectPath === null) {
+		return (
+			<p className="px-4 py-8 text-center text-sm text-muted">
+				{t("selectProject")}
+			</p>
+		);
+	}
+
+	if (isLoading) {
+		return (
+			<div className="flex flex-1 items-center justify-center">
+				<Spinner />
+			</div>
+		);
+	}
+
+	if (filteredRows.length === 0) {
+		return (
+			<p className="px-4 py-8 text-center text-sm text-muted">
+				{t("sourcesEmpty")}
+			</p>
+		);
+	}
+
+	return (
+		<div className="min-h-0 flex-1 overflow-y-auto">
+			<ul className="space-y-1 p-2">
+				{filteredRows.map((row) => {
+					const key = sourceRowKey(row);
+					const isActive = key === selectedKey;
+					return (
+						<li key={key}>
+							<button
+								type="button"
+								onClick={() => onSelectKey(key)}
+								aria-current={isActive ? "page" : undefined}
+								className={cn(
+									"group flex h-12 w-full items-center gap-3 rounded-xl px-3 text-left outline-none transition-colors hover:bg-surface-secondary focus-visible:ring-2 focus-visible:ring-accent/35",
+									isActive && "bg-surface",
+								)}
+							>
+								<GlobeAltIcon
+									className={cn(
+										"size-5 shrink-0 text-muted",
+										isActive && "text-foreground",
+									)}
+								/>
+								<span
+									className="min-w-0 flex-1 truncate text-base font-semibold leading-6 text-foreground"
+									title={row.source}
+								>
+									{sourceDisplayName(row)}
+								</span>
+								<span className="ml-auto shrink-0 rounded-full bg-surface-tertiary px-2 font-mono text-sm leading-7 text-muted tabular-nums">
+									{row.skillCount}
+								</span>
+							</button>
+						</li>
+					);
+				})}
+			</ul>
+		</div>
+	);
+}
+
+// ─── Main page ───────────────────────────────────────────────────────────────
+
+export default function SkillsPage() {
+	const { t, i18n } = useTranslation();
+	const api = useApi();
+	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
 	const queryClient = useQueryClient();
-	const updateCheckParams = useMemo(() => ({ scope: "global" as const }), []);
+
+	// ── URL state (nuqs) ──
+	const [view, setView] = useQueryState<ViewMode>("view", {
+		defaultValue: "agent",
+		parse: (v): ViewMode => (v === "source" ? "source" : "agent"),
+		serialize: (v) => v,
+	});
+	const [selectedSkillName, setSelectedSkillName] = useQueryState("skill");
+	const [selectedSourceKey, setSelectedSourceKey] = useQueryState("source");
+
+	const handleSetView = (newView: ViewMode) => {
+		// Clear the other view's param when switching
+		if (newView === "source") {
+			void setSelectedSkillName(null);
+		} else {
+			void setSelectedSourceKey(null);
+		}
+		void setView(newView);
+	};
+
+	// ── Scope / project state — derived from URL source key on initial load ──
+	// Parse scope and projectRoot from a composite source key "scope:projectRoot:source".
+	const parseScopeFromKey = (key: string | null): "global" | "project" =>
+		key?.startsWith("project:") ? "project" : "global";
+	const parseProjectFromKey = (key: string | null): string | null => {
+		if (!key?.startsWith("project:")) return null;
+		// key format: "project:<projectRoot>:<source>" where projectRoot may be empty
+		const afterPrefix = key.slice("project:".length);
+		const colonIdx = afterPrefix.indexOf(":");
+		return colonIdx === -1 ? null : afterPrefix.slice(0, colonIdx) || null;
+	};
+
+	const [scope, setScope] = useState<"global" | "project">(() =>
+		parseScopeFromKey(selectedSourceKey),
+	);
+	const [selectedProjectPath, setSelectedProjectPath] = useState<
+		string | null
+	>(() => parseProjectFromKey(selectedSourceKey));
+
+	const handleScopeSelect = (
+		newScope: "global" | "project",
+		newProjectPath: string | null,
+	) => {
+		setScope(newScope);
+		setSelectedProjectPath(newProjectPath);
+		// Clear a selected source that no longer belongs to the new scope/project.
+		if (selectedSourceKey !== null) {
+			if (newScope === "global") {
+				if (selectedSourceKey.startsWith(PROJECT_KEY_PREFIX)) {
+					void setSelectedSourceKey(null);
+				}
+			} else if (
+				parseProjectFromKey(selectedSourceKey) !== newProjectPath
+			) {
+				void setSelectedSourceKey(null);
+			}
+		}
+	};
+
+	// ── Skills data ──
+	// Guard: do not fire project-scoped skill query until a project is selected.
+	const projectIsReady = scope !== "project" || selectedProjectPath !== null;
+
+	const skillQueryProjectRoot = useMemo(
+		() =>
+			scope === "project"
+				? (selectedProjectPath ?? undefined)
+				: undefined,
+		[scope, selectedProjectPath],
+	);
+
 	const {
-		data: skills,
+		data: skills = [],
 		refetch,
 		isFetching,
-	} = useSuspenseQuery({
-		...skillListQueryOptions({ api, scope: "global" }),
+	} = useQuery({
+		...skillListQueryOptions({
+			api,
+			scope,
+			projectRoot: skillQueryProjectRoot,
+			enabled: projectIsReady,
+		}),
 	});
+
+	const updateCheckParams = useMemo(
+		() => ({
+			scope,
+			projectRoot: skillQueryProjectRoot,
+		}),
+		[scope, skillQueryProjectRoot],
+	);
+
+	// Auto-check: fires on mount if data is stale (>10 min), online,
+	// and a project is actually selected when in project scope.
+	const {
+		data: cachedUpdateChecks,
+		isFetching: isAutoChecking,
+		dataUpdatedAt: checksUpdatedAt,
+	} = useQuery(
+		checkSkillUpdatesQueryOptions({
+			api,
+			params: updateCheckParams,
+			enabled: navigator.onLine && projectIsReady,
+			forwardForBoundSources,
+		}),
+	);
+
+	// Derive lastCheckedDate from dataUpdatedAt (ms since epoch, 0 = never).
+	const lastCheckedDate = useMemo(
+		() => (checksUpdatedAt > 0 ? new Date(checksUpdatedAt) : null),
+		[checksUpdatedAt],
+	);
+
+	// Manual refresh mutation — keeps explicit isPending for the button spinner.
 	const checkUpdatesMutation = useMutation(
 		checkSkillUpdatesMutationOptions({
 			api,
 			queryClient,
+			forwardForBoundSources,
+			onSuccess: (data) => {
+				const updateCount = data.filter(
+					(s) =>
+						s.status === "updateAvailable" ||
+						s.status === "renamed",
+				).length;
+				const uncheckableCount = data.filter(
+					(s) => s.status === "uncheckable",
+				).length;
+				if (updateCount > 0) {
+					toast.info(
+						t("skillCheckCompleteWithUpdates", {
+							count: updateCount,
+						}),
+					);
+				} else if (uncheckableCount > 0) {
+					toast.warning(
+						t("skillCheckCompleteSomeUncheckable", {
+							count: uncheckableCount,
+						}),
+					);
+				} else {
+					toast.success(t("skillCheckCompleteAllGood"));
+				}
+			},
 			onError: () => toast.danger(t("skillUpdateCheckError")),
 		}),
 	);
-	const { data: cachedUpdateChecks } = useQuery({
-		queryKey: checkSkillUpdatesQueryKey(updateCheckParams),
-		queryFn: () => api.skills.checkUpdates(updateCheckParams),
-		enabled: false,
-	});
+
 	const updateStatuses = useMemo(
 		() =>
 			new Map<string, SkillUpdateResponse>(
@@ -62,23 +448,48 @@ export default function SkillsPage() {
 			),
 		[cachedUpdateChecks],
 	);
+
+	const isRefreshingSkills =
+		isFetching || checkUpdatesMutation.isPending || isAutoChecking;
+
+	const handleRefreshSkills = async () => {
+		// Guard: do not fire project-scoped API calls without a project selected.
+		if (isRefreshingSkills || !projectIsReady) return;
+		await refetch();
+		checkUpdatesMutation.mutate(updateCheckParams);
+	};
+
+	/** Returns a human-readable relative string using the current UI locale. */
+	const formatRelativeTime = (date: Date): string => {
+		const diffMs = Date.now() - date.getTime();
+		const diffSec = Math.round(diffMs / 1_000);
+		const diffMin = Math.round(diffMs / 60_000);
+		const diffHr = Math.round(diffMs / 3_600_000);
+		const diffDay = Math.round(diffMs / 86_400_000);
+		const rtf = new Intl.RelativeTimeFormat(i18n.language, {
+			numeric: "auto",
+		});
+		if (diffSec < 60) return rtf.format(-diffSec, "second");
+		if (diffMin < 60) return rtf.format(-diffMin, "minute");
+		if (diffHr < 24) return rtf.format(-diffHr, "hour");
+		return rtf.format(-diffDay, "day");
+	};
+
+	// ── Agent-view state ──
 	const [searchQuery, setSearchQuery] = useState("");
-	const [selectedName, setSelectedName] = useQueryState("skill");
 	const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
 		() => new Set(),
 	);
 	const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
 	const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
-
+	// pendingAuthSkill: when set, the SkillDetail for this skill will open the
+	// credential dialog as soon as it renders.
+	const [pendingAuthSkill, setPendingAuthSkill] = useState<string | null>(
+		null,
+	);
 	const [panelMode, setPanelMode] = useState<
 		"create" | "import" | "import-github" | null
 	>(null);
-	const isRefreshingSkills = isFetching || checkUpdatesMutation.isPending;
-
-	const handleRefreshSkills = async () => {
-		await refetch();
-		checkUpdatesMutation.mutate(updateCheckParams);
-	};
 
 	const groupedSkills = useMemo(() => {
 		const map = new Map<string, SkillResponse[]>();
@@ -94,18 +505,19 @@ export default function SkillsPage() {
 	}, [skills]);
 
 	const activeGroup = useMemo(() => {
-		if (selectedName) {
-			return groupedSkills.find((g) => g.name === selectedName) ?? null;
+		if (selectedSkillName) {
+			return (
+				groupedSkills.find((g) => g.name === selectedSkillName) ?? null
+			);
 		}
 		return groupedSkills[0] ?? null;
-	}, [selectedName, groupedSkills]);
+	}, [selectedSkillName, groupedSkills]);
 
-	// 多选模式下被选中的所有 groups（用于批量删除）
-	const selectedGroups = useMemo(() => {
-		return groupedSkills.filter((g) => selectedKeys.has(g.name));
-	}, [selectedKeys, groupedSkills]);
+	const selectedGroups = useMemo(
+		() => groupedSkills.filter((g) => selectedKeys.has(g.name)),
+		[selectedKeys, groupedSkills],
+	);
 
-	// ListBox 高亮用的 keys
 	const effectiveSelectedKeys = useMemo(() => {
 		if (selectedKeys.size > 0) return selectedKeys;
 		if (activeGroup && !isMultiSelectMode) {
@@ -116,11 +528,9 @@ export default function SkillsPage() {
 
 	const handleSelectionChange = (keys: Set<string>, clickedKey?: string) => {
 		setSelectedKeys(keys);
-
 		if (clickedKey && !isMultiSelectMode) {
-			setSelectedName(clickedKey);
+			void setSelectedSkillName(clickedKey);
 		}
-
 		if (keys.size > 1 && !isMultiSelectMode) {
 			setIsMultiSelectMode(true);
 		}
@@ -130,197 +540,403 @@ export default function SkillsPage() {
 		setPanelMode(null);
 	};
 
-	const handleCreateSkill = () => {
-		setSelectedKeys(new Set());
-		setSelectedName(null);
-		setPanelMode("create");
-	};
+	// ── Source-view state ──
+	const [sourceImporting, setSourceImporting] = useState(false);
 
-	const handleImportSkill = () => {
-		setSelectedKeys(new Set());
-		setSelectedName(null);
-		setPanelMode("import");
+	// When selecting a source, also sync the scope/project segments from the key.
+	// Key format: "scope:projectRoot:source"
+	const handleSourceSelect = (key: string) => {
+		void setSelectedSourceKey(key);
+		setSourceImporting(false);
+		const keyScope = parseScopeFromKey(key);
+		const keyProject = parseProjectFromKey(key);
+		setScope(keyScope);
+		setSelectedProjectPath(keyProject);
 	};
+	const { data: projects = [] } = useProjects();
+
+	// Load all sources so we can resolve a full SourceRow from the URL key.
+	const allSourcesQuery = useQueries({
+		queries: [
+			sourcesListQueryOptions({ api, scope: "global" }),
+			...projects.map((p) =>
+				sourcesListQueryOptions({
+					api,
+					scope: "project",
+					projectRoot: p.path,
+				}),
+			),
+		],
+	});
+
+	const resolvedSourceRow = useMemo<SourceRow | null>(() => {
+		if (!selectedSourceKey) return null;
+		const globalData = allSourcesQuery[0]?.data as
+			| SourcesListResponse
+			| undefined;
+		const globalRows: SourceRow[] = (globalData?.sources ?? []).map(
+			(s) => ({ ...s, rowScope: "global" as const }),
+		);
+		const projectRows: SourceRow[] = projects.flatMap((p, i) => {
+			const data = allSourcesQuery[i + 1]?.data as
+				| SourcesListResponse
+				| undefined;
+			return (data?.sources ?? []).map((s) => ({
+				...s,
+				rowScope: "project" as const,
+				projectRoot: p.path,
+				projectName: p.name,
+			}));
+		});
+		const allRows = [...globalRows, ...projectRows];
+		return (
+			allRows.find((r) => sourceRowKey(r) === selectedSourceKey) ?? null
+		);
+	}, [selectedSourceKey, allSourcesQuery, projects]);
+
+	// Refresh control, shared by the agent + source toolbars. The last-checked
+	// time lives in its tooltip so it never competes for room in the narrow
+	// header row.
+	const refreshButton = (
+		<Tooltip delay={0}>
+			<Button
+				isIconOnly
+				variant="ghost"
+				size="sm"
+				className="shrink-0"
+				aria-label={t("refreshSkills")}
+				isDisabled={isRefreshingSkills || !projectIsReady}
+				onPress={() => {
+					void handleRefreshSkills();
+				}}
+			>
+				<ArrowPathIcon
+					className={cn(
+						"size-4",
+						isRefreshingSkills && "animate-spin",
+					)}
+				/>
+			</Button>
+			<Tooltip.Content>
+				<div className="flex flex-col gap-0.5">
+					<span>{t("refreshSkills")}</span>
+					<span className="opacity-70">
+						{lastCheckedDate
+							? t("lastCheckedAgo", {
+									time: formatRelativeTime(lastCheckedDate),
+								})
+							: t("lastCheckedNever")}
+					</span>
+				</div>
+			</Tooltip.Content>
+		</Tooltip>
+	);
 
 	return (
-		<div className="flex h-full">
-			{/* Skills List Panel */}
-			<div className="relative flex w-80 shrink-0 flex-col border-r border-border">
-				<ListSearchHeader
-					searchValue={searchQuery}
-					onSearchChange={setSearchQuery}
-					placeholder={t("searchSkills")}
-					ariaLabel={t("searchSkills")}
-				>
-					<Tooltip delay={0}>
-						<Tooltip.Trigger>
-							<div
-								role="button"
-								tabIndex={0}
-								className={cn(
-									"flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted transition-colors hover:bg-default hover:text-foreground focus:outline-none focus:ring-2 focus:ring-accent/40",
-									isMultiSelectMode &&
-										"bg-accent/10 text-accent",
-								)}
-								aria-label={
-									isMultiSelectMode
-										? t("doneSelecting")
-										: t("multiSelect")
+		<div className="flex h-full flex-col">
+			<div className="flex min-h-0 flex-1">
+				{/* Left panel: list */}
+				<div className="relative flex w-80 shrink-0 flex-col border-r border-border">
+					{/* Row A — view + scope (replaces the old full-width
+					    header + view-toggle + segmented scope rows) */}
+					<div className="flex items-center justify-between gap-2 px-3 pt-3">
+						<ToggleButtonGroup
+							selectedKeys={[view]}
+							onSelectionChange={(keys) =>
+								handleSetView([...keys][0] as ViewMode)
+							}
+							selectionMode="single"
+							disallowEmptySelection
+							size="sm"
+						>
+							<ToggleButton id="agent">
+								{t("viewByAgent")}
+							</ToggleButton>
+							<ToggleButtonGroup.Separator />
+							<ToggleButton id="source">
+								{t("viewBySource")}
+							</ToggleButton>
+						</ToggleButtonGroup>
+						<ScopeControl
+							scope={scope}
+							selectedProjectPath={selectedProjectPath}
+							onChange={handleScopeSelect}
+						/>
+					</div>
+
+					{view === "agent" ? (
+						<>
+							<ListSearchHeader
+								searchValue={searchQuery}
+								onSearchChange={setSearchQuery}
+								placeholder={t("searchSkills")}
+								ariaLabel={t("searchSkills")}
+							>
+								<Tooltip delay={0}>
+									<Tooltip.Trigger>
+										<div
+											role="button"
+											tabIndex={0}
+											className={cn(
+												"flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted transition-colors hover:bg-default hover:text-foreground focus:outline-none focus:ring-2 focus:ring-accent/40",
+												isMultiSelectMode &&
+													"bg-accent/10 text-accent",
+											)}
+											aria-label={
+												isMultiSelectMode
+													? t("doneSelecting")
+													: t("multiSelect")
+											}
+											onClick={() => {
+												setIsMultiSelectMode(
+													(prev) => !prev,
+												);
+												if (isMultiSelectMode) {
+													handleSelectionChange(
+														new Set(),
+													);
+												}
+											}}
+											onKeyDown={(event) => {
+												if (
+													event.key !== "Enter" &&
+													event.key !== " "
+												) {
+													return;
+												}
+												event.preventDefault();
+												setIsMultiSelectMode(
+													(prev) => !prev,
+												);
+												if (isMultiSelectMode) {
+													handleSelectionChange(
+														new Set(),
+													);
+												}
+											}}
+										>
+											{isMultiSelectMode ? (
+												<CheckCircleIcon className="size-4" />
+											) : (
+												<RectangleStackIcon className="size-4" />
+											)}
+										</div>
+									</Tooltip.Trigger>
+									<Tooltip.Content>
+										{isMultiSelectMode
+											? t("doneSelecting")
+											: t("multiSelect")}
+									</Tooltip.Content>
+								</Tooltip>
+								<Dropdown>
+									<Button
+										isIconOnly
+										variant="ghost"
+										size="sm"
+										className="shrink-0"
+										aria-label={t("addSkill")}
+									>
+										<PlusIcon className="size-4" />
+									</Button>
+									<Dropdown.Popover placement="bottom end">
+										<Dropdown.Menu
+											onAction={(key) => {
+												if (key === "create") {
+													setSelectedKeys(new Set());
+													void setSelectedSkillName(
+														null,
+													);
+													setPanelMode("create");
+												} else if (key === "import") {
+													setSelectedKeys(new Set());
+													void setSelectedSkillName(
+														null,
+													);
+													setPanelMode("import");
+												} else if (
+													key === "import-github"
+												) {
+													setSelectedKeys(new Set());
+													void setSelectedSkillName(
+														null,
+													);
+													setPanelMode(
+														"import-github",
+													);
+												}
+											}}
+										>
+											<Dropdown.Item
+												id="create"
+												textValue={t(
+													"createCustomSkill",
+												)}
+											>
+												{t("createCustomSkill")}
+											</Dropdown.Item>
+											<Dropdown.Item
+												id="import"
+												textValue={t("importFromFile")}
+											>
+												{t("importFromFile")}
+											</Dropdown.Item>
+											<Dropdown.Item
+												id="import-github"
+												textValue={t(
+													"importRemoteSource",
+												)}
+											>
+												{t("importRemoteSource")}
+											</Dropdown.Item>
+										</Dropdown.Menu>
+									</Dropdown.Popover>
+								</Dropdown>
+								{refreshButton}
+							</ListSearchHeader>
+
+							<SkillList
+								skills={skills}
+								selectedKeys={effectiveSelectedKeys}
+								searchQuery={searchQuery}
+								onSelectionChange={handleSelectionChange}
+								selectionMode="multiple"
+								isMultiSelectMode={isMultiSelectMode}
+								groupBySource={true}
+								projectPath={
+									scope === "project"
+										? (selectedProjectPath ?? undefined)
+										: undefined
 								}
-								onClick={() => {
-									setIsMultiSelectMode((prev) => !prev);
-									if (isMultiSelectMode) {
-										handleSelectionChange(new Set());
-									}
+								updateStatuses={updateStatuses}
+								onResolveAuth={(skillName: string) => {
+									void setSelectedSkillName(skillName);
+									setPendingAuthSkill(skillName);
 								}}
-								onKeyDown={(event) => {
-									if (
-										event.key !== "Enter" &&
-										event.key !== " "
-									) {
-										return;
-									}
-									event.preventDefault();
-									setIsMultiSelectMode((prev) => !prev);
-									if (isMultiSelectMode) {
-										handleSelectionChange(new Set());
-									}
-								}}
-							>
-								{isMultiSelectMode ? (
-									<CheckCircleIcon className="size-4" />
-								) : (
-									<RectangleStackIcon className="size-4" />
-								)}
-							</div>
-						</Tooltip.Trigger>
-						<Tooltip.Content>
-							{isMultiSelectMode
-								? t("doneSelecting")
-								: t("multiSelect")}
-						</Tooltip.Content>
-					</Tooltip>
-					<Dropdown>
-						<Button
-							isIconOnly
-							variant="ghost"
-							size="sm"
-							className="shrink-0"
-							aria-label={t("addSkill")}
-						>
-							<PlusIcon className="size-4" />
-						</Button>
-						<Dropdown.Popover placement="bottom end">
-							<Dropdown.Menu
-								onAction={(key) => {
-									if (key === "create") {
-										handleCreateSkill();
-									} else if (key === "import") {
-										handleImportSkill();
-									} else if (key === "import-github") {
-										setSelectedKeys(new Set());
-										setSelectedName(null);
-										setPanelMode("import-github");
-									}
-								}}
-							>
-								<Dropdown.Item
-									id="create"
-									textValue={t("createCustomSkill")}
-								>
-									{t("createCustomSkill")}
-								</Dropdown.Item>
-								<Dropdown.Item
-									id="import"
-									textValue={t("importFromFile")}
-								>
-									{t("importFromFile")}
-								</Dropdown.Item>
-								<Dropdown.Item
-									id="import-github"
-									textValue={t("importRemoteSource")}
-								>
-									{t("importRemoteSource")}
-								</Dropdown.Item>
-							</Dropdown.Menu>
-						</Dropdown.Popover>
-					</Dropdown>
-					<Tooltip delay={0}>
-						<Button
-							isIconOnly
-							variant="ghost"
-							size="sm"
-							className="shrink-0"
-							aria-label={t("refreshSkills")}
-							isDisabled={isRefreshingSkills}
-							onPress={() => {
-								void handleRefreshSkills();
-							}}
-						>
-							<ArrowPathIcon
-								className={cn(
-									"size-4",
-									isRefreshingSkills && "animate-spin",
-								)}
 							/>
-						</Button>
-						<Tooltip.Content>{t("refreshSkills")}</Tooltip.Content>
-					</Tooltip>
-				</ListSearchHeader>
 
-				{/* Skills List */}
-				<SkillList
-					skills={skills}
-					selectedKeys={effectiveSelectedKeys}
-					searchQuery={searchQuery}
-					onSelectionChange={handleSelectionChange}
-					selectionMode="multiple"
-					isMultiSelectMode={isMultiSelectMode}
-					groupBySource={true}
-					updateStatuses={updateStatuses}
-				/>
+							{isMultiSelectMode && selectedKeys.size > 0 && (
+								<MultiSelectFloatingBar
+									selectedCount={selectedKeys.size}
+									totalCount={groupedSkills.length}
+									onDelete={() =>
+										setIsBulkDeleteDialogOpen(true)
+									}
+								/>
+							)}
+						</>
+					) : (
+						<>
+							<ListSearchHeader
+								searchValue={searchQuery}
+								onSearchChange={setSearchQuery}
+								placeholder={t("searchSources")}
+								ariaLabel={t("searchSources")}
+							>
+								{refreshButton}
+							</ListSearchHeader>
+							<SourceListPanel
+								scope={scope}
+								projectPath={selectedProjectPath}
+								selectedKey={selectedSourceKey}
+								onSelectKey={handleSourceSelect}
+								searchQuery={searchQuery}
+							/>
+						</>
+					)}
+				</div>
 
-				{isMultiSelectMode && selectedKeys.size > 0 && (
-					<MultiSelectFloatingBar
-						selectedCount={selectedKeys.size}
-						totalCount={groupedSkills.length}
-						onDelete={() => setIsBulkDeleteDialogOpen(true)}
-					/>
-				)}
-			</div>
-
-			<div className="flex-1 overflow-hidden relative">
-				{panelMode === "create" ? (
-					<CreateSkillPanel onDone={() => setPanelMode(null)} />
-				) : panelMode === "import" ? (
-					<ImportSkillPanel onDone={() => setPanelMode(null)} />
-				) : panelMode === "import-github" ? (
-					<ImportGithubSkillPanel onDone={() => setPanelMode(null)} />
-				) : activeGroup ? (
-					<SkillDetail group={activeGroup} />
-				) : (
-					<div className="flex h-full flex-col items-center justify-center gap-4">
-						<div className="text-center">
-							<p className="mb-2 text-sm text-muted">
-								{t("selectSkill")}
+				{/* Right panel: detail */}
+				<div className="relative flex-1 overflow-hidden">
+					{view === "agent" && !projectIsReady ? (
+						<div className="flex h-full flex-col items-center justify-center gap-4">
+							<p className="text-sm text-muted">
+								{t("selectProject")}
 							</p>
 						</div>
-					</div>
-				)}
+					) : view === "agent" ? (
+						panelMode === "create" ? (
+							<CreateSkillPanel
+								onDone={() => setPanelMode(null)}
+								projectPath={selectedProjectPath ?? undefined}
+							/>
+						) : panelMode === "import" ? (
+							<ImportSkillPanel
+								onDone={() => setPanelMode(null)}
+								projectPath={selectedProjectPath ?? undefined}
+							/>
+						) : panelMode === "import-github" ? (
+							<ImportGithubSkillPanel
+								onDone={() => setPanelMode(null)}
+								projectPath={selectedProjectPath ?? undefined}
+							/>
+						) : activeGroup ? (
+							<SkillDetail
+								key={
+									pendingAuthSkill === activeGroup.name
+										? `${activeGroup.name}-cred`
+										: activeGroup.name
+								}
+								group={activeGroup}
+								projectPath={selectedProjectPath ?? undefined}
+								openCredDialog={
+									pendingAuthSkill === activeGroup.name
+								}
+								onCredDialogClose={() => {
+									setPendingAuthSkill(null);
+								}}
+							/>
+						) : (
+							<div className="flex h-full flex-col items-center justify-center gap-4">
+								<p className="text-sm text-muted">
+									{t("selectSkill")}
+								</p>
+							</div>
+						)
+					) : resolvedSourceRow ? (
+						sourceImporting ? (
+							<ImportGithubSkillPanel
+								initialUrl={resolvedSourceRow.sourceUrl}
+								projectPath={
+									resolvedSourceRow.rowScope === "project"
+										? resolvedSourceRow.projectRoot
+										: undefined
+								}
+								onDone={() => {
+									setSourceImporting(false);
+									void queryClient.invalidateQueries({
+										queryKey:
+											queryKeys.skills.sources.all(),
+									});
+								}}
+							/>
+						) : (
+							<SourceDetail
+								row={resolvedSourceRow}
+								onImport={() => setSourceImporting(true)}
+							/>
+						)
+					) : (
+						<div className="flex h-full flex-col items-center justify-center gap-4">
+							<p className="text-sm text-muted">
+								{t("selectSource")}
+							</p>
+						</div>
+					)}
 
-				<BulkDeleteDialog
-					isOpen={isBulkDeleteDialogOpen}
-					onClose={() => setIsBulkDeleteDialogOpen(false)}
-					groups={selectedGroups.map((g) => ({
-						key: g.name,
-						items: g.items,
-					}))}
-					onSuccess={() => {
-						handleSelectionChange(new Set());
-						refetch();
-					}}
-					resourceType="skill"
-				/>
+					<BulkDeleteDialog
+						isOpen={isBulkDeleteDialogOpen}
+						onClose={() => setIsBulkDeleteDialogOpen(false)}
+						groups={selectedGroups.map((g) => ({
+							key: g.name,
+							items: g.items,
+						}))}
+						onSuccess={() => {
+							handleSelectionChange(new Set());
+							void refetch();
+						}}
+						resourceType="skill"
+					/>
+				</div>
 			</div>
 		</div>
 	);

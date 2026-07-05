@@ -25,6 +25,10 @@ coverage/
 # lint them; they carry their own branch's files, including byte-exact fixtures).
 .claude/worktrees/
 
+# Session history scratch (git-ignored already, but prettier doesn't read
+# .gitignore — keep these transient notes/dumps out of the format gate).
+.remember/
+
 # OS
 .DS_Store
 Thumbs.db

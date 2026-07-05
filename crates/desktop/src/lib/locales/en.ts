@@ -1,4 +1,10 @@
 export default {
+	pluginStateInstalled: "Installed",
+	select: "Select",
+	pluginSelectedCount: "{{count}} selected",
+	pluginInstallableCount: "{{count}} available to install",
+	pluginInstallSelected: "Install selected",
+	pluginInstallAll: "Install all",
 	// Common
 	settings: "Settings",
 	skills: "Skills",
@@ -399,8 +405,6 @@ export default {
 	// --- Per-skill update check (F1 / Workstream D) ---
 	checkForSkillUpdates: "Check for updates",
 	checkingForSkillUpdates: "Checking…",
-	skillUpToDate: "Up to date",
-	skillUpToDateTooltip: "This skill matches its source.",
 	skillUpdateAvailableBadge: "Update available",
 	skillUpdateAvailableTooltip:
 		"Source changed: {{current}} → {{available}}. Sync to update.",
@@ -422,6 +426,21 @@ export default {
 		"This private source needs a credential. Add one and retry.",
 	skillUpdateCheckError: "Couldn't check for skill updates.",
 	skillUpdateApplyError: "Couldn't apply the skill update.",
+	/** Toast when check completes and N skills have updates. */
+	skillCheckCompleteWithUpdates:
+		"Check complete — {{count}} update(s) available",
+	/** Toast when check completes but some skills could not be checked. */
+	skillCheckCompleteSomeUncheckable:
+		"Check complete — {{count}} skill(s) could not be verified",
+	/** Toast when check completes and everything is current. */
+	skillCheckCompleteAllGood: "All skills are up to date",
+	/** List header label. {{time}} is a human-readable relative string
+	 *  like "3 minutes ago" produced by the component. */
+	lastCheckedAgo: "Last checked {{time}}",
+	/** Shown when check has never run this session. */
+	lastCheckedNever: "Never checked",
+	/** Button label to re-run the check manually. */
+	recheck: "Recheck",
 	onboardingDescription:
 		"Replay the welcome screen or either guided tour any time.",
 
@@ -460,9 +479,9 @@ export default {
 	onboardingMcpTitle: "Global MCP servers",
 	onboardingMcpDescription:
 		"This page is for shared MCP server definitions you want available to one or more agents across your machine.",
-	onboardingSkillsTitle: "Installed skills",
+	onboardingSkillsTitle: "Skills & Sources",
 	onboardingSkillsDescription:
-		"Review local skills, inspect their contents, and manage what is already available to your agents.",
+		"Browse and manage skills by Agent or by Source. Run update checks, install new skills, and handle renamed or removed entries — all in one place.",
 	onboardingSettingsTitle: "Settings stay close by",
 	onboardingSettingsDescription:
 		"Appearance, agent availability, editor integrations, and these onboarding controls all live here.",
@@ -555,6 +574,12 @@ export default {
 	scanFailed: "Failed to scan repository",
 	scanFailedHint:
 		"Please check you are using the correct token or that SSO is configured correctly.",
+	gitCredAvailable:
+		"A saved Git credential for {{host}} was found on this machine — leave credentials empty and just scan.",
+	gitCredMissing:
+		'If this repo needs credentials: no non-interactive Git credential for {{host}} was found on this machine. Sign in once here, or tick "Private repo" and add a token. Public repos can ignore this.',
+	gitCredUnavailable:
+		'git is not installed here. If the repo needs credentials, tick "Private repo" and add a token. Public repos still scan fine.',
 	noSkillsFoundInRepo: "No skills found in this repository.",
 	selectSkillsToInstall: "Select skills to install",
 	branch: "Branch",
@@ -755,6 +780,11 @@ export default {
 	deepLinkUnsupportedType: "This deep link type is not supported.",
 	deepLinkInvalidSkill: "This skill link is missing required fields.",
 	deepLinkInvalidMcp: "This MCP link payload is invalid.",
+	executableMcpWarningTitle: "This MCP can run a command",
+	executableMcpWarningDescription:
+		"Stdio MCP servers are executable commands that agents may run later. Only install this import if you trust its source and have reviewed every command, argument, and environment variable below.",
+	confirmExecutableMcp:
+		"I understand this import can persist an executable command for agents to run later.",
 	copyTooltip: "Copy as JSON",
 	copied: "Copied to clipboard",
 	editTooltip: "Edit server",
@@ -832,6 +862,7 @@ export default {
 	projectSkills: "Project Skills",
 	metadata: "Metadata",
 	installedFrom: "Installed From",
+	viewSkillSource: "View in Sources",
 	syncFromSource: "Sync from source",
 	syncSkill: "Sync Skill",
 	syncingSkill: "Syncing...",
@@ -993,6 +1024,37 @@ export default {
 	connStatusConnecting: "Connecting…",
 	connStatusConnected: "Connected",
 	connStatusError: "Error",
+	connPendingEyebrow: "Preparing connection",
+	connPendingLocalTitle: "Starting Local",
+	connPendingRemoteTitle: "Connecting to {{label}}",
+	connPendingLocalDescription:
+		"Starting the bundled local aghub-api. Local data loads after it is ready.",
+	connPendingRemoteDescription:
+		"Opening the SSH tunnel and making sure remote aghub-api is available. If install or update is needed, this stays here until the remote command finishes.",
+	connPendingTarget: "Target",
+	connPendingElapsed: "Elapsed",
+	connPendingElapsedValue: "{{seconds}}s",
+	connPendingStepLocalApi: "Start local aghub-api",
+	connPendingStepLocalApiDetail: "Starting the desktop-bundled API.",
+	connPendingStepSsh: "Open SSH connection",
+	connPendingStepSshDetail:
+		"Connecting to the remote host over SSH and preparing the local tunnel.",
+	connPendingStepApi: "Check aghub-api",
+	connPendingStepApiDetail:
+		"Confirming the remote aghub-api exists and is version-compatible.",
+	connPendingStepInstall: "Install when needed",
+	connPendingStepInstallDetail:
+		"If aghub-api is missing or incompatible on the remote, it will be installed or updated automatically. This can take a few minutes.",
+	connPendingStepData: "Load data",
+	connPendingStepLocalDataDetail:
+		"Local configuration data loads after startup completes.",
+	connPendingStepRemoteDataDetail:
+		"This host's configuration data reloads after connection completes.",
+	connPendingLongWait:
+		"Waited {{seconds}}s. This usually means the remote is compiling or downloading. If it stays unchanged for more than 5 minutes, switch back to Local and retry.",
+	connErrorTitle: "Failed to connect to {{label}}",
+	connRetry: "Retry",
+	connUseLocal: "Use Local",
 	connManageTitle: "Manage connections",
 	connNoRemotes: "No remote connections yet.",
 	connAddConnection: "Add connection",
@@ -1007,6 +1069,7 @@ export default {
 	connFieldUser: "User",
 	connFieldUserPlaceholder: "optional, overrides ssh config",
 	connFieldPort: "Port",
+	connFieldPortPlaceholder: "Optional, e.g. 22",
 	connFieldRemotePath: "Remote aghub-api path",
 	connFieldRemotePathPlaceholder: "optional, e.g. ~/.local/bin/aghub-api",
 	connRequiredLabel: "Label is required.",
@@ -1014,6 +1077,17 @@ export default {
 	connInvalidPort: "Port must be a whole number between 1 and 65535.",
 	connTestConnection: "Test connection",
 	connTesting: "Testing…",
+	connForceReinstall: "Force reinstall",
+	connReinstalling: "Reinstalling…",
+	connForceReinstallConfirmTitle: "Force reinstall aghub-api?",
+	connForceReinstallConfirmBody:
+		"This disconnects the current remote session, then reinstalls aghub-api on the VM. The first install can take a few minutes.",
+	connForceReinstallAction: "Reinstall",
+	connReinstallFailed: "Reinstall failed: {{message}}",
+	connReinstalledOk: "aghub-api reinstalled. {{message}}",
+	connReinstallProgressTitle: "Reinstalling remote aghub-api",
+	connReinstallProgressDetail:
+		"Reinstalling aghub-api on the VM. The first install can take a few minutes.",
 	connTestReachableOk: "Reachable. {{message}}",
 	connTestInstalledOk: "Reachable, and aghub-api was installed. {{message}}",
 	connTestInstallFailed:
@@ -1028,12 +1102,19 @@ export default {
 	connTestStepApi: "aghub-api",
 	connTestStepApiPresent: "Installed",
 	connTestStepApiVersion: "Installed {{version}}",
+	connTestStepApiCompatibleVersion:
+		"Installed {{version}}, version-compatible",
+	connTestStepApiIncompatibleVersion:
+		"Installed {{version}}, but this desktop needs {{expected}}",
 	connTestStepApiMissing: "Not installed or not executable",
 	connTestStepInstall: "Automatic install",
 	connTestStepInstallOk: "Installed and detected again",
 	connTestStepInstallNotNeeded: "Already present; no install needed",
+	connTestStepInstallNeedsUpdate:
+		"Test connection does not modify the VM; switching to this connection or pressing Force reinstall will update it to {{expected}}.",
 	connTestStepInstallNotRun: "Not run",
 	connTestStepSkipped: "Not run",
+	connTestExpectedApiVersion: "This desktop needs aghub-api {{version}}",
 	connDisconnect: "Disconnect",
 	connDisconnecting: "Disconnecting…",
 	connReconnect: "Reconnect",
@@ -1135,4 +1216,22 @@ export default {
 		"No agents need a link here — the master is written on its own.",
 	agentCoveredBadge: "Covered",
 	selectSource: "Select a source",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} updatable",
+	summaryInstallable: "{{count}} installable",
+	summaryRenamed: "{{count}} renamed",
+	summaryUnchecked: "{{count}} uncheckable",
+	summaryLatest: "{{count}} up to date",
+	// SourceDetail action headings
+	sourceNeedsAction: "Needs action",
+	sourceAllLatest: "All skills are up to date.",
+	// Credential binding
+	credentialBind: "Bind credential",
+	// Phase 2 — Unified skills page
+	skillCenter: "Skills",
+	viewByAgent: "By Agent",
+	viewBySource: "By Source",
+	scope: "Scope",
+	scopeSwitchGlobal: "Global",
+	scopeSwitchProject: "Project",
 };

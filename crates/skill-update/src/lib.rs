@@ -14,13 +14,6 @@
 mod git;
 pub use git::{GitFetcher, GitRefResolver};
 
-pub mod credentials;
-pub use credentials::{
-	BindError, CreateError, CredentialError, EnvThenKeyringResolver,
-	EnvTokenResolver, KeyringTokenResolver, SourceBindings,
-	SourceCredentialStore, StoredCredential,
-};
-
 pub mod sources;
 
 use std::collections::HashMap;
@@ -28,61 +21,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use aghub_core::models::{ResourceScope, Skill};
 use aghub_core::skills::update::{
 	compare_known_hashes, detect_rename, sanitize_skill_path,
 	SkillUpdateStatus, UncheckableReason,
 };
-use std::path::Path;
 
-/// Resolve the on-disk root directory of an installed skill from its model
-/// (`canonical_path` preferred, else `source_path`), expanding a leading `~/`
-/// and stepping up from a `SKILL.md` file to its containing folder.
-fn skill_root(skill: &Skill) -> Option<PathBuf> {
-	let raw = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	let path = if let Some(stripped) = raw.strip_prefix("~/") {
-		dirs::home_dir().map(|home| home.join(stripped))?
-	} else {
-		PathBuf::from(raw)
-	};
-	let is_skill_file = path
-		.file_name()
-		.is_some_and(|name| name == std::ffi::OsStr::new("SKILL.md"));
-	Some(if is_skill_file {
-		path.parent().map(Path::to_path_buf).unwrap_or(path)
-	} else {
-		path
-	})
-}
-
-/// Resolve the on-disk roots of every installed skill named `name` in the given
-/// scope. A lock→disk resolver: loads all agents' skills, filters by name, and
-/// returns each distinct skill folder root. Shared by the API
-/// (`/skills/sources/diff`, `/skills/check-updates`) and the CLI.
-pub fn installed_skill_roots(
-	name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	let mut roots = Vec::new();
-	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
-			if skill.name != name {
-				continue;
-			}
-			let Some(root) = skill_root(&skill) else {
-				continue;
-			};
-			if !roots.contains(&root) {
-				roots.push(root);
-			}
-		}
-	}
-	roots
-}
+/// The lock→disk resolver for an installed skill's on-disk roots now lives in
+/// `aghub-core` (next to the containment guards it feeds); re-exported so the
+/// sources service and the API/CLI update paths share one implementation.
+pub use aghub_core::skills::removal::installed_skill_roots;
 
 /// A unique upstream coordinate: a repo `source` plus an optional `ref`
 /// (branch/tag/SHA). Entries sharing a `SourceRef` are fetched at most once.
@@ -210,6 +157,9 @@ pub struct FetchedRepo {
 	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded for the
 	/// global-lock `refCommit` heal so the next check can preflight.
 	pub oid: String,
+	/// RFC 3339 author-time of the fetched tip commit. Best-effort: `None`
+	/// when the commit time cannot be read (shallow fetch, old gix, error).
+	pub upstream_commit_time: Option<String>,
 	/// Keep-alive guard for a temp dir, dropped when the repo is no longer needed.
 	pub _guard: Option<Arc<tempfile::TempDir>>,
 }
@@ -245,33 +195,15 @@ pub trait TokenResolver: Send + Sync {
 	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String>;
 }
 
-/// Outcome of resolving a `(source, ref)` tip via the ls-refs preflight.
-///
-/// `NoRef` (the ref was not advertised) is a DISTINCT soft signal from
-/// `Failed` (a real transport/auth failure): both fall through to the full
-/// fetch, but `NoRef` is not an error — it must never be reported as a failure
-/// nor cause a fabricated oid to be recorded for the `refCommit` heal.
-#[derive(Debug)]
-pub enum RefResolution {
-	/// The ref resolved to this 40-hex tip commit OID.
-	Resolved(String),
-	/// The ref was not advertised by the remote (not an error).
-	NoRef,
-	/// A real transport/auth failure while resolving.
-	Failed(FetchError),
-}
-
 /// Resolves the current tip commit OID of a `(source, ref)` via a git ref
-/// advertisement (ls-refs) — no object download. Used for the cheap preflight
-/// that skips the full fetch when nothing changed. A missing ref is reported as
-/// [`RefResolution::NoRef`], distinct from a [`RefResolution::Failed`] fetch
-/// failure, so the orchestrator never records a fabricated oid for a no-ref.
+/// advertisement (ls-refs) — no object download. Returns the 40-hex OID. Used
+/// for the cheap preflight that skips the full fetch when nothing changed.
 pub trait RefResolver: Send + Sync {
 	fn resolve(
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
-	) -> RefResolution;
+	) -> Result<String, FetchError>;
 }
 
 /// Orchestration knobs.
@@ -401,6 +333,7 @@ pub(crate) fn preflight_decision(
 fn classify_member_from_probe(
 	member: &EntryInput,
 	probe: &HashProbe,
+	upstream_commit_time: Option<String>,
 ) -> CheckOutput {
 	let key = EntryKey {
 		name: member.name.clone(),
@@ -446,7 +379,11 @@ fn classify_member_from_probe(
 					heal_oid: None,
 				};
 			};
-			let status = compare_known_hashes(baseline, fresh_hash);
+			let status = compare_known_hashes(
+				baseline,
+				fresh_hash,
+				upstream_commit_time,
+			);
 			CheckOutput {
 				key,
 				status,
@@ -475,6 +412,7 @@ fn terminal_output(
 fn apply_cached_group(
 	members: &[EntryInput],
 	cached: &CachedGroup,
+	upstream_commit_time: Option<String>,
 ) -> Vec<CheckOutput> {
 	match cached {
 		CachedGroup::Terminal(status) => members
@@ -487,7 +425,11 @@ fn apply_cached_group(
 				let probe = hashes.get(&member.skill_path).cloned().unwrap_or(
 					HashProbe::Uncheckable(UncheckableReason::NoPath),
 				);
-				classify_member_from_probe(member, &probe)
+				classify_member_from_probe(
+					member,
+					&probe,
+					upstream_commit_time.clone(),
+				)
 			})
 			.collect(),
 	}
@@ -565,7 +507,7 @@ pub async fn check_updates(
 
 		// 3) Cache hit → reuse the group status for every fetchable member.
 		if let Some(cached) = deps.cache.get(&sr, now) {
-			out.extend(apply_cached_group(&fetch_members, &cached));
+			out.extend(apply_cached_group(&fetch_members, &cached, None));
 			continue;
 		}
 
@@ -600,10 +542,7 @@ pub async fn check_updates(
 					do_resolve(rr, job.sr.clone(), job.token.clone()),
 				)
 				.await;
-				// Only a Resolved tip can drive a preflight skip. NoRef (ref not
-				// advertised) and Failed (transport/auth) both fall through to
-				// the full fetch — NoRef without ever recording a fake oid.
-				if let Ok(RefResolution::Resolved(tip)) = tip {
+				if let Ok(Ok(tip)) = tip {
 					if let PreflightResult::Skip(cached) =
 						preflight_decision(&job.members, &tip)
 					{
@@ -643,7 +582,7 @@ pub async fn check_updates(
 			pending.remove(&id);
 			match outcome {
 				JobResult::Skip(cached) => {
-					out.extend(apply_cached_group(&members, &cached));
+					out.extend(apply_cached_group(&members, &cached, None));
 					deps.cache.put(sr.clone(), cached, now);
 				}
 				JobResult::Failed(reason) => {
@@ -671,7 +610,11 @@ pub async fn check_updates(
 						);
 					}
 					let cached = CachedGroup::Hashes(hashes);
-					let mut group_out = apply_cached_group(&members, &cached);
+					let mut group_out = apply_cached_group(
+						&members,
+						&cached,
+						repo.upstream_commit_time.clone(),
+					);
 					// Self-heal refCommit for freshly-fetched GLOBAL entries so the
 					// next check can preflight; the VCS-tracked project lock is
 					// never silently mutated by a read-style check.
@@ -730,17 +673,15 @@ async fn do_fetch(
 		.unwrap_or(Err(FetchError::Network))
 }
 
-/// Bridge the synchronous [`RefResolver`] into the async timeout path. A
-/// panicked/cancelled blocking task degrades to [`RefResolution::Failed`] so it
-/// falls through to the full fetch like any other resolution failure.
+/// Bridge the synchronous [`RefResolver`] into the async timeout path.
 async fn do_resolve(
 	resolver: Arc<dyn RefResolver>,
 	sr: SourceRef,
 	token: Option<String>,
-) -> RefResolution {
+) -> Result<String, FetchError> {
 	tokio::task::spawn_blocking(move || resolver.resolve(&sr, token.as_deref()))
 		.await
-		.unwrap_or(RefResolution::Failed(FetchError::Network))
+		.unwrap_or(Err(FetchError::Network))
 }
 
 #[cfg(test)]
@@ -839,6 +780,7 @@ mod tests {
 			Ok(FetchedRepo {
 				root: self.root.clone().unwrap(),
 				oid: STUB_FETCH_OID.to_string(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}
@@ -933,10 +875,8 @@ mod tests {
 	}
 
 	struct StubRefResolver {
-		/// Tip OID served when `resolution` is `Resolved` (it reads this field).
 		oid: String,
-		/// The resolution this stub reports; `Resolved` uses `oid`.
-		resolution: RefResolution,
+		err: Option<&'static str>,
 		calls: Mutex<usize>,
 	}
 	impl RefResolver for StubRefResolver {
@@ -944,19 +884,12 @@ mod tests {
 			&self,
 			_sr: &SourceRef,
 			_token: Option<&str>,
-		) -> RefResolution {
+		) -> Result<String, FetchError> {
 			*self.calls.lock().unwrap() += 1;
-			match &self.resolution {
-				RefResolution::Resolved(_) => {
-					RefResolution::Resolved(self.oid.clone())
-				}
-				RefResolution::NoRef => RefResolution::NoRef,
-				RefResolution::Failed(FetchError::Auth) => {
-					RefResolution::Failed(FetchError::Auth)
-				}
-				RefResolution::Failed(FetchError::Network) => {
-					RefResolution::Failed(FetchError::Network)
-				}
+			match self.err {
+				Some("auth") => Err(FetchError::Auth),
+				Some(_) => Err(FetchError::Network),
+				None => Ok(self.oid.clone()),
 			}
 		}
 	}
@@ -974,7 +907,7 @@ mod tests {
 		});
 		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
 			oid: tip.to_string(),
-			resolution: RefResolution::Resolved(tip.to_string()),
+			err: None,
 			calls: Mutex::new(0),
 		});
 		let resolver = StubResolver(None);
@@ -1015,7 +948,7 @@ mod tests {
 		});
 		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
 			oid: tip.to_string(),
-			resolution: RefResolution::Resolved(tip.to_string()),
+			err: None,
 			calls: Mutex::new(0),
 		});
 		let resolver = StubResolver(None);
@@ -1074,101 +1007,6 @@ mod tests {
 		let out = check_updates(vec![g], deps).await;
 		assert_eq!(out.len(), 1);
 		// A fresh fetch records the resolved tip so the next check can preflight.
-		assert_eq!(out[0].heal_oid, Some(STUB_FETCH_OID.to_string()));
-	}
-
-	#[tokio::test]
-	async fn no_ref_resolution_does_not_poison_ref_commit_heal() {
-		// A resolver that advertises NO matching ref (Ok(None) upstream) must
-		// fall through to the full fetch WITHOUT recording a fabricated oid: the
-		// only `heal_oid` ever recorded is the real fetched tip, never a bogus
-		// value invented because the ref was absent. Here the fetch ALSO fails,
-		// so no real tip exists and `heal_oid` must stay None.
-		let fetcher = Arc::new(StubFetcher {
-			root: None,
-			err: Some("network"),
-			calls: Mutex::new(0),
-		});
-		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
-			oid: String::new(),
-			resolution: RefResolution::NoRef,
-			calls: Mutex::new(0),
-		});
-		let resolver = StubResolver(None);
-		let mut cache = ResultCache::new(Duration::from_secs(300));
-		let deps = CheckDeps {
-			fetcher: fetcher.clone(),
-			ref_resolver: Some(ref_resolver),
-			resolver: &resolver,
-			cache: &mut cache,
-			per_fetch: Duration::from_secs(5),
-			concurrency: 4,
-			offline: false,
-			overall_deadline: Duration::from_secs(30),
-		};
-		let mut g = entry("g", "o/r", Some("main"));
-		g.ref_commit = None;
-		let out = check_updates(vec![g], deps).await;
-		assert_eq!(out.len(), 1);
-		// No ref advertised + fetch failed -> a real network Uncheckable, and
-		// crucially NO fabricated oid recorded for the heal.
-		assert_eq!(out[0].heal_oid, None, "no-ref must not heal a fake oid");
-		assert_eq!(
-			out[0].status,
-			SkillUpdateStatus::Uncheckable {
-				reason: UncheckableReason::Network
-			}
-		);
-		// The no-ref soft signal still falls through to the real fetch.
-		assert_eq!(
-			*fetcher.calls.lock().unwrap(),
-			1,
-			"no-ref must fall through to a full fetch, not abort"
-		);
-	}
-
-	#[tokio::test]
-	async fn ref_resolution_failed_falls_through_to_fetch() {
-		// A real ref-resolution failure (Failed/Network) is distinct from NoRef
-		// but, like NoRef, still falls through to the full fetch — the resolver
-		// is only ever an optimization, never a hard gate.
-		let dir = tempfile::tempdir().unwrap();
-		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
-		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
-		let fetcher = Arc::new(StubFetcher {
-			root: Some(dir.path().to_path_buf()),
-			err: None,
-			calls: Mutex::new(0),
-		});
-		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
-			oid: String::new(),
-			resolution: RefResolution::Failed(FetchError::Network),
-			calls: Mutex::new(0),
-		});
-		let resolver = StubResolver(None);
-		let mut cache = ResultCache::new(Duration::from_secs(300));
-		let deps = CheckDeps {
-			fetcher: fetcher.clone(),
-			ref_resolver: Some(ref_resolver),
-			resolver: &resolver,
-			cache: &mut cache,
-			per_fetch: Duration::from_secs(5),
-			concurrency: 4,
-			offline: false,
-			overall_deadline: Duration::from_secs(30),
-		};
-		let mut g = entry("g", "o/r", Some("main"));
-		g.stored_hash = Some(hash.clone());
-		g.local_hash = Some(hash);
-		let out = check_updates(vec![g], deps).await;
-		assert_eq!(out.len(), 1);
-		assert_eq!(
-			*fetcher.calls.lock().unwrap(),
-			1,
-			"a failed ref resolution must fall through to a full fetch"
-		);
-		// The real fetch heals with the REAL tip, never a value from the
-		// resolution failure.
 		assert_eq!(out[0].heal_oid, Some(STUB_FETCH_OID.to_string()));
 	}
 
@@ -1474,6 +1312,7 @@ mod tests {
 			SkillUpdateStatus::UpdateAvailable {
 				current: local_hash,
 				available: upstream_hash,
+				upstream_commit_time: None,
 			}
 		);
 	}
@@ -1633,6 +1472,7 @@ mod tests {
 			SkillUpdateStatus::UpdateAvailable {
 				current: "old".into(),
 				available: hash_b,
+				upstream_commit_time: None,
 			}
 		);
 	}
@@ -1697,6 +1537,7 @@ mod tests {
 			Ok(FetchedRepo {
 				root: self.root.clone(),
 				oid: STUB_FETCH_OID.to_string(),
+				upstream_commit_time: None,
 				_guard: None,
 			})
 		}

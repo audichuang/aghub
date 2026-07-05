@@ -1,4 +1,10 @@
 export default {
+	pluginStateInstalled: "已安装",
+	select: "选取",
+	pluginSelectedCount: "已选 {{count}} 个",
+	pluginInstallableCount: "{{count}} 个可安装",
+	pluginInstallSelected: "安装所选",
+	pluginInstallAll: "全部安装",
 	// Common
 	settings: "设置",
 	skills: "技能",
@@ -384,8 +390,6 @@ export default {
 	// --- 单一技能更新检查（F1 / Workstream D）---
 	checkForSkillUpdates: "检查更新",
 	checkingForSkillUpdates: "检查中…",
-	skillUpToDate: "已是最新",
-	skillUpToDateTooltip: "此技能与来源一致。",
 	skillUpdateAvailableBadge: "有更新",
 	skillUpdateAvailableTooltip:
 		"来源已变更：{{current}} → {{available}}。同步以更新。",
@@ -404,6 +408,12 @@ export default {
 	skillNeedsCredentialTooltip: "此私有来源需要凭证。添加后重试。",
 	skillUpdateCheckError: "无法检查技能更新。",
 	skillUpdateApplyError: "无法应用技能更新。",
+	skillCheckCompleteWithUpdates: "检查完成，{{count}} 个可更新",
+	skillCheckCompleteSomeUncheckable: "检查完成，{{count}} 个技能无法验证",
+	skillCheckCompleteAllGood: "全部都是最新版本",
+	lastCheckedAgo: "上次检查 {{time}}",
+	lastCheckedNever: "从未检查",
+	recheck: "重新检查",
 	onboardingDescription: "随时重新打开欢迎页或任一引导流程。",
 
 	// Onboarding — Wizard
@@ -440,9 +450,9 @@ export default {
 	onboardingMcpTitle: "全局 MCP 服务",
 	onboardingMcpDescription:
 		"这里管理的是共享型 MCP 服务定义，你可以把它们分配给一到多个 Agent。",
-	onboardingSkillsTitle: "已安装技能",
+	onboardingSkillsTitle: "技能与来源",
 	onboardingSkillsDescription:
-		"在这里检查本地技能内容，并管理当前 Agent 已经具备的能力。",
+		"按 Agent 或按来源浏览和管理技能。在同一页面执行更新检查、安装新技能，并处理已改名或已删除的条目。",
 	onboardingSettingsTitle: "设置入口始终在这里",
 	onboardingSettingsDescription:
 		"外观、Agent 可用性、编辑器集成，以及这些引导控制都集中在这里。",
@@ -534,6 +544,12 @@ export default {
 	scanningRepo: "扫描中...",
 	scanFailed: "扫描仓库失败",
 	scanFailedHint: "请检查您使用的令牌是否正确，或 SSO 是否已正确配置。",
+	gitCredAvailable:
+		"已检测到本机存有 {{host}} 的 Git 凭证，凭证留空直接扫描即可。",
+	gitCredMissing:
+		"若此仓库需要凭证：本机找不到 {{host}} 的非交互 Git 凭证。可先在本机登录一次，或勾选「私有仓库」填入 Token。公开仓库可忽略此提示。",
+	gitCredUnavailable:
+		"本机未安装 git；若仓库需要凭证，请勾选「私有仓库」填入 Token。公开仓库仍可直接扫描。",
 	noSkillsFoundInRepo: "此仓库中未找到任何技能。",
 	selectSkillsToInstall: "选择要安装的技能",
 	branch: "分支",
@@ -749,6 +765,11 @@ export default {
 	deepLinkUnsupportedType: "该深链类型暂不支持。",
 	deepLinkInvalidSkill: "该技能链接缺少必要字段。",
 	deepLinkInvalidMcp: "该 MCP 链接载荷无效。",
+	executableMcpWarningTitle: "此 MCP 可以运行命令",
+	executableMcpWarningDescription:
+		"Stdio MCP 服务器是代理稍后可能运行的可执行命令。仅当你信任来源，并已查看下方的所有命令、参数和环境变量后才安装。",
+	confirmExecutableMcp:
+		"我了解此导入会持久保存一个可执行命令，供代理稍后运行。",
 
 	// skills.sh
 	searchMarketSkills: "在 skills.sh 搜索技能...",
@@ -805,6 +826,7 @@ export default {
 	projectSkills: "项目技能",
 	metadata: "元数据",
 	installedFrom: "安装来源",
+	viewSkillSource: "在来源中查看",
 	syncFromSource: "从来源同步",
 	syncSkill: "同步 Skill",
 	syncingSkill: "同步中...",
@@ -972,6 +994,33 @@ export default {
 	connStatusConnecting: "连接中…",
 	connStatusConnected: "已连接",
 	connStatusError: "错误",
+	connPendingEyebrow: "连接准备中",
+	connPendingLocalTitle: "正在启动本地",
+	connPendingRemoteTitle: "正在连接到 {{label}}",
+	connPendingLocalDescription:
+		"正在启动桌面版内置的 aghub-api，完成后会加载本地数据。",
+	connPendingRemoteDescription:
+		"正在建立 SSH tunnel 并确认远程 aghub-api 可用。如果需要安装或更新，会停在这里直到远程命令完成。",
+	connPendingTarget: "目标",
+	connPendingElapsed: "已等待",
+	connPendingElapsedValue: "{{seconds}} 秒",
+	connPendingStepLocalApi: "启动本地 aghub-api",
+	connPendingStepLocalApiDetail: "正在启动桌面版内置 API。",
+	connPendingStepSsh: "建立 SSH 连接",
+	connPendingStepSshDetail: "正在通过 SSH 连接远程主机并准备本地 tunnel。",
+	connPendingStepApi: "检查 aghub-api",
+	connPendingStepApiDetail: "正在确认远程 aghub-api 是否存在且版本兼容。",
+	connPendingStepInstall: "必要时自动安装",
+	connPendingStepInstallDetail:
+		"如果远程缺少 aghub-api 或版本不兼容，会自动安装或更新；这一步可能需要几分钟。",
+	connPendingStepData: "加载数据",
+	connPendingStepLocalDataDetail: "启动完成后会加载本地配置数据。",
+	connPendingStepRemoteDataDetail: "连接完成后会重新加载这台主机的配置数据。",
+	connPendingLongWait:
+		"已等待 {{seconds}} 秒。通常代表远程正在编译或下载；如果超过 5 分钟仍没有变化，可以先切回本地再重试。",
+	connErrorTitle: "无法连接到 {{label}}",
+	connRetry: "重试",
+	connUseLocal: "切回本地",
 	connManageTitle: "管理连接",
 	connNoRemotes: "尚无远程连接。",
 	connAddConnection: "新增连接",
@@ -986,6 +1035,7 @@ export default {
 	connFieldUser: "用户",
 	connFieldUserPlaceholder: "可选，覆盖 ssh config 设置",
 	connFieldPort: "端口",
+	connFieldPortPlaceholder: "选填，例如 22",
 	connFieldRemotePath: "远程 aghub-api 路径",
 	connFieldRemotePathPlaceholder: "可选，例如 ~/.local/bin/aghub-api",
 	connRequiredLabel: "请填写名称。",
@@ -993,6 +1043,17 @@ export default {
 	connInvalidPort: "端口必须是 1 到 65535 之间的整数。",
 	connTestConnection: "测试连接",
 	connTesting: "测试中…",
+	connForceReinstall: "强制重新安装",
+	connReinstalling: "重新安装中…",
+	connForceReinstallConfirmTitle: "强制重新安装 aghub-api？",
+	connForceReinstallConfirmBody:
+		"这会先中断当前的远程连接，再在 VM 上重新安装 aghub-api；首次安装可能需要几分钟。",
+	connForceReinstallAction: "重新安装",
+	connReinstallFailed: "重新安装失败：{{message}}",
+	connReinstalledOk: "已重新安装 aghub-api。{{message}}",
+	connReinstallProgressTitle: "正在重新安装远程 aghub-api",
+	connReinstallProgressDetail:
+		"正在 VM 上重新安装 aghub-api，首次安装可能需要几分钟。",
 	connTestReachableOk: "可连接。{{message}}",
 	connTestInstalledOk: "可连接，已安装 aghub-api。{{message}}",
 	connTestInstallFailed: "可连接，但自动安装 aghub-api 失败。{{message}}",
@@ -1006,12 +1067,18 @@ export default {
 	connTestStepApi: "aghub-api",
 	connTestStepApiPresent: "已安装",
 	connTestStepApiVersion: "已安装 {{version}}",
+	connTestStepApiCompatibleVersion: "已安装 {{version}}，版本兼容",
+	connTestStepApiIncompatibleVersion:
+		"已安装 {{version}}，但此桌面需要 {{expected}}",
 	connTestStepApiMissing: "尚未安装或不在可执行路径",
 	connTestStepInstall: "自动安装",
 	connTestStepInstallOk: "已安装并完成再次检测",
 	connTestStepInstallNotNeeded: "已存在，无需安装",
+	connTestStepInstallNeedsUpdate:
+		"测试连接不会修改 VM；切换到此连接或按强制重新安装才会更新到 {{expected}}。",
 	connTestStepInstallNotRun: "未执行",
 	connTestStepSkipped: "未执行",
+	connTestExpectedApiVersion: "此桌面需要 aghub-api {{version}}",
 	connDisconnect: "断开连接",
 	connDisconnecting: "断开中…",
 	connReconnect: "重新连接",
@@ -1110,4 +1177,22 @@ export default {
 	sourceInstallNoLinkTargets: "此处没有 Agent 需要链接 — 只会写入主文件。",
 	agentCoveredBadge: "已覆盖",
 	selectSource: "选择一个来源",
+	// SourceDetail summary bar
+	summaryUpdatable: "{{count}} 可更新",
+	summaryInstallable: "{{count}} 可安装",
+	summaryRenamed: "{{count}} 已改名",
+	summaryUnchecked: "{{count}} 无法检查",
+	summaryLatest: "{{count}} 最新",
+	// SourceDetail action headings
+	sourceNeedsAction: "需要操作",
+	sourceAllLatest: "所有技能均为最新版本。",
+	// Credential binding
+	credentialBind: "绑定凭证",
+	// Phase 2 — Unified skills page
+	skillCenter: "技能",
+	viewByAgent: "按 Agent",
+	viewBySource: "按来源",
+	scope: "范围",
+	scopeSwitchGlobal: "全局",
+	scopeSwitchProject: "项目",
 };

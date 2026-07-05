@@ -15,16 +15,20 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
+	credentials::forwarding::ForwardedGitTokens,
+	credentials::origin::{origin_of, origins_match, ResolvedOrigin},
+	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
 	},
 	dto::skill::{
 		CreateSkillRequest, DeleteSkillByPathRequest,
-		DeleteSkillByPathResponse, GitInstallRequest, GitInstallResponse,
-		GitInstallResultEntry, GitScanRequest, GitScanResponse,
-		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
-		GlobalSkillLockResponse, InstallSkillRequest, InstallSkillResponse,
-		LocalSkillLockEntryResponse, ProjectLockQuery,
+		DeleteSkillByPathResponse, GitCredentialStatus,
+		GitCredentialStatusQuery, GitCredentialStatusResponse,
+		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
+		GitScanRequest, GitScanResponse, GitScanSkillEntry, GitSyncRequest,
+		GitSyncResponse, GlobalSkillLockResponse, InstallSkillRequest,
+		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
 		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
 		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
@@ -37,14 +41,12 @@ use crate::{
 	extractors::{AgentParam, ResolvedScope, ScopeParams},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
-		resolved_to_resource_scope, skills_update::update_lock_hash,
+		resolved_to_resource_scope,
 	},
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
 	state::{GitCloneSession, GitCloneSessions},
 };
-use skill_update::{
-	keychain_host_for_source, SourceCredentialStore, TokenResolver,
-};
+use skill_update::keychain_host_for_source;
 
 #[derive(rocket::FromForm)]
 pub(crate) struct SkillListParams {
@@ -287,10 +289,13 @@ pub async fn delete_skill_by_path(
 	}
 
 	if !skill_dir.exists() {
-		// Idempotent: nothing on disk to remove. Route through the shared
-		// removal seam so the wire shape can't drift — `deleted_path` stays null
-		// because nothing executed (the old hand-built body wrongly set it).
-		return Ok(Json(crate::routes::noop_removal_response(vec![], vec![])));
+		// Idempotent: nothing on disk to remove.
+		return Ok(Json(DeleteSkillByPathResponse {
+			success: true,
+			dry_run: !req.confirm.unwrap_or(false),
+			deleted_path: Some(skill_dir.display().to_string()),
+			..Default::default()
+		}));
 	}
 
 	if let Some(plugin_name) = detect_plugin_for_path(&skill_dir).await {
@@ -402,12 +407,12 @@ pub async fn delete_skill_by_path(
 			&all_in_scope,
 			&safe_name,
 		) {
-			// Kept (skipped) because another in-scope agent still symlinks this
-			// master. No-op success through the shared removal seam.
-			return Ok(Json(crate::routes::noop_removal_response(
-				vec![],
-				vec![skill_dir.clone()],
-			)));
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run,
+				skipped: vec![skill_dir.display().to_string()],
+				..Default::default()
+			}));
 		}
 		let plan = aghub_core::skills::removal::RemovalPlan {
 			layout: aghub_core::skills::removal::Layout::Copy,
@@ -416,7 +421,7 @@ pub async fn delete_skill_by_path(
 			needs_confirm: false,
 		};
 		if dry_run {
-			return Ok(Json(crate::routes::removal_response(
+			return Ok(Json(delete_response_from_outcome(
 				aghub_core::skills::removal::RemovalOutcome {
 					plan,
 					executed: false,
@@ -441,32 +446,27 @@ pub async fn delete_skill_by_path(
 		executed_plan
 			.skipped
 			.extend(report.failed.into_iter().map(|(path, _)| path));
-		// Core-owned prune (same seam the manager's `remove_skill_planned`
-		// uses). The copy branch only reaches here with a single writable
-		// scope (`Both` is rejected upstream), so this is GlobalOnly or
-		// ProjectOnly. The handler only RENDERS the returned PruneStatus.
-		// DEFERRED: routing this whole by-path removal through a manager
-		// planned-removal returning RemovalOutcome waits for the planned-
-		// removal generalization (candidate #5 / Phase 3) — this route owns
-		// API-layer path-containment that must not move into core.
-		let prune = aghub_core::skills::prune::prune_lock_for_scope(
-			resource_scope,
-			project_root.as_deref(),
-		);
-		return Ok(Json(crate::routes::removal_response(
+		prune_scope_lock(resource_scope, project_root.as_deref());
+		// This manual Copy-layout path runs `prune_scope_lock` fire-and-forget
+		// (it swallows its own result), so the response reports `NotRun` rather
+		// than the pruned keys — the `remove_skill_planned` path below carries
+		// the full PruneStatus.
+		return Ok(Json(delete_response_from_outcome(
 			aghub_core::skills::removal::RemovalOutcome {
 				plan: executed_plan,
 				executed: true,
-				prune,
+				prune: aghub_core::skills::removal::PruneStatus::NotRun,
 			},
 		)));
 	}
 
 	match manager.remove_skill_planned(&skill_name, false, dry_run, confirm) {
-		// remove_skill_planned prunes the per-scope lock itself on execute; the
-		// caller must not prune again (unlike the non-link Copy branch above,
-		// which bypasses the manager and therefore still prunes inline).
-		Ok(outcome) => Ok(Json(crate::routes::removal_response(outcome))),
+		Ok(outcome) => {
+			if outcome.executed {
+				prune_scope_lock(resource_scope, project_root.as_deref());
+			}
+			Ok(Json(delete_response_from_outcome(outcome)))
+		}
 		Err(e) => Ok(Json(DeleteSkillByPathResponse {
 			success: false,
 			error: Some(format!("Failed to delete: {e}")),
@@ -522,6 +522,31 @@ pub fn prune_lock_route(
 	}
 }
 
+/// Best-effort disk-reconciled lock prune for a scope after a deletion. A scan
+/// error (or missing project root) is swallowed — the orphan lock entry simply
+/// survives; deletion correctness does not depend on the prune succeeding.
+fn prune_scope_lock(
+	resource_scope: aghub_core::models::ResourceScope,
+	project_root: Option<&std::path::Path>,
+) {
+	use aghub_core::models::ResourceScope;
+	use aghub_core::skills::prune::{prune_lock_scanning, PruneScope};
+	if matches!(
+		resource_scope,
+		ResourceScope::GlobalOnly | ResourceScope::Both
+	) {
+		let _ = prune_lock_scanning(PruneScope::Global, None);
+	}
+	if matches!(
+		resource_scope,
+		ResourceScope::ProjectOnly | ResourceScope::Both
+	) {
+		if let Some(root) = project_root {
+			let _ = prune_lock_scanning(PruneScope::Project, Some(root));
+		}
+	}
+}
+
 fn get_parent_folder(path: std::path::PathBuf) -> std::path::PathBuf {
 	path.parent().map(|p| p.to_path_buf()).unwrap_or(path)
 }
@@ -537,34 +562,50 @@ fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
 	}
 }
 
-fn installed_skill_root(skill: &Skill) -> Option<PathBuf> {
-	let raw = skill
-		.canonical_path
-		.as_deref()
-		.or(skill.source_path.as_deref())?;
-	Some(get_skill_root(expand_tilde_path(raw)))
-}
-
-fn installed_skill_roots(
-	name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Vec<PathBuf> {
-	let mut roots = Vec::new();
-	for agent in load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
-			if skill.name != name {
-				continue;
+fn delete_response_from_outcome(
+	outcome: aghub_core::skills::removal::RemovalOutcome,
+) -> DeleteSkillByPathResponse {
+	DeleteSkillByPathResponse {
+		success: true,
+		dry_run: !outcome.executed,
+		executed: outcome.executed,
+		needs_confirm: outcome.plan.needs_confirm,
+		paths: outcome
+			.plan
+			.paths
+			.iter()
+			.map(|p| p.display().to_string())
+			.collect(),
+		skipped: outcome
+			.plan
+			.skipped
+			.iter()
+			.map(|p| p.display().to_string())
+			.collect(),
+		deleted_path: outcome
+			.executed
+			.then(|| {
+				outcome.plan.paths.first().map(|p| p.display().to_string())
+			})
+			.flatten(),
+		pruned_lock_entries: match &outcome.prune {
+			aghub_core::skills::removal::PruneStatus::NotRun => None,
+			aghub_core::skills::removal::PruneStatus::Pruned(keys) => {
+				Some(keys.clone())
 			}
-			let Some(root) = installed_skill_root(&skill) else {
-				continue;
-			};
-			if !roots.contains(&root) {
-				roots.push(root);
-			}
-		}
+			aghub_core::skills::removal::PruneStatus::Failed {
+				pruned, ..
+			} => Some(pruned.clone()),
+		},
+		prune_error: match &outcome.prune {
+			aghub_core::skills::removal::PruneStatus::Failed {
+				reason, ..
+			} => Some(reason.clone()),
+			_ => None,
+		},
+		error: None,
+		validation_errors: None,
 	}
-	roots
 }
 
 fn resolve_git_install_target_dir(
@@ -912,13 +953,9 @@ pub async fn create_skill(
 		Err(e) => return Err(ApiError::from(e)),
 	}
 	let skill = Skill::from(body.into_inner());
-	let view = aghub_core::dto::SkillView::from(&skill);
+	let response = SkillResponse::from(&skill);
 	manager.add_skill(skill).map_err(ApiError::from)?;
-	// Surface the advisory the CLI already shows: a NativeReader target gets the
-	// `.agents` master only, with no per-agent link. Carry it through the single
-	// SkillView seam so create/import can't drift from the wire shape.
-	let view = view.with_native_reader(manager.skill_target_is_native_reader());
-	Ok((Status::Created, Json(SkillResponse::from(&view))))
+	Ok((Status::Created, Json(response)))
 }
 
 #[post("/agents/<agent>/skills/import?<scope..>", data = "<body>")]
@@ -958,11 +995,7 @@ pub fn import_skill(
 		None,
 	)?;
 
-	// Same single SkillView seam as create_skill: carry the NativeReader
-	// advisory through the view, never by mutating the response after the fact.
-	let view = aghub_core::dto::SkillView::from(&imported)
-		.with_native_reader(manager.skill_target_is_native_reader());
-	Ok(Json(SkillResponse::from(&view)))
+	Ok(Json(SkillResponse::from(&imported)))
 }
 
 #[get("/agents/<agent>/skills/<name>?<scope..>")]
@@ -1028,18 +1061,19 @@ pub async fn delete_skill(
 	params: DeleteSkillParams,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let resolved = params.resolve_scope()?;
-	// project_root is unused: remove_skill_planned prunes the lock internally.
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	match manager.load() {
 		Ok(_) => {}
 		Err(ConfigError::NotFound { .. }) => {
-			return Ok(Json(crate::routes::noop_removal_response(
-				vec![],
-				vec![],
-			)));
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run: !params.confirm.unwrap_or(false),
+				executed: false,
+				..Default::default()
+			}));
 		}
 		Err(e) => return Err(ApiError::from(e)),
 	}
@@ -1048,16 +1082,28 @@ pub async fn delete_skill(
 	}
 	let confirm = params.confirm.unwrap_or(false);
 	let dry_run = !confirm;
-	// remove_skill_planned prunes the per-scope lock itself on execute, so the
-	// handler must NOT prune again. Idempotent-delete (a missing skill is a
-	// success no-op, any other error propagates) is owned once in
-	// `routes::removal_or_noop`.
-	crate::routes::removal_or_noop(manager.remove_skill_planned(
+	match manager.remove_skill_planned(
 		name,
 		params.all_agents.unwrap_or(false),
 		dry_run,
 		confirm,
-	))
+	) {
+		Ok(outcome) => {
+			if outcome.executed {
+				prune_scope_lock(resource_scope, project_root.as_deref());
+			}
+			Ok(Json(delete_response_from_outcome(outcome)))
+		}
+		Err(ConfigError::ResourceNotFound { .. }) => {
+			Ok(Json(DeleteSkillByPathResponse {
+				success: true,
+				dry_run,
+				executed: false,
+				..Default::default()
+			}))
+		}
+		Err(e) => Err(ApiError::from(e)),
+	}
 }
 
 #[post("/agents/<agent>/skills/<name>/enable?<scope..>")]
@@ -1410,7 +1456,7 @@ fn skill_read_roots(
 /// A path that does NOT exist yields `Status::NotFound` (with `not_found_code`)
 /// rather than Forbidden, so a missing/just-deleted skill reads as 404 — only a
 /// path that EXISTS yet resolves outside the roots is a 403. Mirrors how
-/// `removal::assert_targets_contained` distinguishes not-found targets.
+/// `removal::assert_targets_strictly_contained` distinguishes not-found targets.
 fn assert_skill_read_allowed(
 	path: &Path,
 	resource_scope: ResourceScope,
@@ -1563,89 +1609,179 @@ fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
 		)
 	};
 
-	let parsed = url::Url::parse(url).map_err(|_| reject())?;
-
-	let host = parsed.host_str().unwrap_or_default();
-	if parsed.scheme() == "https"
-		&& host.eq_ignore_ascii_case("github.com")
-		&& parsed.port().is_none()
-	{
-		return Ok(());
+	// Pin to the github.com HTTPS origin. `origin_of` folds the default port
+	// in, so `https://github.com` and `https://github.com:443` both match,
+	// while `http://`, a non-default port, or any other host is rejected.
+	let github_https = ResolvedOrigin {
+		scheme: "https".to_string(),
+		host: "github.com".to_string(),
+		port: Some(443),
+	};
+	match origin_of(url) {
+		Some(origin) if origin == github_https => Ok(()),
+		_ => Err(reject()),
 	}
-
-	Err(reject())
 }
 
-/// Returns true when both URLs parse and share the same (ASCII
-/// case-insensitive) host. A parse failure or a missing host on either
-/// side yields false.
+/// Returns true when both URLs parse to the same normalized origin
+/// `(scheme, host, port)`. A parse failure or a missing host on either side
+/// yields false.
 ///
-/// Compares the HOST ONLY and is port-agnostic by design: session
-/// credential pinning keys on host, not port, so the same host on a
-/// different port is treated as the same host.
-fn same_host(a: &str, b: &str) -> bool {
-	let (Ok(a), Ok(b)) = (url::Url::parse(a), url::Url::parse(b)) else {
-		return false;
-	};
-	match (a.host_str(), b.host_str()) {
-		(Some(ha), Some(hb)) => ha.eq_ignore_ascii_case(hb),
-		_ => false,
+/// Pins on the FULL origin: the same host on a different port (or a different
+/// scheme) is NOT a match. Session credentials may be scoped to a specific
+/// `(scheme, host, port)`, so a token bound to one origin must never be reused
+/// against a different port of the same host.
+fn same_origin(a: &str, b: &str) -> bool {
+	origins_match(a, b)
+}
+
+fn current_platform() -> &'static str {
+	if cfg!(target_os = "windows") {
+		"windows"
+	} else if cfg!(target_os = "macos") {
+		"macos"
+	} else if cfg!(target_os = "linux") {
+		"linux"
+	} else {
+		"other"
 	}
+}
+
+/// Non-interactive pre-flight: can the machine running aghub-api resolve a Git
+/// credential for this URL via the system credential helpers? Mirrors the clone
+/// path (same `.git` normalization + `useHttpPath`) so its verdict predicts
+/// whether an unattended scan will authenticate.
+#[get("/skills/git/credential-status?<query..>")]
+pub async fn git_credential_status(
+	query: GitCredentialStatusQuery,
+) -> ApiResult<GitCredentialStatusResponse> {
+	let url = aghub_git::normalize_tfs_clone_url(&query.url);
+
+	// Control characters could inject into the line-based credential protocol;
+	// embedded userinfo would leak a secret through the request URL. Reject both.
+	if url.contains(|c: char| c.is_control()) {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"URL contains control characters",
+			"INVALID_URL",
+		));
+	}
+	let parsed = url::Url::parse(&url).ok();
+	if parsed
+		.as_ref()
+		.is_some_and(|u| !u.username().is_empty() || u.password().is_some())
+	{
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"URL must not embed credentials",
+			"URL_HAS_CREDENTIALS",
+		));
+	}
+	let host = parsed.and_then(|u| u.host_str().map(str::to_string));
+
+	let probe_url = url.clone();
+	let status = tokio::task::spawn_blocking(move || {
+		if !aghub_git::system_git_available() {
+			GitCredentialStatus::GitUnavailable
+		} else if aghub_git::probe_credential(&probe_url) {
+			GitCredentialStatus::Available
+		} else {
+			GitCredentialStatus::Missing
+		}
+	})
+	.await
+	.map_err(|e| {
+		ApiError::new(
+			Status::InternalServerError,
+			format!("Credential probe task panicked: {e}"),
+			"CREDENTIAL_PROBE_ERROR",
+		)
+	})?;
+
+	Ok(Json(GitCredentialStatusResponse {
+		status,
+		platform: current_platform().to_string(),
+		host,
+	}))
 }
 
 #[post("/skills/git/scan", data = "<body>")]
 pub async fn git_scan_skills(
 	body: Json<GitScanRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
+	forwarded: ForwardedGitTokens,
 ) -> ApiResult<GitScanResponse> {
-	let req = body.into_inner();
+	let mut req = body.into_inner();
+	// Azure DevOps Server / TFS rejects the trailing `.git` on `/_git/<repo>`
+	// URLs (TF401019). Normalize once here so every downstream use — credential
+	// resolution, clone, branch listing, session identity — uses the accepted
+	// URL form.
+	req.url = aghub_git::normalize_tfs_clone_url(&req.url);
 
-	// Resolve credential token — either from session or from request.
+	// Remote git-credential forwarding: if the controller forwarded a token for
+	// this URL's source, it takes precedence over the `credential_id` keyring
+	// lookup / session reuse (a remote api has no keyring of its own). The token
+	// is origin-pinned to the request URL (Task 2 / D8) so a token resolved for
+	// origin A is never attached to an origin-B request. Once used, it is cached
+	// in the scan session below exactly like any other token, so branch rescans
+	// inherit it.
+	let forwarded_token = forwarded_token_for_url(&forwarded, &req.url);
+	// Tracks whether the resolved token came from the forwarded header, so the
+	// non-forwarded host-pin guards below are skipped for it.
+	let forwarded_used = forwarded_token.is_some();
+
+	// Resolve credential token — forwarded first, then request, then session.
 	// The session reuse branch also captures the session's stored URL so the
 	// guard below can pin a reused token to its own repository host.
 	let mut session_url: Option<String> = None;
-	let credential_token: Option<String> =
-		if let Some(ref cred_id) = req.credential_id {
-			let creds = SourceCredentialStore.list().map_err(|e| {
+	let credential_token: Option<String> = if let Some(token) = forwarded_token
+	{
+		Some(token)
+	} else if let Some(ref cred_id) = req.credential_id {
+		let creds =
+			crate::routes::credentials::load_credentials().map_err(|e| {
 				ApiError::new(
 					Status::InternalServerError,
 					format!("Failed to read credentials: {e}"),
 					"KEYCHAIN_ERROR",
 				)
 			})?;
-			let cred =
-				creds.iter().find(|c| c.id == *cred_id).ok_or_else(|| {
-					ApiError::new(
-						Status::NotFound,
-						"Credential not found",
-						"CREDENTIAL_NOT_FOUND",
-					)
-				})?;
-			Some(cred.token.clone())
-		} else if let Some(ref sid) = req.session_id {
-			// Reuse credential from existing session
-			let map = sessions.sessions.lock().unwrap();
-			match map.get(sid) {
-				Some(s) => {
-					session_url = Some(s.url.clone());
-					s.credential_token.clone()
-				}
-				None => None,
+		let cred =
+			creds.iter().find(|c| c.id == *cred_id).ok_or_else(|| {
+				ApiError::new(
+					Status::NotFound,
+					"Credential not found",
+					"CREDENTIAL_NOT_FOUND",
+				)
+			})?;
+		Some(cred.token.clone())
+	} else if let Some(ref sid) = req.session_id {
+		// Reuse credential from existing session
+		let map = sessions.sessions.lock().unwrap();
+		match map.get(sid) {
+			Some(s) => {
+				session_url = Some(s.url.clone());
+				s.credential_token.clone()
 			}
-		} else {
-			None
-		};
+			None => None,
+		}
+	} else {
+		None
+	};
 
-	// Guard the explicitly supplied credential to github.com, but pin a reused
-	// session token to its own repository host instead (session tokens may be
-	// host-scoped private credentials resolved lazily on the original scan).
-	// The lazy/host-scoped path resolved inside the clone below is left
-	// unguarded — it is already bound to the scanned host.
-	if credential_token.is_some() {
+	// A forwarded token is already origin-pinned to `req.url` by
+	// `forwarded_token_for_url`, and is NOT restricted to github.com, so it
+	// bypasses the non-forwarded guards below. Only the request/session paths
+	// remain subject to: the explicit-credential github.com pin, and the
+	// reused-session same-origin pin (session tokens may be host-scoped private
+	// credentials resolved lazily on the original scan). The lazy/host-scoped
+	// path resolved inside the clone below is left unguarded — it is already
+	// bound to the scanned host.
+	if credential_token.is_some() && !forwarded_used {
 		if req.credential_id.is_some() {
 			require_github_credential_url(&req.url)?;
 		} else if let Some(ref stored_url) = session_url {
-			if !same_host(&req.url, stored_url) {
+			if !same_origin(&req.url, stored_url) {
 				return Err(ApiError::new(
 					Status::BadRequest,
 					"Session credential cannot be reused for a different host",
@@ -1698,12 +1834,24 @@ pub async fn git_scan_skills(
 	let branch_url = req.url.clone();
 	let credential_token_for_branches = credential_token.clone();
 	let branches = list_branches_for_scan(cached_branches, move || {
-		let options = match credential_token_for_branches {
-			Some(token) => aghub_git::RemoteOptions::new(&branch_url)
-				.with_credentials("x-access-token", token),
-			None => aghub_git::RemoteOptions::new(&branch_url),
-		};
-		aghub_git::list_remote_branches(options)
+		match credential_token_for_branches {
+			Some(token) => aghub_git::list_remote_branches(
+				aghub_git::RemoteOptions::new(&branch_url)
+					.with_credentials("x-access-token", token),
+			),
+			// No token: try gix unauthenticated, then fall back to the system
+			// `git` binary so the OS credential helper authenticates — matching
+			// the clone path so branch listing succeeds for the same repos.
+			None => match aghub_git::list_remote_branches(
+				aghub_git::RemoteOptions::new(&branch_url),
+			) {
+				Ok(branches) => Ok(branches),
+				Err(_) if aghub_git::system_git_available() => {
+					aghub_git::list_remote_branches_system_git(&branch_url)
+				}
+				Err(e) => Err(e),
+			},
+		}
 	})
 	.await?;
 
@@ -1802,19 +1950,38 @@ fn clone_for_git_scan_lazily_auth(
 	branch: Option<&str>,
 	credential_token: Option<String>,
 ) -> aghub_git::Result<(tempfile::TempDir, Option<String>)> {
-	if let Some(token) = credential_token {
-		return clone_for_git_scan(url, branch, Some(&token))
-			.map(|temp_dir| (temp_dir, Some(token)));
+	// An explicit token (forwarded / selected / reused session) is tried first,
+	// but a REJECTED token must not be the final answer: a stale/wrong aghub
+	// token (e.g. a GitHub PAT against a TFS host) has to fall through to the
+	// system-git path below, where the OS credential helper may succeed.
+	if let Some(token) = &credential_token {
+		if let Ok(temp_dir) = clone_for_git_scan(url, branch, Some(token)) {
+			return Ok((temp_dir, Some(token.clone())));
+		}
 	}
 
 	match clone_for_git_scan(url, branch, None) {
 		Ok(temp_dir) => Ok((temp_dir, None)),
 		Err(first_error) => {
-			let Some(token) = token_for_git_scan_source(url) else {
-				return Err(first_error);
-			};
-			clone_for_git_scan(url, branch, Some(&token))
-				.map(|temp_dir| (temp_dir, Some(token)))
+			// Host-scoped aghub keyring token, if one is bound to this source.
+			if let Some(token) = token_for_git_scan_source(url) {
+				if let Ok(temp_dir) =
+					clone_for_git_scan(url, branch, Some(&token))
+				{
+					return Ok((temp_dir, Some(token)));
+				}
+			}
+			// Last resort: the system `git` binary, so the OS credential helper
+			// (Windows Credential Manager / Git Credential Manager, NTLM/Kerberos
+			// for on-prem hosts such as Azure DevOps Server / TFS) can
+			// authenticate. gix cannot use those helpers; there is no token to
+			// cache since the helper holds it. Reached even when an aghub token
+			// was tried and rejected above, so a wrong token never blocks it.
+			if aghub_git::system_git_available() {
+				return aghub_git::clone_to_temp_system_git(url, branch)
+					.map(|temp_dir| (temp_dir, None));
+			}
+			Err(first_error)
 		}
 	}
 }
@@ -1835,12 +2002,57 @@ fn clone_for_git_scan(
 }
 
 fn token_for_git_scan_source(source: &str) -> Option<String> {
-	// Route through the shared resolver seam so a keychain failure is LOGGED
-	// (not silently swallowed by `.ok().flatten()`) before degrading to None —
-	// the same hidden-keychain-failure class finding #1 removed (finding #4).
+	let bindings = load_source_bindings().unwrap_or_default();
+	let creds = crate::routes::credentials::load_credentials().ok()?;
 	let host = keychain_host_for_source(source);
-	skill_update::KeyringTokenResolver::default()
-		.resolve(source, host.as_deref())
+	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
+}
+
+/// Resolve a forwarded git token for `url` and origin-pin it to that URL.
+///
+/// The `forwarded` map (parsed from `X-Aghub-Git-Tokens`) is keyed by source.
+/// A forwarded source matches `url` using the same cross-URL-form, host-scoped
+/// matching the keyring bindings use (`lookup_keys` /
+/// `binding_keys_match_lookup`). On top of that we apply the Task 2 / D8 origin
+/// pin: the request URL's resolved clone-URL origin `(scheme, host, port)` must
+/// equal the matched forwarded source's resolved origin, so a token resolved
+/// for one origin is never attached to a different origin (e.g. a self-hosted
+/// forge on a different port — host-scoped matching alone would not catch this).
+/// Returns `None` (degrade to the keyring path) on any miss or mismatch — never
+/// a hard error, so an absent/benign header is transparent.
+fn forwarded_token_for_url(
+	forwarded: &ForwardedGitTokens,
+	url: &str,
+) -> Option<String> {
+	use crate::credentials::resolve::{binding_keys_match_lookup, lookup_keys};
+	let url_keys = lookup_keys(url);
+	if url_keys.is_empty() {
+		return None;
+	}
+	let url_origin =
+		origin_of(&aghub_git::resolve_remote_source(url).ok()?.clone_url);
+	forwarded.0.iter().find_map(|(forwarded_source, entry)| {
+		if !binding_keys_match_lookup(forwarded_source, &url_keys) {
+			return None;
+		}
+		// Origin pin. Prefer the entry's controller-resolved origin (the new
+		// header shape carries it); fall back to re-resolving the forwarded
+		// source when the entry omits it. The scan path stays strict: a token is
+		// attached ONLY when the request URL and the forwarded entry share the
+		// SAME `(scheme, host, port)`. (If either origin is unknown the pin
+		// cannot be satisfied here, so the token is not attached — the scan
+		// route's own keyring/session path then applies.)
+		let entry_origin =
+			entry.origin.clone().map(ResolvedOrigin::from).or_else(|| {
+				aghub_git::resolve_remote_source(forwarded_source)
+					.ok()
+					.and_then(|r| origin_of(&r.clone_url))
+			});
+		match (&url_origin, &entry_origin) {
+			(Some(a), Some(b)) if a == b => Some(entry.token.clone()),
+			_ => None,
+		}
+	})
 }
 
 /// Try to detect the checked-out branch from the cloned repo via its gix `HEAD`
@@ -2127,93 +2339,61 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	let parsed_skill =
-		skill::parser::parse(&cloned_skill_path).map_err(|e| {
-			ApiError::new(
-				Status::BadRequest,
-				format!("Failed to parse synced skill: {e}"),
-				"SKILL_PARSE_FAILED",
-			)
-		})?;
-	if parsed_skill.name != req.name {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			skill_renamed_message(&req.name, &parsed_skill.name),
-			SKILL_RENAMED_CODE,
-		));
-	}
-	let updated_hash = skill::compute_skill_folder_hash(&cloned_skill_dir)
-		.map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Failed to hash synced skill: {e}"),
-				"SKILL_SYNC_ERROR",
-			)
-		})?;
+	// Best-effort: record the session clone's checked-out tip OID (repo-level,
+	// shared by every skill in the clone) so a later `check` can preflight via
+	// ls-refs. A read failure (e.g. the session dir is not a git repo) leaves
+	// `refCommit` unset, matching install / apply-update's best-effort behavior.
+	let ref_commit = gix::open(&temp_path)
+		.ok()
+		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
+		.map(|oid| oid.to_string());
 
-	let target_dirs = installed_skill_roots(
-		&req.name,
-		resource_scope,
-		project_root.as_deref(),
-	);
-	if target_dirs.is_empty() {
-		return Err(ApiError::new(
+	// The post-session transaction (rename guard → containment → swap → lock) is
+	// the shared core resync; the route owns only the session lifecycle.
+	use aghub_core::skills::resync::{
+		resync_installed_skill, ResyncError, ResyncRequest,
+	};
+	let report = resync_installed_skill(ResyncRequest {
+		source_dir: &cloned_skill_dir,
+		name: &req.name,
+		scope: resource_scope,
+		project_root: project_root.as_deref(),
+		ref_commit: ref_commit.as_deref(),
+	})
+	.map_err(|e| match e {
+		ResyncError::NotInstalled => ApiError::new(
 			Status::NotFound,
 			format!(
 				"Skill '{}' is locked but no installed copy was found",
 				req.name
 			),
 			"SKILL_NOT_INSTALLED",
-		));
-	}
-	let agent_dirs = aghub_core::skills::removal::agent_skill_dirs_in_scope(
-		resource_scope,
-		project_root.as_deref(),
-	);
-	aghub_core::skills::removal::assert_targets_strictly_contained(
-		&target_dirs,
-		&agent_dirs,
-		project_root.as_deref(),
-	)
-	.map_err(|e| {
-		ApiError::new(
+		),
+		ResyncError::Renamed { new_name } => ApiError::new(
 			Status::BadRequest,
-			format!("Refusing to sync out-of-tree target: {e}"),
+			skill_renamed_message(&req.name, &new_name),
+			SKILL_RENAMED_CODE,
+		),
+		ResyncError::Parse(msg) => ApiError::new(
+			Status::BadRequest,
+			format!("Failed to parse synced skill: {msg}"),
+			"SKILL_PARSE_FAILED",
+		),
+		ResyncError::OutOfTree(msg) => ApiError::new(
+			Status::BadRequest,
+			format!("Refusing to sync out-of-tree target: {msg}"),
 			"SKILL_TARGET_OUT_OF_TREE",
-		)
-	})?;
-
-	// Replace each installation path
-	for target_dir in &target_dirs {
-		let outcome = aghub_core::skills::update::stage_and_swap_dir(
-			&cloned_skill_dir,
-			target_dir,
-		)
-		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
-		// A post-swap temp-cleanup failure is a warning, never an abort: the
-		// swap succeeded, so the remaining targets and the lock update must
-		// still run.
-		if let Some(warning) = outcome.cleanup_warning {
-			log::warn!("git-sync: {warning}");
-		}
-	}
-
-	// The session-based sync clones into a session temp dir and does not carry a
-	// resolved tip OID, so it leaves `refCommit` untouched (None). install /
-	// apply-update remain the explicit refCommit write points.
-	update_lock_hash(
-		&req.name,
-		&req.scope,
-		project_root.as_deref(),
-		&updated_hash,
-		None,
-	)
-	.map_err(|e| {
-		ApiError::new(
+		),
+		ResyncError::Hash(msg) | ResyncError::Swap(msg) => ApiError::new(
 			Status::InternalServerError,
-			format!("Failed to update skill lock after sync: {e}"),
+			format!("Failed to sync skill: {msg}"),
+			"SKILL_SYNC_ERROR",
+		),
+		ResyncError::LockUpdate(msg) => ApiError::new(
+			Status::InternalServerError,
+			format!("Failed to update skill lock after sync: {msg}"),
 			"SKILL_LOCK_ERROR",
-		)
+		),
 	})?;
 
 	// Remove session (drops TempDir, cleans up disk)
@@ -2224,8 +2404,8 @@ pub async fn git_sync_skill(
 
 	Ok(Json(GitSyncResponse {
 		success: true,
-		name: Some(parsed_skill.name),
-		updated_hash: Some(updated_hash),
+		name: Some(req.name.clone()),
+		updated_hash: Some(report.updated_hash),
 		error: None,
 	}))
 }
@@ -2268,9 +2448,7 @@ mod tests {
 		result
 	}
 
-	// Cross-platform: a plain tokio current-thread runtime wrapper, nothing
-	// unix-specific. Kept always-compiled because the (non-unix) OpenCode-project
-	// create_skill test uses it on every platform, so it is never dead code.
+	#[cfg(unix)]
 	fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 		rocket::tokio::runtime::Builder::new_current_thread()
 			.enable_all()
@@ -2347,422 +2525,6 @@ mod tests {
 			assert!(resp.success);
 			assert!(!resp.dry_run);
 			assert!(!dir.exists(), "confirm deletes the dir");
-		});
-	}
-
-	// Regression: deleting a path that is not on disk must be an idempotent
-	// no-op routed through the shared RemovalView — `deleted_path` MUST be null
-	// because nothing executed. The old hand-built branch wrongly echoed the
-	// missing path into `deleted_path` while `executed` stayed false.
-	#[cfg(unix)]
-	#[test]
-	fn delete_by_path_missing_is_noop_with_null_deleted_path() {
-		with_isolated_env(|home, _state| {
-			// A valid-but-absent skill dir under the allow-listed claude root.
-			let dir = home.join(".claude/skills").join("ghost");
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&dir,
-				Some(true),
-			))))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-			assert!(resp.success);
-			assert!(!resp.executed, "nothing on disk to remove");
-			assert!(
-				resp.deleted_path.is_none(),
-				"deleted_path must be null when nothing executed"
-			);
-			assert!(resp.paths.is_empty());
-		});
-	}
-
-	// The delete_skill handler must NOT prune the lock itself — that moved into
-	// remove_skill_planned. This proves the manager-side prune still fires
-	// through the API path: an orphan global-lock entry (no dir on disk) is gone
-	// after a confirmed delete. Would regress if both the handler prune AND the
-	// manager prune were removed.
-	#[cfg(unix)]
-	#[test]
-	fn delete_skill_executes_and_lock_pruned() {
-		with_isolated_env(|home, state| {
-			let dir = write_claude_skill(home, "goner");
-			let lock_dir = state.join("skills");
-			std::fs::create_dir_all(&lock_dir).unwrap();
-			let lock_path = lock_dir.join(".skill-lock.json");
-			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
-
-			let resp = block_on(delete_skill(
-				AgentParam(AgentType::Claude),
-				"goner",
-				DeleteSkillParams {
-					scope: Some("global".to_string()),
-					project_root: None,
-					confirm: Some(true),
-					all_agents: None,
-				},
-			))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-
-			assert!(resp.success);
-			assert!(resp.executed);
-			assert!(!dir.exists(), "confirm deletes the dir");
-			let raw = std::fs::read_to_string(&lock_path).unwrap();
-			let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
-			assert!(
-				parsed["skills"].get("orphan").is_none(),
-				"manager-side prune must drop the orphan lock entry"
-			);
-		});
-	}
-
-	// A no-op delete-by-name (missing skill) must go through the shared
-	// noop_removal_response seam like MCP/sub-agent routes: executed=false and
-	// therefore dry_run=true EVEN with confirm=true (nothing ran), plus an
-	// explicit `deleted_path: null`. The route used to hand-build the response
-	// and reported dry_run=false under confirm=true.
-	//
-	// Unix-gated: uses `write_claude_skill`, which redirects HOME — but Windows
-	// `dirs::home_dir()` resolves via SHGetKnownFolderPath and ignores the
-	// override, so the Claude config seed would land in the real home, not the
-	// temp dir. The no-op logic is platform-agnostic and covered here on unix.
-	#[cfg(unix)]
-	#[test]
-	fn delete_skill_missing_skill_is_noop_dry_run_even_with_confirm() {
-		with_isolated_env(|home, _state| {
-			// Claude config dir exists (load succeeds) but the skill does not.
-			write_claude_skill(home, "present");
-
-			let resp = block_on(delete_skill(
-				AgentParam(AgentType::Claude),
-				"absent",
-				DeleteSkillParams {
-					scope: Some("global".to_string()),
-					project_root: None,
-					confirm: Some(true),
-					all_agents: None,
-				},
-			))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-
-			assert!(resp.success);
-			assert!(!resp.executed, "nothing was removed");
-			assert!(resp.dry_run, "no-op must report dry_run even on confirm");
-			let json = serde_json::to_value(&resp).unwrap();
-			assert_eq!(
-				json["deleted_path"],
-				serde_json::Value::Null,
-				"no-op must emit deleted_path: null"
-			);
-		});
-	}
-
-	// Missing config (manager.load() -> NotFound) is also a no-op and must
-	// report the same shape via the shared helper: dry_run=true under confirm.
-	//
-	// Unix-gated: NotFound only holds when HOME is redirected to an empty temp
-	// dir so Claude's `~/.claude` config is absent. Windows `dirs::home_dir()`
-	// ignores the HOME override and would read the real home, so the assertion
-	// is unreliable there. The no-op shape is platform-agnostic; covered on unix.
-	#[cfg(unix)]
-	#[test]
-	fn delete_skill_missing_config_is_noop_dry_run_even_with_confirm() {
-		with_isolated_env(|_home, _state| {
-			let resp = block_on(delete_skill(
-				AgentParam(AgentType::Claude),
-				"absent",
-				DeleteSkillParams {
-					scope: Some("global".to_string()),
-					project_root: None,
-					confirm: Some(true),
-					all_agents: None,
-				},
-			))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-
-			assert!(resp.success);
-			assert!(!resp.executed, "nothing was removed");
-			assert!(resp.dry_run, "no-op must report dry_run even on confirm");
-			let json = serde_json::to_value(&resp).unwrap();
-			assert_eq!(
-				json["deleted_path"],
-				serde_json::Value::Null,
-				"no-op must emit deleted_path: null"
-			);
-		});
-	}
-
-	// create_skill must surface the `native_reader` advisory the CLI shows: a
-	// per-agent-linking agent (Claude) reports false (key omitted), while a
-	// NativeReader (OpenCode at project scope, reads `.agents/skills` directly)
-	// reports true. Both go through the REAL handler.
-	//
-	// The Claude case is unix-gated: a global add writes to
-	// `dirs::home_dir()/.claude/skills`, and Windows `dirs::home_dir()` ignores
-	// the HOME override (SHGetKnownFolderPath), so it would pollute the real
-	// home. The OpenCode-project case below writes only under the temp
-	// project_root (no `dirs::home_dir()`), so it stays cross-platform — and is
-	// the always-compiled caller that keeps `block_on` alive on Windows.
-	#[cfg(unix)]
-	#[test]
-	fn create_skill_native_reader_false_for_claude() {
-		with_isolated_env(|_home, _state| {
-			let resp = block_on(create_skill(
-				AgentParam(AgentType::Claude),
-				ScopeParams {
-					scope: Some("global".to_string()),
-					project_root: None,
-				},
-				Json(CreateSkillRequest {
-					name: "linked".to_string(),
-					description: Some("d".to_string()),
-					author: None,
-					version: None,
-					content: None,
-					tools: None,
-				}),
-			))
-			.ok()
-			.expect("handler ok")
-			.1
-			.into_inner();
-
-			assert!(
-				!resp.native_reader,
-				"Claude links per-agent → not a native reader"
-			);
-			let json = serde_json::to_value(&resp).unwrap();
-			assert_eq!(
-				json["native_reader"],
-				serde_json::json!(false),
-				"native_reader present (= false)"
-			);
-		});
-	}
-
-	#[test]
-	fn create_skill_native_reader_true_for_opencode_project() {
-		with_isolated_env(|home, _state| {
-			let project = home.join("proj");
-			std::fs::create_dir_all(project.join(".opencode")).unwrap();
-
-			let resp = block_on(create_skill(
-				AgentParam(AgentType::OpenCode),
-				ScopeParams {
-					scope: Some("project".to_string()),
-					project_root: Some(project.display().to_string()),
-				},
-				Json(CreateSkillRequest {
-					name: "native".to_string(),
-					description: Some("d".to_string()),
-					author: None,
-					version: None,
-					content: None,
-					tools: None,
-				}),
-			))
-			.ok()
-			.expect("handler ok")
-			.1
-			.into_inner();
-
-			assert!(
-				resp.native_reader,
-				"OpenCode reads .agents/skills directly → native reader"
-			);
-			let json = serde_json::to_value(&resp).unwrap();
-			assert_eq!(json["native_reader"], serde_json::json!(true));
-		});
-	}
-
-	// import_skill must surface the same `native_reader` advisory as create:
-	// Claude (per-agent link) reports false / key omitted, OpenCode at project
-	// scope (reads `.agents/skills` directly) reports true. Both go through the
-	// REAL handler with a real on-disk source skill folder.
-	#[cfg(unix)]
-	fn write_source_skill(name: &str) -> tempfile::TempDir {
-		let src = tempdir().unwrap();
-		let dir = src.path().join(name);
-		std::fs::create_dir_all(&dir).unwrap();
-		std::fs::write(
-			dir.join("SKILL.md"),
-			format!("---\nname: {name}\ndescription: d\n---\n"),
-		)
-		.unwrap();
-		src
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn import_skill_native_reader_false_for_claude() {
-		with_isolated_env(|_home, _state| {
-			let src = write_source_skill("imported");
-			let resp = import_skill(
-				AgentParam(AgentType::Claude),
-				ScopeParams {
-					scope: Some("global".to_string()),
-					project_root: None,
-				},
-				Json(crate::dto::skill::ImportSkillRequest {
-					path: src
-						.path()
-						.join("imported/SKILL.md")
-						.display()
-						.to_string(),
-				}),
-			)
-			.ok()
-			.expect("handler ok")
-			.into_inner();
-
-			assert!(
-				!resp.native_reader,
-				"Claude links per-agent → not a native reader"
-			);
-			let json = serde_json::to_value(&resp).unwrap();
-			assert_eq!(
-				json["native_reader"],
-				serde_json::json!(false),
-				"native_reader present (= false)"
-			);
-		});
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn import_skill_native_reader_true_for_opencode_project() {
-		with_isolated_env(|home, _state| {
-			let project = home.join("proj");
-			std::fs::create_dir_all(project.join(".opencode")).unwrap();
-			let src = write_source_skill("imported");
-
-			let resp = import_skill(
-				AgentParam(AgentType::OpenCode),
-				ScopeParams {
-					scope: Some("project".to_string()),
-					project_root: Some(project.display().to_string()),
-				},
-				Json(crate::dto::skill::ImportSkillRequest {
-					path: src
-						.path()
-						.join("imported/SKILL.md")
-						.display()
-						.to_string(),
-				}),
-			)
-			.ok()
-			.expect("handler ok")
-			.into_inner();
-
-			assert!(
-				resp.native_reader,
-				"OpenCode reads .agents/skills directly → native reader"
-			);
-			let json = serde_json::to_value(&resp).unwrap();
-			assert_eq!(json["native_reader"], serde_json::json!(true));
-		});
-	}
-
-	// Issue #2 + #3: the by-path copy branch must surface the post-delete lock
-	// prune through the response — both the dropped keys (Pruned) and a prune
-	// failure (Failed). It now routes through the core-owned
-	// `prune::prune_lock_for_scope` seam; the handler only RENDERS the result.
-	#[cfg(unix)]
-	#[test]
-	fn delete_by_path_surfaces_pruned_lock_entries() {
-		with_isolated_env(|home, state| {
-			let dir = write_claude_skill(home, "goner");
-			let lock_dir = state.join("skills");
-			std::fs::create_dir_all(&lock_dir).unwrap();
-			let lock_path = lock_dir.join(".skill-lock.json");
-			// An orphan with no dir on disk: a real prune drops it.
-			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
-
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&dir,
-				Some(true),
-			))))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-
-			assert!(resp.success);
-			assert!(resp.executed);
-			assert!(!dir.exists(), "confirm deletes the dir");
-			let pruned = resp
-				.pruned_lock_entries
-				.expect("a successful prune must report its dropped keys");
-			assert!(
-				pruned.contains(&"orphan".to_string()),
-				"the dropped orphan must be surfaced, got {pruned:?}"
-			);
-			assert!(resp.prune_error.is_none(), "no error on a clean prune");
-		});
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn delete_by_path_surfaces_prune_error() {
-		use std::os::unix::fs::PermissionsExt;
-		with_isolated_env(|home, state| {
-			let dir = write_claude_skill(home, "goner");
-			let lock_dir = state.join("skills");
-			std::fs::create_dir_all(&lock_dir).unwrap();
-			let lock_path = lock_dir.join(".skill-lock.json");
-			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
-
-			// Make the lock dir read-only so the prune's atomic write fails.
-			let probe = lock_dir.join(".perm-probe");
-			std::fs::create_dir(&probe).unwrap();
-			std::fs::set_permissions(
-				&probe,
-				std::fs::Permissions::from_mode(0o555),
-			)
-			.unwrap();
-			let enforced = std::fs::write(probe.join("x"), b"x").is_err();
-			std::fs::set_permissions(
-				&probe,
-				std::fs::Permissions::from_mode(0o755),
-			)
-			.unwrap();
-			std::fs::remove_dir_all(&probe).ok();
-			if !enforced {
-				eprintln!("skip: perms not enforced (root)");
-				return;
-			}
-			let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
-			std::fs::set_permissions(
-				&lock_dir,
-				std::fs::Permissions::from_mode(0o555),
-			)
-			.unwrap();
-
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&dir,
-				Some(true),
-			))))
-			.ok()
-			.expect("handler returned ok")
-			.into_inner();
-
-			std::fs::set_permissions(&lock_dir, orig).unwrap();
-
-			assert!(
-				resp.success,
-				"deletion still succeeds, prune is non-fatal"
-			);
-			assert!(resp.executed);
-			assert!(!dir.exists(), "the skill is deleted before the prune");
-			assert!(
-				resp.prune_error.is_some(),
-				"a failed prune must surface its error"
-			);
 		});
 	}
 
@@ -3110,6 +2872,191 @@ mod tests {
 			assert!(std::fs::read_to_string(sibling.join("SKILL.md"))
 				.unwrap()
 				.contains("keep"));
+		});
+	}
+
+	#[test]
+	fn git_sync_records_ref_commit_from_session_head() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			let skills_root = project.join(".claude/skills");
+			let target = skills_root.join("sync-me");
+			std::fs::create_dir_all(&target).unwrap();
+			std::fs::write(
+				target.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: old\n---\n\nold\n",
+			)
+			.unwrap();
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+
+			// Session temp dir is a REAL git repo with a HEAD commit, so the
+			// route can resolve a tip OID to record as `refCommit`.
+			let clone = tempdir().unwrap();
+			let cloned_skill = clone.path().join("sync-me");
+			std::fs::create_dir_all(&cloned_skill).unwrap();
+			std::fs::write(
+				cloned_skill.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+			)
+			.unwrap();
+			// Build the HEAD commit via gix (no `git` subprocess — this file must
+			// stay git-CLI-free per `detect_current_branch_uses_gix_not_subprocess`)
+			// so the route can resolve a tip OID to record as `refCommit`.
+			let head = {
+				let repo = gix::init(clone.path()).unwrap();
+				let tree_id = repo
+					.write_object(&gix::objs::Tree {
+						entries: Vec::new(),
+					})
+					.unwrap()
+					.detach();
+				let sig = gix::actor::SignatureRef::from_bytes(
+					b"t <t@t> 1000000000 +0000",
+				)
+				.unwrap();
+				repo.commit_as(
+					sig,
+					sig,
+					"HEAD",
+					"init",
+					tree_id,
+					std::iter::empty::<gix::ObjectId>(),
+				)
+				.unwrap()
+				.detach()
+				.to_string()
+			};
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"sync-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "sync-session",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [skills_root.display().to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::Ok);
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert_eq!(
+				lock.skills["sync-me"].ref_commit.as_deref(),
+				Some(head.as_str()),
+				"git_sync must record the session repo HEAD as refCommit",
+			);
+		});
+	}
+
+	#[test]
+	fn git_sync_locked_but_uninstalled_maps_to_skill_not_installed() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			// Locked, but NO installed copy on disk: resync must report
+			// NotInstalled, which git-sync maps to SKILL_NOT_INSTALLED (404).
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+
+			let clone = tempdir().unwrap();
+			let cloned_skill = clone.path().join("sync-me");
+			std::fs::create_dir_all(&cloned_skill).unwrap();
+			std::fs::write(
+				cloned_skill.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: new\n---\n\nnew\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"sync-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "sync-session",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [project
+						.join(".claude/skills")
+						.display()
+						.to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::NotFound);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "SKILL_NOT_INSTALLED");
 		});
 	}
 
@@ -3510,32 +3457,191 @@ mod tests {
 	}
 
 	#[test]
-	fn same_host_true_for_matching_hosts() {
-		assert!(same_host(
+	fn same_origin_true_for_matching_origins() {
+		assert!(same_origin(
 			"https://gitlab.internal/a.git",
 			"https://gitlab.internal/b.git",
 		));
 	}
 
 	#[test]
-	fn same_host_false_for_different_hosts() {
-		assert!(!same_host("https://github.com/a", "https://evil.com/a"));
+	fn same_origin_false_for_different_hosts() {
+		assert!(!same_origin("https://github.com/a", "https://evil.com/a"));
 	}
 
 	#[test]
-	fn same_host_false_on_parse_failure() {
-		assert!(!same_host("not a url", "https://github.com/a"));
+	fn same_origin_false_on_parse_failure() {
+		assert!(!same_origin("not a url", "https://github.com/a"));
 	}
 
 	#[test]
-	fn same_host_is_port_agnostic() {
-		// Session pinning keys on host, not port; the same host on a
-		// different port must be treated as the same host (see same_host
-		// doc comment). This documents the intentional behavior.
-		assert!(same_host(
+	fn same_origin_false_for_same_host_different_port() {
+		// Session pinning now keys on the full origin: the same host on a
+		// different explicit port is a DIFFERENT origin and must NOT match,
+		// so a token bound to one port can't be reused against another.
+		assert!(!same_origin(
 			"https://git.internal:8080/a.git",
 			"https://git.internal:9090/b.git",
 		));
+	}
+
+	#[test]
+	fn same_origin_true_for_default_port_forms() {
+		// `https://h` and `https://h:443` are the same origin (default port
+		// folds in), so this remains a match.
+		assert!(same_origin(
+			"https://git.internal/a.git",
+			"https://git.internal:443/b.git",
+		));
+	}
+
+	// ─── forwarded_token_for_url: host-scoped match + D8 origin pin ─────────
+
+	fn forwarded(pairs: &[(&str, &str)]) -> ForwardedGitTokens {
+		use crate::credentials::forwarding::ForwardedEntry;
+		// Entries with NO explicit origin: `forwarded_token_for_url` then
+		// re-resolves the forwarded source's clone-URL origin, exercising the
+		// host-scoped + origin-pin path independently of the wire origin.
+		ForwardedGitTokens(
+			pairs
+				.iter()
+				.map(|(k, v)| {
+					(
+						(*k).to_string(),
+						ForwardedEntry {
+							token: (*v).to_string(),
+							origin: None,
+						},
+					)
+				})
+				.collect(),
+		)
+	}
+
+	#[test]
+	fn forwarded_token_matches_same_github_source() {
+		// Forwarded as the bare shorthand; the request uses the full URL. Both
+		// resolve to the same github.com origin, so the token is attached.
+		let map = forwarded(&[("owner/repo", "TOK")]);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_not_attached_cross_host() {
+		// A github.com forwarded token must not satisfy a gitlab.com request of
+		// the same `owner/repo` shape (host is encoded in the key set).
+		let map = forwarded(&[("owner/repo", "GHTOK")]);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://gitlab.com/owner/repo.git"),
+			None
+		);
+	}
+
+	#[test]
+	fn forwarded_token_not_attached_same_host_different_port() {
+		// D8: a token forwarded for a self-hosted forge on one port must NOT be
+		// attached to a request for the SAME host on a different port.
+		let map =
+			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
+		assert_eq!(
+			forwarded_token_for_url(
+				&map,
+				"https://git.internal:9090/owner/repo.git"
+			),
+			None
+		);
+	}
+
+	#[test]
+	fn forwarded_token_attached_same_host_same_port() {
+		// The positive counterpart to the D8 negative: a self-hosted forge on a
+		// custom port DOES match when the request is for the SAME origin. This
+		// proves the port-mismatch rejection above is the origin pin, not a
+		// resolve failure on custom-port URLs.
+		let map =
+			forwarded(&[("https://git.internal:8443/owner/repo.git", "TOK")]);
+		assert_eq!(
+			forwarded_token_for_url(
+				&map,
+				"https://git.internal:8443/owner/repo.git"
+			),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_none_for_empty_map() {
+		let map = forwarded(&[]);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			None
+		);
+	}
+
+	/// Build a single-entry map carrying an explicit wire `origin`, exercising
+	/// the new `{ token, origin }` shape on the scan path.
+	fn forwarded_with_origin(
+		source: &str,
+		token: &str,
+		scheme: &str,
+		host: &str,
+		port: Option<u16>,
+	) -> ForwardedGitTokens {
+		use crate::credentials::forwarding::{ForwardedEntry, ForwardedOrigin};
+		let mut m = std::collections::BTreeMap::new();
+		m.insert(
+			source.to_string(),
+			ForwardedEntry {
+				token: token.to_string(),
+				origin: Some(ForwardedOrigin {
+					scheme: scheme.to_string(),
+					host: host.to_string(),
+					port,
+				}),
+			},
+		);
+		ForwardedGitTokens(m)
+	}
+
+	#[test]
+	fn forwarded_token_uses_entry_origin_to_pin() {
+		// The entry carries its own controller-resolved origin (matching the
+		// request), so the token is attached using the wire origin.
+		let map = forwarded_with_origin(
+			"owner/repo",
+			"TOK",
+			"https",
+			"github.com",
+			Some(443),
+		);
+		assert_eq!(
+			forwarded_token_for_url(&map, "https://github.com/owner/repo.git"),
+			Some("TOK".to_string())
+		);
+	}
+
+	#[test]
+	fn forwarded_token_entry_origin_mismatch_rejected() {
+		// The entry's wire origin pins a DIFFERENT port than the request: the
+		// scan path must not attach the token even though the host-scoped key
+		// would match.
+		let map = forwarded_with_origin(
+			"https://git.internal:8443/owner/repo.git",
+			"TOK",
+			"https",
+			"git.internal",
+			Some(8443),
+		);
+		assert_eq!(
+			forwarded_token_for_url(
+				&map,
+				"https://git.internal:9090/owner/repo.git"
+			),
+			None
+		);
 	}
 
 	// A session token bound to one host must never be reused against a

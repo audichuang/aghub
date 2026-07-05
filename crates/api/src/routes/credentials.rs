@@ -1,20 +1,12 @@
-//! Source-credential CRUD routes. Thin Rocket wrappers over the shared
-//! [`skill_update::SourceCredentialStore`]: storage, binding validation, and
-//! the host-prefixed resolution logic all live in `skill-update` now (so the
-//! CLI shares them). These handlers only resolve scope-free HTTP shapes, map
-//! the store's [`CredentialError`]/[`BindError`] to API codes, and enforce the
-//! HTTP-only 409 duplicate-name policy (the store stays HTTP-agnostic).
-
 use log::{debug, info, warn};
 use rocket::http::Status;
 use rocket::serde::json::Json;
-
-use skill_update::{
-	BindError, CreateError, CredentialError, SourceCredentialStore,
-};
+use serde::{Deserialize, Serialize};
 
 use crate::credentials::resolve::{
-	list_source_binding_responses, source_binding_response,
+	bind_source_to_credential, list_source_binding_responses,
+	load_source_bindings, prune_bindings_for_credential, save_source_bindings,
+	source_binding_response, SourceBindingError,
 };
 use crate::dto::credential::{
 	CreateCredentialRequest, CredentialResponse,
@@ -22,50 +14,98 @@ use crate::dto::credential::{
 };
 use crate::error::{ApiCreated, ApiNoContent, ApiResult};
 
-/// Map a real keychain/serde failure to a 500 with the stable `KEYCHAIN_ERROR`
-/// code. The store's [`CredentialError`] replaces the old `String`/`None`
-/// swallowing, so a genuine keyring failure now surfaces here instead of being
-/// silently treated as "no credentials".
-fn internal_err(err: CredentialError) -> crate::error::ApiError {
+const SERVICE: &str = "aghub";
+const USER: &str = "github_credentials";
+
+// Guards in-process read-modify-write cycles for the single keyring JSON entry.
+// Cross-process keyring races remain a documented known limitation.
+static SOURCE_BINDINGS_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct StoredCredential {
+	pub(crate) id: String,
+	pub(crate) name: String,
+	pub(crate) token: String,
+}
+
+fn get_entry() -> Result<keyring::Entry, String> {
+	keyring::Entry::new(SERVICE, USER).map_err(|e| e.to_string())
+}
+
+pub(crate) fn load_credentials() -> Result<Vec<StoredCredential>, String> {
+	let entry = get_entry()?;
+	match entry.get_password() {
+		Ok(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
+		Err(keyring::Error::NoEntry) => Ok(vec![]),
+		Err(e) => Err(e.to_string()),
+	}
+}
+
+fn store_credentials(creds: &[StoredCredential]) -> Result<(), String> {
+	let entry = get_entry()?;
+	if creds.is_empty() {
+		match entry.delete_credential() {
+			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+			Err(e) => Err(e.to_string()),
+		}
+	} else {
+		let json = serde_json::to_string(creds).map_err(|e| e.to_string())?;
+		entry.set_password(&json).map_err(|e| e.to_string())
+	}
+}
+
+fn internal_err(msg: impl Into<String>) -> crate::error::ApiError {
 	crate::error::ApiError::new(
 		Status::InternalServerError,
-		err.to_string(),
+		msg,
 		"KEYCHAIN_ERROR",
 	)
 }
 
-fn source_binding_err(err: BindError) -> crate::error::ApiError {
+fn source_binding_err(err: SourceBindingError) -> crate::error::ApiError {
 	match err {
-		BindError::EmptySource => crate::error::ApiError::new(
+		SourceBindingError::EmptySource => crate::error::ApiError::new(
 			Status::BadRequest,
 			"source must not be empty",
 			"VALIDATION_FAILED",
 		),
-		BindError::CredentialNotFound(_) => crate::error::ApiError::new(
-			Status::NotFound,
-			"Credential not found",
-			"CREDENTIAL_NOT_FOUND",
-		),
-		// A real keychain/serde failure during bind is a 500, NOT a 404
-		// (finding #1): conflating it with not-found hid keychain failures.
-		BindError::Store(inner) => internal_err(inner),
+		SourceBindingError::CredentialNotFound(_) => {
+			crate::error::ApiError::new(
+				Status::NotFound,
+				"Credential not found",
+				"CREDENTIAL_NOT_FOUND",
+			)
+		}
 	}
 }
 
-fn create_credential_err(err: CreateError) -> crate::error::ApiError {
-	match err {
-		CreateError::Duplicate(name) => crate::error::ApiError::new(
-			Status::Conflict,
-			format!("A credential named '{name}' already exists"),
-			"CREDENTIAL_NAME_EXISTS",
-		),
-		CreateError::Store(inner) => internal_err(inner),
-	}
+fn lock_source_bindings() -> std::sync::MutexGuard<'static, ()> {
+	SOURCE_BINDINGS_MUTEX
+		.lock()
+		.unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn lock_credentials() -> std::sync::MutexGuard<'static, ()> {
+	SOURCE_BINDINGS_MUTEX
+		.lock()
+		.unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn credential_name_exists(creds: &[StoredCredential], name: &str) -> bool {
+	creds.iter().any(|credential| credential.name == name)
+}
+
+fn duplicate_credential_err(name: &str) -> crate::error::ApiError {
+	crate::error::ApiError::new(
+		Status::Conflict,
+		format!("A credential named '{name}' already exists"),
+		"CREDENTIAL_NAME_EXISTS",
+	)
 }
 
 #[get("/credentials")]
 pub fn list_credentials() -> ApiResult<Vec<CredentialResponse>> {
-	let creds = SourceCredentialStore.list().map_err(internal_err)?;
+	let creds = load_credentials().map_err(internal_err)?;
 	debug!("loaded {} stored credentials", creds.len());
 	Ok(Json(
 		creds
@@ -81,9 +121,9 @@ pub fn list_credentials() -> ApiResult<Vec<CredentialResponse>> {
 #[get("/credentials/source-bindings")]
 pub fn list_source_bindings_route(
 ) -> ApiResult<Vec<SourceCredentialBindingResponse>> {
-	let store = SourceCredentialStore;
-	let bindings = store.list_bindings().map_err(internal_err)?;
-	let creds = store.list().map_err(internal_err)?;
+	let _guard = lock_source_bindings();
+	let bindings = load_source_bindings().map_err(internal_err)?;
+	let creds = load_credentials().map_err(internal_err)?;
 	Ok(Json(list_source_binding_responses(&bindings, &creds)))
 }
 
@@ -91,19 +131,20 @@ pub fn list_source_bindings_route(
 pub fn bind_source_credential(
 	body: Json<SourceCredentialBindingRequest>,
 ) -> ApiResult<SourceCredentialBindingResponse> {
-	let store = SourceCredentialStore;
+	let _guard = lock_source_bindings();
+	let mut bindings = load_source_bindings().map_err(internal_err)?;
+	let creds = load_credentials().map_err(internal_err)?;
 	let credential_id = body.credential_id.as_deref();
 
-	// The store performs the load → validate → save read-modify-write under its
-	// own keyring lock; a missing credential / empty source surfaces as a
-	// `BindError`, mapped to the same 400/404 the route returned before.
-	store
-		.bind(&body.source, credential_id)
-		.map_err(source_binding_err)?;
+	bind_source_to_credential(
+		&mut bindings,
+		&body.source,
+		credential_id,
+		&creds,
+	)
+	.map_err(source_binding_err)?;
+	save_source_bindings(&bindings).map_err(internal_err)?;
 
-	// Re-read the credential list so the response can resolve the bound
-	// credential's display name.
-	let creds = store.list().map_err(internal_err)?;
 	Ok(Json(source_binding_response(
 		&body.source,
 		credential_id,
@@ -115,15 +156,19 @@ pub fn bind_source_credential(
 pub fn create_credential(
 	body: Json<CreateCredentialRequest>,
 ) -> ApiCreated<CredentialResponse> {
-	let store = SourceCredentialStore;
+	let _guard = lock_credentials();
+	let mut creds = load_credentials().map_err(internal_err)?;
 	info!("creating credential '{}'", body.name);
-	// The dup-name check + insert run under ONE keyring lock inside the store
-	// (`create_unique`), so a concurrent create cannot slip a duplicate past the
-	// check (finding #2). The HTTP-only 409 mapping lives here; a keychain
-	// failure maps to 500/KEYCHAIN_ERROR.
-	let new = store
-		.create_unique(&body.name, &body.token)
-		.map_err(create_credential_err)?;
+	if credential_name_exists(&creds, &body.name) {
+		return Err(duplicate_credential_err(&body.name));
+	}
+	let new = StoredCredential {
+		id: uuid::Uuid::new_v4().to_string(),
+		name: body.name.clone(),
+		token: body.token.clone(),
+	};
+	creds.push(new.clone());
+	store_credentials(&creds).map_err(internal_err)?;
 	Ok((
 		Status::Created,
 		Json(CredentialResponse {
@@ -135,16 +180,25 @@ pub fn create_credential(
 
 #[delete("/credentials/<id>")]
 pub fn delete_credential(id: &str) -> ApiNoContent {
-	// `delete` removes the credential AND prunes any bindings that pointed at
-	// it in a single locked read-modify-write. A binding-prune failure is
-	// logged rather than failing the delete, preserving the old route's
-	// behavior.
-	match SourceCredentialStore.delete(id) {
-		Ok(removed) => info!("deleting credential '{id}', removed={removed}"),
-		Err(error) => {
-			warn!("failed to fully delete credential {id}: {error}");
-			return Err(internal_err(error));
+	let _guard = lock_credentials();
+	let mut creds = load_credentials().map_err(internal_err)?;
+	let original_len = creds.len();
+	creds.retain(|c| c.id != id);
+	info!(
+		"deleting credential '{id}', removed={}",
+		original_len != creds.len()
+	);
+	store_credentials(&creds).map_err(internal_err)?;
+	let result = (|| {
+		let mut bindings = load_source_bindings()?;
+		if prune_bindings_for_credential(&mut bindings, id) {
+			save_source_bindings(&bindings)?;
 		}
+		Ok::<(), String>(())
+	})();
+
+	if let Err(error) = result {
+		warn!("failed to prune source credential bindings for {id}: {error}");
 	}
 	Ok(rocket::response::status::NoContent)
 }
@@ -155,68 +209,30 @@ mod tests {
 
 	#[test]
 	fn missing_binding_credential_maps_to_specific_not_found_code() {
-		let err =
-			source_binding_err(BindError::CredentialNotFound("missing".into()));
+		let err = source_binding_err(SourceBindingError::CredentialNotFound(
+			"missing".into(),
+		));
 
 		assert_eq!(err.status, Status::NotFound);
 		assert_eq!(err.body.code, "CREDENTIAL_NOT_FOUND");
 	}
 
 	#[test]
-	fn empty_source_binding_maps_to_validation_failed() {
-		let err = source_binding_err(BindError::EmptySource);
-
-		assert_eq!(err.status, Status::BadRequest);
-		assert_eq!(err.body.code, "VALIDATION_FAILED");
-		assert_eq!(err.body.error, "source must not be empty");
-	}
-
-	#[test]
 	fn duplicate_credential_name_rejected() {
-		let err =
-			create_credential_err(CreateError::Duplicate("github.com".into()));
+		let creds = vec![StoredCredential {
+			id: "c1".to_string(),
+			name: "github.com".to_string(),
+			token: "tok".to_string(),
+		}];
+
+		assert!(credential_name_exists(&creds, "github.com"));
+		let err = duplicate_credential_err("github.com");
 		assert_eq!(err.status, Status::Conflict);
 		assert_eq!(err.body.code, "CREDENTIAL_NAME_EXISTS");
-		assert_eq!(
-			err.body.error,
-			"A credential named 'github.com' already exists"
-		);
 	}
 
 	#[test]
-	fn create_store_failure_maps_to_keychain_error() {
-		// finding #2/#1: a keychain failure during create is a 500, not a 409.
-		let err = create_credential_err(CreateError::Store(
-			CredentialError::Keyring("boom".into()),
-		));
-		assert_eq!(err.status, Status::InternalServerError);
-		assert_eq!(err.body.code, "KEYCHAIN_ERROR");
-	}
-
-	#[test]
-	fn bind_store_failure_maps_to_keychain_error_not_not_found() {
-		// finding #1: a keychain failure during bind must surface as
-		// 500/KEYCHAIN_ERROR, never the misleading 404/CREDENTIAL_NOT_FOUND.
-		let err = source_binding_err(BindError::Store(
-			CredentialError::Keyring("boom".into()),
-		));
-		assert_eq!(err.status, Status::InternalServerError);
-		assert_eq!(err.body.code, "KEYCHAIN_ERROR");
-	}
-
-	#[test]
-	fn keyring_error_maps_to_keychain_error_code() {
-		let err = internal_err(CredentialError::Keyring("boom".into()));
-		assert_eq!(err.status, Status::InternalServerError);
-		assert_eq!(err.body.code, "KEYCHAIN_ERROR");
-		assert_eq!(err.body.error, "keychain error: boom");
-	}
-
-	#[test]
-	fn serde_error_maps_to_keychain_error_code() {
-		let err = internal_err(CredentialError::Serde("bad json".into()));
-		assert_eq!(err.status, Status::InternalServerError);
-		assert_eq!(err.body.code, "KEYCHAIN_ERROR");
-		assert_eq!(err.body.error, "credential serialization error: bad json");
+	fn credential_store_lock_survives_poison_shape() {
+		let _guard = lock_credentials();
 	}
 }

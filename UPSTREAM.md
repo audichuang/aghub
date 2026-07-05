@@ -8,7 +8,9 @@ messages, but this is the discoverable, durable home.
 ## ⚠️ Two different "upstreams" — don't confuse them
 
 - **Fork upstream — [`AkaraChen/aghub`](https://github.com/AkaraChen/aghub)**: the
-  repo this fork descends from. **This file tracks it.** `git remote` name: `upstream`.
+  repo this fork descends from. **This file tracks it.** On this clone its `git
+remote` is named **`origin`** (NOT `upstream`); our own publish remote is
+  **`fork`** — push commits and release tags to `fork`, never to `origin`.
 - **Skills-ecosystem upstream — vercel-labs `npx skills` package**: the skill CLI we
   stay round-trip compatible with. Documented by the `npx-skills-contract` and
   `upstream-skills-flow` skills + `CONTEXT.md` ("Skill folder hash" = its GitHub tree
@@ -17,23 +19,27 @@ messages, but this is the discoverable, durable home.
 ## Fork baseline
 
 - This fork ships its **own** version line (currently `v2.1.x`), independent of upstream.
-- `git remote`: `upstream = https://github.com/AkaraChen/aghub.git`.
+- `git remote`: `origin = https://github.com/AkaraChen/aghub.git` (upstream);
+  `fork = https://github.com/audichuang/aghub.git` (ours — push here).
 - **merge-base** with upstream: `ca48d93`.
 - **Last full review**: upstream `main` @ `714b971` — **52 upstream-only commits** since
-  `ca48d93` (2026-06). Tally: 6 ported · 5 already-present · 4 deferred (security)
+  `ca48d93` (2026-06). Tally: 8 ported · 5 already-present · 2 deferred (security)
   · 3 skipped (product) · 2 upstream-tests · 1 partial · 2 upstream-internal · 29
   dependency bumps. Every one is dispositioned below.
 
 ## ✅ Ported from upstream (active backport work)
 
-| Upstream           | Our commit | Crate      | What                                                                                                                                         |
-| ------------------ | ---------- | ---------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `3ad9f1c`          | `b5a7857`  | core       | copy-mode skill import preserves the full source tree (scripts/refs/assets/body), not just a synthesized `SKILL.md`                          |
-| `52a938c`          | `37ca1e7`  | cc-plugins | tarball extraction path validation (zip-slip / `..` / absolute / symlink / hardlink)                                                         |
-| `ffeec65`          | `a1ee462`  | agents     | Codex sub-agent I/O hardening (O_NOFOLLOW read + staging-temp/rename write)                                                                  |
-| `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`)              |
-| `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                              |
-| `398c7e8`          | `31da70c`  | ci         | validate Homebrew release tag format in `release.yml` before touching the tap (also fixes the prior `aghub vv<tag>` commit-message double-v) |
+| Upstream           | Our commit | Crate      | What                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------ | ---------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `3ad9f1c`          | `b5a7857`  | core       | copy-mode skill import preserves the full source tree (scripts/refs/assets/body), not just a synthesized `SKILL.md`                                                                                                                                                                                                                                                             |
+| `52a938c`          | `37ca1e7`  | cc-plugins | tarball extraction path validation (zip-slip / `..` / absolute / symlink / hardlink)                                                                                                                                                                                                                                                                                            |
+| `ffeec65`          | `a1ee462`  | agents     | Codex sub-agent I/O hardening (O_NOFOLLOW read + staging-temp/rename write) — **codex `.toml` reader only** (`agents/codex/sub_agent.rs`); the generic `.md` sub-agent path was hardened separately (see PR #209 row)                                                                                                                                                           |
+| `91bd12d` (subset) | `1ef6980`  | api        | `/skills/content` + `/skills/tree` constrained to allow-listed roots (delete-by-path already covered by our `assert_contained`)                                                                                                                                                                                                                                                 |
+| `2f13f0c`          | `30856f7`  | api        | git-scan credentials restricted to `github.com`                                                                                                                                                                                                                                                                                                                                 |
+| `398c7e8`          | `31da70c`  | ci         | validate Homebrew release tag format in `release.yml` before touching the tap (also fixes the prior `aghub vv<tag>` commit-message double-v)                                                                                                                                                                                                                                    |
+| `1858167`          | `b87566b0` | cc-plugins | marketplace `github_owner_repo` only resolves owner/repo when the source host is genuinely GitHub (filter on `RemoteSourceType::Github`) — a non-github plugin URL no longer mis-resolves to a github raw-manifest fetch. Ports verbatim; our `aghub-git` already exposes `source_type`                                                                                         |
+| `9ba3a64`          | `b87566b0` | desktop    | deep-link MCP import review hardening — per-field transport review (command/args/env or url/headers/timeout) + a warning Alert and a mandatory consent checkbox that gates Install for stdio (executable) MCPs. `aghub://` links are an external attack surface                                                                                                                 |
+| `PR #209` (open)   | `9b54de54` | agents     | generic `.md` sub-agent I/O symlink hardening (`sub_agents.rs`: Claude/OpenCode path) — reject symlinked path components + non-regular files on read, staging-temp + `create_new` + rename on write. Ported verbatim (portable `symlink_metadata`, not `a1ee462`'s unix-only O_NOFOLLOW). **Not a main commit** — surfaced by upstream-PR review, so not in the 52-commit tally |
 
 ## ✅ Already present in this fork (implemented earlier, independent of the v2.1.3/2.1.4 work)
 
@@ -50,12 +56,13 @@ exact patch-id matches — they were re-implemented in our own commits:
 
 ## ✅ Our hardening beyond upstream (found via review / CI, not in upstream)
 
-| Our commit          | Crate           | What                                                                                                                                                                                        |
-| ------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `cac06b6`           | cc-plugins      | build tarball target from the **canonical** root — fixes macOS/Windows `/var`→`/private` canonicalize-prefix bug that broke extraction (Linux `/tmp` isn't a symlink, so it passed locally) |
-| `a455f4c`           | cc-plugins      | component-wise, symlink-rejecting extraction dir creation (follow-up to `37ca1e7`)                                                                                                          |
-| `408c787` `be9c465` | api/core/agents | accept 403-or-404 for refused reads; `#[cfg(unix)]` tests simulating the macOS canonicalize-prefix gotcha on Linux (symlinked tmp dir)                                                      |
-| `b53fb2f` `e187cff` | ci              | release 3-platform test gate + per-tag concurrency group; `just preflight`                                                                                                                  |
+| Our commit          | Crate           | What                                                                                                                                                                                                                                                                                                                             |
+| ------------------- | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cac06b6`           | cc-plugins      | build tarball target from the **canonical** root — fixes macOS/Windows `/var`→`/private` canonicalize-prefix bug that broke extraction (Linux `/tmp` isn't a symlink, so it passed locally)                                                                                                                                      |
+| `a455f4c`           | cc-plugins      | component-wise, symlink-rejecting extraction dir creation (follow-up to `37ca1e7`)                                                                                                                                                                                                                                               |
+| `408c787` `be9c465` | api/core/agents | accept 403-or-404 for refused reads; `#[cfg(unix)]` tests simulating the macOS canonicalize-prefix gotcha on Linux (symlinked tmp dir)                                                                                                                                                                                           |
+| `b53fb2f` `e187cff` | ci              | release 3-platform test gate + per-tag concurrency group; `just preflight`                                                                                                                                                                                                                                                       |
+| `9b54de54`          | core            | `transfer.rs` batch copy-delete now routes `remove_dir_all` through a containment guard (`allowed_skill_roots` + `assert_contained`), mirroring `manager::skill` removal — closes an unguarded `remove_dir_all` (canonicalize-escape). Inspired by upstream PR #216's principle (its literal "reconcile" fn does not exist here) |
 
 ## ⏸️ Deferred — security-relevant, intentionally not yet
 
@@ -63,8 +70,6 @@ exact patch-id matches — they were re-implemented in our own commits:
 | --------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `43acac8` API token auth (`ApiAuth`) + `109e343` `TrustedLocalOrigin` | Collides with this fork's multi-connection / SSH-remote server model (token injection over the SSH tunnel). The API is same-host-trusted for now — see `crates/api/AGENTS.md` CORS note. Revisit. |
 | (CORS tightening — part of the same change)                           | Tied to the token-auth work above; deferred together.                                                                                                                                             |
-| `1858167` validate GitHub marketplace manifests (cc-plugins)          | Low blast radius; not yet ported. Reasonable next port — `crates/cc-plugins/.../marketplace/source.rs` lacks the host check.                                                                      |
-| `9ba3a64` harden deep-link MCP import review (desktop consent UI)     | Frontend executable-MCP consent guard; not yet ported.                                                                                                                                            |
 
 ## ⏭️ Skipped — product choices (revisit per roadmap)
 
@@ -117,9 +122,9 @@ assert_contained}` instead of upstream's parallel `copy_dir_recursive` / `canoni
 ## Doing the next sync
 
 ```bash
-git fetch upstream main
-git log --no-merges --oneline ca48d93..upstream/main     # full upstream-only list + count
-git log --no-merges --cherry-pick --right-only ca48d93...upstream/main   # not-yet-equivalent
+git fetch origin main
+git log --no-merges --oneline ca48d93..origin/main       # full upstream-only list + count
+git log --no-merges --cherry-pick --right-only ca48d93...origin/main     # not-yet-equivalent
 git show <sha>                                            # inspect a candidate
 # For "is it already here?" check our own history by content, not by title:
 git log --oneline -S '<distinctive snippet>' -- <path>

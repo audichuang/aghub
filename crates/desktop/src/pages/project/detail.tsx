@@ -1,5 +1,6 @@
 import { FolderIcon } from "@heroicons/react/24/solid";
-import { useQuery } from "@tanstack/react-query";
+import { toast } from "@heroui/react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -19,10 +20,14 @@ import { UnifiedResourceList } from "../../components/unified-resource-list";
 import type { McpResponse, SkillResponse } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { useProjects } from "../../hooks/use-projects";
+import { bulkFailureItemsLabel } from "../../lib/bulk-errors";
 import { getMcpMergeKey, getSubAgentMergeKey } from "../../lib/utils";
 import { mcpListQueryOptions } from "../../requests/mcps";
 import { skillListQueryOptions } from "../../requests/skills";
-import { subAgentListQueryOptions } from "../../requests/sub-agents";
+import {
+	invalidateSubAgentQueries,
+	subAgentListQueryOptions,
+} from "../../requests/sub-agents";
 
 export default function ProjectDetailPage() {
 	const { t } = useTranslation();
@@ -30,6 +35,7 @@ export default function ProjectDetailPage() {
 	const { data: projects = [] } = useProjects();
 	const project = projects.find((p) => p.id === id);
 	const api = useApi();
+	const queryClient = useQueryClient();
 
 	const [panelMode, setPanelMode] = useState<
 		| "create-mcp"
@@ -242,6 +248,40 @@ export default function ProjectDetailPage() {
 	const isRefreshing =
 		isFetchingMcps || isFetchingSkills || isFetchingSubAgents;
 
+	// Sub-agent delete handler (removes all items in a group)
+	const handleDeleteSubAgentGroup = async (group: {
+		mergeKey: string;
+		items: (typeof projectSubAgents)[number][];
+	}) => {
+		const itemsWithAgent = group.items.filter(
+			(item): item is typeof item & { agent: string } => !!item.agent,
+		);
+		const results = await Promise.allSettled(
+			itemsWithAgent.map((item) =>
+				api.subAgents.delete(
+					item.name,
+					item.agent,
+					"project",
+					project?.path,
+				),
+			),
+		);
+		const failures = results
+			.map((result, index) => ({ result, item: itemsWithAgent[index] }))
+			.filter(({ result }) => result.status === "rejected")
+			.map(({ item }) => ({ name: item.name, agent: item.agent }));
+		await invalidateSubAgentQueries(queryClient);
+		if (failures.length > 0) {
+			console.error("sub-agent project delete failures:", failures);
+			toast.danger(
+				t("bulkDeleteFailedItems", bulkFailureItemsLabel(failures)),
+			);
+			return;
+		}
+		setSelectedResource(null);
+		setResourceType("");
+	};
+
 	if (!project) {
 		return (
 			<div className="flex h-full items-center justify-center">
@@ -324,10 +364,10 @@ export default function ProjectDetailPage() {
 					<SubAgentDetail
 						group={selectedSubAgentGroup}
 						onEdit={() => {}}
-						onDeleted={() => {
-							setSelectedResource(null);
-							setResourceType("");
-						}}
+						onDelete={() =>
+							handleDeleteSubAgentGroup(selectedSubAgentGroup)
+						}
+						isDeleting={false}
 						projectPath={project.path}
 					/>
 				)}
