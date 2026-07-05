@@ -8,8 +8,9 @@
 //! `local` for local-only sources).
 //!
 //! **`--online` (alias `--check-remote`).** Opt-in network check that runs the
-//! shared [`skill_update`] orchestrator with a `GIT_USERNAME`/`GIT_PASSWORD`
-//! token resolver: a cheap ls-refs preflight skips the fetch when the upstream
+//! shared [`skill_update`] orchestrator with the same env token resolver as
+//! the `source` commands (`GIT_PASSWORD` on any host, `GITHUB_TOKEN` bound to
+//! github.com): a cheap ls-refs preflight skips the fetch when the upstream
 //! tip is unchanged and the installed copy is provably unmodified, otherwise a
 //! treeless fetch + hash compare yields real `upToDate`/`updateAvailable`.
 //!
@@ -24,7 +25,7 @@ use anyhow::Result;
 use serde::Serialize;
 use skill_update::{
 	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcher, GitRefResolver,
-	ResultCache, SourceRef, TokenResolver,
+	ResultCache, SourceRef,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -171,16 +172,11 @@ const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
 const CONCURRENCY: usize = 4;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
-/// CLI [`TokenResolver`]: resolves a token from `GIT_USERNAME`/`GIT_PASSWORD`
-/// (consistent with `apply-update`'s credential handling). The password/PAT is
-/// used as the token regardless of source/host.
-struct EnvTokenResolver;
-
-impl TokenResolver for EnvTokenResolver {
-	fn resolve(&self, _source: &str, _host: Option<&str>) -> Option<String> {
-		aghub_git::read_credentials().map(|creds| creds.password)
-	}
-}
+// Token policy is shared with the `source` commands (`GIT_PASSWORD` on any
+// host; `GITHUB_TOKEN` bound to github.com) so `check --online` accepts the
+// same credentials as `source diff`/`sync`. `apply-update` keeps its own
+// `GIT_USERNAME`/`GIT_PASSWORD` basic-auth semantics.
+use super::source::EnvTokenResolver;
 
 /// `--online` update check: run the shared `skill-update` orchestrator with the
 /// env token resolver and the default git adapters. **Read-only** — it never

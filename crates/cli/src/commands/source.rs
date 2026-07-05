@@ -34,7 +34,7 @@ use crate::SourceAction;
 /// count as unset. `GitFetcher` consumes the token as the `x-access-token`
 /// password — there is no username/password basic-auth path. Returns
 /// `None` when nothing applies (the unauthenticated attempt stands).
-struct EnvTokenResolver;
+pub(crate) struct EnvTokenResolver;
 impl skill_update::TokenResolver for EnvTokenResolver {
 	fn resolve(&self, _source: &str, host: Option<&str>) -> Option<String> {
 		select_env_token(
@@ -1338,21 +1338,18 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		);
 	}
 
-	// 3. Fetch upstream (test hook honored by `CliFetcher`).
+	// 3. Fetch upstream (test hook honored by `CliFetcher`) via the shared
+	//    lazy-auth path: unauthenticated first, token retry on failure —
+	//    same semantics (and host-bound token policy) as `source diff`/`sync`.
 	let effective_ref =
 		args.git_ref.map(str::to_string).or(source.ref_name.clone());
-	let token = <EnvTokenResolver as skill_update::TokenResolver>::resolve(
-		&EnvTokenResolver,
-		&source.source_url,
-		skill_update::keychain_host_for_source(&source.source_url).as_deref(),
-	);
-	let repo = <CliFetcher as skill_update::Fetcher>::fetch(
-		&CliFetcher,
+	let repo = sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: source.source_url.clone(),
 			ref_: effective_ref.clone(),
 		},
-		token.as_deref(),
+		&CliFetcher,
+		&EnvTokenResolver,
 	)
 	.map_err(|e| match e {
 		FetchError::Auth => anyhow::anyhow!(
