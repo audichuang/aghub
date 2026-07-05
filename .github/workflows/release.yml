@@ -521,7 +521,11 @@ jobs:
     finalize-prerelease:
         name: Mark RC as prerelease (not latest)
         needs: [build-tauri, build-cli]
-        if: ${{ contains(github.event.inputs.version || github.ref_name, '-') }}
+        # !cancelled(): run even when a build job failed — a builder may have
+        # already flipped the release to latest before the failure, and skipping
+        # this job would leave the RC pinned at releases/latest (which the Tauri
+        # updater serves to every stable user).
+        if: ${{ !cancelled() && contains(github.event.inputs.version || github.ref_name, '-') }}
         runs-on: ubuntu-latest
         permissions:
             contents: write
