@@ -140,13 +140,20 @@ pub fn apply_skill_update_from_fetched(
 
 	let mut paths = Vec::new();
 	for target in &targets {
-		aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
-			.with_context(|| {
-				format!(
-					"failed to replace installed skill at {}",
-					target.display()
-				)
-			})?;
+		let outcome =
+			aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
+				.with_context(|| {
+					format!(
+						"failed to replace installed skill at {}",
+						target.display()
+					)
+				})?;
+		// A post-swap temp-cleanup failure is a warning, never an abort: the
+		// swap succeeded, so the remaining targets and the lock update must
+		// still run (aborting would leave new content with a stale lock).
+		if let Some(warning) = outcome.cleanup_warning {
+			eprintln!("warning: {warning}");
+		}
 		paths.push(target.clone());
 	}
 

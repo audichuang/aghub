@@ -155,23 +155,6 @@ pub enum RecoveryHint {
 }
 
 impl RecoveryHint {
-	/// Classify an io error against the path it was operating on. Kind-based
-	/// (not errno) so it compiles + maps consistently on all 3 platforms.
-	pub fn from_io(err: &std::io::Error, ctx_path: &Path) -> Self {
-		match err.kind() {
-			std::io::ErrorKind::PermissionDenied => RecoveryHint::LockHeld {
-				path: ctx_path.to_path_buf(),
-			},
-			std::io::ErrorKind::NotFound => RecoveryHint::MissingDir {
-				path: ctx_path.to_path_buf(),
-			},
-			_ => RecoveryHint::ManualRestore {
-				recover_from: ctx_path.to_path_buf(),
-				restore_to: ctx_path.to_path_buf(),
-			},
-		}
-	}
-
 	/// One actionable line. The only raw interpolation is the path(s).
 	pub fn next_step(&self) -> String {
 		match self {
@@ -199,10 +182,22 @@ impl RecoveryHint {
 	}
 }
 
+/// Result of a SUCCESSFUL [`stage_and_swap_dir`]: the target now holds the
+/// new contents. `cleanup_warning` is `Some` when the post-swap temp sweep
+/// failed — the swap itself is done, so callers MUST proceed (update locks,
+/// continue remaining targets) and surface the warning, never treat it as a
+/// swap failure: aborting here leaves new content on disk with a stale lock
+/// and an error message claiming nothing was replaced.
+#[must_use]
+#[derive(Debug)]
+pub struct SwapOutcome {
+	pub cleanup_warning: Option<String>,
+}
+
 pub fn stage_and_swap_dir(
 	source_dir: &Path,
 	target_dir: &Path,
-) -> std::io::Result<()> {
+) -> std::io::Result<SwapOutcome> {
 	let parent = target_dir.parent().ok_or_else(|| {
 		std::io::Error::new(
 			std::io::ErrorKind::InvalidInput,
@@ -224,21 +219,27 @@ pub fn stage_and_swap_dir(
 
 	let swap_result = std::fs::rename(&staged, target_dir);
 	if let Err(error) = swap_result {
-		return handle_failed_swap(
+		handle_failed_swap(
 			error,
 			had_target,
 			&backup,
 			target_dir,
 			&staging_root,
 			&backup_root,
-		);
+		)?;
+		unreachable!("handle_failed_swap always returns Err");
 	}
 
 	// The swap succeeded — target_dir now holds the new contents — but the
 	// staging/backup temps must still be swept. A failure here means we'd be
 	// claiming success while leaking a .aghub-stage-*/.aghub-backup-* orphan,
-	// so surface it instead of swallowing it with `let _`.
-	cleanup_swap_temps(&staging_root, &backup_root)
+	// so surface it as a WARNING on the outcome (never as an Err: the swap is
+	// done, and callers aborting on it would skip the lock update and lie).
+	Ok(SwapOutcome {
+		cleanup_warning: cleanup_swap_temps(&staging_root, &backup_root)
+			.err()
+			.map(|e| e.to_string()),
+	})
 }
 
 /// Sweep the post-swap temp roots. The swap itself already succeeded, so this
@@ -532,8 +533,9 @@ mod tests {
 		fs::create_dir_all(&target).unwrap();
 		fs::write(target.join("old.txt"), "old").unwrap();
 
-		stage_and_swap_dir(&source, &target).unwrap();
+		let outcome = stage_and_swap_dir(&source, &target).unwrap();
 
+		assert!(outcome.cleanup_warning.is_none());
 		assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
 		assert!(target.join("nested/file.txt").exists());
 		assert!(!target.join("old.txt").exists());
@@ -549,8 +551,9 @@ mod tests {
 		fs::create_dir_all(&source).unwrap();
 		fs::write(source.join("SKILL.md"), "new").unwrap();
 
-		stage_and_swap_dir(&source, &target).unwrap();
+		let outcome = stage_and_swap_dir(&source, &target).unwrap();
 
+		assert!(outcome.cleanup_warning.is_none());
 		assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
 	}
 

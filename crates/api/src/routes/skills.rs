@@ -2185,11 +2185,17 @@ pub async fn git_sync_skill(
 
 	// Replace each installation path
 	for target_dir in &target_dirs {
-		aghub_core::skills::update::stage_and_swap_dir(
+		let outcome = aghub_core::skills::update::stage_and_swap_dir(
 			&cloned_skill_dir,
 			target_dir,
 		)
 		.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
+		// A post-swap temp-cleanup failure is a warning, never an abort: the
+		// swap succeeded, so the remaining targets and the lock update must
+		// still run.
+		if let Some(warning) = outcome.cleanup_warning {
+			log::warn!("git-sync: {warning}");
+		}
 	}
 
 	// The session-based sync clones into a session temp dir and does not carry a

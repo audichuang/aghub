@@ -596,14 +596,23 @@ pub(crate) async fn apply_skill_update_inner(
 
 	let mut paths = Vec::new();
 	for target in &targets {
-		if let Err(error) =
-			aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
+		match aghub_core::skills::update::stage_and_swap_dir(source_dir, target)
 		{
-			return Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				&format!("Failed to replace installed skill: {error}"),
-			)));
+			Err(error) => {
+				return Ok(Json(apply_error(
+					&req.name,
+					&req.scope,
+					&format!("Failed to replace installed skill: {error}"),
+				)));
+			}
+			// A post-swap temp-cleanup failure is a warning, never an abort:
+			// the swap succeeded, so the remaining targets and the lock
+			// update must still run.
+			Ok(outcome) => {
+				if let Some(warning) = outcome.cleanup_warning {
+					log::warn!("apply-update: {warning}");
+				}
+			}
 		}
 		paths.push(target.display().to_string());
 	}
