@@ -89,10 +89,17 @@ impl aghub_inference::CredentialStore for CliCredentialStore {
 ///
 /// Uses the native keyring backend in production, so providers created via the
 /// desktop or API are visible to the CLI. When `$AGHUB_TEST_CREDENTIAL_FILE` is
-/// set, a plaintext file backs the keys instead (headless test runs).
+/// set, a plaintext file backs the keys instead (headless test runs) — debug
+/// builds only, like every other test hook: a release binary must never let a
+/// stray env var silently redirect API keys to a plaintext file.
 pub(crate) fn inference_store(
 ) -> aghub_inference::InferenceProviderStore<CliCredentialStore> {
-	let credentials = match std::env::var_os(TEST_CREDENTIAL_FILE_ENV) {
+	let test_credential_file = if cfg!(debug_assertions) {
+		std::env::var_os(TEST_CREDENTIAL_FILE_ENV)
+	} else {
+		None
+	};
+	let credentials = match test_credential_file {
 		Some(path) => CliCredentialStore::File(
 			aghub_inference::FileCredentialStore::new(path),
 		),

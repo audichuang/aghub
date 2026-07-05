@@ -620,21 +620,41 @@ impl TokenResolver for KeyringTokenResolver {
 }
 
 /// [`TokenResolver`] reading `GIT_PASSWORD` (or `GITHUB_TOKEN`) from the
-/// environment, ignoring `source`/`host`. Moved from the CLI.
+/// environment. Moved from the CLI.
+///
+/// `GIT_PASSWORD` is an explicit per-invocation override and applies to any
+/// host. `GITHUB_TOKEN` is usually a long-lived ambient PAT, so it is
+/// host-bound to github.com — the retry-on-401 path must never hand it to an
+/// arbitrary host a hostile lock entry points at (the keyring path already
+/// host-binds; this is the env-path equivalent). Empty values (set-but-blank,
+/// common in CI) are treated as unset so they neither authenticate nor
+/// short-circuit the keyring fallback.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct EnvTokenResolver;
 
 impl EnvTokenResolver {
-	fn env_token() -> Option<String> {
-		std::env::var("GIT_PASSWORD")
-			.or_else(|_| std::env::var("GITHUB_TOKEN"))
-			.ok()
+	fn env_token(host: Option<&str>) -> Option<String> {
+		let non_empty =
+			|var: &str| std::env::var(var).ok().filter(|t| !t.is_empty());
+		non_empty("GIT_PASSWORD").or_else(|| {
+			if host.is_some_and(is_github_host) {
+				non_empty("GITHUB_TOKEN")
+			} else {
+				None
+			}
+		})
 	}
 }
 
+/// github.com or a subdomain of it (e.g. gist.github.com), case-insensitive.
+fn is_github_host(host: &str) -> bool {
+	host.eq_ignore_ascii_case("github.com")
+		|| host.to_ascii_lowercase().ends_with(".github.com")
+}
+
 impl TokenResolver for EnvTokenResolver {
-	fn resolve(&self, _source: &str, _host: Option<&str>) -> Option<String> {
-		Self::env_token()
+	fn resolve(&self, _source: &str, host: Option<&str>) -> Option<String> {
+		Self::env_token(host)
 	}
 }
 
@@ -661,7 +681,7 @@ fn env_then(
 	source: &str,
 	host: Option<&str>,
 ) -> Option<String> {
-	EnvTokenResolver::env_token().or_else(|| fallback.resolve(source, host))
+	EnvTokenResolver::env_token(host).or_else(|| fallback.resolve(source, host))
 }
 
 #[cfg(test)]
@@ -1266,9 +1286,81 @@ mod tests {
 		std::env::remove_var("GIT_PASSWORD");
 		std::env::set_var("GITHUB_TOKEN", "GHTOK");
 
-		assert_eq!(EnvTokenResolver.resolve("o/r", None), Some("GHTOK".into()));
+		assert_eq!(
+			EnvTokenResolver.resolve("o/r", Some("github.com")),
+			Some("GHTOK".into())
+		);
+		assert_eq!(
+			EnvTokenResolver.resolve("o/r", Some("GitHub.com")),
+			Some("GHTOK".into()),
+			"host match must be case-insensitive"
+		);
 
 		std::env::remove_var("GITHUB_TOKEN");
+	}
+
+	#[test]
+	fn github_token_never_sent_to_non_github_host() {
+		// The PAT-exfil guard: an ambient GITHUB_TOKEN must not be handed to
+		// an arbitrary host on the 401-retry path (a hostile lock entry can
+		// point `source` anywhere). Includes the None-host case (host could
+		// not even be derived).
+		let _guard = env_lock().lock().unwrap();
+		std::env::remove_var("GIT_PASSWORD");
+		std::env::set_var("GITHUB_TOKEN", "GHTOK");
+
+		assert_eq!(EnvTokenResolver.resolve("o/r", Some("evil.example")), None);
+		assert_eq!(
+			EnvTokenResolver.resolve("o/r", Some("github.com.evil.example")),
+			None,
+			"suffix-spoofed host must not match"
+		);
+		assert_eq!(EnvTokenResolver.resolve("o/r", None), None);
+
+		std::env::remove_var("GITHUB_TOKEN");
+	}
+
+	#[test]
+	fn git_password_applies_to_any_host() {
+		// GIT_PASSWORD is an explicit per-invocation override, so unlike
+		// GITHUB_TOKEN it is not host-bound.
+		let _guard = env_lock().lock().unwrap();
+		std::env::remove_var("GITHUB_TOKEN");
+		std::env::set_var("GIT_PASSWORD", "ENVTOK");
+
+		assert_eq!(
+			EnvTokenResolver.resolve("o/r", Some("gitlab.example")),
+			Some("ENVTOK".into())
+		);
+		assert_eq!(
+			EnvTokenResolver.resolve("o/r", None),
+			Some("ENVTOK".into())
+		);
+
+		std::env::remove_var("GIT_PASSWORD");
+	}
+
+	#[test]
+	fn empty_env_token_is_ignored_and_falls_through() {
+		// Set-but-blank env vars (common in CI) must neither authenticate nor
+		// short-circuit the keyring fallback.
+		let _guard = env_lock().lock().unwrap();
+		std::env::set_var("GIT_PASSWORD", "");
+		std::env::set_var("GITHUB_TOKEN", "");
+
+		let fallback = RecordingResolver {
+			token: Some("KEYTOK".into()),
+			called: std::sync::atomic::AtomicBool::new(false),
+		};
+		let got = env_then(&fallback, "o/r", Some("github.com"));
+		std::env::remove_var("GIT_PASSWORD");
+		std::env::remove_var("GITHUB_TOKEN");
+
+		assert_eq!(got, Some("KEYTOK".into()));
+		assert!(
+			fallback.called.load(std::sync::atomic::Ordering::SeqCst),
+			"blank env token must fall through to the keyring"
+		);
 	}
 
 	#[test]

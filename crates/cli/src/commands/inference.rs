@@ -343,8 +343,11 @@ fn resolve_api_key(flag: Option<&str>) -> Result<String> {
 	}
 
 	if let Ok(key) = std::env::var(API_KEY_ENV) {
-		if !key.trim().is_empty() {
-			return Ok(key);
+		let trimmed = key.trim();
+		if !trimmed.is_empty() {
+			// Trim like the stdin path — an env var assigned with a trailing
+			// newline must not store the newline into the keyring.
+			return Ok(trimmed.to_string());
 		}
 	}
 
