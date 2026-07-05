@@ -7,7 +7,6 @@
 
 use aghub_core::{
 	create_adapter,
-	manager::sub_agent::SubAgentPatch,
 	models::{AgentType, SubAgent},
 	skills::removal::{Layout, PruneStatus},
 	ConfigError, ConfigManager,
@@ -381,6 +380,8 @@ fn update_sub_agent_rename_stale_file_delete_failure_errors() {
 	// in a SEPARATE `0o555` dir so only the unlink is blocked, on an EXISTING
 	// file. Root-skip + restore perms before asserting.
 	use std::os::unix::fs::PermissionsExt;
+
+	use aghub_core::manager::sub_agent::SubAgentPatch;
 
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
