@@ -3277,7 +3277,32 @@ fn reconcile_mcp_add_then_remove() {
 		"reconcile --add must copy into cursor: {json}"
 	);
 
-	// --remove cursor deletes it back out (Delete action).
+	// --remove without --yes is a dry-run: reports the plan, changes nothing.
+	let dry = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--remove",
+			"cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		dry.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&dry.stderr)
+	);
+	let json: Value = serde_json::from_slice(&dry.stdout).unwrap();
+	assert_eq!(json["dry_run"], true, "no --yes must dry-run: {json}");
+	assert_eq!(json["remove"][0], "cursor");
+
+	// --remove --yes deletes it back out (Delete action).
 	let rm = transfer_cli(project.path())
 		.args([
 			"-p",
@@ -3289,6 +3314,7 @@ fn reconcile_mcp_add_then_remove() {
 			"filesystem",
 			"--remove",
 			"cursor",
+			"--yes",
 			"--json",
 		])
 		.output()

@@ -4,7 +4,6 @@ use crate::{
 	manager::ConfigManager,
 	models::{AgentType, McpServer, Skill, SubAgent},
 	registry,
-	skills::linker::Linker,
 };
 use log::{info, warn};
 use skill::sanitize::sanitize_name;
@@ -297,40 +296,6 @@ fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
 			registry::get(target.agent).id,
 		)
 	})
-}
-
-/// Find where a skill actually exists in each agent's skills directories.
-/// Returns (skill_path, agent) pairs for locations where the skill exists.
-/// TODO: Only find one, maybe we should remove all?
-fn find_skill_locations_in_agents(
-	skill_name: &str,
-	agents: &[AgentType],
-	scope: InstallScope,
-	project_root: Option<&PathBuf>,
-) -> Vec<(PathBuf, AgentType)> {
-	let safe_name = sanitize_name(skill_name);
-	let mut locations = Vec::new();
-
-	for agent in agents {
-		let adapter = create_adapter(*agent);
-		let resource_scope = match scope {
-			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
-			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
-		};
-		let skills_dirs = adapter.get_skills_paths(
-			project_root.map(|p| p.as_path()),
-			resource_scope,
-		);
-
-		for dir in skills_dirs {
-			let skill_path = dir.join(&safe_name);
-			if skill_path.exists() {
-				locations.push((skill_path, *agent));
-			}
-		}
-	}
-
-	locations
 }
 
 fn group_agents_by_target_dir(
@@ -808,36 +773,48 @@ pub fn reconcile_skill(
 		}
 	}
 
-	// Find actual locations of the skill in removed agents' directories
-	let skill_locations = find_skill_locations_in_agents(
-		&skill.name,
-		&removed,
-		target_scope,
-		target_project_root.as_ref(),
-	);
-
-	// Process each actual location for deletion
-	for (skill_path, agent) in skill_locations {
-		let delete_result = if Linker::is_link(&skill_path) {
-			Linker::unlink(&skill_path)
-		} else {
-			fs::remove_dir_all(&skill_path)
+	// Remove per agent through the planned-removal seam (#5) — the same
+	// classifier every delete surface uses (symlink sweep, shared-master
+	// referrer keep, containment, lock prune). Never blind-delete paths
+	// found via READ dirs: a NativeReader's read dirs include the shared
+	// `.agents/skills` master, and `remove_dir_all`-ing it would orphan
+	// every other agent's referrer.
+	for agent in removed {
+		let target = InstallTarget {
+			agent,
+			scope: target_scope,
+			project_root: target_project_root.clone(),
 		};
-		let delete_error = match delete_result {
-			Ok(()) => None,
-			Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
-			Err(e) => Some(e),
-		};
+		let outcome = (|| -> Result<()> {
+			validate_target(&target)?;
+			let mut manager = build_manager(&target);
+			ensure_loaded(&mut manager)?;
+			match manager.remove_skill_planned(
+				&skill.name,
+				false, // single-agent removal, never an all-agents sweep
+				false, // not a dry-run — the CLI/desktop gate confirmation
+				true,  // execute; the plan still keeps shared masters
+			) {
+				Ok(_) => Ok(()),
+				// Already absent from this agent = the desired state;
+				// keep the old NotFound tolerance.
+				Err(ConfigError::ResourceNotFound { .. }) => Ok(()),
+				Err(err) => Err(err),
+			}
+		})();
+		log_operation_outcome(
+			"skill",
+			&skill.name,
+			OperationAction::Delete,
+			&target,
+			&outcome,
+		);
 
 		results.push(OperationResult {
-			target: InstallTarget {
-				agent,
-				scope: target_scope,
-				project_root: target_project_root.clone(),
-			},
+			target,
 			action: OperationAction::Delete,
-			success: delete_error.is_none(),
-			error: delete_error.as_ref().map(|e| e.to_string()),
+			success: outcome.is_ok(),
+			error: outcome.err().map(|err| err.to_string()),
 		});
 	}
 
@@ -1137,6 +1114,74 @@ mod tests {
 		let master_skill = master.join("SKILL.md");
 		assert!(master_skill.exists());
 		assert_eq!(fs::read_to_string(master_skill).unwrap(), skill_md);
+	}
+
+	// T-RECONCILE-NATIVE-READER: reconcile --remove for a NativeReader agent
+	// (cursor reads `.agents/skills` directly) must NOT delete the shared
+	// Master another agent still symlinks. The pre-seam code found the Master
+	// via cursor's READ dirs and `remove_dir_all`'d it — data loss for every
+	// referrer. This test fails if the removal path stops going through
+	// `remove_skill_planned`'s classifier.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_remove_native_reader_keeps_shared_master() {
+		use crate::adapter::set_skills_path_override;
+
+		struct SkillsPathOverrideReset;
+
+		impl Drop for SkillsPathOverrideReset {
+			fn drop(&mut self) {
+				set_skills_path_override("claude", None);
+			}
+		}
+
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let master = root.join(".agents/skills/my-skill");
+		let sentinel = master.join("sentinel.txt");
+		let claude_skills = root.join(".claude/skills");
+		let referrer = claude_skills.join("my-skill");
+		let skill_md =
+			"---\nname: my-skill\ndescription: Shared\n---\n\n# My Skill\n";
+
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), skill_md).unwrap();
+		fs::write(&sentinel, "keep-me").unwrap();
+		fs::create_dir_all(&claude_skills).unwrap();
+		std::os::unix::fs::symlink(&master, &referrer).unwrap();
+		set_skills_path_override("claude", Some(claude_skills));
+		let _reset_override = SkillsPathOverrideReset;
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "my-skill".to_string(),
+			},
+			vec![],
+			vec![AgentType::Cursor],
+		)
+		.unwrap();
+
+		assert_eq!(result.results.len(), 1);
+		assert_eq!(result.results[0].action, OperationAction::Delete);
+		// The shared Master and its contents must survive.
+		assert!(
+			master.join("SKILL.md").exists(),
+			"Master SKILL.md must survive a NativeReader remove"
+		);
+		assert!(
+			sentinel.exists(),
+			"sentinel inside master must survive (remove_dir_all would \
+			 have wiped it)"
+		);
+		// Claude's referrer must still resolve to the live Master.
+		assert!(
+			fs::canonicalize(&referrer).is_ok(),
+			"claude referrer symlink must stay intact"
+		);
 	}
 
 	// T-RECONCILE-WIN-JUNCTION: the real data-loss guard.

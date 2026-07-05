@@ -79,6 +79,14 @@ pub struct ReconcileArgs {
 	/// Agent (repeatable) to remove the resource from.
 	#[arg(long = "remove", value_parser = parse_agent)]
 	remove: Vec<AgentType>,
+	/// Only list what would change (this is the default when --remove is
+	/// given).
+	#[arg(long = "dry-run")]
+	dry_run: bool,
+	/// Actually perform removals (without it, a reconcile that removes is a
+	/// dry-run).
+	#[arg(short = 'y', long = "yes")]
+	yes: bool,
 	#[arg(long)]
 	json: bool,
 }
@@ -176,8 +184,52 @@ pub fn execute_reconcile(
 		name: args.name.clone(),
 	};
 
+	// Delete-consistent gate: a reconcile that REMOVES is destructive, so it
+	// defaults to a dry-run and only executes with an explicit --yes. Adds
+	// alone are non-destructive and run immediately (like `transfer`), unless
+	// --dry-run is asked for explicitly.
+	if args.dry_run || (!args.remove.is_empty() && !args.yes) {
+		return render_dry_run(args);
+	}
+
 	let result = run(source, args.add.clone(), args.remove.clone())?;
 	render(&result, args.json)
+}
+
+/// Report what a reconcile WOULD do without touching anything, mirroring the
+/// `delete` contract (dry-run by default, `--yes` to apply).
+fn render_dry_run(args: &ReconcileArgs) -> Result<()> {
+	let names = |agents: &[AgentType]| -> Vec<String> {
+		agents.iter().map(|a| a.as_str().to_string()).collect()
+	};
+	if args.json {
+		println!(
+			"{}",
+			serde_json::to_string_pretty(&serde_json::json!({
+				"dry_run": true,
+				"name": args.name,
+				"add": names(&args.add),
+				"remove": names(&args.remove),
+			}))?
+		);
+	} else {
+		if !args.add.is_empty() {
+			println!(
+				"dry-run: would add '{}' to: {}",
+				args.name,
+				names(&args.add).join(", ")
+			);
+		}
+		if !args.remove.is_empty() {
+			println!(
+				"dry-run: would remove '{}' from: {}",
+				args.name,
+				names(&args.remove).join(", ")
+			);
+		}
+		eprintln!("pass --yes to apply");
+	}
+	Ok(())
 }
 
 // Scope note: transfer carries its own `InstallScope` (Global/Project), NOT the
