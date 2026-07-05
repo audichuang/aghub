@@ -78,11 +78,13 @@ impl ConfigManager {
 				|| ConfigError::resource_not_found("MCP server", name),
 			)?;
 
-		// The plan describes the on-disk config file that would be rewritten —
-		// the same path `save_current` (via `config_path`) writes to.
+		// An MCP removal deletes NO on-disk path — it rewrites a JSON entry out
+		// of the shared config file (which persists). `paths` stays empty so
+		// `deleted_path` is null; otherwise the preview would claim the whole
+		// config file (e.g. `~/.claude.json`) is being deleted.
 		let plan = RemovalPlan {
 			layout: Layout::Copy,
-			paths: self.config_path().into_iter().collect(),
+			paths: vec![],
 			skipped: vec![],
 			needs_confirm: false,
 		};

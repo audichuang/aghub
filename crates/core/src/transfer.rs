@@ -352,6 +352,22 @@ fn ensure_destinations(destinations: &[InstallTarget]) -> Result<()> {
 	Ok(())
 }
 
+/// Reject a reconcile that names the same agent in both `--add` and `--remove`.
+/// The add loop runs before the remove loop, so `--add X --remove X` would
+/// silently net to a delete and exit 0. Both surfaces (CLI + API) route through
+/// `reconcile_*`, so the guard lives here once.
+fn ensure_disjoint(added: &[AgentType], removed: &[AgentType]) -> Result<()> {
+	for agent in added {
+		if removed.contains(agent) {
+			return Err(ConfigError::InvalidConfig(format!(
+				"agent '{}' appears in both add and remove",
+				agent.as_str()
+			)));
+		}
+	}
+	Ok(())
+}
+
 fn log_operation_outcome(
 	resource: &str,
 	name: &str,
@@ -422,6 +438,7 @@ pub fn reconcile_mcp(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 ) -> Result<OperationBatchResult> {
+	ensure_disjoint(&added, &removed)?;
 	let mcp = load_source_mcp(&source)?;
 	info!(
 		"reconciling MCP '{}' with {} added and {} removed agent(s)",
@@ -567,6 +584,7 @@ pub fn reconcile_sub_agent(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 ) -> Result<OperationBatchResult> {
+	ensure_disjoint(&added, &removed)?;
 	let sub_agent = load_source_sub_agent(&source)?;
 	info!(
 		"reconciling sub-agent '{}' with {} added and {} removed agent(s)",
@@ -712,6 +730,7 @@ pub fn reconcile_skill(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 ) -> Result<OperationBatchResult> {
+	ensure_disjoint(&added, &removed)?;
 	let skill = load_source_skill(&source)?;
 	let source_root = resolve_skill_root(&skill)?;
 	let safe_name = sanitize_name(&skill.name);
@@ -1620,5 +1639,27 @@ mod tests {
 		// Should only process once due to deduplication
 		assert_eq!(result.results.len(), 1);
 		assert_eq!(result.success_count(), 1);
+	}
+
+	#[test]
+	fn ensure_disjoint_rejects_agent_in_both_add_and_remove() {
+		// `--add cursor --remove cursor` would net to a silent delete + exit 0
+		// without this guard.
+		let err = ensure_disjoint(
+			&[AgentType::Cursor, AgentType::Claude],
+			&[AgentType::Cline, AgentType::Cursor],
+		)
+		.unwrap_err();
+		assert!(
+			matches!(err, ConfigError::InvalidConfig(msg) if msg.contains("cursor")),
+			"overlap must be rejected naming the agent"
+		);
+
+		// Disjoint add/remove sets are fine.
+		assert!(ensure_disjoint(
+			&[AgentType::Cursor],
+			&[AgentType::Cline, AgentType::Claude],
+		)
+		.is_ok());
 	}
 }

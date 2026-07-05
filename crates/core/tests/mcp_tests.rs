@@ -1624,7 +1624,8 @@ fn test_no_empty_string_mcp_key_produced() {
 // Phase 3 #5 Task 1: remove_mcp_planned + reroute remove_mcp through it.
 
 /// Dry-run (dry_run=true) plans the removal but deletes nothing: executed is
-/// false, the plan names the rewritten config file, and the MCP survives a
+/// false, the plan names NO on-disk path (an MCP removal only rewrites a JSON
+/// entry out of the shared config file, which persists), and the MCP survives a
 /// reload from disk.
 #[test]
 fn test_remove_mcp_planned_dry_run_keeps_entry() {
@@ -1640,15 +1641,10 @@ fn test_remove_mcp_planned_dry_run_keeps_entry() {
 	assert!(!outcome.executed, "dry-run must not execute");
 	assert_eq!(outcome.plan.layout, Layout::Copy);
 	assert!(!outcome.plan.needs_confirm, "MCP removal never gates");
-	assert_eq!(
-		outcome.plan.paths.len(),
-		1,
-		"plan names exactly the config file that would be rewritten"
-	);
-	assert_eq!(
-		outcome.plan.paths[0],
-		test.config_path(),
-		"planned path is the on-disk config file save_current writes to"
+	assert!(
+		outcome.plan.paths.is_empty(),
+		"MCP removal deletes no on-disk path (config file persists), so \
+		 `deleted_path` must stay null"
 	);
 	assert!(outcome.plan.skipped.is_empty());
 	assert_eq!(outcome.prune, PruneStatus::NotRun);
@@ -1664,7 +1660,8 @@ fn test_remove_mcp_planned_dry_run_keeps_entry() {
 }
 
 /// Confirmed execution (dry_run=false, confirm=true) deletes the MCP and
-/// reports executed=true with the rewritten config path.
+/// reports executed=true; the plan names no on-disk path (only the config
+/// JSON entry is rewritten).
 #[test]
 fn test_remove_mcp_planned_executes() {
 	use aghub_core::skills::removal::Layout;
@@ -1679,7 +1676,10 @@ fn test_remove_mcp_planned_executes() {
 
 	assert!(outcome.executed, "confirmed removal must execute");
 	assert_eq!(outcome.plan.layout, Layout::Copy);
-	assert_eq!(outcome.plan.paths, vec![test.config_path().to_path_buf()]);
+	assert!(
+		outcome.plan.paths.is_empty(),
+		"MCP removal deletes no on-disk path"
+	);
 
 	manager.load().unwrap();
 	let config = manager.config().unwrap();

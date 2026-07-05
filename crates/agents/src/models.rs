@@ -261,6 +261,11 @@ impl McpTransport {
 					"--env is only valid with --command".to_string(),
 				));
 			}
+			if url.trim().is_empty() {
+				return Err(crate::errors::ConfigError::ValidationFailed(
+					"url cannot be empty".to_string(),
+				));
+			}
 			return match transport_type {
 				"sse" => Ok(Some(McpTransport::Sse {
 					url,
@@ -295,6 +300,34 @@ impl McpTransport {
 		}
 
 		Ok(None)
+	}
+
+	/// Reject structurally-empty values that would build an unusable MCP: an
+	/// empty stdio command or an empty remote URL. The single shared rule for
+	/// both surfaces — the CLI reaches it through `from_inputs` (which builds a
+	/// transport, so its own empty-command / empty-url guards already fire) and
+	/// the API calls it from `CreateMcpRequest`/`UpdateMcpRequest::validate`,
+	/// which otherwise build a transport straight from JSON with no value check.
+	pub fn validate_values(&self) -> Result<(), crate::errors::ConfigError> {
+		use crate::errors::ConfigError;
+		match self {
+			McpTransport::Stdio { command, .. } => {
+				if command.trim().is_empty() {
+					return Err(ConfigError::ValidationFailed(
+						"command cannot be empty".to_string(),
+					));
+				}
+			}
+			McpTransport::Sse { url, .. }
+			| McpTransport::StreamableHttp { url, .. } => {
+				if url.trim().is_empty() {
+					return Err(ConfigError::ValidationFailed(
+						"url cannot be empty".to_string(),
+					));
+				}
+			}
+		}
+		Ok(())
 	}
 }
 
@@ -822,5 +855,49 @@ mod tests {
 		let config = AgentConfig::new();
 		assert!(config.skills.is_empty());
 		assert!(config.mcps.is_empty());
+	}
+
+	#[test]
+	fn from_inputs_url_empty_string_errs() {
+		// `--url ""` must be rejected, mirroring the empty-command guard.
+		let err = McpTransport::from_inputs(
+			None,
+			Some("".to_string()),
+			DEFAULT_REMOTE_TRANSPORT,
+			None,
+			None,
+			None,
+		)
+		.unwrap_err();
+		assert!(matches!(
+			err,
+			crate::errors::ConfigError::ValidationFailed(msg) if msg.contains("url")
+		));
+	}
+
+	#[test]
+	fn validate_values_rejects_empty_command_and_url() {
+		let empty_cmd = McpTransport::Stdio {
+			command: "  ".to_string(),
+			args: vec![],
+			env: None,
+			timeout: None,
+		};
+		assert!(empty_cmd.validate_values().is_err());
+
+		let empty_url = McpTransport::StreamableHttp {
+			url: "".to_string(),
+			headers: None,
+			timeout: None,
+		};
+		assert!(empty_url.validate_values().is_err());
+
+		let ok = McpTransport::Stdio {
+			command: "npx".to_string(),
+			args: vec![],
+			env: None,
+			timeout: None,
+		};
+		assert!(ok.validate_values().is_ok());
 	}
 }

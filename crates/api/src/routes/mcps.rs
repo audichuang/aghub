@@ -500,7 +500,10 @@ mod tests {
 		assert!(resp.success);
 		assert!(resp.dry_run, "default (confirm=None) must be a dry-run");
 		assert!(!resp.executed, "dry-run must not execute");
-		assert_eq!(resp.paths.len(), 1, "plan names the config file path");
+		assert!(
+			resp.paths.is_empty(),
+			"MCP removal deletes no on-disk path (only rewrites a config entry)"
+		);
 		assert!(resp.deleted_path.is_none(), "nothing deleted on dry-run");
 		assert!(mcp_exists(root, "keepme"), "dry-run must leave the mcp");
 	}

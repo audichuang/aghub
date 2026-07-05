@@ -867,6 +867,54 @@ fn source_list_runs_with_no_agent_config() {
 		.success();
 }
 
+/// `source list -g -p` must reject the ambiguous both-scopes combo instead of
+/// silently taking global.
+#[test]
+fn source_list_rejects_both_scopes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-p", "source", "list"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "both scopes must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("either -g or -p"),
+		"expected both-scope rejection: {stderr}"
+	);
+}
+
+/// Top-level `--all` has no meaning for `transfer`/`reconcile` (single writing
+/// scope); it must be rejected, not silently ignored.
+#[test]
+fn transfer_rejects_all_scope() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"--all",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"x",
+			"--to",
+			"cursor",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "--all must be rejected");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("'all'"),
+		"expected --all rejection: {stderr}"
+	);
+}
+
 /// Codex finding (global/`--all` source paths must not require a project root):
 /// the old code called `current_project_root()` — a `current_dir()`/`getcwd()`
 /// syscall — UNCONDITIONALLY, so from a broken/deleted cwd even a global-only

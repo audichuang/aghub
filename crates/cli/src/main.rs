@@ -396,7 +396,19 @@ fn main() -> Result<()> {
 
 	// `transfer` / `reconcile` span MULTIPLE agents (source + targets), so they
 	// resolve their own per-target scope and are dispatched before the
-	// single-agent adapter/ConfigManager setup.
+	// single-agent adapter/ConfigManager setup. They take a single writing
+	// scope (-g/-p); the top-level `--all` has no meaning here, so reject it
+	// rather than silently ignoring it (mirrors `coverage`).
+	if matches!(
+		cli.command,
+		Commands::Transfer { .. } | Commands::Reconcile { .. }
+	) && cli.all
+	{
+		anyhow::bail!(
+			"transfer/reconcile support only 'global' or 'project' scope, not \
+			 'all'; pass -g/--global or -p/--project"
+		);
+	}
 	if let Commands::Transfer { action } = &cli.command {
 		return commands::transfer::execute_transfer(
 			action,

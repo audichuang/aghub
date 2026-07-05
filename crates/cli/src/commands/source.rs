@@ -76,6 +76,9 @@ fn resolve_read_scopes(
 	global: bool,
 	project: bool,
 ) -> Result<Vec<SourceScope>> {
+	if global && project {
+		bail!("choose either -g or -p, not both");
+	}
 	if global {
 		return Ok(vec![SourceScope::Global]);
 	}

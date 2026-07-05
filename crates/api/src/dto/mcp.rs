@@ -133,6 +133,10 @@ impl CreateMcpRequest {
 	pub fn validate(&self) -> Result<(), ApiError> {
 		reject_zero_timeout(self.timeout)?;
 		reject_zero_timeout(self.transport.timeout())?;
+		// Reject structurally-empty command/url via the same core seam the CLI
+		// uses, so the API can't create an unusable MCP (empty command/url).
+		let transport: McpTransport = self.transport.clone().into();
+		transport.validate_values().map_err(ApiError::from)?;
 		Ok(())
 	}
 }
@@ -166,6 +170,10 @@ impl UpdateMcpRequest {
 		reject_zero_timeout(self.timeout)?;
 		if let Some(transport) = &self.transport {
 			reject_zero_timeout(transport.timeout())?;
+			// Same empty command/url guard as create — an update that supplies a
+			// transport must not swap in a structurally-empty one.
+			let transport: McpTransport = transport.clone().into();
+			transport.validate_values().map_err(ApiError::from)?;
 		}
 		Ok(())
 	}
