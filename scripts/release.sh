@@ -86,8 +86,12 @@ if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 ||
 	exit 1
 fi
 
-# must be strictly newer than the latest existing tag
-LATEST="$(git tag --list 'v*' --sort=-v:refname | head -1)"
+# must be strictly newer than the latest existing STABLE tag. Pre-release
+# tags (v2.4.0-rc.N) are excluded: both `sort -V` and git's v:refname sort
+# them ABOVE their own stable version, which would wrongly refuse the stable
+# release that follows its RCs. This also makes the "commits to ship" log
+# below start from the last stable release, matching the user-facing delta.
+LATEST="$(git tag --list 'v*' --sort=-v:refname | sed '/-/d' | head -1)"
 if [ -n "$LATEST" ]; then
 	HIGHEST="$(printf '%s\n%s\n' "${LATEST#v}" "$VERSION" | sort -V | tail -1)"
 	if [ "$VERSION" = "${LATEST#v}" ] || [ "$HIGHEST" != "$VERSION" ]; then
