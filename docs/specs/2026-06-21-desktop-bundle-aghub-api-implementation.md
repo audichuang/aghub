@@ -210,13 +210,11 @@ if let RemoteInstallSource::LocalBinary(_) = source {
 		let remote_platform = remote
 			.map(|(o, a)| format!("{o}/{a}"))
 			.unwrap_or_else(|| "unknown".to_string());
-		// Cross-platform: cannot deploy. Present-but-incompatible → surface the
-		// probe (Incompatible screen + manual hint); absent → CrossPlatformDeploy.
-		return if first.api_present {
-			Ok(first)
-		} else {
-			Err(ConnectError::CrossPlatformDeploy { remote_platform })
-		};
+		// Cross-platform: a wrong-arch bundled binary can't run on the VM, so
+		// refuse for BOTH absent and present-but-incompatible — the desktop
+		// then shows the manual-install hint (CrossPlatformRedeploy) rather
+		// than a Force-redeploy button that could only fail the same gate.
+		return Err(ConnectError::CrossPlatformDeploy { remote_platform });
 	}
 }
 
@@ -271,11 +269,34 @@ binary is never committed and never dirties the prettier/lint/test gates
   with no source (and no bundled binary) the behaviour is unchanged (Incompatible
   screen). Unit-test the new `ensure_remote_api` branches with `MockRunner`
   (present+incompatible+LocalBinary+same-platform → installs; present+incompatible
-  +no-source → returns Ok(first); present+incompatible+LocalBinary+cross-platform
-  → Ok(first); absent+cross-platform → CrossPlatformDeploy).
+  +no-source → returns Ok(first); present-or-absent+LocalBinary+cross-platform
+  → CrossPlatformDeploy).
 - **CI-only behaviour** (overlay resource resolution, per-target naming,
   host-arch smoke) is validated by a tag push via the `releasing-aghub`
   re-release-a-botched-tag flow.
+
+## Post-review refinements (final shipped behaviour)
+
+Changes made after the initial implementation, from the E2E build and the
+adversarial Codex review. Where the plan's embedded task snapshots differ, this
+section is authoritative:
+
+- **Upgrade overwrites the probe-resolved path in place.** The install target
+  follows the SAME resolution as the probe (`command -v` → `~/.cargo/bin` →
+  `~/.local/bin`), so a `cargo install`-ed `~/.cargo/bin/aghub-api` is upgraded
+  in place instead of being shadowed by a new `~/.local/bin` copy the probe
+  never finds (`ssh.rs` `default_install_target_script`).
+- **`~/` expanded consistently.** `assign_api_bin_cmd` (probe/start) expands an
+  explicit `~/…` path to `$HOME/…` exactly like the install target, so an
+  explicit `~/.local/bin/aghub-api` is installed and probed at the same place.
+- **Cross-platform always refuses** (both absent and present-but-incompatible),
+  surfacing the manual-install hint rather than a Force-redeploy button.
+- **CargoGit + explicit custom path is refused up front** (cargo install only
+  writes to `~/.cargo/bin/aghub-api`; it can't honor a custom path).
+- **`just desktop-bundle`**: `--config` must NOT be passed after a `--` (that
+  forwards it to `cargo`); a second `--config` sets `createUpdaterArtifacts:
+false` so a local build needs no signing key; the staging dir is removed via
+  an EXIT trap on every exit.
 
 ## Out of scope / follow-ups
 

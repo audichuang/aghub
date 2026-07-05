@@ -278,12 +278,17 @@ pub fn probe_connection<R: CommandRunner>(
 	}
 }
 
-/// Ensure the remote has an `aghub-api` binary available.
+/// Ensure the remote has a COMPATIBLE `aghub-api`.
 ///
-/// This probes first. If the binary is absent and an install source is
-/// provided,
-/// it installs over ssh/scp and probes again. The final [`TestResult`] is
-/// returned so callers can still reject incompatible versions.
+/// Probes first. Returns early only when a compatible binary is already
+/// present. Otherwise — absent, OR present but version-incompatible — it
+/// installs/upgrades over ssh/scp when a source is available (a `LocalBinary`
+/// source is same-platform-gated on BOTH paths; `CargoGit` compiles on the VM
+/// and is un-gated), then re-probes. With no source (or a cross-platform
+/// `LocalBinary`), a present-but-incompatible binary returns the probe so the
+/// caller surfaces the Incompatible screen; an absent binary errors. The final
+/// [`TestResult`] is returned so callers can still reject incompatible
+/// versions.
 pub fn ensure_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -296,40 +301,56 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			stderr: first.message,
 		});
 	}
-	if first.api_present {
+	// Present AND compatible -> nothing to do (unchanged fast path).
+	if first.api_present && first.compatible {
 		return Ok(first);
 	}
 
+	// Absent, or present-but-incompatible: try to install/upgrade when a
+	// source exists. No source -> unchanged behaviour:
+	//   absent  => RemoteApiMissing (UI shows the manual install hint),
+	//   present => Ok(first) so the caller surfaces the Incompatible screen.
 	let Some(source) = source else {
-		return Err(ConnectError::RemoteApiMissing {
-			install_hint: install_hint(),
-		});
+		return if first.api_present {
+			Ok(first)
+		} else {
+			Err(ConnectError::RemoteApiMissing {
+				install_hint: install_hint(),
+			})
+		};
 	};
 
-	// A bundled local binary is architecture-specific: uploading it to a remote
-	// of a different OS/arch would `scp` a binary that simply cannot run. Gate
-	// it on the connect path too (the redeploy path gates separately). CargoGit
-	// is NOT gated — it compiles on the VM, so any platform is fine.
+	// Same-platform gate for a LocalBinary source — covers BOTH the absent
+	// and the upgrade path (a wrong-arch binary would never run). CargoGit
+	// compiles on the VM, so it is un-gated for any remote platform.
 	if let RemoteInstallSource::LocalBinary(_) = source {
 		let local = (std::env::consts::OS, std::env::consts::ARCH);
 		let remote = probe_remote_platform(runner, conn);
-		let matches = remote
+		let same = remote
 			.as_ref()
 			.map(|(os, arch)| os == local.0 && arch == local.1)
 			.unwrap_or(false);
-		if !matches {
+		if !same {
 			let remote_platform = remote
 				.map(|(os, arch)| format!("{os}/{arch}"))
 				.unwrap_or_else(|| "unknown".to_string());
+			// Cross-platform: a wrong-arch bundled binary cannot run on the VM,
+			// so refuse the deploy for BOTH the absent and the present-but-
+			// incompatible remote and let the desktop surface the manual-install
+			// hint (via CrossPlatformRedeploy). Returning `Ok(first)` for the
+			// present case would instead render an actionable "Force redeploy"
+			// button that can only fail the very same cross-platform gate.
 			return Err(ConnectError::CrossPlatformDeploy { remote_platform });
 		}
 	}
 
 	let bin = resolved_path(conn);
+	// `install_remote_api` does stage -> finish (mv + chmod 755), so an
+	// upgrade overwrites an old binary cleanly in place.
 	install_remote_api(runner, conn, &bin, source)?;
 
 	let second = probe_connection(runner, conn, local_version)
-		.with_install_result(true, "aghub-api installed".to_string());
+		.with_install_result(true, "aghub-api installed/upgraded".to_string());
 	if !second.reachable {
 		return Err(ConnectError::Unreachable {
 			stderr: second.message,
@@ -357,6 +378,19 @@ pub fn install_remote_api<R: CommandRunner>(
 			finish_remote_api_upload(runner, conn, resolved_path)
 		}
 		RemoteInstallSource::CargoGit { url, branch } => {
+			// `cargo install` always writes to ~/.cargo/bin/aghub-api; it cannot
+			// target a custom path. If the connection pins an explicit remote
+			// path, a cargo build would land where the post-install probe never
+			// looks — a confusing "installed, but still unavailable". Refuse up
+			// front with an actionable message instead.
+			if resolved_path != "aghub-api" {
+				return Err(ConnectError::DeployFailed(format!(
+					"cannot auto-deploy via cargo-git to the custom remote path \
+					 '{resolved_path}': cargo install only writes to \
+					 ~/.cargo/bin/aghub-api. Clear the custom path to auto-deploy, \
+					 or install aghub-api at '{resolved_path}' on the VM manually."
+				)));
+			}
 			let install_cmd =
 				build_remote_cargo_install_cmd(url, branch.as_deref());
 			run_remote_install_step(runner, conn, &install_cmd)
@@ -659,6 +693,28 @@ mod tests {
 		args.iter().map(|s| s.as_str()).collect()
 	}
 
+	/// `uname -sm` stdout mapping to THIS host's (os, arch) so the
+	/// same-platform gate passes wherever the test runs. Mirrors the mapping
+	/// in `probe_remote_platform` (Linux/Darwin + x86_64/arm64/aarch64).
+	///
+	/// Only the same-platform tests use this, and those are cfg-gated off
+	/// Windows (whose uname vocabulary `normalize_platform` does not map), so
+	/// gate the helper too or it is dead code on Windows (`-D warnings`).
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	fn local_uname_stdout() -> String {
+		let os = match std::env::consts::OS {
+			"linux" => "Linux",
+			"macos" => "Darwin",
+			other => other,
+		};
+		let arch = std::env::consts::ARCH;
+		format!("{os} {arch}\n")
+	}
+
+	fn local_source() -> RemoteInstallSource {
+		RemoteInstallSource::LocalBinary("/tmp/aghub-api".into())
+	}
+
 	// --- probe_connection --------------------------------------------------
 
 	#[test]
@@ -905,6 +961,240 @@ mod tests {
 		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
 	}
 
+	// Same-platform gate: the remote `uname -sm` must normalize to THIS
+	// host's (os, arch). `normalize_platform` (ssh.rs) only knows
+	// Linux/Darwin, so the Windows release-CI runner cannot satisfy the gate
+	// — cfg-gate this same-platform test off Windows. (Real Windows remote
+	// deploy is out of scope; the cross-platform test below still runs
+	// everywhere.)
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	#[test]
+	fn ensure_present_incompatible_local_binary_same_platform_upgrades() {
+		// Present-but-INCOMPATIBLE remote binary + LocalBinary source +
+		// matching platform: ensure_remote_api must UPGRADE (uname gate ->
+		// stage(prepare+scp) -> finish(mv+chmod)) and re-probe.
+		//
+		// MockRunner keys on (program, args) and the first/second probe build
+		// IDENTICAL argv, so we script the probe key INCOMPATIBLE-ONLY: the
+		// first probe is present + !compatible (no short-circuit) and the
+		// re-probe replays the same incompatible output but api_present=true,
+		// so ensure_remote_api returns Ok(second) with install_attempted=true.
+		// We assert the side-effects (an scp + a finish ran, install_attempted)
+		// — NOT result.compatible, which this single-key seam cannot flip.
+		let probe = probe_args();
+		let uname_args = build_ssh_args(&conn(), "uname -sm");
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let incompatible = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.0.0".to_string(),
+			stderr: String::new(),
+		};
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&probe), incompatible())
+			.script(
+				"ssh",
+				&args_as_str(&uname_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: local_uname_stdout(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&prepare_args), ok())
+			.script("scp", &args_as_str(&scp_args), ok())
+			.script("ssh", &args_as_str(&finish_args), ok());
+
+		let result =
+			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
+				.expect("same-platform upgrade returns Ok(second)");
+		assert!(
+			result.api_present,
+			"re-probe still finds the binary present"
+		);
+		assert!(
+			result.install_attempted,
+			"the upgrade install path must have run"
+		);
+
+		let calls = runner.calls();
+		assert!(
+			calls
+				.iter()
+				.any(|c| c.program == "scp" && c.args == scp_args),
+			"the bundled binary must be uploaded on upgrade: {calls:?}"
+		);
+		assert!(
+			calls.iter().any(|c| c.args == finish_args),
+			"the staged upload must be moved into place: {calls:?}"
+		);
+	}
+
+	#[test]
+	fn ensure_present_incompatible_no_source_returns_ok_first() {
+		// Present-but-incompatible + NO source: unchanged behaviour — return
+		// Ok(first) so the caller surfaces the Incompatible screen. No
+		// platform probe, no scp, only the single probe runs.
+		let probe = probe_args();
+		let runner = MockRunner::new().script(
+			"ssh",
+			&args_as_str(&probe),
+			CommandOutput {
+				status_code: Some(0),
+				stdout: "aghub-api 1.0.0".to_string(),
+				stderr: String::new(),
+			},
+		);
+		let result = ensure_remote_api(&runner, &conn(), LOCAL, None)
+			.expect("present-but-incompatible + no source returns Ok(first)");
+		assert!(result.api_present);
+		assert!(!result.compatible);
+		assert!(!result.install_attempted, "no install with no source");
+
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 1, "only the probe should run: {calls:?}");
+		assert!(!calls.iter().any(|c| c.program == "scp"));
+	}
+
+	#[test]
+	fn ensure_present_incompatible_local_binary_cross_platform_refuses() {
+		// Present-but-incompatible + LocalBinary source + CROSS-platform
+		// remote: cannot deploy the wrong-arch binary, so refuse with
+		// CrossPlatformDeploy (same as the absent case) WITHOUT scp, so the
+		// desktop shows the manual-install hint instead of a Force-redeploy
+		// button that could only fail the same gate.
+		let probe = probe_args();
+		let uname_args = build_ssh_args(&conn(), "uname -sm");
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.0.0".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&uname_args),
+				CommandOutput {
+					status_code: Some(0),
+					// Windows_NT does not map to the consts vocabulary -> None,
+					// treated as not-the-same-platform.
+					stdout: "Windows_NT x86_64\n".to_string(),
+					stderr: String::new(),
+				},
+			);
+		let err =
+			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
+				.expect_err("cross-platform incompatible must refuse");
+		assert!(
+			matches!(err, ConnectError::CrossPlatformDeploy { .. }),
+			"expected CrossPlatformDeploy, got {err:?}"
+		);
+
+		// The platform probe must have RUN before refusing, and no scp upload
+		// may happen for a wrong-arch binary.
+		let calls = runner.calls();
+		assert!(
+			calls
+				.iter()
+				.any(|c| c.program == "ssh" && c.args == uname_args),
+			"the platform probe must run before refusing: {calls:?}"
+		);
+		assert!(
+			!calls.iter().any(|c| c.program == "scp"),
+			"no scp on a cross-platform incompatible binary: {calls:?}"
+		);
+	}
+
+	// Same-platform gate (see the upgrade test above) — cfg-gate off
+	// Windows, whose uname vocabulary `normalize_platform` does not map.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	#[test]
+	fn ensure_absent_same_platform_local_binary_runs_install_then_fails() {
+		// Absent (command not found) + LocalBinary + matching platform: the
+		// same-platform gate passes and install runs (prepare+scp+finish).
+		// MockRunner replays the same probe key, so the SECOND probe is still
+		// 127 -> api_present=false -> ensure_remote_api returns DeployFailed.
+		// We assert that error AND that the install steps ran first (the
+		// single-key seam cannot make the re-probe "present"; the success path
+		// is exercised by ..._same_platform_upgrades above).
+		let probe = probe_args();
+		let uname_args = build_ssh_args(&conn(), "uname -sm");
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let scp_args = build_scp_args(
+			&conn(),
+			"/tmp/aghub-api",
+			crate::ssh::remote_api_upload_path(),
+		);
+		let finish_args = build_ssh_args(
+			&conn(),
+			&build_remote_finish_upload_cmd("aghub-api"),
+		);
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(127),
+					stdout: String::new(),
+					stderr: "bash: aghub-api: command not found".to_string(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&uname_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: local_uname_stdout(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&prepare_args), ok())
+			.script("scp", &args_as_str(&scp_args), ok())
+			.script("ssh", &args_as_str(&finish_args), ok());
+
+		let err =
+			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
+				.expect_err("re-probe still absent -> DeployFailed");
+		assert!(matches!(err, ConnectError::DeployFailed(_)), "got {err:?}");
+
+		// The install ran before the failing re-probe.
+		let calls = runner.calls();
+		assert!(
+			calls
+				.iter()
+				.any(|c| c.program == "scp" && c.args == scp_args),
+			"absent same-platform must scp the binary: {calls:?}"
+		);
+		assert!(
+			calls.iter().any(|c| c.args == finish_args),
+			"absent same-platform must run finish: {calls:?}"
+		);
+	}
+
 	#[test]
 	fn install_remote_api_via_cargo_git_runs_remote_cargo_install() {
 		let source = RemoteInstallSource::CargoGit {
@@ -933,6 +1223,31 @@ mod tests {
 		assert_eq!(calls.len(), 1);
 		assert_eq!(calls[0].program, "ssh");
 		assert_eq!(calls[0].args, install_args);
+	}
+
+	#[test]
+	fn install_remote_api_cargo_git_refuses_explicit_custom_path() {
+		// `cargo install` only writes to ~/.cargo/bin/aghub-api, so a CargoGit
+		// deploy to an explicit custom path is refused up front (no remote
+		// command runs) instead of installing where the post-install probe
+		// would never look.
+		let source = RemoteInstallSource::CargoGit {
+			url: "https://github.com/audichuang/aghub.git".to_string(),
+			branch: None,
+		};
+		let runner = MockRunner::new();
+		let err =
+			install_remote_api(&runner, &conn(), "/opt/aghub-api", &source)
+				.expect_err("cargo-git + custom path must be refused");
+		assert!(
+			matches!(err, ConnectError::DeployFailed(_)),
+			"expected DeployFailed, got {err:?}"
+		);
+		assert!(
+			runner.calls().is_empty(),
+			"must refuse before running any remote command: {:?}",
+			runner.calls()
+		);
 	}
 
 	#[test]

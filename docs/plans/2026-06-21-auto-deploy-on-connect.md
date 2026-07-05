@@ -822,22 +822,25 @@ A one-command local path to an installable desktop build with the embedded sidec
         case "$HOST_TRIPLE" in
           *windows*) BIN="aghub-api.exe" ;;
         esac
-        STAGE="crates/desktop/src-tauri/binaries"
+        # Absolute path + an EXIT trap so the staged sidecar is ALWAYS removed,
+        # even if the tauri build fails partway — a leftover staging dir would
+        # make a later `bun run dev` wrongly resolve a stale `.exists()`-gated
+        # bundled source. Absolute so the trap works regardless of the `cd`.
+        STAGE="$(pwd)/crates/desktop/src-tauri/binaries"
+        trap 'rm -rf "$STAGE"' EXIT
         rm -rf "$STAGE"
         mkdir -p "$STAGE"
         cargo build -p aghub-api --release
         cp "target/release/$BIN" "$STAGE/$BIN"
         echo "Staged $STAGE/$BIN"
         cd crates/desktop
-        bun run tauri build -- --config src-tauri/tauri.bundle.conf.json
-        # The bundle now embeds the sidecar; drop the staged copy so the working
-        # tree stays clean and a later `bun run dev` cannot pick up a stale file.
-        cd ../..
-        rm -rf "$STAGE"
-        echo "Removed staging dir $STAGE (the built bundle already contains it)"
+        bun run tauri build --config src-tauri/tauri.bundle.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'
+        # The bundle now embeds the sidecar; the EXIT trap removes the staging
+        # dir so the tree stays clean and `bun run dev` stays on the fallback.
+        echo "Bundle built; staging dir will be removed on exit."
     ```
 
-    `bun run tauri build -- --config ...` forwards `--config` to the tauri CLI; the path is relative to `crates/desktop` (the `cd`'d cwd), so `src-tauri/tauri.bundle.conf.json` resolves. The recipe removes `$STAGE` at the end (after `cd ../..` back to the repo root) so no staged binary lingers in the tree.
+    Do NOT add a `--` separator: `bun run tauri build -- --config ...` would make tauri forward `--config` to the underlying `cargo build`, where cargo parses the `.json` path as a `--config` dotted-key TOML expression and fails (`failed to parse value from --config argument ... as a dotted key expression`). Without the `--`, `--config` is consumed by the tauri CLI (which accepts a path to a JSON/JSON5/TOML file), and the path is relative to `crates/desktop` (the `cd`'d cwd), so `src-tauri/tauri.bundle.conf.json` resolves. A SECOND `--config '{"bundle":{"createUpdaterArtifacts":false}}'` is appended (the two overlays merge over `tauri.conf.json` in order) so a LOCAL build does not require the `TAURI_SIGNING_PRIVATE_KEY` secret: the committed config sets `createUpdaterArtifacts: true` + a `pubkey` for the release auto-updater, which makes `tauri build` fail at the signing step when no private key is present. CI sets the key and keeps signing on; local installs don't need a signed updater artifact, and the produced `.deb`/`.rpm`/`.AppImage` are identical either way. `$STAGE` is an absolute path with a `trap 'rm -rf "$STAGE"' EXIT`, so the staged binary is removed on every exit — including a failed build — and never lingers to be wrongly resolved by a later `bun run dev`.
 
 - [ ] **Step 2: Verify the recipe parses and the host-triple detection works.**
 

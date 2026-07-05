@@ -79,3 +79,42 @@ bump version:
     perl -i -pe 's/^version = .*/version = "{{version}}"/' Cargo.toml
     perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/package.json
     perl -i -pe 's/"version": "[^"]*"/"version": "{{version}}"/' crates/desktop/src-tauri/tauri.conf.json
+
+# Detailed notes: stages crates/desktop/src-tauri/binaries/aghub-api[.exe]
+# for the HOST triple, then runs the bundle build with the committed
+# --config overlay (mirrors the release CI staging). The committed
+# tauri.conf.json is never modified; plain `just desktop` / `bun run dev`
+# stay on the cargo-git fallback (no staged sidecar).
+
+# Build an installable desktop bundle with the version-locked aghub-api embedded.
+desktop-bundle:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    HOST_TRIPLE="$(rustc -vV | sed -n 's/^host: //p')"
+    echo "Host triple: $HOST_TRIPLE"
+    BIN="aghub-api"
+    case "$HOST_TRIPLE" in
+      *windows*) BIN="aghub-api.exe" ;;
+    esac
+    # Absolute path + an EXIT trap so the staged sidecar is ALWAYS removed,
+    # even if the tauri build fails partway — a leftover staging dir would make
+    # a later `bun run dev` wrongly resolve a stale `.exists()`-gated bundled
+    # source. Absolute so the trap works regardless of the `cd` below.
+    STAGE="$(pwd)/crates/desktop/src-tauri/binaries"
+    trap 'rm -rf "$STAGE"' EXIT
+    rm -rf "$STAGE"
+    mkdir -p "$STAGE"
+    cargo build -p aghub-api --release
+    cp "target/release/$BIN" "$STAGE/$BIN"
+    echo "Staged $STAGE/$BIN"
+    cd crates/desktop
+    # Two `--config` overlays merge over tauri.conf.json (in order):
+    #  1. the committed resources overlay (embeds the staged aghub-api), and
+    #  2. createUpdaterArtifacts=false so a LOCAL build does not require the
+    #     TAURI_SIGNING_PRIVATE_KEY secret (the committed config sets it true +
+    #     a pubkey for the release updater; CI signs, local installs don't need
+    #     it). The produced .deb/.rpm/.AppImage are identical either way.
+    bun run tauri build --config src-tauri/tauri.bundle.conf.json --config '{"bundle":{"createUpdaterArtifacts":false}}'
+    # The bundle now embeds the sidecar; the EXIT trap removes the staging dir
+    # so the working tree stays clean and `bun run dev` stays on the fallback.
+    echo "Bundle built; staging dir will be removed on exit."
