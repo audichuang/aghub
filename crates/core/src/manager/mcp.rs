@@ -52,9 +52,10 @@ impl ConfigManager {
 	/// skill `remove_skill_planned` dry-run/confirm gate so all three resource
 	/// types flow through one [`RemovalOutcome`] DTO.
 	///
-	/// MCP removal is a flat config-file rewrite: the plan is a `Layout::Copy`
-	/// plan whose single path is the on-disk config file that `save_current`
-	/// rewrites. It is never destructive of shared data, so `needs_confirm` is
+	/// MCP removal is a flat config-file rewrite: it deletes NO on-disk path
+	/// (only a JSON entry out of the shared config file, which persists), so the
+	/// `Layout::Copy` plan carries an EMPTY `paths` and `deleted_path` stays
+	/// null. It is never destructive of shared data, so `needs_confirm` is
 	/// always false — the gate reduces to `executed == !dry_run`. The
 	/// `dry_run`/`confirm` plumbing exists for a UNIFORM wire+CLI shape, not
 	/// because MCP removal gates.
