@@ -10,10 +10,14 @@ Stores provider inventory + bindings as **SQLite metadata** (`store.rs`) and kee
 
 ```
 src/
-├── lib.rs          # Public exports + InferenceProviderError
+├── lib.rs          # Public exports (re-exports InferenceProviderError)
+├── error.rs        # InferenceProviderError enum
 ├── model.rs        # Provider / binding / capability enums (AgentProvider*)
 ├── store.rs        # SQLite metadata (inventory, bindings, active provider)
 ├── credentials.rs  # Platform keyring for API keys (CredentialStore)
+├── cascade.rs      # delete_provider_cascade — the SINGLE delete-teardown seam
+│                   #   shared by the API route AND CLI `inference delete`;
+│                   #   they must not diverge
 ├── agent.rs        # Cross-agent binding orchestration
 ├── claude/         # files.rs (config I/O) + mod.rs
 ├── codex/          # files.rs + mapping.rs + mod.rs  (TOML)
@@ -22,12 +26,13 @@ src/
 
 ## WHERE TO LOOK
 
-| Task                         | Location                 |
-| ---------------------------- | ------------------------ |
-| Add/list providers, bindings | `src/store.rs`           |
-| API key get/set              | `src/credentials.rs`     |
-| Per-agent config write       | `src/<agent>/files.rs`   |
-| Normalize ↔ agent schema     | `src/<agent>/mapping.rs` |
+| Task                         | Location                                           |
+| ---------------------------- | -------------------------------------------------- |
+| Add/list providers, bindings | `src/store.rs`                                     |
+| API key get/set              | `src/credentials.rs`                               |
+| Provider delete teardown     | `src/cascade.rs` (shared by API + CLI; never fork) |
+| Per-agent config write       | `src/<agent>/files.rs`                             |
+| Normalize ↔ agent schema     | `src/<agent>/mapping.rs`                           |
 
 ## COMMANDS
 

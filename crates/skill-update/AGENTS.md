@@ -1,11 +1,14 @@
 # SKILL-UPDATE CRATE KNOWLEDGE BASE
 
-**Crate**: `skill-update` — Skill update-check orchestrator\
+**Crate**: `skill-update` — Skill update-check orchestrator + Sources domain\
 **Role in monorepo**: The single shared implementation of "are my installed
 skills out of date?". Extracted from `crates/api` so **both** the desktop API
 (`GET /skills/check-updates`) and the CLI (`aghub-cli check --online`) run the
-exact same logic. `crates/core` stays pure (hash/compare only); the network
-fetch and credential resolution live here.
+exact same logic. It ALSO hosts the **Sources domain service** (`sources`
+mod: list/diff/classify + `fetch_source_with_resolver` lazy-auth), consumed
+by the API sources routes AND the CLI `source` commands. `crates/core` stays
+pure (hash/compare only); the network fetch and credential resolution live
+here.
 
 ## OVERVIEW
 
@@ -19,10 +22,14 @@ grouping/cache/timeout/concurrency logic is unit-testable without a network.
 
 ```
 crates/skill-update/src/
-├── lib.rs   # Orchestrator: SourceRef, EntryInput, group_by_source_ref,
-│            #   ResultCache, Fetcher/TokenResolver/RefResolver traits,
-│            #   CheckDeps, check_updates() (the entry point)
-└── git.rs   # GitFetcher / GitRefResolver — the real gix-backed adapters
+├── lib.rs      # Orchestrator: SourceRef, EntryInput, group_by_source_ref,
+│               #   ResultCache, Fetcher/TokenResolver/RefResolver traits,
+│               #   CheckDeps, check_updates() (the entry point)
+├── sources.rs  # Sources domain: list_sources/diff_source/classify +
+│               #   fetch_source_with_resolver (unauth first, ONE token retry)
+└── git.rs      # GitFetcher / GitRefResolver — the real gix-backed adapters.
+                #   https_only_token: tokens are NEVER attached to non-https
+                #   URLs (inject_credentials would hard-fail; ssh auth stands)
 ```
 
 ## WHERE TO LOOK
@@ -33,6 +40,7 @@ crates/skill-update/src/
 | Group entries by repo/ref    | `src/lib.rs` `group_by_source_ref` | Fetch each `SourceRef` at most once                |
 | Result caching               | `src/lib.rs` `ResultCache`         | TTL cache keyed by `SourceRef`                     |
 | Inject auth                  | `src/lib.rs` `TokenResolver`       | CLI = env `GIT_PASSWORD`/`GITHUB_TOKEN`; API = own |
+| Source list/diff/classify    | `src/sources.rs`                   | consumed by API sources routes + CLI `source`      |
 | Real network fetch / ls-refs | `src/git.rs`                       | `GitFetcher` (treeless) / `GitRefResolver`         |
 | Hash compare / rename detect | `aghub_core::skills::update`       | `compare_known_hashes`, `detect_rename` (pure)     |
 

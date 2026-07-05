@@ -1,6 +1,6 @@
 # CLI CRATE
 
-**Crate**: `aghub` — Binary providing the `aghub-cli` CLI tool.
+**Crate**: `aghub-cli` — Binary providing the `aghub-cli` CLI tool (`-p aghub` is the desktop src-tauri crate, NOT this one).
 
 ## OVERVIEW
 
@@ -8,30 +8,23 @@ Command-line interface for managing AI agent configurations. Uses clap derive ma
 
 ## STRUCTURE
 
-```
-src/
-├── main.rs           # Entry point, CLI parsing, command dispatch
-├── commands/
-│   ├── mod.rs        # Module exports
-│   ├── get.rs        # List resources (skills, mcps)
-│   ├── add.rs        # Add resources with options
-│   ├── update.rs     # Update existing resources
-│   ├── delete.rs     # Delete resources
-│   ├── enable.rs     # Enable disabled resources
-│   ├── disable.rs    # Disable resources
-│   └── describe.rs   # JSON output for a single resource
-└── ui/               # (reserved for UI utilities)
-```
+`src/main.rs` (clap `Cli`/`Commands` + dispatch; `describe` is an inline
+module here, not a file) + `src/commands/` — one file per subcommand
+(`ls` it for the current list; includes v2.4.0's `transfer.rs` for
+transfer/reconcile, `coverage.rs`, `inference.rs`, plus `source.rs`,
+`check.rs`, `apply_update.rs`, `prune.rs`, `plugin.rs`). Don't maintain an
+enumerated tree here — it drifts.
 
 ## WHERE TO LOOK
 
-| Task                | Location                            | Notes                             |
-| ------------------- | ----------------------------------- | --------------------------------- |
-| Add CLI flag        | `src/main.rs`                       | Modify `Cli` or `Commands` struct |
-| Add subcommand      | `src/commands/<name>.rs` + `mod.rs` | Follow existing command pattern   |
-| Resource type alias | `src/main.rs:ResourceType`          | Add `#[value(alias = "...")]`     |
-| Table output format | `src/commands/get.rs`               | Uses `tabled` crate               |
-| CLI tests           | `tests/cli_tests.rs`                | Uses `assert_cmd`                 |
+| Task                                  | Location                                        | Notes                                                                            |
+| ------------------------------------- | ----------------------------------------------- | -------------------------------------------------------------------------------- |
+| Add CLI flag                          | `src/main.rs`                                   | Modify `Cli` or `Commands` struct                                                |
+| Add subcommand                        | `src/commands/<name>.rs` + `mod.rs`             | Follow existing command pattern                                                  |
+| Resource type alias                   | `src/main.rs:ResourceType`                      | Add `#[value(alias = "...")]`                                                    |
+| Table output format                   | `src/commands/get.rs`                           | Uses `tabled` crate                                                              |
+| transfer/reconcile/coverage/inference | `src/commands/{transfer,coverage,inference}.rs` | thin CLI over deep core seams (`core::transfer`, `inference::cascade`)           |
+| CLI tests                             | `tests/cli_tests.rs`                            | `assert_cmd` e2e; unix-gated tests: keep helpers/imports under the same `#[cfg]` |
 
 ## COMMANDS
 
@@ -73,6 +66,5 @@ an `#[ignore = "network"]` end-to-end test.
 ## ANTI-PATTERNS
 
 - **Don't** use `println!` for diagnostic output — use `eprintln_verbose!` macro
-- **Don't** add `--interactive` as a global flag — use the `interactive` subcommand pattern instead
 - **Don't** hardcode agent type strings — use `AgentType` enum and `to_string()`
 - **Don't** bypass `ConfigManager` — all config operations go through the manager

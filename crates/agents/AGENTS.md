@@ -9,16 +9,17 @@
 crates/agents/src/
 ├── lib.rs              # Public exports (AgentDescriptor, models, errors, format)
 ├── descriptor.rs       # AgentDescriptor struct + fn pointer type aliases
+├── macros.rs           # define_mcp_paths!/define_skill_paths! — descriptors are built with these
 ├── models.rs           # AgentConfig, AgentType, McpServer, McpTransport, Skill
+├── sub_agents.rs       # SubAgent model
 ├── errors.rs           # ConfigError, Result
-├── agents/             # One descriptor per supported agent (AgentType::ALL = 23)
+├── agents/             # One descriptor per supported agent (AgentType::ALL = 23);
+│   │                   #   `codex/` is a subdirectory; `factory.rs` is the
+│   │                   #   Factory-AI agent's descriptor (NOT a dispatch factory —
+│   │                   #   there is no dispatch match in this crate at all)
 │   ├── mod.rs          # pub mod declarations
-│   ├── factory.rs      # create_descriptor() dispatch
 │   ├── claude.rs       # Claude descriptor
-│   ├── opencode.rs
-│   └── ...             # amp, antigravity, augmentcode, cline, codex, copilot,
-│                       # cursor, gemini, jetbrains_ai, kilocode, kimi, kiro,
-│                       # mistral, openclaw, pi, roocode, trae, warp, windsurf, zed
+│   └── ...             # `ls` for the full list
 └── format/
     ├── mod.rs           # Format trait
     ├── json_opencode.rs # OpenCode native format
@@ -29,48 +30,46 @@ crates/agents/src/
 
 ## WHERE TO LOOK
 
-| Task                   | Location                             |
-| ---------------------- | ------------------------------------ |
-| Add new agent          | `src/agents/<name>.rs` + `mod.rs`    |
-| Agent capability flags | `src/descriptor.rs` — `Capabilities` |
-| Normalized data types  | `src/models.rs`                      |
-| Config serialization   | `src/format/`                        |
-| Agent factory/dispatch | `src/agents/factory.rs`              |
+| Task                   | Location                                                          |
+| ---------------------- | ----------------------------------------------------------------- |
+| Add new agent          | `src/agents/<name>.rs` + `mod.rs`                                 |
+| Agent capability flags | `src/descriptor.rs` — `Capabilities`                              |
+| Normalized data types  | `src/models.rs`                                                   |
+| Config serialization   | `src/format/`                                                     |
+| MCP value validation   | `src/models.rs` — `McpTransport::from_inputs` / `validate_values` |
 
 ## KEY TYPES
 
 **`AgentDescriptor`** (static per agent): holds id, display_name, fn pointers for load_mcps/save_mcps/mcp_parse_config/mcp_serialize_config, path fns, capabilities.
 
-**`Capabilities`**: `{ skills: SkillCapabilities, mcp: McpCapabilities }` — scopes (global/project), transport support (stdio/remote), enable/disable toggle.
+**`Capabilities`**: `{ skills: SkillCapabilities, mcp: McpCapabilities, sub_agents: SubAgentCapabilities }` — scopes (global/project), transport support (stdio/remote), enable/disable toggle.
 
 **`AgentConfig`**: normalized `{ mcps: Vec<McpServer>, skills: Vec<Skill> }`.
 
-**`McpTransport`**: `Stdio { command, args, env }` | `Sse { url, headers }` | `StreamableHttp { url, headers }`.
+**`McpTransport`**: `Stdio { command, args, env }` | `Sse { url, headers }` | `StreamableHttp { url, headers }`. **`from_inputs` + `validate_values` are the single validation seam shared by CLI and API** (reject empty command/url, stdio-with-headers, …) — never validate MCP values anywhere else.
 
 ## AGENT-SPECIFIC GOTCHAS
 
-- **Claude**: Skills from `~/.claude/skills/` — NOT in JSON; URL-based MCPs silently skipped on serialize
-- **OpenCode**: `mcp` object key (not `mcp_servers`); SSE/StreamableHttp unified as `"type": "remote"` — SSE identity lost on roundtrip
-- **Codex/Mistral**: TOML config format
-- **Copilot**: Shares `~/.claude/skills/` path with Claude
+Per-agent behavior (Claude/OpenCode/Codex/Copilot, universal-master read
+matrix, registry fallback) is documented once in the **root AGENTS.md
+"Agent-Specific Behavior"** — don't duplicate it here. Crate-level extras:
+
 - **SSE transport**: Deprecated in `models.rs` — use `StreamableHttp` instead (SSE identity lost on OpenCode roundtrip anyway)
-- **Universal-master reads**: an agent reads the `.agents/skills` Master only where its descriptor maps that scope's skills dir to `.agents/skills` — per-agent and per-scope, NOT every agent. Project `<root>/.agents/skills`: Codex, OpenCode, Cursor, Cline, Copilot, Gemini, Antigravity, Amp, Kimi, Warp. Global `~/.agents/skills`: only Codex, OpenCode, Cursor, Cline, Warp (others read only their own global dir). Invariant: each agent reads ONLY its own dir + the Master where mapped, never another agent's private dir (Cursor/OpenCode do NOT read `.claude/skills`/`.codex/skills`). Separately, only **amp** and **kimi** set `universal: true`, which additionally appends `$XDG_CONFIG_HOME/agents/skills` (the XDG path, not `~/.agents/skills`)
-- **Registry fallback**: If agent ID unknown, returns Claude's descriptor silently
+- **Descriptors are macro-built**: path mappings come from `define_mcp_paths!`/`define_skill_paths!` in `macros.rs` — read those before hand-writing a path fn
 
 ## ADDING AN AGENT
 
 Must touch ALL of these in this crate:
 
-1. `src/agents/<name>.rs` — descriptor constant (`pub static DESCRIPTOR: AgentDescriptor = AgentDescriptor { ... }`)
+1. `src/agents/<name>.rs` — descriptor constant (`pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor { ... }`)
 2. `src/agents/mod.rs` — `pub mod <name>;`
-3. `src/agents/factory.rs` — dispatch arm
-4. `src/models.rs` — `AgentType` enum variant + `ALL` array + `as_str()` + `from_str()`
+3. `src/models.rs` — `AgentType` enum variant + `ALL` array + `as_str()` + `from_str()`
 
-Then in `crates/core`: `src/registry/mod.rs` — add `&agents::<name>::DESCRIPTOR` to `ALL_AGENTS`.
+Then in `crates/core`: `src/registry/mod.rs` — add `&agents::<name>::DESCRIPTOR` to `ALL_AGENTS`. (There is no dispatch match to edit — dispatch is find-by-id over `ALL_AGENTS`.)
 
 ## ANTI-PATTERNS
 
-- NEVER add an agent to `agents/` without wiring `factory.rs` and `models.rs`
+- NEVER add an agent without also wiring `models.rs` and core's `ALL_AGENTS`
 - NEVER hand-wire adapter structs — behavior is entirely in `AgentDescriptor` fn pointers
 - NEVER use `AgentType` string literals — always use `as_str()` / `from_str()`
-- NEVER make `AgentDescriptor` fields non-Copy — must remain `'static`
+- NEVER give `AgentDescriptor` fields that aren't const-constructible — `pub const DESCRIPTOR` needs `&'static str` + fn pointers

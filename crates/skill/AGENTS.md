@@ -17,6 +17,8 @@ src/
 ├── parser.rs        # parse() auto-detects format; parse_skill_md, parse_skill_dir, parse_skill_file
 ├── validator.rs     # validate() with path traversal protection
 ├── sanitize.rs      # sanitize_name() for safe directory names
+├── scan.rs          # scan_skills() — SKILL.md discovery (gitignore-aware, name dedup)
+├── install.rs       # repo-install orchestration (RepoDiscoveredSkill, EMPTY_SKILLS_LOCK_DIGEST)
 ├── hash.rs          # compute_skill_folder_hash() — npx-compatible SHA-256 of the SOURCE folder
 └── lock/            # Lock file management (npx `skills`-compatible)
     ├── io.rs        # global path: $XDG_STATE_HOME/skills/.skill-lock.json → ~/.agents/.skill-lock.json (v3); atomic temp+rename under WRITE_LOCK
