@@ -339,8 +339,8 @@ fn diff(
 	) {
 		Ok(repo) => repo,
 		Err(FetchError::Auth) => bail!(
-			"This source needs a credential. Set GIT_PASSWORD / GITHUB_TOKEN, \
-			 or bind a credential in the desktop app."
+			"This source needs a credential. Set GIT_PASSWORD (any host) or \
+			 GITHUB_TOKEN (github.com) in the environment and retry."
 		),
 		Err(FetchError::Network) => {
 			bail!("Failed to fetch source repository '{source}'")
@@ -507,8 +507,8 @@ fn sync(args: SyncArgs) -> Result<()> {
 	) {
 		Ok(repo) => repo,
 		Err(FetchError::Auth) => bail!(
-			"This source needs a credential. Set GIT_PASSWORD / GITHUB_TOKEN, \
-			 or bind a credential in the desktop app."
+			"This source needs a credential. Set GIT_PASSWORD (any host) or \
+			 GITHUB_TOKEN (github.com) in the environment and retry."
 		),
 		Err(FetchError::Network) => {
 			bail!("Failed to fetch source repository '{source}'")
@@ -1353,8 +1353,8 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	)
 	.map_err(|e| match e {
 		FetchError::Auth => anyhow::anyhow!(
-			"This source needs a credential. Set GIT_PASSWORD / \
-				 GITHUB_TOKEN, or bind a credential in the desktop app."
+			"This source needs a credential. Set GIT_PASSWORD (any host) \
+				 or GITHUB_TOKEN (github.com) in the environment and retry."
 		),
 		FetchError::Network => anyhow::anyhow!(
 			"Failed to fetch source repository '{}'",

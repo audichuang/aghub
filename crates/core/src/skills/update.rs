@@ -219,8 +219,13 @@ pub fn stage_and_swap_dir(
 		);
 	}
 
-	let _ = remove_path_any(&backup_root);
-	let _ = remove_path_any(&staging_root);
+	// The swap succeeded — target_dir now holds the new contents. The temp
+	// roots are best-effort cleanup, but a failure must not be silent: it
+	// leaks a .aghub-stage-*/.aghub-backup-* orphan while the caller is told
+	// everything is fine, and nothing else ever sweeps them (prune.rs is
+	// lock-only). Warn instead of `let _ =` so the orphan has a signal.
+	warn_on_cleanup_failure(&backup_root);
+	warn_on_cleanup_failure(&staging_root);
 	Ok(())
 }
 
@@ -252,9 +257,11 @@ fn handle_failed_swap_with_rollback(
 	backup_root: &Path,
 	rollback: impl FnOnce(&Path, &Path) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-	let _ = remove_path_any(staging_root);
+	// The swap error is the failure the caller must see, so a cleanup error
+	// here only warns — it must never mask `error`.
+	warn_on_cleanup_failure(staging_root);
 	if !had_target {
-		let _ = remove_path_any(backup_root);
+		warn_on_cleanup_failure(backup_root);
 		return Err(error);
 	}
 
@@ -272,8 +279,19 @@ fn handle_failed_swap_with_rollback(
 		));
 	}
 
-	let _ = remove_path_any(backup_root);
+	warn_on_cleanup_failure(backup_root);
 	Err(error)
+}
+
+/// Best-effort temp removal whose ONLY job is to never silently swallow a
+/// cleanup failure: it logs at warn level and otherwise ignores the result.
+/// Used after a successful swap AND on the swap-failure paths — in both cases
+/// the orphan temp is not fatal, but leaving it with no signal is what let a
+/// `.aghub-stage-*`/`.aghub-backup-*` build up unnoticed.
+fn warn_on_cleanup_failure(path: &Path) {
+	if let Err(e) = remove_path_any(path) {
+		log::warn!("failed to remove skill-swap temp {}: {e}", path.display());
+	}
 }
 
 fn copy_dir_recursive_skip_symlinks(

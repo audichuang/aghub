@@ -14,12 +14,14 @@ import {
 	Switch,
 	Tooltip,
 } from "@heroui/react";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
 	CCPluginMarketResponse,
 	CCPluginResponse,
 } from "../../generated/dto";
 import { cn } from "../../lib/utils";
+import { PluginConfirmDialog } from "../plugin-detail/confirm-dialog";
 import { usePluginDetailActions } from "../plugin-detail/use-plugin-detail-actions";
 
 type PluginScopeValue = "global" | "project" | "local";
@@ -68,87 +70,114 @@ export function MarketInstalledRow({
 	});
 
 	const canUpdate = installed.source_info.can_reinstall;
+	// Match the detail pane: uninstall is a destructive one-click action, so it
+	// must go through the same confirm dialog rather than fire on first press.
+	const [showUninstallConfirm, setShowUninstallConfirm] = useState(false);
+	const confirmUninstall = () => {
+		setShowUninstallConfirm(false);
+		handleUninstall();
+	};
 
 	return (
-		<div className="flex items-center gap-2 px-4 py-1.5">
-			{/* Reserve the checkbox column so installed/available titles align. */}
-			<div aria-hidden className="size-4 shrink-0" />
-			<div className="min-w-0 flex-1">
-				<div className="flex items-center gap-2">
-					<span className="truncate text-sm font-medium text-foreground">
-						{entry.name}
-					</span>
-					<Chip variant="soft" size="sm" className="shrink-0">
-						{t("pluginStateInstalled")}
-					</Chip>
+		<>
+			<div className="flex items-center gap-2 px-4 py-1.5">
+				{/* Reserve the checkbox column so installed/available titles align. */}
+				<div aria-hidden className="size-4 shrink-0" />
+				<div className="min-w-0 flex-1">
+					<div className="flex items-center gap-2">
+						<span className="truncate text-sm font-medium text-foreground">
+							{entry.name}
+						</span>
+						<Chip variant="soft" size="sm" className="shrink-0">
+							{t("pluginStateInstalled")}
+						</Chip>
+					</div>
+					{entry.description && (
+						<p className="mt-0.5 line-clamp-2 text-xs text-muted">
+							{entry.description}
+						</p>
+					)}
 				</div>
-				{entry.description && (
-					<p className="mt-0.5 line-clamp-2 text-xs text-muted">
-						{entry.description}
-					</p>
-				)}
-			</div>
-			<span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted">
-				{compactFormatter.format(entry.installs)}
-			</span>
-			<div className="flex w-28 shrink-0 items-center justify-end gap-1">
-				{canUpdate && (
+				<span className="w-14 shrink-0 text-right text-xs tabular-nums text-muted">
+					{compactFormatter.format(entry.installs)}
+				</span>
+				<div className="flex w-28 shrink-0 items-center justify-end gap-1">
+					{canUpdate && (
+						<Tooltip delay={0}>
+							<Button
+								isIconOnly
+								variant="ghost"
+								size="sm"
+								onPress={handleUpdate}
+								isDisabled={updateMutation.isPending}
+								aria-label={t("updatePlugin")}
+							>
+								<ArrowPathIcon
+									className={cn(
+										"size-4",
+										updateMutation.isPending &&
+											"animate-spin",
+									)}
+								/>
+							</Button>
+							<Tooltip.Content>
+								{t("updatePlugin")}
+							</Tooltip.Content>
+						</Tooltip>
+					)}
 					<Tooltip delay={0}>
 						<Button
 							isIconOnly
 							variant="ghost"
 							size="sm"
-							onPress={handleUpdate}
-							isDisabled={updateMutation.isPending}
-							aria-label={t("updatePlugin")}
+							className="text-danger"
+							onPress={() => setShowUninstallConfirm(true)}
+							isDisabled={uninstallMutation.isPending}
+							aria-label={t("uninstallPlugin")}
 						>
-							<ArrowPathIcon
-								className={cn(
-									"size-4",
-									updateMutation.isPending && "animate-spin",
-								)}
-							/>
+							<TrashIcon className="size-4" />
 						</Button>
-						<Tooltip.Content>{t("updatePlugin")}</Tooltip.Content>
+						<Tooltip.Content>
+							{t("uninstallPlugin")}
+						</Tooltip.Content>
 					</Tooltip>
-				)}
-				<Tooltip delay={0}>
-					<Button
-						isIconOnly
-						variant="ghost"
-						size="sm"
-						className="text-danger"
-						onPress={handleUninstall}
-						isDisabled={uninstallMutation.isPending}
-						aria-label={t("uninstallPlugin")}
-					>
-						<TrashIcon className="size-4" />
-					</Button>
-					<Tooltip.Content>{t("uninstallPlugin")}</Tooltip.Content>
-				</Tooltip>
-				<Switch
-					className="w-10 shrink-0"
-					isSelected={installed.enabled}
-					isDisabled={isToggling}
-					onChange={() => {
-						if (installed.enabled) {
-							disableMutation.mutate(installed.id);
-							return;
+					<Switch
+						className="w-10 shrink-0"
+						isSelected={installed.enabled}
+						isDisabled={isToggling}
+						onChange={() => {
+							if (installed.enabled) {
+								disableMutation.mutate(installed.id);
+								return;
+							}
+							enableMutation.mutate(installed.id);
+						}}
+						aria-label={
+							installed.enabled
+								? t("disablePlugin")
+								: t("enablePlugin")
 						}
-						enableMutation.mutate(installed.id);
-					}}
-					aria-label={
-						installed.enabled
-							? t("disablePlugin")
-							: t("enablePlugin")
-					}
-				>
-					<Switch.Control>
-						<Switch.Thumb />
-					</Switch.Control>
-				</Switch>
+					>
+						<Switch.Control>
+							<Switch.Thumb />
+						</Switch.Control>
+					</Switch>
+				</div>
 			</div>
-		</div>
+			<PluginConfirmDialog
+				isOpen={showUninstallConfirm}
+				title={t("confirmUninstallTitle")}
+				description={t("confirmUninstallDescription", {
+					name: entry.name,
+				})}
+				confirmLabel={t("uninstall")}
+				cancelLabel={t("cancel")}
+				status="danger"
+				isPending={uninstallMutation.isPending}
+				onOpenChange={setShowUninstallConfirm}
+				onConfirm={confirmUninstall}
+			/>
+		</>
 	);
 }
 

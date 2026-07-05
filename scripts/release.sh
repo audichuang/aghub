@@ -229,7 +229,11 @@ info "verifying artifacts for $TAG..."
 VERIFY_FAILED=0
 ASSETS="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
 echo "$ASSETS" | sed 's/^/    /'
-for must in latest.json .dmg .AppImage setup.exe; do
+# .msi is required because this script only ever runs for STABLE tags (the
+# X.Y.Z regex above rejects any pre-release `-rc.N`), and stable Windows
+# bundles ship both NSIS setup.exe AND the WiX .msi. Pre-releases (NSIS-only,
+# no .msi) are tagged by hand and never reach this verification.
+for must in latest.json .dmg .AppImage setup.exe .msi; do
 	echo "$ASSETS" | grep -q -- "$must" || {
 		err "missing asset matching '$must'"
 		VERIFY_FAILED=1
