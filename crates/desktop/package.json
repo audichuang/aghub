@@ -13,6 +13,7 @@
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"generate:dto": "cargo run --manifest-path ../api/Cargo.toml --bin export-dto",
+		"test": "node --experimental-strip-types --test src/lib/*.test.ts",
 		"typecheck": "tsc"
 	},
 	"dependencies": {

@@ -184,6 +184,12 @@ jobs:
               run: cd crates/desktop && bun install --frozen-lockfile
             - name: ESLint check (warnings as errors)
               run: cd crates/desktop && bun run lint:check -- --max-warnings 0
+            - name: Setup Node (node:test runner for src/lib unit tests)
+              uses: actions/setup-node@v4
+              with:
+                  node-version: 24
+            - name: Frontend unit tests
+              run: cd crates/desktop && bun run test
 
     # Tests (unit + integration + doc) - 3 OS matrix
     test:
