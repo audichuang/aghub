@@ -142,3 +142,26 @@ git log --oneline -S '<distinctive snippet>' -- <path>
 #   2. remove it from the other sections
 #   3. bump "Last full review" SHA + the tally count above
 ```
+
+### Triage judgment (how to spend the time, learned from prior syncs)
+
+- **Filter deps first, then bucket by crate.** Drop the `chore(deps*)` bumps (~half
+  the batch) up front. Of what's left, the high-value ports are the ones touching
+  the **Rust backend** (`agents`/`core`/`api`/`cli`); `fix(desktop)` commits are
+  usually not.
+- **Our desktop has diverged hard — check the file exists before porting UI.** Most
+  upstream `fix(desktop)`/`feat(desktop)` work builds on the agent-hub-revamp (#282)
+  UI this fork never adopted. Before attempting a desktop port, confirm the target
+  file/component even exists here (`ls`/grep the path from the diff); if it doesn't,
+  it's a rewrite against a different UI, not a port — skip unless we want the feature.
+- **Confirm "already fixed here?" by reading OUR current code, not the title.** A
+  clean `git cherry-pick -n <sha>` that auto-merges is strong evidence our side was
+  still the pre-fix state; if it conflicts, our code already diverged — inspect before
+  resolving.
+- **Port mechanics:** `git cherry-pick -n -x <sha>` (the `-x` records provenance) →
+  run the affected test suites (the fix's own test updates come along and should go
+  green) → **split into one commit per upstream SHA** by passing explicit file lists
+  to `git commit`, so each port keeps its own provenance line.
+- **Two standing gotchas:** push to **`fork`**, never `origin` (= upstream); and any
+  `#[cfg(windows)]` item must carry the same `cfg` as its use site, or Windows CI
+  clippy goes red on merge (unused-const / dead-code) even though local Linux is green.
