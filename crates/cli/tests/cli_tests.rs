@@ -360,6 +360,8 @@ fn seed_mcp(home: &std::path::Path, state: &std::path::Path, name: &str) {
 }
 
 /// True when `get mcps` lists an MCP named `name` for the given env.
+// Only used by #[cfg(unix)] tests (Windows global MCP config isn't HOME-isolated).
+#[cfg(unix)]
 fn mcp_listed(
 	home: &std::path::Path,
 	state: &std::path::Path,
