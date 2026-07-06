@@ -163,6 +163,7 @@ mod tests {
 
 	fn lock_entry() -> skill::LocalSkillLockEntry {
 		skill::LocalSkillLockEntry {
+			source_url: None,
 			source: "owner/repo".to_string(),
 			ref_name: Some("main".to_string()),
 			source_type: "github".to_string(),

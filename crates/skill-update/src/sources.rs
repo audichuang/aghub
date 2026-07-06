@@ -164,22 +164,25 @@ fn global_sources() -> Vec<SourceSummary> {
 		.collect()
 }
 
-/// Group a project lock's skills by source. The project lock omits `sourceUrl`,
-/// so the fetch URL is reconstructed from `owner/repo` (GitHub etc.).
+/// Group a project lock's skills by source. Newer locks record `sourceUrl`
+/// (so a non-github host survives); older/npx locks omit it, so the fetch URL
+/// is reconstructed from `owner/repo` (GitHub etc.).
 fn project_sources(root: &Path) -> Vec<SourceSummary> {
 	let lock = skill::read_local_lock(Some(root));
-	// source (owner/repo) -> (source_type, count)
-	let mut by_source: BTreeMap<String, (String, u32)> = BTreeMap::new();
+	// source (owner/repo) -> (recorded source_url, source_type, count)
+	let mut by_source: BTreeMap<String, (Option<String>, String, u32)> =
+		BTreeMap::new();
 	for (_name, entry) in lock.skills {
-		let agg = by_source
-			.entry(entry.source.clone())
-			.or_insert_with(|| (entry.source_type.clone(), 0));
-		agg.1 += 1;
+		let agg = by_source.entry(entry.source.clone()).or_insert_with(|| {
+			(entry.source_url.clone(), entry.source_type.clone(), 0)
+		});
+		agg.2 += 1;
 	}
 	by_source
 		.into_iter()
-		.map(|(source, (source_type, skill_count))| {
-			let source_url = reconstruct_source_url(&source);
+		.map(|(source, (source_url, source_type, skill_count))| {
+			let source_url =
+				source_url.unwrap_or_else(|| reconstruct_source_url(&source));
 			SourceSummary {
 				source,
 				source_url,
@@ -302,7 +305,11 @@ fn insert_scope_entries(
 		}
 		SourceScope::Project { root } => {
 			for (name, entry) in skill::read_local_lock(Some(root)).skills {
-				if !source_matches(want, &entry.source, None) {
+				if !source_matches(
+					want,
+					&entry.source,
+					entry.source_url.as_deref(),
+				) {
 					continue;
 				}
 				if source_type.is_empty() {
@@ -434,7 +441,7 @@ fn recorded_meta_for_source(
 			for (_name, entry) in skill::read_local_lock(Some(root)).skills {
 				visit(
 					&entry.source,
-					None,
+					entry.source_url.as_deref(),
 					&entry.source_type,
 					entry.ref_name.as_deref(),
 				);
@@ -1487,6 +1494,7 @@ mod diff_tests {
 		lock.skills.insert(
 			"s".to_string(),
 			skill::LocalSkillLockEntry {
+				source_url: None,
 				source: source.to_string(),
 				ref_name: ref_name.map(str::to_string),
 				source_type: source_type.to_string(),

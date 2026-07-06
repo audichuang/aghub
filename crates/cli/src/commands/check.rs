@@ -310,7 +310,10 @@ fn project_lock_entries(
 			name,
 			scope: "project".to_string(),
 			source_ref: SourceRef {
-				source: entry.source,
+				// Prefer the recorded full clone URL so a non-github host
+				// (TFS/Azure DevOps) is fetched correctly; fall back to the
+				// host-stripped owner/repo for github/legacy locks.
+				source: entry.source_url.unwrap_or(entry.source),
 				ref_: entry.ref_name,
 			},
 			source_type: entry.source_type,

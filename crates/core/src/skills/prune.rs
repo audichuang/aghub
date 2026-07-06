@@ -564,6 +564,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"proj-only",
 			skill::LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "o/r".to_string(),
 				ref_name: None,
@@ -588,6 +589,7 @@ mod tests {
 		skill::add_skill_to_local_lock(
 			"proj-gone",
 			skill::LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "o/r".to_string(),
 				ref_name: None,

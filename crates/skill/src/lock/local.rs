@@ -48,6 +48,18 @@ pub struct LocalSkillLockEntry {
 		default
 	)]
 	pub ref_commit: Option<String>,
+	/// aghub-only: the full clone URL recorded at install time, so check/diff can
+	/// rebuild a NON-github host (TFS/Azure DevOps/on-prem GitLab) that the
+	/// host-stripped `source` (`owner/repo`) alone can only reconstruct as
+	/// `github.com`. `None` for github shorthand and for npx/legacy locks that
+	/// predate this field — consumers fall back to reconstructing from `source`.
+	/// Never read/written by npx.
+	#[serde(
+		rename = "sourceUrl",
+		skip_serializing_if = "Option::is_none",
+		default
+	)]
+	pub source_url: Option<String>,
 }
 
 impl LocalSkillLockEntry {
@@ -248,6 +260,7 @@ mod tests {
 
 	fn sample_local_entry() -> LocalSkillLockEntry {
 		LocalSkillLockEntry {
+			source_url: None,
 			ref_commit: None,
 			source: "org/repo".to_string(),
 			ref_name: None,
@@ -266,8 +279,37 @@ mod tests {
 	}
 
 	#[test]
+	fn local_entry_source_url_round_trips_and_is_npx_invisible() {
+		// None → the key is omitted entirely (npx never sees it, byte-identical
+		// to a pre-field lock).
+		let none = sample_local_entry();
+		assert!(none.source_url.is_none());
+		let json = serde_json::to_string(&none).unwrap();
+		assert!(!json.contains("sourceUrl"), "None must not serialize a key");
+
+		// Some(non-github url) → serialized as camelCase `sourceUrl` and reads
+		// back identically.
+		let mut e = sample_local_entry();
+		e.source_url =
+			Some("https://dev.azure.example/org/_git/repo".to_string());
+		let json = serde_json::to_string(&e).unwrap();
+		assert!(json.contains(
+			"\"sourceUrl\":\"https://dev.azure.example/org/_git/repo\""
+		));
+		let back: LocalSkillLockEntry = serde_json::from_str(&json).unwrap();
+		assert_eq!(back.source_url.as_deref(), e.source_url.as_deref());
+
+		// A legacy/npx lock without the key deserializes to None (serde default).
+		let legacy =
+			r#"{"source":"o/r","sourceType":"github","computedHash":"h"}"#;
+		let parsed: LocalSkillLockEntry = serde_json::from_str(legacy).unwrap();
+		assert!(parsed.source_url.is_none());
+	}
+
+	#[test]
 	fn local_entry_key_order_matches_npx() {
 		let entry = LocalSkillLockEntry {
+			source_url: None,
 			source: "org/repo".to_string(),
 			ref_name: Some("main".to_string()),
 			source_type: "github".to_string(),
@@ -468,6 +510,7 @@ mod tests {
 		lock.skills.insert(
 			"zebra-skill".to_string(),
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/z".to_string(),
 				ref_name: None,
@@ -479,6 +522,7 @@ mod tests {
 		lock.skills.insert(
 			"alpha-skill".to_string(),
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/a".to_string(),
 				ref_name: None,
@@ -490,6 +534,7 @@ mod tests {
 		lock.skills.insert(
 			"middle-skill".to_string(),
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/m".to_string(),
 				ref_name: None,
@@ -517,6 +562,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"new-skill",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
@@ -540,6 +586,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
@@ -554,6 +601,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
@@ -578,6 +626,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-a",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/a".to_string(),
 				ref_name: None,
@@ -592,6 +641,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-b",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/b".to_string(),
 				ref_name: None,
@@ -615,6 +665,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"my-skill",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/repo".to_string(),
 				ref_name: None,
@@ -713,6 +764,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-a",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/a".to_string(),
 				ref_name: None,
@@ -733,6 +785,7 @@ mod tests {
 		add_skill_to_local_lock(
 			"skill-b",
 			LocalSkillLockEntry {
+				source_url: None,
 				ref_commit: None,
 				source: "org/b".to_string(),
 				ref_name: None,

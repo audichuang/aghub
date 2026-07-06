@@ -2703,6 +2703,7 @@ mod tests {
 
 	fn local_entry() -> skill::lock::local::LocalSkillLockEntry {
 		skill::lock::local::LocalSkillLockEntry {
+			source_url: None,
 			source: "o/r".to_string(),
 			ref_name: None,
 			source_type: "github".to_string(),

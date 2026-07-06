@@ -165,6 +165,21 @@ pub fn write_global_install_lock(
 	)
 }
 
+/// The `sourceUrl` to persist in a project lock entry, or `None` to omit it.
+/// Only a non-github remote host carries recovery info the host-stripped
+/// `source` lacks; github shorthand and local sources reconstruct fine and are
+/// left out to keep the lock byte-identical and npx-invisible.
+fn recordable_source_url(source: &InstallLockSource) -> Option<String> {
+	let url = source.source_url.trim();
+	if url.is_empty()
+		|| source.source_type.eq_ignore_ascii_case("local")
+		|| url.contains("github.com")
+	{
+		return None;
+	}
+	Some(url.to_string())
+}
+
 pub fn write_project_install_lock(
 	skill_name: &str,
 	source: &InstallLockSource,
@@ -183,6 +198,12 @@ pub fn write_project_install_lock(
 			source_type: source.source_type.clone(),
 			computed_hash,
 			skill_path,
+			// Record the full clone URL ONLY for a non-github remote host
+			// (TFS/Azure DevOps/on-prem GitLab), where the host-stripped
+			// `source` can't be reconstructed. github and local sources
+			// reconstruct fine from `source`, so leave them None — keeping the
+			// lock byte-identical and npx-invisible for the common case.
+			source_url: recordable_source_url(source),
 		},
 		Some(cwd),
 	)

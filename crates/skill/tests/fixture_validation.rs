@@ -15,6 +15,7 @@ fn test_local_lock_json_matches_typescript_simple() {
 	lock.skills.insert(
 		"my-skill".to_string(),
 		LocalSkillLockEntry {
+			source_url: None,
 			ref_commit: None,
 			source: "npm-package".to_string(),
 			ref_name: None,
@@ -53,6 +54,7 @@ fn test_local_lock_json_matches_typescript_sorted() {
 	lock.skills.insert(
 		"zebra-skill".to_string(),
 		LocalSkillLockEntry {
+			source_url: None,
 			ref_commit: None,
 			source: "z".to_string(),
 			ref_name: None,
@@ -64,6 +66,7 @@ fn test_local_lock_json_matches_typescript_sorted() {
 	lock.skills.insert(
 		"alpha-skill".to_string(),
 		LocalSkillLockEntry {
+			source_url: None,
 			ref_commit: None,
 			source: "a".to_string(),
 			ref_name: None,
