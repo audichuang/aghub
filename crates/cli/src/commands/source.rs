@@ -564,10 +564,18 @@ fn sync(args: SyncArgs) -> Result<()> {
 		return print_dry_run(&source, scope_label, &plan, args.json);
 	}
 
-	// Resolve the normalized lock source ONCE. Source normalization lives in
+	// Resolve the normalized lock source ONCE from the RECOVERED fetch
+	// coordinate (recorded `sourceUrl` for a non-github host, else the arg) —
+	// NOT the raw shorthand, or a TFS `Collection/_git/repo` would fail
+	// github-shorthand parsing and a 2-segment non-github source would
+	// normalize to the wrong github lock source. Normalization lives in
 	// `aghub_git`; we never re-implement it.
-	let resolved = aghub_git::resolve_remote_source(&source)
-		.map_err(|e| anyhow::anyhow!("invalid source '{source}': {e}"))?;
+	let fetch_source = meta
+		.effective_source
+		.clone()
+		.unwrap_or_else(|| source.clone());
+	let resolved = aghub_git::resolve_remote_source(&fetch_source)
+		.map_err(|e| anyhow::anyhow!("invalid source '{fetch_source}': {e}"))?;
 	// Record the RESOLVED ref (explicit `--ref` OR the source's recorded lock
 	// ref), not just the explicit flag — so re-installing a source pinned to a
 	// tag/branch persists that pin, matching what the API records.
