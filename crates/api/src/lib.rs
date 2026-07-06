@@ -116,8 +116,25 @@ pub(crate) fn build_rocket(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
 ) -> rocket::Rocket<rocket::Build> {
+	// Only the desktop webview is a legitimate browser origin. Allow-listing it
+	// (instead of `AllOrSome::All`) makes a cross-origin JSON POST — e.g. a
+	// malicious page driving `git/scan` against the localhost API — fail its
+	// CORS preflight, so the request never reaches the handler. Covers the
+	// webview on every platform: `tauri://localhost` (macOS/Linux prod),
+	// `http(s)://tauri.localhost` (Windows prod), `http://localhost:1420`
+	// (vite dev). Non-browser clients (CLI, curl, the SSH-tunnel proxy) don't
+	// do CORS, so they are unaffected. build_rocket is the single construction
+	// point for both the standalone bin and the desktop-embedded server, so
+	// this one change covers every launch path.
 	let cors = rocket_cors::CorsOptions {
-		allowed_origins: rocket_cors::AllOrSome::All,
+		allowed_origins: rocket_cors::AllowedOrigins::some(
+			&[
+				"http://localhost:1420",
+				"http://tauri.localhost",
+				"https://tauri.localhost",
+			],
+			&[r"^tauri://localhost$"],
+		),
 		allowed_methods: vec![
 			rocket::http::Method::Get,
 			rocket::http::Method::Post,
@@ -429,6 +446,32 @@ mod tests {
 		assert_eq!(
 			response.headers().get_one("Access-Control-Allow-Headers"),
 			Some("content-type"),
+		);
+	}
+
+	#[test]
+	fn cors_rejects_untrusted_origin_preflight() {
+		// Layer-1 drive-by guard: an untrusted browser origin must NOT be
+		// granted CORS access to the localhost API. Before origins were
+		// allow-listed (`AllOrSome::All`), this echoed any Origin back, letting
+		// a malicious page's cross-origin JSON POST (e.g. `git/scan`) preflight
+		// succeed and the real request go through.
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let response = client
+			.req(rocket::http::Method::Options, "/api/v1/plugins/uninstall")
+			.header(Header::new("Origin", "http://evil.example"))
+			.header(Header::new("Access-Control-Request-Method", "POST"))
+			.dispatch();
+
+		assert_ne!(
+			response.headers().get_one("Access-Control-Allow-Origin"),
+			Some("http://evil.example"),
+			"an untrusted origin must never be granted CORS access",
 		);
 	}
 
