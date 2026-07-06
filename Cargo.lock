@@ -168,6 +168,7 @@ version = "1.1.1"
 dependencies = [
  "gix",
  "gix-hash",
+ "log",
  "tempfile",
  "thiserror 2.0.18",
  "url",

@@ -1,6 +1,8 @@
 //! Strip URL userinfo (`user:token@`) from any string before it becomes an error,
 //! a log line, an Uncheckable reason, or a persisted URL.
 
+use std::path::Path;
+
 /// Replace every `scheme://user:secret@host` occurrence's userinfo with `***`.
 ///
 /// Scans for `://`, then looks for an `@` userinfo terminator that appears
@@ -37,6 +39,48 @@ pub fn redact_url_userinfo(s: &str) -> String {
 
 	out.push_str(rest);
 	out
+}
+
+/// Strip credential userinfo from a git repo's on-disk config, best-effort.
+///
+/// gix's `PrepareFetch` persists the fetch URL **losslessly** (`save_to` →
+/// `Url::to_bstring()`, which keeps `user:token@`) into the temp repo's local
+/// config *before* connecting — so a token-bearing clone/fetch leaves the token
+/// on disk. `redact_url_userinfo` only sanitizes strings, not this file. Call
+/// this right after a clone/fetch to rewrite the config with the userinfo
+/// stripped (`***@host`).
+///
+/// Safe because nothing re-fetches through the persisted remote afterwards: the
+/// treeless path only reads objects, and git-scan re-clones a fresh dir to
+/// switch branches — so the `***@host` placeholder is never used to connect.
+///
+/// Best-effort: a rewrite failure is logged at warn (never silently swallowed —
+/// it means the token is still on disk) but does not fail the surrounding
+/// operation; the temp dir is `0700` and short-lived. `config_path` is the git
+/// config file (`<dir>/config` for a bare repo, `<dir>/.git/config` for a
+/// worktree). A missing file or a config with no userinfo is a no-op.
+pub(crate) fn scrub_config_userinfo(config_path: &Path) {
+	let text = match std::fs::read_to_string(config_path) {
+		Ok(text) => text,
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+		Err(e) => {
+			log::warn!(
+				"could not read git config to scrub credentials at {}: {e}",
+				config_path.display()
+			);
+			return;
+		}
+	};
+	let scrubbed = redact_url_userinfo(&text);
+	if scrubbed == text {
+		return; // no userinfo persisted (public repo / no credentials)
+	}
+	if let Err(e) = std::fs::write(config_path, scrubbed) {
+		log::warn!(
+			"failed to scrub credentials from git config at {}: {e}",
+			config_path.display()
+		);
+	}
 }
 
 #[cfg(test)]
@@ -100,5 +144,37 @@ mod tests {
 	fn no_userinfo_means_no_change() {
 		let s = "cloning https://github.com/o/r.git into /tmp/x?ref=main";
 		assert_eq!(redact_url_userinfo(s), s);
+	}
+
+	#[test]
+	fn scrub_config_strips_persisted_token() {
+		let dir = tempfile::tempdir().unwrap();
+		let config = dir.path().join("config");
+		std::fs::write(
+			&config,
+			"[core]\n\tbare = true\n[remote \"origin\"]\n\turl = \
+			 https://x-access-token:ghp_SECRET@dev.azure.example/o/r\n\t\
+			 fetch = +refs/heads/*:refs/remotes/origin/*\n",
+		)
+		.unwrap();
+
+		scrub_config_userinfo(&config);
+
+		let after = std::fs::read_to_string(&config).unwrap();
+		assert!(
+			!after.contains("ghp_SECRET"),
+			"token must be gone from config"
+		);
+		assert!(!after.contains("x-access-token"));
+		// Non-credential lines and the host survive.
+		assert!(after.contains("dev.azure.example/o/r"));
+		assert!(after.contains("fetch = +refs/heads/*"));
+	}
+
+	#[test]
+	fn scrub_config_missing_file_is_noop() {
+		let dir = tempfile::tempdir().unwrap();
+		// Must not panic on a nonexistent config.
+		scrub_config_userinfo(&dir.path().join("does-not-exist"));
 	}
 }

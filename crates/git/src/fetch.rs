@@ -86,6 +86,11 @@ pub fn fetch_ref_to_temp(
 
 	let oid =
 		fetch_into_bare(&fetch_url, temp_dir.path(), ref_, total_timeout)?;
+	// A bare repo keeps its config at the dir root (not under .git). gix wrote
+	// the token-bearing fetch URL there; strip it (no-op when creds were None).
+	if creds.is_some() {
+		crate::redact::scrub_config_userinfo(&temp_dir.path().join("config"));
+	}
 	Ok((temp_dir, oid))
 }
 

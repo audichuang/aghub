@@ -248,8 +248,19 @@ resolve_git_token_for_source(source: &str) -> Option<ResolvedToken>` to
   React Query state, persisted stores, logs, devtools-visible state, and error
   objects — resolve it transiently right before the request and never cache it.
 - Token travels to the VM only over the SSH-encrypted loopback tunnel; the VM
-  uses it in-memory and discards it — never written to disk or log (gix strips
-  URL userinfo; the header is added to log redaction).
+  uses it in-memory and the header is added to log redaction. **Correction (was
+  wrong):** gix does NOT keep the token off disk — `PrepareFetch` persists the
+  fetch URL _losslessly_ into the temp repo's git config (`save_to` →
+  `Url::to_bstring()`, which includes `user:token@`) before connecting;
+  `redact_url_userinfo` only sanitizes error/log strings, not that config file.
+  So the token IS briefly on disk. Exposure window: treeless fetch — sub-second
+  (the bare temp repo is dropped right after the tree is materialized);
+  git-scan session — up to the session TTL (`10 min`). Mitigations now in place:
+  the temp dir is created `0700` (same-user only), and the persisted
+  `remote.origin.url` userinfo is scrubbed (`aghub_git::redact::scrub_config_userinfo`)
+  immediately after every clone/fetch — safe because nothing re-fetches through
+  the persisted remote afterwards (treeless only reads objects; git-scan
+  re-clones a fresh dir to switch branches).
 - Host pinning is origin-level `(scheme, host, port)` (D8), so a token is never
   attached to a different origin.
 - CORS adds only the one header.

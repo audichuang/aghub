@@ -1892,8 +1892,12 @@ pub async fn git_scan_skills(
 	let session_id = uuid::Uuid::new_v4().to_string();
 	{
 		let mut map = sessions.sessions.lock().unwrap();
-		// Purge sessions older than 30 minutes
-		let cutoff = std::time::Duration::from_secs(30 * 60);
+		// Purge stale scan sessions. The session pins a cloned temp dir plus an
+		// in-memory credential_token between scan and install; keep the window
+		// tight (browse-then-install is a seconds-to-minutes flow) so a token is
+		// not retained longer than needed. Was 30 min; 10 min still covers a
+		// user reviewing scan results before picking skills.
+		let cutoff = std::time::Duration::from_secs(10 * 60);
 		map.retain(|_, s| s.created_at.elapsed() < cutoff);
 		map.insert(
 			session_id.clone(),

@@ -16,6 +16,7 @@ gix = { version = "0.84", default-features = false, features = [
 gix-hash = { version = "0.25", default-features = false, features = [
 	"sha1",
 ] }
+log = "0.4"
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }

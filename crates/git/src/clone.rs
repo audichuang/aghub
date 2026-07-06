@@ -71,13 +71,18 @@ pub fn clone_to_temp(options: CloneOptions<'_>) -> Result<TempDir> {
 	let temp_dir =
 		TempDir::new().map_err(|e| GitError::TempDirFailed(e.to_string()))?;
 	clone_into(url.as_str(), temp_dir.path(), options.branch)?;
+	// gix persisted the token-bearing URL into .git/config; strip it now so the
+	// token isn't retained for the clone's lifetime (git-scan keeps it ~minutes).
+	crate::redact::scrub_config_userinfo(&temp_dir.path().join(".git/config"));
 	Ok(temp_dir)
 }
 
 /// Clone a repository to a specific path.
 pub fn clone_to_path(dest: &Path, options: CloneOptions<'_>) -> Result<()> {
 	let url = resolve_remote_url(&options.remote, true)?;
-	clone_into(url.as_str(), dest, options.branch)
+	clone_into(url.as_str(), dest, options.branch)?;
+	crate::redact::scrub_config_userinfo(&dest.join(".git/config"));
+	Ok(())
 }
 
 fn clone_into(url: &str, dest: &Path, branch: Option<&str>) -> Result<()> {
