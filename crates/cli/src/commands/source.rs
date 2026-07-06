@@ -320,9 +320,10 @@ fn diff(
 
 	// Skip sources we cannot fetch (local/ssh/unsupported scheme) up front,
 	// before paying for a fetch — honoring the precheck the API path honors.
-	if let Some(reason) =
-		aghub_core::skills::update::precheck_source(&meta.source_type, &source)
-	{
+	if let Some(reason) = aghub_core::skills::update::precheck_source(
+		&meta.source_type,
+		meta.effective_source.as_deref().unwrap_or(&source),
+	) {
 		bail!(
 			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
 			 owner/repo git sources are supported"
@@ -331,7 +332,10 @@ fn diff(
 
 	let repo = match sources::fetch_source_with_resolver(
 		&SourceRef {
-			source: source.clone(),
+			source: meta
+				.effective_source
+				.clone()
+				.unwrap_or_else(|| source.clone()),
 			ref_: meta.effective_ref.clone(),
 		},
 		&CliFetcher,
@@ -485,9 +489,10 @@ fn sync(args: SyncArgs) -> Result<()> {
 		args.git_ref,
 	);
 
-	if let Some(reason) =
-		aghub_core::skills::update::precheck_source(&meta.source_type, &source)
-	{
+	if let Some(reason) = aghub_core::skills::update::precheck_source(
+		&meta.source_type,
+		meta.effective_source.as_deref().unwrap_or(&source),
+	) {
 		bail!(
 			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
 			 owner/repo git sources are supported"
@@ -499,7 +504,10 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// informational path can print the same plan without a second fetch.
 	let repo = match sources::fetch_source_with_resolver(
 		&SourceRef {
-			source: source.clone(),
+			source: meta
+				.effective_source
+				.clone()
+				.unwrap_or_else(|| source.clone()),
 			ref_: meta.effective_ref.clone(),
 		},
 		&CliFetcher,

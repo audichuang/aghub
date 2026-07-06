@@ -1026,14 +1026,21 @@ fn rollback_rename_install(
 #[post("/skills/accept-rename", data = "<body>")]
 pub async fn accept_skill_rename(
 	body: Json<AcceptRenameRequest>,
+	forwarded: ForwardedGitTokens,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<AcceptRenameResponse> {
-	accept_rename_inner(body.into_inner(), &GitFetcherWithFallback).await
+	// Same credential path as apply-update: forwarded tokens (header) take
+	// precedence over the local keyring; an absent header degrades to keyring.
+	let keyring = KeyringResolver;
+	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
+	accept_rename_inner(body.into_inner(), &GitFetcherWithFallback, &resolver)
+		.await
 }
 
 pub(crate) async fn accept_rename_inner(
 	req: AcceptRenameRequest,
 	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
 ) -> ApiResult<AcceptRenameResponse> {
 	if !req.confirm.unwrap_or(false) {
 		return Ok(Json(accept_rename_error(
@@ -1116,11 +1123,14 @@ pub(crate) async fn accept_rename_inner(
 		)));
 	}
 
-	// 3. Fetch upstream (same credential path as apply-update).
-	let resolver = KeyringResolver;
+	// 3. Fetch upstream (same credential path as apply-update). Resolve the
+	// token against the fetch coordinate (`source_url`) so a non-github host
+	// (TFS/Azure DevOps) binds to the right keychain host — resolving against
+	// the host-stripped `source` would yield host `None` and silently miss a
+	// credential bound to the real host.
 	let token = resolver.resolve(
-		&source.source,
-		keychain_host_for_source(&source.source).as_deref(),
+		&source.source_url,
+		keychain_host_for_source(&source.source_url).as_deref(),
 	);
 	let repo = match fetcher.fetch(
 		&SourceRef {
@@ -1477,11 +1487,12 @@ mod tests {
 		req: crate::dto::skill::AcceptRenameRequest,
 		fetcher: &dyn Fetcher,
 	) -> crate::dto::skill::AcceptRenameResponse {
+		let resolver = KeyringResolver;
 		match rocket::tokio::runtime::Builder::new_current_thread()
 			.enable_all()
 			.build()
 			.unwrap()
-			.block_on(accept_rename_inner(req, fetcher))
+			.block_on(accept_rename_inner(req, fetcher, &resolver))
 		{
 			Ok(json) => json.into_inner(),
 			Err(error) => {

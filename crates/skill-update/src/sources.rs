@@ -400,14 +400,18 @@ pub(crate) fn baseline_for_scope(
 /// the given scopes, WITHOUT building a baseline (no folder hashing, no fetch).
 /// Mirrors the merged-baseline scan order (global first, then project) so the
 /// "first non-empty wins" result matches [`merged_baseline_for_source`].
-/// Returns `(source_type, recorded_ref)` — both empty/None when the source is
-/// not present in any lock.
+/// Returns `(source_type, recorded_ref, recorded_source_url)` — all empty/None
+/// when the source is not present in any lock. `recorded_source_url` is the
+/// matching entry's recorded clone URL (the fetch coordinate), so a caller that
+/// was handed a host-stripped `owner/repo` can recover the real non-github host
+/// (TFS/Azure DevOps) instead of reconstructing `github.com`.
 fn recorded_meta_for_source(
 	scopes: &[SourceScope],
 	source: &str,
-) -> (String, Option<String>) {
+) -> (String, Option<String>, Option<String>) {
 	let mut source_type = String::new();
 	let mut recorded_ref: Option<String> = None;
+	let mut recorded_source_url: Option<String> = None;
 	let want = source.trim();
 	let mut visit = |entry_source: &str,
 	                 entry_source_url: Option<&str>,
@@ -421,6 +425,9 @@ fn recorded_meta_for_source(
 		}
 		if recorded_ref.is_none() {
 			recorded_ref = entry_ref.map(str::to_string);
+		}
+		if recorded_source_url.is_none() {
+			recorded_source_url = entry_source_url.map(str::to_string);
 		}
 	};
 	// Global first, then project — same order as `merged_baseline_for_source`.
@@ -448,7 +455,7 @@ fn recorded_meta_for_source(
 			}
 		}
 	}
-	(source_type, recorded_ref)
+	(source_type, recorded_ref, recorded_source_url)
 }
 
 /// The resolved fetch metadata for a source, derived from the lock entries
@@ -462,6 +469,12 @@ pub struct ResolvedSourceMeta {
 	/// Explicit `--ref` override, else the source's recorded lock ref, else
 	/// `None` (the upstream default branch).
 	pub effective_ref: Option<String>,
+	/// The recorded clone URL of the matching lock entry, when one exists — the
+	/// real fetch coordinate. Lets a caller handed a host-stripped `owner/repo`
+	/// (e.g. `source diff <lock source>`) fetch a non-github host (TFS/Azure
+	/// DevOps) instead of reconstructing `github.com`. `None` when the source is
+	/// not in any lock or the entry recorded no URL (github/legacy).
+	pub effective_source: Option<String>,
 }
 
 /// Resolve `(source_type, effective_ref)` for a source across `scopes` from the
@@ -476,7 +489,7 @@ pub fn resolve_source_meta(
 	scopes: &[SourceScope],
 	explicit_ref: Option<&str>,
 ) -> ResolvedSourceMeta {
-	let (mut source_type, recorded_ref) =
+	let (mut source_type, recorded_ref, recorded_source_url) =
 		recorded_meta_for_source(scopes, source);
 	if source_type.is_empty() {
 		source_type = "github".to_string();
@@ -485,6 +498,7 @@ pub fn resolve_source_meta(
 	ResolvedSourceMeta {
 		source_type,
 		effective_ref,
+		effective_source: recorded_source_url,
 	}
 }
 
@@ -866,14 +880,17 @@ pub fn diff_source(
 	let meta =
 		resolve_source_meta(&source, &input.scopes, input.git_ref.as_deref());
 	let git_ref = meta.effective_ref;
+	// Recover the recorded clone URL so a caller who passed the host-stripped
+	// lock `source` (owner/repo) still fetches a non-github host correctly.
+	let fetch_source = meta.effective_source.unwrap_or_else(|| source.clone());
 
 	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
-	if let Some(reason) = precheck_source(&meta.source_type, &source) {
+	if let Some(reason) = precheck_source(&meta.source_type, &fetch_source) {
 		return SourceDiffOutcome::UncheckableSource { git_ref, reason };
 	}
 
 	let source_ref = SourceRef {
-		source: source.clone(),
+		source: fetch_source,
 		ref_: git_ref.clone(),
 	};
 	match fetch_source_with_resolver(&source_ref, deps.fetcher, deps.resolver) {
