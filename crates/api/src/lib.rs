@@ -476,6 +476,51 @@ mod tests {
 	}
 
 	#[test]
+	fn trusted_local_origin_guard_blocks_foreign_origin_and_host() {
+		// Layer-2 guard on a credential route: a browser cross-origin request
+		// (foreign Origin) and a DNS-rebinding request (foreign Host, no Origin)
+		// must both get 403 before the handler runs; a trusted origin must not
+		// be blocked by the guard.
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let foreign_origin = client
+			.get("/api/v1/credentials")
+			.header(Header::new("Origin", "http://evil.example"))
+			.dispatch();
+		assert_eq!(
+			foreign_origin.status(),
+			Status::Forbidden,
+			"a foreign Origin must be rejected by the guard",
+		);
+
+		let foreign_host = client
+			.get("/api/v1/credentials")
+			.header(Header::new("Host", "evil.example"))
+			.dispatch();
+		assert_eq!(
+			foreign_host.status(),
+			Status::Forbidden,
+			"a foreign Host (DNS-rebinding) must be rejected by the guard",
+		);
+
+		// A trusted origin passes the guard (handler may then 200/500 depending
+		// on the keyring, but the guard itself must not forbid it).
+		let trusted = client
+			.get("/api/v1/credentials")
+			.header(Header::new("Origin", "tauri://localhost"))
+			.dispatch();
+		assert_ne!(
+			trusted.status(),
+			Status::Forbidden,
+			"a trusted local origin must pass the guard",
+		);
+	}
+
+	#[test]
 	fn skill_content_rejects_path_outside_skills_roots() {
 		let project = tempfile::tempdir().expect("project dir");
 		let skill_dir = project.path().join(".claude/skills/legit");

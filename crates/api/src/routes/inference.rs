@@ -21,6 +21,7 @@ use crate::dto::inference::{
 	UpdateInferenceProviderRequest,
 };
 use crate::error::{ApiCreated, ApiError, ApiNoContent, ApiResult};
+use crate::extractors::TrustedLocalOrigin;
 use crate::state::InferenceProviderState;
 
 fn store(state: &State<InferenceProviderState>) -> InferenceProviderStore {
@@ -580,6 +581,7 @@ pub fn delete_codex_provider(
 pub fn get_inference_provider_password(
 	state: &State<InferenceProviderState>,
 	latin_name: &str,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<InferenceProviderPasswordResponse> {
 	let store = store(state);
 	let provider = find_by_latin_name(&store, latin_name)?;

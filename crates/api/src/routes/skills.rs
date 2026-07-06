@@ -38,7 +38,7 @@ use crate::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
 	error::{ApiCreated, ApiError, ApiResult},
-	extractors::{AgentParam, ResolvedScope, ScopeParams},
+	extractors::{AgentParam, ResolvedScope, ScopeParams, TrustedLocalOrigin},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
@@ -1625,6 +1625,7 @@ fn current_platform() -> &'static str {
 #[get("/skills/git/credential-status?<query..>")]
 pub async fn git_credential_status(
 	query: GitCredentialStatusQuery,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitCredentialStatusResponse> {
 	let url = aghub_git::normalize_tfs_clone_url(&query.url);
 
@@ -1681,6 +1682,7 @@ pub async fn git_scan_skills(
 	body: Json<GitScanRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
 	forwarded: ForwardedGitTokens,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitScanResponse> {
 	let mut req = body.into_inner();
 	// Azure DevOps Server / TFS rejects the trailing `.git` on `/_git/<repo>`
@@ -2090,6 +2092,7 @@ fn partition_install_agents_in_request_order(
 pub async fn git_install_skills(
 	body: Json<GitInstallRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitInstallResponse> {
 	let req = body.into_inner();
 
@@ -2231,6 +2234,7 @@ pub async fn git_install_skills(
 pub async fn git_sync_skill(
 	body: Json<GitSyncRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitSyncResponse> {
 	let req = body.into_inner();
 

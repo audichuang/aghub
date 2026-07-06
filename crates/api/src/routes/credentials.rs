@@ -13,6 +13,7 @@ use crate::dto::credential::{
 	SourceCredentialBindingRequest, SourceCredentialBindingResponse,
 };
 use crate::error::{ApiCreated, ApiNoContent, ApiResult};
+use crate::extractors::TrustedLocalOrigin;
 
 const SERVICE: &str = "aghub";
 const USER: &str = "github_credentials";
@@ -104,7 +105,9 @@ fn duplicate_credential_err(name: &str) -> crate::error::ApiError {
 }
 
 #[get("/credentials")]
-pub fn list_credentials() -> ApiResult<Vec<CredentialResponse>> {
+pub fn list_credentials(
+	_origin: TrustedLocalOrigin,
+) -> ApiResult<Vec<CredentialResponse>> {
 	let creds = load_credentials().map_err(internal_err)?;
 	debug!("loaded {} stored credentials", creds.len());
 	Ok(Json(
@@ -120,6 +123,7 @@ pub fn list_credentials() -> ApiResult<Vec<CredentialResponse>> {
 
 #[get("/credentials/source-bindings")]
 pub fn list_source_bindings_route(
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<Vec<SourceCredentialBindingResponse>> {
 	let _guard = lock_source_bindings();
 	let bindings = load_source_bindings().map_err(internal_err)?;
@@ -130,6 +134,7 @@ pub fn list_source_bindings_route(
 #[put("/credentials/source-bindings", data = "<body>")]
 pub fn bind_source_credential(
 	body: Json<SourceCredentialBindingRequest>,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<SourceCredentialBindingResponse> {
 	let _guard = lock_source_bindings();
 	let mut bindings = load_source_bindings().map_err(internal_err)?;
@@ -155,6 +160,7 @@ pub fn bind_source_credential(
 #[post("/credentials", data = "<body>")]
 pub fn create_credential(
 	body: Json<CreateCredentialRequest>,
+	_origin: TrustedLocalOrigin,
 ) -> ApiCreated<CredentialResponse> {
 	let _guard = lock_credentials();
 	let mut creds = load_credentials().map_err(internal_err)?;
@@ -179,7 +185,10 @@ pub fn create_credential(
 }
 
 #[delete("/credentials/<id>")]
-pub fn delete_credential(id: &str) -> ApiNoContent {
+pub fn delete_credential(
+	id: &str,
+	_origin: TrustedLocalOrigin,
+) -> ApiNoContent {
 	let _guard = lock_credentials();
 	let mut creds = load_credentials().map_err(internal_err)?;
 	let original_len = creds.len();

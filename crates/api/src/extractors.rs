@@ -102,9 +102,121 @@ impl ScopeParams {
 	}
 }
 
+/// Request guard that blocks browser cross-origin / DNS-rebinding attacks on the
+/// localhost API without a shared token (a token would collide with this fork's
+/// SSH-remote / multi-connection model — see api/AGENTS.md). Two header checks,
+/// both LENIENT when the header is absent so non-browser clients (CLI, curl, the
+/// SSH-tunnel proxy, Rocket's local test client) are unaffected — only a browser
+/// reliably attaches these:
+///
+/// - `Origin` present and NOT a trusted local origin → 403. A malicious page's
+///   cross-origin request always carries its own Origin; a same-origin webview
+///   call carries the trusted `tauri://localhost` / `http://localhost:1420`.
+/// - `Host` present and NOT a trusted local host → 403. Closes DNS-rebinding,
+///   where the attacker page is same-origin (no Origin sent) but the Host is the
+///   attacker's rebound domain. (Layer-1 CORS can't see this; upstream's guard
+///   omitted the Host check.)
+///
+/// Only mounted on routes that touch keyring/OS credentials or act as a
+/// credential-existence oracle; read-only list/get routes rely on Layer-1 CORS.
+pub struct TrustedLocalOrigin;
+
+/// Extract the host from an `authority` (`host`, `host:port`, or `[::1]:port`).
+fn host_from_authority(authority: &str) -> Option<&str> {
+	let authority = authority.trim();
+	if let Some(rest) = authority.strip_prefix('[') {
+		// IPv6 literal: `[::1]:port` → `::1`
+		rest.split_once(']').map(|(host, _)| host)
+	} else {
+		authority.split(':').next()
+	}
+}
+
+fn is_trusted_local_host(host: &str) -> bool {
+	matches!(
+		host.to_ascii_lowercase().as_str(),
+		"localhost" | "127.0.0.1" | "::1" | "tauri.localhost"
+	)
+}
+
+fn origin_scheme_host(origin: &str) -> Option<(&str, &str)> {
+	let (scheme, rest) = origin.trim().split_once("://")?;
+	let authority = rest.split('/').next()?;
+	Some((scheme, host_from_authority(authority)?))
+}
+
+fn is_trusted_local_origin(origin: &str) -> bool {
+	let Some((scheme, host)) = origin_scheme_host(origin) else {
+		return false;
+	};
+	matches!(
+		scheme.to_ascii_lowercase().as_str(),
+		"http" | "https" | "tauri"
+	) && is_trusted_local_host(host)
+}
+
+#[rocket::async_trait]
+impl<'r> rocket::request::FromRequest<'r> for TrustedLocalOrigin {
+	type Error = ();
+
+	async fn from_request(
+		request: &'r rocket::Request<'_>,
+	) -> rocket::request::Outcome<Self, Self::Error> {
+		use rocket::request::Outcome;
+		if let Some(origin) = request.headers().get_one("Origin") {
+			if !is_trusted_local_origin(origin) {
+				return Outcome::Error((Status::Forbidden, ()));
+			}
+		}
+		if let Some(host) = request.headers().get_one("Host") {
+			let trusted =
+				host_from_authority(host).is_some_and(is_trusted_local_host);
+			if !trusted {
+				return Outcome::Error((Status::Forbidden, ()));
+			}
+		}
+		Outcome::Success(Self)
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn trusted_local_origins_pass_and_foreign_fail() {
+		for ok in [
+			"http://localhost:1420",
+			"https://tauri.localhost",
+			"tauri://localhost",
+			"http://127.0.0.1:8000",
+		] {
+			assert!(is_trusted_local_origin(ok), "{ok} should be trusted");
+		}
+		for bad in [
+			"http://evil.example",
+			"https://localhost.evil.com",
+			"http://127.0.0.1.evil.com",
+			"ftp://localhost",
+			"not-a-url",
+		] {
+			assert!(!is_trusted_local_origin(bad), "{bad} must be rejected");
+		}
+	}
+
+	#[test]
+	fn trusted_local_hosts_cover_ipv6_and_ports() {
+		assert!(host_from_authority("localhost:1420")
+			.is_some_and(is_trusted_local_host));
+		assert!(host_from_authority("[::1]:8000")
+			.is_some_and(is_trusted_local_host));
+		assert!(
+			host_from_authority("127.0.0.1").is_some_and(is_trusted_local_host)
+		);
+		// DNS-rebinding host must fail.
+		assert!(!host_from_authority("evil.example:8000")
+			.is_some_and(is_trusted_local_host));
+	}
 
 	#[test]
 	fn resolve_project_absolutizes_relative_root() {

@@ -48,18 +48,31 @@ All mounted under `/api/v1/`. **`lib.rs` (the mounted set) + `routes/*.rs` are t
 
 Path params: `<agent>` (agent id), `<name>` (resource name). Scope is a query guard — `?<scope..>` (`ScopeParams`: `scope` + optional `project_root`); the skill content/tree routes pass `scope`+`project_root` explicitly to compute allow-listed roots. There is currently **no token auth** on the API (see CORS below).
 
-## CORS CONFIGURATION
+## CORS & BROWSER-DRIVE-BY DEFENCE
 
-- Allowed origins: All (`AllOrSome::All`)
-- Allowed methods: GET, POST, PUT, DELETE
-- Allowed headers: Authorization, Accept, Content-Type
-- Credentials: allowed
+The desktop embeds this server on `127.0.0.1` (random port). There is still **no
+token auth** (a shared token collides with the SSH-remote / multi-connection
+model — that's why upstream's `ApiAuth` is deliberately NOT ported). Instead two
+transport-agnostic layers block the real threat — a malicious web page driving
+the localhost API — without any client-side token:
 
-> The desktop embeds this server on `127.0.0.1` (random port). There is **no
-> token auth / origin guard** today — CORS is wide open and `credentials: true`.
-> Upstream added `ApiAuth` + `TrustedLocalOrigin`; porting them is deferred
-> because token injection collides with this fork's multi-connection / SSH-remote
-> server model. Treat the API as same-host-trusted for now.
+- **Layer 1 — CORS allow-list** (`lib.rs` `build_rocket`, the single construction
+  point for both the standalone bin and the desktop-embedded server): origins are
+  restricted to the webview's own (`tauri://localhost`, `http(s)://tauri.localhost`,
+  `http://localhost:1420` dev), NOT `AllOrSome::All`. A cross-origin JSON POST
+  fails preflight. `X-Aghub-Git-Tokens` stays allow-listed (remote forwarding).
+- **Layer 2 — `TrustedLocalOrigin` request guard** (`extractors.rs`): rejects a
+  present-but-foreign `Origin` (browser cross-origin) AND a present-but-foreign
+  `Host` (DNS-rebinding, where no Origin is sent). Both checks are LENIENT when
+  the header is absent, so CLI/curl/the SSH-tunnel proxy/local test client pass.
+  Mounted ONLY on credential/keyring-touching + oracle routes: `git/scan`,
+  `git/install`, `git/sync`, `git/credential-status`, all 5 `/credentials*`, and
+  `inference/.../password`. Read-only list/get routes rely on Layer 1.
+
+> When adding a route that touches keyring/OS credentials or leaks
+> credential-existence, add `_origin: TrustedLocalOrigin` to its handler.
+> `allow_credentials: true` is retained (no cookie/HTTP-auth is used; the custom
+> forwarding header is unaffected by that flag).
 
 ## RUNNING
 
