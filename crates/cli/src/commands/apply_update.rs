@@ -156,7 +156,9 @@ fn apply_source_from_lock(
 				.skill_path
 				.ok_or_else(|| anyhow!("locked skill has no skillPath"))?;
 			Ok(ApplySource {
-				source: entry.source,
+				// Fetch coordinate: prefer the recorded clone URL so a
+				// non-github host (TFS/Azure DevOps) is fetched correctly.
+				source: entry.source_url.unwrap_or(entry.source),
 				ref_name: entry.ref_name,
 				skill_path,
 			})

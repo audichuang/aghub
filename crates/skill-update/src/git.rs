@@ -130,12 +130,15 @@ pub(crate) fn fetch_via_system_git(
 	})
 }
 
-/// Gate for the system-git fallback: https + `git` installed + NON-github host.
+/// Gate for the system-git fallback: https + NON-github host + `git` installed.
+/// The host check runs BEFORE `system_git_available()` (which shells out to
+/// `git --version`) so a github source short-circuits without spawning a
+/// process — keeps unit tests with github `owner/repo` sources hermetic.
 fn should_try_system_git(url: &str) -> bool {
 	url.starts_with("https://")
-		&& aghub_git::system_git::system_git_available()
 		&& host_of_url(url)
 			.is_some_and(|h| h != "github.com" && !h.ends_with(".github.com"))
+		&& aghub_git::system_git::system_git_available()
 }
 
 /// Lowercased host of an `scheme://[user@]host[:port]/…` URL (userinfo/port

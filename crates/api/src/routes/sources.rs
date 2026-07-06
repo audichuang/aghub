@@ -23,7 +23,7 @@ use crate::dto::sources::{
 	SourceSummaryResponse, SourcesListResponse,
 };
 use crate::error::{ApiError, ApiResult};
-use crate::extractors::{ResolvedScope, ScopeParams};
+use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::routes::credentials::load_credentials;
 use skill_update::sources::{
 	self, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome, SourceScope,
@@ -170,6 +170,7 @@ pub struct SourceDiffQuery {
 pub async fn diff_source(
 	query: SourceDiffQuery,
 	forwarded: ForwardedGitTokens,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<SourceDiffResponse> {
 	let scope_params = ScopeParams {
 		scope: query.scope.clone(),

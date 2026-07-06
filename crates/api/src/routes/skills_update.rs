@@ -28,7 +28,7 @@ use crate::dto::skill::{
 	ApplySkillUpdateResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
 };
 use crate::error::{ApiError, ApiResult};
-use crate::extractors::{ResolvedScope, ScopeParams};
+use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
 use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
@@ -140,7 +140,10 @@ fn project_lock_entries(
 			name,
 			scope: "project".to_string(),
 			source_ref: SourceRef {
-				source: entry.source,
+				// Prefer the recorded clone URL so a non-github host (TFS/Azure
+				// DevOps) is fetched correctly; github/legacy fall back to the
+				// host-stripped owner/repo.
+				source: entry.source_url.unwrap_or(entry.source),
 				ref_: entry.ref_name,
 			},
 			source_type: entry.source_type,
@@ -323,7 +326,12 @@ fn apply_source_from_lock(
 				return Err("Locked skill has no skillPath".to_string());
 			};
 			Ok(ApplySource {
-				source: entry.source.clone(),
+				// Fetch coordinate: prefer the recorded clone URL (non-github
+				// host survives); github/legacy fall back to owner/repo.
+				source: entry
+					.source_url
+					.clone()
+					.unwrap_or_else(|| entry.source.clone()),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 			})
@@ -369,6 +377,7 @@ fn fetch_error_text(error: FetchError) -> &'static str {
 pub async fn check_skill_updates(
 	query: CheckUpdatesParams,
 	forwarded: ForwardedGitTokens,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<Vec<SkillUpdateResponse>> {
 	let resolved = ScopeParams {
 		scope: query.scope.clone(),
@@ -418,6 +427,7 @@ pub async fn check_skill_updates(
 pub async fn apply_skill_update(
 	body: Json<ApplySkillUpdateRequest>,
 	forwarded: ForwardedGitTokens,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<ApplySkillUpdateResponse> {
 	// Forwarded tokens (header) take precedence over the local keyring; an
 	// absent/empty header degrades to the keyring path (backward compatible).
@@ -633,10 +643,14 @@ fn rename_source_from_lock(
 				return Err("Locked skill has no skillPath".to_string());
 			};
 			Ok(RenameLockSource {
-				// Project entries store only `source`; reuse it as the URL.
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				source_url: entry.source.clone(),
+				// Prefer the recorded clone URL so a non-github host is fetched
+				// correctly; fall back to `source` for github/legacy locks.
+				source_url: entry
+					.source_url
+					.clone()
+					.unwrap_or_else(|| entry.source.clone()),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 			})
@@ -1012,6 +1026,7 @@ fn rollback_rename_install(
 #[post("/skills/accept-rename", data = "<body>")]
 pub async fn accept_skill_rename(
 	body: Json<AcceptRenameRequest>,
+	_origin: TrustedLocalOrigin,
 ) -> ApiResult<AcceptRenameResponse> {
 	accept_rename_inner(body.into_inner(), &GitFetcherWithFallback).await
 }

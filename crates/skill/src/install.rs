@@ -171,13 +171,31 @@ pub fn write_global_install_lock(
 /// left out to keep the lock byte-identical and npx-invisible.
 fn recordable_source_url(source: &InstallLockSource) -> Option<String> {
 	let url = source.source_url.trim();
-	if url.is_empty()
-		|| source.source_type.eq_ignore_ascii_case("local")
-		|| url.contains("github.com")
-	{
+	if url.is_empty() || source.source_type.eq_ignore_ascii_case("local") {
 		return None;
 	}
-	Some(url.to_string())
+	// Exact-host check (NOT substring): `mygithub.com` must still be recorded,
+	// only real github.com / *.github.com is reconstructable from `source`.
+	match host_of_url(url) {
+		Some(host) if host == "github.com" || host.ends_with(".github.com") => {
+			None
+		}
+		_ => Some(url.to_string()),
+	}
+}
+
+/// Lowercased host of an `scheme://[user@]host[:port]/…` URL (userinfo/port
+/// stripped); `None` when there is no `://` authority.
+fn host_of_url(url: &str) -> Option<String> {
+	let after_scheme = url.split_once("://")?.1;
+	let authority = after_scheme.split(['/', '?', '#']).next()?;
+	let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+	let host = if let Some(rest) = authority.strip_prefix('[') {
+		rest.split_once(']')?.0
+	} else {
+		authority.split(':').next()?
+	};
+	(!host.is_empty()).then(|| host.to_ascii_lowercase())
 }
 
 pub fn write_project_install_lock(
@@ -230,6 +248,42 @@ mod tests {
 			source_url: "https://github.com/owner/repo.git".to_string(),
 			ref_name: Some("main".to_string()),
 		}
+	}
+
+	#[test]
+	fn recordable_source_url_uses_exact_host_not_substring() {
+		let mk = |ty: &str, url: &str| InstallLockSource {
+			source: "o/r".to_string(),
+			source_type: ty.to_string(),
+			source_url: url.to_string(),
+			ref_name: None,
+		};
+		// Real github (+ subdomain) reconstructs from `source` → omitted.
+		assert_eq!(
+			recordable_source_url(&mk("github", "https://github.com/o/r.git")),
+			None
+		);
+		assert_eq!(
+			recordable_source_url(&mk("github", "https://raw.github.com/o/r")),
+			None
+		);
+		// Look-alike host must NOT be treated as github (substring bug).
+		assert_eq!(
+			recordable_source_url(&mk("git", "https://mygithub.com/o/r.git"))
+				.as_deref(),
+			Some("https://mygithub.com/o/r.git")
+		);
+		// Genuine non-github remote → recorded.
+		assert_eq!(
+			recordable_source_url(&mk(
+				"git",
+				"https://tfs.example:8443/c/_git/r"
+			))
+			.as_deref(),
+			Some("https://tfs.example:8443/c/_git/r")
+		);
+		// Local source → never recorded.
+		assert_eq!(recordable_source_url(&mk("local", "file:///tmp/x")), None);
 	}
 
 	#[test]

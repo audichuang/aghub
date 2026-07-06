@@ -2,6 +2,7 @@
 //! a log line, an Uncheckable reason, or a persisted URL.
 
 use std::path::Path;
+use url::Url;
 
 /// Replace every `scheme://user:secret@host` occurrence's userinfo with `***`.
 ///
@@ -71,16 +72,66 @@ pub(crate) fn scrub_config_userinfo(config_path: &Path) {
 			return;
 		}
 	};
-	let scrubbed = redact_url_userinfo(&text);
-	if scrubbed == text {
-		return; // no userinfo persisted (public repo / no credentials)
+	let mut changed = false;
+	let mut out = String::with_capacity(text.len());
+	for (i, line) in text.lines().enumerate() {
+		if i > 0 {
+			out.push('\n');
+		}
+		out.push_str(&scrub_config_url_line(line, &mut changed));
 	}
-	if let Err(e) = std::fs::write(config_path, scrubbed) {
+	if text.ends_with('\n') {
+		out.push('\n');
+	}
+	if !changed {
+		return; // no credentialed remote url in this config
+	}
+	if let Err(e) = std::fs::write(config_path, out) {
 		log::warn!(
 			"failed to scrub credentials from git config at {}: {e}",
 			config_path.display()
 		);
 	}
+}
+
+/// Rewrite a single git-config line: if it is a `url = <value>` whose value is a
+/// URL carrying userinfo, return the line with the userinfo stripped and set
+/// `*changed`. Any other line (or a URL with no userinfo, or an unparsable
+/// value) is returned unchanged. Using real URL parsing — NOT string
+/// redaction — means a port colon or an `@` in the PATH is never mistaken for
+/// credentials (e.g. `https://host:8443/a/b@v2.git` is left intact).
+fn scrub_config_url_line(line: &str, changed: &mut bool) -> String {
+	let trimmed = line.trim_start();
+	// Match the `url` key only (case-insensitive), then `=`. `urlbase = …`,
+	// section headers, and `insteadOf` lines all fall through untouched.
+	let Some(rest) = trimmed
+		.get(..3)
+		.filter(|k| k.eq_ignore_ascii_case("url"))
+		.map(|_| &trimmed[3..])
+	else {
+		return line.to_string();
+	};
+	let Some(value) = rest.trim_start().strip_prefix('=') else {
+		return line.to_string();
+	};
+	// ponytail: strip a single layer of surrounding quotes; fully-escaped
+	// git-config quoting is not handled (a token needing it is rare).
+	let value = value.trim();
+	let value = value
+		.strip_prefix('"')
+		.and_then(|v| v.strip_suffix('"'))
+		.unwrap_or(value);
+	let Ok(mut url) = Url::parse(value) else {
+		return line.to_string();
+	};
+	if url.username().is_empty() && url.password().is_none() {
+		return line.to_string();
+	}
+	let _ = url.set_username("");
+	let _ = url.set_password(None);
+	*changed = true;
+	let indent = &line[..line.len() - trimmed.len()];
+	format!("{indent}url = {url}")
 }
 
 #[cfg(test)]
@@ -176,5 +227,47 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		// Must not panic on a nonexistent config.
 		scrub_config_userinfo(&dir.path().join("does-not-exist"));
+	}
+
+	#[test]
+	fn scrub_config_preserves_clean_url_with_port_and_path_at() {
+		// A clean URL (no userinfo) with a port AND an `@` in the path must be
+		// left untouched — the old string-redaction mistook the port colon for
+		// credentials and corrupted it to `https://***@v2.git`.
+		let dir = tempfile::tempdir().unwrap();
+		let config = dir.path().join("config");
+		let clean =
+			"[remote \"origin\"]\n\turl = https://git.example:8443/org/repo@v2.git\n";
+		std::fs::write(&config, clean).unwrap();
+
+		scrub_config_userinfo(&config);
+
+		let after = std::fs::read_to_string(&config).unwrap();
+		assert!(
+			after.contains("https://git.example:8443/org/repo@v2.git"),
+			"clean URL with port + path-@ must be preserved, got: {after}"
+		);
+		assert!(!after.contains("***"));
+	}
+
+	#[test]
+	fn scrub_config_strips_userinfo_but_keeps_port() {
+		let dir = tempfile::tempdir().unwrap();
+		let config = dir.path().join("config");
+		std::fs::write(
+			&config,
+			"[remote \"origin\"]\n\turl = https://u:tok@tfs.example:8443/a/b\n",
+		)
+		.unwrap();
+
+		scrub_config_userinfo(&config);
+
+		let after = std::fs::read_to_string(&config).unwrap();
+		assert!(!after.contains("tok"), "token must be gone");
+		assert!(!after.contains("u:tok"));
+		assert!(
+			after.contains("https://tfs.example:8443/a/b"),
+			"host + port must survive, got: {after}"
+		);
 	}
 }

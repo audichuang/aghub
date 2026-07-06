@@ -905,11 +905,15 @@ fn rename_source_from_lock(
 			let skill_path = entry.skill_path.clone().ok_or_else(|| {
 				anyhow::anyhow!("locked entry has no skillPath")
 			})?;
-			// Project entries store only `source`; reuse it as the URL.
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
-				source_url: entry.source.clone(),
+				// Prefer the recorded clone URL so a non-github host is fetched
+				// correctly; fall back to `source` for github/legacy locks.
+				source_url: entry
+					.source_url
+					.clone()
+					.unwrap_or_else(|| entry.source.clone()),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
 			})
