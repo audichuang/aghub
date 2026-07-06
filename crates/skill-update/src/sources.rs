@@ -209,13 +209,21 @@ pub fn fetch_source_with_resolver(
 	match fetcher.fetch(source_ref, None) {
 		Ok(repo) => Ok(repo),
 		Err(first_error) => {
+			// Unauth-first, then ONE token retry (GIT_PASSWORD / GITHUB_TOKEN /
+			// keyring). Only if BOTH fail do we fall back to the system `git`
+			// binary + OS credential helpers — so GIT_PASSWORD always wins over
+			// system-git, and the fallback merely reaches TFS/Azure DevOps repos
+			// whose only auth is Windows Credential Manager / GCM / NTLM.
 			let host = crate::keychain_host_for_source(&source_ref.source);
-			let Some(token) =
+			if let Some(token) =
 				resolver.resolve(&source_ref.source, host.as_deref())
-			else {
-				return Err(first_error);
-			};
-			fetcher.fetch(source_ref, Some(&token))
+			{
+				if let Ok(repo) = fetcher.fetch(source_ref, Some(&token)) {
+					return Ok(repo);
+				}
+			}
+			crate::git::fetch_via_system_git(source_ref)
+				.map_err(|_| first_error)
 		}
 	}
 }

@@ -29,7 +29,14 @@ crates/skill-update/src/
 │               #   fetch_source_with_resolver (unauth first, ONE token retry)
 └── git.rs      # GitFetcher / GitRefResolver — the real gix-backed adapters.
                 #   https_only_token: tokens are NEVER attached to non-https
-                #   URLs (inject_credentials would hard-fail; ssh auth stands)
+                #   URLs (inject_credentials would hard-fail; ssh auth stands).
+                #   GitFetcherWithFallback: gix first, then system `git` + OS
+                #   credential helper for https NON-github hosts (TFS/Azure
+                #   DevOps). Kind-2 callers ONLY (single fetch with the final
+                #   token); GIT_PASSWORD/token always tried before system-git.
+                #   The unauth-first fetch_source_with_resolver sequences the
+                #   fallback AFTER its token retry — do NOT wrap it, or
+                #   system-git would fire before the token.
 ```
 
 ## WHERE TO LOOK

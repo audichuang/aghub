@@ -24,8 +24,8 @@ use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::Result;
 use serde::Serialize;
 use skill_update::{
-	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcher, GitRefResolver,
-	ResultCache, SourceRef,
+	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcherWithFallback,
+	GitRefResolver, ResultCache, SourceRef,
 };
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -203,7 +203,10 @@ fn execute_online(
 	}
 	eprintln_verbose!("Checking {} locked skill(s) online", entries.len());
 
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+	// System-git fallback so a private TFS/Azure DevOps repo whose only auth is
+	// an OS credential helper is still checkable (GITHUB_TOKEN/GIT_PASSWORD
+	// still take precedence — see GitFetcherWithFallback).
+	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcherWithFallback);
 	let resolver = EnvTokenResolver;
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {

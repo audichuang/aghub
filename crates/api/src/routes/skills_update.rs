@@ -32,8 +32,8 @@ use crate::extractors::{ResolvedScope, ScopeParams};
 use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
 use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
-	SourceRef, TokenResolver,
+	EntryInput, FetchError, Fetcher, GitFetcherWithFallback, GitRefResolver,
+	ResultCache, SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -378,7 +378,9 @@ pub async fn check_skill_updates(
 	let offline = query.offline.unwrap_or(false);
 	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
 
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+	// System-git fallback for OS-credential-helper-only TFS/Azure DevOps repos
+	// (forwarded/keyring token still wins — see GitFetcherWithFallback).
+	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcherWithFallback);
 	// Forwarded tokens (header) take precedence over the local keyring; an
 	// absent/empty header degrades to the keyring path (backward compatible).
 	let keyring = KeyringResolver;
@@ -421,7 +423,12 @@ pub async fn apply_skill_update(
 	// absent/empty header degrades to the keyring path (backward compatible).
 	let keyring = KeyringResolver;
 	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
-	apply_skill_update_inner(body.into_inner(), &GitFetcher, &resolver).await
+	apply_skill_update_inner(
+		body.into_inner(),
+		&GitFetcherWithFallback,
+		&resolver,
+	)
+	.await
 }
 
 /// Inner apply path that takes an injected [`Fetcher`] + [`TokenResolver`] so
@@ -1006,7 +1013,7 @@ fn rollback_rename_install(
 pub async fn accept_skill_rename(
 	body: Json<AcceptRenameRequest>,
 ) -> ApiResult<AcceptRenameResponse> {
-	accept_rename_inner(body.into_inner(), &GitFetcher).await
+	accept_rename_inner(body.into_inner(), &GitFetcherWithFallback).await
 }
 
 pub(crate) async fn accept_rename_inner(
@@ -1411,7 +1418,10 @@ mod tests {
 	use super::*;
 	use aghub_core::skills::lock::update_lock_hash;
 	use aghub_core::skills::update::SkillUpdateStatus;
-	use skill_update::EntryKey;
+	// GitFetcher (no fallback) is used only by the network E2E tests here; the
+	// production paths use GitFetcherWithFallback, so import it test-locally to
+	// avoid an unused-import warning in non-test builds.
+	use skill_update::{EntryKey, GitFetcher};
 
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
 		let _guard = crate::routes::test_env_lock()
