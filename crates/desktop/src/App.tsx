@@ -10,6 +10,7 @@ import { Suspense, useCallback, useEffect, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useKeyBindings } from "rooks";
 import { Route, Router, Switch, useLocation } from "wouter";
+import { ConnectionGate } from "./components/connection-gate";
 import { DeepLinkImportModal } from "./components/deep-link-import-modal";
 import { OnboardingController } from "./components/onboarding-controller";
 import { Redirect } from "./components/redirect";
@@ -30,7 +31,6 @@ import SkillsPage from "./pages/settings/skills";
 import SubAgentsPage from "./pages/settings/sub-agents";
 import SkillsShPage from "./pages/skills-sh";
 import SkillsSearchPage from "./pages/skills-sh/search";
-import { AgentAvailabilityProvider } from "./providers/agent-availability";
 import { ConnectionProvider } from "./providers/connection";
 import { ThemeProvider } from "./providers/theme";
 import "./lib/i18n";
@@ -181,16 +181,16 @@ function App() {
 			<Toast.Provider placement="bottom end" />
 			<ThemeProvider>
 				<ConnectionProvider>
-					<AgentAvailabilityProvider>
-						<NuqsAdapter>
-							<Router>
-								<OnboardingController />
-								<Switch>
-									<Route path="/">
-										<DefaultSidebarRoute />
-									</Route>
-									<Route path="/skills">
-										<MainLayout>
+					<NuqsAdapter>
+						<Router>
+							<OnboardingController />
+							<MainLayout>
+								<ConnectionGate>
+									<Switch>
+										<Route path="/">
+											<DefaultSidebarRoute />
+										</Route>
+										<Route path="/skills">
 											<ErrorBoundary>
 												<Suspense
 													fallback={
@@ -200,10 +200,8 @@ function App() {
 													<SkillsPage />
 												</Suspense>
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/mcp">
-										<MainLayout>
+										</Route>
+										<Route path="/mcp">
 											<ErrorBoundary>
 												<Suspense
 													fallback={
@@ -213,17 +211,13 @@ function App() {
 													<MCPServersPage />
 												</Suspense>
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/inference-providers">
-										<MainLayout>
+										</Route>
+										<Route path="/inference-providers">
 											<ErrorBoundary>
 												<InferenceProvidersPage />
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/skills-sh/search">
-										<MainLayout>
+										</Route>
+										<Route path="/skills-sh/search">
 											<ErrorBoundary>
 												<Suspense
 													fallback={
@@ -233,10 +227,8 @@ function App() {
 													<SkillsSearchPage />
 												</Suspense>
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/skills-sh">
-										<MainLayout>
+										</Route>
+										<Route path="/skills-sh">
 											<ErrorBoundary>
 												<Suspense
 													fallback={
@@ -246,10 +238,8 @@ function App() {
 													<SkillsShPage />
 												</Suspense>
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/cc-plugins">
-										<MainLayout>
+										</Route>
+										<Route path="/cc-plugins">
 											<ErrorBoundary>
 												<Suspense
 													fallback={
@@ -259,20 +249,14 @@ function App() {
 													<PluginsPage />
 												</Suspense>
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/settings">
-										<MainLayout>
+										</Route>
+										<Route path="/settings">
 											<SettingsPage />
-										</MainLayout>
-									</Route>
-									<Route path="/settings/custom-agents">
-										<MainLayout>
+										</Route>
+										<Route path="/settings/custom-agents">
 											<CustomAgentsPage />
-										</MainLayout>
-									</Route>
-									<Route path="/sub-agents">
-										<MainLayout>
+										</Route>
+										<Route path="/sub-agents">
 											<ErrorBoundary>
 												<Suspense
 													fallback={
@@ -282,27 +266,25 @@ function App() {
 													<SubAgentsPage />
 												</Suspense>
 											</ErrorBoundary>
-										</MainLayout>
-									</Route>
-									<Route path="/projects/:id">
-										<MainLayout>
+										</Route>
+										<Route path="/projects/:id">
 											<ProjectDetailPage />
-										</MainLayout>
-									</Route>
-									<Route path="/sources">
-										<SourcesRedirect />
-									</Route>
-									<Route>
-										<DefaultSidebarRoute />
-									</Route>
-								</Switch>
-								<DeepLinkImportModal
-									intent={currentIntent}
-									onComplete={processNextIntent}
-								/>
-							</Router>
-						</NuqsAdapter>
-					</AgentAvailabilityProvider>
+										</Route>
+										<Route path="/sources">
+											<SourcesRedirect />
+										</Route>
+										<Route>
+											<DefaultSidebarRoute />
+										</Route>
+									</Switch>
+									<DeepLinkImportModal
+										intent={currentIntent}
+										onComplete={processNextIntent}
+									/>
+								</ConnectionGate>
+							</MainLayout>
+						</Router>
+					</NuqsAdapter>
 				</ConnectionProvider>
 			</ThemeProvider>
 		</QueryClientProvider>

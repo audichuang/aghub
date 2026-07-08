@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { info } from "@tauri-apps/plugin-log";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type {
 	ConnectionProviderProps,
@@ -12,7 +12,6 @@ import type {
 	TestResult,
 } from "../contexts/connection";
 import { ConnectionContext } from "../contexts/connection";
-import { ServerContext } from "../contexts/server";
 import {
 	baseUrlFromPort,
 	deriveSupportsCredentialForwarding,
@@ -76,7 +75,7 @@ interface ConnectionErrorScreenProps {
 	onUseLocal: () => void;
 }
 
-function ConnectionPendingScreen({
+export function ConnectionPendingScreen({
 	connection,
 	onUseLocal,
 }: ConnectionPendingScreenProps) {
@@ -130,7 +129,7 @@ function ConnectionPendingScreen({
 	}, [connection.id]);
 
 	return (
-		<div className="flex h-screen items-center justify-center bg-background px-6">
+		<div className="flex h-full items-center justify-center bg-background px-6">
 			<div className="w-full max-w-xl rounded-lg border border-border bg-surface px-5 py-5 shadow-sm">
 				<div className="flex items-start gap-4">
 					<div className="mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-md bg-surface-secondary">
@@ -217,7 +216,7 @@ function ConnectionPendingScreen({
 	);
 }
 
-function ConnectionErrorScreen({
+export function ConnectionErrorScreen({
 	connection,
 	message,
 	isRetrying,
@@ -229,7 +228,7 @@ function ConnectionErrorScreen({
 	const displayLabel = isLocal ? t("connLocal") : connection.label;
 
 	return (
-		<div className="flex h-screen items-center justify-center bg-background px-6">
+		<div className="flex h-full items-center justify-center bg-background px-6">
 			<div className="w-full max-w-xl rounded-lg border border-danger/30 bg-surface px-5 py-5 shadow-sm">
 				<p className="text-xs font-medium uppercase text-danger">
 					{t("connStatusError")}
@@ -277,7 +276,7 @@ function ConnectionErrorScreen({
  * still toast, and a cross-platform refusal is surfaced inline (it is an
  * actionable "install manually" state, not a transient error).
  */
-function IncompatibleConnectionScreen({
+export function IncompatibleConnectionScreen({
 	connection,
 	remoteVersion,
 	onRedeployed,
@@ -317,7 +316,7 @@ function IncompatibleConnectionScreen({
 		redeployError?.kind === "crossPlatformRedeploy" ? redeployError : null;
 
 	return (
-		<div className="flex h-screen flex-col items-center justify-center gap-4 px-6 text-center">
+		<div className="flex h-full flex-col items-center justify-center gap-4 px-6 text-center">
 			<div className="max-w-md space-y-2">
 				<h1 className="text-lg font-semibold text-foreground">
 					Remote aghub-api is incompatible
@@ -454,6 +453,14 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	const port = serverQuery.data?.port ?? null;
 	const status = projectStatus({ ...serverQuery, data: port });
 	const baseUrl = port === null ? null : baseUrlFromPort(port);
+	const connectError = serverQuery.isError ? serverQuery.error : null;
+	// Only cold start owns the whole window; later switches render through the
+	// content-area gate so the surrounding layout stays mounted.
+	const hasEverConnectedRef = useRef(false);
+	if (baseUrl !== null) {
+		hasEverConnectedRef.current = true;
+	}
+	const isColdStart = !hasEverConnectedRef.current;
 
 	// Fail-safe: forward only when the active connection is a remote whose
 	// bring-up result confirmed support. Local (and any unresolved/old/error
@@ -590,42 +597,48 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 	// A failed bring-up (e.g. local start_server fails, or connect_remote
 	// throws a RemoteError) must not spin forever — surface it like the old
 	// ServerProvider did. The richer toast/reconnect UI is W6.
-	if (serverQuery.isError) {
+	if (isColdStart && serverQuery.isError) {
 		const payload = asRemotePayload(serverQuery.error);
 		if (payload?.kind === "incompatible") {
 			return (
-				<IncompatibleConnectionScreen
-					connection={activeConnection}
-					remoteVersion={payload.remoteVersion ?? null}
-					onRedeployed={(result) =>
-						queryClient.setQueryData<ConnectResult>(
-							["server", activeId],
-							result,
-						)
-					}
-				/>
+				<div className="flex h-screen flex-col">
+					<IncompatibleConnectionScreen
+						connection={activeConnection}
+						remoteVersion={payload.remoteVersion ?? null}
+						onRedeployed={(result) =>
+							queryClient.setQueryData<ConnectResult>(
+								["server", activeId],
+								result,
+							)
+						}
+					/>
+				</div>
 			);
 		}
 		return (
-			<ConnectionErrorScreen
-				connection={activeConnection}
-				message={remoteErrorMessage(serverQuery.error)}
-				isRetrying={serverQuery.isFetching}
-				onRetry={() => {
-					void serverQuery.refetch();
-				}}
-				onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
-			/>
+			<div className="flex h-screen flex-col">
+				<ConnectionErrorScreen
+					connection={activeConnection}
+					message={remoteErrorMessage(serverQuery.error)}
+					isRetrying={serverQuery.isFetching}
+					onRetry={() => {
+						void serverQuery.refetch();
+					}}
+					onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
+				/>
+			</div>
 		);
 	}
 
-	if (baseUrl === null || port === null) {
+	if (isColdStart && (baseUrl === null || port === null)) {
 		return (
-			<ConnectionPendingScreen
-				key={activeConnection.id}
-				connection={activeConnection}
-				onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
-			/>
+			<div className="flex h-screen flex-col">
+				<ConnectionPendingScreen
+					key={activeConnection.id}
+					connection={activeConnection}
+					onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
+				/>
+			</div>
 		);
 	}
 
@@ -644,11 +657,21 @@ export function ConnectionProvider({ children }: ConnectionProviderProps) {
 		testConnection,
 		reinstallRemoteApi,
 		disconnect,
+		connectError,
+		retryConnect: () => {
+			void serverQuery.refetch();
+		},
+		isRetryingConnect: serverQuery.isFetching,
+		applyConnectResult: (result) =>
+			queryClient.setQueryData<ConnectResult>(
+				["server", activeId],
+				result,
+			),
 	};
 
 	return (
 		<ConnectionContext value={connectionValue}>
-			<ServerContext value={{ port, baseUrl }}>{children}</ServerContext>
+			{children}
 		</ConnectionContext>
 	);
 }

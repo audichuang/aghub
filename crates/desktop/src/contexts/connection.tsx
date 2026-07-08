@@ -36,6 +36,14 @@ export interface ConnectionContextValue {
 	reinstallRemoteApi: (connection: Connection) => Promise<TestResult>;
 	/** Tear down a remote tunnel + remote server. */
 	disconnect: (id: string) => Promise<void>;
+	/** Most recent raw connection bring-up error, or null when there is none. */
+	connectError: unknown;
+	/** Retry the current connection bring-up. */
+	retryConnect: () => void;
+	/** Whether the current connection bring-up is fetching/retrying. */
+	isRetryingConnect: boolean;
+	/** Write a successful incompatible redeploy result back into server cache. */
+	applyConnectResult: (result: ConnectResult) => void;
 }
 
 /** Mirrors the Rust `TestResult` returned by `test_connection`. */

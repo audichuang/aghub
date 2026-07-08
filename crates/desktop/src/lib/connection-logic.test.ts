@@ -13,6 +13,7 @@ import {
 	mergeConnections,
 	projectStatus,
 	type QueryStateLike,
+	selectConnectionView,
 } from "./connection-logic.ts";
 
 test("LOCAL_CONNECTION has id 'local'", () => {
@@ -121,4 +122,26 @@ test("forwarding: fail-safe false while the remote bring-up is unresolved", () =
 	// first query that races ahead cannot forward to an unconfirmed remote.
 	assert.equal(deriveSupportsCredentialForwarding("vm-1", undefined), false);
 	assert.equal(deriveSupportsCredentialForwarding("vm-1", null), false);
+});
+
+test("selectConnectionView: connected -> ready", () => {
+	assert.equal(selectConnectionView("connected", false), "ready");
+});
+
+test("selectConnectionView: connecting/idle -> pending", () => {
+	assert.equal(selectConnectionView("connecting", false), "pending");
+	assert.equal(selectConnectionView("idle", false), "pending");
+});
+
+test("selectConnectionView: error -> error", () => {
+	assert.equal(selectConnectionView("error", false), "error");
+});
+
+test("selectConnectionView: incompatible wins over generic error", () => {
+	assert.equal(selectConnectionView("error", true), "incompatible");
+});
+
+test("selectConnectionView: isIncompatible ignored unless status is error", () => {
+	assert.equal(selectConnectionView("connected", true), "ready");
+	assert.equal(selectConnectionView("connecting", true), "pending");
 });

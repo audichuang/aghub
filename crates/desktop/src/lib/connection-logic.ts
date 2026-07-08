@@ -92,3 +92,22 @@ export function projectStatus(queryState: QueryStateLike): ConnectionStatus {
 	if (queryState.isPending || queryState.isFetching) return "connecting";
 	return "idle";
 }
+
+/** The four content-area views rendered by the connection gate. */
+export type ConnectionView = "pending" | "error" | "incompatible" | "ready";
+
+/**
+ * Project connection status into the content-area gate view:
+ * - connected => ready
+ * - error + incompatible => incompatible
+ * - error => error
+ * - everything else (connecting / idle) => pending
+ */
+export function selectConnectionView(
+	status: ConnectionStatus,
+	isIncompatible: boolean,
+): ConnectionView {
+	if (status === "connected") return "ready";
+	if (status === "error") return isIncompatible ? "incompatible" : "error";
+	return "pending";
+}
