@@ -14,7 +14,7 @@ import {
 import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import { SourceSkillRow } from "./source-skill-row";
@@ -39,6 +39,19 @@ import { sourceDiffQueryOptions } from "../requests/sources";
 
 const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
 const EMPTY_DIFFS: SourceSkillDiff[] = [];
+
+// ponytail: elapsed-seconds note so a long fetch reads as "working", not "hung".
+// Render with key={source} so switching source remounts it and the counter
+// resets. setState only fires in the interval callback (not the effect body),
+// and there is no Date.now() in render — keeps it lint-pure.
+function CheckingElapsed() {
+	const [seconds, setSeconds] = useState(0);
+	useEffect(() => {
+		const id = setInterval(() => setSeconds((s) => s + 1), 1000);
+		return () => clearInterval(id);
+	}, []);
+	return seconds >= 2 ? <span>{` ${seconds}s`}</span> : null;
+}
 
 export interface SourceRow {
 	source: string;
@@ -312,6 +325,10 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
 	const [isDeletingAllRemoved, setIsDeletingAllRemoved] = useState(false);
+	// Count of skills processed so far by the active batch (update / clean-up)
+	// loop, so the button can show X/Y instead of a static "…". One counter is
+	// enough: only one batch runs at a time.
+	const [batchDone, setBatchDone] = useState(0);
 	const [installingSkillPath, setInstallingSkillPath] = useState<
 		string | null
 	>(null);
@@ -372,6 +389,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const hasSelectedInstallSkills = selectedInstallCount > 0;
 	const allInstallSkillsSelected =
 		notInstalled.length > 0 && selectedInstallCount === notInstalled.length;
+	const isChecking = isLoading || isFetching;
 	const hasVisibleSkills = (data?.skills.length ?? 0) > 0;
 	const updateScope = row.rowScope;
 	const updateProjectRoot =
@@ -564,8 +582,10 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	};
 
 	const applyAllUpdates = async (skills: SourceSkillDiff[]) => {
-		if (skills.length === 0 || isApplyingAll) return;
+		if (skills.length === 0 || isApplyingAll || isDeletingAllRemoved)
+			return;
 		setIsApplyingAll(true);
+		setBatchDone(0);
 		let updated = 0;
 		let failed = 0;
 		// Resolve the forward header once for the source and reuse it for each
@@ -586,6 +606,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				} catch {
 					failed += 1;
 				}
+				setBatchDone(updated + failed);
 			}
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
@@ -610,6 +631,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const deleteAllRemovedSkills = async (skills: SourceSkillDiff[]) => {
 		if (
 			skills.length === 0 ||
+			isApplyingAll ||
 			isDeletingAllRemoved ||
 			deleteRemovedSkillMutation.isPending
 		) {
@@ -620,6 +642,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			return;
 		}
 		setIsDeletingAllRemoved(true);
+		setBatchDone(0);
 		let cleaned = 0;
 		let failed = 0;
 		try {
@@ -630,6 +653,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				} catch {
 					failed += 1;
 				}
+				setBatchDone(cleaned + failed);
 			}
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
@@ -820,11 +844,12 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 
 			{/* Body */}
 			<div className="min-h-0 flex-1 overflow-y-auto p-4">
-				{isLoading || isFetching ? (
+				{isChecking ? (
 					<div className="flex flex-col items-center gap-3 py-12">
 						<Spinner size="lg" />
 						<p className="text-sm text-muted">
 							{t("checkingSource")}
+							<CheckingElapsed key={diffSource} />
 						</p>
 					</div>
 				) : data?.needsCredential ? (
@@ -887,18 +912,18 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 						{/* "Needs action" card — all actionable states mixed */}
 						{hasNeedsAction && (
 							<section>
-								<div className="mb-2 flex items-center justify-between gap-3">
-									<div className="flex items-center gap-2">
-										<ExclamationTriangleIcon className="size-4 text-warning" />
+								<div className="mb-2 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+									<div className="flex min-w-0 items-center gap-2">
+										<ExclamationTriangleIcon className="size-4 shrink-0 text-warning" />
 										<h2 className="truncate text-sm font-semibold text-foreground">
 											{t("sourceNeedsAction")}
 										</h2>
-										<span className="text-xs text-muted">
+										<span className="shrink-0 text-xs text-muted">
 											{needsActionSkills.length}
 										</span>
 									</div>
 									{/* Batch buttons */}
-									<div className="flex items-center gap-1">
+									<div className="flex flex-wrap items-center justify-end gap-1">
 										{outdated.length > 0 && (
 											<Button
 												size="sm"
@@ -906,6 +931,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 												className="h-7 px-2 text-xs"
 												isDisabled={
 													isApplyingAll ||
+													isDeletingAllRemoved ||
 													applyUpdateMutation.isPending
 												}
 												onPress={() =>
@@ -914,7 +940,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											>
 												<ArrowPathIcon className="size-3.5" />
 												{isApplyingAll
-													? t("sourceUpdating")
+													? `${t("sourceUpdating")} ${batchDone}/${outdated.length}`
 													: t("sourceUpdateAll")}
 											</Button>
 										)}
@@ -984,6 +1010,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 												variant="ghost"
 												className="h-7 px-2 text-xs"
 												isDisabled={
+													isApplyingAll ||
 													isDeletingAllRemoved ||
 													deleteRemovedSkillMutation.isPending
 												}
@@ -995,7 +1022,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											>
 												<TrashIcon className="size-3.5" />
 												{isDeletingAllRemoved
-													? t("sourceRemovedCleaning")
+													? `${t("sourceRemovedCleaning")} ${batchDone}/${removed.length}`
 													: t(
 															"sourceRemovedCleanAll",
 														)}
