@@ -131,7 +131,7 @@ git commit -m "feat(desktop): 加 selectConnectionView 純函式投影連線視�
     - `retryConnect: () => void`
     - `isRetryingConnect: boolean`
     - `applyConnectResult: (result: ConnectResult) => void`
-- Produces（export，Task 3 import）：`ConnectionPendingScreen`、`ConnectionErrorScreen`、`IncompatibleConnectionScreen`、`asRemotePayload`、`remoteErrorMessage`。
+- Produces（export，Task 3 import）：`ConnectionPendingScreen`、`ConnectionErrorScreen`、`IncompatibleConnectionScreen`（三個 Screen）。`asRemotePayload`/`remoteErrorMessage` **已在 `lib/remote-errors` export**（`connection.tsx:23` 是從那裡 import 的），gate 直接從 `../lib/remote-errors` import，**不需**改 `connection.tsx`。
 
 - [ ] **Step 1: 擴充 `ConnectionContextValue`**
 
@@ -167,18 +167,20 @@ git commit -m "feat(desktop): 加 selectConnectionView 純函式投影連線視�
 
 （`ConnectResult` 型別已在此檔可用；`queryClient`/`activeId`/`serverQuery` 均為既有區域變數。）
 
-- [ ] **Step 3: export 三個 Screen 與兩個 helper**
+- [ ] **Step 3: export 三個 Screen**
 
 在 `crates/desktop/src/providers/connection.tsx`：
 
 - 把 `function ConnectionPendingScreen(` 改為 `export function ConnectionPendingScreen(`
 - 把 `function ConnectionErrorScreen(` 改為 `export function ConnectionErrorScreen(`
 - 把 `function IncompatibleConnectionScreen(` 改為 `export function IncompatibleConnectionScreen(`
-- 找到 `asRemotePayload` 與 `remoteErrorMessage` 的宣告（`function`/`const`），各加 `export`。
+- **不要**動 `asRemotePayload`/`remoteErrorMessage`：它們宣告在 `lib/remote-errors.ts`（`connection.tsx` 只是 import），gate 會直接從 `../lib/remote-errors` import。
 
-- [ ] **Step 4: 三個 Screen root 的 `h-screen` 改 `h-full`**
+- [ ] **Step 4: 連線畫面 + agent-availability loading 的 `h-screen` 改 `h-full`**
 
-在同檔，把 `ConnectionPendingScreen`、`ConnectionErrorScreen`、`IncompatibleConnectionScreen` 三個元件「最外層 root `<div>`」的 className 內 `h-screen` 改為 `h-full`（只改這三個 Screen 的 root；每個各一處）。
+在 `connection.tsx`，把 `ConnectionPendingScreen`、`ConnectionErrorScreen`、`IncompatibleConnectionScreen` 三個元件「最外層 root `<div>`」的 className 內 `h-screen` 改為 `h-full`（只改這三個 Screen 的 root；每個各一處）。
+
+另外把 `crates/desktop/src/providers/agent-availability.tsx` 的 `isLoading` fallback（約 `line 92`：`<div className="flex h-screen items-center justify-center">`）的 `h-screen` 改為 `h-full`——Task 4 後它會移進內容區（`<main>` = 視窗高減 titlebar），全屏 `h-screen` 會過大/被裁。
 
 - [ ] **Step 5: 冷啟動全屏 return 補 `h-screen` wrapper（暫時，Task 4 會改條件）**
 
@@ -236,12 +238,11 @@ import {
 	selectConnectionView,
 } from "../lib/connection-logic";
 import {
-	asRemotePayload,
 	ConnectionErrorScreen,
 	ConnectionPendingScreen,
 	IncompatibleConnectionScreen,
-	remoteErrorMessage,
 } from "../providers/connection";
+import { asRemotePayload, remoteErrorMessage } from "../lib/remote-errors";
 import { AgentAvailabilityProvider } from "../providers/agent-availability";
 
 /**
@@ -302,12 +303,15 @@ export function ConnectionGate({ children }: { children: ReactNode }) {
 
 	return (
 		<ConnectionPendingScreen
+			key={activeConnection.id}
 			connection={activeConnection}
 			onUseLocal={() => setActive(LOCAL_CONNECTION.id)}
 		/>
 	);
 }
 ```
+
+（`key={activeConnection.id}` 保留現行 provider 對 pending 畫面的 remount 行為，讓切換連線時耗時秒數歸零。）
 
 **注意**：`ConnectionPendingScreen` 的 props 需與其定義一致（連線畫面已存在，Task 2 只加 export）。若其 prop 名與上例不同（例如缺 `key`），以現有定義為準調整——用 `codegraph_explore "ConnectionPendingScreen IncompatibleConnectionScreenProps"` 或讀 `providers/connection.tsx` 對照。`payload?.remoteVersion` 欄位名以 `asRemotePayload` 回傳型別為準。
 
@@ -491,12 +495,12 @@ return (
 										<DefaultSidebarRoute />
 									</Route>
 								</Switch>
+								<DeepLinkImportModal
+									intent={currentIntent}
+									onComplete={processNextIntent}
+								/>
 							</ConnectionGate>
 						</MainLayout>
-						<DeepLinkImportModal
-							intent={currentIntent}
-							onComplete={processNextIntent}
-						/>
 					</Router>
 				</NuqsAdapter>
 			</ConnectionProvider>
@@ -504,6 +508,8 @@ return (
 	</QueryClientProvider>
 );
 ```
+
+> **DeepLinkImportModal 已移入 `ConnectionGate` 內**（`</Switch>` 之後、`</ConnectionGate>` 之前）：它 render 時呼叫 `useApi()` + `useAgentAvailability()`（`deep-link-import-modal.tsx:79/80`），必須在 gate ready 分支的 `ServerContext` + `AgentAvailabilityProvider` 之內，否則 Task 4 移除外層 provider 後會 throw。連線中不 render modal（可接受）。
 
 - [ ] **Step 4: 驗證 OnboardingController 不依賴 baseUrl**
 
