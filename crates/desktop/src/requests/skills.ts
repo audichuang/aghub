@@ -149,19 +149,26 @@ export function skillTreeQueryOptions({
 }
 
 export async function invalidateSkillQueries(queryClient: QueryClient) {
+	// Mark all skill queries stale, but do NOT block on refetching here.
+	// `skills.all()` also covers the network-heavy source-diff queries; awaiting
+	// their refetch means that if ANY source is stuck pending (e.g. an
+	// uncheckable / slow / offline source — the "無法檢查" rows), the mutation
+	// that called this (reconcile / transfer / create / delete …) hangs forever
+	// and its dialog sticks on "套用中…". So: broad-invalidate with
+	// refetchType:"none" (stale only), and fire-and-forget the lightweight
+	// list/lock refetches so the mutation resolves immediately.
 	await queryClient.invalidateQueries({
 		queryKey: queryKeys.skills.all(),
+		refetchType: "none",
 	});
-	await Promise.all([
-		queryClient.refetchQueries({
-			queryKey: queryKeys.skills.lists(),
-			type: "active",
-		}),
-		queryClient.refetchQueries({
-			queryKey: queryKeys.skills.lock.all(),
-			type: "active",
-		}),
-	]);
+	void queryClient.refetchQueries({
+		queryKey: queryKeys.skills.lists(),
+		type: "active",
+	});
+	void queryClient.refetchQueries({
+		queryKey: queryKeys.skills.lock.all(),
+		type: "active",
+	});
 }
 
 interface CreateSkillVariables {
