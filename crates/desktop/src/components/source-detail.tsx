@@ -813,7 +813,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
 			{/* Header */}
-			<div className="flex items-start justify-between gap-3 border-b border-border p-4">
+			<div className="relative z-10 flex items-start justify-between gap-3 border-b border-border p-4 [transform:translateZ(0)]">
 				<div className="min-w-0">
 					<div className="flex items-center gap-2">
 						<SourceIcon className="size-5 shrink-0 text-muted" />
@@ -843,7 +843,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			</div>
 
 			{/* Body */}
-			<div className="min-h-0 flex-1 overflow-y-auto p-4">
+			<div className="min-h-0 flex-1 overflow-y-auto p-4 [transform:translateZ(0)]">
 				{isChecking ? (
 					<div className="flex flex-col items-center gap-3 py-12">
 						<Spinner size="lg" />
