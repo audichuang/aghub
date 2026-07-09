@@ -3,8 +3,9 @@ import {
 	ChevronDownIcon,
 	ChevronRightIcon,
 	StarIcon as StarIconSolid,
+	UsersIcon,
 } from "@heroicons/react/24/solid";
-import { Chip, Label, ListBox, Spinner } from "@heroui/react";
+import { Button, Chip, Label, ListBox, Spinner } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import Fuse from "fuse.js";
 import { useMemo, useState } from "react";
@@ -28,7 +29,7 @@ interface SkillGroup {
 	description: string;
 }
 
-interface SourceGroup {
+export interface SourceGroup {
 	source: string;
 	sourceType: string;
 	skills: SkillGroup[];
@@ -48,6 +49,9 @@ interface SkillListProps {
 	/** Passed to SkillStatusBadge so auth-uncheckable skills are actionable
 	 * in the list (not just in the detail panel). */
 	onResolveAuth?: (skillName: string) => void;
+	/** When set, source group headers show a button to bulk-manage the agents
+	 * of every skill in that group. */
+	onManageGroupAgents?: (group: SourceGroup) => void;
 }
 
 export function SkillList({
@@ -62,6 +66,7 @@ export function SkillList({
 	isMultiSelectMode = false,
 	updateStatuses,
 	onResolveAuth,
+	onManageGroupAgents,
 }: SkillListProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -333,28 +338,39 @@ export function SkillList({
 			<div className="flex-1 overflow-y-auto [transform:translateZ(0)]">
 				{sourceGroups.map((sg) => (
 					<div key={sg.source} className="border-y border-separator">
-						<button
-							type="button"
-							onClick={() => toggleSource(sg.source)}
-							className="
-         flex w-full items-center gap-2 px-3 py-2 text-left transition-colors
-         hover:bg-surface-secondary
-       "
-						>
-							{expandedSources.has(sg.source) ? (
-								<ChevronDownIcon className="size-4 shrink-0 text-muted" />
-							) : (
-								<ChevronRightIcon className="size-4 shrink-0 text-muted" />
+						<div className="flex w-full items-center gap-1 px-3 py-2 transition-colors hover:bg-surface-secondary">
+							<button
+								type="button"
+								onClick={() => toggleSource(sg.source)}
+								className="flex min-w-0 flex-1 items-center gap-2 text-left"
+							>
+								{expandedSources.has(sg.source) ? (
+									<ChevronDownIcon className="size-4 shrink-0 text-muted" />
+								) : (
+									<ChevronRightIcon className="size-4 shrink-0 text-muted" />
+								)}
+								<div className="min-w-0 flex-1">
+									<p className="truncate text-sm font-medium text-foreground">
+										{sg.source}
+									</p>
+								</div>
+								<Chip size="sm" variant="secondary">
+									{sg.skills.length}
+								</Chip>
+							</button>
+							{onManageGroupAgents && (
+								<Button
+									isIconOnly
+									size="sm"
+									variant="ghost"
+									className="shrink-0"
+									aria-label={t("bulkManageGroupAgents")}
+									onPress={() => onManageGroupAgents(sg)}
+								>
+									<UsersIcon className="size-4 text-muted" />
+								</Button>
 							)}
-							<div className="min-w-0 flex-1">
-								<p className="truncate text-sm font-medium text-foreground">
-									{sg.source}
-								</p>
-							</div>
-							<Chip size="sm" variant="secondary">
-								{sg.skills.length}
-							</Chip>
-						</button>
+						</div>
 
 						{expandedSources.has(sg.source) && (
 							<ListBox
