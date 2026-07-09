@@ -246,7 +246,7 @@ function SourceListPanel({
 	}
 
 	return (
-		<div className="min-h-0 flex-1 overflow-y-auto">
+		<div className="min-h-0 flex-1 overflow-y-auto [transform:translateZ(0)]">
 			<ul className="space-y-1 p-2">
 				{filteredRows.map((row) => {
 					const key = sourceRowKey(row);

@@ -12,11 +12,8 @@
 //! (UI) thread, so a blocking sync command freezes the webview (the macOS
 //! spinning beachball). `connect_remote` is therefore an `async fn` that runs
 //! its blocking ssh/tunnel `bring_up` via `async_runtime::spawn_blocking` — off
-//! BOTH the UI thread and the single-thread tokio runtime. The other ssh
-//! commands here (`list_remote_directories`, `test_connection`,
-//! `reinstall_remote_api`, `force_redeploy_remote`) are still sync and WILL
-//! block the UI while they run; convert them the same way if they land on a hot
-//! path. (Prior note here wrongly claimed sync commands run on a worker pool.)
+//! BOTH the UI thread and the single-thread tokio runtime. The other ssh/process
+//! commands here use the same pattern so remote operations do not block the UI.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -240,9 +237,23 @@ fn resolved_path(conn: &Connection) -> String {
 /// Probe a connection without mutating anything. Reports reachability,
 /// whether a compatible `aghub-api` is present, and a human-facing message.
 #[tauri::command]
-pub fn test_connection(connection: Connection) -> TestResult {
-	let runner = SystemRunner;
-	probe_connection(&runner, &connection, LOCAL_VERSION)
+pub async fn test_connection(connection: Connection) -> TestResult {
+	tauri::async_runtime::spawn_blocking(move || {
+		let runner = SystemRunner;
+		probe_connection(&runner, &connection, LOCAL_VERSION)
+	})
+	.await
+	.unwrap_or_else(|e| TestResult {
+		reachable: false,
+		api_present: false,
+		api_version: None,
+		compatible: false,
+		message: format!("connection test task failed to join: {e}"),
+		supports_credential_forwarding: false,
+		install_attempted: false,
+		install_succeeded: false,
+		install_message: None,
+	})
 }
 
 /// Force-reinstall `aghub-api` on the remote and return a fresh probe result.
@@ -251,7 +262,7 @@ pub fn test_connection(connection: Connection) -> TestResult {
 /// manager needs a test-panel action that mutates the remote binary without
 /// opening a tunnel or switching the active connection.
 #[tauri::command]
-pub fn reinstall_remote_api(
+pub async fn reinstall_remote_api(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
@@ -262,36 +273,46 @@ pub fn reinstall_remote_api(
 		return Err(RemoteError::AlreadyConnecting);
 	}
 
-	let source = remote_install_source(&app).ok_or_else(|| {
-		RemoteError::RemoteApiMissing {
-			install_hint: install_hint(),
-		}
-	})?;
-
-	let runner = SystemRunner;
-	let source = deployable_install_source(&runner, &connection, source)?;
-	info!(
-		"remote '{}': force reinstall aghub-api using {}",
-		connection.id,
-		install_source_summary(&source)
-	);
 	let _slot = SlotGuard::claim(&state.connecting, id)?;
 
-	let outcome =
-		reinstall_remote_api_core(&runner, &connection, LOCAL_VERSION, &source);
-	if let Ok(result) = &outcome {
+	let app = app.clone();
+	tauri::async_runtime::spawn_blocking(move || {
+		let source = remote_install_source(&app).ok_or_else(|| {
+			RemoteError::RemoteApiMissing {
+				install_hint: install_hint(),
+			}
+		})?;
+		let runner = SystemRunner;
+		let source = deployable_install_source(&runner, &connection, source)?;
 		info!(
-			"remote '{}': force reinstall finished: version={:?}, \
-			 compatible={}, install_attempted={}, install_succeeded={}",
+			"remote '{}': force reinstall aghub-api using {}",
 			connection.id,
-			result.api_version,
-			result.compatible,
-			result.install_attempted,
-			result.install_succeeded
+			install_source_summary(&source)
 		);
-	}
+		let outcome = reinstall_remote_api_core(
+			&runner,
+			&connection,
+			LOCAL_VERSION,
+			&source,
+		);
+		if let Ok(result) = &outcome {
+			info!(
+				"remote '{}': force reinstall finished: version={:?}, \
+				 compatible={}, install_attempted={}, install_succeeded={}",
+				connection.id,
+				result.api_version,
+				result.compatible,
+				result.install_attempted,
+				result.install_succeeded
+			);
+		}
 
-	outcome.map_err(RemoteError::from)
+		outcome.map_err(RemoteError::from)
+	})
+	.await
+	.map_err(|e| RemoteError::Internal {
+		message: format!("reinstall task failed to join: {e}"),
+	})?
 }
 
 /// The desktop's embedded `aghub-api` version (`aghub_api::VERSION`), i.e. the
@@ -305,19 +326,27 @@ pub fn local_api_version() -> &'static str {
 
 /// Return selectable aliases discovered from the user's local `~/.ssh/config`.
 #[tauri::command]
-pub fn list_ssh_config_hosts() -> Vec<SshConfigHost> {
-	read_default_ssh_config_hosts()
+pub async fn list_ssh_config_hosts() -> Vec<SshConfigHost> {
+	tauri::async_runtime::spawn_blocking(read_default_ssh_config_hosts)
+		.await
+		.unwrap_or_default()
 }
 
 /// List immediate child directories on a remote VM for the project picker.
 #[tauri::command]
-pub fn list_remote_directories(
+pub async fn list_remote_directories(
 	connection: Connection,
 	path: String,
 ) -> Result<RemoteDirectoryListing, RemoteError> {
-	let runner = SystemRunner;
-	list_remote_directories_core(&runner, &connection, &path)
-		.map_err(Into::into)
+	tauri::async_runtime::spawn_blocking(move || {
+		let runner = SystemRunner;
+		list_remote_directories_core(&runner, &connection, &path)
+			.map_err(Into::into)
+	})
+	.await
+	.map_err(|e| RemoteError::Internal {
+		message: format!("remote directory listing task failed to join: {e}"),
+	})?
 }
 
 /// Bring up the remote server and a tunnel; returns the **local** port the
@@ -372,7 +401,7 @@ pub async fn connect_remote(
 /// incompatible/failed state: it refuses to clobber a live connection and is
 /// gated to the desktop's own `(os, arch)`.
 #[tauri::command]
-pub fn force_redeploy_remote(
+pub async fn force_redeploy_remote(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
@@ -384,28 +413,37 @@ pub fn force_redeploy_remote(
 		return Err(RemoteError::AlreadyConnecting);
 	}
 
-	// Resolve the install source (dev fallback until bundling lands).
-	let source = remote_install_source(&app).ok_or_else(|| {
-		RemoteError::RemoteApiMissing {
-			install_hint: install_hint(),
-		}
-	})?;
-
-	// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
-	// binary: a wrong-arch binary would not run on the VM. VM-native install
-	// sources (`ReleaseDeb`, `CargoGit`) are arch-safe for the supported remote
-	// platform, so skip the refusal once `deployable_install_source` has picked
-	// one for the common Mac-desktop -> Linux-VM case.
-	// Mirrors the connect path (`ensure_remote_api`), which gates only
-	// `LocalBinary`.
-	let runner = SystemRunner;
-	let source = deployable_install_source(&runner, &connection, source)?;
-
 	// Claim the in-progress slot so a concurrent connect can't race us; the
 	// guard releases it on every exit path (including a panic mid-redeploy).
 	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
-	let handle = force_redeploy(&app, &connection, &source)?;
+	let handle = {
+		let app = app.clone();
+		let connection = connection.clone();
+		tauri::async_runtime::spawn_blocking(move || {
+			// Resolve the install source (dev fallback until bundling lands).
+			let source = remote_install_source(&app).ok_or_else(|| {
+				RemoteError::RemoteApiMissing {
+					install_hint: install_hint(),
+				}
+			})?;
+			// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
+			// binary: a wrong-arch binary would not run on the VM. VM-native install
+			// sources (`ReleaseDeb`, `CargoGit`) are arch-safe for the supported remote
+			// platform, so skip the refusal once `deployable_install_source` has picked
+			// one for the common Mac-desktop -> Linux-VM case.
+			// Mirrors the connect path (`ensure_remote_api`), which gates only
+			// `LocalBinary`.
+			let runner = SystemRunner;
+			let source =
+				deployable_install_source(&runner, &connection, source)?;
+			force_redeploy(&app, &connection, &source)
+		})
+		.await
+		.map_err(|e| RemoteError::Internal {
+			message: format!("force-redeploy task failed to join: {e}"),
+		})??
+	};
 	let result = ConnectResult {
 		port: handle.local_port,
 		supports_credential_forwarding: handle.supports_credential_forwarding,
@@ -417,13 +455,17 @@ pub fn force_redeploy_remote(
 
 /// Tear down a connection: kill the local tunnel and the remote server.
 #[tauri::command]
-pub fn disconnect_remote(
+pub async fn disconnect_remote(
 	state: State<'_, RemoteState>,
 	connection_id: String,
 ) -> Result<(), RemoteError> {
 	let handle = lock(&state.handles)?.remove(&connection_id);
 	if let Some(handle) = handle {
-		teardown(&handle);
+		tauri::async_runtime::spawn_blocking(move || teardown(&handle))
+			.await
+			.map_err(|e| RemoteError::Internal {
+				message: format!("disconnect task failed to join: {e}"),
+			})?;
 	}
 	Ok(())
 }

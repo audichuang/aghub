@@ -186,7 +186,7 @@ export function PluginMarketTable({
 
 	return (
 		<div className="flex min-h-0 flex-1 flex-col">
-			<div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable]">
+			<div className="min-h-0 flex-1 overflow-auto [scrollbar-gutter:stable] [transform:translateZ(0)]">
 				<Accordion
 					allowsMultipleExpanded
 					expandedKeys={expandedKeys}

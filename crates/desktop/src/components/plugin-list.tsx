@@ -215,7 +215,7 @@ export function PluginList({
 					)}
 				</div>
 			) : (
-				<div className="flex-1 overflow-y-auto">
+				<div className="flex-1 overflow-y-auto [transform:translateZ(0)]">
 					<Accordion
 						allowsMultipleExpanded
 						expandedKeys={expandedKeys}

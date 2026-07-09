@@ -322,7 +322,7 @@ export function MarketplacesPanel({
 			) : (
 				<div className="min-h-0 flex-1 overflow-hidden">
 					<Table className="h-full">
-						<Table.ScrollContainer className="h-full overflow-auto rounded-[inherit] [scrollbar-gutter:stable]">
+						<Table.ScrollContainer className="h-full overflow-auto rounded-[inherit] [scrollbar-gutter:stable] [transform:translateZ(0)]">
 							<Table.Content
 								aria-label={t("pluginMarketTabMarketplaces")}
 							>

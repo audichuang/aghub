@@ -694,7 +694,7 @@ function ProviderModelsEditor({
 					)}
 				</div>
 
-				<div className="grid max-h-[420px] min-h-0 gap-2 overflow-y-auto pr-1">
+				<div className="grid max-h-[420px] min-h-0 gap-2 overflow-y-auto pr-1 [transform:translateZ(0)]">
 					{hasRealModels && filteredModels.length === 0 ? (
 						<p className="px-1 py-2 text-sm text-muted">
 							{t("noProviderModelsMatch")}
@@ -2393,7 +2393,7 @@ export default function InferenceProvidersPage() {
 					</Tooltip>
 				</ListSearchHeader>
 
-				<div className="flex-1 overflow-y-auto">
+				<div className="flex-1 overflow-y-auto [transform:translateZ(0)]">
 					<ResourceSectionHeader
 						title={t("codingAgents")}
 						count={filteredCodingAgents.length}

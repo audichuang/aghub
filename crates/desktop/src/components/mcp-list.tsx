@@ -136,7 +136,7 @@ export function McpList({
 	}
 
 	return (
-		<div className="flex-1 overflow-y-auto">
+		<div className="flex-1 overflow-y-auto [transform:translateZ(0)]">
 			<ListBox
 				aria-label="MCP Servers"
 				selectionMode={selectionMode}

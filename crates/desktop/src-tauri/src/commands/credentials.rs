@@ -66,8 +66,13 @@ impl From<ResolvedToken> for ResolvedTokenDto {
 /// credential matches the source (or the keyring cannot be read). The token is
 /// never logged.
 #[tauri::command]
-pub fn resolve_git_token(source: String) -> Option<ResolvedTokenDto> {
-	aghub_api::resolve_git_token_for_source(&source).map(ResolvedTokenDto::from)
+pub async fn resolve_git_token(source: String) -> Option<ResolvedTokenDto> {
+	tauri::async_runtime::spawn_blocking(move || {
+		aghub_api::resolve_git_token_for_source(&source)
+			.map(ResolvedTokenDto::from)
+	})
+	.await
+	.unwrap_or(None)
 }
 
 /// List the source keys that have an explicit credential binding, in-process.
@@ -75,8 +80,10 @@ pub fn resolve_git_token(source: String) -> Option<ResolvedTokenDto> {
 /// Used by the desktop to enumerate sources for remote `check-updates`. Returns
 /// an empty list when the binding store cannot be read.
 #[tauri::command]
-pub fn list_bound_sources() -> Vec<String> {
-	aghub_api::list_bound_sources()
+pub async fn list_bound_sources() -> Vec<String> {
+	tauri::async_runtime::spawn_blocking(aghub_api::list_bound_sources)
+		.await
+		.unwrap_or_default()
 }
 
 #[cfg(test)]

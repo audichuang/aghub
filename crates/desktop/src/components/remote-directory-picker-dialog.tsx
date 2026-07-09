@@ -146,7 +146,7 @@ export function RemoteDirectoryPickerDialog({
 							</div>
 						</Form>
 
-						<div className="mt-3 h-72 overflow-auto rounded-md border border-border">
+						<div className="mt-3 h-72 overflow-auto rounded-md border border-border [transform:translateZ(0)]">
 							{directoryQuery.isLoading ? (
 								<div className="flex h-full items-center justify-center">
 									<Spinner />

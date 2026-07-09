@@ -330,7 +330,7 @@ export function SkillList({
 		}
 
 		return (
-			<div className="flex-1 overflow-y-auto">
+			<div className="flex-1 overflow-y-auto [transform:translateZ(0)]">
 				{sourceGroups.map((sg) => (
 					<div key={sg.source} className="border-y border-separator">
 						<button
