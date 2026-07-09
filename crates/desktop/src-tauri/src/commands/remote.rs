@@ -321,7 +321,7 @@ pub fn list_remote_directories(
 /// connection id (a reused tunnel reports the capability it was brought up
 /// with).
 #[tauri::command]
-pub fn connect_remote(
+pub async fn connect_remote(
 	state: State<'_, RemoteState>,
 	app: AppHandle,
 	connection: Connection,
@@ -336,8 +336,22 @@ pub fn connect_remote(
 	// guard releases it on every exit path (including a panic in `bring_up`).
 	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
-	// Do the slow ssh work WITHOUT holding any lock.
-	let handle = bring_up(&app, &connection)?;
+	// Do the slow ssh work (connect + tunnel + settle sleep) OFF the UI thread:
+	// Tauri runs sync commands ON the main thread, so a blocking bring-up freezes
+	// the webview (the macOS spinning-beachball). `spawn_blocking` moves it to a
+	// blocking pool; we only touch `state` before/after the await (never hold a
+	// MutexGuard across it). `bring_up` holds no lock, so this is race-free.
+	let handle = {
+		let app = app.clone();
+		let connection = connection.clone();
+		tauri::async_runtime::spawn_blocking(move || {
+			bring_up(&app, &connection)
+		})
+		.await
+		.map_err(|e| RemoteError::Internal {
+			message: format!("bring-up task failed to join: {e}"),
+		})??
+	};
 	let result = ConnectResult {
 		port: handle.local_port,
 		supports_credential_forwarding: handle.supports_credential_forwarding,
