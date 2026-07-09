@@ -1191,4 +1191,15 @@ export default {
 	scope: "范围",
 	scopeSwitchGlobal: "全局",
 	scopeSwitchProject: "项目",
+	// Bulk manage group agents
+	bulkManageGroupAgents: "管理此来源的代理",
+	bulkManageGroupAgentsHint:
+		"对 {{source}} 下全部 {{count}} 个 skill 批量加入或移除代理。",
+	bulkAgentsApply: "应用",
+	bulkAgentsApplying: "应用中… {{done}}/{{total}}",
+	bulkAgentsConfirmRemoveTitle: "确定移除代理？",
+	bulkAgentsConfirmRemoveBody:
+		"这会把取消勾选的代理从 {{count}} 个 skill 移除，且无法撤销。",
+	bulkAgentsDone: "已更新 {{count}} 个 skill。",
+	bulkAgentsSomeFailed: "成功 {{success}} 个，失败 {{failed}} 个。",
 };

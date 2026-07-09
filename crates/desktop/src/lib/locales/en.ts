@@ -1230,4 +1230,15 @@ export default {
 	scope: "Scope",
 	scopeSwitchGlobal: "Global",
 	scopeSwitchProject: "Project",
+	// Bulk manage group agents
+	bulkManageGroupAgents: "Manage agents for this source",
+	bulkManageGroupAgentsHint:
+		"Add or remove agents across all {{count}} skills from {{source}}.",
+	bulkAgentsApply: "Apply",
+	bulkAgentsApplying: "Applying… {{done}}/{{total}}",
+	bulkAgentsConfirmRemoveTitle: "Remove agents?",
+	bulkAgentsConfirmRemoveBody:
+		"This removes the deselected agents from {{count}} skill(s). This cannot be undone.",
+	bulkAgentsDone: "Updated {{count}} skill(s).",
+	bulkAgentsSomeFailed: "{{success}} updated, {{failed}} failed.",
 };
