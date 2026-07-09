@@ -8,10 +8,15 @@
 //! watcher thread that reports unexpected disconnects, and tracks live handles
 //! so they can be torn down on disconnect and on app exit.
 //!
-//! Commands are **synchronous** `#[tauri::command] fn` on purpose: Tauri runs
-//! sync commands on its worker thread-pool, so the blocking `std::process` ssh
-//! work never stalls the (rt-only, single-thread) tokio runtime. The frontend
-//! still receives a Promise from `invoke`.
+//! Command threading: Tauri runs a **sync** `#[tauri::command] fn` ON THE MAIN
+//! (UI) thread, so a blocking sync command freezes the webview (the macOS
+//! spinning beachball). `connect_remote` is therefore an `async fn` that runs
+//! its blocking ssh/tunnel `bring_up` via `async_runtime::spawn_blocking` — off
+//! BOTH the UI thread and the single-thread tokio runtime. The other ssh
+//! commands here (`list_remote_directories`, `test_connection`,
+//! `reinstall_remote_api`, `force_redeploy_remote`) are still sync and WILL
+//! block the UI while they run; convert them the same way if they land on a hot
+//! path. (Prior note here wrongly claimed sync commands run on a worker pool.)
 
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
