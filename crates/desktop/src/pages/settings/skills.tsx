@@ -26,6 +26,7 @@ import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BulkDeleteDialog } from "../../components/bulk-delete-dialog";
+import { BulkManageGroupAgentsDialog } from "../../components/bulk-manage-group-agents-dialog";
 import { CreateSkillPanel } from "../../components/create-skill-panel";
 import { ImportGithubSkillPanel } from "../../components/import-github-skill-panel";
 import { ImportSkillPanel } from "../../components/import-skill-panel";
@@ -33,6 +34,7 @@ import { ListSearchHeader } from "../../components/list-search-header";
 import { MultiSelectFloatingBar } from "../../components/multi-select-floating-bar";
 import { SkillDetail } from "../../components/skill-detail";
 import { SkillList } from "../../components/skill-list";
+import type { SourceGroup } from "../../components/skill-list";
 import { SourceDetail } from "../../components/source-detail";
 import type { SourceRow } from "../../components/source-detail";
 import type {
@@ -481,6 +483,9 @@ export default function SkillsPage() {
 		() => new Set(),
 	);
 	const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
+	const [bulkAgentsGroup, setBulkAgentsGroup] = useState<SourceGroup | null>(
+		null,
+	);
 	const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
 	// pendingAuthSkill: when set, the SkillDetail for this skill will open the
 	// credential dialog as soon as it renders.
@@ -812,6 +817,7 @@ export default function SkillsPage() {
 									void setSelectedSkillName(skillName);
 									setPendingAuthSkill(skillName);
 								}}
+								onManageGroupAgents={setBulkAgentsGroup}
 							/>
 
 							{isMultiSelectMode && selectedKeys.size > 0 && (
@@ -936,6 +942,34 @@ export default function SkillsPage() {
 						}}
 						resourceType="skill"
 					/>
+
+					{bulkAgentsGroup && (
+						<BulkManageGroupAgentsDialog
+							isOpen={!!bulkAgentsGroup}
+							source={bulkAgentsGroup.source}
+							skills={bulkAgentsGroup.skills.map((sg) => ({
+								name: sg.name,
+								items: sg.items.flatMap((it) =>
+									it.agent
+										? [
+												{
+													agent: it.agent,
+													source:
+														it.source ?? "global",
+												},
+											]
+										: [],
+								),
+							}))}
+							scope={scope}
+							projectPath={
+								scope === "project"
+									? (selectedProjectPath ?? undefined)
+									: undefined
+							}
+							onClose={() => setBulkAgentsGroup(null)}
+						/>
+					)}
 				</div>
 			</div>
 		</div>
