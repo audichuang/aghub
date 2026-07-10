@@ -62,6 +62,12 @@ mod tests {
 
 	#[test]
 	fn resolve_editor_path_expands_tilde_prefix() {
+		// Reads the real HOME; hold the crate-wide env lock so a concurrent
+		// HOME-repointing test (sources/inference/skills) can't race us. The
+		// race only surfaces under `cargo test --workspace` load.
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let Some(home) = dirs::home_dir() else {
 			return;
 		};
@@ -74,6 +80,10 @@ mod tests {
 
 	#[test]
 	fn resolve_editor_path_expands_slash_tilde_prefix() {
+		// See the sibling test: hold the env lock while reading real HOME.
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let Some(home) = dirs::home_dir() else {
 			return;
 		};
