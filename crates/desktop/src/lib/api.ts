@@ -58,6 +58,7 @@ import type {
 	SkillResponse,
 	SkillTreeNodeResponse,
 	SkillUpdateResponse,
+	SkillUsageResponse,
 	SourceCredentialBindingRequest,
 	SourceCredentialBindingResponse,
 	SourceDiffResponse,
@@ -300,6 +301,9 @@ export function createApi(baseUrl: string) {
 			},
 			getGlobalLock(): Promise<GlobalSkillLockResponse> {
 				return client.get("skills/lock/global").json();
+			},
+			usage(): Promise<SkillUsageResponse[]> {
+				return client.get("skills/usage").json();
 			},
 			getProjectLock(
 				projectPath?: string,

@@ -67,6 +67,30 @@ export function skillListQueryOptions({
 	});
 }
 
+interface SkillUsageQueryParams {
+	api: ApiClient;
+	enabled?: boolean;
+	staleTime?: number;
+}
+
+/**
+ * Usage counts for the installed global Claude skills, least-used first.
+ * Reads Claude Code's own `skillUsage` counter; never-dispatched skills report
+ * `usage_count: 0`. Claude-only.
+ */
+export function skillUsageQueryOptions({
+	api,
+	enabled = true,
+	staleTime = 30_000,
+}: SkillUsageQueryParams) {
+	return queryOptions({
+		queryKey: queryKeys.skills.usage(),
+		queryFn: () => api.skills.usage(),
+		enabled,
+		staleTime,
+	});
+}
+
 interface GlobalSkillLockQueryParams {
 	api: ApiClient;
 	enabled?: boolean;

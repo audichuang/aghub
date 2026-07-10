@@ -35,6 +35,7 @@ import {
 	projectSkillLockQueryOptions,
 	skillContentQueryOptions,
 	skillTreeQueryOptions,
+	skillUsageQueryOptions,
 } from "../requests/skills";
 import { SkillStatusBadge } from "./skill-update-badge";
 import { ManageSkillAgentsDialog } from "./manage-skill-agents-dialog";
@@ -169,6 +170,18 @@ export function SkillDetail({
 	const { data: globalLock } = useQuery({
 		...globalSkillLockQueryOptions({ api }),
 	});
+
+	// Claude usage count (from Claude Code's own `skillUsage`). `skillUsage` is
+	// user-global, so only join it in global-scope views — matching it by name
+	// against a project-scoped skill would show an unrelated global skill's
+	// count. Disabled (never fetched) when a project path is active.
+	const { data: skillUsage } = useQuery({
+		...skillUsageQueryOptions({ api, enabled: !projectPath }),
+	});
+	const usageEntry = useMemo(
+		() => skillUsage?.find((u) => u.name === skill.name),
+		[skillUsage, skill.name],
+	);
 
 	const { data: projectLock } = useQuery({
 		...projectSkillLockQueryOptions({ api, projectPath }),
@@ -318,6 +331,32 @@ export function SkillDetail({
 									<Card.Description className="mt-2">
 										{skill.description}
 									</Card.Description>
+								)}
+								{usageEntry && (
+									<div className="mt-2 flex items-center gap-2">
+										<Chip
+											size="sm"
+											variant="soft"
+											color={
+												usageEntry.usage_count === 0
+													? "warning"
+													: "default"
+											}
+										>
+											{usageEntry.usage_count === 0
+												? t("skillUsageNever")
+												: t("skillUsageUsed", {
+														count: usageEntry.usage_count,
+													})}
+										</Chip>
+										{usageEntry.last_used_at != null && (
+											<span className="text-xs text-muted">
+												{new Date(
+													usageEntry.last_used_at,
+												).toLocaleDateString()}
+											</span>
+										)}
+									</div>
 								)}
 							</div>
 							<div className="flex items-center gap-2">

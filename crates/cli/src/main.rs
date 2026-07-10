@@ -307,6 +307,16 @@ enum Commands {
 		#[arg(long)]
 		json: bool,
 	},
+	/// Show Claude skill usage counts, least-used first (read-only).
+	///
+	/// Reads Claude Code's own `skillUsage` counter from `~/.claude.json`;
+	/// installed skills never dispatched show 0 uses. Claude-only — no other
+	/// agent keeps such a counter.
+	SkillUsage {
+		/// Emit a machine-readable JSON array instead of a table
+		#[arg(long)]
+		json: bool,
+	},
 }
 
 /// Actions for the `source` subcommand group.
@@ -433,6 +443,12 @@ fn main() -> Result<()> {
 			cli.all,
 			*json,
 		);
+	}
+
+	// `skill-usage` reads Claude's global `skillUsage` counter — it is
+	// Claude-global, not single-agent scoped, so dispatch before adapter setup.
+	if let Commands::SkillUsage { json } = &cli.command {
+		return commands::skill_usage::execute(cli.project, cli.all, *json);
 	}
 
 	// Handle --agent all: iterate all registered agents
@@ -666,6 +682,11 @@ fn main() -> Result<()> {
 		}
 		Commands::Coverage { .. } => {
 			unreachable!("`coverage` is dispatched before agent-config setup")
+		}
+		Commands::SkillUsage { .. } => {
+			unreachable!(
+				"`skill-usage` is dispatched before agent-config setup"
+			)
 		}
 	}
 }

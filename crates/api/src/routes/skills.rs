@@ -32,7 +32,7 @@ use crate::{
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
 		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
 		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
-		UpdateSkillRequest, ValidationError,
+		SkillUsageResponse, UpdateSkillRequest, ValidationError,
 	},
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
@@ -908,6 +908,18 @@ pub fn list_skills(
 	let config = manager.load().map_err(ApiError::from)?;
 	let skills = config.skills.iter().map(SkillResponse::from).collect();
 	Ok(Json(skills))
+}
+
+/// Usage counts for the installed global Claude skills, from Claude Code's
+/// `skillUsage` map. Never-dispatched skills surface as `usage_count: 0`;
+/// sorted least-used first. Claude-only (no other agent keeps a counter).
+#[get("/skills/usage")]
+pub fn list_skill_usage() -> ApiResult<Vec<SkillUsageResponse>> {
+	let rows = aghub_core::skills::usage::list_claude_skill_usage()
+		.into_iter()
+		.map(SkillUsageResponse::from)
+		.collect();
+	Ok(Json(rows))
 }
 
 #[post("/agents/<agent>/skills?<scope..>", data = "<body>")]

@@ -3,6 +3,8 @@ export default {
 	select: "Select",
 	pluginSelectedCount: "{{count}} selected",
 	pluginInstallableCount: "{{count}} available to install",
+	skillUsageUsed: "Used {{count}} times (Claude)",
+	skillUsageNever: "Never used (Claude)",
 	pluginInstallSelected: "Install selected",
 	pluginInstallAll: "Install all",
 	// Common

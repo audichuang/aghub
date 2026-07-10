@@ -176,6 +176,7 @@ pub(crate) fn build_rocket(
 				routes::market::search_skill_market,
 				routes::skills::list_all_agents_skills,
 				routes::skills::list_skills,
+				routes::skills::list_skill_usage,
 				routes::skills::create_skill,
 				routes::skills::import_skill,
 				routes::skills::get_skill,

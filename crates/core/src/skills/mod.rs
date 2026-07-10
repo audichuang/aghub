@@ -6,6 +6,7 @@ pub mod prune;
 pub mod removal;
 pub mod resync;
 pub mod update;
+pub mod usage;
 
 pub use discovery::{load_skills_from_dir, load_skills_from_dirs};
 

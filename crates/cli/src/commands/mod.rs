@@ -9,6 +9,7 @@ pub mod get;
 pub mod inference;
 pub mod plugin;
 pub mod prune;
+pub mod skill_usage;
 pub mod source;
 pub mod transfer;
 pub mod update;

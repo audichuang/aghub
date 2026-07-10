@@ -106,6 +106,7 @@ export type { SkillTreeNodeResponse } from "./SkillTreeNodeResponse";
 export type { SkillTreeQuery } from "./SkillTreeQuery";
 export type { SkillUpdateResponse } from "./SkillUpdateResponse";
 export type { SkillUpdateStatusResponse } from "./SkillUpdateStatusResponse";
+export type { SkillUsageResponse } from "./SkillUsageResponse";
 export type { SkillsPathsDto } from "./SkillsPathsDto";
 export type { SourceCredentialBindingRequest } from "./SourceCredentialBindingRequest";
 export type { SourceCredentialBindingResponse } from "./SourceCredentialBindingResponse";

@@ -3,6 +3,8 @@ export default {
 	select: "選取",
 	pluginSelectedCount: "已選 {{count}} 個",
 	pluginInstallableCount: "{{count}} 個可安裝",
+	skillUsageUsed: "已使用 {{count}} 次（Claude）",
+	skillUsageNever: "從未使用（Claude）",
 	pluginInstallSelected: "安裝選取",
 	pluginInstallAll: "全部安裝",
 	// Common

@@ -93,6 +93,29 @@ pub struct SkillResponse {
 	pub native_reader: bool,
 }
 
+/// One installed Claude skill with its usage count, from Claude Code's
+/// `skillUsage` map. Skills never dispatched surface as `usage_count: 0`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct SkillUsageResponse {
+	pub name: String,
+	pub usage_count: u64,
+	/// Epoch milliseconds of the last dispatch, or null if never used.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub last_used_at: Option<i64>,
+}
+
+impl From<aghub_core::skills::usage::SkillUsage> for SkillUsageResponse {
+	fn from(u: aghub_core::skills::usage::SkillUsage) -> Self {
+		SkillUsageResponse {
+			name: u.name,
+			usage_count: u.usage_count,
+			last_used_at: u.last_used_at,
+		}
+	}
+}
+
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
