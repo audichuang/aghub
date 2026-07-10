@@ -1,11 +1,12 @@
 import {
+	ArrowTopRightOnSquareIcon,
 	BookOpenIcon,
 	ChevronDownIcon,
 	ChevronRightIcon,
 	StarIcon as StarIconSolid,
 	UsersIcon,
 } from "@heroicons/react/24/solid";
-import { Button, Chip, Label, ListBox, Spinner } from "@heroui/react";
+import { Button, Chip, Label, ListBox, Spinner, Tooltip } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
 import Fuse from "fuse.js";
 import { useMemo, useState } from "react";
@@ -52,6 +53,9 @@ interface SkillListProps {
 	/** When set, source group headers show a button to bulk-manage the agents
 	 * of every skill in that group. */
 	onManageGroupAgents?: (group: SourceGroup) => void;
+	/** When set, source group headers show a button that opens the Sources
+	 * view for that source, where uninstalled skills can be installed. */
+	onOpenSourceView?: (source: string) => void;
 }
 
 export function SkillList({
@@ -67,6 +71,7 @@ export function SkillList({
 	updateStatuses,
 	onResolveAuth,
 	onManageGroupAgents,
+	onOpenSourceView,
 }: SkillListProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -358,17 +363,49 @@ export function SkillList({
 									{sg.skills.length}
 								</Chip>
 							</button>
+							{onOpenSourceView && (
+								<Tooltip delay={500}>
+									<Tooltip.Trigger>
+										<Button
+											isIconOnly
+											size="sm"
+											variant="ghost"
+											className="shrink-0"
+											aria-label={t("viewSkillSource")}
+											onPress={() =>
+												onOpenSourceView(sg.source)
+											}
+										>
+											<ArrowTopRightOnSquareIcon className="size-4 text-muted" />
+										</Button>
+									</Tooltip.Trigger>
+									<Tooltip.Content>
+										{t("viewSkillSource")}
+									</Tooltip.Content>
+								</Tooltip>
+							)}
 							{onManageGroupAgents && (
-								<Button
-									isIconOnly
-									size="sm"
-									variant="ghost"
-									className="shrink-0"
-									aria-label={t("bulkManageGroupAgents")}
-									onPress={() => onManageGroupAgents(sg)}
-								>
-									<UsersIcon className="size-4 text-muted" />
-								</Button>
+								<Tooltip delay={500}>
+									<Tooltip.Trigger>
+										<Button
+											isIconOnly
+											size="sm"
+											variant="ghost"
+											className="shrink-0"
+											aria-label={t(
+												"bulkManageGroupAgents",
+											)}
+											onPress={() =>
+												onManageGroupAgents(sg)
+											}
+										>
+											<UsersIcon className="size-4 text-muted" />
+										</Button>
+									</Tooltip.Trigger>
+									<Tooltip.Content>
+										{t("bulkManageGroupAgents")}
+									</Tooltip.Content>
+								</Tooltip>
 							)}
 						</div>
 

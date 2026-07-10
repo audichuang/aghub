@@ -574,8 +574,7 @@ export default function SkillsPage() {
 		],
 	});
 
-	const resolvedSourceRow = useMemo<SourceRow | null>(() => {
-		if (!selectedSourceKey) return null;
+	const allSourceRows = useMemo<SourceRow[]>(() => {
 		const globalData = allSourcesQuery[0]?.data as
 			| SourcesListResponse
 			| undefined;
@@ -593,11 +592,16 @@ export default function SkillsPage() {
 				projectName: p.name,
 			}));
 		});
-		const allRows = [...globalRows, ...projectRows];
+		return [...globalRows, ...projectRows];
+	}, [allSourcesQuery, projects]);
+
+	const resolvedSourceRow = useMemo<SourceRow | null>(() => {
+		if (!selectedSourceKey) return null;
 		return (
-			allRows.find((r) => sourceRowKey(r) === selectedSourceKey) ?? null
+			allSourceRows.find((r) => sourceRowKey(r) === selectedSourceKey) ??
+			null
 		);
-	}, [selectedSourceKey, allSourcesQuery, projects]);
+	}, [selectedSourceKey, allSourceRows]);
 
 	// Refresh control, shared by the agent + source toolbars. The last-checked
 	// time lives in its tooltip so it never competes for room in the narrow
@@ -818,6 +822,24 @@ export default function SkillsPage() {
 									setPendingAuthSkill(skillName);
 								}}
 								onManageGroupAgents={setBulkAgentsGroup}
+								onOpenSourceView={(source) => {
+									// Reuse the real SourceRow's key so we never
+									// re-encode the composite-key format (which is
+									// not colon-safe) by hand.
+									const row = allSourceRows.find(
+										(r) =>
+											r.rowScope === scope &&
+											r.source === source &&
+											(scope === "global" ||
+												(r.projectRoot ?? null) ===
+													(selectedProjectPath ??
+														null)),
+									);
+									setSearchQuery("");
+									if (row)
+										handleSourceSelect(sourceRowKey(row));
+									handleSetView("source");
+								}}
 							/>
 
 							{isMultiSelectMode && selectedKeys.size > 0 && (
