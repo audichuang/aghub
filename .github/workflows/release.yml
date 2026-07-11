@@ -362,10 +362,20 @@ jobs:
                   esac
 
             - name: Build CLI
-              run: cargo build --release -p aghub-cli --target ${{ matrix.target }}
+              shell: bash
+              env:
+                  RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+              run: |
+                  # Explicit version for build.rs — without it the version-sync
+                  # sed dirties the tree and `git describe --dirty=-dev` stamps
+                  # the release binary "X.Y.Z-dev".
+                  export AGHUB_RELEASE_VERSION="${RELEASE_TAG#v}"
+                  cargo build --release -p aghub-cli --target ${{ matrix.target }}
 
             - name: Smoke test CLI (verifies the released binary works)
               shell: bash
+              env:
+                  RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
               run: |
                   BIN="target/${{ matrix.target }}/release/aghub-cli"
                   if [ "${{ matrix.os }}" = "windows-latest" ]; then
@@ -373,6 +383,13 @@ jobs:
                   fi
                   "$BIN" --version
                   "$BIN" --help > /dev/null
+                  # A binary that self-reports the wrong version (e.g. the old
+                  # "-dev" suffix from a sed-dirtied tree) must not ship.
+                  if [[ "$RELEASE_TAG" =~ ^v[0-9] ]]; then
+                      GOT="$("$BIN" --version)"
+                      [[ "$GOT" == "aghub-cli ${RELEASE_TAG#v}" ]] \
+                        || { echo "version mismatch: got '$GOT', want 'aghub-cli ${RELEASE_TAG#v}'" >&2; exit 1; }
+                  fi
 
             - name: Package CLI (Unix)
               if: matrix.os != 'windows-latest'
@@ -435,7 +452,11 @@ jobs:
                   AGENT_MAC_ARM_SHA=$(sha256sum aghub-cli_mac_arm.tar.gz | awk '{print $1}')
                   AGENT_LINUX_SHA=$(sha256sum aghub-cli_linux.tar.gz | awk '{print $1}')
 
-                  cat << INNEREOF > tap/aghub-cli.rb
+                  # Formula MUST live in Formula/ — modern Homebrew ignores
+                  # formulae at the tap root (installs silently resolve to the
+                  # keg's cached copy and never see updates).
+                  mkdir -p tap/Formula
+                  cat << INNEREOF > tap/Formula/aghub-cli.rb
                   class AghubCli < Formula
                     desc "AI coding agent configuration management tool (CLI)"
                     homepage "https://github.com/audichuang/aghub"
@@ -507,7 +528,7 @@ jobs:
                   cd tap
                   git config user.name "github-actions[bot]"
                   git config user.email "github-actions[bot]@users.noreply.github.com"
-                  git add aghub-cli.rb Casks/aghub.rb
+                  git add Formula/aghub-cli.rb Casks/aghub.rb
                   git commit -m "Update Homebrew formula and cask for aghub ${RELEASE_TAG}" || echo "No changes to commit"
                   git push
 

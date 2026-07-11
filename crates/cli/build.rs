@@ -3,12 +3,15 @@
 //! the workspace manifest's placeholder `version`.
 //!
 //! Resolution order:
-//!   1. `git describe --tags --dirty=-dev` (leading `v` stripped) — needs tags
+//!   1. `AGHUB_RELEASE_VERSION` env — set by the release CI. Without it, CI's
+//!      version-sync `sed` dirties the tree and `git describe --dirty=-dev`
+//!      stamps every RELEASE binary `X.Y.Z-dev` (shipped that way up to
+//!      v2.5.4).
+//!   2. `git describe --tags --dirty=-dev` (leading `v` stripped) — needs tags
 //!      reachable, so it works in a full local checkout.
-//!   2. fallback to `CARGO_PKG_VERSION` — the value the release CI `sed`s the
-//!      tag into, and also what a tag-less / tarball build sees. `--always` is
-//!      deliberately NOT used: a bare commit SHA must never shadow the
-//!      CI-injected release version.
+//!   3. fallback to `CARGO_PKG_VERSION` — what a tag-less / tarball build
+//!      sees. `--always` is deliberately NOT used: a bare commit SHA must
+//!      never shadow the release version.
 
 use std::process::Command;
 
@@ -21,9 +24,16 @@ fn main() {
 		println!("cargo:rerun-if-changed=../../{rel}");
 	}
 
-	let version = git_describe().unwrap_or_else(|| {
-		std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".into())
-	});
+	println!("cargo:rerun-if-env-changed=AGHUB_RELEASE_VERSION");
+
+	let version = std::env::var("AGHUB_RELEASE_VERSION")
+		.ok()
+		.filter(|v| !v.is_empty())
+		.or_else(git_describe)
+		.unwrap_or_else(|| {
+			std::env::var("CARGO_PKG_VERSION")
+				.unwrap_or_else(|_| "0.0.0".into())
+		});
 	println!("cargo:rustc-env=AGHUB_CLI_VERSION={version}");
 }
 

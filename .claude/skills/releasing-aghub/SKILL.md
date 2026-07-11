@@ -44,15 +44,18 @@ job. Never ship one without the other; never let their versions diverge.
 
 - **Release builds** — the git tag is the source of truth. CI `sed`s `vX.Y.Z`
   (minus the `v`) into `Cargo.toml`, `crates/desktop/package.json`, and
-  `crates/desktop/src-tauri/tauri.conf.json` at build time. Do NOT hand-edit
-  those manifests for a release.
+  `crates/desktop/src-tauri/tauri.conf.json` at build time, and exports
+  `AGHUB_RELEASE_VERSION` to `build-cli` so the binary self-reports exactly
+  `X.Y.Z` (the smoke test asserts it). Without that env the sed dirties the
+  tree and `git describe --dirty=-dev` stamped every release binary
+  `X.Y.Z-dev` — shipped that way up to v2.5.4. Do NOT hand-edit the manifests
+  for a release.
 - **Local source builds** — `crates/cli/build.rs` stamps the binary from
   `git describe --tags --dirty=-dev` (leading `v` stripped), so
   `aghub-cli --version` self-reports a real version: `2.1.6` on a clean tag,
   `2.1.6-3-gabc1234` a few commits past it, `2.1.6-dev` with a dirty tree. It
-  falls back to `CARGO_PKG_VERSION` when no tag is reachable (shallow CI clone,
-  source tarball) — which CI has already `sed`ed to the tag, so the fallback
-  stays correct. `--always` is deliberately NOT used, so a bare commit SHA can
+  falls back to `CARGO_PKG_VERSION` when no tag is reachable (source
+  tarball). `--always` is deliberately NOT used, so a bare commit SHA can
   never shadow the release version.
 - **The committed manifest version is a placeholder** that lags the release
   line — don't read it as "the version". Trust the tag (releases) or
@@ -97,6 +100,7 @@ not just the commit message. (Distinct from the npx `skills` ecosystem upstream 
 gh release view vX.Y.Z --repo audichuang/aghub --json assets --jq '.assets[].name'
 gh release download vX.Y.Z --repo audichuang/aghub --pattern latest.json --output -   # urls must be audichuang/aghub
 gh api repos/audichuang/homebrew-tap/contents/Casks/aghub.rb --jq .content | base64 -d | grep -E 'version|sha256'
+gh api repos/audichuang/homebrew-tap/contents/Formula/aghub-cli.rb --jq .content | base64 -d | grep -m1 version
 ```
 
 - Expect dmg (arm+x64), nsis `setup.exe`, msi, AppImage/deb/rpm, 4 CLI archives, `latest.json`.
@@ -113,6 +117,11 @@ gh api repos/audichuang/homebrew-tap/contents/Casks/aghub.rb --jq .content | bas
 - **`tauri.conf.json` `pubkey`** (committed, plaintext) pairs with the `TAURI_SIGNING_PRIVATE_KEY` secret and **must never change** once a build ships — otherwise installed apps can't auto-update. `endpoints` must point at this repo.
 - Required repo secrets: `TAURI_SIGNING_PRIVATE_KEY`, `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, `HOMEBREW_TAP_TOKEN` (a PAT with Contents:write on `audichuang/homebrew-tap` — the default `GITHUB_TOKEN` can't reach a separate repo).
 - The signing keypair lives only in those secrets (set once); it is not regenerated per release.
+- **The tap formula lives at `Formula/aghub-cli.rb`** (cask at `Casks/aghub.rb`).
+  Modern Homebrew ignores formulae at the tap ROOT — `brew` then silently
+  resolves the installed keg's cached formula, so users stay pinned at their
+  installed version forever while `brew update` reports up-to-date (bit us up
+  to v2.5.4: Macs stuck on 2.3.11). Never write the formula to the tap root.
 
 ## Troubleshooting
 
