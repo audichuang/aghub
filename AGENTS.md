@@ -33,7 +33,7 @@ Full agent list: the `AgentType` enum in `crates/agents/src/models.rs` (NOT `cra
 
 ## Maps & Decisions (read these first)
 
-- **Features in flight**: `docs/specs/` — e.g. `2026-06-02-sources-and-universal-install.md` (the "Sources" page + `.agents`-symlink "universal" install) and `2026-05-31-skill-management-improvements.md`.
+- **Design specs**: `docs/specs/` — date-stamped design docs (largely shipped by now; e.g. the Sources page + `.agents`-symlink universal install). Treat them as design rationale, not current-state truth — the code wins.
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) is the glossary (Source hash, Master, Referrer, Relink, …).
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/) (e.g. transactional skill rename).
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — what we port / deliberately skip from `AkaraChen/aghub` (the **fork** upstream, distinct from the npx `skills` ecosystem upstream the skills above mirror).
@@ -186,6 +186,8 @@ aghub-cli [-a <agent>] [-g|--global] [-p|--project] [--all] [-v|--verbose] <comm
                                       #   in both --add and --remove is rejected
   coverage                            # read-only per-agent skill coverage of the
                                       #   .agents/skills master; scope -g|-p (rejects --all); --json
+  skill-usage                         # Claude skill usage counts from ~/.claude.json's skillUsage,
+                                      #   least-used first (read-only, Claude-only); --json
   plugin <list|install|uninstall|update|enable|disable|prune|validate>   # Claude Code plugins
   plugin marketplace <add|remove|update|list>
 ```

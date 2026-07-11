@@ -13,7 +13,7 @@ src/
 ├── lib.rs          # Public exports + ConnState / ConnectError / RunError
 ├── ssh.rs          # Pure arg builders: build_ssh_args / build_scp_args / build_tunnel_args; is_version_compatible
 ├── ssh_config.rs   # Parse ~/.ssh/config (host → connection params)
-├── bringup.rs      # probe → ensure_remote_api (install if missing) → start_remote; force_redeploy_remote_api
+├── bringup.rs      # probe → ensure_remote_api (install if missing; auto-upgrade on patch drift) → start_remote; force_redeploy_remote_api
 ├── fs.rs           # Remote dir listing + chunked upload (prepare/cat/finish)
 └── test_support.rs # test helpers for asserting on built argv
 ```
