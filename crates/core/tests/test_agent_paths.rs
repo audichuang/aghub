@@ -172,10 +172,78 @@ fn test_openclaw_skills_enabled() {
 
 // ─── Regression Tests for Mutation Targeting ────────────────────────────────
 
+// Unix-only: dirs::home_dir() reads $HOME on Unix, so we can redirect the
+// global master (`~/.agents/skills`) into a temp dir. On Windows the profile
+// comes from the known-folder API and ignores env, so this isolation would
+// silently write to the real user profile again.
+#[cfg(unix)]
 #[test]
 fn test_opencode_global_creation_persists() {
-	// TestConfig Builder sets an override by default, we must CLEAR it
-	// to allow real path logic to execute.
+	use std::sync::{Mutex, OnceLock};
+
+	// Global skill install resolves the master via dirs::home_dir() →
+	// `$HOME/.agents/skills`. Isolate HOME so real path logic still runs
+	// without writing under the developer's real skill tree (this test used
+	// to create one `test-skill-opencode-<millis>/` per run with no teardown).
+	static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+	let _home_lock = HOME_LOCK
+		.get_or_init(|| Mutex::new(()))
+		.lock()
+		.unwrap_or_else(|e| e.into_inner());
+
+	let fake_home = tempfile::tempdir().unwrap();
+	let previous_home = std::env::var("HOME").ok();
+	std::env::set_var("HOME", fake_home.path());
+
+	// RAII: always restore $HOME, even if an assert panics mid-test.
+	struct RestoreHome(Option<String>);
+	impl Drop for RestoreHome {
+		fn drop(&mut self) {
+			match &self.0 {
+				Some(v) => std::env::set_var("HOME", v),
+				None => std::env::remove_var("HOME"),
+			}
+		}
+	}
+	let _restore_home = RestoreHome(previous_home.clone());
+
+	// RAII: always delete every on-disk skill dir we may have written, even
+	// if an assert panics. Covers the isolated master, the OpenCode agent
+	// slot, and — as a last resort — the real user home in case HOME
+	// isolation failed and something leaked there.
+	struct CleanupSkill {
+		paths: Vec<PathBuf>,
+	}
+	impl Drop for CleanupSkill {
+		fn drop(&mut self) {
+			for path in &self.paths {
+				let _ = std::fs::remove_dir_all(path);
+			}
+		}
+	}
+
+	let skill_name = "test-skill-opencode-persist";
+	let isolated_master =
+		fake_home.path().join(".agents/skills").join(skill_name);
+	let isolated_agent = fake_home
+		.path()
+		.join(".config/opencode/skills")
+		.join(skill_name);
+	// Belt-and-suspenders: if HOME isolation somehow fails, still wipe the
+	// real-user path so we never re-introduce the original pollution.
+	let mut cleanup_paths = vec![isolated_master.clone(), isolated_agent];
+	if let Some(real_home) = previous_home.as_ref().map(PathBuf::from) {
+		cleanup_paths.push(real_home.join(".agents/skills").join(skill_name));
+		cleanup_paths
+			.push(real_home.join(".config/opencode/skills").join(skill_name));
+	}
+	let _cleanup = CleanupSkill {
+		paths: cleanup_paths,
+	};
+
+	// TestConfig sets a skills_path_override by default; clear it so install
+	// and reload both go through the real descriptor path resolution under
+	// the isolated HOME (not the TestConfig temp skills dir).
 	let test =
 		aghub_core::testing::TestConfig::new(aghub_core::AgentType::OpenCode)
 			.unwrap();
@@ -184,15 +252,7 @@ fn test_opencode_global_creation_persists() {
 	let mut manager = test.create_manager();
 	manager.load().unwrap();
 
-	// Use unique skill name with timestamp to avoid conflicts
-	let skill_name = format!(
-		"test-skill-opencode-{}",
-		std::time::SystemTime::now()
-			.duration_since(std::time::UNIX_EPOCH)
-			.unwrap()
-			.as_millis()
-	);
-	let mut skill = aghub_core::models::Skill::new(&skill_name);
+	let mut skill = aghub_core::models::Skill::new(skill_name);
 	skill.description = Some("desc".to_string());
 
 	manager.add_skill(skill).unwrap();
@@ -201,8 +261,36 @@ fn test_opencode_global_creation_persists() {
 	let mut manager2 = test.create_manager();
 	manager2.load().unwrap();
 	assert!(
-		manager2.get_skill(&skill_name).is_some(),
+		manager2.get_skill(skill_name).is_some(),
 		"Skill should survive reload"
+	);
+
+	// Prove the write went through home-dir resolution, not the TestConfig
+	// override. CleanupSkill + fake_home TempDir both remove it afterward.
+	let master_md = isolated_master.join("SKILL.md");
+	assert!(
+		master_md.is_file(),
+		"master should land under isolated $HOME/.agents/skills, got missing {}",
+		master_md.display()
+	);
+
+	// Explicit delete before drop (same paths CleanupSkill covers). Fail the
+	// test if anything is still present — leaving junk is the bug.
+	assert!(
+		!previous_home
+			.as_ref()
+			.map(|h| PathBuf::from(h)
+				.join(".agents/skills")
+				.join(skill_name)
+				.exists())
+			.unwrap_or(false),
+		"must never write the test skill into the real ~/.agents/skills"
+	);
+	std::fs::remove_dir_all(&isolated_master)
+		.expect("explicit teardown must remove the isolated master skill dir");
+	assert!(
+		!isolated_master.exists(),
+		"isolated master must be gone after teardown"
 	);
 }
 
