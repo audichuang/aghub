@@ -22,23 +22,23 @@ codegraph — enumerated trees drift):
 
 ## WHERE TO LOOK
 
-| Task                     | Location                  | Notes                                    |
-| ------------------------ | ------------------------- | ---------------------------------------- |
-| Agent descriptors/models | `crates/agents/`          | NOT here — core re-exports them          |
-| Adapter dispatch         | `src/adapter.rs`          | Maps AgentType → fn calls on descriptor  |
-| CRUD for MCPs/skills     | `src/manager/`            | `ConfigManager::new(agent, scope)`       |
-| All-agent bulk load      | `src/all_agents.rs`       | `load_all_agents() → AgentResources`     |
-| Registry lookup          | `src/registry/mod.rs`     | `registry::get(agent_type)` → descriptor |
-| Skills from filesystem   | `src/skills/discovery.rs` | Parses SKILL.md YAML frontmatter         |
-| Cross-agent batch ops    | `src/transfer.rs`         | `OperationBatchResult`, reconcile fns    |
-| CLI/API wire DTOs        | `src/dto/`                | `RemovalView` / `SkillView`              |
-| XDG paths                | `src/paths.rs`            | `~` prefix convention                    |
-| Agent CLI detection      | `src/availability.rs`     | Checks for installed agent binaries      |
-| Test isolation           | `src/testing.rs`          | `TestConfig` + per-agent path overrides  |
+| Task                     | Location                  | Notes                                               |
+| ------------------------ | ------------------------- | --------------------------------------------------- |
+| Agent descriptors/models | `crates/agents/`          | NOT here — core re-exports them                     |
+| Adapter dispatch         | `src/adapter.rs`          | Maps AgentType → fn calls on descriptor             |
+| CRUD for MCPs/skills     | `src/manager/`            | `ConfigManager::new(adapter, global, project_root)` |
+| All-agent bulk load      | `src/all_agents.rs`       | `load_all_agents() → AgentResources`                |
+| Registry lookup          | `src/registry/mod.rs`     | `registry::get(agent_type)` → descriptor            |
+| Skills from filesystem   | `src/skills/discovery.rs` | Parses SKILL.md YAML frontmatter                    |
+| Cross-agent batch ops    | `src/transfer.rs`         | `OperationBatchResult`, reconcile fns               |
+| CLI/API wire DTOs        | `src/dto/`                | `RemovalView` / `SkillView`                         |
+| XDG paths                | `src/paths.rs`            | `~` prefix convention                               |
+| Agent CLI detection      | `src/availability.rs`     | Checks for installed agent binaries                 |
+| Test isolation           | `src/testing.rs`          | `TestConfig` + per-agent path overrides             |
 
 ## KEY ABSTRACTIONS
 
-**`ConfigManager`**: Central CRUD — `load()`, `save()`, `load_both()`. Scope: `GlobalOnly | ProjectOnly | Both`.
+**`ConfigManager`**: Central CRUD — `load()`, `save()`, `load_both()`. Construct with `ConfigManager::new(adapter, global: bool, project_root: Option<&Path>)` (or `with_scope(...)`). Scope: `GlobalOnly | ProjectOnly | Both`.
 
 **`AgentAdapter`** (trait in `adapters/mod.rs`): wraps a descriptor; `create_adapter(agent_type)` returns one.
 
@@ -65,6 +65,8 @@ cargo test -p aghub-core --features agent-validation  # Tests requiring real CLI
 
 `TestConfig` creates isolated temp dirs. Per-agent path overrides via `set_skills_path_override(agent_id, path)` (thread-local).
 
+**Real-home pollution**: global install resolves the universal master via `dirs::home_dir()/.agents/skills` (override does **not** redirect that path). Clearing `skills_path_override` under global scope / no `project_root` **must** isolate `$HOME` (Unix) into a temp dir, hold the suite env lock, and Drop-clean written skill dirs — never leave junk under the developer's real `~/.agents/skills` or agent skill dirs. Prefer `project_root = tempdir` when project scope is enough. See `test_opencode_global_creation_persists` in `tests/test_agent_paths.rs`.
+
 Tests that mutate `HOME`/`XDG_*` **or** read `dirs::home_dir()` must hold the env lock for their suite (`transfer.rs` tests have a module-local `env_lock()`; api uses `test_env_lock`) — the race only surfaces under `cargo test --workspace`, not `-p <crate>`. Unix-gated tests: keep any helper/import they share under the same `#[cfg(unix)]`, or Windows clippy goes red.
 
 ## ANTI-PATTERNS
@@ -74,3 +76,4 @@ Tests that mutate `HOME`/`XDG_*` **or** read `dirs::home_dir()` must hold the en
 - NEVER skip `source_path` on Skill — required for provenance tracking
 - NEVER use non-XDG paths — always use `dirs` crate + `paths.rs` helpers
 - NEVER add to `registry/mod.rs` without first adding to `crates/agents`
+- NEVER clear `skills_path_override` for a global write without isolating `$HOME` (or using a project `tempdir`) and tearing down written skill dirs

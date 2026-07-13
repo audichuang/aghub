@@ -9,7 +9,7 @@ back. This is the shared primitive behind SKILL.md frontmatter handling.
 
 | Item               | Purpose                                                      |
 | ------------------ | ------------------------------------------------------------ |
-| `parse::<T>()`     | `(meta: T, body: String)` — errors if frontmatter is missing |
+| `parse::<T>()`     | `(meta: T, body: &str)` — errors if frontmatter is missing   |
 | `parse_opt::<T>()` | Like `parse` but tolerates a document with no frontmatter    |
 | `render::<T>()`    | Serialize `meta` + body back into a `---`-delimited document |
 | `MarkdownError`    | Error enum (thiserror)                                       |

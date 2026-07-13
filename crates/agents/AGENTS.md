@@ -5,34 +5,19 @@
 
 ## STRUCTURE
 
-```
-crates/agents/src/
-├── lib.rs              # Public exports (AgentDescriptor, models, errors, format)
-├── descriptor.rs       # AgentDescriptor struct + fn pointer type aliases
-├── macros.rs           # define_mcp_paths!/define_skill_paths! — descriptors are built with these
-├── models.rs           # AgentConfig, AgentType, McpServer, McpTransport, Skill
-├── sub_agents.rs       # SubAgent model
-├── errors.rs           # ConfigError, Result
-├── agents/             # One descriptor per supported agent (AgentType::ALL = 23);
-│   │                   #   `codex/` is a subdirectory; `factory.rs` is the
-│   │                   #   Factory-AI agent's descriptor (NOT a dispatch factory —
-│   │                   #   there is no dispatch match in this crate at all)
-│   ├── mod.rs          # pub mod declarations
-│   ├── claude.rs       # Claude descriptor
-│   └── ...             # `ls` for the full list
-└── format/
-    ├── mod.rs           # Format trait
-    ├── json_opencode.rs # OpenCode native format
-    ├── json_map.rs      # MCP as JSON object map
-    ├── json_list.rs     # MCP as JSON array
-    └── toml_format.rs   # TOML (Codex, Mistral)
-```
+Role map (not a full file tree — `ls` / codegraph for that):
+
+- `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
+- `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns)
+- `models.rs` — `AgentConfig`, `AgentType`, `McpServer`, `McpTransport`, `Skill`
+- `agents/` — one descriptor per agent (`AgentType::ALL` = 23); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
+- `format/` — serializers: OpenCode native, JSON map/list MCP, TOML (Codex/Mistral)
 
 ## WHERE TO LOOK
 
 | Task                   | Location                                                          |
 | ---------------------- | ----------------------------------------------------------------- |
-| Add new agent          | `src/agents/<name>.rs` + `mod.rs`                                 |
+| Add new agent          | `src/agents/<name>.rs` + `mod.rs` + `models.rs` + core registry   |
 | Agent capability flags | `src/descriptor.rs` — `Capabilities`                              |
 | Normalized data types  | `src/models.rs`                                                   |
 | Config serialization   | `src/format/`                                                     |
@@ -59,13 +44,13 @@ matrix, registry fallback) is documented once in the **root AGENTS.md
 
 ## ADDING AN AGENT
 
-Must touch ALL of these in this crate:
+In this crate:
 
-1. `src/agents/<name>.rs` — descriptor constant (`pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor { ... }`)
+1. `src/agents/<name>.rs` — `pub const DESCRIPTOR: AgentDescriptor = …`
 2. `src/agents/mod.rs` — `pub mod <name>;`
-3. `src/models.rs` — `AgentType` enum variant + `ALL` array + `as_str()` + `from_str()`
+3. `src/models.rs` — `AgentType` variant + `ALL` + `as_str()` + `from_str()`
 
-Then in `crates/core`: `src/registry/mod.rs` — add `&agents::<name>::DESCRIPTOR` to `ALL_AGENTS`. (There is no dispatch match to edit — dispatch is find-by-id over `ALL_AGENTS`.)
+Then in `crates/core/src/registry/mod.rs`: add `&agents::<name>::DESCRIPTOR` to `ALL_AGENTS` (dispatch is find-by-id over that array — no match to edit).
 
 ## ANTI-PATTERNS
 

@@ -6,19 +6,14 @@
 
 ## STRUCTURE
 
-```
-src/
-├── main.tsx / App.tsx   # Entry + top-level routes/providers
-├── generated/dto/       # ts-rs DTOs generated from the Rust API — DO NOT hand-edit
-├── requests/            # Data-access layer: per-domain React Query options + mutations
-├── lib/                 # Pure helpers (e.g. getMcpMergeKey, install-layout, grouping)
-├── hooks/               # Reusable stateful logic
-├── contexts/            # Cross-tree state (e.g. agent-availability)
-├── providers/           # App-level providers (query client, store, theme)
-├── pages/               # Route screens
-├── components/          # Reusable UI
-├── layouts/ · styles/ · assets/
-```
+Role map:
+
+- `generated/dto/` — ts-rs from Rust API; **never hand-edit**
+- `requests/` — single data-access seam (query/mutation options + invalidate helpers)
+- `lib/` — pure helpers; `hooks/` / `contexts/` / `providers/` — React wiring
+  (`providers/` is connection/theme/agent-availability context — **not** QueryClient;
+  QueryClient lives in `App.tsx`; persist store under `lib/store`)
+- `pages/` · `components/` · `layouts/` · `styles/` · `assets/`
 
 ## WHERE TO LOOK
 

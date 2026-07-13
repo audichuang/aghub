@@ -1,91 +1,61 @@
 # SKILL-UPDATE CRATE KNOWLEDGE BASE
 
-**Crate**: `skill-update` — Skill update-check orchestrator + Sources domain\
-**Role in monorepo**: The single shared implementation of "are my installed
-skills out of date?". Extracted from `crates/api` so **both** the desktop API
-(`GET /skills/check-updates`) and the CLI (`aghub-cli check --online`) run the
-exact same logic. It ALSO hosts the **Sources domain service** (`sources`
-mod: list/diff/classify + `fetch_source_with_resolver` lazy-auth), consumed
-by the API sources routes AND the CLI `source` commands. `crates/core` stays
-pure (hash/compare only); the network fetch and credential resolution live
-here.
+**Crate**: `skill-update` — Skill update-check orchestrator + Sources domain.
 
-## OVERVIEW
-
-Given the lock entries, it groups them by upstream coordinate, does a cheap
-ls-refs preflight, fetches changed repos treeless, and compares folder hashes —
-with a TTL result cache, bounded concurrency, a per-fetch timeout, and offline
-skip. Network access is injected via the `Fetcher`/`RefResolver` traits so the
-grouping/cache/timeout/concurrency logic is unit-testable without a network.
-
-## STRUCTURE
-
-```
-crates/skill-update/src/
-├── lib.rs      # Orchestrator: SourceRef, EntryInput, group_by_source_ref,
-│               #   ResultCache, Fetcher/TokenResolver/RefResolver traits,
-│               #   CheckDeps, check_updates() (the entry point)
-├── sources.rs  # Sources domain: list_sources/diff_source/classify +
-│               #   fetch_source_with_resolver (unauth first, ONE token retry)
-└── git.rs      # GitFetcher / GitRefResolver — the real gix-backed adapters.
-                #   https_only_token: tokens are NEVER attached to non-https
-                #   URLs (inject_credentials would hard-fail; ssh auth stands).
-                #   GitFetcherWithFallback: gix first, then system `git` + OS
-                #   credential helper for https NON-github hosts (TFS/Azure
-                #   DevOps). Kind-2 callers ONLY (single fetch with the final
-                #   token); GIT_PASSWORD/token always tried before system-git.
-                #   The unauth-first fetch_source_with_resolver sequences the
-                #   fallback AFTER its token retry — do NOT wrap it, or
-                #   system-git would fire before the token.
-```
+**Role**: Single shared implementation of "are installed skills out of date?"
+used by **both** `GET /skills/check-updates` (API) and `aghub-cli check --online`.
+Also hosts Sources domain (`sources` mod: list/diff/classify + lazy-auth fetch)
+for API sources routes and CLI `source`. Network/credentials live here;
+`aghub-core` stays pure (hash/compare only).
 
 ## WHERE TO LOOK
 
-| Task                         | Location                           | Notes                                              |
-| ---------------------------- | ---------------------------------- | -------------------------------------------------- |
-| Entry point                  | `src/lib.rs` `check_updates()`     | Async; takes `CheckDeps` + entries                 |
-| Group entries by repo/ref    | `src/lib.rs` `group_by_source_ref` | Fetch each `SourceRef` at most once                |
-| Result caching               | `src/lib.rs` `ResultCache`         | TTL cache keyed by `SourceRef`                     |
-| Inject auth                  | `src/lib.rs` `TokenResolver`       | CLI = env `GIT_PASSWORD`/`GITHUB_TOKEN`; API = own |
-| Source list/diff/classify    | `src/sources.rs`                   | consumed by API sources routes + CLI `source`      |
-| Real network fetch / ls-refs | `src/git.rs`                       | `GitFetcher` (treeless) / `GitRefResolver`         |
-| Hash compare / rename detect | `aghub_core::skills::update`       | `compare_known_hashes`, `detect_rename` (pure)     |
+| Task                      | Location                       | Notes                                      |
+| ------------------------- | ------------------------------ | ------------------------------------------ |
+| Entry point               | `lib.rs` `check_updates()`     | Async; `CheckDeps` + entries               |
+| Group by repo/ref         | `lib.rs` `group_by_source_ref` | Fetch each `SourceRef` at most once        |
+| TTL result cache          | `lib.rs` `ResultCache`         | Keyed by `SourceRef`                       |
+| Inject auth               | `lib.rs` `TokenResolver`       | CLI env / API own resolver                 |
+| Source list/diff/classify | `sources.rs`                   | API + CLI `source`                         |
+| Network adapters          | `git.rs`                       | `GitFetcher` / `GitRefResolver` + fallback |
+| Hash compare / rename     | `aghub_core::skills::update`   | Pure — never move here                     |
 
 ## KEY ABSTRACTIONS
 
-- **`SourceRef { source, ref_ }`**: a unique upstream coordinate (repo + optional
-  branch/tag/SHA). Entries sharing a `SourceRef` are fetched **once**.
-- **`EntryInput`**: one lock entry projected to the inputs the orchestrator needs
-  (`name`, `scope`, `source_ref`, `source_type`, `skill_path`, `stored_hash`,
-  `local_hash`, `ref_commit`). `source_type == "local"` → `Uncheckable{Local}`
-  with no fetch; `skill_path == None` → `Uncheckable{NoPath}`.
-- **`Fetcher` / `RefResolver` / `TokenResolver`** (traits): the injected seams.
-  Each surface supplies its own `TokenResolver`; default git adapters are
-  `GitFetcher`/`GitRefResolver` in `git.rs`.
-- **`CheckDeps<'a>`**: the dependency bundle passed into `check_updates()`.
+- **`SourceRef { source, ref_ }`**: unique upstream coordinate; shared entries fetch once
+- **`EntryInput`**: lock entry projection (`local` → `Uncheckable{Local}`; no path → `NoPath`)
+- **`Fetcher` / `RefResolver` / `TokenResolver`**: injected seams for testability
+- **`CheckDeps`**: dependency bundle into `check_updates()`
 
-## PREFLIGHT (the optimization that must stay correct)
+## PREFLIGHT (must stay correct)
 
-An ls-refs preflight skips the treeless fetch for a group **only when** the
-upstream tip (`ref_commit`) is unchanged **AND** the installed copy is
-unmodified. `ref_commit == None` (project lock / npx / legacy) → never a
-preflight skip. Getting this wrong either misses real updates (false skip) or
-fetches needlessly (lost optimization).
+ls-refs skips the treeless fetch **only when** upstream tip (`ref_commit`) is
+unchanged **AND** the installed copy is unmodified. `ref_commit == None`
+(project lock / npx / legacy) → **never** preflight-skip. Wrong skip = missed
+updates; wrong fetch = wasted network.
+
+## GIT ADAPTER GOTCHAS (`git.rs`)
+
+- **`https_only_token`**: never attach tokens to non-https URLs (ssh auth stands;
+  `inject_credentials` hard-fails otherwise)
+- **`GitFetcherWithFallback`**: gix first, then system `git` + OS helper for
+  https **non-github** hosts (TFS/Azure). Kind-2 (final-token) callers only —
+  try `GIT_PASSWORD`/token **before** system-git
+- **Do NOT wrap** `fetch_source_with_resolver` with `GitFetcherWithFallback` —
+  that helper sequences unauth → one token retry; wrapping would fire system-git
+  before the token
 
 ## TESTING
 
 ```bash
-cargo test -p skill-update           # unit tests (grouping/cache/timeout — network-free)
-cargo test -p skill-update -- --ignored   # the #[ignore = "network"] E2E paths
+cargo test -p skill-update              # network-free (fake Fetcher)
+cargo test -p skill-update -- --ignored # network E2E
 ```
-
-The grouping/cache/concurrency/timeout logic is covered without a network by
-injecting fake `Fetcher`s. Real network paths are behind `#[ignore]` E2E tests.
 
 ## ANTI-PATTERNS
 
-- **NEVER** move hash/compare logic here — that stays pure in `aghub_core::skills::update`.
-- **NEVER** hardcode credentials — auth comes through the injected `TokenResolver`.
-- **NEVER** fetch per-entry — group by `SourceRef` and fetch each repo at most once.
-- **NEVER** skip a group on `ref_commit == None` — only skip when tip unchanged AND copy unmodified.
-- **NEVER** let one surface (CLI/API) fork the logic — both must call `check_updates()`.
+- **NEVER** move hash/compare here — stays pure in `aghub_core::skills::update`
+- **NEVER** hardcode credentials — inject `TokenResolver`
+- **NEVER** fetch per-entry — group by `SourceRef`
+- **NEVER** skip on `ref_commit == None`
+- **NEVER** let CLI and API fork — both call `check_updates()`

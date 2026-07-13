@@ -1,65 +1,32 @@
 # SKILL CRATE KNOWLEDGE BASE
 
-**Crate**: skill — Skill packaging library for `.skill` (zip) format
-
-## OVERVIEW
-
-Pack, unpack, parse, and validate AI agent skill packages. Extends skills-ref with zip-based packaging and lock file management for tracking skill dependencies with content hashes.
-
-## STRUCTURE
-
-```
-src/
-├── lib.rs           # Public exports (Skill, SkillError, pack, unpack, parse, validate)
-├── error.rs         # SkillError enum with thiserror
-├── model.rs         # Skill struct, SkillSource enum
-├── package.rs       # pack(), unpack(), read_skill_md() — zip I/O
-├── parser.rs        # parse() auto-detects format; parse_skill_md, parse_skill_dir, parse_skill_file
-├── validator.rs     # validate() with path traversal protection
-├── sanitize.rs      # sanitize_name() for safe directory names
-├── scan.rs          # scan_skills() — SKILL.md discovery (gitignore-aware, name dedup)
-├── install.rs       # repo-install orchestration (RepoDiscoveredSkill, EMPTY_SKILLS_LOCK_DIGEST)
-├── hash.rs          # compute_skill_folder_hash() — npx-compatible SHA-256 of the SOURCE folder
-└── lock/            # Lock file management (npx `skills`-compatible)
-    ├── io.rs        # global path: $XDG_STATE_HOME/skills/.skill-lock.json → ~/.agents/.skill-lock.json (v3); atomic temp+rename under WRITE_LOCK
-    ├── types.rs     # SkillLockEntry (contentHash) / LocalSkillLockEntry (computedHash, skillPath)
-    ├── global.rs    # global-lock entry ops (add/remove/retain_locked_skills)
-    ├── local.rs     # project lock: <project>/skills-lock.json (v1)
-    └── test_utils.rs # Mutex-based test isolation
-```
+**Crate**: `skill` — pack/unpack/parse/validate skill packages (`.skill` zip) and
+npx-compatible lock files with content hashes. Extends external `skills-ref`.
 
 ## WHERE TO LOOK
 
-| Task                 | File                 | Notes                                                    |
-| -------------------- | -------------------- | -------------------------------------------------------- |
-| Pack skill to .skill | `src/package.rs`     | Excludes **pycache**, node_modules, .git, tests/ at root |
-| Parse any format     | `src/parser.rs`      | Auto-detects directory, .skill, .zip, .md                |
-| Validate skill       | `src/validator.rs`   | Checks for path traversal (`..`) in resources            |
-| Sanitize name        | `src/sanitize.rs`    | Converts "My Skill!" → "my-skill"                        |
-| Global lock ops      | `src/lock/global.rs` | Per-user skill registry                                  |
-| Local lock ops       | `src/lock/local.rs`  | Per-project skill registry                               |
+| Task                   | Location                 | Notes                                                          |
+| ---------------------- | ------------------------ | -------------------------------------------------------------- |
+| Pack / unpack `.skill` | `src/package.rs`         | Root excludes `__pycache__`, `node_modules`, …                 |
+| Parse any on-disk form | `src/parser.rs`          | Dir / `.skill` / `.zip` / `.md`                                |
+| Sanitize skill name    | `src/sanitize.rs`        | `"My Skill!"` → `my-skill`                                     |
+| Folder content hash    | `src/hash.rs`            | npx-compatible SHA-256 (golden: `tests/hash_parity_golden.rs`) |
+| Global lock            | `src/lock/global.rs`     | `$XDG_STATE_HOME/skills/.skill-lock.json` (v3)                 |
+| Project lock           | `src/lock/local.rs`      | `<project>/skills-lock.json` (v1)                              |
+| Lock test isolation    | `src/lock/test_utils.rs` | `TestLockGuard::new()` — mutex + `XDG_STATE_HOME`              |
 
-## COMMANDS
+## NPX LOCK CONTRACT (do not break)
 
-```bash
-# Build this crate only
-cargo build -p skill
+Round-trip with `npx skills` (also documented in skill `npx-skills-contract`):
 
-# Test with test isolation (uses mutex for lock file tests)
-cargo test -p skill
-```
-
-## CONVENTIONS
-
-- **Skill name rules**: lowercase, hyphens not spaces, no `..` in paths
-- **Required field**: `name` and `description` in SKILL.md frontmatter (rejected if non-string)
-- **Source path**: `~` prefix for home-relative paths
-- **Lock entries**: Track `content_hash` (SHA-256) for integrity
-- **npx-compatible locks**: global `.skill-lock.json` (v3) + project `skills-lock.json` (v1) round-trip with `npx skills`; keep global `skill_folder_hash` EMPTY and store the real SHA in the additive `content_hash`/`computed_hash`; never bump the versions. `hash.rs` mirrors npx `computeSkillFolderHash` (parity is fixture-pinned, see `tests/hash_parity_golden.rs`)
+- Global lock v3 + project lock v1 — **never bump** those versions casually
+- Keep global `skill_folder_hash` **empty**; real integrity is
+  `content_hash` / `computed_hash` (Source hash)
+- Atomic lock writes under the write lock (temp + rename)
 
 ## ANTI-PATTERNS
 
-- **NEVER** use non-string frontmatter values for `name`/`description` (rejected by parser)
-- **NEVER** allow `..` in resource paths (validated in `validate_skill_structure`)
-- **NEVER** write lock tests without `with_test_lock()` mutex guard (prevents test flakiness)
-- **NEVER** pack `tests/` or `evals/` at skill root (intentionally excluded)
+- **NEVER** use non-string frontmatter for `name`/`description` (parser rejects)
+- **NEVER** allow `..` in resource paths (`validate_skill_structure`)
+- **NEVER** write lock tests without `TestLockGuard::new()` (serializes + isolates state home)
+- **NEVER** pack root `tests/` / `evals/` (intentionally excluded from packages)

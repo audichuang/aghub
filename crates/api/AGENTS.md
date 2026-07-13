@@ -6,47 +6,35 @@
 
 ## STRUCTURE
 
-```
-crates/api/src/
-├── main.rs              # Binary entry point
-├── lib.rs               # Exports + route mounting — SOURCE OF TRUTH for the mounted set
-├── cli.rs               # CLI arg parsing for the standalone server bin
-├── state.rs             # AppState, agent registry
-├── error.rs             # ApiError + ErrorBody (HTTP status + machine-readable code)
-├── extractors.rs        # Rocket request guards: AgentParam, ScopeParams
-├── editor_detection.rs  # Detect installed code editors (integrations routes)
-├── bin/export-dto.rs    # ts-rs DTO export bin (`bun run generate:dto` calls this)
-├── credentials/         # Token resolution + remote forwarding (resolve/origin/public/forwarding);
-│                        #   host-scoped source→credential bindings, never written to lock files
-├── skills/              # Skill-route helpers: path containment, scan, lock
-├── dto/                 # ts-rs-exported DTOs, one file per domain (skill, mcp, sub_agent,
-│   └── …                #   inference, credential, sources, plugin, agents, market, …) + data/
-└── routes/              # HTTP handlers, mounted under /api/v1/
-    ├── mod.rs catchers.rs
-    ├── agents.rs mcps.rs skills.rs skills_update.rs sources.rs coverage.rs
-    └── sub_agents.rs credentials.rs inference.rs plugins.rs integrations.rs market.rs
-```
+Role map (`lib.rs` mounts the real route set — do not hardcode route counts):
+
+- `lib.rs` / `main.rs` / `cli.rs` — Rocket build + standalone bin
+- `state.rs` / `error.rs` / `extractors.rs` — `AppState`, `ApiError`, `AgentParam` / `ScopeParams` / `TrustedLocalOrigin`
+- `credentials/` — token resolve + remote forwarding; host-scoped source→credential bindings (never in lock files)
+- `skills/` — path containment, scan, lock helpers for skill routes
+- `dto/` — ts-rs DTOs per domain (`bun run generate:dto` via `bin/export-dto.rs`)
+- `routes/` — handlers under `/api/v1/` (one file per surface: agents, mcps, skills, skills_update, sources, coverage, sub_agents, credentials, inference, plugins, integrations, market)
 
 ## ROUTES
 
-All mounted under `/api/v1/`. **`lib.rs` (the mounted set) + `routes/*.rs` are the source of truth — count them there, don't trust a stale number here.** Do NOT treat this map as exhaustive per-path; it covers every module:
+All under `/api/v1/`. **Source of truth: `lib.rs` + `routes/*.rs`.** Module → intent (paths drift; read the file):
 
-| Module (`routes/…`) | #   | Surface                                                                                                                                                                                                                                                                                                                                                                            |
-| ------------------- | --- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `agents.rs`         | 2   | `GET /agents`, `GET /agents/availability`                                                                                                                                                                                                                                                                                                                                          |
-| `mcps.rs`           | 10  | per-agent MCP CRUD + enable/disable (`/agents/<agent>/mcps[/<name>]`), `GET /agents/all/mcps`, `POST /mcps/transfer`, `/mcps/reconcile`                                                                                                                                                                                                                                            |
-| `skills.rs`         | 24  | per-agent skill CRUD + enable/disable + `import`, `GET /agents/all/skills`; `transfer`/`reconcile`; `DELETE /skills/by-path`; `prune-lock`; `install`/`open`/`edit`; **`GET /skills/content`, `/skills/tree`** (take `scope`+`project_root`, constrained to allow-listed roots); `lock/global`, `lock/project`; **`git/scan`, `git/install`, `git/sync`**, `git/credential-status` |
-| `skills_update.rs`  | 3   | `GET /skills/check-updates`, `POST /skills/apply-update`, `POST /skills/accept-rename`                                                                                                                                                                                                                                                                                             |
-| `sources.rs`        | 2   | `GET /skills/sources`, `/skills/sources/diff` (npx-style source browse/diff)                                                                                                                                                                                                                                                                                                       |
-| `coverage.rs`       | 1   | `GET /skills/coverage` (read-only per-agent coverage of the `.agents/skills` master)                                                                                                                                                                                                                                                                                               |
-| `sub_agents.rs`     | 8   | per-agent sub-agent CRUD (`/agents/<agent>/sub-agents[/<name>]`), `GET /agents/all/sub-agents`, `transfer`/`reconcile`                                                                                                                                                                                                                                                             |
-| `credentials.rs`    | 5   | `GET`/`POST /credentials`, `DELETE /credentials/<id>`, `GET`/`PUT /credentials/source-bindings`                                                                                                                                                                                                                                                                                    |
-| `inference.rs`      | 26  | provider CRUD + keyring password; per-agent (claude/codex/opencode) provider bindings, model routing, profile, catalog `sync`, `state`; `presets`                                                                                                                                                                                                                                  |
-| `plugins.rs`        | 21  | Claude Code plugin lifecycle (install/uninstall/update/enable/disable/detail/config/prune/validate/open), marketplaces CRUD + update, `plugins-market`, `cli/status`                                                                                                                                                                                                               |
-| `integrations.rs`   | 3   | `GET /integrations/code-editors`, `POST /integrations/open-with-editor`, `GET /integrations/preferences`                                                                                                                                                                                                                                                                           |
-| `market.rs`         | 1   | `GET /skills-market/search` (skills.sh registry)                                                                                                                                                                                                                                                                                                                                   |
+| Module          | Surface intent                                                                   |
+| --------------- | -------------------------------------------------------------------------------- |
+| `agents`        | list agents + availability                                                       |
+| `mcps`          | per-agent MCP CRUD, all-agents list, transfer/reconcile                          |
+| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git |
+| `skills_update` | check-updates, apply-update, accept-rename                                       |
+| `sources`       | source list + diff                                                               |
+| `coverage`      | per-agent coverage of `.agents/skills` master                                    |
+| `sub_agents`    | sub-agent CRUD + transfer/reconcile                                              |
+| `credentials`   | credential store + source bindings                                               |
+| `inference`     | provider inventory, keyring keys, per-agent bindings/routing/presets             |
+| `plugins`       | Claude Code plugin + marketplace lifecycle                                       |
+| `integrations`  | code-editor open/preferences                                                     |
+| `market`        | skills.sh search                                                                 |
 
-Path params: `<agent>` (agent id), `<name>` (resource name). Scope is a query guard — `?<scope..>` (`ScopeParams`: `scope` + optional `project_root`); the skill content/tree routes pass `scope`+`project_root` explicitly to compute allow-listed roots. There is currently **no token auth** on the API (see CORS below).
+Path params: `<agent>`, `<name>`. Scope via `ScopeParams` (`scope` + optional `project_root`). **No token auth** — see CORS below.
 
 ## CORS & BROWSER-DRIVE-BY DEFENCE
 
@@ -86,24 +74,11 @@ cargo run -p aghub-api -- --port 8080
 
 Default: localhost:8000
 
-## DEPENDENCIES
-
-- `aghub-core` — core library (re-exports `aghub-agents`)
-- `aghub-inference` — inference provider routes
-- `aghub-cc-plugins` — Claude Code plugin lifecycle (plugins routes)
-- `aghub-git` — git clone/scan with credential injection (skills git routes)
-- `skills-sh` — skills.sh registry client (market)
-- `rocket` + `rocket_cors` — web framework + CORS
-- `keyring` — credential/keychain storage
-- `url` — URL validation (e.g. github.com credential guard)
-- `tokio` — async runtime
-
 ## PATTERNS
 
-- Uses `AppState` for shared agent registry
-- Routes extract agent type from path params
-- Delegates to `ConfigManager` for actual operations
-- Error handling via Rocket catchers
+- `AppState` holds shared state; routes take agent/scope from extractors
+- Mutations go through `ConfigManager` (never bypass)
+- Errors: machine-readable codes + safe messages (no raw filesystem paths in responses)
 
 ## ANTI-PATTERNS
 
