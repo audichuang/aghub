@@ -49,8 +49,12 @@ updates; wrong fetch = wasted network.
 
 ```bash
 cargo test -p skill-update              # network-free (fake Fetcher)
-cargo test -p skill-update -- --ignored # network E2E
 ```
+
+This crate has no `#[ignore]` network tests; its suite uses a fake `Fetcher` to
+exercise orchestration only (no real network). The real `GitFetcher` network
+E2E lives in `aghub-api` (`routes/skills_update.rs`, `#[ignore = "network"]`) —
+run with `cargo test -p aghub-api -- --ignored`.
 
 ## ANTI-PATTERNS
 

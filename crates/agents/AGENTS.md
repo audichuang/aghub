@@ -29,7 +29,7 @@ Role map (not a full file tree — `ls` / codegraph for that):
 
 **`Capabilities`**: `{ skills: SkillCapabilities, mcp: McpCapabilities, sub_agents: SubAgentCapabilities }` — scopes (global/project), transport support (stdio/remote), enable/disable toggle.
 
-**`AgentConfig`**: normalized `{ mcps: Vec<McpServer>, skills: Vec<Skill> }`.
+**`AgentConfig`**: normalized `{ mcps: Vec<McpServer>, skills: Vec<Skill>, sub_agents: Vec<SubAgent> }`.
 
 **`McpTransport`**: `Stdio { command, args, env }` | `Sse { url, headers }` | `StreamableHttp { url, headers }`. **`from_inputs` + `validate_values` are the single validation seam shared by CLI and API** (reject empty command/url, stdio-with-headers, …) — never validate MCP values anywhere else.
 

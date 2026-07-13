@@ -5,15 +5,15 @@ npx-compatible lock files with content hashes. Extends external `skills-ref`.
 
 ## WHERE TO LOOK
 
-| Task                   | Location                 | Notes                                                          |
-| ---------------------- | ------------------------ | -------------------------------------------------------------- |
-| Pack / unpack `.skill` | `src/package.rs`         | Root excludes `__pycache__`, `node_modules`, …                 |
-| Parse any on-disk form | `src/parser.rs`          | Dir / `.skill` / `.zip` / `.md`                                |
-| Sanitize skill name    | `src/sanitize.rs`        | `"My Skill!"` → `my-skill`                                     |
-| Folder content hash    | `src/hash.rs`            | npx-compatible SHA-256 (golden: `tests/hash_parity_golden.rs`) |
-| Global lock            | `src/lock/global.rs`     | `$XDG_STATE_HOME/skills/.skill-lock.json` (v3)                 |
-| Project lock           | `src/lock/local.rs`      | `<project>/skills-lock.json` (v1)                              |
-| Lock test isolation    | `src/lock/test_utils.rs` | `TestLockGuard::new()` — mutex + `XDG_STATE_HOME`              |
+| Task                   | Location                 | Notes                                                                                                                      |
+| ---------------------- | ------------------------ | -------------------------------------------------------------------------------------------------------------------------- |
+| Pack / unpack `.skill` | `src/package.rs`         | Root excludes `__pycache__`, `node_modules`, …                                                                             |
+| Parse any on-disk form | `src/parser.rs`          | Dir / `.skill` / `.zip` / `.md`                                                                                            |
+| Sanitize skill name    | `src/sanitize.rs`        | `"My Skill!"` → `my-skill`                                                                                                 |
+| Folder content hash    | `src/hash.rs`            | npx-compatible SHA-256 (golden: `tests/hash_parity_golden.rs`)                                                             |
+| Global lock            | `src/lock/global.rs`     | `$XDG_STATE_HOME/skills/.skill-lock.json`, else `~/.agents/.skill-lock.json` (or `./.agents` if `home_dir()` is None) (v3) |
+| Project lock           | `src/lock/local.rs`      | `<project>/skills-lock.json` (v1)                                                                                          |
+| Lock test isolation    | `src/lock/test_utils.rs` | `TestLockGuard::new()` — mutex + `XDG_STATE_HOME`                                                                          |
 
 ## NPX LOCK CONTRACT (do not break)
 

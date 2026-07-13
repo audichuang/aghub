@@ -92,15 +92,17 @@ Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `a
 - **Adapter pattern**: `create_adapter(agent_type)` → `registry::get` →
   `&'static AgentDescriptor` implements `AgentAdapter`. **No hand-wired adapter
   structs** — behavior is function pointers on each descriptor.
-- **Normalized model**: `AgentConfig` — `Vec<Skill>` + `Vec<McpServer>` with
-  `McpTransport` (`Stdio` | `Sse` | `StreamableHttp`).
+- **Normalized model**: `AgentConfig` — `Vec<Skill>` + `Vec<McpServer>` +
+  `Vec<SubAgent>` with `McpTransport` (`Stdio` | `Sse` | `StreamableHttp`).
 - **ConfigManager**: CRUD for resources. MCP delete (`remove_mcp_planned`)
   rewrites shared config and deletes **no** disk path — `RemovalPlan.paths` is
   deliberately empty.
 
 ## Agent-Specific Behavior
 
-Defined in `crates/agents/src/agents/<name>.rs` only (not core).
+Each agent's **descriptor** lives in `crates/agents/src/agents/<name>.rs` (not
+core); the MCP **parse/serialize** logic it points at lives in
+`crates/agents/src/format/`. Change either as the case needs.
 
 - **Claude**: skills from `~/.claude/skills/` SKILL.md (not JSON). Disabled MCPs
   omitted on serialize; URL MCPs as `"type": "sse"/"http"`.

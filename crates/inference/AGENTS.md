@@ -17,7 +17,7 @@ map the normalized model into each agent's config format.
 | API key get/set              | `credentials.rs`                               |
 | Provider delete teardown     | `cascade.rs` (shared by API + CLI; never fork) |
 | Per-agent config write       | `<agent>/files.rs`                             |
-| Normalize ↔ agent schema     | `<agent>/mapping.rs`                           |
+| Normalize ↔ agent schema     | `<agent>/mapping.rs` (Claude: `claude/mod.rs`) |
 
 ## GOTCHAS / ANTI-PATTERNS
 
@@ -27,7 +27,8 @@ map the normalized model into each agent's config format.
   inventory rows
 - This crate's `CredentialStore` is **distinct** from git/source credentials in
   `crates/api` — don't conflate them
-- Each agent maps differently; model changes must update every `<agent>/mapping.rs`
+- Each agent maps differently; model changes must update every agent's mapping
+  (`codex`/`opencode`: `mapping.rs`; Claude: `claude/mod.rs` — no `mapping.rs`)
 
 ```bash
 cargo test -p aghub-inference

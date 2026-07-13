@@ -10,7 +10,7 @@ Role map (not a full tree):
 
 - `src/` — React frontend (`pages/`, `components/`, `lib/`, generated DTOs under `src/generated/`)
 - `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI). Commands under `commands/` (credentials/logging/remote/server/window). Embeds `aghub-api` on localhost; uses `aghub-remote` for SSH — does **not** depend on `aghub-core` directly.
-- `capabilities/` — permission manifests (read `default.json`; don't restate the list here)
+- `src-tauri/capabilities/` — permission manifests (read `default.json`; don't restate the list here)
 
 Frontend form patterns: see project skill `project-form-patterns` and `src/AGENTS.md` for page-level notes.
 

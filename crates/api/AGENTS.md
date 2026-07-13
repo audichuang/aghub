@@ -53,9 +53,14 @@ the localhost API — without any client-side token:
   present-but-foreign `Origin` (browser cross-origin) AND a present-but-foreign
   `Host` (DNS-rebinding, where no Origin is sent). Both checks are LENIENT when
   the header is absent, so CLI/curl/the SSH-tunnel proxy/local test client pass.
-  Mounted ONLY on credential/keyring-touching + oracle routes: `git/scan`,
-  `git/install`, `git/sync`, `git/credential-status`, all 5 `/credentials*`, and
-  `inference/.../password`. Read-only list/get routes rely on Layer 1.
+  Currently guarded (SSOT is the `_origin: TrustedLocalOrigin` args in
+  `routes/*.rs`, not this list): `git/scan`, `git/install`, `git/sync`,
+  `git/credential-status`, all 5 `/credentials*`, `inference/.../password`,
+  `skills/check-updates`, `skills/apply-update`, `skills/accept-rename`,
+  `skills/sources/diff`. **Gap**: the `inference` provider
+  create/update/delete/sync + `set_api_key` routes also write the keyring but
+  carry NO Layer-2 guard — they lean on Layer 1 (CORS) alone. Plain read-only
+  list/get routes likewise rely on Layer 1.
 
 > When adding a route that touches keyring/OS credentials or leaks
 > credential-existence, add `_origin: TrustedLocalOrigin` to its handler.
@@ -77,7 +82,9 @@ Default: localhost:8000
 ## PATTERNS
 
 - `AppState` holds shared state; routes take agent/scope from extractors
-- Mutations go through `ConfigManager` (never bypass)
+- MCP / skill / sub-agent CRUD goes through `ConfigManager` (never bypass);
+  other domains own their store — credentials → credential store, inference →
+  `InferenceProviderStore`, plugins → `ClaudePluginManager`
 - Errors: machine-readable codes + safe messages (no raw filesystem paths in responses)
 
 ## ANTI-PATTERNS
