@@ -5,6 +5,7 @@ use rocket::serde::json::Json;
 use crate::dto::integrations::{
 	CodeEditorType, OpenWithEditorRequest, ToolInfoDto, ToolPreferencesDto,
 };
+use crate::extractors::TrustedLocalOrigin;
 
 fn resolve_editor_path(path: &str) -> std::path::PathBuf {
 	let Some(home) = dirs::home_dir() else {
@@ -23,7 +24,9 @@ fn resolve_editor_path(path: &str) -> std::path::PathBuf {
 }
 
 #[get("/integrations/code-editors")]
-pub fn list_code_editors() -> Json<Vec<ToolInfoDto>> {
+pub fn list_code_editors(
+	_origin: TrustedLocalOrigin,
+) -> Json<Vec<ToolInfoDto>> {
 	let editors: Vec<ToolInfoDto> = CodeEditorType::all()
 		.iter()
 		.map(ToolInfoDto::from)
@@ -33,6 +36,7 @@ pub fn list_code_editors() -> Json<Vec<ToolInfoDto>> {
 
 #[post("/integrations/open-with-editor", format = "json", data = "<request>")]
 pub async fn open_with_editor(
+	_origin: TrustedLocalOrigin,
 	request: Json<OpenWithEditorRequest>,
 ) -> Result<(), String> {
 	let req = request.into_inner();
@@ -52,7 +56,9 @@ pub async fn open_with_editor(
 }
 
 #[get("/integrations/preferences")]
-pub fn get_preferences() -> Json<ToolPreferencesDto> {
+pub fn get_preferences(
+	_origin: TrustedLocalOrigin,
+) -> Json<ToolPreferencesDto> {
 	Json(ToolPreferencesDto::default())
 }
 

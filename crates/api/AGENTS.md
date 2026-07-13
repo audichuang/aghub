@@ -53,19 +53,16 @@ the localhost API — without any client-side token:
   present-but-foreign `Origin` (browser cross-origin) AND a present-but-foreign
   `Host` (DNS-rebinding, where no Origin is sent). Both checks are LENIENT when
   the header is absent, so CLI/curl/the SSH-tunnel proxy/local test client pass.
-  Currently guarded (SSOT is the `_origin: TrustedLocalOrigin` args in
-  `routes/*.rs`, not this list): `git/scan`, `git/install`, `git/sync`,
-  `git/credential-status`, all 5 `/credentials*`, `inference/.../password`,
-  `skills/check-updates`, `skills/apply-update`, `skills/accept-rename`,
-  `skills/sources/diff`. **Gap**: the `inference` provider
-  create/update/delete/sync + `set_api_key` routes also write the keyring but
-  carry NO Layer-2 guard — they lean on Layer 1 (CORS) alone. Plain read-only
-  list/get routes likewise rely on Layer 1.
+  **Policy**: every `/api/v1` route (except OPTIONS preflight) takes
+  `_origin: TrustedLocalOrigin` as its first parameter. Layer 1 blocks foreign
+  Origin; Layer 2 blocks foreign Host / DNS-rebinding. Coverage is enforced by
+  `all_routes_reject_foreign_host` in `lib.rs` tests — any new non-OPTIONS route
+  that omits the guard fails that enumeration.
 
-> When adding a route that touches keyring/OS credentials or leaks
-> credential-existence, add `_origin: TrustedLocalOrigin` to its handler.
-> `allow_credentials: true` is retained (no cookie/HTTP-auth is used; the custom
-> forwarding header is unaffected by that flag).
+> When adding any non-OPTIONS `/api/v1` route, add `_origin: TrustedLocalOrigin`
+> first in the handler parameter list. `allow_credentials: true` is retained
+> (no cookie/HTTP-auth is used; the custom forwarding header is unaffected by
+> that flag).
 
 ## RUNNING
 

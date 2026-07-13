@@ -124,7 +124,10 @@ impl Fetcher for ApiFetcher {
 // ─────────────────────────── GET /skills/sources ───────────────────────────
 
 #[get("/skills/sources?<query..>")]
-pub fn list_sources(query: ScopeParams) -> ApiResult<SourcesListResponse> {
+pub fn list_sources(
+	_origin: TrustedLocalOrigin,
+	query: ScopeParams,
+) -> ApiResult<SourcesListResponse> {
 	let resolved = query.resolve()?;
 	let scopes = scopes_for(&resolved);
 

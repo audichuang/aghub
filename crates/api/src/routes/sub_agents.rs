@@ -13,7 +13,7 @@ use crate::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
 	error::{ApiCreated, ApiError, ApiResult},
-	extractors::{AgentParam, ScopeParams},
+	extractors::{AgentParam, ScopeParams, TrustedLocalOrigin},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
@@ -40,6 +40,7 @@ fn check_sub_agent_supported(
 
 #[post("/sub-agents/transfer", data = "<body>")]
 pub fn transfer_sub_agent_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<TransferRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -56,6 +57,7 @@ pub fn transfer_sub_agent_route(
 
 #[post("/sub-agents/reconcile", data = "<body>")]
 pub fn reconcile_sub_agent_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -98,6 +100,7 @@ pub fn reconcile_sub_agent_route(
 
 #[get("/agents/<agent>/sub-agents?<scope..>")]
 pub fn list_sub_agents(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 ) -> ApiResult<Vec<SubAgentResponse>> {
@@ -124,6 +127,7 @@ pub fn list_sub_agents(
 
 #[get("/agents/all/sub-agents?<scope..>")]
 pub fn list_all_agents_sub_agents(
+	_origin: TrustedLocalOrigin,
 	scope: ScopeParams,
 ) -> ApiResult<Vec<SubAgentResponse>> {
 	let resolved = scope.resolve()?;
@@ -143,6 +147,7 @@ pub fn list_all_agents_sub_agents(
 
 #[get("/agents/<agent>/sub-agents/<name>?<scope..>")]
 pub fn get_sub_agent(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: String,
 	scope: ScopeParams,
@@ -182,6 +187,7 @@ pub fn get_sub_agent(
 
 #[post("/agents/<agent>/sub-agents?<scope..>", data = "<body>")]
 pub fn create_sub_agent(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 	body: Json<CreateSubAgentRequest>,
@@ -201,6 +207,7 @@ pub fn create_sub_agent(
 
 #[put("/agents/<agent>/sub-agents/<name>?<scope..>", data = "<body>")]
 pub fn update_sub_agent(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: String,
 	scope: ScopeParams,
@@ -248,6 +255,7 @@ pub struct DeleteSubAgentParams {
 
 #[delete("/agents/<agent>/sub-agents/<name>?<params..>")]
 pub fn delete_sub_agent(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: String,
 	params: DeleteSubAgentParams,
@@ -282,6 +290,7 @@ mod tests {
 	/// have real on-disk state without touching the real home dir.
 	fn seed_sub_agent(root: &std::path::Path, name: &str) {
 		create_sub_agent(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			ScopeParams {
 				scope: Some("project".to_string()),
@@ -303,6 +312,7 @@ mod tests {
 
 	fn sub_agent_exists(root: &std::path::Path, name: &str) -> bool {
 		list_sub_agents(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			ScopeParams {
 				scope: Some("project".to_string()),
@@ -336,6 +346,7 @@ mod tests {
 		assert!(file.exists(), "precondition: backing file written");
 
 		let resp = delete_sub_agent(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"reviewer".to_string(),
 			del_params(root, None),
@@ -362,6 +373,7 @@ mod tests {
 		assert!(file.exists());
 
 		let resp = delete_sub_agent(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"goner".to_string(),
 			del_params(root, Some(true)),
@@ -391,6 +403,7 @@ mod tests {
 		seed_sub_agent(root, "present");
 
 		let resp = delete_sub_agent(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"absent".to_string(),
 			del_params(root, Some(true)),
@@ -414,6 +427,7 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let root = tmp.path();
 		let err = delete_sub_agent(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"x".to_string(),
 			DeleteSubAgentParams {

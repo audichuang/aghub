@@ -7,6 +7,7 @@ use crate::dto::agents::{
 	ScopeSupportDto, SkillCapabilitiesDto, SkillsPathsDto,
 	SubAgentCapabilitiesDto,
 };
+use crate::extractors::TrustedLocalOrigin;
 
 fn format_path(path: std::path::PathBuf) -> String {
 	let s = path.to_string_lossy();
@@ -22,7 +23,7 @@ fn format_path(path: std::path::PathBuf) -> String {
 }
 
 #[get("/agents")]
-pub fn list_agents() -> Json<Vec<AgentInfo>> {
+pub fn list_agents(_origin: TrustedLocalOrigin) -> Json<Vec<AgentInfo>> {
 	let agents = registry::iter_all()
 		.map(|d| {
 			let project_root = Path::new("");
@@ -98,7 +99,9 @@ pub fn list_agents() -> Json<Vec<AgentInfo>> {
 }
 
 #[get("/agents/availability")]
-pub fn check_availability() -> Json<Vec<AgentAvailabilityDto>> {
+pub fn check_availability(
+	_origin: TrustedLocalOrigin,
+) -> Json<Vec<AgentAvailabilityDto>> {
 	let availability_info = availability::check_all_agents_availability();
 
 	let dtos: Vec<AgentAvailabilityDto> = availability_info
@@ -120,7 +123,7 @@ mod tests {
 
 	#[test]
 	fn test_list_agents_includes_pi_without_mcp_capabilities() {
-		let agents = list_agents().into_inner();
+		let agents = list_agents(TrustedLocalOrigin).into_inner();
 		let pi = agents
 			.into_iter()
 			.find(|agent| agent.id == "pi")

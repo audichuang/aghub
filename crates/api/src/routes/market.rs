@@ -4,11 +4,13 @@ use skills_sh::{Client, SearchParams};
 
 use crate::dto::market::MarketSkill;
 use crate::error::ApiError;
+use crate::extractors::TrustedLocalOrigin;
 
 /// Search skills from marketplace
 /// `source` defaults to "skills-sh", extensible for future providers
 #[get("/skills-market/search?<q>&<limit>&<source>")]
 pub async fn search_skill_market(
+	_origin: TrustedLocalOrigin,
 	q: &str,
 	limit: Option<usize>,
 	source: Option<&str>,

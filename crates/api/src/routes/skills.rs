@@ -139,6 +139,7 @@ where
 
 #[post("/skills/transfer", data = "<body>")]
 pub fn transfer_skill_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<TransferRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -155,6 +156,7 @@ pub fn transfer_skill_route(
 
 #[post("/skills/reconcile", data = "<body>")]
 pub fn reconcile_skill_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -198,6 +200,7 @@ pub fn reconcile_skill_route(
 
 #[delete("/skills/by-path", data = "<body>")]
 pub async fn delete_skill_by_path(
+	_origin: TrustedLocalOrigin,
 	body: Json<DeleteSkillByPathRequest>,
 ) -> ApiResult<DeleteSkillByPathResponse> {
 	let req = body.into_inner();
@@ -480,6 +483,7 @@ pub async fn delete_skill_by_path(
 /// reported in `error` with the lock left untouched.
 #[post("/skills/prune-lock", data = "<body>")]
 pub fn prune_lock_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<PruneLockRequest>,
 ) -> ApiResult<PruneLockResponse> {
 	use aghub_core::skills::prune::{
@@ -890,6 +894,7 @@ fn check_skills_mutable(
 
 #[get("/agents/<agent>/skills?<scope..>")]
 pub fn list_skills(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 ) -> ApiResult<Vec<SkillResponse>> {
@@ -914,7 +919,9 @@ pub fn list_skills(
 /// `skillUsage` map. Never-dispatched skills surface as `usage_count: 0`;
 /// sorted least-used first. Claude-only (no other agent keeps a counter).
 #[get("/skills/usage")]
-pub fn list_skill_usage() -> ApiResult<Vec<SkillUsageResponse>> {
+pub fn list_skill_usage(
+	_origin: TrustedLocalOrigin,
+) -> ApiResult<Vec<SkillUsageResponse>> {
 	let rows = aghub_core::skills::usage::list_claude_skill_usage()
 		.into_iter()
 		.map(SkillUsageResponse::from)
@@ -924,6 +931,7 @@ pub fn list_skill_usage() -> ApiResult<Vec<SkillUsageResponse>> {
 
 #[post("/agents/<agent>/skills?<scope..>", data = "<body>")]
 pub async fn create_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 	body: Json<CreateSkillRequest>,
@@ -946,6 +954,7 @@ pub async fn create_skill(
 
 #[post("/agents/<agent>/skills/import?<scope..>", data = "<body>")]
 pub fn import_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 	body: Json<crate::dto::skill::ImportSkillRequest>,
@@ -986,6 +995,7 @@ pub fn import_skill(
 
 #[get("/agents/<agent>/skills/<name>?<scope..>")]
 pub fn get_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -1014,6 +1024,7 @@ pub fn get_skill(
 
 #[put("/agents/<agent>/skills/<name>?<scope..>", data = "<body>")]
 pub async fn update_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -1042,6 +1053,7 @@ pub async fn update_skill(
 
 #[delete("/agents/<agent>/skills/<name>?<params..>")]
 pub async fn delete_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	params: DeleteSkillParams,
@@ -1091,6 +1103,7 @@ pub async fn delete_skill(
 
 #[post("/agents/<agent>/skills/<name>/enable?<scope..>")]
 pub async fn enable_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -1111,6 +1124,7 @@ pub async fn enable_skill(
 
 #[post("/agents/<agent>/skills/<name>/disable?<scope..>")]
 pub async fn disable_skill(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -1175,6 +1189,7 @@ fn is_plugin_managed_skill(
 
 #[get("/agents/all/skills?<params..>")]
 pub(crate) async fn list_all_agents_skills(
+	_origin: TrustedLocalOrigin,
 	params: SkillListParams,
 ) -> ApiResult<Vec<SkillResponse>> {
 	let include_managed = params.include_managed();
@@ -1203,6 +1218,7 @@ pub(crate) async fn list_all_agents_skills(
 
 #[post("/skills/install", data = "<body>")]
 pub async fn install_skill(
+	_origin: TrustedLocalOrigin,
 	body: Json<InstallSkillRequest>,
 ) -> ApiResult<InstallSkillResponse> {
 	let req = body.into_inner();
@@ -1372,6 +1388,7 @@ pub async fn install_skill(
 
 #[post("/skills/open", format = "json", data = "<request>")]
 pub async fn open_skill_folder(
+	_origin: TrustedLocalOrigin,
 	request: Json<OpenSkillFolderRequest>,
 ) -> Result<(), String> {
 	let req = request.into_inner();
@@ -1386,6 +1403,7 @@ pub async fn open_skill_folder(
 
 #[post("/skills/edit", format = "json", data = "<request>")]
 pub async fn edit_skill_folder(
+	_origin: TrustedLocalOrigin,
 	request: Json<EditSkillFolderRequest>,
 ) -> Result<(), String> {
 	let req = request.into_inner();
@@ -1470,7 +1488,10 @@ fn assert_skill_read_allowed(
 }
 
 #[get("/skills/content?<query..>")]
-pub fn get_skill_content(query: SkillContentQuery) -> ApiResult<String> {
+pub fn get_skill_content(
+	_origin: TrustedLocalOrigin,
+	query: SkillContentQuery,
+) -> ApiResult<String> {
 	let resolved = ScopeParams {
 		scope: query.scope.clone(),
 		project_root: query.project_root.clone(),
@@ -1507,6 +1528,7 @@ pub fn get_skill_content(query: SkillContentQuery) -> ApiResult<String> {
 
 #[get("/skills/tree?<query..>")]
 pub fn get_skill_tree(
+	_origin: TrustedLocalOrigin,
 	query: SkillTreeQuery,
 ) -> ApiResult<SkillTreeNodeResponse> {
 	let resolved = ScopeParams {
@@ -1534,7 +1556,9 @@ pub fn get_skill_tree(
 }
 
 #[get("/skills/lock/global")]
-pub fn get_global_skill_lock() -> ApiResult<GlobalSkillLockResponse> {
+pub fn get_global_skill_lock(
+	_origin: TrustedLocalOrigin,
+) -> ApiResult<GlobalSkillLockResponse> {
 	let lock = skill::lock::global::read_skill_lock();
 	let skills: Vec<SkillLockEntryResponse> = lock
 		.skills
@@ -1562,6 +1586,7 @@ pub fn get_global_skill_lock() -> ApiResult<GlobalSkillLockResponse> {
 
 #[get("/skills/lock/project?<query..>")]
 pub fn get_project_skill_lock(
+	_origin: TrustedLocalOrigin,
 	query: ProjectLockQuery,
 ) -> ApiResult<ProjectSkillLockResponse> {
 	let cwd = query.project_path.as_deref().map(std::path::Path::new);
@@ -2489,11 +2514,13 @@ mod tests {
 	fn delete_by_path_dry_run_default_lists_paths_and_keeps_dir() {
 		with_isolated_env(|home, _state| {
 			let dir = write_claude_skill(home, "mytool");
-			let resp =
-				block_on(delete_skill_by_path(Json(by_path_req(&dir, None))))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let resp = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(by_path_req(&dir, None)),
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
 			assert!(resp.success);
 			assert!(resp.dry_run, "default must be dry-run");
 			assert!(resp.paths.iter().any(|p| p.ends_with("mytool")));
@@ -2506,10 +2533,10 @@ mod tests {
 	fn delete_by_path_confirm_deletes_dir() {
 		with_isolated_env(|home, _state| {
 			let dir = write_claude_skill(home, "goner");
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&dir,
-				Some(true),
-			))))
+			let resp = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(by_path_req(&dir, Some(true))),
+			))
 			.ok()
 			.expect("handler returned ok")
 			.into_inner();
@@ -2533,10 +2560,10 @@ mod tests {
 			let link = skills.join("evil");
 			std::os::unix::fs::symlink(&outside, &link).unwrap();
 
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&link,
-				Some(true),
-			))))
+			let resp = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(by_path_req(&link, Some(true))),
+			))
 			.ok()
 			.expect("handler returned ok")
 			.into_inner();
@@ -2576,10 +2603,11 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp = block_on(delete_skill_by_path(Json(req)))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
 
 			assert!(
 				master.join("SKILL.md").exists(),
@@ -2633,10 +2661,11 @@ mod tests {
 				all_agents: None,
 				confirm: Some(true),
 			};
-			let resp = block_on(delete_skill_by_path(Json(req)))
-				.ok()
-				.expect("handler ok")
-				.into_inner();
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler ok")
+					.into_inner();
 			std::env::set_current_dir(prev).unwrap();
 
 			assert!(resp.success, "delete must resolve the relative root");
@@ -2669,10 +2698,13 @@ mod tests {
 			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
 			let before = std::fs::read(&lock_path).unwrap();
 
-			let resp = prune_lock_route(Json(prune_req("global", None, None)))
-				.ok()
-				.expect("handler returned ok")
-				.into_inner();
+			let resp = prune_lock_route(
+				TrustedLocalOrigin,
+				Json(prune_req("global", None, None)),
+			)
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
 
 			assert!(resp.dry_run);
 			assert!(resp.error.is_none());
@@ -2689,11 +2721,13 @@ mod tests {
 			let lock_path = lock_dir.join(".skill-lock.json");
 			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
 
-			let resp =
-				prune_lock_route(Json(prune_req("global", None, Some(true))))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let resp = prune_lock_route(
+				TrustedLocalOrigin,
+				Json(prune_req("global", None, Some(true))),
+			)
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
 
 			assert!(!resp.dry_run);
 			assert!(resp.pruned.iter().any(|n| n == "orphan"));
@@ -2707,11 +2741,13 @@ mod tests {
 	#[test]
 	fn prune_lock_route_project_requires_project_root() {
 		with_isolated_env(|_home, _state| {
-			let resp =
-				prune_lock_route(Json(prune_req("project", None, Some(true))))
-					.ok()
-					.expect("handler returned ok")
-					.into_inner();
+			let resp = prune_lock_route(
+				TrustedLocalOrigin,
+				Json(prune_req("project", None, Some(true))),
+			)
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
 			assert!(resp.error.is_some(), "project prune needs a project root");
 			assert!(resp.pruned.is_empty());
 		});
@@ -2747,7 +2783,7 @@ mod tests {
 				path: source_skill.join("SKILL.md").display().to_string(),
 			});
 
-			import_skill(agent, scope, body)
+			import_skill(TrustedLocalOrigin, agent, scope, body)
 				.ok()
 				.expect("import_skill returned ok");
 
@@ -3819,7 +3855,7 @@ mod tests {
 				project_path: None,
 				install_all: Some(false),
 			};
-			let resp = block_on(install_skill(Json(req)))
+			let resp = block_on(install_skill(TrustedLocalOrigin, Json(req)))
 				.ok()
 				.expect("handler ok")
 				.into_inner();
@@ -3851,10 +3887,10 @@ mod tests {
 			let link = skills.join("linked");
 			std::os::unix::fs::symlink(&master, &link).unwrap();
 
-			let resp = block_on(delete_skill_by_path(Json(by_path_req(
-				&link,
-				Some(true),
-			))))
+			let resp = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(by_path_req(&link, Some(true))),
+			))
 			.ok()
 			.expect("handler ok")
 			.into_inner();
@@ -3971,7 +4007,7 @@ mod tests {
 				project_path: Some("proj".to_string()),
 				install_all: Some(false),
 			};
-			let resp = block_on(install_skill(Json(req)))
+			let resp = block_on(install_skill(TrustedLocalOrigin, Json(req)))
 				.ok()
 				.expect("handler ok")
 				.into_inner();

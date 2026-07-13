@@ -844,4 +844,194 @@ mod tests {
 		server.abort();
 		let _ = server.await;
 	}
+
+	/// Replace Rocket dynamic path segments (`<id>`, `<name..>`, …) with a
+	/// non-empty placeholder so the router matches. Query is omitted when fully
+	/// dynamic/wild (current routes); static `key=value` query fields are kept.
+	fn fill_uri(uri: &str) -> String {
+		let (path, query) = match uri.split_once('?') {
+			Some((p, q)) => (p, Some(q)),
+			None => (uri, None),
+		};
+		let mut filled = String::with_capacity(path.len());
+		let mut chars = path.chars().peekable();
+		while let Some(c) = chars.next() {
+			if c == '<' {
+				for inner in chars.by_ref() {
+					if inner == '>' {
+						break;
+					}
+				}
+				filled.push('x');
+			} else {
+				filled.push(c);
+			}
+		}
+		if let Some(q) = query {
+			// Keep only static `key=value` fields; drop dynamic/wild (`<…>`).
+			let static_parts: Vec<&str> = q
+				.split('&')
+				.filter(|part| !part.contains('<') && part.contains('='))
+				.collect();
+			if !static_parts.is_empty() {
+				filled.push('?');
+				filled.push_str(&static_parts.join("&"));
+			}
+		}
+		filled
+	}
+
+	/// Triple isolation for handler-side side effects if a route ever omits the
+	/// Layer-2 guard: (a) env → temp HOME/XDG/PATH under `test_env_lock`,
+	/// (b) temp app_data for inference SQLite, (c) mock keyring builder so the
+	/// native OS keychain is never touched.
+	struct IsolatedApiTest {
+		_lock: std::sync::MutexGuard<'static, ()>,
+		_home: tempfile::TempDir,
+		_xdg_config: tempfile::TempDir,
+		_xdg_state: tempfile::TempDir,
+		_path_bin: tempfile::TempDir,
+		app_data: tempfile::TempDir,
+		old_home: Option<String>,
+		old_xdg_config: Option<String>,
+		old_xdg_state: Option<String>,
+		old_path: Option<String>,
+	}
+
+	impl IsolatedApiTest {
+		fn new() -> Self {
+			let lock = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			// Process-global; safe under the same lock that serializes env tests.
+			keyring::set_default_credential_builder(
+				keyring::mock::default_credential_builder(),
+			);
+
+			let home = tempfile::tempdir().expect("home tempdir");
+			let xdg_config = tempfile::tempdir().expect("xdg config tempdir");
+			let xdg_state = tempfile::tempdir().expect("xdg state tempdir");
+			let path_bin = tempfile::tempdir().expect("PATH tempdir");
+			let app_data = tempfile::tempdir().expect("app_data tempdir");
+
+			let old_home = std::env::var("HOME").ok();
+			let old_xdg_config = std::env::var("XDG_CONFIG_HOME").ok();
+			let old_xdg_state = std::env::var("XDG_STATE_HOME").ok();
+			let old_path = std::env::var("PATH").ok();
+
+			std::env::set_var("HOME", home.path());
+			std::env::set_var("XDG_CONFIG_HOME", xdg_config.path());
+			std::env::set_var("XDG_STATE_HOME", xdg_state.path());
+			// Minimal PATH so handlers that shell out to CLIs cannot find tools.
+			std::env::set_var("PATH", path_bin.path());
+
+			Self {
+				_lock: lock,
+				_home: home,
+				_xdg_config: xdg_config,
+				_xdg_state: xdg_state,
+				_path_bin: path_bin,
+				app_data,
+				old_home,
+				old_xdg_config,
+				old_xdg_state,
+				old_path,
+			}
+		}
+
+		fn restore_var(key: &str, old: &Option<String>) {
+			match old {
+				Some(v) => std::env::set_var(key, v),
+				None => std::env::remove_var(key),
+			}
+		}
+	}
+
+	impl Drop for IsolatedApiTest {
+		fn drop(&mut self) {
+			Self::restore_var("HOME", &self.old_home);
+			Self::restore_var("XDG_CONFIG_HOME", &self.old_xdg_config);
+			Self::restore_var("XDG_STATE_HOME", &self.old_xdg_state);
+			Self::restore_var("PATH", &self.old_path);
+		}
+	}
+
+	#[test]
+	fn all_routes_reject_foreign_host() {
+		// Gatekeeper: every non-OPTIONS mounted route must carry Layer-2
+		// TrustedLocalOrigin. Probe with foreign Host and NO Origin — foreign
+		// Origin alone is also blocked by CORS Layer 1 and would give a false
+		// green. ContentType::JSON avoids format=json routes matching 404.
+		let iso = IsolatedApiTest::new();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			iso.app_data.path().to_path_buf(),
+		))
+		.expect("client");
+
+		let mut checked = 0usize;
+		for route in client.rocket().routes() {
+			if route.method == rocket::http::Method::Options {
+				continue;
+			}
+			// Only `/api/v1/*` handlers must carry Layer 2. rocket_cors mounts
+			// internal `/cors/<status>` error routes that are not our surface.
+			let uri = fill_uri(route.uri.as_str());
+			if !uri.starts_with("/api/v1") {
+				continue;
+			}
+			let response = client
+				.req(route.method, &uri)
+				.header(Header::new("Host", "evil.example"))
+				.header(rocket::http::ContentType::JSON)
+				.dispatch();
+			assert_eq!(
+				response.status(),
+				Status::Forbidden,
+				"route {} {} ({}) must reject foreign Host with 403; got {}",
+				route.method,
+				uri,
+				route.name.as_deref().unwrap_or("?"),
+				response.status(),
+			);
+			checked += 1;
+		}
+		assert!(
+			checked > 0,
+			"expected mounted non-OPTIONS /api/v1 routes to enumerate"
+		);
+	}
+
+	#[test]
+	fn trusted_origin_and_host_not_forbidden() {
+		// Positive sanity: webview-shaped headers (trusted Origin + trusted Host)
+		// must not be blocked by Layer 2. Use a pure read route so the handler
+		// cannot fail for unrelated reasons in a way that confuses the assert.
+		let iso = IsolatedApiTest::new();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			iso.app_data.path().to_path_buf(),
+		))
+		.expect("client");
+		let port = client.rocket().config().port;
+		let host = format!("127.0.0.1:{port}");
+
+		for path in [
+			"/api/v1/agents",
+			"/api/v1/integrations/code-editors",
+			"/api/v1/credentials",
+		] {
+			let response = client
+				.get(path)
+				.header(Header::new("Origin", "tauri://localhost"))
+				.header(Header::new("Host", host.clone()))
+				.dispatch();
+			assert_ne!(
+				response.status(),
+				Status::Forbidden,
+				"{path} with trusted Origin+Host must not be 403; got {}",
+				response.status(),
+			);
+		}
+	}
 }

@@ -11,7 +11,7 @@ use crate::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
 	},
 	error::{ApiCreated, ApiError, ApiResult},
-	extractors::{AgentParam, ScopeParams},
+	extractors::{AgentParam, ScopeParams, TrustedLocalOrigin},
 	routes::{
 		build_manager_from_resolved, require_writable_scope,
 		resolved_to_resource_scope,
@@ -38,6 +38,7 @@ fn check_mcp_supported(
 
 #[get("/agents/<agent>/mcps?<scope..>")]
 pub fn list_mcps(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 ) -> ApiResult<Vec<McpResponse>> {
@@ -60,6 +61,7 @@ pub fn list_mcps(
 
 #[post("/mcps/transfer", data = "<body>")]
 pub fn transfer_mcp_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<TransferRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -76,6 +78,7 @@ pub fn transfer_mcp_route(
 
 #[post("/mcps/reconcile", data = "<body>")]
 pub fn reconcile_mcp_route(
+	_origin: TrustedLocalOrigin,
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -118,6 +121,7 @@ pub fn reconcile_mcp_route(
 
 #[post("/agents/<agent>/mcps?<scope..>", data = "<body>")]
 pub fn create_mcp(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
 	body: Json<CreateMcpRequest>,
@@ -141,6 +145,7 @@ pub fn create_mcp(
 
 #[get("/agents/<agent>/mcps/<name>?<scope..>")]
 pub fn get_mcp(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -168,6 +173,7 @@ pub fn get_mcp(
 
 #[put("/agents/<agent>/mcps/<name>?<scope..>", data = "<body>")]
 pub fn update_mcp(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -203,6 +209,7 @@ pub struct DeleteMcpParams {
 
 #[delete("/agents/<agent>/mcps/<name>?<params..>")]
 pub fn delete_mcp(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	params: DeleteMcpParams,
@@ -240,6 +247,7 @@ pub fn delete_mcp(
 
 #[post("/agents/<agent>/mcps/<name>/enable?<scope..>")]
 pub fn enable_mcp(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -257,6 +265,7 @@ pub fn enable_mcp(
 
 #[post("/agents/<agent>/mcps/<name>/disable?<scope..>")]
 pub fn disable_mcp(
+	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -273,7 +282,10 @@ pub fn disable_mcp(
 }
 
 #[get("/agents/all/mcps?<scope..>")]
-pub fn list_all_agents_mcps(scope: ScopeParams) -> ApiResult<Vec<McpResponse>> {
+pub fn list_all_agents_mcps(
+	_origin: TrustedLocalOrigin,
+	scope: ScopeParams,
+) -> ApiResult<Vec<McpResponse>> {
 	let resolved = scope.resolve()?;
 	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	let items = load_all_agents(resource_scope, project_root.as_deref())
@@ -299,6 +311,7 @@ mod tests {
 	#[test]
 	fn test_create_mcp_rejects_pi_agent() {
 		let result = create_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Pi),
 			ScopeParams {
 				scope: Some("global".to_string()),
@@ -326,6 +339,7 @@ mod tests {
 	#[test]
 	fn test_create_mcp_rejects_zero_timeout() {
 		let result = create_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			ScopeParams {
 				scope: Some("global".to_string()),
@@ -352,6 +366,7 @@ mod tests {
 	#[test]
 	fn test_create_mcp_rejects_zero_transport_timeout() {
 		let result = create_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			ScopeParams {
 				scope: Some("global".to_string()),
@@ -380,6 +395,7 @@ mod tests {
 		use crate::dto::mcp::UpdateMcpRequest;
 
 		let result = update_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"any",
 			ScopeParams {
@@ -405,6 +421,7 @@ mod tests {
 		use crate::dto::mcp::UpdateMcpRequest;
 
 		let result = update_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"any",
 			ScopeParams {
@@ -436,6 +453,7 @@ mod tests {
 	/// real on-disk state without touching the real home dir.
 	fn seed_mcp(root: &std::path::Path, name: &str) {
 		create_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			ScopeParams {
 				scope: Some("project".to_string()),
@@ -458,6 +476,7 @@ mod tests {
 
 	fn mcp_exists(root: &std::path::Path, name: &str) -> bool {
 		list_mcps(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			ScopeParams {
 				scope: Some("project".to_string()),
@@ -489,6 +508,7 @@ mod tests {
 		seed_mcp(root, "keepme");
 
 		let resp = delete_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"keepme",
 			delete_params(root, None),
@@ -515,6 +535,7 @@ mod tests {
 		seed_mcp(root, "goner");
 
 		let resp = delete_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"goner",
 			delete_params(root, Some(true)),
@@ -538,6 +559,7 @@ mod tests {
 		seed_mcp(root, "present");
 
 		let resp = delete_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"absent",
 			delete_params(root, Some(true)),
@@ -563,6 +585,7 @@ mod tests {
 		let root = tmp.path();
 
 		let resp = delete_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Claude),
 			"anything",
 			delete_params(root, None),
@@ -586,6 +609,7 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let root = tmp.path();
 		let err = delete_mcp(
+			TrustedLocalOrigin,
 			AgentParam(AgentType::Pi),
 			"x",
 			delete_params(root, Some(true)),

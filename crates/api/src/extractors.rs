@@ -117,8 +117,8 @@ impl ScopeParams {
 ///   attacker's rebound domain. (Layer-1 CORS can't see this; upstream's guard
 ///   omitted the Host check.)
 ///
-/// Only mounted on routes that touch keyring/OS credentials or act as a
-/// credential-existence oracle; read-only list/get routes rely on Layer-1 CORS.
+/// Mounted on every `/api/v1` route except OPTIONS preflight. Enumerated by
+/// `all_routes_reject_foreign_host` so new routes cannot silently omit it.
 pub struct TrustedLocalOrigin;
 
 /// Extract the host from an `authority` (`host`, `host:port`, or `[::1]:port`).

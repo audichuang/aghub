@@ -3,7 +3,7 @@ use rocket::serde::json::Json;
 
 use crate::dto::agent_coverage::AgentSkillCoverageDto;
 use crate::error::ApiResult;
-use crate::extractors::{ResolvedScope, ScopeParams};
+use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::linker::classify::classify_all;
 use aghub_core::skills::linker::{
@@ -18,6 +18,7 @@ use aghub_core::skills::linker::{
 /// absolutized by `ScopeParams::resolve` (P0-C) before reaching the classifier.
 #[get("/skills/coverage?<params..>")]
 pub async fn skills_coverage(
+	_origin: TrustedLocalOrigin,
 	params: ScopeParams,
 ) -> ApiResult<Vec<AgentSkillCoverageDto>> {
 	let resolved = params.resolve()?;
@@ -91,7 +92,7 @@ mod tests {
 			scope: Some("global".to_string()),
 			project_root: None,
 		};
-		let dtos = block_on(skills_coverage(params))
+		let dtos = block_on(skills_coverage(TrustedLocalOrigin, params))
 			.ok()
 			.expect("handler ok")
 			.into_inner();
@@ -119,8 +120,8 @@ mod tests {
 			scope: Some("all".to_string()),
 			project_root: None,
 		};
-		let err =
-			block_on(skills_coverage(params)).expect_err("scope=all rejected");
+		let err = block_on(skills_coverage(TrustedLocalOrigin, params))
+			.expect_err("scope=all rejected");
 		assert_eq!(err.status, rocket::http::Status::BadRequest);
 	}
 

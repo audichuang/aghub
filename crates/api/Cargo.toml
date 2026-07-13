@@ -49,3 +49,5 @@ base64 = { workspace = true }
 
 [dev-dependencies]
 url = { workspace = true }
+# Mock credential builder for Layer-2 enumeration tests (isolates native keyring).
+keyring = "3"
