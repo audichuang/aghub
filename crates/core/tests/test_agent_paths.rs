@@ -5,10 +5,25 @@
 use aghub_agents::agents::{amp, cursor, kimi, openclaw, opencode, pi};
 use std::path::{Path, PathBuf};
 
+// Serializes every test in this binary that reads OR mutates global env
+// (`$HOME`/`XDG_*`). libtest runs a binary's tests on parallel threads of ONE
+// process, and on Unix mutating env while another thread reads it is UB
+// (`dirs::home_dir()` reads `$HOME`) — so the mutating test AND every
+// env-reading path test below must hold this lock. Not `#[cfg(unix)]`: readers
+// call it on all platforms, so it is never dead code on Windows.
+fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+	use std::sync::{Mutex, OnceLock};
+	static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+	LOCK.get_or_init(|| Mutex::new(()))
+		.lock()
+		.unwrap_or_else(|e| e.into_inner())
+}
+
 // ─── XDG config path tests (xdg-config-paths.test.ts) ───────────────────────
 
 #[test]
 fn test_opencode_global_config_path_not_platform_specific() {
+	let _env = env_lock();
 	let path = opencode::DESCRIPTOR
 		.mcp_global_path
 		.and_then(|path| path())
@@ -33,6 +48,7 @@ fn test_opencode_global_config_path_not_platform_specific() {
 
 #[test]
 fn test_amp_global_skills_uses_xdg() {
+	let _env = env_lock();
 	let paths = amp::DESCRIPTOR.global_skill_read_paths();
 	let path = paths.first().expect("Should have at least one path");
 	let path_str = path.to_string_lossy();
@@ -45,6 +61,7 @@ fn test_amp_global_skills_uses_xdg() {
 
 #[test]
 fn test_amp_global_skills_not_platform_specific() {
+	let _env = env_lock();
 	let paths = amp::DESCRIPTOR.global_skill_read_paths();
 	let path = paths.first().expect("Should have at least one path");
 	let path_str = path.to_string_lossy();
@@ -67,6 +84,7 @@ fn test_amp_global_skills_not_platform_specific() {
 
 #[test]
 fn test_cursor_global_skills_path() {
+	let _env = env_lock();
 	let paths = cursor::DESCRIPTOR.global_skill_read_paths();
 	let path = paths.first().expect("Should have at least one path");
 	assert!(
@@ -83,6 +101,7 @@ fn test_cursor_global_skills_path() {
 
 #[test]
 fn test_kimi_global_mcp_path() {
+	let _env = env_lock();
 	let path = kimi::DESCRIPTOR
 		.mcp_global_path
 		.and_then(|path| path())
@@ -96,6 +115,7 @@ fn test_kimi_global_mcp_path() {
 
 #[test]
 fn test_pi_global_skills_path_uses_agent_dir() {
+	let _env = env_lock();
 	let paths = pi::DESCRIPTOR.global_skill_read_paths();
 	let path = paths.first().expect("Should have at least one path");
 	assert!(
@@ -179,24 +199,24 @@ fn test_openclaw_skills_enabled() {
 #[cfg(unix)]
 #[test]
 fn test_opencode_global_creation_persists() {
-	use std::sync::{Mutex, OnceLock};
+	use std::ffi::OsString;
 
 	// Global skill install resolves the master via dirs::home_dir() →
 	// `$HOME/.agents/skills`. Isolate HOME so real path logic still runs
 	// without writing under the developer's real skill tree (this test used
 	// to create one `test-skill-opencode-<millis>/` per run with no teardown).
-	static HOME_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-	let _home_lock = HOME_LOCK
-		.get_or_init(|| Mutex::new(()))
-		.lock()
-		.unwrap_or_else(|e| e.into_inner());
+	// This test mutates $HOME, so hold the binary's env lock to exclude other
+	// env-touching tests in the same process.
+	let _env = env_lock();
 
 	let fake_home = tempfile::tempdir().unwrap();
-	let previous_home = std::env::var("HOME").ok();
+	// Use OsString: a Unix $HOME may be non-UTF-8, and String would drop it,
+	// making the Drop below wrongly `remove_var` and pollute later tests.
+	let previous_home = std::env::var_os("HOME");
 	std::env::set_var("HOME", fake_home.path());
 
 	// RAII: always restore $HOME, even if an assert panics mid-test.
-	struct RestoreHome(Option<String>);
+	struct RestoreHome(Option<OsString>);
 	impl Drop for RestoreHome {
 		fn drop(&mut self) {
 			match &self.0 {
@@ -205,12 +225,15 @@ fn test_opencode_global_creation_persists() {
 			}
 		}
 	}
-	let _restore_home = RestoreHome(previous_home.clone());
+	let _restore_home = RestoreHome(previous_home);
 
-	// RAII: always delete every on-disk skill dir we may have written, even
-	// if an assert panics. Covers the isolated master, the OpenCode agent
-	// slot, and — as a last resort — the real user home in case HOME
-	// isolation failed and something leaked there.
+	// RAII: best-effort remove of the skill dirs we may write under the
+	// isolated HOME if an assert panics before explicit teardown (errors are
+	// swallowed, and the fake_home TempDir drop is likewise best-effort — a
+	// permission/IO failure could still leave residue on the panic path). No
+	// real-home paths here — HOME is isolated, so writes cannot reach the
+	// developer's real tree, and blindly deleting a real-home path could nuke a
+	// legitimately-named dir the user happens to own.
 	struct CleanupSkill {
 		paths: Vec<PathBuf>,
 	}
@@ -229,16 +252,8 @@ fn test_opencode_global_creation_persists() {
 		.path()
 		.join(".config/opencode/skills")
 		.join(skill_name);
-	// Belt-and-suspenders: if HOME isolation somehow fails, still wipe the
-	// real-user path so we never re-introduce the original pollution.
-	let mut cleanup_paths = vec![isolated_master.clone(), isolated_agent];
-	if let Some(real_home) = previous_home.as_ref().map(PathBuf::from) {
-		cleanup_paths.push(real_home.join(".agents/skills").join(skill_name));
-		cleanup_paths
-			.push(real_home.join(".config/opencode/skills").join(skill_name));
-	}
 	let _cleanup = CleanupSkill {
-		paths: cleanup_paths,
+		paths: vec![isolated_master.clone(), isolated_agent],
 	};
 
 	// TestConfig sets a skills_path_override by default; clear it so install
@@ -265,8 +280,11 @@ fn test_opencode_global_creation_persists() {
 		"Skill should survive reload"
 	);
 
-	// Prove the write went through home-dir resolution, not the TestConfig
-	// override. CleanupSkill + fake_home TempDir both remove it afterward.
+	// The write landing under the isolated `$HOME/.agents/skills` proves it
+	// went through home-dir resolution (not the TestConfig override) and that
+	// isolation redirected the write off the real user home. (It cannot by
+	// itself rule out a hypothetical double-write also hitting real home —
+	// HOME isolation is what guarantees the real tree stays untouched.)
 	let master_md = isolated_master.join("SKILL.md");
 	assert!(
 		master_md.is_file(),
@@ -274,18 +292,8 @@ fn test_opencode_global_creation_persists() {
 		master_md.display()
 	);
 
-	// Explicit delete before drop (same paths CleanupSkill covers). Fail the
-	// test if anything is still present — leaving junk is the bug.
-	assert!(
-		!previous_home
-			.as_ref()
-			.map(|h| PathBuf::from(h)
-				.join(".agents/skills")
-				.join(skill_name)
-				.exists())
-			.unwrap_or(false),
-		"must never write the test skill into the real ~/.agents/skills"
-	);
+	// Explicit teardown before drop; fail if anything is still present —
+	// leaving junk is the bug this test guards against.
 	std::fs::remove_dir_all(&isolated_master)
 		.expect("explicit teardown must remove the isolated master skill dir");
 	assert!(
