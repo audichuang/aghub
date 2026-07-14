@@ -146,6 +146,9 @@ Non-obvious invariants:
 - Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 - **`skill-usage`**: Claude-global only; rejects project/`--all`
 - **`coverage`**: rejects `--all`; scope `-g` or `-p` only
+- **`transfer`** / **`reconcile`**: cross-agent copy / reconcile of
+  skills·mcps·sub-agents (reconcile-with-removals is dry-run — see above)
+- **`inference`**: provider inventory + keyring keys + per-agent bindings/routing
 
 ## Skills Discovery
 
