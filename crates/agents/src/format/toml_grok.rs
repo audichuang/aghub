@@ -85,6 +85,18 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?,
 		};
+		// Reject entries that mix stdio-family and remote-family keys.
+		let has_stdio = ["command", "args", "env"]
+			.iter()
+			.any(|k| server.contains_key(*k));
+		let has_remote = ["url", "headers", "type"]
+			.iter()
+			.any(|k| server.contains_key(*k));
+		if has_stdio && has_remote {
+			return Err(ConfigError::InvalidConfig(format!(
+				"Grok MCP server `{name}` mixes stdio keys (command/args/env) with remote keys (url/headers/type)"
+			)));
+		}
 		let transport = if let Some(cmd) = server.get("command") {
 			let command = cmd
 				.as_str()
@@ -653,5 +665,50 @@ enabled = true
 			sub_agents: vec![],
 		};
 		assert!(serialize(&cfg, Some("[mcp_servers]\ns = 5\n")).is_err());
+	}
+
+	#[test]
+	fn parse_http_type_is_streamable() {
+		let cfg = parse(
+			"[mcp_servers.s]\nurl = \"https://x/mcp\"\ntype = \"http\"\n",
+		)
+		.unwrap();
+		assert!(matches!(
+			cfg.mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+	}
+
+	#[test]
+	fn parse_rejects_unknown_type() {
+		assert!(parse(
+			"[mcp_servers.s]\nurl = \"https://x\"\ntype = \"weird\"\n"
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn parse_rejects_non_string_type() {
+		assert!(
+			parse("[mcp_servers.s]\nurl = \"https://x\"\ntype = 5\n").is_err()
+		);
+	}
+
+	#[test]
+	fn parse_rejects_mixed_transport_keys() {
+		assert!(parse(
+			"[mcp_servers.s]\ncommand = \"x\"\nurl = \"https://y\"\n"
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn parse_rejects_scalar_args() {
+		assert!(parse("[mcp_servers.s]\ncommand = \"x\"\nargs = 5\n").is_err());
+	}
+
+	#[test]
+	fn parse_rejects_non_table_env() {
+		assert!(parse("[mcp_servers.s]\ncommand = \"x\"\nenv = 5\n").is_err());
 	}
 }
