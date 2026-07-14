@@ -288,7 +288,11 @@ pub fn save_mcps_to_file(
 		fs::create_dir_all(parent)?;
 	}
 
-	let original_content = fs::read_to_string(path).ok();
+	let original_content = match fs::read_to_string(path) {
+		Ok(content) => Some(content),
+		Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+		Err(e) => return Err(e.into()),
+	};
 	let mut config = AgentConfig::new();
 	config.mcps = mcps.to_vec();
 
@@ -458,5 +462,26 @@ pub mod mcp_strategy {
 	}
 	pub fn serialize_none(_: &AgentConfig, _: Option<&str>) -> Result<String> {
 		Ok(String::new())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn save_mcps_to_file_preserves_unrelated_content_via_serializer() {
+		// A serializer that appends " KEEP" proves the original was read, not
+		// discarded. Regression for the `.ok()`-swallows-errors bug.
+		use crate::models::AgentConfig;
+		fn ser(_c: &AgentConfig, original: Option<&str>) -> Result<String> {
+			Ok(format!("{} KEEP", original.unwrap_or("NONE")))
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let path = dir.path().join("config.yaml");
+		std::fs::write(&path, "model: gpt\n").unwrap();
+		save_mcps_to_file(&path, &[], ser).unwrap();
+		let out = std::fs::read_to_string(&path).unwrap();
+		assert_eq!(out, "model: gpt\n KEEP");
 	}
 }
