@@ -2,9 +2,6 @@
 # Enable sccache for faster rebuilds after clean
 rustc-wrapper = "sccache"
 
-# Enable incremental compilation for faster iterative development
-incremental = true
-
 [profile.dev]
 # Faster debug builds with minimal optimization
 opt-level = 0
