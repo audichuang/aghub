@@ -12,15 +12,31 @@ use std::collections::HashMap;
 
 const TRANSPORT_KEYS: [&str; 5] = ["command", "args", "env", "url", "headers"];
 
-fn value_to_string_map(v: &Value) -> Option<HashMap<String, String>> {
-	let map = v.as_mapping()?;
+fn value_to_string_map(
+	v: &Value,
+	server: &str,
+	field: &str,
+) -> Result<HashMap<String, String>> {
+	let map = v.as_mapping().ok_or_else(|| {
+		ConfigError::InvalidConfig(format!(
+			"Hermes MCP server `{server}` field `{field}` must be a mapping"
+		))
+	})?;
 	let mut out = HashMap::new();
 	for (k, val) in map {
-		if let (Some(k), Some(val)) = (k.as_str(), val.as_str()) {
-			out.insert(k.to_string(), val.to_string());
-		}
+		let k = k.as_str().ok_or_else(|| {
+			ConfigError::InvalidConfig(format!(
+				"Hermes MCP server `{server}` field `{field}` has a non-string key"
+			))
+		})?;
+		let val = val.as_str().ok_or_else(|| {
+			ConfigError::InvalidConfig(format!(
+				"Hermes MCP server `{server}` field `{field}`.`{k}` must be a string"
+			))
+		})?;
+		out.insert(k.to_string(), val.to_string());
 	}
-	Some(out)
+	Ok(out)
 }
 
 fn string_map_to_value(map: &HashMap<String, String>) -> Value {
@@ -62,22 +78,46 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				"Hermes MCP server `{name}` is not a mapping"
 			))
 		})?;
-		let enabled = server
-			.get("enabled")
-			.and_then(Value::as_bool)
-			.unwrap_or(true);
+		let enabled = match server.get("enabled") {
+			None => true,
+			Some(v) => v.as_bool().ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"Hermes MCP server `{name}` field `enabled` must be a boolean"
+				))
+			})?,
+		};
 		let transport = if let Some(cmd) = server.get("command") {
-			let command = cmd.as_str().unwrap_or_default().to_string();
-			let args = server
-				.get("args")
-				.and_then(Value::as_sequence)
-				.map(|seq| {
+			let command = cmd
+				.as_str()
+				.ok_or_else(|| {
+					ConfigError::InvalidConfig(format!(
+						"Hermes MCP server `{name}` field `command` must be a string"
+					))
+				})?
+				.to_string();
+			let args = match server.get("args") {
+				None => Vec::new(),
+				Some(v) => {
+					let seq = v.as_sequence().ok_or_else(|| {
+						ConfigError::InvalidConfig(format!(
+							"Hermes MCP server `{name}` field `args` must be a sequence"
+						))
+					})?;
 					seq.iter()
-						.filter_map(|v| v.as_str().map(str::to_string))
-						.collect()
-				})
-				.unwrap_or_default();
-			let env = server.get("env").and_then(value_to_string_map);
+						.map(|a| {
+							a.as_str().map(str::to_string).ok_or_else(|| {
+								ConfigError::InvalidConfig(format!(
+									"Hermes MCP server `{name}` field `args` must contain only strings"
+								))
+							})
+						})
+						.collect::<Result<Vec<_>>>()?
+				}
+			};
+			let env = match server.get("env") {
+				None => None,
+				Some(v) => Some(value_to_string_map(v, name, "env")?),
+			};
 			McpTransport::Stdio {
 				command,
 				args,
@@ -85,8 +125,18 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				timeout: None,
 			}
 		} else if let Some(url_val) = server.get("url") {
-			let url = url_val.as_str().unwrap_or_default().to_string();
-			let headers = server.get("headers").and_then(value_to_string_map);
+			let url = url_val
+				.as_str()
+				.ok_or_else(|| {
+					ConfigError::InvalidConfig(format!(
+						"Hermes MCP server `{name}` field `url` must be a string"
+					))
+				})?
+				.to_string();
+			let headers = match server.get("headers") {
+				None => None,
+				Some(v) => Some(value_to_string_map(v, name, "headers")?),
+			};
 			McpTransport::StreamableHttp {
 				url,
 				headers,
@@ -128,20 +178,30 @@ pub fn serialize(
 		)
 	})?;
 
-	// Existing per-server entries preserve fields we do not own.
-	let existing: Mapping = root_map
-		.get("mcp_servers")
-		.and_then(Value::as_mapping)
-		.cloned()
-		.unwrap_or_default();
+	// Existing per-server entries preserve fields we do not own. A present but
+	// non-mapping `mcp_servers` is malformed — refuse rather than overwrite it.
+	let existing: Mapping = match root_map.get("mcp_servers") {
+		None => Mapping::new(),
+		Some(v) if v.is_null() => Mapping::new(),
+		Some(v) => v.as_mapping().cloned().ok_or_else(|| {
+			ConfigError::InvalidConfig(
+				"existing `mcp_servers` is not a mapping".to_string(),
+			)
+		})?,
+	};
 
 	let mut servers = Mapping::new();
 	for mcp in &config.mcps {
-		let mut entry = existing
-			.get(mcp.name.as_str())
-			.and_then(Value::as_mapping)
-			.cloned()
-			.unwrap_or_default();
+		let mut entry = match existing.get(mcp.name.as_str()) {
+			None => Mapping::new(),
+			Some(v) if v.is_null() => Mapping::new(),
+			Some(v) => v.as_mapping().cloned().ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"existing entry for `{}` is not a mapping",
+					mcp.name
+				))
+			})?,
+		};
 		// Remove all transport-owned keys before re-inserting (avoids stale
 		// keys when a server's transport changes).
 		for k in TRANSPORT_KEYS {
@@ -377,5 +437,59 @@ mcp_servers:
 		let cfg2 = parse(&out).unwrap();
 		assert_eq!(cfg.mcps.len(), cfg2.mcps.len());
 		assert_eq!(cfg.mcps[0].name, cfg2.mcps[0].name);
+	}
+
+	#[test]
+	fn parse_rejects_non_string_command() {
+		assert!(parse("mcp_servers:\n  bad:\n    command: 5\n").is_err());
+	}
+
+	#[test]
+	fn parse_rejects_non_bool_enabled() {
+		assert!(parse(
+			"mcp_servers:\n  bad:\n    command: x\n    enabled: 5\n"
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn parse_rejects_non_string_args_element() {
+		assert!(parse(
+			"mcp_servers:\n  bad:\n    command: x\n    args: [1, 2]\n"
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn parse_rejects_non_string_env_value() {
+		assert!(parse(
+			"mcp_servers:\n  bad:\n    command: x\n    env:\n      A: 1\n"
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn parse_rejects_non_string_url() {
+		assert!(parse("mcp_servers:\n  bad:\n    url: 5\n").is_err());
+	}
+
+	#[test]
+	fn serialize_rejects_non_mapping_existing_mcp_servers() {
+		let cfg = AgentConfig {
+			mcps: vec![McpServer::new("s", McpTransport::stdio("c", vec![]))],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+		assert!(serialize(&cfg, Some("mcp_servers: 5\n")).is_err());
+	}
+
+	#[test]
+	fn serialize_rejects_non_mapping_existing_entry() {
+		let cfg = AgentConfig {
+			mcps: vec![McpServer::new("s", McpTransport::stdio("c", vec![]))],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+		assert!(serialize(&cfg, Some("mcp_servers:\n  s: 5\n")).is_err());
 	}
 }
