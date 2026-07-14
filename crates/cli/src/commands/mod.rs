@@ -292,6 +292,11 @@ mod tests {
 
 	#[test]
 	fn inference_store_is_rooted_at_app_data_dir() {
+		// Hold the shared env lock: this reads `app_data_dir()` (which consults
+		// `$AGHUB_DATA_DIR`), and `app_data_dir_honors_override_env` mutates that
+		// var. Without the lock they race under `cargo test --workspace`'s heavier
+		// parallel load (green locally / `-p`, flaky on the CI matrix).
+		let _g = env_lock();
 		let store = inference_store();
 		assert_eq!(store.app_data_dir(), app_data_dir().as_path());
 	}
