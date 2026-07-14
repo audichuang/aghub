@@ -111,7 +111,10 @@ info "waiting for ci.yml on this commit to finish (must be green before tagging)
 # that happens to share the commit. CI_OK is asserted after the loop so a run
 # that never registers can't fall through and let us tag without a green CI.
 CI_OK=0
-for _ in $(seq 1 60); do
+# 40min budget (120 * 20s sleep): the 3-OS matrix cold-compiles Windows/macOS
+# and routinely runs 25+ min — a 20min window timed out mid-release once, then
+# needed a manual re-run to finish. Do not shrink below the real cold-CI time.
+for _ in $(seq 1 120); do
 	RUN="$(gh run list --repo "$REPO" --workflow ci.yml --limit 30 \
 		--json headSha,headBranch,event,status,conclusion \
 		--jq "[.[] | select(.headSha==\"$HEAD_SHA\" and .headBranch==\"main\" and .event==\"push\")] | first" 2>/dev/null || echo "")"

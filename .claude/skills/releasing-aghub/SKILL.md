@@ -72,12 +72,12 @@ job. Never ship one without the other; never let their versions diverge.
 #    FIRST append a row to UPSTREAM.md (repo root) — upstream SHA ↔ our commit ↔
 #    crate — and bump its "Last full review" SHA. Keep the sync log complete.
 just preflight                                   # local: fmt+clippy+typecheck+test+doc (the pre-push hook does NOT run tests)
-git push origin main                             # then let CI's 3-OS matrix run
+git push fork main                               # then let CI's 3-OS matrix run (origin = upstream — never push there)
 gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # must be GREEN before step 1
 
 # 1. pick the next version (independent monotonic semver; do NOT hand-edit manifests —
 #    CI seds the tag into Cargo.toml / desktop package.json / tauri.conf.json)
-git tag vX.Y.Z && git push origin vX.Y.Z
+git tag vX.Y.Z && git push fork vX.Y.Z
 
 # 2. watch it to completion (grab the run id from the line below)
 gh run list  --repo audichuang/aghub --workflow release.yml --limit 1
@@ -125,12 +125,13 @@ gh api repos/audichuang/homebrew-tap/contents/Formula/aghub-cli.rb --jq .content
 
 ## Troubleshooting
 
-| Symptom                                                                          | Cause                                                                                                                                               | Fix                                                                                                                                                                                                                                                                                                  |
-| -------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS `failed codesign … security import: failed to import keychain certificate` | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri tries to import an empty cert                                                        | Keep the `APPLE_*` env lines **commented out** in `release.yml`; unsigned dmg builds fine. Only uncomment once real Apple Developer certs + secrets exist.                                                                                                                                           |
-| `Cargo Fetch` fails: `sccache: Server startup failed … dns error … Try again`    | Transient GitHub infra/DNS flake reaching the cache backend                                                                                         | Re-run the job: `gh run rerun --failed <run-id> --repo audichuang/aghub`. Not a code issue.                                                                                                                                                                                                          |
-| Homebrew job fails on push to tap                                                | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                                                                | Reset the PAT secret; rest of the release is unaffected.                                                                                                                                                                                                                                             |
-| Release `test` gate fails on a test that passes locally and under `-p <crate>`   | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test under `cargo test --workspace` (heavier parallel load than `-p` surfaces the race) | Serialize it: hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH the HOME/XDG-mutating test AND the home-reading test; `#[cfg(unix)]`-gate unix-only tests; canonicalize both path sides for macOS `/var`→`/private`. Reproduce with `cargo test --workspace`, not just `-p`. |
+| Symptom                                                                                                            | Cause                                                                                                                                               | Fix                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS `failed codesign … security import: failed to import keychain certificate`                                   | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri tries to import an empty cert                                                        | Keep the `APPLE_*` env lines **commented out** in `release.yml`; unsigned dmg builds fine. Only uncomment once real Apple Developer certs + secrets exist.                                                                                                                                           |
+| `Cargo Fetch` fails: `sccache: Server startup failed … dns error … Try again`                                      | Transient GitHub infra/DNS flake reaching the cache backend                                                                                         | Re-run the job: `gh run rerun --failed <run-id> --repo audichuang/aghub`. Not a code issue.                                                                                                                                                                                                          |
+| Homebrew job fails on push to tap                                                                                  | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                                                                | Reset the PAT secret; rest of the release is unaffected.                                                                                                                                                                                                                                             |
+| Release `test` gate fails on a test that passes locally and under `-p <crate>`                                     | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test under `cargo test --workspace` (heavier parallel load than `-p` surfaces the race) | Serialize it: hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH the HOME/XDG-mutating test AND the home-reading test; `#[cfg(unix)]`-gate unix-only tests; canonicalize both path sides for macOS `/var`→`/private`. Reproduce with `cargo test --workspace`, not just `-p`. |
+| `just release` aborts `timed out waiting for ci.yml to go green` while CI is still running / eventually goes green | 3-OS matrix cold compile ran longer than the script's CI-wait window                                                                                | **Re-run** `just release X.Y.Z --yes` once CI is green — HEAD is already pushed, so it skips the wait and tags immediately. Wait window raised 20→40 min, so this should be rare.                                                                                                                    |
 
 ## Re-release a botched tag
 
@@ -141,7 +142,7 @@ gh run cancel <run-id> --repo audichuang/aghub
 gh release delete vX.Y.Z --repo audichuang/aghub --yes --cleanup-tag   # removes Release + remote tag
 git tag -d vX.Y.Z
 # ...commit the fix, push main, then re-tag:
-git tag vX.Y.Z && git push origin vX.Y.Z
+git tag vX.Y.Z && git push fork vX.Y.Z
 ```
 
 > Safe while no users have the build. For an already-public version, ship a new patch tag instead.
