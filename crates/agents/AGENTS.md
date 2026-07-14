@@ -10,7 +10,7 @@ Role map (not a full file tree — `ls` / codegraph for that):
 - `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
 - `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns)
 - `models.rs` — `AgentConfig`, `AgentType`, `McpServer`, `McpTransport`, `Skill`
-- `agents/` — one descriptor per agent (`AgentType::ALL` = 23); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
+- `agents/` — one descriptor per agent (`AgentType::ALL` = 24); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `format/` — serializers: OpenCode native, JSON map/list MCP, TOML (Codex/Mistral)
 
 ## WHERE TO LOOK

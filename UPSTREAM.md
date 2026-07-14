@@ -114,6 +114,12 @@ exact patch-id matches — they were re-implemented in our own commits:
 not mirrored one-for-one. Re-evaluate in bulk during a sync if a security advisory
 or a needed feature lands upstream.
 
+## Fork-only (not present in upstream AkaraChen/aghub)
+
+- **Hermes agent** (2026-07-14): Nous Research Hermes Agent — global-only, YAML
+  MCP at `~/.hermes/config.yaml`. Spec:
+  `docs/specs/2026-07-14-hermes-agent-support.md`. Does not exist upstream.
+
 ## Fork-divergence adaptations (why our ports are not verbatim copies)
 
 - **Reuse, don't duplicate**: ported the _protection_, but reused our existing

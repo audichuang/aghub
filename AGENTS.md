@@ -111,6 +111,12 @@ core); the MCP **parse/serialize** logic it points at lives in
   another agent's private dir.
 - **Codex/Mistral**: TOML.
 - **Copilot**: global `~/.copilot/skills`; project scope reads Master.
+- **Hermes** (Nous Research): global-only. Skills from `~/.hermes/skills/`
+  (SKILL.md). MCP under the `mcp_servers` key of `~/.hermes/config.yaml` (YAML —
+  the only YAML MCP agent); single remote transport (`url`, no sse/http split),
+  native `enabled` flag (`enable_disable: true`); other top-level keys preserved
+  on rewrite (comments are not). Windows home is `%LOCALAPPDATA%\hermes`. No
+  project scope, no sub-agents.
 - **Universal Master (`.agents/skills`)**: an agent reads the Master **only**
   where its descriptor maps that scope's skill paths there — **per-agent and
   per-scope**. Do **not** maintain a hand list here; read each descriptor's
