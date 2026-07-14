@@ -412,6 +412,7 @@ pub enum AgentType {
 	Pi,
 	JetBrainsAi,
 	Hermes,
+	Grok,
 }
 
 impl AgentType {
@@ -440,6 +441,7 @@ impl AgentType {
 		AgentType::Pi,
 		AgentType::JetBrainsAi,
 		AgentType::Hermes,
+		AgentType::Grok,
 	];
 
 	pub fn as_str(&self) -> &'static str {
@@ -468,6 +470,7 @@ impl AgentType {
 			AgentType::Pi => "pi",
 			AgentType::JetBrainsAi => "jetbrains-ai",
 			AgentType::Hermes => "hermes",
+			AgentType::Grok => "grok",
 		}
 	}
 
@@ -506,6 +509,7 @@ impl std::str::FromStr for AgentType {
 			"pi" => Ok(AgentType::Pi),
 			"jetbrains-ai" | "jetbrains" | "jb" => Ok(AgentType::JetBrainsAi),
 			"hermes" => Ok(AgentType::Hermes),
+			"grok" => Ok(AgentType::Grok),
 			_ => Err(format!("Unknown agent type: {s}")),
 		}
 	}
@@ -868,6 +872,15 @@ mod tests {
 		assert_eq!(a, AgentType::Hermes);
 		assert_eq!(a.as_str(), "hermes");
 		assert!(AgentType::ALL.contains(&AgentType::Hermes));
+	}
+
+	#[test]
+	fn grok_agent_type_roundtrip() {
+		use std::str::FromStr;
+		let a = AgentType::from_str("grok").unwrap();
+		assert_eq!(a, AgentType::Grok);
+		assert_eq!(a.as_str(), "grok");
+		assert!(AgentType::ALL.contains(&AgentType::Grok));
 	}
 
 	#[test]
