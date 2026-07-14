@@ -307,6 +307,13 @@ enum Commands {
 		#[arg(long)]
 		json: bool,
 	},
+	/// Diagnose installed skills: source, on-disk master, and lock health
+	/// (read-only). Scope -g/-p/--all; default spans global + project.
+	Doctor {
+		/// Emit a machine-readable JSON array instead of a table
+		#[arg(long)]
+		json: bool,
+	},
 	/// Show Claude skill usage counts, least-used first (read-only).
 	///
 	/// Reads Claude Code's own `skillUsage` counter from `~/.claude.json`;
@@ -344,6 +351,12 @@ pub enum SourceAction {
 		update: bool,
 		#[arg(long)]
 		install_missing: bool,
+		/// Only act on these skills (comma-separated names, as shown in the NAME
+		/// column of `source diff`). Narrows the overview and both
+		/// --install-missing and --update; unknown names are reported. Without
+		/// it, every matching skill in the source is targeted.
+		#[arg(long = "skill", value_delimiter = ',', value_name = "NAME")]
+		skills: Vec<String>,
 		/// DEPRECATED — no-op. `source sync` is always symlink-only now (a single
 		/// `.agents/skills/<name>` master plus per-agent links). Accepted so
 		/// existing scripts don't error, but ignored; there is no copy install.
@@ -438,6 +451,17 @@ fn main() -> Result<()> {
 	// so it is not single-agent scoped; dispatch it before the adapter setup.
 	if let Commands::Coverage { json } = &cli.command {
 		return commands::coverage::execute(
+			cli.global,
+			cli.project,
+			cli.all,
+			*json,
+		);
+	}
+
+	// `doctor` reconciles the skill lock against the on-disk master across
+	// scopes; not single-agent scoped, so dispatch before adapter setup.
+	if let Commands::Doctor { json } = &cli.command {
+		return commands::doctor::execute(
 			cli.global,
 			cli.project,
 			cli.all,
@@ -682,6 +706,9 @@ fn main() -> Result<()> {
 		}
 		Commands::Coverage { .. } => {
 			unreachable!("`coverage` is dispatched before agent-config setup")
+		}
+		Commands::Doctor { .. } => {
+			unreachable!("`doctor` is dispatched before agent-config setup")
 		}
 		Commands::SkillUsage { .. } => {
 			unreachable!(

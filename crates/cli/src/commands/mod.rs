@@ -4,6 +4,7 @@ pub mod check;
 pub mod coverage;
 pub mod delete;
 pub mod disable;
+pub mod doctor;
 pub mod enable;
 pub mod get;
 pub mod inference;

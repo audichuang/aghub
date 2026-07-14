@@ -173,6 +173,7 @@ pub fn execute(
 			git_ref,
 			update,
 			install_missing,
+			skills,
 			universal,
 			yes,
 			json,
@@ -181,6 +182,7 @@ pub fn execute(
 			git_ref: git_ref.as_deref(),
 			update: *update,
 			install_missing: *install_missing,
+			skills,
 			universal: *universal,
 			yes: *yes,
 			json: *json,
@@ -401,6 +403,7 @@ struct SyncArgs<'a> {
 	git_ref: Option<&'a str>,
 	update: bool,
 	install_missing: bool,
+	skills: &'a [String],
 	universal: bool,
 	yes: bool,
 	json: bool,
@@ -529,6 +532,27 @@ fn sync(args: SyncArgs) -> Result<()> {
 		&source,
 		repo.upstream_commit_time.clone(),
 	);
+
+	// `--skill a,b` narrows every downstream path (overview, --install-missing,
+	// --update) to the named skills. Unknown names are reported (not silently
+	// dropped) so a typo doesn't masquerade as a no-op.
+	let diffs = if args.skills.is_empty() {
+		diffs
+	} else {
+		let available: Vec<String> =
+			diffs.iter().map(|d| d.name.clone()).collect();
+		let (kept, unknown) =
+			narrow_by_name(diffs, args.skills, |d| d.name.as_str());
+		if !unknown.is_empty() {
+			eprintln!(
+				"warning: source '{}' has no skill named: {} (available: {})",
+				source,
+				unknown.join(", "),
+				available.join(", ")
+			);
+		}
+		kept
+	};
 
 	// Neither flag: print the plan (per-state overview) and ask the user to
 	// choose an action. Read-only/informational — write NOTHING.
@@ -1607,9 +1631,32 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	Ok(())
 }
 
+/// Split `items` into those whose name is in `requested` (source order kept)
+/// and the requested names that matched nothing. Generic over the item so the
+/// `--skill` filter unit-tests without constructing a full `SourceSkillDiff`.
+fn narrow_by_name<T>(
+	items: Vec<T>,
+	requested: &[String],
+	name_of: impl Fn(&T) -> &str,
+) -> (Vec<T>, Vec<String>) {
+	use std::collections::HashSet;
+	let present: HashSet<&str> = items.iter().map(&name_of).collect();
+	let unknown: Vec<String> = requested
+		.iter()
+		.filter(|r| !present.contains(r.as_str()))
+		.cloned()
+		.collect();
+	let want: HashSet<&str> = requested.iter().map(String::as_str).collect();
+	let kept = items
+		.into_iter()
+		.filter(|it| want.contains(name_of(it)))
+		.collect();
+	(kept, unknown)
+}
+
 #[cfg(test)]
 mod tests {
-	use super::select_env_token;
+	use super::{narrow_by_name, select_env_token};
 
 	fn s(v: &str) -> Option<String> {
 		Some(v.to_string())
@@ -1668,5 +1715,25 @@ mod tests {
 			"empty GIT_PASSWORD falls through to GITHUB_TOKEN"
 		);
 		assert_eq!(select_env_token(s(" "), s("\t"), Some("github.com")), None);
+	}
+
+	#[test]
+	fn narrow_by_name_keeps_requested_in_source_order_and_reports_unknown() {
+		let items = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+		let requested = vec!["c".to_string(), "a".to_string(), "x".to_string()];
+		let (kept, unknown) = narrow_by_name(items, &requested, |s| s.as_str());
+		// Kept follows the source order (a, c), not the request order.
+		assert_eq!(kept, vec!["a".to_string(), "c".to_string()]);
+		// A typo'd name surfaces instead of vanishing into a silent no-op.
+		assert_eq!(unknown, vec!["x".to_string()]);
+	}
+
+	#[test]
+	fn narrow_by_name_all_unknown_keeps_nothing() {
+		let items = vec!["a".to_string()];
+		let (kept, unknown) =
+			narrow_by_name(items, &["zzz".to_string()], |s| s.as_str());
+		assert!(kept.is_empty());
+		assert_eq!(unknown, vec!["zzz".to_string()]);
 	}
 }

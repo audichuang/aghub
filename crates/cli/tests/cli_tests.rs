@@ -1225,6 +1225,104 @@ fn source_sync_project_scope_yes_writes_project_lock_not_global() {
 
 #[cfg(unix)]
 #[test]
+fn source_sync_skill_filter_installs_only_named_skill() {
+	// `--skill alpha` must narrow --install-missing to just `alpha`, leaving a
+	// sibling `beta` in the same source untouched — the selective-install path
+	// that spares you the source's other skills.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	write_source_skill(src.path(), "beta", "beta");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// alpha installed; beta (a sibling in the same source) left alone.
+	assert!(
+		home.path().join(".claude/skills/alpha").exists(),
+		"--skill alpha must install alpha"
+	);
+	assert!(
+		!home.path().join(".claude/skills/beta").exists(),
+		"--skill alpha must NOT install the sibling beta"
+	);
+
+	let lock = state.path().join("skills/.skill-lock.json");
+	let raw = std::fs::read_to_string(&lock).unwrap();
+	let parsed: Value = serde_json::from_str(&raw).unwrap();
+	assert!(
+		!parsed["skills"]["alpha"].is_null(),
+		"alpha must be recorded in the global lock: {raw}"
+	);
+	assert!(
+		parsed["skills"]["beta"].is_null(),
+		"beta must NOT be recorded in the lock: {raw}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_skill_filter_unknown_name_warns_and_installs_nothing() {
+	// A typo'd `--skill` name must surface as a warning listing the available
+	// skills (not a silent no-op) and install nothing.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"nope",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(stderr.contains("no skill named"), "should warn: {stderr}");
+	assert!(
+		stderr.contains("alpha"),
+		"warning should list available skills: {stderr}"
+	);
+	assert!(
+		!home.path().join(".claude/skills/alpha").exists(),
+		"an unknown --skill name must install nothing"
+	);
+}
+
+#[cfg(unix)]
+#[test]
 fn source_sync_project_scope_without_project_root_errors() {
 	// Finding 3 (project-scope, no root): `source sync -p` from a directory
 	// with no agent marker has no project root to write to. The shared
