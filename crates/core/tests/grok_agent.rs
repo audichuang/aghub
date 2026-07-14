@@ -16,7 +16,7 @@ fn registry_resolves_grok_not_fallback() {
 	assert!(d.capabilities.mcp.scopes.global);
 	assert!(d.capabilities.mcp.scopes.project);
 	assert!(d.capabilities.mcp.enable_disable);
-	// Sub-agents out of scope for this addition
-	assert!(!d.capabilities.sub_agents.scopes.global);
-	assert!(!d.capabilities.sub_agents.scopes.project);
+	// Symmetric global + project for sub-agents
+	assert!(d.capabilities.sub_agents.scopes.global);
+	assert!(d.capabilities.sub_agents.scopes.project);
 }

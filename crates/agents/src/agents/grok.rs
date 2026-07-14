@@ -1,11 +1,14 @@
 use crate::define_mcp_paths;
 use crate::define_skill_paths;
 use crate::descriptor::*;
+use crate::sub_agents::{load_scoped_sub_agents, save_scoped_sub_agents};
+use std::path::{Path, PathBuf};
 
 // Symmetric layout (verified against grok 0.2.99):
 //   global  ~/.grok/config.toml
 //   project <root>/.grok/config.toml
 //   skills  ~/.grok/skills / <root>/.grok/skills
+//   agents  ~/.grok/agents / <root>/.grok/agents
 // global_data_dir is the parent of the config file → ~/.grok
 define_mcp_paths! {
 	symmetric: ".grok/config.toml",
@@ -15,6 +18,40 @@ define_mcp_paths! {
 
 define_skill_paths! {
 	symmetric: ".grok/skills",
+}
+
+fn sub_agent_global_dir() -> Option<PathBuf> {
+	home_dir().map(|home| home.join(".grok/agents"))
+}
+
+fn sub_agent_project_dir(root: &Path) -> Option<PathBuf> {
+	Some(root.join(".grok/agents"))
+}
+
+fn load_sub_agents(
+	project_root: Option<&Path>,
+	scope: crate::ResourceScope,
+) -> crate::Result<Vec<crate::SubAgent>> {
+	load_scoped_sub_agents(
+		project_root,
+		scope,
+		Some(sub_agent_global_dir),
+		Some(sub_agent_project_dir),
+	)
+}
+
+fn save_sub_agents(
+	project_root: Option<&Path>,
+	scope: crate::ResourceScope,
+	agents: &[crate::SubAgent],
+) -> crate::Result<()> {
+	save_scoped_sub_agents(
+		project_root,
+		scope,
+		agents,
+		Some(sub_agent_global_dir),
+		Some(sub_agent_project_dir),
+	)
 }
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
@@ -44,11 +81,10 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 			remote: true,
 			enable_disable: true,
 		},
-		// Sub-agents are a follow-up; leave off for this scope.
 		sub_agents: SubAgentCapabilities {
 			scopes: ScopeSupport {
-				global: false,
-				project: false,
+				global: true,
+				project: true,
 			},
 		},
 	},
@@ -60,8 +96,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		read: project_skills_paths,
 		write: project_skill_write_path,
 	}),
-	load_sub_agents: load_sub_agents_noop,
-	save_sub_agents: save_sub_agents_noop,
+	load_sub_agents,
+	save_sub_agents,
 	cli_name: "grok",
 	validate_args: &["--version"],
 	project_markers: &[".grok"],
