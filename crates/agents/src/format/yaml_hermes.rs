@@ -86,6 +86,17 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?,
 		};
+		// Reject entries that mix stdio-family and remote-family keys.
+		let has_stdio = ["command", "args", "env"]
+			.iter()
+			.any(|k| server.contains_key(*k));
+		let has_remote =
+			["url", "headers"].iter().any(|k| server.contains_key(*k));
+		if has_stdio && has_remote {
+			return Err(ConfigError::InvalidConfig(format!(
+				"Hermes MCP server `{name}` mixes stdio keys (command/args/env) with remote keys (url/headers)"
+			)));
+		}
 		let transport = if let Some(cmd) = server.get("command") {
 			let command = cmd
 				.as_str()
@@ -318,6 +329,22 @@ mcp_servers:
 	#[test]
 	fn parse_rejects_entry_without_command_or_url() {
 		assert!(parse("mcp_servers:\n  bad:\n    timeout: 5\n").is_err());
+	}
+
+	#[test]
+	fn parse_rejects_mixed_transport_command_and_url() {
+		assert!(parse(
+			"mcp_servers:\n  bad:\n    command: x\n    url: https://y\n"
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn parse_rejects_mixed_transport_url_and_args() {
+		assert!(parse(
+			"mcp_servers:\n  bad:\n    url: https://y\n    args: [\"a\"]\n"
+		)
+		.is_err());
 	}
 
 	#[test]
