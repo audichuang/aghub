@@ -24,6 +24,7 @@ pub static ALL_AGENTS: &[&AgentDescriptor] = &[
 	&agents::amp::DESCRIPTOR,
 	&agents::factory::DESCRIPTOR,
 	&agents::warp::DESCRIPTOR,
+	&agents::hermes::DESCRIPTOR,
 ];
 
 pub fn get(agent_type: AgentType) -> &'static AgentDescriptor {

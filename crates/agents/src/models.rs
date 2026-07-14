@@ -411,6 +411,7 @@ pub enum AgentType {
 	Mistral,
 	Pi,
 	JetBrainsAi,
+	Hermes,
 }
 
 impl AgentType {
@@ -438,6 +439,7 @@ impl AgentType {
 		AgentType::Mistral,
 		AgentType::Pi,
 		AgentType::JetBrainsAi,
+		AgentType::Hermes,
 	];
 
 	pub fn as_str(&self) -> &'static str {
@@ -465,6 +467,7 @@ impl AgentType {
 			AgentType::Mistral => "mistral",
 			AgentType::Pi => "pi",
 			AgentType::JetBrainsAi => "jetbrains-ai",
+			AgentType::Hermes => "hermes",
 		}
 	}
 
@@ -502,6 +505,7 @@ impl std::str::FromStr for AgentType {
 			"mistral" => Ok(AgentType::Mistral),
 			"pi" => Ok(AgentType::Pi),
 			"jetbrains-ai" | "jetbrains" | "jb" => Ok(AgentType::JetBrainsAi),
+			"hermes" => Ok(AgentType::Hermes),
 			_ => Err(format!("Unknown agent type: {s}")),
 		}
 	}
@@ -855,6 +859,15 @@ mod tests {
 		let config = AgentConfig::new();
 		assert!(config.skills.is_empty());
 		assert!(config.mcps.is_empty());
+	}
+
+	#[test]
+	fn hermes_agent_type_roundtrip() {
+		use std::str::FromStr;
+		let a = AgentType::from_str("hermes").unwrap();
+		assert_eq!(a, AgentType::Hermes);
+		assert_eq!(a.as_str(), "hermes");
+		assert!(AgentType::ALL.contains(&AgentType::Hermes));
 	}
 
 	#[test]
