@@ -395,7 +395,7 @@ pub fn save_sub_agents_noop(
 pub mod mcp_strategy {
 	use super::*;
 	use crate::format::{
-		json_list, json_map, json_opencode, toml_format, yaml_hermes,
+		json_list, json_map, json_opencode, toml_format, toml_grok, yaml_hermes,
 	};
 
 	// JsonMap with "mcpServers" key (most common)
@@ -418,6 +418,17 @@ pub mod mcp_strategy {
 		original: Option<&str>,
 	) -> Result<String> {
 		yaml_hermes::serialize(config, original)
+	}
+
+	// TOML with "mcp_servers" key (Grok ~/.grok/config.toml)
+	pub fn parse_toml_grok_mcp_servers(content: &str) -> Result<AgentConfig> {
+		toml_grok::parse(content)
+	}
+	pub fn serialize_toml_grok_mcp_servers(
+		config: &AgentConfig,
+		original: Option<&str>,
+	) -> Result<String> {
+		toml_grok::serialize(config, original)
 	}
 
 	// JsonMap with "servers" key (Copilot)
