@@ -394,7 +394,9 @@ pub fn save_sub_agents_noop(
 /// MCP config strategy functions for common config formats
 pub mod mcp_strategy {
 	use super::*;
-	use crate::format::{json_list, json_map, json_opencode, toml_format};
+	use crate::format::{
+		json_list, json_map, json_opencode, toml_format, yaml_hermes,
+	};
 
 	// JsonMap with "mcpServers" key (most common)
 	pub fn parse_json_map_mcp_servers(content: &str) -> Result<AgentConfig> {
@@ -405,6 +407,17 @@ pub mod mcp_strategy {
 		original: Option<&str>,
 	) -> Result<String> {
 		json_map::serialize(config, original, "mcpServers")
+	}
+
+	// YAML with "mcp_servers" key (Hermes ~/.hermes/config.yaml)
+	pub fn parse_yaml_hermes_mcp_servers(content: &str) -> Result<AgentConfig> {
+		yaml_hermes::parse(content)
+	}
+	pub fn serialize_yaml_hermes_mcp_servers(
+		config: &AgentConfig,
+		original: Option<&str>,
+	) -> Result<String> {
+		yaml_hermes::serialize(config, original)
 	}
 
 	// JsonMap with "servers" key (Copilot)
