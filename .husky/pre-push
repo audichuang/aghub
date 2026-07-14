@@ -8,9 +8,9 @@ cargo fmt --all -- --check
 bun run format:check
 
 echo "Running Rust clippy..."
-cargo clippy --workspace -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 echo "Running desktop lint and typecheck..."
 cd crates/desktop
-bun run lint:check
+bun run lint:check -- --max-warnings 0
 bun run typecheck
