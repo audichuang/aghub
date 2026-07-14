@@ -251,6 +251,11 @@ mcp_servers:
 	}
 
 	#[test]
+	fn parse_rejects_non_mapping_entry() {
+		assert!(parse("mcp_servers:\n  bad: 5\n").is_err());
+	}
+
+	#[test]
 	fn parse_rejects_entry_without_command_or_url() {
 		assert!(parse("mcp_servers:\n  bad:\n    timeout: 5\n").is_err());
 	}
