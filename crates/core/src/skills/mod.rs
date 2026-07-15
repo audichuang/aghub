@@ -4,6 +4,7 @@ pub mod linker;
 pub mod lock;
 pub mod prune;
 pub mod removal;
+pub mod rename;
 pub mod resync;
 pub mod update;
 pub mod usage;
