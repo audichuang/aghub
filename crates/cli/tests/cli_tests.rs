@@ -1066,6 +1066,32 @@ fn write_source_skill(
 	skill_dir
 }
 
+/// Count symlinks named `name` anywhere under `root` (the per-agent skill links;
+/// the `.agents/skills/<name>` master is a real dir and is NOT counted). Used to
+/// assert that `-a all` linked more than one agent.
+#[cfg(unix)]
+fn count_symlinks_named(root: &std::path::Path, name: &str) -> usize {
+	let mut n = 0usize;
+	let mut stack = vec![root.to_path_buf()];
+	while let Some(dir) = stack.pop() {
+		let Ok(rd) = std::fs::read_dir(&dir) else {
+			continue;
+		};
+		for e in rd.flatten() {
+			let Ok(ft) = e.file_type() else { continue };
+			let p = e.path();
+			if ft.is_symlink() {
+				if p.file_name().and_then(|s| s.to_str()) == Some(name) {
+					n += 1;
+				}
+			} else if ft.is_dir() {
+				stack.push(p);
+			}
+		}
+	}
+	n
+}
+
 #[test]
 fn source_diff_reports_not_installed() {
 	let home = tempfile::TempDir::new().unwrap();
@@ -1318,6 +1344,196 @@ fn source_sync_skill_filter_unknown_name_warns_and_installs_nothing() {
 	assert!(
 		!home.path().join(".claude/skills/alpha").exists(),
 		"an unknown --skill name must install nothing"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_all_agents_links_more_than_one_agent() {
+	// `-a all` must fan the install across every registered agent, not just
+	// claude — the multi-agent extract-and-replace scenario. One shared master
+	// plus a per-agent symlink for each non-native-reader agent.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"all",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// Master materialized once; MANY agents linked (far more than the single
+	// claude link a default sync would create).
+	assert!(
+		home.path().join(".agents/skills/alpha").is_dir(),
+		"the shared master must exist"
+	);
+	let links = count_symlinks_named(home.path(), "alpha");
+	assert!(
+		links >= 2,
+		"`-a all` must link more than one agent, found {links} symlink(s)"
+	);
+	assert!(
+		home.path().join(".claude/skills/alpha").exists(),
+		"claude must be among the linked agents"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_all_agents_repairs_missing_links_after_single_agent_install() {
+	// The Codex-flagged hazard: once a single-agent install writes the scope
+	// lock, a later `--install-missing` is lock-gated and would no-op, silently
+	// leaving other agents unlinked. With an explicit `--skill`, `-a all` must
+	// ENSURE (idempotently re-materialize) the named skill for every agent even
+	// though the lock already says "installed".
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	// Step 1: single-agent install (claude only).
+	let out1 = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(out1.status.success());
+	assert_eq!(
+		count_symlinks_named(home.path(), "alpha"),
+		1,
+		"single-agent install must link exactly one agent"
+	);
+
+	// Step 2: `-a all` re-run must repair — link the rest despite the lock.
+	let out2 = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"all",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out2.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out2.stderr)
+	);
+	assert!(
+		count_symlinks_named(home.path(), "alpha") >= 2,
+		"`-a all` re-run must repair the missing agent links (ensure semantic)"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_conflict_exits_nonzero() {
+	// A foreign real dir occupying an agent's skill slot is a conflict (never
+	// clobbered). It must surface as a NON-ZERO exit, not a swallowed success.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	// Occupy claude's slot with a real dir that is NOT a link to our master.
+	let slot = home.path().join(".claude/skills/alpha");
+	std::fs::create_dir_all(&slot).unwrap();
+	std::fs::write(slot.join("FOREIGN.md"), "not ours").unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"a conflict must exit non-zero; stdout: {} stderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn source_sync_already_linked_exits_zero() {
+	// Re-running an ensure on an already-linked skill is a no-op success
+	// ("already present" is NOT a failure) and must exit zero.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let mk = || {
+		isolated_cli(home.path(), state.path())
+			.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"source",
+				"sync",
+				"owner/repo",
+				"--skill",
+				"alpha",
+				"--install-missing",
+				"--yes",
+			])
+			.output()
+			.unwrap()
+	};
+	assert!(mk().status.success(), "first install must succeed");
+	let again = mk();
+	assert!(
+		again.status.success(),
+		"re-run on an already-linked skill must exit zero; stderr: {}",
+		String::from_utf8_lossy(&again.stderr)
 	);
 }
 

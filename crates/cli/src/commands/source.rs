@@ -413,6 +413,17 @@ struct SyncArgs<'a> {
 	agent: &'a str,
 }
 
+/// Per-agent outcome of one install action. `installed:false` with no `error`
+/// means the agent was ALREADY correctly linked (idempotent no-op = success);
+/// `error:Some` is a real failure (link error or an occupied/foreign slot).
+#[derive(Serialize, Clone)]
+struct AgentResultView {
+	agent: String,
+	installed: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	error: Option<String>,
+}
+
 #[derive(Serialize)]
 struct SyncActionView {
 	action: &'static str, // "install" | "update"
@@ -422,6 +433,21 @@ struct SyncActionView {
 	applied: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	error: Option<String>,
+	/// Per-agent breakdown (install actions only; empty for update). Lets a
+	/// multi-agent (`-a all`) sync show exactly which agents were linked vs
+	/// already-present vs failed, instead of a single collapsed status.
+	#[serde(skip_serializing_if = "Vec::is_empty")]
+	agents: Vec<AgentResultView>,
+}
+
+impl SyncActionView {
+	/// A hard failure = at least one target agent reported an error (link
+	/// failure or occupied slot), OR the action itself failed before reaching
+	/// any agent. "Already present" (installed:false, error:None) is NOT a
+	/// failure.
+	fn had_error(&self) -> bool {
+		self.error.is_some() || self.agents.iter().any(|a| a.error.is_some())
+	}
 }
 
 #[derive(Serialize)]
@@ -560,20 +586,65 @@ fn sync(args: SyncArgs) -> Result<()> {
 		return print_no_action_plan(&source, scope_label, &diffs, args.json);
 	}
 
-	// Parse the target agent the same way the top-level `-a` does.
-	let target = args
-		.agent
-		.parse::<AgentType>()
-		.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?;
-	let target_agents = [target];
+	// Resolve the target agent(s). `-a all` fans the install across every agent
+	// that can ACTUALLY receive this skill in this scope — the multi-agent
+	// extract-and-replace case. Native readers are covered by the shared master;
+	// other supported agents each get their own symlink. Agents that are
+	// Unsupported here (no skill dir / project-only) are dropped up front, NOT
+	// reported as failures — otherwise `-a all` would always exit non-zero.
+	// A single explicit `-a <agent>` is taken verbatim (an unsupported one is a
+	// real error the user asked for). Default is one agent (claude).
+	let target_agents: Vec<AgentType> =
+		if args.agent.eq_ignore_ascii_case("all") {
+			use aghub_core::skills::linker::{
+				classify_all, universal_canonical_dir, LinkNeed,
+			};
+			let master = universal_canonical_dir(project_root.as_deref())
+				.ok_or_else(|| {
+					anyhow::anyhow!(
+					"could not resolve the universal master skills directory"
+				)
+				})?;
+			classify_all(scope, project_root.as_deref(), &master)
+				.into_iter()
+				.filter(|p| !matches!(p.need, LinkNeed::Unsupported))
+				.filter_map(|p| p.agent_id.parse::<AgentType>().ok())
+				.collect()
+		} else {
+			vec![args
+				.agent
+				.parse::<AgentType>()
+				.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?]
+		};
 
-	// Build the plan. `--install-missing` targets only `NotInstalled` rows
-	// (excludes Deprecated/Renamed/Removed); `--update` targets
-	// `InstalledOutdated` rows.
+	// No agent in this scope can hold a skill (e.g. `-a all` where every agent
+	// is Unsupported here). Bail rather than let `materialize_universal_master`
+	// vacuously report success on an empty target set.
+	if target_agents.is_empty() {
+		bail!(
+			"no agent in the current scope can receive skills — nothing to \
+			 install"
+		);
+	}
+
+	// Build the plan.
+	// - Without `--skill`: `--install-missing` targets only `NotInstalled` rows
+	//   (excludes Deprecated/Renamed/Removed); `--update` targets
+	//   `InstalledOutdated` rows.
+	// - With an explicit `--skill`: `--install-missing` ALSO re-materializes
+	//   `InstalledCurrent` rows. The install is idempotent (already-correct
+	//   links are no-ops), so this ENSURES each named skill is linked for every
+	//   target agent even when the scope lock already says "installed" — the
+	//   repair path a bare, lock-gated `--install-missing` cannot reach (e.g.
+	//   adding a new agent's link, or `-a all` after a single-agent install).
 	use skill_update::sources::SourceSkillState as St;
+	let ensure_named = !args.skills.is_empty();
 	let mut plan: Vec<(&'static str, &SourceSkillDiff)> = Vec::new();
 	if args.install_missing {
-		for d in diffs.iter().filter(|d| d.state == St::NotInstalled) {
+		for d in diffs.iter().filter(|d| {
+			d.state == St::NotInstalled
+				|| (ensure_named && d.state == St::InstalledCurrent)
+		}) {
 			plan.push(("install", d));
 		}
 	}
@@ -641,6 +712,11 @@ fn sync(args: SyncArgs) -> Result<()> {
 		}
 	}
 
+	// A hard failure on ANY action (an agent link error / occupied slot, or an
+	// action that failed outright) must surface as a non-zero exit — a conflict
+	// or partial multi-agent failure was previously swallowed as success.
+	let had_error = actions.iter().any(|a| a.had_error());
+
 	if args.json {
 		let view = SyncOutcomeView {
 			source,
@@ -651,22 +727,54 @@ fn sync(args: SyncArgs) -> Result<()> {
 		println!("{}", serde_json::to_string_pretty(&view)?);
 	} else {
 		for a in &actions {
-			match &a.error {
-				None if a.applied => {
-					println!("{}: {} ({})", a.action, a.name, a.skill_path)
-				}
-				None => println!(
-					"{}: {} ({}) — skipped (already present)",
+			if a.agents.len() > 1 {
+				// Multi-agent (`-a all`): a summary plus a per-agent breakdown so
+				// a partial relink is visible, never silently reported as done.
+				let linked = a.agents.iter().filter(|x| x.installed).count();
+				let already = a
+					.agents
+					.iter()
+					.filter(|x| !x.installed && x.error.is_none())
+					.count();
+				let failed =
+					a.agents.iter().filter(|x| x.error.is_some()).count();
+				println!(
+					"{}: {} ({}) — {linked} installed, {already} already \
+					 present, {failed} failed",
 					a.action, a.name, a.skill_path
-				),
-				Some(err) => {
-					println!("{}: {} — failed: {err}", a.action, a.name)
+				);
+				for ag in &a.agents {
+					// "installed" covers a fresh symlink AND a native reader
+					// (which reads the master with no link of its own).
+					let status = match &ag.error {
+						Some(e) => format!("failed: {e}"),
+						None if ag.installed => "installed".to_string(),
+						None => "already present".to_string(),
+					};
+					println!("    - {}: {status}", ag.agent);
+				}
+			} else {
+				match &a.error {
+					None if a.applied => {
+						println!("{}: {} ({})", a.action, a.name, a.skill_path)
+					}
+					None => println!(
+						"{}: {} ({}) — skipped (already present)",
+						a.action, a.name, a.skill_path
+					),
+					Some(err) => {
+						println!("{}: {} — failed: {err}", a.action, a.name)
+					}
 				}
 			}
 		}
 		if actions.is_empty() {
 			println!("Nothing to do.");
 		}
+	}
+
+	if had_error {
+		bail!("one or more sync actions failed (see the results above)");
 	}
 	Ok(())
 }
@@ -769,6 +877,7 @@ fn print_dry_run(
 				skill_path: d.skill_path.clone(),
 				applied: false,
 				error: None,
+				agents: Vec::new(),
 			})
 			.collect();
 		let view = SyncOutcomeView {
@@ -816,6 +925,7 @@ fn apply_install(
 			skill_path: d.skill_path.clone(),
 			applied: false,
 			error: Some("skillPath was not found in the source".to_string()),
+			agents: Vec::new(),
 		};
 	};
 
@@ -838,14 +948,28 @@ fn apply_install(
 	match install_fetched_skill_and_lock(req) {
 		Ok(report) => {
 			let applied = report.agent_results.iter().any(|r| r.installed);
+			// First HARD per-agent error (link failure / occupied slot). An
+			// already-linked agent has installed:false + error:None and must NOT
+			// count as an error — so surface the real error even when another
+			// agent installed fine (partial multi-agent failure stays visible).
 			let error =
 				report.agent_results.iter().find_map(|r| r.error.clone());
+			let agents = report
+				.agent_results
+				.iter()
+				.map(|r| AgentResultView {
+					agent: r.agent.as_str().to_string(),
+					installed: r.installed,
+					error: r.error.clone(),
+				})
+				.collect();
 			SyncActionView {
 				action: "install",
 				name: d.name.clone(),
 				skill_path: d.skill_path.clone(),
 				applied,
-				error: if applied { None } else { error },
+				error,
+				agents,
 			}
 		}
 		Err(e) => SyncActionView {
@@ -854,6 +978,7 @@ fn apply_install(
 			skill_path: d.skill_path.clone(),
 			applied: false,
 			error: Some(e.to_string()),
+			agents: Vec::new(),
 		},
 	}
 }
@@ -878,6 +1003,7 @@ fn apply_update_row(
 			skill_path: d.skill_path.clone(),
 			applied: !paths.is_empty(),
 			error: None,
+			agents: Vec::new(),
 		},
 		Err(e) => SyncActionView {
 			action: "update",
@@ -885,6 +1011,7 @@ fn apply_update_row(
 			skill_path: d.skill_path.clone(),
 			applied: false,
 			error: Some(e.to_string()),
+			agents: Vec::new(),
 		},
 	}
 }

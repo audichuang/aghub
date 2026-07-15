@@ -353,8 +353,11 @@ pub enum SourceAction {
 		install_missing: bool,
 		/// Only act on these skills (comma-separated names, as shown in the NAME
 		/// column of `source diff`). Narrows the overview and both
-		/// --install-missing and --update; unknown names are reported. Without
-		/// it, every matching skill in the source is targeted.
+		/// --install-missing and --update; unknown names are reported. With
+		/// --install-missing it ENSURES each named skill is linked for the target
+		/// agent(s) even when already installed (idempotent repair) — combine
+		/// with `-a all` to (re)link a named skill across every supported agent.
+		/// Without it, every matching skill in the source is targeted.
 		#[arg(long = "skill", value_delimiter = ',', value_name = "NAME")]
 		skills: Vec<String>,
 		/// DEPRECATED — no-op. `source sync` is always symlink-only now (a single
