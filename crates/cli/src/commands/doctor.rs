@@ -42,9 +42,11 @@ impl MasterState {
 struct DoctorRow {
 	scope: &'static str,
 	skill: String,
-	/// Displayable source (`owner/repo`, `local`, or `type:source`) — the
-	/// git-vs-local distinction the reader needs to know if it's updatable.
+	/// Displayable source (`owner/repo`, `local`, or `type:source`).
 	source: String,
+	/// True when the source is a git repo — i.e. `check`/`apply-update` can
+	/// refresh it. JSON-only hint; `check --online` is authoritative.
+	updatable: bool,
 	master: MasterState,
 	/// `ok` | `orphan-lock` (lock entry, no master on disk) | `untracked`
 	/// (master on disk, no lock entry) | `master-is-symlink`.
@@ -65,20 +67,25 @@ fn health_of(tracked: bool, master: &MasterState) -> &'static str {
 	}
 }
 
-/// Human source label: `owner/repo` for github, `local`, or `type:source` for
-/// any other provider. Pure.
-fn source_display(source: &str, source_type: &str) -> String {
+/// Human source label + whether it's a git source (updatable). The label is
+/// `owner/repo` for github, `local`, or `type:source` for any other provider.
+/// Pure.
+fn source_display(source: &str, source_type: &str) -> (String, bool) {
 	let t = source_type.to_ascii_lowercase();
 	if t == "local" || source.is_empty() {
-		"local".to_string()
-	} else if t == "github" {
-		// github shorthand is already `owner/repo`.
+		return ("local".to_string(), false);
+	}
+	// Git source types aghub can re-fetch — the `as_str()` values of
+	// `aghub_git::RemoteSourceType` (github / gitlab / git).
+	let updatable = matches!(t.as_str(), "github" | "git" | "gitlab");
+	// github shorthand is already `owner/repo`; other providers keep their type
+	// prefix so `mintlify:bun.com` doesn't read as a git repo.
+	let label = if t == "github" {
 		source.to_string()
 	} else {
-		// Other providers keep their type prefix so `mintlify:bun.com` doesn't
-		// read as a git repo.
 		format!("{source_type}:{source}")
-	}
+	};
+	(label, updatable)
 }
 
 /// On-disk state of the master path for one skill. Uses the canonical
@@ -114,11 +121,13 @@ fn build_rows(
 	let mut rows = Vec::new();
 	for (name, (source, source_type)) in locked {
 		let state = master_state(&master.join(name));
+		let (label, updatable) = source_display(source, source_type);
 		let health = health_of(true, &state);
 		rows.push(DoctorRow {
 			scope,
 			skill: name.clone(),
-			source: source_display(source, source_type),
+			source: label,
+			updatable,
 			master: state,
 			health,
 		});
@@ -129,6 +138,7 @@ fn build_rows(
 				scope,
 				skill: name,
 				source: "—".to_string(),
+				updatable: false,
 				master: MasterState::Dir,
 				health: "untracked",
 			});
@@ -246,18 +256,37 @@ mod tests {
 	}
 
 	#[test]
-	fn source_display_github_is_owner_repo() {
-		assert_eq!(source_display("owner/repo", "github"), "owner/repo");
+	fn source_display_github_is_owner_repo_and_updatable() {
+		let (label, updatable) = source_display("owner/repo", "github");
+		assert_eq!(label, "owner/repo");
+		assert!(updatable);
 	}
 
 	#[test]
-	fn source_display_local() {
-		assert_eq!(source_display("/tmp/x", "local"), "local");
+	fn source_display_local_is_not_updatable() {
+		let (label, updatable) = source_display("/tmp/x", "local");
+		assert_eq!(label, "local");
+		assert!(!updatable);
 	}
 
 	#[test]
 	fn source_display_other_provider_keeps_type_prefix() {
-		assert_eq!(source_display("bun.com", "mintlify"), "mintlify:bun.com");
+		let (label, updatable) = source_display("bun.com", "mintlify");
+		assert_eq!(label, "mintlify:bun.com");
+		assert!(!updatable);
+	}
+
+	#[test]
+	fn doctor_row_json_keeps_updatable_field() {
+		// `doctor --json` shipped `updatable` in v2.6.2 — it is part of the
+		// released schema and must stay serialized.
+		let locked = BTreeMap::from([(
+			"x".to_string(),
+			("o/r".to_string(), "github".to_string()),
+		)]);
+		let rows = build_rows("global", Path::new("/nonexistent"), &locked);
+		let v = serde_json::to_value(&rows[0]).unwrap();
+		assert_eq!(v["updatable"], serde_json::json!(true));
 	}
 
 	#[test]
@@ -287,5 +316,6 @@ mod tests {
 		assert_eq!(rows[0].skill, "gone");
 		assert_eq!(rows[0].health, "orphan-lock");
 		assert_eq!(rows[0].source, "owner/repo");
+		assert!(rows[0].updatable);
 	}
 }

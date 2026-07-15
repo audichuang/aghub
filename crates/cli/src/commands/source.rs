@@ -594,43 +594,41 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// reported as failures — otherwise `-a all` would always exit non-zero.
 	// A single explicit `-a <agent>` is taken verbatim (an unsupported one is a
 	// real error the user asked for). Default is one agent (claude).
-	let target_agents: Vec<AgentType> =
-		if args.agent.eq_ignore_ascii_case("all") {
-			use aghub_core::skills::linker::{
-				agent_link_need, universal_canonical_dir, LinkNeed,
-			};
-			let master = universal_canonical_dir(project_root.as_deref())
-				.ok_or_else(|| {
-					anyhow::anyhow!(
+	let target_agents: Vec<AgentType> = if args
+		.agent
+		.eq_ignore_ascii_case("all")
+	{
+		use aghub_core::skills::linker::{
+			agent_link_need, universal_canonical_dir, LinkNeed,
+		};
+		let master = universal_canonical_dir(project_root.as_deref())
+			.ok_or_else(|| {
+				anyhow::anyhow!(
 					"could not resolve the universal master skills directory"
 				)
-				})?;
-			// `agent_link_need` is the probe-free classifier: link-vs-skip
-			// WITHOUT the per-agent availability subprocess `classify_all`
-			// runs (we only care whether an agent can hold a skill here, not
-			// whether its CLI is installed). Iterating AgentType::ALL also
-			// avoids a lossy agent_id -> AgentType re-parse.
-			AgentType::ALL
-				.iter()
-				.copied()
-				.filter(|&a| {
-					!matches!(
-						agent_link_need(
-							aghub_core::registry::get(a),
-							scope,
-							project_root.as_deref(),
-							&master,
-						),
-						LinkNeed::Unsupported
-					)
-				})
-				.collect()
-		} else {
-			vec![args
-				.agent
-				.parse::<AgentType>()
-				.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?]
-		};
+			})?;
+		// Iterate the registry in its stable order (claude first) and keep
+		// agents that can hold a skill here. `agent_link_need` is the
+		// probe-free classifier — no per-agent availability subprocess,
+		// since we only need the link decision, not whether the CLI is
+		// installed. (`classify_all` would run that probe for every agent.)
+		aghub_core::registry::ALL_AGENTS
+			.iter()
+			.copied()
+			.filter(|d| {
+				!matches!(
+					agent_link_need(d, scope, project_root.as_deref(), &master,),
+					LinkNeed::Unsupported
+				)
+			})
+			.filter_map(|d| d.id.parse::<AgentType>().ok())
+			.collect()
+	} else {
+		vec![args
+			.agent
+			.parse::<AgentType>()
+			.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?]
+	};
 
 	// No agent in this scope can hold a skill (e.g. `-a all` where every agent
 	// is Unsupported here). Bail rather than let `materialize_universal_master`
