@@ -12,13 +12,14 @@
 //! - `enabled` is a native per-server bool (missing defaults to true)
 
 use crate::errors::{ConfigError, Result};
+use crate::format::transport_policy::{
+	missing_transport_error, reject_mixed_transport, remote_transport,
+	transport_fields, transport_keys, FieldValue,
+};
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use std::collections::HashMap;
 use toml::map::Map;
 use toml::Value;
-
-const TRANSPORT_KEYS: [&str; 6] =
-	["command", "args", "env", "url", "headers", "type"];
 
 fn value_to_string_map(
 	v: &Value,
@@ -85,18 +86,16 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?,
 		};
-		// Reject entries that mix stdio-family and remote-family keys.
+		// Reject mixed families on key PRESENCE before extracting any field so
+		// error precedence matches the pre-extraction behaviour.
 		let has_stdio = ["command", "args", "env"]
 			.iter()
 			.any(|k| server.contains_key(*k));
 		let has_remote = ["url", "headers", "type"]
 			.iter()
 			.any(|k| server.contains_key(*k));
-		if has_stdio && has_remote {
-			return Err(ConfigError::InvalidConfig(format!(
-				"Grok MCP server `{name}` mixes stdio keys (command/args/env) with remote keys (url/headers/type)"
-			)));
-		}
+		reject_mixed_transport(has_stdio, has_remote, name, "Grok", false)?;
+		// Dispatch on presence, then extract ONLY the chosen branch's fields.
 		let transport = if let Some(cmd) = server.get("command") {
 			let command = cmd
 				.as_str()
@@ -148,40 +147,21 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				None => None,
 				Some(v) => Some(value_to_string_map(v, name, "headers")?),
 			};
-			// `type = "sse"` distinguishes SSE from streamable-HTTP.
-			// Missing `type` or `type = "http"` → StreamableHttp.
 			let type_key = match server.get("type") {
 				None => None,
-				Some(v) => {
-					let s = v.as_str().ok_or_else(|| {
-						ConfigError::InvalidConfig(format!(
-							"Grok MCP server `{name}` field `type` must be a string"
-						))
-					})?;
-					Some(s)
-				}
+				Some(v) => Some(
+					v.as_str()
+						.ok_or_else(|| {
+							ConfigError::InvalidConfig(format!(
+								"Grok MCP server `{name}` field `type` must be a string"
+							))
+						})?
+						.to_string(),
+				),
 			};
-			match type_key {
-				Some("sse") => McpTransport::Sse {
-					url,
-					headers,
-					timeout: None,
-				},
-				None | Some("http") => McpTransport::StreamableHttp {
-					url,
-					headers,
-					timeout: None,
-				},
-				Some(other) => {
-					return Err(ConfigError::InvalidConfig(format!(
-						"Grok MCP server `{name}` has unknown `type` `{other}`"
-					)));
-				}
-			}
+			remote_transport(url, headers, type_key, false, name, "Grok")?
 		} else {
-			return Err(ConfigError::InvalidConfig(format!(
-				"Grok MCP server `{name}` has neither `command` nor `url`"
-			)));
+			return Err(missing_transport_error(name, "Grok"));
 		};
 		config.mcps.push(McpServer {
 			name: name.clone(),
@@ -192,6 +172,16 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		});
 	}
 	Ok(config)
+}
+
+fn field_to_value(field: FieldValue) -> Value {
+	match field {
+		FieldValue::Str(s) => Value::String(s),
+		FieldValue::List(l) => {
+			Value::Array(l.into_iter().map(Value::String).collect())
+		}
+		FieldValue::Map(m) => string_map_to_value(&m),
+	}
 }
 
 pub fn serialize(
@@ -232,50 +222,11 @@ pub fn serialize(
 		};
 		// Remove all transport-owned keys before re-inserting (avoids stale
 		// keys when a server's transport changes, including `type`).
-		for k in TRANSPORT_KEYS {
-			entry.remove(k);
+		for k in transport_keys(false) {
+			entry.remove(*k);
 		}
-		match &mcp.transport {
-			McpTransport::Stdio {
-				command, args, env, ..
-			} => {
-				entry.insert(
-					"command".to_string(),
-					Value::String(command.clone()),
-				);
-				entry.insert(
-					"args".to_string(),
-					Value::Array(
-						args.iter().map(|a| Value::String(a.clone())).collect(),
-					),
-				);
-				if let Some(env) = env {
-					entry.insert("env".to_string(), string_map_to_value(env));
-				}
-			}
-			McpTransport::Sse { url, headers, .. } => {
-				entry.insert("url".to_string(), Value::String(url.clone()));
-				entry.insert(
-					"type".to_string(),
-					Value::String("sse".to_string()),
-				);
-				if let Some(headers) = headers {
-					entry.insert(
-						"headers".to_string(),
-						string_map_to_value(headers),
-					);
-				}
-			}
-			McpTransport::StreamableHttp { url, headers, .. } => {
-				// Streamable-HTTP has NO `type` key (already removed above).
-				entry.insert("url".to_string(), Value::String(url.clone()));
-				if let Some(headers) = headers {
-					entry.insert(
-						"headers".to_string(),
-						string_map_to_value(headers),
-					);
-				}
-			}
+		for (key, value) in transport_fields(&mcp.transport, false) {
+			entry.insert(key.to_string(), field_to_value(value));
 		}
 		entry.insert("enabled".to_string(), Value::Boolean(mcp.enabled));
 		servers.insert(mcp.name.clone(), Value::Table(entry));

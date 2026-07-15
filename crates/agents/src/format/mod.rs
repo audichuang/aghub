@@ -12,16 +12,21 @@
 //! entries mixing stdio (command/args/env) with remote (url/headers[/type]).
 //!
 //! These two share a contract but NOT a `Value` type (serde_yaml vs toml differ
-//! on key types, null semantics, and SSE/HTTP handling), so the logic is
-//! duplicated deliberately — a generic `ConfigDoc` trait would be a leaky ~200-
-//! line seam hiding little. Keep their invariants in sync by hand for now.
-//! **Extract a shared preserve/merge policy (or a shared contract-test harness
-//! first) when a 3rd strict dialect appears, or the next cross-dialect invariant
-//! change causes drift.**
+//! on key types, null semantics, and SSE/HTTP handling). The drift trigger the
+//! old note set — "the next cross-dialect invariant change causes drift" —
+//! fired (the mixed-key rule landed in Grok, then had to be hand-ported to
+//! Hermes), so the shared transport SEMANTICS now live in
+//! [`transport_policy`]: mixed-key rejection, command/url dispatch, the `type`
+//! sse/http split, the `enabled` default, and the serialize key/value choice.
+//! Each dialect owns ONLY its syntax (extract fields from its `Value`, write
+//! `Value`s back preserving unowned keys). This is NOT a `ConfigDoc` trait — the
+//! boundary is the neutral `RawServer`/`FieldValue` DTOs. `format_tests.rs`
+//! carries the cross-dialect contract test that fails if either dialect drifts.
 
 pub mod json_list;
 pub mod json_map;
 pub mod json_opencode;
 pub mod toml_format;
 pub mod toml_grok;
+pub mod transport_policy;
 pub mod yaml_hermes;

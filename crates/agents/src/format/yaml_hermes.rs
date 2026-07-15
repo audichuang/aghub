@@ -6,11 +6,13 @@
 //! per-server field it does not own, replacing only the transport keys.
 
 use crate::errors::{ConfigError, Result};
+use crate::format::transport_policy::{
+	missing_transport_error, reject_mixed_transport, remote_transport,
+	transport_fields, transport_keys, FieldValue,
+};
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use serde_yaml::{Mapping, Value};
 use std::collections::HashMap;
-
-const TRANSPORT_KEYS: [&str; 5] = ["command", "args", "env", "url", "headers"];
 
 fn value_to_string_map(
 	v: &Value,
@@ -86,17 +88,16 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?,
 		};
-		// Reject entries that mix stdio-family and remote-family keys.
+		// Reject mixed families on key PRESENCE before extracting any field so
+		// error precedence matches the pre-extraction behaviour. Hermes has a
+		// single remote transport, so `type` is not part of the remote family.
 		let has_stdio = ["command", "args", "env"]
 			.iter()
 			.any(|k| server.contains_key(*k));
 		let has_remote =
 			["url", "headers"].iter().any(|k| server.contains_key(*k));
-		if has_stdio && has_remote {
-			return Err(ConfigError::InvalidConfig(format!(
-				"Hermes MCP server `{name}` mixes stdio keys (command/args/env) with remote keys (url/headers)"
-			)));
-		}
+		reject_mixed_transport(has_stdio, has_remote, name, "Hermes", true)?;
+		// Dispatch on presence, then extract ONLY the chosen branch's fields.
 		let transport = if let Some(cmd) = server.get("command") {
 			let command = cmd
 				.as_str()
@@ -148,15 +149,10 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				None => None,
 				Some(v) => Some(value_to_string_map(v, name, "headers")?),
 			};
-			McpTransport::StreamableHttp {
-				url,
-				headers,
-				timeout: None,
-			}
+			// Single remote transport: `type` is not read; pass `None`.
+			remote_transport(url, headers, None, true, name, "Hermes")?
 		} else {
-			return Err(ConfigError::InvalidConfig(format!(
-				"Hermes MCP server `{name}` has neither `command` nor `url`"
-			)));
+			return Err(missing_transport_error(name, "Hermes"));
 		};
 		config.mcps.push(McpServer {
 			name: name.to_string(),
@@ -167,6 +163,16 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		});
 	}
 	Ok(config)
+}
+
+fn field_to_value(field: FieldValue) -> Value {
+	match field {
+		FieldValue::Str(s) => Value::String(s),
+		FieldValue::List(l) => {
+			Value::Sequence(l.into_iter().map(Value::String).collect())
+		}
+		FieldValue::Map(m) => string_map_to_value(&m),
+	}
 }
 
 pub fn serialize(
@@ -214,47 +220,13 @@ pub fn serialize(
 			})?,
 		};
 		// Remove all transport-owned keys before re-inserting (avoids stale
-		// keys when a server's transport changes).
-		for k in TRANSPORT_KEYS {
-			entry.remove(k);
+		// keys when a server's transport changes). `single_remote = true`, so a
+		// transferred Sse server serializes as the one remote transport.
+		for k in transport_keys(true) {
+			entry.remove(*k);
 		}
-		match &mcp.transport {
-			McpTransport::Stdio {
-				command, args, env, ..
-			} => {
-				entry.insert(
-					Value::String("command".to_string()),
-					Value::String(command.clone()),
-				);
-				entry.insert(
-					Value::String("args".to_string()),
-					Value::Sequence(
-						args.iter().map(|a| Value::String(a.clone())).collect(),
-					),
-				);
-				if let Some(env) = env {
-					entry.insert(
-						Value::String("env".to_string()),
-						string_map_to_value(env),
-					);
-				}
-			}
-			// Hermes has a single remote transport (`url`); serialize the
-			// deprecated Sse arm identically so a transferred SSE server
-			// survives and the match stays exhaustive.
-			McpTransport::Sse { url, headers, .. }
-			| McpTransport::StreamableHttp { url, headers, .. } => {
-				entry.insert(
-					Value::String("url".to_string()),
-					Value::String(url.clone()),
-				);
-				if let Some(headers) = headers {
-					entry.insert(
-						Value::String("headers".to_string()),
-						string_map_to_value(headers),
-					);
-				}
-			}
+		for (key, value) in transport_fields(&mcp.transport, true) {
+			entry.insert(Value::String(key.to_string()), field_to_value(value));
 		}
 		entry.insert(
 			Value::String("enabled".to_string()),
