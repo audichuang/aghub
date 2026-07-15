@@ -10,7 +10,7 @@ pub use classify::{
 };
 
 use std::io;
-use std::path::{Component, Path, PathBuf, MAIN_SEPARATOR};
+use std::path::{Component, Path, PathBuf};
 
 /// Resolve the `.agents/skills` canonical SKILLS-DIR for a scope.
 ///
@@ -72,11 +72,33 @@ pub enum LinkError {
 /// Normalize path separators to the platform native separator. On Windows
 /// `/`->`\` (feeds `cmd.exe` native separators); on Unix a no-op. Ported from
 /// SM `normalize_path`.
+///
+/// The Windows arm rewrites separators over the raw UTF-16 code units
+/// (`encode_wide`/`from_wide`), NOT via `to_string_lossy`, so an ill-formed
+/// component can never be corrupted into `U+FFFD` — a junction snapshot/restore
+/// must reproduce the exact target. For a real (valid, backslash-separated)
+/// path the result is byte-identical to the raw path.
 #[cfg_attr(not(windows), allow(dead_code))]
 pub(crate) fn normalize_path(path: &Path) -> PathBuf {
-	if MAIN_SEPARATOR == '\\' {
-		PathBuf::from(path.to_string_lossy().replace('/', "\\"))
-	} else {
+	#[cfg(windows)]
+	{
+		use std::ffi::OsString;
+		use std::os::windows::ffi::{OsStrExt, OsStringExt};
+		let wide: Vec<u16> = path
+			.as_os_str()
+			.encode_wide()
+			.map(|unit| {
+				if unit == b'/' as u16 {
+					b'\\' as u16
+				} else {
+					unit
+				}
+			})
+			.collect();
+		PathBuf::from(OsString::from_wide(&wide))
+	}
+	#[cfg(not(windows))]
+	{
 		path.to_path_buf()
 	}
 }
@@ -351,6 +373,88 @@ impl Linker {
 		create_link(&requested, master_dir, &link_path)?;
 		Ok(LinkOutcome::Linked)
 	}
+
+	/// Create a RAW cross-platform link at `link` pointing at `target`, with NO
+	/// conflict detection — the caller guarantees an empty slot. This is the
+	/// low-level primitive the rename snapshot/restore uses; contrast
+	/// [`Linker::link`], which lstat-inspects the slot and reports
+	/// `AlreadyLinked`/`Conflict`.
+	///
+	/// Unix: one `symlink` syscall handles both file and dir targets. Windows:
+	/// the kind must be chosen, so resolve `target` relative to `link`'s parent
+	/// and pick `symlink_dir`/`symlink_file` by the resolved metadata (defaulting
+	/// to a file link when it cannot be stat'd). For a directory target: native
+	/// `symlink_dir` first (needs Dev Mode/admin), else a [`create_junction`]
+	/// fallback using the ABSOLUTE resolved target — so a junction round-trips
+	/// through snapshot/restore even without admin.
+	pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+		#[cfg(unix)]
+		{
+			std::os::unix::fs::symlink(target, link)
+		}
+		#[cfg(windows)]
+		{
+			let resolved = if target.is_absolute() {
+				target.to_path_buf()
+			} else {
+				link.parent().unwrap_or_else(|| Path::new(".")).join(target)
+			};
+			if std::fs::metadata(&resolved)
+				.map(|m| m.is_dir())
+				.unwrap_or(false)
+			{
+				if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+					return Ok(());
+				}
+				// Fallback: directory junction (no admin). A junction cannot store
+				// a relative target, so use the absolute resolved path. Reuses the
+				// module's `create_junction` and folds its `LinkError` into `io`.
+				create_junction(&resolved, link).map_err(|e| match e {
+					LinkError::Io(io) => io,
+					LinkError::LinkUnsupported { source, .. } => source,
+					other => io::Error::other(other.to_string()),
+				})
+			} else {
+				std::os::windows::fs::symlink_file(target, link)
+			}
+		}
+		#[cfg(not(any(unix, windows)))]
+		{
+			let _ = (target, link);
+			Err(io::Error::new(
+				io::ErrorKind::Unsupported,
+				"symlinks are not supported on this platform",
+			))
+		}
+	}
+
+	/// Deep-copy the real directory tree at `src` into `dst`, RE-CREATING every
+	/// reparse point (Unix symlink OR Windows symlink/junction, detected via
+	/// [`Linker::is_link`]) as a link via [`Linker::symlink`] rather than
+	/// deep-copying its target.
+	///
+	/// This is the link-PRESERVING copy the rename snapshot/restore needs. It is
+	/// deliberately distinct from the module-private `copy_dir_recursive`, which
+	/// DEREFERENCES links and applies the npx exclude lists to materialize the
+	/// Master — do not conflate the two.
+	pub fn copy_preserving_links(src: &Path, dst: &Path) -> io::Result<()> {
+		std::fs::create_dir_all(dst)?;
+		for entry in std::fs::read_dir(src)? {
+			let entry = entry?;
+			let file_type = entry.file_type()?;
+			let from = entry.path();
+			let to = dst.join(entry.file_name());
+			if Self::is_link(&from) {
+				let target = std::fs::read_link(&from)?;
+				Self::symlink(&target, &to)?;
+			} else if file_type.is_dir() {
+				Self::copy_preserving_links(&from, &to)?;
+			} else {
+				std::fs::copy(&from, &to)?;
+			}
+		}
+		Ok(())
+	}
 }
 
 /// Create a directory link at `link` pointing at `requested_target`
@@ -522,6 +626,80 @@ mod tests {
 		assert!(
 			target.join("keep.txt").exists(),
 			"unlink must never touch the target"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlink_roundtrips_a_dir_target() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let target = tmp.path().join("target");
+		std::fs::create_dir_all(&target).unwrap();
+		let link = tmp.path().join("link");
+		Linker::symlink(&target, &link).unwrap();
+		assert!(Linker::is_link(&link), "symlink must create a link");
+		assert_eq!(
+			std::fs::read_link(&link).unwrap(),
+			target,
+			"the link must resolve to the target"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn copy_preserving_links_preserves_symlink_target_verbatim() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(src.join("real.txt"), "hi").unwrap();
+		// A RELATIVE symlink target: the copy must re-create it VERBATIM, never
+		// rebase, resolve, or materialize it. A relative target is the case a
+		// "some link exists" assertion would miss.
+		std::os::unix::fs::symlink("../elsewhere", src.join("link")).unwrap();
+
+		let dst = tmp.path().join("dst");
+		Linker::copy_preserving_links(&src, &dst).unwrap();
+
+		let copied = dst.join("link");
+		assert!(
+			Linker::is_link(&copied),
+			"a reparse point must be re-created as a link, not materialized"
+		);
+		assert_eq!(
+			std::fs::read_link(&copied).unwrap(),
+			PathBuf::from("../elsewhere"),
+			"the stored target must be preserved verbatim, not rebased"
+		);
+		assert_eq!(
+			std::fs::read_to_string(dst.join("real.txt")).unwrap(),
+			"hi",
+			"real files copy through"
+		);
+	}
+
+	#[test]
+	fn copy_preserving_links_deep_copies_real_dirs() {
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		std::fs::create_dir_all(src.join("nested")).unwrap();
+		std::fs::write(src.join("nested/a.txt"), "a").unwrap();
+
+		let dst = tmp.path().join("dst");
+		Linker::copy_preserving_links(&src, &dst).unwrap();
+
+		assert_eq!(
+			std::fs::read_to_string(dst.join("nested/a.txt")).unwrap(),
+			"a"
+		);
+		// A real copy is independent of the source.
+		std::fs::write(dst.join("nested/a.txt"), "b").unwrap();
+		assert_eq!(
+			std::fs::read_to_string(src.join("nested/a.txt")).unwrap(),
+			"a",
+			"copy must not be a link back to the source"
 		);
 	}
 
