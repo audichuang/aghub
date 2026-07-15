@@ -1440,6 +1440,59 @@ fn source_sync_all_agents_repairs_missing_links_after_single_agent_install() {
 
 #[cfg(unix)]
 #[test]
+fn source_sync_all_agents_output_follows_registry_order() {
+	// `-a all` must list agents in registry::ALL_AGENTS order (claude-first) —
+	// NOT AgentType::ALL order (cursor-first). Locks the ordering so a future
+	// switch back to AgentType::ALL can't silently reorder output/first-error.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"-a",
+			"all",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let order: Vec<&str> = v["actions"][0]["agents"]
+		.as_array()
+		.expect("agents array present for a multi-agent install")
+		.iter()
+		.map(|a| a["agent"].as_str().unwrap())
+		.collect();
+	let pos = |name: &str| order.iter().position(|a| *a == name);
+	// claude leads registry::ALL_AGENTS; cursor leads AgentType::ALL.
+	assert_eq!(
+		order.first().copied(),
+		Some("claude"),
+		"registry order → claude first, got {order:?}"
+	);
+	assert!(
+		pos("claude") < pos("cursor"),
+		"claude must precede cursor (registry, not AgentType::ALL order): {order:?}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
 fn source_sync_conflict_exits_nonzero() {
 	// A foreign real dir occupying an agent's skill slot is a conflict (never
 	// clobbered). It must surface as a NON-ZERO exit, not a swallowed success.
