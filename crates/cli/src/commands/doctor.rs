@@ -1,17 +1,17 @@
 //! `aghub-cli doctor` — read-only skill health across scopes.
 //!
 //! Reconciles each scope's skill lock against the on-disk universal master
-//! (`.agents/skills`): what's installed, where it came from (git → updatable, or
-//! local), and whether disk and lock agree. One table instead of
-//! cross-referencing `source list` + `check` + `prune-lock`. Never writes.
+//! (`.agents/skills`): what's installed, where it came from (git repo vs local),
+//! and whether disk and lock agree. One table instead of cross-referencing
+//! `source list` + `check` + `prune-lock`. Never writes.
 
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use aghub_core::paths::find_project_root;
-use aghub_core::skills::linker::universal_canonical_dir;
-use anyhow::{bail, Result};
+use aghub_core::skills::linker::{universal_canonical_dir, Linker};
+use anyhow::Result;
 use serde::Serialize;
+use skill_update::sources::SourceScope;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -42,11 +42,9 @@ impl MasterState {
 struct DoctorRow {
 	scope: &'static str,
 	skill: String,
-	/// Displayable source (`owner/repo`, `local`, or `type:source`).
+	/// Displayable source (`owner/repo`, `local`, or `type:source`) — the
+	/// git-vs-local distinction the reader needs to know if it's updatable.
 	source: String,
-	/// True when the source is a git repo — i.e. `check`/`apply-update` can
-	/// refresh it. A display hint; `check --online` is authoritative.
-	updatable: bool,
 	master: MasterState,
 	/// `ok` | `orphan-lock` (lock entry, no master on disk) | `untracked`
 	/// (master on disk, no lock entry) | `master-is-symlink`.
@@ -67,29 +65,31 @@ fn health_of(tracked: bool, master: &MasterState) -> &'static str {
 	}
 }
 
-/// Human source label + whether it's a git source (updatable). Pure.
-fn source_display(source: &str, source_type: &str) -> (String, bool) {
+/// Human source label: `owner/repo` for github, `local`, or `type:source` for
+/// any other provider. Pure.
+fn source_display(source: &str, source_type: &str) -> String {
 	let t = source_type.to_ascii_lowercase();
 	if t == "local" || source.is_empty() {
-		return ("local".to_string(), false);
-	}
-	let git = matches!(t.as_str(), "github" | "git" | "gitlab" | "bitbucket");
-	// github shorthand is already `owner/repo`; other providers keep their type
-	// prefix so `mintlify:bun.com` doesn't read as a git repo.
-	let label = if t == "github" {
+		"local".to_string()
+	} else if t == "github" {
+		// github shorthand is already `owner/repo`.
 		source.to_string()
 	} else {
+		// Other providers keep their type prefix so `mintlify:bun.com` doesn't
+		// read as a git repo.
 		format!("{source_type}:{source}")
-	};
-	(label, git)
+	}
 }
 
-/// On-disk state of the master path for one skill.
+/// On-disk state of the master path for one skill. Uses the canonical
+/// [`Linker::is_link`] so a Windows junction is classified as a link, not a dir.
 fn master_state(path: &Path) -> MasterState {
-	match std::fs::symlink_metadata(path) {
-		Err(_) => MasterState::Missing,
-		Ok(md) if md.file_type().is_symlink() => MasterState::Link,
-		Ok(_) => MasterState::Dir,
+	if std::fs::symlink_metadata(path).is_err() {
+		MasterState::Missing
+	} else if Linker::is_link(path) {
+		MasterState::Link
+	} else {
+		MasterState::Dir
 	}
 }
 
@@ -114,13 +114,11 @@ fn build_rows(
 	let mut rows = Vec::new();
 	for (name, (source, source_type)) in locked {
 		let state = master_state(&master.join(name));
-		let (label, updatable) = source_display(source, source_type);
 		let health = health_of(true, &state);
 		rows.push(DoctorRow {
 			scope,
 			skill: name.clone(),
-			source: label,
-			updatable,
+			source: source_display(source, source_type),
 			master: state,
 			health,
 		});
@@ -131,7 +129,6 @@ fn build_rows(
 				scope,
 				skill: name,
 				source: "—".to_string(),
-				updatable: false,
 				master: MasterState::Dir,
 				health: "untracked",
 			});
@@ -158,53 +155,26 @@ fn project_locked(root: &Path) -> BTreeMap<String, (String, String)> {
 		.collect()
 }
 
-/// Dispatch the `doctor` subcommand. `-g` global only, `-p` project only,
-/// default/`--all` = global plus the current project (when a root is detected).
-pub fn execute(
-	global: bool,
-	project: bool,
-	all: bool,
-	json: bool,
-) -> Result<()> {
-	if global && project {
-		bail!("choose either -g or -p, not both");
-	}
-	let _ = all; // default already spans global + project; --all is the explicit spelling.
-
-	let cwd = std::env::current_dir()?;
-	let project_root = find_project_root(&cwd);
-
-	let (want_global, want_project) = if global {
-		(true, false)
-	} else if project {
-		(false, true)
-	} else {
-		(true, true)
-	};
+/// Dispatch the `doctor` subcommand. Scope resolution is shared with `source`
+/// (`-g` global only, `-p` project only, default = global plus the current
+/// project when a root is detected).
+pub fn execute(global: bool, project: bool, json: bool) -> Result<()> {
+	let scopes = crate::commands::source::resolve_read_scopes(global, project)?;
 
 	let mut rows: Vec<DoctorRow> = Vec::new();
-	if want_global {
-		if let Some(master) = universal_canonical_dir(None) {
-			rows.extend(build_rows("global", &master, &global_locked()));
-		}
-	}
-	if want_project {
-		match project_root {
-			Some(root) => {
-				if let Some(master) = universal_canonical_dir(Some(&root)) {
-					rows.extend(build_rows(
-						"project",
-						&master,
-						&project_locked(&root),
-					));
-				}
+	for scope in &scopes {
+		let (root, locked) = match scope {
+			SourceScope::Global => (None, global_locked()),
+			SourceScope::Project { root } => {
+				(Some(root.as_path()), project_locked(root))
 			}
-			None if project => bail!(
-				"project scope requires a project root, but none was found from \
-				 the current directory (need an agent marker like .claude/, \
-				 .opencode/, .mcp.json, …)"
-			),
-			None => {}
+		};
+		if let Some(master) = universal_canonical_dir(root) {
+			rows.extend(build_rows(
+				crate::commands::source::scope_label(scope),
+				&master,
+				&locked,
+			));
 		}
 	}
 
@@ -276,24 +246,18 @@ mod tests {
 	}
 
 	#[test]
-	fn source_display_github_is_owner_repo_and_updatable() {
-		let (label, updatable) = source_display("owner/repo", "github");
-		assert_eq!(label, "owner/repo");
-		assert!(updatable);
+	fn source_display_github_is_owner_repo() {
+		assert_eq!(source_display("owner/repo", "github"), "owner/repo");
 	}
 
 	#[test]
-	fn source_display_local_is_not_updatable() {
-		let (label, updatable) = source_display("/tmp/x", "local");
-		assert_eq!(label, "local");
-		assert!(!updatable);
+	fn source_display_local() {
+		assert_eq!(source_display("/tmp/x", "local"), "local");
 	}
 
 	#[test]
 	fn source_display_other_provider_keeps_type_prefix() {
-		let (label, updatable) = source_display("bun.com", "mintlify");
-		assert_eq!(label, "mintlify:bun.com");
-		assert!(!updatable);
+		assert_eq!(source_display("bun.com", "mintlify"), "mintlify:bun.com");
 	}
 
 	#[test]
@@ -322,6 +286,6 @@ mod tests {
 		assert_eq!(rows.len(), 1);
 		assert_eq!(rows[0].skill, "gone");
 		assert_eq!(rows[0].health, "orphan-lock");
-		assert!(rows[0].updatable);
+		assert_eq!(rows[0].source, "owner/repo");
 	}
 }

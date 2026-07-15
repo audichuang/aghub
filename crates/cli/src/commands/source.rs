@@ -105,7 +105,7 @@ impl skill_update::Fetcher for CliFetcher {
 /// Resolve the read scopes for `list`/`diff` from the global flags:
 /// `-g` → global only; `-p` → project only; otherwise global plus the current
 /// project (when a project root is detected).
-fn resolve_read_scopes(
+pub(crate) fn resolve_read_scopes(
 	global: bool,
 	project: bool,
 ) -> Result<Vec<SourceScope>> {
@@ -144,7 +144,7 @@ fn scope_kind_str(kind: SourceScopeKind) -> &'static str {
 	}
 }
 
-fn scope_label(scope: &SourceScope) -> &'static str {
+pub(crate) fn scope_label(scope: &SourceScope) -> &'static str {
 	match scope {
 		SourceScope::Global => "global",
 		SourceScope::Project { .. } => "project",
@@ -597,7 +597,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let target_agents: Vec<AgentType> =
 		if args.agent.eq_ignore_ascii_case("all") {
 			use aghub_core::skills::linker::{
-				classify_all, universal_canonical_dir, LinkNeed,
+				agent_link_need, universal_canonical_dir, LinkNeed,
 			};
 			let master = universal_canonical_dir(project_root.as_deref())
 				.ok_or_else(|| {
@@ -605,10 +605,25 @@ fn sync(args: SyncArgs) -> Result<()> {
 					"could not resolve the universal master skills directory"
 				)
 				})?;
-			classify_all(scope, project_root.as_deref(), &master)
-				.into_iter()
-				.filter(|p| !matches!(p.need, LinkNeed::Unsupported))
-				.filter_map(|p| p.agent_id.parse::<AgentType>().ok())
+			// `agent_link_need` is the probe-free classifier: link-vs-skip
+			// WITHOUT the per-agent availability subprocess `classify_all`
+			// runs (we only care whether an agent can hold a skill here, not
+			// whether its CLI is installed). Iterating AgentType::ALL also
+			// avoids a lossy agent_id -> AgentType re-parse.
+			AgentType::ALL
+				.iter()
+				.copied()
+				.filter(|&a| {
+					!matches!(
+						agent_link_need(
+							aghub_core::registry::get(a),
+							scope,
+							project_root.as_deref(),
+							&master,
+						),
+						LinkNeed::Unsupported
+					)
+				})
 				.collect()
 		} else {
 			vec![args

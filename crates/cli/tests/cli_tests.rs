@@ -1092,6 +1092,35 @@ fn count_symlinks_named(root: &std::path::Path, name: &str) -> usize {
 	n
 }
 
+/// Run `-g -a <agent> source sync owner/repo --skill <skill> --install-missing
+/// --yes` against the local fetch source — the shape shared by the sync tests
+/// below; only `agent` and `skill` vary.
+#[cfg(unix)]
+fn run_sync_install(
+	home: &std::path::Path,
+	state: &std::path::Path,
+	src: &std::path::Path,
+	agent: &str,
+	skill: &str,
+) -> std::process::Output {
+	isolated_cli(home, state)
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src)
+		.args([
+			"-g",
+			"-a",
+			agent,
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			skill,
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap()
+}
+
 #[test]
 fn source_diff_reports_not_installed() {
 	let home = tempfile::TempDir::new().unwrap();
@@ -1261,22 +1290,13 @@ fn source_sync_skill_filter_installs_only_named_skill() {
 	write_source_skill(src.path(), "alpha", "alpha");
 	write_source_skill(src.path(), "beta", "beta");
 
-	let out = isolated_cli(home.path(), state.path())
-		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-		.args([
-			"-g",
-			"-a",
-			"claude",
-			"source",
-			"sync",
-			"owner/repo",
-			"--skill",
-			"alpha",
-			"--install-missing",
-			"--yes",
-		])
-		.output()
-		.unwrap();
+	let out = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"alpha",
+	);
 	assert!(
 		out.status.success(),
 		"stderr: {}",
@@ -1316,20 +1336,13 @@ fn source_sync_skill_filter_unknown_name_warns_and_installs_nothing() {
 	let src = tempfile::TempDir::new().unwrap();
 	write_source_skill(src.path(), "alpha", "alpha");
 
-	let out = isolated_cli(home.path(), state.path())
-		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-		.args([
-			"-g",
-			"source",
-			"sync",
-			"owner/repo",
-			"--skill",
-			"nope",
-			"--install-missing",
-			"--yes",
-		])
-		.output()
-		.unwrap();
+	let out = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"nope",
+	);
 	assert!(
 		out.status.success(),
 		"stderr: {}",
@@ -1358,22 +1371,8 @@ fn source_sync_all_agents_links_more_than_one_agent() {
 	let src = tempfile::TempDir::new().unwrap();
 	write_source_skill(src.path(), "alpha", "alpha");
 
-	let out = isolated_cli(home.path(), state.path())
-		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-		.args([
-			"-g",
-			"-a",
-			"all",
-			"source",
-			"sync",
-			"owner/repo",
-			"--skill",
-			"alpha",
-			"--install-missing",
-			"--yes",
-		])
-		.output()
-		.unwrap();
+	let out =
+		run_sync_install(home.path(), state.path(), src.path(), "all", "alpha");
 	assert!(
 		out.status.success(),
 		"stderr: {}",
@@ -1411,22 +1410,13 @@ fn source_sync_all_agents_repairs_missing_links_after_single_agent_install() {
 	write_source_skill(src.path(), "alpha", "alpha");
 
 	// Step 1: single-agent install (claude only).
-	let out1 = isolated_cli(home.path(), state.path())
-		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-		.args([
-			"-g",
-			"-a",
-			"claude",
-			"source",
-			"sync",
-			"owner/repo",
-			"--skill",
-			"alpha",
-			"--install-missing",
-			"--yes",
-		])
-		.output()
-		.unwrap();
+	let out1 = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"alpha",
+	);
 	assert!(out1.status.success());
 	assert_eq!(
 		count_symlinks_named(home.path(), "alpha"),
@@ -1435,22 +1425,8 @@ fn source_sync_all_agents_repairs_missing_links_after_single_agent_install() {
 	);
 
 	// Step 2: `-a all` re-run must repair — link the rest despite the lock.
-	let out2 = isolated_cli(home.path(), state.path())
-		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-		.args([
-			"-g",
-			"-a",
-			"all",
-			"source",
-			"sync",
-			"owner/repo",
-			"--skill",
-			"alpha",
-			"--install-missing",
-			"--yes",
-		])
-		.output()
-		.unwrap();
+	let out2 =
+		run_sync_install(home.path(), state.path(), src.path(), "all", "alpha");
 	assert!(
 		out2.status.success(),
 		"stderr: {}",
@@ -1476,22 +1452,13 @@ fn source_sync_conflict_exits_nonzero() {
 	std::fs::create_dir_all(&slot).unwrap();
 	std::fs::write(slot.join("FOREIGN.md"), "not ours").unwrap();
 
-	let out = isolated_cli(home.path(), state.path())
-		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-		.args([
-			"-g",
-			"-a",
-			"claude",
-			"source",
-			"sync",
-			"owner/repo",
-			"--skill",
-			"alpha",
-			"--install-missing",
-			"--yes",
-		])
-		.output()
-		.unwrap();
+	let out = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"alpha",
+	);
 	assert!(
 		!out.status.success(),
 		"a conflict must exit non-zero; stdout: {} stderr: {}",
@@ -1511,22 +1478,13 @@ fn source_sync_already_linked_exits_zero() {
 	write_source_skill(src.path(), "alpha", "alpha");
 
 	let mk = || {
-		isolated_cli(home.path(), state.path())
-			.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
-			.args([
-				"-g",
-				"-a",
-				"claude",
-				"source",
-				"sync",
-				"owner/repo",
-				"--skill",
-				"alpha",
-				"--install-missing",
-				"--yes",
-			])
-			.output()
-			.unwrap()
+		run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			"claude",
+			"alpha",
+		)
 	};
 	assert!(mk().status.success(), "first install must succeed");
 	let again = mk();

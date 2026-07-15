@@ -464,12 +464,7 @@ fn main() -> Result<()> {
 	// `doctor` reconciles the skill lock against the on-disk master across
 	// scopes; not single-agent scoped, so dispatch before adapter setup.
 	if let Commands::Doctor { json } = &cli.command {
-		return commands::doctor::execute(
-			cli.global,
-			cli.project,
-			cli.all,
-			*json,
-		);
+		return commands::doctor::execute(cli.global, cli.project, *json);
 	}
 
 	// `skill-usage` reads Claude's global `skillUsage` counter — it is
