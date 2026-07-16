@@ -2163,6 +2163,20 @@ pub async fn git_install_skills(
 		.as_ref()
 		.map(|r| crate::extractors::absolutize_root(r));
 
+	// Reject absolute / `..` paths before any join or install write.
+	let validated_paths: Vec<skill::SkillPath> = req
+		.skill_paths
+		.iter()
+		.map(|p| skill::SkillPath::parse(p))
+		.collect::<Result<_, _>>()
+		.map_err(|_| {
+			ApiError::new(
+				Status::BadRequest,
+				"skill_path must be a relative path inside the cloned repository",
+				"SKILL_PATH_INVALID",
+			)
+		})?;
+
 	let mut results = Vec::new();
 
 	// Record the session clone's checked-out tip OID (repo-level, shared by all
@@ -2194,15 +2208,17 @@ pub async fn git_install_skills(
 	let target_agents: Vec<AgentType> =
 		valid_agents.iter().map(|(_, agent)| *agent).collect();
 
-	for skill_path in &req.skill_paths {
-		let full_path = temp_path.join(skill_path);
-		let relative_dir = skill_path.replace('\\', "/");
+	for (skill_path, validated) in req.skill_paths.iter().zip(&validated_paths)
+	{
+		let full_path = validated.resolve_under(&temp_path);
 
 		let request =
 			aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
 				skill_file: &full_path,
 				source: &source,
-				lock_skill_path: skill::lock_skill_file_path(&relative_dir),
+				lock_skill_path: skill::lock_skill_file_path(
+					validated.as_str(),
+				),
 				ref_commit: ref_commit.clone(),
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
@@ -2900,6 +2916,82 @@ mod tests {
 			assert!(std::fs::read_to_string(sibling.join("SKILL.md"))
 				.unwrap()
 				.contains("keep"));
+		});
+	}
+
+	// Ticket 02 (SkillPath): the desktop install route must reject a traversal /
+	// absolute `skill_path` BEFORE any filesystem write. Today it raw-joins the
+	// client string (`temp_path.join(skill_path)`), so an absolute path collapses
+	// the join to the absolute path, escapes the clone root, and an out-of-tree
+	// SKILL.md gets read and copied into the `.agents/skills` master. This asserts
+	// the escape is refused and nothing is materialized from outside the clone.
+	// FAILS on the raw-join (install succeeds); passes once the route validates
+	// each path through `skill::SkillPath` before any join.
+	#[cfg(unix)]
+	#[test]
+	fn git_install_rejects_out_of_tree_skill_path_before_write() {
+		with_isolated_env(|home, _state| {
+			// The session clone root — the intended containment boundary.
+			let clone = tempdir().unwrap();
+
+			// An out-of-tree skill the attacker points `skill_path` at.
+			let outside = tempdir().unwrap();
+			let evil = outside.path().join("evil");
+			std::fs::create_dir_all(&evil).unwrap();
+			std::fs::write(
+				evil.join("SKILL.md"),
+				"---\nname: evil\ndescription: stolen\n---\n\nstolen\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<GitCloneSessions>()
+				.expect("git clone sessions");
+			sessions.sessions.lock().unwrap().insert(
+				"evil-session".to_string(),
+				GitCloneSession {
+					temp_dir: clone,
+					created_at: std::time::Instant::now(),
+					url: "https://github.com/owner/repo.git".to_string(),
+					credential_token: None,
+					branches: vec!["main".to_string()],
+					current_branch: "main".to_string(),
+				},
+			);
+
+			// Absolute path: `temp_path.join(<abs>)` collapses to the absolute
+			// path, escaping the clone entirely.
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&serde_json::json!({
+					"session_id": "evil-session",
+					"skill_paths": [evil.display().to_string()],
+					"agents": ["claude"],
+					"scope": "global",
+					"project_root": null,
+				}))
+				.dispatch();
+
+			// The route must reject the traversal outright, not install it.
+			assert_eq!(
+				response.status(),
+				rocket::http::Status::BadRequest,
+				"an out-of-tree skill_path must be refused with 400",
+			);
+
+			// And nothing from outside the clone may reach the master.
+			assert!(
+				!home.join(".agents/skills/evil").exists(),
+				"out-of-tree skill must not be materialized into the master",
+			);
 		});
 	}
 

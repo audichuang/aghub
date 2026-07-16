@@ -31,6 +31,7 @@ pub mod package;
 pub mod parser;
 pub mod sanitize;
 pub mod scan;
+pub mod skill_path;
 pub mod validator;
 
 // Re-export commonly used items
@@ -63,6 +64,7 @@ pub use sanitize::{
 	legacy_sanitize_name, sanitize_name, skill_present_on_disk,
 };
 pub use scan::{scan_skills, ScanError, ScanOptions};
+pub use skill_path::{SkillPath, SkillPathError};
 pub use validator::{
 	validate, validate_skill_dir, validate_skill_file, validate_zip,
 };
