@@ -173,64 +173,94 @@ export default function CoveragePage() {
 	};
 
 	const renderRows = (kind: ResourceKind, rows: CoverageRow[]) =>
-		rows.map((row) => (
-			<tr key={`${kind}:${row.name}`} className="group">
-				<td className="sticky left-0 z-10 bg-background py-1.5 pr-4 pl-1 group-hover:bg-surface-secondary">
-					<span className="text-sm text-foreground">{row.name}</span>
-				</td>
-				{row.cells.map((cell) => {
-					const cellKey = `${kind}:${row.name}:${cell.agentId}`;
-					const isPending = pendingCell === cellKey;
-					return (
-						<td
-							key={cell.agentId}
-							className="px-2 py-1.5 text-center group-hover:bg-surface-secondary"
-						>
-							{cell.applicable ? (
-								<button
-									type="button"
-									disabled={isPending || pendingCell !== null}
-									aria-pressed={cell.installed}
-									aria-label={row.name}
-									onClick={() =>
-										void handleToggle(
-											kind,
-											row,
-											cell.agentId,
-										)
-									}
-									className={cn(
-										"inline-flex size-6 items-center justify-center rounded-md border transition-colors",
-										cell.installed
-											? "border-accent bg-accent/15 text-accent"
-											: "border-separator text-transparent hover:border-accent/50 hover:text-accent/60",
-										pendingCell !== null &&
-											"cursor-not-allowed opacity-60",
-									)}
-								>
-									{isPending ? (
-										<Spinner size="sm" />
-									) : cell.installed ? (
-										<CheckIcon className="size-4" />
+		rows.map((row, index) => {
+			const isEven = index % 2 === 0;
+			const rowBgClass = isEven ? "bg-surface-secondary" : "bg-surface";
+			const stickyBgClass = isEven
+				? "bg-surface-secondary"
+				: "bg-surface";
+
+			return (
+				<tr
+					key={`${kind}:${row.name}`}
+					className={cn(
+						"group border-b border-separator/30 last:border-0 transition-colors duration-150",
+						rowBgClass,
+						"hover:bg-surface-tertiary",
+					)}
+				>
+					<td
+						className={cn(
+							"sticky left-0 z-10 py-2 px-4 font-medium transition-colors duration-150 border-r border-b border-separator/30",
+							stickyBgClass,
+							"group-hover:bg-surface-tertiary",
+						)}
+					>
+						<span className="text-sm font-medium text-foreground">
+							{row.name}
+						</span>
+					</td>
+					{row.cells.map((cell) => {
+						const cellKey = `${kind}:${row.name}:${cell.agentId}`;
+						const isPending = pendingCell === cellKey;
+						return (
+							<td
+								key={cell.agentId}
+								className="px-3 py-2 text-center transition-colors duration-150 border-b border-separator/20"
+							>
+								<div className="flex items-center justify-center">
+									{cell.applicable ? (
+										<button
+											type="button"
+											disabled={
+												isPending ||
+												pendingCell !== null
+											}
+											aria-pressed={cell.installed}
+											aria-label={row.name}
+											onClick={() =>
+												void handleToggle(
+													kind,
+													row,
+													cell.agentId,
+												)
+											}
+											className={cn(
+												"inline-flex size-6 items-center justify-center rounded-md border transition-all duration-200 shadow-xs",
+												cell.installed
+													? "border-accent bg-accent/15 text-accent hover:bg-accent/25 hover:border-accent"
+													: "border-separator bg-surface-secondary/40 text-muted/50 hover:border-accent/50 hover:bg-accent/10 hover:text-accent",
+												pendingCell !== null &&
+													"cursor-not-allowed opacity-60",
+											)}
+										>
+											{isPending ? (
+												<Spinner size="sm" />
+											) : cell.installed ? (
+												<CheckIcon className="size-3.5" />
+											) : (
+												<PlusIcon className="size-3.5 opacity-60 group-hover:opacity-100 transition-opacity" />
+											)}
+										</button>
 									) : (
-										<PlusIcon className="size-3.5" />
+										<span className="text-xs text-muted/30 font-semibold select-none">
+											–
+										</span>
 									)}
-								</button>
-							) : (
-								<span className="text-xs text-muted/40">–</span>
-							)}
-						</td>
-					);
-				})}
-			</tr>
-		));
+								</div>
+							</td>
+						);
+					})}
+				</tr>
+			);
+		});
 
 	const hasColumns = columns.length > 0;
 	const hasRows = skillRows.length > 0 || mcpRows.length > 0;
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
-			<div className="flex items-center justify-between gap-3 border-b border-separator px-4 py-3">
+			<div className="flex items-center justify-between gap-3 border-b border-separator px-6 py-4 bg-surface/50 backdrop-blur-md">
 				<div className="grid gap-0.5">
 					<h1 className="text-base font-semibold text-foreground">
 						{t("coverage")}
@@ -249,72 +279,100 @@ export default function CoveragePage() {
 				/>
 			</div>
 
-			<div className="min-h-0 flex-1 overflow-auto p-4">
+			<div className="min-h-0 flex-1 overflow-auto p-6 flex flex-col">
 				{scope === "project" && !projectPath ? (
-					<p className="text-sm text-muted">
-						{t("coverageSelectProject")}
-					</p>
+					<div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+						<p className="text-sm text-muted">
+							{t("coverageSelectProject")}
+						</p>
+					</div>
 				) : skillsLoading ? (
-					<div className="flex justify-center py-10">
-						<Spinner />
+					<div className="flex-1 flex items-center justify-center py-10">
+						<Spinner size="lg" />
 					</div>
 				) : !hasColumns ? (
-					<p className="text-sm text-muted">{t("noTargetAgents")}</p>
+					<div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+						<p className="text-sm text-muted">
+							{t("noTargetAgents")}
+						</p>
+					</div>
 				) : !hasRows ? (
-					<p className="text-sm text-muted">{t("coverageEmpty")}</p>
+					<div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+						<p className="text-sm text-muted">
+							{t("coverageEmpty")}
+						</p>
+					</div>
 				) : (
-					<table className="border-collapse text-left">
-						<thead>
-							<tr>
-								<th className="sticky left-0 z-20 bg-background pb-2 pl-1" />
-								{columns.map((c) => (
-									<th
-										key={c.id}
-										className="px-2 pb-2 align-bottom font-normal"
-									>
-										<div className="flex flex-col items-center gap-1">
-											<AgentIcon
-												id={c.id}
-												name={c.display_name}
-												size="xs"
-											/>
-											<span className="max-w-[72px] truncate text-xs text-muted">
-												{c.display_name}
-											</span>
-										</div>
-									</th>
-								))}
-							</tr>
-						</thead>
-						<tbody>
-							{skillRows.length > 0 && (
-								<>
-									<tr>
-										<td
-											colSpan={columns.length + 1}
-											className="sticky left-0 pt-3 pb-1 pl-1 text-xs font-semibold tracking-wide text-muted uppercase"
+					<div className="border border-separator rounded-xl bg-surface shadow-xs overflow-auto max-h-full">
+						<table className="w-full border-separate border-spacing-0 text-left">
+							<thead>
+								<tr className="bg-surface-secondary">
+									<th className="sticky left-0 top-0 z-30 bg-surface-secondary px-4 py-3 min-w-[220px] border-r border-b border-separator/40" />
+									{columns.map((c) => (
+										<th
+											key={c.id}
+											className="sticky top-0 z-20 bg-surface-secondary px-3 py-3.5 align-bottom font-normal w-24 min-w-24 max-w-24 text-center border-b border-separator/40"
 										>
-											{t("skills")}
-										</td>
-									</tr>
-									{renderRows("skill", skillRows)}
-								</>
-							)}
-							{showMcp && mcpRows.length > 0 && (
-								<>
-									<tr>
-										<td
-											colSpan={columns.length + 1}
-											className="sticky left-0 pt-4 pb-1 pl-1 text-xs font-semibold tracking-wide text-muted uppercase"
-										>
-											{t("mcpServers")}
-										</td>
-									</tr>
-									{renderRows("mcp", mcpRows)}
-								</>
-							)}
-						</tbody>
-					</table>
+											<div className="flex flex-col items-center gap-1.5">
+												<AgentIcon
+													id={c.id}
+													name={c.display_name}
+													size="xs"
+												/>
+												<span className="max-w-[80px] truncate text-xs font-semibold text-muted hover:text-foreground transition-colors select-none">
+													{c.display_name}
+												</span>
+											</div>
+										</th>
+									))}
+								</tr>
+							</thead>
+							<tbody>
+								{skillRows.length > 0 && (
+									<>
+										<tr>
+											<td
+												colSpan={columns.length + 1}
+												className="sticky left-0 z-10 bg-surface-secondary/70 px-4 py-2.5 border-b border-separator/30 text-xs font-semibold tracking-wider text-muted uppercase"
+											>
+												<div className="flex items-center gap-2">
+													<span className="h-3.5 w-1 rounded-full bg-accent" />
+													<span className="font-bold text-foreground/80">
+														{t("skills")}
+													</span>
+													<span className="rounded-full bg-separator/50 px-1.5 py-0.5 text-[10px] font-semibold text-muted normal-case select-none">
+														{skillRows.length}
+													</span>
+												</div>
+											</td>
+										</tr>
+										{renderRows("skill", skillRows)}
+									</>
+								)}
+								{showMcp && mcpRows.length > 0 && (
+									<>
+										<tr>
+											<td
+												colSpan={columns.length + 1}
+												className="sticky left-0 z-10 bg-surface-secondary/70 px-4 py-2.5 border-b border-separator/30 text-xs font-semibold tracking-wider text-muted uppercase"
+											>
+												<div className="flex items-center gap-2">
+													<span className="h-3.5 w-1 rounded-full bg-success" />
+													<span className="font-bold text-foreground/80">
+														{t("mcpServers")}
+													</span>
+													<span className="rounded-full bg-separator/50 px-1.5 py-0.5 text-[10px] font-semibold text-muted normal-case select-none">
+														{mcpRows.length}
+													</span>
+												</div>
+											</td>
+										</tr>
+										{renderRows("mcp", mcpRows)}
+									</>
+								)}
+							</tbody>
+						</table>
+					</div>
 				)}
 			</div>
 		</div>
