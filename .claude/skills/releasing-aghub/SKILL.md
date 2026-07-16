@@ -1,6 +1,6 @@
 ---
 name: releasing-aghub
-description: Runbook for cutting a desktop + CLI release of this aghub fork (audichuang/aghub) via the tag-driven GitHub Actions pipeline, plus the versioning model and how to verify artifacts and fix the failures it commonly hits. Use when the user wants to cut/ship a release, bump the version, push a release tag, when a Release workflow run fails (macOS `security import` / sccache `Cargo Fetch`), or when verifying release artifacts, `latest.json`, or the Homebrew tap. ALSO use for any aghub version/maintenance question — why a local `aghub-cli --version` reports a `-dev` version, where the version number comes from, keeping the desktop app and CLI on the same version / shipped together, `just bump`, or a `ci.yml` `test` flaking on a test that passes locally (which now blocks the release via the `verify-ci` gate).
+description: Runbook for cutting a desktop + CLI release of this aghub fork (audichuang/aghub) via the tag-driven GitHub Actions pipeline, plus the versioning model and how to verify artifacts and fix the failures it commonly hits. Use when the user wants to cut/ship a release, bump the version, push a release tag, when a Release workflow run fails (macOS `security import` / sccache `Cargo Fetch`), or when verifying release artifacts, `latest.json`, or the Homebrew tap. ALSO use for any aghub version/maintenance question — why a local `aghub-cli --version` reports a `-dev` version, where the version number comes from, keeping the desktop app and CLI on the same version / shipped together, `just bump`, or a `ci.yml` `test` flaking on a test that passes locally.
 ---
 
 # Releasing aghub (this fork)
@@ -30,10 +30,10 @@ Releases are **tag-driven**: pushing a `v*` tag runs `.github/workflows/release.
 `verify-ci` gates everything: it asserts the tagged commit already has a **green push-to-main `ci.yml` run** (ci.yml's
 `test` job runs the ubuntu/macOS/Windows suite unconditionally on every push to main). It does **not** re-run the suite
 — a tag whose CI isn't green, or that never landed on main, produces **no** artifacts and fails fast at `verify-ci`.
-The safety property (added after a macOS/Windows-only bug shipped because the build compiled but tests were red) is
-preserved: a green CI run requires all 3 test legs to pass. The old gate re-ran the full 3-OS suite on the tag (~26 min)
-— pure duplication of the CI that already ran on that exact commit, so it was replaced by the assertion. There is no
-manual build or upload. This fork ships its **own** independent version line — start ≥ the highest existing tag.
+The safety property it protects (added after a bug that compiled but had red tests shipped on macOS/Windows) is intact
+— a green CI run means all 3 test legs passed — while dropping the old gate's ~26 min re-run of tests the tagged commit
+already passed on its push to main. There is no manual build or upload. This fork ships its **own** independent version
+line — start ≥ the highest existing tag.
 
 ## Versioning model & app/CLI sync
 
@@ -88,9 +88,8 @@ gh run list  --repo audichuang/aghub --workflow release.yml --limit 1
 gh run watch <run-id> --repo audichuang/aghub --exit-status
 ```
 
-`verify-ci` is a hard precondition, not a re-test backstop: it does **not** run tests, so tagging a commit whose
-push-to-main CI isn't green (or is still running) fails immediately at `verify-ci` and produces no artifacts. Step 0
-(wait for green CI) is therefore mandatory, not advisory — `just release` already waits for green before it tags.
+Step 0 is mandatory, not advisory: `verify-ci` fails the release if the tagged commit has no green push-to-main CI
+run — it does not re-test. `just release` already waits for green before tagging; a manual tag must too.
 `git push` is gated by a **pre-push hook** (prettier `--check` + clippy `-D warnings` + eslint + tsc) — note it does
 **NOT** run tests; that gap is why `just preflight` exists. `just preflight` runs on your platform only and cannot
 reproduce macOS/Windows-specific behavior — for that, rely on the CI matrix and write tests that simulate the platform
