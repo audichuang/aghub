@@ -5,10 +5,10 @@
 //! tests (see crates/core/AGENTS.md Testing).
 //!
 //! The transaction receives an already-fetched tree, so these drive it with a
-//! tempdir `repo_root` — no git, no network. Assertions are on observable
-//! on-disk state (dirs installed / removed / restored), which is the data-loss
-//! contract that matters; reading the lock would need the `skill` crate as a
-//! dev-dependency, and the on-disk state already proves the guarantee.
+//! tempdir `repo_root` — no git, no network. They seed the global skill lock
+//! (via the `skill` dev-dependency) so `accept_rename`'s lock-managed
+//! precondition is satisfied, and assert BOTH the observable on-disk state
+//! (dirs installed / removed / restored) AND the lock transition.
 
 #![cfg(unix)]
 
@@ -80,10 +80,34 @@ fn install_old_skill(home: &Path, name: &str) {
 	.unwrap();
 }
 
+/// Seed the global skill lock so `accept_rename`'s lock-managed precondition
+/// holds for `name`. Writes into the isolated `XDG_STATE_HOME`.
+fn seed_global_lock(name: &str, skill_path: &str) {
+	let mut lock = skill::SkillLockFile::default();
+	lock.skills.insert(
+		name.to_string(),
+		skill::SkillLockEntry {
+			source: "owner/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/owner/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			skill_path: Some(skill_path.to_string()),
+			skill_folder_hash: String::new(),
+			content_hash: None,
+			ref_commit: None,
+			installed_at: "t".to_string(),
+			updated_at: "t".to_string(),
+			plugin_name: None,
+		},
+	);
+	skill::lock::global::write_skill_lock(&lock).unwrap();
+}
+
 #[test]
 fn accept_rename_installs_new_and_removes_old() {
 	with_isolated_env(|home| {
 		install_old_skill(home, "old-skill");
+		seed_global_lock("old-skill", "new-skill/SKILL.md");
 		let repo = fake_repo("new-skill", "new-skill");
 		let source = source_for("new-skill/SKILL.md");
 
@@ -110,6 +134,53 @@ fn accept_rename_installs_new_and_removes_old() {
 			!home.join(".claude/skills/old-skill").exists(),
 			"old skill dir must be removed"
 		);
+		// The lock transitioned: new-skill present, old-skill gone.
+		let lock = skill::lock::global::read_skill_lock();
+		assert!(
+			lock.skills.contains_key("new-skill"),
+			"new-skill must be in the lock"
+		);
+		assert!(
+			!lock.skills.contains_key("old-skill"),
+			"old-skill must be removed from the lock"
+		);
+	});
+}
+
+/// The forgeable-interface guard: a skill installed on disk but NOT lock-managed
+/// must be refused (fabricated `RenameLockSource` cannot rename an unmanaged
+/// skill), and nothing may be mutated.
+#[test]
+fn accept_rename_refuses_a_skill_that_is_not_lock_managed() {
+	with_isolated_env(|home| {
+		install_old_skill(home, "old-skill"); // on disk, but NO lock entry seeded
+		let repo = fake_repo("new-skill", "new-skill");
+		let source = source_for("new-skill/SKILL.md");
+
+		let err = accept_rename(
+			RenameRequest {
+				old_name: "old-skill",
+				new_name: "new-skill",
+				scope: RenameScope::Global,
+			},
+			FetchedRename {
+				repo_root: repo.path(),
+				oid: "",
+				source: &source,
+			},
+		)
+		.expect_err("an unmanaged (unlocked) skill must not be renamed");
+		assert!(
+			matches!(
+				err,
+				aghub_core::skills::rename::RenameError::NotLocked(_)
+			),
+			"expected NotLocked, got {err:?}"
+		);
+		// Nothing mutated: old present, new never created.
+		assert!(home.join(".claude/skills/old-skill").exists());
+		assert!(!home.join(".claude/skills/new-skill").exists());
+		assert!(!home.join(".agents/skills/new-skill").exists());
 	});
 }
 
@@ -152,6 +223,7 @@ fn accept_rename_rolls_back_when_old_dir_cannot_be_removed() {
 	use std::os::unix::fs::PermissionsExt;
 	with_isolated_env(|home| {
 		install_old_skill(home, "old-skill");
+		seed_global_lock("old-skill", "new-skill/SKILL.md");
 		let repo = fake_repo("new-skill", "new-skill");
 		let source = source_for("new-skill/SKILL.md");
 
@@ -190,12 +262,26 @@ fn accept_rename_rolls_back_when_old_dir_cannot_be_removed() {
 
 		assert!(
 			result.is_err(),
-			"must fail when the old-skill dir cannot be mutated"
+			"must fail when the new-name link cannot be created"
 		);
-		// The safety contract: the old skill must survive a failed transaction.
+		// The safety contract: old skill survives (dir + content + lock), and
+		// every new-name path is cleaned up.
 		assert!(
-			home.join(".claude/skills/old-skill").exists(),
-			"old skill dir must remain after a rolled-back transaction"
+			home.join(".claude/skills/old-skill/SKILL.md").exists(),
+			"old skill content must remain after a rolled-back transaction"
+		);
+		assert!(
+			!home.join(".agents/skills/new-skill").exists(),
+			"the freshly-created new-name master must be rolled back"
+		);
+		let lock = skill::lock::global::read_skill_lock();
+		assert!(
+			lock.skills.contains_key("old-skill"),
+			"old-skill must remain locked after rollback"
+		);
+		assert!(
+			!lock.skills.contains_key("new-skill"),
+			"new-skill must not be left in the lock"
 		);
 	});
 }

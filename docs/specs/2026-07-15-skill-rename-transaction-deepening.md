@@ -255,15 +255,37 @@ introducing the very data-loss it aims to prevent:
   out, so a failed restore leaves no recovery path. ADR-0001 asks for a compound
   error naming the rollback failure + the affected Master, and the backup should
   be retained when restoration fails. Both originals already violated this.
-- **Core interface is misusable.** `RenameLockSource` is freely constructible
-  and `accept_rename` does not re-verify the old lock at transaction time, so a
-  direct core caller with fabricated coordinates could rename an unmanaged
-  skill. Production is safe (both adapters obtain the source via
-  `rename_source_from_lock`, which requires the lock), but the follow-up should
-  make the value non-forgeable (a prepared value returned by
-  `rename_source_from_lock`) and/or re-assert the lock precondition, then seed
-  the lock in the core tests (adds `skill` as a core dev-dependency) to assert
-  the full old/new lock state across the rollback branches.
+- **Windows rollback may restore a referrer with the wrong link kind.** The
+  snapshot captures agent referrers before the Master and `restore_snapshot`
+  replays in that order, so on Windows a referrer restored before its Master
+  cannot stat the (not-yet-restored) target and `Linker::symlink` falls back to
+  `symlink_file` instead of a directory junction. Pre-existing (the same order
+  shipped on `main`) and Unix-unaffected; the follow-up should restore the
+  Master before its referrers (or record + reuse the original link kind). Not
+  verifiable on the Linux dev/CI host.
+
+## Holistic-review follow-up (2026-07-16)
+
+A final cross-candidate Codex pass (all three commits + test effectiveness)
+returned these, addressed here:
+
+- **FIXED — the extracted core interface was more permissive than `main`.**
+  `accept_rename` now re-asserts the old-name lock precondition inside the
+  transaction (before any mutation) and errors `NotLocked` otherwise — a direct
+  core caller can no longer rename an installed-but-unmanaged skill via
+  fabricated `RenameLockSource` coordinates. (`main` enforced this implicitly
+  because both surfaces called their private lock reader first.) The core tests
+  now seed the lock (via a new `skill` core dev-dependency) and assert the full
+  lock transition.
+- **FIXED — error messages restored.** `NoInstalledCopy` again names the old
+  skill and `TargetExists` again names the conflicting new name, matching the
+  pre-extraction CLI/API wording.
+- **FIXED — data-safety rollback is now tested end-to-end.** A deterministic
+  test drives the rollback helpers after the old skill has ALREADY been removed
+  (the scariest path) and asserts the old skill + a universal-install referrer
+  are restored (content + link kind) while every new-name path is cleaned — the
+  branch the read-only-dir integration test (which fails at install) could not
+  reach without a failure hook.
 
 ## Rollback
 

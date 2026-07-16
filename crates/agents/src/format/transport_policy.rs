@@ -223,54 +223,96 @@ mod tests {
 		.is_ok());
 	}
 
-	#[test]
-	fn transport_keys_include_type_only_when_not_single_remote() {
-		assert!(transport_keys(false).contains(&"type"));
-		assert!(!transport_keys(true).contains(&"type"));
+	fn keys(fields: &[(&'static str, FieldValue)]) -> Vec<&'static str> {
+		fields.iter().map(|(k, _)| *k).collect()
+	}
+	fn str_of(fields: &[(&'static str, FieldValue)], key: &str) -> String {
+		match fields.iter().find(|(k, _)| *k == key) {
+			Some((_, FieldValue::Str(s))) => s.clone(),
+			_ => panic!("field `{key}` is missing or not a string"),
+		}
 	}
 
 	#[test]
-	fn serialize_fields_add_type_for_sse_only_when_not_single_remote() {
-		let sse = McpTransport::Sse {
-			url: "u".into(),
-			headers: None,
+	fn transport_keys_are_the_full_owned_set() {
+		assert_eq!(
+			transport_keys(false),
+			["command", "args", "env", "url", "headers", "type"]
+		);
+		assert_eq!(
+			transport_keys(true),
+			["command", "args", "env", "url", "headers"]
+		);
+	}
+
+	#[test]
+	fn serialize_fields_stdio_carry_exact_values_and_omit_absent_env() {
+		let env = HashMap::from([("K".to_string(), "V".to_string())]);
+		let stdio = McpTransport::Stdio {
+			command: "mycmd".into(),
+			args: vec!["--a".into(), "--b".into()],
+			env: Some(env.clone()),
 			timeout: None,
 		};
-		let grok: Vec<_> = transport_fields(&sse, false)
-			.into_iter()
-			.map(|(k, _)| k)
-			.collect();
-		assert_eq!(grok, vec!["url", "type"], "Grok Sse writes url then type");
-		let hermes: Vec<_> = transport_fields(&sse, true)
-			.into_iter()
-			.map(|(k, _)| k)
-			.collect();
-		assert_eq!(hermes, vec!["url"], "single-remote omits type");
-	}
-
-	#[test]
-	fn serialize_fields_for_stdio_and_http() {
-		let stdio = McpTransport::Stdio {
+		let fields = transport_fields(&stdio, false);
+		assert_eq!(keys(&fields), ["command", "args", "env"]);
+		assert_eq!(str_of(&fields, "command"), "mycmd");
+		match fields.iter().find(|(k, _)| *k == "args") {
+			Some((_, FieldValue::List(l))) => assert_eq!(l, &["--a", "--b"]),
+			_ => panic!("args must be a non-empty list with the exact values"),
+		}
+		match fields.iter().find(|(k, _)| *k == "env") {
+			Some((_, FieldValue::Map(m))) => assert_eq!(m, &env),
+			_ => panic!("env must carry the exact map"),
+		}
+		// env is OMITTED (not written empty) when None.
+		let no_env = McpTransport::Stdio {
 			command: "c".into(),
-			args: vec!["a".into()],
+			args: vec![],
 			env: None,
 			timeout: None,
 		};
-		let keys: Vec<_> = transport_fields(&stdio, false)
-			.into_iter()
-			.map(|(k, _)| k)
-			.collect();
-		assert_eq!(keys, vec!["command", "args"]);
+		assert_eq!(
+			keys(&transport_fields(&no_env, false)),
+			["command", "args"],
+			"absent env must not emit an `env` key"
+		);
+	}
 
+	#[test]
+	fn serialize_fields_sse_writes_type_and_values_only_for_type_aware_dialect()
+	{
+		let headers = HashMap::from([("H".to_string(), "1".to_string())]);
+		let sse = McpTransport::Sse {
+			url: "https://x/sse".into(),
+			headers: Some(headers.clone()),
+			timeout: None,
+		};
+		let grok = transport_fields(&sse, false);
+		assert_eq!(keys(&grok), ["url", "type", "headers"]);
+		assert_eq!(str_of(&grok, "url"), "https://x/sse");
+		assert_eq!(str_of(&grok, "type"), "sse");
+		match grok.iter().find(|(k, _)| *k == "headers") {
+			Some((_, FieldValue::Map(m))) => assert_eq!(m, &headers),
+			_ => panic!("headers must carry the exact map"),
+		}
+		// single-remote: url + headers, never `type`.
+		assert_eq!(keys(&transport_fields(&sse, true)), ["url", "headers"]);
+	}
+
+	#[test]
+	fn serialize_fields_http_is_url_only_and_omits_absent_headers() {
 		let http = McpTransport::StreamableHttp {
 			url: "u".into(),
 			headers: None,
 			timeout: None,
 		};
-		let keys: Vec<_> = transport_fields(&http, false)
-			.into_iter()
-			.map(|(k, _)| k)
-			.collect();
-		assert_eq!(keys, vec!["url"], "StreamableHttp never writes type");
+		let fields = transport_fields(&http, false);
+		assert_eq!(
+			keys(&fields),
+			["url"],
+			"StreamableHttp: url only — never type, no empty headers"
+		);
+		assert_eq!(str_of(&fields, "url"), "u");
 	}
 }

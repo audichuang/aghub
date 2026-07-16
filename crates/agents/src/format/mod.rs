@@ -15,13 +15,17 @@
 //! on key types, null semantics, and SSE/HTTP handling). The drift trigger the
 //! old note set — "the next cross-dialect invariant change causes drift" —
 //! fired (the mixed-key rule landed in Grok, then had to be hand-ported to
-//! Hermes), so the shared transport SEMANTICS now live in
-//! [`transport_policy`]: mixed-key rejection, command/url dispatch, the `type`
-//! sse/http split, the `enabled` default, and the serialize key/value choice.
-//! Each dialect owns ONLY its syntax (extract fields from its `Value`, write
-//! `Value`s back preserving unowned keys). This is NOT a `ConfigDoc` trait — the
-//! boundary is the neutral `RawServer`/`FieldValue` DTOs. `format_tests.rs`
-//! carries the cross-dialect contract test that fails if either dialect drifts.
+//! Hermes), so the drift-prone INVARIANTS now live in [`transport_policy`]:
+//! `reject_mixed_transport` (mixed stdio/remote keys), `remote_transport` (the
+//! `url`→Sse/StreamableHttp `type` split), `missing_transport_error`, and the
+//! serialize decision (`transport_keys` + `transport_fields`, over the neutral
+//! `FieldValue`). Each dialect keeps its own SYNTAX and phase order (validate
+//! `enabled` → reject mixed on key presence → dispatch on presence → extract the
+//! chosen branch → build), so error precedence is byte-identical to before.
+//! This is NOT a `ConfigDoc` trait abstracting the whole document — the shared
+//! surface is a handful of pure functions over primitives + `FieldValue`.
+//! `tests/format_tests.rs` carries the cross-dialect contract test that fails if
+//! either dialect drifts.
 
 pub mod json_list;
 pub mod json_map;

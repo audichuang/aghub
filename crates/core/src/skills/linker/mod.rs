@@ -652,20 +652,22 @@ mod tests {
 		use tempfile::tempdir;
 		let tmp = tempdir().unwrap();
 		let src = tmp.path().join("src");
-		std::fs::create_dir_all(&src).unwrap();
+		std::fs::create_dir_all(src.join("nested")).unwrap();
 		std::fs::write(src.join("real.txt"), "hi").unwrap();
-		// A RELATIVE symlink target: the copy must re-create it VERBATIM, never
-		// rebase, resolve, or materialize it. A relative target is the case a
-		// "some link exists" assertion would miss.
-		std::os::unix::fs::symlink("../elsewhere", src.join("link")).unwrap();
+		// A RELATIVE symlink NESTED under a real subdir: the copy must recurse
+		// into `nested` AND re-create the link VERBATIM there, never rebase,
+		// resolve, or materialize it. Nesting catches a recursive descent that
+		// dereferences links below the top level.
+		std::os::unix::fs::symlink("../elsewhere", src.join("nested/link"))
+			.unwrap();
 
 		let dst = tmp.path().join("dst");
 		Linker::copy_preserving_links(&src, &dst).unwrap();
 
-		let copied = dst.join("link");
+		let copied = dst.join("nested/link");
 		assert!(
 			Linker::is_link(&copied),
-			"a reparse point must be re-created as a link, not materialized"
+			"a nested reparse point must be re-created as a link, not materialized"
 		);
 		assert_eq!(
 			std::fs::read_link(&copied).unwrap(),

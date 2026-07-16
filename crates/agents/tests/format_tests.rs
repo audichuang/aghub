@@ -25,10 +25,18 @@ fn assert_parsed_invariants(cfg: &AgentConfig, dialect: &str) {
 		on.enabled,
 		"{dialect}: missing `enabled` must default to true"
 	);
-	assert!(
-		matches!(on.transport, McpTransport::Stdio { .. }),
-		"{dialect}: `command` must map to Stdio"
-	);
+	// Assert the command + args VALUES survived, not just the variant.
+	match &on.transport {
+		McpTransport::Stdio { command, args, .. } => {
+			assert_eq!(command, "cmd", "{dialect}: keep-on command value");
+			assert_eq!(
+				args,
+				&["--x".to_string()],
+				"{dialect}: keep-on args value"
+			);
+		}
+		_ => panic!("{dialect}: keep-on `command` must map to Stdio"),
+	}
 	let off = cfg
 		.mcps
 		.iter()
@@ -42,6 +50,15 @@ fn assert_parsed_invariants(cfg: &AgentConfig, dialect: &str) {
 		cfg.mcps.iter().any(|m| m.name == "remote"),
 		"{dialect}: remote server missing"
 	);
+}
+
+/// The `url` value of a server, whatever remote variant it parsed to.
+fn remote_url<'a>(cfg: &'a AgentConfig, name: &str) -> &'a str {
+	match &cfg.mcps.iter().find(|m| m.name == name).unwrap().transport {
+		McpTransport::Sse { url, .. }
+		| McpTransport::StreamableHttp { url, .. } => url,
+		McpTransport::Stdio { .. } => panic!("{name} is not a remote server"),
+	}
 }
 
 #[test]
@@ -70,6 +87,11 @@ type = "sse"
 	assert!(
 		matches!(remote.transport, McpTransport::Sse { .. }),
 		"grok: `type=sse` must parse to Sse"
+	);
+	assert_eq!(
+		remote_url(&cfg, "remote"),
+		"https://x/sse",
+		"grok: remote url value"
 	);
 
 	// Mixed keys are rejected, and BEFORE any field type error — a server that
@@ -110,6 +132,11 @@ url = "https://y"
 			.transport,
 		McpTransport::Sse { .. }
 	));
+	assert_eq!(
+		remote_url(&reparsed, "remote"),
+		"https://x/sse",
+		"grok: remote url must survive round-trip"
+	);
 }
 
 #[test]
@@ -135,6 +162,11 @@ mcp_servers:
 	assert!(
 		matches!(remote.transport, McpTransport::StreamableHttp { .. }),
 		"hermes: a url server must be StreamableHttp"
+	);
+	assert_eq!(
+		remote_url(&cfg, "remote"),
+		"https://x/mcp",
+		"hermes: remote url value"
 	);
 
 	let mixed_and_malformed = r#"
@@ -165,4 +197,9 @@ mcp_servers:
 	);
 	let reparsed = yaml_hermes::parse(&out).expect("hermes re-parses");
 	assert_parsed_invariants(&reparsed, "hermes");
+	assert_eq!(
+		remote_url(&reparsed, "remote"),
+		"https://x/mcp",
+		"hermes: remote url must survive round-trip"
+	);
 }

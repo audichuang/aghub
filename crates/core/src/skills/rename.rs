@@ -91,12 +91,12 @@ pub struct RenameSuccess {
 pub enum RenameError {
 	/// The old name is not in the lock, or its entry has no `skillPath`.
 	NotLocked(String),
-	/// The old name is locked but no installed copy was found.
-	NoInstalledCopy,
+	/// The old name (carried) is locked but no installed copy was found.
+	NoInstalledCopy(String),
 	/// `old_name` and `new_name` sanitize to the same on-disk directory.
 	SameSanitizedName,
-	/// The new name already exists (lock entry or on-disk dir) in the scope.
-	TargetExists,
+	/// The new name (carried) already exists (lock entry or on-disk dir).
+	TargetExists(String),
 	/// The locked `skillPath` was not found in the fetched tree.
 	SkillPathNotFound,
 	/// The fetched `SKILL.md` declares a name other than `new_name`.
@@ -117,7 +117,7 @@ impl RenameError {
 	/// The machine code for surfaces that expose one, else `None`.
 	pub fn code(&self) -> Option<&'static str> {
 		match self {
-			RenameError::SameSanitizedName | RenameError::TargetExists => {
+			RenameError::SameSanitizedName | RenameError::TargetExists(_) => {
 				Some(RENAME_TARGET_EXISTS_CODE)
 			}
 			_ => None,
@@ -128,20 +128,19 @@ impl RenameError {
 	pub fn message(&self) -> String {
 		match self {
 			RenameError::NotLocked(m) => m.clone(),
-			RenameError::NoInstalledCopy => {
-				"Skill is locked but no installed copy was found".to_string()
-			}
+			RenameError::NoInstalledCopy(old_name) => format!(
+				"'{old_name}' is locked but no installed copy was found"
+			),
 			RenameError::SameSanitizedName => {
 				"old_name and new_name resolve to the same on-disk skill \
 				 directory; choose a distinct rename target"
 					.to_string()
 			}
-			RenameError::TargetExists => {
-				"A skill with the new name already exists in this scope (lock \
+			RenameError::TargetExists(new_name) => format!(
+				"A skill named '{new_name}' already exists in this scope (lock \
 				 entry or on-disk directory); pick a rename target that does \
 				 not already exist"
-					.to_string()
-			}
+			),
 			RenameError::SkillPathNotFound => {
 				"Locked skillPath was not found in fetched source".to_string()
 			}
@@ -259,7 +258,7 @@ pub fn accept_rename(
 			.filter_map(|r| r.agent_id.parse().ok())
 			.collect();
 	if target_agents.is_empty() {
-		return Err(RenameError::NoInstalledCopy);
+		return Err(RenameError::NoInstalledCopy(req.old_name.to_string()));
 	}
 
 	// Step 4: locate the skill file in the fetched tree (containment check).
@@ -293,7 +292,7 @@ pub fn accept_rename(
 		project_root,
 		&agent_dirs,
 	) {
-		return Err(RenameError::TargetExists);
+		return Err(RenameError::TargetExists(req.new_name.to_string()));
 	}
 
 	// Step 6: SNAPSHOT the old-name dirs + clone the old lock entry BEFORE
@@ -322,6 +321,24 @@ pub fn accept_rename(
 		}
 		RenameScope::Global => None,
 	};
+
+	// Reassert the old-name lock precondition INSIDE the transaction. The CLI/API
+	// adapters obtain the source via `rename_source_from_lock` (which requires the
+	// lock), but this is a public core entry point and `RenameLockSource` is
+	// constructible — refuse to rename a skill that is installed but not lock-
+	// managed rather than trusting fabricated coordinates. Checked before any
+	// mutation (the snapshot above is non-mutating and is dropped on return).
+	let (old_is_locked, scope_label) = match &req.scope {
+		RenameScope::Global => (old_global_entry.is_some(), "global"),
+		RenameScope::Project { .. } => (old_local_entry.is_some(), "project"),
+	};
+	if !old_is_locked {
+		return Err(RenameError::NotLocked(format!(
+			"'{}' is not in the {scope_label} lock; refusing to rename a skill \
+			 that is not lock-managed",
+			req.old_name
+		)));
+	}
 
 	// Roll the WHOLE transaction back to its pre-mutation state. Defined BEFORE
 	// install so every post-snapshot failure path (P0-1) runs the SAME rollback.
@@ -707,25 +724,42 @@ fn rollback_rename_install(
 mod tests {
 	use super::*;
 
+	/// EXACTLY the two target-exists variants carry the machine code; every
+	/// other variant must return `None` (checked exhaustively so adding the code
+	/// to the wrong variant fails this test).
 	#[test]
 	fn only_target_exists_variants_carry_the_machine_code() {
-		assert_eq!(
-			RenameError::TargetExists.code(),
-			Some(RENAME_TARGET_EXISTS_CODE)
-		);
-		assert_eq!(
-			RenameError::SameSanitizedName.code(),
-			Some(RENAME_TARGET_EXISTS_CODE)
-		);
-		assert_eq!(RenameError::NoInstalledCopy.code(), None);
-		assert_eq!(
+		let s = || "x".to_string();
+		let all = [
+			RenameError::NotLocked(s()),
+			RenameError::NoInstalledCopy(s()),
+			RenameError::SameSanitizedName,
+			RenameError::TargetExists(s()),
+			RenameError::SkillPathNotFound,
 			RenameError::NameMismatch {
-				declared: "a".into(),
-				expected: "b".into()
+				declared: s(),
+				expected: s(),
+			},
+			RenameError::ParseFailed(s()),
+			RenameError::Snapshot(s()),
+			RenameError::InstallFailed(s()),
+			RenameError::RemovalFailed(s()),
+			RenameError::LockRemovalFailed(s()),
+		];
+		for e in &all {
+			let expected = matches!(
+				e,
+				RenameError::SameSanitizedName | RenameError::TargetExists(_)
+			);
+			assert_eq!(
+				e.code().is_some(),
+				expected,
+				"unexpected code() for {e:?}"
+			);
+			if let Some(code) = e.code() {
+				assert_eq!(code, RENAME_TARGET_EXISTS_CODE);
 			}
-			.code(),
-			None
-		);
+		}
 	}
 
 	#[test]
@@ -738,14 +772,95 @@ mod tests {
 		assert!(ensure_distinct_names("old-skill", "new-skill").is_ok());
 	}
 
+	/// Messages carry the identifying names the CLI/API surfaced before the
+	/// extraction (pins the "no message change" contract), and stay path-free.
 	#[test]
-	fn messages_are_non_empty_and_name_mismatch_reports_both() {
-		let m = RenameError::NameMismatch {
+	fn messages_carry_their_identifying_names() {
+		assert!(RenameError::NoInstalledCopy("myskill".into())
+			.message()
+			.contains("myskill"));
+		assert!(RenameError::TargetExists("newname".into())
+			.message()
+			.contains("newname"));
+		let mismatch = RenameError::NameMismatch {
 			declared: "got".into(),
 			expected: "want".into(),
 		}
 		.message();
-		assert!(m.contains("got") && m.contains("want"));
-		assert!(!RenameError::NoInstalledCopy.message().is_empty());
+		assert!(mismatch.contains("got") && mismatch.contains("want"));
+	}
+
+	/// The data-safety heart of the transaction: after the old skill has ALREADY
+	/// been removed (steps 7+8 done) and a later step fails, the rollback must
+	/// clean every new-name path AND restore the old skill — including a
+	/// universal-install REFERRER re-created as a link (not materialized), with
+	/// its original content. Drives the private rollback helpers directly, in
+	/// project scope under a tempdir (no HOME, deterministic, no root-skip) — the
+	/// path the through-the-transaction tests cannot reach without a failure hook.
+	#[cfg(unix)]
+	#[test]
+	fn rollback_restores_old_skill_and_referrer_after_removal() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let claude = root.join(".claude/skills");
+		let master = universal_canonical_dir(Some(root)).unwrap();
+		std::fs::create_dir_all(&claude).unwrap();
+		std::fs::create_dir_all(&master).unwrap();
+		// Universal layout for old-skill: Master (real dir) + Claude referrer
+		// (symlink → Master).
+		let old_master = master.join("old-skill");
+		std::fs::create_dir_all(&old_master).unwrap();
+		std::fs::write(old_master.join("SKILL.md"), "ORIGINAL").unwrap();
+		let old_ref = claude.join("old-skill");
+		std::os::unix::fs::symlink(&old_master, &old_ref).unwrap();
+
+		let agent_dirs = vec![claude.clone()];
+		// Step 6: snapshot BEFORE any mutation.
+		let snapshot = snapshot_old_skill(
+			"old-skill",
+			ResourceScope::ProjectOnly,
+			Some(root),
+			&agent_dirs,
+		)
+		.unwrap();
+
+		// Simulate steps 7+8 completing: new-skill installed, old removed.
+		let new_ref = claude.join("new-skill");
+		let new_master = master.join("new-skill");
+		std::fs::create_dir_all(&new_master).unwrap();
+		std::os::unix::fs::symlink(&new_master, &new_ref).unwrap();
+		Linker::unlink(&old_ref).unwrap();
+		std::fs::remove_dir_all(&old_master).unwrap();
+		assert!(
+			!old_ref.exists() && !old_master.exists(),
+			"precondition: old skill must be fully removed"
+		);
+
+		// A later step (9) fails → the same rollback the transaction runs.
+		rollback_rename_install(
+			"new-skill",
+			ResourceScope::ProjectOnly,
+			Some(root),
+			&agent_dirs,
+		);
+		restore_snapshot(&snapshot);
+
+		// New-name paths are gone.
+		assert!(
+			!Linker::is_link(&new_ref) && !new_ref.exists(),
+			"rollback must remove the new-name referrer"
+		);
+		assert!(!new_master.exists(), "rollback must remove the new master");
+		// Old skill restored: master content intact, referrer re-created AS A
+		// LINK (not deep-copied into a real dir).
+		assert_eq!(
+			std::fs::read_to_string(old_master.join("SKILL.md")).unwrap(),
+			"ORIGINAL",
+			"old master content must be restored"
+		);
+		assert!(
+			Linker::is_link(&old_ref),
+			"old referrer must be restored as a link, not materialized"
+		);
 	}
 }

@@ -24,6 +24,9 @@ aghub-agents = { path = "../agents" }
 tempfile = { workspace = true }
 libc = { workspace = true }
 serde_json = { workspace = true }
+# Integration tests seed the skill lock to exercise `accept_rename`'s
+# lock-managed precondition; `skill` is already a normal dependency.
+skill = { path = "../skill" }
 
 [features]
 default = [ "testing" ]
