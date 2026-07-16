@@ -25,6 +25,7 @@ import InferenceProvidersPage from "./pages/inference-providers";
 import PluginsPage from "./pages/plugins";
 import ProjectDetailPage from "./pages/project/detail";
 import SettingsPage from "./pages/settings";
+import CoveragePage from "./pages/settings/coverage";
 import CustomAgentsPage from "./pages/settings/custom-agents";
 import MCPServersPage from "./pages/settings/mcp-servers";
 import SkillsPage from "./pages/settings/skills";
@@ -199,6 +200,11 @@ function App() {
 												>
 													<SkillsPage />
 												</Suspense>
+											</ErrorBoundary>
+										</Route>
+										<Route path="/coverage">
+											<ErrorBoundary>
+												<CoveragePage />
 											</ErrorBoundary>
 										</Route>
 										<Route path="/mcp">

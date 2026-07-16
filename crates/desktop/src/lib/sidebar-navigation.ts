@@ -5,6 +5,7 @@ import {
 	ServerIcon,
 	SquaresPlusIcon,
 	PuzzlePieceIcon,
+	TableCellsIcon,
 } from "@heroicons/react/24/solid";
 import type { ComponentType, SVGProps } from "react";
 import {
@@ -47,6 +48,12 @@ const SIDEBAR_ITEM_DEFINITIONS: Record<SidebarItemId, SidebarItemDefinition> = {
 		href: "/skills",
 		icon: BookOpenIcon,
 		tour: "nav-skills",
+	},
+	coverage: {
+		id: "coverage",
+		labelKey: "coverage",
+		href: "/coverage",
+		icon: TableCellsIcon,
 	},
 	skillsSh: {
 		id: "skillsSh",

@@ -1209,6 +1209,13 @@ export default {
 	bulkMcpAgentsConfirmRemoveBody:
 		"这会从 {{count}} 个 MCP 服务器移除未勾选的代理，且无法复原。",
 	bulkMcpAgentsDone: "已更新 {{count}} 个 MCP 服务器。",
+	coverage: "覆盖",
+	coverageDescription: "查看并管理每个技能与 MCP 服务器安装在哪些代理上。",
+	coverageEmpty: "目前没有技能或 MCP 服务器可显示。",
+	coverageSelectProject: "选择一个项目以查看其技能覆盖。",
+	coverageLastInstallBlocked:
+		"这是最后一个代理,移除会等于完全卸载。请改用删除功能。",
+	coverageToggleFailed: "更新覆盖失败,请再试一次。",
 	manageAgentsConfirmRemoveBody:
 		"这会从 {{count}} 个代理移除此技能，且无法复原。",
 	manageAgentsAddThenRemove:

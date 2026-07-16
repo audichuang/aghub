@@ -1249,6 +1249,14 @@ export default {
 	bulkMcpAgentsConfirmRemoveBody:
 		"This removes the deselected agents from {{count}} MCP server(s). This cannot be undone.",
 	bulkMcpAgentsDone: "Updated {{count}} MCP server(s).",
+	coverage: "Coverage",
+	coverageDescription:
+		"See and manage which agents carry each skill and MCP server.",
+	coverageEmpty: "No skills or MCP servers to show.",
+	coverageSelectProject: "Select a project to see its skill coverage.",
+	coverageLastInstallBlocked:
+		"That is the last agent — removing it would uninstall the item. Use delete instead.",
+	coverageToggleFailed: "Couldn't update coverage. Please try again.",
 	manageAgentsConfirmRemoveBody:
 		"This removes the skill from {{count}} agent(s). This cannot be undone.",
 	manageAgentsAddThenRemove:
