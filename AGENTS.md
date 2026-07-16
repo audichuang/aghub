@@ -185,6 +185,15 @@ cli `cli_tests`.
 writes master to `dirs::home_dir()/.agents/skills`. Isolate `$HOME` (Unix) or
 use project `tempdir` + teardown — see `crates/core/AGENTS.md` Testing.
 
+**A test must be able to FAIL on a real regression** — a green test that can't
+is worse than none (it reads as "covered"). Assert observable OUTCOMES (values,
+on-disk / lock state), not just a variant / `is_err()` / a key name; for a
+safety-critical flow (fs mutation, rollback) exercise the FAILURE path — e.g.
+rollback AFTER the destructive step, not only install-fails or the happy path.
+Shallow "passes anyway" tests here masked a data-safety gap; the worked fix is
+`docs/specs/2026-07-15-skill-rename-transaction-deepening.md` (Holistic-review
+follow-up).
+
 ## Agent permissions / approval boundaries
 
 | AI may do autonomously                        | Ask first                                         |
@@ -209,6 +218,14 @@ verifying a release gate.
 - NEVER bypass `ConfigManager`
 - NEVER return arbitrary internal temp/lock/keyring paths in API **errors**;
   skill DTOs may expose intentional `source_path` / `canonical_path` for UI
+- NEVER hand-mirror a mutating/transactional flow across surfaces (CLI ↔ API, or
+  per-dialect parsers) and "keep it in sync by hand" — it WILL drift (it did: the
+  rename txn, the link primitives, the MCP mixed-key rule). Extract the invariant
+  to `core` / a shared policy behind ONE tested interface; surfaces stay thin
+  adapters. Examples + deferred hardening: `docs/specs/2026-07-15-*`
+- When promoting a **private** flow to a **public** seam, re-assert the
+  preconditions the old callers used to guarantee (e.g. `accept_rename` now
+  re-checks the lock) — a public entry point is only as safe as its own guards
 
 ## Release & Packaging
 
