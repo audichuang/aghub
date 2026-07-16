@@ -4,6 +4,7 @@ import {
 	ChevronDownIcon,
 	ChevronUpIcon,
 	CodeBracketIcon,
+	Cog6ToothIcon,
 	GlobeAltIcon,
 	HashtagIcon,
 	LinkIcon,
@@ -724,8 +725,8 @@ export function SkillDetail({
 									variant="primary"
 									onPress={() => setManageDialogOpen(true)}
 								>
-									<PlusIcon className="size-4" />
-									{t("addToAgent")}
+									<Cog6ToothIcon className="size-4" />
+									{t("manageAgents")}
 								</Button>
 							</Card.Footer>
 						</Card.Content>

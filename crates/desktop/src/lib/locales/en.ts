@@ -1243,4 +1243,8 @@ export default {
 		"This removes the deselected agents from {{count}} skill(s). This cannot be undone.",
 	bulkAgentsDone: "Updated {{count}} skill(s).",
 	bulkAgentsSomeFailed: "{{success}} updated, {{failed}} failed.",
+	manageAgentsConfirmRemoveBody:
+		"This removes the skill from {{count}} agent(s). This cannot be undone.",
+	manageAgentsAddThenRemove:
+		"Add the skill to the new agent(s) and apply first, then remove the existing ones — otherwise a failed copy could leave the skill installed nowhere.",
 };

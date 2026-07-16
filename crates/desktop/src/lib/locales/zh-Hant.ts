@@ -1200,4 +1200,8 @@ export default {
 		"這會把取消勾選的代理從 {{count}} 個 skill 移除，且無法復原。",
 	bulkAgentsDone: "已更新 {{count}} 個 skill。",
 	bulkAgentsSomeFailed: "成功 {{success}} 個，失敗 {{failed}} 個。",
+	manageAgentsConfirmRemoveBody:
+		"這會從 {{count}} 個代理移除此技能，且無法復原。",
+	manageAgentsAddThenRemove:
+		"請先新增到新代理並套用，再移除原有代理；否則複製失敗時技能會無處可留。",
 };

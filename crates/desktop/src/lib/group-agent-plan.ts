@@ -30,6 +30,62 @@ export function computeGroupAgentStats(
 	});
 }
 
+export type AgentDiffLabel = "adding" | "removing" | "installed";
+
+export interface SkillAgentDiff {
+	selected: string[];
+	added: string[];
+	removed: string[];
+	labels: Record<string, AgentDiffLabel>;
+}
+
+// Compute the add/remove diff for managing ONE skill's agents. `desired` is the
+// "touched" overlay (agent id -> checked); untouched agents fall back to their
+// installed state. Everything is scoped to `usableAgentIds`, so a removal never
+// targets an agent the UI can't mutate, and `added`/`removed` are always
+// disjoint (a prerequisite the reconcile API enforces).
+export function computeSkillAgentDiff(
+	usableAgentIds: string[],
+	installedAgentIds: Set<string>,
+	desired: Record<string, boolean>,
+): SkillAgentDiff {
+	const selected = usableAgentIds.filter((id) =>
+		id in desired ? desired[id] : installedAgentIds.has(id),
+	);
+	const selectedSet = new Set(selected);
+	const added = selected.filter((id) => !installedAgentIds.has(id));
+	const removed = usableAgentIds.filter(
+		(id) => installedAgentIds.has(id) && !selectedSet.has(id),
+	);
+	const labels: Record<string, AgentDiffLabel> = {};
+	for (const id of usableAgentIds) {
+		const isInstalled = installedAgentIds.has(id);
+		const isSelected = selectedSet.has(id);
+		if (isSelected && !isInstalled) labels[id] = "adding";
+		else if (!isSelected && isInstalled) labels[id] = "removing";
+		else if (isSelected && isInstalled) labels[id] = "installed";
+	}
+	return { selected, added, removed, labels };
+}
+
+// True when applying `added`/`removed` would leave the skill installed for NO
+// agent while still depending on a fresh copy to a new agent. The reconcile
+// backend copies before removing but does NOT gate the removals on copy
+// success, so a failed copy to the new agent would orphan the skill entirely.
+// The dialog blocks this combo and asks the user to add first, then remove.
+export function wouldOrphanSkill(
+	installedAgentIds: Set<string>,
+	added: string[],
+	removed: string[],
+): boolean {
+	if (added.length === 0) return false;
+	const removedSet = new Set(removed);
+	const hasSurvivingInstall = [...installedAgentIds].some(
+		(id) => !removedSet.has(id),
+	);
+	return !hasSurvivingInstall;
+}
+
 export function buildReconcilePlans(
 	skills: { name: string; items: { agent: string; source: string }[] }[],
 	usableAgentIds: string[],

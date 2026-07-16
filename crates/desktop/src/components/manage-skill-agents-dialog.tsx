@@ -1,15 +1,19 @@
-import { toast } from "@heroui/react";
+import { AlertDialog, Button, toast } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useCallback, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { supportsSkillMutation } from "../lib/agent-capabilities";
 import type { InstallResult } from "../lib/install-utils";
 import type { Scope } from "../lib/skills-path-group";
+import {
+	computeSkillAgentDiff,
+	wouldOrphanSkill,
+} from "../lib/group-agent-plan";
 import { cn } from "../lib/utils";
 import { reconcileSkillsMutationOptions } from "../requests/skills";
-import type { AgentDiffLabel, AgentState } from "./agent-list";
+import type { AgentState } from "./agent-list";
 import { SharedSkillInstallModal } from "./shared-skill-install-modal";
 import type { SkillGroup } from "./skill-detail-helpers";
 import { SkillsAgentList } from "./skills-agent-list";
@@ -55,70 +59,110 @@ export function ManageSkillAgentsDialog({
 		return primary?.source ?? "global";
 	}, [hasValidGroup, group]);
 
+	// Include installed agents so the user can uncheck them to remove — the
+	// dialog manages both add AND remove. The reconcile API takes `added` +
+	// `removed`, and core removal keeps shared masters intact. An installed
+	// agent is listed even when it is not currently usable (e.g. its CLI went
+	// away), otherwise there would be no way to remove the skill from it.
 	const usableAgents = useMemo(
 		() =>
-			(availableAgents ?? [])
-				.filter((a) => a?.isUsable && supportsSkillMutation(a, scope))
-				.filter((a) => !installedAgentIds.has(a.id)),
+			(availableAgents ?? []).filter(
+				(a) =>
+					a != null &&
+					supportsSkillMutation(a, scope) &&
+					(a.isUsable || installedAgentIds.has(a.id)),
+			),
 		[availableAgents, installedAgentIds, scope],
 	);
 
-	const [selectedAgents, setSelectedAgents] = useState<string[]>([]);
+	// "touched" overlay: agent id -> desired checked state. Untouched agents
+	// fall back to their installed state, so re-opening resets cleanly without a
+	// useEffect (reset() clears it on close).
+	const [desired, setDesired] = useState<Record<string, boolean>>({});
 	const [agentStates, setAgentStates] = useState<Record<string, AgentState>>(
 		{},
 	);
 	const [isApplying, setIsApplying] = useState(false);
+	const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
 
-	const selectedSet = useMemo(
-		() => new Set(selectedAgents),
-		[selectedAgents],
+	const {
+		selected: selectedAgents,
+		added,
+		removed,
+		labels: diffLabels,
+	} = useMemo(
+		() =>
+			computeSkillAgentDiff(
+				usableAgents.map((a) => a.id),
+				installedAgentIds,
+				desired,
+			),
+		[usableAgents, installedAgentIds, desired],
 	);
 
-	const diffLabels = useMemo((): Record<string, AgentDiffLabel> => {
-		const labels: Record<string, AgentDiffLabel> = {};
-		for (const agent of usableAgents) {
-			if (selectedSet.has(agent.id)) {
-				labels[agent.id] = "adding";
+	const hasChanges = added.length > 0 || removed.length > 0;
+
+	const handleSelectionChange = (keys: string[]) => {
+		const keySet = new Set(keys);
+		const before = new Set(selectedAgents);
+		// Only record agents whose checked state actually flipped. Recording
+		// every agent would freeze untouched ones against the live installed
+		// state, so a background refetch that installs an untouched agent could
+		// turn it into an unintended removal.
+		setDesired((prev) => {
+			const next = { ...prev };
+			for (const agent of usableAgents) {
+				const id = agent.id;
+				if (before.has(id) !== keySet.has(id)) {
+					next[id] = keySet.has(id);
+				}
 			}
-		}
-		return labels;
-	}, [usableAgents, selectedSet]);
+			return next;
+		});
+	};
 
-	const hasChanges = selectedAgents.length > 0;
-
-	const handleSelectionChange = useCallback((keys: string[]) => {
-		setSelectedAgents(keys);
-	}, []);
-
-	const onCloseAndReset = () => {
+	const resetState = () => {
+		setDesired({});
 		setAgentStates({});
 		setIsApplying(false);
+		setConfirmRemoveOpen(false);
+	};
+
+	const onCloseAndReset = () => {
+		resetState();
 		onClose();
 	};
 
-	const handleApply = async () => {
+	const runApply = async () => {
+		setConfirmRemoveOpen(false);
 		if (!hasValidGroup || group.items.length === 0) {
 			toast.danger(t("invalidConfiguration"));
 			return;
 		}
 
-		setIsApplying(true);
-		const primary = group.items[0];
-
-		if (!primary?.name) {
-			toast.danger(t("invalidSkillConfiguration"));
-			setIsApplying(false);
+		// Re-check the orphan guard at the single mutation choke-point: a
+		// background refetch between opening the confirm dialog and pressing it
+		// could have changed the plan, so the check in handleApply alone is
+		// TOCTOU-unsafe.
+		if (wouldOrphanSkill(installedAgentIds, added, removed)) {
+			toast.danger(t("manageAgentsAddThenRemove"));
 			return;
 		}
 
+		const primary = group.items[0];
+		if (!primary?.name) {
+			toast.danger(t("invalidSkillConfiguration"));
+			return;
+		}
+
+		setIsApplying(true);
 		const primaryAgent = primary.agent ?? "claude";
 		const sourceAgentItem =
 			group.items.find((item) => item.agent === primaryAgent) ?? primary;
 
-		const toInstall = selectedAgents;
-
+		const touched = [...added, ...removed];
 		const pendingStates: Record<string, AgentState> = {};
-		for (const id of toInstall) {
+		for (const id of touched) {
 			pendingStates[id] = { status: "pending" };
 		}
 		setAgentStates(pendingStates);
@@ -134,8 +178,8 @@ export function ManageSkillAgentsDialog({
 					project_root: projectPath ?? null,
 					name: primary.name,
 				},
-				added: toInstall.length > 0 ? toInstall : null,
-				removed: null,
+				added: added.length > 0 ? added : null,
+				removed: removed.length > 0 ? removed : null,
 			});
 
 			const newAgentStates: Record<string, AgentState> = {};
@@ -166,7 +210,7 @@ export function ManageSkillAgentsDialog({
 			toast.danger(errorMessage);
 
 			const errorStates: Record<string, AgentState> = {};
-			for (const id of toInstall) {
+			for (const id of touched) {
 				errorStates[id] = { status: "error", error: errorMessage };
 			}
 			setAgentStates(errorStates);
@@ -175,15 +219,23 @@ export function ManageSkillAgentsDialog({
 		}
 	};
 
-	const disabledAgents = useMemo(() => {
-		const disabled = new Set<string>();
-		for (const agent of usableAgents) {
-			if (agent.availability && !agent.availability.is_available) {
-				disabled.add(agent.id);
-			}
+	const handleApply = () => {
+		if (!hasChanges) return;
+		// Data-safety: "add to new agent(s) + remove every existing copy" in one
+		// apply is unsafe — core copies before removing but does not abort the
+		// removals if the copy fails, so a failed copy would leave the skill
+		// installed nowhere. Make the user add first, then remove.
+		if (wouldOrphanSkill(installedAgentIds, added, removed)) {
+			toast.danger(t("manageAgentsAddThenRemove"));
+			return;
 		}
-		return disabled;
-	}, [usableAgents]);
+		// Removing is destructive — gate it behind an explicit confirm.
+		if (removed.length > 0) {
+			setConfirmRemoveOpen(true);
+			return;
+		}
+		void runApply();
+	};
 
 	const agentPicker = !hasValidGroup ? (
 		<p className="text-sm text-muted">{t("invalidConfiguration")}</p>
@@ -197,7 +249,6 @@ export function ManageSkillAgentsDialog({
 				agentStates={agentStates}
 				diffLabels={diffLabels}
 				disabled={isApplying}
-				disabledAgents={disabledAgents}
 				label={t("selectAgentsForSkill")}
 				emptyMessage={t("noTargetAgents")}
 			/>
@@ -209,17 +260,58 @@ export function ManageSkillAgentsDialog({
 	const NO_RESULTS: InstallResult[] = [];
 
 	return (
-		<SharedSkillInstallModal
-			isOpen={isOpen}
-			onClose={onCloseAndReset}
-			heading={t("manageAgents")}
-			agentPickerSlot={agentPicker}
-			installResults={NO_RESULTS}
-			isInstalling={isApplying}
-			showTargetSelector={false}
-			confirmLabel={isApplying ? t("applying") : t("applyChanges")}
-			isConfirmDisabled={!hasChanges}
-			onConfirm={handleApply}
-		/>
+		<>
+			<SharedSkillInstallModal
+				isOpen={isOpen}
+				onClose={onCloseAndReset}
+				heading={t("manageAgents")}
+				agentPickerSlot={agentPicker}
+				installResults={NO_RESULTS}
+				isInstalling={isApplying}
+				showTargetSelector={false}
+				confirmLabel={isApplying ? t("applying") : t("applyChanges")}
+				isConfirmDisabled={!hasChanges}
+				onConfirm={handleApply}
+			/>
+
+			<AlertDialog.Backdrop
+				isOpen={confirmRemoveOpen}
+				onOpenChange={(open) => !open && setConfirmRemoveOpen(false)}
+			>
+				<AlertDialog.Container>
+					<AlertDialog.Dialog className="sm:max-w-[420px]">
+						<AlertDialog.CloseTrigger />
+						<AlertDialog.Header>
+							<AlertDialog.Icon status="danger" />
+							<AlertDialog.Heading>
+								{t("bulkAgentsConfirmRemoveTitle")}
+							</AlertDialog.Heading>
+						</AlertDialog.Header>
+						<AlertDialog.Body>
+							<p className="text-sm text-muted">
+								{t("manageAgentsConfirmRemoveBody", {
+									count: removed.length,
+								})}
+							</p>
+						</AlertDialog.Body>
+						<AlertDialog.Footer>
+							<Button
+								slot="close"
+								variant="tertiary"
+								onPress={() => setConfirmRemoveOpen(false)}
+							>
+								{t("cancel")}
+							</Button>
+							<Button
+								variant="danger"
+								onPress={() => void runApply()}
+							>
+								{t("applyChanges")}
+							</Button>
+						</AlertDialog.Footer>
+					</AlertDialog.Dialog>
+				</AlertDialog.Container>
+			</AlertDialog.Backdrop>
+		</>
 	);
 }
