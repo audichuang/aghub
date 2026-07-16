@@ -193,13 +193,13 @@ export function ManageSubAgentAgentsDialog({
 	return (
 		<Modal.Backdrop isOpen={isOpen} onOpenChange={onCloseAndReset}>
 			<Modal.Container>
-				<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-md sm:max-w-lg">
+				<Modal.Dialog className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden sm:max-w-lg">
 					<Modal.CloseTrigger />
 					<Modal.Header>
 						<Modal.Heading>{t("manageAgents")}</Modal.Heading>
 					</Modal.Header>
 
-					<Modal.Body className="p-4">
+					<Modal.Body className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
 						<div
 							className={cn(
 								"transition-opacity",

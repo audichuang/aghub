@@ -161,7 +161,7 @@ export function BulkManageGroupAgentsDialog({
 		<>
 			<Modal.Backdrop isOpen={isOpen} onOpenChange={handleClose}>
 				<Modal.Container>
-					<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-md sm:max-w-lg">
+					<Modal.Dialog className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden sm:max-w-lg">
 						<Modal.CloseTrigger />
 						<Modal.Header>
 							<Modal.Heading>
@@ -169,7 +169,7 @@ export function BulkManageGroupAgentsDialog({
 							</Modal.Heading>
 						</Modal.Header>
 
-						<Modal.Body className="p-4">
+						<Modal.Body className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
 							<p className="mb-3 text-sm text-muted">
 								{t("bulkManageGroupAgentsHint", {
 									source,

@@ -106,7 +106,7 @@ export function SharedSkillInstallModal(props: SharedSkillInstallModalProps) {
 	return (
 		<Modal.Backdrop isOpen={isOpen} onOpenChange={onClose}>
 			<Modal.Container>
-				<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-md sm:max-w-lg">
+				<Modal.Dialog className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden sm:max-w-lg">
 					<Modal.CloseTrigger />
 					<Modal.Header>
 						<Modal.Heading>
@@ -114,8 +114,8 @@ export function SharedSkillInstallModal(props: SharedSkillInstallModalProps) {
 						</Modal.Heading>
 					</Modal.Header>
 
-					<Modal.Body className="p-4">
-						<div className="space-y-4">
+					<Modal.Body className="flex min-h-0 flex-1 flex-col p-0">
+						<div className="flex-1 space-y-4 overflow-y-auto p-4">
 							{skillInfo?.source && (
 								<SkillInfoCard
 									name={skillInfo.name}
