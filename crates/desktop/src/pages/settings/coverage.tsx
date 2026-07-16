@@ -1,5 +1,5 @@
 import { CheckIcon, PlusIcon } from "@heroicons/react/24/solid";
-import { Spinner, toast } from "@heroui/react";
+import { SearchField, Spinner, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
@@ -45,6 +45,7 @@ export default function CoveragePage() {
 	const [scope, setScope] = useState<"global" | "project">("global");
 	const [projectPath, setProjectPath] = useState<string | null>(null);
 	const [pendingCell, setPendingCell] = useState<string | null>(null);
+	const [query, setQuery] = useState("");
 
 	const projectRoot =
 		scope === "project" ? (projectPath ?? undefined) : undefined;
@@ -128,6 +129,19 @@ export default function CoveragePage() {
 				: [],
 		[mcps, mcpAgentIds, columnIds, showMcp],
 	);
+
+	// Filter rows by resource name (case-insensitive substring). Columns
+	// (agents) are few and stay put; the long axis is the resource list.
+	const filteredSkillRows = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		if (!q) return skillRows;
+		return skillRows.filter((r) => r.name.toLowerCase().includes(q));
+	}, [skillRows, query]);
+	const filteredMcpRows = useMemo(() => {
+		const q = query.trim().toLowerCase();
+		if (!q) return mcpRows;
+		return mcpRows.filter((r) => r.name.toLowerCase().includes(q));
+	}, [mcpRows, query]);
 
 	const handleToggle = async (
 		kind: ResourceKind,
@@ -256,7 +270,9 @@ export default function CoveragePage() {
 		});
 
 	const hasColumns = columns.length > 0;
-	const hasRows = skillRows.length > 0 || mcpRows.length > 0;
+	const hasAnyRows = skillRows.length > 0 || mcpRows.length > 0;
+	const hasVisibleRows =
+		filteredSkillRows.length > 0 || filteredMcpRows.length > 0;
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
@@ -269,14 +285,28 @@ export default function CoveragePage() {
 						{t("coverageDescription")}
 					</p>
 				</div>
-				<ScopeControl
-					scope={scope}
-					selectedProjectPath={projectPath}
-					onChange={(s, p) => {
-						setScope(s);
-						setProjectPath(p);
-					}}
-				/>
+				<div className="flex shrink-0 items-center gap-2">
+					<SearchField
+						value={query}
+						onChange={setQuery}
+						aria-label={t("search")}
+						className="w-44"
+					>
+						<SearchField.Group>
+							<SearchField.SearchIcon />
+							<SearchField.Input placeholder={t("search")} />
+							<SearchField.ClearButton />
+						</SearchField.Group>
+					</SearchField>
+					<ScopeControl
+						scope={scope}
+						selectedProjectPath={projectPath}
+						onChange={(s, p) => {
+							setScope(s);
+							setProjectPath(p);
+						}}
+					/>
+				</div>
 			</div>
 
 			<div className="min-h-0 flex-1 overflow-auto p-6 flex flex-col">
@@ -296,11 +326,15 @@ export default function CoveragePage() {
 							{t("noTargetAgents")}
 						</p>
 					</div>
-				) : !hasRows ? (
+				) : !hasAnyRows ? (
 					<div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
 						<p className="text-sm text-muted">
 							{t("coverageEmpty")}
 						</p>
+					</div>
+				) : !hasVisibleRows ? (
+					<div className="flex-1 flex flex-col items-center justify-center p-8 text-center">
+						<p className="text-sm text-muted">{t("noResults")}</p>
 					</div>
 				) : (
 					<div className="border border-separator rounded-xl bg-surface shadow-xs overflow-auto max-h-full">
@@ -328,7 +362,7 @@ export default function CoveragePage() {
 								</tr>
 							</thead>
 							<tbody>
-								{skillRows.length > 0 && (
+								{filteredSkillRows.length > 0 && (
 									<>
 										<tr>
 											<td
@@ -341,15 +375,17 @@ export default function CoveragePage() {
 														{t("skills")}
 													</span>
 													<span className="rounded-full bg-separator/50 px-1.5 py-0.5 text-[10px] font-semibold text-muted normal-case select-none">
-														{skillRows.length}
+														{
+															filteredSkillRows.length
+														}
 													</span>
 												</div>
 											</td>
 										</tr>
-										{renderRows("skill", skillRows)}
+										{renderRows("skill", filteredSkillRows)}
 									</>
 								)}
-								{showMcp && mcpRows.length > 0 && (
+								{showMcp && filteredMcpRows.length > 0 && (
 									<>
 										<tr>
 											<td
@@ -362,12 +398,12 @@ export default function CoveragePage() {
 														{t("mcpServers")}
 													</span>
 													<span className="rounded-full bg-separator/50 px-1.5 py-0.5 text-[10px] font-semibold text-muted normal-case select-none">
-														{mcpRows.length}
+														{filteredMcpRows.length}
 													</span>
 												</div>
 											</td>
 										</tr>
-										{renderRows("mcp", mcpRows)}
+										{renderRows("mcp", filteredMcpRows)}
 									</>
 								)}
 							</tbody>
