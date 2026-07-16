@@ -54,11 +54,14 @@ impl Fetcher for GitFetcher {
 		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
 			.map_err(|_| FetchError::Network)?;
 		let root = materialized.path().to_path_buf();
-		let upstream_commit_time = read_commit_time(&repo, oid);
+		let snapshot = aghub_git::RepoSnapshot {
+			commit_oid: oid.to_string(),
+			tree_oid: tree.id.to_string(),
+			commit_time: read_commit_time(&repo, oid),
+		};
 		Ok(FetchedRepo {
 			root,
-			oid: oid.to_string(),
-			upstream_commit_time,
+			snapshot,
 			_guard: Some(Arc::new(materialized)),
 		})
 	}
@@ -112,20 +115,24 @@ pub(crate) fn fetch_via_system_git(
 		source_ref.ref_.as_deref(),
 	)
 	.map_err(classify_fetch_error)?;
-	// oid + commit time are best-effort (a shallow clone still has HEAD); a miss
-	// only loses the next preflight optimization, never correctness.
-	let (oid, upstream_commit_time) = gix::open(clone.path())
+	// snapshot is best-effort (a shallow clone still has HEAD); a miss only
+	// loses the next preflight optimization, never correctness.
+	let snapshot = gix::open(clone.path())
 		.ok()
 		.and_then(|repo| {
 			let head = repo.head_id().ok()?.detach();
-			Some((head.to_string(), read_commit_time(&repo, head)))
+			let tree = repo.find_object(head).ok()?.peel_to_tree().ok()?;
+			Some(aghub_git::RepoSnapshot {
+				commit_oid: head.to_string(),
+				tree_oid: tree.id.to_string(),
+				commit_time: read_commit_time(&repo, head),
+			})
 		})
 		.unwrap_or_default();
 	let root = clone.path().to_path_buf();
 	Ok(FetchedRepo {
 		root,
-		oid,
-		upstream_commit_time,
+		snapshot,
 		_guard: Some(Arc::new(clone)),
 	})
 }

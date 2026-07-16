@@ -542,7 +542,7 @@ pub(crate) async fn apply_skill_update_inner(
 		name: &req.name,
 		scope: resource_scope,
 		project_root: project_root.as_deref(),
-		ref_commit: Some(&repo.oid),
+		ref_commit: Some(repo.oid()),
 	}) {
 		Ok(report) => Ok(Json(ApplySkillUpdateResponse {
 			success: true,
@@ -723,7 +723,7 @@ pub(crate) async fn accept_rename_inner(
 		},
 		FetchedRename {
 			repo_root: &repo.root,
-			oid: &repo.oid,
+			oid: repo.oid(),
 			source: &source,
 		},
 	) {
@@ -1148,8 +1148,11 @@ mod tests {
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			Ok(skill_update::FetchedRepo {
 				root: self.root.clone(),
-				oid: String::new(),
-				upstream_commit_time: None,
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: String::new(),
+					tree_oid: "test-tree-oid".to_string(),
+					commit_time: None,
+				},
 				_guard: None,
 			})
 		}
@@ -1265,8 +1268,11 @@ mod tests {
 			*self.seen_token.lock().unwrap() = Some(token.map(str::to_string));
 			Ok(skill_update::FetchedRepo {
 				root: self.root.clone(),
-				oid: String::new(),
-				upstream_commit_time: None,
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: String::new(),
+					tree_oid: "test-tree-oid".to_string(),
+					commit_time: None,
+				},
 				_guard: None,
 			})
 		}

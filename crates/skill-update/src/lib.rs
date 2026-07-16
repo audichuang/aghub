@@ -154,14 +154,24 @@ impl ResultCache {
 pub struct FetchedRepo {
 	/// Root of the fetched source tree (the containment root for `skill_path`).
 	pub root: PathBuf,
-	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded for the
-	/// global-lock `refCommit` heal so the next check can preflight.
-	pub oid: String,
-	/// RFC 3339 author-time of the fetched tip commit. Best-effort: `None`
-	/// when the commit time cannot be read (shallow fetch, old gix, error).
-	pub upstream_commit_time: Option<String>,
+	/// Immutable identity pin of the fetched tip. The lock records
+	/// `snapshot.commit_oid` (via [`FetchedRepo::oid`]) — never the tree oid.
+	pub snapshot: aghub_git::RepoSnapshot,
 	/// Keep-alive guard for a temp dir, dropped when the repo is no longer needed.
 	pub _guard: Option<Arc<tempfile::TempDir>>,
+}
+
+impl FetchedRepo {
+	/// The commit oid to record in the lock's `refCommit`. Always the COMMIT
+	/// oid, never the tree oid.
+	pub fn oid(&self) -> &str {
+		&self.snapshot.commit_oid
+	}
+
+	/// Best-effort RFC 3339 author time of the fetched tip commit.
+	pub fn upstream_commit_time(&self) -> Option<String> {
+		self.snapshot.commit_time.clone()
+	}
 }
 
 /// Errors a [`Fetcher`] can surface, classified for `Uncheckable` mapping.
@@ -613,14 +623,14 @@ pub async fn check_updates(
 					let mut group_out = apply_cached_group(
 						&members,
 						&cached,
-						repo.upstream_commit_time.clone(),
+						repo.upstream_commit_time(),
 					);
 					// Self-heal refCommit for freshly-fetched GLOBAL entries so the
 					// next check can preflight; the VCS-tracked project lock is
 					// never silently mutated by a read-style check.
 					for (output, member) in group_out.iter_mut().zip(&members) {
 						if member.scope == "global" {
-							output.heal_oid = Some(repo.oid.clone());
+							output.heal_oid = Some(repo.oid().to_string());
 						}
 					}
 					out.extend(group_out);
@@ -692,6 +702,7 @@ mod tests {
 
 	/// Fixed tip OID the test fetchers report, so heal-oid wiring is assertable.
 	const STUB_FETCH_OID: &str = "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1";
+	const STUB_TREE_OID: &str = "e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2";
 
 	#[test]
 	fn groups_same_source_ref_once() {
@@ -779,8 +790,11 @@ mod tests {
 			}
 			Ok(FetchedRepo {
 				root: self.root.clone().unwrap(),
-				oid: STUB_FETCH_OID.to_string(),
-				upstream_commit_time: None,
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: STUB_FETCH_OID.to_string(),
+					tree_oid: STUB_TREE_OID.to_string(),
+					commit_time: None,
+				},
 				_guard: None,
 			})
 		}
@@ -1008,6 +1022,76 @@ mod tests {
 		assert_eq!(out.len(), 1);
 		// A fresh fetch records the resolved tip so the next check can preflight.
 		assert_eq!(out[0].heal_oid, Some(STUB_FETCH_OID.to_string()));
+	}
+
+	/// Ticket 01: a fetcher whose snapshot carries DISTINCT commit/tree oids —
+	/// as a GitHub REST trees fetch would (its root `sha` is a TREE oid).
+	struct DistinctOidFetcher {
+		root: PathBuf,
+		commit_oid: String,
+		tree_oid: String,
+	}
+	impl Fetcher for DistinctOidFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+		) -> Result<FetchedRepo, FetchError> {
+			Ok(FetchedRepo {
+				root: self.root.clone(),
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: self.commit_oid.clone(),
+					tree_oid: self.tree_oid.clone(),
+					commit_time: None,
+				},
+				_guard: None,
+			})
+		}
+	}
+
+	/// The value healed into the GLOBAL lock's `refCommit` MUST be the snapshot's
+	/// COMMIT oid, never its tree oid. A test that would go green if the tree oid
+	/// were recorded instead — the acceptance guard for Decision 8.
+	#[tokio::test]
+	async fn heal_records_commit_oid_never_tree_oid() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		// Two DIFFERENT 40-hex oids so commit vs tree is observable.
+		let commit_oid = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+		let tree_oid = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+		let fetcher = Arc::new(DistinctOidFetcher {
+			root: dir.path().to_path_buf(),
+			commit_oid: commit_oid.to_string(),
+			tree_oid: tree_oid.to_string(),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher,
+			ref_resolver: None,
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut g = entry("g", "o/r", Some("main"));
+		g.stored_hash = Some(hash.clone());
+		g.local_hash = Some(hash);
+		let out = check_updates(vec![g], deps).await;
+		assert_eq!(out.len(), 1);
+		assert_eq!(
+			out[0].heal_oid.as_deref(),
+			Some(commit_oid),
+			"refCommit heal must record the COMMIT oid"
+		);
+		assert_ne!(
+			out[0].heal_oid.as_deref(),
+			Some(tree_oid),
+			"the TREE oid must never reach refCommit"
+		);
 	}
 
 	#[tokio::test]
@@ -1536,8 +1620,11 @@ mod tests {
 			self.current.fetch_sub(1, Ordering::SeqCst);
 			Ok(FetchedRepo {
 				root: self.root.clone(),
-				oid: STUB_FETCH_OID.to_string(),
-				upstream_commit_time: None,
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: STUB_FETCH_OID.to_string(),
+					tree_oid: STUB_TREE_OID.to_string(),
+					commit_time: None,
+				},
 				_guard: None,
 			})
 		}

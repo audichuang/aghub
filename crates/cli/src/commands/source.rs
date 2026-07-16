@@ -88,8 +88,11 @@ impl skill_update::Fetcher for CliFetcher {
 			return if root.is_dir() {
 				Ok(skill_update::FetchedRepo {
 					root,
-					oid: "test-fetch-root".into(),
-					upstream_commit_time: None,
+					snapshot: aghub_git::RepoSnapshot {
+						commit_oid: "test-fetch-root".into(),
+						tree_oid: "test-fetch-tree".into(),
+						commit_time: None,
+					},
 					_guard: None,
 				})
 			} else {
@@ -360,7 +363,7 @@ fn diff(
 				repo.root.as_path(),
 				scope,
 				&source,
-				repo.upstream_commit_time.clone(),
+				repo.upstream_commit_time(),
 			);
 			(scope, diffs)
 		})
@@ -556,7 +559,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		repo.root.as_path(),
 		&source_scope,
 		&source,
-		repo.upstream_commit_time.clone(),
+		repo.upstream_commit_time(),
 	);
 
 	// `--skill a,b` narrows every downstream path (overview, --install-missing,
@@ -946,7 +949,7 @@ fn apply_install(
 		skill_file: &skill_file,
 		source: lock_source,
 		lock_skill_path: d.skill_path.clone(),
-		ref_commit: Some(repo.oid.clone()),
+		ref_commit: Some(repo.oid().to_string()),
 		scope,
 		project_root,
 		target_agents,
@@ -1008,7 +1011,7 @@ fn apply_update_row(
 		&d.name,
 		scope,
 		project_root,
-		Some(&repo.oid),
+		Some(repo.oid()),
 	) {
 		Ok(paths) => SyncActionView {
 			action: "update",
@@ -1125,7 +1128,7 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		},
 		FetchedRename {
 			repo_root: &repo.root,
-			oid: &repo.oid,
+			oid: repo.oid(),
 			source: &source,
 		},
 	)

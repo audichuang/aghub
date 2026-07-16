@@ -109,8 +109,11 @@ impl Fetcher for ApiFetcher {
 			return if root.is_dir() {
 				Ok(FetchedRepo {
 					root,
-					oid: "test-fetch-root".to_string(),
-					upstream_commit_time: None,
+					snapshot: aghub_git::RepoSnapshot {
+						commit_oid: "test-fetch-root".to_string(),
+						tree_oid: "test-fetch-tree".to_string(),
+						commit_time: None,
+					},
 					_guard: None,
 				})
 			} else {

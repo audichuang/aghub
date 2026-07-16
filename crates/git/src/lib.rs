@@ -71,3 +71,16 @@ pub use system_git::{
 	probe_credential, system_git_available,
 };
 pub use tree::{is_safe_tree_entry_name, materialize_tree};
+
+/// An immutable pin of a resolved repository state: the three OIDs kept
+/// deliberately distinct. `commit_oid` is the ONLY value a lock's `refCommit`
+/// may record; `tree_oid` is a tree object id (e.g. the GitHub REST trees API
+/// root `sha`) and must NEVER be written to a lock. `commit_time` is the
+/// best-effort RFC 3339 author time of the tip commit — `None` when it cannot
+/// be read (shallow fetch, old gix, parse error).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct RepoSnapshot {
+	pub commit_oid: String,
+	pub tree_oid: String,
+	pub commit_time: Option<String>,
+}

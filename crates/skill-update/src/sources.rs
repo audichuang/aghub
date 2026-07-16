@@ -901,7 +901,7 @@ pub fn diff_source(
 			skills: classify_repo_skills(
 				repo.root.as_path(),
 				&baseline,
-				repo.upstream_commit_time.clone(),
+				repo.upstream_commit_time(),
 			),
 		},
 	}
@@ -1457,8 +1457,11 @@ mod diff_tests {
 		) -> Result<crate::FetchedRepo, FetchError> {
 			Ok(crate::FetchedRepo {
 				root: self.root.clone(),
-				oid: "test-oid".to_string(),
-				upstream_commit_time: None,
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "test-oid".to_string(),
+					tree_oid: "test-tree-oid".to_string(),
+					commit_time: None,
+				},
 				_guard: None,
 			})
 		}
@@ -1487,8 +1490,11 @@ mod diff_tests {
 			*self.seen_ref.lock().unwrap() = Some(sr.ref_.clone());
 			Ok(crate::FetchedRepo {
 				root: self.root.clone(),
-				oid: "test-oid".to_string(),
-				upstream_commit_time: None,
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "test-oid".to_string(),
+					tree_oid: "test-tree-oid".to_string(),
+					commit_time: None,
+				},
 				_guard: None,
 			})
 		}
