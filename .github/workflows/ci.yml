@@ -195,7 +195,14 @@ jobs:
     test:
         name: Test (${{ matrix.os }})
         needs: changes
+        # ALWAYS run on push to main (github.event_name == 'push' — ci.yml's
+        # push trigger is branches:[main]). release.yml's verify-ci gate trusts
+        # a green push-to-main CI run as proof the tagged commit was tested on
+        # all 3 platforms, so `test` must not be path-skipped for a main commit:
+        # a docs-only commit that skipped tests would otherwise be a green run
+        # that verify-ci wrongly accepts. PRs keep the path filter (cheap).
         if: |
+            github.event_name == 'push' ||
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
             needs.changes.outputs.workflows == 'true'
