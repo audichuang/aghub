@@ -29,13 +29,13 @@ port it. We build the two genuine gaps instead.
    `{name, items:[{agent, source}]}`; `installedAgents = items.map(agent)`. **No new API.**
 3. Reuse pure primitives in `lib/group-agent-plan.ts`: `computeGroupAgentStats`,
    `computeSkillAgentDiff`, `buildReconcilePlans`, `wouldOrphanSkill`.
-4. **Data-loss safety**: removing a skill's *last* agent via reconcile can orphan it
+4. **Data-loss safety**: removing a skill's _last_ agent via reconcile can orphan it
    (`reconcile_skill` removes even if the copy to the new agent failed — see
    `aghub-reconcile-orphan-guard`). The grid's per-cell removal MUST route through
    the same `wouldOrphanSkill` guard as `manage-skill-agents-dialog`. MCP has no such
    risk (delete rewrites shared config, deletes no disk path).
 5. (Z) approach: **generalize** `BulkManageGroupAgentsDialog` to a `kind: "skill" |
-   "mcp"` param (pick reconcile mutation + capability check + orphan-guard by kind),
+"mcp"` param (pick reconcile mutation + capability check + orphan-guard by kind),
    per AGENTS.md "don't hand-mirror across surfaces". Skills path stays behaviorally
    identical.
 6. (Y) placement: standalone sidebar page `/coverage` (spans skills+MCP, doesn't
@@ -48,6 +48,7 @@ port it. We build the two genuine gaps instead.
 ## Design
 
 ### (Z) Generalized bulk-manage dialog
+
 - `BulkManageGroupAgentsDialog` gains `kind: "skill" | "mcp"` (default keeps skill
   behavior). Internals branch: reconcile mutation (`reconcileSkills` vs
   `reconcileMcps`), capability filter (`supportsSkillMutation` vs `supportsMcpScope`),
@@ -56,6 +57,7 @@ port it. We build the two genuine gaps instead.
   agents" action beside delete), mirroring the skills page.
 
 ### (Y) Coverage grid page — `pages/settings/coverage.tsx`, route `/coverage`
+
 - Sidebar item `coverage` (add to `SIDEBAR_ITEM_IDS` + `DEFAULT_SIDEBAR_ITEMS` +
   `SIDEBAR_ITEM_DEFINITIONS`; icon e.g. `TableCellsIcon`).
 - Scope control (global / project) — extract the local `ScopeControl` from
@@ -70,6 +72,7 @@ port it. We build the two genuine gaps instead.
   otherwise plain — decide at build time, note the ceiling.
 
 ## Test strategy (AGENTS.md: a test must be able to FAIL)
+
 - Pure logic gets colocated `*.test.ts` (node:test): the grid's cell-applicability /
   cell-state derivation, and the kind→(mutation, guard) selection. Assert observable
   outcomes — e.g. removing a skill's only agent yields a blocked plan, not a reconcile
