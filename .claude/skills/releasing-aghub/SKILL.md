@@ -1,6 +1,6 @@
 ---
 name: releasing-aghub
-description: Runbook for cutting a desktop + CLI release of this aghub fork (audichuang/aghub) via the tag-driven GitHub Actions pipeline, plus the versioning model and how to verify artifacts and fix the failures it commonly hits. Use when the user wants to cut/ship a release, bump the version, push a release tag, when a Release workflow run fails (macOS `security import` / sccache `Cargo Fetch`), or when verifying release artifacts, `latest.json`, or the Homebrew tap. ALSO use for any aghub version/maintenance question — why a local `aghub-cli --version` reports a `-dev` version, where the version number comes from, keeping the desktop app and CLI on the same version / shipped together, `just bump`, or a release `test` gate flaking on a test that passes locally.
+description: Runbook for cutting a desktop + CLI release of this aghub fork (audichuang/aghub) via the tag-driven GitHub Actions pipeline, plus the versioning model and how to verify artifacts and fix the failures it commonly hits. Use when the user wants to cut/ship a release, bump the version, push a release tag, when a Release workflow run fails (macOS `security import` / sccache `Cargo Fetch`), or when verifying release artifacts, `latest.json`, or the Homebrew tap. ALSO use for any aghub version/maintenance question — why a local `aghub-cli --version` reports a `-dev` version, where the version number comes from, keeping the desktop app and CLI on the same version / shipped together, `just bump`, or a `ci.yml` `test` flaking on a test that passes locally (which now blocks the release via the `verify-ci` gate).
 ---
 
 # Releasing aghub (this fork)
@@ -26,16 +26,20 @@ script does not cover (notably **re-releasing a botched tag**, which needs a
 manual delete + retag — see the last section).
 
 Releases are **tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml`, which fans out to
-`test` (ubuntu/macOS/Windows gate) → `changelog` → `build-tauri` (4 targets) + `build-cli` (4 targets) → `publish-homebrew`.
-The `test` job gates everything — a tag whose tests fail on **any** platform produces **no** artifacts (added after a
-macOS/Windows-only bug shipped because the build compiled but tests were red). There is no manual build or upload.
-This fork ships its **own** independent version line — start ≥ the highest existing tag.
+`verify-ci` (gate) → `changelog` → `build-tauri` (4 targets) + `build-cli` (4 targets) → `publish-homebrew`.
+`verify-ci` gates everything: it asserts the tagged commit already has a **green push-to-main `ci.yml` run** (ci.yml's
+`test` job runs the ubuntu/macOS/Windows suite unconditionally on every push to main). It does **not** re-run the suite
+— a tag whose CI isn't green, or that never landed on main, produces **no** artifacts and fails fast at `verify-ci`.
+The safety property (added after a macOS/Windows-only bug shipped because the build compiled but tests were red) is
+preserved: a green CI run requires all 3 test legs to pass. The old gate re-ran the full 3-OS suite on the tag (~26 min)
+— pure duplication of the CI that already ran on that exact commit, so it was replaced by the assertion. There is no
+manual build or upload. This fork ships its **own** independent version line — start ≥ the highest existing tag.
 
 ## Versioning model & app/CLI sync
 
 **One version, two artifacts, always shipped together.** The desktop app and the
 CLI are never released independently: `build-tauri` and `build-cli` both
-`needs: test`, and `publish-homebrew` `needs: [build-tauri, build-cli]` — so a
+`needs: verify-ci`, and `publish-homebrew` `needs: [build-tauri, build-cli]` — so a
 release publishes only when BOTH built from the SAME tag. The Homebrew tap's
 `aghub` cask and `aghub-cli` formula are bumped to the same version in that one
 job. Never ship one without the other; never let their versions diverge.
@@ -73,7 +77,7 @@ job. Never ship one without the other; never let their versions diverge.
 #    crate — and bump its "Last full review" SHA. Keep the sync log complete.
 just preflight                                   # local: fmt+clippy+typecheck+test+doc (the pre-push hook does NOT run tests)
 git push fork main                               # then let CI's 3-OS matrix run (origin = upstream — never push there)
-gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # must be GREEN before step 1
+gh run watch <ci-run-id> --repo audichuang/aghub --exit-status   # MUST be GREEN before step 1 — verify-ci hard-blocks otherwise
 
 # 1. pick the next version (independent monotonic semver; do NOT hand-edit manifests —
 #    CI seds the tag into Cargo.toml / desktop package.json / tauri.conf.json)
@@ -84,7 +88,9 @@ gh run list  --repo audichuang/aghub --workflow release.yml --limit 1
 gh run watch <run-id> --repo audichuang/aghub --exit-status
 ```
 
-The release `test` gate is a backstop, not a substitute for step 0 — tagging a red commit just wastes a release run.
+`verify-ci` is a hard precondition, not a re-test backstop: it does **not** run tests, so tagging a commit whose
+push-to-main CI isn't green (or is still running) fails immediately at `verify-ci` and produces no artifacts. Step 0
+(wait for green CI) is therefore mandatory, not advisory — `just release` already waits for green before it tags.
 `git push` is gated by a **pre-push hook** (prettier `--check` + clippy `-D warnings` + eslint + tsc) — note it does
 **NOT** run tests; that gap is why `just preflight` exists. `just preflight` runs on your platform only and cannot
 reproduce macOS/Windows-specific behavior — for that, rely on the CI matrix and write tests that simulate the platform
@@ -125,13 +131,13 @@ gh api repos/audichuang/homebrew-tap/contents/Formula/aghub-cli.rb --jq .content
 
 ## Troubleshooting
 
-| Symptom                                                                                                            | Cause                                                                                                                                               | Fix                                                                                                                                                                                                                                                                                                  |
-| ------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS `failed codesign … security import: failed to import keychain certificate`                                   | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri tries to import an empty cert                                                        | Keep the `APPLE_*` env lines **commented out** in `release.yml`; unsigned dmg builds fine. Only uncomment once real Apple Developer certs + secrets exist.                                                                                                                                           |
-| `Cargo Fetch` fails: `sccache: Server startup failed … dns error … Try again`                                      | Transient GitHub infra/DNS flake reaching the cache backend                                                                                         | Re-run the job: `gh run rerun --failed <run-id> --repo audichuang/aghub`. Not a code issue.                                                                                                                                                                                                          |
-| Homebrew job fails on push to tap                                                                                  | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                                                                | Reset the PAT secret; rest of the release is unaffected.                                                                                                                                                                                                                                             |
-| Release `test` gate fails on a test that passes locally and under `-p <crate>`                                     | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test under `cargo test --workspace` (heavier parallel load than `-p` surfaces the race) | Serialize it: hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH the HOME/XDG-mutating test AND the home-reading test; `#[cfg(unix)]`-gate unix-only tests; canonicalize both path sides for macOS `/var`→`/private`. Reproduce with `cargo test --workspace`, not just `-p`. |
-| `just release` aborts `timed out waiting for ci.yml to go green` while CI is still running / eventually goes green | 3-OS matrix cold compile ran longer than the script's CI-wait window                                                                                | **Re-run** `just release X.Y.Z --yes` once CI is green — HEAD is already pushed, so it skips the wait and tags immediately. Wait window raised 20→40 min, so this should be rare.                                                                                                                    |
+| Symptom                                                                                                                                                       | Cause                                                                                                                                               | Fix                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS `failed codesign … security import: failed to import keychain certificate`                                                                              | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri tries to import an empty cert                                                        | Keep the `APPLE_*` env lines **commented out** in `release.yml`; unsigned dmg builds fine. Only uncomment once real Apple Developer certs + secrets exist.                                                                                                                                           |
+| `Cargo Fetch` fails: `sccache: Server startup failed … dns error … Try again`                                                                                 | Transient GitHub infra/DNS flake reaching the cache backend                                                                                         | Re-run the job: `gh run rerun --failed <run-id> --repo audichuang/aghub`. Not a code issue.                                                                                                                                                                                                          |
+| Homebrew job fails on push to tap                                                                                                                             | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                                                                | Reset the PAT secret; rest of the release is unaffected.                                                                                                                                                                                                                                             |
+| `ci.yml` `test` (push to main) fails on a test that passes locally and under `-p <crate>` — and so blocks the release (verify-ci stays red until CI is green) | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test under `cargo test --workspace` (heavier parallel load than `-p` surfaces the race) | Serialize it: hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH the HOME/XDG-mutating test AND the home-reading test; `#[cfg(unix)]`-gate unix-only tests; canonicalize both path sides for macOS `/var`→`/private`. Reproduce with `cargo test --workspace`, not just `-p`. |
+| `just release` aborts `timed out waiting for ci.yml to go green` while CI is still running / eventually goes green                                            | 3-OS matrix cold compile ran longer than the script's CI-wait window                                                                                | **Re-run** `just release X.Y.Z --yes` once CI is green — HEAD is already pushed, so it skips the wait and tags immediately. Wait window raised 20→40 min, so this should be rare.                                                                                                                    |
 
 ## Re-release a botched tag
 

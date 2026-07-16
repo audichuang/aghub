@@ -120,6 +120,21 @@ jobs:
         steps:
             - uses: actions/checkout@v6
 
+            - name: Exclude build dirs from Windows Defender (compile speedup)
+              if: matrix.os == 'windows-latest'
+              shell: pwsh
+              run: |
+                  # Real-time AV scanning of every artifact a Rust/Tauri build
+                  # writes is a Windows-only tax on the slowest leg of the
+                  # release. Exclude the build + toolchain dirs. Non-fatal by
+                  # design: a runner with Defender disabled or tamper-protected
+                  # just skips it — this never fails or alters the build output.
+                  $ErrorActionPreference = 'SilentlyContinue'
+                  Add-MpPreference -ExclusionPath "${{ github.workspace }}\target"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.rustup"
+                  exit 0
+
             - name: Install Linux Dependencies
               if: matrix.os == 'ubuntu-22.04'
               run: |
@@ -310,6 +325,18 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
+
+            - name: Exclude build dirs from Windows Defender (compile speedup)
+              if: matrix.os == 'windows-latest'
+              shell: pwsh
+              run: |
+                  # See build-tauri: real-time AV scanning taxes Windows Rust
+                  # builds. Non-fatal — never fails or alters the build output.
+                  $ErrorActionPreference = 'SilentlyContinue'
+                  Add-MpPreference -ExclusionPath "${{ github.workspace }}\target"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.cargo"
+                  Add-MpPreference -ExclusionPath "$env:USERPROFILE\.rustup"
+                  exit 0
 
             - name: Install Rust toolchain
               uses: dtolnay/rust-toolchain@stable
