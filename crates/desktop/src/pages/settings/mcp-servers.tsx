@@ -10,6 +10,7 @@ import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { BulkDeleteDialog } from "../../components/bulk-delete-dialog";
+import { BulkManageGroupAgentsDialog } from "../../components/bulk-manage-group-agents-dialog";
 import { CreateMcpPanel } from "../../components/create-mcp-panel";
 import { EditMcpPanel } from "../../components/edit-mcp-panel";
 import { ImportMcpPanel } from "../../components/import-mcp-panel";
@@ -49,6 +50,7 @@ export default function MCPServersPage() {
 		() => new Set(),
 	);
 	const [isBulkDeleteDialogOpen, setIsBulkDeleteDialogOpen] = useState(false);
+	const [isBulkAgentsOpen, setIsBulkAgentsOpen] = useState(false);
 	const [isMultiSelectMode, setIsMultiSelectMode] = useState(false);
 
 	const hasMcpCapableAgents = useMemo(
@@ -271,6 +273,7 @@ export default function MCPServersPage() {
 						selectedCount={selectedKeys.size}
 						totalCount={groupedMcps.length}
 						onDelete={() => setIsBulkDeleteDialogOpen(true)}
+						onManageAgents={() => setIsBulkAgentsOpen(true)}
 					/>
 				)}
 			</div>
@@ -337,6 +340,26 @@ export default function MCPServersPage() {
 						refetch();
 					}}
 					resourceType="mcp"
+				/>
+
+				<BulkManageGroupAgentsDialog
+					kind="mcp"
+					isOpen={isBulkAgentsOpen}
+					scope="global"
+					resources={selectedGroups.map((g) => ({
+						name: g.items[0]?.name ?? g.mergeKey,
+						items: g.items.flatMap((m) =>
+							m.agent
+								? [
+										{
+											agent: m.agent,
+											source: m.source ?? "global",
+										},
+									]
+								: [],
+						),
+					}))}
+					onClose={() => setIsBulkAgentsOpen(false)}
 				/>
 			</div>
 		</div>

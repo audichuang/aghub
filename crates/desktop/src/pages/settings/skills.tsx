@@ -967,9 +967,10 @@ export default function SkillsPage() {
 
 					{bulkAgentsGroup && (
 						<BulkManageGroupAgentsDialog
+							kind="skill"
 							isOpen={!!bulkAgentsGroup}
 							source={bulkAgentsGroup.source}
-							skills={bulkAgentsGroup.skills.map((sg) => ({
+							resources={bulkAgentsGroup.skills.map((sg) => ({
 								name: sg.name,
 								items: sg.items.flatMap((it) =>
 									it.agent

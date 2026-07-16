@@ -1243,6 +1243,12 @@ export default {
 		"This removes the deselected agents from {{count}} skill(s). This cannot be undone.",
 	bulkAgentsDone: "Updated {{count}} skill(s).",
 	bulkAgentsSomeFailed: "{{success}} updated, {{failed}} failed.",
+	bulkManageMcpAgents: "Manage agents for these servers",
+	bulkManageMcpAgentsHint:
+		"Add or remove agents across all {{count}} MCP servers.",
+	bulkMcpAgentsConfirmRemoveBody:
+		"This removes the deselected agents from {{count}} MCP server(s). This cannot be undone.",
+	bulkMcpAgentsDone: "Updated {{count}} MCP server(s).",
 	manageAgentsConfirmRemoveBody:
 		"This removes the skill from {{count}} agent(s). This cannot be undone.",
 	manageAgentsAddThenRemove:

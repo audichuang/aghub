@@ -1200,6 +1200,11 @@ export default {
 		"這會把取消勾選的代理從 {{count}} 個 skill 移除，且無法復原。",
 	bulkAgentsDone: "已更新 {{count}} 個 skill。",
 	bulkAgentsSomeFailed: "成功 {{success}} 個，失敗 {{failed}} 個。",
+	bulkManageMcpAgents: "管理這些伺服器的代理",
+	bulkManageMcpAgentsHint: "為全部 {{count}} 個 MCP 伺服器新增或移除代理。",
+	bulkMcpAgentsConfirmRemoveBody:
+		"這會從 {{count}} 個 MCP 伺服器移除未勾選的代理，且無法復原。",
+	bulkMcpAgentsDone: "已更新 {{count}} 個 MCP 伺服器。",
 	manageAgentsConfirmRemoveBody:
 		"這會從 {{count}} 個代理移除此技能，且無法復原。",
 	manageAgentsAddThenRemove:

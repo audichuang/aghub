@@ -4,17 +4,27 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
-import { supportsSkillMutation } from "../lib/agent-capabilities";
+import {
+	supportsMcpScope,
+	supportsSkillMutation,
+} from "../lib/agent-capabilities";
 import {
 	buildReconcilePlans,
 	computeGroupAgentStats,
 } from "../lib/group-agent-plan";
 import { cn } from "../lib/utils";
+import { reconcileMcpsMutationOptions } from "../requests/mcps";
 import { reconcileSkillsMutationOptions } from "../requests/skills";
 
+// Bulk-manages which agents carry a group of resources (skills OR mcp servers).
+// `kind` selects the reconcile mutation + capability check; the group-agent-plan
+// helpers are resource-agnostic. Skill callers keep their per-source-group
+// framing (`source`); mcp callers pass the selected servers as `resources`.
 interface BulkManageGroupAgentsDialogProps {
-	source: string;
-	skills: { name: string; items: { agent: string; source: string }[] }[];
+	kind: "skill" | "mcp";
+	/** Skill-only: the git source these skills come from (for the hint copy). */
+	source?: string;
+	resources: { name: string; items: { agent: string; source: string }[] }[];
 	scope: "global" | "project";
 	projectPath?: string;
 	isOpen: boolean;
@@ -22,8 +32,9 @@ interface BulkManageGroupAgentsDialogProps {
 }
 
 export function BulkManageGroupAgentsDialog({
+	kind,
 	source,
-	skills,
+	resources,
 	scope,
 	projectPath,
 	isOpen,
@@ -33,18 +44,28 @@ export function BulkManageGroupAgentsDialog({
 	const api = useApi();
 	const queryClient = useQueryClient();
 	const { availableAgents } = useAgentAvailability();
-	const reconcileMutation = useMutation(
+	const isMcp = kind === "mcp";
+
+	const skillReconcile = useMutation(
 		reconcileSkillsMutationOptions({ api, queryClient }),
 	);
+	const mcpReconcile = useMutation(
+		reconcileMcpsMutationOptions({ api, queryClient }),
+	);
+	const reconcileMutation = isMcp ? mcpReconcile : skillReconcile;
 
-	// Agents that can mutate skills at this scope. Their display names are
-	// keyed for the rows.
+	// Agents that can mutate this resource kind at this scope. Their display
+	// names are keyed for the rows.
 	const usableAgents = useMemo(
 		() =>
 			(availableAgents ?? []).filter(
-				(a) => a?.isUsable && supportsSkillMutation(a, scope),
+				(a) =>
+					a?.isUsable &&
+					(isMcp
+						? supportsMcpScope(a, scope)
+						: supportsSkillMutation(a, scope)),
 			),
-		[availableAgents, scope],
+		[availableAgents, isMcp, scope],
 	);
 	const usableAgentIds = useMemo(
 		() => usableAgents.map((a) => a.id),
@@ -52,8 +73,8 @@ export function BulkManageGroupAgentsDialog({
 	);
 
 	const stats = useMemo(
-		() => computeGroupAgentStats(skills, usableAgentIds),
-		[skills, usableAgentIds],
+		() => computeGroupAgentStats(resources, usableAgentIds),
+		[resources, usableAgentIds],
 	);
 	const statById = useMemo(
 		() => new Map(stats.map((s) => [s.agentId, s])),
@@ -72,8 +93,8 @@ export function BulkManageGroupAgentsDialog({
 	const plans = useMemo(() => {
 		const touchedIds = Object.keys(desired);
 		const desiredSet = new Set(touchedIds.filter((id) => desired[id]));
-		return buildReconcilePlans(skills, touchedIds, desiredSet);
-	}, [skills, desired]);
+		return buildReconcilePlans(resources, touchedIds, desiredSet);
+	}, [resources, desired]);
 
 	const removeCount = useMemo(
 		() => plans.filter((p) => p.removed.length > 0).length,
@@ -134,7 +155,11 @@ export function BulkManageGroupAgentsDialog({
 				setDone(success + failed);
 			}
 			if (failed === 0) {
-				toast.success(t("bulkAgentsDone", { count: success }));
+				toast.success(
+					t(isMcp ? "bulkMcpAgentsDone" : "bulkAgentsDone", {
+						count: success,
+					}),
+				);
 			} else {
 				toast.danger(t("bulkAgentsSomeFailed", { success, failed }));
 			}
@@ -165,16 +190,24 @@ export function BulkManageGroupAgentsDialog({
 						<Modal.CloseTrigger />
 						<Modal.Header>
 							<Modal.Heading>
-								{t("bulkManageGroupAgents")}
+								{t(
+									isMcp
+										? "bulkManageMcpAgents"
+										: "bulkManageGroupAgents",
+								)}
 							</Modal.Heading>
 						</Modal.Header>
 
 						<Modal.Body className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
 							<p className="mb-3 text-sm text-muted">
-								{t("bulkManageGroupAgentsHint", {
-									source,
-									count: skills.length,
-								})}
+								{isMcp
+									? t("bulkManageMcpAgentsHint", {
+											count: resources.length,
+										})
+									: t("bulkManageGroupAgentsHint", {
+											source,
+											count: resources.length,
+										})}
 							</p>
 							<div
 								className={cn(
@@ -211,7 +244,7 @@ export function BulkManageGroupAgentsDialog({
 												<span className="text-xs text-muted">
 													{stat?.installed ?? 0}/
 													{stat?.total ??
-														skills.length}
+														resources.length}
 												</span>
 											</Checkbox.Content>
 										</Checkbox>
@@ -259,9 +292,12 @@ export function BulkManageGroupAgentsDialog({
 						</AlertDialog.Header>
 						<AlertDialog.Body>
 							<p className="text-sm text-muted">
-								{t("bulkAgentsConfirmRemoveBody", {
-									count: removeCount,
-								})}
+								{t(
+									isMcp
+										? "bulkMcpAgentsConfirmRemoveBody"
+										: "bulkAgentsConfirmRemoveBody",
+									{ count: removeCount },
+								)}
 							</p>
 						</AlertDialog.Body>
 						<AlertDialog.Footer>
