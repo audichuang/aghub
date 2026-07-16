@@ -22,13 +22,30 @@ remote` is named **`origin`** (NOT `upstream`); our own publish remote is
 - `git remote`: `origin = https://github.com/AkaraChen/aghub.git` (upstream);
   `fork = https://github.com/audichuang/aghub.git` (ours — push here).
 - **merge-base** with upstream: `ca48d93`.
-- **Last full review**: upstream `main` @ `01bf2d57` (2026-07) — **55 further
-  upstream-only commits** since the prior review at `714b971`. Tally of that batch:
+- **Last full review**: upstream `main` @ `c1801ede` (2026-07-16) — **97 further
+  upstream-only commits** since `01bf2d57`. Tally: **1 ported** (TS7, shipped
+  v2.7.0) · ~75 skipped
+  (desktop "resource-list interaction v2" + library-page redesign — built on the
+  agent-hub-revamp #282 UI this fork never adopted; `@dnd-kit/core`,
+  `use-list-selection`, `use-resource-groups`, `lib/store/groups`,
+  `agent-coverage-matrix` etc. don't exist here) · ~19 dependency bumps · 1 CI
+  bump (`actions/upload-artifact` 6→7) · 1 TS7 upgrade. **Zero Rust-backend
+  commits** in the whole batch — the range touches only `crates/desktop` +
+  lockfiles + one `.github` action. Notes: the CI bump is **N/A here** (our
+  `release.yml` uploads via `softprops/action-gh-release@v3`, never uses
+  `actions/upload-artifact`); the **TS7 upgrade is the only cleanly portable item**
+  (independent of the UI, swaps `tsc`→native `@typescript/native` tsgo). UI is a
+  rewrite against the #282 architecture, not a port (product call, not a sync).
+  Borrowable UI _ideas_ (reimplement, don't cherry-pick): agent-coverage-matrix
+  view + right-click context menus — our `use-multi-select` already does
+  shift-range/bulk selection, so those parts aren't new.
+- **Prior review**: upstream `main` @ `01bf2d57` (2026-07) — **55 further
+  upstream-only commits** since `714b971`. Tally of that batch:
   2 ported (backend fixes below) · 1 deferred (usage-monitoring feature, product
   call) · ~22 skipped (desktop UI built on the agent-hub-revamp #282 architecture
   this fork never adopted — `global-search`/`agent-overview-card`/
   `resource-page-toolbar` don't exist here) · ~30 dependency bumps.
-- **Prior review**: upstream `main` @ `714b971` — 52 upstream-only commits since
+- **Earlier review**: upstream `main` @ `714b971` — 52 upstream-only commits since
   `ca48d93` (2026-06). Tally: 8 ported · 5 already-present · 2 deferred (security)
   · 3 skipped (product) · 2 upstream-tests · 1 partial · 2 upstream-internal · 29
   dependency bumps. Every one is dispositioned below.
@@ -48,6 +65,7 @@ remote` is named **`origin`** (NOT `upstream`); our own publish remote is
 | `PR #209` (open)   | `9b54de54`  | agents     | generic `.md` sub-agent I/O symlink hardening (`sub_agents.rs`: Claude/OpenCode path) — reject symlinked path components + non-regular files on read, staging-temp + `create_new` + rename on write. Ported verbatim (portable `symlink_metadata`, not `a1ee462`'s unix-only O_NOFOLLOW). **Not a main commit** — surfaced by upstream-PR review, so not in the 52-commit tally                                                                                                                                   |
 | `b95e1f61`         | (this sync) | agents     | correct config paths for trae / jetbrains-ai / augmentcode — the descriptors declared MCP/skill files these agents never read (invented home dotfolders). augmentcode → real `~/.augment/settings.json` (global only, no project file, drop `.augmentcode` marker); trae → drop unattested global MCP/skills, keep project `.trae/`, `global_data_dir` = OS config dir; jetbrains-ai → MCP unsupported (GUI-only). Our descriptors were still upstream's pre-fix state; cherry-picked clean with its test updates |
 | `e7628f2a`         | (this sync) | core       | `ConfigManager::validate` spawns the agent CLI via `validate_command`; from the console-less desktop app on Windows that flashed a console window. Set `CREATE_NO_WINDOW` (new `pub(crate)` const in `lib.rs`, `#[cfg(windows)]`), mirroring the api/cc-plugins/skills-linker convention. Cherry-picked clean                                                                                                                                                                                                     |
+| `25a18462`         | `2e636c90`  | desktop    | TS7 native compiler — desktop `build`/`typecheck` swap `tsc` → `@typescript/native` (npm alias `typescript@^7`, Go-based tsgo); root peerDep `typescript` → `^7`. Hand-applied (not cherry-picked); parity vs classic tsc verified. Shipped in v2.7.0                                                                                                                                                                                                                                                             |
 
 ## ✅ Already present in this fork (implemented earlier, independent of the v2.1.3/2.1.4 work)
 
@@ -119,6 +137,12 @@ or a needed feature lands upstream.
 - **Hermes agent** (2026-07-14): Nous Research Hermes Agent — global-only, YAML
   MCP at `~/.hermes/config.yaml`. Spec:
   `docs/specs/2026-07-14-hermes-agent-support.md`. Does not exist upstream.
+- **Coverage matrix page + MCP bulk-manage-agents** (2026-07-16, v2.7.0):
+  desktop `/coverage` grid (skill·mcp × agent, click-to-reconcile, name filter)
+  and generalizing the skill bulk-manage-agents dialog to MCP. Spec:
+  `docs/specs/2026-07-16-desktop-coverage-matrix.md`. Fork-original — the
+  upstream `agent-coverage-matrix.tsx` is a different thing (≈ our existing skill
+  bulk dialog), deliberately NOT ported (see the c1801ede review above).
 
 ## Fork-divergence adaptations (why our ports are not verbatim copies)
 
