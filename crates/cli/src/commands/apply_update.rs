@@ -1,7 +1,7 @@
 use crate::ResourceType;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::removal::installed_skill_roots;
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{anyhow, bail, Result};
 use serde_json::json;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
@@ -17,7 +17,8 @@ struct FetchedSource {
 	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded into the
 	/// lock's `refCommit` so the next `check` can preflight via ls-refs.
 	oid: String,
-	_guard: TempDir,
+	/// Keep-alive for the staging temp dir (from [`skill_update::FetchedRepo`]).
+	_guard: Option<std::sync::Arc<TempDir>>,
 }
 
 pub fn execute(
@@ -170,29 +171,42 @@ fn apply_source_from_lock(
 }
 
 fn fetch_source(source: &ApplySource) -> Result<FetchedSource> {
-	let resolved = aghub_git::resolve_remote_source(&source.source)
-		.context("failed to resolve remote source")?;
-	let creds = aghub_git::read_credentials();
-	let (bare, oid) = aghub_git::fetch_ref_to_temp(
-		&resolved.clone_url,
-		source.ref_name.as_deref(),
-		creds.as_ref(),
-		Some(std::time::Duration::from_secs(30)),
-	)
-	.context("failed to fetch source repository")?;
-	let repo = gix::open(bare.path()).context("failed to open fetched repo")?;
-	let object = repo
-		.find_object(oid)
-		.context("failed to read fetched HEAD")?;
-	let tree = object
-		.peel_to_tree()
-		.context("failed to peel fetched tree")?;
-	let materialized = tempfile::TempDir::new()?;
-	aghub_git::materialize_tree(&repo, tree.id, materialized.path())?;
+	use skill_update::{
+		skill_folder_from_lock_path, FetchError, FetchSelection, Fetcher,
+		SourceRef, TokenResolver,
+	};
+
+	let folder =
+		skill_folder_from_lock_path(&source.skill_path).ok_or_else(|| {
+			anyhow!("locked skillPath is not a valid skill folder")
+		})?;
+	let sr = SourceRef {
+		source: source.source.clone(),
+		ref_: source.ref_name.clone(),
+	};
+	let host = skill_update::keychain_host_for_source(&sr.source);
+	// Same env-token policy as `source` / `check` (GIT_PASSWORD any host,
+	// GITHUB_TOKEN github-only).
+	let token = crate::commands::source::EnvTokenResolver
+		.resolve(&sr.source, host.as_deref());
+	let fetched = skill_update::GitFetcherWithFallback
+		.fetch(
+			&sr,
+			token.as_deref(),
+			FetchSelection::Skills(std::slice::from_ref(&folder)),
+		)
+		.map_err(|e| match e {
+			FetchError::Auth => anyhow!(
+				"failed to fetch source repository: authentication failed"
+			),
+			FetchError::Network => {
+				anyhow!("failed to fetch source repository")
+			}
+		})?;
 	Ok(FetchedSource {
-		path: materialized.path().to_path_buf(),
-		oid: oid.to_string(),
-		_guard: materialized,
+		path: fetched.root.clone(),
+		oid: fetched.oid().to_string(),
+		_guard: fetched._guard,
 	})
 }
 

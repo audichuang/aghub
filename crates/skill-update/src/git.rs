@@ -1,21 +1,19 @@
-//! Default git adapters for the update-check orchestrator: a treeless fetch
-//! ([`GitFetcher`]) and an ls-refs tip resolver ([`GitRefResolver`]).
+//! Default git adapters for the update-check orchestrator: a selection-scoped
+//! fetch ([`GitFetcher`]) and an ls-refs tip resolver ([`GitRefResolver`]).
 //!
 //! No token is ever materialized into an error — `aghub_git` redacts URL
 //! userinfo upstream — and any ref-resolution failure is a soft error so the
 //! orchestrator falls through to the full fetch.
 
 use std::sync::Arc;
-use std::time::Duration;
 
+use crate::repository::{
+	skill_repo_to_fetch_error, FetchSelection, SkillRepository,
+};
 use crate::{FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef};
 
-/// Per-fetch HTTP request timeout for the treeless clone. Generous enough for a
-/// small skill repo but bounded so a stuck remote cannot hang the fetch.
-const FETCH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-
-/// Production [`Fetcher`]: fetches the requested ref into a bare temp repo,
-/// then materializes the tree into a separate temp directory for hashing/apply.
+/// Production [`Fetcher`]: resolves via [`SkillRepository`] (REST→gix single
+/// owner) then materializes only the requested selection.
 pub struct GitFetcher;
 
 impl Fetcher for GitFetcher {
@@ -23,47 +21,14 @@ impl Fetcher for GitFetcher {
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
+		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
-		let url = normalize_fetch_url(&source_ref.source)?;
-		let creds = https_only_token(&url, token)
-			.map(|token| aghub_git::Credentials::new("x-access-token", token));
-		let (bare, oid) = aghub_git::fetch_ref_to_temp(
-			&url,
-			source_ref.ref_.as_deref(),
-			creds.as_ref(),
-			Some(FETCH_HTTP_TIMEOUT),
-		)
-		.map_err(classify_fetch_error)?;
-		let repo = gix::open(bare.path()).map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let object = repo.find_object(oid).map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let tree = object.peel_to_tree().map_err(|e| {
-			classify_fetch_error(aghub_git::GitError::clone_failed(
-				e.to_string(),
-			))
-		})?;
-		let materialized =
-			tempfile::TempDir::new().map_err(|_| FetchError::Network)?;
-		aghub_git::materialize_tree(&repo, tree.id, materialized.path())
-			.map_err(|_| FetchError::Network)?;
-		let root = materialized.path().to_path_buf();
-		let snapshot = aghub_git::RepoSnapshot {
-			commit_oid: oid.to_string(),
-			tree_oid: tree.id.to_string(),
-			commit_time: read_commit_time(&repo, oid),
-		};
-		Ok(FetchedRepo {
-			root,
-			snapshot,
-			_guard: Some(Arc::new(materialized)),
-		})
+		let repo = SkillRepository::new();
+		let snap = repo
+			.resolve(source_ref, token)
+			.map_err(skill_repo_to_fetch_error)?;
+		repo.fetch(&snap, selection)
+			.map_err(skill_repo_to_fetch_error)
 	}
 }
 
@@ -87,9 +52,10 @@ impl Fetcher for GitFetcherWithFallback {
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
+		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
 		GitFetcher
-			.fetch(source_ref, token)
+			.fetch(source_ref, token, selection)
 			.or_else(|e| fetch_via_system_git(source_ref).map_err(|_| e))
 	}
 }
@@ -103,6 +69,9 @@ impl Fetcher for GitFetcherWithFallback {
 /// The clone is a full shallow checkout; downstream skill discovery skips
 /// `.git` (gitignore-aware) and hashing is per-skill-folder, so the working
 /// tree is used directly as the fetched root.
+///
+/// Note: system-git always materializes the whole tip (no selection). That is
+/// intentional — Decision 13 is a last-resort auth path for non-github hosts.
 pub(crate) fn fetch_via_system_git(
 	source_ref: &SourceRef,
 ) -> Result<FetchedRepo, FetchError> {

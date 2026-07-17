@@ -17,7 +17,9 @@ use serde::Serialize;
 use skill_update::sources::{
 	self, SourceScope, SourceScopeKind, SourceSkillDiff, SourceSummary,
 };
-use skill_update::{FetchError, SourceRef};
+use skill_update::{
+	skill_folder_from_lock_path, FetchError, FetchSelection, SourceRef,
+};
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -81,6 +83,7 @@ impl skill_update::Fetcher for CliFetcher {
 		&self,
 		sr: &SourceRef,
 		token: Option<&str>,
+		selection: FetchSelection<'_>,
 	) -> Result<skill_update::FetchedRepo, FetchError> {
 		#[cfg(debug_assertions)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
@@ -99,7 +102,7 @@ impl skill_update::Fetcher for CliFetcher {
 				Err(FetchError::Network)
 			};
 		}
-		skill_update::GitFetcher.fetch(sr, token)
+		skill_update::GitFetcher.fetch(sr, token, selection)
 	}
 }
 
@@ -345,6 +348,7 @@ fn diff(
 		},
 		&CliFetcher,
 		&EnvTokenResolver,
+		FetchSelection::CatalogSnapshot,
 	) {
 		Ok(repo) => repo,
 		Err(FetchError::Auth) => bail!(
@@ -534,6 +538,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// Fetch ONCE; reuse the repo for classification AND every install/update.
 	// Fetch + classify happen BEFORE the flag branch so the neither-flag
 	// informational path can print the same plan without a second fetch.
+	// CatalogSnapshot: classify needs the whole tree (renames/removals).
 	let repo = match sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: meta
@@ -544,6 +549,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		},
 		&CliFetcher,
 		&EnvTokenResolver,
+		FetchSelection::CatalogSnapshot,
 	) {
 		Ok(repo) => repo,
 		Err(FetchError::Auth) => bail!(
@@ -1098,8 +1104,12 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		args.git_ref.map(str::to_string).or(source.ref_name.clone());
 	source.ref_name = effective_ref.clone();
 
-	// Step 3: fetch upstream via the shared lazy-auth path (unauthenticated
-	// first, token retry on failure) — same semantics as `source diff`/`sync`.
+	// Step 3: fetch only the affected skill folder via the shared lazy-auth
+	// path (unauthenticated first, token retry on failure).
+	let folder =
+		skill_folder_from_lock_path(&source.skill_path).ok_or_else(|| {
+			anyhow::anyhow!("locked skillPath is not a valid skill folder")
+		})?;
 	let repo = sources::fetch_source_with_resolver(
 		&SourceRef {
 			source: source.source_url.clone(),
@@ -1107,6 +1117,7 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		},
 		&CliFetcher,
 		&EnvTokenResolver,
+		FetchSelection::Skills(std::slice::from_ref(&folder)),
 	)
 	.map_err(|e| match e {
 		FetchError::Auth => anyhow::anyhow!(

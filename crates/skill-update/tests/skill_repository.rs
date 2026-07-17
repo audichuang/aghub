@@ -1,0 +1,634 @@
+//! Ticket 07: the `SkillRepository` contract — the skill-aware composite that
+//! owns snapshot pinning and the SINGLE REST→gix fallback route.
+//!
+//! Every REST call goes through the T06 injectable [`HttpTransport`] fed canned
+//! GitHub API JSON, and the seam RECORDS the request set — so these tests assert
+//! observable outcomes (what was and was NOT requested, which condition routes
+//! to the gix fallback, the pinned commit) with no network.
+//!
+//! Unix-gated (matches the sibling `github_rest` / `gix_shallow_backend` suites):
+//! exec bit + symlink recreation are part of the no-over-fetch / parity claims,
+//! and symlink staging is Unix-only.
+#![cfg(unix)]
+
+use std::collections::{BTreeSet, HashMap};
+use std::fs;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
+
+use aghub_git::{
+	Blob, Credentials, GitError, GithubRest, HttpRequest, HttpResponse,
+	HttpTransport, RepoFetchBackend, RepoSnapshot, RepoTree,
+	SourceRef as GitSourceRef,
+};
+use skill::SkillPath;
+use skill_update::{
+	FetchSelection, SkillRepoError, SkillRepository, SourceRef,
+};
+
+// ─── Injectable, request-recording transport seam (mirrors tests/github_rest) ─
+
+struct FakeTransport<F> {
+	responder: F,
+	recorded: Arc<Mutex<Vec<HttpRequest>>>,
+}
+
+impl<F> HttpTransport for FakeTransport<F>
+where
+	F: Fn(&HttpRequest) -> Result<HttpResponse, GitError> + Send + Sync,
+{
+	fn execute(&self, request: HttpRequest) -> Result<HttpResponse, GitError> {
+		self.recorded.lock().unwrap().push(request.clone());
+		(self.responder)(&request)
+	}
+}
+
+fn transport(
+	responder: impl Fn(&HttpRequest) -> Result<HttpResponse, GitError>
+		+ Send
+		+ Sync
+		+ 'static,
+) -> (Arc<dyn HttpTransport>, Arc<Mutex<Vec<HttpRequest>>>) {
+	let recorded = Arc::new(Mutex::new(Vec::new()));
+	let t: Arc<dyn HttpTransport> = Arc::new(FakeTransport {
+		responder,
+		recorded: recorded.clone(),
+	});
+	(t, recorded)
+}
+
+fn json_ok(body: impl Into<Vec<u8>>) -> HttpResponse {
+	HttpResponse {
+		status: 200,
+		headers: vec![(
+			"content-type".into(),
+			"application/json; charset=utf-8".into(),
+		)],
+		body: body.into(),
+	}
+}
+
+fn raw_ok(bytes: impl Into<Vec<u8>>) -> HttpResponse {
+	HttpResponse {
+		status: 200,
+		headers: vec![(
+			"content-type".into(),
+			"application/vnd.github.raw".into(),
+		)],
+		body: bytes.into(),
+	}
+}
+
+fn status(code: u16, headers: &[(&str, &str)]) -> HttpResponse {
+	HttpResponse {
+		status: code,
+		headers: headers
+			.iter()
+			.map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+			.collect(),
+		body: Vec::new(),
+	}
+}
+
+fn strip_query(u: &str) -> &str {
+	u.split('?').next().unwrap_or(u)
+}
+fn is_commit_resolve(u: &str) -> bool {
+	u.contains("/commits/")
+}
+fn is_tree(u: &str) -> bool {
+	u.contains("/git/trees/")
+}
+fn blob_oid(u: &str) -> Option<String> {
+	strip_query(u)
+		.split("/git/blobs/")
+		.nth(1)
+		.map(|s| s.trim_end_matches('/').to_string())
+}
+
+fn github_source() -> SourceRef {
+	SourceRef {
+		source: "https://github.com/acme/skills.git".into(),
+		ref_: Some("main".into()),
+	}
+}
+
+// ─── A canned repo: two skills + unrelated large blobs ───
+
+const COMMIT_OID: &str = "1111111111111111111111111111111111111111";
+const TREE_OID: &str = "2222222222222222222222222222222222222222";
+const OID_MUSIC_SKILL: &str = "3333333333333333333333333333333333333333";
+const OID_MUSIC_RUN: &str = "4444444444444444444444444444444444444444";
+const OID_MUSIC_LINK: &str = "5555555555555555555555555555555555555555";
+const OID_OTHER_SKILL: &str = "6666666666666666666666666666666666666666";
+const OID_OTHER_BIG: &str = "7777777777777777777777777777777777777777";
+const OID_README: &str = "8888888888888888888888888888888888888888";
+
+const MUSIC_SKILL_BODY: &[u8] =
+	b"---\nname: music\ndescription: a sub-folder skill fixture\n---\n# body\n";
+const MUSIC_RUN_BODY: &[u8] = b"#!/bin/sh\necho hi\n";
+const MUSIC_LINK_TARGET: &[u8] = b"SKILL.md";
+
+fn commit_json() -> String {
+	format!(
+		r#"{{"sha":"{COMMIT_OID}","commit":{{"tree":{{"sha":"{TREE_OID}"}},"committer":{{"date":"2026-07-17T00:00:00Z"}}}}}}"#
+	)
+}
+
+fn tree_json() -> String {
+	format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
+{{"path":"README.md","mode":"100644","type":"blob","sha":"{OID_README}","size":10}},
+{{"path":"skills","mode":"040000","type":"tree","sha":"deadbeef00000000000000000000000000000001"}},
+{{"path":"skills/music","mode":"040000","type":"tree","sha":"deadbeef00000000000000000000000000000002"}},
+{{"path":"skills/music/SKILL.md","mode":"100644","type":"blob","sha":"{OID_MUSIC_SKILL}","size":60}},
+{{"path":"skills/music/scripts","mode":"040000","type":"tree","sha":"deadbeef00000000000000000000000000000003"}},
+{{"path":"skills/music/scripts/run.sh","mode":"100755","type":"blob","sha":"{OID_MUSIC_RUN}","size":18}},
+{{"path":"skills/music/link.md","mode":"120000","type":"blob","sha":"{OID_MUSIC_LINK}","size":8}},
+{{"path":"skills/other","mode":"040000","type":"tree","sha":"deadbeef00000000000000000000000000000004"}},
+{{"path":"skills/other/SKILL.md","mode":"100644","type":"blob","sha":"{OID_OTHER_SKILL}","size":40}},
+{{"path":"skills/other/big.bin","mode":"100644","type":"blob","sha":"{OID_OTHER_BIG}","size":52428800}}
+]}}"#
+	)
+}
+
+fn blob_map() -> HashMap<String, Vec<u8>> {
+	let mut m = HashMap::new();
+	m.insert(OID_MUSIC_SKILL.to_string(), MUSIC_SKILL_BODY.to_vec());
+	m.insert(OID_MUSIC_RUN.to_string(), MUSIC_RUN_BODY.to_vec());
+	m.insert(OID_MUSIC_LINK.to_string(), MUSIC_LINK_TARGET.to_vec());
+	m.insert(OID_OTHER_SKILL.to_string(), b"other skill".to_vec());
+	m.insert(OID_OTHER_BIG.to_string(), vec![b'x'; 1024]);
+	m.insert(OID_README.to_string(), b"readme".to_vec());
+	m
+}
+
+fn happy_responder(
+) -> impl Fn(&HttpRequest) -> Result<HttpResponse, GitError> + Send + Sync + 'static
+{
+	let commit = commit_json();
+	let tree = tree_json();
+	let blobs = blob_map();
+	move |req: &HttpRequest| {
+		let u = req.url.as_str();
+		if let Some(oid) = blob_oid(u) {
+			return match blobs.get(&oid) {
+				Some(bytes) => Ok(raw_ok(bytes.clone())),
+				None => Ok(status(404, &[])),
+			};
+		}
+		if is_tree(u) {
+			return Ok(json_ok(tree.clone().into_bytes()));
+		}
+		if is_commit_resolve(u) {
+			return Ok(json_ok(commit.clone().into_bytes()));
+		}
+		Ok(status(404, &[]))
+	}
+}
+
+// ─── Fake backends for the fallback-owner + never-touched slots ───
+
+/// A gix-slot backend that must NEVER be consulted (the REST path served the
+/// request). Any call is a routing bug.
+#[derive(Default)]
+struct NeverBackend;
+
+impl RepoFetchBackend for NeverBackend {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		unreachable!("gix slot must not be reached when REST succeeds");
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		unreachable!("gix slot must not be reached when REST succeeds");
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		unreachable!("gix slot must not be reached when REST succeeds");
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		_p: &[&str],
+		_d: &Path,
+	) -> aghub_git::Result<()> {
+		unreachable!("gix slot must not be reached when REST succeeds");
+	}
+}
+
+/// A REST-slot backend that always signals `RestFallback`, and counts the calls
+/// so a test can prove the fallback was attempted once (never re-decided).
+#[derive(Default)]
+struct AlwaysFallbackRest {
+	resolve_calls: AtomicUsize,
+	materialize_calls: AtomicUsize,
+}
+impl RepoFetchBackend for AlwaysFallbackRest {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+		Err(GitError::rest_fallback("rate limited"))
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Err(GitError::rest_fallback("rate limited"))
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Err(GitError::rest_fallback("rate limited"))
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		_p: &[&str],
+		_d: &Path,
+	) -> aghub_git::Result<()> {
+		self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+		Err(GitError::rest_fallback("rate limited"))
+	}
+}
+
+/// A gix-slot backend that serves a prebuilt local fixture dir, counting calls
+/// so a test can prove the fallback landed here exactly once.
+struct LocalDirBackend {
+	base: std::path::PathBuf,
+	resolve_calls: AtomicUsize,
+	materialize_calls: AtomicUsize,
+}
+impl LocalDirBackend {
+	fn new(base: &Path) -> Self {
+		Self {
+			base: base.to_path_buf(),
+			resolve_calls: AtomicUsize::new(0),
+			materialize_calls: AtomicUsize::new(0),
+		}
+	}
+}
+fn copy_dir(src: &Path, dst: &Path) {
+	fs::create_dir_all(dst).unwrap();
+	for e in fs::read_dir(src).unwrap() {
+		let e = e.unwrap();
+		let p = e.path();
+		let d = dst.join(e.file_name());
+		if p.is_dir() {
+			copy_dir(&p, &d);
+		} else {
+			fs::copy(&p, &d).unwrap();
+		}
+	}
+}
+impl RepoFetchBackend for LocalDirBackend {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+		Ok(RepoSnapshot {
+			commit_oid: "9999999999999999999999999999999999999999".into(),
+			tree_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+			commit_time: None,
+		})
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Ok(RepoTree {
+			entries: Vec::new(),
+		})
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Ok(Vec::new())
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		paths: &[&str],
+		dest: &Path,
+	) -> aghub_git::Result<()> {
+		self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+		for p in paths {
+			if p.is_empty() {
+				copy_dir(&self.base, dest);
+			} else {
+				copy_dir(&self.base.join(p), &dest.join(p));
+			}
+		}
+		Ok(())
+	}
+}
+
+// ═══════════════════ Test 1: only the selected skill is fetched ══════════════
+
+#[test]
+fn fetch_downloads_only_the_selected_skills_blobs_no_over_fetch() {
+	let (t, recorded) = transport(happy_responder());
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	assert_eq!(snap.commit_oid, COMMIT_OID, "lock records the COMMIT oid");
+	assert_ne!(snap.commit_oid, snap.tree_oid, "OIDs stay distinct");
+
+	let music = SkillPath::parse("skills/music").unwrap();
+	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[music])).unwrap();
+
+	// The selected skill (and only it) materialized.
+	assert!(fetched.root.join("skills/music/SKILL.md").exists());
+	assert!(fetched.root.join("skills/music/scripts/run.sh").exists());
+	assert!(fetched.root.join("skills/music/link.md").exists());
+	assert!(!fetched.root.join("skills/other").exists());
+	assert!(!fetched.root.join("README.md").exists());
+
+	let requested: BTreeSet<String> = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter_map(|r| blob_oid(&r.url))
+		.collect();
+	let expected: BTreeSet<String> =
+		[OID_MUSIC_SKILL, OID_MUSIC_RUN, OID_MUSIC_LINK]
+			.iter()
+			.map(|s| s.to_string())
+			.collect();
+	assert_eq!(
+		requested, expected,
+		"must fetch ONLY the selected skill's blobs"
+	);
+	for unrelated in [OID_OTHER_BIG, OID_OTHER_SKILL, OID_README] {
+		assert!(
+			!requested.contains(unrelated),
+			"unrelated blob {unrelated} must never be requested"
+		);
+	}
+}
+
+// ═══════════════════ Test 2: snapshot isolation (pinned commit) ══════════════
+
+#[test]
+fn fetch_uses_the_pinned_snapshot_not_a_moved_branch_tip() {
+	const COMMIT_A: &str = "aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111";
+	const TREE_A: &str = "aaaa2222aaaa2222aaaa2222aaaa2222aaaa2222";
+	const OID_MUSIC_A: &str = "aaaa3333aaaa3333aaaa3333aaaa3333aaaa3333";
+	const COMMIT_B: &str = "bbbb1111bbbb1111bbbb1111bbbb1111bbbb1111";
+	const TREE_B: &str = "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222";
+	const OID_MUSIC_B: &str = "bbbb3333bbbb3333bbbb3333bbbb3333bbbb3333";
+
+	let advanced = Arc::new(AtomicBool::new(false));
+	let adv = advanced.clone();
+	let (t, recorded) = transport(move |req: &HttpRequest| {
+		let u = req.url.as_str();
+		if let Some(oid) = blob_oid(u) {
+			return Ok(raw_ok(if oid == OID_MUSIC_A {
+				b"A version".to_vec()
+			} else if oid == OID_MUSIC_B {
+				b"B version".to_vec()
+			} else {
+				return Ok(status(404, &[]));
+			}));
+		}
+		if is_tree(u) {
+			let (tree_oid, music) = if u.contains(TREE_B) {
+				(TREE_B, OID_MUSIC_B)
+			} else {
+				(TREE_A, OID_MUSIC_A)
+			};
+			return Ok(json_ok(
+				format!(
+					r#"{{"sha":"{tree_oid}","truncated":false,"tree":[
+{{"path":"skills/music/SKILL.md","mode":"100644","type":"blob","sha":"{music}","size":9}}
+]}}"#
+				)
+				.into_bytes(),
+			));
+		}
+		if is_commit_resolve(u) {
+			let (commit, tree) = if adv.load(Ordering::SeqCst) {
+				(COMMIT_B, TREE_B)
+			} else {
+				(COMMIT_A, TREE_A)
+			};
+			return Ok(json_ok(
+				format!(
+					r#"{{"sha":"{commit}","commit":{{"tree":{{"sha":"{tree}"}},"committer":{{"date":"2026-07-17T00:00:00Z"}}}}}}"#
+				)
+				.into_bytes(),
+			));
+		}
+		Ok(status(404, &[]))
+	});
+
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	assert_eq!(snap.commit_oid, COMMIT_A);
+	assert_eq!(snap.tree_oid, TREE_A);
+
+	// Branch advances between resolve and fetch.
+	advanced.store(true, Ordering::SeqCst);
+	recorded.lock().unwrap().clear();
+
+	let music = SkillPath::parse("skills/music").unwrap();
+	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[music])).unwrap();
+
+	// The PINNED commit is what was fetched + recorded — never the moved tip.
+	assert_eq!(
+		fetched.snapshot.commit_oid, COMMIT_A,
+		"fetch must record the pinned commit, not the moved branch tip"
+	);
+	let body =
+		fs::read_to_string(fetched.root.join("skills/music/SKILL.md")).unwrap();
+	assert_eq!(
+		body, "A version",
+		"materialized the pinned commit's content"
+	);
+
+	let reqs = recorded.lock().unwrap();
+	assert!(
+		reqs.iter().all(|r| !is_commit_resolve(&r.url)),
+		"fetch must NOT re-resolve the moving ref"
+	);
+	assert!(
+		reqs.iter().any(|r| r.url.contains(TREE_A)),
+		"fetch must read the pinned tree oid"
+	);
+	assert!(
+		reqs.iter().all(|r| !r.url.contains(TREE_B)),
+		"fetch must never read the moved tip's tree"
+	);
+}
+
+// ═══════════════ Test 3: the single central fallback owner ═══════════════════
+
+#[test]
+fn rest_fallback_routes_to_gix_once_inside_the_repository() {
+	// A fixture the gix slot will serve.
+	let fixture = tempfile::tempdir().unwrap();
+	let music = fixture.path().join("skills/music");
+	fs::create_dir_all(&music).unwrap();
+	fs::write(music.join("SKILL.md"), b"gix-served body\n").unwrap();
+
+	let rest = Arc::new(AlwaysFallbackRest::default());
+	let gix = Arc::new(LocalDirBackend::new(fixture.path()));
+	let repo = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	// github host => REST is TRIED first; its RestFallback must route to gix,
+	// decided ONCE inside the repository (never re-decided per surface).
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	let path = SkillPath::parse("skills/music").unwrap();
+	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[path])).unwrap();
+
+	assert_eq!(
+		rest.resolve_calls.load(Ordering::SeqCst),
+		1,
+		"REST resolve attempted exactly once"
+	);
+	assert_eq!(
+		gix.resolve_calls.load(Ordering::SeqCst),
+		1,
+		"gix fallback resolve taken exactly once"
+	);
+	assert_eq!(
+		rest.materialize_calls.load(Ordering::SeqCst),
+		0,
+		"a REST that already fell back must not also materialize"
+	);
+	assert!(
+		gix.materialize_calls.load(Ordering::SeqCst) >= 1,
+		"the fetch must route to the gix backend"
+	);
+	assert!(
+		fetched.root.join("skills/music/SKILL.md").exists(),
+		"the gix fallback served the selected skill"
+	);
+}
+
+// ═══════════════ Test 4: root-level skill preflight ═════════════════════════
+
+fn root_repo_transport(
+	tree_body: String,
+	blobs: HashMap<String, Vec<u8>>,
+) -> (Arc<dyn HttpTransport>, Arc<Mutex<Vec<HttpRequest>>>) {
+	let commit = commit_json();
+	transport(move |req: &HttpRequest| {
+		let u = req.url.as_str();
+		if let Some(oid) = blob_oid(u) {
+			return match blobs.get(&oid) {
+				Some(b) => Ok(raw_ok(b.clone())),
+				None => Ok(status(404, &[])),
+			};
+		}
+		if is_tree(u) {
+			return Ok(json_ok(tree_body.clone().into_bytes()));
+		}
+		if is_commit_resolve(u) {
+			return Ok(json_ok(commit.clone().into_bytes()));
+		}
+		Ok(status(404, &[]))
+	})
+}
+
+#[test]
+fn root_skill_within_bounds_fetches_the_whole_root_folder() {
+	const OID_ROOT_SKILL: &str = "cccc1111cccc1111cccc1111cccc1111cccc1111";
+	const OID_ROOT_REF: &str = "cccc2222cccc2222cccc2222cccc2222cccc2222";
+	let tree = format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
+{{"path":"SKILL.md","mode":"100644","type":"blob","sha":"{OID_ROOT_SKILL}","size":50}},
+{{"path":"references","mode":"040000","type":"tree","sha":"deadbeef00000000000000000000000000000009"}},
+{{"path":"references/guide.md","mode":"100644","type":"blob","sha":"{OID_ROOT_REF}","size":12}}
+]}}"#
+	);
+	let mut blobs = HashMap::new();
+	blobs.insert(
+		OID_ROOT_SKILL.to_string(),
+		b"---\nname: root-skill\ndescription: root fixture\n---\n# hi\n"
+			.to_vec(),
+	);
+	blobs.insert(OID_ROOT_REF.to_string(), b"guide bytes\n".to_vec());
+
+	let (t, _r) = root_repo_transport(tree, blobs);
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	let root = SkillPath::parse("").unwrap();
+	assert!(root.is_root());
+	let fetched = repo.fetch(&snap, FetchSelection::Skills(&[root])).unwrap();
+
+	// The whole root folder is materialized, not just SKILL.md.
+	assert!(fetched.root.join("SKILL.md").exists());
+	assert!(fetched.root.join("references/guide.md").exists());
+	let hash = skill::compute_skill_folder_hash(&fetched.root).unwrap();
+	assert_ne!(hash, skill::hash::EMPTY_SKILLS_LOCK_DIGEST);
+}
+
+#[test]
+fn oversized_root_tree_is_refused_and_downloads_no_blobs() {
+	const OID_BIG: &str = "dddd1111dddd1111dddd1111dddd1111dddd1111";
+	// One blob whose declared size exceeds MAX_TOTAL_BYTES (256 MiB).
+	let over = skill::hash::MAX_TOTAL_BYTES + 1;
+	let tree = format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
+{{"path":"SKILL.md","mode":"100644","type":"blob","sha":"3333333333333333333333333333333333333333","size":50}},
+{{"path":"huge.bin","mode":"100644","type":"blob","sha":"{OID_BIG}","size":{over}}}
+]}}"#
+	);
+	let mut blobs = HashMap::new();
+	blobs.insert(
+		"3333333333333333333333333333333333333333".to_string(),
+		b"---\nname: root\ndescription: d\n---\n".to_vec(),
+	);
+	blobs.insert(OID_BIG.to_string(), vec![b'x'; 8]);
+
+	let (t, recorded) = root_repo_transport(tree, blobs);
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	let root = SkillPath::parse("").unwrap();
+	let err = repo
+		.fetch(&snap, FetchSelection::Skills(&[root]))
+		.unwrap_err();
+
+	assert!(
+		matches!(err, SkillRepoError::RootSkillTooLarge),
+		"an over-bound root tree must be refused with ROOT_SKILL_TOO_LARGE, got {err:?}"
+	);
+	assert_eq!(err.code(), "ROOT_SKILL_TOO_LARGE");
+
+	// The refusal happens BEFORE any blob download — the whole point of the
+	// preflight is to never pull the pathological repo.
+	let downloaded: Vec<String> = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter_map(|r| blob_oid(&r.url))
+		.collect();
+	assert!(
+		downloaded.is_empty(),
+		"an over-bound root must download NO blobs, downloaded: {downloaded:?}"
+	);
+}

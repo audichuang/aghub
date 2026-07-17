@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::{FetchError, Fetcher, SourceRef, TokenResolver};
+use crate::{FetchError, FetchSelection, Fetcher, SourceRef, TokenResolver};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{
 	compare_known_hashes, detect_rename, precheck_source, SkillUpdateStatus,
@@ -204,12 +204,16 @@ fn reconstruct_source_url(source: &str) -> String {
 /// first; on any error, resolves a token (scoped to the source + keychain host)
 /// and retries ONCE with it. If no token is available the original error is
 /// returned. The caller maps `Auth`→needs-credential, `Network`→fetch-failed.
+///
+/// `selection` is passed through both attempts (and the system-git tail always
+/// materializes the whole tip — Decision 13 last-resort auth path).
 pub fn fetch_source_with_resolver(
 	source_ref: &SourceRef,
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
+	selection: FetchSelection<'_>,
 ) -> Result<crate::FetchedRepo, FetchError> {
-	match fetcher.fetch(source_ref, None) {
+	match fetcher.fetch(source_ref, None, selection) {
 		Ok(repo) => Ok(repo),
 		Err(first_error) => {
 			// Unauth-first, then ONE token retry (GIT_PASSWORD / GITHUB_TOKEN /
@@ -221,7 +225,9 @@ pub fn fetch_source_with_resolver(
 			if let Some(token) =
 				resolver.resolve(&source_ref.source, host.as_deref())
 			{
-				if let Ok(repo) = fetcher.fetch(source_ref, Some(&token)) {
+				if let Ok(repo) =
+					fetcher.fetch(source_ref, Some(&token), selection)
+				{
 					return Ok(repo);
 				}
 			}
@@ -893,7 +899,12 @@ pub fn diff_source(
 		source: fetch_source,
 		ref_: git_ref.clone(),
 	};
-	match fetch_source_with_resolver(&source_ref, deps.fetcher, deps.resolver) {
+	match fetch_source_with_resolver(
+		&source_ref,
+		deps.fetcher,
+		deps.resolver,
+		FetchSelection::CatalogSnapshot,
+	) {
 		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential { git_ref },
 		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
 		Ok(repo) => SourceDiffOutcome::Ok {
@@ -1454,6 +1465,7 @@ mod diff_tests {
 			&self,
 			_sr: &SourceRef,
 			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			Ok(crate::FetchedRepo {
 				root: self.root.clone(),
@@ -1486,6 +1498,7 @@ mod diff_tests {
 			&self,
 			sr: &SourceRef,
 			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			*self.seen_ref.lock().unwrap() = Some(sr.ref_.clone());
 			Ok(crate::FetchedRepo {

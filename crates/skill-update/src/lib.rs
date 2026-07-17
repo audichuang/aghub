@@ -14,6 +14,12 @@
 mod git;
 pub use git::{GitFetcher, GitFetcherWithFallback, GitRefResolver};
 
+mod repository;
+pub use repository::{
+	skill_folder_from_lock_path, skill_repo_to_fetch_error, CatalogSkill,
+	FetchSelection, SkillCatalog, SkillRepoError, SkillRepository,
+};
+
 pub mod sources;
 
 use std::collections::HashMap;
@@ -151,6 +157,7 @@ impl ResultCache {
 
 /// The outcome of a fetch for one [`SourceRef`]: a materialized local repo
 /// directory rooted at the temp checkout, kept alive for the borrow's lifetime.
+#[derive(Debug)]
 pub struct FetchedRepo {
 	/// Root of the fetched source tree (the containment root for `skill_path`).
 	pub root: PathBuf,
@@ -187,15 +194,16 @@ pub enum FetchError {
 	Network,
 }
 
-/// Injected fetch boundary. The real implementation does a treeless/bare gix
-/// fetch and materializes the subtree; tests supply a local-dir stub.
+/// Injected fetch boundary. Production materializes only the
+/// [`FetchSelection`]; tests supply a local-dir stub (may ignore selection).
 pub trait Fetcher: Send + Sync {
-	/// Fetch `source_ref` (optionally authenticated by `token`) and return a
-	/// local directory whose layout matches the upstream repo root.
+	/// Fetch `source_ref` (optionally authenticated by `token`) and materialize
+	/// only `selection` into a local directory.
 	fn fetch(
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
+		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError>;
 }
 
@@ -565,9 +573,19 @@ pub async fn check_updates(
 					}
 				}
 			}
+			// Path-scoped fetch: only the locked skill folders for this group.
+			let folders: Vec<skill::SkillPath> = job
+				.members
+				.iter()
+				.filter_map(|m| {
+					m.skill_path
+						.as_deref()
+						.and_then(skill_folder_from_lock_path)
+				})
+				.collect();
 			let result = tokio::time::timeout(
 				per_fetch,
-				do_fetch(fetcher, job.sr.clone(), job.token),
+				do_fetch(fetcher, job.sr.clone(), job.token, folders),
 			)
 			.await;
 			let outcome = match result {
@@ -677,10 +695,13 @@ async fn do_fetch(
 	fetcher: Arc<dyn Fetcher>,
 	sr: SourceRef,
 	token: Option<String>,
+	folders: Vec<skill::SkillPath>,
 ) -> Result<FetchedRepo, FetchError> {
-	tokio::task::spawn_blocking(move || fetcher.fetch(&sr, token.as_deref()))
-		.await
-		.unwrap_or(Err(FetchError::Network))
+	tokio::task::spawn_blocking(move || {
+		fetcher.fetch(&sr, token.as_deref(), FetchSelection::Skills(&folders))
+	})
+	.await
+	.unwrap_or(Err(FetchError::Network))
 }
 
 /// Bridge the synchronous [`RefResolver`] into the async timeout path.
@@ -780,6 +801,7 @@ mod tests {
 			&self,
 			_sr: &SourceRef,
 			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
 		) -> Result<FetchedRepo, FetchError> {
 			*self.calls.lock().unwrap() += 1;
 			if let Some(kind) = self.err {
@@ -1036,6 +1058,7 @@ mod tests {
 			&self,
 			_sr: &SourceRef,
 			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
 		) -> Result<FetchedRepo, FetchError> {
 			Ok(FetchedRepo {
 				root: self.root.clone(),
@@ -1613,6 +1636,7 @@ mod tests {
 			&self,
 			_sr: &SourceRef,
 			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
 		) -> Result<FetchedRepo, FetchError> {
 			let current = self.current.fetch_add(1, Ordering::SeqCst) + 1;
 			self.max.fetch_max(current, Ordering::SeqCst);

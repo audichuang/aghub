@@ -92,6 +92,7 @@ impl Fetcher for ApiFetcher {
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
+		selection: skill_update::FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
 		#[cfg(test)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
@@ -120,7 +121,7 @@ impl Fetcher for ApiFetcher {
 				Err(FetchError::Network)
 			};
 		}
-		GitFetcher.fetch(source_ref, token)
+		GitFetcher.fetch(source_ref, token, selection)
 	}
 }
 

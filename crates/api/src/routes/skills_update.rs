@@ -505,12 +505,24 @@ pub(crate) async fn apply_skill_update_inner(
 		&source.source,
 		keychain_host_for_source(&source.source).as_deref(),
 	);
+	let folder =
+		match skill_update::skill_folder_from_lock_path(&source.skill_path) {
+			Some(f) => f,
+			None => {
+				return Ok(Json(apply_error(
+					&req.name,
+					&req.scope,
+					"Locked skillPath is not a valid skill folder",
+				)));
+			}
+		};
 	let repo = match fetcher.fetch(
 		&SourceRef {
 			source: source.source.clone(),
 			ref_: source.ref_name.clone(),
 		},
 		token.as_deref(),
+		skill_update::FetchSelection::Skills(std::slice::from_ref(&folder)),
 	) {
 		Ok(repo) => repo,
 		Err(error) => {
@@ -696,12 +708,25 @@ pub(crate) async fn accept_rename_inner(
 		&source.source_url,
 		keychain_host_for_source(&source.source_url).as_deref(),
 	);
+	let folder =
+		match skill_update::skill_folder_from_lock_path(&source.skill_path) {
+			Some(f) => f,
+			None => {
+				return Ok(Json(accept_rename_error(
+					&req.old_name,
+					&req.new_name,
+					&req.scope,
+					"Locked skillPath is not a valid skill folder",
+				)));
+			}
+		};
 	let repo = match fetcher.fetch(
 		&SourceRef {
 			source: source.source_url.clone(),
 			ref_: source.ref_name.clone(),
 		},
 		token.as_deref(),
+		skill_update::FetchSelection::Skills(std::slice::from_ref(&folder)),
 	) {
 		Ok(r) => r,
 		Err(e) => {
@@ -1145,6 +1170,7 @@ mod tests {
 			&self,
 			_source_ref: &SourceRef,
 			_token: Option<&str>,
+			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			Ok(skill_update::FetchedRepo {
 				root: self.root.clone(),
@@ -1264,6 +1290,7 @@ mod tests {
 			&self,
 			_source_ref: &SourceRef,
 			token: Option<&str>,
+			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			*self.seen_token.lock().unwrap() = Some(token.map(str::to_string));
 			Ok(skill_update::FetchedRepo {
