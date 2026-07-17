@@ -42,6 +42,15 @@ impl ApiError {
 	pub fn not_found(error: impl Into<String>) -> Self {
 		Self::new(Status::NotFound, error, "NOT_FOUND")
 	}
+
+	pub fn from_join_error(
+		error: tokio::task::JoinError,
+		message: &'static str,
+		code: &'static str,
+	) -> Self {
+		log::error!("{code}: blocking task failed: {error}");
+		Self::new(Status::InternalServerError, message, code)
+	}
 }
 
 impl From<ConfigError> for ApiError {
@@ -177,3 +186,29 @@ pub type ApiResult<T> = Result<rocket::serde::json::Json<T>, ApiError>;
 pub type ApiCreated<T> =
 	Result<(Status, rocket::serde::json::Json<T>), ApiError>;
 pub type ApiNoContent = Result<rocket::response::status::NoContent, ApiError>;
+
+#[cfg(test)]
+mod tests {
+	use super::ApiError;
+
+	#[tokio::test]
+	async fn join_error_response_omits_panic_payload() {
+		const PANIC_PAYLOAD: &str =
+			"secret panic detail at /home/private/repository";
+		let join_error = tokio::task::spawn_blocking(|| {
+			panic!("{PANIC_PAYLOAD}");
+		})
+		.await
+		.unwrap_err();
+
+		let error = ApiError::from_join_error(
+			join_error,
+			"Clone task failed",
+			"CLONE_ERROR",
+		);
+
+		assert_eq!(error.body.error, "Clone task failed");
+		assert_eq!(error.body.code, "CLONE_ERROR");
+		assert!(!error.body.error.contains(PANIC_PAYLOAD));
+	}
+}

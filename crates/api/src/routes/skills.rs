@@ -122,9 +122,9 @@ where
 	tokio::task::spawn_blocking(fetcher)
 		.await
 		.map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Branch listing task panicked: {e}"),
+			ApiError::from_join_error(
+				e,
+				"Branch listing task failed",
 				"BRANCHES_ERROR",
 			)
 		})?
@@ -1297,11 +1297,7 @@ pub async fn install_skill(
 	let repo = tokio::task::spawn_blocking(move || repositories.create())
 		.await
 		.map_err(|e| {
-			ApiError::new(
-				Status::InternalServerError,
-				format!("Clone task panicked: {e}"),
-				"CLONE_ERROR",
-			)
+			ApiError::from_join_error(e, "Clone task failed", "CLONE_ERROR")
 		})?;
 	install_skill_route_with_repo(body.into_inner(), forwarded, repo).await
 }
@@ -1405,9 +1401,9 @@ pub(crate) async fn install_skill_with_repo(
 				Ok(Ok(Ok(v))) => v,
 				Ok(Ok(Err(e))) => return Err(map_install_fetch_error(e)),
 				Ok(Err(e)) => {
-					return Err(ApiError::new(
-						Status::InternalServerError,
-						format!("Clone task panicked: {e}"),
+					return Err(ApiError::from_join_error(
+						e,
+						"Clone task failed",
 						"CLONE_ERROR",
 					));
 				}
@@ -1463,9 +1459,9 @@ pub(crate) async fn install_skill_with_repo(
 							));
 						}
 						Ok(Err(e)) => {
-							return Err(ApiError::new(
-								Status::InternalServerError,
-								format!("Clone task panicked: {e}"),
+							return Err(ApiError::from_join_error(
+								e,
+								"Clone task failed",
 								"CLONE_ERROR",
 							));
 						}
@@ -1911,9 +1907,9 @@ pub async fn git_credential_status(
 	})
 	.await
 	.map_err(|e| {
-		ApiError::new(
-			Status::InternalServerError,
-			format!("Credential probe task panicked: {e}"),
+		ApiError::from_join_error(
+			e,
+			"Credential probe task failed",
 			"CREDENTIAL_PROBE_ERROR",
 		)
 	})?;
@@ -2045,11 +2041,7 @@ pub async fn git_scan_skills(
 	})
 	.await
 	.map_err(|e| {
-		ApiError::new(
-			Status::InternalServerError,
-			format!("Scan task panicked: {e}"),
-			"SCAN_ERROR",
-		)
+		ApiError::from_join_error(e, "Scan task failed", "SCAN_ERROR")
 	})?
 	.map_err(map_skill_repo_error)?;
 
@@ -2351,9 +2343,9 @@ pub async fn git_install_skills(
 		Ok(Ok(Ok(fetched))) => fetched,
 		Ok(Ok(Err(e))) => return Err(map_skill_repo_error(e)),
 		Ok(Err(e)) => {
-			return Err(ApiError::new(
-				Status::InternalServerError,
-				format!("Fetch task panicked: {e}"),
+			return Err(ApiError::from_join_error(
+				e,
+				"Fetch task failed",
 				"CLONE_ERROR",
 			));
 		}
@@ -2516,9 +2508,9 @@ pub async fn git_sync_skill(
 		Ok(Ok(Ok(fetched))) => fetched,
 		Ok(Ok(Err(e))) => return Err(map_skill_repo_error(e)),
 		Ok(Err(e)) => {
-			return Err(ApiError::new(
-				Status::InternalServerError,
-				format!("Fetch task panicked: {e}"),
+			return Err(ApiError::from_join_error(
+				e,
+				"Fetch task failed",
 				"CLONE_ERROR",
 			));
 		}

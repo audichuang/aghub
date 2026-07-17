@@ -210,9 +210,9 @@ pub async fn diff_source(
 	})
 	.await
 	.map_err(|e| {
-		ApiError::new(
-			Status::InternalServerError,
-			format!("diff task panicked: {e}"),
+		ApiError::from_join_error(
+			e,
+			"Source diff task failed",
 			"DIFF_TASK_PANIC",
 		)
 	})?;
