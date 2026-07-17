@@ -13,7 +13,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
-use std::net::{TcpListener, TcpStream};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -898,13 +898,18 @@ impl Drop for ChildGuard {
 	}
 }
 
-/// Spawn a loopback `git daemon` serving `base_path` and wait until it is
-/// accepting connections. The bind-port-0-then-drop trick is inherently TOCTOU
-/// (another process can grab the port before the daemon rebinds), so this
-/// launcher detects a daemon that died on startup (bind failure) and retries
-/// on a fresh port instead of letting the readiness poll connect to whatever
-/// stole the port. Shared by every daemon-backed test.
-fn spawn_git_daemon(base_path: &Path) -> (ChildGuard, std::net::SocketAddr) {
+/// Spawn a loopback `git daemon` serving `base_path` and wait until it
+/// answers the git protocol for `probe_repo`. The bind-port-0-then-drop trick
+/// is inherently TOCTOU — another process can take the port before the daemon
+/// rebinds, and a bare TCP connect could reach that impostor while our child
+/// is still pre-bind — so readiness is a `git ls-remote` against the served
+/// repo (protocol-level proof it is OUR daemon), and a child that lost the
+/// port race (bind failure → immediate exit) is retried on a fresh port.
+/// Shared by every daemon-backed test.
+fn spawn_git_daemon(
+	base_path: &Path,
+	probe_repo: &str,
+) -> (ChildGuard, std::net::SocketAddr) {
 	for _attempt in 0..5 {
 		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
 		let address = listener.local_addr().unwrap();
@@ -925,21 +930,28 @@ fn spawn_git_daemon(base_path: &Path) -> (ChildGuard, std::net::SocketAddr) {
 			.spawn()
 			.unwrap();
 		let mut guard = ChildGuard(child);
-		let ready_by = Instant::now() + Duration::from_secs(5);
+		let probe_url = format!("git://{address}/{probe_repo}");
+		let ready_by = Instant::now() + Duration::from_secs(10);
 		loop {
-			// A git daemon that lost the port race exits immediately; a live
-			// child + an accepting socket therefore IS our daemon (it binds
-			// before serving and exits on bind failure).
 			if guard.0.try_wait().unwrap().is_some() {
 				break; // died on startup (port stolen) → retry on a new port
 			}
-			if TcpStream::connect(address).is_ok() {
+			let ready = Command::new("git")
+				.args(["ls-remote", &probe_url])
+				.env("GIT_CONFIG_GLOBAL", "/dev/null")
+				.env("GIT_CONFIG_SYSTEM", "/dev/null")
+				.stdout(Stdio::null())
+				.stderr(Stdio::null())
+				.status()
+				.unwrap()
+				.success();
+			if ready {
 				return (guard, address);
 			}
 			if Instant::now() >= ready_by {
-				panic!("git daemon did not start on {address}");
+				panic!("git daemon did not become ready on {address}");
 			}
-			std::thread::sleep(Duration::from_millis(10));
+			std::thread::sleep(Duration::from_millis(50));
 		}
 	}
 	panic!("git daemon lost the port race 5 times in a row");
@@ -962,7 +974,7 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 	run_git(git, &origin, &["init", "-q", "-b", "main"]);
 	run_git(git, &origin, &["add", "-A"]);
 	run_git(git, &origin, &["commit", "-q", "-m", "large root"]);
-	let (_daemon, address) = spawn_git_daemon(tmp.path());
+	let (_daemon, address) = spawn_git_daemon(tmp.path(), "large-root-origin");
 
 	let materialize_calls = Arc::new(AtomicUsize::new(0));
 	let backend: Arc<dyn RepoFetchBackend> = Arc::new(MaterializeCountingGix {
@@ -991,12 +1003,8 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 
 // ═══ gix over a REAL git transport: content round-trip + upstream advance ════
 //
-// The other gix-slot tests either fake the backend (`LocalDirBackend`) or only
-// exercise a refusal (`gix_root_skill_over_limit…`). This is the one test that
-// proves the GixShallow SUCCESS path end-to-end over TCP — the manual-E2E chain
-// (install v1 → upstream pushes v2 → re-resolve → fetch v2) as a regression
-// test. It must FAIL if shallow fetch stops materializing content or if
-// re-resolve ever returns a stale/cached tip.
+// The one GixShallow SUCCESS-path test over a real TCP transport; the other
+// gix-slot tests fake the backend or exercise a refusal.
 #[test]
 fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 	let tmp = tempfile::tempdir().unwrap();
@@ -1013,12 +1021,10 @@ fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 	run_git(git, &origin, &["add", "-A"]);
 	run_git(git, &origin, &["commit", "-q", "-m", "v1"]);
 
-	let (_daemon, address) = spawn_git_daemon(tmp.path());
+	let (_daemon, address) = spawn_git_daemon(tmp.path(), "daemon-origin");
 
-	let repo = SkillRepository::with_backends(
-		None,
-		Arc::new(GixShallow::new()) as Arc<dyn RepoFetchBackend>,
-	);
+	let repo =
+		SkillRepository::with_backends(None, Arc::new(GixShallow::new()));
 	let source = SourceRef {
 		source: format!("git://{address}/daemon-origin"),
 		ref_: Some("main".to_string()),
@@ -1048,7 +1054,9 @@ fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 		v2.commit_oid, v1.commit_oid,
 		"re-resolve must see the advanced upstream tip, not a cached one"
 	);
-	let fetched2 = repo.fetch(&v2, FetchSelection::Skills(&[hello])).unwrap();
+	let fetched2 = repo
+		.fetch(&v2, FetchSelection::Skills(std::slice::from_ref(&hello)))
+		.unwrap();
 	let content2 =
 		fs::read_to_string(fetched2.root.join("skills/hello/SKILL.md"))
 			.unwrap();

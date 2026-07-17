@@ -203,6 +203,7 @@ jobs:
         # that verify-ci wrongly accepts. PRs keep the path filter (cheap).
         if: |
             github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
             needs.changes.outputs.rust == 'true' ||
             needs.changes.outputs.desktop == 'true' ||
             needs.changes.outputs.workflows == 'true'
@@ -263,11 +264,15 @@ jobs:
             # (vercel-labs/skills) + live GitHub API — an upstream deletion or
             # API outage must not block a release. PRs and manual dispatch
             # still hard-fail on it, which is where regressions get caught.
+            # --workspace (not -p): keeps feature unification identical to the
+            # `just test` step above, so this reuses that step's already-built
+            # test binary instead of recompiling the gix stack under a
+            # different feature fingerprint.
             - name: Network E2E (GitHub REST, token-gated)
               if: matrix.os == 'ubuntu-latest' && github.event_name != 'push'
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-              run: cargo test -p skill-update --test skill_repository -- --ignored real_github_rest
+              run: cargo test --workspace --test skill_repository -- --ignored real_github_rest
             - name: Agent-validation tests (best-effort, may need real CLIs)
               continue-on-error: true
               run: just test-with-validation
