@@ -23,15 +23,19 @@ export VHOME=$(mktemp -d)
 unset "${!XDG_@}"
 export HOME=$VHOME XDG_STATE_HOME=$VHOME/state XDG_CONFIG_HOME=$VHOME/config
 
-target/debug/aghub-api --port 18877 & API_PID=$!
+# --port 0 + the liftoff port line: readiness comes from OUR child's stdout, so a
+# stale aghub-api (running against the real HOME) on a fixed port can never be
+# mistaken for the sandboxed one.
+target/debug/aghub-api --port 0 > "$VHOME/api.log" 2>&1 & API_PID=$!
 trap 'kill $API_PID 2>/dev/null' EXIT
-ready=0
+API_PORT=
 for _ in $(seq 50); do
   kill -0 $API_PID 2>/dev/null || break                      # died on startup
-  curl -fs --max-time 2 http://127.0.0.1:18877/api/v1/agents >/dev/null && { ready=1; break; }
+  API_PORT=$(sed -n 's/^AGHUB_API_PORT=//p' "$VHOME/api.log" | head -1)
+  [ -n "$API_PORT" ] && break
   sleep 0.2
 done
-[ "$ready" = 1 ] || { echo "aghub-api not ready" >&2; exit 1; }
+[ -n "$API_PORT" ] || { echo "aghub-api not ready" >&2; exit 1; }
 ```
 
 Known isolation limit: the **OS keyring is NOT isolated** by any env var. If the real
@@ -67,7 +71,7 @@ REST E2E — `cargo test --workspace --test skill_repository -- --ignored real_g
 here would read the sandboxed config and return empty).
 
 ```bash
-curl -fs -X POST http://127.0.0.1:18877/api/v1/skills/install -H 'Content-Type: application/json' \
+curl -fs --max-time 30 -X POST "http://127.0.0.1:$API_PORT/api/v1/skills/install" -H 'Content-Type: application/json' \
   -d '{"source":"https://github.com/vercel-labs/skills.git","agents":["claude"],"skills":["find-skills"],"scope":"global","project_path":null,"install_all":false}'
 ```
 
