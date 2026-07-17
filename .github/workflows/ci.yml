@@ -254,6 +254,15 @@ jobs:
               run: just test
             - name: Doc tests
               run: cargo test --workspace --doc
+            # Real-network REST E2E: authenticated GitHub API via the runner's
+            # ephemeral GITHUB_TOKEN (no PAT to manage). The test self-skips
+            # without a token, so it ONLY exercises the authenticated path here.
+            # One platform is enough for a network contract; ubuntu is cheapest.
+            - name: Network E2E (GitHub REST, token-gated)
+              if: matrix.os == 'ubuntu-latest'
+              env:
+                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              run: cargo test -p skill-update --test skill_repository -- --ignored real_github_rest
             - name: Agent-validation tests (best-effort, may need real CLIs)
               continue-on-error: true
               run: just test-with-validation
