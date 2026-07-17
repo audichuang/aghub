@@ -23,3 +23,5 @@ url = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Ground-truth Source-hash for the staging-materializer parity golden test.
+skill = { path = "../skill" }

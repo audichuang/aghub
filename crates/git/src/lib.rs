@@ -47,6 +47,7 @@ pub mod fetch;
 pub mod redact;
 pub mod remote;
 pub mod source;
+pub mod stage;
 pub mod system_git;
 pub mod tree;
 
@@ -66,6 +67,7 @@ pub use source::{
 	normalize_repo_source_from_url, normalize_tfs_clone_url,
 	resolve_remote_source, RemoteSourceType, ResolvedRemoteSource, SourceError,
 };
+pub use stage::{stage_tree_entries, StageError, StagedEntry, StagedEntryMode};
 pub use system_git::{
 	clone_to_temp_system_git, list_remote_branches_system_git,
 	probe_credential, system_git_available,
