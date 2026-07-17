@@ -968,6 +968,101 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 	);
 }
 
+// ═══ gix over a REAL git transport: content round-trip + upstream advance ════
+//
+// The other gix-slot tests either fake the backend (`LocalDirBackend`) or only
+// exercise a refusal (`gix_root_skill_over_limit…`). This is the one test that
+// proves the GixShallow SUCCESS path end-to-end over TCP — the manual-E2E chain
+// (install v1 → upstream pushes v2 → re-resolve → fetch v2) as a regression
+// test. It must FAIL if shallow fetch stops materializing content or if
+// re-resolve ever returns a stale/cached tip.
+#[test]
+fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
+	let tmp = tempfile::tempdir().unwrap();
+	let origin = tmp.path().join("daemon-origin");
+	let skill_dir = origin.join("skills/hello");
+	fs::create_dir_all(&skill_dir).unwrap();
+	fs::write(
+		skill_dir.join("SKILL.md"),
+		b"---\nname: hello\ndescription: roundtrip\n---\n\nv1 body\n",
+	)
+	.unwrap();
+	let git = Path::new("git");
+	run_git(git, &origin, &["init", "-q", "-b", "main"]);
+	run_git(git, &origin, &["add", "-A"]);
+	run_git(git, &origin, &["commit", "-q", "-m", "v1"]);
+
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let address = listener.local_addr().unwrap();
+	drop(listener);
+	let daemon = Command::new(git)
+		.args([
+			"daemon".to_string(),
+			"--reuseaddr".to_string(),
+			"--export-all".to_string(),
+			"--listen=127.0.0.1".to_string(),
+			format!("--port={}", address.port()),
+			format!("--base-path={}", tmp.path().display()),
+		])
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_SYSTEM", "/dev/null")
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.spawn()
+		.unwrap();
+	let _daemon = ChildGuard(daemon);
+	let ready_by = Instant::now() + Duration::from_secs(2);
+	while TcpStream::connect(address).is_err() {
+		assert!(
+			Instant::now() < ready_by,
+			"git daemon did not start on {address}"
+		);
+		std::thread::sleep(Duration::from_millis(10));
+	}
+
+	let repo = SkillRepository::with_backends(
+		None,
+		Arc::new(GixShallow::new()) as Arc<dyn RepoFetchBackend>,
+	);
+	let source = SourceRef {
+		source: format!("git://{address}/daemon-origin"),
+		ref_: Some("main".to_string()),
+	};
+	let hello = SkillPath::parse("skills/hello").unwrap();
+
+	// v1: resolve pins the tip, fetch materializes the skill's content.
+	let v1 = repo.resolve(&source, None).unwrap();
+	let fetched = repo
+		.fetch(&v1, FetchSelection::Skills(std::slice::from_ref(&hello)))
+		.unwrap();
+	let content =
+		fs::read_to_string(fetched.root.join("skills/hello/SKILL.md")).unwrap();
+	assert!(content.contains("v1 body"), "v1 content must materialize");
+
+	// Upstream advances: same source must re-resolve to the NEW tip and
+	// fetch the NEW content (the apply-update chain's substrate).
+	fs::write(
+		skill_dir.join("SKILL.md"),
+		b"---\nname: hello\ndescription: roundtrip\n---\n\nv2 body\n",
+	)
+	.unwrap();
+	run_git(git, &origin, &["commit", "-q", "-a", "-m", "v2"]);
+
+	let v2 = repo.resolve(&source, None).unwrap();
+	assert_ne!(
+		v2.commit_oid, v1.commit_oid,
+		"re-resolve must see the advanced upstream tip, not a cached one"
+	);
+	let fetched2 = repo.fetch(&v2, FetchSelection::Skills(&[hello])).unwrap();
+	let content2 =
+		fs::read_to_string(fetched2.root.join("skills/hello/SKILL.md"))
+			.unwrap();
+	assert!(
+		content2.contains("v2 body"),
+		"the new snapshot must materialize the updated content"
+	);
+}
+
 #[test]
 fn list_filters_over_depth_skill_metadata_before_blob_requests() {
 	const OID_SHALLOW: &str = "eeee1111eeee1111eeee1111eeee1111eeee1111";

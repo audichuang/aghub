@@ -49,7 +49,10 @@ updates; wrong fetch = wasted network.
 cargo test -p skill-update              # network-free (fake Fetcher)
 ```
 
-The regular suite is network-free. The ignored `skill_repository` E2E pins a
+The regular suite needs no external network (fake Fetcher / fake transports;
+two `skill_repository` tests spawn a loopback `git daemon` to exercise the real
+GixShallow TCP path — success round-trip incl. upstream advance, and the
+over-limit refusal). The ignored `skill_repository` E2E pins a
 stable GitHub commit and proves REST catalog + selected install content/hash;
 run it with `cargo test -p skill-update --test skill_repository -- --ignored`.
 The older `GitFetcher` network E2E also lives in `aghub-api`
