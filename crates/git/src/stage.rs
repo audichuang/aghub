@@ -3,7 +3,7 @@
 //! clone. Distinct from Master materialization (which dereferences symlinks
 //! and applies npx excludes).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -38,12 +38,14 @@ pub struct StagedEntry {
 pub enum StageError {
 	#[error("unsafe or escaping entry path: {0}")]
 	UnsafePath(String),
-	#[error("symlink target escapes staging root: {0}")]
+	#[error("symlink target escapes its selected root: {0}")]
 	SymlinkEscapes(String),
 	#[error("symlink target is absolute: {0}")]
 	SymlinkAbsolute(String),
 	#[error("symlink target is self-referential: {0}")]
 	SymlinkSelf(String),
+	#[error("symlink cycle detected: {0}")]
+	SymlinkCycle(String),
 	#[error("destination already exists: {0}")]
 	Collision(String),
 	#[error("symlink not supported on this platform: {0}")]
@@ -61,8 +63,11 @@ pub enum StageError {
 /// staging dir).
 pub fn stage_tree_entries(
 	entries: impl IntoIterator<Item = StagedEntry>,
+	selection_roots: &[&str],
 	dest: &Path,
 ) -> Result<(), StageError> {
+	let entries: Vec<StagedEntry> = entries.into_iter().collect();
+	validate_before_write(&entries, selection_roots, dest)?;
 	fs::create_dir_all(dest)?;
 
 	// Normalized relative paths of written regular/exec/symlink entries.
@@ -79,6 +84,109 @@ pub fn stage_tree_entries(
 		}
 	}
 	Ok(())
+}
+
+fn validate_before_write(
+	entries: &[StagedEntry],
+	selection_roots: &[&str],
+	dest: &Path,
+) -> Result<(), StageError> {
+	let roots: Vec<String> = selection_roots
+		.iter()
+		.map(|root| {
+			if root.is_empty() {
+				Ok(String::new())
+			} else {
+				validate_entry_path(root).map(|parts| parts.join("/"))
+			}
+		})
+		.collect::<Result<_, _>>()?;
+	let mut paths = HashSet::new();
+	let mut links = HashMap::new();
+
+	for entry in entries {
+		if entry.mode == StagedEntryMode::Gitlink {
+			continue;
+		}
+		let components = validate_entry_path(&entry.path)?;
+		let rel = components.join("/");
+		if !paths.insert(rel.clone())
+			|| path_exists(&join_under_dest(dest, &components))
+		{
+			return Err(StageError::Collision(entry.path.clone()));
+		}
+		let root = owning_root(&rel, &roots)
+			.ok_or_else(|| StageError::UnsafePath(entry.path.clone()))?;
+		if entry.mode == StagedEntryMode::Symlink {
+			let target =
+				resolve_symlink_target(&rel, &entry.bytes, &entry.path)?;
+			if !path_is_in_root(&target, root) {
+				return Err(StageError::SymlinkEscapes(entry.path.clone()));
+			}
+			if target == rel {
+				return Err(StageError::SymlinkSelf(entry.path.clone()));
+			}
+			if target.is_empty() || rel.starts_with(&format!("{target}/")) {
+				return Err(StageError::SymlinkCycle(entry.path.clone()));
+			}
+			links.insert(rel, target);
+		}
+	}
+
+	validate_symlink_graph(&links)
+}
+
+fn owning_root<'a>(path: &str, roots: &'a [String]) -> Option<&'a str> {
+	roots
+		.iter()
+		.filter(|root| path_is_in_root(path, root))
+		.max_by_key(|root| root.len())
+		.map(String::as_str)
+}
+
+fn path_is_in_root(path: &str, root: &str) -> bool {
+	root.is_empty() || path == root || path.starts_with(&format!("{root}/"))
+}
+
+fn validate_symlink_graph(
+	links: &HashMap<String, String>,
+) -> Result<(), StageError> {
+	for start in links.keys() {
+		let mut path = start.clone();
+		let mut seen = HashSet::new();
+		while let Some((link, suffix)) = first_link_in_path(&path, links) {
+			if !seen.insert(link.to_string()) {
+				return Err(StageError::SymlinkCycle(start.clone()));
+			}
+			let target = &links[link];
+			path = if suffix.is_empty() {
+				target.clone()
+			} else if target.is_empty() {
+				suffix.to_string()
+			} else {
+				format!("{target}/{suffix}")
+			};
+		}
+	}
+	Ok(())
+}
+
+fn first_link_in_path<'a, 'p>(
+	path: &'p str,
+	links: &'a HashMap<String, String>,
+) -> Option<(&'a str, &'p str)> {
+	links
+		.keys()
+		.filter_map(|link| {
+			if path == link {
+				Some((link.as_str(), ""))
+			} else {
+				path.strip_prefix(link)
+					.and_then(|suffix| suffix.strip_prefix('/'))
+					.map(|suffix| (link.as_str(), suffix))
+			}
+		})
+		.min_by_key(|(link, _)| link.len())
 }
 
 fn stage_one(
@@ -102,7 +210,7 @@ fn stage_one(
 			write_file(&target_path, &entry.bytes, true)?;
 		}
 		StagedEntryMode::Symlink => {
-			write_symlink(&entry.path, &rel, &entry.bytes, &target_path)?;
+			write_symlink(&entry.path, &entry.bytes, &target_path)?;
 		}
 		StagedEntryMode::Gitlink => unreachable!(),
 	}
@@ -179,13 +287,9 @@ fn set_executable(_path: &Path) -> Result<(), StageError> {
 
 fn write_symlink(
 	entry_path: &str,
-	link_rel: &str,
 	target_bytes: &[u8],
 	link_fs_path: &Path,
 ) -> Result<(), StageError> {
-	// Lexical containment before any filesystem mutation.
-	check_symlink_target(link_rel, target_bytes, entry_path)?;
-
 	if let Some(parent) = link_fs_path.parent() {
 		fs::create_dir_all(parent)?;
 	}
@@ -193,13 +297,12 @@ fn write_symlink(
 	create_symlink(target_bytes, link_fs_path, entry_path)
 }
 
-/// Resolve `target_bytes` lexically against the link's parent (relative to
-/// the staging root). Reject absolute, escaping, and self targets.
-fn check_symlink_target(
+/// Resolve `target_bytes` lexically against the link's parent.
+fn resolve_symlink_target(
 	link_rel: &str,
 	target_bytes: &[u8],
 	entry_path: &str,
-) -> Result<(), StageError> {
+) -> Result<String, StageError> {
 	if target_bytes.starts_with(b"/") {
 		return Err(StageError::SymlinkAbsolute(entry_path.to_string()));
 	}
@@ -234,11 +337,7 @@ fn check_symlink_target(
 		}
 	}
 
-	let resolved = stack.join("/");
-	if resolved == link_rel {
-		return Err(StageError::SymlinkSelf(entry_path.to_string()));
-	}
-	Ok(())
+	Ok(stack.join("/"))
 }
 
 #[cfg(unix)]

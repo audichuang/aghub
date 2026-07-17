@@ -530,7 +530,7 @@ impl RepoFetchBackend for GithubRest {
 			});
 		}
 
-		stage_tree_entries(staged, dest).map_err(|e| {
+		stage_tree_entries(staged, paths, dest).map_err(|e| {
 			GitError::clone_failed(format!("Staging materialize failed: {e}"))
 		})
 	}

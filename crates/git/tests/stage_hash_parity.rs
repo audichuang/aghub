@@ -175,7 +175,7 @@ fn materializer_output_is_byte_identical_and_hash_identical_to_gix_clone() {
 
 	// Under test: our materializer fed the tip tree entries.
 	let staged = tmp.path().join("staged");
-	stage_tree_entries(read_tree_entries(&origin), &staged).unwrap();
+	stage_tree_entries(read_tree_entries(&origin), &[""], &staged).unwrap();
 
 	// Byte-identical (file set, contents, exec bits, symlink targets).
 	assert_eq!(

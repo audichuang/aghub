@@ -36,6 +36,7 @@ fn regular_and_executable_modes_set_exec_bit_correctly() {
 			),
 			entry("nested/dir/deep.txt", b"deep", StagedEntryMode::Regular),
 		],
+		&[""],
 		&dest,
 	)
 	.unwrap();
@@ -65,14 +66,15 @@ fn in_root_symlink_is_recreated_as_symlink() {
 	let dest = tmp.path().join("staged");
 	stage_tree_entries(
 		[
-			entry("SKILL.md", b"x", StagedEntryMode::Regular),
-			entry("link.md", b"SKILL.md", StagedEntryMode::Symlink),
+			entry("skills/a/SKILL.md", b"x", StagedEntryMode::Regular),
+			entry("skills/a/link.md", b"SKILL.md", StagedEntryMode::Symlink),
 		],
+		&["skills/a"],
 		&dest,
 	)
 	.unwrap();
 
-	let link = dest.join("link.md");
+	let link = dest.join("skills/a/link.md");
 	let meta = std::fs::symlink_metadata(&link).unwrap();
 	assert!(
 		meta.file_type().is_symlink(),
@@ -98,6 +100,7 @@ fn symlink_escaping_root_via_dotdot_is_rejected_and_writes_nothing() {
 			b"../outside/secret.txt",
 			StagedEntryMode::Symlink,
 		)],
+		&[""],
 		&dest,
 	);
 
@@ -119,6 +122,7 @@ fn absolute_symlink_target_is_rejected_and_writes_nothing() {
 	let dest = tmp.path().join("staged");
 	let res = stage_tree_entries(
 		[entry("pwn", b"/etc/passwd", StagedEntryMode::Symlink)],
+		&[""],
 		&dest,
 	);
 	assert!(res.is_err(), "absolute symlink target must be rejected");
@@ -145,6 +149,7 @@ fn entry_path_escaping_root_is_rejected() {
 			b"pwned",
 			StagedEntryMode::Regular,
 		)],
+		&[""],
 		&dest,
 	);
 	assert!(res.is_err(), "`..` in entry path must be rejected");
@@ -166,6 +171,7 @@ fn gitlink_entry_is_never_written_as_a_file() {
 			entry("SKILL.md", b"x", StagedEntryMode::Regular),
 			entry("vendored", b"", StagedEntryMode::Gitlink),
 		],
+		&[""],
 		&dest,
 	)
 	.unwrap();
@@ -188,10 +194,58 @@ fn colliding_destinations_error_instead_of_silent_merge() {
 			entry("dup", b"first", StagedEntryMode::Regular),
 			entry("dup", b"second", StagedEntryMode::Regular),
 		],
+		&[""],
 		&dest,
 	);
 	assert!(
 		res.is_err(),
 		"a second entry at the same path must error, not silently overwrite"
+	);
+}
+
+#[test]
+fn symlink_cannot_escape_its_own_selected_skill_root() {
+	let tmp = tempfile::tempdir().unwrap();
+	let dest = tmp.path().join("staged");
+	let result = stage_tree_entries(
+		[
+			entry("skills/a/leak", b"../b/secret", StagedEntryMode::Symlink),
+			entry(
+				"skills/b/secret",
+				b"sibling secret",
+				StagedEntryMode::Regular,
+			),
+		],
+		&["skills/a", "skills/b"],
+		&dest,
+	);
+
+	assert!(
+		result.is_err(),
+		"a skill must not link into a sibling skill"
+	);
+	assert!(
+		!dest.exists() || std::fs::read_dir(&dest).unwrap().next().is_none(),
+		"validation must finish before any staged write"
+	);
+}
+
+#[test]
+fn two_node_symlink_cycle_is_rejected_before_any_write() {
+	let tmp = tempfile::tempdir().unwrap();
+	let dest = tmp.path().join("staged");
+	let result = stage_tree_entries(
+		[
+			entry("skills/a/one", b"two", StagedEntryMode::Symlink),
+			entry("skills/a/two", b"one", StagedEntryMode::Symlink),
+		],
+		&["skills/a"],
+		&dest,
+	);
+
+	assert!(result.is_err(), "a two-node symlink cycle must be rejected");
+	assert!(
+		!dest.exists() || std::fs::read_dir(&dest).unwrap().next().is_none(),
+		"cycle detection must finish before any staged write"
 	);
 }
