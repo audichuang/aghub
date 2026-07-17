@@ -15,6 +15,16 @@ pub struct RepoDiscoveredSkill {
 	pub relative_dir: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RepoSkillSelectionError {
+	#[error("No skills found in source repository")]
+	NoSkillsFound,
+	#[error(
+		"Requested skills not found: {missing}. Available skills: {available}"
+	)]
+	SkillsNotFound { missing: String, available: String },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstallLockSource {
 	pub source: String,
@@ -37,6 +47,17 @@ pub enum RepoDiscoveryError {
 		"Failed to determine repo-relative skill path '{path}' from '{root}'"
 	)]
 	RelativePath { path: PathBuf, root: PathBuf },
+}
+
+impl From<RepoSkillSelectionError> for RepoDiscoveryError {
+	fn from(error: RepoSkillSelectionError) -> Self {
+		match error {
+			RepoSkillSelectionError::NoSkillsFound => Self::NoSkillsFound,
+			RepoSkillSelectionError::SkillsNotFound { missing, available } => {
+				Self::SkillsNotFound { missing, available }
+			}
+		}
+	}
 }
 
 fn normalize_relative_repo_dir(
@@ -90,37 +111,55 @@ pub fn discover_repo_skills(
 		});
 	}
 
+	Ok(select_repo_skills(
+		&discovered,
+		requested_skills,
+		install_all,
+		|skill| skill.name.as_str(),
+	)?
+	.into_iter()
+	.cloned()
+	.collect())
+}
+
+pub fn select_repo_skills<'a, T, F>(
+	discovered: &'a [T],
+	requested_skills: &[String],
+	install_all: bool,
+	name: F,
+) -> Result<Vec<&'a T>, RepoSkillSelectionError>
+where
+	F: for<'b> Fn(&'b T) -> &'b str,
+{
 	if discovered.is_empty() {
-		return Err(RepoDiscoveryError::NoSkillsFound);
+		return Err(RepoSkillSelectionError::NoSkillsFound);
 	}
 
 	if install_all || requested_skills.is_empty() {
-		return Ok(discovered);
+		return Ok(discovered.iter().collect());
 	}
 
 	let mut selected = Vec::new();
 	let mut missing = Vec::new();
-
 	for requested in requested_skills {
 		let requested_lower = requested.to_lowercase();
 		match discovered
 			.iter()
-			.find(|skill| skill.name.to_lowercase() == requested_lower)
+			.find(|skill| name(skill).to_lowercase() == requested_lower)
 		{
-			Some(skill) => selected.push(skill.clone()),
+			Some(skill) => selected.push(skill),
 			None => missing.push(requested.clone()),
 		}
 	}
 
 	if !missing.is_empty() {
-		let available = discovered
-			.iter()
-			.map(|skill| skill.name.clone())
-			.collect::<Vec<_>>()
-			.join(", ");
-		return Err(RepoDiscoveryError::SkillsNotFound {
+		return Err(RepoSkillSelectionError::SkillsNotFound {
 			missing: missing.join(", "),
-			available,
+			available: discovered
+				.iter()
+				.map(|skill| name(skill).to_string())
+				.collect::<Vec<_>>()
+				.join(", "),
 		});
 	}
 
@@ -231,6 +270,44 @@ pub fn write_project_install_lock(
 mod tests {
 	use super::*;
 	use tempfile::TempDir;
+
+	#[test]
+	fn repo_skill_selection_policy_is_shared_and_complete() {
+		#[derive(Debug, PartialEq, Eq)]
+		struct Named(&'static str);
+
+		fn name(skill: &Named) -> &str {
+			skill.0
+		}
+
+		let catalog = [Named("Alpha"), Named("Beta")];
+		let empty: [Named; 0] = [];
+		assert_eq!(
+			select_repo_skills(&empty, &[], false, name),
+			Err(RepoSkillSelectionError::NoSkillsFound)
+		);
+		assert_eq!(
+			select_repo_skills(&catalog, &["missing".into()], true, name)
+				.unwrap(),
+			vec![&catalog[0], &catalog[1]]
+		);
+		assert_eq!(
+			select_repo_skills(&catalog, &[], false, name).unwrap(),
+			vec![&catalog[0], &catalog[1]]
+		);
+		assert_eq!(
+			select_repo_skills(&catalog, &["bEtA".into()], false, name)
+				.unwrap(),
+			vec![&catalog[1]]
+		);
+		assert_eq!(
+			select_repo_skills(&catalog, &["missing".into()], false, name),
+			Err(RepoSkillSelectionError::SkillsNotFound {
+				missing: "missing".into(),
+				available: "Alpha, Beta".into(),
+			})
+		);
+	}
 
 	#[test]
 	fn lock_skill_file_path_handles_root_skill() {

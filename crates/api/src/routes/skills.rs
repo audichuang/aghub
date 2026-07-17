@@ -1228,61 +1228,34 @@ enum InstallFetchError {
 	InvalidPath,
 }
 
-/// Map catalog entries to selected `(catalog_name, SkillPath)` pairs.
-///
-/// Mirrors [`skill::discover_repo_skills`] selection semantics exactly:
-/// empty catalog → `NoSkillsFound`; `install_all` or empty request → every
-/// catalogued skill; else case-insensitive name match with miss reporting.
+/// Map shared-policy selections to `(catalog_name, SkillPath)` pairs.
 fn select_catalog_paths(
 	catalog: &[skill_update::CatalogSkill],
 	requested: &[String],
 	install_all: bool,
 ) -> Result<Vec<(String, skill::SkillPath)>, InstallFetchError> {
-	if catalog.is_empty() {
-		return Err(InstallFetchError::NoSkillsFound);
-	}
-
-	if install_all || requested.is_empty() {
-		return catalog
-			.iter()
-			.map(|c| {
-				let path = skill::SkillPath::parse(&c.skill_path)
-					.map_err(|_| InstallFetchError::InvalidPath)?;
-				Ok((c.name.clone(), path))
-			})
-			.collect();
-	}
-
-	let mut selected = Vec::new();
-	let mut missing = Vec::new();
-	for req_name in requested {
-		let requested_lower = req_name.to_lowercase();
-		match catalog
-			.iter()
-			.find(|c| c.name.to_lowercase() == requested_lower)
-		{
-			Some(c) => {
-				let path = skill::SkillPath::parse(&c.skill_path)
-					.map_err(|_| InstallFetchError::InvalidPath)?;
-				selected.push((c.name.clone(), path));
+	let selected =
+		skill::select_repo_skills(catalog, requested, install_all, |skill| {
+			skill.name.as_str()
+		})
+		.map_err(|error| match error {
+			skill::RepoSkillSelectionError::NoSkillsFound => {
+				InstallFetchError::NoSkillsFound
 			}
-			None => missing.push(req_name.clone()),
-		}
-	}
+			skill::RepoSkillSelectionError::SkillsNotFound {
+				missing,
+				available,
+			} => InstallFetchError::SkillsNotFound { missing, available },
+		})?;
 
-	if !missing.is_empty() {
-		let available = catalog
-			.iter()
-			.map(|c| c.name.clone())
-			.collect::<Vec<_>>()
-			.join(", ");
-		return Err(InstallFetchError::SkillsNotFound {
-			missing: missing.join(", "),
-			available,
-		});
-	}
-
-	Ok(selected)
+	selected
+		.into_iter()
+		.map(|skill| {
+			let path = skill::SkillPath::parse(&skill.skill_path)
+				.map_err(|_| InstallFetchError::InvalidPath)?;
+			Ok((skill.name.clone(), path))
+		})
+		.collect()
 }
 
 fn map_install_fetch_error(e: InstallFetchError) -> ApiError {

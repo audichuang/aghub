@@ -41,9 +41,9 @@ pub use hash::{
 	EMPTY_SKILLS_LOCK_DIGEST,
 };
 pub use install::{
-	discover_repo_skills, lock_skill_file_path, write_global_install_lock,
-	write_project_install_lock, InstallLockSource, RepoDiscoveredSkill,
-	RepoDiscoveryError,
+	discover_repo_skills, lock_skill_file_path, select_repo_skills,
+	write_global_install_lock, write_project_install_lock, InstallLockSource,
+	RepoDiscoveredSkill, RepoDiscoveryError, RepoSkillSelectionError,
 };
 pub use lock::global::{
 	get_all_locked_skills, get_skill_from_lock, get_skill_lock_path,
