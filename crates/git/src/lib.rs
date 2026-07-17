@@ -45,6 +45,7 @@ pub mod clone;
 pub mod credentials;
 pub mod error;
 pub mod fetch;
+pub mod github_rest;
 pub mod redact;
 pub mod remote;
 pub mod source;
@@ -62,6 +63,10 @@ pub use error::{GitError, Result};
 pub use fetch::{
 	classify_ref, current_branch_at_path, fetch_ref_to_temp,
 	resolve_default_branch, RefKind,
+};
+pub use github_rest::{
+	github_api_host, GithubRest, HttpRequest, HttpResponse, HttpTransport,
+	ReqwestTransport, DEFAULT_CONCURRENCY,
 };
 pub use redact::redact_url_userinfo;
 pub use remote::{

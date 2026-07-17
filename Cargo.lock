@@ -169,6 +169,8 @@ dependencies = [
  "gix",
  "gix-hash",
  "log",
+ "reqwest",
+ "serde_json",
  "skill",
  "tempfile",
  "thiserror 2.0.18",

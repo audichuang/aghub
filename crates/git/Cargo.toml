@@ -17,6 +17,8 @@ gix-hash = { version = "0.25", default-features = false, features = [
 	"sha1",
 ] }
 log = "0.4"
+reqwest = { workspace = true, features = ["blocking"] }
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }
 url = { workspace = true }

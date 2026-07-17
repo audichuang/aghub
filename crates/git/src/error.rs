@@ -37,6 +37,15 @@ pub enum GitError {
 		/// Reason for the error.
 		reason: String,
 	},
+
+	/// A GitHub REST fast-path attempt could not complete and the caller should
+	/// fall back to the gix transport. This is the ONLY error a REST backend
+	/// raises for transient / unsupported-capability / not-GitHub conditions
+	/// (truncated tree, rate limit, 401/403/404, network, unexpected shape).
+	/// A security-validation failure must NOT be reported as `RestFallback` —
+	/// it is a hard error so it is never masked by a silent fallback.
+	#[error("GitHub REST unavailable, fall back to git: {0}")]
+	RestFallback(String),
 }
 
 impl GitError {
@@ -56,6 +65,12 @@ impl GitError {
 	/// Create a not HTTPS error.
 	pub fn not_https(url: impl Into<String>) -> Self {
 		Self::NotHttps(crate::redact::redact_url_userinfo(&url.into()))
+	}
+
+	/// Create a REST-fallback error. The message is redacted so any URL
+	/// userinfo never leaks, mirroring [`Self::clone_failed`].
+	pub fn rest_fallback(msg: impl Into<String>) -> Self {
+		Self::RestFallback(crate::redact::redact_url_userinfo(&msg.into()))
 	}
 
 	/// Create a destination error.

@@ -19,6 +19,7 @@ use crate::tree::is_safe_tree_entry_name;
 use crate::RepoSnapshot;
 
 /// A repo coordinate for a backend fetch: clone URL + optional ref.
+#[derive(Clone, Debug)]
 pub struct SourceRef {
 	pub url: String,
 	/// Branch or tag name; `None` means the remote default branch.
@@ -27,6 +28,7 @@ pub struct SourceRef {
 
 /// One non-tree entry (blob / exec-blob / symlink / gitlink) in a snapshot's
 /// tree, repo-relative POSIX path.
+#[derive(Clone, Debug)]
 pub struct TreeEntry {
 	pub path: String,
 	pub mode: StagedEntryMode,
@@ -37,11 +39,13 @@ pub struct TreeEntry {
 }
 
 /// Flat listing of a snapshot's non-tree entries.
+#[derive(Clone, Debug)]
 pub struct RepoTree {
 	pub entries: Vec<TreeEntry>,
 }
 
 /// Raw bytes for one blob oid.
+#[derive(Clone, Debug)]
 pub struct Blob {
 	pub oid: String,
 	pub bytes: Vec<u8>,
@@ -271,7 +275,8 @@ impl RepoFetchBackend for GixShallow {
 }
 
 /// Keep entries under any selected folder. Empty path selects the whole repo.
-fn entry_matches_selection(path: &str, paths: &[&str]) -> bool {
+/// Shared by every backend's `materialize` so the selection rule cannot drift.
+pub(crate) fn entry_matches_selection(path: &str, paths: &[&str]) -> bool {
 	paths.iter().any(|p| {
 		if p.is_empty() {
 			true
