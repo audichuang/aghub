@@ -65,8 +65,8 @@ pub use fetch::{
 	resolve_default_branch, RefKind,
 };
 pub use github_rest::{
-	github_api_host, GithubRest, HttpRequest, HttpResponse, HttpTransport,
-	ReqwestTransport, DEFAULT_CONCURRENCY,
+	github_api_host, is_github_com_host, GithubRest, HttpRequest, HttpResponse,
+	HttpTransport, ReqwestTransport, DEFAULT_CONCURRENCY,
 };
 pub use redact::redact_url_userinfo;
 pub use remote::{

@@ -200,40 +200,77 @@ fn reconstruct_source_url(source: &str) -> String {
 		.unwrap_or_else(|_| source.to_string())
 }
 
-/// Fetch a source, lazily authenticating. Tries an unauthenticated fetch
-/// first; on any error, resolves a token (scoped to the source + keychain host)
-/// and retries ONCE with it. If no token is available the original error is
-/// returned. The caller maps `Auth`→needs-credential, `Network`→fetch-failed.
-///
-/// `selection` is passed through both attempts (and the system-git tail always
-/// materializes the whole tip — Decision 13 last-resort auth path).
+/// Fetch a source with the source-scoped token on the first attempt when one is
+/// available. Without a token, performs one anonymous attempt. The repository
+/// backend owns the gix→system-git tail.
 pub fn fetch_source_with_resolver(
 	source_ref: &SourceRef,
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 	selection: FetchSelection<'_>,
 ) -> Result<crate::FetchedRepo, FetchError> {
-	match fetcher.fetch(source_ref, None, selection) {
-		Ok(repo) => Ok(repo),
-		Err(first_error) => {
-			// Unauth-first, then ONE token retry (GIT_PASSWORD / GITHUB_TOKEN /
-			// keyring). Only if BOTH fail do we fall back to the system `git`
-			// binary + OS credential helpers — so GIT_PASSWORD always wins over
-			// system-git, and the fallback merely reaches TFS/Azure DevOps repos
-			// whose only auth is Windows Credential Manager / GCM / NTLM.
-			let host = crate::keychain_host_for_source(&source_ref.source);
-			if let Some(token) =
-				resolver.resolve(&source_ref.source, host.as_deref())
-			{
-				if let Ok(repo) =
-					fetcher.fetch(source_ref, Some(&token), selection)
-				{
-					return Ok(repo);
-				}
-			}
-			crate::git::fetch_via_system_git(source_ref)
-				.map_err(|_| first_error)
+	let host = crate::keychain_host_for_source(&source_ref.source);
+	let token = resolver.resolve(&source_ref.source, host.as_deref());
+	fetcher.fetch(source_ref, token.as_deref(), selection)
+}
+
+#[cfg(test)]
+mod fetch_with_resolver_tests {
+	use std::sync::Mutex;
+
+	use super::*;
+
+	struct RecordingFetcher {
+		tokens: Mutex<Vec<Option<String>>>,
+	}
+
+	impl Fetcher for RecordingFetcher {
+		fn fetch(
+			&self,
+			_source_ref: &SourceRef,
+			token: Option<&str>,
+			_selection: FetchSelection<'_>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			self.tokens.lock().unwrap().push(token.map(str::to_string));
+			Err(FetchError::Network)
 		}
+	}
+
+	struct StaticResolver;
+
+	impl TokenResolver for StaticResolver {
+		fn resolve(
+			&self,
+			_source: &str,
+			_host: Option<&str>,
+		) -> Option<String> {
+			Some("configured-token".to_string())
+		}
+	}
+
+	#[test]
+	fn configured_token_is_used_on_the_first_fetch_attempt() {
+		let fetcher = RecordingFetcher {
+			tokens: Mutex::new(Vec::new()),
+		};
+		let source = SourceRef {
+			source: "https://github.com/acme/private.git".to_string(),
+			ref_: Some("main".to_string()),
+		};
+
+		let result = fetch_source_with_resolver(
+			&source,
+			&fetcher,
+			&StaticResolver,
+			FetchSelection::CatalogSnapshot,
+		);
+
+		assert!(matches!(result, Err(FetchError::Network)));
+		assert_eq!(
+			*fetcher.tokens.lock().unwrap(),
+			vec![Some("configured-token".to_string())],
+			"a configured token must be used first, with no anonymous round-trip"
+		);
 	}
 }
 
@@ -1455,8 +1492,7 @@ mod diff_tests {
 	use tempfile::TempDir;
 
 	/// A [`Fetcher`] that serves a fixed local dir as the fetched repo, ignoring
-	/// the source/token. The unauthenticated fetch always succeeds, so the token
-	/// resolver is never consulted.
+	/// the source/token.
 	struct DirFetcher {
 		root: std::path::PathBuf,
 	}

@@ -96,9 +96,8 @@ impl Fetcher for ApiFetcher {
 	) -> Result<FetchedRepo, FetchError> {
 		#[cfg(test)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
-			// When `AGHUB_TEST_REQUIRE_TOKEN` is set, the unauthenticated fetch
-			// fails so the lazy-auth path resolves a token and retries — letting
-			// the forwarding tests observe which credential reaches the fetch.
+			// When `AGHUB_TEST_REQUIRE_TOKEN` is set, a missing token fails so the
+			// forwarding tests can observe which credential reaches the fetch.
 			let require_token =
 				std::env::var_os("AGHUB_TEST_REQUIRE_TOKEN").is_some();
 			if require_token && token.is_none() {
@@ -189,8 +188,7 @@ pub async fn diff_source(
 
 	// Fetch + discover + classify on a blocking thread (sync git IO, and the
 	// materialized temp dir must outlive discovery + hashing). The shared
-	// `diff_source` tries an unauthenticated fetch first and only resolves a
-	// Keychain token after a failure.
+	// `diff_source` resolves forwarded/keyring credentials before its fetch.
 	let input = SourceDiffInput {
 		source: source.clone(),
 		git_ref: query.git_ref.clone(),
@@ -481,7 +479,7 @@ mod tests {
 
 	/// Read + clear the recorded fetch token (the token the diff fetch was
 	/// actually invoked with). `Some(Some(t))` = fetched with token `t`;
-	/// `Some(None)` = fetched unauthenticated; `None` = fetch never recorded.
+	/// `Some(None)` = fetched anonymously; `None` = fetch never recorded.
 	fn take_recorded_token() -> Option<Option<String>> {
 		super::LAST_FETCH_TOKEN
 			.lock()
@@ -510,7 +508,7 @@ mod tests {
 
 		let _fetch_root =
 			EnvVarGuard::set("AGHUB_TEST_SOURCE_FETCH_ROOT", upstream.path());
-		// Force the lazy-auth retry so the resolved token reaches the fetch.
+		// Require the resolved token to reach the first fetch.
 		let _require = EnvVarGuard::set_str("AGHUB_TEST_REQUIRE_TOKEN", "1");
 		let _ = take_recorded_token();
 
@@ -562,8 +560,7 @@ mod tests {
 		let value: Value = serde_json::from_str(&body).expect("valid JSON");
 		// No forwarded token, empty keyring → unchanged keyring behaviour.
 		assert_eq!(value["needsCredential"], true);
-		// The fetch was only ever attempted unauthenticated (no token recorded
-		// because the unauthenticated attempt short-circuits to Auth error).
+		// The anonymous attempt fails before the test seam records a token.
 		assert_eq!(
 			take_recorded_token(),
 			None,

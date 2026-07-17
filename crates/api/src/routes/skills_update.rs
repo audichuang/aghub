@@ -32,8 +32,8 @@ use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
 use skill_update::{
 	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, Fetcher, GitFetcherWithFallback, GitRefResolver,
-	ResultCache, SourceRef, TokenResolver,
+	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
+	SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -49,7 +49,7 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 /// Production [`TokenResolver`]: wraps the F1.4 keyring source→credential
 /// binding + host keychain resolution. Loads the stored credentials and
 /// bindings lazily per resolve (cheap; keyring reads are local).
-struct KeyringResolver;
+pub(crate) struct KeyringResolver;
 
 impl TokenResolver for KeyringResolver {
 	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
@@ -387,9 +387,7 @@ pub async fn check_skill_updates(
 	let offline = query.offline.unwrap_or(false);
 	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
 
-	// System-git fallback for OS-credential-helper-only TFS/Azure DevOps repos
-	// (forwarded/keyring token still wins — see GitFetcherWithFallback).
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcherWithFallback);
+	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 	// Forwarded tokens (header) take precedence over the local keyring; an
 	// absent/empty header degrades to the keyring path (backward compatible).
 	let keyring = KeyringResolver;
@@ -433,12 +431,7 @@ pub async fn apply_skill_update(
 	// absent/empty header degrades to the keyring path (backward compatible).
 	let keyring = KeyringResolver;
 	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
-	apply_skill_update_inner(
-		body.into_inner(),
-		&GitFetcherWithFallback,
-		&resolver,
-	)
-	.await
+	apply_skill_update_inner(body.into_inner(), &GitFetcher, &resolver).await
 }
 
 /// Inner apply path that takes an injected [`Fetcher`] + [`TokenResolver`] so
@@ -622,8 +615,7 @@ pub async fn accept_skill_rename(
 	// precedence over the local keyring; an absent header degrades to keyring.
 	let keyring = KeyringResolver;
 	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
-	accept_rename_inner(body.into_inner(), &GitFetcherWithFallback, &resolver)
-		.await
+	accept_rename_inner(body.into_inner(), &GitFetcher, &resolver).await
 }
 
 /// Thin adapter over the core rename transaction: validate the request, fetch
@@ -777,10 +769,7 @@ mod tests {
 	use super::*;
 	use aghub_core::skills::lock::update_lock_hash;
 	use aghub_core::skills::update::SkillUpdateStatus;
-	// GitFetcher (no fallback) is used only by the network E2E tests here; the
-	// production paths use GitFetcherWithFallback, so import it test-locally to
-	// avoid an unused-import warning in non-test builds.
-	use skill_update::{EntryKey, GitFetcher};
+	use skill_update::EntryKey;
 
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
 		let _guard = crate::routes::test_env_lock()

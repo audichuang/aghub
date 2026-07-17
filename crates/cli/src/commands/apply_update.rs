@@ -189,7 +189,7 @@ fn fetch_source(source: &ApplySource) -> Result<FetchedSource> {
 	// GITHUB_TOKEN github-only).
 	let token = crate::commands::source::EnvTokenResolver
 		.resolve(&sr.source, host.as_deref());
-	let fetched = skill_update::GitFetcherWithFallback
+	let fetched = skill_update::GitFetcher
 		.fetch(
 			&sr,
 			token.as_deref(),

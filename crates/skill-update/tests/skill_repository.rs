@@ -14,6 +14,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -520,6 +521,128 @@ fn rest_fallback_routes_to_gix_once_inside_the_repository() {
 	assert!(
 		fetched.root.join("skills/music/SKILL.md").exists(),
 		"the gix fallback served the selected skill"
+	);
+}
+
+struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvRestore {
+	fn set(name: &'static str, value: impl AsRef<std::ffi::OsStr>) -> Self {
+		let old = std::env::var_os(name);
+		std::env::set_var(name, value);
+		Self(vec![(name, old)])
+	}
+
+	fn set_more(
+		&mut self,
+		name: &'static str,
+		value: impl AsRef<std::ffi::OsStr>,
+	) {
+		self.0.push((name, std::env::var_os(name)));
+		std::env::set_var(name, value);
+	}
+}
+
+impl Drop for EnvRestore {
+	fn drop(&mut self) {
+		for (name, old) in self.0.drain(..).rev() {
+			match old {
+				Some(value) => std::env::set_var(name, value),
+				None => std::env::remove_var(name),
+			}
+		}
+	}
+}
+
+fn run_git(git: &Path, cwd: &Path, args: &[&str]) {
+	let output = Command::new(git)
+		.current_dir(cwd)
+		.args(args)
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_SYSTEM", "/dev/null")
+		.env("GIT_AUTHOR_NAME", "t")
+		.env("GIT_AUTHOR_EMAIL", "t@t")
+		.env("GIT_COMMITTER_NAME", "t")
+		.env("GIT_COMMITTER_EMAIL", "t@t")
+		.output()
+		.unwrap();
+	assert!(
+		output.status.success(),
+		"git {args:?} failed: {}",
+		String::from_utf8_lossy(&output.stderr)
+	);
+}
+
+#[test]
+fn non_github_private_host_reaches_system_git_through_skill_repository() {
+	use std::os::unix::fs::PermissionsExt;
+
+	static ENV_LOCK: Mutex<()> = Mutex::new(());
+	let _lock = ENV_LOCK.lock().unwrap();
+	let tmp = tempfile::tempdir().unwrap();
+	let real_git = String::from_utf8(
+		Command::new("sh")
+			.args(["-c", "command -v git"])
+			.output()
+			.unwrap()
+			.stdout,
+	)
+	.unwrap();
+	let real_git = real_git.trim();
+	assert!(!real_git.is_empty(), "system git is required for this test");
+
+	let origin = tmp.path().join("origin");
+	let skill = origin.join("skills/private");
+	fs::create_dir_all(&skill).unwrap();
+	fs::write(
+		skill.join("SKILL.md"),
+		b"---\nname: private\ndescription: helper-backed\n---\n",
+	)
+	.unwrap();
+	run_git(Path::new(real_git), &origin, &["init", "-q", "-b", "main"]);
+	run_git(Path::new(real_git), &origin, &["add", "-A"]);
+	run_git(
+		Path::new(real_git),
+		&origin,
+		&["commit", "-q", "-m", "init"],
+	);
+
+	let bin = tmp.path().join("bin");
+	fs::create_dir(&bin).unwrap();
+	let shim = bin.join("git");
+	fs::write(
+		&shim,
+		b"#!/bin/sh\ncase \" $* \" in\n  *\" https://127.0.0.1:1/acme/skills.git \"*)\n    last=\n    for arg in \"$@\"; do last=\"$arg\"; done\n    : > \"$AGHUB_FAKE_GIT_MARKER\"\n    exec \"$AGHUB_REAL_GIT\" clone --depth 1 --branch main -- \"$AGHUB_FAKE_GIT_ORIGIN\" \"$last\"\n    ;;\n  *) exec \"$AGHUB_REAL_GIT\" \"$@\" ;;\nesac\n",
+	)
+	.unwrap();
+	fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+
+	let marker = tmp.path().join("system-git-used");
+	let old_path = std::env::var_os("PATH").unwrap_or_default();
+	let path = std::env::join_paths(
+		std::iter::once(bin.clone()).chain(std::env::split_paths(&old_path)),
+	)
+	.unwrap();
+	let mut env = EnvRestore::set("PATH", path);
+	env.set_more("AGHUB_REAL_GIT", real_git);
+	env.set_more("AGHUB_FAKE_GIT_ORIGIN", &origin);
+	env.set_more("AGHUB_FAKE_GIT_MARKER", &marker);
+
+	let repo = SkillRepository::new();
+	let source = SourceRef {
+		source: "https://127.0.0.1:1/acme/skills.git".to_string(),
+		ref_: Some("main".to_string()),
+	};
+	let snapshot = repo.resolve(&source, None).unwrap();
+	let path = SkillPath::parse("skills/private").unwrap();
+	let fetched = repo
+		.fetch(&snapshot, FetchSelection::Skills(&[path]))
+		.unwrap();
+
+	assert!(marker.exists(), "system-git fallback was not reached");
+	assert!(
+		fetched.root.join("skills/private/SKILL.md").exists(),
+		"system-git content must continue through SkillRepository::fetch"
 	);
 }
 

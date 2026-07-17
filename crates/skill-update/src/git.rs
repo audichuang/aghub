@@ -5,15 +5,14 @@
 //! userinfo upstream — and any ref-resolution failure is a soft error so the
 //! orchestrator falls through to the full fetch.
 
-use std::sync::Arc;
-
 use crate::repository::{
 	skill_repo_to_fetch_error, FetchSelection, SkillRepository,
 };
 use crate::{FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef};
 
-/// Production [`Fetcher`]: resolves via [`SkillRepository`] (REST→gix single
-/// owner) then materializes only the requested selection.
+/// Production [`Fetcher`]: resolves via [`SkillRepository`]
+/// (REST→gix→system-git single owner) then materializes only the requested
+/// selection.
 pub struct GitFetcher;
 
 impl Fetcher for GitFetcher {
@@ -30,124 +29,6 @@ impl Fetcher for GitFetcher {
 		repo.fetch(&snap, selection)
 			.map_err(skill_repo_to_fetch_error)
 	}
-}
-
-/// [`Fetcher`] that tries gix first and, only if that fails, falls back to the
-/// system `git` binary (so OS credential helpers — Windows Credential Manager,
-/// GCM, NTLM/Kerberos for TFS/Azure DevOps — can authenticate a private repo
-/// that has no `GIT_PASSWORD`/keyring token).
-///
-/// For Kind-2 callers ONLY — those that pass the already-resolved final token
-/// in a single `fetch(token)` (the check orchestrator, apply-update,
-/// accept-rename). Because gix runs first WITH that token, `GIT_PASSWORD`
-/// always takes precedence over system-git; the fallback only fires after the
-/// token attempt fails (or when there is no token). It must NOT wrap the
-/// unauth-first `fetch_source_with_resolver` (Kind 1) — that would fire
-/// system-git before the token retry. See `fetch_source_with_resolver`, which
-/// sequences the fallback explicitly after its retry instead.
-pub struct GitFetcherWithFallback;
-
-impl Fetcher for GitFetcherWithFallback {
-	fn fetch(
-		&self,
-		source_ref: &SourceRef,
-		token: Option<&str>,
-		selection: FetchSelection<'_>,
-	) -> Result<FetchedRepo, FetchError> {
-		GitFetcher
-			.fetch(source_ref, token, selection)
-			.or_else(|e| fetch_via_system_git(source_ref).map_err(|_| e))
-	}
-}
-
-/// Last-resort fetch through the system `git` binary + OS credential helpers.
-/// Returns `Err` (leaving the caller's original gix error to surface) unless
-/// the URL is an https NON-github host and `git` is installed — github is left
-/// to gix so we never shell out to a dev machine's `gh`/GCM helper, and the
-/// https gate keeps ssh/other schemes on their own transport auth.
-///
-/// The clone is a full shallow checkout; downstream skill discovery skips
-/// `.git` (gitignore-aware) and hashing is per-skill-folder, so the working
-/// tree is used directly as the fetched root.
-///
-/// Note: system-git always materializes the whole tip (no selection). That is
-/// intentional — Decision 13 is a last-resort auth path for non-github hosts.
-pub(crate) fn fetch_via_system_git(
-	source_ref: &SourceRef,
-) -> Result<FetchedRepo, FetchError> {
-	let url = normalize_fetch_url(&source_ref.source)?;
-	if !should_try_system_git(&url) {
-		return Err(FetchError::Network);
-	}
-	let clone = aghub_git::system_git::clone_to_temp_system_git(
-		&url,
-		source_ref.ref_.as_deref(),
-	)
-	.map_err(classify_fetch_error)?;
-	// snapshot is best-effort (a shallow clone still has HEAD); a miss only
-	// loses the next preflight optimization, never correctness.
-	let snapshot = gix::open(clone.path())
-		.ok()
-		.and_then(|repo| {
-			let head = repo.head_id().ok()?.detach();
-			let tree = repo.find_object(head).ok()?.peel_to_tree().ok()?;
-			Some(aghub_git::RepoSnapshot {
-				commit_oid: head.to_string(),
-				tree_oid: tree.id.to_string(),
-				commit_time: read_commit_time(&repo, head),
-			})
-		})
-		.unwrap_or_default();
-	let root = clone.path().to_path_buf();
-	Ok(FetchedRepo {
-		root,
-		snapshot,
-		_guard: Some(Arc::new(clone)),
-	})
-}
-
-/// Gate for the system-git fallback: https + NON-github host + `git` installed.
-/// The host check runs BEFORE `system_git_available()` (which shells out to
-/// `git --version`) so a github source short-circuits without spawning a
-/// process — keeps unit tests with github `owner/repo` sources hermetic.
-fn should_try_system_git(url: &str) -> bool {
-	url.starts_with("https://")
-		&& host_of_url(url)
-			.is_some_and(|h| h != "github.com" && !h.ends_with(".github.com"))
-		&& aghub_git::system_git::system_git_available()
-}
-
-/// Lowercased host of an `scheme://[user@]host[:port]/…` URL (userinfo/port
-/// stripped). `None` when there is no `://` or authority.
-fn host_of_url(url: &str) -> Option<String> {
-	let after_scheme = url.split_once("://")?.1;
-	let authority = after_scheme.split(['/', '?', '#']).next()?;
-	let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
-	let host = if let Some(rest) = authority.strip_prefix('[') {
-		rest.split_once(']')?.0
-	} else {
-		authority.split(':').next()?
-	};
-	(!host.is_empty()).then(|| host.to_ascii_lowercase())
-}
-
-/// Best-effort RFC 3339 author-time of the tip commit at `oid`.
-///
-/// Returns `None` on any failure (object missing, not a commit, unparsable
-/// time) so a missing timestamp never aborts the fetch.
-fn read_commit_time(
-	repo: &gix::Repository,
-	oid: gix::ObjectId,
-) -> Option<String> {
-	let commit = repo.find_object(oid).ok()?.try_into_commit().ok()?;
-	// In gix 0.84 `SignatureRef.time` is the raw `&str`; `.time()` parses it
-	// into a `gix_date::Time` exposing `seconds` (unix epoch) and `offset`
-	// (seconds east of UTC).
-	let time = commit.author().ok()?.time().ok()?;
-	let offset = chrono::FixedOffset::east_opt(time.offset)?;
-	let dt = chrono::DateTime::from_timestamp(time.seconds, 0)?
-		.with_timezone(&offset);
-	Some(dt.to_rfc3339())
 }
 
 fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
@@ -204,50 +85,7 @@ impl RefResolver for GitRefResolver {
 
 #[cfg(test)]
 mod tests {
-	use super::{host_of_url, https_only_token, should_try_system_git};
-
-	/// The gix→system-git + OS-credential-helper fallback must survive the
-	/// shallow-fetch change: a non-GitHub HTTPS host (TFS / Azure DevOps /
-	/// self-hosted GitLab) is still admitted to the system-git path, while
-	/// github and non-https are excluded. FAILS if the non-github fallback is
-	/// dropped or the gate is broken.
-	#[test]
-	fn system_git_fallback_retained_for_non_github_https() {
-		// github short-circuits BEFORE probing the git binary → never falls back
-		// to a dev machine's gh/GCM helper.
-		assert!(!should_try_system_git("https://github.com/o/r.git"));
-		assert!(!should_try_system_git("https://api.github.com/o/r.git"));
-		// Non-https keeps its own transport auth (ssh agent, etc.).
-		assert!(!should_try_system_git("git@tfs.corp.local:o/r.git"));
-		assert!(!should_try_system_git("ssh://git@tfs.corp.local/o/r.git"));
-		// A non-github HTTPS host is admitted to the fallback exactly when a git
-		// binary exists — i.e. it is NOT excluded the way github is. This is the
-		// TFS/Azure/self-hosted-GitLab credential-helper path (Decision 13).
-		assert_eq!(
-			should_try_system_git(
-				"https://tfs.corp.local/collection/_git/repo"
-			),
-			aghub_git::system_git::system_git_available(),
-			"non-github https must still reach the system-git fallback"
-		);
-	}
-
-	#[test]
-	fn host_of_url_extracts_lowercased_host_without_userinfo_or_port() {
-		assert_eq!(
-			host_of_url("https://dev.azure.example/org/_git/repo").as_deref(),
-			Some("dev.azure.example")
-		);
-		assert_eq!(
-			host_of_url("https://User:tok@Tfs.Corp.LOCAL:8443/a/b").as_deref(),
-			Some("tfs.corp.local")
-		);
-		assert_eq!(
-			host_of_url("https://[::1]:443/a/b").as_deref(),
-			Some("::1")
-		);
-		assert_eq!(host_of_url("not-a-url"), None);
-	}
+	use super::https_only_token;
 
 	#[test]
 	fn token_is_dropped_for_non_https_urls() {

@@ -4,21 +4,21 @@
 
 **Role**: Single shared implementation of "are installed skills out of date?"
 used by **both** `GET /skills/check-updates` (API) and `aghub-cli check --online`.
-Also hosts Sources domain (`sources` mod: list/diff/classify + lazy-auth fetch)
+Also hosts Sources domain (`sources` mod: list/diff/classify + token-first fetch)
 for API sources routes and CLI `source`. Network/credentials live here;
 `aghub-core` stays pure (hash/compare only).
 
 ## WHERE TO LOOK
 
-| Task                      | Location                       | Notes                                      |
-| ------------------------- | ------------------------------ | ------------------------------------------ |
-| Entry point               | `lib.rs` `check_updates()`     | Async; `CheckDeps` + entries               |
-| Group by repo/ref         | `lib.rs` `group_by_source_ref` | Fetch each `SourceRef` at most once        |
-| TTL result cache          | `lib.rs` `ResultCache`         | Keyed by `SourceRef`                       |
-| Inject auth               | `lib.rs` `TokenResolver`       | CLI env / API own resolver                 |
-| Source list/diff/classify | `sources.rs`                   | API + CLI `source`                         |
-| Network adapters          | `git.rs`                       | `GitFetcher` / `GitRefResolver` + fallback |
-| Hash compare / rename     | `aghub_core::skills::update`   | Pure — never move here                     |
+| Task                      | Location                       | Notes                               |
+| ------------------------- | ------------------------------ | ----------------------------------- |
+| Entry point               | `lib.rs` `check_updates()`     | Async; `CheckDeps` + entries        |
+| Group by repo/ref         | `lib.rs` `group_by_source_ref` | Fetch each `SourceRef` at most once |
+| TTL result cache          | `lib.rs` `ResultCache`         | Keyed by `SourceRef`                |
+| Inject auth               | `lib.rs` `TokenResolver`       | CLI env / API own resolver          |
+| Source list/diff/classify | `sources.rs`                   | API + CLI `source`                  |
+| Network adapters          | `git.rs`                       | `GitFetcher` / `GitRefResolver`     |
+| Hash compare / rename     | `aghub_core::skills::update`   | Pure — never move here              |
 
 ## KEY ABSTRACTIONS
 
@@ -38,12 +38,10 @@ updates; wrong fetch = wasted network.
 
 - **`https_only_token`**: never attach tokens to non-https URLs (ssh auth stands;
   `inject_credentials` hard-fails otherwise)
-- **`GitFetcherWithFallback`**: gix first, then system `git` + OS helper for
-  https **non-github** hosts (TFS/Azure). Kind-2 (final-token) callers only —
-  try `GIT_PASSWORD`/token **before** system-git
-- **Do NOT wrap** `fetch_source_with_resolver` with `GitFetcherWithFallback` —
-  that helper sequences unauth → one token retry; wrapping would fire system-git
-  before the token
+- **`SkillRepository` is the fallback owner**: REST → gix → system `git` + OS
+  helper for HTTPS non-GitHub hosts (TFS/Azure). Surfaces use `GitFetcher` only.
+- **`fetch_source_with_resolver` is token-first**: resolve once, then fetch once;
+  anonymous is used only when no token exists.
 
 ## TESTING
 

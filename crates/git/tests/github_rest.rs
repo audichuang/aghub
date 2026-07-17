@@ -382,14 +382,13 @@ fn transport_network_error_routes_to_fallback() {
 // ─── Host gate ───
 
 #[test]
-fn host_gate_maps_github_and_rejects_ghes_and_loose_suffix() {
+fn host_gate_accepts_only_normalized_exact_github_com() {
 	assert_eq!(github_api_host("github.com"), Some("api.github.com"));
 	assert_eq!(github_api_host("GitHub.com"), Some("api.github.com"));
-	assert_eq!(github_api_host("www.github.com"), Some("api.github.com"));
-	assert_eq!(
-		github_api_host("codeload.github.com"),
-		Some("api.github.com")
-	);
+	assert_eq!(github_api_host("github.com."), Some("api.github.com"));
+	assert_eq!(github_api_host("www.github.com"), None);
+	assert_eq!(github_api_host("codeload.github.com"), None);
+	assert_eq!(github_api_host("api.github.com"), None);
 	// GHES custom domain is NOT GitHub.
 	assert_eq!(github_api_host("github.example.com"), None);
 	// A loose suffix must not slip through.

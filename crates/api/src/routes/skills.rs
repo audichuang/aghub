@@ -15,7 +15,7 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
-	credentials::forwarding::ForwardedGitTokens,
+	credentials::forwarding::{ChainResolver, ForwardedGitTokens},
 	credentials::origin::{origin_of, origins_match, ResolvedOrigin},
 	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
@@ -46,7 +46,7 @@ use crate::{
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
 	state::{GitCloneSession, GitCloneSessions},
 };
-use skill_update::keychain_host_for_source;
+use skill_update::{keychain_host_for_source, TokenResolver};
 
 #[derive(rocket::FromForm)]
 pub(crate) struct SkillListParams {
@@ -1314,7 +1314,12 @@ fn map_install_fetch_error(e: InstallFetchError) -> ApiError {
 pub async fn install_skill(
 	_origin: TrustedLocalOrigin,
 	body: Json<InstallSkillRequest>,
+	forwarded: ForwardedGitTokens,
 ) -> ApiResult<InstallSkillResponse> {
+	let host = keychain_host_for_source(&body.source);
+	let keyring = crate::routes::skills_update::KeyringResolver;
+	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
+	let token = resolver.resolve(&body.source, host.as_deref());
 	// Build SkillRepository off the async worker: ReqwestTransport creates a
 	// blocking reqwest client (nested runtime) that panics when constructed
 	// inside a current_thread executor (the unit-test `block_on` helper).
@@ -1327,7 +1332,8 @@ pub async fn install_skill(
 				"CLONE_ERROR",
 			)
 		})?;
-	install_skill_with_repo(body.into_inner(), std::sync::Arc::new(repo)).await
+	install_skill_with_repo(body.into_inner(), std::sync::Arc::new(repo), token)
+		.await
 }
 
 /// Core of `POST /skills/install` with an injectable [`SkillRepository`].
@@ -1338,6 +1344,7 @@ pub async fn install_skill(
 pub(crate) async fn install_skill_with_repo(
 	req: InstallSkillRequest,
 	repo: std::sync::Arc<skill_update::SkillRepository>,
+	token: Option<String>,
 ) -> ApiResult<InstallSkillResponse> {
 	let resource_scope = parse_install_scope(&req.scope)?;
 
@@ -1381,12 +1388,13 @@ pub(crate) async fn install_skill_with_repo(
 			let install_all = req.install_all.unwrap_or(false);
 			let requested = req.skills.clone();
 			let repo_for_task = repo.clone();
+			let token_for_task = token;
 
 			let (snapshot, selected, fetched) = match timeout(
 				Duration::from_secs(300),
 				tokio::task::spawn_blocking(move || {
 					let snapshot = repo_for_task
-						.resolve(&source_ref, None)
+						.resolve(&source_ref, token_for_task.as_deref())
 						.map_err(InstallFetchError::Repo)?;
 					let catalog = repo_for_task
 						.list(&snapshot)
@@ -4229,10 +4237,14 @@ mod tests {
 				project_path: None,
 				install_all: Some(false),
 			};
-			let resp = block_on(install_skill(TrustedLocalOrigin, Json(req)))
-				.ok()
-				.expect("handler ok")
-				.into_inner();
+			let resp = block_on(install_skill(
+				TrustedLocalOrigin,
+				Json(req),
+				ForwardedGitTokens::default(),
+			))
+			.ok()
+			.expect("handler ok")
+			.into_inner();
 			assert!(resp.success, "install succeeded");
 			assert!(
 				resp.agents.iter().any(|a| a.agent == "claude"),
@@ -4381,10 +4393,14 @@ mod tests {
 				project_path: Some("proj".to_string()),
 				install_all: Some(false),
 			};
-			let resp = block_on(install_skill(TrustedLocalOrigin, Json(req)))
-				.ok()
-				.expect("handler ok")
-				.into_inner();
+			let resp = block_on(install_skill(
+				TrustedLocalOrigin,
+				Json(req),
+				ForwardedGitTokens::default(),
+			))
+			.ok()
+			.expect("handler ok")
+			.into_inner();
 			std::env::set_current_dir(prev).unwrap();
 
 			assert!(
@@ -5088,7 +5104,7 @@ mod tests {
 					project_path: None,
 					install_all: Some(false),
 				};
-				let resp = block_on(install_skill_with_repo(req, repo))
+				let resp = block_on(install_skill_with_repo(req, repo, None))
 					.ok()
 					.expect("install handler ok")
 					.into_inner();
@@ -5137,6 +5153,53 @@ mod tests {
 					home.join(".agents/skills/music/SKILL.md").exists(),
 					"the named skill materialized into the master"
 				);
+			});
+		}
+
+		#[test]
+		fn install_skill_uses_forwarded_token_on_first_rest_request() {
+			with_isolated_env(|_home, _state| {
+				let first = Arc::new(AtomicBool::new(true));
+				let first_request = first.clone();
+				let responder = happy_responder();
+				let (t, _recorded) = record_transport(move |req| {
+					if first_request.swap(false, Ordering::SeqCst) {
+						assert!(
+							req.headers.iter().any(|(name, value)| {
+								name.eq_ignore_ascii_case("authorization")
+									&& value == "Bearer forwarded-token"
+							}),
+							"the route's first REST request must carry the forwarded token"
+						);
+					}
+					responder(req)
+				});
+				let rest: Arc<dyn RepoFetchBackend> =
+					Arc::new(GithubRest::new(t));
+				let repo = Arc::new(SkillRepository::with_backends(
+					Some(rest),
+					Arc::new(NoGixBackend),
+				));
+				let req = InstallSkillRequest {
+					source: "https://github.com/acme/skills.git".to_string(),
+					agents: vec!["claude".to_string()],
+					skills: vec!["music".to_string()],
+					scope: "global".to_string(),
+					project_path: None,
+					install_all: Some(false),
+				};
+
+				let response = block_on(install_skill_with_repo(
+					req,
+					repo,
+					Some("forwarded-token".to_string()),
+				));
+
+				assert!(
+					response.is_ok(),
+					"token-authenticated install must succeed"
+				);
+				assert!(!first.load(Ordering::SeqCst), "REST was never called");
 			});
 		}
 
@@ -5382,7 +5445,7 @@ mod tests {
 					project_path: Some(project.display().to_string()),
 					install_all: Some(false),
 				};
-				let resp = block_on(install_skill_with_repo(req, repo))
+				let resp = block_on(install_skill_with_repo(req, repo, None))
 					.ok()
 					.expect("surface A handler ok")
 					.into_inner();
@@ -5532,7 +5595,7 @@ mod tests {
 					project_path: Some(project.display().to_string()),
 					install_all: Some(false),
 				};
-				let resp = block_on(install_skill_with_repo(req, repo))
+				let resp = block_on(install_skill_with_repo(req, repo, None))
 					.ok()
 					.expect("install handler ok")
 					.into_inner();

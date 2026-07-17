@@ -12,7 +12,7 @@
 //! default git adapters ([`GitFetcher`]/[`GitRefResolver`]) live in [`mod@git`].
 
 mod git;
-pub use git::{GitFetcher, GitFetcherWithFallback, GitRefResolver};
+pub use git::{GitFetcher, GitRefResolver};
 
 mod repository;
 pub use repository::{

@@ -30,12 +30,12 @@ use crate::SourceAction;
 /// Token resolver for CLI source auth. `GIT_PASSWORD` is explicit user
 /// intent and applies to ANY host (self-hosted GitLab / TFS / local test
 /// remotes must keep working). `GITHUB_TOKEN` is GitHub-specific by name,
-/// so it is only offered when the source host is github.com or a subdomain
+/// so it is only offered when the source host is exactly github.com
 /// — the fetch-then-retry-with-token flow would otherwise send the PAT to
 /// an arbitrary host after the first failure. Empty/whitespace env values
 /// count as unset. `GitFetcher` consumes the token as the `x-access-token`
 /// password — there is no username/password basic-auth path. Returns
-/// `None` when nothing applies (the unauthenticated attempt stands).
+/// `None` when nothing applies (one anonymous attempt is made).
 pub(crate) struct EnvTokenResolver;
 impl skill_update::TokenResolver for EnvTokenResolver {
 	fn resolve(&self, _source: &str, host: Option<&str>) -> Option<String> {
@@ -65,12 +65,7 @@ fn select_env_token(
 }
 
 fn is_github_host(host: &str) -> bool {
-	let host = host.to_ascii_lowercase();
-	// A trailing root dot is the same FQDN (`github.com.` == `github.com`);
-	// strip it BEFORE matching so the suffix check still rejects
-	// `github.com.evil.com.`.
-	let host = host.trim_end_matches('.');
-	host == "github.com" || host.ends_with(".github.com")
+	aghub_git::is_github_com_host(host)
 }
 
 /// Production fetch is `skill_update::GitFetcher`. Under debug builds ONLY, a
@@ -1104,8 +1099,8 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		args.git_ref.map(str::to_string).or(source.ref_name.clone());
 	source.ref_name = effective_ref.clone();
 
-	// Step 3: fetch only the affected skill folder via the shared lazy-auth
-	// path (unauthenticated first, token retry on failure).
+	// Step 3: fetch only the affected skill folder via the shared token-first
+	// path.
 	let folder =
 		skill_folder_from_lock_path(&source.skill_path).ok_or_else(|| {
 			anyhow::anyhow!("locked skillPath is not a valid skill folder")
@@ -1211,14 +1206,14 @@ mod tests {
 	}
 
 	#[test]
-	fn github_token_is_bound_to_github_hosts() {
+	fn github_token_is_bound_to_exact_github_host() {
 		assert_eq!(
 			select_env_token(None, s("gh"), Some("github.com")),
 			s("gh")
 		);
 		assert_eq!(
 			select_env_token(None, s("gh"), Some("API.GitHub.com")),
-			s("gh")
+			None
 		);
 		// FQDN trailing root dot is the same host.
 		assert_eq!(
@@ -1227,7 +1222,7 @@ mod tests {
 		);
 		assert_eq!(
 			select_env_token(None, s("gh"), Some("api.github.com.")),
-			s("gh")
+			None
 		);
 		for host in [
 			Some("gitlab.com"),

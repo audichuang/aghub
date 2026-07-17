@@ -1,5 +1,5 @@
 //! Skill-aware composite over [`aghub_git::RepoFetchBackend`]: snapshot pin,
-//! single REST→gix fallback owner, discovery (`list`), and selection-scoped
+//! single REST→gix→system-git fallback owner, discovery (`list`), and selection-scoped
 //! materialization (`fetch`). Surfaces never re-decide the transport.
 
 use std::collections::HashMap;
@@ -88,7 +88,8 @@ pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 	}
 }
 
-/// Skill-aware orchestrator: owns REST→gix fallback and snapshot pinning.
+/// Skill-aware orchestrator: owns the REST→gix→system-git composite and
+/// snapshot pinning.
 pub struct SkillRepository {
 	rest: Option<Arc<dyn RepoFetchBackend>>,
 	gix: Arc<dyn RepoFetchBackend>,
@@ -103,7 +104,8 @@ impl Default for SkillRepository {
 }
 
 impl SkillRepository {
-	/// Production: `GithubRest(ReqwestTransport)` + `GixShallow`.
+	/// Production: `GithubRest(ReqwestTransport)` + `GixShallow`, whose final
+	/// tail is system git for OS-credential-helper-only private hosts.
 	pub fn new() -> Self {
 		let rest: Arc<dyn RepoFetchBackend> =
 			Arc::new(GithubRest::new(Arc::new(ReqwestTransport::new())));

@@ -124,13 +124,17 @@ impl HttpTransport for ReqwestTransport {
 	}
 }
 
-/// Explicit trusted host mapping: exact `github.com` and any proper
-/// `*.github.com` subdomain map to `api.github.com`. A loose suffix
-/// (`evilgithub.com`) and a GHES custom domain (`github.example.com`) are NOT
-/// GitHub and return `None` so the caller falls back.
+/// Whether `host` normalizes to the one trusted public GitHub origin.
+pub fn is_github_com_host(host: &str) -> bool {
+	host.trim()
+		.trim_end_matches('.')
+		.eq_ignore_ascii_case("github.com")
+}
+
+/// Explicit trusted host mapping: only exact, normalized `github.com` maps to
+/// `api.github.com`. Subdomains and GHES custom domains fall back to git.
 pub fn github_api_host(host: &str) -> Option<&'static str> {
-	let host = host.trim().to_ascii_lowercase();
-	if host == "github.com" || host.ends_with(".github.com") {
+	if is_github_com_host(host) {
 		Some("api.github.com")
 	} else {
 		None

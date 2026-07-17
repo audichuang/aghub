@@ -81,8 +81,9 @@ pub trait RepoFetchBackend: Send + Sync {
 	) -> Result<()>;
 }
 
-/// Shallow (depth-1) gix bare-fetch backend. Fetches once in [`resolve`] and
-/// reuses the cached bare repo for tree/blob/materialize calls.
+/// Shallow (depth-1) gix bare-fetch backend with a final system-git fallback
+/// for HTTPS non-GitHub hosts that rely on OS credential helpers. Fetches once
+/// in [`resolve`] and reuses the cached repo for later calls.
 pub struct GixShallow {
 	timeout: Option<Duration>,
 	/// commit_oid → fetched bare repo temp dir (kept alive for reuse).
@@ -119,6 +120,47 @@ impl GixShallow {
 			))
 		})
 	}
+
+	fn fetch_tip(
+		&self,
+		source: &SourceRef,
+		auth: Option<&Credentials>,
+	) -> Result<(TempDir, gix::ObjectId)> {
+		match crate::fetch::fetch_ref_to_temp(
+			&source.url,
+			source.ref_.as_deref(),
+			auth,
+			self.timeout,
+		) {
+			Ok(fetched) => Ok(fetched),
+			Err(gix_error) => {
+				if !should_try_system_git(&source.url) {
+					return Err(gix_error);
+				}
+				let temp = match crate::system_git::clone_to_temp_system_git(
+					&source.url,
+					source.ref_.as_deref(),
+				) {
+					Ok(temp) => temp,
+					Err(_) => return Err(gix_error),
+				};
+				let repo = gix::open(temp.path()).map_err(|e| {
+					GitError::clone_failed(format!(
+						"Opening system-git clone failed: {e}"
+					))
+				})?;
+				let tip = repo
+					.head_id()
+					.map_err(|e| {
+						GitError::clone_failed(format!(
+							"Resolving system-git HEAD failed: {e}"
+						))
+					})?
+					.detach();
+				Ok((temp, tip))
+			}
+		}
+	}
 }
 
 impl Default for GixShallow {
@@ -133,12 +175,7 @@ impl RepoFetchBackend for GixShallow {
 		source: &SourceRef,
 		auth: Option<&Credentials>,
 	) -> Result<RepoSnapshot> {
-		let (temp, tip_oid) = crate::fetch::fetch_ref_to_temp(
-			&source.url,
-			source.ref_.as_deref(),
-			auth,
-			self.timeout,
-		)?;
+		let (temp, tip_oid) = self.fetch_tip(source, auth)?;
 
 		let repo = gix::open(temp.path()).map_err(|e| {
 			GitError::clone_failed(format!(
@@ -272,6 +309,17 @@ impl RepoFetchBackend for GixShallow {
 			GitError::clone_failed(format!("Staging materialize failed: {e}"))
 		})
 	}
+}
+
+fn should_try_system_git(url: &str) -> bool {
+	let Ok(url) = url::Url::parse(url) else {
+		return false;
+	};
+	url.scheme() == "https"
+		&& url
+			.host_str()
+			.is_some_and(|host| !crate::github_rest::is_github_com_host(host))
+		&& crate::system_git::system_git_available()
 }
 
 /// Keep entries under any selected folder. Empty path selects the whole repo.
