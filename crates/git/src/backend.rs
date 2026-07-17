@@ -71,6 +71,20 @@ pub trait RepoFetchBackend: Send + Sync {
 		oids: &[String],
 	) -> Result<Vec<Blob>>;
 
+	/// Read tree metadata and the blobs selected from that metadata as one
+	/// backend operation. Backends with an operation deadline override this so
+	/// both phases share the same absolute cutoff.
+	fn read_tree_and_blobs(
+		&self,
+		snapshot: &RepoSnapshot,
+		select: &dyn Fn(&RepoTree) -> Vec<String>,
+	) -> Result<(RepoTree, Vec<Blob>)> {
+		let tree = self.read_tree(snapshot)?;
+		let oids = select(&tree);
+		let blobs = self.read_blobs(snapshot, &oids)?;
+		Ok((tree, blobs))
+	}
+
 	/// Write selected repo-relative folder sub-trees into `dest` through the
 	/// shared Source-staging materializer. `""` = whole repo root.
 	fn materialize(

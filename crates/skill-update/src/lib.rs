@@ -22,6 +22,15 @@ pub use repository::{
 
 pub mod sources;
 
+/// Tokens are HTTPS-only. Passing one to ssh/scp/git would turn transport auth
+/// that could succeed into a guaranteed credential-injection error.
+pub(crate) fn https_only_token<'token>(
+	url: &str,
+	token: Option<&'token str>,
+) -> Option<&'token str> {
+	token.filter(|_| url.starts_with("https://"))
+}
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -178,7 +178,7 @@ pub struct GithubRest {
 	pub(crate) deadline: Option<Instant>,
 	pub(crate) timeout: Option<Duration>,
 	pub(crate) concurrency: usize,
-	pub(crate) cache: Mutex<HashMap<String, RepoContext>>,
+	pub(crate) cache: Arc<Mutex<HashMap<String, RepoContext>>>,
 }
 
 impl GithubRest {
@@ -190,7 +190,7 @@ impl GithubRest {
 			deadline: None,
 			timeout: None,
 			concurrency: DEFAULT_CONCURRENCY,
-			cache: Mutex::new(HashMap::new()),
+			cache: Arc::new(Mutex::new(HashMap::new())),
 		}
 	}
 
@@ -215,18 +215,22 @@ impl GithubRest {
 		self
 	}
 
-	/// `Err(RestFallback)` if the absolute deadline has passed.
-	pub(crate) fn check_deadline(&self) -> Result<()> {
-		self.remaining_timeout().map(|_| ())
+	fn operation_deadline(&self) -> Result<Option<Instant>> {
+		if let Some(deadline) = self.deadline {
+			remaining_timeout(Some(deadline))?;
+			return Ok(Some(deadline));
+		}
+		Ok(self.timeout.map(|timeout| Instant::now() + timeout))
 	}
 
-	fn remaining_timeout(&self) -> Result<Option<Duration>> {
-		remaining_timeout(self.operation_deadline())
-	}
-
-	fn operation_deadline(&self) -> Option<Instant> {
-		self.deadline
-			.or_else(|| self.timeout.map(|timeout| Instant::now() + timeout))
+	fn scoped_operation(&self) -> Result<Self> {
+		Ok(Self {
+			transport: Arc::clone(&self.transport),
+			deadline: self.operation_deadline()?,
+			timeout: None,
+			concurrency: self.concurrency,
+			cache: Arc::clone(&self.cache),
+		})
 	}
 
 	fn get_context(&self, commit_oid: &str) -> Result<RepoContext> {
@@ -248,15 +252,15 @@ impl GithubRest {
 		url: String,
 		token: Option<&str>,
 		accept: &str,
+		deadline: Option<Instant>,
 	) -> Result<HttpResponse> {
-		self.check_deadline()?;
 		let headers = build_headers(token, accept);
 		let response = self
 			.transport
 			.execute(HttpRequest {
 				url,
 				headers,
-				timeout: self.remaining_timeout()?,
+				timeout: remaining_timeout(deadline)?,
 			})
 			.map_err(|e| {
 				GitError::rest_fallback(format!("transport error: {e}"))
@@ -277,7 +281,7 @@ impl RepoFetchBackend for GithubRest {
 		source: &SourceRef,
 		auth: Option<&Credentials>,
 	) -> Result<RepoSnapshot> {
-		self.check_deadline()?;
+		let deadline = self.operation_deadline()?;
 
 		let parsed = url::Url::parse(&source.url).map_err(|e| {
 			GitError::rest_fallback(format!("invalid source URL: {e}"))
@@ -294,7 +298,8 @@ impl RepoFetchBackend for GithubRest {
 		let token = auth.map(|c| c.password.clone());
 
 		let url = commits_url(api_host, &owner, &repo, ref_name)?;
-		let response = self.request(url, token.as_deref(), ACCEPT_JSON)?;
+		let response =
+			self.request(url, token.as_deref(), ACCEPT_JSON, deadline)?;
 
 		let value: serde_json::Value = serde_json::from_slice(&response.body)
 			.map_err(|e| {
@@ -357,6 +362,7 @@ impl RepoFetchBackend for GithubRest {
 	}
 
 	fn read_tree(&self, snapshot: &RepoSnapshot) -> Result<RepoTree> {
+		let deadline = self.operation_deadline()?;
 		let ctx = self.get_context(&snapshot.commit_oid)?;
 		// Prefer the snapshot pin; fall back to the resolve-time cache.
 		let tree_oid = if !snapshot.tree_oid.is_empty() {
@@ -368,7 +374,8 @@ impl RepoFetchBackend for GithubRest {
 			"https://{}/repos/{}/{}/git/trees/{}?recursive=1",
 			ctx.api_host, ctx.owner, ctx.repo, tree_oid
 		);
-		let response = self.request(url, ctx.token.as_deref(), ACCEPT_JSON)?;
+		let response =
+			self.request(url, ctx.token.as_deref(), ACCEPT_JSON, deadline)?;
 
 		let value: serde_json::Value = serde_json::from_slice(&response.body)
 			.map_err(|e| {
@@ -491,7 +498,7 @@ impl RepoFetchBackend for GithubRest {
 		}
 
 		let concurrency = self.concurrency;
-		let operation_deadline = self.operation_deadline();
+		let operation_deadline = self.operation_deadline()?;
 		let mut out = Vec::with_capacity(unique.len());
 		let mut missing = Vec::new();
 		{
@@ -580,13 +587,26 @@ impl RepoFetchBackend for GithubRest {
 		Ok(out)
 	}
 
+	fn read_tree_and_blobs(
+		&self,
+		snapshot: &RepoSnapshot,
+		select: &dyn Fn(&RepoTree) -> Vec<String>,
+	) -> Result<(RepoTree, Vec<Blob>)> {
+		let operation = self.scoped_operation()?;
+		let tree = operation.read_tree(snapshot)?;
+		let oids = select(&tree);
+		let blobs = operation.read_blobs(snapshot, &oids)?;
+		Ok((tree, blobs))
+	}
+
 	fn materialize(
 		&self,
 		snapshot: &RepoSnapshot,
 		paths: &[&str],
 		dest: &Path,
 	) -> Result<()> {
-		let tree = self.read_tree(snapshot)?;
+		let operation = self.scoped_operation()?;
+		let tree = operation.read_tree(snapshot)?;
 		let selected: Vec<&TreeEntry> = tree
 			.entries
 			.iter()
@@ -606,7 +626,7 @@ impl RepoFetchBackend for GithubRest {
 			.map(|e| e.oid.clone())
 			.collect();
 
-		let blobs = self.read_blobs(snapshot, &blob_oids)?;
+		let blobs = operation.read_blobs(snapshot, &blob_oids)?;
 		let mut by_oid: HashMap<String, Vec<u8>> =
 			HashMap::with_capacity(blobs.len());
 		for blob in blobs {

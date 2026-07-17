@@ -1315,15 +1315,13 @@ pub async fn install_skill(
 	_origin: TrustedLocalOrigin,
 	body: Json<InstallSkillRequest>,
 	forwarded: ForwardedGitTokens,
+	repositories: &rocket::State<crate::state::SkillRepositoryFactory>,
 ) -> ApiResult<InstallSkillResponse> {
-	let host = keychain_host_for_source(&body.source);
-	let keyring = crate::routes::skills_update::KeyringResolver;
-	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
-	let token = resolver.resolve(&body.source, host.as_deref());
 	// Build SkillRepository off the async worker: ReqwestTransport creates a
 	// blocking reqwest client (nested runtime) that panics when constructed
 	// inside a current_thread executor (the unit-test `block_on` helper).
-	let repo = tokio::task::spawn_blocking(skill_update::SkillRepository::new)
+	let repositories = repositories.inner().clone();
+	let repo = tokio::task::spawn_blocking(move || repositories.create())
 		.await
 		.map_err(|e| {
 			ApiError::new(
@@ -1332,8 +1330,22 @@ pub async fn install_skill(
 				"CLONE_ERROR",
 			)
 		})?;
-	install_skill_with_repo(body.into_inner(), std::sync::Arc::new(repo), token)
-		.await
+	install_skill_route_with_repo(body.into_inner(), forwarded, repo).await
+}
+
+/// Production route core with an injectable repository. Keeping forwarded
+/// credential resolution here lets the route test exercise the same seam as
+/// Rocket's `POST /skills/install` handler.
+pub(crate) async fn install_skill_route_with_repo(
+	req: InstallSkillRequest,
+	forwarded: ForwardedGitTokens,
+	repo: std::sync::Arc<skill_update::SkillRepository>,
+) -> ApiResult<InstallSkillResponse> {
+	let host = keychain_host_for_source(&req.source);
+	let keyring = crate::routes::skills_update::KeyringResolver;
+	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
+	let token = resolver.resolve(&req.source, host.as_deref());
+	install_skill_with_repo(req, repo, token).await
 }
 
 /// Core of `POST /skills/install` with an injectable [`SkillRepository`].
@@ -4237,10 +4249,12 @@ mod tests {
 				project_path: None,
 				install_all: Some(false),
 			};
-			let resp = block_on(install_skill(
-				TrustedLocalOrigin,
-				Json(req),
+			let repo =
+				std::sync::Arc::new(skill_update::SkillRepository::new());
+			let resp = block_on(install_skill_route_with_repo(
+				req,
 				ForwardedGitTokens::default(),
+				repo,
 			))
 			.ok()
 			.expect("handler ok")
@@ -4393,10 +4407,12 @@ mod tests {
 				project_path: Some("proj".to_string()),
 				install_all: Some(false),
 			};
-			let resp = block_on(install_skill(
-				TrustedLocalOrigin,
-				Json(req),
+			let repo =
+				std::sync::Arc::new(skill_update::SkillRepository::new());
+			let resp = block_on(install_skill_route_with_repo(
+				req,
 				ForwardedGitTokens::default(),
+				repo,
 			))
 			.ok()
 			.expect("handler ok")
@@ -4557,7 +4573,8 @@ mod tests {
 			GitError, GithubRest, HttpRequest, HttpResponse, HttpTransport,
 			RepoFetchBackend,
 		};
-		use rocket::http::Status;
+		use base64::Engine as _;
+		use rocket::http::{Header, Status};
 		use rocket::local::blocking::Client;
 		use rocket::Config;
 		use skill_update::{SkillRepository, SourceRef};
@@ -4569,7 +4586,9 @@ mod tests {
 		use crate::routes::skills::{
 			install_skill_with_repo, scan_repo_catalog,
 		};
-		use crate::state::{GitCloneSession, GitCloneSessions};
+		use crate::state::{
+			GitCloneSession, GitCloneSessions, SkillRepositoryFactory,
+		};
 
 		// ── Request-recording transport seam ──
 		struct RecordingTransport<F> {
@@ -5180,23 +5199,35 @@ mod tests {
 					Some(rest),
 					Arc::new(NoGixBackend),
 				));
-				let req = InstallSkillRequest {
-					source: "https://github.com/acme/skills.git".to_string(),
-					agents: vec!["claude".to_string()],
-					skills: vec!["music".to_string()],
-					scope: "global".to_string(),
-					project_path: None,
-					install_all: Some(false),
-				};
-
-				let response = block_on(install_skill_with_repo(
-					req,
-					repo,
-					Some("forwarded-token".to_string()),
-				));
+				let app_data = tempdir().unwrap();
+				let rocket = crate::build_rocket_with_skill_repository_factory(
+					Config::default(),
+					app_data.path().to_path_buf(),
+					SkillRepositoryFactory::fixed(repo),
+				);
+				let client = Client::tracked(rocket).unwrap();
+				let forwarded = serde_json::json!({
+					"https://github.com/acme/skills.git": {
+						"token": "forwarded-token",
+						"origin": null
+					}
+				});
+				let encoded = base64::engine::general_purpose::STANDARD
+					.encode(serde_json::to_vec(&forwarded).unwrap());
+				let response = client
+					.post("/api/v1/skills/install")
+					.header(Header::new("X-Aghub-Git-Tokens", encoded))
+					.json(&serde_json::json!({
+						"source": "https://github.com/acme/skills.git",
+						"agents": ["claude"],
+						"skills": ["music"],
+						"scope": "global",
+						"install_all": false
+					}))
+					.dispatch();
 
 				assert!(
-					response.is_ok(),
+					response.status() == Status::Ok,
 					"token-authenticated install must succeed"
 				);
 				assert!(!first.load(Ordering::SeqCst), "REST was never called");

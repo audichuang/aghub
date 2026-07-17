@@ -5,6 +5,32 @@ use std::time::Instant;
 
 use skill_update::SkillRepository;
 
+#[derive(Clone)]
+pub struct SkillRepositoryFactory {
+	make: Arc<dyn Fn() -> Arc<SkillRepository> + Send + Sync>,
+}
+
+impl Default for SkillRepositoryFactory {
+	fn default() -> Self {
+		Self {
+			make: Arc::new(|| Arc::new(SkillRepository::new())),
+		}
+	}
+}
+
+impl SkillRepositoryFactory {
+	pub fn create(&self) -> Arc<SkillRepository> {
+		(self.make)()
+	}
+
+	#[cfg(test)]
+	pub fn fixed(repo: Arc<SkillRepository>) -> Self {
+		Self {
+			make: Arc::new(move || Arc::clone(&repo)),
+		}
+	}
+}
+
 pub struct GitCloneSession {
 	/// The skill-aware repository that resolved `snapshot` (the single REST→gix
 	/// fallback owner). `fetch` routes through the SAME backend that produced the

@@ -233,6 +233,52 @@ struct AlwaysFallbackRest {
 	resolve_calls: AtomicUsize,
 	materialize_calls: AtomicUsize,
 }
+
+#[derive(Default)]
+struct LateFallbackRest {
+	materialize_calls: AtomicUsize,
+}
+
+impl RepoFetchBackend for LateFallbackRest {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		Ok(RepoSnapshot {
+			commit_oid: "9999999999999999999999999999999999999999".into(),
+			tree_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+			commit_time: None,
+		})
+	}
+
+	fn read_tree(
+		&self,
+		_snapshot: &RepoSnapshot,
+	) -> aghub_git::Result<RepoTree> {
+		Ok(RepoTree {
+			entries: Vec::new(),
+		})
+	}
+
+	fn read_blobs(
+		&self,
+		_snapshot: &RepoSnapshot,
+		_oids: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Ok(Vec::new())
+	}
+
+	fn materialize(
+		&self,
+		_snapshot: &RepoSnapshot,
+		_paths: &[&str],
+		_dest: &Path,
+	) -> aghub_git::Result<()> {
+		self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+		Err(GitError::rest_fallback("blob request timed out"))
+	}
+}
 impl RepoFetchBackend for AlwaysFallbackRest {
 	fn resolve(
 		&self,
@@ -526,6 +572,32 @@ fn rest_fallback_routes_to_gix_once_inside_the_repository() {
 	);
 }
 
+#[test]
+fn late_rest_blob_failure_falls_back_inside_the_repository() {
+	let fixture = tempfile::tempdir().unwrap();
+	let music = fixture.path().join("skills/music");
+	fs::create_dir_all(&music).unwrap();
+	fs::write(music.join("SKILL.md"), b"late gix fallback\n").unwrap();
+
+	let rest = Arc::new(LateFallbackRest::default());
+	let gix = Arc::new(LocalDirBackend::new(fixture.path()));
+	let repo = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+	let snapshot = repo.resolve(&github_source(), None).unwrap();
+	let path = SkillPath::parse("skills/music").unwrap();
+
+	let fetched = repo
+		.fetch(&snapshot, FetchSelection::Skills(&[path]))
+		.unwrap();
+
+	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
+	assert!(fetched.root.join("skills/music/SKILL.md").exists());
+}
+
 struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl EnvRestore {
@@ -614,7 +686,18 @@ fn non_github_private_host_reaches_system_git_through_skill_repository() {
 	let shim = bin.join("git");
 	fs::write(
 		&shim,
-		b"#!/bin/sh\ncase \" $* \" in\n  *\" https://127.0.0.1:1/acme/skills.git \"*)\n    last=\n    for arg in \"$@\"; do last=\"$arg\"; done\n    : > \"$AGHUB_FAKE_GIT_MARKER\"\n    exec \"$AGHUB_REAL_GIT\" clone --depth 1 --branch main -- \"$AGHUB_FAKE_GIT_ORIGIN\" \"$last\"\n    ;;\n  *) exec \"$AGHUB_REAL_GIT\" \"$@\" ;;\nesac\n",
+		br#"#!/bin/sh
+case " $* " in
+  *" https://127.0.0.1:1/acme/skills.git "*)
+    last=
+    for arg in "$@"; do last="$arg"; done
+    : > "$AGHUB_FAKE_GIT_MARKER"
+    exec "$AGHUB_REAL_GIT" clone --depth 1 \
+      --branch main -- "$AGHUB_FAKE_GIT_ORIGIN" "$last"
+    ;;
+  *) exec "$AGHUB_REAL_GIT" "$@" ;;
+esac
+"#,
 	)
 	.unwrap();
 	fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
@@ -646,6 +729,28 @@ fn non_github_private_host_reaches_system_git_through_skill_repository() {
 		fetched.root.join("skills/private/SKILL.md").exists(),
 		"system-git content must continue through SkillRepository::fetch"
 	);
+}
+
+#[test]
+fn production_repository_threads_deadline_to_first_rest_request() {
+	let saw_timeout = Arc::new(AtomicBool::new(false));
+	let timeout_seen = Arc::clone(&saw_timeout);
+	let commit = commit_json();
+	let (transport, _) = transport(move |request| {
+		let timeout = request
+			.timeout
+			.expect("production REST requests must carry a deadline budget");
+		assert!(timeout > Duration::ZERO);
+		assert!(timeout <= Duration::from_secs(30));
+		timeout_seen.store(true, Ordering::SeqCst);
+		Ok(json_ok(commit.clone().into_bytes()))
+	});
+	let repo = SkillRepository::with_http_transport(transport);
+
+	let snapshot = repo.resolve(&github_source(), None).unwrap();
+
+	assert_eq!(snapshot.commit_oid, COMMIT_OID);
+	assert!(saw_timeout.load(Ordering::SeqCst));
 }
 
 // ═══════════════ Test 4: root-level skill preflight ═════════════════════════
@@ -884,8 +989,10 @@ fn list_filters_over_depth_skill_metadata_before_blob_requests() {
 	let deep_folder = "a/b/c/d/e/f/g/h/i/j/k";
 	let tree = format!(
 		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
-{{"path":"skills/ok/SKILL.md","mode":"100644","type":"blob","sha":"{OID_SHALLOW}","size":45}},
-{{"path":"{deep_folder}/SKILL.md","mode":"100644","type":"blob","sha":"{OID_DEEP}","size":45}}
+{{"path":"skills/ok/SKILL.md","mode":"100644",
+"type":"blob","sha":"{OID_SHALLOW}","size":45}},
+{{"path":"{deep_folder}/SKILL.md","mode":"100644",
+"type":"blob","sha":"{OID_DEEP}","size":45}}
 ]}}"#
 	);
 	let commit = commit_json();
@@ -937,11 +1044,16 @@ fn catalog_snapshot_fetches_only_discovered_skills_and_changelog() {
 	let huge = skill::hash::MAX_TOTAL_BYTES + 1;
 	let tree = format!(
 		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
-{{"path":"skills/a/SKILL.md","mode":"100644","type":"blob","sha":"{OID_A_SKILL}","size":43}},
-{{"path":"skills/a/reference.md","mode":"100644","type":"blob","sha":"{OID_A_SUPPORT}","size":9}},
-{{"path":"skills/b/SKILL.md","mode":"100644","type":"blob","sha":"{OID_B_SKILL}","size":43}},
-{{"path":"CHANGELOG.md","mode":"100644","type":"blob","sha":"{OID_CHANGELOG}","size":10}},
-{{"path":"unrelated/huge.bin","mode":"100644","type":"blob","sha":"{OID_HUGE}","size":{huge}}}
+{{"path":"skills/a/SKILL.md","mode":"100644",
+"type":"blob","sha":"{OID_A_SKILL}","size":43}},
+{{"path":"skills/a/reference.md","mode":"100644",
+"type":"blob","sha":"{OID_A_SUPPORT}","size":9}},
+{{"path":"skills/b/SKILL.md","mode":"100644",
+"type":"blob","sha":"{OID_B_SKILL}","size":43}},
+{{"path":"CHANGELOG.md","mode":"100644",
+"type":"blob","sha":"{OID_CHANGELOG}","size":10}},
+{{"path":"unrelated/huge.bin","mode":"100644",
+"type":"blob","sha":"{OID_HUGE}","size":{huge}}}
 ]}}"#
 	);
 	let mut blobs = HashMap::new();

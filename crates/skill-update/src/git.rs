@@ -8,7 +8,9 @@
 use crate::repository::{
 	skill_repo_to_fetch_error, FetchSelection, SkillRepository,
 };
-use crate::{FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef};
+use crate::{
+	https_only_token, FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef,
+};
 
 /// Production [`Fetcher`]: resolves via [`SkillRepository`]
 /// (REST→gix→system-git single owner) then materializes only the requested
@@ -35,15 +37,6 @@ fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
 	aghub_git::resolve_remote_source(source)
 		.map(|resolved| resolved.clone_url)
 		.map_err(|_| FetchError::Network)
-}
-
-/// Tokens are HTTPS-only: `aghub_git::inject_credentials` rejects every
-/// other scheme, so passing a token alongside an ssh/scp/git URL turns a
-/// fetch that could succeed over the transport's own auth (ssh agent) into
-/// a guaranteed error. Drop the token instead and let the unauthenticated
-/// attempt stand.
-fn https_only_token<'t>(url: &str, token: Option<&'t str>) -> Option<&'t str> {
-	token.filter(|_| url.starts_with("https://"))
 }
 
 fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
@@ -85,7 +78,7 @@ impl RefResolver for GitRefResolver {
 
 #[cfg(test)]
 mod tests {
-	use super::https_only_token;
+	use crate::https_only_token;
 
 	#[test]
 	fn token_is_dropped_for_non_https_urls() {

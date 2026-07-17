@@ -1,6 +1,7 @@
 //! Skill-aware composite over [`aghub_git::RepoFetchBackend`]: snapshot pin,
-//! single REST→gix→system-git fallback owner, discovery (`list`), and selection-scoped
-//! materialization (`fetch`). Surfaces never re-decide the transport.
+//! single REST→gix→system-git fallback owner, discovery (`list`), and
+//! selection-scoped materialization (`fetch`). Surfaces never re-decide the
+//! transport.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -9,11 +10,11 @@ use std::time::Duration;
 
 use aghub_git::{
 	github_api_host, Blob, Credentials, GitError, GithubRest, GixShallow,
-	RepoFetchBackend, RepoSnapshot, ReqwestTransport, TreeEntry,
+	HttpTransport, RepoFetchBackend, RepoSnapshot, ReqwestTransport, TreeEntry,
 };
 use skill::{discover_from_entries, CandidateEntry, SkillPath};
 
-use crate::{FetchError, FetchedRepo, SourceRef};
+use crate::{https_only_token, FetchError, FetchedRepo, SourceRef};
 
 /// Per-fetch HTTP timeout for the gix shallow backend (matches the historical
 /// `GitFetcher` bound so a stuck remote cannot hang forever).
@@ -26,6 +27,13 @@ const CATALOG_MAX_DEPTH: usize = 10;
 enum BackendKind {
 	Rest,
 	Gix,
+}
+
+#[derive(Clone)]
+struct BackendMemo {
+	kind: BackendKind,
+	source: aghub_git::SourceRef,
+	auth: Option<Credentials>,
 }
 
 /// What to materialize from a pinned snapshot.
@@ -94,8 +102,8 @@ pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 pub struct SkillRepository {
 	rest: Option<Arc<dyn RepoFetchBackend>>,
 	gix: Arc<dyn RepoFetchBackend>,
-	/// `commit_oid` → which backend resolved it.
-	memo: Mutex<HashMap<String, BackendKind>>,
+	/// `commit_oid` → backend plus source/auth for a pinned late fallback.
+	memo: Mutex<HashMap<String, BackendMemo>>,
 }
 
 impl Default for SkillRepository {
@@ -108,9 +116,16 @@ impl SkillRepository {
 	/// Production: `GithubRest(ReqwestTransport)` + `GixShallow`, whose final
 	/// tail is system git for OS-credential-helper-only private hosts.
 	pub fn new() -> Self {
+		Self::with_http_transport(Arc::new(ReqwestTransport::new()))
+	}
+
+	/// Build the production backend composite over an injectable HTTP
+	/// transport. This is the production-construction seam used by deadline
+	/// tests; fallback remains the real gix→system-git tail.
+	#[doc(hidden)]
+	pub fn with_http_transport(transport: Arc<dyn HttpTransport>) -> Self {
 		let rest: Arc<dyn RepoFetchBackend> = Arc::new(
-			GithubRest::new(Arc::new(ReqwestTransport::new()))
-				.with_timeout(FETCH_HTTP_TIMEOUT),
+			GithubRest::new(transport).with_timeout(FETCH_HTTP_TIMEOUT),
 		);
 		let gix: Arc<dyn RepoFetchBackend> =
 			Arc::new(GixShallow::with_timeout(Some(FETCH_HTTP_TIMEOUT)));
@@ -157,7 +172,12 @@ impl SkillRepository {
 			let rest = self.rest.as_ref().expect("checked above");
 			match rest.resolve(&git_sr, auth.as_ref()) {
 				Ok(snap) => {
-					self.remember(&snap.commit_oid, BackendKind::Rest)?;
+					self.remember(
+						&snap.commit_oid,
+						BackendKind::Rest,
+						&git_sr,
+						auth.as_ref(),
+					)?;
 					return Ok(snap);
 				}
 				Err(GitError::RestFallback(_)) => {
@@ -171,7 +191,12 @@ impl SkillRepository {
 			.gix
 			.resolve(&git_sr, auth.as_ref())
 			.map_err(map_git_error)?;
-		self.remember(&snap.commit_oid, BackendKind::Gix)?;
+		self.remember(
+			&snap.commit_oid,
+			BackendKind::Gix,
+			&git_sr,
+			auth.as_ref(),
+		)?;
 		Ok(snap)
 	}
 
@@ -181,29 +206,16 @@ impl SkillRepository {
 		&self,
 		snapshot: &RepoSnapshot,
 	) -> Result<SkillCatalog, SkillRepoError> {
-		let backend = self.backend_for(&snapshot.commit_oid)?;
-		let tree = backend.read_tree(snapshot).map_err(map_git_error)?;
-
-		// Collect every SKILL.md-like blob path + oid.
-		let mut skill_md_entries: Vec<(&TreeEntry, String)> = Vec::new();
-		for entry in &tree.entries {
-			if is_skill_md_path(&entry.path) {
-				let folder = folder_of_skill_md(&entry.path);
-				if folder_depth(&folder) <= CATALOG_MAX_DEPTH {
-					skill_md_entries.push((entry, folder));
-				}
-			}
-		}
-
-		let oids: Vec<String> = skill_md_entries
-			.iter()
-			.map(|(e, _)| e.oid.clone())
-			.collect();
-		let blobs = if oids.is_empty() {
-			Vec::new()
-		} else {
-			backend.read_blobs(snapshot, &oids).map_err(map_git_error)?
-		};
+		let (tree, blobs) =
+			self.execute_backend(snapshot, |backend, snapshot| {
+				backend.read_tree_and_blobs(snapshot, &|tree| {
+					catalog_skill_md_entries(tree)
+						.into_iter()
+						.map(|(entry, _)| entry.oid.clone())
+						.collect()
+				})
+			})?;
+		let skill_md_entries = catalog_skill_md_entries(&tree);
 		let blob_by_oid: HashMap<&str, &Blob> =
 			blobs.iter().map(|b| (b.oid.as_str(), b)).collect();
 
@@ -263,8 +275,6 @@ impl SkillRepository {
 		snapshot: &RepoSnapshot,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
-		let backend = self.backend_for(&snapshot.commit_oid)?;
-
 		let path_owned: Vec<String> = match selection {
 			FetchSelection::Skills(paths) => {
 				paths.iter().map(|p| p.as_str().to_string()).collect()
@@ -281,16 +291,20 @@ impl SkillRepository {
 			}
 		};
 		if path_owned.iter().any(String::is_empty) {
-			root_size_preflight(backend.as_ref(), snapshot)?;
+			let tree = self
+				.execute_backend(snapshot, |backend, snapshot| {
+					backend.read_tree(snapshot)
+				})?;
+			root_size_preflight(&tree)?;
 		}
 		let path_refs: Vec<&str> =
 			path_owned.iter().map(String::as_str).collect();
 
 		let dest =
 			tempfile::TempDir::new().map_err(|_| SkillRepoError::Network)?;
-		backend
-			.materialize(snapshot, &path_refs, dest.path())
-			.map_err(map_git_error)?;
+		self.execute_backend(snapshot, |backend, snapshot| {
+			backend.materialize(snapshot, &path_refs, dest.path())
+		})?;
 
 		Ok(FetchedRepo {
 			root: dest.path().to_path_buf(),
@@ -303,26 +317,92 @@ impl SkillRepository {
 		&self,
 		commit_oid: &str,
 		kind: BackendKind,
+		source: &aghub_git::SourceRef,
+		auth: Option<&Credentials>,
 	) -> Result<(), SkillRepoError> {
 		let mut memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
-		memo.insert(commit_oid.to_string(), kind);
+		memo.insert(
+			commit_oid.to_string(),
+			BackendMemo {
+				kind,
+				source: source.clone(),
+				auth: auth.cloned(),
+			},
+		);
 		Ok(())
 	}
 
-	fn backend_for(
+	fn execute_backend<T>(
 		&self,
-		commit_oid: &str,
-	) -> Result<Arc<dyn RepoFetchBackend>, SkillRepoError> {
-		let memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
-		match memo.get(commit_oid).copied() {
-			Some(BackendKind::Rest) => {
-				self.rest.clone().ok_or(SkillRepoError::Network)
+		snapshot: &RepoSnapshot,
+		operation: impl Fn(
+			&dyn RepoFetchBackend,
+			&RepoSnapshot,
+		) -> aghub_git::Result<T>,
+	) -> Result<T, SkillRepoError> {
+		let memo = self.memo_for(&snapshot.commit_oid)?;
+		match memo.kind {
+			BackendKind::Gix => {
+				operation(self.gix.as_ref(), snapshot).map_err(map_git_error)
 			}
-			Some(BackendKind::Gix) => Ok(self.gix.clone()),
-			// Snapshot not resolved through this repository instance.
-			None => Err(SkillRepoError::Network),
+			BackendKind::Rest => {
+				let rest = self.rest.as_ref().ok_or(SkillRepoError::Network)?;
+				match operation(rest.as_ref(), snapshot) {
+					Ok(value) => Ok(value),
+					Err(GitError::RestFallback(_)) => {
+						let gix_snapshot =
+							self.fallback_to_gix(snapshot, memo)?;
+						operation(self.gix.as_ref(), &gix_snapshot)
+							.map_err(map_git_error)
+					}
+					Err(error) => Err(map_git_error(error)),
+				}
+			}
 		}
 	}
+
+	fn memo_for(
+		&self,
+		commit_oid: &str,
+	) -> Result<BackendMemo, SkillRepoError> {
+		let memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
+		memo.get(commit_oid).cloned().ok_or(SkillRepoError::Network)
+	}
+
+	fn fallback_to_gix(
+		&self,
+		snapshot: &RepoSnapshot,
+		memo: BackendMemo,
+	) -> Result<RepoSnapshot, SkillRepoError> {
+		let gix_snapshot = self
+			.gix
+			.resolve(&memo.source, memo.auth.as_ref())
+			.map_err(map_git_error)?;
+		if gix_snapshot.commit_oid != snapshot.commit_oid {
+			return Err(SkillRepoError::Network);
+		}
+		self.remember(
+			&snapshot.commit_oid,
+			BackendKind::Gix,
+			&memo.source,
+			memo.auth.as_ref(),
+		)?;
+		Ok(gix_snapshot)
+	}
+}
+
+fn catalog_skill_md_entries(
+	tree: &aghub_git::RepoTree,
+) -> Vec<(&TreeEntry, String)> {
+	tree.entries
+		.iter()
+		.filter(|entry| is_skill_md_path(&entry.path))
+		.map(|entry| {
+			let folder = folder_of_skill_md(&entry.path);
+			(entry, folder)
+		})
+		.filter(|(_, folder)| folder_depth(folder) <= CATALOG_MAX_DEPTH)
+		.collect()
 }
 
 /// Convert a lock `skillPath` (`"<dir>/SKILL.md"` or `"SKILL.md"`) into a
@@ -343,10 +423,8 @@ pub fn skill_folder_from_lock_path(skill_path: &str) -> Option<SkillPath> {
 /// already transferred the depth-1 tip's blobs, but still refuses before any
 /// materialization (see the spec's documented known limitation).
 fn root_size_preflight(
-	backend: &dyn RepoFetchBackend,
-	snapshot: &RepoSnapshot,
+	tree: &aghub_git::RepoTree,
 ) -> Result<(), SkillRepoError> {
-	let tree = backend.read_tree(snapshot).map_err(map_git_error)?;
 	let count = tree.entries.len();
 	let bytes: u64 = tree
 		.entries
@@ -371,10 +449,6 @@ fn map_git_error(e: GitError) -> SkillRepoError {
 	} else {
 		SkillRepoError::Network
 	}
-}
-
-fn https_only_token<'t>(url: &str, token: Option<&'t str>) -> Option<&'t str> {
-	token.filter(|_| url.starts_with("https://"))
 }
 
 fn host_of_url(url: &str) -> Option<String> {

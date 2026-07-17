@@ -349,9 +349,12 @@ fn blob_phase_is_rejected_when_request_budget_exceeds_rate_limit() {
 	const OID_SUPPORT: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
 	let tree = format!(
 		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
-{{"path":"skills/music/SKILL.md","mode":"100644","type":"blob","sha":"{OID_SHARED}","size":10}},
-{{"path":"skills/music/copy.md","mode":"100644","type":"blob","sha":"{OID_SHARED}","size":10}},
-{{"path":"skills/music/support.md","mode":"100644","type":"blob","sha":"{OID_SUPPORT}","size":20}}
+{{"path":"skills/music/SKILL.md","mode":"100644",
+"type":"blob","sha":"{OID_SHARED}","size":10}},
+{{"path":"skills/music/copy.md","mode":"100644",
+"type":"blob","sha":"{OID_SHARED}","size":10}},
+{{"path":"skills/music/support.md","mode":"100644",
+"type":"blob","sha":"{OID_SUPPORT}","size":20}}
 ]}}"#
 	);
 	let commit = commit_json();
@@ -514,6 +517,37 @@ fn reqwest_transport_aborts_an_in_flight_request_at_the_deadline() {
 		elapsed < Duration::from_millis(700),
 		"an in-flight request exceeded its deadline: {elapsed:?}"
 	);
+}
+
+#[test]
+fn materialize_tree_and_blobs_share_one_absolute_deadline() {
+	let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+	let blob_checked = Arc::clone(&checked);
+	let responder = happy_responder();
+	let (transport, _) = transport(move |request| {
+		if is_tree(&request.url) {
+			std::thread::sleep(Duration::from_millis(100));
+		}
+		if blob_oid(&request.url).is_some() {
+			let remaining = request.timeout.expect("blob request deadline");
+			assert!(
+				remaining < Duration::from_millis(250),
+				"blob phase reset the operation deadline: {remaining:?}"
+			);
+			blob_checked.store(true, std::sync::atomic::Ordering::SeqCst);
+		}
+		responder(request)
+	});
+	let backend =
+		GithubRest::new(transport).with_timeout(Duration::from_millis(300));
+	let snapshot = backend.resolve(&github_source(), None).unwrap();
+	let dest = tempfile::tempdir().unwrap();
+
+	backend
+		.materialize(&snapshot, &["skills/music"], dest.path())
+		.unwrap();
+
+	assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
 }
 
 // ─── Security failure is a HARD error, NOT a silent fallback ───

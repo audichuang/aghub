@@ -116,6 +116,18 @@ pub(crate) fn build_rocket(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
 ) -> rocket::Rocket<rocket::Build> {
+	build_rocket_with_skill_repository_factory(
+		config,
+		app_data_dir,
+		crate::state::SkillRepositoryFactory::default(),
+	)
+}
+
+pub(crate) fn build_rocket_with_skill_repository_factory(
+	config: rocket::Config,
+	app_data_dir: PathBuf,
+	skill_repositories: crate::state::SkillRepositoryFactory,
+) -> rocket::Rocket<rocket::Build> {
 	// Only the desktop webview is a legitimate browser origin. Allow-listing it
 	// (instead of `AllOrSome::All`) makes a cross-origin JSON POST — e.g. a
 	// malicious page driving `git/scan` against the localhost API — fail its
@@ -167,6 +179,7 @@ pub(crate) fn build_rocket(
 			sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
 		})
 		.manage(crate::state::InferenceProviderState { app_data_dir })
+		.manage(skill_repositories)
 		.mount(
 			"/api/v1",
 			routes![
