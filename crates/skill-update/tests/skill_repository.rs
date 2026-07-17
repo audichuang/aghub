@@ -235,11 +235,11 @@ struct AlwaysFallbackRest {
 }
 
 #[derive(Default)]
-struct LateFallbackRest {
+struct TruncatedTreeRest {
 	materialize_calls: AtomicUsize,
 }
 
-impl RepoFetchBackend for LateFallbackRest {
+impl RepoFetchBackend for TruncatedTreeRest {
 	fn resolve(
 		&self,
 		_source: &GitSourceRef,
@@ -256,9 +256,7 @@ impl RepoFetchBackend for LateFallbackRest {
 		&self,
 		_snapshot: &RepoSnapshot,
 	) -> aghub_git::Result<RepoTree> {
-		Ok(RepoTree {
-			entries: Vec::new(),
-		})
+		Err(GitError::rest_fallback("tree truncated"))
 	}
 
 	fn read_blobs(
@@ -276,7 +274,7 @@ impl RepoFetchBackend for LateFallbackRest {
 		_dest: &Path,
 	) -> aghub_git::Result<()> {
 		self.materialize_calls.fetch_add(1, Ordering::SeqCst);
-		Err(GitError::rest_fallback("blob request timed out"))
+		unreachable!("list failure must not produce staging output")
 	}
 }
 impl RepoFetchBackend for AlwaysFallbackRest {
@@ -573,29 +571,17 @@ fn rest_fallback_routes_to_gix_once_inside_the_repository() {
 }
 
 #[test]
-fn late_rest_blob_failure_falls_back_inside_the_repository() {
-	let fixture = tempfile::tempdir().unwrap();
-	let music = fixture.path().join("skills/music");
-	fs::create_dir_all(&music).unwrap();
-	fs::write(music.join("SKILL.md"), b"late gix fallback\n").unwrap();
-
-	let rest = Arc::new(LateFallbackRest::default());
-	let gix = Arc::new(LocalDirBackend::new(fixture.path()));
+fn post_resolve_rest_fallback_returns_clean_error_without_staging() {
+	let rest = Arc::new(TruncatedTreeRest::default());
 	let repo = SkillRepository::with_backends(
 		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
-		gix.clone() as Arc<dyn RepoFetchBackend>,
+		Arc::new(NeverBackend),
 	);
 	let snapshot = repo.resolve(&github_source(), None).unwrap();
-	let path = SkillPath::parse("skills/music").unwrap();
+	let error = repo.list(&snapshot).unwrap_err();
 
-	let fetched = repo
-		.fetch(&snapshot, FetchSelection::Skills(&[path]))
-		.unwrap();
-
-	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 1);
-	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 1);
-	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
-	assert!(fetched.root.join("skills/music/SKILL.md").exists());
+	assert!(matches!(error, SkillRepoError::Network));
+	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 0);
 }
 
 struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);

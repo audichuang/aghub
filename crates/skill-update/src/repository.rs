@@ -29,13 +29,6 @@ enum BackendKind {
 	Gix,
 }
 
-#[derive(Clone)]
-struct BackendMemo {
-	kind: BackendKind,
-	source: aghub_git::SourceRef,
-	auth: Option<Credentials>,
-}
-
 /// What to materialize from a pinned snapshot.
 #[derive(Clone, Copy, Debug)]
 pub enum FetchSelection<'a> {
@@ -102,8 +95,8 @@ pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 pub struct SkillRepository {
 	rest: Option<Arc<dyn RepoFetchBackend>>,
 	gix: Arc<dyn RepoFetchBackend>,
-	/// `commit_oid` → backend plus source/auth for a pinned late fallback.
-	memo: Mutex<HashMap<String, BackendMemo>>,
+	/// `commit_oid` → backend that resolved the immutable snapshot.
+	memo: Mutex<HashMap<String, BackendKind>>,
 }
 
 impl Default for SkillRepository {
@@ -172,12 +165,7 @@ impl SkillRepository {
 			let rest = self.rest.as_ref().expect("checked above");
 			match rest.resolve(&git_sr, auth.as_ref()) {
 				Ok(snap) => {
-					self.remember(
-						&snap.commit_oid,
-						BackendKind::Rest,
-						&git_sr,
-						auth.as_ref(),
-					)?;
+					self.remember(&snap.commit_oid, BackendKind::Rest)?;
 					return Ok(snap);
 				}
 				Err(GitError::RestFallback(_)) => {
@@ -191,12 +179,7 @@ impl SkillRepository {
 			.gix
 			.resolve(&git_sr, auth.as_ref())
 			.map_err(map_git_error)?;
-		self.remember(
-			&snap.commit_oid,
-			BackendKind::Gix,
-			&git_sr,
-			auth.as_ref(),
-		)?;
+		self.remember(&snap.commit_oid, BackendKind::Gix)?;
 		Ok(snap)
 	}
 
@@ -317,18 +300,9 @@ impl SkillRepository {
 		&self,
 		commit_oid: &str,
 		kind: BackendKind,
-		source: &aghub_git::SourceRef,
-		auth: Option<&Credentials>,
 	) -> Result<(), SkillRepoError> {
 		let mut memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
-		memo.insert(
-			commit_oid.to_string(),
-			BackendMemo {
-				kind,
-				source: source.clone(),
-				auth: auth.cloned(),
-			},
-		);
+		memo.insert(commit_oid.to_string(), kind);
 		Ok(())
 	}
 
@@ -340,8 +314,7 @@ impl SkillRepository {
 			&RepoSnapshot,
 		) -> aghub_git::Result<T>,
 	) -> Result<T, SkillRepoError> {
-		let memo = self.memo_for(&snapshot.commit_oid)?;
-		match memo.kind {
+		match self.memo_for(&snapshot.commit_oid)? {
 			BackendKind::Gix => {
 				operation(self.gix.as_ref(), snapshot).map_err(map_git_error)
 			}
@@ -350,10 +323,7 @@ impl SkillRepository {
 				match operation(rest.as_ref(), snapshot) {
 					Ok(value) => Ok(value),
 					Err(GitError::RestFallback(_)) => {
-						let gix_snapshot =
-							self.fallback_to_gix(snapshot, memo)?;
-						operation(self.gix.as_ref(), &gix_snapshot)
-							.map_err(map_git_error)
+						Err(SkillRepoError::Network)
 					}
 					Err(error) => Err(map_git_error(error)),
 				}
@@ -364,30 +334,9 @@ impl SkillRepository {
 	fn memo_for(
 		&self,
 		commit_oid: &str,
-	) -> Result<BackendMemo, SkillRepoError> {
+	) -> Result<BackendKind, SkillRepoError> {
 		let memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
-		memo.get(commit_oid).cloned().ok_or(SkillRepoError::Network)
-	}
-
-	fn fallback_to_gix(
-		&self,
-		snapshot: &RepoSnapshot,
-		memo: BackendMemo,
-	) -> Result<RepoSnapshot, SkillRepoError> {
-		let gix_snapshot = self
-			.gix
-			.resolve(&memo.source, memo.auth.as_ref())
-			.map_err(map_git_error)?;
-		if gix_snapshot.commit_oid != snapshot.commit_oid {
-			return Err(SkillRepoError::Network);
-		}
-		self.remember(
-			&snapshot.commit_oid,
-			BackendKind::Gix,
-			&memo.source,
-			memo.auth.as_ref(),
-		)?;
-		Ok(gix_snapshot)
+		memo.get(commit_oid).copied().ok_or(SkillRepoError::Network)
 	}
 }
 
