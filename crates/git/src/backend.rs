@@ -2,8 +2,9 @@
 //! read blobs, and materialize selected sub-trees.
 //!
 //! Implementations have no skill knowledge — callers (skill-update) own
-//! discovery and selection policy. [`GixShallow`] is the shallow gix path;
-//! a future `GithubRest` backend shares the same trait.
+//! discovery and selection policy. [`GixShallow`] is the shallow gix path and
+//! `GithubRest` (see `github_rest`) is the GitHub REST fast-path; both implement
+//! the same trait.
 
 use std::collections::HashMap;
 use std::path::Path;

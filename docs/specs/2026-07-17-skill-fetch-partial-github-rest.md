@@ -16,7 +16,7 @@ skills install/materialize; round-trip contract with npx `skills`
 Installing, checking, or browsing a skill from a git repo is slow and wasteful,
 and the cost is proportional to the **repository**, not to the skill.
 
-Today every path — CLI `skills add` / `check` / `apply-update` / `source`, and
+Today every repo-fetching path — CLI `check` / `apply-update` / `source`, and
 the desktop "Import from GitHub" scan + install — downloads the **entire repo,
 including all commit history and all blobs**, materializes the whole tip tree
 into a temp dir, and only **then** slices out the one skill folder it wanted:
