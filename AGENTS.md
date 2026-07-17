@@ -249,3 +249,16 @@ own skills + Master.
 
 Project root: walk up for agent markers (`.claude/`, `.opencode/`, `.cursor/`,
 `.mcp.json`, …). **`.git` alone is not enough.**
+
+## Agent skills
+
+### Issue tracker
+
+Local markdown — issues live as `.scratch/<feature>/issues/<NN>-<slug>.md`
+(spec at `.scratch/<feature>/spec.md`), triage state in a `Status:` line. See
+`docs/agents/issue-tracker.md`.
+
+### Domain docs
+
+Single-context — one root `CONTEXT.md` + `docs/adr/`. See
+`docs/agents/domain.md`.
