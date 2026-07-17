@@ -13,15 +13,17 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
+use std::net::{TcpListener, TcpStream};
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use aghub_git::{
-	Blob, Credentials, GitError, GithubRest, HttpRequest, HttpResponse,
-	HttpTransport, RepoFetchBackend, RepoSnapshot, RepoTree,
-	SourceRef as GitSourceRef,
+	Blob, Credentials, GitError, GithubRest, GixShallow, HttpRequest,
+	HttpResponse, HttpTransport, RepoFetchBackend, RepoSnapshot, RepoTree,
+	ReqwestTransport, SourceRef as GitSourceRef,
 };
 use skill::SkillPath;
 use skill_update::{
@@ -754,4 +756,301 @@ fn oversized_root_tree_is_refused_and_downloads_no_blobs() {
 		downloaded.is_empty(),
 		"an over-bound root must download NO blobs, downloaded: {downloaded:?}"
 	);
+}
+
+struct MaterializeCountingGix {
+	inner: GixShallow,
+	materialize_calls: Arc<AtomicUsize>,
+}
+
+impl RepoFetchBackend for MaterializeCountingGix {
+	fn resolve(
+		&self,
+		source: &GitSourceRef,
+		auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		self.inner.resolve(source, auth)
+	}
+
+	fn read_tree(
+		&self,
+		snapshot: &RepoSnapshot,
+	) -> aghub_git::Result<RepoTree> {
+		self.inner.read_tree(snapshot)
+	}
+
+	fn read_blobs(
+		&self,
+		snapshot: &RepoSnapshot,
+		oids: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		self.inner.read_blobs(snapshot, oids)
+	}
+
+	fn materialize(
+		&self,
+		snapshot: &RepoSnapshot,
+		paths: &[&str],
+		dest: &Path,
+	) -> aghub_git::Result<()> {
+		self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+		self.inner.materialize(snapshot, paths, dest)
+	}
+}
+
+struct ChildGuard(Child);
+
+impl Drop for ChildGuard {
+	fn drop(&mut self) {
+		let _ = self.0.kill();
+		let _ = self.0.wait();
+	}
+}
+
+#[test]
+fn gix_root_skill_over_limit_is_refused_before_materialization() {
+	let tmp = tempfile::tempdir().unwrap();
+	let origin = tmp.path().join("large-root-origin");
+	fs::create_dir_all(origin.join("bulk")).unwrap();
+	fs::write(
+		origin.join("SKILL.md"),
+		b"---\nname: root\ndescription: large root\n---\n",
+	)
+	.unwrap();
+	for index in 0..skill::hash::MAX_FILES {
+		fs::write(origin.join(format!("bulk/{index:05}")), []).unwrap();
+	}
+	let git = Path::new("git");
+	run_git(git, &origin, &["init", "-q", "-b", "main"]);
+	run_git(git, &origin, &["add", "-A"]);
+	run_git(git, &origin, &["commit", "-q", "-m", "large root"]);
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let address = listener.local_addr().unwrap();
+	drop(listener);
+	let daemon = Command::new(git)
+		.args([
+			"daemon".to_string(),
+			"--reuseaddr".to_string(),
+			"--export-all".to_string(),
+			"--listen=127.0.0.1".to_string(),
+			format!("--port={}", address.port()),
+			format!("--base-path={}", tmp.path().display()),
+		])
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_SYSTEM", "/dev/null")
+		.stdout(Stdio::null())
+		.stderr(Stdio::null())
+		.spawn()
+		.unwrap();
+	let _daemon = ChildGuard(daemon);
+	let ready_by = Instant::now() + Duration::from_secs(2);
+	while TcpStream::connect(address).is_err() {
+		assert!(
+			Instant::now() < ready_by,
+			"git daemon did not start on {address}"
+		);
+		std::thread::sleep(Duration::from_millis(10));
+	}
+
+	let materialize_calls = Arc::new(AtomicUsize::new(0));
+	let backend: Arc<dyn RepoFetchBackend> = Arc::new(MaterializeCountingGix {
+		inner: GixShallow::new(),
+		materialize_calls: Arc::clone(&materialize_calls),
+	});
+	let repo = SkillRepository::with_backends(None, backend);
+	let source = SourceRef {
+		source: format!("git://{address}/large-root-origin"),
+		ref_: Some("main".to_string()),
+	};
+	let snapshot = repo.resolve(&source, None).unwrap();
+	let root = SkillPath::parse("").unwrap();
+
+	let error = repo
+		.fetch(&snapshot, FetchSelection::Skills(&[root]))
+		.unwrap_err();
+
+	assert_eq!(error.code(), "ROOT_SKILL_TOO_LARGE");
+	assert_eq!(
+		materialize_calls.load(Ordering::SeqCst),
+		0,
+		"the over-bound gix root must be refused before any write"
+	);
+}
+
+#[test]
+fn list_filters_over_depth_skill_metadata_before_blob_requests() {
+	const OID_SHALLOW: &str = "eeee1111eeee1111eeee1111eeee1111eeee1111";
+	const OID_DEEP: &str = "eeee2222eeee2222eeee2222eeee2222eeee2222";
+	let deep_folder = "a/b/c/d/e/f/g/h/i/j/k";
+	let tree = format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
+{{"path":"skills/ok/SKILL.md","mode":"100644","type":"blob","sha":"{OID_SHALLOW}","size":45}},
+{{"path":"{deep_folder}/SKILL.md","mode":"100644","type":"blob","sha":"{OID_DEEP}","size":45}}
+]}}"#
+	);
+	let commit = commit_json();
+	let (transport, recorded) = transport(move |request| {
+		if let Some(oid) = blob_oid(&request.url) {
+			let name = if oid == OID_SHALLOW { "ok" } else { "deep" };
+			return Ok(raw_ok(
+				format!("---\nname: {name}\ndescription: test\n---\n")
+					.into_bytes(),
+			));
+		}
+		if is_tree(&request.url) {
+			return Ok(json_ok(tree.clone().into_bytes()));
+		}
+		if is_commit_resolve(&request.url) {
+			return Ok(json_ok(commit.clone().into_bytes()));
+		}
+		Ok(status(404, &[]))
+	});
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(transport));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+	let snapshot = repo.resolve(&github_source(), None).unwrap();
+
+	let catalog = repo.list(&snapshot).unwrap();
+
+	assert_eq!(catalog.skills.len(), 1);
+	assert_eq!(catalog.skills[0].name, "ok");
+	let requested: Vec<String> = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter_map(|request| blob_oid(&request.url))
+		.collect();
+	assert_eq!(
+		requested,
+		vec![OID_SHALLOW.to_string()],
+		"an over-depth SKILL.md must never enter the blob request set"
+	);
+}
+
+#[test]
+fn catalog_snapshot_fetches_only_discovered_skills_and_changelog() {
+	const OID_A_SKILL: &str = "ffff1111ffff1111ffff1111ffff1111ffff1111";
+	const OID_A_SUPPORT: &str = "ffff2222ffff2222ffff2222ffff2222ffff2222";
+	const OID_B_SKILL: &str = "ffff3333ffff3333ffff3333ffff3333ffff3333";
+	const OID_CHANGELOG: &str = "ffff4444ffff4444ffff4444ffff4444ffff4444";
+	const OID_HUGE: &str = "ffff5555ffff5555ffff5555ffff5555ffff5555";
+	let huge = skill::hash::MAX_TOTAL_BYTES + 1;
+	let tree = format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
+{{"path":"skills/a/SKILL.md","mode":"100644","type":"blob","sha":"{OID_A_SKILL}","size":43}},
+{{"path":"skills/a/reference.md","mode":"100644","type":"blob","sha":"{OID_A_SUPPORT}","size":9}},
+{{"path":"skills/b/SKILL.md","mode":"100644","type":"blob","sha":"{OID_B_SKILL}","size":43}},
+{{"path":"CHANGELOG.md","mode":"100644","type":"blob","sha":"{OID_CHANGELOG}","size":10}},
+{{"path":"unrelated/huge.bin","mode":"100644","type":"blob","sha":"{OID_HUGE}","size":{huge}}}
+]}}"#
+	);
+	let mut blobs = HashMap::new();
+	blobs.insert(
+		OID_A_SKILL.to_string(),
+		b"---\nname: a\ndescription: skill a\n---\n".to_vec(),
+	);
+	blobs.insert(OID_A_SUPPORT.to_string(), b"reference".to_vec());
+	blobs.insert(
+		OID_B_SKILL.to_string(),
+		b"---\nname: b\ndescription: skill b\n---\n".to_vec(),
+	);
+	blobs.insert(OID_CHANGELOG.to_string(), b"changelog\n".to_vec());
+	blobs.insert(OID_HUGE.to_string(), b"must not fetch".to_vec());
+	let commit = commit_json();
+	let (transport, recorded) = transport(move |request| {
+		if let Some(oid) = blob_oid(&request.url) {
+			return blobs
+				.get(&oid)
+				.cloned()
+				.map(raw_ok)
+				.map(Ok)
+				.unwrap_or_else(|| Ok(status(404, &[])));
+		}
+		if is_tree(&request.url) {
+			return Ok(json_ok(tree.clone().into_bytes()));
+		}
+		if is_commit_resolve(&request.url) {
+			return Ok(json_ok(commit.clone().into_bytes()));
+		}
+		Ok(status(404, &[]))
+	});
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(transport));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+	let snapshot = repo.resolve(&github_source(), None).unwrap();
+
+	let fetched = repo
+		.fetch(&snapshot, FetchSelection::CatalogSnapshot)
+		.unwrap();
+
+	assert!(fetched.root.join("skills/a/SKILL.md").exists());
+	assert!(fetched.root.join("skills/a/reference.md").exists());
+	assert!(fetched.root.join("skills/b/SKILL.md").exists());
+	assert!(fetched.root.join("CHANGELOG.md").exists());
+	assert!(!fetched.root.join("unrelated").exists());
+	let requested: Vec<String> = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter_map(|request| blob_oid(&request.url))
+		.collect();
+	let expected = vec![
+		OID_A_SKILL.to_string(),
+		OID_B_SKILL.to_string(),
+		OID_A_SUPPORT.to_string(),
+		OID_CHANGELOG.to_string(),
+	];
+	assert_eq!(
+		requested.len(),
+		expected.len(),
+		"catalog blobs must not be requested twice: {requested:?}"
+	);
+	assert_eq!(
+		requested.into_iter().collect::<BTreeSet<_>>(),
+		expected.into_iter().collect(),
+		"catalog fetch must request exactly skill-folder + CHANGELOG blobs"
+	);
+}
+
+#[test]
+#[ignore = "network"]
+fn real_github_rest_catalog_and_install_are_pinned_and_hashed() {
+	const FIXTURE_COMMIT: &str = "777599e1159e401b11ce4c8a57c20f09a8f1596e";
+	const SKILL_FOLDER: &str = "skills/find-skills";
+	const SKILL_HASH: &str =
+		"913b9d37d0d54047dd65222bb8c67b2bf04e3cb87dcad1729068d7a8b2c8c396";
+
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(
+		GithubRest::new(Arc::new(ReqwestTransport::new()))
+			.with_timeout(Duration::from_secs(30)),
+	);
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+	let source = SourceRef {
+		source: "https://github.com/vercel-labs/skills.git".to_string(),
+		ref_: Some(FIXTURE_COMMIT.to_string()),
+	};
+
+	let snapshot = repo.resolve(&source, None).unwrap();
+	assert_eq!(snapshot.commit_oid, FIXTURE_COMMIT);
+	let catalog = repo.list(&snapshot).unwrap();
+	let skill = catalog
+		.skills
+		.iter()
+		.find(|skill| skill.skill_path.as_str() == SKILL_FOLDER)
+		.expect("the pinned fixture must expose find-skills");
+	let selected = SkillPath::parse(&skill.skill_path).unwrap();
+	let fetched = repo
+		.fetch(
+			&snapshot,
+			FetchSelection::Skills(std::slice::from_ref(&selected)),
+		)
+		.unwrap();
+
+	assert_eq!(fetched.snapshot.commit_oid, FIXTURE_COMMIT);
+	let folder = fetched.root.join(SKILL_FOLDER);
+	let content = fs::read_to_string(folder.join("SKILL.md")).unwrap();
+	assert!(content.contains("name: find-skills"));
+	let hash = skill::compute_skill_folder_hash(&folder).unwrap();
+	assert_eq!(hash, SKILL_HASH);
 }

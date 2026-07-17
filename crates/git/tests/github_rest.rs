@@ -11,14 +11,15 @@
 #![cfg(unix)]
 
 use std::collections::{BTreeSet, HashMap};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use aghub_git::{
 	github_api_host, Credentials, GitError, GithubRest, HttpRequest,
-	HttpResponse, HttpTransport, RepoFetchBackend, SourceRef,
+	HttpResponse, HttpTransport, RepoFetchBackend, ReqwestTransport, SourceRef,
 };
 
 // ─── Injectable, request-recording transport seam ───
@@ -343,6 +344,56 @@ fn rate_limit_403_routes_to_fallback() {
 }
 
 #[test]
+fn blob_phase_is_rejected_when_request_budget_exceeds_rate_limit() {
+	const OID_SHARED: &str = "abababababababababababababababababababab";
+	const OID_SUPPORT: &str = "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd";
+	let tree = format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[
+{{"path":"skills/music/SKILL.md","mode":"100644","type":"blob","sha":"{OID_SHARED}","size":10}},
+{{"path":"skills/music/copy.md","mode":"100644","type":"blob","sha":"{OID_SHARED}","size":10}},
+{{"path":"skills/music/support.md","mode":"100644","type":"blob","sha":"{OID_SUPPORT}","size":20}}
+]}}"#
+	);
+	let commit = commit_json();
+	let (transport, recorded) = transport(move |request| {
+		if blob_oid(&request.url).is_some() {
+			return Ok(raw_ok(b"unexpected".to_vec()));
+		}
+		if is_tree(&request.url) {
+			return Ok(HttpResponse {
+				status: 200,
+				headers: vec![
+					("content-type".into(), "application/json".into()),
+					("x-ratelimit-remaining".into(), "1".into()),
+				],
+				body: tree.clone().into_bytes(),
+			});
+		}
+		Ok(json_ok(commit.clone().into_bytes()))
+	});
+	let backend = GithubRest::new(transport);
+	let snapshot = backend.resolve(&github_source(), None).unwrap();
+	let dest = tempfile::tempdir().unwrap();
+
+	let error = backend
+		.materialize(&snapshot, &["skills/music"], dest.path())
+		.unwrap_err();
+
+	assert!(matches!(error, GitError::RestFallback(_)));
+	let message = error.to_string();
+	assert!(message.contains("2 requests"), "{message}");
+	assert!(message.contains("30 bytes"), "{message}");
+	assert!(
+		recorded
+			.lock()
+			.unwrap()
+			.iter()
+			.all(|request| blob_oid(&request.url).is_none()),
+		"admission must happen before any blob request"
+	);
+}
+
+#[test]
 fn unauthorized_401_routes_to_fallback() {
 	let (t, _r) = transport(|_req: &HttpRequest| Ok(status(401, &[])));
 	let backend = GithubRest::new(t);
@@ -430,6 +481,38 @@ fn past_deadline_falls_back_without_touching_the_network() {
 	assert!(
 		recorded.lock().unwrap().is_empty(),
 		"a passed deadline must not issue any request"
+	);
+}
+
+#[test]
+fn reqwest_transport_aborts_an_in_flight_request_at_the_deadline() {
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let address = listener.local_addr().unwrap();
+	let (accepted_tx, accepted_rx) = mpsc::channel();
+	std::thread::spawn(move || {
+		let (_stream, _) = listener.accept().unwrap();
+		accepted_tx.send(()).unwrap();
+		std::thread::sleep(Duration::from_secs(1));
+	});
+
+	let transport = ReqwestTransport::new();
+	let started = Instant::now();
+	let error = transport
+		.execute(HttpRequest {
+			url: format!("http://{address}/stall"),
+			headers: Vec::new(),
+			timeout: Some(Duration::from_millis(120)),
+		})
+		.unwrap_err();
+	let elapsed = started.elapsed();
+
+	accepted_rx
+		.recv_timeout(Duration::from_millis(500))
+		.expect("the request must be in flight before its deadline aborts it");
+	assert!(matches!(error, GitError::RestFallback(_)));
+	assert!(
+		elapsed < Duration::from_millis(700),
+		"an in-flight request exceeded its deadline: {elapsed:?}"
 	);
 }
 

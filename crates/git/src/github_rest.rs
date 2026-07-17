@@ -1,8 +1,8 @@
 //! GitHub REST fast-path backend: fetch only the selected skill's latest files
 //! via the GitHub REST API — no clone, no history, no unrelated blobs.
 //!
-//! Implements [`RepoFetchBackend`] for `github.com` / `*.github.com` (mapped to
-//! `api.github.com`). Every REST call goes through an injectable
+//! Implements [`RepoFetchBackend`] for exact, normalized `github.com` (mapped
+//! to `api.github.com`). Every REST call goes through an injectable
 //! [`HttpTransport`] so tests feed canned GitHub API JSON without the network
 //! and record the exact request set. Any transient / unsupported / not-GitHub
 //! condition surfaces as [`GitError::RestFallback`] so the caller can route to
@@ -12,7 +12,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::backend::{
 	entry_matches_selection, Blob, RepoFetchBackend, RepoTree, SourceRef,
@@ -41,6 +41,8 @@ pub struct HttpRequest {
 	pub url: String,
 	/// Header (name, value) pairs, e.g. `("Authorization", "Bearer …")`.
 	pub headers: Vec<(String, String)>,
+	/// Remaining absolute-deadline budget for the complete request.
+	pub timeout: Option<Duration>,
 }
 
 /// One inbound REST response.
@@ -99,6 +101,11 @@ impl HttpTransport for ReqwestTransport {
 		for (name, value) in &request.headers {
 			builder = builder.header(name.as_str(), value.as_str());
 		}
+		if let Some(timeout) = request.timeout {
+			// Reqwest applies this from connect through completion of the
+			// response body, bounding connect, read, and overall request time.
+			builder = builder.timeout(timeout);
+		}
 		let response = builder.send().map_err(|e| {
 			GitError::rest_fallback(format!("HTTP request failed: {e}"))
 		})?;
@@ -152,6 +159,14 @@ pub(crate) struct RepoContext {
 	/// Resolved token sent up front on every request (token-first auth).
 	pub token: Option<String>,
 	pub tree_oid: String,
+	pub blob_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+	pub blob_admission: Arc<Mutex<BlobAdmission>>,
+}
+
+#[derive(Default)]
+pub(crate) struct BlobAdmission {
+	remaining_requests: Option<u64>,
+	byte_sizes: HashMap<String, u64>,
 }
 
 /// GitHub REST fast-path backend. Constructed with an [`HttpTransport`]; an
@@ -161,6 +176,7 @@ pub(crate) struct RepoContext {
 pub struct GithubRest {
 	pub(crate) transport: Arc<dyn HttpTransport>,
 	pub(crate) deadline: Option<Instant>,
+	pub(crate) timeout: Option<Duration>,
 	pub(crate) concurrency: usize,
 	pub(crate) cache: Mutex<HashMap<String, RepoContext>>,
 }
@@ -172,6 +188,7 @@ impl GithubRest {
 		Self {
 			transport,
 			deadline: None,
+			timeout: None,
 			concurrency: DEFAULT_CONCURRENCY,
 			cache: Mutex::new(HashMap::new()),
 		}
@@ -184,6 +201,14 @@ impl GithubRest {
 		self
 	}
 
+	/// Set the budget used to derive a fresh absolute deadline for each backend
+	/// operation. Unlike [`Self::with_deadline`], this is safe for repositories
+	/// retained between a catalog scan and a later install.
+	pub fn with_timeout(mut self, timeout: Duration) -> Self {
+		self.timeout = Some(timeout);
+		self
+	}
+
 	/// Override the concurrent-blob-download count.
 	pub fn with_concurrency(mut self, concurrency: usize) -> Self {
 		self.concurrency = concurrency.max(1);
@@ -192,12 +217,16 @@ impl GithubRest {
 
 	/// `Err(RestFallback)` if the absolute deadline has passed.
 	pub(crate) fn check_deadline(&self) -> Result<()> {
-		if let Some(deadline) = self.deadline {
-			if Instant::now() >= deadline {
-				return Err(GitError::rest_fallback("deadline exceeded"));
-			}
-		}
-		Ok(())
+		self.remaining_timeout().map(|_| ())
+	}
+
+	fn remaining_timeout(&self) -> Result<Option<Duration>> {
+		remaining_timeout(self.operation_deadline())
+	}
+
+	fn operation_deadline(&self) -> Option<Instant> {
+		self.deadline
+			.or_else(|| self.timeout.map(|timeout| Instant::now() + timeout))
 	}
 
 	fn get_context(&self, commit_oid: &str) -> Result<RepoContext> {
@@ -224,7 +253,11 @@ impl GithubRest {
 		let headers = build_headers(token, accept);
 		let response = self
 			.transport
-			.execute(HttpRequest { url, headers })
+			.execute(HttpRequest {
+				url,
+				headers,
+				timeout: self.remaining_timeout()?,
+			})
 			.map_err(|e| {
 				GitError::rest_fallback(format!("transport error: {e}"))
 			})?;
@@ -308,6 +341,10 @@ impl RepoFetchBackend for GithubRest {
 					repo,
 					token,
 					tree_oid: tree_oid.clone(),
+					blob_cache: Arc::new(Mutex::new(HashMap::new())),
+					blob_admission: Arc::new(Mutex::new(
+						BlobAdmission::default(),
+					)),
 				},
 			);
 		}
@@ -386,7 +423,10 @@ impl RepoFetchBackend for GithubRest {
 					let size = entry.get("size").and_then(|v| v.as_u64());
 					(StagedEntryMode::Executable, size)
 				}
-				("120000", _) => (StagedEntryMode::Symlink, None),
+				("120000", _) => {
+					let size = entry.get("size").and_then(|v| v.as_u64());
+					(StagedEntryMode::Symlink, size)
+				}
 				("160000", _) | (_, "commit") => {
 					(StagedEntryMode::Gitlink, None)
 				}
@@ -403,6 +443,29 @@ impl RepoFetchBackend for GithubRest {
 				oid,
 				size,
 			});
+		}
+
+		{
+			let remaining = response
+				.header("x-ratelimit-remaining")
+				.and_then(|value| value.parse::<u64>().ok());
+			let mut admission = ctx.blob_admission.lock().map_err(|_| {
+				GitError::clone_failed(
+					"GithubRest blob admission lock poisoned",
+				)
+			})?;
+			if remaining.is_some() {
+				admission.remaining_requests = remaining;
+			}
+			admission.byte_sizes.clear();
+			for entry in &entries {
+				if let Some(size) = entry.size {
+					admission
+						.byte_sizes
+						.entry(entry.oid.clone())
+						.or_insert(size);
+				}
+			}
 		}
 
 		Ok(RepoTree { entries })
@@ -428,15 +491,54 @@ impl RepoFetchBackend for GithubRest {
 		}
 
 		let concurrency = self.concurrency;
+		let operation_deadline = self.operation_deadline();
 		let mut out = Vec::with_capacity(unique.len());
+		let mut missing = Vec::new();
+		{
+			let cache = ctx.blob_cache.lock().map_err(|_| {
+				GitError::clone_failed("GithubRest blob cache lock poisoned")
+			})?;
+			for oid in unique {
+				match cache.get(&oid) {
+					Some(bytes) => out.push(Blob {
+						oid,
+						bytes: bytes.clone(),
+					}),
+					None => missing.push(oid),
+				}
+			}
+		}
 
-		for chunk in unique.chunks(concurrency) {
+		if !missing.is_empty() {
+			let mut admission = ctx.blob_admission.lock().map_err(|_| {
+				GitError::clone_failed(
+					"GithubRest blob admission lock poisoned",
+				)
+			})?;
+			let request_budget = missing.len() as u64;
+			let byte_budget = missing
+				.iter()
+				.filter_map(|oid| admission.byte_sizes.get(oid))
+				.sum::<u64>();
+			if let Some(remaining) = admission.remaining_requests {
+				if request_budget > remaining {
+					return Err(GitError::rest_fallback(format!(
+						"blob admission needs {request_budget} requests and \
+						 {byte_budget} bytes, but only {remaining} requests \
+						 remain"
+					)));
+				}
+				admission.remaining_requests = Some(remaining - request_budget);
+			}
+		}
+
+		for chunk in missing.chunks(concurrency) {
 			let chunk_blobs = std::thread::scope(|scope| {
 				let handles: Vec<_> = chunk
 					.iter()
 					.map(|oid| {
 						let transport = Arc::clone(&self.transport);
-						let deadline = self.deadline;
+						let deadline = operation_deadline;
 						let api_host = ctx.api_host;
 						let owner = ctx.owner.clone();
 						let repo = ctx.repo.clone();
@@ -465,6 +567,13 @@ impl RepoFetchBackend for GithubRest {
 				}
 				Ok::<Vec<Blob>, GitError>(blobs)
 			})?;
+			let mut cache = ctx.blob_cache.lock().map_err(|_| {
+				GitError::clone_failed("GithubRest blob cache lock poisoned")
+			})?;
+			for blob in &chunk_blobs {
+				cache.insert(blob.oid.clone(), blob.bytes.clone());
+			}
+			drop(cache);
 			out.extend(chunk_blobs);
 		}
 
@@ -483,10 +592,6 @@ impl RepoFetchBackend for GithubRest {
 			.iter()
 			.filter(|e| entry_matches_selection(&e.path, paths))
 			.collect();
-
-		// Cheap request/byte budget from tree metadata (caps live elsewhere).
-		let _entry_count = selected.len();
-		let _byte_budget: u64 = selected.iter().filter_map(|e| e.size).sum();
 
 		let blob_oids: Vec<String> = selected
 			.iter()
@@ -608,21 +713,18 @@ fn fetch_blob(
 	token: Option<&str>,
 	oid: &str,
 ) -> Result<Blob> {
-	if let Some(deadline) = deadline {
-		if Instant::now() >= deadline {
-			return Err(GitError::rest_fallback("deadline exceeded"));
-		}
-	}
-
 	let url =
 		format!("https://{api_host}/repos/{owner}/{repo}/git/blobs/{oid}");
 	let headers = build_headers(token, ACCEPT_RAW);
-	let response =
-		transport
-			.execute(HttpRequest { url, headers })
-			.map_err(|e| {
-				GitError::rest_fallback(format!("transport error: {e}"))
-			})?;
+	let response = transport
+		.execute(HttpRequest {
+			url,
+			headers,
+			timeout: remaining_timeout(deadline)?,
+		})
+		.map_err(|e| {
+			GitError::rest_fallback(format!("transport error: {e}"))
+		})?;
 	if !(200..300).contains(&response.status) {
 		return Err(GitError::rest_fallback(format!(
 			"HTTP {} fetching blob {oid}",
@@ -633,4 +735,15 @@ fn fetch_blob(
 		oid: oid.to_string(),
 		bytes: response.body,
 	})
+}
+
+fn remaining_timeout(deadline: Option<Instant>) -> Result<Option<Duration>> {
+	let Some(deadline) = deadline else {
+		return Ok(None);
+	};
+	deadline
+		.checked_duration_since(Instant::now())
+		.filter(|remaining| !remaining.is_zero())
+		.map(Some)
+		.ok_or_else(|| GitError::rest_fallback("deadline exceeded"))
 }

@@ -18,6 +18,7 @@ use crate::{FetchError, FetchedRepo, SourceRef};
 /// Per-fetch HTTP timeout for the gix shallow backend (matches the historical
 /// `GitFetcher` bound so a stuck remote cannot hang forever).
 const FETCH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
+const CATALOG_MAX_DEPTH: usize = 10;
 
 /// Which backend resolved a given `commit_oid`. Memoized so `list`/`fetch`
 /// always hit the same slot that produced the snapshot.
@@ -107,8 +108,10 @@ impl SkillRepository {
 	/// Production: `GithubRest(ReqwestTransport)` + `GixShallow`, whose final
 	/// tail is system git for OS-credential-helper-only private hosts.
 	pub fn new() -> Self {
-		let rest: Arc<dyn RepoFetchBackend> =
-			Arc::new(GithubRest::new(Arc::new(ReqwestTransport::new())));
+		let rest: Arc<dyn RepoFetchBackend> = Arc::new(
+			GithubRest::new(Arc::new(ReqwestTransport::new()))
+				.with_timeout(FETCH_HTTP_TIMEOUT),
+		);
 		let gix: Arc<dyn RepoFetchBackend> =
 			Arc::new(GixShallow::with_timeout(Some(FETCH_HTTP_TIMEOUT)));
 		Self::with_backends(Some(rest), gix)
@@ -186,7 +189,9 @@ impl SkillRepository {
 		for entry in &tree.entries {
 			if is_skill_md_path(&entry.path) {
 				let folder = folder_of_skill_md(&entry.path);
-				skill_md_entries.push((entry, folder));
+				if folder_depth(&folder) <= CATALOG_MAX_DEPTH {
+					skill_md_entries.push((entry, folder));
+				}
 			}
 		}
 
@@ -227,7 +232,8 @@ impl SkillRepository {
 		}
 
 		// Match install discovery: full_depth + generous max depth.
-		let discovered = discover_from_entries(candidates, 10, true);
+		let discovered =
+			discover_from_entries(candidates, CATALOG_MAX_DEPTH, true);
 
 		let mut skills = Vec::with_capacity(discovered.len());
 		for path in discovered {
@@ -259,21 +265,24 @@ impl SkillRepository {
 	) -> Result<FetchedRepo, SkillRepoError> {
 		let backend = self.backend_for(&snapshot.commit_oid)?;
 
-		// Root preflight: refuse over-bound root trees BEFORE any blob download.
-		let needs_root_preflight = match selection {
-			FetchSelection::CatalogSnapshot => true,
-			FetchSelection::Skills(paths) => paths.iter().any(|p| p.is_root()),
-		};
-		if needs_root_preflight {
-			root_size_preflight(backend.as_ref(), snapshot)?;
-		}
-
 		let path_owned: Vec<String> = match selection {
 			FetchSelection::Skills(paths) => {
 				paths.iter().map(|p| p.as_str().to_string()).collect()
 			}
-			FetchSelection::CatalogSnapshot => vec![String::new()],
+			FetchSelection::CatalogSnapshot => {
+				let catalog = self.list(snapshot)?;
+				let mut paths: Vec<String> = catalog
+					.skills
+					.into_iter()
+					.map(|skill| skill.skill_path)
+					.collect();
+				paths.push("CHANGELOG.md".to_string());
+				paths
+			}
 		};
+		if path_owned.iter().any(String::is_empty) {
+			root_size_preflight(backend.as_ref(), snapshot)?;
+		}
 		let path_refs: Vec<&str> =
 			path_owned.iter().map(String::as_str).collect();
 
@@ -330,7 +339,9 @@ pub fn skill_folder_from_lock_path(skill_path: &str) -> Option<SkillPath> {
 }
 
 /// Whole-root size preflight: sum tree metadata (entry count + declared blob
-/// sizes). Refuses without downloading any blob when bounds are exceeded.
+/// sizes). REST refuses without downloading blobs. The gix 0.84 fallback has
+/// already transferred the depth-1 tip's blobs, but still refuses before any
+/// materialization (see the spec's documented known limitation).
 fn root_size_preflight(
 	backend: &dyn RepoFetchBackend,
 	snapshot: &RepoSnapshot,

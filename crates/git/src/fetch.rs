@@ -173,6 +173,12 @@ fn fetch_into_bare(
 		1.try_into().expect("depth 1 is non-zero"),
 	));
 
+	// Known gix 0.84 limitation: the blocking high-level fetch exposes shallow
+	// history but no partial-clone blob filter. The tip's blobs are therefore
+	// transferred before callers can inspect tree metadata. Root-skill bounds
+	// are still enforced before materialization; refusing before blob transfer
+	// requires a future gix partial-clone/filter API.
+
 	// Fetch only — NO `main_worktree()` checkout.
 	let (repo, _outcome) = prep
 		.fetch_only(gix::progress::Discard, &gix::interrupt::IS_INTERRUPTED)

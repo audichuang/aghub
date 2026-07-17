@@ -396,6 +396,12 @@ that can't is worse than none — see `AGENTS.md` Testing).
   layout.
 - Upgrading gix for native partial-clone / sparse-checkout, or moving GitHub onto
   system-git partial clone (evaluated and declined in the Decision Log).
+- **Known gix 0.84 limitation:** the blocking high-level fetch exposes shallow
+  history but no partial-clone blob filter or tree-metadata-only fetch. A
+  non-GitHub root skill's size preflight therefore runs after its depth-1 tip
+  blobs transfer, though an over-bound install is still refused before
+  materialization. Refusing before transfer requires the out-of-scope gix
+  partial-clone/filter upgrade above.
 - Adopting npx `PRIORITY_PREFIXES` discovery semantics.
 - A generic public multi-host plugin API (only the two concrete backends now).
 - Broad refactors of the existing materializer beyond the mode/symlink-containment
