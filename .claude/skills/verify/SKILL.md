@@ -10,8 +10,18 @@ description: Runtime-verify aghub's skill fetch/install/update chain end-to-end 
 ```bash
 cargo build -p aghub-cli -p aghub-api --bin aghub-cli --bin aghub-api
 VHOME=$(mktemp -d)   # NEVER run against real $HOME — global installs write ~/.agents + ~/.claude
-HOME=$VHOME GITHUB_TOKEN=$(gh auth token) target/debug/aghub-api --port 18877 &
+HOME=$VHOME target/debug/aghub-api --port 18877 &
 ```
+
+Token model — know which surface reads what:
+
+- **API `/skills/install` does NOT read `GITHUB_TOKEN` env.** Its tokens come from the
+  keyring credential store or the forwarded `X-Aghub-Git-Tokens` header only. A curl
+  against a public github repo therefore goes ANONYMOUS REST (fine until rate-limited).
+  The token-authenticated REST path is covered by the cargo E2E
+  (`GITHUB_TOKEN=$(gh auth token) cargo test -p skill-update --test skill_repository -- --ignored real_github_rest`).
+- **CLI** (`source diff/sync`, `check --online`, `apply-update`) DOES read
+  `GIT_PASSWORD`/`GITHUB_TOKEN` env — `export` them first (see gotcha below).
 
 Gotchas:
 
