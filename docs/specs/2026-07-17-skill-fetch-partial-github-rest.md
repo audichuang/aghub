@@ -71,10 +71,11 @@ the requested skill's files.
    cloning each source repo in full, so that update checks are fast.
 4. As a CLI user, I want `apply-update` and `source accept-rename` to re-fetch
    only the affected skill(s), so that applying an update is not a full re-clone.
-5. As a CLI user running `source sync`, I want the whole-catalog classification
-   (needed to detect renames/removals against the source) to list the repo
-   cheaply, while the actual **content** fetch is limited to the affected skills,
-   so that sync is not a full re-clone even though it must reason over the catalog.
+5. As a CLI user running `source sync`, I want it to reason over the whole catalog
+   (to detect renames/removals against the source) and materialize the source's
+   **skill folders + root `CHANGELOG.md`** — not the whole repo, no history, no
+   non-skill files — so that sync is far leaner than a full re-clone even though it
+   must reason over the catalog.
 6. As a desktop user, I want "Import from GitHub" to list a repo's skills without
    cloning the whole repo, so that browsing a repo is near-instant.
 7. As a desktop user, I want installing a selected skill to fetch only that
@@ -197,19 +198,22 @@ raw-`join`s a client string — must pass `SkillPath`, never a raw string.
 
 `CatalogSnapshot` exists because `source sync`/`diff` must reason over the **whole**
 catalog to classify renames/removals against the source (it reads the root
-`CHANGELOG.md`); it does not mean "install everything." The **content** actually
-installed by a sync is still limited to the affected skills.
+`CHANGELOG.md`). It materializes **the source's catalogued skill folders + root
+`CHANGELOG.md`** — far leaner than a whole-repo clone (no history, no non-skill
+files), though NOT restricted to only the changed skills (a per-skill-diff sync is
+a possible future optimization). `accept-rename` and `apply-update`, by contrast,
+know their target and fetch `Skills(affected)` directly (no catalog).
 
 **Per-workflow selection** (prevents surface drift):
 
-| Workflow                                             | Catalog needed?                                                                             | Content fetched                           |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- | ----------------------------------------- |
-| CLI `source` install, desktop install (paths known)  | no                                                                                          | `Skills(selected)`                        |
-| API `/skills/install` (client sends skill **names**) | yes — list to map names→paths (reads only the repo's `SKILL.md` blobs), then fetch selected | `Skills(selected)`                        |
-| desktop scan / browse                                | yes (list only)                                                                             | none until install                        |
-| `check --online`                                     | no                                                                                          | `Skills(locked)` per `(source,ref)` group |
-| `apply-update`                                       | no                                                                                          | `Skills(affected)`                        |
-| `source sync` / `diff` / `accept-rename`             | `CatalogSnapshot` (classify)                                                                | `Skills(affected)`                        |
+| Workflow                                             | Catalog needed?                                                                             | Content fetched                                |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| desktop install (paths known)                        | no                                                                                          | `Skills(selected)`                             |
+| API `/skills/install` (client sends skill **names**) | yes — list to map names→paths (reads only the repo's `SKILL.md` blobs), then fetch selected | `Skills(selected)`                             |
+| desktop scan / browse                                | yes (list only)                                                                             | none until install                             |
+| `check --online`                                     | no                                                                                          | `Skills(locked)` per `(source,ref)` group      |
+| `apply-update`, `source accept-rename`               | no                                                                                          | `Skills(affected)`                             |
+| `source sync` / `diff`                               | `CatalogSnapshot` (classify renames/removals)                                               | catalogued skill folders + root `CHANGELOG.md` |
 
 ### GitHub REST fast-path
 

@@ -48,9 +48,15 @@ impl ApiError {
 		message: &'static str,
 		code: &'static str,
 	) -> Self {
-		// Log a REDACTED classification only — `JoinError::Display` embeds the
+		// Boundary: the HTTP RESPONSE (fixed safe `message`) and OUR structured
+		// log records carry NO panic payload. `JoinError::Display` embeds the
 		// panic payload (which can contain paths/internal detail), so never log
-		// it raw. The response already carries only the fixed safe `message`.
+		// it raw — record only the redacted classification below.
+		// NOT in scope: the process-global default Rust panic hook still prints
+		// the panic message to stderr when the blocking task panics. That is
+		// standard runtime behavior, server-side, and needed for debugging; we
+		// deliberately do NOT install a panic-suppressing global hook (it would
+		// harm observability for a non-client-facing stderr line).
 		log::error!(
 			"{code}: blocking task failed (is_panic={}, is_cancelled={})",
 			error.is_panic(),

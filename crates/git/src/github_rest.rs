@@ -5,9 +5,12 @@
 //! to `api.github.com`). Every REST call goes through an injectable
 //! [`HttpTransport`] so tests feed canned GitHub API JSON without the network
 //! and record the exact request set. Any transient / unsupported / not-GitHub
-//! condition surfaces as [`GitError::RestFallback`] so the caller can route to
-//! the gix fallback; a security-validation failure is a hard error and is never
-//! reported as a fallback.
+//! condition surfaces as [`GitError::RestFallback`]. The CALLER decides by
+//! timing: a `RestFallback` at **resolve** re-routes to the gix fallback; one
+//! that surfaces **after** a successful resolve (chiefly a `truncated` tree) is
+//! turned into a clean error by `SkillRepository`, not re-routed (gix 0.84
+//! cannot re-fetch a pinned commit by OID). A security-validation failure is a
+//! hard error and is never reported as a fallback.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
