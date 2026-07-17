@@ -615,6 +615,7 @@ fn map_remote_source_error(error: aghub_git::SourceError) -> ApiError {
 	)
 }
 
+#[cfg(test)]
 fn map_repo_discovery_error(error: skill::RepoDiscoveryError) -> ApiError {
 	match error {
 		skill::RepoDiscoveryError::NoSkillsFound
@@ -740,6 +741,9 @@ fn write_skill_install_lock(
 	Ok(())
 }
 
+/// Test-only full-clone helper for the `file://` install fallback. Production
+/// install goes through [`SkillRepository`] partial fetch instead.
+#[cfg(test)]
 fn clone_skill_source_to_temp(
 	clone_url: &str,
 	is_file_source: bool,
@@ -1216,12 +1220,125 @@ pub(crate) async fn list_all_agents_skills(
 	Ok(Json(items))
 }
 
+/// Errors from the resolve/list/select/fetch stage of skill install.
+enum InstallFetchError {
+	Repo(skill_update::SkillRepoError),
+	SkillsNotFound { missing: String, available: String },
+	NoSkillsFound,
+	InvalidPath,
+}
+
+/// Map catalog entries to selected `(catalog_name, SkillPath)` pairs.
+///
+/// Mirrors [`skill::discover_repo_skills`] selection semantics exactly:
+/// empty catalog → `NoSkillsFound`; `install_all` or empty request → every
+/// catalogued skill; else case-insensitive name match with miss reporting.
+fn select_catalog_paths(
+	catalog: &[skill_update::CatalogSkill],
+	requested: &[String],
+	install_all: bool,
+) -> Result<Vec<(String, skill::SkillPath)>, InstallFetchError> {
+	if catalog.is_empty() {
+		return Err(InstallFetchError::NoSkillsFound);
+	}
+
+	if install_all || requested.is_empty() {
+		return catalog
+			.iter()
+			.map(|c| {
+				let path = skill::SkillPath::parse(&c.skill_path)
+					.map_err(|_| InstallFetchError::InvalidPath)?;
+				Ok((c.name.clone(), path))
+			})
+			.collect();
+	}
+
+	let mut selected = Vec::new();
+	let mut missing = Vec::new();
+	for req_name in requested {
+		let requested_lower = req_name.to_lowercase();
+		match catalog
+			.iter()
+			.find(|c| c.name.to_lowercase() == requested_lower)
+		{
+			Some(c) => {
+				let path = skill::SkillPath::parse(&c.skill_path)
+					.map_err(|_| InstallFetchError::InvalidPath)?;
+				selected.push((c.name.clone(), path));
+			}
+			None => missing.push(req_name.clone()),
+		}
+	}
+
+	if !missing.is_empty() {
+		let available = catalog
+			.iter()
+			.map(|c| c.name.clone())
+			.collect::<Vec<_>>()
+			.join(", ");
+		return Err(InstallFetchError::SkillsNotFound {
+			missing: missing.join(", "),
+			available,
+		});
+	}
+
+	Ok(selected)
+}
+
+fn map_install_fetch_error(e: InstallFetchError) -> ApiError {
+	match e {
+		InstallFetchError::Repo(err) => map_skill_repo_error(err),
+		InstallFetchError::SkillsNotFound { missing, available } => {
+			ApiError::new(
+				Status::NotFound,
+				format!(
+					"Requested skills not found: {missing}. Available skills: {available}"
+				),
+				"SKILLS_NOT_FOUND",
+			)
+		}
+		InstallFetchError::NoSkillsFound => ApiError::new(
+			Status::NotFound,
+			"No skills found in source repository".to_string(),
+			"SKILLS_NOT_FOUND",
+		),
+		InstallFetchError::InvalidPath => ApiError::new(
+			Status::BadRequest,
+			"skill_path must be a relative path inside the cloned repository",
+			"SKILL_PATH_INVALID",
+		),
+	}
+}
+
 #[post("/skills/install", data = "<body>")]
 pub async fn install_skill(
 	_origin: TrustedLocalOrigin,
 	body: Json<InstallSkillRequest>,
 ) -> ApiResult<InstallSkillResponse> {
-	let req = body.into_inner();
+	// Build SkillRepository off the async worker: ReqwestTransport creates a
+	// blocking reqwest client (nested runtime) that panics when constructed
+	// inside a current_thread executor (the unit-test `block_on` helper).
+	let repo = tokio::task::spawn_blocking(skill_update::SkillRepository::new)
+		.await
+		.map_err(|e| {
+			ApiError::new(
+				Status::InternalServerError,
+				format!("Clone task panicked: {e}"),
+				"CLONE_ERROR",
+			)
+		})?;
+	install_skill_with_repo(body.into_inner(), std::sync::Arc::new(repo)).await
+}
+
+/// Core of `POST /skills/install` with an injectable [`SkillRepository`].
+///
+/// Production path: resolve one snapshot, list the catalog, map requested skill
+/// NAMES → [`SkillPath`]s, then partial-fetch only those folders. The test-only
+/// `file://` fallback still full-clones via gix.
+pub(crate) async fn install_skill_with_repo(
+	req: InstallSkillRequest,
+	repo: std::sync::Arc<skill_update::SkillRepository>,
+) -> ApiResult<InstallSkillResponse> {
 	let resource_scope = parse_install_scope(&req.scope)?;
 
 	let project_root = req
@@ -1236,69 +1353,174 @@ pub async fn install_skill(
 		));
 	}
 
-	let (clone_url, lock_source, is_file_source) =
-		match aghub_git::resolve_remote_source(&req.source) {
-			Ok(source) => {
-				let clone_url = source.clone_url.clone();
-				let lock_source =
-					install_lock_source_from_resolved(&source, None);
-				(clone_url, lock_source, false)
-			}
-			Err(error) => {
-				#[cfg(test)]
-				{
-					if let Some((clone_url, lock_source)) =
-						file_install_source(&req.source)?
-					{
-						(clone_url, lock_source, true)
-					} else {
-						return Err(map_remote_source_error(error));
-					}
-				}
-				#[cfg(not(test))]
-				return Err(map_remote_source_error(error));
-			}
-		};
+	// Keeps the materialised fetch root alive through the install loop.
+	// Fields are intentionally unread — only Drop (TempDir cleanup) matters.
+	#[allow(dead_code)]
+	enum FetchGuard {
+		Repo(skill_update::FetchedRepo),
+		#[cfg(test)]
+		Clone(tempfile::TempDir),
+	}
 
-	let clone_url_for_task = clone_url.clone();
-	let temp_dir = match timeout(
-		Duration::from_secs(300),
-		tokio::task::spawn_blocking(move || {
-			clone_skill_source_to_temp(&clone_url_for_task, is_file_source)
-		}),
-	)
-	.await
-	{
-		Ok(Ok(Ok(temp_dir))) => temp_dir,
-		Ok(Ok(Err(e))) => {
-			return Err(ApiError::new(
-				Status::BadRequest,
-				format!("Failed to clone skill source: {e}"),
-				"CLONE_FAILED",
-			));
+	// (name, skill_file, lock_skill_path)
+	type InstallItem = (String, PathBuf, String);
+
+	let (lock_source, ref_commit, items, fetch_guard): (
+		skill::InstallLockSource,
+		Option<String>,
+		Vec<InstallItem>,
+		FetchGuard,
+	) = match aghub_git::resolve_remote_source(&req.source) {
+		Ok(resolved) => {
+			let lock_source =
+				install_lock_source_from_resolved(&resolved, None);
+			let source_ref = skill_update::SourceRef {
+				source: req.source.clone(),
+				ref_: None,
+			};
+			let install_all = req.install_all.unwrap_or(false);
+			let requested = req.skills.clone();
+			let repo_for_task = repo.clone();
+
+			let (snapshot, selected, fetched) = match timeout(
+				Duration::from_secs(300),
+				tokio::task::spawn_blocking(move || {
+					let snapshot = repo_for_task
+						.resolve(&source_ref, None)
+						.map_err(InstallFetchError::Repo)?;
+					let catalog = repo_for_task
+						.list(&snapshot)
+						.map_err(InstallFetchError::Repo)?;
+					let selected = select_catalog_paths(
+						&catalog.skills,
+						&requested,
+						install_all,
+					)?;
+					let paths: Vec<skill::SkillPath> =
+						selected.iter().map(|(_, p)| p.clone()).collect();
+					let fetched = repo_for_task
+						.fetch(
+							&snapshot,
+							skill_update::FetchSelection::Skills(&paths),
+						)
+						.map_err(InstallFetchError::Repo)?;
+					Ok::<_, InstallFetchError>((snapshot, selected, fetched))
+				}),
+			)
+			.await
+			{
+				Ok(Ok(Ok(v))) => v,
+				Ok(Ok(Err(e))) => return Err(map_install_fetch_error(e)),
+				Ok(Err(e)) => {
+					return Err(ApiError::new(
+						Status::InternalServerError,
+						format!("Clone task panicked: {e}"),
+						"CLONE_ERROR",
+					));
+				}
+				Err(_) => {
+					return Err(ApiError::new(
+						Status::RequestTimeout,
+						"Skills installation timed out after 5 minutes"
+							.to_string(),
+						"SKILLS_INSTALL_TIMEOUT",
+					));
+				}
+			};
+
+			let ref_commit = Some(snapshot.commit_oid.clone());
+			let items: Vec<InstallItem> = selected
+				.into_iter()
+				.map(|(name, skill_path)| {
+					let skill_file = skill_path
+						.resolve_under(&fetched.root)
+						.join("SKILL.md");
+					let lock_skill_path =
+						skill::lock_skill_file_path(skill_path.as_str());
+					(name, skill_file, lock_skill_path)
+				})
+				.collect();
+
+			(lock_source, ref_commit, items, FetchGuard::Repo(fetched))
 		}
-		Ok(Err(e)) => {
-			return Err(ApiError::new(
-				Status::InternalServerError,
-				format!("Clone task panicked: {e}"),
-				"CLONE_ERROR",
-			));
-		}
-		Err(_) => {
-			return Err(ApiError::new(
-				Status::RequestTimeout,
-				"Skills installation timed out after 5 minutes".to_string(),
-				"SKILLS_INSTALL_TIMEOUT",
-			));
+		Err(error) => {
+			#[cfg(test)]
+			{
+				if let Some((clone_url, lock_source)) =
+					file_install_source(&req.source)?
+				{
+					let clone_url_for_task = clone_url.clone();
+					let temp_dir = match timeout(
+						Duration::from_secs(300),
+						tokio::task::spawn_blocking(move || {
+							clone_skill_source_to_temp(
+								&clone_url_for_task,
+								true,
+							)
+						}),
+					)
+					.await
+					{
+						Ok(Ok(Ok(temp_dir))) => temp_dir,
+						Ok(Ok(Err(e))) => {
+							return Err(ApiError::new(
+								Status::BadRequest,
+								format!("Failed to clone skill source: {e}"),
+								"CLONE_FAILED",
+							));
+						}
+						Ok(Err(e)) => {
+							return Err(ApiError::new(
+								Status::InternalServerError,
+								format!("Clone task panicked: {e}"),
+								"CLONE_ERROR",
+							));
+						}
+						Err(_) => {
+							return Err(ApiError::new(
+								Status::RequestTimeout,
+								"Skills installation timed out after 5 minutes"
+									.to_string(),
+								"SKILLS_INSTALL_TIMEOUT",
+							));
+						}
+					};
+
+					let selected_skills = skill::discover_repo_skills(
+						temp_dir.path(),
+						&req.skills,
+						req.install_all.unwrap_or(false),
+					)
+					.map_err(map_repo_discovery_error)?;
+
+					let ref_commit = gix::open(temp_dir.path())
+						.ok()
+						.and_then(|r| r.head_id().ok().map(|id| id.detach()))
+						.map(|oid| oid.to_string());
+
+					let items: Vec<InstallItem> = selected_skills
+						.into_iter()
+						.map(|s| {
+							let lock_skill_path =
+								skill::lock_skill_file_path(&s.relative_dir);
+							(s.name, s.full_path, lock_skill_path)
+						})
+						.collect();
+
+					(
+						lock_source,
+						ref_commit,
+						items,
+						FetchGuard::Clone(temp_dir),
+					)
+				} else {
+					return Err(map_remote_source_error(error));
+				}
+			}
+			#[cfg(not(test))]
+			return Err(map_remote_source_error(error));
 		}
 	};
-
-	let selected_skills = skill::discover_repo_skills(
-		temp_dir.path(),
-		&req.skills,
-		req.install_all.unwrap_or(false),
-	)
-	.map_err(map_repo_discovery_error)?;
 
 	// Resolve requested agents; unknown agents become per-agent failure rows.
 	let mut invalid_rows: Vec<GitInstallResultEntry> = Vec::new();
@@ -1317,21 +1539,14 @@ pub async fn install_skill(
 	let agent_types: Vec<AgentType> =
 		target_agents.iter().map(|(_, a)| *a).collect();
 
-	let ref_commit = gix::open(temp_dir.path())
-		.ok()
-		.and_then(|repo| repo.head_id().ok().map(|id| id.detach()))
-		.map(|oid| oid.to_string());
-
 	let mut agent_rows: Vec<GitInstallResultEntry> = invalid_rows;
 	let mut any_installed = false;
-	for skill in &selected_skills {
+	for (name, skill_file, lock_skill_path) in &items {
 		let request =
 			aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
-				skill_file: &skill.full_path,
+				skill_file,
 				source: &lock_source,
-				lock_skill_path: skill::lock_skill_file_path(
-					&skill.relative_dir,
-				),
+				lock_skill_path: lock_skill_path.clone(),
 				ref_commit: ref_commit.clone(),
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
@@ -1357,7 +1572,7 @@ pub async fn install_skill(
 						name: if success {
 							report.name.clone()
 						} else {
-							skill.name.clone()
+							name.clone()
 						},
 						agent: agent_str.clone(),
 						success,
@@ -1369,7 +1584,7 @@ pub async fn install_skill(
 				let message = ApiError::from(e).body.error;
 				for (agent_str, _) in &target_agents {
 					agent_rows.push(GitInstallResultEntry {
-						name: skill.name.clone(),
+						name: name.clone(),
 						agent: agent_str.clone(),
 						success: false,
 						error: Some(message.clone()),
@@ -1378,6 +1593,9 @@ pub async fn install_skill(
 			}
 		}
 	}
+
+	// Keep fetch_guard alive through the install loop (holds TempDir).
+	drop(fetch_guard);
 
 	let success = any_installed && agent_rows.iter().all(|r| r.success);
 	Ok(Json(InstallSkillResponse {
@@ -4329,8 +4547,12 @@ mod tests {
 		use skill_update::{SkillRepository, SourceRef};
 		use tempfile::tempdir;
 
+		use super::block_on;
 		use super::with_isolated_env;
-		use crate::routes::skills::scan_repo_catalog;
+		use crate::dto::skill::InstallSkillRequest;
+		use crate::routes::skills::{
+			install_skill_with_repo, scan_repo_catalog,
+		};
 		use crate::state::{GitCloneSession, GitCloneSessions};
 
 		// ── Request-recording transport seam ──
@@ -4832,6 +5054,88 @@ mod tests {
 				assert!(
 					body.contains("A version"),
 					"install materialized the pinned commit's content, got: {body}"
+				);
+			});
+		}
+
+		// ═══ Test 4: POST /skills/install fetches ONLY the NAMED skill ════════
+		//
+		// `/skills/install` takes a source + skill NAMES (no session). The rewire
+		// resolves ONE snapshot, `list`s to map names→SkillPaths, then fetches
+		// ONLY the selected skill's folder — never a whole-repo clone. Driving the
+		// extracted core with a request-recording REST transport, installing the
+		// single named "music" skill must download that skill's content blobs plus
+		// the catalog SKILL.md blobs (`list` reads every SKILL.md to resolve
+		// names), but NEVER the unrelated large blob or unrelated repo files that
+		// the old full-clone `install_skill` pulled down. FAILS if install
+		// over-fetches (full clone / all-skill content).
+		#[test]
+		fn install_skill_core_fetches_only_the_named_skill() {
+			with_isolated_env(|home, _state| {
+				let (t, recorded) = record_transport(happy_responder());
+				let rest: Arc<dyn RepoFetchBackend> =
+					Arc::new(GithubRest::new(t));
+				let repo = Arc::new(SkillRepository::with_backends(
+					Some(rest),
+					Arc::new(NoGixBackend),
+				));
+
+				let req = InstallSkillRequest {
+					source: "https://github.com/acme/skills.git".to_string(),
+					agents: vec!["claude".to_string()],
+					skills: vec!["music".to_string()],
+					scope: "global".to_string(),
+					project_path: None,
+					install_all: Some(false),
+				};
+				let resp = block_on(install_skill_with_repo(req, repo))
+					.ok()
+					.expect("install handler ok")
+					.into_inner();
+				assert!(
+					resp.success,
+					"install succeeded, rows: {:?}",
+					resp.agents
+				);
+
+				let reqs = recorded.lock().unwrap();
+				// Resolve one snapshot (commit) + read its tree via `list`.
+				assert!(
+					reqs.iter().any(|r| is_commit_resolve(&r.url)),
+					"the commit is resolved once"
+				);
+				assert!(
+					reqs.iter().any(|r| is_tree(&r.url)),
+					"the tree is read to build the catalog"
+				);
+				let blobs: BTreeSet<String> =
+					reqs.iter().filter_map(|r| blob_oid(&r.url)).collect();
+				drop(reqs);
+
+				// The selected skill's own blobs ARE fetched.
+				assert!(
+					blobs.contains(OID_MUSIC_SKILL),
+					"install fetched the selected skill's SKILL.md"
+				);
+				assert!(
+					blobs.contains(OID_MUSIC_RUN),
+					"install fetched the selected skill's support file"
+				);
+				// The whole repo is NOT pulled: the unrelated large blob and
+				// unrelated repo files are never requested (the old full-clone
+				// install_skill would have pulled every blob).
+				assert!(
+					!blobs.contains(OID_OTHER_BIG),
+					"install must NOT fetch the unrelated large blob"
+				);
+				assert!(
+					!blobs.contains(OID_README),
+					"install must NOT fetch unrelated repo files"
+				);
+
+				assert!(
+					home.join(".agents/skills/music/SKILL.md").exists(),
+					"the named skill materialized into the master"
 				);
 			});
 		}
