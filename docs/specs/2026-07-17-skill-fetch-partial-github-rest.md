@@ -48,8 +48,11 @@ the requested skill's files.
 - **github.com** uses the GitHub REST API (recursive git trees to list, git
   blobs to download only the selected skill's files) — the same mechanism npx
   `skills` uses in `blob.ts`, adapted to aghub's credential model.
-- **Every other host, and every failure**, transparently falls back to a git
-  fetch that is now **shallow (`--depth 1`)** — history is dropped there too.
+- **Every other host, and every resolve-time failure**, transparently falls
+  back to a git fetch that is now **shallow (`--depth 1`)** — history is dropped
+  there too. (Fallback is decided at **resolve**; a `RestFallback` that surfaces
+  _after_ a successful resolve — chiefly a `truncated` tree at `read_tree` — is a
+  clean error, not a re-route. See Known limitations.)
 - The installed skill is **byte-identical** to what a clone would have produced,
   so the Source hash and the npx lock round-trip are unchanged.
 
@@ -207,9 +210,11 @@ installed by a sync is still limited to the affected skills.
 
 ### GitHub REST fast-path
 
-- **List**: recursive git trees API for the resolved commit. On `truncated:true`
-  (GitHub caps at ~100k entries / 7MB), fall back; for a **known** target path,
-  prefer a per-level non-recursive subtree walk instead of recursing from root.
+- **List**: recursive git trees API for the resolved commit. `truncated:true`
+  (GitHub caps at ~100k entries / 7MB) surfaces AFTER resolve, so it is a **clean
+  error, not a re-route** (see Known limitations); it cannot occur for a real
+  single-skill repo. (A future per-level non-recursive subtree walk for a known
+  path could avoid the cap, but is not implemented.)
 - **Download**: git blobs API for only the selected skill's blobs, requesting the
   **raw media type** (avoid the ~33% base64 inflation); the bytes obtained are the
   stored git blob bytes.
@@ -233,13 +238,18 @@ installed by a sync is still limited to the affected skills.
 
 ### Fallback — shallow gix `--depth 1`
 
-Triggers (correctness never depends on REST): non-GitHub host (incl. GHES); tree
-`truncated`; rate-limit (403 + `x-ratelimit-remaining: 0`); 401/403/404; any
-network / timeout / unexpected-shape error. The existing gix bare fetch gains
+Fallback is decided at **resolve** time. Resolve-time triggers (correctness never
+depends on REST): non-GitHub host (incl. GHES); rate-limit (403 +
+`x-ratelimit-remaining: 0`); 401/403/404; any network / timeout /
+unexpected-shape error at resolve. The existing gix bare fetch gains
 `with_shallow(DepthAtRemote(1))`; the desktop scan clone becomes shallow too.
 `RepoSnapshot.commit_oid` / `commit_time` remain readable from the shallow tip.
 Fallback is only for **backend / transient / unsupported-capability** reasons —
 a **security validation failure must not be masked by a silent fallback**.
+A `RestFallback` that surfaces **after** a successful resolve (chiefly tree
+`truncated` at `read_tree`) is a **clean error, not a re-route** — see Known
+limitations (gix 0.84 cannot re-fetch a pinned commit by OID; the trigger cannot
+occur for a real single-skill repo).
 
 ### Two distinct materializers — do NOT merge them
 
@@ -363,8 +373,10 @@ that can't is worse than none — see `AGENTS.md` Testing).
   `crates/skill/tests/hash_parity_golden.rs`.
 - **Backend catalog equivalence**: REST `list` and gix `list` for one repo yield
   the identical skill set (discovery unification).
-- **Fallback routing**: each trigger (`truncated`, rate-limit, 401, network) falls
-  back to gix and still installs; a security-validation failure does **not**.
+- **Fallback routing**: each **resolve-time** trigger (rate-limit, 401, network,
+  non-GitHub host) falls back to gix and still installs; a post-resolve
+  `RestFallback` (chiefly tree `truncated`) is a **clean error, not a re-route**;
+  a security-validation failure does **not** fall back.
 - **Security**: a `120000` symlink pointing outside the skill root is rejected; a
   `SkillPath` with `..` / absolute / prefix-escape is rejected before any write.
 - **Snapshot isolation**: with the branch advanced between `list` and `fetch`, the
