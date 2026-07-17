@@ -40,6 +40,7 @@
 //! ).unwrap();
 //! ```
 
+pub mod backend;
 pub mod clone;
 pub mod credentials;
 pub mod error;
@@ -52,6 +53,9 @@ pub mod system_git;
 pub mod tree;
 
 // Re-export commonly used items
+pub use backend::{
+	Blob, GixShallow, RepoFetchBackend, RepoTree, SourceRef, TreeEntry,
+};
 pub use clone::{clone_to_path, clone_to_temp, CloneOptions};
 pub use credentials::{inject_credentials, read_credentials, Credentials};
 pub use error::{GitError, Result};

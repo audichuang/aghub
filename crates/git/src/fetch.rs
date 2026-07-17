@@ -1,26 +1,27 @@
 //! Treeless/bare ref fetch (no worktree checkout) + default-branch resolution via
 //! gix HEAD symref. Never shells out to the `git` binary.
 //!
-//! # Chosen gix 0.83 API (spike result)
+//! # Chosen gix 0.84 API
 //!
-//! gix 0.83 does NOT expose a partial (`blob:none`) fetch filter on the
-//! blocking clone path, so per the plan's documented FALLBACK we perform a
-//! **bare fetch with no worktree checkout**:
+//! gix does NOT expose a partial (`blob:none`) fetch filter on the blocking
+//! clone path, so we perform a **bare shallow (depth-1) fetch with no worktree
+//! checkout**:
 //!
 //! 1. `gix::clone::PrepareFetch::new(url, tmp, gix::create::Kind::Bare, ...)`
 //!    creates a bare repository (object DB lives at the temp-dir root, not under
 //!    `.git`).
-//! 2. `PrepareFetch::fetch_only(progress, should_interrupt)` fetches all objects
-//!    and packed refs WITHOUT calling `main_worktree()` — so there is never a
-//!    worktree checkout. This is the blocking variant (the crate enables
+//! 2. `PrepareFetch::with_shallow(Shallow::DepthAtRemote(1))` limits history to
+//!    the tip commit only — parent commits are not fetched.
+//! 3. `PrepareFetch::fetch_only(progress, should_interrupt)` fetches the tip's
+//!    objects and packed refs WITHOUT calling `main_worktree()` — so there is
+//!    never a worktree checkout. This is the blocking variant (the crate enables
 //!    `blocking-network-client`, so `maybe_async` resolves to a blocking call).
-//! 3. During `fetch_only`, gix's `update_head` writes the local `HEAD` as a
+//! 4. During `fetch_only`, gix's `update_head` writes the local `HEAD` as a
 //!    symbolic ref to the remote default branch (e.g. `refs/heads/main`) and
 //!    materializes that branch ref at the fetched commit. We therefore resolve
 //!    the default branch purely from the local `HEAD` symref via
 //!    `repo.head_name()` — **no `std::process::Command`**.
-//! 4. The skill subtree is read from the populated object DB in Task F1.3
-//!    (no checkout required).
+//! 5. The skill subtree is read from the populated object DB (no checkout).
 
 use tempfile::TempDir;
 
@@ -166,6 +167,11 @@ fn fetch_into_bare(
 			},
 		)?;
 	}
+
+	// Depth-1: tip commit only; parent history is not transferred.
+	prep = prep.with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+		1.try_into().expect("depth 1 is non-zero"),
+	));
 
 	// Fetch only — NO `main_worktree()` checkout.
 	let (repo, _outcome) = prep

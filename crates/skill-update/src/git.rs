@@ -235,7 +235,33 @@ impl RefResolver for GitRefResolver {
 
 #[cfg(test)]
 mod tests {
-	use super::{host_of_url, https_only_token};
+	use super::{host_of_url, https_only_token, should_try_system_git};
+
+	/// The gix→system-git + OS-credential-helper fallback must survive the
+	/// shallow-fetch change: a non-GitHub HTTPS host (TFS / Azure DevOps /
+	/// self-hosted GitLab) is still admitted to the system-git path, while
+	/// github and non-https are excluded. FAILS if the non-github fallback is
+	/// dropped or the gate is broken.
+	#[test]
+	fn system_git_fallback_retained_for_non_github_https() {
+		// github short-circuits BEFORE probing the git binary → never falls back
+		// to a dev machine's gh/GCM helper.
+		assert!(!should_try_system_git("https://github.com/o/r.git"));
+		assert!(!should_try_system_git("https://api.github.com/o/r.git"));
+		// Non-https keeps its own transport auth (ssh agent, etc.).
+		assert!(!should_try_system_git("git@tfs.corp.local:o/r.git"));
+		assert!(!should_try_system_git("ssh://git@tfs.corp.local/o/r.git"));
+		// A non-github HTTPS host is admitted to the fallback exactly when a git
+		// binary exists — i.e. it is NOT excluded the way github is. This is the
+		// TFS/Azure/self-hosted-GitLab credential-helper path (Decision 13).
+		assert_eq!(
+			should_try_system_git(
+				"https://tfs.corp.local/collection/_git/repo"
+			),
+			aghub_git::system_git::system_git_available(),
+			"non-github https must still reach the system-git fallback"
+		);
+	}
 
 	#[test]
 	fn host_of_url_extracts_lowercased_host_without_userinfo_or_port() {
