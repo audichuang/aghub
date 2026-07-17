@@ -58,11 +58,11 @@ the requested skill's files.
 
 ## User Stories
 
-1. As a CLI user installing a skill from a source repo (`aghub source` install,
-   the surface that fetches a repo via `fetch_source_with_resolver` +
-   `install_fetched` — **not** `aghub add`, which is local-`--from` only), I want
-   only the selected skill's folder downloaded, so that a small skill installs
-   quickly even from a large repo.
+1. As a CLI user syncing skills from a source repo (`aghub source sync` — the CLI
+   `source` surface that fetches a repo via `fetch_source_with_resolver` +
+   `install_fetched`; the CLI `source` subcommands are list/diff/sync/accept-rename,
+   and `aghub add` is local-`--from` only, NOT a remote installer), I want only the
+   needed skill folders downloaded, so that syncing is lean even from a large repo.
 2. As a desktop user (and any caller of `POST /skills/install`), I want a
    repo-sourced install to download only the selected skill's folder, so that the
    same lean-fetch benefit applies to the API/desktop install surface, not just
