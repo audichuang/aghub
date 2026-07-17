@@ -148,6 +148,8 @@ Non-obvious invariants:
 
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`, `source sync`,
   `source accept-rename`, reconcile-with-removals → **dry-run unless `--yes`**
+- **`check` is offline by default** — remote sources report `uncheckable/network`;
+  pass `--online` for a real update check
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
 - Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 - **`skill-usage`**: Claude-global only; rejects project/`--all`

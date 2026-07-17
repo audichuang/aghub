@@ -37,12 +37,13 @@ master dir `$VHOME/.agents/skills/<name>/`, symlink `$VHOME/.claude/skills/<name
 A local `git daemon` gives a non-github host AND lets you push v2 to drive the update chain:
 
 ```bash
-S=$(mktemp -d); mkdir -p $S/repo/skills/hello-world
+S=$(mktemp -d); mkdir -p $S/srv/testrepo/skills/hello-world
 # write SKILL.md with YAML frontmatter (name/description), git init -b main, commit
-git clone --bare $S/repo $S/srv/testrepo.git   # daemon needs BARE repos
 git daemon --base-path=$S/srv --export-all --port=9419 &
-# install with source "git://127.0.0.1:9419/testrepo.git" → GixShallow path
-# push a v2 commit to the bare repo, then:
+# non-bare works fine (skill_repository.rs's daemon tests serve a worktree);
+# the URL path must match the dir name EXACTLY — /testrepo, not /testrepo.git
+# install with source "git://127.0.0.1:9419/testrepo" → GixShallow path
+# commit v2 in the served worktree, then:
 HOME=$VHOME aghub-cli -g apply-update skills hello-world        # dry-run: refuses without --yes
 HOME=$VHOME aghub-cli -g apply-update skills hello-world --yes  # disk v1→v2, lock refCommit advances
 ```
