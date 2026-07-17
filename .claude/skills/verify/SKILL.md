@@ -12,24 +12,26 @@ cargo build -p aghub-cli -p aghub-api --bin aghub-cli --bin aghub-api
 
 # Grab real-credential material BEFORE isolating — afterwards gh/git can no
 # longer see their real config (XDG_CONFIG_HOME points into the sandbox):
-export GITHUB_TOKEN="$(gh auth token)"
+export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
 
 # NEVER run against the real environment. HOME alone is NOT enough: the global
 # lock prefers $XDG_STATE_HOME (crates/skill/src/lock/io.rs) and universal-skill
 # agents read $XDG_CONFIG_HOME/agents/skills. Clear the whole XDG class (HOME
-# fallback then lands every dirs:: path in the sandbox), then pin the two this
-# recipe references:
+# fallback then lands every persistent dirs:: path this recipe touches in the
+# sandbox), then pin the two this recipe references:
 export VHOME=$(mktemp -d)
 unset "${!XDG_@}"
 export HOME=$VHOME XDG_STATE_HOME=$VHOME/state XDG_CONFIG_HOME=$VHOME/config
 
 target/debug/aghub-api --port 18877 & API_PID=$!
 trap 'kill $API_PID 2>/dev/null' EXIT
-for _ in $(seq 50); do    # bounded readiness: fail loudly, never hang
-  kill -0 $API_PID 2>/dev/null || { echo "aghub-api died on startup" >&2; exit 1; }
-  curl -fs http://127.0.0.1:18877/api/v1/agents >/dev/null && break
+ready=0
+for _ in $(seq 50); do
+  kill -0 $API_PID 2>/dev/null || break                      # died on startup
+  curl -fs --max-time 2 http://127.0.0.1:18877/api/v1/agents >/dev/null && { ready=1; break; }
   sleep 0.2
 done
+[ "$ready" = 1 ] || { echo "aghub-api not ready" >&2; exit 1; }
 ```
 
 Known isolation limit: the **OS keyring is NOT isolated** by any env var. If the real
@@ -60,7 +62,9 @@ backend served it. A resolve-time REST failure falls back to gix transparently w
 byte-identical results (post-resolve REST errors are clean failures, not fallbacks —
 but you cannot tell the two backends apart from disk). Backend-level proof lives in
 the cargo tests: the `NeverBackend` fake-transport suite, plus the token-gated real
-REST E2E — `GITHUB_TOKEN=$(gh auth token) cargo test --workspace --test skill_repository -- --ignored real_github_rest`.
+REST E2E — `cargo test --workspace --test skill_repository -- --ignored real_github_rest`
+(inherits the `GITHUB_TOKEN` exported before isolation; re-running `gh auth token`
+here would read the sandboxed config and return empty).
 
 ```bash
 curl -fs -X POST http://127.0.0.1:18877/api/v1/skills/install -H 'Content-Type: application/json' \
@@ -84,11 +88,14 @@ S=$(mktemp -d); mkdir -p $S/srv/testrepo/skills/hello-world
 # write SKILL.md with YAML frontmatter (name/description), git init -b main, commit
 git daemon --base-path=$S/srv --export-all --listen=127.0.0.1 --port=9419 & DAEMON_PID=$!
 trap 'kill $API_PID $DAEMON_PID 2>/dev/null' EXIT
-for _ in $(seq 50); do    # bounded: a stolen port kills the daemon instantly — fail, don't hang
-  kill -0 $DAEMON_PID 2>/dev/null || { echo "git daemon died (port taken?)" >&2; exit 1; }
-  git ls-remote git://127.0.0.1:9419/testrepo >/dev/null 2>&1 && break
+ready=0
+for _ in $(seq 50); do
+  kill -0 $DAEMON_PID 2>/dev/null || break                   # stolen port kills it instantly
+  # bound the probe too — git:// has no client-side timeout (GNU timeout; on macOS use gtimeout)
+  timeout 2 git ls-remote git://127.0.0.1:9419/testrepo >/dev/null 2>&1 && { ready=1; break; }
   sleep 0.2
 done
+[ "$ready" = 1 ] || { echo "git daemon not ready (port taken?)" >&2; exit 1; }
 # non-bare works fine (the automated tests serve a worktree);
 # the URL path must match the dir name EXACTLY — /testrepo, not /testrepo.git
 # install with source "git://127.0.0.1:9419/testrepo" → GixShallow path

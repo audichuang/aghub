@@ -898,17 +898,73 @@ impl Drop for ChildGuard {
 	}
 }
 
+/// HEAD commit of a local repo (for daemon readiness verification).
+fn git_head(repo: &Path) -> String {
+	let out = Command::new("git")
+		.current_dir(repo)
+		.args(["rev-parse", "HEAD"])
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_SYSTEM", "/dev/null")
+		.output()
+		.unwrap();
+	assert!(out.status.success(), "git rev-parse HEAD failed");
+	String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// Bounded `git ls-remote <url> HEAD` probe: hard-killed at `timeout` (an
+/// impostor that accepts TCP but stalls the git protocol cannot hang the
+/// caller — git:// has no client-side timeout of its own), succeeding only
+/// when the served HEAD equals `expected_head` (an impostor serving a
+/// different repo cannot fake readiness).
+fn probe_ls_remote(url: &str, expected_head: &str, timeout: Duration) -> bool {
+	let mut probe = Command::new("git")
+		.args(["ls-remote", url, "HEAD"])
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_SYSTEM", "/dev/null")
+		.stdout(Stdio::piped())
+		.stderr(Stdio::null())
+		.spawn()
+		.unwrap();
+	let deadline = Instant::now() + timeout;
+	loop {
+		match probe.try_wait().unwrap() {
+			Some(status) => {
+				if !status.success() {
+					return false;
+				}
+				let mut out = String::new();
+				use std::io::Read;
+				probe
+					.stdout
+					.take()
+					.unwrap()
+					.read_to_string(&mut out)
+					.unwrap();
+				return out.starts_with(expected_head);
+			}
+			None if Instant::now() >= deadline => {
+				let _ = probe.kill();
+				let _ = probe.wait();
+				return false;
+			}
+			None => std::thread::sleep(Duration::from_millis(10)),
+		}
+	}
+}
+
 /// Spawn a loopback `git daemon` serving `base_path` and wait until it
-/// answers the git protocol for `probe_repo`. The bind-port-0-then-drop trick
-/// is inherently TOCTOU — another process can take the port before the daemon
-/// rebinds, and a bare TCP connect could reach that impostor while our child
-/// is still pre-bind — so readiness is a `git ls-remote` against the served
-/// repo (protocol-level proof it is OUR daemon), and a child that lost the
-/// port race (bind failure → immediate exit) is retried on a fresh port.
-/// Shared by every daemon-backed test.
+/// answers the git protocol for `probe_repo` with `expected_head`. The
+/// bind-port-0-then-drop trick is inherently TOCTOU — another process can
+/// take the port before the daemon rebinds, and a bare TCP connect could
+/// reach that impostor while our child is still pre-bind — so readiness is a
+/// bounded, HEAD-verified `git ls-remote` (protocol-level proof it is OUR
+/// daemon serving OUR repo), and a child that lost the port race (bind
+/// failure → immediate exit) is retried on a fresh port. Shared by every
+/// daemon-backed test.
 fn spawn_git_daemon(
 	base_path: &Path,
 	probe_repo: &str,
+	expected_head: &str,
 ) -> (ChildGuard, std::net::SocketAddr) {
 	for _attempt in 0..5 {
 		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
@@ -936,16 +992,11 @@ fn spawn_git_daemon(
 			if guard.0.try_wait().unwrap().is_some() {
 				break; // died on startup (port stolen) → retry on a new port
 			}
-			let ready = Command::new("git")
-				.args(["ls-remote", &probe_url])
-				.env("GIT_CONFIG_GLOBAL", "/dev/null")
-				.env("GIT_CONFIG_SYSTEM", "/dev/null")
-				.stdout(Stdio::null())
-				.stderr(Stdio::null())
-				.status()
-				.unwrap()
-				.success();
-			if ready {
+			if probe_ls_remote(
+				&probe_url,
+				expected_head,
+				Duration::from_secs(2),
+			) {
 				return (guard, address);
 			}
 			if Instant::now() >= ready_by {
@@ -974,7 +1025,9 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 	run_git(git, &origin, &["init", "-q", "-b", "main"]);
 	run_git(git, &origin, &["add", "-A"]);
 	run_git(git, &origin, &["commit", "-q", "-m", "large root"]);
-	let (_daemon, address) = spawn_git_daemon(tmp.path(), "large-root-origin");
+	let head = git_head(&origin);
+	let (_daemon, address) =
+		spawn_git_daemon(tmp.path(), "large-root-origin", &head);
 
 	let materialize_calls = Arc::new(AtomicUsize::new(0));
 	let backend: Arc<dyn RepoFetchBackend> = Arc::new(MaterializeCountingGix {
@@ -1021,7 +1074,9 @@ fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 	run_git(git, &origin, &["add", "-A"]);
 	run_git(git, &origin, &["commit", "-q", "-m", "v1"]);
 
-	let (_daemon, address) = spawn_git_daemon(tmp.path(), "daemon-origin");
+	let head = git_head(&origin);
+	let (_daemon, address) =
+		spawn_git_daemon(tmp.path(), "daemon-origin", &head);
 
 	let repo =
 		SkillRepository::with_backends(None, Arc::new(GixShallow::new()));
