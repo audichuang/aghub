@@ -1136,6 +1136,22 @@ fn real_github_rest_catalog_and_install_are_pinned_and_hashed() {
 		GithubRest::new(Arc::new(ReqwestTransport::new()))
 			.with_timeout(Duration::from_secs(30)),
 	);
+	// This E2E requires a token. The anonymous GitHub API (60/hr) is routinely
+	// exhausted, which (correctly) routes to the gix fallback — so an anonymous
+	// run would panic the NeverBackend slot instead of proving the REST path.
+	// With a token the REST path has 5000/hr. No token → skip (not fail).
+	let token = std::env::var("GITHUB_TOKEN")
+		.ok()
+		.or_else(|| std::env::var("GH_TOKEN").ok())
+		.filter(|t| !t.trim().is_empty());
+	let Some(token) = token else {
+		eprintln!(
+			"skipping real_github_rest E2E: set GITHUB_TOKEN/GH_TOKEN to run \
+			 (anonymous GitHub API rate-limits and would route to fallback)"
+		);
+		return;
+	};
+
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 	let source = SourceRef {
@@ -1143,7 +1159,7 @@ fn real_github_rest_catalog_and_install_are_pinned_and_hashed() {
 		ref_: Some(FIXTURE_COMMIT.to_string()),
 	};
 
-	let snapshot = repo.resolve(&source, None).unwrap();
+	let snapshot = repo.resolve(&source, Some(token.as_str())).unwrap();
 	assert_eq!(snapshot.commit_oid, FIXTURE_COMMIT);
 	let catalog = repo.list(&snapshot).unwrap();
 	let skill = catalog
