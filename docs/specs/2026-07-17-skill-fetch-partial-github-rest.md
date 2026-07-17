@@ -402,6 +402,19 @@ that can't is worse than none — see `AGENTS.md` Testing).
   blobs transfer, though an over-bound install is still refused before
   materialization. Refusing before transfer requires the out-of-scope gix
   partial-clone/filter upgrade above.
+- **Mid-operation REST fallback is NOT re-routed to gix (documented limitation).**
+  The REST→gix fallback is decided at `resolve`. A REST failure that surfaces
+  _after_ a successful resolve — most notably a `truncated` recursive tree
+  (GitHub caps at ~100k entries / 7MB) — surfaces as a clean error rather than
+  re-routing to gix for the same commit, because gix 0.84's high-level
+  `PrepareFetch::with_ref_name(<40-hex OID>)` panics (it cannot fetch a pinned
+  commit by OID), and re-fetching by branch would break snapshot pinning. The
+  trigger cannot occur for a real single-skill repo (a >100k-entry / >7MB tree),
+  so the safe error is preferred over fragile code for an unreachable case; a
+  proper fix needs the same gix partial-clone / by-OID-fetch upgrade above. The
+  common path (resolve + tree + blobs all succeed) and all resolve-time triggers
+  (non-GitHub host, rate-limit, 401/403/404, network, deadline) fall back
+  correctly and are tested.
 - Adopting npx `PRIORITY_PREFIXES` discovery semantics.
 - A generic public multi-host plugin API (only the two concrete backends now).
 - Broad refactors of the existing materializer beyond the mode/symlink-containment
