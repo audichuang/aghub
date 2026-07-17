@@ -38,10 +38,14 @@ pub enum GitError {
 		reason: String,
 	},
 
-	/// A GitHub REST fast-path attempt could not complete and the caller should
-	/// fall back to the gix transport. This is the ONLY error a REST backend
-	/// raises for transient / unsupported-capability / not-GitHub conditions
-	/// (truncated tree, rate limit, 401/403/404, network, unexpected shape).
+	/// A GitHub REST fast-path attempt could not complete. The caller decides
+	/// what to do based on WHEN it surfaces: a `RestFallback` at **resolve**
+	/// re-routes to the gix transport; a `RestFallback` **after** a successful
+	/// resolve (chiefly a `truncated` tree at `read_tree`) is turned into a clean
+	/// error by `SkillRepository`, NOT re-routed (gix 0.84 cannot re-fetch a
+	/// pinned commit by OID). This is the ONLY error a REST backend raises for
+	/// transient / unsupported-capability / not-GitHub conditions (truncated
+	/// tree, rate limit, 401/403/404, network, unexpected shape).
 	/// A security-validation failure must NOT be reported as `RestFallback` —
 	/// it is a hard error so it is never masked by a silent fallback.
 	#[error("GitHub REST unavailable, fall back to git: {0}")]

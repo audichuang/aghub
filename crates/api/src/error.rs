@@ -48,7 +48,14 @@ impl ApiError {
 		message: &'static str,
 		code: &'static str,
 	) -> Self {
-		log::error!("{code}: blocking task failed: {error}");
+		// Log a REDACTED classification only — `JoinError::Display` embeds the
+		// panic payload (which can contain paths/internal detail), so never log
+		// it raw. The response already carries only the fixed safe `message`.
+		log::error!(
+			"{code}: blocking task failed (is_panic={}, is_cancelled={})",
+			error.is_panic(),
+			error.is_cancelled()
+		);
 		Self::new(Status::InternalServerError, message, code)
 	}
 }
