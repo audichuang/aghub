@@ -41,6 +41,67 @@ pub enum ScanError {
 	PermissionDenied(PathBuf),
 }
 
+/// One directory encountered while walking a repo tree or the filesystem, fed
+/// to the shared discovery policy.
+#[derive(Debug, Clone)]
+pub struct CandidateEntry {
+	/// Path recorded verbatim in the result (absolute for the fs walk,
+	/// repo-relative for a future tree walk).
+	pub path: PathBuf,
+	/// Directory depth relative to the scan root (root = 0). The fs walk uses
+	/// the walker's own `.depth()`; a tree walk uses repo-relative component
+	/// count.
+	pub depth: usize,
+	/// Whether this directory contains a SKILL.md.
+	pub has_skill_md: bool,
+	/// Parsed frontmatter `name`, or `None` if missing / unparseable /
+	/// non-string.
+	pub name: Option<String>,
+}
+
+/// Apply aghub's skill-discovery policy to an ordered candidate stream.
+///
+/// Rules (identical to the historical `scan_skills`):
+/// - skip entries without a SKILL.md or without a parseable frontmatter name;
+/// - skip entries deeper than `max_depth`;
+/// - **case-sensitive** dedup by frontmatter name, first-seen wins
+///   (`HashSet<String>`, NO case folding);
+/// - when `!full_depth`, a discovered depth-0 (root) skill returns immediately
+///   as the sole result (the historical base-path early return).
+pub fn discover_from_entries<I>(
+	entries: I,
+	max_depth: usize,
+	full_depth: bool,
+) -> Vec<PathBuf>
+where
+	I: IntoIterator<Item = CandidateEntry>,
+{
+	let mut result = Vec::new();
+	let mut seen_names = HashSet::new();
+
+	for entry in entries {
+		if !entry.has_skill_md {
+			continue;
+		}
+		if entry.depth > max_depth {
+			continue;
+		}
+		let Some(name) = entry.name else {
+			continue;
+		};
+		if seen_names.contains(&name) {
+			continue;
+		}
+		seen_names.insert(name);
+		result.push(entry.path);
+		if entry.depth == 0 && !full_depth {
+			return result;
+		}
+	}
+
+	result
+}
+
 /// Scan for skill directories containing SKILL.md files.
 ///
 /// # Arguments
@@ -67,48 +128,92 @@ pub fn scan_skills(
 		return Err(ScanError::PathNotFound(base_path.to_path_buf()));
 	}
 
-	let mut skill_dirs = Vec::new();
-	let mut seen_names = HashSet::new();
+	let mut entries: Vec<CandidateEntry> = Vec::new();
 
-	// 1. Check if base_path itself is a skill
+	// Phase 1 — base_path itself (depth 0)
 	if has_skill_md(base_path) {
 		if let Some(name) = extract_skill_name(base_path) {
-			skill_dirs.push(base_path.to_path_buf());
-			seen_names.insert(name);
+			entries.push(CandidateEntry {
+				path: base_path.to_path_buf(),
+				depth: 0,
+				has_skill_md: true,
+				name: Some(name),
+			});
 
-			// Return early if not full_depth
+			// Historical early return: root skill + !full_depth → sole result
 			if !options.full_depth {
-				return Ok(skill_dirs);
+				return Ok(discover_from_entries(
+					entries,
+					options.max_depth,
+					options.full_depth,
+				));
 			}
 		}
 	}
 
-	// 2. Scan priority directories
+	// Phase 2 — priority dirs (immediate children only)
 	for dir in priority_dirs {
 		if dir.exists() && dir.is_dir() {
-			scan_priority_dir(&dir, &mut skill_dirs, &mut seen_names)?;
+			let dir_entries = std::fs::read_dir(&dir).map_err(|e| {
+				if e.kind() == std::io::ErrorKind::PermissionDenied {
+					ScanError::PermissionDenied(dir.clone())
+				} else {
+					ScanError::PathNotFound(dir.clone())
+				}
+			})?;
+
+			for entry in dir_entries {
+				let entry = entry.map_err(|e| {
+					if e.kind() == std::io::ErrorKind::PermissionDenied {
+						ScanError::PermissionDenied(dir.clone())
+					} else {
+						ScanError::PathNotFound(dir.clone())
+					}
+				})?;
+
+				let path = entry.path();
+
+				if path.is_dir() && has_skill_md(&path) {
+					if let Some(name) = extract_skill_name(&path) {
+						let depth = path
+							.strip_prefix(base_path)
+							.map(|p| p.components().count())
+							.unwrap_or_else(|_| path.components().count());
+						entries.push(CandidateEntry {
+							path,
+							depth,
+							has_skill_md: true,
+							name: Some(name),
+						});
+					}
+				}
+			}
 		}
 	}
 
-	// 3. Fallback to recursive search if nothing found or full_depth requested
-	if skill_dirs.is_empty() || options.full_depth {
+	// Phase 3 — recursive fallback
+	if entries.is_empty() || options.full_depth {
 		let recursive_dirs = if options.respect_gitignore {
 			scan_with_gitignore(base_path, options.max_depth)
 		} else {
 			scan_recursive_basic(base_path, options.max_depth)
 		};
 
-		for dir in recursive_dirs {
-			if let Some(name) = extract_skill_name(&dir) {
-				if !seen_names.contains(&name) {
-					seen_names.insert(name);
-					skill_dirs.push(dir);
-				}
-			}
+		for (path, depth) in recursive_dirs {
+			entries.push(CandidateEntry {
+				path: path.clone(),
+				depth,
+				has_skill_md: true,
+				name: extract_skill_name(&path),
+			});
 		}
 	}
 
-	Ok(skill_dirs)
+	Ok(discover_from_entries(
+		entries,
+		options.max_depth,
+		options.full_depth,
+	))
 }
 
 /// Check if a directory contains a SKILL.md file.
@@ -136,52 +241,16 @@ fn extract_skill_name(dir: &Path) -> Option<String> {
 		.map(String::from)
 }
 
-/// Scan a single priority directory for skills.
-///
-/// Lists subdirectories and checks each for SKILL.md presence.
-/// Deduplicates by skill name using the provided HashSet.
-fn scan_priority_dir(
-	dir: &Path,
-	skill_dirs: &mut Vec<PathBuf>,
-	seen_names: &mut HashSet<String>,
-) -> Result<(), ScanError> {
-	let entries = std::fs::read_dir(dir).map_err(|e| {
-		if e.kind() == std::io::ErrorKind::PermissionDenied {
-			ScanError::PermissionDenied(dir.to_path_buf())
-		} else {
-			ScanError::PathNotFound(dir.to_path_buf())
-		}
-	})?;
-
-	for entry in entries {
-		let entry = entry.map_err(|e| {
-			if e.kind() == std::io::ErrorKind::PermissionDenied {
-				ScanError::PermissionDenied(dir.to_path_buf())
-			} else {
-				ScanError::PathNotFound(dir.to_path_buf())
-			}
-		})?;
-
-		let path = entry.path();
-
-		if path.is_dir() && has_skill_md(&path) {
-			if let Some(name) = extract_skill_name(&path) {
-				if !seen_names.contains(&name) {
-					seen_names.insert(name);
-					skill_dirs.push(path);
-				}
-			}
-		}
-	}
-
-	Ok(())
-}
-
 /// Recursive directory scan with gitignore filtering.
 ///
 /// Uses the `ignore` crate (ripgrep's gitignore library) to properly
 /// respect .gitignore patterns, nested gitignore files, and global excludes.
-fn scan_with_gitignore(base_path: &Path, max_depth: usize) -> Vec<PathBuf> {
+///
+/// Returns `(path, depth)` pairs using the walker's own depth.
+fn scan_with_gitignore(
+	base_path: &Path,
+	max_depth: usize,
+) -> Vec<(PathBuf, usize)> {
 	use ignore::WalkBuilder;
 
 	let mut skill_dirs = Vec::new();
@@ -198,7 +267,7 @@ fn scan_with_gitignore(base_path: &Path, max_depth: usize) -> Vec<PathBuf> {
 	for entry in walker.flatten() {
 		let path = entry.path();
 		if path.is_dir() && has_skill_md(path) {
-			skill_dirs.push(path.to_path_buf());
+			skill_dirs.push((path.to_path_buf(), entry.depth()));
 		}
 	}
 
@@ -208,7 +277,12 @@ fn scan_with_gitignore(base_path: &Path, max_depth: usize) -> Vec<PathBuf> {
 /// Basic recursive directory scan without gitignore filtering.
 ///
 /// Used when gitignore filtering is disabled.
-fn scan_recursive_basic(base_path: &Path, max_depth: usize) -> Vec<PathBuf> {
+///
+/// Returns `(path, depth)` pairs using the walker's own depth.
+fn scan_recursive_basic(
+	base_path: &Path,
+	max_depth: usize,
+) -> Vec<(PathBuf, usize)> {
 	use walkdir::WalkDir;
 
 	let mut skill_dirs = Vec::new();
@@ -221,7 +295,7 @@ fn scan_recursive_basic(base_path: &Path, max_depth: usize) -> Vec<PathBuf> {
 	{
 		let path = entry.path();
 		if path.is_dir() && has_skill_md(path) {
-			skill_dirs.push(path.to_path_buf());
+			skill_dirs.push((path.to_path_buf(), entry.depth()));
 		}
 	}
 
