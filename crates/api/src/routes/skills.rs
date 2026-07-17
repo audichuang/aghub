@@ -5139,5 +5139,549 @@ mod tests {
 				);
 			});
 		}
+
+		// ══════════════════════════════════════════════════════════════════
+		// Ticket 09 — cross-cutting integration (the ASSEMBLED feature holds).
+		//
+		// Reuse the T06/T07/T08 request-recording REST seam + fake backends and
+		// assert what NO single earlier ticket covered: the two install surfaces
+		// agree (cross-surface consistency), the REST path's lock hash + byte
+		// shape equal a clone's (round-trip parity, incl. the symlink
+		// npx-lstat-skip value), and a RestFallback install equals the
+		// REST/clone install (fallback equivalence). All network-free; unix-gated
+		// (this module already is: symlink staging + Master materialization).
+		// ══════════════════════════════════════════════════════════════════
+
+		/// Canned REST repo derived from a real on-disk folder: commit + tree
+		/// JSON plus a blob map keyed by SYNTHETIC oids (opaque to `GithubRest`).
+		struct RestFixture {
+			commit: String,
+			tree: String,
+			blobs: HashMap<String, Vec<u8>>,
+		}
+
+		fn hex_bytes(bytes: &[u8]) -> String {
+			use std::fmt::Write;
+			bytes.iter().fold(String::new(), |mut s, b| {
+				let _ = write!(s, "{b:02x}");
+				s
+			})
+		}
+
+		/// Recursively turn `root`'s files/symlinks into GitHub trees-API entries
+		/// (full repo-relative paths, git modes) + a blob map. Directory entries
+		/// are omitted — `read_tree` skips `type == "tree"`. A symlink's blob is
+		/// its raw target (git semantics), so staging recreates it as a symlink.
+		fn collect_fixture_entries(
+			root: &std::path::Path,
+			dir: &std::path::Path,
+			entries: &mut Vec<String>,
+			blobs: &mut HashMap<String, Vec<u8>>,
+			counter: &mut u64,
+		) {
+			let mut kids: Vec<_> = std::fs::read_dir(dir)
+				.unwrap()
+				.map(|e| e.unwrap())
+				.collect();
+			kids.sort_by_key(|e| e.file_name());
+			for e in kids {
+				let p = e.path();
+				let rel = p
+					.strip_prefix(root)
+					.unwrap()
+					.to_string_lossy()
+					.replace('\\', "/");
+				let ft = std::fs::symlink_metadata(&p).unwrap().file_type();
+				if ft.is_dir() {
+					collect_fixture_entries(root, &p, entries, blobs, counter);
+					continue;
+				}
+				*counter += 1;
+				let oid = format!("{counter:040x}");
+				if ft.is_symlink() {
+					let target = std::fs::read_link(&p).unwrap();
+					let bytes = target.to_string_lossy().as_bytes().to_vec();
+					entries.push(format!(
+						r#"{{"path":"{rel}","mode":"120000","type":"blob","sha":"{oid}","size":{}}}"#,
+						bytes.len()
+					));
+					blobs.insert(oid, bytes);
+				} else {
+					let bytes = std::fs::read(&p).unwrap();
+					let exec = {
+						use std::os::unix::fs::PermissionsExt;
+						std::fs::metadata(&p).unwrap().permissions().mode()
+							& 0o111 != 0
+					};
+					let mode = if exec { "100755" } else { "100644" };
+					entries.push(format!(
+						r#"{{"path":"{rel}","mode":"{mode}","type":"blob","sha":"{oid}","size":{}}}"#,
+						bytes.len()
+					));
+					blobs.insert(oid, bytes);
+				}
+			}
+		}
+
+		fn rest_fixture(
+			root: &std::path::Path,
+			commit_oid: &str,
+			tree_oid: &str,
+		) -> RestFixture {
+			let mut entries = Vec::new();
+			let mut blobs = HashMap::new();
+			let mut counter = 0u64;
+			collect_fixture_entries(
+				root,
+				root,
+				&mut entries,
+				&mut blobs,
+				&mut counter,
+			);
+			let tree = format!(
+				r#"{{"sha":"{tree_oid}","truncated":false,"tree":[{}]}}"#,
+				entries.join(",")
+			);
+			let commit = format!(
+				r#"{{"sha":"{commit_oid}","commit":{{"tree":{{"sha":"{tree_oid}"}},"committer":{{"date":"2026-07-17T00:00:00Z"}}}}}}"#
+			);
+			RestFixture {
+				commit,
+				tree,
+				blobs,
+			}
+		}
+
+		fn fixture_responder(
+			fx: RestFixture,
+		) -> impl Fn(&HttpRequest) -> Result<HttpResponse, GitError>
+		       + Send
+		       + Sync
+		       + 'static {
+			move |req: &HttpRequest| {
+				let u = req.url.as_str();
+				if let Some(oid) = blob_oid(u) {
+					return match fx.blobs.get(&oid) {
+						Some(b) => Ok(raw_ok(b.clone())),
+						None => Ok(resp_status(404)),
+					};
+				}
+				if is_tree(u) {
+					return Ok(json_ok(fx.tree.clone().into_bytes()));
+				}
+				if is_commit_resolve(u) {
+					return Ok(json_ok(fx.commit.clone().into_bytes()));
+				}
+				Ok(resp_status(404))
+			}
+		}
+
+		/// A rest-slot backend that always signals `RestFallback` — the single
+		/// error every transient REST condition (rate-limit / 401 / network)
+		/// collapses to. Forces the `SkillRepository`'s single fallback owner to
+		/// route to the gix slot. Mirrors T07's `AlwaysFallbackRest`.
+		struct AlwaysFallbackRest;
+		impl RepoFetchBackend for AlwaysFallbackRest {
+			fn resolve(
+				&self,
+				_s: &aghub_git::SourceRef,
+				_a: Option<&aghub_git::Credentials>,
+			) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+				Err(GitError::rest_fallback("rate limited"))
+			}
+			fn read_tree(
+				&self,
+				_s: &aghub_git::RepoSnapshot,
+			) -> aghub_git::Result<aghub_git::RepoTree> {
+				Err(GitError::rest_fallback("rate limited"))
+			}
+			fn read_blobs(
+				&self,
+				_s: &aghub_git::RepoSnapshot,
+				_o: &[String],
+			) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+				Err(GitError::rest_fallback("rate limited"))
+			}
+			fn materialize(
+				&self,
+				_s: &aghub_git::RepoSnapshot,
+				_p: &[&str],
+				_d: &std::path::Path,
+			) -> aghub_git::Result<()> {
+				Err(GitError::rest_fallback("rate limited"))
+			}
+		}
+
+		/// Byte snapshot of a materialized folder (rel-path -> content + exec bit,
+		/// symlink target for links) for a "same Master bytes" comparison.
+		fn dir_snapshot(
+			root: &std::path::Path,
+		) -> std::collections::BTreeMap<String, String> {
+			fn walk(
+				root: &std::path::Path,
+				dir: &std::path::Path,
+				out: &mut std::collections::BTreeMap<String, String>,
+			) {
+				for e in std::fs::read_dir(dir).unwrap() {
+					let p = e.unwrap().path();
+					let rel = p
+						.strip_prefix(root)
+						.unwrap()
+						.to_string_lossy()
+						.replace('\\', "/");
+					let ft = std::fs::symlink_metadata(&p).unwrap().file_type();
+					if ft.is_symlink() {
+						let t = std::fs::read_link(&p).unwrap();
+						out.insert(rel, format!("symlink:{}", t.display()));
+					} else if ft.is_dir() {
+						walk(root, &p, out);
+					} else {
+						use std::os::unix::fs::PermissionsExt;
+						let bytes = std::fs::read(&p).unwrap();
+						let exec =
+							std::fs::metadata(&p).unwrap().permissions().mode()
+								& 0o111 != 0;
+						out.insert(
+							rel,
+							format!("file:exec={exec}:{}", hex_bytes(&bytes)),
+						);
+					}
+				}
+			}
+			let mut out = std::collections::BTreeMap::new();
+			walk(root, root, &mut out);
+			out
+		}
+
+		// ═══ T09.1: cross-surface consistency ════════════════════════════════
+		//
+		// The SAME skill (skills/music) from the SAME canned snapshot installed
+		// via the two production cores — POST /skills/install (by NAME) and the
+		// desktop /skills/git/install (by PATH), both through an injected
+		// recording GithubRest — MUST write an identical lock entry and Master.
+		// FAILS if the surfaces drift (skillPath / hash / refCommit / source, or
+		// a divergent Master).
+		#[test]
+		fn cross_surface_install_yields_identical_lock_and_master() {
+			// Surface A: install_skill_with_repo, selecting by skill NAME.
+			let (entry_a, master_a) = with_isolated_env(|home, _state| {
+				let (t, _rec) = record_transport(happy_responder());
+				let rest: Arc<dyn RepoFetchBackend> =
+					Arc::new(GithubRest::new(t));
+				let repo = Arc::new(SkillRepository::with_backends(
+					Some(rest),
+					Arc::new(NoGixBackend),
+				));
+				let project = home.join("proj-a");
+				std::fs::create_dir_all(&project).unwrap();
+				let req = InstallSkillRequest {
+					source: "https://github.com/acme/skills.git".to_string(),
+					agents: vec!["claude".to_string()],
+					skills: vec!["music".to_string()],
+					scope: "project".to_string(),
+					project_path: Some(project.display().to_string()),
+					install_all: Some(false),
+				};
+				let resp = block_on(install_skill_with_repo(req, repo))
+					.ok()
+					.expect("surface A handler ok")
+					.into_inner();
+				assert!(resp.success, "surface A install: {:?}", resp.agents);
+				let lock = skill::lock::local::read_local_lock(Some(&project));
+				let entry = lock.skills.get("music").expect("A: music").clone();
+				let master =
+					dir_snapshot(&project.join(".agents/skills/music"));
+				(entry, master)
+			});
+
+			// Surface B: desktop /skills/git/install, selecting by skill PATH.
+			// current_branch is empty so ref_name is None (== surface A), making
+			// the whole lock entry directly comparable.
+			let (entry_b, master_b) = with_isolated_env(|home, _state| {
+				let (t, _rec) = record_transport(happy_responder());
+				let rest: Arc<dyn RepoFetchBackend> =
+					Arc::new(GithubRest::new(t));
+				let repo = Arc::new(SkillRepository::with_backends(
+					Some(rest),
+					Arc::new(NoGixBackend),
+				));
+				let snap =
+					repo.resolve(&github_source(), None).expect("resolve");
+				assert_eq!(snap.commit_oid, COMMIT_OID);
+				let project = home.join("proj-b");
+				std::fs::create_dir_all(&project).unwrap();
+				let app_data = tempdir().unwrap();
+				let client = Client::tracked(crate::build_rocket(
+					Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+				let sessions = client
+					.rocket()
+					.state::<GitCloneSessions>()
+					.expect("git clone sessions");
+				sessions.sessions.lock().unwrap().insert(
+					"sess".to_string(),
+					GitCloneSession {
+						repo: repo.clone(),
+						snapshot: snap.clone(),
+						created_at: Instant::now(),
+						url: "https://github.com/acme/skills.git".to_string(),
+						credential_token: None,
+						branches: vec![],
+						current_branch: String::new(),
+					},
+				);
+				let resp = client
+					.post("/api/v1/skills/git/install")
+					.json(&serde_json::json!({
+						"session_id": "sess",
+						"skill_paths": ["skills/music"],
+						"agents": ["claude"],
+						"scope": "project",
+						"project_root": project.display().to_string(),
+					}))
+					.dispatch();
+				assert_eq!(resp.status(), Status::Ok);
+				let lock = skill::lock::local::read_local_lock(Some(&project));
+				let entry = lock.skills.get("music").expect("B: music").clone();
+				let master =
+					dir_snapshot(&project.join(".agents/skills/music"));
+				(entry, master)
+			});
+
+			// Identical lock entry (project lock carries no timestamps): source,
+			// sourceType, skillPath, computedHash, refCommit, ref all match.
+			assert_eq!(
+				serde_json::to_value(&entry_a).unwrap(),
+				serde_json::to_value(&entry_b).unwrap(),
+				"the two install surfaces must write an identical lock entry"
+			);
+			// And an identical Master (byte-for-byte, exec bits included).
+			assert!(!master_a.is_empty(), "master A must be non-empty");
+			assert_eq!(
+				master_a, master_b,
+				"the two surfaces must materialize an identical Master"
+			);
+		}
+
+		// ═══ T09.2: round-trip lock parity (hash + byte shape, incl. symlink) ══
+		//
+		// A symlink-bearing skill fetched via the REST path (GithubRest fed
+		// canned tree+blobs derived from a real on-disk folder) must write a lock
+		// whose computedHash equals `compute_skill_folder_hash` of that folder —
+		// the npx-parity anchor and the value a gix clone yields (T04 proves
+		// stage==clone byte+hash INCL. the symlink). The in-folder symlink must
+		// NOT change the hash (npx-lstat-skip), and the lock entry must be
+		// byte-shaped exactly like the copy-era fixture (prior art:
+		// install_lock_entry_byte_identical_to_copy_era_fixture).
+		#[test]
+		fn rest_install_lock_hash_and_shape_match_a_clone() {
+			const RT_COMMIT: &str = "cccccccccccccccccccccccccccccccccccccccc";
+			const RT_TREE: &str = "dddddddddddddddddddddddddddddddddddddddd";
+
+			// Reference skill folder WITH an in-folder symlink.
+			let content = tempdir().unwrap();
+			let skill_dir = content.path().join("skills/roundtrip");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			let skill_md =
+				"---\nname: roundtrip\ndescription: rt\n---\n# body\n";
+			std::fs::write(skill_dir.join("SKILL.md"), skill_md).unwrap();
+			std::fs::write(skill_dir.join("ref.md"), b"reference notes\n")
+				.unwrap();
+			std::os::unix::fs::symlink("SKILL.md", skill_dir.join("link.md"))
+				.unwrap();
+
+			// Clone / npx-parity anchor: hash the folder directly (symlink
+			// skipped by the Source hash).
+			let clone_hash =
+				skill::compute_skill_folder_hash(&skill_dir).unwrap();
+			assert_ne!(clone_hash, skill::hash::EMPTY_SKILLS_LOCK_DIGEST);
+
+			// Guard: the in-folder symlink contributes NOTHING to the hash
+			// (npx-lstat-skip). A folder without it hashes identically; the old
+			// materialize_tree value (symlink dereferenced into content) would
+			// NOT — so this pins the corrected value.
+			let no_link = tempdir().unwrap();
+			let nl = no_link.path().join("skills/roundtrip");
+			std::fs::create_dir_all(&nl).unwrap();
+			std::fs::write(nl.join("SKILL.md"), skill_md).unwrap();
+			std::fs::write(nl.join("ref.md"), b"reference notes\n").unwrap();
+			assert_eq!(
+				skill::compute_skill_folder_hash(&nl).unwrap(),
+				clone_hash,
+				"the in-folder symlink must be skipped by the Source hash"
+			);
+
+			let fx = rest_fixture(content.path(), RT_COMMIT, RT_TREE);
+			let (t, _rec) = record_transport(fixture_responder(fx));
+			let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+			let repo = Arc::new(SkillRepository::with_backends(
+				Some(rest),
+				Arc::new(NoGixBackend),
+			));
+
+			let entry = with_isolated_env(|home, _state| {
+				let project = home.join("proj");
+				std::fs::create_dir_all(&project).unwrap();
+				let req = InstallSkillRequest {
+					source: "https://github.com/acme/roundtrip.git".to_string(),
+					agents: vec!["claude".to_string()],
+					skills: vec!["roundtrip".to_string()],
+					scope: "project".to_string(),
+					project_path: Some(project.display().to_string()),
+					install_all: Some(false),
+				};
+				let resp = block_on(install_skill_with_repo(req, repo))
+					.ok()
+					.expect("install handler ok")
+					.into_inner();
+				assert!(resp.success, "REST install: {:?}", resp.agents);
+				skill::lock::local::read_local_lock(Some(&project))
+					.skills
+					.get("roundtrip")
+					.expect("roundtrip locked")
+					.clone()
+			});
+
+			// REST-path lock hash equals the clone / npx-parity value.
+			assert_eq!(
+				entry.computed_hash, clone_hash,
+				"REST-materialized skill must hash like a clone (lstat-skip)"
+			);
+
+			// Byte-shape parity with the copy-era fixture: exactly these fields.
+			let expected_source = aghub_git::resolve_remote_source(
+				"https://github.com/acme/roundtrip.git",
+			)
+			.unwrap()
+			.lock_source();
+			assert_eq!(
+				serde_json::to_value(&entry).unwrap(),
+				serde_json::json!({
+					"source": expected_source,
+					"sourceType": "github",
+					"skillPath": "skills/roundtrip/SKILL.md",
+					"computedHash": clone_hash,
+					"refCommit": RT_COMMIT,
+				}),
+				"REST lock entry must be byte-shaped like the copy-era fixture"
+			);
+		}
+
+		// ═══ T09.3: fallback equivalence ═════════════════════════════════════
+		//
+		// The SAME content installed via (a) the REST path and (b) a RestFallback
+		// -> gix route (rate-limited/non-github, modeled by AlwaysFallbackRest
+		// routing to the gix slot that serves the same content) must produce an
+		// IDENTICAL lock entry and Master. FAILS if the fallback path installs
+		// anything different from the REST/clone result.
+		#[test]
+		fn rest_and_gix_fallback_install_are_identical() {
+			// The gix-slot fake resolves to this fixed snapshot; the REST fixture
+			// agrees so refCommit matches across the two paths.
+			const FB_COMMIT: &str = "9999999999999999999999999999999999999999";
+			const FB_TREE: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+			// Reference content: a normal skill folder (no symlink, so the
+			// plain-copy gix fake and the REST staging produce byte-identical
+			// source folders — a symlink would only be present/hashed on one).
+			let content = tempdir().unwrap();
+			let foo = content.path().join("skills/foo");
+			std::fs::create_dir_all(&foo).unwrap();
+			std::fs::write(
+				foo.join("SKILL.md"),
+				"---\nname: foo\ndescription: f\n---\n# foo\n",
+			)
+			.unwrap();
+			std::fs::write(foo.join("ref.md"), b"support\n").unwrap();
+
+			let install_via = |repo: Arc<SkillRepository>| -> (
+				skill::LocalSkillLockEntry,
+				std::collections::BTreeMap<String, String>,
+			) {
+				with_isolated_env(|home, _state| {
+					let snap =
+						repo.resolve(&github_source(), None).expect("resolve");
+					assert_eq!(snap.commit_oid, FB_COMMIT);
+					let project = home.join("proj");
+					std::fs::create_dir_all(&project).unwrap();
+					let app_data = tempdir().unwrap();
+					let client = Client::tracked(crate::build_rocket(
+						Config::default(),
+						app_data.path().to_path_buf(),
+					))
+					.expect("client");
+					let sessions = client
+						.rocket()
+						.state::<GitCloneSessions>()
+						.expect("git clone sessions");
+					sessions.sessions.lock().unwrap().insert(
+						"sess".to_string(),
+						GitCloneSession {
+							repo: repo.clone(),
+							snapshot: snap.clone(),
+							created_at: Instant::now(),
+							url: "https://github.com/acme/skills.git"
+								.to_string(),
+							credential_token: None,
+							branches: vec!["main".to_string()],
+							current_branch: "main".to_string(),
+						},
+					);
+					let resp = client
+						.post("/api/v1/skills/git/install")
+						.json(&serde_json::json!({
+							"session_id": "sess",
+							"skill_paths": ["skills/foo"],
+							"agents": ["claude"],
+							"scope": "project",
+							"project_root": project.display().to_string(),
+						}))
+						.dispatch();
+					assert_eq!(resp.status(), Status::Ok);
+					let entry =
+						skill::lock::local::read_local_lock(Some(&project))
+							.skills
+							.get("foo")
+							.expect("foo locked")
+							.clone();
+					let master =
+						dir_snapshot(&project.join(".agents/skills/foo"));
+					(entry, master)
+				})
+			};
+
+			// (a) REST path.
+			let fx = rest_fixture(content.path(), FB_COMMIT, FB_TREE);
+			let (t, _rec) = record_transport(fixture_responder(fx));
+			let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+			let repo_rest = Arc::new(SkillRepository::with_backends(
+				Some(rest),
+				Arc::new(NoGixBackend),
+			));
+			let (entry_rest, master_rest) = install_via(repo_rest);
+
+			// (b) RestFallback -> gix: REST always falls back; the gix slot
+			// (SessionLocalBackend, resolving to FB_COMMIT) serves the same
+			// content by copy.
+			let gix: Arc<dyn RepoFetchBackend> =
+				Arc::new(super::SessionLocalBackend::new(content.path()));
+			let repo_fb = Arc::new(SkillRepository::with_backends(
+				Some(Arc::new(AlwaysFallbackRest) as Arc<dyn RepoFetchBackend>),
+				gix,
+			));
+			let (entry_fb, master_fb) = install_via(repo_fb);
+
+			assert_eq!(
+				serde_json::to_value(&entry_rest).unwrap(),
+				serde_json::to_value(&entry_fb).unwrap(),
+				"a RestFallback install must write the SAME lock entry"
+			);
+			assert_eq!(
+				master_rest, master_fb,
+				"a RestFallback install must materialize the SAME Master"
+			);
+		}
 	}
 }
