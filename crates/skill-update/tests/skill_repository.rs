@@ -898,6 +898,53 @@ impl Drop for ChildGuard {
 	}
 }
 
+/// Spawn a loopback `git daemon` serving `base_path` and wait until it is
+/// accepting connections. The bind-port-0-then-drop trick is inherently TOCTOU
+/// (another process can grab the port before the daemon rebinds), so this
+/// launcher detects a daemon that died on startup (bind failure) and retries
+/// on a fresh port instead of letting the readiness poll connect to whatever
+/// stole the port. Shared by every daemon-backed test.
+fn spawn_git_daemon(base_path: &Path) -> (ChildGuard, std::net::SocketAddr) {
+	for _attempt in 0..5 {
+		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+		let address = listener.local_addr().unwrap();
+		drop(listener);
+		let child = Command::new("git")
+			.args([
+				"daemon".to_string(),
+				"--reuseaddr".to_string(),
+				"--export-all".to_string(),
+				"--listen=127.0.0.1".to_string(),
+				format!("--port={}", address.port()),
+				format!("--base-path={}", base_path.display()),
+			])
+			.env("GIT_CONFIG_GLOBAL", "/dev/null")
+			.env("GIT_CONFIG_SYSTEM", "/dev/null")
+			.stdout(Stdio::null())
+			.stderr(Stdio::null())
+			.spawn()
+			.unwrap();
+		let mut guard = ChildGuard(child);
+		let ready_by = Instant::now() + Duration::from_secs(5);
+		loop {
+			// A git daemon that lost the port race exits immediately; a live
+			// child + an accepting socket therefore IS our daemon (it binds
+			// before serving and exits on bind failure).
+			if guard.0.try_wait().unwrap().is_some() {
+				break; // died on startup (port stolen) → retry on a new port
+			}
+			if TcpStream::connect(address).is_ok() {
+				return (guard, address);
+			}
+			if Instant::now() >= ready_by {
+				panic!("git daemon did not start on {address}");
+			}
+			std::thread::sleep(Duration::from_millis(10));
+		}
+	}
+	panic!("git daemon lost the port race 5 times in a row");
+}
+
 #[test]
 fn gix_root_skill_over_limit_is_refused_before_materialization() {
 	let tmp = tempfile::tempdir().unwrap();
@@ -915,33 +962,7 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 	run_git(git, &origin, &["init", "-q", "-b", "main"]);
 	run_git(git, &origin, &["add", "-A"]);
 	run_git(git, &origin, &["commit", "-q", "-m", "large root"]);
-	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-	let address = listener.local_addr().unwrap();
-	drop(listener);
-	let daemon = Command::new(git)
-		.args([
-			"daemon".to_string(),
-			"--reuseaddr".to_string(),
-			"--export-all".to_string(),
-			"--listen=127.0.0.1".to_string(),
-			format!("--port={}", address.port()),
-			format!("--base-path={}", tmp.path().display()),
-		])
-		.env("GIT_CONFIG_GLOBAL", "/dev/null")
-		.env("GIT_CONFIG_SYSTEM", "/dev/null")
-		.stdout(Stdio::null())
-		.stderr(Stdio::null())
-		.spawn()
-		.unwrap();
-	let _daemon = ChildGuard(daemon);
-	let ready_by = Instant::now() + Duration::from_secs(2);
-	while TcpStream::connect(address).is_err() {
-		assert!(
-			Instant::now() < ready_by,
-			"git daemon did not start on {address}"
-		);
-		std::thread::sleep(Duration::from_millis(10));
-	}
+	let (_daemon, address) = spawn_git_daemon(tmp.path());
 
 	let materialize_calls = Arc::new(AtomicUsize::new(0));
 	let backend: Arc<dyn RepoFetchBackend> = Arc::new(MaterializeCountingGix {
@@ -992,33 +1013,7 @@ fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
 	run_git(git, &origin, &["add", "-A"]);
 	run_git(git, &origin, &["commit", "-q", "-m", "v1"]);
 
-	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-	let address = listener.local_addr().unwrap();
-	drop(listener);
-	let daemon = Command::new(git)
-		.args([
-			"daemon".to_string(),
-			"--reuseaddr".to_string(),
-			"--export-all".to_string(),
-			"--listen=127.0.0.1".to_string(),
-			format!("--port={}", address.port()),
-			format!("--base-path={}", tmp.path().display()),
-		])
-		.env("GIT_CONFIG_GLOBAL", "/dev/null")
-		.env("GIT_CONFIG_SYSTEM", "/dev/null")
-		.stdout(Stdio::null())
-		.stderr(Stdio::null())
-		.spawn()
-		.unwrap();
-	let _daemon = ChildGuard(daemon);
-	let ready_by = Instant::now() + Duration::from_secs(2);
-	while TcpStream::connect(address).is_err() {
-		assert!(
-			Instant::now() < ready_by,
-			"git daemon did not start on {address}"
-		);
-		std::thread::sleep(Duration::from_millis(10));
-	}
+	let (_daemon, address) = spawn_git_daemon(tmp.path());
 
 	let repo = SkillRepository::with_backends(
 		None,

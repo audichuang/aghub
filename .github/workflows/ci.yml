@@ -258,8 +258,13 @@ jobs:
             # ephemeral GITHUB_TOKEN (no PAT to manage). The test self-skips
             # without a token, so it ONLY exercises the authenticated path here.
             # One platform is enough for a network contract; ubuntu is cheapest.
+            # NOT on push-to-main: release.yml's verify-ci gate trusts the green
+            # push-to-main run, and this test depends on a third-party repo
+            # (vercel-labs/skills) + live GitHub API — an upstream deletion or
+            # API outage must not block a release. PRs and manual dispatch
+            # still hard-fail on it, which is where regressions get caught.
             - name: Network E2E (GitHub REST, token-gated)
-              if: matrix.os == 'ubuntu-latest'
+              if: matrix.os == 'ubuntu-latest' && github.event_name != 'push'
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
               run: cargo test -p skill-update --test skill_repository -- --ignored real_github_rest

@@ -46,12 +46,13 @@ updates; wrong fetch = wasted network.
 ## TESTING
 
 ```bash
-cargo test -p skill-update              # network-free (fake Fetcher)
+cargo test -p skill-update              # no external network; Unix needs git + loopback
 ```
 
 The regular suite needs no external network (fake Fetcher / fake transports;
-two `skill_repository` tests spawn a loopback `git daemon` to exercise the real
-GixShallow TCP path — success round-trip incl. upstream advance, and the
+on Unix, two `skill_repository` tests additionally spawn a loopback `git daemon`
+— they need a `git` binary and a bindable 127.0.0.1 — to exercise the real
+GixShallow TCP path: success round-trip incl. upstream advance, and the
 over-limit refusal). The ignored `skill_repository` E2E pins a
 stable GitHub commit and proves REST catalog + selected install content/hash;
 run it with `cargo test -p skill-update --test skill_repository -- --ignored`.

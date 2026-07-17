@@ -6,7 +6,15 @@ files. This is the core optimization.
 
 **Blocked by:** 01 (RepoSnapshot), 03 (discovery policy), 04 (materializer).
 
-**Status:** ready-for-agent
+**Status:** done
+
+> **Shipped divergences (code + spec win over this ticket — do NOT "re-do" it as
+> written):** (1) host gate shipped as **exact `github.com` only**
+> (`is_github_com_host`, `crates/git/src/github_rest.rs`) — `*.github.com`
+> subdomains and GHES fall back to git, deliberately; (2) a mid-operation
+> `truncated` tree ships a **clean error, NOT a gix re-route** (gix 0.84
+> `with_ref_name(<OID>)` panics; a branch re-fetch would break snapshot
+> pinning). See the spec's Decision Log / Known limitations.
 
 - [ ] `resolve()` returns `commit_oid` + `tree_oid` via REST; `read_tree` lists via
       the recursive git trees API and feeds the ticket-03 discovery policy;

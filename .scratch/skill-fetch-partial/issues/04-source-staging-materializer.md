@@ -9,7 +9,7 @@ applies npx excludes).
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Regular files written at the correct skill-root-relative path with raw
       bytes; mode `100755` sets the exec bit on Unix.

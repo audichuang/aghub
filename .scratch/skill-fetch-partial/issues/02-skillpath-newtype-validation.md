@@ -9,7 +9,7 @@ CLI `source` install, the API `POST /skills/install`, and the desktop
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `SkillPath` construction rejects `..`, absolute paths, leading `/`, and
       prefix-escape inputs; accepts normal sub-folder paths and the empty

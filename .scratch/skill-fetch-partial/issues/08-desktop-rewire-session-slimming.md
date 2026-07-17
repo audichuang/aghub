@@ -7,7 +7,7 @@ GitHub path.
 
 **Blocked by:** 07 (SkillRepository).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] Scan lists a repo's skills via `SkillRepository::list` with **no full clone**
       on the GitHub path — the recording seam shows no repo-wide blob download

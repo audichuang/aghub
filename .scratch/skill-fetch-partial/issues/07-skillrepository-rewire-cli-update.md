@@ -7,7 +7,7 @@ whole-folder + size-refusal policy.
 
 **Blocked by:** 02 (SkillPath), 05 (GixShallow), 06 (GithubRest).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `SkillRepository` with `resolve` / `list` / `fetch`; `list` and `fetch`
       **share one immutable `RepoSnapshot`**. A caller that knows its skill paths

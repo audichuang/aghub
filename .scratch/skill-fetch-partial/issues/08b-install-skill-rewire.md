@@ -8,7 +8,7 @@ per-workflow selection matrix (this surface was missed by tickets 07/08).
 
 **Blocked by:** 07 (SkillRepository).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `install_skill` resolves one `RepoSnapshot` and fetches ONLY the requested
       skills' folders via `SkillRepository` — no whole-repo clone on the GitHub

@@ -1,23 +1,35 @@
 ---
 name: verify
-description: Runtime-verify aghub's skill fetch/install/update chain end-to-end — build the CLI + API binaries, run them under an isolated $HOME, install from a real GitHub repo (REST fast-path) and from a local git daemon (gix shallow fallback), and observe lock/symlink/disk state. Use when verifying changes to skill install, source sync, check, or apply-update.
+description: Runtime-verify aghub's skill fetch/install/update chain end-to-end — build the CLI + API binaries, run them under an isolated HOME + XDG environment, install from a real GitHub repo and from a local git daemon (gix shallow path), and observe lock/symlink/disk state. Use when verifying changes to skill install, source sync, check, or apply-update.
 ---
 
 # Verifying aghub skill fetch/install end-to-end
 
-## Build + launch
+## Build + launch (isolation is the whole game)
 
 ```bash
 cargo build -p aghub-cli -p aghub-api --bin aghub-cli --bin aghub-api
-VHOME=$(mktemp -d)   # NEVER run against real $HOME — global installs write ~/.agents + ~/.claude
-HOME=$VHOME target/debug/aghub-api --port 18877 &
+
+# NEVER run against the real environment. HOME alone is NOT enough:
+# the global lock prefers $XDG_STATE_HOME (crates/skill/src/lock/io.rs) and
+# universal-skill agents read $XDG_CONFIG_HOME/agents/skills — isolate ALL of them.
+export VHOME=$(mktemp -d)
+export HOME=$VHOME XDG_STATE_HOME=$VHOME/state XDG_CONFIG_HOME=$VHOME/config XDG_DATA_HOME=$VHOME/data
+
+target/debug/aghub-api --port 18877 & API_PID=$!
+trap 'kill $API_PID 2>/dev/null' EXIT
+until curl -fs http://127.0.0.1:18877/api/v1/agents >/dev/null; do sleep 0.2; done
 ```
+
+Known isolation limit: the **OS keyring is NOT isolated** by any env var. If the real
+keyring holds a credential binding for the source's host, API installs will use it —
+state that precondition in your report instead of assuming anonymous.
 
 Token model — know which surface reads what:
 
 - **API `/skills/install` does NOT read `GITHUB_TOKEN` env.** Its tokens come from the
-  keyring credential store or the forwarded `X-Aghub-Git-Tokens` header only. A curl
-  against a public github repo therefore goes ANONYMOUS REST (fine until rate-limited).
+  keyring credential store or the forwarded `X-Aghub-Git-Tokens` header only. With an
+  empty keyring, a curl against a public github repo goes ANONYMOUS.
   The token-authenticated REST path is covered by the cargo E2E
   (`GITHUB_TOKEN=$(gh auth token) cargo test -p skill-update --test skill_repository -- --ignored real_github_rest`).
 - **CLI** (`source diff/sync`, `check --online`, `apply-update`) DOES read
@@ -26,36 +38,47 @@ Token model — know which surface reads what:
 Gotchas:
 
 - bash prefix assignments apply left-to-right: in `HOME=$VHOME GITHUB_TOKEN=$(gh auth token) cmd`
-  the `gh` call runs with the isolated HOME and returns an EMPTY token. `export GITHUB_TOKEN` first.
+  the `gh` call runs with the isolated HOME and returns an EMPTY token. `export` first.
 - Global CLI flags go BEFORE the subcommand: `aghub-cli -g check skills`, not `check skills -g`.
 - CWD matters: project-scope commands read the lock of the repo you're standing in (real data).
-  Stick to `-g` (global = isolated VHOME) or cd to a temp dir.
+  Stick to `-g` (global = isolated env) or cd to a temp dir.
 
-## REST fast-path (github.com)
+## API install outcome (github.com source)
+
+What this proves: the install RESULT (lock pin, hash, master dir, symlink) — NOT which
+backend served it. REST failures (rate limit, 403) fall back to gix transparently and
+produce byte-identical results; backend-level proof lives in the cargo tests
+(`NeverBackend` fake-transport suite + the token-gated real REST E2E above).
 
 ```bash
-curl -s -X POST http://127.0.0.1:18877/api/v1/skills/install -H 'Content-Type: application/json' \
+curl -fs -X POST http://127.0.0.1:18877/api/v1/skills/install -H 'Content-Type: application/json' \
   -d '{"source":"https://github.com/vercel-labs/skills.git","agents":["claude"],"skills":["find-skills"],"scope":"global","project_path":null,"install_all":false}'
 ```
 
-Observe: `$VHOME/.agents/.skill-lock.json` (v3; `refCommit` must equal
-`git ls-remote <url> HEAD`; `contentHash` set, `skillFolderHash` empty per npx contract),
-master dir `$VHOME/.agents/skills/<name>/`, symlink `$VHOME/.claude/skills/<name>`.
+Observe: lock at `$XDG_STATE_HOME/skills/.skill-lock.json` (or `$VHOME/.agents/.skill-lock.json`
+when XDG_STATE_HOME is unset) — v3; `refCommit` must equal `git ls-remote <url> HEAD`;
+`contentHash` set, `skillFolderHash` empty per npx contract; master dir
+`$VHOME/.agents/skills/<name>/`; symlink `$VHOME/.claude/skills/<name>`.
 
-## gix shallow fallback + update chain (controllable upstream)
+## gix shallow path + update chain (controllable upstream)
 
-A local `git daemon` gives a non-github host AND lets you push v2 to drive the update chain:
+A local `git daemon` gives a non-github host AND lets you push v2 to drive the update
+chain. This is also automated: `gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance`
+in `crates/skill-update/tests/skill_repository.rs` (its `spawn_git_daemon` helper handles
+the port race) — prefer extending that test over re-doing this manually.
 
 ```bash
 S=$(mktemp -d); mkdir -p $S/srv/testrepo/skills/hello-world
 # write SKILL.md with YAML frontmatter (name/description), git init -b main, commit
-git daemon --base-path=$S/srv --export-all --port=9419 &
-# non-bare works fine (skill_repository.rs's daemon tests serve a worktree);
+git daemon --base-path=$S/srv --export-all --listen=127.0.0.1 --port=9419 & DAEMON_PID=$!
+trap 'kill $API_PID $DAEMON_PID 2>/dev/null' EXIT
+until git ls-remote git://127.0.0.1:9419/testrepo >/dev/null 2>&1; do sleep 0.2; done
+# non-bare works fine (the automated tests serve a worktree);
 # the URL path must match the dir name EXACTLY — /testrepo, not /testrepo.git
 # install with source "git://127.0.0.1:9419/testrepo" → GixShallow path
 # commit v2 in the served worktree, then:
-HOME=$VHOME aghub-cli -g apply-update skills hello-world        # dry-run: refuses without --yes
-HOME=$VHOME aghub-cli -g apply-update skills hello-world --yes  # disk v1→v2, lock refCommit advances
+aghub-cli -g apply-update skills hello-world        # dry-run: refuses without --yes
+aghub-cli -g apply-update skills hello-world --yes  # disk v1→v2, lock refCommit advances
 ```
 
 ## Expected non-obvious behavior (NOT bugs)
@@ -66,5 +89,6 @@ HOME=$VHOME aghub-cli -g apply-update skills hello-world --yes  # disk v1→v2, 
 - Re-installing an already-installed skill: response is `success:false` with all per-agent rows
   `success:true` (aggregate = `any_installed && all rows ok`; idempotent no-op sets no
   `installed` flag). Pre-existing on main.
-- Missing token: `check` degrades to `uncheckable/network`; `source diff` says
-  "needs a credential… GIT_PASSWORD/GITHUB_TOKEN".
+- Observed without a token on a PUBLIC github source: `source diff` says "needs a
+  credential… GIT_PASSWORD/GITHUB_TOKEN". (A private source may classify as
+  `uncheckable/auth` instead — `check.rs` supports both reasons; verify before asserting.)

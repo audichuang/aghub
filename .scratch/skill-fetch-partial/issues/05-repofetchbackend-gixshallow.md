@@ -9,7 +9,7 @@ working.
 
 **Blocked by:** 01 (RepoSnapshot), 04 (materializer).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `RepoFetchBackend` trait (`resolve` → `RepoSnapshot`, `read_tree`,
       `read_blobs`, `materialize`) with a `GixShallow` implementation.

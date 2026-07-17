@@ -7,7 +7,7 @@ behavior — verification only.
 
 **Blocked by:** 01, 02, 03, 04, 05, 06, 07, 08 (all).
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] **End-to-end "only the skill"**: installing a small skill from a large,
       multi-skill repo via **each surface** (CLI `source`, `POST /skills/install`,

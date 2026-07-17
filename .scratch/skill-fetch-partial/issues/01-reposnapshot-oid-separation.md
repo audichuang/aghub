@@ -9,7 +9,7 @@ this ticket — identity model only.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] `RepoSnapshot` carries distinct `commit_oid`, `tree_oid`, `commit_time`.
 - [ ] Given a **crafted snapshot where `commit_oid` ≠ `tree_oid`**, the written

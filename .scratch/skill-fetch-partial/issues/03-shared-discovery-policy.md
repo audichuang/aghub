@@ -8,7 +8,7 @@ behavior, not merely re-pass.
 
 **Blocked by:** None — can start immediately.
 
-**Status:** ready-for-agent
+**Status:** done
 
 - [ ] A pure fn maps tree entries → discovered skill folders using the existing
       semantics: `full_depth`, `max_depth 10`, and **case-sensitive** dedup by raw
