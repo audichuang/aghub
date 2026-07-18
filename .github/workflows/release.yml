@@ -209,6 +209,16 @@ jobs:
                   STAGE="crates/desktop/src-tauri/binaries"
                   rm -rf "$STAGE"
                   mkdir -p "$STAGE"
+                  # Explicit version for build.rs — without it the version-sync
+                  # sed dirties the tree and `git describe --dirty=-dev` stamps
+                  # the embedded api "X.Y.Z-dev" (see build-cli's Build CLI step).
+                  # Persisted to GITHUB_ENV (not just exported here) so the
+                  # SAME pin also covers "Build Tauri" below: tauri-action
+                  # relinks the aghub-api rlib into the desktop, and without
+                  # this the env going set->unset between steps reruns
+                  # crates/api/build.rs and re-stamps it "X.Y.Z-dev".
+                  export AGHUB_RELEASE_VERSION="$VERSION"
+                  echo "AGHUB_RELEASE_VERSION=$VERSION" >> "$GITHUB_ENV"
                   # Built AFTER Sync Version, so it is version-locked to the tag.
                   cargo build -p aghub-api --release --target "$TARGET"
                   cp "target/$TARGET/release/$BIN" "$STAGE/$BIN"
@@ -408,12 +418,50 @@ jobs:
               run: |
                   Compress-Archive -Path target/${{ matrix.target }}/release/aghub-cli.exe -DestinationPath aghub-cli-${{ matrix.target }}.zip
 
+            # Linux-only: publish an `aghub-api` release asset so a remote VM
+            # (Mac desktop -> Linux VM over SSH) can be provisioned/upgraded
+            # from a release instead of requiring a from-source cargo build.
+            # Other 3 legs are untouched — the desktop bundles its own
+            # platform's aghub-api sidecar (see build-tauri) and never needs
+            # a standalone macOS/Windows api archive.
+            - name: Build aghub-api (Linux release asset)
+              if: matrix.target == 'x86_64-unknown-linux-gnu'
+              shell: bash
+              env:
+                  RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+              run: |
+                  # Same rationale as the CLI build above: pin the version
+                  # explicitly so a sed-dirtied tree can't stamp "-dev".
+                  export AGHUB_RELEASE_VERSION="${RELEASE_TAG#v}"
+                  cargo build --release -p aghub-api --target ${{ matrix.target }}
+
+            - name: Smoke test aghub-api (verifies the released binary works)
+              if: matrix.target == 'x86_64-unknown-linux-gnu'
+              shell: bash
+              env:
+                  RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+              run: |
+                  BIN="target/${{ matrix.target }}/release/aghub-api"
+                  "$BIN" --version
+                  if [[ "$RELEASE_TAG" =~ ^v[0-9] ]]; then
+                      GOT="$("$BIN" --version)"
+                      [[ "$GOT" == "aghub-api ${RELEASE_TAG#v}" ]] \
+                        || { echo "version mismatch: got '$GOT', want 'aghub-api ${RELEASE_TAG#v}'" >&2; exit 1; }
+                  fi
+
+            - name: Package aghub-api (Linux release asset)
+              if: matrix.target == 'x86_64-unknown-linux-gnu'
+              run: |
+                  tar -czvf aghub-api-${{ matrix.target }}.tar.gz -C target/${{ matrix.target }}/release aghub-api
+
             - name: Upload CLI to Release
               uses: softprops/action-gh-release@v3
               with:
                   tag_name: ${{ github.event.inputs.version || github.ref_name }}
                   prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
-                  files: aghub-cli-*
+                  files: |
+                      aghub-cli-*
+                      aghub-api-*
 
     publish-homebrew:
         name: Update Homebrew Tap

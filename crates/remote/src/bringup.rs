@@ -310,14 +310,27 @@ pub fn probe_connection<R: CommandRunner>(
 /// Ensure the remote has a COMPATIBLE `aghub-api`.
 ///
 /// Probes first. Returns early only when a compatible binary is already
-/// present. Otherwise — absent, OR present but version-incompatible — it
-/// installs/upgrades over ssh/scp when a source is available (a `LocalBinary`
-/// source is same-platform-gated on BOTH paths; `CargoGit` compiles on the VM
-/// and is un-gated), then re-probes. With no source (or a cross-platform
-/// `LocalBinary`), a present-but-incompatible binary returns the probe so the
-/// caller surfaces the Incompatible screen; an absent binary errors. The final
-/// [`TestResult`] is returned so callers can still reject incompatible
-/// versions.
+/// present at the exact local version (or no source is configured).
+/// Otherwise — absent, present-but-incompatible, or present-but-patch-stale —
+/// it installs/upgrades over ssh/scp when a source is available (a
+/// `LocalBinary` source is same-platform-gated; `CargoGit`/`ReleaseDeb`
+/// build/download on the VM and are un-gated), then re-probes.
+///
+/// Two best-effort fallbacks exist so a failed upgrade never severs an
+/// already-usable connection, each gated on the SAME condition — the PRE-
+/// install probe was present + compatible (only the patch differs):
+/// - a cross-platform `LocalBinary` source cannot deploy at all, so the
+///   attempt is refused before any mutation, and we proceed on the
+///   old-but-compatible binary with a note that auto-upgrade is unavailable;
+/// - any source whose install actually RUNS but FAILS (missing `.deb` asset,
+///   no `dpkg-deb`, network error, cargo build failure, …) falls back to the
+///   pre-install probe result with a note, instead of propagating the error.
+///
+/// An absent or present-but-incompatible remote has nothing usable to fall
+/// back to, so both paths still hard-fail in that case. With no source, a
+/// present-but-incompatible binary returns the probe so the caller surfaces
+/// the Incompatible screen; an absent binary errors. The final [`TestResult`]
+/// is returned so callers can still reject incompatible versions.
 pub fn ensure_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -354,9 +367,10 @@ pub fn ensure_remote_api<R: CommandRunner>(
 		};
 	};
 
-	// Same-platform gate for a LocalBinary source — covers BOTH the absent
-	// and the upgrade path (a wrong-arch binary would never run). CargoGit
-	// compiles on the VM, so it is un-gated for any remote platform.
+	// Same-platform gate for a LocalBinary source — covers the absent, the
+	// incompatible, and the upgrade path (a wrong-arch binary would never
+	// run). CargoGit compiles on the VM, so it is un-gated for any remote
+	// platform.
 	if let RemoteInstallSource::LocalBinary(_) = source {
 		let local = (std::env::consts::OS, std::env::consts::ARCH);
 		let remote = probe_remote_platform(runner, conn);
@@ -365,6 +379,19 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			.map(|(os, arch)| os == local.0 && arch == local.1)
 			.unwrap_or(false);
 		if !same {
+			// Reaching here with api_present && compatible means only the
+			// patch differs (the exact-match/no-source case already returned
+			// above). A cross-platform LocalBinary source cannot auto-upgrade
+			// it, but the old binary is still wire-compatible — proceed on it
+			// instead of failing the connection outright.
+			if first.api_present && first.compatible {
+				let mut result = first;
+				result.message.push_str(&format!(
+					" (newer version {local_version} available; \
+					 cross-platform auto-upgrade unavailable)"
+				));
+				return Ok(result);
+			}
 			let remote_platform = remote
 				.map(|(os, arch)| format!("{os}/{arch}"))
 				.unwrap_or_else(|| "unknown".to_string());
@@ -381,7 +408,24 @@ pub fn ensure_remote_api<R: CommandRunner>(
 	let bin = resolved_path(conn);
 	// `install_remote_api` does stage -> finish (mv + chmod 755), so an
 	// upgrade overwrites an old binary cleanly in place.
-	install_remote_api(runner, conn, &bin, source)?;
+	if let Err(e) =
+		install_remote_api(runner, conn, &bin, local_version, source)
+	{
+		// A compatible remote is already usable; a failed patch upgrade
+		// (missing .deb asset, no dpkg-deb, network, cargo error) must NOT
+		// sever the connection. Absent/incompatible remotes still hard-fail —
+		// they have nothing usable to fall back to.
+		if first.api_present && first.compatible {
+			let mut result = first;
+			let have = result.api_version.clone().unwrap_or_default();
+			result.message.push_str(&format!(
+				" (auto-upgrade to {local_version} failed: {e}; \
+				 proceeding on compatible {have})"
+			));
+			return Ok(result);
+		}
+		return Err(e);
+	}
 
 	let second = probe_connection(runner, conn, local_version)
 		.with_install_result(true, "aghub-api installed/upgraded".to_string());
@@ -400,16 +444,26 @@ pub fn ensure_remote_api<R: CommandRunner>(
 }
 
 /// Install `aghub-api` on the remote by uploading a binary or running cargo.
+///
+/// `local_version` stamps the `CargoGit` build (via `AGHUB_RELEASE_VERSION`)
+/// so a from-source VM build reports the desktop's own version instead of
+/// falling back to the workspace manifest placeholder; the other sources
+/// ignore it.
 pub fn install_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
 	resolved_path: &str,
+	local_version: &str,
 	source: &RemoteInstallSource,
 ) -> Result<(), ConnectError> {
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
-			stage_remote_api_upload(runner, conn, local)?;
-			finish_remote_api_upload(runner, conn, resolved_path)
+			// One nonce shared by BOTH halves of this install, so the finish
+			// step validates/renames the exact file scp just uploaded (see
+			// `install_nonce`).
+			let nonce = install_nonce();
+			stage_remote_api_upload(runner, conn, local, &nonce)?;
+			finish_remote_api_upload(runner, conn, resolved_path, &nonce)
 		}
 		RemoteInstallSource::CargoGit { url, branch, tag } => {
 			// `cargo install` always writes to ~/.cargo/bin/aghub-api; it cannot
@@ -429,6 +483,7 @@ pub fn install_remote_api<R: CommandRunner>(
 				url,
 				branch.as_deref(),
 				tag.as_deref(),
+				local_version,
 			);
 			run_remote_install_step(runner, conn, &install_cmd)
 		}
@@ -440,21 +495,54 @@ pub fn install_remote_api<R: CommandRunner>(
 	}
 }
 
+/// Generate a per-install unique suffix so two installs racing against the
+/// same remote account (e.g. an auto `ensure_remote_api` upgrade overlapping
+/// a user-triggered "Reinstall") never share the fixed staging path — scp and
+/// the finish step are separate round-trips, so a shared path lets install A
+/// validate the staged file just as install B overwrites it mid-copy, then A
+/// renames B's truncated upload into place (TOCTOU).
+///
+/// Collision model: `<pid>-<nanos>-<counter>`.
+/// - the counter differs across installs within the SAME process (it alone
+///   would NOT catch two SEPARATE processes, since it always restarts at 0);
+/// - `std::process::id` differs across separate desktop process runs on ONE
+///   machine, but pids are a small, OS-recycled space, so two desktops on
+///   DIFFERENT machines targeting the same remote account can coincidentally
+///   share a pid;
+/// - the UNIX-epoch nanosecond timestamp closes that gap: a cross-machine
+///   collision now additionally requires both processes to call this within
+///   the SAME nanosecond, which — combined with the shared-pid requirement —
+///   is astronomically unlikely without a remote-side `mktemp` round-trip
+///   (an extra ssh round-trip; deliberately out of scope here).
+fn install_nonce() -> String {
+	use std::sync::atomic::{AtomicU64, Ordering};
+	static COUNTER: AtomicU64 = AtomicU64::new(0);
+	let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+	let nanos = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.unwrap_or_default()
+		.as_nanos();
+	format!("{}-{nanos}-{n}", std::process::id())
+}
+
 /// Stage a local binary on the remote: `mkdir -p` the cache dir, then `scp` the
-/// binary to its `.upload` staging path. Does NOT move it into place — call
-/// [`finish_remote_api_upload`] for the atomic swap. Splitting the upload from
-/// the swap lets a redeploy stage the new binary BEFORE killing the running
-/// server, so a staging failure can never leave the remote with no server.
+/// binary to its nonce'd `.upload.<nonce>` staging path. Does NOT move it into
+/// place — call [`finish_remote_api_upload`] with the SAME `nonce` for the
+/// atomic swap. Splitting the upload from the swap lets a redeploy stage the
+/// new binary BEFORE killing the running server, so a staging failure can
+/// never leave the remote with no server.
 fn stage_remote_api_upload<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
 	local: &std::path::Path,
+	nonce: &str,
 ) -> Result<(), ConnectError> {
 	let prepare_cmd = build_remote_prepare_upload_cmd();
 	run_remote_install_step(runner, conn, &prepare_cmd)?;
 
 	let local = local.to_string_lossy().into_owned();
-	let scp_args = build_scp_args(conn, &local, remote_api_upload_path());
+	let upload_path = remote_api_upload_path(nonce);
+	let scp_args = build_scp_args(conn, &local, &upload_path);
 	let scp_out = runner
 		.run("scp", &scp_args)
 		.map_err(|e| ConnectError::DeployFailed(e.to_string()))?;
@@ -472,14 +560,17 @@ fn stage_remote_api_upload<R: CommandRunner>(
 	Ok(())
 }
 
-/// Move a previously-staged upload into its final path (atomic `mv` + `chmod` +
-/// a version self-check). Pairs with [`stage_remote_api_upload`].
+/// Move a previously-staged upload into its final path (validate, then a
+/// same-directory atomic rename; see `build_remote_finish_upload_cmd`). Pairs
+/// with [`stage_remote_api_upload`] — `nonce` MUST be the same value passed
+/// there, or this references a staged file that was never uploaded.
 fn finish_remote_api_upload<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
 	resolved_path: &str,
+	nonce: &str,
 ) -> Result<(), ConnectError> {
-	let finish_cmd = build_remote_finish_upload_cmd(resolved_path);
+	let finish_cmd = build_remote_finish_upload_cmd(resolved_path, nonce);
 	run_remote_install_step(runner, conn, &finish_cmd)
 }
 
@@ -549,14 +640,15 @@ fn force_install_remote_api<R: CommandRunner>(
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
 			// Stage before the swap: a staging failure must not
-			// down the server.
-			stage_remote_api_upload(runner, conn, local)?;
-			finish_remote_api_upload(runner, conn, &bin)?;
+			// down the server. One nonce shared by both halves (Fix C).
+			let nonce = install_nonce();
+			stage_remote_api_upload(runner, conn, local, &nonce)?;
+			finish_remote_api_upload(runner, conn, &bin, &nonce)?;
 		}
 		RemoteInstallSource::CargoGit { .. }
 		| RemoteInstallSource::ReleaseDeb { .. } => {
 			// These sources install in place on the VM.
-			install_remote_api(runner, conn, &bin, source)?;
+			install_remote_api(runner, conn, &bin, local_version, source)?;
 		}
 	}
 	let probe = probe_connection(runner, conn, local_version);
@@ -743,9 +835,9 @@ mod tests {
 	use super::*;
 	use crate::ssh::{
 		build_remote_cargo_install_cmd, build_remote_finish_upload_cmd,
-		build_remote_prepare_upload_cmd, build_scp_args, CommandOutput,
+		build_remote_prepare_upload_cmd, CommandOutput,
 	};
-	use crate::test_support::MockRunner;
+	use crate::test_support::{decode_wrapped_remote_cmd, MockRunner};
 
 	const LOCAL: &str = "1.1.1";
 
@@ -809,6 +901,60 @@ mod tests {
 
 	fn local_source() -> RemoteInstallSource {
 		RemoteInstallSource::LocalBinary("/tmp/aghub-api".into())
+	}
+
+	/// Extract the nonce'd staged upload path
+	/// (`.cache/aghub/aghub-api.upload.<nonce>`) embedded in a RECORDED scp
+	/// destination argument (`[user@]host:.cache/aghub/aghub-api.upload.<nonce>`).
+	fn staged_path_from_scp_dest(dest: &str) -> &str {
+		let marker = ".cache/aghub/aghub-api.upload.";
+		let idx = dest.find(marker).unwrap_or_else(|| {
+			panic!("scp destination must embed the staged upload path: {dest}")
+		});
+		&dest[idx..]
+	}
+
+	/// Find the finish-upload ssh call among `calls` — the one whose decoded
+	/// remote command references a staged `.upload.<nonce>` path — and return
+	/// its DECODED plaintext. Only the finish command ever mentions this
+	/// marker (prepare/probe/uname/capabilities commands never do), so this
+	/// identifies it regardless of call ordering.
+	fn finish_call_plaintext(
+		calls: &[crate::test_support::RecordedCall],
+	) -> String {
+		calls
+			.iter()
+			.filter(|c| c.program == "ssh")
+			.map(|c| decode_wrapped_remote_cmd(&c.args))
+			.find(|cmd| cmd.contains(".cache/aghub/aghub-api.upload."))
+			.expect(
+				"expected a recorded finish-upload ssh call referencing a \
+				 staged path",
+			)
+	}
+
+	/// Assert that the scp destination and the finish ssh call recorded in
+	/// `calls` reference the EXACT SAME staged path — i.e. both halves of ONE
+	/// install were threaded from the SAME nonce. This is the regression this
+	/// crate must catch: if `install_remote_api`/`force_install_remote_api`
+	/// ever called `install_nonce()` twice (once for scp, once for finish),
+	/// scp would upload to one path while finish validated/moved a DIFFERENT
+	/// (never-uploaded) one.
+	fn assert_scp_and_finish_share_staged_path(
+		calls: &[crate::test_support::RecordedCall],
+	) {
+		let scp_dest = calls
+			.iter()
+			.find(|c| c.program == "scp")
+			.and_then(|c| c.args.last())
+			.expect("expected a recorded scp call with a destination arg");
+		let staged = staged_path_from_scp_dest(scp_dest);
+		let finish_cmd = finish_call_plaintext(calls);
+		assert!(
+			finish_cmd.contains(&format!("$HOME/{staged}")),
+			"finish command must reference the EXACT staged path scp \
+			 uploaded to ({staged}): {finish_cmd}"
+		);
 	}
 
 	// --- probe_connection --------------------------------------------------
@@ -1150,6 +1296,324 @@ mod tests {
 	}
 
 	#[test]
+	fn ensure_patch_stale_release_deb_install_failure_proceeds_on_compatible() {
+		// A patch-stale but wire-compatible remote is already usable. If the
+		// opportunistic patch upgrade itself fails (e.g. no dpkg-deb on the
+		// VM), that must NOT sever the connection — proceed on the old,
+		// still-compatible binary instead of hard-failing.
+		let probe = probe_args();
+		let url = "https://example.com/aghub_2.7.3_amd64.deb";
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: url.to_string(),
+		};
+		let install_cmd =
+			build_remote_release_deb_install_cmd(url, "aghub-api");
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 2.7.2".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&install_args),
+				CommandOutput {
+					status_code: Some(127),
+					stdout: String::new(),
+					stderr: "dpkg-deb not found".to_string(),
+				},
+			);
+
+		let result =
+			ensure_remote_api(&runner, &conn(), "2.7.3", Some(&source)).expect(
+				"a failed patch upgrade must not sever a compatible remote",
+			);
+
+		assert_eq!(result.api_version.as_deref(), Some("2.7.2"));
+		assert!(result.compatible);
+		assert!(
+			result.message.contains("proceeding on compatible"),
+			"got {}",
+			result.message
+		);
+	}
+
+	#[test]
+	fn ensure_patch_stale_staged_self_check_failure_proceeds_on_compatible() {
+		// The BLOCKING validate-before-replace fix: the install step's staged
+		// binary fails its own `--version` self-check (corrupt download,
+		// glibc/ABI mismatch). The composed remote script (pinned in ssh.rs)
+		// never runs `mv` in that case, so `$target` is untouched — but this
+		// test exercises the CALLER side of that guarantee: install_remote_api
+		// surfaces the failure as an error, and the same best-effort fallback
+		// as the release-deb-install-failure case above must proceed on the
+		// OLD, still-compatible binary rather than sever the connection.
+		let probe = probe_args();
+		let url = "https://example.com/aghub_2.7.3_amd64.deb";
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: url.to_string(),
+		};
+		let install_cmd =
+			build_remote_release_deb_install_cmd(url, "aghub-api");
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 2.7.2".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&install_args),
+				CommandOutput {
+					status_code: Some(1),
+					stdout: String::new(),
+					stderr: "staged binary failed self-check".to_string(),
+				},
+			);
+
+		let result =
+			ensure_remote_api(&runner, &conn(), "2.7.3", Some(&source)).expect(
+				"a failed staged self-check must not sever a compatible remote",
+			);
+
+		// Still the OLD, untouched binary -- proceeding on compatible, never a
+		// half-installed state.
+		assert_eq!(result.api_version.as_deref(), Some("2.7.2"));
+		assert!(result.compatible);
+		assert!(
+			result.message.contains("proceeding on compatible"),
+			"got {}",
+			result.message
+		);
+		assert!(
+			result.message.contains("staged binary failed self-check"),
+			"the real remote failure detail must surface: {}",
+			result.message
+		);
+
+		// The pre-install probe ran exactly once; there is no SECOND
+		// (post-install) probe of a "new" version -- the staged binary that
+		// failed its self-check was never moved into $target, so nothing new
+		// exists to re-probe.
+		let calls = runner.calls();
+		assert_eq!(
+			calls.iter().filter(|c| c.args == probe).count(),
+			1,
+			"the version probe must run exactly once -- no second \
+			 post-install re-probe: {calls:?}"
+		);
+		assert!(
+			calls.iter().any(|c| c.args == install_args),
+			"the failed install step must have run: {calls:?}"
+		);
+	}
+
+	#[test]
+	fn ensure_absent_install_failure_still_hard_fails() {
+		// Absent remote: there is nothing usable to fall back to, so a failed
+		// install must still hard-fail (unlike the patch-stale case above).
+		let probe = probe_args();
+		let url = "https://example.com/aghub_2.7.3_amd64.deb";
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: url.to_string(),
+		};
+		let install_cmd =
+			build_remote_release_deb_install_cmd(url, "aghub-api");
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(127),
+					stdout: String::new(),
+					stderr: "bash: aghub-api: command not found".to_string(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&install_args),
+				CommandOutput {
+					status_code: Some(127),
+					stdout: String::new(),
+					stderr: "dpkg-deb not found".to_string(),
+				},
+			);
+
+		let err = ensure_remote_api(&runner, &conn(), "2.7.3", Some(&source))
+			.expect_err("absent remote with a failed install must hard-fail");
+		assert!(matches!(err, ConnectError::DeployFailed(_)), "got {err:?}");
+	}
+
+	#[test]
+	fn ensure_present_incompatible_install_failure_still_hard_fails() {
+		// Present but incompatible remote: also nothing usable to fall back
+		// to, so a failed install must still hard-fail.
+		let probe = probe_args();
+		let url = "https://example.com/aghub_1.1.1_amd64.deb";
+		let source = RemoteInstallSource::ReleaseDeb {
+			url: url.to_string(),
+		};
+		let install_cmd =
+			build_remote_release_deb_install_cmd(url, "aghub-api");
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 1.0.0".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&install_args),
+				CommandOutput {
+					status_code: Some(127),
+					stdout: String::new(),
+					stderr: "dpkg-deb not found".to_string(),
+				},
+			);
+
+		let err = ensure_remote_api(&runner, &conn(), LOCAL, Some(&source))
+			.expect_err(
+				"incompatible remote with a failed install must hard-fail",
+			);
+		assert!(matches!(err, ConnectError::DeployFailed(_)), "got {err:?}");
+	}
+
+	#[test]
+	fn ensure_patch_stale_cargo_git_install_stamps_release_version() {
+		// The CargoGit install path must stamp AGHUB_RELEASE_VERSION with the
+		// desktop's own version: a cargo-git checkout has no tag refs, so its
+		// build.rs's `git describe` fallback fails there and would otherwise
+		// stamp the workspace placeholder, making the desktop treat it as
+		// incompatible forever.
+		let probe = probe_args();
+		let source = RemoteInstallSource::CargoGit {
+			url: "https://github.com/audichuang/aghub.git".to_string(),
+			branch: Some("main".to_string()),
+			tag: None,
+		};
+		let install_cmd = build_remote_cargo_install_cmd(
+			"https://github.com/audichuang/aghub.git",
+			Some("main"),
+			None,
+			"2.7.2",
+		);
+		let install_args = build_ssh_args(&conn(), &install_cmd);
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 2.7.1".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script(
+				"ssh",
+				&args_as_str(&install_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: String::new(),
+					stderr: String::new(),
+				},
+			);
+
+		let result =
+			ensure_remote_api(&runner, &conn(), "2.7.2", Some(&source))
+				.expect("patch-stale cargo-git upgrade should succeed");
+
+		assert!(result.install_attempted);
+		let calls = runner.calls();
+		assert!(
+			calls.iter().any(|c| c.args == install_args),
+			"the stamped cargo-git install command must run: {calls:?}"
+		);
+	}
+
+	#[test]
+	fn ensure_present_compatible_patch_stale_local_binary_cross_platform_proceeds(
+	) {
+		// Compatible (major.minor match) but the remote is on an older patch,
+		// and the only install source is a CROSS-platform LocalBinary: the
+		// connection must PROCEED on the old-but-compatible binary instead of
+		// failing outright — cross-platform auto-upgrade just isn't possible
+		// (the desktop only bundles its own platform's binary).
+		let probe = probe_args();
+		let caps = capabilities_args();
+		let uname_args = build_ssh_args(&conn(), "uname -sm");
+		let runner = MockRunner::new()
+			.script(
+				"ssh",
+				&args_as_str(&probe),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: "aghub-api 2.7.0".to_string(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&caps), capabilities_ok())
+			.script(
+				"ssh",
+				&args_as_str(&uname_args),
+				CommandOutput {
+					status_code: Some(0),
+					// Windows_NT does not map to the consts vocabulary ->
+					// cross-platform regardless of the host running this test.
+					stdout: "Windows_NT x86_64\n".to_string(),
+					stderr: String::new(),
+				},
+			);
+
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let result =
+			ensure_remote_api(&runner, &conn(), "2.7.2", Some(&source)).expect(
+				"compatible-but-patch-stale cross-platform must proceed",
+			);
+
+		assert!(result.api_present);
+		assert!(result.compatible);
+		assert!(
+			!result.install_attempted,
+			"a cross-platform LocalBinary must never attempt an install"
+		);
+		assert!(
+			result.message.contains("newer version 2.7.2 available"),
+			"message should note the unreachable upgrade: {}",
+			result.message
+		);
+		assert!(
+			result
+				.message
+				.contains("cross-platform auto-upgrade unavailable"),
+			"message should explain why: {}",
+			result.message
+		);
+
+		// No scp / install mutation may run.
+		let calls = runner.calls();
+		assert!(
+			!calls.iter().any(|c| c.program == "scp"),
+			"no scp on a cross-platform patch-stale proceed: {calls:?}"
+		);
+	}
+
+	#[test]
 	fn ensure_remote_api_absent_and_no_source_is_remote_api_missing() {
 		// Reachable, but the binary is absent and no install source is given.
 		let args = probe_args();
@@ -1194,19 +1658,15 @@ mod tests {
 		// so ensure_remote_api returns Ok(second) with install_attempted=true.
 		// We assert the side-effects (an scp + a finish ran, install_attempted)
 		// — NOT result.compatible, which this single-key seam cannot flip.
+		//
+		// The scp destination and finish command embed a per-install nonce
+		// (Fix C) this test cannot predict, so both fall back to a
+		// program-wide default response instead of an exact key; the
+		// assertions below check the RECORDED calls' shape instead.
 		let probe = probe_args();
 		let uname_args = build_ssh_args(&conn(), "uname -sm");
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
 		let incompatible = || CommandOutput {
 			status_code: Some(0),
 			stdout: "aghub-api 1.0.0".to_string(),
@@ -1229,8 +1689,8 @@ mod tests {
 				},
 			)
 			.script("ssh", &args_as_str(&prepare_args), ok())
-			.script("scp", &args_as_str(&scp_args), ok())
-			.script("ssh", &args_as_str(&finish_args), ok());
+			.default_for("scp", ok())
+			.default_for("ssh", ok());
 
 		let result =
 			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
@@ -1246,15 +1706,91 @@ mod tests {
 
 		let calls = runner.calls();
 		assert!(
-			calls
-				.iter()
-				.any(|c| c.program == "scp" && c.args == scp_args),
-			"the bundled binary must be uploaded on upgrade: {calls:?}"
+			calls.iter().any(|c| c.program == "scp"
+				&& c.args.last().is_some_and(
+					|a| a.contains(".cache/aghub/aghub-api.upload.")
+				)),
+			"the bundled binary must be uploaded to a nonce'd staging path: \
+			 {calls:?}"
 		);
+		assert_eq!(
+			calls.iter().filter(|c| c.program == "scp").count(),
+			1,
+			"exactly one upload on a single upgrade: {calls:?}"
+		);
+		// Exact scp/finish pairing (regression coverage: catches a bug where
+		// `install_nonce()` is called twice for one install).
+		assert_scp_and_finish_share_staged_path(&calls);
+	}
+
+	// Same-platform gate (see the upgrade test above) — cfg-gate off
+	// Windows, whose uname vocabulary `normalize_platform` does not map.
+	#[cfg(any(target_os = "linux", target_os = "macos"))]
+	#[test]
+	fn ensure_present_compatible_patch_stale_local_binary_same_platform_upgrades(
+	) {
+		// Same-platform + patch-stale (compatible major.minor) + LocalBinary
+		// source: unchanged existing behaviour — the upgrade must still be
+		// attempted. Guards against the S2 cross-platform proceed-instead-of-
+		// error change accidentally widening to the same-platform path too.
+		//
+		// The scp destination and finish command embed a per-install nonce
+		// (Fix C) this test cannot predict, so both fall back to a
+		// program-wide default response instead of an exact key.
+		let probe = probe_args();
+		let caps = capabilities_args();
+		let uname_args = build_ssh_args(&conn(), "uname -sm");
+		let prepare_args =
+			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
+		let old_patch = || CommandOutput {
+			status_code: Some(0),
+			stdout: "aghub-api 1.1.0".to_string(),
+			stderr: String::new(),
+		};
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.script("ssh", &args_as_str(&probe), old_patch())
+			.script("ssh", &args_as_str(&caps), capabilities_ok())
+			.script(
+				"ssh",
+				&args_as_str(&uname_args),
+				CommandOutput {
+					status_code: Some(0),
+					stdout: local_uname_stdout(),
+					stderr: String::new(),
+				},
+			)
+			.script("ssh", &args_as_str(&prepare_args), ok())
+			.default_for("scp", ok())
+			.default_for("ssh", ok());
+
+		let result =
+			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
+				.expect("same-platform patch-stale upgrade should succeed");
 		assert!(
-			calls.iter().any(|c| c.args == finish_args),
-			"the staged upload must be moved into place: {calls:?}"
+			result.install_attempted,
+			"same-platform patch-stale must still install"
 		);
+
+		let calls = runner.calls();
+		assert!(
+			calls.iter().any(|c| c.program == "scp"
+				&& c.args.last().is_some_and(|a| a
+					.contains(".cache/aghub/aghub-api.upload."))),
+			"same-platform patch mismatch must still upload the binary: {calls:?}"
+		);
+		assert_eq!(
+			calls.iter().filter(|c| c.program == "scp").count(),
+			1,
+			"exactly one upload on a single upgrade: {calls:?}"
+		);
+		// Exact scp/finish pairing (regression coverage: catches a bug where
+		// `install_nonce()` is called twice for one install).
+		assert_scp_and_finish_share_staged_path(&calls);
 	}
 
 	#[test]
@@ -1358,19 +1894,14 @@ mod tests {
 		// We assert that error AND that the install steps ran first (the
 		// single-key seam cannot make the re-probe "present"; the success path
 		// is exercised by ..._same_platform_upgrades above).
+		//
+		// The scp destination and finish command embed a per-install nonce
+		// (Fix C) this test cannot predict, so both fall back to a
+		// program-wide default response instead of an exact key.
 		let probe = probe_args();
 		let uname_args = build_ssh_args(&conn(), "uname -sm");
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
 		let ok = || CommandOutput {
 			status_code: Some(0),
 			stdout: String::new(),
@@ -1396,8 +1927,8 @@ mod tests {
 				},
 			)
 			.script("ssh", &args_as_str(&prepare_args), ok())
-			.script("scp", &args_as_str(&scp_args), ok())
-			.script("ssh", &args_as_str(&finish_args), ok());
+			.default_for("scp", ok())
+			.default_for("ssh", ok());
 
 		let err =
 			ensure_remote_api(&runner, &conn(), LOCAL, Some(&local_source()))
@@ -1407,15 +1938,20 @@ mod tests {
 		// The install ran before the failing re-probe.
 		let calls = runner.calls();
 		assert!(
-			calls
-				.iter()
-				.any(|c| c.program == "scp" && c.args == scp_args),
+			calls.iter().any(|c| c.program == "scp"
+				&& c.args.last().is_some_and(
+					|a| a.contains(".cache/aghub/aghub-api.upload.")
+				)),
 			"absent same-platform must scp the binary: {calls:?}"
 		);
-		assert!(
-			calls.iter().any(|c| c.args == finish_args),
-			"absent same-platform must run finish: {calls:?}"
+		assert_eq!(
+			calls.iter().filter(|c| c.program == "scp").count(),
+			1,
+			"exactly one upload attempt: {calls:?}"
 		);
+		// Exact scp/finish pairing (regression coverage: catches a bug where
+		// `install_nonce()` is called twice for one install).
+		assert_scp_and_finish_share_staged_path(&calls);
 	}
 
 	#[test]
@@ -1429,6 +1965,7 @@ mod tests {
 			"https://github.com/audichuang/aghub.git",
 			Some("feat/remote-ssh-management"),
 			None,
+			LOCAL,
 		);
 		let install_args = build_ssh_args(&conn(), &install_cmd);
 		let runner = MockRunner::new().script(
@@ -1441,7 +1978,7 @@ mod tests {
 			},
 		);
 
-		install_remote_api(&runner, &conn(), "aghub-api", &source)
+		install_remote_api(&runner, &conn(), "aghub-api", LOCAL, &source)
 			.expect("cargo-git install should succeed");
 
 		let calls = runner.calls();
@@ -1471,8 +2008,14 @@ mod tests {
 			},
 		);
 
-		install_remote_api(&runner, &conn(), "~/.local/bin/aghub-api", &source)
-			.expect("release .deb install should succeed");
+		install_remote_api(
+			&runner,
+			&conn(),
+			"~/.local/bin/aghub-api",
+			LOCAL,
+			&source,
+		)
+		.expect("release .deb install should succeed");
 
 		let calls = runner.calls();
 		assert_eq!(calls.len(), 1);
@@ -1492,9 +2035,14 @@ mod tests {
 			tag: Some("v1.1.1".to_string()),
 		};
 		let runner = MockRunner::new();
-		let err =
-			install_remote_api(&runner, &conn(), "/opt/aghub-api", &source)
-				.expect_err("cargo-git + custom path must be refused");
+		let err = install_remote_api(
+			&runner,
+			&conn(),
+			"/opt/aghub-api",
+			LOCAL,
+			&source,
+		)
+		.expect_err("cargo-git + custom path must be refused");
 		assert!(
 			matches!(err, ConnectError::DeployFailed(_)),
 			"expected DeployFailed, got {err:?}"
@@ -1511,15 +2059,6 @@ mod tests {
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
 		let probe_args = build_ssh_args(
 			&conn(),
 			&crate::ssh::build_remote_probe_cmd("aghub-api"),
@@ -1535,10 +2074,13 @@ mod tests {
 			stderr: String::new(),
 		};
 		let caps_args = capabilities_args();
+		// The scp destination and finish command embed a per-install nonce
+		// (Fix C) this test cannot predict, so both fall back to a
+		// program-wide default response instead of an exact key.
 		let runner = MockRunner::new()
 			.script("ssh", &args_as_str(&prepare_args), ok())
-			.script("scp", &args_as_str(&scp_args), ok())
-			.script("ssh", &args_as_str(&finish_args), ver())
+			.default_for("scp", ok())
+			.default_for("ssh", ver())
 			.script("ssh", &args_as_str(&probe_args), ver())
 			.script("ssh", &args_as_str(&caps_args), capabilities_ok());
 
@@ -1550,35 +2092,40 @@ mod tests {
 		assert!(result.api_present);
 		assert!(result.supports_credential_forwarding);
 		// Strict ordering: the new binary is fully STAGED (prepare + scp),
-		// then the staged upload is moved into place (atomic `mv`), then we
-		// re-probe (version probe + its additive capability probe). No pkill;
-		// the old incompatible server is left orphaned.
+		// then the staged upload is moved into place (atomic same-dir
+		// rename), then we re-probe (version probe + its additive capability
+		// probe). No pkill; the old incompatible server is left orphaned.
 		let calls = runner.calls();
 		assert_eq!(calls.len(), 5);
 		assert_eq!(calls[0].args, prepare_args, "prepare first");
-		assert_eq!(calls[1].program, "scp");
-		assert_eq!(calls[1].args, scp_args, "scp upload second");
-		assert_eq!(calls[2].args, finish_args, "finish (atomic mv) third");
+		assert_eq!(calls[1].program, "scp", "scp upload second");
+		assert!(
+			calls[1]
+				.args
+				.last()
+				.is_some_and(|a| a.contains(".cache/aghub/aghub-api.upload.")),
+			"scp destination must be the nonce'd staging path: {:?}",
+			calls[1]
+		);
+		assert_eq!(calls[2].program, "ssh", "finish (atomic rename) third");
 		assert_eq!(calls[3].args, probe_args, "re-probe (version) fourth");
 		assert_eq!(calls[4].args, caps_args, "capability probe last");
+		// Exact scp/finish pairing (regression coverage: catches a bug where
+		// `install_nonce()` is called twice for one install).
+		assert_scp_and_finish_share_staged_path(&calls);
 	}
 
 	#[test]
 	fn force_redeploy_staging_failure_aborts_before_finish() {
 		// If staging fails (here: scp upload errors), the swap must NOT
 		// happen — the remote keeps serving the old binary, no `mv` runs.
+		//
+		// The scp destination embeds a per-install nonce (Fix C) this test
+		// cannot predict, so the failure is scripted via a program-wide
+		// default instead of an exact key.
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
 		let runner = MockRunner::new()
 			.script(
 				"ssh",
@@ -1589,9 +2136,8 @@ mod tests {
 					stderr: String::new(),
 				},
 			)
-			.script(
+			.default_for(
 				"scp",
-				&args_as_str(&scp_args),
 				CommandOutput {
 					status_code: Some(1),
 					stdout: String::new(),
@@ -1603,10 +2149,13 @@ mod tests {
 			.expect_err("staging failure must propagate");
 		assert!(matches!(err, ConnectError::DeployFailed(_)), "got {err:?}");
 
-		// No finish (atomic mv) ever ran: the old server is untouched.
+		// No finish (atomic rename) ever ran: the old server is untouched.
+		// Only the prepare + the failing scp ran — a third (finish) ssh call
+		// would show up here since it has no scripted response.
 		let calls = runner.calls();
-		assert!(
-			!calls.iter().any(|c| c.args == finish_args),
+		assert_eq!(
+			calls.len(),
+			2,
 			"finish must NOT run when staging failed: {calls:?}"
 		);
 	}
@@ -1616,15 +2165,6 @@ mod tests {
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
 		let probe_args = build_ssh_args(
 			&conn(),
 			&crate::ssh::build_remote_probe_cmd("aghub-api"),
@@ -1640,10 +2180,13 @@ mod tests {
 			stderr: String::new(),
 		};
 		let caps_args = capabilities_args();
+		// The scp destination and finish command embed a per-install nonce
+		// (Fix C) this test cannot predict, so both fall back to a
+		// program-wide default response instead of an exact key.
 		let runner = MockRunner::new()
 			.script("ssh", &args_as_str(&prepare_args), ok())
-			.script("scp", &args_as_str(&scp_args), ok())
-			.script("ssh", &args_as_str(&finish_args), ver())
+			.default_for("scp", ok())
+			.default_for("ssh", ver())
 			.script("ssh", &args_as_str(&probe_args), ver())
 			.script("ssh", &args_as_str(&caps_args), capabilities_ok());
 
@@ -1663,24 +2206,22 @@ mod tests {
 			calls[0].args, prepare_args,
 			"upload must be staged before the binary is swapped"
 		);
+		assert_eq!(calls[1].program, "scp");
 		// prepare + scp + finish + re-probe (version) + capability probe.
 		assert_eq!(calls.len(), 5);
+		// Exact scp/finish pairing (regression coverage: catches a bug where
+		// `install_nonce()` is called twice for one install).
+		assert_scp_and_finish_share_staged_path(&calls);
 	}
 
 	#[test]
 	fn install_remote_api_from_local_binary_uploads_then_installs() {
+		// The scp destination and finish command embed a per-install nonce
+		// (Fix C) this test cannot predict, so both fall back to a
+		// program-wide default response instead of an exact key.
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
 			build_ssh_args(&conn(), &build_remote_prepare_upload_cmd());
-		let scp_args = build_scp_args(
-			&conn(),
-			"/tmp/aghub-api",
-			crate::ssh::remote_api_upload_path(),
-		);
-		let finish_args = build_ssh_args(
-			&conn(),
-			&build_remote_finish_upload_cmd("aghub-api"),
-		);
 		let runner = MockRunner::new()
 			.script(
 				"ssh",
@@ -1691,18 +2232,16 @@ mod tests {
 					stderr: String::new(),
 				},
 			)
-			.script(
+			.default_for(
 				"scp",
-				&args_as_str(&scp_args),
 				CommandOutput {
 					status_code: Some(0),
 					stdout: String::new(),
 					stderr: String::new(),
 				},
 			)
-			.script(
+			.default_for(
 				"ssh",
-				&args_as_str(&finish_args),
 				CommandOutput {
 					status_code: Some(0),
 					stdout: "aghub-api 1.1.1".to_string(),
@@ -1710,15 +2249,128 @@ mod tests {
 				},
 			);
 
-		install_remote_api(&runner, &conn(), "aghub-api", &source)
+		install_remote_api(&runner, &conn(), "aghub-api", LOCAL, &source)
 			.expect("local binary install should succeed");
 
 		let calls = runner.calls();
 		assert_eq!(calls.len(), 3);
 		assert_eq!(calls[0].args, prepare_args);
 		assert_eq!(calls[1].program, "scp");
-		assert_eq!(calls[1].args, scp_args);
-		assert_eq!(calls[2].args, finish_args);
+		assert!(
+			calls[1]
+				.args
+				.last()
+				.is_some_and(|a| a.contains(".cache/aghub/aghub-api.upload.")),
+			"scp destination must be the nonce'd staging path: {:?}",
+			calls[1]
+		);
+		assert_eq!(calls[2].program, "ssh");
+		// Exact scp/finish pairing (regression coverage: catches a bug where
+		// `install_nonce()` is called twice for one install).
+		assert_scp_and_finish_share_staged_path(&calls);
+	}
+
+	// --- install_nonce / staged-path uniqueness (Fix C) --------------------
+
+	#[test]
+	fn install_nonce_differs_across_consecutive_calls() {
+		// Two installs racing against the same remote account must never
+		// derive the identical staged path, or a concurrent scp/finish pair
+		// can interleave (A validates, B truncates, A renames B's partial
+		// upload).
+		let a = install_nonce();
+		let b = install_nonce();
+		assert_ne!(
+			a, b,
+			"consecutive install nonces must differ so concurrent installs \
+			 never share a staged path"
+		);
+		// Shape check for the cross-machine hardening: `<pid>-<nanos>-<counter>`,
+		// filename-safe (see `install_nonce`'s doc comment for the collision
+		// model this closes).
+		for nonce in [&a, &b] {
+			assert_eq!(
+				nonce.split('-').count(),
+				3,
+				"nonce must be <pid>-<nanos>-<counter>: {nonce}"
+			);
+			assert!(
+				nonce.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'),
+				"nonce must be filename-safe: {nonce}"
+			);
+		}
+	}
+
+	#[test]
+	fn upload_path_and_finish_cmd_reference_the_same_staged_path_for_one_nonce()
+	{
+		// Both halves of a SINGLE install (the scp destination and the
+		// finish script that validates + swaps it into place) must
+		// reference the IDENTICAL staged file — they are threaded from the
+		// SAME nonce.
+		let nonce = install_nonce();
+		let upload_path = crate::ssh::remote_api_upload_path(&nonce);
+		let finish_cmd = build_remote_finish_upload_cmd("aghub-api", &nonce);
+		assert!(
+			finish_cmd.contains(&format!("$HOME/{upload_path}")),
+			"finish command must reference the exact path scp uploaded to \
+			 ({upload_path}): {finish_cmd}"
+		);
+	}
+
+	#[test]
+	fn two_consecutive_installs_never_share_a_staged_path() {
+		// Two full installs against the SAME connection within the SAME
+		// process (e.g. an auto `ensure_remote_api` upgrade racing a
+		// user-triggered "Reinstall") must derive DIFFERENT staged paths, and
+		// each install's OWN finish call must reference its OWN scp's staged
+		// path — never the other install's.
+		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
+		let ok = || CommandOutput {
+			status_code: Some(0),
+			stdout: String::new(),
+			stderr: String::new(),
+		};
+		let runner = MockRunner::new()
+			.default_for("ssh", ok())
+			.default_for("scp", ok());
+
+		install_remote_api(&runner, &conn(), "aghub-api", LOCAL, &source)
+			.expect("first install should succeed");
+		install_remote_api(&runner, &conn(), "aghub-api", LOCAL, &source)
+			.expect("second install should succeed");
+
+		let calls = runner.calls();
+		assert_eq!(calls.len(), 6, "prepare+scp+finish, twice: {calls:?}");
+
+		let scp_dests: Vec<&str> = calls
+			.iter()
+			.filter(|c| c.program == "scp")
+			.map(|c| c.args.last().expect("scp destination arg").as_str())
+			.collect();
+		assert_eq!(scp_dests.len(), 2, "one scp per install: {calls:?}");
+		let staged_1 = staged_path_from_scp_dest(scp_dests[0]);
+		let staged_2 = staged_path_from_scp_dest(scp_dests[1]);
+		assert_ne!(
+			staged_1, staged_2,
+			"two consecutive installs must never derive the same staged path"
+		);
+
+		let finish_cmds: Vec<String> = calls
+			.iter()
+			.filter(|c| c.program == "ssh")
+			.map(|c| decode_wrapped_remote_cmd(&c.args))
+			.filter(|cmd| cmd.contains(".cache/aghub/aghub-api.upload."))
+			.collect();
+		assert_eq!(finish_cmds.len(), 2, "one finish per install: {calls:?}");
+		// Each install's finish must reference its OWN staged path...
+		assert!(finish_cmds[0].contains(&format!("$HOME/{staged_1}")));
+		assert!(finish_cmds[1].contains(&format!("$HOME/{staged_2}")));
+		// ...and NOT the other install's — the exact bug this test guards
+		// against (`install_nonce()` called independently for scp vs finish,
+		// or across installs) would otherwise still slip through.
+		assert!(!finish_cmds[0].contains(&format!("$HOME/{staged_2}")));
+		assert!(!finish_cmds[1].contains(&format!("$HOME/{staged_1}")));
 	}
 
 	// --- start_remote ------------------------------------------------------

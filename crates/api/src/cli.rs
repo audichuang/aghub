@@ -206,16 +206,13 @@ mod tests {
 	}
 
 	#[test]
-	fn version_string_matches_cargo_pkg_version() {
+	fn version_string_matches_crate_version() {
+		// `crate::VERSION` is git-derived by build.rs (release tag /
+		// `git describe` / `CARGO_PKG_VERSION` fallback — see build.rs), so
+		// this asserts the wiring rather than a hardcoded literal.
 		let expected = format!("aghub-api {}", crate::VERSION);
 		assert_eq!(version_string(), expected);
 		assert!(version_string().starts_with("aghub-api "));
-	}
-
-	#[test]
-	fn version_string_is_one_one_one() {
-		// Workspace version is pinned to 1.1.1.
-		assert_eq!(version_string(), "aghub-api 1.1.1");
 	}
 
 	#[test]

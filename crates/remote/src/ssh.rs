@@ -266,8 +266,14 @@ pub fn build_scp_args(
 }
 
 /// Remote upload target used before an install step moves it into place.
-pub fn remote_api_upload_path() -> &'static str {
-	".cache/aghub/aghub-api.upload"
+///
+/// `nonce` must be a per-install unique suffix (see `bringup::install_nonce`)
+/// so two installs racing against the same remote account never share (and
+/// corrupt) one fixed staging file: scp + finish are separate round-trips,
+/// so a fixed path lets install A validate the staged file just as install B
+/// overwrites it mid-copy, then A renames B's truncated upload into place.
+pub fn remote_api_upload_path(nonce: &str) -> String {
+	format!(".cache/aghub/aghub-api.upload.{nonce}")
 }
 
 /// Build the argv for an SSH loopback port-forward tunnel.
@@ -334,7 +340,9 @@ fn sanitize_id(id: &str) -> String {
 
 /// POSIX shell snippet that resolves the default `aghub-api` binary. Non-login
 /// SSH commands frequently miss `~/.cargo/bin`, especially with fish login
-/// shells, so check the common install locations before giving up.
+/// shells, so check the common install locations before giving up. Also
+/// checks the two standard linuxbrew prefixes (system-wide and per-user) since
+/// a non-login shell has no Homebrew `PATH` either.
 fn default_api_path_script() -> &'static str {
 	"if command -v aghub-api >/dev/null 2>&1; then \
 	     command -v aghub-api; \
@@ -342,6 +350,10 @@ fn default_api_path_script() -> &'static str {
 	     printf '%s\\n' \"$HOME/.cargo/bin/aghub-api\"; \
 	 elif [ -x \"$HOME/.local/bin/aghub-api\" ]; then \
 	     printf '%s\\n' \"$HOME/.local/bin/aghub-api\"; \
+	 elif [ -x \"/home/linuxbrew/.linuxbrew/bin/aghub-api\" ]; then \
+	     printf '%s\\n' \"/home/linuxbrew/.linuxbrew/bin/aghub-api\"; \
+	 elif [ -x \"$HOME/.linuxbrew/bin/aghub-api\" ]; then \
+	     printf '%s\\n' \"$HOME/.linuxbrew/bin/aghub-api\"; \
 	 else \
 	     printf '%s\\n' aghub-api; \
 	 fi"
@@ -370,9 +382,16 @@ fn assign_api_bin_cmd(resolved_path: &str) -> String {
 /// overwrite the existing binary the probe would resolve (so a
 /// `cargo install`-ed `~/.cargo/bin/aghub-api` is upgraded IN PLACE rather than
 /// shadowed by a new `~/.local/bin` copy), falling back to
-/// `~/.local/bin/aghub-api` for a fresh install. Mirrors
-/// [`default_api_path_script`] but its final fallback is a concrete writable
-/// path, not the bare command name.
+/// `~/.local/bin/aghub-api` for a fresh install.
+///
+/// Deliberately NOT a full mirror of [`default_api_path_script`]: this script
+/// omits the two linuxbrew fallback branches, so a binary the PROBE resolved
+/// from a linuxbrew prefix is NOT overwritten in place — an upgrade instead
+/// installs a fresh copy at `~/.local/bin/aghub-api`, leaving the older
+/// linuxbrew binary on disk (now shadowed on `PATH` by the new default
+/// location). This asymmetry is a deliberate, tracked deferral, not an
+/// oversight — see
+/// `.scratch/remote-version-hardening/issues/01-install-target-linuxbrew-parity.md`.
 fn default_install_target_script() -> &'static str {
 	"if command -v aghub-api >/dev/null 2>&1; then \
 	     command -v aghub-api; \
@@ -400,21 +419,73 @@ pub fn build_remote_prepare_upload_cmd() -> String {
 	"mkdir -p \"$HOME/.cache/aghub\"".to_string()
 }
 
-/// Compose the remote install command that moves an uploaded binary into place.
-pub fn build_remote_finish_upload_cmd(resolved_path: &str) -> String {
+/// Compose the remote install command that validates the STAGED upload
+/// before it ever touches `$target`: chmod it executable and run `--version`
+/// on the staged path itself.
+///
+/// The staged file scp uploaded normally lives under `$HOME/.cache`, which
+/// can be a DIFFERENT filesystem than `$target`'s directory — a cross-fs
+/// `mv` silently falls back to copy+remove, so a failure partway through
+/// (ENOSPC, I/O error) can destroy `$target` before the copy completes. To
+/// keep the swap atomic regardless of filesystem layout, this stages a
+/// SECOND copy into `$target`'s own directory (a `$target.tmp.<nonce>`
+/// sibling) and `mv`s THAT into `$target` — a same-directory rename is
+/// always an atomic inode swap on the same filesystem, never a partial
+/// copy+remove.
+///
+/// A failing self-check (corrupt download, glibc/ABI mismatch) exits
+/// non-zero WITHOUT ever `cp`/`mv`-ing into `$target`, so the previously
+/// working `$target` binary is never destroyed by a bad upload. (A
+/// `noexec`-mounted staging dir fails the same way — the exec attempt itself
+/// errors — so that degenerate case is fail-safe too.) `tmp` is initialized
+/// to empty up front, and the failure cleanup guards on `[ -n "$tmp" ]`
+/// before removing it — a login-shell-inherited `tmp` from `bash -lc` must
+/// never be deleted just because an earlier step in this script failed
+/// before `tmp` was ever assigned (see `build_remote_release_deb_install_cmd`
+/// for the same hygiene applied to `$stage`). `nonce` must be the SAME value
+/// passed to [`remote_api_upload_path`] for this install, so the staged path
+/// referenced here is the one scp actually uploaded to.
+pub fn build_remote_finish_upload_cmd(
+	resolved_path: &str,
+	nonce: &str,
+) -> String {
 	let target_assignment = assign_install_target_cmd(resolved_path);
+	let staged = format!("$HOME/.cache/aghub/aghub-api.upload.{nonce}");
 	format!(
 		"{target_assignment} \
+	     tmp=\"\"; \
+	     chmod 755 \"{staged}\" && \
+	     \"{staged}\" --version && \
 	     mkdir -p \"$(dirname -- \"$target\")\" && \
-	     mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\" && \
-	     chmod 755 \"$target\" && \
-	     \"$target\" --version"
+	     tmp=\"$target.tmp.{nonce}\" && \
+	     cp -- \"{staged}\" \"$tmp\" && \
+	     chmod 755 \"$tmp\" && \
+	     mv -f -- \"$tmp\" \"$target\" && \
+	     rm -f -- \"{staged}\" \
+	     || {{ [ -n \"$tmp\" ] && rm -f -- \"$tmp\"; rm -f -- \"{staged}\"; exit 1; }}"
 	)
 }
 
 /// Compose a remote install command that downloads a Linux `.deb` release
 /// bundle, extracts the packaged `aghub-api`, and installs it at the same path
 /// the probe/start commands resolve.
+///
+/// Validates the extracted binary BEFORE it replaces `$target`: the staged
+/// copy is chmod'd executable and self-checked with `--version` in place; only
+/// a passing check `mv`s it onto `$target`, and a failing one removes the
+/// stray staged file and exits non-zero without touching `$target`. (A
+/// `noexec`-mounted target dir fails the self-check the same way, so that
+/// degenerate case is fail-safe too.)
+///
+/// `stage` is initialized to empty at the VERY start of the script, before
+/// anything else runs. Without this, a failure early in the chain (e.g. the
+/// `mkdir -p "$target_dir"` before `stage` is ever assigned) would still
+/// reach the `|| { rm -f "$stage"; ... }` cleanup — and under `bash -lc`
+/// (the login shell this whole script runs through), an UNSET `stage` falls
+/// back to whatever the login environment happens to bind that name to
+/// (e.g. a stray `stage=~/.ssh/authorized_keys` in some profile script),
+/// which `rm -f` would then delete. The cleanup itself also guards on
+/// `[ -n "$stage" ]` so it never fires on an empty/unset value.
 pub fn build_remote_release_deb_install_cmd(
 	deb_url: &str,
 	resolved_path: &str,
@@ -423,6 +494,7 @@ pub fn build_remote_release_deb_install_cmd(
 	let quoted_url = shell_quote_single(deb_url);
 	format!(
 		"{target_assignment} \
+	     stage=\"\"; \
 	     command -v dpkg-deb >/dev/null 2>&1 || {{ echo 'dpkg-deb not found' >&2; exit 127; }}; \
 	     tmp=\"$(mktemp -d)\"; \
 	     cleanup() {{ rm -rf \"$tmp\"; }}; \
@@ -445,16 +517,36 @@ pub fn build_remote_release_deb_install_cmd(
 	     stage=\"$(mktemp \"$target_dir/.aghub-api.XXXXXX\")\" && \
 	     cp \"$bin\" \"$stage\" && \
 	     chmod 755 \"$stage\" && \
-	     mv \"$stage\" \"$target\" && \
-	     \"$target\" --version"
+	     \"$stage\" --version && \
+	     mv \"$stage\" \"$target\" || {{ [ -n \"$stage\" ] && rm -f -- \"$stage\"; exit 1; }}"
 	)
 }
 
 /// Compose a remote install command that builds `aghub-api` on the VM itself.
+///
+/// Stamps `AGHUB_RELEASE_VERSION=<release_version>` in the cargo invocation's
+/// own environment (the VAR=... prefix applies to `cargo` AND the `aghub-api`
+/// build script it runs). A `cargo install --git` checkout has no tag refs, so
+/// the build script's `git describe` fallback fails there and it falls all the
+/// way back to the workspace manifest placeholder (`1.1.1`) — a version the
+/// desktop never considers compatible, so it reinstalls forever. Stamping the
+/// desktop's own version here breaks that loop.
+///
+/// When an explicit `tag` is being installed AND no `branch` is also given,
+/// that tag names a SPECIFIC release which may differ from the desktop's own
+/// `release_version` — in that case stamp the tag's version (leading `v`
+/// stripped) instead, so the VM build reports the version it actually built
+/// rather than falsely advertising the desktop's. The stamp mirrors the SAME
+/// `branch`-beats-`tag` precedence `ref_arg` uses below: a `tag` is only the
+/// ref actually installed when `branch` is `None`, so a call supplying BOTH
+/// installs the branch but must stamp `release_version`, not the (unused)
+/// tag's version. `branch`/no-ref installs have no pinned version, so they
+/// keep stamping `release_version`.
 pub fn build_remote_cargo_install_cmd(
 	git_url: &str,
 	branch: Option<&str>,
 	tag: Option<&str>,
+	release_version: &str,
 ) -> String {
 	let ref_arg = branch
 		.map(|branch| format!(" --branch {}", shell_quote_single(branch)))
@@ -462,12 +554,19 @@ pub fn build_remote_cargo_install_cmd(
 			tag.map(|tag| format!(" --tag {}", shell_quote_single(tag)))
 		})
 		.unwrap_or_default();
+	// Same precedence as `ref_arg`: `tag` only names the ref actually used
+	// when `branch` is absent.
+	let stamp_version = tag
+		.filter(|_| branch.is_none())
+		.map(|t| t.strip_prefix('v').unwrap_or(t))
+		.unwrap_or(release_version);
 	format!(
 		"cargo_bin=\"$(command -v cargo || true)\"; \
 	     if [ -z \"$cargo_bin\" ] && [ -x \"$HOME/.cargo/bin/cargo\" ]; then cargo_bin=\"$HOME/.cargo/bin/cargo\"; fi; \
 	     if [ -z \"$cargo_bin\" ]; then echo 'cargo not found' >&2; exit 127; fi; \
 	     command -v git >/dev/null 2>&1 || {{ echo 'git not found' >&2; exit 127; }}; \
-	     \"$cargo_bin\" install --git {}{} aghub-api --bin aghub-api --force",
+	     AGHUB_RELEASE_VERSION={} \"$cargo_bin\" install --git {}{} aghub-api --bin aghub-api --force",
+		shell_quote_single(stamp_version),
 		shell_quote_single(git_url),
 		ref_arg
 	)
@@ -1034,6 +1133,8 @@ mod tests {
 		let cmd = build_remote_start_cmd("aghub-api", "vm-1");
 		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
 		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+		assert!(cmd.contains("/home/linuxbrew/.linuxbrew/bin/aghub-api"));
+		assert!(cmd.contains("$HOME/.linuxbrew/bin/aghub-api"));
 	}
 
 	#[test]
@@ -1094,6 +1195,8 @@ mod tests {
 		let cmd = build_remote_probe_cmd("aghub-api");
 		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
 		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+		assert!(cmd.contains("/home/linuxbrew/.linuxbrew/bin/aghub-api"));
+		assert!(cmd.contains("$HOME/.linuxbrew/bin/aghub-api"));
 		assert!(cmd.contains("--version"));
 	}
 
@@ -1128,6 +1231,8 @@ mod tests {
 		let cmd = build_remote_capabilities_cmd("aghub-api");
 		assert!(cmd.contains("$HOME/.cargo/bin/aghub-api"));
 		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+		assert!(cmd.contains("/home/linuxbrew/.linuxbrew/bin/aghub-api"));
+		assert!(cmd.contains("$HOME/.linuxbrew/bin/aghub-api"));
 		assert!(cmd.contains("--capabilities"));
 	}
 
@@ -1328,7 +1433,8 @@ mod tests {
 		// installed to `$HOME/.local/bin/aghub-api` but probed as a literal
 		// `~/…` and never found — a successful install that can't connect.
 		let probe = build_remote_probe_cmd("~/.local/bin/aghub-api");
-		let finish = build_remote_finish_upload_cmd("~/.local/bin/aghub-api");
+		let finish =
+			build_remote_finish_upload_cmd("~/.local/bin/aghub-api", "n1");
 		assert!(
 			probe.contains("bin=\"$HOME\"/'.local/bin/aghub-api';"),
 			"probe must expand the tilde to $HOME: {probe}"
@@ -1347,9 +1453,11 @@ mod tests {
 			"https://example.com/aghub.git",
 			Some("feat/remote-ssh-management"),
 			None,
+			"2.7.2",
 		);
 		assert!(cmd.contains(
-			"\"$cargo_bin\" install --git 'https://example.com/aghub.git' \
+			"AGHUB_RELEASE_VERSION='2.7.2' \"$cargo_bin\" install \
+		     --git 'https://example.com/aghub.git' \
 		     --branch 'feat/remote-ssh-management' aghub-api \
 		     --bin aghub-api --force"
 		));
@@ -1359,16 +1467,82 @@ mod tests {
 
 	#[test]
 	fn remote_cargo_install_cmd_can_pin_tag() {
+		// An explicit tag names a SPECIFIC release, which may differ from the
+		// desktop's own local_version — the stamp must be the TAG's version
+		// (leading `v` stripped), not the desktop's, or the remote would
+		// falsely advertise 2.7.2 when it actually built 2.3.1.
 		let cmd = build_remote_cargo_install_cmd(
 			"https://example.com/aghub.git",
 			None,
 			Some("v2.3.1"),
+			"2.7.2",
 		);
 		assert!(cmd.contains(
-			"\"$cargo_bin\" install --git 'https://example.com/aghub.git' \
+			"AGHUB_RELEASE_VERSION='2.3.1' \"$cargo_bin\" install \
+		     --git 'https://example.com/aghub.git' \
 		     --tag 'v2.3.1' aghub-api --bin aghub-api --force"
 		));
 		assert!(!cmd.contains("--branch"));
+		assert!(
+			!cmd.contains("AGHUB_RELEASE_VERSION='2.7.2'"),
+			"must not stamp the desktop's local_version over an explicit \
+			 tag's own version: {cmd}"
+		);
+	}
+
+	#[test]
+	fn remote_cargo_install_cmd_stamps_tag_without_v_prefix_verbatim() {
+		// A tag lacking the conventional `v` prefix has nothing to strip and
+		// is stamped verbatim.
+		let cmd = build_remote_cargo_install_cmd(
+			"https://example.com/aghub.git",
+			None,
+			Some("2.3.1"),
+			"2.7.2",
+		);
+		assert!(cmd.contains("AGHUB_RELEASE_VERSION='2.3.1'"));
+	}
+
+	#[test]
+	fn remote_cargo_install_cmd_stamps_release_version() {
+		// A cargo-git checkout has no tag refs, so the remote build.rs's
+		// `git describe` fallback fails there and it would otherwise stamp the
+		// workspace placeholder (1.1.1) — an eternal reinstall loop. The
+		// desktop's own version must be visible to the build script's
+		// environment.
+		let cmd = build_remote_cargo_install_cmd(
+			"https://example.com/aghub.git",
+			Some("main"),
+			None,
+			"2.7.2-3-gabc1234",
+		);
+		assert!(cmd.contains(
+			"AGHUB_RELEASE_VERSION='2.7.2-3-gabc1234' \"$cargo_bin\" install"
+		));
+	}
+
+	#[test]
+	fn remote_cargo_install_cmd_both_branch_and_tag_stamps_release_version() {
+		// Ref-selection prefers `branch` over `tag` when both are given (see
+		// `ref_arg`): the install actually checks out the branch. The stamp
+		// must mirror that SAME precedence — stamping the tag's version here
+		// would falsely advertise a version the VM never actually built.
+		let cmd = build_remote_cargo_install_cmd(
+			"https://example.com/aghub.git",
+			Some("main"),
+			Some("v9.9.9"),
+			"2.7.3",
+		);
+		assert!(cmd.contains("--branch 'main'"), "got: {cmd}");
+		assert!(!cmd.contains("--tag"), "branch must win the ref: {cmd}");
+		assert!(
+			cmd.contains("AGHUB_RELEASE_VERSION='2.7.3'"),
+			"must stamp release_version when branch wins the ref: {cmd}"
+		);
+		assert!(
+			!cmd.contains("AGHUB_RELEASE_VERSION='9.9.9'"),
+			"must NOT stamp the unused tag's version: {cmd}"
+		);
 	}
 
 	#[test]
@@ -1384,9 +1558,68 @@ mod tests {
 		assert!(cmd
 			.contains("stage=\"$(mktemp \"$target_dir/.aghub-api.XXXXXX\")\""));
 		assert!(cmd.contains("cp \"$bin\" \"$stage\""));
+		assert!(cmd.contains("\"$stage\" --version"));
 		assert!(cmd.contains("mv \"$stage\" \"$target\""));
-		assert!(cmd.contains("\"$target\" --version"));
+		// The self-check runs on the STAGED copy, never on the live target.
+		assert!(!cmd.contains("\"$target\" --version"));
+		// A failed self-check/mv must clean up the stray staged file, guarded
+		// on a non-empty $stage (Fix A hygiene).
+		assert!(cmd.contains("[ -n \"$stage\" ] && rm -f -- \"$stage\""));
 		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
+	}
+
+	#[test]
+	fn remote_release_deb_install_cmd_initializes_stage_before_any_use() {
+		// Regression (Fix A): `stage=""` must be bound at the VERY start of
+		// the script — before the dpkg-deb check, before the mkdir the
+		// staged-file mktemp depends on — so a failure early in the chain
+		// (e.g. `mkdir -p "$target_dir"` itself failing) still reaches the
+		// `|| { ...; rm -f -- "$stage"; ... }` cleanup with `stage` bound to
+		// an empty string, never a stray value inherited from the `bash -lc`
+		// login shell's environment (e.g. a profile script's own `stage=`).
+		let cmd = build_remote_release_deb_install_cmd(
+			"https://example.com/aghub.deb",
+			"aghub-api",
+		);
+		let stage_init_pos = cmd
+			.find("stage=\"\";")
+			.expect("stage must be initialized to empty up front");
+		let dpkg_check_pos = cmd
+			.find("command -v dpkg-deb")
+			.expect("dpkg-deb check must be present");
+		let mkdir_pos = cmd
+			.find("mkdir -p \"$target_dir\"")
+			.expect("target_dir mkdir must be present");
+		assert!(
+			stage_init_pos < dpkg_check_pos && stage_init_pos < mkdir_pos,
+			"stage=\"\" must precede every other use: {cmd}"
+		);
+		// The failure cleanup must guard on non-empty AND use `--`.
+		assert!(
+			cmd.contains("[ -n \"$stage\" ] && rm -f -- \"$stage\""),
+			"cleanup must guard on a non-empty $stage and use `--`: {cmd}"
+		);
+	}
+
+	#[test]
+	fn remote_release_deb_install_cmd_validates_staged_binary_before_mv() {
+		// Order pin: the self-check on the STAGED path must run BEFORE the mv
+		// that replaces `$target`, so a corrupt/incompatible download can
+		// never destroy the previously working binary.
+		let cmd = build_remote_release_deb_install_cmd(
+			"https://example.com/aghub.deb",
+			"aghub-api",
+		);
+		let check_pos = cmd
+			.find("\"$stage\" --version")
+			.expect("staged self-check must be present");
+		let mv_pos = cmd
+			.find("mv \"$stage\" \"$target\"")
+			.expect("mv into target must be present");
+		assert!(
+			check_pos < mv_pos,
+			"staged self-check must precede the mv into $target: {cmd}"
+		);
 	}
 
 	#[test]
@@ -1516,6 +1749,19 @@ mod tests {
 	}
 
 	#[test]
+	fn version_compatible_with_git_describe_suffix() {
+		// A dev desktop build now self-reports `aghub_api::VERSION` as a
+		// git-describe string (e.g. `2.7.2-3-gabc1234` or with a `-dev`
+		// dirty-tree suffix), not the bare `CARGO_PKG_VERSION`. `major_minor`
+		// only parses the first two dot-separated components, so the
+		// trailing `-N-g<sha>`/`-dev` noise on the THIRD component never
+		// reaches it — compatibility still turns on major.minor alone.
+		assert!(is_version_compatible("2.7.2-3-gabc1234", "2.7.2"));
+		assert!(is_version_compatible("2.7.2-3-gabc1234-dev", "2.7.9"));
+		assert!(!is_version_compatible("2.7.2-3-gabc1234", "2.8.0"));
+	}
+
+	#[test]
 	fn normalize_platform_maps_uname_to_consts_vocab() {
 		// `uname -sm` vocabulary → std::env::consts vocabulary.
 		assert_eq!(
@@ -1585,27 +1831,116 @@ mod tests {
 
 	#[test]
 	fn finish_upload_cmd_uses_atomic_mv_not_install() {
-		let cmd = build_remote_finish_upload_cmd("aghub-api");
+		let cmd = build_remote_finish_upload_cmd("aghub-api", "n1");
 		assert!(
-			cmd.contains(
-				"mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\""
-			),
-			"expected atomic mv, got: {cmd}"
+			cmd.contains("mv -f -- \"$tmp\" \"$target\""),
+			"expected an atomic same-dir mv, got: {cmd}"
 		);
-		assert!(cmd.contains("chmod 755 \"$target\""), "got: {cmd}");
 		assert!(
 			!cmd.contains("install -m 755"),
 			"install -m 755 risks ETXTBSY on a running binary"
 		);
-		// Mutating steps must be chained with && so a failed mv aborts
-		// before chmod/--version execute.
+	}
+
+	#[test]
+	fn finish_upload_cmd_stages_into_target_dir_before_atomic_rename() {
+		// Fix B: the cache-staged upload may be on a DIFFERENT filesystem than
+		// $target's directory, so the swap must go through a SAME-DIRECTORY
+		// tmp file ("$target.tmp.<nonce>") rather than mv'ing the cache path
+		// straight into $target (a cross-fs mv silently falls back to
+		// copy+remove, which can destroy $target on a failure partway
+		// through).
+		let cmd = build_remote_finish_upload_cmd("aghub-api", "n1");
 		assert!(
-			cmd.contains(
-				"mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\" && \
-			     chmod 755 \"$target\" && \
-			     \"$target\" --version"
-			),
-			"steps must be && chained, got: {cmd}"
+			cmd.contains("\"$target.tmp.n1\""),
+			"the intermediate file must be a sibling of $target: {cmd}"
+		);
+		let validate_pos = cmd
+			.find("\"$HOME/.cache/aghub/aghub-api.upload.n1\" --version")
+			.expect("staged self-check must run");
+		let cp_pos = cmd
+			.find("cp -- \"$HOME/.cache/aghub/aghub-api.upload.n1\" \"$tmp\"")
+			.expect("cp into the target-dir tmp file must run");
+		let mv_pos = cmd
+			.find("mv -f -- \"$tmp\" \"$target\"")
+			.expect("atomic same-dir mv must run");
+		assert!(
+			validate_pos < cp_pos && cp_pos < mv_pos,
+			"order must be validate -> cp -> mv: {cmd}"
+		);
+		// No cross-filesystem mv of the cache path straight into $target may
+		// remain.
+		assert!(
+			!cmd.contains("mv \"$HOME/.cache/aghub/aghub-api.upload"),
+			"the cache path must never be mv'd directly into $target: {cmd}"
+		);
+	}
+
+	#[test]
+	fn finish_upload_cmd_validates_staged_binary_before_mv() {
+		// Order pin (the BLOCKING fix): the staged-path self-check must run
+		// BEFORE the mv that replaces `$target`, so a bad upload (corrupt
+		// download, glibc/ABI mismatch) never destroys the previously working
+		// binary — the check fails, the script exits non-zero, and $target is
+		// untouched.
+		let cmd = build_remote_finish_upload_cmd("aghub-api", "n1");
+		let staged = "$HOME/.cache/aghub/aghub-api.upload.n1";
+		let check_pos = cmd
+			.find(&format!("\"{staged}\" --version"))
+			.expect("staged self-check must be present");
+		let mv_pos = cmd
+			.find("mv -f -- \"$tmp\" \"$target\"")
+			.expect("mv into target must be present");
+		assert!(
+			check_pos < mv_pos,
+			"staged self-check must precede the mv into $target: {cmd}"
+		);
+		// The self-check must run on the STAGED path, never on the live
+		// target — a check retargeted back onto $target would defeat the
+		// whole fix.
+		assert!(!cmd.contains("\"$target\" --version"), "got: {cmd}");
+	}
+
+	#[test]
+	fn finish_upload_cmd_failure_cleans_tmp_and_staged_with_guard() {
+		// Fix A hygiene applied to the NEW `$tmp` variable Fix B introduces:
+		// `tmp` is bound empty up front, and the failure cleanup only removes
+		// it when non-empty — the same guard as `$stage` in
+		// build_remote_release_deb_install_cmd, and for the same reason (an
+		// early failure before `tmp` is ever assigned must not fall back to a
+		// login-shell-inherited value of that name).
+		let cmd = build_remote_finish_upload_cmd("aghub-api", "n1");
+		let tmp_init_pos = cmd
+			.find("tmp=\"\";")
+			.expect("tmp must be initialized to empty up front");
+		let validate_pos = cmd
+			.find("\"$HOME/.cache/aghub/aghub-api.upload.n1\" --version")
+			.expect("staged self-check must run");
+		assert!(
+			tmp_init_pos < validate_pos,
+			"tmp=\"\" must precede every other use: {cmd}"
+		);
+		assert!(
+			cmd.contains("[ -n \"$tmp\" ] && rm -f -- \"$tmp\""),
+			"failure cleanup must guard tmp on non-empty: {cmd}"
+		);
+		assert!(
+			cmd.contains("rm -f -- \"$HOME/.cache/aghub/aghub-api.upload.n1\""),
+			"failure cleanup must also remove the staged upload: {cmd}"
+		);
+	}
+
+	#[test]
+	fn finish_upload_cmd_failure_branch_never_references_target() {
+		// The failure branch (after `||`) must never touch $target — only the
+		// success chain's final `mv` ever writes to it, so any failure before
+		// that point leaves $target completely untouched.
+		let cmd = build_remote_finish_upload_cmd("aghub-api", "n1");
+		let (_, failure_branch) =
+			cmd.split_once("|| {").expect("a failure branch must exist");
+		assert!(
+			!failure_branch.contains("\"$target\""),
+			"failure branch must never touch $target: {failure_branch}"
 		);
 	}
 
@@ -1616,7 +1951,7 @@ mod tests {
 		// cargo-installed binary is upgraded IN PLACE, not shadowed by a new
 		// ~/.local/bin copy. Falls back to ~/.local/bin only for a fresh
 		// install.
-		let cmd = build_remote_finish_upload_cmd("aghub-api");
+		let cmd = build_remote_finish_upload_cmd("aghub-api", "n1");
 		assert!(
 			cmd.contains("command -v aghub-api"),
 			"target must follow the resolved path: {cmd}"
@@ -1630,24 +1965,27 @@ mod tests {
 			"must fall back to local-bin: {cmd}"
 		);
 		assert!(
-			cmd.contains(
-				"mv \"$HOME/.cache/aghub/aghub-api.upload\" \"$target\""
-			),
-			"still moves upload into $target: {cmd}"
+			cmd.contains("mv -f -- \"$tmp\" \"$target\""),
+			"still moves the staged copy into $target: {cmd}"
 		);
-		assert!(cmd.contains("chmod 755 \"$target\""), "still chmods: {cmd}");
+		assert!(
+			cmd.contains(
+				"chmod 755 \"$HOME/.cache/aghub/aghub-api.upload.n1\""
+			),
+			"still chmods the staged upload: {cmd}"
+		);
 	}
 
 	#[test]
 	fn finish_upload_explicit_paths_used_verbatim() {
 		// An explicit tilde path expands $HOME but is otherwise verbatim.
-		let tilde = build_remote_finish_upload_cmd("~/bin/aghub-api");
+		let tilde = build_remote_finish_upload_cmd("~/bin/aghub-api", "n1");
 		assert!(
 			tilde.contains("target=\"$HOME\"/'bin/aghub-api';"),
 			"tilde path must expand $HOME verbatim: {tilde}"
 		);
 		// An absolute / other path is single-quoted verbatim.
-		let abs = build_remote_finish_upload_cmd("/abs/aghub-api");
+		let abs = build_remote_finish_upload_cmd("/abs/aghub-api", "n1");
 		assert!(
 			abs.contains("target='/abs/aghub-api';"),
 			"absolute path must be verbatim: {abs}"

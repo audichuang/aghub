@@ -1,6 +1,7 @@
-//! Stamp the CLI binary with a git-derived version so a from-source build
-//! reports a real version (e.g. `2.1.5-3-gabc1234` or `2.1.5-dev`) instead of
-//! the workspace manifest's placeholder `version`.
+//! Stamp the `aghub-api` binary with a git-derived version so a from-source
+//! build reports a real version (e.g. `2.7.2-3-gabc1234` or `2.7.2-dev`)
+//! instead of the workspace manifest's placeholder `version`. Mirrors
+//! `crates/cli/build.rs` exactly — keep the two in sync.
 //!
 //! Resolution order:
 //!   1. `AGHUB_RELEASE_VERSION` env — set by the release CI. Without it, CI's
@@ -38,7 +39,7 @@ fn main() {
 			std::env::var("CARGO_PKG_VERSION")
 				.unwrap_or_else(|_| "0.0.0".into())
 		});
-	println!("cargo:rustc-env=AGHUB_CLI_VERSION={version}");
+	println!("cargo:rustc-env=AGHUB_API_VERSION={version}");
 }
 
 fn git_describe() -> Option<String> {

@@ -29,8 +29,10 @@ pub use crate::credentials::public::{
 };
 
 /// Version of the `aghub-api` binary/library, shared with the desktop remote
-/// compatibility check.
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// compatibility check. Git-derived by `build.rs` (see there for the
+/// resolution order) so a from-source build self-reports a real version
+/// instead of the workspace manifest's placeholder.
+pub const VERSION: &str = env!("AGHUB_API_VERSION");
 
 #[cfg(windows)]
 pub(crate) const CREATE_NO_WINDOW: u32 = 0x0800_0000;
