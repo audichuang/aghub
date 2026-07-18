@@ -4,9 +4,6 @@
 use crate::dto::credential::SourceCredentialBindingResponse;
 use std::collections::BTreeSet;
 
-const SERVICE: &str = "aghub";
-const BINDINGS_USER: &str = "skill_source_bindings"; // SERVICE = "aghub"
-
 /// In-memory representation for tests; backed by a single keyring JSON entry.
 #[derive(Default, serde::Serialize, serde::Deserialize)]
 pub(crate) struct SourceBindings(
@@ -194,27 +191,11 @@ pub(crate) fn prune_bindings_for_credential(
 	bindings.0.len() != original_len
 }
 
-fn bindings_entry(
-) -> Result<keyring::Entry, crate::credentials::CredentialStoreError> {
-	Ok(keyring::Entry::new(SERVICE, BINDINGS_USER)?)
-}
-
 /// Load the source→credential_id bindings from the `skill_source_bindings`
 /// keyring entry. Mirrors `routes::credentials::load_credentials`.
 pub(crate) fn load_source_bindings(
 ) -> Result<SourceBindings, crate::credentials::CredentialStoreError> {
-	#[cfg(test)]
-	if crate::credentials::test_hooks::credential_backend_forced_unavailable() {
-		return Err(crate::credentials::CredentialStoreError::Unavailable(
-			"forced unavailable (test)".to_string(),
-		));
-	}
-	let entry = bindings_entry()?;
-	match entry.get_password() {
-		Ok(json) => Ok(serde_json::from_str(&json)?),
-		Err(keyring::Error::NoEntry) => Ok(SourceBindings::default()),
-		Err(e) => Err(e.into()),
-	}
+	crate::credentials::source_bindings_store().load()
 }
 
 /// Persist the source→credential_id bindings to the keyring entry. An empty
@@ -222,17 +203,7 @@ pub(crate) fn load_source_bindings(
 pub(crate) fn save_source_bindings(
 	bindings: &SourceBindings,
 ) -> Result<(), crate::credentials::CredentialStoreError> {
-	let entry = bindings_entry()?;
-	if bindings.0.is_empty() {
-		match entry.delete_credential() {
-			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-			Err(e) => Err(e.into()),
-		}
-	} else {
-		let json = serde_json::to_string(bindings)?;
-		entry.set_password(&json)?;
-		Ok(())
-	}
+	crate::credentials::source_bindings_store().store(bindings)
 }
 
 #[cfg(test)]

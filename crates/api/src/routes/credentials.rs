@@ -18,12 +18,9 @@ use crate::error::{
 };
 use crate::extractors::TrustedLocalOrigin;
 
-const SERVICE: &str = "aghub";
-const USER: &str = "github_credentials";
-
 // Guards in-process read-modify-write cycles for the single keyring JSON entry.
 // Cross-process keyring races remain a documented known limitation.
-static SOURCE_BINDINGS_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+static CREDENTIAL_STORE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredCredential {
@@ -32,40 +29,15 @@ pub(crate) struct StoredCredential {
 	pub(crate) token: String,
 }
 
-fn get_entry() -> Result<keyring::Entry, CredentialStoreError> {
-	Ok(keyring::Entry::new(SERVICE, USER)?)
-}
-
 pub(crate) fn load_credentials(
 ) -> Result<Vec<StoredCredential>, CredentialStoreError> {
-	#[cfg(test)]
-	if crate::credentials::test_hooks::credential_backend_forced_unavailable() {
-		return Err(CredentialStoreError::Unavailable(
-			"forced unavailable (test)".to_string(),
-		));
-	}
-	let entry = get_entry()?;
-	match entry.get_password() {
-		Ok(json) => Ok(serde_json::from_str(&json)?),
-		Err(keyring::Error::NoEntry) => Ok(vec![]),
-		Err(e) => Err(e.into()),
-	}
+	crate::credentials::credentials_store().load()
 }
 
 fn store_credentials(
 	creds: &[StoredCredential],
 ) -> Result<(), CredentialStoreError> {
-	let entry = get_entry()?;
-	if creds.is_empty() {
-		match entry.delete_credential() {
-			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-			Err(e) => Err(e.into()),
-		}
-	} else {
-		let json = serde_json::to_string(creds)?;
-		entry.set_password(&json)?;
-		Ok(())
-	}
+	crate::credentials::credentials_store().store(&creds.to_vec())
 }
 
 fn source_binding_err(err: SourceBindingError) -> ApiError {
@@ -83,14 +55,11 @@ fn source_binding_err(err: SourceBindingError) -> ApiError {
 	}
 }
 
-fn lock_source_bindings() -> std::sync::MutexGuard<'static, ()> {
-	SOURCE_BINDINGS_MUTEX
-		.lock()
-		.unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-fn lock_credentials() -> std::sync::MutexGuard<'static, ()> {
-	SOURCE_BINDINGS_MUTEX
+/// Single lock for both the credentials entry and the source-bindings entry —
+/// the delete flow holds ONE guard across a read-modify-write on both (prune
+/// bindings for a deleted credential), so this must stay one mutex, not two.
+fn lock_credential_store() -> std::sync::MutexGuard<'static, ()> {
+	CREDENTIAL_STORE_MUTEX
 		.lock()
 		.unwrap_or_else(|poisoned| poisoned.into_inner())
 }
@@ -129,7 +98,7 @@ pub async fn list_source_bindings_route(
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<Vec<SourceCredentialBindingResponse>> {
 	let responses = blocking(|| {
-		let _guard = lock_source_bindings();
+		let _guard = lock_credential_store();
 		let bindings = load_source_bindings().map_err(ApiError::from)?;
 		let creds = load_credentials().map_err(ApiError::from)?;
 		Ok(list_source_binding_responses(&bindings, &creds))
@@ -145,7 +114,7 @@ pub async fn bind_source_credential(
 ) -> ApiResult<SourceCredentialBindingResponse> {
 	let body = body.into_inner();
 	let response = blocking(move || {
-		let _guard = lock_source_bindings();
+		let _guard = lock_credential_store();
 		let mut bindings = load_source_bindings().map_err(ApiError::from)?;
 		let creds = load_credentials().map_err(ApiError::from)?;
 		let credential_id = body.credential_id.as_deref();
@@ -172,7 +141,7 @@ pub async fn create_credential(
 ) -> ApiCreated<CredentialResponse> {
 	let body = body.into_inner();
 	let created = blocking(move || {
-		let _guard = lock_credentials();
+		let _guard = lock_credential_store();
 		let mut creds = load_credentials().map_err(ApiError::from)?;
 		info!("creating credential '{}'", body.name);
 		if credential_name_exists(&creds, &body.name) {
@@ -201,7 +170,7 @@ pub async fn delete_credential(
 ) -> ApiNoContent {
 	let id = id.to_string();
 	blocking(move || {
-		let _guard = lock_credentials();
+		let _guard = lock_credential_store();
 		let mut creds = load_credentials().map_err(ApiError::from)?;
 		let original_len = creds.len();
 		creds.retain(|c| c.id != id);
@@ -259,6 +228,6 @@ mod tests {
 
 	#[test]
 	fn credential_store_lock_survives_poison_shape() {
-		let _guard = lock_credentials();
+		let _guard = lock_credential_store();
 	}
 }

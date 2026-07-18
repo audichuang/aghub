@@ -30,7 +30,7 @@ pub use codex::{
 pub use credentials::{
 	CredentialStore, FileCredentialStore, NativeCredentialStore,
 };
-pub use error::{InferenceProviderError, Result};
+pub use error::{keyring_backend_unavailable, InferenceProviderError, Result};
 pub use model::{
 	CreateInferenceProvider, InferenceProvider, InferenceProviderFormat,
 	UpdateInferenceProvider,

@@ -21,14 +21,18 @@ pub(crate) mod public;
 // routes (remote git-credential forwarding).
 pub(crate) mod forwarding;
 
+use serde::de::DeserializeOwned;
+use serde::Serialize;
+use std::marker::PhantomData;
+
 /// Classifies a github-credential/source-binding keyring failure so callers
 /// can distinguish "the OS backend itself isn't reachable" (retryable, no
 /// mutation should be assumed to have happened) from every other failure
-/// (corrupt JSON, bad encoding, ...). The `From<InferenceProviderError>`
-/// mapping in `crate::error` makes the equivalent distinction for
-/// `aghub-inference` — both funnel into the same `KEYCHAIN_UNAVAILABLE`
-/// status/code/message in `crate::error::ApiError`, so the two credential
-/// domains never diverge on this.
+/// (corrupt JSON, bad encoding, ...). Delegates to
+/// `aghub_inference::keyring_backend_unavailable` so this and
+/// `InferenceProviderError`'s equivalent `From<keyring::Error>` never diverge
+/// on the classification. Both funnel into the same `KEYCHAIN_UNAVAILABLE`
+/// status/code/message in `crate::error::ApiError`.
 pub(crate) enum CredentialStoreError {
 	/// The backend itself could not be reached.
 	Unavailable(String),
@@ -47,14 +51,10 @@ impl std::fmt::Display for CredentialStoreError {
 
 impl From<keyring::Error> for CredentialStoreError {
 	fn from(error: keyring::Error) -> Self {
-		// Same classification as `aghub_inference::InferenceProviderError`
-		// (see its `From<keyring::Error>` impl) — keep both in sync.
-		match error {
-			keyring::Error::PlatformFailure(_)
-			| keyring::Error::NoStorageAccess(_) => {
-				CredentialStoreError::Unavailable(error.to_string())
-			}
-			other => CredentialStoreError::Other(other.to_string()),
+		if aghub_inference::keyring_backend_unavailable(&error) {
+			CredentialStoreError::Unavailable(error.to_string())
+		} else {
+			CredentialStoreError::Other(error.to_string())
 		}
 	}
 }
@@ -65,57 +65,168 @@ impl From<serde_json::Error> for CredentialStoreError {
 	}
 }
 
-/// Test-only injection hook for "the credential backend is unreachable",
-/// used by `routes::credentials::load_credentials` and
-/// `resolve::load_source_bindings` (GitHub #15 round-2 Codex finding).
-///
-/// The 503-path tests that predate this hook tampered with
-/// `DBUS_SESSION_BUS_ADDRESS` to force a REAL secret-service failure. That
-/// only affects Linux (the only OS that uses D-Bus/secret-service here) —
-/// CI also runs macOS/Windows, where the same env var does nothing, so those
-/// tests would get a non-503 result and fail on those runners. This hook
-/// lets a test force `CredentialStoreError::Unavailable` deterministically
-/// on ANY platform, without touching any real keyring or platform-specific
-/// env var.
-///
-/// Process-global (`static`, not thread-local): `KeyringResolver::load`/
-/// `load_or_unavailable` run the actual read inside
-/// `tokio::task::spawn_blocking`, which executes on a DIFFERENT OS thread
-/// than the one that sets the guard — a thread-local override would not be
-/// visible there. Being process-global means a test using this guard MUST
-/// hold `crate::routes::test_env_lock()` for the guard's entire lifetime
-/// (same requirement the pre-existing `DBUS_SESSION_BUS_ADDRESS`-tampering
-/// tests already had for that env var, and the same requirement
-/// `keyring::set_default_credential_builder` carries in `lib.rs`'s
-/// `IsolatedApiTest` — all three are process-global test state serialized by
-/// that one lock), or it can race a concurrent test that expects the real
-/// backend.
-#[cfg(test)]
-pub(crate) mod test_hooks {
-	use std::sync::atomic::{AtomicBool, Ordering};
+/// Distinguishes the "empty" (delete-worthy) state of a keyring-backed JSON
+/// payload. This is the only difference between the github-credentials store
+/// and the source-bindings store besides the `(service, user)` pair each
+/// closes over — see [`KeyringJson`].
+pub(crate) trait KeyringPayload:
+	Default + Serialize + DeserializeOwned
+{
+	fn is_empty(&self) -> bool;
+}
 
-	static FORCE_UNAVAILABLE: AtomicBool = AtomicBool::new(false);
+impl KeyringPayload for Vec<crate::routes::credentials::StoredCredential> {
+	fn is_empty(&self) -> bool {
+		self.is_empty()
+	}
+}
 
-	pub(crate) fn credential_backend_forced_unavailable() -> bool {
-		FORCE_UNAVAILABLE.load(Ordering::SeqCst)
+impl KeyringPayload for resolve::SourceBindings {
+	fn is_empty(&self) -> bool {
+		self.0.is_empty()
+	}
+}
+
+/// A single JSON-blob-in-one-keyring-entry seam: round-trips a
+/// [`KeyringPayload`] `T` through one `(service, user)` keyring entry as a
+/// JSON string, deleting the entry when `T::is_empty()`. Shared by the
+/// github-credentials store and the source-bindings store (see
+/// `credentials_store`/`source_bindings_store` below) — the only difference
+/// between the two is the `(service, user)` pair.
+///
+/// Deliberately does NOT lock — locking stays at route level (see
+/// `routes::credentials::lock_credential_store`), since some flows (e.g.
+/// credential delete) need ONE guard held across a `load`+`store` pair on
+/// BOTH this store and another `KeyringJson` instance.
+pub(crate) struct KeyringJson<T> {
+	service: &'static str,
+	user: &'static str,
+	_payload: PhantomData<T>,
+}
+
+impl<T: KeyringPayload> KeyringJson<T> {
+	const fn new(service: &'static str, user: &'static str) -> Self {
+		Self {
+			service,
+			user,
+			_payload: PhantomData,
+		}
 	}
 
-	/// RAII guard: forces `load_credentials`/`load_source_bindings` to
-	/// report `CredentialStoreError::Unavailable` for its lifetime. Caller
-	/// must hold `crate::routes::test_env_lock()` for as long as this guard
-	/// is alive (see module doc).
+	fn entry(&self) -> Result<keyring::Entry, CredentialStoreError> {
+		Ok(keyring::Entry::new(self.service, self.user)?)
+	}
+
+	pub(crate) fn load(&self) -> Result<T, CredentialStoreError> {
+		let entry = self.entry()?;
+		match entry.get_password() {
+			Ok(json) => Ok(serde_json::from_str(&json)?),
+			Err(keyring::Error::NoEntry) => Ok(T::default()),
+			Err(e) => Err(e.into()),
+		}
+	}
+
+	pub(crate) fn store(
+		&self,
+		payload: &T,
+	) -> Result<(), CredentialStoreError> {
+		let entry = self.entry()?;
+		if payload.is_empty() {
+			match entry.delete_credential() {
+				Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+				Err(e) => Err(e.into()),
+			}
+		} else {
+			entry.set_password(&serde_json::to_string(payload)?)?;
+			Ok(())
+		}
+	}
+}
+
+/// The github-credentials keyring entry: `service = "aghub"`,
+/// `user = "github_credentials"`.
+pub(crate) fn credentials_store(
+) -> KeyringJson<Vec<crate::routes::credentials::StoredCredential>> {
+	KeyringJson::new("aghub", "github_credentials")
+}
+
+/// The source→credential-id bindings keyring entry: `service = "aghub"`,
+/// `user = "skill_source_bindings"`.
+pub(crate) fn source_bindings_store() -> KeyringJson<resolve::SourceBindings> {
+	KeyringJson::new("aghub", "skill_source_bindings")
+}
+
+/// Test-only injection for "the credential backend is unreachable", used by
+/// `routes::skills`/`routes::skills_update` 503/fail-closed regression tests.
+///
+/// Rather than a hook the production code checks (the previous
+/// `test_hooks::credential_backend_forced_unavailable`), this installs a REAL
+/// faulty `keyring` credential builder via
+/// `keyring::set_default_credential_builder` — so a test using this guard
+/// exercises the actual `From<keyring::Error>` classification end to end,
+/// exactly like a real unreachable secret-service backend would.
+#[cfg(test)]
+pub(crate) mod test_hooks {
+	use keyring::credential::{CredentialBuilderApi, CredentialPersistence};
+	use keyring::Credential;
+
+	/// A credential builder whose `build()` always fails with
+	/// `NoStorageAccess`, simulating "the OS keyring backend is unreachable"
+	/// without ever constructing a real credential or touching any real
+	/// backend.
+	struct FaultyCredentialBuilder;
+
+	impl CredentialBuilderApi for FaultyCredentialBuilder {
+		fn build(
+			&self,
+			_target: Option<&str>,
+			_service: &str,
+			_user: &str,
+		) -> keyring::Result<Box<Credential>> {
+			Err(keyring::Error::NoStorageAccess(Box::new(
+				std::io::Error::other("forced unavailable (test)"),
+			)))
+		}
+
+		fn as_any(&self) -> &dyn std::any::Any {
+			self
+		}
+
+		fn persistence(&self) -> CredentialPersistence {
+			CredentialPersistence::EntryOnly
+		}
+	}
+
+	/// RAII guard: installs [`FaultyCredentialBuilder`] as the process-global
+	/// default keyring credential builder for its lifetime, restoring the
+	/// platform default builder (the true pre-guard state at this guard's
+	/// call sites, which use `with_isolated_state`/`test_env_lock`, not
+	/// `IsolatedApiTest`) on drop.
+	///
+	/// Process-global (`keyring::set_default_credential_builder` has no
+	/// thread-local variant and the actual keyring read runs inside
+	/// `tokio::task::spawn_blocking`, on a different OS thread than the one
+	/// that installs this guard) — the caller MUST hold
+	/// `crate::routes::test_env_lock()` for this guard's entire lifetime, the
+	/// same requirement `IsolatedApiTest` carries for the identical
+	/// process-global builder swap, or it can race a concurrent test that
+	/// expects the mock/real backend.
 	pub(crate) struct ForceCredentialBackendUnavailable;
 
 	impl ForceCredentialBackendUnavailable {
 		pub(crate) fn new() -> Self {
-			FORCE_UNAVAILABLE.store(true, Ordering::SeqCst);
+			keyring::set_default_credential_builder(Box::new(
+				FaultyCredentialBuilder,
+			));
 			Self
 		}
 	}
 
 	impl Drop for ForceCredentialBackendUnavailable {
 		fn drop(&mut self) {
-			FORCE_UNAVAILABLE.store(false, Ordering::SeqCst);
+			keyring::set_default_credential_builder(
+				keyring::default::default_credential_builder(),
+			);
 		}
 	}
 }

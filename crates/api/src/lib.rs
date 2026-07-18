@@ -2,6 +2,7 @@
 extern crate rocket;
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use log::{debug, error, info, warn};
 use rocket::{
@@ -132,22 +133,22 @@ pub(crate) fn build_rocket_with_skill_repository_factory(
 		config,
 		app_data_dir,
 		skill_repositories,
-		crate::state::CredentialStoreFactory::default(),
+		Arc::new(aghub_inference::NativeCredentialStore),
 	)
 }
 
 /// Test-only entry point: same as [`build_rocket`], but lets a test inject a
-/// deterministic [`crate::state::CredentialStoreFactory`] (e.g. an
-/// in-memory store) for `routes::inference`, instead of the real OS keyring.
-/// Route tests that exercise inference provider delete/create/etc. should
-/// build their client through this, not `build_rocket` — a hardcoded
-/// `NativeCredentialStore` coupled those tests to a real, reachable keyring
-/// backend, which CI (no gnome-keyring/dbus) does not have (GitHub #15 P1a).
+/// deterministic credential store (e.g. an in-memory store) for
+/// `routes::inference`, instead of the real OS keyring. Route tests that
+/// exercise inference provider delete/create/etc. should build their client
+/// through this, not `build_rocket` — a hardcoded `NativeCredentialStore`
+/// coupled those tests to a real, reachable keyring backend, which CI (no
+/// gnome-keyring/dbus) does not have (GitHub #15 P1a).
 #[cfg(test)]
 pub(crate) fn build_rocket_with_inference_credentials(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
-	credentials: crate::state::CredentialStoreFactory,
+	credentials: Arc<dyn aghub_inference::CredentialStore + Send + Sync>,
 ) -> rocket::Rocket<rocket::Build> {
 	build_rocket_with_state_factories(
 		config,
@@ -161,7 +162,7 @@ fn build_rocket_with_state_factories(
 	config: rocket::Config,
 	app_data_dir: PathBuf,
 	skill_repositories: crate::state::SkillRepositoryFactory,
-	credentials: crate::state::CredentialStoreFactory,
+	credentials: Arc<dyn aghub_inference::CredentialStore + Send + Sync>,
 ) -> rocket::Rocket<rocket::Build> {
 	// Only the desktop webview is a legitimate browser origin. Allow-listing it
 	// (instead of `AllOrSome::All`) makes a cross-origin JSON POST — e.g. a

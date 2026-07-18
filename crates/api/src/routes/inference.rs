@@ -37,7 +37,7 @@ type Store = InferenceProviderStore<Arc<dyn CredentialStore + Send + Sync>>;
 fn store(state: &State<InferenceProviderState>) -> Store {
 	InferenceProviderStore::with_credentials(
 		state.app_data_dir.clone(),
-		state.credentials.create(),
+		state.credentials.clone(),
 	)
 }
 
@@ -984,8 +984,6 @@ mod tests {
 		InferenceProviderRepository, InferenceProviderStore,
 	};
 
-	use crate::state::CredentialStoreFactory;
-
 	#[derive(Debug, Clone, Default)]
 	struct MemoryCredentialStore {
 		values: Arc<Mutex<std::collections::HashMap<String, String>>>,
@@ -1095,7 +1093,7 @@ mod tests {
 			crate::build_rocket_with_inference_credentials(
 				rocket::Config::default(),
 				data.path().to_path_buf(),
-				CredentialStoreFactory::fixed(Arc::new(credentials)),
+				Arc::new(credentials),
 			),
 		)
 		.expect("rocket builds");
@@ -1158,9 +1156,7 @@ mod tests {
 			crate::build_rocket_with_inference_credentials(
 				rocket::Config::default(),
 				data.path().to_path_buf(),
-				CredentialStoreFactory::fixed(Arc::new(
-					UnavailableCredentialStore,
-				)),
+				Arc::new(UnavailableCredentialStore),
 			),
 		)
 		.expect("rocket builds");

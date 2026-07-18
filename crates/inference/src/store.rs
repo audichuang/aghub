@@ -42,7 +42,7 @@ pub const INFERENCE_PROVIDERS_FILE: &str = "inference_providers.db";
 ///
 /// In-process only — cross-process keyring races remain a documented known
 /// limitation, the same caveat `routes::credentials`'s
-/// `SOURCE_BINDINGS_MUTEX` already carries for the sibling credential store.
+/// `CREDENTIAL_STORE_MUTEX` already carries for the sibling credential store.
 // ponytail: the registry never evicts entries, so it grows by one per
 // distinct `app_data_dir` ever seen by this process. Fine for the API (one
 // long-lived app data dir) and for tests (short-lived processes); revisit
