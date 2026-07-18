@@ -1079,7 +1079,13 @@ mod tests {
 	/// dedicated enum variant (as opposed to forcing the real backend
 	/// unreachable via the OS-level test hook, as the route-level regression
 	/// test below does).
+	// Only constructed by
+	// `apply_skill_update_inner_fails_closed_on_backend_unavailable` below,
+	// which is `#[cfg(unix)]` -- match that exactly so Windows clippy doesn't
+	// see this as dead code under -D warnings.
+	#[cfg(unix)]
 	struct StubBackendUnavailableResolver;
+	#[cfg(unix)]
 	impl TokenResolver for StubBackendUnavailableResolver {
 		fn resolve(
 			&self,

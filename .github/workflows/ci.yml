@@ -275,6 +275,11 @@ jobs:
               if: matrix.os == 'ubuntu-latest'
               shell: bash
               run: |
+                  # Single quotes below are intentional: this is a nested
+                  # `bash -c '...'` script, and the inner `$(...)` must be
+                  # expanded by that inner shell, not the outer runner shell
+                  # composing this run: block.
+                  # shellcheck disable=SC2016
                   dbus-run-session -- bash -c '
                     eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
                     cargo test -p aghub-inference --test keyring_smoke -- --ignored

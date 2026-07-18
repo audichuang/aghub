@@ -1033,11 +1033,16 @@ mod tests {
 	/// plain statement placed AFTER the `assert!`, so a failing assertion
 	/// panicked straight past the restore and left the bogus D-Bus address
 	/// set for every later test in the same `cargo test` process.
+	// Only constructed by `isolated_api_test_restores_real_builder_after_drop`
+	// below, which is `#[cfg(target_os = "linux")]` -- match that exactly so
+	// non-Linux targets don't see this as dead code under clippy -D warnings.
+	#[cfg(target_os = "linux")]
 	struct EnvVarRestoreGuard {
 		key: &'static str,
 		old_value: Option<String>,
 	}
 
+	#[cfg(target_os = "linux")]
 	impl Drop for EnvVarRestoreGuard {
 		fn drop(&mut self) {
 			IsolatedApiTest::restore_var(self.key, &self.old_value);
