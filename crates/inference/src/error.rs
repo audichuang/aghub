@@ -15,6 +15,14 @@ pub enum InferenceProviderError {
 	#[error("keyring error: {0}")]
 	Keyring(String),
 
+	/// The credential backend itself could not be reached (Linux
+	/// secret-service with no D-Bus session, a locked/inaccessible platform
+	/// keychain, ...). Distinct from `Keyring` so callers can return a
+	/// stable, retryable error instead of a generic one — the request didn't
+	/// fail because of bad data, the backend just isn't reachable right now.
+	#[error("credential backend unavailable: {0}")]
+	KeyringUnavailable(String),
+
 	/// Provider latin names must not be empty.
 	#[error("provider latin name cannot be empty")]
 	EmptyName,
@@ -93,7 +101,16 @@ pub enum InferenceProviderError {
 
 impl From<keyring::Error> for InferenceProviderError {
 	fn from(error: keyring::Error) -> Self {
-		Self::Keyring(error.to_string())
+		// `PlatformFailure`/`NoStorageAccess` mean the backend itself is
+		// unreachable (e.g. no D-Bus session on Linux) — every other variant
+		// (NoEntry, BadEncoding, ...) is a normal, data-shaped outcome.
+		match error {
+			keyring::Error::PlatformFailure(_)
+			| keyring::Error::NoStorageAccess(_) => {
+				Self::KeyringUnavailable(error.to_string())
+			}
+			other => Self::Keyring(other.to_string()),
+		}
 	}
 }
 

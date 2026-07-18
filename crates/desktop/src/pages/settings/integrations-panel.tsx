@@ -1,4 +1,4 @@
-import { TrashIcon } from "@heroicons/react/24/outline";
+import { ExclamationCircleIcon, TrashIcon } from "@heroicons/react/24/outline";
 import {
 	AlertDialog,
 	Avatar,
@@ -21,6 +21,12 @@ import {
 	credentialsListQueryOptions,
 	deleteCredentialMutationOptions,
 } from "../../requests/credentials";
+import {
+	Empty,
+	EmptyHeader,
+	EmptyMedia,
+	EmptyTitle,
+} from "../../components/ui/empty";
 import { CreateCredentialDialog } from "./components/create-credential-dialog";
 
 const iconModules = import.meta.glob<{ default: string }>(
@@ -77,10 +83,15 @@ export default function IntegrationsPanel() {
 		null,
 	);
 
-	const { data: credentials = [], isLoading: isCredentialsLoading } =
-		useQuery({
-			...credentialsListQueryOptions({ api, enabled: true }),
-		});
+	const {
+		data: credentials = [],
+		isLoading: isCredentialsLoading,
+		isError: isCredentialsError,
+		error: credentialsError,
+		refetch: refetchCredentials,
+	} = useQuery({
+		...credentialsListQueryOptions({ api, enabled: true }),
+	});
 
 	const deleteMutation = useMutation({
 		...deleteCredentialMutationOptions({
@@ -177,7 +188,44 @@ export default function IntegrationsPanel() {
 						{t("createCredential")}
 					</Button>
 				</Card.Header>
-				<Card.Content className="p-4 pt-0">
+				<Card.Content className="space-y-4 p-4 pt-0">
+					{isCredentialsError && (
+						// Shown regardless of whether stale `credentials` rows are
+						// still on screen: `Table.Body`'s `renderEmptyState` only
+						// fires when `items` is empty, so a refetch failure with
+						// cached data present would otherwise be invisible -- the
+						// user would just see stale rows, no error, no retry.
+						//
+						// This is a persistent cached-data warning banner, not a
+						// transient event -- an intentional, documented exception
+						// to the toast-only rule (see ../../../AGENTS.md). It needs
+						// its own accessible-name announcement instead of relying
+						// on a toast that would have already disappeared by the
+						// time a screen reader user tabs over here.
+						<Empty
+							role="alert"
+							aria-live="polite"
+							className="flex-row items-center justify-between gap-4 rounded-md border-solid border-danger/30 bg-danger/5 p-3 text-left md:p-3"
+						>
+							<EmptyHeader className="flex-row items-center gap-2 text-left">
+								<EmptyMedia>
+									<ExclamationCircleIcon className="size-5 shrink-0 text-danger" />
+								</EmptyMedia>
+								<EmptyTitle className="text-sm font-normal text-foreground">
+									{credentialsError instanceof Error
+										? credentialsError.message
+										: t("unknownError")}
+								</EmptyTitle>
+							</EmptyHeader>
+							<Button
+								variant="secondary"
+								size="sm"
+								onPress={() => refetchCredentials()}
+							>
+								{t("retry")}
+							</Button>
+						</Empty>
+					)}
 					<Table>
 						<Table.ScrollContainer>
 							<Table.Content aria-label={t("credentials")}>
@@ -192,13 +240,22 @@ export default function IntegrationsPanel() {
 								</Table.Header>
 								<Table.Body
 									items={credentials}
-									renderEmptyState={() =>
-										!isCredentialsLoading && (
+									renderEmptyState={() => {
+										// The error case is surfaced by the banner above
+										// instead -- it must stay visible whether or not
+										// `credentials` is empty, so it isn't handled here.
+										if (
+											isCredentialsLoading ||
+											isCredentialsError
+										) {
+											return null;
+										}
+										return (
 											<div className="py-8 text-center text-sm text-muted">
 												{t("noCredentials")}
 											</div>
-										)
-									}
+										);
+									}}
 								>
 									{(credential) => (
 										<Table.Row id={credential.id}>

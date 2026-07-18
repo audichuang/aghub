@@ -49,12 +49,14 @@ interface CreateCredentialMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
 	onSuccess?: (data: CredentialResponse) => void | Promise<void>;
+	onError?: (error: Error) => void;
 }
 
 export function createCredentialMutationOptions({
 	api,
 	queryClient,
 	onSuccess,
+	onError,
 }: CreateCredentialMutationParams) {
 	return mutationOptions({
 		mutationFn: (body: CreateCredentialRequest) =>
@@ -63,6 +65,7 @@ export function createCredentialMutationOptions({
 			await invalidateCredentialQueries(queryClient);
 			await onSuccess?.(data);
 		},
+		onError,
 	});
 }
 

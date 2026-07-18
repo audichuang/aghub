@@ -104,6 +104,15 @@ From `tauri.conf.json`:
 
 - NEVER use `useEffect` for data fetching or side effects, use `useQuery` from React Query or custom hooks instead.
 - NEVER use `{error && <div>{error.message}</div>}` for error handling, just use HeroUI's toast system for consistent UX.
+    - **Exception: a persistent cached-data warning.** A toast is for a transient
+      event (e.g. a mutation just failed) — it disappears on its own, so it is
+      the wrong tool for "a background refetch failed and the rows on screen may
+      be stale," which stays true until the user acts. That case gets an inline
+      banner instead (e.g. `pages/settings/integrations-panel.tsx`'s credentials
+      list), and the banner MUST carry `role="alert"` + `aria-live="polite"` (or
+      `"assertive"`) so it is announced without requiring focus to land on it —
+      an inline error `<div>` with no live-region semantics is silent to a
+      screen reader.
 
 ### You might not need effect
 

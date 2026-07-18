@@ -11,6 +11,16 @@ pub struct ErrorBody {
 	pub code: &'static str,
 }
 
+/// Fixed, safe-to-expose message for "the OS credential backend itself is
+/// unreachable" (Linux secret-service with no D-Bus session, a locked
+/// keychain with no prompt path, ...). The underlying cause is logged
+/// server-side only — never put backend/platform detail (which can include
+/// internal paths) in a response body. Shared by every keyring-touching
+/// surface (github credentials, source bindings, inference provider keys)
+/// so they never diverge on status/code/message for the same failure class.
+const KEYCHAIN_UNAVAILABLE_MSG: &str =
+	"Credential storage is temporarily unavailable. Please try again.";
+
 pub struct ApiError {
 	pub status: Status,
 	pub body: ErrorBody,
@@ -168,6 +178,14 @@ impl From<InferenceProviderError> for ApiError {
 				e.to_string(),
 				"KEYCHAIN_ERROR",
 			),
+			InferenceProviderError::KeyringUnavailable(_) => {
+				log::warn!("credential backend unavailable: {e}");
+				ApiError::new(
+					Status::ServiceUnavailable,
+					KEYCHAIN_UNAVAILABLE_MSG,
+					"KEYCHAIN_UNAVAILABLE",
+				)
+			}
 			InferenceProviderError::Io(_)
 			| InferenceProviderError::Database(_)
 			| InferenceProviderError::AppDataDir(_) => ApiError::new(
@@ -177,6 +195,53 @@ impl From<InferenceProviderError> for ApiError {
 			),
 		}
 	}
+}
+
+impl From<crate::credentials::CredentialStoreError> for ApiError {
+	fn from(e: crate::credentials::CredentialStoreError) -> Self {
+		match e {
+			crate::credentials::CredentialStoreError::Unavailable(detail) => {
+				log::warn!("credential backend unavailable: {detail}");
+				ApiError::new(
+					Status::ServiceUnavailable,
+					KEYCHAIN_UNAVAILABLE_MSG,
+					"KEYCHAIN_UNAVAILABLE",
+				)
+			}
+			crate::credentials::CredentialStoreError::Other(message) => {
+				ApiError::new(
+					Status::InternalServerError,
+					message,
+					"KEYCHAIN_ERROR",
+				)
+			}
+		}
+	}
+}
+
+/// Run `f` on Rocket's blocking-task pool and map a panicked/cancelled task
+/// to a safe, generic error.
+///
+/// Every route whose body performs OS keyring I/O (secret-service on Linux,
+/// or any other slow synchronous credential-store call) MUST go through this
+/// instead of running that I/O inline on the route's async worker thread —
+/// Rocket 0.5 does not `spawn_blocking` a sync handler fn on its own (see the
+/// `keyring` feature comment in `crates/api/Cargo.toml`). Shared by every
+/// keyring-touching route module (`routes::credentials`, `routes::inference`)
+/// so they don't each hand-roll the same `spawn_blocking` + error-mapping
+/// boilerplate.
+pub(crate) async fn run_blocking<F, T>(f: F) -> Result<T, ApiError>
+where
+	F: FnOnce() -> Result<T, ApiError> + Send + 'static,
+	T: Send + 'static,
+{
+	tokio::task::spawn_blocking(f).await.map_err(|e| {
+		ApiError::from_join_error(
+			e,
+			"Credential operation failed",
+			"CREDENTIAL_TASK_ERROR",
+		)
+	})?
 }
 
 impl<'r> Responder<'r, 'static> for ApiError {

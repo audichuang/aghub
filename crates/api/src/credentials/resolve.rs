@@ -194,18 +194,26 @@ pub(crate) fn prune_bindings_for_credential(
 	bindings.0.len() != original_len
 }
 
-fn bindings_entry() -> Result<keyring::Entry, String> {
-	keyring::Entry::new(SERVICE, BINDINGS_USER).map_err(|e| e.to_string())
+fn bindings_entry(
+) -> Result<keyring::Entry, crate::credentials::CredentialStoreError> {
+	Ok(keyring::Entry::new(SERVICE, BINDINGS_USER)?)
 }
 
 /// Load the source→credential_id bindings from the `skill_source_bindings`
 /// keyring entry. Mirrors `routes::credentials::load_credentials`.
-pub(crate) fn load_source_bindings() -> Result<SourceBindings, String> {
+pub(crate) fn load_source_bindings(
+) -> Result<SourceBindings, crate::credentials::CredentialStoreError> {
+	#[cfg(test)]
+	if crate::credentials::test_hooks::credential_backend_forced_unavailable() {
+		return Err(crate::credentials::CredentialStoreError::Unavailable(
+			"forced unavailable (test)".to_string(),
+		));
+	}
 	let entry = bindings_entry()?;
 	match entry.get_password() {
-		Ok(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
+		Ok(json) => Ok(serde_json::from_str(&json)?),
 		Err(keyring::Error::NoEntry) => Ok(SourceBindings::default()),
-		Err(e) => Err(e.to_string()),
+		Err(e) => Err(e.into()),
 	}
 }
 
@@ -213,17 +221,17 @@ pub(crate) fn load_source_bindings() -> Result<SourceBindings, String> {
 /// map deletes the entry. Mirrors `routes::credentials` storage behavior.
 pub(crate) fn save_source_bindings(
 	bindings: &SourceBindings,
-) -> Result<(), String> {
+) -> Result<(), crate::credentials::CredentialStoreError> {
 	let entry = bindings_entry()?;
 	if bindings.0.is_empty() {
 		match entry.delete_credential() {
 			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-			Err(e) => Err(e.to_string()),
+			Err(e) => Err(e.into()),
 		}
 	} else {
-		let json =
-			serde_json::to_string(bindings).map_err(|e| e.to_string())?;
-		entry.set_password(&json).map_err(|e| e.to_string())
+		let json = serde_json::to_string(bindings)?;
+		entry.set_password(&json)?;
+		Ok(())
 	}
 }
 

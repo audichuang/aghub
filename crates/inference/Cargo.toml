@@ -15,10 +15,16 @@ thiserror = { workspace = true }
 log = "0.4.31"
 dirs = { workspace = true }
 url = { workspace = true }
+# Linux: secret-service (pure-Rust zbus/async-io backend), not linux-native
+# (keyutils) — same reasoning as `crates/api/Cargo.toml` (non-persistent
+# kernel keyring + panics if zbus's tokio backend were picked instead from
+# inside a tokio runtime). Keep this feature list identical to `aghub-api`'s.
 keyring = { version = "3", features = [
 	"apple-native",
 	"windows-native",
-	"linux-native",
+	"async-secret-service",
+	"crypto-rust",
+	"async-io",
 ] }
 uuid = { version = "1", features = [ "v4" ] }
 sqlx = { version = "0.9", features = [ "sqlite", "runtime-tokio", "migrate" ] }

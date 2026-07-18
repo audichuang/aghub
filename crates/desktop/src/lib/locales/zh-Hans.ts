@@ -104,6 +104,7 @@ export default {
 	githubCredential: "GitHub",
 	createCredential: "添加凭据",
 	credentialCreated: "凭据添加成功",
+	credentialCreateError: "添加凭据失败",
 	credentialDeleted: "凭据已删除",
 	credentialDeleteFailed: "删除凭据失败",
 	noCredentials: "暂无凭据，点击添加开始使用。",

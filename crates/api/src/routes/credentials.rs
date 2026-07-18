@@ -8,11 +8,14 @@ use crate::credentials::resolve::{
 	load_source_bindings, prune_bindings_for_credential, save_source_bindings,
 	source_binding_response, SourceBindingError,
 };
+use crate::credentials::CredentialStoreError;
 use crate::dto::credential::{
 	CreateCredentialRequest, CredentialResponse,
 	SourceCredentialBindingRequest, SourceCredentialBindingResponse,
 };
-use crate::error::{ApiCreated, ApiNoContent, ApiResult};
+use crate::error::{
+	run_blocking as blocking, ApiCreated, ApiError, ApiNoContent, ApiResult,
+};
 use crate::extractors::TrustedLocalOrigin;
 
 const SERVICE: &str = "aghub";
@@ -29,54 +32,54 @@ pub(crate) struct StoredCredential {
 	pub(crate) token: String,
 }
 
-fn get_entry() -> Result<keyring::Entry, String> {
-	keyring::Entry::new(SERVICE, USER).map_err(|e| e.to_string())
+fn get_entry() -> Result<keyring::Entry, CredentialStoreError> {
+	Ok(keyring::Entry::new(SERVICE, USER)?)
 }
 
-pub(crate) fn load_credentials() -> Result<Vec<StoredCredential>, String> {
+pub(crate) fn load_credentials(
+) -> Result<Vec<StoredCredential>, CredentialStoreError> {
+	#[cfg(test)]
+	if crate::credentials::test_hooks::credential_backend_forced_unavailable() {
+		return Err(CredentialStoreError::Unavailable(
+			"forced unavailable (test)".to_string(),
+		));
+	}
 	let entry = get_entry()?;
 	match entry.get_password() {
-		Ok(json) => serde_json::from_str(&json).map_err(|e| e.to_string()),
+		Ok(json) => Ok(serde_json::from_str(&json)?),
 		Err(keyring::Error::NoEntry) => Ok(vec![]),
-		Err(e) => Err(e.to_string()),
+		Err(e) => Err(e.into()),
 	}
 }
 
-fn store_credentials(creds: &[StoredCredential]) -> Result<(), String> {
+fn store_credentials(
+	creds: &[StoredCredential],
+) -> Result<(), CredentialStoreError> {
 	let entry = get_entry()?;
 	if creds.is_empty() {
 		match entry.delete_credential() {
 			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-			Err(e) => Err(e.to_string()),
+			Err(e) => Err(e.into()),
 		}
 	} else {
-		let json = serde_json::to_string(creds).map_err(|e| e.to_string())?;
-		entry.set_password(&json).map_err(|e| e.to_string())
+		let json = serde_json::to_string(creds)?;
+		entry.set_password(&json)?;
+		Ok(())
 	}
 }
 
-fn internal_err(msg: impl Into<String>) -> crate::error::ApiError {
-	crate::error::ApiError::new(
-		Status::InternalServerError,
-		msg,
-		"KEYCHAIN_ERROR",
-	)
-}
-
-fn source_binding_err(err: SourceBindingError) -> crate::error::ApiError {
+fn source_binding_err(err: SourceBindingError) -> ApiError {
 	match err {
-		SourceBindingError::EmptySource => crate::error::ApiError::new(
+		SourceBindingError::EmptySource => ApiError::new(
 			Status::BadRequest,
 			"source must not be empty",
 			"VALIDATION_FAILED",
 		),
-		SourceBindingError::CredentialNotFound(_) => {
-			crate::error::ApiError::new(
-				Status::NotFound,
-				"Credential not found",
-				"CREDENTIAL_NOT_FOUND",
-			)
-		}
+		SourceBindingError::CredentialNotFound(_) => ApiError::new(
+			Status::NotFound,
+			"Credential not found",
+			"CREDENTIAL_NOT_FOUND",
+		),
 	}
 }
 
@@ -96,8 +99,8 @@ fn credential_name_exists(creds: &[StoredCredential], name: &str) -> bool {
 	creds.iter().any(|credential| credential.name == name)
 }
 
-fn duplicate_credential_err(name: &str) -> crate::error::ApiError {
-	crate::error::ApiError::new(
+fn duplicate_credential_err(name: &str) -> ApiError {
+	ApiError::new(
 		Status::Conflict,
 		format!("A credential named '{name}' already exists"),
 		"CREDENTIAL_NAME_EXISTS",
@@ -105,10 +108,10 @@ fn duplicate_credential_err(name: &str) -> crate::error::ApiError {
 }
 
 #[get("/credentials")]
-pub fn list_credentials(
+pub async fn list_credentials(
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<Vec<CredentialResponse>> {
-	let creds = load_credentials().map_err(internal_err)?;
+	let creds = blocking(|| load_credentials().map_err(ApiError::from)).await?;
 	debug!("loaded {} stored credentials", creds.len());
 	Ok(Json(
 		creds
@@ -122,93 +125,107 @@ pub fn list_credentials(
 }
 
 #[get("/credentials/source-bindings")]
-pub fn list_source_bindings_route(
+pub async fn list_source_bindings_route(
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<Vec<SourceCredentialBindingResponse>> {
-	let _guard = lock_source_bindings();
-	let bindings = load_source_bindings().map_err(internal_err)?;
-	let creds = load_credentials().map_err(internal_err)?;
-	Ok(Json(list_source_binding_responses(&bindings, &creds)))
+	let responses = blocking(|| {
+		let _guard = lock_source_bindings();
+		let bindings = load_source_bindings().map_err(ApiError::from)?;
+		let creds = load_credentials().map_err(ApiError::from)?;
+		Ok(list_source_binding_responses(&bindings, &creds))
+	})
+	.await?;
+	Ok(Json(responses))
 }
 
 #[put("/credentials/source-bindings", data = "<body>")]
-pub fn bind_source_credential(
+pub async fn bind_source_credential(
 	body: Json<SourceCredentialBindingRequest>,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<SourceCredentialBindingResponse> {
-	let _guard = lock_source_bindings();
-	let mut bindings = load_source_bindings().map_err(internal_err)?;
-	let creds = load_credentials().map_err(internal_err)?;
-	let credential_id = body.credential_id.as_deref();
+	let body = body.into_inner();
+	let response = blocking(move || {
+		let _guard = lock_source_bindings();
+		let mut bindings = load_source_bindings().map_err(ApiError::from)?;
+		let creds = load_credentials().map_err(ApiError::from)?;
+		let credential_id = body.credential_id.as_deref();
 
-	bind_source_to_credential(
-		&mut bindings,
-		&body.source,
-		credential_id,
-		&creds,
-	)
-	.map_err(source_binding_err)?;
-	save_source_bindings(&bindings).map_err(internal_err)?;
+		bind_source_to_credential(
+			&mut bindings,
+			&body.source,
+			credential_id,
+			&creds,
+		)
+		.map_err(source_binding_err)?;
+		save_source_bindings(&bindings).map_err(ApiError::from)?;
 
-	Ok(Json(source_binding_response(
-		&body.source,
-		credential_id,
-		&creds,
-	)))
+		Ok(source_binding_response(&body.source, credential_id, &creds))
+	})
+	.await?;
+	Ok(Json(response))
 }
 
 #[post("/credentials", data = "<body>")]
-pub fn create_credential(
+pub async fn create_credential(
 	body: Json<CreateCredentialRequest>,
 	_origin: TrustedLocalOrigin,
 ) -> ApiCreated<CredentialResponse> {
-	let _guard = lock_credentials();
-	let mut creds = load_credentials().map_err(internal_err)?;
-	info!("creating credential '{}'", body.name);
-	if credential_name_exists(&creds, &body.name) {
-		return Err(duplicate_credential_err(&body.name));
-	}
-	let new = StoredCredential {
-		id: uuid::Uuid::new_v4().to_string(),
-		name: body.name.clone(),
-		token: body.token.clone(),
-	};
-	creds.push(new.clone());
-	store_credentials(&creds).map_err(internal_err)?;
-	Ok((
-		Status::Created,
-		Json(CredentialResponse {
+	let body = body.into_inner();
+	let created = blocking(move || {
+		let _guard = lock_credentials();
+		let mut creds = load_credentials().map_err(ApiError::from)?;
+		info!("creating credential '{}'", body.name);
+		if credential_name_exists(&creds, &body.name) {
+			return Err(duplicate_credential_err(&body.name));
+		}
+		let new = StoredCredential {
+			id: uuid::Uuid::new_v4().to_string(),
+			name: body.name.clone(),
+			token: body.token.clone(),
+		};
+		creds.push(new.clone());
+		store_credentials(&creds).map_err(ApiError::from)?;
+		Ok(CredentialResponse {
 			id: new.id,
 			name: new.name,
-		}),
-	))
+		})
+	})
+	.await?;
+	Ok((Status::Created, Json(created)))
 }
 
 #[delete("/credentials/<id>")]
-pub fn delete_credential(
+pub async fn delete_credential(
 	id: &str,
 	_origin: TrustedLocalOrigin,
 ) -> ApiNoContent {
-	let _guard = lock_credentials();
-	let mut creds = load_credentials().map_err(internal_err)?;
-	let original_len = creds.len();
-	creds.retain(|c| c.id != id);
-	info!(
-		"deleting credential '{id}', removed={}",
-		original_len != creds.len()
-	);
-	store_credentials(&creds).map_err(internal_err)?;
-	let result = (|| {
-		let mut bindings = load_source_bindings()?;
-		if prune_bindings_for_credential(&mut bindings, id) {
-			save_source_bindings(&bindings)?;
-		}
-		Ok::<(), String>(())
-	})();
+	let id = id.to_string();
+	blocking(move || {
+		let _guard = lock_credentials();
+		let mut creds = load_credentials().map_err(ApiError::from)?;
+		let original_len = creds.len();
+		creds.retain(|c| c.id != id);
+		info!(
+			"deleting credential '{id}', removed={}",
+			original_len != creds.len()
+		);
+		store_credentials(&creds).map_err(ApiError::from)?;
+		let result = (|| {
+			let mut bindings = load_source_bindings()?;
+			if prune_bindings_for_credential(&mut bindings, &id) {
+				save_source_bindings(&bindings)?;
+			}
+			Ok::<(), CredentialStoreError>(())
+		})();
 
-	if let Err(error) = result {
-		warn!("failed to prune source credential bindings for {id}: {error}");
-	}
+		if let Err(error) = result {
+			warn!(
+				"failed to prune source credential bindings for {id}: {error}"
+			);
+		}
+		Ok(())
+	})
+	.await?;
 	Ok(rocket::response::status::NoContent)
 }
 

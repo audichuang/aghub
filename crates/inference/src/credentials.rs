@@ -73,13 +73,31 @@ impl CredentialStore for NativeCredentialStore {
 	}
 }
 
+/// Forwards to the boxed store. Lets callers hold a runtime-chosen backend
+/// behind an `Arc<dyn CredentialStore + Send + Sync>` (e.g. the API's
+/// per-request injectable store) anywhere an `impl CredentialStore` is
+/// expected, without each caller needing its own newtype wrapper.
+impl CredentialStore for std::sync::Arc<dyn CredentialStore + Send + Sync> {
+	fn get_api_key(&self, provider_id: &str) -> Result<Option<String>> {
+		(**self).get_api_key(provider_id)
+	}
+
+	fn set_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+		(**self).set_api_key(provider_id, api_key)
+	}
+
+	fn delete_api_key(&self, provider_id: &str) -> Result<()> {
+		(**self).delete_api_key(provider_id)
+	}
+}
+
 /// Plaintext-JSON credential store for headless environments (tests, CI) where
 /// no OS keyring is available.
 ///
 /// This is NOT a security backend — keys are stored unencrypted in a file the
 /// caller names. It exists so the CLI/API inference paths can be exercised
-/// end-to-end without a real keyring (where `linux-native` needs a running
-/// secret-service / dbus session). Selected at runtime by the CLI via
+/// end-to-end without a real keyring (on Linux the native backend needs a
+/// running secret-service / dbus session). Selected at runtime by the CLI via
 /// `$AGHUB_TEST_CREDENTIAL_FILE`; never the default.
 #[derive(Debug, Clone)]
 pub struct FileCredentialStore {

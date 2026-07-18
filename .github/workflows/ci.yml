@@ -242,7 +242,10 @@ jobs:
               shell: bash
               run: |
                   sudo apt-get update
-                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf
+                  # gnome-keyring + dbus-x11 (for `dbus-run-session`) are for
+                  # the real Secret Service smoke test step below, not the
+                  # main test suite (GitHub #15 P1-4) — see that step's comment.
+                  sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
             - name: Cargo fetch
               run: cargo fetch
             - name: Install root deps (frozen)
@@ -255,6 +258,27 @@ jobs:
               run: just test
             - name: Doc tests
               run: cargo test --workspace --doc
+            # Real Secret Service smoke test (GitHub #15 P1-4): every OTHER
+            # keyring-touching test in the workspace mocks/injects the
+            # credential store on purpose (deterministic, no real backend
+            # needed — see GitHub #15 P1-1). This is the ONE test that drives
+            # the REAL `NativeCredentialStore` end-to-end, so it needs an
+            # actual Secret Service session, which `ubuntu-latest` does not
+            # have by default. `dbus-run-session` gives it a throwaway D-Bus
+            # session bus; `gnome-keyring-daemon --unlock` (fed an empty
+            # password over stdin, since there's no pre-existing keyring on a
+            # fresh runner) starts+registers `org.freedesktop.secrets` on
+            # that bus. Deliberately scoped to ONLY this one test binary —
+            # the main `just test` step above must keep running its
+            # deterministic, keyring-free path unchanged.
+            - name: Real Secret Service smoke test (keyring, ubuntu only)
+              if: matrix.os == 'ubuntu-latest'
+              shell: bash
+              run: |
+                  dbus-run-session -- bash -c '
+                    eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
+                    cargo test -p aghub-inference --test keyring_smoke -- --ignored
+                  '
             # Real-network REST E2E: authenticated GitHub API via the runner's
             # ephemeral GITHUB_TOKEN (no PAT to manage). The test self-skips
             # without a token, so it ONLY exercises the authenticated path here.

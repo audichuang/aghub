@@ -104,6 +104,7 @@ export default {
 	githubCredential: "GitHub",
 	createCredential: "新增憑證",
 	credentialCreated: "憑證新增成功",
+	credentialCreateError: "新增憑證失敗",
 	credentialDeleted: "憑證已刪除",
 	credentialDeleteFailed: "刪除憑證失敗",
 	noCredentials: "尚無憑證，點擊新增以開始使用。",

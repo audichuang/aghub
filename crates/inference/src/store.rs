@@ -1,8 +1,9 @@
 //! SQLite-backed CRUD storage for inference providers.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection};
 use sqlx::{ConnectOptions, Row};
@@ -19,6 +20,43 @@ use crate::model::{
 
 /// SQLite database file name under the app data directory.
 pub const INFERENCE_PROVIDERS_FILE: &str = "inference_providers.db";
+
+/// Per-`app_data_dir` mutex serializing the credential read-modify-write
+/// sequences (`create`/`update`/`delete`/`set_api_key`/`delete_api_key`)
+/// that touch BOTH the keyring and the matching SQLite row for a single
+/// provider's API key. `CredentialStore`'s own contract (see
+/// `credentials.rs`) already says backends may not handle concurrent writes
+/// reliably — but even a backend that did would still race: two concurrent
+/// "read the old key, write a new key, roll back to the old key on SQL
+/// failure" sequences targeting the SAME provider could have one sequence's
+/// rollback stomp the OTHER sequence's already-committed new key, leaving
+/// the DB (which only ever sees one UPDATE actually win) out of sync with
+/// the keyring (GitHub #15 P2-5).
+///
+/// Keyed by `app_data_dir` rather than held as a field on
+/// `InferenceProviderStore` itself: the API constructs a fresh
+/// `InferenceProviderStore` per request (see `routes::inference::store`), so
+/// a lock living on the struct would never actually be shared across two
+/// concurrent requests. Every store pointed at the same app data dir shares
+/// the same lock instead.
+///
+/// In-process only — cross-process keyring races remain a documented known
+/// limitation, the same caveat `routes::credentials`'s
+/// `SOURCE_BINDINGS_MUTEX` already carries for the sibling credential store.
+// ponytail: the registry never evicts entries, so it grows by one per
+// distinct `app_data_dir` ever seen by this process. Fine for the API (one
+// long-lived app data dir) and for tests (short-lived processes); revisit
+// with an eviction/LRU policy only if something starts opening many distinct
+// app data dirs over one long-lived process's lifetime.
+fn credential_lock_for(app_data_dir: &Path) -> Arc<Mutex<()>> {
+	static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>> =
+		OnceLock::new();
+	let locks = LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+	let mut map = locks.lock().unwrap_or_else(|e| e.into_inner());
+	map.entry(app_data_dir.to_path_buf())
+		.or_insert_with(|| Arc::new(Mutex::new(())))
+		.clone()
+}
 
 /// CRUD interface for inference provider metadata and API keys.
 pub trait InferenceProviderRepository {
@@ -42,6 +80,27 @@ pub trait InferenceProviderRepository {
 	) -> Result<InferenceProvider>;
 
 	/// Delete provider metadata and its API key.
+	///
+	/// Reads the CURRENT API key itself, under the same lock that serializes
+	/// this call against `set_api_key` (see `credential_lock_for`), and uses
+	/// that value for rollback if the SQL delete fails after the keyring
+	/// delete has already succeeded. The read is fail-hard: if it errors,
+	/// `delete` returns that error immediately without touching the keyring
+	/// or the database.
+	///
+	/// This method used to accept the api key as a caller-supplied
+	/// `known_api_key` parameter (reused from `delete_provider_cascade`'s own
+	/// precondition read) instead of reading it itself. That was a stale-read
+	/// race (GitHub #15 P2-5): the caller's read happened OUTSIDE this
+	/// method's lock, so a concurrent `set_api_key` committing a newer key in
+	/// between could have its result clobbered by this method's rollback
+	/// restoring the caller's now-stale value. Reading under the lock here
+	/// closes that window — this is the ONLY read whose result rollback can
+	/// ever use, and it can't be stale relative to lock-ordering. A
+	/// best-effort/degrade-to-`None` read was considered and rejected: that
+	/// would silently disable the rollback on a transient read failure,
+	/// which is a worse outcome than fail-hard for a security-sensitive
+	/// value (see GitHub #15 P1c).
 	fn delete(&self, id: &str) -> Result<InferenceProvider>;
 
 	/// Read the provider API key from the native credential store.
@@ -323,6 +382,12 @@ impl<C: CredentialStore> InferenceProviderRepository
 		let models = clean_model_names(&input.models)?;
 		ensure_api_key(&input.api_key)?;
 
+		// See `credential_lock_for` (GitHub #15 P2-5): serializes this
+		// keyring+SQL sequence against every other provider mutation
+		// sharing this app data dir.
+		let lock = credential_lock_for(&self.app_data_dir);
+		let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
 		self.block_on(async {
 			let mut conn = self.open_db().await?;
 			Self::check_latin_name_unique(&mut conn, &latin_name, None).await?;
@@ -398,6 +463,10 @@ impl<C: CredentialStore> InferenceProviderRepository
 			.as_ref()
 			.map(|models| clean_model_names(models))
 			.transpose()?;
+
+		// See `credential_lock_for` (GitHub #15 P2-5).
+		let lock = credential_lock_for(&self.app_data_dir);
+		let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 
 		self.block_on(async {
 			let mut conn = self.open_db().await?;
@@ -488,10 +557,24 @@ impl<C: CredentialStore> InferenceProviderRepository
 	}
 
 	fn delete(&self, id: &str) -> Result<InferenceProvider> {
+		// See `credential_lock_for` (GitHub #15 P2-5).
+		let lock = credential_lock_for(&self.app_data_dir);
+		let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
 		self.block_on(async {
 			let mut conn = self.open_db().await?;
 			let provider = Self::fetch_by_id(&mut conn, id).await?;
-			let previous_api_key = self.credentials.get_api_key(id)?;
+
+			// Read the CURRENT key under this same lock (see the trait doc
+			// comment on `delete`, GitHub #15 P2-5): this is the only read
+			// the rollback below can use, so it can never be stale relative
+			// to a concurrent `set_api_key`. Fail-hard on a read error
+			// (propagates via `?`) instead of degrading to `None` -- a
+			// best-effort read would silently disable the rollback (GitHub
+			// #15 P1c). `self.credentials` is the `CredentialStore` directly
+			// (never a store-level locking method), so this cannot
+			// self-deadlock against the `lock` already held above.
+			let known_api_key = self.credentials.get_api_key(id)?;
 
 			self.credentials.delete_api_key(id)?;
 
@@ -502,7 +585,7 @@ impl<C: CredentialStore> InferenceProviderRepository
 					.await;
 
 			if let Err(error) = result {
-				if let Some(key) = previous_api_key {
+				if let Some(key) = known_api_key {
 					log_rollback_failure(
 						"restore_api_key",
 						id,
@@ -523,6 +606,12 @@ impl<C: CredentialStore> InferenceProviderRepository
 
 	fn set_api_key(&self, id: &str, api_key: &str) -> Result<()> {
 		ensure_api_key(api_key)?;
+		// See `credential_lock_for` (GitHub #15 P2-5): without this, two
+		// concurrent `set_api_key` calls for the same provider can both read
+		// the SAME previous key, then one's rollback (on a losing/failing
+		// SQL write) stomps the other's already-committed new key.
+		let lock = credential_lock_for(&self.app_data_dir);
+		let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 		self.block_on(async {
 			let mut conn = self.open_db().await?;
 			Self::fetch_by_id(&mut conn, id).await?;
@@ -559,6 +648,9 @@ impl<C: CredentialStore> InferenceProviderRepository
 	}
 
 	fn delete_api_key(&self, id: &str) -> Result<()> {
+		// See `credential_lock_for` (GitHub #15 P2-5).
+		let lock = credential_lock_for(&self.app_data_dir);
+		let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
 		self.block_on(async {
 			let mut conn = self.open_db().await?;
 			Self::fetch_by_id(&mut conn, id).await?;
@@ -1296,6 +1388,219 @@ mod tests {
 		assert_eq!(deleted.id, provider.id);
 		assert!(store.list().unwrap().is_empty());
 		assert_eq!(store.credentials.get_api_key(&provider.id).unwrap(), None);
+	}
+
+	/// `get_api_key` always errors (simulating a keyring read that is
+	/// permanently/transiently broken); `set_api_key`/`delete_api_key`
+	/// operate on a real shared map so a rollback-restore is directly
+	/// observable, bypassing the broken read.
+	#[derive(Debug, Clone, Default)]
+	struct BrokenReadCredentialStore {
+		values: Arc<Mutex<HashMap<String, String>>>,
+	}
+
+	impl CredentialStore for BrokenReadCredentialStore {
+		fn get_api_key(&self, _provider_id: &str) -> Result<Option<String>> {
+			Err(InferenceProviderError::KeyringUnavailable(
+				"simulated transient read failure".to_string(),
+			))
+		}
+
+		fn set_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+			self.values
+				.lock()
+				.unwrap()
+				.insert(provider_id.to_string(), api_key.to_string());
+			Ok(())
+		}
+
+		fn delete_api_key(&self, provider_id: &str) -> Result<()> {
+			self.values.lock().unwrap().remove(provider_id);
+			Ok(())
+		}
+	}
+
+	/// Regression (GitHub #15 P1c + P2-5 redesign, Codex-found): `delete`
+	/// used to accept the api key as a caller-supplied `known_api_key`
+	/// parameter instead of reading it itself. That was a stale-read race —
+	/// the caller's read ran OUTSIDE this method's lock, so a concurrent
+	/// `set_api_key` could commit a newer key in between, and this method's
+	/// rollback would clobber it with the caller's now-stale value. The fix
+	/// makes `delete` read the current key itself, under its own lock, and
+	/// fail HARD (not degrade to `None`) if that read errors —
+	/// `BrokenReadCredentialStore::get_api_key` always errors, proving
+	/// `delete` returns that error immediately without ever touching the
+	/// keyring delete or the database. The provider row and its key must
+	/// both survive untouched.
+	#[test]
+	fn test_delete_fails_hard_when_credential_read_fails() {
+		let temp = tempfile::tempdir().unwrap();
+		let credentials = BrokenReadCredentialStore::default();
+		let store = InferenceProviderStore::with_credentials(
+			temp.path(),
+			credentials.clone(),
+		);
+		// Seed the backing map directly (bypassing `create`, whose own
+		// `set_api_key` call would still succeed even though reads are
+		// broken) so the provider's key is really present before `delete`.
+		let provider = store
+			.create(CreateInferenceProvider {
+				latin_name: "acme".to_string(),
+				display_name: "Acme".to_string(),
+				format: InferenceProviderFormat::OpenAiResponses,
+				api_base_url: "https://api.openai.com/v1".to_string(),
+				preset: None,
+				api_key: "secret".to_string(),
+				models: Vec::new(),
+			})
+			.unwrap();
+		assert_eq!(
+			credentials
+				.values
+				.lock()
+				.unwrap()
+				.get(&provider.id)
+				.cloned(),
+			Some("secret".to_string()),
+			"precondition: the key is really in the backend"
+		);
+
+		let err = store.delete(&provider.id).unwrap_err();
+		assert!(
+			matches!(err, InferenceProviderError::KeyringUnavailable(_)),
+			"a broken credential read must fail delete() HARD instead of \
+			 degrading to None and proceeding, got {err:?}"
+		);
+
+		assert_eq!(
+			credentials
+				.values
+				.lock()
+				.unwrap()
+				.get(&provider.id)
+				.cloned(),
+			Some("secret".to_string()),
+			"the key must survive untouched -- delete() must never reach \
+			 the keyring-delete step when its own precondition read fails"
+		);
+		assert!(
+			store.get(&provider.id).is_ok(),
+			"the provider row must survive when delete() fails hard on the \
+			 credential read, before any SQL delete is attempted"
+		);
+	}
+
+	/// Wraps a real credential map, but instruments every call so a test can
+	/// detect two threads inside the store's credential methods AT THE SAME
+	/// TIME. `enter`/`exit` bracket each method; a short sleep between them
+	/// widens the race window so an unsynchronized caller reliably overlaps
+	/// two threads instead of getting lucky.
+	#[derive(Debug, Clone, Default)]
+	struct RaceDetectingCredentialStore {
+		values: Arc<Mutex<HashMap<String, String>>>,
+		in_flight: Arc<std::sync::atomic::AtomicUsize>,
+		max_observed: Arc<std::sync::atomic::AtomicUsize>,
+	}
+
+	impl RaceDetectingCredentialStore {
+		fn enter(&self) {
+			use std::sync::atomic::Ordering;
+			let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+			self.max_observed.fetch_max(now, Ordering::SeqCst);
+			std::thread::sleep(std::time::Duration::from_millis(5));
+		}
+
+		fn exit(&self) {
+			self.in_flight
+				.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+		}
+	}
+
+	impl CredentialStore for RaceDetectingCredentialStore {
+		fn get_api_key(&self, provider_id: &str) -> Result<Option<String>> {
+			self.enter();
+			let result =
+				Ok(self.values.lock().unwrap().get(provider_id).cloned());
+			self.exit();
+			result
+		}
+
+		fn set_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+			self.enter();
+			self.values
+				.lock()
+				.unwrap()
+				.insert(provider_id.to_string(), api_key.to_string());
+			self.exit();
+			Ok(())
+		}
+
+		fn delete_api_key(&self, provider_id: &str) -> Result<()> {
+			self.enter();
+			self.values.lock().unwrap().remove(provider_id);
+			self.exit();
+			Ok(())
+		}
+	}
+
+	/// Regression (GitHub #15 P2-5, Codex-found): two concurrent
+	/// `set_api_key` calls for the SAME provider both used to read the old
+	/// key and write a new key with no synchronization — a losing SQL write
+	/// could roll back over a winning one's already-committed key. Fix:
+	/// `credential_lock_for` (keyed by `app_data_dir`) serializes the whole
+	/// read-modify-write sequence. Prove serialization directly: spawn many
+	/// threads hammering `set_api_key` on CLONES of the same store (cloned
+	/// stores sharing one `app_data_dir` must still share the lock — that's
+	/// the whole point of keying by path instead of a field on the struct),
+	/// instrumented so overlapping calls are detected, and assert the
+	/// maximum observed concurrency inside the credential store is exactly
+	/// one. Without the fix this reliably observes more than one (the 5ms
+	/// sleep widens the window); with the fix it can never exceed one.
+	#[test]
+	fn concurrent_set_api_key_calls_are_serialized() {
+		let temp = tempfile::tempdir().unwrap();
+		let credentials = RaceDetectingCredentialStore::default();
+		let store = InferenceProviderStore::with_credentials(
+			temp.path(),
+			credentials.clone(),
+		);
+		let provider = store
+			.create(CreateInferenceProvider {
+				latin_name: "acme".to_string(),
+				display_name: "Acme".to_string(),
+				format: InferenceProviderFormat::OpenAiResponses,
+				api_base_url: "https://api.openai.com/v1".to_string(),
+				preset: None,
+				api_key: "initial".to_string(),
+				models: Vec::new(),
+			})
+			.unwrap();
+
+		let handles: Vec<_> = (0..8)
+			.map(|i| {
+				let store = store.clone();
+				let provider_id = provider.id.clone();
+				std::thread::spawn(move || {
+					store
+						.set_api_key(&provider_id, &format!("key-{i}"))
+						.unwrap();
+				})
+			})
+			.collect();
+		for handle in handles {
+			handle.join().unwrap();
+		}
+
+		assert_eq!(
+			credentials
+				.max_observed
+				.load(std::sync::atomic::Ordering::SeqCst),
+			1,
+			"concurrent set_api_key calls for the same provider must never \
+			 overlap inside the credential store — a value > 1 means two \
+			 read-modify-write sequences interleaved, the exact race that \
+			 lets one rollback stomp another's committed key"
+		);
 	}
 
 	#[test]

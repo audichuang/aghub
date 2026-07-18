@@ -220,6 +220,22 @@ pub trait Fetcher: Send + Sync {
 /// keychain resolution so the orchestrator never touches credentials directly.
 pub trait TokenResolver: Send + Sync {
 	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String>;
+
+	/// Whether the MOST RECENT `resolve()` call discovered that its backend
+	/// is unreachable, as opposed to simply having no credential for the
+	/// requested source. Defaults to `false` — only resolvers that
+	/// distinguish "backend down" from "no credential bound" (e.g.
+	/// `aghub-api`'s keyring-backed resolvers) need to override this.
+	///
+	/// A caller that cares checks this immediately after `resolve()` and, if
+	/// true, fails the whole operation closed instead of treating the `None`
+	/// token as "no credential needed" and proceeding — a `None` reached
+	/// this way could really mean "couldn't tell", which is a materially
+	/// different, and less safe, situation than a confirmed absence of a
+	/// credential.
+	fn backend_unavailable(&self) -> bool {
+		false
+	}
 }
 
 /// Resolves the current tip commit OID of a `(source, ref)` via a git ref

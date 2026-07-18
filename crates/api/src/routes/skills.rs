@@ -17,7 +17,6 @@ use tokio::time::timeout;
 use crate::{
 	credentials::forwarding::{ChainResolver, ForwardedGitTokens},
 	credentials::origin::{origin_of, origins_match, ResolvedOrigin},
-	credentials::resolve::{load_source_bindings, resolve_token_for_source},
 	dto::integrations::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
 	},
@@ -1311,7 +1310,7 @@ pub(crate) async fn install_skill_route_with_repo(
 	repo: std::sync::Arc<skill_update::SkillRepository>,
 ) -> ApiResult<InstallSkillResponse> {
 	let host = keychain_host_for_source(&req.source);
-	let keyring = crate::routes::skills_update::KeyringResolver;
+	let keyring = crate::routes::skills_update::KeyringResolver::load().await;
 	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
 	let token = resolver.resolve(&req.source, host.as_deref());
 	install_skill_with_repo(req, repo, token).await
@@ -1868,8 +1867,8 @@ fn current_platform() -> &'static str {
 /// whether an unattended scan will authenticate.
 #[get("/skills/git/credential-status?<query..>")]
 pub async fn git_credential_status(
-	query: GitCredentialStatusQuery,
 	_origin: TrustedLocalOrigin,
+	query: GitCredentialStatusQuery,
 ) -> ApiResult<GitCredentialStatusResponse> {
 	let url = aghub_git::normalize_tfs_clone_url(&query.url);
 
@@ -1923,10 +1922,10 @@ pub async fn git_credential_status(
 
 #[post("/skills/git/scan", data = "<body>")]
 pub async fn git_scan_skills(
+	_origin: TrustedLocalOrigin,
 	body: Json<GitScanRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
 	forwarded: ForwardedGitTokens,
-	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitScanResponse> {
 	let mut req = body.into_inner();
 	// Azure DevOps Server / TFS rejects the trailing `.git` on `/_git/<repo>`
@@ -1951,40 +1950,38 @@ pub async fn git_scan_skills(
 	// The session reuse branch also captures the session's stored URL so the
 	// guard below can pin a reused token to its own repository host.
 	let mut session_url: Option<String> = None;
-	let credential_token: Option<String> = if let Some(token) = forwarded_token
-	{
-		Some(token)
-	} else if let Some(ref cred_id) = req.credential_id {
-		let creds =
-			crate::routes::credentials::load_credentials().map_err(|e| {
-				ApiError::new(
-					Status::InternalServerError,
-					format!("Failed to read credentials: {e}"),
-					"KEYCHAIN_ERROR",
-				)
-			})?;
-		let cred =
-			creds.iter().find(|c| c.id == *cred_id).ok_or_else(|| {
+	let credential_token: Option<String> =
+		if let Some(token) = forwarded_token {
+			Some(token)
+		} else if let Some(ref cred_id) = req.credential_id {
+			// Mutating route (git-scan drives a real clone attempt): an
+			// unreachable keyring backend must fail closed with 503, not
+			// silently resolve "no credential" (GitHub #15 P2-3). Also runs on
+			// the blocking pool via `load_or_unavailable` (GitHub #15 P1b).
+			let snapshot =
+			crate::routes::skills_update::KeyringResolver::load_or_unavailable()
+				.await?;
+			let cred = snapshot.find_credential(cred_id).ok_or_else(|| {
 				ApiError::new(
 					Status::NotFound,
 					"Credential not found",
 					"CREDENTIAL_NOT_FOUND",
 				)
 			})?;
-		Some(cred.token.clone())
-	} else if let Some(ref sid) = req.session_id {
-		// Reuse credential from existing session
-		let map = sessions.sessions.lock().unwrap();
-		match map.get(sid) {
-			Some(s) => {
-				session_url = Some(s.url.clone());
-				s.credential_token.clone()
+			Some(cred.token.clone())
+		} else if let Some(ref sid) = req.session_id {
+			// Reuse credential from existing session
+			let map = sessions.sessions.lock().unwrap();
+			match map.get(sid) {
+				Some(s) => {
+					session_url = Some(s.url.clone());
+					s.credential_token.clone()
+				}
+				None => None,
 			}
-			None => None,
-		}
-	} else {
-		None
-	};
+		} else {
+			None
+		};
 
 	// A forwarded token is already origin-pinned to `req.url` by
 	// `forwarded_token_for_url`, and is NOT restricted to github.com, so it
@@ -2008,9 +2005,17 @@ pub async fn git_scan_skills(
 	}
 
 	// Token-first fallback: host-scoped keyring binding for this source.
+	// Same fail-closed + blocking-pool contract as the explicit
+	// `credential_id` branch above (GitHub #15 P1b/P2-3).
 	let credential_token = match credential_token {
 		Some(t) => Some(t),
-		None => token_for_git_scan_source(&req.url),
+		None => {
+			let snapshot =
+				crate::routes::skills_update::KeyringResolver::load_or_unavailable()
+					.await?;
+			let host = keychain_host_for_source(&req.url);
+			snapshot.resolve(&req.url, host.as_deref())
+		}
 	};
 
 	// Retrieve cached branches from existing session if re-scanning
@@ -2167,13 +2172,6 @@ fn map_skill_repo_error(e: skill_update::SkillRepoError) -> ApiError {
 	}
 }
 
-fn token_for_git_scan_source(source: &str) -> Option<String> {
-	let bindings = load_source_bindings().unwrap_or_default();
-	let creds = crate::routes::credentials::load_credentials().ok()?;
-	let host = keychain_host_for_source(source);
-	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
-}
-
 /// Resolve a forwarded git token for `url` and origin-pin it to that URL.
 ///
 /// The `forwarded` map (parsed from `X-Aghub-Git-Tokens`) is keyed by source.
@@ -2273,9 +2271,9 @@ fn partition_install_agents_in_request_order(
 
 #[post("/skills/git/install", data = "<body>")]
 pub async fn git_install_skills(
+	_origin: TrustedLocalOrigin,
 	body: Json<GitInstallRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
-	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitInstallResponse> {
 	let req = body.into_inner();
 
@@ -2459,9 +2457,9 @@ pub async fn git_install_skills(
 /// client-provided paths are accepted only for backward-compatible requests.
 #[post("/skills/git/sync", data = "<body>")]
 pub async fn git_sync_skill(
+	_origin: TrustedLocalOrigin,
 	body: Json<GitSyncRequest>,
 	sessions: &rocket::State<GitCloneSessions>,
-	_origin: TrustedLocalOrigin,
 ) -> ApiResult<GitSyncResponse> {
 	let req = body.into_inner();
 
@@ -4081,6 +4079,61 @@ mod tests {
 		let parsed: serde_json::Value =
 			serde_json::from_str(&raw).expect("json body");
 		assert_eq!(parsed["code"], "SESSION_CREDENTIAL_HOST_MISMATCH");
+	}
+
+	/// Regression (GitHub #15 P2-3, Codex-found): git-scan's host-scoped
+	/// keyring fallback (no explicit `credential_id`) used to read the
+	/// keyring via `.ok()?` / `.unwrap_or_default()`, silently degrading ANY
+	/// failure — including "the backend itself is unreachable" — to "no
+	/// credential bound". That let a private-source request proceed as if
+	/// public and fail with a confusing clone/network error instead of a
+	/// stable, retryable 503.
+	///
+	/// Forces the backend-unavailable path via
+	/// `crate::credentials::test_hooks::ForceCredentialBackendUnavailable`
+	/// (deterministic, cross-platform) instead of the previous
+	/// `DBUS_SESSION_BUS_ADDRESS` tampering: that env var only affects Linux
+	/// secret-service, so a macOS/Windows CI runner would see a non-503
+	/// result (GitHub #15 round-2 Codex finding). Omit `credential_id` so
+	/// resolution falls through to the host-fallback branch. The target URL
+	/// points at a closed local port (connection refused instantly) so if
+	/// this regresses back to "swallow and attempt a clone", the test fails
+	/// fast on a connection error rather than hanging on a real network
+	/// timeout — it must never reach the network at all now that
+	/// `load_or_unavailable` fails first.
+	#[test]
+	fn git_scan_host_fallback_fails_closed_when_keyring_backend_unreachable() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _unavailable =
+			crate::credentials::test_hooks::ForceCredentialBackendUnavailable::new();
+
+		let app_data = tempdir().unwrap();
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client");
+
+		let response = client
+			.post("/api/v1/skills/git/scan")
+			.json(&serde_json::json!({
+				"url": "http://127.0.0.1:1/owner/repo.git",
+			}))
+			.dispatch();
+
+		assert_eq!(
+			response.status(),
+			Status::ServiceUnavailable,
+			"an unreachable keyring backend must fail closed with 503, not \
+			 a confusing not-found/clone error"
+		);
+		let raw = response.into_string().expect("response body");
+		let parsed: serde_json::Value =
+			serde_json::from_str(&raw).expect("json body");
+		assert_eq!(parsed["code"], "KEYCHAIN_UNAVAILABLE");
 	}
 
 	#[cfg(unix)]

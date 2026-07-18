@@ -1,7 +1,8 @@
 use aghub_inference::{
 	AgentProviderAdapter, AgentProviderBinding, ClaudeProviderAdapter,
-	CodexProviderAdapter, InferenceProvider, InferenceProviderRepository,
-	InferenceProviderStore, OpenCodeProviderAdapter,
+	CodexProviderAdapter, CredentialStore, InferenceProvider,
+	InferenceProviderRepository, InferenceProviderStore,
+	OpenCodeProviderAdapter,
 };
 use rocket::http::Status;
 use rocket::response::status::NoContent;
@@ -9,6 +10,7 @@ use rocket::serde::json::Json;
 use rocket::State;
 use serde::Deserialize;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::dto::inference::{
@@ -20,16 +22,27 @@ use crate::dto::inference::{
 	UpdateCodexActiveProfileRequest, UpdateCodexProfileProviderRequest,
 	UpdateInferenceProviderRequest,
 };
-use crate::error::{ApiCreated, ApiError, ApiNoContent, ApiResult};
+use crate::error::{
+	run_blocking, ApiCreated, ApiError, ApiNoContent, ApiResult,
+};
 use crate::extractors::TrustedLocalOrigin;
 use crate::state::InferenceProviderState;
 
-fn store(state: &State<InferenceProviderState>) -> InferenceProviderStore {
-	InferenceProviderStore::new(state.app_data_dir.clone())
+/// Store type shared by every route in this file, backed by whatever
+/// [`InferenceProviderState::credentials`] resolves to (real keyring in
+/// production; an injected in-memory store in tests). Boxed as a trait
+/// object so every handler shares one concrete type regardless of backend.
+type Store = InferenceProviderStore<Arc<dyn CredentialStore + Send + Sync>>;
+
+fn store(state: &State<InferenceProviderState>) -> Store {
+	InferenceProviderStore::with_credentials(
+		state.app_data_dir.clone(),
+		state.credentials.create(),
+	)
 }
 
 fn find_by_latin_name(
-	store: &InferenceProviderStore,
+	store: &Store,
 	latin_name: &str,
 ) -> Result<InferenceProvider, ApiError> {
 	store
@@ -59,7 +72,7 @@ fn claude_adapter() -> Result<ClaudeProviderAdapter, ApiError> {
 }
 
 fn get_inventory_provider(
-	store: &InferenceProviderStore,
+	store: &Store,
 	id: &str,
 ) -> Result<(InferenceProvider, String), ApiError> {
 	let provider = store.get(id).map_err(ApiError::from)?;
@@ -84,7 +97,7 @@ fn same_api_base_url(left: &str, right: &str) -> bool {
 }
 
 fn inventory_providers_with_api_keys(
-	store: &InferenceProviderStore,
+	store: &Store,
 ) -> Result<Vec<(InferenceProvider, String)>, ApiError> {
 	let mut providers = Vec::new();
 	for provider in store.list().map_err(ApiError::from)? {
@@ -99,7 +112,7 @@ fn inventory_providers_with_api_keys(
 }
 
 fn opencode_inventory_providers_with_api_keys(
-	store: &InferenceProviderStore,
+	store: &Store,
 ) -> Result<Vec<(InferenceProvider, String)>, ApiError> {
 	Ok(inventory_providers_with_api_keys(store)?
 		.into_iter()
@@ -156,7 +169,7 @@ fn opencode_provider_response(
 }
 
 fn codex_provider_response(
-	store: &InferenceProviderStore,
+	store: &Store,
 	inventory: &[(InferenceProvider, String)],
 	adapter: &CodexProviderAdapter,
 	binding: AgentProviderBinding,
@@ -176,7 +189,7 @@ fn codex_provider_response(
 }
 
 fn codex_state_response(
-	store: &InferenceProviderStore,
+	store: &Store,
 	adapter: &CodexProviderAdapter,
 ) -> Result<CodexProviderStateResponse, ApiError> {
 	let inventory = inventory_providers_with_api_keys(store)?;
@@ -318,95 +331,110 @@ pub async fn list_inference_provider_presets(
 }
 
 #[get("/inference/agents/opencode/providers")]
-pub fn list_opencode_providers(
+pub async fn list_opencode_providers(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 ) -> ApiResult<Vec<AgentProviderResponse>> {
 	let store = store(state);
-	let adapter = opencode_adapter()?;
-	let inventory = opencode_inventory_providers_with_api_keys(&store)?;
-	let providers = adapter
-		.load_providers()
-		.map_err(ApiError::from)?
-		.providers
-		.into_iter()
-		.map(|binding| {
-			opencode_provider_response(&inventory, &adapter, binding)
-		})
-		.collect::<Result<Vec<_>, _>>()?;
-	Ok(Json(providers))
+	run_blocking(move || {
+		let adapter = opencode_adapter()?;
+		let inventory = opencode_inventory_providers_with_api_keys(&store)?;
+		let providers = adapter
+			.load_providers()
+			.map_err(ApiError::from)?
+			.providers
+			.into_iter()
+			.map(|binding| {
+				opencode_provider_response(&inventory, &adapter, binding)
+			})
+			.collect::<Result<Vec<_>, _>>()?;
+		Ok(Json(providers))
+	})
+	.await
 }
 
 #[get("/inference/agents/codex/providers")]
-pub fn list_codex_providers(
+pub async fn list_codex_providers(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 ) -> ApiResult<Vec<AgentProviderResponse>> {
 	let store = store(state);
-	let adapter = codex_adapter()?;
-	let inventory = inventory_providers_with_api_keys(&store)?;
-	let providers = adapter
-		.load_profile_state(&store)
-		.map_err(ApiError::from)?
-		.providers
-		.into_iter()
-		.map(|binding| {
-			codex_provider_response(&store, &inventory, &adapter, binding)
-		})
-		.collect::<Result<Vec<_>, _>>()?;
-	Ok(Json(providers))
+	run_blocking(move || {
+		let adapter = codex_adapter()?;
+		let inventory = inventory_providers_with_api_keys(&store)?;
+		let providers = adapter
+			.load_profile_state(&store)
+			.map_err(ApiError::from)?
+			.providers
+			.into_iter()
+			.map(|binding| {
+				codex_provider_response(&store, &inventory, &adapter, binding)
+			})
+			.collect::<Result<Vec<_>, _>>()?;
+		Ok(Json(providers))
+	})
+	.await
 }
 
 #[get("/inference/agents/codex/state")]
-pub fn get_codex_state(
+pub async fn get_codex_state(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 ) -> ApiResult<CodexProviderStateResponse> {
 	let store = store(state);
-	let adapter = codex_adapter()?;
-	Ok(Json(codex_state_response(&store, &adapter)?))
+	run_blocking(move || {
+		let adapter = codex_adapter()?;
+		Ok(Json(codex_state_response(&store, &adapter)?))
+	})
+	.await
 }
 
 #[post("/inference/agents/opencode/providers", data = "<body>")]
-pub fn create_opencode_provider(
+pub async fn create_opencode_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	body: Json<CreateAgentProviderRequest>,
 ) -> ApiCreated<AgentProviderResponse> {
 	let store = store(state);
-	let (provider, api_key) =
-		get_inventory_provider(&store, &body.inference_provider_id)?;
-	let binding = opencode_adapter()?
-		.add_inventory_provider(&provider, &api_key)
-		.map_err(ApiError::from)?;
+	run_blocking(move || {
+		let (provider, api_key) =
+			get_inventory_provider(&store, &body.inference_provider_id)?;
+		let binding = opencode_adapter()?
+			.add_inventory_provider(&provider, &api_key)
+			.map_err(ApiError::from)?;
 
-	Ok((Status::Created, Json(binding.into())))
+		Ok((Status::Created, Json(binding.into())))
+	})
+	.await
 }
 
 #[post("/inference/agents/codex/providers", data = "<body>")]
-pub fn create_codex_provider(
+pub async fn create_codex_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	body: Json<CreateAgentProviderRequest>,
 ) -> ApiCreated<AgentProviderResponse> {
 	let store = store(state);
-	let (provider, api_key) =
-		get_inventory_provider(&store, &body.inference_provider_id)?;
-	let adapter = codex_adapter()?;
-	let binding = adapter
-		.add_inventory_provider(&store, &provider, &api_key)
-		.map_err(ApiError::from)?;
-	adapter
-		.set_active_provider(&store, &binding.id)
-		.map_err(ApiError::from)?;
+	run_blocking(move || {
+		let (provider, api_key) =
+			get_inventory_provider(&store, &body.inference_provider_id)?;
+		let adapter = codex_adapter()?;
+		let binding = adapter
+			.add_inventory_provider(&store, &provider, &api_key)
+			.map_err(ApiError::from)?;
+		adapter
+			.set_active_provider(&store, &binding.id)
+			.map_err(ApiError::from)?;
 
-	Ok((
-		Status::Created,
-		Json(
-			AgentProviderResponse::from(binding)
-				.with_matched_inference_provider(&provider),
-		),
-	))
+		Ok((
+			Status::Created,
+			Json(
+				AgentProviderResponse::from(binding)
+					.with_matched_inference_provider(&provider),
+			),
+		))
+	})
+	.await
 }
 
 #[put("/inference/agents/opencode/providers/<id>", data = "<body>")]
@@ -424,150 +452,175 @@ pub fn update_opencode_provider(
 }
 
 #[put("/inference/agents/codex/providers/<id>", data = "<body>")]
-pub fn update_codex_provider(
+pub async fn update_codex_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 	body: Json<UpdateAgentProviderRequest>,
 ) -> ApiResult<AgentProviderResponse> {
 	let store = store(state);
-	let body = body.into_inner();
-	let binding = codex_adapter()?
-		.update_provider(
-			&store,
-			id,
-			body.name.as_deref(),
-			body.api_key.as_deref(),
-		)
-		.map_err(ApiError::from)?;
+	let id = id.to_string();
+	run_blocking(move || {
+		let binding = codex_adapter()?
+			.update_provider(
+				&store,
+				&id,
+				body.name.as_deref(),
+				body.api_key.as_deref(),
+			)
+			.map_err(ApiError::from)?;
 
-	Ok(Json(binding.into()))
+		Ok(Json(binding.into()))
+	})
+	.await
 }
 
 #[put("/inference/agents/codex/profile", data = "<body>")]
-pub fn update_codex_active_profile(
+pub async fn update_codex_active_profile(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	body: Json<UpdateCodexActiveProfileRequest>,
 ) -> ApiResult<CodexProviderStateResponse> {
 	let store = store(state);
-	let adapter = codex_adapter()?;
-	adapter
-		.set_active_profile(&store, &body.profile_id)
-		.map_err(ApiError::from)?;
-	Ok(Json(codex_state_response(&store, &adapter)?))
+	run_blocking(move || {
+		let adapter = codex_adapter()?;
+		adapter
+			.set_active_profile(&store, &body.profile_id)
+			.map_err(ApiError::from)?;
+		Ok(Json(codex_state_response(&store, &adapter)?))
+	})
+	.await
 }
 
 #[put(
 	"/inference/agents/codex/profiles/<profile_id>/provider",
 	data = "<body>"
 )]
-pub fn update_codex_profile_provider(
+pub async fn update_codex_profile_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	profile_id: &str,
 	body: Json<UpdateCodexProfileProviderRequest>,
 ) -> ApiResult<CodexProviderStateResponse> {
 	let store = store(state);
-	let adapter = codex_adapter()?;
-	adapter
-		.set_profile_provider(&store, profile_id, &body.provider_id)
-		.map_err(ApiError::from)?;
-	Ok(Json(codex_state_response(&store, &adapter)?))
+	let profile_id = profile_id.to_string();
+	run_blocking(move || {
+		let adapter = codex_adapter()?;
+		adapter
+			.set_profile_provider(&store, &profile_id, &body.provider_id)
+			.map_err(ApiError::from)?;
+		Ok(Json(codex_state_response(&store, &adapter)?))
+	})
+	.await
 }
 
 #[post("/inference/agents/opencode/providers/<id>/sync")]
-pub fn sync_opencode_provider(
+pub async fn sync_opencode_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 ) -> ApiResult<AgentProviderResponse> {
 	let store = store(state);
-	let adapter = opencode_adapter()?;
-	let inventory = opencode_inventory_providers_with_api_keys(&store)?;
-	let binding = adapter
-		.load_providers()
-		.map_err(ApiError::from)?
-		.providers
-		.into_iter()
-		.find(|provider| provider.id == id)
-		.ok_or_else(|| {
-			ApiError::new(
-				Status::NotFound,
-				format!("OpenCode provider '{id}' not found"),
-				"RESOURCE_NOT_FOUND",
-			)
-		})?;
-	let agent_api_key = adapter.api_key(&binding.id).map_err(ApiError::from)?;
-	let Some((provider, api_key)) =
-		find_matching_inventory_provider(&inventory, &binding, agent_api_key)?
-	else {
-		return Err(ApiError::new(
-			Status::UnprocessableEntity,
-			format!(
-				"OpenCode provider '{id}' is not backed by an aghub \
-				 inference provider"
-			),
-			"UNRECOGNIZED_PROVIDER",
-		));
-	};
+	let id = id.to_string();
+	run_blocking(move || {
+		let adapter = opencode_adapter()?;
+		let inventory = opencode_inventory_providers_with_api_keys(&store)?;
+		let binding = adapter
+			.load_providers()
+			.map_err(ApiError::from)?
+			.providers
+			.into_iter()
+			.find(|provider| provider.id == id)
+			.ok_or_else(|| {
+				ApiError::new(
+					Status::NotFound,
+					format!("OpenCode provider '{id}' not found"),
+					"RESOURCE_NOT_FOUND",
+				)
+			})?;
+		let agent_api_key =
+			adapter.api_key(&binding.id).map_err(ApiError::from)?;
+		let Some((provider, api_key)) = find_matching_inventory_provider(
+			&inventory,
+			&binding,
+			agent_api_key,
+		)?
+		else {
+			return Err(ApiError::new(
+				Status::UnprocessableEntity,
+				format!(
+					"OpenCode provider '{id}' is not backed by an aghub \
+					 inference provider"
+				),
+				"UNRECOGNIZED_PROVIDER",
+			));
+		};
 
-	let updated = adapter
-		.add_provider(id, &provider, &api_key)
-		.map_err(ApiError::from)?;
+		let updated = adapter
+			.add_provider(&id, &provider, &api_key)
+			.map_err(ApiError::from)?;
 
-	Ok(Json(
-		AgentProviderResponse::from(updated)
-			.with_matched_inference_provider(&provider),
-	))
+		Ok(Json(
+			AgentProviderResponse::from(updated)
+				.with_matched_inference_provider(&provider),
+		))
+	})
+	.await
 }
 
 #[post("/inference/agents/codex/providers/<id>/sync")]
-pub fn sync_codex_provider(
+pub async fn sync_codex_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 ) -> ApiResult<AgentProviderResponse> {
 	let store = store(state);
-	let adapter = codex_adapter()?;
-	let inventory = inventory_providers_with_api_keys(&store)?;
-	let binding = adapter
-		.load_profile_state(&store)
-		.map_err(ApiError::from)?
-		.providers
-		.into_iter()
-		.find(|provider| provider.id == id)
-		.ok_or_else(|| {
-			ApiError::new(
-				Status::NotFound,
-				format!("Codex provider '{id}' not found"),
-				"RESOURCE_NOT_FOUND",
-			)
-		})?;
-	let agent_api_key = adapter
-		.api_key(&store, &binding.id)
-		.map_err(ApiError::from)?;
-	let Some((provider, api_key)) =
-		find_matching_inventory_provider(&inventory, &binding, agent_api_key)?
-	else {
-		return Err(ApiError::new(
-			Status::UnprocessableEntity,
-			format!(
-				"Codex provider '{id}' is not backed by an aghub inference \
-				 provider"
-			),
-			"UNRECOGNIZED_PROVIDER",
-		));
-	};
+	let id = id.to_string();
+	run_blocking(move || {
+		let adapter = codex_adapter()?;
+		let inventory = inventory_providers_with_api_keys(&store)?;
+		let binding = adapter
+			.load_profile_state(&store)
+			.map_err(ApiError::from)?
+			.providers
+			.into_iter()
+			.find(|provider| provider.id == id)
+			.ok_or_else(|| {
+				ApiError::new(
+					Status::NotFound,
+					format!("Codex provider '{id}' not found"),
+					"RESOURCE_NOT_FOUND",
+				)
+			})?;
+		let agent_api_key = adapter
+			.api_key(&store, &binding.id)
+			.map_err(ApiError::from)?;
+		let Some((provider, api_key)) = find_matching_inventory_provider(
+			&inventory,
+			&binding,
+			agent_api_key,
+		)?
+		else {
+			return Err(ApiError::new(
+				Status::UnprocessableEntity,
+				format!(
+					"Codex provider '{id}' is not backed by an aghub \
+					 inference provider"
+				),
+				"UNRECOGNIZED_PROVIDER",
+			));
+		};
 
-	let updated = adapter
-		.add_provider(id, &provider, &api_key)
-		.map_err(ApiError::from)?;
+		let updated = adapter
+			.add_provider(&id, &provider, &api_key)
+			.map_err(ApiError::from)?;
 
-	Ok(Json(
-		AgentProviderResponse::from(updated)
-			.with_matched_inference_provider(&provider),
-	))
+		Ok(Json(
+			AgentProviderResponse::from(updated)
+				.with_matched_inference_provider(&provider),
+		))
+	})
+	.await
 }
 
 #[delete("/inference/agents/opencode/providers/<id>")]
@@ -582,75 +635,91 @@ pub fn delete_opencode_provider(
 }
 
 #[delete("/inference/agents/codex/providers/<id>")]
-pub fn delete_codex_provider(
+pub async fn delete_codex_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 ) -> ApiNoContent {
 	let store = store(state);
-	codex_adapter()?
-		.remove_provider(&store, id)
-		.map_err(ApiError::from)?;
-	Ok(NoContent)
+	let id = id.to_string();
+	run_blocking(move || {
+		codex_adapter()?
+			.remove_provider(&store, &id)
+			.map_err(ApiError::from)?;
+		Ok(NoContent)
+	})
+	.await
 }
 
 #[get("/inference/providers/<latin_name>/password")]
-pub fn get_inference_provider_password(
+pub async fn get_inference_provider_password(
 	state: &State<InferenceProviderState>,
 	latin_name: &str,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<InferenceProviderPasswordResponse> {
 	let store = store(state);
-	let provider = find_by_latin_name(&store, latin_name)?;
-	let api_key = store
-		.get_api_key(&provider.id)
-		.map_err(ApiError::from)?
-		.ok_or_else(|| {
-			ApiError::new(
-				Status::NotFound,
-				format!(
-					"inference provider '{}' has no stored API key",
-					provider.display_name
-				),
-				"RESOURCE_NOT_FOUND",
-			)
-		})?;
+	let latin_name = latin_name.to_string();
+	run_blocking(move || {
+		let provider = find_by_latin_name(&store, &latin_name)?;
+		let api_key = store
+			.get_api_key(&provider.id)
+			.map_err(ApiError::from)?
+			.ok_or_else(|| {
+				ApiError::new(
+					Status::NotFound,
+					format!(
+						"inference provider '{}' has no stored API key",
+						provider.display_name
+					),
+					"RESOURCE_NOT_FOUND",
+				)
+			})?;
 
-	Ok(Json(InferenceProviderPasswordResponse {
-		latin_name: provider.latin_name,
-		api_key,
-	}))
+		Ok(Json(InferenceProviderPasswordResponse {
+			latin_name: provider.latin_name,
+			api_key,
+		}))
+	})
+	.await
 }
 
 #[post("/inference/providers", data = "<body>")]
-pub fn create_inference_provider(
+pub async fn create_inference_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	body: Json<CreateInferenceProviderRequest>,
 ) -> ApiCreated<InferenceProviderResponse> {
-	let provider = store(state)
-		.create(body.into_inner().into())
-		.map_err(ApiError::from)?;
-	Ok((Status::Created, Json(provider.into())))
+	let store = store(state);
+	run_blocking(move || {
+		let provider = store
+			.create(body.into_inner().into())
+			.map_err(ApiError::from)?;
+		Ok((Status::Created, Json(provider.into())))
+	})
+	.await
 }
 
 #[put("/inference/providers/<latin_name>", data = "<body>")]
-pub fn update_inference_provider(
+pub async fn update_inference_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	latin_name: &str,
 	body: Json<UpdateInferenceProviderRequest>,
 ) -> ApiResult<InferenceProviderResponse> {
 	let store = store(state);
-	let provider = find_by_latin_name(&store, latin_name)?;
-	let updated = store
-		.update(&provider.id, body.into_inner().into())
-		.map_err(ApiError::from)?;
-	Ok(Json(updated.into()))
+	let latin_name = latin_name.to_string();
+	run_blocking(move || {
+		let provider = find_by_latin_name(&store, &latin_name)?;
+		let updated = store
+			.update(&provider.id, body.into_inner().into())
+			.map_err(ApiError::from)?;
+		Ok(Json(updated.into()))
+	})
+	.await
 }
 
 #[delete("/inference/providers/<latin_name>")]
-pub fn delete_inference_provider(
+pub async fn delete_inference_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	latin_name: &str,
@@ -660,8 +729,18 @@ pub fn delete_inference_provider(
 	// Shared use case: tears down every agent reference, then deletes the
 	// provider. The CLI routes its delete through the same fn so neither
 	// surface can leave an agent config pointing at a removed provider.
-	aghub_inference::delete_provider_cascade(&store, &provider)
-		.map_err(ApiError::from)?;
+	//
+	// Runs on Rocket's blocking pool via the shared `run_blocking` helper:
+	// the cascade's precondition check and every step below it are OS
+	// keyring reads/writes (D-Bus secret-service on Linux), which must never
+	// block the async worker thread directly — Rocket does not
+	// spawn_blocking sync handlers on its own (see the `keyring` feature
+	// comment in `crates/api/Cargo.toml`).
+	run_blocking(move || {
+		aghub_inference::delete_provider_cascade(&store, &provider)
+			.map_err(ApiError::from)
+	})
+	.await?;
 	Ok(NoContent)
 }
 
@@ -670,7 +749,7 @@ pub fn delete_inference_provider(
 // ============================================================================
 
 fn claude_state_response(
-	store: &InferenceProviderStore,
+	store: &Store,
 	adapter: &ClaudeProviderAdapter,
 ) -> Result<ClaudeProviderStateResponse, ApiError> {
 	let state = adapter.load_bindings_state(store).map_err(ApiError::from)?;
@@ -709,134 +788,154 @@ fn claude_state_response(
 }
 
 #[get("/inference/agents/claude/state")]
-pub fn get_claude_state(
+pub async fn get_claude_state(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 ) -> ApiResult<ClaudeProviderStateResponse> {
 	let store = store(state);
-	let adapter = claude_adapter()?;
-	Ok(Json(claude_state_response(&store, &adapter)?))
+	run_blocking(move || {
+		let adapter = claude_adapter()?;
+		Ok(Json(claude_state_response(&store, &adapter)?))
+	})
+	.await
 }
 
 #[post("/inference/agents/claude/providers", data = "<body>")]
-pub fn create_claude_provider(
+pub async fn create_claude_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	body: Json<CreateAgentProviderRequest>,
 ) -> ApiCreated<AgentProviderResponse> {
 	let store = store(state);
-	let (provider, api_key) =
-		get_inventory_provider(&store, &body.inference_provider_id)?;
-	let adapter = claude_adapter()?;
-	let binding = adapter
-		.add_binding(&store, &provider, &api_key, true)
-		.map_err(ApiError::from)?;
+	run_blocking(move || {
+		let (provider, api_key) =
+			get_inventory_provider(&store, &body.inference_provider_id)?;
+		let adapter = claude_adapter()?;
+		let binding = adapter
+			.add_binding(&store, &provider, &api_key, true)
+			.map_err(ApiError::from)?;
 
-	Ok((
-		Status::Created,
-		Json(
-			AgentProviderResponse::from(binding)
-				.with_matched_inference_provider(&provider),
-		),
-	))
+		Ok((
+			Status::Created,
+			Json(
+				AgentProviderResponse::from(binding)
+					.with_matched_inference_provider(&provider),
+			),
+		))
+	})
+	.await
 }
 
 #[put("/inference/agents/claude/providers/<id>", data = "<body>")]
-pub fn update_claude_provider(
+pub async fn update_claude_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 	body: Json<UpdateAgentProviderRequest>,
 ) -> ApiResult<ClaudeProviderStateResponse> {
 	let store = store(state);
-	let adapter = claude_adapter()?;
+	let id = id.to_string();
+	run_blocking(move || {
+		let adapter = claude_adapter()?;
 
-	if body.name.as_deref().is_some() {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			"Claude provider name cannot be changed".to_string(),
-			"UNSUPPORTED_OPERATION",
-		));
-	}
+		if body.name.as_deref().is_some() {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				"Claude provider name cannot be changed".to_string(),
+				"UNSUPPORTED_OPERATION",
+			));
+		}
 
-	if let Some(api_key) = body.api_key.as_deref() {
-		let row = store
-			.get_agent_binding("claude", id)
+		if let Some(api_key) = body.api_key.as_deref() {
+			let row = store
+				.get_agent_binding("claude", &id)
+				.map_err(ApiError::from)?;
+			let provider = store
+				.get(&row.inference_provider_id)
+				.map_err(ApiError::from)?;
+			store
+				.set_api_key(&provider.id, api_key)
+				.map_err(ApiError::from)?;
+		}
+		adapter
+			.set_active_binding(&store, &id)
 			.map_err(ApiError::from)?;
-		let provider = store
-			.get(&row.inference_provider_id)
-			.map_err(ApiError::from)?;
-		store
-			.set_api_key(&provider.id, api_key)
-			.map_err(ApiError::from)?;
-	}
-	adapter
-		.set_active_binding(&store, id)
-		.map_err(ApiError::from)?;
 
-	Ok(Json(claude_state_response(&store, &adapter)?))
+		Ok(Json(claude_state_response(&store, &adapter)?))
+	})
+	.await
 }
 
 #[post("/inference/agents/claude/providers/<id>/sync")]
-pub fn sync_claude_provider(
+pub async fn sync_claude_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 ) -> ApiResult<AgentProviderResponse> {
 	let store = store(state);
-	let adapter = claude_adapter()?;
-	let row = store
-		.get_agent_binding("claude", id)
-		.map_err(ApiError::from)?;
-	let provider = store
-		.get(&row.inference_provider_id)
-		.map_err(ApiError::from)?;
-	let was_active = adapter
-		.derive_active_provider_id(&store)
-		.map_err(ApiError::from)?
-		== id;
-	let model = provider.models.first().cloned();
-	let row = store
-		.update_agent_binding("claude", id, Some(model.clone()))
-		.map_err(ApiError::from)?;
-
-	if was_active {
-		let api_key = store
-			.get_api_key(&provider.id)
-			.map_err(ApiError::from)?
-			.ok_or_else(|| {
-				ApiError::new(
-					Status::UnprocessableEntity,
-					format!(
-						"inference provider '{}' has no stored API key",
-						provider.display_name
-					),
-					"MISSING_CREDENTIAL",
-				)
-			})?;
-
-		adapter
-			.sync_active_binding(&provider, &api_key, model.as_deref())
+	let id = id.to_string();
+	run_blocking(move || {
+		let adapter = claude_adapter()?;
+		let row = store
+			.get_agent_binding("claude", &id)
 			.map_err(ApiError::from)?;
-	}
+		let provider = store
+			.get(&row.inference_provider_id)
+			.map_err(ApiError::from)?;
+		let was_active = adapter
+			.derive_active_provider_id(&store)
+			.map_err(ApiError::from)?
+			== id;
+		let model = provider.models.first().cloned();
+		let row = store
+			.update_agent_binding("claude", &id, Some(model.clone()))
+			.map_err(ApiError::from)?;
 
-	let binding = store.binding_from_row(&row).map_err(ApiError::from)?;
-	Ok(Json(
-		AgentProviderResponse::from(binding)
-			.with_matched_inference_provider(&provider),
-	))
+		if was_active {
+			let api_key = store
+				.get_api_key(&provider.id)
+				.map_err(ApiError::from)?
+				.ok_or_else(|| {
+					ApiError::new(
+						Status::UnprocessableEntity,
+						format!(
+							"inference provider '{}' has no stored API key",
+							provider.display_name
+						),
+						"MISSING_CREDENTIAL",
+					)
+				})?;
+
+			adapter
+				.sync_active_binding(&provider, &api_key, model.as_deref())
+				.map_err(ApiError::from)?;
+		}
+
+		let binding = store.binding_from_row(&row).map_err(ApiError::from)?;
+		Ok(Json(
+			AgentProviderResponse::from(binding)
+				.with_matched_inference_provider(&provider),
+		))
+	})
+	.await
 }
 
 #[delete("/inference/agents/claude/providers/<id>")]
-pub fn delete_claude_provider(
+pub async fn delete_claude_provider(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 	id: &str,
 ) -> ApiNoContent {
 	let store = store(state);
-	let adapter = claude_adapter()?;
-	adapter.remove_binding(&store, id).map_err(ApiError::from)?;
-	Ok(NoContent)
+	let id = id.to_string();
+	run_blocking(move || {
+		let adapter = claude_adapter()?;
+		adapter
+			.remove_binding(&store, &id)
+			.map_err(ApiError::from)?;
+		Ok(NoContent)
+	})
+	.await
 }
 
 #[delete("/inference/agents/claude/state")]
@@ -851,32 +950,98 @@ pub fn clear_claude_state(
 }
 
 #[delete("/inference/agents/codex/state")]
-pub fn clear_codex_state(
+pub async fn clear_codex_state(
 	_origin: TrustedLocalOrigin,
 	state: &State<InferenceProviderState>,
 ) -> ApiNoContent {
 	let store = store(state);
-	let adapter = codex_adapter()?;
-	adapter
-		.clear_active_provider(&store)
-		.map_err(ApiError::from)?;
-	Ok(NoContent)
+	run_blocking(move || {
+		let adapter = codex_adapter()?;
+		adapter
+			.clear_active_provider(&store)
+			.map_err(ApiError::from)?;
+		Ok(NoContent)
+	})
+	.await
 }
 
-// Linux-only: this module drives the DELETE route through the REAL
-// `NativeCredentialStore` (the route builds its own store and can't be
-// injected). On headless macOS/Windows CI the OS keychain is locked, so a
-// keyring read returns a platform error rather than `NoEntry`, and the cascade
-// `?`-propagates it as a 500 (a CI-environment limitation, not a product bug —
-// on a real machine with an unlocked keychain the read returns NoEntry). The
-// platform-agnostic cascade LOGIC is covered cross-platform at the
-// `delete_provider_references` seam with mock stores (crates/inference/src/cascade.rs).
-#[cfg(all(test, target_os = "linux"))]
+// This module drives inference routes through an INJECTED credential store
+// (`InferenceProviderState::credentials`, wired via
+// `crate::build_rocket_with_inference_credentials`) instead of the real OS
+// keyring. That makes these tests deterministic on every OS/CI (no
+// gnome-keyring/dbus needed) and lets the fail-closed test simulate a broken
+// backend directly, instead of tampering with `DBUS_SESSION_BUS_ADDRESS` /
+// racing the process-global mock keyring builder used elsewhere in this
+// crate's tests (GitHub #15 P1-1). The platform-agnostic cascade LOGIC is
+// covered separately at the `delete_provider_references` seam with mock
+// stores (crates/inference/src/cascade.rs).
+#[cfg(test)]
 mod tests {
+	use std::sync::{Arc, Mutex};
+
 	use aghub_inference::{
 		CreateInferenceProvider, InferenceProviderFormat,
 		InferenceProviderRepository, InferenceProviderStore,
 	};
+
+	use crate::state::CredentialStoreFactory;
+
+	#[derive(Debug, Clone, Default)]
+	struct MemoryCredentialStore {
+		values: Arc<Mutex<std::collections::HashMap<String, String>>>,
+	}
+	impl aghub_inference::CredentialStore for MemoryCredentialStore {
+		fn get_api_key(
+			&self,
+			id: &str,
+		) -> aghub_inference::Result<Option<String>> {
+			Ok(self.values.lock().unwrap().get(id).cloned())
+		}
+		fn set_api_key(
+			&self,
+			id: &str,
+			key: &str,
+		) -> aghub_inference::Result<()> {
+			self.values
+				.lock()
+				.unwrap()
+				.insert(id.to_string(), key.to_string());
+			Ok(())
+		}
+		fn delete_api_key(&self, id: &str) -> aghub_inference::Result<()> {
+			self.values.lock().unwrap().remove(id);
+			Ok(())
+		}
+	}
+
+	/// `get_api_key` always reports the backend as unreachable; `delete_api_key`
+	/// panics — it must never run once the cascade's reachability precondition
+	/// has already failed closed.
+	#[derive(Debug, Clone, Default)]
+	struct UnavailableCredentialStore;
+	impl aghub_inference::CredentialStore for UnavailableCredentialStore {
+		fn get_api_key(
+			&self,
+			_id: &str,
+		) -> aghub_inference::Result<Option<String>> {
+			Err(aghub_inference::InferenceProviderError::KeyringUnavailable(
+				"no secret service provider or dbus session found".to_string(),
+			))
+		}
+		fn set_api_key(
+			&self,
+			_id: &str,
+			_key: &str,
+		) -> aghub_inference::Result<()> {
+			Ok(())
+		}
+		fn delete_api_key(&self, id: &str) -> aghub_inference::Result<()> {
+			panic!(
+				"delete_api_key({id}) must not run once the \
+				 backend-reachability precondition has already failed"
+			)
+		}
+	}
 
 	/// Finding #2: route coverage for `delete_inference_provider`. Proves the
 	/// DELETE route is mounted, drives the shared cascade end-to-end (its
@@ -887,42 +1052,13 @@ mod tests {
 	/// adapters — that is the discriminating coverage; this test pins the wiring.
 	///
 	/// HOME is repointed to an empty temp dir (under `test_env_lock`) so the
-	/// cascade's `global()` adapters read throwaway config, never the real home.
-	/// No keyring entry is ever written (the seed key lives only in the in-test
-	/// MemoryCredentialStore), so the route's NativeCredentialStore just sees
-	/// NoEntry — keyring-free, like the CLI tests.
+	/// cascade's `global()` adapters read throwaway config, never the real
+	/// home. The route's credential store is INJECTED as the very
+	/// `MemoryCredentialStore` used to seed the provider (GitHub #15 P1a: a
+	/// hardcoded `NativeCredentialStore` made this test fail wherever no OS
+	/// keyring is reachable, e.g. CI without gnome-keyring/dbus).
 	#[test]
 	fn delete_route_cascades_agent_bindings() {
-		use std::sync::{Arc, Mutex};
-
-		#[derive(Debug, Clone, Default)]
-		struct MemoryCredentialStore {
-			values: Arc<Mutex<std::collections::HashMap<String, String>>>,
-		}
-		impl aghub_inference::CredentialStore for MemoryCredentialStore {
-			fn get_api_key(
-				&self,
-				id: &str,
-			) -> aghub_inference::Result<Option<String>> {
-				Ok(self.values.lock().unwrap().get(id).cloned())
-			}
-			fn set_api_key(
-				&self,
-				id: &str,
-				key: &str,
-			) -> aghub_inference::Result<()> {
-				self.values
-					.lock()
-					.unwrap()
-					.insert(id.to_string(), key.to_string());
-				Ok(())
-			}
-			fn delete_api_key(&self, id: &str) -> aghub_inference::Result<()> {
-				self.values.lock().unwrap().remove(id);
-				Ok(())
-			}
-		}
-
 		let _env = crate::routes::test_env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
@@ -931,11 +1067,10 @@ mod tests {
 		std::env::set_var("HOME", home.path());
 
 		let data = tempfile::tempdir().unwrap();
-		// Seed via a SQLite-only store: the api key goes to memory (dropped with
-		// this store), so the route's keyring never has an entry.
+		let credentials = MemoryCredentialStore::default();
 		let seed = InferenceProviderStore::with_credentials(
 			data.path(),
-			MemoryCredentialStore::default(),
+			credentials.clone(),
 		);
 		let provider = seed
 			.create(CreateInferenceProvider {
@@ -956,12 +1091,14 @@ mod tests {
 			"precondition: one claude binding references the provider"
 		);
 
-		let client =
-			rocket::local::blocking::Client::tracked(crate::build_rocket(
+		let client = rocket::local::blocking::Client::tracked(
+			crate::build_rocket_with_inference_credentials(
 				rocket::Config::default(),
 				data.path().to_path_buf(),
-			))
-			.expect("rocket builds");
+				CredentialStoreFactory::fixed(Arc::new(credentials)),
+			),
+		)
+		.expect("rocket builds");
 		let resp = client.delete("/api/v1/inference/providers/acme").dispatch();
 		assert_eq!(
 			resp.status(),
@@ -982,5 +1119,73 @@ mod tests {
 			Some(v) => std::env::set_var("HOME", v),
 			None => std::env::remove_var("HOME"),
 		}
+	}
+
+	/// Regression (GitHub #15 P1a/P1-1, Codex-found): `expected 204 got 500`
+	/// when the credential backend is unreachable. Injects
+	/// `UnavailableCredentialStore` (its `get_api_key` always errors) as the
+	/// route's store, so `delete_provider_cascade`'s precondition read fails
+	/// deterministically before any mutation — no `DBUS_SESSION_BUS_ADDRESS`
+	/// tampering (that used to race the process-global keyring-builder mock
+	/// installed by other tests in this crate, a real source of suite-order
+	/// flakiness). Under the contract this must be a stable 503
+	/// `KEYCHAIN_UNAVAILABLE` — not a 500, and NOT a 204 — with the claude
+	/// binding and the inventory row both left exactly as they were.
+	/// `UnavailableCredentialStore::delete_api_key` panics if ever called, so
+	/// an accidental mutation fails this test loudly rather than silently.
+	#[test]
+	fn delete_route_fails_closed_when_keyring_backend_unreachable() {
+		let data = tempfile::tempdir().unwrap();
+		let seed = InferenceProviderStore::with_credentials(
+			data.path(),
+			MemoryCredentialStore::default(),
+		);
+		let provider = seed
+			.create(CreateInferenceProvider {
+				latin_name: "acmenobus".to_string(),
+				display_name: "Acme".to_string(),
+				format: InferenceProviderFormat::OpenAiResponses,
+				api_base_url: "https://api.example.com/v1".to_string(),
+				preset: None,
+				api_key: "secret".to_string(),
+				models: Vec::new(),
+			})
+			.unwrap();
+		seed.create_agent_binding("claude", &provider.id, None)
+			.unwrap();
+
+		let client = rocket::local::blocking::Client::tracked(
+			crate::build_rocket_with_inference_credentials(
+				rocket::Config::default(),
+				data.path().to_path_buf(),
+				CredentialStoreFactory::fixed(Arc::new(
+					UnavailableCredentialStore,
+				)),
+			),
+		)
+		.expect("rocket builds");
+		let resp = client
+			.delete("/api/v1/inference/providers/acmenobus")
+			.dispatch();
+
+		assert_eq!(
+			resp.status(),
+			rocket::http::Status::ServiceUnavailable,
+			"an unreachable backend must fail closed with a stable, \
+			 retryable status — not 500, and not a fabricated 204"
+		);
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["code"], "KEYCHAIN_UNAVAILABLE");
+
+		assert_eq!(
+			seed.list_agent_bindings("claude").unwrap().len(),
+			1,
+			"the claude binding must survive a failed-precondition delete"
+		);
+		assert!(
+			seed.get(&provider.id).is_ok(),
+			"the provider row must survive a failed-precondition delete"
+		);
 	}
 }

@@ -36,10 +36,43 @@ gix = "0.84"
 which = "8"
 open = "5"
 tempfile = "3"
+# Linux: secret-service (persistent, dbus/gnome-keyring), not linux-native
+# (keyutils, kernel session keyring). keyutils is non-persistent across
+# reboots and returns "no entry" for reads made from a session it never
+# wrote in (e.g. a non-interactive SSH-spawned process) — see GitHub #15.
+# `async-secret-service` + `crypto-rust` + `async-io` selects the pure-Rust
+# zbus/async-io backend: no new system lib (no libdbus-1-dev / .deb dep),
+# and critically it does NOT touch tokio's runtime machinery, so it can't
+# panic with "Cannot start a runtime from within a runtime" no matter which
+# thread it runs on. The `zbus/tokio` backend (keyring's `tokio` feature)
+# DOES spin up its own `tokio::runtime::Builder::new_current_thread()
+# .block_on()` internally (see zbus's `blocking::block_on`) which panics
+# whenever entered from a thread that already has a tokio runtime context
+# entered — verified by reading zbus 4.4.0's `src/utils.rs`. That context is
+# present on MORE threads than it sounds: Rocket 0.5's route macro calls a
+# non-async handler fn INLINE inside the route's async future (no implicit
+# `spawn_blocking` — checked `rocket_codegen`'s `responder_outcome_expr`,
+# which only appends `.await` when the handler itself is `async fn`), so
+# EVERY route in this crate already runs with a tokio context entered on its
+# thread; a `tokio::task::spawn_blocking`/`block_in_place` thread carries the
+# same context too (that's what lets `Handle::current()` work inside a
+# blocking closure). `async-io` sidesteps all of this by never touching
+# tokio's context at all. `linux-native` (keyutils) is intentionally
+# NOT also compiled in: keyring 3.6.3's `Entry::new()` always resolves to a
+# single compile-time-selected backend, so having both features on would
+# not add a real runtime fallback (confirmed in keyring's `src/lib.rs` cfg
+# gates: with plain `linux-native` + `async-secret-service`, `secret_service`
+# wins as `default`, leaving keyutils compiled but never selected by
+# `Entry::new()`. The `keyutils_persistent` hybrid — which DOES try keyutils
+# first — only becomes `default` under the separate
+# `linux-native-async-persistent` combo feature, which we do not enable) —
+# it would just be inert dead code.
 keyring = { version = "3", features = [
 	"apple-native",
 	"windows-native",
-	"linux-native",
+	"async-secret-service",
+	"crypto-rust",
+	"async-io",
 ] }
 uuid = { version = "1", features = [ "v4" ] }
 log = "0.4.31"

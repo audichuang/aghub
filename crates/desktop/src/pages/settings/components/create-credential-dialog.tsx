@@ -8,6 +8,7 @@ import {
 	Link,
 	Modal,
 	TextField,
+	toast,
 } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -57,6 +58,14 @@ export function CreateCredentialDialog({
 		createCredentialMutationOptions({
 			api,
 			queryClient,
+			onError: (error) => {
+				console.error("Failed to create credential:", error);
+				toast.danger(
+					error instanceof Error
+						? error.message
+						: t("credentialCreateError"),
+				);
+			},
 		}),
 	);
 
@@ -66,13 +75,18 @@ export function CreateCredentialDialog({
 	};
 
 	const handleSave = async (values: FormValues) => {
-		const result = await createMutation.mutateAsync({
-			name: values.name.trim(),
-			token: values.token.trim(),
-		});
-		reset();
-		onSuccess(result.id);
-		onClose();
+		try {
+			const result = await createMutation.mutateAsync({
+				name: values.name.trim(),
+				token: values.token.trim(),
+			});
+			reset();
+			onSuccess(result.id);
+			onClose();
+		} catch {
+			// Error toast already shown by the mutation's onError above;
+			// keep the dialog open so the user can retry.
+		}
 	};
 
 	return (

@@ -141,10 +141,36 @@ pub fn delete_provider_references<C: CredentialStore>(
 /// reference, then removes the provider (metadata + keyring key) from the
 /// inventory. Both the API and CLI surfaces route their delete through here so
 /// neither can leave an agent config pointing at a removed provider.
+///
+/// **Precondition: the credential backend must be reachable.** The very
+/// first thing this does is read the provider's API key — the same read
+/// `remove_opencode_references` needs later for its (base_url, api_key)
+/// match, but done here FIRST, before any adapter is built or any binding
+/// row is touched. If the backend itself is unreachable (Linux
+/// secret-service with no D-Bus session, a locked keychain, ...), this
+/// returns `KeyringUnavailable` with the whole delete a no-op — no Claude,
+/// Codex, or OpenCode reference and no inventory row is touched, so a client
+/// gets a stable, retryable error instead of a half-finished delete (GitHub
+/// #15 P1a). Once the backend has answered — even `Ok(None)`, "no entry",
+/// still counts as reachable — the rest of the cascade keeps its existing
+/// partial-failure/idempotent-retry semantics (see
+/// [`delete_provider_references`]).
+///
+/// The value read here is intentionally DISCARDED past the reachability
+/// check — it is only a precondition probe. `store.delete` re-reads the
+/// current key itself, under its own lock, immediately before it needs it
+/// for rollback. Threading this read's value into `delete` instead (the
+/// previous design) was a stale-read race (GitHub #15 P2-5): this read runs
+/// UNLOCKED, so a concurrent `set_api_key` committing a newer key between
+/// this read and `store.delete`'s lock acquisition could have its result
+/// clobbered by a rollback restoring this now-stale value. `delete`'s own
+/// lock-scoped read closes that window.
 pub fn delete_provider_cascade<C: CredentialStore>(
 	store: &InferenceProviderStore<C>,
 	provider: &InferenceProvider,
 ) -> Result<InferenceProvider> {
+	store.get_api_key(&provider.id)?;
+
 	let claude = ClaudeProviderAdapter::global()?;
 	let codex = CodexProviderAdapter::global()?;
 	let opencode = OpenCodeProviderAdapter::global()?;
@@ -181,6 +207,38 @@ mod tests {
 		fn delete_api_key(&self, provider_id: &str) -> Result<()> {
 			self.values.lock().unwrap().remove(provider_id);
 			Ok(())
+		}
+	}
+
+	/// `get_api_key` always reports the backend as unreachable;
+	/// `set_api_key` still works (so a provider can be seeded), and
+	/// `delete_api_key` panics — it must never be reached once the
+	/// precondition in [`delete_provider_cascade`] fails closed.
+	#[derive(Debug, Clone, Default)]
+	struct BackendDownCredentialStore {
+		values: Arc<Mutex<HashMap<String, String>>>,
+	}
+
+	impl CredentialStore for BackendDownCredentialStore {
+		fn get_api_key(&self, _provider_id: &str) -> Result<Option<String>> {
+			Err(crate::error::InferenceProviderError::KeyringUnavailable(
+				"no secret service provider or dbus session found".to_string(),
+			))
+		}
+
+		fn set_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+			self.values
+				.lock()
+				.unwrap()
+				.insert(provider_id.to_string(), api_key.to_string());
+			Ok(())
+		}
+
+		fn delete_api_key(&self, provider_id: &str) -> Result<()> {
+			panic!(
+				"delete_api_key({provider_id}) must not run once the \
+				 backend-reachability precondition has already failed"
+			)
 		}
 	}
 
@@ -359,5 +417,216 @@ mod tests {
 		.expect("cascade must be idempotent so a retry converges");
 		assert!(store.list_agent_bindings("claude").unwrap().is_empty());
 		assert!(store.list_agent_bindings("codex").unwrap().is_empty());
+	}
+
+	#[test]
+	fn cascade_fails_closed_before_any_mutation_when_backend_unreachable() {
+		// Regression (GitHub #15 P1a, Codex-found): `delete_provider_cascade`
+		// used to read the API key for OpenCode matching only AFTER Claude
+		// and Codex bindings were already torn down, so an unreachable
+		// backend produced a HALF-finished delete. The precondition check
+		// must run first and leave every binding + the inventory row
+		// untouched. `BackendDownCredentialStore::delete_api_key` panics if
+		// called, so an accidental mutation attempt fails this test loudly.
+		let temp = tempfile::tempdir().unwrap();
+		let store = InferenceProviderStore::with_credentials(
+			temp.path(),
+			BackendDownCredentialStore::default(),
+		);
+		let provider = store
+			.create(CreateInferenceProvider {
+				latin_name: "acme".to_string(),
+				display_name: "acme".to_string(),
+				format: InferenceProviderFormat::OpenAiResponses,
+				api_base_url: "https://api.openai.com/v1".to_string(),
+				preset: None,
+				api_key: "secret".to_string(),
+				models: Vec::new(),
+			})
+			.unwrap();
+		store
+			.create_agent_binding("claude", &provider.id, None)
+			.unwrap();
+
+		let err = delete_provider_cascade(&store, &provider).unwrap_err();
+		assert!(
+			matches!(
+				err,
+				crate::error::InferenceProviderError::KeyringUnavailable(_)
+			),
+			"expected KeyringUnavailable, got {err:?}"
+		);
+
+		assert_eq!(
+			store.list_agent_bindings("claude").unwrap().len(),
+			1,
+			"the claude binding must survive a failed-precondition delete"
+		);
+		assert!(
+			store.list().unwrap().iter().any(|p| p.id == provider.id),
+			"the provider row must survive a failed-precondition delete"
+		);
+	}
+
+	/// Deterministically reproduces the P2-5 race window without real
+	/// threads: the FIRST `get_api_key` call — `delete_provider_cascade`'s
+	/// own precondition read, which runs UNLOCKED before any teardown or
+	/// `store.delete` — returns the value as of that moment and, as a side
+	/// effect, commits a DIFFERENT value into the backing map. That's
+	/// exactly as if a concurrent `set_api_key` call had raced in and
+	/// committed right after the precondition read returned. Every
+	/// subsequent `get_api_key` call (`remove_opencode_references`'s own
+	/// read, and — the one this test cares about — `store.delete`'s
+	/// lock-scoped internal read) sees the already-updated value.
+	#[derive(Debug, Clone)]
+	struct RacingCredentialStore {
+		values: Arc<Mutex<HashMap<String, String>>>,
+		precondition_read_done: Arc<std::sync::atomic::AtomicBool>,
+		key_after_concurrent_write: String,
+	}
+
+	impl CredentialStore for RacingCredentialStore {
+		fn get_api_key(&self, provider_id: &str) -> Result<Option<String>> {
+			let current = self.values.lock().unwrap().get(provider_id).cloned();
+			if !self
+				.precondition_read_done
+				.swap(true, std::sync::atomic::Ordering::SeqCst)
+			{
+				// Simulate a concurrent `set_api_key` committing a NEW key
+				// right after this (the precondition) read returns.
+				self.values.lock().unwrap().insert(
+					provider_id.to_string(),
+					self.key_after_concurrent_write.clone(),
+				);
+			}
+			Ok(current)
+		}
+
+		fn set_api_key(&self, provider_id: &str, api_key: &str) -> Result<()> {
+			self.values
+				.lock()
+				.unwrap()
+				.insert(provider_id.to_string(), api_key.to_string());
+			Ok(())
+		}
+
+		fn delete_api_key(&self, provider_id: &str) -> Result<()> {
+			self.values.lock().unwrap().remove(provider_id);
+			Ok(())
+		}
+	}
+
+	/// Regression (GitHub #15 P2-5, Codex-found): `delete_provider_cascade`
+	/// used to read the API key ONCE — via its own precondition check, which
+	/// runs UNLOCKED before any teardown — and thread THAT value into
+	/// `store.delete` for rollback. If a concurrent `set_api_key` committed
+	/// a NEWER key in the window between that read and `store.delete`
+	/// acquiring its lock, an SQL-delete failure would roll back to the
+	/// STALE precondition value, permanently clobbering the
+	/// concurrently-committed key. Fixed by making `store.delete` read the
+	/// current key itself, under its own lock, instead of trusting a value
+	/// read outside it.
+	///
+	/// This test inlines `delete_provider_cascade`'s own steps (precondition
+	/// read -> `delete_provider_references` -> `store.delete`) with
+	/// TEMP-ROOTED adapters instead of calling `delete_provider_cascade`
+	/// directly, because that fn hardcodes `ClaudeProviderAdapter::global()`
+	/// etc., which touch the real home directory — exactly what every other
+	/// `delete_provider_references`-driving test in this file also avoids.
+	/// The SQL delete is forced to fail via a `BEFORE DELETE` trigger (same
+	/// technique as `store.rs`'s migration tests) so `store.delete`'s
+	/// rollback path actually runs.
+	#[test]
+	fn cascade_delete_rollback_never_restores_stale_precondition_value() {
+		let temp = tempfile::tempdir().unwrap();
+		let credentials = RacingCredentialStore {
+			values: Arc::new(Mutex::new(HashMap::new())),
+			precondition_read_done: Arc::new(
+				std::sync::atomic::AtomicBool::new(false),
+			),
+			key_after_concurrent_write: "concurrently-committed-key"
+				.to_string(),
+		};
+		let store = InferenceProviderStore::with_credentials(
+			temp.path(),
+			credentials.clone(),
+		);
+		let provider = store
+			.create(CreateInferenceProvider {
+				latin_name: "acme".to_string(),
+				display_name: "acme".to_string(),
+				format: InferenceProviderFormat::OpenAiResponses,
+				api_base_url: "https://api.openai.com/v1".to_string(),
+				preset: None,
+				api_key: "original-key".to_string(),
+				models: Vec::new(),
+			})
+			.unwrap();
+		assert_eq!(
+			credentials
+				.values
+				.lock()
+				.unwrap()
+				.get(&provider.id)
+				.cloned(),
+			Some("original-key".to_string()),
+			"precondition: the original key is really in the backend"
+		);
+
+		// Force the SQL delete to fail so `store.delete`'s rollback path
+		// runs.
+		let db_path = store.file_path();
+		tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.unwrap()
+			.block_on(async {
+				use sqlx::ConnectOptions;
+				let mut conn = sqlx::sqlite::SqliteConnectOptions::new()
+					.filename(&db_path)
+					.connect()
+					.await
+					.unwrap();
+				sqlx::query(
+					"CREATE TRIGGER abort_provider_delete \
+					 BEFORE DELETE ON inference_providers \
+					 BEGIN SELECT RAISE(ABORT, 'simulated sql failure'); END;",
+				)
+				.execute(&mut conn)
+				.await
+				.unwrap();
+			});
+
+		// Inline `delete_provider_cascade`'s steps with temp-rooted adapters
+		// (see doc comment above for why we don't call it directly).
+		store.get_api_key(&provider.id).unwrap(); // precondition read (discarded)
+		let (claude, codex, opencode) = temp_adapters(temp.path());
+		delete_provider_references(
+			&store, &provider, &claude, &codex, &opencode,
+		)
+		.unwrap();
+		let err = store.delete(&provider.id).unwrap_err();
+
+		assert!(
+			matches!(err, crate::error::InferenceProviderError::Database(_)),
+			"expected the aborted SQL delete to surface as a database \
+			 error, got {err:?}"
+		);
+		assert_eq!(
+			credentials
+				.values
+				.lock()
+				.unwrap()
+				.get(&provider.id)
+				.cloned(),
+			Some("concurrently-committed-key".to_string()),
+			"rollback must restore the key that was CURRENT when `delete` \
+			 read it under its own lock — never the stale value the \
+			 earlier, unlocked precondition read captured"
+		);
+		assert!(
+			store.get(&provider.id).is_ok(),
+			"the provider row must survive the aborted SQL delete"
+		);
 	}
 }

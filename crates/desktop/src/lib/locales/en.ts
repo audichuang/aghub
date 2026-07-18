@@ -110,6 +110,7 @@ export default {
 	githubCredential: "GitHub",
 	createCredential: "Add Credential",
 	credentialCreated: "Credential added successfully",
+	credentialCreateError: "Failed to add credential",
 	credentialDeleted: "Credential deleted",
 	credentialDeleteFailed: "Failed to delete credential",
 	noCredentials: "No credentials yet. Add one to get started.",
