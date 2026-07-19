@@ -536,11 +536,14 @@ fn add_mcp_agent_list_writes_each_agent_config() {
 		"stderr: {}",
 		String::from_utf8_lossy(&out.stderr)
 	);
-	// stdout is ONE valid JSON document: the batch envelope with a
-	// machine-readable per-agent attribution (not N concatenated docs).
+	// stdout is ONE valid JSON document: the shared core batch envelope
+	// (same wire shape the API /mcps/batch returns) with machine-readable
+	// per-agent attribution — not N concatenated docs.
 	let envelope: Value = serde_json::from_slice(&out.stdout)
 		.expect("batch stdout must be a single valid JSON document");
-	let rows = envelope.as_array().expect("envelope must be an array");
+	assert_eq!(envelope["success_count"], 2, "{envelope}");
+	assert_eq!(envelope["failed_count"], 0, "{envelope}");
+	let rows = envelope["results"].as_array().expect("results array");
 	assert_eq!(rows.len(), 2, "one row per agent: {envelope}");
 	for (row, agent) in rows.iter().zip(["claude", "opencode"]) {
 		assert_eq!(row["agent"], agent, "rows keep the list order");
@@ -704,10 +707,13 @@ fn agent_list_duplicate_still_emits_envelope() {
 	);
 	let envelope: Value = serde_json::from_slice(&out.stdout)
 		.expect("stdout must be one valid JSON document");
-	let rows = envelope.as_array().expect("must be the batch envelope");
+	let rows = envelope["results"]
+		.as_array()
+		.expect("must be the batch envelope");
 	assert_eq!(rows.len(), 1, "deduped to one row: {envelope}");
 	assert_eq!(rows[0]["agent"], "claude");
 	assert_eq!(rows[0]["ok"], true);
+	assert_eq!(envelope["success_count"], 1);
 }
 
 /// A mid-batch runtime failure (duplicate on claude) must NOT skip the
@@ -737,7 +743,9 @@ fn add_mcp_agent_list_reports_partial_failure_and_continues() {
 
 	let envelope: Value = serde_json::from_slice(&out.stdout)
 		.expect("batch stdout must be a single valid JSON document");
-	let rows = envelope.as_array().unwrap();
+	assert_eq!(envelope["failed_count"], 1, "{envelope}");
+	assert_eq!(envelope["success_count"], 1, "{envelope}");
+	let rows = envelope["results"].as_array().unwrap();
 	assert_eq!(rows.len(), 2);
 	assert_eq!(rows[0]["agent"], "claude");
 	assert_eq!(rows[0]["ok"], false, "claude already has 'dup': {envelope}");

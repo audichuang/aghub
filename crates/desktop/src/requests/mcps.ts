@@ -4,6 +4,7 @@ import {
 	queryOptions,
 } from "@tanstack/react-query";
 import type {
+	AgentBatchResponse,
 	CreateMcpRequest,
 	McpResponse,
 	OperationBatchResponse,
@@ -71,6 +72,46 @@ export function createMcpMutationOptions({
 	return mutationOptions({
 		mutationFn: ({ agent, scope, body, projectRoot }: CreateMcpVariables) =>
 			api.mcps.create(agent, scope, body, projectRoot),
+		onSuccess: async (data, variables) => {
+			await invalidateMcpQueries(queryClient);
+			await onSuccess?.(data, variables);
+		},
+	});
+}
+
+interface CreateMcpBatchVariables {
+	agents: string[];
+	scope: "global" | "project";
+	body: CreateMcpRequest;
+	projectRoot?: string;
+}
+
+interface CreateMcpBatchMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: (
+		data: AgentBatchResponse,
+		variables: CreateMcpBatchVariables,
+	) => void | Promise<void>;
+}
+
+// Multi-agent create through the shared core batch policy — ONE request,
+// per-agent attribution back. A 200 can still carry failed rows
+// (failed_count > 0); queries are invalidated either way because the
+// successful agents were written.
+export function createMcpBatchMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+}: CreateMcpBatchMutationParams) {
+	return mutationOptions({
+		mutationFn: ({
+			agents,
+			scope,
+			body,
+			projectRoot,
+		}: CreateMcpBatchVariables) =>
+			api.mcps.createBatch(scope, { agents, mcp: body }, projectRoot),
 		onSuccess: async (data, variables) => {
 			await invalidateMcpQueries(queryClient);
 			await onSuccess?.(data, variables);

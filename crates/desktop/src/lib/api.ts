@@ -17,6 +17,8 @@ import type {
 	ClaudeProviderStateResponse,
 	CodeEditorType,
 	CodexProviderStateResponse,
+	AgentBatchResponse,
+	BatchCreateMcpRequest,
 	CreateAgentProviderRequest,
 	CreateCredentialRequest,
 	CreateInferenceProviderRequest,
@@ -491,6 +493,26 @@ export function createApi(baseUrl: string) {
 			): Promise<McpResponse> {
 				return client
 					.post(`agents/${agent}/mcps`, {
+						searchParams: {
+							scope,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+						json: body,
+					})
+					.json();
+			},
+			// Multi-agent create through the shared core batch policy:
+			// capability preflight before any write (422), then per-agent
+			// attribution back — never a bare per-agent fan-out here.
+			createBatch(
+				scope: "global" | "project",
+				body: BatchCreateMcpRequest,
+				projectRoot?: string,
+			): Promise<AgentBatchResponse> {
+				return client
+					.post("mcps/batch", {
 						searchParams: {
 							scope,
 							...(projectRoot

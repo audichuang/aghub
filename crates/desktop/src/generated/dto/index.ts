@@ -1,7 +1,9 @@
 export type { AcceptRenameRequest } from "./AcceptRenameRequest";
 export type { AcceptRenameResponse } from "./AcceptRenameResponse";
 export type { AgentAvailabilityDto } from "./AgentAvailabilityDto";
+export type { AgentBatchResponse } from "./AgentBatchResponse";
 export type { AgentInfo } from "./AgentInfo";
+export type { AgentOpResultResponse } from "./AgentOpResultResponse";
 export type { AgentProviderCredentialDto } from "./AgentProviderCredentialDto";
 export type { AgentProviderMatchedInferenceProviderResponse } from "./AgentProviderMatchedInferenceProviderResponse";
 export type { AgentProviderModelResponse } from "./AgentProviderModelResponse";
@@ -10,6 +12,7 @@ export type { AgentProviderSourceDto } from "./AgentProviderSourceDto";
 export type { AgentSkillCoverageDto } from "./AgentSkillCoverageDto";
 export type { ApplySkillUpdateRequest } from "./ApplySkillUpdateRequest";
 export type { ApplySkillUpdateResponse } from "./ApplySkillUpdateResponse";
+export type { BatchCreateMcpRequest } from "./BatchCreateMcpRequest";
 export type { CCMarketplaceAddRequest } from "./CCMarketplaceAddRequest";
 export type { CCMarketplaceEntryResponse } from "./CCMarketplaceEntryResponse";
 export type { CCMarketplaceListResponse } from "./CCMarketplaceListResponse";

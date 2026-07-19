@@ -842,33 +842,13 @@ fn batch_write_scope(cli: &Cli) -> Result<ResourceScope> {
 	})
 }
 
-fn scope_word(scope: ResourceScope) -> &'static str {
-	match scope {
-		ResourceScope::GlobalOnly => "global",
-		ResourceScope::ProjectOnly => "project",
-		ResourceScope::Both => "global+project",
-	}
-}
-
-/// One agent's outcome in a multi-agent batch (`-a a,b <mutating-cmd>`).
-/// snake_case, matching the CLI's other JSON wire shapes.
-#[derive(serde::Serialize)]
-struct AgentBatchResult {
-	agent: &'static str,
-	ok: bool,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	output: Option<serde_json::Value>,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	error: Option<String>,
-}
-
 // Handle a comma-separated --agent list: fan the command across the named
 // agents. `get` aggregates (same JSON shape as `--agent all`); mutating
-// commands attempt EVERY agent (no fail-fast), collect per-agent results
-// into ONE JSON envelope on stdout, and exit non-zero if any failed, so a
-// partial batch is always visible and machine-readable. (`source sync` is
-// dispatched earlier and resolves the list itself; the top-of-main guard
-// rejects lists on every other command.)
+// commands map onto the SHARED core batch policy (`aghub_core::batch`):
+// preflight before any write, attempt every agent, one JSON envelope on
+// stdout, non-zero exit if any failed. (`source sync` is dispatched earlier
+// and resolves the list itself; the top-of-main guard rejects lists on
+// every other command.)
 fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	match &cli.command {
 		Commands::Get { resource } => {
@@ -884,73 +864,37 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 		| Commands::Delete { resource, .. }
 		| Commands::Enable { resource, .. }
 		| Commands::Disable { resource, .. } => {
-			// Predictable-failure preflight: an agent that cannot hold this
-			// resource in the scope the batch WRITES (e.g. pi anywhere, or
-			// global-only augmentcode under -p), or cannot toggle (cline on
-			// enable/disable), would fail AFTER earlier agents were written —
-			// reject the whole batch before any write instead. Judges the
-			// same write scope `run_for_agent` resolves, with the same trait
-			// methods the manager's own guards use.
+			// Preflight judges the same write scope `run_for_agent` resolves;
+			// the policy itself (which capabilities, all-before-any-write)
+			// lives in core, shared with the API's /mcps/batch.
 			if matches!(resource, ResourceType::Mcps) {
 				let write_scope = batch_write_scope(cli)?;
 				let is_toggle = matches!(
 					cli.command,
 					Commands::Enable { .. } | Commands::Disable { .. }
 				);
-				let unsupported: Vec<String> = agents
-					.iter()
-					.filter_map(|a| {
-						let adapter = create_adapter(*a);
-						if !adapter.supports_mcp_scope(write_scope) {
-							return Some(format!(
-								"{} (no {} MCP config)",
-								a.as_str(),
-								scope_word(write_scope)
-							));
-						}
-						if is_toggle && !adapter.supports_mcp_enable_disable() {
-							return Some(format!(
-								"{} (no MCP enable/disable)",
-								a.as_str()
-							));
-						}
-						None
-					})
-					.collect();
-				if !unsupported.is_empty() {
-					anyhow::bail!(
-						"agent(s) {} do not support this MCP operation; \
-						 nothing was written",
-						unsupported.join(", ")
-					);
-				}
+				aghub_core::batch::mcp_batch_preflight(
+					agents,
+					write_scope,
+					is_toggle,
+				)
+				.map_err(|e| anyhow::anyhow!("{e}"))?;
 			}
-			// Attempt EVERY agent and collect — a mid-batch failure must not
-			// silently skip the rest.
-			let results: Vec<AgentBatchResult> = agents
-				.iter()
-				.map(|agent| {
-					eprintln_verbose!("Running for agent: {}", agent.as_str());
-					match run_for_agent(cli, *agent) {
-						Ok(output) => AgentBatchResult {
-							agent: agent.as_str(),
-							ok: true,
-							output,
-							error: None,
-						},
-						Err(e) => AgentBatchResult {
-							agent: agent.as_str(),
-							ok: false,
-							output: None,
-							error: Some(format!("{e:#}")),
-						},
-					}
-				})
-				.collect();
-			println!("{}", serde_json::to_string_pretty(&results)?);
-			let failed = results.iter().filter(|r| !r.ok).count();
-			if failed > 0 {
-				anyhow::bail!("{failed} of {} agent(s) failed", results.len());
+			let view = aghub_core::batch::run_agent_batch(agents, |agent| {
+				eprintln_verbose!("Running for agent: {}", agent.as_str());
+				run_for_agent(cli, agent)
+					// Mutating commands always yield a payload; Null keeps
+					// the row well-formed if that invariant ever slips.
+					.map(|o| o.unwrap_or(serde_json::Value::Null))
+					.map_err(|e| format!("{e:#}"))
+			});
+			println!("{}", serde_json::to_string_pretty(&view)?);
+			if view.failed_count > 0 {
+				anyhow::bail!(
+					"{} of {} agent(s) failed",
+					view.failed_count,
+					view.results.len()
+				);
 			}
 			Ok(())
 		}

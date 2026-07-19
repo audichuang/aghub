@@ -118,7 +118,7 @@ impl From<TransportDto> for McpTransport {
 	}
 }
 
-#[derive(Debug, Deserialize, TS)]
+#[derive(Debug, Clone, Deserialize, TS)]
 #[ts(export)]
 pub struct CreateMcpRequest {
 	pub name: String,
@@ -231,5 +231,88 @@ impl From<(McpServer, &str)> for McpResponse {
 			agent: Some(agent_id.to_string()),
 			..McpResponse::from(s)
 		}
+	}
+}
+
+/// Multi-agent MCP create (the desktop's multi-select) — one request mapped
+/// onto the SHARED core batch policy (`aghub_core::batch`): preflight before
+/// any write, attempt every agent, per-agent attribution back.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+pub struct BatchCreateMcpRequest {
+	pub agents: Vec<String>,
+	pub mcp: CreateMcpRequest,
+}
+
+/// Mirrors `aghub_core::batch::AgentOpResultView` byte-for-byte — the same
+/// wire shape the CLI prints for `-a a,b` batches (see the transfer DTO
+/// precedent and the test below).
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AgentOpResultResponse {
+	pub agent: String,
+	pub ok: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(type = "unknown | null")]
+	pub output: Option<serde_json::Value>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub error: Option<String>,
+}
+
+/// Mirrors `aghub_core::batch::AgentBatchView`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+pub struct AgentBatchResponse {
+	pub success_count: usize,
+	pub failed_count: usize,
+	pub results: Vec<AgentOpResultResponse>,
+}
+
+impl From<aghub_core::batch::AgentBatchView> for AgentBatchResponse {
+	fn from(view: aghub_core::batch::AgentBatchView) -> Self {
+		AgentBatchResponse {
+			success_count: view.success_count,
+			failed_count: view.failed_count,
+			results: view
+				.results
+				.into_iter()
+				.map(|r| AgentOpResultResponse {
+					agent: r.agent,
+					ok: r.ok,
+					output: r.output,
+					error: r.error,
+				})
+				.collect(),
+		}
+	}
+}
+
+#[cfg(test)]
+mod batch_dto_tests {
+	use super::*;
+	use aghub_core::batch::run_agent_batch;
+	use aghub_core::models::AgentType;
+
+	/// The API DTO (ts-rs) and the shared core `AgentBatchView` (which the
+	/// CLI serializes) must emit BYTE-IDENTICAL JSON — the single-source
+	/// contract, same as the transfer batch precedent.
+	#[test]
+	fn batch_dto_matches_shared_core_view_byte_for_byte() {
+		let view =
+			run_agent_batch(&[AgentType::Claude, AgentType::Grok], |agent| {
+				match agent {
+					AgentType::Claude => {
+						Ok(serde_json::json!({ "name": "multi" }))
+					}
+					_ => Err("boom".to_string()),
+				}
+			});
+		let view_json = serde_json::to_string(&view).unwrap();
+		let dto_json =
+			serde_json::to_string(&AgentBatchResponse::from(view)).unwrap();
+		assert_eq!(
+			dto_json, view_json,
+			"API DTO and shared core view must serialize identically"
+		);
 	}
 }

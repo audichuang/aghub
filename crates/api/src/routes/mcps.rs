@@ -5,7 +5,10 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 
 use crate::{
-	dto::mcp::{CreateMcpRequest, McpResponse, UpdateMcpRequest},
+	dto::mcp::{
+		AgentBatchResponse, BatchCreateMcpRequest, CreateMcpRequest,
+		McpResponse, UpdateMcpRequest,
+	},
 	dto::skill::DeleteSkillByPathResponse,
 	dto::transfer::{
 		OperationBatchResponse, ReconcileRequest, TransferRequest,
@@ -119,6 +122,28 @@ pub fn reconcile_mcp_route(
 	Ok(Json(result.into()))
 }
 
+/// The single-agent create core, shared by the per-agent route and the
+/// batch route so the two paths cannot drift. Assumes the caller already
+/// validated the request body and the writable scope.
+fn create_mcp_for_agent(
+	agent: &AgentParam,
+	resolved: &crate::extractors::ResolvedScope,
+	req: CreateMcpRequest,
+) -> Result<McpResponse, ApiError> {
+	let (resource_scope, _) = resolved_to_resource_scope(resolved);
+	check_mcp_supported(agent, resource_scope)?;
+	let mut manager = build_manager_from_resolved(agent, resolved)?;
+	match manager.load() {
+		Ok(_) => {}
+		Err(ConfigError::NotFound { .. }) => manager.init_empty_config(),
+		Err(e) => return Err(ApiError::from(e)),
+	}
+	let mcp = McpServer::from(req);
+	let response = McpResponse::from(&mcp);
+	manager.add_mcp(mcp).map_err(ApiError::from)?;
+	Ok(response)
+}
+
 #[post("/agents/<agent>/mcps?<scope..>", data = "<body>")]
 pub fn create_mcp(
 	_origin: TrustedLocalOrigin,
@@ -127,20 +152,65 @@ pub fn create_mcp(
 	body: Json<CreateMcpRequest>,
 ) -> ApiCreated<McpResponse> {
 	let resolved = scope.resolve()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
-	check_mcp_supported(&agent, resource_scope)?;
 	body.validate()?;
 	require_writable_scope(&resolved)?;
-	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
-	match manager.load() {
-		Ok(_) => {}
-		Err(ConfigError::NotFound { .. }) => manager.init_empty_config(),
-		Err(e) => return Err(ApiError::from(e)),
-	}
-	let mcp = McpServer::from(body.into_inner());
-	let response = McpResponse::from(&mcp);
-	manager.add_mcp(mcp).map_err(ApiError::from)?;
+	let response = create_mcp_for_agent(&agent, &resolved, body.into_inner())?;
 	Ok((Status::Created, Json(response)))
+}
+
+/// Multi-agent MCP create — the desktop's multi-select mapped onto the
+/// SHARED core batch policy (`aghub_core::batch`): capability preflight for
+/// ALL agents before any write (422 on a predictable failure, nothing
+/// written), then attempt every agent and return per-agent attribution.
+/// A partial failure is a 200 with `failed_count > 0` — the caller decides
+/// how to surface it.
+#[post("/mcps/batch?<scope..>", data = "<body>")]
+pub fn batch_create_mcp(
+	_origin: TrustedLocalOrigin,
+	scope: ScopeParams,
+	body: Json<BatchCreateMcpRequest>,
+) -> ApiResult<AgentBatchResponse> {
+	let req = body.into_inner();
+	let resolved = scope.resolve()?;
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	req.mcp.validate()?;
+	require_writable_scope(&resolved)?;
+	if req.agents.is_empty() {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"agents must not be empty",
+			"INVALID_PARAM",
+		));
+	}
+	let agents: Vec<aghub_core::models::AgentType> = req
+		.agents
+		.iter()
+		.map(|s| {
+			s.parse().map_err(|_| {
+				ApiError::new(
+					Status::BadRequest,
+					format!("Unknown agent '{s}'"),
+					"INVALID_PARAM",
+				)
+			})
+		})
+		.collect::<Result<_, _>>()?;
+	aghub_core::batch::mcp_batch_preflight(&agents, resource_scope, false)
+		.map_err(|e| {
+			ApiError::new(
+				Status::UnprocessableEntity,
+				e.to_string(),
+				"UNSUPPORTED_OPERATION",
+			)
+		})?;
+	let view = aghub_core::batch::run_agent_batch(&agents, |agent| {
+		create_mcp_for_agent(&AgentParam(agent), &resolved, req.mcp.clone())
+			.map(|resp| {
+				serde_json::to_value(&resp).unwrap_or(serde_json::Value::Null)
+			})
+			.map_err(|e| e.body.error)
+	});
+	Ok(Json(view.into()))
 }
 
 #[get("/agents/<agent>/mcps/<name>?<scope..>")]
@@ -617,5 +687,82 @@ mod tests {
 		.expect_err("pi rejects mcp delete");
 		assert_eq!(err.status, Status::UnprocessableEntity);
 		assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
+	}
+
+	fn stdio_req(name: &str) -> CreateMcpRequest {
+		CreateMcpRequest {
+			name: name.to_string(),
+			transport: TransportDto::Stdio {
+				command: "echo".to_string(),
+				args: vec![],
+				env: None,
+				timeout: None,
+			},
+			timeout: None,
+		}
+	}
+
+	/// The batch preflight must reject the WHOLE batch on one unsupported
+	/// agent (pi holds no MCPs) before any manager is built — nothing
+	/// written, 422 with the shared core reason string.
+	#[test]
+	fn batch_create_mcp_preflight_rejects_and_writes_nothing() {
+		let result = batch_create_mcp(
+			TrustedLocalOrigin,
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(BatchCreateMcpRequest {
+				agents: vec!["claude".to_string(), "pi".to_string()],
+				mcp: stdio_req("never"),
+			}),
+		);
+		let err = result.expect_err("pi must fail the whole batch");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
+		assert!(err.body.error.contains("pi"), "{}", err.body.error);
+		assert!(
+			err.body.error.contains("nothing was written"),
+			"{}",
+			err.body.error
+		);
+	}
+
+	#[test]
+	fn batch_create_mcp_rejects_unknown_agent() {
+		let result = batch_create_mcp(
+			TrustedLocalOrigin,
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(BatchCreateMcpRequest {
+				agents: vec!["claude".to_string(), "nonesuch".to_string()],
+				mcp: stdio_req("never"),
+			}),
+		);
+		let err = result.expect_err("unknown agent must 400");
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_PARAM");
+		assert!(err.body.error.contains("nonesuch"), "{}", err.body.error);
+	}
+
+	#[test]
+	fn batch_create_mcp_rejects_empty_agent_list() {
+		let result = batch_create_mcp(
+			TrustedLocalOrigin,
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(BatchCreateMcpRequest {
+				agents: vec![],
+				mcp: stdio_req("never"),
+			}),
+		);
+		let err = result.expect_err("empty agent list must 400");
+		assert_eq!(err.status, Status::BadRequest);
+		assert_eq!(err.body.code, "INVALID_PARAM");
 	}
 }

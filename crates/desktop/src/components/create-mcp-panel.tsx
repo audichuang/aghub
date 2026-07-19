@@ -13,7 +13,7 @@ import {
 	TextField,
 } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Controller, useForm, useWatch } from "react-hook-form";
 import { useTranslation } from "react-i18next";
 import type { CreateMcpRequest } from "../generated/dto";
@@ -27,7 +27,7 @@ import {
 	validatePositiveInteger,
 } from "../lib/form-utils";
 import { buildTransportFromForm } from "../lib/mcp-utils";
-import { createMcpMutationOptions } from "../requests/mcps";
+import { createMcpBatchMutationOptions } from "../requests/mcps";
 import { AgentSelector } from "./agent-selector";
 import type { EnvVar } from "./env-editor";
 import { EnvEditor } from "./env-editor";
@@ -113,7 +113,7 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 	);
 
 	const createMutation = useMutation({
-		...createMcpMutationOptions({
+		...createMcpBatchMutationOptions({
 			api,
 			queryClient,
 		}),
@@ -121,6 +121,10 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 			// handled in submit catch for better message control
 		},
 	});
+	// Per-agent failures inside a 200 batch response (partial state): the
+	// successful agents were written, so we stay on the panel and show the
+	// attribution instead of pretending the whole create succeeded.
+	const [batchFailures, setBatchFailures] = useState<string[]>([]);
 
 	const onSubmit = async (values: CreateMcpFormValues) => {
 		if (hasPairErrors) return;
@@ -144,16 +148,23 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 		};
 
 		try {
-			await Promise.all(
-				values.selectedAgents.map((agent) =>
-					createMutation.mutateAsync({
-						agent,
-						scope: projectPath ? "project" : "global",
-						body,
-						projectRoot: projectPath,
-					}),
-				),
-			);
+			setBatchFailures([]);
+			// ONE batch request — the server preflights every agent before
+			// any write and returns per-agent attribution.
+			const result = await createMutation.mutateAsync({
+				agents: values.selectedAgents,
+				scope: projectPath ? "project" : "global",
+				body,
+				projectRoot: projectPath,
+			});
+			if (result.failed_count > 0) {
+				setBatchFailures(
+					result.results
+						.filter((r) => !r.ok)
+						.map((r) => `${r.agent}: ${r.error ?? "failed"}`),
+				);
+				return;
+			}
 			onDone();
 		} catch (error) {
 			const errorMessage =
@@ -174,6 +185,18 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 									createMutation.error instanceof Error
 										? createMutation.error.message
 										: String(createMutation.error),
+							})}
+						</Alert.Description>
+					</Alert.Content>
+				</Alert>
+			)}
+			{batchFailures.length > 0 && (
+				<Alert className="mb-4" status="danger">
+					<Alert.Indicator />
+					<Alert.Content>
+						<Alert.Description>
+							{t("createError", {
+								error: batchFailures.join("; "),
 							})}
 						</Alert.Description>
 					</Alert.Content>

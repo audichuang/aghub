@@ -244,6 +244,7 @@ fn build_rocket_with_state_factories(
 				routes::mcps::list_all_agents_mcps,
 				routes::mcps::list_mcps,
 				routes::mcps::create_mcp,
+				routes::mcps::batch_create_mcp,
 				routes::mcps::get_mcp,
 				routes::mcps::update_mcp,
 				routes::mcps::delete_mcp,

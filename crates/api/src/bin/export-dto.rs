@@ -34,7 +34,10 @@ use aghub_api::dto::{
 		OpenWithEditorRequest, ToolInfoDto, ToolPreferencesDto,
 	},
 	market::MarketSkill,
-	mcp::{CreateMcpRequest, McpResponse, TransportDto, UpdateMcpRequest},
+	mcp::{
+		AgentBatchResponse, AgentOpResultResponse, BatchCreateMcpRequest,
+		CreateMcpRequest, McpResponse, TransportDto, UpdateMcpRequest,
+	},
 	plugin::{
 		CCMarketplaceAddRequest, CCMarketplaceEntryResponse,
 		CCMarketplaceListResponse, CCMarketplaceMutationResponse,
@@ -187,6 +190,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<MarketSkill>(&cfg)?;
 	export_type::<TransportDto>(&cfg)?;
 	export_type::<CreateMcpRequest>(&cfg)?;
+	export_type::<BatchCreateMcpRequest>(&cfg)?;
+	export_type::<AgentOpResultResponse>(&cfg)?;
+	export_type::<AgentBatchResponse>(&cfg)?;
 	export_type::<UpdateMcpRequest>(&cfg)?;
 	export_type::<McpResponse>(&cfg)?;
 	export_type::<CreateSkillRequest>(&cfg)?;
