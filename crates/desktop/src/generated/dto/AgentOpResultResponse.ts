@@ -8,6 +8,6 @@
 export type AgentOpResultResponse = {
 	agent: string;
 	ok: boolean;
-	output: unknown | null;
-	error: string | null;
+	output?: unknown;
+	error?: string;
 };

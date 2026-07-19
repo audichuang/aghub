@@ -122,16 +122,17 @@ pub fn reconcile_mcp_route(
 	Ok(Json(result.into()))
 }
 
-/// The single-agent create core, shared by the per-agent route and the
-/// batch route so the two paths cannot drift. Assumes the caller already
-/// validated the request body and the writable scope.
+/// The single-agent create MUTATION, shared by the per-agent route and the
+/// batch route so the two write paths cannot drift. Capability is the
+/// CALLER's contract: the per-agent route checks `check_mcp_supported`
+/// first (preserving its error precedence: capability → validate →
+/// writable), and the batch route preflights every agent via
+/// `aghub_core::batch::mcp_batch_preflight` before any write.
 fn create_mcp_for_agent(
 	agent: &AgentParam,
 	resolved: &crate::extractors::ResolvedScope,
 	req: CreateMcpRequest,
 ) -> Result<McpResponse, ApiError> {
-	let (resource_scope, _) = resolved_to_resource_scope(resolved);
-	check_mcp_supported(agent, resource_scope)?;
 	let mut manager = build_manager_from_resolved(agent, resolved)?;
 	match manager.load() {
 		Ok(_) => {}
@@ -152,6 +153,11 @@ pub fn create_mcp(
 	body: Json<CreateMcpRequest>,
 ) -> ApiCreated<McpResponse> {
 	let resolved = scope.resolve()?;
+	// Error precedence is public contract: capability → validate → writable
+	// (an unsupported agent must answer UNSUPPORTED_OPERATION even when the
+	// body is invalid or the scope is read-only).
+	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	check_mcp_supported(&agent, resource_scope)?;
 	body.validate()?;
 	require_writable_scope(&resolved)?;
 	let response = create_mcp_for_agent(&agent, &resolved, body.into_inner())?;
@@ -182,19 +188,22 @@ pub fn batch_create_mcp(
 			"INVALID_PARAM",
 		));
 	}
-	let agents: Vec<aghub_core::models::AgentType> = req
-		.agents
-		.iter()
-		.map(|s| {
-			s.parse().map_err(|_| {
-				ApiError::new(
-					Status::BadRequest,
-					format!("Unknown agent '{s}'"),
-					"INVALID_PARAM",
-				)
-			})
-		})
-		.collect::<Result<_, _>>()?;
+	// Stable-dedup after parsing (aliases included), matching the CLI's
+	// comma-list semantics — a duplicate must not turn into a second write
+	// that fails RESOURCE_EXISTS.
+	let mut agents: Vec<aghub_core::models::AgentType> = Vec::new();
+	for s in &req.agents {
+		let agent = s.parse().map_err(|_| {
+			ApiError::new(
+				Status::BadRequest,
+				format!("Unknown agent '{s}'"),
+				"INVALID_PARAM",
+			)
+		})?;
+		if !agents.contains(&agent) {
+			agents.push(agent);
+		}
+	}
 	aghub_core::batch::mcp_batch_preflight(&agents, resource_scope, false)
 		.map_err(|e| {
 			ApiError::new(
@@ -746,6 +755,70 @@ mod tests {
 		assert_eq!(err.status, Status::BadRequest);
 		assert_eq!(err.body.code, "INVALID_PARAM");
 		assert!(err.body.error.contains("nonesuch"), "{}", err.body.error);
+	}
+
+	/// Error precedence is public contract: an unsupported agent answers
+	/// UNSUPPORTED_OPERATION even when the scope is read-only (`all`) —
+	/// capability is checked BEFORE the writable-scope gate.
+	#[test]
+	fn create_mcp_capability_beats_readonly_scope() {
+		let result = create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Pi),
+			ScopeParams {
+				scope: Some("all".to_string()),
+				project_root: None,
+			},
+			Json(stdio_req("pi-mcp")),
+		);
+		let err = result.expect_err("pi must fail on capability first");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
+	}
+
+	/// …and BEFORE body validation: pi + invalid timeout must still answer
+	/// UNSUPPORTED_OPERATION, not VALIDATION_FAILED.
+	#[test]
+	fn create_mcp_capability_beats_validation() {
+		let mut req = stdio_req("pi-mcp");
+		req.timeout = Some(0);
+		let result = create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Pi),
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(req),
+		);
+		let err = result.expect_err("pi must fail on capability first");
+		assert_eq!(err.body.code, "UNSUPPORTED_OPERATION");
+	}
+
+	/// Duplicate agents stable-dedup to ONE attempt (CLI parity): the
+	/// preflight rejection names pi exactly once, proving the roster was
+	/// deduped before any downstream step.
+	#[test]
+	fn batch_create_mcp_dedups_duplicate_agents() {
+		let result = batch_create_mcp(
+			TrustedLocalOrigin,
+			ScopeParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+			},
+			Json(BatchCreateMcpRequest {
+				agents: vec!["pi".to_string(), "pi".to_string()],
+				mcp: stdio_req("never"),
+			}),
+		);
+		let err = result.expect_err("pi must fail preflight");
+		assert_eq!(err.status, Status::UnprocessableEntity);
+		assert_eq!(
+			err.body.error.matches("pi").count(),
+			1,
+			"duplicates must collapse to one roster entry: {}",
+			err.body.error
+		);
 	}
 
 	#[test]

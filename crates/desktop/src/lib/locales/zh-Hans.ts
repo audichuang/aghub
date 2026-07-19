@@ -632,6 +632,9 @@ export default {
 	createMcpServer: "创建 MCP 服务器",
 	creating: "创建中...",
 	createError: "创建失败：{{error}}",
+	batchCreateSucceededOn: "已在 {{agents}} 创建。",
+	batchCreateFailedOn:
+		"失败：{{failures}}——选择范围已收敛到失败的 agent，可重试或取消。",
 	advanced: "高级设置",
 	agents: "代理",
 	noAgentsAvailable: "没有可用的代理",

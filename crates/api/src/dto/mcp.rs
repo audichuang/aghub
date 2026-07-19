@@ -252,10 +252,13 @@ pub struct BatchCreateMcpRequest {
 pub struct AgentOpResultResponse {
 	pub agent: String,
 	pub ok: bool,
+	// `skip_serializing_if` means the key is ABSENT (not null) on the wire,
+	// so the TS side must be optional too or the generated type is unsound.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	#[ts(type = "unknown | null")]
+	#[ts(optional, type = "unknown")]
 	pub output: Option<serde_json::Value>,
 	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
 	pub error: Option<String>,
 }
 
@@ -313,6 +316,24 @@ mod batch_dto_tests {
 		assert_eq!(
 			dto_json, view_json,
 			"API DTO and shared core view must serialize identically"
+		);
+	}
+
+	/// `skip_serializing_if` omits absent keys on the wire, so the GENERATED
+	/// TypeScript must declare `output`/`error` optional — a required field
+	/// there is an unsound public contract the byte-identical test above
+	/// cannot catch (it only compares Rust-side JSON).
+	#[test]
+	fn agent_op_result_ts_decl_marks_omittable_fields_optional() {
+		use ts_rs::TS;
+		let decl = AgentOpResultResponse::decl(&ts_rs::Config::default());
+		assert!(
+			decl.contains("output?"),
+			"output must be optional in TS: {decl}"
+		);
+		assert!(
+			decl.contains("error?"),
+			"error must be optional in TS: {decl}"
 		);
 	}
 }

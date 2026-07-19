@@ -67,6 +67,7 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 	const {
 		control,
 		handleSubmit,
+		setValue,
 		formState: { submitCount, isSubmitting },
 	} = useForm<CreateMcpFormValues>({
 		mode: "onSubmit",
@@ -121,10 +122,13 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 			// handled in submit catch for better message control
 		},
 	});
-	// Per-agent failures inside a 200 batch response (partial state): the
-	// successful agents were written, so we stay on the panel and show the
-	// attribution instead of pretending the whole create succeeded.
+	// Per-agent attribution of a partial batch (200 with failed rows): the
+	// successful agents were written, so we stay on the panel, show both
+	// lists, and converge the selection to the FAILED agents — a verbatim
+	// retry must not re-create on the already-successful ones
+	// (RESOURCE_EXISTS would make the batch unconvergeable).
 	const [batchFailures, setBatchFailures] = useState<string[]>([]);
+	const [batchSucceeded, setBatchSucceeded] = useState<string[]>([]);
 
 	const onSubmit = async (values: CreateMcpFormValues) => {
 		if (hasPairErrors) return;
@@ -149,6 +153,7 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 
 		try {
 			setBatchFailures([]);
+			setBatchSucceeded([]);
 			// ONE batch request — the server preflights every agent before
 			// any write and returns per-agent attribution.
 			const result = await createMutation.mutateAsync({
@@ -158,10 +163,16 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 				projectRoot: projectPath,
 			});
 			if (result.failed_count > 0) {
+				const failed = result.results.filter((r) => !r.ok);
 				setBatchFailures(
-					result.results
-						.filter((r) => !r.ok)
-						.map((r) => `${r.agent}: ${r.error ?? "failed"}`),
+					failed.map((r) => `${r.agent}: ${r.error ?? "failed"}`),
+				);
+				setBatchSucceeded(
+					result.results.filter((r) => r.ok).map((r) => r.agent),
+				);
+				setValue(
+					"selectedAgents",
+					failed.map((r) => r.agent),
 				);
 				return;
 			}
@@ -191,16 +202,25 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 				</Alert>
 			)}
 			{batchFailures.length > 0 && (
-				<Alert className="mb-4" status="danger">
-					<Alert.Indicator />
-					<Alert.Content>
-						<Alert.Description>
-							{t("createError", {
-								error: batchFailures.join("; "),
-							})}
-						</Alert.Description>
-					</Alert.Content>
-				</Alert>
+				// Persistent partial-batch state (not a transient mutation
+				// error): an inline live-region banner per the toast-policy
+				// exception — it stays true until the user retries/cancels.
+				<div role="alert" aria-live="polite">
+					<Alert className="mb-4" status="danger">
+						<Alert.Indicator />
+						<Alert.Content>
+							<Alert.Description>
+								{batchSucceeded.length > 0 &&
+									`${t("batchCreateSucceededOn", {
+										agents: batchSucceeded.join(", "),
+									})} `}
+								{t("batchCreateFailedOn", {
+									failures: batchFailures.join("; "),
+								})}
+							</Alert.Description>
+						</Alert.Content>
+					</Alert>
+				</div>
 			)}
 
 			<Card>

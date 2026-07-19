@@ -664,6 +664,9 @@ export default {
 	createMcpServer: "Create MCP Server",
 	creating: "Creating...",
 	createError: "Failed to create: {{error}}",
+	batchCreateSucceededOn: "Created on: {{agents}}.",
+	batchCreateFailedOn:
+		"Failed on {{failures}} — the selection now targets only the failed agents; retry or cancel.",
 	advanced: "Advanced",
 	agents: "Agents",
 	noAgentsAvailable: "No agents available",
