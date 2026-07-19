@@ -222,7 +222,8 @@ verifying a release gate.
   skill DTOs may expose intentional `source_path` / `canonical_path` for UI
 - NEVER hand-mirror a mutating/transactional flow across surfaces (CLI ↔ API, or
   per-dialect parsers) and "keep it in sync by hand" — it WILL drift (it did: the
-  rename txn, the link primitives, the MCP mixed-key rule). Extract the invariant
+  rename txn, the link primitives, the MCP mixed-key rule, the multi-agent batch
+  policy — now `core/src/batch.rs`). Extract the invariant
   to `core` / a shared policy behind ONE tested interface; surfaces stay thin
   adapters. Examples + deferred hardening: `docs/specs/2026-07-15-*`
 - When promoting a **private** flow to a **public** seam, re-assert the

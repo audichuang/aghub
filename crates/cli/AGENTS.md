@@ -18,6 +18,9 @@
 | skill-usage          | `commands/skill_usage.rs`          | Claude-global only                          |
 | CLI e2e tests        | `tests/cli_tests.rs`               | `assert_cmd`; unix-gated helpers stay cfg'd |
 
+`source sync` e2e need no network: `AGHUB_TEST_SOURCE_FETCH_ROOT` (debug-only
+env hook in `commands/source.rs`) serves a local dir as the fetched repo.
+
 ## SKILL UPDATE CHECK (`check skills`)
 
 `commands/check.rs` — **read-only** (never mutates locks):

@@ -12,7 +12,10 @@ Role map (`lib.rs` mounts the real route set — do not hardcode route counts):
 - `state.rs` / `error.rs` / `extractors.rs` — `AppState`, `ApiError`, `AgentParam` / `ScopeParams` / `TrustedLocalOrigin`
 - `credentials/` — token resolve + remote forwarding; host-scoped source→credential bindings (never in lock files)
 - `skills/` — path containment, scan, lock helpers for skill routes
-- `dto/` — ts-rs DTOs per domain (`bun run generate:dto` via `bin/export-dto.rs`)
+- `dto/` — ts-rs DTOs per domain (`bun run generate:dto` via `bin/export-dto.rs`;
+  a new DTO must be REGISTERED there or it silently doesn't generate. An
+  `Option` field with `skip_serializing_if` also needs `#[ts(optional)]`, or
+  the generated TS declares it required — unsound contract)
 - `routes/` — handlers under `/api/v1/` (one file per surface: agents, mcps, skills, skills_update, sources, coverage, sub_agents, credentials, inference, plugins, integrations, market)
 
 ## ROUTES
@@ -83,6 +86,9 @@ Default: localhost:8000
   other domains own their store — credentials → credential store, inference →
   `InferenceProviderStore`, plugins → `ClaudePluginManager`
 - Errors: machine-readable codes + safe messages (no raw filesystem paths in responses)
+- Route error PRECEDENCE is public contract (e.g. MCP create answers
+  capability → validate → writable): refactoring a route into shared helpers
+  must not reorder which error wins on compound-invalid requests
 
 ## ANTI-PATTERNS
 

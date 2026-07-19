@@ -13,6 +13,9 @@ codegraph — enumerated trees drift):
 - `adapter.rs` / `adapters/` — adapter dispatch (`AgentAdapter` trait, `create_adapter()`)
 - `all_agents.rs` — `load_all_agents()` → `AgentResources` bulk load
 - `availability.rs` — which agent CLIs are installed
+- `batch.rs` — multi-target mutation policy: preflight-before-any-write +
+  attempt-all + the `AgentBatchView` wire shape. CLI `-a a,b` and API
+  `/mcps/batch` are thin maps over it — extend it here, never per surface
 - `manager/` — `ConfigManager` CRUD, split per resource: `mod.rs` / `skill.rs` / `mcp.rs` / `sub_agent.rs`
 - `dto/` — CLI/API shared wire views (`removal.rs` `RemovalView`, `skill.rs` `SkillView`) — single source for both surfaces
 - `paths.rs` — XDG path helpers; `registry/` — `ALL_AGENTS` + `get()`
