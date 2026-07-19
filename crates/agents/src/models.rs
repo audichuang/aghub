@@ -478,6 +478,33 @@ impl AgentType {
 		let idx = Self::ALL.iter().position(|a| a == self).unwrap_or(0);
 		Self::ALL[(idx + 1) % Self::ALL.len()]
 	}
+
+	/// Parse a single agent id or a comma-separated list ("claude,grok"),
+	/// preserving order and dropping duplicates. Every token must be a known
+	/// agent id; the error names the offending token and the valid ids.
+	pub fn parse_list(s: &str) -> Result<Vec<AgentType>, String> {
+		let mut out = Vec::new();
+		for token in s.split(',') {
+			let token = token.trim();
+			if token.is_empty() {
+				return Err(format!("empty agent name in '{s}'"));
+			}
+			let agent = token.parse::<AgentType>().map_err(|_| {
+				format!(
+					"unknown agent '{token}' (valid: {})",
+					AgentType::ALL
+						.iter()
+						.map(|a| a.as_str())
+						.collect::<Vec<_>>()
+						.join(", ")
+				)
+			})?;
+			if !out.contains(&agent) {
+				out.push(agent);
+			}
+		}
+		Ok(out)
+	}
 }
 
 impl std::str::FromStr for AgentType {
@@ -881,6 +908,28 @@ mod tests {
 		assert_eq!(a, AgentType::Grok);
 		assert_eq!(a.as_str(), "grok");
 		assert!(AgentType::ALL.contains(&AgentType::Grok));
+	}
+
+	#[test]
+	fn parse_list_single_multi_and_dedup() {
+		assert_eq!(
+			AgentType::parse_list("claude").unwrap(),
+			vec![AgentType::Claude]
+		);
+		// Order preserved, whitespace trimmed, duplicates dropped.
+		assert_eq!(
+			AgentType::parse_list("grok, claude,grok").unwrap(),
+			vec![AgentType::Grok, AgentType::Claude]
+		);
+	}
+
+	#[test]
+	fn parse_list_rejects_unknown_and_empty_tokens() {
+		let err = AgentType::parse_list("claude,nonesuch").unwrap_err();
+		assert!(err.contains("nonesuch"), "err must name the token: {err}");
+		assert!(err.contains("claude"), "err must list valid ids: {err}");
+		assert!(AgentType::parse_list("claude,,grok").is_err());
+		assert!(AgentType::parse_list("").is_err());
 	}
 
 	#[test]

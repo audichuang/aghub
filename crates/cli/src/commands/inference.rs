@@ -30,7 +30,7 @@ use crate::commands::inference_store;
 const API_KEY_ENV: &str = "AGHUB_INFERENCE_API_KEY";
 
 /// Actions for the `inference` subcommand group.
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum InferenceAction {
 	/// List all inference providers.
 	List {

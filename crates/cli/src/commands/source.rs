@@ -596,8 +596,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// other supported agents each get their own symlink. Agents that are
 	// Unsupported here (no skill dir / project-only) are dropped up front, NOT
 	// reported as failures — otherwise `-a all` would always exit non-zero.
-	// A single explicit `-a <agent>` is taken verbatim (an unsupported one is a
-	// real error the user asked for). Default is one agent (claude).
+	// An explicit `-a <agent>` or comma list (`-a claude,grok`) is taken
+	// verbatim (an unsupported one is a real error the user asked for).
+	// Default is one agent (claude).
 	let target_agents: Vec<AgentType> = if args
 		.agent
 		.eq_ignore_ascii_case("all")
@@ -628,10 +629,8 @@ fn sync(args: SyncArgs) -> Result<()> {
 			.filter_map(|d| d.id.parse::<AgentType>().ok())
 			.collect()
 	} else {
-		vec![args
-			.agent
-			.parse::<AgentType>()
-			.map_err(|e| anyhow::anyhow!("Unknown agent type: {e}"))?]
+		AgentType::parse_list(args.agent)
+			.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?
 	};
 
 	// No agent in this scope can hold a skill (e.g. `-a all` where every agent
@@ -673,7 +672,13 @@ fn sync(args: SyncArgs) -> Result<()> {
 
 	if !args.yes {
 		// Dry-run (default): print the plan, write nothing.
-		return print_dry_run(&source, scope_label, &plan, args.json);
+		return print_dry_run(
+			&source,
+			scope_label,
+			&plan,
+			&target_agents,
+			args.json,
+		);
 	}
 
 	// Resolve the normalized lock source ONCE from the RECOVERED fetch
@@ -883,6 +888,7 @@ fn print_dry_run(
 	source: &str,
 	scope_label: &'static str,
 	plan: &[(&'static str, &SourceSkillDiff)],
+	target_agents: &[AgentType],
 	json: bool,
 ) -> Result<()> {
 	if json {
@@ -912,6 +918,19 @@ fn print_dry_run(
 		return Ok(());
 	}
 	println!("Dry-run (pass --yes to apply):");
+	// Make the fan-out visible BEFORE --yes: installs touch every agent
+	// listed here (`-a all` can be the whole registry).
+	if plan.iter().any(|(kind, _)| *kind == "install") {
+		println!(
+			"  target agents ({}): {}",
+			target_agents.len(),
+			target_agents
+				.iter()
+				.map(|a| a.as_str())
+				.collect::<Vec<_>>()
+				.join(", ")
+		);
+	}
 	for (kind, d) in plan {
 		println!("  would {}: {} ({})", kind, d.name, d.skill_path);
 	}

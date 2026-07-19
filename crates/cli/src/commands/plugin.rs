@@ -16,7 +16,7 @@ use aghub_cc_plugins::cli::ClaudeCli;
 use aghub_cc_plugins::installer::PluginInstaller;
 use aghub_cc_plugins::PluginId;
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum PluginAction {
 	/// List installed plugins; pass --available to also show marketplace catalog
 	List {
@@ -80,7 +80,7 @@ pub enum PluginAction {
 	},
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum MarketplaceAction {
 	/// List configured marketplaces
 	List {

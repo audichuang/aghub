@@ -26,7 +26,7 @@ use tabled::settings::Style;
 
 /// The three resource kinds transfer/reconcile operate on. Each carries the same
 /// flags; the kind only selects which core fn pair runs.
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum TransferAction {
 	/// Copy a skill from one agent into one or more target agents.
 	Skill(TransferArgs),
@@ -37,7 +37,7 @@ pub enum TransferAction {
 }
 
 /// Shared flags for every `transfer` kind.
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct TransferArgs {
 	/// Source agent the resource is read from.
 	#[arg(long = "from-agent", value_parser = parse_agent)]
@@ -54,7 +54,7 @@ pub struct TransferArgs {
 	json: bool,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 pub enum ReconcileAction {
 	/// Add/remove a skill across agents to match the given set.
 	Skill(ReconcileArgs),
@@ -65,7 +65,7 @@ pub enum ReconcileAction {
 }
 
 /// Shared flags for every `reconcile` kind.
-#[derive(clap::Args)]
+#[derive(clap::Args, Clone)]
 pub struct ReconcileArgs {
 	/// Source agent the resource is read from.
 	#[arg(long = "from-agent", value_parser = parse_agent)]

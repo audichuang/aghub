@@ -47,7 +47,8 @@ macro_rules! eprintln_verbose {
 #[command(about = "Manage Code Agent configurations")]
 #[command(version = env!("AGHUB_CLI_VERSION"))]
 struct Cli {
-	/// Target agent: claude, opencode
+	/// Target agent id, a comma-separated list, or "all"
+	/// (e.g. -a claude / -a claude,grok / -a all)
 	#[arg(short = 'a', long, default_value = "claude")]
 	agent: String,
 
@@ -71,7 +72,7 @@ struct Cli {
 	command: Commands,
 }
 
-#[derive(Subcommand)]
+#[derive(Subcommand, Clone)]
 enum Commands {
 	/// List resources (skills, mcps)
 	Get {
@@ -327,7 +328,7 @@ enum Commands {
 }
 
 /// Actions for the `source` subcommand group.
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Clone)]
 pub enum SourceAction {
 	/// List installed skill sources
 	List {
@@ -478,12 +479,20 @@ fn main() -> Result<()> {
 		return handle_all_agents(&cli);
 	}
 
-	// Parse agent type
-	let agent_type = cli.agent.parse::<AgentType>().map_err(|e| {
-		anyhow::anyhow!("Unknown agent type: {} (valid: claude, opencode)", e)
-	})?;
+	// Parse the agent flag — a single id or a comma-separated list.
+	let agents = AgentType::parse_list(&cli.agent)
+		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
+	if agents.len() > 1 {
+		return handle_agent_list(&cli, &agents);
+	}
+	let agent_type = agents[0];
 	eprintln_verbose!("Agent type: {}", cli.agent);
+	run_for_agent(&cli, agent_type)
+}
 
+/// Run one command against ONE agent's config. The multi-agent entry points
+/// (`handle_all_agents`, `handle_agent_list`) fan out to this.
+fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 	// Determine resource scope based on flags
 	// -a/--all takes precedence, then -p/--project, then -g/--global, then default (global)
 	let scope = if cli.all {
@@ -562,8 +571,8 @@ fn main() -> Result<()> {
 		}
 	}
 
-	// Execute command
-	match cli.command {
+	// Execute command (cloned so multi-agent entry points can re-run it)
+	match cli.command.clone() {
 		Commands::Get { resource } => get::execute(&manager, resource),
 		Commands::Add {
 			resource,
@@ -716,17 +725,9 @@ fn main() -> Result<()> {
 	}
 }
 
-// Handle --agent all: list resources for every registered agent
-fn handle_all_agents(cli: &Cli) -> Result<()> {
-	let resource = match &cli.command {
-		Commands::Get { resource } => *resource,
-		_ => {
-			return Err(anyhow::anyhow!(
-				"--agent all is only supported with the 'get' command"
-			))
-		}
-	};
-
+/// Resolve the read scope + project root from the top-level scope flags,
+/// for the multi-agent entry points (single-agent runs resolve their own).
+fn read_scope_and_root(cli: &Cli) -> Result<(ResourceScope, Option<PathBuf>)> {
 	let scope = if cli.all {
 		ResourceScope::Both
 	} else if cli.project {
@@ -734,19 +735,68 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 	} else {
 		ResourceScope::GlobalOnly
 	};
-
-	let project_root = if scope == ResourceScope::ProjectOnly
-		|| scope == ResourceScope::Both
-	{
+	let project_root = if scope == ResourceScope::GlobalOnly {
+		None
+	} else {
 		let current_dir = std::env::current_dir()?;
 		find_project_root(&current_dir)
-	} else {
-		None
+	};
+	Ok((scope, project_root))
+}
+
+// Handle --agent all: list resources for every registered agent
+fn handle_all_agents(cli: &Cli) -> Result<()> {
+	let resource = match &cli.command {
+		Commands::Get { resource } => *resource,
+		_ => {
+			return Err(anyhow::anyhow!(
+				"--agent all supports only 'get'; to fan a command across \
+				 specific agents pass a comma-separated list (-a claude,grok)"
+			))
+		}
 	};
 
+	let (scope, project_root) = read_scope_and_root(cli)?;
 	eprintln_verbose!("Loading resources for all agents (scope: {:?})", scope);
 	let resources = load_all_agents(scope, project_root.as_deref());
 	get::execute_all(resources, resource)
+}
+
+// Handle a comma-separated --agent list: fan the command across the named
+// agents. `get` aggregates (same JSON shape as `--agent all`); per-agent
+// config commands run once per agent, fail-fast. Lock-scoped commands
+// (check / apply-update / prune-lock / plugin) ignore the agent flag or are
+// single-agent by nature, so a list would only repeat identical work —
+// reject it. (`source` is dispatched earlier and resolves the list itself.)
+fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
+	match &cli.command {
+		Commands::Get { resource } => {
+			let resource = *resource;
+			let (scope, project_root) = read_scope_and_root(cli)?;
+			let mut resources = load_all_agents(scope, project_root.as_deref());
+			resources
+				.retain(|r| agents.iter().any(|a| a.as_str() == r.agent_id));
+			get::execute_all(resources, resource)
+		}
+		Commands::Add { .. }
+		| Commands::Update { .. }
+		| Commands::Delete { .. }
+		| Commands::Enable { .. }
+		| Commands::Disable { .. } => {
+			for agent in agents {
+				// Label each agent's output block on stderr so concatenated
+				// stdout (e.g. one JSON doc per agent) stays attributable.
+				eprintln!("[{}]", agent.as_str());
+				run_for_agent(cli, *agent)
+					.with_context(|| format!("agent '{}'", agent.as_str()))?;
+			}
+			Ok(())
+		}
+		_ => Err(anyhow::anyhow!(
+			"an --agent list supports get/add/update/delete/enable/disable; \
+			 run this command with a single agent"
+		)),
+	}
 }
 
 // Describe command - outputs JSON

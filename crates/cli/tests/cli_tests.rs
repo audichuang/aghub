@@ -99,6 +99,71 @@ fn test_agent_all_non_get_command_fails() {
 }
 
 #[test]
+fn test_agent_list_get_skills_filters_to_requested_agents() {
+	let dir = fixtures_dir();
+	let out = aghub_cli()
+		.current_dir(&dir)
+		.args(["-a", "claude,cline", "--all", "get", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	let arr = json.as_array().expect("output must be a JSON array");
+	// Filtered: ONLY the requested agents appear…
+	for entry in arr {
+		let agent = entry["agent"].as_str().unwrap();
+		assert!(
+			agent == "claude" || agent == "cline",
+			"unexpected agent in filtered output: {agent}"
+		);
+	}
+	// …and the subset is not empty: cline's fixture skill must be present.
+	assert!(
+		arr.iter().any(|s| s["agent"] == "cline"
+			&& s["name"] == "vercel-react-best-practices"),
+		"cline entry with vercel-react-best-practices must survive the filter"
+	);
+}
+
+#[test]
+fn test_agent_list_unknown_agent_fails() {
+	let out = aghub_cli()
+		.args(["-a", "claude,nonesuch", "get", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "unknown agent in list must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("nonesuch"),
+		"error must name the bad token, got: {stderr}"
+	);
+}
+
+#[test]
+fn test_agent_list_lock_scoped_command_fails() {
+	// `check` ignores the agent flag (lock-scoped): a list would repeat
+	// identical work, so it is rejected with a pointer to single-agent use.
+	let out = aghub_cli()
+		.args(["-a", "claude,grok", "check", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "-a list with check should fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("single agent"),
+		"error must mention the restriction, got: {stderr}"
+	);
+}
+
+#[test]
 fn check_skills_outputs_json_array() {
 	// No network: with an empty/local-only lock, check returns an array (possibly
 	// with Uncheckable entries) and exits 0.
@@ -378,6 +443,55 @@ fn mcp_listed(
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	json.as_array().unwrap().iter().any(|m| m["name"] == name)
+}
+
+/// `-a claude,opencode add mcps` must write EACH agent's own config — the
+/// desktop multi-select's CLI parity. Asserted via per-agent reads, not the
+/// add's exit code alone.
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_writes_each_agent_config() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude,opencode",
+			"add",
+			"mcps",
+			"--name",
+			"multi",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	for agent in ["claude", "opencode"] {
+		let get = isolated_cli(home.path(), state.path())
+			.args(["-a", agent, "get", "mcps"])
+			.output()
+			.unwrap();
+		assert!(
+			get.status.success(),
+			"get mcps for {agent}: {}",
+			String::from_utf8_lossy(&get.stderr)
+		);
+		let json: Value = serde_json::from_slice(&get.stdout).unwrap();
+		assert!(
+			json.as_array()
+				.unwrap()
+				.iter()
+				.any(|m| m["name"] == "multi"),
+			"{agent} config must list the MCP added via the agent list"
+		);
+	}
 }
 
 #[cfg(unix)] // Windows: global MCP config not HOME-isolated
