@@ -31,8 +31,10 @@ pub fn execute(
 	author: Option<String>,
 	version: Option<String>,
 	tools: Vec<String>,
-) -> Result<()> {
-	match resource {
+) -> Result<serde_json::Value> {
+	// The caller prints the payload (single-agent) or wraps it in the batch
+	// envelope (multi-agent) — command logic stays print-free.
+	let payload = match resource {
 		ResourceType::Skills => {
 			eprintln_verbose!("Updating skill: {}", name);
 			// Get existing skill
@@ -61,7 +63,7 @@ pub fn execute(
 			// Same SkillView shape as add/describe/get; update does no
 			// install prep, so native_reader stays false.
 			let view = aghub_core::dto::SkillView::from(&skill);
-			println!("{}", serde_json::to_string_pretty(&view)?);
+			serde_json::to_value(&view)?
 		}
 		ResourceType::Mcps => {
 			eprintln_verbose!("Updating MCP server: {}", name);
@@ -98,9 +100,9 @@ pub fn execute(
 
 			manager.update_mcp(&name, mcp.clone())?;
 			eprintln_verbose!("MCP server updated successfully");
-			println!("{}", serde_json::to_string_pretty(&mcp)?);
+			serde_json::to_value(&mcp)?
 		}
-	}
+	};
 
-	Ok(())
+	Ok(payload)
 }

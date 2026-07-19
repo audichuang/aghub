@@ -10,7 +10,7 @@
 
 use std::path::{Path, PathBuf};
 
-use aghub_core::models::{AgentType, ResourceScope};
+use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
 use aghub_core::paths::find_project_root;
 use anyhow::{bail, Result};
 use serde::Serialize;
@@ -458,7 +458,27 @@ struct SyncOutcomeView {
 	scope: &'static str,
 	#[serde(rename = "dryRun")]
 	dry_run: bool,
+	/// The agents an install would link (safety-critical for `-a all`:
+	/// the fan-out must be visible in the dry-run BEFORE `--yes`). Empty —
+	/// and omitted — when the plan has no install action.
+	#[serde(rename = "targetAgents", skip_serializing_if = "Vec::is_empty")]
+	target_agents: Vec<&'static str>,
 	actions: Vec<SyncActionView>,
+}
+
+/// The agent ids an install plan fans out to: the resolved targets when the
+/// plan contains at least one install action, empty otherwise (updates touch
+/// only the master, not per-agent links). ONE helper for the text and JSON
+/// outputs so they cannot disagree.
+fn plan_target_agents(
+	plan: &[(&'static str, &SourceSkillDiff)],
+	target_agents: &[AgentType],
+) -> Vec<&'static str> {
+	if plan.iter().any(|(kind, _)| *kind == "install") {
+		target_agents.iter().map(|a| a.as_str()).collect()
+	} else {
+		Vec::new()
+	}
 }
 
 /// Resolve the single writing scope for `sync`. Exactly one of `-g`/`-p` must
@@ -509,6 +529,12 @@ fn sync(args: SyncArgs) -> Result<()> {
 
 	let (scope, project_root, source_scope, scope_label) =
 		resolve_write_scope(&args)?;
+
+	// Parse the agent selection BEFORE any network work, so an invalid
+	// --agent fails here (offline runs included) instead of surfacing a
+	// misleading network/auth error first.
+	let selection = AgentSelection::parse(args.agent)
+		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
 	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
 	// helper (the SAME resolution the API runs) BEFORE the single fetch, so sync
@@ -599,38 +625,42 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// An explicit `-a <agent>` or comma list (`-a claude,grok`) is taken
 	// verbatim (an unsupported one is a real error the user asked for).
 	// Default is one agent (claude).
-	let target_agents: Vec<AgentType> = if args
-		.agent
-		.eq_ignore_ascii_case("all")
-	{
-		use aghub_core::skills::linker::{
-			agent_link_need, universal_canonical_dir, LinkNeed,
-		};
-		let master = universal_canonical_dir(project_root.as_deref())
-			.ok_or_else(|| {
-				anyhow::anyhow!(
-					"could not resolve the universal master skills directory"
-				)
-			})?;
-		// Iterate the registry in its stable order (claude first) and keep
-		// agents that can hold a skill here. `agent_link_need` is the
-		// probe-free classifier — no per-agent availability subprocess,
-		// since we only need the link decision, not whether the CLI is
-		// installed. (`classify_all` would run that probe for every agent.)
-		aghub_core::registry::ALL_AGENTS
-			.iter()
-			.copied()
-			.filter(|d| {
-				!matches!(
-					agent_link_need(d, scope, project_root.as_deref(), &master,),
-					LinkNeed::Unsupported
-				)
-			})
-			.filter_map(|d| d.id.parse::<AgentType>().ok())
-			.collect()
-	} else {
-		AgentType::parse_list(args.agent)
-			.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?
+	let target_agents: Vec<AgentType> = match &selection {
+		AgentSelection::All => {
+			use aghub_core::skills::linker::{
+				agent_link_need, universal_canonical_dir, LinkNeed,
+			};
+			let master = universal_canonical_dir(project_root.as_deref())
+				.ok_or_else(|| {
+					anyhow::anyhow!(
+						"could not resolve the universal master skills \
+						 directory"
+					)
+				})?;
+			// Iterate the registry in its stable order (claude first) and
+			// keep agents that can hold a skill here. `agent_link_need` is
+			// the probe-free classifier — no per-agent availability
+			// subprocess, since we only need the link decision, not whether
+			// the CLI is installed. (`classify_all` would run that probe for
+			// every agent.)
+			aghub_core::registry::ALL_AGENTS
+				.iter()
+				.copied()
+				.filter(|d| {
+					!matches!(
+						agent_link_need(
+							d,
+							scope,
+							project_root.as_deref(),
+							&master,
+						),
+						LinkNeed::Unsupported
+					)
+				})
+				.filter_map(|d| d.id.parse::<AgentType>().ok())
+				.collect()
+		}
+		AgentSelection::List(agents) => agents.clone(),
 	};
 
 	// No agent in this scope can hold a skill (e.g. `-a all` where every agent
@@ -712,6 +742,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		ref_name: meta.effective_ref.clone(),
 	};
 
+	let plan_targets = plan_target_agents(&plan, &target_agents);
 	let mut actions: Vec<SyncActionView> = Vec::new();
 	for (kind, d) in &plan {
 		match *kind {
@@ -744,6 +775,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 			source,
 			scope: scope_label,
 			dry_run: false,
+			target_agents: plan_targets,
 			actions,
 		};
 		println!("{}", serde_json::to_string_pretty(&view)?);
@@ -891,6 +923,8 @@ fn print_dry_run(
 	target_agents: &[AgentType],
 	json: bool,
 ) -> Result<()> {
+	let plan_targets = plan_target_agents(plan, target_agents);
+
 	if json {
 		let actions: Vec<SyncActionView> = plan
 			.iter()
@@ -907,6 +941,7 @@ fn print_dry_run(
 			source: source.to_string(),
 			scope: scope_label,
 			dry_run: true,
+			target_agents: plan_targets,
 			actions,
 		};
 		println!("{}", serde_json::to_string_pretty(&view)?);
@@ -920,15 +955,11 @@ fn print_dry_run(
 	println!("Dry-run (pass --yes to apply):");
 	// Make the fan-out visible BEFORE --yes: installs touch every agent
 	// listed here (`-a all` can be the whole registry).
-	if plan.iter().any(|(kind, _)| *kind == "install") {
+	if !plan_targets.is_empty() {
 		println!(
 			"  target agents ({}): {}",
-			target_agents.len(),
-			target_agents
-				.iter()
-				.map(|a| a.as_str())
-				.collect::<Vec<_>>()
-				.join(", ")
+			plan_targets.len(),
+			plan_targets.join(", ")
 		);
 	}
 	for (kind, d) in plan {
@@ -1207,10 +1238,47 @@ fn narrow_by_name<T>(
 
 #[cfg(test)]
 mod tests {
-	use super::{narrow_by_name, select_env_token};
+	use super::{narrow_by_name, plan_target_agents, select_env_token};
+	use aghub_core::models::AgentType;
+	use skill_update::sources::{SourceSkillDiff, SourceSkillState};
 
 	fn s(v: &str) -> Option<String> {
 		Some(v.to_string())
+	}
+
+	fn diff(name: &str, state: SourceSkillState) -> SourceSkillDiff {
+		SourceSkillDiff {
+			name: name.to_string(),
+			skill_path: format!("{name}/SKILL.md"),
+			description: None,
+			version: None,
+			author: None,
+			state,
+			previous_name: None,
+			reason: None,
+			installed_paths: Vec::new(),
+			upstream_commit_time: None,
+		}
+	}
+
+	#[test]
+	fn plan_target_agents_lists_agents_only_for_installs() {
+		let agents = [AgentType::Claude, AgentType::Grok];
+		let install = diff("a", SourceSkillState::NotInstalled);
+		let update = diff("b", SourceSkillState::InstalledOutdated);
+
+		// An install action exposes the full fan-out (the safety-critical
+		// pre-`--yes` visibility for `-a all`).
+		let plan = [("install", &install), ("update", &update)];
+		assert_eq!(plan_target_agents(&plan, &agents), vec!["claude", "grok"]);
+
+		// Update-only plans touch the master, not per-agent links: empty
+		// (and the JSON field is omitted).
+		let plan = [("update", &update)];
+		assert!(plan_target_agents(&plan, &agents).is_empty());
+
+		// Empty plan → empty.
+		assert!(plan_target_agents(&[], &agents).is_empty());
 	}
 
 	#[test]

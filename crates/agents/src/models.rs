@@ -507,6 +507,32 @@ impl AgentType {
 	}
 }
 
+/// The parsed `-a/--agent` flag: every registered agent, or an explicit
+/// order-preserving list. ONE parser for every surface, so "all" casing and
+/// the all-plus-ids rule cannot drift between commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentSelection {
+	/// `-a all` (case-insensitive): every registered agent.
+	All,
+	/// A single id or comma-separated list (deduped, order preserved).
+	List(Vec<AgentType>),
+}
+
+impl AgentSelection {
+	pub fn parse(s: &str) -> Result<Self, String> {
+		if s.trim().eq_ignore_ascii_case("all") {
+			return Ok(Self::All);
+		}
+		if s.split(',').any(|t| t.trim().eq_ignore_ascii_case("all")) {
+			return Err(format!(
+				"'all' cannot be combined with agent ids in '{s}'; pass \
+				 either 'all' or an explicit list"
+			));
+		}
+		Ok(Self::List(AgentType::parse_list(s)?))
+	}
+}
+
 impl std::str::FromStr for AgentType {
 	type Err = String;
 
@@ -927,9 +953,41 @@ mod tests {
 	fn parse_list_rejects_unknown_and_empty_tokens() {
 		let err = AgentType::parse_list("claude,nonesuch").unwrap_err();
 		assert!(err.contains("nonesuch"), "err must name the token: {err}");
-		assert!(err.contains("claude"), "err must list valid ids: {err}");
+		// The valid-id list must be present: assert on an id NOT in the
+		// input, so a message that merely echoes the input can't pass.
+		assert!(err.contains("cursor"), "err must list valid ids: {err}");
 		assert!(AgentType::parse_list("claude,,grok").is_err());
 		assert!(AgentType::parse_list("").is_err());
+	}
+
+	#[test]
+	fn agent_selection_all_is_case_insensitive() {
+		assert_eq!(AgentSelection::parse("all").unwrap(), AgentSelection::All);
+		assert_eq!(AgentSelection::parse("ALL").unwrap(), AgentSelection::All);
+		assert_eq!(
+			AgentSelection::parse(" All ").unwrap(),
+			AgentSelection::All
+		);
+	}
+
+	#[test]
+	fn agent_selection_rejects_all_mixed_with_ids() {
+		for input in ["all,claude", "claude,all", "claude,ALL,grok"] {
+			let err = AgentSelection::parse(input).unwrap_err();
+			assert!(
+				err.contains("cannot be combined"),
+				"'{input}' must get the dedicated mixed error, got: {err}"
+			);
+		}
+	}
+
+	#[test]
+	fn agent_selection_list_delegates_to_parse_list() {
+		assert_eq!(
+			AgentSelection::parse("grok, claude").unwrap(),
+			AgentSelection::List(vec![AgentType::Grok, AgentType::Claude])
+		);
+		assert!(AgentSelection::parse("nonesuch").is_err());
 	}
 
 	#[test]

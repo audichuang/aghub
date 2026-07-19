@@ -100,10 +100,13 @@ fn test_agent_all_non_get_command_fails() {
 
 #[test]
 fn test_agent_list_get_skills_filters_to_requested_agents() {
+	// cline AND cursor both read the fixtures project master, so BOTH must
+	// appear (an implementation that drops one fails) and NOTHING else may
+	// (an implementation that skips the filter fails).
 	let dir = fixtures_dir();
 	let out = aghub_cli()
 		.current_dir(&dir)
-		.args(["-a", "claude,cline", "--all", "get", "skills"])
+		.args(["-a", "cline,cursor", "--all", "get", "skills"])
 		.output()
 		.unwrap();
 
@@ -115,20 +118,22 @@ fn test_agent_list_get_skills_filters_to_requested_agents() {
 	let json: Value =
 		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
 	let arr = json.as_array().expect("output must be a JSON array");
-	// Filtered: ONLY the requested agents appear…
-	for entry in arr {
-		let agent = entry["agent"].as_str().unwrap();
+	let agents: std::collections::BTreeSet<&str> = arr
+		.iter()
+		.map(|e| e["agent"].as_str().expect("agent field"))
+		.collect();
+	assert_eq!(
+		agents,
+		["cline", "cursor"].into_iter().collect(),
+		"filtered output must contain exactly the requested agents"
+	);
+	for agent in ["cline", "cursor"] {
 		assert!(
-			agent == "claude" || agent == "cline",
-			"unexpected agent in filtered output: {agent}"
+			arr.iter().any(|s| s["agent"] == agent
+				&& s["name"] == "vercel-react-best-practices"),
+			"{agent} must list the master skill"
 		);
 	}
-	// …and the subset is not empty: cline's fixture skill must be present.
-	assert!(
-		arr.iter().any(|s| s["agent"] == "cline"
-			&& s["name"] == "vercel-react-best-practices"),
-		"cline entry with vercel-react-best-practices must survive the filter"
-	);
 }
 
 #[test]
@@ -143,6 +148,12 @@ fn test_agent_list_unknown_agent_fails() {
 	assert!(
 		stderr.contains("nonesuch"),
 		"error must name the bad token, got: {stderr}"
+	);
+	// The valid-id list must be present: assert on an id NOT in the input,
+	// so a message that merely echoes the input can't pass.
+	assert!(
+		stderr.contains("cursor"),
+		"error must list the valid agent ids, got: {stderr}"
 	);
 }
 
@@ -160,6 +171,59 @@ fn test_agent_list_lock_scoped_command_fails() {
 	assert!(
 		stderr.contains("single agent"),
 		"error must mention the restriction, got: {stderr}"
+	);
+}
+
+#[test]
+fn test_agent_list_early_dispatched_command_rejected() {
+	// `doctor` is dispatched before the agent parsing and ignores the agent
+	// flag entirely — an --agent list must be rejected up front, never
+	// silently dropped.
+	let out = aghub_cli()
+		.args(["-a", "claude,grok", "doctor"])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "-a list with doctor should fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("does not take an --agent list"),
+		"error must mention the list restriction, got: {stderr}"
+	);
+}
+
+#[test]
+fn test_agent_all_is_case_insensitive() {
+	// `-a ALL` goes through the same shared parser as `-a all`.
+	let dir = fixtures_dir();
+	let out = aghub_cli()
+		.current_dir(&dir)
+		.args(["-a", "ALL", "--all", "get", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value =
+		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
+	assert!(!json.as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_agent_all_mixed_with_ids_fails() {
+	let out = aghub_cli()
+		.args(["-a", "all,claude", "get", "skills"])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "'all,claude' must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("cannot be combined"),
+		"mixed all+ids must get the dedicated error, got: {stderr}"
 	);
 }
 
@@ -472,6 +536,20 @@ fn add_mcp_agent_list_writes_each_agent_config() {
 		"stderr: {}",
 		String::from_utf8_lossy(&out.stderr)
 	);
+	// stdout is ONE valid JSON document: the batch envelope with a
+	// machine-readable per-agent attribution (not N concatenated docs).
+	let envelope: Value = serde_json::from_slice(&out.stdout)
+		.expect("batch stdout must be a single valid JSON document");
+	let rows = envelope.as_array().expect("envelope must be an array");
+	assert_eq!(rows.len(), 2, "one row per agent: {envelope}");
+	for (row, agent) in rows.iter().zip(["claude", "opencode"]) {
+		assert_eq!(row["agent"], agent, "rows keep the list order");
+		assert_eq!(row["ok"], true, "{agent} must succeed: {row}");
+		assert_eq!(
+			row["output"]["name"], "multi",
+			"{agent} row must carry the command's own payload"
+		);
+	}
 
 	for agent in ["claude", "opencode"] {
 		let get = isolated_cli(home.path(), state.path())
@@ -492,6 +570,238 @@ fn add_mcp_agent_list_writes_each_agent_config() {
 			"{agent} config must list the MCP added via the agent list"
 		);
 	}
+}
+
+/// A batch naming an agent with NO MCP support (pi) must be rejected by the
+/// preflight BEFORE any write — claude's config must stay untouched.
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_preflight_rejects_unsupported_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude,pi",
+			"add",
+			"mcps",
+			"--name",
+			"never",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"unsupported agent must fail the batch"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("pi") && stderr.contains("nothing was written"),
+		"preflight must name the agent and promise no writes, got: {stderr}"
+	);
+	// The preflight fired BEFORE any write: claude has no 'never' MCP.
+	assert!(
+		!mcp_listed(home.path(), state.path(), "never"),
+		"claude config must be untouched after a preflight rejection"
+	);
+}
+
+/// A mid-batch runtime failure (duplicate on claude) must NOT skip the
+/// remaining agents: opencode still gets the MCP, the envelope reports the
+/// partial state per agent, and the exit code is non-zero.
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_reports_partial_failure_and_continues() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	seed_mcp(home.path(), state.path(), "dup");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude,opencode",
+			"add",
+			"mcps",
+			"--name",
+			"dup",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "a failed agent must exit non-zero");
+
+	let envelope: Value = serde_json::from_slice(&out.stdout)
+		.expect("batch stdout must be a single valid JSON document");
+	let rows = envelope.as_array().unwrap();
+	assert_eq!(rows.len(), 2);
+	assert_eq!(rows[0]["agent"], "claude");
+	assert_eq!(rows[0]["ok"], false, "claude already has 'dup': {envelope}");
+	assert!(
+		rows[0]["error"]
+			.as_str()
+			.unwrap_or_default()
+			.contains("dup"),
+		"claude row must carry the error: {envelope}"
+	);
+	assert_eq!(rows[1]["agent"], "opencode");
+	assert_eq!(
+		rows[1]["ok"], true,
+		"opencode must still be attempted: {envelope}"
+	);
+
+	// Observable outcome: opencode really has the MCP on disk.
+	let get = isolated_cli(home.path(), state.path())
+		.args(["-a", "opencode", "get", "mcps"])
+		.output()
+		.unwrap();
+	let json: Value = serde_json::from_slice(&get.stdout).unwrap();
+	assert!(
+		json.as_array().unwrap().iter().any(|m| m["name"] == "dup"),
+		"opencode config must contain the MCP despite claude's failure"
+	);
+}
+
+// ================= source sync: agent list + dry-run fan-out =================
+
+/// Write a minimal source-repo layout (one skill dir with SKILL.md) that the
+/// debug-only `AGHUB_TEST_SOURCE_FETCH_ROOT` fetch hook can serve.
+#[cfg(unix)]
+fn write_source_repo(root: &std::path::Path, skill: &str) {
+	let dir = root.join(skill);
+	std::fs::create_dir_all(&dir).unwrap();
+	std::fs::write(
+		dir.join("SKILL.md"),
+		format!("---\nname: {skill}\ndescription: d\n---\nbody\n"),
+	)
+	.unwrap();
+}
+
+/// The JSON dry-run must expose the install fan-out (`targetAgents`) so a
+/// `-a all`-scale install is visible BEFORE `--yes` — for machines, not just
+/// the human-readable plan.
+#[cfg(unix)]
+#[test]
+fn source_sync_dry_run_json_lists_target_agents() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let source = tempfile::TempDir::new().unwrap();
+	write_source_repo(source.path(), "my-skill");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", source.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,grok",
+			"source",
+			"sync",
+			"owner/testrepo",
+			"--skill",
+			"my-skill",
+			"--install-missing",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["dryRun"], true);
+	assert_eq!(
+		json["targetAgents"],
+		serde_json::json!(["claude", "grok"]),
+		"dry-run JSON must list the exact fan-out: {json}"
+	);
+	assert_eq!(json["actions"][0]["action"], "install");
+	// Dry-run wrote nothing.
+	assert!(!home.path().join(".agents/skills/my-skill").exists());
+}
+
+/// An invalid agent list must fail BEFORE any fetch: no fetch root is set
+/// here, so reaching the fetcher would report a network/credential error —
+/// the unknown-agent error proves the selection was validated first.
+#[cfg(unix)]
+#[test]
+fn source_sync_rejects_unknown_agent_before_fetch() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,nonesuch",
+			"source",
+			"sync",
+			"owner/testrepo",
+			"--install-missing",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success());
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("nonesuch"),
+		"must fail on the agent list, got: {stderr}"
+	);
+	assert!(
+		!stderr.contains("Failed to fetch"),
+		"must fail BEFORE the fetch, got: {stderr}"
+	);
+}
+
+/// `--yes` with an agent list installs the master once and links each listed
+/// agent — asserted on disk, not on the exit code alone.
+#[cfg(unix)]
+#[test]
+fn source_sync_agent_list_installs_for_each_listed_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let source = tempfile::TempDir::new().unwrap();
+	write_source_repo(source.path(), "my-skill");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", source.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,grok",
+			"source",
+			"sync",
+			"owner/testrepo",
+			"--skill",
+			"my-skill",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		out.status.success(),
+		"stderr: {}\nstdout: {stdout}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	// Master installed once; claude linked to it.
+	let master = home.path().join(".agents/skills/my-skill");
+	assert!(master.join("SKILL.md").exists(), "master must exist");
+	let claude_link = home.path().join(".claude/skills/my-skill");
+	assert!(
+		claude_link.exists(),
+		"claude must get its per-agent link; stdout: {stdout}"
+	);
+	// Both listed agents appear in the per-agent breakdown.
+	assert!(
+		stdout.contains("claude") && stdout.contains("grok"),
+		"per-agent breakdown must name both agents: {stdout}"
+	);
 }
 
 #[cfg(unix)] // Windows: global MCP config not HOME-isolated

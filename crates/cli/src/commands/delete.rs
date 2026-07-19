@@ -24,8 +24,10 @@ pub fn execute(
 	resource: ResourceType,
 	name: String,
 	options: DeleteOptions,
-) -> Result<()> {
-	match resource {
+) -> Result<serde_json::Value> {
+	// The caller prints the payload (single-agent) or wraps it in the batch
+	// envelope (multi-agent) — command logic stays print-free.
+	let payload = match resource {
 		ResourceType::Skills => {
 			// Default is a dry-run; --yes performs the removal, --dry-run forces
 			// a preview even if --yes was also passed.
@@ -58,7 +60,7 @@ pub fn execute(
 			payload["type"] = json!("skill");
 			payload["name"] = json!(name);
 			apply_prune_fields(&mut payload, &outcome.prune);
-			println!("{}", serde_json::to_string_pretty(&payload)?);
+			payload
 		}
 		ResourceType::Mcps => {
 			// Same gate as skills: default dry-run, --yes executes, --dry-run
@@ -82,11 +84,11 @@ pub fn execute(
 			let mut payload = serde_json::to_value(&view)?;
 			payload["type"] = json!("mcp");
 			payload["name"] = json!(name);
-			println!("{}", serde_json::to_string_pretty(&payload)?);
+			payload
 		}
-	}
+	};
 
-	Ok(())
+	Ok(payload)
 }
 
 /// Run a planned-removal closure, mapping the two "already gone" cases to a

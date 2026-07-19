@@ -7,7 +7,7 @@ use aghub_core::{
 	adapters::create_adapter,
 	load_all_agents,
 	manager::ConfigManager,
-	models::{AgentType, ResourceScope},
+	models::{AgentSelection, AgentType, ResourceScope},
 	paths::find_project_root,
 };
 
@@ -402,6 +402,20 @@ fn main() -> Result<()> {
 	// Set global verbose flag
 	set_verbose(cli.verbose);
 
+	// A comma --agent list is consumed only by the fan-out commands (get /
+	// add / update / delete / enable / disable / source sync); every other
+	// command ignores the agent flag or is single-agent by nature, so a list
+	// there would be silently dropped — reject it up front, BEFORE the early
+	// dispatches below. A scalar -a stays ignored on those commands for
+	// backcompat.
+	if cli.agent.contains(',') && !takes_agent_list(&cli.command) {
+		anyhow::bail!(
+			"this command does not take an --agent list; pass a single agent \
+			 or omit -a (lists work with: get, add, update, delete, enable, \
+			 disable, source sync)"
+		);
+	}
+
 	// `source` operates on installed skills / git sources, not on a single
 	// agent's config. Dispatch it BEFORE the `-a all` special-case and the
 	// adapter/ConfigManager setup so it never fails on a missing agent config.
@@ -474,25 +488,55 @@ fn main() -> Result<()> {
 		return commands::skill_usage::execute(cli.project, cli.all, *json);
 	}
 
-	// Handle --agent all: iterate all registered agents
-	if cli.agent == "all" {
-		return handle_all_agents(&cli);
-	}
-
-	// Parse the agent flag — a single id or a comma-separated list.
-	let agents = AgentType::parse_list(&cli.agent)
-		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
+	// Parse the agent flag — "all" (case-insensitive), a single id, or a
+	// comma-separated list — through the ONE shared parser.
+	let agents = match AgentSelection::parse(&cli.agent)
+		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?
+	{
+		AgentSelection::All => return handle_all_agents(&cli),
+		AgentSelection::List(agents) => agents,
+	};
 	if agents.len() > 1 {
 		return handle_agent_list(&cli, &agents);
 	}
 	let agent_type = agents[0];
 	eprintln_verbose!("Agent type: {}", cli.agent);
-	run_for_agent(&cli, agent_type)
+	match run_for_agent(&cli, agent_type)? {
+		Some(payload) => {
+			println!("{}", serde_json::to_string_pretty(&payload)?);
+			Ok(())
+		}
+		None => Ok(()),
+	}
+}
+
+/// True for the commands that fan out across an --agent list. Everything
+/// else either ignores the agent flag or is single-agent by nature.
+fn takes_agent_list(command: &Commands) -> bool {
+	matches!(
+		command,
+		Commands::Get { .. }
+			| Commands::Add { .. }
+			| Commands::Update { .. }
+			| Commands::Delete { .. }
+			| Commands::Enable { .. }
+			| Commands::Disable { .. }
+			| Commands::Source {
+				action: SourceAction::Sync { .. }
+			}
+	)
 }
 
 /// Run one command against ONE agent's config. The multi-agent entry points
 /// (`handle_all_agents`, `handle_agent_list`) fan out to this.
-fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
+///
+/// Mutating commands return `Some(payload)` — the caller prints it
+/// (single-agent) or wraps it in the batch envelope (multi-agent). Commands
+/// that manage their own output return `None`.
+fn run_for_agent(
+	cli: &Cli,
+	agent_type: AgentType,
+) -> Result<Option<serde_json::Value>> {
 	// Determine resource scope based on flags
 	// -a/--all takes precedence, then -p/--project, then -g/--global, then default (global)
 	let scope = if cli.all {
@@ -571,9 +615,13 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 		}
 	}
 
-	// Execute command (cloned so multi-agent entry points can re-run it)
+	// Execute command (cloned so multi-agent entry points can re-run it).
+	// Mutating commands return their JSON payload for the caller to print
+	// or collect; the rest print for themselves and yield None.
 	match cli.command.clone() {
-		Commands::Get { resource } => get::execute(&manager, resource),
+		Commands::Get { resource } => {
+			get::execute(&manager, resource).map(|()| None)
+		}
 		Commands::Add {
 			resource,
 			name,
@@ -605,7 +653,8 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 			version,
 			tools,
 			universal,
-		),
+		)
+		.map(Some),
 		Commands::Update {
 			resource,
 			name,
@@ -633,7 +682,8 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 			author,
 			version,
 			tools,
-		),
+		)
+		.map(Some),
 		Commands::Delete {
 			resource,
 			name,
@@ -649,15 +699,16 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 				dry_run,
 				yes,
 			},
-		),
+		)
+		.map(Some),
 		Commands::Disable { resource, name } => {
-			disable::execute(&mut manager, resource, name)
+			disable::execute(&mut manager, resource, name).map(Some)
 		}
 		Commands::Enable { resource, name } => {
-			enable::execute(&mut manager, resource, name)
+			enable::execute(&mut manager, resource, name).map(Some)
 		}
 		Commands::Describe { resource, name } => {
-			describe::execute(&manager, resource, name)
+			describe::execute(&manager, resource, name).map(|()| None)
 		}
 		Commands::Check {
 			resource,
@@ -669,7 +720,8 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 			project_root.as_deref(),
 			online,
 			json,
-		),
+		)
+		.map(|()| None),
 		Commands::ApplyUpdate {
 			resource,
 			name,
@@ -682,13 +734,15 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 			project_root.as_deref(),
 			yes,
 			json,
-		),
+		)
+		.map(|()| None),
 		Commands::PruneLock { dry_run, yes, json } => prune::execute(
 			scope,
 			project_root.as_deref(),
 			dry_run || !yes,
 			json,
-		),
+		)
+		.map(|()| None),
 		Commands::Plugin { action } => {
 			// Plugin management is Claude-specific
 			if agent_type != AgentType::Claude {
@@ -696,7 +750,7 @@ fn run_for_agent(cli: &Cli, agent_type: AgentType) -> Result<()> {
 					"Plugin management is only supported for Claude Code. Use -a claude"
 				));
 			}
-			plugin::execute(action)
+			plugin::execute(action).map(|()| None)
 		}
 		// Dispatched earlier in `main`, before adapter/manager setup.
 		Commands::Source { .. } => {
@@ -762,12 +816,25 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 	get::execute_all(resources, resource)
 }
 
+/// One agent's outcome in a multi-agent batch (`-a a,b <mutating-cmd>`).
+/// snake_case, matching the CLI's other JSON wire shapes.
+#[derive(serde::Serialize)]
+struct AgentBatchResult {
+	agent: &'static str,
+	ok: bool,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	output: Option<serde_json::Value>,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	error: Option<String>,
+}
+
 // Handle a comma-separated --agent list: fan the command across the named
-// agents. `get` aggregates (same JSON shape as `--agent all`); per-agent
-// config commands run once per agent, fail-fast. Lock-scoped commands
-// (check / apply-update / prune-lock / plugin) ignore the agent flag or are
-// single-agent by nature, so a list would only repeat identical work —
-// reject it. (`source` is dispatched earlier and resolves the list itself.)
+// agents. `get` aggregates (same JSON shape as `--agent all`); mutating
+// commands attempt EVERY agent (no fail-fast), collect per-agent results
+// into ONE JSON envelope on stdout, and exit non-zero if any failed, so a
+// partial batch is always visible and machine-readable. (`source sync` is
+// dispatched earlier and resolves the list itself; the top-of-main guard
+// rejects lists on every other command.)
 fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	match &cli.command {
 		Commands::Get { resource } => {
@@ -778,17 +845,55 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 				.retain(|r| agents.iter().any(|a| a.as_str() == r.agent_id));
 			get::execute_all(resources, resource)
 		}
-		Commands::Add { .. }
-		| Commands::Update { .. }
-		| Commands::Delete { .. }
-		| Commands::Enable { .. }
-		| Commands::Disable { .. } => {
-			for agent in agents {
-				// Label each agent's output block on stderr so concatenated
-				// stdout (e.g. one JSON doc per agent) stays attributable.
-				eprintln!("[{}]", agent.as_str());
-				run_for_agent(cli, *agent)
-					.with_context(|| format!("agent '{}'", agent.as_str()))?;
+		Commands::Add { resource, .. }
+		| Commands::Update { resource, .. }
+		| Commands::Delete { resource, .. }
+		| Commands::Enable { resource, .. }
+		| Commands::Disable { resource, .. } => {
+			// Predictable-failure preflight: an agent with no MCP support at
+			// all (e.g. pi) would fail AFTER earlier agents were written —
+			// reject the whole batch before any write instead. Mirrors the
+			// manager's own `supports_mcp_operations` guard.
+			if matches!(resource, ResourceType::Mcps) {
+				let unsupported: Vec<&str> = agents
+					.iter()
+					.filter(|a| !create_adapter(**a).supports_mcp_operations())
+					.map(|a| a.as_str())
+					.collect();
+				if !unsupported.is_empty() {
+					anyhow::bail!(
+						"agent(s) {} do not support MCP operations; nothing \
+						 was written",
+						unsupported.join(", ")
+					);
+				}
+			}
+			// Attempt EVERY agent and collect — a mid-batch failure must not
+			// silently skip the rest.
+			let results: Vec<AgentBatchResult> = agents
+				.iter()
+				.map(|agent| {
+					eprintln_verbose!("Running for agent: {}", agent.as_str());
+					match run_for_agent(cli, *agent) {
+						Ok(output) => AgentBatchResult {
+							agent: agent.as_str(),
+							ok: true,
+							output,
+							error: None,
+						},
+						Err(e) => AgentBatchResult {
+							agent: agent.as_str(),
+							ok: false,
+							output: None,
+							error: Some(format!("{e:#}")),
+						},
+					}
+				})
+				.collect();
+			println!("{}", serde_json::to_string_pretty(&results)?);
+			let failed = results.iter().filter(|r| !r.ok).count();
+			if failed > 0 {
+				anyhow::bail!("{failed} of {} agent(s) failed", results.len());
 			}
 			Ok(())
 		}

@@ -39,7 +39,7 @@ pub fn execute(
 	version: Option<String>,
 	tools: Vec<String>,
 	universal: bool,
-) -> Result<()> {
+) -> Result<serde_json::Value> {
 	if universal {
 		eprintln!(
 			"warning: --universal is deprecated and ignored; \
@@ -47,7 +47,9 @@ pub fn execute(
 			 (.agents/skills master + per-agent link)"
 		);
 	}
-	match resource {
+	// The caller prints the payload (single-agent) or wraps it in the batch
+	// envelope (multi-agent) — command logic stays print-free.
+	let payload = match resource {
 		ResourceType::Skills => {
 			if let Some(from_path) = from {
 				eprintln_verbose!(
@@ -73,7 +75,7 @@ pub fn execute(
 					.with_native_reader(
 						manager.skill_target_is_native_reader(),
 					);
-				println!("{}", serde_json::to_string_pretty(&view)?);
+				serde_json::to_value(&view)?
 			} else {
 				let skill_name = name.ok_or_else(|| {
 					anyhow!("--name is required when not using --from")
@@ -91,7 +93,7 @@ pub fn execute(
 					.with_native_reader(
 						manager.skill_target_is_native_reader(),
 					);
-				println!("{}", serde_json::to_string_pretty(&view)?);
+				serde_json::to_value(&view)?
 			}
 		}
 		ResourceType::Mcps => {
@@ -110,9 +112,9 @@ pub fn execute(
 			let mcp = McpServer::new(mcp_name, transport);
 			manager.add_mcp(mcp.clone())?;
 			eprintln_verbose!("MCP server added successfully");
-			println!("{}", serde_json::to_string_pretty(&mcp)?);
+			serde_json::to_value(&mcp)?
 		}
-	}
+	};
 
-	Ok(())
+	Ok(payload)
 }
