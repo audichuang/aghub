@@ -609,6 +609,107 @@ fn add_mcp_agent_list_preflight_rejects_unsupported_agent() {
 	);
 }
 
+/// The preflight must judge the scope the batch WRITES: augmentcode holds
+/// MCPs globally but not per-project, so `-p` must reject the whole batch
+/// BEFORE claude's project config is written.
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_preflight_rejects_wrong_scope() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let proj = home.path().join("proj");
+	std::fs::create_dir_all(proj.join(".claude")).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(&proj)
+		.args([
+			"-p",
+			"-a",
+			"claude,augmentcode",
+			"add",
+			"mcps",
+			"--name",
+			"never",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"global-only agent must fail -p batch"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("augmentcode")
+			&& stderr.contains("project")
+			&& stderr.contains("nothing was written"),
+		"preflight must name the agent and the scope, got: {stderr}"
+	);
+	assert!(
+		!proj.join(".mcp.json").exists(),
+		"claude's project config must not be created before the rejection"
+	);
+}
+
+/// enable/disable must also preflight the toggle capability: cline holds
+/// MCPs but cannot enable/disable them, so the batch is rejected before
+/// hermes (which CAN toggle) is modified.
+#[test]
+fn toggle_mcp_agent_list_preflight_rejects_non_toggleable() {
+	let out = aghub_cli()
+		.args(["-g", "-a", "hermes,cline", "disable", "mcps", "ghost"])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"non-toggleable agent must fail batch"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("cline") && stderr.contains("enable/disable"),
+		"preflight must name cline's missing toggle, got: {stderr}"
+	);
+	assert!(
+		!stderr.contains("hermes"),
+		"hermes supports toggling and must not be blamed: {stderr}"
+	);
+}
+
+/// A SYNTACTIC list that dedups to one agent still emits the batch
+/// envelope — the top-level output shape must not depend on duplicates.
+#[cfg(unix)]
+#[test]
+fn agent_list_duplicate_still_emits_envelope() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-a",
+			"claude,claude",
+			"add",
+			"mcps",
+			"--name",
+			"solo",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let envelope: Value = serde_json::from_slice(&out.stdout)
+		.expect("stdout must be one valid JSON document");
+	let rows = envelope.as_array().expect("must be the batch envelope");
+	assert_eq!(rows.len(), 1, "deduped to one row: {envelope}");
+	assert_eq!(rows[0]["agent"], "claude");
+	assert_eq!(rows[0]["ok"], true);
+}
+
 /// A mid-batch runtime failure (duplicate on claude) must NOT skip the
 /// remaining agents: opencode still gets the MCP, the envelope reports the
 /// partial state per agent, and the exit code is non-zero.

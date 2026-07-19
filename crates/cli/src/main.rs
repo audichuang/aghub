@@ -496,7 +496,11 @@ fn main() -> Result<()> {
 		AgentSelection::All => return handle_all_agents(&cli),
 		AgentSelection::List(agents) => agents,
 	};
-	if agents.len() > 1 {
+	// A SYNTACTIC list keeps the list output contract even when dedup (or an
+	// alias) collapses it to one agent — `-a claude,claude` must produce the
+	// same top-level shape as `-a claude,opencode`, or scripts break on
+	// equivalent inputs.
+	if cli.agent.contains(',') || agents.len() > 1 {
 		return handle_agent_list(&cli, &agents);
 	}
 	let agent_type = agents[0];
@@ -816,6 +820,36 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 	get::execute_all(resources, resource)
 }
 
+/// The scope a mutating batch actually WRITES — mirrors `run_for_agent` →
+/// `ConfigManager::with_scope` (`global:true` ⇒ GlobalOnly, else
+/// ProjectOnly, including `--all`'s existing quirk), so the preflight
+/// judges exactly the config the batch will write.
+fn batch_write_scope(cli: &Cli) -> Result<ResourceScope> {
+	let global = if cli.global {
+		true
+	} else if cli.project {
+		false
+	} else if cli.all {
+		let current_dir = std::env::current_dir()?;
+		find_project_root(&current_dir).is_some()
+	} else {
+		true
+	};
+	Ok(if global {
+		ResourceScope::GlobalOnly
+	} else {
+		ResourceScope::ProjectOnly
+	})
+}
+
+fn scope_word(scope: ResourceScope) -> &'static str {
+	match scope {
+		ResourceScope::GlobalOnly => "global",
+		ResourceScope::ProjectOnly => "project",
+		ResourceScope::Both => "global+project",
+	}
+}
+
 /// One agent's outcome in a multi-agent batch (`-a a,b <mutating-cmd>`).
 /// snake_case, matching the CLI's other JSON wire shapes.
 #[derive(serde::Serialize)]
@@ -850,20 +884,43 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 		| Commands::Delete { resource, .. }
 		| Commands::Enable { resource, .. }
 		| Commands::Disable { resource, .. } => {
-			// Predictable-failure preflight: an agent with no MCP support at
-			// all (e.g. pi) would fail AFTER earlier agents were written —
-			// reject the whole batch before any write instead. Mirrors the
-			// manager's own `supports_mcp_operations` guard.
+			// Predictable-failure preflight: an agent that cannot hold this
+			// resource in the scope the batch WRITES (e.g. pi anywhere, or
+			// global-only augmentcode under -p), or cannot toggle (cline on
+			// enable/disable), would fail AFTER earlier agents were written —
+			// reject the whole batch before any write instead. Judges the
+			// same write scope `run_for_agent` resolves, with the same trait
+			// methods the manager's own guards use.
 			if matches!(resource, ResourceType::Mcps) {
-				let unsupported: Vec<&str> = agents
+				let write_scope = batch_write_scope(cli)?;
+				let is_toggle = matches!(
+					cli.command,
+					Commands::Enable { .. } | Commands::Disable { .. }
+				);
+				let unsupported: Vec<String> = agents
 					.iter()
-					.filter(|a| !create_adapter(**a).supports_mcp_operations())
-					.map(|a| a.as_str())
+					.filter_map(|a| {
+						let adapter = create_adapter(*a);
+						if !adapter.supports_mcp_scope(write_scope) {
+							return Some(format!(
+								"{} (no {} MCP config)",
+								a.as_str(),
+								scope_word(write_scope)
+							));
+						}
+						if is_toggle && !adapter.supports_mcp_enable_disable() {
+							return Some(format!(
+								"{} (no MCP enable/disable)",
+								a.as_str()
+							));
+						}
+						None
+					})
 					.collect();
 				if !unsupported.is_empty() {
 					anyhow::bail!(
-						"agent(s) {} do not support MCP operations; nothing \
-						 was written",
+						"agent(s) {} do not support this MCP operation; \
+						 nothing was written",
 						unsupported.join(", ")
 					);
 				}
