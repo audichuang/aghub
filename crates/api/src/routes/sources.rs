@@ -348,6 +348,11 @@ mod tests {
 	#[test]
 	fn diff_source_route_reports_breaking_skill_source_changes() {
 		let _global = GlobalLockGuard::new();
+		// Deterministic empty+available keyring: without this, a host with no
+		// reachable secret-service (CI) reports BackendUnavailable and the
+		// route fail-closes to an empty UncheckableSource diff.
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
 		let source = "e2e-source";
 		let upstream = tempdir().unwrap();
 		fs::write(
@@ -479,6 +484,8 @@ mod tests {
 	#[test]
 	fn diff_with_forwarded_header_uses_forwarded_token_for_fetch() {
 		let _global = GlobalLockGuard::new();
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
 		let source = "owner/private-repo";
 		let upstream = seed_source(source);
 
@@ -514,6 +521,10 @@ mod tests {
 	#[test]
 	fn diff_without_header_keeps_keyring_path() {
 		let _global = GlobalLockGuard::new();
+		// Mock keyring: empty but AVAILABLE, so the assertion exercises the
+		// "no credential found" path, not the fail-closed unavailable path.
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
 		let source = "owner/private-repo";
 		let upstream = seed_source(source);
 
@@ -547,6 +558,8 @@ mod tests {
 	#[test]
 	fn diff_does_not_attach_cross_origin_forwarded_token() {
 		let _global = GlobalLockGuard::new();
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
 		// The request is for a github.com source, but the header carries a
 		// gitlab.com source token. Host-scoped matching keeps the two apart, so
 		// the github.com diff must NOT pick up the gitlab token.

@@ -230,4 +230,30 @@ pub(crate) mod test_hooks {
 			);
 		}
 	}
+
+	/// RAII guard: installs the in-memory mock keyring builder so credential
+	/// reads deterministically SUCCEED with an empty store — independent of
+	/// whether the host has a reachable secret-service/keychain (CI runners
+	/// do not; a developer machine may even hold real aghub credentials).
+	/// Same process-global contract as [`ForceCredentialBackendUnavailable`]:
+	/// the caller MUST hold `crate::routes::test_env_lock()` for this guard's
+	/// entire lifetime. Restores the platform default builder on drop.
+	pub(crate) struct MockKeyringBackend;
+
+	impl MockKeyringBackend {
+		pub(crate) fn new() -> Self {
+			keyring::set_default_credential_builder(
+				keyring::mock::default_credential_builder(),
+			);
+			Self
+		}
+	}
+
+	impl Drop for MockKeyringBackend {
+		fn drop(&mut self) {
+			keyring::set_default_credential_builder(
+				keyring::default::default_credential_builder(),
+			);
+		}
+	}
 }

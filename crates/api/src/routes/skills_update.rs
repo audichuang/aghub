@@ -36,7 +36,9 @@ use skill_update::mutation::{
 	accept_fetched_rename, resync_locked_skill, FetchMutationError,
 	FetchedSourceRequest, LockedResyncError, LockedResyncRequest,
 };
-#[cfg(test)]
+// Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
+// match its gate exactly or Windows clippy flags an unused import.
+#[cfg(all(test, unix))]
 use skill_update::TokenResolution;
 use skill_update::{
 	check_updates, CheckDeps, CheckOutput, EntryInput, FetchError, Fetcher,

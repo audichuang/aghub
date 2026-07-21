@@ -4317,6 +4317,10 @@ mod tests {
 	#[test]
 	fn install_skill_returns_per_agent_rows_symlink_only() {
 		with_isolated_env(|home, _state| {
+			// Mock keyring: without it the install route fail-closes 503 on
+			// hosts with no reachable credential backend (CI runners).
+			let _keyring =
+				crate::credentials::test_hooks::MockKeyringBackend::new();
 			let work = home.join("work");
 			let skill_dir = work.join("my-skill");
 			std::fs::create_dir_all(&skill_dir).unwrap();
@@ -4467,10 +4471,37 @@ mod tests {
 		);
 	}
 
+	/// Restores the process CWD on drop, so a mid-test panic can never leave
+	/// the process standing in a soon-deleted temp dir — a leaked deleted CWD
+	/// makes every later `std::env::current_dir()` caller in this binary
+	/// (e.g. `gix::init`) fail with NotFound.
+	#[cfg(unix)]
+	struct CwdGuard(std::path::PathBuf);
+
+	#[cfg(unix)]
+	impl CwdGuard {
+		fn change_to(dir: &std::path::Path) -> Self {
+			let prev = std::env::current_dir().unwrap();
+			std::env::set_current_dir(dir).unwrap();
+			Self(prev)
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for CwdGuard {
+		fn drop(&mut self) {
+			let _ = std::env::set_current_dir(&self.0);
+		}
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn install_skill_relative_project_root_is_absolutized() {
 		with_isolated_env(|home, _state| {
+			// Mock keyring: without it the install route fail-closes 503 on
+			// hosts with no reachable credential backend (CI runners).
+			let _keyring =
+				crate::credentials::test_hooks::MockKeyringBackend::new();
 			let proj = home.join("proj");
 			std::fs::create_dir_all(proj.join(".claude")).unwrap();
 			let work = home.join("work");
@@ -4526,27 +4557,27 @@ mod tests {
 				.unwrap();
 			}
 
-			let prev = std::env::current_dir().unwrap();
-			std::env::set_current_dir(home).unwrap();
-			let req = InstallSkillRequest {
-				source: format!("file://{}", work.display()),
-				agents: vec!["claude".to_string()],
-				skills: vec!["my-skill".to_string()],
-				scope: "project".to_string(),
-				project_path: Some("proj".to_string()),
-				install_all: Some(false),
+			let resp = {
+				let _cwd = CwdGuard::change_to(home);
+				let req = InstallSkillRequest {
+					source: format!("file://{}", work.display()),
+					agents: vec!["claude".to_string()],
+					skills: vec!["my-skill".to_string()],
+					scope: "project".to_string(),
+					project_path: Some("proj".to_string()),
+					install_all: Some(false),
+				};
+				let repo =
+					std::sync::Arc::new(skill_update::SkillRepository::new());
+				block_on(install_skill_route_with_repo(
+					req,
+					ForwardedGitTokens::default(),
+					repo,
+				))
+				.ok()
+				.expect("handler ok")
+				.into_inner()
 			};
-			let repo =
-				std::sync::Arc::new(skill_update::SkillRepository::new());
-			let resp = block_on(install_skill_route_with_repo(
-				req,
-				ForwardedGitTokens::default(),
-				repo,
-			))
-			.ok()
-			.expect("handler ok")
-			.into_inner();
-			std::env::set_current_dir(prev).unwrap();
 
 			assert!(
 				resp.agents.iter().all(|a| a
