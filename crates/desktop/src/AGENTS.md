@@ -10,7 +10,8 @@ Role map:
 
 - `generated/dto/` — ts-rs from Rust API; **never hand-edit**
 - `requests/` — single data-access seam (query/mutation options + invalidate helpers)
-- `lib/` — pure helpers; `hooks/` / `contexts/` / `providers/` — React wiring
+- `lib/` — helpers (mostly pure; also the api client, i18n, and `store/`
+  persist); `hooks/` / `contexts/` / `providers/` — React wiring
   (`providers/` is connection/theme/agent-availability context — **not** QueryClient;
   QueryClient lives in `App.tsx`; persist store under `lib/store`)
 - `pages/` · `components/` · `layouts/` · `styles/` · `assets/`
@@ -28,6 +29,7 @@ Role map:
 
 - **`generated/` is codegen (ts-rs from the Rust API).** Never hand-edit; change the Rust type + regenerate. Pages consume these DTOs directly — that coupling is intentional, not a layer to wrap.
 - **`requests/` is the single data-access seam.** Reuse its `queryOptions` / `mutationOptions` and the `invalidate*Queries` helpers (e.g. `invalidateSkillQueries`) — don't hand-roll `useQuery` keys per page or duplicate optimistic-cache logic.
-- **HeroUI v3 ≠ v2.** Always search the v3 docs before any UI work (see the root CLAUDE.md HeroUI policy + the repo `.heroui-docs/`).
-- Grouping/merge utilities live in `lib/` (e.g. `getMcpMergeKey`) — search there before re-implementing a Map-reduce in a page.
+- Grouping/merge and bulk plan/diff utilities live in `lib/` (e.g.
+  `getMcpMergeKey`, `group-agent-plan.ts`) — search there before
+  re-implementing a Map-reduce or bulk-diff in a page.
 - **Pure logic gets a colocated `*.test.ts`** (node:test, run via `bun run test`). When you add a pure helper to `lib/` (or a pure type-contract next to a component), add the test beside it — CI runs the whole `src/**/*.test.ts` glob.

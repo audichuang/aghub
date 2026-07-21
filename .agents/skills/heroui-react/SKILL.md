@@ -24,13 +24,13 @@ curl -fsSL https://v3.heroui.com/install | bash -s heroui-react
 
 **This guide is for HeroUI v3 ONLY.** Do NOT apply v2 patterns — the provider, styling, and component API all changed:
 
-| Feature       | v2 (DO NOT USE)                   | v3 (USE THIS)                               |
-| ------------- | --------------------------------- | ------------------------------------------- |
-| Provider      | `<HeroUIProvider>` required       | **No Provider needed**                      |
-| Animations    | `framer-motion` package           | CSS-based, no extra deps                    |
-| Component API | Flat props: `<Card title="x">`    | Compound: `<Card><Card.Header>`             |
-| Styling       | Tailwind v3 + `@heroui/theme`     | Tailwind v4 + `@heroui/styles@beta`         |
-| Packages      | `@heroui/system`, `@heroui/theme` | `@heroui/react@beta`, `@heroui/styles@beta` |
+| Feature       | v2 (DO NOT USE)                   | v3 (USE THIS)                        |
+| ------------- | --------------------------------- | ------------------------------------ |
+| Provider      | `<HeroUIProvider>` required       | **No Provider needed**               |
+| Animations    | `framer-motion` package           | CSS-based, no extra deps             |
+| Component API | Flat props: `<Card title="x">`    | Compound: `<Card><Card.Header>`      |
+| Styling       | Tailwind v3 + `@heroui/theme`     | Tailwind v4 + `@heroui/styles`       |
+| Packages      | `@heroui/system`, `@heroui/theme` | `@heroui/react` v3, `@heroui/styles` |
 
 ```tsx
 // DO NOT DO THIS - v2 pattern
@@ -114,12 +114,13 @@ Getting started guides: `https://v3.heroui.com/docs/react/getting-started/{topic
 
 ## Installation Essentials
 
-**CRITICAL**: HeroUI v3 is currently in BETA. Always use `@beta` tag when installing packages.
+HeroUI v3 is **stable** (this repo pins `@heroui/react` `^3.0.1` — no `@beta`
+tag; the desktop frontend installs with **bun**, not npm).
 
 ### Quick Install
 
 ```bash
-npm i @heroui/styles@beta @heroui/react@beta tailwind-variants
+bun add @heroui/styles @heroui/react tailwind-variants
 ```
 
 ### Framework Setup (Next.js App Router - Recommended)
@@ -127,7 +128,7 @@ npm i @heroui/styles@beta @heroui/react@beta tailwind-variants
 1. **Install dependencies:**
 
 ```bash
-npm i @heroui/styles@beta @heroui/react@beta tailwind-variants tailwindcss @tailwindcss/postcss postcss
+bun add @heroui/styles @heroui/react tailwind-variants tailwindcss @tailwindcss/postcss postcss
 ```
 
 2. **Create/update `app/globals.css`:**

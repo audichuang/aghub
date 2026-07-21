@@ -18,6 +18,7 @@ map the normalized model into each agent's config format.
 | Provider delete teardown     | `cascade.rs` (shared by API + CLI; never fork) |
 | Per-agent config write       | `<agent>/files.rs`                             |
 | Normalize ↔ agent schema     | `<agent>/mapping.rs` (Claude: `claude/mod.rs`) |
+| Schema migrations            | `migrations/*.sql` (sqlx)                      |
 
 ## GOTCHAS / ANTI-PATTERNS
 
@@ -25,8 +26,12 @@ map the normalized model into each agent's config format.
 - **「Active」provider is not an SQLite binding column** (dropped in
   `0006_drop_binding_is_active`). Selection lives in per-agent adapters, not
   inventory rows
+- **Tests never hit the real keyring** (Linux native backend needs
+  secret-service/dbus — a recurring CI red). Inject a `CredentialStore`:
+  `FileCredentialStore` / `$AGHUB_TEST_CREDENTIAL_FILE`, or `Arc<dyn
+CredentialStore>` per-request in the API
 - This crate's `CredentialStore` is **distinct** from git/source credentials in
-  `crates/api` — don't conflate them
+  `crates/api` (whose test double is `MockKeyringBackend`) — don't conflate them
 - Each agent maps differently; model changes must update every agent's mapping
   (`codex`/`opencode`: `mapping.rs`; Claude: `claude/mod.rs` — no `mapping.rs`)
 

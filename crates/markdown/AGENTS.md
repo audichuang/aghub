@@ -3,7 +3,9 @@
 **Crate**: `aghub-markdown` — Generic YAML-frontmatter markdown parser/renderer\
 **Role in monorepo**: Leaf utility. Splits a document into typed YAML
 frontmatter (between leading `---` lines) and the body, and renders the pair
-back. This is the shared primitive behind SKILL.md frontmatter handling.
+back. This is the shared primitive behind **sub-agent `.md`** frontmatter —
+SKILL.md frontmatter is NOT parsed here (that goes through `skills_ref` in
+`crates/skill`, for npx compatibility).
 
 ## PUBLIC API (`src/lib.rs`)
 
@@ -18,10 +20,9 @@ Frontmatter is delimited by `---` lines at the very top of the document.
 
 ## DEPENDENTS
 
-`aghub-agents` (SKILL.md frontmatter: `name`, `description`, `author`,
-`version`, `tools`). Keep this crate generic over `T` — agent-specific schema
-(required fields, string-only validation) lives in the descriptor/parser layers,
-**not** here.
+`aghub-agents` (`sub_agents.rs` — `SubAgentFrontmatter { name, description }`).
+Keep this crate generic over `T` — agent-specific schema (required fields,
+string-only validation) lives in the descriptor/parser layers, **not** here.
 
 ## ANTI-PATTERNS
 

@@ -1,6 +1,7 @@
 # GIT CRATE KNOWLEDGE BASE
 
-**Crate**: `aghub-git` — clone/fetch with credential injection.
+**Crate**: `aghub-git` — clone/fetch with credential injection + pluggable
+fetch backends (`RepoFetchBackend`: gix shallow / GitHub REST).
 
 **Used by**: `aghub-api`, `aghub-cli`, `skill-update`, `aghub-cc-plugins` (NOT core).
 
@@ -12,18 +13,30 @@
 - **`system_git.rs` shells out to the real `git` binary** when no explicit token
   applies so OS credential helpers (Windows Credential Manager, TFS/Azure DevOps)
   work. Do **not** collapse that path into pure `gix`.
-- Preferred auth: env `GIT_USERNAME` / `GIT_PASSWORD`, or `CloneOptions::with_credentials`.
+- Auth precedence: explicit `CloneOptions::with_credentials` wins; env
+  `GIT_USERNAME` / `GIT_PASSWORD` is the fallback. Token resolution lives in
+  the **callers** — cli `source`/`check` map env `GITHUB_TOKEN`; the api
+  resolves per-source tokens from its `credentials/` store (no `GITHUB_TOKEN`
+  env). Do not add either mapping here.
 
 ## WHERE TO LOOK
 
-| Task                     | File                 |
-| ------------------------ | -------------------- |
-| Clone                    | `src/clone.rs`       |
-| Treeless fetch (updates) | `src/fetch.rs`       |
-| Credential inject        | `src/credentials.rs` |
-| Source/URL normalize     | `src/source.rs`      |
-| System-git fallback      | `src/system_git.rs`  |
-| Redact                   | `src/redact.rs`      |
+| Task                            | File                           |
+| ------------------------------- | ------------------------------ |
+| Clone                           | `src/clone.rs`                 |
+| Bare shallow (depth-1) fetch    | `src/fetch.rs`                 |
+| Fetch backend trait             | `src/backend.rs`               |
+| GitHub REST backend             | `src/github_rest.rs`           |
+| Remote refs / branch listing    | `src/remote.rs`                |
+| Materialize staged tree entries | `src/stage.rs` + `src/tree.rs` |
+| Credential inject               | `src/credentials.rs`           |
+| Source/URL normalize            | `src/source.rs`                |
+| System-git fallback             | `src/system_git.rs`            |
+| Redact                          | `src/redact.rs`                |
+
+`backend.rs` (`RepoFetchBackend`) is the seam `skill-update`'s fallback chain
+plugs into: `GithubRest` (github.com only, `HttpTransport` test seam) →
+`GixShallow` → system git.
 
 ## ANTI-PATTERNS
 

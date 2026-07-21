@@ -14,12 +14,16 @@ codegraph — enumerated trees drift):
 - `all_agents.rs` — `load_all_agents()` → `AgentResources` bulk load
 - `availability.rs` — which agent CLIs are installed
 - `batch.rs` — multi-target mutation policy: preflight-before-any-write +
-  attempt-all + the `AgentBatchView` wire shape. CLI `-a a,b` and API
-  `/mcps/batch` are thin maps over it — extend it here, never per surface
+  attempt-all + the `AgentBatchView` wire shape. CLI `-a a,b`, API
+  `/mcps/batch`, transfer/reconcile, and shared Source-to-Master installs are
+  thin maps over it — extend it here, never per surface
 - `manager/` — `ConfigManager` CRUD, split per resource: `mod.rs` / `skill.rs` / `mcp.rs` / `sub_agent.rs`
 - `dto/` — CLI/API shared wire views (`removal.rs` `RemovalView`, `skill.rs` `SkillView`) — single source for both surfaces
-- `paths.rs` — XDG path helpers; `registry/` — `ALL_AGENTS` + `get()`
-- `skills/` — the skill subsystem: `discovery.rs` (SKILL.md + frontmatter), `linker/` (universal-master link decisions, `classify.rs`), `lock.rs`, `install_fetched.rs`, `removal.rs`, `prune.rs`, `update.rs` (`stage_and_swap_dir` + `RecoveryHint` rollback hints), `resync.rs`
+- `paths.rs` — project-root detection (agent-marker walk-up); `registry/` — `ALL_AGENTS` + `get()`
+- `skills/` — the skill subsystem (`ls` for the full list). Load-bearing:
+  `linker/classify.rs` (universal-master link decisions), `rename.rs` (the
+  transactional skill rename — rollback lives here, not in surfaces),
+  `update.rs` (`stage_and_swap_dir` + `RecoveryHint` rollback hints)
 - `transfer.rs` — batch install/copy/delete + `reconcile_{skill,mcp,sub_agent}` (`ensure_disjoint` rejects an agent in both add and remove)
 - `testing.rs` — `TestConfig` (feature = "testing")
 
@@ -35,19 +39,19 @@ codegraph — enumerated trees drift):
 | Skills from filesystem   | `src/skills/discovery.rs` | Parses SKILL.md YAML frontmatter                    |
 | Cross-agent batch ops    | `src/transfer.rs`         | `OperationBatchResult`, reconcile fns               |
 | CLI/API wire DTOs        | `src/dto/`                | `RemovalView` / `SkillView`                         |
-| XDG paths                | `src/paths.rs`            | `~` prefix convention                               |
+| Project root detection   | `src/paths.rs`            | agent-marker walk-up                                |
 | Agent CLI detection      | `src/availability.rs`     | Checks for installed agent binaries                 |
 | Test isolation           | `src/testing.rs`          | `TestConfig` + per-agent path overrides             |
 
 ## KEY ABSTRACTIONS
 
-**`ConfigManager`**: Central CRUD — `load()`, `save()`, `load_both()`. Construct with `ConfigManager::new(adapter, global: bool, project_root: Option<&Path>)` (or `with_scope(...)`). Scope: `GlobalOnly | ProjectOnly | Both`.
+**`ConfigManager`**: Central CRUD — `load()`, `save()`, `load_both_annotated()` (provenance-carrying; plain `load_both()` is private). Construct with `ConfigManager::new(adapter, global: bool, project_root: Option<&Path>)` (or `with_scope(...)`). Scope: `ResourceScope::{GlobalOnly, ProjectOnly, Both}`.
 
 **`AgentAdapter`** (trait in `adapters/mod.rs`): wraps a descriptor; `create_adapter(agent_type)` returns one.
 
 **`transfer.rs`**: `InstallTarget { agent, scope, project_root }`, `OperationBatchResult { results: Vec<OperationResult> }` — used for installing/copying skills to multiple agents at once. The reconcile family routes skill removal through `remove_skill_planned` (never blind `remove_dir_all` — a NativeReader's read path contains the shared master).
 
-**MCP removal contract**: `remove_mcp_planned` rewrites the shared config entry and deletes NO disk path — `RemovalPlan.paths` stays empty on purpose (a non-empty path once made the desktop preview claim it would delete `~/.claude.json`).
+**MCP removal contract**: root AGENTS.md states the invariant (`RemovalPlan.paths` deliberately empty). The why: a non-empty path once made the desktop preview claim it would delete `~/.claude.json`.
 
 **Skills discovery**: Walks directories looking for `SKILL.md`; parses YAML frontmatter between `---` markers; records `source_path` with `~` prefix.
 
@@ -55,7 +59,7 @@ codegraph — enumerated trees drift):
 
 - Agent IDs: lowercase strings, kebab-case where multiword (e.g. `jetbrains-ai`); Rust module names are snake_case
 - Paths: `~` prefix for home-relative (converted at I/O boundary)
-- Skills deduplication: by name, project takes precedence over global
+- Skills deduplication: by name, project takes precedence over global (sub-agents: same rule)
 - MCPs: not deduplicated
 
 ## TESTING
@@ -77,6 +81,6 @@ Tests that read **or** mutate `HOME`/`XDG_*` — including anything that calls `
 - NEVER add agent descriptors here — they belong in `crates/agents/src/agents/`
 - NEVER bypass `ConfigManager` for config mutations
 - NEVER skip `source_path` on Skill — required for provenance tracking
-- NEVER use non-XDG paths — always use `dirs` crate + `paths.rs` helpers
+- NEVER hand-build home paths — always use the `dirs` crate; `~` display formatting goes through `lib.rs` `format_path_with_tilde`
 - NEVER add to `registry/mod.rs` without first adding to `crates/agents`
 - NEVER clear `skills_path_override` for a global write without isolating `$HOME` (or using a project `tempdir`) and tearing down written skill dirs

@@ -10,8 +10,8 @@ Role map (not a full file tree — `ls` / codegraph for that):
 - `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
 - `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns)
 - `models.rs` — `AgentConfig`, `AgentType`, `McpServer`, `McpTransport`, `Skill`
-- `agents/` — one descriptor per agent (`AgentType::ALL` = 25); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
-- `format/` — serializers: OpenCode native, JSON map/list MCP, TOML (Codex/Mistral)
+- `agents/` — one descriptor per agent (authoritative list: `AgentType::ALL` in `models.rs`); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
+- `format/` — serializers: OpenCode native, JSON map/list MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). The strict dialects (Grok TOML / Hermes YAML) share their transport invariants — mixed-key rejection, `url` → Sse/Http split — in `transport_policy.rs`; read it before touching either parser
 
 ## WHERE TO LOOK
 
@@ -44,17 +44,11 @@ matrix, registry fallback) is documented once in the **root AGENTS.md
 
 ## ADDING AN AGENT
 
-In this crate:
-
-1. `src/agents/<name>.rs` — `pub const DESCRIPTOR: AgentDescriptor = …`
-2. `src/agents/mod.rs` — `pub mod <name>;`
-3. `src/models.rs` — `AgentType` variant + `ALL` + `as_str()` + `from_str()`
-
-Then in `crates/core/src/registry/mod.rs`: add `&agents::<name>::DESCRIPTOR` to `ALL_AGENTS` (dispatch is find-by-id over that array — no match to edit).
+Wiring steps: root AGENTS.md "Adding / Removing an Agent". Crate-level detail:
+the descriptor is `pub const DESCRIPTOR: AgentDescriptor = …`, and core's
+`ALL_AGENTS` dispatch is find-by-id over the array — no match arm to edit.
 
 ## ANTI-PATTERNS
 
-- NEVER add an agent without also wiring `models.rs` and core's `ALL_AGENTS`
-- NEVER hand-wire adapter structs — behavior is entirely in `AgentDescriptor` fn pointers
 - NEVER use `AgentType` string literals — always use `as_str()` / `from_str()`
 - NEVER give `AgentDescriptor` fields that aren't const-constructible — `pub const DESCRIPTOR` needs `&'static str` + fn pointers

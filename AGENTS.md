@@ -57,7 +57,7 @@ crates/
   api/           # Rocket HTTP server
   desktop/       # Tauri + React; src-tauri package name is `aghub` (−p aghub ≠ CLI)
   skill/         # .skill zip + npx-compatible locks + hashing
-  skill-update/  # shared update-check + Sources domain (API check + CLI check/source)
+  skill-update/  # shared update-check + Sources domain + source-mutation seam (API + CLI)
   skills-sh/     # skills.sh registry client (search only)
   inference/     # providers: SQLite meta + keyring
   remote/        # SSH remote VM (desktop only, not API)
@@ -109,7 +109,10 @@ core); the MCP **parse/serialize** logic it points at lives in
 - **OpenCode**: `mcp` object key; SSE + StreamableHttp unify as `"type": "remote"`
   (SSE identity lost). Reads own dir **plus** `.agents/skills` Master — never
   another agent's private dir.
-- **Codex/Mistral**: TOML.
+- **Codex/Mistral/Grok**: TOML. Grok gotchas: MCP under `mcp_servers` in
+  `~/.grok/config.toml` (project: `.grok/config.toml`); streamable HTTP has
+  **no** `type` key — only SSE carries `type = "sse"`; native `enabled` flag;
+  other top-level keys preserved on rewrite.
 - **Copilot**: global `~/.copilot/skills`; project scope reads Master.
 - **Hermes** (Nous Research): global-only. Skills from `~/.hermes/skills/`
   (SKILL.md). MCP under the `mcp_servers` key of `~/.hermes/config.yaml` (YAML —
@@ -142,12 +145,15 @@ just lint / just fmt
 ## CLI Command Surface
 
 Authoritative: clap (`just start -- --help`, `crates/cli/src/commands/`).
-Aliases: `skills`/`skill`, `mcps`/`mcp`. Scope: `-a`, `-g`/`-p`, `--all`.
+Aliases: `skills`/`skill`, `mcps`/`mcp`. Scope: `-a` (one id, a comma-separated
+list, or `all` — one `AgentSelection` parser; multi-target runs emit a batch
+envelope, policy in `core/src/batch.rs`), `-g`/`-p`, `--all`.
 
 Non-obvious invariants:
 
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`, `source sync`,
   `source accept-rename`, reconcile-with-removals → **dry-run unless `--yes`**
+  (`apply-update` refuses outright instead of printing a preview)
 - **`check` is offline by default** — remote sources report `uncheckable/network`;
   pass `--online` for a real update check
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
@@ -167,21 +173,20 @@ load origin. Locks track content hashes.
 (`crates/core/src/skills/linker/classify.rs`). NativeReader → Master only, **no**
 per-agent link. Both install paths must use it — CLI
 `add_skill_universal` / `add_skill_from_path_universal` and fetched
-`install_universal` (they diverged once).
+`install_universal`.
 
 ## Adding / Removing an Agent
 
-1. `crates/agents/src/agents/<name>.rs` — descriptor (`codex/` is a subdir;
-   `factory.rs` = Factory-AI agent, not a dispatch factory)
+1. `crates/agents/src/agents/<name>.rs` — descriptor (naming gotchas:
+   `crates/agents/AGENTS.md`)
 2. `crates/agents/src/agents/mod.rs` — `pub mod`
 3. `crates/agents/src/models.rs` — `AgentType` + `ALL` + `as_str`/`from_str`
 4. `crates/core/src/registry/mod.rs` — `ALL_AGENTS` entry (find-by-id; no match)
 
 ## Testing
 
-`TestConfig` + `set_skills_path_override` (thread-local). Suites: core
-`integration_tests`, `mcp_tests`, `test_agent_paths`, `sources_install_tests`,
-cli `cli_tests`.
+`TestConfig` + `set_skills_path_override` (thread-local). Suites live under
+`crates/core/tests/` and `crates/cli/tests/` — list them there, not here.
 
 **Do not pollute real home**: clearing override under **global** scope still
 writes master to `dirs::home_dir()/.agents/skills`. Isolate `$HOME` (Unix) or
@@ -192,9 +197,7 @@ is worse than none (it reads as "covered"). Assert observable OUTCOMES (values,
 on-disk / lock state), not just a variant / `is_err()` / a key name; for a
 safety-critical flow (fs mutation, rollback) exercise the FAILURE path — e.g.
 rollback AFTER the destructive step, not only install-fails or the happy path.
-Shallow "passes anyway" tests here masked a data-safety gap; the worked fix is
-`docs/specs/2026-07-15-skill-rename-transaction-deepening.md` (Holistic-review
-follow-up).
+Worked example: `docs/specs/2026-07-15-skill-rename-transaction-deepening.md`.
 
 ## Agent permissions / approval boundaries
 
@@ -221,14 +224,14 @@ verifying a release gate.
 - NEVER return arbitrary internal temp/lock/keyring paths in API **errors**;
   skill DTOs may expose intentional `source_path` / `canonical_path` for UI
 - NEVER hand-mirror a mutating/transactional flow across surfaces (CLI ↔ API, or
-  per-dialect parsers) and "keep it in sync by hand" — it WILL drift (it did: the
-  rename txn, the link primitives, the MCP mixed-key rule, the multi-agent batch
-  policy — now `core/src/batch.rs`). Extract the invariant
-  to `core` / a shared policy behind ONE tested interface; surfaces stay thin
-  adapters. Examples + deferred hardening: `docs/specs/2026-07-15-*`
+  per-dialect parsers) and "keep it in sync by hand" — it WILL drift (worked
+  example: the multi-agent batch policy, extracted to `core/src/batch.rs`).
+  Extract the invariant to `core` / a shared policy behind ONE tested interface;
+  surfaces stay thin adapters.
 - When promoting a **private** flow to a **public** seam, re-assert the
-  preconditions the old callers used to guarantee (e.g. `accept_rename` now
-  re-checks the lock) — a public entry point is only as safe as its own guards
+  preconditions the old callers used to guarantee (e.g. `accept_rename`
+  re-checks the lock itself) — a public entry point is only as safe as its own
+  guards
 
 ## Release & Packaging
 
@@ -238,10 +241,7 @@ Hard gotchas only:
 - Tag `v*` after green CI; `just preflight` first — **pre-push does NOT run tests**
 - Version from git tag (CI sed); don't hand-bump for release
 - **Never change** shipped `tauri.conf.json` updater `pubkey` / wrong `endpoints`
-- Unset `APPLE_*` secrets break macOS (`security import` empty cert) — leave
-  commented until real certs exist
-- Homebrew tap needs `HOMEBREW_TAP_TOKEN` (default `GITHUB_TOKEN` cannot write it)
-- Unix-gated test helpers need the same `#[cfg]` as callers or Windows CI clippy fails
+- Everything else (signing secrets, Homebrew tap, workflow failures): the skill
 
 ## Configuration Paths
 

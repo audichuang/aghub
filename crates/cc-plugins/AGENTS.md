@@ -29,8 +29,10 @@ discovery + git/tarball materialization are in-crate.
   installed `plugin list` (`ClaudeCli::plugin_list` → `Vec<CliInstalledPlugin>`)
   AND for on-disk `MarketplaceConfig` (`serde_json::from_str` in
   discovery/installer)
-- Marketplace `"source": "directory"` (alias `"local"`) → `MarketplaceEntry::Directory`;
-  do not assume git-only sources
+- Marketplace `"source": "directory"` (alias `"local"`) parses to
+  `CliMarketplaceSource::Local` (`cli/types.rs`); the separate
+  `MarketplaceEntry::Directory` is `registry_catalog.rs`'s plugins-subdir
+  fallback, unrelated to the JSON `source` field. Do not assume git-only sources
 
 ```bash
 cargo test -p aghub-cc-plugins

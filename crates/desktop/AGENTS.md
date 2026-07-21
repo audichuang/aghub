@@ -1,8 +1,9 @@
 # DESKTOP CRATE KNOWLEDGE BASE
 
-**Crate**: `aghub-desktop` — Tauri v2 desktop application\
+**Directory**: `crates/desktop` — Tauri v2 desktop app (bun frontend +
+`src-tauri` Rust crate; there is no `aghub-desktop` crate)\
 **Stack**: React 19 + TypeScript + HeroUI v3 + Tailwind CSS v4\
-**Package Manager**: bun (REQUIRED)
+**Package Manager**: bun (REQUIRED — never npm/yarn/pnpm)
 
 ## STRUCTURE
 
@@ -12,23 +13,16 @@ Role map (not a full tree):
 - `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI). Commands under `commands/` (credentials/logging/remote/server/window). Embeds `aghub-api` on localhost; uses `aghub-remote` for SSH — does **not** depend on `aghub-core` directly.
 - `src-tauri/capabilities/` — permission manifests (read `default.json`; don't restate the list here)
 
-Frontend form patterns: see project skill `project-form-patterns` and `src/AGENTS.md` for page-level notes.
+Frontend form patterns: `project-form-patterns` in the universal Master
+(`.agents/skills/` — not auto-registered in Claude Code) + `src/AGENTS.md` for
+page-level notes.
 
 ## CRITICAL: HEROUI V3
 
-**STOP**: What you remember about HeroUI React v3 is WRONG for this project.
-
-### v3 Differences (vs v2):
-
-- **NO Provider needed** — was required in v2
-- Compound components pattern (not flat props)
-- Tailwind CSS v4 (not v3)
-- Package: `@heroui/react` v3 stable (not `@heroui/system`)
-
-### Before Any UI Task:
-
-1. Search docs in `../../.heroui-docs/react/`
-2. If docs missing, run: `heroui agents-md --react --output AGENTS.md`
+**STOP**: what you remember about HeroUI React is WRONG for v3 — always search
+the docs first (lookup contract: marker block at the bottom of this file; deep
+patterns: project skill `heroui-react`). Project increment: we are on **stable
+`@heroui/react` ^3.x** — no Provider, compound components, Tailwind v4.
 
 ## COMMANDS
 
@@ -53,10 +47,6 @@ bun run tauri build  # Build Tauri app
 
 ## CONVENTIONS
 
-### Package Management
-
-- **ALWAYS use `bun`** — never npm/yarn/pnpm (also stated in the root AGENTS.md)
-
 ### UI Development
 
 - **ALWAYS use HeroUI v3** components
@@ -76,7 +66,7 @@ From `tauri.conf.json`:
 
 - Product name: `aghub` (bundle id `com.akrc.aghub`)
 - Window: 1200x800 (min 1024x600), overlay titlebar (`titleBarStyle: "Overlay"`, hidden title)
-- Permissions: see `src-tauri/capabilities/default.json` (window controls, opener, dialog, store, deep-link, log, updater, process, autostart, clipboard) — don't restate the list here, it drifts
+- Permissions: see `src-tauri/capabilities/default.json` — don't restate the list here, it drifts
 
 ## ANTI-PATTERNS
 
@@ -91,7 +81,6 @@ From `tauri.conf.json`:
 
 ### Frontend
 
-- NEVER use npm/yarn/pnpm (bun only)
 - NEVER use pure black (#000) or pure white (#fff) — always tint
 - NEVER use string template for className concat, use `cn` util from `@/lib/utils`.
 
@@ -99,6 +88,9 @@ From `tauri.conf.json`:
 
 - NEVER modify Tauri capabilities without security review
 - NEVER expose system APIs without explicit permissions in `capabilities/`
+- NEVER do blocking I/O in a sync `#[tauri::command]` — it runs on the main
+  thread and freezes the UI (beachball). Make the command `async fn` and wrap
+  blocking work in `spawn_blocking` (worked example: `commands/remote.rs`)
 
 ### Async State Management
 
@@ -120,12 +112,12 @@ From `tauri.conf.json`:
 
 ## NOTES
 
-- Tauri backend (`src-tauri/src/`) embeds `aghub-api` (localhost Rocket server) and uses `aghub-remote` for SSH remote management — it does NOT depend on `aghub-core` directly
 - VS Code extensions recommended: `tauri-apps.tauri-vscode`, `rust-lang.rust-analyzer`
 
 <!-- HEROUI-REACT-AGENTS-MD-START -->
 
-HeroUI v3 docs live under `../../.heroui-docs/react/` — **search those files
+HeroUI v3 docs live under `../../.heroui-docs/react/` (gitignored — if absent,
+generate first) — **search those files
 before any UI task** (training data is wrong for v3). Project skill
 `heroui-react` covers component patterns. To regenerate a full component index
 into this file: `heroui agents-md --react --output crates/desktop/AGENTS.md`

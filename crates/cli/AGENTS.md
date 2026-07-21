@@ -18,6 +18,11 @@
 | skill-usage          | `commands/skill_usage.rs`          | Claude-global only                          |
 | CLI e2e tests        | `tests/cli_tests.rs`               | `assert_cmd`; unix-gated helpers stay cfg'd |
 
+Multi-agent runs: `-a` semantics live in root AGENTS.md "CLI Command Surface";
+`AgentSelection` (from `aghub_core::models`; defined in `crates/agents`) is the
+single parser — never re-parse `-a` per command, and never hand-roll the batch
+envelope (`core/src/batch.rs`).
+
 `source sync` e2e need no network: `AGHUB_TEST_SOURCE_FETCH_ROOT` (debug-only
 env hook in `commands/source.rs`) serves a local dir as the fetched repo.
 
@@ -27,8 +32,7 @@ env hook in `commands/source.rs`) serves a local dir as the fetched repo.
 
 - **Default offline**: remote sources → `uncheckable` (`network`); local → `local`
 - **`--online`** (alias `--check-remote`): shared `skill-update` orchestrator +
-  same env token resolver as `source` (`GIT_PASSWORD` any host; `GITHUB_TOKEN`
-  github.com only)
+  the same env token resolver as `source` (creds contract: root AGENTS.md)
 
 Contract pinned by `check_skills_outputs_json_array` in `cli_tests.rs`.
 
@@ -36,4 +40,3 @@ Contract pinned by `check_skills_outputs_json_array` in `cli_tests.rs`.
 
 - **Don't** `println!` diagnostics — use `eprintln_verbose!`
 - **Don't** hardcode agent id strings — use `AgentType`
-- **Don't** bypass `ConfigManager`

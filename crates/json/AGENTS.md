@@ -12,11 +12,11 @@ Built on `jsonc-parser`'s CST API. The point of this crate over plain
 
 ## PUBLIC API (`src/lib.rs`)
 
-| Item                        | Purpose                                                           |
-| --------------------------- | ----------------------------------------------------------------- |
-| `parse_jsonc_opt::<T>()`    | Parse JSONC into `Option<T>` (tolerates comments / trailing JSON) |
-| `patch_jsonc_object::<T>()` | Merge `T`'s fields into an object CST, preserving untouched bits  |
-| `JsonError`                 | `Parse` / `Serialize` / `ExpectedObject` (thiserror)              |
+| Item                        | Purpose                                                                                                                                                                     |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `parse_jsonc_opt::<T>()`    | Parse JSONC into `Option<T>` (tolerates comments / trailing commas)                                                                                                         |
+| `patch_jsonc_object::<T>()` | **Sync** the root object to `T`: fields present in `T` are written, fields absent are **removed**. What survives is comments/formatting on kept nodes — not unlisted fields |
+| `JsonError`                 | `Parse` / `Serialize` / `ExpectedObject` (thiserror)                                                                                                                        |
 
 ## CONVENTIONS
 
@@ -33,3 +33,5 @@ and general — this is a shared low-level helper, not inference-specific.
 
 - **NEVER** round-trip a config file through plain `serde_json` for edits — it
   drops comments and reflows formatting. Use the CST patch path here.
+- **NEVER** pass a partial struct to `patch_jsonc_object` expecting a merge —
+  properties absent from `T` are deleted from the file (silent user-data loss).

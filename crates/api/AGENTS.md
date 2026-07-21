@@ -11,31 +11,35 @@ Role map (`lib.rs` mounts the real route set — do not hardcode route counts):
 - `lib.rs` / `main.rs` / `cli.rs` — Rocket build + standalone bin
 - `state.rs` / `error.rs` / `extractors.rs` — `AppState`, `ApiError`, `AgentParam` / `ScopeParams` / `TrustedLocalOrigin`
 - `credentials/` — token resolve + remote forwarding; host-scoped source→credential bindings (never in lock files)
-- `skills/` — path containment, scan, lock helpers for skill routes
+- `skills/` — rename-guard + resync helpers for skill routes (scan/lock
+  orchestration moved to the `skill-update` crate)
+- `source_sessions.rs` — TTL'd `PinnedSourceSession` cache pairing a
+  `SkillRepository` + `RepoSnapshot` so git scan→install flows reuse one fetch
+- `editor_detection.rs` — code-editor discovery for the integrations surface
 - `dto/` — ts-rs DTOs per domain (`bun run generate:dto` via `bin/export-dto.rs`;
   a new DTO must be REGISTERED there or it silently doesn't generate. An
   `Option` field with `skip_serializing_if` also needs `#[ts(optional)]`, or
   the generated TS declares it required — unsound contract)
-- `routes/` — handlers under `/api/v1/` (one file per surface: agents, mcps, skills, skills_update, sources, coverage, sub_agents, credentials, inference, plugins, integrations, market)
+- `routes/` — handlers under `/api/v1/`, one file per surface (the ROUTES table below)
 
 ## ROUTES
 
 All under `/api/v1/`. **Source of truth: `lib.rs` + `routes/*.rs`.** Module → intent (paths drift; read the file):
 
-| Module          | Surface intent                                                                   |
-| --------------- | -------------------------------------------------------------------------------- |
-| `agents`        | list agents + availability                                                       |
-| `mcps`          | per-agent MCP CRUD, all-agents list, transfer/reconcile                          |
-| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git |
-| `skills_update` | check-updates, apply-update, accept-rename                                       |
-| `sources`       | source list + diff                                                               |
-| `coverage`      | per-agent coverage of `.agents/skills` master                                    |
-| `sub_agents`    | sub-agent CRUD + transfer/reconcile                                              |
-| `credentials`   | credential store + source bindings                                               |
-| `inference`     | provider inventory, keyring keys, per-agent bindings/routing/presets             |
-| `plugins`       | Claude Code plugin + marketplace lifecycle                                       |
-| `integrations`  | code-editor open/preferences                                                     |
-| `market`        | skills.sh search                                                                 |
+| Module          | Surface intent                                                                                           |
+| --------------- | -------------------------------------------------------------------------------------------------------- |
+| `agents`        | list agents + availability                                                                               |
+| `mcps`          | per-agent MCP CRUD, all-agents list, transfer/reconcile, multi-agent batch create (`core::batch` policy) |
+| `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git                         |
+| `skills_update` | check-updates, apply-update, accept-rename                                                               |
+| `sources`       | source list + diff                                                                                       |
+| `coverage`      | per-agent coverage of `.agents/skills` master                                                            |
+| `sub_agents`    | sub-agent CRUD + transfer/reconcile                                                                      |
+| `credentials`   | credential store + source bindings                                                                       |
+| `inference`     | provider inventory, keyring keys, per-agent bindings/routing/presets                                     |
+| `plugins`       | Claude Code plugin + marketplace lifecycle                                                               |
+| `integrations`  | code-editor open/preferences                                                                             |
+| `market`        | skills.sh search                                                                                         |
 
 Path params: `<agent>`, `<name>`. Scope via `ScopeParams` (`scope` + optional `project_root`). **No token auth** — see CORS below.
 
@@ -77,7 +81,9 @@ cargo run -p aghub-api
 cargo run -p aghub-api -- --port 8080
 ```
 
-Default: localhost:8000
+Default port is `0` — the OS assigns an ephemeral port, and the bound port is
+printed to stdout after bind (the desktop / SSH-tunnel callers parse that
+line). Pass `--port N` to pin one.
 
 ## PATTERNS
 
@@ -85,7 +91,8 @@ Default: localhost:8000
 - MCP / skill / sub-agent CRUD goes through `ConfigManager` (never bypass);
   other domains own their store — credentials → credential store, inference →
   `InferenceProviderStore`, plugins → `ClaudePluginManager`
-- Errors: machine-readable codes + safe messages (no raw filesystem paths in responses)
+- Errors: machine-readable codes + safe messages — no internal temp/lock/keyring
+  paths (user-config paths, e.g. the missing-config-file message, are intentional)
 - Route error PRECEDENCE is public contract (e.g. MCP create answers
   capability → validate → writable): refactoring a route into shared helpers
   must not reorder which error wins on compound-invalid requests
