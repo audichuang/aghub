@@ -18,6 +18,7 @@ pub mod error;
 pub mod extractors;
 pub mod routes;
 pub(crate) mod skills;
+pub(crate) mod source_sessions;
 pub mod state;
 
 // Controller-side credential resolution for the desktop `src-tauri` layer
@@ -213,9 +214,7 @@ fn build_rocket_with_state_factories(
 	rocket::custom(config)
 		.attach(ApiLogFairing)
 		.attach(cors)
-		.manage(crate::state::GitCloneSessions {
-			sessions: std::sync::Mutex::new(std::collections::HashMap::new()),
-		})
+		.manage(crate::source_sessions::PinnedSourceSessions::default())
 		.manage(crate::state::InferenceProviderState {
 			app_data_dir,
 			credentials,

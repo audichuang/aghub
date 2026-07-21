@@ -28,8 +28,9 @@ use skill::sanitize::sanitize_name;
 pub struct AgentInstallResult {
 	pub agent: AgentType,
 	/// `true` when this agent received the skill on this call (a fresh copy or
-	/// a fresh universal link). `false` for a soft skip (already present, or no
-	/// resolvable skills dir — see `error`).
+	/// a fresh universal link). `false` for a soft skip or runtime link failure
+	/// (see `error`). Predictably unsupported targets fail preflight before a
+	/// report is created.
 	pub installed: bool,
 	pub error: Option<String>,
 }
@@ -233,8 +234,9 @@ pub fn install_fetched_skill_and_lock(
 /// Returns the per-agent results plus `wrote_master` — `true` only when the
 /// canonical master was NEWLY written on this run. NativeReader agents are
 /// reported installed with NO link; NeedsLink agents are linked via the
-/// copy-free linker; Unsupported agents soft-fail. A per-agent LinkError is
-/// folded into that agent's row (Decision 10), never aborting the install.
+/// copy-free linker. Unsupported agents reject the whole request before the
+/// shared Master write. A per-agent LinkError is folded into that agent's row
+/// (Decision 10), never aborting later runtime attempts.
 pub fn materialize_universal_master(
 	source_root: &Path,
 	safe_name: &str,
@@ -263,151 +265,153 @@ pub fn materialize_universal_master(
 		return Ok((results, false));
 	};
 	let canonical = canonical_skills_dir.join(safe_name);
-	let wrote_master = !canonical.exists();
+	let master_was_absent = !canonical.exists();
 
 	// Classify every target agent against the canonical SKILLS-DIR (not the
 	// SKILL-DIR). `plans[i]` pairs 1:1 with `target_agents[i]`.
-	let plans: Vec<LinkNeed> = target_agents
+	let plans: Vec<(AgentType, LinkNeed)> = target_agents
 		.iter()
 		.map(|&agent| {
 			let descriptor = crate::registry::get(agent);
-			classify_agent(
-				descriptor,
-				scope,
-				project_root,
-				&canonical_skills_dir,
-			)
-			.need
-		})
-		.collect();
-	let symlink_dirs: Vec<std::path::PathBuf> = plans
-		.iter()
-		.filter_map(|need| match need {
-			LinkNeed::NeedsLink { agent_skills_dir } => {
-				Some(agent_skills_dir.clone())
-			}
-			_ => None,
-		})
-		.collect();
-
-	// If NO target agent can receive the skill (all Unsupported), do NOT
-	// materialize an orphan Master or write a lock — nothing would reference
-	// it. Return per-agent soft-failures only (wrote_master = false).
-	if plans
-		.iter()
-		.all(|need| matches!(need, LinkNeed::Unsupported))
-	{
-		let results = target_agents
-			.iter()
-			.map(|&agent| AgentInstallResult {
+			(
 				agent,
-				installed: false,
-				error: Some(
-					"Agent does not support persistent skill creation in \
-					 this scope"
-						.to_string(),
-				),
-			})
-			.collect();
-		return Ok((results, false));
+				classify_agent(
+					descriptor,
+					scope,
+					project_root,
+					&canonical_skills_dir,
+				)
+				.need,
+			)
+		})
+		.collect();
+	if plans.is_empty() {
+		return Ok((Vec::new(), false));
 	}
 
-	// Copy-free install: materialize the Master (if absent) and link each
-	// NeedsLink agent. A hard Master-copy failure (e.g. ENOTDIR on the
-	// canonical parent) is converted to per-agent failures rather than
-	// propagated as Err; callers always get Ok with per-agent results.
-	let report =
-		match install_universal(source_root, &canonical, &symlink_dirs, target)
-		{
-			Ok(r) => r,
-			Err(e) => {
-				let msg = e.to_string();
-				let results = target_agents
-					.iter()
-					.map(|&agent| AgentInstallResult {
-						agent,
-						installed: false,
-						error: Some(msg.clone()),
-					})
-					.collect();
-				return Ok((results, false));
-			}
-		};
-	// Per-agent link errors keyed by the agent's skills-dir (the link parent).
-	let failed_by_dir: std::collections::HashMap<std::path::PathBuf, String> =
-		report
-			.failed
-			.iter()
-			.filter_map(|(link, err)| {
-				link.parent().map(|p| (p.to_path_buf(), err.to_string()))
-			})
-			.collect();
-	// P1-D: a conflict (an occupied real dir, or a foreign link in the agent's
-	// skills-dir) is NOT a successful install — it was never clobbered. Fold
-	// report.conflicts by the agent skills-dir too, so a NeedsLink agent whose
-	// slot is occupied is reported `installed:false` with an error, never a
-	// silent `installed:true`.
-	let conflict_dirs: std::collections::HashSet<std::path::PathBuf> = report
-		.conflicts
-		.iter()
-		.filter_map(|link| link.parent().map(|p| p.to_path_buf()))
-		.collect();
-	let linked_dirs: std::collections::HashSet<std::path::PathBuf> = report
-		.linked
-		.iter()
-		.filter_map(|link| link.parent().map(|p| p.to_path_buf()))
-		.collect();
+	// One shared setup materializes the Master and performs every needed link.
+	// Unsupported is a predictable preflight failure: mixing one with supported
+	// targets must never let the shared setup create a Master or an earlier link.
+	let mut materialized = false;
+	let report = crate::batch::run_shared_multi_target_mutation(
+		&plans,
+		|&(agent, ref need)| match need {
+			LinkNeed::Unsupported => Err(format!(
+				"agent '{}' does not support persistent skill creation in this scope",
+				agent.as_str()
+			)),
+			_ => Ok(()),
+		},
+		|plans| {
+			let symlink_dirs = plans
+				.iter()
+				.filter_map(|(_, need)| match need {
+					LinkNeed::NeedsLink { agent_skills_dir } => {
+						Some(agent_skills_dir.clone())
+					}
+					_ => None,
+				})
+				.collect::<Vec<_>>();
+			let install = install_universal(
+				source_root,
+				&canonical,
+				&symlink_dirs,
+				target,
+			)
+			.map_err(|error| error.to_string())?;
+			materialized = true;
 
-	let results = target_agents
-		.iter()
-		.zip(plans.iter())
-		.map(|(&agent, need)| match need {
-			LinkNeed::NativeReader => AgentInstallResult {
-				agent,
-				installed: true,
-				error: None,
-			},
-			LinkNeed::NeedsLink { agent_skills_dir } => {
-				if let Some(msg) = failed_by_dir.get(agent_skills_dir) {
-					AgentInstallResult {
-						agent,
-						installed: false,
-						error: Some(msg.clone()),
-					}
-				} else if conflict_dirs.contains(agent_skills_dir) {
-					AgentInstallResult {
-						agent,
-						installed: false,
-						error: Some(
-							"A real directory or a foreign link already \
-							 occupies this skill slot; it was not overwritten"
-								.to_string(),
-						),
-					}
-				} else {
-					// Fresh link in `report.linked` -> installed:true.
-					// Correct existing link in `report.already_linked` ->
-					// installed:false (idempotent, not a new install).
-					AgentInstallResult {
-						agent,
-						installed: linked_dirs.contains(agent_skills_dir),
-						error: None,
+			let failed_by_dir = install
+				.failed
+				.iter()
+				.filter_map(|(link, error)| {
+					link.parent()
+						.map(|parent| (parent.to_path_buf(), error.to_string()))
+				})
+				.collect::<std::collections::HashMap<_, _>>();
+			let conflict_dirs = install
+				.conflicts
+				.iter()
+				.filter_map(|link| link.parent().map(Path::to_path_buf))
+				.collect::<std::collections::HashSet<_>>();
+			let linked_dirs = install
+				.linked
+				.iter()
+				.filter_map(|link| link.parent().map(Path::to_path_buf))
+				.collect::<std::collections::HashSet<_>>();
+			Ok((failed_by_dir, conflict_dirs, linked_dirs))
+		},
+		|&(agent, ref need), prepared| {
+			let result = match need {
+				LinkNeed::NativeReader => AgentInstallResult {
+					agent,
+					installed: true,
+					error: None,
+				},
+				LinkNeed::NeedsLink { agent_skills_dir } => {
+					let (failed_by_dir, conflict_dirs, linked_dirs) = prepared;
+					if let Some(message) = failed_by_dir.get(agent_skills_dir) {
+						AgentInstallResult {
+							agent,
+							installed: false,
+							error: Some(message.clone()),
+						}
+					} else if conflict_dirs.contains(agent_skills_dir) {
+						AgentInstallResult {
+							agent,
+							installed: false,
+							error: Some(
+								"A real directory or a foreign link already \
+								 occupies this skill slot; it was not overwritten"
+									.to_string(),
+							),
+						}
+					} else {
+						AgentInstallResult {
+							agent,
+							installed: linked_dirs.contains(agent_skills_dir),
+							error: None,
+						}
 					}
 				}
-			}
-			LinkNeed::Unsupported => AgentInstallResult {
-				agent,
+				LinkNeed::Unsupported => AgentInstallResult {
+					agent,
+					installed: false,
+					error: Some(
+						"Agent does not support persistent skill creation in \
+						 this scope"
+							.to_string(),
+					),
+				},
+			};
+			Ok(result)
+		},
+	)
+	.map_err(|error| {
+		crate::ConfigError::InvalidConfig(format!(
+			"skill install preflight failed: {}; nothing was written",
+			error
+				.failures
+				.into_iter()
+				.map(|failure| failure.reason)
+				.collect::<Vec<_>>()
+				.join("; ")
+		))
+	})?;
+
+	let results = report
+		.results
+		.into_iter()
+		.map(|row| match row.result {
+			Ok(result) => result,
+			Err(error) => AgentInstallResult {
+				agent: row.target.0,
 				installed: false,
-				error: Some(
-					"Agent does not support persistent skill creation in \
-					 this scope"
-						.to_string(),
-				),
+				error: Some(error),
 			},
 		})
 		.collect();
-
-	Ok((results, wrote_master))
+	Ok((results, master_was_absent && materialized))
 }
 
 #[cfg(all(test, unix))]

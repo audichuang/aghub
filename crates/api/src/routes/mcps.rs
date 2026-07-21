@@ -127,7 +127,7 @@ pub fn reconcile_mcp_route(
 /// CALLER's contract: the per-agent route checks `check_mcp_supported`
 /// first (preserving its error precedence: capability → validate →
 /// writable), and the batch route preflights every agent via
-/// `aghub_core::batch::mcp_batch_preflight` before any write.
+/// `aghub_core::batch::run_mcp_agent_mutation` before any write.
 fn create_mcp_for_agent(
 	agent: &AgentParam,
 	resolved: &crate::extractors::ResolvedScope,
@@ -204,21 +204,26 @@ pub fn batch_create_mcp(
 			agents.push(agent);
 		}
 	}
-	aghub_core::batch::mcp_batch_preflight(&agents, resource_scope, false)
-		.map_err(|e| {
-			ApiError::new(
-				Status::UnprocessableEntity,
-				e.to_string(),
-				"UNSUPPORTED_OPERATION",
-			)
-		})?;
-	let view = aghub_core::batch::run_agent_batch(&agents, |agent| {
-		create_mcp_for_agent(&AgentParam(agent), &resolved, req.mcp.clone())
-			.map(|resp| {
-				serde_json::to_value(&resp).unwrap_or(serde_json::Value::Null)
-			})
-			.map_err(|e| e.body.error)
-	});
+	let view = aghub_core::batch::run_mcp_agent_mutation(
+		&agents,
+		resource_scope,
+		false,
+		|agent| {
+			create_mcp_for_agent(&AgentParam(agent), &resolved, req.mcp.clone())
+				.map(|resp| {
+					serde_json::to_value(&resp)
+						.unwrap_or(serde_json::Value::Null)
+				})
+				.map_err(|e| e.body.error)
+		},
+	)
+	.map_err(|e| {
+		ApiError::new(
+			Status::UnprocessableEntity,
+			e.to_string(),
+			"UNSUPPORTED_OPERATION",
+		)
+	})?;
 	Ok(Json(view.into()))
 }
 

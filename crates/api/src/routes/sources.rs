@@ -14,25 +14,19 @@
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
-use crate::credentials::forwarding::{ChainResolver, ForwardedGitTokens};
-use crate::credentials::resolve::{
-	load_source_bindings, resolve_token_for_source,
-};
+use crate::credentials::forwarding::ForwardedGitTokens;
+use crate::credentials::source_auth::SourceAuth;
 use crate::dto::sources::{
 	CredentialStatus, SourceDiffResponse, SourceSkillDiff, SourceSkillStateDto,
 	SourceSummaryResponse, SourcesListResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
-use crate::routes::credentials::load_credentials;
 use skill_update::sources::{
 	self, SourceDiffDeps, SourceDiffInput, SourceDiffOutcome, SourceScope,
 	SourceScopeKind, SourceSkillDiff as DomainSkillDiff, SourceSummary,
 };
-use skill_update::{
-	keychain_host_for_source, FetchError, FetchedRepo, Fetcher, GitFetcher,
-	SourceRef,
-};
+use skill_update::{FetchError, FetchedRepo, Fetcher, GitFetcher, SourceRef};
 
 /// Resolve a request scope into the domain's per-scope list. Mirrors the old
 /// route: `Global` → `[Global]`, `Project` → `[Project]`, `All` → `[Global]`
@@ -51,23 +45,6 @@ fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
 			scopes
 		}
 	}
-}
-
-/// Keychain-backed token resolver: re-fetches private sources using the same
-/// source→credential binding logic as the rest of the API.
-struct KeyringResolver;
-
-impl skill_update::TokenResolver for KeyringResolver {
-	fn resolve(&self, source: &str, _host: Option<&str>) -> Option<String> {
-		token_for_source(source)
-	}
-}
-
-fn token_for_source(source: &str) -> Option<String> {
-	let bindings = load_source_bindings().unwrap_or_default();
-	let creds = load_credentials().unwrap_or_default();
-	let host = keychain_host_for_source(source);
-	resolve_token_for_source(source, host.as_deref(), &bindings, &creds)
 }
 
 /// Test-only recorder for the token the diff fetch was invoked with. The diff
@@ -197,14 +174,13 @@ pub async fn diff_source(
 	// Forwarded tokens (header) take precedence over the local keyring: a remote
 	// api has no keyring of its own, so the controller-resolved token must win.
 	// An absent/empty header degrades to the keyring path (backward compatible).
-	let forwarded_resolver = forwarded.into_resolver();
+	let resolver = SourceAuth::load(forwarded).await;
 	let outcome = rocket::tokio::task::spawn_blocking(move || {
-		let chain = ChainResolver::new(forwarded_resolver, &KeyringResolver);
 		sources::diff_source(
 			input,
 			SourceDiffDeps {
 				fetcher: &ApiFetcher,
-				resolver: &chain,
+				resolver: &resolver,
 			},
 		)
 	})

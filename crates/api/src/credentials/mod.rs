@@ -7,6 +7,7 @@
 // The resolver and binding store are consumed by the update-check orchestration
 // (Task F1.5) via the `routes::skills_update` route.
 pub(crate) mod resolve;
+pub(crate) mod source_auth;
 
 // Normalized `(scheme, host, port)` origin used to pin a credential/token to
 // the exact place it came from. Reused by the skills git-scan host guard.

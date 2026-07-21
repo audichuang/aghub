@@ -5,7 +5,10 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use crate::{FetchError, FetchSelection, Fetcher, SourceRef, TokenResolver};
+use crate::{
+	FetchError, FetchSelection, Fetcher, SourceRef, TokenResolution,
+	TokenResolver,
+};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{
 	compare_known_hashes, detect_rename, precheck_source, SkillUpdateStatus,
@@ -209,8 +212,13 @@ pub fn fetch_source_with_resolver(
 	resolver: &dyn TokenResolver,
 	selection: FetchSelection<'_>,
 ) -> Result<crate::FetchedRepo, FetchError> {
-	let host = crate::keychain_host_for_source(&source_ref.source);
-	let token = resolver.resolve(&source_ref.source, host.as_deref());
+	let token = match resolver.resolve(&source_ref.source) {
+		TokenResolution::Token(token) => Some(token),
+		TokenResolution::NoToken => None,
+		TokenResolution::BackendUnavailable => {
+			return Err(FetchError::BackendUnavailable);
+		}
+	};
 	fetcher.fetch(source_ref, token.as_deref(), selection)
 }
 
@@ -239,12 +247,8 @@ mod fetch_with_resolver_tests {
 	struct StaticResolver;
 
 	impl TokenResolver for StaticResolver {
-		fn resolve(
-			&self,
-			_source: &str,
-			_host: Option<&str>,
-		) -> Option<String> {
-			Some("configured-token".to_string())
+		fn resolve(&self, _source: &str) -> TokenResolution {
+			TokenResolution::Token("configured-token".to_string())
 		}
 	}
 
@@ -942,6 +946,12 @@ pub fn diff_source(
 		deps.resolver,
 		FetchSelection::CatalogSnapshot,
 	) {
+		Err(FetchError::BackendUnavailable) => {
+			SourceDiffOutcome::UncheckableSource {
+				git_ref,
+				reason: UncheckableReason::Network,
+			}
+		}
 		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential { git_ref },
 		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
 		Ok(repo) => SourceDiffOutcome::Ok {
@@ -1518,8 +1528,8 @@ mod diff_tests {
 	/// A [`TokenResolver`] that never has a token.
 	struct NoToken;
 	impl TokenResolver for NoToken {
-		fn resolve(&self, _s: &str, _h: Option<&str>) -> Option<String> {
-			None
+		fn resolve(&self, _source: &str) -> TokenResolution {
+			TokenResolution::NoToken
 		}
 	}
 
@@ -1621,6 +1631,55 @@ mod diff_tests {
 			}
 			other => panic!("expected Ok, got {other:?}"),
 		}
+	}
+
+	#[test]
+	fn diff_source_reports_unavailable_credentials_without_fetching() {
+		struct Unavailable;
+		impl TokenResolver for Unavailable {
+			fn resolve(&self, _source: &str) -> TokenResolution {
+				TokenResolution::BackendUnavailable
+			}
+		}
+
+		struct CountingFetcher(std::sync::Mutex<usize>);
+		impl Fetcher for CountingFetcher {
+			fn fetch(
+				&self,
+				_source_ref: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<crate::FetchedRepo, FetchError> {
+				*self.0.lock().unwrap() += 1;
+				Err(FetchError::Network)
+			}
+		}
+
+		let fetcher = CountingFetcher(std::sync::Mutex::new(0));
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "owner/private-source".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Global],
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &Unavailable,
+			},
+		);
+
+		assert!(matches!(
+			outcome,
+			SourceDiffOutcome::UncheckableSource {
+				reason: UncheckableReason::Network,
+				..
+			}
+		));
+		assert_eq!(
+			*fetcher.0.lock().unwrap(),
+			0,
+			"an indeterminate credential decision must not fetch anonymously",
+		);
 	}
 
 	#[test]

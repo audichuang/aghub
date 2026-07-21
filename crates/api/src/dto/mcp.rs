@@ -293,23 +293,24 @@ impl From<aghub_core::batch::AgentBatchView> for AgentBatchResponse {
 #[cfg(test)]
 mod batch_dto_tests {
 	use super::*;
-	use aghub_core::batch::run_agent_batch;
-	use aghub_core::models::AgentType;
+	use aghub_core::batch::run_mcp_agent_mutation;
+	use aghub_core::models::{AgentType, ResourceScope};
 
 	/// The API DTO (ts-rs) and the shared core `AgentBatchView` (which the
 	/// CLI serializes) must emit BYTE-IDENTICAL JSON — the single-source
 	/// contract, same as the transfer batch precedent.
 	#[test]
 	fn batch_dto_matches_shared_core_view_byte_for_byte() {
-		let view =
-			run_agent_batch(&[AgentType::Claude, AgentType::Grok], |agent| {
-				match agent {
-					AgentType::Claude => {
-						Ok(serde_json::json!({ "name": "multi" }))
-					}
-					_ => Err("boom".to_string()),
-				}
-			});
+		let view = run_mcp_agent_mutation(
+			&[AgentType::Claude, AgentType::Grok],
+			ResourceScope::GlobalOnly,
+			false,
+			|agent| match agent {
+				AgentType::Claude => Ok(serde_json::json!({ "name": "multi" })),
+				_ => Err("boom".to_string()),
+			},
+		)
+		.expect("both agents support global MCPs");
 		let view_json = serde_json::to_string(&view).unwrap();
 		let dto_json =
 			serde_json::to_string(&AgentBatchResponse::from(view)).unwrap();

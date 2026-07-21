@@ -14,6 +14,8 @@
 mod git;
 pub use git::{GitFetcher, GitRefResolver};
 
+pub mod mutation;
+
 mod repository;
 pub use repository::{
 	skill_folder_from_lock_path, skill_repo_to_fetch_error, CatalogSkill,
@@ -201,6 +203,8 @@ pub enum FetchError {
 	Auth,
 	/// Network / transport failure.
 	Network,
+	/// Credential backend state could not be determined; no fetch was attempted.
+	BackendUnavailable,
 }
 
 /// Injected fetch boundary. Production materializes only the
@@ -220,32 +224,17 @@ pub trait Fetcher: Send + Sync {
 /// credential needed" from "couldn't tell" (backend unreachable) so a caller
 /// can fail the whole operation closed on the latter instead of proceeding as
 /// if no credential were bound.
+#[derive(Debug, PartialEq, Eq)]
 pub enum TokenResolution {
 	Token(String),
 	NoToken,
 	BackendUnavailable,
 }
 
-/// Resolves a token for a `(source, host)` pair. Wraps Task F1.4's keyring +
-/// keychain resolution so the orchestrator never touches credentials directly.
+/// Resolves a token for a source. Adapters derive any host-specific lookup key
+/// from the source so callers cannot supply an inconsistent pair.
 pub trait TokenResolver: Send + Sync {
-	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String>;
-
-	/// Same resolution as `resolve()`, but able to report "backend
-	/// unreachable" as its own outcome instead of degrading it to `None`.
-	/// Defaults to wrapping `resolve()` — only resolvers that can tell
-	/// "backend down" apart from "no credential bound" (e.g. `aghub-api`'s
-	/// keyring-backed resolvers) need to override this.
-	fn resolve_checked(
-		&self,
-		source: &str,
-		host: Option<&str>,
-	) -> TokenResolution {
-		match self.resolve(source, host) {
-			Some(token) => TokenResolution::Token(token),
-			None => TokenResolution::NoToken,
-		}
-	}
+	fn resolve(&self, source: &str) -> TokenResolution;
 }
 
 /// Resolves the current tip commit OID of a `(source, ref)` via a git ref
@@ -564,10 +553,19 @@ pub async fn check_updates(
 			continue;
 		}
 
-		let token = deps.resolver.resolve(
-			&sr.source,
-			keychain_host_for_source(&sr.source).as_deref(),
-		);
+		let token = match deps.resolver.resolve(&sr.source) {
+			TokenResolution::Token(token) => Some(token),
+			TokenResolution::NoToken => None,
+			TokenResolution::BackendUnavailable => {
+				let status = SkillUpdateStatus::Uncheckable {
+					reason: UncheckableReason::Network,
+				};
+				for member in &fetch_members {
+					out.push(terminal_output(member, &status));
+				}
+				continue;
+			}
+		};
 		jobs.push(FetchJob {
 			sr,
 			members: fetch_members,
@@ -629,6 +627,9 @@ pub async fn check_updates(
 					JobResult::Failed(UncheckableReason::Auth)
 				}
 				Ok(Err(FetchError::Network)) => {
+					JobResult::Failed(UncheckableReason::Network)
+				}
+				Ok(Err(FetchError::BackendUnavailable)) => {
 					JobResult::Failed(UncheckableReason::Network)
 				}
 				Ok(Ok(repo)) => JobResult::Fetched(repo),
@@ -812,16 +813,35 @@ mod tests {
 		assert!(!is_pinned_sha("v1.2.3"));
 	}
 
+	#[test]
+	fn token_resolver_interface_needs_only_the_source() {
+		struct SourceOnlyResolver;
+
+		impl TokenResolver for SourceOnlyResolver {
+			fn resolve(&self, source: &str) -> TokenResolution {
+				if source == "https://github.com/owner/repo.git" {
+					TokenResolution::Token("token".to_string())
+				} else {
+					TokenResolution::NoToken
+				}
+			}
+		}
+
+		assert!(matches!(
+			SourceOnlyResolver.resolve("https://github.com/owner/repo.git"),
+			TokenResolution::Token(token) if token == "token"
+		));
+	}
+
 	// --- async orchestration stubs -----------------------------------------
 
 	struct StubResolver(Option<String>);
 	impl TokenResolver for StubResolver {
-		fn resolve(
-			&self,
-			_source: &str,
-			_host: Option<&str>,
-		) -> Option<String> {
-			self.0.clone()
+		fn resolve(&self, _source: &str) -> TokenResolution {
+			match &self.0 {
+				Some(token) => TokenResolution::Token(token.clone()),
+				None => TokenResolution::NoToken,
+			}
 		}
 	}
 
@@ -1182,6 +1202,51 @@ mod tests {
 			}
 		);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "offline must not fetch");
+	}
+
+	#[tokio::test]
+	async fn unavailable_credential_backend_makes_check_uncheckable_without_fetch(
+	) {
+		struct UnavailableResolver;
+
+		impl TokenResolver for UnavailableResolver {
+			fn resolve(&self, _source: &str) -> TokenResolution {
+				TokenResolution::BackendUnavailable
+			}
+		}
+
+		let fetcher = Arc::new(StubFetcher {
+			root: None,
+			err: Some("network"),
+			calls: Mutex::new(0),
+		});
+		let resolver = UnavailableResolver;
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			ref_resolver: None,
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+
+		let out =
+			check_updates(vec![entry("a", "o/r", Some("main"))], deps).await;
+
+		assert_eq!(
+			out[0].status,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Network,
+			}
+		);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			0,
+			"an indeterminate credential decision must not attempt a fetch",
+		);
 	}
 
 	#[tokio::test]

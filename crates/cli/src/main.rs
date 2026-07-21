@@ -866,28 +866,47 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 		| Commands::Disable { resource, .. } => {
 			// Preflight judges the same write scope `run_for_agent` resolves;
 			// the policy itself (which capabilities, all-before-any-write)
-			// lives in core, shared with the API's /mcps/batch.
-			if matches!(resource, ResourceType::Mcps) {
+			// lives in core; MCPs share it with the API's /mcps/batch.
+			let view = if matches!(resource, ResourceType::Mcps) {
 				let write_scope = batch_write_scope(cli)?;
 				let is_toggle = matches!(
 					cli.command,
 					Commands::Enable { .. } | Commands::Disable { .. }
 				);
-				aghub_core::batch::mcp_batch_preflight(
+				aghub_core::batch::run_mcp_agent_mutation(
 					agents,
 					write_scope,
 					is_toggle,
+					|agent| {
+						eprintln_verbose!(
+							"Running for agent: {}",
+							agent.as_str()
+						);
+						run_for_agent(cli, agent)
+							.map(|o| o.unwrap_or(serde_json::Value::Null))
+							.map_err(|e| format!("{e:#}"))
+					},
 				)
-				.map_err(|e| anyhow::anyhow!("{e}"))?;
-			}
-			let view = aghub_core::batch::run_agent_batch(agents, |agent| {
-				eprintln_verbose!("Running for agent: {}", agent.as_str());
-				run_for_agent(cli, agent)
-					// Mutating commands always yield a payload; Null keeps
-					// the row well-formed if that invariant ever slips.
-					.map(|o| o.unwrap_or(serde_json::Value::Null))
-					.map_err(|e| format!("{e:#}"))
-			});
+				.map_err(|e| anyhow::anyhow!("{e}"))?
+			} else {
+				let write_scope = batch_write_scope(cli)?;
+				aghub_core::batch::run_skill_agent_mutation(
+					agents,
+					write_scope,
+					|agent| {
+						eprintln_verbose!(
+							"Running for agent: {}",
+							agent.as_str()
+						);
+						run_for_agent(cli, agent)
+							// Mutating commands always yield a payload; Null keeps
+							// the row well-formed if that invariant ever slips.
+							.map(|o| o.unwrap_or(serde_json::Value::Null))
+							.map_err(|e| format!("{e:#}"))
+					},
+				)
+				.map_err(|e| anyhow::anyhow!("{e}"))?
+			};
 			println!("{}", serde_json::to_string_pretty(&view)?);
 			if view.failed_count > 0 {
 				anyhow::bail!(

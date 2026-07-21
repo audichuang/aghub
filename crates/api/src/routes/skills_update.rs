@@ -22,7 +22,8 @@ use chrono::Utc;
 use rocket::http::Status;
 use rocket::serde::json::Json;
 
-use crate::credentials::forwarding::{ChainResolver, ForwardedGitTokens};
+use crate::credentials::forwarding::ForwardedGitTokens;
+use crate::credentials::source_auth::SourceAuth;
 use crate::dto::skill::{
 	AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
@@ -30,10 +31,16 @@ use crate::dto::skill::{
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
+use crate::skills::resync::safe_resync_error;
+use skill_update::mutation::{
+	accept_fetched_rename, resync_locked_skill, FetchMutationError,
+	FetchedSourceRequest, LockedResyncError, LockedResyncRequest,
+};
+#[cfg(test)]
+use skill_update::TokenResolution;
 use skill_update::{
-	check_updates, keychain_host_for_source, CheckDeps, CheckOutput,
-	EntryInput, FetchError, Fetcher, GitFetcher, GitRefResolver, ResultCache,
-	SourceRef, TokenResolution, TokenResolver,
+	check_updates, CheckDeps, CheckOutput, EntryInput, FetchError, Fetcher,
+	GitFetcher, GitRefResolver, ResultCache, SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -45,269 +52,6 @@ const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
-
-/// Production [`TokenResolver`]: wraps the F1.4 keyring source→credential
-/// binding + host keychain resolution.
-///
-/// A per-request SNAPSHOT of the stored credentials + source bindings, loaded
-/// ONCE (via [`KeyringResolver::load`]) and resolved against purely in
-/// memory afterwards. `check_updates` calls `resolve()` once per unique
-/// `(source, ref)` group — with the old "read the keyring on every call"
-/// version that meant 2 secret-service D-Bus round trips PER GROUP (unlike
-/// the old keyutils backend, a secret-service read is not "local/cheap" —
-/// see GitHub #15 P1b). Snapshotting also means the one read that does
-/// happen goes through `load()`'s `spawn_blocking`, never inline on
-/// whichever thread is polling the route's async future (Rocket does not
-/// spawn_blocking sync handlers on its own — see `crates/api/Cargo.toml`'s
-/// keyring feature comment).
-pub(crate) struct KeyringResolver {
-	creds: Vec<crate::routes::credentials::StoredCredential>,
-	bindings: crate::credentials::resolve::SourceBindings,
-}
-
-impl KeyringResolver {
-	/// The one place any of the three snapshot-loading variants below reads
-	/// the keyring: both sources, on Rocket's blocking-task pool, in a single
-	/// `spawn_blocking`. Each inner `Result` carries its own
-	/// [`crate::credentials::CredentialStoreError`]; the outer `Result` is
-	/// `Err` only if the blocking task itself panicked or was cancelled.
-	async fn load_parts() -> Result<
-		(
-			Result<
-				Vec<crate::routes::credentials::StoredCredential>,
-				crate::credentials::CredentialStoreError,
-			>,
-			Result<
-				crate::credentials::resolve::SourceBindings,
-				crate::credentials::CredentialStoreError,
-			>,
-		),
-		tokio::task::JoinError,
-	> {
-		tokio::task::spawn_blocking(|| {
-			(
-				crate::routes::credentials::load_credentials(),
-				crate::credentials::resolve::load_source_bindings(),
-			)
-		})
-		.await
-	}
-
-	fn empty() -> Self {
-		Self {
-			creds: Vec::new(),
-			bindings: Default::default(),
-		}
-	}
-
-	/// Load the snapshot on Rocket's blocking-task pool, once per request.
-	/// A failed read (backend unreachable, corrupt entry, ...) degrades to an
-	/// empty snapshot — same as the resolver's previous per-call behavior —
-	/// so a keyring outage means "no credential resolves", not a hard error
-	/// for what is a best-effort convenience (skills stay `Uncheckable`
-	/// rather than the whole request failing).
-	///
-	/// Only for the non-mutating check-updates path. Mutating routes
-	/// (apply-update, accept-rename, git-scan's credential resolution) MUST
-	/// use [`KeyringResolver::load_or_unavailable`] instead — silently
-	/// degrading to "no credential" there used to turn a keyring outage into
-	/// a confusing downstream clone/auth failure instead of a stable 503
-	/// (GitHub #15 P2-3).
-	pub(crate) async fn load() -> Self {
-		match Self::load_parts().await {
-			Ok((creds, bindings)) => Self {
-				creds: creds.unwrap_or_default(),
-				bindings: bindings.unwrap_or_default(),
-			},
-			Err(_) => Self::empty(),
-		}
-	}
-
-	/// Load the snapshot for a MUTATING route. Unlike [`KeyringResolver::load`],
-	/// a failed read is surfaced as a typed [`ApiError`] (503
-	/// `KEYCHAIN_UNAVAILABLE` for an unreachable backend, via
-	/// [`crate::credentials::CredentialStoreError`]'s `ApiError` mapping)
-	/// instead of silently degrading to an empty snapshot — a mutating
-	/// operation on a private source must fail closed, not proceed as if no
-	/// credential were bound and then fail with a confusing clone/auth error
-	/// (GitHub #15 P2-3). Still runs on the blocking pool, same reason as
-	/// `load` (GitHub #15 P1b).
-	pub(crate) async fn load_or_unavailable() -> Result<Self, ApiError> {
-		match Self::load_parts().await {
-			Ok((creds, bindings)) => Ok(Self {
-				creds: creds.map_err(ApiError::from)?,
-				bindings: bindings.map_err(ApiError::from)?,
-			}),
-			Err(e) => Err(ApiError::from_join_error(
-				e,
-				"Credential operation failed",
-				"CREDENTIAL_TASK_ERROR",
-			)),
-		}
-	}
-
-	/// Find a stored credential by id (git-scan's explicit `credential_id`
-	/// request field).
-	pub(crate) fn find_credential(
-		&self,
-		id: &str,
-	) -> Option<&crate::routes::credentials::StoredCredential> {
-		self.creds.iter().find(|c| c.id == id)
-	}
-
-	/// Load the snapshot for a MUTATING route's forwarded-first fallback, on
-	/// the blocking pool, WITHOUT hard-erroring on an unreachable backend.
-	/// Returns the (possibly empty) snapshot plus a flag: `true` iff the
-	/// credential backend itself was unreachable.
-	///
-	/// Unlike [`KeyringResolver::load_or_unavailable`] (which 503s eagerly on
-	/// an unreachable backend), the caller ([`LazyKeyringFallback`]) only
-	/// escalates that flag to a 503 when the forwarded map ALSO misses the
-	/// requested source — so a forwarded hit is never blocked by an
-	/// unreachable LOCAL keyring (GitHub #15 round-2 forwarded-token
-	/// regression). Doing the read here — once, up front, via `spawn_blocking`
-	/// — keeps it OFF the route's async worker: the previous
-	/// lazy-inside-`resolve()` version ran `load_credentials` /
-	/// `load_source_bindings` synchronously on the async task, re-introducing
-	/// the very blocking-I/O hazard P1b fixed (GitHub #15 round-3 P1).
-	pub(crate) async fn load_soft() -> (Self, bool) {
-		use crate::credentials::CredentialStoreError::Unavailable;
-		match Self::load_parts().await {
-			Ok((creds, bindings)) => {
-				let unavailable = matches!(creds, Err(Unavailable(_)))
-					|| matches!(bindings, Err(Unavailable(_)));
-				(
-					Self {
-						creds: creds.unwrap_or_default(),
-						bindings: bindings.unwrap_or_default(),
-					},
-					unavailable,
-				)
-			}
-			// The blocking task panicked or was cancelled (JoinError): the
-			// keyring state is INDETERMINATE, so treat it as unavailable
-			// (fail-closed) rather than "reachable, no credential"
-			// (fail-open). A forwarded MISS then 503s instead of silently
-			// attempting an anonymous fetch on what may be a private source;
-			// a forwarded HIT still short-circuits before this flag is ever
-			// consulted, so it succeeds regardless (GitHub #15 round-4).
-			Err(_join) => (Self::empty(), true),
-		}
-	}
-}
-
-impl TokenResolver for KeyringResolver {
-	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
-		crate::credentials::resolve::resolve_token_for_source(
-			source,
-			host,
-			&self.bindings,
-			&self.creds,
-		)
-	}
-}
-
-/// Production [`TokenResolver`] for the two MUTATING routes
-/// (`apply_skill_update`, `accept_skill_rename`): tries the forwarded map
-/// first and, on a miss, consults a keyring snapshot pre-loaded once up front
-/// on the blocking pool (see below) — `resolve()` never touches the OS
-/// keyring directly.
-///
-/// Regression fix (GitHub #15 round-2 Codex finding): both routes used to
-/// build their resolver as `KeyringResolver::load_or_unavailable().await?`
-/// (an eager, fail-closed keyring snapshot load) BEFORE constructing the
-/// `ChainResolver` that tries forwarded first — so an unreachable keyring
-/// backend 503'd the request UNCONDITIONALLY, even when the forwarded
-/// header already covered the requested source. That defeats the entire
-/// point of forwarding: a headless remote (no keyring of its own, relying on
-/// the desktop client forwarding a per-source token over
-/// `X-Aghub-Git-Tokens`) would 503 on every apply-update/accept-rename
-/// whenever ITS OWN (irrelevant) keyring happened to be unreachable.
-///
-/// This type keeps forwarded-first precedence while never 503-ing on a
-/// forwarded hit: the keyring snapshot is pre-loaded ONCE, up front, on the
-/// blocking pool ([`KeyringResolver::load_soft`]), which — unlike
-/// `load_or_unavailable` — does NOT hard-error on an unreachable backend but
-/// returns an empty snapshot plus an `unavailable` flag. `resolve()` then
-/// tries the forwarded map first (a hit short-circuits and can never 503),
-/// and only on a miss consults the in-memory snapshot; if the backend was
-/// unavailable at load time AND forwarding missed this source, it records
-/// that so the handler can turn it into a 503. `resolve()` itself does NO
-/// keyring I/O, so it never blocks the async worker (an earlier version read
-/// the keyring synchronously inside `resolve()` — GitHub #15 round-3 P1).
-///
-/// Plumbed through `apply_skill_update_inner`/`accept_rename_inner`'s
-/// existing `resolver: &dyn TokenResolver` parameter, same as every other
-/// caller — those fns call [`TokenResolver::resolve_checked`] and fail closed
-/// (503) BEFORE attempting the fetch on a `BackendUnavailable` outcome,
-/// rather than proceeding with a `None` token that might really mean
-/// "couldn't tell" (see that method's doc comment). Every OTHER resolver in
-/// this module (`KeyringResolver`, `ChainResolver`, plain stubs) keeps the
-/// trait's default `resolve_checked`, so no existing test is affected by this
-/// addition.
-struct LazyKeyringFallback {
-	forwarded: crate::credentials::forwarding::ForwardedTokenResolver,
-	/// Keyring snapshot pre-loaded ONCE, up front, on the blocking pool (via
-	/// [`KeyringResolver::load_soft`]) — `resolve()` only ever reads this
-	/// in-memory copy, never the OS keyring directly, so it never blocks the
-	/// async worker (GitHub #15 round-3 P1).
-	snapshot: KeyringResolver,
-	/// Whether the backend was unreachable when `snapshot` was loaded.
-	keyring_unavailable: bool,
-}
-
-impl LazyKeyringFallback {
-	fn new(
-		forwarded: crate::credentials::forwarding::ForwardedTokenResolver,
-		snapshot: KeyringResolver,
-		keyring_unavailable: bool,
-	) -> Self {
-		Self {
-			forwarded,
-			snapshot,
-			keyring_unavailable,
-		}
-	}
-}
-
-impl TokenResolver for LazyKeyringFallback {
-	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
-		// Delegate to `resolve_checked` — never re-derive the priority order
-		// here, or the two could drift.
-		match self.resolve_checked(source, host) {
-			TokenResolution::Token(token) => Some(token),
-			TokenResolution::NoToken | TokenResolution::BackendUnavailable => {
-				None
-			}
-		}
-	}
-
-	fn resolve_checked(
-		&self,
-		source: &str,
-		host: Option<&str>,
-	) -> TokenResolution {
-		if let Some(token) = self.forwarded.resolve(source, host) {
-			return TokenResolution::Token(token);
-		}
-		// Forwarding missed this source -- consult the PRE-LOADED keyring
-		// snapshot (pure in-memory lookup, no I/O on the async worker).
-		if self.keyring_unavailable {
-			// The backend was unreachable at load time AND forwarding did not
-			// cover this source -> fail closed; the caller turns this into a
-			// 503.
-			return TokenResolution::BackendUnavailable;
-		}
-		// Backend was reachable: `None` here is a genuine "no credential
-		// bound", so a public source proceeds anonymously (unchanged
-		// behavior). Any non-`Unavailable` load failure (corrupt JSON, ...)
-		// already degraded to an empty snapshot in `load_soft`.
-		match self.snapshot.resolve(source, host) {
-			Some(token) => TokenResolution::Token(token),
-			None => TokenResolution::NoToken,
-		}
-	}
-}
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -533,59 +277,6 @@ fn write_auto_healed_hashes(
 	Ok(())
 }
 
-struct ApplySource {
-	source: String,
-	ref_name: Option<String>,
-	skill_path: String,
-}
-
-fn apply_source_from_lock(
-	name: &str,
-	scope: &str,
-	project_root: Option<&Path>,
-) -> Result<ApplySource, String> {
-	match scope {
-		"global" => {
-			let lock = skill::lock::global::read_skill_lock();
-			let Some(entry) = lock.skills.get(name) else {
-				return Err("Skill is not in global lock".to_string());
-			};
-			let Some(skill_path) = entry.skill_path.clone() else {
-				return Err("Locked skill has no skillPath".to_string());
-			};
-			Ok(ApplySource {
-				source: entry.source_url.clone(),
-				ref_name: entry.ref_name.clone(),
-				skill_path,
-			})
-		}
-		"project" => {
-			let Some(root) = project_root else {
-				return Err("project_root is required when scope is project"
-					.to_string());
-			};
-			let lock = skill::lock::local::read_local_lock(Some(root));
-			let Some(entry) = lock.skills.get(name) else {
-				return Err("Skill is not in project lock".to_string());
-			};
-			let Some(skill_path) = entry.skill_path.clone() else {
-				return Err("Locked skill has no skillPath".to_string());
-			};
-			Ok(ApplySource {
-				// Fetch coordinate: prefer the recorded clone URL (non-github
-				// host survives); github/legacy fall back to owner/repo.
-				source: entry
-					.source_url
-					.clone()
-					.unwrap_or_else(|| entry.source.clone()),
-				ref_name: entry.ref_name.clone(),
-				skill_path,
-			})
-		}
-		_ => Err("scope must be global or project".to_string()),
-	}
-}
-
 fn apply_error(
 	name: &str,
 	scope: &str,
@@ -615,6 +306,7 @@ fn fetch_error_text(error: FetchError) -> &'static str {
 	match error {
 		FetchError::Auth => "Authentication failed while fetching source",
 		FetchError::Network => "Failed to fetch source repository",
+		FetchError::BackendUnavailable => "Credential backend unavailable",
 	}
 }
 
@@ -634,10 +326,7 @@ pub async fn check_skill_updates(
 	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
-	// Forwarded tokens (header) take precedence over the local keyring; an
-	// absent/empty header degrades to the keyring path (backward compatible).
-	let keyring = KeyringResolver::load().await;
-	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
+	let resolver = SourceAuth::load(forwarded).await;
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
@@ -673,27 +362,14 @@ pub async fn apply_skill_update(
 	forwarded: ForwardedGitTokens,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<ApplySkillUpdateResponse> {
-	// Forwarded tokens (header) take precedence over the local keyring. The
-	// keyring snapshot is pre-loaded ONCE here on the blocking pool
-	// (`load_soft`), so no keyring I/O ever runs on the async worker; the
-	// resolver then tries forwarded first and consults that in-memory
-	// snapshot only on a miss (see `LazyKeyringFallback`). This is a MUTATING
-	// route, so a forwarded miss WITH an unreachable backend fails the whole
-	// request closed with 503 — checked inside `apply_skill_update_inner`
-	// right after resolving the token and before any fetch is attempted.
-	let (snapshot, keyring_unavailable) = KeyringResolver::load_soft().await;
-	let resolver = LazyKeyringFallback::new(
-		forwarded.into_resolver(),
-		snapshot,
-		keyring_unavailable,
-	);
+	let resolver = SourceAuth::load(forwarded).await;
 	apply_skill_update_inner(body.into_inner(), &GitFetcher, &resolver).await
 }
 
 /// Inner apply path that takes an injected [`Fetcher`] + [`TokenResolver`] so
 /// the rename guard (and the rest of the happy-path wiring) is unit-testable
 /// without a real network. The route handler is a thin shim that supplies
-/// [`GitFetcher`] + the forwarded/keyring [`ChainResolver`].
+/// [`GitFetcher`] + the request-scoped [`SourceAuth`].
 pub(crate) async fn apply_skill_update_inner(
 	req: ApplySkillUpdateRequest,
 	fetcher: &dyn Fetcher,
@@ -727,100 +403,15 @@ pub(crate) async fn apply_skill_update_inner(
 		)));
 	}
 
-	let source = match apply_source_from_lock(
-		&req.name,
-		&req.scope,
-		project_root.as_deref(),
-	) {
-		Ok(source) => source,
-		Err(error) => {
-			return Ok(Json(apply_error(&req.name, &req.scope, &error)));
-		}
-	};
-	let targets = skill_update::installed_skill_roots(
-		&req.name,
-		resource_scope,
-		project_root.as_deref(),
-	);
-	if targets.is_empty() {
-		return Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"Skill is locked but no installed copy was found",
-		)));
-	}
-
-	// Fail closed BEFORE attempting any fetch if the resolver reports its
-	// backend unreachable (see `TokenResolver::resolve_checked` and
-	// `LazyKeyringFallback`) — a `None` token reached that way might really
-	// mean "couldn't tell", not "no credential needed" (GitHub #15 round-2
-	// forwarded-token regression fix: this check must run before the fetch,
-	// not after, so an unreachable backend never triggers a wasted real
-	// network fetch attempt first).
-	let token = match resolver.resolve_checked(
-		&source.source,
-		keychain_host_for_source(&source.source).as_deref(),
-	) {
-		TokenResolution::Token(token) => Some(token),
-		TokenResolution::NoToken => None,
-		TokenResolution::BackendUnavailable => {
-			return Err(crate::credentials::CredentialStoreError::Unavailable(
-				"credential backend unreachable".to_string(),
-			)
-			.into());
-		}
-	};
-	let folder =
-		match skill_update::skill_folder_from_lock_path(&source.skill_path) {
-			Some(f) => f,
-			None => {
-				return Ok(Json(apply_error(
-					&req.name,
-					&req.scope,
-					"Locked skillPath is not a valid skill folder",
-				)));
-			}
-		};
-	let repo = match fetcher.fetch(
-		&SourceRef {
-			source: source.source.clone(),
-			ref_: source.ref_name.clone(),
+	match resync_locked_skill(
+		LockedResyncRequest {
+			name: &req.name,
+			scope: resource_scope,
+			project_root: project_root.as_deref(),
 		},
-		token.as_deref(),
-		skill_update::FetchSelection::Skills(std::slice::from_ref(&folder)),
+		fetcher,
+		resolver,
 	) {
-		Ok(repo) => repo,
-		Err(error) => {
-			return Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				fetch_error_text(error),
-			)));
-		}
-	};
-
-	let Some(skill_file) = aghub_core::skills::update::sanitize_skill_path(
-		&repo.root,
-		&source.skill_path,
-	) else {
-		return Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"Locked skillPath was not found in fetched source",
-		)));
-	};
-	let source_dir = skill_file.parent().unwrap_or(&repo.root);
-
-	use aghub_core::skills::resync::{
-		resync_installed_skill, ResyncError, ResyncRequest,
-	};
-	match resync_installed_skill(ResyncRequest {
-		source_dir,
-		name: &req.name,
-		scope: resource_scope,
-		project_root: project_root.as_deref(),
-		ref_commit: Some(repo.oid()),
-	}) {
 		Ok(report) => Ok(Json(ApplySkillUpdateResponse {
 			success: true,
 			name: req.name,
@@ -834,15 +425,72 @@ pub(crate) async fn apply_skill_update_inner(
 			error: None,
 			code: None,
 		})),
-		Err(ResyncError::Renamed { new_name }) => {
+		Err(LockedResyncError::LockEntryNotFound { scope }) => {
+			let message = if scope == ResourceScope::GlobalOnly {
+				"Skill is not in global lock"
+			} else {
+				"Skill is not in project lock"
+			};
+			Ok(Json(apply_error(&req.name, &req.scope, message)))
+		}
+		Err(LockedResyncError::MissingSkillPath) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			"Locked skill has no skillPath",
+		))),
+		Err(LockedResyncError::NotInstalled) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			"Skill is locked but no installed copy was found",
+		))),
+		Err(LockedResyncError::CredentialBackendUnavailable) => {
+			Err(crate::credentials::CredentialStoreError::Unavailable(
+				"credential backend unreachable".to_string(),
+			)
+			.into())
+		}
+		Err(LockedResyncError::InvalidSkillPath) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			"Locked skillPath is not a valid skill folder",
+		))),
+		Err(LockedResyncError::SourceSkillNotFound) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			"Locked skillPath was not found in fetched source",
+		))),
+		Err(LockedResyncError::Fetch(error)) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			fetch_error_text(error),
+		))),
+		Err(LockedResyncError::Resync(
+			aghub_core::skills::resync::ResyncError::Renamed { new_name },
+		)) => Ok(Json(apply_error_with_code(
+			&req.name,
+			&req.scope,
+			&skill_renamed_message(&req.name, &new_name),
+			Some(SKILL_RENAMED_CODE),
+		))),
+		Err(LockedResyncError::Resync(error)) => {
+			let mapped = safe_resync_error(&error);
 			Ok(Json(apply_error_with_code(
 				&req.name,
 				&req.scope,
-				&skill_renamed_message(&req.name, &new_name),
-				Some(SKILL_RENAMED_CODE),
+				mapped.message,
+				Some(mapped.code),
 			)))
 		}
-		Err(e) => Ok(Json(apply_error(&req.name, &req.scope, &e.to_string()))),
+		Err(LockedResyncError::ProjectRootRequired) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			"project_root is required when scope is project",
+		))),
+		Err(LockedResyncError::UnsupportedScope(_)) => Ok(Json(apply_error(
+			&req.name,
+			&req.scope,
+			"scope must be global or project",
+		))),
 	}
 }
 
@@ -883,18 +531,7 @@ pub async fn accept_skill_rename(
 	forwarded: ForwardedGitTokens,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<AcceptRenameResponse> {
-	// Same credential path as apply-update: forwarded tokens (header) take
-	// precedence; the keyring snapshot is pre-loaded once on the blocking
-	// pool (`load_soft`, never on the async worker) and consulted in-memory
-	// only on a forwarded miss (see `LazyKeyringFallback`). Also mutating, so
-	// a forwarded miss WITH an unreachable backend fails closed (503) —
-	// checked inside `accept_rename_inner`.
-	let (snapshot, keyring_unavailable) = KeyringResolver::load_soft().await;
-	let resolver = LazyKeyringFallback::new(
-		forwarded.into_resolver(),
-		snapshot,
-		keyring_unavailable,
-	);
+	let resolver = SourceAuth::load(forwarded).await;
 	accept_rename_inner(body.into_inner(), &GitFetcher, &resolver).await
 }
 
@@ -907,9 +544,7 @@ pub(crate) async fn accept_rename_inner(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> ApiResult<AcceptRenameResponse> {
-	use aghub_core::skills::rename::{
-		self, FetchedRename, RenameRequest, RenameScope,
-	};
+	use aghub_core::skills::rename::{self, RenameRequest, RenameScope};
 
 	// Adapter concern: confirmation gate.
 	if !req.confirm.unwrap_or(false) {
@@ -973,67 +608,51 @@ pub(crate) async fn accept_rename_inner(
 		}
 	};
 
-	// Step 3: fetch (same credential path as apply-update). Resolve the token
-	// against the fetch coordinate (`source_url`) so a non-github host binds to
-	// the right keychain host. See the matching check in
-	// `apply_skill_update_inner` — fail closed BEFORE the fetch if the
-	// resolver reports its backend unreachable.
-	let token = match resolver.resolve_checked(
-		&source.source_url,
-		keychain_host_for_source(&source.source_url).as_deref(),
+	// Step 3: the shared mutation seam owns auth, path validation, selective
+	// materialization, and the commit-pinned Fetched Source lifetime.
+	let fetched = match skill_update::mutation::fetch_for_mutation(
+		FetchedSourceRequest {
+			source: &source.source_url,
+			ref_name: source.ref_name.as_deref(),
+			skill_path: &source.skill_path,
+		},
+		fetcher,
+		resolver,
 	) {
-		TokenResolution::Token(token) => Some(token),
-		TokenResolution::NoToken => None,
-		TokenResolution::BackendUnavailable => {
+		Ok(fetched) => fetched,
+		Err(FetchMutationError::CredentialBackendUnavailable) => {
 			return Err(crate::credentials::CredentialStoreError::Unavailable(
 				"credential backend unreachable".to_string(),
 			)
 			.into());
 		}
-	};
-	let folder =
-		match skill_update::skill_folder_from_lock_path(&source.skill_path) {
-			Some(f) => f,
-			None => {
-				return Ok(Json(accept_rename_error(
-					&req.old_name,
-					&req.new_name,
-					&req.scope,
-					"Locked skillPath is not a valid skill folder",
-				)));
-			}
-		};
-	let repo = match fetcher.fetch(
-		&SourceRef {
-			source: source.source_url.clone(),
-			ref_: source.ref_name.clone(),
-		},
-		token.as_deref(),
-		skill_update::FetchSelection::Skills(std::slice::from_ref(&folder)),
-	) {
-		Ok(r) => r,
-		Err(e) => {
+		Err(FetchMutationError::InvalidSkillPath) => {
 			return Ok(Json(accept_rename_error(
 				&req.old_name,
 				&req.new_name,
 				&req.scope,
-				fetch_error_text(e),
+				"Locked skillPath is not a valid skill folder",
+			)));
+		}
+		Err(FetchMutationError::Fetch(error)) => {
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				fetch_error_text(error),
 			)));
 		}
 	};
 
 	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core.
-	match rename::accept_rename(
+	match accept_fetched_rename(
+		&fetched,
 		RenameRequest {
 			old_name: &req.old_name,
 			new_name: &req.new_name,
 			scope,
 		},
-		FetchedRename {
-			repo_root: &repo.root,
-			oid: repo.oid(),
-			source: &source,
-		},
+		&source,
 	) {
 		Ok(ok) => Ok(Json(AcceptRenameResponse {
 			success: true,
@@ -1062,20 +681,14 @@ mod tests {
 	use aghub_core::skills::update::SkillUpdateStatus;
 	use skill_update::EntryKey;
 
-	/// Empty snapshot for tests that don't seed the keyring — they only need
-	/// a [`TokenResolver`] to satisfy the type; `resolve()` always returns
-	/// `None`. Bypasses `KeyringResolver::load()` (which needs an async
-	/// context to `spawn_blocking`) since these are plain sync test helpers.
-	fn empty_keyring_resolver() -> KeyringResolver {
-		KeyringResolver {
-			creds: Vec::new(),
-			bindings: Default::default(),
-		}
+	/// Empty source-auth snapshot for synchronous route-core tests.
+	fn empty_keyring_resolver() -> SourceAuth {
+		SourceAuth::for_test(ForwardedGitTokens::default(), false)
 	}
 
-	/// Stub resolver whose `resolve_checked` always reports
+	/// Stub resolver whose `resolve` always reports
 	/// `BackendUnavailable`, with no real keyring involved -- used to assert
-	/// the fail-closed 503 path directly against `resolve_checked`'s
+	/// the fail-closed 503 path directly against `resolve`'s
 	/// dedicated enum variant (as opposed to forcing the real backend
 	/// unreachable via the OS-level test hook, as the route-level regression
 	/// test below does).
@@ -1087,19 +700,7 @@ mod tests {
 	struct StubBackendUnavailableResolver;
 	#[cfg(unix)]
 	impl TokenResolver for StubBackendUnavailableResolver {
-		fn resolve(
-			&self,
-			_source: &str,
-			_host: Option<&str>,
-		) -> Option<String> {
-			None
-		}
-
-		fn resolve_checked(
-			&self,
-			_source: &str,
-			_host: Option<&str>,
-		) -> TokenResolution {
+		fn resolve(&self, _source: &str) -> TokenResolution {
 			TokenResolution::BackendUnavailable
 		}
 	}
@@ -1117,7 +718,7 @@ mod tests {
 			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
 			panic!(
-				"fetch must not be attempted when resolve_checked reports \
+				"fetch must not be attempted when resolve reports \
 				 BackendUnavailable"
 			);
 		}
@@ -1125,7 +726,7 @@ mod tests {
 
 	/// Regression coverage for F2: `apply_skill_update_inner` must fail
 	/// closed (503 `KEYCHAIN_UNAVAILABLE`) BEFORE any fetch is attempted when
-	/// the injected resolver's `resolve_checked` reports
+	/// the injected resolver's `resolve` reports
 	/// `BackendUnavailable` -- exercised directly against a stub, so this
 	/// fails on a regression without needing a real (im)possible keyring
 	/// state.
@@ -1175,7 +776,7 @@ mod tests {
 
 			let Err(error) = result else {
 				panic!(
-					"expected a 503 when resolve_checked reports \
+					"expected a 503 when resolve reports \
 					 BackendUnavailable"
 				);
 			};
@@ -1184,8 +785,8 @@ mod tests {
 		});
 	}
 
-	/// Regression (GitHub #15 P2-3, Codex-found): `apply_skill_update` used
-	/// to load its keyring snapshot via `KeyringResolver::load`, which
+	/// Regression (GitHub #15 P2-3, Codex-found): `apply_skill_update` once
+	/// loaded a permissive keyring snapshot, which
 	/// degrades ANY read failure -- including "the backend itself is
 	/// unreachable" -- to an empty snapshot. For this MUTATING route that
 	/// meant a keyring outage silently resolved "no credential" and the
@@ -1201,12 +802,12 @@ mod tests {
 	/// (GitHub #15 round-2 Codex finding, P1-1-adjacent).
 	///
 	/// A real lock entry + installed copy for `some-skill` is required: the
-	/// keyring fallback (`LazyKeyringFallback`, see its doc comment) is only
+	/// keyring fallback in `SourceAuth` is only
 	/// ever consulted once `apply_skill_update_inner` actually reaches its
 	/// `resolver.resolve(...)` call — which requires a real, locked,
 	/// installed skill to get past the earlier "not installed"/"no lock
-	/// entry" short-circuits. (The keyring READ is eager/off-worker via
-	/// `load_soft`; only the in-memory `resolve()` lookup is gated here.) Dispatches a real HTTP
+	/// entry" short-circuits. (The keyring read is eager/off-worker; only the
+	/// in-memory `resolve()` lookup is gated here.) Dispatches a real HTTP
 	/// request through the mounted route (not `apply_skill_update_inner`
 	/// directly, which bypasses this exact code path). No forwarded-token
 	/// header is sent, so the forwarded resolver misses and the keyring
@@ -1801,7 +1402,7 @@ mod tests {
 	}
 
 	/// P1-b: a forwarded `X-Aghub-Git-Tokens` entry (the new `{token,origin}`
-	/// shape) must reach the apply-update fetch via the [`ChainResolver`], with
+	/// shape) must reach the apply-update fetch via [`SourceAuth`], with
 	/// the controller-resolved origin matching the locked source.
 	#[cfg(unix)]
 	#[test]
@@ -1854,9 +1455,7 @@ mod tests {
 				},
 			);
 			let forwarded = ForwardedGitTokens(map);
-			let keyring = empty_keyring_resolver();
-			let resolver =
-				ChainResolver::new(forwarded.into_resolver(), &keyring);
+			let resolver = SourceAuth::for_test(forwarded, false);
 
 			let req = ApplySkillUpdateRequest {
 				name: "some-skill".to_string(),
@@ -1895,13 +1494,12 @@ mod tests {
 	}
 
 	/// Regression (GitHub #15 round-2 Codex finding): both mutating routes
-	/// used to build their resolver as `KeyringResolver::load_or_unavailable()
-	/// .await?` — an eager, fail-closed keyring load — BEFORE ever
-	/// constructing the `ChainResolver` that tries the forwarded map first.
+	/// once loaded the fail-closed keyring snapshot BEFORE trying the forwarded
+	/// map.
 	/// That meant an unreachable keyring 503'd the request UNCONDITIONALLY,
 	/// even when the forwarded header already covered the requested source
 	/// — defeating the entire purpose of forwarding for a headless remote
-	/// (no keyring of its own). Uses `LazyKeyringFallback` directly — the
+	/// (no keyring of its own). Uses `SourceAuth` directly — the
 	/// SAME resolver type the production route handler constructs — with the
 	/// credential backend forced unreachable via the cross-platform
 	/// injection hook (never DBUS). Must succeed using the forwarded token;
@@ -1969,14 +1567,7 @@ mod tests {
 			// succeed and never 503 (GitHub #15 round-2 regression); round-3
 			// keeps the keyring read off the async worker via `load_soft`, so
 			// this constructs the already-loaded state directly.
-			let resolver = LazyKeyringFallback::new(
-				forwarded.into_resolver(),
-				KeyringResolver {
-					creds: Vec::new(),
-					bindings: Default::default(),
-				},
-				true,
-			);
+			let resolver = SourceAuth::for_test(forwarded, true);
 
 			let req = ApplySkillUpdateRequest {
 				name: "some-skill".to_string(),

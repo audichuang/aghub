@@ -913,6 +913,42 @@ fn source_sync_agent_list_installs_for_each_listed_agent() {
 	);
 }
 
+#[cfg(unix)]
+#[test]
+fn source_sync_agent_list_preflights_before_writing_master() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let source = tempfile::TempDir::new().unwrap();
+	write_source_skill(source.path(), "alpha", "alpha");
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", source.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,augmentcode",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "unsupported target must reject sync");
+	assert!(
+		!home.path().join(".agents/skills/alpha").exists(),
+		"capability preflight must happen before the shared Master write",
+	);
+	assert!(
+		!home.path().join(".claude/skills/alpha").exists(),
+		"no earlier agent may be linked before all targets pass preflight",
+	);
+}
+
 #[cfg(unix)] // Windows: global MCP config not HOME-isolated
 #[test]
 fn cli_delete_mcp_dry_run_default() {
@@ -3834,9 +3870,9 @@ fn transfer_skill_copies_claude_to_opencode_project() {
 	assert!(
 		project
 			.path()
-			.join(".opencode/skills/repo-helper/SKILL.md")
+			.join(".agents/skills/repo-helper/SKILL.md")
 			.exists(),
-		"transfer must copy the skill into OpenCode's project skills dir"
+		"OpenCode is a NativeReader and must use the shared Master",
 	);
 }
 
@@ -4083,9 +4119,9 @@ fn reconcile_skill_reports_batch_summary() {
 	assert!(
 		project
 			.path()
-			.join(".opencode/skills/repo-helper/SKILL.md")
+			.join(".agents/skills/repo-helper/SKILL.md")
 			.exists(),
-		"reconcile --add must materialize the OpenCode skill"
+		"reconcile --add must retain the Master OpenCode reads natively"
 	);
 }
 

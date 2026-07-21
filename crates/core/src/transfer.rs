@@ -6,8 +6,8 @@ use crate::{
 	registry,
 };
 use log::{info, warn};
-use skill::sanitize::sanitize_name;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -36,6 +36,12 @@ pub struct ResourceLocator {
 pub enum OperationAction {
 	Copy,
 	Delete,
+}
+
+#[derive(Debug, Clone)]
+struct OperationPlan {
+	target: InstallTarget,
+	action: OperationAction,
 }
 
 impl std::fmt::Display for OperationAction {
@@ -149,12 +155,28 @@ fn validate_target(target: &InstallTarget) -> Result<()> {
 	Ok(())
 }
 
+fn target_resource_scope(
+	target: &InstallTarget,
+) -> crate::models::ResourceScope {
+	match target.scope {
+		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
+		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
+	}
+}
+
 fn mcp_supported_for_target(
 	target: &InstallTarget,
 	mcp: &McpServer,
 ) -> Result<()> {
 	let adapter = create_adapter(target.agent);
 	let descriptor = registry::get(target.agent);
+	if !descriptor.supports_mcp_scope(target_resource_scope(target)) {
+		return Err(ConfigError::unsupported_operation(
+			"copy",
+			"MCP server",
+			descriptor.id,
+		));
+	}
 	let supported = adapter.mcp_supports_transport(&mcp.transport);
 
 	if supported {
@@ -164,6 +186,18 @@ fn mcp_supported_for_target(
 	Err(ConfigError::unsupported_operation(
 		"copy incompatible",
 		"MCP server",
+		descriptor.id,
+	))
+}
+
+fn sub_agent_supported_for_target(target: &InstallTarget) -> Result<()> {
+	let descriptor = registry::get(target.agent);
+	if descriptor.supports_sub_agent_scope(target_resource_scope(target)) {
+		return Ok(());
+	}
+	Err(ConfigError::unsupported_operation(
+		"copy",
+		"sub-agent",
 		descriptor.id,
 	))
 }
@@ -263,22 +297,6 @@ fn resolve_skill_root(skill: &Skill) -> Result<PathBuf> {
 	Ok(root)
 }
 
-fn copy_dir_recursive(from: &Path, to: &Path) -> Result<()> {
-	fs::create_dir_all(to)?;
-	for entry in fs::read_dir(from)? {
-		let entry = entry?;
-		let from_path = entry.path();
-		let to_path = to.join(entry.file_name());
-		let file_type = entry.file_type()?;
-		if file_type.is_dir() {
-			copy_dir_recursive(&from_path, &to_path)?;
-		} else {
-			fs::copy(&from_path, &to_path)?;
-		}
-	}
-	Ok(())
-}
-
 fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
 	let adapter = create_adapter(target.agent);
 	let dir = adapter.target_skills_dir(
@@ -296,25 +314,6 @@ fn skill_target_dir(target: &InstallTarget) -> Result<PathBuf> {
 			registry::get(target.agent).id,
 		)
 	})
-}
-
-fn group_agents_by_target_dir(
-	agents: &[AgentType],
-	scope: InstallScope,
-	project_root: Option<&PathBuf>,
-) -> HashMap<PathBuf, Vec<AgentType>> {
-	let mut dir_to_agents: HashMap<PathBuf, Vec<AgentType>> = HashMap::new();
-	for agent in agents {
-		let target = InstallTarget {
-			agent: *agent,
-			scope,
-			project_root: project_root.cloned(),
-		};
-		if let Ok(target_dir) = skill_target_dir(&target) {
-			dir_to_agents.entry(target_dir).or_default().push(*agent);
-		}
-	}
-	dir_to_agents
 }
 
 fn unique_targets(targets: Vec<InstallTarget>) -> Vec<InstallTarget> {
@@ -368,6 +367,90 @@ fn ensure_disjoint(added: &[AgentType], removed: &[AgentType]) -> Result<()> {
 	Ok(())
 }
 
+fn copy_plans(destinations: Vec<InstallTarget>) -> Vec<OperationPlan> {
+	destinations
+		.into_iter()
+		.map(|target| OperationPlan {
+			target,
+			action: OperationAction::Copy,
+		})
+		.collect()
+}
+
+fn reconcile_plans(
+	added: Vec<AgentType>,
+	removed: Vec<AgentType>,
+	scope: InstallScope,
+	project_root: Option<PathBuf>,
+) -> Vec<OperationPlan> {
+	added
+		.into_iter()
+		.map(|agent| OperationPlan {
+			target: InstallTarget {
+				agent,
+				scope,
+				project_root: project_root.clone(),
+			},
+			action: OperationAction::Copy,
+		})
+		.chain(removed.into_iter().map(|agent| OperationPlan {
+			target: InstallTarget {
+				agent,
+				scope,
+				project_root: project_root.clone(),
+			},
+			action: OperationAction::Delete,
+		}))
+		.collect()
+}
+
+fn batch_preflight_error(
+	operation: &str,
+	error: crate::batch::MultiTargetMutationError<OperationPlan, ConfigError>,
+) -> ConfigError {
+	let failures = error
+		.failures
+		.into_iter()
+		.map(|failure| {
+			let scope = match failure.target.target.scope {
+				InstallScope::Global => "global",
+				InstallScope::Project => "project",
+			};
+			format!(
+				"{} {} ({scope}): {}",
+				failure.target.action,
+				failure.target.target.agent.as_str(),
+				failure.reason
+			)
+		})
+		.collect::<Vec<_>>()
+		.join("; ");
+	ConfigError::InvalidConfig(format!(
+		"{operation} preflight failed; nothing was written: {failures}"
+	))
+}
+
+fn operation_batch(
+	report: crate::batch::MultiTargetMutationReport<
+		OperationPlan,
+		(),
+		ConfigError,
+	>,
+) -> OperationBatchResult {
+	OperationBatchResult {
+		results: report
+			.results
+			.into_iter()
+			.map(|row| OperationResult {
+				target: row.target.target,
+				action: row.target.action,
+				success: row.result.is_ok(),
+				error: row.result.err().map(|error| error.to_string()),
+			})
+			.collect(),
+	}
+}
+
 fn log_operation_outcome(
 	resource: &str,
 	name: &str,
@@ -404,31 +487,60 @@ pub fn transfer_mcp(
 		mcp.name,
 		destinations.len()
 	);
-	let mut results = Vec::new();
+	let report = crate::batch::run_multi_target_mutation(
+		&destinations,
+		|target| {
+			validate_target(target)?;
+			mcp_supported_for_target(target, &mcp)
+		},
+		|target| {
+			let outcome = (|| -> Result<()> {
+				let mut manager = build_manager(target);
+				ensure_loaded(&mut manager)?;
+				manager.add_mcp(mcp.clone())
+			})();
+			log_operation_outcome(
+				"MCP",
+				&mcp.name,
+				OperationAction::Copy,
+				target,
+				&outcome,
+			);
+			outcome
+		},
+	)
+	.map_err(|error| {
+		let failures = error
+			.failures
+			.into_iter()
+			.map(|failure| {
+				let scope = match failure.target.scope {
+					InstallScope::Global => "global",
+					InstallScope::Project => "project",
+				};
+				format!(
+					"{} ({scope}): {}",
+					failure.target.agent.as_str(),
+					failure.reason
+				)
+			})
+			.collect::<Vec<_>>()
+			.join("; ");
+		ConfigError::InvalidConfig(format!(
+			"MCP transfer preflight failed; nothing was written: {failures}"
+		))
+	})?;
 
-	for target in destinations {
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			mcp_supported_for_target(&target, &mcp)?;
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			manager.add_mcp(mcp.clone())
-		})();
-		log_operation_outcome(
-			"MCP",
-			&mcp.name,
-			OperationAction::Copy,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
+	let results = report
+		.results
+		.into_iter()
+		.map(|row| OperationResult {
+			target: row.target,
 			action: OperationAction::Copy,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
+			success: row.result.is_ok(),
+			error: row.result.err().map(|error| error.to_string()),
+		})
+		.collect();
 
 	Ok(OperationBatchResult { results })
 }
@@ -446,69 +558,47 @@ pub fn reconcile_mcp(
 		added.len(),
 		removed.len()
 	);
-	let mut results = Vec::new();
-
-	let target_scope = source.scope;
-	let target_project_root = source.project_root.clone();
-
-	for agent in added {
-		let target = InstallTarget {
-			agent,
-			scope: target_scope,
-			project_root: target_project_root.clone(),
-		};
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			mcp_supported_for_target(&target, &mcp)?;
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			manager.add_mcp(mcp.clone())
-		})();
-		log_operation_outcome(
-			"MCP",
-			&mcp.name,
-			OperationAction::Copy,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Copy,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	for agent in removed {
-		let target = InstallTarget {
-			agent,
-			scope: target_scope,
-			project_root: target_project_root.clone(),
-		};
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			manager.remove_mcp(&source.name)
-		})();
-		log_operation_outcome(
-			"MCP",
-			&source.name,
-			OperationAction::Delete,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Delete,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	Ok(OperationBatchResult { results })
+	let plans = reconcile_plans(
+		added,
+		removed,
+		source.scope,
+		source.project_root.clone(),
+	);
+	let report = crate::batch::run_multi_target_mutation(
+		&plans,
+		|plan| {
+			validate_target(&plan.target)?;
+			if plan.action == OperationAction::Copy {
+				mcp_supported_for_target(&plan.target, &mcp)?;
+			}
+			Ok(())
+		},
+		|plan| {
+			let outcome = (|| -> Result<()> {
+				let mut manager = build_manager(&plan.target);
+				ensure_loaded(&mut manager)?;
+				match plan.action {
+					OperationAction::Copy => manager.add_mcp(mcp.clone()),
+					OperationAction::Delete => manager.remove_mcp(&source.name),
+				}
+			})();
+			let name = if plan.action == OperationAction::Copy {
+				&mcp.name
+			} else {
+				&source.name
+			};
+			log_operation_outcome(
+				"MCP",
+				name,
+				plan.action,
+				&plan.target,
+				&outcome,
+			);
+			outcome
+		},
+	)
+	.map_err(|error| batch_preflight_error("MCP reconcile", error))?;
+	Ok(operation_batch(report))
 }
 
 fn load_source_sub_agent(source: &ResourceLocator) -> Result<SubAgent> {
@@ -535,48 +625,31 @@ pub fn transfer_sub_agent(
 		sub_agent.name,
 		destinations.len()
 	);
-	let mut results = Vec::new();
-
-	for target in destinations {
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			let descriptor = registry::get(target.agent);
-			let scope = match target.scope {
-				InstallScope::Global => {
-					crate::models::ResourceScope::GlobalOnly
-				}
-				InstallScope::Project => {
-					crate::models::ResourceScope::ProjectOnly
-				}
-			};
-			if !descriptor.supports_sub_agent_scope(scope) {
-				return Err(ConfigError::unsupported_operation(
-					"copy",
-					"sub-agent",
-					descriptor.id,
-				));
-			}
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			manager.add_sub_agent(sub_agent.clone())
-		})();
-		log_operation_outcome(
-			"sub-agent",
-			&sub_agent.name,
-			OperationAction::Copy,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Copy,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	Ok(OperationBatchResult { results })
+	let plans = copy_plans(destinations);
+	let report = crate::batch::run_multi_target_mutation(
+		&plans,
+		|plan| {
+			validate_target(&plan.target)?;
+			sub_agent_supported_for_target(&plan.target)
+		},
+		|plan| {
+			let mut manager = build_manager(&plan.target);
+			let outcome = (|| -> Result<()> {
+				ensure_loaded(&mut manager)?;
+				manager.add_sub_agent(sub_agent.clone())
+			})();
+			log_operation_outcome(
+				"sub-agent",
+				&sub_agent.name,
+				plan.action,
+				&plan.target,
+				&outcome,
+			);
+			outcome
+		},
+	)
+	.map_err(|error| batch_preflight_error("sub-agent transfer", error))?;
+	Ok(operation_batch(report))
 }
 
 pub fn reconcile_sub_agent(
@@ -592,84 +665,51 @@ pub fn reconcile_sub_agent(
 		added.len(),
 		removed.len()
 	);
-	let mut results = Vec::new();
-
-	let target_scope = source.scope;
-	let target_project_root = source.project_root.clone();
-
-	for agent in added {
-		let target = InstallTarget {
-			agent,
-			scope: target_scope,
-			project_root: target_project_root.clone(),
-		};
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			let descriptor = registry::get(target.agent);
-			let scope = match target.scope {
-				InstallScope::Global => {
-					crate::models::ResourceScope::GlobalOnly
-				}
-				InstallScope::Project => {
-					crate::models::ResourceScope::ProjectOnly
-				}
-			};
-			if !descriptor.supports_sub_agent_scope(scope) {
-				return Err(ConfigError::unsupported_operation(
-					"copy",
-					"sub-agent",
-					descriptor.id,
-				));
+	let plans = reconcile_plans(
+		added,
+		removed,
+		source.scope,
+		source.project_root.clone(),
+	);
+	let report = crate::batch::run_multi_target_mutation(
+		&plans,
+		|plan| {
+			validate_target(&plan.target)?;
+			if plan.action == OperationAction::Copy {
+				sub_agent_supported_for_target(&plan.target)?;
 			}
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			manager.add_sub_agent(sub_agent.clone())
-		})();
-		log_operation_outcome(
-			"sub-agent",
-			&sub_agent.name,
-			OperationAction::Copy,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Copy,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	for agent in removed {
-		let target = InstallTarget {
-			agent,
-			scope: target_scope,
-			project_root: target_project_root.clone(),
-		};
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			manager.remove_sub_agent(&source.name)
-		})();
-		log_operation_outcome(
-			"sub-agent",
-			&source.name,
-			OperationAction::Delete,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Delete,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	Ok(OperationBatchResult { results })
+			Ok(())
+		},
+		|plan| {
+			let outcome = (|| -> Result<()> {
+				let mut manager = build_manager(&plan.target);
+				ensure_loaded(&mut manager)?;
+				match plan.action {
+					OperationAction::Copy => {
+						manager.add_sub_agent(sub_agent.clone())
+					}
+					OperationAction::Delete => {
+						manager.remove_sub_agent(&source.name)
+					}
+				}
+			})();
+			let name = if plan.action == OperationAction::Copy {
+				&sub_agent.name
+			} else {
+				&source.name
+			};
+			log_operation_outcome(
+				"sub-agent",
+				name,
+				plan.action,
+				&plan.target,
+				&outcome,
+			);
+			outcome
+		},
+	)
+	.map_err(|error| batch_preflight_error("sub-agent reconcile", error))?;
+	Ok(operation_batch(report))
 }
 
 pub fn transfer_skill(
@@ -678,7 +718,6 @@ pub fn transfer_skill(
 ) -> Result<OperationBatchResult> {
 	let skill = load_source_skill(&source)?;
 	let source_root = resolve_skill_root(&skill)?;
-	let safe_name = sanitize_name(&skill.name);
 	let destinations = unique_targets(destinations);
 	ensure_destinations(&destinations)?;
 	info!(
@@ -687,42 +726,38 @@ pub fn transfer_skill(
 		source_root.display(),
 		destinations.len()
 	);
-	let mut results = Vec::new();
-
-	for target in destinations {
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			let target_dir = skill_target_dir(&target)?;
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			if manager.get_skill(&skill.name).is_some() {
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
-
-			let dest_root = target_dir.join(&safe_name);
-			if dest_root.exists() {
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
-
-			copy_dir_recursive(&source_root, &dest_root)
-		})();
-		log_operation_outcome(
-			"skill",
-			&skill.name,
-			OperationAction::Copy,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Copy,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	Ok(OperationBatchResult { results })
+	let plans = copy_plans(destinations);
+	let report = crate::batch::run_multi_target_mutation(
+		&plans,
+		|plan| {
+			validate_target(&plan.target)?;
+			skill_target_dir(&plan.target).map(|_| ())
+		},
+		|plan| {
+			let outcome = (|| -> Result<()> {
+				let mut manager = build_manager(&plan.target);
+				ensure_loaded(&mut manager)?;
+				if manager.get_skill(&skill.name).is_some() {
+					return Err(ConfigError::resource_exists(
+						"skill",
+						&skill.name,
+					));
+				}
+				manager.add_skill_from_path(&source_root)?;
+				Ok(())
+			})();
+			log_operation_outcome(
+				"skill",
+				&skill.name,
+				plan.action,
+				&plan.target,
+				&outcome,
+			);
+			outcome
+		},
+	)
+	.map_err(|error| batch_preflight_error("skill transfer", error))?;
+	Ok(operation_batch(report))
 }
 
 pub fn reconcile_skill(
@@ -733,111 +768,65 @@ pub fn reconcile_skill(
 	ensure_disjoint(&added, &removed)?;
 	let skill = load_source_skill(&source)?;
 	let source_root = resolve_skill_root(&skill)?;
-	let safe_name = sanitize_name(&skill.name);
 	info!(
 		"reconciling skill '{}' with {} added and {} removed agent(s)",
 		skill.name,
 		added.len(),
 		removed.len()
 	);
-	let mut results = Vec::new();
-
-	let target_scope = source.scope;
-	let target_project_root = source.project_root.clone();
-
-	// Group agents by target directory to avoid redundant copies
-	let dir_to_agents = group_agents_by_target_dir(
-		&added,
-		target_scope,
-		target_project_root.as_ref(),
+	let plans = reconcile_plans(
+		added,
+		removed,
+		source.scope,
+		source.project_root.clone(),
 	);
-
-	// Process each unique directory
-	for (target_dir, agents) in dir_to_agents {
-		let dest_root = target_dir.join(&safe_name);
-		let already_exists = dest_root.exists();
-
-		// Copy once per directory (if doesn't exist)
-		if !already_exists {
-			if let Err(e) = copy_dir_recursive(&source_root, &dest_root) {
-				// If copy fails, all agents in this group fail
-				for agent in agents {
-					results.push(OperationResult {
-						target: InstallTarget {
-							agent,
-							scope: target_scope,
-							project_root: target_project_root.clone(),
-						},
-						action: OperationAction::Copy,
-						success: false,
-						error: Some(e.to_string()),
-					});
-				}
-				continue;
+	let report = crate::batch::run_multi_target_mutation(
+		&plans,
+		|plan| {
+			validate_target(&plan.target)?;
+			if plan.action == OperationAction::Copy {
+				skill_target_dir(&plan.target)?;
 			}
-		}
-
-		// All agents in this group succeed (skill is auto-discovered from dir)
-		for agent in agents {
-			results.push(OperationResult {
-				target: InstallTarget {
-					agent,
-					scope: target_scope,
-					project_root: target_project_root.clone(),
-				},
-				action: OperationAction::Copy,
-				success: true,
-				error: None,
-			});
-		}
-	}
-
-	// Remove per agent through the planned-removal seam (#5) — the same
-	// classifier every delete surface uses (symlink sweep, shared-master
-	// referrer keep, containment, lock prune). Never blind-delete paths
-	// found via READ dirs: a NativeReader's read dirs include the shared
-	// `.agents/skills` master, and `remove_dir_all`-ing it would orphan
-	// every other agent's referrer.
-	for agent in removed {
-		let target = InstallTarget {
-			agent,
-			scope: target_scope,
-			project_root: target_project_root.clone(),
-		};
-		let outcome = (|| -> Result<()> {
-			validate_target(&target)?;
-			let mut manager = build_manager(&target);
-			ensure_loaded(&mut manager)?;
-			match manager.remove_skill_planned(
+			Ok(())
+		},
+		|plan| {
+			let outcome = match plan.action {
+				OperationAction::Copy => (|| -> Result<()> {
+					let mut manager = build_manager(&plan.target);
+					ensure_loaded(&mut manager)?;
+					manager.add_skill_from_path(&source_root)?;
+					Ok(())
+				})(),
+				// Use the planned-removal seam — never blind-delete a shared
+				// universal master discovered through an agent's read dirs.
+				OperationAction::Delete => (|| -> Result<()> {
+					let mut manager = build_manager(&plan.target);
+					ensure_loaded(&mut manager)?;
+					match manager.remove_skill_planned(
+						&skill.name,
+						false,
+						false,
+						true,
+					) {
+						Ok(_) | Err(ConfigError::ResourceNotFound { .. }) => {
+							Ok(())
+						}
+						Err(error) => Err(error),
+					}
+				})(),
+			};
+			log_operation_outcome(
+				"skill",
 				&skill.name,
-				false, // single-agent removal, never an all-agents sweep
-				false, // not a dry-run — the CLI/desktop gate confirmation
-				true,  // execute; the plan still keeps shared masters
-			) {
-				Ok(_) => Ok(()),
-				// Already absent from this agent = the desired state;
-				// keep the old NotFound tolerance.
-				Err(ConfigError::ResourceNotFound { .. }) => Ok(()),
-				Err(err) => Err(err),
-			}
-		})();
-		log_operation_outcome(
-			"skill",
-			&skill.name,
-			OperationAction::Delete,
-			&target,
-			&outcome,
-		);
-
-		results.push(OperationResult {
-			target,
-			action: OperationAction::Delete,
-			success: outcome.is_ok(),
-			error: outcome.err().map(|err| err.to_string()),
-		});
-	}
-
-	Ok(OperationBatchResult { results })
+				plan.action,
+				&plan.target,
+				&outcome,
+			);
+			outcome
+		},
+	)
+	.map_err(|error| batch_preflight_error("skill reconcile", error))?;
+	Ok(operation_batch(report))
 }
 
 #[cfg(test)]
@@ -940,6 +929,67 @@ mod tests {
 	}
 
 	#[test]
+	fn transfer_mcp_preflight_prevents_partial_writes() {
+		let _guard = env_lock().lock().unwrap();
+		let temporary = tempdir().unwrap();
+		let source_root = temporary.path().join("source");
+		let valid_root = temporary.path().join("valid-target");
+		let unsupported_root = temporary.path().join("unsupported-target");
+		fs::create_dir_all(&source_root).unwrap();
+		fs::create_dir_all(&valid_root).unwrap();
+		fs::create_dir_all(&unsupported_root).unwrap();
+
+		let mut source_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&source_root),
+		);
+		source_manager.load().unwrap();
+		source_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
+			))
+			.unwrap();
+
+		let result = transfer_mcp(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(source_root),
+				name: "filesystem".to_string(),
+			},
+			vec![
+				InstallTarget {
+					agent: AgentType::Cursor,
+					scope: InstallScope::Project,
+					project_root: Some(valid_root.clone()),
+				},
+				InstallTarget {
+					agent: AgentType::AugmentCode,
+					scope: InstallScope::Project,
+					project_root: Some(unsupported_root),
+				},
+			],
+		);
+
+		assert!(
+			result.is_err(),
+			"predictable target failure rejects the batch"
+		);
+		let mut valid_manager = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(&valid_root),
+		);
+		valid_manager.load().unwrap();
+		assert!(
+			valid_manager.get_mcp("filesystem").is_none(),
+			"no target may be written before every target passes preflight",
+		);
+	}
+
+	#[test]
 	fn reconcile_mcp_deletes_when_removed() {
 		let _guard = env_lock().lock().unwrap();
 		let temp = tempdir().unwrap();
@@ -984,7 +1034,7 @@ mod tests {
 	}
 
 	#[test]
-	fn transfer_skill_copies_whole_folder() {
+	fn transfer_skill_materializes_master_and_referrer() {
 		let _guard = env_lock().lock().unwrap();
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
@@ -1013,7 +1063,7 @@ mod tests {
 				name: "repo-helper".to_string(),
 			},
 			vec![InstallTarget {
-				agent: AgentType::Cursor,
+				agent: AgentType::Windsurf,
 				scope: InstallScope::Project,
 				project_root: Some(dest_root.clone()),
 			}],
@@ -1021,9 +1071,13 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(result.success_count(), 1);
-		assert!(dest_root
-			.join(".cursor/skills/repo-helper/assets/notes.txt")
-			.exists());
+		let master = dest_root.join(".agents/skills/repo-helper");
+		let referrer = dest_root.join(".windsurf/skills/repo-helper");
+		assert!(master.join("assets/notes.txt").exists());
+		assert!(
+			crate::skills::linker::Linker::is_link(&referrer),
+			"skill transfer must use ConfigManager's Master + Referrer layout",
+		);
 	}
 
 	#[test]
@@ -1477,10 +1531,15 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(result.success_count(), 2);
-		assert!(dest_root_cursor.join(".cursor/skills/repo-helper").exists());
-		assert!(dest_root_windsurf
-			.join(".windsurf/skills/repo-helper")
+		assert!(dest_root_cursor
+			.join(".agents/skills/repo-helper/SKILL.md")
 			.exists());
+		assert!(dest_root_windsurf
+			.join(".agents/skills/repo-helper/SKILL.md")
+			.exists());
+		assert!(crate::skills::linker::Linker::is_link(
+			&dest_root_windsurf.join(".windsurf/skills/repo-helper")
+		));
 	}
 
 	#[test]
@@ -1568,13 +1627,14 @@ mod tests {
 		)
 		.unwrap();
 
-		// Both should succeed - Cursor and Windsurf use the same skills directory
+		// Both should succeed: Cursor reads the Master natively; Windsurf gets a
+		// Referrer to that same Master.
 		assert_eq!(result.success_count(), 2);
 
-		// Verify directory was copied to the project's skills directory
-		// Cursor and Windsurf both use .cursor/skills/ directory
-		let skill_dir = root.join(".cursor/skills/shared-skill");
-		assert!(skill_dir.exists());
+		assert!(root.join(".agents/skills/shared-skill/SKILL.md").exists());
+		assert!(crate::skills::linker::Linker::is_link(
+			&root.join(".windsurf/skills/shared-skill")
+		));
 
 		// Verify both agents can see the skill
 		let mut cursor_manager = ConfigManager::new(

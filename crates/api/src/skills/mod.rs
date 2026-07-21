@@ -5,3 +5,4 @@
 //! `skill-update` crate (shared by the api and the CLI); only the rename-guard
 //! re-export remains here.
 pub(crate) mod rename;
+pub(crate) mod resync;

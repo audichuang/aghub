@@ -3,9 +3,9 @@
 //! When a desktop client drives a *remote* aghub-api (over an SSH tunnel), the
 //! remote process has no access to the user's local keyring. The client may
 //! instead forward a per-request set of `source → { token, origin }` entries in
-//! the `X-Aghub-Git-Tokens` header (base64-encoded JSON). These primitives
-//! parse that header into a [`TokenResolver`] that the update/sources
-//! orchestration can consult *before* the keyring-backed resolver.
+//! the `X-Aghub-Git-Tokens` header (base64-encoded JSON). This module parses
+//! the transport shape; `credentials::source_auth` owns matching, origin
+//! pinning, precedence, and keyring fallback.
 //!
 //! Wire contract (must match the TS encoder in
 //! `crates/desktop/src/lib/git-token-forwarding.ts`):
@@ -22,8 +22,8 @@
 //! Security invariants:
 //! - A token is never logged. The only `warn!` here (malformed header) must
 //!   not include the header value.
-//! - Absent / malformed header degrades to an empty map → the resolver returns
-//!   `None` → callers behave exactly as they do today (backward compatible).
+//! - Absent / malformed header degrades to an empty map; Source-auth then uses
+//!   the keyring path exactly as it does for requests without this header.
 //! - The `origin` field is non-sensitive metadata; only the `token` is secret.
 
 use std::collections::BTreeMap;
@@ -32,10 +32,14 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use rocket::request::{self, FromRequest, Request};
 use serde::Deserialize;
-use skill_update::TokenResolver;
+#[cfg(test)]
+use skill_update::{TokenResolution, TokenResolver};
 
-use crate::credentials::origin::{origin_of, ResolvedOrigin};
-use crate::credentials::resolve::{binding_keys_match_lookup, lookup_keys};
+use crate::credentials::origin::ResolvedOrigin;
+#[cfg(test)]
+use crate::credentials::source_auth::{
+	forwarded_token_from_entries, ForwardedCredentialPolicy,
+};
 
 /// Header carrying the base64-encoded JSON `source → { token, origin }` map.
 const FORWARDED_TOKENS_HEADER: &str = "X-Aghub-Git-Tokens";
@@ -117,11 +121,6 @@ impl ForwardedGitTokens {
 			}
 		}
 	}
-
-	/// Build a [`ForwardedTokenResolver`] over this map.
-	pub(crate) fn into_resolver(self) -> ForwardedTokenResolver {
-		ForwardedTokenResolver(self.0)
-	}
 }
 
 #[rocket::async_trait]
@@ -140,28 +139,18 @@ impl<'r> FromRequest<'r> for ForwardedGitTokens {
 	}
 }
 
-/// Derive the requested `source`'s normalized origin, mirroring how the
-/// controller derived each entry's origin: resolve the source through
-/// `aghub_git` (which understands shorthands like `owner/repo`) and normalize
-/// its `clone_url`. `None` when the source does not resolve to a host-bearing
-/// URL (e.g. a local path) — the resolver then degrades to the permissive
-/// host-scoped behaviour.
-fn requested_origin(source: &str) -> Option<ResolvedOrigin> {
-	let resolved = aghub_git::resolve_remote_source(source).ok()?;
-	origin_of(&resolved.clone_url)
-}
-
 /// [`TokenResolver`] backed by a forwarded `source → { token, origin }` map.
 ///
 /// Matching is by `source`, using the SAME cross-URL-form matching the keyring
 /// bindings use (`owner/repo` ⇔ `https://github.com/owner/repo.git`
 /// ⇔ `git@github.com:owner/repo.git`, host-scoped) — then a `(scheme,host,port)`
-/// origin pin on top. The `host` argument is intentionally unused; the
-/// forwarded map is keyed by source and the cross-form key set already encodes
-/// the host.
+/// origin pin on top. The forwarded map is keyed by source and the cross-form
+/// key set already encodes the host.
 #[derive(Debug, Default, Clone)]
+#[cfg(test)]
 pub(crate) struct ForwardedTokenResolver(BTreeMap<String, ForwardedEntry>);
 
+#[cfg(test)]
 impl TokenResolver for ForwardedTokenResolver {
 	/// Resolve a forwarded token for `source`, origin-pinned to the requested
 	/// source's `(scheme, host, port)`.
@@ -169,29 +158,25 @@ impl TokenResolver for ForwardedTokenResolver {
 	/// 1. Find the entry whose source matches `source` under the legacy
 	///    host-scoped key match (cross-URL form, unchanged — `lookup_keys` /
 	///    `binding_keys_match_lookup`).
-	/// 2. Derive the requested source's origin via `requested_origin`.
+	/// 2. Derive the requested source's origin through the shared Source-auth
+	///    policy.
 	/// 3. If the matched entry's `origin` is `Some` AND the requested origin is
 	///    `Some` AND they do NOT match → return `None` (the [`ChainResolver`]
 	///    then falls back to the keyring). Otherwise return the token.
 	///    When either origin is unknown the pin is permissive — it falls back to
 	///    the legacy host-scoped behaviour so a previously-working case (e.g. a
 	///    plain github.com source) is never newly broken.
-	fn resolve(&self, source: &str, _host: Option<&str>) -> Option<String> {
-		let source_keys = lookup_keys(source);
-		let (_, entry) = self.0.iter().find(|(forwarded_source, _)| {
-			binding_keys_match_lookup(forwarded_source, &source_keys)
-		})?;
-
-		// Origin pin: only reject when BOTH origins are known and differ. An
-		// unknown origin on either side is permissive (legacy host-scoped).
-		if let (Some(entry_origin), Some(req_origin)) =
-			(entry.origin.clone(), requested_origin(source))
-		{
-			if ResolvedOrigin::from(entry_origin) != req_origin {
-				return None;
-			}
+	fn resolve(&self, source: &str) -> TokenResolution {
+		match forwarded_token_from_entries(
+			self.0.iter().map(|(forwarded_source, entry)| {
+				(forwarded_source.as_str(), entry)
+			}),
+			source,
+			ForwardedCredentialPolicy::Compatible,
+		) {
+			Some(token) => TokenResolution::Token(token),
+			None => TokenResolution::NoToken,
 		}
-		Some(entry.token.clone())
 	}
 }
 
@@ -200,22 +185,34 @@ impl TokenResolver for ForwardedTokenResolver {
 /// Borrow-based so callers can compose any pair of resolvers without taking
 /// ownership; Task 3 wraps a [`ForwardedTokenResolver`] over the existing
 /// keyring resolver.
+#[cfg(test)]
 pub(crate) struct ChainResolver<'a, P: TokenResolver> {
 	primary: P,
 	fallback: &'a dyn TokenResolver,
 }
 
+#[cfg(test)]
 impl<'a, P: TokenResolver> ChainResolver<'a, P> {
 	pub(crate) fn new(primary: P, fallback: &'a dyn TokenResolver) -> Self {
 		Self { primary, fallback }
 	}
 }
 
+#[cfg(test)]
 impl<P: TokenResolver> TokenResolver for ChainResolver<'_, P> {
-	fn resolve(&self, source: &str, host: Option<&str>) -> Option<String> {
-		self.primary
-			.resolve(source, host)
-			.or_else(|| self.fallback.resolve(source, host))
+	fn resolve(&self, source: &str) -> TokenResolution {
+		match self.primary.resolve(source) {
+			TokenResolution::Token(token) => TokenResolution::Token(token),
+			TokenResolution::NoToken | TokenResolution::BackendUnavailable => {
+				match self.fallback.resolve(source) {
+					TokenResolution::Token(token) => {
+						TokenResolution::Token(token)
+					}
+					TokenResolution::NoToken
+					| TokenResolution::BackendUnavailable => TokenResolution::NoToken,
+				}
+			}
+		}
 	}
 }
 
@@ -323,7 +320,7 @@ mod tests {
 	#[test]
 	fn resolver_returns_none_on_empty_map() {
 		let r = ForwardedTokenResolver::default();
-		assert_eq!(r.resolve("owner/repo", Some("github.com")), None);
+		assert_eq!(r.resolve("owner/repo"), TokenResolution::NoToken);
 	}
 
 	#[test]
@@ -333,7 +330,10 @@ mod tests {
 			"https://github.com/owner/repo.git",
 			"TOK1",
 		)]));
-		assert_eq!(r.resolve("owner/repo", None), Some("TOK1".to_string()));
+		assert_eq!(
+			r.resolve("owner/repo"),
+			TokenResolution::Token("TOK1".to_string())
+		);
 	}
 
 	#[test]
@@ -341,8 +341,8 @@ mod tests {
 		// Forwarded bare; looked up by an equivalent full URL.
 		let r = ForwardedTokenResolver(map(&[("owner/repo", "TOK1")]));
 		assert_eq!(
-			r.resolve("https://github.com/owner/repo.git", Some("github.com")),
-			Some("TOK1".to_string())
+			r.resolve("https://github.com/owner/repo.git"),
+			TokenResolution::Token("TOK1".to_string())
 		);
 	}
 
@@ -353,8 +353,8 @@ mod tests {
 		let r = ForwardedTokenResolver(map(&[("owner/repo", "GHTOK")]));
 		// `owner/repo` resolves to github.com; gitlab URL must miss.
 		assert_eq!(
-			r.resolve("https://gitlab.com/owner/repo.git", Some("gitlab.com")),
-			None
+			r.resolve("https://gitlab.com/owner/repo.git"),
+			TokenResolution::NoToken
 		);
 	}
 
@@ -371,8 +371,8 @@ mod tests {
 			origin("https", "git.internal", Some(8443)),
 		));
 		assert_eq!(
-			r.resolve("https://git.internal:9090/owner/repo.git", None),
-			None,
+			r.resolve("https://git.internal:9090/owner/repo.git"),
+			TokenResolution::NoToken,
 			"a token pinned to one port must not be reused on another"
 		);
 	}
@@ -386,8 +386,8 @@ mod tests {
 			origin("https", "git.internal", Some(8443)),
 		));
 		assert_eq!(
-			r.resolve("https://git.internal:8443/owner/repo.git", None),
-			Some("TOK".to_string())
+			r.resolve("https://git.internal:8443/owner/repo.git"),
+			TokenResolution::Token("TOK".to_string())
 		);
 	}
 
@@ -401,8 +401,8 @@ mod tests {
 			origin("https", "github.com", Some(443)),
 		));
 		assert_eq!(
-			r.resolve("https://github.com/owner/repo.git", None),
-			Some("TOK".to_string())
+			r.resolve("https://github.com/owner/repo.git"),
+			TokenResolution::Token("TOK".to_string())
 		);
 	}
 
@@ -412,8 +412,8 @@ mod tests {
 		// permissive: the host-scoped match alone returns the token (legacy).
 		let r = ForwardedTokenResolver(map(&[("owner/repo", "TOK")]));
 		assert_eq!(
-			r.resolve("https://github.com/owner/repo.git", Some("github.com")),
-			Some("TOK".to_string())
+			r.resolve("https://github.com/owner/repo.git"),
+			TokenResolution::Token("TOK".to_string())
 		);
 	}
 
@@ -421,8 +421,11 @@ mod tests {
 
 	struct StubResolver(Option<String>);
 	impl TokenResolver for StubResolver {
-		fn resolve(&self, _s: &str, _h: Option<&str>) -> Option<String> {
-			self.0.clone()
+		fn resolve(&self, _source: &str) -> TokenResolution {
+			match &self.0 {
+				Some(token) => TokenResolution::Token(token.clone()),
+				None => TokenResolution::NoToken,
+			}
 		}
 	}
 
@@ -438,8 +441,8 @@ mod tests {
 		let fallback = StubResolver(Some("KEYRING".to_string()));
 		let chain = ChainResolver::new(primary, &fallback);
 		assert_eq!(
-			chain.resolve("https://git.internal:9090/owner/repo.git", None),
-			Some("KEYRING".to_string())
+			chain.resolve("https://git.internal:9090/owner/repo.git"),
+			TokenResolution::Token("KEYRING".to_string())
 		);
 	}
 
@@ -449,8 +452,8 @@ mod tests {
 		let fallback = StubResolver(Some("KEYRING".to_string()));
 		let chain = ChainResolver::new(primary, &fallback);
 		assert_eq!(
-			chain.resolve("owner/repo", Some("github.com")),
-			Some("FWD".to_string())
+			chain.resolve("owner/repo"),
+			TokenResolution::Token("FWD".to_string())
 		);
 	}
 
@@ -460,8 +463,8 @@ mod tests {
 		let fallback = StubResolver(Some("KEYRING".to_string()));
 		let chain = ChainResolver::new(primary, &fallback);
 		assert_eq!(
-			chain.resolve("owner/repo", Some("github.com")),
-			Some("KEYRING".to_string())
+			chain.resolve("owner/repo"),
+			TokenResolution::Token("KEYRING".to_string())
 		);
 	}
 
@@ -470,6 +473,6 @@ mod tests {
 		let primary = ForwardedTokenResolver::default();
 		let fallback = StubResolver(None);
 		let chain = ChainResolver::new(primary, &fallback);
-		assert_eq!(chain.resolve("owner/repo", Some("github.com")), None);
+		assert_eq!(chain.resolve("owner/repo"), TokenResolution::NoToken);
 	}
 }

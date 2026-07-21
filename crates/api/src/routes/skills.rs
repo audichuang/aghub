@@ -1,6 +1,7 @@
 use aghub_cc_plugins::claude::ClaudePluginManager;
+#[cfg(test)]
+use aghub_core::create_adapter;
 use aghub_core::{
-	create_adapter,
 	errors::ConfigError,
 	load_all_agents,
 	models::{AgentType, ResourceScope, Skill},
@@ -15,8 +16,8 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
-	credentials::forwarding::{ChainResolver, ForwardedGitTokens},
-	credentials::origin::{origin_of, origins_match, ResolvedOrigin},
+	credentials::forwarding::ForwardedGitTokens,
+	credentials::source_auth::SourceAuth,
 	dto::integrations::{
 		CodeEditorType, EditSkillFolderRequest, OpenSkillFolderRequest,
 	},
@@ -43,9 +44,11 @@ use crate::{
 		resolved_to_resource_scope,
 	},
 	skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE},
-	state::{GitCloneSession, GitCloneSessions},
+	source_sessions::{
+		PinnedSourceFetchError, PinnedSourceSession, PinnedSourceSessions,
+	},
 };
-use skill_update::{keychain_host_for_source, TokenResolver};
+use skill_update::TokenResolver;
 
 #[derive(rocket::FromForm)]
 pub(crate) struct SkillListParams {
@@ -585,6 +588,7 @@ fn delete_response_from_outcome(
 	}
 }
 
+#[cfg(test)]
 fn resolve_git_install_target_dir(
 	agent_type: AgentType,
 	resource_scope: ResourceScope,
@@ -1309,11 +1313,73 @@ pub(crate) async fn install_skill_route_with_repo(
 	forwarded: ForwardedGitTokens,
 	repo: std::sync::Arc<skill_update::SkillRepository>,
 ) -> ApiResult<InstallSkillResponse> {
-	let host = keychain_host_for_source(&req.source);
-	let keyring = crate::routes::skills_update::KeyringResolver::load().await;
-	let resolver = ChainResolver::new(forwarded.into_resolver(), &keyring);
-	let token = resolver.resolve(&req.source, host.as_deref());
+	let resolver = SourceAuth::load(forwarded).await;
+	let token = match resolver.resolve(&req.source) {
+		skill_update::TokenResolution::Token(token) => Some(token),
+		skill_update::TokenResolution::NoToken => None,
+		skill_update::TokenResolution::BackendUnavailable => {
+			return Err(crate::credentials::CredentialStoreError::Unavailable(
+				"credential backend unreachable".to_string(),
+			)
+			.into());
+		}
+	};
 	install_skill_with_repo(req, repo, token).await
+}
+
+const INVALID_FETCHED_SKILL_PATH: &str =
+	"skill_path must be a relative path inside the fetched repository";
+
+fn fetched_install_error_message(
+	error: skill_update::mutation::InstallMutationError,
+) -> String {
+	match error {
+		skill_update::mutation::InstallMutationError::InvalidSkillPath => {
+			INVALID_FETCHED_SKILL_PATH.to_string()
+		}
+		skill_update::mutation::InstallMutationError::Install(error) => {
+			ApiError::from(error).body.error
+		}
+	}
+}
+
+/// Compatibility adapter for the test-only `file://` full-clone fallback.
+/// Production fetched Sources always go through
+/// `skill_update::mutation::install_fetched_source`.
+#[cfg(test)]
+fn install_test_clone(
+	root: &Path,
+	ref_commit: Option<&str>,
+	lock_skill_path: &str,
+	source: &skill::InstallLockSource,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	target_agents: &[AgentType],
+) -> Result<
+	aghub_core::skills::install_fetched::FetchedSkillInstallReport,
+	String,
+> {
+	let skill_file =
+		aghub_core::skills::update::sanitize_skill_path(root, lock_skill_path)
+			.ok_or_else(|| INVALID_FETCHED_SKILL_PATH.to_string())?;
+	aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
+		aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
+			skill_file: &skill_file,
+			source,
+			lock_skill_path: lock_skill_path.to_string(),
+			ref_commit: ref_commit.map(str::to_string),
+			scope,
+			project_root,
+			target_agents,
+			expected_name: None,
+			target: if matches!(scope, ResourceScope::ProjectOnly) {
+				aghub_core::skills::linker::LinkTarget::Relative
+			} else {
+				aghub_core::skills::linker::LinkTarget::Absolute
+			},
+		},
+	)
+	.map_err(|error| ApiError::from(error).body.error)
 }
 
 /// Core of `POST /skills/install` with an injectable [`SkillRepository`].
@@ -1340,23 +1406,64 @@ pub(crate) async fn install_skill_with_repo(
 		));
 	}
 
-	// Keeps the materialised fetch root alive through the install loop.
-	// Fields are intentionally unread — only Drop (TempDir cleanup) matters.
-	#[allow(dead_code)]
-	enum FetchGuard {
-		Repo(skill_update::FetchedRepo),
+	// Raw agent ids are part of the predictable target preflight. If any id is
+	// unknown, attribute the rejection to every requested agent in request order
+	// and stop before source materialization or install writes.
+	let parsed_agents = req
+		.agents
+		.iter()
+		.map(|agent_str| {
+			(
+				agent_str.clone(),
+				agent_str
+					.parse::<AgentType>()
+					.map_err(|_| format!("Unknown agent '{agent_str}'")),
+			)
+		})
+		.collect::<Vec<_>>();
+	if parsed_agents.iter().any(|(_, agent)| agent.is_err()) {
+		let agents = parsed_agents
+			.into_iter()
+			.map(|(agent, parsed)| GitInstallResultEntry {
+				name: String::new(),
+				agent,
+				success: false,
+				error: Some(parsed.err().unwrap_or_else(|| {
+					"Another requested agent is invalid; nothing was written"
+						.to_string()
+				})),
+			})
+			.collect();
+		return Ok(Json(InstallSkillResponse {
+			success: false,
+			agents,
+		}));
+	}
+	let target_agents = parsed_agents
+		.into_iter()
+		.filter_map(|(agent_str, agent)| {
+			agent.ok().map(|agent| (agent_str, agent))
+		})
+		.collect::<Vec<_>>();
+
+	// Owns the materialized source through the install loop. The production
+	// variant keeps root + immutable commit identity behind one deep interface.
+	enum InstallMaterialization {
+		Fetched(skill_update::mutation::FetchedSource),
 		#[cfg(test)]
-		Clone(tempfile::TempDir),
+		Clone {
+			temp_dir: tempfile::TempDir,
+			ref_commit: Option<String>,
+		},
 	}
 
-	// (name, skill_file, lock_skill_path)
-	type InstallItem = (String, PathBuf, String);
+	// (catalog name, npx-form lock skill path)
+	type InstallItem = (String, String);
 
-	let (lock_source, ref_commit, items, fetch_guard): (
+	let (lock_source, items, materialization): (
 		skill::InstallLockSource,
-		Option<String>,
 		Vec<InstallItem>,
-		FetchGuard,
+		InstallMaterialization,
 	) = match aghub_git::resolve_remote_source(&req.source) {
 		Ok(resolved) => {
 			let lock_source =
@@ -1370,7 +1477,7 @@ pub(crate) async fn install_skill_with_repo(
 			let repo_for_task = repo.clone();
 			let token_for_task = token;
 
-			let (snapshot, selected, fetched) = match timeout(
+			let (selected, fetched) = match timeout(
 				Duration::from_secs(300),
 				tokio::task::spawn_blocking(move || {
 					let snapshot = repo_for_task
@@ -1392,7 +1499,7 @@ pub(crate) async fn install_skill_with_repo(
 							skill_update::FetchSelection::Skills(&paths),
 						)
 						.map_err(InstallFetchError::Repo)?;
-					Ok::<_, InstallFetchError>((snapshot, selected, fetched))
+					Ok::<_, InstallFetchError>((selected, fetched))
 				}),
 			)
 			.await
@@ -1416,20 +1523,22 @@ pub(crate) async fn install_skill_with_repo(
 				}
 			};
 
-			let ref_commit = Some(snapshot.commit_oid.clone());
 			let items: Vec<InstallItem> = selected
 				.into_iter()
 				.map(|(name, skill_path)| {
-					let skill_file = skill_path
-						.resolve_under(&fetched.root)
-						.join("SKILL.md");
 					let lock_skill_path =
 						skill::lock_skill_file_path(skill_path.as_str());
-					(name, skill_file, lock_skill_path)
+					(name, lock_skill_path)
 				})
 				.collect();
 
-			(lock_source, ref_commit, items, FetchGuard::Repo(fetched))
+			(
+				lock_source,
+				items,
+				InstallMaterialization::Fetched(
+					skill_update::mutation::FetchedSource::from_repo(fetched),
+				),
+			)
 		}
 		Err(error) => {
 			#[cfg(test)]
@@ -1491,15 +1600,17 @@ pub(crate) async fn install_skill_with_repo(
 						.map(|s| {
 							let lock_skill_path =
 								skill::lock_skill_file_path(&s.relative_dir);
-							(s.name, s.full_path, lock_skill_path)
+							(s.name, lock_skill_path)
 						})
 						.collect();
 
 					(
 						lock_source,
-						ref_commit,
 						items,
-						FetchGuard::Clone(temp_dir),
+						InstallMaterialization::Clone {
+							temp_dir,
+							ref_commit,
+						},
 					)
 				} else {
 					return Err(map_remote_source_error(error));
@@ -1510,46 +1621,42 @@ pub(crate) async fn install_skill_with_repo(
 		}
 	};
 
-	// Resolve requested agents; unknown agents become per-agent failure rows.
-	let mut invalid_rows: Vec<GitInstallResultEntry> = Vec::new();
-	let mut target_agents: Vec<(String, AgentType)> = Vec::new();
-	for agent_str in &req.agents {
-		match agent_str.parse::<AgentType>() {
-			Ok(a) => target_agents.push((agent_str.clone(), a)),
-			Err(_) => invalid_rows.push(GitInstallResultEntry {
-				name: String::new(),
-				agent: agent_str.clone(),
-				success: false,
-				error: Some(format!("Unknown agent '{agent_str}'")),
-			}),
-		}
-	}
 	let agent_types: Vec<AgentType> =
 		target_agents.iter().map(|(_, a)| *a).collect();
 
-	let mut agent_rows: Vec<GitInstallResultEntry> = invalid_rows;
+	let mut agent_rows: Vec<GitInstallResultEntry> = Vec::new();
 	let mut any_installed = false;
-	for (name, skill_file, lock_skill_path) in &items {
-		let request =
-			aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
-				skill_file,
-				source: &lock_source,
-				lock_skill_path: lock_skill_path.clone(),
-				ref_commit: ref_commit.clone(),
-				scope: resource_scope,
-				project_root: project_root.as_deref(),
-				target_agents: &agent_types,
-				expected_name: None,
-				target: if matches!(resource_scope, ResourceScope::ProjectOnly)
-				{
-					aghub_core::skills::linker::LinkTarget::Relative
-				} else {
-					aghub_core::skills::linker::LinkTarget::Absolute
-				},
-			};
-		match aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
-			request,
-		) {
+	for (name, lock_skill_path) in &items {
+		let installed = match &materialization {
+			InstallMaterialization::Fetched(fetched) => {
+				skill_update::mutation::install_fetched_source(
+					fetched,
+					skill_update::mutation::FetchedInstallRequest {
+						source: &lock_source,
+						lock_skill_path,
+						expected_name: None,
+						scope: resource_scope,
+						project_root: project_root.as_deref(),
+						target_agents: &agent_types,
+					},
+				)
+				.map_err(fetched_install_error_message)
+			}
+			#[cfg(test)]
+			InstallMaterialization::Clone {
+				temp_dir,
+				ref_commit,
+			} => install_test_clone(
+				temp_dir.path(),
+				ref_commit.as_deref(),
+				lock_skill_path,
+				&lock_source,
+				resource_scope,
+				project_root.as_deref(),
+				&agent_types,
+			),
+		};
+		match installed {
 			Ok(report) => {
 				for ((agent_str, _), agent_result) in
 					target_agents.iter().zip(report.agent_results)
@@ -1568,8 +1675,7 @@ pub(crate) async fn install_skill_with_repo(
 					});
 				}
 			}
-			Err(e) => {
-				let message = ApiError::from(e).body.error;
+			Err(message) => {
 				for (agent_str, _) in &target_agents {
 					agent_rows.push(GitInstallResultEntry {
 						name: name.clone(),
@@ -1581,9 +1687,6 @@ pub(crate) async fn install_skill_with_repo(
 			}
 		}
 	}
-
-	// Keep fetch_guard alive through the install loop (holds TempDir).
-	drop(fetch_guard);
 
 	let success = any_installed && agent_rows.iter().all(|r| r.success);
 	Ok(Json(InstallSkillResponse {
@@ -1814,39 +1917,14 @@ pub fn get_project_skill_lock(
 	}))
 }
 
+#[cfg(test)]
 fn require_github_credential_url(url: &str) -> Result<(), ApiError> {
-	let reject = || {
-		ApiError::new(
-			Status::BadRequest,
-			"GitHub credentials can only be used with github.com HTTPS URLs",
-			"INVALID_GITHUB_CREDENTIAL_URL",
-		)
-	};
-
-	// Pin to the github.com HTTPS origin. `origin_of` folds the default port
-	// in, so `https://github.com` and `https://github.com:443` both match,
-	// while `http://`, a non-default port, or any other host is rejected.
-	let github_https = ResolvedOrigin {
-		scheme: "https".to_string(),
-		host: "github.com".to_string(),
-		port: Some(443),
-	};
-	match origin_of(url) {
-		Some(origin) if origin == github_https => Ok(()),
-		_ => Err(reject()),
-	}
+	SourceAuth::require_github_credential_url_for_test(url)
 }
 
-/// Returns true when both URLs parse to the same normalized origin
-/// `(scheme, host, port)`. A parse failure or a missing host on either side
-/// yields false.
-///
-/// Pins on the FULL origin: the same host on a different port (or a different
-/// scheme) is NOT a match. Session credentials may be scoped to a specific
-/// `(scheme, host, port)`, so a token bound to one origin must never be reused
-/// against a different port of the same host.
+#[cfg(test)]
 fn same_origin(a: &str, b: &str) -> bool {
-	origins_match(a, b)
+	SourceAuth::same_origin_for_test(a, b)
 }
 
 fn current_platform() -> &'static str {
@@ -1924,7 +2002,7 @@ pub async fn git_credential_status(
 pub async fn git_scan_skills(
 	_origin: TrustedLocalOrigin,
 	body: Json<GitScanRequest>,
-	sessions: &rocket::State<GitCloneSessions>,
+	sessions: &rocket::State<PinnedSourceSessions>,
 	forwarded: ForwardedGitTokens,
 ) -> ApiResult<GitScanResponse> {
 	let mut req = body.into_inner();
@@ -1932,100 +2010,27 @@ pub async fn git_scan_skills(
 	// URLs (TF401019). Normalize once here so every downstream use — credential
 	// resolution, clone, branch listing, session identity — uses the accepted
 	// URL form.
-	req.url = aghub_git::normalize_tfs_clone_url(&req.url);
+	req.url = SourceAuth::normalize_scan_source(&req.url);
 
-	// Remote git-credential forwarding: if the controller forwarded a token for
-	// this URL's source, it takes precedence over the `credential_id` keyring
-	// lookup / session reuse (a remote api has no keyring of its own). The token
-	// is origin-pinned to the request URL (Task 2 / D8) so a token resolved for
-	// origin A is never attached to an origin-B request. Once used, it is cached
-	// in the scan session below exactly like any other token, so branch rescans
-	// inherit it.
-	let forwarded_token = forwarded_token_for_url(&forwarded, &req.url);
-	// Tracks whether the resolved token came from the forwarded header, so the
-	// non-forwarded host-pin guards below are skipped for it.
-	let forwarded_used = forwarded_token.is_some();
-
-	// Resolve credential token — forwarded first, then request, then session.
-	// The session reuse branch also captures the session's stored URL so the
-	// guard below can pin a reused token to its own repository host.
-	let mut session_url: Option<String> = None;
-	let credential_token: Option<String> =
-		if let Some(token) = forwarded_token {
-			Some(token)
-		} else if let Some(ref cred_id) = req.credential_id {
-			// Mutating route (git-scan drives a real clone attempt): an
-			// unreachable keyring backend must fail closed with 503, not
-			// silently resolve "no credential" (GitHub #15 P2-3). Also runs on
-			// the blocking pool via `load_or_unavailable` (GitHub #15 P1b).
-			let snapshot =
-			crate::routes::skills_update::KeyringResolver::load_or_unavailable()
-				.await?;
-			let cred = snapshot.find_credential(cred_id).ok_or_else(|| {
-				ApiError::new(
-					Status::NotFound,
-					"Credential not found",
-					"CREDENTIAL_NOT_FOUND",
-				)
-			})?;
-			Some(cred.token.clone())
-		} else if let Some(ref sid) = req.session_id {
-			// Reuse credential from existing session
-			let map = sessions.sessions.lock().unwrap();
-			match map.get(sid) {
-				Some(s) => {
-					session_url = Some(s.url.clone());
-					s.credential_token.clone()
-				}
-				None => None,
-			}
-		} else {
-			None
-		};
-
-	// A forwarded token is already origin-pinned to `req.url` by
-	// `forwarded_token_for_url`, and is NOT restricted to github.com, so it
-	// bypasses the non-forwarded guards below. Only the request/session paths
-	// remain subject to: the explicit-credential github.com pin, and the
-	// reused-session same-origin pin (session tokens may be host-scoped private
-	// credentials resolved lazily on the original scan). The host-scoped
-	// keyring fallback below is already bound to the scanned host.
-	if credential_token.is_some() && !forwarded_used {
-		if req.credential_id.is_some() {
-			require_github_credential_url(&req.url)?;
-		} else if let Some(ref stored_url) = session_url {
-			if !same_origin(&req.url, stored_url) {
-				return Err(ApiError::new(
-					Status::BadRequest,
-					"Session credential cannot be reused for a different host",
-					"SESSION_CREDENTIAL_HOST_MISMATCH",
-				));
-			}
-		}
-	}
-
-	// Token-first fallback: host-scoped keyring binding for this source.
-	// Same fail-closed + blocking-pool contract as the explicit
-	// `credential_id` branch above (GitHub #15 P1b/P2-3).
-	let credential_token = match credential_token {
-		Some(t) => Some(t),
-		None => {
-			let snapshot =
-				crate::routes::skills_update::KeyringResolver::load_or_unavailable()
-					.await?;
-			let host = keychain_host_for_source(&req.url);
-			snapshot.resolve(&req.url, host.as_deref())
-		}
-	};
+	let existing_session = req
+		.session_id
+		.as_deref()
+		.and_then(|session_id| sessions.active(session_id));
+	let prior_session = existing_session
+		.as_ref()
+		.map(|session| (session.url(), session.credential_token()));
+	let credential_token = SourceAuth::resolve_for_scan(
+		&forwarded,
+		&req.url,
+		req.credential_id.as_deref(),
+		prior_session,
+	)
+	.await?;
 
 	// Retrieve cached branches from existing session if re-scanning
-	let cached_branches: Option<Vec<String>> =
-		if let Some(ref sid) = req.session_id {
-			let map = sessions.sessions.lock().unwrap();
-			map.get(sid).map(|s| s.branches.clone())
-		} else {
-			None
-		};
+	let cached_branches: Option<Vec<String>> = existing_session
+		.as_ref()
+		.map(|session| session.branches().to_vec());
 
 	// Skill-aware catalog scan: resolve + list only (no whole-repo clone).
 	// The same `SkillRepository` instance is retained on the session so a later
@@ -2085,36 +2090,23 @@ pub async fn git_scan_skills(
 			.unwrap_or_default()
 	});
 
-	// Remove old session if re-scanning
-	if let Some(ref old_sid) = req.session_id {
-		let mut map = sessions.sessions.lock().unwrap();
-		map.remove(old_sid);
-	}
-
 	// Store the commit-pinned repository handle until install/sync.
 	let session_id = uuid::Uuid::new_v4().to_string();
-	{
-		let mut map = sessions.sessions.lock().unwrap();
-		// Purge stale scan sessions. The session pins a SkillRepository (and any
-		// internal gix shallow-clone cache) plus an in-memory credential_token
-		// between scan and install; keep the window tight (browse-then-install
-		// is a seconds-to-minutes flow) so a token is not retained longer than
-		// needed. Was 30 min; 10 min still covers a user reviewing scan results
-		// before picking skills.
-		let cutoff = std::time::Duration::from_secs(10 * 60);
-		map.retain(|_, s| s.created_at.elapsed() < cutoff);
-		map.insert(
-			session_id.clone(),
-			GitCloneSession {
-				repo,
-				snapshot,
-				created_at: std::time::Instant::now(),
-				url: req.url,
-				credential_token,
-				branches: branches.clone(),
-				current_branch: current_branch.clone(),
-			},
-		);
+	// The session module owns the 10-minute lifetime and eviction policy. The
+	// browse-then-install window stays tight so credentials and any internal gix
+	// shallow-clone cache are not retained longer than needed.
+	let session = PinnedSourceSession::new(
+		repo,
+		snapshot,
+		req.url,
+		credential_token,
+		branches.clone(),
+		current_branch.clone(),
+	);
+	if let Some(old_session_id) = req.session_id.as_deref() {
+		sessions.replace(old_session_id, session_id.clone(), session);
+	} else {
+		sessions.insert(session_id.clone(), session);
 	}
 
 	Ok(Json(GitScanResponse {
@@ -2172,92 +2164,53 @@ fn map_skill_repo_error(e: skill_update::SkillRepoError) -> ApiError {
 	}
 }
 
-/// Resolve a forwarded git token for `url` and origin-pin it to that URL.
-///
-/// The `forwarded` map (parsed from `X-Aghub-Git-Tokens`) is keyed by source.
-/// A forwarded source matches `url` using the same cross-URL-form, host-scoped
-/// matching the keyring bindings use (`lookup_keys` /
-/// `binding_keys_match_lookup`). On top of that we apply the Task 2 / D8 origin
-/// pin: the request URL's resolved clone-URL origin `(scheme, host, port)` must
-/// equal the matched forwarded source's resolved origin, so a token resolved
-/// for one origin is never attached to a different origin (e.g. a self-hosted
-/// forge on a different port — host-scoped matching alone would not catch this).
-/// Returns `None` (degrade to the keyring path) on any miss or mismatch — never
-/// a hard error, so an absent/benign header is transparent.
+fn map_pinned_source_fetch_error(
+	error: PinnedSourceFetchError,
+	timeout_message: &str,
+) -> ApiError {
+	match error {
+		PinnedSourceFetchError::Repository(error) => {
+			map_skill_repo_error(error)
+		}
+		PinnedSourceFetchError::Task(error) => {
+			ApiError::from_join_error(error, "Fetch task failed", "CLONE_ERROR")
+		}
+		PinnedSourceFetchError::Timeout => ApiError::new(
+			Status::RequestTimeout,
+			timeout_message.to_string(),
+			"SKILLS_INSTALL_TIMEOUT",
+		),
+	}
+}
+
+/// Compatibility adapter for the existing strict scan-policy tests.
+#[cfg(test)]
 fn forwarded_token_for_url(
 	forwarded: &ForwardedGitTokens,
 	url: &str,
 ) -> Option<String> {
-	use crate::credentials::resolve::{binding_keys_match_lookup, lookup_keys};
-	let url_keys = lookup_keys(url);
-	if url_keys.is_empty() {
-		return None;
-	}
-	let url_origin =
-		origin_of(&aghub_git::resolve_remote_source(url).ok()?.clone_url);
-	forwarded.0.iter().find_map(|(forwarded_source, entry)| {
-		if !binding_keys_match_lookup(forwarded_source, &url_keys) {
-			return None;
-		}
-		// Origin pin. Prefer the entry's controller-resolved origin (the new
-		// header shape carries it); fall back to re-resolving the forwarded
-		// source when the entry omits it. The scan path stays strict: a token is
-		// attached ONLY when the request URL and the forwarded entry share the
-		// SAME `(scheme, host, port)`. (If either origin is unknown the pin
-		// cannot be satisfied here, so the token is not attached — the scan
-		// route's own keyring/session path then applies.)
-		let entry_origin =
-			entry.origin.clone().map(ResolvedOrigin::from).or_else(|| {
-				aghub_git::resolve_remote_source(forwarded_source)
-					.ok()
-					.and_then(|r| origin_of(&r.clone_url))
-			});
-		match (&url_origin, &entry_origin) {
-			(Some(a), Some(b)) if a == b => Some(entry.token.clone()),
-			_ => None,
-		}
-	})
+	SourceAuth::forwarded_for_scan(forwarded, url)
 }
 
 /// Partition `agents` (raw strings from the request) into valid/invalid
 /// entries in request order. Invalid entries carry the error message to
 /// surface back to the caller.
 ///
-/// Valid: the agent string parses AND `resolve_git_install_target_dir`
-///        returns `Some` for `scope` + `project_root`.
-/// Invalid: unknown agent string OR no skills dir for this scope.
+/// Valid means the id parses. Scope support is intentionally NOT filtered
+/// here: the deep install seam must see every known requested target so its
+/// all-target preflight can reject a mixed list before writing the Master.
+/// Invalid means an unknown raw agent id.
 #[allow(clippy::type_complexity)]
 fn partition_install_agents_in_request_order(
 	agents: &[String],
-	scope: ResourceScope,
-	project_root: Option<&std::path::Path>,
+	_scope: ResourceScope,
+	_project_root: Option<&std::path::Path>,
 ) -> (Vec<(String, AgentType)>, Vec<(String, String)>) {
-	let project_root_buf: Option<std::path::PathBuf> =
-		project_root.map(|p| p.to_path_buf());
 	let mut valid: Vec<(String, AgentType)> = Vec::new();
 	let mut invalid: Vec<(String, String)> = Vec::new();
 	for agent_str in agents {
 		match agent_str.parse::<AgentType>() {
-			Ok(agent_type) => {
-				if resolve_git_install_target_dir(
-					agent_type,
-					scope,
-					project_root_buf.as_ref(),
-				)
-				.is_some()
-				{
-					valid.push((agent_str.clone(), agent_type));
-				} else {
-					invalid.push((
-						agent_str.clone(),
-						format!(
-							"Agent '{}' does not support persistent \
-							 skill creation in this scope",
-							agent_str
-						),
-					));
-				}
-			}
+			Ok(agent_type) => valid.push((agent_str.clone(), agent_type)),
 			Err(_) => {
 				invalid.push((
 					agent_str.clone(),
@@ -2273,30 +2226,22 @@ fn partition_install_agents_in_request_order(
 pub async fn git_install_skills(
 	_origin: TrustedLocalOrigin,
 	body: Json<GitInstallRequest>,
-	sessions: &rocket::State<GitCloneSessions>,
+	sessions: &rocket::State<PinnedSourceSessions>,
 ) -> ApiResult<GitInstallResponse> {
 	let req = body.into_inner();
 
-	// Extract the commit-pinned SkillRepository handle and lock source metadata.
-	let (repo, snapshot, source) = {
-		let map = sessions.sessions.lock().unwrap();
-		let session = map.get(&req.session_id).ok_or_else(|| {
-			ApiError::new(
-				Status::NotFound,
-				"Session not found or expired",
-				"SESSION_NOT_FOUND",
-			)
-		})?;
-		let ref_name = (!session.current_branch.is_empty())
-			.then(|| session.current_branch.clone());
-		let resolved = aghub_git::resolve_remote_source(&session.url)
-			.map_err(map_remote_source_error)?;
-		(
-			session.repo.clone(),
-			session.snapshot.clone(),
-			install_lock_source_from_resolved(&resolved, ref_name),
+	let session = sessions.claim(&req.session_id).ok_or_else(|| {
+		ApiError::new(
+			Status::NotFound,
+			"Session not found or expired",
+			"SESSION_NOT_FOUND",
 		)
-	};
+	})?;
+	let ref_name = (!session.current_branch().is_empty())
+		.then(|| session.current_branch().to_string());
+	let resolved = aghub_git::resolve_remote_source(session.url())
+		.map_err(map_remote_source_error)?;
+	let source = install_lock_source_from_resolved(&resolved, ref_name);
 
 	let resource_scope = parse_install_scope(&req.scope)?;
 
@@ -2320,41 +2265,18 @@ pub async fn git_install_skills(
 			)
 		})?;
 
-	// Pin the scanned commit (NOT a re-resolve of the branch tip).
-	let ref_commit = Some(snapshot.commit_oid.clone());
-
 	// Fetch once for all selected skill folders (partial materialization).
-	let paths_for_fetch = validated_paths.clone();
-	let repo_for_fetch = repo.clone();
-	let snap_for_fetch = snapshot.clone();
-	let fetched = match timeout(
-		Duration::from_secs(300),
-		tokio::task::spawn_blocking(move || {
-			repo_for_fetch.fetch(
-				&snap_for_fetch,
-				skill_update::FetchSelection::Skills(&paths_for_fetch),
-			)
-		}),
-	)
-	.await
-	{
-		Ok(Ok(Ok(fetched))) => fetched,
-		Ok(Ok(Err(e))) => return Err(map_skill_repo_error(e)),
-		Ok(Err(e)) => {
-			return Err(ApiError::from_join_error(
-				e,
-				"Fetch task failed",
-				"CLONE_ERROR",
-			));
-		}
-		Err(_) => {
-			return Err(ApiError::new(
-				Status::RequestTimeout,
-				"Skills installation timed out after 5 minutes".to_string(),
-				"SKILLS_INSTALL_TIMEOUT",
-			));
-		}
-	};
+	let fetched =
+		session
+			.fetch_skills(&validated_paths)
+			.await
+			.map_err(|error| {
+				map_pinned_source_fetch_error(
+					error,
+					"Skills installation timed out after 5 minutes",
+				)
+			})?;
+	let fetched = skill_update::mutation::FetchedSource::from_repo(fetched);
 
 	let mut results = Vec::new();
 
@@ -2365,15 +2287,29 @@ pub async fn git_install_skills(
 			project_root.as_deref(),
 		);
 
-	for (agent_str, error) in &invalid_agents {
+	if !invalid_agents.is_empty() {
 		for skill_path in &req.skill_paths {
-			results.push(GitInstallResultEntry {
-				name: skill_path.clone(),
-				agent: agent_str.clone(),
-				success: false,
-				error: Some(error.clone()),
-			});
+			for agent_str in &req.agents {
+				let error = invalid_agents
+					.iter()
+					.find(|(invalid, _)| invalid == agent_str)
+					.map(|(_, error)| error.clone())
+					.unwrap_or_else(|| {
+						"Another requested agent is invalid; nothing was written"
+							.to_string()
+					});
+				results.push(GitInstallResultEntry {
+					name: skill_path.clone(),
+					agent: agent_str.clone(),
+					success: false,
+					error: Some(error),
+				});
+			}
 		}
+		// This remains a successfully handled request, so retain the route's
+		// exclusive pinned-session consumption semantics.
+		session.consume();
+		return Ok(Json(GitInstallResponse { results }));
 	}
 
 	let target_agents: Vec<AgentType> =
@@ -2381,31 +2317,17 @@ pub async fn git_install_skills(
 
 	for (skill_path, validated) in req.skill_paths.iter().zip(&validated_paths)
 	{
-		let skill_file =
-			validated.resolve_under(&fetched.root).join("SKILL.md");
-
-		let request =
-			aghub_core::skills::install_fetched::FetchedSkillInstallRequest {
-				skill_file: &skill_file,
+		let lock_skill_path = skill::lock_skill_file_path(validated.as_str());
+		match skill_update::mutation::install_fetched_source(
+			&fetched,
+			skill_update::mutation::FetchedInstallRequest {
 				source: &source,
-				lock_skill_path: skill::lock_skill_file_path(
-					validated.as_str(),
-				),
-				ref_commit: ref_commit.clone(),
+				lock_skill_path: &lock_skill_path,
+				expected_name: None,
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
 				target_agents: &target_agents,
-				expected_name: None,
-				target: if matches!(resource_scope, ResourceScope::ProjectOnly)
-				{
-					aghub_core::skills::linker::LinkTarget::Relative
-				} else {
-					aghub_core::skills::linker::LinkTarget::Absolute
-				},
-			};
-
-		match aghub_core::skills::install_fetched::install_fetched_skill_and_lock(
-			request,
+			},
 		) {
 			Ok(report) => {
 				for ((agent_str, _), agent_result) in
@@ -2429,8 +2351,8 @@ pub async fn git_install_skills(
 			// A per-skill failure (e.g. parse error) is reported as per-agent
 			// failure rows and never aborts the whole request — matching the old
 			// route, where `install_git_skill_*` errors became failure entries.
-			Err(e) => {
-				let message = ApiError::from(e).body.error;
+			Err(error) => {
+				let message = fetched_install_error_message(error);
 				for (agent_str, _) in &valid_agents {
 					results.push(GitInstallResultEntry {
 						name: skill_path.clone(),
@@ -2443,11 +2365,8 @@ pub async fn git_install_skills(
 		}
 	}
 
-	// Remove session (drops SkillRepository / any internal gix cache).
-	{
-		let mut map = sessions.sessions.lock().unwrap();
-		map.remove(&req.session_id);
-	}
+	// Successful request permanently consumes the exclusive session claim.
+	session.consume();
 
 	Ok(Json(GitInstallResponse { results }))
 }
@@ -2459,22 +2378,17 @@ pub async fn git_install_skills(
 pub async fn git_sync_skill(
 	_origin: TrustedLocalOrigin,
 	body: Json<GitSyncRequest>,
-	sessions: &rocket::State<GitCloneSessions>,
+	sessions: &rocket::State<PinnedSourceSessions>,
 ) -> ApiResult<GitSyncResponse> {
 	let req = body.into_inner();
 
-	// Extract the commit-pinned SkillRepository handle.
-	let (repo, snapshot) = {
-		let map = sessions.sessions.lock().unwrap();
-		let session = map.get(&req.session_id).ok_or_else(|| {
-			ApiError::new(
-				Status::NotFound,
-				"Session not found or expired",
-				"SESSION_NOT_FOUND",
-			)
-		})?;
-		(session.repo.clone(), session.snapshot.clone())
-	};
+	let session = sessions.claim(&req.session_id).ok_or_else(|| {
+		ApiError::new(
+			Status::NotFound,
+			"Session not found or expired",
+			"SESSION_NOT_FOUND",
+		)
+	})?;
 
 	// Lock path (`"<dir>/SKILL.md"` or `"SKILL.md"`) → skill-folder SkillPath.
 	let folder = skill_update::skill_folder_from_lock_path(&req.skill_path)
@@ -2487,42 +2401,23 @@ pub async fn git_sync_skill(
 		})?;
 
 	// Fetch only the selected skill folder.
-	let repo_for_fetch = repo.clone();
-	let snap_for_fetch = snapshot.clone();
-	let folder_for_fetch = folder.clone();
-	let fetched = match timeout(
-		Duration::from_secs(300),
-		tokio::task::spawn_blocking(move || {
-			repo_for_fetch.fetch(
-				&snap_for_fetch,
-				skill_update::FetchSelection::Skills(std::slice::from_ref(
-					&folder_for_fetch,
-				)),
+	let fetched = session
+		.fetch_skills(std::slice::from_ref(&folder))
+		.await
+		.map_err(|error| {
+			map_pinned_source_fetch_error(
+				error,
+				"Skills sync timed out after 5 minutes",
 			)
-		}),
-	)
-	.await
-	{
-		Ok(Ok(Ok(fetched))) => fetched,
-		Ok(Ok(Err(e))) => return Err(map_skill_repo_error(e)),
-		Ok(Err(e)) => {
-			return Err(ApiError::from_join_error(
-				e,
-				"Fetch task failed",
-				"CLONE_ERROR",
-			));
-		}
-		Err(_) => {
-			return Err(ApiError::new(
-				Status::RequestTimeout,
-				"Skills sync timed out after 5 minutes".to_string(),
-				"SKILLS_INSTALL_TIMEOUT",
-			));
-		}
-	};
-
-	let source_dir = folder.resolve_under(&fetched.root);
-	if !source_dir.join("SKILL.md").exists() {
+		})?;
+	let fetched = skill_update::mutation::FetchedSource::from_repo(fetched);
+	// Preserve the route's historical precedence: a missing fetched skill is
+	// reported before request scope/lock validation. The mutation seam repeats
+	// this containment check at the write boundary.
+	if !skill_update::mutation::fetched_skill_path_exists(
+		&fetched,
+		&req.skill_path,
+	) {
 		return Err(ApiError::new(
 			Status::NotFound,
 			format!(
@@ -2575,62 +2470,56 @@ pub async fn git_sync_skill(
 		));
 	}
 
-	// Pin the scanned commit (NOT a re-read of a local clone HEAD).
-	let ref_commit = Some(snapshot.commit_oid.clone());
-
 	// The post-session transaction (rename guard → containment → swap → lock) is
 	// the shared core resync; the route owns only the session lifecycle.
-	use aghub_core::skills::resync::{
-		resync_installed_skill, ResyncError, ResyncRequest,
+	use crate::skills::resync::safe_resync_error;
+	use aghub_core::skills::resync::ResyncError;
+	use skill_update::mutation::{
+		resync_fetched_source, FetchedResyncRequest, ResyncMutationError,
 	};
-	let report = resync_installed_skill(ResyncRequest {
-		source_dir: &source_dir,
-		name: &req.name,
-		scope: resource_scope,
-		project_root: project_root.as_deref(),
-		ref_commit: ref_commit.as_deref(),
-	})
+	let report = resync_fetched_source(
+		&fetched,
+		FetchedResyncRequest {
+			skill_path: &req.skill_path,
+			name: &req.name,
+			scope: resource_scope,
+			project_root: project_root.as_deref(),
+		},
+	)
 	.map_err(|e| match e {
-		ResyncError::NotInstalled => ApiError::new(
+		ResyncMutationError::InvalidSkillPath => ApiError::new(
 			Status::NotFound,
 			format!(
-				"Skill '{}' is locked but no installed copy was found",
-				req.name
+				"Skill path '{}' not found in cloned repository",
+				req.skill_path
 			),
-			"SKILL_NOT_INSTALLED",
+			"SKILL_PATH_NOT_FOUND",
 		),
-		ResyncError::Renamed { new_name } => ApiError::new(
-			Status::BadRequest,
-			skill_renamed_message(&req.name, &new_name),
-			SKILL_RENAMED_CODE,
-		),
-		ResyncError::Parse(msg) => ApiError::new(
-			Status::BadRequest,
-			format!("Failed to parse synced skill: {msg}"),
-			"SKILL_PARSE_FAILED",
-		),
-		ResyncError::OutOfTree(msg) => ApiError::new(
-			Status::BadRequest,
-			format!("Refusing to sync out-of-tree target: {msg}"),
-			"SKILL_TARGET_OUT_OF_TREE",
-		),
-		ResyncError::Hash(msg) | ResyncError::Swap(msg) => ApiError::new(
-			Status::InternalServerError,
-			format!("Failed to sync skill: {msg}"),
-			"SKILL_SYNC_ERROR",
-		),
-		ResyncError::LockUpdate(msg) => ApiError::new(
-			Status::InternalServerError,
-			format!("Failed to update skill lock after sync: {msg}"),
-			"SKILL_LOCK_ERROR",
-		),
+		ResyncMutationError::Resync(ResyncError::NotInstalled) => {
+			ApiError::new(
+				Status::NotFound,
+				format!(
+					"Skill '{}' is locked but no installed copy was found",
+					req.name
+				),
+				"SKILL_NOT_INSTALLED",
+			)
+		}
+		ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
+			ApiError::new(
+				Status::BadRequest,
+				skill_renamed_message(&req.name, &new_name),
+				SKILL_RENAMED_CODE,
+			)
+		}
+		ResyncMutationError::Resync(error) => {
+			let mapped = safe_resync_error(&error);
+			ApiError::new(mapped.status, mapped.message, mapped.code)
+		}
 	})?;
 
-	// Remove session (drops SkillRepository / any internal gix cache).
-	{
-		let mut map = sessions.sessions.lock().unwrap();
-		map.remove(&req.session_id);
-	}
+	// Successful request permanently consumes the exclusive session claim.
+	session.consume();
 
 	Ok(Json(GitSyncResponse {
 		success: true,
@@ -2756,7 +2645,7 @@ mod tests {
 		fixture_root: &std::path::Path,
 		url: &str,
 		current_branch: &str,
-	) -> GitCloneSession {
+	) -> PinnedSourceSession {
 		let backend =
 			std::sync::Arc::new(SessionLocalBackend::new(fixture_root));
 		let repo = std::sync::Arc::new(
@@ -2776,39 +2665,118 @@ mod tests {
 				None,
 			)
 			.expect("resolve fixture session");
-		GitCloneSession {
+		PinnedSourceSession::new(
 			repo,
 			snapshot,
-			created_at: std::time::Instant::now(),
-			url: url.to_string(),
-			credential_token: None,
-			branches: if current_branch.is_empty() {
+			url.to_string(),
+			None,
+			if current_branch.is_empty() {
 				vec![]
 			} else {
 				vec![current_branch.to_string()]
 			},
-			current_branch: current_branch.to_string(),
-		}
+			current_branch.to_string(),
+		)
 	}
 
 	/// Dummy session for guards / path-validation paths that never fetch.
 	fn dummy_git_session(
 		url: &str,
 		credential_token: Option<String>,
-	) -> GitCloneSession {
-		GitCloneSession {
-			repo: std::sync::Arc::new(skill_update::SkillRepository::new()),
-			snapshot: aghub_git::RepoSnapshot {
+	) -> PinnedSourceSession {
+		PinnedSourceSession::new(
+			std::sync::Arc::new(skill_update::SkillRepository::new()),
+			aghub_git::RepoSnapshot {
 				commit_oid: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".into(),
 				tree_oid: "cafebabecafebabecafebabecafebabeaaaaaaaa".into(),
 				commit_time: None,
 			},
-			created_at: std::time::Instant::now(),
-			url: url.to_string(),
+			url.to_string(),
 			credential_token,
-			branches: vec![],
-			current_branch: String::new(),
-		}
+			vec![],
+			String::new(),
+		)
+	}
+
+	#[test]
+	fn git_install_rejects_an_expired_pinned_source_session() {
+		let app_data = tempdir().unwrap();
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client");
+		let sessions = client
+			.rocket()
+			.state::<PinnedSourceSessions>()
+			.expect("sessions state");
+		let mut expired =
+			dummy_git_session("https://github.com/acme/skills.git", None);
+		expired.set_created_at(
+			std::time::Instant::now()
+				- std::time::Duration::from_secs(10 * 60 + 1),
+		);
+		sessions.insert("expired".to_string(), expired);
+
+		let response = client
+			.post("/api/v1/skills/git/install")
+			.json(&serde_json::json!({
+				"session_id": "expired",
+				"skill_paths": ["music"],
+				"agents": ["claude"],
+				"scope": "global",
+				"project_root": null
+			}))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::NotFound);
+		let body: serde_json::Value = serde_json::from_str(
+			&response.into_string().expect("response body"),
+		)
+		.expect("json body");
+		assert_eq!(body["code"], "SESSION_NOT_FOUND");
+	}
+
+	#[test]
+	fn git_sync_rejects_an_expired_pinned_source_session() {
+		let app_data = tempdir().unwrap();
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client");
+		let sessions = client
+			.rocket()
+			.state::<PinnedSourceSessions>()
+			.expect("sessions state");
+		let mut expired =
+			dummy_git_session("https://github.com/acme/skills.git", None);
+		expired.set_created_at(
+			std::time::Instant::now()
+				- std::time::Duration::from_secs(10 * 60 + 1),
+		);
+		sessions.insert("expired".to_string(), expired);
+
+		let response = client
+			.post("/api/v1/skills/git/sync")
+			.json(&serde_json::json!({
+				"session_id": "expired",
+				"name": "music",
+				"scope": "global",
+				"project_root": null,
+				"skill_path": "music/SKILL.md",
+				"source_paths": []
+			}))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::NotFound);
+		let body: serde_json::Value = serde_json::from_str(
+			&response.into_string().expect("response body"),
+		)
+		.expect("json body");
+		assert_eq!(body["code"], "SESSION_NOT_FOUND");
 	}
 
 	#[cfg(unix)]
@@ -3210,9 +3178,9 @@ mod tests {
 				.expect("client");
 			let sessions = client
 				.rocket()
-				.state::<GitCloneSessions>()
+				.state::<PinnedSourceSessions>()
 				.expect("git clone sessions");
-			sessions.sessions.lock().unwrap().insert(
+			sessions.insert(
 				"sync-session".to_string(),
 				session_from_fixture(
 					fixture.path(),
@@ -3279,9 +3247,9 @@ mod tests {
 				.expect("client");
 			let sessions = client
 				.rocket()
-				.state::<GitCloneSessions>()
+				.state::<PinnedSourceSessions>()
 				.expect("git clone sessions");
-			sessions.sessions.lock().unwrap().insert(
+			sessions.insert(
 				"evil-session".to_string(),
 				dummy_git_session("https://github.com/owner/repo.git", None),
 			);
@@ -3362,19 +3330,15 @@ mod tests {
 				.expect("client");
 			let sessions = client
 				.rocket()
-				.state::<GitCloneSessions>()
+				.state::<PinnedSourceSessions>()
 				.expect("git clone sessions");
 			let session = session_from_fixture(
 				fixture.path(),
 				"https://github.com/owner/repo.git",
 				"main",
 			);
-			let pinned_commit = session.snapshot.commit_oid.clone();
-			sessions
-				.sessions
-				.lock()
-				.unwrap()
-				.insert("sync-session".to_string(), session);
+			let pinned_commit = session.commit_oid().to_string();
+			sessions.insert("sync-session".to_string(), session);
 
 			let response = client
 				.post("/api/v1/skills/git/sync")
@@ -3438,9 +3402,9 @@ mod tests {
 				.expect("client");
 			let sessions = client
 				.rocket()
-				.state::<GitCloneSessions>()
+				.state::<PinnedSourceSessions>()
 				.expect("git clone sessions");
-			sessions.sessions.lock().unwrap().insert(
+			sessions.insert(
 				"sync-session".to_string(),
 				session_from_fixture(
 					fixture.path(),
@@ -3468,6 +3432,10 @@ mod tests {
 			let body: serde_json::Value =
 				serde_json::from_str(&response.into_string().unwrap()).unwrap();
 			assert_eq!(body["code"], "SKILL_NOT_INSTALLED");
+			assert!(
+				sessions.active("sync-session").is_some(),
+				"a failed claimed session must be restored for retry",
+			);
 		});
 	}
 
@@ -3516,9 +3484,9 @@ mod tests {
 				.expect("client");
 			let sessions = client
 				.rocket()
-				.state::<GitCloneSessions>()
+				.state::<PinnedSourceSessions>()
 				.expect("git clone sessions");
-			sessions.sessions.lock().unwrap().insert(
+			sessions.insert(
 				"sync-session".to_string(),
 				session_from_fixture(
 					fixture.path(),
@@ -3547,7 +3515,7 @@ mod tests {
 	}
 
 	#[test]
-	fn reconcile_skill_prefers_primary_path_for_opencode() {
+	fn reconcile_skill_reuses_master_for_native_reader_opencode() {
 		let _guard = crate::routes::test_env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
@@ -3582,13 +3550,12 @@ mod tests {
 
 		assert_eq!(result.success_count(), 1);
 		assert!(project_root
-			.join(".opencode/skills/repo-helper/assets/notes.txt")
+			.join(".agents/skills/repo-helper/assets/notes.txt")
 			.exists());
-		// Under the symlink-only model the source `add_skill` writes a
-		// `.agents/skills` Master by construction (Task 25), so the Master
-		// existing is expected. What this test pins is that reconcile copies
-		// into OpenCode's own primary path (asserted above).
-		assert!(project_root.join(".agents/skills/repo-helper").exists());
+		assert!(
+			!project_root.join(".opencode/skills/repo-helper").exists(),
+			"OpenCode is a NativeReader and must not get a private duplicate",
+		);
 	}
 
 	#[test]
@@ -4056,9 +4023,9 @@ mod tests {
 
 		let sessions = client
 			.rocket()
-			.state::<GitCloneSessions>()
+			.state::<PinnedSourceSessions>()
 			.expect("git clone sessions");
-		sessions.sessions.lock().unwrap().insert(
+		sessions.insert(
 			"test-session".to_string(),
 			dummy_git_session(
 				"https://gitlab.internal/repo.git",
@@ -4079,6 +4046,50 @@ mod tests {
 		let parsed: serde_json::Value =
 			serde_json::from_str(&raw).expect("json body");
 		assert_eq!(parsed["code"], "SESSION_CREDENTIAL_HOST_MISMATCH");
+	}
+
+	#[test]
+	fn git_scan_does_not_reuse_credentials_from_an_expired_session() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _unavailable =
+			crate::credentials::test_hooks::ForceCredentialBackendUnavailable::new();
+		let app_data = tempdir().unwrap();
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client");
+		let sessions = client
+			.rocket()
+			.state::<PinnedSourceSessions>()
+			.expect("git clone sessions");
+		let mut expired = dummy_git_session(
+			"https://stale.example/repo.git",
+			Some("stale-token".to_string()),
+		);
+		expired.set_created_at(
+			std::time::Instant::now()
+				- std::time::Duration::from_secs(10 * 60 + 1),
+		);
+		sessions.insert("expired".to_string(), expired);
+
+		let response = client
+			.post("/api/v1/skills/git/scan")
+			.json(&serde_json::json!({
+				"url": "http://127.0.0.1:1/owner/repo.git",
+				"session_id": "expired"
+			}))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::ServiceUnavailable);
+		let body: serde_json::Value = serde_json::from_str(
+			&response.into_string().expect("response body"),
+		)
+		.expect("json body");
+		assert_eq!(body["code"], "KEYCHAIN_UNAVAILABLE");
 	}
 
 	/// Regression (GitHub #15 P2-3, Codex-found): git-scan's host-scoped
@@ -4136,6 +4147,40 @@ mod tests {
 		assert_eq!(parsed["code"], "KEYCHAIN_UNAVAILABLE");
 	}
 
+	#[test]
+	fn install_fails_closed_when_keyring_backend_unreachable() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|error| error.into_inner());
+		let _unavailable =
+			crate::credentials::test_hooks::ForceCredentialBackendUnavailable::new();
+		let app_data = tempdir().unwrap();
+		let client =
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client");
+
+		let response = client
+			.post("/api/v1/skills/install")
+			.json(&serde_json::json!({
+				"source": "http://127.0.0.1:1/owner/repo.git",
+				"agents": ["claude"],
+				"skills": ["example"],
+				"scope": "global",
+				"install_all": false,
+			}))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::ServiceUnavailable);
+		let body: serde_json::Value = serde_json::from_str(
+			&response.into_string().expect("response body"),
+		)
+		.expect("json body");
+		assert_eq!(body["code"], "KEYCHAIN_UNAVAILABLE");
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn git_install_writes_npx_lock_symlink_only() {
@@ -4149,7 +4194,7 @@ mod tests {
 				.expect("client");
 			let app_sessions = client
 				.rocket()
-				.state::<GitCloneSessions>()
+				.state::<PinnedSourceSessions>()
 				.expect("sessions state");
 			// Fixture must outlive the install request (backend copies from it).
 			let fixture = tempdir().unwrap();
@@ -4160,7 +4205,7 @@ mod tests {
 				"---\nname: my-skill\ndescription: d\n---\n",
 			)
 			.unwrap();
-			app_sessions.sessions.lock().unwrap().insert(
+			app_sessions.insert(
 				"sess-1".to_string(),
 				session_from_fixture(
 					fixture.path(),
@@ -4198,6 +4243,72 @@ mod tests {
 			assert!(
 				lock.exists() || lock_alt.exists(),
 				"a global skill install lock was written"
+			);
+			assert!(
+				app_sessions.active("sess-1").is_none(),
+				"a successful install must consume its pinned session",
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn git_install_preflights_mixed_agents_before_writing() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("project");
+			std::fs::create_dir_all(&project).unwrap();
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("sessions state");
+			let fixture = tempdir().unwrap();
+			let source = fixture.path().join("my-skill");
+			std::fs::create_dir_all(&source).unwrap();
+			std::fs::write(
+				source.join("SKILL.md"),
+				"---\nname: my-skill\ndescription: d\n---\n",
+			)
+			.unwrap();
+			sessions.insert(
+				"mixed-session".to_string(),
+				session_from_fixture(
+					fixture.path(),
+					"https://github.com/o/r",
+					"main",
+				),
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/install")
+				.json(&serde_json::json!({
+					"session_id": "mixed-session",
+					"skill_paths": ["my-skill"],
+					"agents": ["claude", "augmentcode"],
+					"scope": "project",
+					"project_root": project.display().to_string()
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::Ok);
+			let body: serde_json::Value = serde_json::from_str(
+				&response.into_string().expect("response body"),
+			)
+			.expect("json response");
+			assert_eq!(body["results"].as_array().unwrap().len(), 2);
+			assert!(
+				!project.join(".agents/skills/my-skill").exists(),
+				"route preflight must happen before the shared Master write",
+			);
+			assert!(
+				!project.join(".claude/skills/my-skill").exists(),
+				"the valid target must not be partially installed",
 			);
 		});
 	}
@@ -4585,7 +4696,6 @@ mod tests {
 		use std::collections::{BTreeSet, HashMap};
 		use std::sync::atomic::{AtomicBool, Ordering};
 		use std::sync::{Arc, Mutex};
-		use std::time::Instant;
 
 		use aghub_git::{
 			GitError, GithubRest, HttpRequest, HttpResponse, HttpTransport,
@@ -4604,9 +4714,10 @@ mod tests {
 		use crate::routes::skills::{
 			install_skill_with_repo, scan_repo_catalog,
 		};
-		use crate::state::{
-			GitCloneSession, GitCloneSessions, SkillRepositoryFactory,
+		use crate::source_sessions::{
+			PinnedSourceSession, PinnedSourceSessions,
 		};
+		use crate::state::SkillRepositoryFactory;
 
 		// ── Request-recording transport seam ──
 		struct RecordingTransport<F> {
@@ -4894,19 +5005,18 @@ mod tests {
 				.expect("client");
 				let sessions = client
 					.rocket()
-					.state::<GitCloneSessions>()
+					.state::<PinnedSourceSessions>()
 					.expect("git clone sessions");
-				sessions.sessions.lock().unwrap().insert(
+				sessions.insert(
 					"sess".to_string(),
-					GitCloneSession {
-						repo: repo.clone(),
-						snapshot: snap.clone(),
-						created_at: Instant::now(),
-						url: "https://github.com/acme/skills.git".to_string(),
-						credential_token: None,
-						branches: vec!["main".to_string()],
-						current_branch: "main".to_string(),
-					},
+					PinnedSourceSession::new(
+						repo.clone(),
+						snap.clone(),
+						"https://github.com/acme/skills.git".to_string(),
+						None,
+						vec!["main".to_string()],
+						"main".to_string(),
+					),
 				);
 				// Only measure the traffic install itself issues.
 				recorded.lock().unwrap().clear();
@@ -5046,19 +5156,18 @@ mod tests {
 				.expect("client");
 				let sessions = client
 					.rocket()
-					.state::<GitCloneSessions>()
+					.state::<PinnedSourceSessions>()
 					.expect("git clone sessions");
-				sessions.sessions.lock().unwrap().insert(
+				sessions.insert(
 					"sess".to_string(),
-					GitCloneSession {
-						repo: repo.clone(),
-						snapshot: snap.clone(),
-						created_at: Instant::now(),
-						url: "https://github.com/acme/skills.git".to_string(),
-						credential_token: None,
-						branches: vec!["main".to_string()],
-						current_branch: "main".to_string(),
-					},
+					PinnedSourceSession::new(
+						repo.clone(),
+						snap.clone(),
+						"https://github.com/acme/skills.git".to_string(),
+						None,
+						vec!["main".to_string()],
+						"main".to_string(),
+					),
 				);
 				recorded.lock().unwrap().clear();
 
@@ -5189,6 +5298,66 @@ mod tests {
 				assert!(
 					home.join(".agents/skills/music/SKILL.md").exists(),
 					"the named skill materialized into the master"
+				);
+			});
+		}
+
+		#[test]
+		fn install_skill_http_preflights_mixed_agents_before_writing() {
+			with_isolated_env(|home, _state| {
+				let project = home.join("project");
+				std::fs::create_dir_all(&project).unwrap();
+				let (transport, _recorded) =
+					record_transport(happy_responder());
+				let rest: Arc<dyn RepoFetchBackend> =
+					Arc::new(GithubRest::new(transport));
+				let repo = Arc::new(SkillRepository::with_backends(
+					Some(rest),
+					Arc::new(NoGixBackend),
+				));
+				let app_data = tempdir().unwrap();
+				let rocket = crate::build_rocket_with_skill_repository_factory(
+					Config::default(),
+					app_data.path().to_path_buf(),
+					SkillRepositoryFactory::fixed(repo),
+				);
+				let client = Client::tracked(rocket).unwrap();
+				let forwarded = serde_json::json!({
+					"https://github.com/acme/skills.git": {
+						"token": "forwarded-token",
+						"origin": null
+					}
+				});
+				let encoded = base64::engine::general_purpose::STANDARD
+					.encode(serde_json::to_vec(&forwarded).unwrap());
+
+				let response = client
+					.post("/api/v1/skills/install")
+					.header(Header::new("X-Aghub-Git-Tokens", encoded))
+					.json(&serde_json::json!({
+						"source": "https://github.com/acme/skills.git",
+						"agents": ["claude", "augmentcode"],
+						"skills": ["music"],
+						"scope": "project",
+						"project_path": project.display().to_string(),
+						"install_all": false
+					}))
+					.dispatch();
+
+				assert_eq!(response.status(), Status::Ok);
+				let body: serde_json::Value = serde_json::from_str(
+					&response.into_string().expect("response body"),
+				)
+				.expect("json response");
+				assert_eq!(body["success"], false);
+				assert_eq!(body["agents"].as_array().unwrap().len(), 2);
+				assert!(
+					!project.join(".agents/skills/music").exists(),
+					"capability preflight must happen before the Master write",
+				);
+				assert!(
+					!project.join(".claude/skills/music").exists(),
+					"the supported target must not receive a Referrer",
 				);
 			});
 		}
@@ -5530,19 +5699,18 @@ mod tests {
 				.expect("client");
 				let sessions = client
 					.rocket()
-					.state::<GitCloneSessions>()
+					.state::<PinnedSourceSessions>()
 					.expect("git clone sessions");
-				sessions.sessions.lock().unwrap().insert(
+				sessions.insert(
 					"sess".to_string(),
-					GitCloneSession {
-						repo: repo.clone(),
-						snapshot: snap.clone(),
-						created_at: Instant::now(),
-						url: "https://github.com/acme/skills.git".to_string(),
-						credential_token: None,
-						branches: vec![],
-						current_branch: String::new(),
-					},
+					PinnedSourceSession::new(
+						repo.clone(),
+						snap.clone(),
+						"https://github.com/acme/skills.git".to_string(),
+						None,
+						vec![],
+						String::new(),
+					),
 				);
 				let resp = client
 					.post("/api/v1/skills/git/install")
@@ -5726,20 +5894,18 @@ mod tests {
 					.expect("client");
 					let sessions = client
 						.rocket()
-						.state::<GitCloneSessions>()
+						.state::<PinnedSourceSessions>()
 						.expect("git clone sessions");
-					sessions.sessions.lock().unwrap().insert(
+					sessions.insert(
 						"sess".to_string(),
-						GitCloneSession {
-							repo: repo.clone(),
-							snapshot: snap.clone(),
-							created_at: Instant::now(),
-							url: "https://github.com/acme/skills.git"
-								.to_string(),
-							credential_token: None,
-							branches: vec!["main".to_string()],
-							current_branch: "main".to_string(),
-						},
+						PinnedSourceSession::new(
+							repo.clone(),
+							snap.clone(),
+							"https://github.com/acme/skills.git".to_string(),
+							None,
+							vec!["main".to_string()],
+							"main".to_string(),
+						),
 					);
 					let resp = client
 						.post("/api/v1/skills/git/install")

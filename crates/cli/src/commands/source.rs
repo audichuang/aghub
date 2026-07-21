@@ -35,15 +35,19 @@ use crate::SourceAction;
 /// an arbitrary host after the first failure. Empty/whitespace env values
 /// count as unset. `GitFetcher` consumes the token as the `x-access-token`
 /// password — there is no username/password basic-auth path. Returns
-/// `None` when nothing applies (one anonymous attempt is made).
+/// `NoToken` when nothing applies (one anonymous attempt is made).
 pub(crate) struct EnvTokenResolver;
 impl skill_update::TokenResolver for EnvTokenResolver {
-	fn resolve(&self, _source: &str, host: Option<&str>) -> Option<String> {
-		select_env_token(
+	fn resolve(&self, source: &str) -> skill_update::TokenResolution {
+		let host = skill_update::keychain_host_for_source(source);
+		match select_env_token(
 			std::env::var("GIT_PASSWORD").ok(),
 			std::env::var("GITHUB_TOKEN").ok(),
-			host,
-		)
+			host.as_deref(),
+		) {
+			Some(token) => skill_update::TokenResolution::Token(token),
+			None => skill_update::TokenResolution::NoToken,
+		}
 	}
 }
 
@@ -346,6 +350,9 @@ fn diff(
 		FetchSelection::CatalogSnapshot,
 	) {
 		Ok(repo) => repo,
+		Err(FetchError::BackendUnavailable) => {
+			bail!("Credential backend is unavailable; retry later.")
+		}
 		Err(FetchError::Auth) => bail!(
 			"This source needs a credential. Set GIT_PASSWORD (any host) or \
 			 GITHUB_TOKEN (github.com) in the environment and retry."
@@ -573,6 +580,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 		FetchSelection::CatalogSnapshot,
 	) {
 		Ok(repo) => repo,
+		Err(FetchError::BackendUnavailable) => {
+			bail!("Credential backend is unavailable; retry later.")
+		}
 		Err(FetchError::Auth) => bail!(
 			"This source needs a credential. Set GIT_PASSWORD (any host) or \
 			 GITHUB_TOKEN (github.com) in the environment and retry."
@@ -741,29 +751,55 @@ fn sync(args: SyncArgs) -> Result<()> {
 		source_url: resolved.source_url.clone(),
 		ref_name: meta.effective_ref.clone(),
 	};
+	let fetched = skill_update::mutation::FetchedSource::from_repo(repo);
 
 	let plan_targets = plan_target_agents(&plan, &target_agents);
-	let mut actions: Vec<SyncActionView> = Vec::new();
-	for (kind, d) in &plan {
-		match *kind {
-			"install" => actions.push(apply_install(
-				&repo,
-				d,
-				scope,
-				project_root.as_deref(),
-				&target_agents,
-				args.universal,
-				&lock_source,
-			)),
-			"update" => actions.push(apply_update_row(
-				&repo,
-				d,
-				scope,
-				project_root.as_deref(),
-			)),
-			_ => unreachable!(),
-		}
-	}
+	let action_report = aghub_core::batch::run_multi_target_mutation(
+		&plan,
+		|(kind, _)| {
+			if *kind != "install" {
+				return Ok(());
+			}
+			aghub_core::batch::skill_batch_preflight(&target_agents, scope)
+				.map_err(|error| error.to_string())
+		},
+		|(kind, d)| {
+			Ok::<SyncActionView, String>(match *kind {
+				"install" => apply_install(
+					&fetched,
+					d,
+					scope,
+					project_root.as_deref(),
+					&target_agents,
+					&lock_source,
+				),
+				"update" => apply_update_row(
+					&fetched,
+					d,
+					scope,
+					project_root.as_deref(),
+				),
+				_ => unreachable!(),
+			})
+		},
+	)
+	.map_err(|error| {
+		let mut reasons = error
+			.failures
+			.into_iter()
+			.map(|failure| failure.reason)
+			.collect::<Vec<_>>();
+		reasons.dedup();
+		anyhow::anyhow!(reasons.join("; "))
+	})?;
+	let actions: Vec<SyncActionView> = action_report
+		.results
+		.into_iter()
+		.map(|row| {
+			row.result
+				.expect("action execution is infallible after preflight")
+		})
+		.collect();
 
 	// A hard failure on ANY action (an agent link error / occupied slot, or an
 	// action that failed outright) must surface as a non-zero exit — a conflict
@@ -969,50 +1005,27 @@ fn print_dry_run(
 }
 
 fn apply_install(
-	repo: &skill_update::FetchedRepo,
+	fetched: &skill_update::mutation::FetchedSource,
 	d: &SourceSkillDiff,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	target_agents: &[AgentType],
-	_universal: bool,
 	lock_source: &skill::InstallLockSource,
 ) -> SyncActionView {
-	use aghub_core::skills::install_fetched::{
-		install_fetched_skill_and_lock, FetchedSkillInstallRequest,
-	};
-	use aghub_core::skills::linker::LinkTarget;
-
-	let Some(skill_file) = aghub_core::skills::update::sanitize_skill_path(
-		repo.root.as_path(),
-		&d.skill_path,
-	) else {
-		return SyncActionView {
-			action: "install",
-			name: d.name.clone(),
-			skill_path: d.skill_path.clone(),
-			applied: false,
-			error: Some("skillPath was not found in the source".to_string()),
-			agents: Vec::new(),
-		};
+	use skill_update::mutation::{
+		install_fetched_source, FetchedInstallRequest, InstallMutationError,
 	};
 
-	let req = FetchedSkillInstallRequest {
-		skill_file: &skill_file,
+	let req = FetchedInstallRequest {
 		source: lock_source,
-		lock_skill_path: d.skill_path.clone(),
-		ref_commit: Some(repo.oid().to_string()),
+		lock_skill_path: &d.skill_path,
+		expected_name: Some(&d.name),
 		scope,
 		project_root,
 		target_agents,
-		expected_name: Some(&d.name),
-		target: if matches!(scope, ResourceScope::ProjectOnly) {
-			LinkTarget::Relative
-		} else {
-			LinkTarget::Absolute
-		},
 	};
 
-	match install_fetched_skill_and_lock(req) {
+	match install_fetched_source(fetched, req) {
 		Ok(report) => {
 			let applied = report.agent_results.iter().any(|r| r.installed);
 			// First HARD per-agent error (link failure / occupied slot). An
@@ -1039,45 +1052,72 @@ fn apply_install(
 				agents,
 			}
 		}
-		Err(e) => SyncActionView {
+		Err(error) => SyncActionView {
 			action: "install",
 			name: d.name.clone(),
 			skill_path: d.skill_path.clone(),
 			applied: false,
-			error: Some(e.to_string()),
+			error: Some(match error {
+				InstallMutationError::InvalidSkillPath => {
+					"skillPath was not found in the source".to_string()
+				}
+				InstallMutationError::Install(error) => error.to_string(),
+			}),
 			agents: Vec::new(),
 		},
 	}
 }
 
 fn apply_update_row(
-	repo: &skill_update::FetchedRepo,
+	fetched: &skill_update::mutation::FetchedSource,
 	d: &SourceSkillDiff,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> SyncActionView {
-	match crate::commands::apply_update::apply_skill_update_from_fetched(
-		repo.root.as_path(),
-		&d.skill_path,
-		&d.name,
-		scope,
-		project_root,
-		Some(repo.oid()),
+	use aghub_core::skills::resync::ResyncError;
+	use skill_update::mutation::{
+		resync_fetched_source, FetchedResyncRequest, ResyncMutationError,
+	};
+
+	match resync_fetched_source(
+		fetched,
+		FetchedResyncRequest {
+			skill_path: &d.skill_path,
+			name: &d.name,
+			scope,
+			project_root,
+		},
 	) {
-		Ok(paths) => SyncActionView {
+		Ok(report) => SyncActionView {
 			action: "update",
 			name: d.name.clone(),
 			skill_path: d.skill_path.clone(),
-			applied: !paths.is_empty(),
+			applied: !report.swapped.is_empty(),
 			error: None,
 			agents: Vec::new(),
 		},
-		Err(e) => SyncActionView {
+		Err(error) => SyncActionView {
 			action: "update",
 			name: d.name.clone(),
 			skill_path: d.skill_path.clone(),
 			applied: false,
-			error: Some(e.to_string()),
+			error: Some(match error {
+				ResyncMutationError::InvalidSkillPath => {
+					"locked skillPath was not found in source".to_string()
+				}
+				ResyncMutationError::Resync(ResyncError::NotInstalled) => {
+					format!(
+						"skill '{}' is locked but no installed copy was found",
+						d.name
+					)
+				}
+				ResyncMutationError::Resync(ResyncError::Renamed {
+					new_name,
+				}) => aghub_core::skills::update::skill_renamed_message(
+					&d.name, &new_name,
+				),
+				ResyncMutationError::Resync(other) => other.to_string(),
+			}),
 			agents: Vec::new(),
 		},
 	}
@@ -1101,9 +1141,8 @@ struct AcceptRenameArgs<'a> {
 /// and fetches (the fetch cannot live in core — `skill-update` depends on
 /// core), then hands the fetched tree to `rename::accept_rename`.
 fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
-	use aghub_core::skills::rename::{
-		self, FetchedRename, RenameRequest, RenameScope,
-	};
+	use aghub_core::skills::rename::{self, RenameRequest, RenameScope};
+	use skill_update::mutation::{accept_fetched_rename, FetchedSource};
 
 	if args.all {
 		bail!(
@@ -1165,6 +1204,9 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		FetchSelection::Skills(std::slice::from_ref(&folder)),
 	)
 	.map_err(|e| match e {
+		FetchError::BackendUnavailable => {
+			anyhow::anyhow!("Credential backend is unavailable; retry later.")
+		}
 		FetchError::Auth => anyhow::anyhow!(
 			"This source needs a credential. Set GIT_PASSWORD (any host) \
 			 or GITHUB_TOKEN (github.com) in the environment and retry."
@@ -1176,17 +1218,15 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	})?;
 
 	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core.
-	let outcome = rename::accept_rename(
+	let fetched = FetchedSource::from_repo(repo);
+	let outcome = accept_fetched_rename(
+		&fetched,
 		RenameRequest {
 			old_name: args.old_name,
 			new_name: args.new_name,
 			scope,
 		},
-		FetchedRename {
-			repo_root: &repo.root,
-			oid: repo.oid(),
-			source: &source,
-		},
+		&source,
 	)
 	.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
 

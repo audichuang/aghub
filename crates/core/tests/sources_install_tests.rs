@@ -373,46 +373,129 @@ fn project_scope_writes_project_lock() {
 }
 
 #[test]
-fn zero_installs_with_no_existing_lock_writes_no_lock() {
-	// Bug A: every target is a soft failure (no resolvable skills dir) AND there
-	// is no pre-existing lock entry → no lock must be written. The API guards
-	// the whole lock-write block behind `if installed { ... }` (skills.rs:2119).
+fn all_unsupported_targets_preflight_before_master_or_lock_write() {
+	// Every target is predictably unsupported. The multi-target policy rejects
+	// the command before materializing a Master or advancing the lock.
 	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
 
 	let fetched = tempdir().unwrap();
 	let skill_md = write_skill(fetched.path(), "gamma", "gamma");
 
-	// AugmentCode does not support skill creation in ANY scope, so its target
-	// dir resolves to `None` → a soft failure, never an install. No override is
-	// set for it, so nothing touches a real directory.
+	// AugmentCode does not support skill creation in project scope. No override
+	// is set for it, so a preflight regression cannot hide behind a test path.
 	let source = sample_source();
-	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
 		skill_file: &skill_md,
 		source: &source,
 		lock_skill_path: "gamma/SKILL.md".to_string(),
 		ref_commit: None,
-		scope: ResourceScope::GlobalOnly,
-		project_root: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
 		target_agents: &[AgentType::AugmentCode],
 		expected_name: None,
-		target: LinkTarget::Absolute,
-	})
-	.expect("install with only soft failures still returns Ok");
+		target: LinkTarget::Relative,
+	});
+	let error = result.expect_err("unsupported targets must fail preflight");
+	assert!(error.to_string().contains("nothing was written"));
+	assert!(
+		!project_root.join(".agents/skills/gamma").exists(),
+		"an all-unsupported mutation must not leave an orphan Master",
+	);
+	let local_lock = skill::lock::local::read_local_lock(Some(&project_root));
+	assert!(
+		!local_lock.skills.contains_key("gamma"),
+		"no project lock entry should be written"
+	);
+}
 
-	// No agent installed, and no pre-existing lock entry → no lock written.
-	assert!(
-		!report.agent_results.iter().any(|r| r.installed),
-		"no agent should have installed"
+#[test]
+fn mixed_supported_and_unsupported_targets_preflight_before_master_write() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "mixed", "mixed");
+	let claude_dir = project_root.join(".claude/skills");
+	set_skills_path_override("claude", Some(claude_dir.clone()));
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "mixed/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude, AgentType::AugmentCode],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+	set_skills_path_override("claude", None);
+
+	let error = result.expect_err(
+		"a predictable unsupported target must reject the whole mutation",
 	);
 	assert!(
-		!report.wrote_lock,
-		"no lock should be written when zero agents installed and no entry \
-		 pre-existed"
+		error.to_string().contains("nothing was written"),
+		"preflight error must state the no-write guarantee: {error}",
 	);
 	assert!(
-		skill::lock::global::get_skill_from_lock("gamma").is_none(),
-		"no global lock entry should be written"
+		!project_root.join(".agents/skills/mixed").exists(),
+		"preflight must run before the shared Master is materialized",
 	);
+	assert!(
+		!claude_dir.join("mixed").exists(),
+		"a supported earlier target must not receive a Referrer",
+	);
+	assert!(
+		!skill::lock::local::read_local_lock(Some(&project_root))
+			.skills
+			.contains_key("mixed"),
+		"a rejected mutation must not advance the lock",
+	);
+}
+
+#[test]
+fn shared_master_failure_is_attributed_to_every_agent() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "blocked", "blocked");
+	let claude_dir = project_root.join("claude-skills");
+	let codex_dir = project_root.join("codex-skills");
+	set_skills_path_override("claude", Some(claude_dir));
+	set_skills_path_override("codex", Some(codex_dir));
+
+	// Make the shared `.agents/skills` parent impossible to create. The one
+	// shared setup must fail once and attribute that same failure to both rows.
+	std::fs::write(project_root.join(".agents"), "not a directory").unwrap();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "blocked/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude, AgentType::Codex],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	})
+	.expect("shared setup failures are returned as attributed rows");
+
+	set_skills_path_override("claude", None);
+	set_skills_path_override("codex", None);
+
+	assert_eq!(report.agent_results.len(), 2);
+	assert!(report.agent_results.iter().all(|row| !row.installed));
+	let errors = report
+		.agent_results
+		.iter()
+		.map(|row| row.error.as_deref().expect("attributed error"))
+		.collect::<Vec<_>>();
+	assert_eq!(errors[0], errors[1]);
+	assert!(!report.wrote_lock);
 }
 
 #[test]

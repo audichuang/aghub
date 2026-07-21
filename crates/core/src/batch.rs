@@ -1,11 +1,10 @@
 //! Multi-target mutation policy — the ONE place that defines how a batch of
 //! agents receives the same mutation: a predictable-failure preflight BEFORE
 //! any write, then an attempt on EVERY agent (no fail-fast) collected into a
-//! per-agent attribution both surfaces serialize verbatim. The CLI's
-//! `-a a,b <mutating-cmd>` and the API's `/mcps/batch` (behind the desktop's
-//! multi-agent create) both map to this module — policy lives here, the
-//! surfaces stay transport adapters. Mirrors the transfer-module precedent:
-//! one wire view, no hand-rolled second mapping that could drift.
+//! per-agent attribution. CLI/API agent lists, transfer/reconcile, and shared
+//! Source-to-Master installs all map to this module. Surface adapters retain
+//! their own wire views; preflight, attempt-all execution, and attribution
+//! ordering live here once.
 
 use std::fmt;
 
@@ -18,6 +17,13 @@ use crate::registry;
 pub struct BatchUnsupported {
 	/// `(agent id, reason)` pairs, in the order the agents were named.
 	pub agents: Vec<(String, String)>,
+	operation: &'static str,
+}
+
+impl BatchUnsupported {
+	fn new(operation: &'static str, agents: Vec<(String, String)>) -> Self {
+		Self { agents, operation }
+	}
 }
 
 impl fmt::Display for BatchUnsupported {
@@ -30,8 +36,9 @@ impl fmt::Display for BatchUnsupported {
 			.join(", ");
 		write!(
 			f,
-			"agent(s) {list} do not support this MCP operation; nothing \
-			 was written"
+			"agent(s) {list} do not support this {} operation; nothing \
+			 was written",
+			self.operation
 		)
 	}
 }
@@ -46,11 +53,60 @@ fn scope_word(scope: ResourceScope) -> &'static str {
 	}
 }
 
+fn mcp_agent_preflight(
+	agent: AgentType,
+	write_scope: ResourceScope,
+	toggle: bool,
+) -> Result<(), String> {
+	let descriptor = registry::get(agent);
+	if !descriptor.supports_mcp_scope(write_scope) {
+		return Err(format!("no {} MCP config", scope_word(write_scope)));
+	}
+	if toggle && !descriptor.capabilities.mcp.enable_disable {
+		return Err("no MCP enable/disable".to_string());
+	}
+	Ok(())
+}
+
+fn skill_agent_preflight(
+	agent: AgentType,
+	write_scope: ResourceScope,
+) -> Result<(), String> {
+	let descriptor = registry::get(agent);
+	if descriptor.supports_skill_scope(write_scope) {
+		Ok(())
+	} else {
+		Err(format!("no {} skill config", scope_word(write_scope)))
+	}
+}
+
+/// Preflight a skill mutation across every named agent. Capability failures
+/// are collected in input order and guarantee that no mutation has run.
+pub fn skill_batch_preflight(
+	agents: &[AgentType],
+	write_scope: ResourceScope,
+) -> Result<(), BatchUnsupported> {
+	let unsupported = agents
+		.iter()
+		.filter_map(|agent| {
+			skill_agent_preflight(*agent, write_scope)
+				.err()
+				.map(|reason| (agent.as_str().to_string(), reason))
+		})
+		.collect::<Vec<_>>();
+	if unsupported.is_empty() {
+		Ok(())
+	} else {
+		Err(BatchUnsupported::new("skill", unsupported))
+	}
+}
+
 /// Preflight for an MCP batch: every agent must hold MCPs in the scope the
 /// batch WRITES, and a toggle batch (enable/disable) additionally needs the
 /// enable/disable capability — the same descriptor bits the manager's own
 /// per-agent guards check, evaluated for ALL agents BEFORE any write so a
 /// capability mismatch cannot leave a partial batch.
+#[cfg(test)]
 pub fn mcp_batch_preflight(
 	agents: &[AgentType],
 	write_scope: ResourceScope,
@@ -58,29 +114,16 @@ pub fn mcp_batch_preflight(
 ) -> Result<(), BatchUnsupported> {
 	let unsupported: Vec<(String, String)> = agents
 		.iter()
-		.filter_map(|a| {
-			let descriptor = registry::get(*a);
-			if !descriptor.supports_mcp_scope(write_scope) {
-				return Some((
-					a.as_str().to_string(),
-					format!("no {} MCP config", scope_word(write_scope)),
-				));
-			}
-			if toggle && !descriptor.capabilities.mcp.enable_disable {
-				return Some((
-					a.as_str().to_string(),
-					"no MCP enable/disable".to_string(),
-				));
-			}
-			None
+		.filter_map(|agent| {
+			mcp_agent_preflight(*agent, write_scope, toggle)
+				.err()
+				.map(|reason| (agent.as_str().to_string(), reason))
 		})
 		.collect();
 	if unsupported.is_empty() {
 		Ok(())
 	} else {
-		Err(BatchUnsupported {
-			agents: unsupported,
-		})
+		Err(BatchUnsupported::new("MCP", unsupported))
 	}
 }
 
@@ -106,37 +149,210 @@ pub struct AgentBatchView {
 	pub results: Vec<AgentOpResultView>,
 }
 
-/// Attempt EVERY agent and collect — a mid-batch failure must not silently
-/// skip the rest. The caller decides how to surface `failed_count > 0`
-/// (non-zero exit on the CLI, HTTP status on the API).
-pub fn run_agent_batch(
-	agents: &[AgentType],
-	mut op: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
-) -> AgentBatchView {
-	let results: Vec<AgentOpResultView> = agents
+/// One target rejected by the predictable-failure preflight. These rows are
+/// returned together, in input order, before any mutation is attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiTargetMutationFailure<T, E> {
+	pub target: T,
+	pub reason: E,
+}
+
+/// Aggregate preflight rejection for a multi-target mutation. A non-empty
+/// `failures` list guarantees that the mutation callback was never invoked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiTargetMutationError<T, E> {
+	pub failures: Vec<MultiTargetMutationFailure<T, E>>,
+}
+
+/// One attempted target and its exact mutation outcome.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiTargetMutationResult<T, O, E> {
+	pub target: T,
+	pub result: Result<O, E>,
+}
+
+/// Successful preflight followed by one mutation result per input target, in
+/// input order. Mutation failures do not stop later targets from running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MultiTargetMutationReport<T, O, E> {
+	pub results: Vec<MultiTargetMutationResult<T, O, E>>,
+}
+
+impl<T, O, E> MultiTargetMutationReport<T, O, E> {
+	pub fn success_count(&self) -> usize {
+		self.results.iter().filter(|row| row.result.is_ok()).count()
+	}
+
+	pub fn failed_count(&self) -> usize {
+		self.results.len() - self.success_count()
+	}
+}
+
+fn collect_preflight_failures<T, E>(
+	targets: &[T],
+	mut preflight: impl FnMut(&T) -> Result<(), E>,
+) -> Vec<MultiTargetMutationFailure<T, E>>
+where
+	T: Clone,
+{
+	targets
 		.iter()
-		.map(|agent| match op(*agent) {
+		.filter_map(|target| {
+			preflight(target)
+				.err()
+				.map(|reason| MultiTargetMutationFailure {
+					target: target.clone(),
+					reason,
+				})
+		})
+		.collect()
+}
+
+/// Apply one mutation across multiple targets under the repository-wide batch
+/// policy: collect every predictable failure before writing anything; when the
+/// preflight is clean, attempt every mutation without fail-fast behavior.
+pub fn run_multi_target_mutation<T, O, E>(
+	targets: &[T],
+	preflight: impl FnMut(&T) -> Result<(), E>,
+	mut mutate: impl FnMut(&T) -> Result<O, E>,
+) -> Result<MultiTargetMutationReport<T, O, E>, MultiTargetMutationError<T, E>>
+where
+	T: Clone,
+{
+	let failures = collect_preflight_failures(targets, preflight);
+	if !failures.is_empty() {
+		return Err(MultiTargetMutationError { failures });
+	}
+
+	let results = targets
+		.iter()
+		.map(|target| MultiTargetMutationResult {
+			target: target.clone(),
+			result: mutate(target),
+		})
+		.collect();
+	Ok(MultiTargetMutationReport { results })
+}
+
+/// Run one shared setup after a clean all-target preflight, then attribute the
+/// prepared state to every target. A shared setup failure is represented as an
+/// attempted failure row for every target so adapters retain full attribution.
+pub fn run_shared_multi_target_mutation<T, S, O, E>(
+	targets: &[T],
+	preflight: impl FnMut(&T) -> Result<(), E>,
+	shared_setup_once: impl FnOnce(&[T]) -> Result<S, E>,
+	mut per_target_attribute: impl FnMut(&T, &S) -> Result<O, E>,
+) -> Result<MultiTargetMutationReport<T, O, E>, MultiTargetMutationError<T, E>>
+where
+	T: Clone,
+	E: Clone,
+{
+	let failures = collect_preflight_failures(targets, preflight);
+	if !failures.is_empty() {
+		return Err(MultiTargetMutationError { failures });
+	}
+
+	let prepared = match shared_setup_once(targets) {
+		Ok(prepared) => prepared,
+		Err(error) => {
+			let results = targets
+				.iter()
+				.map(|target| MultiTargetMutationResult {
+					target: target.clone(),
+					result: Err(error.clone()),
+				})
+				.collect();
+			return Ok(MultiTargetMutationReport { results });
+		}
+	};
+
+	let results = targets
+		.iter()
+		.map(|target| MultiTargetMutationResult {
+			target: target.clone(),
+			result: per_target_attribute(target, &prepared),
+		})
+		.collect();
+	Ok(MultiTargetMutationReport { results })
+}
+
+fn run_agent_mutation_with_preflight(
+	agents: &[AgentType],
+	operation: &'static str,
+	mut preflight: impl FnMut(AgentType) -> Result<(), String>,
+	mut mutate: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
+) -> Result<AgentBatchView, BatchUnsupported> {
+	let report = run_multi_target_mutation(
+		agents,
+		|agent| preflight(*agent),
+		|agent| mutate(*agent),
+	)
+	.map_err(|error| {
+		BatchUnsupported::new(
+			operation,
+			error
+				.failures
+				.into_iter()
+				.map(|failure| {
+					(failure.target.as_str().to_string(), failure.reason)
+				})
+				.collect(),
+		)
+	})?;
+
+	let success_count = report.success_count();
+	let failed_count = report.failed_count();
+	let results = report
+		.results
+		.into_iter()
+		.map(|row| match row.result {
 			Ok(output) => AgentOpResultView {
-				agent: agent.as_str().to_string(),
+				agent: row.target.as_str().to_string(),
 				ok: true,
 				output: Some(output),
 				error: None,
 			},
 			Err(error) => AgentOpResultView {
-				agent: agent.as_str().to_string(),
+				agent: row.target.as_str().to_string(),
 				ok: false,
 				output: None,
 				error: Some(error),
 			},
 		})
 		.collect();
-	let success_count = results.iter().filter(|r| r.ok).count();
-	let failed_count = results.len() - success_count;
-	AgentBatchView {
+	Ok(AgentBatchView {
 		success_count,
 		failed_count,
 		results,
-	}
+	})
+}
+
+/// Run one MCP mutation across agents with capability preflight owned by the
+/// same interface. Predictable scope/toggle failures reject the entire batch;
+/// execution failures remain attributed per agent and never fail fast.
+pub fn run_mcp_agent_mutation(
+	agents: &[AgentType],
+	write_scope: ResourceScope,
+	toggle: bool,
+	mutate: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
+) -> Result<AgentBatchView, BatchUnsupported> {
+	run_agent_mutation_with_preflight(
+		agents,
+		"MCP",
+		|agent| mcp_agent_preflight(agent, write_scope, toggle),
+		mutate,
+	)
+}
+
+/// Run one skill mutation across agents with scope capability preflight owned
+/// by the same interface, preserving ordered attempt-all wire attribution.
+pub fn run_skill_agent_mutation(
+	agents: &[AgentType],
+	write_scope: ResourceScope,
+	mutate: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
+) -> Result<AgentBatchView, BatchUnsupported> {
+	skill_batch_preflight(agents, write_scope)?;
+	run_agent_mutation_with_preflight(agents, "skill", |_| Ok(()), mutate)
 }
 
 #[cfg(test)]
@@ -183,25 +399,119 @@ mod tests {
 	}
 
 	#[test]
-	fn run_agent_batch_attempts_every_agent_and_counts() {
-		// claude fails mid-batch; grok must still be attempted.
-		let view =
-			run_agent_batch(&[AgentType::Claude, AgentType::Grok], |agent| {
-				match agent {
-					AgentType::Claude => Err("boom".to_string()),
-					other => Ok(json!({ "agent": other.as_str() })),
+	fn multi_target_mutation_attempts_every_target_after_preflight() {
+		let attempts = std::cell::RefCell::new(Vec::new());
+		let report = run_multi_target_mutation(
+			&["claude", "codex", "grok"],
+			|_target| Ok::<_, String>(()),
+			|target| {
+				attempts.borrow_mut().push(*target);
+				if *target == "codex" {
+					Err("boom".to_string())
+				} else {
+					Ok(json!({ "agent": target }))
 				}
-			});
-		assert_eq!(view.success_count, 1);
-		assert_eq!(view.failed_count, 1);
-		assert_eq!(view.results.len(), 2);
-		assert!(!view.results[0].ok);
-		assert_eq!(view.results[0].error.as_deref(), Some("boom"));
-		assert!(view.results[1].ok, "grok attempted despite claude failing");
-		// Wire shape: snake_case fields, absent optionals omitted.
-		let wire = serde_json::to_value(&view).unwrap();
-		assert!(wire["results"][0].get("output").is_none());
-		assert!(wire["results"][1].get("error").is_none());
-		assert_eq!(wire["failed_count"], 1);
+			},
+		)
+		.expect("preflight succeeds");
+
+		assert_eq!(*attempts.borrow(), ["claude", "codex", "grok"]);
+		assert_eq!(report.success_count(), 2);
+		assert_eq!(report.failed_count(), 1);
+		assert!(matches!(
+			&report.results[1].result,
+			Err(error) if error == "boom"
+		));
+	}
+
+	#[test]
+	fn multi_target_mutation_collects_preflight_failures_before_any_write() {
+		let targets = ["claude", "pi", "augmentcode"];
+		let writes = std::cell::Cell::new(0);
+
+		let error = run_multi_target_mutation(
+			&targets,
+			|target| match *target {
+				"pi" => Err("no skill config".to_string()),
+				"augmentcode" => Err("global only".to_string()),
+				_ => Ok(()),
+			},
+			|target| {
+				writes.set(writes.get() + 1);
+				Ok(target.to_string())
+			},
+		)
+		.expect_err("predictable failures must reject the whole mutation");
+
+		assert_eq!(writes.get(), 0, "preflight must precede every write");
+		assert_eq!(error.failures.len(), 2);
+		assert_eq!(error.failures[0].target, "pi");
+		assert_eq!(error.failures[0].reason, "no skill config");
+		assert_eq!(error.failures[1].target, "augmentcode");
+	}
+
+	#[test]
+	fn mcp_mutation_interface_owns_preflight_before_execution() {
+		let writes = std::cell::Cell::new(0);
+		let result = run_mcp_agent_mutation(
+			&[AgentType::Claude, AgentType::Pi],
+			ResourceScope::ProjectOnly,
+			false,
+			|agent| {
+				writes.set(writes.get() + 1);
+				Ok(serde_json::json!({ "agent": agent.as_str() }))
+			},
+		);
+
+		assert!(result.is_err(), "Pi cannot receive a project MCP");
+		assert_eq!(
+			writes.get(),
+			0,
+			"the interface must not let callers run before preflight",
+		);
+	}
+
+	#[test]
+	fn skill_mutation_interface_owns_preflight_before_execution() {
+		let writes = std::cell::Cell::new(0);
+		let result = run_skill_agent_mutation(
+			&[AgentType::Claude, AgentType::JetBrainsAi],
+			ResourceScope::GlobalOnly,
+			|agent| {
+				writes.set(writes.get() + 1);
+				Ok(serde_json::json!({ "agent": agent.as_str() }))
+			},
+		);
+
+		assert!(result.is_err(), "JetBrains AI cannot receive a skill");
+		assert_eq!(
+			writes.get(),
+			0,
+			"the interface must not let callers run before preflight",
+		);
+	}
+
+	#[test]
+	fn shared_mutation_failure_is_attributed_to_every_target() {
+		let setup_calls = std::cell::Cell::new(0);
+		let report = run_shared_multi_target_mutation(
+			&["claude", "codex", "opencode"],
+			|_target| Ok::<_, String>(()),
+			|_targets| {
+				setup_calls.set(setup_calls.get() + 1);
+				Err::<(), _>("master write failed".to_string())
+			},
+			|target, _prepared| Ok(target.to_string()),
+		)
+		.expect("preflight succeeds even when shared mutation fails");
+
+		assert_eq!(setup_calls.get(), 1);
+		assert_eq!(report.results.len(), 3);
+		assert!(report.results.iter().all(|row| {
+			matches!(
+				&row.result,
+				Err(error) if error == "master write failed"
+			)
+		}));
 	}
 }

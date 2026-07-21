@@ -1,25 +1,10 @@
 use crate::ResourceType;
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::removal::installed_skill_roots;
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
-use std::path::{Path, PathBuf};
-use tempfile::TempDir;
-
-struct ApplySource {
-	source: String,
-	ref_name: Option<String>,
-	skill_path: String,
-}
-
-struct FetchedSource {
-	path: PathBuf,
-	/// Resolved tip commit OID (40-hex) of the fetched ref, recorded into the
-	/// lock's `refCommit` so the next `check` can preflight via ls-refs.
-	oid: String,
-	/// Keep-alive for the staging temp dir (from [`skill_update::FetchedRepo`]).
-	_guard: Option<std::sync::Arc<TempDir>>,
-}
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 pub fn execute(
 	resource: ResourceType,
@@ -36,22 +21,18 @@ pub fn execute(
 	if !yes {
 		bail!("refusing to overwrite skill files without --yes");
 	}
-	let source = apply_source_from_lock(&name, scope, project_root)?;
-	// Bail early (before paying for a fetch) when nothing is installed.
-	if installed_skill_roots(&name, scope, project_root).is_empty() {
-		bail!("skill '{name}' is locked but no installed copy was found");
-	}
-
-	let fetched = fetch_source(&source)?;
-	let paths = apply_skill_update_from_fetched(
-		&fetched.path,
-		&source.skill_path,
-		&name,
-		scope,
-		project_root,
-		Some(&fetched.oid),
-	)?;
-	let updated_hash = updated_hash_for_paths(&paths);
+	let report = skill_update::mutation::resync_locked_skill(
+		skill_update::mutation::LockedResyncRequest {
+			name: &name,
+			scope,
+			project_root,
+		},
+		&skill_update::GitFetcher,
+		&crate::commands::source::EnvTokenResolver,
+	)
+	.map_err(|error| locked_resync_error(&name, error))?;
+	let paths = report.swapped;
+	let updated_hash = report.updated_hash;
 	println!(
 		"{}",
 		serde_json::to_string_pretty(&json!({
@@ -77,6 +58,7 @@ pub fn execute(
 /// Sanitizes the locked skillPath to a source dir, then delegates the rename
 /// guard → containment → best-effort swap → lock transaction to the shared core
 /// resync. Returns the swapped install paths.
+#[cfg(test)]
 pub fn apply_skill_update_from_fetched(
 	repo_root: &Path,
 	skill_path: &str,
@@ -115,99 +97,59 @@ pub fn apply_skill_update_from_fetched(
 	Ok(report.swapped)
 }
 
-/// Recompute the folder hash for the JSON `updatedHash` field from a swapped
-/// install path. `execute` historically emitted the hash computed off the
-/// fetched source dir; after the swap that dir's content is now on disk at each
-/// target, so hashing the first target yields the identical value.
-fn updated_hash_for_paths(paths: &[PathBuf]) -> String {
-	paths
-		.first()
-		.and_then(|p| skill::compute_skill_folder_hash(p).ok())
-		.unwrap_or_default()
-}
-
-fn apply_source_from_lock(
+fn locked_resync_error(
 	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> Result<ApplySource> {
-	match scope {
-		ResourceScope::GlobalOnly => {
-			let entry = skill::lock::global::get_skill_from_lock(name)
-				.ok_or_else(|| {
-					anyhow!("skill '{name}' is not in global lock")
-				})?;
-			let skill_path = entry
-				.skill_path
-				.ok_or_else(|| anyhow!("locked skill has no skillPath"))?;
-			Ok(ApplySource {
-				source: entry.source_url,
-				ref_name: entry.ref_name,
-				skill_path,
-			})
-		}
-		ResourceScope::ProjectOnly => {
-			let root = project_root
-				.ok_or_else(|| anyhow!("project root is required"))?;
-			let lock = skill::lock::local::read_local_lock(Some(root));
-			let entry = lock.skills.get(name).cloned().ok_or_else(|| {
-				anyhow!("skill '{name}' is not in project lock")
-			})?;
-			let skill_path = entry
-				.skill_path
-				.ok_or_else(|| anyhow!("locked skill has no skillPath"))?;
-			Ok(ApplySource {
-				// Fetch coordinate: prefer the recorded clone URL so a
-				// non-github host (TFS/Azure DevOps) is fetched correctly.
-				source: entry.source_url.unwrap_or(entry.source),
-				ref_name: entry.ref_name,
-				skill_path,
-			})
-		}
-		ResourceScope::Both => {
-			bail!("apply-update requires --global or --project, not --all")
-		}
-	}
-}
+	error: skill_update::mutation::LockedResyncError,
+) -> anyhow::Error {
+	use aghub_core::skills::resync::ResyncError;
+	use skill_update::mutation::LockedResyncError;
 
-fn fetch_source(source: &ApplySource) -> Result<FetchedSource> {
-	use skill_update::{
-		skill_folder_from_lock_path, FetchError, FetchSelection, Fetcher,
-		SourceRef, TokenResolver,
-	};
-
-	let folder =
-		skill_folder_from_lock_path(&source.skill_path).ok_or_else(|| {
-			anyhow!("locked skillPath is not a valid skill folder")
-		})?;
-	let sr = SourceRef {
-		source: source.source.clone(),
-		ref_: source.ref_name.clone(),
-	};
-	let host = skill_update::keychain_host_for_source(&sr.source);
-	// Same env-token policy as `source` / `check` (GIT_PASSWORD any host,
-	// GITHUB_TOKEN github-only).
-	let token = crate::commands::source::EnvTokenResolver
-		.resolve(&sr.source, host.as_deref());
-	let fetched = skill_update::GitFetcher
-		.fetch(
-			&sr,
-			token.as_deref(),
-			FetchSelection::Skills(std::slice::from_ref(&folder)),
-		)
-		.map_err(|e| match e {
-			FetchError::Auth => anyhow!(
-				"failed to fetch source repository: authentication failed"
-			),
-			FetchError::Network => {
-				anyhow!("failed to fetch source repository")
+	match error {
+		LockedResyncError::UnsupportedScope(_) => {
+			anyhow!("apply-update requires --global or --project, not --all")
+		}
+		LockedResyncError::ProjectRootRequired => {
+			anyhow!("project root is required")
+		}
+		LockedResyncError::LockEntryNotFound { scope } => match scope {
+			ResourceScope::GlobalOnly => {
+				anyhow!("skill '{name}' is not in global lock")
 			}
-		})?;
-	Ok(FetchedSource {
-		path: fetched.root.clone(),
-		oid: fetched.oid().to_string(),
-		_guard: fetched._guard,
-	})
+			ResourceScope::ProjectOnly => {
+				anyhow!("skill '{name}' is not in project lock")
+			}
+			ResourceScope::Both => anyhow!("skill '{name}' is not in lock"),
+		},
+		LockedResyncError::MissingSkillPath => {
+			anyhow!("locked skill has no skillPath")
+		}
+		LockedResyncError::NotInstalled
+		| LockedResyncError::Resync(ResyncError::NotInstalled) => {
+			anyhow!("skill '{name}' is locked but no installed copy was found")
+		}
+		LockedResyncError::CredentialBackendUnavailable
+		| LockedResyncError::Fetch(
+			skill_update::FetchError::BackendUnavailable,
+		) => anyhow!("Credential backend is unavailable; retry later."),
+		LockedResyncError::InvalidSkillPath => {
+			anyhow!("locked skillPath is not a valid skill folder")
+		}
+		LockedResyncError::SourceSkillNotFound => {
+			anyhow!("locked skillPath was not found in source")
+		}
+		LockedResyncError::Fetch(skill_update::FetchError::Auth) => {
+			anyhow!("failed to fetch source repository: authentication failed")
+		}
+		LockedResyncError::Fetch(skill_update::FetchError::Network) => {
+			anyhow!("failed to fetch source repository")
+		}
+		LockedResyncError::Resync(ResyncError::Renamed { new_name }) => {
+			anyhow!(aghub_core::skills::update::skill_renamed_message(
+				name, &new_name
+			))
+		}
+		LockedResyncError::Resync(other) => anyhow!(other.to_string()),
+	}
 }
 
 fn scope_name(scope: ResourceScope) -> &'static str {
