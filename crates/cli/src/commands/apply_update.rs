@@ -3,8 +3,6 @@ use aghub_core::models::ResourceScope;
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
 use std::path::Path;
-#[cfg(test)]
-use std::path::PathBuf;
 
 pub fn execute(
 	resource: ResourceType,
@@ -48,53 +46,6 @@ pub fn execute(
 		}))?
 	);
 	Ok(())
-}
-
-/// Apply a skill update from an **already-fetched** repo working tree, then
-/// update the scope's lock (content/computed hash + `refCommit`) exactly as
-/// [`execute`] does. Fetch-free so callers that already materialized the source
-/// (e.g. `source sync --update`) can reuse it without a second network round.
-///
-/// Sanitizes the locked skillPath to a source dir, then delegates the rename
-/// guard → containment → best-effort swap → lock transaction to the shared core
-/// resync. Returns the swapped install paths.
-#[cfg(test)]
-pub fn apply_skill_update_from_fetched(
-	repo_root: &Path,
-	skill_path: &str,
-	name: &str,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-	ref_commit: Option<&str>,
-) -> Result<Vec<PathBuf>> {
-	use aghub_core::skills::resync::{
-		resync_installed_skill, ResyncError, ResyncRequest,
-	};
-
-	let skill_file =
-		aghub_core::skills::update::sanitize_skill_path(repo_root, skill_path)
-			.ok_or_else(|| {
-				anyhow!("locked skillPath was not found in source")
-			})?;
-	let source_dir = skill_file.parent().unwrap_or(repo_root);
-
-	let report = resync_installed_skill(ResyncRequest {
-		source_dir,
-		name,
-		scope,
-		project_root,
-		ref_commit,
-	})
-	.map_err(|e| match e {
-		ResyncError::NotInstalled => {
-			anyhow!("skill '{name}' is locked but no installed copy was found")
-		}
-		ResyncError::Renamed { new_name } => anyhow!(
-			aghub_core::skills::update::skill_renamed_message(name, &new_name)
-		),
-		other => anyhow!(other.to_string()),
-	})?;
-	Ok(report.swapped)
 }
 
 fn locked_resync_error(
@@ -291,76 +242,71 @@ mod tests {
 		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
 	}
 
-	fn write_skill_md(dir: &std::path::Path, name: &str, body: &str) {
-		std::fs::create_dir_all(dir).unwrap();
-		std::fs::write(
-			dir.join("SKILL.md"),
-			format!("---\nname: {name}\ndescription: d\n---\n\n{body}\n"),
-		)
-		.unwrap();
-	}
-
-	// The CLI wrapper maps resync's NotInstalled to the documented message.
+	// Pin the PRODUCTION variant→message mapping used by `execute`. A
+	// cfg(test) shadow of this mapping (`apply_skill_update_from_fetched`)
+	// once carried these assertions, leaving the real seam uncovered —
+	// swapping two arms below must fail this test.
 	#[test]
-	fn apply_from_fetched_not_installed_errors() {
-		let tmp = tempdir().unwrap();
-		let project = tmp.path().join("project");
-		let repo = tmp.path().join("repo");
-		write_skill_md(&repo.join("ghost"), "ghost", "x");
+	fn locked_resync_error_maps_variants_to_cli_messages() {
+		use aghub_core::skills::resync::ResyncError;
+		use skill_update::mutation::LockedResyncError;
 
-		let err = apply_skill_update_from_fetched(
-			&repo,
-			"ghost/SKILL.md",
-			"ghost",
-			ResourceScope::ProjectOnly,
-			Some(&project),
-			None,
-		)
-		.unwrap_err();
-		assert!(err.to_string().contains("no installed copy"), "err: {err}");
-	}
+		let cases = [
+			(
+				LockedResyncError::NotInstalled,
+				"skill 'keep' is locked but no installed copy was found",
+			),
+			(
+				LockedResyncError::Resync(ResyncError::NotInstalled),
+				"skill 'keep' is locked but no installed copy was found",
+			),
+			(
+				LockedResyncError::UnsupportedScope(ResourceScope::Both),
+				"apply-update requires --global or --project, not --all",
+			),
+			(
+				LockedResyncError::SourceSkillNotFound,
+				"locked skillPath was not found in source",
+			),
+			(
+				LockedResyncError::InvalidSkillPath,
+				"locked skillPath is not a valid skill folder",
+			),
+			(
+				LockedResyncError::CredentialBackendUnavailable,
+				"Credential backend is unavailable; retry later.",
+			),
+			(
+				LockedResyncError::LockEntryNotFound {
+					scope: ResourceScope::ProjectOnly,
+				},
+				"skill 'keep' is not in project lock",
+			),
+			(
+				LockedResyncError::LockEntryNotFound {
+					scope: ResourceScope::GlobalOnly,
+				},
+				"skill 'keep' is not in global lock",
+			),
+		];
+		for (error, expected) in cases {
+			assert_eq!(
+				locked_resync_error("keep", error).to_string(),
+				expected
+			);
+		}
 
-	// The CLI wrapper maps resync's Renamed to the shared rename message and
-	// leaves the installed copy untouched.
-	#[test]
-	fn apply_from_fetched_renamed_errors_and_keeps_install() {
-		let tmp = tempdir().unwrap();
-		let project = tmp.path().join("project");
-		let installed = project.join(".claude/skills/keep");
-		write_skill_md(&installed, "keep", "old");
-		skill::add_skill_to_local_lock(
+		// Renamed routes through the shared rename message (old + new name).
+		let msg = locked_resync_error(
 			"keep",
-			skill::LocalSkillLockEntry {
-				source_url: None,
-				source: "owner/repo".to_string(),
-				ref_name: Some("main".to_string()),
-				source_type: "github".to_string(),
-				computed_hash: "old".to_string(),
-				skill_path: Some("keep/SKILL.md".to_string()),
-				ref_commit: None,
-			},
-			Some(&project),
+			LockedResyncError::Resync(ResyncError::Renamed {
+				new_name: "keep-v2".to_string(),
+			}),
 		)
-		.unwrap();
-		let repo = tmp.path().join("repo");
-		write_skill_md(&repo.join("keep"), "keep-v2", "new");
-
-		let err = apply_skill_update_from_fetched(
-			&repo,
-			"keep/SKILL.md",
-			"keep",
-			ResourceScope::ProjectOnly,
-			Some(&project),
-			None,
-		)
-		.unwrap_err();
-		let msg = err.to_string();
+		.to_string();
 		assert!(
 			msg.contains("keep") && msg.contains("keep-v2"),
-			"msg: {msg}"
+			"rename mapping must carry both names, got: {msg}"
 		);
-		assert!(std::fs::read_to_string(installed.join("SKILL.md"))
-			.unwrap()
-			.contains("old"));
 	}
 }

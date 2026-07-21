@@ -8,8 +8,11 @@
 //!
 //! It returns PER-AGENT results so the API can rebuild its current per-agent
 //! success / invalid-agent response and the CLI can report which agents got the
-//! skill. An agent whose target skills dir cannot be resolved is reported as a
-//! soft failure (`installed: false`, `error: Some(..)`), NOT a hard error.
+//! skill. An agent whose target skills dir cannot be resolved (`Unsupported`)
+//! is a PREDICTABLE failure: the shared multi-target preflight rejects the
+//! whole batch as a hard error and nothing is written for ANY agent. Soft
+//! failures (`installed: false`, `error: Some(..)`) are reserved for runtime
+//! link failures on targets that passed preflight.
 
 use std::path::Path;
 

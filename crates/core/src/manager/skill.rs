@@ -708,10 +708,12 @@ impl ConfigManager {
 	///
 	/// The add path linked ONLY a `NeedsLink` agent and errored when that link
 	/// hit a real foreign occupant (the old `report.conflicts` check) or a hard
-	/// link failure. A `NativeReader` reads the Master directly and an
-	/// `Unsupported` agent had no writable dir — neither was ever an error
-	/// (the skill is still recorded against the Master). So enforce the
-	/// error-free result ONLY for a `NeedsLink` agent, exactly as before.
+	/// link failure. A `NativeReader` reads the Master directly and is never an
+	/// error. An `Unsupported` agent no longer reaches this helper on the add
+	/// path: `materialize_universal_master` rejects it in preflight (hard
+	/// error, nothing written) before per-agent results exist — its arm here
+	/// is defensive only. So enforce the error-free result ONLY for a
+	/// `NeedsLink` agent.
 	fn ensure_single_agent_installed(
 		results: &[crate::skills::install_fetched::AgentInstallResult],
 		link_need: &crate::skills::linker::LinkNeed,
@@ -3176,8 +3178,11 @@ mod tests {
 		)
 		.is_ok());
 
-		// Unsupported -> Ok even with a soft-failure result (no writable dir;
-		// the Master is still recorded — old behaviour preserved).
+		// Unsupported -> Ok (defensive arm only: the add path never reaches
+		// this helper — the materialize preflight hard-errors first; that
+		// contract is pinned by
+		// `add_skill_from_path_unsupported_scope_errors_and_writes_nothing`
+		// in tests/test_agent_paths.rs).
 		assert!(ConfigManager::ensure_single_agent_installed(
 			&conflict,
 			&LinkNeed::Unsupported,

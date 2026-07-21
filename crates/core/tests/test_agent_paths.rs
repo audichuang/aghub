@@ -472,6 +472,49 @@ fn skill_import_directory_preserves_body_and_resources() {
 	assert!(loaded.canonical_path.is_some());
 }
 
+// Contract pin: a SINGLE agent whose descriptor cannot resolve a skills dir
+// for the scope (Hermes is global-only, so project scope classifies as
+// Unsupported) is a preflight HARD error — the add must not soft-succeed and
+// record a dangling config entry against a never-written Master.
+#[test]
+fn add_skill_from_path_unsupported_scope_errors_and_writes_nothing() {
+	aghub_core::adapter::set_skills_path_override("hermes", None);
+	let temp = tempfile::tempdir().unwrap();
+	let project_root = temp.path().join("project");
+	std::fs::create_dir_all(&project_root).unwrap();
+	let source_dir = temp.path().join("source/orphan-skill");
+	write_import_skill_with_resources(&source_dir, "orphan-skill", "# body");
+
+	let mut manager = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(aghub_core::AgentType::Hermes),
+		false,
+		Some(&project_root),
+	);
+	manager.load().unwrap();
+	let err = manager.add_skill_from_path(&source_dir).unwrap_err();
+
+	let msg = err.to_string();
+	assert!(
+		msg.contains("does not support") && msg.contains("nothing was written"),
+		"preflight rejection must state the contract, got: {msg}"
+	);
+	assert!(
+		!project_root.join(".agents/skills/orphan-skill").exists(),
+		"a rejected preflight must not write the Master"
+	);
+
+	let mut reloaded = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(aghub_core::AgentType::Hermes),
+		false,
+		Some(&project_root),
+	);
+	reloaded.load().unwrap();
+	assert!(
+		reloaded.get_skill("orphan-skill").is_none(),
+		"a rejected add must not record a dangling config entry"
+	);
+}
+
 #[test]
 fn skill_import_skill_md_file_copies_sibling_resources() {
 	aghub_core::adapter::set_skills_path_override("claude", None);

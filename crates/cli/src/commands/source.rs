@@ -1074,10 +1074,7 @@ fn apply_update_row(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> SyncActionView {
-	use aghub_core::skills::resync::ResyncError;
-	use skill_update::mutation::{
-		resync_fetched_source, FetchedResyncRequest, ResyncMutationError,
-	};
+	use skill_update::mutation::{resync_fetched_source, FetchedResyncRequest};
 
 	match resync_fetched_source(
 		fetched,
@@ -1101,25 +1098,31 @@ fn apply_update_row(
 			name: d.name.clone(),
 			skill_path: d.skill_path.clone(),
 			applied: false,
-			error: Some(match error {
-				ResyncMutationError::InvalidSkillPath => {
-					"locked skillPath was not found in source".to_string()
-				}
-				ResyncMutationError::Resync(ResyncError::NotInstalled) => {
-					format!(
-						"skill '{}' is locked but no installed copy was found",
-						d.name
-					)
-				}
-				ResyncMutationError::Resync(ResyncError::Renamed {
-					new_name,
-				}) => aghub_core::skills::update::skill_renamed_message(
-					&d.name, &new_name,
-				),
-				ResyncMutationError::Resync(other) => other.to_string(),
-			}),
+			error: Some(resync_row_error(&d.name, error)),
 			agents: Vec::new(),
 		},
+	}
+}
+
+/// Map a sync update-row resync failure to its user-facing row message.
+fn resync_row_error(
+	name: &str,
+	error: skill_update::mutation::ResyncMutationError,
+) -> String {
+	use aghub_core::skills::resync::ResyncError;
+	use skill_update::mutation::ResyncMutationError;
+
+	match error {
+		ResyncMutationError::InvalidSkillPath => {
+			"locked skillPath was not found in source".to_string()
+		}
+		ResyncMutationError::Resync(ResyncError::NotInstalled) => {
+			format!("skill '{name}' is locked but no installed copy was found")
+		}
+		ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
+			aghub_core::skills::update::skill_renamed_message(name, &new_name)
+		}
+		ResyncMutationError::Resync(other) => other.to_string(),
 	}
 }
 
@@ -1278,7 +1281,9 @@ fn narrow_by_name<T>(
 
 #[cfg(test)]
 mod tests {
-	use super::{narrow_by_name, plan_target_agents, select_env_token};
+	use super::{
+		narrow_by_name, plan_target_agents, resync_row_error, select_env_token,
+	};
 	use aghub_core::models::AgentType;
 	use skill_update::sources::{SourceSkillDiff, SourceSkillState};
 
@@ -1299,6 +1304,37 @@ mod tests {
 			installed_paths: Vec::new(),
 			upstream_commit_time: None,
 		}
+	}
+
+	// Pin the PRODUCTION update-row variant→message mapping (previously
+	// inlined in `apply_update_row` with no coverage — a swapped arm was
+	// invisible to the suite).
+	#[test]
+	fn resync_row_error_maps_variants_to_row_messages() {
+		use aghub_core::skills::resync::ResyncError;
+		use skill_update::mutation::ResyncMutationError;
+
+		assert_eq!(
+			resync_row_error("keep", ResyncMutationError::InvalidSkillPath),
+			"locked skillPath was not found in source"
+		);
+		assert_eq!(
+			resync_row_error(
+				"keep",
+				ResyncMutationError::Resync(ResyncError::NotInstalled)
+			),
+			"skill 'keep' is locked but no installed copy was found"
+		);
+		let renamed = resync_row_error(
+			"keep",
+			ResyncMutationError::Resync(ResyncError::Renamed {
+				new_name: "keep-v2".to_string(),
+			}),
+		);
+		assert!(
+			renamed.contains("keep") && renamed.contains("keep-v2"),
+			"rename mapping must carry both names, got: {renamed}"
+		);
 	}
 
 	#[test]
