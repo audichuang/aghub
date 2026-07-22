@@ -414,6 +414,8 @@ export default {
 	skillCheckCompleteWithUpdates: "检查完成，{{count}} 个可更新",
 	skillCheckCompleteSomeUncheckable: "检查完成，{{count}} 个技能无法验证",
 	skillCheckCompleteAllGood: "全部都是最新版本",
+	credentialSpeedHint:
+		"提示：在「集成」设置添加 GitHub 凭证，可加快技能更新检查。",
 	lastCheckedAgo: "上次检查 {{time}}",
 	lastCheckedNever: "从未检查",
 	recheck: "重新检查",

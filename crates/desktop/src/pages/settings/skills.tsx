@@ -45,6 +45,7 @@ import type {
 	SourcesListResponse,
 } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
+import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
 import { cn } from "../../lib/utils";
@@ -526,6 +527,13 @@ export default function SkillsPage() {
 			null
 		);
 	}, [selectedSourceKey, allSourceRows]);
+
+	// Update-check states ONLY — a plain skill-list refetch (isFetching) must
+	// not trigger the credential speed hint.
+	useCredentialSpeedHint({
+		checking: isAutoChecking || checkUpdatesMutation.isPending,
+		sources: allSourceRows,
+	});
 
 	// Refresh control, shared by the agent + source toolbars. The last-checked
 	// time lives in its tooltip so it never competes for room in the narrow

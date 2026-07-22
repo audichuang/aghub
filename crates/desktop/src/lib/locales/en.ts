@@ -437,6 +437,9 @@ export default {
 		"Check complete — {{count}} skill(s) could not be verified",
 	/** Toast when check completes and everything is current. */
 	skillCheckCompleteAllGood: "All skills are up to date",
+	/** Throttled toast shown while a check runs without a GitHub credential. */
+	credentialSpeedHint:
+		"Tip: add a GitHub credential in Integrations to speed up skill update checks.",
 	/** List header label. {{time}} is a human-readable relative string
 	 *  like "3 minutes ago" produced by the component. */
 	lastCheckedAgo: "Last checked {{time}}",
