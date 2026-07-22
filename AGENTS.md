@@ -75,17 +75,17 @@ Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `a
 
 ## Where to Look
 
-| Task               | Location                          | Notes                        |
-| ------------------ | --------------------------------- | ---------------------------- |
-| Add agent support  | `crates/agents/src/agents/`       | + models + core registry     |
-| Agent models/types | `crates/agents/src/models.rs`     | `AgentConfig`, `AgentType`   |
-| Agent registry     | `crates/core/src/registry/mod.rs` | `ALL_AGENTS`                 |
-| Config management  | `crates/core/src/manager/`        | `ConfigManager`              |
-| Adapter trait      | `crates/core/src/adapters/mod.rs` | impl via `adapter.rs`        |
-| Batch install/copy | `crates/core/src/transfer.rs`     | `OperationBatchResult`       |
-| CLI commands       | `crates/cli/src/commands/`        | clap; `just start -- --help` |
-| API routes         | `crates/api/src/routes/`          |                              |
-| Desktop UI         | `crates/desktop/src/`             | HeroUI v3                    |
+| Task               | Location                          | Notes                         |
+| ------------------ | --------------------------------- | ----------------------------- |
+| Add agent support  | `crates/agents/src/agents/`       | + models + core registry      |
+| Agent models/types | `crates/agents/src/models.rs`     | `AgentConfig`, `AgentType`    |
+| Agent registry     | `crates/core/src/registry/mod.rs` | `ALL_AGENTS`                  |
+| Config management  | `crates/core/src/manager/`        | `ConfigManager`               |
+| Adapter trait      | `crates/core/src/adapters/mod.rs` | impl in `core/src/adapter.rs` |
+| Batch install/copy | `crates/core/src/transfer.rs`     | `OperationBatchResult`        |
+| CLI commands       | `crates/cli/src/commands/`        | clap; `just start -- --help`  |
+| API routes         | `crates/api/src/routes/`          |                               |
+| Desktop UI         | `crates/desktop/src/`             | HeroUI v3                     |
 
 ## Key Design Patterns
 
