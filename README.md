@@ -15,16 +15,25 @@
 
 [中文版本](./README.CN.md)
 
+aghub is a desktop app **and** CLI for managing **MCP servers, skills,
+sub-agents, inference providers, and Claude Code plugins** across all
+[25 supported agents](#supported-agents). Configure a capability once and deploy
+it everywhere — aghub reads your real config files and changes only what you ask
+it to.
+
 ## Installation
 
-### macOS (Homebrew)
+The fastest way to install is [Homebrew](https://brew.sh) on macOS / Linux.
+
+### Desktop app
 
 ```bash
-# Install Desktop App
+# macOS
 brew install --cask audichuang/tap/aghub
 ```
 
-### Download
+On **Windows or Linux**, download a build below (or from the
+[Releases](https://github.com/audichuang/aghub/releases) page):
 
 | Platform               | Download                                                                                          |
 | ---------------------- | ------------------------------------------------------------------------------------------------- |
@@ -33,25 +42,19 @@ brew install --cask audichuang/tap/aghub
 | macOS (Apple Silicon)  | [dmg](https://github.com/audichuang/aghub/releases/latest/download/aghub_mac_arm.dmg)             |
 | Linux                  | [AppImage](https://github.com/audichuang/aghub/releases/latest/download/aghub-linux.AppImage)     |
 
-Or visit [Releases](https://github.com/audichuang/aghub/releases) for all available downloads.
-
 ### CLI (`aghub-cli`)
 
-The desktop app bundles everything, but aghub also runs headlessly:
+Run aghub headlessly — ideal for scripting and CI.
 
 ```bash
-# Homebrew (macOS / Linux)
+# macOS / Linux
 brew install audichuang/tap/aghub-cli
-```
-
-Or grab the `aghub-cli` binary for your platform from
-[Releases](https://github.com/audichuang/aghub/releases) (look for
-`aghub-cli-<target>`), or build it from source:
-
-```bash
-cargo build --release -p aghub-cli   # -> target/release/aghub-cli
 aghub-cli --help
 ```
+
+Prefer a raw binary? Download `aghub-cli-<target>` from
+[Releases](https://github.com/audichuang/aghub/releases), or build from source
+with `cargo build --release -p aghub-cli`.
 
 ### System Requirements
 
@@ -83,14 +86,14 @@ Then open the app normally. (Adjust the path if you haven't moved it to
 
 ## Features
 
-**Unified MCP Management**
+**Unified MCP Management** — one config, deployed to every agent
 
 - Configure once, deploy to any of the 25 supported agents
 - Stdio, SSE, and StreamableHttp transports
 - Enable or disable servers without removing them
 - View and audit servers across all agents in one command
 
-**Portable Skills**
+**Portable Skills** — author once, share across agents
 
 - Import `.skill` packages or author skills with SKILL.md frontmatter
 - Share skills across agents via the universal skills directory
@@ -98,13 +101,13 @@ Then open the app normally. (Adjust the path if you haven't moved it to
 - SHA-256 content verification and source provenance tracking
 - Browse and install from the skills.sh marketplace
 
-**Flexible Scoping**
+**Flexible Scoping** — global, per-project, or merged
 
 - View global, project, or merged config per agent
 - Filter by a single agent, a comma-separated list, or all at once
 - Full audit trail for every configured resource
 
-**Inference Providers**
+**Inference Providers** — bring your own model to any agent
 
 - **Start from a preset** — spin up popular providers from built-in presets, or configure a custom endpoint from
   scratch
@@ -113,25 +116,34 @@ Then open the app normally. (Adjust the path if you haven't moved it to
 - **Keys stay safe** — API keys are stored in your OS-native keychain, never in plaintext config
 - **Per-agent model selection** — choose the right provider and model for each agent independently
 
-**Claude Code Plugins**
+**Claude Code Plugins** — discover, install, and manage from a built-in marketplace
 
 - **Install plugins from anywhere** — the official registry, third-party Git URLs, or a local path
 - **Marketplace built in** — discover, browse, and install Claude Code plugins (v2) without leaving aghub
 - **Full lifecycle management** — install, update, enable/disable, and remove plugins with one command
 - **Global or project scope** — apply plugins everywhere or pin them to a single project
 
-**Remote Deployment** (Desktop)
+**Remote Deployment** (Desktop) — manage a remote machine over SSH
 
 - Manage a remote machine's agent configs over SSH — the same MCP, skills, and provider tooling, applied to a VM or server
 - Per-source Git credentials are forwarded securely from your local machine over the tunnel
 
-**Command-Line Interface** (`aghub-cli`)
+**Command-Line Interface** (`aghub-cli`) — every capability, scriptable
 
 - Every core capability, scriptable and headless — ideal for CI and automation
 - `get` / `add` / `delete` / `enable` / `disable` MCP servers and skills across agents
 - `transfer` resources between agents; `coverage` shows what's configured where
 - `source` sync from Git, offline-by-default `check`, and `apply-update`
 - `inference` providers + keys, `plugin` lifecycle, and `doctor` diagnostics
+
+## Supported Agents
+
+25 agents, one interface:
+
+Claude Code · Cursor · Windsurf · GitHub Copilot · Gemini CLI · OpenAI Codex ·
+OpenCode · Zed · Warp · Cline · RooCode · KiloCode · AugmentCode · Amp · Kiro ·
+Trae · Factory · Kimi Code CLI · Mistral Le Chat · Pi Coding Agent ·
+JetBrains AI · Hermes · Grok · Antigravity · OpenClaw
 
 ## Contributing
 
