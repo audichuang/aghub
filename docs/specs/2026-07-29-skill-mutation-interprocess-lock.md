@@ -1,7 +1,23 @@
 # One interprocess mutation lock for the skill subsystem
 
-Status: planned, not started. Written after v2.8.2 closed everything in this
-area that a single process can close on its own.
+Status: **implemented** 2026-07-29. Written after v2.8.2 closed everything in
+this area that a single process can close on its own.
+
+Two decisions diverged from the plan below, both simpler:
+
+- **Mechanism**: neither `fd-lock` nor `gix-lock` — `std::fs::File::lock`
+  (stable since Rust 1.89) already IS `flock` / `LockFileEx`, so the recommended
+  new workspace dependency was not needed at all. Same OS-released semantics, no
+  supply chain. (`crates/skill` did pick up `log`, the version core already pins.)
+- **Blocking policy**: no env override. `mutation_guard` is 10s;
+  `mutation_guard_with_timeout` takes an explicit bound, which is what the
+  timeout test uses.
+
+Implementation: `crates/skill/src/lock/guard.rs` (the guard),
+`crates/core/src/skills/lock.rs` `mutation_guard` (the `ResourceScope` seam),
+`crates/skill/tests/mutation_lock.rs` (the two-process tests). The project lock
+file lives at `<project>/.agents/.aghub-mutation.lock`, NOT beside
+`skills-lock.json` — the repo root is the user's, `.agents/` is already aghub's.
 
 ## Problem
 

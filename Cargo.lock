@@ -7199,6 +7199,7 @@ dependencies = [
  "dirs 6.0.0",
  "feruca",
  "ignore",
+ "log",
  "serde",
  "serde_json",
  "serde_yaml",

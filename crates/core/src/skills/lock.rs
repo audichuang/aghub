@@ -6,6 +6,35 @@
 use crate::models::ResourceScope;
 use std::path::Path;
 
+/// Take the interprocess skill mutation lock for `scope`, to be held across a
+/// whole transaction (check → write → rollback) rather than one lock write.
+///
+/// This is what makes a flow's own receipts (`created_master`, `created_lock`,
+/// the replaced entry) trustworthy: without it two aghub processes both observe
+/// an absent entry and are both told they created it. Reentrant, so the
+/// `modify_*_lock` calls underneath take it again for free. `op` names the
+/// operation in the timeout error. See `skill::lock::MutationScope`.
+///
+/// A `ProjectOnly` scope with no root locks nothing but the process — those
+/// flows reject the missing root on their own.
+pub fn mutation_guard(
+	op: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> std::io::Result<skill::lock::MutationGuard> {
+	let mut scopes = Vec::new();
+	if matches!(scope, ResourceScope::GlobalOnly | ResourceScope::Both) {
+		scopes.push(skill::lock::MutationScope::Global);
+	}
+	if matches!(scope, ResourceScope::ProjectOnly | ResourceScope::Both) {
+		if let Some(root) = project_root {
+			scopes
+				.push(skill::lock::MutationScope::Project(root.to_path_buf()));
+		}
+	}
+	skill::lock::mutation_guard(op, &scopes)
+}
+
 /// Re-stamp an installed skill's lock hash after a content rewrite. `ref_commit`
 /// is authoritative: `Some(oid)` records the tip; `None` CLEARS any recorded tip
 /// (the content changed, so a stale OID would let an ls-refs preflight falsely

@@ -18,6 +18,7 @@ skills-ref = { git = "https://github.com/AkaraChen/skills-ref" }
 walkdir = "2.5"
 chrono = { version = "0.4", features = [ "serde" ] }
 dirs = { workspace = true }
+log = "0.4.31" # same version aghub-core pins; already in the tree
 ignore = "0.4"
 sha2 = "0.10"
 feruca = "0.11"   # UCA collation; close to JS localeCompare but not identical

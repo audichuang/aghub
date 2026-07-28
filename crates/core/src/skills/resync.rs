@@ -35,6 +35,8 @@ pub struct ResyncReport {
 /// codes/messages (HTTP status codes, anyhow text).
 #[derive(Debug)]
 pub enum ResyncError {
+	/// The interprocess mutation lock could not be taken (nothing was mutated).
+	Locked(String),
 	/// The skill has no installed copy on disk in this scope.
 	NotInstalled,
 	/// The fetched source's frontmatter `name` no longer matches the locked name.
@@ -56,6 +58,7 @@ pub enum ResyncError {
 impl std::fmt::Display for ResyncError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
+			Self::Locked(e) => write!(f, "{e}"),
 			Self::NotInstalled => {
 				write!(f, "skill is locked but no installed copy was found")
 			}
@@ -78,6 +81,16 @@ impl std::fmt::Display for ResyncError {
 pub fn resync_installed_skill(
 	req: ResyncRequest,
 ) -> Result<ResyncReport, ResyncError> {
+	// Hold the interprocess mutation lock across stage-and-swap AND the lock
+	// re-stamp, so a concurrent aghub cannot swap content under the hash we are
+	// about to record (nor be rolled back over by ours).
+	let _mutation_guard = crate::skills::lock::mutation_guard(
+		"resync skill",
+		req.scope,
+		req.project_root,
+	)
+	.map_err(|e| ResyncError::Locked(e.to_string()))?;
+
 	let targets = crate::skills::removal::installed_skill_roots(
 		req.name,
 		req.scope,

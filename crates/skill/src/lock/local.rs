@@ -1,15 +1,21 @@
+use super::guard::{mutation_guard, MutationGuard, MutationScope};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
 const LOCAL_LOCK_FILE: &str = "skills-lock.json";
 const CURRENT_VERSION: u32 = 1;
 
-/// Process-wide guard so concurrent writers never interleave or observe a
-/// partially written lock file. Combined with temp+rename, readers always see
-/// either the old or the fully written new file.
-static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// The interprocess mutation lock for THIS project's lock file — see
+/// [`super::io`]'s `global_guard` for why the process mutex this replaced was
+/// not enough. Resolves the project dir exactly like [`get_local_lock_path`], so
+/// the guard and the file it guards can never disagree.
+fn project_guard(
+	op: &str,
+	cwd: Option<&Path>,
+) -> std::io::Result<MutationGuard> {
+	mutation_guard(op, &[MutationScope::Project(local_dir(cwd))])
+}
 
 /// Represents a single skill entry in the local (project) lock file.
 ///
@@ -104,13 +110,16 @@ impl LocalSkillLockFile {
 	}
 }
 
+/// The project directory a `cwd: Option<&Path>` resolves to.
+fn local_dir(cwd: Option<&Path>) -> PathBuf {
+	cwd.map(|p| p.to_path_buf())
+		.or_else(|| std::env::current_dir().ok())
+		.unwrap_or_else(|| PathBuf::from("."))
+}
+
 /// Get the path to the local skill lock file for a project.
 pub fn get_local_lock_path(cwd: Option<&Path>) -> PathBuf {
-	let dir = cwd
-		.map(|p| p.to_path_buf())
-		.or_else(|| std::env::current_dir().ok())
-		.unwrap_or_else(|| PathBuf::from("."));
-	dir.join(LOCAL_LOCK_FILE)
+	local_dir(cwd).join(LOCAL_LOCK_FILE)
 }
 
 /// Read the local skill lock file.
@@ -154,7 +163,7 @@ pub fn write_local_lock(
 	lock: &LocalSkillLockFile,
 	cwd: Option<&Path>,
 ) -> std::io::Result<()> {
-	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let _guard = project_guard("write project lock", cwd)?;
 	write_local_lock_locked(lock, cwd)
 }
 
@@ -174,7 +183,7 @@ pub fn modify_local_lock<R>(
 	cwd: Option<&Path>,
 	f: impl FnOnce(&mut LocalSkillLockFile) -> R,
 ) -> std::io::Result<R> {
-	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let _guard = project_guard("modify project lock", cwd)?;
 	let mut lock = read_local_lock_locked(cwd);
 	let before = lock.clone();
 	let result = f(&mut lock);
@@ -188,7 +197,7 @@ pub fn modify_local_lock_changed<R>(
 	cwd: Option<&Path>,
 	f: impl FnOnce(&mut LocalSkillLockFile) -> (R, bool),
 ) -> std::io::Result<R> {
-	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let _guard = project_guard("modify project lock", cwd)?;
 	let mut lock = read_local_lock_locked(cwd);
 	let (result, changed) = f(&mut lock);
 	if changed {

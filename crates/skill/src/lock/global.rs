@@ -14,7 +14,9 @@ pub use types::{DismissedPrompts, SkillLockEntry, SkillLockFile};
 /// Returns the entry this write REPLACED, or `None` when it created a new one —
 /// the receipt a caller needs to roll its own write back: deleting an entry it
 /// only replaced would destroy someone else's, and `None` is the only proof the
-/// entry is genuinely ours.
+/// entry is genuinely ours. The read-modify-write runs under the interprocess
+/// mutation lock ([`crate::lock::MutationScope`]), so that receipt is a real
+/// compare-and-set: two aghub processes cannot both be told they created it.
 pub fn add_skill_to_lock(
 	skill_name: &str,
 	mut entry: SkillLockEntry,

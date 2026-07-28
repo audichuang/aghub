@@ -385,6 +385,16 @@ pub fn install_fetched_skill_and_lock(
 		));
 	}
 
+	// Hold the interprocess mutation lock from the FIRST state read (the
+	// ownership / Master-hash guards below) through the lock write, so no other
+	// aghub process can invalidate a guard between checking it and acting on it.
+	let _mutation_guard = crate::skills::lock::mutation_guard(
+		"install skill",
+		req.scope,
+		req.project_root,
+	)
+	.map_err(crate::ConfigError::Io)?;
+
 	let source_root = skill_source_root(req.skill_file);
 	let safe_name = sanitize_name(&name);
 	let installed_hash = skill::compute_skill_folder_hash(&source_root)

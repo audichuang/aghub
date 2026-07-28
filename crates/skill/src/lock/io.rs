@@ -1,12 +1,17 @@
+use super::guard::{mutation_guard, MutationScope};
 use super::types::SkillLockFile;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-/// Process-wide guard so concurrent writers never interleave or observe a
-/// partially written lock file. Combined with temp+rename, readers always see
-/// either the old or the fully written new file.
-static WRITE_LOCK: Mutex<()> = Mutex::new(());
+/// The interprocess mutation lock for the global lock file, so concurrent
+/// writers never interleave or observe a partially written file — and, unlike
+/// the process mutex this replaced, so two aghub PROCESSES cannot both be told
+/// they created the same entry. Reentrant, so a core flow holding it for a whole
+/// transaction composes with these writers. Combined with temp+rename, readers
+/// always see either the old or the fully written new file.
+fn global_guard(op: &str) -> std::io::Result<super::guard::MutationGuard> {
+	mutation_guard(op, &[MutationScope::Global])
+}
 
 /// Get the path to the global skill lock file.
 /// Use $XDG_STATE_HOME/skills/.skill-lock.json if set.
@@ -59,7 +64,7 @@ fn read_skill_lock_locked() -> SkillLockFile {
 /// Write the skill lock file.
 /// Creates the directory if it doesn't exist.
 pub fn write_skill_lock(lock: &SkillLockFile) -> std::io::Result<()> {
-	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let _guard = global_guard("write global lock")?;
 	write_skill_lock_locked(lock)
 }
 
@@ -118,7 +123,7 @@ fn apply_json_file_mode(
 pub fn modify_skill_lock<R>(
 	f: impl FnOnce(&mut SkillLockFile) -> R,
 ) -> std::io::Result<R> {
-	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let _guard = global_guard("modify global lock")?;
 	let mut lock = read_skill_lock_locked();
 	let before = lock.clone();
 	let result = f(&mut lock);
@@ -131,7 +136,7 @@ pub fn modify_skill_lock<R>(
 pub fn modify_skill_lock_changed<R>(
 	f: impl FnOnce(&mut SkillLockFile) -> (R, bool),
 ) -> std::io::Result<R> {
-	let _guard = WRITE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+	let _guard = global_guard("modify global lock")?;
 	let mut lock = read_skill_lock_locked();
 	let (result, changed) = f(&mut lock);
 	if changed {

@@ -5,22 +5,24 @@
 //! is a dry-run (reports what would be pruned). A disk-scan error aborts before
 //! that scope's lock is written. For a `Both`-scope commit, the global and
 //! project scans are preflighted before either lock is touched — but that is
-//! not full atomicity. Three windows remain:
+//! not full atomicity. Two windows remain:
 //!
 //! 1. TOCTOU — a permission/mount change between the preflight scan and the
 //!    real commit-time scan can still fail the project scan AFTER the global
 //!    lock was already rewritten.
 //! 2. The project lock WRITE itself (after its scan passes) can fail on its
 //!    own, e.g. a read-only project root.
-//! 3. Concurrency — a skill installed by another process between this scan and
-//!    the lock rewrite is pruned from the lock anyway, because the rewrite
-//!    applies a stale disk set. There is no interprocess mutation lock spanning
-//!    install and prune (core's own prune path has the same window), so a
-//!    concurrent install + prune is not safe in either surface.
 //!
-//! Windows 1 and 2 leave a partial mutation; when either happens and the global
-//! scope had already pruned something, the reported JSON carries those keys
-//! tagged with an `error` field, and the command still exits non-zero.
+//! Both leave a partial mutation; when either happens and the global scope had
+//! already pruned something, the reported JSON carries those keys tagged with an
+//! `error` field, and the command still exits non-zero.
+//!
+//! The concurrency window that used to be third here is CLOSED: core's
+//! `prune_lock_from_dirs` holds the interprocess mutation lock across its scan
+//! AND its rewrite, so a skill another aghub process installs can no longer be
+//! pruned by a disk set that predates it. `npx skills` still takes no lock of
+//! ours. Windows 1/2 are per-scope-sequential, not concurrency — one lock per
+//! scope cannot make two independent lock files commit atomically.
 
 use crate::eprintln_verbose;
 use aghub_core::models::ResourceScope;
@@ -50,12 +52,12 @@ pub fn execute(
 	// side surfaces here instead of after the global lock below is already
 	// committed. This buys back the documented all-or-nothing-on-scan-error
 	// contract at the cost of scanning disk twice. See the module doc for the
-	// three residual non-atomic windows this does NOT close: the scan-to-commit
-	// TOCTOU, the lock WRITE itself, and a concurrent installer whose fresh
-	// lock entry is pruned by a stale disk set. The first two are handled below
-	// by reporting whatever the global scope already pruned alongside an
-	// `error` field instead of bailing with empty stdout; the third needs an
-	// interprocess lock that no surface has.
+	// two residual non-atomic windows this does NOT close: the scan-to-commit
+	// TOCTOU and the lock WRITE itself. Both are handled below by reporting
+	// whatever the global scope already pruned alongside an `error` field
+	// instead of bailing with empty stdout. Neither is concurrency — core's
+	// prune holds the interprocess mutation lock over scan+rewrite — so this
+	// preflight stays: the lock cannot make two lock files commit atomically.
 	if !dry_run && want_global && want_project {
 		if let Some(root) = project_root {
 			preview_prune(PruneScope::Global, None)?;

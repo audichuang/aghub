@@ -14,6 +14,11 @@ pub(crate) struct SafeResyncError {
 
 pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 	match error {
+		ResyncError::Locked(_) => SafeResyncError {
+			message: "Another aghub process is mutating skills; retry shortly",
+			code: "SKILL_MUTATION_LOCK_BUSY",
+			status: Status::Conflict,
+		},
 		ResyncError::NotInstalled => SafeResyncError {
 			message: "Skill is locked but no installed copy was found",
 			code: "SKILL_NOT_INSTALLED",
@@ -61,6 +66,7 @@ mod tests {
 			ResyncError::Hash(sentinel.to_string()),
 			ResyncError::Swap(sentinel.to_string()),
 			ResyncError::LockUpdate(sentinel.to_string()),
+			ResyncError::Locked(sentinel.to_string()),
 		];
 
 		for error in cases {

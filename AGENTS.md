@@ -166,6 +166,14 @@ Non-obvious invariants:
 
 ## Skills Discovery
 
+**Mutation lock**: every mutating skill flow (install / prune / rename / resync /
+manager add-remove) holds ONE interprocess lock across its whole
+check→write→rollback span — `core::skills::lock::mutation_guard`, implemented in
+`skill::lock::guard` on `std::fs::File::lock`. Reentrant per thread, per lock
+file (global before project), bounded, OS-released on crash. Read paths are
+deliberately unlocked, and it serializes aghub against aghub only. Rationale +
+invariants: `crates/core/AGENTS.md` "Mutation attribution".
+
 **Link decision**: `classify_agent` / `agent_link_need`
 (`crates/core/src/skills/linker/classify.rs`). NativeReader → Master only, **no**
 per-agent link. Both install paths must use it — CLI

@@ -160,6 +160,16 @@ impl ConfigManager {
 		let project_root = self.project_root.clone();
 		let agent_type = self.agent_type();
 
+		// Spans the duplicate-name check, the Master write and the link, so a
+		// concurrent aghub cannot land its own Master between our `exists()` and
+		// our write (both would then write SKILL.md, last one wins).
+		let _mutation_guard = crate::skills::lock::mutation_guard(
+			"add skill",
+			scope,
+			project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
+
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
 			// Classify the already-installed state before deciding to error.
@@ -496,6 +506,17 @@ impl ConfigManager {
 			});
 		}
 
+		// Spans the removal AND the prune below: a prune whose disk scan runs
+		// after another process re-installed this name would otherwise drop its
+		// fresh lock entry. Taken only on the executing path — a dry-run mutates
+		// nothing and must not block a concurrent mutation.
+		let _mutation_guard = crate::skills::lock::mutation_guard(
+			"remove skill",
+			self.scope,
+			self.project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
+
 		info!(
 			"removing skill '{}' (layout={:?}, all_agents={})",
 			name, plan.layout, all_agents
@@ -640,6 +661,14 @@ impl ConfigManager {
 		let scope = self.write_scope;
 		let project_root = self.project_root.clone();
 		let agent_type = self.agent_type();
+
+		// Same span as `add_skill_universal`: duplicate check → Master → link.
+		let _mutation_guard = crate::skills::lock::mutation_guard(
+			"add skill from path",
+			scope,
+			project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {

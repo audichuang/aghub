@@ -42,3 +42,6 @@ crates/desktop/src-tauri/binaries/
 
 # Orca paste-image cache (tool artifact, never committed)
 .orca/
+
+# aghub's own interprocess skill-mutation lock (this repo is also an aghub project)
+.agents/.aghub-mutation.lock

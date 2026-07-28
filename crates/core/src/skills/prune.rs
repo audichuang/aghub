@@ -11,8 +11,10 @@
 //!   agent's *global* skill dirs; a project prune scans ONLY the project's skill
 //!   dirs. A project prune never touches the global lock and vice versa.
 //! - A project prune requires a project root.
-//! - The lock write is atomic (temp + rename under a process mutex; see
-//!   `skill::lock`).
+//! - The lock write is atomic (temp + rename; see `skill::lock`), and the SCAN
+//!   plus the rewrite are held under the interprocess mutation lock, so a skill
+//!   another aghub process installs in between can no longer be pruned by a disk
+//!   set that predates it.
 //!
 //! [`prune_lock`] is pure given a pre-scanned name set; [`prune_lock_from_dirs`]
 //! adds the scan (with an injectable scanner for deterministic tests), and
@@ -111,6 +113,17 @@ where
 	if scope == PruneScope::Project && project_root.is_none() {
 		return Err(PruneError::MissingProjectRoot);
 	}
+	// Hold the interprocess mutation lock across scan AND rewrite (window 3 in
+	// the module docs): otherwise a skill another process installs in between is
+	// pruned from the lock by a disk set that predates it.
+	let _mutation_guard = crate::skills::lock::mutation_guard(
+		"prune lock",
+		match scope {
+			PruneScope::Global => ResourceScope::GlobalOnly,
+			PruneScope::Project => ResourceScope::ProjectOnly,
+		},
+		project_root,
+	)?;
 	let disk = collect_disk_dir_names(dirs, scan)?;
 	prune_lock(scope, &disk, project_root)
 }

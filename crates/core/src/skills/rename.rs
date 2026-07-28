@@ -104,6 +104,8 @@ pub enum RenameError {
 	NameMismatch { declared: String, expected: String },
 	/// The fetched `SKILL.md` failed to parse.
 	ParseFailed(String),
+	/// The interprocess mutation lock could not be taken (nothing was mutated).
+	Locked(String),
 	/// The pre-mutation snapshot failed (nothing was mutated).
 	Snapshot(String),
 	/// Installing the new name failed (rolled back).
@@ -158,6 +160,7 @@ impl RenameError {
 			RenameError::ParseFailed(e) => {
 				format!("Failed to parse fetched skill: {e}")
 			}
+			RenameError::Locked(e) => e.clone(),
 			RenameError::Snapshot(e) => e.clone(),
 			RenameError::InstallFailed(e) => {
 				format!("Failed to install renamed skill: {e}")
@@ -252,6 +255,18 @@ pub fn accept_rename(
 ) -> Result<RenameSuccess, RenameError> {
 	let resource_scope = req.scope.resource_scope();
 	let project_root = req.scope.project_root();
+
+	// Hold the interprocess mutation lock for the WHOLE transaction: the
+	// target-absence check, the install, the old-name removal AND the rollback.
+	// This is what makes the rollback's attribution sound — without it a
+	// `new_name` another process created between the check and a failure here is
+	// indistinguishable from our own work.
+	let _mutation_guard = crate::skills::lock::mutation_guard(
+		"accept rename",
+		resource_scope,
+		project_root,
+	)
+	.map_err(|e| RenameError::Locked(e.to_string()))?;
 
 	// P0-2 guard (a) — also enforced by adapters before fetch.
 	ensure_distinct_names(req.old_name, req.new_name)?;
@@ -360,18 +375,17 @@ pub fn accept_rename(
 	// only the agent dirs whose row reports `installed`, and the Master only when
 	// `wrote_master`. A Master or Referrer we merely found and verified belongs
 	// to whoever wrote it. `created: None` means the install returned Err without
-	// a report, so nothing can be attributed and every new-name slot is cleared —
-	// conservative, and still the only safe choice there.
+	// a report, so nothing can be attributed and every new-name slot is cleared.
 	//
-	// Residual limit, unchanged in kind from before this attribution existed but
-	// much narrower: every signal here is process-local. The lock receipt comes
-	// from a `modify_*_lock` guarded by a per-PROCESS mutex, so two processes can
-	// both observe an absent entry and both be told they created it; and in the
-	// `None` case a `new_name` another process created between the target-absence
-	// check and a failure here is indistinguishable from our own work. Closing
-	// that needs an interprocess mutation lock (or a filesystem CAS) spanning
-	// check and rollback — the rest of this subsystem, install / prune /
-	// source sync, takes none either — not a local change here.
+	// That `None` fallback is now SOUND, not merely conservative: this whole
+	// transaction holds the interprocess mutation lock (taken at the top), the
+	// pre-install check proved `new_name` was absent in this scope, and no other
+	// aghub process can have written it since — so anything standing at
+	// `new_name` is ours to remove. The lock receipts are equally trustworthy for
+	// the same reason: a `modify_*_lock` insert under the held lock is a genuine
+	// compare-and-set, so `created_lock` cannot be reported to two processes at
+	// once. Residual limit: `npx skills` takes no lock of ours, so a concurrent
+	// `npx skills` run is still unserialized (see `skill::lock::guard`).
 	let rollback_new_only = |created: Option<&FetchedSkillInstallReport>| {
 		let (dirs, remove_master) = match created {
 			Some(report) => {
@@ -848,6 +862,7 @@ mod tests {
 				expected: s(),
 			},
 			RenameError::ParseFailed(s()),
+			RenameError::Locked(s()),
 			RenameError::Snapshot(s()),
 			RenameError::InstallFailed(s()),
 			RenameError::RemovalFailed(s()),
