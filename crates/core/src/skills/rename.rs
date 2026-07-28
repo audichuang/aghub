@@ -14,6 +14,7 @@
 //! tempdir `repo_root` — no git, no network.
 
 use crate::models::ResourceScope;
+use crate::skills::install_fetched::FetchedSkillInstallReport;
 use crate::skills::linker::{universal_canonical_dir, LinkTarget, Linker};
 use std::path::{Path, PathBuf};
 
@@ -355,29 +356,66 @@ pub fn accept_rename(
 	// (ENOSPC, a parent that turned read-only) would destroy a skill the
 	// transaction had not touched.
 	//
-	// Not concurrency-safe, by design and consistently with the rest of this
-	// subsystem (install, prune and source sync take no interprocess lock
-	// either): this removes the new name unconditionally rather than only what
-	// THIS call created, so if another process installs `new_name` between the
-	// target-absence check above and a failure here, that installation is
-	// removed. Closing it needs an interprocess mutation lock spanning the
-	// check and the rollback, not a local change here.
-	let rollback_new_only = || {
+	// Removal is scoped to what THIS call created, read off the install report:
+	// only the agent dirs whose row reports `installed`, and the Master only when
+	// `wrote_master`. A Master or Referrer we merely found and verified belongs
+	// to whoever wrote it. `created: None` means the install returned Err without
+	// a report, so nothing can be attributed and every new-name slot is cleared —
+	// conservative, and still the only safe choice there.
+	//
+	// Residual limit, unchanged in kind from before this attribution existed but
+	// much narrower: every signal here is process-local. The lock receipt comes
+	// from a `modify_*_lock` guarded by a per-PROCESS mutex, so two processes can
+	// both observe an absent entry and both be told they created it; and in the
+	// `None` case a `new_name` another process created between the target-absence
+	// check and a failure here is indistinguishable from our own work. Closing
+	// that needs an interprocess mutation lock (or a filesystem CAS) spanning
+	// check and rollback — the rest of this subsystem, install / prune /
+	// source sync, takes none either — not a local change here.
+	let rollback_new_only = |created: Option<&FetchedSkillInstallReport>| {
+		let (dirs, remove_master) = match created {
+			Some(report) => {
+				(report.created_referrer_dirs.clone(), report.wrote_master)
+			}
+			None => (agent_dirs.clone(), true),
+		};
 		rollback_rename_install(
 			req.new_name,
 			resource_scope,
 			project_root,
-			&agent_dirs,
+			&dirs,
+			remove_master,
 		);
-		let _ = remove_lock_entry(req.new_name, &req.scope);
+		match created {
+			// The write's own receipt decides: an entry we created is ours to
+			// drop; one we only REPLACED must be put back, because deleting it
+			// would destroy a writer we merely overwrote.
+			Some(report) if report.created_lock => {
+				let _ = remove_lock_entry(req.new_name, &req.scope);
+			}
+			Some(report) if report.wrote_lock => {
+				let _ = restore_lock_entry(
+					req.new_name,
+					&req.scope,
+					report.replaced_global_entry.as_ref(),
+					report.replaced_project_entry.as_ref(),
+				);
+			}
+			// Wrote no entry at all -- nothing to undo.
+			Some(_) => {}
+			// No report: nothing can be attributed, so fall back to removal.
+			None => {
+				let _ = remove_lock_entry(req.new_name, &req.scope);
+			}
+		}
 	};
 
 	// Roll the WHOLE transaction back to its pre-mutation state, old name
 	// included. Used ONLY from Step 8 onward, once the old name itself has been
 	// mutated. Defined BEFORE install so every post-old-mutation failure path
 	// (P0-1) runs the SAME rollback.
-	let rollback_all = || {
-		rollback_new_only();
+	let rollback_all = |created: Option<&FetchedSkillInstallReport>| {
+		rollback_new_only(created);
 		restore_snapshot(&snapshot);
 		let _ = restore_lock_entry(
 			req.old_name,
@@ -418,7 +456,7 @@ pub fn accept_rename(
 		) {
 			Ok(r) => r,
 			Err(e) => {
-				rollback_new_only();
+				rollback_new_only(None);
 				return Err(RenameError::InstallFailed(e.to_string()));
 			}
 		};
@@ -444,7 +482,7 @@ pub fn accept_rename(
 			agent.as_str(),
 			req.new_name
 		);
-		rollback_new_only();
+		rollback_new_only(Some(&install_report));
 		return Err(RenameError::InstallFailed(format!(
 			"agent '{}' failed to install",
 			agent.as_str()
@@ -460,7 +498,7 @@ pub fn accept_rename(
 		// above rejects a new_name that already exists in this scope, so only a
 		// concurrent installer racing that check can produce an all-soft-skip
 		// report, and failing here would delete that installer's work.)
-		rollback_new_only();
+		rollback_new_only(Some(&install_report));
 		return Err(RenameError::InstallFailed(
 			"no agent received the skill".to_string(),
 		));
@@ -503,7 +541,7 @@ pub fn accept_rename(
 	) {
 		Ok(r) => r,
 		Err(e) => {
-			rollback_all();
+			rollback_all(Some(&install_report));
 			return Err(RenameError::RemovalFailed(format!(
 				"Failed to remove old skill '{}': {e}",
 				req.old_name
@@ -524,7 +562,7 @@ pub fn accept_rename(
 			req.old_name,
 			failed_msgs.join("; ")
 		);
-		rollback_all();
+		rollback_all(Some(&install_report));
 		return Err(RenameError::RemovalFailed(format!(
 			"Partial removal failure removing old skill '{}'",
 			req.old_name
@@ -534,7 +572,7 @@ pub fn accept_rename(
 	// Step 9: remove the old-name lock entry. A failure here means the txn did
 	// not fully commit -> roll everything back.
 	if let Err(e) = remove_lock_entry(req.old_name, &req.scope) {
-		rollback_all();
+		rollback_all(Some(&install_report));
 		return Err(RenameError::LockRemovalFailed(format!(
 			"Failed to remove old lock entry '{}': {e}",
 			req.old_name
@@ -736,18 +774,18 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 	}
 }
 
-/// Best-effort rollback of the new-name dirs and the universal master,
+/// Best-effort rollback of the new-name artifacts this call created,
 /// re-asserting containment before each `remove_dir_all` (TOCTOU guard).
 ///
-/// Removal is UNCONDITIONAL, not "only what this call created" — freshness is
-/// not tracked. Everything carrying `new_name` in the resolved scope goes, so a
-/// concurrently-created `new_name` is removed too (see `rollback_new_only`'s
-/// note on why closing that needs an interprocess lock, not a local change).
+/// `agent_dirs` is the caller's attribution of which dirs to clear, and
+/// `remove_master` whether the canonical Master was newly written by the same
+/// call — a Master that merely existed and verified belongs to whoever wrote it.
 fn rollback_rename_install(
 	new_name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	agent_dirs: &[PathBuf],
+	remove_master: bool,
 ) {
 	let safe = skill::sanitize::sanitize_name(new_name);
 	let roots =
@@ -769,6 +807,9 @@ fn rollback_rename_install(
 				let _ = std::fs::remove_file(&target);
 			}
 		}
+	}
+	if !remove_master {
+		return;
 	}
 	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
 		project_root
@@ -856,6 +897,56 @@ mod tests {
 		assert!(mismatch.contains("got") && mismatch.contains("want"));
 	}
 
+	/// Ownership attribution: the rollback may only remove what its own install
+	/// created. A Master the call merely found and verified (`wrote_master` false)
+	/// and a Referrer that already pointed at it (a soft-skipped row, so not in
+	/// the attributed dirs) both belong to whoever wrote them — a rollback that
+	/// takes them out destroys another writer's install.
+	#[cfg(unix)]
+	#[test]
+	fn rollback_keeps_a_master_and_referrer_it_did_not_create() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let master = universal_canonical_dir(Some(root)).unwrap();
+		let mine = root.join(".claude/skills");
+		let theirs = root.join(".other/skills");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::create_dir_all(&mine).unwrap();
+		std::fs::create_dir_all(&theirs).unwrap();
+
+		// A Master this call did NOT write, plus one Referrer per agent dir.
+		let foreign_master = master.join("new-skill");
+		std::fs::create_dir_all(&foreign_master).unwrap();
+		std::fs::write(foreign_master.join("SKILL.md"), "NOT MINE").unwrap();
+		let my_ref = mine.join("new-skill");
+		let their_ref = theirs.join("new-skill");
+		std::os::unix::fs::symlink(&foreign_master, &my_ref).unwrap();
+		std::os::unix::fs::symlink(&foreign_master, &their_ref).unwrap();
+
+		// Attribution: only `mine` was freshly linked; the Master pre-existed.
+		rollback_rename_install(
+			"new-skill",
+			ResourceScope::ProjectOnly,
+			Some(root),
+			std::slice::from_ref(&mine),
+			false,
+		);
+
+		assert!(
+			!Linker::is_link(&my_ref) && !my_ref.exists(),
+			"the referrer this call created must be removed"
+		);
+		assert!(
+			Linker::is_link(&their_ref),
+			"a referrer this call did not create must survive"
+		);
+		assert_eq!(
+			std::fs::read_to_string(foreign_master.join("SKILL.md")).unwrap(),
+			"NOT MINE",
+			"a Master this call did not write must survive untouched"
+		);
+	}
+
 	/// The data-safety heart of the transaction: after the old skill has ALREADY
 	/// been removed (steps 7+8 done) and a later step fails, the rollback must
 	/// clean every new-name path AND restore the old skill — including a
@@ -902,12 +993,14 @@ mod tests {
 			"precondition: old skill must be fully removed"
 		);
 
-		// A later step (9) fails → the same rollback the transaction runs.
+		// A later step (9) fails → the same rollback the transaction runs. This
+		// call created both the referrer and the Master, so both are attributed.
 		rollback_rename_install(
 			"new-skill",
 			ResourceScope::ProjectOnly,
 			Some(root),
 			&agent_dirs,
+			true,
 		);
 		restore_snapshot(&snapshot);
 

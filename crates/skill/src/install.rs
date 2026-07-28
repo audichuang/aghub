@@ -182,7 +182,7 @@ pub fn write_global_install_lock(
 	skill_path: Option<String>,
 	source_dir: &Path,
 	ref_commit: Option<String>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<crate::SkillLockEntry>> {
 	let content_hash = compute_install_hash(source_dir)?;
 	global::add_skill_to_lock(
 		skill_name,
@@ -244,7 +244,7 @@ pub fn write_project_install_lock(
 	source_dir: &Path,
 	cwd: &Path,
 	ref_commit: Option<String>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<local::LocalSkillLockEntry>> {
 	let computed_hash = compute_install_hash(source_dir)?;
 	local::add_skill_to_local_lock(
 		skill_name,

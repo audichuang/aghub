@@ -198,13 +198,17 @@ pub fn modify_local_lock_changed<R>(
 }
 
 /// Add or update a skill entry in the local lock file.
+/// Add or update a skill entry in the project lock.
+///
+/// Returns the entry this write REPLACED, or `None` when it created a new one.
+/// See [`crate::lock::global::add_skill_to_lock`] for why the receipt matters.
 pub fn add_skill_to_local_lock(
 	skill_name: &str,
 	entry: LocalSkillLockEntry,
 	cwd: Option<&Path>,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<LocalSkillLockEntry>> {
 	modify_local_lock(cwd, |lock| {
-		lock.skills.insert(skill_name.to_string(), entry);
+		lock.skills.insert(skill_name.to_string(), entry)
 	})
 }
 

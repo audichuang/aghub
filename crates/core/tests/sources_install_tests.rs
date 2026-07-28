@@ -1215,6 +1215,226 @@ fn universal_idempotent_rerun_does_not_rewrite_lock() {
 	);
 }
 
+/// An idempotent re-run writes nothing on disk, so without coordinate healing a
+/// re-install pointed at a DIFFERENT ref (or commit, or skillPath) would leave
+/// the lock pinned to the first one and every later `source sync --update` would
+/// keep following the stale ref. Content and ownership are identical here, so
+/// only the update coordinates may change.
+#[test]
+#[cfg(unix)]
+fn same_owner_reinstall_heals_stale_update_coordinates() {
+	let _g = GlobalLockGuard::new();
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+	let agent_dir = project_root.join(".claude/skills");
+	set_skills_path_override("claude", Some(agent_dir.clone()));
+
+	let on_main = sample_source();
+	let mut on_tag = sample_source();
+	on_tag.ref_name = Some("v1".to_string());
+
+	// A nested fn, not a closure: the request borrows for a named lifetime that
+	// a closure's inferred one cannot express.
+	fn req<'a>(
+		skill_md: &'a Path,
+		source: &'a skill::InstallLockSource,
+		project_root: &'a Path,
+		agents: &'a [AgentType],
+		commit: Option<String>,
+		skill_path: &str,
+	) -> FetchedSkillInstallRequest<'a> {
+		FetchedSkillInstallRequest {
+			skill_file: skill_md,
+			source,
+			lock_skill_path: skill_path.to_string(),
+			ref_commit: commit,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(project_root),
+			target_agents: agents,
+			expected_name: None,
+			target: LinkTarget::Relative,
+		}
+	}
+	let agents = [AgentType::Claude];
+
+	install_fetched_skill_and_lock(req(
+		&skill_md,
+		&on_main,
+		&project_root,
+		&agents,
+		Some("c1".to_string()),
+		"alpha/SKILL.md",
+	))
+	.expect("first install should succeed");
+
+	// Same bytes, same owner, different ref + commit: nothing changes on disk.
+	let healed = install_fetched_skill_and_lock(req(
+		&skill_md,
+		&on_tag,
+		&project_root,
+		&agents,
+		Some("c2".to_string()),
+		"alpha/SKILL.md",
+	))
+	.expect("re-install from another ref should succeed");
+	assert!(
+		!healed.wrote_master,
+		"the Master already existed; this must not be a fresh write"
+	);
+	assert!(
+		healed.wrote_lock,
+		"stale update coordinates must be healed even with no disk change"
+	);
+
+	let entry = |root: &Path| {
+		skill::lock::local::read_local_lock(Some(root))
+			.skills
+			.get("alpha")
+			.cloned()
+			.expect("alpha must stay locked")
+	};
+	let after = entry(&project_root);
+	assert_eq!(
+		after.ref_name.as_deref(),
+		Some("v1"),
+		"ref_name must follow the ref this install actually requested"
+	);
+	assert_eq!(
+		after.ref_commit.as_deref(),
+		Some("c2"),
+		"ref_commit must follow the commit this install actually fetched"
+	);
+
+	// Back to `main` WITHOUT a commit: the differing ref heals, and the recorded
+	// commit must be DROPPED, not carried. `c2` only certifies the content at
+	// `v1`; keeping it would let update preflight treat `main` as already proven
+	// and skip the fetch.
+	let dropped = install_fetched_skill_and_lock(req(
+		&skill_md,
+		&on_main,
+		&project_root,
+		&agents,
+		None,
+		"alpha/SKILL.md",
+	))
+	.expect("re-install without a commit should succeed");
+	assert!(dropped.wrote_lock, "the differing ref must still heal");
+	let after_drop = entry(&project_root);
+	assert_eq!(
+		after_drop.ref_name.as_deref(),
+		Some("main"),
+		"the requested ref must win"
+	);
+	assert_eq!(
+		after_drop.ref_commit, None,
+		"a commit recorded for another ref must not certify this one"
+	);
+
+	// A changed skillPath is the third coordinate and heals on its own.
+	let moved = install_fetched_skill_and_lock(req(
+		&skill_md,
+		&on_main,
+		&project_root,
+		&agents,
+		Some("c2".to_string()),
+		"nested/alpha/SKILL.md",
+	))
+	.expect("re-install from a moved path should succeed");
+	set_skills_path_override("claude", None);
+	assert!(moved.wrote_lock, "a changed skillPath must heal");
+	assert_eq!(
+		entry(&project_root).skill_path.as_deref(),
+		Some("nested/alpha/SKILL.md"),
+		"skillPath must follow the path this install actually used"
+	);
+
+	// Nothing so far created the entry -- every one of these was a rewrite.
+	assert!(
+		!moved.created_lock,
+		"healing a pre-existing entry is not entry creation"
+	);
+
+	// Carry-over's real case: a rewrite triggered by covering a NEW agent, with
+	// the ref and skillPath unchanged and no commit supplied. The recorded commit
+	// still certifies exactly these coordinates, so erasing it would needlessly
+	// defeat update preflight.
+	let both = [AgentType::Claude, AgentType::Codex];
+	let relink = install_fetched_skill_and_lock(req(
+		&skill_md,
+		&on_main,
+		&project_root,
+		&both,
+		None,
+		"nested/alpha/SKILL.md",
+	))
+	.expect("covering another agent should succeed");
+	assert!(relink.wrote_lock, "covering a new agent rewrites the entry");
+	assert_eq!(
+		entry(&project_root).ref_commit.as_deref(),
+		Some("c2"),
+		"an unchanged coordinate context must keep its recorded commit"
+	);
+}
+
+/// A NativeReader agent reads the Master directly: its row reports
+/// `installed: true` with NO link created, and its first skills path IS the
+/// Master. Attribution must come from the linker's own `linked` set, so
+/// `created_referrer_dirs` stays empty here — a rollback that re-derived dirs
+/// from `installed` would delete the Master through the referrer loop, before
+/// any `wrote_master` check could stop it.
+#[test]
+#[cfg(unix)]
+fn native_reader_install_attributes_no_referrer_dir() {
+	let _g = GlobalLockGuard::new();
+
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
+	let source = sample_source();
+
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	})
+	.expect("a NativeReader install should succeed");
+
+	let row = report
+		.agent_results
+		.first()
+		.expect("one target agent, one row");
+	assert!(row.installed, "a NativeReader row reports installed");
+	assert!(row.error.is_none(), "and carries no error");
+	let master = project_root.join(".agents/skills/alpha");
+	assert!(master.is_dir(), "the Master must exist");
+	assert!(
+		report.wrote_master,
+		"this call claimed and wrote the Master"
+	);
+	assert!(
+		report.created_referrer_dirs.is_empty(),
+		"no link was created, so no referrer dir may be attributed -- got {:?}",
+		report.created_referrer_dirs
+	);
+	assert!(
+		!report
+			.created_referrer_dirs
+			.iter()
+			.any(|d| d == master.parent().unwrap()),
+		"the Master's own dir must never be attributed as a referrer dir"
+	);
+}
+
 #[test]
 #[cfg(unix)]
 fn unsupported_scope_rejected_before_any_write() {

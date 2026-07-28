@@ -224,7 +224,7 @@ impl ConfigManager {
 		} else {
 			crate::skills::linker::LinkTarget::Absolute
 		};
-		let (results, _wrote_master) =
+		let results =
 			crate::skills::install_fetched::materialize_universal_master(
 				&canonical,
 				&safe_name,
@@ -233,7 +233,11 @@ impl ConfigManager {
 				std::slice::from_ref(&agent_type),
 				target_link,
 			)?;
-		Self::ensure_single_agent_installed(&results, &link_need, &skill.name)?;
+		Self::ensure_single_agent_installed(
+			&results.agent_results,
+			&link_need,
+			&skill.name,
+		)?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
@@ -681,7 +685,7 @@ impl ConfigManager {
 		} else {
 			crate::skills::linker::LinkTarget::Absolute
 		};
-		let (results, _wrote_master) =
+		let results =
 			crate::skills::install_fetched::materialize_universal_master(
 				&source_root,
 				&safe_name,
@@ -690,7 +694,11 @@ impl ConfigManager {
 				std::slice::from_ref(&agent_type),
 				target_link,
 			)?;
-		Self::ensure_single_agent_installed(&results, &link_need, &skill.name)?;
+		Self::ensure_single_agent_installed(
+			&results.agent_results,
+			&link_need,
+			&skill.name,
+		)?;
 
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();

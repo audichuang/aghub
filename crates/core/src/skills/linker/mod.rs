@@ -193,6 +193,12 @@ pub struct UniversalInstallReport {
 	pub conflicts: Vec<PathBuf>,
 	/// Per-agent hard link failures (Decision 10): NOT propagated as `Err`.
 	pub failed: Vec<(PathBuf, LinkError)>,
+	/// `true` only when THIS call created the master SKILL-DIR, established by
+	/// an atomic `create_dir` claim rather than an exists-check. A caller that
+	/// rolls its own install back needs creation provenance it can trust: with a
+	/// pre-check, a second process could create the master in the gap and have
+	/// its copy deleted by the first process's rollback.
+	pub created_master: bool,
 }
 
 /// Materialize the Master from `source_root` (npx-identical copy +
@@ -211,13 +217,34 @@ pub fn install_universal(
 			target: canonical.to_path_buf(),
 		});
 	}
-	if !canonical.exists() {
-		if let Some(parent) = canonical.parent() {
-			std::fs::create_dir_all(parent)?;
-		}
-		copy_dir_recursive(source_root, canonical)?;
+	// Claim the master SKILL-DIR atomically: `create_dir` is the whole
+	// invariant. `AlreadyExists` means someone else owns this master (a previous
+	// run, or a concurrent process), so we neither copy over it nor claim to
+	// have created it -- an exists-check first would report creation for a
+	// master another process wrote in the gap.
+	let mut created_master = false;
+	if let Some(parent) = canonical.parent() {
+		std::fs::create_dir_all(parent)?;
 	}
-	link_agents_to_canonical(canonical, agent_skills_dirs, target)
+	match std::fs::create_dir(canonical) {
+		Ok(()) => {
+			created_master = true;
+			if let Err(error) = copy_dir_recursive(source_root, canonical) {
+				// We claimed this directory, so we own its cleanup. Leaving a
+				// partial Master behind would poison every retry: the next claim
+				// sees `AlreadyExists`, skips the copy, and the half-written
+				// Master keeps occupying the name.
+				let _ = std::fs::remove_dir_all(canonical);
+				return Err(error.into());
+			}
+		}
+		Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+		Err(e) => return Err(e.into()),
+	}
+	let mut report =
+		link_agents_to_canonical(canonical, agent_skills_dirs, target)?;
+	report.created_master = created_master;
+	Ok(report)
 }
 
 /// Link each agent skills-dir to an already-materialized Master. Same
@@ -762,6 +789,53 @@ mod tests {
 		)
 		.unwrap_err();
 		assert!(matches!(err, LinkError::NonAbsoluteTarget { .. }));
+	}
+
+	/// The claim and the copy are one unit: if the copy fails after `create_dir`
+	/// won the Master, the claimed directory must go. Leaving it poisons every
+	/// retry -- the next claim sees `AlreadyExists`, skips the copy, and the
+	/// half-written Master keeps occupying the name (a failed rename would then
+	/// be permanently blocked by its own leftovers).
+	#[cfg(unix)]
+	#[test]
+	fn a_failed_master_copy_removes_the_directory_it_claimed() {
+		use std::os::unix::fs::PermissionsExt;
+		use tempfile::tempdir;
+
+		let source = tempdir().unwrap();
+		std::fs::write(source.path().join("SKILL.md"), "x").unwrap();
+		let unreadable = source.path().join("secret.md");
+		std::fs::write(&unreadable, "y").unwrap();
+		std::fs::set_permissions(
+			&unreadable,
+			std::fs::Permissions::from_mode(0o000),
+		)
+		.unwrap();
+		// Root ignores 0o000, so probe rather than false-pass.
+		if std::fs::read(&unreadable).is_ok() {
+			eprintln!("skipping under root: 0o000 is not enforced");
+			return;
+		}
+
+		let home = tempdir().unwrap();
+		let canonical = home.path().join(".agents/skills/alpha");
+
+		let err = install_universal(
+			source.path(),
+			&canonical,
+			&[],
+			LinkTarget::Absolute,
+		)
+		.expect_err("an unreadable source file must fail the Master copy");
+
+		assert!(
+			matches!(err, LinkError::Io(_)),
+			"expected the copy's io error, got {err:?}"
+		);
+		assert!(
+			!canonical.exists(),
+			"the claimed Master directory must not survive a failed copy"
+		);
 	}
 
 	#[test]

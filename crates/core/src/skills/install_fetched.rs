@@ -14,7 +14,7 @@
 //! failures (`installed: false`, `error: Some(..)`) are reserved for runtime
 //! link failures on targets that passed preflight.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::models::ResourceScope;
 use crate::skills::linker::classify::{classify_agent, LinkNeed};
@@ -66,7 +66,24 @@ pub struct FetchedSkillInstallRequest<'a> {
 pub struct FetchedSkillInstallReport {
 	/// Parsed (canonical) skill name.
 	pub name: String,
+	/// The lock entry was written — either created or rewritten in place.
 	pub wrote_lock: bool,
+	/// The lock ENTRY did not exist before this call, established by the write
+	/// itself (nothing was replaced) rather than by an earlier observation. A
+	/// rewrite of a pre-existing entry is not creation: rolling back must restore
+	/// that entry, never delete it.
+	pub created_lock: bool,
+	/// The global lock entry this call REPLACED, for a rollback to restore.
+	pub replaced_global_entry: Option<skill::SkillLockEntry>,
+	/// The project lock entry this call REPLACED, for a rollback to restore.
+	pub replaced_project_entry: Option<skill::LocalSkillLockEntry>,
+	/// `true` only when this call atomically claimed and wrote the canonical
+	/// Master. A caller rolling its own install back must not remove a Master it
+	/// merely found and verified — that copy belongs to whoever wrote it.
+	pub wrote_master: bool,
+	/// Agent skills-dirs where this call created a FRESH referrer, straight from
+	/// the linker. The sound attribution for a rollback.
+	pub created_referrer_dirs: Vec<PathBuf>,
 	/// Content hash of the fetched source folder.
 	pub installed_hash: String,
 	pub agent_results: Vec<AgentInstallResult>,
@@ -77,6 +94,12 @@ struct LockedSourceOwner {
 	source: String,
 	source_type: String,
 	source_url: Option<String>,
+	/// Update coordinates already recorded for this skill. Compared against the
+	/// request so a same-owner re-install with a different ref / path / commit
+	/// heals them instead of leaving the lock pinned to the old ones.
+	ref_name: Option<String>,
+	skill_path: Option<String>,
+	ref_commit: Option<String>,
 }
 
 fn skill_lock_source(
@@ -91,6 +114,9 @@ fn skill_lock_source(
 					source: entry.source,
 					source_type: entry.source_type,
 					source_url: Some(entry.source_url),
+					ref_name: entry.ref_name,
+					skill_path: entry.skill_path,
+					ref_commit: entry.ref_commit,
 				}
 			})
 		}
@@ -102,6 +128,9 @@ fn skill_lock_source(
 					source: entry.source.clone(),
 					source_type: entry.source_type.clone(),
 					source_url: entry.source_url.clone(),
+					ref_name: entry.ref_name.clone(),
+					skill_path: entry.skill_path.clone(),
+					ref_commit: entry.ref_commit.clone(),
 				})
 		}),
 		ResourceScope::Both => None,
@@ -185,6 +214,28 @@ fn same_source_owner(
 	}
 }
 
+/// Whether a same-owner lock's update coordinates disagree with what this
+/// install was asked for. Healing them keeps a later `source sync --update`
+/// following the ref the caller actually requested, instead of whatever the
+/// lock happened to be written with first — an idempotent re-install writes no
+/// file, so without this the stale coordinates would survive silently.
+///
+/// Only a PRESENT requested value can differ: an omitted coordinate is carried
+/// over from the recorded entry at the write site, never erased.
+fn coordinates_need_heal(
+	existing: &LockedSourceOwner,
+	requested_ref: Option<&str>,
+	requested_skill_path: &str,
+	requested_commit: Option<&str>,
+) -> bool {
+	let differs = |req: Option<&str>, locked: &Option<String>| {
+		req.is_some_and(|r| locked.as_deref() != Some(r))
+	};
+	differs(requested_ref, &existing.ref_name)
+		|| differs(requested_commit, &existing.ref_commit)
+		|| existing.skill_path.as_deref() != Some(requested_skill_path)
+}
+
 fn hash_master(
 	skill_name: &str,
 	canonical: &Path,
@@ -239,6 +290,15 @@ fn ensure_link_free_master(
 	Ok(())
 }
 
+/// What a lock write actually replaced, straight from the map insert. `None` in
+/// both fields after a write means the entry was CREATED, so a rollback owns it;
+/// a `Some` is the previous entry a rollback must RESTORE rather than delete.
+#[derive(Clone, Debug, Default)]
+struct LockWriteReceipt {
+	replaced_global: Option<skill::SkillLockEntry>,
+	replaced_project: Option<skill::LocalSkillLockEntry>,
+}
+
 fn write_install_lock(
 	skill_name: &str,
 	scope: ResourceScope,
@@ -247,7 +307,7 @@ fn write_install_lock(
 	lock_skill_path: String,
 	source_dir: &Path,
 	ref_commit: Option<String>,
-) -> Result<(), crate::ConfigError> {
+) -> Result<LockWriteReceipt, crate::ConfigError> {
 	match scope {
 		ResourceScope::GlobalOnly => skill::write_global_install_lock(
 			skill_name,
@@ -256,6 +316,10 @@ fn write_install_lock(
 			source_dir,
 			ref_commit,
 		)
+		.map(|replaced_global| LockWriteReceipt {
+			replaced_global,
+			replaced_project: None,
+		})
 		.map_err(crate::ConfigError::Io),
 		ResourceScope::ProjectOnly => {
 			let cwd = project_root.ok_or_else(|| {
@@ -272,6 +336,10 @@ fn write_install_lock(
 				cwd,
 				ref_commit,
 			)
+			.map(|replaced_project| LockWriteReceipt {
+				replaced_global: None,
+				replaced_project,
+			})
 			.map_err(crate::ConfigError::Io)
 		}
 		ResourceScope::Both => Err(crate::ConfigError::InvalidConfig(
@@ -366,7 +434,7 @@ pub fn install_fetched_skill_and_lock(
 		}
 	}
 
-	let (agent_results, wrote_master) = materialize_universal_master(
+	let materialized = materialize_universal_master(
 		&source_root,
 		&safe_name,
 		req.scope,
@@ -374,6 +442,11 @@ pub fn install_fetched_skill_and_lock(
 		req.target_agents,
 		req.target,
 	)?;
+	let MaterializedMaster {
+		agent_results,
+		created_master: wrote_master,
+		created_referrer_dirs,
+	} = materialized;
 
 	// Gate ordinary lock rewrites on a fresh Master or fresh Referrer. One
 	// additional case is safe: an untracked, byte-identical Master with at least
@@ -381,9 +454,24 @@ pub fn install_fetched_skill_and_lock(
 	// may be adopted without manufacturing a filesystem change.
 	let installed_any = agent_results.iter().any(|r| r.installed);
 	let covered_any = agent_results.iter().any(|r| r.error.is_none());
+	// A same-owner re-install that changed nothing on disk still has to correct
+	// stale update coordinates; ownership and Master content are already proven
+	// identical at this point, and the write below re-verifies the hash.
+	let heal_coordinates = existing_owner.as_ref().is_some_and(|owner| {
+		coordinates_need_heal(
+			owner,
+			req.source.ref_name.as_deref(),
+			&req.lock_skill_path,
+			req.ref_commit.as_deref(),
+		)
+	});
 	let wrote_lock = wrote_master
 		|| installed_any
-		|| (existing_owner.is_none() && covered_any);
+		|| (existing_owner.is_none() && covered_any)
+		|| heal_coordinates;
+	// Filled from the write below, never from `existing_owner`: an observation
+	// taken before the write cannot prove what the write actually replaced.
+	let mut receipt = LockWriteReceipt::default();
 	if wrote_lock {
 		let canonical = canonical.as_ref().ok_or_else(|| {
 			crate::ConfigError::ValidationFailed(format!(
@@ -399,23 +487,64 @@ pub fn install_fetched_skill_and_lock(
 				 before the source lock write; the lock was not written",
 			)));
 		}
-		write_install_lock(
+		// Rewriting an existing entry must not DROP a coordinate this request
+		// omits (a relink rewrites the entry with no commit of its own, and
+		// erasing `ref_commit` changes update preflight). But a recorded commit
+		// certifies ONE (ref, skillPath) pair: carry it over only while both
+		// still match, else leave it None so preflight cannot treat coordinates
+		// nothing has verified as already proven.
+		let mut effective_source = req.source.clone();
+		let mut effective_commit = req.ref_commit.clone();
+		if let Some(owner) = existing_owner.as_ref() {
+			if effective_source.ref_name.is_none() {
+				effective_source.ref_name = owner.ref_name.clone();
+			}
+			let same_context = owner.skill_path.as_deref()
+				== Some(req.lock_skill_path.as_str())
+				&& owner.ref_name.as_deref()
+					== effective_source.ref_name.as_deref();
+			if effective_commit.is_none() && same_context {
+				effective_commit = owner.ref_commit.clone();
+			}
+		}
+		receipt = write_install_lock(
 			&name,
 			req.scope,
 			req.project_root,
-			req.source,
+			&effective_source,
 			req.lock_skill_path.clone(),
 			&source_root,
-			req.ref_commit.clone(),
+			effective_commit,
 		)?;
 	}
+	let created_lock = wrote_lock
+		&& receipt.replaced_global.is_none()
+		&& receipt.replaced_project.is_none();
 
 	Ok(FetchedSkillInstallReport {
 		name,
 		wrote_lock,
+		created_lock,
+		replaced_global_entry: receipt.replaced_global,
+		replaced_project_entry: receipt.replaced_project,
+		wrote_master,
+		created_referrer_dirs,
 		installed_hash,
 		agent_results,
 	})
+}
+
+/// What [`materialize_universal_master`] actually did, as attribution a caller
+/// can roll back safely.
+pub struct MaterializedMaster {
+	pub agent_results: Vec<AgentInstallResult>,
+	/// `true` only when this call atomically claimed and wrote the Master.
+	pub created_master: bool,
+	/// The agent skills-dirs where this call created a FRESH referrer, taken
+	/// from the linker's own `linked` set -- never reconstructed from
+	/// `installed` or from read-path order, which would wrongly attribute a
+	/// NativeReader row (installed, no link, first read path IS the Master).
+	pub created_referrer_dirs: Vec<PathBuf>,
 }
 
 /// The ONE universal-install materializer shared by every install path: the
@@ -425,12 +554,10 @@ pub fn install_fetched_skill_and_lock(
 /// Master from `source_root` (copy-free linker; copied only when absent) and
 /// links each `NeedsLink` agent.
 ///
-/// Returns the per-agent results plus `wrote_master` — `true` only when the
-/// canonical master was NEWLY written on this run. NativeReader agents are
-/// reported installed with NO link; NeedsLink agents are linked via the
-/// copy-free linker. Unsupported agents reject the whole request before the
-/// shared Master write. A per-agent LinkError is folded into that agent's row
-/// (Decision 10), never aborting later runtime attempts.
+/// NativeReader agents are reported installed with NO link; NeedsLink agents are
+/// linked via the copy-free linker. Unsupported agents reject the whole request
+/// before the shared Master write. A per-agent LinkError is folded into that
+/// agent's row (Decision 10), never aborting later runtime attempts.
 pub fn materialize_universal_master(
 	source_root: &Path,
 	safe_name: &str,
@@ -438,7 +565,7 @@ pub fn materialize_universal_master(
 	project_root: Option<&Path>,
 	target_agents: &[AgentType],
 	target: LinkTarget,
-) -> Result<(Vec<AgentInstallResult>, bool), crate::ConfigError> {
+) -> Result<MaterializedMaster, crate::ConfigError> {
 	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
 		project_root
 	} else {
@@ -456,10 +583,13 @@ pub fn materialize_universal_master(
 				),
 			})
 			.collect();
-		return Ok((results, false));
+		return Ok(MaterializedMaster {
+			agent_results: results,
+			created_master: false,
+			created_referrer_dirs: Vec::new(),
+		});
 	};
 	let canonical = canonical_skills_dir.join(safe_name);
-	let master_was_absent = !canonical.exists();
 
 	// Classify every target agent against the canonical SKILLS-DIR (not the
 	// SKILL-DIR). `plans[i]` pairs 1:1 with `target_agents[i]`.
@@ -480,13 +610,18 @@ pub fn materialize_universal_master(
 		})
 		.collect();
 	if plans.is_empty() {
-		return Ok((Vec::new(), false));
+		return Ok(MaterializedMaster {
+			agent_results: Vec::new(),
+			created_master: false,
+			created_referrer_dirs: Vec::new(),
+		});
 	}
 
 	// One shared setup materializes the Master and performs every needed link.
 	// Unsupported is a predictable preflight failure: mixing one with supported
 	// targets must never let the shared setup create a Master or an earlier link.
-	let mut materialized = false;
+	let mut created_master = false;
+	let mut created_referrer_dirs: Vec<PathBuf> = Vec::new();
 	let report = crate::batch::run_shared_multi_target_mutation(
 		&plans,
 		|&(agent, ref need)| match need {
@@ -513,7 +648,7 @@ pub fn materialize_universal_master(
 				target,
 			)
 			.map_err(|error| error.to_string())?;
-			materialized = true;
+			created_master = install.created_master;
 
 			let failed_by_dir = install
 				.failed
@@ -533,6 +668,9 @@ pub fn materialize_universal_master(
 				.iter()
 				.filter_map(|link| link.parent().map(Path::to_path_buf))
 				.collect::<std::collections::HashSet<_>>();
+			// The linker's own record of what it linked -- the only sound
+			// attribution for a rollback.
+			created_referrer_dirs = linked_dirs.iter().cloned().collect();
 			Ok((failed_by_dir, conflict_dirs, linked_dirs))
 		},
 		|&(agent, ref need), prepared| {
@@ -605,7 +743,11 @@ pub fn materialize_universal_master(
 			},
 		})
 		.collect();
-	Ok((results, master_was_absent && materialized))
+	Ok(MaterializedMaster {
+		agent_results: results,
+		created_master,
+		created_referrer_dirs,
+	})
 }
 
 #[cfg(all(test, unix))]

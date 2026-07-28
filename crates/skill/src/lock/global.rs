@@ -10,22 +10,34 @@ pub use io::{
 pub use types::{DismissedPrompts, SkillLockEntry, SkillLockFile};
 
 /// Add or update a skill entry in the lock file.
+///
+/// Returns the entry this write REPLACED, or `None` when it created a new one —
+/// the receipt a caller needs to roll its own write back: deleting an entry it
+/// only replaced would destroy someone else's, and `None` is the only proof the
+/// entry is genuinely ours.
 pub fn add_skill_to_lock(
 	skill_name: &str,
 	mut entry: SkillLockEntry,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<SkillLockEntry>> {
 	modify_skill_lock(|lock| {
 		let now = Utc::now().to_rfc3339();
 
 		if let Some(existing) = lock.skills.get(skill_name) {
 			// Preserve the original installedAt timestamp
 			entry.installed_at = existing.installed_at.clone();
+			// `pluginName` belongs to the npx `skills` side of the lock — nothing
+			// in aghub ever writes it, and rewriting an entry (re-install, relink,
+			// coordinate heal) must not destroy interop metadata we only read. A
+			// caller that genuinely knows the new owner passes it explicitly.
+			if entry.plugin_name.is_none() {
+				entry.plugin_name = existing.plugin_name.clone();
+			}
 		} else {
 			entry.installed_at = now.clone();
 		}
 		entry.updated_at = now;
 
-		lock.skills.insert(skill_name.to_string(), entry);
+		lock.skills.insert(skill_name.to_string(), entry)
 	})
 }
 
@@ -164,6 +176,87 @@ mod tests {
 		let stored = lock.skills.get("new-skill").unwrap();
 		assert!(!stored.installed_at.is_empty());
 		assert!(!stored.updated_at.is_empty());
+	}
+
+	/// The write's own receipt: `None` means it created the entry, `Some` hands
+	/// back exactly what it replaced. A caller rolling its own write back can
+	/// only tell "mine, delete it" from "someone else's, put it back" this way —
+	/// an observation taken before the write cannot.
+	#[test]
+	fn add_skill_to_lock_reports_what_it_replaced() {
+		let _guard = TestLockGuard::new();
+
+		let mut first = test_entry();
+		first.ref_name = Some("main".to_string());
+		let replaced = add_skill_to_lock("s", first).unwrap();
+		assert!(replaced.is_none(), "a new entry replaces nothing");
+
+		let mut second = test_entry();
+		second.ref_name = Some("v2".to_string());
+		let replaced = add_skill_to_lock("s", second).unwrap();
+		assert_eq!(
+			replaced
+				.expect("the rewrite replaced an entry")
+				.ref_name
+				.as_deref(),
+			Some("main"),
+			"the receipt must carry the entry as it was before the write"
+		);
+	}
+
+	/// `pluginName` is written by the npx `skills` side and only ever READ here.
+	/// Any aghub rewrite of the entry — re-install, relink, coordinate heal —
+	/// passes `plugin_name: None`, so without preservation it silently destroys
+	/// interop metadata and the skill stops looking plugin-managed.
+	#[test]
+	fn add_skill_to_lock_preserves_plugin_name_on_rewrite() {
+		let _guard = TestLockGuard::new();
+
+		let mut managed = test_entry();
+		managed.plugin_name = Some("some-plugin".to_string());
+		add_skill_to_lock("managed", managed).unwrap();
+
+		// A later aghub write of the same entry carries no plugin name.
+		let mut rewrite = test_entry();
+		rewrite.ref_name = Some("v2".to_string());
+		add_skill_to_lock("managed", rewrite).unwrap();
+
+		let stored = read_skill_lock().skills.remove("managed").unwrap();
+		assert_eq!(
+			stored.plugin_name.as_deref(),
+			Some("some-plugin"),
+			"a rewrite must not drop the npx-owned pluginName"
+		);
+		assert_eq!(
+			stored.ref_name.as_deref(),
+			Some("v2"),
+			"the rewrite's own fields still take effect"
+		);
+	}
+
+	/// An explicit new owner still wins — preservation fills a gap, it does not
+	/// pin the field forever.
+	#[test]
+	fn add_skill_to_lock_lets_an_explicit_plugin_name_win() {
+		let _guard = TestLockGuard::new();
+
+		let mut first = test_entry();
+		first.plugin_name = Some("old-plugin".to_string());
+		add_skill_to_lock("managed", first).unwrap();
+
+		let mut second = test_entry();
+		second.plugin_name = Some("new-plugin".to_string());
+		add_skill_to_lock("managed", second).unwrap();
+
+		assert_eq!(
+			read_skill_lock()
+				.skills
+				.remove("managed")
+				.unwrap()
+				.plugin_name
+				.as_deref(),
+			Some("new-plugin"),
+		);
 	}
 
 	#[test]
