@@ -499,14 +499,14 @@ impl ConfigManager {
 	) -> Result<crate::skills::removal::RemovalOutcome> {
 		use crate::skills::removal;
 
-		let skill = self.skill_for_planned_removal(name, all_agents)?;
-
-		// Taken BEFORE `plan_removal` on any executing path, not just before the
-		// delete: the plan carries the referrer sweep that decides whether a
-		// Master may go, so planning outside the lock and deleting inside it
-		// would act on a sweep another process has already invalidated (it links
-		// a new Referrer to that Master; we delete it anyway). A dry-run mutates
-		// nothing and deliberately takes no lock.
+		// Taken FIRST on any executing path — before the target is even looked up,
+		// let alone planned. Everything downstream is a decision about what to
+		// delete: `skill_for_planned_removal` picks the target, and `plan_removal`
+		// runs the referrer sweep that decides whether a shared Master may go.
+		// Reading any of that outside the lock and deleting inside it means acting
+		// on a view another process has already invalidated (it links a new
+		// Referrer to that Master, or replaces the same-name skill, and we delete
+		// its work anyway). A dry-run mutates nothing and deliberately takes none.
 		let _mutation_guard = if dry_run {
 			None
 		} else {
@@ -519,6 +519,14 @@ impl ConfigManager {
 				.map_err(ConfigError::Io)?,
 			)
 		};
+		// Re-read from disk UNDER the lock: `self.config` was populated by a
+		// `load()` the caller made before this method, so the guard alone would
+		// still leave the target chosen from a stale view.
+		if !dry_run {
+			self.load()?;
+		}
+
+		let skill = self.skill_for_planned_removal(name, all_agents)?;
 
 		let own_agent_dir = self.target_skills_dir();
 		let scope = self.scope;

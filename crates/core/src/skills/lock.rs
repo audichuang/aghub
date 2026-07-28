@@ -35,6 +35,89 @@ pub fn mutation_guard(
 	skill::lock::mutation_guard(op, &scopes)
 }
 
+/// The lock coordinates a flow FETCHED from, carried through the fetch so the
+/// mutation can prove — under the mutation lock — that it is still acting on the
+/// same entry.
+///
+/// The mutation lock cannot close this window on its own: a fetch is a NETWORK
+/// operation and must not run while holding the lock, so the read that decides
+/// what to fetch is necessarily unlocked. That makes it the WIDEST window in the
+/// subsystem (seconds, not microseconds) — everything else the lock covers is a
+/// local filesystem step. Compare-after-fetch is the other half.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FetchedFrom {
+	/// The source the pre-fetch read produced, VERBATIM — the global entry's
+	/// `source_url`, or the project entry's `source_url` falling back to `source`.
+	/// Carry the value that read returned, never a re-derived one: an npx-written
+	/// entry has no `sourceUrl` at all (it is an aghub-only field), so its
+	/// effective source is the `owner/repo` shorthand and comparing a
+	/// reconstructed clone URL against it would reject every such entry.
+	pub source: String,
+	/// The repo-relative `skillPath` the fetch used, when the flow requires it to
+	/// be unchanged. `None` for a flow that legitimately RESOLVES a moved path —
+	/// `accept_rename` does exactly that, so comparing the path there would reject
+	/// the very case it exists to handle.
+	pub skill_path: Option<String>,
+}
+
+impl FetchedFrom {
+	/// Refuse unless the CURRENT lock entry for `name` is still the one
+	/// [`FetchedFrom`] describes. Call under the mutation lock, immediately
+	/// before mutating.
+	///
+	/// Compares the source, and `skillPath` when the caller supplied one — the
+	/// fields that identify WHOSE skill this is and WHERE in the repo it lives.
+	/// Deliberately not `ref_name`: an adapter may legitimately override the ref
+	/// for this very operation, so comparing it would reject valid work.
+	pub fn ensure_unchanged(
+		&self,
+		name: &str,
+		scope: ResourceScope,
+		project_root: Option<&Path>,
+	) -> Result<(), String> {
+		let current = match scope {
+			ResourceScope::GlobalOnly => skill::lock::global::read_skill_lock()
+				.skills
+				.get(name)
+				.map(|e| (e.source_url.clone(), e.skill_path.clone())),
+			ResourceScope::ProjectOnly => project_root.and_then(|root| {
+				skill::lock::local::read_local_lock(Some(root))
+					.skills
+					.get(name)
+					.map(|e| {
+						(
+							e.source_url
+								.clone()
+								.unwrap_or_else(|| e.source.clone()),
+							e.skill_path.clone(),
+						)
+					})
+			}),
+			ResourceScope::Both => None,
+		};
+		let Some((source, skill_path)) = current else {
+			return Err(format!(
+				"'{name}' is no longer in the lock; another aghub process changed \
+				 it while this operation was fetching, so nothing was written"
+			));
+		};
+		let path_ok = match &self.skill_path {
+			Some(expected) => skill_path.as_deref() == Some(expected.as_str()),
+			// The caller resolves a moved path on purpose; only the source binds.
+			None => true,
+		};
+		if source == self.source && path_ok {
+			return Ok(());
+		}
+		// Names only, no paths/URLs: a surface may forward this verbatim.
+		Err(format!(
+			"'{name}' now points at a different source or skill path than the one \
+			 this operation fetched; another aghub process changed it in the \
+			 meantime, so nothing was written. Re-run to use the current source."
+		))
+	}
+}
+
 /// Re-stamp an installed skill's lock hash after a content rewrite. `ref_commit`
 /// is authoritative: `Some(oid)` records the tip; `None` CLEARS any recorded tip
 /// (the content changed, so a stale OID would let an ls-refs preflight falsely

@@ -19,6 +19,13 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 			code: "SKILL_MUTATION_LOCK_BUSY",
 			status: Status::Conflict,
 		},
+		ResyncError::StaleFetch(_) => SafeResyncError {
+			message:
+				"The skill's source changed while this sync was fetching; \
+			          nothing was written. Re-run to use the current source",
+			code: "SKILL_SOURCE_CHANGED_DURING_FETCH",
+			status: Status::Conflict,
+		},
 		ResyncError::NotInstalled => SafeResyncError {
 			message: "Skill is locked but no installed copy was found",
 			code: "SKILL_NOT_INSTALLED",
@@ -67,6 +74,7 @@ mod tests {
 			ResyncError::Swap(sentinel.to_string()),
 			ResyncError::LockUpdate(sentinel.to_string()),
 			ResyncError::Locked(sentinel.to_string()),
+			ResyncError::StaleFetch(sentinel.to_string()),
 		];
 
 		for error in cases {

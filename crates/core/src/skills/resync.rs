@@ -21,6 +21,16 @@ pub struct ResyncRequest<'a> {
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
 	pub ref_commit: Option<&'a str>,
+	/// The lock coordinates the caller read BEFORE fetching, re-verified under the
+	/// mutation lock before anything is swapped — the unlocked read → fetch →
+	/// mutate window is seconds wide and the lock alone cannot cover it.
+	///
+	/// `None` ONLY for a caller that never read the entry pre-fetch, so it has
+	/// nothing to compare: the API git-sync route syncs from a session whose
+	/// source the USER picked, not from coordinates it read. Passing a re-derived
+	/// value there would be a check that proves nothing (and would reject
+	/// npx-written entries, which carry no `sourceUrl`).
+	pub expected: Option<crate::skills::lock::FetchedFrom>,
 }
 
 /// Outcome of a successful resync: every installed target was swapped to the new
@@ -37,6 +47,9 @@ pub struct ResyncReport {
 pub enum ResyncError {
 	/// The interprocess mutation lock could not be taken (nothing was mutated).
 	Locked(String),
+	/// The lock entry changed source/skillPath while this resync was fetching, so
+	/// it is no longer the entry that was fetched (nothing was mutated).
+	StaleFetch(String),
 	/// The skill has no installed copy on disk in this scope.
 	NotInstalled,
 	/// The fetched source's frontmatter `name` no longer matches the locked name.
@@ -59,6 +72,7 @@ impl std::fmt::Display for ResyncError {
 	fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
 		match self {
 			Self::Locked(e) => write!(f, "{e}"),
+			Self::StaleFetch(e) => write!(f, "{e}"),
 			Self::NotInstalled => {
 				write!(f, "skill is locked but no installed copy was found")
 			}
@@ -98,6 +112,17 @@ pub fn resync_installed_skill(
 	);
 	if targets.is_empty() {
 		return Err(ResyncError::NotInstalled);
+	}
+
+	// Compare-after-fetch: the caller read these coordinates, then fetched over
+	// the network (seconds), so prove under the lock that the entry is still the
+	// one it fetched before overwriting installed content and stamping a hash.
+	// After the disk check, which is cheaper and a more specific answer when there
+	// is simply nothing installed to resync.
+	if let Some(expected) = req.expected.as_ref() {
+		expected
+			.ensure_unchanged(req.name, req.scope, req.project_root)
+			.map_err(ResyncError::StaleFetch)?;
 	}
 
 	// Rename guard: refuse to overwrite when the upstream frontmatter `name`
@@ -179,6 +204,16 @@ mod tests {
 		.unwrap();
 	}
 
+	/// The coordinates `lock_entry()` describes — what a caller would have
+	/// fetched from. `source_url` is None there, so the effective source is
+	/// `source`.
+	fn fetched_from() -> Option<crate::skills::lock::FetchedFrom> {
+		Some(crate::skills::lock::FetchedFrom {
+			source: "owner/repo".to_string(),
+			skill_path: Some("s/SKILL.md".to_string()),
+		})
+	}
+
 	fn lock_entry() -> skill::LocalSkillLockEntry {
 		skill::LocalSkillLockEntry {
 			source_url: None,
@@ -209,6 +244,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("deadbeefcafef00d"),
+			expected: fetched_from(),
 		})
 		.unwrap();
 
@@ -235,6 +271,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&tmp.path().join("empty")),
 			ref_commit: None,
+			expected: fetched_from(),
 		})
 		.unwrap_err();
 		assert!(matches!(err, ResyncError::NotInstalled));
@@ -258,6 +295,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: None,
+			expected: fetched_from(),
 		})
 		.unwrap_err();
 		assert!(matches!(err, ResyncError::Renamed { .. }));
@@ -266,10 +304,76 @@ mod tests {
 			.contains("old"));
 	}
 
+	/// Compare-after-fetch, the widest window in the subsystem: the caller read
+	/// the entry, then spent SECONDS fetching over the network while another aghub
+	/// process repointed that entry at a different source. The resync must refuse
+	/// and leave the replacement's installed content untouched — overwriting it
+	/// would destroy the other process's work and stamp a hash that disagrees with
+	/// the lock's own coordinates.
+	#[test]
+	fn refuses_when_the_entry_was_repointed_during_the_fetch() {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let installed = project.join(".claude/skills/sync-me");
+		write_skill(&installed, "sync-me", "the other process's content");
+
+		// What the lock says NOW: a different source than the one we fetched.
+		let mut repointed = lock_entry();
+		repointed.source = "someone-else/repo".to_string();
+		repointed.source_url =
+			Some("https://example.com/someone-else/repo".to_string());
+		skill::add_skill_to_local_lock("sync-me", repointed, Some(&project))
+			.unwrap();
+		let lock_before = skill::lock::local::read_local_lock(Some(&project));
+
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "our stale fetch");
+
+		let err = resync_installed_skill(ResyncRequest {
+			source_dir: &source,
+			name: "sync-me",
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+			ref_commit: Some("newoid"),
+			// What WE fetched, read before the entry was repointed.
+			expected: fetched_from(),
+		})
+		.unwrap_err();
+
+		assert!(
+			matches!(err, ResyncError::StaleFetch(_)),
+			"a repointed entry must be refused, got {err:?}"
+		);
+		assert!(
+			std::fs::read_to_string(installed.join("SKILL.md"))
+				.unwrap()
+				.contains("the other process's content"),
+			"the other process's installed content must survive untouched"
+		);
+		assert_eq!(
+			skill::lock::local::read_local_lock(Some(&project)).skills,
+			lock_before.skills,
+			"a refused resync must not advance the lock"
+		);
+	}
+
+	/// The data-safety heart: a lock failure AFTER the destructive swap must
+	/// restore every replaced target.
+	///
+	/// The failure used to be injected by removing the tracked lock entry, which
+	/// compare-after-fetch now refuses BEFORE any swap (a better outcome, but it
+	/// would leave this rollback path uncovered). So the entry stays intact and
+	/// matching, and the lock WRITE is what fails: the project root is made
+	/// read-only, so the atomic temp+rename cannot create its temp file there,
+	/// while `.agents/skills` underneath stays writable so the swap still happens.
 	#[cfg(unix)]
 	#[test]
 	fn lock_failure_rolls_back_master_and_existing_referrer() {
-		use std::os::unix::fs::symlink;
+		use std::os::unix::fs::{symlink, PermissionsExt};
+		// Root ignores the read-only bit, so there would be no failure to observe.
+		if unsafe { libc::geteuid() } == 0 {
+			return;
+		}
 
 		let tmp = tempfile::tempdir().unwrap();
 		let project = tmp.path().join("project");
@@ -284,30 +388,41 @@ mod tests {
 			symlink(&master, referrer).unwrap();
 		}
 
-		// Keep a real lock file, but simulate the tracked entry disappearing after
-		// source resolution and before the transaction commits. The lock write now
-		// fails only after the installed target has been destructively swapped.
-		skill::add_skill_to_local_lock(
-			"unrelated",
-			lock_entry(),
-			Some(&project),
-		)
-		.unwrap();
+		// The tracked entry is present and matches what was "fetched", so the
+		// transaction runs all the way to the lock write.
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		// Pre-create the mutation lock file while the root is still writable, so
+		// the guard can open it after the freeze (it is the WRITE that must fail).
+		std::fs::write(project.join(".agents/.aghub-mutation.lock"), b"")
+			.unwrap();
 		let lock_before = skill::lock::local::read_local_lock(Some(&project));
 
 		let source = tmp.path().join("src/sync-me");
 		write_skill(&source, "sync-me", "new");
 
+		let original = std::fs::metadata(&project).unwrap().permissions();
+		std::fs::set_permissions(
+			&project,
+			std::fs::Permissions::from_mode(0o500),
+		)
+		.unwrap();
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "sync-me",
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("newoid"),
+			expected: fetched_from(),
 		})
 		.unwrap_err();
+		// Restore before asserting, so a failed assert cannot leak a read-only dir.
+		std::fs::set_permissions(&project, original).unwrap();
 
-		assert!(matches!(err, ResyncError::LockUpdate(_)));
+		assert!(
+			matches!(err, ResyncError::LockUpdate(_)),
+			"expected a post-swap lock write failure, got {err:?}"
+		);
 		assert!(
 			std::fs::read_to_string(master.join("SKILL.md"))
 				.unwrap()
@@ -330,8 +445,14 @@ mod tests {
 			);
 		}
 		let lock_after = skill::lock::local::read_local_lock(Some(&project));
-		assert_eq!(lock_after.skills, lock_before.skills);
-		assert!(!lock_after.skills.contains_key("sync-me"));
+		assert_eq!(
+			lock_after.skills, lock_before.skills,
+			"a failed lock write must leave the lock byte-identical"
+		);
+		assert_eq!(
+			lock_after.skills["sync-me"].computed_hash, "old",
+			"the un-advanced hash is what makes a later `check` see the truth"
+		);
 	}
 
 	// A swap failure must NOT advance the lock — else a later `check` would read
@@ -366,6 +487,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("newoid"),
+			expected: fetched_from(),
 		})
 		.unwrap_err();
 

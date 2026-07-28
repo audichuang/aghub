@@ -2521,6 +2521,12 @@ pub async fn git_sync_skill(
 			name: &req.name,
 			scope: resource_scope,
 			project_root: project_root.as_deref(),
+			// No pre-fetch identity to compare: this route syncs from a session
+			// whose source the USER picked, it never read the entry's coordinates.
+			// Comparing the session URL would prove nothing and would reject every
+			// npx-written entry (no `sourceUrl`). The mutation guard still covers
+			// the swap + lock write.
+			expected_source: None,
 		},
 	)
 	.map_err(|e| match e {

@@ -776,6 +776,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 					d,
 					scope,
 					project_root.as_deref(),
+					// The URL this sync actually cloned, so the resync can prove
+					// under the lock that the entry still points at it.
+					&lock_source.source_url,
 				),
 				_ => unreachable!(),
 			})
@@ -1077,6 +1080,7 @@ fn apply_update_row(
 	d: &SourceSkillDiff,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
+	fetched_from: &str,
 ) -> SyncActionView {
 	use skill_update::mutation::{resync_fetched_source, FetchedResyncRequest};
 
@@ -1087,6 +1091,7 @@ fn apply_update_row(
 			name: &d.name,
 			scope,
 			project_root,
+			expected_source: Some(fetched_from),
 		},
 	) {
 		Ok(report) => SyncActionView {

@@ -236,6 +236,12 @@ pub struct FetchedResyncRequest<'a> {
 	pub name: &'a str,
 	pub scope: aghub_core::models::ResourceScope,
 	pub project_root: Option<&'a Path>,
+	/// The source the caller read from the lock BEFORE this fetch, re-verified
+	/// against the lock under the mutation guard so a repointed entry cannot be
+	/// overwritten with a stale fetch. `None` when the caller never read the entry
+	/// pre-fetch (the user picked the source), which is the only legitimate way to
+	/// skip the check — see `aghub_core::skills::lock::FetchedFrom`.
+	pub expected_source: Option<&'a str>,
 }
 
 #[derive(Debug)]
@@ -264,6 +270,12 @@ pub fn resync_fetched_source(
 			scope: request.scope,
 			project_root: request.project_root,
 			ref_commit: Some(fetched.oid()),
+			expected: request.expected_source.map(|source| {
+				aghub_core::skills::lock::FetchedFrom {
+					source: source.to_string(),
+					skill_path: Some(request.skill_path.to_string()),
+				}
+			}),
 		},
 	)
 	.map_err(ResyncMutationError::Resync)
@@ -371,6 +383,7 @@ pub fn resync_locked_skill(
 			name: request.name,
 			scope: request.scope,
 			project_root: request.project_root,
+			expected_source: Some(&source),
 		},
 	)
 	.map_err(|error| match error {
@@ -562,6 +575,10 @@ mod tests {
 				name: "sync-me",
 				scope: ResourceScope::ProjectOnly,
 				project_root: Some(&project),
+				// The lock entry has no `source_url`, so its effective source is
+				// `source` — the verbatim value a real caller's pre-fetch read
+				// would have returned.
+				expected_source: Some("owner/repo"),
 			},
 		)
 		.expect("Fetched Source should Resync the installed skill");

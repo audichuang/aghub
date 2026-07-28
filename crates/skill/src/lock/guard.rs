@@ -80,7 +80,14 @@ pub enum MutationScope {
 }
 
 impl MutationScope {
-	/// The file whose OS lock guards this scope.
+	/// The file whose OS lock guards this scope — and the scope's ONE identity.
+	///
+	/// Everything downstream keys off this value: the `HELD` map, the acquisition
+	/// order, and the high-water mark that rejects an inverted nested acquire.
+	/// They must not use anything else. Ordering by the raw project root while
+	/// locking a canonicalized path is a deadlock: an alias for project P that
+	/// sorts after Q lets one thread order P→Q and another Q→P while both pass
+	/// the ordering check, and they then wait each other out.
 	pub fn lock_path(&self) -> PathBuf {
 		match self {
 			// Follows the global lock file wherever `XDG_STATE_HOME` puts it, so
@@ -92,38 +99,60 @@ impl MutationScope {
 			// root, while `.agents/` is already aghub's (it holds the project
 			// Master). Users who commit `.agents/` should gitignore this file.
 			//
-			// CANONICALIZED first, or two spellings of one project get two lock
-			// files and serialize against nothing: the API takes `project_root`
-			// straight from a request (`/proj` vs `/proj/`), and on macOS the
-			// walk-up root can arrive as `/var/...` where another caller resolved
-			// `/private/var/...`.
-			//
-			// Falls back to the raw path when canonicalize fails, which needs
-			// every component to exist. So two spellings of a root that does NOT
-			// exist can still fork — accepted: a mutating flow with a missing
-			// project root has nothing to serialize against and rejects the root
-			// on its own.
-			Self::Project(root) => std::fs::canonicalize(root)
-				.unwrap_or_else(|_| root.clone())
-				.join(".agents")
-				.join(LOCK_FILE_NAME),
+			// Resolved through `resolve_existing`, or two spellings of one project
+			// get two lock files and serialize against nothing: the API takes
+			// `project_root` straight from a request (`/proj` vs `/proj/`), and on
+			// macOS the walk-up root can arrive as `/var/...` where another caller
+			// resolved `/private/var/...`.
+			Self::Project(root) => {
+				resolve_existing(root).join(".agents").join(LOCK_FILE_NAME)
+			}
 		}
 	}
 
-	/// Fixed acquisition order, so a caller taking BOTH scopes can never
-	/// deadlock against one taking them the other way round.
-	fn order_key(&self) -> (u8, &Path) {
-		match self {
-			Self::Global => (0, Path::new("")),
-			Self::Project(root) => (1, root.as_path()),
-		}
-	}
-
-	/// [`Self::order_key`] as an owned value, for the per-thread high-water mark
-	/// that rejects a nested acquire in the wrong order.
+	/// Total, stable acquisition order. Global first (so a `Both` acquire reads
+	/// naturally), then projects by their resolved lock path — the SAME identity
+	/// the lock itself uses.
 	fn order_rank(&self) -> (u8, PathBuf) {
-		let (tag, path) = self.order_key();
-		(tag, path.to_path_buf())
+		match self {
+			Self::Global => (0, self.lock_path()),
+			Self::Project(_) => (1, self.lock_path()),
+		}
+	}
+}
+
+/// Canonicalize as much of `path` as exists and keep the rest verbatim.
+///
+/// Plain `canonicalize` needs EVERY component to exist, and a project root that
+/// does not exist yet is reachable — the API accepts an absolute root it has
+/// never seen, and acquiring the lock then CREATES `<root>/.agents`. With plain
+/// canonicalize that root would key one way before the create and another way
+/// after, so a nested acquire would miss `HELD` and contend with its own handle
+/// until the timeout. Resolving the longest existing ancestor keeps one identity
+/// across the create.
+///
+/// Remaining imperfection, deliberately not chased: `..` components BELOW the
+/// existing ancestor stay unresolved, so two lexically different spellings of a
+/// path that does not exist still fork. Deterministic, and no flow constructs
+/// one.
+fn resolve_existing(path: &Path) -> PathBuf {
+	let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+	let mut cursor = path;
+	loop {
+		if let Ok(resolved) = std::fs::canonicalize(cursor) {
+			let mut out = resolved;
+			out.extend(suffix.iter().rev());
+			return out;
+		}
+		match (cursor.parent(), cursor.file_name()) {
+			(Some(parent), Some(name)) => {
+				suffix.push(name.to_os_string());
+				cursor = parent;
+			}
+			// Nothing left to strip (relative path, or a root that cannot be
+			// resolved at all): use it verbatim.
+			_ => return path.to_path_buf(),
+		}
 	}
 }
 
@@ -203,17 +232,20 @@ pub fn mutation_guard(
 
 /// [`mutation_guard`] with an explicit wait bound (tests, and any caller that
 /// knows it should fail faster than the default).
+///
+/// The exact contract, because "bounded" alone is not true: `timeout` bounds the
+/// waits on FOREIGN processes — one deadline shared by every scope, so a
+/// two-scope acquire cannot quietly take twice as long. Queueing behind another
+/// thread of THIS process happens first and is deliberately unbounded; the
+/// deadline starts after it, so a thread that queued for a while still gets its
+/// full bound. See [`lock_process`] for why the two waits are treated
+/// differently. A local filesystem operation that hangs while holding the lock
+/// can therefore still stall this process — availability, not corruption.
 pub fn mutation_guard_with_timeout(
 	op: &str,
 	scopes: &[MutationScope],
 	timeout: Duration,
 ) -> io::Result<MutationGuard> {
-	// ONE deadline for the whole acquisition — the process mutex AND every scope.
-	// Per-step timeouts would make the documented bound a lie: a `Both` acquire
-	// would get 2x, and an unbounded `Mutex::lock` would let a hung mutation on
-	// another thread block this one forever.
-	let deadline = Instant::now() + timeout;
-
 	let outermost = DEPTH.with(|d| {
 		d.set(d.get() + 1);
 		d.get() == 1
@@ -223,24 +255,35 @@ pub fn mutation_guard_with_timeout(
 	let guard = MutationGuard {
 		_not_send: PhantomData,
 	};
+	// Queue behind other threads FIRST, unbounded — see `lock_process`. The
+	// deadline starts after, and covers only the waits on foreign processes, so a
+	// thread that queued for a while still gets its full bound. ONE deadline for
+	// all scopes, not one each, or a `Both` acquire would silently get 2x.
 	if outermost {
 		PROCESS_GUARD.with(|p| *p.borrow_mut() = Some(lock_process()));
 	}
+	let deadline = Instant::now() + timeout;
 
-	let mut ordered: Vec<&MutationScope> = scopes.iter().collect();
-	ordered.sort_by_key(|s| s.order_key());
-	ordered.dedup();
-	for scope in ordered {
+	// Sorted and deduplicated by the scope's ONE identity, its lock path.
+	let mut ordered: Vec<(_, &MutationScope)> =
+		scopes.iter().map(|s| (s.order_rank(), s)).collect();
+	ordered.sort_by(|a, b| a.0.cmp(&b.0));
+	ordered.dedup_by(|a, b| a.0 == b.0);
+	for (rank, scope) in ordered {
 		let path = scope.lock_path();
 		if HELD.with(|h| h.borrow().contains_key(&path)) {
 			continue;
 		}
-		reject_out_of_order(scope, op)?;
+		reject_out_of_order(&rank, op)?;
 		// `guard` is dropped on the `?`. That unwinds the depth, and if this was
 		// the outermost acquire the depth hits zero and Drop releases everything
 		// taken so far — a partial acquire never leaks.
 		let file = lock_file(&path, op, deadline)?;
 		HELD.with(|h| h.borrow_mut().insert(path, file));
+		// Advanced only AFTER the lock is really held. Recording the rank of a
+		// lock we then failed to take would spuriously reject a later legal
+		// nesting for the rest of this guard's life.
+		HIGHEST.with(|h| *h.borrow_mut() = Some(rank));
 	}
 	Ok(guard)
 }
@@ -271,18 +314,9 @@ fn lock_process() -> MutexGuard<'static, ()> {
 /// deadlocks both. No flow in this repo does that, and this keeps it that way —
 /// an error at the second acquire, rather than two processes waiting out the
 /// timeout mid-transaction.
-fn reject_out_of_order(scope: &MutationScope, op: &str) -> io::Result<()> {
-	let rank = scope.order_rank();
-	let inverted = HIGHEST.with(|h| {
-		let mut highest = h.borrow_mut();
-		match highest.as_ref() {
-			Some(held) if rank < *held => true,
-			_ => {
-				*highest = Some(rank);
-				false
-			}
-		}
-	});
+fn reject_out_of_order(rank: &(u8, PathBuf), op: &str) -> io::Result<()> {
+	let inverted =
+		HIGHEST.with(|h| h.borrow().as_ref().is_some_and(|held| rank < held));
 	if inverted {
 		return Err(io::Error::other(format!(
 			"'{op}' tried to take a lower-ordered skill mutation lock while \
@@ -474,23 +508,43 @@ mod tests {
 	}
 
 	/// Fixed order, so taking both scopes cannot deadlock against a caller that
-	/// listed them the other way round.
+	/// listed them the other way round — and the order must be derived from the
+	/// same identity the lock uses, its lock path, not from the raw root.
 	#[test]
-	fn both_scopes_sort_global_first() {
+	fn scopes_order_global_first_then_by_lock_path() {
+		let tmp = tempfile::tempdir().unwrap();
+		let a = tmp.path().join("a");
+		let b = tmp.path().join("b");
+		std::fs::create_dir_all(&a).unwrap();
+		std::fs::create_dir_all(&b).unwrap();
+
 		let mut scopes = vec![
-			MutationScope::Project(PathBuf::from("/b")),
+			MutationScope::Project(b.clone()),
 			MutationScope::Global,
-			MutationScope::Project(PathBuf::from("/a")),
+			MutationScope::Project(a.clone()),
 		];
-		scopes.sort_by(|a, b| a.order_key().cmp(&b.order_key()));
+		scopes.sort_by_key(|x| x.order_rank());
 		assert_eq!(
 			scopes,
 			vec![
 				MutationScope::Global,
-				MutationScope::Project(PathBuf::from("/a")),
-				MutationScope::Project(PathBuf::from("/b")),
+				MutationScope::Project(a.clone()),
+				MutationScope::Project(b),
 			]
 		);
+
+		// The ordering key must survive an alias: a symlinked spelling of `a` has
+		// to rank identically, or two threads can order the same pair both ways.
+		#[cfg(unix)]
+		{
+			let alias = tmp.path().join("z-alias-outranking-b");
+			std::os::unix::fs::symlink(&a, &alias).unwrap();
+			assert_eq!(
+				MutationScope::Project(a).order_rank(),
+				MutationScope::Project(alias).order_rank(),
+				"an alias must not get its own rank"
+			);
+		}
 	}
 
 	/// The same scope listed twice must be acquired once. Success under a SHORT
@@ -582,21 +636,32 @@ mod tests {
 	/// A nested acquire that orders BEFORE one this thread already holds is
 	/// refused: two processes nesting the opposite way round would otherwise
 	/// deadlock each other mid-transaction.
+	///
+	/// Two project roots named so they sort deterministically — NOT
+	/// [`MutationScope::Global`], whose lock file is under the real `$HOME` when
+	/// `XDG_STATE_HOME` is unset.
 	#[test]
 	fn a_nested_acquire_in_the_wrong_order_is_refused() {
 		let tmp = tempfile::tempdir().unwrap();
-		let root = tmp.path().to_path_buf();
-		// Project sorts AFTER Global, so holding Project and then asking for
-		// Global is the inversion.
+		let lower = tmp.path().join("a-project");
+		let higher = tmp.path().join("b-project");
+		std::fs::create_dir_all(&lower).unwrap();
+		std::fs::create_dir_all(&higher).unwrap();
+		assert!(
+			MutationScope::Project(lower.clone()).order_rank()
+				< MutationScope::Project(higher.clone()).order_rank(),
+			"fixture assumption: 'a-project' must order before 'b-project'"
+		);
+
 		let _outer = mutation_guard_with_timeout(
 			"outer",
-			&[MutationScope::Project(root)],
+			&[MutationScope::Project(higher)],
 			Duration::from_millis(200),
 		)
 		.unwrap();
 		let error = mutation_guard_with_timeout(
 			"inner",
-			&[MutationScope::Global],
+			&[MutationScope::Project(lower)],
 			Duration::from_millis(200),
 		)
 		.expect_err("a lock-order inversion must be refused, not attempted");
@@ -604,5 +669,41 @@ mod tests {
 			error.to_string().contains("lower-ordered"),
 			"unexpected message: {error}"
 		);
+	}
+
+	/// One identity, before and after the directory exists. A project root the
+	/// caller has never created keys the same way once acquiring the lock creates
+	/// `<root>/.agents` — otherwise a nested acquire misses `HELD` and contends
+	/// with its own handle until the timeout.
+	#[test]
+	fn a_root_that_does_not_exist_yet_keys_the_same_after_creation() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path().join("not-yet");
+		let scope = MutationScope::Project(root.clone());
+		let before = scope.lock_path();
+
+		let guard = mutation_guard_with_timeout(
+			"create",
+			std::slice::from_ref(&scope),
+			Duration::from_millis(200),
+		)
+		.expect("a missing root is created, not refused");
+		let after = scope.lock_path();
+		assert_eq!(
+			before, after,
+			"identity moved when the root came into being"
+		);
+
+		// The nested acquire must hit `HELD`, not the filesystem.
+		let nested = mutation_guard_with_timeout(
+			"nested",
+			&[MutationScope::Project(root)],
+			Duration::from_millis(200),
+		);
+		assert!(
+			nested.is_ok(),
+			"a nested acquire contended with its own handle: {nested:?}"
+		);
+		drop(guard);
 	}
 }

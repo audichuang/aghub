@@ -2,8 +2,12 @@
 //!
 //! `crates/skill/tests/mutation_lock.rs` proves the lock mechanism works. This
 //! file proves a core flow actually TAKES it — delete the
-//! `let _mutation_guard = …` from `prune_lock_from_dirs` and the wait assertion
-//! below goes red, which nothing in the skill crate's tests would catch.
+//! `let _mutation_guard = …` from `prune_lock_from_dirs` and both tests below go
+//! red, which nothing in the skill crate's tests would catch.
+//!
+//! Note WHICH assertion catches it: not a timing one. Without the outer guard the
+//! prune still blocks, at the writer floor inside the lock rewrite; what changes
+//! is that it scans disk BEFORE blocking. See each test.
 //!
 //! Prune is the flow under test because it is the one the spec called out by
 //! name (its scan→rewrite window) and the only guarded flow that needs no git
@@ -169,6 +173,41 @@ fn a_prune_waits_for_another_process_and_keeps_its_entry() {
 		locked.skills.contains_key("child-skill"),
 		"the other process's entry must survive the prune: {:?}",
 		locked.skills.keys().collect::<Vec<_>>()
+	);
+}
+
+/// Placement, with NO timing in it: the guard must be taken BEFORE the disk scan.
+///
+/// An unlockable location makes acquisition fail, so if the guard really is the
+/// first thing the flow does, the scanner is never called. Move the guard below
+/// the scan (or delete it) and the scanner runs — which is exactly the stale-view
+/// bug, proven here without depending on the scheduler at all.
+#[test]
+fn a_prune_takes_the_guard_before_it_scans_disk() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().join("proj");
+	std::fs::create_dir_all(root.join(".claude/skills")).unwrap();
+	// A regular file where `.agents/` must be: the lock cannot be created here.
+	std::fs::write(root.join(".agents"), b"not a directory").unwrap();
+
+	let scanned = std::cell::Cell::new(false);
+	let result = prune_lock_from_dirs(
+		PruneScope::Project,
+		&[skills_dir(&root)],
+		Some(&root),
+		|dir| {
+			scanned.set(true);
+			top_level_dirs(dir)
+		},
+	);
+
+	assert!(
+		result.is_err(),
+		"an unacquirable lock must refuse the prune, got {result:?}"
+	);
+	assert!(
+		!scanned.get(),
+		"the disk scan ran before the mutation lock was held"
 	);
 }
 

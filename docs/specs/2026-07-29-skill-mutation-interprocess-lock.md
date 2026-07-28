@@ -11,7 +11,12 @@ Two decisions diverged from the plan below, both simpler:
   supply chain. (`crates/skill` did pick up `log`, the version core already pins.)
 - **Blocking policy**: no env override. `mutation_guard` is 10s;
   `mutation_guard_with_timeout` takes an explicit bound, which is what the
-  timeout test uses.
+  timeout test uses. The bound applies to waits on **foreign processes** — one
+  deadline shared by every scope. Queueing behind another thread of the same
+  process is deliberately **unbounded**: bounding it was tried and turned
+  ordinary queued work into spurious failures (a 200ms acquire in `crates/skill`'s
+  own suite failed as soon as the other lock tests ran alongside it, which is the
+  shape of a desktop bulk operation over N skills).
 
 Implementation: `crates/skill/src/lock/guard.rs` (the guard),
 `crates/core/src/skills/lock.rs` `mutation_guard` (the `ResourceScope` seam),
@@ -43,18 +48,35 @@ reports nothing, and that Master genuinely is ours to remove — which is a
 signature change across every caller. The overclaiming comment has been corrected
 in `rename.rs`; do not re-report it as done.
 
-### Known remaining holes (the lock cannot close these)
+### Compare-after-fetch: the other half of the guarantee
 
-- **Read-before-fetch, compare-after.** `skill-update::mutation`'s resync and the
-  rename adapter read lock coordinates, run a NETWORK fetch (correctly outside
-  the lock), then mutate under it. The guard re-checks only that the old key
-  still exists, not that it is the same entry that was fetched. Closing it needs
-  the expected entry carried through the fetch and compared under the lock.
-- **`ConfigManager` guards protect the disk, not the in-memory config**, which
-  `load()` populated before the method was called. An under-lock reload would be
-  needed for full freshness.
+A fetch is a network operation and must NOT run under the lock, so the read that
+decides what to fetch is necessarily unlocked. That makes it the widest window in
+the subsystem — seconds, where everything else the lock covers is a local
+filesystem step. `skills::lock::FetchedFrom::ensure_unchanged` closes it: the
+coordinates a flow fetched from are carried through the fetch and re-verified
+under the guard, immediately before mutating. `resync_installed_skill` requires
+them (`ResyncRequest::expected`) and `accept_rename` checks them; both refuse with
+a dedicated `StaleFetch` error and mutate nothing.
+
+Compared fields are the source and `skillPath` — whose skill this is and where in
+the repo it lives. NOT `ref_name`: an adapter may legitimately override the ref
+for the operation, so comparing it would reject valid work.
+
+### Known remaining holes
+
+- **API transaction ownership.** The by-path delete and import routes hold the
+  guard correctly, but still own transactional policy instead of routing through
+  one core seam (`AGENTS.md` "NEVER hand-mirror a mutating/transactional flow
+  across surfaces"). Pre-dates this work; the guards close the races, the
+  mirroring remains debt.
 - **API auto-heal** (`routes/skills_update.rs`) applies hashes computed by an
-  earlier unlocked check to whatever same-named entry exists at write time.
+  earlier unlocked check to whatever same-named entry exists at write time. Same
+  class as compare-after-fetch and fixable the same way.
+- **Lexical `..` below a non-existent path.** `resolve_existing` canonicalizes the
+  longest existing ancestor, so identity is stable across the directory being
+  created; two lexically different spellings of a path that does not exist yet can
+  still fork. No flow constructs one.
 
 ## Problem
 

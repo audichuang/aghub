@@ -106,6 +106,9 @@ pub enum RenameError {
 	ParseFailed(String),
 	/// The interprocess mutation lock could not be taken (nothing was mutated).
 	Locked(String),
+	/// The lock entry changed source/skillPath while this rename was fetching, so
+	/// it is no longer the entry that was fetched (nothing was mutated).
+	StaleFetch(String),
 	/// The pre-mutation snapshot failed (nothing was mutated).
 	Snapshot(String),
 	/// Installing the new name failed (rolled back).
@@ -161,6 +164,7 @@ impl RenameError {
 				format!("Failed to parse fetched skill: {e}")
 			}
 			RenameError::Locked(e) => e.clone(),
+			RenameError::StaleFetch(e) => e.clone(),
 			RenameError::Snapshot(e) => e.clone(),
 			RenameError::InstallFailed(e) => {
 				format!("Failed to install renamed skill: {e}")
@@ -361,6 +365,25 @@ pub fn accept_rename(
 			req.old_name
 		)));
 	}
+
+	// Compare-after-fetch. The adapter read these coordinates, then FETCHED —
+	// seconds during which another aghub process may have repointed this very
+	// entry at a different source. The mutation lock cannot cover a network fetch,
+	// so proving the entry is still the one we fetched is the other half of the
+	// guarantee. Without it this transaction removes the old name AND its lock
+	// entry (steps 8-9) on behalf of coordinates that no longer exist — deleting
+	// the other process's skill and replacing it with content from a source the
+	// lock no longer names. Checked here: after the guard, before any mutation.
+	crate::skills::lock::FetchedFrom {
+		source: fetched.source.source_url.clone(),
+		// No path comparison: resolving a MOVED skillPath is a feature of this
+		// flow (the adapter rewrites it to where the skill actually is now), so
+		// requiring it to match the locked path would reject the case rename
+		// exists to handle. The source still binds.
+		skill_path: None,
+	}
+	.ensure_unchanged(req.old_name, resource_scope, project_root)
+	.map_err(RenameError::StaleFetch)?;
 
 	// Undo ONLY the new-name artifacts. This is the correct rollback for every
 	// failure BEFORE Step 8 touches the old name: at that point the old dirs
@@ -871,6 +894,7 @@ mod tests {
 			},
 			RenameError::ParseFailed(s()),
 			RenameError::Locked(s()),
+			RenameError::StaleFetch(s()),
 			RenameError::Snapshot(s()),
 			RenameError::InstallFailed(s()),
 			RenameError::RemovalFailed(s()),
