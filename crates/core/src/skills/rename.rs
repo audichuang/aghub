@@ -377,15 +377,23 @@ pub fn accept_rename(
 	// to whoever wrote it. `created: None` means the install returned Err without
 	// a report, so nothing can be attributed and every new-name slot is cleared.
 	//
-	// That `None` fallback is now SOUND, not merely conservative: this whole
-	// transaction holds the interprocess mutation lock (taken at the top), the
-	// pre-install check proved `new_name` was absent in this scope, and no other
-	// aghub process can have written it since — so anything standing at
-	// `new_name` is ours to remove. The lock receipts are equally trustworthy for
-	// the same reason: a `modify_*_lock` insert under the held lock is a genuine
-	// compare-and-set, so `created_lock` cannot be reported to two processes at
-	// once. Residual limit: `npx skills` takes no lock of ours, so a concurrent
-	// `npx skills` run is still unserialized (see `skill::lock::guard`).
+	// The lock this transaction holds makes the RECEIPTS trustworthy: a
+	// `modify_*_lock` insert under it is a genuine compare-and-set, so
+	// `created_lock` can no longer be reported to two aghub processes at once,
+	// and the `Some(report)` arms below are exact.
+	//
+	// The `None` arm is still a BLANKET cleanup, and it is not provably correct.
+	// It is sound against another aghub process — the lock plus the pre-install
+	// absence check leave nothing at `new_name` that could be someone else's —
+	// but `npx skills` takes no lock of ours (see `skill::lock::guard`). So an
+	// `npx skills` install of this exact `new_name`, landing between our absence
+	// check and a report-less install failure, has its work deleted here. The
+	// spec's intended payoff was an ATTRIBUTED fallback; delivering it needs
+	// `install_fetched_skill_and_lock` to carry a partial receipt out of its Err
+	// path (today an Err after `materialize_universal_master` but before the lock
+	// write reports nothing, and that Master genuinely is ours to remove), which
+	// is a signature change across every caller. Deferred deliberately, recorded
+	// in docs/specs/2026-07-29-skill-mutation-interprocess-lock.md.
 	let rollback_new_only = |created: Option<&FetchedSkillInstallReport>| {
 		let (dirs, remove_master) = match created {
 			Some(report) => {

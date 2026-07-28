@@ -30,6 +30,6 @@ skill **`npx-skills-contract`**; read it before touching lock read/write.
 
 - **NEVER** use non-string frontmatter for `name`/`description` (parser rejects)
 - **NEVER** allow `..` in resource paths (`validate_skill_structure`); repo-relative skill paths go through the `SkillPath` newtype, never raw strings
-- **NEVER** write lock tests without `TestLockGuard::new()` (serializes + isolates state home)
-- **NEVER** test the mutation lock with threads — they share its process mutex, so a thread test passes with no file lock at all (`tests/mutation_lock.rs` spawns a real second process)
+- **NEVER** write lock tests without `TestLockGuard::new()` (serializes + isolates state home). Exception, and the ONLY one: a test that touches no global state and mutates no env — the mutation-lock tests key every guard on a `tempdir` project root, and `TestLockGuard` is `#[cfg(test)]`-internal so `tests/` could not use it anyway
+- **NEVER** test the mutation lock with threads — they share its process mutex, so a thread test passes with no file lock at all (`tests/mutation_lock.rs` for the mechanism, `core/tests/mutation_lock_flows.rs` for a flow actually taking it — both spawn a real second process)
 - **NEVER** pack root `tests/` / `evals/` (intentionally excluded from packages)

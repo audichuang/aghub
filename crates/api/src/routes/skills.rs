@@ -386,6 +386,32 @@ pub async fn delete_skill_by_path(
 			..Default::default()
 		}));
 	}
+	// Hold the interprocess mutation lock for every executing path below, taken
+	// BEFORE the layout and referrer inspection that decides what to delete.
+	// The copy-layout branch further down does its own referrer sweep and
+	// `execute_removal` instead of going through `remove_skill_planned`, so
+	// without this it would read "no other agent references this master", then
+	// delete a master another aghub process re-linked in the meantime. A dry-run
+	// mutates nothing and takes no lock.
+	let _mutation_guard = if dry_run {
+		None
+	} else {
+		match aghub_core::skills::lock::mutation_guard(
+			"delete skill by path",
+			resource_scope,
+			project_root.as_deref(),
+		) {
+			Ok(guard) => Some(guard),
+			Err(error) => {
+				return Ok(Json(DeleteSkillByPathResponse {
+					success: false,
+					error: Some(error.to_string()),
+					..Default::default()
+				}));
+			}
+		}
+	};
+
 	let path_is_link = aghub_core::skills::linker::Linker::is_link(&skill_dir);
 	let canonical_layout = manager
 		.get_skill(&skill_name)
@@ -975,6 +1001,17 @@ pub fn import_skill(
 
 	// Load configuration before adding skill
 	manager.load().map_err(ApiError::from)?;
+
+	// ONE transaction for materialize + hash + lock write. Without this the
+	// manager takes the lock for the Master and releases it, then the lock write
+	// below takes it again — and another process removing the skill in between
+	// leaves this route writing a lock entry for a skill that is gone.
+	let _mutation_guard = aghub_core::skills::lock::mutation_guard(
+		"import skill",
+		resource_scope,
+		project_root.as_deref(),
+	)
+	.map_err(|e| ApiError::internal(e.to_string()))?;
 
 	let imported = manager
 		.add_skill_from_path(std::path::Path::new(&request.path))

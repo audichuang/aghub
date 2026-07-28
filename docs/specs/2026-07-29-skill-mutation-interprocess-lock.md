@@ -15,9 +15,46 @@ Two decisions diverged from the plan below, both simpler:
 
 Implementation: `crates/skill/src/lock/guard.rs` (the guard),
 `crates/core/src/skills/lock.rs` `mutation_guard` (the `ResourceScope` seam),
-`crates/skill/tests/mutation_lock.rs` (the two-process tests). The project lock
-file lives at `<project>/.agents/.aghub-mutation.lock`, NOT beside
+`crates/skill/tests/mutation_lock.rs` (mechanism, two-process) and
+`crates/core/tests/mutation_lock_flows.rs` (a flow actually taking it). The
+project lock file lives at `<project>/.agents/.aghub-mutation.lock`, NOT beside
 `skills-lock.json` — the repo root is the user's, `.agents/` is already aghub's.
+
+Also decided against the plan, after review: **acquisition never degrades**. The
+plan's blocking policy forbade a "silent non-blocking skip" on contention; an
+early revision also degraded to a `log::warn` when a location could not be locked
+at all, which review showed to be strictly worse than an error — a warning is
+invisible in the desktop/API, and it masked a total failure (opening the lock file
+append-only made `try_lock` fail on ALL of Windows, so Windows would have shipped
+with no interprocess lock and no symptom). Every acquisition failure is now an
+error, and the file is opened `read + write`.
+
+### Not delivered from "What this unlocks"
+
+Three of the four landed. The fourth — _"rename's report-less `Err` fallback can
+become attributed instead of clearing every new-name slot"_ — did **not**. The
+fallback is now sound against another aghub process (the lock plus the
+pre-install absence check), but it stays a blanket cleanup, so an `npx skills`
+install of the same `new_name` racing a report-less install failure still has its
+work removed. Delivering the attributed version needs
+`install_fetched_skill_and_lock` to carry a partial receipt out of its `Err` path
+— today an `Err` after `materialize_universal_master` but before the lock write
+reports nothing, and that Master genuinely is ours to remove — which is a
+signature change across every caller. The overclaiming comment has been corrected
+in `rename.rs`; do not re-report it as done.
+
+### Known remaining holes (the lock cannot close these)
+
+- **Read-before-fetch, compare-after.** `skill-update::mutation`'s resync and the
+  rename adapter read lock coordinates, run a NETWORK fetch (correctly outside
+  the lock), then mutate under it. The guard re-checks only that the old key
+  still exists, not that it is the same entry that was fetched. Closing it needs
+  the expected entry carried through the fetch and compared under the lock.
+- **`ConfigManager` guards protect the disk, not the in-memory config**, which
+  `load()` populated before the method was called. An under-lock reload would be
+  needed for full freshness.
+- **API auto-heal** (`routes/skills_update.rs`) applies hashes computed by an
+  earlier unlocked check to whatever same-named entry exists at write time.
 
 ## Problem
 

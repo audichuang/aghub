@@ -264,6 +264,17 @@ impl ConfigManager {
 	}
 
 	pub fn update_skill(&mut self, name: &str, skill: Skill) -> Result<()> {
+		// A rename here is `rename_skill_master` + a relink of every Referrer —
+		// itself transactional, so it must not interleave with another process's
+		// install of either name. Scope (not write_scope) because the relink
+		// sweeps every in-scope agent dir.
+		let _mutation_guard = crate::skills::lock::mutation_guard(
+			"update skill",
+			self.scope,
+			self.project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
+
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
 		// Captured before the mutable borrow below so the universal-rename relink
@@ -401,6 +412,16 @@ impl ConfigManager {
 	}
 
 	pub fn remove_skill(&mut self, name: &str) -> Result<()> {
+		// Guarded like every other disk mutation: this deletes a Master or a
+		// Referrer, and the CLI add path calls it as a ROLLBACK after a failed
+		// add — the one caller that most needs the deletion attributed to us.
+		let _mutation_guard = crate::skills::lock::mutation_guard(
+			"remove skill",
+			self.scope,
+			self.project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
+
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
 		// Allow-listed roots for the containment guard, computed before the
@@ -480,6 +501,25 @@ impl ConfigManager {
 
 		let skill = self.skill_for_planned_removal(name, all_agents)?;
 
+		// Taken BEFORE `plan_removal` on any executing path, not just before the
+		// delete: the plan carries the referrer sweep that decides whether a
+		// Master may go, so planning outside the lock and deleting inside it
+		// would act on a sweep another process has already invalidated (it links
+		// a new Referrer to that Master; we delete it anyway). A dry-run mutates
+		// nothing and deliberately takes no lock.
+		let _mutation_guard = if dry_run {
+			None
+		} else {
+			Some(
+				crate::skills::lock::mutation_guard(
+					"remove skill",
+					self.scope,
+					self.project_root.as_deref(),
+				)
+				.map_err(ConfigError::Io)?,
+			)
+		};
+
 		let own_agent_dir = self.target_skills_dir();
 		let scope = self.scope;
 		let project_root = self.project_root.clone();
@@ -505,17 +545,6 @@ impl ConfigManager {
 				prune: removal::PruneStatus::NotRun,
 			});
 		}
-
-		// Spans the removal AND the prune below: a prune whose disk scan runs
-		// after another process re-installed this name would otherwise drop its
-		// fresh lock entry. Taken only on the executing path — a dry-run mutates
-		// nothing and must not block a concurrent mutation.
-		let _mutation_guard = crate::skills::lock::mutation_guard(
-			"remove skill",
-			self.scope,
-			self.project_root.as_deref(),
-		)
-		.map_err(ConfigError::Io)?;
 
 		info!(
 			"removing skill '{}' (layout={:?}, all_agents={})",

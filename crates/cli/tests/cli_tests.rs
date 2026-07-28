@@ -1449,6 +1449,13 @@ fn perms_enforced(under: &std::path::Path) -> bool {
 /// A prune write failure is non-fatal: the skill is still deleted and the JSON
 /// surfaces `prune_error` (read-only lock dir forces the post-delete lock write
 /// to fail). Pins the `PruneStatus::Failed` -> `prune_error` serialization.
+///
+/// The mutation lock file is pre-created writable BEFORE the directory is frozen,
+/// so the guard can still open it and this test keeps exercising the lock-WRITE
+/// failure it is about. Without that the guard itself would be refused (it cannot
+/// create its file in a read-only dir) and the delete would never run — which is
+/// the intended behaviour for that case, covered separately by
+/// `delete_skill_refuses_when_the_mutation_lock_cannot_be_created`.
 #[cfg(unix)]
 #[test]
 fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
@@ -1464,6 +1471,7 @@ fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
 		eprintln!("skip: perms not enforced (root)");
 		return;
 	}
+	std::fs::write(lock_dir.join(".aghub-mutation.lock"), b"").unwrap();
 	let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
 	std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o555))
 		.unwrap();
@@ -1495,6 +1503,53 @@ fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
 	assert!(
 		json.get("pruneError").is_none(),
 		"prune_error must be snake_case to match the API DeleteSkillByPathResponse"
+	);
+}
+
+/// The other half of the case above: when the interprocess mutation lock cannot
+/// even be CREATED, the delete is REFUSED rather than run unprotected. Deleting
+/// unlocked could remove a Master another aghub process just re-linked, and a
+/// state dir this broken cannot record any mutation, so the user needs to see it
+/// instead of finding a lock that silently drifted from disk.
+#[cfg(unix)]
+#[test]
+fn delete_skill_refuses_when_the_mutation_lock_cannot_be_created() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "keeper");
+	let lock_path = seed_global_lock(state.path());
+	let lock_dir = lock_path.parent().unwrap().to_path_buf();
+
+	if !perms_enforced(&lock_dir) {
+		eprintln!("skip: perms not enforced (root)");
+		return;
+	}
+	// No pre-created lock file this time, so the guard cannot open one.
+	let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
+	std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "keeper", "--yes"])
+		.output()
+		.unwrap();
+
+	std::fs::set_permissions(&lock_dir, orig).unwrap();
+
+	assert!(
+		!out.status.success(),
+		"an unacquirable mutation lock must refuse the delete"
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("mutation lock") && stderr.contains("refused"),
+		"the error must explain why nothing was deleted: {stderr}"
+	);
+	assert!(
+		skill_dir.exists(),
+		"a refused delete must leave the skill on disk"
 	);
 }
 

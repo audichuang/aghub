@@ -6,6 +6,11 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Skill packaging and parsing library for .skill/.zip files"
+# `std::fs::File::lock` (the interprocess mutation lock in src/lock/guard.rs)
+# stabilized in 1.89. Declared so an older toolchain fails with an MSRV message
+# instead of "no method named `lock`". Every other crate reaches this one, so
+# declaring it here covers a workspace build.
+rust-version = "1.89"
 
 [dependencies]
 serde = { workspace = true }

@@ -44,6 +44,11 @@ pub enum PruneError {
 	/// Writing the lock failed.
 	#[error("failed to write lock: {0}")]
 	Io(#[from] std::io::Error),
+	/// The interprocess mutation lock could not be taken; nothing was scanned
+	/// and NOTHING was written. Distinct from [`PruneError::Io`] precisely so the
+	/// message cannot claim a write that never happened.
+	#[error("{0}")]
+	Locked(String),
 	/// A project-scope prune was requested without a project root.
 	#[error("project prune requires a project root")]
 	MissingProjectRoot,
@@ -123,7 +128,8 @@ where
 			PruneScope::Project => ResourceScope::ProjectOnly,
 		},
 		project_root,
-	)?;
+	)
+	.map_err(|e| PruneError::Locked(e.to_string()))?;
 	let disk = collect_disk_dir_names(dirs, scan)?;
 	prune_lock(scope, &disk, project_root)
 }

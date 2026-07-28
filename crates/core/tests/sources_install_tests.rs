@@ -936,8 +936,12 @@ fn universal_install_universal_error_fails_all_agents() {
 	let project = tempdir().unwrap();
 	let project_root = project.path().to_path_buf();
 
-	// `.agents` is a file, not a dir → mkdir of `.agents/skills` fails.
-	std::fs::write(project_root.join(".agents"), b"not a dir").unwrap();
+	// `.agents/skills` is a file, not a dir → mkdir of it fails. Deliberately
+	// NOT `.agents` itself: that dir also holds the interprocess mutation lock
+	// file, so breaking it would fail the guard BEFORE the install runs and this
+	// test would stop covering per-agent error attribution at all.
+	std::fs::create_dir_all(project_root.join(".agents")).unwrap();
+	std::fs::write(project_root.join(".agents/skills"), b"not a dir").unwrap();
 
 	let fetched = tempdir().unwrap();
 	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
@@ -1127,9 +1131,13 @@ fn shared_master_failure_is_attributed_to_every_agent() {
 	set_skills_path_override("claude", Some(claude_dir));
 	set_skills_path_override("codex", Some(codex_dir));
 
-	// Make the shared `.agents/skills` parent impossible to create. The one
-	// shared setup must fail once and attribute that same failure to both rows.
-	std::fs::write(project_root.join(".agents"), "not a directory").unwrap();
+	// Make the shared `.agents/skills` impossible to create. The one shared setup
+	// must fail once and attribute that same failure to both rows. Breaking
+	// `.agents` itself would instead fail the mutation guard (its lock file lives
+	// there) before the install could attribute anything.
+	std::fs::create_dir_all(project_root.join(".agents")).unwrap();
+	std::fs::write(project_root.join(".agents/skills"), "not a directory")
+		.unwrap();
 	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
 		skill_file: &skill_md,
 		source: &sample_source(),
