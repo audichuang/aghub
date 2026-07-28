@@ -2,11 +2,12 @@
 //! primitive (Phase 2 of the CLI sources work).
 //!
 //! These exercise the per-agent install + lock behavior end to end against a
-//! fetched skill tree on disk. The GLOBAL lock is process-wide (keyed off
-//! `XDG_STATE_HOME`), so its tests serialize through a single mutex and point
-//! `XDG_STATE_HOME` at a fresh temp dir; per-agent target dirs are isolated via
-//! the thread-local `set_skills_path_override`.
+//! fetched skill tree on disk. The GLOBAL lock and Master are process-wide
+//! (keyed off `XDG_STATE_HOME` and `HOME`), so every test serializes through a
+//! single mutex and points both variables at fresh temp dirs. Per-agent target
+//! dirs are isolated via project roots or `set_skills_path_override`.
 
+use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
@@ -19,11 +20,14 @@ use aghub_core::skills::linker::LinkTarget;
 use aghub_core::AgentType;
 use tempfile::{tempdir, TempDir};
 
-/// Serializes + isolates the GLOBAL lock by pointing `XDG_STATE_HOME` at a
-/// fresh temp dir (core cannot import skill's `pub(crate)` TestLockGuard).
+/// Serializes environment access and isolates the GLOBAL lock + Master by
+/// pointing `XDG_STATE_HOME` and `HOME` at fresh temp dirs (core cannot import
+/// skill's `pub(crate)` TestLockGuard).
 struct GlobalLockGuard {
-	_temp: TempDir,
-	old: Option<String>,
+	home: TempDir,
+	_state: TempDir,
+	old_home: Option<OsString>,
+	old_state: Option<OsString>,
 	_lock: MutexGuard<'static, ()>,
 }
 
@@ -34,20 +38,33 @@ impl GlobalLockGuard {
 			.get_or_init(|| Mutex::new(()))
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
-		let temp = tempdir().unwrap();
-		let old = std::env::var("XDG_STATE_HOME").ok();
-		std::env::set_var("XDG_STATE_HOME", temp.path());
+		let home = tempdir().unwrap();
+		let state = tempdir().unwrap();
+		let old_home = std::env::var_os("HOME");
+		let old_state = std::env::var_os("XDG_STATE_HOME");
+		std::env::set_var("HOME", home.path());
+		std::env::set_var("XDG_STATE_HOME", state.path());
 		Self {
-			_temp: temp,
-			old,
+			home,
+			_state: state,
+			old_home,
+			old_state,
 			_lock: guard,
 		}
+	}
+
+	fn home(&self) -> &Path {
+		self.home.path()
 	}
 }
 
 impl Drop for GlobalLockGuard {
 	fn drop(&mut self) {
-		match &self.old {
+		match &self.old_home {
+			Some(v) => std::env::set_var("HOME", v),
+			None => std::env::remove_var("HOME"),
+		}
+		match &self.old_state {
 			Some(v) => std::env::set_var("XDG_STATE_HOME", v),
 			None => std::env::remove_var("XDG_STATE_HOME"),
 		}
@@ -57,12 +74,21 @@ impl Drop for GlobalLockGuard {
 /// Write `<root>/<dir>/SKILL.md` with the given frontmatter name and return the
 /// SKILL.md path.
 fn write_skill(root: &Path, dir: &str, name: &str) -> PathBuf {
+	write_skill_with_body(root, dir, name, "body")
+}
+
+fn write_skill_with_body(
+	root: &Path,
+	dir: &str,
+	name: &str,
+	body: &str,
+) -> PathBuf {
 	let skill_dir = root.join(dir);
 	std::fs::create_dir_all(&skill_dir).unwrap();
 	let skill_md = skill_dir.join("SKILL.md");
 	std::fs::write(
 		&skill_md,
-		format!("---\nname: {name}\ndescription: a test skill\n---\nbody\n"),
+		format!("---\nname: {name}\ndescription: a test skill\n---\n{body}\n"),
 	)
 	.unwrap();
 	skill_md
@@ -78,6 +104,633 @@ fn sample_source() -> skill::InstallLockSource {
 }
 
 #[test]
+fn project_existing_different_master_rejects_before_native_or_link_mutation() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"fetched bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"local bytes that must survive",
+	);
+	let before = std::fs::read(&master_md).unwrap();
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	let error = result.expect_err(
+		"a fetched source must not adopt a different pre-existing Master",
+	);
+	assert!(
+		error.to_string().contains("Master")
+			&& error.to_string().contains("different"),
+		"error should explain the Master integrity conflict: {error}",
+	);
+	assert_eq!(
+		std::fs::read(&master_md).unwrap(),
+		before,
+		"the pre-existing Master bytes must remain untouched",
+	);
+	assert!(
+		!project_root.join(".claude/skills/alpha").exists(),
+		"the NeedsLink target must not receive a Referrer",
+	);
+	assert!(
+		!skill::lock::local::read_local_lock(Some(&project_root))
+			.skills
+			.contains_key("alpha"),
+		"the fetched source must not be stamped into the project lock",
+	);
+}
+
+#[test]
+#[cfg(unix)]
+fn global_existing_different_master_rejects_before_native_or_link_mutation() {
+	let g = GlobalLockGuard::new();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"fetched bytes",
+	);
+	let master_md = write_skill_with_body(
+		&g.home().join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"global local bytes that must survive",
+	);
+	let before = std::fs::read(&master_md).unwrap();
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Absolute,
+	});
+
+	let error = result.expect_err(
+		"a fetched source must not adopt a different global Master",
+	);
+	assert!(
+		error.to_string().contains("Master")
+			&& error.to_string().contains("different"),
+		"error should explain the Master integrity conflict: {error}",
+	);
+	assert_eq!(
+		std::fs::read(&master_md).unwrap(),
+		before,
+		"the pre-existing global Master bytes must remain untouched",
+	);
+	assert!(
+		!g.home().join(".claude/skills/alpha").exists(),
+		"the global NeedsLink target must not receive a Referrer",
+	);
+	assert!(
+		skill::lock::global::get_skill_from_lock("alpha").is_none(),
+		"the fetched source must not be stamped into the global lock",
+	);
+}
+
+#[test]
+#[cfg(unix)]
+fn exact_byte_untracked_master_is_adopted_for_native_and_link_targets() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let expected_hash = skill::compute_skill_folder_hash(
+		skill_md.parent().expect("fetched skill dir"),
+	)
+	.unwrap();
+	assert_eq!(
+		skill::compute_skill_folder_hash(
+			master_md.parent().expect("Master skill dir")
+		)
+		.unwrap(),
+		expected_hash,
+		"fixture must start as an exact-byte untracked Master",
+	);
+
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	})
+	.expect("an exact-byte untracked Master should be adoptable");
+
+	assert!(report.wrote_lock, "adoption must stamp source provenance");
+	assert!(
+		report.agent_results.iter().all(|row| row.installed),
+		"NativeReader and NeedsLink targets should both receive the adopted skill",
+	);
+	let referrer = project_root.join(".claude/skills/alpha");
+	assert!(
+		aghub_core::skills::linker::Linker::is_link(&referrer),
+		"the NeedsLink target should receive a Referrer",
+	);
+	assert_eq!(
+		skill::compute_skill_folder_hash(
+			project_root.join(".agents/skills/alpha").as_path()
+		)
+		.unwrap(),
+		expected_hash,
+		"adoption must not alter the exact-byte Master",
+	);
+	let lock = skill::lock::local::read_local_lock(Some(&project_root));
+	let entry = lock.skills.get("alpha").expect("adoption lock entry");
+	assert_eq!(entry.source, source.source);
+	assert_eq!(entry.computed_hash, expected_hash);
+}
+
+#[test]
+#[cfg(unix)]
+fn exact_byte_untracked_master_with_existing_referrer_is_adopted() {
+	use std::os::unix::fs::symlink;
+
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let referrer = project_root.join(".claude/skills/alpha");
+	std::fs::create_dir_all(referrer.parent().unwrap()).unwrap();
+	symlink(master_md.parent().unwrap(), &referrer).unwrap();
+
+	let source = sample_source();
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	})
+	.expect("an exact Master with a correct Referrer should be adoptable");
+
+	assert!(
+		report.wrote_lock,
+		"a successfully covered NeedsLink target must permit provenance adoption"
+	);
+	assert_eq!(report.agent_results.len(), 1);
+	assert!(report.agent_results[0].error.is_none());
+	assert!(
+		skill::lock::local::read_local_lock(Some(&project_root))
+			.skills
+			.contains_key("alpha"),
+		"adoption must persist the source lock"
+	);
+}
+
+#[test]
+#[cfg(unix)]
+fn symlink_master_is_rejected_before_referrer_or_lock_mutation() {
+	use std::os::unix::fs::symlink;
+
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let outside = tempdir().unwrap();
+	let outside_md = write_skill_with_body(
+		outside.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master = project_root.join(".agents/skills/alpha");
+	std::fs::create_dir_all(master.parent().unwrap()).unwrap();
+	symlink(outside_md.parent().unwrap(), &master).unwrap();
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	let error = result.expect_err("a Master slot must never be a link");
+	assert!(
+		error.to_string().contains("Master")
+			&& error.to_string().contains("link"),
+		"error should explain the unsafe Master occupant: {error}"
+	);
+	assert!(
+		aghub_core::skills::linker::Linker::is_link(&master),
+		"the rejected Master link must remain untouched"
+	);
+	assert_eq!(
+		std::fs::read_to_string(&outside_md).unwrap(),
+		"---\nname: alpha\ndescription: a test skill\n---\nidentical bytes\n"
+	);
+	assert!(!project_root.join(".claude/skills/alpha").exists());
+	assert!(!skill::lock::local::read_local_lock(Some(&project_root))
+		.skills
+		.contains_key("alpha"));
+}
+
+#[test]
+#[cfg(unix)]
+fn master_with_nested_symlink_is_rejected_before_referrer_or_lock_mutation() {
+	use std::os::unix::fs::symlink;
+
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let outside = tempdir().unwrap();
+	let outside_asset = outside.path().join("secret.txt");
+	std::fs::write(&outside_asset, "must stay outside provenance").unwrap();
+	let nested_link = master_md.parent().unwrap().join("assets/evil");
+	std::fs::create_dir_all(nested_link.parent().unwrap()).unwrap();
+	symlink(&outside_asset, &nested_link).unwrap();
+	assert_eq!(
+		skill::compute_skill_folder_hash(master_md.parent().unwrap()).unwrap(),
+		skill::compute_skill_folder_hash(skill_md.parent().unwrap()).unwrap(),
+		"the fixture proves content hashing alone cannot see the nested link"
+	);
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("deadbeef".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	let error = result.expect_err("adoption must reject every nested link");
+	assert!(
+		error.to_string().contains("Master")
+			&& error.to_string().contains("link"),
+		"error should explain the unsafe nested Master link: {error}"
+	);
+	assert!(
+		aghub_core::skills::linker::Linker::is_link(&nested_link),
+		"the rejected nested link must remain untouched"
+	);
+	assert_eq!(
+		std::fs::read_to_string(&outside_asset).unwrap(),
+		"must stay outside provenance"
+	);
+	assert!(!project_root.join(".claude/skills/alpha").exists());
+	assert!(!skill::lock::local::read_local_lock(Some(&project_root))
+		.skills
+		.contains_key("alpha"));
+}
+
+#[test]
+fn matching_master_with_different_project_source_owner_is_not_reassigned() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let other_source = skill::InstallLockSource {
+		source: "different-owner/different-repo".to_string(),
+		source_type: "github".to_string(),
+		source_url: "https://github.com/different-owner/different-repo.git"
+			.to_string(),
+		ref_name: Some("main".to_string()),
+	};
+	skill::write_project_install_lock(
+		"alpha",
+		&other_source,
+		Some("alpha/SKILL.md".to_string()),
+		master_md.parent().expect("Master skill dir"),
+		&project_root,
+		Some("oldcommit".to_string()),
+	)
+	.unwrap();
+	let lock_path = project_root.join("skills-lock.json");
+	let lock_before = std::fs::read(&lock_path).unwrap();
+	let master_before = std::fs::read(&master_md).unwrap();
+
+	let requested_source = sample_source();
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &requested_source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("newcommit".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	let error = result.expect_err(
+		"a fetched install must not reassign an existing normalized source owner",
+	);
+	assert!(
+		error.to_string().contains("different-owner/different-repo")
+			&& error.to_string().contains("owner/repo"),
+		"ownership conflict should name both normalized sources: {error}",
+	);
+	assert_eq!(
+		std::fs::read(&master_md).unwrap(),
+		master_before,
+		"the matching Master must remain unchanged",
+	);
+	assert!(
+		!project_root.join(".claude/skills/alpha").exists(),
+		"ownership must be checked before creating a Referrer",
+	);
+	assert_eq!(
+		std::fs::read(&lock_path).unwrap(),
+		lock_before,
+		"the existing lock owner and Source hash must remain byte-for-byte intact",
+	);
+}
+
+#[test]
+fn matching_master_with_same_repo_path_on_another_host_is_not_reassigned() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let original_source = skill::InstallLockSource {
+		source: "owner/repo".to_string(),
+		source_type: "git".to_string(),
+		source_url: "https://git.example.test/owner/repo.git".to_string(),
+		ref_name: Some("main".to_string()),
+	};
+	skill::write_project_install_lock(
+		"alpha",
+		&original_source,
+		Some("alpha/SKILL.md".to_string()),
+		master_md.parent().unwrap(),
+		&project_root,
+		Some("oldcommit".to_string()),
+	)
+	.unwrap();
+	let lock_path = project_root.join("skills-lock.json");
+	let lock_before = std::fs::read(&lock_path).unwrap();
+	let requested_source = skill::InstallLockSource {
+		source: "owner/repo".to_string(),
+		source_type: "git".to_string(),
+		source_url: "https://another.example.test/owner/repo.git".to_string(),
+		ref_name: Some("main".to_string()),
+	};
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &requested_source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("newcommit".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	let error = result.expect_err(
+		"the same owner/repo path on another host must be a different owner",
+	);
+	assert!(
+		error.to_string().contains("source owner"),
+		"error should explain the source ownership conflict: {error}"
+	);
+	assert!(!project_root.join(".claude/skills/alpha").exists());
+	assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
+}
+
+#[test]
+fn legacy_remote_lock_without_host_identity_is_not_reassigned() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&project_root.join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_hash =
+		skill::compute_skill_folder_hash(master_md.parent().unwrap()).unwrap();
+	skill::add_skill_to_local_lock(
+		"alpha",
+		skill::LocalSkillLockEntry {
+			source: "owner/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			source_type: "git".to_string(),
+			skill_path: Some("alpha/SKILL.md".to_string()),
+			computed_hash: master_hash,
+			ref_commit: Some("oldcommit".to_string()),
+			source_url: None,
+		},
+		Some(&project_root),
+	)
+	.unwrap();
+	let lock_path = project_root.join("skills-lock.json");
+	let lock_before = std::fs::read(&lock_path).unwrap();
+	let requested_source = skill::InstallLockSource {
+		source: "owner/repo".to_string(),
+		source_type: "git".to_string(),
+		source_url: "https://git.example.test/owner/repo.git".to_string(),
+		ref_name: Some("main".to_string()),
+	};
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &requested_source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("newcommit".to_string()),
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	result.expect_err(
+		"a legacy non-GitHub lock without a host cannot prove source ownership",
+	);
+	assert!(!project_root.join(".claude/skills/alpha").exists());
+	assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
+}
+
+#[test]
+#[cfg(unix)]
+fn matching_master_with_different_global_source_owner_is_not_reassigned() {
+	let g = GlobalLockGuard::new();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let master_md = write_skill_with_body(
+		&g.home().join(".agents/skills"),
+		"alpha",
+		"alpha",
+		"identical bytes",
+	);
+	let other_source = skill::InstallLockSource {
+		source: "different-owner/different-repo".to_string(),
+		source_type: "github".to_string(),
+		source_url: "https://github.com/different-owner/different-repo.git"
+			.to_string(),
+		ref_name: Some("main".to_string()),
+	};
+	skill::write_global_install_lock(
+		"alpha",
+		&other_source,
+		Some("alpha/SKILL.md".to_string()),
+		master_md.parent().expect("Master skill dir"),
+		Some("oldcommit".to_string()),
+	)
+	.unwrap();
+	let lock_path = skill::lock::global::get_skill_lock_path();
+	let lock_before = std::fs::read(&lock_path).unwrap();
+
+	let requested_source = sample_source();
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &requested_source,
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: Some("newcommit".to_string()),
+		scope: ResourceScope::GlobalOnly,
+		project_root: None,
+		target_agents: &[AgentType::Codex, AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Absolute,
+	});
+
+	let error = result.expect_err(
+		"a fetched install must not reassign a global source owner",
+	);
+	assert!(
+		error.to_string().contains("different-owner/different-repo")
+			&& error.to_string().contains("owner/repo"),
+		"ownership conflict should name both normalized sources: {error}",
+	);
+	assert!(
+		!g.home().join(".claude/skills/alpha").exists(),
+		"global ownership must be checked before creating a Referrer",
+	);
+	assert_eq!(
+		std::fs::read(&lock_path).unwrap(),
+		lock_before,
+		"the global lock owner and Source hash must remain byte-for-byte intact",
+	);
+}
+
+#[test]
+#[cfg(unix)]
 fn isolated_copy_installs_writes_global_lock_and_per_agent_result() {
 	let _g = GlobalLockGuard::new();
 
@@ -565,11 +1218,8 @@ fn unsupported_scope_rejected_before_any_write() {
 	// HOME dir (`~/.agents/skills`), so we isolate HOME to a temp dir (the
 	// GlobalLockGuard mutex serializes env mutation) and assert that path stays
 	// untouched. Before the fix the master is copied THERE before the Err.
-	let _g = GlobalLockGuard::new();
-
-	let home = tempdir().unwrap();
-	let old_home = std::env::var("HOME").ok();
-	std::env::set_var("HOME", home.path());
+	let g = GlobalLockGuard::new();
+	let home = g.home();
 
 	let fetched = tempdir().unwrap();
 	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
@@ -588,12 +1238,8 @@ fn unsupported_scope_rejected_before_any_write() {
 	})
 	.expect_err("Combined scope must be refused");
 
-	let home_canonical = home.path().join(".agents/skills/alpha");
-	let home_agents = home.path().join(".agents");
-	match &old_home {
-		Some(v) => std::env::set_var("HOME", v),
-		None => std::env::remove_var("HOME"),
-	}
+	let home_canonical = home.join(".agents/skills/alpha");
+	let home_agents = home.join(".agents");
 
 	assert!(
 		err.to_string().contains("scope")
@@ -613,6 +1259,7 @@ fn unsupported_scope_rejected_before_any_write() {
 }
 
 #[test]
+#[cfg(unix)]
 fn rename_guard_rejects_mismatch_and_writes_nothing() {
 	let _g = GlobalLockGuard::new();
 

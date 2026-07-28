@@ -19,7 +19,7 @@ use crate::{https_only_token, FetchError, FetchedRepo, SourceRef};
 /// Per-fetch HTTP timeout for the gix shallow backend (matches the historical
 /// `GitFetcher` bound so a stuck remote cannot hang forever).
 const FETCH_HTTP_TIMEOUT: Duration = Duration::from_secs(30);
-const CATALOG_MAX_DEPTH: usize = 10;
+pub(crate) const CATALOG_MAX_DEPTH: usize = 10;
 
 /// Which backend resolved a given `commit_oid`. Memoized so `list`/`fetch`
 /// always hit the same slot that produced the snapshot.

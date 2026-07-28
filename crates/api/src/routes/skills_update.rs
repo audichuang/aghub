@@ -33,8 +33,9 @@ use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
 use crate::skills::resync::safe_resync_error;
 use skill_update::mutation::{
-	accept_fetched_rename, resync_locked_skill, FetchMutationError,
-	FetchedSourceRequest, LockedResyncError, LockedResyncRequest,
+	accept_fetched_rename, fetch_for_rename, resync_locked_skill,
+	FetchRenameError, FetchedRenameRequest, LockedResyncError,
+	LockedResyncRequest,
 };
 // Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
 // match its gate exactly or Windows clippy flags an unused import.
@@ -610,33 +611,40 @@ pub(crate) async fn accept_rename_inner(
 		}
 	};
 
-	// Step 3: the shared mutation seam owns auth, path validation, selective
-	// materialization, and the commit-pinned Fetched Source lifetime.
-	let fetched = match skill_update::mutation::fetch_for_mutation(
-		FetchedSourceRequest {
-			source: &source.source_url,
-			ref_name: source.ref_name.as_deref(),
-			skill_path: &source.skill_path,
+	// Step 3: the shared mutation seam owns auth, catalog scanning, new-path
+	// validation, and the commit-pinned Fetched Source lifetime.
+	let prepared = match fetch_for_rename(
+		FetchedRenameRequest {
+			source: &source,
+			new_name: &req.new_name,
 		},
 		fetcher,
 		resolver,
 	) {
-		Ok(fetched) => fetched,
-		Err(FetchMutationError::CredentialBackendUnavailable) => {
+		Ok(prepared) => prepared,
+		Err(FetchRenameError::CredentialBackendUnavailable) => {
 			return Err(crate::credentials::CredentialStoreError::Unavailable(
 				"credential backend unreachable".to_string(),
 			)
 			.into());
 		}
-		Err(FetchMutationError::InvalidSkillPath) => {
+		Err(FetchRenameError::CatalogScan) => {
 			return Ok(Json(accept_rename_error(
 				&req.old_name,
 				&req.new_name,
 				&req.scope,
-				"Locked skillPath is not a valid skill folder",
+				"Fetched source catalog could not be scanned safely",
 			)));
 		}
-		Err(FetchMutationError::Fetch(error)) => {
+		Err(FetchRenameError::SkillNotFound) => {
+			return Ok(Json(accept_rename_error(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				"New skill name was not found in the fetched source",
+			)));
+		}
+		Err(FetchRenameError::Fetch(error)) => {
 			return Ok(Json(accept_rename_error(
 				&req.old_name,
 				&req.new_name,
@@ -648,13 +656,13 @@ pub(crate) async fn accept_rename_inner(
 
 	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core.
 	match accept_fetched_rename(
-		&fetched,
+		&prepared.fetched,
 		RenameRequest {
 			old_name: &req.old_name,
 			new_name: &req.new_name,
 			scope,
 		},
-		&source,
+		&prepared.source,
 	) {
 		Ok(ok) => Ok(Json(AcceptRenameResponse {
 			success: true,
@@ -1700,7 +1708,7 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn accept_rename_inner_installs_new_and_removes_old() {
+	fn accept_rename_inner_resolves_moved_path_and_rewrites_lock() {
 		with_isolated_state(|| {
 			let home = tempfile::tempdir().unwrap();
 			// Install old skill
@@ -1717,13 +1725,13 @@ mod tests {
 			// Lock entry for old-skill
 			let mut lock = skill::SkillLockFile::default();
 			let mut entry = global_entry();
-			entry.skill_path = Some("new-skill/SKILL.md".to_string());
+			entry.skill_path = Some("old/location/SKILL.md".to_string());
 			lock.skills.insert("old-skill".into(), entry);
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
 			// Fetched repo has SKILL.md with new name
 			let fetched = tempfile::tempdir().unwrap();
-			let new_skill_dir = fetched.path().join("new-skill");
+			let new_skill_dir = fetched.path().join("new/location");
 			std::fs::create_dir_all(&new_skill_dir).unwrap();
 			std::fs::write(
 				new_skill_dir.join("SKILL.md"),
@@ -1769,6 +1777,11 @@ mod tests {
 			assert!(
 				!lock.skills.contains_key("old-skill"),
 				"old-skill removed from lock"
+			);
+			assert_eq!(
+				lock.skills["new-skill"].skill_path.as_deref(),
+				Some("new/location/SKILL.md"),
+				"the new lock must carry the discovered moved path"
 			);
 		});
 	}

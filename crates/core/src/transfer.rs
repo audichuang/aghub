@@ -377,13 +377,18 @@ fn copy_plans(destinations: Vec<InstallTarget>) -> Vec<OperationPlan> {
 		.collect()
 }
 
+/// Build the two reconcile groups separately (rather than one flat `Vec`) so
+/// callers can hand them to
+/// [`crate::batch::run_staged_multi_target_mutation`] as primary (copies) /
+/// secondary (deletes) — a runtime copy failure must never let its paired
+/// delete run.
 fn reconcile_plans(
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
 	scope: InstallScope,
 	project_root: Option<PathBuf>,
-) -> Vec<OperationPlan> {
-	added
+) -> (Vec<OperationPlan>, Vec<OperationPlan>) {
+	let copies = added
 		.into_iter()
 		.map(|agent| OperationPlan {
 			target: InstallTarget {
@@ -393,15 +398,19 @@ fn reconcile_plans(
 			},
 			action: OperationAction::Copy,
 		})
-		.chain(removed.into_iter().map(|agent| OperationPlan {
+		.collect();
+	let deletes = removed
+		.into_iter()
+		.map(|agent| OperationPlan {
 			target: InstallTarget {
 				agent,
 				scope,
 				project_root: project_root.clone(),
 			},
 			action: OperationAction::Delete,
-		}))
-		.collect()
+		})
+		.collect();
+	(copies, deletes)
 }
 
 fn batch_preflight_error(
@@ -558,14 +567,15 @@ pub fn reconcile_mcp(
 		added.len(),
 		removed.len()
 	);
-	let plans = reconcile_plans(
+	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
 		source.scope,
 		source.project_root.clone(),
 	);
-	let report = crate::batch::run_multi_target_mutation(
-		&plans,
+	let report = crate::batch::run_staged_multi_target_mutation(
+		&copies,
+		&deletes,
 		|plan| {
 			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
@@ -595,6 +605,14 @@ pub fn reconcile_mcp(
 				&outcome,
 			);
 			outcome
+		},
+		|plan| {
+			ConfigError::InvalidConfig(format!(
+				"skipped delete of MCP '{}' for agent '{}': a copy to \
+				 another agent failed first; nothing was removed",
+				source.name,
+				plan.target.agent.as_str(),
+			))
 		},
 	)
 	.map_err(|error| batch_preflight_error("MCP reconcile", error))?;
@@ -665,14 +683,15 @@ pub fn reconcile_sub_agent(
 		added.len(),
 		removed.len()
 	);
-	let plans = reconcile_plans(
+	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
 		source.scope,
 		source.project_root.clone(),
 	);
-	let report = crate::batch::run_multi_target_mutation(
-		&plans,
+	let report = crate::batch::run_staged_multi_target_mutation(
+		&copies,
+		&deletes,
 		|plan| {
 			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
@@ -706,6 +725,14 @@ pub fn reconcile_sub_agent(
 				&outcome,
 			);
 			outcome
+		},
+		|plan| {
+			ConfigError::InvalidConfig(format!(
+				"skipped delete of sub-agent '{}' for agent '{}': a copy \
+				 to another agent failed first; nothing was removed",
+				source.name,
+				plan.target.agent.as_str(),
+			))
 		},
 	)
 	.map_err(|error| batch_preflight_error("sub-agent reconcile", error))?;
@@ -774,14 +801,15 @@ pub fn reconcile_skill(
 		added.len(),
 		removed.len()
 	);
-	let plans = reconcile_plans(
+	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
 		source.scope,
 		source.project_root.clone(),
 	);
-	let report = crate::batch::run_multi_target_mutation(
-		&plans,
+	let report = crate::batch::run_staged_multi_target_mutation(
+		&copies,
+		&deletes,
 		|plan| {
 			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
@@ -823,6 +851,14 @@ pub fn reconcile_skill(
 				&outcome,
 			);
 			outcome
+		},
+		|plan| {
+			ConfigError::InvalidConfig(format!(
+				"skipped delete of skill '{}' for agent '{}': a copy to \
+				 another agent failed first; nothing was removed",
+				skill.name,
+				plan.target.agent.as_str(),
+			))
 		},
 	)
 	.map_err(|error| batch_preflight_error("skill reconcile", error))?;
@@ -1033,6 +1069,105 @@ mod tests {
 		assert!(manager.get_mcp("filesystem").is_none());
 	}
 
+	// Fix A regression test: a Copy that fails at RUNTIME (after preflight
+	// already passed) must not let its paired Delete run. Cursor supports
+	// project-scope stdio MCPs (so `mcp_supported_for_target` preflight is
+	// clean), but Cursor's OWN mcp config already holds an unrelated MCP
+	// named "filesystem" — `add_mcp`'s duplicate-name guard rejects the copy
+	// only once it actually runs. Before the fix, `reconcile_mcp` built one
+	// flat Copy-then-Delete plan and attempted every row regardless, so the
+	// Claude delete still ran: the MCP would vanish from Claude without ever
+	// landing on Cursor — gone from every agent. This test fails on that
+	// regression because `claude_manager.get_mcp("filesystem")` would be
+	// `None` afterward.
+	#[test]
+	fn reconcile_mcp_keeps_source_when_a_copy_fails_at_runtime() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let mut claude_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		claude_manager.load().unwrap();
+		claude_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
+			))
+			.unwrap();
+
+		// Pre-populate Cursor's OWN project config with an unrelated MCP of
+		// the same name so its copy fails at write time, not at preflight.
+		let mut cursor_manager = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(&root),
+		);
+		cursor_manager.load().unwrap();
+		cursor_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("echo", vec!["conflict".to_string()]),
+			))
+			.unwrap();
+
+		let result = reconcile_mcp(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "filesystem".to_string(),
+			},
+			vec![AgentType::Cursor], // added: fails at runtime
+			vec![AgentType::Claude], // removed: must be skipped
+		)
+		.unwrap();
+
+		assert_eq!(result.results.len(), 2);
+		let copy_row = result
+			.results
+			.iter()
+			.find(|r| r.action == OperationAction::Copy)
+			.expect("a copy row must be present");
+		assert!(!copy_row.success, "the Cursor copy must fail");
+
+		let delete_row = result
+			.results
+			.iter()
+			.find(|r| r.action == OperationAction::Delete)
+			.expect("a delete row must be present");
+		assert!(
+			!delete_row.success,
+			"the Claude delete must be skipped, not attempted"
+		);
+		assert!(
+			delete_row
+				.error
+				.as_ref()
+				.is_some_and(|e| e.contains("skipped")),
+			"the delete row must read as skipped, not as an attempted \
+			 failure: {:?}",
+			delete_row.error,
+		);
+
+		// The critical assertion: the source MCP must survive. Before the
+		// fix this was deleted even though its only copy destination failed.
+		let mut claude_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		claude_manager.load().unwrap();
+		assert!(
+			claude_manager.get_mcp("filesystem").is_some(),
+			"source MCP must survive a reconcile whose only copy failed"
+		);
+	}
+
 	#[test]
 	fn transfer_skill_materializes_master_and_referrer() {
 		let _guard = env_lock().lock().unwrap();
@@ -1129,6 +1264,107 @@ mod tests {
 		);
 		manager.load().unwrap();
 		assert!(manager.get_skill("repo-helper").is_none());
+	}
+
+	// Fix A regression test (skill case): a Copy that fails at RUNTIME (after
+	// preflight already passed) must not let its paired Delete run — same
+	// policy as `reconcile_mcp_keeps_source_when_a_copy_fails_at_runtime`, but
+	// for the highest-blast-radius resource, since a skill delete can
+	// `remove_dir_all` an on-disk directory.
+	//
+	// The source skill here is a COPY-LAYOUT skill: a plain, hand-created
+	// directory inside Claude's own skills dir with no `.agents/skills`
+	// Master, so `canonical_path` is None and this directory is the SOLE
+	// on-disk copy. Windsurf's own skills dir already holds a real directory
+	// at the slot the copy would need to link into, so the universal
+	// materializer's link step reports a conflict at write time — preflight
+	// (`skill_target_dir`) only resolves the write dir, it never checks for an
+	// existing occupant. Before the fix, `reconcile_skill` attempted the
+	// Delete regardless: the source directory would be `remove_dir_all`'d
+	// even though the Windsurf copy never landed, destroying the skill
+	// outright with no surviving copy anywhere. This test fails on that
+	// regression because `skill_dir.join("SKILL.md").exists()` would be
+	// `false` afterward.
+	#[test]
+	fn reconcile_skill_keeps_source_when_a_copy_fails_at_runtime() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+
+		let claude_skills = root.join(".claude/skills");
+		let skill_dir = claude_skills.join("repo-helper");
+		fs::create_dir_all(&skill_dir).unwrap();
+		fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: repo-helper\ndescription: Copies files\n---\n",
+		)
+		.unwrap();
+
+		// Pre-occupy the Windsurf destination slot with a real directory (not
+		// a symlink) so `Linker::link` reports `Conflict` at runtime.
+		let windsurf_slot = root.join(".windsurf/skills/repo-helper");
+		fs::create_dir_all(&windsurf_slot).unwrap();
+		fs::write(windsurf_slot.join("occupant.txt"), "conflict").unwrap();
+
+		let mut claude_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		claude_manager.load().unwrap();
+		let source_skill = claude_manager
+			.get_skill("repo-helper")
+			.expect("discovery must pick up the hand-created skill dir");
+		assert!(
+			source_skill.canonical_path.is_none(),
+			"copy-layout precondition: no universal Master"
+		);
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "repo-helper".to_string(),
+			},
+			vec![AgentType::Windsurf], // added: fails at runtime
+			vec![AgentType::Claude],   // removed: must be skipped
+		)
+		.unwrap();
+
+		assert_eq!(result.results.len(), 2);
+		let copy_row = result
+			.results
+			.iter()
+			.find(|r| r.action == OperationAction::Copy)
+			.expect("a copy row must be present");
+		assert!(!copy_row.success, "the Windsurf copy must fail");
+
+		let delete_row = result
+			.results
+			.iter()
+			.find(|r| r.action == OperationAction::Delete)
+			.expect("a delete row must be present");
+		assert!(
+			!delete_row.success,
+			"the Claude delete must be skipped, not attempted"
+		);
+		assert!(
+			delete_row
+				.error
+				.as_ref()
+				.is_some_and(|e| e.contains("skipped")),
+			"the delete row must read as skipped, not as an attempted \
+			 failure: {:?}",
+			delete_row.error,
+		);
+
+		// The critical assertion: the source skill directory is the SOLE
+		// on-disk copy and must survive.
+		assert!(
+			skill_dir.join("SKILL.md").exists(),
+			"source skill dir must survive a reconcile whose only copy failed"
+		);
 	}
 
 	#[cfg(unix)]

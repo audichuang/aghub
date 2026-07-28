@@ -276,6 +276,62 @@ where
 	Ok(MultiTargetMutationReport { results })
 }
 
+/// Run a mutation across two groups of targets under a STAGED policy:
+/// preflight covers every target (primary + secondary) up front exactly like
+/// [`run_multi_target_mutation`], so no predictable failure ever reaches a
+/// write. Once preflight is clean, every primary row is attempted (no
+/// fail-fast among primaries). If any primary row failed, the secondary rows
+/// are never attempted at all — each gets a synthesized failure row instead,
+/// so a caller can never remove a resource whose only copy to another target
+/// failed. When every primary row succeeds, secondary rows run with the same
+/// attempt-all behavior as before.
+///
+/// This is `reconcile_{skill,mcp,sub_agent}`'s policy: `primary` is the
+/// "added" copies, `secondary` is the "removed" deletes — a copy that fails
+/// at RUNTIME (after preflight already passed) must not let its paired
+/// delete run, or the resource ends up gone from every agent.
+pub fn run_staged_multi_target_mutation<T, O, E>(
+	primary: &[T],
+	secondary: &[T],
+	mut preflight: impl FnMut(&T) -> Result<(), E>,
+	mut mutate: impl FnMut(&T) -> Result<O, E>,
+	skipped_secondary_reason: impl Fn(&T) -> E,
+) -> Result<MultiTargetMutationReport<T, O, E>, MultiTargetMutationError<T, E>>
+where
+	T: Clone,
+{
+	let all_targets: Vec<T> =
+		primary.iter().chain(secondary.iter()).cloned().collect();
+	let failures = collect_preflight_failures(&all_targets, &mut preflight);
+	if !failures.is_empty() {
+		return Err(MultiTargetMutationError { failures });
+	}
+
+	let mut results: Vec<MultiTargetMutationResult<T, O, E>> = primary
+		.iter()
+		.map(|target| MultiTargetMutationResult {
+			target: target.clone(),
+			result: mutate(target),
+		})
+		.collect();
+
+	let any_primary_failed = results.iter().any(|row| row.result.is_err());
+
+	results.extend(secondary.iter().map(|target| {
+		let result = if any_primary_failed {
+			Err(skipped_secondary_reason(target))
+		} else {
+			mutate(target)
+		};
+		MultiTargetMutationResult {
+			target: target.clone(),
+			result,
+		}
+	}));
+
+	Ok(MultiTargetMutationReport { results })
+}
+
 fn run_agent_mutation_with_preflight(
 	agents: &[AgentType],
 	operation: &'static str,
@@ -513,5 +569,132 @@ mod tests {
 				Err(error) if error == "master write failed"
 			)
 		}));
+	}
+
+	#[test]
+	fn staged_mutation_skips_secondary_when_a_primary_fails() {
+		let secondary_calls = std::cell::Cell::new(0);
+		let report = run_staged_multi_target_mutation(
+			&["claude", "cursor"],
+			&["windsurf", "cline"],
+			|_target| Ok::<_, String>(()),
+			|target| match *target {
+				"claude" => Err("copy failed".to_string()),
+				"windsurf" | "cline" => {
+					secondary_calls.set(secondary_calls.get() + 1);
+					Ok(target.to_string())
+				}
+				other => Ok(other.to_string()),
+			},
+			|target| format!("skipped '{target}': a copy failed"),
+		)
+		.expect("preflight succeeds");
+
+		assert_eq!(
+			secondary_calls.get(),
+			0,
+			"secondary mutate must never run once a primary row failed"
+		);
+		assert_eq!(report.results.len(), 4);
+		assert!(matches!(
+			&report.results[0].result,
+			Err(error) if error == "copy failed"
+		));
+		assert!(
+			report.results[1].result.is_ok(),
+			"cursor primary is still attempted (no fail-fast among primaries)"
+		);
+		assert!(matches!(
+			&report.results[2].result,
+			Err(error) if error.contains("skipped")
+		));
+		assert!(matches!(
+			&report.results[3].result,
+			Err(error) if error.contains("skipped")
+		));
+	}
+
+	#[test]
+	fn staged_mutation_runs_secondary_attempt_all_when_primaries_succeed() {
+		let calls = std::cell::RefCell::new(Vec::new());
+		let report = run_staged_multi_target_mutation(
+			&["claude", "cursor"],
+			&["windsurf", "cline"],
+			|_target| Ok::<_, String>(()),
+			|target| {
+				calls.borrow_mut().push(*target);
+				if *target == "cline" {
+					Err("delete failed".to_string())
+				} else {
+					Ok(target.to_string())
+				}
+			},
+			|target| format!("skipped {target}"),
+		)
+		.expect("preflight succeeds");
+
+		assert_eq!(*calls.borrow(), ["claude", "cursor", "windsurf", "cline"]);
+		assert_eq!(report.results.len(), 4);
+		assert!(report.results[0].result.is_ok());
+		assert!(report.results[1].result.is_ok());
+		assert!(
+			report.results[2].result.is_ok(),
+			"windsurf must still be attempted"
+		);
+		assert!(matches!(
+			&report.results[3].result,
+			Err(error) if error == "delete failed"
+		));
+	}
+
+	#[test]
+	fn staged_mutation_with_no_primary_runs_secondary_as_before() {
+		let empty: [&str; 0] = [];
+		let calls = std::cell::Cell::new(0);
+		let report = run_staged_multi_target_mutation(
+			&empty,
+			&["claude", "cursor"],
+			|_target| Ok::<_, String>(()),
+			|target| {
+				calls.set(calls.get() + 1);
+				Ok(target.to_string())
+			},
+			|target| format!("skipped {target}"),
+		)
+		.expect("preflight succeeds");
+
+		assert_eq!(
+			calls.get(),
+			2,
+			"the removals-only case must run every secondary row"
+		);
+		assert_eq!(report.results.len(), 2);
+		assert!(report.results.iter().all(|row| row.result.is_ok()));
+	}
+
+	#[test]
+	fn staged_mutation_preflight_covers_primary_and_secondary_before_any_write()
+	{
+		let writes = std::cell::Cell::new(0);
+		let error = run_staged_multi_target_mutation(
+			&["claude"],
+			&["pi"],
+			|target| match *target {
+				"pi" => Err("no skill config".to_string()),
+				_ => Ok(()),
+			},
+			|target| {
+				writes.set(writes.get() + 1);
+				Ok(target.to_string())
+			},
+			|target| format!("skipped {target}"),
+		)
+		.expect_err(
+			"a secondary preflight failure rejects the whole staged mutation",
+		);
+
+		assert_eq!(writes.get(), 0, "preflight must precede every write");
+		assert_eq!(error.failures.len(), 1);
+		assert_eq!(error.failures[0].target, "pi");
 	}
 }

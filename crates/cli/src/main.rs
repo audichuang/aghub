@@ -14,8 +14,8 @@ use aghub_core::{
 mod commands;
 
 use commands::{
-	add, apply_update, check, delete, disable, enable, get, inference, plugin,
-	prune, transfer, update,
+	add, check, delete, disable, enable, get, inference, plugin, prune,
+	transfer, update,
 };
 
 /// Global verbose flag used by the eprintln_verbose macro
@@ -46,6 +46,11 @@ macro_rules! eprintln_verbose {
 #[command(name = "aghub-cli")]
 #[command(about = "Manage Code Agent configurations")]
 #[command(version = env!("AGHUB_CLI_VERSION"))]
+#[command(group(
+	clap::ArgGroup::new("scope")
+		.args(["global", "project", "all"])
+		.multiple(false)
+))]
 struct Cli {
 	/// Target agent id, a comma-separated list, or "all"
 	/// (e.g. -a claude / -a claude,grok / -a all)
@@ -311,6 +316,11 @@ enum Commands {
 	/// Diagnose installed skills: source, on-disk master, and lock health
 	/// (read-only). Scope -g/-p/--all; default spans global + project.
 	Doctor {
+		/// Verify each selected agent's skill referrer against the Master.
+		/// Supports one id, a comma-separated roster, or `-a all`.
+		#[arg(long)]
+		verify_links: bool,
+
 		/// Emit a machine-readable JSON array instead of a table
 		#[arg(long)]
 		json: bool,
@@ -348,8 +358,13 @@ pub enum SourceAction {
 		source: String,
 		#[arg(long = "ref", alias = "git-ref")]
 		git_ref: Option<String>,
+		/// Refresh outdated installed skills in the selected scope. Updates replace
+		/// the scoped Master and resync existing referrers; `-a/--agent` does not
+		/// narrow update targets (it applies to install/relink actions only).
 		#[arg(long)]
 		update: bool,
+		/// Install missing skills, or idempotently repair explicitly named skills,
+		/// for the roster selected by `-a/--agent`.
 		#[arg(long)]
 		install_missing: bool,
 		/// Only act on these skills (comma-separated names, as shown in the NAME
@@ -429,6 +444,28 @@ fn main() -> Result<()> {
 		);
 	}
 
+	// `apply-update` is driven by the skill lock + Master, not an agent's
+	// config. Dispatch it before adapter/ConfigManager setup so an unrelated
+	// missing or malformed agent config cannot block the Resync.
+	if let Commands::ApplyUpdate {
+		resource,
+		name,
+		yes,
+		json,
+	} = &cli.command
+	{
+		let (scope, project_root) =
+			resolve_scope_and_root(&cli, ScopePolicy::AllowBoth)?;
+		return commands::apply_update::execute(
+			*resource,
+			name.clone(),
+			scope,
+			project_root.as_deref(),
+			*yes,
+			*json,
+		);
+	}
+
 	// Inference inventory is not agent-scoped (it's the shared provider store +
 	// keyring). Dispatch it before the adapter/ConfigManager setup too.
 	if let Commands::Inference { action } = &cli.command {
@@ -478,8 +515,14 @@ fn main() -> Result<()> {
 
 	// `doctor` reconciles the skill lock against the on-disk master across
 	// scopes; not single-agent scoped, so dispatch before adapter setup.
-	if let Commands::Doctor { json } = &cli.command {
-		return commands::doctor::execute(cli.global, cli.project, *json);
+	if let Commands::Doctor { verify_links, json } = &cli.command {
+		return commands::doctor::execute_with_options(
+			cli.global,
+			cli.project,
+			*json,
+			*verify_links,
+			&cli.agent,
+		);
 	}
 
 	// `skill-usage` reads Claude's global `skillUsage` counter — it is
@@ -527,8 +570,77 @@ fn takes_agent_list(command: &Commands) -> bool {
 			| Commands::Disable { .. }
 			| Commands::Source {
 				action: SourceAction::Sync { .. }
-			}
+			} | Commands::Doctor {
+			verify_links: true,
+			..
+		}
 	)
+}
+
+#[derive(Clone, Copy)]
+enum ScopePolicy {
+	AllowBoth,
+	SingleWrite,
+}
+
+fn scope_policy(command: &Commands) -> ScopePolicy {
+	match command {
+		Commands::Add { .. }
+		| Commands::Update { .. }
+		| Commands::Delete { .. }
+		| Commands::Enable { .. }
+		| Commands::Disable { .. } => ScopePolicy::SingleWrite,
+		// Any new MUTATING subcommand must be added to the SingleWrite arm
+		// above, or it silently bypasses the project-root guard.
+		_ => ScopePolicy::AllowBoth,
+	}
+}
+
+/// Resolve top-level scope flags once for every generic command path.
+///
+/// Read-only commands may span both scopes. Generic CRUD mutations must pick
+/// one write target so a read scope can never disagree with the config that is
+/// mutated.
+fn resolve_scope_and_root(
+	cli: &Cli,
+	policy: ScopePolicy,
+) -> Result<(ResourceScope, Option<PathBuf>)> {
+	if cli.all && matches!(policy, ScopePolicy::SingleWrite) {
+		anyhow::bail!(
+			"generic mutation does not support --all; pass -g/--global or \
+			 -p/--project"
+		);
+	}
+
+	let scope = if cli.all {
+		ResourceScope::Both
+	} else if cli.project {
+		ResourceScope::ProjectOnly
+	} else {
+		ResourceScope::GlobalOnly
+	};
+	let project_root = if scope == ResourceScope::GlobalOnly {
+		None
+	} else {
+		let current_dir = std::env::current_dir()?;
+		find_project_root(&current_dir)
+	};
+
+	// A single-write mutation targeting -p must fail here, before any config
+	// is touched, rather than silently falling back to the global write.
+	if matches!(policy, ScopePolicy::SingleWrite)
+		&& scope == ResourceScope::ProjectOnly
+		&& project_root.is_none()
+	{
+		anyhow::bail!(
+			"no project root found from the current directory; run this \
+			 inside a project (a directory with an agent config marker, \
+			 e.g. .claude/, .mcp.json, or skills-lock.json) or pass \
+			 -g/--global"
+		);
+	}
+
+	Ok((scope, project_root))
 }
 
 /// Run one command against ONE agent's config. The multi-agent entry points
@@ -541,26 +653,8 @@ fn run_for_agent(
 	cli: &Cli,
 	agent_type: AgentType,
 ) -> Result<Option<serde_json::Value>> {
-	// Determine resource scope based on flags
-	// -a/--all takes precedence, then -p/--project, then -g/--global, then default (global)
-	let scope = if cli.all {
-		ResourceScope::Both
-	} else if cli.project {
-		ResourceScope::ProjectOnly
-	} else {
-		// Default: global only (preserves current behavior)
-		ResourceScope::GlobalOnly
-	};
-
-	// Determine project root if needed for scope
-	let project_root = if scope == ResourceScope::ProjectOnly
-		|| scope == ResourceScope::Both
-	{
-		let current_dir = std::env::current_dir()?;
-		find_project_root(&current_dir)
-	} else {
-		None
-	};
+	let (scope, project_root) =
+		resolve_scope_and_root(cli, scope_policy(&cli.command))?;
 
 	// Determine which config file to use for writes (primary scope)
 	let use_global_config = if cli.global {
@@ -726,20 +820,11 @@ fn run_for_agent(
 			json,
 		)
 		.map(|()| None),
-		Commands::ApplyUpdate {
-			resource,
-			name,
-			yes,
-			json,
-		} => apply_update::execute(
-			resource,
-			name,
-			scope,
-			project_root.as_deref(),
-			yes,
-			json,
-		)
-		.map(|()| None),
+		Commands::ApplyUpdate { .. } => {
+			unreachable!(
+				"`apply-update` is dispatched before agent-config setup"
+			)
+		}
 		Commands::PruneLock { dry_run, yes, json } => prune::execute(
 			scope,
 			project_root.as_deref(),
@@ -783,25 +868,6 @@ fn run_for_agent(
 	}
 }
 
-/// Resolve the read scope + project root from the top-level scope flags,
-/// for the multi-agent entry points (single-agent runs resolve their own).
-fn read_scope_and_root(cli: &Cli) -> Result<(ResourceScope, Option<PathBuf>)> {
-	let scope = if cli.all {
-		ResourceScope::Both
-	} else if cli.project {
-		ResourceScope::ProjectOnly
-	} else {
-		ResourceScope::GlobalOnly
-	};
-	let project_root = if scope == ResourceScope::GlobalOnly {
-		None
-	} else {
-		let current_dir = std::env::current_dir()?;
-		find_project_root(&current_dir)
-	};
-	Ok((scope, project_root))
-}
-
 // Handle --agent all: list resources for every registered agent
 fn handle_all_agents(cli: &Cli) -> Result<()> {
 	let resource = match &cli.command {
@@ -814,32 +880,11 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 		}
 	};
 
-	let (scope, project_root) = read_scope_and_root(cli)?;
+	let (scope, project_root) =
+		resolve_scope_and_root(cli, ScopePolicy::AllowBoth)?;
 	eprintln_verbose!("Loading resources for all agents (scope: {:?})", scope);
 	let resources = load_all_agents(scope, project_root.as_deref());
 	get::execute_all(resources, resource)
-}
-
-/// The scope a mutating batch actually WRITES — mirrors `run_for_agent` →
-/// `ConfigManager::with_scope` (`global:true` ⇒ GlobalOnly, else
-/// ProjectOnly, including `--all`'s existing quirk), so the preflight
-/// judges exactly the config the batch will write.
-fn batch_write_scope(cli: &Cli) -> Result<ResourceScope> {
-	let global = if cli.global {
-		true
-	} else if cli.project {
-		false
-	} else if cli.all {
-		let current_dir = std::env::current_dir()?;
-		find_project_root(&current_dir).is_some()
-	} else {
-		true
-	};
-	Ok(if global {
-		ResourceScope::GlobalOnly
-	} else {
-		ResourceScope::ProjectOnly
-	})
 }
 
 // Handle a comma-separated --agent list: fan the command across the named
@@ -853,7 +898,8 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	match &cli.command {
 		Commands::Get { resource } => {
 			let resource = *resource;
-			let (scope, project_root) = read_scope_and_root(cli)?;
+			let (scope, project_root) =
+				resolve_scope_and_root(cli, ScopePolicy::AllowBoth)?;
 			let mut resources = load_all_agents(scope, project_root.as_deref());
 			resources
 				.retain(|r| agents.iter().any(|a| a.as_str() == r.agent_id));
@@ -868,7 +914,8 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 			// the policy itself (which capabilities, all-before-any-write)
 			// lives in core; MCPs share it with the API's /mcps/batch.
 			let view = if matches!(resource, ResourceType::Mcps) {
-				let write_scope = batch_write_scope(cli)?;
+				let (write_scope, _) =
+					resolve_scope_and_root(cli, ScopePolicy::SingleWrite)?;
 				let is_toggle = matches!(
 					cli.command,
 					Commands::Enable { .. } | Commands::Disable { .. }
@@ -889,7 +936,8 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?
 			} else {
-				let write_scope = batch_write_scope(cli)?;
+				let (write_scope, _) =
+					resolve_scope_and_root(cli, ScopePolicy::SingleWrite)?;
 				aghub_core::batch::run_skill_agent_mutation(
 					agents,
 					write_scope,

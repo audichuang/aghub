@@ -124,7 +124,13 @@ impl RenameError {
 		}
 	}
 
-	/// The canonical, safe, user-facing message (no internal paths).
+	/// The canonical, safe, user-facing message. Every variant produced by the
+	/// transaction itself is name-based, not path-based. The two exceptions wrap
+	/// an upstream error whose Display can embed a fetched temp path:
+	/// `ParseFailed` (from `skill::parser::parse`) and, for a whole-install
+	/// failure, `InstallFailed`. Neither is reachable through the API today --
+	/// the adapter pre-parses the fetched `SKILL.md` before `accept_rename`
+	/// re-parses it -- so redact them at the source if that ever changes.
 	pub fn message(&self) -> String {
 		match self {
 			RenameError::NotLocked(m) => m.clone(),
@@ -340,9 +346,23 @@ pub fn accept_rename(
 		)));
 	}
 
-	// Roll the WHOLE transaction back to its pre-mutation state. Defined BEFORE
-	// install so every post-snapshot failure path (P0-1) runs the SAME rollback.
-	let rollback_all = || {
+	// Undo ONLY the new-name artifacts. This is the correct rollback for every
+	// failure BEFORE Step 8 touches the old name: at that point the old dirs
+	// and the old lock entry are still complete, so restoring them would mean
+	// deleting live, intact directories and re-copying them from the backup --
+	// pure risk with nothing to gain. `restore_snapshot` clears `live` before
+	// re-copying and swallows both errors, so one unrelated I/O failure there
+	// (ENOSPC, a parent that turned read-only) would destroy a skill the
+	// transaction had not touched.
+	//
+	// Not concurrency-safe, by design and consistently with the rest of this
+	// subsystem (install, prune and source sync take no interprocess lock
+	// either): this removes the new name unconditionally rather than only what
+	// THIS call created, so if another process installs `new_name` between the
+	// target-absence check above and a failure here, that installation is
+	// removed. Closing it needs an interprocess mutation lock spanning the
+	// check and the rollback, not a local change here.
+	let rollback_new_only = || {
 		rollback_rename_install(
 			req.new_name,
 			resource_scope,
@@ -350,6 +370,14 @@ pub fn accept_rename(
 			&agent_dirs,
 		);
 		let _ = remove_lock_entry(req.new_name, &req.scope);
+	};
+
+	// Roll the WHOLE transaction back to its pre-mutation state, old name
+	// included. Used ONLY from Step 8 onward, once the old name itself has been
+	// mutated. Defined BEFORE install so every post-old-mutation failure path
+	// (P0-1) runs the SAME rollback.
+	let rollback_all = || {
+		rollback_new_only();
 		restore_snapshot(&snapshot);
 		let _ = restore_lock_entry(
 			req.old_name,
@@ -390,18 +418,52 @@ pub fn accept_rename(
 		) {
 			Ok(r) => r,
 			Err(e) => {
-				rollback_all();
+				rollback_new_only();
 				return Err(RenameError::InstallFailed(e.to_string()));
 			}
 		};
-	if !install_report.agent_results.iter().any(|r| r.installed) {
-		let detail = install_report
-			.agent_results
-			.iter()
-			.find_map(|r| r.error.clone())
-			.unwrap_or_else(|| "no agent received the skill".to_string());
-		rollback_all();
-		return Err(RenameError::InstallFailed(detail));
+	// A genuine runtime failure (`error: Some(..)`) on ANY target agent must
+	// abort the transaction, even when other agents installed successfully --
+	// otherwise Step 8 below removes the old name for every agent and the
+	// failed one loses the skill entirely. `installed: false, error: None` is a
+	// legitimate idempotent soft skip (already-correct link, see
+	// `materialize_universal_master`), not a failure, so it must NOT trip this
+	// branch on its own.
+	if let Some((agent, detail)) = install_report
+		.agent_results
+		.iter()
+		.find_map(|r| r.error.as_ref().map(|e| (r.agent, e.clone())))
+	{
+		// The per-agent detail comes from `LinkError`'s Display, which embeds
+		// absolute link/target paths -- log it, but keep the returned message
+		// path-free (naming only the agent) so the API contract (no raw
+		// filesystem paths in errors) holds when a surface forwards it
+		// verbatim. Mirrors the removal-failure branch below.
+		log::warn!(
+			"rename: install failed for agent '{}' installing '{}': {detail}",
+			agent.as_str(),
+			req.new_name
+		);
+		rollback_new_only();
+		return Err(RenameError::InstallFailed(format!(
+			"agent '{}' failed to install",
+			agent.as_str()
+		)));
+	}
+	if install_report.agent_results.is_empty() {
+		// Degenerate case: no target rows at all, so nothing can have received
+		// the skill. A NON-empty report whose rows are all `installed: false,
+		// error: None` is deliberately NOT this case: that is the idempotent
+		// soft skip, meaning every target's link for the new name was already
+		// correct, so the new name IS installed and the rename may proceed.
+		// (Unreachable in practice -- the pre-install target-existence check
+		// above rejects a new_name that already exists in this scope, so only a
+		// concurrent installer racing that check can produce an all-soft-skip
+		// report, and failing here would delete that installer's work.)
+		rollback_new_only();
+		return Err(RenameError::InstallFailed(
+			"no agent received the skill".to_string(),
+		));
 	}
 
 	let installed_paths: Vec<String> = install_report
@@ -674,9 +736,13 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 	}
 }
 
-/// Best-effort rollback of the just-installed new-name dirs (and the universal
-/// master if it was freshly created), re-asserting containment before each
-/// `remove_dir_all` (TOCTOU guard).
+/// Best-effort rollback of the new-name dirs and the universal master,
+/// re-asserting containment before each `remove_dir_all` (TOCTOU guard).
+///
+/// Removal is UNCONDITIONAL, not "only what this call created" — freshness is
+/// not tracked. Everything carrying `new_name` in the resolved scope goes, so a
+/// concurrently-created `new_name` is removed too (see `rollback_new_only`'s
+/// note on why closing that needs an interprocess lock, not a local change).
 fn rollback_rename_install(
 	new_name: &str,
 	scope: ResourceScope,

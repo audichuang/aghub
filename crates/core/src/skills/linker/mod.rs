@@ -153,28 +153,25 @@ fn copy_dir_recursive(from: &Path, to: &Path) -> io::Result<()> {
 		let file_name = entry.file_name();
 		let name = file_name.to_string_lossy();
 		let file_type = entry.file_type()?;
+		let from_path = entry.path();
+		// Source hashes use lstat semantics and skip links. Materializing a Master
+		// must use the same basis: dereferencing here would both import bytes from
+		// outside the fetched skill and make the on-disk hash disagree with its
+		// lock immediately after install. `Linker::is_link` also covers Windows
+		// junctions/reparse points.
+		if Linker::is_link(&from_path) {
+			continue;
+		}
 		if EXCLUDE_FILES.contains(&name.as_ref())
 			|| (file_type.is_dir() && EXCLUDE_DIRS.contains(&name.as_ref()))
 		{
 			continue;
 		}
-		let from_path = entry.path();
 		let to_path = to.join(&file_name);
 		if file_type.is_dir() {
 			copy_dir_recursive(&from_path, &to_path)?;
-		} else {
-			match std::fs::metadata(&from_path) {
-				Ok(meta) if meta.is_dir() => {
-					copy_dir_recursive(&from_path, &to_path)?
-				}
-				Ok(_) => {
-					std::fs::copy(&from_path, &to_path)?;
-				}
-				Err(e)
-					if e.kind() == io::ErrorKind::NotFound
-						&& file_type.is_symlink() => {}
-				Err(e) => return Err(e),
-			}
+		} else if file_type.is_file() {
+			std::fs::copy(&from_path, &to_path)?;
 		}
 	}
 	Ok(())
@@ -435,8 +432,8 @@ impl Linker {
 	///
 	/// This is the link-PRESERVING copy the rename snapshot/restore needs. It is
 	/// deliberately distinct from the module-private `copy_dir_recursive`, which
-	/// DEREFERENCES links and applies the npx exclude lists to materialize the
-	/// Master — do not conflate the two.
+	/// SKIPS links and applies the npx exclude lists to materialize the Master —
+	/// do not conflate the two.
 	pub fn copy_preserving_links(src: &Path, dst: &Path) -> io::Result<()> {
 		std::fs::create_dir_all(dst)?;
 		for entry in std::fs::read_dir(src)? {
@@ -797,6 +794,35 @@ mod tests {
 		assert!(
 			!dest.join("metadata.json").exists(),
 			"metadata.json must be excluded"
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn master_copy_skips_links_and_preserves_source_hash() {
+		use std::os::unix::fs::symlink;
+		use tempfile::tempdir;
+
+		let tmp = tempdir().unwrap();
+		let src = tmp.path().join("src");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(src.join("SKILL.md"), "real").unwrap();
+		let outside = tmp.path().join("outside-secret");
+		std::fs::write(&outside, "must not be copied").unwrap();
+		symlink(&outside, src.join("linked-secret")).unwrap();
+		let source_hash = skill::compute_skill_folder_hash(&src).unwrap();
+
+		let dest = tmp.path().join("dest");
+		copy_dir_recursive(&src, &dest).unwrap();
+
+		assert!(
+			!dest.join("linked-secret").exists(),
+			"the Master copy must skip links instead of dereferencing them"
+		);
+		assert_eq!(
+			skill::compute_skill_folder_hash(&dest).unwrap(),
+			source_hash,
+			"the materialized Master and fetched Source must share one hash basis"
 		);
 	}
 

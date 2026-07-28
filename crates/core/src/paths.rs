@@ -16,6 +16,12 @@ pub fn find_project_root(start_dir: &Path) -> Option<PathBuf> {
 	let mut current = Some(start_dir);
 
 	while let Some(dir) = current {
+		// A project skill lock is itself an explicit project-scoped artifact.
+		// Recognize it even when the project has no agent-specific config marker.
+		if dir.join("skills-lock.json").is_file() {
+			return Some(dir.to_path_buf());
+		}
+
 		// Check all agent project markers from registry
 		for descriptor in crate::registry::iter_all() {
 			for marker in descriptor.project_markers {
@@ -89,6 +95,19 @@ mod tests {
 		fs::write(project_root.join(".mcp.json"), "{}").unwrap();
 		let nested_dir = project_root.join("src/components");
 		fs::create_dir_all(&nested_dir).unwrap();
+		let found = find_project_root(&nested_dir).unwrap();
+		assert_eq!(found, project_root);
+	}
+
+	#[test]
+	fn test_find_project_root_with_skill_lock_only() {
+		let temp_dir = TempDir::new().unwrap();
+		let project_root = temp_dir.path().join("skill-only-project");
+		let nested_dir = project_root.join("nested");
+		fs::create_dir_all(&nested_dir).unwrap();
+		fs::write(project_root.join("skills-lock.json"), "{\"version\":1}")
+			.unwrap();
+
 		let found = find_project_root(&nested_dir).unwrap();
 		assert_eq!(found, project_root);
 	}

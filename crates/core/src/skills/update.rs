@@ -229,6 +229,178 @@ pub fn stage_and_swap_dir(
 	Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SwapState {
+	Prepared,
+	OriginalMoved,
+	Committed,
+	RolledBack,
+}
+
+#[derive(Debug)]
+struct PreparedDirSwap {
+	target: PathBuf,
+	staging_root: PathBuf,
+	staged: PathBuf,
+	backup_root: PathBuf,
+	backup: PathBuf,
+	had_target: bool,
+	state: SwapState,
+}
+
+impl PreparedDirSwap {
+	fn prepare(source_dir: &Path, target: &Path) -> std::io::Result<Self> {
+		let parent = target.parent().ok_or_else(|| {
+			std::io::Error::new(
+				std::io::ErrorKind::InvalidInput,
+				format!("target has no parent: {}", target.display()),
+			)
+		})?;
+		std::fs::create_dir_all(parent)?;
+
+		let staging_root = unique_temp_dir(parent, ".aghub-stage")?;
+		let staged = staging_root.join("skill");
+		if let Err(error) =
+			copy_dir_recursive_skip_symlinks(source_dir, &staged)
+		{
+			warn_on_cleanup_failure(&staging_root);
+			return Err(error);
+		}
+
+		let backup_root = match unique_temp_dir(parent, ".aghub-backup") {
+			Ok(path) => path,
+			Err(error) => {
+				warn_on_cleanup_failure(&staging_root);
+				return Err(error);
+			}
+		};
+		let backup = backup_root.join("target");
+		let had_target = std::fs::symlink_metadata(target).is_ok();
+
+		Ok(Self {
+			target: target.to_path_buf(),
+			staging_root,
+			staged,
+			backup_root,
+			backup,
+			had_target,
+			state: SwapState::Prepared,
+		})
+	}
+
+	fn commit(&mut self) -> std::io::Result<()> {
+		if self.had_target {
+			std::fs::rename(&self.target, &self.backup)?;
+			self.state = SwapState::OriginalMoved;
+		}
+		std::fs::rename(&self.staged, &self.target)?;
+		self.state = SwapState::Committed;
+		Ok(())
+	}
+
+	fn rollback(&mut self) -> std::io::Result<()> {
+		match self.state {
+			SwapState::Prepared | SwapState::RolledBack => return Ok(()),
+			SwapState::OriginalMoved | SwapState::Committed => {}
+		}
+
+		remove_path_any(&self.target)?;
+		if self.had_target {
+			std::fs::rename(&self.backup, &self.target)?;
+		}
+		self.state = SwapState::RolledBack;
+		Ok(())
+	}
+
+	fn cleanup_after_rollback(&self) {
+		warn_on_cleanup_failure(&self.staging_root);
+		// A failed rollback leaves the only retained original in `backup`. Never
+		// erase that recovery copy during best-effort cleanup.
+		if std::fs::symlink_metadata(&self.backup).is_err() {
+			warn_on_cleanup_failure(&self.backup_root);
+		}
+	}
+
+	fn finish(self) {
+		warn_on_cleanup_failure(&self.backup_root);
+		warn_on_cleanup_failure(&self.staging_root);
+	}
+}
+
+/// A staged multi-target directory rewrite whose old contents remain available
+/// until the caller commits its accompanying metadata write. This is the
+/// transaction primitive used by skill resync so a late lock-write failure can
+/// restore every Master/copy that was already replaced.
+pub(super) struct DirSwapTransaction {
+	entries: Vec<PreparedDirSwap>,
+}
+
+impl DirSwapTransaction {
+	pub(super) fn prepare(
+		source_dir: &Path,
+		targets: &[PathBuf],
+	) -> std::io::Result<Self> {
+		let mut entries = Vec::with_capacity(targets.len());
+		for target in targets {
+			match PreparedDirSwap::prepare(source_dir, target) {
+				Ok(entry) => entries.push(entry),
+				Err(error) => {
+					for entry in &entries {
+						entry.cleanup_after_rollback();
+					}
+					return Err(error);
+				}
+			}
+		}
+		Ok(Self { entries })
+	}
+
+	pub(super) fn commit_all(&mut self) -> std::io::Result<()> {
+		for entry in &mut self.entries {
+			if let Err(error) = entry.commit() {
+				return Err(std::io::Error::new(
+					error.kind(),
+					format!("{}: {error}", entry.target.display()),
+				));
+			}
+		}
+		Ok(())
+	}
+
+	pub(super) fn rollback(&mut self) -> Result<(), String> {
+		let mut failures = Vec::new();
+		for entry in self.entries.iter_mut().rev() {
+			if let Err(error) = entry.rollback() {
+				let recovery = if std::fs::symlink_metadata(&entry.backup)
+					.is_ok()
+				{
+					format!("; original retained at {}", entry.backup.display())
+				} else {
+					String::new()
+				};
+				failures.push(format!(
+					"{}: {error}{recovery}",
+					entry.target.display()
+				));
+			}
+		}
+		for entry in &self.entries {
+			entry.cleanup_after_rollback();
+		}
+		if failures.is_empty() {
+			Ok(())
+		} else {
+			Err(failures.join("; "))
+		}
+	}
+
+	pub(super) fn finish(self) {
+		for entry in self.entries {
+			entry.finish();
+		}
+	}
+}
+
 fn handle_failed_swap(
 	error: std::io::Error,
 	had_target: bool,
@@ -499,6 +671,88 @@ mod tests {
 		stage_and_swap_dir(&source, &target).unwrap();
 
 		assert_eq!(fs::read_to_string(target.join("SKILL.md")).unwrap(), "new");
+	}
+
+	#[test]
+	fn multi_target_commit_failure_rolls_back_an_earlier_swap() {
+		let tmp = tempdir().unwrap();
+		let source = tmp.path().join("source");
+		let first = tmp.path().join("first/skill");
+		let second = tmp.path().join("second/skill");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(source.join("SKILL.md"), "new").unwrap();
+		for target in [&first, &second] {
+			fs::create_dir_all(target).unwrap();
+			fs::write(target.join("SKILL.md"), "old").unwrap();
+		}
+
+		let mut transaction = DirSwapTransaction::prepare(
+			&source,
+			&[first.clone(), second.clone()],
+		)
+		.unwrap();
+		// Force the second commit to fail only after the first target has been
+		// replaced: its reserved backup destination is now non-empty.
+		fs::create_dir_all(&transaction.entries[1].backup).unwrap();
+		fs::write(
+			transaction.entries[1].backup.join("occupied"),
+			"block rename",
+		)
+		.unwrap();
+
+		transaction.commit_all().unwrap_err();
+		assert_eq!(
+			fs::read_to_string(first.join("SKILL.md")).unwrap(),
+			"new",
+			"the test must fail after an earlier destructive swap",
+		);
+		transaction.rollback().unwrap();
+
+		assert_eq!(fs::read_to_string(first.join("SKILL.md")).unwrap(), "old");
+		assert_eq!(fs::read_to_string(second.join("SKILL.md")).unwrap(), "old");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn transaction_rollback_failure_retains_and_reports_original_backup() {
+		use std::os::unix::ffi::OsStringExt;
+
+		let tmp = tempdir().unwrap();
+		let source = tmp.path().join("source");
+		let target = tmp.path().join("installed/skill");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(source.join("SKILL.md"), "new").unwrap();
+		fs::create_dir_all(&target).unwrap();
+		fs::write(target.join("SKILL.md"), "old").unwrap();
+
+		let mut transaction =
+			DirSwapTransaction::prepare(&source, std::slice::from_ref(&target))
+				.unwrap();
+		transaction.commit_all().unwrap();
+		let backup = transaction.entries[0].backup.clone();
+		let backup_root = transaction.entries[0].backup_root.clone();
+		assert_eq!(fs::read_to_string(backup.join("SKILL.md")).unwrap(), "old");
+
+		// A NUL-containing path is rejected by every Unix filesystem API. Pointing
+		// the private test fixture at one deterministically exercises rollback's
+		// own failure branch even when the suite runs as root.
+		transaction.entries[0].target = PathBuf::from(
+			std::ffi::OsString::from_vec(b"invalid\0target".to_vec()),
+		);
+		let error = transaction.rollback().unwrap_err();
+
+		assert!(error.contains(&backup.display().to_string()));
+		assert!(backup_root.exists(), "the recovery container must survive");
+		assert_eq!(
+			fs::read_to_string(backup.join("SKILL.md")).unwrap(),
+			"old",
+			"the only original copy must survive a failed rollback"
+		);
+		assert_eq!(
+			fs::read_to_string(target.join("SKILL.md")).unwrap(),
+			"new",
+			"the fixture must prove commit happened before rollback failed"
+		);
 	}
 
 	#[test]

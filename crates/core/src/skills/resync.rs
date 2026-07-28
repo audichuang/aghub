@@ -4,11 +4,10 @@
 //!
 //! Callers own everything I/O-shaped up to a resolved on-disk source dir (fetch,
 //! session, credential, sanitize, request validation); this owns the transaction:
-//! discover installed targets → rename guard → hash → strict containment → swap
-//! every target → lock re-stamp. Any swap failure aborts before the lock advances
-//! (a partial swap with an advanced lock would let a later `check` read a stale
-//! target as up-to-date), so the lock moves only once every target took the new
-//! content.
+//! discover installed targets → rename guard → hash → strict containment → stage
+//! every target → swap every target → lock re-stamp. Old contents stay in sibling
+//! backups until the lock commits; any swap or lock failure rolls every replaced
+//! target back, so disk content and the lock advance together.
 
 use crate::models::ResourceScope;
 use std::path::{Path, PathBuf};
@@ -46,9 +45,11 @@ pub enum ResyncError {
 	Hash(String),
 	/// An installed target resolved outside the allow-listed skill roots.
 	OutOfTree(String),
-	/// One or more installed targets failed to swap; the lock was left unchanged.
+	/// One or more installed targets failed to swap; completed swaps were rolled
+	/// back and the lock was left unchanged.
 	Swap(String),
-	/// The lock could not be re-stamped after the swap.
+	/// The lock could not be re-stamped after the swap; installed targets were
+	/// rolled back to their prior contents.
 	LockUpdate(String),
 }
 
@@ -110,40 +111,44 @@ pub fn resync_installed_skill(
 	)
 	.map_err(|e| ResyncError::OutOfTree(e.to_string()))?;
 
-	// Swap every installed target. ANY failure aborts before the lock advances: a
-	// partial swap with an advanced lock would let a later `check` read a failed
-	// target as up-to-date (differing per-agent hashes are dropped as ambiguous,
-	// leaving the lock as the sole baseline). Universal installs resolve to one
-	// canonical Master target (N=1); N>1 only for isolated-copy installs.
-	let mut swapped = Vec::new();
-	let mut failures = Vec::new();
-	for target in &targets {
-		match crate::skills::update::stage_and_swap_dir(req.source_dir, target)
-		{
-			Ok(()) => swapped.push(target.clone()),
-			Err(e) => failures.push(format!("{}: {e}", target.display())),
-		}
-	}
-	if !failures.is_empty() {
-		return Err(ResyncError::Swap(format!(
-			"{} of {} target(s) failed: {}",
-			failures.len(),
-			targets.len(),
-			failures.join("; ")
-		)));
+	// Stage every target before the first destructive rename, then retain every
+	// old directory until the lock write commits. Universal installs resolve to
+	// one canonical Master target (Referrers remain symlinks); N>1 covers legacy
+	// isolated copies. Either way a late failure rolls every replaced root back.
+	let mut transaction = crate::skills::update::DirSwapTransaction::prepare(
+		req.source_dir,
+		&targets,
+	)
+	.map_err(|e| ResyncError::Swap(e.to_string()))?;
+	if let Err(error) = transaction.commit_all() {
+		let detail = match transaction.rollback() {
+			Ok(()) => error.to_string(),
+			Err(rollback) => {
+				format!("{error}; rollback also failed: {rollback}")
+			}
+		};
+		return Err(ResyncError::Swap(detail));
 	}
 
-	crate::skills::lock::update_lock_hash(
+	if let Err(error) = crate::skills::lock::update_lock_hash(
 		req.name,
 		req.scope,
 		req.project_root,
 		&updated_hash,
 		req.ref_commit,
-	)
-	.map_err(ResyncError::LockUpdate)?;
+	) {
+		let detail = match transaction.rollback() {
+			Ok(()) => error,
+			Err(rollback) => {
+				format!("{error}; rollback also failed: {rollback}")
+			}
+		};
+		return Err(ResyncError::LockUpdate(detail));
+	}
+	transaction.finish();
 
 	Ok(ResyncReport {
-		swapped,
+		swapped: targets,
 		updated_hash,
 	})
 }
@@ -246,6 +251,74 @@ mod tests {
 		assert!(std::fs::read_to_string(installed.join("SKILL.md"))
 			.unwrap()
 			.contains("old"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn lock_failure_rolls_back_master_and_existing_referrer() {
+		use std::os::unix::fs::symlink;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let master = project.join(".agents/skills/sync-me");
+		let referrers = [
+			project.join(".claude/skills/sync-me"),
+			project.join(".cursor/skills/sync-me"),
+		];
+		write_skill(&master, "sync-me", "old");
+		for referrer in &referrers {
+			std::fs::create_dir_all(referrer.parent().unwrap()).unwrap();
+			symlink(&master, referrer).unwrap();
+		}
+
+		// Keep a real lock file, but simulate the tracked entry disappearing after
+		// source resolution and before the transaction commits. The lock write now
+		// fails only after the installed target has been destructively swapped.
+		skill::add_skill_to_local_lock(
+			"unrelated",
+			lock_entry(),
+			Some(&project),
+		)
+		.unwrap();
+		let lock_before = skill::lock::local::read_local_lock(Some(&project));
+
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "new");
+
+		let err = resync_installed_skill(ResyncRequest {
+			source_dir: &source,
+			name: "sync-me",
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+			ref_commit: Some("newoid"),
+		})
+		.unwrap_err();
+
+		assert!(matches!(err, ResyncError::LockUpdate(_)));
+		assert!(
+			std::fs::read_to_string(master.join("SKILL.md"))
+				.unwrap()
+				.contains("old"),
+			"Master content must be restored after the post-swap lock failure",
+		);
+		for referrer in &referrers {
+			assert!(
+				std::fs::read_to_string(referrer.join("SKILL.md"))
+					.unwrap()
+					.contains("old"),
+				"every existing Referrer must resolve to the restored Master",
+			);
+			assert!(
+				std::fs::symlink_metadata(referrer)
+					.unwrap()
+					.file_type()
+					.is_symlink(),
+				"rollback must not replace an existing Referrer",
+			);
+		}
+		let lock_after = skill::lock::local::read_local_lock(Some(&project));
+		assert_eq!(lock_after.skills, lock_before.skills);
+		assert!(!lock_after.skills.contains_key("sync-me"));
 	}
 
 	// A swap failure must NOT advance the lock — else a later `check` would read

@@ -176,9 +176,9 @@ fn test_agent_list_lock_scoped_command_fails() {
 
 #[test]
 fn test_agent_list_early_dispatched_command_rejected() {
-	// `doctor` is dispatched before the agent parsing and ignores the agent
-	// flag entirely — an --agent list must be rejected up front, never
-	// silently dropped.
+	// Plain `doctor` is Master/lock scoped and ignores the agent flag. A list
+	// must be rejected up front unless the caller explicitly requests the
+	// roster-aware link audit.
 	let out = aghub_cli()
 		.args(["-a", "claude,grok", "doctor"])
 		.output()
@@ -190,6 +190,59 @@ fn test_agent_list_early_dispatched_command_rejected() {
 		stderr.contains("does not take an --agent list"),
 		"error must mention the list restriction, got: {stderr}"
 	);
+}
+
+#[cfg(unix)]
+#[test]
+fn doctor_verify_links_audits_the_selected_roster() {
+	use std::os::unix::fs::symlink;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let master = home.path().join(".agents/skills/rostered");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: rostered\ndescription: roster audit fixture\n---\n",
+	)
+	.unwrap();
+
+	let claude_skills = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&claude_skills).unwrap();
+	symlink(&master, claude_skills.join("rostered")).unwrap();
+	// Grok intentionally has no referrer. Codex reads the universal Master
+	// directly, so the three agents exercise linked/missing/autoCovered.
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,codex,grok",
+			"doctor",
+			"--verify-links",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let rows: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let agents = rows[0]["linkAudit"]["agents"].as_array().unwrap();
+	for (agent, state) in [
+		("claude", "linked"),
+		("codex", "autoCovered"),
+		("grok", "missing"),
+	] {
+		assert!(
+			agents
+				.iter()
+				.any(|row| row["agent"] == agent && row["state"] == state),
+			"expected {agent}:{state}, got {agents:?}"
+		);
+	}
 }
 
 #[test]
@@ -340,6 +393,125 @@ fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
 	cmd.env("XDG_STATE_HOME", state);
 	cmd.current_dir(home);
 	cmd
+}
+
+#[test]
+fn top_level_scope_flags_are_mutually_exclusive() {
+	for flags in [["-g", "-p"], ["-g", "--all"], ["-p", "--all"]] {
+		let out = aghub_cli()
+			.args([flags[0], flags[1], "get", "skills"])
+			.output()
+			.unwrap();
+
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			!out.status.success(),
+			"scope pair {flags:?} must be rejected: {stderr}"
+		);
+		assert!(
+			stderr.contains("cannot be used with"),
+			"scope pair {flags:?} must report a clap conflict: {stderr}"
+		);
+	}
+}
+
+#[test]
+fn source_sync_help_distinguishes_update_scope_from_install_roster() {
+	let out = aghub_cli()
+		.args(["source", "sync", "--help"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		stdout.contains("does not narrow update targets"),
+		"update help must explain its scope-wide semantics: {stdout}"
+	);
+	assert!(
+		stdout.contains("roster selected by `-a/--agent`"),
+		"install help must explain roster fan-out: {stdout}"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn generic_mutations_reject_all_scope_before_writing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let cases: &[&[&str]] = &[
+		&["--all", "add", "skills", "--name", "blocked"],
+		&[
+			"--all",
+			"update",
+			"skills",
+			"blocked",
+			"--description",
+			"changed",
+		],
+		&["--all", "delete", "skills", "blocked"],
+		&["--all", "enable", "skills", "blocked"],
+		&["--all", "disable", "skills", "blocked"],
+	];
+
+	for args in cases {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args(*args)
+			.output()
+			.unwrap();
+
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			!out.status.success(),
+			"generic mutation {args:?} must reject --all: {stderr}"
+		);
+		assert!(
+			stderr.contains("does not support --all")
+				&& stderr.contains("-g/--global")
+				&& stderr.contains("-p/--project"),
+			"generic mutation {args:?} must prescribe one write scope: {stderr}"
+		);
+	}
+
+	assert!(
+		!home.path().join(".agents/skills/blocked").exists(),
+		"a rejected --all mutation must not create the global Master"
+	);
+	assert!(
+		!project.path().join(".agents/skills/blocked").exists(),
+		"a rejected --all mutation must not create the project Master"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn apply_update_is_not_gated_by_agent_config() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	std::fs::write(home.path().join(".claude.json"), "{not-json").unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "apply-update", "skills", "missing"])
+		.output()
+		.unwrap();
+
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(!out.status.success(), "missing --yes must fail: {stderr}");
+	assert!(
+		stderr.contains("without --yes"),
+		"lock-scoped apply-update must reach its own confirmation gate: {stderr}"
+	);
+	assert!(
+		!stderr.contains("Failed to load config"),
+		"missing or malformed agent config must not gate apply-update: {stderr}"
+	);
 }
 
 // These delete tests rely on redirecting the home dir via env (HOME/USERPROFILE).
@@ -1452,7 +1624,7 @@ fn source_list_rejects_both_scopes() {
 	assert!(!out.status.success(), "both scopes must fail");
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(
-		stderr.contains("either -g or -p"),
+		stderr.contains("cannot be used with"),
 		"expected both-scope rejection: {stderr}"
 	);
 }
@@ -2727,10 +2899,7 @@ fn source_sync_both_flags_is_rejected() {
 		.unwrap();
 	assert!(!out.status.success(), "both -g/-p must be rejected");
 	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(
-		stderr.contains("choose either -g or -p"),
-		"stderr: {stderr}"
-	);
+	assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
 }
 
 #[test]
@@ -4596,4 +4765,229 @@ fn agents_md_command_surface_lists_phase7_subcommands() {
 			 block:\n{block}"
 		);
 	}
+}
+
+/// `-p` selects `ResourceScope::ProjectOnly`. With no project root found
+/// from cwd, every generic SingleWrite mutation (add/update/delete/enable/
+/// disable) must fail before touching any config instead of silently
+/// falling back to a write against the global Master.
+#[cfg(unix)]
+#[test]
+fn project_scope_mutation_without_project_root_fails_before_writing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let not_a_project = tempfile::TempDir::new().unwrap();
+
+	// `find_project_root` walks the REAL ancestor chain of `not_a_project`,
+	// not a sandboxed one. If TMPDIR happens to sit under a directory that
+	// carries a project marker (e.g. `$HOME/tmp` on a box whose `$HOME` has
+	// `.claude/`), the walk resolves a root, the guard below never fires,
+	// and the mutation runs for real against the isolated-but-real-enough
+	// HOME. Skip rather than let that happen; the point of this test is
+	// that the guard fires, not that we can force TMPDIR's ancestry.
+	if aghub_core::paths::find_project_root(not_a_project.path()).is_some() {
+		eprintln!(
+			"skipping project_scope_mutation_without_project_root_fails_before_writing: \
+			 {} resolves to a project root via its real ancestor chain \
+			 (TMPDIR likely sits under a directory with a project marker)",
+			not_a_project.path().display()
+		);
+		return;
+	}
+
+	let cases: &[&[&str]] = &[
+		&["-p", "add", "skills", "--name", "leaked"],
+		&[
+			"-p",
+			"update",
+			"skills",
+			"leaked",
+			"--description",
+			"changed",
+		],
+		&["-p", "delete", "skills", "leaked"],
+		&["-p", "enable", "skills", "leaked"],
+		&["-p", "disable", "skills", "leaked"],
+	];
+
+	for args in cases {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(not_a_project.path())
+			.args(*args)
+			.output()
+			.unwrap();
+
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			!out.status.success(),
+			"{args:?} with no project root must fail: {stderr}"
+		);
+		// Assert the guard itself is what failed the command, so an
+		// unrelated failure (e.g. a bad flag) can't make this pass for the
+		// wrong reason.
+		assert!(
+			stderr.contains("no project root found"),
+			"{args:?} must fail via the project-root guard: {stderr}"
+		);
+	}
+
+	assert!(
+		!home.path().join(".agents/skills/leaked").exists(),
+		"a rejected -p mutation must not leak the global Master onto disk"
+	);
+}
+
+/// Fix D: a `--all` (`ResourceScope::Both`) commit prune must scan BOTH scopes
+/// before mutating either lock. Chmod the project's Claude skills dir to
+/// `000` so `prune_lock_scanning(Project, ..)`'s disk scan fails with a real
+/// permission error; before the fix, the GLOBAL lock had already been
+/// committed (its orphan entry dropped) by the time that error surfaced, so
+/// a failing command still left a silent partial mutation behind.
+#[cfg(unix)]
+#[test]
+fn prune_lock_all_scope_project_scan_failure_leaves_global_lock_untouched() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+
+	let lock_path = seed_global_lock(state.path());
+	let before = std::fs::read(&lock_path).unwrap();
+
+	// `.claude` is a project marker (so `--all` finds this as the project
+	// root), and `.claude/skills` is Claude's project skill dir (so it's
+	// part of the set `prune_lock_scanning(Project, ..)` scans).
+	let project_skills = project.path().join(".claude/skills");
+	std::fs::create_dir_all(&project_skills).unwrap();
+	std::fs::set_permissions(
+		&project_skills,
+		std::fs::Permissions::from_mode(0o000),
+	)
+	.unwrap();
+
+	// Root bypasses directory permission checks entirely, so the scan below
+	// would succeed instead of failing; skip in that case (chmod doesn't
+	// block root, matching `perms_enforced` above).
+	if std::fs::read_dir(&project_skills).is_ok() {
+		std::fs::set_permissions(
+			&project_skills,
+			std::fs::Permissions::from_mode(0o755),
+		)
+		.unwrap();
+		eprintln!("skip: perms not enforced (root)");
+		return;
+	}
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["--all", "prune-lock", "--yes"])
+		.output()
+		.unwrap();
+
+	// Restore before asserting so a failed assert never leaks the temp dir.
+	std::fs::set_permissions(
+		&project_skills,
+		std::fs::Permissions::from_mode(0o755),
+	)
+	.unwrap();
+
+	assert!(
+		!out.status.success(),
+		"a project-side scan error must abort the whole prune: stdout={} \
+		 stderr={}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let after = std::fs::read(&lock_path).unwrap();
+	assert_eq!(
+		before, after,
+		"a project scan failure must leave the GLOBAL lock untouched (no \
+		 partial commit)"
+	);
+}
+
+/// D2: a `--all` (`ResourceScope::Both`) commit prune where the GLOBAL lock
+/// commits fine but the PROJECT lock WRITE then fails must not bail with
+/// empty stdout. Chmod the PROJECT ROOT itself (not a skills dir) to `000`:
+/// the preflight + commit scans still pass (listing/traversing a directory
+/// only needs read+execute), but `skills-lock.json` lives directly under the
+/// project root, so writing its replacement temp file there fails. Before the
+/// fix this failure propagated via `?` with nothing printed, silently hiding
+/// the fact that the global lock had already been pruned.
+#[cfg(unix)]
+#[test]
+fn prune_lock_all_scope_project_write_failure_reports_global_prune() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+
+	seed_global_lock(state.path());
+	// `.claude` marks this dir as a project root for `--all` resolution.
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	// Seed a project-lock entry with no matching on-disk skill dir, so the
+	// project prune actually finds a removal to write. Without a change,
+	// `retain_local_locked_skills` skips the write entirely and the write
+	// failure this test targets would never be reached.
+	std::fs::write(
+		project.path().join("skills-lock.json"),
+		r#"{"version":1,"skills":{"porphan":{"source":"o/r","sourceType":"github","computedHash":"deadbeef"}}}"#,
+	)
+	.unwrap();
+
+	// Root bypasses directory permission checks entirely; skip in that case
+	// (chmod doesn't block root, matching `perms_enforced` elsewhere).
+	if !perms_enforced(project.path()) {
+		eprintln!("skip: perms not enforced (root)");
+		return;
+	}
+	let orig = std::fs::metadata(project.path()).unwrap().permissions();
+	std::fs::set_permissions(
+		project.path(),
+		std::fs::Permissions::from_mode(0o555),
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["--all", "prune-lock", "--yes"])
+		.output()
+		.unwrap();
+
+	// Restore before asserting so a failed assert never leaks the temp dir.
+	std::fs::set_permissions(project.path(), orig).unwrap();
+
+	assert!(
+		!out.status.success(),
+		"a project lock WRITE failure must still exit non-zero: stdout={} \
+		 stderr={}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// This is the assertion that fails without the fix: `?` on the project
+	// write error propagated immediately, leaving stdout completely empty.
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		!stdout.trim().is_empty(),
+		"the already-committed global prune must be reported on stdout, not \
+		 swallowed by an early error return"
+	);
+	let json: Value = serde_json::from_str(&stdout).unwrap();
+	assert!(
+		json["pruned"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|n| n == "orphan"),
+		"the global orphan entry pruned before the project write failed \
+		 must be reported: {json}"
+	);
+	assert!(
+		json["error"].is_string(),
+		"the partial-mutation report must surface an error field: {json}"
+	);
 }

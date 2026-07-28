@@ -19,7 +19,7 @@ use std::path::Path;
 use crate::models::ResourceScope;
 use crate::skills::linker::classify::{classify_agent, LinkNeed};
 use crate::skills::linker::{
-	install_universal, universal_canonical_dir, LinkTarget,
+	install_universal, universal_canonical_dir, LinkTarget, Linker,
 };
 use crate::skills::skill_source_root;
 use crate::skills::update::{detect_rename, skill_renamed_message};
@@ -42,6 +42,8 @@ pub struct AgentInstallResult {
 pub struct FetchedSkillInstallRequest<'a> {
 	/// `SKILL.md` inside the already-fetched tree (or its parent dir).
 	pub skill_file: &'a Path,
+	/// Fetched source provenance. The source field is the normalized ownership
+	/// key.
 	pub source: &'a skill::InstallLockSource,
 	/// npx-form lock path, e.g. `"<dir>/SKILL.md"`.
 	pub lock_skill_path: String,
@@ -70,36 +72,171 @@ pub struct FetchedSkillInstallReport {
 	pub agent_results: Vec<AgentInstallResult>,
 }
 
-/// Whether the lock should be (re)written for this scope.
-///
-/// Mirrors the API's `should_write_install_lock`
-/// (`crates/api/src/routes/skills.rs`): write when at least one agent actually
-/// received the skill on this call, OR there is no existing lock entry yet.
-fn should_write_install_lock(
-	skill_name: &str,
-	installed_any: bool,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> bool {
-	installed_any || !skill_lock_contains(skill_name, scope, project_root)
+#[derive(Clone, Debug)]
+struct LockedSourceOwner {
+	source: String,
+	source_type: String,
+	source_url: Option<String>,
 }
 
-fn skill_lock_contains(
+fn skill_lock_source(
 	skill_name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
-) -> bool {
+) -> Option<LockedSourceOwner> {
 	match scope {
 		ResourceScope::GlobalOnly => {
-			skill::lock::global::get_skill_from_lock(skill_name).is_some()
+			skill::lock::global::get_skill_from_lock(skill_name).map(|entry| {
+				LockedSourceOwner {
+					source: entry.source,
+					source_type: entry.source_type,
+					source_url: Some(entry.source_url),
+				}
+			})
 		}
-		ResourceScope::ProjectOnly => project_root.is_some_and(|root| {
+		ResourceScope::ProjectOnly => project_root.and_then(|root| {
 			skill::lock::local::read_local_lock(Some(root))
 				.skills
-				.contains_key(skill_name)
+				.get(skill_name)
+				.map(|entry| LockedSourceOwner {
+					source: entry.source.clone(),
+					source_type: entry.source_type.clone(),
+					source_url: entry.source_url.clone(),
+				})
 		}),
-		ResourceScope::Both => false,
+		ResourceScope::Both => None,
 	}
+}
+
+/// Canonical host + repo-path identity for the common remote URL forms. The
+/// transport and optional `.git` suffix do not define ownership; the host does.
+fn remote_owner_from_url(source_url: &str) -> Option<String> {
+	let source_url = source_url.trim();
+	if source_url.is_empty() || source_url.starts_with("file:") {
+		return None;
+	}
+
+	let (authority, path) =
+		if let Some((scheme, rest)) = source_url.split_once("://") {
+			if !matches!(
+				scheme.to_ascii_lowercase().as_str(),
+				"http" | "https" | "ssh" | "git"
+			) {
+				return None;
+			}
+			let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+			(authority, path)
+		} else {
+			// SCP-like Git URL: `[user@]host:path/to/repo.git`.
+			let host_and_path = source_url
+				.rsplit_once('@')
+				.map_or(source_url, |(_, value)| value);
+			host_and_path.split_once(':')?
+		};
+	let authority = authority
+		.rsplit_once('@')
+		.map_or(authority, |(_, value)| value)
+		.to_ascii_lowercase();
+	let path = path
+		.split(['?', '#'])
+		.next()
+		.unwrap_or(path)
+		.trim_matches('/');
+	let path = path
+		.strip_suffix(".git")
+		.unwrap_or(path)
+		.trim_end_matches('/');
+	(!authority.is_empty() && !path.is_empty())
+		.then(|| format!("{authority}/{path}"))
+}
+
+fn same_source_owner(
+	existing: &LockedSourceOwner,
+	requested: &skill::InstallLockSource,
+) -> bool {
+	if !existing
+		.source_type
+		.eq_ignore_ascii_case(&requested.source_type)
+	{
+		return false;
+	}
+	match existing
+		.source_url
+		.as_deref()
+		.filter(|source_url| !source_url.trim().is_empty())
+	{
+		Some(source_url) => match (
+			remote_owner_from_url(source_url),
+			remote_owner_from_url(&requested.source_url),
+		) {
+			(Some(existing), Some(requested)) => existing == requested,
+			_ => source_url.trim() == requested.source_url.trim(),
+		},
+		// Project GitHub and local locks intentionally omit a reconstructable
+		// sourceUrl, and their provider gives the missing identity. A legacy
+		// non-GitHub remote without sourceUrl has lost its host; fail closed rather
+		// than let an arbitrary host with the same owner/repo claim it.
+		None => {
+			matches!(
+				existing.source_type.to_ascii_lowercase().as_str(),
+				"github" | "local"
+			) && existing.source == requested.source
+		}
+	}
+}
+
+fn hash_master(
+	skill_name: &str,
+	canonical: &Path,
+) -> Result<String, crate::ConfigError> {
+	skill::compute_skill_folder_hash(canonical).map_err(|error| {
+		crate::ConfigError::ValidationFailed(format!(
+			"Master for skill '{skill_name}' could not be verified: {error}",
+		))
+	})
+}
+
+/// Inspect a Master with lstat semantics and never descend through a link or
+/// Windows reparse point. Hashing intentionally skips links for npx parity, so
+/// provenance adoption needs this separate invariant: every byte reachable
+/// through the adopted Master must come from its real directory tree.
+fn ensure_link_free_master(
+	skill_name: &str,
+	canonical: &Path,
+) -> Result<(), crate::ConfigError> {
+	let mut pending = vec![canonical.to_path_buf()];
+	while let Some(path) = pending.pop() {
+		let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+			crate::ConfigError::ValidationFailed(format!(
+				"Master for skill '{skill_name}' could not be inspected for links: \
+				 {error}",
+			))
+		})?;
+		if metadata.file_type().is_symlink() || Linker::is_link(&path) {
+			return Err(crate::ConfigError::ValidationFailed(format!(
+				"Master for skill '{skill_name}' contains a link or junction; \
+				 refusing to adopt it",
+			)));
+		}
+		if metadata.is_dir() {
+			let entries = std::fs::read_dir(&path).map_err(|error| {
+				crate::ConfigError::ValidationFailed(format!(
+					"Master for skill '{skill_name}' could not be inspected for \
+					 links: {error}",
+				))
+			})?;
+			for entry in entries {
+				let entry = entry.map_err(|error| {
+					crate::ConfigError::ValidationFailed(format!(
+						"Master for skill '{skill_name}' could not be inspected for \
+						 links: {error}",
+					))
+				})?;
+				pending.push(entry.path());
+			}
+		}
+	}
+	Ok(())
 }
 
 fn write_install_lock(
@@ -145,6 +282,11 @@ fn write_install_lock(
 
 /// Install an already-fetched skill into the resolved agent dirs and write the
 /// install lock. See module docs. Performs no network / credential work.
+///
+/// Before any Master, Referrer, or lock mutation, an existing Master must hash
+/// identically to the fetched content and an existing lock must have the same
+/// normalized source owner. Exact-byte untracked Masters may be adopted. The
+/// Master is hashed again immediately before a source lock is persisted.
 pub fn install_fetched_skill_and_lock(
 	req: FetchedSkillInstallRequest<'_>,
 ) -> Result<FetchedSkillInstallReport, crate::ConfigError> {
@@ -183,6 +325,46 @@ pub fn install_fetched_skill_and_lock(
 				"Failed to hash fetched skill: {e}"
 			))
 		})?;
+	let canonical_root = if matches!(req.scope, ResourceScope::ProjectOnly) {
+		req.project_root
+	} else {
+		None
+	};
+	let canonical = universal_canonical_dir(canonical_root)
+		.map(|skills_dir| skills_dir.join(&safe_name));
+	let existing_owner = skill_lock_source(&name, req.scope, req.project_root);
+	if let Some(existing_owner) = existing_owner.as_ref() {
+		if !same_source_owner(existing_owner, req.source) {
+			return Err(crate::ConfigError::ValidationFailed(format!(
+				"Skill '{name}' is already owned by source '{}:{}'; its \
+				 canonical source owner differs from requested source '{}:{}', \
+				 so reassignment was refused",
+				existing_owner.source_type,
+				existing_owner.source,
+				req.source.source_type,
+				req.source.source,
+			)));
+		}
+	}
+	if let Some(canonical) = canonical.as_ref() {
+		if Linker::is_link(canonical) {
+			return Err(crate::ConfigError::ValidationFailed(format!(
+				"Master slot for skill '{name}' is a link; refusing to follow or \
+				 adopt it",
+			)));
+		}
+		if canonical.exists() {
+			ensure_link_free_master(&name, canonical)?;
+			let master_hash = hash_master(&name, canonical)?;
+			if master_hash != installed_hash {
+				return Err(crate::ConfigError::ValidationFailed(format!(
+					"Pre-existing Master for skill '{name}' has different content; \
+					 refusing to adopt it for fetched source '{}'",
+					req.source.source,
+				)));
+			}
+		}
+	}
 
 	let (agent_results, wrote_master) = materialize_universal_master(
 		&source_root,
@@ -193,21 +375,30 @@ pub fn install_fetched_skill_and_lock(
 		req.target,
 	)?;
 
-	// Gate the lock write on the master being freshly written OR at least one
-	// agent actually receiving the skill on THIS run (Decision 11).
-	// NOTE: the gate passes (wrote_master||installed_any) as the helper's
-	// `installed_any` arg; when the outer guard is false (both false) the
-	// `&&` short-circuits before calling the helper, so
-	// `skill_lock_contains` is never reached — that branch is dead here.
+	// Gate ordinary lock rewrites on a fresh Master or fresh Referrer. One
+	// additional case is safe: an untracked, byte-identical Master with at least
+	// one successfully covered target (including an already-correct Referrer)
+	// may be adopted without manufacturing a filesystem change.
 	let installed_any = agent_results.iter().any(|r| r.installed);
-	let wrote_lock = (wrote_master || installed_any)
-		&& should_write_install_lock(
-			&name,
-			wrote_master || installed_any,
-			req.scope,
-			req.project_root,
-		);
+	let covered_any = agent_results.iter().any(|r| r.error.is_none());
+	let wrote_lock = wrote_master
+		|| installed_any
+		|| (existing_owner.is_none() && covered_any);
 	if wrote_lock {
+		let canonical = canonical.as_ref().ok_or_else(|| {
+			crate::ConfigError::ValidationFailed(format!(
+				"Master for skill '{name}' could not be resolved before the \
+				 source lock write; the lock was not written",
+			))
+		})?;
+		ensure_link_free_master(&name, canonical)?;
+		let master_hash = hash_master(&name, canonical)?;
+		if master_hash != installed_hash {
+			return Err(crate::ConfigError::ValidationFailed(format!(
+				"Master for skill '{name}' does not match the fetched content \
+				 before the source lock write; the lock was not written",
+			)));
+		}
 		write_install_lock(
 			&name,
 			req.scope,

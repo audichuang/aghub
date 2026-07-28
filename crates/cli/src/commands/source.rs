@@ -17,9 +17,7 @@ use serde::Serialize;
 use skill_update::sources::{
 	self, SourceScope, SourceScopeKind, SourceSkillDiff, SourceSummary,
 };
-use skill_update::{
-	skill_folder_from_lock_path, FetchError, FetchSelection, SourceRef,
-};
+use skill_update::{FetchError, FetchSelection, SourceRef};
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -989,6 +987,12 @@ fn print_dry_run(
 		return Ok(());
 	}
 	println!("Dry-run (pass --yes to apply):");
+	if plan.iter().any(|(kind, _)| *kind == "update") {
+		println!(
+			"  update target: scoped Master + existing referrers (`-a/--agent` \
+			 applies only to install/relink actions)"
+		);
+	}
 	// Make the fan-out visible BEFORE --yes: installs touch every agent
 	// listed here (`-a all` can be the whole registry).
 	if !plan_targets.is_empty() {
@@ -1145,7 +1149,10 @@ struct AcceptRenameArgs<'a> {
 /// core), then hands the fetched tree to `rename::accept_rename`.
 fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	use aghub_core::skills::rename::{self, RenameRequest, RenameScope};
-	use skill_update::mutation::{accept_fetched_rename, FetchedSource};
+	use skill_update::mutation::{
+		accept_fetched_rename, fetch_for_rename, FetchRenameError,
+		FetchedRenameRequest,
+	};
 
 	if args.all {
 		bail!(
@@ -1191,45 +1198,51 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		args.git_ref.map(str::to_string).or(source.ref_name.clone());
 	source.ref_name = effective_ref.clone();
 
-	// Step 3: fetch only the affected skill folder via the shared token-first
-	// path.
-	let folder =
-		skill_folder_from_lock_path(&source.skill_path).ok_or_else(|| {
-			anyhow::anyhow!("locked skillPath is not a valid skill folder")
-		})?;
-	let repo = sources::fetch_source_with_resolver(
-		&SourceRef {
-			source: source.source_url.clone(),
-			ref_: effective_ref,
+	// Step 3: fetch a catalog snapshot and resolve the new frontmatter name to
+	// its current path. The directory may have moved as part of the rename.
+	let prepared = fetch_for_rename(
+		FetchedRenameRequest {
+			source: &source,
+			new_name: args.new_name,
 		},
 		&CliFetcher,
 		&EnvTokenResolver,
-		FetchSelection::Skills(std::slice::from_ref(&folder)),
 	)
-	.map_err(|e| match e {
-		FetchError::BackendUnavailable => {
+	.map_err(|error| match error {
+		FetchRenameError::CredentialBackendUnavailable => {
 			anyhow::anyhow!("Credential backend is unavailable; retry later.")
 		}
-		FetchError::Auth => anyhow::anyhow!(
+		FetchRenameError::Fetch(FetchError::Auth) => anyhow::anyhow!(
 			"This source needs a credential. Set GIT_PASSWORD (any host) \
 			 or GITHUB_TOKEN (github.com) in the environment and retry."
 		),
-		FetchError::Network => anyhow::anyhow!(
+		FetchRenameError::Fetch(FetchError::Network) => anyhow::anyhow!(
 			"Failed to fetch source repository '{}'",
 			source.source_url
+		),
+		FetchRenameError::Fetch(FetchError::BackendUnavailable) => {
+			anyhow::anyhow!("Credential backend is unavailable; retry later.")
+		}
+		FetchRenameError::CatalogScan => {
+			anyhow::anyhow!(
+				"Fetched source catalog could not be scanned safely"
+			)
+		}
+		FetchRenameError::SkillNotFound => anyhow::anyhow!(
+			"new skill '{}' was not found in the fetched source",
+			args.new_name
 		),
 	})?;
 
 	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core.
-	let fetched = FetchedSource::from_repo(repo);
 	let outcome = accept_fetched_rename(
-		&fetched,
+		&prepared.fetched,
 		RenameRequest {
 			old_name: args.old_name,
 			new_name: args.new_name,
 			scope,
 		},
-		&source,
+		&prepared.source,
 	)
 	.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
 

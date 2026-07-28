@@ -20,6 +20,24 @@ pub enum FetchMutationError {
 	Fetch(FetchError),
 }
 
+pub struct FetchedRenameRequest<'a> {
+	pub source: &'a aghub_core::skills::rename::RenameLockSource,
+	pub new_name: &'a str,
+}
+
+#[derive(Debug)]
+pub enum FetchRenameError {
+	CredentialBackendUnavailable,
+	Fetch(FetchError),
+	CatalogScan,
+	SkillNotFound,
+}
+
+pub struct PreparedRename {
+	pub fetched: FetchedSource,
+	pub source: aghub_core::skills::rename::RenameLockSource,
+}
+
 /// A selectively materialized source tree and its immutable commit identity.
 /// Keeping the owning [`FetchedRepo`] intact ensures its temporary-directory
 /// guard outlives every root/OID consumer.
@@ -155,6 +173,62 @@ pub fn fetch_for_mutation(
 		)
 		.map_err(FetchMutationError::Fetch)?;
 	Ok(FetchedSource { repo })
+}
+
+/// Fetch a complete catalog for rename acceptance and resolve the new name to
+/// its current repo-relative path. This supports both a frontmatter-only rename
+/// at the old path and a rename that moved the skill directory.
+pub fn fetch_for_rename(
+	request: FetchedRenameRequest<'_>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<PreparedRename, FetchRenameError> {
+	let token = match resolver.resolve(&request.source.source_url) {
+		TokenResolution::Token(token) => Some(token),
+		TokenResolution::NoToken => None,
+		TokenResolution::BackendUnavailable => {
+			return Err(FetchRenameError::CredentialBackendUnavailable);
+		}
+	};
+	let source_ref = SourceRef {
+		source: request.source.source_url.clone(),
+		ref_: request.source.ref_name.clone(),
+	};
+	let repo = fetcher
+		.fetch(
+			&source_ref,
+			token.as_deref(),
+			FetchSelection::CatalogSnapshot,
+		)
+		.map_err(FetchRenameError::Fetch)?;
+	let fetched = FetchedSource { repo };
+	let options = skill::scan::ScanOptions {
+		max_depth: crate::repository::CATALOG_MAX_DEPTH,
+		full_depth: true,
+		respect_gitignore: false,
+	};
+	let skill_dirs =
+		skill::scan::scan_skills(fetched.root(), options, Vec::new())
+			.map_err(|_| FetchRenameError::CatalogScan)?;
+	let matched = skill_dirs.into_iter().find(|directory| {
+		skill::parser::parse(&directory.join("SKILL.md"))
+			.is_ok_and(|parsed| parsed.name == request.new_name)
+	});
+	let directory = matched.ok_or(FetchRenameError::SkillNotFound)?;
+	let relative = directory
+		.strip_prefix(fetched.root())
+		.map_err(|_| FetchRenameError::CatalogScan)?;
+	let folder = relative.to_string_lossy().replace('\\', "/");
+	let validated = skill::SkillPath::parse(&folder)
+		.map_err(|_| FetchRenameError::CatalogScan)?;
+	let lock_skill_path = if validated.is_root() {
+		"SKILL.md".to_string()
+	} else {
+		format!("{}/SKILL.md", validated.as_str())
+	};
+	let mut source = request.source.clone();
+	source.skill_path = lock_skill_path;
+	Ok(PreparedRename { fetched, source })
 }
 
 pub struct FetchedResyncRequest<'a> {
@@ -319,10 +393,41 @@ mod tests {
 	use aghub_core::models::ResourceScope;
 
 	use super::{
-		fetch_for_mutation, resync_fetched_source, resync_locked_skill,
-		FetchMutationError, FetchedResyncRequest, FetchedSource,
-		FetchedSourceRequest, LockedResyncRequest,
+		fetch_for_mutation, fetch_for_rename, resync_fetched_source,
+		resync_locked_skill, FetchMutationError, FetchedRenameRequest,
+		FetchedResyncRequest, FetchedSource, FetchedSourceRequest,
+		LockedResyncRequest,
 	};
+
+	struct NoToken;
+	impl TokenResolver for NoToken {
+		fn resolve(&self, _source: &str) -> TokenResolution {
+			TokenResolution::NoToken
+		}
+	}
+
+	struct CatalogFetcher {
+		root: std::path::PathBuf,
+	}
+	impl Fetcher for CatalogFetcher {
+		fn fetch(
+			&self,
+			_source_ref: &SourceRef,
+			_token: Option<&str>,
+			selection: FetchSelection<'_>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			assert!(matches!(selection, FetchSelection::CatalogSnapshot));
+			Ok(crate::FetchedRepo {
+				root: self.root.clone(),
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "moved-commit".to_string(),
+					tree_oid: "moved-tree".to_string(),
+					commit_time: None,
+				},
+				_guard: None,
+			})
+		}
+	}
 
 	fn write_skill(directory: &Path, name: &str, description: &str) {
 		std::fs::create_dir_all(directory).unwrap();
@@ -379,6 +484,40 @@ mod tests {
 			0,
 			"credential failure must precede Fetched Source materialization",
 		);
+	}
+
+	#[test]
+	fn rename_fetch_resolves_a_skill_that_moved_to_a_new_repo_path() {
+		let temporary = tempfile::tempdir().unwrap();
+		let fetched_root = temporary.path().join("fetched");
+		write_skill(
+			&fetched_root.join("one/two/three/four/five/six/renamed"),
+			"renamed-skill",
+			"moved",
+		);
+		let source = aghub_core::skills::rename::RenameLockSource {
+			source: "owner/repo".to_string(),
+			source_type: "github".to_string(),
+			source_url: "https://github.com/owner/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			skill_path: "old/location/SKILL.md".to_string(),
+		};
+
+		let prepared = fetch_for_rename(
+			FetchedRenameRequest {
+				source: &source,
+				new_name: "renamed-skill",
+			},
+			&CatalogFetcher { root: fetched_root },
+			&NoToken,
+		)
+		.expect("moved rename should resolve the new path");
+
+		assert_eq!(
+			prepared.source.skill_path,
+			"one/two/three/four/five/six/renamed/SKILL.md"
+		);
+		assert_eq!(prepared.fetched.oid(), "moved-commit");
 	}
 
 	#[test]
