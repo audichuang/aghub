@@ -21,16 +21,15 @@ pub struct ResyncRequest<'a> {
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
 	pub ref_commit: Option<&'a str>,
-	/// The lock coordinates the caller read BEFORE fetching, re-verified under the
-	/// mutation lock before anything is swapped — the unlocked read → fetch →
-	/// mutate window is seconds wide and the lock alone cannot cover it.
+	/// The entry's identity as [`captured`](crate::skills::lock::EntryIdentity::capture)
+	/// BEFORE the fetch, re-verified under the mutation lock before anything is
+	/// swapped — the unlocked read → fetch → mutate window is seconds wide and the
+	/// lock alone cannot cover it.
 	///
-	/// `None` ONLY for a caller that never read the entry pre-fetch, so it has
-	/// nothing to compare: the API git-sync route syncs from a session whose
-	/// source the USER picked, not from coordinates it read. Passing a re-derived
-	/// value there would be a check that proves nothing (and would reject
-	/// npx-written entries, which carry no `sourceUrl`).
-	pub expected: Option<crate::skills::lock::FetchedFrom>,
+	/// Required, with no opt-out: a caller whose capture returned `None` never saw
+	/// the entry and has no mandate to overwrite it, so it must refuse rather than
+	/// pass "nothing to compare" down here.
+	pub expected: crate::skills::lock::EntryIdentity,
 }
 
 /// Outcome of a successful resync: every installed target was swapped to the new
@@ -119,11 +118,9 @@ pub fn resync_installed_skill(
 	// one it fetched before overwriting installed content and stamping a hash.
 	// After the disk check, which is cheaper and a more specific answer when there
 	// is simply nothing installed to resync.
-	if let Some(expected) = req.expected.as_ref() {
-		expected
-			.ensure_unchanged(req.name, req.scope, req.project_root)
-			.map_err(ResyncError::StaleFetch)?;
-	}
+	req.expected
+		.ensure_unchanged(req.name, req.scope, req.project_root)
+		.map_err(ResyncError::StaleFetch)?;
 
 	// Rename guard: refuse to overwrite when the upstream frontmatter `name`
 	// diverged from the locked name (same skillPath, renamed skill).
@@ -207,11 +204,18 @@ mod tests {
 	/// The coordinates `lock_entry()` describes — what a caller would have
 	/// fetched from. `source_url` is None there, so the effective source is
 	/// `source`.
-	fn fetched_from() -> Option<crate::skills::lock::FetchedFrom> {
-		Some(crate::skills::lock::FetchedFrom {
-			source: "owner/repo".to_string(),
-			skill_path: Some("s/SKILL.md".to_string()),
-		})
+	/// The identity a caller's pre-fetch capture would have returned for the
+	/// fixture entry. Captured, never hand-built — the same rule production obeys.
+	fn captured(
+		name: &str,
+		project: &Path,
+	) -> crate::skills::lock::EntryIdentity {
+		crate::skills::lock::EntryIdentity::capture(
+			name,
+			ResourceScope::ProjectOnly,
+			Some(project),
+		)
+		.expect("fixture entry must exist before capture")
 	}
 
 	fn lock_entry() -> skill::LocalSkillLockEntry {
@@ -244,7 +248,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("deadbeefcafef00d"),
-			expected: fetched_from(),
+			expected: captured("sync-me", &project),
 		})
 		.unwrap();
 
@@ -264,14 +268,19 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let source = tmp.path().join("src/ghost");
 		write_skill(&source, "ghost", "x");
+		// Locked but never installed: the disk check must answer first, so the
+		// identity capture below is satisfiable yet irrelevant.
+		let project = tmp.path().join("project");
+		skill::add_skill_to_local_lock("ghost", lock_entry(), Some(&project))
+			.unwrap();
 
 		let err = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
 			name: "ghost",
 			scope: ResourceScope::ProjectOnly,
-			project_root: Some(&tmp.path().join("empty")),
+			project_root: Some(&project),
 			ref_commit: None,
-			expected: fetched_from(),
+			expected: captured("ghost", &project),
 		})
 		.unwrap_err();
 		assert!(matches!(err, ResyncError::NotInstalled));
@@ -295,7 +304,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: None,
-			expected: fetched_from(),
+			expected: captured("keep", &project),
 		})
 		.unwrap_err();
 		assert!(matches!(err, ResyncError::Renamed { .. }));
@@ -317,7 +326,11 @@ mod tests {
 		let installed = project.join(".claude/skills/sync-me");
 		write_skill(&installed, "sync-me", "the other process's content");
 
-		// What the lock says NOW: a different source than the one we fetched.
+		// Capture the identity our fetch started from, THEN let "another process"
+		// repoint the entry at a different source — the real ordering.
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let expected = captured("sync-me", &project);
 		let mut repointed = lock_entry();
 		repointed.source = "someone-else/repo".to_string();
 		repointed.source_url =
@@ -335,8 +348,8 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("newoid"),
-			// What WE fetched, read before the entry was repointed.
-			expected: fetched_from(),
+			// What WE fetched, captured before the entry was repointed.
+			expected,
 		})
 		.unwrap_err();
 
@@ -355,6 +368,66 @@ mod tests {
 			lock_before.skills,
 			"a refused resync must not advance the lock"
 		);
+	}
+
+	/// Every coordinate binds, not just the source. Without the `ref_name` and
+	/// `skillPath` comparisons these two cases pass and the swap proceeds: the ref
+	/// case overwrites `stable` content with `main` and stamps only the hash/OID,
+	/// so disk and lock disagree; the path case overwrites from a folder the entry
+	/// no longer names.
+	#[test]
+	fn refuses_when_only_the_ref_or_only_the_path_changed() {
+		for (label, mutate) in [
+			(
+				"ref",
+				(|e: &mut skill::LocalSkillLockEntry| {
+					e.ref_name = Some("stable".to_string());
+				}) as fn(&mut skill::LocalSkillLockEntry),
+			),
+			("skillPath", |e: &mut skill::LocalSkillLockEntry| {
+				e.skill_path = Some("moved/SKILL.md".to_string());
+			}),
+		] {
+			let tmp = tempfile::tempdir().unwrap();
+			let project = tmp.path().join("project");
+			let installed = project.join(".claude/skills/sync-me");
+			write_skill(&installed, "sync-me", "content to protect");
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				lock_entry(),
+				Some(&project),
+			)
+			.unwrap();
+			// Capture FIRST, then let "another process" change one coordinate.
+			let expected = captured("sync-me", &project);
+			let mut changed = lock_entry();
+			mutate(&mut changed);
+			skill::add_skill_to_local_lock("sync-me", changed, Some(&project))
+				.unwrap();
+
+			let source = tmp.path().join("src/sync-me");
+			write_skill(&source, "sync-me", "stale fetch");
+			let err = resync_installed_skill(ResyncRequest {
+				source_dir: &source,
+				name: "sync-me",
+				scope: ResourceScope::ProjectOnly,
+				project_root: Some(&project),
+				ref_commit: Some("newoid"),
+				expected,
+			})
+			.unwrap_err();
+
+			assert!(
+				matches!(err, ResyncError::StaleFetch(_)),
+				"a changed {label} must be refused, got {err:?}"
+			);
+			assert!(
+				std::fs::read_to_string(installed.join("SKILL.md"))
+					.unwrap()
+					.contains("content to protect"),
+				"installed content must survive a changed {label}"
+			);
+		}
 	}
 
 	/// The data-safety heart: a lock failure AFTER the destructive swap must
@@ -413,7 +486,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("newoid"),
-			expected: fetched_from(),
+			expected: captured("sync-me", &project),
 		})
 		.unwrap_err();
 		// Restore before asserting, so a failed assert cannot leak a read-only dir.
@@ -447,7 +520,7 @@ mod tests {
 		let lock_after = skill::lock::local::read_local_lock(Some(&project));
 		assert_eq!(
 			lock_after.skills, lock_before.skills,
-			"a failed lock write must leave the lock byte-identical"
+			"a failed lock write must leave every entry unchanged"
 		);
 		assert_eq!(
 			lock_after.skills["sync-me"].computed_hash, "old",
@@ -487,7 +560,7 @@ mod tests {
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
 			ref_commit: Some("newoid"),
-			expected: fetched_from(),
+			expected: captured("locked", &project),
 		})
 		.unwrap_err();
 

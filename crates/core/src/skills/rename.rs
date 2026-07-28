@@ -58,6 +58,12 @@ pub struct RenameLockSource {
 	pub source_url: String,
 	pub ref_name: Option<String>,
 	pub skill_path: String,
+	/// The OLD-name entry's identity as it stood when [`rename_source_from_lock`]
+	/// read it, BEFORE the fetch. An adapter is expected to override `ref_name`
+	/// (a `--ref`) and to rewrite `skill_path` to the resolved new location — this
+	/// field is the one it must leave alone, because it is what
+	/// [`accept_rename`] compares the live entry against under the lock.
+	pub captured: crate::skills::lock::EntryIdentity,
 }
 
 /// What the adapter learned by fetching, in types core can name.
@@ -195,12 +201,23 @@ pub fn rename_source_from_lock(
 					"Locked skill has no skillPath".to_string(),
 				)
 			})?;
+			let captured = crate::skills::lock::EntryIdentity::capture(
+				old_name,
+				ResourceScope::GlobalOnly,
+				None,
+			)
+			.ok_or_else(|| {
+				RenameError::NotLocked(
+					"Skill is not in global lock".to_string(),
+				)
+			})?;
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
 				source_url: entry.source_url.clone(),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
+				captured,
 			})
 		}
 		RenameScope::Project { root } => {
@@ -215,6 +232,16 @@ pub fn rename_source_from_lock(
 					"Locked skill has no skillPath".to_string(),
 				)
 			})?;
+			let captured = crate::skills::lock::EntryIdentity::capture(
+				old_name,
+				ResourceScope::ProjectOnly,
+				Some(root),
+			)
+			.ok_or_else(|| {
+				RenameError::NotLocked(
+					"Skill is not in project lock".to_string(),
+				)
+			})?;
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
@@ -226,6 +253,7 @@ pub fn rename_source_from_lock(
 					.unwrap_or_else(|| entry.source.clone()),
 				ref_name: entry.ref_name.clone(),
 				skill_path,
+				captured,
 			})
 		}
 	}
@@ -374,16 +402,16 @@ pub fn accept_rename(
 	// entry (steps 8-9) on behalf of coordinates that no longer exist — deleting
 	// the other process's skill and replacing it with content from a source the
 	// lock no longer names. Checked here: after the guard, before any mutation.
-	crate::skills::lock::FetchedFrom {
-		source: fetched.source.source_url.clone(),
-		// No path comparison: resolving a MOVED skillPath is a feature of this
-		// flow (the adapter rewrites it to where the skill actually is now), so
-		// requiring it to match the locked path would reject the case rename
-		// exists to handle. The source still binds.
-		skill_path: None,
-	}
-	.ensure_unchanged(req.old_name, resource_scope, project_root)
-	.map_err(RenameError::StaleFetch)?;
+	// All three coordinates bind, including the OLD skillPath: the snapshot holds
+	// what the entry said pre-fetch, while the adapter's own resolved new path
+	// lives in `source.skill_path` and is unaffected — so a rename that legitimately
+	// follows a MOVED skill still works, and one racing another process's repoint
+	// of the old name does not.
+	fetched
+		.source
+		.captured
+		.ensure_unchanged(req.old_name, resource_scope, project_root)
+		.map_err(RenameError::StaleFetch)?;
 
 	// Undo ONLY the new-name artifacts. This is the correct rollback for every
 	// failure BEFORE Step 8 touches the old name: at that point the old dirs

@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
 use aghub_core::paths::find_project_root;
+use aghub_core::skills::lock::EntryIdentity;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use skill_update::sources::{
@@ -562,6 +563,15 @@ fn sync(args: SyncArgs) -> Result<()> {
 	}
 
 	// Fetch ONCE; reuse the repo for classification AND every install/update.
+	// Snapshot every in-scope lock entry's identity BEFORE the fetch below, so an
+	// update can prove under the mutation lock that it is still writing to the
+	// coordinates it started from. Captured (never reconstructed) because a
+	// project entry's `sourceUrl` is optional — an npx-written one has none, and
+	// its effective source is the `owner/repo` shorthand, so comparing a rebuilt
+	// HTTPS URL would falsely reject it.
+	let pre_fetch_identities =
+		capture_scope_identities(scope, project_root.as_deref());
+
 	// Fetch + classify happen BEFORE the flag branch so the neither-flag
 	// informational path can print the same plan without a second fetch.
 	// CatalogSnapshot: classify needs the whole tree (renames/removals).
@@ -776,9 +786,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 					d,
 					scope,
 					project_root.as_deref(),
-					// The URL this sync actually cloned, so the resync can prove
-					// under the lock that the entry still points at it.
-					&lock_source.source_url,
+					&pre_fetch_identities,
 				),
 				_ => unreachable!(),
 			})
@@ -1075,14 +1083,59 @@ fn apply_install(
 	}
 }
 
+/// Every in-scope lock entry's identity, keyed by skill name. Taken before a
+/// fetch; see the call site.
+fn capture_scope_identities(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> std::collections::BTreeMap<String, EntryIdentity> {
+	let names: Vec<String> = match scope {
+		ResourceScope::ProjectOnly => project_root
+			.map(|root| {
+				skill::lock::local::read_local_lock(Some(root))
+					.skills
+					.keys()
+					.cloned()
+					.collect()
+			})
+			.unwrap_or_default(),
+		_ => skill::get_all_locked_skills().keys().cloned().collect(),
+	};
+	names
+		.into_iter()
+		.filter_map(|name| {
+			EntryIdentity::capture(&name, scope, project_root)
+				.map(|id| (name, id))
+		})
+		.collect()
+}
+
 fn apply_update_row(
 	fetched: &skill_update::mutation::FetchedSource,
 	d: &SourceSkillDiff,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
-	fetched_from: &str,
+	pre_fetch: &std::collections::BTreeMap<String, EntryIdentity>,
 ) -> SyncActionView {
 	use skill_update::mutation::{resync_fetched_source, FetchedResyncRequest};
+
+	// No pre-fetch identity means this name was NOT in the lock when the fetch
+	// started: another process installed it in between, and this sync has no
+	// mandate to overwrite it.
+	let Some(expected) = pre_fetch.get(&d.name).cloned() else {
+		return SyncActionView {
+			action: "update",
+			name: d.name.clone(),
+			skill_path: d.skill_path.clone(),
+			applied: false,
+			error: Some(
+				"skill appeared in the lock while this sync was fetching; \
+				 nothing was written"
+					.to_string(),
+			),
+			agents: Vec::new(),
+		};
+	};
 
 	match resync_fetched_source(
 		fetched,
@@ -1091,7 +1144,7 @@ fn apply_update_row(
 			name: &d.name,
 			scope,
 			project_root,
-			expected_source: Some(fetched_from),
+			expected,
 		},
 	) {
 		Ok(report) => SyncActionView {

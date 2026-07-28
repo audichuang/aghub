@@ -35,85 +35,120 @@ pub fn mutation_guard(
 	skill::lock::mutation_guard(op, &scopes)
 }
 
-/// The lock coordinates a flow FETCHED from, carried through the fetch so the
-/// mutation can prove — under the mutation lock — that it is still acting on the
-/// same entry.
+/// A snapshot of one lock entry's identity, taken BEFORE a fetch and re-verified
+/// under the mutation lock immediately before mutating — a compare-and-set on the
+/// coordinates, not on content.
 ///
 /// The mutation lock cannot close this window on its own: a fetch is a NETWORK
 /// operation and must not run while holding the lock, so the read that decides
 /// what to fetch is necessarily unlocked. That makes it the WIDEST window in the
 /// subsystem (seconds, not microseconds) — everything else the lock covers is a
-/// local filesystem step. Compare-after-fetch is the other half.
+/// local filesystem step.
+///
+/// **Always produce one with [`EntryIdentity::capture`], never by hand.** Every
+/// field then holds the entry's own pre-fetch value verbatim, which is what makes
+/// the comparison meaningful and removes two traps:
+///
+/// - A re-derived source is not comparable. A GLOBAL entry always carries
+///   `sourceUrl`, but a PROJECT entry's is aghub-only and absent on npx-written
+///   locks, where the effective source is the `owner/repo` shorthand — so
+///   reconstructing an HTTPS URL and comparing it would falsely reject every such
+///   entry.
+/// - A flow that OVERRIDES a coordinate for the operation (a `--ref`, or a
+///   rename resolving a moved `skillPath`) must still compare the value that was
+///   there BEFORE. Capturing separates the two by construction: the snapshot is
+///   the expectation, and whatever the flow writes is the intent.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FetchedFrom {
-	/// The source the pre-fetch read produced, VERBATIM — the global entry's
-	/// `source_url`, or the project entry's `source_url` falling back to `source`.
-	/// Carry the value that read returned, never a re-derived one: an npx-written
-	/// entry has no `sourceUrl` at all (it is an aghub-only field), so its
-	/// effective source is the `owner/repo` shorthand and comparing a
-	/// reconstructed clone URL against it would reject every such entry.
-	pub source: String,
-	/// The repo-relative `skillPath` the fetch used, when the flow requires it to
-	/// be unchanged. `None` for a flow that legitimately RESOLVES a moved path —
-	/// `accept_rename` does exactly that, so comparing the path there would reject
-	/// the very case it exists to handle.
-	pub skill_path: Option<String>,
+pub struct EntryIdentity {
+	/// Effective source: the global entry's `source_url`, or the project entry's
+	/// `source_url` falling back to `source`.
+	source: String,
+	skill_path: Option<String>,
+	ref_name: Option<String>,
 }
 
-impl FetchedFrom {
-	/// Refuse unless the CURRENT lock entry for `name` is still the one
-	/// [`FetchedFrom`] describes. Call under the mutation lock, immediately
-	/// before mutating.
+impl EntryIdentity {
+	/// Snapshot the entry's identity as it stands NOW. Call before fetching.
+	/// `None` means there is no such entry, which is itself a decision the caller
+	/// must make explicitly (it has no mandate to overwrite a skill it never saw).
+	pub fn capture(
+		name: &str,
+		scope: ResourceScope,
+		project_root: Option<&Path>,
+	) -> Option<Self> {
+		match scope {
+			ResourceScope::GlobalOnly => skill::lock::global::read_skill_lock()
+				.skills
+				.get(name)
+				.map(|e| Self {
+					source: e.source_url.clone(),
+					skill_path: e.skill_path.clone(),
+					ref_name: e.ref_name.clone(),
+				}),
+			ResourceScope::ProjectOnly => project_root.and_then(|root| {
+				skill::lock::local::read_local_lock(Some(root))
+					.skills
+					.get(name)
+					.map(|e| Self {
+						source: e
+							.source_url
+							.clone()
+							.unwrap_or_else(|| e.source.clone()),
+						skill_path: e.skill_path.clone(),
+						ref_name: e.ref_name.clone(),
+					})
+			}),
+			ResourceScope::Both => None,
+		}
+	}
+
+	/// Build one WITHOUT reading a lock, for tests that never compare it (a
+	/// fetch-only fixture still has to hand a value to the type). Gated on the
+	/// same `testing` feature `TestConfig` uses. Production must always
+	/// [`capture`](Self::capture) — a hand-built snapshot proves nothing.
+	#[cfg(feature = "testing")]
+	pub fn unchecked_for_tests(
+		source: impl Into<String>,
+		skill_path: Option<String>,
+		ref_name: Option<String>,
+	) -> Self {
+		Self {
+			source: source.into(),
+			skill_path,
+			ref_name,
+		}
+	}
+
+	/// Refuse unless the entry is still exactly the one this snapshot describes.
+	/// Call under the mutation lock, immediately before mutating.
 	///
-	/// Compares the source, and `skillPath` when the caller supplied one — the
-	/// fields that identify WHOSE skill this is and WHERE in the repo it lives.
-	/// Deliberately not `ref_name`: an adapter may legitimately override the ref
-	/// for this very operation, so comparing it would reject valid work.
+	/// All three coordinates bind. `ref_name` included: A fetching `main` while
+	/// another process repoints the entry to `stable` would otherwise overwrite
+	/// that content with `main` and stamp only the hash/OID, leaving disk and lock
+	/// disagreeing. `skillPath` included: for a rename, the snapshot holds the OLD
+	/// path, so a repoint to a different folder in the same repo is caught while
+	/// the flow's own resolved new path is unaffected.
 	pub fn ensure_unchanged(
 		&self,
 		name: &str,
 		scope: ResourceScope,
 		project_root: Option<&Path>,
 	) -> Result<(), String> {
-		let current = match scope {
-			ResourceScope::GlobalOnly => skill::lock::global::read_skill_lock()
-				.skills
-				.get(name)
-				.map(|e| (e.source_url.clone(), e.skill_path.clone())),
-			ResourceScope::ProjectOnly => project_root.and_then(|root| {
-				skill::lock::local::read_local_lock(Some(root))
-					.skills
-					.get(name)
-					.map(|e| {
-						(
-							e.source_url
-								.clone()
-								.unwrap_or_else(|| e.source.clone()),
-							e.skill_path.clone(),
-						)
-					})
-			}),
-			ResourceScope::Both => None,
-		};
-		let Some((source, skill_path)) = current else {
+		let Some(current) = Self::capture(name, scope, project_root) else {
 			return Err(format!(
 				"'{name}' is no longer in the lock; another aghub process changed \
 				 it while this operation was fetching, so nothing was written"
 			));
 		};
-		let path_ok = match &self.skill_path {
-			Some(expected) => skill_path.as_deref() == Some(expected.as_str()),
-			// The caller resolves a moved path on purpose; only the source binds.
-			None => true,
-		};
-		if source == self.source && path_ok {
+		if &current == self {
 			return Ok(());
 		}
 		// Names only, no paths/URLs: a surface may forward this verbatim.
 		Err(format!(
-			"'{name}' now points at a different source or skill path than the one \
-			 this operation fetched; another aghub process changed it in the \
-			 meantime, so nothing was written. Re-run to use the current source."
+			"'{name}' now points at a different source, skill path or ref than the \
+			 one this operation started from; another aghub process changed it in \
+			 the meantime, so nothing was written. Re-run to use the current \
+			 coordinates."
 		))
 	}
 }

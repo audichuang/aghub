@@ -236,12 +236,12 @@ pub struct FetchedResyncRequest<'a> {
 	pub name: &'a str,
 	pub scope: aghub_core::models::ResourceScope,
 	pub project_root: Option<&'a Path>,
-	/// The source the caller read from the lock BEFORE this fetch, re-verified
-	/// against the lock under the mutation guard so a repointed entry cannot be
-	/// overwritten with a stale fetch. `None` when the caller never read the entry
-	/// pre-fetch (the user picked the source), which is the only legitimate way to
-	/// skip the check — see `aghub_core::skills::lock::FetchedFrom`.
-	pub expected_source: Option<&'a str>,
+	/// The entry's identity CAPTURED before this fetch
+	/// (`aghub_core::skills::lock::EntryIdentity::capture`), re-verified under the
+	/// mutation guard so a repointed entry cannot be overwritten with a stale
+	/// fetch. Required: a caller whose capture found no entry has no mandate to
+	/// overwrite that skill and must refuse instead of syncing.
+	pub expected: aghub_core::skills::lock::EntryIdentity,
 }
 
 #[derive(Debug)]
@@ -270,12 +270,7 @@ pub fn resync_fetched_source(
 			scope: request.scope,
 			project_root: request.project_root,
 			ref_commit: Some(fetched.oid()),
-			expected: request.expected_source.map(|source| {
-				aghub_core::skills::lock::FetchedFrom {
-					source: source.to_string(),
-					skill_path: Some(request.skill_path.to_string()),
-				}
-			}),
+			expected: request.expected,
 		},
 	)
 	.map_err(ResyncMutationError::Resync)
@@ -357,6 +352,18 @@ pub fn resync_locked_skill(
 		return Err(LockedResyncError::NotInstalled);
 	}
 
+	// Snapshot the entry's identity HERE, before the fetch below, so the
+	// transaction can prove under the mutation lock that it is still updating the
+	// same coordinates. The entry was just read above, so this cannot be absent.
+	let expected = aghub_core::skills::lock::EntryIdentity::capture(
+		request.name,
+		request.scope,
+		request.project_root,
+	)
+	.ok_or(LockedResyncError::LockEntryNotFound {
+		scope: request.scope,
+	})?;
+
 	let fetched = fetch_for_mutation(
 		FetchedSourceRequest {
 			source: &source,
@@ -383,7 +390,7 @@ pub fn resync_locked_skill(
 			name: request.name,
 			scope: request.scope,
 			project_root: request.project_root,
-			expected_source: Some(&source),
+			expected,
 		},
 	)
 	.map_err(|error| match error {
@@ -514,6 +521,13 @@ mod tests {
 			source_url: "https://github.com/owner/repo".to_string(),
 			ref_name: Some("main".to_string()),
 			skill_path: "old/location/SKILL.md".to_string(),
+			// This test drives the FETCH only; the identity is never compared.
+			captured:
+				aghub_core::skills::lock::EntryIdentity::unchecked_for_tests(
+					"https://github.com/owner/repo",
+					Some("old/location/SKILL.md".to_string()),
+					Some("main".to_string()),
+				),
 		};
 
 		let prepared = fetch_for_rename(
@@ -578,7 +592,12 @@ mod tests {
 				// The lock entry has no `source_url`, so its effective source is
 				// `source` — the verbatim value a real caller's pre-fetch read
 				// would have returned.
-				expected_source: Some("owner/repo"),
+				expected: aghub_core::skills::lock::EntryIdentity::capture(
+					"sync-me",
+					ResourceScope::ProjectOnly,
+					Some(&project),
+				)
+				.expect("fixture entry exists"),
 			},
 		)
 		.expect("Fetched Source should Resync the installed skill");

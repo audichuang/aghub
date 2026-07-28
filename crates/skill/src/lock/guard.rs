@@ -18,8 +18,9 @@
 //! `flock` is advisory and whole-file; `LockFileEx` is MANDATORY over a byte
 //! range (std locks `0..u32::MAX:u32::MAX`, i.e. all of it), so on Windows a
 //! foreign handle's reads and writes inside the range fail outright. That never
-//! matters here because the lock file's CONTENTS are never used: it is opened
-//! append-only, nothing is ever written to it, and it stays 0 bytes. What both
+//! matters here because the lock file's CONTENTS are never used: nothing is ever
+//! written to it and it stays 0 bytes (it IS opened read+write, because Windows
+//! cannot lock an append-only handle at all — see `lock_file`). What both
 //! platforms do share is what the reentrancy below relies on — a lock belongs to
 //! the open handle, not the process, so a second `open` of the same path from
 //! this very process blocks against itself.
@@ -131,13 +132,28 @@ impl MutationScope {
 /// until the timeout. Resolving the longest existing ancestor keeps one identity
 /// across the create.
 ///
-/// Remaining imperfection, deliberately not chased: `..` components BELOW the
-/// existing ancestor stay unresolved, so two lexically different spellings of a
-/// path that does not exist still fork. Deterministic, and no flow constructs
-/// one.
+/// `..` below that ancestor cannot be resolved lexically without inventing a
+/// meaning for it, and the API DOES accept a caller-supplied root, so those
+/// components are dropped with their preceding segment instead of being left to
+/// fork the identity. Not a security boundary — every mutating flow has its own
+/// containment guards — just one identity per path.
 fn resolve_existing(path: &Path) -> PathBuf {
+	// Lexical pass FIRST, so `..` is gone before the ancestor walk: `file_name()`
+	// returns None for a path ending in `..`, which would otherwise abandon the
+	// walk and hand back the raw spelling.
+	let mut lexical = PathBuf::new();
+	for component in path.components() {
+		match component {
+			std::path::Component::ParentDir => {
+				lexical.pop();
+			}
+			std::path::Component::CurDir => {}
+			other => lexical.push(other.as_os_str()),
+		}
+	}
+
 	let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-	let mut cursor = path;
+	let mut cursor = lexical.as_path();
 	loop {
 		if let Ok(resolved) = std::fs::canonicalize(cursor) {
 			let mut out = resolved;
@@ -150,8 +166,8 @@ fn resolve_existing(path: &Path) -> PathBuf {
 				cursor = parent;
 			}
 			// Nothing left to strip (relative path, or a root that cannot be
-			// resolved at all): use it verbatim.
-			_ => return path.to_path_buf(),
+			// resolved at all): use the lexically normalized form.
+			_ => return lexical,
 		}
 	}
 }
@@ -264,13 +280,16 @@ pub fn mutation_guard_with_timeout(
 	}
 	let deadline = Instant::now() + timeout;
 
-	// Sorted and deduplicated by the scope's ONE identity, its lock path.
-	let mut ordered: Vec<(_, &MutationScope)> =
-		scopes.iter().map(|s| (s.order_rank(), s)).collect();
-	ordered.sort_by(|a, b| a.0.cmp(&b.0));
-	ordered.dedup_by(|a, b| a.0 == b.0);
-	for (rank, scope) in ordered {
-		let path = scope.lock_path();
+	// Resolved ONCE per scope, then sorted, deduplicated, locked and range-checked
+	// against that same value. Recomputing `lock_path()` after ordering would let
+	// a directory being created (or an alias resolving) between the two calls
+	// separate the ordering identity from the path actually locked.
+	let mut ordered: Vec<(u8, PathBuf)> =
+		scopes.iter().map(|s| s.order_rank()).collect();
+	ordered.sort();
+	ordered.dedup();
+	for rank in ordered {
+		let path = rank.1.clone();
 		if HELD.with(|h| h.borrow().contains_key(&path)) {
 			continue;
 		}
@@ -490,6 +509,16 @@ mod tests {
 		let indirect =
 			MutationScope::Project(root.join("sub").join("..")).lock_path();
 		assert_eq!(plain, indirect, "a `..` hop must not fork the lock");
+
+		// The same hop through a path that does NOT exist, so canonicalize cannot
+		// resolve it and the lexical normalization has to.
+		let missing =
+			MutationScope::Project(root.join("never-created").join(".."))
+				.lock_path();
+		assert_eq!(
+			plain, missing,
+			"a `..` hop below a non-existent path must not fork the lock"
+		);
 
 		#[cfg(unix)]
 		{

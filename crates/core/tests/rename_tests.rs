@@ -16,7 +16,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 use aghub_core::skills::rename::{
-	accept_rename, FetchedRename, RenameLockSource, RenameRequest, RenameScope,
+	accept_rename, FetchedRename, RenameError, RenameLockSource, RenameRequest,
+	RenameScope,
 };
 
 fn env_lock() -> &'static Mutex<()> {
@@ -38,13 +39,35 @@ fn with_isolated_env<T>(f: impl FnOnce(&Path) -> T) -> T {
 	f(home.path())
 }
 
+/// Built the way a real adapter builds it: read the seeded OLD-name entry through
+/// the production reader (so `captured` holds that entry's true pre-fetch
+/// identity), then override `skill_path` with the resolved location, exactly as an
+/// adapter does for a moved skill. Requires `seed_global_lock` to have run.
 fn source_for(skill_path: &str) -> RenameLockSource {
+	let mut source = aghub_core::skills::rename::rename_source_from_lock(
+		"old-skill",
+		&RenameScope::Global,
+	)
+	.expect("seed_global_lock must run before source_for");
+	source.skill_path = skill_path.to_string();
+	source
+}
+
+/// For the two tests that deliberately have NO lock entry (they assert the
+/// not-lock-managed refusal and the name-mismatch refusal, both of which fire
+/// before the identity comparison). Nothing here is ever compared.
+fn unseeded_source_for(skill_path: &str) -> RenameLockSource {
 	RenameLockSource {
 		source: "owner/repo".to_string(),
 		source_type: "github".to_string(),
 		source_url: "https://github.com/owner/repo".to_string(),
 		ref_name: Some("main".to_string()),
 		skill_path: skill_path.to_string(),
+		captured: aghub_core::skills::lock::EntryIdentity::unchecked_for_tests(
+			"https://github.com/owner/repo",
+			Some(skill_path.to_string()),
+			Some("main".to_string()),
+		),
 	}
 }
 
@@ -104,6 +127,63 @@ fn seed_global_lock(name: &str, skill_path: &str) {
 	skill::lock::global::write_skill_lock(&lock).unwrap();
 }
 
+/// Compare-after-fetch for the DESTRUCTIVE flow. A rename removes the old name
+/// and its lock entry, so acting on coordinates another process has already
+/// repointed destroys that process's skill.
+///
+/// The moved-path case must keep working, which is why the comparison uses the
+/// captured OLD path rather than the adapter's resolved new one: here the adapter
+/// legitimately resolves `new-skill/SKILL.md` while the entry is repointed to a
+/// different OLD path in the same repo, and only the latter must fail.
+#[test]
+fn accept_rename_refuses_when_the_old_entry_was_repointed_during_the_fetch() {
+	with_isolated_env(|home| {
+		install_old_skill(home, "old-skill");
+		seed_global_lock("old-skill", "old-location/SKILL.md");
+		let repo = fake_repo("new-skill", "new-skill");
+		// Captured from the entry as it was, then the adapter resolves the moved
+		// path — exactly the legitimate shape.
+		let source = source_for("new-skill/SKILL.md");
+
+		// "Another process" repoints the OLD name to a different path, same source.
+		seed_global_lock("old-skill", "somewhere-else/SKILL.md");
+
+		let outcome = accept_rename(
+			RenameRequest {
+				old_name: "old-skill",
+				new_name: "new-skill",
+				scope: RenameScope::Global,
+			},
+			FetchedRename {
+				repo_root: repo.path(),
+				oid: "",
+				source: &source,
+			},
+		);
+
+		let error = outcome.expect_err("a repointed old entry must be refused");
+		assert!(
+			matches!(error, RenameError::StaleFetch(_)),
+			"expected StaleFetch, got {error:?}"
+		);
+		// The other process's entry and the old skill both survive untouched.
+		let lock = skill::lock::global::read_skill_lock();
+		assert_eq!(
+			lock.skills["old-skill"].skill_path.as_deref(),
+			Some("somewhere-else/SKILL.md"),
+			"the other process's lock entry must survive"
+		);
+		assert!(
+			home.join(".claude/skills/old-skill").exists(),
+			"a refused rename must not remove the old skill"
+		);
+		assert!(
+			!lock.skills.contains_key("new-skill"),
+			"a refused rename must not write the new name"
+		);
+	});
+}
+
 #[test]
 fn accept_rename_installs_new_and_removes_old() {
 	with_isolated_env(|home| {
@@ -156,7 +236,7 @@ fn accept_rename_refuses_a_skill_that_is_not_lock_managed() {
 	with_isolated_env(|home| {
 		install_old_skill(home, "old-skill"); // on disk, but NO lock entry seeded
 		let repo = fake_repo("new-skill", "new-skill");
-		let source = source_for("new-skill/SKILL.md");
+		let source = unseeded_source_for("new-skill/SKILL.md");
 
 		let err = accept_rename(
 			RenameRequest {
@@ -191,7 +271,7 @@ fn accept_rename_rejects_name_mismatch_without_mutating() {
 		install_old_skill(home, "old-skill");
 		// The fetched SKILL.md declares a DIFFERENT name than requested.
 		let repo = fake_repo("new-skill", "something-else");
-		let source = source_for("new-skill/SKILL.md");
+		let source = unseeded_source_for("new-skill/SKILL.md");
 
 		let err = accept_rename(
 			RenameRequest {

@@ -927,10 +927,10 @@ fn universal_install_universal_error_fails_all_agents() {
 	// failure (matching the old API, skills.rs:2077) — no agent (including a
 	// canonical-dir agent) may be marked installed, and no lock may be written.
 	//
-	// We force the failure by pre-creating the canonical dir's parent
-	// (`<root>/.agents`) as a REGULAR FILE: `install_universal` then fails on
-	// `create_dir_all(<root>/.agents/skills)` with ENOTDIR before any master is
-	// written.
+	// We force the failure by pre-creating the canonical dir (`<root>/.agents/skills`)
+	// as a REGULAR FILE: `install_universal` then fails on `create_dir_all` of it
+	// with ENOTDIR before any master is written. Deliberately NOT `<root>/.agents`
+	// itself — see the note at the write below.
 	let _g = GlobalLockGuard::new();
 
 	let project = tempdir().unwrap();

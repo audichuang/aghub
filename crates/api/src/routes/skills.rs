@@ -313,6 +313,45 @@ pub async fn delete_skill_by_path(
 		}));
 	}
 
+	// Acquired here: after the last `.await` in this route, and before every read
+	// that decides WHAT gets deleted (the containment resolve, the SKILL.md name
+	// parse, the manager load, and the copy-branch referrer sweep). Any of those
+	// taken outside the lock is a view another aghub process can invalidate before
+	// the delete lands — it reinstalls the same name, or links a new Referrer to
+	// the Master, and we delete its work.
+	//
+	// It cannot go earlier: `MutationGuard` is deliberately `!Send`, so holding it
+	// across the plugin-ownership `.await` above would not compile (and would be
+	// unsound — the thread-local bookkeeping belongs to one thread). The two reads
+	// left outside are safe to leave there: the existence probe only drives an
+	// idempotent "already gone" reply, and the plugin check only decides whether to
+	// REFUSE, never what to remove. A dry-run mutates nothing and takes no lock.
+	// Acquired BEFORE the first filesystem/config read that decides WHAT gets
+	// deleted — the existence probe, the SKILL.md name parse, the manager load and
+	// the referrer sweep are all such reads, and any of them taken outside the
+	// lock is a view another aghub process can invalidate before the delete lands
+	// (it reinstalls the same name, or links a new Referrer to the Master, and we
+	// delete its work). Static request validation above stays unlocked; a dry-run
+	// mutates nothing and takes no lock.
+	let _mutation_guard = if req.confirm.unwrap_or(false) {
+		match aghub_core::skills::lock::mutation_guard(
+			"delete skill by path",
+			resource_scope,
+			project_root.as_deref(),
+		) {
+			Ok(guard) => Some(guard),
+			Err(error) => {
+				return Ok(Json(DeleteSkillByPathResponse {
+					success: false,
+					error: Some(error.to_string()),
+					..Default::default()
+				}));
+			}
+		}
+	} else {
+		None
+	};
+
 	// Containment guard (canonicalize-escape protection): the resolved dir must
 	// stay inside an allow-listed skills root, even if `skill_dir` is a symlink.
 	let agent_dirs: Vec<std::path::PathBuf> = req
@@ -386,32 +425,6 @@ pub async fn delete_skill_by_path(
 			..Default::default()
 		}));
 	}
-	// Hold the interprocess mutation lock for every executing path below, taken
-	// BEFORE the layout and referrer inspection that decides what to delete.
-	// The copy-layout branch further down does its own referrer sweep and
-	// `execute_removal` instead of going through `remove_skill_planned`, so
-	// without this it would read "no other agent references this master", then
-	// delete a master another aghub process re-linked in the meantime. A dry-run
-	// mutates nothing and takes no lock.
-	let _mutation_guard = if dry_run {
-		None
-	} else {
-		match aghub_core::skills::lock::mutation_guard(
-			"delete skill by path",
-			resource_scope,
-			project_root.as_deref(),
-		) {
-			Ok(guard) => Some(guard),
-			Err(error) => {
-				return Ok(Json(DeleteSkillByPathResponse {
-					success: false,
-					error: Some(error.to_string()),
-					..Default::default()
-				}));
-			}
-		}
-	};
-
 	let path_is_link = aghub_core::skills::linker::Linker::is_link(&skill_dir);
 	let canonical_layout = manager
 		.get_skill(&skill_name)
@@ -999,19 +1012,21 @@ pub fn import_skill(
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	let request = body.into_inner();
 
-	// Load configuration before adding skill
-	manager.load().map_err(ApiError::from)?;
-
-	// ONE transaction for materialize + hash + lock write. Without this the
-	// manager takes the lock for the Master and releases it, then the lock write
-	// below takes it again — and another process removing the skill in between
-	// leaves this route writing a lock entry for a skill that is gone.
+	// ONE transaction for load + materialize + hash + lock write. The load is
+	// INSIDE the guard on purpose: the manager's duplicate-name check decides
+	// whether to write, so a config read taken outside the lock lets another
+	// process install the same name in between — this route would then accept its
+	// own install, keep the other Master, and replace that entry with its own
+	// source and hash. Holding it also stops the Master write and the lock write
+	// from being two transactions with a removal in between (a ghost lock entry).
 	let _mutation_guard = aghub_core::skills::lock::mutation_guard(
 		"import skill",
 		resource_scope,
 		project_root.as_deref(),
 	)
 	.map_err(|e| ApiError::internal(e.to_string()))?;
+
+	manager.load().map_err(ApiError::from)?;
 
 	let imported = manager
 		.add_skill_from_path(std::path::Path::new(&request.path))
@@ -2437,6 +2452,18 @@ pub async fn git_sync_skill(
 			)
 		})?;
 
+	// Snapshot the entry's identity BEFORE the fetch, so the resync can prove
+	// under the mutation lock that it is still writing to the coordinates this
+	// request started from. Absent = there is no such entry; the scope/lock
+	// validation below reports that with the route's historical precedence.
+	let pre_fetch_identity = aghub_core::skills::lock::EntryIdentity::capture(
+		&req.name,
+		match req.scope.as_str() {
+			"global" => ResourceScope::GlobalOnly,
+			_ => ResourceScope::ProjectOnly,
+		},
+		req.project_root.as_deref().map(std::path::Path::new),
+	);
 	// Fetch only the selected skill folder.
 	let fetched = session
 		.fetch_skills(std::slice::from_ref(&folder))
@@ -2521,12 +2548,9 @@ pub async fn git_sync_skill(
 			name: &req.name,
 			scope: resource_scope,
 			project_root: project_root.as_deref(),
-			// No pre-fetch identity to compare: this route syncs from a session
-			// whose source the USER picked, it never read the entry's coordinates.
-			// Comparing the session URL would prove nothing and would reject every
-			// npx-written entry (no `sourceUrl`). The mutation guard still covers
-			// the swap + lock write.
-			expected_source: None,
+			// Captured before the fetch above. `expect` is safe: the lock
+			// validation directly above already refused a missing entry.
+			expected: pre_fetch_identity.expect("lock entry validated above"),
 		},
 	)
 	.map_err(|e| match e {
