@@ -24,6 +24,11 @@ use tempfile::{tempdir, TempDir};
 /// pointing `XDG_STATE_HOME` and `HOME` at fresh temp dirs (core cannot import
 /// skill's `pub(crate)` TestLockGuard).
 struct GlobalLockGuard {
+	/// Read through `home()` by the `#[cfg(unix)]` tests only; on Windows the
+	/// field still has to exist so the TempDir outlives the guard. Allowed dead
+	/// there rather than cfg'd away, so a real unix regression still fails
+	/// `clippy -D warnings`.
+	#[cfg_attr(windows, allow(dead_code))]
 	home: TempDir,
 	_state: TempDir,
 	old_home: Option<OsString>,
@@ -53,6 +58,7 @@ impl GlobalLockGuard {
 		}
 	}
 
+	#[cfg_attr(windows, allow(dead_code))]
 	fn home(&self) -> &Path {
 		self.home.path()
 	}
