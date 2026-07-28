@@ -1,42 +1,46 @@
 # CLI CRATE
 
-**Crate**: `aghub-cli` — Binary `aghub-cli`. **`-p aghub` is the desktop src-tauri package, NOT this.**
+`aghub-cli` — the clap binary. **`-p aghub` is the desktop src-tauri package, not
+this one**; this crate is `-p aghub-cli`.
 
-## STRUCTURE
+`src/main.rs` holds `Cli`/`Commands` + dispatch; `src/commands/` is one file per
+subcommand. User-facing semantics (`-a`, scope flags, destructive defaults,
+creds) live in root AGENTS.md "CLI Command Surface" and are not repeated here.
 
-`src/main.rs` (clap `Cli`/`Commands` + dispatch; `describe` is inline) +
-`src/commands/` — one file per subcommand (`ls` it; do not enumerate here).
+## Two dispatch funnels — keep both halves in step
 
-## WHERE TO LOOK
+**Scope.** Every generic CRUD path resolves scope through
+`resolve_scope_and_root`, gated by `scope_policy`. A new **mutating** subcommand
+MUST be added to that fn's `SingleWrite` arm: the `_ => AllowBoth` wildcard means
+one that isn't silently bypasses the project-root write guard, and `-p` outside a
+project then writes the global Master.
 
-| Task                 | Location                           | Notes                                       |
-| -------------------- | ---------------------------------- | ------------------------------------------- |
-| Add flag/subcommand  | `main.rs` + `commands/<name>.rs`   | Register in `mod.rs` + `Commands` enum      |
-| Resource aliases     | `main.rs` `ResourceType`           | `#[value(alias = "...")]`                   |
-| transfer/reconcile   | `commands/transfer.rs`             | Thin over `core::transfer`                  |
-| coverage / inference | `commands/{coverage,inference}.rs` | Thin over core / `inference::cascade`       |
-| skill-usage          | `commands/skill_usage.rs`          | Claude-global only                          |
-| CLI e2e tests        | `tests/cli_tests.rs`               | `assert_cmd`; unix-gated helpers stay cfg'd |
+**Early dispatch.** `source`, `apply-update`, `inference`, `transfer`,
+`reconcile`, `coverage`, `doctor` and `skill-usage` run BEFORE any adapter or
+`ConfigManager` exists, so a missing or malformed agent config cannot block a
+command that never needed one. The `unreachable!()` arms in `run_for_agent`'s
+match are that contract — adding an early dispatch without its arm (or the
+reverse) is how it rots.
 
-Multi-agent runs: `-a` semantics live in root AGENTS.md "CLI Command Surface";
-`AgentSelection` (from `aghub_core::models`; defined in `crates/agents`) is the
-single parser — never re-parse `-a` per command, and never hand-roll the batch
-envelope (`core/src/batch.rs`).
+**Multi-agent.** `AgentSelection` (re-exported by `aghub_core::models`, defined
+in `crates/agents/src/models.rs`) is the ONE `-a` parser and `core/src/batch.rs`
+owns the envelope. Never re-parse `-a` per command; never hand-roll the envelope.
 
-`source sync` e2e need no network: `AGHUB_TEST_SOURCE_FETCH_ROOT` (debug-only
-env hook in `commands/source.rs`) serves a local dir as the fetched repo.
+## Commands stay thin
 
-## SKILL UPDATE CHECK (`check skills`)
+`transfer` / `reconcile` / `coverage` / `inference` are adapters over core (and
+`inference::cascade`). Anything a second surface also needs belongs in core —
+this crate is a surface, not a home for policy.
 
-`commands/check.rs` — **read-only** (never mutates locks):
+## Tests
 
-- **Default offline**: remote sources → `uncheckable` (`network`); local → `local`
-- **`--online`** (alias `--check-remote`): shared `skill-update` orchestrator +
-  the same env token resolver as `source` (creds contract: root AGENTS.md)
+`tests/cli_tests.rs` (`assert_cmd`). `source sync` e2e need no network:
+`AGHUB_TEST_SOURCE_FETCH_ROOT` (a `#[cfg(debug_assertions)]` hook in
+`commands/source.rs`) serves a local dir as the fetched repo. `check skills` is
+read-only — it never mutates a lock — and its JSON shape is pinned by
+`check_skills_outputs_json_array`.
 
-Contract pinned by `check_skills_outputs_json_array` in `cli_tests.rs`.
-
-## ANTI-PATTERNS
+## Anti-patterns
 
 - **Don't** `println!` diagnostics — use `eprintln_verbose!`
 - **Don't** hardcode agent id strings — use `AgentType`

@@ -4,20 +4,15 @@
 **Stack**: Rust workspace (root `Cargo.toml`) + Tauri v2 desktop + React 19/TypeScript\
 **Package manager**: cargo (Rust), **bun** (desktop frontend — never npm/yarn/pnpm)
 
-> This is the single source of truth for project context. The root `CLAUDE.md`
-> and every per-crate `CLAUDE.md` are one-line `@AGENTS.md` imports of the
-> sibling `AGENTS.md` (not symlinks).
+> Single source of truth for project context; every `CLAUDE.md` here is a
+> one-line `@AGENTS.md` import (a real file, not a symlink) — edit the sibling
+> `AGENTS.md`.
 >
-> **What this file is for**: orienting you to the modules — what each crate is,
-> why it exists, how they depend on each other, and the invariants you must not
-> break. It is the **navigation layer**, deliberately coarse.
->
-> **For file/symbol-level work, use CodeGraph** (`.codegraph/` is indexed): one
-> `codegraph_explore` call returns the verbatim source of the relevant symbols
-> plus their callers/callees — more accurate and current than any hand-written
-> list. This file does NOT enumerate files, line numbers, or symbols; those
-> drift. It carries the _why_ and _what-not-to-break_ that CodeGraph cannot
-> derive. `Cargo.toml` `[workspace].members` is the authoritative crate list.
+> **What this file is for**: the modules — what each crate is, why it exists, how
+> they depend on each other, and the invariants you must not break. It is the
+> **navigation layer**, deliberately coarse: it enumerates no files, symbols or
+> line numbers. `.codegraph/` is indexed, so ask CodeGraph for structure and
+> `Cargo.toml` `[workspace].members` for the crate list.
 
 ## Overview
 
@@ -75,17 +70,15 @@ Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `a
 
 ## Where to Look
 
-| Task               | Location                          | Notes                         |
-| ------------------ | --------------------------------- | ----------------------------- |
-| Add agent support  | `crates/agents/src/agents/`       | + models + core registry      |
-| Agent models/types | `crates/agents/src/models.rs`     | `AgentConfig`, `AgentType`    |
-| Agent registry     | `crates/core/src/registry/mod.rs` | `ALL_AGENTS`                  |
-| Config management  | `crates/core/src/manager/`        | `ConfigManager`               |
-| Adapter trait      | `crates/core/src/adapters/mod.rs` | impl in `core/src/adapter.rs` |
-| Batch install/copy | `crates/core/src/transfer.rs`     | `OperationBatchResult`        |
-| CLI commands       | `crates/cli/src/commands/`        | clap; `just start -- --help`  |
-| API routes         | `crates/api/src/routes/`          |                               |
-| Desktop UI         | `crates/desktop/src/`             | HeroUI v3                     |
+Only where the obvious guess is wrong; everything else, ask CodeGraph.
+
+| Task              | Location                          | Notes                              |
+| ----------------- | --------------------------------- | ---------------------------------- |
+| Add agent support | `crates/agents/src/agents/`       | 4 wiring steps below — miss one    |
+|                   |                                   | and the agent silently falls back  |
+| Adapter trait     | `crates/core/src/adapters/mod.rs` | impl is in `core/src/adapter.rs`   |
+| CLI commands      | `crates/cli/src/commands/`        | surface truth: `just start --help` |
+| Desktop UI        | `crates/desktop/src/`             | HeroUI v3                          |
 
 ## Key Design Patterns
 
@@ -124,9 +117,10 @@ core); the MCP **parse/serialize** logic it points at lives in
   where its descriptor maps that scope's skill paths there — **per-agent and
   per-scope**. Do **not** maintain a hand list here; read each descriptor's
   skill read paths. Invariant: each agent reads only its own dir + Master where
-  mapped, never another agent's private dir. `capabilities.skills.universal:
-true` (Amp, Kimi today) also appends XDG `$XDG_CONFIG_HOME/agents/skills`
-  (default `~/.config/agents/skills`) — that is **not** `~/.agents/skills`.
+  mapped, never another agent's private dir. A descriptor with
+  `capabilities.skills.universal: true` ALSO appends XDG
+  `$XDG_CONFIG_HOME/agents/skills` (default `~/.config/agents/skills`) — which is
+  **not** `~/.agents/skills`; grep that flag for the current set.
 - **`registry::get()` fallback**: unknown id → Claude's descriptor silently.
 
 ## Commands
@@ -154,6 +148,12 @@ Non-obvious invariants:
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`, `source sync`,
   `source accept-rename`, reconcile-with-removals → **dry-run unless `--yes`**
   (`apply-update` refuses outright instead of printing a preview)
+- **Scope flags are mutually exclusive** (`-g` / `-p` / `--all`, clap-enforced) and
+  a generic mutation must resolve exactly ONE write scope: `--all` is rejected, and
+  `-p` with no project root bails BEFORE any write (it used to fall through and
+  write the global Master)
+- **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
+  needs `--verify-links`
 - **`check` is offline by default** — remote sources report `uncheckable/network`;
   pass `--online` for a real update check
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
@@ -165,9 +165,6 @@ Non-obvious invariants:
 - **`inference`**: provider inventory + keyring keys + per-agent bindings/routing
 
 ## Skills Discovery
-
-Skills = dirs with `SKILL.md` + YAML frontmatter. `Skill.source_path` records
-load origin. Locks track content hashes.
 
 **Link decision**: `classify_agent` / `agent_link_need`
 (`crates/core/src/skills/linker/classify.rs`). NativeReader → Master only, **no**
@@ -197,6 +194,8 @@ is worse than none (it reads as "covered"). Assert observable OUTCOMES (values,
 on-disk / lock state), not just a variant / `is_err()` / a key name; for a
 safety-critical flow (fs mutation, rollback) exercise the FAILURE path — e.g.
 rollback AFTER the destructive step, not only install-fails or the happy path.
+PROVE it: revert the fix, watch the assertion go red, restore. Reasoning that it
+_would_ fail is how false greens survive.
 Worked example: `docs/specs/2026-07-15-skill-rename-transaction-deepening.md`.
 
 ## Agent permissions / approval boundaries
@@ -251,17 +250,12 @@ OpenCode `~/.config/opencode/opencode.json` / `.opencode/settings.json` /
 own skills + Master.
 
 Project root: walk up for agent markers (`.claude/`, `.opencode/`, `.cursor/`,
-`.mcp.json`, …). **`.git` alone is not enough.**
+`.mcp.json`, `skills-lock.json`, …). **`.git` alone is not enough.**
 
-## Agent skills
+## Agent workflows
 
-### Issue tracker
-
-Local markdown — issues live as `.scratch/<feature>/issues/<NN>-<slug>.md`
-(spec at `.scratch/<feature>/spec.md`), triage state in a `Status:` line. See
-`docs/agents/issue-tracker.md`.
-
-### Domain docs
-
-Single-context — one root `CONTEXT.md` + `docs/adr/`. See
-`docs/agents/domain.md`.
+- **Issues**: local markdown at `.scratch/<feature>/issues/<NN>-<slug>.md` (spec
+  at `.scratch/<feature>/spec.md`), triage in a `Status:` line —
+  `docs/agents/issue-tracker.md`
+- **Domain docs**: single-context, one root `CONTEXT.md` + `docs/adr/` —
+  `docs/agents/domain.md`
