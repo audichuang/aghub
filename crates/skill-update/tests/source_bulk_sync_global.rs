@@ -121,12 +121,13 @@ fn global_entry(source_url: &str, skill_path: &str) -> skill::SkillLockEntry {
 	}
 }
 
-/// Two global entries share the host-blind `source` the Sources view groups by,
-/// but sit on different hosts. The desktop sends ONE of the two `sourceUrl`s, so
-/// asserting against the entry's own coordinate would reject the other row
-/// forever. Each row must still fetch from its OWN host, with its OWN token.
+/// Grouping keys on the repository ORIGIN, so two hosts serving the same
+/// `owner/repo` are two Sources rows. A batch naming host A's row updates A's
+/// entry and refuses B's. What makes this global-only: a global entry carries
+/// `source` AND `sourceUrl` as separate fields, so the membership check reads a
+/// different field than the fetch does — a project entry can collapse the two.
 #[test]
-fn global_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
+fn global_source_row_covers_only_its_own_origin() {
 	with_isolated_env(|home| {
 		let fetched = tempfile::tempdir().unwrap();
 		let mut lock = skill::SkillLockFile::default();
@@ -166,43 +167,100 @@ fn global_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
 			&fetcher,
 			&PerSourceToken,
 		)
-		.expect("both rows belong to the Source row the caller was shown");
+		.expect("a foreign-origin entry belongs in its own row");
 
+		assert_eq!(results[0].name, "alpha");
 		assert!(
-			results.iter().all(|result| result.outcome.is_ok()),
-			"a global Source row's own members must all be updatable: {:?}",
-			results
-				.iter()
-				.map(|result| (&result.name, result.outcome.is_ok()))
-				.collect::<Vec<_>>()
+			results[0].outcome.is_ok(),
+			"alpha is this row's own entry: {:?}",
+			results[0].outcome
+		);
+		assert!(
+			matches!(
+				results[1].outcome,
+				Err(skill_update::mutation::LockedResyncError::SourceGroupMismatch)
+			),
+			"beta sits on another origin: {:?}",
+			results[1].outcome
 		);
 		let seen = fetcher.seen.lock().unwrap();
-		assert_eq!(seen.len(), 2, "distinct coordinates fetch separately");
+		assert_eq!(seen.len(), 1, "only this row's origin may be fetched");
 		assert_eq!(seen[0].0.source, "https://github.com/owner/repo.git");
 		assert_eq!(
 			seen[0].1.as_deref(),
 			Some("token-for:https://github.com/owner/repo.git"),
-			"each group must carry the token resolved for ITS OWN source"
-		);
-		assert_eq!(seen[1].0.source, "https://gitlab.com/owner/repo.git");
-		assert_eq!(
-			seen[1].1.as_deref(),
-			Some("token-for:https://gitlab.com/owner/repo.git")
+			"the fetch must carry the token resolved for ITS OWN source"
 		);
 		drop(seen);
 
 		let lock = skill::lock::global::read_skill_lock();
-		for name in ["alpha", "beta"] {
-			assert!(std::fs::read_to_string(
-				home.join(format!(".claude/skills/{name}/SKILL.md"))
-			)
-			.unwrap()
-			.contains("new"));
-			assert_eq!(
-				lock.skills[name].ref_commit.as_deref(),
-				Some("global-commit"),
-				"{name} lock must record the fetched commit"
+		assert!(std::fs::read_to_string(
+			home.join(".claude/skills/alpha/SKILL.md")
+		)
+		.unwrap()
+		.contains("new"));
+		assert_eq!(
+			lock.skills["alpha"].ref_commit.as_deref(),
+			Some("global-commit")
+		);
+		assert!(std::fs::read_to_string(
+			home.join(".claude/skills/beta/SKILL.md")
+		)
+		.unwrap()
+		.contains("old"));
+		assert!(lock.skills["beta"].ref_commit.is_none());
+	});
+}
+
+/// The GROUPING, not just the membership predicate: two forges serving one
+/// `owner/repo` must surface as TWO Sources rows, each advertising its own
+/// `sourceUrl`. That is what makes a row's diff and its apply resolve to the
+/// same repository — the host-blind key kept one row whose `sourceUrl` was
+/// whichever entry landed first, so the other host's skills were judged against
+/// a tree they do not come from.
+#[test]
+fn two_forges_serving_one_path_are_two_source_rows() {
+	with_isolated_env(|_home| {
+		let mut lock = skill::SkillLockFile::default();
+		for (name, source_url) in [
+			("alpha", "https://github.com/owner/repo.git"),
+			("beta", "https://gitlab.com/owner/repo.git"),
+			("gamma", "https://github.com/owner/repo.git"),
+		] {
+			lock.skills.insert(
+				name.to_string(),
+				global_entry(source_url, &format!("skills/{name}/SKILL.md")),
 			);
 		}
+		skill::lock::global::write_skill_lock(&lock).unwrap();
+
+		let rows = skill_update::sources::list_sources(
+			skill_update::sources::SourceListInput {
+				scopes: vec![skill_update::sources::SourceScope::Global],
+			},
+		);
+
+		assert_eq!(
+			rows.len(),
+			2,
+			"one row per origin, got: {:?}",
+			rows.iter()
+				.map(|row| (&row.source, &row.source_url, row.skill_count))
+				.collect::<Vec<_>>()
+		);
+		let github = rows
+			.iter()
+			.find(|row| row.source_url.contains("github.com"))
+			.expect("a github row");
+		let gitlab = rows
+			.iter()
+			.find(|row| row.source_url.contains("gitlab.com"))
+			.expect("a gitlab row");
+		assert_eq!(github.skill_count, 2, "alpha + gamma");
+		assert_eq!(gitlab.skill_count, 1, "beta");
+		assert_ne!(
+			github.source, gitlab.source,
+			"a row identity must be unique — the desktop keys its list on it"
+		);
 	});
 }

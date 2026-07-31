@@ -343,10 +343,10 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const [isCredentialDialogOpen, setIsCredentialDialogOpen] = useState(false);
 
 	// P1-c: use the recorded clone URL as the network/credential coordinate.
-	// `row.source` (owner/repo) re-resolves non-GitHub hosts as github.com, so
-	// the diff/fetch + forward map key must use the real clone URL. `row.source`
-	// stays for display/grouping only. Fall back to `row.source` for entries
-	// that have no recorded URL (e.g. local sources).
+	// `row.source` is the row's ORIGIN (`host[:port]/path`) — a unique identity
+	// this list is keyed on, and resolvable back to a clone URL, but not itself a
+	// fetch coordinate. Prefer the recorded URL; fall back for entries that have
+	// none (e.g. local sources).
 	const diffSource = row.sourceUrl || row.source;
 
 	const { data, isLoading, isFetching } = useQuery(

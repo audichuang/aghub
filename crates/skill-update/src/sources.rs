@@ -144,11 +144,15 @@ pub fn list_sources(input: SourceListInput) -> Vec<SourceSummary> {
 /// Group the global lock's skills by source (the global lock carries
 /// `sourceUrl`).
 fn global_sources() -> Vec<SourceSummary> {
-	// source (owner/repo) -> (source_url, source_type, count)
+	// origin (host[:port]/path) -> (source_url, source_type, count). Keyed on the
+	// ORIGIN, not the host-blind `owner/repo`: two forges serving one path are two
+	// rows, so a row's `sourceUrl` always covers every entry in it — which is what
+	// lets its diff and its apply resolve to the same repository.
 	let mut by_source: BTreeMap<String, (String, String, u32)> =
 		BTreeMap::new();
 	for (_name, entry) in skill::get_all_locked_skills() {
-		let agg = by_source.entry(entry.source.clone()).or_insert_with(|| {
+		let origin = source_origin(&entry.source, Some(&entry.source_url));
+		let agg = by_source.entry(origin).or_insert_with(|| {
 			(entry.source_url.clone(), entry.source_type.clone(), 0)
 		});
 		agg.2 += 1;
@@ -176,7 +180,8 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 	let mut by_source: BTreeMap<String, (Option<String>, String, u32)> =
 		BTreeMap::new();
 	for (_name, entry) in lock.skills {
-		let agg = by_source.entry(entry.source.clone()).or_insert_with(|| {
+		let origin = source_origin(&entry.source, entry.source_url.as_deref());
+		let agg = by_source.entry(origin).or_insert_with(|| {
 			(entry.source_url.clone(), entry.source_type.clone(), 0)
 		});
 		agg.2 += 1;
@@ -198,9 +203,26 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 }
 
 fn reconstruct_source_url(source: &str) -> String {
-	aghub_git::resolve_remote_source(source)
+	let trimmed = source.trim();
+	// An origin (`host[:port]/path`) — what `list_sources` reports as a row's
+	// identity — is a clone URL missing only its scheme, and a caller echoing one
+	// back (a script, `aghub source diff <row>`) must still reach the repository.
+	//
+	// This runs BEFORE `resolve_remote_source` on purpose: that reader parses
+	// `host:8443/owner/repo` as an SCP-like URL whose PATH is `8443/owner/repo`,
+	// which names a different repository. A dot in the first segment is the
+	// discriminator — forge account names do not contain one, while hosts do
+	// (`mintlify/bun.com` keeps its dot in the REPO segment, not the first).
+	if !trimmed.contains("://") && !trimmed.contains('@') {
+		if let Some((authority, path)) = trimmed.split_once('/') {
+			if authority.contains('.') && !path.is_empty() {
+				return format!("https://{trimmed}");
+			}
+		}
+	}
+	aghub_git::resolve_remote_source(trimmed)
 		.map(|resolved| resolved.clone_url)
-		.unwrap_or_else(|_| source.to_string())
+		.unwrap_or_else(|_| trimmed.to_string())
 }
 
 /// Fetch a source with the source-scoped token on the first attempt when one is
@@ -278,15 +300,45 @@ mod fetch_with_resolver_tests {
 	}
 }
 
-/// Whether a lock entry belongs to the requested source. Matches on the
-/// normalized `owner/repo` identifier first, then on a normalized clone URL so
-/// global (has `sourceUrl`) and project (reconstructed) scopes match
-/// symmetrically — a custom git host normalizes the same on both sides.
+/// A Source's identity: the repository's ORIGIN — `host[:port]/path`, lower-cased
+/// authority, no userinfo, no `.git`. Two forges serving the same path are two
+/// Sources; two spellings of one repo (ssh vs https, with or without `.git`) are
+/// one. Shared with the install-time owner check and `EntryIdentity` via
+/// `aghub_core`, so all three answer "same repo?" identically.
 ///
-/// This is the ONE definition of Source membership. `mutation.rs` asserts a
-/// bulk caller's Source view with it too: a caller's row is built from this
-/// predicate, so a second, stricter definition there would reject entries the
-/// caller was correctly shown (and no refresh could fix it).
+/// Accepts whatever a caller holds: the recorded `sourceUrl`, an `owner/repo`
+/// shorthand (which IS a GitHub coordinate), or an origin echoed back from a
+/// previous response. Anything unresolvable (a local path, `file:`) keeps its own
+/// spelling, so two distinct local sources never merge into one row.
+pub(crate) fn source_origin(
+	entry_source: &str,
+	entry_source_url: Option<&str>,
+) -> String {
+	let candidates = [
+		entry_source_url.map(str::to_string),
+		Some(entry_source.to_string()),
+		entry_source_url.map(reconstruct_source_url),
+		Some(reconstruct_source_url(entry_source)),
+	];
+	for candidate in candidates.into_iter().flatten() {
+		if let Some(origin) =
+			aghub_core::skills::install_fetched::remote_owner_from_url(
+				&candidate,
+			) {
+			return origin;
+		}
+	}
+	entry_source.trim().to_string()
+}
+
+/// Whether a lock entry belongs to the requested source.
+///
+/// This is the ONE definition of Source membership: the Sources list groups by
+/// it, `diff_source` selects by it, and `mutation.rs` checks a bulk caller's row
+/// identity with it. They MUST agree — when the grouping admitted an entry this
+/// predicate's own resolution could not, a row's diff judged against one
+/// repository while its apply installed from another, and a stricter check in
+/// `mutation.rs` rejected rows the caller was correctly shown.
 pub(crate) fn source_matches(
 	want: &str,
 	entry_source: &str,
@@ -295,10 +347,7 @@ pub(crate) fn source_matches(
 	if entry_source == want || entry_source_url == Some(want) {
 		return true;
 	}
-	let want_url = reconstruct_source_url(want);
-	reconstruct_source_url(entry_source) == want_url
-		|| entry_source_url
-			.is_some_and(|u| reconstruct_source_url(u) == want_url)
+	source_origin(want, None) == source_origin(entry_source, entry_source_url)
 }
 
 fn local_hashes_for_installed(
@@ -967,6 +1016,118 @@ pub fn diff_source(
 				repo.upstream_commit_time(),
 			),
 		},
+	}
+}
+
+#[cfg(test)]
+mod origin_tests {
+	use super::*;
+
+	/// Every spelling of one repository must collapse to one origin, and every
+	/// distinct forge must stay separate — this is what a Sources row IS.
+	#[test]
+	fn one_repo_many_spellings_is_one_origin() {
+		let canonical = "github.com/owner/repo";
+		for (source, source_url) in [
+			("owner/repo", Some("https://github.com/owner/repo.git")),
+			("owner/repo", Some("https://github.com/owner/repo")),
+			("owner/repo", Some("git@github.com:owner/repo.git")),
+			("owner/repo", Some("ssh://git@github.com/owner/repo.git")),
+			(
+				"owner/repo",
+				Some("https://token@github.com/owner/repo.git"),
+			),
+			// npx-written project lock: no `sourceUrl`, the shorthand IS the
+			// GitHub coordinate.
+			("owner/repo", None),
+			// An origin echoed back from a previous response.
+			("github.com/owner/repo", None),
+		] {
+			assert_eq!(
+				source_origin(source, source_url),
+				canonical,
+				"source={source} url={source_url:?}"
+			);
+		}
+	}
+
+	#[test]
+	fn a_different_forge_or_port_is_a_different_origin() {
+		let github = source_origin(
+			"owner/repo",
+			Some("https://github.com/owner/repo.git"),
+		);
+		for other in [
+			"https://gitlab.com/owner/repo.git",
+			"https://github.example.com/owner/repo.git",
+			// Port matters: two forges on one host are two repositories, which
+			// is why a host-only comparison is too loose (same reason
+			// credential origin pinning includes the port).
+			"https://github.com:8443/owner/repo.git",
+		] {
+			assert_ne!(
+				source_origin("owner/repo", Some(other)),
+				github,
+				"{other} must not collapse into {github}"
+			);
+		}
+	}
+
+	/// A row identity reported by `list_sources` must be usable as INPUT again —
+	/// a script, or `aghub source diff <row>`, echoes it back and has to reach
+	/// the repository. An origin is not GitHub shorthand, so it needs its scheme
+	/// restored.
+	#[test]
+	fn a_reported_origin_round_trips_to_a_clone_url() {
+		assert_eq!(
+			reconstruct_source_url("github.com/owner/repo"),
+			"https://github.com/owner/repo"
+		);
+		assert_eq!(
+			reconstruct_source_url("git.example.com:8443/owner/repo"),
+			"https://git.example.com:8443/owner/repo"
+		);
+		// Not origin-shaped: a local path and a bare shorthand must not gain a
+		// scheme they cannot support.
+		assert_eq!(reconstruct_source_url("/opt/skills/a"), "/opt/skills/a");
+		assert_eq!(
+			reconstruct_source_url("owner/repo"),
+			"https://github.com/owner/repo.git"
+		);
+	}
+
+	/// A local/unresolvable source keeps its own spelling, so two distinct local
+	/// directories never merge into one row.
+	#[test]
+	fn unresolvable_sources_keep_their_spelling() {
+		assert_eq!(source_origin("/opt/skills/a", None), "/opt/skills/a");
+		assert_ne!(
+			source_origin("/opt/skills/a", None),
+			source_origin("/opt/skills/b", None)
+		);
+	}
+
+	/// Membership follows the same origin, in both directions.
+	#[test]
+	fn membership_admits_only_the_same_origin() {
+		assert!(source_matches(
+			"https://github.com/owner/repo.git",
+			"owner/repo",
+			Some("https://github.com/owner/repo")
+		));
+		assert!(source_matches(
+			"github.com/owner/repo",
+			"owner/repo",
+			Some("https://github.com/owner/repo.git")
+		));
+		assert!(
+			!source_matches(
+				"https://github.com/owner/repo.git",
+				"owner/repo",
+				Some("https://gitlab.com/owner/repo.git")
+			),
+			"a same-path entry on another forge is NOT part of this row"
+		);
 	}
 }
 

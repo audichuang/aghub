@@ -232,13 +232,17 @@ fn locked(project: &Path, name: &str, source: &str, source_url: Option<&str>) {
 	.unwrap();
 }
 
-/// Two hosts serving the same `owner/repo` are ONE Sources row (grouping keys on
-/// the lock's host-blind `source`), so "Update all" sends both names under one
-/// `source`. Each must still be fetched from ITS OWN coordinate, with ITS OWN
-/// token — and neither may be rejected, which is what a stricter assertion here
-/// used to do, unfixably.
+/// Two hosts serving the same `owner/repo` are TWO Sources rows, because grouping
+/// keys on the repository origin. A batch naming host A's row must therefore
+/// update only host A's entry and refuse host B's — the refusal is meaningful
+/// here precisely because B is no longer part of the row the caller was shown.
+///
+/// (Before host-aware grouping this was ONE row spanning both hosts, so a batch
+/// legitimately covered both and this test asserted both succeeded. That
+/// arrangement is what let a row's diff judge against one repository while its
+/// apply installed from another.)
 #[test]
-fn one_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
+fn a_source_row_covers_only_its_own_origin() {
 	let temporary = tempfile::tempdir().unwrap();
 	let project = temporary.path().join("project");
 	let fetched_root = temporary.path().join("fetched");
@@ -274,28 +278,96 @@ fn one_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
 		&fetcher,
 		&PerSourceToken,
 	)
-	.expect("both rows belong to the Source row the caller was shown");
-
-	assert!(
-		results.iter().all(|result| result.outcome.is_ok()),
-		"a Source row's own members must all be updatable: {:?}",
-		results
-			.iter()
-			.map(|result| (&result.name, result.outcome.is_ok()))
-			.collect::<Vec<_>>()
+	.expect(
+		"a foreign-origin entry belongs in its own row, not a request error",
 	);
+
+	assert_eq!(results[0].name, "alpha");
+	assert!(
+		results[0].outcome.is_ok(),
+		"alpha is this row's own entry: {:?}",
+		results[0].outcome
+	);
+	assert!(
+		matches!(
+			results[1].outcome,
+			Err(skill_update::mutation::LockedResyncError::SourceGroupMismatch)
+		),
+		"beta sits on another origin and is not part of this row: {:?}",
+		results[1].outcome
+	);
+
 	let seen = fetcher.seen.lock().unwrap();
-	assert_eq!(seen.len(), 2, "distinct coordinates fetch separately");
+	assert_eq!(seen.len(), 1, "only this row's origin may be fetched");
 	assert_eq!(seen[0].0.source, "https://github.com/owner/repo.git");
 	assert_eq!(
 		seen[0].1.as_deref(),
 		Some("token-for:https://github.com/owner/repo.git"),
-		"each group must carry the token resolved for ITS OWN source"
+		"the fetch must carry the token resolved for ITS OWN source"
 	);
-	assert_eq!(seen[1].0.source, "https://gitlab.com/owner/repo.git");
+	drop(seen);
+	assert!(std::fs::read_to_string(
+		project.join(".claude/skills/beta/SKILL.md")
+	)
+	.unwrap()
+	.contains("old"));
+}
+
+/// Per-group token isolation, for a caller that passes no group identity (the
+/// single-entry path today, and any future multi-entry caller). Grouping now
+/// keeps a Source row to one origin, so this is the only shape where one batch
+/// can span two origins — and a token resolved for one must never travel to the
+/// other.
+#[test]
+fn each_group_carries_only_its_own_sources_token() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	let fetched_root = temporary.path().join("fetched");
+	for name in ["alpha", "beta"] {
+		write_skill(&project.join(".claude/skills").join(name), name, "old");
+		write_skill(&fetched_root.join("skills").join(name), name, "new");
+	}
+	locked(
+		&project,
+		"alpha",
+		"owner/repo",
+		Some("https://github.com/owner/repo.git"),
+	);
+	locked(
+		&project,
+		"beta",
+		"other/repo",
+		Some("https://gitlab.com/other/repo.git"),
+	);
+	let names = vec!["alpha".to_string(), "beta".to_string()];
+
+	let fetcher = RecordingFetcher {
+		root: fetched_root,
+		seen: Mutex::new(Vec::new()),
+	};
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source_group: None,
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&fetcher,
+		&PerSourceToken,
+	)
+	.expect("no group identity means no membership check");
+
+	assert!(results.iter().all(|result| result.outcome.is_ok()));
+	let seen = fetcher.seen.lock().unwrap();
+	assert_eq!(seen.len(), 2, "two origins fetch separately");
+	assert_eq!(
+		seen[0].1.as_deref(),
+		Some("token-for:https://github.com/owner/repo.git")
+	);
 	assert_eq!(
 		seen[1].1.as_deref(),
-		Some("token-for:https://gitlab.com/owner/repo.git")
+		Some("token-for:https://gitlab.com/other/repo.git"),
+		"a token resolved for one origin must never travel to another"
 	);
 }
 
