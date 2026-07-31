@@ -607,39 +607,44 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				},
 				sourceUrl: diffSource,
 			});
-			const updated = response.results.filter(
-				(result) => result.success,
-			).length;
-			const failed = response.results.length - updated;
+			const failures = response.results.filter(
+				(result) => !result.success,
+			);
+			const updated = response.results.length - failures.length;
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});
-			if (failed > 0) {
+			if (failures.length > 0) {
+				// Per-row reasons are the only actionable part — a repointed
+				// source or a skill missing upstream needs a different response
+				// from the user than a network failure. Same as the per-row
+				// button, which already surfaces `result.error`.
 				toast.danger(
-					failed === 1
-						? t("sourceUpdateSomeFailedOne", { count: failed })
+					failures.length === 1
+						? t("sourceUpdateSomeFailedOne", { count: 1 })
 						: t("sourceUpdateSomeFailedMany", {
-								count: failed,
+								count: failures.length,
 							}),
+					{ description: failures[0]?.error ?? undefined },
 				);
 			} else {
 				toast.success(t("sourceUpdatesApplied", { count: updated }));
 			}
-		} catch {
-			const failed = skills.length;
+		} catch (error) {
+			// The request failed, but the server does NOT abort with the client:
+			// it holds the mutation lock to completion, so the batch may well
+			// have been applied. Claiming N failures here would be a lie the
+			// user acts on — say we couldn't confirm, and let the refetch below
+			// show what actually landed.
+			toast.danger(t("sourceUpdateUnconfirmed"), {
+				description: error instanceof Error ? error.message : undefined,
+			});
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
 			});
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});
-			toast.danger(
-				failed === 1
-					? t("sourceUpdateSomeFailedOne", { count: failed })
-					: t("sourceUpdateSomeFailedMany", {
-							count: failed,
-						}),
-			);
 		} finally {
 			setIsApplyingAll(false);
 		}

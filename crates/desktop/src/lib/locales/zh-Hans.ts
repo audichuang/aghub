@@ -1161,6 +1161,8 @@ export default {
 	sourceUpdateSomeFailed: "有 {{count}} 个技能更新失败。",
 	sourceUpdateSomeFailedOne: "有 1 个技能更新失败。",
 	sourceUpdateSomeFailedMany: "有 {{count}} 个技能更新失败。",
+	sourceUpdateUnconfirmed:
+		"无法确认更新结果，部分技能可能已更新，请刷新确认。",
 	sourceInstallSkill: "安装",
 	sourceInstallAll: "全部安装",
 	sourceInstallSelected: "安装已选 ({{count}})",

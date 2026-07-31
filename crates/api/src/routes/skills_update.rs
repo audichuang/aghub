@@ -36,8 +36,7 @@ use crate::skills::resync::safe_resync_error;
 use skill_update::mutation::{
 	accept_fetched_rename, fetch_for_rename, resync_locked_skill,
 	resync_locked_skills, FetchRenameError, FetchedRenameRequest,
-	LockedResyncError, LockedResyncRequest, LockedSkillsResyncError,
-	LockedSkillsResyncRequest,
+	LockedResyncError, LockedResyncRequest, LockedSkillsResyncRequest,
 };
 // Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
 // match its gate exactly or Windows clippy flags an unused import.
@@ -57,6 +56,15 @@ const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
+/// Wire code for a bulk row whose entry no longer belongs to the Source the
+/// caller named. Distinct from `SOURCE_CHANGED_DURING_FETCH`: nothing moved
+/// mid-flight, the caller's Sources view is simply stale.
+const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
+/// Upper bound on one batch's `names`. The lock is re-read and dedupe is
+/// quadratic per name, all inside one blocking task — an unbounded list lets a
+/// single request occupy a mutation worker for minutes. Far above any real
+/// Source's outdated count.
+const MAX_BATCH_NAMES: usize = 500;
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -355,10 +363,13 @@ fn apply_locked_resync_error(
 			scope,
 			"Locked skillPath was not found in fetched source",
 		)),
-		LockedResyncError::SourceChanged => Ok(apply_error(
+		// The only row state that is worth RETRYING after a refresh, so it must
+		// be machine-distinguishable from the terminal ones.
+		LockedResyncError::SourceChanged => Ok(apply_error_with_code(
 			name,
 			scope,
 			"Skill source changed; refresh Sources and retry",
+			Some(SKILL_SOURCE_VIEW_STALE_CODE),
 		)),
 		LockedResyncError::Fetch(error) => {
 			Ok(apply_error(name, scope, fetch_error_text(error)))
@@ -456,9 +467,10 @@ fn apply_locked_resync_batch_error(
 	}
 	match apply_locked_resync_error(name, scope, error) {
 		Ok(response) => response,
-		Err(_) => unreachable!(
-			"only credential backend failures project to a top-level API error"
-		),
+		// Today only the credential-backend arm returns `Err`, and it is
+		// handled above. A future arm that projects to a top-level error must
+		// still not turn one row into a 500 that erases the whole batch.
+		Err(_) => apply_error(name, scope, "Skill update failed"),
 	}
 }
 
@@ -604,6 +616,13 @@ pub(crate) async fn apply_skill_updates_inner(
 			"INVALID_PARAM",
 		));
 	}
+	if req.names.len() > MAX_BATCH_NAMES {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"too many names in one batch",
+			"INVALID_PARAM",
+		));
+	}
 
 	let resolved = ScopeParams {
 		scope: Some(req.scope.clone()),
@@ -641,24 +660,17 @@ pub(crate) async fn apply_skill_updates_inner(
 			fetcher,
 			resolver,
 		)
-		.map_err(|error| match error {
-			LockedSkillsResyncError::EmptyRequest => ApiError::new(
+		// Unreachable in practice: this route answers empty names above and
+		// `ScopeParams::resolve` answers every bad scope (including project
+		// without a root) before we get here. Kept as ONE generic arm rather
+		// than re-stating each condition's message, which would be a second
+		// written contract for something the extractor already owns.
+		.map_err(|_| {
+			ApiError::new(
 				Status::BadRequest,
-				"names must not be empty",
+				"scope must be global or project, with a non-empty names list",
 				"INVALID_PARAM",
-			),
-			LockedSkillsResyncError::Preflight(
-				LockedResyncError::ProjectRootRequired,
-			) => ApiError::new(
-				Status::BadRequest,
-				"project_root is required when scope is project",
-				"INVALID_PARAM",
-			),
-			LockedSkillsResyncError::Preflight(_) => ApiError::new(
-				Status::BadRequest,
-				"scope must be global or project",
-				"INVALID_PARAM",
-			),
+			)
 		})?;
 		let results = outcomes
 			.into_iter()
@@ -1088,12 +1100,138 @@ mod tests {
 				["beta", "alpha"]
 			);
 			assert!(response.results.iter().all(|row| row.success));
+			// The success projection is shared with the single-update route, so
+			// assert its whole payload here: scope echoed, the hash the resync
+			// actually computed, and the swapped path attributed.
+			for row in &response.results {
+				assert_eq!(row.scope, "global");
+				assert!(
+					row.updated_hash.as_ref().is_some_and(|h| !h.is_empty()),
+					"{} must report the hash it stamped",
+					row.name
+				);
+				assert!(
+					row.paths.iter().any(|path| path.contains(&row.name)),
+					"{} must attribute its swapped path, got {:?}",
+					row.name,
+					row.paths
+				);
+				assert!(row.error.is_none() && row.code.is_none());
+			}
+			let lock = skill::lock::global::read_skill_lock();
 			for name in ["alpha", "beta"] {
 				let installed = std::fs::read_to_string(
 					home.path().join(format!(".claude/skills/{name}/SKILL.md")),
 				)
 				.unwrap();
 				assert!(installed.contains("new"), "{name} was not updated");
+				assert_eq!(
+					lock.skills[name].ref_commit.as_deref(),
+					Some("batch-commit"),
+					"{name} lock must record the fetched commit"
+				);
+			}
+		});
+	}
+
+	/// `confirm=true` is the destructive-default gate on a route that overwrites
+	/// every installed file of a whole Source. Nothing else in the repo notices
+	/// if it is removed, so assert BOTH the rejection and that no fetch and no
+	/// write happened.
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_requires_confirm_and_writes_nothing_without_it() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+			prepare_global_batch(home.path());
+			let runtime = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+
+			let mut statuses = Vec::new();
+			for confirm in [None, Some(false)] {
+				let result = runtime.block_on(apply_skill_updates_inner(
+					ApplySkillUpdatesRequest {
+						source: "https://github.com/owner/repo".to_string(),
+						names: vec!["alpha".to_string()],
+						scope: "global".to_string(),
+						project_root: None,
+						confirm,
+					},
+					&PanicOnFetch,
+					&empty_keyring_resolver(),
+				));
+				statuses.push(match result {
+					Ok(_) => panic!("confirm={confirm:?} must be rejected"),
+					Err(error) => (error.status, error.body.code),
+				});
+			}
+
+			let installed = std::fs::read_to_string(
+				home.path().join(".claude/skills/alpha/SKILL.md"),
+			)
+			.unwrap();
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			for (status, code) in statuses {
+				assert_eq!(status, Status::BadRequest);
+				assert_eq!(code, "INVALID_PARAM");
+			}
+			assert!(
+				installed.contains("old"),
+				"an unconfirmed batch must not touch installed content"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_rejects_empty_oversized_and_all_scope() {
+		with_isolated_state(|| {
+			let runtime = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+			let request =
+				|names: Vec<String>, scope: &str| ApplySkillUpdatesRequest {
+					source: "https://github.com/owner/repo".to_string(),
+					names,
+					scope: scope.to_string(),
+					project_root: None,
+					confirm: Some(true),
+				};
+			let cases = [
+				request(Vec::new(), "global"),
+				request(
+					(0..=MAX_BATCH_NAMES)
+						.map(|index| format!("skill-{index}"))
+						.collect(),
+					"global",
+				),
+				request(vec!["alpha".to_string()], "all"),
+			];
+
+			for case in cases {
+				let names = case.names.len();
+				let scope = case.scope.clone();
+				match runtime.block_on(apply_skill_updates_inner(
+					case,
+					&PanicOnFetch,
+					&empty_keyring_resolver(),
+				)) {
+					Ok(_) => {
+						panic!("names={names} scope={scope} must be rejected")
+					}
+					Err(error) => {
+						assert_eq!(error.status, Status::BadRequest);
+					}
+				}
 			}
 		});
 	}

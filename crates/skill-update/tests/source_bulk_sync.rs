@@ -16,6 +16,15 @@ impl TokenResolver for Token {
 	}
 }
 
+/// One token per source, so a fetch carrying another group's token is visible.
+struct PerSourceToken;
+
+impl TokenResolver for PerSourceToken {
+	fn resolve(&self, source: &str) -> TokenResolution {
+		TokenResolution::Token(format!("token-for:{source}"))
+	}
+}
+
 type FetchCall = (SourceRef, Option<String>, Vec<String>);
 
 struct RecordingFetcher {
@@ -204,4 +213,168 @@ fn locked_multi_resync_fetches_each_source_ref_once_and_preserves_order() {
 		vec!["beta", "alpha"],
 	);
 	assert!(results.iter().all(|result| result.outcome.is_ok()));
+}
+
+fn locked(project: &Path, name: &str, source: &str, source_url: Option<&str>) {
+	skill::add_skill_to_local_lock(
+		name,
+		skill::LocalSkillLockEntry {
+			source_url: source_url.map(str::to_string),
+			source: source.to_string(),
+			ref_name: Some("main".to_string()),
+			source_type: "git".to_string(),
+			computed_hash: "old".to_string(),
+			skill_path: Some(format!("skills/{name}/SKILL.md")),
+			ref_commit: None,
+		},
+		Some(project),
+	)
+	.unwrap();
+}
+
+/// Two hosts serving the same `owner/repo` are ONE Sources row (grouping keys on
+/// the lock's host-blind `source`), so "Update all" sends both names under one
+/// `source`. Each must still be fetched from ITS OWN coordinate, with ITS OWN
+/// token — and neither may be rejected, which is what a stricter assertion here
+/// used to do, unfixably.
+#[test]
+fn one_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	let fetched_root = temporary.path().join("fetched");
+	for name in ["alpha", "beta"] {
+		write_skill(&project.join(".claude/skills").join(name), name, "old");
+		write_skill(&fetched_root.join("skills").join(name), name, "new");
+	}
+	locked(
+		&project,
+		"alpha",
+		"owner/repo",
+		Some("https://github.com/owner/repo.git"),
+	);
+	locked(
+		&project,
+		"beta",
+		"owner/repo",
+		Some("https://gitlab.com/owner/repo.git"),
+	);
+	let names = vec!["alpha".to_string(), "beta".to_string()];
+
+	let fetcher = RecordingFetcher {
+		root: fetched_root,
+		seen: Mutex::new(Vec::new()),
+	};
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source: Some("https://github.com/owner/repo.git"),
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&fetcher,
+		&PerSourceToken,
+	)
+	.expect("both rows belong to the Source row the caller was shown");
+
+	assert!(
+		results.iter().all(|result| result.outcome.is_ok()),
+		"a Source row's own members must all be updatable: {:?}",
+		results
+			.iter()
+			.map(|result| (&result.name, result.outcome.is_ok()))
+			.collect::<Vec<_>>()
+	);
+	let seen = fetcher.seen.lock().unwrap();
+	assert_eq!(seen.len(), 2, "distinct coordinates fetch separately");
+	assert_eq!(seen[0].0.source, "https://github.com/owner/repo.git");
+	assert_eq!(
+		seen[0].1.as_deref(),
+		Some("token-for:https://github.com/owner/repo.git"),
+		"each group must carry the token resolved for ITS OWN source"
+	);
+	assert_eq!(seen[1].0.source, "https://gitlab.com/owner/repo.git");
+	assert_eq!(
+		seen[1].1.as_deref(),
+		Some("token-for:https://gitlab.com/owner/repo.git")
+	);
+}
+
+/// npx-written project locks carry no `sourceUrl`, so the entry's effective
+/// source is the `owner/repo` shorthand while the Sources row advertises a
+/// reconstructed clone URL — the desktop sends the latter. The assertion must
+/// normalize across that, or project-scope "Update all" fails every row.
+#[test]
+fn reconstructed_source_url_matches_a_shorthand_only_entry() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	let fetched_root = temporary.path().join("fetched");
+	write_skill(&project.join(".claude/skills/alpha"), "alpha", "old");
+	write_skill(&fetched_root.join("skills/alpha"), "alpha", "new");
+	locked(&project, "alpha", "owner/repo", None);
+	let names = vec!["alpha".to_string()];
+
+	let fetcher = RecordingFetcher {
+		root: fetched_root,
+		seen: Mutex::new(Vec::new()),
+	};
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source: Some("https://github.com/owner/repo.git"),
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&fetcher,
+		&Token,
+	)
+	.expect("a shorthand-only entry belongs to its reconstructed Source row");
+	assert!(
+		results[0].outcome.is_ok(),
+		"npx-written entry must be updatable: {:?}",
+		results[0].outcome
+	);
+	assert_eq!(
+		fetcher.seen.lock().unwrap()[0].0.source,
+		"owner/repo",
+		"the fetch still uses the entry's own effective coordinate"
+	);
+}
+
+/// A TFS/Azure-DevOps entry's `source` has more than two path segments, so it is
+/// not GitHub shorthand and does not resolve as a remote on its own. A caller
+/// that passes the `source` field `GET /sources` reported must still match.
+#[test]
+fn tfs_style_source_identifier_matches_its_own_entry() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	let fetched_root = temporary.path().join("fetched");
+	write_skill(&project.join(".claude/skills/alpha"), "alpha", "old");
+	write_skill(&fetched_root.join("skills/alpha"), "alpha", "new");
+	locked(
+		&project,
+		"alpha",
+		"Coll/_git/repo",
+		Some("https://tfs.example.com/tfs/Coll/_git/repo"),
+	);
+	let names = vec!["alpha".to_string()];
+
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source: Some("Coll/_git/repo"),
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&RecordingFetcher {
+			root: fetched_root,
+			seen: Mutex::new(Vec::new()),
+		},
+		&Token,
+	)
+	.expect("a TFS Source row's own member must be updatable");
+	assert!(
+		results[0].outcome.is_ok(),
+		"TFS entry must not be rejected as a changed source: {:?}",
+		results[0].outcome
+	);
 }

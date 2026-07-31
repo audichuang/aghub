@@ -1123,6 +1123,34 @@ mod tests {
 		// since it runs during unwind), restoring the env var.
 	}
 
+	/// The desktop posts to this exact path (`src/lib/api.ts`,
+	/// `skills/apply-updates`) and its own test stubs `fetch`, so the two halves
+	/// of that contract are verified in isolation and can drift apart silently:
+	/// unmounting the route, or renaming its path, breaks "Update all" with
+	/// nothing else going red.
+	#[test]
+	fn bulk_apply_updates_is_mounted_where_the_desktop_posts() {
+		let iso = IsolatedApiTest::new();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			iso.app_data.path().to_path_buf(),
+		))
+		.expect("client");
+
+		assert!(
+			client.rocket().routes().any(|route| {
+				route.method == rocket::http::Method::Post
+					&& route.uri.as_str() == "/api/v1/skills/apply-updates"
+			}),
+			"POST /api/v1/skills/apply-updates must stay mounted: {:?}",
+			client
+				.rocket()
+				.routes()
+				.map(|route| route.uri.as_str())
+				.collect::<Vec<_>>()
+		);
+	}
+
 	#[test]
 	fn all_routes_reject_foreign_host() {
 		// Gatekeeper: every non-OPTIONS mounted route must carry Layer-2

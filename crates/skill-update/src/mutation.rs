@@ -285,10 +285,19 @@ pub struct LockedResyncRequest<'a> {
 pub struct LockedSkillsResyncRequest<'a> {
 	/// The Source the caller believes every named entry still belongs to.
 	/// A mismatch fails that entry's row instead of fetching, so a stale
-	/// Sources view can never aim this batch — or the caller's forwarded
-	/// token — at an entry that was repointed elsewhere. `None` skips the
-	/// assertion: a caller that read the coordinates from the very Lock read
-	/// this flow performs has nothing independent to assert against.
+	/// Sources view cannot aim this batch at an entry that was repointed to a
+	/// different repository. `None` skips the assertion: a caller that read the
+	/// coordinates from the very Lock read this flow performs has nothing
+	/// independent to assert against.
+	///
+	/// Judged by `sources::source_matches` — the SAME predicate that decided
+	/// which skills the caller's Source row contains. Its resolution is
+	/// therefore whatever the Sources view groups by, which is the lock's
+	/// host-blind `source` identifier: two hosts (or ports) serving the same
+	/// `owner/repo` are ONE Source row, so this assertion cannot separate them
+	/// either. A stricter comparison here would reject rows the caller was
+	/// correctly shown, unfixably — the resolution has to be raised in the
+	/// grouping, not here.
 	pub source: Option<&'a str>,
 	pub names: &'a [String],
 	pub scope: ResourceScope,
@@ -371,30 +380,24 @@ impl From<GroupFailure> for LockedResyncError {
 	}
 }
 
-fn same_source(expected: &str, actual: &str) -> bool {
-	if expected == actual {
-		return true;
-	}
-	let Ok(expected) = aghub_git::resolve_remote_source(expected) else {
-		return false;
-	};
-	let Ok(actual) = aghub_git::resolve_remote_source(actual) else {
-		return false;
-	};
-	expected.host == actual.host
-		&& expected.source.trim_end_matches(".git")
-			== actual.source.trim_end_matches(".git")
+/// One Lock entry's two Source identities: the coordinate its content is
+/// fetched from, and the identifier the Sources view groups it under. They
+/// differ whenever a lock records both `source` and `sourceUrl`, and the
+/// assertion MUST use the grouping one — see [`resync_locked_skills`].
+struct EntrySource {
+	source_ref: SourceRef,
+	grouping_source: String,
 }
 
 fn prepare_locked_resync(
 	name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
-) -> Result<(SourceRef, PreparedLockedResync), LockedResyncError> {
+) -> Result<(EntrySource, PreparedLockedResync), LockedResyncError> {
 	// Coordinates and identity must come from the SAME entry read. A second
 	// lookup could straddle another process's repoint and let a stale fetch pass
 	// the compare-after-fetch against a different observation.
-	let (source_ref, skill_path, expected) = match scope {
+	let (entry_source, skill_path, expected) = match scope {
 		ResourceScope::GlobalOnly => {
 			let entry = skill::lock::global::get_skill_from_lock(name).ok_or(
 				LockedResyncError::LockEntryNotFound {
@@ -406,9 +409,12 @@ fn prepare_locked_resync(
 					&entry,
 				);
 			(
-				SourceRef {
-					source: entry.source_url,
-					ref_: entry.ref_name,
+				EntrySource {
+					source_ref: SourceRef {
+						source: entry.source_url,
+						ref_: entry.ref_name,
+					},
+					grouping_source: entry.source,
 				},
 				entry
 					.skill_path
@@ -430,9 +436,14 @@ fn prepare_locked_resync(
 					&entry,
 				);
 			(
-				SourceRef {
-					source: entry.source_url.unwrap_or(entry.source),
-					ref_: entry.ref_name,
+				EntrySource {
+					source_ref: SourceRef {
+						source: entry
+							.source_url
+							.unwrap_or_else(|| entry.source.clone()),
+						ref_: entry.ref_name,
+					},
+					grouping_source: entry.source,
 				},
 				entry
 					.skill_path
@@ -458,7 +469,7 @@ fn prepare_locked_resync(
 	}
 
 	Ok((
-		source_ref,
+		entry_source,
 		PreparedLockedResync {
 			skill_path,
 			expected,
@@ -517,9 +528,17 @@ pub fn resync_locked_skills(
 	for name in names {
 		let prepared =
 			prepare_locked_resync(name, request.scope, request.project_root)
-				.and_then(|(source_ref, mut item)| {
+				.and_then(|(entry, mut item)| {
+					let EntrySource {
+						source_ref,
+						grouping_source,
+					} = entry;
 					if request.source.is_some_and(|source| {
-						!same_source(source, &source_ref.source)
+						!crate::sources::source_matches(
+							source,
+							&grouping_source,
+							Some(&source_ref.source),
+						)
 					}) {
 						return Err(LockedResyncError::SourceChanged);
 					}
@@ -577,6 +596,19 @@ pub fn resync_locked_skills(
 		})
 		.collect();
 
+	// Each row takes the mutation lock for its own transaction; the batch
+	// deliberately does NOT hold one guard across all of them. The lock's
+	// process-wide half is held for its whole span, so a batch-long hold would
+	// queue every unrelated in-process mutation behind this batch and push
+	// other processes into their 10s bound — the measured way to make the API
+	// stop answering everything (root AGENTS.md). The cost is that the batch is
+	// NOT atomic: another aghub landing between two rows leaves this Source's
+	// entries on different commits with both batches reporting success, which
+	// the per-entry compare-after-fetch cannot catch (`EntryIdentity` compares
+	// coordinates, not the commit). Each row stays internally consistent
+	// (content and lock hash always agree) and the next check re-flags the
+	// drift, so this is a bounded, self-healing inconsistency — priced
+	// deliberately against never answering a request.
 	Ok(rows
 		.into_iter()
 		.map(|ResyncRow { name, prepared }| {

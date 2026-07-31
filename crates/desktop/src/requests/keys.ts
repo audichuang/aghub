@@ -37,6 +37,9 @@ export const queryKeys = {
 			scope: "global" | "project" | "all" = "global",
 			projectRoot?: string,
 		) => ["skills", "check-updates", scope, projectRoot ?? null] as const,
+		/// Prefix covering every scope's update check — an applied update
+		/// invalidates the outdated-or-not answer for all of them.
+		updateChecksAll: () => ["skills", "check-updates"] as const,
 		lock: {
 			all: () => ["skills", "lock"] as const,
 			global: () => ["skills", "lock", "global"] as const,

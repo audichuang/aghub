@@ -282,7 +282,12 @@ mod fetch_with_resolver_tests {
 /// normalized `owner/repo` identifier first, then on a normalized clone URL so
 /// global (has `sourceUrl`) and project (reconstructed) scopes match
 /// symmetrically — a custom git host normalizes the same on both sides.
-fn source_matches(
+///
+/// This is the ONE definition of Source membership. `mutation.rs` asserts a
+/// bulk caller's Source view with it too: a caller's row is built from this
+/// predicate, so a second, stricter definition there would reject entries the
+/// caller was correctly shown (and no refresh could fix it).
+pub(crate) fn source_matches(
 	want: &str,
 	entry_source: &str,
 	entry_source_url: Option<&str>,

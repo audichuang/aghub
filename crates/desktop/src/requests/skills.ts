@@ -195,6 +195,15 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 		queryKey: queryKeys.skills.lock.all(),
 		type: "active",
 	});
+	// An applied update changes whether a skill IS outdated, and the badge that
+	// says so is fed by its own key prefix that neither refetch above covers.
+	// Without this the list keeps offering "Update available" for skills that
+	// were just updated (nothing else clears it: no refetch-on-focus, and the
+	// page's observer never unmounts).
+	void queryClient.refetchQueries({
+		queryKey: queryKeys.skills.updateChecksAll(),
+		type: "active",
+	});
 }
 
 interface CreateSkillVariables {

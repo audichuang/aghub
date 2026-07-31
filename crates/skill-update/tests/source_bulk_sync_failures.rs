@@ -386,3 +386,60 @@ fn stale_first_entry_does_not_prevent_later_runtime_attempts() {
 	.unwrap()
 	.contains("new"));
 }
+
+/// A genuinely repointed entry must fail ALONE. `changed_source_...` above
+/// mismatches every row, so on its own it only proves SourceChanged is a row
+/// rather than a whole-request error — not that it spares its siblings.
+#[test]
+fn repointed_entry_fails_without_costing_its_sibling() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	prepare_project(&project);
+	// alpha now belongs to a different repository than the caller's Source.
+	skill::add_skill_to_local_lock(
+		"alpha",
+		local_entry("elsewhere/repo", "skills/alpha/SKILL.md"),
+		Some(&project),
+	)
+	.unwrap();
+	let fetched = temporary.path().join("fetched");
+	write_skill(&fetched.join("skills/alpha"), "alpha", "new");
+	write_skill(&fetched.join("skills/beta"), "beta", "new");
+	let names = vec!["alpha".to_string(), "beta".to_string()];
+
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source: Some("owner/repo"),
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&FixtureFetcher {
+			root: fetched,
+			repoint_alpha_in: None,
+		},
+		&NoToken,
+	)
+	.expect("one repointed entry must not fail the request");
+	assert!(matches!(
+		results[0].outcome,
+		Err(LockedResyncError::SourceChanged),
+	));
+	assert!(results[1].outcome.is_ok(), "beta must still be updated");
+	assert!(std::fs::read_to_string(
+		project.join(".claude/skills/alpha/SKILL.md")
+	)
+	.unwrap()
+	.contains("old"));
+	assert!(std::fs::read_to_string(
+		project.join(".claude/skills/beta/SKILL.md")
+	)
+	.unwrap()
+	.contains("new"));
+	let lock = skill::lock::local::read_local_lock(Some(&project));
+	assert!(lock.skills["alpha"].ref_commit.is_none());
+	assert_eq!(
+		lock.skills["beta"].ref_commit.as_deref(),
+		Some("bulk-commit")
+	);
+}

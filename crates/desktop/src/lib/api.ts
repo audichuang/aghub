@@ -418,15 +418,20 @@ export function createApi(baseUrl: string) {
 			): Promise<ApplySkillUpdatesResponse> {
 				// Every name belongs to a source group handled by the shared seam;
 				// forwarding remains one request-scoped, origin-pinned header.
-				// No client timeout: one request now covers the fetch plus EVERY
-				// skill's transaction, and aborting it does not stop the server
-				// (it holds the mutation lock to completion) — a client-side
-				// timeout would just report a batch that actually succeeded as
-				// having failed entirely.
+				// The budget scales with the batch: one request now covers the
+				// fetch plus EVERY skill's transaction, so the single-skill 120s
+				// would abort work that is progressing fine. It stays FINITE
+				// because aborting does not stop the server — a request that
+				// never settles leaves the UI unable to say anything at all.
+				// The caller must treat a timeout as "couldn't confirm", not as
+				// failure, since the server likely committed the batch.
 				return client
 					.post("skills/apply-updates", {
 						json: body,
-						timeout: false,
+						timeout: Math.min(
+							120000 + body.names.length * 30000,
+							900000,
+						),
 						...(forwardedTokens
 							? { headers: forwardedTokens }
 							: {}),

@@ -1200,6 +1200,8 @@ export default {
 	sourceUpdatesApplied: "Updated {{count}} skills.",
 	sourceUpdateSomeFailedOne: "Couldn't update 1 skill.",
 	sourceUpdateSomeFailedMany: "Couldn't update {{count}} skills.",
+	sourceUpdateUnconfirmed:
+		"Couldn't confirm the update. Some skills may already be updated — refresh to check.",
 	sourceInstallSkill: "Install",
 	sourceInstallAll: "Install all",
 	sourceInstallSelected: "Install selected ({{count}})",
