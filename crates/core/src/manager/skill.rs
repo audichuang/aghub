@@ -123,6 +123,35 @@ fn remove_skill_path(
 }
 
 impl ConfigManager {
+	/// Take the interprocess mutation lock for `scope` AND re-read this manager's
+	/// config under it — the two are one step on purpose.
+	///
+	/// `self.config` was populated by a `load()` the CALLER made before entering
+	/// the mutation, so the guard alone still leaves every decision below it
+	/// (duplicate-name check, target lookup, referrer sweep) resolved from a view
+	/// another aghub process may already have invalidated: it reinstalls the same
+	/// name, or repoints a Master, and this flow then acts on the stale
+	/// `source_path` / `canonical_path`. The API widens that window further by
+	/// awaiting plugin detection between its `load()` and the mutation.
+	///
+	/// Every guarded `ConfigManager` mutation goes through here rather than
+	/// calling `mutation_guard` directly, so a new one cannot acquire the lock and
+	/// forget the re-read. A dry-run takes neither.
+	fn guard_and_reload(
+		&mut self,
+		op: &str,
+		scope: crate::models::ResourceScope,
+	) -> Result<skill::lock::MutationGuard> {
+		let guard = crate::skills::lock::mutation_guard(
+			op,
+			scope,
+			self.project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
+		self.load()?;
+		Ok(guard)
+	}
+
 	pub fn add_skill(&mut self, skill: Skill) -> Result<()> {
 		// Symlink-only model (Locked Decision 1): manual skill creation writes a
 		// single .agents/skills/<name> Master and links THIS agent to it, exactly
@@ -162,13 +191,9 @@ impl ConfigManager {
 
 		// Spans the duplicate-name check, the Master write and the link, so a
 		// concurrent aghub cannot land its own Master between our `exists()` and
-		// our write (both would then write SKILL.md, last one wins).
-		let _mutation_guard = crate::skills::lock::mutation_guard(
-			"add skill",
-			scope,
-			project_root.as_deref(),
-		)
-		.map_err(ConfigError::Io)?;
+		// our write (both would then write SKILL.md, last one wins). Re-reads
+		// config under the lock — see `guard_and_reload`.
+		let _mutation_guard = self.guard_and_reload("add skill", scope)?;
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
@@ -267,13 +292,10 @@ impl ConfigManager {
 		// A rename here is `rename_skill_master` + a relink of every Referrer —
 		// itself transactional, so it must not interleave with another process's
 		// install of either name. Scope (not write_scope) because the relink
-		// sweeps every in-scope agent dir.
-		let _mutation_guard = crate::skills::lock::mutation_guard(
-			"update skill",
-			self.scope,
-			self.project_root.as_deref(),
-		)
-		.map_err(ConfigError::Io)?;
+		// sweeps every in-scope agent dir. Re-reads config under the lock: the
+		// `source_path` this rename moves is read below.
+		let _mutation_guard =
+			self.guard_and_reload("update skill", self.scope)?;
 
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
@@ -412,15 +434,25 @@ impl ConfigManager {
 	}
 
 	pub fn remove_skill(&mut self, name: &str) -> Result<()> {
+		// Whether the CALLER's view held it, recorded before the re-read below.
+		// After that re-read "another process removed it while we waited for the
+		// lock" and "there is no such skill" are indistinguishable, and they need
+		// opposite answers: the first is this removal's goal already met, the
+		// second is a real not-found.
+		let was_in_callers_view = self
+			.config
+			.as_ref()
+			.is_some_and(|c| c.skills.iter().any(|s| s.name == name));
+
 		// Guarded like every other disk mutation: this deletes a Master or a
-		// Referrer, and the CLI add path calls it as a ROLLBACK after a failed
-		// add — the one caller that most needs the deletion attributed to us.
-		let _mutation_guard = crate::skills::lock::mutation_guard(
-			"remove skill",
-			self.scope,
-			self.project_root.as_deref(),
-		)
-		.map_err(ConfigError::Io)?;
+		// Referrer. Its one production caller is CLI `add --from … --name X`,
+		// which removes the imported name and re-adds it under X — so the
+		// deletion must be attributed to us across that pair. Re-reads config
+		// under the lock because the PATHS it deletes come from the entry
+		// (`source_path` / `canonical_path`), and a stale entry points at whatever
+		// another process has since put there.
+		let _mutation_guard =
+			self.guard_and_reload("remove skill", self.scope)?;
 
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
@@ -440,11 +472,17 @@ impl ConfigManager {
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})?;
-		let index = config
-			.skills
-			.iter()
-			.position(|s| s.name == name)
-			.ok_or_else(|| ConfigError::resource_not_found("skill", name))?;
+		let Some(index) = config.skills.iter().position(|s| s.name == name)
+		else {
+			// Absent under the lock. Skills live on disk (a Master plus symlinks),
+			// never in an agent's JSON, so there is nothing left to write out —
+			// the same already-gone tolerance the path removal below applies.
+			return if was_in_callers_view {
+				Ok(())
+			} else {
+				Err(ConfigError::resource_not_found("skill", name))
+			};
+		};
 		let existing_skill = config.skills[index].clone();
 
 		let config = self.config_mut()?;
@@ -507,24 +545,14 @@ impl ConfigManager {
 		// on a view another process has already invalidated (it links a new
 		// Referrer to that Master, or replaces the same-name skill, and we delete
 		// its work anyway). A dry-run mutates nothing and deliberately takes none.
+		// `guard_and_reload` because the target is chosen from `self.config`, which
+		// the caller loaded before this method — see it for why the two are one
+		// step.
 		let _mutation_guard = if dry_run {
 			None
 		} else {
-			Some(
-				crate::skills::lock::mutation_guard(
-					"remove skill",
-					self.scope,
-					self.project_root.as_deref(),
-				)
-				.map_err(ConfigError::Io)?,
-			)
+			Some(self.guard_and_reload("remove skill", self.scope)?)
 		};
-		// Re-read from disk UNDER the lock: `self.config` was populated by a
-		// `load()` the caller made before this method, so the guard alone would
-		// still leave the target chosen from a stale view.
-		if !dry_run {
-			self.load()?;
-		}
 
 		let skill = self.skill_for_planned_removal(name, all_agents)?;
 
@@ -699,13 +727,10 @@ impl ConfigManager {
 		let project_root = self.project_root.clone();
 		let agent_type = self.agent_type();
 
-		// Same span as `add_skill_universal`: duplicate check → Master → link.
-		let _mutation_guard = crate::skills::lock::mutation_guard(
-			"add skill from path",
-			scope,
-			project_root.as_deref(),
-		)
-		.map_err(ConfigError::Io)?;
+		// Same span as `add_skill_universal`: duplicate check → Master → link,
+		// with config re-read under the lock.
+		let _mutation_guard =
+			self.guard_and_reload("add skill from path", scope)?;
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {

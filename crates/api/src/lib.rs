@@ -10,6 +10,7 @@ use rocket::{
 	Data, Request, Response,
 };
 
+pub mod blocking;
 pub mod cli;
 pub(crate) mod credentials;
 pub mod dto;

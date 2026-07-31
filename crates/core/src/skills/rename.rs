@@ -132,6 +132,16 @@ impl RenameError {
 			RenameError::SameSanitizedName | RenameError::TargetExists(_) => {
 				Some(RENAME_TARGET_EXISTS_CODE)
 			}
+			// Both are retryable and neither mutated anything — a surface that
+			// cannot tell them from a permanent failure makes the caller give up
+			// on a transient condition. Rename is the most destructive flow here,
+			// so "retry" vs "do not retry" matters most.
+			RenameError::Locked(_) => {
+				Some(crate::skills::lock::MUTATION_LOCK_BUSY_CODE)
+			}
+			RenameError::StaleFetch(_) => {
+				Some(crate::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE)
+			}
 			_ => None,
 		}
 	}
@@ -201,16 +211,12 @@ pub fn rename_source_from_lock(
 					"Locked skill has no skillPath".to_string(),
 				)
 			})?;
-			let captured = crate::skills::lock::EntryIdentity::capture(
-				old_name,
-				ResourceScope::GlobalOnly,
-				None,
-			)
-			.ok_or_else(|| {
-				RenameError::NotLocked(
-					"Skill is not in global lock".to_string(),
-				)
-			})?;
+			// From THIS read, not a second one: the coordinates below and the
+			// identity must describe the same observation, or another process's
+			// repoint between two reads would be fetched under one set and
+			// compare-verified against the other.
+			let captured =
+				crate::skills::lock::EntryIdentity::of_global_entry(entry);
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
@@ -232,16 +238,9 @@ pub fn rename_source_from_lock(
 					"Locked skill has no skillPath".to_string(),
 				)
 			})?;
-			let captured = crate::skills::lock::EntryIdentity::capture(
-				old_name,
-				ResourceScope::ProjectOnly,
-				Some(root),
-			)
-			.ok_or_else(|| {
-				RenameError::NotLocked(
-					"Skill is not in project lock".to_string(),
-				)
-			})?;
+			// Same read as the coordinates below — see the Global arm.
+			let captured =
+				crate::skills::lock::EntryIdentity::of_project_entry(entry);
 			Ok(RenameLockSource {
 				source: entry.source.clone(),
 				source_type: entry.source_type.clone(),
@@ -904,9 +903,12 @@ fn rollback_rename_install(
 mod tests {
 	use super::*;
 
-	/// EXACTLY the two target-exists variants carry the machine code; every
-	/// other variant must return `None` (checked exhaustively so adding the code
-	/// to the wrong variant fails this test).
+	/// Exactly which variants carry a machine code, and WHICH code — checked
+	/// exhaustively, so attaching one to the wrong variant fails here.
+	///
+	/// The two RETRYABLE variants (`Locked`, `StaleFetch`) must be distinguishable
+	/// from a permanent failure or a surface tells the user to give up on a
+	/// transient condition; every other variant is permanent and carries none.
 	#[test]
 	fn only_target_exists_variants_carry_the_machine_code() {
 		let s = || "x".to_string();
@@ -929,18 +931,18 @@ mod tests {
 			RenameError::LockRemovalFailed(s()),
 		];
 		for e in &all {
-			let expected = matches!(
-				e,
-				RenameError::SameSanitizedName | RenameError::TargetExists(_)
-			);
-			assert_eq!(
-				e.code().is_some(),
-				expected,
-				"unexpected code() for {e:?}"
-			);
-			if let Some(code) = e.code() {
-				assert_eq!(code, RENAME_TARGET_EXISTS_CODE);
-			}
+			let expected = match e {
+				RenameError::SameSanitizedName
+				| RenameError::TargetExists(_) => Some(RENAME_TARGET_EXISTS_CODE),
+				RenameError::Locked(_) => {
+					Some(crate::skills::lock::MUTATION_LOCK_BUSY_CODE)
+				}
+				RenameError::StaleFetch(_) => {
+					Some(crate::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE)
+				}
+				_ => None,
+			};
+			assert_eq!(e.code(), expected, "unexpected code() for {e:?}");
 		}
 	}
 

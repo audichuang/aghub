@@ -542,6 +542,19 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let selection = AgentSelection::parse(args.agent)
 		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
+	// Snapshot every in-scope lock entry's identity FIRST, before the resolution
+	// below reads those same entries to decide what to fetch. Captured (never
+	// reconstructed) because a project entry's `sourceUrl` is optional — an
+	// npx-written one has none, and its effective source is the `owner/repo`
+	// shorthand, so comparing a rebuilt HTTPS URL would falsely reject it.
+	//
+	// Ordered before the resolution on purpose: if another process repoints an
+	// entry between the two reads, the identity is the OLDER observation, so the
+	// compare-after-fetch refuses rather than approving a fetch that used the
+	// newer coordinates. The reverse order approves exactly that mismatch.
+	let pre_fetch_identities =
+		capture_scope_identities(scope, project_root.as_deref());
+
 	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
 	// helper (the SAME resolution the API runs) BEFORE the single fetch, so sync
 	// fetches/installs from the recorded ref — not the default branch — and
@@ -563,15 +576,6 @@ fn sync(args: SyncArgs) -> Result<()> {
 	}
 
 	// Fetch ONCE; reuse the repo for classification AND every install/update.
-	// Snapshot every in-scope lock entry's identity BEFORE the fetch below, so an
-	// update can prove under the mutation lock that it is still writing to the
-	// coordinates it started from. Captured (never reconstructed) because a
-	// project entry's `sourceUrl` is optional — an npx-written one has none, and
-	// its effective source is the `owner/repo` shorthand, so comparing a rebuilt
-	// HTTPS URL would falsely reject it.
-	let pre_fetch_identities =
-		capture_scope_identities(scope, project_root.as_deref());
-
 	// Fetch + classify happen BEFORE the flag branch so the neither-flag
 	// informational path can print the same plan without a second fetch.
 	// CatalogSnapshot: classify needs the whole tree (renames/removals).

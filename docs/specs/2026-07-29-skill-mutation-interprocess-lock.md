@@ -53,15 +53,24 @@ in `rename.rs`; do not re-report it as done.
 A fetch is a network operation and must NOT run under the lock, so the read that
 decides what to fetch is necessarily unlocked. That makes it the widest window in
 the subsystem — seconds, where everything else the lock covers is a local
-filesystem step. `skills::lock::FetchedFrom::ensure_unchanged` closes it: the
-coordinates a flow fetched from are carried through the fetch and re-verified
-under the guard, immediately before mutating. `resync_installed_skill` requires
-them (`ResyncRequest::expected`) and `accept_rename` checks them; both refuse with
-a dedicated `StaleFetch` error and mutate nothing.
+filesystem step. `skills::lock::EntryIdentity` closes it: the entry's identity is
+captured before the fetch and re-verified under the guard, immediately before
+mutating. `resync_installed_skill` requires it (`ResyncRequest::expected`) and
+`accept_rename` checks it; both refuse with a dedicated `StaleFetch` error and
+mutate nothing.
 
-Compared fields are the source and `skillPath` — whose skill this is and where in
-the repo it lives. NOT `ref_name`: an adapter may legitimately override the ref
-for the operation, so comparing it would reject valid work.
+All three coordinates are compared — source, `skillPath` AND `ref_name`. An
+adapter overriding a coordinate for the operation (a `--ref`, or a rename
+resolving a moved path) is not a conflict with this, because the captured value is
+by construction the PRE-fetch one: the snapshot is the expectation, whatever the
+flow writes is the intent, and the two are separate values.
+
+The identity must come from the SAME lock read that produced the coordinates being
+fetched — `EntryIdentity::of_global_entry` / `of_project_entry` when the caller
+holds the entry, `capture` only when it does not. Two separate reads can straddle
+another process's repoint: the first yields the coordinates that get fetched, the
+second an identity matching the live entry, so the comparison passes while the
+bytes came from the other coordinates.
 
 ### Known remaining holes
 
@@ -73,10 +82,17 @@ for the operation, so comparing it would reject valid work.
 - **API auto-heal** (`routes/skills_update.rs`) applies hashes computed by an
   earlier unlocked check to whatever same-named entry exists at write time. Same
   class as compare-after-fetch and fixable the same way.
-- **Lexical `..` below a non-existent path.** `resolve_existing` canonicalizes the
-  longest existing ancestor, so identity is stable across the directory being
-  created; two lexically different spellings of a path that does not exist yet can
-  still fork. No flow constructs one.
+- **Lexical `..` below a non-existent path.** `resolve_existing` absolutizes, then
+  canonicalizes the longest existing PREFIX (so the filesystem resolves `..` and
+  symlinks), and only the un-resolvable tail is treated lexically — exact, since a
+  component that does not exist cannot be a symlink. What remains: two spellings
+  that differ _inside_ a tail neither of which exists can still fork. No flow
+  constructs one.
+- **API worker starvation (closed).** Acquiring the lock blocks the calling
+  thread, so a Rocket handler doing it on an async worker could park every worker
+  and stop even unlocked read routes. Every mutating skill route now runs its
+  transaction through `api::blocking::in_mutation_pool`. A new mutating route that
+  forgets it reintroduces the stall — there is no compile-time guard for this.
 
 ## Problem
 

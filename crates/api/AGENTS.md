@@ -100,4 +100,12 @@ line). Pass `--port N` to pin one.
 ## ANTI-PATTERNS
 
 - NEVER widen CORS or add new mutating routes without considering the no-auth posture above
+- **NEVER take the skill mutation lock (or call a `core` flow that does) directly in
+  a handler body** — wrap that transaction in `blocking::in_mutation_pool`.
+  Acquiring blocks the thread for up to 10s, and Rocket's worker count is the CPU
+  count, so enough contended mutations park every worker and the server stops
+  answering **everything**, unlocked read routes included (measured: 25 concurrent
+  deletes against a held lock took `GET /agents` from 0.00s to a 30s timeout).
+  There is no compile-time guard; the awaits (git fetch, plugin detection) stay
+  OUTSIDE the closure, which is also where they belong relative to the lock.
 - (path/ConfigManager rules: see root AGENTS.md Anti-Patterns — errors here use machine codes + safe messages)

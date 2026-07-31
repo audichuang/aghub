@@ -6,6 +6,22 @@
 use crate::models::ResourceScope;
 use std::path::Path;
 
+/// Wire code for mutation-lock contention: another aghub process held the lock,
+/// nothing was written, and the SAME request will succeed once it finishes. The
+/// one thing a surface must convey is that it is retryable — a generic failure
+/// code makes callers give up on a transient condition.
+///
+/// Defined here so every surface that can hit contention (manager mutations via
+/// `ConfigError::Io`, resync, rename) projects it identically instead of each
+/// spelling the string itself.
+pub const MUTATION_LOCK_BUSY_CODE: &str = "SKILL_MUTATION_LOCK_BUSY";
+
+/// Wire code for [`EntryIdentity`] refusing: the lock entry no longer matches the
+/// one this operation fetched, so nothing was written. Also retryable, but only
+/// after the caller re-reads — the coordinates themselves moved.
+pub const SOURCE_CHANGED_DURING_FETCH_CODE: &str =
+	"SKILL_SOURCE_CHANGED_DURING_FETCH";
+
 /// Take the interprocess skill mutation lock for `scope`, to be held across a
 /// whole transaction (check → write → rollback) rather than one lock write.
 ///
@@ -45,7 +61,10 @@ pub fn mutation_guard(
 /// subsystem (seconds, not microseconds) — everything else the lock covers is a
 /// local filesystem step.
 ///
-/// **Always produce one with [`EntryIdentity::capture`], never by hand.** Every
+/// **Only an entry aghub actually read can produce one** — via
+/// [`of_global_entry`](Self::of_global_entry) /
+/// [`of_project_entry`](Self::of_project_entry) when the caller already holds the
+/// entry, or [`capture`](Self::capture) when it does not. Never by hand: every
 /// field then holds the entry's own pre-fetch value verbatim, which is what makes
 /// the comparison meaningful and removes two traps:
 ///
@@ -58,6 +77,12 @@ pub fn mutation_guard(
 ///   rename resolving a moved `skillPath`) must still compare the value that was
 ///   there BEFORE. Capturing separates the two by construction: the snapshot is
 ///   the expectation, and whatever the flow writes is the intent.
+///
+/// A caller that reads the entry to decide WHAT to fetch must build the identity
+/// from THAT read — `of_*_entry` — not from a second [`Self::capture`]. Two reads can
+/// straddle another process's repoint: the first yields the coordinates that get
+/// fetched, the second an identity that matches the live entry, so the
+/// compare-after-fetch passes while the bytes came from the OTHER coordinates.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EntryIdentity {
 	/// Effective source: the global entry's `source_url`, or the project entry's
@@ -68,9 +93,36 @@ pub struct EntryIdentity {
 }
 
 impl EntryIdentity {
-	/// Snapshot the entry's identity as it stands NOW. Call before fetching.
-	/// `None` means there is no such entry, which is itself a decision the caller
-	/// must make explicitly (it has no mandate to overwrite a skill it never saw).
+	/// The identity of a GLOBAL entry the caller already holds, so it comes from
+	/// the SAME read that produced the coordinates being fetched. Prefer this over
+	/// [`capture`](Self::capture) whenever the entry is in hand — see the type
+	/// docs for the two-read interleaving it rules out.
+	pub fn of_global_entry(entry: &skill::SkillLockEntry) -> Self {
+		Self {
+			source: entry.source_url.clone(),
+			skill_path: entry.skill_path.clone(),
+			ref_name: entry.ref_name.clone(),
+		}
+	}
+
+	/// [`of_global_entry`](Self::of_global_entry) for a PROJECT entry, whose
+	/// `sourceUrl` is optional (npx writes none) so the effective source falls
+	/// back to `source`.
+	pub fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
+		Self {
+			source: entry
+				.source_url
+				.clone()
+				.unwrap_or_else(|| entry.source.clone()),
+			skill_path: entry.skill_path.clone(),
+			ref_name: entry.ref_name.clone(),
+		}
+	}
+
+	/// Snapshot the entry's identity as it stands NOW, for a caller that does NOT
+	/// already hold the entry. `None` means there is no such entry, which is
+	/// itself a decision the caller must make explicitly (it has no mandate to
+	/// overwrite a skill it never saw).
 	pub fn capture(
 		name: &str,
 		scope: ResourceScope,
@@ -80,23 +132,12 @@ impl EntryIdentity {
 			ResourceScope::GlobalOnly => skill::lock::global::read_skill_lock()
 				.skills
 				.get(name)
-				.map(|e| Self {
-					source: e.source_url.clone(),
-					skill_path: e.skill_path.clone(),
-					ref_name: e.ref_name.clone(),
-				}),
+				.map(Self::of_global_entry),
 			ResourceScope::ProjectOnly => project_root.and_then(|root| {
 				skill::lock::local::read_local_lock(Some(root))
 					.skills
 					.get(name)
-					.map(|e| Self {
-						source: e
-							.source_url
-							.clone()
-							.unwrap_or_else(|| e.source.clone()),
-						skill_path: e.skill_path.clone(),
-						ref_name: e.ref_name.clone(),
-					})
+					.map(Self::of_project_entry)
 			}),
 			ResourceScope::Both => None,
 		}

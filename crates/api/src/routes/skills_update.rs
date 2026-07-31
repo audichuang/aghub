@@ -406,95 +406,106 @@ pub(crate) async fn apply_skill_update_inner(
 		)));
 	}
 
-	match resync_locked_skill(
-		LockedResyncRequest {
-			name: &req.name,
-			scope: resource_scope,
-			project_root: project_root.as_deref(),
-		},
-		fetcher,
-		resolver,
-	) {
-		Ok(report) => Ok(Json(ApplySkillUpdateResponse {
-			success: true,
-			name: req.name,
-			scope: req.scope,
-			updated_hash: Some(report.updated_hash),
-			paths: report
-				.swapped
-				.iter()
-				.map(|p| p.display().to_string())
-				.collect(),
-			error: None,
-			code: None,
-		})),
-		Err(LockedResyncError::LockEntryNotFound { scope }) => {
-			let message = if scope == ResourceScope::GlobalOnly {
-				"Skill is not in global lock"
-			} else {
-				"Skill is not in project lock"
-			};
-			Ok(Json(apply_error(&req.name, &req.scope, message)))
-		}
-		Err(LockedResyncError::MissingSkillPath) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"Locked skill has no skillPath",
-		))),
-		Err(LockedResyncError::NotInstalled) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"Skill is locked but no installed copy was found",
-		))),
-		Err(LockedResyncError::CredentialBackendUnavailable) => {
-			Err(crate::credentials::CredentialStoreError::Unavailable(
-				"credential backend unreachable".to_string(),
-			)
-			.into())
-		}
-		Err(LockedResyncError::InvalidSkillPath) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"Locked skillPath is not a valid skill folder",
-		))),
-		Err(LockedResyncError::SourceSkillNotFound) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"Locked skillPath was not found in fetched source",
-		))),
-		Err(LockedResyncError::Fetch(error)) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			fetch_error_text(error),
-		))),
-		Err(LockedResyncError::Resync(
-			aghub_core::skills::resync::ResyncError::Renamed { new_name },
-		)) => Ok(Json(apply_error_with_code(
-			&req.name,
-			&req.scope,
-			&skill_renamed_message(&req.name, &new_name),
-			Some(SKILL_RENAMED_CODE),
-		))),
-		Err(LockedResyncError::Resync(error)) => {
-			let mapped = safe_resync_error(&error);
-			Ok(Json(apply_error_with_code(
+	// `resync_locked_skill` is synchronous but does BOTH the network fetch and the
+	// lock-holding transaction, so it must not run on an async worker.
+	crate::blocking::in_mutation_pool(|| {
+		match resync_locked_skill(
+			LockedResyncRequest {
+				name: &req.name,
+				scope: resource_scope,
+				project_root: project_root.as_deref(),
+			},
+			fetcher,
+			resolver,
+		) {
+			Ok(report) => Ok(Json(ApplySkillUpdateResponse {
+				success: true,
+				name: req.name,
+				scope: req.scope,
+				updated_hash: Some(report.updated_hash),
+				paths: report
+					.swapped
+					.iter()
+					.map(|p| p.display().to_string())
+					.collect(),
+				error: None,
+				code: None,
+			})),
+			Err(LockedResyncError::LockEntryNotFound { scope }) => {
+				let message = if scope == ResourceScope::GlobalOnly {
+					"Skill is not in global lock"
+				} else {
+					"Skill is not in project lock"
+				};
+				Ok(Json(apply_error(&req.name, &req.scope, message)))
+			}
+			Err(LockedResyncError::MissingSkillPath) => Ok(Json(apply_error(
 				&req.name,
 				&req.scope,
-				mapped.message,
-				Some(mapped.code),
-			)))
+				"Locked skill has no skillPath",
+			))),
+			Err(LockedResyncError::NotInstalled) => Ok(Json(apply_error(
+				&req.name,
+				&req.scope,
+				"Skill is locked but no installed copy was found",
+			))),
+			Err(LockedResyncError::CredentialBackendUnavailable) => {
+				Err(crate::credentials::CredentialStoreError::Unavailable(
+					"credential backend unreachable".to_string(),
+				)
+				.into())
+			}
+			Err(LockedResyncError::InvalidSkillPath) => Ok(Json(apply_error(
+				&req.name,
+				&req.scope,
+				"Locked skillPath is not a valid skill folder",
+			))),
+			Err(LockedResyncError::SourceSkillNotFound) => {
+				Ok(Json(apply_error(
+					&req.name,
+					&req.scope,
+					"Locked skillPath was not found in fetched source",
+				)))
+			}
+			Err(LockedResyncError::Fetch(error)) => Ok(Json(apply_error(
+				&req.name,
+				&req.scope,
+				fetch_error_text(error),
+			))),
+			Err(LockedResyncError::Resync(
+				aghub_core::skills::resync::ResyncError::Renamed { new_name },
+			)) => Ok(Json(apply_error_with_code(
+				&req.name,
+				&req.scope,
+				&skill_renamed_message(&req.name, &new_name),
+				Some(SKILL_RENAMED_CODE),
+			))),
+			Err(LockedResyncError::Resync(error)) => {
+				let mapped = safe_resync_error(&error);
+				Ok(Json(apply_error_with_code(
+					&req.name,
+					&req.scope,
+					mapped.message,
+					Some(mapped.code),
+				)))
+			}
+			Err(LockedResyncError::ProjectRootRequired) => {
+				Ok(Json(apply_error(
+					&req.name,
+					&req.scope,
+					"project_root is required when scope is project",
+				)))
+			}
+			Err(LockedResyncError::UnsupportedScope(_)) => {
+				Ok(Json(apply_error(
+					&req.name,
+					&req.scope,
+					"scope must be global or project",
+				)))
+			}
 		}
-		Err(LockedResyncError::ProjectRootRequired) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"project_root is required when scope is project",
-		))),
-		Err(LockedResyncError::UnsupportedScope(_)) => Ok(Json(apply_error(
-			&req.name,
-			&req.scope,
-			"scope must be global or project",
-		))),
-	}
+	})
+	.await
 }
 
 fn accept_rename_error(
@@ -654,34 +665,39 @@ pub(crate) async fn accept_rename_inner(
 		}
 	};
 
-	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core.
-	match accept_fetched_rename(
-		&prepared.fetched,
-		RenameRequest {
-			old_name: &req.old_name,
-			new_name: &req.new_name,
-			scope,
-		},
-		&prepared.source,
-	) {
-		Ok(ok) => Ok(Json(AcceptRenameResponse {
-			success: true,
-			old_name: req.old_name,
-			new_name: req.new_name,
-			scope: req.scope,
-			installed_hash: Some(ok.installed_hash),
-			paths: ok.paths,
-			error: None,
-			code: None,
-		})),
-		Err(e) => Ok(Json(accept_rename_error_with_code(
-			&req.old_name,
-			&req.new_name,
-			&req.scope,
-			&e.message(),
-			e.code(),
-		))),
-	}
+	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core. The whole
+	// transaction holds the mutation lock and is synchronous — off the async
+	// worker; the fetch above already happened.
+	crate::blocking::in_mutation_pool(|| {
+		match accept_fetched_rename(
+			&prepared.fetched,
+			RenameRequest {
+				old_name: &req.old_name,
+				new_name: &req.new_name,
+				scope,
+			},
+			&prepared.source,
+		) {
+			Ok(ok) => Ok(Json(AcceptRenameResponse {
+				success: true,
+				old_name: req.old_name,
+				new_name: req.new_name,
+				scope: req.scope,
+				installed_hash: Some(ok.installed_hash),
+				paths: ok.paths,
+				error: None,
+				code: None,
+			})),
+			Err(e) => Ok(Json(accept_rename_error_with_code(
+				&req.old_name,
+				&req.new_name,
+				&req.scope,
+				&e.message(),
+				e.code(),
+			))),
+		}
+	})
+	.await
 }
 
 #[cfg(test)]

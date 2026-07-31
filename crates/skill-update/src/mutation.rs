@@ -303,18 +303,27 @@ pub fn resync_locked_skill(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
-	let (source, ref_name, skill_path) = match request.scope {
+	// The identity comes from the SAME read as the coordinates, so the fetch and
+	// the compare-after-fetch can never describe different observations: a second
+	// read could straddle another process's repoint, fetch the old coordinates and
+	// then verify successfully against the new ones.
+	let (source, ref_name, skill_path, expected) = match request.scope {
 		ResourceScope::GlobalOnly => {
 			let entry = skill::lock::global::get_skill_from_lock(request.name)
 				.ok_or(LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::GlobalOnly,
 				})?;
+			let expected =
+				aghub_core::skills::lock::EntryIdentity::of_global_entry(
+					&entry,
+				);
 			(
 				entry.source_url,
 				entry.ref_name,
 				entry
 					.skill_path
 					.ok_or(LockedResyncError::MissingSkillPath)?,
+				expected,
 			)
 		}
 		ResourceScope::ProjectOnly => {
@@ -327,12 +336,17 @@ pub fn resync_locked_skill(
 					scope: ResourceScope::ProjectOnly,
 				},
 			)?;
+			let expected =
+				aghub_core::skills::lock::EntryIdentity::of_project_entry(
+					&entry,
+				);
 			(
 				entry.source_url.unwrap_or(entry.source),
 				entry.ref_name,
 				entry
 					.skill_path
 					.ok_or(LockedResyncError::MissingSkillPath)?,
+				expected,
 			)
 		}
 		ResourceScope::Both => {
@@ -351,18 +365,6 @@ pub fn resync_locked_skill(
 	{
 		return Err(LockedResyncError::NotInstalled);
 	}
-
-	// Snapshot the entry's identity HERE, before the fetch below, so the
-	// transaction can prove under the mutation lock that it is still updating the
-	// same coordinates. The entry was just read above, so this cannot be absent.
-	let expected = aghub_core::skills::lock::EntryIdentity::capture(
-		request.name,
-		request.scope,
-		request.project_root,
-	)
-	.ok_or(LockedResyncError::LockEntryNotFound {
-		scope: request.scope,
-	})?;
 
 	let fetched = fetch_for_mutation(
 		FetchedSourceRequest {

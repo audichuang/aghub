@@ -122,27 +122,69 @@ impl MutationScope {
 	}
 }
 
-/// Canonicalize as much of `path` as exists and keep the rest verbatim.
+/// Canonicalize as much of `path` as exists and resolve the rest lexically.
 ///
 /// Plain `canonicalize` needs EVERY component to exist, and a project root that
 /// does not exist yet is reachable — the API accepts an absolute root it has
 /// never seen, and acquiring the lock then CREATES `<root>/.agents`. With plain
 /// canonicalize that root would key one way before the create and another way
 /// after, so a nested acquire would miss `HELD` and contend with its own handle
-/// until the timeout. Resolving the longest existing ancestor keeps one identity
+/// until the timeout. Resolving the longest existing PREFIX keeps one identity
 /// across the create.
 ///
-/// `..` below that ancestor cannot be resolved lexically without inventing a
-/// meaning for it, and the API DOES accept a caller-supplied root, so those
-/// components are dropped with their preceding segment instead of being left to
-/// fork the identity. Not a security boundary — every mutating flow has its own
-/// containment guards — just one identity per path.
+/// The order matters, and getting it wrong forks the identity — which defeats the
+/// exclusion entirely, because two spellings of one project then take two
+/// different locks:
+///
+/// - **Absolutize before anything else.** A relative root is resolved against the
+///   process cwd, so `..` in it only means something once the cwd is prepended.
+///   Normalizing `../target` lexically first yields `target` — a DIFFERENT
+///   directory (a sibling of the cwd vs a child of it), while
+///   `get_local_lock_path` still resolves the original spelling. One caller would
+///   lock `<cwd>/target` while mutating `<cwd>/../target`.
+/// - **Try the longest prefix first, so the filesystem resolves `..`.** `..` after
+///   a symlink is the parent of the link's TARGET; no lexical pass can know that.
+///   `<p>/link/..` and the target's real parent are the same directory and must
+///   share one lock file.
+///
+/// Only the tail that cannot be resolved gets lexical treatment, and that is
+/// exact: a path component that does not exist cannot be a symlink. Not a
+/// security boundary — every mutating flow has its own containment guards — just
+/// one identity per directory.
 fn resolve_existing(path: &Path) -> PathBuf {
-	// Lexical pass FIRST, so `..` is gone before the ancestor walk: `file_name()`
-	// returns None for a path ending in `..`, which would otherwise abandon the
-	// walk and hand back the raw spelling.
+	let absolute =
+		std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+	let components: Vec<std::path::Component<'_>> =
+		absolute.components().collect();
+
+	// Longest existing prefix wins. Walking down from the full path (rather than
+	// up from the root) also means an already-existing root costs ONE
+	// `canonicalize`. `components()` is used instead of `parent()`/`file_name()`
+	// because `file_name()` is None for a path ending in `..`, which would
+	// abandon the walk.
+	for split in (0..=components.len()).rev() {
+		let prefix: PathBuf = components[..split].iter().collect();
+		let Ok(resolved) = std::fs::canonicalize(&prefix) else {
+			continue;
+		};
+		let mut out = resolved;
+		for component in &components[split..] {
+			match component {
+				std::path::Component::ParentDir => {
+					out.pop();
+				}
+				std::path::Component::CurDir => {}
+				other => out.push(other.as_os_str()),
+			}
+		}
+		return out;
+	}
+
+	// Nothing resolvable at all (an unreadable cwd left `path` relative, or the
+	// root itself cannot be stat'd). Fall back to a purely lexical form so one
+	// spelling still maps to one key.
 	let mut lexical = PathBuf::new();
-	for component in path.components() {
+	for component in &components {
 		match component {
 			std::path::Component::ParentDir => {
 				lexical.pop();
@@ -151,25 +193,7 @@ fn resolve_existing(path: &Path) -> PathBuf {
 			other => lexical.push(other.as_os_str()),
 		}
 	}
-
-	let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-	let mut cursor = lexical.as_path();
-	loop {
-		if let Ok(resolved) = std::fs::canonicalize(cursor) {
-			let mut out = resolved;
-			out.extend(suffix.iter().rev());
-			return out;
-		}
-		match (cursor.parent(), cursor.file_name()) {
-			(Some(parent), Some(name)) => {
-				suffix.push(name.to_os_string());
-				cursor = parent;
-			}
-			// Nothing left to strip (relative path, or a root that cannot be
-			// resolved at all): use the lexically normalized form.
-			_ => return lexical,
-		}
-	}
+	lexical
 }
 
 /// Serializes mutations between THREADS of this process, replacing the two
@@ -184,7 +208,7 @@ fn resolve_existing(path: &Path) -> PathBuf {
 /// process, an unrelated mutation on thread B queues too (up to A's bound). That
 /// needs a real external holder to bite, and the spec's own non-goal is "making
 /// concurrent aghub mutations fast". Upgrade path if it ever bites: a registry of
-/// per-lock-path mutexes, acquired in [`MutationScope::order_key`] order.
+/// per-lock-path mutexes, acquired in `MutationScope::order_rank` order.
 static PROCESS_LOCK: Mutex<()> = Mutex::new(());
 
 thread_local! {
@@ -214,11 +238,11 @@ thread_local! {
 /// be dropped in any order: an early `drop()` of an outer guard cannot free a
 /// lock a nested guard still relies on.
 ///
-/// Deliberately **not `Send`**: every piece of bookkeeping behind it
-/// ([`HELD`], [`DEPTH`], [`PROCESS_GUARD`]) is thread-local, so dropping a guard
-/// on a thread other than the one that took it would release nothing, leave the
-/// open handle in the acquiring thread's [`HELD`] forever, and drop the wrong
-/// thread's depth to zero — wedging [`PROCESS_LOCK`] for the rest of the
+/// Deliberately **not `Send`**: every piece of bookkeeping behind it (`HELD`,
+/// `DEPTH`, `PROCESS_GUARD` — all module-private) is thread-local, so dropping a
+/// guard on a thread other than the one that took it would release nothing, leave
+/// the open handle in the acquiring thread's held-set forever, and drop the wrong
+/// thread's depth to zero — wedging the process mutex for the rest of the
 /// process. The `PhantomData` makes that a compile error:
 ///
 /// ```compile_fail
@@ -234,7 +258,8 @@ pub struct MutationGuard {
 }
 
 /// Acquire the mutation lock for every scope in `scopes` (order-independent —
-/// they are sorted internally), waiting up to [`DEFAULT_TIMEOUT`].
+/// they are sorted internally), waiting up to 10s for other PROCESSES (see
+/// [`mutation_guard_with_timeout`] for the exact contract).
 ///
 /// `op` names the operation for the timeout error. Reentrant: acquiring a scope
 /// this thread already holds is free, so a flow-level guard and the lock
@@ -254,9 +279,14 @@ pub fn mutation_guard(
 /// two-scope acquire cannot quietly take twice as long. Queueing behind another
 /// thread of THIS process happens first and is deliberately unbounded; the
 /// deadline starts after it, so a thread that queued for a while still gets its
-/// full bound. See [`lock_process`] for why the two waits are treated
-/// differently. A local filesystem operation that hangs while holding the lock
-/// can therefore still stall this process — availability, not corruption.
+/// full bound. `lock_process` (module-private) documents why the two waits are
+/// treated differently. A local filesystem operation that hangs while holding the
+/// lock can therefore still stall this process — availability, not corruption.
+///
+/// Both waits BLOCK the calling thread. An async caller must not call this on an
+/// executor thread: an aghub process holding the lock would then park a worker for
+/// up to the bound. `aghub-api` runs every mutation through
+/// `crate::blocking::in_mutation_pool` for exactly that reason.
 pub fn mutation_guard_with_timeout(
 	op: &str,
 	scopes: &[MutationScope],
@@ -534,6 +564,44 @@ mod tests {
 				"a symlinked root must not fork the lock"
 			);
 		}
+	}
+
+	/// A RELATIVE root must be resolved against the cwd, not normalized lexically
+	/// first. Normalizing first turns `../x` into `x` — a sibling of the cwd
+	/// becomes a child of it, so the guard locks a different directory than
+	/// `get_local_lock_path` writes to and the exclusion protects nothing.
+	#[test]
+	fn a_relative_root_resolves_through_the_cwd() {
+		let cwd = std::fs::canonicalize(".").unwrap();
+		assert_eq!(
+			resolve_existing(Path::new("..")),
+			cwd.parent().unwrap(),
+			"`..` must mean the cwd's parent"
+		);
+		assert_eq!(
+			resolve_existing(Path::new(".")),
+			cwd,
+			"`.` must mean the cwd itself"
+		);
+	}
+
+	/// `..` after a SYMLINK belongs to the link's target, and only the filesystem
+	/// knows that. Two spellings of one directory must key the same, or two
+	/// callers mutating it take two different locks.
+	#[cfg(unix)]
+	#[test]
+	fn a_parent_hop_after_a_symlink_follows_the_link() {
+		let tmp = tempfile::tempdir().unwrap();
+		let real = tmp.path().join("real");
+		std::fs::create_dir_all(real.join("inner")).unwrap();
+		let link = tmp.path().join("link");
+		std::os::unix::fs::symlink(real.join("inner"), &link).unwrap();
+
+		assert_eq!(
+			resolve_existing(&link.join("..")),
+			std::fs::canonicalize(&real).unwrap(),
+			"`link/..` is the parent of the link's TARGET, not of the link"
+		);
 	}
 
 	/// Fixed order, so taking both scopes cannot deadlock against a caller that

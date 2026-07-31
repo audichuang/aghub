@@ -118,6 +118,22 @@ impl From<ConfigError> for ApiError {
 				e.to_string(),
 				"JSON_PARSE_ERROR",
 			),
+			// Skill mutation-lock contention arrives as `Io(WouldBlock)` — see
+			// `skill::lock::guard`, which is the only producer of that kind here.
+			// It is a RETRYABLE conflict, not a server fault: 500 `IO_ERROR` tells
+			// the desktop nothing is worth retrying, when in fact another aghub
+			// process simply held the lock. `lock_unavailable` (a state dir that
+			// cannot hold a lock at all) stays a 500 on purpose — retrying that
+			// does not help.
+			ConfigError::Io(e)
+				if e.kind() == std::io::ErrorKind::WouldBlock =>
+			{
+				ApiError::new(
+					Status::Conflict,
+					e.to_string(),
+					aghub_core::skills::lock::MUTATION_LOCK_BUSY_CODE,
+				)
+			}
 			ConfigError::Io(e) => ApiError::new(
 				Status::InternalServerError,
 				e.to_string(),

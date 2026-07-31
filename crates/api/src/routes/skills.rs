@@ -16,6 +16,7 @@ use std::{
 use tokio::time::timeout;
 
 use crate::{
+	blocking::in_mutation_pool,
 	credentials::forwarding::ForwardedGitTokens,
 	credentials::source_auth::SourceAuth,
 	dto::integrations::{
@@ -140,7 +141,7 @@ where
 }
 
 #[post("/skills/transfer", data = "<body>")]
-pub fn transfer_skill_route(
+pub async fn transfer_skill_route(
 	_origin: TrustedLocalOrigin,
 	body: Json<TransferRequest>,
 ) -> ApiResult<OperationBatchResponse> {
@@ -151,13 +152,17 @@ pub fn transfer_skill_route(
 		.iter()
 		.map(|target| target.to_core())
 		.collect::<Result<Vec<_>, _>>()?;
-	let result = transfer::transfer_skill(source, destinations)
-		.map_err(ApiError::from)?;
-	Ok(Json(result.into()))
+	// Installs into every destination, so it takes the mutation lock per target.
+	in_mutation_pool(move || {
+		let result = transfer::transfer_skill(source, destinations)
+			.map_err(ApiError::from)?;
+		Ok(Json(result.into()))
+	})
+	.await
 }
 
 #[post("/skills/reconcile", data = "<body>")]
-pub fn reconcile_skill_route(
+pub async fn reconcile_skill_route(
 	_origin: TrustedLocalOrigin,
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
@@ -194,10 +199,13 @@ pub fn reconcile_skill_route(
 		})
 		.collect::<Result<Vec<AgentType>, _>>()?;
 
-	let result = transfer::reconcile_skill(source, added, removed)
-		.map_err(ApiError::from)?;
-
-	Ok(Json(result.into()))
+	// Installs into `added` and removes from `removed`, both under the lock.
+	in_mutation_pool(move || {
+		let result = transfer::reconcile_skill(source, added, removed)
+			.map_err(ApiError::from)?;
+		Ok(Json(result.into()))
+	})
+	.await
 }
 
 #[delete("/skills/by-path", data = "<body>")]
@@ -326,155 +334,155 @@ pub async fn delete_skill_by_path(
 	// left outside are safe to leave there: the existence probe only drives an
 	// idempotent "already gone" reply, and the plugin check only decides whether to
 	// REFUSE, never what to remove. A dry-run mutates nothing and takes no lock.
-	// Acquired BEFORE the first filesystem/config read that decides WHAT gets
-	// deleted — the existence probe, the SKILL.md name parse, the manager load and
-	// the referrer sweep are all such reads, and any of them taken outside the
-	// lock is a view another aghub process can invalidate before the delete lands
-	// (it reinstalls the same name, or links a new Referrer to the Master, and we
-	// delete its work). Static request validation above stays unlocked; a dry-run
-	// mutates nothing and takes no lock.
-	let _mutation_guard = if req.confirm.unwrap_or(false) {
-		match aghub_core::skills::lock::mutation_guard(
-			"delete skill by path",
-			resource_scope,
-			project_root.as_deref(),
-		) {
-			Ok(guard) => Some(guard),
-			Err(error) => {
-				return Ok(Json(DeleteSkillByPathResponse {
-					success: false,
-					error: Some(error.to_string()),
-					..Default::default()
-				}));
-			}
-		}
-	} else {
-		None
-	};
-
-	// Containment guard (canonicalize-escape protection): the resolved dir must
-	// stay inside an allow-listed skills root, even if `skill_dir` is a symlink.
-	let agent_dirs: Vec<std::path::PathBuf> = req
-		.agents
-		.iter()
-		.filter_map(|a| a.parse::<AgentType>().ok())
-		.flat_map(|a| {
-			aghub_core::create_adapter(a)
-				.get_skills_paths(project_root.as_deref(), resource_scope)
-		})
-		.collect();
-	let roots = aghub_core::skills::removal::allowed_skill_roots(
-		&agent_dirs,
-		project_root.as_deref(),
-	);
-	if aghub_core::skills::removal::assert_contained(&skill_dir, &roots)
-		.is_none()
-	{
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some(
-				"Refusing to delete: resolved path is outside the \
-				 allow-listed skills roots"
-					.to_string(),
-			),
-			skipped: vec![skill_dir.display().to_string()],
-			..Default::default()
-		}));
-	}
-
-	let confirm = req.confirm.unwrap_or(false);
-	let dry_run = !confirm;
-	let skill_file = skill_dir.join("SKILL.md");
-	let skill_name = skill::parser::parse(&skill_file)
-		.map(|parsed| parsed.name)
-		.unwrap_or_else(|_| {
-			skill_dir
-				.file_name()
-				.and_then(|n| n.to_str())
-				.unwrap_or_default()
-				.to_string()
-		});
-	let Some(first_agent) =
-		req.agents.iter().find_map(|a| a.parse::<AgentType>().ok())
-	else {
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some("No valid agent was provided".to_string()),
-			..Default::default()
-		}));
-	};
-	let resolved = match resource_scope {
-		ResourceScope::GlobalOnly => ResolvedScope::Global,
-		ResourceScope::ProjectOnly => ResolvedScope::Project {
-			root: project_root.clone().expect("validated project root"),
-		},
-		ResourceScope::Both => {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: false,
-				error: Some("scope 'all' is not writable".to_string()),
-				..Default::default()
-			}));
-		}
-	};
-	let mut manager =
-		build_manager_from_resolved(&AgentParam(first_agent), &resolved)?;
-	if let Err(error) = manager.load() {
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some(format!("Failed to load agent skills: {error}")),
-			..Default::default()
-		}));
-	}
-	let path_is_link = aghub_core::skills::linker::Linker::is_link(&skill_dir);
-	let canonical_layout = manager
-		.get_skill(&skill_name)
-		.and_then(|skill| skill.canonical_path.as_ref())
-		.is_some()
-		|| path_is_link;
-
-	if !canonical_layout {
-		// Guard: this non-link branch bypasses `plan_removal`'s referrer
-		// sweep (`Linker::is_link` covers symlinks AND Windows junctions),
-		// so re-apply it here. If the targeted dir is a shared universal
-		// master that ANOTHER in-scope agent still symlinks into (discovered
-		// as a real dir by a direct `.agents/skills` reader, so
-		// canonical_path=None), refuse to `remove_dir_all` it — that would
-		// orphan the live symlink and lose the skill for every other agent.
-		let all_in_scope =
-			aghub_core::skills::removal::agent_skill_dirs_in_scope(
+	//
+	// Everything from here down is synchronous, so it runs on the blocking pool —
+	// acquiring the lock parks its thread, and that must not be an async worker.
+	in_mutation_pool(move || {
+		let _mutation_guard = if req.confirm.unwrap_or(false) {
+			match aghub_core::skills::lock::mutation_guard(
+				"delete skill by path",
 				resource_scope,
 				project_root.as_deref(),
-			);
-		let safe_name = skill::sanitize::sanitize_name(&skill_name);
-		if aghub_core::skills::removal::dir_has_external_referrer(
-			&skill_dir,
-			&all_in_scope,
-			&safe_name,
-		) {
+			) {
+				Ok(guard) => Some(guard),
+				// A real HTTP status, not `200 + success:false`: contention is
+				// retryable and the caller has to be able to tell that apart from a
+				// request it should fix. Same projection as every other surface.
+				Err(error) => {
+					return Err(ApiError::from(aghub_core::ConfigError::Io(
+						error,
+					)));
+				}
+			}
+		} else {
+			None
+		};
+
+		// Containment guard (canonicalize-escape protection): the resolved dir must
+		// stay inside an allow-listed skills root, even if `skill_dir` is a symlink.
+		let agent_dirs: Vec<std::path::PathBuf> = req
+			.agents
+			.iter()
+			.filter_map(|a| a.parse::<AgentType>().ok())
+			.flat_map(|a| {
+				aghub_core::create_adapter(a)
+					.get_skills_paths(project_root.as_deref(), resource_scope)
+			})
+			.collect();
+		let roots = aghub_core::skills::removal::allowed_skill_roots(
+			&agent_dirs,
+			project_root.as_deref(),
+		);
+		if aghub_core::skills::removal::assert_contained(&skill_dir, &roots)
+			.is_none()
+		{
 			return Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
+				success: false,
+				error: Some(
+					"Refusing to delete: resolved path is outside the \
+				 allow-listed skills roots"
+						.to_string(),
+				),
 				skipped: vec![skill_dir.display().to_string()],
 				..Default::default()
 			}));
 		}
-		let plan = aghub_core::skills::removal::RemovalPlan {
-			layout: aghub_core::skills::removal::Layout::Copy,
-			paths: vec![skill_dir.clone()],
-			skipped: vec![],
-			needs_confirm: false,
+
+		let confirm = req.confirm.unwrap_or(false);
+		let dry_run = !confirm;
+		let skill_file = skill_dir.join("SKILL.md");
+		let skill_name = skill::parser::parse(&skill_file)
+			.map(|parsed| parsed.name)
+			.unwrap_or_else(|_| {
+				skill_dir
+					.file_name()
+					.and_then(|n| n.to_str())
+					.unwrap_or_default()
+					.to_string()
+			});
+		let Some(first_agent) =
+			req.agents.iter().find_map(|a| a.parse::<AgentType>().ok())
+		else {
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: false,
+				error: Some("No valid agent was provided".to_string()),
+				..Default::default()
+			}));
 		};
-		if dry_run {
-			return Ok(Json(delete_response_from_outcome(
-				aghub_core::skills::removal::RemovalOutcome {
-					plan,
-					executed: false,
-					prune: aghub_core::skills::removal::PruneStatus::NotRun,
-				},
-			)));
+		let resolved = match resource_scope {
+			ResourceScope::GlobalOnly => ResolvedScope::Global,
+			ResourceScope::ProjectOnly => ResolvedScope::Project {
+				root: project_root.clone().expect("validated project root"),
+			},
+			ResourceScope::Both => {
+				return Ok(Json(DeleteSkillByPathResponse {
+					success: false,
+					error: Some("scope 'all' is not writable".to_string()),
+					..Default::default()
+				}));
+			}
+		};
+		let mut manager =
+			build_manager_from_resolved(&AgentParam(first_agent), &resolved)?;
+		if let Err(error) = manager.load() {
+			return Ok(Json(DeleteSkillByPathResponse {
+				success: false,
+				error: Some(format!("Failed to load agent skills: {error}")),
+				..Default::default()
+			}));
 		}
-		let report =
-			match aghub_core::skills::removal::execute_removal(&plan, &roots) {
+		let path_is_link =
+			aghub_core::skills::linker::Linker::is_link(&skill_dir);
+		let canonical_layout = manager
+			.get_skill(&skill_name)
+			.and_then(|skill| skill.canonical_path.as_ref())
+			.is_some()
+			|| path_is_link;
+
+		if !canonical_layout {
+			// Guard: this non-link branch bypasses `plan_removal`'s referrer
+			// sweep (`Linker::is_link` covers symlinks AND Windows junctions),
+			// so re-apply it here. If the targeted dir is a shared universal
+			// master that ANOTHER in-scope agent still symlinks into (discovered
+			// as a real dir by a direct `.agents/skills` reader, so
+			// canonical_path=None), refuse to `remove_dir_all` it — that would
+			// orphan the live symlink and lose the skill for every other agent.
+			let all_in_scope =
+				aghub_core::skills::removal::agent_skill_dirs_in_scope(
+					resource_scope,
+					project_root.as_deref(),
+				);
+			let safe_name = skill::sanitize::sanitize_name(&skill_name);
+			if aghub_core::skills::removal::dir_has_external_referrer(
+				&skill_dir,
+				&all_in_scope,
+				&safe_name,
+			) {
+				return Ok(Json(DeleteSkillByPathResponse {
+					success: true,
+					dry_run,
+					skipped: vec![skill_dir.display().to_string()],
+					..Default::default()
+				}));
+			}
+			let plan = aghub_core::skills::removal::RemovalPlan {
+				layout: aghub_core::skills::removal::Layout::Copy,
+				paths: vec![skill_dir.clone()],
+				skipped: vec![],
+				needs_confirm: false,
+			};
+			if dry_run {
+				return Ok(Json(delete_response_from_outcome(
+					aghub_core::skills::removal::RemovalOutcome {
+						plan,
+						executed: false,
+						prune: aghub_core::skills::removal::PruneStatus::NotRun,
+					},
+				)));
+			}
+			let report = match aghub_core::skills::removal::execute_removal(
+				&plan, &roots,
+			) {
 				Ok(report) => report,
 				Err(e) => {
 					return Ok(Json(DeleteSkillByPathResponse {
@@ -484,38 +492,41 @@ pub async fn delete_skill_by_path(
 					}));
 				}
 			};
-		let mut executed_plan = plan;
-		executed_plan.paths = report.removed;
-		executed_plan.skipped.extend(report.skipped);
-		executed_plan
-			.skipped
-			.extend(report.failed.into_iter().map(|(path, _)| path));
-		// Reconcile the per-scope lock against disk through the SAME core-owned
-		// seam the manager uses, and report its real PruneStatus (not NotRun) so
-		// `pruned_lock_entries`/`prune_error` truthfully reflect the cleanup.
-		let prune = aghub_core::skills::prune::prune_lock_for_scope(
-			resource_scope,
-			project_root.as_deref(),
-		);
-		return Ok(Json(delete_response_from_outcome(
-			aghub_core::skills::removal::RemovalOutcome {
-				plan: executed_plan,
-				executed: true,
-				prune,
-			},
-		)));
-	}
+			let mut executed_plan = plan;
+			executed_plan.paths = report.removed;
+			executed_plan.skipped.extend(report.skipped);
+			executed_plan
+				.skipped
+				.extend(report.failed.into_iter().map(|(path, _)| path));
+			// Reconcile the per-scope lock against disk through the SAME core-owned
+			// seam the manager uses, and report its real PruneStatus (not NotRun) so
+			// `pruned_lock_entries`/`prune_error` truthfully reflect the cleanup.
+			let prune = aghub_core::skills::prune::prune_lock_for_scope(
+				resource_scope,
+				project_root.as_deref(),
+			);
+			return Ok(Json(delete_response_from_outcome(
+				aghub_core::skills::removal::RemovalOutcome {
+					plan: executed_plan,
+					executed: true,
+					prune,
+				},
+			)));
+		}
 
-	match manager.remove_skill_planned(&skill_name, false, dry_run, confirm) {
-		// `remove_skill_planned` already prunes the lock (core-owned seam) and
-		// records the status in `outcome.prune`; no route-level re-prune.
-		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
-		Err(e) => Ok(Json(DeleteSkillByPathResponse {
-			success: false,
-			error: Some(format!("Failed to delete: {e}")),
-			..Default::default()
-		})),
-	}
+		match manager.remove_skill_planned(&skill_name, false, dry_run, confirm)
+		{
+			// `remove_skill_planned` already prunes the lock (core-owned seam) and
+			// records the status in `outcome.prune`; no route-level re-prune.
+			Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
+			Err(e) => Ok(Json(DeleteSkillByPathResponse {
+				success: false,
+				error: Some(format!("Failed to delete: {e}")),
+				..Default::default()
+			})),
+		}
+	})
+	.await
 }
 
 /// Disk-reconciled, lock-only prune (renamed to avoid colliding with
@@ -523,7 +534,7 @@ pub async fn delete_skill_by_path(
 /// dry-run; `confirm: true` writes. Any disk-scan error aborts the prune and is
 /// reported in `error` with the lock left untouched.
 #[post("/skills/prune-lock", data = "<body>")]
-pub fn prune_lock_route(
+pub async fn prune_lock_route(
 	_origin: TrustedLocalOrigin,
 	body: Json<PruneLockRequest>,
 ) -> ApiResult<PruneLockResponse> {
@@ -546,24 +557,32 @@ pub fn prune_lock_route(
 	let project_root = req.project_root.as_ref().map(std::path::PathBuf::from);
 	let dry_run = !req.confirm.unwrap_or(false);
 
-	let result = if dry_run {
-		preview_prune(scope, project_root.as_deref())
-	} else {
-		prune_lock_scanning(scope, project_root.as_deref())
-	};
+	// A commit takes the mutation lock across scan + rewrite; the dry-run preview
+	// does not, but it still scans disk, so both belong off the async worker.
+	in_mutation_pool(move || {
+		let result = if dry_run {
+			preview_prune(scope, project_root.as_deref())
+		} else {
+			prune_lock_scanning(scope, project_root.as_deref())
+		};
 
-	match result {
-		Ok(pruned) => Ok(Json(PruneLockResponse {
-			pruned,
-			dry_run,
-			error: None,
-		})),
-		Err(e) => Ok(Json(PruneLockResponse {
-			pruned: vec![],
-			dry_run,
-			error: Some(e.to_string()),
-		})),
-	}
+		match result {
+			Ok(pruned) => Ok(Json(PruneLockResponse {
+				pruned,
+				dry_run,
+				error: None,
+			})),
+			// This route reports failures in its `error` field rather than as an
+			// HTTP status — including contention, whose message already says
+			// nothing was scanned or written.
+			Err(e) => Ok(Json(PruneLockResponse {
+				pruned: vec![],
+				dry_run,
+				error: Some(e.to_string()),
+			})),
+		}
+	})
+	.await
 }
 
 fn get_parent_folder(path: std::path::PathBuf) -> std::path::PathBuf {
@@ -994,12 +1013,16 @@ pub async fn create_skill(
 	}
 	let skill = Skill::from(body.into_inner());
 	let response = SkillResponse::from(&skill);
-	manager.add_skill(skill).map_err(ApiError::from)?;
-	Ok((Status::Created, Json(response)))
+	// `add_skill` takes the mutation lock (Master write + link).
+	in_mutation_pool(move || {
+		manager.add_skill(skill).map_err(ApiError::from)?;
+		Ok((Status::Created, Json(response)))
+	})
+	.await
 }
 
 #[post("/agents/<agent>/skills/import?<scope..>", data = "<body>")]
-pub fn import_skill(
+pub async fn import_skill(
 	_origin: TrustedLocalOrigin,
 	agent: AgentParam,
 	scope: ScopeParams,
@@ -1012,44 +1035,56 @@ pub fn import_skill(
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	let request = body.into_inner();
 
-	// ONE transaction for load + materialize + hash + lock write. The load is
-	// INSIDE the guard on purpose: the manager's duplicate-name check decides
-	// whether to write, so a config read taken outside the lock lets another
-	// process install the same name in between — this route would then accept its
-	// own install, keep the other Master, and replace that entry with its own
-	// source and hash. Holding it also stops the Master write and the lock write
-	// from being two transactions with a removal in between (a ghost lock entry).
-	let _mutation_guard = aghub_core::skills::lock::mutation_guard(
-		"import skill",
-		resource_scope,
-		project_root.as_deref(),
-	)
-	.map_err(|e| ApiError::internal(e.to_string()))?;
+	in_mutation_pool(move || {
+		// ONE transaction for load + materialize + hash + lock write. The load is
+		// INSIDE the guard on purpose: the manager's duplicate-name check decides
+		// whether to write, so a config read taken outside the lock lets another
+		// process install the same name in between — this route would then accept
+		// its own install, keep the other Master, and replace that entry with its
+		// own source and hash. Holding it also stops the Master write and the lock
+		// write from being two transactions with a removal in between (a ghost
+		// lock entry).
+		//
+		// Because the guard spans both writes it necessarily precedes the source
+		// path's validation inside `add_skill_from_path`, so a request that is BOTH
+		// unusable and contended answers with the contention. That is a transient
+		// reordering — the retry reports the path error — and splitting the guard
+		// to avoid it would reintroduce the ghost-entry window.
+		let _mutation_guard = aghub_core::skills::lock::mutation_guard(
+			"import skill",
+			resource_scope,
+			project_root.as_deref(),
+		)
+		// Through `ConfigError::Io` so contention gets the ONE projection every
+		// other surface uses (409 retryable vs 500 unavailable).
+		.map_err(|e| ApiError::from(aghub_core::ConfigError::Io(e)))?;
 
-	manager.load().map_err(ApiError::from)?;
+		manager.load().map_err(ApiError::from)?;
 
-	let imported = manager
-		.add_skill_from_path(std::path::Path::new(&request.path))
-		.map_err(ApiError::from)?;
-	// Hash the local source folder (the SKILL.md's directory).
-	let source_dir = get_skill_root(expand_tilde_path(&request.path));
-	write_skill_install_lock(
-		&imported.name,
-		resource_scope,
-		project_root.as_deref(),
-		&skill::InstallLockSource {
-			source: request.path.clone(),
-			source_type: "local".to_string(),
-			source_url: request.path,
-			ref_name: None,
-		},
-		None,
-		&source_dir,
-		// Local installs have no upstream commit OID.
-		None,
-	)?;
+		let imported = manager
+			.add_skill_from_path(std::path::Path::new(&request.path))
+			.map_err(ApiError::from)?;
+		// Hash the local source folder (the SKILL.md's directory).
+		let source_dir = get_skill_root(expand_tilde_path(&request.path));
+		write_skill_install_lock(
+			&imported.name,
+			resource_scope,
+			project_root.as_deref(),
+			&skill::InstallLockSource {
+				source: request.path.clone(),
+				source_type: "local".to_string(),
+				source_url: request.path,
+				ref_name: None,
+			},
+			None,
+			&source_dir,
+			// Local installs have no upstream commit OID.
+			None,
+		)?;
 
-	Ok(Json(SkillResponse::from(&imported)))
+		Ok(Json(SkillResponse::from(&imported)))
+	})
+	.await
 }
 
 #[get("/agents/<agent>/skills/<name>?<scope..>")]
@@ -1104,10 +1139,16 @@ pub async fn update_skill(
 	ensure_skill_not_plugin_managed(&existing, "update").await?;
 	let updated = body.into_inner().apply_to(existing);
 	let response = SkillResponse::from(&updated);
-	manager
-		.update_skill(name, updated)
-		.map_err(ApiError::from)?;
-	Ok(Json(response))
+	let name = name.to_string();
+	// `update_skill` takes the mutation lock (a rename is a Master move plus a
+	// relink of every Referrer).
+	in_mutation_pool(move || {
+		manager
+			.update_skill(&name, updated)
+			.map_err(ApiError::from)?;
+		Ok(Json(response))
+	})
+	.await
 }
 
 #[delete("/agents/<agent>/skills/<name>?<params..>")]
@@ -1139,25 +1180,28 @@ pub async fn delete_skill(
 	}
 	let confirm = params.confirm.unwrap_or(false);
 	let dry_run = !confirm;
-	match manager.remove_skill_planned(
-		name,
-		params.all_agents.unwrap_or(false),
-		dry_run,
-		confirm,
-	) {
-		// `remove_skill_planned` already prunes the lock and records the status
-		// in `outcome.prune`; no route-level re-prune.
-		Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
-		Err(ConfigError::ResourceNotFound { .. }) => {
-			Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run,
-				executed: false,
-				..Default::default()
-			}))
+	let name = name.to_string();
+	let all_agents = params.all_agents.unwrap_or(false);
+	// Only the lock-taking call moves to the blocking pool; every check above
+	// stays exactly where it was, so which error wins is unchanged.
+	in_mutation_pool(move || {
+		match manager.remove_skill_planned(&name, all_agents, dry_run, confirm)
+		{
+			// `remove_skill_planned` already prunes the lock and records the
+			// status in `outcome.prune`; no route-level re-prune.
+			Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
+			Err(ConfigError::ResourceNotFound { .. }) => {
+				Ok(Json(DeleteSkillByPathResponse {
+					success: true,
+					dry_run,
+					executed: false,
+					..Default::default()
+				}))
+			}
+			Err(e) => Err(ApiError::from(e)),
 		}
-		Err(e) => Err(ApiError::from(e)),
-	}
+	})
+	.await
 }
 
 #[post("/agents/<agent>/skills/<name>/enable?<scope..>")]
@@ -1676,75 +1720,81 @@ pub(crate) async fn install_skill_with_repo(
 	let agent_types: Vec<AgentType> =
 		target_agents.iter().map(|(_, a)| *a).collect();
 
-	let mut agent_rows: Vec<GitInstallResultEntry> = Vec::new();
-	let mut any_installed = false;
-	for (name, lock_skill_path) in &items {
-		let installed = match &materialization {
-			InstallMaterialization::Fetched(fetched) => {
-				skill_update::mutation::install_fetched_source(
-					fetched,
-					skill_update::mutation::FetchedInstallRequest {
-						source: &lock_source,
-						lock_skill_path,
-						expected_name: None,
-						scope: resource_scope,
-						project_root: project_root.as_deref(),
-						target_agents: &agent_types,
-					},
-				)
-				.map_err(fetched_install_error_message)
-			}
-			#[cfg(test)]
-			InstallMaterialization::Clone {
-				temp_dir,
-				ref_commit,
-			} => install_test_clone(
-				temp_dir.path(),
-				ref_commit.as_deref(),
-				lock_skill_path,
-				&lock_source,
-				resource_scope,
-				project_root.as_deref(),
-				&agent_types,
-			),
-		};
-		match installed {
-			Ok(report) => {
-				for ((agent_str, _), agent_result) in
-					target_agents.iter().zip(report.agent_results)
-				{
-					let success = agent_result.error.is_none();
-					any_installed |= agent_result.installed;
-					agent_rows.push(GitInstallResultEntry {
-						name: if success {
-							report.name.clone()
-						} else {
-							name.clone()
+	// The install loop below is fully synchronous and takes the mutation lock per
+	// skill, so it runs on the blocking pool. Everything above — scope parsing,
+	// agent preflight, the fetch — is unchanged and still decides errors first.
+	in_mutation_pool(move || {
+		let mut agent_rows: Vec<GitInstallResultEntry> = Vec::new();
+		let mut any_installed = false;
+		for (name, lock_skill_path) in &items {
+			let installed = match &materialization {
+				InstallMaterialization::Fetched(fetched) => {
+					skill_update::mutation::install_fetched_source(
+						fetched,
+						skill_update::mutation::FetchedInstallRequest {
+							source: &lock_source,
+							lock_skill_path,
+							expected_name: None,
+							scope: resource_scope,
+							project_root: project_root.as_deref(),
+							target_agents: &agent_types,
 						},
-						agent: agent_str.clone(),
-						success,
-						error: agent_result.error,
-					});
+					)
+					.map_err(fetched_install_error_message)
 				}
-			}
-			Err(message) => {
-				for (agent_str, _) in &target_agents {
-					agent_rows.push(GitInstallResultEntry {
-						name: name.clone(),
-						agent: agent_str.clone(),
-						success: false,
-						error: Some(message.clone()),
-					});
+				#[cfg(test)]
+				InstallMaterialization::Clone {
+					temp_dir,
+					ref_commit,
+				} => install_test_clone(
+					temp_dir.path(),
+					ref_commit.as_deref(),
+					lock_skill_path,
+					&lock_source,
+					resource_scope,
+					project_root.as_deref(),
+					&agent_types,
+				),
+			};
+			match installed {
+				Ok(report) => {
+					for ((agent_str, _), agent_result) in
+						target_agents.iter().zip(report.agent_results)
+					{
+						let success = agent_result.error.is_none();
+						any_installed |= agent_result.installed;
+						agent_rows.push(GitInstallResultEntry {
+							name: if success {
+								report.name.clone()
+							} else {
+								name.clone()
+							},
+							agent: agent_str.clone(),
+							success,
+							error: agent_result.error,
+						});
+					}
+				}
+				Err(message) => {
+					for (agent_str, _) in &target_agents {
+						agent_rows.push(GitInstallResultEntry {
+							name: name.clone(),
+							agent: agent_str.clone(),
+							success: false,
+							error: Some(message.clone()),
+						});
+					}
 				}
 			}
 		}
-	}
 
-	let success = any_installed && agent_rows.iter().all(|r| r.success);
-	Ok(Json(InstallSkillResponse {
-		success,
-		agents: agent_rows,
-	}))
+		let success = any_installed && agent_rows.iter().all(|r| r.success);
+		Ok(Json(InstallSkillResponse {
+			success,
+			agents: agent_rows,
+		}))
+	})
+	.await
 }
 
 #[post("/skills/open", format = "json", data = "<request>")]
@@ -2367,55 +2417,63 @@ pub async fn git_install_skills(
 	let target_agents: Vec<AgentType> =
 		valid_agents.iter().map(|(_, agent)| *agent).collect();
 
-	for (skill_path, validated) in req.skill_paths.iter().zip(&validated_paths)
-	{
-		let lock_skill_path = skill::lock_skill_file_path(validated.as_str());
-		match skill_update::mutation::install_fetched_source(
-			&fetched,
-			skill_update::mutation::FetchedInstallRequest {
-				source: &source,
-				lock_skill_path: &lock_skill_path,
-				expected_name: None,
-				scope: resource_scope,
-				project_root: project_root.as_deref(),
-				target_agents: &target_agents,
-			},
-		) {
-			Ok(report) => {
-				for ((agent_str, _), agent_result) in
-					valid_agents.iter().zip(report.agent_results)
-				{
-					let success = agent_result.error.is_none();
-					results.push(GitInstallResultEntry {
-						// Successful rows carry the parsed skill name (as the old
-						// route did); failures keep the requested `skill_path`.
-						name: if success {
-							report.name.clone()
-						} else {
-							skill_path.clone()
-						},
-						agent: agent_str.clone(),
-						success,
-						error: agent_result.error,
-					});
+	// The install loop takes the mutation lock per skill and is synchronous, so it
+	// runs on the blocking pool; the fetch above stays on the async worker.
+	let skill_paths = req.skill_paths.clone();
+	let results = in_mutation_pool(move || {
+		for (skill_path, validated) in skill_paths.iter().zip(&validated_paths)
+		{
+			let lock_skill_path =
+				skill::lock_skill_file_path(validated.as_str());
+			match skill_update::mutation::install_fetched_source(
+				&fetched,
+				skill_update::mutation::FetchedInstallRequest {
+					source: &source,
+					lock_skill_path: &lock_skill_path,
+					expected_name: None,
+					scope: resource_scope,
+					project_root: project_root.as_deref(),
+					target_agents: &target_agents,
+				},
+			) {
+				Ok(report) => {
+					for ((agent_str, _), agent_result) in
+						valid_agents.iter().zip(report.agent_results)
+					{
+						let success = agent_result.error.is_none();
+						results.push(GitInstallResultEntry {
+							// Successful rows carry the parsed skill name (as the old
+							// route did); failures keep the requested `skill_path`.
+							name: if success {
+								report.name.clone()
+							} else {
+								skill_path.clone()
+							},
+							agent: agent_str.clone(),
+							success,
+							error: agent_result.error,
+						});
+					}
 				}
-			}
-			// A per-skill failure (e.g. parse error) is reported as per-agent
-			// failure rows and never aborts the whole request — matching the old
-			// route, where `install_git_skill_*` errors became failure entries.
-			Err(error) => {
-				let message = fetched_install_error_message(error);
-				for (agent_str, _) in &valid_agents {
-					results.push(GitInstallResultEntry {
-						name: skill_path.clone(),
-						agent: agent_str.clone(),
-						success: false,
-						error: Some(message.clone()),
-					});
+				// A per-skill failure (e.g. parse error) is reported as per-agent
+				// failure rows and never aborts the whole request — matching the old
+				// route, where `install_git_skill_*` errors became failure entries.
+				Err(error) => {
+					let message = fetched_install_error_message(error);
+					for (agent_str, _) in &valid_agents {
+						results.push(GitInstallResultEntry {
+							name: skill_path.clone(),
+							agent: agent_str.clone(),
+							success: false,
+							error: Some(message.clone()),
+						});
+					}
 				}
 			}
 		}
-	}
+		Ok(results)
+	})
+	.await?;
 
 	// Successful request permanently consumes the exclusive session claim.
 	session.consume();
@@ -2454,8 +2512,10 @@ pub async fn git_sync_skill(
 
 	// Snapshot the entry's identity BEFORE the fetch, so the resync can prove
 	// under the mutation lock that it is still writing to the coordinates this
-	// request started from. Absent = there is no such entry; the scope/lock
-	// validation below reports that with the route's historical precedence.
+	// request started from. Absent = there was no such entry AT THAT POINT; the
+	// scope/lock validation below reports the still-absent case with the route's
+	// historical precedence, and the appeared-during-the-fetch case is answered
+	// after it.
 	let pre_fetch_identity = aghub_core::skills::lock::EntryIdentity::capture(
 		&req.name,
 		match req.scope.as_str() {
@@ -2534,6 +2594,24 @@ pub async fn git_sync_skill(
 		));
 	}
 
+	// Locked NOW but absent when this request started: another aghub process (or
+	// `npx skills`, which takes no lock of ours) inserted it while we were
+	// fetching. There is no snapshot to compare against and no mandate to
+	// overwrite a skill this request never saw, so refuse — the same answer the
+	// CLI's sync gives, and the same 409 a repointed entry gets. Checked AFTER
+	// the not-found reply above so that precedence is unchanged.
+	let Some(pre_fetch_identity) = pre_fetch_identity else {
+		return Err(ApiError::new(
+			Status::Conflict,
+			format!(
+				"Skill '{}' appeared in the lock while this sync was fetching; \
+				 nothing was written. Re-run to sync the current entry",
+				req.name
+			),
+			aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE,
+		));
+	};
+
 	// The post-session transaction (rename guard → containment → swap → lock) is
 	// the shared core resync; the route owns only the session lifecycle.
 	use crate::skills::resync::safe_resync_error;
@@ -2541,49 +2619,55 @@ pub async fn git_sync_skill(
 	use skill_update::mutation::{
 		resync_fetched_source, FetchedResyncRequest, ResyncMutationError,
 	};
-	let report = resync_fetched_source(
-		&fetched,
-		FetchedResyncRequest {
-			skill_path: &req.skill_path,
-			name: &req.name,
-			scope: resource_scope,
-			project_root: project_root.as_deref(),
-			// Captured before the fetch above. `expect` is safe: the lock
-			// validation directly above already refused a missing entry.
-			expected: pre_fetch_identity.expect("lock entry validated above"),
-		},
-	)
-	.map_err(|e| match e {
-		ResyncMutationError::InvalidSkillPath => ApiError::new(
-			Status::NotFound,
-			format!(
-				"Skill path '{}' not found in cloned repository",
-				req.skill_path
-			),
-			"SKILL_PATH_NOT_FOUND",
-		),
-		ResyncMutationError::Resync(ResyncError::NotInstalled) => {
-			ApiError::new(
+	// The transaction (rename guard → containment → swap → lock re-stamp) takes the
+	// mutation lock and is synchronous, so it runs on the blocking pool. The fetch
+	// above stays on the async worker — it must never hold the lock anyway.
+	let name = req.name.clone();
+	let skill_path = req.skill_path.clone();
+	let report = in_mutation_pool(move || {
+		resync_fetched_source(
+			&fetched,
+			FetchedResyncRequest {
+				skill_path: &skill_path,
+				name: &name,
+				scope: resource_scope,
+				project_root: project_root.as_deref(),
+				// Captured before the fetch above, and proven present as of then
+				// by the check directly above.
+				expected: pre_fetch_identity,
+			},
+		)
+		.map_err(|e| match e {
+			ResyncMutationError::InvalidSkillPath => ApiError::new(
 				Status::NotFound,
 				format!(
-					"Skill '{}' is locked but no installed copy was found",
-					req.name
+					"Skill path '{skill_path}' not found in cloned repository"
 				),
-				"SKILL_NOT_INSTALLED",
-			)
-		}
-		ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
-			ApiError::new(
-				Status::BadRequest,
-				skill_renamed_message(&req.name, &new_name),
-				SKILL_RENAMED_CODE,
-			)
-		}
-		ResyncMutationError::Resync(error) => {
-			let mapped = safe_resync_error(&error);
-			ApiError::new(mapped.status, mapped.message, mapped.code)
-		}
-	})?;
+				"SKILL_PATH_NOT_FOUND",
+			),
+			ResyncMutationError::Resync(ResyncError::NotInstalled) => {
+				ApiError::new(
+					Status::NotFound,
+					format!(
+						"Skill '{name}' is locked but no installed copy was found"
+					),
+					"SKILL_NOT_INSTALLED",
+				)
+			}
+			ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
+				ApiError::new(
+					Status::BadRequest,
+					skill_renamed_message(&name, &new_name),
+					SKILL_RENAMED_CODE,
+				)
+			}
+			ResyncMutationError::Resync(error) => {
+				let mapped = safe_resync_error(&error);
+				ApiError::new(mapped.status, mapped.message, mapped.code)
+			}
+		})
+	})
+	.await?;
 
 	// Successful request permanently consumes the exclusive session claim.
 	session.consume();
@@ -3080,10 +3164,10 @@ mod tests {
 			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
 			let before = std::fs::read(&lock_path).unwrap();
 
-			let resp = prune_lock_route(
+			let resp = block_on(prune_lock_route(
 				TrustedLocalOrigin,
 				Json(prune_req("global", None, None)),
-			)
+			))
 			.ok()
 			.expect("handler returned ok")
 			.into_inner();
@@ -3103,10 +3187,10 @@ mod tests {
 			let lock_path = lock_dir.join(".skill-lock.json");
 			std::fs::write(&lock_path, ORPHAN_LOCK_JSON).unwrap();
 
-			let resp = prune_lock_route(
+			let resp = block_on(prune_lock_route(
 				TrustedLocalOrigin,
 				Json(prune_req("global", None, Some(true))),
-			)
+			))
 			.ok()
 			.expect("handler returned ok")
 			.into_inner();
@@ -3123,10 +3207,10 @@ mod tests {
 	#[test]
 	fn prune_lock_route_project_requires_project_root() {
 		with_isolated_env(|_home, _state| {
-			let resp = prune_lock_route(
+			let resp = block_on(prune_lock_route(
 				TrustedLocalOrigin,
 				Json(prune_req("project", None, Some(true))),
-			)
+			))
 			.ok()
 			.expect("handler returned ok")
 			.into_inner();
@@ -3165,7 +3249,7 @@ mod tests {
 				path: source_skill.join("SKILL.md").display().to_string(),
 			});
 
-			import_skill(TrustedLocalOrigin, agent, scope, body)
+			block_on(import_skill(TrustedLocalOrigin, agent, scope, body))
 				.ok()
 				.expect("import_skill returned ok");
 

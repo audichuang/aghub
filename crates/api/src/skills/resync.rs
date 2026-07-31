@@ -16,14 +16,14 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 	match error {
 		ResyncError::Locked(_) => SafeResyncError {
 			message: "Another aghub process is mutating skills; retry shortly",
-			code: "SKILL_MUTATION_LOCK_BUSY",
+			code: aghub_core::skills::lock::MUTATION_LOCK_BUSY_CODE,
 			status: Status::Conflict,
 		},
 		ResyncError::StaleFetch(_) => SafeResyncError {
 			message:
 				"The skill's source changed while this sync was fetching; \
 			          nothing was written. Re-run to use the current source",
-			code: "SKILL_SOURCE_CHANGED_DURING_FETCH",
+			code: aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE,
 			status: Status::Conflict,
 		},
 		ResyncError::NotInstalled => SafeResyncError {
