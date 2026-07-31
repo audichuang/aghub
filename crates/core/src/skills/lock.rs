@@ -6,6 +6,28 @@
 use crate::models::ResourceScope;
 use std::path::Path;
 
+/// A remote identity two source spellings can be compared on, or `None` when this
+/// spelling is not one of the forms we can canonicalize.
+///
+/// Wraps [`crate::skills::install_fetched::remote_owner_from_url`] with the
+/// `owner/repo` shorthand, which that function deliberately does not accept (it
+/// guards Master adoption, where treating a hostless string as GitHub would widen
+/// ownership). Here the shorthand MUST resolve, because it is exactly what an
+/// npx-written project entry records — leaving it unresolvable would make every
+/// such entry unprovable and therefore unguarded. `owner/repo` means GitHub in
+/// this codebase; `precheck_source` accepts no other hostless form.
+fn comparable_remote(source: &str) -> Option<String> {
+	use crate::skills::install_fetched::remote_owner_from_url;
+	let source = source.trim();
+	let hostless_shorthand = !source.contains("://")
+		&& !source.contains(':')
+		&& source.matches('/').count() == 1;
+	if hostless_shorthand {
+		return remote_owner_from_url(&format!("https://github.com/{source}"));
+	}
+	remote_owner_from_url(source)
+}
+
 /// Wire code for mutation-lock contention: another aghub process held the lock,
 /// nothing was written, and the SAME request will succeed once it finishes. The
 /// one thing a surface must convey is that it is retryable — a generic failure
@@ -160,6 +182,36 @@ impl EntryIdentity {
 		}
 	}
 
+	/// Whether a request claiming `source` + `skill_path` is talking about THIS
+	/// entry — i.e. whether the caller is allowed to overwrite it with content it
+	/// fetched from those coordinates.
+	///
+	/// [`ensure_unchanged`](Self::ensure_unchanged) is a different question: it
+	/// proves nobody else moved the entry while we fetched. It cannot catch a
+	/// caller that fetched from somewhere else entirely, because the entry it
+	/// compares against never changed. The API's git-sync takes both the session
+	/// (a repo) and the skill name from the request, so without this a client can
+	/// pair repo B's session with a skill locked to repo A: B's bytes land on disk
+	/// while the lock keeps A's source/path/ref and merely gets B's hash stamped.
+	/// No race needed.
+	///
+	/// Refuses ONLY on a provable mismatch. A side that cannot be resolved to a
+	/// comparable remote (a self-hosted spelling, a form neither branch below
+	/// understands) proves nothing, and refusing there would break legitimate
+	/// syncs — the same false-negative trap that comparing a RECONSTRUCTED source
+	/// URL fell into for npx-written project entries.
+	pub fn describes(&self, source: &str, skill_path: &str) -> bool {
+		if let Some(recorded) = self.skill_path.as_deref() {
+			if recorded.trim() != skill_path.trim() {
+				return false;
+			}
+		}
+		match (comparable_remote(&self.source), comparable_remote(source)) {
+			(Some(recorded), Some(claimed)) => recorded == claimed,
+			_ => true,
+		}
+	}
+
 	/// Refuse unless the entry is still exactly the one this snapshot describes.
 	/// Call under the mutation lock, immediately before mutating.
 	///
@@ -236,5 +288,89 @@ pub fn update_lock_hash(
 		ResourceScope::Both => {
 			Err("update requires global or project scope, not both".to_string())
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	fn identity(source: &str, skill_path: &str) -> EntryIdentity {
+		EntryIdentity::unchecked_for_tests(
+			source,
+			Some(skill_path.to_string()),
+			Some("main".to_string()),
+		)
+	}
+
+	/// The mismatched-pair the API's git-sync could not see: a session for one
+	/// repo alongside a skill locked to another. `ensure_unchanged` cannot catch
+	/// it — the entry never moved — so this is the only thing standing between a
+	/// caller and installing B's bytes under A's lock entry.
+	#[test]
+	fn a_different_repo_is_refused() {
+		let entry = identity("https://github.com/good/repo.git", "s/SKILL.md");
+		assert!(
+			!entry.describes("https://github.com/evil/repo.git", "s/SKILL.md")
+		);
+		// Same repo NAME on another host is still another repo.
+		assert!(
+			!entry.describes("https://gitlab.com/good/repo.git", "s/SKILL.md")
+		);
+	}
+
+	/// The false-negative trap this must NOT fall into. One repo has many legal
+	/// spellings, and a project entry written by `npx skills` records the bare
+	/// `owner/repo` shorthand — rejecting those would break every such sync,
+	/// which is exactly the regression a reconstructed source URL caused before.
+	#[test]
+	fn one_repo_spelled_many_ways_is_accepted() {
+		let shorthand = identity("owner/repo", "s/SKILL.md");
+		for claimed in [
+			"owner/repo",
+			"https://github.com/owner/repo",
+			"https://github.com/owner/repo.git",
+			"https://GitHub.com/owner/repo.git/",
+			"git@github.com:owner/repo.git",
+			"ssh://git@github.com/owner/repo.git",
+		] {
+			assert!(
+				shorthand.describes(claimed, "s/SKILL.md"),
+				"'{claimed}' is the same repo as the shorthand"
+			);
+		}
+
+		// And from the other direction: a full URL on the entry, shorthand claimed.
+		let full = identity("https://github.com/owner/repo.git", "s/SKILL.md");
+		assert!(full.describes("owner/repo", "s/SKILL.md"));
+	}
+
+	/// Same repo, different folder: the content would come from a path the entry
+	/// does not name, while the lock keeps pointing at the old one.
+	#[test]
+	fn a_different_skill_path_is_refused() {
+		let entry = identity("owner/repo", "mine/SKILL.md");
+		assert!(!entry.describes("owner/repo", "theirs/SKILL.md"));
+		assert!(entry.describes("owner/repo", "mine/SKILL.md"));
+	}
+
+	/// An unresolvable spelling proves nothing, so it must not refuse: a
+	/// self-hosted host or a form neither branch understands is not evidence of a
+	/// mismatch, and treating it as one would break working setups.
+	#[test]
+	fn an_unprovable_source_is_allowed_through() {
+		let local = identity("file:///srv/skills", "s/SKILL.md");
+		assert!(local.describes("file:///somewhere/else", "s/SKILL.md"));
+		let entry = identity("owner/repo", "s/SKILL.md");
+		assert!(entry.describes("not a url at all", "s/SKILL.md"));
+	}
+
+	/// A missing `skillPath` cannot be compared, and the source check still runs.
+	#[test]
+	fn an_entry_without_a_skill_path_still_checks_the_source() {
+		let entry =
+			EntryIdentity::unchecked_for_tests("owner/repo", None, None);
+		assert!(entry.describes("owner/repo", "anything/SKILL.md"));
+		assert!(!entry.describes("other/repo", "anything/SKILL.md"));
 	}
 }

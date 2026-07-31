@@ -2612,6 +2612,24 @@ pub async fn git_sync_skill(
 		));
 	};
 
+	// The session (a repo) and the skill name arrive as SEPARATE request fields, so
+	// nothing so far ties them together: `ensure_unchanged` proves the entry did not
+	// move under us, not that we fetched from the entry's own coordinates. Without
+	// this a caller can pair one repo's session with a skill locked to another and
+	// have those bytes installed under the original entry's source/path/ref, with
+	// only the hash re-stamped. No race required — just a mismatched pair.
+	if !pre_fetch_identity.describes(session.url(), &req.skill_path) {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			format!(
+				"The scanned source or skill path does not match what '{}' is \
+				 locked to; nothing was written. Re-scan the skill's own source",
+				req.name
+			),
+			"SKILL_SOURCE_MISMATCH",
+		));
+	}
+
 	// The post-session transaction (rename guard → containment → swap → lock) is
 	// the shared core resync; the route owns only the session lifecycle.
 	use crate::skills::resync::safe_resync_error;
@@ -3586,6 +3604,109 @@ mod tests {
 			assert!(
 				sessions.active("sync-session").is_some(),
 				"a failed claimed session must be restored for retry",
+			);
+		});
+	}
+
+	/// The session (a repo) and the skill name are SEPARATE request fields, so a
+	/// caller can pair one repo's scan with a skill locked to another. Nothing
+	/// else in the route catches it: the lock entry is present and unchanged, so
+	/// `ensure_unchanged` is satisfied, and the resync would then install the
+	/// scanned repo's bytes under this entry's source/path/ref with only the hash
+	/// re-stamped. No race involved.
+	///
+	/// The surviving content is the assertion with teeth — drop the `describes`
+	/// check and the swap goes through, so this fails on the file contents (and on
+	/// the status, which becomes 200).
+	#[test]
+	fn git_sync_refuses_a_session_for_a_different_repo() {
+		with_isolated_env(|_, _| {
+			let temp = tempdir().unwrap();
+			let project = temp.path().join("project");
+			let installed = project.join(".claude/skills/sync-me");
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: mine\n---\n\nmine\n",
+			)
+			.unwrap();
+			// Locked to `owner/repo`.
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("sync-me/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+			let lock_before =
+				skill::lock::local::read_local_lock(Some(&project));
+
+			// A scan of a DIFFERENT repo that happens to contain the same path.
+			let fixture = tempdir().unwrap();
+			let elsewhere = fixture.path().join("sync-me");
+			std::fs::create_dir_all(&elsewhere).unwrap();
+			std::fs::write(
+				elsewhere.join("SKILL.md"),
+				"---\nname: sync-me\ndescription: theirs\n---\n\ntheirs\n",
+			)
+			.unwrap();
+
+			let app_data = tempdir().unwrap();
+			let client =
+				rocket::local::blocking::Client::tracked(crate::build_rocket(
+					rocket::Config::default(),
+					app_data.path().to_path_buf(),
+				))
+				.expect("client");
+			let sessions = client
+				.rocket()
+				.state::<PinnedSourceSessions>()
+				.expect("git clone sessions");
+			sessions.insert(
+				"other-repo".to_string(),
+				session_from_fixture(
+					fixture.path(),
+					"https://github.com/someone-else/repo.git",
+					"main",
+				),
+			);
+
+			let response = client
+				.post("/api/v1/skills/git/sync")
+				.json(&serde_json::json!({
+					"session_id": "other-repo",
+					"name": "sync-me",
+					"scope": "project",
+					"project_root": project.display().to_string(),
+					"skill_path": "sync-me/SKILL.md",
+					"source_paths": [project
+						.join(".claude/skills")
+						.display()
+						.to_string()],
+				}))
+				.dispatch();
+
+			assert_eq!(response.status(), rocket::http::Status::BadRequest);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "SKILL_SOURCE_MISMATCH");
+			assert!(
+				std::fs::read_to_string(installed.join("SKILL.md"))
+					.unwrap()
+					.contains("mine"),
+				"the locked skill's content must survive a mismatched session"
+			);
+			assert_eq!(
+				skill::lock::local::read_local_lock(Some(&project)).skills,
+				lock_before.skills,
+				"a refused sync must not stamp a hash"
 			);
 		});
 	}

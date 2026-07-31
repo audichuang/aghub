@@ -139,7 +139,10 @@ fn skill_lock_source(
 
 /// Canonical host + repo-path identity for the common remote URL forms. The
 /// transport and optional `.git` suffix do not define ownership; the host does.
-fn remote_owner_from_url(source_url: &str) -> Option<String> {
+///
+/// `pub(crate)` for [`crate::skills::lock::EntryIdentity`], which answers the same
+/// question ("do these two spellings name one repo?") for a different caller.
+pub(crate) fn remote_owner_from_url(source_url: &str) -> Option<String> {
 	let source_url = source_url.trim();
 	if source_url.is_empty() || source_url.starts_with("file:") {
 		return None;
