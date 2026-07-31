@@ -283,7 +283,13 @@ pub struct LockedResyncRequest<'a> {
 }
 
 pub struct LockedSkillsResyncRequest<'a> {
-	pub source: &'a str,
+	/// The Source the caller believes every named entry still belongs to.
+	/// A mismatch fails that entry's row instead of fetching, so a stale
+	/// Sources view can never aim this batch — or the caller's forwarded
+	/// token — at an entry that was repointed elsewhere. `None` skips the
+	/// assertion: a caller that read the coordinates from the very Lock read
+	/// this flow performs has nothing independent to assert against.
+	pub source: Option<&'a str>,
 	pub names: &'a [String],
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
@@ -311,28 +317,58 @@ pub enum LockedResyncError {
 	Resync(aghub_core::skills::resync::ResyncError),
 }
 
+/// Only a request that cannot produce rows AT ALL fails as a whole: an
+/// unsupported scope, or no names. Every per-entry failure — including one
+/// whose fetch group failed — is an ordered row in the returned `Vec`, because
+/// the named skills are INDEPENDENT of each other: aborting the batch over one
+/// unresolvable entry would cost the others their update and buy no atomicity
+/// (each row's own install+lock swap is already transactional under the
+/// mutation lock). This is deliberately NOT
+/// `aghub_core::batch::run_multi_target_mutation`'s all-or-nothing preflight —
+/// that policy exists for ONE resource fanned out to many agents, where a
+/// partial batch leaves the agents inconsistent with each other.
 #[derive(Debug)]
 pub enum LockedSkillsResyncError {
 	EmptyRequest,
 	Preflight(LockedResyncError),
-	ItemPreflight {
-		name: String,
-		error: LockedResyncError,
-	},
-	Fetch(FetchError),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 struct PreparedLockedResync {
-	name: String,
 	skill_path: String,
 	expected: aghub_core::skills::lock::EntryIdentity,
 	group_index: usize,
 }
 
+/// One requested skill, in request order: either ready to resync from its
+/// fetch group, or already failed and no longer attemptable.
+#[derive(Debug)]
+struct ResyncRow {
+	name: String,
+	prepared: Result<PreparedLockedResync, LockedResyncError>,
+}
+
 struct PreparedFetchGroup {
 	source_ref: SourceRef,
 	folders: Vec<skill::SkillPath>,
+}
+
+/// One fetch group's failure, replayed onto every row that group owns.
+#[derive(Clone, Copy, Debug)]
+enum GroupFailure {
+	CredentialBackendUnavailable,
+	Fetch(FetchError),
+}
+
+impl From<GroupFailure> for LockedResyncError {
+	fn from(failure: GroupFailure) -> Self {
+		match failure {
+			GroupFailure::CredentialBackendUnavailable => {
+				LockedResyncError::CredentialBackendUnavailable
+			}
+			GroupFailure::Fetch(error) => LockedResyncError::Fetch(error),
+		}
+	}
 }
 
 fn same_source(expected: &str, actual: &str) -> bool {
@@ -424,7 +460,6 @@ fn prepare_locked_resync(
 	Ok((
 		source_ref,
 		PreparedLockedResync {
-			name: name.to_string(),
 			skill_path,
 			expected,
 			group_index: 0,
@@ -432,11 +467,27 @@ fn prepare_locked_resync(
 	))
 }
 
-/// Resolve every requested Lock entry before fetching, group entries by their
-/// effective Source + ref, and selectively fetch each group once. All groups
-/// are fetched and validated before any installed copy is mutated; afterwards
-/// every runtime Resync is attempted in request order with its captured
-/// compare-after-fetch identity.
+/// Request order, first occurrence only. A repeated name would otherwise be
+/// attempted twice against ONE captured identity: the second attempt fails the
+/// compare-after-fetch it cannot satisfy (the first attempt just re-stamped the
+/// entry) and reports a phantom concurrent-change to the caller.
+fn unique_in_order(names: &[String]) -> Vec<&String> {
+	let mut unique: Vec<&String> = Vec::with_capacity(names.len());
+	for name in names {
+		if !unique.contains(&name) {
+			unique.push(name);
+		}
+	}
+	unique
+}
+
+/// Resolve every requested Lock entry before fetching, group the resolvable
+/// ones by their effective Source + ref, and selectively fetch each group once.
+/// Nothing is written until every group has been fetched, so a fetch failure
+/// cannot leave a half-updated batch; then every ready row is attempted in
+/// request order against its captured compare-after-fetch identity. One row's
+/// failure — at resolution, at its group's fetch, or at its own transaction —
+/// never suppresses another row.
 pub fn resync_locked_skills(
 	request: LockedSkillsResyncRequest<'_>,
 	fetcher: &dyn Fetcher,
@@ -460,116 +511,102 @@ pub fn resync_locked_skills(
 	}
 
 	let mut groups: Vec<PreparedFetchGroup> = Vec::new();
-	let mut prepared = Vec::with_capacity(request.names.len());
+	let names = unique_in_order(request.names);
+	let mut rows = Vec::with_capacity(names.len());
 
-	for name in request.names {
-		let (source_ref, mut item) =
+	for name in names {
+		let prepared =
 			prepare_locked_resync(name, request.scope, request.project_root)
-				.map_err(|error| LockedSkillsResyncError::ItemPreflight {
-					name: name.clone(),
-					error,
-				})?;
-		if !same_source(request.source, &source_ref.source) {
-			return Err(LockedSkillsResyncError::ItemPreflight {
-				name: name.clone(),
-				error: LockedResyncError::SourceChanged,
-			});
-		}
-		let folder = skill_folder_from_lock_path(&item.skill_path)
-			.ok_or(LockedResyncError::InvalidSkillPath)
-			.map_err(|error| LockedSkillsResyncError::ItemPreflight {
-				name: name.clone(),
-				error,
-			})?;
-		let group_index = if let Some(index) = groups
-			.iter()
-			.position(|group| group.source_ref == source_ref)
-		{
-			index
-		} else {
-			groups.push(PreparedFetchGroup {
-				source_ref,
-				folders: Vec::new(),
-			});
-			groups.len() - 1
-		};
-		let group = &mut groups[group_index];
-		if !group
-			.folders
-			.iter()
-			.any(|seen| seen.as_str() == folder.as_str())
-		{
-			group.folders.push(folder);
-		}
-		item.group_index = group_index;
-		prepared.push(item);
-	}
-
-	let mut fetched_groups = Vec::with_capacity(groups.len());
-	for group in &groups {
-		let token = match resolver.resolve(&group.source_ref.source) {
-			TokenResolution::Token(token) => Some(token),
-			TokenResolution::NoToken => None,
-			TokenResolution::BackendUnavailable => {
-				return Err(LockedSkillsResyncError::Preflight(
-					LockedResyncError::CredentialBackendUnavailable,
-				));
-			}
-		};
-		let repo = fetcher
-			.fetch(
-				&group.source_ref,
-				token.as_deref(),
-				FetchSelection::Skills(&group.folders),
-			)
-			.map_err(LockedSkillsResyncError::Fetch)?;
-		fetched_groups.push(FetchedSource { repo });
-	}
-
-	if let Some(item) = prepared.iter().find(|item| {
-		!fetched_skill_path_exists(
-			&fetched_groups[item.group_index],
-			&item.skill_path,
-		)
-	}) {
-		return Err(LockedSkillsResyncError::ItemPreflight {
-			name: item.name.clone(),
-			error: LockedResyncError::SourceSkillNotFound,
+				.and_then(|(source_ref, mut item)| {
+					if request.source.is_some_and(|source| {
+						!same_source(source, &source_ref.source)
+					}) {
+						return Err(LockedResyncError::SourceChanged);
+					}
+					let folder = skill_folder_from_lock_path(&item.skill_path)
+						.ok_or(LockedResyncError::InvalidSkillPath)?;
+					let group_index = if let Some(index) = groups
+						.iter()
+						.position(|group| group.source_ref == source_ref)
+					{
+						index
+					} else {
+						groups.push(PreparedFetchGroup {
+							source_ref,
+							folders: Vec::new(),
+						});
+						groups.len() - 1
+					};
+					let group = &mut groups[group_index];
+					if !group
+						.folders
+						.iter()
+						.any(|seen| seen.as_str() == folder.as_str())
+					{
+						group.folders.push(folder);
+					}
+					item.group_index = group_index;
+					Ok(item)
+				});
+		rows.push(ResyncRow {
+			name: name.clone(),
+			prepared,
 		});
 	}
 
-	let report = aghub_core::batch::run_multi_target_mutation(
-		&prepared,
-		|_| Ok::<(), LockedResyncError>(()),
-		|item| {
-			resync_fetched_source(
-				&fetched_groups[item.group_index],
-				FetchedResyncRequest {
-					skill_path: &item.skill_path,
-					name: &item.name,
-					scope: request.scope,
-					project_root: request.project_root,
-					expected: item.expected.clone(),
-				},
-			)
-			.map_err(|error| match error {
-				ResyncMutationError::InvalidSkillPath => {
-					LockedResyncError::SourceSkillNotFound
+	// Every group is fetched BEFORE the first write, so no row can be swapped
+	// while a later group is still on the network.
+	let fetched_groups: Vec<Result<FetchedSource, GroupFailure>> = groups
+		.iter()
+		.map(|group| {
+			let token = match resolver.resolve(&group.source_ref.source) {
+				TokenResolution::Token(token) => Some(token),
+				TokenResolution::NoToken => None,
+				TokenResolution::BackendUnavailable => {
+					return Err(GroupFailure::CredentialBackendUnavailable);
 				}
-				ResyncMutationError::Resync(error) => {
-					LockedResyncError::Resync(error)
-				}
-			})
-		},
-	)
-	.expect("all predictable failures were rejected before batch execution");
+			};
+			fetcher
+				.fetch(
+					&group.source_ref,
+					token.as_deref(),
+					FetchSelection::Skills(&group.folders),
+				)
+				.map(FetchedSource::from_repo)
+				.map_err(GroupFailure::Fetch)
+		})
+		.collect();
 
-	Ok(report
-		.results
+	Ok(rows
 		.into_iter()
-		.map(|row| LockedSkillResyncResult {
-			name: row.target.name,
-			outcome: row.result,
+		.map(|ResyncRow { name, prepared }| {
+			let outcome = prepared.and_then(|item| {
+				let fetched = fetched_groups[item.group_index]
+					.as_ref()
+					.map_err(|failure| LockedResyncError::from(*failure))?;
+				if !fetched_skill_path_exists(fetched, &item.skill_path) {
+					return Err(LockedResyncError::SourceSkillNotFound);
+				}
+				resync_fetched_source(
+					fetched,
+					FetchedResyncRequest {
+						skill_path: &item.skill_path,
+						name: &name,
+						scope: request.scope,
+						project_root: request.project_root,
+						expected: item.expected,
+					},
+				)
+				.map_err(|error| match error {
+					ResyncMutationError::InvalidSkillPath => {
+						LockedResyncError::SourceSkillNotFound
+					}
+					ResyncMutationError::Resync(error) => {
+						LockedResyncError::Resync(error)
+					}
+				})
+			});
+			LockedSkillResyncResult { name, outcome }
 		})
 		.collect())
 }
@@ -581,15 +618,14 @@ pub fn resync_locked_skill(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
-	let (source_ref, _) = prepare_locked_resync(
-		request.name,
-		request.scope,
-		request.project_root,
-	)?;
+	// `source: None` — this caller has no independent Source view to assert
+	// against, and asserting one would mean reading the entry a SECOND time:
+	// a repoint landing between the two reads would fail an update that is
+	// perfectly safe to apply against the coordinates actually read here.
 	let names = [request.name.to_string()];
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: &source_ref.source,
+			source: None,
 			names: &names,
 			scope: request.scope,
 			project_root: request.project_root,
@@ -599,10 +635,6 @@ pub fn resync_locked_skill(
 	)
 	.map_err(|error| match error {
 		LockedSkillsResyncError::Preflight(error) => error,
-		LockedSkillsResyncError::ItemPreflight { error, .. } => error,
-		LockedSkillsResyncError::Fetch(error) => {
-			LockedResyncError::Fetch(error)
-		}
 		LockedSkillsResyncError::EmptyRequest => {
 			unreachable!("single-item batch cannot be empty")
 		}

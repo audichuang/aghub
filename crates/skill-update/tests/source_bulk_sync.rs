@@ -95,7 +95,7 @@ fn locked_multi_resync_fetches_one_source_and_updates_every_skill() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: "https://git.example/owner/repo.git",
+			source: Some("https://git.example/owner/repo.git"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -179,7 +179,7 @@ fn locked_multi_resync_fetches_each_source_ref_once_and_preserves_order() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: "https://git.example/owner/repo.git",
+			source: Some("https://git.example/owner/repo.git"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),

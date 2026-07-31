@@ -391,6 +391,26 @@ fn apply_locked_resync_error(
 	}
 }
 
+fn apply_success(
+	name: String,
+	scope: &str,
+	report: aghub_core::skills::resync::ResyncReport,
+) -> ApplySkillUpdateResponse {
+	ApplySkillUpdateResponse {
+		success: true,
+		name,
+		scope: scope.to_string(),
+		updated_hash: Some(report.updated_hash),
+		paths: report
+			.swapped
+			.iter()
+			.map(|path| path.display().to_string())
+			.collect(),
+		error: None,
+		code: None,
+	}
+}
+
 fn apply_locked_resync_outcome(
 	name: String,
 	scope: &str,
@@ -400,20 +420,24 @@ fn apply_locked_resync_outcome(
 	>,
 ) -> Result<ApplySkillUpdateResponse, ApiError> {
 	match outcome {
-		Ok(report) => Ok(ApplySkillUpdateResponse {
-			success: true,
-			name,
-			scope: scope.to_string(),
-			updated_hash: Some(report.updated_hash),
-			paths: report
-				.swapped
-				.iter()
-				.map(|path| path.display().to_string())
-				.collect(),
-			error: None,
-			code: None,
-		}),
+		Ok(report) => Ok(apply_success(name, scope, report)),
 		Err(error) => apply_locked_resync_error(&name, scope, &error),
+	}
+}
+
+/// A batch row NEVER escalates to a top-level API error: one row hitting the
+/// keyring must not erase every other row's attribution.
+fn apply_locked_resync_batch_outcome(
+	name: String,
+	scope: &str,
+	outcome: Result<
+		aghub_core::skills::resync::ResyncReport,
+		LockedResyncError,
+	>,
+) -> ApplySkillUpdateResponse {
+	match outcome {
+		Ok(report) => apply_success(name, scope, report),
+		Err(error) => apply_locked_resync_batch_error(&name, scope, &error),
 	}
 }
 
@@ -603,62 +627,49 @@ pub(crate) async fn apply_skill_updates_inner(
 	let names = req.names;
 	let scope = req.scope;
 	crate::blocking::in_mutation_pool(|| {
-		let results = match resync_locked_skills(
+		// Every per-skill failure — unresolvable entry, repointed Source, its
+		// group's fetch — comes back as its own ordered row, so one bad skill
+		// never costs the others their update. Only a request that cannot
+		// produce rows at all is an API-level error.
+		let outcomes = resync_locked_skills(
 			LockedSkillsResyncRequest {
-				source: &req.source,
+				source: Some(&req.source),
 				names: &names,
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
 			},
 			fetcher,
 			resolver,
-		) {
-			Ok(outcomes) => outcomes
-				.into_iter()
-				.map(|item| {
-					apply_locked_resync_outcome(item.name, &scope, item.outcome)
-				})
-				.collect::<Result<Vec<_>, ApiError>>()?,
-			Err(LockedSkillsResyncError::Preflight(error)) => names
-				.iter()
-				.map(|name| {
-					apply_locked_resync_batch_error(name, &scope, &error)
-				})
-				.collect(),
-			Err(LockedSkillsResyncError::ItemPreflight {
-				name: failed_name,
-				error,
-			}) => names
-				.iter()
-				.map(|name| {
-					if name == &failed_name {
-						apply_locked_resync_batch_error(name, &scope, &error)
-					} else {
-						apply_error(
-							name,
-							&scope,
-							"Batch preflight failed; nothing was written",
-						)
-					}
-				})
-				.collect(),
-			Err(LockedSkillsResyncError::Fetch(error)) => {
-				let error = LockedResyncError::Fetch(error);
-				names
-					.iter()
-					.map(|name| {
-						apply_locked_resync_batch_error(name, &scope, &error)
-					})
-					.collect()
-			}
-			Err(LockedSkillsResyncError::EmptyRequest) => {
-				return Err(ApiError::new(
-					Status::BadRequest,
-					"names must not be empty",
-					"INVALID_PARAM",
-				));
-			}
-		};
+		)
+		.map_err(|error| match error {
+			LockedSkillsResyncError::EmptyRequest => ApiError::new(
+				Status::BadRequest,
+				"names must not be empty",
+				"INVALID_PARAM",
+			),
+			LockedSkillsResyncError::Preflight(
+				LockedResyncError::ProjectRootRequired,
+			) => ApiError::new(
+				Status::BadRequest,
+				"project_root is required when scope is project",
+				"INVALID_PARAM",
+			),
+			LockedSkillsResyncError::Preflight(_) => ApiError::new(
+				Status::BadRequest,
+				"scope must be global or project",
+				"INVALID_PARAM",
+			),
+		})?;
+		let results = outcomes
+			.into_iter()
+			.map(|item| {
+				apply_locked_resync_batch_outcome(
+					item.name,
+					&scope,
+					item.outcome,
+				)
+			})
+			.collect();
 		Ok(Json(ApplySkillUpdatesResponse { results }))
 	})
 	.await

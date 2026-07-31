@@ -197,7 +197,7 @@ impl FetchedRepo {
 /// The variants are payload-free: any underlying message is redacted of URL
 /// userinfo by `aghub_git` and then discarded at the boundary, so a token can
 /// never leak through the error string into the response.
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub enum FetchError {
 	/// Authentication failure (bad/missing token).
 	Auth,

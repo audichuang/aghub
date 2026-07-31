@@ -418,10 +418,15 @@ export function createApi(baseUrl: string) {
 			): Promise<ApplySkillUpdatesResponse> {
 				// Every name belongs to a source group handled by the shared seam;
 				// forwarding remains one request-scoped, origin-pinned header.
+				// No client timeout: one request now covers the fetch plus EVERY
+				// skill's transaction, and aborting it does not stop the server
+				// (it holds the mutation lock to completion) — a client-side
+				// timeout would just report a batch that actually succeeded as
+				// having failed entirely.
 				return client
 					.post("skills/apply-updates", {
 						json: body,
-						timeout: 120000,
+						timeout: false,
 						...(forwardedTokens
 							? { headers: forwardedTokens }
 							: {}),
