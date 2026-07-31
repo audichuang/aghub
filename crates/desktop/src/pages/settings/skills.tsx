@@ -48,6 +48,7 @@ import { useApi } from "../../hooks/use-api";
 import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
+import { matchesLockSource } from "../../lib/source-identity";
 import { cn } from "../../lib/utils";
 import {
 	checkSkillUpdatesMutationOptions,
@@ -761,7 +762,10 @@ export default function SkillsPage() {
 									const row = allSourceRows.find(
 										(r) =>
 											r.rowScope === scope &&
-											r.source === source &&
+											matchesLockSource(
+												r.source,
+												source,
+											) &&
 											(scope === "global" ||
 												(r.projectRoot ?? null) ===
 													(selectedProjectPath ??
