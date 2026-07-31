@@ -48,7 +48,6 @@ import { useApi } from "../../hooks/use-api";
 import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
-import { matchesLockSource } from "../../lib/source-identity";
 import { cn } from "../../lib/utils";
 import {
 	checkSkillUpdatesMutationOptions,
@@ -71,7 +70,11 @@ function sourceDisplayName(row: SourceRow): string {
 }
 
 function sourceRowKey(r: SourceRow) {
-	return `${r.rowScope}:${r.projectRoot ?? ""}:${r.source}`;
+	// Keyed on `sourceUrl`, not `source`: rows are grouped by repository origin,
+	// so two forges serving one `owner/repo` are two rows that SHARE the
+	// host-blind `source`. `sourceUrl` is unique per origin by construction.
+	// Falls back for entries with no recorded URL (local sources).
+	return `${r.rowScope}:${r.projectRoot ?? ""}:${r.sourceUrl || r.source}`;
 }
 
 // ─── Source list panel (view=source) ─────────────────────────────────────────
@@ -762,10 +765,7 @@ export default function SkillsPage() {
 									const row = allSourceRows.find(
 										(r) =>
 											r.rowScope === scope &&
-											matchesLockSource(
-												r.source,
-												source,
-											) &&
+											r.source === source &&
 											(scope === "global" ||
 												(r.projectRoot ?? null) ===
 													(selectedProjectPath ??

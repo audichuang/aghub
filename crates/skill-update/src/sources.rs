@@ -144,23 +144,37 @@ pub fn list_sources(input: SourceListInput) -> Vec<SourceSummary> {
 /// Group the global lock's skills by source (the global lock carries
 /// `sourceUrl`).
 fn global_sources() -> Vec<SourceSummary> {
-	// origin (host[:port]/path) -> (source_url, source_type, count). Keyed on the
-	// ORIGIN, not the host-blind `owner/repo`: two forges serving one path are two
-	// rows, so a row's `sourceUrl` always covers every entry in it — which is what
-	// lets its diff and its apply resolve to the same repository.
-	let mut by_source: BTreeMap<String, (String, String, u32)> =
+	// Keyed on the repository ORIGIN (`host[:port]/path`), so two forges serving
+	// one `owner/repo` are two rows and a row's `sourceUrl` covers every entry in
+	// it — which is what lets its diff and its apply resolve to the same
+	// repository.
+	//
+	// The origin is an INTERNAL key only. A row's reported `source` stays the
+	// lock's own identifier: it is what every consumer already matches against
+	// (credential bindings, the skill list's source groups, `source diff <x>`),
+	// and unlike an origin it is a coordinate a caller can feed back. Row
+	// UNIQUENESS lives in `source_url`, which is unique per origin by
+	// construction.
+	//
+	// origin -> (lock source, source_url, source_type, count)
+	let mut by_origin: BTreeMap<String, (String, String, String, u32)> =
 		BTreeMap::new();
 	for (_name, entry) in skill::get_all_locked_skills() {
 		let origin = source_origin(&entry.source, Some(&entry.source_url));
-		let agg = by_source.entry(origin).or_insert_with(|| {
-			(entry.source_url.clone(), entry.source_type.clone(), 0)
+		let agg = by_origin.entry(origin).or_insert_with(|| {
+			(
+				entry.source.clone(),
+				entry.source_url.clone(),
+				entry.source_type.clone(),
+				0,
+			)
 		});
-		agg.2 += 1;
+		agg.3 += 1;
 	}
-	by_source
-		.into_iter()
+	by_origin
+		.into_values()
 		.map(
-			|(source, (source_url, source_type, skill_count))| SourceSummary {
+			|(source, source_url, source_type, skill_count)| SourceSummary {
 				source,
 				source_url,
 				source_type,
@@ -177,18 +191,26 @@ fn global_sources() -> Vec<SourceSummary> {
 fn project_sources(root: &Path) -> Vec<SourceSummary> {
 	let lock = skill::read_local_lock(Some(root));
 	// source (owner/repo) -> (recorded source_url, source_type, count)
-	let mut by_source: BTreeMap<String, (Option<String>, String, u32)> =
+	// origin -> (lock source, recorded source_url, source_type, count). See
+	// `global_sources` for why the origin stays internal and the reported
+	// `source` remains the lock's own identifier.
+	let mut by_origin: BTreeMap<String, (String, Option<String>, String, u32)> =
 		BTreeMap::new();
 	for (_name, entry) in lock.skills {
 		let origin = source_origin(&entry.source, entry.source_url.as_deref());
-		let agg = by_source.entry(origin).or_insert_with(|| {
-			(entry.source_url.clone(), entry.source_type.clone(), 0)
+		let agg = by_origin.entry(origin).or_insert_with(|| {
+			(
+				entry.source.clone(),
+				entry.source_url.clone(),
+				entry.source_type.clone(),
+				0,
+			)
 		});
-		agg.2 += 1;
+		agg.3 += 1;
 	}
-	by_source
-		.into_iter()
-		.map(|(source, (source_url, source_type, skill_count))| {
+	by_origin
+		.into_values()
+		.map(|(source, source_url, source_type, skill_count)| {
 			let source_url =
 				source_url.unwrap_or_else(|| reconstruct_source_url(&source));
 			SourceSummary {
@@ -203,26 +225,9 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 }
 
 fn reconstruct_source_url(source: &str) -> String {
-	let trimmed = source.trim();
-	// An origin (`host[:port]/path`) — what `list_sources` reports as a row's
-	// identity — is a clone URL missing only its scheme, and a caller echoing one
-	// back (a script, `aghub source diff <row>`) must still reach the repository.
-	//
-	// This runs BEFORE `resolve_remote_source` on purpose: that reader parses
-	// `host:8443/owner/repo` as an SCP-like URL whose PATH is `8443/owner/repo`,
-	// which names a different repository. A dot in the first segment is the
-	// discriminator — forge account names do not contain one, while hosts do
-	// (`mintlify/bun.com` keeps its dot in the REPO segment, not the first).
-	if !trimmed.contains("://") && !trimmed.contains('@') {
-		if let Some((authority, path)) = trimmed.split_once('/') {
-			if authority.contains('.') && !path.is_empty() {
-				return format!("https://{trimmed}");
-			}
-		}
-	}
-	aghub_git::resolve_remote_source(trimmed)
+	aghub_git::resolve_remote_source(source)
 		.map(|resolved| resolved.clone_url)
-		.unwrap_or_else(|_| trimmed.to_string())
+		.unwrap_or_else(|_| source.to_string())
 }
 
 /// Fetch a source with the source-scoped token on the first attempt when one is
@@ -314,21 +319,33 @@ pub(crate) fn source_origin(
 	entry_source: &str,
 	entry_source_url: Option<&str>,
 ) -> String {
+	resolvable_origin(entry_source, entry_source_url)
+		.unwrap_or_else(|| entry_source.trim().to_string())
+}
+
+/// `Some` when a host can be derived, `None` for a HOST-BLIND identifier — a
+/// lock `source` whose forge is not recoverable from the string alone (a TFS
+/// collection path, a local directory). Callers that must not merge two forges
+/// need that distinction: an unresolvable spelling cannot separate them, so
+/// treating its echo as an origin would compare unlike things.
+fn resolvable_origin(
+	entry_source: &str,
+	entry_source_url: Option<&str>,
+) -> Option<String> {
+	// Recorded URLs first — they carry the real host. The reconstruction handles a
+	// shorthand (which IS a GitHub coordinate). The RAW `entry_source` is
+	// deliberately absent: `remote_owner_from_url` reads `host:8443/owner/repo` as
+	// an SCP-like URL whose path is `8443/owner/repo`, so feeding it a raw
+	// authority-bearing string yields a DIFFERENT origin than the URL it came
+	// from — the key would not be idempotent.
 	let candidates = [
 		entry_source_url.map(str::to_string),
-		Some(entry_source.to_string()),
 		entry_source_url.map(reconstruct_source_url),
 		Some(reconstruct_source_url(entry_source)),
 	];
-	for candidate in candidates.into_iter().flatten() {
-		if let Some(origin) =
-			aghub_core::skills::install_fetched::remote_owner_from_url(
-				&candidate,
-			) {
-			return origin;
-		}
-	}
-	entry_source.trim().to_string()
+	candidates.into_iter().flatten().find_map(|candidate| {
+		aghub_core::skills::install_fetched::remote_owner_from_url(&candidate)
+	})
 }
 
 /// Whether a lock entry belongs to the requested source.
@@ -344,10 +361,20 @@ pub(crate) fn source_matches(
 	entry_source: &str,
 	entry_source_url: Option<&str>,
 ) -> bool {
-	if entry_source == want || entry_source_url == Some(want) {
+	if entry_source_url == Some(want) {
 		return true;
 	}
-	source_origin(want, None) == source_origin(entry_source, entry_source_url)
+	let entry = source_origin(entry_source, entry_source_url);
+	match resolvable_origin(want, None) {
+		// `want` names a host, so compare exactly — this is what stops a row from
+		// admitting another forge serving the same path. A bare
+		// `entry_source == want` would not: the lock's identifier is host-blind.
+		Some(origin) => origin == entry,
+		// `want` is host-blind (a TFS collection path, a local directory). It
+		// cannot separate forges, and the caller has given nothing finer, so fall
+		// back to the identifier the lock itself records.
+		None => entry_source == want,
+	}
 }
 
 fn local_hashes_for_installed(
@@ -1073,29 +1100,6 @@ mod origin_tests {
 		}
 	}
 
-	/// A row identity reported by `list_sources` must be usable as INPUT again —
-	/// a script, or `aghub source diff <row>`, echoes it back and has to reach
-	/// the repository. An origin is not GitHub shorthand, so it needs its scheme
-	/// restored.
-	#[test]
-	fn a_reported_origin_round_trips_to_a_clone_url() {
-		assert_eq!(
-			reconstruct_source_url("github.com/owner/repo"),
-			"https://github.com/owner/repo"
-		);
-		assert_eq!(
-			reconstruct_source_url("git.example.com:8443/owner/repo"),
-			"https://git.example.com:8443/owner/repo"
-		);
-		// Not origin-shaped: a local path and a bare shorthand must not gain a
-		// scheme they cannot support.
-		assert_eq!(reconstruct_source_url("/opt/skills/a"), "/opt/skills/a");
-		assert_eq!(
-			reconstruct_source_url("owner/repo"),
-			"https://github.com/owner/repo.git"
-		);
-	}
-
 	/// A local/unresolvable source keeps its own spelling, so two distinct local
 	/// directories never merge into one row.
 	#[test]
@@ -1115,10 +1119,22 @@ mod origin_tests {
 			"owner/repo",
 			Some("https://github.com/owner/repo")
 		));
-		assert!(source_matches(
+		// An ORIGIN is an internal grouping key, deliberately NOT an accepted
+		// input: it is not a coordinate anything can fetch from, and echoing one
+		// back used to yield a different origin than the row it came from (the
+		// port case parsed as SCP-like). Callers pass the row's `source` or its
+		// `sourceUrl`.
+		assert!(!source_matches(
 			"github.com/owner/repo",
 			"owner/repo",
 			Some("https://github.com/owner/repo.git")
+		));
+		// A host-blind identifier the lock records but we cannot resolve (TFS
+		// collection path) still matches itself — nothing finer is available.
+		assert!(source_matches(
+			"Coll/_git/repo",
+			"Coll/_git/repo",
+			Some("https://tfs.example.com/tfs/Coll/_git/repo")
 		));
 		assert!(
 			!source_matches(

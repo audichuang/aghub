@@ -258,9 +258,19 @@ fn two_forges_serving_one_path_are_two_source_rows() {
 			.expect("a gitlab row");
 		assert_eq!(github.skill_count, 2, "alpha + gamma");
 		assert_eq!(gitlab.skill_count, 1, "beta");
-		assert_ne!(
+		// The reported `source` is the lock's own host-blind identifier, so both
+		// rows carry the SAME one — that is deliberate: it is what credential
+		// bindings, the skill list's source groups and `source diff <x>` all
+		// already match against, and unlike an origin it is a coordinate a caller
+		// can feed back. Row UNIQUENESS lives in `source_url`.
+		assert_eq!(
 			github.source, gitlab.source,
-			"a row identity must be unique — the desktop keys its list on it"
+			"the lock identifier is shared"
+		);
+		assert_ne!(
+			github.source_url, gitlab.source_url,
+			"a row must be uniquely identifiable — the desktop keys its list on \
+			 this"
 		);
 	});
 }
