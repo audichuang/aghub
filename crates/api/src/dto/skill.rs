@@ -590,6 +590,18 @@ pub struct ApplySkillUpdateRequest {
 	pub confirm: Option<bool>,
 }
 
+/// Request to update several locked skills from one shared source.
+#[derive(Debug, Clone, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySkillUpdatesRequest {
+	pub source: String,
+	pub names: Vec<String>,
+	pub scope: String,
+	pub project_root: Option<String>,
+	pub confirm: Option<bool>,
+}
+
 /// Response from `POST /skills/apply-update`.
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
@@ -607,6 +619,14 @@ pub struct ApplySkillUpdateResponse {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub code: Option<String>,
+}
+
+/// Ordered per-skill results from `POST /skills/apply-updates`.
+#[derive(Debug, Clone, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplySkillUpdatesResponse {
+	pub results: Vec<ApplySkillUpdateResponse>,
 }
 
 /// Request to atomically rename an installed skill:

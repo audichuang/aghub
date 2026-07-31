@@ -282,6 +282,20 @@ pub struct LockedResyncRequest<'a> {
 	pub project_root: Option<&'a Path>,
 }
 
+pub struct LockedSkillsResyncRequest<'a> {
+	pub source: &'a str,
+	pub names: &'a [String],
+	pub scope: ResourceScope,
+	pub project_root: Option<&'a Path>,
+}
+
+#[derive(Debug)]
+pub struct LockedSkillResyncResult {
+	pub name: String,
+	pub outcome:
+		Result<aghub_core::skills::resync::ResyncReport, LockedResyncError>,
+}
+
 #[derive(Debug)]
 pub enum LockedResyncError {
 	UnsupportedScope(ResourceScope),
@@ -292,34 +306,74 @@ pub enum LockedResyncError {
 	CredentialBackendUnavailable,
 	InvalidSkillPath,
 	SourceSkillNotFound,
+	SourceChanged,
 	Fetch(FetchError),
 	Resync(aghub_core::skills::resync::ResyncError),
 }
 
-/// Resolve one locked skill's source, fetch its selected folder, and delegate
-/// the transactional install/lock update to the existing Fetched Source seam.
-pub fn resync_locked_skill(
-	request: LockedResyncRequest<'_>,
-	fetcher: &dyn Fetcher,
-	resolver: &dyn TokenResolver,
-) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
-	// The identity comes from the SAME read as the coordinates, so the fetch and
-	// the compare-after-fetch can never describe different observations: a second
-	// read could straddle another process's repoint, fetch the old coordinates and
-	// then verify successfully against the new ones.
-	let (source, ref_name, skill_path, expected) = match request.scope {
+#[derive(Debug)]
+pub enum LockedSkillsResyncError {
+	EmptyRequest,
+	Preflight(LockedResyncError),
+	ItemPreflight {
+		name: String,
+		error: LockedResyncError,
+	},
+	Fetch(FetchError),
+}
+
+#[derive(Clone, Debug)]
+struct PreparedLockedResync {
+	name: String,
+	skill_path: String,
+	expected: aghub_core::skills::lock::EntryIdentity,
+	group_index: usize,
+}
+
+struct PreparedFetchGroup {
+	source_ref: SourceRef,
+	folders: Vec<skill::SkillPath>,
+}
+
+fn same_source(expected: &str, actual: &str) -> bool {
+	if expected == actual {
+		return true;
+	}
+	let Ok(expected) = aghub_git::resolve_remote_source(expected) else {
+		return false;
+	};
+	let Ok(actual) = aghub_git::resolve_remote_source(actual) else {
+		return false;
+	};
+	expected.host == actual.host
+		&& expected.source.trim_end_matches(".git")
+			== actual.source.trim_end_matches(".git")
+}
+
+fn prepare_locked_resync(
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Result<(SourceRef, PreparedLockedResync), LockedResyncError> {
+	// Coordinates and identity must come from the SAME entry read. A second
+	// lookup could straddle another process's repoint and let a stale fetch pass
+	// the compare-after-fetch against a different observation.
+	let (source_ref, skill_path, expected) = match scope {
 		ResourceScope::GlobalOnly => {
-			let entry = skill::lock::global::get_skill_from_lock(request.name)
-				.ok_or(LockedResyncError::LockEntryNotFound {
+			let entry = skill::lock::global::get_skill_from_lock(name).ok_or(
+				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::GlobalOnly,
-				})?;
+				},
+			)?;
 			let expected =
 				aghub_core::skills::lock::EntryIdentity::of_global_entry(
 					&entry,
 				);
 			(
-				entry.source_url,
-				entry.ref_name,
+				SourceRef {
+					source: entry.source_url,
+					ref_: entry.ref_name,
+				},
 				entry
 					.skill_path
 					.ok_or(LockedResyncError::MissingSkillPath)?,
@@ -327,11 +381,10 @@ pub fn resync_locked_skill(
 			)
 		}
 		ResourceScope::ProjectOnly => {
-			let root = request
-				.project_root
-				.ok_or(LockedResyncError::ProjectRootRequired)?;
+			let root =
+				project_root.ok_or(LockedResyncError::ProjectRootRequired)?;
 			let lock = skill::lock::local::read_local_lock(Some(root));
-			let entry = lock.skills.get(request.name).cloned().ok_or(
+			let entry = lock.skills.get(name).cloned().ok_or(
 				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::ProjectOnly,
 				},
@@ -341,8 +394,10 @@ pub fn resync_locked_skill(
 					&entry,
 				);
 			(
-				entry.source_url.unwrap_or(entry.source),
-				entry.ref_name,
+				SourceRef {
+					source: entry.source_url.unwrap_or(entry.source),
+					ref_: entry.ref_name,
+				},
 				entry
 					.skill_path
 					.ok_or(LockedResyncError::MissingSkillPath)?,
@@ -357,50 +412,206 @@ pub fn resync_locked_skill(
 	};
 
 	if aghub_core::skills::removal::installed_skill_roots(
-		request.name,
-		request.scope,
-		request.project_root,
+		name,
+		scope,
+		project_root,
 	)
 	.is_empty()
 	{
 		return Err(LockedResyncError::NotInstalled);
 	}
 
-	let fetched = fetch_for_mutation(
-		FetchedSourceRequest {
-			source: &source,
-			ref_name: ref_name.as_deref(),
-			skill_path: &skill_path,
+	Ok((
+		source_ref,
+		PreparedLockedResync {
+			name: name.to_string(),
+			skill_path,
+			expected,
+			group_index: 0,
+		},
+	))
+}
+
+/// Resolve every requested Lock entry before fetching, group entries by their
+/// effective Source + ref, and selectively fetch each group once. All groups
+/// are fetched and validated before any installed copy is mutated; afterwards
+/// every runtime Resync is attempted in request order with its captured
+/// compare-after-fetch identity.
+pub fn resync_locked_skills(
+	request: LockedSkillsResyncRequest<'_>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<Vec<LockedSkillResyncResult>, LockedSkillsResyncError> {
+	match request.scope {
+		ResourceScope::Both => {
+			return Err(LockedSkillsResyncError::Preflight(
+				LockedResyncError::UnsupportedScope(ResourceScope::Both),
+			));
+		}
+		ResourceScope::ProjectOnly if request.project_root.is_none() => {
+			return Err(LockedSkillsResyncError::Preflight(
+				LockedResyncError::ProjectRootRequired,
+			));
+		}
+		_ => {}
+	}
+	if request.names.is_empty() {
+		return Err(LockedSkillsResyncError::EmptyRequest);
+	}
+
+	let mut groups: Vec<PreparedFetchGroup> = Vec::new();
+	let mut prepared = Vec::with_capacity(request.names.len());
+
+	for name in request.names {
+		let (source_ref, mut item) =
+			prepare_locked_resync(name, request.scope, request.project_root)
+				.map_err(|error| LockedSkillsResyncError::ItemPreflight {
+					name: name.clone(),
+					error,
+				})?;
+		if !same_source(request.source, &source_ref.source) {
+			return Err(LockedSkillsResyncError::ItemPreflight {
+				name: name.clone(),
+				error: LockedResyncError::SourceChanged,
+			});
+		}
+		let folder = skill_folder_from_lock_path(&item.skill_path)
+			.ok_or(LockedResyncError::InvalidSkillPath)
+			.map_err(|error| LockedSkillsResyncError::ItemPreflight {
+				name: name.clone(),
+				error,
+			})?;
+		let group_index = if let Some(index) = groups
+			.iter()
+			.position(|group| group.source_ref == source_ref)
+		{
+			index
+		} else {
+			groups.push(PreparedFetchGroup {
+				source_ref,
+				folders: Vec::new(),
+			});
+			groups.len() - 1
+		};
+		let group = &mut groups[group_index];
+		if !group
+			.folders
+			.iter()
+			.any(|seen| seen.as_str() == folder.as_str())
+		{
+			group.folders.push(folder);
+		}
+		item.group_index = group_index;
+		prepared.push(item);
+	}
+
+	let mut fetched_groups = Vec::with_capacity(groups.len());
+	for group in &groups {
+		let token = match resolver.resolve(&group.source_ref.source) {
+			TokenResolution::Token(token) => Some(token),
+			TokenResolution::NoToken => None,
+			TokenResolution::BackendUnavailable => {
+				return Err(LockedSkillsResyncError::Preflight(
+					LockedResyncError::CredentialBackendUnavailable,
+				));
+			}
+		};
+		let repo = fetcher
+			.fetch(
+				&group.source_ref,
+				token.as_deref(),
+				FetchSelection::Skills(&group.folders),
+			)
+			.map_err(LockedSkillsResyncError::Fetch)?;
+		fetched_groups.push(FetchedSource { repo });
+	}
+
+	if let Some(item) = prepared.iter().find(|item| {
+		!fetched_skill_path_exists(
+			&fetched_groups[item.group_index],
+			&item.skill_path,
+		)
+	}) {
+		return Err(LockedSkillsResyncError::ItemPreflight {
+			name: item.name.clone(),
+			error: LockedResyncError::SourceSkillNotFound,
+		});
+	}
+
+	let report = aghub_core::batch::run_multi_target_mutation(
+		&prepared,
+		|_| Ok::<(), LockedResyncError>(()),
+		|item| {
+			resync_fetched_source(
+				&fetched_groups[item.group_index],
+				FetchedResyncRequest {
+					skill_path: &item.skill_path,
+					name: &item.name,
+					scope: request.scope,
+					project_root: request.project_root,
+					expected: item.expected.clone(),
+				},
+			)
+			.map_err(|error| match error {
+				ResyncMutationError::InvalidSkillPath => {
+					LockedResyncError::SourceSkillNotFound
+				}
+				ResyncMutationError::Resync(error) => {
+					LockedResyncError::Resync(error)
+				}
+			})
+		},
+	)
+	.expect("all predictable failures were rejected before batch execution");
+
+	Ok(report
+		.results
+		.into_iter()
+		.map(|row| LockedSkillResyncResult {
+			name: row.target.name,
+			outcome: row.result,
+		})
+		.collect())
+}
+
+/// Resolve one locked skill's source, fetch its selected folder, and delegate
+/// the transactional install/lock update to the existing Fetched Source seam.
+pub fn resync_locked_skill(
+	request: LockedResyncRequest<'_>,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
+	let (source_ref, _) = prepare_locked_resync(
+		request.name,
+		request.scope,
+		request.project_root,
+	)?;
+	let names = [request.name.to_string()];
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source: &source_ref.source,
+			names: &names,
+			scope: request.scope,
+			project_root: request.project_root,
 		},
 		fetcher,
 		resolver,
 	)
 	.map_err(|error| match error {
-		FetchMutationError::CredentialBackendUnavailable => {
-			LockedResyncError::CredentialBackendUnavailable
+		LockedSkillsResyncError::Preflight(error) => error,
+		LockedSkillsResyncError::ItemPreflight { error, .. } => error,
+		LockedSkillsResyncError::Fetch(error) => {
+			LockedResyncError::Fetch(error)
 		}
-		FetchMutationError::InvalidSkillPath => {
-			LockedResyncError::InvalidSkillPath
+		LockedSkillsResyncError::EmptyRequest => {
+			unreachable!("single-item batch cannot be empty")
 		}
-		FetchMutationError::Fetch(error) => LockedResyncError::Fetch(error),
 	})?;
-
-	resync_fetched_source(
-		&fetched,
-		FetchedResyncRequest {
-			skill_path: &skill_path,
-			name: request.name,
-			scope: request.scope,
-			project_root: request.project_root,
-			expected,
-		},
-	)
-	.map_err(|error| match error {
-		ResyncMutationError::InvalidSkillPath => {
-			LockedResyncError::SourceSkillNotFound
-		}
-		ResyncMutationError::Resync(error) => LockedResyncError::Resync(error),
-	})
+	results
+		.into_iter()
+		.next()
+		.expect("single-item batch must return one outcome")
+		.outcome
 }
 
 #[cfg(test)]

@@ -85,6 +85,9 @@ fn locked_resync_error(
 		LockedResyncError::InvalidSkillPath => {
 			anyhow!("locked skillPath is not a valid skill folder")
 		}
+		LockedResyncError::SourceChanged => {
+			anyhow!("skill source changed while updating; retry the command")
+		}
 		LockedResyncError::SourceSkillNotFound => {
 			anyhow!("locked skillPath was not found in source")
 		}

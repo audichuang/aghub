@@ -8,6 +8,8 @@ import type {
 	DeleteSkillByPathRequest,
 	ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse,
+	ApplySkillUpdatesRequest,
+	ApplySkillUpdatesResponse,
 	GitInstallRequest,
 	GitInstallResponse,
 	GitScanRequest,
@@ -531,6 +533,51 @@ export function applySkillUpdateMutationOptions({
 				: undefined;
 			return api.skills.applyUpdate(body, headers);
 		},
+		onSuccess: async (data) => {
+			await invalidateSkillQueries(queryClient);
+			await onSuccess?.(data);
+		},
+		onError,
+	});
+}
+
+interface ApplySkillUpdatesMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: (data: ApplySkillUpdatesResponse) => void | Promise<void>;
+	onError?: (error: Error) => void;
+	forwardForSource?: ForwardForSource;
+}
+
+export interface ApplySkillUpdatesVariables {
+	body: ApplySkillUpdatesRequest;
+	sourceUrl?: string;
+}
+
+interface ApplySkillUpdatesApi {
+	skills: Pick<ApiClient["skills"], "applyUpdates">;
+}
+
+/** Resolve forwarding once and issue exactly one batch HTTP request. */
+export async function applySkillUpdatesRequest(
+	api: ApplySkillUpdatesApi,
+	forwardForSource: ForwardForSource | undefined,
+	{ body, sourceUrl }: ApplySkillUpdatesVariables,
+) {
+	const headers = sourceUrl ? await forwardForSource?.(sourceUrl) : undefined;
+	return api.skills.applyUpdates(body, headers);
+}
+
+export function applySkillUpdatesMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+	onError,
+	forwardForSource,
+}: ApplySkillUpdatesMutationParams) {
+	return mutationOptions({
+		mutationFn: (variables: ApplySkillUpdatesVariables) =>
+			applySkillUpdatesRequest(api, forwardForSource, variables),
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			await onSuccess?.(data);

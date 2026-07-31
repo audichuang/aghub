@@ -59,18 +59,20 @@ use aghub_api::dto::{
 	},
 	skill::{
 		AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
-		ApplySkillUpdateResponse, CreateSkillRequest, DeleteSkillByPathRequest,
-		DeleteSkillByPathResponse, GitCredentialStatus,
-		GitCredentialStatusQuery, GitCredentialStatusResponse,
-		GitInstallRequest, GitInstallResponse, GitInstallResultEntry,
-		GitScanRequest, GitScanResponse, GitScanSkillEntry, GitSyncRequest,
-		GitSyncResponse, GlobalSkillLockResponse, ImportSkillRequest,
-		InstallSkillRequest, InstallSkillResponse, LocalSkillLockEntryResponse,
-		ProjectLockQuery, ProjectSkillLockResponse, PruneLockRequest,
-		PruneLockResponse, SkillContentQuery, SkillLockEntryResponse,
-		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
-		SkillTreeQuery, SkillUpdateResponse, SkillUpdateStatusResponse,
-		SkillUsageResponse, UpdateSkillRequest, ValidationError,
+		ApplySkillUpdateResponse, ApplySkillUpdatesRequest,
+		ApplySkillUpdatesResponse, CreateSkillRequest,
+		DeleteSkillByPathRequest, DeleteSkillByPathResponse,
+		GitCredentialStatus, GitCredentialStatusQuery,
+		GitCredentialStatusResponse, GitInstallRequest, GitInstallResponse,
+		GitInstallResultEntry, GitScanRequest, GitScanResponse,
+		GitScanSkillEntry, GitSyncRequest, GitSyncResponse,
+		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
+		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
+		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
+		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
+		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
+		SkillUpdateResponse, SkillUpdateStatusResponse, SkillUsageResponse,
+		UpdateSkillRequest, ValidationError,
 	},
 	sources::{
 		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
@@ -213,6 +215,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<SkillUpdateResponse>(&cfg)?;
 	export_type::<ApplySkillUpdateRequest>(&cfg)?;
 	export_type::<ApplySkillUpdateResponse>(&cfg)?;
+	export_type::<ApplySkillUpdatesRequest>(&cfg)?;
+	export_type::<ApplySkillUpdatesResponse>(&cfg)?;
 	export_type::<AcceptRenameRequest>(&cfg)?;
 	export_type::<AcceptRenameResponse>(&cfg)?;
 	export_type::<ValidationError>(&cfg)?;

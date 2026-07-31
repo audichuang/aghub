@@ -6,6 +6,8 @@ import type {
 	AgentProviderResponse,
 	ApplySkillUpdateRequest,
 	ApplySkillUpdateResponse,
+	ApplySkillUpdatesRequest,
+	ApplySkillUpdatesResponse,
 	CCMarketplaceAddRequest,
 	CCMarketplaceListResponse,
 	CCMarketplaceMutationResponse,
@@ -402,6 +404,22 @@ export function createApi(baseUrl: string) {
 				// origin-pins the forwarded token like check-updates/diff.
 				return client
 					.post("skills/apply-update", {
+						json: body,
+						timeout: 120000,
+						...(forwardedTokens
+							? { headers: forwardedTokens }
+							: {}),
+					})
+					.json();
+			},
+			applyUpdates(
+				body: ApplySkillUpdatesRequest,
+				forwardedTokens?: GitForwardHeaders,
+			): Promise<ApplySkillUpdatesResponse> {
+				// Every name belongs to a source group handled by the shared seam;
+				// forwarding remains one request-scoped, origin-pinned header.
+				return client
+					.post("skills/apply-updates", {
 						json: body,
 						timeout: 120000,
 						...(forwardedTokens

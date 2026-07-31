@@ -34,7 +34,10 @@ import {
 import { cn } from "../lib/utils";
 import { useSkillCoverage } from "../requests/agents";
 import { queryKeys } from "../requests/keys";
-import { applySkillUpdateMutationOptions } from "../requests/skills";
+import {
+	applySkillUpdateMutationOptions,
+	applySkillUpdatesMutationOptions,
+} from "../requests/skills";
 import { sourceDiffQueryOptions } from "../requests/sources";
 
 const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
@@ -442,6 +445,14 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}),
 	);
 
+	const applyUpdatesMutation = useMutation(
+		applySkillUpdatesMutationOptions({
+			api,
+			queryClient,
+			forwardForSource,
+		}),
+	);
+
 	const prunePreviewQuery = useQuery({
 		queryKey: queryKeys.skills.pruneLock(updateScope, updateProjectRoot),
 		queryFn: () =>
@@ -585,32 +596,21 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		if (skills.length === 0 || isApplyingAll || isDeletingAllRemoved)
 			return;
 		setIsApplyingAll(true);
-		setBatchDone(0);
-		let updated = 0;
-		let failed = 0;
-		// Resolve the forward header once for the source and reuse it for each
-		// apply in the loop (same source → same origin-pinned token).
-		const forwardHeaders = await forwardForSource(diffSource);
 		try {
-			for (const skill of skills) {
-				try {
-					const result = await api.skills.applyUpdate(
-						updateRequestFor(skill),
-						forwardHeaders,
-					);
-					if (result.success) {
-						updated += 1;
-					} else {
-						failed += 1;
-					}
-				} catch {
-					failed += 1;
-				}
-				setBatchDone(updated + failed);
-			}
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.all(),
+			const response = await applyUpdatesMutation.mutateAsync({
+				body: {
+					source: diffSource,
+					names: skills.map((skill) => skill.name),
+					scope: updateScope,
+					projectRoot: updateProjectRoot,
+					confirm: true,
+				},
+				sourceUrl: diffSource,
 			});
+			const updated = response.results.filter(
+				(result) => result.success,
+			).length;
+			const failed = response.results.length - updated;
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});
@@ -618,11 +618,28 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				toast.danger(
 					failed === 1
 						? t("sourceUpdateSomeFailedOne", { count: failed })
-						: t("sourceUpdateSomeFailedMany", { count: failed }),
+						: t("sourceUpdateSomeFailedMany", {
+								count: failed,
+							}),
 				);
 			} else {
 				toast.success(t("sourceUpdatesApplied", { count: updated }));
 			}
+		} catch {
+			const failed = skills.length;
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.all(),
+			});
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.sources.all(),
+			});
+			toast.danger(
+				failed === 1
+					? t("sourceUpdateSomeFailedOne", { count: failed })
+					: t("sourceUpdateSomeFailedMany", {
+							count: failed,
+						}),
+			);
 		} finally {
 			setIsApplyingAll(false);
 		}
@@ -940,7 +957,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											>
 												<ArrowPathIcon className="size-3.5" />
 												{isApplyingAll
-													? `${t("sourceUpdating")} ${batchDone}/${outdated.length}`
+													? t("sourceUpdating")
 													: t("sourceUpdateAll")}
 											</Button>
 										)}

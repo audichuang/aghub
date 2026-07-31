@@ -56,3 +56,55 @@ test("subAgents.delete sends confirm=true so the backend executes", async () => 
 	assert.equal(calls.length, 1);
 	assert.equal(calls[0].searchParams.get("confirm"), "true");
 });
+test("skills.applyUpdates sends one forwarded batch request", async () => {
+	const original = globalThis.fetch;
+	const calls: Array<{
+		url: URL;
+		headers: Headers;
+		body: unknown;
+	}> = [];
+	globalThis.fetch = (async (
+		input: RequestInfo | URL,
+		init?: RequestInit,
+	) => {
+		const request =
+			input instanceof Request ? input : new Request(input, init);
+		calls.push({
+			url: new URL(request.url),
+			headers: request.headers,
+			body: await request.clone().json(),
+		});
+		return new Response(JSON.stringify({ results: [] }), {
+			status: 200,
+			headers: { "Content-Type": "application/json" },
+		});
+	}) as typeof fetch;
+	try {
+		const response = await createApi(
+			"http://api.test/",
+		).skills.applyUpdates(
+			{
+				source: "https://git.example/owner/repo.git",
+				names: ["alpha", "beta"],
+				scope: "project",
+				projectRoot: "/tmp/project",
+				confirm: true,
+			},
+			{ "X-Aghub-Git-Tokens": "forwarded" },
+		);
+		assert.deepEqual(response, { results: [] });
+	} finally {
+		globalThis.fetch = original;
+	}
+
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].url.pathname, "/skills/apply-updates");
+	assert.equal(calls[0].headers.get("X-Aghub-Git-Tokens"), "forwarded");
+	assert.deepEqual(calls[0].body, {
+		source: "https://git.example/owner/repo.git",
+		names: ["alpha", "beta"],
+		scope: "project",
+		projectRoot: "/tmp/project",
+		confirm: true,
+	});
+});

@@ -26,7 +26,8 @@ use crate::credentials::forwarding::ForwardedGitTokens;
 use crate::credentials::source_auth::SourceAuth;
 use crate::dto::skill::{
 	AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
-	ApplySkillUpdateResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
+	ApplySkillUpdateResponse, ApplySkillUpdatesRequest,
+	ApplySkillUpdatesResponse, SkillUpdateResponse, SkillUpdateStatusResponse,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
@@ -34,8 +35,9 @@ use crate::skills::rename::{skill_renamed_message, SKILL_RENAMED_CODE};
 use crate::skills::resync::safe_resync_error;
 use skill_update::mutation::{
 	accept_fetched_rename, fetch_for_rename, resync_locked_skill,
-	FetchRenameError, FetchedRenameRequest, LockedResyncError,
-	LockedResyncRequest,
+	resync_locked_skills, FetchRenameError, FetchedRenameRequest,
+	LockedResyncError, LockedResyncRequest, LockedSkillsResyncError,
+	LockedSkillsResyncRequest,
 };
 // Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
 // match its gate exactly or Windows clippy flags an unused import.
@@ -305,11 +307,134 @@ fn apply_error_with_code(
 	}
 }
 
-fn fetch_error_text(error: FetchError) -> &'static str {
+fn fetch_error_text(error: &FetchError) -> &'static str {
 	match error {
 		FetchError::Auth => "Authentication failed while fetching source",
 		FetchError::Network => "Failed to fetch source repository",
 		FetchError::BackendUnavailable => "Credential backend unavailable",
+	}
+}
+
+fn apply_locked_resync_error(
+	name: &str,
+	scope: &str,
+	error: &LockedResyncError,
+) -> Result<ApplySkillUpdateResponse, ApiError> {
+	match error {
+		LockedResyncError::LockEntryNotFound {
+			scope: locked_scope,
+		} => {
+			let message = if *locked_scope == ResourceScope::GlobalOnly {
+				"Skill is not in global lock"
+			} else {
+				"Skill is not in project lock"
+			};
+			Ok(apply_error(name, scope, message))
+		}
+		LockedResyncError::MissingSkillPath => {
+			Ok(apply_error(name, scope, "Locked skill has no skillPath"))
+		}
+		LockedResyncError::NotInstalled => Ok(apply_error(
+			name,
+			scope,
+			"Skill is locked but no installed copy was found",
+		)),
+		LockedResyncError::CredentialBackendUnavailable => {
+			Err(crate::credentials::CredentialStoreError::Unavailable(
+				"credential backend unreachable".to_string(),
+			)
+			.into())
+		}
+		LockedResyncError::InvalidSkillPath => Ok(apply_error(
+			name,
+			scope,
+			"Locked skillPath is not a valid skill folder",
+		)),
+		LockedResyncError::SourceSkillNotFound => Ok(apply_error(
+			name,
+			scope,
+			"Locked skillPath was not found in fetched source",
+		)),
+		LockedResyncError::SourceChanged => Ok(apply_error(
+			name,
+			scope,
+			"Skill source changed; refresh Sources and retry",
+		)),
+		LockedResyncError::Fetch(error) => {
+			Ok(apply_error(name, scope, fetch_error_text(error)))
+		}
+		LockedResyncError::Resync(
+			aghub_core::skills::resync::ResyncError::Renamed { new_name },
+		) => Ok(apply_error_with_code(
+			name,
+			scope,
+			&skill_renamed_message(name, new_name),
+			Some(SKILL_RENAMED_CODE),
+		)),
+		LockedResyncError::Resync(error) => {
+			let mapped = safe_resync_error(error);
+			Ok(apply_error_with_code(
+				name,
+				scope,
+				mapped.message,
+				Some(mapped.code),
+			))
+		}
+		LockedResyncError::ProjectRootRequired => Ok(apply_error(
+			name,
+			scope,
+			"project_root is required when scope is project",
+		)),
+		LockedResyncError::UnsupportedScope(_) => {
+			Ok(apply_error(name, scope, "scope must be global or project"))
+		}
+	}
+}
+
+fn apply_locked_resync_outcome(
+	name: String,
+	scope: &str,
+	outcome: Result<
+		aghub_core::skills::resync::ResyncReport,
+		LockedResyncError,
+	>,
+) -> Result<ApplySkillUpdateResponse, ApiError> {
+	match outcome {
+		Ok(report) => Ok(ApplySkillUpdateResponse {
+			success: true,
+			name,
+			scope: scope.to_string(),
+			updated_hash: Some(report.updated_hash),
+			paths: report
+				.swapped
+				.iter()
+				.map(|path| path.display().to_string())
+				.collect(),
+			error: None,
+			code: None,
+		}),
+		Err(error) => apply_locked_resync_error(&name, scope, &error),
+	}
+}
+
+fn apply_locked_resync_batch_error(
+	name: &str,
+	scope: &str,
+	error: &LockedResyncError,
+) -> ApplySkillUpdateResponse {
+	if matches!(error, LockedResyncError::CredentialBackendUnavailable) {
+		return apply_error_with_code(
+			name,
+			scope,
+			"Credential backend unavailable",
+			Some("KEYCHAIN_UNAVAILABLE"),
+		);
+	}
+	match apply_locked_resync_error(name, scope, error) {
+		Ok(response) => response,
+		Err(_) => unreachable!(
+			"only credential backend failures project to a top-level API error"
+		),
 	}
 }
 
@@ -408,102 +533,133 @@ pub(crate) async fn apply_skill_update_inner(
 
 	// `resync_locked_skill` is synchronous but does BOTH the network fetch and the
 	// lock-holding transaction, so it must not run on an async worker.
+	let name = req.name;
+	let scope = req.scope;
 	crate::blocking::in_mutation_pool(|| {
-		match resync_locked_skill(
+		let outcome = resync_locked_skill(
 			LockedResyncRequest {
-				name: &req.name,
+				name: &name,
+				scope: resource_scope,
+				project_root: project_root.as_deref(),
+			},
+			fetcher,
+			resolver,
+		);
+		apply_locked_resync_outcome(name, &scope, outcome).map(Json)
+	})
+	.await
+}
+
+/// `POST /skills/apply-updates` — update several locked skills from Sources.
+#[post("/skills/apply-updates", data = "<body>")]
+pub async fn apply_skill_updates(
+	_origin: TrustedLocalOrigin,
+	body: Json<ApplySkillUpdatesRequest>,
+	forwarded: ForwardedGitTokens,
+) -> ApiResult<ApplySkillUpdatesResponse> {
+	let resolver = SourceAuth::load(forwarded).await;
+	apply_skill_updates_inner(body.into_inner(), &GitFetcher, &resolver).await
+}
+
+pub(crate) async fn apply_skill_updates_inner(
+	req: ApplySkillUpdatesRequest,
+	fetcher: &dyn Fetcher,
+	resolver: &dyn TokenResolver,
+) -> ApiResult<ApplySkillUpdatesResponse> {
+	if !req.confirm.unwrap_or(false) {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"confirm=true is required to overwrite installed skill files",
+			"INVALID_PARAM",
+		));
+	}
+	if req.names.is_empty() {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"names must not be empty",
+			"INVALID_PARAM",
+		));
+	}
+
+	let resolved = ScopeParams {
+		scope: Some(req.scope.clone()),
+		project_root: req.project_root.clone(),
+	}
+	.resolve()?;
+	let (resource_scope, project_root) = match resolved {
+		ResolvedScope::Global => (ResourceScope::GlobalOnly, None),
+		ResolvedScope::Project { root } => {
+			(ResourceScope::ProjectOnly, Some(root))
+		}
+		ResolvedScope::All { .. } => {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				"scope must be global or project",
+				"INVALID_PARAM",
+			));
+		}
+	};
+
+	let names = req.names;
+	let scope = req.scope;
+	crate::blocking::in_mutation_pool(|| {
+		let results = match resync_locked_skills(
+			LockedSkillsResyncRequest {
+				source: &req.source,
+				names: &names,
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
 			},
 			fetcher,
 			resolver,
 		) {
-			Ok(report) => Ok(Json(ApplySkillUpdateResponse {
-				success: true,
-				name: req.name,
-				scope: req.scope,
-				updated_hash: Some(report.updated_hash),
-				paths: report
-					.swapped
+			Ok(outcomes) => outcomes
+				.into_iter()
+				.map(|item| {
+					apply_locked_resync_outcome(item.name, &scope, item.outcome)
+				})
+				.collect::<Result<Vec<_>, ApiError>>()?,
+			Err(LockedSkillsResyncError::Preflight(error)) => names
+				.iter()
+				.map(|name| {
+					apply_locked_resync_batch_error(name, &scope, &error)
+				})
+				.collect(),
+			Err(LockedSkillsResyncError::ItemPreflight {
+				name: failed_name,
+				error,
+			}) => names
+				.iter()
+				.map(|name| {
+					if name == &failed_name {
+						apply_locked_resync_batch_error(name, &scope, &error)
+					} else {
+						apply_error(
+							name,
+							&scope,
+							"Batch preflight failed; nothing was written",
+						)
+					}
+				})
+				.collect(),
+			Err(LockedSkillsResyncError::Fetch(error)) => {
+				let error = LockedResyncError::Fetch(error);
+				names
 					.iter()
-					.map(|p| p.display().to_string())
-					.collect(),
-				error: None,
-				code: None,
-			})),
-			Err(LockedResyncError::LockEntryNotFound { scope }) => {
-				let message = if scope == ResourceScope::GlobalOnly {
-					"Skill is not in global lock"
-				} else {
-					"Skill is not in project lock"
-				};
-				Ok(Json(apply_error(&req.name, &req.scope, message)))
+					.map(|name| {
+						apply_locked_resync_batch_error(name, &scope, &error)
+					})
+					.collect()
 			}
-			Err(LockedResyncError::MissingSkillPath) => Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				"Locked skill has no skillPath",
-			))),
-			Err(LockedResyncError::NotInstalled) => Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				"Skill is locked but no installed copy was found",
-			))),
-			Err(LockedResyncError::CredentialBackendUnavailable) => {
-				Err(crate::credentials::CredentialStoreError::Unavailable(
-					"credential backend unreachable".to_string(),
-				)
-				.into())
+			Err(LockedSkillsResyncError::EmptyRequest) => {
+				return Err(ApiError::new(
+					Status::BadRequest,
+					"names must not be empty",
+					"INVALID_PARAM",
+				));
 			}
-			Err(LockedResyncError::InvalidSkillPath) => Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				"Locked skillPath is not a valid skill folder",
-			))),
-			Err(LockedResyncError::SourceSkillNotFound) => {
-				Ok(Json(apply_error(
-					&req.name,
-					&req.scope,
-					"Locked skillPath was not found in fetched source",
-				)))
-			}
-			Err(LockedResyncError::Fetch(error)) => Ok(Json(apply_error(
-				&req.name,
-				&req.scope,
-				fetch_error_text(error),
-			))),
-			Err(LockedResyncError::Resync(
-				aghub_core::skills::resync::ResyncError::Renamed { new_name },
-			)) => Ok(Json(apply_error_with_code(
-				&req.name,
-				&req.scope,
-				&skill_renamed_message(&req.name, &new_name),
-				Some(SKILL_RENAMED_CODE),
-			))),
-			Err(LockedResyncError::Resync(error)) => {
-				let mapped = safe_resync_error(&error);
-				Ok(Json(apply_error_with_code(
-					&req.name,
-					&req.scope,
-					mapped.message,
-					Some(mapped.code),
-				)))
-			}
-			Err(LockedResyncError::ProjectRootRequired) => {
-				Ok(Json(apply_error(
-					&req.name,
-					&req.scope,
-					"project_root is required when scope is project",
-				)))
-			}
-			Err(LockedResyncError::UnsupportedScope(_)) => {
-				Ok(Json(apply_error(
-					&req.name,
-					&req.scope,
-					"scope must be global or project",
-				)))
-			}
-		}
+		};
+		Ok(Json(ApplySkillUpdatesResponse { results }))
 	})
 	.await
 }
@@ -660,7 +816,7 @@ pub(crate) async fn accept_rename_inner(
 				&req.old_name,
 				&req.new_name,
 				&req.scope,
-				fetch_error_text(error),
+				fetch_error_text(&error),
 			)));
 		}
 	};
@@ -750,6 +906,51 @@ mod tests {
 		}
 	}
 
+	#[cfg(unix)]
+	struct CountingFetcher {
+		root: PathBuf,
+		calls: std::sync::atomic::AtomicUsize,
+	}
+
+	#[cfg(unix)]
+	impl Fetcher for CountingFetcher {
+		fn fetch(
+			&self,
+			_source_ref: &SourceRef,
+			_token: Option<&str>,
+			_selection: skill_update::FetchSelection<'_>,
+		) -> Result<skill_update::FetchedRepo, FetchError> {
+			self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+			Ok(skill_update::FetchedRepo {
+				root: self.root.clone(),
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "batch-commit".to_string(),
+					tree_oid: "batch-tree".to_string(),
+					commit_time: None,
+				},
+				_guard: None,
+			})
+		}
+	}
+
+	#[cfg(unix)]
+	fn prepare_global_batch(home: &Path) {
+		let mut lock = skill::SkillLockFile::default();
+		for name in ["alpha", "beta"] {
+			let installed = home.join(format!(".claude/skills/{name}"));
+			std::fs::create_dir_all(&installed).unwrap();
+			std::fs::write(
+				installed.join("SKILL.md"),
+				format!("---\nname: {name}\ndescription: old\n---\nold\n"),
+			)
+			.unwrap();
+			let mut entry = global_entry();
+			entry.skill_path = Some(format!("skills/{name}/SKILL.md"));
+			lock.skills.insert(name.to_string(), entry);
+		}
+		skill::lock::global::write_skill_lock(&lock).unwrap();
+	}
+
 	/// Regression coverage for F2: `apply_skill_update_inner` must fail
 	/// closed (503 `KEYCHAIN_UNAVAILABLE`) BEFORE any fetch is attempted when
 	/// the injected resolver's `resolve` reports
@@ -808,6 +1009,127 @@ mod tests {
 			};
 			assert_eq!(error.status, rocket::http::Status::ServiceUnavailable);
 			assert_eq!(error.body.code, "KEYCHAIN_UNAVAILABLE");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_fetches_once_and_preserves_request_order() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+			prepare_global_batch(home.path());
+
+			let fetched = tempfile::tempdir().unwrap();
+			for name in ["alpha", "beta"] {
+				let directory = fetched.path().join(format!("skills/{name}"));
+				std::fs::create_dir_all(&directory).unwrap();
+				std::fs::write(
+					directory.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: new\n---\nnew\n"),
+				)
+				.unwrap();
+			}
+			let fetcher = CountingFetcher {
+				root: fetched.path().to_path_buf(),
+				calls: std::sync::atomic::AtomicUsize::new(0),
+			};
+			let resolver = empty_keyring_resolver();
+			let result = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap()
+				.block_on(apply_skill_updates_inner(
+					ApplySkillUpdatesRequest {
+						source: "https://github.com/owner/repo".to_string(),
+						names: vec!["beta".to_string(), "alpha".to_string()],
+						scope: "global".to_string(),
+						project_root: None,
+						confirm: Some(true),
+					},
+					&fetcher,
+					&resolver,
+				));
+
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			let response = match result {
+				Ok(json) => json.into_inner(),
+				Err(error) => {
+					panic!("batch apply should return Ok: {}", error.body.error)
+				}
+			};
+			assert_eq!(
+				fetcher.calls.load(std::sync::atomic::Ordering::SeqCst),
+				1,
+				"skills sharing a source and ref must share one fetch"
+			);
+			assert_eq!(
+				response
+					.results
+					.iter()
+					.map(|row| row.name.as_str())
+					.collect::<Vec<_>>(),
+				["beta", "alpha"]
+			);
+			assert!(response.results.iter().all(|row| row.success));
+			for name in ["alpha", "beta"] {
+				let installed = std::fs::read_to_string(
+					home.path().join(format!(".claude/skills/{name}/SKILL.md")),
+				)
+				.unwrap();
+				assert!(installed.contains("new"), "{name} was not updated");
+			}
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_reports_backend_failure_for_every_ordered_row() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+			prepare_global_batch(home.path());
+			let result = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap()
+				.block_on(apply_skill_updates_inner(
+					ApplySkillUpdatesRequest {
+						source: "https://github.com/owner/repo".to_string(),
+						names: vec!["beta".to_string(), "alpha".to_string()],
+						scope: "global".to_string(),
+						project_root: None,
+						confirm: Some(true),
+					},
+					&PanicOnFetch,
+					&StubBackendUnavailableResolver,
+				));
+
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			let response = match result {
+				Ok(json) => json.into_inner(),
+				Err(error) => panic!(
+					"batch failures belong in ordered rows: {}",
+					error.body.error
+				),
+			};
+			assert_eq!(response.results.len(), 2);
+			assert_eq!(response.results[0].name, "beta");
+			assert_eq!(response.results[1].name, "alpha");
+			assert!(response.results.iter().all(|row| !row.success));
+			assert!(response.results.iter().all(|row| {
+				row.code.as_deref() == Some("KEYCHAIN_UNAVAILABLE")
+			}));
 		});
 	}
 

@@ -308,6 +308,7 @@ fn build_rocket_with_state_factories(
 				routes::skills::git_sync_skill,
 				routes::skills_update::check_skill_updates,
 				routes::skills_update::apply_skill_update,
+				routes::skills_update::apply_skill_updates,
 				routes::skills_update::accept_skill_rename,
 				routes::sources::list_sources,
 				routes::sources::diff_source,

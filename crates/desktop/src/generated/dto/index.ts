@@ -12,6 +12,8 @@ export type { AgentProviderSourceDto } from "./AgentProviderSourceDto";
 export type { AgentSkillCoverageDto } from "./AgentSkillCoverageDto";
 export type { ApplySkillUpdateRequest } from "./ApplySkillUpdateRequest";
 export type { ApplySkillUpdateResponse } from "./ApplySkillUpdateResponse";
+export type { ApplySkillUpdatesRequest } from "./ApplySkillUpdatesRequest";
+export type { ApplySkillUpdatesResponse } from "./ApplySkillUpdatesResponse";
 export type { BatchCreateMcpRequest } from "./BatchCreateMcpRequest";
 export type { CCMarketplaceAddRequest } from "./CCMarketplaceAddRequest";
 export type { CCMarketplaceEntryResponse } from "./CCMarketplaceEntryResponse";
