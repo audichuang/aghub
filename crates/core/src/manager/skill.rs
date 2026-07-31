@@ -136,7 +136,9 @@ impl ConfigManager {
 	///
 	/// Every guarded `ConfigManager` mutation goes through here rather than
 	/// calling `mutation_guard` directly, so a new one cannot acquire the lock and
-	/// forget the re-read. A dry-run takes neither.
+	/// forget the re-read. A dry-run takes neither. One documented exception,
+	/// `update_skill` — see the comment there for the macOS-only regression that
+	/// keeps its re-read out for now.
 	fn guard_and_reload(
 		&mut self,
 		op: &str,
@@ -292,10 +294,26 @@ impl ConfigManager {
 		// A rename here is `rename_skill_master` + a relink of every Referrer —
 		// itself transactional, so it must not interleave with another process's
 		// install of either name. Scope (not write_scope) because the relink
-		// sweeps every in-scope agent dir. Re-reads config under the lock: the
-		// `source_path` this rename moves is read below.
-		let _mutation_guard =
-			self.guard_and_reload("update skill", self.scope)?;
+		// sweeps every in-scope agent dir.
+		//
+		// The ONLY guarded mutation that does not `guard_and_reload`, and that is a
+		// known gap, not a decision: re-reading here regressed two rename tests on
+		// macOS ONLY ("the referrer must resolve to the master" — the relink lands
+		// somewhere that does not resolve). The paths this flow renames come from
+		// the reloaded entry, and on macOS a filesystem-resolved path is
+		// `/private/var/...` where the caller's root is `/var/...`; something in
+		// that pair breaks the relink. It could not be reproduced on Linux — a
+		// project root that is itself a symlink still passes — so the re-read is
+		// withheld until the macOS behaviour is understood rather than guessed at.
+		// The stale-view window Codey found therefore stays OPEN here (it is closed
+		// in add / add-from-path / remove / remove-planned); see
+		// docs/specs/2026-07-29-skill-mutation-interprocess-lock.md.
+		let _mutation_guard = crate::skills::lock::mutation_guard(
+			"update skill",
+			self.scope,
+			self.project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
 
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();

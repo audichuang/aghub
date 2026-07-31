@@ -2948,7 +2948,11 @@ mod tests {
 		assert_eq!(body["code"], "SESSION_NOT_FOUND");
 	}
 
-	#[cfg(unix)]
+	/// Drive an async handler directly from a sync test. NOT `#[cfg(unix)]`: it
+	/// started out serving only the unix-gated by-path delete tests, but the
+	/// prune-lock and import handlers became `async` (they run their transaction
+	/// through `blocking::in_mutation_pool`) and their tests are cross-platform,
+	/// so gating this to unix broke the Windows build — which only CI sees.
 	fn block_on<F: std::future::Future>(fut: F) -> F::Output {
 		rocket::tokio::runtime::Builder::new_current_thread()
 			.enable_all()

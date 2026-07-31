@@ -88,6 +88,13 @@ bytes came from the other coordinates.
   component that does not exist cannot be a symlink. What remains: two spellings
   that differ _inside_ a tail neither of which exists can still fork. No flow
   constructs one.
+- **`update_skill` still decides from a pre-lock config.** Every other guarded
+  `ConfigManager` mutation re-reads under the guard (`guard_and_reload`); this one
+  does not. Adding the re-read there regressed two universal-rename tests on
+  **macOS only** — the relinked referrer stops resolving — and the condition could
+  not be reproduced on Linux (a symlinked project root still passes), so the
+  re-read is withheld rather than guessed at. Needs a macOS run that prints the
+  reloaded `canonical_path` / `source_path` to settle what differs.
 - **API worker starvation (closed).** Acquiring the lock blocks the calling
   thread, so a Rocket handler doing it on an async worker could park every worker
   and stop even unlocked read routes. Every mutating skill route now runs its
