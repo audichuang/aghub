@@ -60,11 +60,12 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 /// caller named. Distinct from `SOURCE_CHANGED_DURING_FETCH`: nothing moved
 /// mid-flight, the caller's Sources view is simply stale.
 const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
-/// Upper bound on one batch's `names`. The lock is re-read and dedupe is
-/// quadratic per name, all inside one blocking task — an unbounded list lets a
-/// single request occupy a mutation worker for minutes. Far above any real
-/// Source's outdated count.
-const MAX_BATCH_NAMES: usize = 500;
+/// Upper bound on one batch's `names`. The per-name costs that motivated a tight
+/// bound are gone (the seam reads the lock ONCE and dedupes linearly), so this is
+/// now only a backstop against an absurd body occupying a mutation worker — set
+/// far above any real Source, so "Update all" can never be unusable because a
+/// Source is large.
+const MAX_BATCH_NAMES: usize = 10_000;
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -365,7 +366,7 @@ fn apply_locked_resync_error(
 		)),
 		// The only row state that is worth RETRYING after a refresh, so it must
 		// be machine-distinguishable from the terminal ones.
-		LockedResyncError::SourceChanged => Ok(apply_error_with_code(
+		LockedResyncError::SourceGroupMismatch => Ok(apply_error_with_code(
 			name,
 			scope,
 			"Skill source changed; refresh Sources and retry",
@@ -664,7 +665,7 @@ pub(crate) async fn apply_skill_updates_inner(
 		// produce rows at all is an API-level error.
 		let outcomes = resync_locked_skills(
 			LockedSkillsResyncRequest {
-				source: Some(&req.source),
+				source_group: Some(&req.source),
 				names: &names,
 				scope: resource_scope,
 				project_root: project_root.as_deref(),

@@ -158,7 +158,7 @@ fn global_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
 		let names = vec!["alpha".to_string(), "beta".to_string()];
 		let results = resync_locked_skills(
 			LockedSkillsResyncRequest {
-				source: Some("https://github.com/owner/repo.git"),
+				source_group: Some("https://github.com/owner/repo.git"),
 				names: &names,
 				scope: ResourceScope::GlobalOnly,
 				project_root: None,

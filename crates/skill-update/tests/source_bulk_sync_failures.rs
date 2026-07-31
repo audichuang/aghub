@@ -149,7 +149,7 @@ fn changed_source_fails_its_rows_without_fetching_anything() {
 	// with no resolvable row there is no group left to fetch at all.
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("other/repo"),
+			source_group: Some("other/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -161,7 +161,10 @@ fn changed_source_fails_its_rows_without_fetching_anything() {
 	assert_eq!(results.len(), 2);
 	for (row, name) in results.iter().zip(&names) {
 		assert_eq!(&row.name, name);
-		assert!(matches!(row.outcome, Err(LockedResyncError::SourceChanged),));
+		assert!(matches!(
+			row.outcome,
+			Err(LockedResyncError::SourceGroupMismatch),
+		));
 		let installed = std::fs::read_to_string(
 			project.join(format!(".claude/skills/{name}/SKILL.md")),
 		)
@@ -185,7 +188,7 @@ fn missing_fetched_skill_fails_only_its_own_row() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("owner/repo"),
+			source_group: Some("owner/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -233,7 +236,7 @@ fn unresolvable_entry_fails_only_its_own_row() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("owner/repo"),
+			source_group: Some("owner/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -280,7 +283,7 @@ fn one_groups_fetch_failure_leaves_the_other_group_updatable() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("owner/repo"),
+			source_group: Some("owner/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -328,7 +331,7 @@ fn repeated_name_is_attempted_once() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("owner/repo"),
+			source_group: Some("owner/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -356,7 +359,7 @@ fn stale_first_entry_does_not_prevent_later_runtime_attempts() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("owner/repo"),
+			source_group: Some("owner/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -409,7 +412,7 @@ fn repointed_entry_fails_without_costing_its_sibling() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("owner/repo"),
+			source_group: Some("owner/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -423,7 +426,7 @@ fn repointed_entry_fails_without_costing_its_sibling() {
 	.expect("one repointed entry must not fail the request");
 	assert!(matches!(
 		results[0].outcome,
-		Err(LockedResyncError::SourceChanged),
+		Err(LockedResyncError::SourceGroupMismatch),
 	));
 	assert!(results[1].outcome.is_ok(), "beta must still be updated");
 	assert!(std::fs::read_to_string(

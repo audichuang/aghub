@@ -104,7 +104,7 @@ fn locked_multi_resync_fetches_one_source_and_updates_every_skill() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("https://git.example/owner/repo.git"),
+			source_group: Some("https://git.example/owner/repo.git"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -188,7 +188,7 @@ fn locked_multi_resync_fetches_each_source_ref_once_and_preserves_order() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("https://git.example/owner/repo.git"),
+			source_group: Some("https://git.example/owner/repo.git"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -266,7 +266,7 @@ fn one_source_row_spanning_two_hosts_updates_each_from_its_own_host() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("https://github.com/owner/repo.git"),
+			source_group: Some("https://github.com/owner/repo.git"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -319,7 +319,7 @@ fn reconstructed_source_url_matches_a_shorthand_only_entry() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("https://github.com/owner/repo.git"),
+			source_group: Some("https://github.com/owner/repo.git"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
@@ -369,7 +369,7 @@ fn tfs_style_source_identifier_matches_its_own_entry() {
 
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: Some("Coll/_git/repo"),
+			source_group: Some("Coll/_git/repo"),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),

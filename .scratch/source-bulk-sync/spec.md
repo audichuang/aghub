@@ -46,13 +46,34 @@ per-skill install/lock transaction.
 - Shared module: Lock observation, Source assertion, fetch grouping,
   compare-after-fetch, attempt-all row policy, ordered results.
 
-## Known gap (not addressed here)
+## Original objective NOT met
 
-CLI `source sync --update` still runs its OWN bulk loop
-(`capture_scope_identities` + `apply_update_row`) rather than this seam; the two
-share only `resync_fetched_source`. Their row policies already differ. Folding
-the CLI onto this seam needs its dry-run/diff view to be reconciled with the
-Lock-entry-driven row model, so it is left as follow-up work.
+This spec's stated objective was ONE Rust bulk implementation shared by the
+Desktop HTTP adapter and the CLI adapter. That was not achieved: CLI
+`source sync --update` still runs its OWN bulk loop
+(`capture_scope_identities` + `apply_update_row`), and the two share only
+`resync_fetched_source` — which they already shared BEFORE this work. Their row
+policies differ (the CLI treats a missing pre-fetch identity as one failed row
+and continues; this seam rejects that row for a different reason).
+
+Recorded as unmet rather than reworded into a "known gap": an earlier revision
+of this file downgraded the objective to match the implementation, which is
+documentation bending to code. Shipped in v2.9.1 with the objective open.
+
+Mitigating context, not a justification: the CLI has ONE source and ONE fetched
+tree, so it needs no grouping, and the transactional core is already shared. The
+un-shared part is the thin attempt-all ordering layer. Folding the CLI on needs
+this seam to accept an already-fetched Source so the CLI does not fetch twice.
+
+## Batch failure policy — approved decision
+
+Per-row attribution (a predictable failure fails only its own row) is the
+APPROVED behavior, decided by the maintainer after v2.9.1 shipped it. The
+alternative considered and rejected was the original fail-closed contract
+(any predictable failure ⇒ nothing written for the whole batch): the named
+skills are independent and each row's own install+lock swap is already
+transactional, so aborting buys no atomicity while letting one unresolvable
+entry cost every other skill its update.
 
 ## Verification
 

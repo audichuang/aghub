@@ -283,22 +283,20 @@ pub struct LockedResyncRequest<'a> {
 }
 
 pub struct LockedSkillsResyncRequest<'a> {
-	/// The Source the caller believes every named entry still belongs to.
-	/// A mismatch fails that entry's row instead of fetching, so a stale
-	/// Sources view cannot aim this batch at an entry that was repointed to a
-	/// different repository. `None` skips the assertion: a caller that read the
+	/// The Source GROUP the caller believes every named entry still belongs to
+	/// — a Sources-row identity, NOT a repository coordinate. Nothing is ever
+	/// fetched from it: each row fetches from its own entry's `sourceUrl`. Its
+	/// only job is to reject a name whose entry no longer belongs to the row the
+	/// caller was looking at. `None` skips the check: a caller that read the
 	/// coordinates from the very Lock read this flow performs has nothing
 	/// independent to assert against.
 	///
-	/// Judged by `sources::source_matches` — the SAME predicate that decided
-	/// which skills the caller's Source row contains. Its resolution is
-	/// therefore whatever the Sources view groups by, which is the lock's
-	/// host-blind `source` identifier: two hosts (or ports) serving the same
-	/// `owner/repo` are ONE Source row, so this assertion cannot separate them
-	/// either. A stricter comparison here would reject rows the caller was
-	/// correctly shown, unfixably — the resolution has to be raised in the
-	/// grouping, not here.
-	pub source: Option<&'a str>,
+	/// Judged by `sources::source_matches`, the SAME predicate that decided
+	/// which skills that row contains — so its resolution is exactly the
+	/// grouping's, no finer. A stricter comparison here would reject rows the
+	/// caller was correctly shown, with an error no refresh could clear; the
+	/// resolution has to be raised in the grouping instead.
+	pub source_group: Option<&'a str>,
 	pub names: &'a [String],
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
@@ -321,7 +319,7 @@ pub enum LockedResyncError {
 	CredentialBackendUnavailable,
 	InvalidSkillPath,
 	SourceSkillNotFound,
-	SourceChanged,
+	SourceGroupMismatch,
 	Fetch(FetchError),
 	Resync(aghub_core::skills::resync::ResyncError),
 }
@@ -389,17 +387,51 @@ struct EntrySource {
 	grouping_source: String,
 }
 
+/// ONE read of the scope's lock, shared by every requested name. Re-reading and
+/// re-parsing per name made a large batch cost O(names) full lock parses inside a
+/// single blocking task — which is what forced a low cap on `names`. It also
+/// makes the whole batch observe ONE snapshot, so two rows can no longer be
+/// prepared from lock states that straddle another process's write.
+enum ScopeLock {
+	Global(std::collections::BTreeMap<String, skill::SkillLockEntry>),
+	Project(std::collections::BTreeMap<String, skill::LocalSkillLockEntry>),
+}
+
+impl ScopeLock {
+	fn read(
+		scope: ResourceScope,
+		project_root: Option<&Path>,
+	) -> Result<Self, LockedResyncError> {
+		match scope {
+			ResourceScope::GlobalOnly => {
+				Ok(Self::Global(skill::get_all_locked_skills()))
+			}
+			ResourceScope::ProjectOnly => {
+				let root = project_root
+					.ok_or(LockedResyncError::ProjectRootRequired)?;
+				Ok(Self::Project(
+					skill::lock::local::read_local_lock(Some(root)).skills,
+				))
+			}
+			ResourceScope::Both => {
+				Err(LockedResyncError::UnsupportedScope(ResourceScope::Both))
+			}
+		}
+	}
+}
+
 fn prepare_locked_resync(
 	name: &str,
+	lock: &ScopeLock,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> Result<(EntrySource, PreparedLockedResync), LockedResyncError> {
-	// Coordinates and identity must come from the SAME entry read. A second
-	// lookup could straddle another process's repoint and let a stale fetch pass
-	// the compare-after-fetch against a different observation.
-	let (entry_source, skill_path, expected) = match scope {
-		ResourceScope::GlobalOnly => {
-			let entry = skill::lock::global::get_skill_from_lock(name).ok_or(
+	// Coordinates and identity must come from the SAME entry observation. A
+	// second lookup could straddle another process's repoint and let a stale
+	// fetch pass the compare-after-fetch against a different observation.
+	let (entry_source, skill_path, expected) = match lock {
+		ScopeLock::Global(entries) => {
+			let entry = entries.get(name).cloned().ok_or(
 				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::GlobalOnly,
 				},
@@ -422,11 +454,8 @@ fn prepare_locked_resync(
 				expected,
 			)
 		}
-		ResourceScope::ProjectOnly => {
-			let root =
-				project_root.ok_or(LockedResyncError::ProjectRootRequired)?;
-			let lock = skill::lock::local::read_local_lock(Some(root));
-			let entry = lock.skills.get(name).cloned().ok_or(
+		ScopeLock::Project(entries) => {
+			let entry = entries.get(name).cloned().ok_or(
 				LockedResyncError::LockEntryNotFound {
 					scope: ResourceScope::ProjectOnly,
 				},
@@ -450,11 +479,6 @@ fn prepare_locked_resync(
 					.ok_or(LockedResyncError::MissingSkillPath)?,
 				expected,
 			)
-		}
-		ResourceScope::Both => {
-			return Err(LockedResyncError::UnsupportedScope(
-				ResourceScope::Both,
-			));
 		}
 	};
 
@@ -483,13 +507,11 @@ fn prepare_locked_resync(
 /// compare-after-fetch it cannot satisfy (the first attempt just re-stamped the
 /// entry) and reports a phantom concurrent-change to the caller.
 fn unique_in_order(names: &[String]) -> Vec<&String> {
-	let mut unique: Vec<&String> = Vec::with_capacity(names.len());
-	for name in names {
-		if !unique.contains(&name) {
-			unique.push(name);
-		}
-	}
-	unique
+	let mut seen = std::collections::HashSet::with_capacity(names.len());
+	names
+		.iter()
+		.filter(|name| seen.insert(name.as_str()))
+		.collect()
 }
 
 /// Resolve every requested Lock entry before fetching, group the resolvable
@@ -521,52 +543,62 @@ pub fn resync_locked_skills(
 		return Err(LockedSkillsResyncError::EmptyRequest);
 	}
 
+	let lock = match ScopeLock::read(request.scope, request.project_root) {
+		Ok(lock) => lock,
+		Err(error) => {
+			return Err(LockedSkillsResyncError::Preflight(error));
+		}
+	};
 	let mut groups: Vec<PreparedFetchGroup> = Vec::new();
 	let names = unique_in_order(request.names);
 	let mut rows = Vec::with_capacity(names.len());
 
 	for name in names {
-		let prepared =
-			prepare_locked_resync(name, request.scope, request.project_root)
-				.and_then(|(entry, mut item)| {
-					let EntrySource {
-						source_ref,
-						grouping_source,
-					} = entry;
-					if request.source.is_some_and(|source| {
-						!crate::sources::source_matches(
-							source,
-							&grouping_source,
-							Some(&source_ref.source),
-						)
-					}) {
-						return Err(LockedResyncError::SourceChanged);
-					}
-					let folder = skill_folder_from_lock_path(&item.skill_path)
-						.ok_or(LockedResyncError::InvalidSkillPath)?;
-					let group_index = if let Some(index) = groups
-						.iter()
-						.position(|group| group.source_ref == source_ref)
-					{
-						index
-					} else {
-						groups.push(PreparedFetchGroup {
-							source_ref,
-							folders: Vec::new(),
-						});
-						groups.len() - 1
-					};
-					let group = &mut groups[group_index];
-					if !group
-						.folders
-						.iter()
-						.any(|seen| seen.as_str() == folder.as_str())
-					{
-						group.folders.push(folder);
-					}
-					item.group_index = group_index;
-					Ok(item)
+		let prepared = prepare_locked_resync(
+			name,
+			&lock,
+			request.scope,
+			request.project_root,
+		)
+		.and_then(|(entry, mut item)| {
+			let EntrySource {
+				source_ref,
+				grouping_source,
+			} = entry;
+			if request.source_group.is_some_and(|group| {
+				!crate::sources::source_matches(
+					group,
+					&grouping_source,
+					Some(&source_ref.source),
+				)
+			}) {
+				return Err(LockedResyncError::SourceGroupMismatch);
+			}
+			let folder = skill_folder_from_lock_path(&item.skill_path)
+				.ok_or(LockedResyncError::InvalidSkillPath)?;
+			let group_index = if let Some(index) = groups
+				.iter()
+				.position(|group| group.source_ref == source_ref)
+			{
+				index
+			} else {
+				groups.push(PreparedFetchGroup {
+					source_ref,
+					folders: Vec::new(),
 				});
+				groups.len() - 1
+			};
+			let group = &mut groups[group_index];
+			if !group
+				.folders
+				.iter()
+				.any(|seen| seen.as_str() == folder.as_str())
+			{
+				group.folders.push(folder);
+			}
+			item.group_index = group_index;
+			Ok(item)
+		});
 		rows.push(ResyncRow {
 			name: name.clone(),
 			prepared,
@@ -650,14 +682,14 @@ pub fn resync_locked_skill(
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
 ) -> Result<aghub_core::skills::resync::ResyncReport, LockedResyncError> {
-	// `source: None` — this caller has no independent Source view to assert
-	// against, and asserting one would mean reading the entry a SECOND time:
-	// a repoint landing between the two reads would fail an update that is
-	// perfectly safe to apply against the coordinates actually read here.
+	// `source_group: None` — this caller has no independent Sources view to
+	// check against, and checking one would mean reading the entry a SECOND
+	// time: a repoint landing between the two reads would fail an update that
+	// is perfectly safe to apply against the coordinates actually read here.
 	let names = [request.name.to_string()];
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source: None,
+			source_group: None,
 			names: &names,
 			scope: request.scope,
 			project_root: request.project_root,
