@@ -348,6 +348,28 @@ fn resolvable_origin(
 	})
 }
 
+/// The origin a CALLER's `want` names, or `None` when it carries no host.
+///
+/// Deliberately stricter than [`resolvable_origin`], which reads a bare
+/// `owner/repo` as a GitHub coordinate. That reading is right for an ENTRY — an
+/// npx-written lock records exactly that and it IS GitHub — but wrong for a
+/// `want`: `resolve_remote_source` strips the host when it records `source`, so
+/// `owner/repo` is the shape EVERY forge's lock identifier takes, and it is what
+/// `aghub source list` prints. Reading it as GitHub made a caller naming a GitLab
+/// row select GitHub's tree instead, then report every skill as not-installed and
+/// offer to install from that unrelated repository.
+fn want_origin(want: &str) -> Option<String> {
+	let trimmed = want.trim();
+	// No transport and no authority separator ⇒ a host-blind identifier.
+	if !trimmed.contains("://")
+		&& !trimmed.contains('@')
+		&& !trimmed.contains(':')
+	{
+		return None;
+	}
+	resolvable_origin(trimmed, None)
+}
+
 /// Whether a lock entry belongs to the requested source.
 ///
 /// This is the ONE definition of Source membership: the Sources list groups by
@@ -365,7 +387,7 @@ pub(crate) fn source_matches(
 		return true;
 	}
 	let entry = source_origin(entry_source, entry_source_url);
-	match resolvable_origin(want, None) {
+	match want_origin(want) {
 		// `want` names a host, so compare exactly — this is what stops a row from
 		// admitting another forge serving the same path. A bare
 		// `entry_source == want` would not: the lock's identifier is host-blind.
@@ -1098,6 +1120,33 @@ mod origin_tests {
 				"{other} must not collapse into {github}"
 			);
 		}
+	}
+
+	/// The value `source list` PRINTS must select the row it came from. For every
+	/// non-GitHub HTTPS source that value is a bare `owner/repo`, because
+	/// `resolve_remote_source` strips the host when it records `source` — so
+	/// reading a want-side shorthand as GitHub silently pointed the caller at
+	/// github.com, reported every skill as not-installed, and offered to install
+	/// from that unrelated repository.
+	#[test]
+	fn a_host_blind_want_selects_its_own_entry_on_any_forge() {
+		for url in [
+			"https://gitlab.com/owner/repo.git",
+			"https://git.example.com:8443/owner/repo.git",
+			"https://github.com/owner/repo.git",
+		] {
+			assert!(
+				source_matches("owner/repo", "owner/repo", Some(url)),
+				"the printed identifier must still select {url}"
+			);
+		}
+		// A want that DOES carry a host stays exact — that is what keeps one row
+		// from admitting another forge serving the same path.
+		assert!(!source_matches(
+			"https://github.com/owner/repo.git",
+			"owner/repo",
+			Some("https://gitlab.com/owner/repo.git")
+		));
 	}
 
 	/// A local/unresolvable source keeps its own spelling, so two distinct local
