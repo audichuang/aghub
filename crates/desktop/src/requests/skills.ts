@@ -195,11 +195,19 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 		queryKey: queryKeys.skills.lock.all(),
 		type: "active",
 	});
-	// An applied update changes whether a skill IS outdated, and the badge that
-	// says so is fed by its own key prefix that neither refetch above covers.
-	// Without this the list keeps offering "Update available" for skills that
-	// were just updated (nothing else clears it: no refetch-on-focus, and the
-	// page's observer never unmounts).
+}
+
+/// An applied update changes whether a skill IS outdated, and the badge that
+/// says so is fed by a key prefix `invalidateSkillQueries` deliberately only
+/// marks stale — so without this the list keeps offering "Update available" for
+/// skills that were just updated (nothing else clears it: no
+/// refetch-on-window-focus, and the page's observer never unmounts).
+///
+/// Only the apply-update flows call it. An update check re-fetches EVERY source
+/// over the network, which is not a price a create/delete/transfer should pay.
+/// Fire-and-forget for the same reason `invalidateSkillQueries` is: a stuck or
+/// offline source must not hang the mutation that triggered it.
+function refetchUpdateChecks(queryClient: QueryClient) {
 	void queryClient.refetchQueries({
 		queryKey: queryKeys.skills.updateChecksAll(),
 		type: "active",
@@ -544,6 +552,7 @@ export function applySkillUpdateMutationOptions({
 		},
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
+			refetchUpdateChecks(queryClient);
 			await onSuccess?.(data);
 		},
 		onError,
@@ -589,6 +598,7 @@ export function applySkillUpdatesMutationOptions({
 			applySkillUpdatesRequest(api, forwardForSource, variables),
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
+			refetchUpdateChecks(queryClient);
 			await onSuccess?.(data);
 		},
 		onError,
