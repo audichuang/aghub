@@ -1,6 +1,6 @@
 # Host-aware Source grouping
 
-Status: in progress (v2.9.2)
+Status: complete (unreleased)
 
 ## Problem
 
@@ -62,3 +62,36 @@ error no refresh could clear — see `.scratch/source-bulk-sync/spec.md`).
   must be rewritten as two rows, and their docstrings currently do not say they
   describe a transitional state.
 - CLI `source list` / `diff` / `sync` row sets change for mixed-host locks.
+
+## Outcome
+
+All three consequences are addressed by the ONE grouping fix, because diff,
+apply, the bulk membership check and CLI `source sync` all select through
+`source_matches`:
+
+1. A row's diff and its apply now resolve to the same repository — the row's
+   `sourceUrl` covers every entry in it by construction.
+2. A foreign-forge entry can no longer be classified `Removed { noPath }` from
+   another forge's tree, so the one-click "Clean up removed" cannot reach it.
+3. CLI `source sync --update` applies its ONE fetched tree only to entries of
+   that origin, so it can no longer overwrite a skill with another forge's
+   content. It still has no Source assertion of its own — it no longer needs one
+   for THIS failure, because selection is now origin-exact.
+
+Unplanned benefit: credential bindings are keyed on the clone URL, and a row's
+URL now covers all of its entries, so a bound token can no longer be the wrong
+forge's for part of a row.
+
+Regression caught in self-review before release: making the row identity an
+origin silently broke the "open Sources view" jump from a skill's source group
+(it compared an origin against a host-blind lock source — both `string`, so
+neither the typechecker nor any test noticed). Fixed with a tested mapping in
+`lib/source-identity.ts`; its first implementation matched a partial segment and
+its own test caught that.
+
+## Still open
+
+- CLI `source sync --update` has no Source assertion (the bulk HTTP path does).
+  Not needed for the failure above, but the CLI would still act on a stale view.
+- `.scratch/source-bulk-sync/spec.md`'s original objective — CLI and Desktop
+  sharing ONE bulk implementation — remains unmet.
