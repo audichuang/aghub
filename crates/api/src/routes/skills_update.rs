@@ -469,8 +469,17 @@ fn apply_locked_resync_batch_error(
 		Ok(response) => response,
 		// Today only the credential-backend arm returns `Err`, and it is
 		// handled above. A future arm that projects to a top-level error must
-		// still not turn one row into a 500 that erases the whole batch.
-		Err(_) => apply_error(name, scope, "Skill update failed"),
+		// still not turn one row into a 500 that erases the whole batch — but
+		// it IS a wiring mistake, so fail loudly where that is free (tests,
+		// debug) and degrade to an attributed row in release.
+		Err(_) => {
+			debug_assert!(
+				false,
+				"a new LockedResyncError arm projects to a top-level API \
+				 error; give it a batch row projection"
+			);
+			apply_error(name, scope, "Skill update failed")
+		}
 	}
 }
 
@@ -504,7 +513,14 @@ pub async fn check_skill_updates(
 	};
 
 	let outputs = check_updates(entries, deps).await;
-	write_auto_healed_hashes(&outputs, project_root.as_deref())?;
+	// This WRITES the lock, so it takes the mutation lock and must not run on an
+	// async worker — a check racing a bulk update would otherwise park a Rocket
+	// worker for the whole batch (root AGENTS.md). The fetches above are already
+	// done and stay outside.
+	crate::blocking::in_mutation_pool(|| {
+		write_auto_healed_hashes(&outputs, project_root.as_deref())
+	})
+	.await?;
 
 	let mut out: Vec<SkillUpdateResponse> = outputs
 		.into_iter()
@@ -609,17 +625,13 @@ pub(crate) async fn apply_skill_updates_inner(
 			"INVALID_PARAM",
 		));
 	}
-	if req.names.is_empty() {
-		return Err(ApiError::new(
-			Status::BadRequest,
-			"names must not be empty",
-			"INVALID_PARAM",
-		));
-	}
+	// An empty list is answered by the seam's own `EmptyRequest` (projected
+	// below) — one written contract, not two. The CAP is the route's own job:
+	// the seam cannot know how long a caller may occupy a mutation worker.
 	if req.names.len() > MAX_BATCH_NAMES {
 		return Err(ApiError::new(
 			Status::BadRequest,
-			"too many names in one batch",
+			format!("names must not exceed {MAX_BATCH_NAMES} per batch"),
 			"INVALID_PARAM",
 		));
 	}
@@ -922,10 +934,36 @@ mod tests {
 			_token: Option<&str>,
 			_selection: skill_update::FetchSelection<'_>,
 		) -> Result<skill_update::FetchedRepo, FetchError> {
-			panic!(
-				"fetch must not be attempted when resolve reports \
-				 BackendUnavailable"
-			);
+			// Shared by several tests (backend-unavailable fail-closed, the
+			// confirm gate, request validation), so keep the message about
+			// the stub's contract rather than one caller's scenario.
+			panic!("fetch must not be attempted");
+		}
+	}
+
+	/// Restores `HOME` on drop, including during a panic. A test that restores
+	/// it manually AFTER its assertions leaks a deleted tempdir HOME into the
+	/// rest of the binary the moment it actually catches a regression — which
+	/// buries the signal under unrelated failures.
+	#[cfg(unix)]
+	struct HomeGuard(Option<String>);
+
+	#[cfg(unix)]
+	impl HomeGuard {
+		fn set(home: &Path) -> Self {
+			let previous = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home);
+			Self(previous)
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for HomeGuard {
+		fn drop(&mut self) {
+			match self.0.take() {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
 		}
 	}
 
@@ -1143,8 +1181,7 @@ mod tests {
 	fn apply_skill_updates_requires_confirm_and_writes_nothing_without_it() {
 		with_isolated_state(|| {
 			let home = tempfile::tempdir().unwrap();
-			let old_home = std::env::var("HOME").ok();
-			std::env::set_var("HOME", home.path());
+			let _home = HomeGuard::set(home.path());
 			prepare_global_batch(home.path());
 			let runtime = rocket::tokio::runtime::Builder::new_current_thread()
 				.enable_all()
@@ -1174,10 +1211,6 @@ mod tests {
 				home.path().join(".claude/skills/alpha/SKILL.md"),
 			)
 			.unwrap();
-			match old_home {
-				Some(value) => std::env::set_var("HOME", value),
-				None => std::env::remove_var("HOME"),
-			}
 
 			for (status, code) in statuses {
 				assert_eq!(status, Status::BadRequest);
@@ -1216,6 +1249,12 @@ mod tests {
 				),
 				request(vec!["alpha".to_string()], "all"),
 			];
+			let at_cap = request(
+				(0..MAX_BATCH_NAMES)
+					.map(|index| format!("skill-{index}"))
+					.collect(),
+				"global",
+			);
 
 			for case in cases {
 				let names = case.names.len();
@@ -1233,6 +1272,25 @@ mod tests {
 					}
 				}
 			}
+
+			// Exactly at the cap is LEGAL: a `>=` typo would reject a real
+			// batch with nothing else going red. The rows themselves fail
+			// (no such lock entries) — only the request-level verdict matters.
+			let home = tempfile::tempdir().unwrap();
+			let _home = HomeGuard::set(home.path());
+			let response = match runtime.block_on(apply_skill_updates_inner(
+				at_cap,
+				&PanicOnFetch,
+				&empty_keyring_resolver(),
+			)) {
+				Ok(json) => json.into_inner(),
+				Err(error) => panic!(
+					"a batch exactly at the cap must be accepted: {}",
+					error.body.error
+				),
+			};
+			assert_eq!(response.results.len(), MAX_BATCH_NAMES);
+			assert!(response.results.iter().all(|row| !row.success));
 		});
 	}
 
@@ -1279,6 +1337,136 @@ mod tests {
 			assert!(response.results.iter().all(|row| {
 				row.code.as_deref() == Some("KEYCHAIN_UNAVAILABLE")
 			}));
+		});
+	}
+
+	/// The bulk route's PROJECT wiring: the desktop uses this scope for a
+	/// project Source row, and a mis-wire aims the batch at the wrong lock and
+	/// the wrong installed tree. Also pins the repointed row's wire code, the
+	/// only row state worth retrying after a refresh.
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_project_scope_writes_only_the_project() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let _home = HomeGuard::set(home.path());
+			prepare_global_batch(home.path());
+
+			let project = tempfile::tempdir().unwrap();
+			let fetched = tempfile::tempdir().unwrap();
+			for name in ["alpha", "gamma"] {
+				let installed =
+					project.path().join(format!(".claude/skills/{name}"));
+				std::fs::create_dir_all(&installed).unwrap();
+				std::fs::write(
+					installed.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: old\n---\nold\n"),
+				)
+				.unwrap();
+				let directory = fetched.path().join(format!("skills/{name}"));
+				std::fs::create_dir_all(&directory).unwrap();
+				std::fs::write(
+					directory.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: new\n---\nnew\n"),
+				)
+				.unwrap();
+			}
+			// gamma belongs to a DIFFERENT repository than the caller names.
+			for (name, source) in
+				[("alpha", "owner/repo"), ("gamma", "other/repo")]
+			{
+				skill::add_skill_to_local_lock(
+					name,
+					skill::LocalSkillLockEntry {
+						source_url: None,
+						source: source.to_string(),
+						ref_name: Some("main".to_string()),
+						source_type: "github".to_string(),
+						computed_hash: "old".to_string(),
+						skill_path: Some(format!("skills/{name}/SKILL.md")),
+						ref_commit: None,
+					},
+					Some(project.path()),
+				)
+				.unwrap();
+			}
+
+			let fetcher = CountingFetcher {
+				root: fetched.path().to_path_buf(),
+				calls: std::sync::atomic::AtomicUsize::new(0),
+			};
+			let response =
+				match rocket::tokio::runtime::Builder::new_current_thread()
+					.enable_all()
+					.build()
+					.unwrap()
+					.block_on(apply_skill_updates_inner(
+						ApplySkillUpdatesRequest {
+							source: "owner/repo".to_string(),
+							names: vec![
+								"alpha".to_string(),
+								"gamma".to_string(),
+							],
+							scope: "project".to_string(),
+							project_root: Some(
+								project.path().to_string_lossy().to_string(),
+							),
+							confirm: Some(true),
+						},
+						&fetcher,
+						&empty_keyring_resolver(),
+					)) {
+					Ok(json) => json.into_inner(),
+					Err(error) => {
+						panic!(
+							"project batch should return Ok: {}",
+							error.body.error
+						)
+					}
+				};
+
+			assert_eq!(response.results[0].name, "alpha");
+			assert!(
+				response.results[0].success,
+				"{:?}",
+				response.results[0].error
+			);
+			assert_eq!(response.results[0].scope, "project");
+			assert!(!response.results[1].success, "gamma was repointed");
+			assert_eq!(
+				response.results[1].code.as_deref(),
+				Some(SKILL_SOURCE_VIEW_STALE_CODE),
+				"a stale Source view must be machine-distinguishable from \
+				 terminal row states"
+			);
+
+			assert!(std::fs::read_to_string(
+				project.path().join(".claude/skills/alpha/SKILL.md")
+			)
+			.unwrap()
+			.contains("new"));
+			assert!(std::fs::read_to_string(
+				project.path().join(".claude/skills/gamma/SKILL.md")
+			)
+			.unwrap()
+			.contains("old"));
+			// The identically-named global entry must be untouched: a batch
+			// scoped to a project may not write the global lock or its tree.
+			assert!(std::fs::read_to_string(
+				home.path().join(".claude/skills/alpha/SKILL.md")
+			)
+			.unwrap()
+			.contains("old"));
+			assert!(skill::lock::global::read_skill_lock().skills["alpha"]
+				.ref_commit
+				.is_none());
+			let project_lock =
+				skill::lock::local::read_local_lock(Some(project.path()));
+			assert_eq!(
+				project_lock.skills["alpha"].ref_commit.as_deref(),
+				Some("batch-commit")
+			);
+			assert!(project_lock.skills["gamma"].ref_commit.is_none());
 		});
 	}
 

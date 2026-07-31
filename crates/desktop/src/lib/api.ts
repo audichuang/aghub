@@ -83,6 +83,19 @@ import type {
 	UpdateSubAgentRequest,
 } from "../generated/dto";
 
+/**
+ * Client budget for one bulk apply-update request. The Source is fetched ONCE
+ * per batch, so each extra skill costs a local transaction, not a clone — but
+ * the single-skill 120s would abort a large batch that is progressing fine.
+ *
+ * The cap keeps it FINITE on purpose: aborting does not stop the server, so a
+ * request that never settles leaves the UI unable to say anything at all. The
+ * caller must read a timeout as "couldn't confirm", never as failure.
+ */
+export function bulkApplyTimeoutMs(count: number): number {
+	return Math.min(120_000 + count * 30_000, 900_000);
+}
+
 interface ApiErrorBody {
 	error?: string;
 	code?: string;
@@ -428,10 +441,7 @@ export function createApi(baseUrl: string) {
 				return client
 					.post("skills/apply-updates", {
 						json: body,
-						timeout: Math.min(
-							120000 + body.names.length * 30000,
-							900000,
-						),
+						timeout: bulkApplyTimeoutMs(body.names.length),
 						...(forwardedTokens
 							? { headers: forwardedTokens }
 							: {}),

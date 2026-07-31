@@ -208,10 +208,14 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 /// Fire-and-forget for the same reason `invalidateSkillQueries` is: a stuck or
 /// offline source must not hang the mutation that triggered it.
 function refetchUpdateChecks(queryClient: QueryClient) {
-	void queryClient.refetchQueries({
-		queryKey: queryKeys.skills.updateChecksAll(),
-		type: "active",
-	});
+	void queryClient.refetchQueries(
+		{ queryKey: queryKeys.skills.updateChecksAll(), type: "active" },
+		// Default `true` would ORPHAN an in-flight check and start another —
+		// and the queryFn ignores the abort signal, so the server keeps working
+		// on the orphan. Updating several skills in a row would then run one
+		// full every-source check per click instead of sharing one.
+		{ cancelRefetch: false },
+	);
 }
 
 interface CreateSkillVariables {
@@ -630,6 +634,9 @@ export function gitSyncSkillMutationOptions({
 			api.skills.gitSync(body),
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
+			// git-sync runs the same resync transaction as apply-update, so it
+			// flips a skill from outdated to current and owes the same refetch.
+			refetchUpdateChecks(queryClient);
 			await onSuccess?.(data);
 		},
 	});

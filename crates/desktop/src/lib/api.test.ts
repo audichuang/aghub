@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 // runner (`node --test --experimental-strip-types`), same as the sibling tests.
 // eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
-import { createApi } from "./api.ts";
+import { bulkApplyTimeoutMs, createApi } from "./api.ts";
 
 // Regression guard for the v2.4.0 desktop P0: the delete endpoints gate on
 // `?confirm=true` (the backend does `confirm.unwrap_or(false)` => dry-run).
@@ -107,4 +107,13 @@ test("skills.applyUpdates sends one forwarded batch request", async () => {
 		projectRoot: "/tmp/project",
 		confirm: true,
 	});
+});
+
+test("the bulk apply timeout scales with the batch and stays finite", () => {
+	assert.equal(bulkApplyTimeoutMs(1), 150_000);
+	assert.equal(bulkApplyTimeoutMs(10), 420_000);
+	// The cap engages at 26 and never lets the budget become unbounded — an
+	// unsettling request leaves the UI unable to report anything at all.
+	assert.equal(bulkApplyTimeoutMs(26), 900_000);
+	assert.equal(bulkApplyTimeoutMs(500), 900_000);
 });

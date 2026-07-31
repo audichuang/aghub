@@ -871,6 +871,10 @@ export default function SkillsPage() {
 							/>
 						) : (
 							<SourceDetail
+								// Keyed so per-source state (a running "Update
+								// all") cannot leak into another source's panel
+								// and disable its buttons.
+								key={sourceRowKey(resolvedSourceRow)}
 								row={resolvedSourceRow}
 								onImport={() => setSourceImporting(true)}
 							/>

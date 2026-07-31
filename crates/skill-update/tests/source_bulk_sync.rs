@@ -341,8 +341,17 @@ fn reconstructed_source_url_matches_a_shorthand_only_entry() {
 }
 
 /// A TFS/Azure-DevOps entry's `source` has more than two path segments, so it is
-/// not GitHub shorthand and does not resolve as a remote on its own. A caller
-/// that passes the `source` field `GET /sources` reported must still match.
+/// not GitHub shorthand and does not resolve as a remote on its own — the
+/// pre-a3235178 assertion rejected it outright. A caller passing the `source`
+/// field `GET /sources` reported must still match.
+///
+/// Honest about its reach: this matches through the `entry_source == want` arm,
+/// not TFS-specific normalization (the desktop sends `row.sourceUrl`, which
+/// would match through the `entry_source_url == Some(want)` arm instead). It is
+/// still a real regression test — it goes red both when the assertion compares
+/// the fetch coordinate instead of the grouping identifier, and when the strict
+/// host comparison comes back — but do not read the name as "TFS URLs are
+/// normalized here".
 #[test]
 fn tfs_style_source_identifier_matches_its_own_entry() {
 	let temporary = tempfile::tempdir().unwrap();

@@ -31,12 +31,14 @@ import {
 	selectedSkills,
 	toggleSkillPath,
 } from "../lib/source-skill-selection";
+import { describeRequestFailure } from "../lib/request-failure";
 import { cn } from "../lib/utils";
 import { useSkillCoverage } from "../requests/agents";
 import { queryKeys } from "../requests/keys";
 import {
 	applySkillUpdateMutationOptions,
 	applySkillUpdatesMutationOptions,
+	invalidateSkillQueries,
 } from "../requests/skills";
 import { sourceDiffQueryOptions } from "../requests/sources";
 
@@ -631,18 +633,27 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				toast.success(t("sourceUpdatesApplied", { count: updated }));
 			}
 		} catch (error) {
-			// The request failed, but the server does NOT abort with the client:
-			// it holds the mutation lock to completion, so the batch may well
-			// have been applied. Claiming N failures here would be a lie the
-			// user acts on — say we couldn't confirm, and let the refetch below
-			// show what actually landed.
-			toast.danger(t("sourceUpdateUnconfirmed"), {
-				description: error instanceof Error ? error.message : undefined,
-			});
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.all(),
-			});
-			await queryClient.invalidateQueries({
+			// A 4xx was answered before the handler ran, so nothing was written
+			// and reporting failure is accurate. A timeout or transport error
+			// proves nothing: the server does not abort with the client (it
+			// holds the mutation lock to completion), so claiming N failures
+			// would be a lie the user acts on.
+			const failure = describeRequestFailure(error);
+			toast.danger(
+				failure.definite
+					? skills.length === 1
+						? t("sourceUpdateSomeFailedOne", { count: 1 })
+						: t("sourceUpdateSomeFailedMany", {
+								count: skills.length,
+							})
+					: t("sourceUpdateUnconfirmed"),
+				{ description: failure.description },
+			);
+			// Not the broad `skills.all()` invalidate: that one AWAITS every
+			// active refetch (the 120s check and source diff) before `finally`
+			// re-enables the buttons, over the connection that just failed.
+			await invalidateSkillQueries(queryClient);
+			void queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});
 		} finally {
