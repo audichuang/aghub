@@ -498,8 +498,17 @@ mod tests {
 	/// `.agents/`, never in the repo root and never inside `.agents/skills`
 	/// (`npx skills` enumerates that dir and the folder hash walks it); the
 	/// global one sits next to the global lock file.
+	///
+	/// Holds [`TestLockGuard`] because the GLOBAL half reads `XDG_STATE_HOME`
+	/// (twice), which makes it one of the lock tests the crate's rule covers — not
+	/// the tempdir-only exception the other tests here qualify for. Without it
+	/// another test's state-home swap lands between the two reads and they simply
+	/// describe different moments: caught on Windows CI, where the pair came back
+	/// as `~/.agents` vs a temp `…/skills`.
 	#[test]
 	fn lock_files_live_where_documented() {
+		let _state_home = super::super::test_utils::TestLockGuard::new();
+
 		let tmp = tempfile::tempdir().unwrap();
 		let root = tmp.path();
 		assert_eq!(
@@ -609,6 +618,12 @@ mod tests {
 	/// same identity the lock uses, its lock path, not from the raw root.
 	#[test]
 	fn scopes_order_global_first_then_by_lock_path() {
+		// Ranking `Global` resolves the global lock path, i.e. reads
+		// `XDG_STATE_HOME`. The assertions do not depend on its value (a `Global`
+		// rank sorts first on the discriminant alone), but reading env while
+		// another thread swaps it is UB on unix, so take the guard anyway.
+		let _state_home = super::super::test_utils::TestLockGuard::new();
+
 		let tmp = tempfile::tempdir().unwrap();
 		let a = tmp.path().join("a");
 		let b = tmp.path().join("b");
