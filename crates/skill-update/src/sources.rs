@@ -219,9 +219,11 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 	by_origin
 		.into_values()
 		.map(|(source, source_url, source_type, skill_count)| {
-			let source_url = source_url.unwrap_or_else(|| {
-				reconstruct_source_url(&source, &source_type)
-			});
+			let source_url = entry_clone_source(
+				&source,
+				source_url.as_deref(),
+				&source_type,
+			);
 			SourceSummary {
 				source,
 				source_url,
@@ -233,22 +235,39 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 		.collect()
 }
 
-/// The clone coordinate of a lock entry that records no `sourceUrl` — the ONE
-/// answer the Sources row advertises, `diff_source` fetches, and the bulk apply
-/// re-fetches. They MUST agree, and only agree because they all call this: while
-/// the row reconstructed a GitLab URL and apply resolved the raw `group/repo` on
-/// its own (as GitHub shorthand), applying stamped GitHub's commit into a GitLab
+/// The clone coordinate a lock entry's content comes from — the ONE answer every
+/// consumer must use. `owner/repo` is the shape EVERY forge's lock identifier
+/// takes, so whoever resolves it alone reads it as GitHub shorthand: while the
+/// Sources row reconstructed a GitLab URL and the bulk apply resolved the raw
+/// `group/repo` on its own, applying stamped GitHub's commit into a GitLab
 /// entry, silently, whenever a same-path repo existed there.
 ///
-/// Only two things in a lock entry can name a host: the string itself, when it
-/// already carries a transport or an authority, and the recorded provider —
-/// `github` and `gitlab` are single-host services. A `git`/custom/`local` type
-/// with no URL keeps its own spelling; inventing a host advertises, and then
-/// fetches from, a repository nobody installed from.
-pub(crate) fn reconstruct_source_url(
+/// Callers that must agree, and only agree because they all call this: the
+/// Sources row's advertised `source_url`, the grouping origin, `diff_source`'s
+/// fetch, both update-check projections (API and CLI), CLI `source diff`/`sync`,
+/// and the bulk apply's `SourceRef`. Hand-mirroring
+/// `source_url.unwrap_or(source)` at each of them is what let them drift.
+pub fn entry_clone_source(
 	source: &str,
+	source_url: Option<&str>,
 	source_type: &str,
 ) -> String {
+	source_url
+		.map(str::trim)
+		.filter(|recorded| !recorded.is_empty())
+		.map(str::to_string)
+		.unwrap_or_else(|| reconstruct_source_url(source, source_type))
+}
+
+/// The [`entry_clone_source`] half that has to invent a coordinate, because the
+/// entry recorded no `sourceUrl`.
+///
+/// Only two things can then name a host: the string itself, when it already
+/// carries a transport or an authority, and the recorded provider — `github` and
+/// `gitlab` are single-host services. A `git`/custom/`local` type keeps its own
+/// spelling; inventing a host advertises, and then fetches from, a repository
+/// nobody installed from.
+pub fn reconstruct_source_url(source: &str, source_type: &str) -> String {
 	let source = source.trim();
 	if source_type.eq_ignore_ascii_case("local") {
 		// A Windows path (`C:\skills\a`) would otherwise read as an SCP-like URL
@@ -268,12 +287,18 @@ pub(crate) fn reconstruct_source_url(
 		Some(host) if !carries_authority => {
 			let path = source.trim_matches('/');
 			// An origin echoed back from a previous response already carries the
-			// host; re-prefixing it would produce `host/host/path`.
-			let path = path
-				.strip_prefix(host)
-				.and_then(|rest| rest.strip_prefix('/'))
-				.unwrap_or(path)
-				.trim_end_matches(".git");
+			// host; re-prefixing it would produce `host/host/path`. Hostnames are
+			// case-insensitive, and a host with NOTHING after it names no
+			// repository — both must fall through to the raw spelling rather than
+			// become `https://host/HOST/path` or `https://host/host.git`.
+			let path = match path
+				.get(..host.len())
+				.is_some_and(|head| head.eq_ignore_ascii_case(host))
+			{
+				true => path[host.len()..].trim_start_matches('/'),
+				false => path,
+			};
+			let path = path.trim_end_matches(".git").trim_matches('/');
 			if path.is_empty() {
 				return source.to_string();
 			}
@@ -669,7 +694,15 @@ fn recorded_meta_for_source(
 			recorded_ref = entry_ref.map(str::to_string);
 		}
 		if recorded_source_url.is_none() {
-			recorded_source_url = entry_source_url.map(str::to_string);
+			// Reconstructed, not merely recorded: `diff_source` and CLI
+			// `source diff`/`sync` fetch this, and falling back to the caller's
+			// raw `group/repo` would send them to GitHub while `list_sources` and
+			// apply went to the entry's real forge.
+			recorded_source_url = Some(entry_clone_source(
+				entry_source,
+				entry_source_url,
+				entry_source_type,
+			));
 		}
 	};
 	// Global first, then project — same order as `merged_baseline_for_source`.
@@ -1255,6 +1288,55 @@ mod origin_tests {
 			source_origin("/opt/skills/a", None, "local"),
 			source_origin("/opt/skills/b", None, "local")
 		);
+	}
+
+	/// Reconstruction may only produce a coordinate that names the SAME
+	/// repository the entry records. A shape it cannot place must keep its own
+	/// spelling — inventing one advertises, and then fetches from, a repository
+	/// nobody installed from.
+	#[test]
+	fn reconstruction_never_invents_a_repository() {
+		for (source, source_type, expected) in [
+			// A provider names its host; the path is whatever remains.
+			("owner/repo", "github", "https://github.com/owner/repo.git"),
+			("group/repo", "gitlab", "https://gitlab.com/group/repo.git"),
+			(
+				"group/sub/repo",
+				"gitlab",
+				"https://gitlab.com/group/sub/repo.git",
+			),
+			// An origin echoed back already carries the host — in any case, and
+			// with or without `.git`.
+			(
+				"github.com/owner/repo",
+				"github",
+				"https://github.com/owner/repo.git",
+			),
+			(
+				"GitHub.com/owner/repo.git",
+				"github",
+				"https://github.com/owner/repo.git",
+			),
+			// A host with nothing after it names no repository.
+			("gitlab.com", "gitlab", "gitlab.com"),
+			("github.com/", "github", "github.com/"),
+			// No provider ⇒ no host to be had. `segments >= 3` once turned this
+			// into `https://group/subgroup/repo`, a host that does not exist.
+			("group/subgroup/repo", "git", "group/subgroup/repo"),
+			("owner/repo", "git", "owner/repo"),
+			("Coll/_git/repo", "git", "Coll/_git/repo"),
+			// A local path keeps its spelling whatever it looks like; a Windows
+			// drive letter would otherwise read as an SCP-like host.
+			("/opt/skills/a", "local", "/opt/skills/a"),
+			("C:\\skills\\a", "local", "C:\\skills\\a"),
+			("./owner/repo", "local", "./owner/repo"),
+		] {
+			assert_eq!(
+				reconstruct_source_url(source, source_type),
+				expected,
+				"source={source} type={source_type}"
+			);
+		}
 	}
 
 	/// Membership follows the same origin, in both directions.
@@ -2158,6 +2240,45 @@ mod diff_tests {
 		);
 
 		assert_eq!(meta.source_type, "git");
+	}
+
+	/// `diff_source` and CLI `source diff`/`sync` fetch `effective_source`. It
+	/// must be the SAME coordinate `list_sources` advertises and apply uses:
+	/// falling back to the caller's raw `group/repo` sent the diff to GitHub
+	/// while the row and the apply went to GitLab, so the badge compared against
+	/// one repository and the update installed from another.
+	#[test]
+	fn resolve_source_meta_reconstructs_the_coordinate_apply_uses() {
+		let project = TempDir::new().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		lock.skills.insert(
+			"legacy".to_string(),
+			skill::LocalSkillLockEntry {
+				source: "group/repo".to_string(),
+				ref_name: Some("main".to_string()),
+				source_type: "gitlab".to_string(),
+				skill_path: Some("legacy/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+				source_url: None,
+			},
+		);
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+		let scopes = [SourceScope::Project {
+			root: project.path().to_path_buf(),
+		}];
+
+		// The host-blind identifier `source list` prints, and the row URL the
+		// desktop sends, must both land on the entry's own forge.
+		for want in ["group/repo", "https://gitlab.com/group/repo.git"] {
+			let meta = resolve_source_meta(want, &scopes, None);
+			assert_eq!(
+				meta.effective_source.as_deref(),
+				Some("https://gitlab.com/group/repo.git"),
+				"want={want} must not be diffed against GitHub"
+			);
+			assert_eq!(meta.source_type, "gitlab");
+		}
 	}
 
 	#[test]

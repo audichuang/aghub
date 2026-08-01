@@ -454,7 +454,11 @@ fn prepare_locked_resync(
 			(
 				EntrySource {
 					source_ref: SourceRef {
-						source: entry.source_url,
+						source: crate::sources::entry_clone_source(
+							&entry.source,
+							Some(&entry.source_url),
+							&entry.source_type,
+						),
 						ref_: entry.ref_name,
 					},
 					grouping_source: entry.source,
@@ -479,16 +483,15 @@ fn prepare_locked_resync(
 			(
 				EntrySource {
 					source_ref: SourceRef {
-						// The SAME reconstruction the Sources row advertises and
+						// The SAME coordinate the Sources row advertises and
 						// `diff_source` fetches. Resolving the raw `source` here
 						// instead made a GitLab row fetch GitHub shorthand and
 						// stamp GitHub's commit into the GitLab lock entry.
-						source: entry.source_url.clone().unwrap_or_else(|| {
-							crate::sources::reconstruct_source_url(
-								&entry.source,
-								&entry.source_type,
-							)
-						}),
+						source: crate::sources::entry_clone_source(
+							&entry.source,
+							entry.source_url.as_deref(),
+							&entry.source_type,
+						),
 						ref_: entry.ref_name,
 					},
 					grouping_source: entry.source,

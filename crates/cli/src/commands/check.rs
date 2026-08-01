@@ -283,7 +283,11 @@ fn global_lock_entries(
 			name,
 			scope: "global".to_string(),
 			source_ref: SourceRef {
-				source: entry.source_url,
+				source: skill_update::sources::entry_clone_source(
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+				),
 				ref_: entry.ref_name,
 			},
 			source_type: entry.source_type,
@@ -307,10 +311,14 @@ fn project_lock_entries(
 			name,
 			scope: "project".to_string(),
 			source_ref: SourceRef {
-				// Prefer the recorded full clone URL so a non-github host
-				// (TFS/Azure DevOps) is fetched correctly; fall back to the
-				// host-stripped owner/repo for github/legacy locks.
-				source: entry.source_url.unwrap_or(entry.source),
+				// The shared coordinate — NOT a local `source_url.unwrap_or(
+				// source)`, which reads a legacy GitLab entry's `group/repo` as
+				// GitHub shorthand and checks it against the wrong repository.
+				source: skill_update::sources::entry_clone_source(
+					&entry.source,
+					entry.source_url.as_deref(),
+					&entry.source_type,
+				),
 				ref_: entry.ref_name,
 			},
 			source_type: entry.source_type,

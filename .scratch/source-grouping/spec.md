@@ -81,9 +81,9 @@ apply, the bulk membership check and CLI `source sync` all select through
 2. A foreign-forge entry can no longer be classified `Removed { noPath }` from
    another forge's tree, so the one-click "Clean up removed" cannot reach it.
 3. CLI `source sync --update` applies its ONE fetched tree only to entries of
-   that origin, so it can no longer overwrite a skill with another forge's
-   content. It still has no Source assertion of its own — it no longer needs one
-   for THIS failure, because selection is now origin-exact.
+   that origin **when it is given an origin** — i.e. the row's `SOURCE_URL`. It
+   still has no Source assertion of its own, and see "Still open" for what a
+   host-blind argument still does.
 
 Unplanned benefit: credential bindings are keyed on the clone URL, and a row's
 URL now covers all of its entries, so a bound token can no longer be the wrong
@@ -118,6 +118,15 @@ for `git`/`gitlab` installs — it just never backfills.)
 
 ## Still open
 
+- **A host-blind CLI argument still spans forges.** `source list` prints the
+  lock's own host-blind `SOURCE` column, and passing THAT back makes
+  `source_matches` fall through to `entry_source == want`, admitting every forge
+  with the same `owner/repo`. `source sync owner/repo --update` then fetches the
+  first match's repository once and applies that tree to every matched row, so a
+  GitLab skill can be overwritten with GitHub content. Pre-existing (unchanged
+  since `286e4a67`) and avoided by passing the `SOURCE_URL` column, but nothing
+  makes that mandatory. Fix direction: reject a host-blind argument that matches
+  more than one origin, rather than silently picking one.
 - **An unknowable host still silently resolves to GitHub.** `sourceType: git`
   (or a custom type) with no `sourceUrl` keeps its own spelling, and the fetcher
   then reads `owner/repo` as GitHub shorthand. List and apply agree — that is

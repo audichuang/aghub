@@ -60,18 +60,10 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 /// caller named. Distinct from `SOURCE_CHANGED_DURING_FETCH`: nothing moved
 /// mid-flight, the caller's Sources view is simply stale.
 const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
-/// Upper bound on one batch's `names`, and a HARD one — the request is refused,
-/// not truncated.
-///
-/// The seam reads the Lock once and scans the agents once, but neither hoist
-/// bounds the real cost: every resolvable row still runs its own install+lock
-/// transaction, which re-scans every agent under the mutation lock because that
-/// read has to be fresh. One request therefore occupies a mutation worker for
-/// `O(names)` transactions, and Rocket has only CPU-count workers.
-///
-/// A client with more outdated skills than this must send several batches —
-/// see `applyAllUpdates` in the desktop's `source-detail.tsx`, which chunks.
-const MAX_BATCH_NAMES: usize = 256;
+/// Upper bound on one batch's `names`. Defined ONCE, in `dto::limits`, and
+/// generated into the desktop's `generated/dto/limits.ts` — `source-detail.tsx`
+/// chunks to it, and hand-copying the number here would let the two drift.
+use crate::dto::limits::MAX_BATCH_NAMES;
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -127,7 +119,11 @@ fn global_lock_entries(
 			name,
 			scope: "global".to_string(),
 			source_ref: SourceRef {
-				source: entry.source_url,
+				source: skill_update::sources::entry_clone_source(
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+				),
 				ref_: entry.ref_name,
 			},
 			source_type: entry.source_type,
@@ -150,10 +146,14 @@ fn project_lock_entries(
 			name,
 			scope: "project".to_string(),
 			source_ref: SourceRef {
-				// Prefer the recorded clone URL so a non-github host (TFS/Azure
-				// DevOps) is fetched correctly; github/legacy fall back to the
-				// host-stripped owner/repo.
-				source: entry.source_url.unwrap_or(entry.source),
+				// The shared coordinate — NOT a local `source_url.unwrap_or(
+				// source)`, which reads a legacy GitLab entry's `group/repo` as
+				// GitHub shorthand and checks it against the wrong repository.
+				source: skill_update::sources::entry_clone_source(
+					&entry.source,
+					entry.source_url.as_deref(),
+					&entry.source_type,
+				),
 				ref_: entry.ref_name,
 			},
 			source_type: entry.source_type,
