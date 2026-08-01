@@ -96,6 +96,22 @@ apply, the bulk membership check and CLI `source sync` all select through
     updated from its own forge. The guard belongs only where ONE fetched tree is
     applied to MANY entries.
 
+4. A row is one repository, not one TREE — its entries need not share a branch.
+   The row's key stays the origin (adding `ref` to it would give two rows one
+   `source_url`, which the desktop keys on), but `diff_source` now splits the
+   baseline into one cohort per recorded ref and fetches each, so every entry is
+   judged against the tree it was installed from. Judged against the row's ref
+   instead, a `v1`-pinned skill read as outdated forever — its own apply fetches
+   `v1`, so the hash never converged — or as `Removed { noPath }` when its folder
+   was absent there, which the desktop deletes in one click. The mutation seam
+   already fetched once per `(source, ref)`; this is the same grouping on the
+   read side. An explicit `?ref=` still collapses everything into one cohort:
+   that IS the caller asking what a single ref would give.
+
+    Only the PRIMARY cohort (the row's own ref) contributes not-installed offers,
+    and only for paths no cohort owns — another cohort's skills appear in the
+    primary tree too, and they are entries, not offers.
+
 Unplanned benefit: credential bindings are keyed on the clone URL, and a row's
 URL now covers all of its entries, so a bound token can no longer be the wrong
 forge's for part of a row.
@@ -136,11 +152,21 @@ for `git`/`gitlab` installs — it just never backfills.)
   is fail-closed (report the row uncheckable rather than fetch a repository
   nobody installed from); that changes behavior for existing installs, so it is
   not folded into this change.
-- **Grouping ignores `ref`.** A row's key is the origin only, while `diff_source`
-  picks ONE recorded ref for the whole row and apply uses each entry's own. Two
-  skills from one repository pinned to different branches are therefore diffed
-  against one branch and applied from another. Fix direction: key on
-  `(origin, effective_ref)`, or classify per ref cohort.
+- **CLI `source diff`/`sync` refuse a multi-ref scope instead of splitting it.**
+  Both fetch the repository ONCE and reuse that tree for every entry — and
+  `sync --update` also installs from it — so they now bail with the list of refs
+  and ask for `--ref`, rather than judging (or overwriting) a `v1` entry with
+  `main`'s tree. The API `/sources/diff` does not need the guard: it owns its
+  fetches and splits into one cohort per ref. Making the CLI match means holding
+  one fetched tree per ref through the install/update flow; that is the same
+  unmet "CLI and Desktop share ONE bulk implementation" objective below.
+- **A cohort that cannot be fetched fails the whole diff.** `diff_source`
+  returns `FetchFailed`/`NeedsCredential`/`UncheckableSource` for the row rather
+  than dropping that cohort's entries or judging them against another ref's
+  tree — the same answer the row already gave when its only fetch failed. So one
+  dead ref (a deleted branch someone was pinned to) makes the whole row
+  undiffable. Reporting those entries individually needs a per-skill uncheckable
+  state, which `SourceSkillState` does not have.
 - **accept-rename can write a non-URL as a present `sourceUrl`.** For a legacy
   GitLab entry it fetches the raw `group/repo` and `recordable_source_url`
   persists that string, since it is non-empty and carries no GitHub host. That

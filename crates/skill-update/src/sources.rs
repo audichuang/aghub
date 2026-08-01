@@ -86,8 +86,34 @@ pub(crate) struct BaselineEntry {
 	pub stored_hash: String,
 	pub local_hashes: Vec<String>,
 	pub scope_label: String,
+	/// The ref THIS entry is pinned to. A Sources row is one repository, but its
+	/// entries need not share a branch/tag, and an entry may only be judged
+	/// against its own ref's tree — see [`baseline_by_ref`].
+	pub ref_name: Option<String>,
 }
 pub(crate) type Baseline = BTreeMap<String, BaselineEntry>;
+
+/// Split a baseline into one cohort per recorded ref.
+///
+/// A row's entries share a repository, not a tree. Judging a `v1`-pinned entry
+/// against `main`'s tree reports it outdated forever (its apply fetches `v1`, so
+/// the hash never converges) or — when its folder does not exist on `main` —
+/// `Removed { noPath }`, which the desktop offers to delete in one click.
+///
+/// The mutation seam already fetches once per `(source, ref)` group; this is the
+/// same grouping on the read side.
+pub(crate) fn baseline_by_ref(
+	baseline: Baseline,
+) -> BTreeMap<Option<String>, Baseline> {
+	let mut cohorts: BTreeMap<Option<String>, Baseline> = BTreeMap::new();
+	for (skill_path, entry) in baseline {
+		cohorts
+			.entry(entry.ref_name.clone())
+			.or_default()
+			.insert(skill_path, entry);
+	}
+	cohorts
+}
 
 #[derive(Debug)]
 pub enum SourceDiffOutcome {
@@ -576,6 +602,7 @@ fn insert_scope_entries(
 							stored_hash: hash,
 							local_hashes,
 							scope_label: "global".to_string(),
+							ref_name: entry.ref_name.clone(),
 						},
 					);
 				}
@@ -610,6 +637,7 @@ fn insert_scope_entries(
 							stored_hash: entry.computed_hash,
 							local_hashes,
 							scope_label: "project".to_string(),
+							ref_name: entry.ref_name.clone(),
 						},
 					);
 				}
@@ -1198,6 +1226,20 @@ pub fn classify_scope(
 	classify_repo_skills(root, &baseline, upstream_commit_time)
 }
 
+/// The distinct refs the entries of `source` in `scope` are pinned to, sorted.
+///
+/// [`classify_scope`] judges a whole scope against ONE already-fetched tree, so
+/// a caller holding a single tree must first know whether that is sound. More
+/// than one ref means it is not: `diff_source`, which owns its fetches, splits
+/// into cohorts instead ([`baseline_by_ref`]).
+pub fn scope_ref_cohorts(
+	scope: &SourceScope,
+	source: &str,
+) -> Vec<Option<String>> {
+	let (baseline, _src_type, _ref) = baseline_for_scope(scope, source);
+	baseline_by_ref(baseline).into_keys().collect()
+}
+
 /// PUBLIC API entry: merged-baseline, single-classification, flat output —
 /// byte-identical to the old route. Fetches internally via `deps`.
 pub fn diff_source(
@@ -1228,33 +1270,78 @@ pub fn diff_source(
 		return SourceDiffOutcome::UncheckableSource { git_ref, reason };
 	}
 
-	let source_ref = SourceRef {
-		source: fetch_source,
-		ref_: git_ref.clone(),
+	// One cohort per recorded ref, so no entry is judged against a tree it was
+	// never installed from. An explicit `?ref=` is the caller asking "what would
+	// this ref give me?", so it collapses every entry into one cohort by design.
+	//
+	// The PRIMARY cohort (the row's `effective_ref`) also contributes the
+	// not-installed offers: those describe what is available to install, and an
+	// install goes to the row's ref. A secondary cohort contributes verdicts for
+	// its own entries only.
+	// Every path some cohort owns. The primary tree also contains OTHER cohorts'
+	// skills; those are not "available to install", they are another ref's
+	// entries and that cohort reports them.
+	let claimed_paths: std::collections::BTreeSet<String> =
+		baseline.keys().cloned().collect();
+	let cohorts: Vec<(Option<String>, Baseline)> = if input.git_ref.is_some() {
+		vec![(git_ref.clone(), baseline)]
+	} else {
+		let mut by_ref = baseline_by_ref(baseline);
+		let primary = by_ref.remove(&git_ref).unwrap_or_default();
+		std::iter::once((git_ref.clone(), primary))
+			.chain(by_ref)
+			.collect()
 	};
-	match fetch_source_with_resolver(
-		&source_ref,
-		deps.fetcher,
-		deps.resolver,
-		FetchSelection::CatalogSnapshot,
-	) {
-		Err(FetchError::BackendUnavailable) => {
-			SourceDiffOutcome::UncheckableSource {
-				git_ref,
-				reason: UncheckableReason::Network,
-			}
+
+	let mut skills = Vec::new();
+	for (index, (cohort_ref, cohort)) in cohorts.into_iter().enumerate() {
+		let is_primary = index == 0;
+		if !is_primary && cohort.is_empty() {
+			continue;
 		}
-		Err(FetchError::Auth) => SourceDiffOutcome::NeedsCredential { git_ref },
-		Err(FetchError::Network) => SourceDiffOutcome::FetchFailed,
-		Ok(repo) => SourceDiffOutcome::Ok {
-			git_ref,
-			skills: classify_repo_skills(
-				repo.root.as_path(),
-				&baseline,
-				repo.upstream_commit_time(),
-			),
-		},
+		let source_ref = SourceRef {
+			source: fetch_source.clone(),
+			ref_: cohort_ref,
+		};
+		let repo = match fetch_source_with_resolver(
+			&source_ref,
+			deps.fetcher,
+			deps.resolver,
+			FetchSelection::CatalogSnapshot,
+		) {
+			Ok(repo) => repo,
+			// A cohort that cannot be fetched fails the WHOLE diff rather than
+			// dropping its entries or judging them against another ref's tree —
+			// the same answer the row already gives when its only fetch fails.
+			// A silently partial view is what "clean up removed" acts on.
+			Err(FetchError::BackendUnavailable) => {
+				return SourceDiffOutcome::UncheckableSource {
+					git_ref,
+					reason: UncheckableReason::Network,
+				};
+			}
+			Err(FetchError::Auth) => {
+				return SourceDiffOutcome::NeedsCredential { git_ref };
+			}
+			Err(FetchError::Network) => return SourceDiffOutcome::FetchFailed,
+		};
+		let classified = classify_repo_skills(
+			repo.root.as_path(),
+			&cohort,
+			repo.upstream_commit_time(),
+		);
+		// Each cohort speaks about ITS OWN installed entries — keyed on
+		// `installed_paths` rather than the cohort's paths, because a Renamed
+		// diff carries the NEW path, which the baseline never had. Only the
+		// primary additionally offers what is available to INSTALL, and only for
+		// paths no cohort already owns.
+		skills.extend(classified.into_iter().filter(|diff| {
+			!diff.installed_paths.is_empty()
+				|| (is_primary && !claimed_paths.contains(&diff.skill_path))
+		}));
 	}
+
+	SourceDiffOutcome::Ok { git_ref, skills }
 }
 
 #[cfg(test)]
@@ -1497,6 +1584,7 @@ mod classify_tests {
 			stored_hash: "stale-lock-hash".to_string(),
 			local_hashes: vec![fresh],
 			scope_label: "project".to_string(),
+			ref_name: None,
 		};
 
 		assert_eq!(
@@ -1514,6 +1602,7 @@ mod classify_tests {
 			stored_hash: "stale-lock-hash".to_string(),
 			local_hashes: Vec::new(),
 			scope_label: "project".to_string(),
+			ref_name: None,
 		};
 
 		assert_eq!(
@@ -1531,6 +1620,7 @@ mod classify_tests {
 			stored_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
 			local_hashes: Vec::new(),
 			scope_label: "project".to_string(),
+			ref_name: None,
 		};
 
 		assert_eq!(
@@ -1549,6 +1639,7 @@ mod classify_tests {
 			stored_hash: fresh.clone(),
 			local_hashes: vec![fresh, "older-install".to_string()],
 			scope_label: "project".to_string(),
+			ref_name: None,
 		};
 
 		assert_eq!(
@@ -1566,6 +1657,7 @@ mod classify_tests {
 			stored_hash: "stale-lock-hash".to_string(),
 			local_hashes: Vec::new(),
 			scope_label: "project".to_string(),
+			ref_name: None,
 		};
 
 		assert_eq!(
@@ -1599,6 +1691,7 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_hashes: Vec::new(),
 				scope_label: "global".to_string(),
+				ref_name: None,
 			},
 		);
 
@@ -1683,6 +1776,7 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_hashes: Vec::new(),
 				scope_label: "global".to_string(),
+				ref_name: None,
 			},
 		);
 
@@ -1737,6 +1831,7 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_hashes: Vec::new(),
 				scope_label: "global".to_string(),
+				ref_name: None,
 			},
 		);
 
@@ -1832,6 +1927,7 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_hashes: Vec::new(),
 				scope_label: "global".to_string(),
+				ref_name: None,
 			},
 		);
 
@@ -1888,6 +1984,7 @@ mod classify_tests {
 				stored_hash: "old-hash".to_string(),
 				local_hashes: Vec::new(),
 				scope_label: "global".to_string(),
+				ref_name: None,
 			},
 		);
 
@@ -2051,6 +2148,133 @@ mod diff_tests {
 				_guard: None,
 			})
 		}
+	}
+
+	/// A [`Fetcher`] serving a DIFFERENT tree per requested ref, so a test can
+	/// tell which ref's tree a verdict was computed from.
+	struct PerRefFetcher {
+		roots: BTreeMap<Option<String>, std::path::PathBuf>,
+		fetched: std::sync::Mutex<Vec<Option<String>>>,
+	}
+	impl Fetcher for PerRefFetcher {
+		fn fetch(
+			&self,
+			sr: &SourceRef,
+			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			self.fetched.lock().unwrap().push(sr.ref_.clone());
+			let root = self
+				.roots
+				.get(&sr.ref_)
+				.unwrap_or_else(|| panic!("unexpected ref {:?}", sr.ref_));
+			Ok(crate::FetchedRepo {
+				root: root.clone(),
+				snapshot: aghub_git::RepoSnapshot {
+					commit_oid: "test-oid".to_string(),
+					tree_oid: "test-tree-oid".to_string(),
+					commit_time: None,
+				},
+				_guard: None,
+			})
+		}
+	}
+
+	/// A Sources row is ONE repository, but its entries need not share a branch.
+	/// Every entry must be judged against the tree it was installed from: judging
+	/// a `v1` entry against `main` reports it outdated forever (its apply fetches
+	/// `v1`, so the hash never converges) or — when the folder does not exist on
+	/// `main` — `Removed { noPath }`, which the desktop deletes in one click.
+	///
+	/// The mutation seam already fetches once per `(source, ref)`; this is the
+	/// same grouping on the read side.
+	#[test]
+	fn each_ref_cohort_is_judged_against_its_own_tree() {
+		let project = TempDir::new().unwrap();
+		let trees = TempDir::new().unwrap();
+		// `main` carries only `shared`; `v1` carries `shared` AND `pinned`.
+		let main_root = trees.path().join("main");
+		let v1_root = trees.path().join("v1");
+		for (root, dirs) in [
+			(&main_root, vec!["alpha"]),
+			(&v1_root, vec!["alpha", "zeta"]),
+		] {
+			for dir in dirs {
+				write_skill(root, dir, dir);
+			}
+		}
+
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, dir, ref_name) in
+			[("alpha", "alpha", "main"), ("zeta", "zeta", "v1")]
+		{
+			lock.skills.insert(
+				name.to_string(),
+				skill::LocalSkillLockEntry {
+					source: "owner/repo".to_string(),
+					ref_name: Some(ref_name.to_string()),
+					source_type: "github".to_string(),
+					skill_path: Some(format!("{dir}/SKILL.md")),
+					computed_hash: "stale".to_string(),
+					ref_commit: None,
+					source_url: None,
+				},
+			);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		let fetcher = PerRefFetcher {
+			roots: BTreeMap::from([
+				(Some("main".to_string()), main_root.clone()),
+				(Some("v1".to_string()), v1_root.clone()),
+			]),
+			fetched: std::sync::Mutex::new(Vec::new()),
+		};
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "owner/repo".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Project {
+					root: project.path().to_path_buf(),
+				}],
+			},
+			SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver: &NoToken,
+			},
+		);
+
+		let SourceDiffOutcome::Ok { skills, .. } = outcome else {
+			panic!("expected a diff, got {outcome:?}");
+		};
+		let state_of = |name: &str| {
+			skills
+				.iter()
+				.find(|diff| diff.name == name)
+				.unwrap_or_else(|| panic!("{name} missing from {skills:?}"))
+				.state
+				.clone()
+		};
+		// `zeta` exists on v1 — the ref it is installed from. The row's ref is
+		// `main` (first-wins, and `alpha` sorts first), where zeta's folder is
+		// absent: judged against THAT tree it is Removed{noPath}, which the
+		// desktop offers to delete in one click.
+		assert_eq!(state_of("zeta"), SourceSkillState::InstalledOutdated);
+		assert_eq!(state_of("alpha"), SourceSkillState::InstalledOutdated);
+		// One fetch per distinct ref, no more.
+		let mut fetched = fetcher.fetched.lock().unwrap().clone();
+		fetched.sort();
+		assert_eq!(
+			fetched,
+			vec![Some("main".to_string()), Some("v1".to_string())]
+		);
+		// The v1 tree also carries `alpha`, but that is another cohort's entry,
+		// not something to offer for installation — it must appear once.
+		assert_eq!(
+			skills.iter().filter(|d| d.name == "alpha").count(),
+			1,
+			"{skills:?}"
+		);
 	}
 
 	/// Write a project lock entry recording a non-default ref for `source`.

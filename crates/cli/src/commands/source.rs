@@ -24,6 +24,42 @@ use tabled::settings::Style;
 
 use crate::SourceAction;
 
+/// `source diff` / `source sync` fetch the repository ONCE and reuse that tree
+/// for every matched entry. A Sources row is one repository but its entries need
+/// not share a branch, so that is only sound when they do: judged against
+/// `main`, a `v1`-pinned skill reads as outdated forever (its own update fetches
+/// `v1`, so the hash never converges) or as removed when its folder is absent
+/// there — and `--update` would overwrite it with `main`'s content.
+///
+/// An explicit `--ref` IS the caller picking one tree, so it passes.
+///
+/// The API `/sources/diff` does not need this: it owns its fetches and splits
+/// into one cohort per ref (`skill_update::sources::baseline_by_ref`). Teaching
+/// this command to do the same means holding one fetched tree per ref through
+/// the install/update flow — see `.scratch/source-grouping/spec.md`.
+fn assert_one_tree_can_serve(
+	source: &str,
+	scope: &SourceScope,
+	git_ref: Option<&str>,
+) -> Result<()> {
+	if git_ref.is_some() {
+		return Ok(());
+	}
+	let refs = sources::scope_ref_cohorts(scope, source);
+	if refs.len() < 2 {
+		return Ok(());
+	}
+	bail!(
+		"source '{source}' has skills pinned to {} different refs:\n  {}\nRun \
+		 it again with --ref to work on one of them.",
+		refs.len(),
+		refs.iter()
+			.map(|name| name.as_deref().unwrap_or("(default branch)"))
+			.collect::<Vec<_>>()
+			.join("\n  ")
+	)
+}
+
 // ─────────────────────────── credential / fetch ────────────────────────────
 
 /// Token resolver for CLI source auth. `GIT_PASSWORD` is explicit user
@@ -324,6 +360,10 @@ fn diff(
 	// source_type (not a hard-coded "github"). No fetch happens here.
 	let meta = sources::resolve_source_meta(&source, &scopes, git_ref);
 
+	for scope in &scopes {
+		assert_one_tree_can_serve(&source, scope, git_ref)?;
+	}
+
 	// Skip sources we cannot fetch (local/ssh/unsupported scheme) up front,
 	// before paying for a fetch — honoring the precheck the API path honors.
 	// One fetched tree cannot judge two forges. `source list` prints the lock's
@@ -576,6 +616,8 @@ fn sync(args: SyncArgs) -> Result<()> {
 		std::slice::from_ref(&source_scope),
 		args.git_ref,
 	);
+
+	assert_one_tree_can_serve(&source, &source_scope, args.git_ref)?;
 
 	// One fetched tree cannot judge two forges. `source list` prints the lock's
 	// host-blind SOURCE, and pasting that back selects every forge serving the
@@ -1381,13 +1423,83 @@ fn narrow_by_name<T>(
 #[cfg(test)]
 mod tests {
 	use super::{
-		narrow_by_name, plan_target_agents, resync_row_error, select_env_token,
+		assert_one_tree_can_serve, narrow_by_name, plan_target_agents,
+		resync_row_error, select_env_token,
 	};
 	use aghub_core::models::AgentType;
-	use skill_update::sources::{SourceSkillDiff, SourceSkillState};
+	use skill_update::sources::{
+		SourceScope, SourceSkillDiff, SourceSkillState,
+	};
 
 	fn s(v: &str) -> Option<String> {
 		Some(v.to_string())
+	}
+
+	fn lock_entry(ref_name: &str) -> skill::LocalSkillLockEntry {
+		skill::LocalSkillLockEntry {
+			source: "owner/repo".to_string(),
+			ref_name: Some(ref_name.to_string()),
+			source_type: "github".to_string(),
+			skill_path: None,
+			computed_hash: "h".to_string(),
+			ref_commit: None,
+			source_url: None,
+		}
+	}
+
+	/// `source diff`/`sync` fetch ONE tree and reuse it for every entry, so they
+	/// must refuse a scope whose entries are pinned to different refs — judged
+	/// against the wrong ref a skill reads as outdated forever, or as removed,
+	/// and `--update` overwrites it with the other ref's content. An explicit
+	/// `--ref` is the caller picking one tree, so it passes.
+	#[test]
+	fn a_scope_spanning_two_refs_is_refused_without_an_explicit_ref() {
+		let project = tempfile::tempdir().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, ref_name) in [("alpha", "main"), ("zeta", "v1")] {
+			let mut entry = lock_entry(ref_name);
+			entry.skill_path = Some(format!("{name}/SKILL.md"));
+			lock.skills.insert(name.to_string(), entry);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+		let scope = SourceScope::Project {
+			root: project.path().to_path_buf(),
+		};
+
+		let refused = assert_one_tree_can_serve("owner/repo", &scope, None)
+			.expect_err("two refs cannot share one fetched tree");
+		let message = refused.to_string();
+		assert!(message.contains("main"), "{message}");
+		assert!(message.contains("v1"), "{message}");
+
+		assert!(
+			assert_one_tree_can_serve("owner/repo", &scope, Some("main"))
+				.is_ok(),
+			"an explicit --ref picks one tree"
+		);
+	}
+
+	/// The guard must not fire on the ordinary single-ref source — it would make
+	/// every `source diff` bail.
+	#[test]
+	fn one_ref_passes() {
+		let project = tempfile::tempdir().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for name in ["alpha", "zeta"] {
+			let mut entry = lock_entry("main");
+			entry.skill_path = Some(format!("{name}/SKILL.md"));
+			lock.skills.insert(name.to_string(), entry);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		assert!(assert_one_tree_can_serve(
+			"owner/repo",
+			&SourceScope::Project {
+				root: project.path().to_path_buf(),
+			},
+			None,
+		)
+		.is_ok());
 	}
 
 	fn diff(name: &str, state: SourceSkillState) -> SourceSkillDiff {
