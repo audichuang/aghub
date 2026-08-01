@@ -60,12 +60,11 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 /// caller named. Distinct from `SOURCE_CHANGED_DURING_FETCH`: nothing moved
 /// mid-flight, the caller's Sources view is simply stale.
 const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
-/// Upper bound on one batch's `names`. The per-name costs that motivated a tight
-/// bound are gone (the seam reads the lock ONCE and dedupes linearly), so this is
-/// now only a backstop against an absurd body occupying a mutation worker — set
-/// far above any real Source, so "Update all" can never be unusable because a
-/// Source is large.
-const MAX_BATCH_NAMES: usize = 10_000;
+/// Upper bound on one batch's `names`. The seam reads the Lock once, but each
+/// resolvable name still scans every agent authoritatively inside its Resync
+/// transaction. Keep that `O(names × agents)` work bounded while allowing a
+/// Source with hundreds of skills to update in one request.
+const MAX_BATCH_NAMES: usize = 256;
 
 /// Query parameters for the update check. `offline` short-circuits every entry
 /// to `Uncheckable { network }` without touching the network (useful for tests
@@ -343,7 +342,10 @@ fn apply_locked_resync_error(
 		LockedResyncError::MissingSkillPath => {
 			Ok(apply_error(name, scope, "Locked skill has no skillPath"))
 		}
-		LockedResyncError::NotInstalled => Ok(apply_error(
+		LockedResyncError::NotInstalled
+		| LockedResyncError::Resync(
+			aghub_core::skills::resync::ResyncError::NotInstalled,
+		) => Ok(apply_error(
 			name,
 			scope,
 			"Skill is locked but no installed copy was found",
@@ -997,8 +999,17 @@ mod tests {
 
 	#[cfg(unix)]
 	fn prepare_global_batch(home: &Path) {
+		prepare_global_batch_names(home, ["alpha", "beta"]);
+	}
+
+	#[cfg(unix)]
+	fn prepare_global_batch_names(
+		home: &Path,
+		names: impl IntoIterator<Item = impl AsRef<str>>,
+	) {
 		let mut lock = skill::SkillLockFile::default();
-		for name in ["alpha", "beta"] {
+		for name in names {
+			let name = name.as_ref();
 			let installed = home.join(format!(".claude/skills/{name}"));
 			std::fs::create_dir_all(&installed).unwrap();
 			std::fs::write(
@@ -1071,6 +1082,43 @@ mod tests {
 			};
 			assert_eq!(error.status, rocket::http::Status::ServiceUnavailable);
 			assert_eq!(error.body.code, "KEYCHAIN_UNAVAILABLE");
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_rejects_257_installed_names_before_fetching() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let _home = HomeGuard::set(home.path());
+			let names = (0..257)
+				.map(|index| format!("skill-{index}"))
+				.collect::<Vec<_>>();
+			prepare_global_batch_names(home.path(), &names);
+			let runtime = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap();
+
+			let error = runtime
+				.block_on(apply_skill_updates_inner(
+					ApplySkillUpdatesRequest {
+						source: "https://github.com/owner/repo".to_string(),
+						names,
+						scope: "global".to_string(),
+						project_root: None,
+						confirm: Some(true),
+					},
+					&PanicOnFetch,
+					&empty_keyring_resolver(),
+				))
+				.expect_err(
+					"257 installed skills must exceed the safe batch cap",
+				);
+
+			assert_eq!(error.status, Status::BadRequest);
+			assert_eq!(error.body.code, "INVALID_PARAM");
+			assert_eq!(error.body.error, "names must not exceed 256 per batch");
 		});
 	}
 

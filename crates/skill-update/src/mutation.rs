@@ -385,6 +385,7 @@ impl From<GroupFailure> for LockedResyncError {
 struct EntrySource {
 	source_ref: SourceRef,
 	grouping_source: String,
+	source_type: String,
 }
 
 /// ONE read of the scope's lock, shared by every requested name. Re-reading and
@@ -397,11 +398,22 @@ enum ScopeLock {
 	Project(std::collections::BTreeMap<String, skill::LocalSkillLockEntry>),
 }
 
+// Counts `ScopeLock::read` calls on the CURRENT thread, so a test can pin the
+// one-read-per-batch property without a process-wide counter that concurrent
+// tests would pollute.
+#[cfg(test)]
+thread_local! {
+	pub(super) static LOCK_READS: std::cell::Cell<usize> =
+		const { std::cell::Cell::new(0) };
+}
+
 impl ScopeLock {
 	fn read(
 		scope: ResourceScope,
 		project_root: Option<&Path>,
 	) -> Result<Self, LockedResyncError> {
+		#[cfg(test)]
+		LOCK_READS.with(|reads| reads.set(reads.get() + 1));
 		match scope {
 			ResourceScope::GlobalOnly => {
 				Ok(Self::Global(skill::get_all_locked_skills()))
@@ -447,6 +459,7 @@ fn prepare_locked_resync(
 						ref_: entry.ref_name,
 					},
 					grouping_source: entry.source,
+					source_type: entry.source_type,
 				},
 				entry
 					.skill_path
@@ -473,6 +486,7 @@ fn prepare_locked_resync(
 						ref_: entry.ref_name,
 					},
 					grouping_source: entry.source,
+					source_type: entry.source_type,
 				},
 				entry
 					.skill_path
@@ -482,6 +496,12 @@ fn prepare_locked_resync(
 		}
 	};
 
+	// Advisory: the transaction re-checks this authoritatively under the lock, so
+	// this is not the guard. It is here to keep a name with nothing installed out
+	// of a fetch GROUP — otherwise a stale Sources view costs a remote round trip
+	// per affected group before failing with the same message. One local agent
+	// scan is the cheaper half of that trade, and `MAX_BATCH_NAMES` already bounds
+	// how many of them a request can ask for.
 	if aghub_core::skills::removal::installed_skill_roots(
 		name,
 		scope,
@@ -564,12 +584,14 @@ pub fn resync_locked_skills(
 			let EntrySource {
 				source_ref,
 				grouping_source,
+				source_type,
 			} = entry;
 			if request.source_group.is_some_and(|group| {
 				!crate::sources::source_matches(
 					group,
 					&grouping_source,
 					Some(&source_ref.source),
+					&source_type,
 				)
 			}) {
 				return Err(LockedResyncError::SourceGroupMismatch);
@@ -919,6 +941,90 @@ mod tests {
 		assert_eq!(
 			lock.skills["sync-me"].ref_commit.as_deref(),
 			Some("new-commit"),
+		);
+	}
+
+	/// The batch must read the Lock ONCE, not once per name: re-reading per name
+	/// made a large batch cost O(names) full parses, and that is the property
+	/// justifying the batch cap. Nothing else fails if `prepare_locked_resync`
+	/// starts reading the Lock itself again.
+	#[test]
+	fn a_batch_reads_the_lock_exactly_once() {
+		struct StubFetcher {
+			root: std::path::PathBuf,
+		}
+		impl Fetcher for StubFetcher {
+			fn fetch(
+				&self,
+				_source_ref: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<crate::FetchedRepo, FetchError> {
+				Ok(crate::FetchedRepo {
+					root: self.root.clone(),
+					snapshot: aghub_git::RepoSnapshot {
+						commit_oid: "once-commit".to_string(),
+						tree_oid: "once-tree".to_string(),
+						commit_time: None,
+					},
+					_guard: None,
+				})
+			}
+		}
+
+		let temporary = tempfile::tempdir().unwrap();
+		let project = temporary.path().join("project");
+		let fetched_root = temporary.path().join("fetched");
+		let names = ["one", "two", "three"];
+		for name in names {
+			write_skill(
+				&project.join(format!(".claude/skills/{name}")),
+				name,
+				"old",
+			);
+			write_skill(
+				&fetched_root.join(format!("skills/{name}")),
+				name,
+				"new",
+			);
+			skill::add_skill_to_local_lock(
+				name,
+				skill::LocalSkillLockEntry {
+					source_url: Some(
+						"https://git.example/owner/repo.git".to_string(),
+					),
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "git".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some(format!("skills/{name}/SKILL.md")),
+					ref_commit: None,
+				},
+				Some(&project),
+			)
+			.unwrap();
+		}
+		let owned = names.map(str::to_string);
+
+		super::LOCK_READS.with(|reads| reads.set(0));
+		let results = super::resync_locked_skills(
+			super::LockedSkillsResyncRequest {
+				source_group: None,
+				names: &owned,
+				scope: ResourceScope::ProjectOnly,
+				project_root: Some(&project),
+			},
+			&StubFetcher { root: fetched_root },
+			&NoToken,
+		)
+		.expect("three locked skills should resync");
+
+		assert!(results.iter().all(|row| row.outcome.is_ok()));
+		assert_eq!(
+			super::LOCK_READS.with(|reads| reads.get()),
+			1,
+			"a batch of {} names must parse the Lock once",
+			names.len()
 		);
 	}
 

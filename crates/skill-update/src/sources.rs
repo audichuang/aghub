@@ -160,7 +160,11 @@ fn global_sources() -> Vec<SourceSummary> {
 	let mut by_origin: BTreeMap<String, (String, String, String, u32)> =
 		BTreeMap::new();
 	for (_name, entry) in skill::get_all_locked_skills() {
-		let origin = source_origin(&entry.source, Some(&entry.source_url));
+		let origin = source_origin(
+			&entry.source,
+			Some(&entry.source_url),
+			&entry.source_type,
+		);
 		let agg = by_origin.entry(origin).or_insert_with(|| {
 			(
 				entry.source.clone(),
@@ -197,7 +201,11 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 	let mut by_origin: BTreeMap<String, (String, Option<String>, String, u32)> =
 		BTreeMap::new();
 	for (_name, entry) in lock.skills {
-		let origin = source_origin(&entry.source, entry.source_url.as_deref());
+		let origin = source_origin(
+			&entry.source,
+			entry.source_url.as_deref(),
+			&entry.source_type,
+		);
 		let agg = by_origin.entry(origin).or_insert_with(|| {
 			(
 				entry.source.clone(),
@@ -211,8 +219,9 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 	by_origin
 		.into_values()
 		.map(|(source, source_url, source_type, skill_count)| {
-			let source_url =
-				source_url.unwrap_or_else(|| reconstruct_source_url(&source));
+			let source_url = source_url.unwrap_or_else(|| {
+				reconstruct_source_url(&source, &source_type)
+			});
 			SourceSummary {
 				source,
 				source_url,
@@ -224,7 +233,60 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 		.collect()
 }
 
-fn reconstruct_source_url(source: &str) -> String {
+fn reconstruct_source_url(source: &str, source_type: &str) -> String {
+	let source = source.trim();
+	if source_type.eq_ignore_ascii_case("local") {
+		return source.to_string();
+	}
+	let segments = source.split('/').collect::<Vec<_>>();
+	let provider_origin = match source_type.to_ascii_lowercase().as_str() {
+		"github" => Some("github.com"),
+		"gitlab" => Some("gitlab.com"),
+		_ => None,
+	};
+	let known_origin = provider_origin.is_some_and(|host| {
+		segments
+			.first()
+			.is_some_and(|segment| segment.eq_ignore_ascii_case(host))
+	});
+	let explicit_port = segments.first().is_some_and(|segment| {
+		segment
+			.rsplit_once(':')
+			.is_some_and(|(_, port)| port.parse::<u16>().is_ok())
+	});
+	let unknown_origin = provider_origin.is_none()
+		&& !segments.contains(&"_git")
+		&& segments.len() >= 2
+		&& segments.first().is_some_and(|segment| {
+			segment.contains('.') || explicit_port || segments.len() >= 3
+		});
+	if !source.contains("://")
+		&& !source.contains('@')
+		&& (known_origin || unknown_origin)
+	{
+		let with_scheme = format!("https://{source}");
+		return aghub_git::resolve_remote_source(&with_scheme)
+			.map(|resolved| resolved.clone_url)
+			.unwrap_or(with_scheme);
+	}
+	if source_type.eq_ignore_ascii_case("gitlab")
+		&& !source.contains("://")
+		&& !source.contains('@')
+		&& !source.contains(':')
+		&& !source.starts_with(['/', '.'])
+	{
+		let path = source.trim_matches('/').trim_end_matches(".git");
+		if !path.is_empty() {
+			return format!("https://gitlab.com/{path}.git");
+		}
+	}
+	let may_default_to_github = source_type.eq_ignore_ascii_case("github")
+		|| source.contains("://")
+		|| source.contains('@')
+		|| source.contains(':');
+	if !may_default_to_github {
+		return source.to_string();
+	}
 	aghub_git::resolve_remote_source(source)
 		.map(|resolved| resolved.clone_url)
 		.unwrap_or_else(|_| source.to_string())
@@ -308,19 +370,33 @@ mod fetch_with_resolver_tests {
 /// A Source's identity: the repository's ORIGIN — `host[:port]/path`, lower-cased
 /// authority, no userinfo, no `.git`. Two forges serving the same path are two
 /// Sources; two spellings of one repo (ssh vs https, with or without `.git`) are
-/// one. Shared with the install-time owner check and `EntryIdentity` via
-/// `aghub_core`, so all three answer "same repo?" identically.
+/// one. The explicit-transport normalization is shared with the install-time
+/// owner check and `EntryIdentity` via `aghub_core`; provider fallback and
+/// unresolved-entry identity are intentionally owned here.
 ///
 /// Accepts whatever a caller holds: the recorded `sourceUrl`, an `owner/repo`
-/// shorthand (which IS a GitHub coordinate), or an origin echoed back from a
-/// previous response. Anything unresolvable (a local path, `file:`) keeps its own
-/// spelling, so two distinct local sources never merge into one row.
+/// shorthand, or an origin echoed back from a previous response. When
+/// `sourceUrl` is absent, the recorded provider supplies the public GitHub or
+/// GitLab host. Unresolvable entries retain a provider-qualified internal
+/// identity, so a local/custom entry cannot merge into a provider-backed row.
+///
+/// Some legacy shapes remain undecidable: `sourceType: "git"` (or another
+/// custom type) plus no `sourceUrl` cannot reveal which self-hosted forge owns
+/// `owner/repo`, and a TFS collection path cannot reveal its server. Two such
+/// entries with the same type and spelling still cannot be separated.
 pub(crate) fn source_origin(
 	entry_source: &str,
 	entry_source_url: Option<&str>,
+	entry_source_type: &str,
 ) -> String {
-	resolvable_origin(entry_source, entry_source_url)
-		.unwrap_or_else(|| entry_source.trim().to_string())
+	resolvable_origin(entry_source, entry_source_url, entry_source_type)
+		.unwrap_or_else(|| {
+			format!(
+				"unresolved:{}:{}",
+				entry_source_type.trim().to_ascii_lowercase(),
+				entry_source.trim()
+			)
+		})
 }
 
 /// `Some` when a host can be derived, `None` for a HOST-BLIND identifier — a
@@ -331,17 +407,19 @@ pub(crate) fn source_origin(
 fn resolvable_origin(
 	entry_source: &str,
 	entry_source_url: Option<&str>,
+	entry_source_type: &str,
 ) -> Option<String> {
-	// Recorded URLs first — they carry the real host. The reconstruction handles a
-	// shorthand (which IS a GitHub coordinate). The RAW `entry_source` is
+	// Recorded URLs first — they carry the real host. Reconstruction applies the
+	// recorded provider to a shorthand. The RAW `entry_source` is
 	// deliberately absent: `remote_owner_from_url` reads `host:8443/owner/repo` as
 	// an SCP-like URL whose path is `8443/owner/repo`, so feeding it a raw
 	// authority-bearing string yields a DIFFERENT origin than the URL it came
 	// from — the key would not be idempotent.
 	let candidates = [
 		entry_source_url.map(str::to_string),
-		entry_source_url.map(reconstruct_source_url),
-		Some(reconstruct_source_url(entry_source)),
+		entry_source_url
+			.map(|source| reconstruct_source_url(source, entry_source_type)),
+		Some(reconstruct_source_url(entry_source, entry_source_type)),
 	];
 	candidates.into_iter().flatten().find_map(|candidate| {
 		aghub_core::skills::install_fetched::remote_owner_from_url(&candidate)
@@ -367,7 +445,7 @@ fn want_origin(want: &str) -> Option<String> {
 	{
 		return None;
 	}
-	resolvable_origin(trimmed, None)
+	resolvable_origin(trimmed, None, "git")
 }
 
 /// Whether a lock entry belongs to the requested source.
@@ -382,11 +460,13 @@ pub(crate) fn source_matches(
 	want: &str,
 	entry_source: &str,
 	entry_source_url: Option<&str>,
+	entry_source_type: &str,
 ) -> bool {
 	if entry_source_url == Some(want) {
 		return true;
 	}
-	let entry = source_origin(entry_source, entry_source_url);
+	let entry =
+		source_origin(entry_source, entry_source_url, entry_source_type);
 	match want_origin(want) {
 		// `want` names a host, so compare exactly — this is what stops a row from
 		// admitting another forge serving the same path. A bare
@@ -424,8 +504,12 @@ fn insert_scope_entries(
 	match scope {
 		SourceScope::Global => {
 			for (name, entry) in skill::get_all_locked_skills() {
-				if !source_matches(want, &entry.source, Some(&entry.source_url))
-				{
+				if !source_matches(
+					want,
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+				) {
 					continue;
 				}
 				if source_type.is_empty() {
@@ -459,6 +543,7 @@ fn insert_scope_entries(
 					want,
 					&entry.source,
 					entry.source_url.as_deref(),
+					&entry.source_type,
 				) {
 					continue;
 				}
@@ -548,8 +633,10 @@ pub(crate) fn baseline_for_scope(
 
 /// Discover only the recorded `source_type` + `ref_name` for a source across
 /// the given scopes, WITHOUT building a baseline (no folder hashing, no fetch).
-/// Mirrors the merged-baseline scan order (global first, then project) so the
-/// "first non-empty wins" result matches [`merged_baseline_for_source`].
+/// Mirrors the merged-baseline scan order (global first, then project) for type
+/// and ref. For the fetch coordinate, an HTTPS entry wins within one origin so
+/// an alphabetically earlier SSH spelling cannot make the whole row
+/// uncheckable.
 /// Returns `(source_type, recorded_ref, recorded_source_url)` — all empty/None
 /// when the source is not present in any lock. `recorded_source_url` is the
 /// matching entry's recorded clone URL (the fetch coordinate), so a caller that
@@ -567,7 +654,12 @@ fn recorded_meta_for_source(
 	                 entry_source_url: Option<&str>,
 	                 entry_source_type: &str,
 	                 entry_ref: Option<&str>| {
-		if !source_matches(want, entry_source, entry_source_url) {
+		if !source_matches(
+			want,
+			entry_source,
+			entry_source_url,
+			entry_source_type,
+		) {
 			return;
 		}
 		if source_type.is_empty() {
@@ -576,8 +668,22 @@ fn recorded_meta_for_source(
 		if recorded_ref.is_none() {
 			recorded_ref = entry_ref.map(str::to_string);
 		}
-		if recorded_source_url.is_none() {
-			recorded_source_url = entry_source_url.map(str::to_string);
+		if let Some(candidate) = entry_source_url {
+			let candidate_is_https =
+				candidate.split_once("://").is_some_and(|(scheme, _)| {
+					scheme.eq_ignore_ascii_case("https")
+				});
+			let recorded_is_https = recorded_source_url
+				.as_deref()
+				.and_then(|recorded| recorded.split_once("://"))
+				.is_some_and(|(scheme, _)| {
+					scheme.eq_ignore_ascii_case("https")
+				});
+			if recorded_source_url.is_none()
+				|| (candidate_is_https && !recorded_is_https)
+			{
+				recorded_source_url = Some(candidate.to_string());
+			}
 		}
 	};
 	// Global first, then project — same order as `merged_baseline_for_source`.
@@ -1093,7 +1199,7 @@ mod origin_tests {
 			("github.com/owner/repo", None),
 		] {
 			assert_eq!(
-				source_origin(source, source_url),
+				source_origin(source, source_url, "github"),
 				canonical,
 				"source={source} url={source_url:?}"
 			);
@@ -1105,6 +1211,7 @@ mod origin_tests {
 		let github = source_origin(
 			"owner/repo",
 			Some("https://github.com/owner/repo.git"),
+			"github",
 		);
 		for other in [
 			"https://gitlab.com/owner/repo.git",
@@ -1115,7 +1222,7 @@ mod origin_tests {
 			"https://github.com:8443/owner/repo.git",
 		] {
 			assert_ne!(
-				source_origin("owner/repo", Some(other)),
+				source_origin("owner/repo", Some(other), "git"),
 				github,
 				"{other} must not collapse into {github}"
 			);
@@ -1136,7 +1243,7 @@ mod origin_tests {
 			"https://github.com/owner/repo.git",
 		] {
 			assert!(
-				source_matches("owner/repo", "owner/repo", Some(url)),
+				source_matches("owner/repo", "owner/repo", Some(url), "git",),
 				"the printed identifier must still select {url}"
 			);
 		}
@@ -1145,7 +1252,8 @@ mod origin_tests {
 		assert!(!source_matches(
 			"https://github.com/owner/repo.git",
 			"owner/repo",
-			Some("https://gitlab.com/owner/repo.git")
+			Some("https://gitlab.com/owner/repo.git"),
+			"gitlab",
 		));
 	}
 
@@ -1153,10 +1261,13 @@ mod origin_tests {
 	/// directories never merge into one row.
 	#[test]
 	fn unresolvable_sources_keep_their_spelling() {
-		assert_eq!(source_origin("/opt/skills/a", None), "/opt/skills/a");
+		assert_eq!(
+			source_origin("/opt/skills/a", None, "local"),
+			"unresolved:local:/opt/skills/a"
+		);
 		assert_ne!(
-			source_origin("/opt/skills/a", None),
-			source_origin("/opt/skills/b", None)
+			source_origin("/opt/skills/a", None, "local"),
+			source_origin("/opt/skills/b", None, "local")
 		);
 	}
 
@@ -1166,7 +1277,8 @@ mod origin_tests {
 		assert!(source_matches(
 			"https://github.com/owner/repo.git",
 			"owner/repo",
-			Some("https://github.com/owner/repo")
+			Some("https://github.com/owner/repo"),
+			"github",
 		));
 		// An ORIGIN is an internal grouping key, deliberately NOT an accepted
 		// input: it is not a coordinate anything can fetch from, and echoing one
@@ -1176,20 +1288,23 @@ mod origin_tests {
 		assert!(!source_matches(
 			"github.com/owner/repo",
 			"owner/repo",
-			Some("https://github.com/owner/repo.git")
+			Some("https://github.com/owner/repo.git"),
+			"github",
 		));
 		// A host-blind identifier the lock records but we cannot resolve (TFS
 		// collection path) still matches itself — nothing finer is available.
 		assert!(source_matches(
 			"Coll/_git/repo",
 			"Coll/_git/repo",
-			Some("https://tfs.example.com/tfs/Coll/_git/repo")
+			Some("https://tfs.example.com/tfs/Coll/_git/repo"),
+			"git",
 		));
 		assert!(
 			!source_matches(
 				"https://github.com/owner/repo.git",
 				"owner/repo",
-				Some("https://gitlab.com/owner/repo.git")
+				Some("https://gitlab.com/owner/repo.git"),
+				"gitlab",
 			),
 			"a same-path entry on another forge is NOT part of this row"
 		);
@@ -2057,6 +2172,51 @@ mod diff_tests {
 		);
 
 		assert_eq!(meta.source_type, "git");
+	}
+
+	#[test]
+	fn resolve_source_meta_prefers_https_coordinate_within_origin() {
+		let project = TempDir::new().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, source_url) in [
+			("a-ssh", "git@github.com:owner/meta-transport.git"),
+			("z-https", "https://github.com/owner/meta-transport.git"),
+		] {
+			lock.skills.insert(
+				name.to_string(),
+				skill::LocalSkillLockEntry {
+					source: "owner/meta-transport".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					skill_path: Some(format!("{name}/SKILL.md")),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+					source_url: Some(source_url.to_string()),
+				},
+			);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		let meta = resolve_source_meta(
+			"git@github.com:owner/meta-transport.git",
+			&[SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+			None,
+		);
+
+		assert_eq!(
+			meta.effective_source.as_deref(),
+			Some("https://github.com/owner/meta-transport.git"),
+			"one SSH lock entry must not make the whole origin uncheckable"
+		);
+		assert_eq!(
+			precheck_source(
+				&meta.source_type,
+				meta.effective_source.as_deref().unwrap()
+			),
+			None
+		);
 	}
 
 	#[test]

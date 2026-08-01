@@ -371,12 +371,12 @@ fn each_group_carries_only_its_own_sources_token() {
 	);
 }
 
-/// npx-written project locks carry no `sourceUrl`, so the entry's effective
-/// source is the `owner/repo` shorthand while the Sources row advertises a
-/// reconstructed clone URL — the desktop sends the latter. The assertion must
-/// normalize across that, or project-scope "Update all" fails every row.
+/// A legacy project entry with `sourceType: "git"` and no `sourceUrl` has lost
+/// its host. The Sources row must keep the host-blind spelling instead of
+/// inventing GitHub, and the desktop's exact list → apply round-trip must still
+/// select it.
 #[test]
-fn reconstructed_source_url_matches_a_shorthand_only_entry() {
+fn listed_source_url_matches_a_shorthand_only_entry() {
 	let temporary = tempfile::tempdir().unwrap();
 	let project = temporary.path().join("project");
 	let fetched_root = temporary.path().join("fetched");
@@ -384,6 +384,18 @@ fn reconstructed_source_url_matches_a_shorthand_only_entry() {
 	write_skill(&fetched_root.join("skills/alpha"), "alpha", "new");
 	locked(&project, "alpha", "owner/repo", None);
 	let names = vec!["alpha".to_string()];
+	let rows = skill_update::sources::list_sources(
+		skill_update::sources::SourceListInput {
+			scopes: vec![skill_update::sources::SourceScope::Project {
+				root: project.clone(),
+			}],
+		},
+	);
+	assert_eq!(rows.len(), 1);
+	assert_eq!(
+		rows[0].source_url, "owner/repo",
+		"a custom host cannot be reconstructed from sourceType=git"
+	);
 
 	let fetcher = RecordingFetcher {
 		root: fetched_root,
@@ -391,7 +403,7 @@ fn reconstructed_source_url_matches_a_shorthand_only_entry() {
 	};
 	let results = resync_locked_skills(
 		LockedSkillsResyncRequest {
-			source_group: Some("https://github.com/owner/repo.git"),
+			source_group: Some(&rows[0].source_url),
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),

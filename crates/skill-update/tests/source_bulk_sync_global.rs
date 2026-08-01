@@ -121,6 +121,23 @@ fn global_entry(source_url: &str, skill_path: &str) -> skill::SkillLockEntry {
 	}
 }
 
+fn project_entry(
+	source: &str,
+	source_type: &str,
+	source_url: Option<&str>,
+	skill_path: &str,
+) -> skill::LocalSkillLockEntry {
+	skill::LocalSkillLockEntry {
+		source: source.to_string(),
+		ref_name: Some("main".to_string()),
+		source_type: source_type.to_string(),
+		skill_path: Some(skill_path.to_string()),
+		computed_hash: "hash".to_string(),
+		ref_commit: None,
+		source_url: source_url.map(str::to_string),
+	}
+}
+
 /// Grouping keys on the repository ORIGIN, so two hosts serving the same
 /// `owner/repo` are two Sources rows. A batch naming host A's row updates A's
 /// entry and refuses B's. What makes this global-only: a global entry carries
@@ -273,4 +290,169 @@ fn two_forges_serving_one_path_are_two_source_rows() {
 			 this"
 		);
 	});
+}
+
+/// Project locks use the same origin grouping even though `sourceUrl` is
+/// optional. The local entry is deliberately the same apparent repo path with
+/// an explicit relative marker: it must never join either fetched repository.
+#[test]
+fn project_two_forges_serving_one_path_are_two_source_rows() {
+	let project = tempfile::tempdir().unwrap();
+	let mut lock = skill::LocalSkillLockFile::default();
+	for (name, source_url) in [
+		("alpha", "https://github.com/owner/repo.git"),
+		("beta", "https://gitlab.com/owner/repo.git"),
+		("gamma", "https://github.com/owner/repo.git"),
+	] {
+		lock.skills.insert(
+			name.to_string(),
+			project_entry(
+				"owner/repo",
+				if source_url.contains("gitlab.com") {
+					"gitlab"
+				} else {
+					"github"
+				},
+				Some(source_url),
+				&format!("skills/{name}/SKILL.md"),
+			),
+		);
+	}
+	lock.skills.insert(
+		"local".to_string(),
+		project_entry("./owner/repo", "local", None, "skills/local/SKILL.md"),
+	);
+	skill::lock::local::write_local_lock(&lock, Some(project.path())).unwrap();
+
+	let rows = skill_update::sources::list_sources(
+		skill_update::sources::SourceListInput {
+			scopes: vec![skill_update::sources::SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+		},
+	);
+
+	assert_eq!(
+		rows.len(),
+		3,
+		"one row per remote origin plus local: {:?}",
+		rows.iter()
+			.map(|row| (&row.source_url, &row.source_type, row.skill_count))
+			.collect::<Vec<_>>()
+	);
+	let github = rows
+		.iter()
+		.find(|row| row.source_url == "https://github.com/owner/repo.git")
+		.expect("a github row");
+	let gitlab = rows
+		.iter()
+		.find(|row| row.source_url == "https://gitlab.com/owner/repo.git")
+		.expect("a gitlab row");
+	let local = rows
+		.iter()
+		.find(|row| row.source_url == "./owner/repo")
+		.expect("a local row");
+	assert_eq!(github.skill_count, 2, "alpha + gamma");
+	assert_eq!(gitlab.skill_count, 1, "beta");
+	assert_eq!(local.skill_count, 1, "local");
+	assert_eq!(github.source_type, "github");
+	assert_eq!(gitlab.source_type, "gitlab");
+	assert_eq!(local.source_type, "local");
+}
+
+/// A path with an explicit relative marker is not GitHub shorthand. Legacy or
+/// hand-edited locks can contain one, and merging it into the remote row makes
+/// that row's remote diff classify the local member as removed.
+#[test]
+fn relative_source_keeps_a_row_separate_from_github_shorthand() {
+	with_isolated_env(|_home| {
+		let mut lock = skill::SkillLockFile::default();
+		lock.skills.insert(
+			"local".to_string(),
+			skill::SkillLockEntry {
+				source: "./owner/repo".to_string(),
+				source_type: "local".to_string(),
+				source_url: "./owner/repo".to_string(),
+				..global_entry("./owner/repo", "skills/local/SKILL.md")
+			},
+		);
+		lock.skills.insert(
+			"remote".to_string(),
+			global_entry(
+				"https://github.com/owner/repo.git",
+				"skills/remote/SKILL.md",
+			),
+		);
+		skill::lock::global::write_skill_lock(&lock).unwrap();
+
+		let rows = skill_update::sources::list_sources(
+			skill_update::sources::SourceListInput {
+				scopes: vec![skill_update::sources::SourceScope::Global],
+			},
+		);
+
+		assert_eq!(
+			rows.len(),
+			2,
+			"relative and remote entries must not share a row: {:?}",
+			rows.iter()
+				.map(|row| (&row.source_url, row.skill_count))
+				.collect::<Vec<_>>()
+		);
+		assert!(rows.iter().any(|row| {
+			row.source_url == "./owner/repo"
+				&& row.source_type == "local"
+				&& row.skill_count == 1
+		}));
+		assert!(rows.iter().any(|row| {
+			row.source_url == "https://github.com/owner/repo.git"
+				&& row.source_type == "github"
+				&& row.skill_count == 1
+		}));
+	});
+}
+
+/// npx and legacy project locks can omit `sourceUrl`, but still record the
+/// provider. That type must keep a GitLab `group/repo` separate from the same
+/// path on GitHub and reconstruct the matching fetch URL.
+#[test]
+fn source_type_selects_forge_when_project_source_url_is_missing() {
+	let project = tempfile::tempdir().unwrap();
+	let mut lock = skill::LocalSkillLockFile::default();
+	lock.skills.insert(
+		"github-skill".to_string(),
+		project_entry("group/repo", "github", None, "skills/github/SKILL.md"),
+	);
+	lock.skills.insert(
+		"gitlab-skill".to_string(),
+		project_entry("group/repo", "gitlab", None, "skills/gitlab/SKILL.md"),
+	);
+	skill::lock::local::write_local_lock(&lock, Some(project.path())).unwrap();
+
+	let rows = skill_update::sources::list_sources(
+		skill_update::sources::SourceListInput {
+			scopes: vec![skill_update::sources::SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}],
+		},
+	);
+
+	assert_eq!(
+		rows.len(),
+		2,
+		"provider types must produce separate origins: {:?}",
+		rows.iter()
+			.map(|row| (&row.source_url, &row.source_type, row.skill_count))
+			.collect::<Vec<_>>()
+	);
+	assert!(rows.iter().any(|row| {
+		row.source_url == "https://github.com/group/repo.git"
+			&& row.source_type == "github"
+			&& row.skill_count == 1
+	}));
+	assert!(rows.iter().any(|row| {
+		row.source_url == "https://gitlab.com/group/repo.git"
+			&& row.source_type == "gitlab"
+			&& row.skill_count == 1
+	}));
 }

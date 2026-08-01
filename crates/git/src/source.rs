@@ -111,11 +111,14 @@ fn parse_github_repo_shorthand(
 			));
 		}
 		path.components()
-			.filter_map(|component| match component {
+			.map(|component| match component {
 				Component::Normal(value) => value.to_str().map(str::to_string),
 				_ => None,
 			})
-			.collect::<Vec<_>>()
+			.collect::<Option<Vec<_>>>()
+			.ok_or_else(|| {
+				SourceError::InvalidGithubShorthand(source.to_string())
+			})?
 	};
 
 	if segments.len() != 2 {
@@ -304,6 +307,14 @@ mod tests {
 			source.clone_url,
 			"https://github.com/vercel-labs/agent-skills.git"
 		);
+	}
+
+	#[test]
+	fn rejects_explicit_relative_path_as_github_shorthand() {
+		assert!(matches!(
+			resolve_remote_source("./vercel-labs/agent-skills"),
+			Err(SourceError::InvalidGithubShorthand(_))
+		));
 	}
 
 	#[test]

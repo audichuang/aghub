@@ -140,13 +140,16 @@ fn skill_lock_source(
 /// Canonical host + repo-path identity for the common remote URL forms. The
 /// transport and optional `.git` suffix do not define ownership; the host does.
 ///
-/// Public because three callers answer the same question — "do these two
-/// spellings name one repo?" — and must answer it identically:
-/// [`crate::skills::lock::EntryIdentity`], the install-time owner check here, and
-/// `skill_update::sources`, which groups Sources by this origin so a row's diff
-/// and its apply can never resolve to different repositories.
-///
-/// Pure string normalization: no preconditions to re-assert at the wider seam.
+/// This is the low-level normalizer shared by three callers, not their complete
+/// identity policy. The install-time owner check passes recorded clone URLs and
+/// falls back to literal equality when either side cannot be normalized.
+/// [`crate::skills::lock::EntryIdentity`] wraps it in `comparable_remote`, which
+/// additionally recognizes GitHub `owner/repo` shorthand but deliberately
+/// returns `None` for a TFS collection path and for a bare origin-shaped string.
+/// `skill_update::sources` first uses the recorded provider or restores a
+/// fetchable URL, so its `source_origin` can resolve those origin-shaped strings.
+/// Keeping the transport parser here prevents those caller-specific fallbacks
+/// from silently widening install ownership or `EntryIdentity` comparisons.
 pub fn remote_owner_from_url(source_url: &str) -> Option<String> {
 	let source_url = source_url.trim();
 	if source_url.is_empty() || source_url.starts_with("file:") {

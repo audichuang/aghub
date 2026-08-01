@@ -446,3 +446,36 @@ fn repointed_entry_fails_without_costing_its_sibling() {
 		Some("bulk-commit")
 	);
 }
+
+/// A name that is locked but has nothing installed must fail WITHOUT costing a
+/// remote round trip. The transaction re-checks this authoritatively under the
+/// lock, so dropping the advisory check loses no error — it just moves the
+/// failure to after the fetch, which is what `PanicFetcher` catches here. A
+/// stale Sources view is the ordinary way to reach this.
+#[test]
+fn a_locked_but_uninstalled_name_fails_before_any_fetch() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	prepare_project(&project);
+	// beta is locked and installed; alpha is locked with its install removed.
+	std::fs::remove_dir_all(project.join(".claude/skills/alpha")).unwrap();
+	let names = vec!["alpha".to_string()];
+
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source_group: Some("owner/repo"),
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&PanicFetcher,
+		&NoToken,
+	)
+	.expect("an uninstalled entry belongs in its own row");
+	assert!(matches!(
+		results[0].outcome,
+		Err(LockedResyncError::NotInstalled),
+	));
+	let lock = skill::lock::local::read_local_lock(Some(&project));
+	assert!(lock.skills["alpha"].ref_commit.is_none());
+}
