@@ -305,6 +305,9 @@ pub fn reconstruct_source_url(source: &str, source_type: &str) -> String {
 				.get(..host.len())
 				.filter(|head| head.eq_ignore_ascii_case(host))
 				.map(|_| &path[host.len()..])
+				// A trailing dot is the DNS root label: `gitlab.com.` names the
+				// same host as `gitlab.com`.
+				.map(|rest| rest.strip_prefix('.').unwrap_or(rest))
 				.filter(|rest| rest.is_empty() || rest.starts_with('/'))
 				.map_or(path, |rest| rest.trim_start_matches('/'));
 			let path = path.trim_end_matches(".git").trim_matches('/');
@@ -1341,6 +1344,14 @@ mod origin_tests {
 				"gitlab",
 				"https://gitlab.com/gitlab.comtools/sub/repo.git",
 			),
+			// …but a trailing dot IS the same host (the DNS root label), so the
+			// boundary check must not treat it as part of the owner name.
+			(
+				"gitlab.com./group/repo",
+				"gitlab",
+				"https://gitlab.com/group/repo.git",
+			),
+			("gitlab.com.", "gitlab", "gitlab.com."),
 			// No provider ⇒ no host to be had. `segments >= 3` once turned this
 			// into `https://group/subgroup/repo`, a host that does not exist.
 			("group/subgroup/repo", "git", "group/subgroup/repo"),
