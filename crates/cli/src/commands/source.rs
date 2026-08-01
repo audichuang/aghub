@@ -33,19 +33,26 @@ use crate::SourceAction;
 ///
 /// An explicit `--ref` IS the caller picking one tree, so it passes.
 ///
+/// Takes ALL the scopes the command will classify, not one at a time: the fetch
+/// is shared across them, so a global entry on `main` and a project entry on
+/// `v1` is exactly the hazard even though each scope alone looks uniform.
+///
 /// The API `/sources/diff` does not need this: it owns its fetches and splits
 /// into one cohort per ref (`skill_update::sources::baseline_by_ref`). Teaching
 /// this command to do the same means holding one fetched tree per ref through
 /// the install/update flow — see `.scratch/source-grouping/spec.md`.
 fn assert_one_tree_can_serve(
 	source: &str,
-	scope: &SourceScope,
+	scopes: &[SourceScope],
 	git_ref: Option<&str>,
 ) -> Result<()> {
 	if git_ref.is_some() {
 		return Ok(());
 	}
-	let refs = sources::scope_ref_cohorts(scope, source);
+	let refs = scopes
+		.iter()
+		.flat_map(|scope| sources::scope_ref_cohorts(scope, source))
+		.collect::<std::collections::BTreeSet<_>>();
 	if refs.len() < 2 {
 		return Ok(());
 	}
@@ -360,9 +367,7 @@ fn diff(
 	// source_type (not a hard-coded "github"). No fetch happens here.
 	let meta = sources::resolve_source_meta(&source, &scopes, git_ref);
 
-	for scope in &scopes {
-		assert_one_tree_can_serve(&source, scope, git_ref)?;
-	}
+	assert_one_tree_can_serve(&source, &scopes, git_ref)?;
 
 	// Skip sources we cannot fetch (local/ssh/unsupported scheme) up front,
 	// before paying for a fetch — honoring the precheck the API path honors.
@@ -617,7 +622,11 @@ fn sync(args: SyncArgs) -> Result<()> {
 		args.git_ref,
 	);
 
-	assert_one_tree_can_serve(&source, &source_scope, args.git_ref)?;
+	assert_one_tree_can_serve(
+		&source,
+		std::slice::from_ref(&source_scope),
+		args.git_ref,
+	)?;
 
 	// One fetched tree cannot judge two forges. `source list` prints the lock's
 	// host-blind SOURCE, and pasting that back selects every forge serving the
@@ -1466,17 +1475,61 @@ mod tests {
 			root: project.path().to_path_buf(),
 		};
 
-		let refused = assert_one_tree_can_serve("owner/repo", &scope, None)
-			.expect_err("two refs cannot share one fetched tree");
+		let refused = assert_one_tree_can_serve(
+			"owner/repo",
+			std::slice::from_ref(&scope),
+			None,
+		)
+		.expect_err("two refs cannot share one fetched tree");
 		let message = refused.to_string();
 		assert!(message.contains("main"), "{message}");
 		assert!(message.contains("v1"), "{message}");
 
 		assert!(
-			assert_one_tree_can_serve("owner/repo", &scope, Some("main"))
+			assert_one_tree_can_serve("owner/repo", &[scope], Some("main"))
 				.is_ok(),
 			"an explicit --ref picks one tree"
 		);
+	}
+
+	/// The refs must be unioned ACROSS the scopes the command will classify, not
+	/// checked one scope at a time: `diff` fetches once and classifies every
+	/// scope against that tree, so one scope on `main` and another on `v1` is the
+	/// hazard even though each looks uniform on its own.
+	#[test]
+	fn refs_are_unioned_across_scopes_not_checked_per_scope() {
+		let uniform_scope = |ref_name: &str| {
+			let dir = tempfile::tempdir().unwrap();
+			let mut lock = skill::LocalSkillLockFile::new();
+			let mut entry = lock_entry(ref_name);
+			entry.skill_path = Some("alpha/SKILL.md".to_string());
+			lock.skills.insert("alpha".to_string(), entry);
+			skill::write_local_lock(&lock, Some(dir.path())).unwrap();
+			let scope = SourceScope::Project {
+				root: dir.path().to_path_buf(),
+			};
+			(dir, scope)
+		};
+		let (_a, on_main) = uniform_scope("main");
+		let (_b, on_v1) = uniform_scope("v1");
+
+		// Each scope alone is uniform, so a per-scope check passes both.
+		for scope in [&on_main, &on_v1] {
+			assert!(assert_one_tree_can_serve(
+				"owner/repo",
+				std::slice::from_ref(scope),
+				None,
+			)
+			.is_ok());
+		}
+		let refused =
+			assert_one_tree_can_serve("owner/repo", &[on_main, on_v1], None)
+				.expect_err(
+					"one fetched tree serves both scopes, so both count",
+				);
+		let message = refused.to_string();
+		assert!(message.contains("main"), "{message}");
+		assert!(message.contains("v1"), "{message}");
 	}
 
 	/// The guard must not fire on the ordinary single-ref source — it would make
@@ -1494,9 +1547,9 @@ mod tests {
 
 		assert!(assert_one_tree_can_serve(
 			"owner/repo",
-			&SourceScope::Project {
+			&[SourceScope::Project {
 				root: project.path().to_path_buf(),
-			},
+			}],
 			None,
 		)
 		.is_ok());

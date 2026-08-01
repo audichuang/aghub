@@ -152,11 +152,14 @@ for `git`/`gitlab` installs — it just never backfills.)
   is fail-closed (report the row uncheckable rather than fetch a repository
   nobody installed from); that changes behavior for existing installs, so it is
   not folded into this change.
-- **CLI `source diff`/`sync` refuse a multi-ref scope instead of splitting it.**
-  Both fetch the repository ONCE and reuse that tree for every entry — and
-  `sync --update` also installs from it — so they now bail with the list of refs
-  and ask for `--ref`, rather than judging (or overwriting) a `v1` entry with
-  `main`'s tree. The API `/sources/diff` does not need the guard: it owns its
+- **CLI `source diff`/`sync` refuse a multi-ref SELECTION instead of splitting it.**
+  The refs are unioned across every scope the command will classify, not checked
+  per scope: `diff` fetches once and classifies global AND project against that
+  one tree, so a global entry on `main` plus a project entry on `v1` is the
+  hazard even though each scope alone looks uniform. They bail with the list of
+  refs and ask for `--ref`, rather than judging (or, for `sync --update`,
+  overwriting) a `v1` entry with `main`'s tree.
+  The API `/sources/diff` does not need the guard: it owns its
   fetches and splits into one cohort per ref. Making the CLI match means holding
   one fetched tree per ref through the install/update flow; that is the same
   unmet "CLI and Desktop share ONE bulk implementation" objective below.

@@ -1278,11 +1278,6 @@ pub fn diff_source(
 	// not-installed offers: those describe what is available to install, and an
 	// install goes to the row's ref. A secondary cohort contributes verdicts for
 	// its own entries only.
-	// Every path some cohort owns. The primary tree also contains OTHER cohorts'
-	// skills; those are not "available to install", they are another ref's
-	// entries and that cohort reports them.
-	let claimed_paths: std::collections::BTreeSet<String> =
-		baseline.keys().cloned().collect();
 	let cohorts: Vec<(Option<String>, Baseline)> = if input.git_ref.is_some() {
 		vec![(git_ref.clone(), baseline)]
 	} else {
@@ -1293,7 +1288,14 @@ pub fn diff_source(
 			.collect()
 	};
 
-	let mut skills = Vec::new();
+	// Verdicts about installed entries, from every cohort; and what the primary
+	// tree offers to install. The offers are filtered LAST, against the paths the
+	// verdicts actually claim — not against the baseline's paths, because a
+	// Renamed verdict carries the NEW path, which no baseline ever had. Filtering
+	// on the baseline let the primary offer `new/SKILL.md` while a secondary
+	// reported `old → new` for the same path: two contradictory rows.
+	let mut verdicts = Vec::new();
+	let mut primary_offers = Vec::new();
 	for (index, (cohort_ref, cohort)) in cohorts.into_iter().enumerate() {
 		let is_primary = index == 0;
 		if !is_primary && cohort.is_empty() {
@@ -1330,16 +1332,25 @@ pub fn diff_source(
 			&cohort,
 			repo.upstream_commit_time(),
 		);
-		// Each cohort speaks about ITS OWN installed entries — keyed on
-		// `installed_paths` rather than the cohort's paths, because a Renamed
-		// diff carries the NEW path, which the baseline never had. Only the
-		// primary additionally offers what is available to INSTALL, and only for
-		// paths no cohort already owns.
-		skills.extend(classified.into_iter().filter(|diff| {
-			!diff.installed_paths.is_empty()
-				|| (is_primary && !claimed_paths.contains(&diff.skill_path))
-		}));
+		for diff in classified {
+			// A cohort speaks about ITS OWN installed entries — `installed_paths`
+			// is what marks one, and it survives a rename's path change.
+			if !diff.installed_paths.is_empty() {
+				verdicts.push(diff);
+			} else if is_primary {
+				primary_offers.push(diff);
+			}
+		}
 	}
+
+	let claimed: std::collections::BTreeSet<&str> = verdicts
+		.iter()
+		.map(|diff| diff.skill_path.as_str())
+		.collect();
+	let mut skills = Vec::with_capacity(verdicts.len() + primary_offers.len());
+	primary_offers.retain(|diff| !claimed.contains(diff.skill_path.as_str()));
+	skills.extend(verdicts);
+	skills.extend(primary_offers);
 
 	SourceDiffOutcome::Ok { git_ref, skills }
 }
@@ -2275,6 +2286,82 @@ mod diff_tests {
 			1,
 			"{skills:?}"
 		);
+	}
+
+	/// A skill renamed upstream lives at a NEW path, which no baseline ever had.
+	/// The primary tree carries that new path too, so filtering its offers on the
+	/// BASELINE's paths let it advertise `new` as installable while the cohort
+	/// that owns the entry reported `old → new` — two contradictory rows for one
+	/// path, one offering an install and one offering a rename.
+	#[test]
+	fn a_cross_cohort_rename_is_not_also_offered_as_installable() {
+		let project = TempDir::new().unwrap();
+		let trees = TempDir::new().unwrap();
+		// Both refs carry the renamed skill at its NEW path; the changelog
+		// records the rename. `alpha` pins the row to `main`.
+		let main_root = trees.path().join("main");
+		let v1_root = trees.path().join("v1");
+		for root in [&main_root, &v1_root] {
+			write_skill(root, "alpha", "alpha");
+			write_skill(root, "new", "new");
+			fs::write(
+				root.join("CHANGELOG.md"),
+				"- Rename the `old` skill to `new`\n",
+			)
+			.unwrap();
+		}
+
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, path, ref_name) in [
+			("alpha", "alpha/SKILL.md", "main"),
+			// Installed from v1 at the OLD path, which neither tree has now.
+			("old", "old/SKILL.md", "v1"),
+		] {
+			lock.skills.insert(
+				name.to_string(),
+				skill::LocalSkillLockEntry {
+					source: "owner/repo".to_string(),
+					ref_name: Some(ref_name.to_string()),
+					source_type: "github".to_string(),
+					skill_path: Some(path.to_string()),
+					computed_hash: "stale".to_string(),
+					ref_commit: None,
+					source_url: None,
+				},
+			);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "owner/repo".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Project {
+					root: project.path().to_path_buf(),
+				}],
+			},
+			SourceDiffDeps {
+				fetcher: &PerRefFetcher {
+					roots: BTreeMap::from([
+						(Some("main".to_string()), main_root.clone()),
+						(Some("v1".to_string()), v1_root.clone()),
+					]),
+					fetched: std::sync::Mutex::new(Vec::new()),
+				},
+				resolver: &NoToken,
+			},
+		);
+		let SourceDiffOutcome::Ok { skills, .. } = outcome else {
+			panic!("expected a diff, got {outcome:?}");
+		};
+
+		let rows: Vec<_> = skills
+			.iter()
+			.filter(|diff| diff.skill_path == "new/SKILL.md")
+			.collect();
+		assert_eq!(rows.len(), 1, "one row per path: {skills:?}");
+		assert_eq!(rows[0].state, SourceSkillState::Renamed);
+		assert_eq!(rows[0].previous_name.as_deref(), Some("old"));
 	}
 
 	/// Write a project lock entry recording a non-default ref for `source`.
