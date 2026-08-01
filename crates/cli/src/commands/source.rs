@@ -326,6 +326,18 @@ fn diff(
 
 	// Skip sources we cannot fetch (local/ssh/unsupported scheme) up front,
 	// before paying for a fetch — honoring the precheck the API path honors.
+	// One fetched tree cannot judge two forges. `source list` prints the lock's
+	// host-blind SOURCE, and pasting that back selects every forge serving the
+	// same path — so refuse rather than fetch one of them and apply it to all.
+	if let Some(origins) = meta.ambiguous_origins() {
+		bail!(
+			"source '{source}' matches {} repositories:\n  {}\nRun it again \
+			 with the SOURCE_URL of the one you mean.",
+			origins.len(),
+			origins.join("\n  ")
+		);
+	}
+
 	if let Some(reason) = aghub_core::skills::update::precheck_source(
 		&meta.source_type,
 		meta.effective_source.as_deref().unwrap_or(&source),
@@ -564,6 +576,18 @@ fn sync(args: SyncArgs) -> Result<()> {
 		std::slice::from_ref(&source_scope),
 		args.git_ref,
 	);
+
+	// One fetched tree cannot judge two forges. `source list` prints the lock's
+	// host-blind SOURCE, and pasting that back selects every forge serving the
+	// same path — so refuse rather than fetch one of them and apply it to all.
+	if let Some(origins) = meta.ambiguous_origins() {
+		bail!(
+			"source '{source}' matches {} repositories:\n  {}\nRun it again \
+			 with the SOURCE_URL of the one you mean.",
+			origins.len(),
+			origins.join("\n  ")
+		);
+	}
 
 	if let Some(reason) = aghub_core::skills::update::precheck_source(
 		&meta.source_type,

@@ -111,6 +111,14 @@ pub enum SourceDiffOutcome {
 		git_ref: Option<String>,
 		reason: UncheckableReason,
 	},
+	/// The named source spans more than one forge, so no single fetched tree can
+	/// judge it. Refused instead of silently picking one — this diff drives a
+	/// one-click "clean up removed" and CLI `source sync --update`, both of which
+	/// would act on the other forge's entries. Carries the origins so the caller
+	/// can name them.
+	AmbiguousSource {
+		origins: Vec<String>,
+	},
 }
 
 pub struct SourceListInput {
@@ -682,10 +690,12 @@ pub(crate) fn baseline_for_scope(
 fn recorded_meta_for_source(
 	scopes: &[SourceScope],
 	source: &str,
-) -> (String, Option<String>, Option<String>) {
+) -> (String, Option<String>, Option<String>, Vec<String>) {
 	let mut source_type = String::new();
 	let mut recorded_ref: Option<String> = None;
 	let mut recorded_source_url: Option<String> = None;
+	let mut matched_origins: std::collections::BTreeSet<String> =
+		std::collections::BTreeSet::new();
 	let want = source.trim();
 	let mut visit = |entry_source: &str,
 	                 entry_source_url: Option<&str>,
@@ -699,6 +709,11 @@ fn recorded_meta_for_source(
 		) {
 			return;
 		}
+		matched_origins.insert(source_origin(
+			entry_source,
+			entry_source_url,
+			entry_source_type,
+		));
 		if source_type.is_empty() {
 			source_type = entry_source_type.to_string();
 		}
@@ -742,7 +757,12 @@ fn recorded_meta_for_source(
 			}
 		}
 	}
-	(source_type, recorded_ref, recorded_source_url)
+	(
+		source_type,
+		recorded_ref,
+		recorded_source_url,
+		matched_origins.into_iter().collect(),
+	)
 }
 
 /// The resolved fetch metadata for a source, derived from the lock entries
@@ -766,6 +786,28 @@ pub struct ResolvedSourceMeta {
 	/// URL". A matching entry always yields `Some`, so the diff resolves the same
 	/// repository the row advertises and the apply installs from.
 	pub effective_source: Option<String>,
+	/// Every DISTINCT origin the caller's source selected, sorted. More than one
+	/// means the caller named something host-blind that spans forges — see
+	/// [`ResolvedSourceMeta::ambiguous_origins`].
+	pub matched_origins: Vec<String>,
+}
+
+impl ResolvedSourceMeta {
+	/// The origins a host-blind source spans, when it spans more than one.
+	///
+	/// `aghub source list` prints the lock's own host-blind `SOURCE`, and
+	/// `source_matches` falls back to `entry_source == want` for it — so pasting
+	/// that column back selects EVERY forge serving the same `owner/repo`. The
+	/// caller then fetches ONE of them and judges (or overwrites) all of them
+	/// against that single tree.
+	///
+	/// Only flows that apply one fetched tree to many entries need this. The bulk
+	/// apply does not: each row fetches its own entry's coordinate, so a
+	/// host-blind group merely admits more rows, each still updated from its own
+	/// forge.
+	pub fn ambiguous_origins(&self) -> Option<&[String]> {
+		(self.matched_origins.len() > 1).then_some(&self.matched_origins[..])
+	}
 }
 
 /// Resolve `(source_type, effective_ref)` for a source across `scopes` from the
@@ -780,7 +822,7 @@ pub fn resolve_source_meta(
 	scopes: &[SourceScope],
 	explicit_ref: Option<&str>,
 ) -> ResolvedSourceMeta {
-	let (mut source_type, recorded_ref, recorded_source_url) =
+	let (mut source_type, recorded_ref, recorded_source_url, matched_origins) =
 		recorded_meta_for_source(scopes, source);
 	if source_type.is_empty() {
 		source_type = "github".to_string();
@@ -790,6 +832,7 @@ pub fn resolve_source_meta(
 		source_type,
 		effective_ref,
 		effective_source: recorded_source_url,
+		matched_origins,
 	}
 }
 
@@ -1170,6 +1213,11 @@ pub fn diff_source(
 	// ref, else the source's RECORDED ref, else None (the repo default branch).
 	let meta =
 		resolve_source_meta(&source, &input.scopes, input.git_ref.as_deref());
+	if let Some(origins) = meta.ambiguous_origins() {
+		return SourceDiffOutcome::AmbiguousSource {
+			origins: origins.to_vec(),
+		};
+	}
 	let git_ref = meta.effective_ref;
 	// Recover the recorded clone URL so a caller who passed the host-stripped
 	// lock `source` (owner/repo) still fetches a non-github host correctly.
@@ -2310,6 +2358,87 @@ mod diff_tests {
 				"want={want} must not be diffed against GitHub"
 			);
 			assert_eq!(meta.source_type, "gitlab");
+		}
+	}
+
+	/// `source list` prints the lock's host-blind `SOURCE`, and pasting that
+	/// column back selects EVERY forge serving the same path. One fetched tree
+	/// then judges all of them — `source sync --update` would overwrite the
+	/// GitLab skill with GitHub's bytes, and the diff's "clean up removed" would
+	/// offer to delete it. Naming one forge's clone URL stays unambiguous.
+	#[test]
+	fn a_host_blind_source_spanning_two_forges_is_refused() {
+		let project = TempDir::new().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, source_url, source_type) in [
+			("gh", "https://github.com/owner/repo.git", "github"),
+			("gl", "https://gitlab.com/owner/repo.git", "gitlab"),
+		] {
+			lock.skills.insert(
+				name.to_string(),
+				skill::LocalSkillLockEntry {
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: source_type.to_string(),
+					skill_path: Some(format!("{name}/SKILL.md")),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+					source_url: Some(source_url.to_string()),
+				},
+			);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+		let scopes = [SourceScope::Project {
+			root: project.path().to_path_buf(),
+		}];
+
+		let blind = resolve_source_meta("owner/repo", &scopes, None);
+		assert_eq!(
+			blind.ambiguous_origins(),
+			Some(
+				&[
+					"github.com/owner/repo".to_string(),
+					"gitlab.com/owner/repo".to_string(),
+				][..]
+			),
+			"the printed SOURCE column selects both forges"
+		);
+		// Refused BEFORE any fetch: the whole point is that no single tree is
+		// authoritative here, so fetching one and judging both is the bug.
+		struct PanicFetcher;
+		impl Fetcher for PanicFetcher {
+			fn fetch(
+				&self,
+				_sr: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<crate::FetchedRepo, FetchError> {
+				panic!("an ambiguous source must not be fetched");
+			}
+		}
+		assert!(matches!(
+			diff_source(
+				SourceDiffInput {
+					source: "owner/repo".to_string(),
+					git_ref: None,
+					scopes: scopes.to_vec(),
+				},
+				SourceDiffDeps {
+					fetcher: &PanicFetcher,
+					resolver: &NoToken,
+				},
+			),
+			SourceDiffOutcome::AmbiguousSource { .. }
+		));
+
+		// Naming ONE forge is unambiguous, and still resolves to that forge.
+		for url in [
+			"https://github.com/owner/repo.git",
+			"https://gitlab.com/owner/repo.git",
+		] {
+			let exact = resolve_source_meta(url, &scopes, None);
+			assert_eq!(exact.ambiguous_origins(), None, "{url}");
+			assert_eq!(exact.effective_source.as_deref(), Some(url));
 		}
 	}
 

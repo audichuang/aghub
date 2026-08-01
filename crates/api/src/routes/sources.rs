@@ -217,6 +217,17 @@ pub async fn diff_source(
 			"Failed to fetch source repository",
 			"SOURCE_FETCH_FAILED",
 		)),
+		// The origins are the caller's own Sources rows, not internal paths.
+		SourceDiffOutcome::AmbiguousSource { origins } => Err(ApiError::new(
+			Status::BadRequest,
+			format!(
+				"Source '{source}' matches {} repositories ({}); name one by \
+				 its clone URL",
+				origins.len(),
+				origins.join(", ")
+			),
+			"SOURCE_AMBIGUOUS",
+		)),
 		SourceDiffOutcome::UncheckableSource { git_ref, .. } => {
 			Ok(Json(SourceDiffResponse {
 				source,
