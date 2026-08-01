@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 // eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import { MAX_BATCH_NAMES } from "../generated/dto/limits.ts";
-import { chunkNames } from "./batch-names.ts";
+import { chunkNames, sendInBatches } from "./batch-names.ts";
 
 const names = (count: number) =>
 	Array.from({ length: count }, (_, index) => `skill-${index}`);
@@ -27,4 +27,22 @@ test("one over the cap splits rather than failing the whole update", () => {
 
 test("no names means no request", () => {
 	assert.deepEqual(chunkNames([]), []);
+});
+
+test("an oversized list becomes several requests, each within the cap", async () => {
+	const all = names(MAX_BATCH_NAMES + 1);
+	const sent: string[][] = [];
+	const results = await sendInBatches(all, async (chunk) => {
+		sent.push(chunk);
+		return chunk.map((name) => ({ name, success: true }));
+	});
+
+	assert.equal(sent.length, 2, "one oversized request would be refused");
+	assert.ok(sent.every((chunk) => chunk.length <= MAX_BATCH_NAMES));
+	// Rows come back for every name, once, in request order — a caller counts
+	// failures against this, so a dropped or duplicated batch misreports.
+	assert.deepEqual(
+		results.map((row) => row.name),
+		all,
+	);
 });

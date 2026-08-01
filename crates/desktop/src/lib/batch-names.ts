@@ -16,3 +16,26 @@ export function chunkNames(names: string[]): string[][] {
 	}
 	return chunks;
 }
+
+/**
+ * Send `names` as request-sized batches, in order, and flatten the per-name
+ * results.
+ *
+ * The chunking lives HERE rather than inline at the call site so a regression
+ * to one oversized request is observable: a component-level test runner does
+ * not exist in this app, so an inline loop could be removed with every test
+ * still green.
+ *
+ * Sequential on purpose — each batch occupies a mutation worker for its whole
+ * span, and the server serializes them anyway.
+ */
+export async function sendInBatches<T>(
+	names: string[],
+	send: (chunk: string[]) => Promise<T[]>,
+): Promise<T[]> {
+	const results: T[] = [];
+	for (const chunk of chunkNames(names)) {
+		results.push(...(await send(chunk)));
+	}
+	return results;
+}

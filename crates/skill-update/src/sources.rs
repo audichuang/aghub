@@ -168,7 +168,16 @@ fn global_sources() -> Vec<SourceSummary> {
 		let agg = by_origin.entry(origin).or_insert_with(|| {
 			(
 				entry.source.clone(),
-				entry.source_url.clone(),
+				// The global `source_url` is a required String, but nothing
+				// validates it as non-empty. Advertising a blank one gave the
+				// desktop a truthy-but-unusable coordinate while check and apply
+				// reconstructed a real one — the same row disagreeing with
+				// itself.
+				entry_clone_source(
+					&entry.source,
+					Some(&entry.source_url),
+					&entry.source_type,
+				),
 				entry.source_type.clone(),
 				0,
 			)
@@ -288,16 +297,16 @@ pub fn reconstruct_source_url(source: &str, source_type: &str) -> String {
 			let path = source.trim_matches('/');
 			// An origin echoed back from a previous response already carries the
 			// host; re-prefixing it would produce `host/host/path`. Hostnames are
-			// case-insensitive, and a host with NOTHING after it names no
-			// repository — both must fall through to the raw spelling rather than
-			// become `https://host/HOST/path` or `https://host/host.git`.
-			let path = match path
+			// case-insensitive, so the comparison is too — but it must land on a
+			// SEGMENT boundary: `gitlab.comtools/sub/repo` is an owner literally
+			// named `gitlab.comtools`, and stripping `gitlab.com` off it names a
+			// different repository that may well exist.
+			let path = path
 				.get(..host.len())
-				.is_some_and(|head| head.eq_ignore_ascii_case(host))
-			{
-				true => path[host.len()..].trim_start_matches('/'),
-				false => path,
-			};
+				.filter(|head| head.eq_ignore_ascii_case(host))
+				.map(|_| &path[host.len()..])
+				.filter(|rest| rest.is_empty() || rest.starts_with('/'))
+				.map_or(path, |rest| rest.trim_start_matches('/'));
 			let path = path.trim_end_matches(".git").trim_matches('/');
 			if path.is_empty() {
 				return source.to_string();
@@ -744,11 +753,15 @@ pub struct ResolvedSourceMeta {
 	/// Explicit `--ref` override, else the source's recorded lock ref, else
 	/// `None` (the upstream default branch).
 	pub effective_ref: Option<String>,
-	/// The recorded clone URL of the matching lock entry, when one exists — the
-	/// real fetch coordinate. Lets a caller handed a host-stripped `owner/repo`
-	/// (e.g. `source diff <lock source>`) fetch a non-github host (TFS/Azure
-	/// DevOps) instead of reconstructing `github.com`. `None` when the source is
-	/// not in any lock or the entry recorded no URL (github/legacy).
+	/// The matching lock entry's [`entry_clone_source`] — its recorded clone URL,
+	/// or the coordinate reconstructed from `(source, source_type)` when it
+	/// recorded none. Lets a caller handed a host-stripped `owner/repo` (e.g.
+	/// `source diff <lock source>`) fetch the entry's real forge instead of
+	/// reconstructing `github.com`.
+	///
+	/// `None` means ONLY that no lock entry matched — not "the entry recorded no
+	/// URL". A matching entry always yields `Some`, so the diff resolves the same
+	/// repository the row advertises and the apply installs from.
 	pub effective_source: Option<String>,
 }
 
@@ -1320,6 +1333,14 @@ mod origin_tests {
 			// A host with nothing after it names no repository.
 			("gitlab.com", "gitlab", "gitlab.com"),
 			("github.com/", "github", "github.com/"),
+			// An owner whose name merely STARTS with the host is not an echoed
+			// origin. Stripping the prefix here names a different repository —
+			// one that may exist.
+			(
+				"gitlab.comtools/sub/repo",
+				"gitlab",
+				"https://gitlab.com/gitlab.comtools/sub/repo.git",
+			),
 			// No provider ⇒ no host to be had. `segments >= 3` once turned this
 			// into `https://group/subgroup/repo`, a host that does not exist.
 			("group/subgroup/repo", "git", "group/subgroup/repo"),

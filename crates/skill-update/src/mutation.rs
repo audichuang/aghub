@@ -398,13 +398,27 @@ enum ScopeLock {
 	Project(std::collections::BTreeMap<String, skill::LocalSkillLockEntry>),
 }
 
-// Counts `ScopeLock::read` calls on the CURRENT thread, so a test can pin the
-// one-read-per-batch property without a process-wide counter that concurrent
-// tests would pollute.
+// Counts `ScopeLock::read` and `load_all_agents` calls on the CURRENT thread, so
+// a test can pin the one-per-batch properties without a process-wide counter
+// that concurrent tests would pollute.
 #[cfg(test)]
 thread_local! {
 	pub(super) static LOCK_READS: std::cell::Cell<usize> =
 		const { std::cell::Cell::new(0) };
+	pub(super) static AGENT_SCANS: std::cell::Cell<usize> =
+		const { std::cell::Cell::new(0) };
+}
+
+/// The batch's agent scan, counted. Every registered agent's config is re-read
+/// from disk, so doing it per name is what made the advisory installed-check
+/// cost `O(names × agents)`.
+fn scan_agents(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<aghub_core::AgentResources> {
+	#[cfg(test)]
+	AGENT_SCANS.with(|scans| scans.set(scans.get() + 1));
+	aghub_core::load_all_agents(scope, project_root)
 }
 
 impl ScopeLock {
@@ -575,11 +589,9 @@ pub fn resync_locked_skills(
 			return Err(LockedSkillsResyncError::Preflight(error));
 		}
 	};
-	// ONE agent scan for the whole batch, next to the ONE lock read: every
-	// registered agent's config is re-read from disk, and the answer does not
-	// vary by name.
-	let agents =
-		aghub_core::load_all_agents(request.scope, request.project_root);
+	// ONE agent scan for the whole batch, next to the ONE lock read: the answer
+	// does not vary by name.
+	let agents = scan_agents(request.scope, request.project_root);
 	let mut groups: Vec<PreparedFetchGroup> = Vec::new();
 	let names = unique_in_order(request.names);
 	let mut rows = Vec::with_capacity(names.len());
@@ -951,17 +963,18 @@ mod tests {
 		);
 	}
 
-	/// The batch must call [`ScopeLock::read`] ONCE, not once per name: reading
-	/// per name made a large batch cost O(names) full parses AND let two rows be
-	/// prepared from lock states straddling another process's write. Nothing else
-	/// fails if `prepare_locked_resync` starts reading the Lock itself again.
+	/// The batch must call [`ScopeLock::read`] and [`scan_agents`] ONCE each, not
+	/// once per name. Reading the Lock per name cost O(names) full parses AND let
+	/// two rows be prepared from lock states straddling another process's write;
+	/// scanning the agents per name re-read every registered agent's config from
+	/// disk, which is what forced a tighter cap on `names`.
 	///
-	/// This counts `ScopeLock::read` only. A direct `read_local_lock` added
-	/// inside `prepare_locked_resync` would still pass, and every successful row
-	/// re-parses the Lock anyway inside its own transaction
-	/// (`EntryIdentity::ensure_unchanged`) — deliberately, since that read must
-	/// happen under the mutation lock. What this pins is the shape the
-	/// regression actually takes.
+	/// Both counters observe the named functions only. A direct `read_local_lock`
+	/// or `load_all_agents` added inside `prepare_locked_resync` would still
+	/// pass, and every successful row re-parses the Lock and re-scans the agents
+	/// anyway inside its own transaction — deliberately, since those reads must
+	/// happen under the mutation lock. What this pins is the shape the regression
+	/// actually takes.
 	#[test]
 	fn a_batch_reads_the_lock_exactly_once() {
 		struct StubFetcher {
@@ -1021,6 +1034,7 @@ mod tests {
 		let owned = names.map(str::to_string);
 
 		super::LOCK_READS.with(|reads| reads.set(0));
+		super::AGENT_SCANS.with(|scans| scans.set(0));
 		let results = super::resync_locked_skills(
 			super::LockedSkillsResyncRequest {
 				source_group: None,
@@ -1038,6 +1052,12 @@ mod tests {
 			super::LOCK_READS.with(|reads| reads.get()),
 			1,
 			"a batch of {} names must call ScopeLock::read once",
+			names.len()
+		);
+		assert_eq!(
+			super::AGENT_SCANS.with(|scans| scans.get()),
+			1,
+			"a batch of {} names must scan the agents once",
 			names.len()
 		);
 	}

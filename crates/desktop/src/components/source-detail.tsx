@@ -29,7 +29,7 @@ import {
 	partitionByCoverage,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
-import { chunkNames } from "../lib/batch-names";
+import { sendInBatches } from "../lib/batch-names";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -603,26 +603,27 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			return;
 		setIsApplyingAll(true);
 		try {
-			const results: ApplySkillUpdateResponse[] = [];
-			// The server refuses an oversized batch outright rather than
-			// truncating it, so a Source with more outdated skills than one
-			// batch holds would make "Update all" fail entirely instead of
-			// updating anything. Chunks run in sequence: each one occupies a
-			// mutation worker for its whole span, and the server serializes
-			// them anyway.
-			for (const chunk of chunkNames(skills.map((skill) => skill.name))) {
-				const response = await applyUpdatesMutation.mutateAsync({
-					body: {
-						source: diffSource,
-						names: chunk,
-						scope: updateScope,
-						projectRoot: updateProjectRoot,
-						confirm: true,
-					},
-					sourceUrl: diffSource,
-				});
-				results.push(...response.results);
-			}
+			// Batched, not one body: the server REFUSES an oversized batch
+			// rather than truncating it, so a Source with more outdated skills
+			// than one batch holds would make "Update all" fail entirely
+			// instead of updating anything. Ordering and cap live in
+			// `sendInBatches`, which is tested.
+			const results = await sendInBatches<ApplySkillUpdateResponse>(
+				skills.map((skill) => skill.name),
+				async (names) => {
+					const response = await applyUpdatesMutation.mutateAsync({
+						body: {
+							source: diffSource,
+							names,
+							scope: updateScope,
+							projectRoot: updateProjectRoot,
+							confirm: true,
+						},
+						sourceUrl: diffSource,
+					});
+					return response.results;
+				},
+			);
 			const failures = results.filter((result) => !result.success);
 			const updated = results.length - failures.length;
 			await queryClient.invalidateQueries({
