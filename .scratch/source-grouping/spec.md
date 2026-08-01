@@ -38,6 +38,13 @@ error no refresh could clear — see `.scratch/source-bulk-sync/spec.md`).
   same path are two rows.
 - ONE predicate decides membership, and diff, apply and the bulk assertion all
   use it — a row's diff and its apply must resolve to the same repository.
+- ONE reconstruction decides the clone COORDINATE of an entry that records no
+  `sourceUrl` (`sources::reconstruct_source_url`), and the row's advertised
+  `source_url`, `diff_source`'s fetch and the bulk apply's `SourceRef` all come
+  from it. Membership agreeing is not enough: while the row reconstructed a
+  GitLab URL and apply resolved the raw `group/repo` on its own (as GitHub
+  shorthand), both halves passed the group check and then fetched different
+  forges.
 - An npx-written entry (no `sourceUrl`, `source` = `owner/repo` shorthand) keeps
   matching its reconstructed GitHub origin: the shorthand IS a GitHub coordinate.
 - The lock file's own fields do not change. Grouping is a view concern; the
@@ -89,8 +96,55 @@ neither the typechecker nor any test noticed). Fixed with a tested mapping in
 `lib/source-identity.ts`; its first implementation matched a partial segment and
 its own test caught that.
 
+## The legacy shape this turns on
+
+`sourceType: gitlab|git` with NO `sourceUrl` is live, not hypothetical. Current
+aghub cannot originate it on a fresh remote install — `recordable_source_url`
+(`crates/skill/src/install.rs`) records a URL for every non-github.com host —
+but:
+
+- aghub before `3c1a0601` had no `source_url` field at all while already
+  classifying `gitlab.com` as `gitlab` and other hosts as `git`;
+- npx `skills` before `1164afa5` did the same;
+- every rewrite path preserves it — apply/update, `source sync`, check-updates
+  hash healing, prune, and accept-rename rollback all re-emit the surviving
+  entry unchanged, and no migration backfills the field;
+- `npx skills`'s v1 reader accepts an older entry as-is and its writer re-emits
+  the whole lock, so an absent field survives npx round-trips too.
+
+So the reconstruction must be provider-aware, and every consumer of it must use
+the SAME one. (`sourceUrl` is also no longer aghub-only: current npx writes it
+for `git`/`gitlab` installs — it just never backfills.)
+
 ## Still open
 
+- **An unknowable host still silently resolves to GitHub.** `sourceType: git`
+  (or a custom type) with no `sourceUrl` keeps its own spelling, and the fetcher
+  then reads `owner/repo` as GitHub shorthand. List and apply agree — that is
+  what this version fixes — but they can agree on the wrong forge. The end state
+  is fail-closed (report the row uncheckable rather than fetch a repository
+  nobody installed from); that changes behavior for existing installs, so it is
+  not folded into this change.
+- **Grouping ignores `ref`.** A row's key is the origin only, while `diff_source`
+  picks ONE recorded ref for the whole row and apply uses each entry's own. Two
+  skills from one repository pinned to different branches are therefore diffed
+  against one branch and applied from another. Fix direction: key on
+  `(origin, effective_ref)`, or classify per ref cohort.
+- **accept-rename can write a non-URL as a present `sourceUrl`.** For a legacy
+  GitLab entry it fetches the raw `group/repo` and `recordable_source_url`
+  persists that string, since it is non-empty and carries no GitHub host. That
+  defeats "a present `sourceUrl` is an authoritative clone URL" everywhere else.
+  `rename.rs` lives in `core` and cannot reach `skill_update::sources`, so the
+  shared reconstruction has to move down (or the value be validated) first.
+- **One SSH-recorded entry can make a whole row uncheckable.** `resolve_source_meta`
+  is first-wins on the fetch coordinate, matching `list_sources`. Preferring an
+  HTTPS spelling was tried and removed: with a host-blind `want`, `source_matches`
+  falls back to `entry_source == want`, so the preference could swap in another
+  forge's URL while keeping the first forge's type and ref.
+- **`MAX_BATCH_NAMES` is a hard 256 and the desktop chunks to it.** Hoisting the
+  Lock read and the agent scan to one-per-batch does not bound the real cost:
+  every resolvable row still runs its own transaction, which re-scans every
+  agent under the mutation lock because that read has to be fresh.
 - CLI `source sync --update` has no Source assertion (the bulk HTTP path does).
   Not needed for the failure above, but the CLI would still act on a stale view.
 - `.scratch/source-bulk-sync/spec.md`'s original objective — CLI and Desktop

@@ -81,13 +81,28 @@ pub fn installed_skill_roots(
 	resource_scope: crate::models::ResourceScope,
 	project_root: Option<&Path>,
 ) -> Vec<PathBuf> {
+	installed_skill_roots_in(
+		&crate::load_all_agents(resource_scope, project_root),
+		name,
+	)
+}
+
+/// [`installed_skill_roots`] against an ALREADY-loaded agent set. The scan is
+/// the expensive half — every registered agent's config re-read from disk — and
+/// it does not vary by name, so a caller resolving many names in one pass loads
+/// once and reuses. Same filtering: name match, a resolvable [`skill_root`],
+/// de-duplicated.
+pub fn installed_skill_roots_in(
+	agents: &[crate::AgentResources],
+	name: &str,
+) -> Vec<PathBuf> {
 	let mut roots = Vec::new();
-	for agent in crate::load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
+	for agent in agents {
+		for skill in &agent.skills {
 			if skill.name != name {
 				continue;
 			}
-			let Some(root) = skill_root(&skill) else {
+			let Some(root) = skill_root(skill) else {
 				continue;
 			};
 			if !roots.contains(&root) {

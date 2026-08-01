@@ -60,10 +60,17 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 /// caller named. Distinct from `SOURCE_CHANGED_DURING_FETCH`: nothing moved
 /// mid-flight, the caller's Sources view is simply stale.
 const SKILL_SOURCE_VIEW_STALE_CODE: &str = "SKILL_SOURCE_VIEW_STALE";
-/// Upper bound on one batch's `names`. The seam reads the Lock once, but each
-/// resolvable name still scans every agent authoritatively inside its Resync
-/// transaction. Keep that `O(names × agents)` work bounded while allowing a
-/// Source with hundreds of skills to update in one request.
+/// Upper bound on one batch's `names`, and a HARD one — the request is refused,
+/// not truncated.
+///
+/// The seam reads the Lock once and scans the agents once, but neither hoist
+/// bounds the real cost: every resolvable row still runs its own install+lock
+/// transaction, which re-scans every agent under the mutation lock because that
+/// read has to be fresh. One request therefore occupies a mutation worker for
+/// `O(names)` transactions, and Rocket has only CPU-count workers.
+///
+/// A client with more outdated skills than this must send several batches —
+/// see `applyAllUpdates` in the desktop's `source-detail.tsx`, which chunks.
 const MAX_BATCH_NAMES: usize = 256;
 
 /// Query parameters for the update check. `offline` short-circuits every entry
@@ -342,13 +349,20 @@ fn apply_locked_resync_error(
 		LockedResyncError::MissingSkillPath => {
 			Ok(apply_error(name, scope, "Locked skill has no skillPath"))
 		}
-		LockedResyncError::NotInstalled
-		| LockedResyncError::Resync(
-			aghub_core::skills::resync::ResyncError::NotInstalled,
-		) => Ok(apply_error(
+		// Same condition as `ResyncError::NotInstalled` below, reached earlier by
+		// the batch's advisory pre-fetch check. It must carry the SAME wire code,
+		// or whether a client can machine-distinguish it depends on which of two
+		// identically-worded arms happened to fire.
+		LockedResyncError::NotInstalled => Ok(apply_error_with_code(
 			name,
 			scope,
 			"Skill is locked but no installed copy was found",
+			Some(
+				crate::skills::resync::safe_resync_error(
+					&aghub_core::skills::resync::ResyncError::NotInstalled,
+				)
+				.code,
+			),
 		)),
 		LockedResyncError::CredentialBackendUnavailable => {
 			Err(crate::credentials::CredentialStoreError::Unavailable(
@@ -1083,6 +1097,38 @@ mod tests {
 			assert_eq!(error.status, rocket::http::Status::ServiceUnavailable);
 			assert_eq!(error.body.code, "KEYCHAIN_UNAVAILABLE");
 		});
+	}
+
+	/// "Locked but not installed" is reachable from two arms — the batch's
+	/// advisory pre-fetch check and the transaction's authoritative one — and the
+	/// two say the same thing in prose. Only the machine code tells a client they
+	/// are the same condition, so a client that branches on it must not depend on
+	/// which arm happened to fire. Folding one arm into the other silently
+	/// dropped the code once: the message was identical, so nothing looked wrong.
+	#[test]
+	fn both_not_installed_arms_carry_one_wire_code() {
+		let expected = crate::skills::resync::safe_resync_error(
+			&aghub_core::skills::resync::ResyncError::NotInstalled,
+		);
+		for error in [
+			LockedResyncError::NotInstalled,
+			LockedResyncError::Resync(
+				aghub_core::skills::resync::ResyncError::NotInstalled,
+			),
+		] {
+			let Ok(response) =
+				apply_locked_resync_error("alpha", "global", &error)
+			else {
+				panic!("a not-installed row is a row, not a request failure");
+			};
+			assert!(!response.success);
+			assert_eq!(response.error.as_deref(), Some(expected.message));
+			assert_eq!(
+				response.code.as_deref(),
+				Some(expected.code),
+				"{error:?} must be machine-distinguishable"
+			);
+		}
 	}
 
 	#[cfg(unix)]

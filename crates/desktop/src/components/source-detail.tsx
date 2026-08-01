@@ -18,7 +18,10 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import { SourceSkillRow } from "./source-skill-row";
-import type { SourceSkillDiff } from "../generated/dto";
+import type {
+	ApplySkillUpdateResponse,
+	SourceSkillDiff,
+} from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
@@ -26,6 +29,7 @@ import {
 	partitionByCoverage,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
+import { chunkNames } from "../lib/batch-names";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -599,20 +603,28 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			return;
 		setIsApplyingAll(true);
 		try {
-			const response = await applyUpdatesMutation.mutateAsync({
-				body: {
-					source: diffSource,
-					names: skills.map((skill) => skill.name),
-					scope: updateScope,
-					projectRoot: updateProjectRoot,
-					confirm: true,
-				},
-				sourceUrl: diffSource,
-			});
-			const failures = response.results.filter(
-				(result) => !result.success,
-			);
-			const updated = response.results.length - failures.length;
+			const results: ApplySkillUpdateResponse[] = [];
+			// The server refuses an oversized batch outright rather than
+			// truncating it, so a Source with more outdated skills than one
+			// batch holds would make "Update all" fail entirely instead of
+			// updating anything. Chunks run in sequence: each one occupies a
+			// mutation worker for its whole span, and the server serializes
+			// them anyway.
+			for (const chunk of chunkNames(skills.map((skill) => skill.name))) {
+				const response = await applyUpdatesMutation.mutateAsync({
+					body: {
+						source: diffSource,
+						names: chunk,
+						scope: updateScope,
+						projectRoot: updateProjectRoot,
+						confirm: true,
+					},
+					sourceUrl: diffSource,
+				});
+				results.push(...response.results);
+			}
+			const failures = results.filter((result) => !result.success);
+			const updated = results.length - failures.length;
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});

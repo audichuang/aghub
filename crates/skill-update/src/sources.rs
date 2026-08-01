@@ -233,61 +233,57 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 		.collect()
 }
 
-fn reconstruct_source_url(source: &str, source_type: &str) -> String {
+/// The clone coordinate of a lock entry that records no `sourceUrl` — the ONE
+/// answer the Sources row advertises, `diff_source` fetches, and the bulk apply
+/// re-fetches. They MUST agree, and only agree because they all call this: while
+/// the row reconstructed a GitLab URL and apply resolved the raw `group/repo` on
+/// its own (as GitHub shorthand), applying stamped GitHub's commit into a GitLab
+/// entry, silently, whenever a same-path repo existed there.
+///
+/// Only two things in a lock entry can name a host: the string itself, when it
+/// already carries a transport or an authority, and the recorded provider —
+/// `github` and `gitlab` are single-host services. A `git`/custom/`local` type
+/// with no URL keeps its own spelling; inventing a host advertises, and then
+/// fetches from, a repository nobody installed from.
+pub(crate) fn reconstruct_source_url(
+	source: &str,
+	source_type: &str,
+) -> String {
 	let source = source.trim();
 	if source_type.eq_ignore_ascii_case("local") {
+		// A Windows path (`C:\skills\a`) would otherwise read as an SCP-like URL
+		// whose host is the drive letter.
 		return source.to_string();
 	}
-	let segments = source.split('/').collect::<Vec<_>>();
-	let provider_origin = match source_type.to_ascii_lowercase().as_str() {
+	// `://`, `@` or `:` means the string carries its own transport/authority, so
+	// the resolver can read the host out of it and the provider is irrelevant.
+	let carries_authority =
+		source.contains("://") || source.contains('@') || source.contains(':');
+	let provider_host = match source_type.to_ascii_lowercase().as_str() {
 		"github" => Some("github.com"),
 		"gitlab" => Some("gitlab.com"),
 		_ => None,
 	};
-	let known_origin = provider_origin.is_some_and(|host| {
-		segments
-			.first()
-			.is_some_and(|segment| segment.eq_ignore_ascii_case(host))
-	});
-	let explicit_port = segments.first().is_some_and(|segment| {
-		segment
-			.rsplit_once(':')
-			.is_some_and(|(_, port)| port.parse::<u16>().is_ok())
-	});
-	let unknown_origin = provider_origin.is_none()
-		&& !segments.contains(&"_git")
-		&& segments.len() >= 2
-		&& segments.first().is_some_and(|segment| {
-			segment.contains('.') || explicit_port || segments.len() >= 3
-		});
-	if !source.contains("://")
-		&& !source.contains('@')
-		&& (known_origin || unknown_origin)
-	{
-		let with_scheme = format!("https://{source}");
-		return aghub_git::resolve_remote_source(&with_scheme)
-			.map(|resolved| resolved.clone_url)
-			.unwrap_or(with_scheme);
-	}
-	if source_type.eq_ignore_ascii_case("gitlab")
-		&& !source.contains("://")
-		&& !source.contains('@')
-		&& !source.contains(':')
-		&& !source.starts_with(['/', '.'])
-	{
-		let path = source.trim_matches('/').trim_end_matches(".git");
-		if !path.is_empty() {
-			return format!("https://gitlab.com/{path}.git");
+	let candidate = match provider_host {
+		Some(host) if !carries_authority => {
+			let path = source.trim_matches('/');
+			// An origin echoed back from a previous response already carries the
+			// host; re-prefixing it would produce `host/host/path`.
+			let path = path
+				.strip_prefix(host)
+				.and_then(|rest| rest.strip_prefix('/'))
+				.unwrap_or(path)
+				.trim_end_matches(".git");
+			if path.is_empty() {
+				return source.to_string();
+			}
+			format!("https://{host}/{path}.git")
 		}
-	}
-	let may_default_to_github = source_type.eq_ignore_ascii_case("github")
-		|| source.contains("://")
-		|| source.contains('@')
-		|| source.contains(':');
-	if !may_default_to_github {
-		return source.to_string();
-	}
-	aghub_git::resolve_remote_source(source)
+		_ if carries_authority => source.to_string(),
+		// A self-hosted forge behind a `git`/custom type: unknowable.
+		_ => return source.to_string(),
+	};
+	aghub_git::resolve_remote_source(&candidate)
 		.map(|resolved| resolved.clone_url)
 		.unwrap_or_else(|_| source.to_string())
 }
@@ -375,10 +371,13 @@ mod fetch_with_resolver_tests {
 /// unresolved-entry identity are intentionally owned here.
 ///
 /// Accepts whatever a caller holds: the recorded `sourceUrl`, an `owner/repo`
-/// shorthand, or an origin echoed back from a previous response. When
-/// `sourceUrl` is absent, the recorded provider supplies the public GitHub or
-/// GitLab host. Unresolvable entries retain a provider-qualified internal
-/// identity, so a local/custom entry cannot merge into a provider-backed row.
+/// shorthand, or an origin echoed back from a previous response — all through
+/// [`reconstruct_source_url`], the same coordinate apply fetches.
+///
+/// Unresolvable entries get a `unresolved:<type>:<spelling>` key rather than
+/// their bare spelling: a local directory can be named `github.com/owner/repo`
+/// (not GitHub shorthand — that is exactly two segments), and the bare spelling
+/// would then be byte-identical to a real GitHub entry's origin.
 ///
 /// Some legacy shapes remain undecidable: `sourceType: "git"` (or another
 /// custom type) plus no `sourceUrl` cannot reveal which self-hosted forge owns
@@ -633,10 +632,11 @@ pub(crate) fn baseline_for_scope(
 
 /// Discover only the recorded `source_type` + `ref_name` for a source across
 /// the given scopes, WITHOUT building a baseline (no folder hashing, no fetch).
-/// Mirrors the merged-baseline scan order (global first, then project) for type
-/// and ref. For the fetch coordinate, an HTTPS entry wins within one origin so
-/// an alphabetically earlier SSH spelling cannot make the whole row
-/// uncheckable.
+/// Mirrors the merged-baseline scan order (global first, then project) so the
+/// "first non-empty wins" result matches [`merged_baseline_for_source`] — and,
+/// for the fetch coordinate, matches the row `list_sources` advertises, which is
+/// first-wins too. Preferring an HTTPS spelling here instead would diverge from
+/// both, and with a host-blind `want` it could swap in another forge's URL.
 /// Returns `(source_type, recorded_ref, recorded_source_url)` — all empty/None
 /// when the source is not present in any lock. `recorded_source_url` is the
 /// matching entry's recorded clone URL (the fetch coordinate), so a caller that
@@ -668,22 +668,8 @@ fn recorded_meta_for_source(
 		if recorded_ref.is_none() {
 			recorded_ref = entry_ref.map(str::to_string);
 		}
-		if let Some(candidate) = entry_source_url {
-			let candidate_is_https =
-				candidate.split_once("://").is_some_and(|(scheme, _)| {
-					scheme.eq_ignore_ascii_case("https")
-				});
-			let recorded_is_https = recorded_source_url
-				.as_deref()
-				.and_then(|recorded| recorded.split_once("://"))
-				.is_some_and(|(scheme, _)| {
-					scheme.eq_ignore_ascii_case("https")
-				});
-			if recorded_source_url.is_none()
-				|| (candidate_is_https && !recorded_is_https)
-			{
-				recorded_source_url = Some(candidate.to_string());
-			}
+		if recorded_source_url.is_none() {
+			recorded_source_url = entry_source_url.map(str::to_string);
 		}
 	};
 	// Global first, then project — same order as `merged_baseline_for_source`.
@@ -2172,51 +2158,6 @@ mod diff_tests {
 		);
 
 		assert_eq!(meta.source_type, "git");
-	}
-
-	#[test]
-	fn resolve_source_meta_prefers_https_coordinate_within_origin() {
-		let project = TempDir::new().unwrap();
-		let mut lock = skill::LocalSkillLockFile::new();
-		for (name, source_url) in [
-			("a-ssh", "git@github.com:owner/meta-transport.git"),
-			("z-https", "https://github.com/owner/meta-transport.git"),
-		] {
-			lock.skills.insert(
-				name.to_string(),
-				skill::LocalSkillLockEntry {
-					source: "owner/meta-transport".to_string(),
-					ref_name: Some("main".to_string()),
-					source_type: "github".to_string(),
-					skill_path: Some(format!("{name}/SKILL.md")),
-					computed_hash: "h".to_string(),
-					ref_commit: None,
-					source_url: Some(source_url.to_string()),
-				},
-			);
-		}
-		skill::write_local_lock(&lock, Some(project.path())).unwrap();
-
-		let meta = resolve_source_meta(
-			"git@github.com:owner/meta-transport.git",
-			&[SourceScope::Project {
-				root: project.path().to_path_buf(),
-			}],
-			None,
-		);
-
-		assert_eq!(
-			meta.effective_source.as_deref(),
-			Some("https://github.com/owner/meta-transport.git"),
-			"one SSH lock entry must not make the whole origin uncheckable"
-		);
-		assert_eq!(
-			precheck_source(
-				&meta.source_type,
-				meta.effective_source.as_deref().unwrap()
-			),
-			None
-		);
 	}
 
 	#[test]

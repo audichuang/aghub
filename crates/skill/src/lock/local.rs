@@ -54,12 +54,17 @@ pub struct LocalSkillLockEntry {
 		default
 	)]
 	pub ref_commit: Option<String>,
-	/// aghub-only: the full clone URL recorded at install time, so check/diff can
-	/// rebuild a NON-github host (TFS/Azure DevOps/on-prem GitLab) that the
-	/// host-stripped `source` (`owner/repo`) alone can only reconstruct as
-	/// `github.com`. `None` for github shorthand and for npx/legacy locks that
-	/// predate this field — consumers fall back to reconstructing from `source`.
-	/// Never read/written by npx.
+	/// The full clone URL recorded at install time, so check/diff can rebuild a
+	/// NON-github host (TFS/Azure DevOps/on-prem GitLab) that the host-stripped
+	/// `source` (`owner/repo`) alone can only reconstruct as `github.com`.
+	/// `None` for github shorthand and for legacy locks that predate the field —
+	/// consumers fall back to `skill_update::sources::reconstruct_source_url`,
+	/// which can only recover a host for `github`/`gitlab` types.
+	///
+	/// NOT aghub-only: current npx `skills` writes `sourceUrl` for `git`/`gitlab`
+	/// installs too. What it does not do is backfill — its v1 reader accepts an
+	/// older entry as-is and its writer re-emits the whole lock, so an absent
+	/// field stays absent across npx round-trips.
 	#[serde(
 		rename = "sourceUrl",
 		skip_serializing_if = "Option::is_none",

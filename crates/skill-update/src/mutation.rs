@@ -435,8 +435,7 @@ impl ScopeLock {
 fn prepare_locked_resync(
 	name: &str,
 	lock: &ScopeLock,
-	scope: ResourceScope,
-	project_root: Option<&Path>,
+	agents: &[aghub_core::AgentResources],
 ) -> Result<(EntrySource, PreparedLockedResync), LockedResyncError> {
 	// Coordinates and identity must come from the SAME entry observation. A
 	// second lookup could straddle another process's repoint and let a stale
@@ -480,9 +479,16 @@ fn prepare_locked_resync(
 			(
 				EntrySource {
 					source_ref: SourceRef {
-						source: entry
-							.source_url
-							.unwrap_or_else(|| entry.source.clone()),
+						// The SAME reconstruction the Sources row advertises and
+						// `diff_source` fetches. Resolving the raw `source` here
+						// instead made a GitLab row fetch GitHub shorthand and
+						// stamp GitHub's commit into the GitLab lock entry.
+						source: entry.source_url.clone().unwrap_or_else(|| {
+							crate::sources::reconstruct_source_url(
+								&entry.source,
+								&entry.source_type,
+							)
+						}),
 						ref_: entry.ref_name,
 					},
 					grouping_source: entry.source,
@@ -497,17 +503,14 @@ fn prepare_locked_resync(
 	};
 
 	// Advisory: the transaction re-checks this authoritatively under the lock, so
-	// this is not the guard. It is here to keep a name with nothing installed out
-	// of a fetch GROUP — otherwise a stale Sources view costs a remote round trip
-	// per affected group before failing with the same message. One local agent
-	// scan is the cheaper half of that trade, and `MAX_BATCH_NAMES` already bounds
-	// how many of them a request can ask for.
-	if aghub_core::skills::removal::installed_skill_roots(
-		name,
-		scope,
-		project_root,
-	)
-	.is_empty()
+	// this is not the guard. What it buys is narrow — when EVERY name in a fetch
+	// group is uninstalled, the group is never built and the batch skips that
+	// remote round trip. With any installed sibling the group is fetched anyway,
+	// and this only moves the identical failure earlier. It is worth keeping only
+	// because it now costs nothing per name: the agent scan is hoisted to ONE per
+	// batch (`agents`), where it used to be one per name.
+	if aghub_core::skills::removal::installed_skill_roots_in(agents, name)
+		.is_empty()
 	{
 		return Err(LockedResyncError::NotInstalled);
 	}
@@ -569,58 +572,59 @@ pub fn resync_locked_skills(
 			return Err(LockedSkillsResyncError::Preflight(error));
 		}
 	};
+	// ONE agent scan for the whole batch, next to the ONE lock read: every
+	// registered agent's config is re-read from disk, and the answer does not
+	// vary by name.
+	let agents =
+		aghub_core::load_all_agents(request.scope, request.project_root);
 	let mut groups: Vec<PreparedFetchGroup> = Vec::new();
 	let names = unique_in_order(request.names);
 	let mut rows = Vec::with_capacity(names.len());
 
 	for name in names {
-		let prepared = prepare_locked_resync(
-			name,
-			&lock,
-			request.scope,
-			request.project_root,
-		)
-		.and_then(|(entry, mut item)| {
-			let EntrySource {
-				source_ref,
-				grouping_source,
-				source_type,
-			} = entry;
-			if request.source_group.is_some_and(|group| {
-				!crate::sources::source_matches(
-					group,
-					&grouping_source,
-					Some(&source_ref.source),
-					&source_type,
-				)
-			}) {
-				return Err(LockedResyncError::SourceGroupMismatch);
-			}
-			let folder = skill_folder_from_lock_path(&item.skill_path)
-				.ok_or(LockedResyncError::InvalidSkillPath)?;
-			let group_index = if let Some(index) = groups
-				.iter()
-				.position(|group| group.source_ref == source_ref)
-			{
-				index
-			} else {
-				groups.push(PreparedFetchGroup {
+		let prepared = prepare_locked_resync(name, &lock, &agents).and_then(
+			|(entry, mut item)| {
+				let EntrySource {
 					source_ref,
-					folders: Vec::new(),
-				});
-				groups.len() - 1
-			};
-			let group = &mut groups[group_index];
-			if !group
-				.folders
-				.iter()
-				.any(|seen| seen.as_str() == folder.as_str())
-			{
-				group.folders.push(folder);
-			}
-			item.group_index = group_index;
-			Ok(item)
-		});
+					grouping_source,
+					source_type,
+				} = entry;
+				if request.source_group.is_some_and(|group| {
+					!crate::sources::source_matches(
+						group,
+						&grouping_source,
+						Some(&source_ref.source),
+						&source_type,
+					)
+				}) {
+					return Err(LockedResyncError::SourceGroupMismatch);
+				}
+				let folder = skill_folder_from_lock_path(&item.skill_path)
+					.ok_or(LockedResyncError::InvalidSkillPath)?;
+				let group_index = if let Some(index) = groups
+					.iter()
+					.position(|group| group.source_ref == source_ref)
+				{
+					index
+				} else {
+					groups.push(PreparedFetchGroup {
+						source_ref,
+						folders: Vec::new(),
+					});
+					groups.len() - 1
+				};
+				let group = &mut groups[group_index];
+				if !group
+					.folders
+					.iter()
+					.any(|seen| seen.as_str() == folder.as_str())
+				{
+					group.folders.push(folder);
+				}
+				item.group_index = group_index;
+				Ok(item)
+			},
+		);
 		rows.push(ResyncRow {
 			name: name.clone(),
 			prepared,
@@ -944,10 +948,17 @@ mod tests {
 		);
 	}
 
-	/// The batch must read the Lock ONCE, not once per name: re-reading per name
-	/// made a large batch cost O(names) full parses, and that is the property
-	/// justifying the batch cap. Nothing else fails if `prepare_locked_resync`
-	/// starts reading the Lock itself again.
+	/// The batch must call [`ScopeLock::read`] ONCE, not once per name: reading
+	/// per name made a large batch cost O(names) full parses AND let two rows be
+	/// prepared from lock states straddling another process's write. Nothing else
+	/// fails if `prepare_locked_resync` starts reading the Lock itself again.
+	///
+	/// This counts `ScopeLock::read` only. A direct `read_local_lock` added
+	/// inside `prepare_locked_resync` would still pass, and every successful row
+	/// re-parses the Lock anyway inside its own transaction
+	/// (`EntryIdentity::ensure_unchanged`) — deliberately, since that read must
+	/// happen under the mutation lock. What this pins is the shape the
+	/// regression actually takes.
 	#[test]
 	fn a_batch_reads_the_lock_exactly_once() {
 		struct StubFetcher {
@@ -1023,7 +1034,7 @@ mod tests {
 		assert_eq!(
 			super::LOCK_READS.with(|reads| reads.get()),
 			1,
-			"a batch of {} names must parse the Lock once",
+			"a batch of {} names must call ScopeLock::read once",
 			names.len()
 		);
 	}

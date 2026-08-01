@@ -411,16 +411,81 @@ fn listed_source_url_matches_a_shorthand_only_entry() {
 		&fetcher,
 		&Token,
 	)
-	.expect("a shorthand-only entry belongs to its reconstructed Source row");
+	.expect("a host-blind entry belongs to the row that advertises it");
 	assert!(
 		results[0].outcome.is_ok(),
-		"npx-written entry must be updatable: {:?}",
+		"a legacy sourceType=git entry must stay updatable: {:?}",
 		results[0].outcome
 	);
 	assert_eq!(
 		fetcher.seen.lock().unwrap()[0].0.source,
-		"owner/repo",
-		"the fetch still uses the entry's own effective coordinate"
+		rows[0].source_url,
+		"apply must fetch the very coordinate the row advertised"
+	);
+}
+
+/// The finding this whole grouping change exists to kill: a legacy GitLab entry
+/// with no `sourceUrl`. The row advertises a GitLab URL, so apply must fetch
+/// GitLab — resolving the raw `group/repo` on its own reads it as GitHub
+/// shorthand and stamps GitHub's commit into the GitLab entry, silently,
+/// whenever a same-path repo exists there.
+#[test]
+fn a_provider_typed_entry_applies_from_the_forge_the_row_advertises() {
+	let temporary = tempfile::tempdir().unwrap();
+	let project = temporary.path().join("project");
+	let fetched_root = temporary.path().join("fetched");
+	write_skill(&project.join(".claude/skills/alpha"), "alpha", "old");
+	write_skill(&fetched_root.join("skills/alpha"), "alpha", "new");
+	skill::add_skill_to_local_lock(
+		"alpha",
+		skill::LocalSkillLockEntry {
+			source_url: None,
+			source: "group/repo".to_string(),
+			ref_name: Some("main".to_string()),
+			source_type: "gitlab".to_string(),
+			computed_hash: "old".to_string(),
+			skill_path: Some("skills/alpha/SKILL.md".to_string()),
+			ref_commit: None,
+		},
+		Some(&project),
+	)
+	.unwrap();
+	let names = vec!["alpha".to_string()];
+
+	let rows = skill_update::sources::list_sources(
+		skill_update::sources::SourceListInput {
+			scopes: vec![skill_update::sources::SourceScope::Project {
+				root: project.clone(),
+			}],
+		},
+	);
+	assert_eq!(rows.len(), 1);
+	assert_eq!(rows[0].source_url, "https://gitlab.com/group/repo.git");
+
+	let fetcher = RecordingFetcher {
+		root: fetched_root,
+		seen: Mutex::new(Vec::new()),
+	};
+	let results = resync_locked_skills(
+		LockedSkillsResyncRequest {
+			source_group: Some(&rows[0].source_url),
+			names: &names,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+		},
+		&fetcher,
+		&Token,
+	)
+	.expect("the advertised row must select its own entry");
+	assert!(
+		results[0].outcome.is_ok(),
+		"the row's own entry must be updatable: {:?}",
+		results[0].outcome
+	);
+	assert_eq!(
+		fetcher.seen.lock().unwrap()[0].0.source,
+		"https://gitlab.com/group/repo.git",
+		"apply must not resolve group/repo as GitHub shorthand"
 	);
 }
 
