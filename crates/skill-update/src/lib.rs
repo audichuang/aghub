@@ -682,8 +682,17 @@ pub async fn check_updates(
 					// Self-heal refCommit for freshly-fetched GLOBAL entries so the
 					// next check can preflight; the VCS-tracked project lock is
 					// never silently mutated by a read-style check.
+					//
+					// ONLY on `UpToDate`: refCommit means "the commit the
+					// INSTALLED content came from", which equals the fetched tip
+					// only when the two match. Healing an UpdateAvailable /
+					// Renamed row would make the next check preflight-skip (tip
+					// unchanged, no local drift) and report UpToDate — the
+					// pending update would vanish until upstream moved again.
 					for (output, member) in group_out.iter_mut().zip(&members) {
-						if member.scope == "global" {
+						if member.scope == "global"
+							&& output.status == SkillUpdateStatus::UpToDate
+						{
 							output.heal_oid = Some(repo.oid().to_string());
 						}
 					}
@@ -1068,6 +1077,83 @@ mod tests {
 			out[0].status,
 			SkillUpdateStatus::UpdateAvailable { .. }
 		));
+	}
+
+	/// A check that REPORTS a pending update must not advance `refCommit` to the
+	/// upstream tip. Healing it there makes the very next check preflight-skip
+	/// (tip unchanged + no local drift) and report `UpToDate` — the pending
+	/// update silently vanishes from the UI until upstream moves again, which
+	/// reads to the user as "the refresh button is cached".
+	#[tokio::test]
+	async fn update_available_does_not_heal_ref_commit() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"upstream-moved").unwrap();
+		let old_oid = "0000000000000000000000000000000000000000";
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
+			oid: STUB_FETCH_OID.to_string(),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		// Installed copy is intact but built from the PREVIOUS commit.
+		let mut g = entry("g", "o/r", Some("main"));
+		g.ref_commit = Some(old_oid.to_string());
+		g.stored_hash = Some("INSTALLED_HASH".to_string());
+		g.local_hash = Some("INSTALLED_HASH".to_string());
+
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let first = check_updates(
+			vec![g.clone()],
+			CheckDeps {
+				fetcher: fetcher.clone(),
+				ref_resolver: Some(Arc::clone(&ref_resolver)),
+				resolver: &resolver,
+				cache: &mut cache,
+				per_fetch: Duration::from_secs(5),
+				concurrency: 4,
+				offline: false,
+				overall_deadline: Duration::from_secs(30),
+			},
+		)
+		.await;
+		assert!(matches!(
+			first[0].status,
+			SkillUpdateStatus::UpdateAvailable { .. }
+		));
+
+		// Replay what the API does with the outputs: heal the lock, then check
+		// again on a cold cache (a second click of the refresh button).
+		if let Some(oid) = &first[0].heal_oid {
+			g.ref_commit = Some(oid.clone());
+		}
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let second = check_updates(
+			vec![g],
+			CheckDeps {
+				fetcher,
+				ref_resolver: Some(ref_resolver),
+				resolver: &resolver,
+				cache: &mut cache,
+				per_fetch: Duration::from_secs(5),
+				concurrency: 4,
+				offline: false,
+				overall_deadline: Duration::from_secs(30),
+			},
+		)
+		.await;
+		assert!(
+			matches!(
+				second[0].status,
+				SkillUpdateStatus::UpdateAvailable { .. }
+			),
+			"the pending update must survive a second check, got {:?}",
+			second[0].status
+		);
 	}
 
 	#[tokio::test]

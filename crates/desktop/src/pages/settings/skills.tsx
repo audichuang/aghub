@@ -387,6 +387,12 @@ export default function SkillsPage() {
 		// Guard: do not fire project-scoped API calls without a project selected.
 		if (isRefreshingSkills || !projectIsReady) return;
 		await refetch();
+		// The source view's list + per-source diff carry their own staleTime, so
+		// without this a refresh in that view keeps serving cached rows. Not
+		// awaited: a stuck/offline source must not hold the button spinning.
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.skills.sources.all(),
+		});
 		checkUpdatesMutation.mutate(updateCheckParams);
 	};
 
