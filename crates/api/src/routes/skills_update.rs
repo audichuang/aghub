@@ -157,10 +157,23 @@ type Identities = HashMap<String, HealPrecondition>;
 
 /// Project the global skill lock into the orchestrator's per-entry inputs, plus
 /// the identity of each entry AS READ HERE (the read that decides what to fetch).
-fn global_lock_entries(
-	local_hashes: &HashMap<String, String>,
-) -> (Vec<EntryInput>, Identities) {
+///
+/// Takes `offline` rather than pre-computed hashes so the ORDER of its two reads
+/// cannot be got wrong by a caller. The lock snapshot must not be NEWER than the
+/// disk hashes paired with it: hashing disk first lets a concurrent `npx skills
+/// update` land in between, and the check then pairs the OLD disk hash with a
+/// lock snapshot that already reflects npx's write. The heal derived from that
+/// stale hash matches the live lock, passes the precondition, and overwrites
+/// npx's newer state. Snapshotting the lock first inverts that: any interleaved
+/// write leaves the live lock ahead of the snapshot, so the precondition
+/// rejects the heal instead.
+fn global_lock_entries(offline: bool) -> (Vec<EntryInput>, Identities) {
 	let lock = skill::lock::global::read_skill_lock();
+	let local_hashes = &if offline {
+		HashMap::new()
+	} else {
+		local_hashes_for_scope(ResourceScope::GlobalOnly, None)
+	};
 	let mut identities = Identities::new();
 	let entries = lock
 		.skills
@@ -192,11 +205,17 @@ fn global_lock_entries(
 	(entries, identities)
 }
 
+/// [`global_lock_entries`] for the project lock — same read-order rule.
 fn project_lock_entries(
 	project_root: Option<&Path>,
-	local_hashes: &HashMap<String, String>,
+	offline: bool,
 ) -> (Vec<EntryInput>, Identities) {
 	let lock = skill::lock::local::read_local_lock(project_root);
+	let local_hashes = &if offline {
+		HashMap::new()
+	} else {
+		local_hashes_for_scope(ResourceScope::ProjectOnly, project_root)
+	};
 	let mut identities = Identities::new();
 	let entries = lock
 		.skills
@@ -252,47 +271,24 @@ fn lock_entries_for_scope(
 	};
 	match scope {
 		ResolvedScope::Global => {
-			let local = if offline {
-				HashMap::new()
-			} else {
-				local_hashes_for_scope(ResourceScope::GlobalOnly, None)
-			};
-			let (entries, identities) = global_lock_entries(&local);
+			let (entries, identities) = global_lock_entries(offline);
 			inputs.entries = entries;
 			inputs.global_identities = identities;
 		}
 		ResolvedScope::Project { root } => {
-			let local = if offline {
-				HashMap::new()
-			} else {
-				local_hashes_for_scope(ResourceScope::ProjectOnly, Some(root))
-			};
 			let (entries, identities) =
-				project_lock_entries(Some(root), &local);
+				project_lock_entries(Some(root), offline);
 			inputs.entries = entries;
 			inputs.project_identities = identities;
 			inputs.project_root = Some(root.clone());
 		}
 		ResolvedScope::All { project_root } => {
-			let global = if offline {
-				HashMap::new()
-			} else {
-				local_hashes_for_scope(ResourceScope::GlobalOnly, None)
-			};
-			let (entries, identities) = global_lock_entries(&global);
+			let (entries, identities) = global_lock_entries(offline);
 			inputs.entries = entries;
 			inputs.global_identities = identities;
 			if let Some(root) = project_root {
-				let local = if offline {
-					HashMap::new()
-				} else {
-					local_hashes_for_scope(
-						ResourceScope::ProjectOnly,
-						Some(root),
-					)
-				};
 				let (entries, identities) =
-					project_lock_entries(Some(root), &local);
+					project_lock_entries(Some(root), offline);
 				inputs.entries.extend(entries);
 				inputs.project_identities = identities;
 			}
@@ -1909,7 +1905,7 @@ mod tests {
 	/// The identities production captures from the CURRENT global lock — i.e.
 	/// the same read that decides what a check fetches.
 	fn global_identities_now() -> Identities {
-		global_lock_entries(&HashMap::new()).1
+		global_lock_entries(true).1
 	}
 
 	#[test]
@@ -2188,7 +2184,7 @@ mod tests {
 			.unwrap();
 
 		let (entries, _identities) =
-			project_lock_entries(Some(project.path()), &HashMap::new());
+			project_lock_entries(Some(project.path()), true);
 		assert_eq!(entries.len(), 1);
 		assert_eq!(entries[0].ref_commit.as_deref(), Some("deadbeefcafef00d"));
 	}
@@ -2265,7 +2261,7 @@ mod tests {
 				.unwrap();
 
 			let (_entries, project_identities) =
-				project_lock_entries(Some(project.path()), &HashMap::new());
+				project_lock_entries(Some(project.path()), true);
 			assert!(write_auto_healed_hashes(
 				&[healed_output("legacy", "project", "def456")],
 				Some(project.path()),
