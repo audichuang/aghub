@@ -17,5 +17,13 @@ export type SourceDiffResponse = {
 	 * diff could not be computed and the UI should offer to bind one.
 	 */
 	needsCredential: boolean;
+	/**
+	 * Set when the whole source could not be checked (`local`, `ssh`,
+	 * `unsupportedScheme`, `network`, …) — same vocabulary as a per-skill
+	 * `uncheckable` reason. `skills` is then empty because nothing was
+	 * COMPARED, which is not the same as "this source has no skills"; a UI that
+	 * cannot tell those apart shows an empty state for a transient failure.
+	 */
+	uncheckableReason?: string;
 	skills: Array<SourceSkillDiff>;
 };

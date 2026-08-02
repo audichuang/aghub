@@ -529,13 +529,29 @@ pub enum SkillUpdateStatusResponse {
 	},
 }
 
+/// The wire spelling of an uncheckable reason. ONE mapping, shared by the
+/// per-skill status above and the source-level `uncheckableReason` on
+/// `SourceDiffResponse` — two hand-kept copies would drift.
+pub(crate) fn uncheckable_reason_code(
+	reason: &aghub_core::skills::update::UncheckableReason,
+) -> &'static str {
+	use aghub_core::skills::update::UncheckableReason;
+	match reason {
+		UncheckableReason::Auth => "auth",
+		UncheckableReason::Network => "network",
+		UncheckableReason::Local => "local",
+		UncheckableReason::Ssh => "ssh",
+		UncheckableReason::UnsupportedScheme => "unsupportedScheme",
+		UncheckableReason::NoPath => "noPath",
+		UncheckableReason::Timeout => "timeout",
+	}
+}
+
 impl From<aghub_core::skills::update::SkillUpdateStatus>
 	for SkillUpdateStatusResponse
 {
 	fn from(s: aghub_core::skills::update::SkillUpdateStatus) -> Self {
-		use aghub_core::skills::update::{
-			SkillUpdateStatus, UncheckableReason,
-		};
+		use aghub_core::skills::update::SkillUpdateStatus;
 		match s {
 			SkillUpdateStatus::UpToDate => SkillUpdateStatusResponse::UpToDate,
 			SkillUpdateStatus::UpdateAvailable {
@@ -551,17 +567,8 @@ impl From<aghub_core::skills::update::SkillUpdateStatus>
 				SkillUpdateStatusResponse::Renamed { new_name }
 			}
 			SkillUpdateStatus::Uncheckable { reason } => {
-				let reason = match reason {
-					UncheckableReason::Auth => "auth",
-					UncheckableReason::Network => "network",
-					UncheckableReason::Local => "local",
-					UncheckableReason::Ssh => "ssh",
-					UncheckableReason::UnsupportedScheme => "unsupportedScheme",
-					UncheckableReason::NoPath => "noPath",
-					UncheckableReason::Timeout => "timeout",
-				};
 				SkillUpdateStatusResponse::Uncheckable {
-					reason: reason.to_string(),
+					reason: uncheckable_reason_code(&reason).to_string(),
 				}
 			}
 		}

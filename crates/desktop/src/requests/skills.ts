@@ -218,6 +218,19 @@ function refetchUpdateChecks(queryClient: QueryClient) {
 	);
 }
 
+/// A flow that REWRITES a skill's files (apply-update, sync) leaves the open
+/// detail panel showing pre-update text: the skill path is unchanged, so the
+/// content/tree keys are unchanged, and `invalidateSkillQueries` only marks
+/// them stale (`refetchType: "none"`). Nothing else refetches them — the panel
+/// does not remount and window-focus refetching is off — so the user sees a
+/// success toast over stale bytes. Fire-and-forget for the same reason the
+/// other refetch helpers are.
+function refetchSkillBodies(queryClient: QueryClient) {
+	for (const key of [queryKeys.skills.contents(), queryKeys.skills.trees()]) {
+		void queryClient.refetchQueries({ queryKey: key, type: "active" });
+	}
+}
+
 interface CreateSkillVariables {
 	agent: string;
 	body: CreateSkillRequest;
@@ -557,6 +570,7 @@ export function applySkillUpdateMutationOptions({
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			refetchUpdateChecks(queryClient);
+			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},
 		onError,
@@ -603,6 +617,7 @@ export function applySkillUpdatesMutationOptions({
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
 			refetchUpdateChecks(queryClient);
+			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},
 		onError,
@@ -637,6 +652,7 @@ export function gitSyncSkillMutationOptions({
 			// git-sync runs the same resync transaction as apply-update, so it
 			// flips a skill from outdated to current and owes the same refetch.
 			refetchUpdateChecks(queryClient);
+			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},
 	});

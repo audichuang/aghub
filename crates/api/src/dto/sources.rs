@@ -147,6 +147,14 @@ pub struct SourceDiffResponse {
 	/// True when the source is private and we lack a usable credential, so the
 	/// diff could not be computed and the UI should offer to bind one.
 	pub needs_credential: bool,
+	/// Set when the whole source could not be checked (`local`, `ssh`,
+	/// `unsupportedScheme`, `network`, …) — same vocabulary as a per-skill
+	/// `uncheckable` reason. `skills` is then empty because nothing was
+	/// COMPARED, which is not the same as "this source has no skills"; a UI that
+	/// cannot tell those apart shows an empty state for a transient failure.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub uncheckable_reason: Option<String>,
 	pub skills: Vec<SourceSkillDiff>,
 }
 

@@ -40,6 +40,19 @@ export const queryKeys = {
 		/// Prefix covering every scope's update check — an applied update
 		/// invalidates the outdated-or-not answer for all of them.
 		updateChecksAll: () => ["skills", "check-updates"] as const,
+		/// Prefixes for a skill's rendered BODY — the SKILL.md text and its file
+		/// tree. A flow that rewrites files on disk owes these a refetch: the
+		/// path (and so the key) is unchanged, so nothing else brings the open
+		/// detail panel up to date.
+		contents: () => ["skills", "content"] as const,
+		trees: () => ["skills", "tree"] as const,
+		/// "Does the machine running aghub-api already have a git credential for
+		/// this URL?" — an answer about the HOST, so it is keyed by connection
+		/// (and lives under `skills` so a host switch's cache purge covers it).
+		/// Without both, switching to another VM re-uses the previous machine's
+		/// answer for the same URL.
+		gitCredentialStatus: (url: string, connectionId: string) =>
+			["skills", "git-credential-status", connectionId, url] as const,
 		lock: {
 			all: () => ["skills", "lock"] as const,
 			global: () => ["skills", "lock", "global"] as const,

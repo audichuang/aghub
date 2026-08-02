@@ -41,7 +41,9 @@ import { useSkillCoverage } from "../requests/agents";
 import { cn } from "../lib/utils";
 import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { credentialsListQueryOptions } from "../requests/credentials";
+import { queryKeys } from "../requests/keys";
 import { gitInstallSkillsMutationOptions } from "../requests/skills";
+import { useConnection } from "../hooks/use-connection";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { AgentSelector } from "./agent-selector";
 
@@ -80,6 +82,9 @@ export function ImportGithubSkillPanel({
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
+	// The credential probe answers for the machine running aghub-api, so its
+	// cache entry belongs to this connection and no other.
+	const { activeId } = useConnection();
 	const { forSource: forwardForSource } = useGitForwarding();
 	const { availableAgents } = useAgentAvailability();
 
@@ -166,7 +171,7 @@ export function ImportGithubSkillPanel({
 	// credential for this URL? Only relevant when not supplying an aghub token
 	// (otherwise the system-git credential path isn't used).
 	const { data: credStatus } = useQuery({
-		queryKey: ["gitCredentialStatus", probeUrl],
+		queryKey: queryKeys.skills.gitCredentialStatus(probeUrl, activeId),
 		queryFn: () => api.skills.gitCredentialStatus(probeUrl),
 		enabled: isProbeUrlValidHttps && !isPrivateRepo,
 		staleTime: 60_000,

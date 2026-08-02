@@ -878,10 +878,17 @@ pub(crate) fn classify_repo_skills(
 	baseline: &Baseline,
 	upstream_commit_time: Option<String>,
 ) -> Vec<SourceSkillDiff> {
-	let Ok(discovered) = skill::discover_repo_skills(root, &[], true) else {
-		// No SKILL.md in the repo → nothing to offer (old route returned an
-		// empty diff, bypassing the removed/changelog pass).
-		return Vec::new();
+	let discovered = match skill::discover_repo_skills(root, &[], true) {
+		Ok(discovered) => discovered,
+		// An upstream that carries no SKILL.md at all is a legitimate diff
+		// input, not a failure: every baseline entry belongs in the removed
+		// pass. Returning early here (as the old route did) hid the deletion of
+		// a source's LAST skill entirely — the caller saw an empty diff.
+		Err(skill::RepoDiscoveryError::NoSkillsFound) => Vec::new(),
+		// A scan / relative-path failure says nothing about upstream content.
+		// Reporting it as a wholesale deletion would be worse than silence, so
+		// it keeps yielding an empty diff.
+		Err(_) => return Vec::new(),
 	};
 	build_source_skill_diffs(root, discovered, baseline, upstream_commit_time)
 }
@@ -1732,6 +1739,35 @@ mod classify_tests {
 			diff.skill_path == "skills/engineering/diagnosing-bugs/SKILL.md"
 				&& diff.state == SourceSkillState::NotInstalled
 		}));
+	}
+
+	/// Deleting a source's LAST skill upstream must still surface as `Removed`.
+	/// This goes through `classify_repo_skills` (not the lower
+	/// `build_source_skill_diffs`) because the empty-discovery short-circuit
+	/// lives there: it used to return an empty diff, so the deletion of the
+	/// only skill in a source was invisible in the UI.
+	#[test]
+	fn empty_upstream_still_reports_the_last_skill_as_removed() {
+		let dir = tempdir().unwrap();
+
+		let mut baseline = Baseline::new();
+		baseline.insert(
+			"skills/only/SKILL.md".to_string(),
+			BaselineEntry {
+				installed_name: "only".to_string(),
+				stored_hash: "old-hash".to_string(),
+				local_hashes: Vec::new(),
+				scope_label: "global".to_string(),
+				ref_name: None,
+			},
+		);
+
+		let diffs = classify_repo_skills(dir.path(), &baseline, None);
+
+		assert_eq!(diffs.len(), 1, "expected the removed row, got {diffs:?}");
+		assert_eq!(diffs[0].name, "only");
+		assert_eq!(diffs[0].state, SourceSkillState::Removed);
+		assert_eq!(diffs[0].reason.as_deref(), Some("noPath"));
 	}
 
 	#[test]

@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use aghub_core::models::ResourceScope;
+use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::removal::skill_root;
 use chrono::Utc;
 use rocket::http::Status;
@@ -107,68 +108,103 @@ fn local_hashes_for_scope(
 	hashes
 }
 
-/// Project the global skill lock into the orchestrator's per-entry inputs.
+/// Pre-fetch identity of every entry a check read, keyed by skill name within a
+/// scope. A check decides WHAT to fetch from an unlocked read and only takes the
+/// mutation lock afterwards to write its heals, so it owes the same
+/// compare-and-set every other post-fetch writer does — see [`EntryIdentity`].
+type Identities = HashMap<String, EntryIdentity>;
+
+/// Project the global skill lock into the orchestrator's per-entry inputs, plus
+/// the identity of each entry AS READ HERE (the read that decides what to fetch).
 fn global_lock_entries(
 	local_hashes: &HashMap<String, String>,
-) -> Vec<EntryInput> {
+) -> (Vec<EntryInput>, Identities) {
 	let lock = skill::lock::global::read_skill_lock();
-	lock.skills
+	let mut identities = Identities::new();
+	let entries = lock
+		.skills
 		.into_iter()
-		.map(|(name, entry)| EntryInput {
-			local_hash: local_hashes.get(&name).cloned(),
-			name,
-			scope: "global".to_string(),
-			source_ref: SourceRef {
-				source: skill_update::sources::entry_clone_source(
-					&entry.source,
-					Some(&entry.source_url),
-					&entry.source_type,
-				),
-				ref_: entry.ref_name,
-			},
-			source_type: entry.source_type,
-			skill_path: entry.skill_path,
-			stored_hash: entry.content_hash,
-			ref_commit: entry.ref_commit,
+		.map(|(name, entry)| {
+			identities
+				.insert(name.clone(), EntryIdentity::of_global_entry(&entry));
+			EntryInput {
+				local_hash: local_hashes.get(&name).cloned(),
+				name,
+				scope: "global".to_string(),
+				source_ref: SourceRef {
+					source: skill_update::sources::entry_clone_source(
+						&entry.source,
+						Some(&entry.source_url),
+						&entry.source_type,
+					),
+					ref_: entry.ref_name,
+				},
+				source_type: entry.source_type,
+				skill_path: entry.skill_path,
+				stored_hash: entry.content_hash,
+				ref_commit: entry.ref_commit,
+			}
 		})
-		.collect()
+		.collect();
+	(entries, identities)
 }
 
 fn project_lock_entries(
 	project_root: Option<&Path>,
 	local_hashes: &HashMap<String, String>,
-) -> Vec<EntryInput> {
+) -> (Vec<EntryInput>, Identities) {
 	let lock = skill::lock::local::read_local_lock(project_root);
-	lock.skills
+	let mut identities = Identities::new();
+	let entries = lock
+		.skills
 		.into_iter()
-		.map(|(name, entry)| EntryInput {
-			local_hash: local_hashes.get(&name).cloned(),
-			name,
-			scope: "project".to_string(),
-			source_ref: SourceRef {
-				// The shared coordinate — NOT a local `source_url.unwrap_or(
-				// source)`, which reads a legacy GitLab entry's `group/repo` as
-				// GitHub shorthand and checks it against the wrong repository.
-				source: skill_update::sources::entry_clone_source(
-					&entry.source,
-					entry.source_url.as_deref(),
-					&entry.source_type,
-				),
-				ref_: entry.ref_name,
-			},
-			source_type: entry.source_type,
-			skill_path: entry.skill_path,
-			stored_hash: Some(entry.computed_hash),
-			ref_commit: entry.ref_commit,
+		.map(|(name, entry)| {
+			identities
+				.insert(name.clone(), EntryIdentity::of_project_entry(&entry));
+			EntryInput {
+				local_hash: local_hashes.get(&name).cloned(),
+				name,
+				scope: "project".to_string(),
+				source_ref: SourceRef {
+					// The shared coordinate — NOT a local `source_url.unwrap_or(
+					// source)`, which reads a legacy GitLab entry's `group/repo` as
+					// GitHub shorthand and checks it against the wrong repository.
+					source: skill_update::sources::entry_clone_source(
+						&entry.source,
+						entry.source_url.as_deref(),
+						&entry.source_type,
+					),
+					ref_: entry.ref_name,
+				},
+				source_type: entry.source_type,
+				skill_path: entry.skill_path,
+				stored_hash: Some(entry.computed_hash),
+				ref_commit: entry.ref_commit,
+			}
 		})
-		.collect()
+		.collect();
+	(entries, identities)
+}
+
+/// Everything one check read BEFORE fetching: the orchestrator inputs, the write
+/// scope, and the pre-fetch identities its heal writer must compare against.
+struct CheckInputs {
+	entries: Vec<EntryInput>,
+	project_root: Option<PathBuf>,
+	global_identities: Identities,
+	project_identities: Identities,
 }
 
 fn lock_entries_for_scope(
 	scope: &ResolvedScope,
 	offline: bool,
-) -> Result<(Vec<EntryInput>, Option<PathBuf>), ApiError> {
-	let mut entries = Vec::new();
+) -> Result<CheckInputs, ApiError> {
+	let mut inputs = CheckInputs {
+		entries: Vec::new(),
+		project_root: None,
+		global_identities: Identities::new(),
+		project_identities: Identities::new(),
+	};
 	match scope {
 		ResolvedScope::Global => {
 			let local = if offline {
@@ -176,8 +212,9 @@ fn lock_entries_for_scope(
 			} else {
 				local_hashes_for_scope(ResourceScope::GlobalOnly, None)
 			};
-			entries.extend(global_lock_entries(&local));
-			Ok((entries, None))
+			let (entries, identities) = global_lock_entries(&local);
+			inputs.entries = entries;
+			inputs.global_identities = identities;
 		}
 		ResolvedScope::Project { root } => {
 			let local = if offline {
@@ -185,8 +222,11 @@ fn lock_entries_for_scope(
 			} else {
 				local_hashes_for_scope(ResourceScope::ProjectOnly, Some(root))
 			};
-			entries.extend(project_lock_entries(Some(root), &local));
-			Ok((entries, Some(root.clone())))
+			let (entries, identities) =
+				project_lock_entries(Some(root), &local);
+			inputs.entries = entries;
+			inputs.project_identities = identities;
+			inputs.project_root = Some(root.clone());
 		}
 		ResolvedScope::All { project_root } => {
 			let global = if offline {
@@ -194,7 +234,9 @@ fn lock_entries_for_scope(
 			} else {
 				local_hashes_for_scope(ResourceScope::GlobalOnly, None)
 			};
-			entries.extend(global_lock_entries(&global));
+			let (entries, identities) = global_lock_entries(&global);
+			inputs.entries = entries;
+			inputs.global_identities = identities;
 			if let Some(root) = project_root {
 				let local = if offline {
 					HashMap::new()
@@ -204,16 +246,38 @@ fn lock_entries_for_scope(
 						Some(root),
 					)
 				};
-				entries.extend(project_lock_entries(Some(root), &local));
+				let (entries, identities) =
+					project_lock_entries(Some(root), &local);
+				inputs.entries.extend(entries);
+				inputs.project_identities = identities;
 			}
-			Ok((entries, project_root.clone()))
+			inputs.project_root = project_root.clone();
 		}
 	}
+	Ok(inputs)
+}
+
+/// Heal `name` only if the live entry is still the one the check fetched.
+///
+/// A check reads the lock unlocked, spends seconds on the network, and only then
+/// takes the mutation lock — so by write time another process may have repointed
+/// this name at a different source/ref/skillPath and written ITS correct hash.
+/// Healing by name alone would stamp the old source's hash/OID onto the new
+/// entry, and every later check would compare against a baseline that never
+/// belonged to it (a permanent phantom "update available").
+fn identity_unchanged(
+	identities: &Identities,
+	name: &str,
+	live: EntryIdentity,
+) -> bool {
+	identities.get(name) == Some(&live)
 }
 
 fn write_auto_healed_hashes(
 	outputs: &[CheckOutput],
 	project_root: Option<&Path>,
+	global_identities: &Identities,
+	project_identities: &Identities,
 ) -> Result<(), ApiError> {
 	let mut global_heals = HashMap::new();
 	let mut global_oid_heals = HashMap::new();
@@ -245,11 +309,25 @@ fn write_auto_healed_hashes(
 			let mut changed = false;
 			for (name, hash) in &global_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
+					if !identity_unchanged(
+						global_identities,
+						name,
+						EntryIdentity::of_global_entry(entry),
+					) {
+						continue;
+					}
 					changed |= entry.apply_content_hash(hash, &now);
 				}
 			}
 			for (name, oid) in &global_oid_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
+					if !identity_unchanged(
+						global_identities,
+						name,
+						EntryIdentity::of_global_entry(entry),
+					) {
+						continue;
+					}
 					if entry.ref_commit.as_deref() != Some(oid.as_str()) {
 						entry.ref_commit = Some(oid.clone());
 						entry.updated_at = now.clone();
@@ -280,6 +358,13 @@ fn write_auto_healed_hashes(
 			let mut changed = false;
 			for (name, hash) in &project_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
+					if !identity_unchanged(
+						project_identities,
+						name,
+						EntryIdentity::of_project_entry(entry),
+					) {
+						continue;
+					}
 					changed |= entry.apply_computed_hash(hash);
 				}
 			}
@@ -513,7 +598,12 @@ pub async fn check_skill_updates(
 	}
 	.resolve()?;
 	let offline = query.offline.unwrap_or(false);
-	let (entries, project_root) = lock_entries_for_scope(&resolved, offline)?;
+	let CheckInputs {
+		entries,
+		project_root,
+		global_identities,
+		project_identities,
+	} = lock_entries_for_scope(&resolved, offline)?;
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
 	let resolver = SourceAuth::load(forwarded).await;
@@ -535,7 +625,12 @@ pub async fn check_skill_updates(
 	// worker for the whole batch (root AGENTS.md). The fetches above are already
 	// done and stay outside.
 	crate::blocking::in_mutation_pool(|| {
-		write_auto_healed_hashes(&outputs, project_root.as_deref())
+		write_auto_healed_hashes(
+			&outputs,
+			project_root.as_deref(),
+			&global_identities,
+			&project_identities,
+		)
 	})
 	.await?;
 
@@ -1761,6 +1856,12 @@ mod tests {
 		));
 	}
 
+	/// The identities production captures from the CURRENT global lock — i.e.
+	/// the same read that decides what a check fetches.
+	fn global_identities_now() -> Identities {
+		global_lock_entries(&HashMap::new()).1
+	}
+
 	#[test]
 	fn auto_heal_writes_global_content_hash() {
 		with_isolated_state(|| {
@@ -1773,6 +1874,8 @@ mod tests {
 			assert!(write_auto_healed_hashes(
 				&[healed_output("legacy", "global", "abc123")],
 				None,
+				&global_identities_now(),
+				&Identities::new(),
 			)
 			.is_ok());
 
@@ -1798,13 +1901,68 @@ mod tests {
 			output.heal_hash = None;
 			output.heal_oid = Some("deadbeefcafef00d".to_string());
 
-			assert!(write_auto_healed_hashes(&[output], None).is_ok());
+			assert!(write_auto_healed_hashes(
+				&[output],
+				None,
+				&global_identities_now(),
+				&Identities::new(),
+			)
+			.is_ok());
 
 			let lock = skill::lock::global::read_skill_lock();
 			assert_eq!(
 				lock.skills["legacy"].ref_commit.as_deref(),
 				Some("deadbeefcafef00d")
 			);
+		});
+	}
+
+	/// A check reads the lock, spends SECONDS fetching, and only then takes the
+	/// mutation lock to write its heals. If another process repoints the same
+	/// NAME at a different source in that window (and writes that source's own
+	/// correct hash), the stale heal must not land on the new entry — otherwise
+	/// every later check compares against a baseline that never belonged to it
+	/// and reports a phantom update forever.
+	#[test]
+	fn auto_heal_skips_an_entry_repointed_during_the_fetch() {
+		with_isolated_state(|| {
+			// Pre-fetch: `legacy` points at owner/repo. This is the read the
+			// check's fetch is based on.
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+			let identities = global_identities_now();
+
+			// Mid-fetch: another mutation repoints the name at owner/other and
+			// records THAT source's hash and tip.
+			let mut repointed = global_entry();
+			repointed.source = "owner/other".to_string();
+			repointed.source_url = "https://github.com/owner/other".to_string();
+			repointed.content_hash = Some("other-hash".to_string());
+			repointed.ref_commit = Some("bbbbbbbb".to_string());
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), repointed);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			// The stale check finally writes: owner/repo's hash and tip.
+			let mut output = healed_output("legacy", "global", "repo-hash");
+			output.heal_oid = Some("aaaaaaaa".to_string());
+			assert!(write_auto_healed_hashes(
+				&[output],
+				None,
+				&identities,
+				&Identities::new(),
+			)
+			.is_ok());
+
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["legacy"];
+			assert_eq!(
+				entry.content_hash.as_deref(),
+				Some("other-hash"),
+				"owner/repo's hash must not overwrite owner/other's entry"
+			);
+			assert_eq!(entry.ref_commit.as_deref(), Some("bbbbbbbb"));
 		});
 	}
 
@@ -1862,7 +2020,7 @@ mod tests {
 		skill::lock::local::write_local_lock(&local, Some(project.path()))
 			.unwrap();
 
-		let entries =
+		let (entries, _identities) =
 			project_lock_entries(Some(project.path()), &HashMap::new());
 		assert_eq!(entries.len(), 1);
 		assert_eq!(entries[0].ref_commit.as_deref(), Some("deadbeefcafef00d"));
@@ -1939,9 +2097,13 @@ mod tests {
 			skill::lock::local::write_local_lock(&local, Some(project.path()))
 				.unwrap();
 
+			let (_entries, project_identities) =
+				project_lock_entries(Some(project.path()), &HashMap::new());
 			assert!(write_auto_healed_hashes(
 				&[healed_output("legacy", "project", "def456")],
 				Some(project.path()),
+				&Identities::new(),
+				&project_identities,
 			)
 			.is_ok());
 

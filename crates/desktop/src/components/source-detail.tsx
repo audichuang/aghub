@@ -924,6 +924,20 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 						</Alert>
 						{/* Dialog is mounted once at root level — just trigger open above */}
 					</div>
+				) : data?.uncheckableReason ? (
+					// Nothing was COMPARED. Without this the same response —
+					// an empty skill list — renders as "this source is fine".
+					<Alert status="warning">
+						<Alert.Indicator />
+						<Alert.Content>
+							<Alert.Title>{t("sourceUncheckable")}</Alert.Title>
+							<Alert.Description>
+								{t("sourceUncheckableHint", {
+									reason: data.uncheckableReason,
+								})}
+							</Alert.Description>
+						</Alert.Content>
+					</Alert>
 				) : (
 					<div className="space-y-6">
 						{/* Summary bar — per-source counts */}

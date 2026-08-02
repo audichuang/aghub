@@ -1100,6 +1100,9 @@ export default {
 	scopeProject: "專案",
 	needsCredential: "需要憑證",
 	needsCredentialHint: "此來源為私有且無可用憑證。請綁定憑證後再檢查。",
+	sourceUncheckable: "無法檢查此來源",
+	sourceUncheckableHint:
+		"沒有進行任何比對，因此下方的技能狀態都不是最新的。原因：{{reason}}。",
 	checkingSource: "檢查來源中…",
 	sourceEmptyDiffTitle: "沒有可顯示的技能",
 	sourceEmptyDiffHint:

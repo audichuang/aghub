@@ -200,6 +200,7 @@ pub async fn diff_source(
 				git_ref,
 				session_id: None,
 				needs_credential: false,
+				uncheckable_reason: None,
 				skills: skills.into_iter().map(map_diff_to_dto).collect(),
 			}))
 		}
@@ -209,6 +210,7 @@ pub async fn diff_source(
 				git_ref,
 				session_id: None,
 				needs_credential: true,
+				uncheckable_reason: None,
 				skills: Vec::new(),
 			}))
 		}
@@ -228,12 +230,19 @@ pub async fn diff_source(
 			),
 			"SOURCE_AMBIGUOUS",
 		)),
-		SourceDiffOutcome::UncheckableSource { git_ref, .. } => {
+		// Nothing was compared, so `skills` is empty — but an empty list alone
+		// reads as "this source has no skills". Carry the reason so the UI can
+		// say "couldn't check" instead of showing an empty state.
+		SourceDiffOutcome::UncheckableSource { git_ref, reason } => {
 			Ok(Json(SourceDiffResponse {
 				source,
 				git_ref,
 				session_id: None,
 				needs_credential: false,
+				uncheckable_reason: Some(
+					crate::dto::skill::uncheckable_reason_code(&reason)
+						.to_string(),
+				),
 				skills: Vec::new(),
 			}))
 		}
@@ -354,6 +363,43 @@ mod tests {
 			format!("---\nname: {name}\ndescription: {name} skill\n---\n"),
 		)
 		.unwrap();
+	}
+
+	/// A source nothing could be checked against must not answer with a plain
+	/// empty diff — that is indistinguishable from "this source has no skills",
+	/// so the UI shows an empty state for what is really a failure to check.
+	#[test]
+	fn diff_source_route_reports_an_uncheckable_source_as_such() {
+		let _global = GlobalLockGuard::new();
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
+		// An ssh-shorthand source is rejected by `precheck_source` before any
+		// fetch, so this exercises the UncheckableSource arm deterministically.
+		let source = "git@github.com:owner/private.git";
+		let mut entry =
+			global_entry(source, "skills/engineering/thing/SKILL.md");
+		entry.source = source.to_string();
+		entry.source_url = source.to_string();
+		skill::lock::add_skill_to_lock("thing", entry).unwrap();
+
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+		// `@` and `:` are legal query characters, so the scp-like source needs
+		// no escaping here.
+		let response = client
+			.get(format!("/skills/sources/diff?scope=global&source={source}"))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::Ok);
+		let value: Value =
+			serde_json::from_str(&response.into_string().expect("body"))
+				.expect("valid JSON");
+		assert_eq!(
+			value["uncheckableReason"], "ssh",
+			"an uncheckable source must say why, got {value}"
+		);
+		assert_eq!(value["needsCredential"], false);
 	}
 
 	#[test]

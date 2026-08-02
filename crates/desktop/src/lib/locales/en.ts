@@ -1144,6 +1144,9 @@ export default {
 	needsCredential: "Needs credential",
 	needsCredentialHint:
 		"This source is private and no credential is available. Bind a credential to check it.",
+	sourceUncheckable: "Could not check this source",
+	sourceUncheckableHint:
+		"Nothing was compared, so no skill state below is current. Reason: {{reason}}.",
 	checkingSource: "Checking source…",
 	sourceEmptyDiffTitle: "Nothing to show",
 	sourceEmptyDiffHint:

@@ -45,6 +45,27 @@ export async function invalidateCredentialQueries(queryClient: QueryClient) {
 	});
 }
 
+/// For the credential mutations that change which token a SOURCE resolves to —
+/// binding one, or deleting one (the backend prunes that credential's source
+/// bindings with it). Source diffs and update checks are computed WITH that
+/// token, so they stop being true the moment it changes; without this they keep
+/// serving the pre-change answer (diff 30-60s, update checks 10 min) and the UI
+/// looks like the credential still works.
+///
+/// Source diffs refetch (one source, and the user is usually looking at it);
+/// update checks are only marked stale, because re-running them refetches EVERY
+/// source over the network — the same price the skill mutations decline to pay.
+async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
+	await invalidateCredentialQueries(queryClient);
+	await queryClient.invalidateQueries({
+		queryKey: queryKeys.skills.sources.all(),
+	});
+	await queryClient.invalidateQueries({
+		queryKey: queryKeys.skills.updateChecksAll(),
+		refetchType: "none",
+	});
+}
+
 interface CreateCredentialMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
@@ -86,7 +107,7 @@ export function bindSourceCredentialMutationOptions({
 		mutationFn: (body: SourceCredentialBindingRequest) =>
 			api.credentials.bindSource(body),
 		onSuccess: async (data) => {
-			await invalidateCredentialQueries(queryClient);
+			await invalidateSourceCredentialAnswers(queryClient);
 			await onSuccess?.(data);
 		},
 		onError,
@@ -107,7 +128,7 @@ export function deleteCredentialMutationOptions({
 	return mutationOptions({
 		mutationFn: (id: string) => api.credentials.delete(id),
 		onSuccess: async () => {
-			await invalidateCredentialQueries(queryClient);
+			await invalidateSourceCredentialAnswers(queryClient);
 			await onSuccess?.();
 		},
 	});
