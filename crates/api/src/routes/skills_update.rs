@@ -168,12 +168,24 @@ type Identities = HashMap<String, HealPrecondition>;
 /// write leaves the live lock ahead of the snapshot, so the precondition
 /// rejects the heal instead.
 fn global_lock_entries(offline: bool) -> (Vec<EntryInput>, Identities) {
-	let lock = skill::lock::global::read_skill_lock();
-	let local_hashes = &if offline {
-		HashMap::new()
-	} else {
-		local_hashes_for_scope(ResourceScope::GlobalOnly, None)
-	};
+	global_lock_entries_with(skill::lock::global::read_skill_lock, || {
+		if offline {
+			HashMap::new()
+		} else {
+			local_hashes_for_scope(ResourceScope::GlobalOnly, None)
+		}
+	})
+}
+
+/// The seam the order above is testable through: a test supplies a `read_hashes`
+/// that performs an npx-style write before returning, which is exactly the
+/// interleaving the ordering defends against — deterministically, with no sleep.
+fn global_lock_entries_with(
+	read_lock: impl FnOnce() -> skill::SkillLockFile,
+	read_hashes: impl FnOnce() -> HashMap<String, String>,
+) -> (Vec<EntryInput>, Identities) {
+	let lock = read_lock();
+	let local_hashes = &read_hashes();
 	let mut identities = Identities::new();
 	let entries = lock
 		.skills
@@ -1995,6 +2007,57 @@ mod tests {
 				"the OID must land in the same write as the hash — otherwise the \
 				 next check has to fetch the whole source again to re-derive it"
 			);
+		});
+	}
+
+	/// The read ORDER inside `global_lock_entries`, pinned deterministically: the
+	/// npx-style write happens while the check is between its two reads. Reading
+	/// the lock FIRST means the snapshot predates that write, so the writer's
+	/// precondition sees a live lock that has moved on and refuses the heal.
+	/// Hash-then-lock would snapshot npx's OWN state, pair it with the disk hash
+	/// read before npx ran, and sail through the precondition.
+	#[test]
+	fn a_check_snapshots_the_lock_before_hashing_disk() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_folder_hash = "npx-tree-a".to_string();
+			lock.skills.insert("legacy".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			let (_entries, identities) = global_lock_entries_with(
+				skill::lock::global::read_skill_lock,
+				|| {
+					// npx finishes updating to tree B right here.
+					let mut updated = global_entry();
+					updated.skill_folder_hash = "npx-tree-b".to_string();
+					let mut lock = skill::SkillLockFile::default();
+					lock.skills.insert("legacy".into(), updated);
+					skill::lock::global::write_skill_lock(&lock).unwrap();
+					// The disk hash the check read: still the pre-npx tree.
+					HashMap::from([(
+						"legacy".to_string(),
+						"disk-hash-a".to_string(),
+					)])
+				},
+			);
+
+			assert!(write_auto_healed_hashes(
+				&[healed_output("legacy", "global", "disk-hash-a")],
+				None,
+				&identities,
+				&Identities::new(),
+			)
+			.is_ok());
+
+			let entry =
+				&skill::lock::global::read_skill_lock().skills["legacy"];
+			assert_eq!(
+				entry.skill_folder_hash, "npx-tree-b",
+				"the heal was derived from the pre-npx disk hash; it must not \
+				 land on npx's newer entry or blank its baseline"
+			);
+			assert_eq!(entry.content_hash, None);
 		});
 	}
 
