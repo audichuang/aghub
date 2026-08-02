@@ -26,7 +26,7 @@ import type {
 } from "../generated/dto";
 import type { GitForwardHeaders } from "../lib/api";
 import type { ApiClient } from "./client";
-import { queryKeys } from "./keys";
+import { queryKeys } from "./keys.ts";
 
 /**
  * Resolve the per-request forward header for a known single source, or

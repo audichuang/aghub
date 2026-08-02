@@ -171,7 +171,7 @@ export function ImportGithubSkillPanel({
 	// credential for this URL? Only relevant when not supplying an aghub token
 	// (otherwise the system-git credential path isn't used).
 	const { data: credStatus } = useQuery({
-		queryKey: queryKeys.skills.gitCredentialStatus(probeUrl, activeId),
+		queryKey: queryKeys.gitCredentialStatus.of(probeUrl, activeId),
 		queryFn: () => api.skills.gitCredentialStatus(probeUrl),
 		enabled: isProbeUrlValidHttps && !isPrivateRepo,
 		staleTime: 60_000,

@@ -10,7 +10,7 @@ import type {
 	SourceCredentialBindingResponse,
 } from "../generated/dto";
 import type { ApiClient } from "./client";
-import { queryKeys } from "./keys";
+import { queryKeys } from "./keys.ts";
 
 interface CredentialsQueryParams {
 	api: ApiClient;
@@ -45,24 +45,36 @@ export async function invalidateCredentialQueries(queryClient: QueryClient) {
 	});
 }
 
-/// For the credential mutations that change which token a SOURCE resolves to —
-/// binding one, or deleting one (the backend prunes that credential's source
-/// bindings with it). Source diffs and update checks are computed WITH that
-/// token, so they stop being true the moment it changes; without this they keep
+/// EVERY credential mutation changes which token a source can resolve to, so
+/// all three go through here. Deleting one prunes its source bindings server
+/// side; binding one repoints a source; and CREATING one is not neutral either
+/// — `resolve.rs` falls back to a credential whose NAME matches the host, so a
+/// credential called `github.com` starts authenticating every github source the
+/// moment it exists. Source diffs and update checks are computed WITH that
+/// token, so they stop being true at that instant; without this they keep
 /// serving the pre-change answer (diff 30-60s, update checks 10 min) and the UI
-/// looks like the credential still works.
+/// looks like nothing changed.
 ///
-/// Source diffs refetch (one source, and the user is usually looking at it);
-/// update checks are only marked stale, because re-running them refetches EVERY
-/// source over the network — the same price the skill mutations decline to pay.
+/// Marked stale WITHOUT awaiting a refetch, then refetched fire-and-forget: a
+/// source diff CLONES the repo behind a 120s timeout, so awaiting it would hold
+/// the mutation pending long after the write succeeded and the bind dialog
+/// would sit there looking hung. Update checks are not refetched at all —
+/// re-running them refetches EVERY source, the price `invalidateSkillQueries`
+/// also declines to pay.
 async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
 	await invalidateCredentialQueries(queryClient);
-	await queryClient.invalidateQueries({
+	for (const queryKey of [
+		queryKeys.skills.sources.all(),
+		queryKeys.skills.updateChecksAll(),
+	]) {
+		await queryClient.invalidateQueries({
+			queryKey,
+			refetchType: "none",
+		});
+	}
+	void queryClient.refetchQueries({
 		queryKey: queryKeys.skills.sources.all(),
-	});
-	await queryClient.invalidateQueries({
-		queryKey: queryKeys.skills.updateChecksAll(),
-		refetchType: "none",
+		type: "active",
 	});
 }
 
@@ -83,7 +95,7 @@ export function createCredentialMutationOptions({
 		mutationFn: (body: CreateCredentialRequest) =>
 			api.credentials.create(body),
 		onSuccess: async (data) => {
-			await invalidateCredentialQueries(queryClient);
+			await invalidateSourceCredentialAnswers(queryClient);
 			await onSuccess?.(data);
 		},
 		onError,

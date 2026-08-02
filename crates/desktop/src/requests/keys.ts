@@ -46,13 +46,6 @@ export const queryKeys = {
 		/// detail panel up to date.
 		contents: () => ["skills", "content"] as const,
 		trees: () => ["skills", "tree"] as const,
-		/// "Does the machine running aghub-api already have a git credential for
-		/// this URL?" — an answer about the HOST, so it is keyed by connection
-		/// (and lives under `skills` so a host switch's cache purge covers it).
-		/// Without both, switching to another VM re-uses the previous machine's
-		/// answer for the same URL.
-		gitCredentialStatus: (url: string, connectionId: string) =>
-			["skills", "git-credential-status", connectionId, url] as const,
 		lock: {
 			all: () => ["skills", "lock"] as const,
 			global: () => ["skills", "lock", "global"] as const,
@@ -117,6 +110,17 @@ export const queryKeys = {
 			agent: string,
 			scope: "global" | "project" | "all",
 		) => ["sub-agents", "detail", name, agent, scope] as const,
+	},
+	/// "Does the machine running aghub-api already have a git credential for
+	/// this URL?" — an answer about the HOST, so the connection is part of the
+	/// key: without it, switching to another VM re-uses the previous machine's
+	/// answer for the same URL. Its OWN namespace on purpose — parked under
+	/// `skills` it would be swept stale by every skill mutation, and each
+	/// re-probe spawns a `git credential fill` on the target machine.
+	gitCredentialStatus: {
+		all: () => ["git-credential-status"] as const,
+		of: (url: string, connectionId: string) =>
+			["git-credential-status", connectionId, url] as const,
 	},
 	credentials: {
 		all: () => ["credentials"] as const,

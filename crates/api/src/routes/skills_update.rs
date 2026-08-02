@@ -108,11 +108,43 @@ fn local_hashes_for_scope(
 	hashes
 }
 
-/// Pre-fetch identity of every entry a check read, keyed by skill name within a
-/// scope. A check decides WHAT to fetch from an unlocked read and only takes the
+/// What one entry looked like BEFORE the check fetched: its coordinates, and
+/// the metadata the check's heals are computed relative to.
+///
+/// A check decides WHAT to fetch from an unlocked read and only takes the
 /// mutation lock afterwards to write its heals, so it owes the same
 /// compare-and-set every other post-fetch writer does — see [`EntryIdentity`].
-type Identities = HashMap<String, EntryIdentity>;
+/// The identity alone is not enough: `apply-update` on this very entry leaves
+/// the coordinates IDENTICAL while advancing `contentHash`/`refCommit`, so a
+/// heal that only checked the identity would roll those newer values back to
+/// what the stale check saw.
+#[derive(PartialEq, Eq)]
+struct HealPrecondition {
+	identity: EntryIdentity,
+	content_hash: Option<String>,
+	ref_commit: Option<String>,
+}
+
+impl HealPrecondition {
+	fn of_global_entry(entry: &skill::SkillLockEntry) -> Self {
+		Self {
+			identity: EntryIdentity::of_global_entry(entry),
+			content_hash: entry.content_hash.clone(),
+			ref_commit: entry.ref_commit.clone(),
+		}
+	}
+
+	fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
+		Self {
+			identity: EntryIdentity::of_project_entry(entry),
+			content_hash: Some(entry.computed_hash.clone()),
+			ref_commit: entry.ref_commit.clone(),
+		}
+	}
+}
+
+/// Pre-fetch preconditions keyed by skill name within a scope.
+type Identities = HashMap<String, HealPrecondition>;
 
 /// Project the global skill lock into the orchestrator's per-entry inputs, plus
 /// the identity of each entry AS READ HERE (the read that decides what to fetch).
@@ -125,8 +157,10 @@ fn global_lock_entries(
 		.skills
 		.into_iter()
 		.map(|(name, entry)| {
-			identities
-				.insert(name.clone(), EntryIdentity::of_global_entry(&entry));
+			identities.insert(
+				name.clone(),
+				HealPrecondition::of_global_entry(&entry),
+			);
 			EntryInput {
 				local_hash: local_hashes.get(&name).cloned(),
 				name,
@@ -159,8 +193,10 @@ fn project_lock_entries(
 		.skills
 		.into_iter()
 		.map(|(name, entry)| {
-			identities
-				.insert(name.clone(), EntryIdentity::of_project_entry(&entry));
+			identities.insert(
+				name.clone(),
+				HealPrecondition::of_project_entry(&entry),
+			);
 			EntryInput {
 				local_hash: local_hashes.get(&name).cloned(),
 				name,
@@ -257,18 +293,23 @@ fn lock_entries_for_scope(
 	Ok(inputs)
 }
 
-/// Heal `name` only if the live entry is still the one the check fetched.
+/// Heal `name` only if the live entry is still EXACTLY the one the check read.
 ///
 /// A check reads the lock unlocked, spends seconds on the network, and only then
-/// takes the mutation lock — so by write time another process may have repointed
-/// this name at a different source/ref/skillPath and written ITS correct hash.
-/// Healing by name alone would stamp the old source's hash/OID onto the new
-/// entry, and every later check would compare against a baseline that never
-/// belonged to it (a permanent phantom "update available").
-fn identity_unchanged(
+/// takes the mutation lock. By write time another process may have
+///
+/// - repointed this name at a different source/ref/skillPath and written ITS
+///   correct hash, or
+/// - run `apply-update` on this very entry — same coordinates, but the content
+///   hash and refCommit have moved on.
+///
+/// Both make the stale heal wrong, and both look fine to a name lookup. Writing
+/// it anyway leaves a baseline the entry never came from, so every later check
+/// reports a phantom "update available" until something rewrites the entry.
+fn heal_precondition_holds(
 	identities: &Identities,
 	name: &str,
-	live: EntryIdentity,
+	live: HealPrecondition,
 ) -> bool {
 	identities.get(name) == Some(&live)
 }
@@ -309,10 +350,10 @@ fn write_auto_healed_hashes(
 			let mut changed = false;
 			for (name, hash) in &global_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
-					if !identity_unchanged(
+					if !heal_precondition_holds(
 						global_identities,
 						name,
-						EntryIdentity::of_global_entry(entry),
+						HealPrecondition::of_global_entry(entry),
 					) {
 						continue;
 					}
@@ -321,10 +362,10 @@ fn write_auto_healed_hashes(
 			}
 			for (name, oid) in &global_oid_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
-					if !identity_unchanged(
+					if !heal_precondition_holds(
 						global_identities,
 						name,
-						EntryIdentity::of_global_entry(entry),
+						HealPrecondition::of_global_entry(entry),
 					) {
 						continue;
 					}
@@ -358,10 +399,10 @@ fn write_auto_healed_hashes(
 			let mut changed = false;
 			for (name, hash) in &project_heals {
 				if let Some(entry) = lock.skills.get_mut(name) {
-					if !identity_unchanged(
+					if !heal_precondition_holds(
 						project_identities,
 						name,
-						EntryIdentity::of_project_entry(entry),
+						HealPrecondition::of_project_entry(entry),
 					) {
 						continue;
 					}
@@ -1963,6 +2004,47 @@ mod tests {
 				"owner/repo's hash must not overwrite owner/other's entry"
 			);
 			assert_eq!(entry.ref_commit.as_deref(), Some("bbbbbbbb"));
+		});
+	}
+
+	/// The same window, but the racing mutation is an `apply-update` on THIS
+	/// entry: the coordinates never change, only the hash and refCommit move
+	/// forward. An identity-only compare-and-set sees no difference and rolls
+	/// both back to what the stale check saw.
+	#[test]
+	fn auto_heal_skips_an_entry_updated_during_the_fetch() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+			let identities = global_identities_now();
+
+			// Mid-fetch: apply-update advances this entry to the new content.
+			let mut updated = global_entry();
+			updated.content_hash = Some("new-hash".to_string());
+			updated.ref_commit = Some("cccccccc".to_string());
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), updated);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			let mut output = healed_output("legacy", "global", "stale-hash");
+			output.heal_oid = Some("aaaaaaaa".to_string());
+			assert!(write_auto_healed_hashes(
+				&[output],
+				None,
+				&identities,
+				&Identities::new(),
+			)
+			.is_ok());
+
+			let lock = skill::lock::global::read_skill_lock();
+			let entry = &lock.skills["legacy"];
+			assert_eq!(
+				entry.content_hash.as_deref(),
+				Some("new-hash"),
+				"a stale check must not roll back a newer apply-update"
+			);
+			assert_eq!(entry.ref_commit.as_deref(), Some("cccccccc"));
 		});
 	}
 

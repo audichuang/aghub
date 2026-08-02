@@ -47,6 +47,7 @@ const DATA_NAMESPACES = [
 	"inference-providers",
 	"integrations",
 	"market",
+	"git-credential-status",
 ] as const;
 
 interface RemoteDisconnectedPayload {
