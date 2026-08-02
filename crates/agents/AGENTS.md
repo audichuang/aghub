@@ -13,16 +13,6 @@ Role map (not a full file tree — `ls` / codegraph for that):
 - `agents/` — one descriptor per agent (authoritative list: `AgentType::ALL` in `models.rs`); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `format/` — serializers: OpenCode native, JSON map/list MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). The strict dialects (Grok TOML / Hermes YAML) share their transport invariants — mixed-key rejection, `url` → Sse/Http split — in `transport_policy.rs`; read it before touching either parser
 
-## WHERE TO LOOK
-
-| Task                   | Location                                                          |
-| ---------------------- | ----------------------------------------------------------------- |
-| Add new agent          | `src/agents/<name>.rs` + `mod.rs` + `models.rs` + core registry   |
-| Agent capability flags | `src/descriptor.rs` — `Capabilities`                              |
-| Normalized data types  | `src/models.rs`                                                   |
-| Config serialization   | `src/format/`                                                     |
-| MCP value validation   | `src/models.rs` — `McpTransport::from_inputs` / `validate_values` |
-
 ## KEY TYPES
 
 **`AgentDescriptor`** (static per agent): holds id, display_name, fn pointers for load_mcps/save_mcps/mcp_parse_config/mcp_serialize_config, path fns, capabilities.
@@ -35,11 +25,25 @@ Role map (not a full file tree — `ls` / codegraph for that):
 
 ## AGENT-SPECIFIC GOTCHAS
 
-Per-agent behavior (Claude/OpenCode/Codex/Copilot, universal-master read
-matrix, registry fallback) is documented once in the **root AGENTS.md
-"Agent-Specific Behavior"** — don't duplicate it here. Crate-level extras:
+The cross-crate rules (universal-master read matrix, `registry::get()` fallback)
+are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps:
 
-- **SSE transport**: Deprecated in `models.rs` — use `StreamableHttp` instead (SSE identity lost on OpenCode roundtrip anyway)
+- **Claude**: skills from `~/.claude/skills/` SKILL.md (not JSON). Disabled MCPs
+  omitted on serialize; URL MCPs as `"type": "sse"/"http"`
+- **OpenCode**: `mcp` object key; SSE + StreamableHttp unify as
+  `"type": "remote"` — **SSE identity is lost** on round-trip
+- **Codex/Mistral/Grok**: TOML. Grok: MCP under `mcp_servers` in
+  `~/.grok/config.toml` (project: `.grok/config.toml`); streamable HTTP carries
+  **no** `type` key — only SSE has `type = "sse"`; native `enabled` flag; other
+  top-level keys preserved on rewrite
+- **Copilot**: global `~/.copilot/skills`; project scope reads the Master
+- **Hermes** (Nous Research): global-only — no project scope, no sub-agents.
+  Skills from `~/.hermes/skills/` (SKILL.md). MCP under `mcp_servers` in
+  `~/.hermes/config.yaml` — the **only YAML MCP agent**; one remote transport
+  (`url`, no sse/http split), native `enabled` flag (`enable_disable: true`);
+  other top-level keys preserved on rewrite (comments are **not**). Windows home
+  is `%LOCALAPPDATA%\hermes`
+- **SSE transport**: Deprecated in `models.rs` — use `StreamableHttp` instead
 - **Descriptors are macro-built**: path mappings come from `define_mcp_paths!`/`define_skill_paths!` in `macros.rs` — read those before hand-writing a path fn
 
 ## ADDING AN AGENT

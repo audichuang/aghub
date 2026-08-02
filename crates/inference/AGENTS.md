@@ -34,7 +34,3 @@ CredentialStore>` per-request in the API
   `crates/api` (whose test double is `MockKeyringBackend`) — don't conflate them
 - Each agent maps differently; model changes must update every agent's mapping
   (`codex`/`opencode`: `mapping.rs`; Claude: `claude/mod.rs` — no `mapping.rs`)
-
-```bash
-cargo test -p aghub-inference
-```

@@ -28,7 +28,3 @@ depend on this crate).
   `--capabilities` — keep output in sync with `is_version_compatible`, and note
   `CAP_GIT_CREDENTIAL_FORWARDING` **mirrors** the `aghub_api::cli` constant
   (deliberately no api dependency); probe is fail-safe-false and additive
-
-```bash
-cargo test -p aghub-remote
-```

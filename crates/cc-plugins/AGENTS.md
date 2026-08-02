@@ -33,7 +33,3 @@ discovery + git/tarball materialization are in-crate.
   `CliMarketplaceSource::Local` (`cli/types.rs`); the separate
   `MarketplaceEntry::Directory` is `registry_catalog.rs`'s plugins-subdir
   fallback, unrelated to the JSON `source` field. Do not assume git-only sources
-
-```bash
-cargo test -p aghub-cc-plugins
-```

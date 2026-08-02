@@ -73,17 +73,9 @@ the localhost API — without any client-side token:
 
 ## RUNNING
 
-```bash
-# Run API server
-cargo run -p aghub-api
-
-# Or with custom port
-cargo run -p aghub-api -- --port 8080
-```
-
 Default port is `0` — the OS assigns an ephemeral port, and the bound port is
-printed to stdout after bind (the desktop / SSH-tunnel callers parse that
-line). Pass `--port N` to pin one.
+printed to stdout after bind (the desktop / SSH-tunnel callers **parse that
+line** — don't reword it). Pass `--port N` to pin one.
 
 ## PATTERNS
 

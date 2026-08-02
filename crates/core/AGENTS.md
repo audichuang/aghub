@@ -21,27 +21,12 @@ codegraph — enumerated trees drift):
 - `dto/` — CLI/API shared wire views (`removal.rs` `RemovalView`, `skill.rs` `SkillView`) — single source for both surfaces
 - `paths.rs` — project-root detection (agent-marker walk-up); `registry/` — `ALL_AGENTS` + `get()`
 - `skills/` — the skill subsystem (`ls` for the full list). Load-bearing:
-  `linker/classify.rs` (universal-master link decisions), `rename.rs` (the
-  transactional skill rename — rollback lives here, not in surfaces),
-  `update.rs` (`stage_and_swap_dir` + `RecoveryHint` rollback hints)
+  `discovery.rs` (SKILL.md frontmatter walk), `linker/classify.rs`
+  (universal-master link decisions), `rename.rs` (the transactional skill
+  rename — rollback lives here, not in surfaces), `update.rs`
+  (`stage_and_swap_dir` + `RecoveryHint` rollback hints)
 - `transfer.rs` — batch install/copy/delete + `reconcile_{skill,mcp,sub_agent}` (`ensure_disjoint` rejects an agent in both add and remove)
 - `testing.rs` — `TestConfig` (feature = "testing")
-
-## WHERE TO LOOK
-
-| Task                     | Location                  | Notes                                               |
-| ------------------------ | ------------------------- | --------------------------------------------------- |
-| Agent descriptors/models | `crates/agents/`          | NOT here — core re-exports them                     |
-| Adapter dispatch         | `src/adapter.rs`          | Maps AgentType → fn calls on descriptor             |
-| CRUD for MCPs/skills     | `src/manager/`            | `ConfigManager::new(adapter, global, project_root)` |
-| All-agent bulk load      | `src/all_agents.rs`       | `load_all_agents() → AgentResources`                |
-| Registry lookup          | `src/registry/mod.rs`     | `registry::get(agent_type)` → descriptor            |
-| Skills from filesystem   | `src/skills/discovery.rs` | Parses SKILL.md YAML frontmatter                    |
-| Cross-agent batch ops    | `src/transfer.rs`         | `OperationBatchResult`, reconcile fns               |
-| CLI/API wire DTOs        | `src/dto/`                | `RemovalView` / `SkillView`                         |
-| Project root detection   | `src/paths.rs`            | agent-marker walk-up                                |
-| Agent CLI detection      | `src/availability.rs`     | Checks for installed agent binaries                 |
-| Test isolation           | `src/testing.rs`          | `TestConfig` + per-agent path overrides             |
 
 ## KEY ABSTRACTIONS
 
@@ -74,13 +59,10 @@ It serializes aghub against aghub only — `npx skills` takes no lock of ours, s
 
 ## TESTING
 
-```bash
-cargo test -p aghub-core                           # All core tests (testing feature on by default)
-cargo test -p aghub-core --test integration_tests  # Integration only
-cargo test -p aghub-core --features agent-validation  # Tests requiring real CLIs installed
-```
-
-`TestConfig` creates isolated temp dirs. Per-agent path overrides via `set_skills_path_override(agent_id, path)` (thread-local).
+`--features agent-validation` additionally runs the tests that need the real
+agent CLIs installed; the `testing` feature (`TestConfig`, isolated temp dirs)
+is on by default. Per-agent path overrides via
+`set_skills_path_override(agent_id, path)` (thread-local).
 
 **Real-home pollution**: global install resolves the universal master via `dirs::home_dir()/.agents/skills` (override does **not** redirect that path). Clearing `skills_path_override` under global scope / no `project_root` **must** isolate `$HOME` (Unix) into a temp dir, hold that binary's env lock, and Drop-clean written skill dirs — never leave junk under the developer's real `~/.agents/skills` or agent skill dirs. Prefer `project_root = tempdir` when project scope is enough. See `test_opencode_global_creation_persists` in `tests/test_agent_paths.rs`.
 
