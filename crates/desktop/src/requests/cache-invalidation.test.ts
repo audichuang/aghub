@@ -68,12 +68,9 @@ test("applying an update refetches the open skill's content and file tree", asyn
 		queryClient: client,
 	});
 	await options.onSuccess?.(
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		{ success: true } as any,
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		{ body: {} as any },
 		undefined,
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		{} as any,
 	);
 	// The refetches are deliberately fire-and-forget, so let them land.
@@ -109,7 +106,6 @@ test("a credential change invalidates the source answers computed with it", asyn
 			mutation === "create"
 				? createCredentialMutationOptions({ api, queryClient: client })
 				: deleteCredentialMutationOptions({ api, queryClient: client });
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
 		await (options.onSuccess as any)?.(
 			{ id: "c1", name: "github.com" },
 			"c1",
@@ -153,11 +149,10 @@ test("a credential change does not block on any network refetch", async () => {
 		});
 
 		const settled = await Promise.race([
-			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			(options.onSuccess as any)?.(undefined, "c1", undefined, {}).then(
 				() => "done",
 			),
-			new Promise((resolve) => setTimeout(() => resolve("hung"), 300)),
+			new Promise((resolve) => setTimeout(resolve, 300, "hung")),
 		]);
 
 		assert.equal(
