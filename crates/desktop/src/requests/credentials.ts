@@ -39,12 +39,6 @@ export function sourceCredentialBindingsQueryOptions({
 	});
 }
 
-export async function invalidateCredentialQueries(queryClient: QueryClient) {
-	await queryClient.invalidateQueries({
-		queryKey: queryKeys.credentials.all(),
-	});
-}
-
 /// EVERY credential mutation changes which token a source can resolve to, so
 /// all three go through here. Deleting one prunes its source bindings server
 /// side; binding one repoints a source; and CREATING one is not neutral either
@@ -55,15 +49,17 @@ export async function invalidateCredentialQueries(queryClient: QueryClient) {
 /// serving the pre-change answer (diff 30-60s, update checks 10 min) and the UI
 /// looks like nothing changed.
 ///
-/// Marked stale WITHOUT awaiting a refetch, then refetched fire-and-forget: a
-/// source diff CLONES the repo behind a 120s timeout, so awaiting it would hold
-/// the mutation pending long after the write succeeded and the bind dialog
-/// would sit there looking hung. Update checks are not refetched at all —
-/// re-running them refetches EVERY source, the price `invalidateSkillQueries`
-/// also declines to pay.
+/// NOTHING here is awaited past marking stale. Every one of these queries is an
+/// HTTP round trip — a source diff CLONES the repo behind a 120s timeout, and
+/// even the credential list carries a 10s timeout plus a retry — so awaiting any
+/// of their refetches would hold the mutation pending long after the write
+/// succeeded, and the dialog would sit there looking hung. Update checks are not
+/// refetched at all: re-running them refetches EVERY source, the price
+/// `invalidateSkillQueries` also declines to pay. They stay stale until the user
+/// asks, which is the honest state.
 async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
-	await invalidateCredentialQueries(queryClient);
 	for (const queryKey of [
+		queryKeys.credentials.all(),
 		queryKeys.skills.sources.all(),
 		queryKeys.skills.updateChecksAll(),
 	]) {
@@ -72,10 +68,12 @@ async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
 			refetchType: "none",
 		});
 	}
-	void queryClient.refetchQueries({
-		queryKey: queryKeys.skills.sources.all(),
-		type: "active",
-	});
+	for (const queryKey of [
+		queryKeys.credentials.all(),
+		queryKeys.skills.sources.all(),
+	]) {
+		void queryClient.refetchQueries({ queryKey, type: "active" });
+	}
 }
 
 interface CreateCredentialMutationParams {

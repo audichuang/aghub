@@ -123,6 +123,11 @@ struct HealPrecondition {
 	identity: EntryIdentity,
 	content_hash: Option<String>,
 	ref_commit: Option<String>,
+	/// npx's own baseline. Not just another field to compare: `apply_content_hash`
+	/// CLEARS it, so a stale heal that ignored it would destroy a newer `npx
+	/// skills update`'s record — and npx skips its update check outright when it
+	/// is empty, leaving that skill silently frozen on both sides.
+	skill_folder_hash: String,
 }
 
 impl HealPrecondition {
@@ -131,14 +136,18 @@ impl HealPrecondition {
 			identity: EntryIdentity::of_global_entry(entry),
 			content_hash: entry.content_hash.clone(),
 			ref_commit: entry.ref_commit.clone(),
+			skill_folder_hash: entry.skill_folder_hash.clone(),
 		}
 	}
 
+	/// The project lock has no folder-hash field, so there is nothing to compare
+	/// — `computed_hash` is its whole content baseline.
 	fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
 		Self {
 			identity: EntryIdentity::of_project_entry(entry),
 			content_hash: Some(entry.computed_hash.clone()),
 			ref_commit: entry.ref_commit.clone(),
+			skill_folder_hash: String::new(),
 		}
 	}
 }
@@ -320,57 +329,57 @@ fn write_auto_healed_hashes(
 	global_identities: &Identities,
 	project_identities: &Identities,
 ) -> Result<(), ApiError> {
-	let mut global_heals = HashMap::new();
-	let mut global_oid_heals = HashMap::new();
+	// One record per global name: the hash and the OID are applied together
+	// under a SINGLE precondition check. Split across two passes, writing the
+	// hash would invalidate the very precondition the OID pass re-checks, so
+	// the OID silently never landed and the next check had to fetch again.
+	let mut global_heals: HashMap<String, (Option<&String>, Option<&String>)> =
+		HashMap::new();
 	let mut project_heals = HashMap::new();
 	for output in outputs {
-		if let Some(hash) = &output.heal_hash {
-			match output.key.scope.as_str() {
-				"global" => {
-					global_heals.insert(output.key.name.clone(), hash.clone());
+		match output.key.scope.as_str() {
+			"global" => {
+				// refCommit heal is GLOBAL-only (the project lock is
+				// VCS-tracked) and independent of heal_hash (a known-stored
+				// entry has no heal_hash).
+				if output.heal_hash.is_some() || output.heal_oid.is_some() {
+					let slot = global_heals
+						.entry(output.key.name.clone())
+						.or_insert((None, None));
+					slot.0 = slot.0.or(output.heal_hash.as_ref());
+					slot.1 = slot.1.or(output.heal_oid.as_ref());
 				}
-				"project" => {
+			}
+			"project" => {
+				if let Some(hash) = &output.heal_hash {
 					project_heals.insert(output.key.name.clone(), hash.clone());
 				}
-				_ => {}
 			}
-		}
-		// refCommit heal is GLOBAL-only (the project lock is VCS-tracked) and
-		// independent of heal_hash (a known-stored entry has no heal_hash).
-		if output.key.scope == "global" {
-			if let Some(oid) = &output.heal_oid {
-				global_oid_heals.insert(output.key.name.clone(), oid.clone());
-			}
+			_ => {}
 		}
 	}
 
-	if !global_heals.is_empty() || !global_oid_heals.is_empty() {
+	if !global_heals.is_empty() {
 		skill::lock::global::modify_skill_lock_changed(|lock| {
 			let now = Utc::now().to_rfc3339();
 			let mut changed = false;
-			for (name, hash) in &global_heals {
-				if let Some(entry) = lock.skills.get_mut(name) {
-					if !heal_precondition_holds(
-						global_identities,
-						name,
-						HealPrecondition::of_global_entry(entry),
-					) {
-						continue;
-					}
+			for (name, (hash, oid)) in &global_heals {
+				let Some(entry) = lock.skills.get_mut(name) else {
+					continue;
+				};
+				if !heal_precondition_holds(
+					global_identities,
+					name,
+					HealPrecondition::of_global_entry(entry),
+				) {
+					continue;
+				}
+				if let Some(hash) = hash {
 					changed |= entry.apply_content_hash(hash, &now);
 				}
-			}
-			for (name, oid) in &global_oid_heals {
-				if let Some(entry) = lock.skills.get_mut(name) {
-					if !heal_precondition_holds(
-						global_identities,
-						name,
-						HealPrecondition::of_global_entry(entry),
-					) {
-						continue;
-					}
+				if let Some(oid) = oid {
 					if entry.ref_commit.as_deref() != Some(oid.as_str()) {
-						entry.ref_commit = Some(oid.clone());
+						entry.ref_commit = Some((*oid).clone());
 						entry.updated_at = now.clone();
 						changed = true;
 					}
@@ -1955,6 +1964,82 @@ mod tests {
 				lock.skills["legacy"].ref_commit.as_deref(),
 				Some("deadbeefcafef00d")
 			);
+		});
+	}
+
+	/// The REAL shape of a legacy/npx heal: an entry with an unknown hash and no
+	/// refCommit produces BOTH `heal_hash` and `heal_oid` from one check, and
+	/// both must land in that single write. (`auto_heal_writes_global_ref_commit`
+	/// above forces `heal_hash = None`, so it cannot see the two interacting —
+	/// applying the hash moves the entry, and a second precondition check against
+	/// the pre-fetch snapshot then rejects the OID.)
+	#[test]
+	fn auto_heal_lands_hash_and_ref_commit_in_one_write() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), global_entry());
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			let mut output = healed_output("legacy", "global", "healed-hash");
+			output.heal_oid = Some("deadbeefcafef00d".to_string());
+			assert!(write_auto_healed_hashes(
+				&[output],
+				None,
+				&global_identities_now(),
+				&Identities::new(),
+			)
+			.is_ok());
+
+			let entry =
+				&skill::lock::global::read_skill_lock().skills["legacy"];
+			assert_eq!(entry.content_hash.as_deref(), Some("healed-hash"));
+			assert_eq!(
+				entry.ref_commit.as_deref(),
+				Some("deadbeefcafef00d"),
+				"the OID must land in the same write as the hash — otherwise the \
+				 next check has to fetch the whole source again to re-derive it"
+			);
+		});
+	}
+
+	/// npx writes its own baseline into `skillFolderHash`, and
+	/// `apply_content_hash` CLEARS that field. So a concurrent `npx skills
+	/// update` — same source/ref/path, and it leaves `contentHash`/`refCommit`
+	/// untouched — is invisible to a precondition that only compares those two:
+	/// the stale heal would overwrite npx's newer state and blank the field npx
+	/// uses to decide whether to check for updates at all.
+	#[test]
+	fn auto_heal_skips_an_entry_npx_updated_during_the_fetch() {
+		with_isolated_state(|| {
+			let mut lock = skill::SkillLockFile::default();
+			let mut entry = global_entry();
+			entry.skill_folder_hash = "npx-tree-a".to_string();
+			lock.skills.insert("legacy".into(), entry);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+			let identities = global_identities_now();
+
+			// Mid-fetch: npx updates the same entry to a newer tree.
+			let mut updated = global_entry();
+			updated.skill_folder_hash = "npx-tree-b".to_string();
+			let mut lock = skill::SkillLockFile::default();
+			lock.skills.insert("legacy".into(), updated);
+			skill::lock::global::write_skill_lock(&lock).unwrap();
+
+			assert!(write_auto_healed_hashes(
+				&[healed_output("legacy", "global", "stale-hash")],
+				None,
+				&identities,
+				&Identities::new(),
+			)
+			.is_ok());
+
+			let entry =
+				&skill::lock::global::read_skill_lock().skills["legacy"];
+			assert_eq!(
+				entry.skill_folder_hash, "npx-tree-b",
+				"a stale heal must not blank the folder hash npx just wrote"
+			);
+			assert_eq!(entry.content_hash, None);
 		});
 	}
 

@@ -130,38 +130,43 @@ test("a credential change invalidates the source answers computed with it", asyn
 	}
 });
 
-test("a credential change does not block on a source diff network refetch", async () => {
-	const client = freshClient();
-	// An active source diff whose refetch never settles — the shape of a real
-	// one, which clones the repo behind a 120s timeout.
-	const hanging = new QueryObserver(client, {
-		queryKey: [...queryKeys.skills.sources.diff("owner/repo")],
-		queryFn: () => new Promise(() => {}),
-	});
-	const unsubscribe = hanging.subscribe(() => {});
+test("a credential change does not block on any network refetch", async () => {
+	// Both are HTTP round trips that can hang: the source diff clones the repo
+	// (120s timeout), the credential list carries a 10s timeout plus a retry.
+	for (const [label, queryKey] of [
+		["source diff", queryKeys.skills.sources.diff("owner/repo")],
+		["credential list", queryKeys.credentials.list()],
+	] as const) {
+		const client = freshClient();
+		const hanging = new QueryObserver(client, {
+			queryKey: [...queryKey],
+			queryFn: () => new Promise(() => {}),
+		});
+		const unsubscribe = hanging.subscribe(() => {});
 
-	const api = {
-		credentials: { delete: async () => undefined },
-	} as unknown as ApiClient;
-	const options = deleteCredentialMutationOptions({
-		api,
-		queryClient: client,
-	});
+		const api = {
+			credentials: { delete: async () => undefined },
+		} as unknown as ApiClient;
+		const options = deleteCredentialMutationOptions({
+			api,
+			queryClient: client,
+		});
 
-	const settled = await Promise.race([
-		// eslint-disable-next-line @typescript-eslint/no-explicit-any
-		(options.onSuccess as any)?.(undefined, "c1", undefined, {}).then(
-			() => "done",
-		),
-		new Promise((resolve) => setTimeout(() => resolve("hung"), 300)),
-	]);
+		const settled = await Promise.race([
+			// eslint-disable-next-line @typescript-eslint/no-explicit-any
+			(options.onSuccess as any)?.(undefined, "c1", undefined, {}).then(
+				() => "done",
+			),
+			new Promise((resolve) => setTimeout(() => resolve("hung"), 300)),
+		]);
 
-	assert.equal(
-		settled,
-		"done",
-		"the mutation must resolve without awaiting the diff refetch — otherwise the bind dialog sits pending long after the write succeeded",
-	);
-	unsubscribe();
+		assert.equal(
+			settled,
+			"done",
+			`the mutation must resolve without awaiting the ${label} refetch — otherwise the dialog sits pending long after the write succeeded`,
+		);
+		unsubscribe();
+	}
 });
 
 test("the git-credential probe is keyed per connection and outside the skills namespace", () => {

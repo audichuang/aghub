@@ -927,7 +927,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				) : data?.uncheckableReason ? (
 					// Nothing was COMPARED. Without this the same response —
 					// an empty skill list — renders as "this source is fine".
-					<Alert status="warning">
+					// A persistent cached-data warning, so it needs the live
+					// region: it replaces a spinner without moving focus, and a
+					// screen reader would otherwise never hear that the rows are
+					// not current (desktop AGENTS.md).
+					<Alert status="warning" role="alert" aria-live="polite">
 						<Alert.Indicator />
 						<Alert.Content>
 							<Alert.Title>{t("sourceUncheckable")}</Alert.Title>
