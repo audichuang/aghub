@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -225,6 +225,12 @@ pub(crate) struct BlobAdmission {
 	/// with a fixed TTL: a guess is either too short (the tally expires mid
 	/// window and the budget check silently stops running) or too long (a
 	/// pre-rollover 0 keeps refusing work the reset already allowed).
+	///
+	/// Compared against the wall clock, which is not monotonic — a clock jump
+	/// can expire this early or hold it late. Accepted: the server sends the
+	/// boundary in wall-clock terms, so tracking it any other way means
+	/// estimating an offset, and being wrong here only mis-times a courtesy
+	/// preflight.
 	resets_at: Option<SystemTime>,
 	byte_sizes: HashMap<String, u64>,
 }
@@ -239,19 +245,62 @@ impl BlobAdmission {
 		self.resets_at = resets_at;
 	}
 
-	/// Requests known to be left, or `None` once the window has rolled over.
-	fn remaining(&self) -> Option<u64> {
-		if self.resets_at.is_some_and(|at| SystemTime::now() >= at) {
+	/// Requests known to be left as of `now`, or `None` once the window that
+	/// produced the count has rolled over. Takes the clock so a test can cross
+	/// a window boundary without sleeping.
+	fn remaining_at(&self, now: SystemTime) -> Option<u64> {
+		if self.resets_at.is_some_and(|at| now >= at) {
 			return None;
 		}
 		self.remaining_requests
 	}
 }
 
-/// Parse `x-ratelimit-reset` (Unix seconds) into a wall-clock instant.
-fn rate_limit_reset(response: &HttpResponse) -> Option<SystemTime> {
+/// One rate-limit reading. The two numbers are only meaningful together: a
+/// `remaining` belongs to exactly the window named by its `reset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RateLimitReading {
+	reset: u64,
+	remaining: u64,
+}
+
+/// Fold a reading into the running one. Kept as an indivisible pair on purpose:
+/// aggregating `min(remaining)` and `max(reset)` separately can invent a state
+/// no server ever reported — a pre-rollover `remaining=0` welded onto the NEXT
+/// window's reset, which then refuses that whole window.
+fn merge_reading(
+	slot: &Mutex<Option<RateLimitReading>>,
+	seen: RateLimitReading,
+) {
+	let Ok(mut current) = slot.lock() else { return };
+	match *current {
+		// A stale window's reading says nothing about the live one.
+		Some(have) if seen.reset < have.reset => {}
+		// Same window: the lowest count is the freshest truth.
+		Some(have) if seen.reset == have.reset => {
+			current.replace(RateLimitReading {
+				reset: have.reset,
+				remaining: have.remaining.min(seen.remaining),
+			});
+		}
+		// Newer window: it supersedes rather than mixes.
+		_ => {
+			current.replace(seen);
+		}
+	}
+}
+
+/// Parse `x-ratelimit-reset` (Unix seconds). `None` when absent, unparseable,
+/// or so far out that it is not a representable `SystemTime` — a header that
+/// large is a broken proxy, not a deadline worth honoring.
+fn rate_limit_reset_secs(response: &HttpResponse) -> Option<u64> {
 	let seconds: u64 = response.header("x-ratelimit-reset")?.parse().ok()?;
-	Some(UNIX_EPOCH + Duration::from_secs(seconds))
+	epoch_seconds_to_time(seconds).map(|_| seconds)
+}
+
+/// `UNIX_EPOCH + secs`, or `None` on overflow (`SystemTime`'s `Add` panics).
+fn epoch_seconds_to_time(seconds: u64) -> Option<SystemTime> {
+	UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
 }
 
 /// GitHub REST fast-path backend. Constructed with an [`HttpTransport`]; an
@@ -554,7 +603,8 @@ impl RepoFetchBackend for GithubRest {
 			let remaining = response
 				.header("x-ratelimit-remaining")
 				.and_then(|value| value.parse::<u64>().ok());
-			let resets_at = rate_limit_reset(&response);
+			let resets_at = rate_limit_reset_secs(&response)
+				.and_then(epoch_seconds_to_time);
 			let mut admission = ctx.blob_admission.lock().map_err(|_| {
 				GitError::clone_failed(
 					"GithubRest blob admission lock poisoned",
@@ -635,7 +685,7 @@ impl RepoFetchBackend for GithubRest {
 				.iter()
 				.filter_map(|oid| admission.byte_sizes.get(oid))
 				.sum::<u64>();
-			if let Some(remaining) = admission.remaining() {
+			if let Some(remaining) = admission.remaining_at(SystemTime::now()) {
 				if request_budget > remaining {
 					return Err(GitError::rest_fallback(format!(
 						"blob admission needs {request_budget} requests and \
@@ -658,14 +708,11 @@ impl RepoFetchBackend for GithubRest {
 			// ponytail: a hint, not a cancel token — a worker may still finish
 			// the request it already sent. Waste ceiling ~1 request/worker.
 			let aborted = AtomicBool::new(false);
-			// Lowest `x-ratelimit-remaining` seen, paired with the latest
-			// `x-ratelimit-reset`. Since the tree cache landed, this is the
-			// ONLY thing that corrects the reservation above back to what the
-			// server actually charged. Taking min-remaining with max-reset errs
-			// toward refusing: if the window rolled over mid-batch the pair
-			// under-reports, which is the safe direction.
-			let observed = AtomicU64::new(u64::MAX);
-			let observed_reset = AtomicU64::new(0);
+			// The live rate-limit reading, kept as an indivisible (reset,
+			// remaining) pair — see `merge_reading`. Since the tree cache
+			// landed, this is the ONLY thing that corrects the reservation
+			// above back to what the server actually charged.
+			let observed: Mutex<Option<RateLimitReading>> = Mutex::new(None);
 			let missing = &missing;
 			let ctx = &ctx;
 			let transport: &dyn HttpTransport = self.transport.as_ref();
@@ -685,7 +732,6 @@ impl RepoFetchBackend for GithubRest {
 									ctx,
 									oid,
 									&observed,
-									&observed_reset,
 								) {
 									Ok(blob) => mine.push(blob),
 									Err(e) => {
@@ -731,14 +777,13 @@ impl RepoFetchBackend for GithubRest {
 				cache.insert(blob.oid.clone(), blob.bytes.clone());
 			}
 			drop(cache);
-			let seen = observed.load(Ordering::Relaxed);
-			if seen != u64::MAX {
-				let reset = match observed_reset.load(Ordering::Relaxed) {
-					0 => None,
-					secs => Some(UNIX_EPOCH + Duration::from_secs(secs)),
-				};
+			let seen = observed.lock().ok().and_then(|slot| *slot);
+			if let Some(seen) = seen {
 				if let Ok(mut admission) = ctx.blob_admission.lock() {
-					admission.observe(seen, reset);
+					admission.observe(
+						seen.remaining,
+						epoch_seconds_to_time(seen.reset),
+					);
 				}
 			}
 			if let Some(e) = failure {
@@ -892,8 +937,7 @@ fn fetch_blob(
 	deadline: Option<Instant>,
 	ctx: &RepoContext,
 	oid: &str,
-	observed_remaining: &AtomicU64,
-	observed_reset: &AtomicU64,
+	observed: &Mutex<Option<RateLimitReading>>,
 ) -> Result<Blob> {
 	let url = format!(
 		"https://{}/repos/{}/{}/git/blobs/{oid}",
@@ -909,16 +953,13 @@ fn fetch_blob(
 		.map_err(|e| {
 			GitError::rest_fallback(format!("transport error: {e}"))
 		})?;
-	if let Some(remaining) = response
-		.header("x-ratelimit-remaining")
-		.and_then(|v| v.parse::<u64>().ok())
-	{
-		observed_remaining.fetch_min(remaining, Ordering::Relaxed);
-	}
-	if let Some(reset) = rate_limit_reset(&response) {
-		if let Ok(secs) = reset.duration_since(UNIX_EPOCH) {
-			observed_reset.fetch_max(secs.as_secs(), Ordering::Relaxed);
-		}
+	if let (Some(remaining), Some(reset)) = (
+		response
+			.header("x-ratelimit-remaining")
+			.and_then(|v| v.parse::<u64>().ok()),
+		rate_limit_reset_secs(&response),
+	) {
+		merge_reading(observed, RateLimitReading { reset, remaining });
 	}
 	if !(200..300).contains(&response.status) {
 		return Err(GitError::rest_fallback(format!(
@@ -941,4 +982,126 @@ fn remaining_timeout(deadline: Option<Instant>) -> Result<Option<Duration>> {
 		.filter(|remaining| !remaining.is_zero())
 		.map(Some)
 		.ok_or_else(|| GitError::rest_fallback("deadline exceeded"))
+}
+
+#[cfg(test)]
+mod admission_tests {
+	use super::*;
+
+	fn at(base: SystemTime, secs: u64) -> SystemTime {
+		base + Duration::from_secs(secs)
+	}
+
+	/// A pinned source session lives for minutes between a scan and an install,
+	/// and a cache hit on the tree means no fresh header arrives in between. A
+	/// tally bounded by elapsed time instead of by its window would expire in
+	/// that gap and the budget check would silently stop running.
+	#[test]
+	fn a_tally_stays_authoritative_for_its_whole_window() {
+		let observed = SystemTime::now();
+		let mut admission = BlobAdmission::default();
+		admission.observe(1, Some(at(observed, 3600)));
+
+		assert_eq!(
+			admission.remaining_at(at(observed, 600)),
+			Some(1),
+			"ten minutes into an hour-long window the count still holds"
+		);
+	}
+
+	/// …and the mirror image: once the window is spent, its count must stop
+	/// refusing work the rollover already allowed.
+	#[test]
+	fn a_tally_expires_exactly_when_its_window_does() {
+		let observed = SystemTime::now();
+		let mut admission = BlobAdmission::default();
+		admission.observe(0, Some(at(observed, 60)));
+
+		assert_eq!(admission.remaining_at(at(observed, 59)), Some(0));
+		assert_eq!(
+			admission.remaining_at(at(observed, 61)),
+			None,
+			"a spent window's zero must not refuse the next window"
+		);
+	}
+
+	/// Aggregating min-remaining and max-reset separately would weld a spent
+	/// window's `0` onto the next window's reset and refuse that whole window.
+	#[test]
+	fn a_rolled_over_reading_supersedes_rather_than_mixes() {
+		let slot = Mutex::new(None);
+		merge_reading(
+			&slot,
+			RateLimitReading {
+				reset: 1_000,
+				remaining: 0,
+			},
+		);
+		merge_reading(
+			&slot,
+			RateLimitReading {
+				reset: 4_600,
+				remaining: 4_999,
+			},
+		);
+
+		assert_eq!(
+			*slot.lock().unwrap(),
+			Some(RateLimitReading {
+				reset: 4_600,
+				remaining: 4_999
+			}),
+			"the newer window replaces the older one whole"
+		);
+	}
+
+	#[test]
+	fn readings_in_one_window_keep_the_lowest_count() {
+		let slot = Mutex::new(None);
+		for remaining in [40, 12, 27] {
+			merge_reading(
+				&slot,
+				RateLimitReading {
+					reset: 1_000,
+					remaining,
+				},
+			);
+		}
+		assert_eq!(slot.lock().unwrap().unwrap().remaining, 12);
+	}
+
+	/// A worker still finishing a request from the previous window must not
+	/// drag the ledger backwards.
+	#[test]
+	fn a_stale_window_reading_is_ignored() {
+		let slot = Mutex::new(None);
+		merge_reading(
+			&slot,
+			RateLimitReading {
+				reset: 4_600,
+				remaining: 4_999,
+			},
+		);
+		merge_reading(
+			&slot,
+			RateLimitReading {
+				reset: 1_000,
+				remaining: 0,
+			},
+		);
+		assert_eq!(slot.lock().unwrap().unwrap().remaining, 4_999);
+	}
+
+	/// A broken proxy can return a syntactically valid but unrepresentable
+	/// reset; `UNIX_EPOCH + Duration` panics on those.
+	#[test]
+	fn an_unrepresentable_reset_header_is_rejected_not_panicked_on() {
+		let response = HttpResponse {
+			status: 200,
+			headers: vec![("x-ratelimit-reset".into(), u64::MAX.to_string())],
+			body: Vec::new(),
+		};
+		assert_eq!(rate_limit_reset_secs(&response), None);
+		assert_eq!(epoch_seconds_to_time(u64::MAX), None);
+	}
 }
