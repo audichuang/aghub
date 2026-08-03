@@ -1261,6 +1261,18 @@ fn catalog_snapshot_fetches_only_discovered_skills_and_changelog() {
 		expected.into_iter().collect(),
 		"catalog fetch must request exactly skill-folder + CHANGELOG blobs"
 	);
+	// One pinned snapshot = one tree listing, shared by the catalog scan and
+	// the materialize that follows it.
+	let trees = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|request| is_tree(&request.url))
+		.count();
+	assert_eq!(
+		trees, 1,
+		"catalog fetch must read the pinned tree exactly once"
+	);
 }
 
 #[test]
