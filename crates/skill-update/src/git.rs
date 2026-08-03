@@ -15,7 +15,36 @@ use crate::{
 /// Production [`Fetcher`]: resolves via [`SkillRepository`]
 /// (REST→gix→system-git single owner) then materializes only the requested
 /// selection.
-pub struct GitFetcher;
+///
+/// Holds ONE [`SkillRepository`] for the fetcher's lifetime so that repeated
+/// fetches through the same instance reuse its per-snapshot caches. A source
+/// diff fetches once per ref-cohort, and cohorts that resolve to the SAME
+/// commit (typically `ref=Some("main")` alongside `ref=None`, where `None`
+/// means "the default branch" and the default branch IS `main`) would otherwise
+/// re-download an identical tree — measured at ~2.9s of pure duplication per
+/// source.
+///
+/// Construct one per request and drop it there. It must NEVER become a
+/// process-wide singleton: the REST backend's per-repo context holds the token
+/// it was built with, so a shared instance would let an unauthenticated
+/// request — or one for a different host — reuse another caller's credential.
+pub struct GitFetcher {
+	repo: SkillRepository,
+}
+
+impl GitFetcher {
+	pub fn new() -> Self {
+		Self {
+			repo: SkillRepository::new(),
+		}
+	}
+}
+
+impl Default for GitFetcher {
+	fn default() -> Self {
+		Self::new()
+	}
+}
 
 impl Fetcher for GitFetcher {
 	fn fetch(
@@ -24,11 +53,12 @@ impl Fetcher for GitFetcher {
 		token: Option<&str>,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
-		let repo = SkillRepository::new();
-		let snap = repo
+		let snap = self
+			.repo
 			.resolve(source_ref, token)
 			.map_err(skill_repo_to_fetch_error)?;
-		repo.fetch(&snap, selection)
+		self.repo
+			.fetch(&snap, selection)
 			.map_err(skill_repo_to_fetch_error)
 	}
 }

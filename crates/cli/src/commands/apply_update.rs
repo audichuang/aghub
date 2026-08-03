@@ -25,7 +25,7 @@ pub fn execute(
 			scope,
 			project_root,
 		},
-		&skill_update::GitFetcher,
+		&skill_update::GitFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,
 	)
 	.map_err(|error| locked_resync_error(&name, error))?;

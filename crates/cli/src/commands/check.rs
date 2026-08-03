@@ -203,7 +203,7 @@ fn execute_online(
 	}
 	eprintln_verbose!("Checking {} locked skill(s) online", entries.len());
 
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
 	let resolver = EnvTokenResolver;
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {

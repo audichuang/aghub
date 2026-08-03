@@ -724,7 +724,7 @@ pub async fn check_skill_updates(
 		inputs_started.elapsed()
 	);
 
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
 	let auth_started = std::time::Instant::now();
 	let resolver = SourceAuth::load(forwarded).await;
 	log::info!(
@@ -790,7 +790,8 @@ pub async fn apply_skill_update(
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<ApplySkillUpdateResponse> {
 	let resolver = SourceAuth::load(forwarded).await;
-	apply_skill_update_inner(body.into_inner(), &GitFetcher, &resolver).await
+	apply_skill_update_inner(body.into_inner(), &GitFetcher::new(), &resolver)
+		.await
 }
 
 /// Inner apply path that takes an injected [`Fetcher`] + [`TokenResolver`] so
@@ -857,7 +858,8 @@ pub async fn apply_skill_updates(
 	forwarded: ForwardedGitTokens,
 ) -> ApiResult<ApplySkillUpdatesResponse> {
 	let resolver = SourceAuth::load(forwarded).await;
-	apply_skill_updates_inner(body.into_inner(), &GitFetcher, &resolver).await
+	apply_skill_updates_inner(body.into_inner(), &GitFetcher::new(), &resolver)
+		.await
 }
 
 pub(crate) async fn apply_skill_updates_inner(
@@ -984,7 +986,7 @@ pub async fn accept_skill_rename(
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<AcceptRenameResponse> {
 	let resolver = SourceAuth::load(forwarded).await;
-	accept_rename_inner(body.into_inner(), &GitFetcher, &resolver).await
+	accept_rename_inner(body.into_inner(), &GitFetcher::new(), &resolver).await
 }
 
 /// Thin adapter over the core rename transaction: validate the request, fetch
@@ -2017,7 +2019,7 @@ mod tests {
 			local_hash: None,
 			ref_commit: None,
 		}];
-		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
 		let resolver = empty_keyring_resolver();
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
@@ -2486,7 +2488,7 @@ mod tests {
 			local_hash: None,
 			ref_commit: None,
 		}];
-		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
 		let resolver = empty_keyring_resolver();
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {
@@ -2524,7 +2526,7 @@ mod tests {
 			local_hash: None,
 			ref_commit: None,
 		}];
-		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
 		let resolver = empty_keyring_resolver();
 		let mut cache = ResultCache::new(CACHE_TTL);
 		let deps = CheckDeps {

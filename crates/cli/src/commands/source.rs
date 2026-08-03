@@ -143,7 +143,7 @@ impl skill_update::Fetcher for CliFetcher {
 				Err(FetchError::Network)
 			};
 		}
-		skill_update::GitFetcher.fetch(sr, token, selection)
+		skill_update::GitFetcher::new().fetch(sr, token, selection)
 	}
 }
 

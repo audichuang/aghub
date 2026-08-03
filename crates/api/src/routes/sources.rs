@@ -62,7 +62,20 @@ static LAST_FETCH_TOKEN: std::sync::Mutex<Option<Option<String>>> =
 /// to the shared `diff_source`. In test mode it also records the token the fetch
 /// was called with so the forwarding tests can assert which credential reached
 /// the fetch.
-struct ApiFetcher;
+/// Request-scoped wrapper over [`GitFetcher`]. Carries the fetcher rather than
+/// building one per call so every ref-cohort of ONE diff shares its snapshot
+/// caches; see `GitFetcher` for why this must not outlive the request.
+struct ApiFetcher {
+	inner: GitFetcher,
+}
+
+impl ApiFetcher {
+	fn new() -> Self {
+		Self {
+			inner: GitFetcher::new(),
+		}
+	}
+}
 
 impl Fetcher for ApiFetcher {
 	fn fetch(
@@ -97,7 +110,7 @@ impl Fetcher for ApiFetcher {
 				Err(FetchError::Network)
 			};
 		}
-		GitFetcher.fetch(source_ref, token, selection)
+		self.inner.fetch(source_ref, token, selection)
 	}
 }
 
@@ -185,10 +198,14 @@ pub async fn diff_source(
 		auth_started.elapsed()
 	);
 	let outcome = rocket::tokio::task::spawn_blocking(move || {
+		// ONE fetcher for this diff's whole cohort loop — that is what lets a
+		// second cohort resolving to the same commit reuse the first one's
+		// fetched tree instead of downloading it again.
+		let fetcher = ApiFetcher::new();
 		sources::diff_source(
 			input,
 			SourceDiffDeps {
-				fetcher: &ApiFetcher,
+				fetcher: &fetcher,
 				resolver: &resolver,
 			},
 		)
