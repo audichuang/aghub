@@ -195,15 +195,20 @@ pub(crate) fn prune_bindings_for_credential(
 /// keyring entry. Mirrors `routes::credentials::load_credentials`.
 pub(crate) fn load_source_bindings(
 ) -> Result<SourceBindings, crate::credentials::CredentialStoreError> {
-	crate::credentials::source_bindings_store().load()
+	Ok(crate::credentials::load_bundle()?.bindings)
 }
 
 /// Persist the source→credential_id bindings to the keyring entry. An empty
 /// map deletes the entry. Mirrors `routes::credentials` storage behavior.
+/// Replace the bindings, preserving the credentials stored alongside them.
+/// Read-modify-write on the shared bundle — see `store_credentials` for the
+/// locking that makes the pair safe.
 pub(crate) fn save_source_bindings(
 	bindings: &SourceBindings,
 ) -> Result<(), crate::credentials::CredentialStoreError> {
-	crate::credentials::source_bindings_store().store(bindings)
+	let mut bundle = crate::credentials::load_bundle()?;
+	bundle.bindings = SourceBindings(bindings.0.clone());
+	crate::credentials::store_bundle(&bundle)
 }
 
 #[cfg(test)]

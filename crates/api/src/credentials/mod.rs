@@ -92,10 +92,10 @@ impl KeyringPayload for resolve::SourceBindings {
 
 /// A single JSON-blob-in-one-keyring-entry seam: round-trips a
 /// [`KeyringPayload`] `T` through one `(service, user)` keyring entry as a
-/// JSON string, deleting the entry when `T::is_empty()`. Shared by the
-/// github-credentials store and the source-bindings store (see
-/// `credentials_store`/`source_bindings_store` below) — the only difference
-/// between the two is the `(service, user)` pair.
+/// JSON string, deleting the entry when `T::is_empty()`. Backs the combined
+/// credential bundle and the two legacy entries it migrates from (see
+/// `bundle_store`/`load_bundle` below) — the only difference between them is
+/// the `(service, user)` pair.
 ///
 /// Deliberately does NOT lock — locking stays at route level (see
 /// `routes::credentials::lock_credential_store`), since some flows (e.g.
@@ -118,6 +118,44 @@ impl<T: KeyringPayload> KeyringJson<T> {
 
 	fn entry(&self) -> Result<keyring::Entry, CredentialStoreError> {
 		Ok(keyring::Entry::new(self.service, self.user)?)
+	}
+
+	/// Like [`load`](Self::load) but keeps "the entry does not exist" distinct
+	/// from "the entry holds an empty value".
+	///
+	/// `load` collapses both to `T::default()`, which is right for every read
+	/// path but wrong for the legacy migration: an absent bundle means "look for
+	/// the old entries", whereas a bundle that exists and is empty means the
+	/// user really has no credentials and the migration already ran.
+	pub(crate) fn load_optional(
+		&self,
+	) -> Result<Option<T>, CredentialStoreError> {
+		if let Some(cached) = cache_get(self.service, self.user) {
+			return match cached {
+				Some(json) => Ok(Some(serde_json::from_str(&json)?)),
+				None => Ok(None),
+			};
+		}
+		let entry = self.entry()?;
+		let started = std::time::Instant::now();
+		let read = entry.get_password();
+		log::info!(
+			"keyring read: entry={} hit=false took={:?}",
+			self.user,
+			started.elapsed()
+		);
+		match read {
+			Ok(json) => {
+				let parsed = serde_json::from_str(&json)?;
+				cache_put(self.service, self.user, Some(json));
+				Ok(Some(parsed))
+			}
+			Err(keyring::Error::NoEntry) => {
+				cache_put(self.service, self.user, None);
+				Ok(None)
+			}
+			Err(e) => Err(e.into()),
+		}
 	}
 
 	pub(crate) fn load(&self) -> Result<T, CredentialStoreError> {
@@ -232,16 +270,77 @@ pub(crate) fn clear_cache_for_test() {
 	cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
-/// The github-credentials keyring entry: `service = "aghub"`,
-/// `user = "github_credentials"`.
-pub(crate) fn credentials_store(
+/// Everything credential-related in ONE keyring entry.
+///
+/// macOS asks for authorization per keychain ITEM, and this app is shipped
+/// ad-hoc signed, so its signature changes on every release and the ACL of a
+/// previously-authorized item no longer matches. The user is therefore
+/// re-prompted after each upgrade — once per item. Holding both payloads in a
+/// single item makes that one password prompt instead of two. It also halves
+/// the number of round trips on every other platform.
+#[derive(Default, Serialize, serde::Deserialize)]
+pub(crate) struct CredentialBundle {
+	#[serde(default)]
+	pub(crate) credentials: Vec<crate::routes::credentials::StoredCredential>,
+	#[serde(default)]
+	pub(crate) bindings: resolve::SourceBindings,
+}
+
+impl KeyringPayload for CredentialBundle {
+	fn is_empty(&self) -> bool {
+		self.credentials.is_empty() && self.bindings.0.is_empty()
+	}
+}
+
+/// The single combined entry: `service = "aghub"`, `user = "credentials"`.
+pub(crate) fn bundle_store() -> KeyringJson<CredentialBundle> {
+	KeyringJson::new("aghub", "credentials")
+}
+
+/// Read the bundle, migrating from the two legacy entries the first time.
+///
+/// Migration is idempotent and convergent: it only runs while the bundle entry
+/// is ABSENT, and it stops being reachable the moment the bundle is written. If
+/// clearing the legacy entries fails (they are best-effort — a delete can be
+/// denied independently of a read), the bundle still wins every later read,
+/// because nothing consults the legacy entries once the bundle exists.
+pub(crate) fn load_bundle() -> Result<CredentialBundle, CredentialStoreError> {
+	if let Some(bundle) = bundle_store().load_optional()? {
+		return Ok(bundle);
+	}
+	let legacy = CredentialBundle {
+		credentials: legacy_credentials_store().load()?,
+		bindings: legacy_bindings_store().load()?,
+	};
+	if legacy.is_empty() {
+		// Nothing to carry over. Do NOT write an entry just to record that —
+		// writing one would create a keychain item for a user who has no
+		// credentials at all, and the absent-bundle path costs the same.
+		return Ok(legacy);
+	}
+	bundle_store().store(&legacy)?;
+	// Best effort: a failure here leaves a stale copy of the tokens behind but
+	// cannot make a later read wrong.
+	let _ = legacy_credentials_store().store(&Vec::new());
+	let _ = legacy_bindings_store().store(&resolve::SourceBindings::default());
+	Ok(legacy)
+}
+
+/// Persist the bundle.
+pub(crate) fn store_bundle(
+	bundle: &CredentialBundle,
+) -> Result<(), CredentialStoreError> {
+	bundle_store().store(bundle)
+}
+
+/// Pre-merge github-credentials entry. Read ONLY by the migration above.
+fn legacy_credentials_store(
 ) -> KeyringJson<Vec<crate::routes::credentials::StoredCredential>> {
 	KeyringJson::new("aghub", "github_credentials")
 }
 
-/// The source→credential-id bindings keyring entry: `service = "aghub"`,
-/// `user = "skill_source_bindings"`.
-pub(crate) fn source_bindings_store() -> KeyringJson<resolve::SourceBindings> {
+/// Pre-merge source-bindings entry. Read ONLY by the migration above.
+fn legacy_bindings_store() -> KeyringJson<resolve::SourceBindings> {
 	KeyringJson::new("aghub", "skill_source_bindings")
 }
 
@@ -385,21 +484,27 @@ mod cache_tests {
 			.unwrap_or_else(|e| e.into_inner());
 		let _mock = test_hooks::MockKeyringBackend::new();
 
-		let store = credentials_store();
+		let store = bundle_store();
 		assert!(
 			store.load().ok().expect("empty store loads").is_empty(),
 			"the mock backend starts empty"
 		);
 
-		store.store(&vec![cred("a")]).ok().expect("store writes");
+		store
+			.store(&CredentialBundle {
+				credentials: vec![cred("a")],
+				..Default::default()
+			})
+			.ok()
+			.expect("store writes");
 
 		let after = store.load().ok().expect("store reloads");
 		assert_eq!(
-			after.len(),
+			after.credentials.len(),
 			1,
 			"a write must invalidate or refresh the cached entry"
 		);
-		assert_eq!(after[0].id, "a");
+		assert_eq!(after.credentials[0].id, "a");
 	}
 
 	/// Deleting (storing an empty payload) must be visible too — the delete
@@ -412,15 +517,117 @@ mod cache_tests {
 			.unwrap_or_else(|e| e.into_inner());
 		let _mock = test_hooks::MockKeyringBackend::new();
 
-		let store = credentials_store();
-		store.store(&vec![cred("b")]).ok().expect("store writes");
-		assert_eq!(store.load().ok().expect("reload").len(), 1);
+		let store = bundle_store();
+		store
+			.store(&CredentialBundle {
+				credentials: vec![cred("b")],
+				..Default::default()
+			})
+			.ok()
+			.expect("store writes");
+		assert_eq!(store.load().ok().expect("reload").credentials.len(), 1);
 
-		store.store(&Vec::new()).ok().expect("delete writes");
+		store
+			.store(&CredentialBundle::default())
+			.ok()
+			.expect("delete writes");
 
 		assert!(
 			store.load().ok().expect("reload after delete").is_empty(),
 			"a delete must not leave the pre-delete value cached"
+		);
+	}
+}
+
+#[cfg(test)]
+mod migration_tests {
+	use super::*;
+	use crate::routes::credentials::StoredCredential;
+
+	fn cred(id: &str) -> StoredCredential {
+		StoredCredential {
+			id: id.to_string(),
+			name: format!("name-{id}"),
+			token: format!("token-{id}"),
+		}
+	}
+
+	/// Users upgrading from a pre-merge build have their data in the two legacy
+	/// entries. Losing it means their stored tokens silently vanish and every
+	/// private-source fetch starts failing, so the carry-over is the one part of
+	/// this change that MUST be pinned.
+	#[test]
+	fn legacy_entries_are_carried_into_the_bundle() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _mock = test_hooks::MockKeyringBackend::new();
+
+		legacy_credentials_store()
+			.store(&vec![cred("legacy")])
+			.ok()
+			.expect("legacy credentials written");
+		let mut bindings = std::collections::BTreeMap::new();
+		bindings.insert("owner/repo".to_string(), "legacy".to_string());
+		legacy_bindings_store()
+			.store(&resolve::SourceBindings(bindings))
+			.ok()
+			.expect("legacy bindings written");
+
+		let bundle = load_bundle().ok().expect("migration runs");
+
+		assert_eq!(
+			bundle.credentials.len(),
+			1,
+			"the legacy credential must survive the merge"
+		);
+		assert_eq!(bundle.credentials[0].id, "legacy");
+		assert_eq!(
+			bundle.bindings.0.get("owner/repo").map(String::as_str),
+			Some("legacy"),
+			"the legacy binding must survive the merge"
+		);
+
+		// And it must now come from the bundle, not be re-migrated: clearing the
+		// legacy entries must not change what a later read returns.
+		let _ = legacy_credentials_store().store(&Vec::new());
+		let _ =
+			legacy_bindings_store().store(&resolve::SourceBindings::default());
+		let again = load_bundle().ok().expect("bundle reload");
+		assert_eq!(
+			again.credentials.len(),
+			1,
+			"once migrated, reads must come from the bundle"
+		);
+	}
+
+	/// An existing bundle is authoritative. A leftover legacy entry (the delete
+	/// is best-effort and can fail) must never resurrect an old credential over
+	/// the current one.
+	#[test]
+	fn a_leftover_legacy_entry_never_overrides_the_bundle() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _mock = test_hooks::MockKeyringBackend::new();
+
+		store_bundle(&CredentialBundle {
+			credentials: vec![cred("current")],
+			..Default::default()
+		})
+		.ok()
+		.expect("bundle written");
+		legacy_credentials_store()
+			.store(&vec![cred("stale")])
+			.ok()
+			.expect("stale legacy entry written");
+
+		let bundle = load_bundle().ok().expect("bundle read");
+
+		assert_eq!(bundle.credentials.len(), 1);
+		assert_eq!(
+			bundle.credentials[0].id, "current",
+			"the bundle wins over a leftover legacy entry"
 		);
 	}
 }

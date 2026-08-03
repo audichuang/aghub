@@ -31,13 +31,20 @@ pub(crate) struct StoredCredential {
 
 pub(crate) fn load_credentials(
 ) -> Result<Vec<StoredCredential>, CredentialStoreError> {
-	crate::credentials::credentials_store().load()
+	Ok(crate::credentials::load_bundle()?.credentials)
 }
 
+/// Replace the credential list, preserving the bindings stored alongside it.
+///
+/// Read-modify-write on the shared bundle. Callers already hold
+/// [`lock_credential_store`] across their own load+store pair, which is what
+/// keeps this from losing the bindings half under a concurrent binding write.
 fn store_credentials(
 	creds: &[StoredCredential],
 ) -> Result<(), CredentialStoreError> {
-	crate::credentials::credentials_store().store(&creds.to_vec())
+	let mut bundle = crate::credentials::load_bundle()?;
+	bundle.credentials = creds.to_vec();
+	crate::credentials::store_bundle(&bundle)
 }
 
 fn source_binding_err(err: SourceBindingError) -> ApiError {
