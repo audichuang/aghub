@@ -2848,6 +2848,17 @@ mod tests {
 		)
 	}
 
+	/// `git_scan_skills` builds a `SkillRepository` directly in its async body,
+	/// before the `spawn_blocking` under it. reqwest's blocking client panics
+	/// when constructed on a runtime thread ("Cannot drop a runtime in a
+	/// context where blocking is not allowed"), so the shared client's
+	/// initializer has to hop to its own OS thread. Building one inline here
+	/// checks that contract where the route actually relies on it.
+	#[tokio::test]
+	async fn skill_repository_can_be_built_inside_an_async_handler() {
+		let _repo = skill_update::SkillRepository::new();
+	}
+
 	/// Dummy session for guards / path-validation paths that never fetch.
 	fn dummy_git_session(
 		url: &str,

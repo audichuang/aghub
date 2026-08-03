@@ -1074,3 +1074,84 @@ fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
 			"the tally must follow the server, not the aborted reservation",
 		);
 }
+
+/// The rate-limit tally is bounded by the window it was measured in, not by a
+/// fixed TTL. A pinned session can sit between a scan and an install for
+/// minutes; if the tally expired on a timer the budget check would silently
+/// stop running (fail-open) and the batch would go out only to collect 403s.
+#[test]
+fn the_tally_still_refuses_after_the_scan_to_install_gap() {
+	// Reset an hour out: the reading is still inside its window.
+	let reset = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.unwrap()
+		.as_secs()
+		+ 3600;
+	let happy = happy_responder();
+	let (t, _recorded) = transport(move |req: &HttpRequest| {
+		let mut response = happy(req)?;
+		if response.status == 200 {
+			response
+				.headers
+				.push(("x-ratelimit-remaining".into(), "1".into()));
+			response
+				.headers
+				.push(("x-ratelimit-reset".into(), reset.to_string()));
+		}
+		Ok(response)
+	});
+	let backend = GithubRest::new(t);
+	let snap = backend.resolve(&github_source(), None).unwrap();
+	// The scan: reads the tree (and the live tally along with it).
+	backend.read_tree(&snap).unwrap();
+
+	// The install: 3 blobs against 1 remaining request must be refused BEFORE
+	// any of them is issued.
+	let error = backend
+		.materialize(
+			&snap,
+			&["skills/music"],
+			tempfile::tempdir().unwrap().path(),
+		)
+		.expect_err("3 blobs against 1 remaining request must be refused");
+	assert!(
+		error.to_string().contains("only 1 requests remain"),
+		"expected an admission refusal, got: {error}"
+	);
+}
+
+/// …but once the window has actually rolled over, the stale count must not
+/// keep refusing work the reset already allowed.
+#[test]
+fn a_rolled_over_window_stops_refusing() {
+	// Reset in the past: whatever it counted belongs to a spent window.
+	let reset = std::time::SystemTime::now()
+		.duration_since(std::time::UNIX_EPOCH)
+		.unwrap()
+		.as_secs()
+		- 1;
+	let happy = happy_responder();
+	let (t, _recorded) = transport(move |req: &HttpRequest| {
+		let mut response = happy(req)?;
+		if response.status == 200 {
+			response
+				.headers
+				.push(("x-ratelimit-remaining".into(), "0".into()));
+			response
+				.headers
+				.push(("x-ratelimit-reset".into(), reset.to_string()));
+		}
+		Ok(response)
+	});
+	let backend = GithubRest::new(t);
+	let snap = backend.resolve(&github_source(), None).unwrap();
+	backend.read_tree(&snap).unwrap();
+
+	backend
+		.materialize(
+			&snap,
+			&["skills/music"],
+			tempfile::tempdir().unwrap().path(),
+		)
+		.expect("a spent window's zero must not refuse the next window's work");
+}

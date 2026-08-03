@@ -16,7 +16,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use crate::backend::{
 	entry_matches_selection, Blob, RepoFetchBackend, RepoTree, SourceRef,
@@ -108,12 +108,22 @@ pub struct ReqwestTransport {
 impl ReqwestTransport {
 	/// Borrow the process-wide blocking client, building it on first use.
 	///
-	/// Construction stays in `new` (not in `execute`) so the existing "build the
-	/// client off the async worker" call sites keep their guarantee verbatim.
+	/// The initializer builds on its OWN OS thread because
+	/// `reqwest::blocking::Client::new` panics when it runs on a Tokio worker
+	/// ("Cannot drop a runtime in a context where blocking is not allowed"),
+	/// and callers do construct one straight from an async handler — see
+	/// `git_scan_skills` in `aghub-api`. Before this was a `OnceLock` every
+	/// such call built its own client and every one of them was exposed; now
+	/// only the process's first call would be, which is worse to diagnose.
+	/// Owning the hop here means no caller has to know the rule.
 	pub fn new() -> Self {
 		static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 		Self {
-			client: CLIENT.get_or_init(reqwest::blocking::Client::new),
+			client: CLIENT.get_or_init(|| {
+				std::thread::spawn(reqwest::blocking::Client::new)
+					.join()
+					.expect("shared blocking client initializer panicked")
+			}),
 		}
 	}
 }
@@ -195,32 +205,53 @@ pub(crate) struct RepoContext {
 	pub blob_admission: Arc<Mutex<BlobAdmission>>,
 }
 
+/// Preflight budget for one snapshot's blob phase.
+///
+/// KNOWN SCOPE LIMIT: this ledger is per-[`RepoContext`], but GitHub's quota is
+/// per-credential and global. Two repositories fetching concurrently on the
+/// same token each see the live count and each reserve against it, so together
+/// they can reserve more than exists and collect 403s instead of one being
+/// refused up front. Pre-dates the worker pool (the old batched path had the
+/// same per-context ledger) and is widened by it. Fixing it properly means a
+/// process-wide reservation bucket keyed by api_host + credential identity —
+/// deliberately out of scope here, since this gate is a courtesy preflight and
+/// the real limit is still enforced by the server.
 #[derive(Default)]
 pub(crate) struct BlobAdmission {
 	remaining_requests: Option<u64>,
-	/// When `remaining_requests` was last read off a live response. A tally is
-	/// only meaningful inside the rate-limit window it was measured in.
-	observed_at: Option<Instant>,
+	/// Unix time at which the rate-limit window holding `remaining_requests`
+	/// rolls over (`x-ratelimit-reset`). The tally is authoritative until then
+	/// and meaningless after, so this bounds it exactly instead of guessing
+	/// with a fixed TTL: a guess is either too short (the tally expires mid
+	/// window and the budget check silently stops running) or too long (a
+	/// pre-rollover 0 keeps refusing work the reset already allowed).
+	resets_at: Option<SystemTime>,
 	byte_sizes: HashMap<String, u64>,
 }
 
-/// A tally older than this may predate a rate-limit window rollover, so it is
-/// treated as unknown rather than as a refusal.
-const ADMISSION_TALLY_TTL: Duration = Duration::from_secs(60);
-
 impl BlobAdmission {
-	/// Record a live `x-ratelimit-remaining` reading — the ONLY writer.
-	fn observe(&mut self, remaining: u64) {
+	/// Record a live rate-limit reading — the ONLY writer.
+	fn observe(&mut self, remaining: u64, resets_at: Option<SystemTime>) {
 		self.remaining_requests = Some(remaining);
-		self.observed_at = Some(Instant::now());
+		// A reading without a reset header cannot be window-bounded; keep the
+		// count (refusing loudly beats overrunning silently) rather than
+		// inventing an expiry.
+		self.resets_at = resets_at;
 	}
 
-	/// Requests known to be left, or `None` when the tally is stale.
+	/// Requests known to be left, or `None` once the window has rolled over.
 	fn remaining(&self) -> Option<u64> {
-		self.observed_at
-			.filter(|t| t.elapsed() < ADMISSION_TALLY_TTL)
-			.and(self.remaining_requests)
+		if self.resets_at.is_some_and(|at| SystemTime::now() >= at) {
+			return None;
+		}
+		self.remaining_requests
 	}
+}
+
+/// Parse `x-ratelimit-reset` (Unix seconds) into a wall-clock instant.
+fn rate_limit_reset(response: &HttpResponse) -> Option<SystemTime> {
+	let seconds: u64 = response.header("x-ratelimit-reset")?.parse().ok()?;
+	Some(UNIX_EPOCH + Duration::from_secs(seconds))
 }
 
 /// GitHub REST fast-path backend. Constructed with an [`HttpTransport`]; an
@@ -523,13 +554,14 @@ impl RepoFetchBackend for GithubRest {
 			let remaining = response
 				.header("x-ratelimit-remaining")
 				.and_then(|value| value.parse::<u64>().ok());
+			let resets_at = rate_limit_reset(&response);
 			let mut admission = ctx.blob_admission.lock().map_err(|_| {
 				GitError::clone_failed(
 					"GithubRest blob admission lock poisoned",
 				)
 			})?;
 			if let Some(remaining) = remaining {
-				admission.observe(remaining);
+				admission.observe(remaining, resets_at);
 			}
 			admission.byte_sizes.clear();
 			for entry in &entries {
@@ -626,10 +658,14 @@ impl RepoFetchBackend for GithubRest {
 			// ponytail: a hint, not a cancel token — a worker may still finish
 			// the request it already sent. Waste ceiling ~1 request/worker.
 			let aborted = AtomicBool::new(false);
-			// Lowest `x-ratelimit-remaining` seen. Since the tree cache landed,
-			// this is the ONLY thing that corrects the reservation above back
-			// to what the server actually charged.
+			// Lowest `x-ratelimit-remaining` seen, paired with the latest
+			// `x-ratelimit-reset`. Since the tree cache landed, this is the
+			// ONLY thing that corrects the reservation above back to what the
+			// server actually charged. Taking min-remaining with max-reset errs
+			// toward refusing: if the window rolled over mid-batch the pair
+			// under-reports, which is the safe direction.
 			let observed = AtomicU64::new(u64::MAX);
+			let observed_reset = AtomicU64::new(0);
 			let missing = &missing;
 			let ctx = &ctx;
 			let transport: &dyn HttpTransport = self.transport.as_ref();
@@ -649,6 +685,7 @@ impl RepoFetchBackend for GithubRest {
 									ctx,
 									oid,
 									&observed,
+									&observed_reset,
 								) {
 									Ok(blob) => mine.push(blob),
 									Err(e) => {
@@ -696,8 +733,12 @@ impl RepoFetchBackend for GithubRest {
 			drop(cache);
 			let seen = observed.load(Ordering::Relaxed);
 			if seen != u64::MAX {
+				let reset = match observed_reset.load(Ordering::Relaxed) {
+					0 => None,
+					secs => Some(UNIX_EPOCH + Duration::from_secs(secs)),
+				};
 				if let Ok(mut admission) = ctx.blob_admission.lock() {
-					admission.observe(seen);
+					admission.observe(seen, reset);
 				}
 			}
 			if let Some(e) = failure {
@@ -852,6 +893,7 @@ fn fetch_blob(
 	ctx: &RepoContext,
 	oid: &str,
 	observed_remaining: &AtomicU64,
+	observed_reset: &AtomicU64,
 ) -> Result<Blob> {
 	let url = format!(
 		"https://{}/repos/{}/{}/git/blobs/{oid}",
@@ -872,6 +914,11 @@ fn fetch_blob(
 		.and_then(|v| v.parse::<u64>().ok())
 	{
 		observed_remaining.fetch_min(remaining, Ordering::Relaxed);
+	}
+	if let Some(reset) = rate_limit_reset(&response) {
+		if let Ok(secs) = reset.duration_since(UNIX_EPOCH) {
+			observed_reset.fetch_max(secs.as_secs(), Ordering::Relaxed);
+		}
 	}
 	if !(200..300).contains(&response.status) {
 		return Err(GitError::rest_fallback(format!(
