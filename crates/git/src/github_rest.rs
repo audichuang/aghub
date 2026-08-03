@@ -255,6 +255,14 @@ impl BlobAdmission {
 		self.resets_at = resets_at;
 	}
 
+	/// Forget the count. Used when a batch died between reserving and
+	/// reconciling: its deduction is still in the tally with nothing to
+	/// correct it, and an under-count refuses work the server would allow.
+	fn invalidate(&mut self) {
+		self.remaining_requests = None;
+		self.resets_at = None;
+	}
+
 	/// Requests known to be left as of `now`, or `None` once the window that
 	/// produced the count has rolled over. Takes the clock so a test can cross
 	/// a window boundary without sleeping.
@@ -319,6 +327,10 @@ fn epoch_seconds_to_time(seconds: u64) -> Option<SystemTime> {
 /// blocking HTTP).
 pub struct GithubRest {
 	pub(crate) transport: Arc<dyn HttpTransport>,
+	/// Test seam: invoked immediately before the blob-phase lock is taken, so a
+	/// test can establish that a caller has genuinely reached the lock rather
+	/// than inferring it from a timeout. `None` in production.
+	pub(crate) blob_phase_probe: Option<Arc<dyn Fn() + Send + Sync>>,
 	pub(crate) deadline: Option<Instant>,
 	pub(crate) timeout: Option<Duration>,
 	pub(crate) concurrency: usize,
@@ -335,6 +347,7 @@ impl GithubRest {
 			timeout: None,
 			concurrency: DEFAULT_CONCURRENCY,
 			cache: Arc::new(Mutex::new(HashMap::new())),
+			blob_phase_probe: None,
 		}
 	}
 
@@ -350,6 +363,16 @@ impl GithubRest {
 	/// retained between a catalog scan and a later install.
 	pub fn with_timeout(mut self, timeout: Duration) -> Self {
 		self.timeout = Some(timeout);
+		self
+	}
+
+	/// Install the blob-phase probe. Test-only seam — see the field.
+	#[doc(hidden)]
+	pub fn with_blob_phase_probe(
+		mut self,
+		probe: Arc<dyn Fn() + Send + Sync>,
+	) -> Self {
+		self.blob_phase_probe = Some(probe);
 		self
 	}
 
@@ -374,6 +397,7 @@ impl GithubRest {
 			timeout: None,
 			concurrency: self.concurrency,
 			cache: Arc::clone(&self.cache),
+			blob_phase_probe: self.blob_phase_probe.clone(),
 		})
 	}
 
@@ -660,15 +684,24 @@ impl RepoFetchBackend for GithubRest {
 		// full budget on top of the one it spent waiting and this operation's
 		// bound would stack per waiter.
 		let operation_deadline = self.operation_deadline()?;
-		// Recovering from poison is correct here specifically because this mutex
-		// guards ordering and holds no data: a panicking batch leaves nothing
-		// half-written behind it. Without this, one `Scope::spawn` failure under
-		// resource exhaustion would retire the context for good — every later
-		// retry failing instantly where it used to have a chance.
-		let _phase = ctx
-			.blob_phase
-			.lock()
-			.unwrap_or_else(|poisoned| poisoned.into_inner());
+		// Poison means a batch died between reserving and reconciling — so the
+		// tally IS half-written: its deduction stands with nothing left to
+		// correct it. Drop the count to unknown, then carry on; refusing
+		// forever instead would retire the context on a single `Scope::spawn`
+		// failure under resource exhaustion, which is worse than the phantom
+		// deduction and worse than before this lock existed.
+		if let Some(probe) = &self.blob_phase_probe {
+			probe();
+		}
+		let _phase = match ctx.blob_phase.lock() {
+			Ok(guard) => guard,
+			Err(poisoned) => {
+				if let Ok(mut admission) = ctx.blob_admission.lock() {
+					admission.invalidate();
+				}
+				poisoned.into_inner()
+			}
+		};
 		// The wait may have consumed the whole budget.
 		remaining_timeout(operation_deadline)?;
 
@@ -1055,6 +1088,30 @@ mod admission_tests {
 			admission.remaining_at(at(observed, 61)),
 			None,
 			"a spent window's zero must not refuse the next window"
+		);
+	}
+
+	/// A batch that dies between reserving and reconciling leaves its deduction
+	/// standing with nothing left to correct it. Forgetting the count is the
+	/// only honest recovery — the alternative is refusing work the server would
+	/// have allowed, for the rest of the window.
+	///
+	/// (The `blob_phase` poison path that calls this is not itself covered:
+	/// poisoning there requires `Scope::spawn` to fail at OS-thread creation,
+	/// which a test cannot provoke reliably.)
+	#[test]
+	fn invalidating_forgets_a_half_written_tally() {
+		let observed = SystemTime::now();
+		let mut admission = BlobAdmission::default();
+		admission.observe(0, Some(at(observed, 3600)));
+		assert_eq!(admission.remaining_at(observed), Some(0));
+
+		admission.invalidate();
+
+		assert_eq!(
+			admission.remaining_at(observed),
+			None,
+			"an unreconciled reservation must not keep refusing work"
 		);
 	}
 

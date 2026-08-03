@@ -1092,72 +1092,82 @@ fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
 /// `Arc<SkillRepository>`. Interleaved batches let a slow response from the
 /// earlier one overwrite the later one's reconciled tally.
 ///
-/// The first request to arrive holds its slot and WAITS for the other batch to
-/// appear, so the verdict does not depend on the scheduler: if the batches can
-/// overlap, the waiter observes it; if they are serialized, no amount of
-/// scheduling luck can make a second batch show up while the lock is held.
+/// The blob-phase probe fires just before the lock is taken, so "both callers
+/// reached the lock" is an established fact rather than something inferred from
+/// a timeout. Waiting for the probe count is safe in BOTH directions: it is
+/// reached whether or not the lock serializes them, so a slow machine delays
+/// the test instead of turning a real regression green.
 #[test]
 fn concurrent_blob_batches_on_one_context_do_not_interleave() {
 	let batch_of = |oid: &str| match oid {
 		OID_MUSIC_SKILL | OID_MUSIC_RUN | OID_MUSIC_LINK => 'a',
 		_ => 'b',
 	};
-	let happy = happy_responder();
+	let at_lock = Arc::new(AtomicUsize::new(0));
 	let seen: Arc<Mutex<BTreeSet<char>>> =
 		Arc::new(Mutex::new(BTreeSet::new()));
 	let gate_used = Arc::new(AtomicUsize::new(0));
-	let overlapped = Arc::new(AtomicUsize::new(0));
-	let (s, g, o) = (
+	let observed = Arc::new(AtomicUsize::new(0));
+
+	let happy = happy_responder();
+	let (s, g, o, waiting) = (
 		Arc::clone(&seen),
 		Arc::clone(&gate_used),
-		Arc::clone(&overlapped),
+		Arc::clone(&observed),
+		Arc::clone(&at_lock),
 	);
-
 	let (t, _recorded) = transport(move |req: &HttpRequest| {
 		if let Some(oid) = blob_oid(&req.url) {
 			s.lock().unwrap().insert(batch_of(&oid));
+			// The first request in flight holds its slot until BOTH callers
+			// have provably reached the lock, then reads how many batches got
+			// requests out. Serialized: 1. Interleaved: 2.
 			if g.fetch_add(1, SeqCst) == 0 {
-				// Hold this slot until the other batch shows up, or give up.
-				let stop = Instant::now() + Duration::from_millis(500);
-				while Instant::now() < stop && s.lock().unwrap().len() < 2 {
+				while waiting.load(SeqCst) < 2 {
 					std::thread::sleep(Duration::from_millis(2));
 				}
+				// Give an unserialized second batch room to issue its request.
+				std::thread::sleep(Duration::from_millis(50));
 				o.store(s.lock().unwrap().len(), SeqCst);
 			}
 		}
 		happy(req)
 	});
 
-	let backend = Arc::new(GithubRest::new(t).with_concurrency(1));
+	let probe = Arc::clone(&at_lock);
+	let backend = Arc::new(
+		GithubRest::new(t)
+			.with_concurrency(1)
+			.with_blob_phase_probe(Arc::new(move || {
+				probe.fetch_add(1, SeqCst);
+			})),
+	);
 	let snap = backend.resolve(&github_source(), None).unwrap();
 	// Prime the tree so neither batch pays for it inside the race window.
 	backend.read_tree(&snap).unwrap();
+	at_lock.store(0, SeqCst); // the priming read_blobs, if any, does not count
 
 	let batches = [
 		[OID_MUSIC_SKILL, OID_MUSIC_RUN, OID_MUSIC_LINK],
 		[OID_OTHER_SKILL, OID_OTHER_BIG, OID_README],
 	];
-	// Both threads are released together, so neither can finish before the
-	// other has even been scheduled.
-	let start = std::sync::Barrier::new(batches.len());
 	std::thread::scope(|scope| {
 		for batch in batches {
 			let backend = Arc::clone(&backend);
 			let snap = snap.clone();
-			let start = &start;
 			scope.spawn(move || {
 				let oids: Vec<String> =
 					batch.iter().map(|o| (*o).to_string()).collect();
-				start.wait();
 				backend.read_blobs(&snap, &oids).unwrap();
 			});
 		}
 	});
 
 	assert_eq!(
-		overlapped.load(SeqCst),
+		observed.load(SeqCst),
 		1,
-		"a second batch issued requests while the first held the phase; their \
-		 ledger updates can overwrite each other"
+		"both callers were at the lock, yet a second batch still issued \
+		 requests while the first held the phase — their ledger updates can \
+		 overwrite each other"
 	);
 }
