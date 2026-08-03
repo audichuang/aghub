@@ -973,9 +973,15 @@ fn commits_url(
 /// Commit a finished batch: cache what was downloaded, then reconcile the
 /// rate-limit tally from what the server reported.
 ///
-/// Takes `_phase` purely to prove at the type level that the batch still holds
-/// its phase — this tail is the half that a second batch must not interleave
-/// with, and an in-flight-request test cannot observe it.
+/// Takes `_phase` as a compile-time tripwire: this tail is the half a second
+/// batch must not interleave with, and no in-flight-request test can observe
+/// it, so dropping the guard before this point is made a compile error instead.
+///
+/// A tripwire, NOT a proof — the parameter has no provenance link to `ctx`, so
+/// `drop(_phase); commit_batch(&ctx.blob_phase.lock().unwrap(), ..)` still
+/// compiles and still reopens the window. Proving it would take a transaction
+/// type owning both the context and the guard; this catches the mistake someone
+/// actually makes.
 fn commit_batch(
 	_phase: &std::sync::MutexGuard<'_, ()>,
 	ctx: &RepoContext,
