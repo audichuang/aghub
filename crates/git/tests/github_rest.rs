@@ -1084,3 +1084,59 @@ fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
 			"the tally must follow the server, not the aborted reservation",
 		);
 }
+
+/// Two blob batches on one context must not interleave. `fetch_skills` wraps
+/// `spawn_blocking` in a `timeout`, and a timed-out blocking task keeps running
+/// while `PinnedSourceClaim::drop` returns the session for the user to retry —
+/// so a retry can genuinely overlap the run it replaced, both holding the same
+/// `Arc<SkillRepository>`. Interleaved batches let a slow response from the
+/// earlier one overwrite the later one's reconciled tally.
+#[test]
+fn concurrent_blob_batches_on_one_context_do_not_interleave() {
+	// Which batch each blob belongs to, by oid.
+	let batch_of = |oid: &str| match oid {
+		OID_MUSIC_SKILL | OID_MUSIC_RUN | OID_MUSIC_LINK => 'a',
+		_ => 'b',
+	};
+	let happy = happy_responder();
+	let order = Arc::new(Mutex::new(Vec::<char>::new()));
+	let seen = Arc::clone(&order);
+	let (t, _recorded) = transport(move |req: &HttpRequest| {
+		if let Some(oid) = blob_oid(&req.url) {
+			seen.lock().unwrap().push(batch_of(&oid));
+			// Hold the slot so an unserialized second batch would slip in.
+			std::thread::sleep(Duration::from_millis(20));
+		}
+		happy(req)
+	});
+
+	let backend = Arc::new(GithubRest::new(t).with_concurrency(1));
+	let snap = backend.resolve(&github_source(), None).unwrap();
+	// Prime the tree so neither batch pays for it inside the race window.
+	backend.read_tree(&snap).unwrap();
+
+	let batch_a = [OID_MUSIC_SKILL, OID_MUSIC_RUN, OID_MUSIC_LINK]
+		.map(str::to_string)
+		.to_vec();
+	let batch_b = [OID_OTHER_SKILL, OID_OTHER_BIG, OID_README]
+		.map(str::to_string)
+		.to_vec();
+
+	std::thread::scope(|scope| {
+		for batch in [batch_a, batch_b] {
+			let backend = Arc::clone(&backend);
+			let snap = snap.clone();
+			scope.spawn(move || backend.read_blobs(&snap, &batch).unwrap());
+		}
+	});
+
+	// Serialized batches produce one run of 'a' and one run of 'b' — never a
+	// mix. Count the transitions: two interleaved batches make more than one.
+	let order = order.lock().unwrap();
+	let transitions = order.windows(2).filter(|w| w[0] != w[1]).count();
+	assert_eq!(
+		transitions, 1,
+		"batches interleaved (request order {order:?}); their ledger updates \
+		 can overwrite each other"
+	);
+}

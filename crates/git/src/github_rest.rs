@@ -203,28 +203,29 @@ pub(crate) struct RepoContext {
 	/// so one fetch per snapshot serves list + preflight + materialize.
 	pub tree_cache: Arc<Mutex<HashMap<String, RepoTree>>>,
 	pub blob_admission: Arc<Mutex<BlobAdmission>>,
+	/// Held for one whole reserve → download → reconcile pass, so two batches
+	/// on this context cannot interleave their bookkeeping. Serializes BATCHES
+	/// only — the 16 workers inside a batch still run concurrently — and in the
+	/// normal call pattern (one batch at a time) it is never contended. It is
+	/// reachable: `fetch_skills` wraps `spawn_blocking` in a `timeout`, and a
+	/// timed-out blocking task keeps running while `PinnedSourceClaim::drop`
+	/// puts the session back for the user to retry.
+	pub blob_phase: Arc<Mutex<()>>,
 }
 
 /// Preflight budget for one snapshot's blob phase.
 ///
-/// KNOWN SCOPE LIMIT — the ledger tracks a count, never the reservations in
-/// flight against it, so it is only ever an estimate. Two consequences:
+/// KNOWN SCOPE LIMIT — this ledger is per-[`RepoContext`], but GitHub's quota
+/// is per-credential and global. `check_updates` runs its repository groups
+/// concurrently and each builds its own `SkillRepository`, so several contexts
+/// routinely reserve against the SAME real budget on one token and together can
+/// overrun it. Reachable today, and accepted: fixing it means a reservation
+/// bucket keyed by api_host + credential identity, which is a different piece
+/// of work. The cost of being wrong is a 403 the server would have sent anyway
+/// — this gate is a courtesy preflight, not the enforcement point.
 ///
-/// - It is per-[`RepoContext`] while GitHub's quota is per-credential and
-///   global, so two repositories fetching on the same token each reserve
-///   against the same real budget and together can overrun it.
-/// - Within one context, concurrent blob batches reconcile last-writer-wins: a
-///   slow-arriving response from an EARLIER request can raise the count back
-///   above what a later one already recorded.
-///
-/// Neither is reachable from today's callers — the API serializes a session's
-/// fetches through `PinnedSourceSessions::claim` (which removes the entry), and
-/// every CLI fetch builds its own `SkillRepository` — but `RepoFetchBackend` is
-/// `Send + Sync`, so anyone adding concurrency here inherits both. Fixing them
-/// means tracking in-flight reservations in a bucket keyed by api_host +
-/// credential identity. Deliberately out of scope: this gate is a courtesy
-/// preflight, being wrong costs a 403 the server would have sent anyway, and
-/// serializing the phase to fix it would undo the concurrency it guards.
+/// Ordering WITHIN one context is not part of that limit; `RepoContext`'s
+/// `blob_phase` serializes batches so their bookkeeping cannot interleave.
 #[derive(Default)]
 pub(crate) struct BlobAdmission {
 	remaining_requests: Option<u64>,
@@ -494,6 +495,7 @@ impl RepoFetchBackend for GithubRest {
 					blob_admission: Arc::new(Mutex::new(
 						BlobAdmission::default(),
 					)),
+					blob_phase: Arc::new(Mutex::new(())),
 				},
 			);
 		}
@@ -651,6 +653,12 @@ impl RepoFetchBackend for GithubRest {
 		oids: &[String],
 	) -> Result<Vec<Blob>> {
 		let ctx = self.get_context(&snapshot.commit_oid)?;
+		// Reserve → download → reconcile is one indivisible pass: without this
+		// a second batch's reconcile can be overwritten by a slower response
+		// from the first, raising the tally back above what the server charged.
+		let _phase = ctx.blob_phase.lock().map_err(|_| {
+			GitError::clone_failed("GithubRest blob phase lock poisoned")
+		})?;
 
 		// One request per unique SHA.
 		let mut seen = HashSet::new();
