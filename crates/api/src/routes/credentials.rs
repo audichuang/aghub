@@ -1,12 +1,11 @@
-use log::{debug, info, warn};
+use log::{debug, info};
 use rocket::http::Status;
 use rocket::serde::json::Json;
 use serde::{Deserialize, Serialize};
 
 use crate::credentials::resolve::{
 	bind_source_to_credential, list_source_binding_responses,
-	load_source_bindings, prune_bindings_for_credential, save_source_bindings,
-	source_binding_response, SourceBindingError,
+	prune_bindings_for_credential, source_binding_response, SourceBindingError,
 };
 use crate::credentials::CredentialStoreError;
 use crate::dto::credential::{
@@ -18,10 +17,6 @@ use crate::error::{
 };
 use crate::extractors::TrustedLocalOrigin;
 
-// Guards in-process read-modify-write cycles for the single keyring JSON entry.
-// Cross-process keyring races remain a documented known limitation.
-static CREDENTIAL_STORE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct StoredCredential {
 	pub(crate) id: String,
@@ -31,20 +26,7 @@ pub(crate) struct StoredCredential {
 
 pub(crate) fn load_credentials(
 ) -> Result<Vec<StoredCredential>, CredentialStoreError> {
-	Ok(crate::credentials::load_bundle()?.credentials)
-}
-
-/// Replace the credential list, preserving the bindings stored alongside it.
-///
-/// Read-modify-write on the shared bundle. Callers already hold
-/// [`lock_credential_store`] across their own load+store pair, which is what
-/// keeps this from losing the bindings half under a concurrent binding write.
-fn store_credentials(
-	creds: &[StoredCredential],
-) -> Result<(), CredentialStoreError> {
-	let mut bundle = crate::credentials::load_bundle()?;
-	bundle.credentials = creds.to_vec();
-	crate::credentials::store_bundle(&bundle)
+	Ok(crate::credentials::read_bundle()?.credentials)
 }
 
 fn source_binding_err(err: SourceBindingError) -> ApiError {
@@ -60,15 +42,6 @@ fn source_binding_err(err: SourceBindingError) -> ApiError {
 			"CREDENTIAL_NOT_FOUND",
 		),
 	}
-}
-
-/// Single lock for both the credentials entry and the source-bindings entry —
-/// the delete flow holds ONE guard across a read-modify-write on both (prune
-/// bindings for a deleted credential), so this must stay one mutex, not two.
-fn lock_credential_store() -> std::sync::MutexGuard<'static, ()> {
-	CREDENTIAL_STORE_MUTEX
-		.lock()
-		.unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 fn credential_name_exists(creds: &[StoredCredential], name: &str) -> bool {
@@ -105,10 +78,15 @@ pub async fn list_source_bindings_route(
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<Vec<SourceCredentialBindingResponse>> {
 	let responses = blocking(|| {
-		let _guard = lock_credential_store();
-		let bindings = load_source_bindings().map_err(ApiError::from)?;
-		let creds = load_credentials().map_err(ApiError::from)?;
-		Ok(list_source_binding_responses(&bindings, &creds))
+		// One read, so the bindings and the credentials they reference come
+		// from the SAME revision — two reads could straddle a write and render
+		// a binding as pointing at a credential that no longer exists.
+		let bundle =
+			crate::credentials::read_bundle().map_err(ApiError::from)?;
+		Ok(list_source_binding_responses(
+			&bundle.bindings,
+			&bundle.credentials,
+		))
 	})
 	.await?;
 	Ok(Json(responses))
@@ -121,21 +99,28 @@ pub async fn bind_source_credential(
 ) -> ApiResult<SourceCredentialBindingResponse> {
 	let body = body.into_inner();
 	let response = blocking(move || {
-		let _guard = lock_credential_store();
-		let mut bindings = load_source_bindings().map_err(ApiError::from)?;
-		let creds = load_credentials().map_err(ApiError::from)?;
 		let credential_id = body.credential_id.as_deref();
-
-		bind_source_to_credential(
-			&mut bindings,
-			&body.source,
-			credential_id,
-			&creds,
-		)
-		.map_err(source_binding_err)?;
-		save_source_bindings(&bindings).map_err(ApiError::from)?;
-
-		Ok(source_binding_response(&body.source, credential_id, &creds))
+		let outcome = crate::credentials::update_bundle(|bundle| {
+			// Split borrow: the validation needs the credential list while the
+			// bindings are being mutated, and they are separate fields.
+			let crate::credentials::CredentialBundle {
+				credentials,
+				bindings,
+			} = bundle;
+			bind_source_to_credential(
+				bindings,
+				&body.source,
+				credential_id,
+				credentials,
+			)?;
+			Ok(source_binding_response(
+				&body.source,
+				credential_id,
+				credentials,
+			))
+		})
+		.map_err(ApiError::from)?;
+		outcome.map_err(source_binding_err)
 	})
 	.await?;
 	Ok(Json(response))
@@ -148,23 +133,23 @@ pub async fn create_credential(
 ) -> ApiCreated<CredentialResponse> {
 	let body = body.into_inner();
 	let created = blocking(move || {
-		let _guard = lock_credential_store();
-		let mut creds = load_credentials().map_err(ApiError::from)?;
 		info!("creating credential '{}'", body.name);
-		if credential_name_exists(&creds, &body.name) {
-			return Err(duplicate_credential_err(&body.name));
-		}
-		let new = StoredCredential {
-			id: uuid::Uuid::new_v4().to_string(),
-			name: body.name.clone(),
-			token: body.token.clone(),
-		};
-		creds.push(new.clone());
-		store_credentials(&creds).map_err(ApiError::from)?;
-		Ok(CredentialResponse {
-			id: new.id,
-			name: new.name,
+		crate::credentials::update_bundle(|bundle| {
+			if credential_name_exists(&bundle.credentials, &body.name) {
+				return Err(duplicate_credential_err(&body.name));
+			}
+			let new = StoredCredential {
+				id: uuid::Uuid::new_v4().to_string(),
+				name: body.name.clone(),
+				token: body.token.clone(),
+			};
+			bundle.credentials.push(new.clone());
+			Ok(CredentialResponse {
+				id: new.id,
+				name: new.name,
+			})
 		})
+		.map_err(ApiError::from)?
 	})
 	.await?;
 	Ok((Status::Created, Json(created)))
@@ -177,28 +162,21 @@ pub async fn delete_credential(
 ) -> ApiNoContent {
 	let id = id.to_string();
 	blocking(move || {
-		let _guard = lock_credential_store();
-		let mut creds = load_credentials().map_err(ApiError::from)?;
-		let original_len = creds.len();
-		creds.retain(|c| c.id != id);
-		info!(
-			"deleting credential '{id}', removed={}",
-			original_len != creds.len()
-		);
-		store_credentials(&creds).map_err(ApiError::from)?;
-		let result = (|| {
-			let mut bindings = load_source_bindings()?;
-			if prune_bindings_for_credential(&mut bindings, &id) {
-				save_source_bindings(&bindings)?;
-			}
-			Ok::<(), CredentialStoreError>(())
-		})();
-
-		if let Err(error) = result {
-			warn!(
-				"failed to prune source credential bindings for {id}: {error}"
+		// Credential removal and its binding prune are ONE write. Done as two,
+		// a reader between them sees a binding referencing a credential that is
+		// already gone; and the prune could fail on its own, stranding it.
+		crate::credentials::update_bundle(|bundle| {
+			let original_len = bundle.credentials.len();
+			bundle.credentials.retain(|c| c.id != id);
+			info!(
+				"deleting credential '{id}', removed={}",
+				original_len != bundle.credentials.len()
 			);
-		}
+			prune_bindings_for_credential(&mut bundle.bindings, &id);
+			Ok::<(), std::convert::Infallible>(())
+		})
+		.map_err(ApiError::from)?
+		.expect("the delete closure cannot reject");
 		Ok(())
 	})
 	.await?;
@@ -231,10 +209,5 @@ mod tests {
 		let err = duplicate_credential_err("github.com");
 		assert_eq!(err.status, Status::Conflict);
 		assert_eq!(err.body.code, "CREDENTIAL_NAME_EXISTS");
-	}
-
-	#[test]
-	fn credential_store_lock_survives_poison_shape() {
-		let _guard = lock_credential_store();
 	}
 }

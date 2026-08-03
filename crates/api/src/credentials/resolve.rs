@@ -191,24 +191,10 @@ pub(crate) fn prune_bindings_for_credential(
 	bindings.0.len() != original_len
 }
 
-/// Load the source→credential_id bindings from the `skill_source_bindings`
-/// keyring entry. Mirrors `routes::credentials::load_credentials`.
+/// The source→credential_id bindings half of the combined credential bundle.
 pub(crate) fn load_source_bindings(
 ) -> Result<SourceBindings, crate::credentials::CredentialStoreError> {
-	Ok(crate::credentials::load_bundle()?.bindings)
-}
-
-/// Persist the source→credential_id bindings to the keyring entry. An empty
-/// map deletes the entry. Mirrors `routes::credentials` storage behavior.
-/// Replace the bindings, preserving the credentials stored alongside them.
-/// Read-modify-write on the shared bundle — see `store_credentials` for the
-/// locking that makes the pair safe.
-pub(crate) fn save_source_bindings(
-	bindings: &SourceBindings,
-) -> Result<(), crate::credentials::CredentialStoreError> {
-	let mut bundle = crate::credentials::load_bundle()?;
-	bundle.bindings = SourceBindings(bindings.0.clone());
-	crate::credentials::store_bundle(&bundle)
+	Ok(crate::credentials::read_bundle()?.bindings)
 }
 
 #[cfg(test)]
