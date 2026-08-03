@@ -12,6 +12,7 @@ aghub-core = { path = "../core" }
 aghub-git = { path = "../git" }
 skill = { path = "../skill" }
 dirs = { workspace = true }
+log = "0.4"
 tokio = { version = "1", features = [
 	"rt",
 	"rt-multi-thread",

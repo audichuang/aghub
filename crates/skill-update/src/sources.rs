@@ -549,12 +549,16 @@ pub(crate) fn source_matches(
 	}
 }
 
+/// Local content hashes for every installed copy of `name`, against an
+/// ALREADY-loaded agent set. Taking the set rather than a scope is what keeps
+/// the caller's per-entry loop off the agent scan: that scan re-reads every
+/// registered agent's config from disk and does not vary by name, so hoisting
+/// it turns an O(entries x agents) sweep into one load per scope.
 fn local_hashes_for_installed(
+	agents: &[aghub_core::AgentResources],
 	name: &str,
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
 ) -> Vec<String> {
-	crate::installed_skill_roots(name, resource_scope, project_root)
+	aghub_core::skills::removal::installed_skill_roots_in(agents, name)
 		.into_iter()
 		.filter_map(|root| skill::compute_skill_folder_hash(&root).ok())
 		.collect()
@@ -571,6 +575,10 @@ fn insert_scope_entries(
 	scope: &SourceScope,
 	want: &str,
 ) {
+	// The agent scan is loaded at most ONCE per scope, and only if a matching
+	// entry is actually reached: a source whose rows all belong to another scope
+	// must not pay for a scan it never reads.
+	let mut agents: Option<Vec<aghub_core::AgentResources>> = None;
 	match scope {
 		SourceScope::Global => {
 			for (name, entry) in skill::get_all_locked_skills() {
@@ -590,11 +598,14 @@ fn insert_scope_entries(
 				}
 				if let Some(skill_path) = entry.skill_path.clone() {
 					let hash = entry.content_hash.clone().unwrap_or_default();
-					let local_hashes = local_hashes_for_installed(
-						&name,
-						ResourceScope::GlobalOnly,
-						None,
-					);
+					let agents = agents.get_or_insert_with(|| {
+						aghub_core::load_all_agents(
+							ResourceScope::GlobalOnly,
+							None,
+						)
+					});
+					let local_hashes =
+						local_hashes_for_installed(agents, &name);
 					baseline.insert(
 						skill_path,
 						BaselineEntry {
@@ -625,11 +636,14 @@ fn insert_scope_entries(
 					*recorded_ref = entry.ref_name.clone();
 				}
 				if let Some(skill_path) = entry.skill_path.clone() {
-					let local_hashes = local_hashes_for_installed(
-						&name,
-						ResourceScope::ProjectOnly,
-						Some(root),
-					);
+					let agents = agents.get_or_insert_with(|| {
+						aghub_core::load_all_agents(
+							ResourceScope::ProjectOnly,
+							Some(root),
+						)
+					});
+					let local_hashes =
+						local_hashes_for_installed(agents, &name);
 					baseline.insert(
 						skill_path,
 						BaselineEntry {
@@ -1254,8 +1268,18 @@ pub fn diff_source(
 	deps: SourceDiffDeps<'_>,
 ) -> SourceDiffOutcome {
 	let source = input.source.trim().to_string();
+	let diff_started = std::time::Instant::now();
+	let baseline_started = std::time::Instant::now();
 	let (baseline, _src_type, _recorded_ref) =
 		merged_baseline_for_source(&input.scopes, &source);
+	// The baseline hashes every installed copy of every matching entry, so it is
+	// local-disk work that scales with the source's row count — report it apart
+	// from the fetch, or a slow diff cannot be attributed to disk vs network.
+	log::info!(
+		"source diff [{source}]: baseline entries={} took={:?}",
+		baseline.len(),
+		baseline_started.elapsed()
+	);
 
 	// Resolve `(source_type, effective_ref)` via the SHARED helper so the API
 	// and CLI agree on the fetch coordinate. `effective_ref` = explicit query
@@ -1312,12 +1336,26 @@ pub fn diff_source(
 			source: fetch_source.clone(),
 			ref_: cohort_ref,
 		};
-		let repo = match fetch_source_with_resolver(
+		let fetch_started = std::time::Instant::now();
+		let fetched = fetch_source_with_resolver(
 			&source_ref,
 			deps.fetcher,
 			deps.resolver,
 			FetchSelection::CatalogSnapshot,
-		) {
+		);
+		log::info!(
+			"source diff [{source}]: cohort {} ref={:?} fetch {} took={:?}",
+			index,
+			source_ref.ref_,
+			match &fetched {
+				Ok(_) => "ok",
+				Err(FetchError::Auth) => "auth-failed",
+				Err(FetchError::BackendUnavailable) => "backend-unavailable",
+				Err(FetchError::Network) => "network-failed",
+			},
+			fetch_started.elapsed()
+		);
+		let repo = match fetched {
 			Ok(repo) => repo,
 			// A cohort that cannot be fetched fails the WHOLE diff rather than
 			// dropping its entries or judging them against another ref's tree —
@@ -1334,10 +1372,17 @@ pub fn diff_source(
 			}
 			Err(FetchError::Network) => return SourceDiffOutcome::FetchFailed,
 		};
+		let classify_started = std::time::Instant::now();
 		let classified = classify_repo_skills(
 			repo.root.as_path(),
 			&cohort,
 			repo.upstream_commit_time(),
+		);
+		log::info!(
+			"source diff [{source}]: cohort {} classify skills={} took={:?}",
+			index,
+			classified.len(),
+			classify_started.elapsed()
 		);
 		for diff in classified {
 			// A cohort speaks about ITS OWN installed entries — `installed_paths`
@@ -1359,6 +1404,11 @@ pub fn diff_source(
 	skills.extend(verdicts);
 	skills.extend(primary_offers);
 
+	log::info!(
+		"source diff [{source}]: done skills={} total={:?}",
+		skills.len(),
+		diff_started.elapsed()
+	);
 	SourceDiffOutcome::Ok { git_ref, skills }
 }
 

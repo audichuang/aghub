@@ -174,7 +174,15 @@ pub async fn diff_source(
 	// Forwarded tokens (header) take precedence over the local keyring: a remote
 	// api has no keyring of its own, so the controller-resolved token must win.
 	// An absent/empty header degrades to the keyring path (backward compatible).
+	// Timed separately: this reads the OS keychain, which can block for seconds
+	// on its first unlock — indistinguishable from a slow network in a log that
+	// only brackets the whole route.
+	let auth_started = std::time::Instant::now();
 	let resolver = SourceAuth::load(forwarded).await;
+	log::info!(
+		"source diff [{source}]: credential resolve took={:?}",
+		auth_started.elapsed()
+	);
 	let outcome = rocket::tokio::task::spawn_blocking(move || {
 		sources::diff_source(
 			input,

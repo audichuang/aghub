@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aghub_git::{
 	github_api_host, Blob, Credentials, GitError, GithubRest, GixShallow,
@@ -161,15 +161,30 @@ impl SkillRepository {
 			host_owned.as_deref().and_then(github_api_host).is_some()
 				&& self.rest.is_some();
 
+		// Timing spans below are the ONLY visibility into where a slow source
+		// diff spends its seconds: resolve/list/materialize are separate network
+		// round trips, and a log that reports just the total cannot tell a slow
+		// tip resolution from a large blob download.
+		let started = Instant::now();
 		if try_rest {
 			let rest = self.rest.as_ref().expect("checked above");
 			match rest.resolve(&git_sr, auth.as_ref()) {
 				Ok(snap) => {
+					log::info!(
+						"skill repo resolve: backend=rest ref={:?} took={:?}",
+						sr.ref_,
+						started.elapsed()
+					);
 					self.remember(&snap.commit_oid, BackendKind::Rest)?;
 					return Ok(snap);
 				}
 				Err(GitError::RestFallback(_)) => {
 					// Single fall-through to gix; never re-decided later.
+					log::info!(
+						"skill repo resolve: rest declined after {:?}, \
+						 falling back to gix",
+						started.elapsed()
+					);
 				}
 				Err(e) => return Err(map_git_error(e)),
 			}
@@ -179,6 +194,11 @@ impl SkillRepository {
 			.gix
 			.resolve(&git_sr, auth.as_ref())
 			.map_err(map_git_error)?;
+		log::info!(
+			"skill repo resolve: backend=gix ref={:?} took={:?}",
+			sr.ref_,
+			started.elapsed()
+		);
 		self.remember(&snap.commit_oid, BackendKind::Gix)?;
 		Ok(snap)
 	}
@@ -189,6 +209,7 @@ impl SkillRepository {
 		&self,
 		snapshot: &RepoSnapshot,
 	) -> Result<SkillCatalog, SkillRepoError> {
+		let started = Instant::now();
 		let (tree, blobs) =
 			self.execute_backend(snapshot, |backend, snapshot| {
 				backend.read_tree_and_blobs(snapshot, &|tree| {
@@ -198,6 +219,14 @@ impl SkillRepository {
 						.collect()
 				})
 			})?;
+		log::info!(
+			"skill repo list: tree_entries={} skill_md_blobs={} blob_bytes={} \
+			 took={:?}",
+			tree.entries.len(),
+			blobs.len(),
+			blobs.iter().map(|b| b.bytes.len()).sum::<usize>(),
+			started.elapsed()
+		);
 		let skill_md_entries = catalog_skill_md_entries(&tree);
 		let blob_by_oid: HashMap<&str, &Blob> =
 			blobs.iter().map(|b| (b.oid.as_str(), b)).collect();
@@ -285,9 +314,15 @@ impl SkillRepository {
 
 		let dest =
 			tempfile::TempDir::new().map_err(|_| SkillRepoError::Network)?;
+		let started = Instant::now();
 		self.execute_backend(snapshot, |backend, snapshot| {
 			backend.materialize(snapshot, &path_refs, dest.path())
 		})?;
+		log::info!(
+			"skill repo materialize: paths={} took={:?}",
+			path_refs.len(),
+			started.elapsed()
+		);
 
 		Ok(FetchedRepo {
 			root: dest.path().to_path_buf(),
