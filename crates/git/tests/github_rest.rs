@@ -1075,9 +1075,9 @@ fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
 		.materialize(&snap, &["skills/music"], dest.path())
 		.expect_err("a 500 on one blob must fail the operation");
 
-	// The server still reports 4 requests left, so a 1-blob read must be
-	// admitted. Without reconciliation the tally would read 4 - 3 = 1 and keep
-	// shrinking on every retry.
+	// The server still reports 3 requests left, so a 1-blob read must be
+	// admitted. Without reconciliation the tally would sit at 3 - 3 = 0 and
+	// refuse it.
 	backend
 		.read_blobs(&snap, &[OID_MUSIC_LINK.to_string()])
 		.expect(

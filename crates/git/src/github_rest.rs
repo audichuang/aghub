@@ -527,7 +527,10 @@ impl RepoFetchBackend for GithubRest {
 		// ponytail: unbounded, same as the blob_cache beside it — one ~2 MB
 		// listing next to every blob's bytes is noise. LRU when blob_cache
 		// gets one. A hit deliberately skips the rate-limit refresh below:
-		// the local admission tally only ever under-counts what remains.
+		// nothing THIS context does can make its own tally rise, so a stale
+		// count only ever refuses too eagerly. (Another context spending the
+		// same token can still leave it too high — the scope limit on
+		// `BlobAdmission`.)
 		{
 			let cached = ctx.tree_cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest tree cache lock poisoned")
@@ -816,9 +819,9 @@ impl RepoFetchBackend for GithubRest {
 
 			// Commit BEFORE propagating any error: these blobs were paid for,
 			// and the tally must reflect what the server actually charged.
-			// Taking the guard by reference makes "still inside the phase" a
-			// type-level fact — releasing it before this point stops compiling
-			// rather than silently reopening the interleave.
+			// Passing the guard makes dropping or moving THIS binding early a
+			// compile error. It is a tripwire for the likely mistake, not a
+			// proof — see `commit_batch`.
 			commit_batch(
 				&_phase,
 				ctx,
@@ -1152,9 +1155,10 @@ mod admission_tests {
 	/// only honest recovery — the alternative is refusing work the server would
 	/// have allowed, for the rest of the window.
 	///
-	/// (The `blob_phase` poison path that calls this is not itself covered:
-	/// poisoning there requires `Scope::spawn` to fail at OS-thread creation,
-	/// which a test cannot provoke reliably.)
+	/// (The recovery path that calls this is covered by
+	/// `a_poisoned_phase_clears_the_half_written_tally`, which poisons the
+	/// phase deterministically. The production trigger for that poison — an
+	/// OS-thread creation failure inside `Scope::spawn` — is not reproduced.)
 	#[test]
 	fn invalidating_forgets_a_half_written_tally() {
 		let observed = SystemTime::now();

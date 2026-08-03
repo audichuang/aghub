@@ -291,9 +291,9 @@ fn read_tree_sizes_match_decompressed_blob_lengths() {
 	}
 }
 
-/// Walking a pinned tree decompresses every blob just to read its length, and
-/// `materialize` walks it again. One walk per snapshot: drop the cache and the
-/// second read of an unresolved-but-same-tree snapshot goes back to Err.
+/// Walking a pinned tree reads a header per entry and `materialize` walks it
+/// again. One walk per snapshot: drop the cache and the second read of an
+/// unresolved-but-same-tree snapshot goes back to Err.
 #[test]
 fn read_tree_is_served_from_cache_after_the_first_walk() {
 	let tmp = tempfile::tempdir().unwrap();
