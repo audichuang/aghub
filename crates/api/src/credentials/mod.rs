@@ -9,6 +9,8 @@
 pub(crate) mod resolve;
 pub(crate) mod source_auth;
 
+use std::collections::HashMap;
+
 // Normalized `(scheme, host, port)` origin used to pin a credential/token to
 // the exact place it came from. Reused by the skills git-scan host guard.
 pub(crate) mod origin;
@@ -119,10 +121,32 @@ impl<T: KeyringPayload> KeyringJson<T> {
 	}
 
 	pub(crate) fn load(&self) -> Result<T, CredentialStoreError> {
+		if let Some(cached) = cache_get(self.service, self.user) {
+			return match cached {
+				Some(json) => Ok(serde_json::from_str(&json)?),
+				None => Ok(T::default()),
+			};
+		}
 		let entry = self.entry()?;
-		match entry.get_password() {
-			Ok(json) => Ok(serde_json::from_str(&json)?),
-			Err(keyring::Error::NoEntry) => Ok(T::default()),
+		let started = std::time::Instant::now();
+		let read = entry.get_password();
+		log::info!(
+			"keyring read: entry={} hit=false took={:?}",
+			self.user,
+			started.elapsed()
+		);
+		match read {
+			Ok(json) => {
+				let parsed = serde_json::from_str(&json)?;
+				cache_put(self.service, self.user, Some(json));
+				Ok(parsed)
+			}
+			Err(keyring::Error::NoEntry) => {
+				cache_put(self.service, self.user, None);
+				Ok(T::default())
+			}
+			// A failing backend is NOT cached: the next caller must be free to
+			// get a real answer once the credential store comes back.
 			Err(e) => Err(e.into()),
 		}
 	}
@@ -134,14 +158,78 @@ impl<T: KeyringPayload> KeyringJson<T> {
 		let entry = self.entry()?;
 		if payload.is_empty() {
 			match entry.delete_credential() {
-				Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+				Ok(()) | Err(keyring::Error::NoEntry) => {
+					cache_put(self.service, self.user, None);
+					Ok(())
+				}
 				Err(e) => Err(e.into()),
 			}
 		} else {
-			entry.set_password(&serde_json::to_string(payload)?)?;
+			let json = serde_json::to_string(payload)?;
+			entry.set_password(&json)?;
+			// Refresh rather than invalidate: this process just wrote the
+			// authoritative value, so the next read must see it without paying
+			// for another round trip.
+			cache_put(self.service, self.user, Some(json));
 			Ok(())
 		}
 	}
+}
+
+/// How long a keyring entry read stays reusable.
+///
+/// The OS credential store is not a cheap local read: on macOS it serializes
+/// concurrent access from one process and can block for SECONDS on the first
+/// touch after the keychain locks. Startup alone issues several credential
+/// reads (the credentials route, the update check, a source diff), and paying
+/// that price once per read made a single check-updates spend 22.9s in
+/// credential resolution.
+///
+/// The window is short on purpose. Writes THROUGH this type refresh the entry
+/// immediately, so the only staleness left is another process (`aghub-cli`, or
+/// `npx skills`) changing a credential behind our back — bounded by this TTL
+/// rather than lasting until the app restarts.
+const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
+type CacheKey = (&'static str, &'static str);
+/// `None` payload = the entry is known-absent (`NoEntry`), which is a real
+/// answer worth caching, not a miss.
+type CacheEntry = (std::time::Instant, Option<String>);
+
+fn cache() -> &'static std::sync::Mutex<HashMap<CacheKey, CacheEntry>> {
+	static CACHE: std::sync::OnceLock<
+		std::sync::Mutex<HashMap<CacheKey, CacheEntry>>,
+	> = std::sync::OnceLock::new();
+	CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+fn cache_get(
+	service: &'static str,
+	user: &'static str,
+) -> Option<Option<String>> {
+	let map = cache().lock().unwrap_or_else(|e| e.into_inner());
+	let (stored_at, payload) = map.get(&(service, user))?;
+	if stored_at.elapsed() >= CACHE_TTL {
+		return None;
+	}
+	Some(payload.clone())
+}
+
+fn cache_put(
+	service: &'static str,
+	user: &'static str,
+	payload: Option<String>,
+) {
+	let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
+	map.insert((service, user), (std::time::Instant::now(), payload));
+}
+
+/// Drop every cached keyring entry. Tests that install a faulty keyring backend
+/// mid-run must call this, or a value cached by an earlier test answers the
+/// read the new backend was supposed to fail.
+#[cfg(test)]
+pub(crate) fn clear_cache_for_test() {
+	cache().lock().unwrap_or_else(|e| e.into_inner()).clear();
 }
 
 /// The github-credentials keyring entry: `service = "aghub"`,
@@ -216,6 +304,12 @@ pub(crate) mod test_hooks {
 
 	impl ForceCredentialBackendUnavailable {
 		pub(crate) fn new() -> Self {
+			// Swapping the builder is not enough on its own: a value cached
+			// from the PREVIOUS backend would answer the read this guard exists
+			// to make fail, and the fail-closed assertion would pass for the
+			// wrong reason. Clear on the way in and on the way out, so neither
+			// backend can answer for the other.
+			super::clear_cache_for_test();
 			keyring::set_default_credential_builder(Box::new(
 				FaultyCredentialBuilder,
 			));
@@ -228,6 +322,7 @@ pub(crate) mod test_hooks {
 			keyring::set_default_credential_builder(
 				keyring::default::default_credential_builder(),
 			);
+			super::clear_cache_for_test();
 		}
 	}
 
@@ -245,6 +340,7 @@ pub(crate) mod test_hooks {
 			keyring::set_default_credential_builder(
 				keyring::mock::default_credential_builder(),
 			);
+			super::clear_cache_for_test();
 			Self
 		}
 	}
@@ -254,6 +350,77 @@ pub(crate) mod test_hooks {
 			keyring::set_default_credential_builder(
 				keyring::default::default_credential_builder(),
 			);
+			super::clear_cache_for_test();
 		}
+	}
+}
+
+#[cfg(test)]
+mod cache_tests {
+	use super::*;
+	use crate::routes::credentials::StoredCredential;
+
+	fn cred(id: &str) -> StoredCredential {
+		StoredCredential {
+			id: id.to_string(),
+			name: format!("name-{id}"),
+			token: format!("token-{id}"),
+		}
+	}
+
+	/// A write must be visible to the very next read.
+	///
+	/// The read path caches, so this is the failure mode that matters: if a
+	/// write did not refresh the cached entry, the token a user just added
+	/// stays invisible for the whole TTL and their private-source fetch fails
+	/// with "no credential" while the UI shows the credential present.
+	///
+	/// The leading `load()` is what gives the test teeth — it seeds the cache
+	/// with the EMPTY store, so a `store()` that forgets to refresh leaves that
+	/// stale empty value behind for the second `load()` to return.
+	#[test]
+	fn a_write_is_visible_to_the_next_read() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _mock = test_hooks::MockKeyringBackend::new();
+
+		let store = credentials_store();
+		assert!(
+			store.load().ok().expect("empty store loads").is_empty(),
+			"the mock backend starts empty"
+		);
+
+		store.store(&vec![cred("a")]).ok().expect("store writes");
+
+		let after = store.load().ok().expect("store reloads");
+		assert_eq!(
+			after.len(),
+			1,
+			"a write must invalidate or refresh the cached entry"
+		);
+		assert_eq!(after[0].id, "a");
+	}
+
+	/// Deleting (storing an empty payload) must be visible too — the delete
+	/// branch takes a different path than `set_password`, so it needs its own
+	/// cache refresh.
+	#[test]
+	fn a_delete_is_visible_to_the_next_read() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let _mock = test_hooks::MockKeyringBackend::new();
+
+		let store = credentials_store();
+		store.store(&vec![cred("b")]).ok().expect("store writes");
+		assert_eq!(store.load().ok().expect("reload").len(), 1);
+
+		store.store(&Vec::new()).ok().expect("delete writes");
+
+		assert!(
+			store.load().ok().expect("reload after delete").is_empty(),
+			"a delete must not leave the pre-delete value cached"
+		);
 	}
 }

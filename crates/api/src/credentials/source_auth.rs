@@ -34,16 +34,17 @@ impl CredentialSnapshot {
 		),
 		tokio::task::JoinError,
 	> {
-		// Two INDEPENDENT keyring reads. Run on separate blocking tasks rather
-		// than back-to-back on one: each is a round trip to the OS credential
-		// store, and when that store is slow or unreachable the cost is a
-		// per-read timeout, so sequencing them doubles the stall. A real host
-		// measured 5.3s here on macOS, and ~30s on a Linux box whose
-		// secret-service was unreachable (two ~15s timeouts, one after the
-		// other).
-		let credentials = tokio::task::spawn_blocking(load_credentials);
-		let bindings = tokio::task::spawn_blocking(load_source_bindings);
-		Ok((credentials.await?, bindings.await?))
+		// Deliberately SEQUENTIAL on one blocking task. Splitting these into two
+		// concurrent tasks was tried and measured WORSE on macOS — 5.3s became
+		// 22.9s — because the OS keychain serializes concurrent access from one
+		// process anyway, and the app already has other in-flight credential
+		// reads at startup; adding more contenders only deepened the queue. The
+		// cost that mattered was the number of round trips, not their
+		// arrangement, so it is the cache in `KeyringJson::load` that fixes this.
+		tokio::task::spawn_blocking(|| {
+			(load_credentials(), load_source_bindings())
+		})
+		.await
 	}
 
 	fn empty() -> Self {
