@@ -236,7 +236,9 @@ know their target and fetch `Skills(affected)` directly (no catalog).
   Origin/token pinning uses an **explicit** `github.com → api.github.com` trusted
   mapping, not a loose suffix match.
 - **Request discipline**: dedup blobs by SHA; **default concurrency 6** (named
-  constant, not a range); compute the request/byte budget from tree metadata
+  constant, not a range) — _superseded 2026-08-03: the constant is 16 and the
+  batch barrier became a continuously-fed worker pool; see
+  `DEFAULT_CONCURRENCY`_; compute the request/byte budget from tree metadata
   **before** downloading and check the remaining rate-limit; write to a private
   staging `TempDir` and expose the `FetchedRepo` **only after all blobs succeed**
   (all-or-nothing); the backend accepts an **absolute deadline / cancellation**
@@ -511,7 +513,7 @@ keep REST + gix (Decision 6).
 | Core perf requirement had no acceptance test                                                                                                                   | Added request-set "no over-fetch / no history" + depth-1 fixture tests                                                                                           |
 
 P2 folded: conditional-fallback wording (Story 10), filename normalization → Out of
-Scope, named concurrency default (6).
+Scope, named concurrency default (6 — superseded 2026-08-03, now 16).
 
 **Still open (needs-verification, to confirm during implementation, not blockers):**
 GitHub raw media type behavior on large blobs / redirects / rate-limit headers;

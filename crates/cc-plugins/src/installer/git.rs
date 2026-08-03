@@ -192,6 +192,12 @@ fn reset_extraction_target(target_dir: &Path) -> Result<()> {
 pub(crate) fn build_http_client(timeout_secs: u64) -> Result<reqwest::Client> {
 	reqwest::Client::builder()
 		.user_agent("aghub-plugin-installer")
+		// The body here is a .tar.gz this crate decompresses itself with
+		// flate2. A host that ALSO labels it `Content-Encoding: gzip` (S3
+		// metadata, nginx gzip_static) would have reqwest decode it first, and
+		// flate2 then fails with "invalid gzip header". The workspace enables
+		// reqwest's `gzip` feature for the GitHub REST path, so opt out here.
+		.no_gzip()
 		.timeout(std::time::Duration::from_secs(timeout_secs))
 		.build()
 		.context("Failed to create HTTP client")

@@ -14,7 +14,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -30,11 +30,18 @@ use crate::RepoSnapshot;
 /// Default number of concurrent blob downloads (Decision: named constant, not a
 /// range).
 ///
-/// 16 keeps the outer fetch concurrency (4) × 16 = 64 in flight, under GitHub's
-/// documented 100-concurrent secondary limit, and `api.github.com` advertises
-/// `MAX_CONCURRENT_STREAMS=100` so they all multiplex on one h2 connection.
-/// Measured on 41 blobs: 6 → 398ms, 16 → 253ms, 32 → 217ms (32 would breach the
-/// 100-concurrent ceiling for a marginal gain).
+/// Measured on 41 blobs: 6 → 398ms, 16 → 253ms, 32 → 217ms — past 16 the gain
+/// is marginal because `reqwest::blocking` drives every stream from ONE
+/// current-thread runtime. `api.github.com` advertises
+/// `MAX_CONCURRENT_STREAMS=100`, so 16 streams still multiplex on one h2
+/// connection.
+///
+/// This is a **per-repository** ceiling, NOT a process-wide one: every
+/// `SkillRepository` builds its own backend, and a desktop process can have
+/// several in their blob phase at once (background check-updates, a pinned
+/// source session, an install). Nothing here caps the process total — if
+/// GitHub's documented 100-concurrent secondary limit ever starts returning
+/// 403s, the fix is a shared semaphore, not a smaller constant.
 pub const DEFAULT_CONCURRENCY: usize = 16;
 
 /// Accept header for commit + tree JSON endpoints.
@@ -191,7 +198,29 @@ pub(crate) struct RepoContext {
 #[derive(Default)]
 pub(crate) struct BlobAdmission {
 	remaining_requests: Option<u64>,
+	/// When `remaining_requests` was last read off a live response. A tally is
+	/// only meaningful inside the rate-limit window it was measured in.
+	observed_at: Option<Instant>,
 	byte_sizes: HashMap<String, u64>,
+}
+
+/// A tally older than this may predate a rate-limit window rollover, so it is
+/// treated as unknown rather than as a refusal.
+const ADMISSION_TALLY_TTL: Duration = Duration::from_secs(60);
+
+impl BlobAdmission {
+	/// Record a live `x-ratelimit-remaining` reading — the ONLY writer.
+	fn observe(&mut self, remaining: u64) {
+		self.remaining_requests = Some(remaining);
+		self.observed_at = Some(Instant::now());
+	}
+
+	/// Requests known to be left, or `None` when the tally is stale.
+	fn remaining(&self) -> Option<u64> {
+		self.observed_at
+			.filter(|t| t.elapsed() < ADMISSION_TALLY_TTL)
+			.and(self.remaining_requests)
+	}
 }
 
 /// GitHub REST fast-path backend. Constructed with an [`HttpTransport`]; an
@@ -499,8 +528,8 @@ impl RepoFetchBackend for GithubRest {
 					"GithubRest blob admission lock poisoned",
 				)
 			})?;
-			if remaining.is_some() {
-				admission.remaining_requests = remaining;
+			if let Some(remaining) = remaining {
+				admission.observe(remaining);
 			}
 			admission.byte_sizes.clear();
 			for entry in &entries {
@@ -574,7 +603,7 @@ impl RepoFetchBackend for GithubRest {
 				.iter()
 				.filter_map(|oid| admission.byte_sizes.get(oid))
 				.sum::<u64>();
-			if let Some(remaining) = admission.remaining_requests {
+			if let Some(remaining) = admission.remaining() {
 				if request_budget > remaining {
 					return Err(GitError::rest_fallback(format!(
 						"blob admission needs {request_budget} requests and \
@@ -582,6 +611,8 @@ impl RepoFetchBackend for GithubRest {
 						 remain"
 					)));
 				}
+				// Reserve for the batch; the responses below correct this back
+				// to the server's real count.
 				admission.remaining_requests = Some(remaining - request_budget);
 			}
 		}
@@ -595,15 +626,19 @@ impl RepoFetchBackend for GithubRest {
 			// ponytail: a hint, not a cancel token — a worker may still finish
 			// the request it already sent. Waste ceiling ~1 request/worker.
 			let aborted = AtomicBool::new(false);
+			// Lowest `x-ratelimit-remaining` seen. Since the tree cache landed,
+			// this is the ONLY thing that corrects the reservation above back
+			// to what the server actually charged.
+			let observed = AtomicU64::new(u64::MAX);
 			let missing = &missing;
 			let ctx = &ctx;
 			let transport: &dyn HttpTransport = self.transport.as_ref();
 
-			let fetched = std::thread::scope(|scope| {
+			let (fetched, failure) = std::thread::scope(|scope| {
 				// No `move`: the workers borrow the atomics and the context.
 				let handles: Vec<_> = (0..workers)
 					.map(|_| {
-						scope.spawn(|| -> Result<Vec<Blob>> {
+						scope.spawn(|| -> (Vec<Blob>, Option<GitError>) {
 							let mut mine = Vec::new();
 							while !aborted.load(Ordering::Relaxed) {
 								let i = next.fetch_add(1, Ordering::Relaxed);
@@ -611,20 +646,19 @@ impl RepoFetchBackend for GithubRest {
 								match fetch_blob(
 									transport,
 									operation_deadline,
-									ctx.api_host,
-									&ctx.owner,
-									&ctx.repo,
-									ctx.token.as_deref(),
+									ctx,
 									oid,
+									&observed,
 								) {
 									Ok(blob) => mine.push(blob),
 									Err(e) => {
 										aborted.store(true, Ordering::Relaxed);
-										return Err(e);
+										// Keep `mine`: those blobs are paid for.
+										return (mine, Some(e));
 									}
 								}
 							}
-							Ok(mine)
+							(mine, None)
 						})
 					})
 					.collect();
@@ -633,9 +667,11 @@ impl RepoFetchBackend for GithubRest {
 				let mut first_err: Option<GitError> = None;
 				for handle in handles {
 					match handle.join() {
-						Ok(Ok(mut mine)) => blobs.append(&mut mine),
-						Ok(Err(e)) => {
-							first_err.get_or_insert(e);
+						Ok((mut mine, e)) => {
+							blobs.append(&mut mine);
+							if let Some(e) = e {
+								first_err.get_or_insert(e);
+							}
 						}
 						Err(_) => {
 							first_err.get_or_insert_with(|| {
@@ -646,12 +682,11 @@ impl RepoFetchBackend for GithubRest {
 						}
 					}
 				}
-				match first_err {
-					Some(e) => Err(e),
-					None => Ok(blobs),
-				}
-			})?;
+				(blobs, first_err)
+			});
 
+			// Commit BEFORE propagating any error: these blobs were paid for,
+			// and the tally must reflect what the server actually charged.
 			let mut cache = ctx.blob_cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest blob cache lock poisoned")
 			})?;
@@ -659,6 +694,15 @@ impl RepoFetchBackend for GithubRest {
 				cache.insert(blob.oid.clone(), blob.bytes.clone());
 			}
 			drop(cache);
+			let seen = observed.load(Ordering::Relaxed);
+			if seen != u64::MAX {
+				if let Ok(mut admission) = ctx.blob_admission.lock() {
+					admission.observe(seen);
+				}
+			}
+			if let Some(e) = failure {
+				return Err(e);
+			}
 			out.extend(fetched);
 		}
 
@@ -805,15 +849,15 @@ fn commits_url(
 fn fetch_blob(
 	transport: &dyn HttpTransport,
 	deadline: Option<Instant>,
-	api_host: &str,
-	owner: &str,
-	repo: &str,
-	token: Option<&str>,
+	ctx: &RepoContext,
 	oid: &str,
+	observed_remaining: &AtomicU64,
 ) -> Result<Blob> {
-	let url =
-		format!("https://{api_host}/repos/{owner}/{repo}/git/blobs/{oid}");
-	let headers = build_headers(token, ACCEPT_RAW);
+	let url = format!(
+		"https://{}/repos/{}/{}/git/blobs/{oid}",
+		ctx.api_host, ctx.owner, ctx.repo
+	);
+	let headers = build_headers(ctx.token.as_deref(), ACCEPT_RAW);
 	let response = transport
 		.execute(HttpRequest {
 			url,
@@ -823,6 +867,12 @@ fn fetch_blob(
 		.map_err(|e| {
 			GitError::rest_fallback(format!("transport error: {e}"))
 		})?;
+	if let Some(remaining) = response
+		.header("x-ratelimit-remaining")
+		.and_then(|v| v.parse::<u64>().ok())
+	{
+		observed_remaining.fetch_min(remaining, Ordering::Relaxed);
+	}
 	if !(200..300).contains(&response.status) {
 		return Err(GitError::rest_fallback(format!(
 			"HTTP {} fetching blob {oid}",

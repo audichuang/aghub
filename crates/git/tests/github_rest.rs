@@ -998,3 +998,79 @@ fn a_slow_blob_does_not_stall_the_blobs_queued_behind_it() {
 		assert!(dest.path().join(format!("skills/many/f{i}.md")).exists());
 	}
 }
+
+/// A worker that fails must not discard what its batch already paid for: those
+/// blobs were charged against the rate limit either way, so the next attempt
+/// has to be served from cache rather than re-downloaded.
+#[test]
+fn a_failed_blob_batch_keeps_the_ones_already_paid_for() {
+	let happy = happy_responder();
+	let (t, recorded) = transport(move |req: &HttpRequest| {
+		if blob_oid(&req.url).as_deref() == Some(OID_MUSIC_RUN) {
+			return Ok(status(500, &[]));
+		}
+		happy(req)
+	});
+	// Concurrency 1 makes the tree order the fetch order, so SKILL.md is
+	// downloaded before run.sh fails the batch.
+	let backend = GithubRest::new(t).with_concurrency(1);
+	let snap = backend.resolve(&github_source(), None).unwrap();
+	let dest = tempfile::tempdir().unwrap();
+
+	backend
+		.materialize(&snap, &["skills/music"], dest.path())
+		.expect_err("a 500 on one blob must fail the operation");
+
+	let before = recorded.lock().unwrap().len();
+	let blobs = backend
+		.read_blobs(&snap, &[OID_MUSIC_SKILL.to_string()])
+		.expect("the surviving blob is cached, so this needs no network");
+	assert_eq!(blobs[0].bytes, MUSIC_SKILL_BODY);
+	assert_eq!(
+		recorded.lock().unwrap().len(),
+		before,
+		"a blob downloaded before the failure must be served from cache, \
+		 not re-fetched"
+	);
+}
+
+/// The rate-limit tally must be corrected by what the server actually charged.
+/// Reserving the whole batch up front and never reconciling leaves the tally
+/// permanently short after an aborted batch, which then refuses a retry that
+/// GitHub would have allowed.
+#[test]
+fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
+	let happy = happy_responder();
+	let (t, _recorded) = transport(move |req: &HttpRequest| {
+		// Every response carries the server's live count. 3 is exactly the
+		// batch size, so an un-reconciled reservation drains the tally to 0 and
+		// refuses the single-blob retry below.
+		let remaining = ("x-ratelimit-remaining", "3");
+		if blob_oid(&req.url).as_deref() == Some(OID_MUSIC_RUN) {
+			return Ok(status(500, &[remaining]));
+		}
+		let mut response = happy(req)?;
+		if response.status == 200 {
+			response
+				.headers
+				.push((remaining.0.to_string(), remaining.1.to_string()));
+		}
+		Ok(response)
+	});
+	let backend = GithubRest::new(t).with_concurrency(1);
+	let snap = backend.resolve(&github_source(), None).unwrap();
+	let dest = tempfile::tempdir().unwrap();
+
+	backend
+		.materialize(&snap, &["skills/music"], dest.path())
+		.expect_err("a 500 on one blob must fail the operation");
+
+	// The server still reports 4 requests left, so a 1-blob read must be
+	// admitted. Without reconciliation the tally would read 4 - 3 = 1 and keep
+	// shrinking on every retry.
+	backend
+		.read_blobs(&snap, &[OID_MUSIC_LINK.to_string()])
+		.expect(
+			"the tally must follow the server, not the aborted reservation",
+		);
+}

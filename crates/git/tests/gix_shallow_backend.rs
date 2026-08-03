@@ -23,10 +23,12 @@ use aghub_git::{
 	StagedEntryMode,
 };
 
-fn git(args: &[&str], cwd: &Path) {
+fn git(args: &[&str], cwd: &Path) -> String {
 	let out = Command::new("git")
 		.args(args)
 		.current_dir(cwd)
+		// C locale: `verify-pack` output below is parsed positionally.
+		.env("LC_ALL", "C")
 		.env("GIT_CONFIG_GLOBAL", "/dev/null")
 		.env("GIT_CONFIG_SYSTEM", "/dev/null")
 		.env("GIT_AUTHOR_NAME", "t")
@@ -40,6 +42,7 @@ fn git(args: &[&str], cwd: &Path) {
 		"git {args:?} failed: {}",
 		String::from_utf8_lossy(&out.stderr)
 	);
+	String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
 /// Origin repo with a sub-folder skill `skills/music/` containing a SKILL.md, a
@@ -335,4 +338,119 @@ fn read_tree_is_served_from_cache_after_the_first_walk() {
 		listing(&cached),
 		"the cached listing must be identical to the walked one"
 	);
+}
+
+/// Origin whose tip holds several same-sized, progressively-mutated blobs: each
+/// `vN` differs from `v(N-1)` by ONE block and from `v0` by N blocks, so the
+/// cheapest base for `vN` is `v(N-1)` and pack-objects builds a real delta
+/// CHAIN rather than a flat set of depth-1 deltas.
+fn build_delta_origin(root: &Path) -> std::path::PathBuf {
+	let origin = root.join("delta-origin");
+	std::fs::create_dir_all(origin.join("skills/big")).unwrap();
+
+	let mut blocks: Vec<String> = (0..8)
+		.map(|b| {
+			(0..1000)
+				.map(|i| format!("block {b} line {i} lorem ipsum dolor sit\n"))
+				.collect()
+		})
+		.collect();
+	for v in 0..8 {
+		if v > 0 {
+			blocks[v - 1] = (0..1000)
+				.map(|i| format!("MUTATED {v} line {i} lorem ipsum dolor si\n"))
+				.collect();
+		}
+		std::fs::write(
+			origin.join(format!("skills/big/v{v}.txt")),
+			blocks.concat(),
+		)
+		.unwrap();
+	}
+	std::fs::write(
+		origin.join("skills/big/SKILL.md"),
+		b"---\nname: big\ndescription: packed delta fixture\n---\n",
+	)
+	.unwrap();
+
+	git(&["init", "-q", "-b", "main"], &origin);
+	git(&["add", "-A"], &origin);
+	git(&["commit", "-q", "-m", "init"], &origin);
+	origin
+}
+
+/// `walk_tree` reads `TreeEntry.size` from the object HEADER instead of
+/// decompressing the blob. For a packed DELTA that size comes out of the delta
+/// header, not the object itself — so this pins the premise the whole
+/// optimization rests on: a delta's declared size is still the RESOLVED
+/// (decompressed) length, at every depth of a delta chain.
+///
+/// `root_size_preflight` sums these to refuse an oversized root skill, so a
+/// header size that reported the delta stream's length instead (as
+/// `git verify-pack -v` does — 61 bytes for a 463 KB blob here) would silently
+/// wave a huge repo past the guard.
+#[test]
+fn read_tree_sizes_are_correct_for_packed_delta_blobs() {
+	let tmp = tempfile::tempdir().unwrap();
+	let origin = build_delta_origin(tmp.path());
+	let url = format!("file://{}", origin.display());
+
+	// Fetch the way GixShallow does, but keep the temp dir so the pack the
+	// backend will actually read can be inspected.
+	let (temp, _tip) =
+		aghub_git::fetch::fetch_ref_to_temp(&url, Some("main"), None, None)
+			.unwrap();
+	let idx = std::fs::read_dir(temp.path().join("objects/pack"))
+		.expect("a fetch must produce a pack")
+		.filter_map(|e| e.ok())
+		.map(|e| e.file_name().to_string_lossy().into_owned())
+		.find(|n| n.ends_with(".idx"))
+		.expect("a fetch must produce a pack index");
+
+	// `verify-pack -v`: `oid type size size-in-pack offset [depth base-oid]` —
+	// the two trailing columns appear only on delta objects.
+	let verify = git(
+		&["verify-pack", "-v", &format!("objects/pack/{idx}")],
+		temp.path(),
+	);
+	let depths: Vec<u32> = verify
+		.lines()
+		.filter_map(|line| {
+			let c: Vec<_> = line.split_whitespace().collect();
+			(c.len() == 7 && c[1] == "blob").then(|| c[5].parse().ok())?
+		})
+		.collect();
+	// Guard the FIXTURE, not the code: without packed blob deltas — and without
+	// a chain deeper than one level — this test proves nothing about headers.
+	assert!(
+		depths.len() >= 4 && depths.iter().any(|d| *d >= 2),
+		"fixture stopped producing a packed blob delta chain (depths {depths:?}); \
+		 the header-size claim would go untested"
+	);
+
+	// Same claim as `read_tree_sizes_match_decompressed_blob_lengths`, now over
+	// blobs that only exist in the pack as deltas.
+	let backend = GixShallow::new();
+	let snap = backend.resolve(&source_ref(&origin), None).unwrap();
+	let tree = backend.read_tree(&snap).unwrap();
+	let mut regular = 0;
+	for entry in &tree.entries {
+		if !matches!(
+			entry.mode,
+			StagedEntryMode::Regular | StagedEntryMode::Executable
+		) {
+			continue;
+		}
+		let blobs = backend
+			.read_blobs(&snap, std::slice::from_ref(&entry.oid))
+			.unwrap();
+		assert_eq!(
+			entry.size,
+			Some(blobs[0].bytes.len() as u64),
+			"declared size for {} must equal its decompressed length",
+			entry.path
+		);
+		regular += 1;
+	}
+	assert!(regular >= 8, "expected the fixture's blobs, got {regular}");
 }
