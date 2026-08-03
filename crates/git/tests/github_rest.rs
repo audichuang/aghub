@@ -1088,24 +1088,42 @@ fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
 /// Two blob batches on one context must not interleave. `fetch_skills` wraps
 /// `spawn_blocking` in a `timeout`, and a timed-out blocking task keeps running
 /// while `PinnedSourceClaim::drop` returns the session for the user to retry —
-/// so a retry can genuinely overlap the run it replaced, both holding the same
+/// so a retry genuinely overlaps the run it replaced, both holding the same
 /// `Arc<SkillRepository>`. Interleaved batches let a slow response from the
 /// earlier one overwrite the later one's reconciled tally.
+///
+/// The first request to arrive holds its slot and WAITS for the other batch to
+/// appear, so the verdict does not depend on the scheduler: if the batches can
+/// overlap, the waiter observes it; if they are serialized, no amount of
+/// scheduling luck can make a second batch show up while the lock is held.
 #[test]
 fn concurrent_blob_batches_on_one_context_do_not_interleave() {
-	// Which batch each blob belongs to, by oid.
 	let batch_of = |oid: &str| match oid {
 		OID_MUSIC_SKILL | OID_MUSIC_RUN | OID_MUSIC_LINK => 'a',
 		_ => 'b',
 	};
 	let happy = happy_responder();
-	let order = Arc::new(Mutex::new(Vec::<char>::new()));
-	let seen = Arc::clone(&order);
+	let seen: Arc<Mutex<BTreeSet<char>>> =
+		Arc::new(Mutex::new(BTreeSet::new()));
+	let gate_used = Arc::new(AtomicUsize::new(0));
+	let overlapped = Arc::new(AtomicUsize::new(0));
+	let (s, g, o) = (
+		Arc::clone(&seen),
+		Arc::clone(&gate_used),
+		Arc::clone(&overlapped),
+	);
+
 	let (t, _recorded) = transport(move |req: &HttpRequest| {
 		if let Some(oid) = blob_oid(&req.url) {
-			seen.lock().unwrap().push(batch_of(&oid));
-			// Hold the slot so an unserialized second batch would slip in.
-			std::thread::sleep(Duration::from_millis(20));
+			s.lock().unwrap().insert(batch_of(&oid));
+			if g.fetch_add(1, SeqCst) == 0 {
+				// Hold this slot until the other batch shows up, or give up.
+				let stop = Instant::now() + Duration::from_millis(500);
+				while Instant::now() < stop && s.lock().unwrap().len() < 2 {
+					std::thread::sleep(Duration::from_millis(2));
+				}
+				o.store(s.lock().unwrap().len(), SeqCst);
+			}
 		}
 		happy(req)
 	});
@@ -1115,28 +1133,31 @@ fn concurrent_blob_batches_on_one_context_do_not_interleave() {
 	// Prime the tree so neither batch pays for it inside the race window.
 	backend.read_tree(&snap).unwrap();
 
-	let batch_a = [OID_MUSIC_SKILL, OID_MUSIC_RUN, OID_MUSIC_LINK]
-		.map(str::to_string)
-		.to_vec();
-	let batch_b = [OID_OTHER_SKILL, OID_OTHER_BIG, OID_README]
-		.map(str::to_string)
-		.to_vec();
-
+	let batches = [
+		[OID_MUSIC_SKILL, OID_MUSIC_RUN, OID_MUSIC_LINK],
+		[OID_OTHER_SKILL, OID_OTHER_BIG, OID_README],
+	];
+	// Both threads are released together, so neither can finish before the
+	// other has even been scheduled.
+	let start = std::sync::Barrier::new(batches.len());
 	std::thread::scope(|scope| {
-		for batch in [batch_a, batch_b] {
+		for batch in batches {
 			let backend = Arc::clone(&backend);
 			let snap = snap.clone();
-			scope.spawn(move || backend.read_blobs(&snap, &batch).unwrap());
+			let start = &start;
+			scope.spawn(move || {
+				let oids: Vec<String> =
+					batch.iter().map(|o| (*o).to_string()).collect();
+				start.wait();
+				backend.read_blobs(&snap, &oids).unwrap();
+			});
 		}
 	});
 
-	// Serialized batches produce one run of 'a' and one run of 'b' — never a
-	// mix. Count the transitions: two interleaved batches make more than one.
-	let order = order.lock().unwrap();
-	let transitions = order.windows(2).filter(|w| w[0] != w[1]).count();
 	assert_eq!(
-		transitions, 1,
-		"batches interleaved (request order {order:?}); their ledger updates \
-		 can overwrite each other"
+		overlapped.load(SeqCst),
+		1,
+		"a second batch issued requests while the first held the phase; their \
+		 ledger updates can overwrite each other"
 	);
 }

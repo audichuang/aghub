@@ -656,9 +656,21 @@ impl RepoFetchBackend for GithubRest {
 		// Reserve → download → reconcile is one indivisible pass: without this
 		// a second batch's reconcile can be overwritten by a slower response
 		// from the first, raising the tally back above what the server charged.
-		let _phase = ctx.blob_phase.lock().map_err(|_| {
-			GitError::clone_failed("GithubRest blob phase lock poisoned")
-		})?;
+		// Start the clock BEFORE the wait, or a queued caller would get a fresh
+		// full budget on top of the one it spent waiting and this operation's
+		// bound would stack per waiter.
+		let operation_deadline = self.operation_deadline()?;
+		// Recovering from poison is correct here specifically because this mutex
+		// guards ordering and holds no data: a panicking batch leaves nothing
+		// half-written behind it. Without this, one `Scope::spawn` failure under
+		// resource exhaustion would retire the context for good — every later
+		// retry failing instantly where it used to have a chance.
+		let _phase = ctx
+			.blob_phase
+			.lock()
+			.unwrap_or_else(|poisoned| poisoned.into_inner());
+		// The wait may have consumed the whole budget.
+		remaining_timeout(operation_deadline)?;
 
 		// One request per unique SHA.
 		let mut seen = HashSet::new();
@@ -673,7 +685,6 @@ impl RepoFetchBackend for GithubRest {
 		}
 
 		let concurrency = self.concurrency;
-		let operation_deadline = self.operation_deadline()?;
 		let mut out = Vec::with_capacity(unique.len());
 		let mut missing = Vec::new();
 		{
