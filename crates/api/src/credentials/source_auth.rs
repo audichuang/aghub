@@ -34,10 +34,16 @@ impl CredentialSnapshot {
 		),
 		tokio::task::JoinError,
 	> {
-		tokio::task::spawn_blocking(|| {
-			(load_credentials(), load_source_bindings())
-		})
-		.await
+		// Two INDEPENDENT keyring reads. Run on separate blocking tasks rather
+		// than back-to-back on one: each is a round trip to the OS credential
+		// store, and when that store is slow or unreachable the cost is a
+		// per-read timeout, so sequencing them doubles the stall. A real host
+		// measured 5.3s here on macOS, and ~30s on a Linux box whose
+		// secret-service was unreachable (two ~15s timeouts, one after the
+		// other).
+		let credentials = tokio::task::spawn_blocking(load_credentials);
+		let bindings = tokio::task::spawn_blocking(load_source_bindings);
+		Ok((credentials.await?, bindings.await?))
 	}
 
 	fn empty() -> Self {

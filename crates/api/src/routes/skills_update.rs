@@ -76,30 +76,52 @@ pub struct CheckUpdatesParams {
 	project_root: Option<String>,
 }
 
+/// Folder hashes for the installed copies of `wanted`, keyed by skill name.
+///
+/// `wanted` is the lock's key set, and restricting the sweep to it is what keeps
+/// this off every unlocked skill on the machine: folder-hashing reads every file
+/// of every skill folder, and a real host measured 464 folders hashed to answer
+/// 34 locked names — 10.4s of the check's 18.6s, ~93% of it discarded.
+///
+/// The filter is by NAME only, so every agent's copy of a wanted name is still
+/// seen and the ambiguity detection below is unchanged.
 fn local_hashes_for_scope(
 	resource_scope: ResourceScope,
 	project_root: Option<&Path>,
+	wanted: &HashSet<String>,
 ) -> HashMap<String, String> {
 	let mut hashes = HashMap::new();
 	let mut ambiguous = HashSet::new();
-	// This walks EVERY discovered skill of every agent and folder-hashes each
-	// one, while the only consumer looks up the lock's names. The counters say
-	// how lopsided that is on a real machine — hash calls vs the map that
-	// survives — so the cost of narrowing it can be judged from a user's log
-	// instead of guessed.
+	if wanted.is_empty() {
+		return hashes;
+	}
 	let started = std::time::Instant::now();
 	let mut hashed = 0usize;
+	let mut reused = 0usize;
+	// Agents that link to the same universal master resolve to the SAME root,
+	// and a folder hash is a pure function of that folder — so the second agent
+	// carrying a linked skill costs a map lookup instead of a full tree read.
+	// One master was observed being re-hashed 19 times without this.
+	let mut hash_by_root: HashMap<std::path::PathBuf, String> = HashMap::new();
 	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
 		for skill in agent.skills {
-			if ambiguous.contains(&skill.name) {
+			if !wanted.contains(&skill.name) || ambiguous.contains(&skill.name)
+			{
 				continue;
 			}
 			let Some(root) = skill_root(&skill) else {
 				continue;
 			};
-			hashed += 1;
-			let Ok(hash) = skill::compute_skill_folder_hash(&root) else {
-				continue;
+			let hash = if let Some(known) = hash_by_root.get(&root) {
+				reused += 1;
+				known.clone()
+			} else {
+				hashed += 1;
+				let Ok(fresh) = skill::compute_skill_folder_hash(&root) else {
+					continue;
+				};
+				hash_by_root.insert(root.clone(), fresh.clone());
+				fresh
 			};
 			match hashes.get(&skill.name) {
 				Some(existing) if existing != &hash => {
@@ -114,9 +136,11 @@ fn local_hashes_for_scope(
 		}
 	}
 	log::info!(
-		"check-updates: local hashes folders_hashed={} distinct_names={} \
-		 ambiguous={} took={:?}",
+		"check-updates: local hashes wanted={} folders_hashed={} \
+		 root_reused={} distinct_names={} ambiguous={} took={:?}",
+		wanted.len(),
 		hashed,
+		reused,
 		hashes.len(),
 		ambiguous.len(),
 		started.elapsed()
@@ -184,11 +208,11 @@ type Identities = HashMap<String, HealPrecondition>;
 /// write leaves the live lock ahead of the snapshot, so the precondition
 /// rejects the heal instead.
 fn global_lock_entries(offline: bool) -> (Vec<EntryInput>, Identities) {
-	global_lock_entries_with(skill::lock::global::read_skill_lock, || {
+	global_lock_entries_with(skill::lock::global::read_skill_lock, |wanted| {
 		if offline {
 			HashMap::new()
 		} else {
-			local_hashes_for_scope(ResourceScope::GlobalOnly, None)
+			local_hashes_for_scope(ResourceScope::GlobalOnly, None, wanted)
 		}
 	})
 }
@@ -198,10 +222,15 @@ fn global_lock_entries(offline: bool) -> (Vec<EntryInput>, Identities) {
 /// interleaving the ordering defends against — deterministically, with no sleep.
 fn global_lock_entries_with(
 	read_lock: impl FnOnce() -> skill::SkillLockFile,
-	read_hashes: impl FnOnce() -> HashMap<String, String>,
+	read_hashes: impl FnOnce(&HashSet<String>) -> HashMap<String, String>,
 ) -> (Vec<EntryInput>, Identities) {
 	let lock = read_lock();
-	let local_hashes = &read_hashes();
+	// The lock snapshot decides which names are worth hashing. Deriving the set
+	// HERE rather than inside `read_hashes` keeps the documented order intact:
+	// the lock is still read first, and the hashes still come from a disk read
+	// that happens after it.
+	let wanted: HashSet<String> = lock.skills.keys().cloned().collect();
+	let local_hashes = &read_hashes(&wanted);
 	let mut identities = Identities::new();
 	let entries = lock
 		.skills
@@ -239,10 +268,15 @@ fn project_lock_entries(
 	offline: bool,
 ) -> (Vec<EntryInput>, Identities) {
 	let lock = skill::lock::local::read_local_lock(project_root);
+	let wanted: HashSet<String> = lock.skills.keys().cloned().collect();
 	let local_hashes = &if offline {
 		HashMap::new()
 	} else {
-		local_hashes_for_scope(ResourceScope::ProjectOnly, project_root)
+		local_hashes_for_scope(
+			ResourceScope::ProjectOnly,
+			project_root,
+			&wanted,
+		)
 	};
 	let mut identities = Identities::new();
 	let entries = lock
@@ -1854,6 +1888,53 @@ mod tests {
 		});
 	}
 
+	/// The hash sweep must cover EXACTLY the locked names — and carry the right
+	/// value for them.
+	///
+	/// Both halves are load-bearing. Hashing beyond the lock is pure waste (a
+	/// real host hashed 464 folders to answer 34 names, 10.4s of an 18.6s
+	/// check), but a filter that drops a name the lock DOES ask about is worse
+	/// than slow: `local_hash: None` makes the check compare against nothing and
+	/// report a locally-modified skill as up to date. The value assertion is
+	/// what separates "filtered correctly" from "filtered everything out".
+	#[test]
+	fn local_hashes_cover_exactly_the_locked_names() {
+		let project = tempfile::tempdir().unwrap();
+		for name in ["locked", "unlocked"] {
+			let dir = project.path().join(format!(".claude/skills/{name}"));
+			std::fs::create_dir_all(&dir).unwrap();
+			std::fs::write(
+				dir.join("SKILL.md"),
+				format!(
+					"---\nname: {name}\ndescription: d\n---\nbody {name}\n"
+				),
+			)
+			.unwrap();
+		}
+
+		let wanted: HashSet<String> =
+			std::iter::once("locked".to_string()).collect();
+		let hashes = local_hashes_for_scope(
+			ResourceScope::ProjectOnly,
+			Some(project.path()),
+			&wanted,
+		);
+
+		let expected = skill::compute_skill_folder_hash(
+			&project.path().join(".claude/skills/locked"),
+		)
+		.expect("the locked skill folder hashes");
+		assert_eq!(
+			hashes.get("locked"),
+			Some(&expected),
+			"a locked name must carry its real folder hash"
+		);
+		assert!(
+			!hashes.contains_key("unlocked"),
+			"a skill absent from the lock must not be hashed"
+		);
+	}
+
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
 		let _guard = crate::routes::test_env_lock()
 			.lock()
@@ -2070,7 +2151,7 @@ mod tests {
 
 			let (_entries, identities) = global_lock_entries_with(
 				skill::lock::global::read_skill_lock,
-				|| {
+				|_wanted| {
 					// npx finishes updating to tree B right here.
 					let mut updated = global_entry();
 					updated.skill_folder_hash = "npx-tree-b".to_string();
