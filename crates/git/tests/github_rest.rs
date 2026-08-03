@@ -11,9 +11,11 @@
 #![cfg(unix)]
 
 use std::collections::{BTreeSet, HashMap};
+use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command;
+use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -791,4 +793,208 @@ fn rest_materialized_skill_is_byte_and_hash_identical_to_gix_clone() {
 		"Source hash of the REST skill must equal the clone's"
 	);
 	assert_ne!(h_staged, skill::hash::EMPTY_SKILLS_LOCK_DIGEST);
+}
+
+// ─── Transport-level performance invariants ───
+
+/// The transport must advertise gzip and hand back DECOMPRESSED bytes. Drop the
+/// `gzip` feature from the workspace `reqwest` and this reads a raw gzip frame.
+#[test]
+fn reqwest_transport_sends_accept_encoding_and_decompresses_gzip() {
+	// gzip(br#"{"gzip":"ok"}"#) as fixed bytes — no compressor dev-dep needed.
+	const GZIP_BODY: [u8; 33] = [
+		0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02, 0xff, 0xab, 0x56,
+		0x4a, 0xaf, 0xca, 0x2c, 0x50, 0xb2, 0x52, 0xca, 0xcf, 0x56, 0xaa, 0x05,
+		0x00, 0x68, 0x08, 0x54, 0x8a, 0x0d, 0x00, 0x00, 0x00,
+	];
+
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let address = listener.local_addr().unwrap();
+	let (head_tx, head_rx) = mpsc::channel();
+	std::thread::spawn(move || {
+		let (mut stream, _) = listener.accept().unwrap();
+		let (mut head, mut byte) = (Vec::new(), [0u8; 1]);
+		while !head.ends_with(b"\r\n\r\n") {
+			if stream.read(&mut byte).unwrap_or(0) == 0 {
+				break;
+			}
+			head.push(byte[0]);
+		}
+		head_tx
+			.send(String::from_utf8_lossy(&head).to_ascii_lowercase())
+			.unwrap();
+		let mut out = format!(
+			"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+			 Content-Encoding: gzip\r\nContent-Length: {}\r\n\
+			 Connection: close\r\n\r\n",
+			GZIP_BODY.len()
+		)
+		.into_bytes();
+		out.extend_from_slice(&GZIP_BODY);
+		let _ = stream.write_all(&out);
+	});
+
+	let response = ReqwestTransport::new()
+		.execute(HttpRequest {
+			url: format!("http://{address}/tree"),
+			headers: Vec::new(),
+			timeout: Some(Duration::from_secs(5)),
+		})
+		.unwrap();
+
+	let head = head_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+	assert!(
+		head.contains("accept-encoding: gzip"),
+		"the transport must advertise gzip; request head was:\n{head}"
+	);
+	assert_eq!(
+		response.body,
+		br#"{"gzip":"ok"}"#.to_vec(),
+		"the transport must hand back DECOMPRESSED bytes"
+	);
+}
+
+/// Two independently-constructed transports must land on ONE process-wide
+/// client: a keep-alive server counting accepted connections sees exactly one.
+/// Revert `ReqwestTransport::new` to a per-instance client and this reads 2.
+#[test]
+fn reqwest_transports_share_one_connection_pool() {
+	let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+	let address = listener.local_addr().unwrap();
+	let connections = Arc::new(AtomicUsize::new(0));
+	let counter = Arc::clone(&connections);
+	std::thread::spawn(move || {
+		for stream in listener.incoming() {
+			counter.fetch_add(1, SeqCst);
+			let mut stream = stream.unwrap();
+			std::thread::spawn(move || {
+				// Byte-at-a-time so a split request head cannot flake the test.
+				let (mut head, mut byte) = (Vec::new(), [0u8; 1]);
+				while stream.read(&mut byte).unwrap_or(0) == 1 {
+					head.push(byte[0]);
+					if head.ends_with(b"\r\n\r\n") {
+						head.clear();
+						let _ = stream.write_all(
+							b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok",
+						);
+					}
+				}
+			});
+		}
+	});
+
+	for path in ["one", "two"] {
+		let response = ReqwestTransport::new()
+			.execute(HttpRequest {
+				url: format!("http://{address}/{path}"),
+				headers: Vec::new(),
+				timeout: Some(Duration::from_secs(5)),
+			})
+			.expect("request must succeed");
+		assert_eq!(response.status, 200);
+	}
+
+	assert_eq!(
+		connections.load(SeqCst),
+		1,
+		"two transports must reuse one pooled connection, not handshake twice"
+	);
+}
+
+/// A pinned snapshot's tree is immutable content, so list + preflight +
+/// materialize must share ONE tree API call. Drop the cache and this reads 3.
+#[test]
+fn pinned_tree_is_fetched_once_across_operations() {
+	let tmp = tempfile::tempdir().unwrap();
+	let (t, recorded) = transport(happy_responder());
+	let backend = GithubRest::new(t);
+	let snap = backend.resolve(&github_source(), None).unwrap();
+
+	backend.read_tree(&snap).unwrap();
+	backend
+		.materialize(&snap, &["skills/music"], &tmp.path().join("a"))
+		.unwrap();
+	backend
+		.materialize(&snap, &["skills/other"], &tmp.path().join("b"))
+		.unwrap();
+
+	let trees = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| is_tree(&r.url))
+		.count();
+	assert_eq!(
+		trees, 1,
+		"an immutable pinned tree must cost exactly one API call, got {trees}"
+	);
+	// The cached listing still drives materialization correctly.
+	assert!(tmp.path().join("b/skills/other/SKILL.md").exists());
+}
+
+/// A slow blob must not stall the ones queued behind it. Reverting to
+/// `missing.chunks(concurrency)` caps in-flight starts at CONCURRENCY while the
+/// first request is outstanding, and this assertion goes red.
+#[test]
+fn a_slow_blob_does_not_stall_the_blobs_queued_behind_it() {
+	const CONCURRENCY: usize = 4;
+	const BLOBS: usize = 12;
+
+	let oids: Vec<String> = (0..BLOBS)
+		.map(|i| format!("{:040x}", 0xb10b_0000u64 + i as u64))
+		.collect();
+	let entries: Vec<String> = oids
+		.iter()
+		.enumerate()
+		.map(|(i, oid)| {
+			format!(
+				r#"{{"path":"skills/many/f{i}.md","mode":"100644","type":"blob","sha":"{oid}","size":4}}"#
+			)
+		})
+		.collect();
+	let tree = format!(
+		r#"{{"sha":"{TREE_OID}","truncated":false,"tree":[{}]}}"#,
+		entries.join(",")
+	);
+	let commit = commit_json();
+
+	let started = Arc::new(AtomicUsize::new(0));
+	let observed = Arc::new(AtomicUsize::new(0));
+	let (s, o) = (Arc::clone(&started), Arc::clone(&observed));
+
+	let (t, _recorded) = transport(move |req: &HttpRequest| {
+		if blob_oid(&req.url).is_some() {
+			// The FIRST blob request holds its slot and watches whether the
+			// backend keeps issuing more while it is in flight.
+			if s.fetch_add(1, SeqCst) == 0 {
+				let stop = Instant::now() + Duration::from_secs(2);
+				while s.load(SeqCst) <= CONCURRENCY && Instant::now() < stop {
+					std::thread::sleep(Duration::from_millis(2));
+				}
+				o.store(s.load(SeqCst), SeqCst);
+			}
+			return Ok(raw_ok(b"body".to_vec()));
+		}
+		if is_tree(&req.url) {
+			return Ok(json_ok(tree.clone().into_bytes()));
+		}
+		Ok(json_ok(commit.clone().into_bytes()))
+	});
+
+	let backend = GithubRest::new(t).with_concurrency(CONCURRENCY);
+	let snap = backend.resolve(&github_source(), None).unwrap();
+	let dest = tempfile::tempdir().unwrap();
+	backend
+		.materialize(&snap, &["skills/many"], dest.path())
+		.unwrap();
+
+	assert!(
+		observed.load(SeqCst) > CONCURRENCY,
+		"only {} blob requests had started while the first was still in flight \
+		 (concurrency {CONCURRENCY}) — the pool is barriered, not continuously fed",
+		observed.load(SeqCst)
+	);
+	for i in 0..BLOBS {
+		assert!(dest.path().join(format!("skills/many/f{i}.md")).exists());
+	}
 }

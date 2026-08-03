@@ -14,7 +14,8 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use crate::backend::{
@@ -28,7 +29,13 @@ use crate::RepoSnapshot;
 
 /// Default number of concurrent blob downloads (Decision: named constant, not a
 /// range).
-pub const DEFAULT_CONCURRENCY: usize = 6;
+///
+/// 16 keeps the outer fetch concurrency (4) × 16 = 64 in flight, under GitHub's
+/// documented 100-concurrent secondary limit, and `api.github.com` advertises
+/// `MAX_CONCURRENT_STREAMS=100` so they all multiplex on one h2 connection.
+/// Measured on 41 blobs: 6 → 398ms, 16 → 253ms, 32 → 217ms (32 would breach the
+/// 100-concurrent ceiling for a marginal gain).
+pub const DEFAULT_CONCURRENCY: usize = 16;
 
 /// Accept header for commit + tree JSON endpoints.
 const ACCEPT_JSON: &str = "application/vnd.github+json";
@@ -79,15 +86,27 @@ pub trait HttpTransport: Send + Sync {
 }
 
 /// Production transport: synchronous `reqwest` GET requests.
+///
+/// Every instance borrows ONE process-wide client, so its connection pool — and
+/// therefore the ~80ms TCP+TLS handshake to `api.github.com` — is paid once per
+/// process instead of once per `SkillRepository`. Auth stays per-request (see
+/// [`build_headers`]): NEVER give this client `default_headers` or a cookie
+/// store, or one source's token would ride along on another source's request.
+/// Never give it a client-level `.timeout(...)` either — that would silently
+/// cover requests whose caller forgot to pass a deadline budget.
 pub struct ReqwestTransport {
-	client: reqwest::blocking::Client,
+	client: &'static reqwest::blocking::Client,
 }
 
 impl ReqwestTransport {
-	/// Build a transport with a default blocking client.
+	/// Borrow the process-wide blocking client, building it on first use.
+	///
+	/// Construction stays in `new` (not in `execute`) so the existing "build the
+	/// client off the async worker" call sites keep their guarantee verbatim.
 	pub fn new() -> Self {
+		static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 		Self {
-			client: reqwest::blocking::Client::new(),
+			client: CLIENT.get_or_init(reqwest::blocking::Client::new),
 		}
 	}
 }
@@ -163,6 +182,9 @@ pub(crate) struct RepoContext {
 	pub token: Option<String>,
 	pub tree_oid: String,
 	pub blob_cache: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+	/// tree_oid → already-parsed listing. A pinned oid names immutable content,
+	/// so one fetch per snapshot serves list + preflight + materialize.
+	pub tree_cache: Arc<Mutex<HashMap<String, RepoTree>>>,
 	pub blob_admission: Arc<Mutex<BlobAdmission>>,
 }
 
@@ -350,6 +372,7 @@ impl RepoFetchBackend for GithubRest {
 					token,
 					tree_oid: tree_oid.clone(),
 					blob_cache: Arc::new(Mutex::new(HashMap::new())),
+					tree_cache: Arc::new(Mutex::new(HashMap::new())),
 					blob_admission: Arc::new(Mutex::new(
 						BlobAdmission::default(),
 					)),
@@ -373,6 +396,18 @@ impl RepoFetchBackend for GithubRest {
 		} else {
 			ctx.tree_oid.as_str()
 		};
+		// ponytail: unbounded, same as the blob_cache beside it — one ~2 MB
+		// listing next to every blob's bytes is noise. LRU when blob_cache
+		// gets one. A hit deliberately skips the rate-limit refresh below:
+		// the local admission tally only ever under-counts what remains.
+		{
+			let cached = ctx.tree_cache.lock().map_err(|_| {
+				GitError::clone_failed("GithubRest tree cache lock poisoned")
+			})?;
+			if let Some(tree) = cached.get(tree_oid) {
+				return Ok(tree.clone());
+			}
+		}
 		let url = format!(
 			"https://{}/repos/{}/{}/git/trees/{}?recursive=1",
 			ctx.api_host, ctx.owner, ctx.repo, tree_oid
@@ -478,7 +513,16 @@ impl RepoFetchBackend for GithubRest {
 			}
 		}
 
-		Ok(RepoTree { entries })
+		let tree = RepoTree { entries };
+		// Insert LAST: truncated / non-2xx / malformed all returned above, so a
+		// failed read is never cached.
+		ctx.tree_cache
+			.lock()
+			.map_err(|_| {
+				GitError::clone_failed("GithubRest tree cache lock poisoned")
+			})?
+			.insert(tree_oid.to_string(), tree.clone());
+		Ok(tree)
 	}
 
 	fn read_blobs(
@@ -542,49 +586,80 @@ impl RepoFetchBackend for GithubRest {
 			}
 		}
 
-		for chunk in missing.chunks(concurrency) {
-			let chunk_blobs = std::thread::scope(|scope| {
-				let handles: Vec<_> = chunk
-					.iter()
-					.map(|oid| {
-						let transport = Arc::clone(&self.transport);
-						let deadline = operation_deadline;
-						let api_host = ctx.api_host;
-						let owner = ctx.owner.clone();
-						let repo = ctx.repo.clone();
-						let token = ctx.token.clone();
-						let oid = oid.clone();
-						scope.spawn(move || {
-							fetch_blob(
-								transport.as_ref(),
-								deadline,
-								api_host,
-								&owner,
-								&repo,
-								token.as_deref(),
-								&oid,
-							)
+		if !missing.is_empty() {
+			// A continuously-fed pool, NOT `missing.chunks(concurrency)`: a
+			// batch barrier makes every worker wait on its chunk's slowest blob
+			// before the next request is even issued.
+			let workers = concurrency.min(missing.len());
+			let next = AtomicUsize::new(0);
+			// ponytail: a hint, not a cancel token — a worker may still finish
+			// the request it already sent. Waste ceiling ~1 request/worker.
+			let aborted = AtomicBool::new(false);
+			let missing = &missing;
+			let ctx = &ctx;
+			let transport: &dyn HttpTransport = self.transport.as_ref();
+
+			let fetched = std::thread::scope(|scope| {
+				// No `move`: the workers borrow the atomics and the context.
+				let handles: Vec<_> = (0..workers)
+					.map(|_| {
+						scope.spawn(|| -> Result<Vec<Blob>> {
+							let mut mine = Vec::new();
+							while !aborted.load(Ordering::Relaxed) {
+								let i = next.fetch_add(1, Ordering::Relaxed);
+								let Some(oid) = missing.get(i) else { break };
+								match fetch_blob(
+									transport,
+									operation_deadline,
+									ctx.api_host,
+									&ctx.owner,
+									&ctx.repo,
+									ctx.token.as_deref(),
+									oid,
+								) {
+									Ok(blob) => mine.push(blob),
+									Err(e) => {
+										aborted.store(true, Ordering::Relaxed);
+										return Err(e);
+									}
+								}
+							}
+							Ok(mine)
 						})
 					})
 					.collect();
 
-				let mut blobs = Vec::with_capacity(handles.len());
+				let mut blobs = Vec::with_capacity(missing.len());
+				let mut first_err: Option<GitError> = None;
 				for handle in handles {
-					let blob = handle.join().map_err(|_| {
-						GitError::rest_fallback("blob download thread panicked")
-					})??;
-					blobs.push(blob);
+					match handle.join() {
+						Ok(Ok(mut mine)) => blobs.append(&mut mine),
+						Ok(Err(e)) => {
+							first_err.get_or_insert(e);
+						}
+						Err(_) => {
+							first_err.get_or_insert_with(|| {
+								GitError::rest_fallback(
+									"blob download thread panicked",
+								)
+							});
+						}
+					}
 				}
-				Ok::<Vec<Blob>, GitError>(blobs)
+				match first_err {
+					Some(e) => Err(e),
+					None => Ok(blobs),
+				}
 			})?;
+
 			let mut cache = ctx.blob_cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest blob cache lock poisoned")
 			})?;
-			for blob in &chunk_blobs {
+			for blob in &fetched {
 				cache.insert(blob.oid.clone(), blob.bytes.clone());
 			}
 			drop(cache);
-			out.extend(chunk_blobs);
+			out.extend(fetched);
 		}
 
 		Ok(out)

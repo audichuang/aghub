@@ -103,6 +103,11 @@ pub struct GixShallow {
 	timeout: Option<Duration>,
 	/// commit_oid → fetched bare repo temp dir (kept alive for reuse).
 	cache: Mutex<HashMap<String, Arc<TempDir>>>,
+	/// tree_oid → walked listing. `materialize` re-reads the tree, and a walk
+	/// touches every object in the tip, so one walk per snapshot is enough.
+	/// If the repo cache above ever gains eviction, evict here in lockstep —
+	/// otherwise a listing could outlive the bare repo its oids point into.
+	tree_cache: Mutex<HashMap<String, RepoTree>>,
 }
 
 impl GixShallow {
@@ -116,6 +121,7 @@ impl GixShallow {
 		Self {
 			timeout,
 			cache: Mutex::new(HashMap::new()),
+			tree_cache: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -232,6 +238,17 @@ impl RepoFetchBackend for GixShallow {
 	}
 
 	fn read_tree(&self, snapshot: &RepoSnapshot) -> Result<RepoTree> {
+		// A hit is itself proof this tree was already walked — and therefore
+		// that its snapshot was resolved — so it may answer before
+		// `open_cached`'s "call resolve first" precondition check.
+		{
+			let cached = self.tree_cache.lock().map_err(|_| {
+				GitError::clone_failed("GixShallow tree cache lock poisoned")
+			})?;
+			if let Some(tree) = cached.get(&snapshot.tree_oid) {
+				return Ok(tree.clone());
+			}
+		}
 		let repo = self.open_cached(snapshot)?;
 		let tree_oid = gix::ObjectId::from_hex(snapshot.tree_oid.as_bytes())
 			.map_err(|e| {
@@ -246,7 +263,14 @@ impl RepoFetchBackend for GixShallow {
 
 		let mut entries = Vec::new();
 		walk_tree(&repo, &tree, "", &mut entries)?;
-		Ok(RepoTree { entries })
+		let walked = RepoTree { entries };
+		self.tree_cache
+			.lock()
+			.map_err(|_| {
+				GitError::clone_failed("GixShallow tree cache lock poisoned")
+			})?
+			.insert(snapshot.tree_oid.clone(), walked.clone());
+		Ok(walked)
 	}
 
 	fn read_blobs(
@@ -393,23 +417,28 @@ fn walk_tree(
 			StagedEntryMode::Regular
 		};
 
-		let oid = entry.object_id().to_string();
+		let oid = entry.object_id();
 		let size = match staged_mode {
+			// The match is load-bearing: a gitlink's oid names a commit that a
+			// shallow fetch never transferred, so it must not reach the odb.
 			StagedEntryMode::Symlink | StagedEntryMode::Gitlink => None,
 			StagedEntryMode::Regular | StagedEntryMode::Executable => {
-				let object = entry.object().map_err(|e| {
+				// Object header only — no blob decompression. A packed delta
+				// reads its declared result size from the delta header
+				// (20-byte probe), so this stays cheap inside a delta chain.
+				let header = repo.find_header(oid).map_err(|e| {
 					GitError::clone_failed(format!(
-						"Reading blob for '{path}' failed: {e}"
+						"Reading blob header for '{path}' failed: {e}"
 					))
 				})?;
-				Some(object.data.len() as u64)
+				Some(header.size())
 			}
 		};
 
 		out.push(TreeEntry {
 			path,
 			mode: staged_mode,
-			oid,
+			oid: oid.to_string(),
 			size,
 		});
 	}

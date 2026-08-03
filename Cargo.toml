@@ -44,7 +44,10 @@ anyhow = "1.0"
 colored = "3.0"
 
 # HTTP dependencies
-reqwest = { version = "0.13", features = [ "json" ] }
+# gzip: GitHub serves recursive-tree JSON uncompressed otherwise (measured
+# 3.8 MB -> 588 KB on a large repo). Feature-unified across every reqwest
+# consumer in the graph, so it must live here rather than in one crate.
+reqwest = { version = "0.13", features = [ "json", "gzip" ] }
 url = "2.5"
 base64 = "0.22"
 

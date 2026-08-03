@@ -18,7 +18,10 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::process::Command;
 
-use aghub_git::{GixShallow, RepoFetchBackend, SourceRef, StagedEntryMode};
+use aghub_git::{
+	GixShallow, RepoFetchBackend, RepoSnapshot, RepoTree, SourceRef,
+	StagedEntryMode,
+};
 
 fn git(args: &[&str], cwd: &Path) {
 	let out = Command::new("git")
@@ -247,5 +250,89 @@ fn materialize_selected_folder_is_byte_identical_to_clone() {
 	assert!(
 		!dest.join("UNRELATED.txt").exists(),
 		"materialize must write only the selected sub-tree"
+	);
+}
+
+/// `TreeEntry.size` must stay the DECOMPRESSED byte length whichever way the
+/// walk obtains it (full object vs object header) — `root_size_preflight` sums
+/// these to refuse oversized root skills.
+#[test]
+fn read_tree_sizes_match_decompressed_blob_lengths() {
+	let tmp = tempfile::tempdir().unwrap();
+	let origin = build_origin(tmp.path());
+	let backend = GixShallow::new();
+	let snap = backend.resolve(&source_ref(&origin), None).unwrap();
+
+	let tree = backend.read_tree(&snap).unwrap();
+	assert!(tree.entries.len() >= 4, "fixture must have several entries");
+
+	for entry in &tree.entries {
+		match entry.mode {
+			StagedEntryMode::Symlink | StagedEntryMode::Gitlink => assert_eq!(
+				entry.size, None,
+				"{} must not declare a size",
+				entry.path
+			),
+			StagedEntryMode::Regular | StagedEntryMode::Executable => {
+				let blobs = backend
+					.read_blobs(&snap, std::slice::from_ref(&entry.oid))
+					.unwrap();
+				assert_eq!(
+					entry.size,
+					Some(blobs[0].bytes.len() as u64),
+					"declared size for {} must equal its decompressed length",
+					entry.path
+				);
+			}
+		}
+	}
+}
+
+/// Walking a pinned tree decompresses every blob just to read its length, and
+/// `materialize` walks it again. One walk per snapshot: drop the cache and the
+/// second read of an unresolved-but-same-tree snapshot goes back to Err.
+#[test]
+fn read_tree_is_served_from_cache_after_the_first_walk() {
+	let tmp = tempfile::tempdir().unwrap();
+	let origin = build_origin(tmp.path());
+	let backend = GixShallow::new();
+	let snap = backend.resolve(&source_ref(&origin), None).unwrap();
+
+	// A snapshot whose commit was never resolved can only be answered from a
+	// tree cache — before the first walk there is none.
+	let probe = RepoSnapshot {
+		commit_oid: "0".repeat(40),
+		tree_oid: snap.tree_oid.clone(),
+		commit_time: None,
+	};
+	assert!(
+		backend.read_tree(&probe).is_err(),
+		"nothing walked yet -> no cache to answer from"
+	);
+
+	let walked = backend.read_tree(&snap).unwrap();
+	let cached = backend
+		.read_tree(&probe)
+		.expect("the walked tree must be served from cache");
+
+	// Vec, not a set: a cache hit must reproduce the walk order too, because
+	// `SkillRepository::list` feeds that order to skill discovery.
+	let listing = |t: &RepoTree| {
+		t.entries
+			.iter()
+			.map(|e| {
+				(
+					e.path.clone(),
+					format!("{:?}", e.mode),
+					e.oid.clone(),
+					e.size,
+				)
+			})
+			.collect::<Vec<_>>()
+	};
+	assert_eq!(
+		listing(&walked),
+		listing(&cached),
+		"the cached listing must be identical to the walked one"
 	);
 }
