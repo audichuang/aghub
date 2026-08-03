@@ -412,7 +412,11 @@ thread_local! {
 /// The batch's agent scan, counted. Every registered agent's config is re-read
 /// from disk, so doing it per name is what made the advisory installed-check
 /// cost `O(names × agents)`.
-fn scan_agents(
+///
+/// `pub(crate)` so the Sources baseline builder shares the SAME counted entry
+/// point: it has the identical one-scan-per-batch property, and a scan that
+/// bypassed this function would be invisible to the tests that pin it.
+pub(crate) fn scan_agents(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 ) -> Vec<aghub_core::AgentResources> {

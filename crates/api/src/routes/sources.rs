@@ -180,7 +180,8 @@ pub async fn diff_source(
 	let auth_started = std::time::Instant::now();
 	let resolver = SourceAuth::load(forwarded).await;
 	log::info!(
-		"source diff [{source}]: credential resolve took={:?}",
+		"source diff [{}]: credential resolve took={:?}",
+		aghub_git::redact_url_userinfo(&source),
 		auth_started.elapsed()
 	);
 	let outcome = rocket::tokio::task::spawn_blocking(move || {

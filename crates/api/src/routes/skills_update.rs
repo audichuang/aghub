@@ -82,6 +82,13 @@ fn local_hashes_for_scope(
 ) -> HashMap<String, String> {
 	let mut hashes = HashMap::new();
 	let mut ambiguous = HashSet::new();
+	// This walks EVERY discovered skill of every agent and folder-hashes each
+	// one, while the only consumer looks up the lock's names. The counters say
+	// how lopsided that is on a real machine — hash calls vs the map that
+	// survives — so the cost of narrowing it can be judged from a user's log
+	// instead of guessed.
+	let started = std::time::Instant::now();
+	let mut hashed = 0usize;
 	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
 		for skill in agent.skills {
 			if ambiguous.contains(&skill.name) {
@@ -90,6 +97,7 @@ fn local_hashes_for_scope(
 			let Some(root) = skill_root(&skill) else {
 				continue;
 			};
+			hashed += 1;
 			let Ok(hash) = skill::compute_skill_folder_hash(&root) else {
 				continue;
 			};
@@ -105,6 +113,14 @@ fn local_hashes_for_scope(
 			}
 		}
 	}
+	log::info!(
+		"check-updates: local hashes folders_hashed={} distinct_names={} \
+		 ambiguous={} took={:?}",
+		hashed,
+		hashes.len(),
+		ambiguous.len(),
+		started.elapsed()
+	);
 	hashes
 }
 
@@ -656,15 +672,31 @@ pub async fn check_skill_updates(
 	}
 	.resolve()?;
 	let offline = query.offline.unwrap_or(false);
+	// `offline` decides whether this route touches the network AND whether the
+	// local-hash sweep above runs at all, so log the resolved value: the two
+	// modes differ by orders of magnitude and the query string alone does not
+	// say which one ran.
+	let route_started = std::time::Instant::now();
+	let inputs_started = std::time::Instant::now();
 	let CheckInputs {
 		entries,
 		project_root,
 		global_identities,
 		project_identities,
 	} = lock_entries_for_scope(&resolved, offline)?;
+	log::info!(
+		"check-updates: offline={offline} entries={} inputs took={:?}",
+		entries.len(),
+		inputs_started.elapsed()
+	);
 
 	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher);
+	let auth_started = std::time::Instant::now();
 	let resolver = SourceAuth::load(forwarded).await;
+	log::info!(
+		"check-updates: credential resolve took={:?}",
+		auth_started.elapsed()
+	);
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
@@ -677,7 +709,13 @@ pub async fn check_skill_updates(
 		overall_deadline: OVERALL_DEADLINE,
 	};
 
+	let check_started = std::time::Instant::now();
 	let outputs = check_updates(entries, deps).await;
+	log::info!(
+		"check-updates: fetch+compare results={} took={:?}",
+		outputs.len(),
+		check_started.elapsed()
+	);
 	// This WRITES the lock, so it takes the mutation lock and must not run on an
 	// async worker — a check racing a bulk update would otherwise park a Rocket
 	// worker for the whole batch (root AGENTS.md). The fetches above are already
@@ -702,6 +740,11 @@ pub async fn check_skill_updates(
 		.collect();
 	out.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
+	log::info!(
+		"check-updates: done offline={offline} results={} total={:?}",
+		out.len(),
+		route_started.elapsed()
+	);
 	Ok(Json(out))
 }
 

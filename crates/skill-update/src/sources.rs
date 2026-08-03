@@ -599,7 +599,7 @@ fn insert_scope_entries(
 				if let Some(skill_path) = entry.skill_path.clone() {
 					let hash = entry.content_hash.clone().unwrap_or_default();
 					let agents = agents.get_or_insert_with(|| {
-						aghub_core::load_all_agents(
+						crate::mutation::scan_agents(
 							ResourceScope::GlobalOnly,
 							None,
 						)
@@ -637,7 +637,7 @@ fn insert_scope_entries(
 				}
 				if let Some(skill_path) = entry.skill_path.clone() {
 					let agents = agents.get_or_insert_with(|| {
-						aghub_core::load_all_agents(
+						crate::mutation::scan_agents(
 							ResourceScope::ProjectOnly,
 							Some(root),
 						)
@@ -1268,6 +1268,10 @@ pub fn diff_source(
 	deps: SourceDiffDeps<'_>,
 ) -> SourceDiffOutcome {
 	let source = input.source.trim().to_string();
+	// A caller may hand us a clone URL that still carries userinfo, and these
+	// lines land in a log file the user exports and shares. Redact ONCE here so
+	// no later log line has to remember to.
+	let source_log = aghub_git::redact_url_userinfo(&source);
 	let diff_started = std::time::Instant::now();
 	let baseline_started = std::time::Instant::now();
 	let (baseline, _src_type, _recorded_ref) =
@@ -1276,7 +1280,7 @@ pub fn diff_source(
 	// local-disk work that scales with the source's row count — report it apart
 	// from the fetch, or a slow diff cannot be attributed to disk vs network.
 	log::info!(
-		"source diff [{source}]: baseline entries={} took={:?}",
+		"source diff [{source_log}]: baseline entries={} took={:?}",
 		baseline.len(),
 		baseline_started.elapsed()
 	);
@@ -1344,7 +1348,7 @@ pub fn diff_source(
 			FetchSelection::CatalogSnapshot,
 		);
 		log::info!(
-			"source diff [{source}]: cohort {} ref={:?} fetch {} took={:?}",
+			"source diff [{source_log}]: cohort {} ref={:?} fetch {} took={:?}",
 			index,
 			source_ref.ref_,
 			match &fetched {
@@ -1379,7 +1383,7 @@ pub fn diff_source(
 			repo.upstream_commit_time(),
 		);
 		log::info!(
-			"source diff [{source}]: cohort {} classify skills={} took={:?}",
+			"source diff [{source_log}]: cohort {} classify skills={} took={:?}",
 			index,
 			classified.len(),
 			classify_started.elapsed()
@@ -1405,7 +1409,7 @@ pub fn diff_source(
 	skills.extend(primary_offers);
 
 	log::info!(
-		"source diff [{source}]: done skills={} total={:?}",
+		"source diff [{source_log}]: done skills={} total={:?}",
 		skills.len(),
 		diff_started.elapsed()
 	);
@@ -2570,6 +2574,57 @@ mod diff_tests {
 			*fetcher.0.lock().unwrap(),
 			0,
 			"an indeterminate credential decision must not fetch anonymously",
+		);
+	}
+
+	/// The agent scan re-reads every registered agent's config from disk and
+	/// does not vary by skill name, so the baseline builder must run it ONCE per
+	/// scope. Doing it per entry is what made a single source diff cost
+	/// `O(entries × agents)` — 264 full scans for an 11-entry source.
+	///
+	/// Counted through the shared `mutation::scan_agents` seam, so a future
+	/// rewrite that reaches for `load_all_agents` directly fails here rather
+	/// than silently reintroducing the sweep.
+	#[test]
+	fn baseline_scans_agents_once_per_scope_not_once_per_entry() {
+		let project = TempDir::new().unwrap();
+		let source = "owner/multi-entry-baseline";
+		let mut lock = skill::LocalSkillLockFile::new();
+		for name in ["alpha", "beta", "gamma"] {
+			lock.skills.insert(
+				name.to_string(),
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					source: source.to_string(),
+					ref_name: None,
+					source_type: "github".to_string(),
+					skill_path: Some(format!("{name}/SKILL.md")),
+					computed_hash: "h".to_string(),
+					ref_commit: None,
+				},
+			);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		crate::mutation::AGENT_SCANS.with(|scans| scans.set(0));
+		let (baseline, _source_type, _recorded_ref) =
+			merged_baseline_for_source(
+				&[SourceScope::Project {
+					root: project.path().to_path_buf(),
+				}],
+				source,
+			);
+
+		assert_eq!(
+			baseline.len(),
+			3,
+			"all three entries must reach the baseline, or the scan count \
+			 below proves nothing"
+		);
+		assert_eq!(
+			crate::mutation::AGENT_SCANS.with(|scans| scans.get()),
+			1,
+			"3 entries in one scope must scan the agents once"
 		);
 	}
 

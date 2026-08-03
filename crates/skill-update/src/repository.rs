@@ -190,13 +190,19 @@ impl SkillRepository {
 			}
 		}
 
+		// Timed from here, not from `started`: on the REST-declined path `started`
+		// also covers the failed REST round trip, and attributing that to gix is
+		// exactly the misreading these logs exist to prevent. `total` keeps the
+		// wall-clock the caller actually waited.
+		let gix_started = Instant::now();
 		let snap = self
 			.gix
 			.resolve(&git_sr, auth.as_ref())
 			.map_err(map_git_error)?;
 		log::info!(
-			"skill repo resolve: backend=gix ref={:?} took={:?}",
+			"skill repo resolve: backend=gix ref={:?} took={:?} total={:?}",
 			sr.ref_,
+			gix_started.elapsed(),
 			started.elapsed()
 		);
 		self.remember(&snap.commit_oid, BackendKind::Gix)?;
