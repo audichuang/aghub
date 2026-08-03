@@ -327,10 +327,6 @@ fn epoch_seconds_to_time(seconds: u64) -> Option<SystemTime> {
 /// blocking HTTP).
 pub struct GithubRest {
 	pub(crate) transport: Arc<dyn HttpTransport>,
-	/// Test seam: invoked immediately before the blob-phase lock is taken, so a
-	/// test can establish that a caller has genuinely reached the lock rather
-	/// than inferring it from a timeout. `None` in production.
-	pub(crate) blob_phase_probe: Option<Arc<dyn Fn() + Send + Sync>>,
 	pub(crate) deadline: Option<Instant>,
 	pub(crate) timeout: Option<Duration>,
 	pub(crate) concurrency: usize,
@@ -347,7 +343,6 @@ impl GithubRest {
 			timeout: None,
 			concurrency: DEFAULT_CONCURRENCY,
 			cache: Arc::new(Mutex::new(HashMap::new())),
-			blob_phase_probe: None,
 		}
 	}
 
@@ -363,16 +358,6 @@ impl GithubRest {
 	/// retained between a catalog scan and a later install.
 	pub fn with_timeout(mut self, timeout: Duration) -> Self {
 		self.timeout = Some(timeout);
-		self
-	}
-
-	/// Install the blob-phase probe. Test-only seam — see the field.
-	#[doc(hidden)]
-	pub fn with_blob_phase_probe(
-		mut self,
-		probe: Arc<dyn Fn() + Send + Sync>,
-	) -> Self {
-		self.blob_phase_probe = Some(probe);
 		self
 	}
 
@@ -397,7 +382,6 @@ impl GithubRest {
 			timeout: None,
 			concurrency: self.concurrency,
 			cache: Arc::clone(&self.cache),
-			blob_phase_probe: self.blob_phase_probe.clone(),
 		})
 	}
 
@@ -690,9 +674,6 @@ impl RepoFetchBackend for GithubRest {
 		// forever instead would retire the context on a single `Scope::spawn`
 		// failure under resource exhaustion, which is worse than the phantom
 		// deduction and worse than before this lock existed.
-		if let Some(probe) = &self.blob_phase_probe {
-			probe();
-		}
 		let _phase = match ctx.blob_phase.lock() {
 			Ok(guard) => guard,
 			Err(poisoned) => {
@@ -1048,6 +1029,50 @@ fn remaining_timeout(deadline: Option<Instant>) -> Result<Option<Duration>> {
 #[cfg(test)]
 mod admission_tests {
 	use super::*;
+	use std::sync::mpsc;
+
+	const T_COMMIT: &str = "1111111111111111111111111111111111111111";
+	const T_TREE: &str = "2222222222222222222222222222222222222222";
+	const T_BLOB: &str = "3333333333333333333333333333333333333333";
+
+	/// A transport whose blob responses run an arbitrary hook, so a test can
+	/// observe the backend from INSIDE a request that is still in flight.
+	struct HookTransport<F>(F);
+
+	impl<F: Fn() + Send + Sync> HttpTransport for HookTransport<F> {
+		fn execute(&self, request: HttpRequest) -> Result<HttpResponse> {
+			let body = if request.url.contains("/git/blobs/") {
+				(self.0)();
+				b"blob".to_vec()
+			} else if request.url.contains("/git/trees/") {
+				format!(
+					r#"{{"sha":"{T_TREE}","truncated":false,"tree":[{{"path":"a.md","mode":"100644","type":"blob","sha":"{T_BLOB}","size":4}}]}}"#
+				)
+				.into_bytes()
+			} else {
+				format!(
+					r#"{{"sha":"{T_COMMIT}","commit":{{"tree":{{"sha":"{T_TREE}"}}}}}}"#
+				)
+				.into_bytes()
+			};
+			Ok(HttpResponse {
+				status: 200,
+				headers: Vec::new(),
+				body,
+			})
+		}
+	}
+
+	fn hooked(hook: impl Fn() + Send + Sync + 'static) -> GithubRest {
+		GithubRest::new(Arc::new(HookTransport(hook)))
+	}
+
+	fn source() -> SourceRef {
+		SourceRef {
+			url: "https://github.com/acme/skills.git".into(),
+			ref_: Some("main".into()),
+		}
+	}
 
 	fn at(base: SystemTime, secs: u64) -> SystemTime {
 		base + Duration::from_secs(secs)
@@ -1193,5 +1218,71 @@ mod admission_tests {
 		};
 		assert_eq!(rate_limit_reset_secs(&response), None);
 		assert_eq!(epoch_seconds_to_time(u64::MAX), None);
+	}
+
+	/// The phase must stay held for the WHOLE batch, not just its bookkeeping:
+	/// a second batch that slipped in mid-download could have its reconciled
+	/// tally overwritten by a slower response from this one.
+	///
+	/// Asserted with `try_lock` from inside an in-flight request, so there is
+	/// no second caller to schedule and no interval to tune — the question
+	/// "is the phase held right now?" is answered directly.
+	#[test]
+	fn a_batch_holds_the_phase_for_its_whole_run() {
+		let (in_flight, observe) = mpsc::sync_channel::<()>(0);
+		let (release, wait) = mpsc::sync_channel::<()>(0);
+		// A Receiver is not Sync; the hook is shared, so guard it.
+		let wait = Mutex::new(wait);
+		let backend = hooked(move || {
+			in_flight.send(()).unwrap();
+			wait.lock().unwrap().recv().unwrap();
+		});
+		let snapshot = backend.resolve(&source(), None).unwrap();
+		let ctx = backend.get_context(&snapshot.commit_oid).unwrap();
+
+		let held = std::thread::scope(|scope| {
+			let worker = scope
+				.spawn(|| backend.read_blobs(&snapshot, &[T_BLOB.to_string()]));
+			observe.recv().unwrap();
+			// A request is in flight, so the batch is mid-run by construction.
+			let held = ctx.blob_phase.try_lock().is_err();
+			release.send(()).unwrap();
+			worker.join().unwrap().unwrap();
+			held
+		});
+
+		assert!(
+			held,
+			"the phase was free while a blob request was still in flight — 			 another batch could interleave with this one"
+		);
+	}
+
+	/// A batch that panics mid-transaction leaves its reservation deducted with
+	/// nothing to reconcile it. Recovering the lock without clearing that tally
+	/// would refuse every later batch for the rest of the window.
+	#[test]
+	fn a_poisoned_phase_clears_the_half_written_tally() {
+		let backend = hooked(|| {});
+		let snapshot = backend.resolve(&source(), None).unwrap();
+		let ctx = backend.get_context(&snapshot.commit_oid).unwrap();
+
+		// A tally that would refuse the next batch outright.
+		ctx.blob_admission
+			.lock()
+			.unwrap()
+			.observe(0, Some(SystemTime::now() + Duration::from_secs(3600)));
+
+		// Poison deterministically: hold the phase, then panic.
+		let phase = Arc::clone(&ctx.blob_phase);
+		let panicked = std::thread::spawn(move || {
+			let _guard = phase.lock().unwrap();
+			panic!("a batch died mid-transaction");
+		})
+		.join();
+		assert!(panicked.is_err() && ctx.blob_phase.is_poisoned());
+
+		backend
+			.read_blobs(&snapshot, &[T_BLOB.to_string()])
+			.expect("a phantom deduction must not refuse the next batch");
 	}
 }
