@@ -207,15 +207,24 @@ pub(crate) struct RepoContext {
 
 /// Preflight budget for one snapshot's blob phase.
 ///
-/// KNOWN SCOPE LIMIT: this ledger is per-[`RepoContext`], but GitHub's quota is
-/// per-credential and global. Two repositories fetching concurrently on the
-/// same token each see the live count and each reserve against it, so together
-/// they can reserve more than exists and collect 403s instead of one being
-/// refused up front. Pre-dates the worker pool (the old batched path had the
-/// same per-context ledger) and is widened by it. Fixing it properly means a
-/// process-wide reservation bucket keyed by api_host + credential identity —
-/// deliberately out of scope here, since this gate is a courtesy preflight and
-/// the real limit is still enforced by the server.
+/// KNOWN SCOPE LIMIT — the ledger tracks a count, never the reservations in
+/// flight against it, so it is only ever an estimate. Two consequences:
+///
+/// - It is per-[`RepoContext`] while GitHub's quota is per-credential and
+///   global, so two repositories fetching on the same token each reserve
+///   against the same real budget and together can overrun it.
+/// - Within one context, concurrent blob batches reconcile last-writer-wins: a
+///   slow-arriving response from an EARLIER request can raise the count back
+///   above what a later one already recorded.
+///
+/// Neither is reachable from today's callers — the API serializes a session's
+/// fetches through `PinnedSourceSessions::claim` (which removes the entry), and
+/// every CLI fetch builds its own `SkillRepository` — but `RepoFetchBackend` is
+/// `Send + Sync`, so anyone adding concurrency here inherits both. Fixing them
+/// means tracking in-flight reservations in a bucket keyed by api_host +
+/// credential identity. Deliberately out of scope: this gate is a courtesy
+/// preflight, being wrong costs a 403 the server would have sent anyway, and
+/// serializing the phase to fix it would undo the concurrency it guards.
 #[derive(Default)]
 pub(crate) struct BlobAdmission {
 	remaining_requests: Option<u64>,
@@ -1018,6 +1027,11 @@ mod admission_tests {
 		admission.observe(0, Some(at(observed, 60)));
 
 		assert_eq!(admission.remaining_at(at(observed, 59)), Some(0));
+		assert_eq!(
+			admission.remaining_at(at(observed, 60)),
+			None,
+			"the reset instant itself belongs to the NEW window"
+		);
 		assert_eq!(
 			admission.remaining_at(at(observed, 61)),
 			None,
