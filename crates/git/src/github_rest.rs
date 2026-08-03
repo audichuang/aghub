@@ -680,6 +680,10 @@ impl RepoFetchBackend for GithubRest {
 				if let Ok(mut admission) = ctx.blob_admission.lock() {
 					admission.invalidate();
 				}
+				// Clear the bit too, or EVERY later batch re-enters this arm
+				// and throws away the tally it just reconciled — that would
+				// retire this context's preflight permanently.
+				ctx.blob_phase.clear_poison();
 				poisoned.into_inner()
 			}
 		};
@@ -812,22 +816,15 @@ impl RepoFetchBackend for GithubRest {
 
 			// Commit BEFORE propagating any error: these blobs were paid for,
 			// and the tally must reflect what the server actually charged.
-			let mut cache = ctx.blob_cache.lock().map_err(|_| {
-				GitError::clone_failed("GithubRest blob cache lock poisoned")
-			})?;
-			for blob in &fetched {
-				cache.insert(blob.oid.clone(), blob.bytes.clone());
-			}
-			drop(cache);
-			let seen = observed.lock().ok().and_then(|slot| *slot);
-			if let Some(seen) = seen {
-				if let Ok(mut admission) = ctx.blob_admission.lock() {
-					admission.observe(
-						seen.remaining,
-						epoch_seconds_to_time(seen.reset),
-					);
-				}
-			}
+			// Taking the guard by reference makes "still inside the phase" a
+			// type-level fact — releasing it before this point stops compiling
+			// rather than silently reopening the interleave.
+			commit_batch(
+				&_phase,
+				ctx,
+				&fetched,
+				observed.lock().ok().and_then(|slot| *slot),
+			)?;
 			if let Some(e) = failure {
 				return Err(e);
 			}
@@ -971,6 +968,34 @@ fn commits_url(
 			.push(ref_name);
 	}
 	Ok(url.into())
+}
+
+/// Commit a finished batch: cache what was downloaded, then reconcile the
+/// rate-limit tally from what the server reported.
+///
+/// Takes `_phase` purely to prove at the type level that the batch still holds
+/// its phase — this tail is the half that a second batch must not interleave
+/// with, and an in-flight-request test cannot observe it.
+fn commit_batch(
+	_phase: &std::sync::MutexGuard<'_, ()>,
+	ctx: &RepoContext,
+	fetched: &[Blob],
+	observed: Option<RateLimitReading>,
+) -> Result<()> {
+	let mut cache = ctx.blob_cache.lock().map_err(|_| {
+		GitError::clone_failed("GithubRest blob cache lock poisoned")
+	})?;
+	for blob in fetched {
+		cache.insert(blob.oid.clone(), blob.bytes.clone());
+	}
+	drop(cache);
+	if let Some(seen) = observed {
+		if let Ok(mut admission) = ctx.blob_admission.lock() {
+			admission
+				.observe(seen.remaining, epoch_seconds_to_time(seen.reset));
+		}
+	}
+	Ok(())
 }
 
 /// Fetch one blob via the raw media type. Used from worker threads.
@@ -1231,9 +1256,15 @@ mod admission_tests {
 	fn a_batch_holds_the_phase_for_its_whole_run() {
 		let (in_flight, observe) = mpsc::sync_channel::<()>(0);
 		let (release, wait) = mpsc::sync_channel::<()>(0);
-		// A Receiver is not Sync; the hook is shared, so guard it.
+		// A Receiver is not Sync; the hook is shared, so guard it. Only the
+		// FIRST request rendezvouses — a second blob would otherwise block
+		// forever on the zero-capacity channel and hang instead of failing.
 		let wait = Mutex::new(wait);
+		let gated = AtomicBool::new(false);
 		let backend = hooked(move || {
+			if gated.swap(true, Ordering::SeqCst) {
+				return;
+			}
 			in_flight.send(()).unwrap();
 			wait.lock().unwrap().recv().unwrap();
 		});
@@ -1284,5 +1315,11 @@ mod admission_tests {
 		backend
 			.read_blobs(&snapshot, &[T_BLOB.to_string()])
 			.expect("a phantom deduction must not refuse the next batch");
+
+		assert!(
+			!ctx.blob_phase.is_poisoned(),
+			"the poison bit must be cleared, or every later batch re-enters \
+			 recovery and discards the tally it just reconciled"
+		);
 	}
 }
