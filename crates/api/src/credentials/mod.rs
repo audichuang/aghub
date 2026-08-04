@@ -36,6 +36,11 @@ use std::marker::PhantomData;
 /// `InferenceProviderError`'s equivalent `From<keyring::Error>` never diverge
 /// on the classification. Both funnel into the same `KEYCHAIN_UNAVAILABLE`
 /// status/code/message in `crate::error::ApiError`.
+/// `Clone` so a failed read can be REMEMBERED with its classification intact.
+/// The distinction is load-bearing: `Unavailable` makes callers fail closed,
+/// while `Other` lets some of them degrade to anonymous — replaying the wrong
+/// variant silently flips that decision.
+#[derive(Clone)]
 pub(crate) enum CredentialStoreError {
 	/// The backend itself could not be reached.
 	Unavailable(String),
@@ -129,41 +134,58 @@ impl<T: KeyringPayload> KeyringJson<T> {
 	pub(crate) fn load_optional(
 		&self,
 	) -> Result<Option<T>, CredentialStoreError> {
-		if let Some(cached) = cache_get(self.service, self.user) {
-			return match cached {
-				Some(json) => Ok(Some(serde_json::from_str(&json)?)),
-				None => Ok(None),
-			};
-		}
-		let entry = self.entry()?;
-		let started = std::time::Instant::now();
-		let read = entry.get_password();
-		log::info!(
-			"keyring read: entry={} hit=false took={:?}",
-			self.user,
-			started.elapsed()
-		);
-		match read {
-			Ok(json) => {
-				let parsed = serde_json::from_str(&json)?;
-				cache_put(self.service, self.user, Some(json));
-				Ok(Some(parsed))
-			}
-			Err(keyring::Error::NoEntry) => {
-				cache_put(self.service, self.user, None);
-				Ok(None)
-			}
-			Err(e) => Err(e.into()),
+		match self.read_state()? {
+			ReadState::Value(json) => Ok(Some(serde_json::from_str(&json)?)),
+			ReadState::Absent => Ok(None),
 		}
 	}
 
 	pub(crate) fn load(&self) -> Result<T, CredentialStoreError> {
+		Ok(self.load_optional()?.unwrap_or_default())
+	}
+
+	/// The single keyring read, cache in front of it.
+	///
+	/// One primitive for both accessors above: they differ only in how they
+	/// render "the entry is absent", and having two copies of the caching and
+	/// logging was an invitation for the two to drift.
+	fn read_state(&self) -> Result<ReadState, CredentialStoreError> {
 		if let Some(cached) = cache_get(self.service, self.user) {
 			return match cached {
-				Some(json) => Ok(serde_json::from_str(&json)?),
-				None => Ok(T::default()),
+				// A remembered failure is replayed rather than retried — that
+				// is the whole point of caching it (see FAILURE_TTL). It is
+				// replayed VERBATIM: `Unavailable` and `Other` drive different
+				// caller behaviour (fail closed vs degrade), so rebuilding the
+				// error as one fixed variant would change what callers do.
+				CachedRead::Failed(error) => Err(error),
+				CachedRead::Value(json) => Ok(ReadState::Value(json)),
+				CachedRead::Absent => Ok(ReadState::Absent),
 			};
 		}
+		// EVERY outcome is recorded, including the failures. Both ways this can
+		// fail cost the user something: opening the entry fails when the backend
+		// is unreachable, and reading it fails when they dismiss the
+		// authorization dialog. Letting either escape uncached is what turned a
+		// single dismissal into one dialog per caller.
+		match self.read_backend() {
+			Ok(state) => {
+				cache_put(self.service, self.user, CachedRead::from(&state));
+				Ok(state)
+			}
+			Err(error) => {
+				cache_put(
+					self.service,
+					self.user,
+					CachedRead::Failed(error.clone()),
+				);
+				Err(error)
+			}
+		}
+	}
+
+	/// The uncached read. Separated so `read_state` has exactly one place to
+	/// record the outcome.
+	fn read_backend(&self) -> Result<ReadState, CredentialStoreError> {
 		let entry = self.entry()?;
 		let started = std::time::Instant::now();
 		let read = entry.get_password();
@@ -173,17 +195,8 @@ impl<T: KeyringPayload> KeyringJson<T> {
 			started.elapsed()
 		);
 		match read {
-			Ok(json) => {
-				let parsed = serde_json::from_str(&json)?;
-				cache_put(self.service, self.user, Some(json));
-				Ok(parsed)
-			}
-			Err(keyring::Error::NoEntry) => {
-				cache_put(self.service, self.user, None);
-				Ok(T::default())
-			}
-			// A failing backend is NOT cached: the next caller must be free to
-			// get a real answer once the credential store comes back.
+			Ok(json) => Ok(ReadState::Value(json)),
+			Err(keyring::Error::NoEntry) => Ok(ReadState::Absent),
 			Err(e) => Err(e.into()),
 		}
 	}
@@ -196,7 +209,7 @@ impl<T: KeyringPayload> KeyringJson<T> {
 		if payload.is_empty() {
 			match entry.delete_credential() {
 				Ok(()) | Err(keyring::Error::NoEntry) => {
-					cache_put(self.service, self.user, None);
+					cache_put(self.service, self.user, CachedRead::Absent);
 					Ok(())
 				}
 				Err(e) => Err(e.into()),
@@ -207,7 +220,7 @@ impl<T: KeyringPayload> KeyringJson<T> {
 			// Refresh rather than invalidate: this process just wrote the
 			// authoritative value, so the next read must see it without paying
 			// for another round trip.
-			cache_put(self.service, self.user, Some(json));
+			cache_put(self.service, self.user, CachedRead::Value(json));
 			Ok(())
 		}
 	}
@@ -228,10 +241,54 @@ impl<T: KeyringPayload> KeyringJson<T> {
 /// rather than lasting until the app restarts.
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// How long a FAILED read is remembered.
+///
+/// Much shorter than a successful one, and it exists for a different reason.
+/// On macOS a locked keychain shows an authorization dialog, and a user who
+/// dismisses it produces `User canceled the operation`. Startup issues several
+/// independent credential reads (the credentials route, the update check, a
+/// source diff); without remembering the refusal, each one re-opens the dialog,
+/// so a single cancel became three prompts and ~10s of waiting.
+///
+/// Remembering it briefly turns that into one prompt: the reads that follow
+/// take the same answer instead of asking again. The window stays small so a
+/// genuinely transient backend failure — or the user simply deciding to
+/// authorize after all — recovers on its own within seconds.
+const FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
 type CacheKey = (&'static str, &'static str);
-/// `None` payload = the entry is known-absent (`NoEntry`), which is a real
-/// answer worth caching, not a miss.
-type CacheEntry = (std::time::Instant, Option<String>);
+
+/// A SUCCESSFUL read's outcome. Deliberately has no failure variant: a failed
+/// read is an `Err`, so callers cannot be handed one to unwrap and no
+/// `unreachable!` is needed to explain why.
+enum ReadState {
+	/// The entry holds this JSON payload.
+	Value(String),
+	/// The entry does not exist (`NoEntry`) — a real answer, not a miss.
+	Absent,
+}
+
+/// What a previous read of this entry concluded — including that it failed,
+/// which [`ReadState`] cannot express.
+#[derive(Clone)]
+enum CachedRead {
+	Value(String),
+	Absent,
+	/// Carries the WHOLE error, not just its text, so a replay reproduces the
+	/// original classification rather than a guess at it.
+	Failed(CredentialStoreError),
+}
+
+impl From<&ReadState> for CachedRead {
+	fn from(state: &ReadState) -> Self {
+		match state {
+			ReadState::Value(json) => CachedRead::Value(json.clone()),
+			ReadState::Absent => CachedRead::Absent,
+		}
+	}
+}
+
+type CacheEntry = (std::time::Instant, CachedRead);
 
 fn cache() -> &'static std::sync::Mutex<HashMap<CacheKey, CacheEntry>> {
 	static CACHE: std::sync::OnceLock<
@@ -240,25 +297,22 @@ fn cache() -> &'static std::sync::Mutex<HashMap<CacheKey, CacheEntry>> {
 	CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
-fn cache_get(
-	service: &'static str,
-	user: &'static str,
-) -> Option<Option<String>> {
+fn cache_get(service: &'static str, user: &'static str) -> Option<CachedRead> {
 	let map = cache().lock().unwrap_or_else(|e| e.into_inner());
-	let (stored_at, payload) = map.get(&(service, user))?;
-	if stored_at.elapsed() >= CACHE_TTL {
+	let (stored_at, entry) = map.get(&(service, user))?;
+	let ttl = match entry {
+		CachedRead::Failed(_) => FAILURE_TTL,
+		_ => CACHE_TTL,
+	};
+	if stored_at.elapsed() >= ttl {
 		return None;
 	}
-	Some(payload.clone())
+	Some(entry.clone())
 }
 
-fn cache_put(
-	service: &'static str,
-	user: &'static str,
-	payload: Option<String>,
-) {
+fn cache_put(service: &'static str, user: &'static str, entry: CachedRead) {
 	let mut map = cache().lock().unwrap_or_else(|e| e.into_inner());
-	map.insert((service, user), (std::time::Instant::now(), payload));
+	map.insert((service, user), (std::time::Instant::now(), entry));
 }
 
 /// Drop every cached keyring entry. Tests that install a faulty keyring backend
@@ -426,6 +480,13 @@ pub(crate) mod test_hooks {
 	use keyring::credential::{CredentialBuilderApi, CredentialPersistence};
 	use keyring::Credential;
 
+	/// Counts how many times the faulty backend was actually reached. A cached
+	/// verdict must NOT reach it, and only a counter can tell "replayed the
+	/// remembered failure" apart from "asked again and failed again" — both
+	/// produce the same `Err`.
+	pub(crate) static FAULTY_BUILDS: std::sync::atomic::AtomicUsize =
+		std::sync::atomic::AtomicUsize::new(0);
+
 	/// A credential builder whose `build()` always fails with
 	/// `NoStorageAccess`, simulating "the OS keyring backend is unreachable"
 	/// without ever constructing a real credential or touching any real
@@ -439,6 +500,7 @@ pub(crate) mod test_hooks {
 			_service: &str,
 			_user: &str,
 		) -> keyring::Result<Box<Credential>> {
+			FAULTY_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
 			Err(keyring::Error::NoStorageAccess(Box::new(
 				std::io::Error::other("forced unavailable (test)"),
 			)))
@@ -762,6 +824,112 @@ mod tombstone_tests {
 			after.credentials.is_empty(),
 			"the deleted credential must stay deleted, not be re-migrated from \
 			 the leftover legacy entry"
+		);
+	}
+}
+
+#[cfg(test)]
+mod failure_cache_tests {
+	use super::*;
+
+	/// A refused read must not send the next caller back to the backend.
+	///
+	/// On macOS a locked keychain shows an authorization dialog; dismissing it
+	/// surfaces as a backend failure. App startup issues several independent
+	/// credential reads, so a failure that is not remembered re-opens that
+	/// dialog once per read — a real session showed one cancel turning into
+	/// three prompts and 10.3s of waiting.
+	#[test]
+	fn a_refused_read_is_not_retried_by_the_next_caller() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+
+		{
+			let _faulty = test_hooks::ForceCredentialBackendUnavailable::new();
+			test_hooks::FAULTY_BUILDS
+				.store(0, std::sync::atomic::Ordering::SeqCst);
+
+			assert!(
+				bundle_store().load_optional().is_err(),
+				"the faulty backend must fail the first read"
+			);
+			assert!(
+				bundle_store().load_optional().is_err(),
+				"the remembered failure is replayed as the same error"
+			);
+
+			// The assertion that has teeth: BOTH reads returned Err either way,
+			// so only the reach count distinguishes a replayed verdict from a
+			// second trip to the backend — a second trip is a second dialog.
+			assert_eq!(
+				test_hooks::FAULTY_BUILDS
+					.load(std::sync::atomic::Ordering::SeqCst),
+				1,
+				"the second read must be answered from the remembered failure, \
+				 not by asking the backend again"
+			);
+		}
+
+		// Guard dropped: the real backend is back AND the guard cleared the
+		// cache, so nothing stale outlives the test.
+		assert!(
+			cache_get("aghub", "credentials").is_none(),
+			"the guard must leave no cached verdict behind"
+		);
+	}
+
+	/// A replayed failure must carry its ORIGINAL classification.
+	///
+	/// `Unavailable` and `Other` are not interchangeable: `SourceAuth::load_soft`
+	/// turns only `Unavailable` into `BackendUnavailable` (fail closed) and lets
+	/// `Other` degrade to an anonymous fetch, and the two map to 503 vs 500 at
+	/// the HTTP layer. An earlier version of this cache rebuilt every replayed
+	/// error as `Unavailable`, which silently converted a fail-OPEN path into a
+	/// fail-CLOSED one for the whole window.
+	///
+	/// The faulty-backend guard can only produce `Unavailable`, so the cache is
+	/// seeded directly — that is the only way to observe the `Other` direction.
+	#[test]
+	fn a_replayed_failure_keeps_its_original_classification() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		clear_cache_for_test();
+
+		cache_put(
+			"aghub",
+			"credentials",
+			CachedRead::Failed(CredentialStoreError::Other(
+				"corrupt payload".to_string(),
+			)),
+		);
+
+		match bundle_store().load_optional() {
+			Err(CredentialStoreError::Other(message)) => {
+				assert_eq!(message, "corrupt payload");
+			}
+			Err(CredentialStoreError::Unavailable(_)) => panic!(
+				"a cached `Other` was replayed as `Unavailable` — that turns a \
+				 degrade-to-anonymous path into a hard failure"
+			),
+			Ok(_) => panic!("the cached failure must be replayed, not ignored"),
+		}
+
+		clear_cache_for_test();
+	}
+
+	/// The remembered failure must not outlive its short window, or a user who
+	/// dismisses the dialog once would be locked out until the app restarts.
+	#[test]
+	fn the_failure_window_is_far_shorter_than_the_success_window() {
+		assert!(
+			FAILURE_TTL < CACHE_TTL,
+			"a refusal must expire sooner than a successful read"
+		);
+		assert!(
+			FAILURE_TTL <= std::time::Duration::from_secs(10),
+			"the user must be able to change their mind within seconds"
 		);
 	}
 }
