@@ -490,9 +490,20 @@ impl RepoFetchBackend for GithubRest {
 			let mut cache = self.cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest cache lock poisoned")
 			})?;
-			cache.insert(
-				commit_oid.clone(),
-				RepoContext {
+			// Keep an EXISTING context for this commit rather than replacing it.
+			//
+			// A commit oid names immutable content, so a second resolve that
+			// lands on the same commit — two ref-cohorts of one source diff
+			// where `ref=None` means the default branch and the other cohort
+			// names that same branch — describes the identical tree and blobs.
+			// Overwriting the entry handed that second caller empty caches and
+			// made it re-download everything the first had just fetched:
+			// measured as a duplicated ~1.2s tree read plus ~1.3s of blobs per
+			// source. The re-resolve itself still happens (the tip must be
+			// re-checked); only the content caches survive.
+			cache
+				.entry(commit_oid.clone())
+				.or_insert_with(|| RepoContext {
 					api_host,
 					owner,
 					repo,
@@ -504,8 +515,7 @@ impl RepoFetchBackend for GithubRest {
 						BlobAdmission::default(),
 					)),
 					blob_phase: Arc::new(Mutex::new(())),
-				},
-			);
+				});
 		}
 
 		Ok(RepoSnapshot {

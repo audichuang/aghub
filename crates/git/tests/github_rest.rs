@@ -1084,3 +1084,71 @@ fn an_aborted_batch_reconciles_the_rate_limit_tally_from_blob_responses() {
 			"the tally must follow the server, not the aborted reservation",
 		);
 }
+
+/// Two resolves landing on the SAME commit must not throw away the first one's
+/// content caches.
+///
+/// A source diff fetches once per ref-cohort, and cohorts routinely converge on
+/// one commit: `ref=None` means "the default branch", which is usually the very
+/// branch the other cohort names. `resolve` used to overwrite the cached
+/// `RepoContext` wholesale, handing the second cohort empty blob/tree caches, so
+/// it re-downloaded a tree and blobs the first had just fetched — measured on a
+/// real host as a duplicated ~1.2s tree read plus ~1.3s of blobs, per source.
+///
+/// The re-resolve itself is expected (the tip must be re-checked); only the
+/// content caches must survive.
+#[test]
+fn a_second_resolve_of_the_same_commit_keeps_the_fetched_tree() {
+	let (t, recorded) = transport(|req| {
+		let url = req.url.as_str();
+		if is_commit_resolve(url) {
+			Ok(json_ok(commit_json()))
+		} else if is_tree(url) {
+			Ok(json_ok(tree_json()))
+		} else {
+			Err(GitError::rest_fallback("unexpected request"))
+		}
+	});
+	let backend = GithubRest::new(t);
+	let source = SourceRef {
+		url: "https://github.com/o/r.git".into(),
+		ref_: Some("main".into()),
+	};
+
+	let first = backend.resolve(&source, None).expect("first resolve");
+	backend.read_tree(&first).expect("first tree read");
+	let tree_reads_after_first = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| is_tree(r.url.as_str()))
+		.count();
+	assert_eq!(tree_reads_after_first, 1, "the first read must fetch");
+
+	// Second cohort: same repo, no explicit ref — resolves to the same commit.
+	let second = backend
+		.resolve(
+			&SourceRef {
+				url: "https://github.com/o/r.git".into(),
+				ref_: None,
+			},
+			None,
+		)
+		.expect("second resolve");
+	assert_eq!(
+		second.commit_oid, first.commit_oid,
+		"the fixture pins both cohorts to one commit"
+	);
+	backend.read_tree(&second).expect("second tree read");
+
+	let tree_reads_total = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| is_tree(r.url.as_str()))
+		.count();
+	assert_eq!(
+		tree_reads_total, 1,
+		"the second resolve must not discard the cached tree — it re-fetched it"
+	);
+}
