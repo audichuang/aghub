@@ -18,6 +18,14 @@ fetch backends (`RepoFetchBackend`: gix shallow / GitHub REST).
   the **callers** — cli `source`/`check` map env `GITHUB_TOKEN`; the api
   resolves per-source tokens from its `credentials/` store (no `GITHUB_TOKEN`
   env). Do not add either mapping here.
+- **Which backend serves a fetch is decided at RUNTIME, and each caches
+  separately.** `GithubRest` yields to `GixShallow` on ANY non-2xx — a
+  rate-limited anonymous request included — so a token-less dev machine
+  routinely exercises gix while a user with a token exercises REST. A
+  fetch/caching change verified on one path says NOTHING about the other.
+  Assert on request COUNT through the `HttpTransport` seam, never on
+  wall-clock: a timing only measures whichever path that machine happened
+  to take.
 
 ## WHERE TO LOOK
 
