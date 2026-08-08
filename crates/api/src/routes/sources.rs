@@ -107,7 +107,9 @@ impl Fetcher for ApiFetcher {
 					_guard: None,
 				})
 			} else {
-				Err(FetchError::Network)
+				Err(FetchError::network(
+					"AGHUB_TEST_SOURCE_FETCH_ROOT is not a directory",
+				))
 			};
 		}
 		self.inner.fetch(source_ref, token, selection)

@@ -518,7 +518,9 @@ fn apply_error_with_code(
 fn fetch_error_text(error: &FetchError) -> &'static str {
 	match error {
 		FetchError::Auth => "Authentication failed while fetching source",
-		FetchError::Network => "Failed to fetch source repository",
+		// Deliberately drops `FetchError::Network`'s detail: it can name an
+		// internal temp path, which API errors must never disclose.
+		FetchError::Network(_) => "Failed to fetch source repository",
 		FetchError::BackendUnavailable => "Credential backend unavailable",
 	}
 }

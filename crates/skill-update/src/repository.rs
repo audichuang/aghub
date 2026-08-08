@@ -57,12 +57,20 @@ pub struct CatalogSkill {
 }
 
 /// Errors from [`SkillRepository`] operations.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub enum SkillRepoError {
 	/// Authentication failure (401/403 / credential messages).
 	Auth,
-	/// Network / transport / other non-auth failure.
-	Network,
+	/// Network / transport / other non-auth failure. Carries the underlying
+	/// reason: it is what a user needs to tell a DNS failure from a 404 from a
+	/// TLS problem, and dropping it left "Failed to fetch" as the only signal.
+	///
+	/// The payload is already redacted of URL userinfo by `aghub_git`'s error
+	/// constructors, so it cannot carry a token — but it CAN carry an internal
+	/// temp path (`GitError::DestinationError`), so surfaces that must not
+	/// disclose internals (the HTTP API) keep matching on the variant and
+	/// printing their own generic message.
+	Network(String),
 	/// Root-skill whole-folder size preflight exceeded Source-hash bounds.
 	RootSkillTooLarge,
 }
@@ -72,8 +80,16 @@ impl SkillRepoError {
 	pub fn code(&self) -> &'static str {
 		match self {
 			Self::Auth => "AUTH",
-			Self::Network => "NETWORK",
+			Self::Network(_) => "NETWORK",
 			Self::RootSkillTooLarge => "ROOT_SKILL_TOO_LARGE",
+		}
+	}
+
+	/// The underlying reason, when there is one.
+	pub fn detail(&self) -> Option<&str> {
+		match self {
+			Self::Network(detail) => Some(detail),
+			_ => None,
 		}
 	}
 }
@@ -84,9 +100,10 @@ impl SkillRepoError {
 pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 	match e {
 		SkillRepoError::Auth => FetchError::Auth,
-		SkillRepoError::Network | SkillRepoError::RootSkillTooLarge => {
-			FetchError::Network
-		}
+		SkillRepoError::Network(detail) => FetchError::Network(detail),
+		SkillRepoError::RootSkillTooLarge => FetchError::Network(
+			"skill folder exceeds the source-hash size limits".to_string(),
+		),
 	}
 }
 
@@ -146,7 +163,7 @@ impl SkillRepository {
 		token: Option<&str>,
 	) -> Result<RepoSnapshot, SkillRepoError> {
 		let resolved = aghub_git::resolve_remote_source(&sr.source)
-			.map_err(|_| SkillRepoError::Network)?;
+			.map_err(|e| SkillRepoError::Network(e.to_string()))?;
 		let clone_url = resolved.clone_url;
 		// Prefer the host from resolve_remote_source; fall back to URL parse.
 		let host_owned = resolved.host.or_else(|| host_of_url(&clone_url));
@@ -318,8 +335,8 @@ impl SkillRepository {
 		let path_refs: Vec<&str> =
 			path_owned.iter().map(String::as_str).collect();
 
-		let dest =
-			tempfile::TempDir::new().map_err(|_| SkillRepoError::Network)?;
+		let dest = tempfile::TempDir::new()
+			.map_err(|e| SkillRepoError::Network(format!("temp dir: {e}")))?;
 		let started = Instant::now();
 		self.execute_backend(snapshot, |backend, snapshot| {
 			backend.materialize(snapshot, &path_refs, dest.path())
@@ -342,7 +359,9 @@ impl SkillRepository {
 		commit_oid: &str,
 		kind: BackendKind,
 	) -> Result<(), SkillRepoError> {
-		let mut memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
+		let mut memo = self.memo.lock().map_err(|_| {
+			SkillRepoError::Network("backend memo lock poisoned".to_string())
+		})?;
 		memo.insert(commit_oid.to_string(), kind);
 		Ok(())
 	}
@@ -360,11 +379,17 @@ impl SkillRepository {
 				operation(self.gix.as_ref(), snapshot).map_err(map_git_error)
 			}
 			BackendKind::Rest => {
-				let rest = self.rest.as_ref().ok_or(SkillRepoError::Network)?;
+				let rest = self.rest.as_ref().ok_or_else(|| {
+					SkillRepoError::Network(
+						"snapshot was resolved over REST but no REST backend \
+						 is configured"
+							.to_string(),
+					)
+				})?;
 				match operation(rest.as_ref(), snapshot) {
 					Ok(value) => Ok(value),
-					Err(GitError::RestFallback(_)) => {
-						Err(SkillRepoError::Network)
+					Err(GitError::RestFallback(msg)) => {
+						Err(SkillRepoError::Network(msg))
 					}
 					Err(error) => Err(map_git_error(error)),
 				}
@@ -376,8 +401,14 @@ impl SkillRepository {
 		&self,
 		commit_oid: &str,
 	) -> Result<BackendKind, SkillRepoError> {
-		let memo = self.memo.lock().map_err(|_| SkillRepoError::Network)?;
-		memo.get(commit_oid).copied().ok_or(SkillRepoError::Network)
+		let memo = self.memo.lock().map_err(|_| {
+			SkillRepoError::Network("backend memo lock poisoned".to_string())
+		})?;
+		memo.get(commit_oid).copied().ok_or_else(|| {
+			SkillRepoError::Network(format!(
+				"no backend memoized for commit {commit_oid}"
+			))
+		})
 	}
 }
 
@@ -437,7 +468,7 @@ fn map_git_error(e: GitError) -> SkillRepoError {
 	{
 		SkillRepoError::Auth
 	} else {
-		SkillRepoError::Network
+		SkillRepoError::Network(msg)
 	}
 }
 

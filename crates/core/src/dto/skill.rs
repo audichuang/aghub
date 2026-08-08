@@ -39,6 +39,11 @@ pub struct SkillView {
 	/// master directly), so a universal install writes only the master with
 	/// no per-agent link.
 	pub native_reader: bool,
+	/// Advisory: the install that produced this view was a no-op — the skill
+	/// was already present, so NOTHING was written and every field above
+	/// describes the EXISTING master, not the source that was submitted.
+	/// Only the install paths set it; a plain read leaves it false.
+	pub already_installed: bool,
 }
 
 impl From<&Skill> for SkillView {
@@ -55,6 +60,7 @@ impl From<&Skill> for SkillView {
 			source: skill.config_source,
 			agent: None,
 			native_reader: false,
+			already_installed: false,
 		}
 	}
 }
@@ -69,6 +75,12 @@ impl SkillView {
 	/// Set the `native_reader` install advisory.
 	pub fn with_native_reader(mut self, v: bool) -> Self {
 		self.native_reader = v;
+		self
+	}
+
+	/// Set the `already_installed` advisory (the install was a no-op).
+	pub fn with_already_installed(mut self, v: bool) -> Self {
+		self.already_installed = v;
 		self
 	}
 }

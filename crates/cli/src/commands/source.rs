@@ -57,14 +57,24 @@ fn assert_one_tree_can_serve(
 		return Ok(());
 	}
 	bail!(
-		"source '{source}' has skills pinned to {} different refs:\n  {}\nRun \
+		"source '{}' has skills pinned to {} different refs:\n  {}\nRun \
 		 it again with --ref to work on one of them.",
+		safe_source(source),
 		refs.len(),
 		refs.iter()
 			.map(|name| name.as_deref().unwrap_or("(default branch)"))
 			.collect::<Vec<_>>()
 			.join("\n  ")
 	)
+}
+
+/// A source string safe to put in a message. `<SOURCE>` comes straight from
+/// argv (or from a lock), and a user who typed `https://user:token@host/repo`
+/// would otherwise see that token again in stderr, CI logs, or a captured
+/// shell buffer. `aghub_git` already redacts what IT builds; this covers the
+/// strings the CLI echoes itself.
+fn safe_source(source: &str) -> String {
+	aghub_git::redact_url_userinfo(source)
 }
 
 // ─────────────────────────── credential / fetch ────────────────────────────
@@ -140,7 +150,11 @@ impl skill_update::Fetcher for CliFetcher {
 					_guard: None,
 				})
 			} else {
-				Err(FetchError::Network)
+				Err(FetchError::network(format!(
+					"AGHUB_TEST_SOURCE_FETCH_ROOT is not a directory \
+					 (fetching '{}')",
+					sr.source
+				)))
 			};
 		}
 		skill_update::GitFetcher::new().fetch(sr, token, selection)
@@ -207,14 +221,13 @@ pub fn execute(
 	project: bool,
 	all: bool,
 	agent: &str,
+	json: bool,
 ) -> Result<()> {
 	match action {
-		SourceAction::List { json } => list(global, project, *json),
-		SourceAction::Diff {
-			source,
-			git_ref,
-			json,
-		} => diff(source, git_ref.as_deref(), global, project, *json),
+		SourceAction::List => list(global, project, json),
+		SourceAction::Diff { source, git_ref } => {
+			diff(source, git_ref.as_deref(), global, project, json)
+		}
 		SourceAction::Sync {
 			source,
 			git_ref,
@@ -223,7 +236,6 @@ pub fn execute(
 			skills,
 			universal,
 			yes,
-			json,
 		} => sync(SyncArgs {
 			source,
 			git_ref: git_ref.as_deref(),
@@ -232,7 +244,7 @@ pub fn execute(
 			skills,
 			universal: *universal,
 			yes: *yes,
-			json: *json,
+			json,
 			global,
 			project,
 			all,
@@ -243,13 +255,12 @@ pub fn execute(
 			new_name,
 			git_ref,
 			yes,
-			json,
 		} => accept_rename(AcceptRenameArgs {
 			old_name,
 			new_name,
 			git_ref: git_ref.as_deref(),
 			yes: *yes,
-			json: *json,
+			json,
 			global,
 			project,
 			all,
@@ -388,8 +399,9 @@ fn diff(
 		meta.effective_source.as_deref().unwrap_or(&source),
 	) {
 		bail!(
-			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
-			 owner/repo git sources are supported"
+			"source '{}' cannot be fetched ({reason:?}); only HTTPS / \
+			 owner/repo git sources are supported",
+			safe_source(&source)
 		);
 	}
 
@@ -413,8 +425,11 @@ fn diff(
 			"This source needs a credential. Set GIT_PASSWORD (any host) or \
 			 GITHUB_TOKEN (github.com) in the environment and retry."
 		),
-		Err(FetchError::Network) => {
-			bail!("Failed to fetch source repository '{source}'")
+		Err(FetchError::Network(detail)) => {
+			bail!(
+				"Failed to fetch source repository '{}': {detail}",
+				safe_source(&source)
+			)
 		}
 	};
 
@@ -645,8 +660,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 		meta.effective_source.as_deref().unwrap_or(&source),
 	) {
 		bail!(
-			"source '{source}' cannot be fetched ({reason:?}); only HTTPS / \
-			 owner/repo git sources are supported"
+			"source '{}' cannot be fetched ({reason:?}); only HTTPS / \
+			 owner/repo git sources are supported",
+			safe_source(&source)
 		);
 	}
 
@@ -674,8 +690,11 @@ fn sync(args: SyncArgs) -> Result<()> {
 			"This source needs a credential. Set GIT_PASSWORD (any host) or \
 			 GITHUB_TOKEN (github.com) in the environment and retry."
 		),
-		Err(FetchError::Network) => {
-			bail!("Failed to fetch source repository '{source}'")
+		Err(FetchError::Network(detail)) => {
+			bail!(
+				"Failed to fetch source repository '{}': {detail}",
+				safe_source(&source)
+			)
 		}
 	};
 
@@ -818,8 +837,13 @@ fn sync(args: SyncArgs) -> Result<()> {
 		.effective_source
 		.clone()
 		.unwrap_or_else(|| source.clone());
-	let resolved = aghub_git::resolve_remote_source(&fetch_source)
-		.map_err(|e| anyhow::anyhow!("invalid source '{fetch_source}': {e}"))?;
+	let resolved =
+		aghub_git::resolve_remote_source(&fetch_source).map_err(|e| {
+			anyhow::anyhow!(
+				"invalid source '{}': {e}",
+				safe_source(&fetch_source)
+			)
+		})?;
 	// Record the RESOLVED ref (explicit `--ref` OR the source's recorded lock
 	// ref), not just the explicit flag — so re-installing a source pinned to a
 	// tag/branch persists that pin, matching what the API records.
@@ -1353,10 +1377,12 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 			"This source needs a credential. Set GIT_PASSWORD (any host) \
 			 or GITHUB_TOKEN (github.com) in the environment and retry."
 		),
-		FetchRenameError::Fetch(FetchError::Network) => anyhow::anyhow!(
-			"Failed to fetch source repository '{}'",
-			source.source_url
-		),
+		FetchRenameError::Fetch(FetchError::Network(detail)) => {
+			anyhow::anyhow!(
+				"Failed to fetch source repository '{}': {detail}",
+				safe_source(&source.source_url)
+			)
+		}
 		FetchRenameError::Fetch(FetchError::BackendUnavailable) => {
 			anyhow::anyhow!("Credential backend is unavailable; retry later.")
 		}

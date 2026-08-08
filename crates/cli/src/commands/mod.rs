@@ -20,6 +20,41 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Print a JSON value as an aligned `key  value` block, or as pretty JSON when
+/// `json` is set.
+///
+/// Nested objects/arrays render as their compact JSON on one line — the views
+/// this serves (`describe`, a provider record) are flat, and a real YAML
+/// dependency would buy nothing. Null fields are omitted: "author: null" is
+/// noise a human never wants, while `--json` still carries the key.
+pub(crate) fn print_value(value: &serde_json::Value, json: bool) -> Result<()> {
+	if json {
+		println!("{}", serde_json::to_string_pretty(value)?);
+		return Ok(());
+	}
+	let Some(map) = value.as_object() else {
+		println!("{value}");
+		return Ok(());
+	};
+	let width = map
+		.iter()
+		.filter(|(_, v)| !v.is_null())
+		.map(|(k, _)| k.len())
+		.max()
+		.unwrap_or(0);
+	for (key, val) in map {
+		if val.is_null() {
+			continue;
+		}
+		let rendered = match val {
+			serde_json::Value::String(s) => s.clone(),
+			other => other.to_string(),
+		};
+		println!("{key:<width$}  {rendered}");
+	}
+	Ok(())
+}
+
 /// Override for the app data dir; when set, takes precedence over the platform
 /// default. Lets tests pin the SQLite root to a throwaway tempdir without
 /// guessing each OS's `dirs::data_dir()` location.

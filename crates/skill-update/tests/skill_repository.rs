@@ -580,7 +580,7 @@ fn post_resolve_rest_fallback_returns_clean_error_without_staging() {
 	let snapshot = repo.resolve(&github_source(), None).unwrap();
 	let error = repo.list(&snapshot).unwrap_err();
 
-	assert!(matches!(error, SkillRepoError::Network));
+	assert!(matches!(error, SkillRepoError::Network(_)));
 	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 0);
 }
 

@@ -10,6 +10,38 @@ use skill::sanitize::sanitize_name;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Outcome of an install-from-path.
+///
+/// `skill` is ALWAYS the skill as it exists on disk after the call — for an
+/// install that is what was just written, and for a re-add of something already
+/// present it is the untouched Master, NOT the source file that was parsed.
+/// The distinction is the whole point of the type: a re-add writes nothing, and
+/// a caller that reported the parsed source as if it had been installed told
+/// the user their edit had landed when it had not.
+#[derive(Debug, Clone)]
+pub struct SkillAdd {
+	/// The skill as it exists on disk after the call.
+	pub skill: Skill,
+	/// True when the skill was already installed and nothing was written.
+	pub already_installed: bool,
+}
+
+impl SkillAdd {
+	fn installed(skill: Skill) -> Self {
+		Self {
+			skill,
+			already_installed: false,
+		}
+	}
+
+	fn already_installed(skill: Skill) -> Self {
+		Self {
+			skill,
+			already_installed: true,
+		}
+	}
+}
+
 /// Shared preparation for the two universal-install entry points
 /// (`add_skill_universal` / `add_skill_from_path_universal`): resolves the
 /// `.agents` canonical directory plus the current agent's symlink target.
@@ -699,7 +731,7 @@ impl ConfigManager {
 		self.set_skill_enabled(name, true)
 	}
 
-	pub fn add_skill_from_path(&mut self, path: &Path) -> Result<Skill> {
+	pub fn add_skill_from_path(&mut self, path: &Path) -> Result<SkillAdd> {
 		debug!(
 			"adding skill from path '{}' for agent '{}'",
 			path.display(),
@@ -721,7 +753,7 @@ impl ConfigManager {
 	pub fn add_skill_from_path_universal(
 		&mut self,
 		path: &Path,
-	) -> Result<Skill> {
+	) -> Result<SkillAdd> {
 		debug!(
 			"adding skill (universal) from path '{}' for agent '{}'",
 			path.display(),
@@ -754,12 +786,25 @@ impl ConfigManager {
 		if config.skills.iter().any(|s| s.name == skill.name) {
 			let safe = sanitize_name(&skill.name);
 			let canonical = canonical_dir.join(&safe);
+			// Both no-op branches below report the INSTALLED skill, never the
+			// one just parsed from `path`. The install writes nothing when the
+			// Master already exists, so returning the parsed copy claimed an
+			// overwrite that never happened — `add --from` printed the source
+			// file's frontmatter while disk still held the old Master.
+			let installed = || {
+				config
+					.skills
+					.iter()
+					.find(|s| s.name == skill.name)
+					.cloned()
+					.unwrap_or_else(|| skill.clone())
+			};
 			// NativeReader: reads the Master directly → re-add is a no-op.
 			if matches!(
 				link_need,
 				crate::skills::linker::LinkNeed::NativeReader
 			) {
-				return Ok(skill.clone());
+				return Ok(SkillAdd::already_installed(installed()));
 			}
 			if let Some(ref agent_dir) = agent_write_dir {
 				let slot = agent_dir.join(&safe);
@@ -770,7 +815,7 @@ impl ConfigManager {
 						.map(|r| r == master_real)
 						.unwrap_or(false)
 					{
-						return Ok(skill.clone());
+						return Ok(SkillAdd::already_installed(installed()));
 					}
 				}
 			}
@@ -817,7 +862,7 @@ impl ConfigManager {
 		config.skills.push(fs_skill);
 
 		self.save_current()?;
-		Ok(skill)
+		Ok(SkillAdd::installed(skill))
 	}
 
 	/// Map the single-agent result from `materialize_universal_master` onto the
@@ -2344,8 +2389,9 @@ mod tests {
 		std::fs::write(src.join("scripts/setup.sh"), "#!/bin/sh\necho ok")
 			.unwrap();
 
-		let skill = mgr.add_skill_from_path_universal(&src).unwrap();
-		assert_eq!(skill.name, "my-skill");
+		let added = mgr.add_skill_from_path_universal(&src).unwrap();
+		assert_eq!(added.skill.name, "my-skill");
+		assert!(!added.already_installed);
 
 		// Canonical should have the full tree
 		let canonical = root.join(".agents/skills/my-skill");
@@ -2398,8 +2444,9 @@ mod tests {
 		std::fs::write(src.join("extra.txt"), "bonus").unwrap();
 
 		let skill_md = src.join("SKILL.md");
-		let skill = mgr.add_skill_from_path_universal(&skill_md).unwrap();
-		assert_eq!(skill.name, "other-skill");
+		let added = mgr.add_skill_from_path_universal(&skill_md).unwrap();
+		assert_eq!(added.skill.name, "other-skill");
+		assert!(!added.already_installed);
 
 		// extra.txt should have been copied to canonical
 		let canonical = root.join(".agents/skills/other-skill");

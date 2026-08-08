@@ -361,7 +361,8 @@ struct PreparedFetchGroup {
 }
 
 /// One fetch group's failure, replayed onto every row that group owns.
-#[derive(Clone, Copy, Debug)]
+// Clone, not Copy: `FetchError::Network` carries the underlying reason.
+#[derive(Clone, Debug)]
 enum GroupFailure {
 	CredentialBackendUnavailable,
 	Fetch(FetchError),
@@ -690,9 +691,10 @@ pub fn resync_locked_skills(
 		.into_iter()
 		.map(|ResyncRow { name, prepared }| {
 			let outcome = prepared.and_then(|item| {
-				let fetched = fetched_groups[item.group_index]
-					.as_ref()
-					.map_err(|failure| LockedResyncError::from(*failure))?;
+				let fetched =
+					fetched_groups[item.group_index].as_ref().map_err(
+						|failure| LockedResyncError::from(failure.clone()),
+					)?;
 				if !fetched_skill_path_exists(fetched, &item.skill_path) {
 					return Err(LockedResyncError::SourceSkillNotFound);
 				}
@@ -832,7 +834,7 @@ mod tests {
 			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			*self.0.lock().unwrap() += 1;
-			Err(FetchError::Network)
+			Err(FetchError::network("stub"))
 		}
 	}
 

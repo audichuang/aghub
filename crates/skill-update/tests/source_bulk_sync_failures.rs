@@ -87,7 +87,7 @@ impl Fetcher for GroupFetcher {
 			);
 		}
 		if source_ref.ref_.as_deref() == Some(self.failing_ref) {
-			return Err(FetchError::Network);
+			return Err(FetchError::network("stub group failure"));
 		}
 		Ok(skill_update::FetchedRepo {
 			root: self.root.clone(),
@@ -306,7 +306,7 @@ fn one_groups_fetch_failure_leaves_the_other_group_updatable() {
 	);
 	assert!(matches!(
 		results[1].outcome,
-		Err(LockedResyncError::Fetch(FetchError::Network)),
+		Err(LockedResyncError::Fetch(FetchError::Network(_))),
 	));
 	assert!(std::fs::read_to_string(
 		project.join(".claude/skills/beta/SKILL.md")

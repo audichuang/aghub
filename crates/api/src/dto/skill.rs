@@ -91,6 +91,13 @@ pub struct SkillResponse {
 	/// per-agent link. Always serialized (default false) so the wire matches the
 	/// generated `native_reader: boolean` ts-rs type — no DTO drift.
 	pub native_reader: bool,
+	/// Advisory: this import was a no-op — the skill was already installed, so
+	/// nothing was written and the fields above describe the EXISTING master,
+	/// not the source that was just submitted. Mirrors
+	/// `aghub_core::dto::SkillView::already_installed`, which is where the
+	/// field is defined so both surfaces keep ONE wire shape. Always
+	/// serialized, like `native_reader`, so the ts-rs type stays non-optional.
+	pub already_installed: bool,
 }
 
 /// One installed Claude skill with its usage count, from Claude Code's
@@ -172,6 +179,7 @@ impl From<&aghub_core::dto::SkillView> for SkillResponse {
 			source: v.source.map(Into::into),
 			agent: v.agent.clone(),
 			native_reader: v.native_reader,
+			already_installed: v.already_installed,
 		}
 	}
 }

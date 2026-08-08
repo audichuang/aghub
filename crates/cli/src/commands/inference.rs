@@ -33,89 +33,107 @@ const API_KEY_ENV: &str = "AGHUB_INFERENCE_API_KEY";
 #[derive(Subcommand, Clone)]
 pub enum InferenceAction {
 	/// List all inference providers.
-	List {
-		#[arg(long)]
-		json: bool,
-	},
+	List,
 	/// Show one provider by id.
 	Get {
+		/// Provider id from `inference list` (the ID column)
 		id: String,
-		#[arg(long)]
-		json: bool,
 	},
 	/// Add a provider. The API key is resolved from `--api-key`, else piped
 	/// stdin, else `$AGHUB_INFERENCE_API_KEY` — never echoed back.
 	Add {
-		#[arg(long = "latin-name")]
+		/// Machine-readable identifier, e.g. `my-openrouter`. ASCII; this is
+		/// what agent configs reference.
+		#[arg(long = "latin-name", value_name = "NAME")]
 		latin_name: String,
-		#[arg(long = "display-name")]
+		/// Human-readable label shown in the desktop UI
+		#[arg(long = "display-name", value_name = "TEXT")]
 		display_name: String,
-		#[arg(long, value_parser = parse_format)]
+		/// Wire protocol the endpoint speaks
+		#[arg(long, value_parser = parse_format, value_name = FORMAT_VALUE_NAME)]
 		format: InferenceProviderFormat,
-		#[arg(long = "api-base-url")]
+		/// Endpoint root, e.g. `https://openrouter.ai/api/v1`
+		#[arg(long = "api-base-url", value_name = "URL")]
 		api_base_url: String,
-		#[arg(long)]
+		/// Optional named preset to seed defaults from (see the desktop
+		/// provider presets); omit for a fully custom provider
+		#[arg(long, value_name = "NAME")]
 		preset: Option<String>,
 		/// The API key. Prefer stdin or `$AGHUB_INFERENCE_API_KEY` so it stays
 		/// off argv.
 		#[arg(long = "api-key")]
 		api_key: Option<String>,
 		/// Model name (repeatable).
-		#[arg(long = "model")]
+		#[arg(long = "model", value_name = "MODEL")]
 		models: Vec<String>,
-		#[arg(long)]
-		json: bool,
 	},
 	/// Update a provider's metadata (and optionally its API key).
 	Update {
+		/// Provider id from `inference list` (the ID column)
 		id: String,
-		#[arg(long = "latin-name")]
+		/// New machine-readable identifier
+		#[arg(long = "latin-name", value_name = "NAME")]
 		latin_name: Option<String>,
-		#[arg(long = "display-name")]
+		/// New human-readable label
+		#[arg(long = "display-name", value_name = "TEXT")]
 		display_name: Option<String>,
-		#[arg(long, value_parser = parse_format)]
+		/// New wire protocol
+		#[arg(long, value_parser = parse_format, value_name = FORMAT_VALUE_NAME)]
 		format: Option<InferenceProviderFormat>,
-		#[arg(long = "api-base-url")]
+		/// New endpoint root
+		#[arg(long = "api-base-url", value_name = "URL")]
 		api_base_url: Option<String>,
-		#[arg(long)]
+		/// New preset name; pass an empty string to clear it
+		#[arg(long, value_name = "NAME")]
 		preset: Option<String>,
 		/// Replace the API key. Resolved from this flag only (stdin/env are not
 		/// consulted on update — pass it explicitly).
 		#[arg(long = "api-key")]
 		api_key: Option<String>,
 		/// Replace the model list (repeatable). Omit to leave models unchanged.
-		#[arg(long = "model")]
+		#[arg(long = "model", value_name = "MODEL")]
 		models: Vec<String>,
-		#[arg(long)]
-		json: bool,
 	},
 	/// Delete a provider and its API key. Destructive: needs `--yes`.
 	Delete {
+		/// Provider id from `inference list` (the ID column)
 		id: String,
+		/// Actually delete. Without it the command refuses.
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
-		#[arg(long)]
-		json: bool,
 	},
 	/// Report whether an API key is stored for a provider (prints the masked
 	/// preview only; NEVER the raw key).
-	Key { id: String },
+	Key {
+		/// Provider id from `inference list` (the ID column)
+		id: String,
+	},
 }
+
+/// `--format`'s placeholder, which clap prints in the usage line and in the
+/// per-flag help. `InferenceProviderFormat` is not a clap `ValueEnum` — it is
+/// the store's canonical type with its own `FromStr` aliases, and deriving a
+/// parallel CLI enum would duplicate the very list that has to stay in step —
+/// so the accepted values are surfaced here and in [`parse_format`]'s error
+/// instead of via `[possible values: ...]`.
+const FORMAT_VALUE_NAME: &str = "anthropic|openai_completions|openai_responses";
 
 /// clap value parser for `--format`, reusing the canonical FromStr so the CLI
 /// accepts the exact same spellings/aliases as the API and store.
 fn parse_format(value: &str) -> Result<InferenceProviderFormat, String> {
 	value
 		.parse()
-		.map_err(|e: aghub_inference::InferenceProviderError| e.to_string())
+		.map_err(|e: aghub_inference::InferenceProviderError| {
+			format!("{e} (expected one of: {FORMAT_VALUE_NAME})")
+		})
 }
 
 /// Dispatch an `inference` subcommand action.
-pub fn execute(action: &InferenceAction) -> Result<()> {
+pub fn execute(action: &InferenceAction, json: bool) -> Result<()> {
 	let store = inference_store();
 	match action {
-		InferenceAction::List { json } => list(&store, *json),
-		InferenceAction::Get { id, json } => get(&store, id, *json),
+		InferenceAction::List => list(&store, json),
+		InferenceAction::Get { id } => get(&store, id, json),
 		InferenceAction::Add {
 			latin_name,
 			display_name,
@@ -124,7 +142,6 @@ pub fn execute(action: &InferenceAction) -> Result<()> {
 			preset,
 			api_key,
 			models,
-			json,
 		} => add(
 			&store,
 			AddArgs {
@@ -135,7 +152,7 @@ pub fn execute(action: &InferenceAction) -> Result<()> {
 				preset: preset.as_deref(),
 				api_key: api_key.as_deref(),
 				models,
-				json: *json,
+				json,
 			},
 		),
 		InferenceAction::Update {
@@ -147,7 +164,6 @@ pub fn execute(action: &InferenceAction) -> Result<()> {
 			preset,
 			api_key,
 			models,
-			json,
 		} => update(
 			&store,
 			id,
@@ -159,13 +175,11 @@ pub fn execute(action: &InferenceAction) -> Result<()> {
 				preset: preset.as_deref(),
 				api_key: api_key.as_deref(),
 				models,
-				json: *json,
+				json,
 			},
 		),
-		InferenceAction::Delete { id, yes, json } => {
-			delete(&store, id, *yes, *json)
-		}
-		InferenceAction::Key { id } => key(&store, id),
+		InferenceAction::Delete { id, yes } => delete(&store, id, *yes, json),
+		InferenceAction::Key { id } => key(&store, id, json),
 	}
 }
 
@@ -306,11 +320,28 @@ fn delete<C: aghub_inference::CredentialStore>(
 	print_provider(&provider, json)
 }
 
-fn key(store: &impl InferenceProviderRepository, id: &str) -> Result<()> {
+fn key(
+	store: &impl InferenceProviderRepository,
+	id: &str,
+	json: bool,
+) -> Result<()> {
 	// `get_api_key` first verifies the provider exists, then reads the keyring.
 	let stored = store.get_api_key(id).map_err(|e| anyhow!(e.to_string()))?;
 	let provider = store.get(id).map_err(|e| anyhow!(e.to_string()))?;
 	// NEVER print the raw key — only the masked preview + a presence flag.
+	// Both branches carry the same three fields; neither can reach the secret,
+	// which lives only in `stored` and is reduced to a bool here.
+	if json {
+		println!(
+			"{}",
+			serde_json::to_string_pretty(&serde_json::json!({
+				"id": provider.id,
+				"maskedApiKey": provider.masked_api_key,
+				"stored": stored.is_some(),
+			}))?
+		);
+		return Ok(());
+	}
 	println!(
 		"{}\t{}\tstored={}",
 		provider.id,

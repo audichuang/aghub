@@ -51,6 +51,22 @@ pub enum SourceError {
 	InvalidGithubShorthand(String),
 }
 
+impl SourceError {
+	/// Build an `InvalidGithubShorthand` error. The source is run through
+	/// [`crate::redact::redact_url_userinfo`] first, so a `user:token@` a
+	/// caller embedded in the URL can never survive into the error string —
+	/// the same contract `GitError`'s constructors already hold. Construct
+	/// this variant through here, never directly.
+	///
+	/// `Unsupported` has no constructor because nothing in the workspace
+	/// builds it; add one (redacting, like this) if that changes.
+	pub fn invalid_github_shorthand(source: impl Into<String>) -> Self {
+		Self::InvalidGithubShorthand(crate::redact::redact_url_userinfo(
+			&source.into(),
+		))
+	}
+}
+
 fn normalize_repo_path(path: &Path) -> Option<String> {
 	let mut segments = path
 		.components()
@@ -80,9 +96,7 @@ fn parse_github_repo_shorthand(
 	let trimmed = source.trim();
 	let mut segments = if let Ok(parsed) = Url::parse(trimmed) {
 		if parsed.scheme() != "github" {
-			return Err(SourceError::InvalidGithubShorthand(
-				source.to_string(),
-			));
+			return Err(SourceError::invalid_github_shorthand(source));
 		}
 
 		let path = if let Some(host) = parsed.host_str() {
@@ -106,9 +120,7 @@ fn parse_github_repo_shorthand(
 	} else {
 		let path = Path::new(trimmed);
 		if path.has_root() {
-			return Err(SourceError::InvalidGithubShorthand(
-				source.to_string(),
-			));
+			return Err(SourceError::invalid_github_shorthand(source));
 		}
 		path.components()
 			.map(|component| match component {
@@ -116,21 +128,17 @@ fn parse_github_repo_shorthand(
 				_ => None,
 			})
 			.collect::<Option<Vec<_>>>()
-			.ok_or_else(|| {
-				SourceError::InvalidGithubShorthand(source.to_string())
-			})?
+			.ok_or_else(|| SourceError::invalid_github_shorthand(source))?
 	};
 
 	if segments.len() != 2 {
-		return Err(SourceError::InvalidGithubShorthand(source.to_string()));
+		return Err(SourceError::invalid_github_shorthand(source));
 	}
 
 	if let Some(last) = segments.last_mut() {
 		*last = last.trim_end_matches(".git").to_string();
 		if last.is_empty() {
-			return Err(SourceError::InvalidGithubShorthand(
-				source.to_string(),
-			));
+			return Err(SourceError::invalid_github_shorthand(source));
 		}
 	}
 

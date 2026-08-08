@@ -23,7 +23,7 @@ fn test_agent_all_get_skills_is_valid_json_array() {
 	let dir = fixtures_dir();
 	let out = aghub_cli()
 		.current_dir(&dir)
-		.args(["--agent", "all", "--all", "get", "skills"])
+		.args(["--json", "--agent", "all", "--all", "get", "skills"])
 		.output()
 		.unwrap();
 
@@ -59,7 +59,7 @@ fn test_agent_all_get_mcps_is_valid_json_array() {
 	let dir = fixtures_dir();
 	let out = aghub_cli()
 		.current_dir(&dir)
-		.args(["--agent", "all", "--all", "get", "mcps"])
+		.args(["--json", "--agent", "all", "--all", "get", "mcps"])
 		.output()
 		.unwrap();
 
@@ -106,7 +106,7 @@ fn test_agent_list_get_skills_filters_to_requested_agents() {
 	let dir = fixtures_dir();
 	let out = aghub_cli()
 		.current_dir(&dir)
-		.args(["-a", "cline,cursor", "--all", "get", "skills"])
+		.args(["--json", "-a", "cline,cursor", "--all", "get", "skills"])
 		.output()
 		.unwrap();
 
@@ -251,7 +251,7 @@ fn test_agent_all_is_case_insensitive() {
 	let dir = fixtures_dir();
 	let out = aghub_cli()
 		.current_dir(&dir)
-		.args(["-a", "ALL", "--all", "get", "skills"])
+		.args(["--json", "-a", "ALL", "--all", "get", "skills"])
 		.output()
 		.unwrap();
 
@@ -409,8 +409,8 @@ fn top_level_scope_flags_are_mutually_exclusive() {
 			"scope pair {flags:?} must be rejected: {stderr}"
 		);
 		assert!(
-			stderr.contains("cannot be used with"),
-			"scope pair {flags:?} must report a clap conflict: {stderr}"
+			stderr.contains("mutually exclusive"),
+			"scope pair {flags:?} must be reported as a conflict: {stderr}"
 		);
 	}
 }
@@ -553,7 +553,7 @@ fn delete_skill_dry_run_is_default_and_lists_paths() {
 	let skill_dir = write_claude_skill(home.path(), "mytool");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "skills", "mytool"])
+		.args(["--json", "-a", "claude", "delete", "skills", "mytool"])
 		.output()
 		.unwrap();
 
@@ -584,7 +584,9 @@ fn delete_skill_yes_removes_copy() {
 	let skill_dir = write_claude_skill(home.path(), "goner");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "skills", "goner", "--yes"])
+		.args([
+			"--json", "-a", "claude", "delete", "skills", "goner", "--yes",
+		])
 		.output()
 		.unwrap();
 
@@ -609,7 +611,9 @@ fn delete_skill_yes_prunes_and_reports() {
 	seed_global_lock(state.path());
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "skills", "goner", "--yes"])
+		.args([
+			"--json", "-a", "claude", "delete", "skills", "goner", "--yes",
+		])
 		.output()
 		.unwrap();
 
@@ -669,7 +673,7 @@ fn mcp_listed(
 	name: &str,
 ) -> bool {
 	let out = isolated_cli(home, state)
-		.args(["-a", "claude", "get", "mcps"])
+		.args(["--json", "-a", "claude", "get", "mcps"])
 		.output()
 		.unwrap();
 	assert!(
@@ -692,6 +696,7 @@ fn add_mcp_agent_list_writes_each_agent_config() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude,opencode",
 			"add",
@@ -728,7 +733,7 @@ fn add_mcp_agent_list_writes_each_agent_config() {
 
 	for agent in ["claude", "opencode"] {
 		let get = isolated_cli(home.path(), state.path())
-			.args(["-a", agent, "get", "mcps"])
+			.args(["--json", "-a", agent, "get", "mcps"])
 			.output()
 			.unwrap();
 		assert!(
@@ -757,6 +762,7 @@ fn add_mcp_agent_list_preflight_rejects_unsupported_agent() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude,pi",
 			"add",
@@ -861,6 +867,7 @@ fn agent_list_duplicate_still_emits_envelope() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude,claude",
 			"add",
@@ -900,6 +907,7 @@ fn add_mcp_agent_list_reports_partial_failure_and_continues() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude,opencode",
 			"add",
@@ -936,7 +944,7 @@ fn add_mcp_agent_list_reports_partial_failure_and_continues() {
 
 	// Observable outcome: opencode really has the MCP on disk.
 	let get = isolated_cli(home.path(), state.path())
-		.args(["-a", "opencode", "get", "mcps"])
+		.args(["--json", "-a", "opencode", "get", "mcps"])
 		.output()
 		.unwrap();
 	let json: Value = serde_json::from_slice(&get.stdout).unwrap();
@@ -1131,7 +1139,7 @@ fn cli_delete_mcp_dry_run_default() {
 	seed_mcp(home.path(), state.path(), "m");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "mcps", "m"])
+		.args(["--json", "-a", "claude", "delete", "mcps", "m"])
 		.output()
 		.unwrap();
 	assert!(
@@ -1173,7 +1181,7 @@ fn cli_delete_mcp_yes_removes() {
 	seed_mcp(home.path(), state.path(), "goner");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "mcps", "goner", "--yes"])
+		.args(["--json", "-a", "claude", "delete", "mcps", "goner", "--yes"])
 		.output()
 		.unwrap();
 	assert!(
@@ -1204,7 +1212,7 @@ fn cli_delete_mcp_missing_config_is_noop_ok() {
 	let state = tempfile::tempdir().unwrap();
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "mcps", "ghost", "--yes"])
+		.args(["--json", "-a", "claude", "delete", "mcps", "ghost", "--yes"])
 		.output()
 		.unwrap();
 	assert!(
@@ -1233,7 +1241,7 @@ fn cli_delete_mcp_missing_name_is_noop_ok() {
 	seed_mcp(home.path(), state.path(), "other");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "mcps", "ghost", "--yes"])
+		.args(["--json", "-a", "claude", "delete", "mcps", "ghost", "--yes"])
 		.output()
 		.unwrap();
 	assert!(
@@ -1289,7 +1297,7 @@ fn get_skills_outputs_skill_view_shape() {
 	write_claude_skill(home.path(), "mytool");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "get", "skills"])
+		.args(["--json", "-a", "claude", "get", "skills"])
 		.output()
 		.unwrap();
 
@@ -1317,7 +1325,7 @@ fn get_skills_all_agents_tags_agent_and_native_reader() {
 	write_claude_skill(home.path(), "mytool");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["--agent", "all", "get", "skills"])
+		.args(["--json", "--agent", "all", "get", "skills"])
 		.output()
 		.unwrap();
 
@@ -1345,6 +1353,7 @@ fn update_skill_outputs_skill_view_shape() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude",
 			"update",
@@ -1377,7 +1386,7 @@ fn describe_skill_outputs_skill_view_shape() {
 	write_claude_skill(home.path(), "mytool");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "describe", "skills", "mytool"])
+		.args(["--json", "-a", "claude", "describe", "skills", "mytool"])
 		.output()
 		.unwrap();
 
@@ -1407,6 +1416,7 @@ fn add_skill_from_path_outputs_skill_view_with_native_reader() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude",
 			"add",
@@ -1477,7 +1487,9 @@ fn delete_skill_yes_reports_prune_error_when_lock_unwritable() {
 		.unwrap();
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "skills", "goner", "--yes"])
+		.args([
+			"--json", "-a", "claude", "delete", "skills", "goner", "--yes",
+		])
 		.output()
 		.unwrap();
 
@@ -1561,7 +1573,7 @@ fn prune_lock_default_dry_run_reports_orphan_without_mutating() {
 	let before = std::fs::read(&lock_path).unwrap();
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "prune-lock"])
+		.args(["--json", "-a", "claude", "prune-lock"])
 		.output()
 		.unwrap();
 
@@ -1679,7 +1691,7 @@ fn source_list_rejects_both_scopes() {
 	assert!(!out.status.success(), "both scopes must fail");
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(
-		stderr.contains("cannot be used with"),
+		stderr.contains("mutually exclusive"),
 		"expected both-scope rejection: {stderr}"
 	);
 }
@@ -2954,7 +2966,7 @@ fn source_sync_both_flags_is_rejected() {
 		.unwrap();
 	assert!(!out.status.success(), "both -g/-p must be rejected");
 	let stderr = String::from_utf8_lossy(&out.stderr);
-	assert!(stderr.contains("cannot be used with"), "stderr: {stderr}");
+	assert!(stderr.contains("mutually exclusive"), "stderr: {stderr}");
 }
 
 #[test]
@@ -3285,6 +3297,7 @@ fn add_mcp_url_with_timeout_succeeds_and_sets_it() {
 	let state = tempfile::tempdir().unwrap();
 	let out = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude",
 			"add",
@@ -3345,6 +3358,7 @@ fn update_mcp_timeout_flag_overrides_existing() {
 	let state = tempfile::tempdir().unwrap();
 	let add = isolated_cli(home.path(), state.path())
 		.args([
+			"--json",
 			"-a",
 			"claude",
 			"add",
@@ -3365,7 +3379,16 @@ fn update_mcp_timeout_flag_overrides_existing() {
 	);
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "update", "mcps", "m", "--timeout", "45"])
+		.args([
+			"--json",
+			"-a",
+			"claude",
+			"update",
+			"mcps",
+			"m",
+			"--timeout",
+			"45",
+		])
 		.output()
 		.unwrap();
 	assert!(
@@ -3437,7 +3460,7 @@ fn delete_skill_dry_run_outputs_snake_case_keys() {
 	let skill_dir = write_claude_skill(home.path(), "snaketool");
 
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-a", "claude", "delete", "skills", "snaketool"])
+		.args(["--json", "-a", "claude", "delete", "skills", "snaketool"])
 		.output()
 		.unwrap();
 
@@ -3490,6 +3513,7 @@ fn add_skill_output_includes_native_reader_field() {
 		.env("APPDATA", project)
 		.current_dir(project)
 		.args([
+			"--json",
 			"-a",
 			"claude",
 			"add",
@@ -3538,6 +3562,7 @@ fn add_skill_output_native_reader_true_for_opencode() {
 		.env("APPDATA", home)
 		.current_dir(home)
 		.args([
+			"--json",
 			"-a",
 			"opencode",
 			"add",
@@ -5008,7 +5033,7 @@ fn prune_lock_all_scope_project_write_failure_reports_global_prune() {
 
 	let out = isolated_cli(home.path(), state.path())
 		.current_dir(project.path())
-		.args(["--all", "prune-lock", "--yes"])
+		.args(["--json", "--all", "prune-lock", "--yes"])
 		.output()
 		.unwrap();
 
@@ -5044,5 +5069,916 @@ fn prune_lock_all_scope_project_write_failure_reports_global_prune() {
 	assert!(
 		json["error"].is_string(),
 		"the partial-mutation report must surface an error field: {json}"
+	);
+}
+
+// ───────────────────────── CLI surface contract (2.11) ─────────────────────
+//
+// One test per fix in the 2.11 usability pass. Each asserts an OBSERVABLE
+// outcome (stdout text, disk content) so reverting the fix turns it red.
+
+/// Scope/agent/json/verbose are `global = true`, so they parse AFTER the
+/// subcommand too. Before that, `get skills -a claude` died with clap's
+/// "unexpected argument '-a' found" — the single most common trip-up, since
+/// every other CLI accepts trailing flags.
+#[test]
+fn global_flags_parse_after_the_subcommand() {
+	let dir = fixtures_dir();
+	for args in [
+		vec!["get", "skills", "-a", "claude", "--json"],
+		vec!["get", "skills", "--json", "-g"],
+		vec!["coverage", "--json", "-g"],
+	] {
+		let out = aghub_cli().current_dir(&dir).args(&args).output().unwrap();
+		assert!(
+			out.status.success(),
+			"{args:?} must parse; stderr: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		serde_json::from_slice::<Value>(&out.stdout)
+			.unwrap_or_else(|e| panic!("{args:?} must emit JSON: {e}"));
+	}
+}
+
+/// The scope guard survived the move to `global = true`: clap does NOT
+/// propagate an ArgGroup into subcommands, so the exclusivity check had to
+/// become a manual one — and it must fire in the trailing position too, which
+/// the old ArgGroup could never have covered.
+#[test]
+fn scope_flags_stay_exclusive_in_the_trailing_position() {
+	let dir = fixtures_dir();
+	let out = aghub_cli()
+		.current_dir(&dir)
+		.args(["get", "skills", "-g", "-p"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "-g -p must still be rejected");
+	assert!(
+		String::from_utf8_lossy(&out.stderr).contains("mutually exclusive"),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+/// Default output is human-readable; `--json` is what scripts ask for. `get`
+/// used to have no `--json` at all and ALWAYS printed JSON, so a human had no
+/// readable option and the flag's meaning differed per command.
+#[cfg(unix)]
+#[test]
+fn get_skills_is_a_table_by_default_and_json_on_demand() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "tabled");
+
+	let table = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "get", "skills"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&table.stdout);
+	assert!(table.status.success(), "get skills must succeed");
+	assert!(
+		text.contains("NAME") && text.contains("tabled"),
+		"default output must be a table: {text}"
+	);
+	assert!(
+		serde_json::from_str::<Value>(&text).is_err(),
+		"default output must NOT be JSON: {text}"
+	);
+
+	let json = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "get", "skills", "--json"])
+		.output()
+		.unwrap();
+	let parsed: Value = serde_json::from_slice(&json.stdout).unwrap();
+	assert_eq!(parsed[0]["name"], "tabled");
+}
+
+/// A delete preview must SAY it is a preview and how to commit it. It used to
+/// print only `{"success": true, "dry_run": true, ...}` — read as "removed".
+#[cfg(unix)]
+#[test]
+fn delete_preview_tells_you_how_to_commit_it() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill_dir = write_claude_skill(home.path(), "previewed");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "previewed"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(out.status.success());
+	assert!(
+		text.contains("would remove") && text.contains("--yes"),
+		"preview must name itself and say how to commit: {text}"
+	);
+	assert!(skill_dir.exists(), "preview must not delete");
+}
+
+/// A committed delete must disclose the `.agents/skills` Master it leaves
+/// behind: `source sync` refuses to overwrite an existing Master, so a user who
+/// believes the skill is gone cannot reinstall it from git. The JSON always
+/// carried this in `skipped`; the human path printed nothing.
+#[cfg(unix)]
+#[test]
+fn delete_discloses_the_master_it_leaves_behind() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "kept", "kept");
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"kept",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-a", "claude", "delete", "skills", "kept", "--yes"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(out.status.success());
+	// Pins the FACTS (the master path is named, and it is called out as kept),
+	// not the heading's exact wording — a reword should not turn this red.
+	assert!(
+		text.contains(".agents/skills") && text.contains("NOT removed"),
+		"a committed delete must name the surviving master: {text}"
+	);
+	assert!(
+		home.path().join(".agents/skills/kept").exists(),
+		"the master really does survive — that is why it must be reported"
+	);
+}
+
+/// Re-adding an installed skill writes NOTHING. It used to report the freshly
+/// parsed SOURCE file as if it had been installed, so an edited source printed
+/// its new frontmatter while disk still held the old Master.
+#[cfg(unix)]
+#[test]
+fn re_add_reports_the_installed_master_not_the_source_file() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(src.path().join("drifted")).unwrap();
+	let source_md = src.path().join("drifted/SKILL.md");
+	std::fs::write(
+		&source_md,
+		"---\nname: drifted\ndescription: original\n---\n",
+	)
+	.unwrap();
+
+	let first = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "--json", "--from"])
+		.arg(src.path().join("drifted"))
+		.output()
+		.unwrap();
+	assert!(
+		first.status.success(),
+		"first add: {}",
+		String::from_utf8_lossy(&first.stderr)
+	);
+
+	// Edit the SOURCE only. The Master on disk still says "original".
+	std::fs::write(
+		&source_md,
+		"---\nname: drifted\ndescription: EDITED\n---\n",
+	)
+	.unwrap();
+
+	let second = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "--json", "--from"])
+		.arg(src.path().join("drifted"))
+		.output()
+		.unwrap();
+	assert!(second.status.success());
+	let payload: Value = serde_json::from_slice(&second.stdout).unwrap();
+	assert_eq!(
+		payload["description"], "original",
+		"the re-add must report the UNTOUCHED master, not the edited source"
+	);
+	assert_eq!(
+		payload["already_installed"], true,
+		"the payload must mark the re-add as a no-op"
+	);
+	assert!(
+		String::from_utf8_lossy(&second.stderr).contains("nothing was written"),
+		"a write-nothing re-add must say so; stderr: {}",
+		String::from_utf8_lossy(&second.stderr)
+	);
+
+	// And the HUMAN verb must match: "added" on a write-nothing run is the
+	// exact misreport this whole change exists to remove.
+	let human = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "--from"])
+		.arg(src.path().join("drifted"))
+		.output()
+		.unwrap();
+	let verb = String::from_utf8_lossy(&human.stdout);
+	assert!(
+		verb.contains("already installed") && !verb.contains("added skill"),
+		"a no-op re-add must not say 'added': {verb}"
+	);
+	let master = std::fs::read_to_string(
+		home.path().join(".agents/skills/drifted/SKILL.md"),
+	)
+	.unwrap();
+	assert!(
+		master.contains("original") && !master.contains("EDITED"),
+		"master really was left alone: {master}"
+	);
+}
+
+/// A fetch failure must name its cause. `FetchError::Network` was payload-free,
+/// so every failure — DNS, 404, TLS, a bad ref — printed the same
+/// "Failed to fetch source repository '<url>'" with no way to tell them apart,
+/// not even under `-v`.
+#[test]
+fn fetch_failure_reports_the_underlying_reason() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		// A path that is not a directory drives the debug fetch hook down its
+		// failure arm without touching the network.
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", home.path().join("nope"))
+		.args([
+			"-g",
+			"source",
+			"sync",
+			"owner/repo",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "a failed fetch must exit non-zero");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("Failed to fetch source repository"),
+		"stderr: {stderr}"
+	);
+	assert!(
+		stderr.contains("AGHUB_TEST_SOURCE_FETCH_ROOT"),
+		"the message must carry the underlying reason, not just the url: \
+		 {stderr}"
+	);
+}
+
+/// `source sync` IS the install entry point (there is no `source add`), so it
+/// answers to `install` and its help says so.
+#[test]
+fn source_sync_is_reachable_as_install_and_documents_it() {
+	let dir = fixtures_dir();
+	let help = aghub_cli()
+		.current_dir(&dir)
+		.args(["source", "install", "--help"])
+		.output()
+		.unwrap();
+	assert!(
+		help.status.success(),
+		"`source install` must be a valid alias"
+	);
+	let text = String::from_utf8_lossy(&help.stdout);
+	assert!(
+		text.contains("--install-missing"),
+		"install help must show the flag that actually installs: {text}"
+	);
+}
+
+/// `--format` takes a closed set, but it is a `value_parser` (not a ValueEnum),
+/// so clap prints no `[possible values]`. Both the help and the rejection must
+/// carry the list themselves or the flag is unguessable.
+#[test]
+fn inference_format_lists_its_accepted_values() {
+	let dir = fixtures_dir();
+	let help = aghub_cli()
+		.current_dir(&dir)
+		.args(["inference", "add", "--help"])
+		.output()
+		.unwrap();
+	let help_text = String::from_utf8_lossy(&help.stdout);
+	for value in ["anthropic", "openai_completions", "openai_responses"] {
+		assert!(
+			help_text.contains(value),
+			"help must list '{value}': {help_text}"
+		);
+	}
+
+	let bad = aghub_cli()
+		.current_dir(&dir)
+		.args([
+			"inference",
+			"add",
+			"--latin-name",
+			"x",
+			"--display-name",
+			"X",
+			"--api-base-url",
+			"https://example.invalid",
+			"--api-key",
+			"k",
+			"--format",
+			"bogus",
+		])
+		.output()
+		.unwrap();
+	assert!(!bad.status.success());
+	let stderr = String::from_utf8_lossy(&bad.stderr);
+	assert!(
+		stderr.contains("anthropic") && stderr.contains("openai_responses"),
+		"the rejection must list what IS accepted: {stderr}"
+	);
+}
+
+// ───────────── Findings from the Codex adversarial review (2.11) ───────────
+
+/// `delete` must never claim a resource is absent. `RemovalView` cannot express
+/// that: an MCP that EXISTS and one that does not serialize identically (MCP
+/// removal rewrites shared config and deletes no path, so `paths` is always
+/// empty). The first renderer used `paths.is_empty()` as "not installed" and so
+/// told you an installed MCP was not there — while `--yes` really removed it.
+#[cfg(unix)]
+#[test]
+fn delete_mcp_preview_never_claims_it_is_absent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let add = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"-n",
+			"live-mcp",
+			"--url",
+			"http://example.invalid",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+
+	let preview = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "delete", "mcps", "live-mcp"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&preview.stdout);
+	assert!(preview.status.success());
+	assert!(
+		!text.contains("not installed"),
+		"the payload cannot prove absence, so the renderer must not claim it: \
+		 {text}"
+	);
+	assert!(
+		text.contains("would remove") && text.contains("--yes"),
+		"a preview must still name itself and say how to commit: {text}"
+	);
+
+	// And the removal it previewed really does happen — which is exactly why
+	// calling it "not installed" was dangerous.
+	let commit = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "delete", "mcps", "live-mcp", "--yes"])
+		.output()
+		.unwrap();
+	assert!(commit.status.success());
+	assert!(
+		!mcp_listed(home.path(), state.path(), "live-mcp"),
+		"--yes must really remove the MCP the preview described"
+	);
+}
+
+/// `add skills` must emit ONE schema. `--from` carries `already_installed`
+/// because its install can no-op; a manual add never no-ops but must still
+/// carry the key, or a `-a a,b` batch envelope mixes two shapes.
+#[cfg(unix)]
+#[test]
+fn add_skill_json_schema_is_the_same_with_and_without_from() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(src.path().join("from-path")).unwrap();
+	std::fs::write(
+		src.path().join("from-path/SKILL.md"),
+		"---\nname: from-path\ndescription: d\n---\n",
+	)
+	.unwrap();
+
+	let manual = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "add", "skills", "--json", "-n", "manual",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		manual.status.success(),
+		"manual add: {}",
+		String::from_utf8_lossy(&manual.stderr)
+	);
+	let manual_json: Value = serde_json::from_slice(&manual.stdout).unwrap();
+
+	let imported = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "--json", "--from"])
+		.arg(src.path().join("from-path"))
+		.output()
+		.unwrap();
+	assert!(imported.status.success());
+	let imported_json: Value =
+		serde_json::from_slice(&imported.stdout).unwrap();
+
+	assert_eq!(
+		manual_json["already_installed"], false,
+		"a manual add must still carry the discriminator: {manual_json}"
+	);
+	assert_eq!(
+		imported_json["already_installed"], false,
+		"a fresh --from import is not a no-op: {imported_json}"
+	);
+	// NOT a key-set comparison: both branches build the same `SkillView`, so
+	// the key sets are structurally identical and such an assertion cannot
+	// fail. The two value assertions above are what carry this test.
+}
+
+/// `--json` on a `plugin` action that has no JSON form must FAIL, not print
+/// prose on a zero exit — a script would read that as success and break later.
+#[test]
+fn plugin_rejects_json_where_it_has_no_json_form() {
+	let dir = fixtures_dir();
+	let out = aghub_cli()
+		.current_dir(&dir)
+		.args(["--json", "plugin", "validate", "/nonexistent/path"])
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "--json must be refused, not ignored");
+	assert!(
+		String::from_utf8_lossy(&out.stderr).contains("--json is supported"),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+/// `inference key` DOES have a JSON form, and neither form may carry the raw
+/// key — only the masked preview and a presence bool.
+#[test]
+fn inference_key_supports_json_without_leaking_the_secret() {
+	let data = tempfile::tempdir().unwrap();
+	let id = add_provider(data.path(), "keyed");
+
+	let out = inference_cli(data.path())
+		.args(["inference", "key", &id, "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"inference key --json must succeed; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let raw = String::from_utf8_lossy(&out.stdout);
+	let json: Value = serde_json::from_str(&raw)
+		.unwrap_or_else(|e| panic!("key --json must emit JSON ({e}): {raw}"));
+	assert_eq!(json["id"], id);
+	assert_eq!(json["stored"], true, "the key was stored by add_provider");
+	assert!(
+		!raw.contains("sk-test-secret-value"),
+		"the raw api key must never be printed: {raw}"
+	);
+
+	// The default form stays the tab-separated line, and is equally secret-free.
+	let text_out = inference_cli(data.path())
+		.args(["inference", "key", &id])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&text_out.stdout);
+	assert!(text.contains("stored=true"), "default form: {text}");
+	assert!(
+		!text.contains("sk-test-secret-value"),
+		"the raw api key must never be printed: {text}"
+	);
+}
+
+/// The scope help must not promise a guard that does not exist: `prune-lock`
+/// accepts `--all` and writes BOTH locks, so the old blanket "rejected by every
+/// command that writes" was false.
+#[test]
+fn scope_help_matches_what_prune_lock_actually_accepts() {
+	let dir = fixtures_dir();
+	let help = aghub_cli()
+		.current_dir(&dir)
+		.args(["--help"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&help.stdout);
+	assert!(
+		text.contains("prune-lock"),
+		"the --all paragraph must name the write command that DOES take it: \
+		 {text}"
+	);
+
+	// And that is really what it does: --all is accepted, not rejected.
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["--all", "prune-lock"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"prune-lock --all must be accepted; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+}
+
+/// A `user:token@` a caller embedded in the source URL must not survive into
+/// any error the CLI prints. `aghub_git` redacts what IT builds, but the CLI
+/// echoes the raw `<SOURCE>` argument back in its own messages, and the fetch
+/// detail is now surfaced too — both had to be routed through the redactor.
+#[test]
+fn embedded_credentials_never_survive_into_a_cli_error() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	for source in [
+		"https://alice:SUPERSECRET@",
+		"https://alice:SUPERSECRET@host.invalid/o/r",
+		"ftp://alice:SUPERSECRET@host/x",
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"source",
+				"sync",
+				source,
+				"--install-missing",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(!out.status.success(), "{source} must fail");
+		let combined = format!(
+			"{}{}",
+			String::from_utf8_lossy(&out.stdout),
+			String::from_utf8_lossy(&out.stderr)
+		);
+		assert!(
+			!combined.contains("SUPERSECRET"),
+			"the embedded secret leaked for {source}: {combined}"
+		);
+		// The redactor replaces the WHOLE `user:secret` segment, so the
+		// username goes too — asserting that pins real redaction rather than a
+		// message that merely happens to omit the password.
+		assert!(
+			!combined.contains("alice"),
+			"userinfo must be redacted whole for {source}: {combined}"
+		);
+	}
+}
+
+// ────────── Findings from the three-way review round (2.11) ──────────
+
+/// `--from X --name NEW` is import-then-rename. When X's OWN name is already
+/// installed the import no-ops, so the rename would remove that master and
+/// re-add its OLD content as NEW — writing content the user never pointed at
+/// and deleting a skill they never asked to touch. It must refuse instead.
+#[cfg(unix)]
+#[test]
+fn rename_import_refuses_when_the_source_name_is_already_installed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src1 = tempfile::TempDir::new().unwrap();
+	let src2 = tempfile::TempDir::new().unwrap();
+	for (dir, body) in [(&src1, "ORIGINAL"), (&src2, "NEWCONTENT")] {
+		std::fs::create_dir_all(dir.path().join("foo")).unwrap();
+		std::fs::write(
+			dir.path().join("foo/SKILL.md"),
+			format!("---\nname: foo\ndescription: {body}\n---\n\n{body}\n"),
+		)
+		.unwrap();
+	}
+
+	let seed = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "--from"])
+		.arg(src1.path().join("foo"))
+		.output()
+		.unwrap();
+	assert!(seed.status.success(), "seed install must succeed");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "add", "skills", "--name", "bar", "--from",
+		])
+		.arg(src2.path().join("foo"))
+		.output()
+		.unwrap();
+	assert!(!out.status.success(), "the rename import must be refused");
+
+	// Nothing was written and nothing was destroyed.
+	assert!(
+		!home.path().join(".agents/skills/bar").exists(),
+		"a refused import must not create the renamed skill"
+	);
+	let foo = std::fs::read_to_string(
+		home.path().join(".agents/skills/foo/SKILL.md"),
+	)
+	.expect("the pre-existing skill must survive");
+	assert!(
+		foo.contains("ORIGINAL"),
+		"the pre-existing skill must be untouched: {foo}"
+	);
+}
+
+/// The same flags on a source whose name is NOT installed must still work —
+/// the refusal above must not have broken the feature.
+#[cfg(unix)]
+#[test]
+fn rename_import_still_works_when_the_source_name_is_free() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(src.path().join("fresh")).unwrap();
+	std::fs::write(
+		src.path().join("fresh/SKILL.md"),
+		"---\nname: fresh\ndescription: BODY\n---\n\nBODY\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "add", "skills", "--json", "--name",
+			"renamed", "--from",
+		])
+		.arg(src.path().join("fresh"))
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["name"], "renamed");
+	assert_eq!(
+		json["already_installed"], false,
+		"a rename WRITES, so it is never a no-op: {json}"
+	);
+	// The paths must name the RENAMED skill, not the source's own name.
+	for key in ["source_path", "canonical_path"] {
+		let path = json[key].as_str().unwrap_or_default();
+		assert!(
+			path.contains("renamed") && !path.contains("fresh"),
+			"{key} must point at the renamed skill, got {path}"
+		);
+	}
+	let body = std::fs::read_to_string(
+		home.path().join(".agents/skills/renamed/SKILL.md"),
+	)
+	.unwrap();
+	assert!(
+		body.contains("BODY"),
+		"the source content must land: {body}"
+	);
+}
+
+/// `delete --yes` on something already gone must not tell you to re-run with
+/// `--yes`. A script retrying on that hint would never terminate.
+#[cfg(unix)]
+#[test]
+fn delete_yes_on_an_absent_resource_does_not_ask_for_yes_again() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "delete", "mcps", "ghost", "--yes"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(out.status.success(), "delete stays idempotent");
+	assert!(
+		!text.contains("--yes"),
+		"--yes was already given; asking for it again is a loop: {text}"
+	);
+	assert!(
+		text.contains("nothing to remove"),
+		"it must say what happened: {text}"
+	);
+}
+
+/// A fresh multi-agent install must not print the "nothing was written" drift
+/// warning. A NativeReader no-ops as soon as ANY agent has the skill —
+/// including a sibling row of the same run — so that warning told users to
+/// delete a skill that had just installed correctly.
+#[cfg(unix)]
+#[test]
+fn fresh_multi_agent_install_does_not_warn_about_drift() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(src.path().join("shared")).unwrap();
+	std::fs::write(
+		src.path().join("shared/SKILL.md"),
+		"---\nname: shared\ndescription: d\n---\n\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude,codex", "add", "skills", "--from"])
+		.arg(src.path().join("shared"))
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		!stderr.contains("nothing was written"),
+		"a fresh install must not claim its content did not land: {stderr}"
+	);
+	assert!(
+		home.path().join(".agents/skills/shared").exists(),
+		"and it really did install"
+	);
+}
+
+/// `describe` does no install, so the install advisories are always false —
+/// printing "already_installed false" for an installed skill reads as a
+/// contradiction. They stay in `--json` so the wire shape is unchanged.
+#[cfg(unix)]
+#[test]
+fn describe_hides_install_advisories_from_the_human_block() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "described");
+
+	let text_out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "describe", "skills", "described"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&text_out.stdout);
+	assert!(text_out.status.success());
+	assert!(text.contains("described"), "sanity: {text}");
+	assert!(
+		!text.contains("already_installed") && !text.contains("native_reader"),
+		"install advisories are noise on a read: {text}"
+	);
+
+	let json_out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"describe",
+			"skills",
+			"described",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	let json: Value = serde_json::from_slice(&json_out.stdout).unwrap();
+	assert_eq!(
+		json["already_installed"], false,
+		"--json keeps the full wire shape"
+	);
+	assert_eq!(json["native_reader"], false);
+}
+
+/// The multi-agent batch's HUMAN output. All six batch tests assert the JSON
+/// envelope; without this the per-row rendering and the ok/failed tally could
+/// regress to nothing and still read as success.
+#[cfg(unix)]
+#[test]
+fn agent_list_human_output_renders_each_row_and_a_tally() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,opencode",
+			"add",
+			"mcps",
+			"-n",
+			"batched",
+			"--url",
+			"http://example.invalid",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		text.contains("claude: added mcp 'batched'"),
+		"each agent needs its own row: {text}"
+	);
+	assert!(
+		text.contains("opencode: added mcp 'batched'"),
+		"each agent needs its own row: {text}"
+	);
+	assert!(text.contains("2 ok, 0 failed"), "tally missing: {text}");
+	assert!(
+		serde_json::from_str::<Value>(&text).is_err(),
+		"the default must not be JSON: {text}"
+	);
+}
+
+/// A batch row that FAILS must say so by name, and the tally must count it —
+/// a silently dropped failure row alongside "2 ok" would read as a clean run.
+#[cfg(unix)]
+#[test]
+fn agent_list_human_output_names_the_failing_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// claude already has `dup`, so its row fails while opencode's succeeds —
+	// the same setup the JSON-envelope partial-failure test uses.
+	seed_mcp(home.path(), state.path(), "dup");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,opencode",
+			"add",
+			"mcps",
+			"--name",
+			"dup",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		!out.status.success(),
+		"a failing row must exit non-zero: {text}"
+	);
+	assert!(
+		text.contains("claude: FAILED"),
+		"the failing agent must be named as failed: {text}"
+	);
+	assert!(
+		text.contains("opencode: added mcp 'dup'"),
+		"the surviving agent must still be attempted and reported: {text}"
+	);
+	assert!(
+		text.contains("1 ok, 1 failed"),
+		"the tally must count the failure: {text}"
+	);
+}
+
+/// `check skills`' default table. `check` is what a human runs to decide
+/// whether to `apply-update`; if the row or the offline hint regressed they
+/// would conclude nothing needs updating.
+#[cfg(unix)]
+#[test]
+fn check_skills_default_output_is_a_table_with_the_offline_hint() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "locked-one", "locked-one");
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"locked-one",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "check", "skills"])
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+	let text = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		text.contains("SKILL") && text.contains("STATUS"),
+		"default must be a table: {text}"
+	);
+	assert!(
+		text.contains("locked-one") && text.contains("uncheckable"),
+		"the locked skill's row must be there: {text}"
+	);
+	assert!(
+		text.contains("--online"),
+		"offline default must point at --online: {text}"
+	);
+	assert!(
+		serde_json::from_str::<Value>(&text).is_err(),
+		"the default must not be JSON: {text}"
 	);
 }

@@ -56,7 +56,31 @@ pub fn execute(
 					"Importing skill from: {}",
 					from_path.display()
 				);
-				let mut skill = manager.add_skill_from_path(&from_path)?;
+				let added = manager.add_skill_from_path(&from_path)?;
+				let mut skill = added.skill;
+				// `--name` is implemented as import-then-rename, which only
+				// works when the import actually imported something. When the
+				// source's own name is ALREADY installed the import is a no-op
+				// and `skill` is the pre-existing master — so the rename would
+				// remove that master and re-add the OLD content under the new
+				// name, discarding the source the user pointed at and deleting
+				// a skill they never asked to touch. Refuse instead: nothing
+				// has been written yet, so there is nothing to roll back.
+				if added.already_installed && name.is_some() {
+					return Err(anyhow!(
+						"cannot import '{}' as a different name: a skill named \
+						 '{}' (this source's own name) is already installed, so \
+						 nothing was imported to rename. Delete '{}' first, or \
+						 rename the skill in the source's SKILL.md.",
+						from_path.display(),
+						skill.name,
+						skill.name
+					));
+				}
+				// A `--name` rename REMOVES and RE-ADDS under the new name, so
+				// it always writes. Inheriting the inner `already_installed`
+				// would report a genuine install as a no-op.
+				let renamed = name.is_some();
 
 				if let Some(custom_name) = name {
 					eprintln_verbose!(
@@ -65,15 +89,53 @@ pub fn execute(
 						custom_name
 					);
 					manager.remove_skill(&skill.name)?;
-					skill.name = custom_name;
+					skill.name = custom_name.clone();
 					manager.add_skill(skill.clone())?;
+					// Re-read the entry the rename just wrote: `skill` still
+					// carries the ORIGINAL skill's paths, only its name having
+					// been reassigned above.
+					if let Some(installed) = manager
+						.config()
+						.and_then(|c| {
+							c.skills.iter().find(|s| s.name == custom_name)
+						})
+						.cloned()
+					{
+						skill = installed;
+					}
+				} else if added.already_installed
+					&& !manager.skill_target_is_native_reader()
+				{
+					// The install wrote NOTHING: the Master was already there.
+					// Say so, because the payload below reports that untouched
+					// Master and a user who just edited the source would
+					// otherwise read it as a successful overwrite.
+					//
+					// NOT for a NativeReader: that agent reads the Master
+					// directly, so it no-ops the moment ANY agent has the skill
+					// — including a sibling row of this very `-a a,b` run, which
+					// just installed it from this same source. There is no drift
+					// to warn about there, and `note_if_native_reader` below
+					// already explains the coverage.
+					eprintln!(
+						"note: nothing was written — the existing \
+						 .agents/skills master was left as-is. To take the \
+						 source's current content, delete the skill \
+						 (aghub-cli delete skills {} --yes) and remove the \
+						 master it reports as kept, then add it again.",
+						skill.name
+					);
 				}
 
 				eprintln_verbose!("Skill '{}' added successfully", skill.name);
 				note_if_native_reader(manager);
+				// An idempotent re-add is a no-op, and both the human verb
+				// ("added" vs "already installed") and a scripted caller need
+				// to tell it from a real install.
 				let view = aghub_core::dto::SkillView::from(&skill)
-					.with_native_reader(
-						manager.skill_target_is_native_reader(),
+					.with_native_reader(manager.skill_target_is_native_reader())
+					.with_already_installed(
+						added.already_installed && !renamed,
 					);
 				serde_json::to_value(&view)?
 			} else {
@@ -89,6 +151,10 @@ pub fn execute(
 				manager.add_skill(skill.clone())?;
 				eprintln_verbose!("Skill added successfully");
 				note_if_native_reader(manager);
+				// `already_installed` is always false here — a manual add errors
+				// on a duplicate rather than no-op'ing — but it is serialized
+				// either way, so `add skills` has ONE schema whether or not
+				// --from was used and a batch envelope cannot mix two shapes.
 				let view = aghub_core::dto::SkillView::from(&skill)
 					.with_native_reader(
 						manager.skill_target_is_native_reader(),

@@ -50,8 +50,6 @@ pub struct TransferArgs {
 	/// rejects it too; this just fails fast at parse with a usage error).
 	#[arg(long = "to", value_parser = parse_agent, required = true, num_args = 1..)]
 	to: Vec<AgentType>,
-	#[arg(long)]
-	json: bool,
 }
 
 #[derive(Subcommand, Clone)]
@@ -87,8 +85,6 @@ pub struct ReconcileArgs {
 	/// dry-run).
 	#[arg(short = 'y', long = "yes")]
 	yes: bool,
-	#[arg(long)]
-	json: bool,
 }
 
 /// A core `transfer_*` fn (copy a resource into a set of destinations).
@@ -136,6 +132,7 @@ pub fn execute_transfer(
 	action: &TransferAction,
 	global: bool,
 	project: bool,
+	json: bool,
 ) -> Result<()> {
 	let (scope, project_root) = resolve_scope(global, project)?;
 	let (args, run): (&TransferArgs, TransferFn) = match action {
@@ -161,7 +158,7 @@ pub fn execute_transfer(
 		.collect();
 
 	let result = run(source, destinations)?;
-	render(&result, args.json)
+	render(&result, json)
 }
 
 /// Dispatch a `reconcile` subcommand action.
@@ -169,6 +166,7 @@ pub fn execute_reconcile(
 	action: &ReconcileAction,
 	global: bool,
 	project: bool,
+	json: bool,
 ) -> Result<()> {
 	let (scope, project_root) = resolve_scope(global, project)?;
 	let (args, run): (&ReconcileArgs, ReconcileFn) = match action {
@@ -189,20 +187,20 @@ pub fn execute_reconcile(
 	// alone are non-destructive and run immediately (like `transfer`), unless
 	// --dry-run is asked for explicitly.
 	if args.dry_run || (!args.remove.is_empty() && !args.yes) {
-		return render_dry_run(args);
+		return render_dry_run(args, json);
 	}
 
 	let result = run(source, args.add.clone(), args.remove.clone())?;
-	render(&result, args.json)
+	render(&result, json)
 }
 
 /// Report what a reconcile WOULD do without touching anything, mirroring the
 /// `delete` contract (dry-run by default, `--yes` to apply).
-fn render_dry_run(args: &ReconcileArgs) -> Result<()> {
+fn render_dry_run(args: &ReconcileArgs, json: bool) -> Result<()> {
 	let names = |agents: &[AgentType]| -> Vec<String> {
 		agents.iter().map(|a| a.as_str().to_string()).collect()
 	};
-	if args.json {
+	if json {
 		println!(
 			"{}",
 			serde_json::to_string_pretty(&serde_json::json!({

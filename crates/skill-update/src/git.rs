@@ -66,7 +66,7 @@ impl Fetcher for GitFetcher {
 fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
 	aghub_git::resolve_remote_source(source)
 		.map(|resolved| resolved.clone_url)
-		.map_err(|_| FetchError::Network)
+		.map_err(|e| FetchError::network(e.to_string()))
 }
 
 fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
@@ -79,7 +79,7 @@ fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
 	{
 		FetchError::Auth
 	} else {
-		FetchError::Network
+		FetchError::network(msg)
 	}
 }
 
@@ -102,7 +102,12 @@ impl RefResolver for GitRefResolver {
 		}
 		aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
 			.map_err(classify_fetch_error)?
-			.ok_or(FetchError::Network)
+			.ok_or_else(|| {
+				FetchError::network(match source_ref.ref_.as_deref() {
+					Some(r) => format!("remote has no ref '{r}'"),
+					None => "remote advertised no default branch".to_string(),
+				})
+			})
 	}
 }
 

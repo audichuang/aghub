@@ -31,6 +31,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use tabled::builder::Builder;
+use tabled::settings::Style;
 
 /// Flattened, camelCase status mirroring `aghub-api`'s `SkillUpdateStatusResponse`
 /// (the CLI does not depend on the api crate, so the shape is duplicated here).
@@ -62,6 +64,89 @@ struct SkillUpdateView {
 	scope: String,
 	#[serde(flatten)]
 	status: StatusView,
+}
+
+/// Render the update statuses as a table, or the exact `SkillUpdateView` array
+/// under `--json`. `check` is the command a human runs to decide whether to
+/// bother with `apply-update`, so the default has to be readable; the JSON
+/// shape stays byte-identical for scripts.
+fn print_updates(
+	views: &[SkillUpdateView],
+	json: bool,
+	online: bool,
+) -> Result<()> {
+	if json {
+		println!("{}", serde_json::to_string_pretty(views)?);
+		return Ok(());
+	}
+	if views.is_empty() {
+		println!("No locked skills to check.");
+		return Ok(());
+	}
+	let mut builder = Builder::default();
+	builder.push_record(["SKILL", "SCOPE", "STATUS", "DETAIL"]);
+	let mut outdated = 0usize;
+	for v in views {
+		let (status, detail) = match &v.status {
+			StatusView::UpToDate => ("up-to-date", String::new()),
+			StatusView::UpdateAvailable { current, available } => {
+				outdated += 1;
+				(
+					"update-available",
+					format!("{} -> {}", short(current), short(available)),
+				)
+			}
+			StatusView::Renamed { new_name } => {
+				("renamed", format!("upstream name is now '{new_name}'"))
+			}
+			StatusView::Uncheckable { reason } => {
+				("uncheckable", reason.clone())
+			}
+		};
+		builder.push_record([
+			v.name.clone(),
+			v.scope.clone(),
+			status.to_string(),
+			detail,
+		]);
+	}
+	let mut table = builder.build();
+	table.with(Style::sharp());
+	println!("{table}");
+	if outdated > 0 {
+		println!(
+			"{outdated} skill(s) can be updated: aghub-cli apply-update \
+skills <name> --yes"
+		);
+	}
+	// Only meaningful for the OFFLINE default. After `--online`, a `network`
+	// reason is a REAL fetch failure, and telling that user to "pass --online"
+	// is both wrong and a dead end.
+	if !online
+		&& views.iter().any(|v| {
+			matches!(&v.status, StatusView::Uncheckable { reason } if reason == "network")
+		}) {
+		println!(
+			"note: remote sources report `network` because check is offline \
+by default; pass --online for a real check"
+		);
+	}
+	Ok(())
+}
+
+/// Shorten a content hash for the table; anything that is not a long hash (a
+/// version string, say) is left alone.
+fn short(hash: &str) -> String {
+	// Char-based, not byte-based: `available` is a content hash today but the
+	// field is a free-form String, and slicing a multi-byte value at byte 12
+	// would panic instead of shortening it.
+	let mut chars = hash.chars();
+	let head: String = chars.by_ref().take(12).collect();
+	if chars.next().is_some() {
+		format!("{head}…")
+	} else {
+		head
+	}
 }
 
 /// Map a lock entry's `source_type` to the offline `Uncheckable` reason.
@@ -110,7 +195,7 @@ pub fn execute(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	online: bool,
-	_json: bool,
+	json: bool,
 ) -> Result<()> {
 	match resource {
 		ResourceType::Mcps => {
@@ -120,7 +205,7 @@ pub fn execute(
 	}
 
 	if online {
-		return execute_online(scope, project_root);
+		return execute_online(scope, project_root, json);
 	}
 
 	let mut views: Vec<SkillUpdateView> = Vec::new();
@@ -161,7 +246,7 @@ pub fn execute(
 		}
 	}
 
-	println!("{}", serde_json::to_string_pretty(&views)?);
+	print_updates(&views, json, false)?;
 	Ok(())
 }
 
@@ -185,6 +270,7 @@ use super::source::EnvTokenResolver;
 fn execute_online(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
+	json: bool,
 ) -> Result<()> {
 	let want_global =
 		matches!(scope, ResourceScope::GlobalOnly | ResourceScope::Both);
@@ -232,7 +318,7 @@ fn execute_online(
 		.collect();
 	views.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
-	println!("{}", serde_json::to_string_pretty(&views)?);
+	print_updates(&views, json, true)?;
 	Ok(())
 }
 

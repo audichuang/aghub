@@ -37,7 +37,7 @@ pub fn execute(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	dry_run: bool,
-	_json: bool,
+	json: bool,
 ) -> Result<()> {
 	let want_global =
 		matches!(scope, ResourceScope::GlobalOnly | ResourceScope::Both);
@@ -85,13 +85,7 @@ pub fn execute(
 			eprintln_verbose!(
 				"Skipping project skill lock prune: no project root"
 			);
-			println!(
-				"{}",
-				serde_json::to_string_pretty(&json!({
-					"pruned": pruned,
-					"dryRun": dry_run,
-				}))?
-			);
+			report(&pruned, dry_run, None, json)?;
 			return Ok(());
 		};
 		eprintln_verbose!("Pruning project skill lock (dry_run={dry_run})");
@@ -111,14 +105,7 @@ pub fn execute(
 					// treats "stdout parses as JSON" as success must not
 					// start reading a failed prune as a clean one.
 					if !pruned.is_empty() {
-						println!(
-							"{}",
-							serde_json::to_string_pretty(&json!({
-								"pruned": pruned,
-								"dryRun": dry_run,
-								"error": e.to_string(),
-							}))?
-						);
+						report(&pruned, dry_run, Some(&e.to_string()), json)?;
 					}
 					return Err(e.into());
 				}
@@ -127,12 +114,43 @@ pub fn execute(
 		pruned.extend(names);
 	}
 
-	println!(
-		"{}",
-		serde_json::to_string_pretty(&json!({
-			"pruned": pruned,
-			"dryRun": dry_run,
-		}))?
-	);
+	report(&pruned, dry_run, None, json)
+}
+
+/// Emit the prune result: a human summary by default, the unchanged
+/// `{pruned, dryRun[, error]}` object under `--json`.
+///
+/// A dry run MUST say how to commit it — the JSON encoded that in `dryRun`,
+/// which a human reading a bare key list never saw, so "nothing happened" and
+/// "entries were dropped" printed identically.
+fn report(
+	pruned: &[String],
+	dry_run: bool,
+	error: Option<&str>,
+	json: bool,
+) -> Result<()> {
+	if json {
+		let mut payload = json!({ "pruned": pruned, "dryRun": dry_run });
+		if let Some(error) = error {
+			payload["error"] = json!(error);
+		}
+		println!("{}", serde_json::to_string_pretty(&payload)?);
+		return Ok(());
+	}
+	if pruned.is_empty() {
+		println!("No orphaned lock entries.");
+	} else {
+		let verb = if dry_run { "would prune" } else { "pruned" };
+		println!("{verb} {} lock entry(ies):", pruned.len());
+		for key in pruned {
+			println!("  {key}");
+		}
+		if dry_run {
+			println!("re-run with --yes to write the pruned lock");
+		}
+	}
+	if let Some(error) = error {
+		println!("error after a partial prune: {error}");
+	}
 	Ok(())
 }

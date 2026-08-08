@@ -396,7 +396,7 @@ mod fetch_with_resolver_tests {
 			_selection: FetchSelection<'_>,
 		) -> Result<crate::FetchedRepo, FetchError> {
 			self.tokens.lock().unwrap().push(token.map(str::to_string));
-			Err(FetchError::Network)
+			Err(FetchError::network("stub"))
 		}
 	}
 
@@ -425,7 +425,7 @@ mod fetch_with_resolver_tests {
 			FetchSelection::CatalogSnapshot,
 		);
 
-		assert!(matches!(result, Err(FetchError::Network)));
+		assert!(matches!(result, Err(FetchError::Network(_))));
 		assert_eq!(
 			*fetcher.tokens.lock().unwrap(),
 			vec![Some("configured-token".to_string())],
@@ -1355,7 +1355,7 @@ pub fn diff_source(
 				Ok(_) => "ok",
 				Err(FetchError::Auth) => "auth-failed",
 				Err(FetchError::BackendUnavailable) => "backend-unavailable",
-				Err(FetchError::Network) => "network-failed",
+				Err(FetchError::Network(_)) => "network-failed",
 			},
 			fetch_started.elapsed()
 		);
@@ -1374,7 +1374,9 @@ pub fn diff_source(
 			Err(FetchError::Auth) => {
 				return SourceDiffOutcome::NeedsCredential { git_ref };
 			}
-			Err(FetchError::Network) => return SourceDiffOutcome::FetchFailed,
+			Err(FetchError::Network(_)) => {
+				return SourceDiffOutcome::FetchFailed
+			}
 		};
 		let classify_started = std::time::Instant::now();
 		let classified = classify_repo_skills(
@@ -2546,7 +2548,7 @@ mod diff_tests {
 				_selection: FetchSelection<'_>,
 			) -> Result<crate::FetchedRepo, FetchError> {
 				*self.0.lock().unwrap() += 1;
-				Err(FetchError::Network)
+				Err(FetchError::network("stub"))
 			}
 		}
 

@@ -10,7 +10,7 @@ pub fn execute(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	yes: bool,
-	_json: bool,
+	json: bool,
 ) -> Result<()> {
 	match resource {
 		ResourceType::Skills => {}
@@ -31,20 +31,28 @@ pub fn execute(
 	.map_err(|error| locked_resync_error(&name, error))?;
 	let paths = report.swapped;
 	let updated_hash = report.updated_hash;
-	println!(
-		"{}",
-		serde_json::to_string_pretty(&json!({
-			"success": true,
-			"name": name,
-			"scope": scope_name(scope),
-			"updatedHash": updated_hash,
-			"paths": paths
-				.iter()
-				.map(|p| p.display().to_string())
-				.collect::<Vec<_>>(),
-			"error": null,
-		}))?
-	);
+	if json {
+		println!(
+			"{}",
+			serde_json::to_string_pretty(&json!({
+				"success": true,
+				"name": name,
+				"scope": scope_name(scope),
+				"updatedHash": updated_hash,
+				"paths": paths
+					.iter()
+					.map(|p| p.display().to_string())
+					.collect::<Vec<_>>(),
+				"error": null,
+			}))?
+		);
+		return Ok(());
+	}
+	println!("updated skill '{name}' ({} scope)", scope_name(scope));
+	for path in &paths {
+		println!("  {}", path.display());
+	}
+	println!("hash: {updated_hash}");
 	Ok(())
 }
 
@@ -94,8 +102,8 @@ fn locked_resync_error(
 		LockedResyncError::Fetch(skill_update::FetchError::Auth) => {
 			anyhow!("failed to fetch source repository: authentication failed")
 		}
-		LockedResyncError::Fetch(skill_update::FetchError::Network) => {
-			anyhow!("failed to fetch source repository")
+		LockedResyncError::Fetch(skill_update::FetchError::Network(detail)) => {
+			anyhow!("failed to fetch source repository: {detail}")
 		}
 		LockedResyncError::Resync(ResyncError::Renamed { new_name }) => {
 			anyhow!(aghub_core::skills::update::skill_renamed_message(

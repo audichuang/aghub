@@ -194,17 +194,35 @@ impl FetchedRepo {
 
 /// Errors a [`Fetcher`] can surface, classified for `Uncheckable` mapping.
 ///
-/// The variants are payload-free: any underlying message is redacted of URL
-/// userinfo by `aghub_git` and then discarded at the boundary, so a token can
-/// never leak through the error string into the response.
-#[derive(Clone, Copy, Debug)]
+/// `Network` carries the underlying reason so a caller can tell a DNS failure
+/// from a 404 from a TLS problem. The payload is redacted of URL userinfo by
+/// `aghub_git`'s error constructors, so it cannot leak a token — but it CAN
+/// name an internal temp path, so a surface that must not disclose internals
+/// (the HTTP API) matches the variant and prints its own generic message
+/// instead of forwarding this string.
+#[derive(Clone, Debug)]
 pub enum FetchError {
 	/// Authentication failure (bad/missing token).
 	Auth,
-	/// Network / transport failure.
-	Network,
+	/// Network / transport failure, with the underlying reason.
+	Network(String),
 	/// Credential backend state could not be determined; no fetch was attempted.
 	BackendUnavailable,
+}
+
+impl FetchError {
+	/// A network failure with no more specific reason available.
+	pub fn network(reason: impl Into<String>) -> Self {
+		Self::Network(reason.into())
+	}
+
+	/// The underlying reason, when there is one.
+	pub fn detail(&self) -> Option<&str> {
+		match self {
+			Self::Network(detail) => Some(detail),
+			_ => None,
+		}
+	}
 }
 
 /// Injected fetch boundary. Production materializes only the
@@ -626,7 +644,7 @@ pub async fn check_updates(
 				Ok(Err(FetchError::Auth)) => {
 					JobResult::Failed(UncheckableReason::Auth)
 				}
-				Ok(Err(FetchError::Network)) => {
+				Ok(Err(FetchError::Network(_))) => {
 					JobResult::Failed(UncheckableReason::Network)
 				}
 				Ok(Err(FetchError::BackendUnavailable)) => {
@@ -746,7 +764,7 @@ async fn do_fetch(
 		fetcher.fetch(&sr, token.as_deref(), FetchSelection::Skills(&folders))
 	})
 	.await
-	.unwrap_or(Err(FetchError::Network))
+	.unwrap_or_else(|e| Err(FetchError::network(format!("fetch task: {e}"))))
 }
 
 /// Bridge the synchronous [`RefResolver`] into the async timeout path.
@@ -757,7 +775,9 @@ async fn do_resolve(
 ) -> Result<String, FetchError> {
 	tokio::task::spawn_blocking(move || resolver.resolve(&sr, token.as_deref()))
 		.await
-		.unwrap_or(Err(FetchError::Network))
+		.unwrap_or_else(|e| {
+			Err(FetchError::network(format!("resolve task: {e}")))
+		})
 }
 
 #[cfg(test)]
@@ -871,7 +891,7 @@ mod tests {
 			if let Some(kind) = self.err {
 				return Err(match kind {
 					"auth" => FetchError::Auth,
-					_ => FetchError::Network,
+					_ => FetchError::network("stub"),
 				});
 			}
 			Ok(FetchedRepo {
@@ -988,7 +1008,7 @@ mod tests {
 			*self.calls.lock().unwrap() += 1;
 			match self.err {
 				Some("auth") => Err(FetchError::Auth),
-				Some(_) => Err(FetchError::Network),
+				Some(_) => Err(FetchError::network("stub")),
 				None => Ok(self.oid.clone()),
 			}
 		}

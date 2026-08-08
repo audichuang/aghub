@@ -19,4 +19,13 @@ export type SkillResponse = {
 	 * generated `native_reader: boolean` ts-rs type — no DTO drift.
 	 */
 	native_reader: boolean;
+	/**
+	 * Advisory: this import was a no-op — the skill was already installed, so
+	 * nothing was written and the fields above describe the EXISTING master,
+	 * not the source that was just submitted. Mirrors
+	 * `aghub_core::dto::SkillView::already_installed`, which is where the
+	 * field is defined so both surfaces keep ONE wire shape. Always
+	 * serialized, like `native_reader`, so the ts-rs type stays non-optional.
+	 */
+	already_installed: boolean;
 };

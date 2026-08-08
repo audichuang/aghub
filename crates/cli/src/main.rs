@@ -46,36 +46,64 @@ macro_rules! eprintln_verbose {
 #[command(name = "aghub-cli")]
 #[command(about = "Manage Code Agent configurations")]
 #[command(version = env!("AGHUB_CLI_VERSION"))]
-#[command(group(
-	clap::ArgGroup::new("scope")
-		.args(["global", "project", "all"])
-		.multiple(false)
-))]
+#[command(after_help = SCOPE_HELP)]
 struct Cli {
-	/// Target agent id, a comma-separated list, or "all"
-	/// (e.g. -a claude / -a claude,grok / -a all)
-	#[arg(short = 'a', long, default_value = "claude")]
+	/// Target agent: one id, a comma-separated list, or "all".
+	///
+	/// A LIST fans the command out across those agents (get, add, update,
+	/// delete, enable, disable, `source sync`, `doctor --verify-links`);
+	/// "all" is accepted by `get` and `doctor --verify-links` only. Every
+	/// other command is single-agent or agent-independent and ignores it.
+	#[arg(short = 'a', long, default_value = "claude", global = true)]
 	agent: String,
 
-	/// Use global config (forces global-only scope)
-	#[arg(short, long)]
+	/// Read AND write global config only (the default)
+	#[arg(short, long, global = true)]
 	global: bool,
 
-	/// Show only project resources (project-only scope)
-	#[arg(short, long)]
+	/// Read AND write the current project's config only
+	#[arg(short, long, global = true)]
 	project: bool,
 
-	/// Show both project and global resources
-	#[arg(long)]
+	/// Read both project and global scopes (read-only commands only)
+	#[arg(long, global = true)]
 	all: bool,
 
+	/// Emit machine-readable JSON instead of human-readable output
+	#[arg(long, global = true)]
+	json: bool,
+
 	/// Enable verbose output (to stderr)
-	#[arg(short, long)]
+	#[arg(short, long, global = true)]
 	verbose: bool,
 
 	#[command(subcommand)]
 	command: Commands,
 }
+
+/// Appended to `--help`. The scope flags are `global = true`, so clap prints
+/// them on every subcommand but cannot explain the per-command policy there.
+const SCOPE_HELP: &str = "\
+Scope flags (-g / -p / --all) are mutually exclusive and may appear before or \
+after the subcommand:
+  -g/--global   global config only (default)
+  -p/--project  the current project only; a mutation fails if no project root
+  --all         both scopes. Accepted by the read-only commands and by
+                prune-lock, which then writes BOTH locks. Rejected by
+                add/update/delete/enable/disable, transfer, reconcile,
+                coverage, apply-update and `source sync`.
+
+`inference` and `plugin` manage a shared store, not per-scope agent config, so
+they ignore the scope flags entirely.
+
+Output:
+  Human-readable by default; --json emits the machine-readable shape.
+  The `plugin` mutations have no JSON form and reject --json rather than
+  silently printing prose; `plugin list` and `plugin marketplace list` do.
+
+Destructive commands (delete, apply-update, prune-lock, source sync, source
+accept-rename, reconcile with --remove) preview by default and only write with
+--yes.";
 
 #[derive(Subcommand, Clone)]
 enum Commands {
@@ -134,8 +162,9 @@ enum Commands {
 		#[arg(long)]
 		author: Option<String>,
 
-		/// For skill: Version
-		#[arg(short, long)]
+		/// For skill: Version string written into the skill's frontmatter
+		/// (no `-v` short — that is the global --verbose)
+		#[arg(long)]
 		version: Option<String>,
 
 		/// For skill: Comma-separated list of tool names
@@ -192,8 +221,9 @@ enum Commands {
 		#[arg(long)]
 		author: Option<String>,
 
-		/// For skill: Version
-		#[arg(short, long)]
+		/// For skill: Version string written into the skill's frontmatter
+		/// (no `-v` short — that is the global --verbose)
+		#[arg(long)]
 		version: Option<String>,
 
 		/// For skill: Comma-separated list of tool names
@@ -206,15 +236,18 @@ enum Commands {
 		resource: ResourceType,
 		name: String,
 
-		/// For skills: remove the skill from EVERY agent (destructive; needs --yes)
+		/// For skills: remove it from EVERY agent, not just --agent
+		/// (destructive; still needs --yes)
 		#[arg(long = "all-agents")]
 		all_agents: bool,
 
-		/// For skills: only list what would be removed (this is the default)
+		/// Force a preview even when --yes is also passed. Delete already
+		/// previews without --yes, so this only matters alongside it.
 		#[arg(long = "dry-run")]
 		dry_run: bool,
 
-		/// For skills: actually perform the removal (without it, delete is a dry-run)
+		/// Actually perform the removal. Without it delete only previews
+		/// (applies to both skills and MCP servers).
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
 	},
@@ -246,10 +279,6 @@ enum Commands {
 		/// sources are reported `uncheckable`). Read-only on both locks.
 		#[arg(long, visible_alias = "check-remote")]
 		online: bool,
-
-		/// Emit machine-readable JSON (default output is also JSON today)
-		#[arg(long)]
-		json: bool,
 	},
 	/// Apply an available skill update from the lock's source/ref/skillPath.
 	ApplyUpdate {
@@ -257,37 +286,32 @@ enum Commands {
 		resource: ResourceType,
 		name: String,
 
-		/// Actually overwrite installed skill files.
+		/// Actually overwrite installed skill files. Without it apply-update
+		/// refuses outright — it has no preview mode.
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
-
-		/// Emit machine-readable JSON (default output is also JSON today)
-		#[arg(long)]
-		json: bool,
 	},
 	/// Prune skill lock entries whose skill is no longer on disk (skills only).
 	///
 	/// Disk-driven and lock-only: never deletes skill files or edits agent config.
 	/// Defaults to a dry-run; pass --yes to write. Scope follows -g/-p/--all.
 	PruneLock {
-		/// Only report what would be pruned (this is the default)
+		/// Force a preview even when --yes is also passed. prune-lock already
+		/// previews without --yes, so this only matters alongside it.
 		#[arg(long = "dry-run")]
 		dry_run: bool,
 
-		/// Actually write the pruned lock (without it, prune-lock is a dry-run)
+		/// Actually write the pruned lock. Without it prune-lock only previews.
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
-
-		/// Emit machine-readable JSON (default output is also JSON today)
-		#[arg(long)]
-		json: bool,
 	},
 	/// Manage Claude Code plugins
 	Plugin {
 		#[command(subcommand)]
 		action: plugin::PluginAction,
 	},
-	/// Manage skill sources (git repos you've installed skills from)
+	/// Install skills from a git repo, and manage the repos already installed
+	/// from. `source sync` (alias `install`) is the install entry point.
 	Source {
 		#[command(subcommand)]
 		action: SourceAction,
@@ -308,11 +332,7 @@ enum Commands {
 		action: transfer::ReconcileAction,
 	},
 	/// Show per-agent skill coverage of the .agents/skills master (read-only)
-	Coverage {
-		/// Emit a machine-readable JSON array instead of a table
-		#[arg(long)]
-		json: bool,
-	},
+	Coverage,
 	/// Diagnose installed skills: source, on-disk master, and lock health
 	/// (read-only). Scope -g/-p/--all; default spans global + project.
 	Doctor {
@@ -320,42 +340,47 @@ enum Commands {
 		/// Supports one id, a comma-separated roster, or `-a all`.
 		#[arg(long)]
 		verify_links: bool,
-
-		/// Emit a machine-readable JSON array instead of a table
-		#[arg(long)]
-		json: bool,
 	},
 	/// Show Claude skill usage counts, least-used first (read-only).
 	///
 	/// Reads Claude Code's own `skillUsage` counter from `~/.claude.json`;
 	/// installed skills never dispatched show 0 uses. Claude-only — no other
 	/// agent keeps such a counter.
-	SkillUsage {
-		/// Emit a machine-readable JSON array instead of a table
-		#[arg(long)]
-		json: bool,
-	},
+	SkillUsage,
 }
 
 /// Actions for the `source` subcommand group.
 #[derive(clap::Subcommand, Clone)]
 pub enum SourceAction {
-	/// List installed skill sources
-	List {
-		#[arg(long)]
-		json: bool,
-	},
-	/// Show how a source differs from its installed skills
+	/// List the git sources the installed skills came from
+	List,
+	/// Show how a source's current content differs from your installed skills
 	Diff {
+		/// Repo the skills came from: `owner/repo`, an https git URL, or a
+		/// source id from `source list`
 		source: String,
+		/// Branch/tag/commit to compare against (defaults to each skill's
+		/// locked ref)
 		#[arg(long = "ref", alias = "git-ref")]
 		git_ref: Option<String>,
-		#[arg(long)]
-		json: bool,
 	},
-	/// Sync installed skills with a source
+	/// Install skills from a git repo, and refresh ones already installed.
+	///
+	/// This is also the INSTALL entry point — there is no separate `source
+	/// add`. A repo that is not installed yet is fetched the same way:
+	///
+	///   aghub-cli -p source sync <owner/repo> --install-missing --yes
+	///   aghub-cli -p source sync <owner/repo> --skill <name> --install-missing --yes
+	///
+	/// Neither --install-missing nor --update means "report only". Both
+	/// preview unless --yes is passed. Private repos read GIT_PASSWORD (any
+	/// host) or GITHUB_TOKEN (github.com only) from the environment.
+	#[command(visible_alias = "install")]
 	Sync {
+		/// Repo to sync from: `owner/repo`, an https git URL, or a source id
+		/// from `source list`
 		source: String,
+		/// Branch/tag/commit to fetch (defaults to each skill's locked ref)
 		#[arg(long = "ref", alias = "git-ref")]
 		git_ref: Option<String>,
 		/// Refresh outdated installed skills in the selected scope. Updates replace
@@ -381,10 +406,9 @@ pub enum SourceAction {
 		/// existing scripts don't error, but ignored; there is no copy install.
 		#[arg(long, hide = true)]
 		universal: bool,
+		/// Actually install/update. Without it sync only previews.
 		#[arg(long)]
 		yes: bool,
-		#[arg(long)]
-		json: bool,
 	},
 	/// Accept an upstream rename: install the new name and remove the old one
 	/// as a single transaction (rolls back on any failure).
@@ -393,13 +417,13 @@ pub enum SourceAction {
 		old_name: String,
 		/// New upstream name (from the source's `renamed.newName`).
 		new_name: String,
+		/// Branch/tag/commit to read the new name from (defaults to the
+		/// locked ref)
 		#[arg(long = "ref", alias = "git-ref")]
 		git_ref: Option<String>,
-		/// Commit changes. Default is a dry run.
+		/// Actually commit the rename. Without it accept-rename only previews.
 		#[arg(long)]
 		yes: bool,
-		#[arg(long)]
-		json: bool,
 	},
 }
 
@@ -411,11 +435,42 @@ enum ResourceType {
 	Mcps,
 }
 
+impl ResourceType {
+	/// Noun for human-readable output ("added skill 'x'").
+	fn singular(self) -> &'static str {
+		match self {
+			Self::Skills => "skill",
+			Self::Mcps => "mcp",
+		}
+	}
+}
+
 fn main() -> Result<()> {
 	let cli = Cli::parse();
 
 	// Set global verbose flag
 	set_verbose(cli.verbose);
+
+	// The scope flags are `global = true` so they can be written before OR
+	// after the subcommand. clap does NOT propagate an ArgGroup to
+	// subcommands, so the old `ArgGroup::new("scope")` would have silently
+	// stopped enforcing exclusivity the moment the args went global — the
+	// check has to be manual, and it has to run for EVERY command, including
+	// the ones dispatched early below.
+	let picked: Vec<&str> = [
+		(cli.global, "-g/--global"),
+		(cli.project, "-p/--project"),
+		(cli.all, "--all"),
+	]
+	.into_iter()
+	.filter_map(|(set, name)| set.then_some(name))
+	.collect();
+	if picked.len() > 1 {
+		anyhow::bail!(
+			"scope flags are mutually exclusive; got {}",
+			picked.join(" and ")
+		);
+	}
 
 	// A comma --agent list is consumed only by the fan-out commands (get /
 	// add / update / delete / enable / disable / source sync); every other
@@ -427,7 +482,7 @@ fn main() -> Result<()> {
 		anyhow::bail!(
 			"this command does not take an --agent list; pass a single agent \
 			 or omit -a (lists work with: get, add, update, delete, enable, \
-			 disable, source sync)"
+			 disable, `source sync`, `doctor --verify-links`)"
 		);
 	}
 
@@ -441,6 +496,7 @@ fn main() -> Result<()> {
 			cli.project,
 			cli.all,
 			&cli.agent,
+			cli.json,
 		);
 	}
 
@@ -451,7 +507,6 @@ fn main() -> Result<()> {
 		resource,
 		name,
 		yes,
-		json,
 	} = &cli.command
 	{
 		let (scope, project_root) =
@@ -462,14 +517,14 @@ fn main() -> Result<()> {
 			scope,
 			project_root.as_deref(),
 			*yes,
-			*json,
+			cli.json,
 		);
 	}
 
 	// Inference inventory is not agent-scoped (it's the shared provider store +
 	// keyring). Dispatch it before the adapter/ConfigManager setup too.
 	if let Commands::Inference { action } = &cli.command {
-		return commands::inference::execute(action);
+		return commands::inference::execute(action, cli.json);
 	}
 
 	// `transfer` / `reconcile` span MULTIPLE agents (source + targets), so they
@@ -492,6 +547,7 @@ fn main() -> Result<()> {
 			action,
 			cli.global,
 			cli.project,
+			cli.json,
 		);
 	}
 	if let Commands::Reconcile { action } = &cli.command {
@@ -499,27 +555,28 @@ fn main() -> Result<()> {
 			action,
 			cli.global,
 			cli.project,
+			cli.json,
 		);
 	}
 
 	// `coverage` classifies EVERY registered agent against the per-scope master,
 	// so it is not single-agent scoped; dispatch it before the adapter setup.
-	if let Commands::Coverage { json } = &cli.command {
+	if let Commands::Coverage = &cli.command {
 		return commands::coverage::execute(
 			cli.global,
 			cli.project,
 			cli.all,
-			*json,
+			cli.json,
 		);
 	}
 
 	// `doctor` reconciles the skill lock against the on-disk master across
 	// scopes; not single-agent scoped, so dispatch before adapter setup.
-	if let Commands::Doctor { verify_links, json } = &cli.command {
+	if let Commands::Doctor { verify_links } = &cli.command {
 		return commands::doctor::execute_with_options(
 			cli.global,
 			cli.project,
-			*json,
+			cli.json,
 			*verify_links,
 			&cli.agent,
 		);
@@ -527,8 +584,8 @@ fn main() -> Result<()> {
 
 	// `skill-usage` reads Claude's global `skillUsage` counter — it is
 	// Claude-global, not single-agent scoped, so dispatch before adapter setup.
-	if let Commands::SkillUsage { json } = &cli.command {
-		return commands::skill_usage::execute(cli.project, cli.all, *json);
+	if let Commands::SkillUsage = &cli.command {
+		return commands::skill_usage::execute(cli.project, cli.all, cli.json);
 	}
 
 	// Parse the agent flag — "all" (case-insensitive), a single id, or a
@@ -550,11 +607,142 @@ fn main() -> Result<()> {
 	eprintln_verbose!("Agent type: {}", cli.agent);
 	match run_for_agent(&cli, agent_type)? {
 		Some(payload) => {
-			println!("{}", serde_json::to_string_pretty(&payload)?);
+			if cli.json {
+				println!("{}", serde_json::to_string_pretty(&payload)?);
+			} else {
+				print!("{}", render_mutation(&cli.command, &payload));
+			}
 			Ok(())
 		}
 		None => Ok(()),
 	}
+}
+
+/// Render one mutating command's JSON payload as human-readable text.
+///
+/// Dispatches on the COMMAND, not on the payload's keys: `add`/`update` emit a
+/// bare `SkillView`/`McpServer` with no discriminator, so sniffing fields would
+/// guess wrong the moment either shape gains a key. Every arm falls back to the
+/// name so an unexpected payload still says what it acted on.
+fn render_mutation(command: &Commands, payload: &serde_json::Value) -> String {
+	let name = payload
+		.get("name")
+		.and_then(|v| v.as_str())
+		.unwrap_or("(unnamed)");
+	match command {
+		Commands::Add { resource, .. } => {
+			// An idempotent re-add writes nothing; saying "added" there
+			// contradicts the note `add` prints and reads as an overwrite.
+			if payload.get("already_installed").and_then(|v| v.as_bool())
+				== Some(true)
+			{
+				format!(
+					"{} '{name}' is already installed\n",
+					resource.singular()
+				)
+			} else {
+				format!("added {} '{name}'\n", resource.singular())
+			}
+		}
+		Commands::Update { resource, .. } => {
+			format!("updated {} '{name}'\n", resource.singular())
+		}
+		Commands::Enable { resource, .. } => {
+			format!("enabled {} '{name}'\n", resource.singular())
+		}
+		Commands::Disable { resource, .. } => {
+			format!("disabled {} '{name}'\n", resource.singular())
+		}
+		Commands::Delete {
+			resource,
+			yes,
+			dry_run,
+			..
+		} => render_removal(*resource, name, payload, !yes || *dry_run),
+		// `run_for_agent` only returns a payload for the six arms above.
+		_ => format!("{name}\n"),
+	}
+}
+
+/// Render a `RemovalView` payload. A preview MUST say how to commit it and a
+/// commit MUST disclose the Master left behind — the JSON carried both facts in
+/// `needs_confirm` / `skipped`, where a human running `delete` never saw them
+/// and could read `"success": true` as "it was removed".
+///
+/// It must NOT claim the resource is absent. `RemovalView` cannot express that:
+/// an MCP that exists and one that does not serialize IDENTICALLY (MCP removal
+/// rewrites shared config and deletes no disk path, so `paths` is deliberately
+/// always empty — root AGENTS.md "MCP removal contract"), and a skill's noop
+/// looks the same as a skill whose files are already gone. So the wording stays
+/// inside what the payload proves: which paths, if any, are involved.
+fn render_removal(
+	resource: ResourceType,
+	name: &str,
+	payload: &serde_json::Value,
+	is_preview: bool,
+) -> String {
+	let kind = resource.singular();
+	let flag = |key: &str| payload.get(key).and_then(|v| v.as_bool());
+	let list = |key: &str| -> Vec<&str> {
+		payload
+			.get(key)
+			.and_then(|v| v.as_array())
+			.map(|a| a.iter().filter_map(|p| p.as_str()).collect())
+			.unwrap_or_default()
+	};
+	let paths = list("paths");
+	let skipped = list("skipped");
+	let mut out = String::new();
+
+	// What removal actually touches, per resource. Naming it beats printing an
+	// empty path list under "would remove:" and leaving the user to guess.
+	let target = match resource {
+		ResourceType::Mcps => "the agent's MCP config entry",
+		ResourceType::Skills => {
+			"no installed files (nothing on disk to remove)"
+		}
+	};
+
+	if flag("executed") != Some(true) && is_preview {
+		if paths.is_empty() {
+			out.push_str(&format!("would remove {kind} '{name}': {target}\n"));
+		} else {
+			out.push_str(&format!("would remove {kind} '{name}':\n"));
+			for p in &paths {
+				out.push_str(&format!("  {p}\n"));
+			}
+		}
+		out.push_str("re-run with --yes to remove\n");
+	} else if flag("executed") != Some(true) {
+		// `--yes` was given and nothing ran: the resource was already gone
+		// (`RemovalOutcome::noop`). Telling the caller to "re-run with --yes"
+		// there is a loop that never terminates — a script retrying on that
+		// hint would spin forever. Delete stays idempotent (exit 0).
+		out.push_str(&format!("{kind} '{name}': nothing to remove\n"));
+	} else if paths.is_empty() {
+		out.push_str(&format!("removed {kind} '{name}': {target}\n"));
+	} else {
+		out.push_str(&format!("removed {kind} '{name}':\n"));
+		for p in &paths {
+			out.push_str(&format!("  {p}\n"));
+		}
+	}
+
+	if !skipped.is_empty() {
+		out.push_str("kept (shared with other agents):\n");
+		for p in &skipped {
+			out.push_str(&format!("  {p}\n"));
+		}
+		out.push_str(
+			"note: the .agents/skills Master above is NOT removed. `source \
+			 sync` refuses to overwrite an existing Master, so delete it by \
+			 hand before reinstalling this skill from git.\n",
+		);
+	}
+	if let Some(err) = payload.get("prune_error").and_then(|v| v.as_str()) {
+		out.push_str(&format!("lock prune failed: {err}\n"));
+	}
+	out
 }
 
 /// True for the commands that fan out across an --agent list. Everything
@@ -718,7 +906,7 @@ fn run_for_agent(
 	// or collect; the rest print for themselves and yield None.
 	match cli.command.clone() {
 		Commands::Get { resource } => {
-			get::execute(&manager, resource).map(|()| None)
+			get::execute(&manager, resource, cli.json).map(|()| None)
 		}
 		Commands::Add {
 			resource,
@@ -806,18 +994,14 @@ fn run_for_agent(
 			enable::execute(&mut manager, resource, name).map(Some)
 		}
 		Commands::Describe { resource, name } => {
-			describe::execute(&manager, resource, name).map(|()| None)
+			describe::execute(&manager, resource, name, cli.json).map(|()| None)
 		}
-		Commands::Check {
-			resource,
-			online,
-			json,
-		} => check::execute(
+		Commands::Check { resource, online } => check::execute(
 			resource,
 			scope,
 			project_root.as_deref(),
 			online,
-			json,
+			cli.json,
 		)
 		.map(|()| None),
 		Commands::ApplyUpdate { .. } => {
@@ -825,11 +1009,11 @@ fn run_for_agent(
 				"`apply-update` is dispatched before agent-config setup"
 			)
 		}
-		Commands::PruneLock { dry_run, yes, json } => prune::execute(
+		Commands::PruneLock { dry_run, yes } => prune::execute(
 			scope,
 			project_root.as_deref(),
 			dry_run || !yes,
-			json,
+			cli.json,
 		)
 		.map(|()| None),
 		Commands::Plugin { action } => {
@@ -839,7 +1023,7 @@ fn run_for_agent(
 					"Plugin management is only supported for Claude Code. Use -a claude"
 				));
 			}
-			plugin::execute(action).map(|()| None)
+			plugin::execute(action, cli.json).map(|()| None)
 		}
 		// Dispatched earlier in `main`, before adapter/manager setup.
 		Commands::Source { .. } => {
@@ -854,13 +1038,13 @@ fn run_for_agent(
 		Commands::Reconcile { .. } => {
 			unreachable!("`reconcile` is dispatched before agent-config setup")
 		}
-		Commands::Coverage { .. } => {
+		Commands::Coverage => {
 			unreachable!("`coverage` is dispatched before agent-config setup")
 		}
 		Commands::Doctor { .. } => {
 			unreachable!("`doctor` is dispatched before agent-config setup")
 		}
-		Commands::SkillUsage { .. } => {
+		Commands::SkillUsage => {
 			unreachable!(
 				"`skill-usage` is dispatched before agent-config setup"
 			)
@@ -884,7 +1068,7 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 		resolve_scope_and_root(cli, ScopePolicy::AllowBoth)?;
 	eprintln_verbose!("Loading resources for all agents (scope: {:?})", scope);
 	let resources = load_all_agents(scope, project_root.as_deref());
-	get::execute_all(resources, resource)
+	get::execute_all(resources, resource, cli.json)
 }
 
 // Handle a comma-separated --agent list: fan the command across the named
@@ -903,7 +1087,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 			let mut resources = load_all_agents(scope, project_root.as_deref());
 			resources
 				.retain(|r| agents.iter().any(|a| a.as_str() == r.agent_id));
-			get::execute_all(resources, resource)
+			get::execute_all(resources, resource, cli.json)
 		}
 		Commands::Add { resource, .. }
 		| Commands::Update { resource, .. }
@@ -955,7 +1139,33 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?
 			};
-			println!("{}", serde_json::to_string_pretty(&view)?);
+			if cli.json {
+				println!("{}", serde_json::to_string_pretty(&view)?);
+			} else {
+				for row in &view.results {
+					if row.ok {
+						let payload = row
+							.output
+							.clone()
+							.unwrap_or(serde_json::Value::Null);
+						print!(
+							"{}: {}",
+							row.agent,
+							render_mutation(&cli.command, &payload)
+						);
+					} else {
+						println!(
+							"{}: FAILED — {}",
+							row.agent,
+							row.error.as_deref().unwrap_or("unknown error")
+						);
+					}
+				}
+				println!(
+					"{} ok, {} failed",
+					view.success_count, view.failed_count
+				);
+			}
 			if view.failed_count > 0 {
 				anyhow::bail!(
 					"{} of {} agent(s) failed",
@@ -972,14 +1182,16 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	}
 }
 
-// Describe command - outputs JSON
+// Describe command - a key/value block, or the raw view under --json
 mod describe {
 	use super::*;
+	use crate::commands::print_value;
 
 	pub fn execute(
 		manager: &ConfigManager,
 		resource: ResourceType,
 		name: String,
+		json: bool,
 	) -> Result<()> {
 		let config = manager.config().context("No configuration loaded")?;
 
@@ -1000,7 +1212,18 @@ mod describe {
 				// Same SkillView shape as `add`/API. describe does no install
 				// prep, so native_reader stays false.
 				let view = aghub_core::dto::SkillView::from(skill);
-				println!("{}", serde_json::to_string_pretty(&view)?);
+				let mut value = serde_json::to_value(&view)?;
+				// `native_reader` / `already_installed` are INSTALL advisories.
+				// describe does no install, so both are always false here, and
+				// "already_installed: false" on an installed skill reads as a
+				// contradiction. --json keeps them (one wire shape).
+				if !json {
+					if let Some(map) = value.as_object_mut() {
+						map.remove("native_reader");
+						map.remove("already_installed");
+					}
+				}
+				print_value(&value, json)?;
 			}
 			ResourceType::Mcps => {
 				let mcp =
@@ -1008,7 +1231,7 @@ mod describe {
 						|| format!("MCP server '{}' not found", name),
 					)?;
 				eprintln_verbose!("Found MCP server: {}", mcp.name);
-				println!("{}", serde_json::to_string_pretty(mcp)?);
+				print_value(&serde_json::to_value(mcp)?, json)?;
 			}
 		}
 

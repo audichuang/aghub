@@ -20,9 +20,6 @@ use aghub_cc_plugins::PluginId;
 pub enum PluginAction {
 	/// List installed plugins; pass --available to also show marketplace catalog
 	List {
-		/// Output as JSON
-		#[arg(long)]
-		json: bool,
 		/// Include plugins available in configured marketplaces
 		#[arg(long)]
 		available: bool,
@@ -83,10 +80,7 @@ pub enum PluginAction {
 #[derive(Subcommand, Clone)]
 pub enum MarketplaceAction {
 	/// List configured marketplaces
-	List {
-		#[arg(long)]
-		json: bool,
-	},
+	List,
 	/// Add a marketplace (owner/repo, git URL, local path, or marketplace.json URL)
 	Add {
 		source: String,
@@ -122,17 +116,34 @@ impl From<ScopeArg> for InstallScope {
 	}
 }
 
-pub fn execute(action: PluginAction) -> Result<()> {
+pub fn execute(action: PluginAction, json: bool) -> Result<()> {
 	let runtime = tokio::runtime::Builder::new_current_thread()
 		.enable_all()
 		.build()
 		.context("Failed to build tokio runtime")?;
-	runtime.block_on(dispatch(action))
+	runtime.block_on(dispatch(action, json))
 }
 
-async fn dispatch(action: PluginAction) -> Result<()> {
+async fn dispatch(action: PluginAction, json: bool) -> Result<()> {
+	// `--json` is a global flag, so it reaches every plugin action, but only the
+	// two listings have a JSON form. Refuse rather than ignore: a script that
+	// passes --json and gets prose back on a zero exit reads the mistake as
+	// success and fails later, somewhere else.
+	if json
+		&& !matches!(
+			action,
+			PluginAction::List { .. }
+				| PluginAction::Marketplace {
+					action: MarketplaceAction::List
+				}
+		) {
+		anyhow::bail!(
+			"--json is supported only by `plugin list` and `plugin \
+			 marketplace list`; this action prints a human-readable result"
+		);
+	}
 	match action {
-		PluginAction::List { json, available } => {
+		PluginAction::List { available } => {
 			if available {
 				list_available(json).await
 			} else {
@@ -162,14 +173,17 @@ async fn dispatch(action: PluginAction) -> Result<()> {
 		}
 		PluginAction::Validate { path } => validate_plugin(&path).await,
 		PluginAction::Marketplace { action } => {
-			marketplace_dispatch(action).await
+			marketplace_dispatch(action, json).await
 		}
 	}
 }
 
-async fn marketplace_dispatch(action: MarketplaceAction) -> Result<()> {
+async fn marketplace_dispatch(
+	action: MarketplaceAction,
+	json: bool,
+) -> Result<()> {
 	match action {
-		MarketplaceAction::List { json } => list_marketplaces(json).await,
+		MarketplaceAction::List => list_marketplaces(json).await,
 		MarketplaceAction::Add {
 			source,
 			scope,

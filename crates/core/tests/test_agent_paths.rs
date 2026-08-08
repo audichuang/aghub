@@ -436,7 +436,7 @@ fn skill_import_directory_preserves_body_and_resources() {
 		Some(&project_root),
 	);
 	manager.load().unwrap();
-	let imported = manager.add_skill_from_path(&source_dir).unwrap();
+	let imported = manager.add_skill_from_path(&source_dir).unwrap().skill;
 
 	assert_eq!(imported.name, "imported-skill");
 	assert!(imported
@@ -536,7 +536,8 @@ fn skill_import_skill_md_file_copies_sibling_resources() {
 	manager.load().unwrap();
 	let imported = manager
 		.add_skill_from_path(&source_dir.join("SKILL.md"))
-		.unwrap();
+		.unwrap()
+		.skill;
 
 	assert_eq!(imported.name, "md-skill");
 	let target_dir = project_root.join(".agents/skills/md-skill");
