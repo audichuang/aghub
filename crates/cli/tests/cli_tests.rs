@@ -6070,3 +6070,125 @@ fn source_errors_never_replay_url_userinfo() {
 		);
 	}
 }
+
+/// The CRUD verbs print a human line by default. Only `get`/`delete` had that
+/// pinned; the rest were covered exclusively by tests that pass `--json`, so a
+/// regression back to raw JSON on the default path would have gone unnoticed.
+#[cfg(unix)]
+#[test]
+fn crud_verbs_print_human_lines_by_default() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let run = |args: &[&str]| {
+		let out = isolated_cli(home.path(), state.path())
+			.args(args)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"{args:?} failed: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		String::from_utf8_lossy(&out.stdout).to_string()
+	};
+
+	for (args, expected) in [
+		(
+			vec!["-g", "-a", "claude", "add", "skills", "-n", "verbs"],
+			"added skill 'verbs'",
+		),
+		(
+			vec![
+				"-g", "-a", "claude", "update", "skills", "verbs", "-d", "new",
+			],
+			"updated skill 'verbs'",
+		),
+		(
+			vec!["-g", "-a", "claude", "disable", "skills", "verbs"],
+			"disabled skill 'verbs'",
+		),
+		(
+			vec!["-g", "-a", "claude", "enable", "skills", "verbs"],
+			"enabled skill 'verbs'",
+		),
+	] {
+		let text = run(&args);
+		assert!(
+			text.contains(expected),
+			"{args:?} must print '{expected}', got: {text}"
+		);
+		assert!(
+			serde_json::from_str::<Value>(&text).is_err(),
+			"{args:?} must NOT emit JSON by default: {text}"
+		);
+	}
+
+	// `describe` is a key/value block, not JSON, and drops null fields.
+	let described = run(&["-g", "-a", "claude", "describe", "skills", "verbs"]);
+	assert!(
+		described.contains("name") && described.contains("verbs"),
+		"describe must print a key/value block: {described}"
+	);
+	assert!(
+		!described.contains("author"),
+		"describe must omit null fields from the human form: {described}"
+	);
+	assert!(
+		serde_json::from_str::<Value>(&described).is_err(),
+		"describe must not emit JSON by default: {described}"
+	);
+}
+
+/// `check` and `prune-lock` are the two read paths a human runs to decide
+/// whether to mutate, so their default form must be readable — and `check` must
+/// only suggest `--online` when it is actually offline.
+#[cfg(unix)]
+#[test]
+fn check_and_prune_lock_print_human_output_by_default() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "locked", "locked");
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"locked",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+
+	let check = isolated_cli(home.path(), state.path())
+		.args(["-g", "check", "skills"])
+		.output()
+		.unwrap();
+	let text = String::from_utf8_lossy(&check.stdout);
+	assert!(check.status.success());
+	assert!(
+		text.contains("SKILL") && text.contains("locked"),
+		"check must render a table by default: {text}"
+	);
+	assert!(
+		serde_json::from_str::<Value>(&text).is_err(),
+		"check must not emit JSON by default: {text}"
+	);
+	assert!(
+		text.contains("pass --online"),
+		"the offline default must say how to get a real answer: {text}"
+	);
+
+	let pruned = isolated_cli(home.path(), state.path())
+		.args(["-g", "prune-lock"])
+		.output()
+		.unwrap();
+	let ptext = String::from_utf8_lossy(&pruned.stdout);
+	assert!(pruned.status.success());
+	assert!(
+		ptext.contains("No orphaned lock entries."),
+		"prune-lock must say so in words, not as {{\"pruned\": []}}: {ptext}"
+	);
+}

@@ -119,19 +119,28 @@ fn print_updates(
 skills <name> --yes"
 		);
 	}
-	// Only meaningful for the OFFLINE default. After `--online`, a `network`
-	// reason is a REAL fetch failure, and telling that user to "pass --online"
-	// is both wrong and a dead end.
-	if !online
-		&& views.iter().any(|v| {
-			matches!(&v.status, StatusView::Uncheckable { reason } if reason == "network")
-		}) {
+	if should_suggest_online(views, online) {
 		println!(
 			"note: remote sources report `network` because check is offline \
 by default; pass --online for a real check"
 		);
 	}
 	Ok(())
+}
+
+/// Whether to tell the user to re-run with `--online`.
+///
+/// Only for the OFFLINE default, where `network` means "we did not look".
+/// After `--online` the same reason is a REAL fetch failure, and pointing that
+/// user at the flag they already passed is both wrong and a dead end.
+///
+/// Split out from the renderer so it is testable without a network round-trip:
+/// reaching the `--online` branch for real needs a live (failing) fetch.
+fn should_suggest_online(views: &[SkillUpdateView], online: bool) -> bool {
+	!online
+		&& views.iter().any(|v| {
+			matches!(&v.status, StatusView::Uncheckable { reason } if reason == "network")
+		})
 }
 
 /// Shorten a content hash for the table; anything that is not a long hash (a
@@ -445,6 +454,43 @@ mod tests {
 		assert_eq!(json["status"], "updateAvailable");
 		assert_eq!(json["current"], "a");
 		assert_eq!(json["available"], "b");
+	}
+
+	fn uncheckable(reason: &str) -> SkillUpdateView {
+		SkillUpdateView {
+			name: "n".to_string(),
+			scope: "global".to_string(),
+			status: StatusView::Uncheckable {
+				reason: reason.to_string(),
+			},
+		}
+	}
+
+	#[test]
+	fn offline_network_rows_suggest_online() {
+		assert!(super::should_suggest_online(
+			&[uncheckable("network")],
+			false
+		));
+	}
+
+	#[test]
+	fn online_network_rows_do_not_suggest_online() {
+		// After --online, `network` is a real fetch failure; re-running with
+		// the flag already passed changes nothing.
+		assert!(!super::should_suggest_online(
+			&[uncheckable("network")],
+			true
+		));
+	}
+
+	#[test]
+	fn a_local_only_reason_never_suggests_online() {
+		// `local` sources have no remote to check; --online cannot help.
+		assert!(!super::should_suggest_online(
+			&[uncheckable("local")],
+			false
+		));
 	}
 
 	#[test]
