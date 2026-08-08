@@ -5982,3 +5982,91 @@ fn check_skills_default_output_is_a_table_with_the_offline_hint() {
 		"the default must not be JSON: {text}"
 	);
 }
+
+/// Every place the CLI echoes a SOURCE back must redact URL userinfo. `<SOURCE>`
+/// comes straight from argv, so `https://user:token@host/repo` would otherwise
+/// replay the token into stderr, CI logs, and shell scrollback. `aghub_git`
+/// redacts the URLs it BUILDS; these are the strings the CLI prints itself, on
+/// both halves of the line — the `'{source}'` quote AND the `{detail}` that
+/// `SourceError` fills with the same raw input.
+#[test]
+fn source_errors_never_replay_url_userinfo() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	const SECRET: &str = "hunter2SUPERSECRET";
+
+	// One case per error path that quotes SOURCE: an unreachable https host
+	// (fetch failure), an unsupported scheme (early refusal), and the fetch
+	// hook's own failure arm.
+	let cases: [(&str, Vec<&str>); 4] = [
+		(
+			"fetch failure",
+			vec![
+				"-g",
+				"source",
+				"sync",
+				"https://alice:hunter2SUPERSECRET@no-such-host.invalid/o/r",
+				"--install-missing",
+				"--yes",
+			],
+		),
+		(
+			"unsupported scheme",
+			vec![
+				"-g",
+				"source",
+				"sync",
+				"ftp://alice:hunter2SUPERSECRET@host/x",
+				"--install-missing",
+				"--yes",
+			],
+		),
+		(
+			"diff",
+			vec![
+				"-g",
+				"source",
+				"diff",
+				"https://alice:hunter2SUPERSECRET@no-such-host.invalid/o/r",
+			],
+		),
+		(
+			// Scheme-less scp-like: git accepts it, so people type it, and the
+			// url-anchored redactor alone let it through verbatim.
+			"scp-like",
+			vec![
+				"-g",
+				"source",
+				"sync",
+				"alice:hunter2SUPERSECRET@no-such-host.invalid/o/r",
+				"--install-missing",
+				"--yes",
+			],
+		),
+	];
+
+	for (label, args) in cases {
+		let out = isolated_cli(home.path(), state.path())
+			.args(&args)
+			.output()
+			.unwrap();
+		let combined = format!(
+			"{}{}",
+			String::from_utf8_lossy(&out.stdout),
+			String::from_utf8_lossy(&out.stderr)
+		);
+		assert!(
+			!out.status.success(),
+			"{label}: expected a failure to inspect, got success: {combined}"
+		);
+		assert!(
+			!combined.contains(SECRET),
+			"{label}: the CLI replayed the URL password: {combined}"
+		);
+		assert!(
+			combined.contains("***"),
+			"{label}: userinfo must be redacted, not dropped silently, so the \
+			 user can still recognise the source: {combined}"
+		);
+	}
+}

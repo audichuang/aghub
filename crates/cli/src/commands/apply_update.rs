@@ -103,7 +103,12 @@ fn locked_resync_error(
 			anyhow!("failed to fetch source repository: authentication failed")
 		}
 		LockedResyncError::Fetch(skill_update::FetchError::Network(detail)) => {
-			anyhow!("failed to fetch source repository: {detail}")
+			// The detail can quote the locked source URL verbatim, and a lock
+			// written from `https://user:token@host/repo` carries that userinfo.
+			anyhow!(
+				"failed to fetch source repository: {}",
+				aghub_git::redact_url_userinfo(&detail)
+			)
 		}
 		LockedResyncError::Resync(ResyncError::Renamed { new_name }) => {
 			anyhow!(aghub_core::skills::update::skill_renamed_message(

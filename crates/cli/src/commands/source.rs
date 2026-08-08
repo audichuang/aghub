@@ -73,8 +73,30 @@ fn assert_one_tree_can_serve(
 /// would otherwise see that token again in stderr, CI logs, or a captured
 /// shell buffer. `aghub_git` already redacts what IT builds; this covers the
 /// strings the CLI echoes itself.
+///
+/// Two passes, because argv is not restricted to the shape `aghub_git` emits:
+/// [`aghub_git::redact_url_userinfo`] anchors on `://`, so a scheme-less
+/// scp-like `user:token@host/path` — which git itself accepts, so people type
+/// it — walked through it untouched and printed the token verbatim.
 fn safe_source(source: &str) -> String {
-	aghub_git::redact_url_userinfo(source)
+	redact_schemeless_userinfo(&aghub_git::redact_url_userinfo(source))
+}
+
+/// Redact `user:secret@` from a scheme-less source. Operates on the authority
+/// only (everything before the first `/`), and requires a `:` before the `@`,
+/// so the two shapes that legitimately carry an `@` survive untouched:
+/// `git@github.com:owner/repo.git` (an SSH *user*, no secret) and any path
+/// containing `@`. A plain `owner/repo` has no `@` at all.
+fn redact_schemeless_userinfo(source: &str) -> String {
+	let authority_end = source.find('/').unwrap_or(source.len());
+	let authority = &source[..authority_end];
+	let Some(at) = authority.rfind('@') else {
+		return source.to_string();
+	};
+	if !authority[..at].contains(':') {
+		return source.to_string();
+	}
+	format!("***{}", &source[at..])
 }
 
 // ─────────────────────────── credential / fetch ────────────────────────────
@@ -153,7 +175,7 @@ impl skill_update::Fetcher for CliFetcher {
 				Err(FetchError::network(format!(
 					"AGHUB_TEST_SOURCE_FETCH_ROOT is not a directory \
 					 (fetching '{}')",
-					sr.source
+					safe_source(&sr.source)
 				)))
 			};
 		}
@@ -387,8 +409,9 @@ fn diff(
 	// same path — so refuse rather than fetch one of them and apply it to all.
 	if let Some(origins) = meta.ambiguous_origins() {
 		bail!(
-			"source '{source}' matches {} repositories:\n  {}\nRun it again \
+			"source '{}' matches {} repositories:\n  {}\nRun it again \
 			 with the SOURCE_URL of the one you mean.",
+			safe_source(&source),
 			origins.len(),
 			origins.join("\n  ")
 		);
@@ -427,8 +450,9 @@ fn diff(
 		),
 		Err(FetchError::Network(detail)) => {
 			bail!(
-				"Failed to fetch source repository '{}': {detail}",
-				safe_source(&source)
+				"Failed to fetch source repository '{}': {}",
+				safe_source(&source),
+				safe_source(&detail)
 			)
 		}
 	};
@@ -648,8 +672,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// same path — so refuse rather than fetch one of them and apply it to all.
 	if let Some(origins) = meta.ambiguous_origins() {
 		bail!(
-			"source '{source}' matches {} repositories:\n  {}\nRun it again \
+			"source '{}' matches {} repositories:\n  {}\nRun it again \
 			 with the SOURCE_URL of the one you mean.",
+			safe_source(&source),
 			origins.len(),
 			origins.join("\n  ")
 		);
@@ -692,8 +717,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 		),
 		Err(FetchError::Network(detail)) => {
 			bail!(
-				"Failed to fetch source repository '{}': {detail}",
-				safe_source(&source)
+				"Failed to fetch source repository '{}': {}",
+				safe_source(&source),
+				safe_source(&detail)
 			)
 		}
 	};
@@ -718,7 +744,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		if !unknown.is_empty() {
 			eprintln!(
 				"warning: source '{}' has no skill named: {} (available: {})",
-				source,
+				safe_source(&source),
 				unknown.join(", "),
 				available.join(", ")
 			);
@@ -1379,8 +1405,9 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		),
 		FetchRenameError::Fetch(FetchError::Network(detail)) => {
 			anyhow::anyhow!(
-				"Failed to fetch source repository '{}': {detail}",
-				safe_source(&source.source_url)
+				"Failed to fetch source repository '{}': {}",
+				safe_source(&source.source_url),
+				safe_source(&detail)
 			)
 		}
 		FetchRenameError::Fetch(FetchError::BackendUnavailable) => {
@@ -1720,5 +1747,44 @@ mod tests {
 			narrow_by_name(items, &["zzz".to_string()], |s| s.as_str());
 		assert!(kept.is_empty());
 		assert_eq!(unknown, vec!["zzz".to_string()]);
+	}
+}
+
+#[cfg(test)]
+mod safe_source_tests {
+	use super::safe_source;
+
+	#[test]
+	fn redacts_a_secret_in_a_scheme_less_scp_like_source() {
+		// git accepts this shape, so people type it — and `redact_url_userinfo`
+		// anchors on "://", so it used to print the token verbatim.
+		assert_eq!(safe_source("alice:tok@host/o/r"), "***@host/o/r");
+		assert_eq!(safe_source("alice:tok@host"), "***@host");
+	}
+
+	#[test]
+	fn redacts_a_secret_behind_a_scheme() {
+		assert_eq!(
+			safe_source("https://alice:tok@host/o/r"),
+			"https://***@host/o/r"
+		);
+	}
+
+	#[test]
+	fn leaves_sources_that_carry_no_secret_alone() {
+		// An SSH *user* is not a secret, and there is no `:` before the `@`.
+		assert_eq!(
+			safe_source("git@github.com:owner/repo.git"),
+			"git@github.com:owner/repo.git"
+		);
+		// Plain shorthand and plain URLs must round-trip unchanged, or an error
+		// message stops naming the source the user actually passed.
+		assert_eq!(safe_source("owner/repo"), "owner/repo");
+		assert_eq!(
+			safe_source("https://github.com/owner/repo"),
+			"https://github.com/owner/repo"
+		);
+		// A colon in a PATH segment, past the authority, is not userinfo.
+		assert_eq!(safe_source("host/a:b@c"), "host/a:b@c");
 	}
 }
