@@ -51,9 +51,12 @@ struct Cli {
 	/// Target agent: one id, a comma-separated list, or "all".
 	///
 	/// A LIST fans the command out across those agents (get, add, update,
-	/// delete, enable, disable, `source sync`, `doctor --verify-links`);
-	/// "all" is accepted by `get` and `doctor --verify-links` only. Every
-	/// other command is single-agent or agent-independent and ignores it.
+	/// delete, enable, disable, `source sync`, `doctor --verify-links`).
+	/// "all" is accepted by `get`, `doctor --verify-links` and `source sync`
+	/// (which fans install/relink out to every agent that can hold a skill in
+	/// the scope); add/update/delete/enable/disable REJECT it — pass a
+	/// comma-separated list there. Every other command is single-agent or
+	/// agent-independent and ignores it.
 	#[arg(short = 'a', long, default_value = "claude", global = true)]
 	agent: String,
 
@@ -413,9 +416,11 @@ pub enum SourceAction {
 	/// Accept an upstream rename: install the new name and remove the old one
 	/// as a single transaction (rolls back on any failure).
 	AcceptRename {
-		/// Locked name of the skill that was renamed upstream.
+		/// Locked name of the skill that was renamed upstream — the
+		/// `previousName` of a `renamed` row in `source diff --json`.
 		old_name: String,
-		/// New upstream name (from the source's `renamed.newName`).
+		/// New upstream name — the `name` of that same `renamed` row
+		/// (`check --online` calls the same value `newName`).
 		new_name: String,
 		/// Branch/tag/commit to read the new name from (defaults to the
 		/// locked ref)
