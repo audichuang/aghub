@@ -707,20 +707,26 @@ impl ConfigManager {
 		Err(ConfigError::resource_not_found("skill", name))
 	}
 
+	/// Refuse: there is no writer for a skill's enabled flag.
+	///
+	/// `save()` serializes MCPs and nothing else, so flipping `Skill::enabled`
+	/// in memory was dropped on the floor — while `save_current()` rewrote the
+	/// agent's MCP config as a side effect, stripping unknown per-server fields
+	/// from `.mcp.json`. A silent no-op that damages an unrelated file is worse
+	/// than an honest refusal.
 	fn set_skill_enabled(&mut self, name: &str, enabled: bool) -> Result<()> {
-		let agent_name = self.adapter.name().to_string();
+		// Resolve the name FIRST: a missing skill is a not-found, and callers
+		// (including the API's 404) depend on that answer winning over the
+		// unsupported-operation refusal below.
 		let config = self.config_mut()?;
-		let skill = config
-			.skills
-			.iter_mut()
-			.find(|s| s.name == name)
-			.ok_or_else(|| ConfigError::resource_not_found("skill", name))?;
-		info!(
-			"setting skill '{}' enabled={} for agent '{}'",
-			name, enabled, agent_name
-		);
-		skill.enabled = enabled;
-		self.save_current()
+		if !config.skills.iter().any(|s| s.name == name) {
+			return Err(ConfigError::resource_not_found("skill", name));
+		}
+		Err(ConfigError::unsupported_operation(
+			if enabled { "enable" } else { "disable" },
+			"skill",
+			self.adapter.name(),
+		))
 	}
 
 	pub fn disable_skill(&mut self, name: &str) -> Result<()> {
@@ -1244,6 +1250,61 @@ fn format_skill(skill: &Skill, existing_body: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	// `disable`/`enable skills` used to flip the flag in memory and call
+	// `save_current()`, which serializes MCPs and nothing else: the skill state
+	// was dropped AND the agent's MCP config was rewritten from the normalized
+	// model, stripping per-server fields aghub does not model. Two assertions,
+	// because either alone false-passes — the refusal without the byte check
+	// would pass even if the write still happened first, and the byte check
+	// without the refusal would pass on a silent no-op.
+	#[test]
+	fn disable_skill_refuses_and_leaves_the_mcp_config_untouched() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+
+		let skill_dir = root.join(".claude/skills/demo-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: demo-skill\ndescription: fixture\n---\n\nbody\n",
+		)
+		.unwrap();
+
+		// `customField` is the canary: aghub does not model it, so any rewrite
+		// of this file drops it.
+		let mcp_path = root.join(".mcp.json");
+		let original = "{\n  \"mcpServers\": {\n    \"demo\": {\n      \"command\": \"echo\",\n      \"args\": [\"hi\"],\n      \"customField\": \"keepme\"\n    }\n  }\n}\n";
+		std::fs::write(&mcp_path, original).unwrap();
+
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+		assert!(
+			mgr.get_skill("demo-skill").is_some(),
+			"fixture must be discoverable, or the refusal below proves nothing"
+		);
+
+		let error = mgr
+			.disable_skill("demo-skill")
+			.expect_err("skill enable/disable has no writer; it must refuse");
+		assert!(
+			matches!(error, ConfigError::UnsupportedOperation { .. }),
+			"expected an unsupported-operation refusal, got: {error}"
+		);
+
+		assert_eq!(
+			std::fs::read_to_string(&mcp_path).unwrap(),
+			original,
+			"a skill command must not rewrite the agent's MCP config"
+		);
+	}
 
 	#[cfg(unix)]
 	#[test]

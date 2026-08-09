@@ -17,5 +17,8 @@ pub use global::{
 pub use guard::{
 	mutation_guard, mutation_guard_with_timeout, MutationGuard, MutationScope,
 };
-pub use io::{get_skill_lock_path, read_skill_lock, write_skill_lock};
+pub use io::{
+	ensure_locks_writable, get_skill_lock_path, read_skill_lock,
+	write_skill_lock,
+};
 pub use types::{DismissedPrompts, SkillLockEntry, SkillLockFile};

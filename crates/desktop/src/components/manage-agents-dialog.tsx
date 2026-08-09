@@ -186,6 +186,8 @@ export function ManageAgentsDialog({
 				},
 				added: toInstall.length > 0 ? toInstall : null,
 				removed: toUninstall.length > 0 ? toUninstall : null,
+				// The user picked the agents to uninstall from in this dialog.
+				confirm: true,
 			});
 
 			const newAgentStates: Record<string, AgentState> = {};

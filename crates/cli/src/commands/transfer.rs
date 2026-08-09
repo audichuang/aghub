@@ -98,6 +98,7 @@ type ReconcileFn = fn(
 	ResourceLocator,
 	Vec<AgentType>,
 	Vec<AgentType>,
+	bool,
 ) -> aghub_core::Result<OperationBatchResult>;
 
 /// clap value parser for an agent id, reusing the canonical FromStr so the CLI
@@ -190,7 +191,7 @@ pub fn execute_reconcile(
 		return render_dry_run(args, json);
 	}
 
-	let result = run(source, args.add.clone(), args.remove.clone())?;
+	let result = run(source, args.add.clone(), args.remove.clone(), args.yes)?;
 	render(&result, json)
 }
 

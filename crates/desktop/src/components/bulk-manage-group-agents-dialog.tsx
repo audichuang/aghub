@@ -143,6 +143,9 @@ export function BulkManageGroupAgentsDialog({
 						},
 						added: plan.added.length > 0 ? plan.added : null,
 						removed: plan.removed.length > 0 ? plan.removed : null,
+						// Removals here already went through the dialog's own
+						// confirmation modal (see `removeCount > 0` below).
+						confirm: true,
 					});
 					if (result.failed_count === 0) {
 						success += 1;

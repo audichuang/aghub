@@ -5,4 +5,10 @@ export type ReconcileRequest = {
 	source: ResourceLocatorDto;
 	added: Array<string> | null;
 	removed: Array<string> | null;
+	/**
+	 * Required to execute a reconcile that REMOVES — the API-side half of the
+	 * CLI's `--yes`. Adds alone ignore it. Defaults to false, so a client that
+	 * never heard of the field cannot delete by omission.
+	 */
+	confirm?: boolean;
 };

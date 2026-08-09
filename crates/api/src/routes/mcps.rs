@@ -85,6 +85,8 @@ pub fn reconcile_mcp_route(
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
+	// Read the gate BEFORE the vec fields below move out of `req`.
+	let confirm = req.confirmed();
 	let source = req.source.to_core()?;
 
 	let added: Vec<_> = req
@@ -117,7 +119,7 @@ pub fn reconcile_mcp_route(
 		})
 		.collect::<Result<Vec<_>, _>>()?;
 
-	let result = transfer::reconcile_mcp(source, added, removed)
+	let result = transfer::reconcile_mcp(source, added, removed, confirm)
 		.map_err(ApiError::from)?;
 	Ok(Json(result.into()))
 }

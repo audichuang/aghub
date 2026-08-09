@@ -167,6 +167,8 @@ pub async fn reconcile_skill_route(
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
+	// Read the gate BEFORE the vec fields below move out of `req`.
+	let confirm = req.confirmed();
 	let source = req.source.to_core()?;
 
 	let added: Vec<AgentType> = req
@@ -201,7 +203,7 @@ pub async fn reconcile_skill_route(
 
 	// Installs into `added` and removes from `removed`, both under the lock.
 	in_mutation_pool(move || {
-		let result = transfer::reconcile_skill(source, added, removed)
+		let result = transfer::reconcile_skill(source, added, removed, confirm)
 			.map_err(ApiError::from)?;
 		Ok(Json(result.into()))
 	})
@@ -1110,6 +1112,35 @@ pub async fn import_skill(
 
 		manager.load().map_err(ApiError::from)?;
 
+		// This route installs BEFORE it stamps the lock, and the lock writer
+		// refuses an unparseable file. Prove the lock is usable now, while
+		// nothing has been written — otherwise a conflicted `skills-lock.json`
+		// answers 500 with the skill already installed and untracked.
+		//
+		// Only when this request can actually materialize. A re-import of a
+		// skill that is already present writes NOTHING and may never touch the
+		// lock at all, so refusing it on the lock's account would break the
+		// no-op contract below. The name comes from the SAME parse of the SAME
+		// raw path `add_skill_from_path` uses, so the two cannot disagree; if
+		// it fails to parse, fall through and let that call report it.
+		let submitted_name =
+			skill::parser::parse(std::path::Path::new(&request.path))
+				.ok()
+				.map(|parsed| parsed.name);
+		let may_materialize = submitted_name
+			.as_deref()
+			.is_none_or(|name| manager.get_skill(name).is_none());
+		if may_materialize {
+			skill::lock::ensure_locks_writable(
+				resource_scope != ResourceScope::ProjectOnly,
+				match resource_scope {
+					ResourceScope::GlobalOnly => None,
+					_ => project_root.as_deref(),
+				},
+			)
+			.map_err(|e| ApiError::from(aghub_core::ConfigError::Io(e)))?;
+		}
+
 		// `.skill` is the on-disk state: a re-import writes nothing and hands
 		// back the untouched Master rather than the file just parsed.
 		let added = manager
@@ -1307,6 +1338,10 @@ pub async fn enable_skill(
 		ensure_skill_not_plugin_managed(skill, "enable").await?;
 	}
 	manager.enable_skill(name).map_err(ApiError::from)?;
+	// Unreachable today — `enable_skill` always refuses, because nothing
+	// persists a skill's enabled flag. The call stays HERE rather than short-
+	// circuiting at the top so the plugin-managed check above still decides the
+	// error first; that precedence is route contract.
 	let skill = manager.get_skill(name).expect("skill present after enable");
 	Ok(Json(SkillResponse::from(skill)))
 }
@@ -1328,6 +1363,8 @@ pub async fn disable_skill(
 		ensure_skill_not_plugin_managed(skill, "disable").await?;
 	}
 	manager.disable_skill(name).map_err(ApiError::from)?;
+	// Unreachable today — see `enable_skill` above for why the refusal happens
+	// here instead of at the top of the handler.
 	let skill = manager
 		.get_skill(name)
 		.expect("skill present after disable");
@@ -1811,7 +1848,6 @@ pub(crate) async fn install_skill_with_repo(
 	// agent preflight, the fetch — is unchanged and still decides errors first.
 	in_mutation_pool(move || {
 		let mut agent_rows: Vec<GitInstallResultEntry> = Vec::new();
-		let mut any_installed = false;
 		for (name, lock_skill_path) in &items {
 			let installed = match &materialization {
 				InstallMaterialization::Fetched(fetched) => {
@@ -1848,7 +1884,6 @@ pub(crate) async fn install_skill_with_repo(
 						target_agents.iter().zip(report.agent_results)
 					{
 						let success = agent_result.error.is_none();
-						any_installed |= agent_result.installed;
 						agent_rows.push(GitInstallResultEntry {
 							name: if success {
 								report.name.clone()
@@ -1874,7 +1909,11 @@ pub(crate) async fn install_skill_with_repo(
 			}
 		}
 
-		let success = any_installed && agent_rows.iter().all(|r| r.success);
+		// Aggregate over OUTCOMES, not over "did we write bytes". `installed` is
+		// false for an idempotent re-install (the agent was already correctly
+		// linked), and folding it in here reported that success as a failure.
+		let success =
+			!agent_rows.is_empty() && agent_rows.iter().all(|r| r.success);
 		Ok(Json(InstallSkillResponse {
 			success,
 			agents: agent_rows,
@@ -3328,6 +3367,96 @@ mod tests {
 		});
 	}
 
+	/// A corrupt lock must not break a re-import that writes nothing.
+	///
+	/// The lock writer fails closed on an unparseable file, so this route
+	/// preflights it — but only when the request can actually materialize. A
+	/// re-import of a skill already present is a no-op that may never touch the
+	/// lock, and refusing it on the lock's account breaks the route's no-op
+	/// contract. Both halves are asserted: the no-op still answers, AND a real
+	/// install still refuses before writing anything.
+	#[cfg(unix)]
+	#[test]
+	fn import_skill_no_op_survives_a_corrupt_lock() {
+		with_isolated_env(|home, _state| {
+			let source_skill = home.join("source-skills/dup-skill");
+			std::fs::create_dir_all(&source_skill).unwrap();
+			std::fs::write(
+				source_skill.join("SKILL.md"),
+				"---\nname: dup-skill\ndescription: test\n---\n\nbody\n",
+			)
+			.unwrap();
+
+			let project = home.join("myproject");
+			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+
+			let import = |path: &std::path::Path| {
+				block_on(import_skill(
+					TrustedLocalOrigin,
+					AgentParam(AgentType::Claude),
+					ScopeParams {
+						scope: Some("project".to_string()),
+						project_root: Some(project.display().to_string()),
+					},
+					Json(crate::dto::skill::ImportSkillRequest {
+						path: path.display().to_string(),
+					}),
+				))
+			};
+
+			import(&source_skill.join("SKILL.md"))
+				.ok()
+				.expect("first import succeeds");
+
+			// Now corrupt the lock, exactly as an unresolved merge would.
+			let lock_path = project.join("skills-lock.json");
+			let corrupt = format!(
+				"<<<<<<< HEAD\n{}",
+				std::fs::read_to_string(&lock_path).unwrap()
+			);
+			std::fs::write(&lock_path, &corrupt).unwrap();
+
+			// Re-import the same NAME from DIFFERENT content. The Master is
+			// already there and does not match, so the route resolves this to
+			// "no-op, write no lock" — it must not be refused on the lock's
+			// account. (Same-content would instead try to ADOPT the untracked
+			// Master, which genuinely needs a writable lock and rightly fails.)
+			let variant = home.join("source-skills-b/dup-skill");
+			std::fs::create_dir_all(&variant).unwrap();
+			std::fs::write(
+				variant.join("SKILL.md"),
+				"---\nname: dup-skill\ndescription: test\n---\n\ndifferent\n",
+			)
+			.unwrap();
+
+			import(&variant.join("SKILL.md")).ok().expect(
+				"a re-import writes nothing, so a corrupt lock must not fail it",
+			);
+
+			// The other half: a NEW skill still refuses before materializing.
+			let fresh = home.join("source-skills/fresh-skill");
+			std::fs::create_dir_all(&fresh).unwrap();
+			std::fs::write(
+				fresh.join("SKILL.md"),
+				"---\nname: fresh-skill\ndescription: test\n---\n\nbody\n",
+			)
+			.unwrap();
+
+			import(&fresh.join("SKILL.md")).expect_err(
+				"a real install must refuse while the lock is corrupt",
+			);
+			assert!(
+				!project.join(".agents/skills/fresh-skill").exists(),
+				"the refusal must happen before the Master is written"
+			);
+			assert_eq!(
+				std::fs::read_to_string(&lock_path).unwrap(),
+				corrupt,
+				"the corrupt lock must be left exactly as found"
+			);
+		});
+	}
+
 	// GAP-4: import_skill inherits the symlink-only model via
 	// add_skill_from_path -- it must materialize a .agents Master + a link
 	// (never an isolated copy) and still write the install lock from the
@@ -4066,6 +4195,7 @@ mod tests {
 			},
 			vec![AgentType::OpenCode],
 			vec![],
+			false, // confirm: add-only, nothing to confirm
 		)
 		.unwrap();
 
@@ -4834,6 +4964,54 @@ mod tests {
 		});
 	}
 
+	/// A one-skill git repo at `work`, built with gix (no `git` subprocess).
+	#[cfg(unix)]
+	fn write_single_skill_git_fixture(work: &std::path::Path) {
+		use gix::objs::tree::{Entry, EntryKind};
+
+		const SKILL_MD: &[u8] = b"---\nname: my-skill\ndescription: d\n---\n";
+		let skill_dir = work.join("my-skill");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(skill_dir.join("SKILL.md"), SKILL_MD).unwrap();
+
+		let repo = gix::init(work).unwrap();
+		let blob_id = repo.write_blob(SKILL_MD).unwrap().detach();
+		// Subtree: my-skill/ containing SKILL.md
+		let subtree_id = repo
+			.write_object(&gix::objs::Tree {
+				entries: vec![Entry {
+					mode: EntryKind::Blob.into(),
+					filename: "SKILL.md".into(),
+					oid: blob_id,
+				}],
+			})
+			.unwrap()
+			.detach();
+		// Root tree containing the my-skill/ subdirectory
+		let tree_id = repo
+			.write_object(&gix::objs::Tree {
+				entries: vec![Entry {
+					mode: EntryKind::Tree.into(),
+					filename: "my-skill".into(),
+					oid: subtree_id,
+				}],
+			})
+			.unwrap()
+			.detach();
+		let sig =
+			gix::actor::SignatureRef::from_bytes(b"t <t@t> 1000000000 +0000")
+				.unwrap();
+		repo.commit_as(
+			sig,
+			sig,
+			"HEAD",
+			"init",
+			tree_id,
+			std::iter::empty::<gix::ObjectId>(),
+		)
+		.unwrap();
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn install_skill_returns_per_agent_rows_symlink_only() {
@@ -4843,57 +5021,7 @@ mod tests {
 			let _keyring =
 				crate::credentials::test_hooks::MockKeyringBackend::new();
 			let work = home.join("work");
-			let skill_dir = work.join("my-skill");
-			std::fs::create_dir_all(&skill_dir).unwrap();
-			std::fs::write(
-				skill_dir.join("SKILL.md"),
-				"---\nname: my-skill\ndescription: d\n---\n",
-			)
-			.unwrap();
-			// Build the git fixture with gix (no `git` subprocess).
-			{
-				use gix::objs::tree::{Entry, EntryKind};
-				let repo = gix::init(&work).unwrap();
-				let blob_id = repo
-					.write_blob(b"---\nname: my-skill\ndescription: d\n---\n")
-					.unwrap()
-					.detach();
-				// Subtree: my-skill/ containing SKILL.md
-				let subtree_id = repo
-					.write_object(&gix::objs::Tree {
-						entries: vec![Entry {
-							mode: EntryKind::Blob.into(),
-							filename: "SKILL.md".into(),
-							oid: blob_id,
-						}],
-					})
-					.unwrap()
-					.detach();
-				// Root tree containing the my-skill/ subdirectory
-				let tree_id = repo
-					.write_object(&gix::objs::Tree {
-						entries: vec![Entry {
-							mode: EntryKind::Tree.into(),
-							filename: "my-skill".into(),
-							oid: subtree_id,
-						}],
-					})
-					.unwrap()
-					.detach();
-				let sig = gix::actor::SignatureRef::from_bytes(
-					b"t <t@t> 1000000000 +0000",
-				)
-				.unwrap();
-				repo.commit_as(
-					sig,
-					sig,
-					"HEAD",
-					"init",
-					tree_id,
-					std::iter::empty::<gix::ObjectId>(),
-				)
-				.unwrap();
-			}
+			write_single_skill_git_fixture(&work);
 
 			let req = InstallSkillRequest {
 				source: format!("file://{}", work.display()),
@@ -4921,6 +5049,120 @@ mod tests {
 			assert!(
 				home.join(".agents/skills/my-skill/SKILL.md").exists(),
 				"master materialized (symlink-only)"
+			);
+		});
+	}
+
+	/// The confirmation gate must hold at the HTTP boundary, not just in core.
+	///
+	/// The original defect was API-only: `/skills/reconcile` removed without any
+	/// gate while the CLI required `--yes`. A core-level test cannot catch a
+	/// regression that hardcodes `confirm: true` (or flips `unwrap_or`) in this
+	/// adapter, which would restore the exact bug with the suite still green.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_route_refuses_removal_without_confirm() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("proj");
+			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+			let skill_dir = project.join(".claude/skills/verbs");
+			std::fs::create_dir_all(&skill_dir).unwrap();
+			std::fs::write(
+				skill_dir.join("SKILL.md"),
+				"---\nname: verbs\ndescription: d\n---\n",
+			)
+			.unwrap();
+
+			let request = |confirm: Option<bool>| ReconcileRequest {
+				source: crate::dto::transfer::ResourceLocatorDto {
+					agent: "claude".to_string(),
+					scope: crate::dto::transfer::InstallScopeDto::Project,
+					project_root: Some(project.display().to_string()),
+					name: "verbs".to_string(),
+				},
+				added: None,
+				removed: Some(vec!["claude".to_string()]),
+				confirm,
+			};
+
+			for omitted in [None, Some(false)] {
+				let err = block_on(reconcile_skill_route(
+					crate::extractors::TrustedLocalOrigin,
+					rocket::serde::json::Json(request(omitted)),
+				))
+				.expect_err("a removal without confirmation must be rejected");
+				assert_eq!(
+					err.status,
+					rocket::http::Status::BadRequest,
+					"confirm={omitted:?} must be a 400"
+				);
+				assert!(
+					skill_dir.join("SKILL.md").exists(),
+					"confirm={omitted:?} must not delete anything"
+				);
+			}
+
+			block_on(reconcile_skill_route(
+				crate::extractors::TrustedLocalOrigin,
+				rocket::serde::json::Json(request(Some(true))),
+			))
+			.ok()
+			.expect("confirm: true must execute");
+			assert!(
+				!skill_dir.exists(),
+				"the confirmed removal must actually run — otherwise the two \
+				 assertions above would pass on a route that never removes"
+			);
+		});
+	}
+
+	// The aggregate used to fold in `installed`, which means "this call wrote
+	// bytes" — false for an already-correctly-linked agent. Re-installing an
+	// unchanged skill therefore reported `success: false` with every per-agent
+	// row `success: true` and no error, and the desktop had to route around it.
+	// The per-row assertion is the control: without it, a genuinely broken
+	// second install would also satisfy "success is false".
+	#[cfg(unix)]
+	#[test]
+	fn install_skill_reports_success_on_idempotent_reinstall() {
+		with_isolated_env(|home, _state| {
+			let _keyring =
+				crate::credentials::test_hooks::MockKeyringBackend::new();
+			let work = home.join("work");
+			write_single_skill_git_fixture(&work);
+
+			let install = || {
+				let req = InstallSkillRequest {
+					source: format!("file://{}", work.display()),
+					agents: vec!["claude".to_string()],
+					skills: vec!["my-skill".to_string()],
+					scope: "global".to_string(),
+					project_path: None,
+					install_all: Some(false),
+				};
+				let repo =
+					std::sync::Arc::new(skill_update::SkillRepository::new());
+				block_on(install_skill_route_with_repo(
+					req,
+					ForwardedGitTokens::default(),
+					repo,
+				))
+				.ok()
+				.expect("handler ok")
+				.into_inner()
+			};
+
+			assert!(install().success, "first install succeeds");
+
+			let again = install();
+			assert!(
+				again.agents.iter().all(|a| a.success && a.error.is_none()),
+				"every agent row is a success: {:?}",
+				again.agents
+			);
+			assert!(
+				again.success,
+				"a no-op re-install is a success, not a failure"
 			);
 		});
 	}

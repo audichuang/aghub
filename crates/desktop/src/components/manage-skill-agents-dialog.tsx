@@ -180,6 +180,9 @@ export function ManageSkillAgentsDialog({
 				},
 				added: added.length > 0 ? added : null,
 				removed: removed.length > 0 ? removed : null,
+				// The user picked the agents to unlink in this dialog — that IS
+				// the confirmation the API asks for before a removing reconcile.
+				confirm: true,
 			});
 
 			const newAgentStates: Record<string, AgentState> = {};

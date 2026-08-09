@@ -451,7 +451,7 @@ pub fn accept_rename(
 			}
 			None => (agent_dirs.clone(), true),
 		};
-		rollback_rename_install(
+		rollback_materialized_install(
 			req.new_name,
 			resource_scope,
 			project_root,
@@ -852,7 +852,12 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 /// `agent_dirs` is the caller's attribution of which dirs to clear, and
 /// `remove_master` whether the canonical Master was newly written by the same
 /// call — a Master that merely existed and verified belongs to whoever wrote it.
-fn rollback_rename_install(
+/// Undo a `materialize_universal_master` from its OWN receipt: unlink the
+/// referrers this call created, then remove the Master only if this call wrote
+/// it. Shared with `install_fetched`, which must clean up after itself when a
+/// post-materialization step fails — the rename flow is not the only caller
+/// that can fail with a fresh Master already on disk.
+pub(crate) fn rollback_materialized_install(
 	new_name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -1001,7 +1006,7 @@ mod tests {
 		std::os::unix::fs::symlink(&foreign_master, &their_ref).unwrap();
 
 		// Attribution: only `mine` was freshly linked; the Master pre-existed.
-		rollback_rename_install(
+		rollback_materialized_install(
 			"new-skill",
 			ResourceScope::ProjectOnly,
 			Some(root),
@@ -1072,7 +1077,7 @@ mod tests {
 
 		// A later step (9) fails → the same rollback the transaction runs. This
 		// call created both the referrer and the Master, so both are attributed.
-		rollback_rename_install(
+		rollback_materialized_install(
 			"new-skill",
 			ResourceScope::ProjectOnly,
 			Some(root),

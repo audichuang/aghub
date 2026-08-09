@@ -175,6 +175,8 @@ export default function CoveragePage() {
 				},
 				added: plan.added.length > 0 ? plan.added : null,
 				removed: plan.removed.length > 0 ? plan.removed : null,
+				// Toggling a coverage cell off IS the user asking to unlink it.
+				confirm: true,
 			});
 			if (result.failed_count > 0) {
 				toast.danger(t("coverageToggleFailed"));

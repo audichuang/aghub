@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const LOCAL_LOCK_FILE: &str = "skills-lock.json";
+pub(super) const LOCAL_LOCK_FILE: &str = "skills-lock.json";
 const CURRENT_VERSION: u32 = 1;
 
 /// The interprocess mutation lock for THIS project's lock file — see
@@ -149,8 +149,16 @@ fn read_local_lock_locked(cwd: Option<&Path>) -> LocalSkillLockFile {
 						lock
 					}
 				}
-				Err(_) => {
-					// Corrupted JSON (merge conflict markers, etc.)
+				Err(error) => {
+					// Unparseable (merge conflict markers, truncation, …).
+					// Fail open so read paths still answer, but say so —
+					// silently reading as "no skills installed" is how a
+					// corrupt lock gets mistaken for an empty one.
+					log::warn!(
+						"project skill lock {} is not valid JSON ({error}); \
+						 reading it as empty",
+						lock_path.display()
+					);
 					LocalSkillLockFile::new()
 				}
 			}
@@ -160,6 +168,21 @@ fn read_local_lock_locked(cwd: Option<&Path>) -> LocalSkillLockFile {
 			LocalSkillLockFile::new()
 		}
 	}
+}
+
+/// [`super::io::read_lock_for_modify`] plus the same old-format wipe the read
+/// path does.
+fn read_local_lock_for_modify(
+	cwd: Option<&Path>,
+) -> std::io::Result<LocalSkillLockFile> {
+	let lock: LocalSkillLockFile = super::io::read_lock_for_modify(
+		&get_local_lock_path(cwd),
+		LOCAL_LOCK_FILE,
+	)?;
+	if lock.version < CURRENT_VERSION {
+		return Ok(LocalSkillLockFile::new());
+	}
+	Ok(lock)
 }
 
 /// Write the local skill lock file.
@@ -189,7 +212,7 @@ pub fn modify_local_lock<R>(
 	f: impl FnOnce(&mut LocalSkillLockFile) -> R,
 ) -> std::io::Result<R> {
 	let _guard = project_guard("modify project lock", cwd)?;
-	let mut lock = read_local_lock_locked(cwd);
+	let mut lock = read_local_lock_for_modify(cwd)?;
 	let before = lock.clone();
 	let result = f(&mut lock);
 	if lock != before {
@@ -203,7 +226,7 @@ pub fn modify_local_lock_changed<R>(
 	f: impl FnOnce(&mut LocalSkillLockFile) -> (R, bool),
 ) -> std::io::Result<R> {
 	let _guard = project_guard("modify project lock", cwd)?;
-	let mut lock = read_local_lock_locked(cwd);
+	let mut lock = read_local_lock_for_modify(cwd)?;
 	let (result, changed) = f(&mut lock);
 	if changed {
 		write_local_lock_locked(&lock, cwd)?;
@@ -441,6 +464,75 @@ mod tests {
 		modify_local_lock(Some(dir.path()), |_lock| ()).unwrap();
 
 		assert_eq!(fs::read(&path).unwrap(), before);
+	}
+
+	// An unresolved merge conflict in a VCS-tracked `skills-lock.json` used to
+	// read as an EMPTY lock, so the next install rewrote the file from that
+	// empty view and silently dropped every other entry. The write side must
+	// fail closed. Asserting only the error would pass even if the file had
+	// already been clobbered, so this reads the bytes back.
+	#[test]
+	fn modify_local_lock_refuses_to_overwrite_an_unparseable_lock() {
+		let dir = TempDir::new().unwrap();
+		let path = dir.path().join("skills-lock.json");
+		// What an unresolved merge of two branches actually leaves behind.
+		write_local_lock(
+			&LocalSkillLockFile {
+				version: CURRENT_VERSION,
+				skills: [("keep-me".to_string(), sample_local_entry())]
+					.into_iter()
+					.collect(),
+			},
+			Some(dir.path()),
+		)
+		.unwrap();
+		let corrupt =
+			format!("<<<<<<< HEAD\n{}", fs::read_to_string(&path).unwrap());
+		fs::write(&path, &corrupt).unwrap();
+
+		let error = modify_local_lock(Some(dir.path()), |lock| {
+			lock.skills
+				.insert("newcomer".to_string(), sample_local_entry());
+		})
+		.expect_err("an unparseable lock must not be overwritten");
+
+		assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+		assert_eq!(
+			fs::read_to_string(&path).unwrap(),
+			corrupt,
+			"the corrupt file must be left exactly as found"
+		);
+	}
+
+	// `skills-lock.json` is a project-root marker, so `touch`ing one to mark a
+	// root is a deliberate state. It holds nothing to lose, so writes proceed.
+	#[test]
+	fn modify_local_lock_treats_an_empty_lock_as_fresh() {
+		let dir = TempDir::new().unwrap();
+		let path = dir.path().join("skills-lock.json");
+		fs::write(&path, "").unwrap();
+
+		modify_local_lock(Some(dir.path()), |lock| {
+			lock.skills
+				.insert("newcomer".to_string(), sample_local_entry());
+		})
+		.expect("an empty lock file must not block writes");
+
+		assert!(read_local_lock(Some(dir.path()))
+			.skills
+			.contains_key("newcomer"));
+	}
+
+	// The read side stays fail-open on purpose (a corrupt lock must not brick
+	// `get`/`check`), so pin that too — otherwise "fix" the write side by
+	// making reads throw and every read command breaks instead.
+	#[test]
+	fn read_local_lock_still_falls_open_on_an_unparseable_lock() {
+		let dir = TempDir::new().unwrap();
+		fs::write(dir.path().join("skills-lock.json"), "<<<<<<< HEAD\n")
+			.unwrap();
+
+		assert!(read_local_lock(Some(dir.path())).skills.is_empty());
 	}
 
 	#[test]

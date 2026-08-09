@@ -455,6 +455,20 @@ pub fn install_fetched_skill_and_lock(
 		}
 	}
 
+	// LAST preflight before the first write. The lock is written at the END of
+	// this flow, but a modify funnel that refuses on an unreadable lock would
+	// do so AFTER the Master and Referrers exist — and `?` there returns
+	// without consuming the materialization receipt, leaving an untracked
+	// partial install. Refuse now, while there is still nothing to roll back.
+	skill::lock::ensure_locks_writable(
+		req.scope != ResourceScope::ProjectOnly,
+		match req.scope {
+			ResourceScope::GlobalOnly => None,
+			_ => req.project_root,
+		},
+	)
+	.map_err(crate::ConfigError::Io)?;
+
 	let materialized = materialize_universal_master(
 		&source_root,
 		&safe_name,
@@ -528,7 +542,14 @@ pub fn install_fetched_skill_and_lock(
 				effective_commit = owner.ref_commit.clone();
 			}
 		}
-		receipt = write_install_lock(
+		// Roll back from THIS call's receipt when the lock write fails. The
+		// preflight above rejects a lock we cannot parse, but it cannot rule
+		// out a late I/O failure (unwritable parent, full disk) or a foreign
+		// writer corrupting the file in between — the mutation lock serializes
+		// aghub against aghub only. Returning `?` here instead would leave the
+		// Master and Referrers this call just created with no lock entry
+		// pointing at them: an untracked install the caller was told failed.
+		receipt = match write_install_lock(
 			&name,
 			req.scope,
 			req.project_root,
@@ -536,7 +557,19 @@ pub fn install_fetched_skill_and_lock(
 			req.lock_skill_path.clone(),
 			&source_root,
 			effective_commit,
-		)?;
+		) {
+			Ok(receipt) => receipt,
+			Err(error) => {
+				crate::skills::rename::rollback_materialized_install(
+					&name,
+					req.scope,
+					req.project_root,
+					&created_referrer_dirs,
+					wrote_master,
+				);
+				return Err(error);
+			}
+		};
 	}
 	let created_lock = wrote_lock
 		&& receipt.replaced_global.is_none()

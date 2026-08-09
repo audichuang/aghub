@@ -6103,14 +6103,6 @@ fn crud_verbs_print_human_lines_by_default() {
 			],
 			"updated skill 'verbs'",
 		),
-		(
-			vec!["-g", "-a", "claude", "disable", "skills", "verbs"],
-			"disabled skill 'verbs'",
-		),
-		(
-			vec!["-g", "-a", "claude", "enable", "skills", "verbs"],
-			"enabled skill 'verbs'",
-		),
 	] {
 		let text = run(&args);
 		assert!(
@@ -6137,6 +6129,52 @@ fn crud_verbs_print_human_lines_by_default() {
 		serde_json::from_str::<Value>(&described).is_err(),
 		"describe must not emit JSON by default: {described}"
 	);
+}
+
+/// `disable`/`enable skills` must REFUSE, not print a success line.
+///
+/// Nothing persists a skill's enabled flag — `save()` serializes MCPs only — so
+/// the old success line was a lie that also rewrote the agent's MCP config as a
+/// side effect. Exit status alone is not enough to pin: a refusal that still
+/// wrote would satisfy it, so this also proves `.mcp.json` is byte-identical.
+#[cfg(unix)]
+#[test]
+fn skill_enable_disable_refuse_and_leave_mcp_config_alone() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let added = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "-n", "verbs"])
+		.output()
+		.unwrap();
+	assert!(added.status.success(), "fixture skill must be added");
+
+	// `customField` is the canary: aghub does not model it, so any rewrite of
+	// the agent's MCP config drops it.
+	let mcp_path = home.path().join(".claude.json");
+	let original = "{\n  \"mcpServers\": {\n    \"demo\": {\n      \"command\": \"echo\",\n      \"args\": [\"hi\"],\n      \"customField\": \"keepme\"\n    }\n  }\n}\n";
+	std::fs::write(&mcp_path, original).unwrap();
+
+	for verb in ["disable", "enable"] {
+		let out = isolated_cli(home.path(), state.path())
+			.args(["-g", "-a", "claude", verb, "skills", "verbs"])
+			.output()
+			.unwrap();
+		let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+		assert!(
+			!out.status.success(),
+			"`{verb} skills` must fail, not report a success it cannot deliver"
+		);
+		assert!(
+			stderr.contains("Unsupported operation"),
+			"`{verb} skills` must say it is unsupported, got: {stderr}"
+		);
+		assert_eq!(
+			std::fs::read_to_string(&mcp_path).unwrap(),
+			original,
+			"`{verb} skills` must not touch the agent's MCP config"
+		);
+	}
 }
 
 /// `check` and `prune-lock` are the two read paths a human runs to decide

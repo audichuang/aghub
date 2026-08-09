@@ -13,6 +13,9 @@ fn global_guard(op: &str) -> std::io::Result<super::guard::MutationGuard> {
 	mutation_guard(op, &[MutationScope::Global])
 }
 
+/// Basename of the global lock, for errors that must not carry its path.
+const GLOBAL_LOCK_FILE: &str = ".skill-lock.json";
+
 /// Get the path to the global skill lock file.
 /// Use $XDG_STATE_HOME/skills/.skill-lock.json if set.
 /// otherwise fall back to ~/.agents/.skill-lock.json
@@ -51,14 +54,124 @@ fn read_skill_lock_locked() -> SkillLockFile {
 						lock
 					}
 				}
-				Err(_) => {
-					// File doesn't exist or is invalid - return empty
+				Err(error) => {
+					// Unparseable (merge conflict markers, truncation, …).
+					// Fail open so read paths still answer, but say so —
+					// silently reading as "no skills installed" is how a
+					// corrupt lock gets mistaken for an empty one.
+					log::warn!(
+						"global skill lock {} is not valid JSON ({error}); \
+						 reading it as empty",
+						lock_path.display()
+					);
 					SkillLockFile::new()
 				}
 			}
 		}
 		Err(_) => SkillLockFile::new(),
 	}
+}
+
+/// Read a lock for a MODIFY funnel, failing CLOSED on anything unprovable.
+///
+/// `read_*_lock` fails open to an empty lock so read paths keep answering. A
+/// modify funnel must not: from that empty view it rewrites the file and drops
+/// every entry the unreadable one still holds — an unresolved merge conflict in
+/// a VCS-tracked `skills-lock.json` is the everyday way in. Only `NotFound` and
+/// an empty file are genuinely "start fresh"; a permissions error or invalid
+/// UTF-8 is NOT, because the entries are still there.
+///
+/// The parsed value is RETURNED rather than left for a second read. Two reads
+/// are a window another writer slips through, and the mutation lock serializes
+/// aghub against aghub only — `npx skills` and editors take none of it.
+///
+/// The error names the FILE, never its path: it reaches API clients verbatim,
+/// and root AGENTS.md forbids internal lock paths in API errors. The path goes
+/// to the log instead.
+pub(crate) fn read_lock_for_modify<T>(
+	path: &Path,
+	file_label: &str,
+) -> std::io::Result<T>
+where
+	T: serde::de::DeserializeOwned + Default,
+{
+	let content = match std::fs::read_to_string(path) {
+		Ok(content) => content,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			return Ok(T::default())
+		}
+		Err(error) => {
+			log::warn!(
+				"refusing to rewrite unreadable skill lock {}: {error}",
+				path.display()
+			);
+			return Err(std::io::Error::new(
+				error.kind(),
+				format!(
+					"the skill lock file {file_label} exists but could not be \
+					 read ({}); refusing to overwrite it",
+					error.kind()
+				),
+			));
+		}
+	};
+	// An empty file holds no entries to lose. It is also a state users reach on
+	// purpose: `skills-lock.json` is one of the project-root markers, so
+	// `touch`ing it to mark a root must not dead-end every later write.
+	if content.trim().is_empty() {
+		return Ok(T::default());
+	}
+	serde_json::from_str::<T>(&content).map_err(|error| {
+		log::warn!(
+			"refusing to rewrite unparseable skill lock {}: {error}",
+			path.display()
+		);
+		std::io::Error::new(
+			std::io::ErrorKind::InvalidData,
+			format!(
+				"the skill lock file {file_label} is not valid JSON; refusing \
+				 to overwrite it. Resolve it (unresolved merge conflict?) and \
+				 retry."
+			),
+		)
+	})
+}
+
+/// [`read_lock_for_modify`] plus the same old-format wipe the read path does.
+fn read_lock_for_modify_versioned() -> std::io::Result<SkillLockFile> {
+	let lock: SkillLockFile =
+		read_lock_for_modify(&get_skill_lock_path(), GLOBAL_LOCK_FILE)?;
+	// Old format: wipe and start fresh, exactly as `read_skill_lock_locked`
+	// does — v3 added skillFolderHash and fresh installs must populate it.
+	if lock.version < SkillLockFile::current_version() {
+		return Ok(SkillLockFile::new());
+	}
+	Ok(lock)
+}
+
+/// Preflight for a caller that writes files BEFORE it writes the lock.
+///
+/// `install_fetched` materializes the Master and Referrers first, so a lock
+/// funnel that refuses mid-transaction would leave an untracked partial
+/// install behind. Prove the locks are writable while there is still nothing
+/// to roll back — the project-AGENTS rule is preflight before any write.
+pub fn ensure_locks_writable(
+	global: bool,
+	project_root: Option<&Path>,
+) -> std::io::Result<()> {
+	if global {
+		read_lock_for_modify::<SkillLockFile>(
+			&get_skill_lock_path(),
+			GLOBAL_LOCK_FILE,
+		)?;
+	}
+	if let Some(root) = project_root {
+		read_lock_for_modify::<super::local::LocalSkillLockFile>(
+			&super::local::get_local_lock_path(Some(root)),
+			super::local::LOCAL_LOCK_FILE,
+		)?;
+	}
+	Ok(())
 }
 
 /// Write the skill lock file.
@@ -124,7 +237,7 @@ pub fn modify_skill_lock<R>(
 	f: impl FnOnce(&mut SkillLockFile) -> R,
 ) -> std::io::Result<R> {
 	let _guard = global_guard("modify global lock")?;
-	let mut lock = read_skill_lock_locked();
+	let mut lock = read_lock_for_modify_versioned()?;
 	let before = lock.clone();
 	let result = f(&mut lock);
 	if lock != before {
@@ -137,7 +250,7 @@ pub fn modify_skill_lock_changed<R>(
 	f: impl FnOnce(&mut SkillLockFile) -> (R, bool),
 ) -> std::io::Result<R> {
 	let _guard = global_guard("modify global lock")?;
-	let mut lock = read_skill_lock_locked();
+	let mut lock = read_lock_for_modify_versioned()?;
 	let (result, changed) = f(&mut lock);
 	if changed {
 		write_skill_lock_locked(&lock)?;

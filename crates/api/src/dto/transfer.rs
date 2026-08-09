@@ -101,6 +101,23 @@ pub struct ReconcileRequest {
 	pub source: ResourceLocatorDto,
 	pub added: Option<Vec<String>>,
 	pub removed: Option<Vec<String>>,
+	/// Required to execute a reconcile that REMOVES — the API-side half of the
+	/// CLI's `--yes`. Adds alone ignore it. Defaults to false, so a client that
+	/// never heard of the field cannot delete by omission.
+	#[ts(optional)]
+	pub confirm: Option<bool>,
+}
+
+impl ReconcileRequest {
+	/// The ONE request-to-core confirmation conversion.
+	///
+	/// All three reconcile routes go through this rather than each spelling
+	/// `unwrap_or(false)`: three copies is three places to flip to `true` and
+	/// restore the unconfirmed-removal bug, and only one of them has an
+	/// end-to-end route test.
+	pub fn confirmed(&self) -> bool {
+		self.confirm.unwrap_or(false)
+	}
 }
 
 #[derive(Debug, Clone, Serialize, TS)]

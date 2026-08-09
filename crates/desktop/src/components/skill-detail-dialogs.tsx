@@ -208,6 +208,8 @@ export function DeleteSkillDialog({
 					},
 					added: null,
 					removed: globalItems.map((item) => item.agent!),
+					// This dialog is the "remove from these agents" confirmation.
+					confirm: true,
 				});
 				results.push(result);
 			}
@@ -222,6 +224,8 @@ export function DeleteSkillDialog({
 					},
 					added: null,
 					removed: projectItems.map((item) => item.agent!),
+					// This dialog is the "remove from these agents" confirmation.
+					confirm: true,
 				});
 				results.push(result);
 			}

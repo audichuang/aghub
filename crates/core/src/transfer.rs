@@ -355,6 +355,29 @@ fn ensure_destinations(destinations: &[InstallTarget]) -> Result<()> {
 /// The add loop runs before the remove loop, so `--add X --remove X` would
 /// silently net to a delete and exit 0. Both surfaces (CLI + API) route through
 /// `reconcile_*`, so the guard lives here once.
+/// Preconditions every `reconcile_*` shares.
+///
+/// The destructive half is the point: a reconcile that REMOVES needs explicit
+/// confirmation, and that policy lives HERE so the CLI's `--yes` and the API's
+/// `confirm` are two adapters over one rule instead of two hand-kept copies.
+/// The CLI still previews before it ever calls in, so from that surface this is
+/// a backstop; for an API client it is the only gate there is.
+fn ensure_reconcilable(
+	added: &[AgentType],
+	removed: &[AgentType],
+	confirm: bool,
+) -> Result<()> {
+	ensure_disjoint(added, removed)?;
+	if !removed.is_empty() && !confirm {
+		return Err(ConfigError::InvalidConfig(format!(
+			"reconcile would remove this resource from {} agent(s); \
+			 confirm the removal explicitly to proceed",
+			removed.len()
+		)));
+	}
+	Ok(())
+}
+
 fn ensure_disjoint(added: &[AgentType], removed: &[AgentType]) -> Result<()> {
 	for agent in added {
 		if removed.contains(agent) {
@@ -558,8 +581,9 @@ pub fn reconcile_mcp(
 	source: ResourceLocator,
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
+	confirm: bool,
 ) -> Result<OperationBatchResult> {
-	ensure_disjoint(&added, &removed)?;
+	ensure_reconcilable(&added, &removed, confirm)?;
 	let mcp = load_source_mcp(&source)?;
 	info!(
 		"reconciling MCP '{}' with {} added and {} removed agent(s)",
@@ -674,8 +698,9 @@ pub fn reconcile_sub_agent(
 	source: ResourceLocator,
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
+	confirm: bool,
 ) -> Result<OperationBatchResult> {
-	ensure_disjoint(&added, &removed)?;
+	ensure_reconcilable(&added, &removed, confirm)?;
 	let sub_agent = load_source_sub_agent(&source)?;
 	info!(
 		"reconciling sub-agent '{}' with {} added and {} removed agent(s)",
@@ -791,8 +816,9 @@ pub fn reconcile_skill(
 	source: ResourceLocator,
 	added: Vec<AgentType>,
 	removed: Vec<AgentType>,
+	confirm: bool,
 ) -> Result<OperationBatchResult> {
-	ensure_disjoint(&added, &removed)?;
+	ensure_reconcilable(&added, &removed, confirm)?;
 	let skill = load_source_skill(&source)?;
 	let source_root = resolve_skill_root(&skill)?;
 	info!(
@@ -1054,6 +1080,7 @@ mod tests {
 			},
 			vec![],                  // added
 			vec![AgentType::Claude], // removed
+			true,                    // confirm
 		)
 		.unwrap();
 
@@ -1124,6 +1151,7 @@ mod tests {
 			},
 			vec![AgentType::Cursor], // added: fails at runtime
 			vec![AgentType::Claude], // removed: must be skipped
+			true,                    // confirm
 		)
 		.unwrap();
 
@@ -1251,6 +1279,7 @@ mod tests {
 			},
 			vec![],                  // added
 			vec![AgentType::Claude], // removed
+			true,                    // confirm
 		)
 		.unwrap();
 
@@ -1264,6 +1293,101 @@ mod tests {
 		);
 		manager.load().unwrap();
 		assert!(manager.get_skill("repo-helper").is_none());
+	}
+
+	// The confirmation gate lives in core so the CLI's `--yes` and the API's
+	// `confirm` cannot drift. Asserting the ERROR alone would still pass if the
+	// guard ran AFTER the deletes, so this also proves the skill survived.
+	#[test]
+	fn reconcile_skill_without_confirm_refuses_and_removes_nothing() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		manager.load().unwrap();
+		manager.add_skill(Skill::new("repo-helper")).unwrap();
+
+		let error = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "repo-helper".to_string(),
+			},
+			vec![],
+			vec![AgentType::Claude],
+			false, // confirm withheld
+		)
+		.expect_err("a removing reconcile must refuse without confirmation");
+		assert!(
+			error.to_string().contains("confirm"),
+			"error should name what is missing, got: {error}"
+		);
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		manager.load().unwrap();
+		assert!(
+			manager.get_skill("repo-helper").is_some(),
+			"unconfirmed reconcile must not delete the skill"
+		);
+	}
+
+	// Adds are non-destructive, so withholding confirmation must NOT block
+	// them — otherwise the guard silently breaks every install-only reconcile.
+	#[test]
+	fn reconcile_skill_adds_without_confirm() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		manager.load().unwrap();
+		manager.add_skill(Skill::new("repo-helper")).unwrap();
+
+		let referrer = root.join(".windsurf/skills/repo-helper");
+		assert!(
+			!referrer.exists(),
+			"the destination must start uncovered, or the assertion at the \
+			 end proves nothing"
+		);
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "repo-helper".to_string(),
+			},
+			// Windsurf NEEDS a Referrer — a NativeReader destination would
+			// read the Master the fixture already created, so the disk
+			// assertion below would hold even if the reconcile did nothing.
+			vec![AgentType::Windsurf],
+			vec![],
+			false, // confirm withheld — irrelevant to an add
+		)
+		.expect("an add-only reconcile needs no confirmation");
+
+		// `failed_count() == 0` alone is vacuous — an empty result set also
+		// satisfies it. Pin the copy AND the state it was supposed to produce.
+		assert_eq!(result.results.len(), 1);
+		assert_eq!(result.results[0].action, OperationAction::Copy);
+		assert!(result.results[0].success);
+		assert!(referrer.exists(), "the add must create Windsurf's referrer");
 	}
 
 	// Fix A regression test (skill case): a Copy that fails at RUNTIME (after
@@ -1329,6 +1453,7 @@ mod tests {
 			},
 			vec![AgentType::Windsurf], // added: fails at runtime
 			vec![AgentType::Claude],   // removed: must be skipped
+			true,                      // confirm
 		)
 		.unwrap();
 
@@ -1414,6 +1539,7 @@ mod tests {
 			},
 			vec![],
 			vec![AgentType::Claude],
+			true, // confirm
 		)
 		.unwrap();
 
@@ -1471,6 +1597,7 @@ mod tests {
 			},
 			vec![],
 			vec![AgentType::Cursor],
+			true, // confirm
 		)
 		.unwrap();
 
@@ -1647,6 +1774,7 @@ mod tests {
 			},
 			vec![AgentType::OpenCode], // added
 			vec![AgentType::Claude],   // removed
+			true,                      // confirm
 		)
 		.unwrap();
 
@@ -1860,6 +1988,7 @@ mod tests {
 			},
 			vec![AgentType::Cursor, AgentType::Windsurf],
 			vec![],
+			false, // confirm
 		)
 		.unwrap();
 

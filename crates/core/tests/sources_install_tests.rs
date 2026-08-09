@@ -1706,3 +1706,139 @@ fn conflict_fold_real_dir_and_foreign_link_are_not_clobbered() {
 		"foreign symlink should still resolve to unrelated content"
 	);
 }
+
+/// A corrupt lock must be refused BEFORE anything is materialized.
+///
+/// The lock is written at the END of the install, so a funnel that refuses an
+/// unparseable lock there would do so with the Master and Referrers already on
+/// disk — an untracked partial install the caller was told failed.
+#[test]
+fn corrupt_lock_refuses_before_materializing_anything() {
+	let _guard = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md =
+		write_skill_with_body(fetched.path(), "alpha", "alpha", "bytes");
+
+	// What an unresolved merge of two branches leaves behind.
+	std::fs::write(
+		project_root.join("skills-lock.json"),
+		"<<<<<<< HEAD\n{\"version\":1,\"skills\":{}}\n",
+	)
+	.unwrap();
+
+	let error = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	})
+	.expect_err("an unparseable lock must abort the install");
+	assert!(
+		error.to_string().contains("not valid JSON"),
+		"error should name the lock problem: {error}"
+	);
+	// The two paths alone cannot tell "refused early" from "materialized then
+	// rolled back" — the rollback removes exactly those. What distinguishes
+	// them is the PARENT dirs: materialization creates `.agents/skills` and the
+	// agent's skills dir, and the rollback removes only the skill entries
+	// inside them. Their absence is what proves nothing ran.
+	assert!(
+		!project_root.join(".agents/skills").exists(),
+		"materialization must not have run at all — its parent dir exists, so \
+		 the refusal happened AFTER the Master write rather than before it"
+	);
+	assert!(
+		!project_root.join(".claude/skills").exists(),
+		"materialization must not have run at all — the agent skills dir exists"
+	);
+	assert!(
+		!project_root.join(".agents/skills/alpha").exists(),
+		"no Master may exist after a refused install"
+	);
+	assert!(
+		!project_root.join(".claude/skills/alpha").exists(),
+		"no Referrer may exist after a refused install"
+	);
+}
+
+/// A lock write that fails AFTER materialization must roll back its own work.
+///
+/// The preflight above cannot rule out a late I/O failure (unwritable parent,
+/// full disk) or a foreign writer — the mutation lock serializes aghub against
+/// aghub only. Here the project root is read-only while the agent dirs are not,
+/// so the Master and Referrer succeed and only the lock write fails.
+#[cfg(unix)]
+#[test]
+fn lock_write_failure_rolls_back_master_and_referrer() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let _guard = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md =
+		write_skill_with_body(fetched.path(), "alpha", "alpha", "bytes");
+
+	// Pre-create the dirs the install writes INTO, so only a new entry directly
+	// under the project root (the lock) is blocked by the mode below.
+	std::fs::create_dir_all(project_root.join(".agents/skills")).unwrap();
+	std::fs::create_dir_all(project_root.join(".claude/skills")).unwrap();
+
+	let original = std::fs::metadata(&project_root).unwrap().permissions();
+	std::fs::set_permissions(
+		&project_root,
+		std::fs::Permissions::from_mode(0o500),
+	)
+	.unwrap();
+	// Root ignores 0o500. A bare `return` there would report PASSED with the
+	// rollback never exercised, so assert the happy path instead: weaker, but
+	// it still fails if the install itself broke.
+	let probe = project_root.join(".root-probe");
+	let permissions_enforced = std::fs::write(&probe, b"x").is_err();
+	if !permissions_enforced {
+		let _ = std::fs::remove_file(&probe);
+		std::fs::set_permissions(&project_root, original.clone()).unwrap();
+		eprintln!(
+			"0o500 is not enforced here (root?); asserting the happy path \
+			 instead — the rollback branch is NOT covered by this run"
+		);
+	}
+
+	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "alpha/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+	});
+
+	// Restore before asserting so the tempdir can be cleaned up.
+	std::fs::set_permissions(&project_root, original).unwrap();
+
+	if !permissions_enforced {
+		result.expect("with a writable lock the install must succeed");
+		assert!(project_root.join(".agents/skills/alpha").exists());
+		return;
+	}
+
+	result.expect_err("a failed lock write must fail the install");
+	assert!(
+		!project_root.join(".agents/skills/alpha").exists(),
+		"the Master this call created must be rolled back"
+	);
+	assert!(
+		!project_root.join(".claude/skills/alpha").exists(),
+		"the Referrer this call created must be rolled back"
+	);
+}
