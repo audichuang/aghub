@@ -254,9 +254,38 @@ else
 	VERIFY_FAILED=1
 fi
 
+# ...and it must carry a signed entry for every platform the updater asks for.
+# The four desktop build jobs run CONCURRENTLY and each read-modify-writes this
+# ONE asset (tauri-action `includeUpdaterJson`). When two interleave, one loses
+# its platform. That has two shapes: the job 404s and the run goes red (v2.11.1's
+# first cut — caught), or every job stays green and the manifest silently ships
+# short. The second is the reason this check exists: the endpoint is
+# `releases/latest/download/latest.json`, so a missing key means that platform's
+# updater is told "no update available" forever, and nobody files a bug for an
+# app that simply never updates. Asserting only the four `{os}-{arch}` keys the
+# updater actually queries — the `-app`/`-appimage`/`-deb`/`-rpm`/`-msi`/`-nsis`
+# aliases are extras whose set is tauri-action's business, not ours.
+for plat in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
+	echo "$LJ" | jq -e --arg p "$plat" \
+		'(.platforms[$p].signature // "") | length > 0' >/dev/null 2>&1 || {
+		err "latest.json has no signed entry for '$plat' — auto-update is dead for it"
+		VERIFY_FAILED=1
+	}
+done
+# A wrong version here is the same class of silent break: the updater compares
+# against THIS field, not the tag.
+echo "$LJ" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null 2>&1 ||
+	{
+		err "latest.json version is not $VERSION"
+		VERIFY_FAILED=1
+	}
+
 # Homebrew cask sha256 — informational only (the tap push can lag a moment).
+# The cask is arm/intel dual, so the hash line reads `sha256 arm:   "..."`; the
+# old bare-`sha256 "..."` pattern could never match it and this always reported
+# "could not confirm", which reads as a real problem and is just noise.
 CASK="$(gh api "repos/audichuang/homebrew-tap/contents/Casks/aghub.rb" --jq .content 2>/dev/null | base64 -d 2>/dev/null || true)"
-if echo "$CASK" | grep -qE 'sha256 "[0-9a-f]{64}"'; then
+if echo "$CASK" | grep -qE 'sha256 +(arm:|intel:)? *"[0-9a-f]{64}"'; then
 	ok "Homebrew cask sha256 present"
 else
 	info "(could not confirm Homebrew cask sha256 — check manually)"
