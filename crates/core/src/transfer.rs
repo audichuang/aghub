@@ -1677,6 +1677,7 @@ mod tests {
 			},
 			vec![],
 			vec![AgentType::Claude],
+			true, // confirm
 		)
 		.unwrap();
 
