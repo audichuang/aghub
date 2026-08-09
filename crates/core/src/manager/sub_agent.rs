@@ -141,6 +141,7 @@ impl ConfigManager {
 			paths,
 			skipped: vec![],
 			needs_confirm: false,
+			shared_master_kept: false,
 		};
 
 		// Determine presence up front so a dry-run still surfaces NotFound

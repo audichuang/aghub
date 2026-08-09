@@ -472,6 +472,7 @@ pub async fn delete_skill_by_path(
 				paths: vec![skill_dir.clone()],
 				skipped: vec![],
 				needs_confirm: false,
+				shared_master_kept: false,
 			};
 			if dry_run {
 				return Ok(Json(delete_response_from_outcome(
@@ -1179,7 +1180,13 @@ pub async fn import_skill(
 		};
 
 		if may_write_lock {
-			write_skill_install_lock(
+			// This route materializes BEFORE it stamps the lock, so a failure
+			// here would leave an untracked install behind — the preflight
+			// above rejects an unparseable lock but cannot rule out a late I/O
+			// failure (unwritable parent, full disk) or a foreign writer. Undo
+			// exactly what THIS call created, from the materializer's own
+			// receipt, and only then report the failure.
+			if let Err(error) = write_skill_install_lock(
 				&imported.name,
 				resource_scope,
 				project_root.as_deref(),
@@ -1193,7 +1200,16 @@ pub async fn import_skill(
 				&source_dir,
 				// Local installs have no upstream commit OID.
 				None,
-			)?;
+			) {
+				aghub_core::skills::rollback_materialized_install(
+					&imported.name,
+					resource_scope,
+					project_root.as_deref(),
+					&added.created_referrer_dirs,
+					added.wrote_master,
+				);
+				return Err(error);
+			}
 		}
 
 		Ok(Json(SkillResponse::from(
@@ -3453,6 +3469,80 @@ mod tests {
 				std::fs::read_to_string(&lock_path).unwrap(),
 				corrupt,
 				"the corrupt lock must be left exactly as found"
+			);
+		});
+	}
+
+	/// An import whose lock write fails must roll back its own materialization.
+	///
+	/// The route installs BEFORE it stamps the lock. The preflight rejects an
+	/// unparseable lock, but a late I/O failure still lands after the Master and
+	/// Referrer exist — returning the error there left an untracked install the
+	/// caller was told had failed. Project root at 0o500 with the agent dirs
+	/// pre-created makes only the lock write fail.
+	#[cfg(unix)]
+	#[test]
+	fn import_skill_rolls_back_when_the_lock_write_fails() {
+		use std::os::unix::fs::PermissionsExt;
+
+		with_isolated_env(|home, _state| {
+			let source_skill = home.join("source-skills/rollback-skill");
+			std::fs::create_dir_all(&source_skill).unwrap();
+			std::fs::write(
+				source_skill.join("SKILL.md"),
+				"---\nname: rollback-skill\ndescription: t\n---\n\nbody\n",
+			)
+			.unwrap();
+
+			let project = home.join("myproject");
+			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+			std::fs::create_dir_all(project.join(".agents/skills")).unwrap();
+
+			let original = std::fs::metadata(&project).unwrap().permissions();
+			std::fs::set_permissions(
+				&project,
+				std::fs::Permissions::from_mode(0o500),
+			)
+			.unwrap();
+			// Root ignores 0o500; assert the happy path instead of a silent
+			// pass that would read as "rollback verified".
+			let probe = project.join(".root-probe");
+			let enforced = std::fs::write(&probe, b"x").is_err();
+			if !enforced {
+				let _ = std::fs::remove_file(&probe);
+				std::fs::set_permissions(&project, original.clone()).unwrap();
+				eprintln!(
+					"0o500 not enforced (root?); rollback branch NOT covered"
+				);
+			}
+
+			let result = block_on(import_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Claude),
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some(project.display().to_string()),
+				},
+				Json(crate::dto::skill::ImportSkillRequest {
+					path: source_skill.join("SKILL.md").display().to_string(),
+				}),
+			));
+
+			std::fs::set_permissions(&project, original).unwrap();
+
+			if !enforced {
+				result.ok().expect("writable lock: import must succeed");
+				return;
+			}
+
+			result.expect_err("a failed lock write must fail the import");
+			assert!(
+				!project.join(".agents/skills/rollback-skill").exists(),
+				"the Master this call created must be rolled back"
+			);
+			assert!(
+				!project.join(".claude/skills/rollback-skill").exists(),
+				"the Referrer this call created must be rolled back"
 			);
 		});
 	}

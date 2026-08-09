@@ -179,10 +179,24 @@ export default function CoveragePage() {
 				confirm: true,
 			});
 			if (result.failed_count > 0) {
-				toast.danger(t("coverageToggleFailed"));
+				// Carry the per-agent reason through. The common failure here
+				// is "this agent reads the shared master, so it cannot be
+				// unlinked for that agent alone" — a bare "failed" leaves the
+				// user with no idea why the cell refused to toggle.
+				const reason = result.results.find((r) => r.error)?.error;
+				toast.danger(
+					reason
+						? `${t("coverageToggleFailed")}: ${reason}`
+						: t("coverageToggleFailed"),
+				);
 			}
-		} catch {
-			toast.danger(t("coverageToggleFailed"));
+		} catch (error) {
+			const reason = error instanceof Error ? error.message : null;
+			toast.danger(
+				reason
+					? `${t("coverageToggleFailed")}: ${reason}`
+					: t("coverageToggleFailed"),
+			);
 		} finally {
 			setPendingCell(null);
 		}

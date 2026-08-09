@@ -857,7 +857,7 @@ fn restore_snapshot(snapshot: &SkillSnapshot) {
 /// it. Shared with `install_fetched`, which must clean up after itself when a
 /// post-materialization step fails — the rename flow is not the only caller
 /// that can fail with a fresh Master already on disk.
-pub(crate) fn rollback_materialized_install(
+pub fn rollback_materialized_install(
 	new_name: &str,
 	scope: ResourceScope,
 	project_root: Option<&Path>,

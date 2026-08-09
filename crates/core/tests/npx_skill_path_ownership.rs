@@ -223,3 +223,67 @@ fn single_agent_delete_keeps_shared_master_and_reports_it() {
 		"the shared master must survive the planned delete"
 	);
 }
+
+/// Two NativeReaders sharing one Master: removing it for ONE of them must not
+/// take the Master away from the other.
+///
+/// The existing reference-count guard only sweeps for symlink Referrers, and a
+/// NativeReader leaves none — so with two of them the sweep found nothing and
+/// `remove_dir_all`'d the shared Master while reporting success. The other
+/// agent silently lost the skill. Every agent here reads `.agents/skills`
+/// directly, so no symlink exists anywhere in the fixture: that is the point.
+#[test]
+fn single_agent_delete_keeps_master_shared_by_another_native_reader() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let master = root.join(".agents/skills/shared");
+	write_skill_md(&master, "shared");
+
+	// Both Cursor and OpenCode read `<project>/.agents/skills` directly.
+	for agent in [AgentType::Cursor, AgentType::OpenCode] {
+		let mut mgr =
+			ConfigManager::new(create_adapter(agent), false, Some(root));
+		mgr.load().unwrap();
+		assert!(
+			mgr.get_skill("shared").is_some(),
+			"{agent:?} should discover the shared master"
+		);
+	}
+
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+	let outcome = mgr
+		.remove_skill_planned("shared", false, false, true)
+		.unwrap();
+
+	assert!(
+		!outcome.plan.paths.contains(&master),
+		"the shared master must never be scheduled for a single-agent removal"
+	);
+	assert!(
+		outcome.plan.shared_master_kept,
+		"the plan must record WHY nothing was removed, so a caller can refuse \
+		 instead of reporting a removal that did not happen: {:?}",
+		outcome.plan
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"the master must survive — the other native reader still uses it"
+	);
+
+	// And the other agent still sees it.
+	let mut other = ConfigManager::new(
+		create_adapter(AgentType::OpenCode),
+		false,
+		Some(root),
+	);
+	other.load().unwrap();
+	assert!(
+		other.get_skill("shared").is_some(),
+		"OpenCode must not lose a skill because Cursor asked to drop it"
+	);
+}

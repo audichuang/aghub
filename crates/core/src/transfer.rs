@@ -862,6 +862,24 @@ pub fn reconcile_skill(
 						false,
 						true,
 					) {
+						// Nothing removable is NOT success here. The planner
+						// keeps a shared universal Master on a single-agent
+						// removal (an agent that reads `.agents/skills`
+						// directly leaves no per-agent artifact to take), so
+						// reporting Ok told the user "removed from cursor"
+						// while cursor still sees it — and, before the planner
+						// fix, the alternative was worse: it deleted the Master
+						// and every other agent lost the skill too.
+						Ok(outcome)
+							if outcome.plan.paths.is_empty()
+								&& outcome.plan.shared_master_kept =>
+						{
+							Err(ConfigError::unsupported_operation(
+								"remove for this agent alone",
+								"skill it reads from the shared master",
+								plan.target.agent.as_str(),
+							))
+						}
 						Ok(_) | Err(ConfigError::ResourceNotFound { .. }) => {
 							Ok(())
 						}

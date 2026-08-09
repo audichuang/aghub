@@ -24,13 +24,31 @@ pub struct SkillAdd {
 	pub skill: Skill,
 	/// True when the skill was already installed and nothing was written.
 	pub already_installed: bool,
+	/// This call atomically claimed and wrote the `.agents/skills/<name>`
+	/// Master. Attribution for a caller that must roll its own work back — a
+	/// Master merely found and verified belongs to whoever wrote it.
+	pub wrote_master: bool,
+	/// Agent skills-dirs where this call created a FRESH referrer, straight
+	/// from the linker. Never reconstructed from `installed`: a NativeReader
+	/// row is installed with no link, and its first read path IS the Master.
+	pub created_referrer_dirs: Vec<std::path::PathBuf>,
 }
 
 impl SkillAdd {
-	fn installed(skill: Skill) -> Self {
+	/// A real install, carrying the materializer's OWN receipt so a caller that
+	/// writes something AFTER this call (the API import route stamps the lock)
+	/// can undo exactly this call's work when that later step fails. The
+	/// receipt is not optional: a caller that cannot roll back is the bug this
+	/// exists to prevent.
+	fn installed(
+		skill: Skill,
+		materialized: &crate::skills::install_fetched::MaterializedMaster,
+	) -> Self {
 		Self {
 			skill,
 			already_installed: false,
+			wrote_master: materialized.created_master,
+			created_referrer_dirs: materialized.created_referrer_dirs.clone(),
 		}
 	}
 
@@ -38,6 +56,8 @@ impl SkillAdd {
 		Self {
 			skill,
 			already_installed: true,
+			wrote_master: false,
+			created_referrer_dirs: Vec::new(),
 		}
 	}
 }
@@ -315,7 +335,13 @@ impl ConfigManager {
 		fs_skill.canonical_path = Some(canonical_md);
 		config.skills.push(fs_skill);
 
-		self.save_current()
+		// Deliberately NOT `save_current()`: `save()` serializes MCPs and
+		// nothing else, so it cannot persist a skill — the on-disk work is already
+		// done above. Calling it here rewrote the agent's MCP config from the
+		// normalized model as a pure side effect, dropping per-server fields aghub
+		// does not model. See `set_skill_enabled` for the same defect in its
+		// starkest form.
+		Ok(())
 	}
 
 	pub fn get_skill(&self, name: &str) -> Option<&Skill> {
@@ -480,7 +506,9 @@ impl ConfigManager {
 			));
 		}
 
-		self.save_current()
+		// Not `save_current()` — it only serializes MCPs, so it cannot persist
+		// a skill and rewrites `.mcp.json` as a side effect. See `add_skill`.
+		Ok(())
 	}
 
 	pub fn remove_skill(&mut self, name: &str) -> Result<()> {
@@ -560,7 +588,9 @@ impl ConfigManager {
 		}
 
 		config.skills.remove(index);
-		self.save_current()
+		// Not `save_current()` — it only serializes MCPs, so it cannot persist
+		// a skill and rewrites `.mcp.json` as a side effect. See `add_skill`.
+		Ok(())
 	}
 
 	/// Layout-aware skill removal with a default dry-run.
@@ -867,8 +897,8 @@ impl ConfigManager {
 		fs_skill.canonical_path = Some(canonical_md);
 		config.skills.push(fs_skill);
 
-		self.save_current()?;
-		Ok(SkillAdd::installed(skill))
+		// Not `save_current()` — see `add_skill`.
+		Ok(SkillAdd::installed(skill, &results))
 	}
 
 	/// Map the single-agent result from `materialize_universal_master` onto the

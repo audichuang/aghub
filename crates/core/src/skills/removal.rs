@@ -213,6 +213,11 @@ pub struct RemovalPlan {
 	/// True when destructive execution requires an explicit confirm flag
 	/// (symlink-layout full removal, or copy `--all-agents`).
 	pub needs_confirm: bool,
+	/// The targeted removal resolved to the SHARED universal Master and was
+	/// therefore refused. A single-agent removal cannot express "stop only this
+	/// agent seeing it" when the agent reads the Master directly, so the caller
+	/// must fail loudly instead of reporting a removal that did not happen.
+	pub shared_master_kept: bool,
 }
 
 /// Plan a layout-aware removal.
@@ -320,6 +325,7 @@ fn plan_symlink_removal(
 		paths,
 		skipped,
 		needs_confirm: true,
+		shared_master_kept: false,
 	}
 }
 
@@ -347,8 +353,10 @@ fn plan_copy_removal(
 			paths,
 			skipped,
 			needs_confirm: true,
+			shared_master_kept: false,
 		}
 	} else {
+		let mut shared_master_kept = false;
 		if let Some(root) = crate::transfer::skill_root_unchecked(skill) {
 			if root.exists() {
 				// Guard against orphaning a live symlink: when this dir is a
@@ -357,7 +365,19 @@ fn plan_copy_removal(
 				// directly by this agent, but symlinked by Claude), keep it and
 				// report it instead of `remove_dir_all`-ing it. Plain per-agent
 				// copies have no inbound symlinks, so this never blocks them.
-				if dir_has_external_referrer(&root, all_agent_dirs, safe) {
+				//
+				// The referrer sweep alone is not enough: a NativeReader leaves
+				// NO symlink behind, so a second agent reading the same Master
+				// is invisible to it and the Master got `remove_dir_all`'d out
+				// from under that agent while the operation reported success.
+				// The Master is shared BY CONSTRUCTION, so a single-agent
+				// removal may never take it — only `--all-agents` (which means
+				// "remove everywhere") may, through the branch above.
+				if is_universal_master(&root) {
+					shared_master_kept = true;
+					skipped.push(root);
+				} else if dir_has_external_referrer(&root, all_agent_dirs, safe)
+				{
 					skipped.push(root);
 				} else {
 					push_contained(root, roots, &mut paths, &mut skipped);
@@ -369,8 +389,38 @@ fn plan_copy_removal(
 			paths,
 			skipped,
 			needs_confirm: false,
+			shared_master_kept,
 		}
 	}
+}
+
+/// True when `dir` is a universal Master (`.../skills/<name>` under an
+/// `agents` store) rather than one agent's private copy.
+///
+/// Shape-based on purpose: the copy planner reaches here exactly when the skill
+/// carries NO `canonical_path` (an agent discovered the Master as a plain
+/// directory through its own read path), so there is no canonical identity left
+/// to compare — the layout invariant is what remains.
+///
+/// BOTH spellings count: `<scope>/.agents/skills` and the XDG global store
+/// `$XDG_CONFIG_HOME/agents/skills` (default `~/.config/agents/skills`, with no
+/// leading dot — see root AGENTS.md). Matching only the dotted one would leave
+/// the XDG Master deletable by a single-agent removal, which is the exact bug
+/// this guard exists to stop.
+fn is_universal_master(dir: &Path) -> bool {
+	let Some(parent) = dir.parent() else {
+		return false;
+	};
+	if parent.file_name() != Some(std::ffi::OsStr::new("skills")) {
+		return false;
+	}
+	matches!(
+		parent
+			.parent()
+			.and_then(|p| p.file_name())
+			.and_then(|n| n.to_str()),
+		Some(".agents") | Some("agents")
+	)
 }
 
 /// True when some in-scope agent skills dir holds a symlink named `safe` that
@@ -466,6 +516,7 @@ impl RemovalOutcome {
 				paths: vec![],
 				skipped: vec![],
 				needs_confirm: false,
+				shared_master_kept: false,
 			},
 			executed: false,
 			prune: PruneStatus::NotRun,
@@ -970,6 +1021,7 @@ mod tests {
 			paths: vec![claude.join("foo")],
 			skipped: vec![],
 			needs_confirm: true,
+			shared_master_kept: false,
 		};
 		let report =
 			execute_removal(&plan, std::slice::from_ref(&claude)).unwrap();
@@ -992,6 +1044,7 @@ mod tests {
 			paths: vec![foo.clone()],
 			skipped: vec![],
 			needs_confirm: false,
+			shared_master_kept: false,
 		};
 		execute_removal(&plan, std::slice::from_ref(&skills)).unwrap();
 		assert!(!foo.exists());
@@ -1009,6 +1062,7 @@ mod tests {
 			paths: vec![outside.clone()],
 			skipped: vec![],
 			needs_confirm: false,
+			shared_master_kept: false,
 		};
 		let report = execute_removal(&plan, &[skills]).unwrap();
 		assert!(outside.exists(), "out-of-allowlist dir must survive");
@@ -1025,6 +1079,7 @@ mod tests {
 			paths: vec![missing],
 			skipped: vec![],
 			needs_confirm: false,
+			shared_master_kept: false,
 		};
 		let report =
 			execute_removal(&plan, &[tmp.path().to_path_buf()]).unwrap();
@@ -1061,6 +1116,7 @@ mod tests {
 			paths: vec![first.clone(), blocked.clone(), second.clone()],
 			skipped: vec![],
 			needs_confirm: false,
+			shared_master_kept: false,
 		};
 		let report =
 			execute_removal(&plan, &[root.clone(), blocked_parent.clone()])
@@ -1089,6 +1145,7 @@ mod tests {
 				paths: vec![],
 				skipped: vec![],
 				needs_confirm: false,
+				shared_master_kept: false,
 			},
 			executed: false,
 			prune: PruneStatus::Pruned(vec!["a".to_string()]),
@@ -1263,5 +1320,38 @@ mod tests {
 			!plan.paths.contains(&agent_dirs[1].join("foo")),
 			"untargeted cursor symlink must NOT be scheduled",
 		);
+	}
+}
+
+#[cfg(test)]
+mod universal_master_shape_tests {
+	use super::is_universal_master;
+	use std::path::Path;
+
+	/// Both Master spellings must be recognised. `~/.config/agents/skills` has
+	/// NO leading dot (root AGENTS.md), so a guard written only for `.agents`
+	/// leaves the XDG global Master deletable by a single-agent removal — the
+	/// exact data loss this guard exists to stop.
+	#[test]
+	fn both_agents_store_spellings_count_as_master() {
+		assert!(is_universal_master(Path::new(
+			"/home/u/project/.agents/skills/foo"
+		)));
+		assert!(is_universal_master(Path::new(
+			"/home/u/.config/agents/skills/foo"
+		)));
+		assert!(is_universal_master(Path::new("/home/u/.agents/skills/foo")));
+	}
+
+	/// A per-agent private copy must stay removable, or a single-agent delete
+	/// silently stops working for ordinary installs.
+	#[test]
+	fn private_agent_dirs_are_not_masters() {
+		assert!(!is_universal_master(Path::new(
+			"/home/u/project/.claude/skills/foo"
+		)));
+		assert!(!is_universal_master(Path::new("/home/u/.codex/skills/foo")));
+		// `skills` directly under something else is not an agents store.
+		assert!(!is_universal_master(Path::new("/home/u/vendor/skills/foo")));
 	}
 }

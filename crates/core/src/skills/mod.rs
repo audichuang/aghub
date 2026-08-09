@@ -10,6 +10,10 @@ pub mod update;
 pub mod usage;
 
 pub use discovery::{load_skills_from_dir, load_skills_from_dirs};
+/// Undo a `materialize_universal_master` from the caller's OWN receipt. Shared
+/// by every flow that writes files before it writes the lock (rename, fetched
+/// install, the API import route) so none of them hand-rolls a second one.
+pub use rename::rollback_materialized_install;
 
 use std::path::{Path, PathBuf};
 
