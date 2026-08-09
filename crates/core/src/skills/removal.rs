@@ -7,6 +7,31 @@ use std::path::{Path, PathBuf};
 
 use crate::skills::linker::Linker;
 
+/// The universal-Master stores for a scope — the shared `.agents/skills` (and
+/// the XDG `agents/skills`, which has NO leading dot) that every agent may read,
+/// as opposed to any single agent's private skills dir.
+///
+/// Kept separate from [`allowed_skill_roots`] (which adds the per-agent dirs)
+/// because "may this path be deleted at all" and "is this path SHARED" are
+/// different questions: a private per-agent copy is deletable, a Master is not.
+pub fn universal_master_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
+	let mut roots: Vec<PathBuf> = Vec::new();
+	// Universal global root: $XDG_CONFIG_HOME/agents/skills (dirs resolves XDG).
+	if let Some(config) = dirs::config_dir() {
+		roots.push(config.join("agents").join("skills"));
+	}
+	if let Some(home) = dirs::home_dir() {
+		// Explicit ~/.config fallback (in case XDG_CONFIG_HOME points elsewhere).
+		roots.push(home.join(".config").join("agents").join("skills"));
+		// Legacy ~/.agents/skills.
+		roots.push(home.join(".agents").join("skills"));
+	}
+	if let Some(root) = project_root {
+		roots.push(root.join(".agents").join("skills"));
+	}
+	roots
+}
+
 /// Collect the allow-listed skills roots for a scope.
 ///
 /// Includes the universal global root (`$XDG_CONFIG_HOME/agents/skills` or
@@ -18,21 +43,7 @@ pub fn allowed_skill_roots(
 	agent_skill_dirs: &[PathBuf],
 	project_root: Option<&Path>,
 ) -> Vec<PathBuf> {
-	let mut candidates: Vec<PathBuf> = Vec::new();
-
-	// Universal global root: $XDG_CONFIG_HOME/agents/skills (dirs resolves XDG).
-	if let Some(config) = dirs::config_dir() {
-		candidates.push(config.join("agents").join("skills"));
-	}
-	if let Some(home) = dirs::home_dir() {
-		// Explicit ~/.config fallback (in case XDG_CONFIG_HOME points elsewhere).
-		candidates.push(home.join(".config").join("agents").join("skills"));
-		// Legacy ~/.agents/skills.
-		candidates.push(home.join(".agents").join("skills"));
-	}
-	if let Some(root) = project_root {
-		candidates.push(root.join(".agents").join("skills"));
-	}
+	let mut candidates: Vec<PathBuf> = universal_master_roots(project_root);
 	candidates.extend(agent_skill_dirs.iter().cloned());
 
 	let mut roots: Vec<PathBuf> = Vec::new();
@@ -247,7 +258,14 @@ pub fn plan_removal(
 			all_agents,
 		)
 	} else {
-		plan_copy_removal(skill, &safe, all_agent_dirs, &roots, all_agents)
+		plan_copy_removal(
+			skill,
+			&safe,
+			all_agent_dirs,
+			&roots,
+			project_root,
+			all_agents,
+		)
 	}
 }
 
@@ -336,6 +354,7 @@ fn plan_copy_removal(
 	safe: &str,
 	all_agent_dirs: &[PathBuf],
 	roots: &[PathBuf],
+	project_root: Option<&Path>,
 	all_agents: bool,
 ) -> RemovalPlan {
 	let mut paths: Vec<PathBuf> = Vec::new();
@@ -373,7 +392,7 @@ fn plan_copy_removal(
 				// The Master is shared BY CONSTRUCTION, so a single-agent
 				// removal may never take it — only `--all-agents` (which means
 				// "remove everywhere") may, through the branch above.
-				if is_universal_master(&root) {
+				if is_universal_master(&root, project_root) {
 					shared_master_kept = true;
 					skipped.push(root);
 				} else if dir_has_external_referrer(&root, all_agent_dirs, safe)
@@ -394,33 +413,20 @@ fn plan_copy_removal(
 	}
 }
 
-/// True when `dir` is a universal Master (`.../skills/<name>` under an
-/// `agents` store) rather than one agent's private copy.
+/// True when `dir` lives inside a universal Master store — i.e. it is SHARED
+/// with every other agent reading that store, rather than one agent's private
+/// copy.
 ///
-/// Shape-based on purpose: the copy planner reaches here exactly when the skill
-/// carries NO `canonical_path` (an agent discovered the Master as a plain
-/// directory through its own read path), so there is no canonical identity left
-/// to compare — the layout invariant is what remains.
-///
-/// BOTH spellings count: `<scope>/.agents/skills` and the XDG global store
-/// `$XDG_CONFIG_HOME/agents/skills` (default `~/.config/agents/skills`, with no
-/// leading dot — see root AGENTS.md). Matching only the dotted one would leave
-/// the XDG Master deletable by a single-agent removal, which is the exact bug
-/// this guard exists to stop.
-fn is_universal_master(dir: &Path) -> bool {
-	let Some(parent) = dir.parent() else {
-		return false;
-	};
-	if parent.file_name() != Some(std::ffi::OsStr::new("skills")) {
-		return false;
-	}
-	matches!(
-		parent
-			.parent()
-			.and_then(|p| p.file_name())
-			.and_then(|n| n.to_str()),
-		Some(".agents") | Some("agents")
-	)
+/// Containment, not path shape. Discovery RECURSES (`collect_skills` descends
+/// into any directory that is not itself a skill), so a Master can sit at
+/// `.agents/skills/<team>/<name>`, which a `parent == "skills"` shape test
+/// misses — and misses in the dangerous direction, letting a single-agent
+/// removal take a shared Master. The shape test was wrong the other way too: a
+/// private copy at `.claude/skills/agents/skills/<name>` matched it and became
+/// undeletable.
+fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
+	assert_strictly_contained(dir, &universal_master_roots(project_root))
+		.is_some()
 }
 
 /// True when some in-scope agent skills dir holds a symlink named `safe` that
@@ -1324,34 +1330,61 @@ mod tests {
 }
 
 #[cfg(test)]
-mod universal_master_shape_tests {
-	use super::is_universal_master;
-	use std::path::Path;
+mod universal_master_tests {
+	use super::{is_universal_master, universal_master_roots};
 
-	/// Both Master spellings must be recognised. `~/.config/agents/skills` has
-	/// NO leading dot (root AGENTS.md), so a guard written only for `.agents`
-	/// leaves the XDG global Master deletable by a single-agent removal — the
-	/// exact data loss this guard exists to stop.
+	/// Containment, not path shape. Discovery recurses, so a Master can live at
+	/// `.agents/skills/<team>/<name>` — a `parent == "skills"` test misses it
+	/// and lets a single-agent removal delete a SHARED Master.
 	#[test]
-	fn both_agents_store_spellings_count_as_master() {
-		assert!(is_universal_master(Path::new(
-			"/home/u/project/.agents/skills/foo"
-		)));
-		assert!(is_universal_master(Path::new(
-			"/home/u/.config/agents/skills/foo"
-		)));
-		assert!(is_universal_master(Path::new("/home/u/.agents/skills/foo")));
+	fn nested_master_under_the_store_still_counts() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let nested = root.join(".agents/skills/team/foo");
+		let flat = root.join(".agents/skills/flat");
+		std::fs::create_dir_all(&nested).unwrap();
+		std::fs::create_dir_all(&flat).unwrap();
+
+		assert!(is_universal_master(&flat, Some(root)), "flat master");
+		assert!(is_universal_master(&nested, Some(root)), "nested master");
 	}
 
-	/// A per-agent private copy must stay removable, or a single-agent delete
-	/// silently stops working for ordinary installs.
+	/// The inverse error: a private per-agent copy that merely LOOKS like the
+	/// store must stay deletable, or single-agent delete silently stops working.
 	#[test]
-	fn private_agent_dirs_are_not_masters() {
-		assert!(!is_universal_master(Path::new(
-			"/home/u/project/.claude/skills/foo"
-		)));
-		assert!(!is_universal_master(Path::new("/home/u/.codex/skills/foo")));
-		// `skills` directly under something else is not an agents store.
-		assert!(!is_universal_master(Path::new("/home/u/vendor/skills/foo")));
+	fn agent_private_dirs_are_not_masters_even_when_shaped_like_one() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let decoy = root.join(".claude/skills/agents/skills/foo");
+		std::fs::create_dir_all(&decoy).unwrap();
+		let plain = root.join(".claude/skills/foo");
+		std::fs::create_dir_all(&plain).unwrap();
+
+		assert!(!is_universal_master(&decoy, Some(root)));
+		assert!(!is_universal_master(&plain, Some(root)));
+	}
+
+	/// The store root itself is not a skill, and a missing path is not a Master.
+	#[test]
+	fn store_root_and_missing_paths_are_not_masters() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let store = root.join(".agents/skills");
+		std::fs::create_dir_all(&store).unwrap();
+
+		assert!(!is_universal_master(&store, Some(root)));
+		assert!(!is_universal_master(&store.join("ghost"), Some(root)));
+	}
+
+	/// Both spellings are stores: `.agents/skills` and XDG `agents/skills`
+	/// (no leading dot — root AGENTS.md).
+	#[test]
+	fn both_store_spellings_are_listed() {
+		let roots = universal_master_roots(Some(std::path::Path::new("/p")));
+		assert!(roots.iter().any(|r| r.ends_with(".agents/skills")));
+		assert!(roots
+			.iter()
+			.any(|r| r.ends_with("agents/skills")
+				&& !r.ends_with(".agents/skills")));
 	}
 }

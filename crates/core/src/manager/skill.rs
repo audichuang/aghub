@@ -654,6 +654,25 @@ impl ConfigManager {
 		);
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);
+
+		// Refuse rather than report a removal that cannot happen. The planner
+		// keeps a shared universal Master on a single-agent removal (an agent
+		// reading `.agents/skills` directly leaves no per-agent artifact to
+		// take), so executing would remove NOTHING while `RemovalView` reports
+		// `success: true` — `delete skills foo -a cursor --yes` exited 0 saying
+		// it removed no files, and the skill was still there.
+		//
+		// Only on an EXECUTING call: a dry-run must still preview the plan
+		// (Master kept, listed in `skipped`), which is the contract
+		// `single_agent_delete_keeps_shared_master_and_reports_it` pins.
+		if executed && plan.shared_master_kept && plan.paths.is_empty() {
+			return Err(ConfigError::unsupported_operation(
+				"remove for this agent alone",
+				"skill it reads from the shared master",
+				self.adapter.name(),
+			));
+		}
+
 		if !executed {
 			return Ok(removal::RemovalOutcome {
 				plan,

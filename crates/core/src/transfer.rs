@@ -812,6 +812,23 @@ pub fn transfer_skill(
 	Ok(operation_batch(report))
 }
 
+/// Every in-scope agent whose config currently carries `name`.
+///
+/// One extra scan, taken only to answer "will anyone still be reading the
+/// Master after this reconcile?" — the per-agent removal planner cannot see
+/// that, because a NativeReader leaves no artifact for it to count.
+fn skill_holders(name: &str, source: &ResourceLocator) -> Vec<AgentType> {
+	let scope = match source.scope {
+		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
+		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
+	};
+	crate::load_all_agents(scope, source.project_root.as_deref())
+		.into_iter()
+		.filter(|agent| agent.skills.iter().any(|s| s.name == name))
+		.filter_map(|agent| agent.agent_id.parse::<AgentType>().ok())
+		.collect()
+}
+
 pub fn reconcile_skill(
 	source: ResourceLocator,
 	added: Vec<AgentType>,
@@ -827,6 +844,17 @@ pub fn reconcile_skill(
 		added.len(),
 		removed.len()
 	);
+	// Does this reconcile drop the skill from EVERY agent that currently holds
+	// it? Then the shared Master has no remaining reader and must go with it.
+	// Removing it per-agent instead would refuse on every target (an agent
+	// reading the Master directly has nothing agent-specific to take) and leave
+	// the Master orphaned — and the desktop's manage-agents dialog allows
+	// exactly this shape: deselect every agent, no adds.
+	let exhaustive = !removed.is_empty()
+		&& added.is_empty()
+		&& skill_holders(&skill.name, &source)
+			.iter()
+			.all(|held| removed.contains(held));
 	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
@@ -858,7 +886,7 @@ pub fn reconcile_skill(
 					ensure_loaded(&mut manager)?;
 					match manager.remove_skill_planned(
 						&skill.name,
-						false,
+						exhaustive,
 						false,
 						true,
 					) {

@@ -256,8 +256,11 @@ fn single_agent_delete_keeps_master_shared_by_another_native_reader() {
 		Some(root),
 	);
 	mgr.load().unwrap();
+	// Dry-run: previews the plan (Master kept + reported). An EXECUTING call
+	// refuses instead — pinned by
+	// `confirmed_single_agent_delete_of_a_shared_master_errors`.
 	let outcome = mgr
-		.remove_skill_planned("shared", false, false, true)
+		.remove_skill_planned("shared", false, true, false)
 		.unwrap();
 
 	assert!(
@@ -266,8 +269,8 @@ fn single_agent_delete_keeps_master_shared_by_another_native_reader() {
 	);
 	assert!(
 		outcome.plan.shared_master_kept,
-		"the plan must record WHY nothing was removed, so a caller can refuse \
-		 instead of reporting a removal that did not happen: {:?}",
+		"the plan must record WHY nothing would be removed, so a caller can \
+		 refuse instead of reporting a removal that did not happen: {:?}",
 		outcome.plan
 	);
 	assert!(
@@ -285,5 +288,101 @@ fn single_agent_delete_keeps_master_shared_by_another_native_reader() {
 	assert!(
 		other.get_skill("shared").is_some(),
 		"OpenCode must not lose a skill because Cursor asked to drop it"
+	);
+}
+
+/// A CONFIRMED single-agent delete that can remove nothing must fail, not
+/// report success.
+///
+/// `RemovalView` hardcodes `success: true`, so an executing call that removed
+/// nothing exited 0 saying it "removed no installed files" while the skill was
+/// still there. The dry-run keeps its preview contract (see the test above);
+/// only the executing call refuses.
+#[test]
+fn confirmed_single_agent_delete_of_a_shared_master_errors() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let master = root.join(".agents/skills/shared");
+	write_skill_md(&master, "shared");
+
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+
+	// dry-run still previews
+	let preview = mgr
+		.remove_skill_planned("shared", false, true, false)
+		.expect("a dry-run must still preview the plan");
+	assert!(preview.plan.skipped.iter().any(|p| p == &master));
+
+	// executing refuses
+	let error = mgr
+		.remove_skill_planned("shared", false, false, true)
+		.expect_err("an executing delete that removes nothing must fail");
+	assert!(
+		error.to_string().contains("shared master"),
+		"the error must say why, got: {error}"
+	);
+	assert!(master.join("SKILL.md").exists());
+}
+
+/// Removing the skill from EVERY agent that holds it must take the Master too.
+///
+/// Per-agent removal refuses for a NativeReader, so an exhaustive reconcile
+/// would fail on every target and orphan the Master. The desktop's
+/// manage-agents dialog allows exactly this shape (deselect all, no adds).
+#[test]
+fn reconcile_removing_every_holder_takes_the_master() {
+	use aghub_core::transfer::{
+		reconcile_skill, InstallScope, ResourceLocator,
+	};
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let master = root.join(".agents/skills/shared");
+	write_skill_md(&master, "shared");
+
+	// EVERY native reader of `<project>/.agents/skills` holds this skill, not
+	// just the two obvious ones — computed rather than hardcoded so a change to
+	// the agent roster cannot silently make this test non-exhaustive (and thus
+	// stop covering the branch it exists for).
+	let holders: Vec<AgentType> = aghub_core::load_all_agents(
+		aghub_core::models::ResourceScope::ProjectOnly,
+		Some(root),
+	)
+	.into_iter()
+	.filter(|a| a.skills.iter().any(|s| s.name == "shared"))
+	.filter_map(|a| a.agent_id.parse::<AgentType>().ok())
+	.collect();
+	assert!(
+		holders.len() > 1,
+		"fixture must have several native readers, got {holders:?}"
+	);
+
+	let result = reconcile_skill(
+		ResourceLocator {
+			agent: AgentType::Cursor,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "shared".to_string(),
+		},
+		vec![],
+		holders.clone(),
+		true,
+	)
+	.expect("an exhaustive removal must be allowed");
+
+	assert_eq!(
+		result.failed_count(),
+		0,
+		"no target may fail: {:?}",
+		result.results.iter().map(|r| &r.error).collect::<Vec<_>>()
+	);
+	assert!(
+		!master.exists(),
+		"the last reader is gone, so the Master must go with it"
 	);
 }
