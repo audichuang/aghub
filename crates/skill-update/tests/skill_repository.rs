@@ -1423,10 +1423,13 @@ impl RepoFetchBackend for ResolveCountingGix {
 /// so routing the preflight through it would pay the exact cost the preflight
 /// exists to avoid, on every non-github host.
 ///
-/// The remote here is a closed port, so the ls-refs attempt fails fast with no
-/// network dependency; the assertion that matters is which slot was consulted.
+/// The remote here is a closed port, so the advertisement attempt fails fast with
+/// no network dependency. Two assertions together pin the path: the gix slot was
+/// never consulted, AND the error is the one our own advertisement wrapper
+/// produces — which a `resolve_tip` that skipped the advertisement and returned a
+/// bare Network error could not produce.
 #[test]
-fn resolve_tip_off_the_rest_path_never_fetches_objects_through_gix() {
+fn resolve_tip_off_the_rest_path_advertises_and_never_fetches_through_gix() {
 	let gix = Arc::new(ResolveCountingGix::default());
 	let repo = SkillRepository::with_backends(
 		None,
@@ -1444,8 +1447,104 @@ fn resolve_tip_off_the_rest_path_never_fetches_objects_through_gix() {
 		0,
 		"the preflight must not resolve through the object-fetching gix backend"
 	);
+	let detail = match &result {
+		Err(SkillRepoError::Network(detail)) => detail.clone(),
+		other => panic!("expected a soft network failure, got {other:?}"),
+	};
 	assert!(
-		matches!(result, Err(SkillRepoError::Network(_))),
-		"an unreachable remote is a soft network failure, got {result:?}"
+		detail.contains("Git clone failed"),
+		"the failure must come from the ref advertisement actually being \
+		 attempted (our `discover_remote_refs` wrapper's wording), not from \
+		 short-circuiting to a generic error: {detail}"
+	);
+}
+
+/// A non-https remote is refused BY the advertisement layer, so it never reaches
+/// the gix backend's object-fetching resolve either. Pins that the "no objects"
+/// property does not quietly depend on the remote being reachable.
+#[test]
+fn resolve_tip_refuses_a_non_https_remote_without_touching_gix() {
+	let gix = Arc::new(ResolveCountingGix::default());
+	let repo = SkillRepository::with_backends(
+		None,
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+	let source = SourceRef {
+		source: "git://127.0.0.1:1/acme".to_string(),
+		ref_: Some("main".to_string()),
+	};
+
+	let result = repo.resolve_tip(&source, None);
+
+	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 0);
+	let detail = match &result {
+		Err(SkillRepoError::Network(detail)) => detail.clone(),
+		other => panic!("expected a soft network failure, got {other:?}"),
+	};
+	assert!(
+		detail.contains("Not an HTTPS URL"),
+		"the advertisement layer's own https guard must be what refuses it: \
+		 {detail}"
+	);
+}
+
+/// The preflight and the fetch are one logical question, and on the REST path the
+/// tip the preflight paid for is the tip the fetch needs. Buying it twice doubled
+/// this flow's spend against GitHub's 60/hour anonymous budget — the difference
+/// between a working check and `uncheckable/network`.
+#[test]
+fn a_fetch_after_a_preflight_does_not_buy_the_same_tip_twice() {
+	let (t, recorded) = transport(happy_responder());
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	let tip = repo.resolve_tip(&github_source(), None).unwrap();
+	let commits_after_preflight = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| is_commit_resolve(&r.url))
+		.count();
+	let snapshot = repo.resolve(&github_source(), None).unwrap();
+
+	assert_eq!(snapshot.commit_oid, tip, "same coordinate, same tip");
+	let commits_total = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| is_commit_resolve(&r.url))
+		.count();
+	assert_eq!(
+		commits_after_preflight, 1,
+		"the preflight buys the tip once"
+	);
+	assert_eq!(
+		commits_total, 1,
+		"the fetch's resolve must reuse it, not spend a second request"
+	);
+}
+
+/// …but only for the SAME credential. A cache that conflated them would hand an
+/// anonymous caller a tip that only a token could see.
+#[test]
+fn a_preflighted_tip_is_not_reused_across_credentials() {
+	let (t, recorded) = transport(happy_responder());
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	repo.resolve_tip(&github_source(), Some("ghp_ONE")).unwrap();
+	repo.resolve(&github_source(), Some("ghp_TWO")).unwrap();
+
+	let commits = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.filter(|r| is_commit_resolve(&r.url))
+		.count();
+	assert_eq!(
+		commits, 2,
+		"a different token is a different question and must be asked"
 	);
 }

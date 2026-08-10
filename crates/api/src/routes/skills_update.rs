@@ -52,11 +52,19 @@ use skill_update::{
 /// bounded so a stuck remote cannot hang the request.
 const PER_FETCH: Duration = Duration::from_secs(30);
 const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
-/// Default bounded concurrency for upstream fetches. Sized for LATENCY, not CPU:
-/// every job is one HTTPS round trip to a forge, so a cap below the number of
-/// source groups just serializes those round trips into waves (measured: 6 groups
-/// at 4 cost a whole extra ~0.7s wave).
-const CONCURRENCY: usize = 8;
+/// Default bounded concurrency for upstream fetches.
+///
+/// Kept at 4 deliberately. Raising it looks free — each job is one HTTPS round
+/// trip, so a cap below the group count splits them into waves — but this is the
+/// OUTER cap over a fetch that itself runs `aghub_git::DEFAULT_CONCURRENCY` (16)
+/// blob workers, so N here permits N×16 concurrent requests against one forge.
+/// 8 would allow 128, past the 100-concurrent-stream ceiling `github_rest.rs`
+/// documents, and a 403 raised after the snapshot is pinned can no longer fall
+/// back to gix — it surfaces as `uncheckable/network`. The wave saving is also
+/// tiny now that a tip costs ~40ms instead of ~600ms: two waves of preflight is
+/// ~40ms, not ~700ms. Going above 4 needs the process-wide per-credential
+/// semaphore `github_rest.rs` names, not a bigger number here.
+const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);

@@ -365,17 +365,34 @@ pub(crate) enum PreflightResult {
 /// per `skill_path`) so the normal `classify_member_from_probe` path runs
 /// unchanged — yielding `UpToDate` with `heal_hash: None` — instead of a blanket
 /// terminal status that would bypass the per-member heal logic.
+/// The part of [`preflight_decision`] that needs NO network: whether any tip
+/// value at all could produce a `Skip`.
+///
+/// A member with no `ref_commit`, an unknown `stored_hash`, or a drifted local
+/// copy forces `Fetch` whatever the remote says — so asking the remote first is
+/// a round trip whose answer cannot change the outcome. That used to be free
+/// (a git ref advertisement costs no API quota); since the preflight resolves
+/// tips over the GitHub REST API it spends one request from a 60/hour anonymous
+/// budget, so the wasted call is now the difference between a working check and
+/// `uncheckable/network`.
+pub(crate) fn preflight_can_skip(members: &[EntryInput]) -> bool {
+	members.iter().all(|m| {
+		m.ref_commit.is_some()
+			&& !lock_hash_unknown(m.stored_hash.as_deref())
+			&& m.local_hash.is_some()
+			&& m.local_hash == m.stored_hash
+	})
+}
+
 pub(crate) fn preflight_decision(
 	members: &[EntryInput],
 	tip_oid: &str,
 ) -> PreflightResult {
-	let trustworthy = |m: &EntryInput| {
-		m.ref_commit.as_deref() == Some(tip_oid)
-			&& !lock_hash_unknown(m.stored_hash.as_deref())
-			&& m.local_hash.is_some()
-			&& m.local_hash == m.stored_hash
-	};
-	if !members.iter().all(trustworthy) {
+	if !preflight_can_skip(members)
+		|| !members
+			.iter()
+			.all(|m| m.ref_commit.as_deref() == Some(tip_oid))
+	{
 		return PreflightResult::Fetch;
 	}
 	let mut hashes: HashMap<Option<String>, HashProbe> = HashMap::new();
@@ -607,7 +624,13 @@ pub async fn check_updates(
 			// Tip preflight, no object download (bounded by the per-fetch timeout):
 			// skip the fetch when the tip is unchanged AND every member is
 			// trustworthy. Any resolver error falls through to the full fetch.
-			if let Some(rr) = ref_resolver {
+			//
+			// `preflight_can_skip` gates the round trip itself: a group that
+			// cannot skip no matter what the remote answers must not spend a
+			// request to be told so.
+			if let Some(rr) =
+				ref_resolver.filter(|_| preflight_can_skip(&job.members))
+			{
 				// This hop runs for EVERY group, including the all-clear case
 				// where nothing else touches the network — so without its own
 				// span a check that spends all its time here reports none of it,
@@ -624,7 +647,7 @@ pub async fn check_updates(
 				};
 				log::info!(
 					"check-updates preflight [{}]: ref={:?} {} took={:?}",
-					aghub_git::redact_url_userinfo(&job.sr.source),
+					aghub_git::redact_source_credentials(&job.sr.source),
 					job.sr.ref_,
 					match &decision {
 						Some(PreflightResult::Skip(_)) => "skip",
@@ -1066,6 +1089,60 @@ mod tests {
 			*fetcher.calls.lock().unwrap(),
 			0,
 			"preflight hit must skip the fetch"
+		);
+	}
+
+	/// A group that cannot skip whatever upstream answers must not spend a tip
+	/// round trip to be told so. Here the ONLY disqualifier is a missing
+	/// `ref_commit` — the hashes agree — so this pins that the gate reads it.
+	///
+	/// That wasted request used to be free (a git ref advertisement costs no API
+	/// quota). It now comes out of GitHub's 60-per-hour anonymous budget, where
+	/// spending it is the difference between a working check and
+	/// `uncheckable/network`.
+	#[tokio::test]
+	async fn an_unskippable_group_spends_no_preflight_round_trip() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let ref_resolver = Arc::new(StubRefResolver {
+			oid: "abc123def456abc123def456abc123def456abc1".to_string(),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			fetcher: fetcher.clone(),
+			ref_resolver: Some(ref_resolver.clone() as Arc<dyn RefResolver>),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let mut a = entry("a", "o/r", Some("main"));
+		a.ref_commit = None; // project lock / npx / legacy → never a skip
+		a.stored_hash = Some(hash.clone());
+		a.local_hash = Some(hash);
+
+		check_updates(vec![a], deps).await;
+
+		assert_eq!(
+			*ref_resolver.calls.lock().unwrap(),
+			0,
+			"no tip value could have produced a skip, so no tip may be bought"
+		);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			1,
+			"the group must still be answered by a real fetch"
 		);
 	}
 

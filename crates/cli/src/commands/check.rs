@@ -264,7 +264,9 @@ pub fn execute(
 /// desktop API defaults so both surfaces behave the same).
 const PER_FETCH: Duration = Duration::from_secs(30);
 const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
-const CONCURRENCY: usize = 8;
+/// See the API's constant of the same name for why this stays at 4: it is an
+/// OUTER cap over a fetch that already runs 16 blob workers, so it multiplies.
+const CONCURRENCY: usize = 4;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 // Token policy is shared with the `source` commands (`GIT_PASSWORD` on any

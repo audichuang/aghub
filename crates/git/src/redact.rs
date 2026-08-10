@@ -42,6 +42,36 @@ pub fn redact_url_userinfo(s: &str) -> String {
 	out
 }
 
+/// A SOURCE string safe to log or put in a message — a clone URL **or** a
+/// scheme-less scp-like remote.
+///
+/// [`redact_url_userinfo`] anchors on `://`, so a scheme-less
+/// `user:token@host:owner/repo.git` — which git accepts, so people type it and
+/// locks carry it — walks through it untouched and prints the token verbatim.
+/// Every surface that echoes a source (a log line, an error, an Uncheckable
+/// reason) must come through HERE; reach for [`redact_url_userinfo`] only for
+/// free-form text that merely happens to contain a URL.
+pub fn redact_source_credentials(source: &str) -> String {
+	redact_schemeless_userinfo(&redact_url_userinfo(source))
+}
+
+/// Redact `user:secret@` from a scheme-less source. Operates on the authority
+/// only (everything before the first `/`), and requires a `:` before the `@`,
+/// so the two shapes that legitimately carry an `@` survive untouched:
+/// `git@github.com:owner/repo.git` (an SSH *user*, no secret) and any path
+/// containing `@`. A plain `owner/repo` has no `@` at all.
+fn redact_schemeless_userinfo(source: &str) -> String {
+	let authority_end = source.find('/').unwrap_or(source.len());
+	let authority = &source[..authority_end];
+	let Some(at) = authority.rfind('@') else {
+		return source.to_string();
+	};
+	if !authority[..at].contains(':') {
+		return source.to_string();
+	}
+	format!("***{}", &source[at..])
+}
+
 /// Strip credential userinfo from a git repo's on-disk config, best-effort.
 ///
 /// gix's `PrepareFetch` persists the fetch URL **losslessly** (`save_to` →
@@ -151,6 +181,55 @@ mod tests {
 	fn leaves_clean_url_untouched() {
 		let s = "https://github.com/o/r.git";
 		assert_eq!(redact_url_userinfo(s), s);
+	}
+
+	// ─── redact_source_credentials: the scheme-less hole `redact_url_userinfo`
+	// leaves open. These moved here from a private copy in the CLI; the copy is
+	// why the update-check preflight log later logged a token verbatim.
+
+	#[test]
+	fn source_redaction_covers_scheme_less_scp_like_sources() {
+		// git accepts these shapes, so people type them and locks carry them —
+		// and `redact_url_userinfo` anchors on "://", so it prints them verbatim.
+		assert_eq!(
+			redact_source_credentials("alice:tok@host/o/r"),
+			"***@host/o/r"
+		);
+		assert_eq!(redact_source_credentials("alice:tok@host"), "***@host");
+		// The scp-like spelling with a colon before the path, which is the one a
+		// lock's `source` field actually holds.
+		assert_eq!(
+			redact_source_credentials(
+				"git:ghp_SECRET@github.com:owner/repo.git"
+			),
+			"***@github.com:owner/repo.git"
+		);
+	}
+
+	#[test]
+	fn source_redaction_still_covers_the_url_form() {
+		assert_eq!(
+			redact_source_credentials("https://alice:tok@host/o/r"),
+			"https://***@host/o/r"
+		);
+	}
+
+	#[test]
+	fn source_redaction_leaves_sources_that_carry_no_secret_alone() {
+		// An SSH *user* is not a secret, and there is no `:` before the `@`.
+		assert_eq!(
+			redact_source_credentials("git@github.com:owner/repo.git"),
+			"git@github.com:owner/repo.git"
+		);
+		// Plain shorthand and plain URLs must round-trip unchanged, or an error
+		// message stops naming the source the user actually passed.
+		assert_eq!(redact_source_credentials("owner/repo"), "owner/repo");
+		assert_eq!(
+			redact_source_credentials("https://github.com/owner/repo"),
+			"https://github.com/owner/repo"
+		);
+		// A colon in a PATH segment, past the authority, is not userinfo.
+		assert_eq!(redact_source_credentials("host/a:b@c"), "host/a:b@c");
 	}
 
 	#[test]

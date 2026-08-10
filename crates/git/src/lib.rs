@@ -68,7 +68,7 @@ pub use github_rest::{
 	github_api_host, is_github_com_host, GithubRest, HttpRequest, HttpResponse,
 	HttpTransport, ReqwestTransport, DEFAULT_CONCURRENCY,
 };
-pub use redact::redact_url_userinfo;
+pub use redact::{redact_source_credentials, redact_url_userinfo};
 pub use remote::{
 	list_remote_branches, resolve_ref_oid, select_ref_oid, RemoteOptions,
 };

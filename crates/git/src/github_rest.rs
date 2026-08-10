@@ -216,10 +216,11 @@ pub(crate) struct RepoContext {
 /// Preflight budget for one snapshot's blob phase.
 ///
 /// KNOWN SCOPE LIMIT — this ledger is per-[`RepoContext`], but GitHub's quota
-/// is per-credential and global. `check_updates` runs its repository groups
-/// concurrently and each builds its own `SkillRepository`, so several contexts
-/// routinely reserve against the SAME real budget on one token and together can
-/// overrun it. Reachable today, and accepted: fixing it means a reservation
+/// is per-credential and global. `check_updates` runs its groups concurrently
+/// against ONE shared `SkillRepository` (its preflight and its fetch resolve
+/// through the same composite), so several contexts routinely reserve against
+/// the SAME real budget on one token and together can overrun it. Reachable
+/// today, and accepted: fixing it means a reservation
 /// bucket keyed by api_host + credential identity, which is a different piece
 /// of work. The cost of being wrong is a 403 the server would have sent anyway
 /// — this gate is a courtesy preflight, not the enforcement point.
@@ -490,7 +491,8 @@ impl RepoFetchBackend for GithubRest {
 			let mut cache = self.cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest cache lock poisoned")
 			})?;
-			// Keep an EXISTING context for this commit rather than replacing it.
+			// Keep an EXISTING context for this commit — but ONLY when it names
+			// the same repo with the same credential.
 			//
 			// A commit oid names immutable content, so a second resolve that
 			// lands on the same commit — two ref-cohorts of one source diff
@@ -501,21 +503,45 @@ impl RepoFetchBackend for GithubRest {
 			// measured as a duplicated ~1.2s tree read plus ~1.3s of blobs per
 			// source. The re-resolve itself still happens (the tip must be
 			// re-checked); only the content caches survive.
-			cache
-				.entry(commit_oid.clone())
-				.or_insert_with(|| RepoContext {
-					api_host,
-					owner,
-					repo,
-					token,
-					tree_oid: tree_oid.clone(),
-					blob_cache: Arc::new(Mutex::new(HashMap::new())),
-					tree_cache: Arc::new(Mutex::new(HashMap::new())),
-					blob_admission: Arc::new(Mutex::new(
-						BlobAdmission::default(),
-					)),
-					blob_phase: Arc::new(Mutex::new(())),
-				});
+			//
+			// The identity guard is what keeps that saving from becoming a
+			// credential mix-up. Identical content does NOT imply identical
+			// ACCESS: a public upstream and a private fork sitting on one commit
+			// share a tree but not who may read it, and this key is the oid
+			// alone. Without the guard the fork's authenticated resolve was
+			// discarded and its tree/blob reads went out with the upstream's
+			// anonymous context — a private repo read anonymously, reported to
+			// the user as `uncheckable/network` while holding a valid token.
+			let fresh = |tree_oid: &str| RepoContext {
+				api_host,
+				owner: owner.clone(),
+				repo: repo.clone(),
+				token: token.clone(),
+				tree_oid: tree_oid.to_string(),
+				blob_cache: Arc::new(Mutex::new(HashMap::new())),
+				tree_cache: Arc::new(Mutex::new(HashMap::new())),
+				blob_admission: Arc::new(Mutex::new(BlobAdmission::default())),
+				blob_phase: Arc::new(Mutex::new(())),
+			};
+			match cache.get(&commit_oid) {
+				Some(existing)
+					if existing.owner == owner
+						&& existing.repo == repo
+						&& existing.api_host == api_host
+						&& existing.token == token => {}
+				// ponytail: last-writer-wins on an identity mismatch, because
+				// the lookup key is the oid and `read_tree`/`materialize` only
+				// ever hold a snapshot. The resolve immediately preceding those
+				// reads is the right context for them, so this is correct for
+				// the sequential pattern every caller actually uses; two
+				// sources on one commit interleaving resolve→read can still
+				// cross. Closing that needs the identity ON the snapshot
+				// (`RepoSnapshot` carrying an opaque context handle), which is
+				// a wider change than this fix.
+				_ => {
+					cache.insert(commit_oid.clone(), fresh(&tree_oid));
+				}
+			}
 		}
 
 		Ok(RepoSnapshot {

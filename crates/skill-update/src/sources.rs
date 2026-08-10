@@ -1271,7 +1271,7 @@ pub fn diff_source(
 	// A caller may hand us a clone URL that still carries userinfo, and these
 	// lines land in a log file the user exports and shares. Redact ONCE here so
 	// no later log line has to remember to.
-	let source_log = aghub_git::redact_url_userinfo(&source);
+	let source_log = aghub_git::redact_source_credentials(&source);
 	let diff_started = std::time::Instant::now();
 	let baseline_started = std::time::Instant::now();
 	let (baseline, _src_type, _recorded_ref) =

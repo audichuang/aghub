@@ -114,6 +114,24 @@ pub struct SkillRepository {
 	gix: Arc<dyn RepoFetchBackend>,
 	/// `commit_oid` → backend that resolved the immutable snapshot.
 	memo: Mutex<HashMap<String, BackendKind>>,
+	/// Snapshots [`Self::resolve_tip`] already paid for, so the fetch that a
+	/// `Fetch` verdict triggers does not buy the SAME tip a second time.
+	///
+	/// WRITTEN only by `resolve_tip`, READ only by `resolve` — a plain
+	/// `resolve`-only caller therefore behaves exactly as before, and nothing
+	/// caches a tip that nobody asked for twice.
+	preflighted: Mutex<HashMap<TipKey, RepoSnapshot>>,
+}
+
+/// Identity of one tip lookup. The token is part of it because two callers with
+/// different credentials are not asking the same question — one may see a repo
+/// the other cannot — and a cache that conflated them would hand an anonymous
+/// caller a private repo's tip.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+struct TipKey {
+	url: String,
+	ref_: Option<String>,
+	token: Option<String>,
 }
 
 impl Default for SkillRepository {
@@ -151,6 +169,7 @@ impl SkillRepository {
 			rest,
 			gix,
 			memo: Mutex::new(HashMap::new()),
+			preflighted: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -163,6 +182,18 @@ impl SkillRepository {
 		token: Option<&str>,
 	) -> Result<RepoSnapshot, SkillRepoError> {
 		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
+
+		// A preflight on this exact coordinate already bought this tip. Reusing
+		// it is not just a latency saving: the preflight and the fetch are one
+		// logical "is it stale, and if so give me it", and paying twice doubled
+		// this flow's GitHub API spend against a 60/hour anonymous budget.
+		if let Some(snapshot) = self.preflighted_snapshot(&git_sr, token)? {
+			log::info!(
+				"skill repo resolve: reusing preflight snapshot ref={:?}",
+				sr.ref_
+			);
+			return Ok(snapshot);
+		}
 
 		// Timing spans below are the ONLY visibility into where a slow source
 		// diff spends its seconds: resolve/list/materialize are separate network
@@ -240,6 +271,7 @@ impl SkillRepository {
 						started.elapsed()
 					);
 					self.remember(&snap.commit_oid, BackendKind::Rest)?;
+					self.record_preflight(&git_sr, token, &snap)?;
 					return Ok(snap.commit_oid);
 				}
 				Err(GitError::RestFallback(_)) => {
@@ -274,6 +306,38 @@ impl SkillRepository {
 				None => "remote advertised no default branch".to_string(),
 			})
 		})
+	}
+
+	fn tip_key(git_sr: &aghub_git::SourceRef, token: Option<&str>) -> TipKey {
+		TipKey {
+			url: git_sr.url.clone(),
+			ref_: git_sr.ref_.clone(),
+			token: token.map(str::to_owned),
+		}
+	}
+
+	fn record_preflight(
+		&self,
+		git_sr: &aghub_git::SourceRef,
+		token: Option<&str>,
+		snapshot: &RepoSnapshot,
+	) -> Result<(), SkillRepoError> {
+		let mut cache = self.preflighted.lock().map_err(|_| {
+			SkillRepoError::Network("preflight cache lock poisoned".to_string())
+		})?;
+		cache.insert(Self::tip_key(git_sr, token), snapshot.clone());
+		Ok(())
+	}
+
+	fn preflighted_snapshot(
+		&self,
+		git_sr: &aghub_git::SourceRef,
+		token: Option<&str>,
+	) -> Result<Option<RepoSnapshot>, SkillRepoError> {
+		let cache = self.preflighted.lock().map_err(|_| {
+			SkillRepoError::Network("preflight cache lock poisoned".to_string())
+		})?;
+		Ok(cache.get(&Self::tip_key(git_sr, token)).cloned())
 	}
 
 	/// Shared fetch coordinate for [`Self::resolve`] / [`Self::resolve_tip`]:

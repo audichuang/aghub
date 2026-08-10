@@ -74,29 +74,12 @@ fn assert_one_tree_can_serve(
 /// shell buffer. `aghub_git` already redacts what IT builds; this covers the
 /// strings the CLI echoes itself.
 ///
-/// Two passes, because argv is not restricted to the shape `aghub_git` emits:
-/// [`aghub_git::redact_url_userinfo`] anchors on `://`, so a scheme-less
-/// scp-like `user:token@host/path` — which git itself accepts, so people type
-/// it — walked through it untouched and printed the token verbatim.
+/// Scheme-less scp-like sources are covered too — see
+/// [`aghub_git::redact_source_credentials`], which owns that shape for every
+/// surface (this used to be a private copy here, and the copy is exactly why the
+/// update-check log later grew the same hole).
 fn safe_source(source: &str) -> String {
-	redact_schemeless_userinfo(&aghub_git::redact_url_userinfo(source))
-}
-
-/// Redact `user:secret@` from a scheme-less source. Operates on the authority
-/// only (everything before the first `/`), and requires a `:` before the `@`,
-/// so the two shapes that legitimately carry an `@` survive untouched:
-/// `git@github.com:owner/repo.git` (an SSH *user*, no secret) and any path
-/// containing `@`. A plain `owner/repo` has no `@` at all.
-fn redact_schemeless_userinfo(source: &str) -> String {
-	let authority_end = source.find('/').unwrap_or(source.len());
-	let authority = &source[..authority_end];
-	let Some(at) = authority.rfind('@') else {
-		return source.to_string();
-	};
-	if !authority[..at].contains(':') {
-		return source.to_string();
-	}
-	format!("***{}", &source[at..])
+	aghub_git::redact_source_credentials(source)
 }
 
 // ─────────────────────────── credential / fetch ────────────────────────────
@@ -1747,44 +1730,5 @@ mod tests {
 			narrow_by_name(items, &["zzz".to_string()], |s| s.as_str());
 		assert!(kept.is_empty());
 		assert_eq!(unknown, vec!["zzz".to_string()]);
-	}
-}
-
-#[cfg(test)]
-mod safe_source_tests {
-	use super::safe_source;
-
-	#[test]
-	fn redacts_a_secret_in_a_scheme_less_scp_like_source() {
-		// git accepts this shape, so people type it — and `redact_url_userinfo`
-		// anchors on "://", so it used to print the token verbatim.
-		assert_eq!(safe_source("alice:tok@host/o/r"), "***@host/o/r");
-		assert_eq!(safe_source("alice:tok@host"), "***@host");
-	}
-
-	#[test]
-	fn redacts_a_secret_behind_a_scheme() {
-		assert_eq!(
-			safe_source("https://alice:tok@host/o/r"),
-			"https://***@host/o/r"
-		);
-	}
-
-	#[test]
-	fn leaves_sources_that_carry_no_secret_alone() {
-		// An SSH *user* is not a secret, and there is no `:` before the `@`.
-		assert_eq!(
-			safe_source("git@github.com:owner/repo.git"),
-			"git@github.com:owner/repo.git"
-		);
-		// Plain shorthand and plain URLs must round-trip unchanged, or an error
-		// message stops naming the source the user actually passed.
-		assert_eq!(safe_source("owner/repo"), "owner/repo");
-		assert_eq!(
-			safe_source("https://github.com/owner/repo"),
-			"https://github.com/owner/repo"
-		);
-		// A colon in a PATH segment, past the authority, is not userinfo.
-		assert_eq!(safe_source("host/a:b@c"), "host/a:b@c");
 	}
 }
