@@ -277,9 +277,10 @@ enum Commands {
 		#[arg(value_enum)]
 		resource: ResourceType,
 
-		/// Check upstream over the network: cheap ls-refs preflight, then a
-		/// treeless fetch only when the tip moved. Default is offline (remote
-		/// sources are reported `uncheckable`). Read-only on both locks.
+		/// Check upstream over the network: a tip preflight that downloads no
+		/// objects, then a treeless fetch only when the tip moved. Default is
+		/// offline (remote sources are reported `uncheckable`). Read-only on
+		/// both locks.
 		#[arg(long, visible_alias = "check-remote")]
 		online: bool,
 	},

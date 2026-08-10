@@ -33,10 +33,19 @@ routes and CLI `apply-update` / `source`. Network/credentials live here;
 
 ## PREFLIGHT (must stay correct)
 
-ls-refs skips the treeless fetch **only when** upstream tip (`ref_commit`) is
-unchanged **AND** the installed copy is unmodified. `ref_commit == None`
-(project lock / npx / legacy) → **never** preflight-skip. Wrong skip = missed
-updates; wrong fetch = wasted network.
+The tip preflight skips the treeless fetch **only when** upstream tip
+(`ref_commit`) is unchanged **AND** the installed copy is unmodified.
+`ref_commit == None` (project lock / npx / legacy) → **never** preflight-skip.
+Wrong skip = missed updates; wrong fetch = wasted network.
+
+**It must never download objects** (`SkillRepository::resolve_tip`): REST
+`/commits/<ref>` on github hosts — ONE request on the pooled client — else a git
+ref advertisement. NOT `RepoFetchBackend::resolve`, which the gix backend answers
+by performing the depth-1 fetch, i.e. exactly the cost the preflight exists to
+avoid. It runs for EVERY source group including the all-clear case, so its cost
+is the floor of a check: a `git ls-refs` handshake is cheap in bytes and ~0.6s in
+time against github.com, and that was most of a check's wall clock before REST
+took over the github path.
 
 ## GIT ADAPTER GOTCHAS
 

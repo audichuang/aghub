@@ -76,7 +76,7 @@ pub struct EntryInput {
 	/// before checking upstream. Used as the comparison baseline for legacy locks.
 	pub local_hash: Option<String>,
 	/// Stored repo-level commit OID (`refCommit`) from the lock, when present.
-	/// Drives the ls-refs preflight: an unchanged tip lets the group skip the
+	/// Drives the tip preflight: an unchanged tip lets the group skip the
 	/// fetch. `None` (project lock / npx / legacy) → never a preflight skip.
 	pub ref_commit: Option<String>,
 }
@@ -255,9 +255,11 @@ pub trait TokenResolver: Send + Sync {
 	fn resolve(&self, source: &str) -> TokenResolution;
 }
 
-/// Resolves the current tip commit OID of a `(source, ref)` via a git ref
-/// advertisement (ls-refs) — no object download. Returns the 40-hex OID. Used
-/// for the cheap preflight that skips the full fetch when nothing changed.
+/// Resolves the current tip commit OID of a `(source, ref)` **without
+/// downloading objects**. Returns the 40-hex OID. Used for the preflight that
+/// skips the full fetch when nothing changed — so an implementation that reads
+/// the tip by fetching (git's own resolve-by-fetch) defeats the entire point.
+/// The production one is [`GitRefResolver`]; build it from the fetcher.
 pub trait RefResolver: Send + Sync {
 	fn resolve(
 		&self,
@@ -269,7 +271,7 @@ pub trait RefResolver: Send + Sync {
 /// Orchestration knobs.
 pub struct CheckDeps<'a> {
 	pub fetcher: Arc<dyn Fetcher>,
-	/// Optional ls-refs preflight. `None` disables the preflight entirely (the
+	/// Optional tip preflight. `None` disables the preflight entirely (the
 	/// orchestrator always fetches), preserving the pre-preflight behavior.
 	pub ref_resolver: Option<Arc<dyn RefResolver>>,
 	pub resolver: &'a dyn TokenResolver,
@@ -345,7 +347,7 @@ fn lock_hash_unknown(stored_hash: Option<&str>) -> bool {
 	}
 }
 
-/// Outcome of the ls-refs preflight for one `(source, ref)` group.
+/// Outcome of the tip preflight for one `(source, ref)` group.
 pub(crate) enum PreflightResult {
 	/// Every member is provably up to date; reuse these synthesized per-skill
 	/// probes and skip the fetch entirely.
@@ -602,26 +604,37 @@ pub async fn check_updates(
 		let per_fetch = deps.per_fetch;
 		set.spawn(async move {
 			let _permit = semaphore.clone().acquire_owned().await.ok();
-			// Cheap ls-refs preflight (bounded by the same per-fetch timeout):
+			// Tip preflight, no object download (bounded by the per-fetch timeout):
 			// skip the fetch when the tip is unchanged AND every member is
 			// trustworthy. Any resolver error falls through to the full fetch.
 			if let Some(rr) = ref_resolver {
+				// This hop runs for EVERY group, including the all-clear case
+				// where nothing else touches the network — so without its own
+				// span a check that spends all its time here reports none of it,
+				// and the route total looks unattributable.
+				let started = Instant::now();
 				let tip = tokio::time::timeout(
 					per_fetch,
 					do_resolve(rr, job.sr.clone(), job.token.clone()),
 				)
 				.await;
-				if let Ok(Ok(tip)) = tip {
-					if let PreflightResult::Skip(cached) =
-						preflight_decision(&job.members, &tip)
-					{
-						return (
-							id,
-							job.sr,
-							job.members,
-							JobResult::Skip(cached),
-						);
-					}
+				let decision = match &tip {
+					Ok(Ok(tip)) => Some(preflight_decision(&job.members, tip)),
+					_ => None,
+				};
+				log::info!(
+					"check-updates preflight [{}]: ref={:?} {} took={:?}",
+					aghub_git::redact_url_userinfo(&job.sr.source),
+					job.sr.ref_,
+					match &decision {
+						Some(PreflightResult::Skip(_)) => "skip",
+						Some(PreflightResult::Fetch) => "fetch",
+						None => "resolve-failed",
+					},
+					started.elapsed()
+				);
+				if let Some(PreflightResult::Skip(cached)) = decision {
+					return (id, job.sr, job.members, JobResult::Skip(cached));
 				}
 			}
 			// Path-scoped fetch: only the locked skill folders for this group.

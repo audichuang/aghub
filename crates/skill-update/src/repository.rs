@@ -162,21 +162,7 @@ impl SkillRepository {
 		sr: &SourceRef,
 		token: Option<&str>,
 	) -> Result<RepoSnapshot, SkillRepoError> {
-		let resolved = aghub_git::resolve_remote_source(&sr.source)
-			.map_err(|e| SkillRepoError::Network(e.to_string()))?;
-		let clone_url = resolved.clone_url;
-		// Prefer the host from resolve_remote_source; fall back to URL parse.
-		let host_owned = resolved.host.or_else(|| host_of_url(&clone_url));
-		let auth = https_only_token(&clone_url, token)
-			.map(|t| Credentials::new("x-access-token", t));
-		let git_sr = aghub_git::SourceRef {
-			url: clone_url,
-			ref_: sr.ref_.clone(),
-		};
-
-		let try_rest =
-			host_owned.as_deref().and_then(github_api_host).is_some()
-				&& self.rest.is_some();
+		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
 
 		// Timing spans below are the ONLY visibility into where a slow source
 		// diff spends its seconds: resolve/list/materialize are separate network
@@ -224,6 +210,100 @@ impl SkillRepository {
 		);
 		self.remember(&snap.commit_oid, BackendKind::Gix)?;
 		Ok(snap)
+	}
+
+	/// The tip commit OID of `sr.ref_` **without downloading objects** — the
+	/// update-check preflight's question ("has upstream moved?"), which is only
+	/// worth asking if answering it is cheaper than the fetch it may avoid.
+	///
+	/// REST answers it in one request on the pooled HTTP client and memoizes the
+	/// snapshot, so a fetch that follows keeps the same backend slot. Off the
+	/// REST path this falls to a git ref advertisement (ls-refs), NOT to
+	/// [`RepoFetchBackend::resolve`]: the gix backend resolves by performing the
+	/// depth-1 fetch, so routing the preflight through it would pay the full cost
+	/// on exactly the sources it was meant to spare.
+	pub fn resolve_tip(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+	) -> Result<String, SkillRepoError> {
+		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
+
+		let started = Instant::now();
+		if try_rest {
+			let rest = self.rest.as_ref().expect("checked above");
+			match rest.resolve(&git_sr, auth.as_ref()) {
+				Ok(snap) => {
+					log::info!(
+						"skill repo tip: backend=rest ref={:?} took={:?}",
+						sr.ref_,
+						started.elapsed()
+					);
+					self.remember(&snap.commit_oid, BackendKind::Rest)?;
+					return Ok(snap.commit_oid);
+				}
+				Err(GitError::RestFallback(_)) => {
+					log::info!(
+						"skill repo tip: rest declined after {:?}, falling back \
+						 to ls-refs",
+						started.elapsed()
+					);
+				}
+				Err(e) => return Err(map_git_error(e)),
+			}
+		}
+
+		let ls_refs_started = Instant::now();
+		let mut opts = aghub_git::RemoteOptions::new(&git_sr.url);
+		if let Some(credentials) = auth {
+			opts = opts.with_auth(credentials);
+		}
+		let tip = aghub_git::resolve_ref_oid(opts, git_sr.ref_.as_deref())
+			.map_err(map_git_error)?;
+		log::info!(
+			"skill repo tip: backend=ls-refs ref={:?} found={} took={:?} \
+			 total={:?}",
+			sr.ref_,
+			tip.is_some(),
+			ls_refs_started.elapsed(),
+			started.elapsed()
+		);
+		tip.ok_or_else(|| {
+			SkillRepoError::Network(match git_sr.ref_.as_deref() {
+				Some(r) => format!("remote has no ref '{r}'"),
+				None => "remote advertised no default branch".to_string(),
+			})
+		})
+	}
+
+	/// Shared fetch coordinate for [`Self::resolve`] / [`Self::resolve_tip`]:
+	/// clone URL, https-only credentials, and whether the REST slot may serve
+	/// this host. Deriving it once is what keeps the two entry points from
+	/// disagreeing about which backend owns a source.
+	fn coordinates(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+	) -> Result<(aghub_git::SourceRef, Option<Credentials>, bool), SkillRepoError>
+	{
+		let resolved = aghub_git::resolve_remote_source(&sr.source)
+			.map_err(|e| SkillRepoError::Network(e.to_string()))?;
+		let clone_url = resolved.clone_url;
+		// Prefer the host from resolve_remote_source; fall back to URL parse.
+		let host_owned = resolved.host.or_else(|| host_of_url(&clone_url));
+		let auth = https_only_token(&clone_url, token)
+			.map(|t| Credentials::new("x-access-token", t));
+		let try_rest =
+			host_owned.as_deref().and_then(github_api_host).is_some()
+				&& self.rest.is_some();
+		Ok((
+			aghub_git::SourceRef {
+				url: clone_url,
+				ref_: sr.ref_.clone(),
+			},
+			auth,
+			try_rest,
+		))
 	}
 
 	/// Read tree + shared discovery policy + SKILL.md frontmatter blobs.

@@ -46,7 +46,7 @@ pub struct LocalSkillLockEntry {
 	#[serde(rename = "computedHash")]
 	pub computed_hash: String,
 	/// aghub-only: repo-level commit OID (SHA-1 hex) of the branch/tag tip at
-	/// install/update time, for the cheap ls-refs update preflight. Identical
+	/// install/update time, for the cheap update preflight. Identical
 	/// across members of the same source+ref group. Never read/written by npx.
 	#[serde(
 		rename = "refCommit",

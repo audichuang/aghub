@@ -1333,3 +1333,119 @@ fn real_github_rest_catalog_and_install_are_pinned_and_hashed() {
 	let hash = skill::compute_skill_folder_hash(&folder).unwrap();
 	assert_eq!(hash, SKILL_HASH);
 }
+
+// ══════════ The update-check preflight: a tip must not cost a fetch ══════════
+
+/// The whole point of the preflight is that asking "has upstream moved?" costs
+/// less than the fetch it may avoid. On github hosts that is ONE REST request —
+/// no tree, no blobs, and no git ref advertisement (a fresh TCP+TLS connection
+/// plus the full heads+tags listing, measured at ~0.6s per source, is what this
+/// path exists to escape).
+#[test]
+fn resolve_tip_costs_one_rest_request_and_downloads_no_objects() {
+	let (t, recorded) = transport(happy_responder());
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	let tip = repo.resolve_tip(&github_source(), None).unwrap();
+
+	assert_eq!(
+		tip, COMMIT_OID,
+		"the tip is the COMMIT oid the lock records"
+	);
+	let urls: Vec<String> = recorded
+		.lock()
+		.unwrap()
+		.iter()
+		.map(|r| r.url.clone())
+		.collect();
+	assert_eq!(
+		urls.len(),
+		1,
+		"a tip must cost exactly one request: {urls:?}"
+	);
+	assert!(
+		is_commit_resolve(&urls[0]),
+		"the one request must be the commit resolve: {urls:?}"
+	);
+	assert!(
+		!urls.iter().any(|u| is_tree(u) || blob_oid(u).is_some()),
+		"the preflight must not download tree or blob objects: {urls:?}"
+	);
+}
+
+/// A gix-slot backend that counts `resolve` instead of forbidding it, so a test
+/// can prove the preflight never reaches it (and say so with a count, not a
+/// panic in another thread's stack).
+#[derive(Default)]
+struct ResolveCountingGix {
+	resolve_calls: AtomicUsize,
+}
+
+impl RepoFetchBackend for ResolveCountingGix {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		self.resolve_calls.fetch_add(1, Ordering::SeqCst);
+		Ok(RepoSnapshot {
+			commit_oid: COMMIT_OID.into(),
+			tree_oid: TREE_OID.into(),
+			commit_time: None,
+		})
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Ok(RepoTree {
+			entries: Vec::new(),
+		})
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Ok(Vec::new())
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		_p: &[&str],
+		_d: &Path,
+	) -> aghub_git::Result<()> {
+		Ok(())
+	}
+}
+
+/// Off the REST path the tip must come from a ref advertisement, NOT from the gix
+/// backend's `resolve` — that one answers by performing the depth-1 object fetch,
+/// so routing the preflight through it would pay the exact cost the preflight
+/// exists to avoid, on every non-github host.
+///
+/// The remote here is a closed port, so the ls-refs attempt fails fast with no
+/// network dependency; the assertion that matters is which slot was consulted.
+#[test]
+fn resolve_tip_off_the_rest_path_never_fetches_objects_through_gix() {
+	let gix = Arc::new(ResolveCountingGix::default());
+	let repo = SkillRepository::with_backends(
+		None,
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+	let source = SourceRef {
+		source: "https://127.0.0.1:1/acme/skills.git".to_string(),
+		ref_: Some("main".to_string()),
+	};
+
+	let result = repo.resolve_tip(&source, None);
+
+	assert_eq!(
+		gix.resolve_calls.load(Ordering::SeqCst),
+		0,
+		"the preflight must not resolve through the object-fetching gix backend"
+	);
+	assert!(
+		matches!(result, Err(SkillRepoError::Network(_))),
+		"an unreachable remote is a soft network failure, got {result:?}"
+	);
+}

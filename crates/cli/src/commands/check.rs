@@ -10,9 +10,10 @@
 //! **`--online` (alias `--check-remote`).** Opt-in network check that runs the
 //! shared [`skill_update`] orchestrator with the same env token resolver as
 //! the `source` commands (`GIT_PASSWORD` on any host, `GITHUB_TOKEN` bound to
-//! github.com): a cheap ls-refs preflight skips the fetch when the upstream
-//! tip is unchanged and the installed copy is provably unmodified, otherwise a
-//! treeless fetch + hash compare yields real `upToDate`/`updateAvailable`.
+//! github.com): a tip preflight that downloads no objects skips the fetch when
+//! the upstream tip is unchanged and the installed copy is provably unmodified,
+//! otherwise a treeless fetch + hash compare yields real
+//! `upToDate`/`updateAvailable`.
 //!
 //! Either way `check` is **read-only**: it never mutates either lock (the
 //! desktop API owns global-lock self-heal; the project lock is VCS-tracked).
@@ -24,7 +25,7 @@ use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::Result;
 use serde::Serialize;
 use skill_update::{
-	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcher, GitRefResolver,
+	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcher, RefResolver,
 	ResultCache, SourceRef,
 };
 use std::collections::{HashMap, HashSet};
@@ -263,7 +264,7 @@ pub fn execute(
 /// desktop API defaults so both surfaces behave the same).
 const PER_FETCH: Duration = Duration::from_secs(30);
 const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
-const CONCURRENCY: usize = 4;
+const CONCURRENCY: usize = 8;
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
 // Token policy is shared with the `source` commands (`GIT_PASSWORD` on any
@@ -298,12 +299,18 @@ fn execute_online(
 	}
 	eprintln_verbose!("Checking {} locked skill(s) online", entries.len());
 
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
+	// One repository behind both: the preflight's tip resolution and the fetch
+	// that may follow it share the composite, its snapshot memo, and its token
+	// context.
+	let git_fetcher = GitFetcher::new();
+	let ref_resolver: Arc<dyn RefResolver> =
+		Arc::new(git_fetcher.ref_resolver());
+	let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
 	let resolver = EnvTokenResolver;
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
-		ref_resolver: Some(Arc::new(GitRefResolver)),
+		ref_resolver: Some(ref_resolver),
 		resolver: &resolver,
 		cache: &mut cache,
 		per_fetch: PER_FETCH,

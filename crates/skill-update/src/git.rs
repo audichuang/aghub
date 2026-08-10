@@ -1,16 +1,16 @@
 //! Default git adapters for the update-check orchestrator: a selection-scoped
-//! fetch ([`GitFetcher`]) and an ls-refs tip resolver ([`GitRefResolver`]).
+//! fetch ([`GitFetcher`]) and a no-object tip resolver ([`GitRefResolver`]).
 //!
 //! No token is ever materialized into an error — `aghub_git` redacts URL
 //! userinfo upstream — and any ref-resolution failure is a soft error so the
 //! orchestrator falls through to the full fetch.
 
+use std::sync::Arc;
+
 use crate::repository::{
 	skill_repo_to_fetch_error, FetchSelection, SkillRepository,
 };
-use crate::{
-	https_only_token, FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef,
-};
+use crate::{FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef};
 
 /// Production [`Fetcher`]: resolves via [`SkillRepository`]
 /// (REST→gix→system-git single owner) then materializes only the requested
@@ -29,13 +29,23 @@ use crate::{
 /// it was built with, so a shared instance would let an unauthenticated
 /// request — or one for a different host — reuse another caller's credential.
 pub struct GitFetcher {
-	repo: SkillRepository,
+	repo: Arc<SkillRepository>,
 }
 
 impl GitFetcher {
 	pub fn new() -> Self {
 		Self {
-			repo: SkillRepository::new(),
+			repo: Arc::new(SkillRepository::new()),
+		}
+	}
+
+	/// A [`RefResolver`] over THIS fetcher's repository, so the tip the preflight
+	/// reads is resolved by the same composite (and the same token context) that
+	/// a following fetch would use. Callers that want the preflight must build it
+	/// from the fetcher rather than standing up a second resolver.
+	pub fn ref_resolver(&self) -> GitRefResolver {
+		GitRefResolver {
+			repo: Arc::clone(&self.repo),
 		}
 	}
 }
@@ -63,31 +73,24 @@ impl Fetcher for GitFetcher {
 	}
 }
 
-fn normalize_fetch_url(source: &str) -> Result<String, FetchError> {
-	aghub_git::resolve_remote_source(source)
-		.map(|resolved| resolved.clone_url)
-		.map_err(|e| FetchError::network(e.to_string()))
+/// Production [`RefResolver`]: the tip OID of the requested
+/// branch/tag/default-branch via [`SkillRepository::resolve_tip`]. Any error maps
+/// to a soft failure so the orchestrator falls through to the full fetch.
+///
+/// It resolves through the repository rather than owning a ref advertisement of
+/// its own because on github.com REST answers in one request on the pooled HTTP
+/// client, while a `git ls-refs` handshake — cheap in BYTES, expensive in TIME —
+/// costs a fresh TCP+TLS connection plus the whole heads+tags advertisement,
+/// measured at ~0.6s per source, every time. The preflight runs for EVERY source
+/// group, including the all-clear case where nothing else touches the network, so
+/// that difference was most of a check's wall clock.
+///
+/// Build it with [`GitFetcher::ref_resolver`] so it shares the fetcher's
+/// repository: the same fallback owner and the same token context decide the tip
+/// and the fetch.
+pub struct GitRefResolver {
+	repo: Arc<SkillRepository>,
 }
-
-fn classify_fetch_error(e: aghub_git::GitError) -> FetchError {
-	let msg = e.to_string();
-	let lower = msg.to_lowercase();
-	if lower.contains("auth")
-		|| lower.contains("401")
-		|| lower.contains("403")
-		|| lower.contains("credential")
-	{
-		FetchError::Auth
-	} else {
-		FetchError::network(msg)
-	}
-}
-
-/// Production [`RefResolver`]: a git ref advertisement (ls-refs, no object
-/// download) resolving the tip OID of the requested branch/tag/default-branch.
-/// Any error (incl. ref-not-found) maps to a soft failure so the orchestrator
-/// falls through to the full fetch.
-pub struct GitRefResolver;
 
 impl RefResolver for GitRefResolver {
 	fn resolve(
@@ -95,19 +98,9 @@ impl RefResolver for GitRefResolver {
 		source_ref: &SourceRef,
 		token: Option<&str>,
 	) -> Result<String, FetchError> {
-		let url = normalize_fetch_url(&source_ref.source)?;
-		let mut opts = aghub_git::RemoteOptions::new(&url);
-		if let Some(token) = https_only_token(&url, token) {
-			opts = opts.with_credentials("x-access-token", token);
-		}
-		aghub_git::resolve_ref_oid(opts, source_ref.ref_.as_deref())
-			.map_err(classify_fetch_error)?
-			.ok_or_else(|| {
-				FetchError::network(match source_ref.ref_.as_deref() {
-					Some(r) => format!("remote has no ref '{r}'"),
-					None => "remote advertised no default branch".to_string(),
-				})
-			})
+		self.repo
+			.resolve_tip(source_ref, token)
+			.map_err(skill_repo_to_fetch_error)
 	}
 }
 

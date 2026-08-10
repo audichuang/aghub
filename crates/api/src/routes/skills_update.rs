@@ -45,15 +45,18 @@ use skill_update::mutation::{
 use skill_update::TokenResolution;
 use skill_update::{
 	check_updates, CheckDeps, CheckOutput, EntryInput, FetchError, Fetcher,
-	GitFetcher, GitRefResolver, ResultCache, SourceRef, TokenResolver,
+	GitFetcher, RefResolver, ResultCache, SourceRef, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
 /// bounded so a stuck remote cannot hang the request.
 const PER_FETCH: Duration = Duration::from_secs(30);
 const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
-/// Default bounded concurrency for upstream fetches.
-const CONCURRENCY: usize = 4;
+/// Default bounded concurrency for upstream fetches. Sized for LATENCY, not CPU:
+/// every job is one HTTPS round trip to a forge, so a cap below the number of
+/// source groups just serializes those round trips into waves (measured: 6 groups
+/// at 4 cost a whole extra ~0.7s wave).
+const CONCURRENCY: usize = 8;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
 const CACHE_TTL: Duration = Duration::from_secs(60);
@@ -726,7 +729,13 @@ pub async fn check_skill_updates(
 		inputs_started.elapsed()
 	);
 
-	let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
+	// One repository behind both: the preflight's tip resolution and the fetch
+	// that may follow it share the composite, its snapshot memo, and its token
+	// context.
+	let git_fetcher = GitFetcher::new();
+	let ref_resolver: Arc<dyn RefResolver> =
+		Arc::new(git_fetcher.ref_resolver());
+	let fetcher: Arc<dyn Fetcher> = Arc::new(git_fetcher);
 	let auth_started = std::time::Instant::now();
 	let resolver = SourceAuth::load(forwarded).await;
 	log::info!(
@@ -736,7 +745,7 @@ pub async fn check_skill_updates(
 	let mut cache = ResultCache::new(CACHE_TTL);
 	let deps = CheckDeps {
 		fetcher,
-		ref_resolver: Some(Arc::new(GitRefResolver)),
+		ref_resolver: Some(ref_resolver),
 		resolver: &resolver,
 		cache: &mut cache,
 		per_fetch: PER_FETCH,
