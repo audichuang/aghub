@@ -305,6 +305,7 @@ mod batch_dto_tests {
 			&[AgentType::Claude, AgentType::Grok],
 			ResourceScope::GlobalOnly,
 			false,
+			None,
 			|agent| match agent {
 				AgentType::Claude => Ok(serde_json::json!({ "name": "multi" })),
 				_ => Err("boom".to_string()),

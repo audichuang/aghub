@@ -4,13 +4,21 @@ use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 
 // Antigravity spells the remote endpoint `serverUrl` and toggles with
-// `disabled`. It documents no SSE-vs-HTTP tag, and its explicit WebSocket
-// option has no counterpart in the normalized model (rejected on read).
+// `disabled`; its explicit WebSocket option has no counterpart in the
+// normalized model (rejected on read).
+// The `type` tag stays even where the vendor docs only show it for stdio:
+// dropping it makes SSE indistinguishable from streamable HTTP on the next
+// read, and v2.13.3 already wrote it — removing it would strand every
+// config that release produced.
 json_map_dialect!(json_map::Dialect {
-	discriminator: None,
+	discriminator: Some(json_map::Discriminator {
+		key: "type",
+		stdio: "stdio",
+		sse: "sse",
+		http: "http",
+	}),
 	url_key: "serverUrl",
 	toggle_key: json_map::ToggleKey::Disabled,
-	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });
 
@@ -103,36 +111,37 @@ mod tests {
 	}
 
 	#[test]
-	fn antigravity_serializes_remote_transports_with_server_url() {
+	fn antigravity_uses_server_url_and_keeps_the_two_remotes_apart() {
 		let mut config = AgentConfig::new();
-		config.mcps = vec![McpServer::new(
-			"api",
-			McpTransport::streamable_http("https://example.test/mcp"),
-		)];
+		config.mcps = vec![
+			McpServer::new(
+				"api",
+				McpTransport::streamable_http("https://example.test/mcp"),
+			),
+			// Deliberately NOT a `/sse` path: without the `type` tag this
+			// would read back as streamable HTTP.
+			McpServer::new(
+				"events",
+				McpTransport::sse("https://example.test/v1/messages"),
+			),
+		];
 
 		let output = (DESCRIPTOR.mcp_serialize_config.unwrap())(&config, None)
 			.expect("Antigravity MCP config should serialize");
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-		let api = &value["mcpServers"]["api"];
+		assert_eq!(
+			value["mcpServers"]["api"]["serverUrl"],
+			"https://example.test/mcp"
+		);
+		assert!(value["mcpServers"]["api"].get("url").is_none());
 
-		assert_eq!(api["serverUrl"], "https://example.test/mcp");
-		assert!(api.get("type").is_none());
-		assert!(api.get("url").is_none());
-	}
-
-	#[test]
-	fn antigravity_refuses_sse_rather_than_downgrading_it() {
-		// The file has no transport tag, so a written SSE server would read
-		// back as streamable HTTP. Refuse instead of changing it silently.
-		let mut config = AgentConfig::new();
-		config.mcps = vec![McpServer::new(
-			"events",
-			McpTransport::sse("https://example.test/events"),
-		)];
-
-		let error = (DESCRIPTOR.mcp_serialize_config.unwrap())(&config, None)
-			.expect_err("SSE is not expressible in Antigravity's format");
-		assert!(error.to_string().contains("cannot express"), "got: {error}");
+		let reparsed = (DESCRIPTOR.mcp_parse_config.unwrap())(&output).unwrap();
+		let events = reparsed.mcps.iter().find(|m| m.name == "events").unwrap();
+		assert!(
+			matches!(events.transport, McpTransport::Sse { .. }),
+			"SSE must survive the round trip, got {:?}",
+			events.transport
+		);
 	}
 
 	#[test]

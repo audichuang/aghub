@@ -2,13 +2,20 @@ use crate::descriptor::*;
 use crate::format::json_map;
 use crate::json_map_dialect;
 
-// Zed's documented `context_servers` entry is `command`/`args`/`env` or
-// `url`/`headers` — no transport tag and no persisted per-server toggle, so
-// aghub invents neither.
+// Zed's documented `context_servers` entry has no persisted per-server
+// toggle, so aghub does not invent one.
+// The `type` tag stays even where the vendor docs only show it for stdio:
+// dropping it makes SSE indistinguishable from streamable HTTP on the next
+// read, and v2.13.3 already wrote it — removing it would strand every
+// config that release produced.
 json_map_dialect!(json_map::Dialect {
 	server_key: "context_servers",
-	discriminator: None,
-	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	discriminator: Some(json_map::Discriminator {
+		key: "type",
+		stdio: "stdio",
+		sse: "sse",
+		http: "http",
+	}),
 	..json_map::MCP_SERVERS
 });
 

@@ -206,10 +206,16 @@ pub fn batch_create_mcp(
 			agents.push(agent);
 		}
 	}
+	// Preflight also has to know the transport: a dialect with no word for it
+	// refuses the write, and finding that out mid-batch leaves the agents that
+	// already succeeded holding the server.
+	let probe_transport =
+		aghub_core::models::McpTransport::from(req.mcp.transport.clone());
 	let view = aghub_core::batch::run_mcp_agent_mutation(
 		&agents,
 		resource_scope,
 		false,
+		Some(&probe_transport),
 		|agent| {
 			create_mcp_for_agent(&AgentParam(agent), &resolved, req.mcp.clone())
 				.map(|resp| {

@@ -94,8 +94,13 @@ pub(crate) struct MapMcpServer {
 	pub args: Vec<serde_json::Value>,
 	#[serde(alias = "environment")]
 	pub env: Option<HashMap<String, serde_json::Value>>,
-	#[serde(alias = "httpUrl", alias = "serverUrl")]
+	#[serde(alias = "serverUrl")]
 	pub url: Option<String>,
+	/// Gemini's dedicated streamable-HTTP key. Kept apart from `url` because
+	/// its presence IS the transport declaration — folding it into `url` would
+	/// leave the path-sniffing below to guess at something the user stated.
+	#[serde(rename = "httpUrl")]
+	pub http_url: Option<String>,
 	pub headers: Option<HashMap<String, String>>,
 	pub enabled: Option<bool>,
 	pub disabled: Option<bool>,
@@ -212,6 +217,7 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 			args,
 			env,
 			url,
+			http_url,
 			headers,
 			enabled,
 			disabled,
@@ -220,6 +226,8 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 				"Invalid MCP server '{name}': {error}"
 			))
 		})?;
+		let declared_http = http_url.is_some();
+		let url = url.or(http_url);
 		if command.is_some() && url.is_some() {
 			return Err(ConfigError::InvalidConfig(format!(
 				"MCP server '{name}' cannot contain both command and url"
@@ -277,8 +285,10 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 						timeout: None,
 					}
 				} else if let Some(url) = url {
-					// Never infer a transport the dialect could not write back.
-					let is_sse = dialect.writes_sse()
+					// Never infer a transport the dialect could not write back,
+					// and never guess when the KEY already declared one.
+					let is_sse = !declared_http
+						&& dialect.writes_sse()
 						&& dialect.untyped_remote
 							== UntypedRemote::InferSseFromUrl
 						&& url_has_sse_path(&url);
@@ -302,12 +312,20 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 				}
 			}
 		};
-		// A toggle the dialect cannot write back must not be reported either;
-		// otherwise aghub shows a state the user can never change.
-		let enabled = if dialect.writes_toggle() {
-			enabled.unwrap_or_else(|| !disabled.unwrap_or(false))
-		} else {
-			true
+		// The dialect's OWN field decides. Reading the other one first lets a
+		// stale/foreign key win: a Cline entry with native `disabled: true` and
+		// a leftover `enabled: true` would parse as enabled, and the next save
+		// writes `disabled: false` — silently turning the server back on. A
+		// toggle the dialect cannot write back is not reported at all, since
+		// aghub would be showing a state the user can never change.
+		let enabled = match dialect.toggle_key {
+			ToggleKey::None => true,
+			ToggleKey::Enabled => {
+				enabled.unwrap_or_else(|| !disabled.unwrap_or(false))
+			}
+			ToggleKey::Disabled => disabled
+				.map(|disabled| !disabled)
+				.unwrap_or_else(|| enabled.unwrap_or(true)),
 		};
 		config.mcps.push(McpServer {
 			name,

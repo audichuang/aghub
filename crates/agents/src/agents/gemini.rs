@@ -3,10 +3,11 @@ use crate::descriptor::*;
 use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 
-// Gemini spells `httpUrl` for streamable HTTP, so a bare `url` with no `type`
-// is read as HTTP rather than guessed from the path.
+// Gemini spells streamable HTTP as `httpUrl` (handled by the shared parser); a
+// bare `url` is auto-detected by Gemini itself, so aghub keeps the default
+// path-based inference rather than forcing `type: "http"` onto an entry the
+// user left open — that would pin a `/sse` endpoint to the wrong transport.
 json_map_dialect!(json_map::Dialect {
-	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });
 

@@ -3,16 +3,17 @@ use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 use std::path::{Path, PathBuf};
 
-// Cursor documents `type: "stdio"` for local servers, but its remote example is
-// a bare `url` with no transport tag — so SSE has no native spelling here.
+// The `type` tag stays even where the vendor docs only show it for stdio:
+// dropping it makes SSE indistinguishable from streamable HTTP on the next
+// read, and v2.13.3 already wrote it — removing it would strand every
+// config that release produced.
 json_map_dialect!(json_map::Dialect {
 	discriminator: Some(json_map::Discriminator {
 		key: "type",
 		stdio: "stdio",
-		sse: "",
-		http: "",
+		sse: "sse",
+		http: "http",
 	}),
-	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });
 

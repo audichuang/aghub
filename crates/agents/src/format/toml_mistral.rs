@@ -96,29 +96,30 @@ fn map_value(values: &HashMap<String, String>) -> Value {
 	Value::Table(table)
 }
 
-/// A value aghub cannot read here is a value a later rewrite would DELETE, so
-/// an unreadable timeout is an error rather than a silent `None`.
+/// Vibe types `tool_timeout_sec` as a positive FLOAT; the normalized model has
+/// whole seconds. A fractional value is read (floored) rather than rejected —
+/// erroring would make a perfectly valid native config unreadable — and
+/// [`set_timeout`] leaves it byte-identical on the way out. A value aghub cannot
+/// read at all is still an error, because a later rewrite would DELETE it.
 fn timeout(table: &TomlTable, name: &str) -> Result<Option<u64>> {
+	let unreadable = || {
+		invalid(format!(
+			"Mistral Vibe MCP server `{name}` field `tool_timeout_sec` must be a non-negative number"
+		))
+	};
 	match table.get("tool_timeout_sec") {
 		None => Ok(None),
-		Some(Value::Integer(value)) => u64::try_from(*value).map(Some).map_err(
-			|_| {
-				invalid(format!(
-					"Mistral Vibe MCP server `{name}` field `tool_timeout_sec` must be a non-negative integer"
-				))
-			},
-		),
+		Some(Value::Integer(value)) => {
+			u64::try_from(*value).map(Some).map_err(|_| unreadable())
+		}
 		Some(Value::Float(value))
 			if value.is_finite()
 				&& *value >= 0.0
-				&& value.fract() == 0.0
 				&& *value <= u64::MAX as f64 =>
 		{
 			Ok(Some(*value as u64))
 		}
-		Some(_) => Err(invalid(format!(
-			"Mistral Vibe MCP server `{name}` field `tool_timeout_sec` must be a non-negative integer"
-		))),
+		Some(_) => Err(unreadable()),
 	}
 }
 
@@ -365,6 +366,14 @@ fn set_remote_headers(
 }
 
 fn set_timeout(table: &mut TomlTable, timeout: Option<u64>) -> Result<()> {
+	// A fractional native value floors into the model; rewriting it as that
+	// integer would silently shorten the user's timeout, so leave it alone when
+	// the model still agrees with it.
+	if let Some(Value::Float(existing)) = table.get("tool_timeout_sec") {
+		if existing.fract() != 0.0 && timeout == Some(*existing as u64) {
+			return Ok(());
+		}
+	}
 	match timeout {
 		Some(timeout) => {
 			let timeout = i64::try_from(timeout).map_err(|_| {
@@ -469,7 +478,8 @@ pub fn serialize(
 			}
 			McpTransport::Sse { .. } => {
 				return Err(invalid(format!(
-					"Mistral Vibe MCP server `{}` uses unsupported SSE transport",
+					"Mistral Vibe MCP server `{}` uses SSE, which this agent's \
+					 config format cannot express; use streamable HTTP instead",
 					mcp.name
 				)));
 			}

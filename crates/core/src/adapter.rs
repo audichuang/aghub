@@ -251,7 +251,7 @@ impl AgentAdapter for &'static AgentDescriptor {
 	}
 
 	fn mcp_supports_transport(&self, transport: &McpTransport) -> bool {
-		crate::descriptor::supports_mcp_transport(self.capabilities, transport)
+		crate::descriptor::supports_mcp_transport(self, transport)
 	}
 
 	fn supports_mcp_enable_disable(&self) -> bool {

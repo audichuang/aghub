@@ -19,16 +19,39 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		return Ok(config);
 	};
 
+	// Skipping a server aghub cannot read is not harmless: `serialize` retains
+	// only the names it was handed, so the next unrelated save DELETES the
+	// skipped entry from the user's config. Reject the file instead.
 	for (name, entry) in servers {
-		let table = match entry.as_table() {
-			Some(t) => t,
-			None => continue,
+		let table = entry.as_table().ok_or_else(|| {
+			ConfigError::InvalidConfig(format!(
+				"MCP server '{name}' is not a table"
+			))
+		})?;
+		let command = match table.get("command") {
+			None => None,
+			Some(value) => Some(value.as_str().ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' field 'command' must be a string"
+				))
+			})?),
 		};
-		let command = table.get("command").and_then(|v| v.as_str());
-		let url = table.get("url").and_then(|v| v.as_str());
+		let url = match table.get("url") {
+			None => None,
+			Some(value) => Some(value.as_str().ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' field 'url' must be a string"
+				))
+			})?),
+		};
 		if command.is_some() && url.is_some() {
 			return Err(ConfigError::InvalidConfig(format!(
 				"MCP server '{name}' cannot contain both command and url"
+			)));
+		}
+		if command.is_none() && url.is_none() {
+			return Err(ConfigError::InvalidConfig(format!(
+				"MCP server '{name}' has neither command nor url"
 			)));
 		}
 		let enabled = table
@@ -83,8 +106,8 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				headers,
 				timeout,
 			},
-			(None, None) => continue,
-			(Some(_), Some(_)) => unreachable!(),
+			// Both guarded above, before any field was extracted.
+			(None, None) | (Some(_), Some(_)) => unreachable!(),
 		};
 
 		config.mcps.push(McpServer {

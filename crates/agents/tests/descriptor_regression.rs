@@ -702,7 +702,10 @@ fn test_mcp_capabilities_stdio() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.mcp.stdio, *val,
@@ -744,7 +747,10 @@ fn test_mcp_capabilities_remote() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.mcp.remote, *val,
@@ -786,7 +792,10 @@ fn test_mcp_capabilities_scopes_global() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.mcp.scopes.global, *val,
@@ -828,7 +837,10 @@ fn test_mcp_capabilities_scopes_project() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.mcp.scopes.project, *val,
@@ -891,7 +903,7 @@ fn test_mcp_capabilities_enable_disable() {
 
 #[test]
 fn test_skills_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -914,10 +926,16 @@ fn test_skills_capabilities_scopes_global() {
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
+		(AgentType::Factory, true),
+		(AgentType::Hermes, true),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.skills.scopes.global, *val,
@@ -930,7 +948,7 @@ fn test_skills_capabilities_scopes_global() {
 
 #[test]
 fn test_skills_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false), // Openclaw has no project skills
@@ -953,10 +971,16 @@ fn test_skills_capabilities_scopes_project() {
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
+		(AgentType::Factory, true),
+		(AgentType::Hermes, false),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.skills.scopes.project, *val,
@@ -969,7 +993,7 @@ fn test_skills_capabilities_scopes_project() {
 
 #[test]
 fn test_skills_capabilities_universal() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, false),
 		(AgentType::Codex, false),
 		(AgentType::Openclaw, false),
@@ -992,10 +1016,16 @@ fn test_skills_capabilities_universal() {
 		(AgentType::KiloCode, false),
 		(AgentType::Amp, true), // Amp has universal skills
 		(AgentType::Warp, false),
+		(AgentType::Factory, false),
+		(AgentType::Hermes, false),
+		(AgentType::Grok, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.skills.universal, *val,
@@ -1012,7 +1042,7 @@ fn test_skills_capabilities_universal() {
 
 #[test]
 fn test_sub_agent_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true), // Claude has global sub-agents
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false),
@@ -1035,10 +1065,16 @@ fn test_sub_agent_capabilities_scopes_global() {
 		(AgentType::KiloCode, false),
 		(AgentType::Amp, false),
 		(AgentType::Warp, false),
+		(AgentType::Factory, false),
+		(AgentType::Hermes, false),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.sub_agents.scopes.global, *val,
@@ -1051,7 +1087,7 @@ fn test_sub_agent_capabilities_scopes_global() {
 
 #[test]
 fn test_sub_agent_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true), // Claude has project sub-agents
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false),
@@ -1074,10 +1110,16 @@ fn test_sub_agent_capabilities_scopes_project() {
 		(AgentType::KiloCode, false),
 		(AgentType::Amp, false),
 		(AgentType::Warp, false),
+		(AgentType::Factory, false),
+		(AgentType::Hermes, false),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, val)) = expected.iter().find(|(t, _)| *t == agent_type)
+		let (_, val) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.expect("every descriptor must have a capability contract");
 		{
 			assert_eq!(
 				desc.capabilities.sub_agents.scopes.project, *val,

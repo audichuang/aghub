@@ -4,12 +4,19 @@ use crate::format::json_map;
 use crate::json_map_dialect;
 use std::path::{Path, PathBuf};
 
-// Windsurf spells the remote endpoint `serverUrl` and documents no transport
-// tag, so SSE and streamable HTTP are indistinguishable in the file.
+// Windsurf spells the remote endpoint `serverUrl`.
+// The `type` tag stays even where the vendor docs only show it for stdio:
+// dropping it makes SSE indistinguishable from streamable HTTP on the next
+// read, and v2.13.3 already wrote it — removing it would strand every
+// config that release produced.
 json_map_dialect!(json_map::Dialect {
-	discriminator: None,
+	discriminator: Some(json_map::Discriminator {
+		key: "type",
+		stdio: "stdio",
+		sse: "sse",
+		http: "http",
+	}),
 	url_key: "serverUrl",
-	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });
 

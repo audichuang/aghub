@@ -46,8 +46,21 @@ not safe.
 - A dialect with no native word for a transport now REFUSES to write it instead
   of downgrading it, and never parses into one either. Same for the on/off
   field: a dialect without a persisted toggle does not report a disabled state
-  the user could not change. `crates/core/tests/mcp_dialect_roundtrip.rs` pins
-  this for every agent in the registry, including new ones.
+  the user could not change, and a dialect WITH one reads its own field first
+  (reading the other lets a stale `enabled` flip a natively-disabled server back
+  on). `crates/core/tests/mcp_dialect_roundtrip.rs` pins this for every agent in
+  the registry, including new ones, against an exhaustive list of which agents
+  may refuse — "any error counts as a deliberate refusal" would let a real
+  regression pass as a skip.
+- The refusal is predictable BEFORE any write: `supports_mcp_transport` asks the
+  real serializer instead of reading the `remote` capability bit (which collapses
+  SSE and streamable HTTP into one flag), so a multi-agent batch rejects the
+  whole set up front rather than writing the agents that can take it and then
+  failing on the one that cannot.
+- A server aghub cannot read is a server the next save DELETES, because the
+  writers keep only the names they were handed. Every dialect therefore rejects
+  an entry it cannot model rather than skipping it — the Codex TOML reader used
+  to skip silently.
 - `json_map` parses JSONC and keeps root/server fields it does not own
   (OAuth/tool/cwd metadata survives). Scalars written where the MCP schema wants
   a string (a port as a bare number) are coerced rather than costing the user
@@ -70,10 +83,16 @@ not safe.
 
 - Aghub's normalized transport model has no WebSocket variant, so an explicit
   WebSocket config is rejected rather than mislabelled as HTTP.
-- Cursor, Trae, Windsurf, Antigravity, Kiro, Zed, Codex, OpenCode, KiloCode and
-  Mistral Vibe document exactly one remote shape, so aghub refuses to write an
-  SSE server to them. Refusing is recoverable (switch to streamable HTTP);
+- Codex, OpenCode, KiloCode and Mistral Vibe have exactly one remote entry shape
+  by construction (`url` alone, or `type: "remote"`), so aghub refuses to write
+  an SSE server to them. Refusing is recoverable (switch to streamable HTTP);
   writing it and reading back something else is not.
+- The `type` tag is still written for the JSON-map agents whose vendor docs only
+  show it on stdio entries (Cursor, Trae, Windsurf, Antigravity, Kiro, Zed).
+  Dropping it was tried and reverted: it makes SSE indistinguishable from
+  streamable HTTP on the next read, and every config the previous release wrote
+  already carries the tag — a reader that honours it while the writer refuses to
+  reproduce it leaves those files unmanageable.
 - The OpenCode descriptor selects one existing writable candidate; OpenCode's
   runtime merges several global/project JSON and JSONC layers. Supporting full
   precedence would need a merge-aware ConfigManager seam, not a second guessed

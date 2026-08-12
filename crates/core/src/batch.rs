@@ -57,6 +57,7 @@ fn mcp_agent_preflight(
 	agent: AgentType,
 	write_scope: ResourceScope,
 	toggle: bool,
+	transport: Option<&crate::models::McpTransport>,
 ) -> Result<(), String> {
 	let descriptor = registry::get(agent);
 	if !descriptor.supports_mcp_scope(write_scope) {
@@ -64,6 +65,24 @@ fn mcp_agent_preflight(
 	}
 	if toggle && !descriptor.capabilities.mcp.enable_disable {
 		return Err("no MCP enable/disable".to_string());
+	}
+	// A dialect with no native word for the transport refuses the write. Catch
+	// it here, for EVERY target, or the batch writes the agents that can take
+	// it and then fails on the one that cannot — the partial cross-agent state
+	// this module exists to prevent.
+	if let Some(transport) = transport {
+		if !aghub_agents::descriptor::supports_mcp_transport(
+			descriptor, transport,
+		) {
+			let name = match transport {
+				crate::models::McpTransport::Stdio { .. } => "stdio",
+				crate::models::McpTransport::Sse { .. } => "SSE",
+				crate::models::McpTransport::StreamableHttp { .. } => {
+					"streamable HTTP"
+				}
+			};
+			return Err(format!("no {name} MCP transport"));
+		}
 	}
 	Ok(())
 }
@@ -111,11 +130,12 @@ pub fn mcp_batch_preflight(
 	agents: &[AgentType],
 	write_scope: ResourceScope,
 	toggle: bool,
+	transport: Option<&crate::models::McpTransport>,
 ) -> Result<(), BatchUnsupported> {
 	let unsupported: Vec<(String, String)> = agents
 		.iter()
 		.filter_map(|agent| {
-			mcp_agent_preflight(*agent, write_scope, toggle)
+			mcp_agent_preflight(*agent, write_scope, toggle, transport)
 				.err()
 				.map(|reason| (agent.as_str().to_string(), reason))
 		})
@@ -390,12 +410,13 @@ pub fn run_mcp_agent_mutation(
 	agents: &[AgentType],
 	write_scope: ResourceScope,
 	toggle: bool,
+	transport: Option<&crate::models::McpTransport>,
 	mutate: impl FnMut(AgentType) -> Result<serde_json::Value, String>,
 ) -> Result<AgentBatchView, BatchUnsupported> {
 	run_agent_mutation_with_preflight(
 		agents,
 		"MCP",
-		|agent| mcp_agent_preflight(agent, write_scope, toggle),
+		|agent| mcp_agent_preflight(agent, write_scope, toggle, transport),
 		mutate,
 	)
 }
@@ -423,6 +444,7 @@ mod tests {
 			&[AgentType::Claude, AgentType::Pi, AgentType::AugmentCode],
 			ResourceScope::ProjectOnly,
 			false,
+			None,
 		)
 		.unwrap_err();
 		let ids: Vec<&str> =
@@ -440,6 +462,7 @@ mod tests {
 			&[AgentType::Hermes, AgentType::Windsurf],
 			ResourceScope::GlobalOnly,
 			true,
+			None,
 		)
 		.unwrap_err();
 		assert_eq!(err.agents.len(), 1, "hermes must not be blamed");
@@ -450,6 +473,7 @@ mod tests {
 			&[AgentType::Hermes, AgentType::Windsurf],
 			ResourceScope::GlobalOnly,
 			false,
+			None,
 		)
 		.is_ok());
 	}
@@ -507,12 +531,50 @@ mod tests {
 	}
 
 	#[test]
+	fn preflight_rejects_a_transport_the_dialect_cannot_write() {
+		use crate::models::McpTransport;
+		// OpenCode's config has one remote type, so SSE has no native spelling
+		// there; claude spells all three. Without this leg claude gets written
+		// and opencode then fails, leaving the batch half applied.
+		let sse = McpTransport::sse("https://example.com/v1/messages");
+		let err = mcp_batch_preflight(
+			&[AgentType::Claude, AgentType::OpenCode],
+			ResourceScope::ProjectOnly,
+			false,
+			Some(&sse),
+		)
+		.unwrap_err();
+		assert_eq!(err.agents.len(), 1, "claude must not be blamed");
+		assert_eq!(err.agents[0].0, "opencode");
+		assert!(err.agents[0].1.contains("SSE"), "{:?}", err.agents[0].1);
+		assert!(err.to_string().contains("nothing was written"));
+
+		// The same pair takes streamable HTTP, and stdio, without complaint.
+		for transport in [
+			McpTransport::streamable_http("https://example.com/v1/mcp"),
+			McpTransport::stdio("echo", vec![]),
+		] {
+			assert!(
+				mcp_batch_preflight(
+					&[AgentType::Claude, AgentType::OpenCode],
+					ResourceScope::ProjectOnly,
+					false,
+					Some(&transport),
+				)
+				.is_ok(),
+				"{transport:?} must pass"
+			);
+		}
+	}
+
+	#[test]
 	fn mcp_mutation_interface_owns_preflight_before_execution() {
 		let writes = std::cell::Cell::new(0);
 		let result = run_mcp_agent_mutation(
 			&[AgentType::Claude, AgentType::Pi],
 			ResourceScope::ProjectOnly,
 			false,
+			None,
 			|agent| {
 				writes.set(writes.get() + 1);
 				Ok(serde_json::json!({ "agent": agent.as_str() }))

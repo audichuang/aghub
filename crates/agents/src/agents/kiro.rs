@@ -3,12 +3,19 @@ use crate::descriptor::*;
 use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 
-// Kiro documents `disabled` and a bare `url` for remote servers; it has no
-// transport tag, so SSE cannot be expressed.
+// Kiro toggles with `disabled`.
+// The `type` tag stays even where the vendor docs only show it for stdio:
+// dropping it makes SSE indistinguishable from streamable HTTP on the next
+// read, and v2.13.3 already wrote it — removing it would strand every
+// config that release produced.
 json_map_dialect!(json_map::Dialect {
-	discriminator: None,
+	discriminator: Some(json_map::Discriminator {
+		key: "type",
+		stdio: "stdio",
+		sse: "sse",
+		http: "http",
+	}),
 	toggle_key: json_map::ToggleKey::Disabled,
-	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });
 

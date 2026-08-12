@@ -356,16 +356,36 @@ pub fn save_scoped_mcps(
 	save_mcps_to_file(&path, mcps, serialize)
 }
 
+/// Can this agent actually receive a server on this transport?
+///
+/// The capability bits collapse SSE and streamable HTTP into one `remote` flag,
+/// but several dialects have a native word for only one of them and refuse the
+/// other rather than silently rewriting it. So after the advertised bit says
+/// yes, ASK THE REAL SERIALIZER: a preflight that answers from a bit the writer
+/// does not consult can promise a write that then fails halfway through a
+/// multi-agent batch, leaving partial cross-agent state.
 pub fn supports_mcp_transport(
-	capabilities: Capabilities,
+	descriptor: &AgentDescriptor,
 	transport: &McpTransport,
 ) -> bool {
-	match transport {
-		McpTransport::Stdio { .. } => capabilities.mcp.stdio,
+	let advertised = match transport {
+		McpTransport::Stdio { .. } => descriptor.capabilities.mcp.stdio,
 		McpTransport::Sse { .. } | McpTransport::StreamableHttp { .. } => {
-			capabilities.mcp.remote
+			descriptor.capabilities.mcp.remote
 		}
+	};
+	if !advertised {
+		return false;
 	}
+	let Some(serialize) = descriptor.mcp_serialize_config else {
+		return false;
+	};
+	let probe = AgentConfig {
+		mcps: vec![McpServer::new("aghub-transport-probe", transport.clone())],
+		skills: Vec::new(),
+		sub_agents: Vec::new(),
+	};
+	serialize(&probe, None).is_ok()
 }
 
 pub fn home_dir() -> Option<PathBuf> {

@@ -1084,6 +1084,46 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 // stdout, non-zero exit if any failed. (`source sync` is dispatched earlier
 // and resolves the list itself; the top-of-main guard rejects lists on
 // every other command.)
+/// The transport an add/update batch is about to write, when the flags spell
+/// one out. Returns `None` for commands that carry no transport and for input
+/// the shared validator rejects — the batch preflight only decides whether
+/// every target COULD take it; reporting bad input is `run_for_agent`'s job.
+fn mcp_transport_for_preflight(
+	command: &Commands,
+) -> Option<aghub_core::models::McpTransport> {
+	let (cmd, url, transport, headers, env_vars, timeout) = match command {
+		Commands::Add {
+			command,
+			url,
+			transport,
+			headers,
+			env_vars,
+			timeout,
+			..
+		}
+		| Commands::Update {
+			command,
+			url,
+			transport,
+			headers,
+			env_vars,
+			timeout,
+			..
+		} => (command, url, transport, headers, env_vars, timeout),
+		_ => return None,
+	};
+	commands::parse_mcp_transport(
+		cmd.clone(),
+		url.clone(),
+		transport,
+		headers.clone(),
+		env_vars.clone(),
+		*timeout,
+	)
+	.ok()
+	.flatten()
+}
+
 fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	match &cli.command {
 		Commands::Get { resource } => {
@@ -1110,10 +1150,17 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 					cli.command,
 					Commands::Enable { .. } | Commands::Disable { .. }
 				);
+				// Give preflight the transport too: some dialects have a word
+				// for only one remote transport and refuse the other, and a
+				// refusal discovered mid-batch leaves the earlier agents
+				// already written. A malformed transport stays None — its real
+				// error belongs to `run_for_agent`, not to the preflight.
+				let transport = mcp_transport_for_preflight(&cli.command);
 				aghub_core::batch::run_mcp_agent_mutation(
 					agents,
 					write_scope,
 					is_toggle,
+					transport.as_ref(),
 					|agent| {
 						eprintln_verbose!(
 							"Running for agent: {}",
