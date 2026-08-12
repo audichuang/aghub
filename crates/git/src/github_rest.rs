@@ -491,55 +491,54 @@ impl RepoFetchBackend for GithubRest {
 			let mut cache = self.cache.lock().map_err(|_| {
 				GitError::clone_failed("GithubRest cache lock poisoned")
 			})?;
-			// Keep an EXISTING context for this commit — but ONLY when it names
-			// the same repo with the same credential.
+			// A context for a commit oid is written ONCE and never replaced.
 			//
-			// A commit oid names immutable content, so a second resolve that
-			// lands on the same commit — two ref-cohorts of one source diff
-			// where `ref=None` means the default branch and the other cohort
-			// names that same branch — describes the identical tree and blobs.
-			// Overwriting the entry handed that second caller empty caches and
-			// made it re-download everything the first had just fetched:
-			// measured as a duplicated ~1.2s tree read plus ~1.3s of blobs per
-			// source. The re-resolve itself still happens (the tip must be
-			// re-checked); only the content caches survive.
+			// Two ref-cohorts of one source landing on the same commit — the
+			// common case, `ref=None` alongside the branch it names — must reuse
+			// it: overwriting handed the second caller empty caches and made it
+			// re-download everything the first had just fetched (measured as a
+			// duplicated ~1.2s tree read plus ~1.3s of blobs per source).
 			//
-			// The identity guard is what keeps that saving from becoming a
-			// credential mix-up. Identical content does NOT imply identical
-			// ACCESS: a public upstream and a private fork sitting on one commit
-			// share a tree but not who may read it, and this key is the oid
-			// alone. Without the guard the fork's authenticated resolve was
-			// discarded and its tree/blob reads went out with the upstream's
-			// anonymous context — a private repo read anonymously, reported to
-			// the user as `uncheckable/network` while holding a valid token.
-			let fresh = |tree_oid: &str| RepoContext {
-				api_host,
-				owner: owner.clone(),
-				repo: repo.clone(),
-				token: token.clone(),
-				tree_oid: tree_oid.to_string(),
-				blob_cache: Arc::new(Mutex::new(HashMap::new())),
-				tree_cache: Arc::new(Mutex::new(HashMap::new())),
-				blob_admission: Arc::new(Mutex::new(BlobAdmission::default())),
-				blob_phase: Arc::new(Mutex::new(())),
-			};
+			// A DIFFERENT repo or credential on the same commit is not that case.
+			// Identical content does not imply identical ACCESS: a public upstream
+			// and a private fork sit on one commit, share a tree, and do not share
+			// who may read it. Since `read_tree`/`read_blobs`/`materialize` recover
+			// their context by oid ALONE, letting the second resolve replace the
+			// entry made the first snapshot's later reads go out with the second's
+			// repo and token — and replacing nothing but declining the entry keeps
+			// both correct: this source simply loses the REST fast path and
+			// `SkillRepository` routes it to gix, which fetches the same content
+			// under its own credentials.
 			match cache.get(&commit_oid) {
 				Some(existing)
-					if existing.owner == owner
-						&& existing.repo == repo
-						&& existing.api_host == api_host
-						&& existing.token == token => {}
-				// ponytail: last-writer-wins on an identity mismatch, because
-				// the lookup key is the oid and `read_tree`/`materialize` only
-				// ever hold a snapshot. The resolve immediately preceding those
-				// reads is the right context for them, so this is correct for
-				// the sequential pattern every caller actually uses; two
-				// sources on one commit interleaving resolve→read can still
-				// cross. Closing that needs the identity ON the snapshot
-				// (`RepoSnapshot` carrying an opaque context handle), which is
-				// a wider change than this fix.
-				_ => {
-					cache.insert(commit_oid.clone(), fresh(&tree_oid));
+					if existing.owner != owner
+						|| existing.repo != repo
+						|| existing.api_host != api_host
+						|| existing.token != token =>
+				{
+					return Err(GitError::rest_fallback(format!(
+						"commit {commit_oid} is already pinned to a different \
+						 repository or credential in this session"
+					)));
+				}
+				Some(_) => {}
+				None => {
+					cache.insert(
+						commit_oid.clone(),
+						RepoContext {
+							api_host,
+							owner,
+							repo,
+							token,
+							tree_oid: tree_oid.clone(),
+							blob_cache: Arc::new(Mutex::new(HashMap::new())),
+							tree_cache: Arc::new(Mutex::new(HashMap::new())),
+							blob_admission: Arc::new(Mutex::new(
+								BlobAdmission::default(),
+							)),
+							blob_phase: Arc::new(Mutex::new(())),
+						},
+					);
 				}
 			}
 		}

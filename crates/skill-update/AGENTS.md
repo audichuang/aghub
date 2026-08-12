@@ -38,6 +38,21 @@ The tip preflight skips the treeless fetch **only when** upstream tip
 `ref_commit == None` (project lock / npx / legacy) → **never** preflight-skip.
 Wrong skip = missed updates; wrong fetch = wasted network.
 
+**The preflight hands the fetch a CLAIM, not a cache entry.** `resolve_tip`
+returns a `PinnedSnapshot` (REST path only) and `check_updates` carries it into
+`Fetcher::fetch_pinned`. A `(url, ref, token) -> snapshot` cache was
+last-writer-wins, and since several source spellings normalize to one coordinate
+(`acme/skills`, `github:acme/skills`, `https://github.com/acme/skills.git`) while
+groups are keyed by the RAW string, a slow observation of an older tip could
+overwrite a newer one — the fetch then materialized a tip nobody judged and the
+row read `UpToDate` for a source that had moved. A claim also carries its backend,
+so it bypasses the commit-oid-keyed `memo` that two sources can overwrite.
+
+**Anything that answers without looking upstream must still verify the local
+copy** (`locally_intact`): the preflight skip, the pinned-SHA shortcut, and the
+`UpToDate` verdict itself. "Upstream has not moved" is not "your copy is fine" —
+each of those used to report `UpToDate` for a skill whose folder was gone.
+
 **It must never download objects** (`SkillRepository::resolve_tip`): REST
 `/commits/<ref>` on github hosts — ONE request on the pooled client — else a git
 ref advertisement. NOT `RepoFetchBackend::resolve`, which the gix backend answers

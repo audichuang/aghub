@@ -1348,11 +1348,16 @@ fn resolve_tip_costs_one_rest_request_and_downloads_no_objects() {
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 
-	let tip = repo.resolve_tip(&github_source(), None).unwrap();
+	let (tip, pinned) = repo.resolve_tip(&github_source(), None).unwrap();
 
 	assert_eq!(
 		tip, COMMIT_OID,
 		"the tip is the COMMIT oid the lock records"
+	);
+	assert_eq!(
+		pinned.as_ref().map(|p| p.commit_oid()),
+		Some(COMMIT_OID),
+		"the REST path must hand back a claim naming that same tip"
 	);
 	let urls: Vec<String> = recorded
 		.lock()
@@ -1493,50 +1498,21 @@ fn resolve_tip_refuses_a_non_https_remote_without_touching_gix() {
 /// this flow's spend against GitHub's 60/hour anonymous budget — the difference
 /// between a working check and `uncheckable/network`.
 #[test]
-fn a_fetch_after_a_preflight_does_not_buy_the_same_tip_twice() {
+fn a_pinned_claim_fetches_without_buying_the_tip_again() {
 	let (t, recorded) = transport(happy_responder());
 	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
 	let repo =
 		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
 
-	let tip = repo.resolve_tip(&github_source(), None).unwrap();
-	let commits_after_preflight = recorded
-		.lock()
-		.unwrap()
-		.iter()
-		.filter(|r| is_commit_resolve(&r.url))
-		.count();
-	let snapshot = repo.resolve(&github_source(), None).unwrap();
+	let (tip, pinned) = repo.resolve_tip(&github_source(), None).unwrap();
+	let pinned = pinned.expect("the REST path yields a claim");
+	let music = SkillPath::parse("skills/music").unwrap();
+	let fetched = repo
+		.fetch_pinned(&pinned, FetchSelection::Skills(&[music]))
+		.unwrap();
 
-	assert_eq!(snapshot.commit_oid, tip, "same coordinate, same tip");
-	let commits_total = recorded
-		.lock()
-		.unwrap()
-		.iter()
-		.filter(|r| is_commit_resolve(&r.url))
-		.count();
-	assert_eq!(
-		commits_after_preflight, 1,
-		"the preflight buys the tip once"
-	);
-	assert_eq!(
-		commits_total, 1,
-		"the fetch's resolve must reuse it, not spend a second request"
-	);
-}
-
-/// …but only for the SAME credential. A cache that conflated them would hand an
-/// anonymous caller a tip that only a token could see.
-#[test]
-fn a_preflighted_tip_is_not_reused_across_credentials() {
-	let (t, recorded) = transport(happy_responder());
-	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
-	let repo =
-		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
-
-	repo.resolve_tip(&github_source(), Some("ghp_ONE")).unwrap();
-	repo.resolve(&github_source(), Some("ghp_TWO")).unwrap();
-
+	assert_eq!(fetched.snapshot.commit_oid, tip);
+	assert!(fetched.root.join("skills/music/SKILL.md").exists());
 	let commits = recorded
 		.lock()
 		.unwrap()
@@ -1544,7 +1520,103 @@ fn a_preflighted_tip_is_not_reused_across_credentials() {
 		.filter(|r| is_commit_resolve(&r.url))
 		.count();
 	assert_eq!(
-		commits, 2,
-		"a different token is a different question and must be asked"
+		commits, 1,
+		"the tip is bought once by the preflight and never again"
+	);
+}
+
+/// The composite half of the same-commit collision: `GithubRest` declining a
+/// colliding identity is only safe because THIS routes it to gix, so the second
+/// source still gets its content under its own credentials.
+#[test]
+fn a_same_commit_identity_collision_falls_back_to_gix() {
+	let (t, _recorded) = transport(happy_responder());
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let gix = Arc::new(ResolveCountingGix::default());
+	let repo = SkillRepository::with_backends(
+		Some(rest),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	// First source takes the REST slot for this commit.
+	repo.resolve(&github_source(), None).unwrap();
+	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 0);
+
+	// A different repo on the SAME commit must not inherit that context.
+	let fork = SourceRef {
+		source: "https://github.com/forkco/skills.git".to_string(),
+		ref_: Some("main".to_string()),
+	};
+	let snapshot = repo.resolve(&fork, Some("ghp_FORK")).unwrap();
+
+	assert_eq!(
+		gix.resolve_calls.load(Ordering::SeqCst),
+		1,
+		"the declined source must be served by gix, not refused outright"
+	);
+	assert_eq!(snapshot.commit_oid, COMMIT_OID);
+}
+
+/// A commit responder whose tip MOVES on demand, so a test can interleave two
+/// observations of one coordinate the way two concurrent groups do.
+fn moving_tip_responder(
+	moved: Arc<AtomicBool>,
+) -> impl Fn(&HttpRequest) -> Result<HttpResponse, GitError> + Send + Sync + 'static
+{
+	const COMMIT_TWO: &str = "9999999999999999999999999999999999999999";
+	const TREE_TWO: &str = "8888888888888888888888888888888888888888";
+	let first = commit_json();
+	let second = format!(
+		r#"{{"sha":"{COMMIT_TWO}","commit":{{"tree":{{"sha":"{TREE_TWO}"}}}}}}"#
+	);
+	move |req: &HttpRequest| {
+		if is_commit_resolve(&req.url) {
+			let body = if moved.load(Ordering::SeqCst) {
+				second.clone()
+			} else {
+				first.clone()
+			};
+			return Ok(json_ok(body.into_bytes()));
+		}
+		Ok(status(404, &[]))
+	}
+}
+
+/// THE reason the handoff is a value and not a coordinate-keyed cache.
+///
+/// Two concurrent groups can share one coordinate — `acme/skills`,
+/// `github:acme/skills` and `https://github.com/acme/skills.git` all normalize to
+/// the same URL while `check_updates` groups by the RAW source string. With a
+/// `coordinate -> snapshot` map, a slow observation of an older tip overwrote a
+/// newer one, and the newer group's fetch then materialized the tip nobody had
+/// judged and reported `UpToDate` for a source that had moved on.
+///
+/// A claim cannot be overwritten by anyone: it names its own snapshot.
+#[test]
+fn a_claim_survives_a_later_observation_of_a_different_tip() {
+	let moved = Arc::new(AtomicBool::new(false));
+	let (t, _recorded) = transport(moving_tip_responder(moved.clone()));
+	let rest: Arc<dyn RepoFetchBackend> = Arc::new(GithubRest::new(t));
+	let repo =
+		SkillRepository::with_backends(Some(rest), Arc::new(NeverBackend));
+
+	// Group A observes the tip and keeps its claim.
+	let (first_tip, pinned) = repo.resolve_tip(&github_source(), None).unwrap();
+	let pinned = pinned.expect("the REST path yields a claim");
+
+	// Upstream moves; group B observes the NEW tip on the same coordinate.
+	moved.store(true, Ordering::SeqCst);
+	let (second_tip, _) = repo.resolve_tip(&github_source(), None).unwrap();
+	assert_ne!(second_tip, first_tip, "fixture premise: the tip moved");
+
+	assert_eq!(
+		pinned.commit_oid(),
+		first_tip,
+		"A's claim must still name the tip A observed, not B's"
+	);
+	assert_eq!(
+		pinned.snapshot().commit_oid,
+		first_tip,
+		"and the snapshot it pins must be that same commit"
 	);
 }

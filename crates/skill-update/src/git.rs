@@ -10,7 +10,10 @@ use std::sync::Arc;
 use crate::repository::{
 	skill_repo_to_fetch_error, FetchSelection, SkillRepository,
 };
-use crate::{FetchError, FetchedRepo, Fetcher, RefResolver, SourceRef};
+use crate::{
+	FetchError, FetchedRepo, Fetcher, PinnedSnapshot, RefResolver, SourceRef,
+	TipObservation,
+};
 
 /// Production [`Fetcher`]: resolves via [`SkillRepository`]
 /// (REST→gix→system-git single owner) then materializes only the requested
@@ -71,6 +74,21 @@ impl Fetcher for GitFetcher {
 			.fetch(&snap, selection)
 			.map_err(skill_repo_to_fetch_error)
 	}
+
+	/// Skips resolution entirely: the claim already names the snapshot AND the
+	/// backend that produced it, so this cannot buy the tip a second time nor be
+	/// routed to another source's backend slot by the commit-oid-keyed memo.
+	fn fetch_pinned(
+		&self,
+		_source_ref: &SourceRef,
+		_token: Option<&str>,
+		selection: FetchSelection<'_>,
+		pinned: &PinnedSnapshot,
+	) -> Result<FetchedRepo, FetchError> {
+		self.repo
+			.fetch_pinned(pinned, selection)
+			.map_err(skill_repo_to_fetch_error)
+	}
 }
 
 /// Production [`RefResolver`]: the tip OID of the requested
@@ -97,9 +115,10 @@ impl RefResolver for GitRefResolver {
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
-	) -> Result<String, FetchError> {
+	) -> Result<TipObservation, FetchError> {
 		self.repo
 			.resolve_tip(source_ref, token)
+			.map(|(commit_oid, pinned)| TipObservation { commit_oid, pinned })
 			.map_err(skill_repo_to_fetch_error)
 	}
 }

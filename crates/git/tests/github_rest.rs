@@ -294,15 +294,48 @@ fn token_is_sent_on_the_very_first_request() {
 }
 
 /// Two repositories can sit on ONE commit oid — a public upstream and a private
-/// fork, the ordinary case for a fork that has not diverged yet. The context
-/// cache is keyed by that oid alone, so the second resolve must not be allowed to
-/// inherit the first's repo and credential: identical content does not imply
-/// identical ACCESS. Before the identity guard the fork's authenticated resolve
-/// was discarded and its tree read went out anonymously against the UPSTREAM's
-/// path, which for a real private fork is a 404 the user sees as
-/// `uncheckable/network` while holding a valid token.
+/// fork that has not diverged, the ordinary case. The context cache is keyed by
+/// that oid alone and `read_tree`/`read_blobs`/`materialize` recover their repo
+/// and token from it, so a second identity on the same commit must NOT be allowed
+/// to take the slot: identical content does not imply identical ACCESS.
+///
+/// The backend declines instead of replacing. `SkillRepository` treats a
+/// `RestFallback` at resolve as "use gix", so the second source still gets its
+/// content — under its own credentials, over the git protocol.
 #[test]
-fn a_second_repo_on_the_same_commit_keeps_its_own_repo_and_token() {
+fn a_second_repo_on_the_same_commit_is_declined_rather_than_given_the_first_context(
+) {
+	let (t, _recorded) = transport(happy_responder());
+	let backend = GithubRest::new(t);
+	let upstream = SourceRef {
+		url: "https://github.com/acme/skills.git".into(),
+		ref_: Some("main".into()),
+	};
+	let fork = SourceRef {
+		url: "https://github.com/forkco/skills.git".into(),
+		ref_: Some("main".into()),
+	};
+	let creds = Credentials::new("x-access-token", "ghp_FORKTOKEN");
+
+	backend.resolve(&upstream, None).unwrap();
+	let declined = backend.resolve(&fork, Some(&creds)).unwrap_err();
+
+	assert!(
+		matches!(declined, GitError::RestFallback(_)),
+		"a colliding identity must be routed to git, got {declined:?}"
+	);
+}
+
+/// The same collision seen from the FIRST snapshot's side, and the case a
+/// sequential test cannot reach: after another identity has tried the same
+/// commit, the original snapshot's reads must still go to its own repo with its
+/// own credential (here: none).
+///
+/// A crossed context sends one source's job to the other's path — an anonymous
+/// read against a private path (a 404 the user sees as `uncheckable/network`), or
+/// a credentialed read that spends the wrong account's quota.
+#[test]
+fn two_same_oid_snapshots_keep_their_context_when_reads_interleave() {
 	let (t, recorded) = transport(happy_responder());
 	let backend = GithubRest::new(t);
 	let upstream = SourceRef {
@@ -315,16 +348,13 @@ fn a_second_repo_on_the_same_commit_keeps_its_own_repo_and_token() {
 	};
 	let creds = Credentials::new("x-access-token", "ghp_FORKTOKEN");
 
-	// The upstream resolves first, anonymously, and populates the cache.
+	// Both resolves happen before EITHER read — the interleaving two concurrent
+	// update-check groups produce.
 	let upstream_snap = backend.resolve(&upstream, None).unwrap();
-	let fork_snap = backend.resolve(&fork, Some(&creds)).unwrap();
-	assert_eq!(
-		upstream_snap.commit_oid, fork_snap.commit_oid,
-		"fixture premise: both repos are on the same commit"
-	);
+	let _ = backend.resolve(&fork, Some(&creds));
 
 	recorded.lock().unwrap().clear();
-	backend.read_tree(&fork_snap).unwrap();
+	backend.read_tree(&upstream_snap).unwrap();
 
 	let reqs = recorded.lock().unwrap();
 	let tree = reqs
@@ -332,18 +362,15 @@ fn a_second_repo_on_the_same_commit_keeps_its_own_repo_and_token() {
 		.find(|r| is_tree(&r.url))
 		.expect("read_tree issued a tree request");
 	assert!(
-		tree.url.contains("/repos/forkco/skills/"),
-		"the fork's read must go to the FORK's path, got {}",
+		tree.url.contains("/repos/acme/skills/"),
+		"the upstream snapshot must still read the UPSTREAM path, got {}",
 		tree.url
 	);
-	let auth = tree
-		.headers
-		.iter()
-		.find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-		.map(|(_, v)| v.as_str());
 	assert!(
-		matches!(auth, Some(v) if v.contains("ghp_FORKTOKEN")),
-		"the fork's read must carry the FORK's token, got {auth:?}"
+		tree.headers
+			.iter()
+			.all(|(k, _)| !k.eq_ignore_ascii_case("authorization")),
+		"and must stay anonymous — the fork's token is not its to spend"
 	);
 }
 

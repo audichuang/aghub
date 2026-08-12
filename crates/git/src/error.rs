@@ -62,13 +62,21 @@ impl GitError {
 	}
 
 	/// Create an invalid URL error.
+	///
+	/// Redacted as a SOURCE, not as free text: the argument IS a source, and
+	/// callers hand it the raw string a user typed or a lock recorded — which may
+	/// be a scheme-less `user:secret@host:path` that `redact_url_userinfo` would
+	/// pass through untouched.
 	pub fn invalid_url(url: impl Into<String>) -> Self {
-		Self::InvalidUrl(crate::redact::redact_url_userinfo(&url.into()))
+		Self::InvalidUrl(crate::redact::redact_source_credentials(&url.into()))
 	}
 
-	/// Create a not HTTPS error.
+	/// Create a not HTTPS error. Redacted as a SOURCE — see [`Self::invalid_url`].
+	/// This is the constructor that actually leaked: branch listing passes the
+	/// raw scan URL straight in, so a scheme-less credentialed source reached the
+	/// API response as `Not an HTTPS URL: git:ghp_…@host:o/r`.
 	pub fn not_https(url: impl Into<String>) -> Self {
-		Self::NotHttps(crate::redact::redact_url_userinfo(&url.into()))
+		Self::NotHttps(crate::redact::redact_source_credentials(&url.into()))
 	}
 
 	/// Create a REST-fallback error. The message is redacted so any URL

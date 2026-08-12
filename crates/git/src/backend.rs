@@ -125,21 +125,36 @@ impl GixShallow {
 		}
 	}
 
-	fn open_cached(&self, snapshot: &RepoSnapshot) -> Result<gix::Repository> {
-		let cache = self.cache.lock().map_err(|_| {
-			GitError::clone_failed("GixShallow cache lock poisoned")
-		})?;
-		let temp = cache.get(&snapshot.commit_oid).ok_or_else(|| {
-			GitError::clone_failed(format!(
-				"snapshot commit {} is not in the GixShallow cache; call resolve first",
-				snapshot.commit_oid
-			))
-		})?;
-		gix::open(temp.path()).map_err(|e| {
+	/// Open the cached bare repo for `snapshot`, returning the repository TOGETHER
+	/// with a clone of its `TempDir` guard.
+	///
+	/// The guard must travel with the repository: gix reads objects LAZILY, so a
+	/// caller holding only the `Repository` could have the directory deleted from
+	/// under it the moment the last `Arc` elsewhere dropped — and the resulting
+	/// object-lookup error surfaces to the user as `uncheckable/network` for a
+	/// source that is perfectly reachable. Callers must keep the guard alive for
+	/// every read they make.
+	fn open_cached(
+		&self,
+		snapshot: &RepoSnapshot,
+	) -> Result<(gix::Repository, Arc<TempDir>)> {
+		let temp = {
+			let cache = self.cache.lock().map_err(|_| {
+				GitError::clone_failed("GixShallow cache lock poisoned")
+			})?;
+			Arc::clone(cache.get(&snapshot.commit_oid).ok_or_else(|| {
+				GitError::clone_failed(format!(
+					"snapshot commit {} is not in the GixShallow cache; call resolve first",
+					snapshot.commit_oid
+				))
+			})?)
+		};
+		let repo = gix::open(temp.path()).map_err(|e| {
 			GitError::clone_failed(format!(
 				"Opening cached bare repo failed: {e}"
 			))
-		})
+		})?;
+		Ok((repo, temp))
 	}
 
 	fn fetch_tip(
@@ -227,7 +242,13 @@ impl RepoFetchBackend for GixShallow {
 			let mut cache = self.cache.lock().map_err(|_| {
 				GitError::clone_failed("GixShallow cache lock poisoned")
 			})?;
-			cache.insert(commit_oid.clone(), Arc::new(temp));
+			// `or_insert`, NOT `insert`: a commit oid names immutable content, so
+			// a second resolve landing on it describes the same objects — and
+			// replacing the entry dropped the previous `TempDir` while another
+			// group could still be lazily reading objects out of it.
+			cache
+				.entry(commit_oid.clone())
+				.or_insert_with(|| Arc::new(temp));
 		}
 
 		Ok(RepoSnapshot {
@@ -249,7 +270,9 @@ impl RepoFetchBackend for GixShallow {
 				return Ok(tree.clone());
 			}
 		}
-		let repo = self.open_cached(snapshot)?;
+		// `_guard` is load-bearing: gix reads objects lazily, so the temp dir
+		// must outlive every read made through `repo`.
+		let (repo, _guard) = self.open_cached(snapshot)?;
 		let tree_oid = gix::ObjectId::from_hex(snapshot.tree_oid.as_bytes())
 			.map_err(|e| {
 				GitError::clone_failed(format!(
@@ -278,7 +301,9 @@ impl RepoFetchBackend for GixShallow {
 		snapshot: &RepoSnapshot,
 		oids: &[String],
 	) -> Result<Vec<Blob>> {
-		let repo = self.open_cached(snapshot)?;
+		// `_guard` is load-bearing: gix reads objects lazily, so the temp dir
+		// must outlive every read made through `repo`.
+		let (repo, _guard) = self.open_cached(snapshot)?;
 		let mut out = Vec::with_capacity(oids.len());
 		for oid_hex in oids {
 			let oid =
@@ -313,7 +338,9 @@ impl RepoFetchBackend for GixShallow {
 			.filter(|e| entry_matches_selection(&e.path, paths))
 			.collect();
 
-		let repo = self.open_cached(snapshot)?;
+		// `_guard` is load-bearing: gix reads objects lazily, so the temp dir
+		// must outlive every read made through `repo`.
+		let (repo, _guard) = self.open_cached(snapshot)?;
 		let mut staged = Vec::with_capacity(selected.len());
 		for entry in selected {
 			let bytes = match entry.mode {

@@ -19,7 +19,8 @@ pub mod mutation;
 mod repository;
 pub use repository::{
 	skill_folder_from_lock_path, skill_repo_to_fetch_error, CatalogSkill,
-	FetchSelection, SkillCatalog, SkillRepoError, SkillRepository,
+	FetchSelection, PinnedSnapshot, SkillCatalog, SkillRepoError,
+	SkillRepository,
 };
 
 pub mod sources;
@@ -236,6 +237,23 @@ pub trait Fetcher: Send + Sync {
 		token: Option<&str>,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError>;
+
+	/// Fetch the snapshot a preflight already pinned, instead of re-resolving the
+	/// coordinate.
+	///
+	/// Defaulted so only the production adapter has to care: ignoring the claim
+	/// is still CORRECT, it just re-resolves (one more request, and a tip that may
+	/// have moved since the decision). [`GitFetcher`] overrides it so the fetch
+	/// operates on exactly the tip its preflight decided about.
+	fn fetch_pinned(
+		&self,
+		source_ref: &SourceRef,
+		token: Option<&str>,
+		selection: FetchSelection<'_>,
+		_pinned: &PinnedSnapshot,
+	) -> Result<FetchedRepo, FetchError> {
+		self.fetch(source_ref, token, selection)
+	}
 }
 
 /// Outcome of a fail-closed-aware token resolution: distinguishes "no
@@ -255,17 +273,42 @@ pub trait TokenResolver: Send + Sync {
 	fn resolve(&self, source: &str) -> TokenResolution;
 }
 
+/// What one tip preflight observed.
+///
+/// `commit_oid` is what the skip/fetch decision is made against. `pinned` is the
+/// snapshot that produced it, when the resolver had one — and carrying it as a
+/// VALUE to the following fetch is what guarantees the fetch operates on the tip
+/// that was decided about. Routing that handoff through any coordinate-keyed
+/// cache instead is last-writer-wins, and a slow observation of an older tip
+/// overwriting a newer one makes a moved source report `UpToDate`.
+#[derive(Clone, Debug)]
+pub struct TipObservation {
+	pub commit_oid: String,
+	pub pinned: Option<PinnedSnapshot>,
+}
+
+impl TipObservation {
+	/// An observation with no reusable snapshot — a ref advertisement yields an
+	/// OID and no tree, so the fetch that follows resolves for itself.
+	pub fn tip_only(commit_oid: impl Into<String>) -> Self {
+		Self {
+			commit_oid: commit_oid.into(),
+			pinned: None,
+		}
+	}
+}
+
 /// Resolves the current tip commit OID of a `(source, ref)` **without
-/// downloading objects**. Returns the 40-hex OID. Used for the preflight that
-/// skips the full fetch when nothing changed — so an implementation that reads
-/// the tip by fetching (git's own resolve-by-fetch) defeats the entire point.
-/// The production one is [`GitRefResolver`]; build it from the fetcher.
+/// downloading objects**. Used for the preflight that skips the full fetch when
+/// nothing changed — so an implementation that reads the tip by fetching (git's
+/// own resolve-by-fetch) defeats the entire point. The production one is
+/// [`GitRefResolver`]; build it from the fetcher.
 pub trait RefResolver: Send + Sync {
 	fn resolve(
 		&self,
 		source_ref: &SourceRef,
 		token: Option<&str>,
-	) -> Result<String, FetchError>;
+	) -> Result<TipObservation, FetchError>;
 }
 
 /// Orchestration knobs.
@@ -376,12 +419,31 @@ pub(crate) enum PreflightResult {
 /// budget, so the wasted call is now the difference between a working check and
 /// `uncheckable/network`.
 pub(crate) fn preflight_can_skip(members: &[EntryInput]) -> bool {
+	let mut recorded: Option<&str> = None;
 	members.iter().all(|m| {
-		m.ref_commit.is_some()
-			&& !lock_hash_unknown(m.stored_hash.as_deref())
-			&& m.local_hash.is_some()
-			&& m.local_hash == m.stored_hash
+		let Some(ref_commit) = m.ref_commit.as_deref() else {
+			return false;
+		};
+		// Members recording DIFFERENT commits (reachable after a partial update)
+		// can never all equal one remote tip, so no tip value could make this
+		// group skip — the exact condition this gate exists to detect.
+		if *recorded.get_or_insert(ref_commit) != ref_commit {
+			return false;
+		}
+		locally_intact(m)
 	})
+}
+
+/// The installed copy was READ and matches its recorded baseline.
+///
+/// Any answer that skips looking upstream — a preflight skip, a pinned-SHA
+/// shortcut — is only honest if this holds: otherwise "nothing moved upstream"
+/// gets reported as `UpToDate` for a skill whose folder is missing, unreadable,
+/// or locally modified.
+fn locally_intact(m: &EntryInput) -> bool {
+	!lock_hash_unknown(m.stored_hash.as_deref())
+		&& m.local_hash.is_some()
+		&& m.local_hash == m.stored_hash
 }
 
 pub(crate) fn preflight_decision(
@@ -463,6 +525,22 @@ fn classify_member_from_probe(
 				fresh_hash,
 				upstream_commit_time,
 			);
+			// The lock agreeing with upstream does NOT mean the installed copy is
+			// current — it means upstream has not moved since we recorded it. With
+			// no readable local copy (folder deleted, unreadable, or two agent
+			// copies disagreeing) that came out as `UpToDate` for a skill that is
+			// not on disk, which is the one answer a user acts on by doing
+			// nothing. `UpdateAvailable` stays as-is: an update really does exist,
+			// and applying it restores the folder.
+			let status = if status == SkillUpdateStatus::UpToDate
+				&& !unknown && member.local_hash.is_none()
+			{
+				SkillUpdateStatus::Uncheckable {
+					reason: UncheckableReason::Local,
+				}
+			} else {
+				status
+			};
 			CheckOutput {
 				key,
 				status,
@@ -551,9 +629,19 @@ pub async fn check_updates(
 			continue;
 		}
 
-		// 2) Pinned SHA → UpToDate without fetching.
+		// 2) Pinned SHA → UpToDate without fetching, but ONLY while every
+		//    installed copy still matches its baseline.
+		//
+		//    A commit pin means upstream cannot have moved, so skipping the
+		//    network is sound. It says nothing about the local copy, and this
+		//    shortcut used to answer `UpToDate` for a pinned skill whose folder
+		//    had been deleted. It is also the only thing standing behind
+		//    `is_pinned_sha`, which infers immutability from SPELLING — a branch
+		//    or force-moved tag named like a 40-hex OID lands here too, so
+		//    falling through on local drift is what stops that inference from
+		//    also skipping every other check.
 		if let Some(r) = &sr.ref_ {
-			if is_pinned_sha(r) {
+			if is_pinned_sha(r) && members.iter().all(locally_intact) {
 				deps.cache.put(
 					sr.clone(),
 					CachedGroup::Terminal(SkillUpdateStatus::UpToDate),
@@ -621,6 +709,9 @@ pub async fn check_updates(
 		let per_fetch = deps.per_fetch;
 		set.spawn(async move {
 			let _permit = semaphore.clone().acquire_owned().await.ok();
+			// The snapshot the preflight pinned, when it had one — handed to the
+			// fetch below so both act on the same tip.
+			let mut pinned: Option<PinnedSnapshot> = None;
 			// Tip preflight, no object download (bounded by the per-fetch timeout):
 			// skip the fetch when the tip is unchanged AND every member is
 			// trustworthy. Any resolver error falls through to the full fetch.
@@ -641,10 +732,13 @@ pub async fn check_updates(
 					do_resolve(rr, job.sr.clone(), job.token.clone()),
 				)
 				.await;
-				let decision = match &tip {
-					Ok(Ok(tip)) => Some(preflight_decision(&job.members, tip)),
+				let observed = match tip {
+					Ok(Ok(observed)) => Some(observed),
 					_ => None,
 				};
+				let decision = observed.as_ref().map(|observed| {
+					preflight_decision(&job.members, &observed.commit_oid)
+				});
 				log::info!(
 					"check-updates preflight [{}]: ref={:?} {} took={:?}",
 					aghub_git::redact_source_credentials(&job.sr.source),
@@ -659,6 +753,7 @@ pub async fn check_updates(
 				if let Some(PreflightResult::Skip(cached)) = decision {
 					return (id, job.sr, job.members, JobResult::Skip(cached));
 				}
+				pinned = observed.and_then(|observed| observed.pinned);
 			}
 			// Path-scoped fetch: only the locked skill folders for this group.
 			let folders: Vec<skill::SkillPath> = job
@@ -672,7 +767,7 @@ pub async fn check_updates(
 				.collect();
 			let result = tokio::time::timeout(
 				per_fetch,
-				do_fetch(fetcher, job.sr.clone(), job.token, folders),
+				do_fetch(fetcher, job.sr.clone(), job.token, folders, pinned),
 			)
 			.await;
 			let outcome = match result {
@@ -795,9 +890,19 @@ async fn do_fetch(
 	sr: SourceRef,
 	token: Option<String>,
 	folders: Vec<skill::SkillPath>,
+	pinned: Option<PinnedSnapshot>,
 ) -> Result<FetchedRepo, FetchError> {
 	tokio::task::spawn_blocking(move || {
-		fetcher.fetch(&sr, token.as_deref(), FetchSelection::Skills(&folders))
+		let selection = FetchSelection::Skills(&folders);
+		match &pinned {
+			// The preflight decided `Fetch` about a SPECIFIC tip. Fetching that
+			// exact snapshot is what makes the verdict and the content agree; a
+			// re-resolve here could land on a tip nobody judged.
+			Some(pinned) => {
+				fetcher.fetch_pinned(&sr, token.as_deref(), selection, pinned)
+			}
+			None => fetcher.fetch(&sr, token.as_deref(), selection),
+		}
 	})
 	.await
 	.unwrap_or_else(|e| Err(FetchError::network(format!("fetch task: {e}"))))
@@ -808,7 +913,7 @@ async fn do_resolve(
 	resolver: Arc<dyn RefResolver>,
 	sr: SourceRef,
 	token: Option<String>,
-) -> Result<String, FetchError> {
+) -> Result<TipObservation, FetchError> {
 	tokio::task::spawn_blocking(move || resolver.resolve(&sr, token.as_deref()))
 		.await
 		.unwrap_or_else(|e| {
@@ -1040,12 +1145,12 @@ mod tests {
 			&self,
 			_sr: &SourceRef,
 			_token: Option<&str>,
-		) -> Result<String, FetchError> {
+		) -> Result<TipObservation, FetchError> {
 			*self.calls.lock().unwrap() += 1;
 			match self.err {
 				Some("auth") => Err(FetchError::Auth),
 				Some(_) => Err(FetchError::network("stub")),
-				None => Ok(self.oid.clone()),
+				None => Ok(TipObservation::tip_only(self.oid.clone())),
 			}
 		}
 	}
@@ -1061,7 +1166,7 @@ mod tests {
 			err: None,
 			calls: Mutex::new(0),
 		});
-		let ref_resolver: Arc<dyn RefResolver> = Arc::new(StubRefResolver {
+		let ref_resolver = Arc::new(StubRefResolver {
 			oid: tip.to_string(),
 			err: None,
 			calls: Mutex::new(0),
@@ -1070,7 +1175,7 @@ mod tests {
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let deps = CheckDeps {
 			fetcher: fetcher.clone(),
-			ref_resolver: Some(ref_resolver),
+			ref_resolver: Some(ref_resolver.clone() as Arc<dyn RefResolver>),
 			resolver: &resolver,
 			cache: &mut cache,
 			per_fetch: Duration::from_secs(5),
@@ -1090,6 +1195,144 @@ mod tests {
 			0,
 			"preflight hit must skip the fetch"
 		);
+		// Without this the test passed even if the tip was never looked up at
+		// all — a fabricated `UpToDate` reads identically from the outside.
+		assert_eq!(
+			*ref_resolver.calls.lock().unwrap(),
+			1,
+			"the skip must be justified by an actual tip lookup"
+		);
+	}
+
+	/// A preflight is an OPTIMIZATION, so failing it must cost only the
+	/// optimization. Every resolver error is a soft failure that falls through to
+	/// the full fetch — nothing here may turn a reachable source into
+	/// `Uncheckable` just because the tip lookup broke.
+	#[tokio::test]
+	async fn preflight_failure_falls_through_to_a_successful_fetch() {
+		for kind in ["auth", "network"] {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+			let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+			let tip = "abc123def456abc123def456abc123def456abc1";
+			let fetcher = Arc::new(StubFetcher {
+				root: Some(dir.path().to_path_buf()),
+				err: None,
+				calls: Mutex::new(0),
+			});
+			let ref_resolver = Arc::new(StubRefResolver {
+				oid: tip.to_string(),
+				err: Some(kind),
+				calls: Mutex::new(0),
+			});
+			let resolver = StubResolver(None);
+			let mut cache = ResultCache::new(Duration::from_secs(300));
+			let deps = CheckDeps {
+				fetcher: fetcher.clone(),
+				ref_resolver: Some(ref_resolver.clone() as Arc<dyn RefResolver>),
+				resolver: &resolver,
+				cache: &mut cache,
+				per_fetch: Duration::from_secs(5),
+				concurrency: 4,
+				offline: false,
+				overall_deadline: Duration::from_secs(30),
+			};
+			let mut a = entry("a", "o/r", Some("main"));
+			a.ref_commit = Some(tip.to_string());
+			a.stored_hash = Some(hash.clone());
+			a.local_hash = Some(hash);
+
+			let out = check_updates(vec![a], deps).await;
+
+			assert_eq!(*ref_resolver.calls.lock().unwrap(), 1, "{kind}");
+			assert_eq!(
+				*fetcher.calls.lock().unwrap(),
+				1,
+				"a failed preflight ({kind}) must still be answered by a fetch"
+			);
+			assert_eq!(
+				out[0].status,
+				SkillUpdateStatus::UpToDate,
+				"and the fetch's real answer must reach the user ({kind})"
+			);
+		}
+	}
+
+	/// Every local blocker, not just a missing `ref_commit`, must save the round
+	/// trip — each one makes a skip impossible whatever the remote answers.
+	#[tokio::test]
+	async fn every_unskippable_reason_spends_zero_preflight_requests() {
+		let tip = "abc123def456abc123def456abc123def456abc1";
+		/// One way a group becomes unskippable, applied to an otherwise
+		/// trustworthy member.
+		type Blocker = (&'static str, fn(&mut EntryInput));
+		let cases: Vec<Blocker> = vec![
+			("no ref_commit", |e| e.ref_commit = None),
+			("no stored hash", |e| e.stored_hash = None),
+			("placeholder stored hash", |e| {
+				e.stored_hash = Some(String::new())
+			}),
+			("no local hash", |e| e.local_hash = None),
+			("local drift", |e| e.local_hash = Some("DRIFTED".into())),
+		];
+		for (label, break_it) in cases {
+			let dir = tempfile::tempdir().unwrap();
+			std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+			let hash = skill::compute_skill_folder_hash(dir.path()).unwrap();
+			let fetcher = Arc::new(StubFetcher {
+				root: Some(dir.path().to_path_buf()),
+				err: None,
+				calls: Mutex::new(0),
+			});
+			let ref_resolver = Arc::new(StubRefResolver {
+				oid: tip.to_string(),
+				err: None,
+				calls: Mutex::new(0),
+			});
+			let resolver = StubResolver(None);
+			let mut cache = ResultCache::new(Duration::from_secs(300));
+			let deps = CheckDeps {
+				fetcher: fetcher.clone(),
+				ref_resolver: Some(ref_resolver.clone() as Arc<dyn RefResolver>),
+				resolver: &resolver,
+				cache: &mut cache,
+				per_fetch: Duration::from_secs(5),
+				concurrency: 4,
+				offline: false,
+				overall_deadline: Duration::from_secs(30),
+			};
+			let mut a = entry("a", "o/r", Some("main"));
+			a.ref_commit = Some(tip.to_string());
+			a.stored_hash = Some(hash.clone());
+			a.local_hash = Some(hash);
+			break_it(&mut a);
+
+			check_updates(vec![a], deps).await;
+
+			assert_eq!(
+				*ref_resolver.calls.lock().unwrap(),
+				0,
+				"{label}: no tip value could have produced a skip"
+			);
+			assert_eq!(
+				*fetcher.calls.lock().unwrap(),
+				1,
+				"{label}: the group must still be answered by a fetch"
+			);
+		}
+	}
+
+	/// Two members of one group recording DIFFERENT commits can never both equal
+	/// one remote tip, so the gate must recognise that locally too.
+	#[test]
+	fn members_on_different_commits_cannot_skip() {
+		let mut a =
+			trustworthy_member("aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1aaa1");
+		a.name = "a".into();
+		let mut b =
+			trustworthy_member("bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2bbb2");
+		b.name = "b".into();
+		assert!(!preflight_can_skip(&[a, b]));
 	}
 
 	/// A group that cannot skip whatever upstream answers must not spend a tip
@@ -1565,11 +1808,61 @@ mod tests {
 			overall_deadline: Duration::from_secs(30),
 		};
 		let sha = "0123456789abcdef0123456789abcdef01234567";
-		let out = check_updates(vec![entry("a", "o/r", Some(sha))], deps).await;
+		let mut a = entry("a", "o/r", Some(sha));
+		a.stored_hash = Some("H".into());
+		a.local_hash = Some("H".into());
+		let out = check_updates(vec![a], deps).await;
 		assert_eq!(out.len(), 1);
 		assert_eq!(out[0].status, SkillUpdateStatus::UpToDate);
 		assert_eq!(out[0].heal_hash, None);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "pin must not fetch");
+	}
+
+	/// A commit pin means UPSTREAM cannot move; it says nothing about the local
+	/// copy. Answering `UpToDate` with no readable installed copy reported a
+	/// deleted skill as current, and it is also the only guard behind
+	/// `is_pinned_sha` inferring immutability from spelling alone.
+	#[tokio::test]
+	async fn pinned_sha_does_not_excuse_a_missing_local_copy() {
+		let dir = tempfile::tempdir().unwrap();
+		std::fs::write(dir.path().join("SKILL.md"), b"x").unwrap();
+		let upstream = skill::compute_skill_folder_hash(dir.path()).unwrap();
+		let fetcher = Arc::new(StubFetcher {
+			root: Some(dir.path().to_path_buf()),
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			ref_resolver: None,
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline: false,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let sha = "0123456789abcdef0123456789abcdef01234567";
+		let mut a = entry("a", "o/r", Some(sha));
+		a.stored_hash = Some(upstream);
+		a.local_hash = None; // the folder is gone
+
+		let out = check_updates(vec![a], deps).await;
+
+		assert_eq!(
+			out[0].status,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Local
+			},
+			"a pinned skill with no readable copy must not read as current"
+		);
+		assert_eq!(
+			*fetcher.calls.lock().unwrap(),
+			1,
+			"and the shortcut must give way to a real fetch"
+		);
 	}
 
 	#[tokio::test]
@@ -1862,10 +2155,12 @@ mod tests {
 		};
 		let mut a = entry("a", "o/r", Some("main"));
 		a.skill_path = Some("a/SKILL.md".into());
-		a.stored_hash = Some(hash_a);
+		a.stored_hash = Some(hash_a.clone());
+		a.local_hash = Some(hash_a);
 		let mut b = entry("b", "o/r", Some("main"));
 		b.skill_path = Some("b/SKILL.md".into());
 		b.stored_hash = Some("old".into());
+		b.local_hash = Some("old".into());
 		let out = check_updates(vec![a, b], deps).await;
 		let by_name: HashMap<_, _> =
 			out.into_iter().map(|o| (o.key.name.clone(), o)).collect();

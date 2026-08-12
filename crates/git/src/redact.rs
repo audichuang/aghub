@@ -55,18 +55,37 @@ pub fn redact_source_credentials(source: &str) -> String {
 	redact_schemeless_userinfo(&redact_url_userinfo(source))
 }
 
-/// Redact `user:secret@` from a scheme-less source. Operates on the authority
-/// only (everything before the first `/`), and requires a `:` before the `@`,
-/// so the two shapes that legitimately carry an `@` survive untouched:
-/// `git@github.com:owner/repo.git` (an SSH *user*, no secret) and any path
-/// containing `@`. A plain `owner/repo` has no `@` at all.
+/// Redact `user:secret@` from a scheme-less source.
+///
+/// Userinfo, when present, STARTS the string (`user:secret@rest`), so the test
+/// is "a `:` before the first `/`, then an `@` after it". That keeps the two
+/// shapes which legitimately carry an `@` intact: `git@github.com:owner/repo.git`
+/// (an SSH *user*, no secret — nothing before the `@` has a colon) and a path
+/// containing `@` (`host/a:b@c` — the colon is past the first `/`).
+///
+/// It takes the LAST `@`, not the first, because a password may itself contain
+/// `/` or `@` — `git:tok/part@host:o/r.git` was the exact spelling an earlier
+/// authority-ends-at-the-first-slash version let through into a log verbatim.
+/// The bias is deliberate: over-redacting a pathological scheme-less source that
+/// carries a port and an `@` in its path mangles one log line, while
+/// under-redacting publishes a credential.
 fn redact_schemeless_userinfo(source: &str) -> String {
-	let authority_end = source.find('/').unwrap_or(source.len());
-	let authority = &source[..authority_end];
-	let Some(at) = authority.rfind('@') else {
+	// A source WITH a scheme is `redact_url_userinfo`'s job and it has already
+	// run; `://` also makes the colon test below meaningless (`https:` sits
+	// before the first `/`), which would eat the scheme off an already-redacted
+	// URL. Bailing here is the same first condition `strip_scp_like_password`
+	// applies, which is what keeps the two in step.
+	if source.contains("://") {
+		return source.to_string();
+	}
+	let first_slash = source.find('/').unwrap_or(source.len());
+	if !source[..first_slash].contains(':') {
+		return source.to_string();
+	}
+	let Some(at) = source.rfind('@') else {
 		return source.to_string();
 	};
-	if !authority[..at].contains(':') {
+	if !source[..at].contains(':') {
 		return source.to_string();
 	}
 	format!("***{}", &source[at..])
@@ -202,6 +221,22 @@ mod tests {
 			redact_source_credentials(
 				"git:ghp_SECRET@github.com:owner/repo.git"
 			),
+			"***@github.com:owner/repo.git"
+		);
+	}
+
+	/// `crate::source`'s `strip_scp_like_password` accepts a password containing
+	/// `/` or `@`, so redaction must cover the same spellings — an
+	/// authority-ends-at-the-first-slash rule let the first of these through into
+	/// a log verbatim while the fetch path had already stripped it.
+	#[test]
+	fn source_redaction_covers_a_password_containing_slash_or_at() {
+		assert_eq!(
+			redact_source_credentials("git:tok/part@github.com:owner/repo.git"),
+			"***@github.com:owner/repo.git"
+		);
+		assert_eq!(
+			redact_source_credentials("git:tok@part@github.com:owner/repo.git"),
 			"***@github.com:owner/repo.git"
 		);
 	}

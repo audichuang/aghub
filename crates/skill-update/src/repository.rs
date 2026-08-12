@@ -112,26 +112,43 @@ pub fn skill_repo_to_fetch_error(e: SkillRepoError) -> FetchError {
 pub struct SkillRepository {
 	rest: Option<Arc<dyn RepoFetchBackend>>,
 	gix: Arc<dyn RepoFetchBackend>,
-	/// `commit_oid` → backend that resolved the immutable snapshot.
+	/// `commit_oid` → backend that resolved the immutable snapshot. Consulted
+	/// only by callers that did NOT come through a [`PinnedSnapshot`]; a claim
+	/// carries its own backend, which is what keeps two sources landing on one
+	/// commit from routing each other's operations.
 	memo: Mutex<HashMap<String, BackendKind>>,
-	/// Snapshots [`Self::resolve_tip`] already paid for, so the fetch that a
-	/// `Fetch` verdict triggers does not buy the SAME tip a second time.
-	///
-	/// WRITTEN only by `resolve_tip`, READ only by `resolve` — a plain
-	/// `resolve`-only caller therefore behaves exactly as before, and nothing
-	/// caches a tip that nobody asked for twice.
-	preflighted: Mutex<HashMap<TipKey, RepoSnapshot>>,
 }
 
-/// Identity of one tip lookup. The token is part of it because two callers with
-/// different credentials are not asking the same question — one may see a repo
-/// the other cannot — and a cache that conflated them would hand an anonymous
-/// caller a private repo's tip.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-struct TipKey {
-	url: String,
-	ref_: Option<String>,
-	token: Option<String>,
+/// An immutable snapshot together with the backend slot that produced it.
+///
+/// This is the handoff from a tip preflight to the fetch its verdict triggers.
+/// It is a VALUE the caller carries, deliberately not an entry in a
+/// coordinate-keyed cache: a `(url, ref, token) -> snapshot` map is
+/// last-writer-wins, so a slow observation of an older tip could overwrite a
+/// newer one and the fetch would then operate on a tip nobody decided about —
+/// silently reporting `UpToDate` for a source that had moved on. Two source
+/// spellings normalizing to one coordinate (`acme/skills`, `github:acme/skills`
+/// and `https://github.com/acme/skills.git` all do) put two concurrent groups on
+/// exactly that key.
+///
+/// Opaque on purpose: only [`SkillRepository`] can mint one, so a claim always
+/// names a snapshot this repository really resolved.
+#[derive(Clone, Debug)]
+pub struct PinnedSnapshot {
+	snapshot: RepoSnapshot,
+	backend: BackendKind,
+}
+
+impl PinnedSnapshot {
+	/// The pinned commit OID.
+	pub fn commit_oid(&self) -> &str {
+		&self.snapshot.commit_oid
+	}
+
+	/// The snapshot this claim pins.
+	pub fn snapshot(&self) -> &RepoSnapshot {
+		&self.snapshot
+	}
 }
 
 impl Default for SkillRepository {
@@ -169,7 +186,6 @@ impl SkillRepository {
 			rest,
 			gix,
 			memo: Mutex::new(HashMap::new()),
-			preflighted: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -182,18 +198,6 @@ impl SkillRepository {
 		token: Option<&str>,
 	) -> Result<RepoSnapshot, SkillRepoError> {
 		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
-
-		// A preflight on this exact coordinate already bought this tip. Reusing
-		// it is not just a latency saving: the preflight and the fetch are one
-		// logical "is it stale, and if so give me it", and paying twice doubled
-		// this flow's GitHub API spend against a 60/hour anonymous budget.
-		if let Some(snapshot) = self.preflighted_snapshot(&git_sr, token)? {
-			log::info!(
-				"skill repo resolve: reusing preflight snapshot ref={:?}",
-				sr.ref_
-			);
-			return Ok(snapshot);
-		}
 
 		// Timing spans below are the ONLY visibility into where a slow source
 		// diff spends its seconds: resolve/list/materialize are separate network
@@ -253,11 +257,14 @@ impl SkillRepository {
 	/// [`RepoFetchBackend::resolve`]: the gix backend resolves by performing the
 	/// depth-1 fetch, so routing the preflight through it would pay the full cost
 	/// on exactly the sources it was meant to spare.
+	/// Returns the tip OID plus, when the REST slot served it, a
+	/// [`PinnedSnapshot`] claim the caller hands to [`Self::fetch_pinned`] so the
+	/// fetch operates on the very tip the decision was made about.
 	pub fn resolve_tip(
 		&self,
 		sr: &SourceRef,
 		token: Option<&str>,
-	) -> Result<String, SkillRepoError> {
+	) -> Result<(String, Option<PinnedSnapshot>), SkillRepoError> {
 		let (git_sr, auth, try_rest) = self.coordinates(sr, token)?;
 
 		let started = Instant::now();
@@ -271,8 +278,13 @@ impl SkillRepository {
 						started.elapsed()
 					);
 					self.remember(&snap.commit_oid, BackendKind::Rest)?;
-					self.record_preflight(&git_sr, token, &snap)?;
-					return Ok(snap.commit_oid);
+					return Ok((
+						snap.commit_oid.clone(),
+						Some(PinnedSnapshot {
+							snapshot: snap,
+							backend: BackendKind::Rest,
+						}),
+					));
 				}
 				Err(GitError::RestFallback(_)) => {
 					log::info!(
@@ -300,7 +312,9 @@ impl SkillRepository {
 			ls_refs_started.elapsed(),
 			started.elapsed()
 		);
-		tip.ok_or_else(|| {
+		// No claim on this path: an advertisement yields an OID, not a tree, so
+		// there is no snapshot to pin. The fetch resolves for itself.
+		tip.map(|oid| (oid, None)).ok_or_else(|| {
 			SkillRepoError::Network(match git_sr.ref_.as_deref() {
 				Some(r) => format!("remote has no ref '{r}'"),
 				None => "remote advertised no default branch".to_string(),
@@ -308,36 +322,16 @@ impl SkillRepository {
 		})
 	}
 
-	fn tip_key(git_sr: &aghub_git::SourceRef, token: Option<&str>) -> TipKey {
-		TipKey {
-			url: git_sr.url.clone(),
-			ref_: git_sr.ref_.clone(),
-			token: token.map(str::to_owned),
-		}
-	}
-
-	fn record_preflight(
+	/// Materialize `selection` from a claim a preflight already pinned — no tip
+	/// resolution, and the backend comes from the claim rather than the
+	/// commit-oid-keyed memo, so a concurrent group that landed on the same
+	/// commit cannot route this operation to its own slot.
+	pub fn fetch_pinned(
 		&self,
-		git_sr: &aghub_git::SourceRef,
-		token: Option<&str>,
-		snapshot: &RepoSnapshot,
-	) -> Result<(), SkillRepoError> {
-		let mut cache = self.preflighted.lock().map_err(|_| {
-			SkillRepoError::Network("preflight cache lock poisoned".to_string())
-		})?;
-		cache.insert(Self::tip_key(git_sr, token), snapshot.clone());
-		Ok(())
-	}
-
-	fn preflighted_snapshot(
-		&self,
-		git_sr: &aghub_git::SourceRef,
-		token: Option<&str>,
-	) -> Result<Option<RepoSnapshot>, SkillRepoError> {
-		let cache = self.preflighted.lock().map_err(|_| {
-			SkillRepoError::Network("preflight cache lock poisoned".to_string())
-		})?;
-		Ok(cache.get(&Self::tip_key(git_sr, token)).cloned())
+		pinned: &PinnedSnapshot,
+		selection: FetchSelection<'_>,
+	) -> Result<FetchedRepo, SkillRepoError> {
+		self.fetch_with_backend(&pinned.snapshot, pinned.backend, selection)
 	}
 
 	/// Shared fetch coordinate for [`Self::resolve`] / [`Self::resolve_tip`]:
@@ -376,9 +370,18 @@ impl SkillRepository {
 		&self,
 		snapshot: &RepoSnapshot,
 	) -> Result<SkillCatalog, SkillRepoError> {
+		let backend = self.memo_for(&snapshot.commit_oid)?;
+		self.list_with_backend(snapshot, backend)
+	}
+
+	fn list_with_backend(
+		&self,
+		snapshot: &RepoSnapshot,
+		backend: BackendKind,
+	) -> Result<SkillCatalog, SkillRepoError> {
 		let started = Instant::now();
 		let (tree, blobs) =
-			self.execute_backend(snapshot, |backend, snapshot| {
+			self.run_on(backend, snapshot, |backend, snapshot| {
 				backend.read_tree_and_blobs(snapshot, &|tree| {
 					catalog_skill_md_entries(tree)
 						.into_iter()
@@ -454,12 +457,22 @@ impl SkillRepository {
 		snapshot: &RepoSnapshot,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
+		let backend = self.memo_for(&snapshot.commit_oid)?;
+		self.fetch_with_backend(snapshot, backend, selection)
+	}
+
+	fn fetch_with_backend(
+		&self,
+		snapshot: &RepoSnapshot,
+		backend: BackendKind,
+		selection: FetchSelection<'_>,
+	) -> Result<FetchedRepo, SkillRepoError> {
 		let path_owned: Vec<String> = match selection {
 			FetchSelection::Skills(paths) => {
 				paths.iter().map(|p| p.as_str().to_string()).collect()
 			}
 			FetchSelection::CatalogSnapshot => {
-				let catalog = self.list(snapshot)?;
+				let catalog = self.list_with_backend(snapshot, backend)?;
 				let mut paths: Vec<String> = catalog
 					.skills
 					.into_iter()
@@ -470,8 +483,8 @@ impl SkillRepository {
 			}
 		};
 		if path_owned.iter().any(String::is_empty) {
-			let tree = self
-				.execute_backend(snapshot, |backend, snapshot| {
+			let tree =
+				self.run_on(backend, snapshot, |backend, snapshot| {
 					backend.read_tree(snapshot)
 				})?;
 			root_size_preflight(&tree)?;
@@ -482,7 +495,7 @@ impl SkillRepository {
 		let dest = tempfile::TempDir::new()
 			.map_err(|e| SkillRepoError::Network(format!("temp dir: {e}")))?;
 		let started = Instant::now();
-		self.execute_backend(snapshot, |backend, snapshot| {
+		self.run_on(backend, snapshot, |backend, snapshot| {
 			backend.materialize(snapshot, &path_refs, dest.path())
 		})?;
 		log::info!(
@@ -510,15 +523,21 @@ impl SkillRepository {
 		Ok(())
 	}
 
-	fn execute_backend<T>(
+	/// Run `operation` on `backend`. Callers reach this either through a
+	/// [`PinnedSnapshot`] claim (which names its own backend) or through
+	/// [`Self::memo_for`] — the memo is keyed by commit oid alone, so prefer a
+	/// claim wherever one exists: two sources landing on one commit overwrite
+	/// each other's memo entry.
+	fn run_on<T>(
 		&self,
+		backend: BackendKind,
 		snapshot: &RepoSnapshot,
 		operation: impl Fn(
 			&dyn RepoFetchBackend,
 			&RepoSnapshot,
 		) -> aghub_git::Result<T>,
 	) -> Result<T, SkillRepoError> {
-		match self.memo_for(&snapshot.commit_oid)? {
+		match backend {
 			BackendKind::Gix => {
 				operation(self.gix.as_ref(), snapshot).map_err(map_git_error)
 			}
