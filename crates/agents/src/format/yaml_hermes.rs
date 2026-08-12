@@ -7,8 +7,8 @@
 
 use crate::errors::{ConfigError, Result};
 use crate::format::transport_policy::{
-	missing_transport_error, reject_mixed_transport, remote_transport,
-	transport_fields, transport_keys, FieldValue,
+	missing_transport_error, reject_mixed_transport, remote_tag_key,
+	remote_transport, transport_fields, transport_keys, FieldValue,
 };
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use serde_yaml::{Mapping, Value};
@@ -89,8 +89,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			})?,
 		};
 		// Reject mixed families on key PRESENCE before extracting any field so
-		// error precedence matches the pre-extraction behaviour. Hermes has a
-		// single remote transport, so `type` is not part of the remote family.
+		// error precedence matches the pre-extraction behaviour.
 		let has_stdio = ["command", "args", "env"]
 			.iter()
 			.any(|k| server.contains_key(*k));
@@ -149,8 +148,16 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				None => None,
 				Some(v) => Some(value_to_string_map(v, name, "headers")?),
 			};
-			// Single remote transport: `type` is not read; pass `None`.
-			remote_transport(url, headers, None, true, name, "Hermes")?
+			let tag = match server.get(remote_tag_key(true)) {
+				None => None,
+				Some(Value::String(kind)) => Some(kind.clone()),
+				Some(_) => {
+					return Err(ConfigError::InvalidConfig(format!(
+						"Hermes MCP server `{name}` field `transport` must be a string"
+					)));
+				}
+			};
+			remote_transport(url, headers, tag, true, name, "Hermes")?
 		} else {
 			return Err(missing_transport_error(name, "Hermes"));
 		};
@@ -220,8 +227,7 @@ pub fn serialize(
 			})?,
 		};
 		// Remove all transport-owned keys before re-inserting (avoids stale
-		// keys when a server's transport changes). `single_remote = true`, so a
-		// transferred Sse server serializes as the one remote transport.
+		// keys when a server's transport changes).
 		for k in transport_keys(true) {
 			entry.remove(*k);
 		}
@@ -286,6 +292,37 @@ mcp_servers:
 		let cfg = parse(yaml).unwrap();
 		assert!(cfg.mcps.iter().find(|m| m.name == "on").unwrap().enabled);
 		assert!(!cfg.mcps.iter().find(|m| m.name == "off").unwrap().enabled);
+	}
+
+	#[test]
+	fn parse_and_serialize_native_sse_transport() {
+		let yaml = "
+mcp_servers:
+  events:
+    url: https://example.com/sse
+    transport: sse
+";
+		let cfg = parse(yaml).unwrap();
+		assert!(matches!(cfg.mcps[0].transport, McpTransport::Sse { .. }));
+
+		let output = serialize(&cfg, Some(yaml)).unwrap();
+		assert!(output.contains("transport: sse"));
+	}
+
+	#[test]
+	fn switching_hermes_sse_to_http_removes_transport_tag() {
+		let yaml = "
+mcp_servers:
+  remote:
+    url: https://example.com/sse
+    transport: sse
+";
+		let mut cfg = parse(yaml).unwrap();
+		cfg.mcps[0].transport =
+			McpTransport::streamable_http("https://example.com/mcp");
+
+		let output = serialize(&cfg, Some(yaml)).unwrap();
+		assert!(!output.contains("transport:"));
 	}
 
 	#[test]

@@ -88,6 +88,18 @@ mod tests {
 	}
 
 	#[test]
+	fn test_find_project_root_with_root_opencode_config() {
+		let temp_dir = TempDir::new().unwrap();
+		let project_root = temp_dir.path().join("myproject");
+		let nested_dir = project_root.join("src");
+		fs::create_dir_all(&nested_dir).unwrap();
+		fs::write(project_root.join("opencode.json"), "{}").unwrap();
+
+		let found = find_project_root(&nested_dir).unwrap();
+		assert_eq!(found, project_root);
+	}
+
+	#[test]
 	fn test_find_project_root_nested() {
 		let temp_dir = TempDir::new().unwrap();
 		let project_root = temp_dir.path().join("myproject");
@@ -144,19 +156,16 @@ mod tests {
 				.expect("Cursor should have a project MCP path"),
 			dir.join(".cursor/mcp.json")
 		);
-		assert_eq!(
-			windsurf
-				.mcp_project_path
-				.and_then(|path| path(dir))
-				.expect("Windsurf should have a project MCP path"),
-			dir.join(".windsurf/mcp_config.json")
+		assert!(
+			windsurf.mcp_project_path.is_none(),
+			"Windsurf MCP is global-only"
 		);
 		assert_eq!(
 			copilot
 				.mcp_project_path
 				.and_then(|path| path(dir))
 				.expect("Copilot should have a project MCP path"),
-			dir.join(".vscode/mcp.json")
+			dir.join(".mcp.json")
 		);
 		assert_eq!(
 			roocode
@@ -172,12 +181,7 @@ mod tests {
 				.expect("Gemini should have a project MCP path"),
 			dir.join(".gemini/settings.json")
 		);
-		assert_eq!(
-			kimi.mcp_project_path
-				.and_then(|path| path(dir))
-				.expect("Kimi should have a project MCP path"),
-			dir.join(".kimi/mcp.json")
-		);
+		assert!(kimi.mcp_project_path.is_none(), "Kimi MCP is global-only");
 		assert_eq!(
 			codex
 				.mcp_project_path
@@ -190,15 +194,9 @@ mod tests {
 				.mcp_project_path
 				.and_then(|path| path(dir))
 				.expect("Antigravity should have a project MCP path"),
-			dir.join(".gemini/antigravity/mcp_config.json")
+			dir.join(".agents/mcp_config.json")
 		);
 		assert!(openclaw.mcp_project_path.is_none());
-		assert_eq!(
-			cline
-				.mcp_project_path
-				.and_then(|path| path(dir))
-				.expect("Cline should have a project MCP path"),
-			dir.join(".cline/mcp.json")
-		);
+		assert!(cline.mcp_project_path.is_none(), "Cline MCP is global-only");
 	}
 }

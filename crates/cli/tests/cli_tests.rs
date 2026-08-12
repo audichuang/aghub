@@ -15,6 +15,7 @@ fn aghub_cli() -> Command {
 	cmd.env("HOME", &dir);
 	cmd.env("USERPROFILE", &dir);
 	cmd.env("APPDATA", &dir);
+	clear_agent_home_overrides(&mut cmd);
 	cmd
 }
 
@@ -44,7 +45,7 @@ fn test_agent_all_get_skills_is_valid_json_array() {
 		assert!(entry["agent"].is_string(), "each entry must have 'agent'");
 	}
 
-	// Cline has universal_skills + project_skills_path = root/.agents/skills
+	// Cline has universal_skills + project_skills_path = root/.agents/skills.
 	// fixtures/.cline/ makes fixtures/ the project root, so cline sees:
 	// fixtures/.agents/skills/vercel-react-best-practices/SKILL.md
 	assert!(
@@ -74,7 +75,8 @@ fn test_agent_all_get_mcps_is_valid_json_array() {
 	let arr = json.as_array().expect("output must be a JSON array");
 	assert!(!arr.is_empty(), "array must not be empty");
 
-	// Each entry is an MCP with an agent field
+	// Each entry is an MCP with an agent field. Cline's global MCP file is
+	// isolated at fixtures/.cline/data/settings/cline_mcp_settings.json.
 	for entry in arr {
 		assert!(entry["name"].is_string(), "each entry must have 'name'");
 		assert!(entry["agent"].is_string(), "each entry must have 'agent'");
@@ -391,8 +393,32 @@ fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
 	cmd.env("USERPROFILE", home);
 	cmd.env("APPDATA", home);
 	cmd.env("XDG_STATE_HOME", state);
+	clear_agent_home_overrides(&mut cmd);
 	cmd.current_dir(home);
 	cmd
+}
+
+/// Overriding `$HOME` is NOT enough to isolate a run: several descriptors honour
+/// their agent's own home/config variable, which outranks `$HOME` and would send
+/// the test's writes straight into the developer's real config. (It already did:
+/// an ambient `OPENCODE_CONFIG_DIR` had these tests writing MCP servers into a
+/// live `opencode.json`.) Clear every such variable for the child process.
+fn clear_agent_home_overrides(cmd: &mut Command) {
+	for key in [
+		"OPENCODE_CONFIG",
+		"OPENCODE_CONFIG_DIR",
+		"XDG_CONFIG_HOME",
+		"CODEX_HOME",
+		"COPILOT_HOME",
+		"KIMI_SHARE_DIR",
+		"VIBE_HOME",
+		"HERMES_HOME",
+		"GROK_HOME",
+		"OPENCLAW_CONFIG_PATH",
+		"OPENCLAW_STATE_DIR",
+	] {
+		cmd.env_remove(key);
+	}
 }
 
 #[test]
@@ -833,13 +859,13 @@ fn add_mcp_agent_list_preflight_rejects_wrong_scope() {
 	);
 }
 
-/// enable/disable must also preflight the toggle capability: cline holds
+/// enable/disable must also preflight the toggle capability: windsurf holds
 /// MCPs but cannot enable/disable them, so the batch is rejected before
 /// hermes (which CAN toggle) is modified.
 #[test]
 fn toggle_mcp_agent_list_preflight_rejects_non_toggleable() {
 	let out = aghub_cli()
-		.args(["-g", "-a", "hermes,cline", "disable", "mcps", "ghost"])
+		.args(["-g", "-a", "hermes,windsurf", "disable", "mcps", "ghost"])
 		.output()
 		.unwrap();
 	assert!(
@@ -848,8 +874,8 @@ fn toggle_mcp_agent_list_preflight_rejects_non_toggleable() {
 	);
 	let stderr = String::from_utf8_lossy(&out.stderr);
 	assert!(
-		stderr.contains("cline") && stderr.contains("enable/disable"),
-		"preflight must name cline's missing toggle, got: {stderr}"
+		stderr.contains("windsurf") && stderr.contains("enable/disable"),
+		"preflight must name windsurf's missing toggle, got: {stderr}"
 	);
 	assert!(
 		!stderr.contains("hermes"),

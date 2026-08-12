@@ -2,14 +2,67 @@ use crate::descriptor::*;
 use crate::sub_agents::{load_scoped_sub_agents, save_scoped_sub_agents};
 use std::path::{Path, PathBuf};
 
+fn config_dir_from(
+	opencode_config_dir: Option<PathBuf>,
+	xdg_config_home: Option<PathBuf>,
+	home: Option<PathBuf>,
+) -> Option<PathBuf> {
+	opencode_config_dir
+		.or_else(|| xdg_config_home.map(|config| config.join("opencode")))
+		.or_else(|| home.map(|home| home.join(".config/opencode")))
+}
+
+fn config_dir() -> Option<PathBuf> {
+	config_dir_from(
+		std::env::var_os("OPENCODE_CONFIG_DIR")
+			.filter(|value| !value.is_empty())
+			.map(PathBuf::from),
+		std::env::var_os("XDG_CONFIG_HOME")
+			.filter(|value| !value.is_empty())
+			.map(PathBuf::from),
+		home_dir(),
+	)
+}
+
+fn mcp_global_path_from(
+	opencode_config: Option<PathBuf>,
+	config_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+	opencode_config.or_else(|| {
+		config_dir.map(|config| {
+			existing_or_default(&config, &["opencode.json", "opencode.jsonc"])
+		})
+	})
+}
+
+fn existing_or_default(root: &Path, candidates: &[&str]) -> PathBuf {
+	candidates
+		.iter()
+		.map(|path| root.join(path))
+		.find(|path| path.is_file())
+		.unwrap_or_else(|| root.join(candidates[0]))
+}
 fn mcp_global_path() -> Option<PathBuf> {
-	home_dir().map(|home| home.join(".config/opencode/opencode.json"))
+	mcp_global_path_from(
+		std::env::var_os("OPENCODE_CONFIG")
+			.filter(|value| !value.is_empty())
+			.map(PathBuf::from),
+		config_dir(),
+	)
 }
 fn mcp_project_path(root: &Path) -> Option<PathBuf> {
-	Some(root.join(".opencode/settings.json"))
+	Some(existing_or_default(
+		root,
+		&[
+			"opencode.json",
+			"opencode.jsonc",
+			".opencode/opencode.json",
+			".opencode/opencode.jsonc",
+		],
+	))
 }
 fn global_data_dir() -> Option<PathBuf> {
-	home_dir().map(|home| home.join(".config/opencode"))
+	config_dir()
 }
 fn load_mcps(
 	project_root: Option<&Path>,
@@ -49,7 +102,9 @@ fn global_skills_paths() -> Vec<PathBuf> {
 		return Vec::new();
 	};
 	vec![
-		home.join(".config/opencode/skills"),
+		config_dir()
+			.unwrap_or_else(|| home.join(".config/opencode"))
+			.join("skills"),
 		home.join(".agents/skills"),
 	]
 }
@@ -58,7 +113,7 @@ fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
-	home_dir().map(|home| home.join(".config/opencode/skills"))
+	config_dir().map(|config| config.join("skills"))
 }
 
 fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
@@ -66,7 +121,7 @@ fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 }
 
 fn sub_agent_global_dir() -> Option<PathBuf> {
-	home_dir().map(|home| home.join(".config/opencode/agents"))
+	config_dir().map(|config| config.join("agents"))
 }
 
 fn sub_agent_project_dir(root: &Path) -> Option<PathBuf> {
@@ -145,6 +200,30 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	save_sub_agents,
 	cli_name: "opencode",
 	validate_args: &["--version"],
-	project_markers: &[".opencode"],
+	project_markers: &["opencode.json", "opencode.jsonc", ".opencode"],
 	skills_cli_name: Some("opencode"),
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn global_config_overrides_are_respected() {
+		assert_eq!(
+			mcp_global_path_from(
+				Some(PathBuf::from("/tmp/custom.json")),
+				Some(PathBuf::from("/tmp/config")),
+			),
+			Some(PathBuf::from("/tmp/custom.json"))
+		);
+		assert_eq!(
+			config_dir_from(
+				Some(PathBuf::from("/tmp/custom-dir")),
+				Some(PathBuf::from("/tmp/xdg")),
+				Some(PathBuf::from("/home/user")),
+			),
+			Some(PathBuf::from("/tmp/custom-dir"))
+		);
+	}
+}

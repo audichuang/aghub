@@ -24,10 +24,21 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			Some(t) => t,
 			None => continue,
 		};
-		let Some(command) = table.get("command").and_then(|v| v.as_str())
-		else {
-			continue;
-		};
+		let command = table.get("command").and_then(|v| v.as_str());
+		let url = table.get("url").and_then(|v| v.as_str());
+		if command.is_some() && url.is_some() {
+			return Err(ConfigError::InvalidConfig(format!(
+				"MCP server '{name}' cannot contain both command and url"
+			)));
+		}
+		let enabled = table
+			.get("enabled")
+			.and_then(|value| value.as_bool())
+			.unwrap_or(true);
+		let timeout = table
+			.get("tool_timeout_sec")
+			.and_then(|value| value.as_integer())
+			.and_then(|value| u64::try_from(value).ok());
 		let args = table
 			.get("args")
 			.and_then(|v| v.as_array())
@@ -48,16 +59,38 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 					.collect::<HashMap<_, _>>()
 			})
 			.filter(|m| !m.is_empty());
+		let headers = table
+			.get("http_headers")
+			.and_then(|v| v.as_table())
+			.map(|t| {
+				t.iter()
+					.filter_map(|(k, v)| {
+						v.as_str().map(|s| (k.clone(), s.to_string()))
+					})
+					.collect::<HashMap<_, _>>()
+			})
+			.filter(|m| !m.is_empty());
 
-		config.mcps.push(McpServer {
-			name: name.clone(),
-			enabled: true,
-			transport: McpTransport::Stdio {
+		let transport = match (command, url) {
+			(Some(command), None) => McpTransport::Stdio {
 				command: command.to_string(),
 				args,
 				env,
-				timeout: None,
+				timeout,
 			},
+			(None, Some(url)) => McpTransport::StreamableHttp {
+				url: url.to_string(),
+				headers,
+				timeout,
+			},
+			(None, None) => continue,
+			(Some(_), Some(_)) => unreachable!(),
+		};
+
+		config.mcps.push(McpServer {
+			name: name.clone(),
+			enabled,
+			transport,
 			timeout: None,
 			config_source: None,
 		});
@@ -102,17 +135,6 @@ pub fn serialize(
 
 	// Upsert each server: merge aghub fields into existing entry.
 	for mcp in &config.mcps {
-		if !mcp.enabled {
-			servers.remove(&mcp.name);
-			continue;
-		}
-		let McpTransport::Stdio {
-			command, args, env, ..
-		} = &mcp.transport
-		else {
-			continue;
-		};
-
 		let entry = servers
 			.entry(&mcp.name)
 			.or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
@@ -121,34 +143,119 @@ pub fn serialize(
 			None => continue,
 		};
 
-		table.insert(
-			"command".to_string(),
-			toml::Value::String(command.clone()),
-		);
-
-		if args.is_empty() {
-			table.remove("args");
+		if mcp.enabled {
+			table.remove("enabled");
 		} else {
-			table.insert(
-				"args".to_string(),
-				toml::Value::Array(
-					args.iter()
-						.map(|a| toml::Value::String(a.clone()))
-						.collect(),
-				),
-			);
+			table.insert("enabled".to_string(), toml::Value::Boolean(false));
 		}
 
-		match env {
-			Some(env_map) if !env_map.is_empty() => {
-				let mut env_table = toml::map::Map::new();
-				for (k, v) in env_map {
-					env_table.insert(k.clone(), toml::Value::String(v.clone()));
+		match &mcp.transport {
+			McpTransport::Stdio {
+				command,
+				args,
+				env,
+				timeout,
+			} => {
+				table.remove("type");
+				for key in [
+					"url",
+					"http_headers",
+					"env_http_headers",
+					"bearer_token_env_var",
+					"auth",
+				] {
+					table.remove(key);
 				}
-				table.insert("env".to_string(), toml::Value::Table(env_table));
+				table.insert(
+					"command".to_string(),
+					toml::Value::String(command.clone()),
+				);
+				if args.is_empty() {
+					table.remove("args");
+				} else {
+					table.insert(
+						"args".to_string(),
+						toml::Value::Array(
+							args.iter()
+								.map(|arg| toml::Value::String(arg.clone()))
+								.collect(),
+						),
+					);
+				}
+				match env {
+					Some(env) if !env.is_empty() => {
+						table.insert(
+							"env".to_string(),
+							toml::Value::Table(
+								env.iter()
+									.map(|(key, value)| {
+										(
+											key.clone(),
+											toml::Value::String(value.clone()),
+										)
+									})
+									.collect(),
+							),
+						);
+					}
+					_ => {
+						table.remove("env");
+					}
+				}
+				set_timeout(table, *timeout)?;
 			}
-			_ => {
-				table.remove("env");
+			McpTransport::Sse { .. } => {
+				// Codex's remote MCP entry is a bare `url` with no transport
+				// tag, so writing an SSE server here would silently turn it
+				// into streamable HTTP on the next read.
+				return Err(ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' uses SSE, which this agent's config \
+					 format cannot express; use streamable HTTP instead",
+					name = mcp.name
+				)));
+			}
+			McpTransport::StreamableHttp {
+				url,
+				headers,
+				timeout,
+			} => {
+				table.remove("type");
+				for key in [
+					"command",
+					"args",
+					"env",
+					"env_vars",
+					"cwd",
+					"experimental_environment",
+				] {
+					table.remove(key);
+				}
+				table.insert(
+					"url".to_string(),
+					toml::Value::String(url.clone()),
+				);
+				match headers {
+					Some(headers) if !headers.is_empty() => {
+						table.insert(
+							"http_headers".to_string(),
+							toml::Value::Table(
+								headers
+									.iter()
+									.map(|(key, value)| {
+										(
+											key.clone(),
+											toml::Value::String(value.clone()),
+										)
+									})
+									.collect(),
+							),
+						);
+					}
+					_ => {
+						table.remove("http_headers");
+					}
+				}
+				set_timeout(table, *timeout)?;
 			}
 		}
 	}
@@ -160,6 +267,29 @@ pub fn serialize(
 
 	toml::to_string_pretty(&doc)
 		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))
+}
+
+fn set_timeout(
+	table: &mut toml::map::Map<String, toml::Value>,
+	timeout: Option<u64>,
+) -> Result<()> {
+	match timeout {
+		Some(timeout) => {
+			let timeout = i64::try_from(timeout).map_err(|_| {
+				ConfigError::InvalidConfig(
+					"MCP timeout exceeds TOML integer range".into(),
+				)
+			})?;
+			table.insert(
+				"tool_timeout_sec".to_string(),
+				toml::Value::Integer(timeout),
+			);
+		}
+		None => {
+			table.remove("tool_timeout_sec");
+		}
+	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -267,6 +397,32 @@ approval_mode = "approve"
 	}
 
 	#[test]
+	fn switching_transport_removes_stale_type_discriminator() {
+		let original = r#"
+[mcp_servers.server]
+type = "stdio"
+command = "old-command"
+"#;
+		let config = AgentConfig {
+			mcps: vec![McpServer::new(
+				"server",
+				McpTransport::streamable_http("https://example.com/mcp"),
+			)],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+		let output = serialize(&config, Some(original)).unwrap();
+		let parsed: toml::Value = toml::from_str(&output).unwrap();
+		let server = &parsed["mcp_servers"]["server"];
+		assert!(server.get("type").is_none());
+		assert_eq!(
+			server["url"],
+			toml::Value::String("https://example.com/mcp".into())
+		);
+		assert!(server.get("command").is_none());
+	}
+
+	#[test]
 	fn add_server_preserves_existing_tools() {
 		let original = r#"
 [mcp_servers.playwright]
@@ -297,5 +453,80 @@ model = "gpt-5.4"
 "#;
 		let config = parse(content).unwrap();
 		assert!(config.mcps.is_empty());
+	}
+
+	#[test]
+	fn parse_codex_streamable_http_and_disabled_state() {
+		let content = r#"
+[mcp_servers.figma]
+url = "https://mcp.figma.com/mcp"
+http_headers = { "X-Figma-Region" = "us-east-1" }
+bearer_token_env_var = "FIGMA_OAUTH_TOKEN"
+tool_timeout_sec = 45
+enabled = false
+"#;
+
+		let config = parse(content).unwrap();
+		let server = &config.mcps[0];
+		assert!(!server.enabled);
+		assert_eq!(
+			server.transport,
+			McpTransport::StreamableHttp {
+				url: "https://mcp.figma.com/mcp".into(),
+				headers: Some(HashMap::from([(
+					"X-Figma-Region".into(),
+					"us-east-1".into(),
+				)])),
+				timeout: Some(45),
+			}
+		);
+	}
+
+	#[test]
+	fn serialize_codex_streamable_http_preserves_auth_options() {
+		let original = r#"
+[mcp_servers.figma]
+url = "https://old.example.com/mcp"
+bearer_token_env_var = "FIGMA_OAUTH_TOKEN"
+auth = "oauth"
+required = true
+enabled = false
+"#;
+		let config = AgentConfig {
+			mcps: vec![McpServer {
+				name: "figma".into(),
+				enabled: true,
+				transport: McpTransport::StreamableHttp {
+					url: "https://mcp.figma.com/mcp".into(),
+					headers: Some(HashMap::from([(
+						"X-Figma-Region".into(),
+						"us-east-1".into(),
+					)])),
+					timeout: Some(45),
+				},
+				timeout: None,
+				config_source: None,
+			}],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+
+		let output = serialize(&config, Some(original)).unwrap();
+		let value: toml::Value = toml::from_str(&output).unwrap();
+		let server = &value["mcp_servers"]["figma"];
+		assert_eq!(server["url"].as_str(), Some("https://mcp.figma.com/mcp"));
+		assert_eq!(
+			server["http_headers"]["X-Figma-Region"].as_str(),
+			Some("us-east-1")
+		);
+		assert_eq!(server["tool_timeout_sec"].as_integer(), Some(45));
+		assert_eq!(
+			server["bearer_token_env_var"].as_str(),
+			Some("FIGMA_OAUTH_TOKEN")
+		);
+		assert_eq!(server["auth"].as_str(), Some("oauth"));
+		assert_eq!(server["required"].as_bool(), Some(true));
+		assert!(server.get("command").is_none());
+		assert!(server.get("enabled").is_none());
 	}
 }

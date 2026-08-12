@@ -1,13 +1,59 @@
-use crate::define_mcp_paths;
 use crate::define_skill_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::json_map_dialect;
+use std::path::{Path, PathBuf};
 
-define_mcp_paths! {
-	global: ".cline/data/settings/cline_mcp_settings.json",
-	project: ".cline/mcp.json",
-	data_dir: ".cline",
-	strategy: mcp_strategy::parse_json_map_mcp_servers,
-			  mcp_strategy::serialize_json_map_mcp_servers,
+// Cline spells streamable HTTP in camelCase and toggles with `disabled`.
+json_map_dialect!(json_map::Dialect {
+	discriminator: Some(json_map::Discriminator {
+		key: "type",
+		stdio: "stdio",
+		sse: "sse",
+		http: "streamableHttp",
+	}),
+	toggle_key: json_map::ToggleKey::Disabled,
+	..json_map::MCP_SERVERS
+});
+
+fn mcp_global_path() -> Option<PathBuf> {
+	home_dir()
+		.map(|home| home.join(".cline/data/settings/cline_mcp_settings.json"))
+}
+
+fn global_data_dir() -> Option<PathBuf> {
+	home_dir().map(|home| home.join(".cline"))
+}
+
+const MCP_GLOBAL_PATH: Option<OptionalPathFn> = Some(mcp_global_path);
+const MCP_PROJECT_PATH: Option<OptionalProjectPathFn> = None;
+
+fn load_mcps(
+	project_root: Option<&Path>,
+	scope: crate::ResourceScope,
+) -> crate::Result<Vec<crate::McpServer>> {
+	load_scoped_mcps(
+		project_root,
+		scope,
+		MCP_GLOBAL_PATH,
+		MCP_PROJECT_PATH,
+		parse_mcp_config,
+	)
+}
+
+fn save_mcps(
+	project_root: Option<&Path>,
+	scope: crate::ResourceScope,
+	mcps: &[crate::McpServer],
+) -> crate::Result<()> {
+	save_scoped_mcps(
+		project_root,
+		scope,
+		mcps,
+		MCP_GLOBAL_PATH,
+		MCP_PROJECT_PATH,
+		serialize_mcp_config,
+	)
 }
 
 define_skill_paths! {
@@ -17,12 +63,12 @@ define_skill_paths! {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "cline",
 	display_name: "Cline",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
-	mcp_global_path: Some(mcp_global_path),
-	mcp_project_path: Some(mcp_project_path),
+	mcp_global_path: MCP_GLOBAL_PATH,
+	mcp_project_path: MCP_PROJECT_PATH,
 	global_data_dir,
 	capabilities: Capabilities {
 		skills: SkillCapabilities {
@@ -35,11 +81,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		mcp: McpCapabilities {
 			scopes: ScopeSupport {
 				global: true,
-				project: true,
+				project: false,
 			},
 			stdio: true,
 			remote: true,
-			enable_disable: false,
+			enable_disable: true,
 		},
 		sub_agents: SubAgentCapabilities {
 			scopes: ScopeSupport {
@@ -63,3 +109,19 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_markers: &[".cline"],
 	skills_cli_name: Some("cline"),
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const _: () = {
+		assert!(DESCRIPTOR.capabilities.mcp.scopes.global);
+		assert!(!DESCRIPTOR.capabilities.mcp.scopes.project);
+	};
+
+	#[test]
+	fn descriptor_mcp_contract_matches_runtime() {
+		assert!(DESCRIPTOR.mcp_global_path.is_some());
+		assert!(DESCRIPTOR.mcp_project_path.is_none());
+	}
+}

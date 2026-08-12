@@ -398,15 +398,16 @@ pub mod mcp_strategy {
 		json_list, json_map, json_opencode, toml_format, toml_grok, yaml_hermes,
 	};
 
-	// JsonMap with "mcpServers" key (most common)
+	// JsonMap with "mcpServers" key (most common). Agents with a dialect of
+	// their own declare it in their own file via `json_map_dialect!`.
 	pub fn parse_json_map_mcp_servers(content: &str) -> Result<AgentConfig> {
-		json_map::parse(content, "mcpServers")
+		json_map::parse(content, &json_map::MCP_SERVERS)
 	}
 	pub fn serialize_json_map_mcp_servers(
 		config: &AgentConfig,
 		original: Option<&str>,
 	) -> Result<String> {
-		json_map::serialize(config, original, "mcpServers")
+		json_map::serialize(config, original, &json_map::MCP_SERVERS)
 	}
 
 	// YAML with "mcp_servers" key (Hermes ~/.hermes/config.yaml)
@@ -429,43 +430,6 @@ pub mod mcp_strategy {
 		original: Option<&str>,
 	) -> Result<String> {
 		toml_grok::serialize(config, original)
-	}
-
-	// JsonMap with "servers" key (Copilot)
-	pub fn parse_json_map_servers(content: &str) -> Result<AgentConfig> {
-		json_map::parse(content, "servers")
-	}
-	pub fn serialize_json_map_servers(
-		config: &AgentConfig,
-		original: Option<&str>,
-	) -> Result<String> {
-		json_map::serialize(config, original, "servers")
-	}
-
-	// JsonMap with "context_servers" key (Zed)
-	pub fn parse_json_map_context_servers(
-		content: &str,
-	) -> Result<AgentConfig> {
-		json_map::parse(content, "context_servers")
-	}
-	pub fn serialize_json_map_context_servers(
-		config: &AgentConfig,
-		original: Option<&str>,
-	) -> Result<String> {
-		json_map::serialize(config, original, "context_servers")
-	}
-
-	// JsonMap with nested "amp.mcpServers" key (Amp)
-	pub fn parse_json_map_nested_amp_mcp_servers(
-		content: &str,
-	) -> Result<AgentConfig> {
-		json_map::parse(content, "amp.mcpServers")
-	}
-	pub fn serialize_json_map_nested_amp_mcp_servers(
-		config: &AgentConfig,
-		original: Option<&str>,
-	) -> Result<String> {
-		json_map::serialize(config, original, "amp.mcpServers")
 	}
 
 	// JsonOpenCode format

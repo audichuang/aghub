@@ -1,21 +1,77 @@
-use crate::define_mcp_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::json_map_dialect;
 
-define_mcp_paths! {
-	global: ".config/zed/settings.json",
-	project: ".zed/settings.json",
-	data_dir: ".config/zed",
-	strategy: mcp_strategy::parse_json_map_context_servers,
-			  mcp_strategy::serialize_json_map_context_servers,
+// Zed's documented `context_servers` entry is `command`/`args`/`env` or
+// `url`/`headers` — no transport tag and no persisted per-server toggle, so
+// aghub invents neither.
+json_map_dialect!(json_map::Dialect {
+	server_key: "context_servers",
+	discriminator: None,
+	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	..json_map::MCP_SERVERS
+});
+
+fn zed_config_dir() -> Option<std::path::PathBuf> {
+	#[cfg(target_os = "macos")]
+	{
+		home_dir().map(|home| home.join(".config/zed"))
+	}
+	#[cfg(target_os = "windows")]
+	{
+		dirs::config_dir().map(|dir| dir.join("Zed"))
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+	{
+		dirs::config_dir().map(|dir| dir.join("zed"))
+	}
+}
+
+fn mcp_global_path() -> Option<std::path::PathBuf> {
+	zed_config_dir().map(|dir| dir.join("settings.json"))
+}
+
+fn mcp_project_path(root: &std::path::Path) -> Option<std::path::PathBuf> {
+	Some(root.join(".zed/settings.json"))
+}
+
+fn global_data_dir() -> Option<std::path::PathBuf> {
+	zed_config_dir()
+}
+
+fn load_mcps(
+	project_root: Option<&std::path::Path>,
+	scope: crate::ResourceScope,
+) -> crate::Result<Vec<crate::McpServer>> {
+	load_scoped_mcps(
+		project_root,
+		scope,
+		Some(mcp_global_path),
+		Some(mcp_project_path),
+		parse_mcp_config,
+	)
+}
+
+fn save_mcps(
+	project_root: Option<&std::path::Path>,
+	scope: crate::ResourceScope,
+	mcps: &[crate::McpServer],
+) -> crate::Result<()> {
+	save_scoped_mcps(
+		project_root,
+		scope,
+		mcps,
+		Some(mcp_global_path),
+		Some(mcp_project_path),
+		serialize_mcp_config,
+	)
 }
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "zed",
 	display_name: "Zed",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_context_servers),
-	mcp_serialize_config: Some(
-		mcp_strategy::serialize_json_map_context_servers,
-	),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
 	mcp_global_path: Some(mcp_global_path),

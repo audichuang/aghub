@@ -145,10 +145,9 @@ fn mcp_http(name: &str) -> McpServer {
 // ==================== Group 1: Per-agent JSON key names ====================
 // From ruler: mcp-key-per-agent.test.ts, mcp-key-gemini.test.ts
 
-/// GitHub Copilot uses "servers" key, not "mcpServers"
-/// Corresponds to ruler test: uses "servers" key for Copilot
+/// GitHub Copilot CLI uses the `mcpServers` key.
 #[test]
-fn test_copilot_mcp_uses_servers_key() {
+fn test_copilot_mcp_uses_mcpservers_key() {
 	// Use empty initial content so no stale keys are preserved
 	let test = TestConfigBuilder::new(AgentType::Copilot)
 		.with_content("{}")
@@ -162,15 +161,9 @@ fn test_copilot_mcp_uses_servers_key() {
 	let content = test.read_config().unwrap();
 	let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-	assert!(
-		json.get("servers").is_some(),
-		"Copilot should use 'servers' key"
-	);
-	assert!(
-		json.get("mcpServers").is_none(),
-		"Copilot should NOT use 'mcpServers' key"
-	);
-	assert!(json["servers"].get("my-server").is_some());
+	assert!(json.get("mcpServers").is_some());
+	assert!(json.get("servers").is_none());
+	assert!(json["mcpServers"].get("my-server").is_some());
 }
 
 /// Cursor uses "mcpServers" key
@@ -266,9 +259,9 @@ fn test_claude_mcp_uses_mcpservers_key() {
 	assert!(json["mcpServers"].get("my-server").is_some());
 }
 
-/// KiloCode uses "mcpServers" key in .kilocode/mcp.json
+/// KiloCode uses OpenCode-compatible `mcp` in its canonical config.
 #[test]
-fn test_kilocode_mcp_uses_mcpservers_key() {
+fn test_kilocode_mcp_uses_mcp_key() {
 	let test = TestConfig::new(AgentType::KiloCode).unwrap();
 	let mut manager = test.create_manager();
 	manager.load().unwrap();
@@ -278,8 +271,8 @@ fn test_kilocode_mcp_uses_mcpservers_key() {
 	let content = test.read_config().unwrap();
 	let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-	assert!(json.get("mcpServers").is_some());
-	assert!(json["mcpServers"].get("my-server").is_some());
+	assert!(json.get("mcp").is_some());
+	assert!(json["mcp"].get("my-server").is_some());
 }
 
 /// OpenCode uses "mcp" key in opencode.json
@@ -347,12 +340,12 @@ fn test_opencode_stdio_format_is_local_type() {
 	assert_eq!(server["enabled"], true);
 }
 
-/// SSE transport serializes to {type: "remote", url: ..., enabled: true}
-/// Corresponds to ruler test: transforms ruler MCP config to OpenCode format for remote servers
+/// An SSE server is refused with a message that says what to use instead, and
+/// the config is left exactly as it was.
 #[test]
-fn test_opencode_sse_format_is_remote_type() {
+fn test_opencode_refuses_sse_without_touching_the_config() {
 	let test = TestConfigBuilder::new(AgentType::OpenCode)
-		.with_content("{}")
+		.with_content(r#"{"model": "anthropic/claude-sonnet-4-5"}"#)
 		.build()
 		.unwrap();
 	let mut manager = test.create_manager();
@@ -365,19 +358,18 @@ fn test_opencode_sse_format_is_remote_type() {
 		"my-remote-server",
 		McpTransport::sse_with_headers("https://my-mcp-server.com", headers),
 	);
-	manager.add_mcp(mcp).unwrap();
+	let error = manager.add_mcp(mcp).unwrap_err().to_string();
+	assert!(error.contains("cannot express"), "got: {error}");
+	assert!(error.contains("streamable HTTP"), "got: {error}");
 
 	let content = test.read_config().unwrap();
 	let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-	let server = &json["mcp"]["my-remote-server"];
-
-	assert_eq!(
-		server["type"], "remote",
-		"SSE should serialize as type 'remote'"
+	assert_eq!(json["model"], "anthropic/claude-sonnet-4-5");
+	assert!(
+		json.get("mcp")
+			.is_none_or(|mcp| mcp.get("my-remote-server").is_none()),
+		"a refused server must leave no trace: {json}"
 	);
-	assert_eq!(server["url"], "https://my-mcp-server.com");
-	assert_eq!(server["enabled"], true);
-	assert_eq!(server["headers"]["Authorization"], "Bearer MY_API_KEY");
 }
 
 /// StreamableHttp transport serializes to {type: "remote", url: ..., enabled: true}
@@ -618,9 +610,10 @@ fn test_kilocode_mcp_add() {
 	let content = test.read_config().unwrap();
 	let json: serde_json::Value = serde_json::from_str(&content).unwrap();
 
-	assert!(json["mcpServers"].get("filesystem").is_some());
-	assert_eq!(json["mcpServers"]["filesystem"]["command"], "npx");
-	assert_eq!(json["mcpServers"]["filesystem"]["args"][0], "-y");
+	assert!(json["mcp"].get("filesystem").is_some());
+	assert_eq!(json["mcp"]["filesystem"]["type"], "local");
+	assert_eq!(json["mcp"]["filesystem"]["command"][0], "npx");
+	assert_eq!(json["mcp"]["filesystem"]["command"][1], "-y");
 }
 
 /// KiloCode: read existing MCP configuration
@@ -779,7 +772,7 @@ fn test_kilocode_mcp_remove() {
 fn test_kilocode_preserves_non_mcp_json_fields() {
 	let test = TestConfigBuilder::new(AgentType::KiloCode)
 		.with_content(
-			r#"{"mcpServers": {}, "otherProperty": "preserved", "version": 2}"#,
+			r#"{"mcp": {}, "otherProperty": "preserved", "version": 2}"#,
 		)
 		.build()
 		.unwrap();
@@ -793,7 +786,7 @@ fn test_kilocode_preserves_non_mcp_json_fields() {
 
 	assert_eq!(json["otherProperty"], "preserved");
 	assert_eq!(json["version"], 2);
-	assert!(json["mcpServers"].get("filesystem").is_some());
+	assert!(json["mcp"].get("filesystem").is_some());
 }
 
 // ==================== Group 4: CRUD for agents without existing coverage ====================
@@ -980,7 +973,7 @@ fn test_kiro_mcp_crud() {
 	assert!(manager.config().unwrap().mcps.is_empty());
 }
 
-/// GitHub Copilot: full CRUD workflow (.vscode/mcp.json, servers key)
+/// GitHub Copilot CLI: full CRUD workflow (.mcp.json, mcpServers key)
 #[test]
 fn test_copilot_mcp_crud() {
 	let test = TestConfig::new(AgentType::Copilot).unwrap();
@@ -1186,7 +1179,7 @@ fn test_mistral_mcp_toml_stdio() {
 		.unwrap();
 
 	let content = test.read_config().unwrap();
-	assert!(content.contains("[mcp_servers.filesystem]"));
+	assert!(content.contains("[[mcp_servers]]"));
 	assert!(content.contains("command = \"npx\""));
 }
 
@@ -1200,7 +1193,7 @@ fn test_mcp_merge_preserves_existing_servers() {
 	// Start with an existing native config that has a server
 	let test = TestConfigBuilder::new(AgentType::Copilot)
 		.with_content(
-			r#"{"servers": {"native-server": {"type": "stdio", "command": "native-cmd"}}}"#,
+			r#"{"mcpServers": {"native-server": {"type": "stdio", "command": "native-cmd"}}}"#,
 		)
 		.build()
 		.unwrap();
@@ -1279,7 +1272,7 @@ fn test_mcp_update_replaces_target_only() {
 fn test_mcp_overwrite_via_remove_then_add() {
 	let test = TestConfigBuilder::new(AgentType::Copilot)
 		.with_content(
-			r#"{"servers": {"bar": {"type": "stdio", "command": "bar-cmd"}}}"#,
+			r#"{"mcpServers": {"bar": {"type": "stdio", "command": "bar-cmd"}}}"#,
 		)
 		.build()
 		.unwrap();
@@ -1544,10 +1537,10 @@ fn test_claude_http_mcp_type_field() {
 	);
 }
 
-/// OpenCode: SSE transport is serialized as "remote" type (same as StreamableHttp)
-/// Corresponds to ruler test: OpenCode MCP Integration — remote servers
+/// OpenCode has ONE remote type (`remote`), so an SSE server written here would
+/// read back as streamable HTTP. It is refused rather than converted.
 #[test]
-fn test_opencode_sse_and_http_both_serialize_as_remote() {
+fn test_opencode_writes_http_as_remote_and_refuses_sse() {
 	let test = TestConfigBuilder::new(AgentType::OpenCode)
 		.with_content("{}")
 		.build()
@@ -1555,32 +1548,36 @@ fn test_opencode_sse_and_http_both_serialize_as_remote() {
 	let mut manager = test.create_manager();
 	manager.load().unwrap();
 
-	manager.add_mcp(mcp_sse("sse-server")).unwrap();
 	manager.add_mcp(mcp_http("http-server")).unwrap();
+	let error = manager.add_mcp(mcp_sse("sse-server")).unwrap_err();
+	assert!(
+		error.to_string().contains("cannot express"),
+		"SSE must be refused, not silently rewritten: {error}"
+	);
 
 	let content = test.read_config().unwrap();
 	let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-	// Both SSE and StreamableHttp should serialize as "remote" in OpenCode
-	assert_eq!(json["mcp"]["sse-server"]["type"], "remote");
 	assert_eq!(json["mcp"]["http-server"]["type"], "remote");
+	assert!(
+		json["mcp"].get("sse-server").is_none(),
+		"a refused server must not be half-written: {json}"
+	);
 }
 
-/// KiloCode: SSE and StreamableHttp use "sse" and "http" type tags respectively
+/// KiloCode uses OpenCode's config format, so it inherits the same contract.
 #[test]
-fn test_kilocode_sse_and_http_type_tags() {
+fn test_kilocode_writes_http_as_remote_and_refuses_sse() {
 	let test = TestConfig::new(AgentType::KiloCode).unwrap();
 	let mut manager = test.create_manager();
 	manager.load().unwrap();
 
-	manager.add_mcp(mcp_sse("sse-server")).unwrap();
 	manager.add_mcp(mcp_http("http-server")).unwrap();
+	assert!(manager.add_mcp(mcp_sse("sse-server")).is_err());
 
 	let content = test.read_config().unwrap();
 	let json: serde_json::Value = serde_json::from_str(&content).unwrap();
-
-	assert_eq!(json["mcpServers"]["sse-server"]["type"], "sse");
-	assert_eq!(json["mcpServers"]["http-server"]["type"], "http");
+	assert_eq!(json["mcp"]["http-server"]["type"], "remote");
+	assert!(json["mcp"].get("sse-server").is_none());
 }
 
 /// Test that all agents with mcpServers key don't produce empty string key
@@ -1591,7 +1588,6 @@ fn test_no_empty_string_mcp_key_produced() {
 		AgentType::Claude,
 		AgentType::Cursor,
 		AgentType::Gemini,
-		AgentType::KiloCode,
 		AgentType::Windsurf,
 		AgentType::Factory,
 		AgentType::Kiro,

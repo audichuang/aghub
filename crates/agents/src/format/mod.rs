@@ -4,7 +4,9 @@
 //! needed when an agent stores MCP inside a large shared document whose other
 //! keys must survive a rewrite, or with a dialect the JSON path can't express.
 //!
-//! `json_map` rebuilds the server map wholesale and omits disabled servers.
+//! `json_map` rebuilds the managed server map and omits newly disabled servers
+//! only when a dialect has no native toggle field; existing disabled entries
+//! are retained during unrelated rewrites.
 //! `yaml_hermes` (Hermes) and `toml_grok` (Grok) are the strict *preserve-and-
 //! merge* pair: they keep every other document key AND every unowned per-server
 //! field, reject malformed input instead of coercing, remove transport keys
@@ -29,8 +31,10 @@
 
 pub mod json_list;
 pub mod json_map;
+pub mod json_openclaw;
 pub mod json_opencode;
 pub mod toml_format;
 pub mod toml_grok;
+pub mod toml_mistral;
 pub mod transport_policy;
 pub mod yaml_hermes;

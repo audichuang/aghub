@@ -1839,10 +1839,10 @@ mod tests {
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root_cursor = temp.path().join("dest_cursor");
-		let dest_root_windsurf = temp.path().join("dest_windsurf");
+		let dest_root_copilot = temp.path().join("dest_copilot");
 		fs::create_dir_all(&source_root).unwrap();
 		fs::create_dir_all(&dest_root_cursor).unwrap();
-		fs::create_dir_all(&dest_root_windsurf).unwrap();
+		fs::create_dir_all(&dest_root_copilot).unwrap();
 
 		let mut source_manager = ConfigManager::new(
 			create_adapter(AgentType::Claude),
@@ -1871,9 +1871,9 @@ mod tests {
 					project_root: Some(dest_root_cursor.clone()),
 				},
 				InstallTarget {
-					agent: AgentType::Windsurf,
+					agent: AgentType::Copilot,
 					scope: InstallScope::Project,
-					project_root: Some(dest_root_windsurf.clone()),
+					project_root: Some(dest_root_copilot.clone()),
 				},
 			],
 		)
@@ -1889,13 +1889,13 @@ mod tests {
 		cursor_manager.load().unwrap();
 		assert!(cursor_manager.get_mcp("filesystem").is_some());
 
-		let mut windsurf_manager = ConfigManager::new(
-			create_adapter(AgentType::Windsurf),
+		let mut copilot_manager = ConfigManager::new(
+			create_adapter(AgentType::Copilot),
 			false,
-			Some(&dest_root_windsurf),
+			Some(&dest_root_copilot),
 		);
-		windsurf_manager.load().unwrap();
-		assert!(windsurf_manager.get_mcp("filesystem").is_some());
+		copilot_manager.load().unwrap();
+		assert!(copilot_manager.get_mcp("filesystem").is_some());
 	}
 
 	#[test]

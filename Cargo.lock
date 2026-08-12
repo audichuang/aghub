@@ -63,6 +63,7 @@ dependencies = [
 name = "aghub-agents"
 version = "1.1.1"
 dependencies = [
+ "aghub-json",
  "aghub-markdown",
  "dirs 6.0.0",
  "libc",

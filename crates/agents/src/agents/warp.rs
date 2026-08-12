@@ -3,7 +3,7 @@ use crate::define_skill_paths;
 use crate::descriptor::*;
 
 define_mcp_paths! {
-	symmetric: ".warp/mcp.json",
+	symmetric: ".warp/.mcp.json",
 	strategy: mcp_strategy::parse_json_map_mcp_servers,
 			  mcp_strategy::serialize_json_map_mcp_servers,
 }
@@ -61,3 +61,17 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_markers: &[".warp"],
 	skills_cli_name: Some("warp"),
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::path::Path;
+
+	#[test]
+	fn descriptor_mcp_contract_matches_runtime() {
+		assert_eq!(
+			(DESCRIPTOR.mcp_project_path.unwrap())(Path::new("/workspace")),
+			Some(Path::new("/workspace/.warp/.mcp.json").to_path_buf())
+		);
+	}
+}

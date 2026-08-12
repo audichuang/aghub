@@ -1,11 +1,24 @@
-use crate::define_mcp_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::{define_mcp_paths, json_map_dialect};
 use std::path::{Path, PathBuf};
+
+// Cursor documents `type: "stdio"` for local servers, but its remote example is
+// a bare `url` with no transport tag — so SSE has no native spelling here.
+json_map_dialect!(json_map::Dialect {
+	discriminator: Some(json_map::Discriminator {
+		key: "type",
+		stdio: "stdio",
+		sse: "",
+		http: "",
+	}),
+	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	..json_map::MCP_SERVERS
+});
 
 define_mcp_paths! {
 	symmetric: ".cursor/mcp.json",
-	strategy: mcp_strategy::parse_json_map_mcp_servers,
-			  mcp_strategy::serialize_json_map_mcp_servers,
+	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 // npx-`skills` layout: Cursor owns ONLY its own per-agent dir (which holds
@@ -36,8 +49,8 @@ fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "cursor",
 	display_name: "Cursor",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
 	mcp_global_path: Some(mcp_global_path),

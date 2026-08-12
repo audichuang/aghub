@@ -46,11 +46,20 @@ pub fn reject_mixed_transport(
 	Ok(())
 }
 
-/// Build the remote transport for a `url`-based server. When `single_remote`
-/// (Hermes) the dialect has one remote transport and `type` is not part of it,
-/// so every remote is StreamableHttp. Otherwise (Grok) `type = "sse"` selects
-/// SSE, a missing `type` or `"http"` selects StreamableHttp, and anything else
-/// is an error.
+/// The key each dialect tags its remote transport with: Grok spells it `type`,
+/// Hermes spells it `transport`.
+pub fn remote_tag_key(single_remote: bool) -> &'static str {
+	if single_remote {
+		"transport"
+	} else {
+		"type"
+	}
+}
+
+/// Build the remote transport for a `url`-based server. `"sse"` selects SSE, a
+/// missing tag or `"http"` selects StreamableHttp, and anything else is an
+/// error. `single_remote` (Hermes) additionally accepts the spelled-out
+/// `"streamable-http"` and reports the mismatch against its own tag key.
 pub fn remote_transport(
 	url: String,
 	headers: Option<HashMap<String, String>>,
@@ -59,13 +68,6 @@ pub fn remote_transport(
 	name: &str,
 	dialect: &str,
 ) -> Result<McpTransport> {
-	if single_remote {
-		return Ok(McpTransport::StreamableHttp {
-			url,
-			headers,
-			timeout: None,
-		});
-	}
 	match type_key.as_deref() {
 		Some("sse") => Ok(McpTransport::Sse {
 			url,
@@ -77,8 +79,16 @@ pub fn remote_transport(
 			headers,
 			timeout: None,
 		}),
+		Some("streamable-http") if single_remote => {
+			Ok(McpTransport::StreamableHttp {
+				url,
+				headers,
+				timeout: None,
+			})
+		}
 		Some(other) => Err(ConfigError::InvalidConfig(format!(
-			"{dialect} MCP server `{name}` has unknown `type` `{other}`"
+			"{dialect} MCP server `{name}` has unknown `{key}` `{other}`",
+			key = remote_tag_key(single_remote)
 		))),
 	}
 }
@@ -99,11 +109,11 @@ pub enum FieldValue {
 }
 
 /// The transport-owned keys to strip from an existing entry before writing the
-/// current transport (so a changed transport leaves no stale key): 6 for a
-/// `type`-aware dialect, 5 for a single-remote one.
+/// current transport (so a changed transport leaves no stale key). Both dialects
+/// own their remote tag key; only its spelling differs.
 pub fn transport_keys(single_remote: bool) -> &'static [&'static str] {
 	if single_remote {
-		&["command", "args", "env", "url", "headers"]
+		&["command", "args", "env", "url", "headers", "transport"]
 	} else {
 		&["command", "args", "env", "url", "headers", "type"]
 	}
@@ -130,9 +140,10 @@ pub fn transport_fields(
 		}
 		McpTransport::Sse { url, headers, .. } => {
 			out.push(("url", FieldValue::Str(url.clone())));
-			if !single_remote {
-				out.push(("type", FieldValue::Str("sse".to_string())));
-			}
+			out.push((
+				remote_tag_key(single_remote),
+				FieldValue::Str("sse".to_string()),
+			));
 			if let Some(headers) = headers {
 				out.push(("headers", FieldValue::Map(headers.clone())));
 			}
@@ -171,56 +182,73 @@ mod tests {
 	}
 
 	#[test]
-	fn remote_transport_splits_sse_and_http_only_when_not_single_remote() {
-		let sse = remote_transport(
-			"u".into(),
-			None,
-			Some("sse".into()),
-			false,
-			"r",
-			"Grok",
-		)
-		.unwrap();
-		assert!(matches!(sse, McpTransport::Sse { .. }));
-
-		let http = remote_transport("u".into(), None, None, false, "r", "Grok")
+	fn remote_transport_splits_sse_and_http_in_both_dialects() {
+		for (single_remote, dialect) in [(false, "Grok"), (true, "Hermes")] {
+			let sse = remote_transport(
+				"u".into(),
+				None,
+				Some("sse".into()),
+				single_remote,
+				"r",
+				dialect,
+			)
 			.unwrap();
-		assert!(matches!(http, McpTransport::StreamableHttp { .. }));
+			assert!(
+				matches!(sse, McpTransport::Sse { .. }),
+				"{dialect} must keep an explicit SSE tag"
+			);
 
-		// single_remote ignores `type` entirely — always StreamableHttp.
-		let one = remote_transport(
-			"u".into(),
-			None,
-			Some("sse".into()),
-			true,
-			"r",
-			"Hermes",
-		)
-		.unwrap();
-		assert!(matches!(one, McpTransport::StreamableHttp { .. }));
-	}
+			let untagged = remote_transport(
+				"u".into(),
+				None,
+				None,
+				single_remote,
+				"r",
+				dialect,
+			)
+			.unwrap();
+			assert!(matches!(untagged, McpTransport::StreamableHttp { .. }));
+		}
 
-	#[test]
-	fn unknown_type_is_rejected_only_when_not_single_remote() {
+		// Only Hermes spells streamable HTTP out in full.
 		assert!(remote_transport(
 			"u".into(),
 			None,
-			Some("grpc".into()),
-			false,
-			"r",
-			"Grok"
-		)
-		.is_err());
-		// single_remote never inspects `type`, so it cannot be "unknown".
-		assert!(remote_transport(
-			"u".into(),
-			None,
-			Some("grpc".into()),
+			Some("streamable-http".into()),
 			true,
 			"r",
 			"Hermes"
 		)
 		.is_ok());
+	}
+
+	#[test]
+	fn unknown_tag_is_rejected_in_both_dialects() {
+		for (single_remote, dialect, key) in
+			[(false, "Grok", "type"), (true, "Hermes", "transport")]
+		{
+			let error = remote_transport(
+				"u".into(),
+				None,
+				Some("grpc".into()),
+				single_remote,
+				"r",
+				dialect,
+			)
+			.unwrap_err();
+			let message = error.to_string();
+			assert!(message.contains("grpc"), "got: {message}");
+			assert!(
+				message.contains(key),
+				"{dialect} must name its own tag key: {message}"
+			);
+		}
+	}
+
+	#[test]
+	fn remote_tag_key_is_per_dialect() {
+		assert_eq!(remote_tag_key(false), "type");
+		assert_eq!(remote_tag_key(true), "transport");
 	}
 
 	fn keys(fields: &[(&'static str, FieldValue)]) -> Vec<&'static str> {
@@ -241,8 +269,24 @@ mod tests {
 		);
 		assert_eq!(
 			transport_keys(true),
-			["command", "args", "env", "url", "headers"]
+			["command", "args", "env", "url", "headers", "transport"]
 		);
+		// Every key a dialect WRITES must also be one it STRIPS, or a changed
+		// transport leaves the old tag behind.
+		for single_remote in [false, true] {
+			for transport in [
+				McpTransport::stdio("c", vec![]),
+				McpTransport::sse("u"),
+				McpTransport::streamable_http("u"),
+			] {
+				for (key, _) in transport_fields(&transport, single_remote) {
+					assert!(
+						transport_keys(single_remote).contains(&key),
+						"`{key}` is written but never stripped"
+					);
+				}
+			}
+		}
 	}
 
 	#[test]
@@ -280,8 +324,7 @@ mod tests {
 	}
 
 	#[test]
-	fn serialize_fields_sse_writes_type_and_values_only_for_type_aware_dialect()
-	{
+	fn serialize_fields_sse_writes_each_dialects_own_tag() {
 		let headers = HashMap::from([("H".to_string(), "1".to_string())]);
 		let sse = McpTransport::Sse {
 			url: "https://x/sse".into(),
@@ -296,8 +339,11 @@ mod tests {
 			Some((_, FieldValue::Map(m))) => assert_eq!(m, &headers),
 			_ => panic!("headers must carry the exact map"),
 		}
-		// single-remote: url + headers, never `type`.
-		assert_eq!(keys(&transport_fields(&sse, true)), ["url", "headers"]);
+		// Hermes spells the same tag `transport` — it must not be dropped, or
+		// the server reads back as streamable HTTP.
+		let hermes = transport_fields(&sse, true);
+		assert_eq!(keys(&hermes), ["url", "transport", "headers"]);
+		assert_eq!(str_of(&hermes, "transport"), "sse");
 	}
 
 	#[test]

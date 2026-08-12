@@ -4,14 +4,27 @@ use std::path::{Path, PathBuf};
 // Hermes home: `~/.hermes` on POSIX/WSL2, `%LOCALAPPDATA%\hermes` on native
 // Windows. Both arms are compiled on every platform (cfg blocks inside one fn)
 // so there is no unused-fn / Windows-clippy gap.
+fn resolve_hermes_home(
+	override_dir: Option<PathBuf>,
+	default_dir: Option<PathBuf>,
+) -> Option<PathBuf> {
+	override_dir
+		.filter(|path| !path.as_os_str().is_empty())
+		.or(default_dir)
+}
+
 fn hermes_home() -> Option<PathBuf> {
+	let override_dir = std::env::var_os("HERMES_HOME").map(PathBuf::from);
 	#[cfg(windows)]
 	{
-		dirs::data_local_dir().map(|d| d.join("hermes"))
+		resolve_hermes_home(
+			override_dir,
+			dirs::data_local_dir().map(|d| d.join("hermes")),
+		)
 	}
 	#[cfg(not(windows))]
 	{
-		home_dir().map(|h| h.join(".hermes"))
+		resolve_hermes_home(override_dir, home_dir().map(|h| h.join(".hermes")))
 	}
 }
 
@@ -108,3 +121,19 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_markers: &[],
 	skills_cli_name: None,
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn hermes_home_override_wins() {
+		assert_eq!(
+			resolve_hermes_home(
+				Some(PathBuf::from("/custom/hermes")),
+				Some(PathBuf::from("/home/user/.hermes")),
+			),
+			Some(PathBuf::from("/custom/hermes"))
+		);
+	}
+}

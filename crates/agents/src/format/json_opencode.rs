@@ -2,6 +2,7 @@ use crate::{
 	errors::{ConfigError, Result},
 	models::{AgentConfig, McpServer, McpTransport},
 };
+use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -27,6 +28,8 @@ struct OpenCodeMcpEntry {
 	environment: Option<HashMap<String, String>>,
 	headers: Option<HashMap<String, String>>,
 	timeout: Option<u64>,
+	#[serde(flatten)]
+	extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -44,6 +47,8 @@ struct OpenCodeMcpOutput {
 	headers: Option<HashMap<String, String>>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	timeout: Option<u64>,
+	#[serde(flatten)]
+	extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -56,7 +61,9 @@ struct OpenCodeConfigOutput {
 }
 
 pub fn parse(content: &str) -> Result<AgentConfig> {
-	let oc: OpenCodeConfig = serde_json::from_str(content)?;
+	let oc: OpenCodeConfig = parse_jsonc_opt(content)
+		.map_err(|error| ConfigError::InvalidConfig(error.to_string()))?
+		.unwrap_or_default();
 	let mut config = AgentConfig::new();
 
 	for (name, entry) in oc.mcp {
@@ -98,18 +105,29 @@ pub fn serialize(
 	config: &AgentConfig,
 	original_content: Option<&str>,
 ) -> Result<String> {
-	let original: OpenCodeConfig = original_content
-		.filter(|c| !c.trim().is_empty())
-		.and_then(|c| serde_json::from_str(c).ok())
-		.unwrap_or_default();
+	let original: OpenCodeConfig = match original_content {
+		Some(content) => parse_jsonc_opt(content)
+			.map_err(|error| ConfigError::InvalidConfig(error.to_string()))?
+			.unwrap_or_default(),
+		None => OpenCodeConfig::default(),
+	};
+	let OpenCodeConfig {
+		schema,
+		mcp: original_mcps,
+		extra,
+	} = original;
 
 	let mut out = OpenCodeConfigOutput {
-		schema: original.schema,
+		schema,
 		mcp: HashMap::new(),
-		extra: original.extra,
+		extra,
 	};
 
 	for mcp in &config.mcps {
+		let extra = original_mcps
+			.get(&mcp.name)
+			.map(|entry| entry.extra.clone())
+			.unwrap_or_default();
 		let entry = match &mcp.transport {
 			McpTransport::Stdio {
 				command,
@@ -128,15 +146,20 @@ pub fn serialize(
 					environment: env.clone(),
 					headers: None,
 					timeout: *timeout,
+					extra,
 				}
 			}
-			McpTransport::Sse {
-				url,
-				headers,
-				timeout,
-				..
+			// `remote` is the only remote type in this dialect, so an SSE
+			// server written here reads back as streamable HTTP. Refuse rather
+			// than change the user's transport behind their back.
+			McpTransport::Sse { .. } => {
+				return Err(ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' uses SSE, which this agent's config \
+					 format cannot express; use streamable HTTP instead",
+					name = mcp.name
+				)));
 			}
-			| McpTransport::StreamableHttp {
+			McpTransport::StreamableHttp {
 				url,
 				headers,
 				timeout,
@@ -149,12 +172,14 @@ pub fn serialize(
 				environment: None,
 				headers: headers.clone(),
 				timeout: *timeout,
+				extra,
 			},
 		};
 		out.mcp.insert(mcp.name.clone(), entry);
 	}
 
-	serde_json::to_string_pretty(&out).map_err(ConfigError::Json)
+	patch_jsonc_object(original_content, &out)
+		.map_err(|error| ConfigError::InvalidConfig(error.to_string()))
 }
 
 #[cfg(test)]
@@ -215,5 +240,48 @@ mod tests {
 		assert_eq!(val["model"]["default"], "gpt-5.4-mini");
 		assert!(val["mcp"].get("new-srv").is_some());
 		assert!(val["mcp"].get("old-srv").is_none());
+	}
+
+	#[test]
+	fn test_opencode_jsonc_roundtrip_preserves_comments() {
+		let original = r#"{
+			// Keep this project note.
+			"model": "anthropic/claude-sonnet-4-5",
+			"mcp": {
+				"old-srv": {
+					"type": "local",
+					"command": ["old-cmd"],
+				},
+			},
+		}"#;
+
+		let mut config = parse(original).unwrap();
+		config.mcps = vec![McpServer::new(
+			"new-srv",
+			McpTransport::stdio("new-cmd", vec![]),
+		)];
+
+		let out = serialize(&config, Some(original)).unwrap();
+		assert!(out.contains("// Keep this project note."));
+		let reparsed = parse(&out).unwrap();
+		assert_eq!(reparsed.mcps[0].name, "new-srv");
+	}
+
+	#[test]
+	fn test_opencode_preserves_unmanaged_server_options() {
+		let original = r#"{
+			"mcp": {
+				"remote-srv": {
+					"type": "remote",
+					"url": "https://example.com/mcp",
+					"oauth": {"clientId": "client-id"}
+				}
+			}
+		}"#;
+
+		let config = parse(original).unwrap();
+		let out = serialize(&config, Some(original)).unwrap();
+		let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+		assert_eq!(val["mcp"]["remote-srv"]["oauth"]["clientId"], "client-id");
 	}
 }

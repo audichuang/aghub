@@ -5,7 +5,9 @@
 //!
 //! Expected values are extracted from main branch actual descriptor definitions.
 
-use aghub_agents::{AgentDescriptor, AgentType};
+use aghub_agents::{
+	agents, AgentDescriptor, AgentType, McpServer, McpTransport, ResourceScope,
+};
 use std::path::PathBuf;
 
 /// Helper to get home directory for path assertions
@@ -13,9 +15,76 @@ fn home() -> PathBuf {
 	dirs::home_dir().expect("home dir should exist")
 }
 
+/// Documented overrides that move an agent's global config off its default
+/// path. The tables below pin the DEFAULTS, so a test that reads a global path
+/// must clear these first — otherwise the suite goes red on any machine that
+/// happens to export one, and a bare `XDG_CONFIG_HOME` is enough to do it.
+const PATH_OVERRIDES: &[&str] = &[
+	"OPENCODE_CONFIG",
+	"OPENCODE_CONFIG_DIR",
+	"XDG_CONFIG_HOME",
+	"CODEX_HOME",
+	"COPILOT_HOME",
+	"KIMI_SHARE_DIR",
+	"VIBE_HOME",
+	"HERMES_HOME",
+	"GROK_HOME",
+	"OPENCLAW_CONFIG_PATH",
+	"OPENCLAW_STATE_DIR",
+];
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct DefaultEnv {
+	_guard: std::sync::MutexGuard<'static, ()>,
+	saved: Vec<(&'static str, Option<std::ffi::OsString>)>,
+}
+
+impl Drop for DefaultEnv {
+	fn drop(&mut self) {
+		for (key, value) in &self.saved {
+			match value {
+				Some(value) => std::env::set_var(key, value),
+				None => std::env::remove_var(key),
+			}
+		}
+	}
+}
+
+/// Resolve global paths as if no override were set. Serialised against every
+/// other test that does the same.
+fn default_env() -> DefaultEnv {
+	let guard = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+	let saved = PATH_OVERRIDES
+		.iter()
+		.map(|key| (*key, std::env::var_os(key)))
+		.collect::<Vec<_>>();
+	for (key, _) in &saved {
+		std::env::remove_var(key);
+	}
+	DefaultEnv {
+		_guard: guard,
+		saved,
+	}
+}
+
+fn zed_config_dir() -> Option<PathBuf> {
+	#[cfg(target_os = "macos")]
+	{
+		Some(home().join(".config/zed"))
+	}
+	#[cfg(target_os = "windows")]
+	{
+		dirs::config_dir().map(|dir| dir.join("Zed"))
+	}
+	#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+	{
+		dirs::config_dir().map(|dir| dir.join("zed"))
+	}
+}
+
 /// Get all descriptors from the registry
 fn all_descriptors() -> Vec<(AgentType, &'static AgentDescriptor)> {
-	use aghub_agents::agents;
 	vec![
 		(AgentType::Claude, &agents::claude::DESCRIPTOR),
 		(AgentType::Codex, &agents::codex::DESCRIPTOR),
@@ -38,8 +107,24 @@ fn all_descriptors() -> Vec<(AgentType, &'static AgentDescriptor)> {
 		(AgentType::AugmentCode, &agents::augmentcode::DESCRIPTOR),
 		(AgentType::KiloCode, &agents::kilocode::DESCRIPTOR),
 		(AgentType::Amp, &agents::amp::DESCRIPTOR),
+		(AgentType::Factory, &agents::factory::DESCRIPTOR),
 		(AgentType::Warp, &agents::warp::DESCRIPTOR),
+		(AgentType::Hermes, &agents::hermes::DESCRIPTOR),
+		(AgentType::Grok, &agents::grok::DESCRIPTOR),
 	]
+}
+
+#[test]
+fn descriptor_matrix_covers_every_agent_type() {
+	let descriptors = all_descriptors();
+	let actual: Vec<_> = descriptors.iter().map(|(agent, _)| *agent).collect();
+	assert_eq!(actual.len(), AgentType::ALL.len());
+	for agent in AgentType::ALL {
+		assert!(actual.contains(agent), "missing descriptor for {agent:?}");
+	}
+	for (agent, descriptor) in descriptors {
+		assert_eq!(descriptor.id, agent.as_str());
+	}
 }
 
 // =============================================================================
@@ -49,14 +134,14 @@ fn all_descriptors() -> Vec<(AgentType, &'static AgentDescriptor)> {
 #[test]
 fn test_cli_names() {
 	// Expected values from main branch descriptor files
-	let expected: [(AgentType, &str); 22] = [
+	let expected: [(AgentType, &str); 25] = [
 		(AgentType::Claude, "claude"),
 		(AgentType::Codex, "codex"),
 		(AgentType::Openclaw, "openclaw"),
 		(AgentType::OpenCode, "opencode"),
 		(AgentType::Gemini, "gemini"),
 		(AgentType::Cline, "cline"),
-		(AgentType::Copilot, "code"),
+		(AgentType::Copilot, "copilot"),
 		(AgentType::Cursor, "cursor"),
 		(AgentType::Antigravity, "antigravity"),
 		(AgentType::Kiro, "kiro"),
@@ -72,6 +157,9 @@ fn test_cli_names() {
 		(AgentType::KiloCode, "kilocode"), // main branch: "kilocode"
 		(AgentType::Amp, "amp"),
 		(AgentType::Warp, "warp"),
+		(AgentType::Factory, "factory"),
+		(AgentType::Hermes, "hermes"),
+		(AgentType::Grok, "grok"),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -92,7 +180,7 @@ fn test_cli_names() {
 
 #[test]
 fn test_skills_cli_names() {
-	let expected: [(AgentType, Option<&str>); 22] = [
+	let expected: [(AgentType, Option<&str>); 25] = [
 		(AgentType::Claude, Some("claude-code")), // main branch: "claude-code"
 		(AgentType::Codex, Some("codex")),
 		(AgentType::Openclaw, Some("openclaw")),
@@ -115,6 +203,9 @@ fn test_skills_cli_names() {
 		(AgentType::KiloCode, Some("kilo")), // main branch: "kilo"
 		(AgentType::Amp, Some("amp")),
 		(AgentType::Warp, Some("warp")),
+		(AgentType::Factory, Some("factory")),
+		(AgentType::Hermes, None),
+		(AgentType::Grok, None),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -135,7 +226,7 @@ fn test_skills_cli_names() {
 
 #[test]
 fn test_display_names() {
-	let expected: [(AgentType, &str); 22] = [
+	let expected: [(AgentType, &str); 25] = [
 		(AgentType::Claude, "Claude Code"), // main branch: "Claude Code"
 		(AgentType::Codex, "OpenAI Codex"),
 		(AgentType::Openclaw, "OpenClaw"),
@@ -158,6 +249,9 @@ fn test_display_names() {
 		(AgentType::KiloCode, "KiloCode"),
 		(AgentType::Amp, "Amp"),
 		(AgentType::Warp, "Warp"),
+		(AgentType::Factory, "Factory"),
+		(AgentType::Hermes, "Hermes"),
+		(AgentType::Grok, "Grok"),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -178,16 +272,19 @@ fn test_display_names() {
 
 #[test]
 fn test_project_markers() {
-	let expected: [(AgentType, &[&str]); 22] = [
+	let expected: [(AgentType, &[&str]); 25] = [
 		(AgentType::Claude, &[".claude", ".mcp.json"]), // main branch has both
 		(AgentType::Codex, &[".codex"]),
 		(AgentType::Openclaw, &[".openclaw"]),
-		(AgentType::OpenCode, &[".opencode"]),
+		(
+			AgentType::OpenCode,
+			&["opencode.json", "opencode.jsonc", ".opencode"],
+		),
 		(AgentType::Gemini, &[".gemini"]),
 		(AgentType::Cline, &[".cline"]),
-		(AgentType::Copilot, &[".vscode"]),
+		(AgentType::Copilot, &[".mcp.json", ".github"]),
 		(AgentType::Cursor, &[".cursor"]),
-		(AgentType::Antigravity, &[".gemini/antigravity"]),
+		(AgentType::Antigravity, &[".agents/mcp_config.json"]),
 		(AgentType::Kiro, &[".kiro"]),
 		(AgentType::Windsurf, &[".windsurf"]),
 		(AgentType::Trae, &[".trae"]),
@@ -198,9 +295,15 @@ fn test_project_markers() {
 		(AgentType::Mistral, &[".vibe"]),
 		(AgentType::Pi, &[".pi"]),
 		(AgentType::AugmentCode, &[]),
-		(AgentType::KiloCode, &[".kilocode"]),
+		(
+			AgentType::KiloCode,
+			&["kilo.json", "kilo.jsonc", ".kilo", ".kilocode"],
+		),
 		(AgentType::Amp, &[".amp"]),
 		(AgentType::Warp, &[".warp"]),
+		(AgentType::Factory, &[".factory"]),
+		(AgentType::Hermes, &[]),
+		(AgentType::Grok, &[".grok"]),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -217,29 +320,27 @@ fn test_project_markers() {
 }
 
 // =============================================================================
-// MCP Global Path Tests (from main branch actual values)
+// MCP Global Path Contract
 // =============================================================================
 
 #[test]
 fn test_mcp_global_paths() {
-	let expected: [(AgentType, Option<&str>); 22] = [
-		(AgentType::Claude, Some(".claude.json")), // main branch: .claude.json
+	let _env = default_env();
+	let expected: [(AgentType, Option<&str>); 25] = [
+		(AgentType::Claude, Some(".claude.json")),
 		(AgentType::Codex, Some(".codex/config.toml")),
-		(
-			AgentType::Openclaw,
-			Some(".openclaw/workspace/config/mcporter.json"),
-		),
+		(AgentType::Openclaw, Some(".openclaw/openclaw.json")),
 		(AgentType::OpenCode, Some(".config/opencode/opencode.json")),
 		(AgentType::Gemini, Some(".gemini/settings.json")),
 		(
 			AgentType::Cline,
 			Some(".cline/data/settings/cline_mcp_settings.json"),
 		),
-		(AgentType::Copilot, Some(".vscode/mcp.json")),
+		(AgentType::Copilot, Some(".copilot/mcp-config.json")),
 		(AgentType::Cursor, Some(".cursor/mcp.json")),
 		(
 			AgentType::Antigravity,
-			Some(".gemini/antigravity/mcp_config.json"),
+			Some(".gemini/config/mcp_config.json"),
 		),
 		(AgentType::Kiro, Some(".kiro/settings/mcp.json")),
 		(
@@ -249,14 +350,17 @@ fn test_mcp_global_paths() {
 		(AgentType::Trae, None), // global MCP is GUI-managed (no file)
 		(AgentType::Zed, Some(".config/zed/settings.json")),
 		(AgentType::JetBrainsAi, None), // MCP is GUI-only (no file)
-		(AgentType::RooCode, Some(".roo/mcp.json")),
+		(AgentType::RooCode, None),
 		(AgentType::Kimi, Some(".kimi/mcp.json")),
-		(AgentType::Mistral, Some(".vibe/mcp.toml")),
+		(AgentType::Mistral, Some(".vibe/config.toml")),
 		(AgentType::Pi, None), // Pi has no MCP
 		(AgentType::AugmentCode, Some(".augment/settings.json")),
-		(AgentType::KiloCode, Some(".kilocode/mcp.json")),
+		(AgentType::KiloCode, Some(".config/kilo/kilo.json")),
 		(AgentType::Amp, Some(".config/amp/settings.json")),
-		(AgentType::Warp, Some(".warp/mcp.json")),
+		(AgentType::Factory, Some(".factory/mcp.json")),
+		(AgentType::Warp, Some(".warp/.mcp.json")),
+		(AgentType::Hermes, Some(".hermes/config.yaml")),
+		(AgentType::Grok, Some(".grok/config.toml")),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -273,12 +377,44 @@ fn test_mcp_global_paths() {
 					agent_type
 				);
 				let actual = desc.mcp_global_path.unwrap()();
-				assert_eq!(
-					actual,
-					Some(home().join(path)),
-					"mcp_global_path mismatch for {:?}",
-					agent_type
-				);
+				if agent_type == AgentType::Zed {
+					assert_eq!(
+						actual,
+						zed_config_dir().map(|dir| dir.join("settings.json")),
+						"Zed global path should use the platform config directory"
+					);
+				} else if matches!(
+					agent_type,
+					AgentType::OpenCode | AgentType::KiloCode
+				) || agent_type == AgentType::Amp
+				{
+					let allowed = match agent_type {
+						AgentType::OpenCode => [
+							home().join(".config/opencode/opencode.json"),
+							home().join(".config/opencode/opencode.jsonc"),
+						],
+						AgentType::KiloCode => [
+							home().join(".config/kilo/kilo.json"),
+							home().join(".config/kilo/kilo.jsonc"),
+						],
+						AgentType::Amp => [
+							home().join(".config/amp/settings.json"),
+							home().join(".config/amp/settings.jsonc"),
+						],
+						_ => unreachable!(),
+					};
+					assert!(
+						allowed.into_iter().any(|path| actual == Some(path)),
+						"global path must use a supported filename: {actual:?}"
+					);
+				} else {
+					assert_eq!(
+						actual,
+						Some(home().join(path)),
+						"mcp_global_path mismatch for {:?}",
+						agent_type
+					);
+				}
 			}
 			Some(None) => {
 				assert!(
@@ -293,37 +429,37 @@ fn test_mcp_global_paths() {
 }
 
 // =============================================================================
-// MCP Project Path Tests (from main branch actual values)
+// MCP Project Path Contract
 // =============================================================================
 
 #[test]
 fn test_mcp_project_paths() {
-	let expected: [(AgentType, Option<&str>); 22] = [
-		(AgentType::Claude, Some(".mcp.json")), // main branch: .mcp.json
+	let expected: [(AgentType, Option<&str>); 25] = [
+		(AgentType::Claude, Some(".mcp.json")),
 		(AgentType::Codex, Some(".codex/config.toml")),
 		(AgentType::Openclaw, None), // Openclaw has no project MCP path
-		(AgentType::OpenCode, Some(".opencode/settings.json")),
+		(AgentType::OpenCode, Some("opencode.json")),
 		(AgentType::Gemini, Some(".gemini/settings.json")),
-		(AgentType::Cline, Some(".cline/mcp.json")),
-		(AgentType::Copilot, Some(".vscode/mcp.json")),
+		(AgentType::Cline, None),
+		(AgentType::Copilot, Some(".mcp.json")),
 		(AgentType::Cursor, Some(".cursor/mcp.json")),
-		(
-			AgentType::Antigravity,
-			Some(".gemini/antigravity/mcp_config.json"),
-		),
+		(AgentType::Antigravity, Some(".agents/mcp_config.json")),
 		(AgentType::Kiro, Some(".kiro/settings/mcp.json")),
-		(AgentType::Windsurf, Some(".windsurf/mcp_config.json")),
+		(AgentType::Windsurf, None),
 		(AgentType::Trae, Some(".trae/mcp.json")),
 		(AgentType::Zed, Some(".zed/settings.json")),
 		(AgentType::JetBrainsAi, None), // MCP is GUI-only (no file)
 		(AgentType::RooCode, Some(".roo/mcp.json")),
-		(AgentType::Kimi, Some(".kimi/mcp.json")),
-		(AgentType::Mistral, Some(".vibe/mcp.toml")),
+		(AgentType::Kimi, None),
+		(AgentType::Mistral, Some(".vibe/config.toml")),
 		(AgentType::Pi, None),          // Pi has no MCP
 		(AgentType::AugmentCode, None), // CLI has no project MCP file
-		(AgentType::KiloCode, Some(".kilocode/mcp.json")),
-		(AgentType::Amp, Some(".amp/mcp.json")),
-		(AgentType::Warp, Some(".warp/mcp.json")),
+		(AgentType::KiloCode, Some("kilo.json")),
+		(AgentType::Amp, Some(".amp/settings.json")),
+		(AgentType::Factory, Some(".factory/mcp.json")),
+		(AgentType::Warp, Some(".warp/.mcp.json")),
+		(AgentType::Hermes, None),
+		(AgentType::Grok, Some(".grok/config.toml")),
 	];
 
 	let root = PathBuf::from("/project");
@@ -342,12 +478,30 @@ fn test_mcp_project_paths() {
 					agent_type
 				);
 				let actual = desc.mcp_project_path.unwrap()(&root);
-				assert_eq!(
-					actual,
-					Some(root.join(path)),
-					"mcp_project_path mismatch for {:?}",
-					agent_type
-				);
+				if matches!(agent_type, AgentType::KiloCode | AgentType::Amp) {
+					let candidates = match agent_type {
+						AgentType::KiloCode => {
+							[root.join("kilo.json"), root.join("kilo.jsonc")]
+						}
+						AgentType::Amp => [
+							root.join(".amp/settings.json"),
+							root.join(".amp/settings.jsonc"),
+						],
+						_ => unreachable!(),
+					};
+					assert!(
+						candidates.into_iter().any(|path| actual == Some(path)),
+						"project path must use a supported filename for {:?}: {actual:?}",
+						agent_type
+					);
+				} else {
+					assert_eq!(
+						actual,
+						Some(root.join(path)),
+						"mcp_project_path mismatch for {:?}",
+						agent_type
+					);
+				}
 			}
 			Some(None) => {
 				assert!(
@@ -361,13 +515,84 @@ fn test_mcp_project_paths() {
 	}
 }
 
+#[test]
+fn opencode_project_mcp_uses_an_existing_supported_config() {
+	for relative in [
+		"opencode.json",
+		"opencode.jsonc",
+		".opencode/opencode.json",
+		".opencode/opencode.jsonc",
+	] {
+		let project = tempfile::tempdir().unwrap();
+		let path = project.path().join(relative);
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(&path, "{}\n").unwrap();
+
+		let actual = agents::opencode::DESCRIPTOR.mcp_project_path.unwrap()(
+			project.path(),
+		);
+		assert_eq!(actual, Some(path), "existing {relative} must be reused");
+	}
+}
+
+#[test]
+fn opencode_project_mcp_defaults_to_root_config() {
+	let project = tempfile::tempdir().unwrap();
+	let server = McpServer::new(
+		"notebooklm",
+		McpTransport::stdio(
+			"doppler",
+			vec![
+				"run".into(),
+				"-p".into(),
+				"notebooklm".into(),
+				"-c".into(),
+				"prd".into(),
+				"--".into(),
+				"nblm-mcp".into(),
+				"--transport".into(),
+				"stdio".into(),
+			],
+		),
+	);
+
+	(agents::opencode::DESCRIPTOR.save_mcps)(
+		Some(project.path()),
+		ResourceScope::ProjectOnly,
+		&[server],
+	)
+	.unwrap();
+
+	let config = project.path().join("opencode.json");
+	let json: serde_json::Value =
+		serde_json::from_str(&std::fs::read_to_string(config).unwrap())
+			.unwrap();
+	assert_eq!(
+		json["mcp"]["notebooklm"]["command"],
+		serde_json::json!([
+			"doppler",
+			"run",
+			"-p",
+			"notebooklm",
+			"-c",
+			"prd",
+			"--",
+			"nblm-mcp",
+			"--transport",
+			"stdio"
+		])
+	);
+	assert!(!project.path().join(".opencode/settings.json").exists());
+}
+
 // =============================================================================
 // Global Data Dir Tests (from main branch actual values)
 // =============================================================================
 
 #[test]
 fn test_global_data_dirs() {
-	let expected: [(AgentType, Option<&str>); 20] = [
+	let _env = default_env();
+	let expected: [(AgentType, Option<&str>); 22] = [
 		(AgentType::Claude, Some(".claude")),
 		(AgentType::Codex, Some(".codex")),
 		(AgentType::Openclaw, Some(".openclaw")),
@@ -379,17 +604,19 @@ fn test_global_data_dirs() {
 		(AgentType::Antigravity, Some(".gemini/antigravity")),
 		(AgentType::Kiro, Some(".kiro")),
 		(AgentType::Windsurf, Some(".codeium/windsurf")),
-		// Trae and JetBrainsAi use the OS config dir, not a home dotfolder —
+		// Zed, Trae, and JetBrainsAi use the OS config dir, not a home dotfolder —
 		// asserted explicitly after the loop.
-		(AgentType::Zed, Some(".config/zed")),
 		(AgentType::RooCode, Some(".roo")),
 		(AgentType::Kimi, Some(".kimi")),
 		(AgentType::Mistral, Some(".vibe")),
 		(AgentType::Pi, Some(".pi/agent")),
 		(AgentType::AugmentCode, Some(".augment")),
-		(AgentType::KiloCode, Some(".kilocode")),
+		(AgentType::KiloCode, Some(".config/kilo")),
 		(AgentType::Amp, Some(".config/amp")),
 		(AgentType::Warp, Some(".warp")),
+		(AgentType::Factory, Some(".factory")),
+		(AgentType::Hermes, Some(".hermes")),
+		(AgentType::Grok, Some(".grok")),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -433,6 +660,11 @@ fn test_global_data_dirs() {
 		dirs::config_dir().map(|c| c.join("JetBrains")),
 		"jetbrains-ai global_data_dir should be the OS config dir"
 	);
+	assert_eq!(
+		(agents::zed::DESCRIPTOR.global_data_dir)(),
+		zed_config_dir(),
+		"zed global_data_dir should be the OS config dir"
+	);
 }
 
 // =============================================================================
@@ -441,7 +673,7 @@ fn test_global_data_dirs() {
 
 #[test]
 fn test_mcp_capabilities_stdio() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -464,6 +696,9 @@ fn test_mcp_capabilities_stdio() {
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
+		(AgentType::Factory, true),
+		(AgentType::Hermes, true),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -480,16 +715,16 @@ fn test_mcp_capabilities_stdio() {
 
 #[test]
 fn test_mcp_capabilities_remote() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true),
-		(AgentType::Codex, false), // Codex doesn't support remote MCP
+		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
 		(AgentType::OpenCode, true),
 		(AgentType::Gemini, true),
 		(AgentType::Cline, true),
 		(AgentType::Copilot, true),
 		(AgentType::Cursor, true),
-		(AgentType::Antigravity, false),
+		(AgentType::Antigravity, true),
 		(AgentType::Kiro, true),
 		(AgentType::Windsurf, true),
 		(AgentType::Trae, true),
@@ -503,6 +738,9 @@ fn test_mcp_capabilities_remote() {
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
+		(AgentType::Factory, true),
+		(AgentType::Hermes, true),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -519,7 +757,7 @@ fn test_mcp_capabilities_remote() {
 
 #[test]
 fn test_mcp_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -534,7 +772,7 @@ fn test_mcp_capabilities_scopes_global() {
 		(AgentType::Trae, false), // global MCP is GUI-managed
 		(AgentType::Zed, true),
 		(AgentType::JetBrainsAi, false), // GUI-only, no file-based MCP
-		(AgentType::RooCode, true),
+		(AgentType::RooCode, false),
 		(AgentType::Kimi, true),
 		(AgentType::Mistral, true),
 		(AgentType::Pi, false), // Pi has no MCP
@@ -542,6 +780,9 @@ fn test_mcp_capabilities_scopes_global() {
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
+		(AgentType::Factory, true),
+		(AgentType::Hermes, true),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -558,29 +799,32 @@ fn test_mcp_capabilities_scopes_global() {
 
 #[test]
 fn test_mcp_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 22] = [
+	let expected: [(AgentType, bool); 25] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false), // Openclaw has no project MCP
 		(AgentType::OpenCode, true),
 		(AgentType::Gemini, true),
-		(AgentType::Cline, true),
+		(AgentType::Cline, false),
 		(AgentType::Copilot, true),
 		(AgentType::Cursor, true),
 		(AgentType::Antigravity, true),
 		(AgentType::Kiro, true),
-		(AgentType::Windsurf, true),
+		(AgentType::Windsurf, false),
 		(AgentType::Trae, true),
 		(AgentType::Zed, true),
 		(AgentType::JetBrainsAi, false), // GUI-only, no file-based MCP
 		(AgentType::RooCode, true),
-		(AgentType::Kimi, true),
+		(AgentType::Kimi, false),
 		(AgentType::Mistral, true),
 		(AgentType::Pi, false),          // Pi has no MCP
 		(AgentType::AugmentCode, false), // CLI has no project MCP file
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
+		(AgentType::Factory, true),
+		(AgentType::Hermes, false),
+		(AgentType::Grok, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -592,6 +836,52 @@ fn test_mcp_capabilities_scopes_project() {
 				agent_type
 			);
 		}
+	}
+}
+
+#[test]
+fn test_mcp_capabilities_enable_disable() {
+	let expected: [(AgentType, bool); 25] = [
+		(AgentType::Claude, false),
+		(AgentType::Codex, true),
+		(AgentType::Openclaw, true),
+		(AgentType::OpenCode, true),
+		(AgentType::Gemini, false),
+		(AgentType::Cline, true),
+		(AgentType::Copilot, false),
+		(AgentType::Cursor, false),
+		(AgentType::Antigravity, true),
+		(AgentType::Kiro, true),
+		(AgentType::Windsurf, false),
+		(AgentType::Trae, false),
+		// Zed's documented `context_servers` entry has no per-server toggle,
+		// so aghub does not invent one.
+		(AgentType::Zed, false),
+		(AgentType::JetBrainsAi, false),
+		(AgentType::RooCode, true),
+		(AgentType::Kimi, false),
+		(AgentType::Mistral, true),
+		(AgentType::Pi, false),
+		(AgentType::AugmentCode, false),
+		(AgentType::KiloCode, true),
+		(AgentType::Amp, true),
+		(AgentType::Warp, false),
+		(AgentType::Factory, false),
+		(AgentType::Hermes, true),
+		(AgentType::Grok, true),
+	];
+
+	for (agent_type, desc) in all_descriptors() {
+		let expected = expected
+			.iter()
+			.find(|(agent, _)| *agent == agent_type)
+			.map(|(_, value)| *value)
+			.expect("every descriptor must have an MCP capability contract");
+		assert_eq!(
+			desc.capabilities.mcp.enable_disable, expected,
+			"mcp.enable_disable mismatch for {:?}",
+			agent_type
+		);
 	}
 }
 
@@ -804,6 +1094,7 @@ fn test_sub_agent_capabilities_scopes_project() {
 
 #[test]
 fn test_global_skill_paths() {
+	let _env = default_env();
 	// Most agents have single skill path, Claude has dynamic plugin discovery
 	let expected: [(AgentType, Option<&[&str]>); 22] = [
 		// Claude: dynamic plugin discovery, base path is .claude/skills

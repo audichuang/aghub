@@ -1,11 +1,16 @@
-use crate::define_mcp_paths;
 use crate::define_skill_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::{define_mcp_paths, json_map_dialect};
+
+json_map_dialect!(json_map::Dialect {
+	toggle_key: json_map::ToggleKey::Disabled,
+	..json_map::MCP_SERVERS
+});
 
 define_mcp_paths! {
 	symmetric: ".factory/mcp.json",
-	strategy: mcp_strategy::parse_json_map_mcp_servers,
-			  mcp_strategy::serialize_json_map_mcp_servers,
+	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 define_skill_paths! {
@@ -15,8 +20,8 @@ define_skill_paths! {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "factory",
 	display_name: "Factory",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
@@ -37,6 +42,9 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 			},
 			stdio: true,
 			remote: true,
+			// Factory stores project-toggle overrides at user scope. Aghub's
+			// current scope writer cannot express that without mutating the
+			// project file, so do not advertise an unsafe toggle operation.
 			enable_disable: false,
 		},
 		sub_agents: SubAgentCapabilities {

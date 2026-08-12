@@ -5,14 +5,17 @@ use crate::descriptor::*;
 use std::path::{Path, PathBuf};
 
 fn global_data_dir() -> Option<PathBuf> {
-	home_dir().map(|home| home.join(".codex"))
+	mcp::global_dir()
 }
 
 fn global_skills_paths() -> Vec<PathBuf> {
-	let Some(home) = home_dir() else {
+	let Some(root) = mcp::global_dir() else {
 		return Vec::new();
 	};
-	let paths = vec![home.join(".codex/skills"), home.join(".agents/skills")];
+	let Some(home) = home_dir() else {
+		return vec![root.join("skills")];
+	};
+	let paths = vec![root.join("skills"), home.join(".agents/skills")];
 	#[cfg(not(target_os = "windows"))]
 	let paths = {
 		let mut p = paths;
@@ -27,7 +30,7 @@ fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
-	home_dir().map(|home| home.join(".codex/skills"))
+	mcp::global_dir().map(|root| root.join("skills"))
 }
 
 fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
@@ -58,8 +61,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 				project: true,
 			},
 			stdio: true,
-			remote: false,
-			enable_disable: false,
+			remote: true,
+			enable_disable: true,
 		},
 		sub_agents: SubAgentCapabilities {
 			scopes: ScopeSupport {

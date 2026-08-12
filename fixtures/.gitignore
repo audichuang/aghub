@@ -1,4 +1,7 @@
 *
 !.gitignore
 !.cline/
+!.cline/data/
+!.cline/data/settings/
+!.cline/data/settings/cline_mcp_settings.json
 !.agents/

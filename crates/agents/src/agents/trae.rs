@@ -1,5 +1,15 @@
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::json_map_dialect;
 use std::path::{Path, PathBuf};
+
+// Trae documents `mcpServers` with a bare `url` for remote servers and no
+// transport tag, so SSE has no native spelling.
+json_map_dialect!(json_map::Dialect {
+	discriminator: None,
+	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	..json_map::MCP_SERVERS
+});
 
 // Trae configures MCP through its GUI (Settings > MCP); there is no documented
 // hand-editable GLOBAL file — the global store is the IDE's opaque app data.
@@ -23,7 +33,7 @@ fn load_mcps(
 		scope,
 		None,
 		Some(mcp_project_path),
-		mcp_strategy::parse_json_map_mcp_servers,
+		parse_mcp_config,
 	)
 }
 fn save_mcps(
@@ -37,7 +47,7 @@ fn save_mcps(
 		mcps,
 		None,
 		Some(mcp_project_path),
-		mcp_strategy::serialize_json_map_mcp_servers,
+		serialize_mcp_config,
 	)
 }
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
@@ -50,8 +60,8 @@ fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "trae",
 	display_name: "Trae",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
 	mcp_global_path: None,

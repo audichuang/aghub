@@ -3,6 +3,42 @@
 //! These macros reduce boilerplate in agent descriptor files by generating
 //! common path and I/O functions.
 
+// ── MCP Dialect Macro ────────────────────────────────────────────────────────
+
+/// Declare an agent's map-based MCP dialect ONCE and generate the matching
+/// `parse_mcp_config` / `serialize_mcp_config` pair from it.
+///
+/// Reading and writing must come from the same [`json_map::Dialect`]: when they
+/// were configured separately an agent could parse a transport or a toggle it
+/// had no way to write back, and the next save silently rewrote the user's
+/// config. Going through this macro makes that mismatch unrepresentable.
+///
+/// ```rust,ignore
+/// json_map_dialect!(json_map::Dialect {
+///     toggle_key: json_map::ToggleKey::Disabled,
+///     ..json_map::MCP_SERVERS
+/// });
+/// ```
+#[macro_export]
+macro_rules! json_map_dialect {
+	($dialect:expr) => {
+		const MCP_DIALECT: $crate::format::json_map::Dialect = $dialect;
+
+		fn parse_mcp_config(
+			content: &str,
+		) -> $crate::Result<$crate::AgentConfig> {
+			$crate::format::json_map::parse(content, &MCP_DIALECT)
+		}
+
+		fn serialize_mcp_config(
+			config: &$crate::AgentConfig,
+			original: Option<&str>,
+		) -> $crate::Result<String> {
+			$crate::format::json_map::serialize(config, original, &MCP_DIALECT)
+		}
+	};
+}
+
 // ── MCP Path Macros ──────────────────────────────────────────────────────────
 
 /// Macro to generate MCP path helper functions for an agent descriptor.

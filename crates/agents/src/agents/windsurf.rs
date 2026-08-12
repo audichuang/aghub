@@ -1,13 +1,55 @@
-use crate::define_mcp_paths;
 use crate::define_skill_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::json_map_dialect;
+use std::path::{Path, PathBuf};
 
-define_mcp_paths! {
-	global: ".codeium/windsurf/mcp_config.json",
-	project: ".windsurf/mcp_config.json",
-	data_dir: ".codeium/windsurf",
-	strategy: mcp_strategy::parse_json_map_mcp_servers,
-			  mcp_strategy::serialize_json_map_mcp_servers,
+// Windsurf spells the remote endpoint `serverUrl` and documents no transport
+// tag, so SSE and streamable HTTP are indistinguishable in the file.
+json_map_dialect!(json_map::Dialect {
+	discriminator: None,
+	url_key: "serverUrl",
+	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	..json_map::MCP_SERVERS
+});
+
+fn mcp_global_path() -> Option<PathBuf> {
+	home_dir().map(|home| home.join(".codeium/windsurf/mcp_config.json"))
+}
+
+fn global_data_dir() -> Option<PathBuf> {
+	home_dir().map(|home| home.join(".codeium/windsurf"))
+}
+
+const MCP_GLOBAL_PATH: Option<OptionalPathFn> = Some(mcp_global_path);
+const MCP_PROJECT_PATH: Option<OptionalProjectPathFn> = None;
+
+fn load_mcps(
+	project_root: Option<&Path>,
+	scope: crate::ResourceScope,
+) -> crate::Result<Vec<crate::McpServer>> {
+	load_scoped_mcps(
+		project_root,
+		scope,
+		MCP_GLOBAL_PATH,
+		MCP_PROJECT_PATH,
+		parse_mcp_config,
+	)
+}
+
+fn save_mcps(
+	project_root: Option<&Path>,
+	scope: crate::ResourceScope,
+	mcps: &[crate::McpServer],
+) -> crate::Result<()> {
+	save_scoped_mcps(
+		project_root,
+		scope,
+		mcps,
+		MCP_GLOBAL_PATH,
+		MCP_PROJECT_PATH,
+		serialize_mcp_config,
+	)
 }
 
 define_skill_paths! {
@@ -18,12 +60,12 @@ define_skill_paths! {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "windsurf",
 	display_name: "Windsurf",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
-	mcp_global_path: Some(mcp_global_path),
-	mcp_project_path: Some(mcp_project_path),
+	mcp_global_path: MCP_GLOBAL_PATH,
+	mcp_project_path: MCP_PROJECT_PATH,
 	global_data_dir,
 	capabilities: Capabilities {
 		skills: SkillCapabilities {
@@ -36,7 +78,7 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 		mcp: McpCapabilities {
 			scopes: ScopeSupport {
 				global: true,
-				project: true,
+				project: false,
 			},
 			stdio: true,
 			remote: true,
@@ -64,3 +106,19 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_markers: &[".windsurf"],
 	skills_cli_name: Some("windsurf"),
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	const _: () = {
+		assert!(DESCRIPTOR.capabilities.mcp.scopes.global);
+		assert!(!DESCRIPTOR.capabilities.mcp.scopes.project);
+	};
+
+	#[test]
+	fn descriptor_mcp_contract_matches_runtime() {
+		assert!(DESCRIPTOR.mcp_global_path.is_some());
+		assert!(DESCRIPTOR.mcp_project_path.is_none());
+	}
+}

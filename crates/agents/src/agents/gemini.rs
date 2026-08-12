@@ -1,11 +1,18 @@
-use crate::define_mcp_paths;
 use crate::define_skill_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::{define_mcp_paths, json_map_dialect};
+
+// Gemini spells `httpUrl` for streamable HTTP, so a bare `url` with no `type`
+// is read as HTTP rather than guessed from the path.
+json_map_dialect!(json_map::Dialect {
+	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	..json_map::MCP_SERVERS
+});
 
 define_mcp_paths! {
 	symmetric: ".gemini/settings.json",
-	strategy: mcp_strategy::parse_json_map_mcp_servers,
-			  mcp_strategy::serialize_json_map_mcp_servers,
+	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 define_skill_paths! {
@@ -16,8 +23,8 @@ define_skill_paths! {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "gemini",
 	display_name: "Gemini CLI",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
 	mcp_global_path: Some(mcp_global_path),

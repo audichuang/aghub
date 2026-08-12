@@ -34,6 +34,20 @@ fn create_test_mcp_sse(name: &str) -> McpServer {
 	)
 }
 
+fn create_test_mcp_http(name: &str) -> McpServer {
+	let mut headers = HashMap::new();
+	headers
+		.insert("Authorization".to_string(), "Bearer test-token".to_string());
+
+	McpServer::new(
+		name,
+		McpTransport::streamable_http_with_headers(
+			"http://localhost:3000",
+			headers,
+		),
+	)
+}
+
 fn create_test_mcp_streamable_http(name: &str) -> McpServer {
 	let mut headers = HashMap::new();
 	headers
@@ -215,12 +229,14 @@ fn test_opencode_full_mcp_workflow() {
 
 	manager.load().unwrap();
 
-	// Add both command and URL MCPs
+	// Add both command and URL MCPs. OpenCode has one remote type, so the URL
+	// server must be streamable HTTP — SSE is refused, not converted.
 	let cmd_mcp = create_test_mcp_stdio("cmd-mcp");
-	let url_mcp = create_test_mcp_sse("url-mcp");
+	let url_mcp = create_test_mcp_http("url-mcp");
 
 	manager.add_mcp(cmd_mcp).unwrap();
 	manager.add_mcp(url_mcp).unwrap();
+	assert!(manager.add_mcp(create_test_mcp_sse("sse-mcp")).is_err());
 
 	manager.load().unwrap();
 	let config = manager.config().unwrap();
@@ -672,7 +688,6 @@ test_mcp_workflow! {
 	test_kiro_mcp_workflow => AgentType::Kiro, "kiro-mcp",
 	test_cursor_mcp_workflow => AgentType::Cursor, "cursor-mcp",
 	test_windsurf_mcp_workflow => AgentType::Windsurf, "windsurf-mcp",
-	test_roocode_mcp_workflow => AgentType::RooCode, "roocode-mcp",
 	test_cline_mcp_workflow => AgentType::Cline, "cline-mcp",
 	test_gemini_mcp_workflow => AgentType::Gemini, "gemini-mcp",
 	test_kilocode_mcp_workflow => AgentType::KiloCode, "kilocode-mcp",
@@ -682,6 +697,26 @@ test_mcp_workflow! {
 	test_amp_mcp_workflow => AgentType::Amp, "amp-mcp",
 	test_augmentcode_mcp_workflow => AgentType::AugmentCode, "augmentcode-mcp",
 	test_warp_mcp_workflow => AgentType::Warp, "warp-mcp",
+}
+
+#[test]
+fn test_roocode_mcp_workflow() {
+	let test = TestConfig::new(AgentType::RooCode).unwrap();
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::RooCode),
+		false,
+		Some(test.temp_dir()),
+	);
+	manager.load().unwrap();
+	manager
+		.add_mcp(create_test_mcp_stdio("roocode-mcp"))
+		.unwrap();
+	manager.load().unwrap();
+	assert_eq!(manager.config().unwrap().mcps.len(), 1);
+	assert_eq!(manager.config().unwrap().mcps[0].name, "roocode-mcp");
+	manager.remove_mcp("roocode-mcp").unwrap();
+	manager.load().unwrap();
+	assert!(manager.config().unwrap().mcps.is_empty());
 }
 
 #[test]
@@ -772,7 +807,7 @@ fn test_zed_mcp_uses_context_servers_key() {
 }
 
 #[test]
-fn test_copilot_mcp_uses_servers_key() {
+fn test_copilot_mcp_uses_mcpservers_key() {
 	let test = TestConfig::new(AgentType::Copilot).unwrap();
 	let mut manager = test.create_manager();
 	manager.load().unwrap();
@@ -781,7 +816,7 @@ fn test_copilot_mcp_uses_servers_key() {
 	manager.add_mcp(mcp).unwrap();
 
 	let content = test.read_config().unwrap();
-	assert!(content.contains("\"servers\""));
+	assert!(content.contains("\"mcpServers\""));
 
 	manager.load().unwrap();
 	let config = manager.config().unwrap();

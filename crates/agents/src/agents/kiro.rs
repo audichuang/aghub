@@ -1,13 +1,22 @@
-use crate::define_mcp_paths;
 use crate::define_skill_paths;
 use crate::descriptor::*;
+use crate::format::json_map;
+use crate::{define_mcp_paths, json_map_dialect};
+
+// Kiro documents `disabled` and a bare `url` for remote servers; it has no
+// transport tag, so SSE cannot be expressed.
+json_map_dialect!(json_map::Dialect {
+	discriminator: None,
+	toggle_key: json_map::ToggleKey::Disabled,
+	untyped_remote: json_map::UntypedRemote::StreamableHttp,
+	..json_map::MCP_SERVERS
+});
 
 define_mcp_paths! {
 	global: ".kiro/settings/mcp.json",
 	project: ".kiro/settings/mcp.json",
 	data_dir: ".kiro",
-	strategy: mcp_strategy::parse_json_map_mcp_servers,
-			  mcp_strategy::serialize_json_map_mcp_servers,
+	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
 define_skill_paths! {
@@ -17,8 +26,8 @@ define_skill_paths! {
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "kiro",
 	display_name: "Kiro",
-	mcp_parse_config: Some(mcp_strategy::parse_json_map_mcp_servers),
-	mcp_serialize_config: Some(mcp_strategy::serialize_json_map_mcp_servers),
+	mcp_parse_config: Some(parse_mcp_config),
+	mcp_serialize_config: Some(serialize_mcp_config),
 	load_mcps,
 	save_mcps,
 	mcp_global_path: Some(mcp_global_path),
@@ -39,7 +48,7 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 			},
 			stdio: true,
 			remote: true,
-			enable_disable: false,
+			enable_disable: true,
 		},
 		sub_agents: SubAgentCapabilities {
 			scopes: ScopeSupport {

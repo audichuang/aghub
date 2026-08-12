@@ -47,6 +47,47 @@ fn test_opencode_global_config_path_not_platform_specific() {
 }
 
 #[test]
+fn test_opencode_global_config_respects_xdg_config_home() {
+	use std::ffi::OsString;
+
+	let _env = env_lock();
+	let config_home = tempfile::tempdir().unwrap();
+	// OPENCODE_CONFIG(_DIR) outrank XDG_CONFIG_HOME, so leaving either one set
+	// (a developer running OpenCode does) would make this assert the wrong
+	// path. Restore whatever the machine had on the way out.
+	struct RestoreEnv(Vec<(&'static str, Option<OsString>)>);
+	impl Drop for RestoreEnv {
+		fn drop(&mut self) {
+			for (key, value) in &self.0 {
+				match value {
+					Some(value) => std::env::set_var(key, value),
+					None => std::env::remove_var(key),
+				}
+			}
+		}
+	}
+	let keys = ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"];
+	let _restore = RestoreEnv(
+		keys.iter()
+			.map(|key| (*key, std::env::var_os(key)))
+			.collect(),
+	);
+	for key in keys {
+		std::env::remove_var(key);
+	}
+	std::env::set_var("XDG_CONFIG_HOME", config_home.path());
+	std::fs::create_dir_all(config_home.path().join("opencode")).unwrap();
+	std::fs::write(config_home.path().join("opencode/opencode.jsonc"), "{}\n")
+		.unwrap();
+
+	let path = opencode::DESCRIPTOR
+		.mcp_global_path
+		.and_then(|path| path())
+		.unwrap();
+	assert_eq!(path, config_home.path().join("opencode/opencode.jsonc"));
+}
+
+#[test]
 fn test_amp_global_skills_uses_xdg() {
 	let _env = env_lock();
 	let paths = amp::DESCRIPTOR.global_skill_read_paths();

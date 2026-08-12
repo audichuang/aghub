@@ -435,19 +435,19 @@ mod tests {
 
 	#[test]
 	fn preflight_toggle_requires_enable_disable_capability() {
-		// hermes toggles MCPs; cline holds them but cannot toggle.
+		// hermes toggles MCPs; windsurf holds them but cannot toggle.
 		let err = mcp_batch_preflight(
-			&[AgentType::Hermes, AgentType::Cline],
+			&[AgentType::Hermes, AgentType::Windsurf],
 			ResourceScope::GlobalOnly,
 			true,
 		)
 		.unwrap_err();
 		assert_eq!(err.agents.len(), 1, "hermes must not be blamed");
-		assert_eq!(err.agents[0].0, "cline");
+		assert_eq!(err.agents[0].0, "windsurf");
 		assert!(err.agents[0].1.contains("enable/disable"));
 		// The same pair passes a non-toggle mutation.
 		assert!(mcp_batch_preflight(
-			&[AgentType::Hermes, AgentType::Cline],
+			&[AgentType::Hermes, AgentType::Windsurf],
 			ResourceScope::GlobalOnly,
 			false,
 		)
