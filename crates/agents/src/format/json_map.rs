@@ -47,6 +47,12 @@ pub struct Dialect {
 	pub server_key: &'static str,
 	pub discriminator: Option<Discriminator>,
 	pub url_key: &'static str,
+	/// A second URL key whose PRESENCE declares streamable HTTP. Only Gemini
+	/// has one (`httpUrl`); for every other dialect the key is foreign and must
+	/// be left alone, not read and not removed — hijacking an entry on a key the
+	/// vendor never defined is how a Windsurf `serverUrl` server ends up
+	/// pointing at someone else's endpoint.
+	pub http_url_key: Option<&'static str>,
 	pub env_key: &'static str,
 	pub toggle_key: ToggleKey,
 	pub untyped_remote: UntypedRemote,
@@ -77,6 +83,7 @@ pub const MCP_SERVERS: Dialect = Dialect {
 		http: "http",
 	}),
 	url_key: "url",
+	http_url_key: None,
 	env_key: "env",
 	toggle_key: ToggleKey::None,
 	untyped_remote: UntypedRemote::InferSseFromUrl,
@@ -227,9 +234,9 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 			))
 		})?;
 		// Gemini's `httpUrl` IS the transport declaration, and Gemini itself
-		// consults it before `url` and before any `type`. Honour that order, or
-		// an entry carrying both keys parses as the `url` endpoint and the next
-		// save writes the wrong address.
+		// consults it before `url` and before any `type`. Honour that order for
+		// the dialect that declares the key — and ONLY that one.
+		let http_url = http_url.filter(|_| dialect.http_url_key.is_some());
 		let declared_http = http_url.is_some();
 		let url = http_url.or(url);
 		if command.is_some() && url.is_some() {
@@ -456,10 +463,12 @@ pub fn serialize(
 			"env",
 			"environment",
 			"url",
-			"httpUrl",
 			"serverUrl",
 			"headers",
 		] {
+			entry.remove(key);
+		}
+		if let Some(key) = dialect.http_url_key {
 			entry.remove(key);
 		}
 		match dialect.toggle_key {
@@ -720,23 +729,44 @@ mod tests {
 	}
 
 	#[test]
-	fn http_url_is_a_declaration_not_a_hint() {
+	fn http_url_is_a_declaration_only_for_the_dialect_that_owns_it() {
+		const GEMINI: Dialect = Dialect {
+			http_url_key: Some("httpUrl"),
+			..MCP_SERVERS
+		};
 		// Gemini consults `httpUrl` before `url` and before any `type`.
 		let both = r#"{"mcpServers":{"s":{"url":"https://events/sse","httpUrl":"https://api/mcp"}}}"#;
-		let config = parse(both, &MCP_SERVERS).unwrap();
-		match &config.mcps[0].transport {
+		match &parse(both, &GEMINI).unwrap().mcps[0].transport {
 			McpTransport::StreamableHttp { url, .. } => {
 				assert_eq!(url, "https://api/mcp", "httpUrl is authoritative")
 			}
 			other => panic!("expected streamable http, got {other:?}"),
 		}
-
-		// …even against an explicit `type: "sse"`.
 		let tagged = r#"{"mcpServers":{"s":{"httpUrl":"https://api/mcp","type":"sse"}}}"#;
 		assert!(matches!(
-			parse(tagged, &MCP_SERVERS).unwrap().mcps[0].transport,
+			parse(tagged, &GEMINI).unwrap().mcps[0].transport,
 			McpTransport::StreamableHttp { .. }
 		));
+
+		// For every OTHER dialect the key is foreign: it must not hijack the
+		// entry, and it must not be stripped on the way out either.
+		const WINDSURF: Dialect = Dialect {
+			url_key: "serverUrl",
+			..MCP_SERVERS
+		};
+		let foreign = r#"{"mcpServers":{"s":{"type":"sse","serverUrl":"https://events","httpUrl":"https://foreign/mcp"}}}"#;
+		let config = parse(foreign, &WINDSURF).unwrap();
+		match &config.mcps[0].transport {
+			McpTransport::Sse { url, .. } => assert_eq!(url, "https://events"),
+			other => panic!("expected sse, got {other:?}"),
+		}
+		let output = serialize(&config, Some(foreign), &WINDSURF).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+		assert_eq!(value["mcpServers"]["s"]["serverUrl"], "https://events");
+		assert_eq!(
+			value["mcpServers"]["s"]["httpUrl"], "https://foreign/mcp",
+			"an unowned key is unmanaged data, not ours to delete"
+		);
 	}
 
 	#[test]

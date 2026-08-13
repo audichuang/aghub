@@ -176,21 +176,29 @@ fn mcp_supported_for_target(
 			descriptor.id,
 		));
 	}
-	// The whole server, not just its transport: a dialect with no persisted
+	// The whole server, not just its transport. A dialect with no persisted
 	// toggle omits a DISABLED one, so the copy would report success while
-	// nothing landed — and reconcile then deletes the source.
-	let supported =
-		aghub_agents::descriptor::supports_mcp_server(descriptor, mcp);
-
-	if supported {
-		return Ok(());
+	// nothing landed. A cross-agent copy also refuses a LOSSY landing: the
+	// caller may delete the original afterwards (reconcile does), and a
+	// "successful" copy that silently shed the server's timeout would leave the
+	// only surviving copy missing it.
+	match aghub_agents::descriptor::mcp_fit(descriptor, mcp) {
+		aghub_agents::descriptor::McpFit::Exact => Ok(()),
+		aghub_agents::descriptor::McpFit::Lossy => {
+			Err(ConfigError::unsupported_operation(
+				"copy without losing fields",
+				"MCP server",
+				descriptor.id,
+			))
+		}
+		aghub_agents::descriptor::McpFit::Unsupported => {
+			Err(ConfigError::unsupported_operation(
+				"copy incompatible",
+				"MCP server",
+				descriptor.id,
+			))
+		}
 	}
-
-	Err(ConfigError::unsupported_operation(
-		"copy incompatible",
-		"MCP server",
-		descriptor.id,
-	))
 }
 
 fn sub_agent_supported_for_target(target: &InstallTarget) -> Result<()> {

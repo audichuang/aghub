@@ -364,27 +364,26 @@ pub fn save_scoped_mcps(
 /// yes, ASK THE REAL SERIALIZER: a preflight that answers from a bit the writer
 /// does not consult can promise a write that then fails halfway through a
 /// multi-agent batch, leaving partial cross-agent state.
-pub fn supports_mcp_transport(
-	descriptor: &AgentDescriptor,
-	transport: &McpTransport,
-) -> bool {
-	supports_mcp_server(
-		descriptor,
-		&McpServer::new("aghub-transport-probe", transport.clone()),
-	)
+/// How completely an agent can hold a given server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpFit {
+	/// Written and read back unchanged.
+	Exact,
+	/// Survives, but the dialect has nowhere to put some field (only the
+	/// per-transport `timeout`, today — no JSON-map agent has that key).
+	Lossy,
+	/// Refused, dropped, or its on/off state flipped.
+	Unsupported,
 }
 
-/// Can this agent hold this exact server — transport AND on/off state?
+/// Round-trip the REAL server through the agent's own serializer and parser.
 ///
-/// Refusing is not the only way a write loses a server: a dialect with no
-/// persisted toggle OMITS a disabled one, so the copy "succeeds" while nothing
-/// lands. A reconcile that trusts that success then deletes the source and the
-/// server is gone everywhere. So the probe round-trips the real server and
-/// checks it comes back with the state it went in with.
-pub fn supports_mcp_server(
-	descriptor: &AgentDescriptor,
-	server: &McpServer,
-) -> bool {
+/// Refusing is not the only way a write loses something: a dialect with no
+/// persisted toggle OMITS a disabled server, so the copy "succeeds" while
+/// nothing lands — and a reconcile that trusts that success then deletes the
+/// source. Field-level loss matters too, for the same reason, so it is reported
+/// separately instead of being folded into "supported".
+pub fn mcp_fit(descriptor: &AgentDescriptor, server: &McpServer) -> McpFit {
 	let advertised = match &server.transport {
 		McpTransport::Stdio { .. } => descriptor.capabilities.mcp.stdio,
 		McpTransport::Sse { .. } | McpTransport::StreamableHttp { .. } => {
@@ -392,12 +391,12 @@ pub fn supports_mcp_server(
 		}
 	};
 	if !advertised {
-		return false;
+		return McpFit::Unsupported;
 	}
 	let (Some(serialize), Some(parse)) =
 		(descriptor.mcp_serialize_config, descriptor.mcp_parse_config)
 	else {
-		return false;
+		return McpFit::Unsupported;
 	};
 	let mut probe = server.clone();
 	probe.name = "aghub-transport-probe".to_string();
@@ -407,15 +406,44 @@ pub fn supports_mcp_server(
 		sub_agents: Vec::new(),
 	};
 	let Ok(written) = serialize(&config, None) else {
-		return false;
+		return McpFit::Unsupported;
 	};
 	let Ok(reparsed) = parse(&written) else {
-		return false;
+		return McpFit::Unsupported;
 	};
-	reparsed
-		.mcps
-		.iter()
-		.any(|mcp| mcp.name == probe.name && mcp.enabled == probe.enabled)
+	let Some(landed) = reparsed.mcps.iter().find(|mcp| mcp.name == probe.name)
+	else {
+		return McpFit::Unsupported;
+	};
+	if landed.enabled != probe.enabled {
+		return McpFit::Unsupported;
+	}
+	if landed.transport == probe.transport {
+		McpFit::Exact
+	} else {
+		McpFit::Lossy
+	}
+}
+
+/// Can this agent hold this server at all? Field-level loss is tolerated here
+/// because a plain `add` has always dropped the fields the dialect lacks;
+/// callers that DELETE the original must use [`mcp_fit`] and reject
+/// [`McpFit::Lossy`] too.
+pub fn supports_mcp_server(
+	descriptor: &AgentDescriptor,
+	server: &McpServer,
+) -> bool {
+	mcp_fit(descriptor, server) != McpFit::Unsupported
+}
+
+pub fn supports_mcp_transport(
+	descriptor: &AgentDescriptor,
+	transport: &McpTransport,
+) -> bool {
+	supports_mcp_server(
+		descriptor,
+		&McpServer::new("aghub-transport-probe", transport.clone()),
+	)
 }
 
 pub fn home_dir() -> Option<PathBuf> {

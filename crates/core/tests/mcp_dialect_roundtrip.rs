@@ -81,10 +81,22 @@ fn read_back(descriptor: &AgentDescriptor, written: &str) -> McpServer {
 		})
 }
 
+/// Every agent that CLAIMS an MCP transport. Filtering on the fn pointers
+/// instead would let an agent drop its parser and quietly leave every test
+/// below green while `mcp_fit` refuses all of its transfers.
 fn agents_with_mcp() -> impl Iterator<Item = &'static AgentDescriptor> {
 	registry::iter_all().filter(|descriptor| {
-		descriptor.mcp_parse_config.is_some()
-			&& descriptor.mcp_serialize_config.is_some()
+		let claims = descriptor.capabilities.mcp.stdio
+			|| descriptor.capabilities.mcp.remote;
+		if claims {
+			assert!(
+				descriptor.mcp_parse_config.is_some()
+					&& descriptor.mcp_serialize_config.is_some(),
+				"{} claims MCP support but has no parser or serializer",
+				descriptor.id
+			);
+		}
+		claims
 	})
 }
 
@@ -235,6 +247,48 @@ fn transport_support_check_rejects_a_target_that_would_drop_the_state() {
 			descriptor.id
 		);
 	}
+}
+
+/// A cross-agent copy may be followed by a DELETE of the original, so a landing
+/// that silently sheds a field has to be refused, not reported as success.
+#[test]
+fn a_field_the_dialect_cannot_hold_is_reported_as_lossy_not_exact() {
+	use aghub_agents::descriptor::{mcp_fit, McpFit};
+
+	let mut with_timeout =
+		McpServer::new("probe", McpTransport::stdio("echo", vec![]));
+	if let McpTransport::Stdio { timeout, .. } = &mut with_timeout.transport {
+		*timeout = Some(30);
+	}
+	let mut lossy = Vec::new();
+	for descriptor in agents_with_mcp() {
+		match mcp_fit(descriptor, &with_timeout) {
+			McpFit::Exact => {}
+			McpFit::Lossy => lossy.push(descriptor.id),
+			McpFit::Unsupported => {
+				panic!("{} refused a plain stdio server", descriptor.id)
+			}
+		}
+		// The same server WITHOUT the unholdable field must be exact
+		// everywhere — otherwise `Lossy` is hiding a real defect.
+		let plain =
+			McpServer::new("probe", McpTransport::stdio("echo", vec![]));
+		assert_eq!(
+			mcp_fit(descriptor, &plain),
+			McpFit::Exact,
+			"{} cannot hold even a bare stdio server",
+			descriptor.id
+		);
+	}
+	// No JSON-map dialect has a per-server timeout key; the TOML/YAML ones do.
+	assert!(
+		lossy.contains(&"claude") && lossy.contains(&"cursor"),
+		"expected the JSON-map agents to shed a timeout, got {lossy:?}"
+	);
+	assert!(
+		!lossy.contains(&"codex"),
+		"codex has tool_timeout_sec and must hold it"
+	);
 }
 
 #[test]

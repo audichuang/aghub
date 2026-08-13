@@ -96,30 +96,41 @@ fn map_value(values: &HashMap<String, String>) -> Value {
 	Value::Table(table)
 }
 
-/// Vibe types `tool_timeout_sec` as a positive FLOAT; the normalized model has
-/// whole seconds. A fractional value is read (floored) rather than rejected —
-/// erroring would make a perfectly valid native config unreadable — and
-/// [`set_timeout`] leaves it byte-identical on the way out. A value aghub cannot
-/// read at all is still an error, because a later rewrite would DELETE it.
-fn timeout(table: &TomlTable, name: &str) -> Result<Option<u64>> {
-	let unreadable = || {
-		invalid(format!(
-			"Mistral Vibe MCP server `{name}` field `tool_timeout_sec` must be a non-negative number"
-		))
-	};
-	match table.get("tool_timeout_sec") {
-		None => Ok(None),
-		Some(Value::Integer(value)) => {
-			u64::try_from(*value).map(Some).map_err(|_| unreadable())
-		}
-		Some(Value::Float(value))
+/// Vibe types `tool_timeout_sec` as a float with `gt=0`; the normalized model
+/// has whole seconds. A sub-second value floors to ZERO, which Vibe rejects, so
+/// the model keeps at least one second — otherwise copying such a server to a
+/// fresh Vibe target would write a config the vendor refuses. An unchanged
+/// value is still emitted byte-identical by [`set_timeout`], so this rounding
+/// only ever shows up on a genuine cross-agent copy.
+fn model_seconds(value: &Value) -> Option<u64> {
+	match value {
+		Value::Integer(value) => u64::try_from(*value).ok(),
+		Value::Float(value)
 			if value.is_finite()
 				&& *value >= 0.0
 				&& *value <= u64::MAX as f64 =>
 		{
-			Ok(Some(*value as u64))
+			let seconds = *value as u64;
+			Some(if seconds == 0 && *value > 0.0 {
+				1
+			} else {
+				seconds
+			})
 		}
-		Some(_) => Err(unreadable()),
+		_ => None,
+	}
+}
+
+/// A value aghub cannot read is a value a later rewrite would DELETE, so an
+/// unreadable timeout is an error rather than a silent `None`.
+fn timeout(table: &TomlTable, name: &str) -> Result<Option<u64>> {
+	match table.get("tool_timeout_sec") {
+		None => Ok(None),
+		Some(value) => model_seconds(value).map(Some).ok_or_else(|| {
+			invalid(format!(
+				"Mistral Vibe MCP server `{name}` field `tool_timeout_sec` must be a non-negative number"
+			))
+		}),
 	}
 }
 
@@ -367,37 +378,26 @@ fn set_remote_headers(
 
 fn set_timeout(table: &mut TomlTable, timeout: Option<u64>) -> Result<()> {
 	// Leave an existing value byte-identical whenever the model still agrees
-	// with it. That covers a fractional value the whole-second model cannot
-	// hold (rewriting `1.9` as `1` would silently shorten the user's timeout)
-	// AND one too large to re-emit as a TOML integer, which would otherwise
-	// make every unrelated save fail. Ceiling: an explicit edit to exactly the
-	// floor of a fractional value is a no-op — the model has no way to say
-	// "1, not 1.9".
-	let unchanged = match table.get("tool_timeout_sec") {
-		Some(Value::Integer(existing)) => {
-			u64::try_from(*existing).ok() == timeout
-		}
-		Some(Value::Float(existing))
-			if existing.is_finite()
-				&& *existing >= 0.0
-				&& *existing <= u64::MAX as f64 =>
-		{
-			Some(*existing as u64) == timeout
-		}
-		_ => false,
-	};
-	if unchanged {
+	// with it. That covers a sub-second value the whole-second model rounds up
+	// (rewriting `0.5` as `1` would change the user's timeout) AND one too large
+	// to re-emit as a TOML integer. Ceiling: an explicit edit to exactly the
+	// value the model already holds is a no-op — the model has no way to say
+	// "1, not 0.5".
+	if table
+		.get("tool_timeout_sec")
+		.and_then(model_seconds)
+		.is_some_and(|existing| Some(existing) == timeout)
+	{
 		return Ok(());
 	}
 	match timeout {
 		Some(timeout) => {
-			let timeout = i64::try_from(timeout).map_err(|_| {
-				invalid("Mistral Vibe MCP timeout exceeds TOML integer range")
-			})?;
-			table.insert(
-				"tool_timeout_sec".to_string(),
-				Value::Integer(timeout),
-			);
+			// Vibe's field is a float, so a value beyond the TOML integer range
+			// is written as one rather than failing every later save.
+			let value = i64::try_from(timeout)
+				.map(Value::Integer)
+				.unwrap_or_else(|_| Value::Float(timeout as f64));
+			table.insert("tool_timeout_sec".to_string(), value);
 		}
 		None => {
 			table.remove("tool_timeout_sec");
