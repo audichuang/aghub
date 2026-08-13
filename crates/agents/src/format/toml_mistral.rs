@@ -6,6 +6,7 @@
 //! rewrite, an existing remote server keeps its original Vibe transport tag.
 
 use crate::errors::{ConfigError, Result};
+use crate::format::transport_policy::reject_mixed_transport;
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use std::collections::{HashMap, HashSet};
 use toml::map::Map;
@@ -251,6 +252,13 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?,
 		};
+		reject_mixed_transport(
+			server.contains_key("command"),
+			server.contains_key("url"),
+			&name,
+			"Mistral Vibe",
+			true,
+		)?;
 		let transport_name = required_string(server, "transport", &name)?;
 		let transport = match transport_name.as_str() {
 			"stdio" => parse_stdio(server, &name)?,
@@ -752,6 +760,31 @@ custom_auth = "keep me too"
 				"{value} must be refused by name: {error}"
 			);
 		}
+	}
+
+	#[test]
+	fn an_existing_zero_timeout_is_preserved_rather_than_blocking_every_save() {
+		// Deliberate: the file is already invalid by Vibe's `gt=0` rule, and
+		// erroring here would make every unrelated save fail on it. Moving the
+		// `Some(0)` rejection ahead of the unchanged-check would break this.
+		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"old\"\ntool_timeout_sec = 0\n";
+		let config = parse(original).unwrap();
+		let output = serialize(&config, Some(original)).unwrap();
+		let root: Value = toml::from_str(&output).unwrap();
+		let server = &root["mcp_servers"].as_array().unwrap()[0];
+		assert_eq!(
+			server.get("tool_timeout_sec").and_then(Value::as_integer),
+			Some(0)
+		);
+	}
+
+	#[test]
+	fn a_mixed_transport_entry_is_refused_rather_than_half_deleted() {
+		// `transport = "stdio"` with a `url` is ambiguous; parsing it as stdio
+		// and rewriting the entry would delete the url and its auth fields.
+		let original = "[[mcp_servers]]\nname = \"s\"\ntransport = \"stdio\"\ncommand = \"c\"\nurl = \"https://remote\"\n";
+		let error = parse(original).unwrap_err().to_string();
+		assert!(error.contains("mixes stdio keys"), "got: {error}");
 	}
 
 	#[test]

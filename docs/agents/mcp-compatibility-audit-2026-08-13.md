@@ -79,6 +79,22 @@ not safe.
   transport/toggle round trips, preservation of unmanaged fields, CLI batch
   preflight, and an isolated CLI add regression.
 
+## Known gap, unchanged by this audit
+
+A cross-agent copy carries only the normalized model, so per-server fields the
+model has no room for — Antigravity's `cwd` / `auth` / `disabledTools`, Codex's
+auth options, OpenCode and OpenClaw OAuth blocks, Mistral's auth table — are
+preserved on a rewrite of their OWN file but do not travel. `mcp_fit` cannot see
+that loss, because it happens before the model exists; a reconcile that removes
+the source therefore still deletes an entry richer than the copy it made.
+
+This predates the audit (every release has behaved this way — the previous
+`mcp_supported_for_target` consulted only the capability bit) and is NOT made
+worse here: reconcile now additionally catches transport, on/off and timeout
+loss, which it never did before. Closing it properly needs each format to answer
+"does this entry carry keys the model does not own", which is a seam worth
+adding on its own rather than folding into this change.
+
 ## Deliberate ceilings
 
 - Aghub's normalized transport model has no WebSocket variant, so an explicit

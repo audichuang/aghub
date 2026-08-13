@@ -1,3 +1,4 @@
+use crate::format::transport_policy::reject_mixed_transport;
 use crate::{
 	errors::{ConfigError, Result},
 	models::{AgentConfig, McpServer, McpTransport},
@@ -67,6 +68,15 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 	let mut config = AgentConfig::new();
 
 	for (name, entry) in oc.mcp {
+		// A mixed entry has to FAIL: serialization rewrites the server from the
+		// parsed half, so "just ignore the other one" deletes it.
+		reject_mixed_transport(
+			entry.command.is_some(),
+			entry.url.is_some(),
+			&name,
+			"OpenCode",
+			true,
+		)?;
 		let is_remote = entry.server_type.as_deref() == Some("remote")
 			|| (entry.server_type.is_none() && entry.url.is_some());
 		let transport = if is_remote {

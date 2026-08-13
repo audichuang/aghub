@@ -604,7 +604,10 @@ pub fn reconcile_mcp(
 		added.len(),
 		removed.len()
 	);
-	let deletes_source = !removed.is_empty();
+	// Strict only when THIS source is the copy that disappears. Removing some
+	// OTHER agent leaves the faithful original in place, so its copies are as
+	// best-effort as a plain transfer.
+	let deletes_source = removed.contains(&source.agent);
 	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,

@@ -6,6 +6,7 @@
 //! rewrites.
 
 use crate::errors::{ConfigError, Result};
+use crate::format::transport_policy::reject_mixed_transport;
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde_json::{Map, Value};
@@ -168,6 +169,13 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				}
 			}),
 		};
+		reject_mixed_transport(
+			server.contains_key("command"),
+			server.contains_key("url"),
+			name,
+			"OpenClaw",
+			true,
+		)?;
 		let timeout = optional_timeout(server, name)?;
 		let transport = match transport_name {
 			Some("stdio") => McpTransport::Stdio {
