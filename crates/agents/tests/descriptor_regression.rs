@@ -68,6 +68,20 @@ fn default_env() -> DefaultEnv {
 	}
 }
 
+/// Hermes lives under `%LOCALAPPDATA%` on Windows, not in a home dotfolder —
+/// mirrors `agents::hermes::hermes_home`. Asserting `~/.hermes` unconditionally
+/// only goes red on the Windows CI leg, which `just preflight` cannot reach.
+fn hermes_home() -> Option<PathBuf> {
+	#[cfg(windows)]
+	{
+		dirs::data_local_dir().map(|dir| dir.join("hermes"))
+	}
+	#[cfg(not(windows))]
+	{
+		dirs::home_dir().map(|home| home.join(".hermes"))
+	}
+}
+
 fn zed_config_dir() -> Option<PathBuf> {
 	#[cfg(target_os = "macos")]
 	{
@@ -359,7 +373,8 @@ fn test_mcp_global_paths() {
 		(AgentType::Amp, Some(".config/amp/settings.json")),
 		(AgentType::Factory, Some(".factory/mcp.json")),
 		(AgentType::Warp, Some(".warp/.mcp.json")),
-		(AgentType::Hermes, Some(".hermes/config.yaml")),
+		// Platform-dependent home — asserted explicitly below.
+		(AgentType::Hermes, Some("")),
 		(AgentType::Grok, Some(".grok/config.toml")),
 	];
 
@@ -377,7 +392,13 @@ fn test_mcp_global_paths() {
 					agent_type
 				);
 				let actual = desc.mcp_global_path.unwrap()();
-				if agent_type == AgentType::Zed {
+				if agent_type == AgentType::Hermes {
+					assert_eq!(
+						actual,
+						hermes_home().map(|home| home.join("config.yaml")),
+						"Hermes global path follows its platform home"
+					);
+				} else if agent_type == AgentType::Zed {
 					assert_eq!(
 						actual,
 						zed_config_dir().map(|dir| dir.join("settings.json")),
@@ -592,7 +613,7 @@ fn opencode_project_mcp_defaults_to_root_config() {
 #[test]
 fn test_global_data_dirs() {
 	let _env = default_env();
-	let expected: [(AgentType, Option<&str>); 22] = [
+	let expected: [(AgentType, Option<&str>); 21] = [
 		(AgentType::Claude, Some(".claude")),
 		(AgentType::Codex, Some(".codex")),
 		(AgentType::Openclaw, Some(".openclaw")),
@@ -615,7 +636,7 @@ fn test_global_data_dirs() {
 		(AgentType::Amp, Some(".config/amp")),
 		(AgentType::Warp, Some(".warp")),
 		(AgentType::Factory, Some(".factory")),
-		(AgentType::Hermes, Some(".hermes")),
+		// Hermes uses a platform-dependent home — asserted after the loop.
 		(AgentType::Grok, Some(".grok")),
 	];
 
@@ -664,6 +685,11 @@ fn test_global_data_dirs() {
 		(agents::zed::DESCRIPTOR.global_data_dir)(),
 		zed_config_dir(),
 		"zed global_data_dir should be the OS config dir"
+	);
+	assert_eq!(
+		(agents::hermes::DESCRIPTOR.global_data_dir)(),
+		hermes_home(),
+		"hermes global_data_dir follows its platform home"
 	);
 }
 
@@ -1138,7 +1164,7 @@ fn test_sub_agent_capabilities_scopes_project() {
 fn test_global_skill_paths() {
 	let _env = default_env();
 	// Most agents have single skill path, Claude has dynamic plugin discovery
-	let expected: [(AgentType, Option<&[&str]>); 22] = [
+	let expected: [(AgentType, Option<&[&str]>); 25] = [
 		// Claude: dynamic plugin discovery, base path is .claude/skills
 		(AgentType::Claude, Some(&[".claude/skills"])),
 		(
@@ -1182,12 +1208,28 @@ fn test_global_skill_paths() {
 			Some(&[".config/agents/skills", ".config/agents/skills"]),
 		), // universal=true adds extra path
 		(AgentType::Warp, Some(&[".agents/skills"])),
+		(AgentType::Factory, Some(&[".factory/skills"])),
+		(AgentType::Grok, Some(&[".grok/skills"])),
+		// Hermes has a platform-dependent home — asserted after the loop.
+		(AgentType::Hermes, Some(&[])),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, paths)) =
-			expected.iter().find(|(t, _)| *t == agent_type)
 		{
+			let (_, paths) = expected
+				.iter()
+				.find(|(t, _)| *t == agent_type)
+				.expect("every descriptor must have a skill-path contract");
+			if agent_type == AgentType::Hermes {
+				assert_eq!(
+					desc.global_skill_read_paths(),
+					hermes_home()
+						.map(|home| vec![home.join("skills")])
+						.unwrap_or_default(),
+					"Hermes global skills follow its platform home"
+				);
+				continue;
+			}
 			match paths {
 				Some(path_strs) => {
 					assert!(
@@ -1254,7 +1296,7 @@ fn test_global_skill_paths() {
 fn test_project_skill_paths() {
 	let root = PathBuf::from("/project");
 
-	let expected: [(AgentType, Option<&[&str]>); 22] = [
+	let expected: [(AgentType, Option<&[&str]>); 25] = [
 		(AgentType::Claude, Some(&[".claude/skills"])),
 		(AgentType::Codex, Some(&[".agents/skills"])),
 		(AgentType::Openclaw, None), // Openclaw has no project skills
@@ -1284,12 +1326,17 @@ fn test_project_skill_paths() {
 		(AgentType::KiloCode, Some(&[".kilocode/skills"])),
 		(AgentType::Amp, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
 		(AgentType::Warp, Some(&[".agents/skills"])),
+		(AgentType::Factory, Some(&[".factory/skills"])),
+		(AgentType::Grok, Some(&[".grok/skills"])),
+		(AgentType::Hermes, None),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, paths)) =
-			expected.iter().find(|(t, _)| *t == agent_type)
 		{
+			let (_, paths) = expected
+				.iter()
+				.find(|(t, _)| *t == agent_type)
+				.expect("every descriptor must have a skill-path contract");
 			match paths {
 				Some(path_strs) => {
 					assert!(
