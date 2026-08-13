@@ -18,6 +18,28 @@ use aghub_core::registry;
 /// a real regression pass as a skip.
 const NO_NATIVE_SSE: &[&str] = &["codex", "opencode", "kilocode", "mistral"];
 
+/// The agents whose native config has a persisted per-server on/off field, so a
+/// disabled server survives a write. Deliberately NOT the `enable_disable`
+/// capability: Factory has the field but writes project toggles at user scope,
+/// so aghub does not offer the toggle command. Keying the assertion off the
+/// capability instead would let Factory's dialect silently lose its toggle
+/// while both tests stayed green.
+const NATIVE_TOGGLE: &[&str] = &[
+	"antigravity",
+	"amp",
+	"cline",
+	"codex",
+	"factory",
+	"grok",
+	"hermes",
+	"kilocode",
+	"kiro",
+	"mistral",
+	"openclaw",
+	"opencode",
+	"roocode",
+];
+
 fn config_with(server: McpServer) -> AgentConfig {
 	AgentConfig {
 		mcps: vec![server],
@@ -159,7 +181,7 @@ fn an_agent_that_advertises_a_toggle_must_round_trip_a_disabled_server() {
 /// writer and reader that disagree — writing `disabled` and reading back
 /// enabled silently turns a server the user switched off back on.
 #[test]
-fn a_disabled_server_is_either_written_as_disabled_or_not_at_all() {
+fn a_disabled_server_survives_exactly_where_the_dialect_has_a_toggle() {
 	for descriptor in agents_with_mcp() {
 		let mut server =
 			McpServer::new("probe", McpTransport::stdio("echo", vec![]));
@@ -171,14 +193,57 @@ fn a_disabled_server_is_either_written_as_disabled_or_not_at_all() {
 		let parsed = parse(&written).unwrap_or_else(|error| {
 			panic!("{} cannot read back its own output: {error}", descriptor.id)
 		});
-		match parsed.mcps.iter().find(|mcp| mcp.name == "probe") {
-			None => {} // omitted: the dialect has nowhere to put the state
-			Some(mcp) => assert!(
+		let survived = parsed.mcps.iter().find(|mcp| mcp.name == "probe");
+
+		if NATIVE_TOGGLE.contains(&descriptor.id) {
+			let mcp = survived.unwrap_or_else(|| {
+				panic!(
+					"{} has a native toggle but dropped the disabled server\n--- written ---\n{written}",
+					descriptor.id
+				)
+			});
+			assert!(
 				!mcp.enabled,
 				"{} wrote a disabled server and read it back as ENABLED\n--- written ---\n{written}",
 				descriptor.id
-			),
+			);
+		} else {
+			assert!(
+				survived.is_none(),
+				"{} has no native toggle but kept a disabled server — either the \
+				 dialect gained one (add it to NATIVE_TOGGLE) or it is writing a \
+				 state it cannot read back",
+				descriptor.id
+			);
 		}
+	}
+}
+
+/// The preflight must refuse a target that would silently swallow the server,
+/// not just one that errors — reconcile deletes the source on a "successful"
+/// copy.
+#[test]
+fn transport_support_check_rejects_a_target_that_would_drop_the_state() {
+	for descriptor in agents_with_mcp() {
+		let mut server =
+			McpServer::new("probe", McpTransport::stdio("echo", vec![]));
+		server.enabled = false;
+		assert_eq!(
+			aghub_agents::descriptor::supports_mcp_server(descriptor, &server),
+			NATIVE_TOGGLE.contains(&descriptor.id),
+			"{}: preflight disagrees with the dialect about a disabled server",
+			descriptor.id
+		);
+	}
+}
+
+#[test]
+fn the_native_toggle_list_names_only_real_agents() {
+	for id in NATIVE_TOGGLE {
+		assert!(
+			registry::iter_all().any(|descriptor| descriptor.id == *id),
+			"`{id}` is not a registered agent — stale entry"
+		);
 	}
 }
 

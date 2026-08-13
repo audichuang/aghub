@@ -368,7 +368,24 @@ pub fn supports_mcp_transport(
 	descriptor: &AgentDescriptor,
 	transport: &McpTransport,
 ) -> bool {
-	let advertised = match transport {
+	supports_mcp_server(
+		descriptor,
+		&McpServer::new("aghub-transport-probe", transport.clone()),
+	)
+}
+
+/// Can this agent hold this exact server — transport AND on/off state?
+///
+/// Refusing is not the only way a write loses a server: a dialect with no
+/// persisted toggle OMITS a disabled one, so the copy "succeeds" while nothing
+/// lands. A reconcile that trusts that success then deletes the source and the
+/// server is gone everywhere. So the probe round-trips the real server and
+/// checks it comes back with the state it went in with.
+pub fn supports_mcp_server(
+	descriptor: &AgentDescriptor,
+	server: &McpServer,
+) -> bool {
+	let advertised = match &server.transport {
 		McpTransport::Stdio { .. } => descriptor.capabilities.mcp.stdio,
 		McpTransport::Sse { .. } | McpTransport::StreamableHttp { .. } => {
 			descriptor.capabilities.mcp.remote
@@ -377,15 +394,28 @@ pub fn supports_mcp_transport(
 	if !advertised {
 		return false;
 	}
-	let Some(serialize) = descriptor.mcp_serialize_config else {
+	let (Some(serialize), Some(parse)) =
+		(descriptor.mcp_serialize_config, descriptor.mcp_parse_config)
+	else {
 		return false;
 	};
-	let probe = AgentConfig {
-		mcps: vec![McpServer::new("aghub-transport-probe", transport.clone())],
+	let mut probe = server.clone();
+	probe.name = "aghub-transport-probe".to_string();
+	let config = AgentConfig {
+		mcps: vec![probe.clone()],
 		skills: Vec::new(),
 		sub_agents: Vec::new(),
 	};
-	serialize(&probe, None).is_ok()
+	let Ok(written) = serialize(&config, None) else {
+		return false;
+	};
+	let Ok(reparsed) = parse(&written) else {
+		return false;
+	};
+	reparsed
+		.mcps
+		.iter()
+		.any(|mcp| mcp.name == probe.name && mcp.enabled == probe.enabled)
 }
 
 pub fn home_dir() -> Option<PathBuf> {

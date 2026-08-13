@@ -226,8 +226,12 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 				"Invalid MCP server '{name}': {error}"
 			))
 		})?;
+		// Gemini's `httpUrl` IS the transport declaration, and Gemini itself
+		// consults it before `url` and before any `type`. Honour that order, or
+		// an entry carrying both keys parses as the `url` endpoint and the next
+		// save writes the wrong address.
 		let declared_http = http_url.is_some();
-		let url = url.or(http_url);
+		let url = http_url.or(url);
 		if command.is_some() && url.is_some() {
 			return Err(ConfigError::InvalidConfig(format!(
 				"MCP server '{name}' cannot contain both command and url"
@@ -240,28 +244,38 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 				value.get("type").and_then(serde_json::Value::as_str)
 			})
 		});
-		let transport = match server_type.as_deref().or(nested_transport) {
-			Some("stdio") => McpTransport::Stdio {
-				command: command.ok_or_else(|| {
-					ConfigError::InvalidConfig(format!(
-						"MCP server '{name}' is missing command"
-					))
-				})?,
-				args,
-				env,
-				timeout: None,
-			},
-			Some("sse") => McpTransport::Sse {
-				url: url.ok_or_else(|| {
-					ConfigError::InvalidConfig(format!(
-						"MCP server '{name}' is missing url"
-					))
-				})?,
+		// The DIALECT'S OWN tag wins. Reading whichever key happens to be
+		// present lets a foreign one decide: a Kimi entry carrying both
+		// `transport: "http"` (native) and a stray `type: "sse"` would parse as
+		// SSE, and the save then rewrites the native key to `sse`.
+		let own_tag =
+			dialect
+				.discriminator
+				.and_then(|discriminator| match discriminator.key {
+					"type" => server_type.as_deref(),
+					"transport" => nested_transport,
+					_ => None,
+				});
+		let tag = own_tag.or(server_type.as_deref()).or(nested_transport);
+		let transport = if declared_http {
+			McpTransport::StreamableHttp {
+				url: url.expect("httpUrl was present"),
 				headers,
 				timeout: None,
-			},
-			Some("http" | "streamable-http" | "streamableHttp") => {
-				McpTransport::StreamableHttp {
+			}
+		} else {
+			match tag {
+				Some("stdio") => McpTransport::Stdio {
+					command: command.ok_or_else(|| {
+						ConfigError::InvalidConfig(format!(
+							"MCP server '{name}' is missing command"
+						))
+					})?,
+					args,
+					env,
+					timeout: None,
+				},
+				Some("sse") => McpTransport::Sse {
 					url: url.ok_or_else(|| {
 						ConfigError::InvalidConfig(format!(
 							"MCP server '{name}' is missing url"
@@ -269,46 +283,55 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 					})?,
 					headers,
 					timeout: None,
-				}
-			}
-			Some("ws" | "websocket") => {
-				return Err(ConfigError::InvalidConfig(format!(
-					"MCP server '{name}' uses unsupported WebSocket transport"
-				)));
-			}
-			None | Some(_) => {
-				if let Some(command) = command {
-					McpTransport::Stdio {
-						command,
-						args,
-						env,
+				},
+				Some("http" | "streamable-http" | "streamableHttp") => {
+					McpTransport::StreamableHttp {
+						url: url.ok_or_else(|| {
+							ConfigError::InvalidConfig(format!(
+								"MCP server '{name}' is missing url"
+							))
+						})?,
+						headers,
 						timeout: None,
 					}
-				} else if let Some(url) = url {
-					// Never infer a transport the dialect could not write back,
-					// and never guess when the KEY already declared one.
-					let is_sse = !declared_http
-						&& dialect.writes_sse()
-						&& dialect.untyped_remote
-							== UntypedRemote::InferSseFromUrl
-						&& url_has_sse_path(&url);
-					if is_sse {
-						McpTransport::Sse {
-							url,
-							headers,
+				}
+				Some("ws" | "websocket") => {
+					return Err(ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' uses unsupported WebSocket transport"
+				)));
+				}
+				None | Some(_) => {
+					if let Some(command) = command {
+						McpTransport::Stdio {
+							command,
+							args,
+							env,
 							timeout: None,
+						}
+					} else if let Some(url) = url {
+						// Never infer a transport the dialect could not write back.
+						let is_sse = dialect.writes_sse()
+							&& dialect.untyped_remote
+								== UntypedRemote::InferSseFromUrl
+							&& url_has_sse_path(&url);
+						if is_sse {
+							McpTransport::Sse {
+								url,
+								headers,
+								timeout: None,
+							}
+						} else {
+							McpTransport::StreamableHttp {
+								url,
+								headers,
+								timeout: None,
+							}
 						}
 					} else {
-						McpTransport::StreamableHttp {
-							url,
-							headers,
-							timeout: None,
-						}
+						return Err(ConfigError::InvalidConfig(format!(
+							"MCP server '{name}' has neither command nor url"
+						)));
 					}
-				} else {
-					return Err(ConfigError::InvalidConfig(format!(
-						"MCP server '{name}' has neither command nor url"
-					)));
 				}
 			}
 		};
@@ -663,6 +686,57 @@ mod tests {
 		assert!(parse(json, &MCP_SERVERS).unwrap().mcps[0].enabled);
 		// Native toggle: honoured.
 		assert!(!parse(json, &DISABLED).unwrap().mcps[0].enabled);
+	}
+
+	#[test]
+	fn the_dialects_own_tag_outranks_a_foreign_one() {
+		const KIMI: Dialect = Dialect {
+			discriminator: Some(Discriminator {
+				key: "transport",
+				stdio: "stdio",
+				sse: "sse",
+				http: "http",
+			}),
+			untyped_remote: UntypedRemote::StreamableHttp,
+			..MCP_SERVERS
+		};
+		// Native `transport` says http; a stray `type` says sse. Letting the
+		// foreign key win would rewrite the native one to `sse` on save.
+		let json = r#"{"mcpServers":{"s":{"transport":"http","type":"sse","url":"https://host/mcp"}}}"#;
+		let config = parse(json, &KIMI).unwrap();
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+		let output = serialize(&config, Some(json), &KIMI).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+		assert_eq!(value["mcpServers"]["s"]["transport"], "http");
+
+		// The `type` dialect reads the same file the other way round.
+		assert!(matches!(
+			parse(json, &MCP_SERVERS).unwrap().mcps[0].transport,
+			McpTransport::Sse { .. }
+		));
+	}
+
+	#[test]
+	fn http_url_is_a_declaration_not_a_hint() {
+		// Gemini consults `httpUrl` before `url` and before any `type`.
+		let both = r#"{"mcpServers":{"s":{"url":"https://events/sse","httpUrl":"https://api/mcp"}}}"#;
+		let config = parse(both, &MCP_SERVERS).unwrap();
+		match &config.mcps[0].transport {
+			McpTransport::StreamableHttp { url, .. } => {
+				assert_eq!(url, "https://api/mcp", "httpUrl is authoritative")
+			}
+			other => panic!("expected streamable http, got {other:?}"),
+		}
+
+		// …even against an explicit `type: "sse"`.
+		let tagged = r#"{"mcpServers":{"s":{"httpUrl":"https://api/mcp","type":"sse"}}}"#;
+		assert!(matches!(
+			parse(tagged, &MCP_SERVERS).unwrap().mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
 	}
 
 	#[test]

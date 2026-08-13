@@ -168,7 +168,6 @@ fn mcp_supported_for_target(
 	target: &InstallTarget,
 	mcp: &McpServer,
 ) -> Result<()> {
-	let adapter = create_adapter(target.agent);
 	let descriptor = registry::get(target.agent);
 	if !descriptor.supports_mcp_scope(target_resource_scope(target)) {
 		return Err(ConfigError::unsupported_operation(
@@ -177,7 +176,11 @@ fn mcp_supported_for_target(
 			descriptor.id,
 		));
 	}
-	let supported = adapter.mcp_supports_transport(&mcp.transport);
+	// The whole server, not just its transport: a dialect with no persisted
+	// toggle omits a DISABLED one, so the copy would report success while
+	// nothing landed — and reconcile then deletes the source.
+	let supported =
+		aghub_agents::descriptor::supports_mcp_server(descriptor, mcp);
 
 	if supported {
 		return Ok(());

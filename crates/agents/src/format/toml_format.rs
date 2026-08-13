@@ -10,6 +10,65 @@ fn parse_toml(content: &str) -> Result<toml::Value> {
 	})
 }
 
+/// Codex writes these as strings; a scalar in their place is a user typo worth
+/// coercing. Anything else is DROPPED data — and `serialize` keeps only the
+/// names it was handed, so a dropped field is a field the next save erases.
+fn scalar_to_string(value: &toml::Value) -> Option<String> {
+	match value {
+		toml::Value::String(text) => Some(text.clone()),
+		toml::Value::Integer(number) => Some(number.to_string()),
+		toml::Value::Float(number) => Some(number.to_string()),
+		toml::Value::Boolean(flag) => Some(flag.to_string()),
+		_ => None,
+	}
+}
+
+fn string_list(
+	value: &toml::Value,
+	name: &str,
+	field: &str,
+) -> Result<Vec<String>> {
+	let values = value.as_array().ok_or_else(|| {
+		ConfigError::InvalidConfig(format!(
+			"MCP server '{name}' field '{field}' must be an array"
+		))
+	})?;
+	values
+		.iter()
+		.map(|value| {
+			scalar_to_string(value).ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' field '{field}' must contain only scalars"
+				))
+			})
+		})
+		.collect()
+}
+
+fn string_map(
+	value: &toml::Value,
+	name: &str,
+	field: &str,
+) -> Result<HashMap<String, String>> {
+	let values = value.as_table().ok_or_else(|| {
+		ConfigError::InvalidConfig(format!(
+			"MCP server '{name}' field '{field}' must be a table"
+		))
+	})?;
+	values
+		.iter()
+		.map(|(key, value)| {
+			scalar_to_string(value)
+				.map(|value| (key.clone(), value))
+				.ok_or_else(|| {
+					ConfigError::InvalidConfig(format!(
+						"MCP server '{name}' field '{field}'.'{key}' must be a scalar"
+					))
+				})
+		})
+		.collect()
+}
+
 pub fn parse(content: &str) -> Result<AgentConfig> {
 	let doc = parse_toml(content)?;
 	let mut config = AgentConfig::new();
@@ -54,45 +113,43 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				"MCP server '{name}' has neither command nor url"
 			)));
 		}
-		let enabled = table
-			.get("enabled")
-			.and_then(|value| value.as_bool())
-			.unwrap_or(true);
-		let timeout = table
-			.get("tool_timeout_sec")
-			.and_then(|value| value.as_integer())
-			.and_then(|value| u64::try_from(value).ok());
-		let args = table
-			.get("args")
-			.and_then(|v| v.as_array())
-			.map(|arr| {
-				arr.iter()
-					.filter_map(|v| v.as_str().map(String::from))
-					.collect()
-			})
-			.unwrap_or_default();
-		let env = table
-			.get("env")
-			.and_then(|v| v.as_table())
-			.map(|t| {
-				t.iter()
-					.filter_map(|(k, v)| {
-						v.as_str().map(|s| (k.clone(), s.to_string()))
-					})
-					.collect::<HashMap<_, _>>()
-			})
-			.filter(|m| !m.is_empty());
-		let headers = table
-			.get("http_headers")
-			.and_then(|v| v.as_table())
-			.map(|t| {
-				t.iter()
-					.filter_map(|(k, v)| {
-						v.as_str().map(|s| (k.clone(), s.to_string()))
-					})
-					.collect::<HashMap<_, _>>()
-			})
-			.filter(|m| !m.is_empty());
+		// Same rule as the fields above: a value read as `None` is a value the
+		// next save DELETES, so an unreadable timeout is an error.
+		let timeout = match table.get("tool_timeout_sec") {
+			None => None,
+			Some(value) => Some(
+				value
+					.as_integer()
+					.and_then(|value| u64::try_from(value).ok())
+					.ok_or_else(|| {
+						ConfigError::InvalidConfig(format!(
+							"MCP server '{name}' field 'tool_timeout_sec' must be a non-negative integer"
+						))
+					})?,
+			),
+		};
+		let enabled = match table.get("enabled") {
+			None => true,
+			Some(value) => value.as_bool().ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' field 'enabled' must be a boolean"
+				))
+			})?,
+		};
+		let args = match table.get("args") {
+			None => Vec::new(),
+			Some(value) => string_list(value, name, "args")?,
+		};
+		let env = match table.get("env") {
+			None => None,
+			Some(value) => Some(string_map(value, name, "env")?),
+		}
+		.filter(|map: &HashMap<String, String>| !map.is_empty());
+		let headers = match table.get("http_headers") {
+			None => None,
+			Some(value) => Some(string_map(value, name, "http_headers")?),
+		}
+		.filter(|map: &HashMap<String, String>| !map.is_empty());
 
 		let transport = match (command, url) {
 			(Some(command), None) => McpTransport::Stdio {
@@ -476,6 +533,42 @@ model = "gpt-5.4"
 "#;
 		let config = parse(content).unwrap();
 		assert!(config.mcps.is_empty());
+	}
+
+	#[test]
+	fn parse_rejects_a_subfield_it_cannot_read_and_coerces_scalars() {
+		// A dropped subfield is a DELETED subfield: `serialize` rewrites the
+		// entry from what parse produced.
+		let coerced = parse(
+			r#"
+[mcp_servers.ok]
+command = "echo"
+args = ["--port", 8080]
+env = { PORT = 3000, DEBUG = true }
+"#,
+		)
+		.unwrap();
+		match &coerced.mcps[0].transport {
+			McpTransport::Stdio { args, env, .. } => {
+				assert_eq!(args, &["--port".to_string(), "8080".to_string()]);
+				let env = env.as_ref().unwrap();
+				assert_eq!(env.get("PORT").unwrap(), "3000");
+				assert_eq!(env.get("DEBUG").unwrap(), "true");
+			}
+			other => panic!("expected stdio, got {other:?}"),
+		}
+
+		for bad in [
+			"[mcp_servers.a]\ncommand = \"echo\"\nargs = [[\"nested\"]]\n",
+			"[mcp_servers.a]\ncommand = \"echo\"\nenv = { K = [1] }\n",
+			"[mcp_servers.a]\ncommand = \"echo\"\nenabled = \"false\"\n",
+			"[mcp_servers.a]\nurl = \"https://h/mcp\"\nhttp_headers = { R = [1] }\n",
+			"[mcp_servers.a]\ncommand = \"echo\"\ntool_timeout_sec = \"30\"\n",
+			"[mcp_servers.a]\ncommand = 123\n",
+			"[mcp_servers.a]\nother = true\n",
+		] {
+			assert!(parse(bad).is_err(), "accepted: {bad}");
+		}
 	}
 
 	#[test]

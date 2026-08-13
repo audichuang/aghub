@@ -366,13 +366,28 @@ fn set_remote_headers(
 }
 
 fn set_timeout(table: &mut TomlTable, timeout: Option<u64>) -> Result<()> {
-	// A fractional native value floors into the model; rewriting it as that
-	// integer would silently shorten the user's timeout, so leave it alone when
-	// the model still agrees with it.
-	if let Some(Value::Float(existing)) = table.get("tool_timeout_sec") {
-		if existing.fract() != 0.0 && timeout == Some(*existing as u64) {
-			return Ok(());
+	// Leave an existing value byte-identical whenever the model still agrees
+	// with it. That covers a fractional value the whole-second model cannot
+	// hold (rewriting `1.9` as `1` would silently shorten the user's timeout)
+	// AND one too large to re-emit as a TOML integer, which would otherwise
+	// make every unrelated save fail. Ceiling: an explicit edit to exactly the
+	// floor of a fractional value is a no-op — the model has no way to say
+	// "1, not 1.9".
+	let unchanged = match table.get("tool_timeout_sec") {
+		Some(Value::Integer(existing)) => {
+			u64::try_from(*existing).ok() == timeout
 		}
+		Some(Value::Float(existing))
+			if existing.is_finite()
+				&& *existing >= 0.0
+				&& *existing <= u64::MAX as f64 =>
+		{
+			Some(*existing as u64) == timeout
+		}
+		_ => false,
+	};
+	if unchanged {
+		return Ok(());
 	}
 	match timeout {
 		Some(timeout) => {
@@ -687,6 +702,40 @@ custom_auth = "keep me too"
 				.and_then(Value::as_str),
 			Some("Bearer fresh")
 		);
+	}
+
+	#[test]
+	fn a_timeout_the_whole_second_model_cannot_hold_is_left_alone() {
+		// Vibe types `tool_timeout_sec` as a float. Rewriting `1.9` as `1`
+		// would shorten the user's timeout; a value beyond i64 would make the
+		// write fail outright and block every unrelated save.
+		for original_value in ["1.9", "1e19"] {
+			let original = format!(
+				"[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"old\"\ntool_timeout_sec = {original_value}\n"
+			);
+			let config = parse(&original).unwrap();
+			let output = serialize(&config, Some(&original)).unwrap();
+			let root: Value = toml::from_str(&output).unwrap();
+			let server = &root["mcp_servers"].as_array().unwrap()[0];
+			assert_eq!(
+				server.get("tool_timeout_sec"),
+				toml::from_str::<Value>(&original).unwrap()["mcp_servers"]
+					.as_array()
+					.unwrap()[0]
+					.get("tool_timeout_sec"),
+				"{original_value} must survive byte-identical"
+			);
+			assert_eq!(
+				server.get("command").and_then(Value::as_str),
+				Some("old")
+			);
+		}
+	}
+
+	#[test]
+	fn an_unreadable_timeout_is_rejected_rather_than_deleted() {
+		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"c\"\ntool_timeout_sec = \"30\"\n";
+		assert!(parse(original).is_err());
 	}
 
 	#[test]
