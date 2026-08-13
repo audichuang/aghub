@@ -604,6 +604,7 @@ pub fn reconcile_mcp(
 		added.len(),
 		removed.len()
 	);
+	let deletes_source = !removed.is_empty();
 	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
@@ -616,8 +617,9 @@ pub fn reconcile_mcp(
 		|plan| {
 			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
-				// Reconcile removes the source once the copies land.
-				mcp_supported_for_target(&plan.target, &mcp, true)?;
+				// Only a reconcile that REMOVES something can delete a source;
+				// an add-only one is as best-effort as a plain copy.
+				mcp_supported_for_target(&plan.target, &mcp, deletes_source)?;
 			}
 			Ok(())
 		},
@@ -1181,7 +1183,9 @@ mod tests {
 		);
 
 		// A plain copy is best-effort and still allowed — it deletes nothing.
-		assert!(transfer_mcp(
+		// Assert the ROW succeeded and the server is on Cursor's disk:
+		// `transfer_mcp` returns Ok even when an execution row failed.
+		let copied = transfer_mcp(
 			ResourceLocator {
 				agent: AgentType::Codex,
 				scope: InstallScope::Project,
@@ -1194,7 +1198,23 @@ mod tests {
 				project_root: Some(root.clone()),
 			}],
 		)
-		.is_ok());
+		.unwrap();
+		assert_eq!(copied.results.len(), 1);
+		assert!(
+			copied.results[0].error.is_none(),
+			"best-effort copy must actually run: {:?}",
+			copied.results[0].error
+		);
+		let mut cursor = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(&root),
+		);
+		cursor.load().unwrap();
+		assert!(
+			cursor.get_mcp("filesystem").is_some(),
+			"the best-effort copy must land on disk"
+		);
 	}
 
 	#[test]

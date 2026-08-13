@@ -71,3 +71,38 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_markers: &[".gemini"],
 	skills_cli_name: Some("gemini-cli"),
 };
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::McpTransport;
+
+	/// Driven through the PRODUCTION descriptor on purpose: the same assertions
+	/// against a test-local dialect stayed green while `gemini.rs` was missing
+	/// `http_url_key` entirely.
+	#[test]
+	fn gemini_honours_its_own_http_url_key() {
+		let parse = DESCRIPTOR.mcp_parse_config.unwrap();
+
+		// `httpUrl` alone is a complete server…
+		let only = r#"{"mcpServers":{"api":{"httpUrl":"https://host/mcp"}}}"#;
+		assert!(matches!(
+			parse(only).unwrap().mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+
+		// …and Gemini consults it before `url` and before any `type`.
+		let both = r#"{"mcpServers":{"api":{"url":"https://events/sse","httpUrl":"https://api/mcp"}}}"#;
+		match &parse(both).unwrap().mcps[0].transport {
+			McpTransport::StreamableHttp { url, .. } => {
+				assert_eq!(url, "https://api/mcp")
+			}
+			other => panic!("expected streamable http, got {other:?}"),
+		}
+		let tagged = r#"{"mcpServers":{"api":{"httpUrl":"https://api/mcp","type":"sse"}}}"#;
+		assert!(matches!(
+			parse(tagged).unwrap().mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+	}
+}

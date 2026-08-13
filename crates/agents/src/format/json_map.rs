@@ -764,32 +764,16 @@ mod tests {
 	}
 
 	#[test]
-	fn http_url_is_a_declaration_only_for_the_dialect_that_owns_it() {
-		const GEMINI: Dialect = Dialect {
-			http_url_key: Some("httpUrl"),
-			..MCP_SERVERS
-		};
-		// Gemini consults `httpUrl` before `url` and before any `type`.
-		let both = r#"{"mcpServers":{"s":{"url":"https://events/sse","httpUrl":"https://api/mcp"}}}"#;
-		match &parse(both, &GEMINI).unwrap().mcps[0].transport {
-			McpTransport::StreamableHttp { url, .. } => {
-				assert_eq!(url, "https://api/mcp", "httpUrl is authoritative")
-			}
-			other => panic!("expected streamable http, got {other:?}"),
-		}
-		let tagged = r#"{"mcpServers":{"s":{"httpUrl":"https://api/mcp","type":"sse"}}}"#;
-		assert!(matches!(
-			parse(tagged, &GEMINI).unwrap().mcps[0].transport,
-			McpTransport::StreamableHttp { .. }
-		));
-
-		// For every OTHER dialect the key is foreign: it must not hijack the
-		// entry, and it must not be stripped on the way out either.
+	fn an_unowned_url_key_is_neither_read_nor_removed_nor_type_checked() {
 		const WINDSURF: Dialect = Dialect {
 			url_key: "serverUrl",
+			legacy_url_keys: &["url"],
 			..MCP_SERVERS
 		};
-		let foreign = r#"{"mcpServers":{"s":{"type":"sse","serverUrl":"https://events","httpUrl":"https://foreign/mcp"}}}"#;
+		// The foreign key holds an OBJECT: capturing it as a typed string would
+		// fail an otherwise valid entry, so this input is what proves the raw
+		// capture is doing its job.
+		let foreign = r#"{"mcpServers":{"s":{"type":"sse","serverUrl":"https://events","httpUrl":{"plugin":"metadata"}}}}"#;
 		let config = parse(foreign, &WINDSURF).unwrap();
 		match &config.mcps[0].transport {
 			McpTransport::Sse { url, .. } => assert_eq!(url, "https://events"),
@@ -799,8 +783,28 @@ mod tests {
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 		assert_eq!(value["mcpServers"]["s"]["serverUrl"], "https://events");
 		assert_eq!(
-			value["mcpServers"]["s"]["httpUrl"], "https://foreign/mcp",
+			value["mcpServers"]["s"]["httpUrl"]["plugin"], "metadata",
 			"an unowned key is unmanaged data, not ours to delete"
+		);
+	}
+
+	#[test]
+	fn a_legacy_url_key_is_read_then_normalised_to_the_written_one() {
+		const WINDSURF: Dialect = Dialect {
+			url_key: "serverUrl",
+			legacy_url_keys: &["url"],
+			..MCP_SERVERS
+		};
+		// v2.13.3 wrote `url` for this agent; those entries must still load.
+		let legacy =
+			r#"{"mcpServers":{"s":{"type":"http","url":"https://api/mcp"}}}"#;
+		let config = parse(legacy, &WINDSURF).unwrap();
+		let output = serialize(&config, Some(legacy), &WINDSURF).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+		assert_eq!(value["mcpServers"]["s"]["serverUrl"], "https://api/mcp");
+		assert!(
+			value["mcpServers"]["s"].get("url").is_none(),
+			"the legacy spelling must not survive alongside the canonical one"
 		);
 	}
 

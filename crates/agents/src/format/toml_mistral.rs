@@ -97,27 +97,27 @@ fn map_value(values: &HashMap<String, String>) -> Value {
 }
 
 /// Vibe types `tool_timeout_sec` as a float with `gt=0`; the normalized model
-/// has whole seconds. A sub-second value floors to ZERO, which Vibe rejects, so
-/// the model keeps at least one second — otherwise copying such a server to a
-/// fresh Vibe target would write a config the vendor refuses. An unchanged
-/// value is still emitted byte-identical by [`set_timeout`], so this rounding
-/// only ever shows up on a genuine cross-agent copy.
+/// has whole seconds. An integral float (`30.0`) is read and emitted
+/// byte-identical by [`set_timeout`]; a fractional one is REFUSED with a message
+/// naming the field, because the alternatives — approximating it, or carrying a
+/// value the model cannot represent — both end with a cross-agent copy silently
+/// landing a different timeout.
 fn model_seconds(value: &Value) -> Option<u64> {
 	match value {
 		Value::Integer(value) => u64::try_from(*value).ok(),
-		// Beyond 2^53 an f64 no longer holds every integer, so a value read
-		// there could not be compared or written back faithfully.
+		// Whole seconds only, and below 2^53 where an f64 still holds every
+		// integer. Rounding `0.5` to `1` here looked harmless, but the model is
+		// what a cross-agent copy carries: the copy then landed a DIFFERENT
+		// timeout, the round-trip check saw two equal whole seconds and called
+		// it exact, and reconcile deleted the source holding the real value.
+		// A value this model cannot carry has to be refused, not approximated.
 		Value::Float(value)
 			if value.is_finite()
 				&& *value >= 0.0
-				&& *value <= (1u64 << 53) as f64 =>
+				&& *value < (1u64 << 53) as f64
+				&& value.fract() == 0.0 =>
 		{
-			let seconds = *value as u64;
-			Some(if seconds == 0 && *value > 0.0 {
-				1
-			} else {
-				seconds
-			})
+			Some(*value as u64)
 		}
 		_ => None,
 	}
@@ -716,51 +716,70 @@ custom_auth = "keep me too"
 	}
 
 	#[test]
-	fn a_fractional_timeout_is_left_byte_identical() {
-		// Vibe types the field as a float. Rewriting `1.9` as the model's `1`
-		// would silently shorten the user's timeout.
-		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"old\"\ntool_timeout_sec = 1.9\n";
+	fn an_integral_float_timeout_is_left_byte_identical() {
+		// Vibe types the field as a float, so `30.0` is the ordinary shape.
+		// Rewriting it as `30` would churn the file for nothing.
+		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"old\"\ntool_timeout_sec = 30.0\n";
 		let config = parse(original).unwrap();
+		match &config.mcps[0].transport {
+			McpTransport::Stdio { timeout, .. } => {
+				assert_eq!(*timeout, Some(30))
+			}
+			other => panic!("expected stdio, got {other:?}"),
+		}
 		let output = serialize(&config, Some(original)).unwrap();
 		let root: Value = toml::from_str(&output).unwrap();
 		let server = &root["mcp_servers"].as_array().unwrap()[0];
 		assert_eq!(
 			server.get("tool_timeout_sec").and_then(Value::as_float),
-			Some(1.9)
+			Some(30.0)
 		);
-		assert_eq!(server.get("command").and_then(Value::as_str), Some("old"));
 	}
 
 	#[test]
-	fn a_sub_second_timeout_never_becomes_the_zero_vibe_rejects() {
-		// `0.5` floors to 0, and Vibe declares the field `gt=0`. Copying such a
-		// server to a FRESH target must not write that 0.
-		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"c\"\ntool_timeout_sec = 0.5\n";
-		let config = parse(original).unwrap();
-		match &config.mcps[0].transport {
-			McpTransport::Stdio { timeout, .. } => {
-				assert_eq!(*timeout, Some(1))
-			}
-			other => panic!("expected stdio, got {other:?}"),
+	fn a_fractional_timeout_is_refused_rather_than_approximated() {
+		// The model holds whole seconds. Rounding `0.5` to `1` here is what a
+		// cross-agent copy would carry, so the copy would land a DIFFERENT
+		// timeout, the round-trip check would call it exact, and a reconcile
+		// would then delete the source holding the real value.
+		for value in ["0.5", "1.9"] {
+			let original = format!(
+				"[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"c\"\ntool_timeout_sec = {value}\n"
+			);
+			let error = parse(&original).unwrap_err().to_string();
+			assert!(
+				error.contains("tool_timeout_sec"),
+				"{value} must be refused by name: {error}"
+			);
 		}
-		let fresh = serialize(&config, None).unwrap();
-		let root: Value = toml::from_str(&fresh).unwrap();
-		let server = &root["mcp_servers"].as_array().unwrap()[0];
-		assert_eq!(
-			server.get("tool_timeout_sec").and_then(Value::as_integer),
-			Some(1),
-			"a fresh write must be a value Vibe accepts"
-		);
+	}
 
-		// …and an explicit zero is refused outright rather than written.
-		let mut zeroed = config.clone();
-		if let McpTransport::Stdio { timeout, .. } =
-			&mut zeroed.mcps[0].transport
-		{
+	#[test]
+	fn a_zero_timeout_is_never_written_fresh() {
+		// Vibe declares the field `gt=0`, and transfer / add_mcp do not go
+		// through aghub's input validator.
+		let mut config = AgentConfig::new();
+		let mut server = McpServer::new("s", McpTransport::stdio("c", vec![]));
+		if let McpTransport::Stdio { timeout, .. } = &mut server.transport {
 			*timeout = Some(0);
 		}
-		let error = serialize(&zeroed, None).unwrap_err().to_string();
+		config.mcps.push(server);
+		let error = serialize(&config, None).unwrap_err().to_string();
 		assert!(error.contains("positive"), "got: {error}");
+	}
+
+	#[test]
+	fn a_programmatic_timeout_beyond_toml_integers_is_refused_on_write() {
+		// Reached through transfer / add_mcp, which do not go through the CLI
+		// validator. Writing it as a float would silently widen the value.
+		let mut config = AgentConfig::new();
+		let mut server = McpServer::new("s", McpTransport::stdio("c", vec![]));
+		if let McpTransport::Stdio { timeout, .. } = &mut server.transport {
+			*timeout = Some(u64::MAX);
+		}
+		config.mcps.push(server);
+		let error = serialize(&config, None).unwrap_err().to_string();
+		assert!(error.contains("integer range"), "got: {error}");
 	}
 
 	#[test]
