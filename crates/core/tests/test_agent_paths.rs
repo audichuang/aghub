@@ -147,9 +147,23 @@ fn test_kimi_global_mcp_path() {
 		.mcp_global_path
 		.and_then(|path| path())
 		.expect("Kimi should have a global MCP path");
-	assert!(
-		path.to_string_lossy().contains(".kimi/mcp.json"),
-		"Kimi global MCP path should be ~/.kimi/mcp.json, got: {}",
+	// Compare COMPONENTS, not the rendered string: the descriptor builds this
+	// path by joining `.kimi` and `mcp.json` separately, so on Windows the
+	// rendering is `.kimi\\mcp.json` and a `contains(".kimi/mcp.json")` check
+	// goes red. It only ever passed because the old descriptor happened to join
+	// one slash-bearing literal.
+	assert_eq!(
+		path.file_name().and_then(|name| name.to_str()),
+		Some("mcp.json"),
+		"got: {}",
+		path.display()
+	);
+	assert_eq!(
+		path.parent()
+			.and_then(|parent| parent.file_name())
+			.and_then(|name| name.to_str()),
+		Some(".kimi"),
+		"Kimi global MCP path should be <share dir>/mcp.json, got: {}",
 		path.display()
 	);
 }

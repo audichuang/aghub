@@ -16,7 +16,10 @@ dev:
 
 # Run all tests
 test:
-    cargo test --workspace
+    # --no-fail-fast: without it cargo stops at the FIRST failing test
+    # binary, so a red CI leg reveals one problem per run and a
+    # platform-specific batch costs one full cycle each.
+    cargo test --workspace --no-fail-fast
 
 # Run integration tests only
 integration-test:
