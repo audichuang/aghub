@@ -167,6 +167,7 @@ fn target_resource_scope(
 fn mcp_supported_for_target(
 	target: &InstallTarget,
 	mcp: &McpServer,
+	lossless: bool,
 ) -> Result<()> {
 	let descriptor = registry::get(target.agent);
 	if !descriptor.supports_mcp_scope(target_resource_scope(target)) {
@@ -176,14 +177,15 @@ fn mcp_supported_for_target(
 			descriptor.id,
 		));
 	}
-	// The whole server, not just its transport. A dialect with no persisted
+	// The whole server, not just its transport: a dialect with no persisted
 	// toggle omits a DISABLED one, so the copy would report success while
-	// nothing landed. A cross-agent copy also refuses a LOSSY landing: the
-	// caller may delete the original afterwards (reconcile does), and a
-	// "successful" copy that silently shed the server's timeout would leave the
-	// only surviving copy missing it.
+	// nothing landed. `lossless` is for the callers that DELETE the original
+	// afterwards (reconcile) — there a copy that silently shed the server's
+	// timeout leaves the only surviving copy missing it. A plain copy keeps the
+	// best-effort behaviour it has always had.
 	match aghub_agents::descriptor::mcp_fit(descriptor, mcp) {
 		aghub_agents::descriptor::McpFit::Exact => Ok(()),
+		aghub_agents::descriptor::McpFit::Lossy if !lossless => Ok(()),
 		aghub_agents::descriptor::McpFit::Lossy => {
 			Err(ConfigError::unsupported_operation(
 				"copy without losing fields",
@@ -534,7 +536,7 @@ pub fn transfer_mcp(
 		&destinations,
 		|target| {
 			validate_target(target)?;
-			mcp_supported_for_target(target, &mcp)
+			mcp_supported_for_target(target, &mcp, false)
 		},
 		|target| {
 			let outcome = (|| -> Result<()> {
@@ -614,7 +616,8 @@ pub fn reconcile_mcp(
 		|plan| {
 			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
-				mcp_supported_for_target(&plan.target, &mcp)?;
+				// Reconcile removes the source once the copies land.
+				mcp_supported_for_target(&plan.target, &mcp, true)?;
 			}
 			Ok(())
 		},
@@ -1106,6 +1109,92 @@ mod tests {
 			valid_manager.get_mcp("filesystem").is_none(),
 			"no target may be written before every target passes preflight",
 		);
+	}
+
+	/// Reconcile DELETES the source once the copies land, so a copy that would
+	/// silently shed a field has to fail preflight. Codex holds
+	/// `tool_timeout_sec`; the JSON-map dialects have no per-server timeout key
+	/// at all, so this copy is lossy — and without the check the only surviving
+	/// copy would be the one missing the timeout.
+	#[test]
+	fn reconcile_mcp_refuses_a_lossy_copy_and_keeps_the_source() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+
+		let mut source = ConfigManager::new(
+			create_adapter(AgentType::Codex),
+			false,
+			Some(&root),
+		);
+		source.load().unwrap();
+		source
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::Stdio {
+					command: "npx".to_string(),
+					args: vec!["mcp-filesystem".to_string()],
+					env: None,
+					timeout: Some(30),
+				},
+			))
+			.unwrap();
+
+		let error = reconcile_mcp(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "filesystem".to_string(),
+			},
+			vec![AgentType::Cursor], // added — cannot hold the timeout
+			vec![AgentType::Codex],  // removed
+			true,
+		)
+		.unwrap_err();
+		assert!(
+			error.to_string().contains("without losing fields"),
+			"got: {error}"
+		);
+
+		// The source must still be on disk, with its timeout intact.
+		let mut source = ConfigManager::new(
+			create_adapter(AgentType::Codex),
+			false,
+			Some(&root),
+		);
+		source.load().unwrap();
+		let kept = source.get_mcp("filesystem").expect(
+			"reconcile must not delete a source whose copy was refused",
+		);
+		assert!(
+			matches!(
+				kept.transport,
+				McpTransport::Stdio {
+					timeout: Some(30),
+					..
+				}
+			),
+			"the source kept the field the copy would have dropped: {:?}",
+			kept.transport
+		);
+
+		// A plain copy is best-effort and still allowed — it deletes nothing.
+		assert!(transfer_mcp(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "filesystem".to_string(),
+			},
+			vec![InstallTarget {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+			}],
+		)
+		.is_ok());
 	}
 
 	#[test]

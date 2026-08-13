@@ -18,6 +18,7 @@ json_map_dialect!(json_map::Dialect {
 		http: "http",
 	}),
 	url_key: "serverUrl",
+	legacy_url_keys: &["url"],
 	toggle_key: json_map::ToggleKey::Disabled,
 	..json_map::MCP_SERVERS
 });

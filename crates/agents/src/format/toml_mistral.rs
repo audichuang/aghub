@@ -105,10 +105,12 @@ fn map_value(values: &HashMap<String, String>) -> Value {
 fn model_seconds(value: &Value) -> Option<u64> {
 	match value {
 		Value::Integer(value) => u64::try_from(*value).ok(),
+		// Beyond 2^53 an f64 no longer holds every integer, so a value read
+		// there could not be compared or written back faithfully.
 		Value::Float(value)
 			if value.is_finite()
 				&& *value >= 0.0
-				&& *value <= u64::MAX as f64 =>
+				&& *value <= (1u64 << 53) as f64 =>
 		{
 			let seconds = *value as u64;
 			Some(if seconds == 0 && *value > 0.0 {
@@ -391,12 +393,21 @@ fn set_timeout(table: &mut TomlTable, timeout: Option<u64>) -> Result<()> {
 		return Ok(());
 	}
 	match timeout {
+		// Vibe declares the field `gt=0`; writing 0 produces a config the vendor
+		// refuses to load. aghub's own input validation rejects 0, but transfer
+		// and direct `add_mcp` calls do not go through it.
+		Some(0) => {
+			return Err(invalid(
+				"Mistral Vibe requires a positive `tool_timeout_sec`",
+			));
+		}
 		Some(timeout) => {
-			// Vibe's field is a float, so a value beyond the TOML integer range
-			// is written as one rather than failing every later save.
-			let value = i64::try_from(timeout)
-				.map(Value::Integer)
-				.unwrap_or_else(|_| Value::Float(timeout as f64));
+			let value =
+				i64::try_from(timeout).map(Value::Integer).map_err(|_| {
+					invalid(
+						"Mistral Vibe MCP timeout exceeds TOML integer range",
+					)
+				})?;
 			table.insert("tool_timeout_sec".to_string(), value);
 		}
 		None => {
@@ -705,31 +716,60 @@ custom_auth = "keep me too"
 	}
 
 	#[test]
-	fn a_timeout_the_whole_second_model_cannot_hold_is_left_alone() {
-		// Vibe types `tool_timeout_sec` as a float. Rewriting `1.9` as `1`
-		// would shorten the user's timeout; a value beyond i64 would make the
-		// write fail outright and block every unrelated save.
-		for original_value in ["1.9", "1e19"] {
-			let original = format!(
-				"[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"old\"\ntool_timeout_sec = {original_value}\n"
-			);
-			let config = parse(&original).unwrap();
-			let output = serialize(&config, Some(&original)).unwrap();
-			let root: Value = toml::from_str(&output).unwrap();
-			let server = &root["mcp_servers"].as_array().unwrap()[0];
-			assert_eq!(
-				server.get("tool_timeout_sec"),
-				toml::from_str::<Value>(&original).unwrap()["mcp_servers"]
-					.as_array()
-					.unwrap()[0]
-					.get("tool_timeout_sec"),
-				"{original_value} must survive byte-identical"
-			);
-			assert_eq!(
-				server.get("command").and_then(Value::as_str),
-				Some("old")
-			);
+	fn a_fractional_timeout_is_left_byte_identical() {
+		// Vibe types the field as a float. Rewriting `1.9` as the model's `1`
+		// would silently shorten the user's timeout.
+		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"old\"\ntool_timeout_sec = 1.9\n";
+		let config = parse(original).unwrap();
+		let output = serialize(&config, Some(original)).unwrap();
+		let root: Value = toml::from_str(&output).unwrap();
+		let server = &root["mcp_servers"].as_array().unwrap()[0];
+		assert_eq!(
+			server.get("tool_timeout_sec").and_then(Value::as_float),
+			Some(1.9)
+		);
+		assert_eq!(server.get("command").and_then(Value::as_str), Some("old"));
+	}
+
+	#[test]
+	fn a_sub_second_timeout_never_becomes_the_zero_vibe_rejects() {
+		// `0.5` floors to 0, and Vibe declares the field `gt=0`. Copying such a
+		// server to a FRESH target must not write that 0.
+		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"c\"\ntool_timeout_sec = 0.5\n";
+		let config = parse(original).unwrap();
+		match &config.mcps[0].transport {
+			McpTransport::Stdio { timeout, .. } => {
+				assert_eq!(*timeout, Some(1))
+			}
+			other => panic!("expected stdio, got {other:?}"),
 		}
+		let fresh = serialize(&config, None).unwrap();
+		let root: Value = toml::from_str(&fresh).unwrap();
+		let server = &root["mcp_servers"].as_array().unwrap()[0];
+		assert_eq!(
+			server.get("tool_timeout_sec").and_then(Value::as_integer),
+			Some(1),
+			"a fresh write must be a value Vibe accepts"
+		);
+
+		// …and an explicit zero is refused outright rather than written.
+		let mut zeroed = config.clone();
+		if let McpTransport::Stdio { timeout, .. } =
+			&mut zeroed.mcps[0].transport
+		{
+			*timeout = Some(0);
+		}
+		let error = serialize(&zeroed, None).unwrap_err().to_string();
+		assert!(error.contains("positive"), "got: {error}");
+	}
+
+	#[test]
+	fn a_timeout_beyond_exact_float_range_is_rejected_not_rounded() {
+		// Past 2^53 an f64 cannot hold every integer, so aghub could neither
+		// compare nor rewrite the value faithfully.
+		let original = "[[mcp_servers]]\nname = \"server\"\ntransport = \"stdio\"\ncommand = \"c\"\ntool_timeout_sec = 1e19\n";
+		let error = parse(original).unwrap_err().to_string();
+		assert!(error.contains("tool_timeout_sec"), "got: {error}");
 	}
 
 	#[test]

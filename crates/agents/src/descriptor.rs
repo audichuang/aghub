@@ -418,10 +418,49 @@ pub fn mcp_fit(descriptor: &AgentDescriptor, server: &McpServer) -> McpFit {
 	if landed.enabled != probe.enabled {
 		return McpFit::Unsupported;
 	}
-	if landed.transport == probe.transport {
+	if normalized(&landed.transport) == normalized(&probe.transport) {
 		McpFit::Exact
 	} else {
 		McpFit::Lossy
+	}
+}
+
+/// An absent map and an empty one are the same configuration; treating the
+/// difference as loss would refuse copies that lose nothing.
+fn normalized(transport: &McpTransport) -> McpTransport {
+	let strip = |map: &Option<std::collections::HashMap<String, String>>| {
+		map.clone().filter(|map| !map.is_empty())
+	};
+	match transport {
+		McpTransport::Stdio {
+			command,
+			args,
+			env,
+			timeout,
+		} => McpTransport::Stdio {
+			command: command.clone(),
+			args: args.clone(),
+			env: strip(env),
+			timeout: *timeout,
+		},
+		McpTransport::Sse {
+			url,
+			headers,
+			timeout,
+		} => McpTransport::Sse {
+			url: url.clone(),
+			headers: strip(headers),
+			timeout: *timeout,
+		},
+		McpTransport::StreamableHttp {
+			url,
+			headers,
+			timeout,
+		} => McpTransport::StreamableHttp {
+			url: url.clone(),
+			headers: strip(headers),
+			timeout: *timeout,
+		},
 	}
 }
 

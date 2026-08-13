@@ -46,12 +46,16 @@ pub struct Dialect {
 	/// Dotted path to the server map (`"mcpServers"`, `"amp.mcpServers"`, …).
 	pub server_key: &'static str,
 	pub discriminator: Option<Discriminator>,
+	/// The URL key this dialect WRITES.
 	pub url_key: &'static str,
-	/// A second URL key whose PRESENCE declares streamable HTTP. Only Gemini
-	/// has one (`httpUrl`); for every other dialect the key is foreign and must
-	/// be left alone, not read and not removed — hijacking an entry on a key the
-	/// vendor never defined is how a Windsurf `serverUrl` server ends up
-	/// pointing at someone else's endpoint.
+	/// URL keys it also READS and STRIPS: spellings an older aghub wrote for
+	/// this agent. A key in NEITHER list is foreign — never read, never removed,
+	/// never type-checked. Hijacking an entry on a key the vendor did not define
+	/// is how a Windsurf `serverUrl` server ends up pointing at someone else's
+	/// endpoint, and stripping one deletes the user's data.
+	pub legacy_url_keys: &'static [&'static str],
+	/// A URL key whose PRESENCE declares streamable HTTP. Only Gemini has one
+	/// (`httpUrl`), and Gemini consults it before `url` and before any `type`.
 	pub http_url_key: Option<&'static str>,
 	pub env_key: &'static str,
 	pub toggle_key: ToggleKey,
@@ -83,6 +87,7 @@ pub const MCP_SERVERS: Dialect = Dialect {
 		http: "http",
 	}),
 	url_key: "url",
+	legacy_url_keys: &[],
 	http_url_key: None,
 	env_key: "env",
 	toggle_key: ToggleKey::None,
@@ -101,16 +106,49 @@ pub(crate) struct MapMcpServer {
 	pub args: Vec<serde_json::Value>,
 	#[serde(alias = "environment")]
 	pub env: Option<HashMap<String, serde_json::Value>>,
-	#[serde(alias = "serverUrl")]
-	pub url: Option<String>,
-	/// Gemini's dedicated streamable-HTTP key. Kept apart from `url` because
-	/// its presence IS the transport declaration — folding it into `url` would
-	/// leave the path-sniffing below to guess at something the user stated.
-	#[serde(rename = "httpUrl")]
-	pub http_url: Option<String>,
 	pub headers: Option<HashMap<String, String>>,
 	pub enabled: Option<bool>,
 	pub disabled: Option<bool>,
+	/// Every other key, still raw. URL keys live here so a spelling this
+	/// dialect does not own is never type-checked — a foreign `httpUrl` holding
+	/// an object must not fail an otherwise valid entry.
+	#[serde(flatten)]
+	pub rest: serde_json::Map<String, serde_json::Value>,
+}
+
+/// The URL this dialect owns, and whether the KEY itself declared HTTP.
+fn owned_url(
+	rest: &serde_json::Map<String, serde_json::Value>,
+	dialect: &Dialect,
+	name: &str,
+) -> Result<(Option<String>, bool)> {
+	let read = |key: &str| -> Result<Option<String>> {
+		match rest.get(key) {
+			None => Ok(None),
+			Some(value) => value
+				.as_str()
+				.map(|value| Some(value.to_string()))
+				.ok_or_else(|| {
+					ConfigError::InvalidConfig(format!(
+						"MCP server '{name}' field '{key}' must be a string"
+					))
+				}),
+		}
+	};
+	if let Some(key) = dialect.http_url_key {
+		if let Some(url) = read(key)? {
+			return Ok((Some(url), true));
+		}
+	}
+	if let Some(url) = read(dialect.url_key)? {
+		return Ok((Some(url), false));
+	}
+	for key in dialect.legacy_url_keys {
+		if let Some(url) = read(key)? {
+			return Ok((Some(url), false));
+		}
+	}
+	Ok((None, false))
 }
 
 fn get_nested<'a>(
@@ -223,22 +261,16 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 			command,
 			args,
 			env,
-			url,
-			http_url,
 			headers,
 			enabled,
 			disabled,
+			rest,
 		} = serde_json::from_value(mcp_val).map_err(|error| {
 			ConfigError::InvalidConfig(format!(
 				"Invalid MCP server '{name}': {error}"
 			))
 		})?;
-		// Gemini's `httpUrl` IS the transport declaration, and Gemini itself
-		// consults it before `url` and before any `type`. Honour that order for
-		// the dialect that declares the key — and ONLY that one.
-		let http_url = http_url.filter(|_| dialect.http_url_key.is_some());
-		let declared_http = http_url.is_some();
-		let url = http_url.or(url);
+		let (url, declared_http) = owned_url(&rest, dialect, &name)?;
 		if command.is_some() && url.is_some() {
 			return Err(ConfigError::InvalidConfig(format!(
 				"MCP server '{name}' cannot contain both command and url"
@@ -462,13 +494,16 @@ pub fn serialize(
 			"args",
 			"env",
 			"environment",
-			"url",
-			"serverUrl",
 			"headers",
 		] {
 			entry.remove(key);
 		}
-		if let Some(key) = dialect.http_url_key {
+		// Only the URL spellings this dialect OWNS. Removing a foreign one
+		// deletes data aghub was never asked to manage.
+		for key in std::iter::once(dialect.url_key)
+			.chain(dialect.legacy_url_keys.iter().copied())
+			.chain(dialect.http_url_key)
+		{
 			entry.remove(key);
 		}
 		match dialect.toggle_key {

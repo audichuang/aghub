@@ -8,6 +8,7 @@ use crate::{define_mcp_paths, json_map_dialect};
 // path-based inference rather than forcing `type: "http"` onto an entry the
 // user left open — that would pin a `/sse` endpoint to the wrong transport.
 json_map_dialect!(json_map::Dialect {
+	http_url_key: Some("httpUrl"),
 	..json_map::MCP_SERVERS
 });
 
