@@ -4,4 +4,6 @@
 !.cline/data/
 !.cline/data/settings/
 !.cline/data/settings/cline_mcp_settings.json
+!.cursor/
+!.cursor/mcp.json
 !.agents/

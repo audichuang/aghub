@@ -73,10 +73,17 @@ fn test_agent_all_get_mcps_is_valid_json_array() {
 	let json: Value =
 		serde_json::from_slice(&out.stdout).expect("stdout must be valid JSON");
 	let arr = json.as_array().expect("output must be a JSON array");
-	assert!(!arr.is_empty(), "array must not be empty");
+	assert!(
+		arr.iter()
+			.any(|m| m["agent"] == "cursor" && m["name"] == "test-mcp"),
+		"the project-scoped cursor fixture must be listed: {json}"
+	);
 
-	// Each entry is an MCP with an agent field. Cline's global MCP file is
-	// isolated at fixtures/.cline/data/settings/cline_mcp_settings.json.
+	// Each entry is an MCP with an agent field. The PROJECT-scoped
+	// fixtures/.cursor/mcp.json is what keeps this non-empty everywhere:
+	// Cline's fixture is global-scoped, and on Windows `dirs::home_dir()` reads
+	// the known-folder API rather than the `HOME` this harness overrides, so a
+	// global fixture is simply not visible there.
 	for entry in arr {
 		assert!(entry["name"].is_string(), "each entry must have 'name'");
 		assert!(entry["agent"].is_string(), "each entry must have 'agent'");

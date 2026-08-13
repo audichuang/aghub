@@ -1,0 +1,9 @@
+{
+	"mcpServers": {
+		"test-mcp": {
+			"type": "stdio",
+			"command": "echo",
+			"args": ["hello"]
+		}
+	}
+}
