@@ -5,6 +5,10 @@ rustc-wrapper = "sccache"
 [profile.dev]
 # Faster debug builds with minimal optimization
 opt-level = 0
+# Keep panic backtraces (file:line) but drop the full DWARF a step debugger
+# needs — that was ~80% of every test binary. Inherited by [profile.test] and
+# by dependencies. Set back to `true` if you need to inspect locals in gdb.
+debug = "line-tables-only"
 
 [profile.release]
 # Keep default release settings for performance
