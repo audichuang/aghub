@@ -137,8 +137,10 @@ Output:
   (dry_run/needs_confirm/deleted_path/outcome), reconcile (dry_run), coverage,
   and the batch envelope (success_count/failed_count). camelCase for prune-lock
   (dryRun), source sync (dryRun/skillPath/targetAgents), source list, doctor
-  and check. Read `delete`'s three-way `outcome` field rather than deriving
-  intent from dry_run/executed.
+  and check. Read `delete`'s `outcome` field (preview | removed | absent |
+  partial) rather than deriving intent from dry_run/executed: `partial` means
+  the removal ran and at least one path could NOT be deleted, which those two
+  booleans cannot express at all.
 
   Multi-agent runs wrap rows in {success_count, failed_count, results:[…]}.
   A row carries BOTH `ok` and `success` (same value); a FAILED row replaces
@@ -581,6 +583,23 @@ impl ResourceType {
 	}
 }
 
+/// Reject `-a all` for a command that does not fan out.
+///
+/// The generic path rejects it inside `handle_all_agents`. `check` and
+/// `prune-lock` are now dispatched BEFORE that, so they need the same refusal
+/// explicitly — without it, moving them silently turned `-a all` into a no-op,
+/// which is the exact shape of defect this whole change set is removing.
+fn reject_agent_all(agent: &str) -> Result<()> {
+	if matches!(AgentSelection::parse(agent), Ok(AgentSelection::All)) {
+		anyhow::bail!(
+			"--agent all is accepted by `get`, `doctor --verify-links` and \
+			 `source sync` only. This command takes a single agent (or ignores \
+			 -a entirely)."
+		);
+	}
+	Ok(())
+}
+
 /// The resource a fan-out mutation targets, normalized to [`ResourceType`].
 ///
 /// `enable`/`disable` take the narrowed [`McpResource`] (clap rejects `skills`
@@ -682,7 +701,12 @@ fn report_failure(error: &anyhow::Error, json: bool) {
 		let payload = serde_json::json!({
 			"error": {
 				"code": code,
-				"message": error.to_string(),
+				// `{:#}` walks the whole anyhow chain. `to_string()` returns
+				// only the outermost context, so a wrapped failure read as
+				// "Failed to load config" with the actual cause (which file,
+				// which parse error, which line) stranded in the `Caused by:`
+				// block that only stderr gets.
+				"message": format!("{error:#}"),
 				"retryable": retryable,
 			}
 		});
@@ -802,6 +826,30 @@ fn run(cli: Cli) -> Result<()> {
 		return commands::inference::execute(action, cli.json);
 	}
 
+	// `plugin` manages Claude Code's plugin store, not per-scope agent config —
+	// root `--help` says outright that it IGNORES the scope flags. It therefore
+	// must not go through `resolve_scope_and_root`: once the project-root guard
+	// became unconditional (so read paths stop answering `[]` outside a
+	// project), the generic path started failing `-p plugin list` with "no
+	// project root found" for a command that never wanted a scope. Claude-only
+	// is still enforced, here, where the message can name the fix.
+	if let Commands::Plugin { action } = &cli.command {
+		let agents = AgentSelection::parse(&cli.agent)
+			.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
+		let claude_only = matches!(
+			&agents,
+			AgentSelection::List(list)
+				if list.as_slice() == [AgentType::Claude]
+		);
+		if !claude_only {
+			anyhow::bail!(
+				"Plugin management is only supported for Claude Code. Use \
+				 -a claude"
+			);
+		}
+		return commands::plugin::execute(action.clone(), cli.json);
+	}
+
 	// `transfer` / `reconcile` span MULTIPLE agents (source + targets), so they
 	// resolve their own per-target scope and are dispatched before the
 	// single-agent adapter/ConfigManager setup. They take a single writing
@@ -861,6 +909,38 @@ fn run(cli: Cli) -> Result<()> {
 	// Claude-global, not single-agent scoped, so dispatch before adapter setup.
 	if let Commands::SkillUsage = &cli.command {
 		return commands::skill_usage::execute(cli.project, cli.all, cli.json);
+	}
+
+	// `check` and `prune-lock` answer from the SKILL LOCK alone — they never
+	// read or write an agent's config. Dispatched here, before the
+	// adapter/ConfigManager setup, for the same reason the commands above are:
+	// a malformed agent config must not block a command that never needed one.
+	// Tightening `tolerate_missing` to only absorb NotFound (so a corrupt
+	// config stops reading as an empty one) otherwise made a broken
+	// `.mcp.json` fail `check skills` and `prune-lock`, which is unrelated to
+	// either.
+	if let Commands::Check { resource, online } = &cli.command {
+		reject_agent_all(&cli.agent)?;
+		let (scope, project_root) =
+			resolve_scope_and_root(&cli, ScopePolicy::AllowBoth)?;
+		return check::execute(
+			(*resource).into(),
+			scope,
+			project_root.as_deref(),
+			*online,
+			cli.json,
+		);
+	}
+	if let Commands::PruneLock { dry_run, yes } = &cli.command {
+		reject_agent_all(&cli.agent)?;
+		let (scope, project_root) =
+			resolve_scope_and_root(&cli, ScopePolicy::AllowBoth)?;
+		return prune::execute(
+			scope,
+			project_root.as_deref(),
+			*dry_run || !*yes,
+			cli.json,
+		);
 	}
 
 	// Parse the agent flag — "all" (case-insensitive), a single id, or a
@@ -1201,7 +1281,15 @@ fn run_for_agent(
 					"No existing config found, will create new configuration"
 				);
 			} else {
-				return Err(anyhow::anyhow!("Failed to load config: {}", e));
+				// `anyhow!("… {}", e)` STRINGIFIES the ConfigError, so
+				// `report_failure`'s downcast finds nothing and the shared
+				// code degrades to `CLI_ERROR` — a malformed config reported
+				// itself as an unclassified CLI error instead of
+				// `JSON_PARSE_ERROR`. `Error::from(..).context(..)` keeps the
+				// typed error in the chain, where the downcast can reach it.
+				return Err(
+					anyhow::Error::from(e).context("Failed to load config")
+				);
 			}
 		}
 	}
@@ -1301,34 +1389,19 @@ fn run_for_agent(
 		Commands::Describe { resource, name } => {
 			describe::execute(&manager, resource, name, cli.json).map(|()| None)
 		}
-		Commands::Check { resource, online } => check::execute(
-			resource.into(),
-			scope,
-			project_root.as_deref(),
-			online,
-			cli.json,
-		)
-		.map(|()| None),
+		Commands::Check { .. } => {
+			unreachable!("`check` is dispatched before agent-config setup")
+		}
 		Commands::ApplyUpdate { .. } => {
 			unreachable!(
 				"`apply-update` is dispatched before agent-config setup"
 			)
 		}
-		Commands::PruneLock { dry_run, yes } => prune::execute(
-			scope,
-			project_root.as_deref(),
-			dry_run || !yes,
-			cli.json,
-		)
-		.map(|()| None),
-		Commands::Plugin { action } => {
-			// Plugin management is Claude-specific
-			if agent_type != AgentType::Claude {
-				return Err(anyhow::anyhow!(
-					"Plugin management is only supported for Claude Code. Use -a claude"
-				));
-			}
-			plugin::execute(action, cli.json).map(|()| None)
+		Commands::PruneLock { .. } => {
+			unreachable!("`prune-lock` is dispatched before agent-config setup")
+		}
+		Commands::Plugin { .. } => {
+			unreachable!("`plugin` is dispatched before agent-config setup")
 		}
 		// Dispatched earlier in `main`, before adapter/manager setup.
 		Commands::Source { .. } => {

@@ -692,6 +692,9 @@ impl ConfigManager {
 				plan,
 				executed: false,
 				prune: removal::PruneStatus::NotRun,
+				failed_paths: vec![],
+				// Reached only AFTER the not-found check.
+				absent: false,
 			});
 		}
 
@@ -713,6 +716,11 @@ impl ConfigManager {
 		// Reflect what actually happened on disk in the returned plan.
 		plan.paths = report.removed;
 		plan.skipped.extend(report.skipped);
+		// Kept separately as well as folded into `skipped`: `skipped` also holds
+		// paths refused for being outside the allow-list and the shared master
+		// deliberately left behind, so it cannot answer "did anything FAIL?".
+		let failed_paths: Vec<std::path::PathBuf> =
+			report.failed.iter().map(|(path, _)| path.clone()).collect();
 		plan.skipped
 			.extend(report.failed.into_iter().map(|(path, _)| path));
 
@@ -736,6 +744,8 @@ impl ConfigManager {
 			plan,
 			executed: true,
 			prune,
+			failed_paths,
+			absent: false,
 		})
 	}
 

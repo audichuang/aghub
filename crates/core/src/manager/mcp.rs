@@ -97,6 +97,10 @@ impl ConfigManager {
 				plan,
 				executed: false,
 				prune: PruneStatus::NotRun,
+				// Reached only AFTER the not-found check: the resource
+				// exists, it just was not removed (dry-run/unconfirmed).
+				failed_paths: vec![],
+				absent: false,
 			});
 		}
 
@@ -107,6 +111,8 @@ impl ConfigManager {
 			plan,
 			executed: true,
 			prune: PruneStatus::NotRun,
+			failed_paths: vec![],
+			absent: false,
 		})
 	}
 

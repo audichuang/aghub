@@ -157,9 +157,12 @@ skills` was dead for all 25 agents; core still refuses it for the API path.)
 - **`--json` failures are JSON too**: `{"error":{code,message,retryable}}` on
   stdout, exit 1. `code` is `aghub_core::error_codes` — the SAME vocabulary the
   HTTP API sends. clap usage errors stay exit 2 with prose
-- **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent`. Read
-  that, not `dry_run`/`executed` — those two cannot separate a refused preview
-  from an already-gone resource
+- **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
+  `partial`. Read that, not `dry_run`/`executed`: those two cannot separate a
+  refused preview from an already-gone resource, and `executed: true` is set for
+  the whole execute branch even when every single delete failed (`partial`).
+  `absent` outranks the caller's intent — an unconfirmed delete of something
+  that does not exist is not a preview of any change
 - **An unreadable lock fails the commands that report it** (`check`, `doctor`,
   `source list`/`diff`). The lock read paths fail OPEN by design; those three
   present lock contents AS their answer, so they probe first

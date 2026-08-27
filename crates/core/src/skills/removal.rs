@@ -506,6 +506,27 @@ pub struct RemovalOutcome {
 	pub plan: RemovalPlan,
 	pub executed: bool,
 	pub prune: PruneStatus,
+	/// Paths the executing removal TRIED and failed to delete (permissions, a
+	/// concurrent change, …). Empty on a clean run, and on the resources whose
+	/// removal touches no path at all (MCP / sub-agent).
+	///
+	/// `executed` is set to `true` for the whole execute branch regardless, and
+	/// the failed paths are folded into `plan.skipped`, so a run where EVERY
+	/// delete failed still reported `executed: true` and — once a three-way
+	/// outcome existed — `outcome: "removed"` for files that are all still
+	/// there. Keeping the failures here lets the wire view say `partial`
+	/// instead of claiming a removal that did not happen.
+	pub failed_paths: Vec<std::path::PathBuf>,
+	/// The resource was ALREADY GONE — nothing to remove, whatever the caller
+	/// asked for.
+	///
+	/// Without this, `executed: false` conflated two different answers, and the
+	/// wire view could only guess between them from the caller's intent: an
+	/// unconfirmed delete of an absent resource reported `outcome: "preview"`,
+	/// whose contract says re-running with `--yes` WILL change something. It
+	/// will not — there is nothing there. Set by [`RemovalOutcome::noop`], the
+	/// one constructor for that case.
+	pub absent: bool,
 }
 
 impl RemovalOutcome {
@@ -526,6 +547,8 @@ impl RemovalOutcome {
 			},
 			executed: false,
 			prune: PruneStatus::NotRun,
+			failed_paths: vec![],
+			absent: true,
 		}
 	}
 }
@@ -1155,6 +1178,8 @@ mod tests {
 			},
 			executed: false,
 			prune: PruneStatus::Pruned(vec!["a".to_string()]),
+			failed_paths: vec![],
+			absent: false,
 		};
 		assert_eq!(outcome.prune, PruneStatus::Pruned(vec!["a".to_string()]));
 	}
@@ -1167,6 +1192,13 @@ mod tests {
 		// wire `deleted_path` stays null. NOT an error.
 		let n = RemovalOutcome::noop();
 		assert!(!n.executed, "a no-op delete must not report execution");
+		assert!(
+			n.absent,
+			"this IS the already-gone constructor: without `absent` the wire \
+			 view can only guess from caller intent, and reported an \
+			 unconfirmed delete of a missing resource as `preview` — a \
+			 promise that re-running with --yes would change something"
+		);
 		assert!(n.plan.paths.is_empty(), "no-op deletes nothing");
 		assert!(n.plan.skipped.is_empty());
 		assert!(!n.plan.needs_confirm);

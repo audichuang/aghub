@@ -65,8 +65,6 @@ const DATA_DIR_ENV: &str = "AGHUB_DATA_DIR";
 /// inference path where no keyring (linux secret-service/dbus) is available.
 const TEST_CREDENTIAL_FILE_ENV: &str = "AGHUB_TEST_CREDENTIAL_FILE";
 
-/// App data directory shared by the CLI, desktop, and HTTP API.
-///
 /// Fail when a skill lock the caller is about to REPORT ON exists but cannot be
 /// read.
 ///
@@ -85,15 +83,24 @@ pub(crate) fn assert_locks_readable(
 	want_global: bool,
 	project_root: Option<&std::path::Path>,
 ) -> Result<()> {
+	// Mapped to `ConfigError::Io` rather than passed through as a raw
+	// `io::Error`: `report_failure` recovers the shared error code by
+	// downcasting to `ConfigError`, and a bare `io::Error` in the anyhow chain
+	// degrades to `CLI_ERROR` instead of `IO_ERROR`.
+	let typed = |error: std::io::Error| {
+		anyhow::Error::from(aghub_core::errors::ConfigError::Io(error))
+	};
 	if want_global {
-		skill::lock::global_lock_readable()?;
+		skill::lock::global_lock_readable().map_err(typed)?;
 	}
 	if let Some(root) = project_root {
-		skill::lock::local::local_lock_readable(Some(root))?;
+		skill::lock::local::local_lock_readable(Some(root)).map_err(typed)?;
 	}
 	Ok(())
 }
 
+/// App data directory shared by the CLI, desktop, and HTTP API.
+///
 /// Defaults to `dirs::data_dir()/aghub` — byte-identical to
 /// `api::default_app_data_dir` so all three surfaces open the same SQLite db and
 /// credential-keyring namespace (a key stored by the desktop is readable by the

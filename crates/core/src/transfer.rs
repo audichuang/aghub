@@ -427,7 +427,19 @@ fn ensure_reconcilable(
 	Ok(())
 }
 
-fn ensure_disjoint(added: &[AgentType], removed: &[AgentType]) -> Result<()> {
+/// Reject an agent that appears in BOTH the add and remove sets.
+///
+/// Public so a PREVIEW can apply it without touching anything: a dry-run used
+/// to approve `--add opencode --remove opencode` and only the `--yes` run hit
+/// this, which is the wrong order for a check whose entire job is telling the
+/// caller what the commit will do. (`confirm = false` is NOT a dry-run switch —
+/// it is the "refuses removals without confirmation" gate, and an add-only
+/// reconcile with it still WRITES. That is why the preview needs read-only
+/// preflights like this one rather than a planner call.)
+pub fn ensure_disjoint(
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
 	for agent in added {
 		if removed.contains(agent) {
 			return Err(ConfigError::InvalidConfig(format!(

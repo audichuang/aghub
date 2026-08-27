@@ -36,6 +36,15 @@ pub enum RemovalKind {
 	/// Nothing to do: the resource was already gone. Re-running changes
 	/// nothing, so a caller must not retry on this.
 	Absent,
+	/// Deletion ran and at least one path could NOT be deleted. `paths` holds
+	/// what went, `skipped` holds what stayed. Do not read this as success:
+	/// when `paths` is empty, nothing was removed at all.
+	///
+	/// Without this variant, such a run reported `removed` — `executed` is
+	/// hard-coded `true` for the whole execute branch and the failures are
+	/// folded into `skipped`, so the only honest signal was a caller manually
+	/// comparing two lists.
+	Partial,
 }
 
 /// Wire view of a [`RemovalOutcome`]: the post-execution plan flattened to
@@ -73,12 +82,25 @@ impl RemovalView {
 		let stringify = |paths: &[std::path::PathBuf]| -> Vec<String> {
 			paths.iter().map(|p| p.display().to_string()).collect()
 		};
-		let kind = if outcome.executed {
+		let kind = if outcome.executed && !outcome.failed_paths.is_empty() {
+			// Ran, but not everything went. Checked BEFORE `Removed`: the
+			// execute branch sets `executed: true` unconditionally, so a run
+			// where every single delete failed is indistinguishable from a
+			// clean one on that flag alone.
+			RemovalKind::Partial
+		} else if outcome.executed {
 			RemovalKind::Removed
+		} else if outcome.absent {
+			// Already gone. This OUTRANKS the caller's intent: an unconfirmed
+			// delete of a resource that does not exist is not a preview of
+			// anything — re-running it with `--yes` changes nothing, and
+			// reporting `preview` invites exactly that pointless retry.
+			RemovalKind::Absent
 		} else if requested_dry_run {
 			RemovalKind::Preview
 		} else {
-			// Confirmed, yet nothing ran: the resource was already gone.
+			// Confirmed, nothing ran, and the plan did not say "absent" —
+			// treated as absent because there is nothing else it can be.
 			RemovalKind::Absent
 		};
 		Self {
@@ -118,6 +140,8 @@ mod tests {
 			},
 			executed,
 			prune: PruneStatus::NotRun,
+			failed_paths: vec![],
+			absent: false,
 		}
 	}
 
@@ -195,6 +219,45 @@ mod tests {
 	}
 
 	#[test]
+	fn a_run_whose_deletes_all_failed_is_not_reported_as_removed() {
+		// The execute branch sets `executed: true` unconditionally and folds
+		// failed paths into `plan.skipped`, so a run where EVERY delete failed
+		// looked identical to a clean one on that flag. Once a three-way
+		// outcome existed it said `removed` — for files that are all still on
+		// disk. `failed_paths` is what makes `partial` expressible.
+		let all_failed = RemovalOutcome {
+			plan: RemovalPlan {
+				layout: Layout::Copy,
+				// Nothing actually went.
+				paths: vec![],
+				skipped: vec![PathBuf::from("/a/locked")],
+				needs_confirm: false,
+				shared_master_kept: false,
+			},
+			executed: true,
+			prune: PruneStatus::NotRun,
+			failed_paths: vec![PathBuf::from("/a/locked")],
+			absent: false,
+		};
+		let view = RemovalView::from_outcome(&all_failed, false);
+		assert_eq!(
+			view.outcome,
+			RemovalKind::Partial,
+			"a removal that deleted nothing must not report `removed`"
+		);
+
+		// A clean executed run is still `removed`.
+		let clean = RemovalOutcome {
+			failed_paths: vec![],
+			..outcome(true, vec![PathBuf::from("/a/foo")])
+		};
+		assert_eq!(
+			RemovalView::from_outcome(&clean, false).outcome,
+			RemovalKind::Removed
+		);
+	}
+
+	#[test]
 	fn needs_confirm_and_skipped_paths_map_through() {
 		// Guards the single mapper against dropping/hard-coding needs_confirm
 		// or skipped: a not-yet-executed all-agents delete carries
@@ -209,6 +272,8 @@ mod tests {
 			},
 			executed: false,
 			prune: PruneStatus::NotRun,
+			failed_paths: vec![],
+			absent: false,
 		};
 		let view = RemovalView::from_outcome(&outcome, true);
 		assert!(view.needs_confirm, "needs_confirm must propagate");

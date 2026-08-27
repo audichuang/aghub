@@ -5,4 +5,4 @@
  * ts-rs dependency, so the wire enum is restated here exactly as
  * `DeleteSkillByPathResponse` restates `RemovalView`).
  */
-export type RemovalOutcomeKind = "preview" | "removed" | "absent";
+export type RemovalOutcomeKind = "preview" | "removed" | "absent" | "partial";

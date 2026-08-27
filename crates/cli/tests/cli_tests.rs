@@ -6601,11 +6601,74 @@ fn reconcile_rejects_empty_target_set_and_validates_source_in_preview() {
 /// path; a lenient one concludes the rename was committed. The lock read and
 /// the degenerate-name guard also sat AFTER that return, so the preview green-lit
 /// a name that is not in the lock at all.
+///
+/// The SUCCESS case below is load-bearing and was missing at first: with only
+/// the two failing cases, both returned before ever reaching the renderer, the
+/// JSON on stdout came from the global `report_failure`, and reverting the
+/// renderer fix back to prose left the test GREEN. A seeded lock entry is what
+/// makes the preview actually render.
 #[cfg(unix)]
 #[test]
 fn accept_rename_preview_validates_lock_and_honours_json() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+
+	// A real lock entry, so the preview reaches its renderer instead of
+	// bailing early.
+	write_source_skill(src.path(), "renamable", "renamable");
+	let installed = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"renamable",
+	);
+	assert!(
+		installed.status.success(),
+		"fixture install must succeed: {}",
+		String::from_utf8_lossy(&installed.stderr)
+	);
+
+	let preview = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"--json",
+			"source",
+			"accept-rename",
+			"renamable",
+			"renamable-new",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		preview.status.success(),
+		"a preview of a LOCKED skill must succeed: {}",
+		String::from_utf8_lossy(&preview.stderr)
+	);
+	let pj: Value = serde_json::from_slice(&preview.stdout).expect(
+		"the preview MUST emit JSON under --json — this is the assertion the \
+		 two failing cases below cannot make, because they never reach the \
+		 renderer",
+	);
+	assert_eq!(pj["dryRun"], true, "{pj}");
+	assert_eq!(pj["applied"], false, "{pj}");
+	assert_eq!(pj["oldName"], "renamable", "{pj}");
+	assert_eq!(pj["newName"], "renamable-new", "{pj}");
+	// And it must not have written anything.
+	let after = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+	let listed: Value = serde_json::from_slice(&after.stdout).unwrap();
+	assert!(
+		listed
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|s| s["name"] == "renamable"),
+		"a preview must leave the original name in place: {listed}"
+	);
 
 	// Nothing is in the lock, so the preview must fail — not print a plan.
 	let absent = isolated_cli(home.path(), state.path())
@@ -6901,49 +6964,64 @@ fn delete_json_distinguishes_preview_removed_and_absent() {
 			.unwrap_or_else(|e| panic!("{args:?} must emit JSON: {e}"))
 	};
 
-	// Absent + confirmed: nothing to do, and NOT a dry-run.
-	let absent =
+	// ABSENT is absent whether or not the caller confirmed. `absent` outranks
+	// the caller's intent on purpose: an unconfirmed delete of something that
+	// does not exist is not a preview of any change, and calling it `preview`
+	// invites a `--yes` retry that also does nothing, forever.
+	let absent_confirmed =
 		delete(&["-p", "--json", "delete", "skills", "ghost", "--yes"]);
-	assert_eq!(absent["outcome"], "absent", "{absent}");
+	let absent_preview = delete(&["-p", "--json", "delete", "skills", "ghost"]);
+	assert_eq!(absent_confirmed["outcome"], "absent", "{absent_confirmed}");
+	assert_eq!(absent_preview["outcome"], "absent", "{absent_preview}");
 	assert_eq!(
-		absent["dry_run"], false,
+		absent_confirmed["dry_run"], false,
 		"a confirmed request is not a dry-run just because there was nothing \
-		 to do: {absent}"
+		 to do: {absent_confirmed}"
 	);
 
-	// Absent + unconfirmed: a preview.
-	let preview = delete(&["-p", "--json", "delete", "skills", "ghost"]);
-	assert_eq!(preview["outcome"], "preview", "{preview}");
-	assert_eq!(preview["dry_run"], true, "{preview}");
-
-	// The two must not serialize identically — that is the whole defect.
-	assert_ne!(
-		absent, preview,
-		"an already-absent resource and a refused preview must differ"
-	);
-
-	// A real removal is the third answer.
+	// A REAL preview needs something that actually exists — and this is the
+	// pair that used to serialize identically (same bytes, same md5) for
+	// `delete X -y` and `delete X`.
 	let seeded = isolated_cli(home.path(), state.path())
 		.current_dir(project.path())
 		.args(["-p", "add", "skills", "--name", "doomed", "-d", "d"])
 		.output()
 		.unwrap();
 	assert!(seeded.status.success());
+	let preview = delete(&["-p", "--json", "delete", "skills", "doomed"]);
+	assert_eq!(preview["outcome"], "preview", "{preview}");
+	assert_eq!(preview["dry_run"], true, "{preview}");
+
 	let removed =
 		delete(&["-p", "--json", "delete", "skills", "doomed", "--yes"]);
 	assert_eq!(removed["outcome"], "removed", "{removed}");
 	assert_eq!(removed["executed"], true, "{removed}");
 	assert_eq!(removed["dry_run"], false, "{removed}");
 
+	// All three answers must be mutually distinguishable.
+	for (a, b) in [
+		(&preview, &removed),
+		(&preview, &absent_confirmed),
+		(&removed, &absent_confirmed),
+	] {
+		assert_ne!(a["outcome"], b["outcome"], "{a} vs {b}");
+	}
+
 	// MCP delete shares the seam, and its `paths` is deliberately always empty
 	// (root AGENTS.md MCP removal contract) — so `outcome` is the ONLY thing
 	// that can tell its three cases apart.
+	let seeded_mcp = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "mcps", "-n", "doomed-mcp", "-c", "echo"])
+		.output()
+		.unwrap();
+	assert!(seeded_mcp.status.success());
 	let mcp_absent =
 		delete(&["-p", "--json", "delete", "mcps", "ghost", "--yes"]);
-	let mcp_preview = delete(&["-p", "--json", "delete", "mcps", "ghost"]);
+	let mcp_preview = delete(&["-p", "--json", "delete", "mcps", "doomed-mcp"]);
 	assert_eq!(mcp_absent["outcome"], "absent", "{mcp_absent}");
 	assert_eq!(mcp_preview["outcome"], "preview", "{mcp_preview}");
-	assert_ne!(mcp_absent, mcp_preview);
+	assert_ne!(mcp_absent["outcome"], mcp_preview["outcome"]);
 }
 
 /// A batch of agent-facing fixes that each turned a wrong or unusable answer
@@ -7313,4 +7391,241 @@ fn json_payload_key_sets_are_pinned() {
 		rrow["ok"], rrow["success"],
 		"both success predicates must be present and agree: {rrow}"
 	);
+}
+
+/// Regressions found by an independent adversarial review of the fixes above,
+/// each one a case the original round missed.
+///
+/// Grouped deliberately: they are one-assertion checks over four different
+/// commands, and the point of the test is the SET — every one of these was a
+/// place where a fix was believed complete and was not.
+#[cfg(unix)]
+#[test]
+fn review_found_gaps_stay_fixed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	// --- `check` / `prune-lock` answer from the LOCK, so a broken agent config
+	// must not block them. Tightening `tolerate_missing` to only absorb
+	// NotFound (so a corrupt config stops reading as an absent one) made a
+	// malformed `.mcp.json` fail both — commands that neither read nor write
+	// it. Fixed by dispatching them before the ConfigManager exists, the same
+	// way `source`/`doctor`/`coverage` already were.
+	let mcp_path = project.path().join(".mcp.json");
+	std::fs::write(&mcp_path, r#"{ "mcpServers": {} } OOPS"#).unwrap();
+
+	for args in [
+		["-p", "--json", "check", "skills"].as_slice(),
+		["-p", "--json", "prune-lock"].as_slice(),
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args(args)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"{args:?} reads only the lock; a malformed agent config must not \
+			 block it: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+
+	// ...while the commands that DO read that config still fail loudly.
+	let reads_config = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "--json", "get", "mcps"])
+		.output()
+		.unwrap();
+	assert!(
+		!reads_config.status.success(),
+		"a malformed config must still fail the commands that read it"
+	);
+	// And with a typed code, not the `CLI_ERROR` fallback — the load error used
+	// to be stringified through `anyhow!("… {}", e)`, which erased the type the
+	// shared code vocabulary is derived from.
+	let cj: Value = serde_json::from_slice(&reads_config.stdout).unwrap();
+	assert_eq!(cj["error"]["code"], "INVALID_CONFIG", "{cj}");
+	// The message must be self-contained: `to_string()` gave only the outermost
+	// context ("Failed to load config"), stranding the actual cause in the
+	// `Caused by:` block that only stderr receives.
+	let msg = cj["error"]["message"].as_str().unwrap();
+	assert!(
+		msg.contains("parse"),
+		"the JSON message must carry the whole cause chain: {msg}"
+	);
+
+	// --- `plugin` ignores the scope flags (root --help says so outright), so
+	// the now-unconditional project-root guard must not reach it. It did: `-p
+	// plugin list` failed with "no project root found" for a command that never
+	// wanted a scope.
+	let nowhere = tempfile::TempDir::new().unwrap();
+	for scope in [["-p"].as_slice(), ["-g"].as_slice(), [].as_slice()] {
+		let mut argv = scope.to_vec();
+		argv.extend_from_slice(&["--json", "plugin", "list"]);
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(nowhere.path())
+			.args(&argv)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"plugin ignores scope flags, so {argv:?} must not fail: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+	// Claude-only is still enforced, and still names the fix.
+	let wrong_agent = isolated_cli(home.path(), state.path())
+		.current_dir(nowhere.path())
+		.args(["-a", "codex", "--json", "plugin", "list"])
+		.output()
+		.unwrap();
+	assert!(!wrong_agent.status.success());
+	assert!(
+		String::from_utf8_lossy(&wrong_agent.stderr).contains("-a claude"),
+		"the refusal must name the fix"
+	);
+
+	// --- An already-ABSENT resource is `absent` even without `--yes`. It used
+	// to report `preview`, whose contract promises that re-running with `--yes`
+	// changes something — it does not, so that reading invites an endless
+	// retry. `absent` outranks the caller's intent.
+	// A CLEAN project: the malformed `.mcp.json` above belongs to the earlier
+	// case, and `delete` legitimately fails on it (it reads that config).
+	let clean = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(clean.path().join(".claude")).unwrap();
+	let unconfirmed = isolated_cli(home.path(), state.path())
+		.current_dir(clean.path())
+		.args(["-p", "--json", "delete", "skills", "never-existed"])
+		.output()
+		.unwrap();
+	assert!(unconfirmed.status.success());
+	let uj: Value = serde_json::from_slice(&unconfirmed.stdout).unwrap();
+	assert_eq!(
+		uj["outcome"], "absent",
+		"nothing to delete is `absent`, not a preview of a change: {uj}"
+	);
+
+	// --- A `reconcile` PREVIEW must run every read-only preflight the commit
+	// would, not just the source-exists one: an agent in BOTH --add and
+	// --remove was approved by the preview and refused by the commit.
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(clean.path())
+		.args(["-p", "add", "skills", "--name", "both-sets", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+	let overlap = isolated_cli(home.path(), state.path())
+		.current_dir(clean.path())
+		.args([
+			"-p",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"both-sets",
+			"--add",
+			"opencode",
+			"--remove",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!overlap.status.success(),
+		"the preview must refuse what the commit refuses: stdout={}",
+		String::from_utf8_lossy(&overlap.stdout)
+	);
+	assert!(
+		String::from_utf8_lossy(&overlap.stderr).contains("both"),
+		"the error must say the agent is in both sets: {}",
+		String::from_utf8_lossy(&overlap.stderr)
+	);
+}
+
+/// Any `--json` command that can PARTIALLY fail must leave exactly ONE JSON
+/// document on stdout.
+///
+/// A behavioural check, deliberately not a hand-maintained list of bail sites:
+/// the first round enumerated those by hand and missed `source sync`, whose
+/// action-error path printed the full outcome view and then let the global
+/// failure renderer append a second document. Two concatenated documents fail
+/// every parser.
+#[cfg(unix)]
+#[test]
+fn partial_failure_leaves_exactly_one_json_document_on_stdout() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "shared", "shared");
+
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "conflicted", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+
+	// Each case is a command that reports per-row verdicts in its payload and
+	// then returns Err purely to set the exit code.
+	let cases: &[(&str, Vec<&str>)] = &[
+		(
+			// transfer into an agent that already has it: a failed row inside a
+			// successful-shaped envelope.
+			"transfer",
+			vec![
+				"-p",
+				"--json",
+				"transfer",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"conflicted",
+				"--to",
+				"claude",
+			],
+		),
+		(
+			// source sync with a source that cannot be reached: the path the
+			// hand-maintained list missed.
+			"source sync",
+			vec![
+				"-p",
+				"--json",
+				"source",
+				"sync",
+				"owner/repo",
+				"--install-missing",
+				"--yes",
+			],
+		),
+	];
+
+	for (label, argv) in cases {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+			.args(argv)
+			.output()
+			.unwrap();
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		if stdout.trim().is_empty() {
+			// Nothing printed is fine — the contract is about not printing
+			// TWO documents.
+			continue;
+		}
+		serde_json::from_str::<Value>(&stdout).unwrap_or_else(|e| {
+			panic!(
+				"{label}: stdout must hold exactly ONE JSON document, got \
+				 {e}\n{stdout}"
+			)
+		});
+	}
 }

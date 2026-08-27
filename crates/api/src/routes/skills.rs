@@ -488,6 +488,9 @@ pub async fn delete_skill_by_path(
 						plan,
 						executed: false,
 						prune: aghub_core::skills::removal::PruneStatus::NotRun,
+						// The dir exists (checked above); this is a preview.
+						failed_paths: vec![],
+						absent: false,
 					},
 					dry_run,
 				)));
@@ -522,6 +525,8 @@ pub async fn delete_skill_by_path(
 					plan: executed_plan,
 					executed: true,
 					prune,
+					failed_paths: vec![],
+					absent: false,
 				},
 				dry_run,
 			)));

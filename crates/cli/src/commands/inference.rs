@@ -6,7 +6,8 @@
 //! builds and calls the same `InferenceProviderRepository` methods, against the
 //! same `app_data_dir` store. The keyring backend is shared, so a key stored by
 //! the desktop is readable here and vice-versa. API keys are write-only: they
-//! are resolved from a flag/stdin/env and never printed back.
+//! are resolved from a flag (`--api-key`, or `--api-key -` to read stdin) or
+//! `$AGHUB_INFERENCE_API_KEY`, and are never printed back.
 //
 // ponytail: print the `InferenceProvider` model + serde_json directly; do NOT
 // drag the api DTO crate into the CLI.
@@ -24,7 +25,8 @@ use tabled::settings::Style;
 
 use crate::commands::inference_store;
 
-/// Env var the API key falls back to when neither `--api-key` nor piped stdin
+/// Env var the API key falls back to when neither `--api-key <KEY>` nor
+/// `--api-key -` (read stdin)
 /// supplies one. Never passed on argv, where it would leak into the process
 /// table / shell history.
 const API_KEY_ENV: &str = "AGHUB_INFERENCE_API_KEY";
@@ -39,8 +41,9 @@ pub enum InferenceAction {
 		/// Provider id from `inference list` (the ID column)
 		id: String,
 	},
-	/// Add a provider. The API key is resolved from `--api-key`, else piped
-	/// stdin, else `$AGHUB_INFERENCE_API_KEY` — never echoed back.
+	/// Add a provider. The API key is resolved from `--api-key <KEY>`, else
+	/// `--api-key -` (reads stdin), else `$AGHUB_INFERENCE_API_KEY` — never
+	/// echoed back. stdin is NOT read without the explicit `-`.
 	Add {
 		/// Machine-readable identifier, e.g. `my-openrouter`. ASCII; this is
 		/// what agent configs reference.
@@ -357,9 +360,10 @@ fn key(
 
 // ──────────────────────────────── helpers ──────────────────────────────────
 
-/// Resolve the API key for `create`: `--api-key`, else piped stdin, else
+/// Resolve the API key for `create`: `--api-key <KEY>`, `--api-key -` (stdin),
+/// else
 /// `$AGHUB_INFERENCE_API_KEY`, else a clear error. The raw key never goes on
-/// argv beyond the explicit flag; prefer stdin/env.
+/// argv beyond the explicit flag; prefer `--api-key -` or the env var.
 fn resolve_api_key(flag: Option<&str>) -> Result<String> {
 	// `--api-key -` is the ONLY way to read stdin. It used to read stdin
 	// whenever stdin was not a tty, which protected an interactive user but

@@ -439,6 +439,10 @@ pub enum RemovalOutcomeKind {
 	Removed,
 	/// Nothing to do: it was already gone. Do NOT retry on this.
 	Absent,
+	/// Deletion ran and at least one path could not be deleted. `paths` holds
+	/// what went, `skipped` holds what stayed — when `paths` is empty nothing
+	/// was removed at all. Do not treat this as success.
+	Partial,
 }
 
 impl From<aghub_core::dto::RemovalKind> for RemovalOutcomeKind {
@@ -447,6 +451,7 @@ impl From<aghub_core::dto::RemovalKind> for RemovalOutcomeKind {
 			aghub_core::dto::RemovalKind::Preview => Self::Preview,
 			aghub_core::dto::RemovalKind::Removed => Self::Removed,
 			aghub_core::dto::RemovalKind::Absent => Self::Absent,
+			aghub_core::dto::RemovalKind::Partial => Self::Partial,
 		}
 	}
 }

@@ -79,6 +79,13 @@ pub(crate) fn noop_removal_response(
 			},
 			executed: false,
 			prune: PruneStatus::NotRun,
+			// This IS the already-gone constructor — every caller reaches it
+			// because the config or the resource does not exist. It outranks
+			// `requested_dry_run` in the wire view, so an unconfirmed delete of
+			// an absent resource reports `absent`, not a `preview` that would
+			// invite a pointless retry.
+			failed_paths: vec![],
+			absent: true,
 		},
 		requested_dry_run,
 	)
@@ -199,6 +206,8 @@ mod removal_or_noop_tests {
 			},
 			executed,
 			prune: PruneStatus::NotRun,
+			failed_paths: vec![],
+			absent: false,
 		}
 	}
 

@@ -15,10 +15,11 @@
 use aghub_core::models::AgentType;
 use aghub_core::paths::find_project_root;
 use aghub_core::transfer::{
-	ensure_mcp_exists, ensure_skill_exists, ensure_sub_agent_exists,
-	reconcile_mcp, reconcile_skill, reconcile_sub_agent, transfer_mcp,
-	transfer_skill, transfer_sub_agent, InstallScope, InstallTarget,
-	OperationBatchResult, OperationBatchView, ResourceLocator,
+	ensure_disjoint, ensure_mcp_exists, ensure_skill_exists,
+	ensure_sub_agent_exists, reconcile_mcp, reconcile_skill,
+	reconcile_sub_agent, transfer_mcp, transfer_skill, transfer_sub_agent,
+	InstallScope, InstallTarget, OperationBatchResult, OperationBatchView,
+	ResourceLocator,
 };
 use anyhow::{bail, Result};
 use clap::Subcommand;
@@ -214,11 +215,14 @@ pub fn execute_reconcile(
 	// alone are non-destructive and run immediately (like `transfer`), unless
 	// --dry-run is asked for explicitly.
 	if args.dry_run || (!args.remove.is_empty() && !args.yes) {
-		// Validate the source BEFORE reporting a plan for it. The preview is
-		// the step an agent takes to decide whether to commit, so it has to
-		// fail on a name that does not exist rather than green-lighting it and
-		// leaving the discovery to the `--yes` run.
+		// Run the read-only preflights BEFORE reporting a plan. The preview is
+		// the step an agent takes to decide whether to commit, so anything the
+		// commit will refuse must be refused here too — otherwise the preview
+		// green-lights a plan that cannot execute and the caller only finds out
+		// on the `--yes` run. Two checks qualify: the source must exist, and
+		// the add/remove sets must be disjoint.
 		exists(&source)?;
+		ensure_disjoint(&args.add, &args.remove)?;
 		return render_dry_run(args, json);
 	}
 

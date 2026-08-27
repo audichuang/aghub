@@ -1026,6 +1026,11 @@ fn sync(args: SyncArgs) -> Result<()> {
 	}
 
 	if had_error {
+		// The view above already carries every per-action verdict, so a second
+		// error document after it would leave stdout holding TWO concatenated
+		// JSON documents and every parse of it failing. This path was missed
+		// when the other three were marked.
+		crate::note_answer_on_stdout();
 		bail!("one or more sync actions failed (see the results above)");
 	}
 	Ok(())
