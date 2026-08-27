@@ -14,6 +14,8 @@ pub fn execute(
 ) -> Result<()> {
 	match resource {
 		ResourceType::Skills => {}
+		// Unreachable from the CLI (clap rejects `mcps` at parse time via the
+		// narrowed `SkillResource`); kept because this fn takes `ResourceType`.
 		ResourceType::Mcps => bail!("`apply-update` only supports skills"),
 	}
 	if !yes {

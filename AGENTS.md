@@ -124,21 +124,45 @@ Non-obvious invariants:
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`, `source sync`,
   `source accept-rename`, reconcile-with-removals → **dry-run unless `--yes`**
   (`apply-update` refuses outright instead of printing a preview)
-- **Scope flags are mutually exclusive** (`-g` / `-p` / `--all`, clap-enforced) and
-  a generic mutation must resolve exactly ONE write scope: `--all` is rejected, and
-  `-p` with no project root bails BEFORE any write (it used to fall through and
-  write the global Master)
+- **Scope flags are mutually exclusive**, enforced MANUALLY in `main()` before
+  every dispatch (a clap `ArgGroup` does not propagate to `global = true` args —
+  so this is exit **1**, not clap's exit 2). A generic mutation must resolve
+  exactly ONE write scope: `--all` is rejected, and **`-p` with no project root
+  bails BEFORE anything happens — for reads too**, so `get`/`check`/`describe`
+  cannot answer `[]` from a non-project directory
 - **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
   needs `--verify-links`
-- **`check` is offline by default** — remote sources report `uncheckable/network`;
-  pass `--online` for a real update check
+- **`check` is offline by default** — remote sources report `uncheckable/network`
+  with `checked: false`; pass `--online` for a real update check. Its scope
+  follows the GLOBAL default, unlike `doctor`/`source list`/`source diff`, which
+  span both
+- **`source diff` ALWAYS fetches** (no offline mode); `--online` is accepted as a
+  no-op alias so the `check` habit does not become a clap error
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
 - Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 - **`skill-usage`**: Claude-global only; rejects project/`--all`
-- **`coverage`**: rejects `--all`; scope `-g` or `-p` only
+- **`coverage`**: rejects `--all`; scope `-g` or `-p` only. It is a static agent
+  CAPABILITY matrix — no skill names, no counts; use `doctor --verify-links` for
+  per-skill link state
+- **Narrowed resource args**: `check`/`apply-update` take skills ONLY and
+  `enable`/`disable` take mcps ONLY — enforced by their own clap value_enums, so
+  the rejection is a parse error naming the valid values. (`enable`/`disable
+skills` was dead for all 25 agents; core still refuses it for the API path.)
 - **`transfer`** / **`reconcile`**: cross-agent copy / reconcile of
-  skills·mcps·sub-agents (reconcile-with-removals is dry-run — see above)
-- **`inference`**: provider inventory + keyring keys + per-agent bindings/routing
+  skills·mcps·sub-agents (reconcile-with-removals is dry-run — see above).
+  `reconcile` needs at least one `--add`/`--remove`; `-a/--agent` is ignored
+- **`inference`**: provider inventory + keyring keys. Bindings/routing are
+  desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
+  reads the key from stdin; nothing else does
+- **`--json` failures are JSON too**: `{"error":{code,message,retryable}}` on
+  stdout, exit 1. `code` is `aghub_core::error_codes` — the SAME vocabulary the
+  HTTP API sends. clap usage errors stay exit 2 with prose
+- **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent`. Read
+  that, not `dry_run`/`executed` — those two cannot separate a refused preview
+  from an already-gone resource
+- **An unreadable lock fails the commands that report it** (`check`, `doctor`,
+  `source list`/`diff`). The lock read paths fail OPEN by design; those three
+  present lock contents AS their answer, so they probe first
 
 ## Skills Discovery
 

@@ -8,5 +8,14 @@ export type OperationResultDto = {
 	project_root: string | null;
 	action: OperationActionDto;
 	success: boolean;
+	/**
+	 * Duplicate of `success` under the name `core::batch`'s envelope rows use
+	 * (`AgentOpResultView.ok`). Both families serialize into an envelope with
+	 * identical top-level keys, so a client written against `row.ok` read
+	 * `undefined` here and scored every SUCCESS as a failure. Mirrors
+	 * `aghub_core::transfer::OperationResultView`, which
+	 * `dto_matches_shared_core_view_byte_for_byte` pins byte-for-byte.
+	 */
+	ok: boolean;
 	error: string | null;
 };

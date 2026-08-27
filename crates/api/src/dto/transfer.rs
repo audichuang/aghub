@@ -146,6 +146,13 @@ pub struct OperationResultDto {
 	pub project_root: Option<String>,
 	pub action: OperationActionDto,
 	pub success: bool,
+	/// Duplicate of `success` under the name `core::batch`'s envelope rows use
+	/// (`AgentOpResultView.ok`). Both families serialize into an envelope with
+	/// identical top-level keys, so a client written against `row.ok` read
+	/// `undefined` here and scored every SUCCESS as a failure. Mirrors
+	/// `aghub_core::transfer::OperationResultView`, which
+	/// `dto_matches_shared_core_view_byte_for_byte` pins byte-for-byte.
+	pub ok: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -161,6 +168,7 @@ impl From<OperationResult> for OperationResultDto {
 				.map(|path| path.to_string_lossy().to_string()),
 			action: value.action.into(),
 			success: value.success,
+			ok: value.success,
 			error: value.error,
 		}
 	}

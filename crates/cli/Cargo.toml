@@ -20,6 +20,7 @@ skill = { path = "../skill" }
 skill-update = { path = "../skill-update" }
 
 clap = { workspace = true }
+log = "0.4.31" # same version aghub-core/aghub-skill pin; already in the tree
 tabled = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }

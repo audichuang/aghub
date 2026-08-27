@@ -305,12 +305,20 @@ pub async fn delete_skill_by_path(
 
 	if !skill_dir.exists() {
 		// Idempotent: nothing on disk to remove.
-		return Ok(Json(DeleteSkillByPathResponse {
-			success: true,
-			dry_run: !req.confirm.unwrap_or(false),
-			deleted_path: Some(skill_dir.display().to_string()),
-			..Default::default()
-		}));
+		//
+		// Through the SHARED no-op seam, not a hand-built body. The hand-built
+		// one set `deleted_path: Some(skill_dir)` with `executed: false`, which
+		// contradicts that field's own contract ("only when `executed`; null
+		// otherwise") and tells the desktop a path was deleted that was never
+		// touched — it did not even exist. It also derived `dry_run` from
+		// `!confirm`, so a confirmed delete of an absent skill reported a
+		// dry-run. `noop_removal_response` gives this the same
+		// `outcome: "absent"` shape every other already-gone path uses.
+		return Ok(Json(super::noop_removal_response(
+			vec![],
+			vec![],
+			!req.confirm.unwrap_or(false),
+		)));
 	}
 
 	if let Some(plugin_name) = detect_plugin_for_path(&skill_dir).await {
@@ -475,12 +483,13 @@ pub async fn delete_skill_by_path(
 				shared_master_kept: false,
 			};
 			if dry_run {
-				return Ok(Json(delete_response_from_outcome(
+				return Ok(Json(super::removal_response(
 					aghub_core::skills::removal::RemovalOutcome {
 						plan,
 						executed: false,
 						prune: aghub_core::skills::removal::PruneStatus::NotRun,
 					},
+					dry_run,
 				)));
 			}
 			let report = match aghub_core::skills::removal::execute_removal(
@@ -508,12 +517,13 @@ pub async fn delete_skill_by_path(
 				resource_scope,
 				project_root.as_deref(),
 			);
-			return Ok(Json(delete_response_from_outcome(
+			return Ok(Json(super::removal_response(
 				aghub_core::skills::removal::RemovalOutcome {
 					plan: executed_plan,
 					executed: true,
 					prune,
 				},
+				dry_run,
 			)));
 		}
 
@@ -521,7 +531,7 @@ pub async fn delete_skill_by_path(
 		{
 			// `remove_skill_planned` already prunes the lock (core-owned seam) and
 			// records the status in `outcome.prune`; no route-level re-prune.
-			Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
+			Ok(outcome) => Ok(Json(super::removal_response(outcome, dry_run))),
 			Err(e) => Ok(Json(DeleteSkillByPathResponse {
 				success: false,
 				error: Some(format!("Failed to delete: {e}")),
@@ -600,52 +610,6 @@ fn get_skill_root(path: std::path::PathBuf) -> std::path::PathBuf {
 		get_parent_folder(path)
 	} else {
 		path
-	}
-}
-
-fn delete_response_from_outcome(
-	outcome: aghub_core::skills::removal::RemovalOutcome,
-) -> DeleteSkillByPathResponse {
-	DeleteSkillByPathResponse {
-		success: true,
-		dry_run: !outcome.executed,
-		executed: outcome.executed,
-		needs_confirm: outcome.plan.needs_confirm,
-		paths: outcome
-			.plan
-			.paths
-			.iter()
-			.map(|p| p.display().to_string())
-			.collect(),
-		skipped: outcome
-			.plan
-			.skipped
-			.iter()
-			.map(|p| p.display().to_string())
-			.collect(),
-		deleted_path: outcome
-			.executed
-			.then(|| {
-				outcome.plan.paths.first().map(|p| p.display().to_string())
-			})
-			.flatten(),
-		pruned_lock_entries: match &outcome.prune {
-			aghub_core::skills::removal::PruneStatus::NotRun => None,
-			aghub_core::skills::removal::PruneStatus::Pruned(keys) => {
-				Some(keys.clone())
-			}
-			aghub_core::skills::removal::PruneStatus::Failed {
-				pruned, ..
-			} => Some(pruned.clone()),
-		},
-		prune_error: match &outcome.prune {
-			aghub_core::skills::removal::PruneStatus::Failed {
-				reason, ..
-			} => Some(reason.clone()),
-			_ => None,
-		},
-		error: None,
-		validation_errors: None,
 	}
 }
 
@@ -1322,7 +1286,7 @@ pub async fn delete_skill(
 		{
 			// `remove_skill_planned` already prunes the lock and records the
 			// status in `outcome.prune`; no route-level re-prune.
-			Ok(outcome) => Ok(Json(delete_response_from_outcome(outcome))),
+			Ok(outcome) => Ok(Json(super::removal_response(outcome, dry_run))),
 			Err(ConfigError::ResourceNotFound { .. }) => {
 				Ok(Json(DeleteSkillByPathResponse {
 					success: true,

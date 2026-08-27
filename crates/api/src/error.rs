@@ -78,6 +78,11 @@ impl ApiError {
 
 impl From<ConfigError> for ApiError {
 	fn from(e: ConfigError) -> Self {
+		// The machine code comes from `aghub_core::error_codes`, the ONE place
+		// it is defined, so the CLI's `--json` errors and this response speak
+		// the same vocabulary. Only the HTTP status and the message wording are
+		// decided here — they are the genuinely transport-specific half.
+		let code = aghub_core::error_codes::wire_code(&e);
 		match e {
 			ConfigError::ResourceNotFound {
 				resource_type,
@@ -85,7 +90,7 @@ impl From<ConfigError> for ApiError {
 			} => ApiError::new(
 				Status::NotFound,
 				format!("{resource_type} '{name}' not found"),
-				"RESOURCE_NOT_FOUND",
+				code,
 			),
 			ConfigError::ResourceExists {
 				resource_type,
@@ -93,31 +98,25 @@ impl From<ConfigError> for ApiError {
 			} => ApiError::new(
 				Status::Conflict,
 				format!("{resource_type} '{name}' already exists"),
-				"RESOURCE_EXISTS",
+				code,
 			),
 			ConfigError::NotFound { path } => ApiError::new(
 				Status::NotFound,
 				format!("Config file not found: {}", path.display()),
-				"CONFIG_NOT_FOUND",
+				code,
 			),
-			ConfigError::UnsupportedOperation(msg) => ApiError::new(
-				Status::UnprocessableEntity,
-				msg,
-				"UNSUPPORTED_OPERATION",
-			),
-			ConfigError::ValidationFailed(msg) => ApiError::new(
-				Status::UnprocessableEntity,
-				msg,
-				"VALIDATION_FAILED",
-			),
-			ConfigError::InvalidConfig(msg) => {
-				ApiError::new(Status::BadRequest, msg, "INVALID_CONFIG")
+			ConfigError::UnsupportedOperation(msg) => {
+				ApiError::new(Status::UnprocessableEntity, msg, code)
 			}
-			ConfigError::Json(e) => ApiError::new(
-				Status::BadRequest,
-				e.to_string(),
-				"JSON_PARSE_ERROR",
-			),
+			ConfigError::ValidationFailed(msg) => {
+				ApiError::new(Status::UnprocessableEntity, msg, code)
+			}
+			ConfigError::InvalidConfig(msg) => {
+				ApiError::new(Status::BadRequest, msg, code)
+			}
+			ConfigError::Json(e) => {
+				ApiError::new(Status::BadRequest, e.to_string(), code)
+			}
 			// Skill mutation-lock contention arrives as `Io(WouldBlock)` — see
 			// `skill::lock::guard`, which is the only producer of that kind here.
 			// It is a RETRYABLE conflict, not a server fault: 500 `IO_ERROR` tells
@@ -128,17 +127,11 @@ impl From<ConfigError> for ApiError {
 			ConfigError::Io(e)
 				if e.kind() == std::io::ErrorKind::WouldBlock =>
 			{
-				ApiError::new(
-					Status::Conflict,
-					e.to_string(),
-					aghub_core::skills::lock::MUTATION_LOCK_BUSY_CODE,
-				)
+				ApiError::new(Status::Conflict, e.to_string(), code)
 			}
-			ConfigError::Io(e) => ApiError::new(
-				Status::InternalServerError,
-				e.to_string(),
-				"IO_ERROR",
-			),
+			ConfigError::Io(e) => {
+				ApiError::new(Status::InternalServerError, e.to_string(), code)
+			}
 		}
 	}
 }

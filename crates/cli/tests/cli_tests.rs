@@ -489,8 +489,11 @@ fn generic_mutations_reject_all_scope_before_writing() {
 			"changed",
 		],
 		&["--all", "delete", "skills", "blocked"],
-		&["--all", "enable", "skills", "blocked"],
-		&["--all", "disable", "skills", "blocked"],
+		// enable/disable take the narrowed `McpResource` (clap rejects
+		// `skills` at parse time — no agent supports it), so the scope guard
+		// has to be exercised through their real resource.
+		&["--all", "enable", "mcps", "blocked"],
+		&["--all", "disable", "mcps", "blocked"],
 	];
 
 	for args in cases {
@@ -3974,8 +3977,13 @@ fn inference_add_api_key_from_env() {
 
 #[test]
 fn inference_add_api_key_from_stdin() {
-	// With no --api-key and no env, a piped stdin key is used. Mirrors the
-	// resolve_api_key stdin branch.
+	// `--api-key -` reads the key from stdin.
+	//
+	// BEHAVIOUR CHANGE: stdin used to be read whenever it was not a tty, with
+	// no flag at all. That blocked to EOF on the open, idle pipe a
+	// non-interactive harness leaves on stdin — an infinite hang with no
+	// prompt, no output and no diagnostic. `-` makes the read explicit (the
+	// curl/gpg convention) and keeps the key off argv.
 	let data = tempfile::tempdir().unwrap();
 	let out = inference_cli(data.path())
 		.env_remove("AGHUB_INFERENCE_API_KEY")
@@ -3990,6 +3998,8 @@ fn inference_add_api_key_from_stdin() {
 			"anthropic",
 			"--api-base-url",
 			"https://api.example.com",
+			"--api-key",
+			"-",
 			"--json",
 		])
 		.write_stdin("sk-from-stdin-secret\n")
@@ -4919,8 +4929,8 @@ fn project_scope_mutation_without_project_root_fails_before_writing() {
 			"changed",
 		],
 		&["-p", "delete", "skills", "leaked"],
-		&["-p", "enable", "skills", "leaked"],
-		&["-p", "disable", "skills", "leaked"],
+		&["-p", "enable", "mcps", "leaked"],
+		&["-p", "disable", "mcps", "leaked"],
 	];
 
 	for args in cases {
@@ -6188,6 +6198,14 @@ fn skill_enable_disable_refuse_and_leave_mcp_config_alone() {
 	let original = "{\n  \"mcpServers\": {\n    \"demo\": {\n      \"command\": \"echo\",\n      \"args\": [\"hi\"],\n      \"customField\": \"keepme\"\n    }\n  }\n}\n";
 	std::fs::write(&mcp_path, original).unwrap();
 
+	// The refusal now happens EARLIER than it used to: `enable`/`disable` take
+	// the narrowed `McpResource`, so clap rejects `skills` at parse time with an
+	// exact `[possible values: mcps]` instead of letting the request reach core
+	// for an "Unsupported operation" bail. Core's refusal is still the one that
+	// protects `.mcp.json` and is still reachable through the API routes —
+	// `disable_skill_refuses_and_leaves_the_mcp_config_untouched` in
+	// `core/src/manager/skill.rs` pins it. What this test now pins is that the
+	// CLI never advertises the dead form at all, and still touches nothing.
 	for verb in ["disable", "enable"] {
 		let out = isolated_cli(home.path(), state.path())
 			.args(["-g", "-a", "claude", verb, "skills", "verbs"])
@@ -6198,9 +6216,16 @@ fn skill_enable_disable_refuse_and_leave_mcp_config_alone() {
 			!out.status.success(),
 			"`{verb} skills` must fail, not report a success it cannot deliver"
 		);
+		assert_eq!(
+			out.status.code(),
+			Some(2),
+			"it must be a clap usage error, caught before any work: {stderr}"
+		);
 		assert!(
-			stderr.contains("Unsupported operation"),
-			"`{verb} skills` must say it is unsupported, got: {stderr}"
+			stderr.contains("invalid value 'skills'")
+				&& stderr.contains("[possible values: mcps]"),
+			"`{verb}` must not advertise a resource no agent supports: \
+			 {stderr}"
 		);
 		assert_eq!(
 			std::fs::read_to_string(&mcp_path).unwrap(),
@@ -6261,5 +6286,1031 @@ fn check_and_prune_lock_print_human_output_by_default() {
 	assert!(
 		ptext.contains("No orphaned lock entries."),
 		"prune-lock must say so in words, not as {{\"pruned\": []}}: {ptext}"
+	);
+}
+
+// ==================== agent-operability regressions (2026-08-27 audit) ====
+
+/// `add skills` on a name that is already installed must report the SKILL AS
+/// IT IS ON DISK, not echo the request back.
+///
+/// The regression: two branches of `add_skill_universal` were idempotent no-ops
+/// that returned a bare `Ok(())`, so the CLI built its payload from the request
+/// and hard-coded `already_installed: false`. Re-running `add` with a corrected
+/// `--description` printed "added skill", serialized the NEW description, and
+/// exited 0 while the Master on disk kept the OLD one. Re-running `add` with
+/// fixed metadata is a standard scripted repair, so an agent was told its write
+/// had landed when nothing was written.
+#[cfg(unix)]
+#[test]
+fn readd_existing_skill_reports_already_installed_and_keeps_disk_content() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let first = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "dup", "-d", "first desc"])
+		.output()
+		.unwrap();
+	assert!(
+		first.status.success(),
+		"first add must succeed: {}",
+		String::from_utf8_lossy(&first.stderr)
+	);
+
+	let second = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"--json",
+			"add",
+			"skills",
+			"--name",
+			"dup",
+			"-d",
+			"SECOND desc",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		second.status.success(),
+		"an idempotent re-add stays a success: {}",
+		String::from_utf8_lossy(&second.stderr)
+	);
+
+	let json: Value = serde_json::from_slice(&second.stdout)
+		.expect("add --json must emit JSON");
+	assert_eq!(
+		json["already_installed"], true,
+		"a re-add that wrote nothing must say so: {json}"
+	);
+	assert_eq!(
+		json["description"], "first desc",
+		"the payload must carry the on-disk description, not the requested \
+		 one: {json}"
+	);
+
+	let master = project.path().join(".agents/skills/dup/SKILL.md");
+	let body = std::fs::read_to_string(&master).unwrap();
+	assert!(
+		body.contains("description: first desc"),
+		"the Master must be untouched: {body}"
+	);
+	assert!(
+		!body.contains("SECOND desc"),
+		"the re-add must not have rewritten the Master: {body}"
+	);
+
+	let stderr = String::from_utf8_lossy(&second.stderr);
+	assert!(
+		stderr.contains("nothing was written"),
+		"a human must be told the add was a no-op: {stderr}"
+	);
+}
+
+/// A config file that EXISTS but does not parse must fail every command, not be
+/// treated as an absent one.
+///
+/// The regression: `main.rs` picked which load errors to tolerate by matching
+/// on the COMMAND (`Add`/`Check`/`PruneLock`/`Delete`) and ignored the error
+/// KIND. `delete --yes` then found `config().is_none()`, mapped it to the
+/// idempotent-delete no-op, and printed `{"success":true,"executed":false}` on
+/// exit 0 — while the entry it claimed to have handled was still in the file.
+#[cfg(unix)]
+#[test]
+fn malformed_agent_config_fails_delete_instead_of_reporting_success() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	// Valid JSON followed by a stray token: parses far enough to be obviously
+	// a real config, then fails.
+	let mcp_path = project.path().join(".mcp.json");
+	let malformed =
+		r#"{ "mcpServers": { "keepme": { "command": "echo" } } } OOPS"#;
+	std::fs::write(&mcp_path, malformed).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "--json", "delete", "mcps", "keepme", "--yes"])
+		.output()
+		.unwrap();
+
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		!out.status.success(),
+		"a delete against an unparseable config must fail, not report a \
+		 no-op success: stdout={} stderr={stderr}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	assert!(
+		stderr.contains("parse"),
+		"the failure must name the parse problem: {stderr}"
+	);
+	assert_eq!(
+		std::fs::read_to_string(&mcp_path).unwrap(),
+		malformed,
+		"the malformed config must be left exactly as it was"
+	);
+
+	// `add` shares the same tolerate-missing path.
+	let added = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "mcps", "--name", "other", "-c", "echo"])
+		.output()
+		.unwrap();
+	assert!(
+		!added.status.success(),
+		"add must not silently start from a blank config either: {}",
+		String::from_utf8_lossy(&added.stdout)
+	);
+}
+
+/// `-p` with no project root must fail on READ commands too, not answer `[]`.
+///
+/// The regression: the project-root guard only ran for `ScopePolicy::
+/// SingleWrite`, so `-p get skills --json` from a non-project directory printed
+/// `[]` on exit 0 with an empty stderr — byte-identical, on all three channels,
+/// to a real project holding no skills. `coverage`, `doctor`, `source list` and
+/// `prune-lock` already bailed, and `describe` blamed the resource name for a
+/// missing project.
+#[cfg(unix)]
+#[test]
+fn project_scope_without_project_root_fails_on_read_commands_too() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// No agent marker anywhere in this tree.
+	let nowhere = tempfile::TempDir::new().unwrap();
+
+	let cases: &[&[&str]] = &[
+		&["-p", "--json", "get", "skills"],
+		&["-p", "--json", "get", "mcps"],
+		&["-p", "--json", "check", "skills"],
+		&["-p", "describe", "skills", "anything"],
+	];
+
+	for args in cases {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(nowhere.path())
+			.args(*args)
+			.output()
+			.unwrap();
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			!out.status.success(),
+			"{args:?} must not report an empty world when there is no \
+			 project: stdout={stdout}"
+		);
+		assert!(
+			stderr.contains("no project root found"),
+			"{args:?} must blame the missing project, not the resource: \
+			 {stderr}"
+		);
+	}
+
+	// The read-only both-scopes path must still work with no project root.
+	let both = isolated_cli(home.path(), state.path())
+		.current_dir(nowhere.path())
+		.args(["--all", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+	assert!(
+		both.status.success(),
+		"--all must still span whatever scopes exist: {}",
+		String::from_utf8_lossy(&both.stderr)
+	);
+}
+
+/// `reconcile` must reject an empty target set, and its preview must validate
+/// the source instead of echoing argv.
+///
+/// The regression: with neither `--add` nor `--remove`, it fell through to an
+/// empty batch and printed `{"success_count":0,"failed_count":0,"results":[]}`
+/// on exit 0 — and `--agent` is exactly where a caller lands, because clap's
+/// own "a similar argument exists: '--agent'" tip for a mistyped `--agents`
+/// points there while the usage line never mentions `--add`. Separately, the
+/// dry-run was a pure echo, so a `--name` that does not exist was green-lit and
+/// only failed on the `--yes` run.
+#[cfg(unix)]
+#[test]
+fn reconcile_rejects_empty_target_set_and_validates_source_in_preview() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "present", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+
+	// No --add / --remove: a usage error, not a successful no-op.
+	let empty = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"present",
+			"--agent",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&empty.stderr);
+	assert!(
+		!empty.status.success(),
+		"a reconcile with no target must fail: stdout={}",
+		String::from_utf8_lossy(&empty.stdout)
+	);
+	assert!(
+		stderr.contains("--add") && stderr.contains("--remove"),
+		"the error must name the flags that actually pick targets: {stderr}"
+	);
+
+	// A preview for a source that does not exist must fail HERE.
+	let absent = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"totally-absent",
+			"--remove",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!absent.status.success(),
+		"a preview must not green-light a missing source: stdout={}",
+		String::from_utf8_lossy(&absent.stdout)
+	);
+	assert!(
+		String::from_utf8_lossy(&absent.stderr).contains("not found"),
+		"the preview must report the missing resource: {}",
+		String::from_utf8_lossy(&absent.stderr)
+	);
+
+	// A preview for a source that DOES exist still previews (no over-reach).
+	let ok = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"present",
+			"--remove",
+			"opencode",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		ok.status.success(),
+		"an existing source must still preview: {}",
+		String::from_utf8_lossy(&ok.stderr)
+	);
+	let json: Value = serde_json::from_slice(&ok.stdout).unwrap();
+	assert_eq!(json["dry_run"], true, "the preview must say so: {json}");
+}
+
+/// `source accept-rename` without `--yes` must emit JSON under `--json`, and
+/// must validate the lock BEFORE reporting a plan.
+///
+/// The regression: the dry-run branch was `println!` prose + `return Ok(())`
+/// and never read `args.json` — a destructive command's DEFAULT path emitting
+/// unparseable text on exit 0. A strict parser sees a crash on the success
+/// path; a lenient one concludes the rename was committed. The lock read and
+/// the degenerate-name guard also sat AFTER that return, so the preview green-lit
+/// a name that is not in the lock at all.
+#[cfg(unix)]
+#[test]
+fn accept_rename_preview_validates_lock_and_honours_json() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// Nothing is in the lock, so the preview must fail — not print a plan.
+	let absent = isolated_cli(home.path(), state.path())
+		.args(["--json", "source", "accept-rename", "ghost", "ghost-new"])
+		.output()
+		.unwrap();
+	assert!(
+		!absent.status.success(),
+		"the preview must not plan a rename of a name that is not locked: \
+		 stdout={}",
+		String::from_utf8_lossy(&absent.stdout)
+	);
+
+	// A degenerate rename must also be refused before any plan is printed.
+	let same = isolated_cli(home.path(), state.path())
+		.args(["--json", "source", "accept-rename", "same", "same"])
+		.output()
+		.unwrap();
+	assert!(
+		!same.status.success(),
+		"a degenerate rename must be refused in the preview: stdout={}",
+		String::from_utf8_lossy(&same.stdout)
+	);
+
+	// Whatever the outcome, the preview must never print prose under --json.
+	for out in [&absent, &same] {
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		assert!(
+			stdout.trim().is_empty()
+				|| serde_json::from_str::<Value>(&stdout).is_ok(),
+			"accept-rename must not emit prose on stdout under --json: \
+			 {stdout}"
+		);
+	}
+}
+
+/// An unreadable skill lock must fail the read-only commands that REPORT its
+/// contents, not read as an empty one.
+///
+/// The regression: both lock read paths fail OPEN to an empty lock (deliberate —
+/// one corrupt file must not break every query) and announced it only through
+/// `log::warn!`. Nothing in this workspace installed a logger outside its own
+/// tests, so the warning went to the no-op logger. `check skills`, `source list`
+/// and `doctor` therefore answered `[]` on exit 0 with an EMPTY stderr for a
+/// lock full of entries they could not parse — and `doctor` classified the
+/// still-present skills `untracked` and printed remediation saying to delete
+/// them.
+#[cfg(unix)]
+#[test]
+fn unreadable_lock_fails_the_commands_that_report_it() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "alpha", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+
+	let lock = project.path().join("skills-lock.json");
+	let corrupt = "not json at all";
+	std::fs::write(&lock, corrupt).unwrap();
+
+	let reporters: &[&[&str]] = &[
+		&["-p", "--json", "check", "skills"],
+		&["-p", "--json", "source", "list"],
+		&["-p", "--json", "doctor"],
+	];
+	for args in reporters {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args(*args)
+			.output()
+			.unwrap();
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			!out.status.success(),
+			"{args:?} must not report a clean world for an unreadable lock: \
+			 stdout={stdout}"
+		);
+		assert!(
+			stderr.contains("could not be read"),
+			"{args:?} must say the lock is unreadable: {stderr}"
+		);
+		// A read-only command must NOT claim it was about to write.
+		assert!(
+			!stderr.contains("refusing to overwrite"),
+			"{args:?} is read-only; its error must not imply a write: {stderr}"
+		);
+	}
+
+	assert_eq!(
+		std::fs::read_to_string(&lock).unwrap(),
+		corrupt,
+		"none of the read-only commands may touch the lock"
+	);
+
+	// An ABSENT lock is still a legitimate empty answer, not an error.
+	std::fs::remove_file(&lock).unwrap();
+	let absent = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "--json", "check", "skills"])
+		.output()
+		.unwrap();
+	assert!(
+		absent.status.success(),
+		"a missing lock must stay an empty success: {}",
+		String::from_utf8_lossy(&absent.stderr)
+	);
+}
+
+/// Under `--json`, a failure must be machine-readable too — and must never
+/// append a SECOND JSON document after a payload that already reported it.
+///
+/// The regression: `fn main() -> anyhow::Result<()>` let anyhow print every
+/// error, so `--json` failures put nothing on stdout and one line of English on
+/// stderr. Policy refusals, missing resources, invalid agent ids and real write
+/// failures were all exit 1, separable only by matching prose that is neither
+/// stable nor consistent (`describe` said `Skill 'x' not found` where every
+/// other command said `Resource not found: skill 'x'`).
+#[cfg(unix)]
+#[test]
+fn json_mode_reports_failures_as_json_with_a_shared_code() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	// A core ConfigError must carry the SHARED code the HTTP API sends.
+	let missing = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "--json", "describe", "skills", "ghost"])
+		.output()
+		.unwrap();
+	assert!(!missing.status.success());
+	let json: Value = serde_json::from_slice(&missing.stdout).expect(
+		"a --json failure must put a parseable document on stdout, not just \
+		 prose on stderr",
+	);
+	assert_eq!(
+		json["error"]["code"], "RESOURCE_NOT_FOUND",
+		"the code must come from the shared vocabulary: {json}"
+	);
+	assert_eq!(json["error"]["retryable"], false, "{json}");
+	assert!(
+		json["error"]["message"].as_str().unwrap().contains("ghost"),
+		"the message must name the resource: {json}"
+	);
+
+	// Same condition through a different command: same code AND same wording.
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "real", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+	let via_disable = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		// codex supports MCP enable/disable, so this reaches the
+		// not-found path rather than an unsupported-operation refusal.
+		.args(["-p", "-a", "codex", "--json", "disable", "mcps", "ghost"])
+		.output()
+		.unwrap();
+	let dj: Value = serde_json::from_slice(&via_disable.stdout).unwrap();
+	assert_eq!(dj["error"]["code"], json["error"]["code"]);
+	// Same shape of wording ("Resource not found: <kind> '<name>'") for the
+	// same condition; the kind differs because the commands take different
+	// resources. `describe` used to say "Skill 'x' not found" instead, so a
+	// matcher tuned to one missed the other entirely.
+	let msg = dj["error"]["message"].as_str().unwrap();
+	assert!(
+		msg.starts_with("Resource not found:") && msg.contains("ghost"),
+		"one condition must have one wording shape across commands: {msg}"
+	);
+
+	// A CLI-authored refusal is still machine-readable, and honest about having
+	// no finer classification.
+	let refused = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "--json", "apply-update", "skills", "real"])
+		.output()
+		.unwrap();
+	assert!(!refused.status.success());
+	let rj: Value = serde_json::from_slice(&refused.stdout)
+		.expect("a policy refusal must be JSON too");
+	assert_eq!(rj["error"]["code"], "CLI_ERROR", "{rj}");
+
+	// Without --json the failure stays prose on stderr, stdout untouched.
+	let prose = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "describe", "skills", "ghost"])
+		.output()
+		.unwrap();
+	assert!(prose.stdout.is_empty(), "no JSON without --json");
+	assert!(String::from_utf8_lossy(&prose.stderr).contains("ghost"));
+}
+
+/// An invalid `--agent` must fail the SAME way on every command.
+///
+/// The regression: `AgentSelection::parse` ran after eight early dispatches, so
+/// `-a bogus` exited 1 on `get`/`check`/`prune-lock`/`delete` and exited 0 —
+/// silently ignoring the typo — on `coverage`/`doctor`/`source list`/
+/// `skill-usage`. `doctor` and `doctor --verify-links`, the same subcommand,
+/// disagreed. No command could be used to validate an id before a write.
+#[cfg(unix)]
+#[test]
+fn invalid_agent_id_fails_consistently_across_commands() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let commands: &[&[&str]] = &[
+		&["get", "skills"],
+		&["check", "skills"],
+		&["prune-lock"],
+		&["coverage"],
+		&["doctor"],
+		&["doctor", "--verify-links"],
+		&["source", "list"],
+		&["skill-usage"],
+	];
+
+	for args in commands {
+		let mut argv = vec!["-a", "definitely-not-an-agent"];
+		argv.extend_from_slice(args);
+		let out = isolated_cli(home.path(), state.path())
+			.args(&argv)
+			.output()
+			.unwrap();
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			!out.status.success(),
+			"{args:?} must reject an unknown agent id instead of ignoring it: \
+			 stdout={}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert!(
+			stderr.contains("unknown agent"),
+			"{args:?} must name the problem: {stderr}"
+		);
+	}
+
+	// A VALID id must still be accepted (and ignored where it has no meaning).
+	for args in commands {
+		let mut argv = vec!["-a", "codex"];
+		argv.extend_from_slice(args);
+		let out = isolated_cli(home.path(), state.path())
+			.args(&argv)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"{args:?} must still accept a valid agent id: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+}
+
+/// A preview, a real removal and an already-absent resource must be three
+/// distinguishable answers in the JSON.
+///
+/// The regression: `RemovalView::dry_run` was `!outcome.executed`, so
+/// `delete skills nope -y --json` and `delete skills nope --json` produced
+/// BYTE-IDENTICAL documents — both `{success:true, dry_run:true,
+/// executed:false, …}`. The human renderer told them apart perfectly ("nothing
+/// to remove" vs "would remove … re-run with --yes"); only the machine shape
+/// could not. A caller that passed `--yes` and read `dry_run: true` can only
+/// conclude its confirmation was ignored, so it retries — and nothing ever
+/// contradicts that, because the world is already in the requested state.
+#[cfg(unix)]
+#[test]
+fn delete_json_distinguishes_preview_removed_and_absent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let delete = |args: &[&str]| -> Value {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args(args)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"{args:?} must succeed: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		serde_json::from_slice(&out.stdout)
+			.unwrap_or_else(|e| panic!("{args:?} must emit JSON: {e}"))
+	};
+
+	// Absent + confirmed: nothing to do, and NOT a dry-run.
+	let absent =
+		delete(&["-p", "--json", "delete", "skills", "ghost", "--yes"]);
+	assert_eq!(absent["outcome"], "absent", "{absent}");
+	assert_eq!(
+		absent["dry_run"], false,
+		"a confirmed request is not a dry-run just because there was nothing \
+		 to do: {absent}"
+	);
+
+	// Absent + unconfirmed: a preview.
+	let preview = delete(&["-p", "--json", "delete", "skills", "ghost"]);
+	assert_eq!(preview["outcome"], "preview", "{preview}");
+	assert_eq!(preview["dry_run"], true, "{preview}");
+
+	// The two must not serialize identically — that is the whole defect.
+	assert_ne!(
+		absent, preview,
+		"an already-absent resource and a refused preview must differ"
+	);
+
+	// A real removal is the third answer.
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "skills", "--name", "doomed", "-d", "d"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+	let removed =
+		delete(&["-p", "--json", "delete", "skills", "doomed", "--yes"]);
+	assert_eq!(removed["outcome"], "removed", "{removed}");
+	assert_eq!(removed["executed"], true, "{removed}");
+	assert_eq!(removed["dry_run"], false, "{removed}");
+
+	// MCP delete shares the seam, and its `paths` is deliberately always empty
+	// (root AGENTS.md MCP removal contract) — so `outcome` is the ONLY thing
+	// that can tell its three cases apart.
+	let mcp_absent =
+		delete(&["-p", "--json", "delete", "mcps", "ghost", "--yes"]);
+	let mcp_preview = delete(&["-p", "--json", "delete", "mcps", "ghost"]);
+	assert_eq!(mcp_absent["outcome"], "absent", "{mcp_absent}");
+	assert_eq!(mcp_preview["outcome"], "preview", "{mcp_preview}");
+	assert_ne!(mcp_absent, mcp_preview);
+}
+
+/// A batch of agent-facing fixes that each turned a wrong or unusable answer
+/// into an honest one. Grouped because each is a one-line assertion over a
+/// distinct command; splitting them would add five near-identical fixtures.
+#[cfg(unix)]
+#[test]
+fn agent_facing_message_and_flag_fixes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// A8: `source sync --yes` with no action flag must REFUSE, before any
+	// network work. It used to fall through to the no-action overview: exit 0,
+	// no `dryRun` key, and a third payload shape, so a consumer keyed on
+	// `dryRun == false` read it as "the install was applied".
+	let no_action = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "source", "sync", "owner/repo", "--yes"])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&no_action.stderr);
+	assert!(
+		!no_action.status.success(),
+		"`source sync --yes` with no action flag must refuse: stdout={}",
+		String::from_utf8_lossy(&no_action.stdout)
+	);
+	assert!(
+		stderr.contains("--install-missing") && stderr.contains("--update"),
+		"the refusal must name the flags that make it a write: {stderr}"
+	);
+	assert!(
+		!stderr.contains("credential"),
+		"it must fail on the flag combination, not after a network attempt: \
+		 {stderr}"
+	);
+
+	// C1: the `-a all` rejection must match the `-a` long help. It used to say
+	// "supports only 'get'", contradicting both the help and the behaviour, and
+	// its suggested remedy (a comma list) is itself rejected by this command.
+	let all_rejected = isolated_cli(home.path(), state.path())
+		.args(["-a", "all", "check", "skills"])
+		.output()
+		.unwrap();
+	let msg = String::from_utf8_lossy(&all_rejected.stderr);
+	assert!(!all_rejected.status.success());
+	assert!(
+		msg.contains("doctor --verify-links") && msg.contains("source sync"),
+		"the message must list every command that DOES accept `all`: {msg}"
+	);
+	assert!(
+		!msg.contains("comma-separated list"),
+		"it must not suggest a list this command also rejects: {msg}"
+	);
+
+	// B10: `source diff --online` must parse. It exists only because
+	// `check --online` does, so a caller reasonably tries it here; clap's
+	// exit-2 "to pass '--online' as a value" tip reads like a quoting problem.
+	let diff_online = isolated_cli(home.path(), state.path())
+		.args(["source", "diff", "owner/repo", "--online"])
+		.output()
+		.unwrap();
+	assert_ne!(
+		diff_online.status.code(),
+		Some(2),
+		"--online must not be a clap usage error: {}",
+		String::from_utf8_lossy(&diff_online.stderr)
+	);
+
+	// B9: stdin is read ONLY for `--api-key -`. It used to be read whenever
+	// stdin was not a tty, which blocked to EOF on the open, idle pipe a
+	// non-interactive harness leaves behind — no prompt, no output, no
+	// diagnostic. (assert_cmd cannot hold a pipe open without writing, so the
+	// hang itself is not reproducible here; what IS pinned is the contract that
+	// replaced it: no `-`, no stdin read.)
+	let add_args = [
+		"--json",
+		"inference",
+		"add",
+		"--latin-name",
+		"pp",
+		"--display-name",
+		"PP",
+		"--format",
+		"anthropic",
+		"--api-base-url",
+		"https://example.invalid/v1",
+	];
+
+	// Without `-`, a key on stdin must be IGNORED, and the run must fail fast
+	// with the actionable missing-key error rather than silently consuming it.
+	let ignored = isolated_cli(home.path(), state.path())
+		.env("AGHUB_DATA_DIR", state.path().join("data"))
+		.args(add_args)
+		.write_stdin("would-have-been-swallowed\n")
+		.output()
+		.unwrap();
+	assert!(
+		!ignored.status.success(),
+		"stdin must not be consulted without `--api-key -`: stdout={}",
+		String::from_utf8_lossy(&ignored.stdout)
+	);
+	let combined = format!(
+		"{}{}",
+		String::from_utf8_lossy(&ignored.stdout),
+		String::from_utf8_lossy(&ignored.stderr)
+	);
+	assert!(
+		combined.contains("api key"),
+		"the failure must name the missing key and how to supply it: \
+		 {combined}"
+	);
+}
+
+/// GOLDEN CONTRACT: the top-level `--json` key set of every command an agent
+/// parses, pinned exactly.
+///
+/// This is the test the audit found missing, and the reason the wire shape could
+/// drift freely: the only key-level assertions that existed pinned individual
+/// commands in OPPOSITE directions (`cli_tests` requires `delete` to use
+/// `dry_run` and to NOT contain `dryRun`, while requiring `prune-lock` to use
+/// `dryRun`), so the divergence was locked in from both sides and nothing
+/// watched the surface as a whole.
+///
+/// The casing split is DELIBERATE and documented in root `--help`: each command
+/// mirrors the API/desktop DTO it shares a wire shape with, so unifying it means
+/// changing those DTOs and the frontend, not the CLI. What must not happen is
+/// silent drift — a key renamed, added or dropped without anyone deciding to.
+///
+/// When you intentionally change a payload, update the expectation here in the
+/// same commit. If that feels annoying, that is the point: it is a wire
+/// contract that agents and the desktop both parse.
+#[cfg(unix)]
+#[test]
+fn json_payload_key_sets_are_pinned() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	let run = |args: &[&str]| -> std::process::Output {
+		isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args(args)
+			.output()
+			.unwrap()
+	};
+
+	// Seed one skill and one MCP so the list/describe payloads are non-empty.
+	assert!(run(&["-p", "add", "skills", "--name", "pinned", "-d", "d"])
+		.status
+		.success());
+	assert!(
+		run(&["-p", "add", "mcps", "-n", "pinned-mcp", "-c", "echo"])
+			.status
+			.success()
+	);
+
+	/// Sorted top-level keys of a JSON object, or of the FIRST element when the
+	/// payload is an array (every array payload here is homogeneous).
+	fn keys(stdout: &[u8]) -> Vec<String> {
+		let json: Value = serde_json::from_slice(stdout).unwrap_or_else(|e| {
+			panic!(
+				"payload must be JSON: {e}\n{}",
+				String::from_utf8_lossy(stdout)
+			)
+		});
+		let obj = match &json {
+			Value::Array(items) => match items.first() {
+				Some(first) => first.clone(),
+				// An empty array pins nothing; the cases below all produce rows.
+				None => panic!("payload array was empty"),
+			},
+			other => other.clone(),
+		};
+		let mut ks: Vec<String> = obj
+			.as_object()
+			.expect("payload must be an object (or array of objects)")
+			.keys()
+			.cloned()
+			.collect();
+		ks.sort();
+		ks
+	}
+
+	let cases: &[(&[&str], &[&str])] = &[
+		(
+			&["-p", "--json", "get", "skills"],
+			&[
+				"already_installed",
+				"author",
+				"canonical_path",
+				"description",
+				"enabled",
+				"name",
+				"native_reader",
+				"source_path",
+				"tools",
+				"version",
+			],
+		),
+		(
+			&["-p", "--json", "describe", "skills", "pinned"],
+			&[
+				"already_installed",
+				"author",
+				"canonical_path",
+				"description",
+				"enabled",
+				"name",
+				"native_reader",
+				"source_path",
+				"tools",
+				"version",
+			],
+		),
+		(
+			// snake_case + the three-way `outcome`. NOTE the absence of
+			// `pruned_lock_entries`: a delete PREVIEW does not disclose the
+			// scope-wide lock prune that a committed delete performs, so the
+			// preview cannot tell you which OTHER skills' lock entries the
+			// commit will drop. Pinned here so that asymmetry is a stated
+			// contract rather than a surprise; the committed shape is pinned
+			// separately below.
+			&["-p", "--json", "delete", "skills", "pinned"],
+			&[
+				"deleted_path",
+				"dry_run",
+				"executed",
+				"name",
+				"needs_confirm",
+				"outcome",
+				"paths",
+				"skipped",
+				"success",
+				"type",
+			],
+		),
+		(
+			// camelCase — mirrors the api `PruneLockResponse` the desktop reads.
+			&["-p", "--json", "prune-lock"],
+			&["dryRun", "pruned"],
+		),
+		(
+			// snake_case, and every row must be self-describing about agent.
+			&["-p", "--json", "coverage"],
+			&[
+				"auto_covered",
+				"id",
+				"needs_link",
+				"reads_master",
+				"scope",
+				"supported",
+				"writes_master",
+			],
+		),
+		(
+			// A failure payload: one shape for every command.
+			&["-p", "--json", "describe", "skills", "no-such-skill"],
+			&["error"],
+		),
+	];
+
+	for (args, expected) in cases {
+		let out = run(args);
+		let got = keys(&out.stdout);
+		assert_eq!(
+			got,
+			expected.iter().map(|k| k.to_string()).collect::<Vec<_>>(),
+			"{args:?} top-level keys drifted"
+		);
+	}
+
+	// The COMMITTED delete shape: same keys plus `pruned_lock_entries`, which
+	// only a real removal emits (see the preview note above).
+	assert!(run(&["-p", "add", "skills", "--name", "doomed", "-d", "d"])
+		.status
+		.success());
+	let committed =
+		run(&["-p", "--json", "delete", "skills", "doomed", "--yes"]);
+	assert!(committed.status.success());
+	assert_eq!(
+		keys(&committed.stdout),
+		[
+			"deleted_path",
+			"dry_run",
+			"executed",
+			"name",
+			"needs_confirm",
+			"outcome",
+			"paths",
+			"pruned_lock_entries",
+			"skipped",
+			"success",
+			"type",
+		]
+		.iter()
+		.map(|k| k.to_string())
+		.collect::<Vec<_>>(),
+		"a committed delete additionally reports the lock keys it pruned"
+	);
+
+	// The failure object's own keys are part of the contract.
+	let failure = run(&["-p", "--json", "describe", "skills", "no-such-skill"]);
+	let json: Value = serde_json::from_slice(&failure.stdout).unwrap();
+	let mut err_keys: Vec<&str> = json["error"]
+		.as_object()
+		.unwrap()
+		.keys()
+		.map(|k| k.as_str())
+		.collect();
+	err_keys.sort();
+	assert_eq!(err_keys, vec!["code", "message", "retryable"]);
+
+	// The multi-agent envelope, and the row carrying BOTH success predicates.
+	let batch = run(&[
+		"-p",
+		"-a",
+		"claude,codex",
+		"--json",
+		"add",
+		"skills",
+		"--name",
+		"fanned",
+		"-d",
+		"d",
+	]);
+	assert!(
+		batch.status.success(),
+		"fan-out must succeed: {}",
+		String::from_utf8_lossy(&batch.stderr)
+	);
+	let env: Value = serde_json::from_slice(&batch.stdout).unwrap();
+	let mut env_keys: Vec<&str> = env
+		.as_object()
+		.unwrap()
+		.keys()
+		.map(|k| k.as_str())
+		.collect();
+	env_keys.sort();
+	assert_eq!(env_keys, vec!["failed_count", "results", "success_count"]);
+	let row = &env["results"][0];
+	assert!(row["agent"].is_string(), "every row names its agent: {row}");
+	assert!(row["ok"].is_boolean(), "row must carry `ok`: {row}");
+
+	// transfer/reconcile share the envelope but a DIFFERENT row struct, whose
+	// success predicate was `success` only — a parser written against `ok`
+	// scored every successful row as a failure. Both names now appear.
+	let reconciled = run(&[
+		"-p",
+		"--json",
+		"reconcile",
+		"skill",
+		"--from-agent",
+		"claude",
+		"--name",
+		"fanned",
+		"--add",
+		"opencode",
+	]);
+	assert!(
+		reconciled.status.success(),
+		"reconcile must succeed: {}",
+		String::from_utf8_lossy(&reconciled.stderr)
+	);
+	let rv: Value = serde_json::from_slice(&reconciled.stdout).unwrap();
+	let rrow = &rv["results"][0];
+	assert_eq!(
+		rrow["ok"], rrow["success"],
+		"both success predicates must be present and agree: {rrow}"
 	);
 }

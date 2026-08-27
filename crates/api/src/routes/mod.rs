@@ -32,11 +32,21 @@ use crate::extractors::{AgentParam, ResolvedScope};
 /// executed/needs_confirm/paths/skipped/deleted_path) and the PathBuf->String
 /// derivation live in `aghub_core::dto::RemovalView`; this layers the api-only
 /// lock-prune fields on top (always None for MCP/sub-agent, which never prune).
+/// `requested_dry_run` is the CALLER's intent — `!confirm` for every delete
+/// route here. It must be passed in, not inferred from `!outcome.executed`:
+/// inferring it reported `dry_run: true` for a CONFIRMED delete whose target was
+/// already absent, which reads as "your request was not carried out" when it was
+/// in fact already satisfied, and made an already-gone resource serialize
+/// identically to a refused preview.
 pub(crate) fn removal_response(
 	outcome: RemovalOutcome,
+	requested_dry_run: bool,
 ) -> DeleteSkillByPathResponse {
 	let mut response = DeleteSkillByPathResponse::from(
-		&aghub_core::dto::RemovalView::from(&outcome),
+		&aghub_core::dto::RemovalView::from_outcome(
+			&outcome,
+			requested_dry_run,
+		),
 	);
 	let (pruned_lock_entries, prune_error) = match outcome.prune {
 		PruneStatus::NotRun => (None, None),
@@ -56,18 +66,22 @@ pub(crate) fn removal_response(
 pub(crate) fn noop_removal_response(
 	paths: Vec<PathBuf>,
 	skipped: Vec<PathBuf>,
+	requested_dry_run: bool,
 ) -> DeleteSkillByPathResponse {
-	removal_response(RemovalOutcome {
-		plan: aghub_core::skills::removal::RemovalPlan {
-			layout: aghub_core::skills::removal::Layout::Copy,
-			paths,
-			skipped,
-			needs_confirm: false,
-			shared_master_kept: false,
+	removal_response(
+		RemovalOutcome {
+			plan: aghub_core::skills::removal::RemovalPlan {
+				layout: aghub_core::skills::removal::Layout::Copy,
+				paths,
+				skipped,
+				needs_confirm: false,
+				shared_master_kept: false,
+			},
+			executed: false,
+			prune: PruneStatus::NotRun,
 		},
-		executed: false,
-		prune: PruneStatus::NotRun,
-	})
+		requested_dry_run,
+	)
 }
 
 /// The API's **idempotent-delete contract**, owned in ONE place so the skill,
@@ -86,13 +100,21 @@ pub(crate) fn noop_removal_response(
 /// dry-run/confirm by the manager).
 pub(crate) fn removal_or_noop(
 	outcome: aghub_core::errors::Result<RemovalOutcome>,
+	requested_dry_run: bool,
 ) -> Result<rocket::serde::json::Json<DeleteSkillByPathResponse>, ApiError> {
 	use aghub_core::errors::ConfigError;
 	match outcome {
-		Ok(outcome) => Ok(rocket::serde::json::Json(removal_response(outcome))),
-		Err(ConfigError::ResourceNotFound { .. }) => Ok(
-			rocket::serde::json::Json(noop_removal_response(vec![], vec![])),
-		),
+		Ok(outcome) => Ok(rocket::serde::json::Json(removal_response(
+			outcome,
+			requested_dry_run,
+		))),
+		Err(ConfigError::ResourceNotFound { .. }) => {
+			Ok(rocket::serde::json::Json(noop_removal_response(
+				vec![],
+				vec![],
+				requested_dry_run,
+			)))
+		}
 		Err(e) => Err(ApiError::from(e)),
 	}
 }
@@ -162,6 +184,7 @@ pub fn preflight(_path: PathBuf) -> NoContent {
 #[cfg(test)]
 mod removal_or_noop_tests {
 	use super::*;
+	use crate::dto::skill::RemovalOutcomeKind;
 	use aghub_core::errors::ConfigError;
 	use aghub_core::skills::removal::{Layout, RemovalPlan};
 
@@ -181,22 +204,26 @@ mod removal_or_noop_tests {
 
 	#[test]
 	fn ok_outcome_passes_through() {
-		let resp = removal_or_noop(Ok(outcome(true)))
+		let resp = removal_or_noop(Ok(outcome(true)), false)
 			.ok()
 			.expect("ok")
 			.into_inner();
 		assert!(resp.success);
 		assert!(resp.executed);
 		assert_eq!(resp.paths, vec!["/x".to_string()]);
+		assert_eq!(resp.outcome, Some(RemovalOutcomeKind::Removed));
 	}
 
 	#[test]
 	fn resource_not_found_is_success_noop_not_error() {
 		// The idempotent-delete contract: deleting an absent resource succeeds
 		// as a no-op, never an error. Owned here so all delete routes agree.
-		let resp = removal_or_noop(Err(ConfigError::resource_not_found(
-			"mcp", "ghost",
-		)))
+		let resp = removal_or_noop(
+			Err(ConfigError::resource_not_found("mcp", "ghost")),
+			// CONFIRMED: the caller asked for a real delete and the resource
+			// was already gone. That is `absent`, not a dry-run.
+			false,
+		)
 		.ok()
 		.expect("missing resource must be a success no-op")
 		.into_inner();
@@ -207,6 +234,15 @@ mod removal_or_noop_tests {
 			resp.deleted_path.is_none(),
 			"no-op must not report a deleted path"
 		);
+		assert!(
+			!resp.dry_run,
+			"a confirmed delete of an absent resource is not a dry-run"
+		);
+		assert_eq!(
+			resp.outcome,
+			Some(RemovalOutcomeKind::Absent),
+			"an already-gone resource must be distinguishable from a preview"
+		);
 	}
 
 	#[test]
@@ -216,7 +252,7 @@ mod removal_or_noop_tests {
 		// instead of being swallowed as a success no-op.
 		let io = ConfigError::Io(std::io::Error::other("disk full"));
 		assert!(
-			removal_or_noop(Err(io)).is_err(),
+			removal_or_noop(Err(io), false).is_err(),
 			"a non-ResourceNotFound error must propagate, not be swallowed"
 		);
 	}

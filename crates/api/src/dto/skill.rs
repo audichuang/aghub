@@ -199,6 +199,7 @@ impl From<&aghub_core::dto::RemovalView> for DeleteSkillByPathResponse {
 			deleted_path: v.deleted_path.clone(),
 			pruned_lock_entries: None,
 			prune_error: None,
+			outcome: Some(v.outcome.into()),
 			error: None,
 			validation_errors: None,
 		}
@@ -425,6 +426,31 @@ pub struct GitInstallResponse {
 	pub results: Vec<GitInstallResultEntry>,
 }
 
+/// Mirror of `aghub_core::dto::RemovalKind` for the TS surface (core carries no
+/// ts-rs dependency, so the wire enum is restated here exactly as
+/// `DeleteSkillByPathResponse` restates `RemovalView`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum RemovalOutcomeKind {
+	/// Nothing was touched because the caller did not confirm.
+	Preview,
+	/// Deletion ran.
+	Removed,
+	/// Nothing to do: it was already gone. Do NOT retry on this.
+	Absent,
+}
+
+impl From<aghub_core::dto::RemovalKind> for RemovalOutcomeKind {
+	fn from(kind: aghub_core::dto::RemovalKind) -> Self {
+		match kind {
+			aghub_core::dto::RemovalKind::Preview => Self::Preview,
+			aghub_core::dto::RemovalKind::Removed => Self::Removed,
+			aghub_core::dto::RemovalKind::Absent => Self::Absent,
+		}
+	}
+}
+
 #[derive(Debug, Default, Serialize, TS)]
 #[ts(export)]
 pub struct DeleteSkillByPathResponse {
@@ -455,6 +481,14 @@ pub struct DeleteSkillByPathResponse {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub prune_error: Option<String>,
+	/// The three-way answer to "did the delete happen?" — present on every
+	/// real removal response, absent on the early `success: false` bodies that
+	/// never reached a removal at all. Prefer it over reading
+	/// `dry_run`/`executed`: those two could not distinguish a refused preview
+	/// from an already-absent resource, and serialized identically for both.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub outcome: Option<RemovalOutcomeKind>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub error: Option<String>,
@@ -748,9 +782,15 @@ mod tests {
 			paths: vec!["/a/foo".to_string()],
 			skipped: vec!["/a/bar".to_string()],
 			deleted_path: Some("/a/foo".to_string()),
+			outcome: aghub_core::dto::RemovalKind::Removed,
 		};
 		let resp = DeleteSkillByPathResponse::from(&view);
 		assert!(resp.success);
+		assert_eq!(
+			resp.outcome,
+			Some(RemovalOutcomeKind::Removed),
+			"the three-way outcome must cross the wrapper too"
+		);
 		assert!(!resp.dry_run);
 		assert!(resp.executed);
 		assert!(resp.needs_confirm);
@@ -786,6 +826,11 @@ mod tests {
 				paths: vec![],
 				skipped: vec![],
 				deleted_path: deleted_path.clone(),
+				outcome: if deleted_path.is_some() {
+					aghub_core::dto::RemovalKind::Removed
+				} else {
+					aghub_core::dto::RemovalKind::Preview
+				},
 			};
 			let resp = DeleteSkillByPathResponse::from(&view);
 			let view_json = serde_json::to_value(&view).unwrap();

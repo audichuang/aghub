@@ -8,5 +8,5 @@
 pub mod removal;
 pub mod skill;
 
-pub use removal::RemovalView;
+pub use removal::{RemovalKind, RemovalView};
 pub use skill::SkillView;

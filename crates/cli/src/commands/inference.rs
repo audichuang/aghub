@@ -11,7 +11,7 @@
 // ponytail: print the `InferenceProvider` model + serde_json directly; do NOT
 // drag the api DTO crate into the CLI.
 
-use std::io::{IsTerminal, Read};
+use std::io::Read;
 
 use aghub_inference::{
 	CreateInferenceProvider, InferenceProvider, InferenceProviderFormat,
@@ -59,8 +59,12 @@ pub enum InferenceAction {
 		/// provider presets); omit for a fully custom provider
 		#[arg(long, value_name = "NAME")]
 		preset: Option<String>,
-		/// The API key. Prefer stdin or `$AGHUB_INFERENCE_API_KEY` so it stays
-		/// off argv.
+		/// The API key. Pass `-` to read it from stdin, or set
+		/// `$AGHUB_INFERENCE_API_KEY`, so it stays off argv.
+		///
+		/// stdin is read ONLY for `-`. Reading it whenever stdin was not a tty
+		/// hung forever on the open, idle pipe a non-interactive harness leaves
+		/// behind.
 		#[arg(long = "api-key")]
 		api_key: Option<String>,
 		/// Model name (repeatable).
@@ -357,20 +361,28 @@ fn key(
 /// `$AGHUB_INFERENCE_API_KEY`, else a clear error. The raw key never goes on
 /// argv beyond the explicit flag; prefer stdin/env.
 fn resolve_api_key(flag: Option<&str>) -> Result<String> {
-	if let Some(key) = flag {
-		return Ok(key.to_string());
-	}
-
-	// Only read stdin when it is piped, so an interactive run errors fast
-	// instead of blocking on a tty.
-	let stdin = std::io::stdin();
-	if !stdin.is_terminal() {
-		let mut buf = String::new();
-		stdin.lock().read_to_string(&mut buf)?;
-		let trimmed = buf.trim();
-		if !trimmed.is_empty() {
+	// `--api-key -` is the ONLY way to read stdin. It used to read stdin
+	// whenever stdin was not a tty, which protected an interactive user but
+	// created the agent failure mode: a harness that leaves an open, idle pipe
+	// on stdin (the normal shape of non-interactive execution) made this block
+	// to EOF forever — no prompt, no output, no diagnostic, just a hang.
+	// Explicit opt-in keeps the key off argv without that trap.
+	match flag {
+		Some("-") => {
+			let mut buf = String::new();
+			std::io::stdin().lock().read_to_string(&mut buf)?;
+			let trimmed = buf.trim();
+			if trimmed.is_empty() {
+				anyhow::bail!(
+					"--api-key - was given but stdin was empty; pipe the key \
+					 in, or pass it as --api-key <KEY>, or set \
+					 ${API_KEY_ENV}"
+				);
+			}
 			return Ok(trimmed.to_string());
 		}
+		Some(key) => return Ok(key.to_string()),
+		None => {}
 	}
 
 	if let Ok(key) = std::env::var(API_KEY_ENV) {
@@ -383,8 +395,8 @@ fn resolve_api_key(flag: Option<&str>) -> Result<String> {
 	}
 
 	Err(anyhow!(
-		"missing api key: pass --api-key, pipe it on stdin, or set \
-		 ${API_KEY_ENV}"
+		"missing api key: pass --api-key <KEY>, pass `--api-key -` to read \
+		 it from stdin, or set ${API_KEY_ENV}"
 	))
 }
 

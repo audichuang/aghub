@@ -170,6 +170,17 @@ fn read_local_lock_locked(cwd: Option<&Path>) -> LocalSkillLockFile {
 	}
 }
 
+/// Is the PROJECT skill lock readable? See
+/// [`super::io::global_lock_readable`] for why a read-only caller needs this.
+pub fn local_lock_readable(cwd: Option<&Path>) -> std::io::Result<()> {
+	super::io::read_lock_for_modify::<LocalSkillLockFile>(
+		&get_local_lock_path(cwd),
+		LOCAL_LOCK_FILE,
+	)
+	.map(|_| ())
+	.map_err(|error| super::io::unreadable_for_reading(LOCAL_LOCK_FILE, &error))
+}
+
 /// [`super::io::read_lock_for_modify`] plus the same old-format wipe the read
 /// path does.
 fn read_local_lock_for_modify(

@@ -63,6 +63,14 @@ enum StatusView {
 struct SkillUpdateView {
 	name: String,
 	scope: String,
+	/// Did this row involve a real upstream lookup?
+	///
+	/// `false` for every row of the OFFLINE default, where `reason: "network"`
+	/// means "we did not look" — a statement the payload could not previously
+	/// make. The human renderer said so in a trailing note; the JSON branch
+	/// returns before that note is even computed, so a stored or forwarded
+	/// payload read as "the network failed" when nothing was attempted.
+	checked: bool,
 	#[serde(flatten)]
 	status: StatusView,
 }
@@ -208,22 +216,33 @@ pub fn execute(
 	json: bool,
 ) -> Result<()> {
 	match resource {
+		// Unreachable from the CLI: `Commands::Check` takes the narrowed
+		// `SkillResource`, so clap rejects `mcps` at parse time with an exact
+		// `[possible values: skills]`. Kept as defence-in-depth because this fn
+		// still takes the full `ResourceType`.
 		ResourceType::Mcps => {
 			anyhow::bail!("`check` only supports skills");
 		}
 		ResourceType::Skills => {}
 	}
 
+	let want_global =
+		matches!(scope, ResourceScope::GlobalOnly | ResourceScope::Both);
+	let want_project =
+		matches!(scope, ResourceScope::ProjectOnly | ResourceScope::Both);
+
+	// `check`'s entire answer comes from the lock, so an unreadable one has to
+	// fail rather than read as "no skills need updating".
+	crate::commands::assert_locks_readable(
+		want_global,
+		want_project.then_some(project_root).flatten(),
+	)?;
+
 	if online {
 		return execute_online(scope, project_root, json);
 	}
 
 	let mut views: Vec<SkillUpdateView> = Vec::new();
-
-	let want_global =
-		matches!(scope, ResourceScope::GlobalOnly | ResourceScope::Both);
-	let want_project =
-		matches!(scope, ResourceScope::ProjectOnly | ResourceScope::Both);
 
 	if want_global {
 		let locked = skill::get_all_locked_skills();
@@ -232,6 +251,8 @@ pub fn execute(
 			views.push(SkillUpdateView {
 				name,
 				scope: "global".to_string(),
+				// Offline default: nothing was looked up.
+				checked: false,
 				status: StatusView::Uncheckable {
 					reason: offline_reason(&entry.source_type).to_string(),
 				},
@@ -249,6 +270,7 @@ pub fn execute(
 			views.push(SkillUpdateView {
 				name,
 				scope: "project".to_string(),
+				checked: false,
 				status: StatusView::Uncheckable {
 					reason: offline_reason(&entry.source_type).to_string(),
 				},
@@ -331,6 +353,9 @@ fn execute_online(
 		.map(|output| SkillUpdateView {
 			name: output.key.name,
 			scope: output.key.scope,
+			// --online: this row IS the result of a real lookup, so an
+			// `Uncheckable { reason: "network" }` here is a genuine failure.
+			checked: true,
 			status: status_view(output.status),
 		})
 		.collect();
@@ -442,6 +467,7 @@ mod tests {
 		let view = SkillUpdateView {
 			name: "n".to_string(),
 			scope: "global".to_string(),
+			checked: true,
 			status: status_view(status),
 		};
 		serde_json::to_value(view).unwrap()
@@ -469,6 +495,7 @@ mod tests {
 		SkillUpdateView {
 			name: "n".to_string(),
 			scope: "global".to_string(),
+			checked: false,
 			status: StatusView::Uncheckable {
 				reason: reason.to_string(),
 			},

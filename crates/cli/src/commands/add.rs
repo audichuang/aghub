@@ -148,17 +148,28 @@ pub fn execute(
 				skill.author = author;
 				skill.version = version;
 				skill.tools = tools;
-				manager.add_skill(skill.clone())?;
+				let added = manager.add_skill(skill)?;
 				eprintln_verbose!("Skill added successfully");
 				note_if_native_reader(manager);
-				// `already_installed` is always false here — a manual add errors
-				// on a duplicate rather than no-op'ing — but it is serialized
-				// either way, so `add skills` has ONE schema whether or not
-				// --from was used and a batch envelope cannot mix two shapes.
-				let view = aghub_core::dto::SkillView::from(&skill)
-					.with_native_reader(
-						manager.skill_target_is_native_reader(),
+				// Serialize the skill the manager reports on disk, NOT the one
+				// that was requested, and carry `already_installed` through.
+				// This branch used to build the view from the request and hard-
+				// code `already_installed: false`, on a comment claiming a
+				// manual add always errors on a duplicate. It does not: two of
+				// `add_skill_universal`'s branches are idempotent no-ops, so a
+				// re-add with a changed --description printed "added skill",
+				// echoed the NEW description back, and left the Master alone.
+				if added.already_installed {
+					eprintln!(
+						"note: nothing was written — skill '{}' is already \
+						 installed for this agent; use `aghub-cli update \
+						 skills {}` to change its metadata",
+						added.skill.name, added.skill.name
 					);
+				}
+				let view = aghub_core::dto::SkillView::from(&added.skill)
+					.with_native_reader(manager.skill_target_is_native_reader())
+					.with_already_installed(added.already_installed);
 				serde_json::to_value(&view)?
 			}
 		}

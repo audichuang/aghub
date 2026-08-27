@@ -8,6 +8,7 @@ pub mod all_agents;
 pub mod availability;
 pub mod batch;
 pub mod dto;
+pub mod error_codes;
 pub mod manager;
 pub mod paths;
 pub mod registry;

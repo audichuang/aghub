@@ -95,6 +95,17 @@ pub struct OperationResultView {
 	pub project_root: Option<String>,
 	pub action: String,
 	pub success: bool,
+	/// Duplicate of `success` under the name the OTHER batch family uses.
+	///
+	/// `core::batch`'s `AgentOpResultView` calls this field `ok`, and both
+	/// families serialize into an envelope with the SAME top-level keys
+	/// (`success_count` / `failed_count` / `results`). Each struct's own doc
+	/// comment claims to be "the SINGLE place the wire shape is defined" —
+	/// true per family, and the collision went unnoticed. A parser written
+	/// against `row.ok` therefore read `undefined` for every transfer/reconcile
+	/// row and scored SUCCESSES as failures. Emitting both names costs one bool
+	/// and makes either spelling correct.
+	pub ok: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -114,6 +125,7 @@ impl From<&OperationResult> for OperationResultView {
 				.map(|p| p.display().to_string()),
 			action: r.action.to_string(),
 			success: r.success,
+			ok: r.success,
 			error: r.error.clone(),
 		}
 	}
@@ -238,6 +250,30 @@ fn load_source_skill(source: &ResourceLocator) -> Result<Skill> {
 		.get_skill(&source.name)
 		.cloned()
 		.ok_or_else(|| ConfigError::resource_not_found("skill", &source.name))
+}
+
+/// Does the reconcile/transfer SOURCE resource exist? Read-only, mutates
+/// nothing.
+///
+/// A `reconcile --dry-run` (and the implicit dry-run a `--remove` without
+/// `--yes` takes) has to answer this itself. Its preview used to be a plain
+/// echo of argv, so `--name totally-absent --remove opencode` printed a plan
+/// and exited 0, and only the `--yes` run reported `Resource not found` —
+/// exactly the sequence an agent uses to check before committing. These are
+/// the same three loaders the real reconcile uses, so the existence rule
+/// cannot drift between the preview and the mutation.
+pub fn ensure_skill_exists(source: &ResourceLocator) -> Result<()> {
+	load_source_skill(source).map(|_| ())
+}
+
+/// See [`ensure_skill_exists`].
+pub fn ensure_mcp_exists(source: &ResourceLocator) -> Result<()> {
+	load_source_mcp(source).map(|_| ())
+}
+
+/// See [`ensure_skill_exists`].
+pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
+	load_source_sub_agent(source).map(|_| ())
 }
 
 fn ensure_loaded(manager: &mut ConfigManager) -> Result<()> {

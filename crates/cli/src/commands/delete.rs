@@ -55,7 +55,9 @@ pub fn execute(
 			// deleted_path) live once and stay snake_case, matching the API +
 			// desktop DeleteSkillByPathResponse. Then layer the CLI-only
 			// {type,name} envelope and the prune status on top.
-			let view = aghub_core::dto::RemovalView::from(&outcome);
+			let view = aghub_core::dto::RemovalView::from_outcome(
+				&outcome, is_dry_run,
+			);
 			let mut payload = serde_json::to_value(&view)?;
 			payload["type"] = json!("skill");
 			payload["name"] = json!(name);
@@ -80,7 +82,9 @@ pub fn execute(
 			// snake_case and byte-identical to the skills branch + the API +
 			// desktop DeleteSkillByPathResponse; layer the CLI {type,name}
 			// envelope on top. MCP removal has no lock prune.
-			let view = aghub_core::dto::RemovalView::from(&outcome);
+			let view = aghub_core::dto::RemovalView::from_outcome(
+				&outcome, is_dry_run,
+			);
 			let mut payload = serde_json::to_value(&view)?;
 			payload["type"] = json!("mcp");
 			payload["name"] = json!(name);

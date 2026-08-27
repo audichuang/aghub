@@ -101,10 +101,9 @@ where
 			return Ok(T::default())
 		}
 		Err(error) => {
-			log::warn!(
-				"refusing to rewrite unreadable skill lock {}: {error}",
-				path.display()
-			);
+			// Neutral wording: this predicate now also backs the read-only
+			// `*_lock_readable` probes, where "rewrite" would be a lie.
+			log::warn!("skill lock {} is unreadable: {error}", path.display());
 			return Err(std::io::Error::new(
 				error.kind(),
 				format!(
@@ -122,10 +121,7 @@ where
 		return Ok(T::default());
 	}
 	serde_json::from_str::<T>(&content).map_err(|error| {
-		log::warn!(
-			"refusing to rewrite unparseable skill lock {}: {error}",
-			path.display()
-		);
+		log::warn!("skill lock {} is not valid JSON: {error}", path.display());
 		std::io::Error::new(
 			std::io::ErrorKind::InvalidData,
 			format!(
@@ -135,6 +131,46 @@ where
 			),
 		)
 	})
+}
+
+/// Is the GLOBAL skill lock readable? `Ok(())` when it parses, is absent, or is
+/// empty; `Err` naming the problem otherwise. Reads nothing into the caller and
+/// takes no mutation lock.
+///
+/// The read paths above fail OPEN so a corrupt lock does not break every query.
+/// A caller that presents the lock's CONTENTS as its answer needs the
+/// difference, or it reports "nothing installed" for "I could not read the
+/// file": `check skills`, `source list` and `doctor` each did exactly that, on
+/// exit 0 with an empty stderr, and `doctor` went on to recommend deleting the
+/// skills it had just failed to see.
+pub fn global_lock_readable() -> std::io::Result<()> {
+	read_lock_for_modify::<SkillLockFile>(
+		&get_skill_lock_path(),
+		GLOBAL_LOCK_FILE,
+	)
+	.map(|_| ())
+	.map_err(|error| unreadable_for_reading(GLOBAL_LOCK_FILE, &error))
+}
+
+/// Restate a fail-closed read error for a READ-ONLY caller.
+///
+/// `read_lock_for_modify`'s own wording ends in "refusing to overwrite it",
+/// which is right for a writer and actively misleading for `check` / `doctor` /
+/// `source list` — an agent reading it would think the command had tried to
+/// write. Same predicate, caller-appropriate sentence.
+pub(crate) fn unreadable_for_reading(
+	file_label: &str,
+	error: &std::io::Error,
+) -> std::io::Error {
+	std::io::Error::new(
+		error.kind(),
+		format!(
+			"the skill lock file {file_label} exists but could not be read \
+			 ({}); its contents cannot be reported. Resolve it (unresolved \
+			 merge conflict?) and retry.",
+			error.kind()
+		),
+	)
 }
 
 /// [`read_lock_for_modify`] plus the same old-format wipe the read path does.

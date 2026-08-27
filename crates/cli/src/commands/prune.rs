@@ -106,6 +106,9 @@ pub fn execute(
 					// start reading a failed prune as a clean one.
 					if !pruned.is_empty() {
 						report(&pruned, dry_run, Some(&e.to_string()), json)?;
+						// That report IS the answer for this run; a second
+						// error document after it would break the parse.
+						crate::note_answer_on_stdout();
 					}
 					return Err(e.into());
 				}

@@ -69,10 +69,10 @@ use aghub_api::dto::{
 		GlobalSkillLockResponse, ImportSkillRequest, InstallSkillRequest,
 		InstallSkillResponse, LocalSkillLockEntryResponse, ProjectLockQuery,
 		ProjectSkillLockResponse, PruneLockRequest, PruneLockResponse,
-		SkillContentQuery, SkillLockEntryResponse, SkillResponse,
-		SkillTreeNodeKind, SkillTreeNodeResponse, SkillTreeQuery,
-		SkillUpdateResponse, SkillUpdateStatusResponse, SkillUsageResponse,
-		UpdateSkillRequest, ValidationError,
+		RemovalOutcomeKind, SkillContentQuery, SkillLockEntryResponse,
+		SkillResponse, SkillTreeNodeKind, SkillTreeNodeResponse,
+		SkillTreeQuery, SkillUpdateResponse, SkillUpdateStatusResponse,
+		SkillUsageResponse, UpdateSkillRequest, ValidationError,
 	},
 	sources::{
 		CredentialStatus, SourceDiffResponse, SourceSkillDiff,
@@ -261,6 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<SourceSkillDiff>(&cfg)?;
 	export_type::<SourceDiffResponse>(&cfg)?;
 	export_type::<DeleteSkillByPathResponse>(&cfg)?;
+	export_type::<RemovalOutcomeKind>(&cfg)?;
 	export_type::<PruneLockRequest>(&cfg)?;
 	export_type::<PruneLockResponse>(&cfg)?;
 	export_type::<SkillContentQuery>(&cfg)?;

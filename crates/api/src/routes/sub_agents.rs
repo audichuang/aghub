@@ -279,6 +279,7 @@ pub fn delete_sub_agent(
 	// mirroring the skill/MCP delete routes.
 	crate::routes::removal_or_noop(
 		manager.remove_sub_agent_planned(&name, dry_run, confirm),
+		dry_run,
 	)
 }
 

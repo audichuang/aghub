@@ -198,6 +198,22 @@ pub(crate) fn resolve_read_scopes(
 	Ok(scopes)
 }
 
+/// [`crate::commands::assert_locks_readable`] for a resolved read-scope list.
+///
+/// `source list` / `source diff` / `doctor` all report the lock's contents as
+/// their answer, so an unreadable lock must fail here instead of surfacing as
+/// "no sources installed" / "untracked".
+pub(crate) fn assert_scope_locks_readable(
+	scopes: &[SourceScope],
+) -> Result<()> {
+	let want_global = scopes.iter().any(|s| matches!(s, SourceScope::Global));
+	let project_root = scopes.iter().find_map(|s| match s {
+		SourceScope::Project { root } => Some(root.as_path()),
+		SourceScope::Global => None,
+	});
+	crate::commands::assert_locks_readable(want_global, project_root)
+}
+
 fn current_project_root() -> Result<Option<PathBuf>> {
 	let cwd = std::env::current_dir()?;
 	Ok(find_project_root(&cwd))
@@ -230,9 +246,12 @@ pub fn execute(
 ) -> Result<()> {
 	match action {
 		SourceAction::List => list(global, project, json),
-		SourceAction::Diff { source, git_ref } => {
-			diff(source, git_ref.as_deref(), global, project, json)
-		}
+		SourceAction::Diff {
+			source,
+			git_ref,
+			// Accepted and ignored — `diff` has no offline mode.
+			online: _,
+		} => diff(source, git_ref.as_deref(), global, project, json),
 		SourceAction::Sync {
 			source,
 			git_ref,
@@ -299,6 +318,7 @@ fn summary_to_view(s: &SourceSummary) -> SourceSummaryView {
 
 fn list(global: bool, project: bool, json: bool) -> Result<()> {
 	let scopes = resolve_read_scopes(global, project)?;
+	assert_scope_locks_readable(&scopes)?;
 	let summaries = sources::list_sources(sources::SourceListInput { scopes });
 
 	if json {
@@ -375,6 +395,7 @@ fn diff(
 	json: bool,
 ) -> Result<()> {
 	let scopes = resolve_read_scopes(global, project)?;
+	assert_scope_locks_readable(&scopes)?;
 	let source = source.trim().to_string();
 
 	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
@@ -428,8 +449,10 @@ fn diff(
 			bail!("Credential backend is unavailable; retry later.")
 		}
 		Err(FetchError::Auth) => bail!(
-			"This source needs a credential. Set GIT_PASSWORD (any host) or \
-			 GITHUB_TOKEN (github.com) in the environment and retry."
+			"Could not read this source. Either it needs a credential (set \
+			 GIT_PASSWORD for any host, or GITHUB_TOKEN for github.com, in \
+			 the environment and retry) or the repo/ref does not exist or is \
+			 not visible to the credential already in use."
 		),
 		Err(FetchError::Network(detail)) => {
 			bail!(
@@ -621,6 +644,22 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let selection = AgentSelection::parse(args.agent)
 		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
+	// Same reason, one line earlier in the flow: `--yes` with NO action flag is
+	// a caller who believes they asked for a write. `source sync <repo> --yes`
+	// is the most natural spelling of "install this repo's skills", and it used
+	// to fall through to the no-action overview — exit 0, no `dryRun` key at
+	// all, and a THIRD payload shape, so a consumer keyed on `dryRun == false`
+	// (missing → falsy) concluded the install had been applied. Refused here,
+	// before the fetch, so it costs no network round-trip and reports the real
+	// problem instead of a credential/network error.
+	if args.yes && !args.update && !args.install_missing {
+		bail!(
+			"--yes needs an action: pass --install-missing (install missing \
+			 skills) and/or --update (refresh outdated ones). Without either, \
+			 `source sync` only prints an overview."
+		);
+	}
+
 	// Snapshot every in-scope lock entry's identity FIRST, before the resolution
 	// below reads those same entries to decide what to fetch. Captured (never
 	// reconstructed) because a project entry's `sourceUrl` is optional — an
@@ -695,8 +734,10 @@ fn sync(args: SyncArgs) -> Result<()> {
 			bail!("Credential backend is unavailable; retry later.")
 		}
 		Err(FetchError::Auth) => bail!(
-			"This source needs a credential. Set GIT_PASSWORD (any host) or \
-			 GITHUB_TOKEN (github.com) in the environment and retry."
+			"Could not read this source. Either it needs a credential (set \
+			 GIT_PASSWORD for any host, or GITHUB_TOKEN for github.com, in \
+			 the environment and retry) or the repo/ref does not exist or is \
+			 not visible to the credential already in use."
 		),
 		Err(FetchError::Network(detail)) => {
 			bail!(
@@ -1345,22 +1386,49 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	};
 	let scope_label = if args.project { "project" } else { "global" };
 
-	if !args.yes {
-		println!(
-			"Dry-run: would install '{}' and remove '{}' ({scope_label}). \
-			 Pass --yes to execute.",
-			args.new_name, args.old_name
-		);
-		return Ok(());
-	}
-
 	// P0-2 guard (a): refuse a degenerate rename before any lock read / fetch.
+	//
+	// Both this guard and the lock read below used to sit AFTER the dry-run
+	// return, so the preview green-lit a rename of a name that is not in the
+	// lock at all (and a degenerate `a → a`); the caller only hit the wall on
+	// the `--yes` run. They validate, they do not write, so they belong in
+	// front of the preview.
 	rename::ensure_distinct_names(args.old_name, args.new_name)
 		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
 
 	// Step 1: read the OLD-name lock entry for the fetch coordinates.
 	let mut source = rename::rename_source_from_lock(args.old_name, &scope)
 		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
+
+	if !args.yes {
+		// The preview MUST honour --json. This branch used to `println!` prose
+		// unconditionally and return Ok(()) — a destructive command's DEFAULT
+		// path emitting unparseable text on exit 0, which a strict parser reads
+		// as a crash on the success path and a lenient one reads as "the rename
+		// was committed". Every sibling preview (delete, prune-lock, source
+		// sync, reconcile) already emits JSON here. Keys match the --yes
+		// payload below, plus `applied` so the two are machine-distinguishable.
+		if args.json {
+			println!(
+				"{}",
+				serde_json::to_string_pretty(&serde_json::json!({
+					"success": true,
+					"dryRun": true,
+					"applied": false,
+					"oldName": args.old_name,
+					"newName": args.new_name,
+					"scope": scope_label,
+				}))?
+			);
+		} else {
+			println!(
+				"Dry-run: would install '{}' and remove '{}' \
+				 ({scope_label}). Pass --yes to execute.",
+				args.new_name, args.old_name
+			);
+		}
+		return Ok(());
+	}
 
 	// Apply any --ref override: the effective ref is fetched AND written to the
 	// new lock entry.
@@ -1424,6 +1492,10 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 			"{}",
 			serde_json::to_string_pretty(&serde_json::json!({
 				"success": true,
+				// Mirrors the preview branch above so ONE parser handles both
+				// and can tell them apart without inspecting other keys.
+				"dryRun": false,
+				"applied": true,
 				"oldName": args.old_name,
 				"newName": args.new_name,
 				"scope": scope_label,

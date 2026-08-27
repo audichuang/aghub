@@ -15,6 +15,7 @@
 use aghub_core::models::AgentType;
 use aghub_core::paths::find_project_root;
 use aghub_core::transfer::{
+	ensure_mcp_exists, ensure_skill_exists, ensure_sub_agent_exists,
 	reconcile_mcp, reconcile_skill, reconcile_sub_agent, transfer_mcp,
 	transfer_skill, transfer_sub_agent, InstallScope, InstallTarget,
 	OperationBatchResult, OperationBatchView, ResourceLocator,
@@ -101,6 +102,9 @@ type ReconcileFn = fn(
 	bool,
 ) -> aghub_core::Result<OperationBatchResult>;
 
+/// A core `ensure_*_exists` fn — the read-only source check a dry-run makes.
+type ExistsFn = fn(&ResourceLocator) -> aghub_core::Result<()>;
+
 /// clap value parser for an agent id, reusing the canonical FromStr so the CLI
 /// accepts the same spellings/aliases as the API and store.
 fn parse_agent(value: &str) -> Result<AgentType, String> {
@@ -170,11 +174,33 @@ pub fn execute_reconcile(
 	json: bool,
 ) -> Result<()> {
 	let (scope, project_root) = resolve_scope(global, project)?;
-	let (args, run): (&ReconcileArgs, ReconcileFn) = match action {
-		ReconcileAction::Skill(a) => (a, reconcile_skill),
-		ReconcileAction::Mcp(a) => (a, reconcile_mcp),
-		ReconcileAction::SubAgent(a) => (a, reconcile_sub_agent),
-	};
+	let (args, run, exists): (&ReconcileArgs, ReconcileFn, ExistsFn) =
+		match action {
+			ReconcileAction::Skill(a) => {
+				(a, reconcile_skill, ensure_skill_exists)
+			}
+			ReconcileAction::Mcp(a) => (a, reconcile_mcp, ensure_mcp_exists),
+			ReconcileAction::SubAgent(a) => {
+				(a, reconcile_sub_agent, ensure_sub_agent_exists)
+			}
+		};
+
+	// A reconcile with no target set is a usage error, not a successful no-op.
+	// Without this guard it fell through to `run(source, [], [], false)`, which
+	// returns an empty batch that `render` reports as
+	// `{"success_count":0,"failed_count":0,"results":[]}` on exit 0 — and
+	// `--agent` is the shape a caller lands on first, because clap's own
+	// "a similar argument exists: '--agent'" tip for a mistyped `--agents`
+	// points there and the usage line it prints never mentions `--add`.
+	// Indistinguishable from a real single-agent copy for anything keyed on the
+	// exit code or `failed_count`.
+	if args.add.is_empty() && args.remove.is_empty() {
+		bail!(
+			"reconcile needs at least one --add <agent> or --remove <agent>; \
+			 -a/--agent is ignored by reconcile (it names the desired agent \
+			 set, not a target)"
+		);
+	}
 
 	let source = ResourceLocator {
 		agent: args.from_agent,
@@ -188,6 +214,11 @@ pub fn execute_reconcile(
 	// alone are non-destructive and run immediately (like `transfer`), unless
 	// --dry-run is asked for explicitly.
 	if args.dry_run || (!args.remove.is_empty() && !args.yes) {
+		// Validate the source BEFORE reporting a plan for it. The preview is
+		// the step an agent takes to decide whether to commit, so it has to
+		// fail on a name that does not exist rather than green-lighting it and
+		// leaving the discovery to the `--yes` run.
+		exists(&source)?;
 		return render_dry_run(args, json);
 	}
 
@@ -269,6 +300,8 @@ fn render(result: &OperationBatchResult, json: bool) -> Result<()> {
 	}
 
 	if result.failed_count() > 0 {
+		// The batch view above already carries every per-target verdict.
+		crate::note_answer_on_stdout();
 		bail!(
 			"{} of {} operations failed",
 			result.failed_count(),

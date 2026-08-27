@@ -67,6 +67,33 @@ const TEST_CREDENTIAL_FILE_ENV: &str = "AGHUB_TEST_CREDENTIAL_FILE";
 
 /// App data directory shared by the CLI, desktop, and HTTP API.
 ///
+/// Fail when a skill lock the caller is about to REPORT ON exists but cannot be
+/// read.
+///
+/// The lock read paths fail OPEN to an empty lock, deliberately, so one corrupt
+/// file does not break every query. But `check`, `doctor` and `source list`
+/// present the lock's contents AS their answer, and an empty view there reads
+/// as "nothing is installed" — they answered `[]` on exit 0 with an empty
+/// stderr for a `skills-lock.json` full of entries they simply could not parse.
+/// `doctor` compounded it by classifying the still-present skills as
+/// `untracked` and printing remediation that says to DELETE them.
+///
+/// Absent and empty locks stay fine: this reuses the same
+/// `read_lock_for_modify` predicate `prune-lock --yes` already fails closed on,
+/// so "unreadable" means one thing across every surface.
+pub(crate) fn assert_locks_readable(
+	want_global: bool,
+	project_root: Option<&std::path::Path>,
+) -> Result<()> {
+	if want_global {
+		skill::lock::global_lock_readable()?;
+	}
+	if let Some(root) = project_root {
+		skill::lock::local::local_lock_readable(Some(root))?;
+	}
+	Ok(())
+}
+
 /// Defaults to `dirs::data_dir()/aghub` — byte-identical to
 /// `api::default_app_data_dir` so all three surfaces open the same SQLite db and
 /// credential-keyring namespace (a key stored by the desktop is readable by the

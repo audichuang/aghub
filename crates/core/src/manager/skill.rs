@@ -206,7 +206,10 @@ impl ConfigManager {
 		Ok(guard)
 	}
 
-	pub fn add_skill(&mut self, skill: Skill) -> Result<()> {
+	/// Returns the [`SkillAdd`] receipt, so a caller can tell a real install
+	/// from an idempotent no-op and report the skill AS IT EXISTS ON DISK
+	/// rather than echoing back what was requested.
+	pub fn add_skill(&mut self, skill: Skill) -> Result<SkillAdd> {
 		// Symlink-only model (Locked Decision 1): manual skill creation writes a
 		// single .agents/skills/<name> Master and links THIS agent to it, exactly
 		// like every other install path. The old isolated agent-local copy body is
@@ -229,7 +232,16 @@ impl ConfigManager {
 	/// mirrors the API path's `wrote_master = !canonical.exists()` rule and
 	/// avoids silently clobbering edits to the canonical. The per-agent
 	/// symlink is still created (idempotently).
-	pub fn add_skill_universal(&mut self, skill: Skill) -> Result<()> {
+	///
+	/// The two idempotent branches below return
+	/// `SkillAdd::already_installed(<the skill ALREADY in config>)`, not the
+	/// requested one. They used to return a bare `Ok(())`, which cost the
+	/// caller both facts it needs: `aghub add skills -n <existing>` printed
+	/// "added skill", serialized `already_installed: false`, and echoed the
+	/// REQUESTED `--description` / `--version` / `--tools` back on exit 0 while
+	/// the Master on disk kept its old content. Re-running `add` with corrected
+	/// metadata is a standard scripted repair, and it silently did nothing.
+	pub fn add_skill_universal(&mut self, skill: Skill) -> Result<SkillAdd> {
 		let UniversalPrep {
 			agent_name,
 			agent_write_dir,
@@ -250,7 +262,9 @@ impl ConfigManager {
 		let _mutation_guard = self.guard_and_reload("add skill", scope)?;
 
 		let config = self.config_mut()?;
-		if config.skills.iter().any(|s| s.name == skill.name) {
+		if let Some(existing) =
+			config.skills.iter().find(|s| s.name == skill.name).cloned()
+		{
 			// Classify the already-installed state before deciding to error.
 			let safe = sanitize_name(&skill.name);
 			let canonical = canonical_dir.join(&safe);
@@ -261,7 +275,7 @@ impl ConfigManager {
 				link_need,
 				crate::skills::linker::LinkNeed::NativeReader
 			) {
-				return Ok(());
+				return Ok(SkillAdd::already_installed(existing));
 			}
 			// (b) Correct link already exists at the agent slot (AlreadyLinked).
 			if let Some(ref agent_dir) = agent_write_dir {
@@ -273,7 +287,7 @@ impl ConfigManager {
 						.map(|r| r == master_real)
 						.unwrap_or(false)
 					{
-						return Ok(());
+						return Ok(SkillAdd::already_installed(existing));
 					}
 				}
 			}
@@ -333,7 +347,7 @@ impl ConfigManager {
 		let mut fs_skill = skill.clone();
 		fs_skill.source_path = Some(canonical_md.clone());
 		fs_skill.canonical_path = Some(canonical_md);
-		config.skills.push(fs_skill);
+		config.skills.push(fs_skill.clone());
 
 		// Deliberately NOT `save_current()`: `save()` serializes MCPs and
 		// nothing else, so it cannot persist a skill — the on-disk work is already
@@ -341,7 +355,7 @@ impl ConfigManager {
 		// normalized model as a pure side effect, dropping per-server fields aghub
 		// does not model. See `set_skill_enabled` for the same defect in its
 		// starkest form.
-		Ok(())
+		Ok(SkillAdd::installed(fs_skill, &results))
 	}
 
 	pub fn get_skill(&self, name: &str) -> Option<&Skill> {

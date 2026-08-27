@@ -388,6 +388,10 @@ pub fn execute_with_options(
 	agent: &str,
 ) -> Result<()> {
 	let scopes = crate::commands::source::resolve_read_scopes(global, project)?;
+	// doctor's whole point is reporting lock health, and it must not report a
+	// clean-but-empty world for a lock it could not parse — it classified the
+	// still-present skills `untracked` and told the caller to delete them.
+	crate::commands::source::assert_scope_locks_readable(&scopes)?;
 	let roster = verify_links.then(|| resolve_roster(agent)).transpose()?;
 
 	let mut rows: Vec<DoctorRow> = Vec::new();

@@ -326,6 +326,7 @@ pub fn delete_mcp(
 			return Ok(Json(crate::routes::noop_removal_response(
 				vec![],
 				vec![],
+				dry_run,
 			)));
 		}
 		Err(e) => return Err(ApiError::from(e)),
@@ -334,6 +335,7 @@ pub fn delete_mcp(
 	// error propagates) is owned once in `routes::removal_or_noop`.
 	crate::routes::removal_or_noop(
 		manager.remove_mcp_planned(name, dry_run, confirm),
+		dry_run,
 	)
 }
 
