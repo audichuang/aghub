@@ -160,6 +160,25 @@ struct DoctorRow {
 	link_audit: LinkAudit,
 }
 
+impl DoctorRow {
+	/// Is this row something a caller should act on?
+	///
+	/// `health` is the lock ↔ Master axis and is ALWAYS computed; `link_audit`
+	/// is the per-agent referrer axis and exists only under `--verify-links`.
+	/// A gate that reads one and not the other is inert exactly when the other
+	/// is the only thing that ran.
+	fn is_issue(&self) -> bool {
+		let health_bad = self.health != "ok";
+		let links_bad = match &self.link_audit {
+			LinkAudit::NotRequested | LinkAudit::Verified { .. } => false,
+			LinkAudit::Issues { agents } => {
+				agents.iter().any(|audit| audit.state.is_issue())
+			}
+		};
+		health_bad || links_bad
+	}
+}
+
 #[derive(Debug, Clone)]
 struct LockedSkill {
 	source: String,
@@ -235,13 +254,21 @@ fn audit_agent_links(
 			);
 			let (state, path) = match need {
 				LinkNeed::NativeReader => {
+					// `!= Missing`, not `== Dir`: a master that is itself a
+					// symlink is a SUPPORTED layout (it has its own `health`
+					// label, `master-is-symlink`), and this branch used to call
+					// it `missing` for every Master-reading agent — a row that
+					// contradicted its own `master=link` column, and, once
+					// `--fail-on-issues` existed, exited 1 with a repair
+					// command whose `<source>` is `—`. Same gate the NeedsLink
+					// branch below already uses.
 					let state = if matches!(
 						master_state(&master_skill),
-						MasterState::Dir
+						MasterState::Missing
 					) {
-						AgentLinkState::AutoCovered
-					} else {
 						AgentLinkState::Missing
+					} else {
+						AgentLinkState::AutoCovered
 					};
 					(state, Some(master_skill.to_string_lossy().into_owned()))
 				}
@@ -512,16 +539,13 @@ pub fn execute_with_options(
 
 	// Counted before the JSON early-return: `--fail-on-issues` must mean the
 	// same thing in both output modes.
-	let issue_count =
-		rows.iter()
-			.filter_map(|row| match &row.link_audit {
-				LinkAudit::NotRequested => None,
-				LinkAudit::Verified { agents }
-				| LinkAudit::Issues { agents } => Some(agents),
-			})
-			.flatten()
-			.filter(|audit| audit.state.is_issue())
-			.count();
+	//
+	// Counts BOTH halves of what doctor reports. Deriving it from `link_audit`
+	// alone made the flag inert without `--verify-links` — every row is
+	// `notRequested` then — so `doctor --fail-on-issues` exited 0 over an
+	// `untracked` master or an `invalid-skill`: the same false green the flag
+	// exists to remove, one level up.
+	let issue_count = rows.iter().filter(|row| row.is_issue()).count();
 	let gate = |issues: usize| -> Result<()> {
 		if fail_on_issues && issues > 0 {
 			anyhow::bail!(

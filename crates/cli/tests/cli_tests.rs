@@ -8200,3 +8200,209 @@ fn doctor_separates_orphan_masters_and_can_gate_on_issues() {
 		String::from_utf8_lossy(&clean.stderr)
 	);
 }
+
+/// An agent holding an UNRELATED skill of the same name is a conflict, and a
+/// paired `--remove` must not run.
+///
+/// The data-loss path this pins: making `transfer` idempotent moved the
+/// already-present decision into `add_skill_from_path`, whose NativeReader
+/// branch returned on the NAME alone. A Master-reading agent's read paths
+/// include its OWN private dir, so an unrelated `<own-dir>/<name>` matched, the
+/// copy reported success having written nothing, and
+/// `run_staged_multi_target_mutation`'s gate — which only asks whether the copy
+/// ERRORED — let the paired delete proceed. Source content gone, exit 0,
+/// "2 succeeded, 0 failed".
+#[cfg(unix)]
+#[test]
+fn reconcile_does_not_delete_the_source_when_the_target_holds_a_different_skill(
+) {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// claude's skill, and an UNRELATED cursor skill that merely shares the
+	// name — a real directory, not a link to any Master.
+	let claude_skill = home.path().join(".claude/skills/collide");
+	std::fs::create_dir_all(&claude_skill).unwrap();
+	std::fs::write(
+		claude_skill.join("SKILL.md"),
+		"---\nname: collide\ndescription: the one that matters\n---\n\nKEEP-ME\n",
+	)
+	.unwrap();
+	let cursor_skill = home.path().join(".cursor/skills/collide");
+	std::fs::create_dir_all(&cursor_skill).unwrap();
+	std::fs::write(
+		cursor_skill.join("SKILL.md"),
+		"---\nname: collide\ndescription: unrelated\n---\n\nCURSOR-PRIVATE\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"collide",
+			"--add",
+			"cursor",
+			"--remove",
+			"claude",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	// THE assertion. Everything else is diagnosis.
+	let survived = std::fs::read_to_string(claude_skill.join("SKILL.md"))
+		.expect("the source skill must still exist");
+	assert!(
+		survived.contains("KEEP-ME"),
+		"the source content must survive a copy that wrote nothing: {survived}"
+	);
+
+	assert!(
+		!out.status.success(),
+		"a copy that could not happen must not report success: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let copy = json["results"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|r| r["action"] == "copy")
+		.expect("copy row present");
+	assert_eq!(copy["success"], false, "{copy}");
+	assert_eq!(
+		copy["already_present"], false,
+		"an unrelated same-named skill is NOT `already_present`: {copy}"
+	);
+
+	// The target keeps its own content — nothing was overwritten either.
+	assert!(std::fs::read_to_string(cursor_skill.join("SKILL.md"))
+		.unwrap()
+		.contains("CURSOR-PRIVATE"));
+}
+
+/// Gaps found by two independent adversarial reviews of the six changes above.
+/// Each was a place where a fix was believed complete and was not.
+#[cfg(unix)]
+#[test]
+fn second_review_found_gaps_stay_fixed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+
+	// --- Two agents can share ONE backing file: Claude's project MCP config is
+	// `.mcp.json`, and Copilot uses that same file when it exists. "Add to
+	// copilot, remove from claude" is then not a state the world can be in —
+	// and left unchecked it DESTROYED: the copy truthfully reported
+	// `already_present` (same file!), the staged gate only asks whether the
+	// copy errored, and the delete rewrote that one file without the entry.
+	// Both rows reported success and the server was gone from both agents.
+	let seeded = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "add", "mcps", "-n", "shared", "-c", "echo"])
+		.output()
+		.unwrap();
+	assert!(seeded.status.success());
+
+	let collide = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args([
+			"-p",
+			"--json",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"shared",
+			"--add",
+			"copilot",
+			"--remove",
+			"claude",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!collide.status.success(),
+		"a reconcile that cannot be expressed must be refused: {}",
+		String::from_utf8_lossy(&collide.stdout)
+	);
+	// THE assertion: the server survived.
+	let still_there = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.args(["-p", "-a", "copilot", "--json", "get", "mcps"])
+		.output()
+		.unwrap();
+	let listed: Value = serde_json::from_slice(&still_there.stdout).unwrap();
+	assert!(
+		listed
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|m| m["name"] == "shared"),
+		"the refused reconcile must not have deleted anything: {listed}"
+	);
+
+	// --- `--fail-on-issues` must count the `health` axis too. Derived from
+	// `link_audit` alone it was inert without `--verify-links` — every row is
+	// `notRequested` then — so it exited 0 over an untracked master, which is
+	// the same false green the flag exists to remove.
+	let untracked = home.path().join(".agents/skills/untracked-one");
+	std::fs::create_dir_all(&untracked).unwrap();
+	std::fs::write(
+		untracked.join("SKILL.md"),
+		"---\nname: untracked-one\ndescription: d\n---\n\nx\n",
+	)
+	.unwrap();
+	let gated = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "doctor", "--fail-on-issues"])
+		.output()
+		.unwrap();
+	assert!(
+		!gated.status.success(),
+		"an untracked master is an issue even without --verify-links: {}",
+		String::from_utf8_lossy(&gated.stdout)
+	);
+
+	// --- A `kept` delete must not tell the human to re-run with --yes: that
+	// run fails with `Unsupported operation`. The JSON and the desktop were
+	// fixed; the CLI's own human renderer still printed the dead-end hint.
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "shared-skill", "shared-skill");
+	for agent in ["claude", "cursor"] {
+		let out = run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			agent,
+			"shared-skill",
+		);
+		assert!(
+			out.status.success(),
+			"{}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+	let kept = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor", "delete", "skills", "shared-skill"])
+		.output()
+		.unwrap();
+	assert!(kept.status.success());
+	let text = String::from_utf8_lossy(&kept.stdout);
+	assert!(
+		!text.contains("re-run with --yes"),
+		"`--yes` fails for a kept master; pointing at it is a dead end: {text}"
+	);
+	assert!(
+		text.contains("NOT removed") && text.contains("shared"),
+		"it must say plainly that nothing was removed and why: {text}"
+	);
+}

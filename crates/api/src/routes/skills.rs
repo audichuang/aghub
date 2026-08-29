@@ -532,6 +532,16 @@ pub async fn delete_skill_by_path(
 			let mut executed_plan = plan;
 			executed_plan.paths = report.removed;
 			executed_plan.skipped.extend(report.skipped);
+			// Kept as well as folded into `skipped`: `skipped` also holds paths
+			// refused for being outside the allow-list, so it cannot answer
+			// "did anything FAIL?". Hard-coding this empty (as this route did)
+			// made `RemovalKind::Partial` unreachable HERE, so a delete where
+			// every `remove_dir_all` returned EACCES reported
+			// `outcome: "removed"` with the skill still on disk — and the
+			// desktop closes its dialog on `removed`. The manager path already
+			// collects this; only this hand-written copy did not.
+			let failed_paths: Vec<std::path::PathBuf> =
+				report.failed.iter().map(|(path, _)| path.clone()).collect();
 			executed_plan
 				.skipped
 				.extend(report.failed.into_iter().map(|(path, _)| path));
@@ -547,7 +557,7 @@ pub async fn delete_skill_by_path(
 					plan: executed_plan,
 					executed: true,
 					prune,
-					failed_paths: vec![],
+					failed_paths,
 					absent: false,
 				},
 				dry_run,

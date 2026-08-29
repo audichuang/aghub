@@ -291,6 +291,56 @@ pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_sub_agent(source).map(|_| ())
 }
 
+/// Refuse a reconcile whose add and remove targets share the SAME backing file.
+///
+/// Several agents deliberately read one file: Claude's project MCP config is
+/// `.mcp.json`, and Copilot uses that same file when it exists. "Add to
+/// copilot, remove from claude" is then not a state the world can be in — the
+/// membership is a property of the file, not of the agent.
+///
+/// Left unchecked it does not merely fail, it DESTROYS: the copy finds an
+/// equivalent entry (truthfully — it is the same file) and reports
+/// `already_present`, the staged gate only asks whether the copy ERRORED, and
+/// the delete then rewrites that one file without the entry. Both rows report
+/// success and the resource is gone from both agents.
+fn ensure_targets_do_not_share_backing<F>(
+	copies: &[OperationPlan],
+	deletes: &[OperationPlan],
+	backing: F,
+) -> Result<()>
+where
+	F: Fn(&InstallTarget) -> Option<PathBuf>,
+{
+	let resolve = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+	for copy in copies {
+		let Some(copy_path) = backing(&copy.target).map(resolve) else {
+			continue;
+		};
+		for delete in deletes {
+			let Some(delete_path) = backing(&delete.target).map(resolve) else {
+				continue;
+			};
+			if copy_path == delete_path {
+				return Err(ConfigError::InvalidConfig(format!(
+					"'{}' and '{}' share one config file ({}), so adding to \
+					 the first while removing from the second is not a state \
+					 that can exist — the removal would take it from both. \
+					 Drop one of them from this reconcile.",
+					copy.target.agent.as_str(),
+					delete.target.agent.as_str(),
+					copy_path.display()
+				)));
+			}
+		}
+	}
+	Ok(())
+}
+
+/// The file an agent's MCP entries live in, for [`ensure_targets_do_not_share_backing`].
+fn mcp_backing_path(target: &InstallTarget) -> Option<PathBuf> {
+	build_manager(target).config_path()
+}
+
 /// Copy one MCP into a target. `Ok(true)` = the target already had an
 /// EQUIVALENT server and nothing was written.
 ///
@@ -743,6 +793,9 @@ pub fn reconcile_mcp(
 		source.scope,
 		source.project_root.clone(),
 	);
+	// Before ANY write: an add and a remove that resolve to the same file
+	// cannot both be honoured, and attempting it deletes from both.
+	ensure_targets_do_not_share_backing(&copies, &deletes, mcp_backing_path)?;
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,

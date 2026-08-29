@@ -1153,6 +1153,8 @@ export default {
 	sourceRemovedCleaning: "清理中...",
 	sourceRemovedCleaned: "已清理 `{{name}}`。",
 	sourceRemovedCleanedMany: "已清理 {{count}} 个已移除技能。",
+	deleteSkillPartial:
+		"`{{name}}` 只删掉一部分:有些文件移除失败(权限,或文件正在使用中)。请检查该 skill 的文件夹后再试一次。",
 	deleteSkillKeptSharedMaster:
 		"`{{name}}` 没有被删除:还有其他 agent 在读共用的 .agents/skills master。请先从那些 agent 移除,或改成对所有 agent 删除。",
 	sourceRemovedCleanFailed: "清理 `{{name}}` 失败。",

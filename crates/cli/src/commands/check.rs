@@ -243,7 +243,10 @@ pub fn execute(
 	)?;
 
 	if online {
-		return execute_online(scope, project_root, json);
+		// Consumes the SAME snapshot the offline path does — reading the lock
+		// again here left the online path with the very window the probe
+		// closes.
+		return execute_online(locks, project_root, json);
 	}
 
 	let mut views: Vec<SkillUpdateView> = Vec::new();
@@ -307,24 +310,19 @@ use super::source::EnvTokenResolver;
 /// heals either lock (the desktop API owns global-lock self-heal; the CLI
 /// `check` stays non-mutating, and the project lock is VCS-tracked).
 fn execute_online(
-	scope: ResourceScope,
+	locks: crate::commands::LockSnapshot,
 	project_root: Option<&Path>,
 	json: bool,
 ) -> Result<()> {
-	let want_global =
-		matches!(scope, ResourceScope::GlobalOnly | ResourceScope::Both);
-	let want_project =
-		matches!(scope, ResourceScope::ProjectOnly | ResourceScope::Both);
-
 	let mut entries: Vec<EntryInput> = Vec::new();
-	if want_global {
+	if let Some(global) = locks.global {
 		let local = local_hashes_for_scope(ResourceScope::GlobalOnly, None);
-		entries.extend(global_lock_entries(&local));
+		entries.extend(global_lock_entries(global, &local));
 	}
-	if want_project {
+	if let Some(project) = locks.project {
 		let local =
 			local_hashes_for_scope(ResourceScope::ProjectOnly, project_root);
-		entries.extend(project_lock_entries(project_root, &local));
+		entries.extend(project_lock_entries(project, &local));
 	}
 	eprintln_verbose!("Checking {} locked skill(s) online", entries.len());
 
@@ -406,10 +404,12 @@ fn local_hashes_for_scope(
 }
 
 /// Project the global skill lock into the orchestrator's per-entry inputs.
+/// Takes the ALREADY-READ lock. Reading it again here would reopen the window
+/// the fail-closed probe exists to close — see `LockSnapshot`.
 fn global_lock_entries(
+	lock: skill::lock::SkillLockFile,
 	local_hashes: &HashMap<String, String>,
 ) -> Vec<EntryInput> {
-	let lock = skill::lock::global::read_skill_lock();
 	lock.skills
 		.into_iter()
 		.map(|(name, entry)| EntryInput {
@@ -433,11 +433,11 @@ fn global_lock_entries(
 }
 
 /// Project the project skill lock into the orchestrator's per-entry inputs.
+/// See [`global_lock_entries`] for why the lock is passed in.
 fn project_lock_entries(
-	project_root: Option<&Path>,
+	lock: skill::lock::local::LocalSkillLockFile,
 	local_hashes: &HashMap<String, String>,
 ) -> Vec<EntryInput> {
-	let lock = skill::lock::local::read_local_lock(project_root);
 	lock.skills
 		.into_iter()
 		.map(|(name, entry)| EntryInput {

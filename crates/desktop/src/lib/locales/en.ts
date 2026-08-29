@@ -1192,6 +1192,8 @@ export default {
 	sourceRemovedCleaning: "Cleaning...",
 	sourceRemovedCleaned: "Cleaned `{{name}}`.",
 	sourceRemovedCleanedMany: "Cleaned {{count}} removed skills.",
+	deleteSkillPartial:
+		"`{{name}}` was only partly deleted: some files could not be removed (permissions, or a file in use). Check the skill's folder and try again.",
 	deleteSkillKeptSharedMaster:
 		"`{{name}}` was not deleted: another agent still reads the shared .agents/skills master. Remove it from those agents first, or delete it for all agents.",
 	sourceRemovedCleanFailed: "Failed to clean `{{name}}`.",

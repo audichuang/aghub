@@ -62,6 +62,21 @@ impl SkillAdd {
 	}
 }
 
+/// Do two paths resolve to the same directory?
+///
+/// `canonicalize` on both sides when it succeeds, so a symlinked HOME
+/// (`/private/var` on macOS) or a linked agent dir does not read as a different
+/// location; falls back to a literal comparison when a side does not exist yet.
+/// Used to tell "this agent already reads the Master" from "this agent holds an
+/// unrelated skill of the same name" — a distinction that decides whether a
+/// no-op is honest or a silent conflict.
+fn paths_resolve_same(a: &std::path::Path, b: &std::path::Path) -> bool {
+	let resolve = |p: &std::path::Path| {
+		std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+	};
+	resolve(a) == resolve(b)
+}
+
 /// Shared preparation for the two universal-install entry points
 /// (`add_skill_universal` / `add_skill_from_path_universal`): resolves the
 /// `.agents` canonical directory plus the current agent's symlink target.
@@ -896,12 +911,44 @@ impl ConfigManager {
 					.cloned()
 					.unwrap_or_else(|| skill.clone())
 			};
-			// NativeReader: reads the Master directly → re-add is a no-op.
+			// NativeReader: reads the Master directly → re-add is a no-op —
+			// but ONLY when the entry it already has really IS that Master.
+			//
+			// This used to return on the name alone. A NativeReader's read
+			// paths include its OWN private dir as well as the Master, so an
+			// agent holding an unrelated `<own-dir>/<name>` matched here and the
+			// call reported `already_installed`. Nothing was written, and the
+			// transfer path — which now defers its already-present decision to
+			// this function — reported a success. Paired with a `reconcile
+			// --remove`, whose gate only asks whether the copy ERRORED, that
+			// silently deleted the source: the copy did nothing, the delete ran,
+			// and the content was gone. Verified by resolved path, not by name.
 			if matches!(
 				link_need,
 				crate::skills::linker::LinkNeed::NativeReader
 			) {
-				return Ok(SkillAdd::already_installed(installed()));
+				let existing = installed();
+				let reads_the_master = existing
+					.canonical_path
+					.as_deref()
+					.or(existing.source_path.as_deref())
+					// Entries store the home-relative `~/…` form (root
+					// `AGENTS.md`: "`~` prefix for home-relative, converted at
+					// the I/O boundary"), so compare only after expanding it —
+					// a literal comparison never matches.
+					.map(resolve_source_path)
+					.and_then(|p| {
+						// Entries record `<dir>/SKILL.md`; compare the dir.
+						p.parent().map(std::path::Path::to_path_buf)
+					})
+					.map(|dir| paths_resolve_same(&dir, &canonical))
+					.unwrap_or(false);
+				if reads_the_master {
+					return Ok(SkillAdd::already_installed(existing));
+				}
+				// A same-named skill this agent holds somewhere else entirely:
+				// a real conflict, exactly as for a NeedsLink agent.
+				return Err(ConfigError::resource_exists("skill", &skill.name));
 			}
 			if let Some(ref agent_dir) = agent_write_dir {
 				let slot = agent_dir.join(&safe);

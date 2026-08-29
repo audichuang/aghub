@@ -81,6 +81,14 @@ export function DeleteSkillLocationDialog({
 					}),
 				);
 			}
+			if (result.outcome === "partial") {
+				// Some paths went, some did not. Still an error for the user —
+				// the skill is not gone — but the list MUST be refreshed,
+				// because part of it really was removed. Throwing without
+				// invalidating would leave stale entries on screen.
+				await invalidateSkillQueries(queryClient);
+				throw new Error(t("deleteSkillPartial", { name: skillName }));
+			}
 			if (result.outcome !== "removed" && result.outcome !== "absent") {
 				// `absent` is a success for a delete: the post-condition
 				// ("the skill is gone") already holds.

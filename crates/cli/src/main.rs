@@ -428,9 +428,12 @@ enum Commands {
 		/// `doctor --verify-links && echo healthy` prints healthy over a
 		/// dangling referrer — the findings only ever went to stderr.
 		///
-		/// `autoCovered` and `unsupported` are not issues: they are the correct
-		/// resting state for an agent that reads the Master directly or cannot
-		/// hold a skill at all.
+		/// Counts BOTH axes: a `health` other than `ok` (orphan-lock,
+		/// untracked, invalid-skill, master-is-symlink) and, when
+		/// `--verify-links` is given, any per-agent referrer problem.
+		/// `autoCovered` and `unsupported` are not issues — they are the
+		/// correct resting state for an agent that reads the Master directly
+		/// or cannot hold a skill at all.
 		#[arg(long)]
 		fail_on_issues: bool,
 	},
@@ -1099,6 +1102,21 @@ fn render_removal(
 	payload: &serde_json::Value,
 	is_preview: bool,
 ) -> String {
+	// `kept` is terminal: the master is shared and an executing call REFUSES.
+	// Checked before the preview branch, which would otherwise print "re-run
+	// with --yes to remove" — and `--yes` then fails with
+	// `Unsupported operation`. That is the never-terminating hint
+	// `RemovalKind::Kept` was introduced to eliminate; the JSON and the three
+	// desktop consumers were fixed and the CLI's own human output was not.
+	if payload.get("outcome").and_then(|v| v.as_str()) == Some("kept") {
+		return format!(
+			"{} '{name}' was NOT removed: it lives in the shared \
+			 .agents/skills master and another agent still reads it. Remove it \
+			 from those agents first, or delete it for all agents \
+			 (--all-agents).\n",
+			resource.singular()
+		);
+	}
 	let kind = resource.singular();
 	let flag = |key: &str| payload.get(key).and_then(|v| v.as_bool());
 	let list = |key: &str| -> Vec<&str> {

@@ -297,8 +297,17 @@ pub fn preview_prune_for_removal(
 	// the root for the Global half of `Both`. A different mapping here would
 	// scan different dirs from the commit it is previewing.
 	let preview_one = |prune_scope: PruneScope, root: Option<&Path>| {
+		// Fail-CLOSED on the LOCK as well as on the scan: an unreadable lock
+		// must degrade the whole preview to `NotRun`, not to an empty list that
+		// promises nothing else will be dropped.
+		let keys = locked_keys_checked(prune_scope, root)?;
 		let dirs = scope_skill_dirs(prune_scope, root);
-		preview_prune_from_dirs(prune_scope, &dirs, root, &scan).ok()
+		let disk = collect_disk_dir_names(&dirs, &scan).ok()?;
+		Some(
+			keys.into_iter()
+				.filter(|k| !skill::skill_present_on_disk(k, &disk))
+				.collect::<Vec<String>>(),
+		)
 	};
 
 	let keys = match scope {
@@ -367,6 +376,30 @@ pub fn preview_prune(
 }
 
 /// Current lock entry keys for a scope (no mutation).
+/// Lock keys for a PREVIEW, failing CLOSED.
+///
+/// `locked_keys` uses the fail-OPEN readers, so an unreadable lock yields an
+/// empty key set — and an empty `would_prune_lock_entries` reads, by this
+/// module's own convention, as "the scan ran and found no orphans": a clean
+/// bill of health from a scan that saw nothing. The commit path prunes through
+/// the fail-CLOSED modify seam and reports `Failed` for the same file, so the
+/// two diverged exactly where the preview is supposed to predict the commit.
+fn locked_keys_checked(
+	scope: PruneScope,
+	project_root: Option<&Path>,
+) -> Option<Vec<String>> {
+	match scope {
+		PruneScope::Global => skill::lock::read_global_lock_checked()
+			.ok()
+			.map(|lock| lock.skills.keys().cloned().collect()),
+		PruneScope::Project => project_root.and_then(|root| {
+			skill::lock::local::read_local_lock_checked(Some(root))
+				.ok()
+				.map(|lock| lock.skills.keys().cloned().collect())
+		}),
+	}
+}
+
 fn locked_keys(scope: PruneScope, project_root: Option<&Path>) -> Vec<String> {
 	match scope {
 		PruneScope::Global => {
