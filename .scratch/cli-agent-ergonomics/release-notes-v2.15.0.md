@@ -83,6 +83,29 @@ each with a control/fault pair that differs by one permission bit:
   "is anything still pointing at this?" check, so the directory it pointed at
   was `remove_dir_all`'d and the peer left dangling.
 
+An eighth pass, over round 7's own patch, caught it overshooting in two places
+and shipping one fix untested:
+
+- Failing closed on EVERY stat error was too blunt. That check runs over all 25
+  agents' skills dirs, so one odd directory — an empty one that cannot be
+  traversed, or a `skills` that is a regular file — blocked copy-layout deletion
+  of every skill, silently, because the report names only the caller's own path.
+  It now asks the cheaper question first: `read_dir` yields NAMES without
+  stat'ing anything, so a complete listing that does not contain the name is
+  proof no referrer is there. Only an incomplete listing keeps the directory,
+  and the path that kept it is named on stderr.
+- `SkillError::Io` is not a synonym for "unreadable": a SKILL.md that is not
+  UTF-8 (one latin-1 byte will do) raises it too, having been READ. Treating
+  that as unreadable made a single malformed file exit-1 every command for that
+  agent — including the `delete` that would have removed the offender, so it
+  could not be cleaned up through aghub at all. Malformed content recurses, as
+  it always has; the fix's own comment had claimed that while the code did the
+  opposite.
+- The symlink-sweep fix had no test: reverting it alone left every new test
+  green, under a comment claiming otherwise. It has its own control/fault pair
+  now, and all six new tests were proved by reverting each fix and watching the
+  assertion go red.
+
 Those four are **pre-existing on `main`** — this branch's review process found
 them, it did not introduce them. The claim above ("an agent whose config could
 not be READ is no longer counted as one that holds nothing") is only true with

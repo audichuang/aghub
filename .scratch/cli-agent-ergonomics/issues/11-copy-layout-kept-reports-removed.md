@@ -30,3 +30,8 @@ match guard。擴張它等於在三個決策點改語意，AGENTS.md 對這件�
 
 誤導的是字串；`paths: []` 和 `skipped: [...]` 已經把真相寫在旁邊。
 正解是給 copy 路徑自己的「因外部 referrer 保留」狀態，而不是借用 master 那個。
+
+**round 7 之後的補正**：`dir_has_external_referrer` 現在會在 stderr 上
+`warn!` 點名是**哪一個路徑**擋住了刪除（`keeping <root>: <referrer> still
+references it`）。原本 25 個 agent 的目錄裡任何一個造成的保留，使用者都無從
+得知是誰。`outcome` 仍然錯報 `removed` —— 這一條沒變。
