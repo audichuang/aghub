@@ -168,7 +168,21 @@ impl DoctorRow {
 	/// A gate that reads one and not the other is inert exactly when the other
 	/// is the only thing that ran.
 	fn is_issue(&self) -> bool {
-		let health_bad = self.health != "ok";
+		// NOT simply `health != "ok"`. Two non-`ok` values are legitimate
+		// resting states, and gating on them makes `--fail-on-issues` red for
+		// setups that are working exactly as designed:
+		//
+		// - `untracked`: a hand-written skill in `.agents/skills` with no lock
+		//   entry. That is how a skill authored in place looks — this very repo
+		//   is that layout — and the note doctor prints for it ("back up, then
+		//   delete before reinstalling via source sync") is the wrong advice
+		//   for one, let alone a reason to fail CI.
+		// - `master-is-symlink`: a SUPPORTED layout, as the NativeReader branch
+		//   below says in so many words.
+		//
+		// `orphan-lock` and `invalid-skill` ARE actionable: a lock entry with
+		// no master on disk, and a master whose SKILL.md does not parse.
+		let health_bad = matches!(self.health, "orphan-lock" | "invalid-skill");
 		let links_bad = match &self.link_audit {
 			LinkAudit::NotRequested | LinkAudit::Verified { .. } => false,
 			LinkAudit::Issues { agents } => {
@@ -176,6 +190,19 @@ impl DoctorRow {
 			}
 		};
 		health_bad || links_bad
+	}
+
+	/// Which axis made this row an issue — for a message that points at the one
+	/// that actually ran.
+	fn issue_axis(&self) -> Option<&'static str> {
+		let links_bad = matches!(&self.link_audit, LinkAudit::Issues { .. });
+		let health_bad = matches!(self.health, "orphan-lock" | "invalid-skill");
+		match (health_bad, links_bad) {
+			(true, true) => Some("both"),
+			(true, false) => Some("health"),
+			(false, true) => Some("links"),
+			(false, false) => None,
+		}
 	}
 }
 
@@ -254,21 +281,23 @@ fn audit_agent_links(
 			);
 			let (state, path) = match need {
 				LinkNeed::NativeReader => {
-					// `!= Missing`, not `== Dir`: a master that is itself a
-					// symlink is a SUPPORTED layout (it has its own `health`
-					// label, `master-is-symlink`), and this branch used to call
-					// it `missing` for every Master-reading agent — a row that
-					// contradicted its own `master=link` column, and, once
-					// `--fail-on-issues` existed, exited 1 with a repair
-					// command whose `<source>` is `—`. Same gate the NeedsLink
-					// branch below already uses.
-					let state = if matches!(
-						master_state(&master_skill),
-						MasterState::Missing
-					) {
-						AgentLinkState::Missing
-					} else {
+					// A master that is itself a symlink is a SUPPORTED layout
+					// (it has its own `health` label), so `== Dir` wrongly
+					// called it `missing` for every Master-reading agent. But
+					// `master_state` uses `symlink_metadata`, so a DANGLING
+					// symlink also reports `Link` — and simply accepting
+					// `!= Missing` then certified a broken tree as
+					// `autoCovered` while `get skills` returned `[]`. That is
+					// precisely the false green `--verify-links` exists to
+					// prevent.
+					//
+					// So: resolve it. Covered when the master actually leads to
+					// a readable skill; missing when it does not, however it is
+					// spelled on disk.
+					let state = if master_skill.join("SKILL.md").is_file() {
 						AgentLinkState::AutoCovered
+					} else {
+						AgentLinkState::Missing
 					};
 					(state, Some(master_skill.to_string_lossy().into_owned()))
 				}
@@ -546,11 +575,24 @@ pub fn execute_with_options(
 	// `untracked` master or an `invalid-skill`: the same false green the flag
 	// exists to remove, one level up.
 	let issue_count = rows.iter().filter(|row| row.is_issue()).count();
+	// Name the axis that actually failed. A hard-coded "agent referrer
+	// issue(s)" pointed at the link audit even when it had never run
+	// (`--fail-on-issues` without `--verify-links`), and contradicted doctor's
+	// own note two lines above.
+	let axes: std::collections::BTreeSet<&'static str> =
+		rows.iter().filter_map(DoctorRow::issue_axis).collect();
 	let gate = |issues: usize| -> Result<()> {
 		if fail_on_issues && issues > 0 {
-			anyhow::bail!(
-				"{issues} agent referrer issue(s) — see the report above"
-			);
+			let what = if axes.contains("both")
+				|| (axes.contains("health") && axes.contains("links"))
+			{
+				"skill health and agent referrer issue(s)"
+			} else if axes.contains("links") {
+				"agent referrer issue(s)"
+			} else {
+				"skill health issue(s)"
+			};
+			anyhow::bail!("{issues} {what} — see the report above");
 		}
 		Ok(())
 	};

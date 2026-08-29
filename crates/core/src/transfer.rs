@@ -291,6 +291,44 @@ pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_sub_agent(source).map(|_| ())
 }
 
+/// Does the target's installed skill hold the same content as `source_root`?
+///
+/// Compared by the npx-compatible folder hash, the same digest the lock files
+/// use, so "same" means the same thing here as everywhere else in the project.
+/// Any error resolving either side answers `false`: this gates a DESTRUCTIVE
+/// step, and an unprovable match must not be read as a match.
+fn skill_folders_match(
+	source_root: &Path,
+	target: &InstallTarget,
+	name: &str,
+) -> bool {
+	let mut manager = build_manager(target);
+	if ensure_loaded(&mut manager).is_err() {
+		return false;
+	}
+	let Some(installed) = manager.get_skill(name) else {
+		return false;
+	};
+	let Some(recorded) = installed
+		.canonical_path
+		.as_deref()
+		.or(installed.source_path.as_deref())
+	else {
+		return false;
+	};
+	let installed_dir = resolve_skill_file(recorded);
+	let Some(installed_dir) = installed_dir.parent() else {
+		return false;
+	};
+	match (
+		skill::hash::compute_skill_folder_hash(source_root),
+		skill::hash::compute_skill_folder_hash(installed_dir),
+	) {
+		(Ok(a), Ok(b)) => a == b,
+		_ => false,
+	}
+}
+
 /// Refuse a reconcile whose add and remove targets share the SAME backing file.
 ///
 /// Several agents deliberately read one file: Claude's project MCP config is
@@ -796,6 +834,15 @@ pub fn reconcile_mcp(
 	// Before ANY write: an add and a remove that resolve to the same file
 	// cannot both be honoured, and attempting it deletes from both.
 	ensure_targets_do_not_share_backing(&copies, &deletes, mcp_backing_path)?;
+	// The copy targets, remembered for the RE-CHECK inside the delete arm. Some
+	// resolvers are existence-dependent — Copilot's project path is
+	// `.mcp.json` when that file exists and `.github/mcp.json` otherwise — so
+	// the preflight above is a SNAPSHOT: a copy that creates `.mcp.json` flips
+	// the delete target onto it afterwards, and the preflight saw two different
+	// files. Re-resolving at delete time is the only point where the paths are
+	// settled.
+	let copy_targets: Vec<InstallTarget> =
+		copies.iter().map(|plan| plan.target.clone()).collect();
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -815,6 +862,32 @@ pub fn reconcile_mcp(
 					// about what "already there" means.
 					OperationAction::Copy => copy_mcp_into(&plan.target, &mcp),
 					OperationAction::Delete => {
+						// Re-check now that every copy has run: this target may
+						// have been resolved onto a file one of them just
+						// created (see `copy_targets`).
+						let resolve =
+							|p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+						if let Some(mine) =
+							mcp_backing_path(&plan.target).map(resolve)
+						{
+							for copied in &copy_targets {
+								if mcp_backing_path(copied).map(resolve)
+									== Some(mine.clone())
+								{
+									return Err(ConfigError::InvalidConfig(
+										format!(
+											"'{}' now resolves to the same \
+											 config file as '{}' ({}); \
+											 removing would take the entry \
+											 from both. Nothing was removed.",
+											plan.target.agent.as_str(),
+											copied.agent.as_str(),
+											mine.display()
+										),
+									));
+								}
+							}
+						}
 						let mut manager = build_manager(&plan.target);
 						ensure_loaded(&mut manager)?;
 						manager.remove_mcp(&source.name).map(|()| false)
@@ -1060,6 +1133,9 @@ pub fn reconcile_skill(
 	// reading the Master directly has nothing agent-specific to take) and leave
 	// the Master orphaned — and the desktop's manage-agents dialog allows
 	// exactly this shape: deselect every agent, no adds.
+	// Does this reconcile take the skill AWAY from its source? Only then must a
+	// copy prove the content actually landed — see the Copy arm below.
+	let deletes_source = removed.contains(&source.agent);
 	let exhaustive = !removed.is_empty()
 		&& added.is_empty()
 		&& skill_holders(&skill.name, &source)
@@ -1087,10 +1163,50 @@ pub fn reconcile_skill(
 					let mut manager = build_manager(&plan.target);
 					ensure_loaded(&mut manager)?;
 					// `add_skill_from_path` owns the already-present decision;
-					// `transfer_skill` now defers to the same call.
-					Ok(manager
-						.add_skill_from_path(&source_root)?
-						.already_installed)
+					// `transfer_skill` defers to the same call.
+					let added = manager.add_skill_from_path(&source_root)?;
+
+					// When this reconcile also REMOVES, the copy has to prove
+					// the source content actually landed — not merely that the
+					// call succeeded.
+					//
+					// `materialize_universal_master` preserves a pre-existing
+					// Master rather than overwriting it (deliberate: see
+					// `add_skill_from_path`). So a target with no skill at all
+					// can be linked to an ALREADY-PRESENT Master holding
+					// DIFFERENT content: the call reports success,
+					// `already_installed` is false — it really did install
+					// something — and not one byte of the source was written.
+					// Paired with the delete, the source content is then gone
+					// while a same-named skill remains, so nothing looks wrong.
+					//
+					// Only the removing case is tightened. A plain
+					// `transfer`/`--add` writes nothing away, so preserving the
+					// Master there stays the documented behaviour.
+					if deletes_source
+						&& !added.wrote_master
+						&& !added.already_installed
+					{
+						let landed =
+							crate::skills::skill_source_root(&source_root);
+						let same = skill_folders_match(
+							&landed,
+							&plan.target,
+							&skill.name,
+						);
+						if !same {
+							return Err(ConfigError::InvalidConfig(format!(
+								"refusing to remove '{}' from the source: the \
+								 target was linked to an existing \
+								 .agents/skills master whose content differs \
+								 from the source, so the copy did not carry \
+								 it over. Reconcile the master first, or drop \
+								 the --remove.",
+								skill.name
+							)));
+						}
+					}
+					Ok(added.already_installed)
 				})(),
 				// Use the planned-removal seam — never blind-delete a shared
 				// universal master discovered through an agent's read dirs.

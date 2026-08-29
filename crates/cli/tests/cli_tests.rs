@@ -8353,23 +8353,48 @@ fn second_review_found_gaps_stay_fixed() {
 
 	// --- `--fail-on-issues` must count the `health` axis too. Derived from
 	// `link_audit` alone it was inert without `--verify-links` — every row is
-	// `notRequested` then — so it exited 0 over an untracked master, which is
-	// the same false green the flag exists to remove.
-	let untracked = home.path().join(".agents/skills/untracked-one");
-	std::fs::create_dir_all(&untracked).unwrap();
-	std::fs::write(
-		untracked.join("SKILL.md"),
-		"---\nname: untracked-one\ndescription: d\n---\n\nx\n",
-	)
-	.unwrap();
+	// `notRequested` then — so it exited 0 over a lock entry whose master is
+	// gone, the same false green the flag exists to remove.
+	//
+	// `orphan-lock`, NOT `untracked`: a hand-written skill with no lock entry is
+	// a SUPPORTED layout (this repo is one), and gating on it made the flag
+	// permanently red for anyone authoring in place. See `DoctorRow::is_issue`.
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "will-vanish", "will-vanish");
+	let installed = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"will-vanish",
+	);
+	assert!(
+		installed.status.success(),
+		"{}",
+		String::from_utf8_lossy(&installed.stderr)
+	);
+	// The master disappears WITHOUT going through aghub: the lock entry is now
+	// an orphan, which is genuinely actionable.
+	std::fs::remove_dir_all(home.path().join(".agents/skills/will-vanish"))
+		.unwrap();
+	std::fs::remove_dir_all(home.path().join(".claude/skills/will-vanish"))
+		.ok();
+
 	let gated = isolated_cli(home.path(), state.path())
 		.args(["-g", "--json", "doctor", "--fail-on-issues"])
 		.output()
 		.unwrap();
 	assert!(
 		!gated.status.success(),
-		"an untracked master is an issue even without --verify-links: {}",
+		"an orphaned lock entry is an issue even without --verify-links: {}",
 		String::from_utf8_lossy(&gated.stdout)
+	);
+	// The message must name the axis that actually ran — it used to say
+	// "agent referrer issue(s)" while the link audit had never been requested.
+	let stderr = String::from_utf8_lossy(&gated.stderr);
+	assert!(
+		stderr.contains("skill health"),
+		"the failure must point at the axis that was checked: {stderr}"
 	);
 
 	// --- A `kept` delete must not tell the human to re-run with --yes: that
@@ -8405,4 +8430,139 @@ fn second_review_found_gaps_stay_fixed() {
 		text.contains("NOT removed") && text.contains("shared"),
 		"it must say plainly that nothing was removed and why: {text}"
 	);
+}
+
+/// The fixes for the two data-loss bugs only closed the shape each review
+/// NAMED. These are the sibling shapes a third review found on top of them.
+#[cfg(unix)]
+#[test]
+fn third_review_sibling_shapes_stay_fixed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// --- The worst one: the copy does not even claim `already_present`.
+	//
+	// `materialize_universal_master` preserves a pre-existing Master rather
+	// than overwriting it. So a target with NO skill at all gets linked to an
+	// existing Master holding DIFFERENT content: the call succeeds,
+	// `already_present` is false — it really did install something — and not
+	// one byte of the source was written. The paired delete then removed the
+	// source. Strengthening `already_present`, or the staged gate, closes
+	// neither: the copy did not lie about being a no-op, it lied about having
+	// carried the content over.
+	let master = home.path().join(".agents/skills/collide2");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: collide2\ndescription: master\n---\n\nMASTER-CONTENT\n",
+	)
+	.unwrap();
+	let claude_skill = home.path().join(".claude/skills/collide2");
+	std::fs::create_dir_all(&claude_skill).unwrap();
+	std::fs::write(
+		claude_skill.join("SKILL.md"),
+		"---\nname: collide2\ndescription: claude\n---\n\nONLY-COPY-OF-THIS\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"collide2",
+			// gemini has nothing at all — this is the `already_present: false`
+			// shape.
+			"--add",
+			"gemini",
+			"--remove",
+			"claude",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	// THE assertion.
+	let survived = std::fs::read_to_string(claude_skill.join("SKILL.md"))
+		.expect("the source must still exist");
+	assert!(
+		survived.contains("ONLY-COPY-OF-THIS"),
+		"a copy that linked the target to a DIFFERENT master must not let the \
+		 source be deleted: {survived}"
+	);
+	assert!(!out.status.success());
+	assert!(
+		String::from_utf8_lossy(&out.stdout).contains("did not carry it over")
+			|| String::from_utf8_lossy(&out.stderr)
+				.contains("did not carry it over"),
+		"the error must say WHY: stdout={} stderr={}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// --- `--fail-on-issues` must not fire on layouts that are working as
+	// designed. A hand-written skill in `.agents/skills` with no lock entry is
+	// `untracked` — this very repo is that layout — and gating on it made the
+	// flag permanently red for anyone authoring skills in place.
+	let handwritten = home.path().join(".agents/skills/authored-here");
+	std::fs::create_dir_all(&handwritten).unwrap();
+	std::fs::write(
+		handwritten.join("SKILL.md"),
+		"---\nname: authored-here\ndescription: written in place\n---\n\nx\n",
+	)
+	.unwrap();
+	// (collide2 above is also untracked; both must be tolerated.)
+	let tolerated = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "doctor", "--fail-on-issues"])
+		.output()
+		.unwrap();
+	assert!(
+		tolerated.status.success(),
+		"an untracked, hand-written skill is a supported layout, not a CI \
+		 failure: {}",
+		String::from_utf8_lossy(&tolerated.stderr)
+	);
+
+	// --- A DANGLING master symlink must not be certified. `master_state` uses
+	// `symlink_metadata`, so a broken link still reports `link`; accepting
+	// anything that is not `Missing` certified a tree where `get skills`
+	// returns [] as `autoCovered` / `verified`.
+	let target_dir = tempfile::TempDir::new().unwrap();
+	let live = target_dir.path().join("live");
+	std::fs::create_dir_all(&live).unwrap();
+	std::fs::write(
+		live.join("SKILL.md"),
+		"---\nname: live\ndescription: d\n---\n\nx\n",
+	)
+	.unwrap();
+	let link = home.path().join(".agents/skills/live");
+	std::os::unix::fs::symlink(&live, &link).unwrap();
+
+	let audit = |expect_state: &str| {
+		let out = isolated_cli(home.path(), state.path())
+			.args(["-g", "-a", "cursor", "--json", "doctor", "--verify-links"])
+			.output()
+			.unwrap();
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		let row = json
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|r| r["skill"] == "live")
+			.unwrap_or_else(|| panic!("live row present: {json}"))
+			.clone();
+		assert_eq!(
+			row["linkAudit"]["agents"][0]["state"], expect_state,
+			"{row}"
+		);
+	};
+	// A working symlink master is a SUPPORTED layout.
+	audit("autoCovered");
+	// A broken one is not covered, however it is spelled on disk.
+	std::fs::remove_dir_all(&live).unwrap();
+	audit("missing");
 }

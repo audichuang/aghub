@@ -52,6 +52,16 @@ pub enum PruneError {
 	/// A project-scope prune was requested without a project root.
 	#[error("project prune requires a project root")]
 	MissingProjectRoot,
+	/// The lock itself could not be read, so nothing about it can be reported.
+	///
+	/// Distinct from [`PruneError::Scan`]: reusing that made the message blame
+	/// the disk scan and claim a permissions problem for a file that is merely
+	/// unparseable — the exact kind of lie this module keeps having to remove.
+	#[error(
+		"the skill lock could not be read, so no prune can be planned: \
+		 {0}; resolve it (unresolved merge conflict?) and retry"
+	)]
+	UnreadableLock(String),
 }
 
 /// Pure prune: drop lock entries whose sanitized name is absent from
@@ -356,7 +366,18 @@ where
 		return Err(PruneError::MissingProjectRoot);
 	}
 	let disk = collect_disk_dir_names(dirs, scan)?;
-	let keys = locked_keys(scope, project_root);
+	// Fail CLOSED on the lock, like the commit this previews. `locked_keys`'s
+	// fail-OPEN readers turned an unreadable lock into an empty key set, and an
+	// empty result here means "the scan ran and found no orphans" — a clean
+	// bill of health from a scan that saw nothing, while `--yes` on the same
+	// file refuses outright. A preview whose whole job is predicting the commit
+	// must not disagree with it about whether the file is readable.
+	let keys = locked_keys_checked(scope, project_root).ok_or_else(|| {
+		PruneError::UnreadableLock(match scope {
+			PruneScope::Global => "global skill lock".to_string(),
+			PruneScope::Project => "skills-lock.json".to_string(),
+		})
+	})?;
 	Ok(keys
 		.into_iter()
 		.filter(|k| !skill::skill_present_on_disk(k, &disk))
@@ -397,23 +418,6 @@ fn locked_keys_checked(
 				.ok()
 				.map(|lock| lock.skills.keys().cloned().collect())
 		}),
-	}
-}
-
-fn locked_keys(scope: PruneScope, project_root: Option<&Path>) -> Vec<String> {
-	match scope {
-		PruneScope::Global => {
-			skill::get_all_locked_skills().keys().cloned().collect()
-		}
-		PruneScope::Project => project_root
-			.map(|r| {
-				skill::read_local_lock(Some(r))
-					.skills
-					.keys()
-					.cloned()
-					.collect()
-			})
-			.unwrap_or_default(),
 	}
 }
 
