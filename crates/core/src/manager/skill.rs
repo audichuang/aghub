@@ -77,6 +77,31 @@ fn paths_resolve_same(a: &std::path::Path, b: &std::path::Path) -> bool {
 	resolve(a) == resolve(b)
 }
 
+/// The skill as it exists at the Master on disk, with its paths pointed there.
+///
+/// `materialize_universal_master` PRESERVES a pre-existing Master rather than
+/// overwriting it (deliberate). When it does, what is on disk is that Master —
+/// not the skill the caller just handed in — and [`SkillAdd`]'s contract is
+/// that `skill` is ALWAYS what is on disk after the call. Returning the input
+/// told a user re-adding an edited source that their new description/version
+/// had landed while disk kept the old content, and told `transfer`/`reconcile`
+/// that the copy had carried the content over.
+///
+/// `None` when the Master cannot be parsed, in which case the caller keeps what
+/// it has: a best-effort read must not turn a successful install into an error.
+fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
+	let pkg = skill::parser::parse(canonical).ok()?;
+	let mut found = convert_skill(pkg);
+	// Keyed by the requested name: that is the directory it lives in and the
+	// name every later lookup uses, even if the Master's own frontmatter
+	// disagrees.
+	found.name = name.to_string();
+	let md = canonical.join("SKILL.md").to_string_lossy().to_string();
+	found.source_path = Some(md.clone());
+	found.canonical_path = Some(md);
+	Some(found)
+}
+
 /// Does an agent's already-present `existing` entry resolve to the Master at
 /// `canonical`?
 ///
@@ -351,7 +376,8 @@ impl ConfigManager {
 		// This path has a `Skill` struct, not a source tree, so the from-struct
 		// SKILL.md is serialized here (intrinsic to this entry point). A
 		// pre-existing master is reused without overwriting.
-		if canonical.exists() {
+		let canonical_existed = canonical.exists();
+		if canonical_existed {
 			warn!(
 				"canonical '{}' already exists; reusing without overwriting \
 				 SKILL.md (use `aghub update` to refresh content)",
@@ -394,7 +420,14 @@ impl ConfigManager {
 		let mut fs_skill = skill.clone();
 		fs_skill.source_path = Some(canonical_md.clone());
 		fs_skill.canonical_path = Some(canonical_md);
-		config.skills.push(fs_skill.clone());
+		// What is ON DISK, which is not `fs_skill` when the Master was preserved.
+		let on_disk = if canonical_existed {
+			master_on_disk(&canonical, &skill.name)
+				.unwrap_or_else(|| fs_skill.clone())
+		} else {
+			fs_skill.clone()
+		};
+		config.skills.push(on_disk.clone());
 
 		// Deliberately NOT `save_current()`: `save()` serializes MCPs and
 		// nothing else, so it cannot persist a skill — the on-disk work is already
@@ -402,7 +435,7 @@ impl ConfigManager {
 		// normalized model as a pure side effect, dropping per-server fields aghub
 		// does not model. See `set_skill_enabled` for the same defect in its
 		// starkest form.
-		Ok(SkillAdd::installed(fs_skill, &results))
+		Ok(SkillAdd::installed(on_disk, &results))
 	}
 
 	pub fn get_skill(&self, name: &str) -> Option<&Skill> {
@@ -974,10 +1007,28 @@ impl ConfigManager {
 		let mut fs_skill = skill.clone();
 		fs_skill.source_path = Some(canonical_md.clone());
 		fs_skill.canonical_path = Some(canonical_md);
-		config.skills.push(fs_skill);
+		// What is ON DISK. `created_master` is the materializer's own receipt:
+		// it is false exactly when a pre-existing Master was preserved, and then
+		// the source we parsed was never written.
+		let on_disk = if results.created_master {
+			fs_skill.clone()
+		} else {
+			// Say so. The from-struct sibling has warned about this since it was
+			// written; this path said nothing at all, so a user re-adding an
+			// edited source saw only a success.
+			warn!(
+				"canonical '{}' already exists; reusing it without overwriting \
+				 SKILL.md — the skill reported below is the MASTER on disk, not \
+				 the source just read (use `aghub update` to refresh content)",
+				canonical.display()
+			);
+			master_on_disk(&canonical, &skill.name)
+				.unwrap_or_else(|| fs_skill.clone())
+		};
+		config.skills.push(on_disk.clone());
 
 		// Not `save_current()` — see `add_skill`.
-		Ok(SkillAdd::installed(skill, &results))
+		Ok(SkillAdd::installed(on_disk, &results))
 	}
 
 	/// Map the single-agent result from `materialize_universal_master` onto the

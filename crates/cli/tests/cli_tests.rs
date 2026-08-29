@@ -9160,3 +9160,173 @@ fn a_delete_that_removed_nothing_does_not_report_success() {
 		String::from_utf8_lossy(&out.stdout)
 	);
 }
+
+/// Three ways the tool said something that was not so, all found by the same
+/// question: does the report match what is on disk?
+#[cfg(unix)]
+#[test]
+fn what_the_tool_reports_matches_what_is_on_disk() {
+	// --- (1) A refused copy must leave nothing behind.
+	//
+	// The content-landing guard returns Err AFTER `add_skill_from_path` has
+	// already linked the target to the master, so `failed_count: 2` plus
+	// "nothing was removed" read as "no state changed" while the target had
+	// gained a skill it never had, holding content nobody asked to copy.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/skills/foo"))
+			.unwrap();
+		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
+			.unwrap();
+		std::fs::write(
+			home.path().join(".claude/skills/foo/SKILL.md"),
+			"---\nname: foo\ndescription: A\n---\n\nCLAUDE-A\n",
+		)
+		.unwrap();
+		std::fs::write(
+			home.path().join(".agents/skills/foo/SKILL.md"),
+			"---\nname: foo\ndescription: C\n---\n\nMASTER-C\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"foo",
+				"--add",
+				"gemini",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(!out.status.success());
+		assert!(
+			!home.path().join(".gemini/skills/foo").exists(),
+			"a refused copy must not leave its referrer behind"
+		);
+		let sees = isolated_cli(home.path(), state.path())
+			.args(["-g", "--json", "-a", "gemini", "get", "skills"])
+			.output()
+			.unwrap();
+		let json: Value = serde_json::from_slice(&sees.stdout).unwrap();
+		assert_eq!(json.as_array().unwrap().len(), 0, "{json}");
+	}
+
+	// --- (2) The preview must refuse what `--yes` refuses.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+		std::os::unix::fs::symlink(
+			home.path().join(".claude"),
+			home.path().join(".grok"),
+		)
+		.unwrap();
+		std::fs::write(
+			home.path().join(".claude/agents/reviewer.md"),
+			"---\nname: reviewer\ndescription: d\n---\n\nB\n",
+		)
+		.unwrap();
+		let preview = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"sub-agent",
+				"--from-agent",
+				"claude",
+				"--name",
+				"reviewer",
+				"--add",
+				"grok",
+				"--remove",
+				"claude",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			!preview.status.success(),
+			"the preview green-lit a plan --yes refuses: {}",
+			String::from_utf8_lossy(&preview.stdout)
+		);
+	}
+
+	// --- (3) `add` must report the skill ON DISK, not the one it just parsed.
+	//
+	// The materializer preserves a pre-existing Master rather than overwriting
+	// it, so re-adding an edited source for a second agent wrote nothing — and
+	// the response echoed the SOURCE's description and version back, telling
+	// the user their edit had landed. `add` said B while `get` said A.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let src_a = home.path().join("srcA/shared");
+		let src_b = home.path().join("srcB/shared");
+		std::fs::create_dir_all(&src_a).unwrap();
+		std::fs::create_dir_all(&src_b).unwrap();
+		std::fs::write(
+			src_a.join("SKILL.md"),
+			"---\nname: shared\ndescription: FROM-A\nversion: A.0.0\n---\n\nA\n",
+		)
+		.unwrap();
+		std::fs::write(
+			src_b.join("SKILL.md"),
+			"---\nname: shared\ndescription: FROM-B\nversion: B.0.0\n---\n\nB\n",
+		)
+		.unwrap();
+
+		let first = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"cursor",
+				"--json",
+				"add",
+				"skills",
+				"--from",
+				src_a.to_str().unwrap(),
+			])
+			.output()
+			.unwrap();
+		assert!(first.status.success());
+
+		let second = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"--json",
+				"add",
+				"skills",
+				"--from",
+				src_b.to_str().unwrap(),
+			])
+			.output()
+			.unwrap();
+		assert!(second.status.success());
+		let added: Value = serde_json::from_slice(&second.stdout).unwrap();
+		assert_eq!(
+			added["description"], "FROM-A",
+			"add must report the master that is on disk, not the source it \
+			 just parsed: {added}"
+		);
+		assert_eq!(added["version"], "A.0.0", "{added}");
+
+		// …and `get`, seconds later, must give the same answer.
+		let got = isolated_cli(home.path(), state.path())
+			.args(["-g", "-a", "claude", "--json", "get", "skills"])
+			.output()
+			.unwrap();
+		let rows: Value = serde_json::from_slice(&got.stdout).unwrap();
+		assert_eq!(rows[0]["description"], added["description"], "{rows}");
+	}
+}

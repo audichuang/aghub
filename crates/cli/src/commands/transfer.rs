@@ -15,11 +15,12 @@
 use aghub_core::models::AgentType;
 use aghub_core::paths::find_project_root;
 use aghub_core::transfer::{
-	ensure_disjoint, ensure_mcp_exists, ensure_skill_exists,
-	ensure_sub_agent_exists, reconcile_mcp, reconcile_skill,
-	reconcile_sub_agent, transfer_mcp, transfer_skill, transfer_sub_agent,
-	InstallScope, InstallTarget, OperationBatchResult, OperationBatchView,
-	ResourceLocator,
+	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
+	ensure_skill_exists, ensure_skill_reconcile_spares,
+	ensure_sub_agent_exists, ensure_sub_agent_reconcile_spares, reconcile_mcp,
+	reconcile_skill, reconcile_sub_agent, transfer_mcp, transfer_skill,
+	transfer_sub_agent, InstallScope, InstallTarget, OperationBatchResult,
+	OperationBatchView, ResourceLocator,
 };
 use anyhow::{bail, Result};
 use clap::Subcommand;
@@ -106,6 +107,12 @@ type ReconcileFn = fn(
 /// A core `ensure_*_exists` fn — the read-only source check a dry-run makes.
 type ExistsFn = fn(&ResourceLocator) -> aghub_core::Result<()>;
 
+/// A core `ensure_*_reconcile_spares` fn — the read-only shared-backing check.
+/// It is the ONE refusal that exists to prevent data loss, so the preview has
+/// to be able to raise it without writing anything.
+type SpareFn =
+	fn(&ResourceLocator, &[AgentType], &[AgentType]) -> aghub_core::Result<()>;
+
 /// clap value parser for an agent id, reusing the canonical FromStr so the CLI
 /// accepts the same spellings/aliases as the API and store.
 fn parse_agent(value: &str) -> Result<AgentType, String> {
@@ -175,16 +182,31 @@ pub fn execute_reconcile(
 	json: bool,
 ) -> Result<()> {
 	let (scope, project_root) = resolve_scope(global, project)?;
-	let (args, run, exists): (&ReconcileArgs, ReconcileFn, ExistsFn) =
-		match action {
-			ReconcileAction::Skill(a) => {
-				(a, reconcile_skill, ensure_skill_exists)
-			}
-			ReconcileAction::Mcp(a) => (a, reconcile_mcp, ensure_mcp_exists),
-			ReconcileAction::SubAgent(a) => {
-				(a, reconcile_sub_agent, ensure_sub_agent_exists)
-			}
-		};
+	let (args, run, exists, spares): (
+		&ReconcileArgs,
+		ReconcileFn,
+		ExistsFn,
+		SpareFn,
+	) = match action {
+		ReconcileAction::Skill(a) => (
+			a,
+			reconcile_skill,
+			ensure_skill_exists,
+			ensure_skill_reconcile_spares,
+		),
+		ReconcileAction::Mcp(a) => (
+			a,
+			reconcile_mcp,
+			ensure_mcp_exists,
+			ensure_mcp_reconcile_spares,
+		),
+		ReconcileAction::SubAgent(a) => (
+			a,
+			reconcile_sub_agent,
+			ensure_sub_agent_exists,
+			ensure_sub_agent_reconcile_spares,
+		),
+	};
 
 	// A reconcile with no target set is a usage error, not a successful no-op.
 	// Without this guard it fell through to `run(source, [], [], false)`, which
@@ -219,10 +241,13 @@ pub fn execute_reconcile(
 		// the step an agent takes to decide whether to commit, so anything the
 		// commit will refuse must be refused here too — otherwise the preview
 		// green-lights a plan that cannot execute and the caller only finds out
-		// on the `--yes` run. Two checks qualify: the source must exist, and
-		// the add/remove sets must be disjoint.
+		// on the `--yes` run. Three checks qualify: the source must exist, the
+		// add/remove sets must be disjoint, and no removal may take the resource
+		// from a copy target or from the source. The third is THE check that
+		// exists to prevent data loss, and it was the one the preview skipped.
 		exists(&source)?;
 		ensure_disjoint(&args.add, &args.remove)?;
+		spares(&source, &args.add, &args.remove)?;
 		return render_dry_run(args, json);
 	}
 

@@ -409,6 +409,66 @@ where
 	Ok(())
 }
 
+/// The shared-backing refusal a `--yes` run would raise, WITHOUT writing
+/// anything — so a preview can raise it too.
+///
+/// The documented pattern for a destructive verb is preview-then-confirm. A
+/// preview that green-lights a plan the commit refuses is worse than no
+/// preview: the caller learns about the refusal only by attempting the write,
+/// and this is the one check that exists to stop data loss.
+///
+/// One definition, called by both the preview and the commit. Two would drift.
+fn ensure_reconcile_spares<F>(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+	backing: F,
+) -> Result<()>
+where
+	F: Fn(&InstallTarget) -> Option<PathBuf>,
+{
+	let (copies, deletes) = reconcile_plans(
+		added.to_vec(),
+		removed.to_vec(),
+		source.scope,
+		source.project_root.clone(),
+	);
+	let protect =
+		protected_targets(&copies, source, removed.contains(&source.agent));
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	ensure_removals_spare(&protect, &removing, backing)
+}
+
+/// [`ensure_reconcile_spares`] for a skill — the preview seam.
+pub fn ensure_skill_reconcile_spares(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
+	ensure_reconcile_spares(source, added, removed, skill_backing_dir)
+}
+
+/// [`ensure_reconcile_spares`] for an MCP — the preview seam.
+pub fn ensure_mcp_reconcile_spares(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
+	ensure_reconcile_spares(source, added, removed, mcp_backing_path)
+}
+
+/// [`ensure_reconcile_spares`] for a sub-agent — the preview seam.
+pub fn ensure_sub_agent_reconcile_spares(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
+	ensure_reconcile_spares(source, added, removed, |target| {
+		sub_agent_backing_path(target, &source.name)
+	})
+}
+
 /// Everything a reconcile must not destroy: the copy targets, plus the source
 /// unless the caller asked to remove the source too.
 fn protected_targets(
@@ -1311,6 +1371,32 @@ pub fn reconcile_skill(
 							&skill.name,
 						);
 						if !same {
+							// Undo THIS call's own work before refusing.
+							// `add_skill_from_path` has already linked the
+							// target to the master, so returning Err here
+							// left the row saying `success: false` while the
+							// target had gained a skill it never had, holding
+							// content nobody asked to copy.
+							// `created_referrer_dirs` is the materializer's
+							// own receipt and exists for exactly this — its
+							// doc: "a caller that cannot roll back is the bug
+							// this exists to prevent". The master is NOT
+							// touched: we only get here when we did not write
+							// it, so it belongs to whoever did.
+							crate::skills::rename::rollback_materialized_install(
+								&skill.name,
+								match plan.target.scope {
+									InstallScope::Global => {
+										crate::models::ResourceScope::GlobalOnly
+									}
+									InstallScope::Project => {
+										crate::models::ResourceScope::ProjectOnly
+									}
+								},
+								plan.target.project_root.as_deref(),
+								&added.created_referrer_dirs,
+								false,
+							);
 							return Err(ConfigError::InvalidConfig(format!(
 								"refusing to remove '{}' from the source: the \
 								 target already holds a same-named skill (an \
