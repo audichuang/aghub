@@ -1437,9 +1437,14 @@ mod tests {
 			.unwrap();
 
 		let agent_dirs = vec![claude.clone()];
-		assert!(
+		// Returns the referrer PATH, not a bool: the sweep runs over every
+		// agent dir, so a keep decided by one of them has to be able to name
+		// which one.
+		assert_eq!(
 			dir_has_external_referrer(&master, &agent_dirs, "foo"),
-			"a junction referrer must count as an external referrer"
+			Some(claude.join("foo")),
+			"a junction referrer must count as an external referrer, and the \
+			 junction itself must be what is named"
 		);
 	}
 
