@@ -29,3 +29,25 @@ else { return Vec::new() }`、`.flatten()`、`.ok()?`。**不是資料遺失**�
   `canonicalize` 失敗時 `canonical_path` 留 None，會把 symlink 安裝**誤判成
   Copy layout**，讓後續刪除走依名字的全 agent 掃描而不是 canonical 比對。
   一個讀取失敗因此擴大了刪除的波及面。未重現。
+
+## round 8 刻意換來的一個洞（accepted risk，不是「這樣就好」）
+
+round 7 讓 `SkillError::Io` 一律傳播,round 8 把 `InvalidData` 和
+`IsADirectory` 收回去照舊遞迴 —— 因為前者讓一個 latin-1 位元組就 exit-1 掉
+該 agent 的每一個指令,連刪掉那個壞檔都做不到。
+
+**但收回去的代價要寫清楚**:一個 `SKILL.md` 不是 UTF-8 的持有者,對
+`transfer::skill_holders` 一樣是隱形的 —— 跟 round 7 修掉的 EACCES 情況
+**完全同一個 sweep 曝險**,只是觸發的 errno 不同。copy layout 下就是那個
+「毀掉沒被指名的 agent 的 skill 目錄」重現,把 EACCES 換成 InvalidData。
+
+換句話說:我們用「一個壞檔不會癱瘓整個 agent」換掉了「一個壞檔的持有者不會
+隱形」。在這一版這個取捨是對的（前者是每天都可能踩到的可用性,後者要
+copy layout + 剛好在 reconcile 的路徑上），但它**是風險不是解決**。
+
+正解需要第三種答案:`load_config` 要能表達「這裡有東西但我解不開」,讓守衛
+把它算成持有者、讓列表把它標成 invalid,而不是在「傳播」與「當成不存在」
+之間二選一。這是設計變更,不是發版前夕的補丁。
+
+`doctor` 目前**看得到**這個狀態（health `invalid-skill`),所以使用者不是
+完全沒有工具 —— 只是守衛沒讀它。
