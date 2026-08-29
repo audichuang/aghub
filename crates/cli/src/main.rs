@@ -1039,6 +1039,21 @@ fn run(cli: Cli) -> Result<()> {
 			} else {
 				print!("{}", render_mutation(&cli.command, &payload));
 			}
+			// A payload that says `success: false` must not exit 0. Today that is
+			// `RemovalKind::Partial`: the removal RAN and at least one path could
+			// not be deleted, so the resource is wholly or partly still there.
+			// `delete --yes` on a read-only directory exited 0 with the skill
+			// untouched. The report above IS the answer, so suppress the failure
+			// renderer's second document.
+			if payload.get("success").and_then(serde_json::Value::as_bool)
+				== Some(false)
+			{
+				note_answer_on_stdout();
+				anyhow::bail!(
+					"the removal did not complete: some paths could not be \
+					 deleted — see the report above"
+				);
+			}
 			Ok(())
 		}
 		None => Ok(()),
@@ -1140,6 +1155,34 @@ fn render_removal(
 	};
 	let paths = list("paths");
 	let skipped = list("skipped");
+
+	// `partial` is terminal in the other direction from `kept`: the removal RAN
+	// and at least one path could not be deleted. Falling through would print
+	// two lies at once — with every path failing, `paths` is empty, so the
+	// branch below says "removed … : no installed files to remove", and then
+	// every path that FAILED gets listed under "kept (shared with other
+	// agents)", which is a different thing entirely.
+	if payload.get("outcome").and_then(|v| v.as_str()) == Some("partial") {
+		let mut out = format!(
+			"{} '{name}' was only PARTIALLY removed — see the warnings above \
+			 for why each path could not be deleted.\n",
+			resource.singular()
+		);
+		if !paths.is_empty() {
+			out.push_str("removed:\n");
+			for p in &paths {
+				out.push_str(&format!("  {p}\n"));
+			}
+		}
+		if !skipped.is_empty() {
+			out.push_str("still there:\n");
+			for p in &skipped {
+				out.push_str(&format!("  {p}\n"));
+			}
+		}
+		return out;
+	}
+
 	let mut out = String::new();
 
 	// What removal actually touches, per resource. Naming it beats printing an

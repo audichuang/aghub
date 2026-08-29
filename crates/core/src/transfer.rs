@@ -329,47 +329,79 @@ fn skill_folders_match(
 	}
 }
 
-/// Refuse a reconcile whose add and remove targets share the SAME backing file.
+/// Resolve a path through symlinks even when it does not exist yet.
 ///
-/// Two agents land on one file both by design and by accident. By design:
-/// Claude's project MCP config is `.mcp.json`, and Copilot uses that same file
-/// when it exists. By accident: a symlinked ancestor (deliberately allowed) or
-/// an agent-home env override collapses two declared-distinct sub-agent
-/// directories into one. Either way "add to the first, remove from the second"
-/// is not a state the world can be in — the membership is a property of the
-/// file, not of the agent.
+/// A plain `canonicalize` fails on a missing leaf and falls back to the literal
+/// path, which is how `~/.gemini/skills` and `~/.claude/skills` read as two
+/// different places while `~/.gemini` is a symlink to `~/.claude`. Falling back
+/// one level up resolves the part that DOES exist.
+fn resolve_through_links(path: PathBuf) -> PathBuf {
+	if let Ok(real) = std::fs::canonicalize(&path) {
+		return real;
+	}
+	match (path.parent(), path.file_name()) {
+		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
+			.map(|real| real.join(name))
+			.unwrap_or(path),
+		_ => path,
+	}
+}
+
+/// Refuse a removal that would take the resource from something that must
+/// SURVIVE this reconcile.
+///
+/// Two things must survive: every agent we are copying INTO, and the SOURCE we
+/// are copying FROM — unless the caller explicitly asked to remove the source
+/// too, which is the ordinary "move it" shape.
+///
+/// The membership is a property of the FILE, not of the agent id, so this
+/// compares resolved backing paths and never `AgentType` equality. Two ids land
+/// on one file both by design (Claude's project MCP config is `.mcp.json`, and
+/// Copilot uses that same file when it exists) and by accident (a symlinked
+/// home or an agent-home env override collapses two declared-distinct
+/// directories into one).
 ///
 /// Left unchecked it does not merely fail, it DESTROYS: the copy finds an
-/// equivalent entry (truthfully — it is the same file) and reports
-/// `already_present`, the staged gate only asks whether the copy ERRORED, and
-/// the delete then rewrites that one file without the entry. Both rows report
-/// success and the resource is gone from both agents.
-fn ensure_targets_do_not_share_backing<F>(
-	copies: &[OperationPlan],
-	deletes: &[OperationPlan],
+/// equivalent entry and reports `already_present` — truthfully, it IS the same
+/// file — the staged gate only asks whether the copy ERRORED, and the removal
+/// then rewrites that one file without the entry. Every row reports success and
+/// the resource is gone from everyone. Keying the protection on the agent id
+/// missed the whole source half of it: `reconcile --from-agent claude --remove
+/// grok` with `~/.grok` symlinked to `~/.claude` deleted the source's only copy
+/// and exited 0, because `grok != claude` as an id.
+fn ensure_removals_spare<F>(
+	protect: &[InstallTarget],
+	removing: &[InstallTarget],
 	backing: F,
 ) -> Result<()>
 where
 	F: Fn(&InstallTarget) -> Option<PathBuf>,
 {
-	let resolve = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-	for copy in copies {
-		let Some(copy_path) = backing(&copy.target).map(resolve) else {
+	for delete in removing {
+		let Some(delete_path) = backing(delete).map(resolve_through_links)
+		else {
 			continue;
 		};
-		for delete in deletes {
-			let Some(delete_path) = backing(&delete.target).map(resolve) else {
+		for kept in protect {
+			// The caller asked to remove it from THIS agent; that it also
+			// holds it is the point, not a collision.
+			if kept.agent == delete.agent {
+				continue;
+			}
+			let Some(kept_path) = backing(kept).map(resolve_through_links)
+			else {
 				continue;
 			};
-			if copy_path == delete_path {
+			if kept_path == delete_path {
 				return Err(ConfigError::InvalidConfig(format!(
-					"'{}' and '{}' share one file on disk ({}), so adding to \
-					 the first while removing from the second is not a state \
-					 that can exist — the removal would take it from both. \
-					 Drop one of them from this reconcile.",
-					copy.target.agent.as_str(),
-					delete.target.agent.as_str(),
-					copy_path.display()
+					"'{}' and '{}' resolve to the same file on disk ({}), so \
+					 removing it from the first would take it from the second \
+					 as well — not a state that can exist. Drop '{}' from \
+					 this reconcile.",
+					delete.agent.as_str(),
+					kept.agent.as_str(),
+					delete_path.display(),
+					delete.agent.as_str(),
 				)));
 			}
 		}
@@ -377,57 +409,47 @@ where
 	Ok(())
 }
 
-/// The delete-time half of the shared-backing guard.
-///
-/// [`ensure_targets_do_not_share_backing`] is a SNAPSHOT taken before any write,
-/// and that is not enough on its own — some backing paths only settle after the
-/// copies have run:
-///
-/// - Copilot's project MCP path is `.mcp.json` when that file exists and
-///   `.github/mcp.json` otherwise, so a copy that CREATES `.mcp.json` flips the
-///   delete target onto it.
-/// - A sub-agent's backing IS its own `.md`/`.toml` file, which does not exist
-///   until the copy writes it. Two agents sharing one directory therefore read
-///   as "no collision" at preflight — both resolve to `None` — and as one
-///   collision one instruction later.
-///
-/// So the preflight is an early, better-worded error; THIS is the guard. Both
-/// reconcile arms call it, through one function: the MCP arm carried a
-/// hand-written copy and the sub-agent arm had none, which is exactly the
-/// drift the root `AGENTS.md` forbids.
-fn ensure_delete_target_untouched_by_copies<F>(
-	target: &InstallTarget,
-	copy_targets: &[InstallTarget],
-	backing: F,
-) -> Result<()>
-where
-	F: Fn(&InstallTarget) -> Option<PathBuf>,
-{
-	let resolve = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-	let Some(mine) = backing(target).map(resolve) else {
-		return Ok(());
-	};
-	for copied in copy_targets {
-		if backing(copied).map(resolve).as_ref() == Some(&mine) {
-			return Err(ConfigError::InvalidConfig(format!(
-				"'{}' now resolves to the same file as '{}' ({}); removing \
-				 would take it from both. Nothing was removed.",
-				target.agent.as_str(),
-				copied.agent.as_str(),
-				mine.display()
-			)));
-		}
+/// Everything a reconcile must not destroy: the copy targets, plus the source
+/// unless the caller asked to remove the source too.
+fn protected_targets(
+	copies: &[OperationPlan],
+	source: &ResourceLocator,
+	source_removed: bool,
+) -> Vec<InstallTarget> {
+	let mut protect: Vec<InstallTarget> =
+		copies.iter().map(|plan| plan.target.clone()).collect();
+	if !source_removed {
+		protect.push(InstallTarget {
+			agent: source.agent,
+			scope: source.scope,
+			project_root: source.project_root.clone(),
+		});
 	}
-	Ok(())
+	protect
 }
 
-/// The file an agent's MCP entries live in, for [`ensure_targets_do_not_share_backing`].
+/// The directory an agent writes ITS OWN skills into, for
+/// [`ensure_removals_spare`].
+///
+/// Deliberately the agent's own dir and NOT the shared `.agents/skills` Master.
+/// Several agents linking to one Master is the normal supported state, and
+/// removing one agent's link is exactly what `remove_skill_planned` does — it
+/// keeps the Master (`shared_master_kept`). What is NOT a state the world can
+/// be in is two agent IDS whose own skills DIRECTORY is one directory, which a
+/// symlinked home or an agent-home env override produces: `~/.gemini ->
+/// ~/.claude` made "remove from gemini" delete claude's private skill, on a
+/// reconcile that never named claude, and exit 0.
+fn skill_backing_dir(target: &InstallTarget) -> Option<PathBuf> {
+	skill_target_dir(target).ok()
+}
+
+/// The file an agent's MCP entries live in, for [`ensure_removals_spare`].
 fn mcp_backing_path(target: &InstallTarget) -> Option<PathBuf> {
 	build_manager(target).config_path()
 }
 
 /// The file one agent's sub-agent of this name lives in, for
-/// [`ensure_targets_do_not_share_backing`].
+/// [`ensure_removals_spare`].
 ///
 /// Sub-agents have no `config_path()` — each one IS its own `.md` file — so the
 /// backing key is the resolved path of the same-named file this target actually
@@ -896,6 +918,7 @@ pub fn reconcile_mcp(
 	// OTHER agent leaves the faithful original in place, so its copies are as
 	// best-effort as a plain transfer.
 	let deletes_source = removed.contains(&source.agent);
+	let source_removed = deletes_source;
 	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
@@ -904,7 +927,10 @@ pub fn reconcile_mcp(
 	);
 	// Before ANY write: an add and a remove that resolve to the same file
 	// cannot both be honoured, and attempting it deletes from both.
-	ensure_targets_do_not_share_backing(&copies, &deletes, mcp_backing_path)?;
+	let protect = protected_targets(&copies, &source, source_removed);
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	ensure_removals_spare(&protect, &removing, mcp_backing_path)?;
 	// The copy targets, remembered for the RE-CHECK inside the delete arm. Some
 	// resolvers are existence-dependent — Copilot's project path is
 	// `.mcp.json` when that file exists and `.github/mcp.json` otherwise — so
@@ -912,8 +938,6 @@ pub fn reconcile_mcp(
 	// the delete target onto it afterwards, and the preflight saw two different
 	// files. Re-resolving at delete time is the only point where the paths are
 	// settled.
-	let copy_targets: Vec<InstallTarget> =
-		copies.iter().map(|plan| plan.target.clone()).collect();
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -933,12 +957,14 @@ pub fn reconcile_mcp(
 					// about what "already there" means.
 					OperationAction::Copy => copy_mcp_into(&plan.target, &mcp),
 					OperationAction::Delete => {
-						// Re-check now that every copy has run: this target may
-						// have been resolved onto a file one of them just
-						// created (see `copy_targets`).
-						ensure_delete_target_untouched_by_copies(
-							&plan.target,
-							&copy_targets,
+						// Re-check now that every copy has run: this target
+						// may have been resolved onto a file one of them just
+						// created. Copilot's project path is `.mcp.json` when
+						// that file exists and `.github/mcp.json` otherwise, so
+						// the preflight above is only a SNAPSHOT.
+						ensure_removals_spare(
+							&protect,
+							std::slice::from_ref(&plan.target),
 							mcp_backing_path,
 						)?;
 						let mut manager = build_manager(&plan.target);
@@ -1035,6 +1061,7 @@ pub fn reconcile_sub_agent(
 		added.len(),
 		removed.len()
 	);
+	let source_removed = removed.contains(&source.agent);
 	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,
@@ -1046,15 +1073,16 @@ pub fn reconcile_sub_agent(
 	// truthfully, the staged gate only asks whether the copy ERRORED, and the
 	// delete then removes the one file both targets were reading. Two success
 	// rows, resource gone from both.
-	ensure_targets_do_not_share_backing(&copies, &deletes, |target| {
+	let protect = protected_targets(&copies, &source, source_removed);
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	ensure_removals_spare(&protect, &removing, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})?;
 	// …and that preflight is only a SNAPSHOT, which for sub-agents is barely a
 	// guard at all: the backing IS the resource file, so two agents sharing one
 	// directory both resolve to `None` until a copy writes it. The real check is
 	// the delete-time one below.
-	let copy_targets: Vec<InstallTarget> =
-		copies.iter().map(|plan| plan.target.clone()).collect();
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -1075,9 +1103,9 @@ pub fn reconcile_sub_agent(
 					OperationAction::Delete => {
 						// Re-check now that every copy has run: the file this
 						// target resolves to may be one a copy just created.
-						ensure_delete_target_untouched_by_copies(
-							&plan.target,
-							&copy_targets,
+						ensure_removals_spare(
+							&protect,
+							std::slice::from_ref(&plan.target),
 							|target| {
 								sub_agent_backing_path(target, &source.name)
 							},
@@ -1223,6 +1251,13 @@ pub fn reconcile_skill(
 		source.scope,
 		source.project_root.clone(),
 	);
+	// Nothing we are copying INTO — and not the source either, unless the caller
+	// asked to remove it — may share a skills DIRECTORY with something we are
+	// removing from.
+	let protect = protected_targets(&copies, &source, deletes_source);
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	ensure_removals_spare(&protect, &removing, skill_backing_dir)?;
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -1293,6 +1328,13 @@ pub fn reconcile_skill(
 				// Use the planned-removal seam — never blind-delete a shared
 				// universal master discovered through an agent's read dirs.
 				OperationAction::Delete => (|| -> Result<bool> {
+					// Re-check now that every copy has run: a copy can create
+					// the very directory this target resolves through.
+					ensure_removals_spare(
+						&protect,
+						std::slice::from_ref(&plan.target),
+						skill_backing_dir,
+					)?;
 					let mut manager = build_manager(&plan.target);
 					ensure_loaded(&mut manager)?;
 					match manager.remove_skill_planned(

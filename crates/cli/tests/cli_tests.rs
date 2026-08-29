@@ -8919,3 +8919,244 @@ fn reconcile_sub_agent_refuses_when_both_targets_are_one_file() {
 	assert!(home2.path().join(".grok/agents/reviewer.md").is_file());
 	assert!(!home2.path().join(".claude/agents/reviewer.md").exists());
 }
+
+/// A removal must spare the SOURCE, not merely the copy targets.
+///
+/// The shared-backing guard compared copies against deletes and keyed
+/// "is this the source?" on `AgentType` equality. Two agent IDS are one
+/// directory whenever a home is symlinked or an agent-home env var is
+/// redirected, so `--remove grok` with `~/.grok -> ~/.claude` deleted the
+/// source's only copy while every row reported success — the source was never
+/// named, so nothing compared it to anything.
+///
+/// One guard, all three resource kinds; each previously destroyed on its own
+/// route.
+#[cfg(unix)]
+#[test]
+fn a_removal_that_would_take_it_from_the_source_is_refused() {
+	// --- sub-agent: remove-only reconcile, no copies at all.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+		std::os::unix::fs::symlink(
+			home.path().join(".claude"),
+			home.path().join(".grok"),
+		)
+		.unwrap();
+		let file = home.path().join(".claude/agents/reviewer.md");
+		std::fs::write(
+			&file,
+			"---\nname: reviewer\ndescription: d\n---\n\nONLY-COPY\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"sub-agent",
+				"--from-agent",
+				"claude",
+				"--name",
+				"reviewer",
+				"--remove",
+				"grok",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			std::fs::read_to_string(&file)
+				.is_ok_and(|s| s.contains("ONLY-COPY")),
+			"the source's only copy must survive"
+		);
+		assert!(!out.status.success());
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["error"]["code"], "INVALID_CONFIG", "{json}");
+	}
+
+	// --- skill: the delete target's own skills DIR is the source's.
+	//
+	// Note what is NOT guarded here: several agents linking to one shared
+	// `.agents/skills` Master is the normal supported state, and removing one
+	// agent's link is exactly what `remove_skill_planned` does. The guard is
+	// on the agent's own directory, not on the Master.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/skills/foo"))
+			.unwrap();
+		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
+			.unwrap();
+		std::os::unix::fs::symlink(
+			home.path().join(".claude"),
+			home.path().join(".gemini"),
+		)
+		.unwrap();
+		let private = home.path().join(".claude/skills/foo/SKILL.md");
+		std::fs::write(
+			&private,
+			"---\nname: foo\ndescription: A\n---\n\nCLAUDE-A\n",
+		)
+		.unwrap();
+		std::fs::write(
+			home.path().join(".agents/skills/foo/SKILL.md"),
+			"---\nname: foo\ndescription: C\n---\n\nMASTER-C\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"foo",
+				"--add",
+				"cursor",
+				"--remove",
+				"gemini",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			std::fs::read_to_string(&private)
+				.is_ok_and(|s| s.contains("CLAUDE-A")),
+			"the source's private skill must survive a reconcile that never \
+			 named it"
+		);
+		assert!(!out.status.success());
+	}
+
+	// --- MCP: claude and copilot share the project `.mcp.json`.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let project = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+		let shared = project.path().join(".mcp.json");
+		std::fs::write(&shared, r#"{"mcpServers":{"only":{"command":"x"}}}"#)
+			.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args([
+				"-p",
+				"--json",
+				"reconcile",
+				"mcp",
+				"--from-agent",
+				"claude",
+				"--name",
+				"only",
+				"--remove",
+				"copilot",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			std::fs::read_to_string(&shared).unwrap().contains("only"),
+			"the source's only MCP entry must survive"
+		);
+		assert!(!out.status.success());
+	}
+
+	// --- …and the ordinary move between separate directories still works.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+		std::fs::write(
+			home.path().join(".claude/agents/reviewer.md"),
+			"---\nname: reviewer\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		let moved = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"sub-agent",
+				"--from-agent",
+				"claude",
+				"--name",
+				"reviewer",
+				"--add",
+				"grok",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			moved.status.success(),
+			"a move between separate dirs must still work: {}",
+			String::from_utf8_lossy(&moved.stdout)
+		);
+	}
+}
+
+/// A `delete` where every path failed must not exit 0 saying success.
+///
+/// `RemovalKind::Partial`'s own doc says "Do not read this as success", and the
+/// wire view hard-coded `success: true` two screens below it. `delete --yes` on
+/// a directory it cannot remove printed `"success": true, "outcome": "partial"`,
+/// exited 0, listed the failed path under "kept (shared with other agents)",
+/// and left the skill entirely in place.
+#[cfg(unix)]
+#[test]
+fn a_delete_that_removed_nothing_does_not_report_success() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let skill = home.path().join(".claude/skills/foo");
+	std::fs::create_dir_all(&skill).unwrap();
+	std::fs::write(
+		skill.join("SKILL.md"),
+		"---\nname: foo\ndescription: d\n---\n\nBODY\n",
+	)
+	.unwrap();
+	// Read+execute only: the entry cannot be unlinked from it.
+	std::fs::set_permissions(&skill, std::fs::Permissions::from_mode(0o500))
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "--json", "delete", "skills", "foo", "--yes",
+		])
+		.output()
+		.unwrap();
+
+	// Restore before any assertion can abort the test and leak the mode.
+	std::fs::set_permissions(&skill, std::fs::Permissions::from_mode(0o700))
+		.unwrap();
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["outcome"], "partial", "{json}");
+	assert_eq!(json["success"], false, "{json}");
+	assert!(
+		!out.status.success(),
+		"a delete that removed nothing must not exit 0: {json}"
+	);
+	assert!(skill.join("SKILL.md").is_file(), "the skill is still there");
+
+	// Exactly ONE JSON document on stdout — the failure renderer must not
+	// append a second one.
+	assert_eq!(
+		String::from_utf8_lossy(&out.stdout)
+			.matches("\"outcome\"")
+			.count(),
+		1,
+		"stdout={}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+}

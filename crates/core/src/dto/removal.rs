@@ -127,7 +127,15 @@ impl RemovalView {
 			RemovalKind::Absent
 		};
 		Self {
-			success: true,
+			// NOT hard-coded true. `Partial` means the removal RAN and at least
+			// one path could not be deleted — with every path failing, `paths` is
+			// empty and the resource is entirely still there. This type's own doc
+			// for the variant says "Do not read this as success", and then said
+			// `success: true` two screens later; a `delete --yes` that deleted
+			// nothing because of EACCES exited 0. Every other variant IS a
+			// success: a preview succeeded at previewing, `absent` at finding
+			// nothing to do, and `kept` at deliberately keeping a shared master.
+			success: kind != RemovalKind::Partial,
 			dry_run: requested_dry_run,
 			executed: outcome.executed,
 			needs_confirm: outcome.plan.needs_confirm,
