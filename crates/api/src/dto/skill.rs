@@ -198,6 +198,7 @@ impl From<&aghub_core::dto::RemovalView> for DeleteSkillByPathResponse {
 			skipped: v.skipped.clone(),
 			deleted_path: v.deleted_path.clone(),
 			pruned_lock_entries: None,
+			would_prune_lock_entries: None,
 			prune_error: None,
 			outcome: v.outcome.into(),
 			error: None,
@@ -502,6 +503,13 @@ pub struct DeleteSkillByPathResponse {
 	pub pruned_lock_entries: Option<Vec<String>>,
 	/// Set when the post-delete lock prune failed. The deletion still happened
 	/// (prune is non-fatal); this reports why the lock could not be reconciled.
+	/// A PREVIEW's disclosure: the lock keys a committed delete WOULD drop.
+	/// Present only on a preview; `pruned_lock_entries` is the committed
+	/// counterpart. Separate keys on purpose — a preview must not claim
+	/// entries were dropped.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub would_prune_lock_entries: Option<Vec<String>>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub prune_error: Option<String>,

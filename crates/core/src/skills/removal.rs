@@ -495,6 +495,14 @@ pub enum PruneStatus {
 	/// the failure (empty for a single-scope prune; possibly non-empty for the
 	/// `Both` scope when the first lock pruned before the second errored).
 	Failed { reason: String, pruned: Vec<String> },
+	/// A PREVIEW: these are the keys a committed delete would drop. Nothing has
+	/// been written.
+	///
+	/// Distinct from `Pruned` on purpose — the whole point is that a preview
+	/// cannot claim entries WERE dropped, and the CLI, API and desktop share
+	/// one wire shape, so reusing `pruned_lock_entries` would make `outcome`
+	/// the only thing separating "about to" from "did".
+	WouldPrune(Vec<String>),
 }
 
 /// Result of a planned removal request: the (post-execution) plan plus whether

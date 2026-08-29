@@ -688,10 +688,28 @@ impl ConfigManager {
 		}
 
 		if !executed {
+			// Disclose the scope-wide lock prune the COMMIT would run. Computed
+			// before the struct literal because `plan` moves into it.
+			//
+			// The `shared_master_kept` guard is load-bearing: for that state the
+			// committed call does not prune, it REFUSES (the
+			// `unsupported_operation` a few lines above). Promising
+			// `would_prune_lock_entries` there would describe a commit that can
+			// never happen — the same never-terminating hint `RemovalKind::
+			// Absent` and `Kept` were added to eliminate.
+			let prune = if plan.shared_master_kept && plan.paths.is_empty() {
+				removal::PruneStatus::NotRun
+			} else {
+				crate::skills::prune::preview_prune_for_removal(
+					self.scope,
+					self.project_root.as_deref(),
+					&plan.paths,
+				)
+			};
 			return Ok(removal::RemovalOutcome {
 				plan,
 				executed: false,
-				prune: removal::PruneStatus::NotRun,
+				prune,
 				failed_paths: vec![],
 				// Reached only AFTER the not-found check.
 				absent: false,
@@ -2834,7 +2852,7 @@ mod tests {
 	}
 
 	#[test]
-	fn remove_skill_planned_dry_run_leaves_prune_notrun() {
+	fn remove_skill_planned_dry_run_discloses_prune_without_writing() {
 		use crate::create_adapter;
 		use crate::models::AgentType;
 
@@ -2874,10 +2892,17 @@ mod tests {
 		crate::adapter::set_skills_path_override("claude", None);
 
 		assert!(!outcome.executed, "dry-run must not delete");
+		// A dry-run DISCLOSES what a commit would prune, and writes nothing.
+		// This asserted `NotRun`, which conflated "did not run it" with "will
+		// not tell you about it" — the caller could not see whose provenance a
+		// commit was about to discard. The load-bearing invariant, that the
+		// lock is untouched, is asserted below and is unchanged.
 		assert_eq!(
 			outcome.prune,
-			crate::skills::removal::PruneStatus::NotRun,
-			"dry-run leaves prune NotRun"
+			crate::skills::removal::PruneStatus::WouldPrune(vec![
+				"orphan-never-on-disk-xyz".to_string()
+			]),
+			"a dry-run must disclose the orphan a commit would drop"
 		);
 		let lock = skill::read_skill_lock();
 		assert!(
@@ -2891,7 +2916,7 @@ mod tests {
 	/// exactly like a dry-run. Distinct from the dry-run test because the gate is
 	/// `needs_confirm && !confirm` (all-agents), not `dry_run`.
 	#[test]
-	fn remove_skill_planned_unconfirmed_destructive_leaves_prune_notrun() {
+	fn remove_skill_planned_unconfirmed_discloses_prune_without_writing() {
 		use crate::create_adapter;
 		use crate::models::AgentType;
 
@@ -2929,10 +2954,13 @@ mod tests {
 		crate::adapter::set_skills_path_override("claude", None);
 
 		assert!(!outcome.executed, "unconfirmed destructive op must not run");
+		// Same as the dry-run above: disclose, write nothing.
 		assert_eq!(
 			outcome.prune,
-			crate::skills::removal::PruneStatus::NotRun,
-			"gated (unconfirmed) op leaves prune NotRun"
+			crate::skills::removal::PruneStatus::WouldPrune(vec![
+				"orphan-never-on-disk-xyz".to_string()
+			]),
+			"an unconfirmed destructive op must disclose, not stay silent"
 		);
 		assert!(skill_dir.exists(), "gated op must not delete");
 		let lock = skill::read_skill_lock();

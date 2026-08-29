@@ -48,12 +48,19 @@ pub(crate) fn removal_response(
 			requested_dry_run,
 		),
 	);
-	let (pruned_lock_entries, prune_error) = match outcome.prune {
-		PruneStatus::NotRun => (None, None),
-		PruneStatus::Pruned(keys) => (Some(keys), None),
-		PruneStatus::Failed { reason, pruned } => (Some(pruned), Some(reason)),
-	};
+	let (pruned_lock_entries, would_prune_lock_entries, prune_error) =
+		match outcome.prune {
+			PruneStatus::NotRun => (None, None, None),
+			// A preview's disclosure goes under its OWN key — a preview cannot
+			// claim entries were dropped.
+			PruneStatus::WouldPrune(keys) => (None, Some(keys), None),
+			PruneStatus::Pruned(keys) => (Some(keys), None, None),
+			PruneStatus::Failed { reason, pruned } => {
+				(Some(pruned), None, Some(reason))
+			}
+		};
 	response.pruned_lock_entries = pruned_lock_entries;
+	response.would_prune_lock_entries = would_prune_lock_entries;
 	response.prune_error = prune_error;
 	response
 }

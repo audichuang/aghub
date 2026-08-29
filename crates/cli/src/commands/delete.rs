@@ -136,6 +136,13 @@ fn plan_or_noop(
 fn apply_prune_fields(payload: &mut serde_json::Value, prune: &PruneStatus) {
 	match prune {
 		PruneStatus::NotRun => {}
+		// A PREVIEW's disclosure, under its own key. Reusing
+		// `pruned_lock_entries` would make `outcome` the only thing separating
+		// "about to drop these" from "dropped these" — and the whole finding
+		// was that a preview must not claim entries were dropped.
+		PruneStatus::WouldPrune(keys) => {
+			payload["would_prune_lock_entries"] = json!(keys);
+		}
 		PruneStatus::Pruned(keys) => {
 			payload["pruned_lock_entries"] = json!(keys);
 		}

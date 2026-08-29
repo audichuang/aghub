@@ -242,6 +242,96 @@ pub fn prune_lock_for_scope(
 	}
 }
 
+/// What the post-delete lock prune WOULD drop, for a removal that has not run
+/// yet.
+///
+/// A committed `delete` reconciles the WHOLE scope's lock against disk, so it
+/// also drops entries for OTHER skills that are already gone. The preview did
+/// not disclose that: `pruned_lock_entries` appeared only on the committed
+/// payload, so the caller could not see which other skills' provenance the
+/// commit was about to discard — while `prune-lock`, which performs the SAME
+/// GC, gates it behind its own `--yes`.
+///
+/// `removing` is the paths this delete will take. They must be EXCLUDED from
+/// the disk scan: the preview runs BEFORE the deletion, so those folders are
+/// still present, and a plain `preview_prune` would omit exactly the key the
+/// commit is most certain to drop — the target's own.
+///
+/// Read-only. `preview_prune_from_dirs` deliberately takes no mutation guard
+/// (unlike `prune_lock_from_dirs`), and `locked_keys` only reads, so this is
+/// safe on the dry-run path, which holds no guard.
+///
+/// Returns [`PruneStatus::NotRun`] rather than an error when anything is
+/// unprovable — an unreadable dir, an unreadable lock, a project scope with no
+/// root. A preview that cannot see the whole picture must promise NOTHING; the
+/// alternative is claiming "no other entries will be dropped" on the strength
+/// of a scan that failed. That also keeps preview and commit from diverging on
+/// a corrupt lock: the commit path reads through the fail-CLOSED modify seam
+/// and reports `Failed`, whereas these readers fail OPEN to an empty lock and
+/// would otherwise quietly answer "nothing".
+pub fn preview_prune_for_removal(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	removing: &[PathBuf],
+) -> crate::skills::removal::PruneStatus {
+	use crate::skills::removal::PruneStatus;
+
+	// Excluded by PATH, not by folder name: a single-agent delete removes only
+	// some referrers and KEEPS the shared Master, so the skill is still on disk
+	// through that Master and its key must NOT be listed.
+	//
+	// ponytail: path equality. If `canonical_path` was canonicalized while the
+	// descriptor dirs were not (macOS /private/var, a symlinked HOME), a path
+	// fails to match and its key is simply omitted — i.e. today's behaviour,
+	// never a fabricated key. Upgrade path: compare canonicalized pairs.
+	let excluded: Vec<PathBuf> = removing.to_vec();
+	let scan = move |dir: &Path| -> Result<Vec<PathBuf>, ScanError> {
+		let dirs = top_level_skill_dirs(dir)?;
+		Ok(dirs
+			.into_iter()
+			.filter(|found| !excluded.iter().any(|gone| gone == found))
+			.collect())
+	};
+
+	// Mirrors `prune_lock_for_scope`'s mapping exactly — including `None` as
+	// the root for the Global half of `Both`. A different mapping here would
+	// scan different dirs from the commit it is previewing.
+	let preview_one = |prune_scope: PruneScope, root: Option<&Path>| {
+		let dirs = scope_skill_dirs(prune_scope, root);
+		preview_prune_from_dirs(prune_scope, &dirs, root, &scan).ok()
+	};
+
+	let keys = match scope {
+		ResourceScope::GlobalOnly => preview_one(PruneScope::Global, None),
+		ResourceScope::ProjectOnly => match project_root {
+			Some(root) => preview_one(PruneScope::Project, Some(root)),
+			None => None,
+		},
+		ResourceScope::Both => {
+			let global = preview_one(PruneScope::Global, None);
+			match (global, project_root) {
+				(Some(mut g), Some(root)) => {
+					match preview_one(PruneScope::Project, Some(root)) {
+						Some(p) => {
+							g.extend(p);
+							Some(g)
+						}
+						// Half a picture is not a picture.
+						None => None,
+					}
+				}
+				(g, None) => g,
+				(None, _) => None,
+			}
+		}
+	};
+
+	match keys {
+		Some(keys) => PruneStatus::WouldPrune(keys),
+		None => PruneStatus::NotRun,
+	}
+}
+
 /// Dry-run: report which lock entries WOULD be pruned, without mutating the lock.
 /// Uses an injectable scanner for deterministic tests.
 pub fn preview_prune_from_dirs<F>(

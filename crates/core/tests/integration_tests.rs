@@ -1009,12 +1009,15 @@ fn remove_skill_planned_all_agents_requires_confirm() {
 		!outcome.executed,
 		"all-agents without confirm must not delete"
 	);
-	// The confirm-gated (unconfirmed) branch is non-executed, so the lock prune
-	// must not run — same contract as a dry-run.
+	// The confirm-gated (unconfirmed) branch is non-executed, so the prune must
+	// not RUN — but it does now DISCLOSE what a commit would drop. Empty here
+	// because this fixture has no orphaned lock entries; what matters is the
+	// variant, which says the preview looked and found nothing rather than
+	// staying silent about a scope-wide GC the commit performs.
 	assert_eq!(
 		outcome.prune,
-		aghub_core::skills::removal::PruneStatus::NotRun,
-		"unconfirmed destructive op leaves prune NotRun"
+		aghub_core::skills::removal::PruneStatus::WouldPrune(vec![]),
+		"an unconfirmed destructive op discloses without pruning"
 	);
 	assert!(skill_dir.exists());
 

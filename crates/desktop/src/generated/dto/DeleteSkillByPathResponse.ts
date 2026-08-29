@@ -40,7 +40,12 @@ export type DeleteSkillByPathResponse = {
 	/**
 	 * Set when the post-delete lock prune failed. The deletion still happened
 	 * (prune is non-fatal); this reports why the lock could not be reconciled.
+	 * A PREVIEW's disclosure: the lock keys a committed delete WOULD drop.
+	 * Present only on a preview; `pruned_lock_entries` is the committed
+	 * counterpart. Separate keys on purpose — a preview must not claim
+	 * entries were dropped.
 	 */
+	would_prune_lock_entries?: Array<string>;
 	prune_error?: string;
 	/**
 	 * The three-way answer to "did the delete happen?" — present on every

@@ -7349,13 +7349,14 @@ fn json_payload_key_sets_are_pinned() {
 			],
 		),
 		(
-			// snake_case + the three-way `outcome`. NOTE the absence of
-			// `pruned_lock_entries`: a delete PREVIEW does not disclose the
-			// scope-wide lock prune that a committed delete performs, so the
-			// preview cannot tell you which OTHER skills' lock entries the
-			// commit will drop. Pinned here so that asymmetry is a stated
-			// contract rather than a surprise; the committed shape is pinned
-			// separately below.
+			// snake_case + `outcome` + `would_prune_lock_entries`.
+			//
+			// A preview now DISCLOSES the scope-wide lock prune a committed
+			// delete performs, under its own key — it used to be invisible
+			// until after the fact, so the caller could not see which OTHER
+			// skills' provenance the commit was about to discard. The committed
+			// counterpart is `pruned_lock_entries`, pinned separately below;
+			// two keys, because a preview must not claim entries were dropped.
 			&["-p", "--json", "delete", "skills", "pinned"],
 			&[
 				"deleted_path",
@@ -7368,6 +7369,7 @@ fn json_payload_key_sets_are_pinned() {
 				"skipped",
 				"success",
 				"type",
+				"would_prune_lock_entries",
 			],
 		),
 		(
@@ -7740,4 +7742,202 @@ fn partial_failure_leaves_exactly_one_json_document_on_stdout() {
 			)
 		});
 	}
+}
+
+/// A `delete` PREVIEW discloses the scope-wide lock prune the commit would run.
+///
+/// A committed delete reconciles the whole scope's lock against disk, dropping
+/// entries for OTHER skills that are already gone — invisibly, until after the
+/// fact. `prune-lock` gates the same GC behind its own `--yes`; `delete` did it
+/// as an undisclosed side effect, so the preview could not tell you whose
+/// provenance was about to be discarded.
+#[cfg(unix)]
+#[test]
+fn delete_preview_discloses_the_lock_entries_it_would_prune() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+
+	// Two skills from a source, so both get real lock entries.
+	write_source_skill(src.path(), "keeper", "keeper");
+	write_source_skill(src.path(), "ghosted", "ghosted");
+	for name in ["keeper", "ghosted"] {
+		let out = run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			"claude",
+			name,
+		);
+		assert!(
+			out.status.success(),
+			"install {name} must succeed: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+
+	// `ghosted` disappears from disk WITHOUT going through aghub — the everyday
+	// way an orphan lock entry appears.
+	std::fs::remove_dir_all(home.path().join(".agents/skills/ghosted"))
+		.unwrap();
+	std::fs::remove_dir_all(home.path().join(".claude/skills/ghosted")).ok();
+
+	let preview = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "delete", "skills", "keeper"])
+		.output()
+		.unwrap();
+	assert!(
+		preview.status.success(),
+		"preview must succeed: {}",
+		String::from_utf8_lossy(&preview.stderr)
+	);
+	let pj: Value = serde_json::from_slice(&preview.stdout).unwrap();
+	assert_eq!(pj["outcome"], "preview", "{pj}");
+
+	let would: Vec<&str> = pj["would_prune_lock_entries"]
+		.as_array()
+		.unwrap_or_else(|| panic!("preview must disclose the prune: {pj}"))
+		.iter()
+		.map(|v| v.as_str().unwrap())
+		.collect();
+	assert!(
+		would.contains(&"ghosted"),
+		"the OTHER skill's orphaned entry is what the caller cannot otherwise \
+		 see: {pj}"
+	);
+	// And NOT the target's own key: this single-agent delete removes the agent
+	// link but KEEPS the shared `.agents/skills` Master (see `skipped`), so the
+	// skill is still on disk and its lock entry survives. This is why exclusion
+	// is by PATH and not by folder name — excluding the name would have
+	// promised to drop an entry the commit keeps.
+	assert!(
+		!would.contains(&"keeper"),
+		"the Master is kept, so the target's own entry must NOT be listed: {pj}"
+	);
+
+	// With `--all-agents` the Master goes too, so now the target's own key IS
+	// certain to be dropped — and a naive preview would omit it, because the
+	// folder is still on disk when the preview runs.
+	let all_agents = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "delete", "skills", "keeper", "--all-agents"])
+		.output()
+		.unwrap();
+	assert!(
+		all_agents.status.success(),
+		"all-agents preview must succeed: {}",
+		String::from_utf8_lossy(&all_agents.stderr)
+	);
+	let aj: Value = serde_json::from_slice(&all_agents.stdout).unwrap();
+	let would_all: Vec<&str> = aj["would_prune_lock_entries"]
+		.as_array()
+		.unwrap_or_else(|| panic!("preview must disclose the prune: {aj}"))
+		.iter()
+		.map(|v| v.as_str().unwrap())
+		.collect();
+	assert!(
+		would_all.contains(&"keeper"),
+		"an all-agents delete takes the Master too, so the target's own key \
+		 is certain to be dropped: {aj}"
+	);
+
+	// A preview writes NOTHING.
+	assert!(
+		home.path().join(".agents/skills/keeper").exists(),
+		"a preview must not delete"
+	);
+	let after_preview = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "source", "list"])
+		.output()
+		.unwrap();
+	assert!(after_preview.status.success());
+
+	// The commit reports the same keys under the COMMITTED key, never the
+	// preview one.
+	let committed = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "delete", "skills", "keeper", "--yes"])
+		.output()
+		.unwrap();
+	assert!(committed.status.success());
+	let cj: Value = serde_json::from_slice(&committed.stdout).unwrap();
+	assert_eq!(cj["outcome"], "removed", "{cj}");
+	assert!(
+		cj["would_prune_lock_entries"].is_null(),
+		"a COMMIT must not use the preview key: {cj}"
+	);
+	let pruned: Vec<&str> = cj["pruned_lock_entries"]
+		.as_array()
+		.expect("commit reports what it pruned")
+		.iter()
+		.map(|v| v.as_str().unwrap())
+		.collect();
+	assert!(pruned.contains(&"ghosted"), "{cj}");
+}
+
+/// A KEPT shared Master must not promise a prune the commit will never run.
+///
+/// Found by cross-checking two independently-written plans that each looked
+/// correct alone: one classified this state `kept`, the other attached
+/// `would_prune_lock_entries` to the same preview. Together they describe a
+/// commit that cannot happen — re-running with `--yes` hits
+/// `unsupported_operation` and prunes nothing, so the disclosure would be the
+/// exact never-terminating hint `absent` and `kept` were introduced to kill.
+#[cfg(unix)]
+#[test]
+fn a_kept_shared_master_preview_promises_no_prune() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "shared-one", "shared-one");
+
+	// Install for an agent that NEEDS a link, then for one that reads the
+	// Master directly — so removing it from the Master-reader alone cannot
+	// express anything.
+	for agent in ["claude", "cursor"] {
+		let out = run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			agent,
+			"shared-one",
+		);
+		assert!(
+			out.status.success(),
+			"install for {agent} must succeed: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+
+	// cursor reads `.agents/skills` directly: there is no cursor-only artifact
+	// to remove, so this delete keeps the Master.
+	let preview = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"cursor",
+			"--json",
+			"delete",
+			"skills",
+			"shared-one",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		preview.status.success(),
+		"preview must succeed: {}",
+		String::from_utf8_lossy(&preview.stderr)
+	);
+	let pj: Value = serde_json::from_slice(&preview.stdout).unwrap();
+
+	// Only assert the pairing when this really is the kept state — if the
+	// fixture stops producing it, say so instead of passing vacuously.
+	assert_eq!(
+		pj["outcome"], "kept",
+		"fixture must produce the shared-master-kept state, or this test \
+		 proves nothing: {pj}"
+	);
+	assert!(
+		pj["would_prune_lock_entries"].is_null(),
+		"a commit that will REFUSE must not be previewed as one that prunes: \
+		 {pj}"
+	);
 }
