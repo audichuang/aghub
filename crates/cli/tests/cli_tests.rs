@@ -10012,11 +10012,13 @@ fn an_unreadable_skill_md_is_not_a_missing_one() {
 			.output()
 			.unwrap();
 
-		std::fs::set_permissions(
+		// Tolerant on purpose: in the bug state this file has been DELETED,
+		// and an `.unwrap()` here would panic before the assertion below got
+		// to say why.
+		let _ = std::fs::set_permissions(
 			&gemini_md,
 			std::fs::Permissions::from_mode(0o644),
-		)
-		.unwrap();
+		);
 
 		// THE assertion, and it holds in BOTH arms: gemini was never named on
 		// the command line, so nothing may touch gemini's copy either way.
@@ -10110,11 +10112,10 @@ fn an_unreadable_sub_agent_file_is_not_an_absent_one() {
 			.output()
 			.unwrap();
 
-		std::fs::set_permissions(
+		let _ = std::fs::set_permissions(
 			&target,
 			std::fs::Permissions::from_mode(0o644),
-		)
-		.unwrap();
+		);
 
 		// THE assertion: the existing file is never silently replaced. Both
 		// arms must refuse — a readable conflict as "already exists", an
