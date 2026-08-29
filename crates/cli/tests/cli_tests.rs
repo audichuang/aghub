@@ -8814,6 +8814,74 @@ fn reconcile_sub_agent_refuses_when_both_targets_are_one_file() {
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert_eq!(json["error"]["code"], "INVALID_CONFIG", "{json}");
 
+	// --- The preflight above is only a SNAPSHOT, and for sub-agents it barely
+	// guards at all: the backing IS the resource file, so when the shared
+	// directory does not yet hold it BOTH targets resolve to `None` and the
+	// preflight sees no collision. One instruction later the copy has written
+	// the file, and the delete removes it.
+	//
+	// The worst shape is the natural "move it" invocation, which also deletes
+	// the pre-existing original: without the delete-time re-check this exits 0
+	// with "3 succeeded, 0 failed" and `find $HOME` returns nothing at all.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+		std::fs::create_dir_all(home.path().join(".codex/agents")).unwrap();
+		// grok's home IS claude's home — but neither holds `reviewer` yet.
+		std::os::unix::fs::symlink(
+			home.path().join(".claude"),
+			home.path().join(".grok"),
+		)
+		.unwrap();
+		let original = home.path().join(".codex/agents/reviewer.toml");
+		std::fs::write(
+			&original,
+			"name = \"reviewer\"\ndescription = \"d\"\n\
+			 developer_instructions = \"ORIGINAL-BODY\"\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"sub-agent",
+				"--from-agent",
+				"codex",
+				"--name",
+				"reviewer",
+				"--add",
+				"grok",
+				"--remove",
+				"codex",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		// THE assertion: the sub-agent still exists SOMEWHERE.
+		let shared = home.path().join(".claude/agents/reviewer.md");
+		assert!(
+			shared.is_file() || original.is_file(),
+			"the sub-agent must survive somewhere: stdout={}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		// The removal that would have emptied the shared dir is the one refused.
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		let claude_delete = json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|r| r["action"] == "delete" && r["agent"] == "claude")
+			.expect("claude delete row present");
+		assert_eq!(claude_delete["success"], false, "{claude_delete}");
+		assert!(!out.status.success());
+	}
+
 	// The same reconcile between genuinely separate directories still works —
 	// a guard that refused every sub-agent reconcile would also pass the
 	// assertion above.

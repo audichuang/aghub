@@ -377,6 +377,50 @@ where
 	Ok(())
 }
 
+/// The delete-time half of the shared-backing guard.
+///
+/// [`ensure_targets_do_not_share_backing`] is a SNAPSHOT taken before any write,
+/// and that is not enough on its own — some backing paths only settle after the
+/// copies have run:
+///
+/// - Copilot's project MCP path is `.mcp.json` when that file exists and
+///   `.github/mcp.json` otherwise, so a copy that CREATES `.mcp.json` flips the
+///   delete target onto it.
+/// - A sub-agent's backing IS its own `.md`/`.toml` file, which does not exist
+///   until the copy writes it. Two agents sharing one directory therefore read
+///   as "no collision" at preflight — both resolve to `None` — and as one
+///   collision one instruction later.
+///
+/// So the preflight is an early, better-worded error; THIS is the guard. Both
+/// reconcile arms call it, through one function: the MCP arm carried a
+/// hand-written copy and the sub-agent arm had none, which is exactly the
+/// drift the root `AGENTS.md` forbids.
+fn ensure_delete_target_untouched_by_copies<F>(
+	target: &InstallTarget,
+	copy_targets: &[InstallTarget],
+	backing: F,
+) -> Result<()>
+where
+	F: Fn(&InstallTarget) -> Option<PathBuf>,
+{
+	let resolve = |p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
+	let Some(mine) = backing(target).map(resolve) else {
+		return Ok(());
+	};
+	for copied in copy_targets {
+		if backing(copied).map(resolve).as_ref() == Some(&mine) {
+			return Err(ConfigError::InvalidConfig(format!(
+				"'{}' now resolves to the same file as '{}' ({}); removing \
+				 would take it from both. Nothing was removed.",
+				target.agent.as_str(),
+				copied.agent.as_str(),
+				mine.display()
+			)));
+		}
+	}
+	Ok(())
+}
+
 /// The file an agent's MCP entries live in, for [`ensure_targets_do_not_share_backing`].
 fn mcp_backing_path(target: &InstallTarget) -> Option<PathBuf> {
 	build_manager(target).config_path()
@@ -892,29 +936,11 @@ pub fn reconcile_mcp(
 						// Re-check now that every copy has run: this target may
 						// have been resolved onto a file one of them just
 						// created (see `copy_targets`).
-						let resolve =
-							|p: PathBuf| std::fs::canonicalize(&p).unwrap_or(p);
-						if let Some(mine) =
-							mcp_backing_path(&plan.target).map(resolve)
-						{
-							for copied in &copy_targets {
-								if mcp_backing_path(copied).map(resolve)
-									== Some(mine.clone())
-								{
-									return Err(ConfigError::InvalidConfig(
-										format!(
-											"'{}' now resolves to the same \
-											 config file as '{}' ({}); \
-											 removing would take the entry \
-											 from both. Nothing was removed.",
-											plan.target.agent.as_str(),
-											copied.agent.as_str(),
-											mine.display()
-										),
-									));
-								}
-							}
-						}
+						ensure_delete_target_untouched_by_copies(
+							&plan.target,
+							&copy_targets,
+							mcp_backing_path,
+						)?;
 						let mut manager = build_manager(&plan.target);
 						ensure_loaded(&mut manager)?;
 						manager.remove_mcp(&source.name).map(|()| false)
@@ -1023,6 +1049,12 @@ pub fn reconcile_sub_agent(
 	ensure_targets_do_not_share_backing(&copies, &deletes, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})?;
+	// …and that preflight is only a SNAPSHOT, which for sub-agents is barely a
+	// guard at all: the backing IS the resource file, so two agents sharing one
+	// directory both resolve to `None` until a copy writes it. The real check is
+	// the delete-time one below.
+	let copy_targets: Vec<InstallTarget> =
+		copies.iter().map(|plan| plan.target.clone()).collect();
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -1041,6 +1073,15 @@ pub fn reconcile_sub_agent(
 						copy_sub_agent_into(&plan.target, &sub_agent)
 					}
 					OperationAction::Delete => {
+						// Re-check now that every copy has run: the file this
+						// target resolves to may be one a copy just created.
+						ensure_delete_target_untouched_by_copies(
+							&plan.target,
+							&copy_targets,
+							|target| {
+								sub_agent_backing_path(target, &source.name)
+							},
+						)?;
 						let mut manager = build_manager(&plan.target);
 						ensure_loaded(&mut manager)?;
 						manager.remove_sub_agent(&source.name).map(|()| false)
