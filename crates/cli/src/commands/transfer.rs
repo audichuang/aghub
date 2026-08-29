@@ -17,9 +17,9 @@ use aghub_core::transfer::{
 	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
 	ensure_skill_exists, ensure_skill_reconcile_spares,
 	ensure_sub_agent_exists, ensure_sub_agent_reconcile_spares, reconcile_mcp,
-	reconcile_skill, reconcile_sub_agent, transfer_mcp, transfer_skill,
-	transfer_sub_agent, InstallScope, InstallTarget, OperationBatchResult,
-	OperationBatchView, ResourceLocator,
+	reconcile_skill, reconcile_skill_preview, reconcile_sub_agent,
+	transfer_mcp, transfer_skill, transfer_sub_agent, InstallScope,
+	InstallTarget, OperationBatchResult, OperationBatchView, ResourceLocator,
 };
 use anyhow::{bail, Result};
 use clap::Subcommand;
@@ -251,6 +251,15 @@ pub fn execute_reconcile(
 		exists(&source)?;
 		ensure_disjoint(&args.add, &args.remove)?;
 		spares(&source, &args.add, &args.remove)?;
+		// Skills have a third refusal the commit makes and a preview cannot
+		// reconstruct: an end state that cannot exist (removing an agent that
+		// reads the shared Master while the Master stays). Ask core for it
+		// rather than restating it here — otherwise the preview exits 0 on a
+		// plan `--yes` rejects. MCP/sub-agent reconcile have no equivalent
+		// end-state check to preview yet.
+		if let ReconcileAction::Skill(_) = action {
+			reconcile_skill_preview(&source, &args.add, &args.remove)?;
+		}
 		return render_dry_run(args, json);
 	}
 

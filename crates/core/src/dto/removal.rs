@@ -45,8 +45,11 @@ pub enum RemovalKind {
 	/// folded into `skipped`, so the only honest signal was a caller manually
 	/// comparing two lists.
 	Partial,
-	/// Nothing was or will be removed because the target is SHARED: it is the
-	/// universal Master another in-scope agent still reads.
+	/// Nothing was or will be removed because the agent goes on reading the
+	/// skill from the SHARED universal Master either way — whether the plan
+	/// found nothing of its own to take (the Master IS the only copy) or found
+	/// a path that changes nothing (an npx-era Referrer beside the Master it
+	/// points at).
 	///
 	/// A single-agent removal cannot express "stop only this agent seeing it",
 	/// so an EXECUTING call refuses outright (`manager/skill.rs`'s
@@ -94,16 +97,28 @@ impl RemovalView {
 			paths.iter().map(|p| p.display().to_string()).collect()
 		};
 		let kind = if outcome.plan.shared_master_kept
-			&& outcome.plan.paths.is_empty()
+			&& (outcome.plan.paths.is_empty() || !outcome.executed)
 		{
-			// Nothing to remove BECAUSE it is shared. Outranks every other
-			// answer: an executing call refuses (the manager guard), so
-			// `preview` would tell a caller to retry into a guaranteed error,
-			// and an `executed` call that took nothing is not a removal.
+			// Nothing was or will be removed BECAUSE it is shared. Outranks
+			// every other answer: an executing call refuses (the manager
+			// guard), so `preview` would tell a caller to retry into a
+			// guaranteed error, and an `executed` call that took nothing is not
+			// a removal.
 			//
 			// `plan.shared_master_kept` has existed since the plan was written
 			// and is read by `manager/skill.rs` and `transfer.rs` — it was just
 			// never read HERE, so the fact never reached the wire at all.
+			//
+			// `|| !outcome.executed` covers the shape where the plan HAS paths
+			// of its own and unlinking them changes NOTHING about what the
+			// agent reads (an npx-era Referrer beside the Master it points at
+			// — both resolve to the same place). The manager folds that fact
+			// into `shared_master_kept`, then REFUSES the confirmed call — so a
+			// preview reporting `preview` promised "re-run with --yes will
+			// change something" and `--yes` answered `unsupported_operation`.
+			// That is exactly the never-terminating hint this variant exists to
+			// kill. An EXECUTED run keeps falling through to `Removed`/
+			// `Partial`: it got past the refusal, so its paths really went.
 			RemovalKind::Kept
 		} else if outcome.executed && !outcome.failed_paths.is_empty() {
 			// Ran, but not everything went. Checked BEFORE `Removed`: the
@@ -320,6 +335,35 @@ mod tests {
 				RemovalView::from_outcome(&kept, requested_dry_run).outcome,
 				RemovalKind::Kept,
 				"shared-master-kept outranks the caller's intent \
+				 (dry_run={requested_dry_run})"
+			);
+		}
+
+		// A plan that HAS a path of its own whose removal changes nothing about
+		// what the agent reads (an npx-era Referrer beside the Master it points
+		// at) previews as `kept` too — the manager folds that into
+		// `shared_master_kept` and then REFUSES the confirmed call, so
+		// `preview` would promise a `--yes` that only ever answers
+		// `unsupported_operation`. A path whose removal DOES take something
+		// away (a private copy shadowing the Master) never reaches here: the
+		// manager does not set the flag for it.
+		let refused_but_has_paths = RemovalOutcome {
+			plan: RemovalPlan {
+				paths: vec![PathBuf::from("/a/.opencode/skills/mover")],
+				..kept.plan.clone()
+			},
+			..kept.clone()
+		};
+		for requested_dry_run in [true, false] {
+			assert_eq!(
+				RemovalView::from_outcome(
+					&refused_but_has_paths,
+					requested_dry_run
+				)
+				.outcome,
+				RemovalKind::Kept,
+				"a non-executed removal the commit will refuse must not be \
+				 previewed as one that changes something \
 				 (dry_run={requested_dry_run})"
 			);
 		}

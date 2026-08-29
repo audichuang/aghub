@@ -457,18 +457,44 @@ pub async fn delete_skill_by_path(
 			// as a real dir by a direct `.agents/skills` reader, so
 			// canonical_path=None), refuse to `remove_dir_all` it — that would
 			// orphan the live symlink and lose the skill for every other agent.
+			//
+			// The referrer sweep alone is NOT that guard, for exactly the
+			// reason `plan_copy_removal` spells out: a NativeReader leaves no
+			// symlink, so a project whose readers are all NativeReaders
+			// (cline/warp/cursor/codex/…) has ZERO links pointing at its
+			// Master and the sweep answers "nobody references it". This route
+			// then `remove_dir_all`'d the shared Master and reported
+			// `removed`, while `DELETE /agents/<a>/skills/<n>` and the CLI
+			// `delete` refused the same request — the one delete surface that
+			// never came through `remove_skill_planned`.
+			//
+			// The second half is `skill_dir_readers_outside`, NOT "is this a
+			// Master?": a Master is shared BY CONSTRUCTION, so that question
+			// answers yes for every one of them and made this route — the
+			// desktop's per-LOCATION delete — unable to drop any Master at
+			// all. The dialog groups installs by exact `source_path` and sends
+			// every agent installed there, which is the user saying "drop this
+			// location" with nobody left to surprise. What must be refused is
+			// the request that names only SOME of that location's readers: the
+			// leftovers are what a `remove_dir_all` would rob. So ask who is
+			// left over, and let a request covering the whole set through.
+			let requested_agents: Vec<AgentType> = req
+				.agents
+				.iter()
+				.filter_map(|a| a.parse::<AgentType>().ok())
+				.collect();
 			let all_in_scope =
 				aghub_core::skills::removal::agent_skill_dirs_in_scope(
 					resource_scope,
 					project_root.as_deref(),
 				);
-			let safe_name = skill::sanitize::sanitize_name(&skill_name);
-			if let Some(referrer) =
+			let referrer =
 				aghub_core::skills::removal::dir_has_external_referrer(
 					&skill_dir,
 					&all_in_scope,
-					&safe_name,
-				) {
+					&skill_name,
+				);
+			if let Some(referrer) = referrer.as_deref() {
 				// Name WHICH path kept it: the sweep runs over every in-scope
 				// agent dir, so "kept" without a pointer is undiagnosable.
 				log::warn!(
@@ -476,6 +502,19 @@ pub async fn delete_skill_by_path(
 					skill_dir.display(),
 					referrer.display()
 				);
+			}
+			// A NativeReader leaves NO symlink behind, so the referrer sweep
+			// alone is blind to a second agent reading the same Master —
+			// `skill_dir_readers_outside` is the half that sees it.
+			if referrer.is_some()
+				|| !aghub_core::skills::removal::skill_dir_readers_outside(
+					&skill_dir,
+					resource_scope,
+					project_root.as_deref(),
+					&requested_agents,
+				)
+				.is_empty()
+			{
 				// Kept because SHARED — routed through the same `RemovalView`
 				// seam every other branch uses, so it carries
 				// `outcome: "kept"` instead of a hand-built `success: true`
@@ -521,6 +560,8 @@ pub async fn delete_skill_by_path(
 				return Ok(Json(super::removal_response(
 					aghub_core::skills::removal::RemovalOutcome::preview(
 						plan,
+						// Reaching here means the guard above did not block.
+						false,
 						resource_scope,
 						project_root.as_deref(),
 					),
@@ -3223,6 +3264,197 @@ mod tests {
 				resp.skipped.iter().any(|p| p.contains("shared")),
 				"the kept master should be reported as skipped, got {:?}",
 				resp.skipped
+			);
+		});
+	}
+
+	/// The same shared Master, with NO symlink anywhere — the shape the
+	/// referrer sweep is blind to.
+	///
+	/// This branch builds its own plan instead of coming through
+	/// `remove_skill_planned`, and its only guard was
+	/// `dir_has_external_referrer`. A NativeReader leaves no link behind, so a
+	/// project whose readers are all NativeReaders (cursor/opencode/cline/…)
+	/// has zero links pointing at its Master, the sweep answered "nobody
+	/// references it", and the route `remove_dir_all`'d the Master and reported
+	/// `removed` — while `DELETE /agents/<a>/skills/<n>` and `aghub delete`
+	/// refused the identical request. This is the delete surface that never
+	/// converged on core's answer.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_keeps_master_read_by_another_native_reader() {
+		with_isolated_env(|home, _state| {
+			let proj = home;
+			let master = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: shared\ndescription: d\n---\n",
+			)
+			.unwrap();
+
+			let req = DeleteSkillByPathRequest {
+				source_path: master.join("SKILL.md").display().to_string(),
+				agents: vec!["cursor".to_string()],
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(
+				master.join("SKILL.md").exists(),
+				"a single-agent by-path delete may not take the shared Master \
+				 — every other NativeReader reads it from there"
+			);
+			assert_eq!(
+				resp.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Kept,
+				"the entity is still there, so the answer is `kept`, not \
+				 `removed`: the desktop closes its dialog on `removed`"
+			);
+			// The reader that would have lost it, asked directly.
+			let mut other = aghub_core::manager::ConfigManager::new(
+				aghub_core::create_adapter(
+					aghub_core::models::AgentType::OpenCode,
+				),
+				false,
+				Some(proj),
+			);
+			other.load().unwrap();
+			assert!(
+				other.get_skill("shared").is_some(),
+				"opencode must not lose a skill because cursor asked to drop \
+				 that location"
+			);
+		});
+	}
+
+	/// The OTHER direction, and the one the keep-guard must not swallow: the
+	/// desktop's location dialog sends EVERY agent installed at that exact
+	/// `source_path`, so nobody is left to lose the skill and the location has
+	/// to go.
+	///
+	/// Refusing on "is this a universal Master?" alone answers yes for every
+	/// Master by construction, which turned that dialog into a button that can
+	/// never succeed — the `kept` reply raises "another agent still reads it"
+	/// while naming no such agent, because there is none.
+	///
+	/// The agent list is COMPUTED, not hardcoded: which agents read a project
+	/// `.agents/skills` is a roster fact that moves whenever a descriptor gains
+	/// `universal: true`, and a stale literal list would silently degrade this
+	/// into the partial-request case above (which the test would then still
+	/// pass, for the wrong reason). Asking with `requested: []` yields exactly
+	/// the readers, and the route's own per-agent path validation is what pins
+	/// the opposite error — an over-broad list is rejected before the guard.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_removes_master_when_every_reader_is_in_the_request() {
+		with_isolated_env(|home, _state| {
+			let proj = home;
+			let master = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: shared\ndescription: d\n---\n",
+			)
+			.unwrap();
+
+			let readers =
+				aghub_core::skills::removal::skill_dir_readers_outside(
+					&master,
+					aghub_core::models::ResourceScope::ProjectOnly,
+					Some(proj),
+					&[],
+				);
+			assert!(
+				readers.len() > 1,
+				"the shape under test needs SEVERAL readers of the project \
+				 master, else this is just the single-agent case again: {readers:?}"
+			);
+
+			let req = DeleteSkillByPathRequest {
+				source_path: master.join("SKILL.md").display().to_string(),
+				agents: readers.iter().map(|id| id.to_string()).collect(),
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert_eq!(
+				resp.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Removed,
+				"every reader of this location asked for it to go, so it goes \
+				 — a `kept` here is a dialog the user can never make succeed"
+			);
+			assert!(
+				!master.exists(),
+				"`removed` must mean removed: the desktop closes its dialog \
+				 and drops the row on this outcome"
+			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_full_group_keeps_master_with_legacy_named_referrer() {
+		with_isolated_env(|home, _state| {
+			let proj = home;
+			let master = proj.join(".agents/skills/dirname");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: realname\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let claude_referrer = proj.join(".claude/skills/dirname");
+			std::fs::create_dir_all(claude_referrer.parent().unwrap()).unwrap();
+			std::os::unix::fs::symlink(&master, &claude_referrer).unwrap();
+
+			let readers =
+				aghub_core::skills::removal::skill_dir_readers_outside(
+					&master,
+					aghub_core::models::ResourceScope::ProjectOnly,
+					Some(proj),
+					&[],
+				);
+			let req = DeleteSkillByPathRequest {
+				source_path: master.join("SKILL.md").display().to_string(),
+				agents: readers.iter().map(|id| id.to_string()).collect(),
+				scope: "project".to_string(),
+				project_root: Some(proj.display().to_string()),
+				all_agents: None,
+				confirm: Some(true),
+			};
+			let resp =
+				block_on(delete_skill_by_path(TrustedLocalOrigin, Json(req)))
+					.ok()
+					.expect("handler returned ok")
+					.into_inner();
+
+			assert!(
+				master.join("SKILL.md").exists(),
+				"Claude's differently-named Referrer must keep the Master alive"
+			);
+			assert!(
+				std::fs::canonicalize(&claude_referrer).is_ok(),
+				"the Referrer must not be left dangling"
+			);
+			assert_eq!(
+				resp.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Kept,
+				"a real reader outside the request makes this a kept location"
 			);
 		});
 	}

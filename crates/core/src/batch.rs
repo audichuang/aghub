@@ -208,7 +208,7 @@ impl<T, O, E> MultiTargetMutationReport<T, O, E> {
 	}
 }
 
-fn collect_preflight_failures<T, E>(
+pub(crate) fn collect_preflight_failures<T, E>(
 	targets: &[T],
 	mut preflight: impl FnMut(&T) -> Result<(), E>,
 ) -> Vec<MultiTargetMutationFailure<T, E>>

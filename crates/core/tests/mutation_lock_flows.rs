@@ -226,3 +226,87 @@ fn top_level_dirs(dir: &Path) -> Result<Vec<PathBuf>, skill::ScanError> {
 	}
 	Ok(out)
 }
+
+/// A skill reconcile decides what to delete from TWO unlocked reads — the
+/// holder scan that computes `exhaustive`, and a dry-run removal plan per row —
+/// and only then writes. Both must happen under the guard, so the guard has to
+/// be the first thing the flow does.
+///
+/// Same no-timing trick as `a_prune_takes_the_guard_before_it_scans_disk`: an
+/// unlockable location makes acquisition fail, so a correctly placed guard
+/// refuses the whole reconcile. Move it below the planning (or drop it) and the
+/// flow reads state, plans every row and returns a BATCH instead — the shape
+/// that tells a caller "we looked at your agents and here is what happened".
+#[test]
+fn a_skill_reconcile_takes_the_guard_before_it_plans() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().join("proj");
+	// A private copy claude holds; removing it needs no `.agents` of its own.
+	let owned = skills_dir(&root).join("mover");
+	std::fs::create_dir_all(&owned).unwrap();
+	std::fs::write(owned.join("SKILL.md"), skill_md("mover")).unwrap();
+	// A regular file where `.agents/` must be: the lock cannot be created here.
+	std::fs::write(root.join(".agents"), b"not a directory").unwrap();
+
+	let result = aghub_core::transfer::reconcile_skill(
+		aghub_core::transfer::ResourceLocator {
+			agent: aghub_core::models::AgentType::Claude,
+			scope: aghub_core::transfer::InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "mover".to_string(),
+		},
+		vec![],
+		vec![aghub_core::models::AgentType::Claude],
+		true, // confirm
+	);
+
+	assert!(
+		result.is_err(),
+		"an unacquirable lock must refuse the whole reconcile before it plans \
+		 anything, got a batch: {:?}",
+		result.map(|batch| batch.results)
+	);
+	assert!(
+		owned.join("SKILL.md").exists(),
+		"nothing may be removed when the lock was never held"
+	);
+}
+
+/// The ORDERING half, which the test above cannot pin on its own.
+///
+/// There the skill really exists, so planning SUCCEEDS and the guard fails
+/// whichever side of the planning it sits on — both placements produce the same
+/// `Err`, and moving the guard below `plan_reconcile_skill` leaves that test
+/// green. Name a skill that is NOT there and the two placements finally
+/// disagree: a guard taken first reports the LOCK, a guard taken after the
+/// planning reports "no such skill" — proof the flow read state it had no right
+/// to read yet. That read is the whole point of the guard's position: the
+/// holder scan it feeds decides whether the shared Master gets collected.
+#[test]
+fn a_skill_reconcile_reports_the_lock_before_it_looks_the_skill_up() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path().join("proj");
+	std::fs::create_dir_all(skills_dir(&root)).unwrap();
+	// A regular file where `.agents/` must be: the lock cannot be created here.
+	std::fs::write(root.join(".agents"), b"not a directory").unwrap();
+
+	let message = aghub_core::transfer::reconcile_skill(
+		aghub_core::transfer::ResourceLocator {
+			agent: aghub_core::models::AgentType::Claude,
+			scope: aghub_core::transfer::InstallScope::Project,
+			project_root: Some(root.clone()),
+			name: "never-installed".to_string(),
+		},
+		vec![],
+		vec![aghub_core::models::AgentType::Claude],
+		true, // confirm
+	)
+	.expect_err("an unacquirable lock must refuse the reconcile")
+	.to_string();
+
+	assert!(
+		message.contains("mutation lock"),
+		"the LOCK must be what refused this, not a lookup the flow should \
+		 never have reached without it; got: {message}"
+	);
+}

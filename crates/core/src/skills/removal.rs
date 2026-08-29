@@ -231,6 +231,169 @@ pub struct RemovalPlan {
 	pub shared_master_kept: bool,
 }
 
+/// A path's identity for comparison, with the FINAL component left unresolved.
+///
+/// Resolving the leaf too would be wrong here: a Referrer and the Master it
+/// points at canonicalize to the same path, so "this Referrer is being deleted"
+/// would read as "the Master is being deleted". The parent still gets resolved
+/// so two spellings of the same directory (macOS `/var`, Windows short names)
+/// compare equal.
+fn entry_identity(path: &Path) -> PathBuf {
+	match (path.parent(), path.file_name()) {
+		(Some(parent), Some(leaf)) => {
+			crate::skills::linker::classify::canonicalize_lenient(parent)
+				.join(leaf)
+		}
+		_ => path.to_path_buf(),
+	}
+}
+
+/// The folder a discovered skill was read FROM — its own entry, never the
+/// Master a Referrer resolves to.
+///
+/// [`skill_root`] answers the other question (`canonical_path` first) and is
+/// the wrong one here: a removal plan lists ENTRIES, so entries are what a plan
+/// can be checked against.
+fn discovered_entry_dir(skill: &crate::models::Skill) -> Option<PathBuf> {
+	let raw = skill.source_path.as_deref()?;
+	let path = match raw.strip_prefix("~/") {
+		Some(rest) => dirs::home_dir()?.join(rest),
+		None => PathBuf::from(raw),
+	};
+	path.parent().map(Path::to_path_buf)
+}
+
+/// Every folder in `dir` a removal of the skill `name` has to consider: the
+/// `<dir>/<sanitized-name>` slot AND whatever DISCOVERY actually reads as that
+/// skill there.
+///
+/// Both planners used to sweep the slot alone, which is only where aghub itself
+/// installs. `npx skills` and older aghub releases wrote `<dir>/<folder>` with a
+/// different frontmatter `name`, and discovery recurses, so a grouped layout
+/// puts the skill at `<dir>/<team>/<folder>` — neither is at the slot. The
+/// planner then found nothing to take while the agent went on reading it, which
+/// `--all-agents` reported as a clean `removed` (nested copy untouched, the
+/// other agent still discovering the skill) and the symlink path turned into a
+/// hard `unsupported_operation` refusal of a delete the caller was entitled to.
+///
+/// The union, not a swap: the slot is kept because an empty same-named folder
+/// holds no skill for discovery to find, and leaving one behind is what makes a
+/// reinstall collide.
+///
+/// Existence is NOT filtered here — callers disagree on what counts (the
+/// symlink planner must see a DANGLING link, which `exists()` hides), so each
+/// keeps its own probe.
+fn candidate_entries(dir: &Path, name: &str, safe: &str) -> Vec<PathBuf> {
+	let mut out = vec![dir.join(safe)];
+	// Fail-OPEN to the slot alone when the dir cannot be walked: that IS the
+	// answer every earlier release gave, and the slot is still probed by the
+	// caller's own fail-CLOSED stat, so an unreadable dir cannot silently
+	// green-light a deletion here.
+	for skill in
+		crate::skills::discovery::load_skills_from_dir(dir).unwrap_or_default()
+	{
+		if skill.name != name {
+			continue;
+		}
+		if let Some(entry) = discovered_entry_dir(&skill) {
+			if !out.contains(&entry) {
+				out.push(entry);
+			}
+		}
+	}
+	out
+}
+
+/// What a removal actually does to ONE agent's view of a skill.
+#[derive(Debug, Clone, Default)]
+pub struct ReadEffect {
+	/// Entries that go on handing this agent the skill afterwards, as
+	/// DISCOVERED (not canonicalized): these get surfaced to the user, and
+	/// every other member of `RemovalPlan::skipped` is a raw path.
+	pub survivors: Vec<PathBuf>,
+	/// The set of distinct LOCATIONS this agent reads the skill from got
+	/// smaller — the removal took something away even when `survivors` is
+	/// non-empty.
+	pub changed: bool,
+}
+
+/// Did this removal take anything away from the agent reading `read_dirs`, and
+/// what still hands it the skill afterwards?
+///
+/// The ONE place that answers it — the question every removal surface needs and
+/// none of them can read off a plan. A plan lists paths, and a path list looks
+/// the same whether the agent goes on reading the skill from somewhere else or
+/// not.
+///
+/// It asks DISCOVERY, not a path guess. Every earlier spelling compared
+/// `dir.join(sanitize_name(name))` against the plan, which misses in both
+/// directions: a skill whose FOLDER name differs from its frontmatter `name`
+/// (`npx skills` and older aghub releases both wrote that) was invisible to it,
+/// and an empty directory that merely carries the name looked like a live
+/// skill. Discovery reads the frontmatter and recurses into grouped layouts, so
+/// it sees what the agent will see.
+///
+/// `changed` is why "are there survivors?" is not the whole verdict, and the
+/// distinction is drawn by FULLY canonicalizing each entry (leaf included),
+/// unlike [`entry_identity`]:
+///
+/// - an npx-era Referrer beside the Master it points at resolves to the SAME
+///   location as the Master, so unlinking it leaves the set identical —
+///   nothing was taken away, and a single-agent removal must still refuse;
+/// - a private per-agent copy shadowing a Master resolves to a location of its
+///   own, so deleting it really does shrink the set. Refusing that (which is
+///   what asking survivors alone did) left no verb at all able to drop a
+///   private copy whose content had drifted from the Master.
+///
+/// Fail-OPEN on an unlistable read dir (plain `load_skills_from_dir`, not the
+/// `_checked` variant): "cannot tell" reads as no survivors, hence no refusal.
+/// That is the safe direction HERE and only here — this guard REFUSES removals,
+/// so fail-closed would let one unreadable directory make a skill undeletable.
+/// `transfer::skill_holders` asks the opposite question (may the Master be
+/// collected?) and is fail-CLOSED for the same reason. Do not unify them.
+pub fn read_effect_after(
+	read_dirs: &[PathBuf],
+	name: &str,
+	deleting: &[PathBuf],
+) -> ReadEffect {
+	use std::collections::BTreeSet;
+
+	let doomed: Vec<PathBuf> =
+		deleting.iter().map(|path| entry_identity(path)).collect();
+	let mut before: BTreeSet<PathBuf> = BTreeSet::new();
+	let mut after: BTreeSet<PathBuf> = BTreeSet::new();
+	let mut survivors: Vec<PathBuf> = Vec::new();
+
+	for dir in read_dirs {
+		for skill in crate::skills::discovery::load_skills_from_dir(dir)
+			.unwrap_or_default()
+			.iter()
+			.filter(|skill| skill.name == name)
+		{
+			let Some(entry) = discovered_entry_dir(skill) else {
+				continue;
+			};
+			let resolved =
+				crate::skills::linker::classify::canonicalize_lenient(&entry);
+			before.insert(resolved.clone());
+			// `starts_with`, not equality: deleting a folder takes every skill
+			// nested under it with it.
+			let id = entry_identity(&entry);
+			if doomed.iter().any(|doomed| id.starts_with(doomed)) {
+				continue;
+			}
+			if after.insert(resolved) {
+				survivors.push(entry);
+			}
+		}
+	}
+
+	ReadEffect {
+		changed: before != after,
+		survivors,
+	}
+}
+
 /// Plan a layout-aware removal.
 ///
 /// - `own_agent_dir`: the targeted agent's skills dir (single-agent default;
@@ -290,8 +453,15 @@ fn plan_symlink_removal(
 	let mut unresolvable = false;
 	let mut targeted_anything = false;
 
-	for dir in all_agent_dirs {
-		let entry = dir.join(safe);
+	// The union `candidate_entries` returns, not the `<dir>/<safe>` slot alone:
+	// `npx skills` and older aghub releases wrote `<dir>/<folder>` under a
+	// different frontmatter name, and a grouped layout nests it deeper still, so
+	// a sweep keyed on the slot walked straight past a live referrer.
+	for (dir, entry) in all_agent_dirs.iter().flat_map(|dir| {
+		candidate_entries(dir, &skill.name, safe)
+			.into_iter()
+			.map(move |entry| (dir, entry))
+	}) {
 		// NotFound means this agent simply does not hold it. Any other error
 		// means the entry is THERE and we could not look — dropping it out of
 		// the sweep made `delete --all-agents` neither count it as a holder nor
@@ -376,9 +546,10 @@ fn plan_copy_removal(
 
 	if all_agents {
 		for dir in all_agent_dirs {
-			let copy = dir.join(safe);
-			if copy.exists() {
-				push_contained(copy, roots, &mut paths, &mut skipped);
+			for copy in candidate_entries(dir, &skill.name, safe) {
+				if copy.exists() && !paths.contains(&copy) {
+					push_contained(copy, roots, &mut paths, &mut skipped);
+				}
 			}
 		}
 		RemovalPlan {
@@ -409,9 +580,11 @@ fn plan_copy_removal(
 				if is_universal_master(&root, project_root) {
 					shared_master_kept = true;
 					skipped.push(root);
-				} else if let Some(referrer) =
-					dir_has_external_referrer(&root, all_agent_dirs, safe)
-				{
+				} else if let Some(referrer) = dir_has_external_referrer(
+					&root,
+					all_agent_dirs,
+					&skill.name,
+				) {
 					// Name the referrer, not just the kept directory: `skipped`
 					// lists only the caller's own path, so a keep decided by one
 					// of 25 OTHER agents' dirs was previously undiagnosable.
@@ -447,26 +620,83 @@ fn plan_copy_removal(
 /// removal take a shared Master. The shape test was wrong the other way too: a
 /// private copy at `.claude/skills/agents/skills/<name>` matched it and became
 /// undeletable.
+///
+/// "Is this SHARED?" is not on its own a reason to keep a directory — see
+/// [`skill_dir_readers_outside`] for the question a location delete asks.
 fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
 	assert_strictly_contained(dir, &universal_master_roots(project_root))
 		.is_some()
 }
 
-/// True when some in-scope agent skills dir holds a symlink named `safe` that
-/// resolves to `target_dir` — i.e. `target_dir` is a shared master another view
-/// still references. A copy-layout removal must NOT `remove_dir_all` such a dir
-/// (it would orphan the live link); it keeps + reports it instead. The symlink
-/// layout already does this via its `other_refs` sweep — this is the copy-path
-/// equivalent for a master that was discovered as a real dir (canonical_path
-/// None) by a direct `.agents/skills` reader.
+/// Which in-scope agents read the skill folder `dir` WITHOUT being named in
+/// `requested`?
+///
+/// The question a LOCATION delete has to ask. "Is this a shared Master?"
+/// ([`is_universal_master`]) is not it: a Master is shared by construction, so
+/// asking that alone made every Master permanently undeletable through the
+/// desktop's per-location dialog — which groups installs by exact
+/// `source_path` and sends EVERY agent installed at that path, i.e. the whole
+/// set of readers. That request is the user saying "drop this location", and
+/// it takes nothing from anybody who did not ask. A request naming only SOME
+/// of them is the dangerous one, and it is the leftovers — not the layout —
+/// that make it dangerous.
+///
+/// A PATH question on purpose, answered from each agent's own read dirs rather
+/// than from a `load_all_agents` scan: an agent whose config fails to parse
+/// loads zero skills, and reading "no skills" as "not a reader" would fail
+/// OPEN — straight into deleting a folder another agent still reads. Nothing
+/// here parses a config, so a broken one cannot hide a reader. Containment,
+/// not equality, because discovery recurses: a Master at
+/// `.agents/skills/<team>/<name>` is still read by every agent whose read dir
+/// is `.agents/skills`.
+pub fn skill_dir_readers_outside(
+	dir: &Path,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+	requested: &[crate::models::AgentType],
+) -> Vec<&'static str> {
+	let target = crate::skills::linker::classify::canonicalize_lenient(dir);
+	crate::models::AgentType::ALL
+		.iter()
+		.filter(|agent| !requested.contains(agent))
+		.filter(|agent| {
+			crate::create_adapter(**agent)
+				.get_skills_paths(project_root, scope)
+				.iter()
+				.any(|read_dir| {
+					target.starts_with(
+						crate::skills::linker::classify::canonicalize_lenient(
+							read_dir,
+						),
+					)
+				})
+		})
+		.map(|agent| crate::registry::get(*agent).id)
+		.collect()
+}
+
+/// True when some in-scope agent skills dir holds a discovered Referrer for
+/// `name` that resolves to `target_dir` — i.e. `target_dir` is a shared Master
+/// another view still references. A copy-layout removal must NOT
+/// `remove_dir_all` such a dir (it would orphan the live link); it keeps +
+/// reports it instead. The symlink layout already does this via its `other_refs`
+/// sweep — this is the copy-path equivalent for a Master that was discovered as
+/// a real dir (`canonical_path=None`) by a direct `.agents/skills` reader.
 pub fn dir_has_external_referrer(
 	target_dir: &Path,
 	all_agent_dirs: &[PathBuf],
-	safe: &str,
+	name: &str,
 ) -> Option<PathBuf> {
 	let target_real = target_dir.canonicalize().ok()?;
-	for dir in all_agent_dirs {
-		let entry = dir.join(safe);
+	let safe = skill::sanitize::sanitize_name(name);
+	// Same union as the symlink sweep: a Referrer this loop cannot see is one
+	// the caller then orphans with `remove_dir_all`, and the slot spelling never
+	// names an npx-era or grouped layout.
+	for (dir, entry) in all_agent_dirs.iter().flat_map(|dir| {
+		candidate_entries(dir, name, &safe)
+			.into_iter()
+			.map(move |entry| (dir.as_path(), entry))
+	}) {
 		// `Linker::is_link` and `canonicalize(..).unwrap_or(false)` both answer
 		// "no" to EACCES, so an unreadable peer directory hid a live inbound
 		// symlink and this function green-lit `remove_dir_all` on the directory
@@ -480,8 +710,8 @@ pub fn dir_has_external_referrer(
 		// referrer could actually BE there.
 		match std::fs::symlink_metadata(&entry) {
 			Ok(_) => {}
-			// Nothing there, and — for NotADirectory — nothing CAN be: `dir`
-			// itself is a file, so it holds no entries at all.
+			// Nothing there, and — for NotADirectory — nothing CAN be: the
+			// parent itself is a file, so it holds no entries at all.
 			Err(error)
 				if matches!(
 					error.kind(),
@@ -494,9 +724,17 @@ pub fn dir_has_external_referrer(
 			Err(_) => {
 				// Cannot stat the entry — but a NAME needs no stat. Mode 0400
 				// is exactly this shape: `read_dir` succeeds, every child stat
-				// fails. If the listing is complete and `safe` is not in it,
-				// there is provably no referrer here.
-				match dir_lists_name(dir, safe) {
+				// fails. If the listing is complete and the leaf is not in it,
+				// there is provably no referrer here. Asked of the entry's OWN
+				// parent and leaf, because a discovered entry can sit nested
+				// below `dir` — `<dir>/<safe>` is just the depth-0 case.
+				let listed = entry
+					.file_name()
+					.and_then(|leaf| leaf.to_str())
+					.and_then(|leaf| {
+						dir_lists_name(entry.parent().unwrap_or(dir), leaf)
+					});
+				match listed {
 					Some(false) => continue,
 					// Present but opaque, or not even listable: unknown, and an
 					// unknown referrer keeps the directory. This function only
@@ -630,23 +868,31 @@ impl RemovalOutcome {
 	/// `AGENTS.md` forbids, and it had already drifted: the route hard-coded
 	/// `PruneStatus::NotRun`, so its preview silently under-reported the lock
 	/// cleanup its own commit would perform.
+	/// `blocks` is the caller's OWN "this removal takes nothing away" verdict
+	/// (`read_effect_after`), passed in rather than re-derived here: the
+	/// `shared_master_kept && paths.is_empty()` proxy below cannot see the
+	/// npx-era Referrer sitting BESIDE the Master it points at, where there is
+	/// a real path to unlink and the commit still refuses. A caller with no
+	/// such verdict passes `false` and keeps the proxy.
 	pub fn preview(
 		plan: RemovalPlan,
+		blocks: bool,
 		scope: crate::models::ResourceScope,
 		project_root: Option<&Path>,
 	) -> Self {
 		// Load-bearing: for a kept shared Master the COMMIT does not prune, it
 		// REFUSES. Promising `would_prune_lock_entries` there would describe a
 		// commit that can never happen.
-		let prune = if plan.shared_master_kept && plan.paths.is_empty() {
-			PruneStatus::NotRun
-		} else {
-			crate::skills::prune::preview_prune_for_removal(
-				scope,
-				project_root,
-				&plan.paths,
-			)
-		};
+		let prune =
+			if blocks || (plan.shared_master_kept && plan.paths.is_empty()) {
+				PruneStatus::NotRun
+			} else {
+				crate::skills::prune::preview_prune_for_removal(
+					scope,
+					project_root,
+					&plan.paths,
+				)
+			};
 		Self {
 			plan,
 			executed: false,

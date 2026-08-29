@@ -944,6 +944,18 @@ fn batch_preflight_error(
 	operation: &str,
 	error: crate::batch::MultiTargetMutationError<OperationPlan, ConfigError>,
 ) -> ConfigError {
+	// Keep the VARIANT when every row refused for the same domain reason.
+	// Aggregating a batch is a transport concern and must not relabel the
+	// answer: `delete skills x -a cursor` and `reconcile skills x --remove
+	// cursor` are one refusal ("cursor reads it from the shared master"), and
+	// flattening the second to `InvalidConfig` sent the API 400 for one and 422
+	// for the other, so a client branching on `UNSUPPORTED_OPERATION` saw the
+	// same domain error land in its "bad parameters" arm.
+	let all_unsupported = !error.failures.is_empty()
+		&& error
+			.failures
+			.iter()
+			.all(|f| matches!(f.reason, ConfigError::UnsupportedOperation(_)));
 	let failures = error
 		.failures
 		.into_iter()
@@ -961,9 +973,14 @@ fn batch_preflight_error(
 		})
 		.collect::<Vec<_>>()
 		.join("; ");
-	ConfigError::InvalidConfig(format!(
+	let message = format!(
 		"{operation} preflight failed; nothing was written: {failures}"
-	))
+	);
+	if all_unsupported {
+		ConfigError::UnsupportedOperation(message)
+	} else {
+		ConfigError::InvalidConfig(message)
+	}
 }
 
 /// The success payload is `bool` = "the target already had it, nothing was
@@ -1394,40 +1411,37 @@ pub fn transfer_skill(
 	Ok(operation_batch(report))
 }
 
-/// Every in-scope agent whose config currently carries `name`.
+/// Every in-scope agent whose skill READ DIRS currently hold `name`, plus the
+/// ids of the agents whose read dirs exist but could not be listed.
 ///
 /// One extra scan, taken only to answer "will anyone still be reading the
 /// Master after this reconcile?" — the per-agent removal planner cannot see
 /// that, because a NativeReader leaves no artifact for it to count.
-/// Can this agent hold a skill in this scope at all?
 ///
-/// Asked of the descriptor, which is where the answer lives — `target_skills_dir`
-/// is `None` for an agent with no skill support in the scope.
-fn can_hold_skills(
-	agent_id: &str,
-	scope: crate::models::ResourceScope,
-	project_root: Option<&Path>,
-) -> bool {
-	let Ok(agent) = agent_id.parse::<AgentType>() else {
-		return false;
-	};
-	create_adapter(agent)
-		.target_skills_dir(project_root, scope)
-		.is_some()
-}
-
-/// Which agents currently hold this skill, and which agents we could NOT read.
+/// It walks the skill dirs DIRECTLY instead of going through
+/// `load_all_agents`, and that is the point rather than an optimisation. A full
+/// config load also parses MCPs and sub-agents and gives up on the FIRST error,
+/// so one unparseable `.mcp.json` erased an agent's skills from this answer
+/// while nothing about its skills was broken — the Master was then garbage
+/// collected out from under a real holder. Patching that by treating any load
+/// failure as "might hold it" only traded the data loss for the opposite
+/// failure: an agent that cannot hold skills at all vetoed every removal in the
+/// scope, with no override. Asking the filesystem the skill question directly
+/// has neither failure mode.
 ///
-/// The second half is load-bearing. `load_all_agents` fails OPEN — a config it
-/// cannot parse becomes "this agent has nothing", with a warning to stderr —
-/// and for a listing that is right. For the `exhaustive` DECISION below it is a
-/// data-loss bug: that decision asks "has every reader of the shared master
-/// been named?", so an agent counted as a non-reader because it could not be
-/// read gets the master deleted out from under it. Verified: one truncated,
-/// completely unrelated MCP config turned a reconcile that correctly refused
-/// (exit 1, master kept) into one reporting "5 succeeded, 0 failed" with the
-/// master gone — the only signal being a stderr warning no `--json` consumer
-/// ever sees.
+/// FAIL-CLOSED on what is left: a read dir that EXISTS but cannot be listed
+/// counts as a holder, because "holds nothing" and "cannot tell" are the same
+/// empty list. An ABSENT read dir really does hold nothing and does not count —
+/// widen that and every uninstalled agent becomes a holder, `exhaustive` is
+/// never true again, and Master GC silently stops happening forever.
+///
+/// Naming an unreadable agent in `removed` makes the reconcile exhaustive
+/// again. That is deliberate: an explicit "take it from that one too" is the
+/// only thing that can authorize a collection we cannot verify.
+///
+/// Otherwise the direction leaves an orphan Master behind — `doctor` reports it
+/// as `orphanMaster` and it is reclaimable. Recoverable noise beats
+/// unrecoverable data loss; do not "fix" this back to fail-open.
 fn skill_holders(
 	name: &str,
 	source: &ResourceLocator,
@@ -1438,30 +1452,358 @@ fn skill_holders(
 	};
 	let mut holders = Vec::new();
 	let mut unreadable = Vec::new();
-	for agent in crate::load_all_agents(scope, source.project_root.as_deref()) {
-		if agent.load_failed {
-			// Only agents that could actually READ this master count as
-			// unknowns. Several descriptors hold no skills at all in a given
-			// scope (zed holds none in either), and treating a broken zed
-			// config as a possible reader refused an exhaustive removal that
-			// was correct — a guard against blindness must not be blind to
-			// what it is guarding.
-			if can_hold_skills(
-				agent.agent_id,
-				scope,
-				source.project_root.as_deref(),
-			) {
-				unreadable.push(agent.agent_id);
-			}
+	for descriptor in registry::iter_all() {
+		let Ok(agent) = descriptor.id.parse::<AgentType>() else {
 			continue;
-		}
-		if agent.skills.iter().any(|s| s.name == name) {
-			if let Ok(parsed) = agent.agent_id.parse::<AgentType>() {
-				holders.push(parsed);
+		};
+		// Through the ADAPTER, never the descriptor: the skills-path test
+		// override lives only there, and bypassing it would answer about the
+		// developer's real home instead of the fixture.
+		let dirs = create_adapter(agent)
+			.get_skills_paths(source.project_root.as_deref(), scope);
+		// FAIL-CLOSED, and the direction is the whole point: `Err` means a
+		// read dir EXISTS and could not be listed, and "holds nothing" and
+		// "cannot tell" are the same empty list. An ABSENT dir is not an error
+		// — it really does hold nothing, and widening that would make every
+		// uninstalled agent a holder.
+		match crate::skills::discovery::load_skills_from_dirs(&dirs) {
+			Ok(skills) => {
+				if skills.iter().any(|s| s.name == name) {
+					holders.push(agent);
+				}
+			}
+			Err(error) => {
+				// SAY so even when the answer is safe anyway. Counting an
+				// unreadable agent as a holder keeps the Master, but it also
+				// makes the whole thing silent: the removal simply stops being
+				// exhaustive and proceeds. The error names the path it failed
+				// on (`discovery::at_path`), which is the only thing the user
+				// can act on.
+				log::warn!(
+					"cannot read agent '{}' skills, counting it as a holder \
+					 of '{name}': {error}",
+					descriptor.id
+				);
+				unreadable.push(descriptor.id);
+				holders.push(agent);
 			}
 		}
 	}
 	(holders, unreadable)
+}
+
+/// Everything a skill reconcile decides BEFORE it writes anything: the resolved
+/// source, the Master's fate, and the two plan lists.
+///
+/// One struct so the PREVIEW and the COMMIT answer the same question. A preview
+/// that green-lights what the commit refuses is worse than no preview: it is
+/// the step an agent takes to decide whether to commit.
+struct ReconcileSkillPlan {
+	skill: Skill,
+	source_root: PathBuf,
+	/// Does this reconcile drop the skill from EVERY agent that holds it? Then
+	/// the shared Master has no remaining reader and must go with it. Removing
+	/// it per-agent instead refuses on every target (an agent reading the
+	/// Master directly has nothing agent-specific to take) and leaves the
+	/// Master orphaned — and the desktop's manage-agents dialog allows exactly
+	/// that shape: deselect every agent, no adds.
+	exhaustive: bool,
+	/// Holders this reconcile does NOT remove: the reason the Master stays, and
+	/// the only thing a refused caller can actually act on.
+	keepers: Vec<&'static str>,
+	/// Agents whose skill dirs could not be listed at all.
+	unreadable: Vec<&'static str>,
+	copies: Vec<OperationPlan>,
+	deletes: Vec<OperationPlan>,
+}
+
+fn plan_reconcile_skill(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<ReconcileSkillPlan> {
+	let skill = load_source_skill(source)?;
+	let source_root = resolve_skill_root(&skill)?;
+
+	// The holder scan walks every agent's whole skill tree, so it runs only
+	// where its answer can change the outcome. An add alone already guarantees
+	// the Master gains a reader, and no removal has nothing to collect:
+	// `exhaustive` is false either way without asking.
+	let collectable = !removed.is_empty() && added.is_empty();
+	let (holders, unreadable) = if collectable {
+		skill_holders(&skill.name, source)
+	} else {
+		(Vec::new(), Vec::new())
+	};
+	let exhaustive =
+		collectable && holders.iter().all(|held| removed.contains(held));
+
+	let (copies, deletes) = reconcile_plans(
+		added.to_vec(),
+		removed.to_vec(),
+		source.scope,
+		source.project_root.clone(),
+	);
+	Ok(ReconcileSkillPlan {
+		skill,
+		source_root,
+		exhaustive,
+		// Unreadable agents get their own clause in the refusal, so leaving
+		// them out here keeps a message from naming the same agent twice.
+		keepers: holders
+			.iter()
+			.filter(|held| {
+				!removed.contains(held) && !unreadable.contains(&held.as_str())
+			})
+			.map(|held| held.as_str())
+			.collect(),
+		unreadable,
+		copies,
+		deletes,
+	})
+}
+
+impl ReconcileSkillPlan {
+	/// The read-only verdict for ONE row, run before any write in the batch and
+	/// reused verbatim by [`reconcile_skill_preview`].
+	fn preflight(&self, plan: &OperationPlan) -> Result<()> {
+		validate_target(&plan.target)?;
+		match plan.action {
+			OperationAction::Copy => {
+				skill_target_dir(&plan.target)?;
+				Ok(())
+			}
+			OperationAction::Delete => self.preflight_delete(&plan.target),
+		}
+	}
+
+	/// Refuse an END STATE that cannot exist, BEFORE the first write.
+	///
+	/// Removing an agent that reads the shared Master directly takes nothing
+	/// away while the Master stays — and whether it stays is a fact about the
+	/// WHOLE reconcile, not about this one row. So the copies used to land on
+	/// disk first and the delete row failed afterwards, leaving a half-applied
+	/// reconcile.
+	///
+	/// This is not a second implementation of that verdict: it asks the same
+	/// planner the same question with the same `exhaustive`, just earlier. It
+	/// runs for EVERY delete row, including a reconcile with no copies at all —
+	/// the unreachable end state is what is refused, not the pairing with a
+	/// copy.
+	fn preflight_delete(&self, target: &InstallTarget) -> Result<()> {
+		let mut manager = build_manager(target);
+		// Fail OPEN on a config this row cannot even read: that is this row's
+		// own problem, the mutate arm fails it identically, and escalating it
+		// here would abort the whole batch — an unparseable `.mcp.json` would
+		// cancel a perfectly good copy to a DIFFERENT agent.
+		if ensure_loaded(&mut manager).is_err() {
+			return Ok(());
+		}
+		// A dry-run plans under the guard this reconcile already holds and
+		// writes nothing.
+		let shared_master_kept = match manager.remove_skill_planned(
+			&self.skill.name,
+			self.exhaustive,
+			true, // dry_run
+			true,
+		) {
+			Ok(outcome) => outcome.plan.shared_master_kept,
+			// The copy may make an absent target present before its delete row
+			// runs, so absence only answers the on-disk half of this preflight.
+			Err(ConfigError::ResourceNotFound { .. }) => false,
+			Err(error) => return Err(error),
+		};
+
+		// Two ways this row takes nothing away, and only the first is visible
+		// on the disk the preflight can see.
+		//
+		// The first is READ OFF the dry-run above rather than re-asked:
+		// `remove_skill_planned` folds its own "this removal takes nothing
+		// away" verdict into `shared_master_kept` before returning an
+		// unexecuted outcome, so this inherits the commit's exact answer —
+		// including its `--all-agents`/single-agent split — by construction. A
+		// second call here re-derived it from the target's own read dirs alone
+		// and could not see that split, which is precisely how a preflight
+		// green-lights a row the commit then refuses.
+		if shared_master_kept || self.a_copy_restores_it(target) {
+			return Err(self.refuse_shared_master(target.agent.as_str()));
+		}
+		Ok(())
+	}
+
+	/// Will one of THIS reconcile's own copies leave the skill sitting in a
+	/// directory `target` READS?
+	///
+	/// Preflight runs before the first write, so the probe above looks at a
+	/// disk where the entries this reconcile is about to create do not exist
+	/// yet. Reasoned about rather than observed because
+	/// `run_staged_multi_target_mutation` runs EVERY preflight before ANY copy;
+	/// without it, "add windsurf, remove cursor" on a cursor-private skill
+	/// passed preflight, wrote the Master, deleted cursor's own folder and
+	/// reported BOTH rows successful while cursor still saw the skill.
+	///
+	/// Both halves come from ONE home. WHERE a copy lands is
+	/// [`Self::copy_entry_dirs`] (`agent_link_need` — root AGENTS.md "Link
+	/// decision"); WHERE the delete target reads is its own
+	/// `get_skills_paths`. Asking the classifier about the DELETE target alone
+	/// — "is it a NativeReader of the Master?" — was only half the question,
+	/// and the missing half is a data-loss shape, not a false refusal: Amp and
+	/// Kimi BOTH read and write `~/.config/agents/skills` at global scope
+	/// (`macros.rs` maps that path as read AND write for them), so
+	/// `--add amp --remove kimi -g` planned a copy whose Referrer slot IS the
+	/// entry Kimi's delete then unlinks. Copies run first, so both rows
+	/// reported success and Amp — the agent the user was ADDING — ended up
+	/// unable to see the skill. Comparing DIRS (not the delete's planned paths)
+	/// is what catches it at preflight: the shared entry need not exist on disk
+	/// yet for the collision to be certain.
+	///
+	/// Do NOT re-derive either half from `universal_master_roots` membership:
+	/// that list includes the XDG `~/.config/agents/skills`, which Amp and Kimi
+	/// read at global scope but no copy to a DIFFERENT agent ever writes
+	/// (global installs materialise `~/.agents/skills`). Doing so refused
+	/// `reconcile --add claude --remove amp -g` outright — batch preflight, so
+	/// nothing was written at all.
+	fn a_copy_restores_it(&self, target: &InstallTarget) -> bool {
+		let entry_dirs = self.copy_entry_dirs();
+		if entry_dirs.is_empty() {
+			return false;
+		}
+		create_adapter(target.agent)
+			.get_skills_paths(
+				target.project_root.as_deref(),
+				target_resource_scope(target),
+			)
+			.iter()
+			.map(|dir| {
+				crate::skills::linker::classify::canonicalize_lenient(dir)
+			})
+			.any(|read_dir| {
+				entry_dirs
+					.iter()
+					.any(|entry_dir| entry_dir.starts_with(&read_dir))
+			})
+	}
+
+	/// Every directory this reconcile's copies leave a READABLE entry in,
+	/// canonicalized so two spellings of one directory compare equal.
+	///
+	/// Installs are symlink-only, so a copy touches two places: it materialises
+	/// the shared Master (`universal_canonical_dir` — the same resolution
+	/// `universal_install_prep` uses), and, for a `NeedsLink` agent, it links
+	/// that agent's own skills dir to it. A `NativeReader` gets no link; the
+	/// Master already IS one of its read dirs.
+	fn copy_entry_dirs(&self) -> Vec<PathBuf> {
+		let mut dirs: Vec<PathBuf> = Vec::new();
+		let mut push = |dir: &Path| {
+			let canonical =
+				crate::skills::linker::classify::canonicalize_lenient(dir);
+			if !dirs.contains(&canonical) {
+				dirs.push(canonical);
+			}
+		};
+		for copy in &self.copies {
+			let scope = target_resource_scope(&copy.target);
+			let canonical_root = match scope {
+				crate::models::ResourceScope::ProjectOnly => {
+					copy.target.project_root.as_deref()
+				}
+				_ => None,
+			};
+			let Some(master) =
+				crate::skills::linker::universal_canonical_dir(canonical_root)
+			else {
+				continue;
+			};
+			if let crate::skills::linker::LinkNeed::NeedsLink {
+				agent_skills_dir,
+			} = crate::skills::linker::agent_link_need(
+				crate::registry::get(copy.target.agent),
+				scope,
+				copy.target.project_root.as_deref(),
+				&master,
+			) {
+				push(&agent_skills_dir);
+			}
+			push(&master);
+		}
+		dirs
+	}
+
+	/// "This agent reads the skill from the shared master, so removing it alone
+	/// takes nothing away."
+	///
+	/// Naming WHY the master stays is not decoration: without it the message
+	/// names the delete target while the real reason is a different agent, and
+	/// the user has nothing to act on.
+	fn refuse_shared_master(&self, agent: &str) -> ConfigError {
+		let ConfigError::UnsupportedOperation(mut message) =
+			ConfigError::unsupported_operation(
+				"remove for this agent alone",
+				"skill it reads from the shared master",
+				agent,
+			)
+		else {
+			unreachable!("unsupported_operation builds UnsupportedOperation")
+		};
+		if !self.keepers.is_empty() {
+			message.push_str(&format!(
+				"; the shared master is still read by '{}'",
+				self.keepers.join("', '")
+			));
+		} else if !self.copies.is_empty() {
+			// No keepers were computed because an add short-circuits the holder
+			// scan — the add IS the reason. Saying so is the difference between
+			// a dead end and "drop the --add, or remove that agent too".
+			message.push_str(
+				"; this reconcile also adds the skill to another agent, so the \
+				 shared master stays",
+			);
+		}
+		if !self.unreadable.is_empty() {
+			message.push_str(&format!(
+				"; cannot verify agent '{}' (skills directory unreadable), so \
+				 the shared master must stay",
+				self.unreadable.join("', '")
+			));
+		}
+		ConfigError::UnsupportedOperation(message)
+	}
+}
+
+/// Everything a `reconcile_skill` would refuse, without touching anything.
+///
+/// Exists so a PREVIEW cannot green-light a plan the commit rejects — the CLI's
+/// dry-run is the step an agent takes to decide whether to commit. It runs the
+/// SAME per-row preflight over the SAME plan and reports it through the same
+/// `batch_preflight_error`, so the preview and the commit are indistinguishable
+/// down to the error code and message.
+///
+/// Advisory by construction: it takes no mutation lock, and the committing call
+/// re-runs all of it under one. That is the right split — a preview that locked
+/// would serialize read-only inspection against real work.
+pub fn reconcile_skill_preview(
+	source: &ResourceLocator,
+	added: &[AgentType],
+	removed: &[AgentType],
+) -> Result<()> {
+	ensure_disjoint(added, removed)?;
+	let plan = plan_reconcile_skill(source, added, removed)?;
+	let rows: Vec<OperationPlan> = plan
+		.copies
+		.iter()
+		.chain(plan.deletes.iter())
+		.cloned()
+		.collect();
+	let failures = crate::batch::collect_preflight_failures(&rows, |row| {
+		plan.preflight(row)
+	});
+	if failures.is_empty() {
+		return Ok(());
+	}
+	Err(batch_preflight_error(
+		"skill reconcile",
+		crate::batch::MultiTargetMutationError { failures },
+	))
 }
 
 pub fn reconcile_skill(
@@ -1471,55 +1813,42 @@ pub fn reconcile_skill(
 	confirm: bool,
 ) -> Result<OperationBatchResult> {
 	ensure_reconcilable(&added, &removed, confirm)?;
-	let skill = load_source_skill(&source)?;
-	let source_root = resolve_skill_root(&skill)?;
+	// ONE guard for the whole reconcile, taken before the first READ that
+	// decides a write. The holder scan and the preflight dry-runs are exactly
+	// the "state read that decides the mutation" the lock exists for: computed
+	// outside it, another aghub process could link a fresh Referrer into the
+	// Master between the scan and the writes, and this flow would collect a
+	// Master that had just gained a reader. Reentrant, so every
+	// `guard_and_reload` underneath is free. It serializes aghub against aghub
+	// only — `manager/skill.rs`'s executing refusal stays as the backstop for
+	// anything else that touches these dirs.
+	let _mutation_guard = crate::skills::lock::mutation_guard(
+		"reconcile skill",
+		match source.scope {
+			InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
+			InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
+		},
+		source.project_root.as_deref(),
+	)
+	.map_err(ConfigError::Io)?;
+	let plan = plan_reconcile_skill(&source, &added, &removed)?;
 	info!(
 		"reconciling skill '{}' with {} added and {} removed agent(s)",
-		skill.name,
+		plan.skill.name,
 		added.len(),
 		removed.len()
 	);
-	// Does this reconcile drop the skill from EVERY agent that currently holds
-	// it? Then the shared Master has no remaining reader and must go with it.
-	// Removing it per-agent instead would refuse on every target (an agent
-	// reading the Master directly has nothing agent-specific to take) and leave
-	// the Master orphaned — and the desktop's manage-agents dialog allows
-	// exactly this shape: deselect every agent, no adds.
 	// Does this reconcile take the skill AWAY from its source? Only then must a
 	// copy prove the content actually landed — see the Copy arm below.
 	let deletes_source = removed.contains(&source.agent);
-	let (holders, unreadable) = skill_holders(&skill.name, &source);
-	let exhaustive = !removed.is_empty()
-		&& added.is_empty()
-		&& holders.iter().all(|held| removed.contains(held));
-	// `exhaustive` is the ONE answer an unreadable agent can wrongly flip to
-	// TRUE — an agent we could not read is counted as a non-reader — and TRUE
-	// is the answer that deletes the shared master. (It can never wrongly flip
-	// it to false: an unread holder outside `removed` only makes it stricter.)
-	// So refuse exactly here, rather than degrading to a per-agent removal
-	// whose "Cannot remove for this agent alone" says nothing about why.
-	if exhaustive && !unreadable.is_empty() {
-		return Err(ConfigError::InvalidConfig(format!(
-			"cannot decide whether removing '{}' leaves the shared \
-			 .agents/skills master unread: agent(s) {} could not be read, \
-			 and an agent aghub cannot read may still be reading it. Fix \
-			 or remove those configs, then re-run.",
-			skill.name,
-			unreadable.join(", ")
-		)));
-	}
-	let (copies, deletes) = reconcile_plans(
-		added,
-		removed,
-		source.scope,
-		source.project_root.clone(),
-	);
-	// Nothing we are copying INTO — and not the source either, unless the caller
-	// asked to remove it — may share a skills DIRECTORY with something we are
-	// removing from.
-	let protect = protected_targets(&copies, &source, deletes_source);
+	// Nothing we are copying INTO — and not the source either, unless the
+	// caller asked to remove it — may share a skills DIRECTORY with something
+	// we are removing from. A DIFFERENT question from `plan.preflight`, which
+	// refuses an unreachable END STATE: this one refuses a target whose backing
+	// dir another row in the same batch is about to delete. Both still asked.
+	let protect = protected_targets(&plan.copies, &source, deletes_source);
 	let removing: Vec<InstallTarget> =
-		deletes.iter().map(|plan| plan.target.clone()).collect();
+		plan.deletes.iter().map(|row| row.target.clone()).collect();
 	ensure_removals_spare(
 		&protect,
 		&removing,
@@ -1527,19 +1856,13 @@ pub fn reconcile_skill(
 		skill_backing_dir,
 	)?;
 	let report = crate::batch::run_staged_multi_target_mutation(
-		&copies,
-		&deletes,
-		|plan| {
-			validate_target(&plan.target)?;
-			if plan.action == OperationAction::Copy {
-				skill_target_dir(&plan.target)?;
-			}
-			Ok(())
-		},
-		|plan| {
-			let outcome = match plan.action {
+		&plan.copies,
+		&plan.deletes,
+		|row| plan.preflight(row),
+		|row| {
+			let outcome = match row.action {
 				OperationAction::Copy => (|| -> Result<bool> {
-					let target_scope = match plan.target.scope {
+					let target_scope = match row.target.scope {
 						InstallScope::Global => {
 							crate::models::ResourceScope::GlobalOnly
 						}
@@ -1557,14 +1880,15 @@ pub fn reconcile_skill(
 					let _copy_guard = crate::skills::lock::mutation_guard(
 						"reconcile skill copy",
 						target_scope,
-						plan.target.project_root.as_deref(),
+						row.target.project_root.as_deref(),
 					)
 					.map_err(ConfigError::Io)?;
-					let mut manager = build_manager(&plan.target);
+					let mut manager = build_manager(&row.target);
 					ensure_loaded(&mut manager)?;
 					// `add_skill_from_path` owns the already-present decision;
 					// `transfer_skill` defers to the same call.
-					let added = manager.add_skill_from_path(&source_root)?;
+					let added =
+						manager.add_skill_from_path(&plan.source_root)?;
 
 					// When this reconcile also REMOVES, the copy has to prove
 					// the source content actually landed — not merely that the
@@ -1593,11 +1917,11 @@ pub fn reconcile_skill(
 					// Master there stays the documented behaviour.
 					if deletes_source && !added.wrote_master {
 						let landed =
-							crate::skills::skill_source_root(&source_root);
+							crate::skills::skill_source_root(&plan.source_root);
 						let why = match prove_content_landed(
 							&landed,
-							&plan.target,
-							&skill.name,
+							&row.target,
+							&plan.skill.name,
 						) {
 							ContentProof::Landed => None,
 							ContentProof::Differs => Some(String::from(
@@ -1639,16 +1963,16 @@ pub fn reconcile_skill(
 							// unlink a referrer another aghub process had just
 							// recreated.
 							crate::skills::rename::rollback_materialized_install(
-								&skill.name,
+								&plan.skill.name,
 								target_scope,
-								plan.target.project_root.as_deref(),
+								row.target.project_root.as_deref(),
 								&added.created_referrer_dirs,
 								false,
 							);
 							return Err(ConfigError::InvalidConfig(format!(
 								"refusing to remove '{}' from the source: \
 								 {why}",
-								skill.name
+								plan.skill.name
 							)));
 						}
 					}
@@ -1661,36 +1985,26 @@ pub fn reconcile_skill(
 					// the very directory this target resolves through.
 					ensure_removals_spare(
 						&protect,
-						std::slice::from_ref(&plan.target),
+						std::slice::from_ref(&row.target),
 						source.agent,
 						skill_backing_dir,
 					)?;
-					let mut manager = build_manager(&plan.target);
+					let mut manager = build_manager(&row.target);
 					ensure_loaded(&mut manager)?;
 					match manager.remove_skill_planned(
-						&skill.name,
-						exhaustive,
+						&plan.skill.name,
+						plan.exhaustive,
 						false,
 						true,
 					) {
-						// Nothing removable is NOT success here. The planner
-						// keeps a shared universal Master on a single-agent
-						// removal (an agent that reads `.agents/skills`
-						// directly leaves no per-agent artifact to take), so
-						// reporting Ok told the user "removed from cursor"
-						// while cursor still sees it — and, before the planner
-						// fix, the alternative was worse: it deleted the Master
-						// and every other agent lost the skill too.
-						Ok(outcome)
-							if outcome.plan.paths.is_empty()
-								&& outcome.plan.shared_master_kept =>
-						{
-							Err(ConfigError::unsupported_operation(
-								"remove for this agent alone",
-								"skill it reads from the shared master",
-								plan.target.agent.as_str(),
-							))
-						}
+						// `remove_skill_planned` REFUSES an executing removal
+						// that would take nothing while keeping a shared
+						// Master, so that shape arrives here as an `Err` and
+						// never as an `Ok` to re-inspect. Do not add a second
+						// copy of the check here: it is unreachable, and a
+						// reader who spots the duplicate may delete the wrong
+						// one of the two.
+						//
 						// A Delete row is never `already_present` — that
 						// vocabulary belongs to the Copy direction.
 						Ok(_) | Err(ConfigError::ResourceNotFound { .. }) => {
@@ -1702,19 +2016,19 @@ pub fn reconcile_skill(
 			};
 			log_operation_outcome(
 				"skill",
-				&skill.name,
-				plan.action,
-				&plan.target,
+				&plan.skill.name,
+				row.action,
+				&row.target,
 				&outcome,
 			);
 			outcome
 		},
-		|plan| {
+		|row| {
 			ConfigError::InvalidConfig(format!(
 				"skipped delete of skill '{}' for agent '{}': a copy to \
 				 another agent failed first; nothing was removed",
-				skill.name,
-				plan.target.agent.as_str(),
+				plan.skill.name,
+				row.target.agent.as_str(),
 			))
 		},
 	)
@@ -1726,12 +2040,32 @@ pub fn reconcile_skill(
 mod tests {
 	use super::*;
 	use crate::models::McpTransport;
-	use std::sync::{Mutex, OnceLock};
+	// The lib binary's ONE env mutex. A module-local copy here would not
+	// serialize against `GlobalLockGuard`'s `XDG_STATE_HOME` swap, which is UB
+	// (and made `manager::skill`'s prune tests resolve the wrong lock file).
+	use crate::skills::prune::test_lock::env_lock;
 	use tempfile::tempdir;
 
-	fn env_lock() -> &'static Mutex<()> {
-		static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-		LOCK.get_or_init(|| Mutex::new(()))
+	#[cfg(unix)]
+	struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
+
+	#[cfg(unix)]
+	impl EnvVarGuard {
+		fn set(key: &'static str, value: &Path) -> Self {
+			let previous = std::env::var_os(key);
+			std::env::set_var(key, value);
+			Self(key, previous)
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for EnvVarGuard {
+		fn drop(&mut self) {
+			match self.1.take() {
+				Some(value) => std::env::set_var(self.0, value),
+				None => std::env::remove_var(self.0),
+			}
+		}
 	}
 
 	#[test]
@@ -2230,6 +2564,625 @@ mod tests {
 		assert!(manager.get_skill("repo-helper").is_none());
 	}
 
+	// Removing an agent that never held the skill is a per-row SUCCESS, and has
+	// to stay one: the planner answers `ResourceNotFound` for it, and the
+	// preflight added for the shared-master guard must map that to "allow", not
+	// to "reject the whole batch". Written before that guard existed, exactly to
+	// pin the contract it could break.
+	#[test]
+	fn reconcile_skill_removing_a_never_holder_still_succeeds() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		// A PRIVATE copy under claude's own dir: no `.agents/skills` Master, so
+		// no other agent can see it and windsurf is a genuine never-holder.
+		let private = root.join(".claude/skills/never");
+		fs::create_dir_all(&private).unwrap();
+		fs::write(
+			private.join("SKILL.md"),
+			"---\nname: never\ndescription: Private\n---\n\n# Never\n",
+		)
+		.unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "never".to_string(),
+			},
+			vec![],
+			vec![AgentType::Windsurf],
+			true, // confirm
+		)
+		.expect("removing a never-holder must not fail the batch");
+
+		assert_eq!(result.results.len(), 1);
+		assert!(
+			result.results[0].success,
+			"a never-holder removal stays a success row, got: {:?}",
+			result.results[0].error
+		);
+		assert!(
+			private.join("SKILL.md").exists(),
+			"claude's own copy must not be touched"
+		);
+	}
+
+	// Fixture shared by the shared-master preflight tests: a universal Master
+	// every NativeReader (cursor, codex, …) reads directly, plus claude's
+	// symlink Referrer into it.
+	#[cfg(unix)]
+	fn master_with_claude_referrer(root: &std::path::Path, name: &str) {
+		let master = root.join(".agents/skills").join(name);
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			format!(
+				"---\nname: {name}\ndescription: Shared\n---\n\n# {name}\n"
+			),
+		)
+		.unwrap();
+		let claude_skills = root.join(".claude/skills");
+		fs::create_dir_all(&claude_skills).unwrap();
+		std::os::unix::fs::symlink(&master, claude_skills.join(name)).unwrap();
+	}
+
+	// G3: "add to claude, remove from cursor" is an END STATE that cannot exist
+	// — cursor reads the Master directly, and the add guarantees the Master
+	// stays, so the removal can never take effect. It used to be discovered
+	// AFTER the copy had already written claude's Referrer, leaving a
+	// half-applied reconcile on disk. Asserting the error alone is not enough:
+	// the old behaviour also exited non-zero.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_refuses_native_reader_removal_that_cannot_take_effect() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		master_with_claude_referrer(&root, "mover");
+		let master = root.join(".agents/skills/mover");
+		// Claude already has a Referrer, so give the copy a fresh target.
+		let windsurf_link = root.join(".windsurf/skills/mover");
+
+		// Disk state is asserted BEFORE the return value: the old behaviour also
+		// exited non-zero, so only "the copy never landed" separates them.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![AgentType::Windsurf],
+			vec![AgentType::Cursor],
+			true, // confirm
+		);
+
+		assert!(
+			std::fs::symlink_metadata(&windsurf_link).is_err(),
+			"the copy must NOT have landed before the impossible delete was \
+			 discovered"
+		);
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the Master must be untouched"
+		);
+		let error = outcome
+			.expect_err(
+				"an unreachable end state must be refused, not half-applied",
+			)
+			.to_string();
+		assert!(error.contains("nothing was written"), "got: {error}");
+		// A refusal the user cannot act on is barely better than a silent
+		// no-op: this shape is unreachable BECAUSE of the add, and the message
+		// has to say so.
+		assert!(
+			error.contains("adds the skill to another agent"),
+			"the refusal must name the add that keeps the Master alive; got: \
+			 {error}"
+		);
+	}
+
+	// A holder whose CONFIG cannot be parsed is still a holder.
+	//
+	// `skill_holders` used to answer through `load_all_agents`, whose config
+	// load parses MCPs first and gives up on the first error — so one
+	// unparseable `.mcp.json` turned claude's very real Referrer into an empty
+	// skill list. Read as "does not hold it", the reconcile believed it was
+	// dropping the LAST holder and took the Master with it, deleting the
+	// Referrer of an agent the user never named and exiting 0. Reading the
+	// skill dirs directly is what stops an unrelated MCP file from hiding a
+	// holder; the refusal then names claude as the reason the Master stays.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_will_not_gc_the_master_when_a_holder_is_unreadable() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		master_with_claude_referrer(&root, "mover");
+		let master = root.join(".agents/skills/mover");
+		let claude_referrer = root.join(".claude/skills/mover");
+		// Claude's project MCP config exists but cannot be parsed, so its whole
+		// config load fails and its Referrer used to become invisible.
+		fs::write(root.join(".mcp.json"), "{ not json").unwrap();
+
+		// Every holder the fail-OPEN scan can still see. Removing exactly these
+		// is what used to make the reconcile look exhaustive; deriving the list
+		// keeps that true as the agent roster grows.
+		let readable_holders: Vec<AgentType> = crate::load_all_agents(
+			crate::models::ResourceScope::ProjectOnly,
+			Some(&root),
+		)
+		.into_iter()
+		.filter(|agent| agent.skills.iter().any(|s| s.name == "mover"))
+		.filter_map(|agent| agent.agent_id.parse::<AgentType>().ok())
+		.collect();
+		assert!(
+			!readable_holders.is_empty(),
+			"fixture is broken: no agent reads the Master"
+		);
+		assert!(
+			!readable_holders.contains(&AgentType::Claude),
+			"fixture is broken: claude's config still loads, so it is not the \
+			 invisible holder this test needs"
+		);
+
+		// Disk state is asserted BEFORE the return value: the regression this
+		// pins is data loss, not a different `Result` shape.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			readable_holders,
+			true, // confirm
+		);
+
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the Master must survive: an agent whose config could not be read \
+			 may still be reading it"
+		);
+		assert!(
+			std::fs::symlink_metadata(&claude_referrer).is_ok(),
+			"the Referrer of an agent the user never named must survive"
+		);
+		let message = outcome
+			.expect_err(
+				"an unverifiable holder must block the Master's removal",
+			)
+			.to_string();
+		assert!(message.contains("nothing was written"), "got: {message}");
+		assert!(
+			message.contains("claude"),
+			"the refusal must name the holder that keeps the Master alive, or \
+			 the user has no way to act on it; got: {message}"
+		);
+	}
+
+	// Fail-CLOSED is not fail-shut: one unreadable config makes `exhaustive`
+	// false, it does NOT veto every removal. A NeedsLink agent still has its
+	// own Referrer to give up, so unlinking it must go through.
+	#[cfg(unix)]
+	#[test]
+	fn an_unreadable_agent_does_not_block_a_referrer_unlink() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		master_with_claude_referrer(&root, "mover");
+		let master = root.join(".agents/skills/mover");
+		let windsurf_skills = root.join(".windsurf/skills");
+		let windsurf_referrer = windsurf_skills.join("mover");
+		fs::create_dir_all(&windsurf_skills).unwrap();
+		std::os::unix::fs::symlink(&master, &windsurf_referrer).unwrap();
+		fs::write(root.join(".mcp.json"), "{ not json").unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Windsurf,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			vec![AgentType::Windsurf],
+			true, // confirm
+		)
+		.expect(
+			"an unrelated broken config must not veto a removal that can \
+			 actually take effect",
+		);
+
+		assert!(result.results[0].success, "{:?}", result.results[0].error);
+		assert!(
+			std::fs::symlink_metadata(&windsurf_referrer).is_err(),
+			"windsurf's Referrer must be gone"
+		);
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the Master keeps its other readers"
+		);
+	}
+
+	// The core guard refuses UNREACHABLE end states — it does NOT adopt the
+	// desktop dialog's "add first, then remove" product rule. Moving a private
+	// copy to another agent in one reconcile stays legal.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_still_allows_add_then_remove_of_a_private_copy() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		let private = root.join(".claude/skills/solo");
+		fs::create_dir_all(&private).unwrap();
+		fs::write(
+			private.join("SKILL.md"),
+			"---\nname: solo\ndescription: Private\n---\n\n# Solo\n",
+		)
+		.unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "solo".to_string(),
+			},
+			vec![AgentType::Windsurf],
+			vec![AgentType::Claude],
+			true, // confirm
+		)
+		.expect("moving a private copy between agents must stay legal");
+
+		assert_eq!(result.results.len(), 2);
+		for row in &result.results {
+			assert!(row.success, "{:?}: {:?}", row.action, row.error);
+		}
+		assert!(
+			root.join(".agents/skills/solo/SKILL.md").exists(),
+			"the copy must have materialised the Master"
+		);
+		assert!(
+			std::fs::symlink_metadata(root.join(".windsurf/skills/solo"))
+				.is_ok(),
+			"windsurf must be linked to it"
+		);
+		assert!(
+			!private.exists(),
+			"claude's private copy must be gone — that is the whole point of \
+			 the move"
+		);
+	}
+
+	// The copy runs BEFORE the delete, so a reconcile can hand the removed
+	// agent the skill back through the Master it just created.
+	//
+	// Cursor holds `solo` as a private folder and also reads `.agents/skills`.
+	// The preflight probe looks at a disk where that Master does not exist yet,
+	// so every row passed: the copy materialised `.agents/skills/solo` +
+	// windsurf's link, the delete took cursor's private folder, BOTH rows
+	// reported success — and cursor could still see `solo`, now via the Master.
+	// Nothing on disk recorded that anything was wrong.
+	//
+	// Deliberately NOT the same shape as
+	// `reconcile_skill_still_allows_add_then_remove_of_a_private_copy`: there
+	// the removed agent is claude, which does NOT read `.agents/skills`, so the
+	// move really does take the skill away and must stay legal.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_refuses_a_removal_the_paired_copy_would_undo() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		let private = root.join(".cursor/skills/solo");
+		fs::create_dir_all(&private).unwrap();
+		fs::write(
+			private.join("SKILL.md"),
+			"---\nname: solo\ndescription: Private\n---\n\n# Solo\n",
+		)
+		.unwrap();
+
+		// Disk state is asserted BEFORE the return value: the old behaviour
+		// returned Ok, so only "nothing landed" separates the two.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "solo".to_string(),
+			},
+			vec![AgentType::Windsurf],
+			vec![AgentType::Cursor],
+			true, // confirm
+		);
+
+		assert!(
+			private.join("SKILL.md").exists(),
+			"cursor's copy must survive a removal that could not take effect"
+		);
+		assert!(
+			!root.join(".agents/skills/solo").exists(),
+			"the copy must NOT have landed: it is the thing that would hand \
+			 the skill straight back to cursor"
+		);
+		let message = outcome
+			.expect_err(
+				"cursor reads `.agents/skills`, so the copy this reconcile \
+				 makes would restore what the delete takes",
+			)
+			.to_string();
+		assert!(message.contains("nothing was written"), "got: {message}");
+		assert!(
+			message.contains("adds the skill to another agent"),
+			"the refusal must name the add that keeps the Master alive; got: \
+			 {message}"
+		);
+	}
+
+	// Every agent the fail-OPEN roster scan can see holding `name`. Derived
+	// rather than listed so the fixtures keep working as the agent roster
+	// grows, and deliberately NOT `skill_holders` — a test that asks the code
+	// under test for its own expectation proves nothing.
+	#[cfg(unix)]
+	fn holders_via_agent_roster(
+		root: &std::path::Path,
+		name: &str,
+	) -> Vec<AgentType> {
+		crate::load_all_agents(
+			crate::models::ResourceScope::ProjectOnly,
+			Some(root),
+		)
+		.into_iter()
+		.filter(|agent| agent.skills.iter().any(|s| s.name == name))
+		.filter_map(|agent| agent.agent_id.parse::<AgentType>().ok())
+		.collect()
+	}
+
+	// FAIL-CLOSED IS NOT FAIL-SHUT, the load-failure half.
+	//
+	// `skill_holders` used to go through the whole config load, which parses
+	// MCPs first and aborts on the first error. Reading that abort as "this
+	// agent might hold the skill" made ANY agent with a broken MCP file veto
+	// the removal — including roocode, which cannot even read `.agents/skills`
+	// and never held this skill. The scope's universal skills then became
+	// unremovable through every surface until an unrelated JSON file was fixed.
+	// Asking the skill dirs directly is what makes the MCP file irrelevant.
+	#[cfg(unix)]
+	#[test]
+	fn a_broken_mcp_file_of_a_non_holder_does_not_block_master_collection() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".agents/skills/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+		// roocode holds no skill here and reads no `.agents/skills`; only its
+		// MCP config is broken.
+		fs::create_dir_all(root.join(".roo")).unwrap();
+		fs::write(root.join(".roo/mcp.json"), "{ oops").unwrap();
+
+		let holders = holders_via_agent_roster(&root, "mover");
+		assert!(!holders.is_empty(), "fixture: nobody reads the Master");
+		assert!(
+			!holders.contains(&AgentType::RooCode),
+			"fixture: roocode must NOT be a holder, or this proves nothing"
+		);
+
+		// Disk state is asserted BEFORE the return value: the regression is an
+		// availability one — the Master that SHOULD be collected is still
+		// there because an unrelated file could not be parsed.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			holders,
+			true, // confirm
+		);
+
+		assert!(
+			!master.exists(),
+			"dropping every holder must collect the Master; it survived, so \
+			 something unrelated to skills refused the operation"
+		);
+		let result = outcome.expect(
+			"an unrelated agent's broken MCP file must not veto the removal",
+		);
+		assert!(
+			result.results.iter().all(|row| row.success),
+			"{:?}",
+			result.results
+		);
+	}
+
+	// FAIL-CLOSED, the half that must stay closed: a holder whose skills
+	// directory EXISTS but cannot be listed is "cannot tell", not "holds
+	// nothing", and the two are the same empty list to every fail-open reader.
+	// Treating it as nothing is what garbage-collected a Master out from under
+	// an agent the user never named.
+	//
+	// A plain FILE where the skills dir belongs, not a chmod: `read_dir` fails
+	// for any user, including a CI job running as root.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_keeps_the_master_when_a_holders_dir_cannot_be_listed() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".agents/skills/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+		fs::create_dir_all(root.join(".windsurf")).unwrap();
+		fs::write(root.join(".windsurf/skills"), "not a directory").unwrap();
+
+		let holders = holders_via_agent_roster(&root, "mover");
+		assert!(
+			!holders.contains(&AgentType::Windsurf),
+			"fixture: windsurf's dir is unlistable, so the fail-open scan must \
+			 not see it as a holder"
+		);
+
+		// Disk state is asserted BEFORE the return value: the regression this
+		// pins is data loss, not a different `Result` shape.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			holders,
+			true, // confirm
+		);
+
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the Master must survive: an agent whose skills directory could \
+			 not be listed may still be reading it"
+		);
+		let message = outcome
+			.expect_err("an unverifiable holder must block the collection")
+			.to_string();
+		assert!(
+			message.contains("windsurf")
+				&& message.contains("skills directory unreadable"),
+			"the refusal must name the agent it could not read and why, or the \
+			 user has nothing to act on; got: {message}"
+		);
+	}
+
+	// An agent that reads BOTH a private dir and the Master defeats a verdict
+	// read off the plan alone: the private artifact IS removable, so the plan
+	// looks effective, while the agent keeps seeing the skill through the
+	// Master. The row reported a removal that never happened.
+	//
+	// aghub does not create that artifact today (a NativeReader gets no
+	// Referrer), but `npx skills` and older aghub releases did.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_refuses_a_removal_the_master_would_undo() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".agents/skills/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+		// opencode reads `.opencode/skills` FIRST and `.agents/skills` second,
+		// so this stale link is what its config load discovers.
+		let stale = root.join(".opencode/skills/mover");
+		fs::create_dir_all(stale.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&master, &stale).unwrap();
+
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::OpenCode,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			vec![AgentType::OpenCode],
+			true, // confirm
+		);
+
+		assert!(
+			std::fs::symlink_metadata(&stale).is_ok(),
+			"nothing may be unlinked for a removal that cannot take effect"
+		);
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the Master keeps its other readers"
+		);
+		let message = outcome
+			.expect_err(
+				"opencode still reads the Master, so removing it takes nothing \
+				 away and must be refused",
+			)
+			.to_string();
+		assert!(message.contains("nothing was written"), "got: {message}");
+	}
+
+	// The preflight refuses UNREACHABLE end states, not rows that merely look
+	// risky. A delete target whose own config cannot be parsed is neither: it
+	// is that row's problem, and the mutate arm already fails it. Escalating it
+	// to a batch-wide rejection would let one unrelated broken `.mcp.json`
+	// cancel a perfectly good copy to a DIFFERENT agent.
+	#[cfg(unix)]
+	#[test]
+	fn a_broken_config_on_a_delete_target_does_not_cancel_the_paired_copy() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".agents/skills/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+		fs::create_dir_all(root.join(".cursor")).unwrap();
+		fs::write(root.join(".cursor/mcp.json"), "{ oops").unwrap();
+
+		// Disk state is asserted BEFORE the return value: the regression is a
+		// copy that never ran, not a different `Result` shape.
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![AgentType::Windsurf],
+			vec![AgentType::Cursor],
+			true, // confirm
+		);
+
+		assert!(
+			std::fs::symlink_metadata(root.join(".windsurf/skills/mover"))
+				.is_ok(),
+			"the copy must still land: nothing about it depends on cursor's \
+			 MCP file"
+		);
+		let result = outcome
+			.expect("one row's unreadable config must not abort the batch");
+		let cursor_row = result
+			.results
+			.iter()
+			.find(|row| row.target.agent == AgentType::Cursor)
+			.expect("cursor row");
+		assert!(
+			!cursor_row.success,
+			"the unreadable config still fails ITS OWN row: {cursor_row:?}"
+		);
+	}
+
 	// The confirmation gate lives in core so the CLI's `--yes` and the API's
 	// `confirm` cannot drift. Asserting the ERROR alone would still pass if the
 	// guard ran AFTER the deletes, so this also proves the skill survived.
@@ -2492,6 +3445,10 @@ mod tests {
 	// via cursor's READ dirs and `remove_dir_all`'d it — data loss for every
 	// referrer. This test fails if the removal path stops going through
 	// `remove_skill_planned`'s classifier.
+	//
+	// The refusal MOVED: it used to be a failed row inside an `Ok` batch (the
+	// row itself was never asserted), and is now a preflight rejection of the
+	// whole reconcile. Same invariant, stronger claim — nothing is written.
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_remove_native_reader_keeps_shared_master() {
@@ -2523,7 +3480,7 @@ mod tests {
 		set_skills_path_override("claude", Some(claude_skills));
 		let _reset_override = SkillsPathOverrideReset;
 
-		let result = reconcile_skill(
+		let error = reconcile_skill(
 			ResourceLocator {
 				agent: AgentType::Claude,
 				scope: InstallScope::Project,
@@ -2534,10 +3491,15 @@ mod tests {
 			vec![AgentType::Cursor],
 			true, // confirm
 		)
-		.unwrap();
+		.expect_err(
+			"removing a NativeReader while the Master stays cannot take \
+			 effect and must be refused",
+		);
+		assert!(
+			error.to_string().contains("nothing was written"),
+			"the refusal must say the batch never ran, got: {error}"
+		);
 
-		assert_eq!(result.results.len(), 1);
-		assert_eq!(result.results[0].action, OperationAction::Delete);
 		// The shared Master and its contents must survive.
 		assert!(
 			master.join("SKILL.md").exists(),
@@ -2552,6 +3514,11 @@ mod tests {
 		assert!(
 			fs::canonicalize(&referrer).is_ok(),
 			"claude referrer symlink must stay intact"
+		);
+		assert_eq!(
+			fs::read_dir(root.join(".claude/skills")).unwrap().count(),
+			1,
+			"a refused reconcile must not add anything under .claude/skills"
 		);
 	}
 
@@ -3054,5 +4021,201 @@ mod tests {
 			&[AgentType::Cline, AgentType::Claude],
 		)
 		.is_ok());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn copy_collision_is_checked_when_delete_target_is_initially_absent() {
+		let _guard = env_lock().lock().unwrap();
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+
+		let source = home.path().join(".claude/skills/solo");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(
+			source.join("SKILL.md"),
+			"---\nname: solo\ndescription: private\n---\n",
+		)
+		.unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Global,
+				project_root: None,
+				name: "solo".to_string(),
+			},
+			vec![AgentType::Amp],
+			vec![AgentType::Kimi],
+			true,
+		);
+
+		assert!(
+			!home.path().join(".agents/skills/solo").exists(),
+			"preflight must reject before Amp's copy materialises the Master"
+		);
+		assert!(
+			std::fs::symlink_metadata(
+				home.path().join(".config/agents/skills/solo")
+			)
+			.is_err(),
+			"the shared Amp/Kimi Referrer slot must remain untouched"
+		);
+		result.expect_err(
+			"a copy that makes an absent delete target see the skill must be refused",
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn copy_collision_uses_recursive_read_dir_containment() {
+		let _guard = env_lock().lock().unwrap();
+		let home = tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
+		let _config =
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state = EnvVarGuard::set(
+			"XDG_STATE_HOME",
+			&home.path().join(".local/state"),
+		);
+		let _hermes = EnvVarGuard::set(
+			"HERMES_HOME",
+			&home.path().join(".claude/skills"),
+		);
+
+		let master = home.path().join(".agents/skills/solo");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: solo\ndescription: shared\n---\n",
+		)
+		.unwrap();
+		let claude_referrer = home.path().join(".claude/skills/solo");
+		fs::create_dir_all(claude_referrer.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&master, &claude_referrer).unwrap();
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Global,
+				project_root: None,
+				name: "solo".to_string(),
+			},
+			vec![AgentType::Hermes],
+			vec![AgentType::Claude],
+			true,
+		);
+
+		assert!(
+			std::fs::symlink_metadata(&claude_referrer).is_ok(),
+			"preflight must reject before Claude's sweep can unlink either Referrer"
+		);
+		assert!(
+			std::fs::symlink_metadata(
+				home.path().join(".claude/skills/skills/solo")
+			)
+			.is_err(),
+			"Hermes's nested Referrer must never be created"
+		);
+		result.expect_err(
+			"a copy below the delete target's recursively-read root must be refused",
+		);
+	}
+
+	fn global_target(agent: AgentType) -> InstallTarget {
+		InstallTarget {
+			agent,
+			scope: InstallScope::Global,
+			project_root: None,
+		}
+	}
+
+	/// A `ReconcileSkillPlan` whose only content is the copy set — enough for
+	/// the preflight predicates, which read no disk of their own.
+	fn plan_copying_to(agents: &[AgentType]) -> ReconcileSkillPlan {
+		ReconcileSkillPlan {
+			skill: Skill::new("x"),
+			source_root: PathBuf::from("/nonexistent/x"),
+			exhaustive: false,
+			keepers: vec![],
+			unreadable: vec![],
+			copies: agents
+				.iter()
+				.map(|agent| OperationPlan {
+					target: global_target(*agent),
+					action: OperationAction::Copy,
+				})
+				.collect(),
+			deletes: vec![],
+		}
+	}
+
+	/// "Will one of this reconcile's own copies leave the skill where the
+	/// delete target reads?" must be answered from BOTH real locations —
+	/// where the copy lands (`agent_link_need`) and where the target reads
+	/// (`get_skills_paths`) — never from `universal_master_roots` membership.
+	///
+	/// That list also names the XDG `~/.config/agents/skills`. Amp and Kimi
+	/// read it at GLOBAL scope, but a global install writes `~/.agents/skills`
+	/// and links them into it — the classifier's own
+	/// `amp_kimi_global_needs_link_but_project_is_native` says so. So
+	/// `reconcile skills X --add claude --remove amp -g --yes` was refused
+	/// outright (batch preflight => nothing written at all) on the false claim
+	/// that a copy to CLAUDE would hand the skill back to Amp.
+	#[test]
+	fn a_copy_restores_it_asks_the_classifier_not_the_master_root_list() {
+		// Reads HOME/XDG through `dirs`; see core AGENTS.md Testing.
+		let _guard = env_lock().lock().unwrap();
+		// Non-empty so the "no copies at all" short-circuit is not what is
+		// being measured.
+		let plan = plan_copying_to(&[AgentType::Claude]);
+
+		for agent in [AgentType::Amp, AgentType::Kimi] {
+			assert!(
+				!plan.a_copy_restores_it(&global_target(agent)),
+				"{agent:?} reads the XDG dir at global scope, which a copy to \
+				 claude never writes — removing it must not be refused"
+			);
+		}
+		assert!(
+			plan.a_copy_restores_it(&global_target(AgentType::OpenCode)),
+			"opencode DOES read ~/.agents/skills at global scope, so a copy \
+			 really does restore it — this is the half that must keep refusing"
+		);
+	}
+
+	/// The other half: the copy's REFERRER dir, not just the Master.
+	///
+	/// Amp and Kimi both read and write `~/.config/agents/skills` at global
+	/// scope, so a copy to Amp materialises its Referrer at the very entry
+	/// Kimi's delete unlinks. Copies run first
+	/// (`run_staged_multi_target_mutation`), so `--add amp --remove kimi -g`
+	/// reported BOTH rows successful and left AMP — the agent being added —
+	/// unable to see the skill. Asking only "is the delete target a
+	/// NativeReader of the Master?" answers `false` here (Kimi is NeedsLink at
+	/// global) and green-lights exactly that.
+	#[test]
+	fn a_copy_restores_it_sees_a_referrer_dir_the_copy_and_the_delete_share() {
+		// Reads HOME/XDG through `dirs`; see core AGENTS.md Testing.
+		let _guard = env_lock().lock().unwrap();
+		let plan = plan_copying_to(&[AgentType::Amp]);
+
+		assert!(
+			plan.a_copy_restores_it(&global_target(AgentType::Kimi)),
+			"amp's copy links into ~/.config/agents/skills, which is the SAME \
+			 dir kimi reads and the same entry kimi's delete unlinks — this \
+			 reconcile cannot be expressed and must be refused, not half-run"
+		);
+		assert!(
+			!plan.a_copy_restores_it(&global_target(AgentType::Claude)),
+			"claude reads ~/.claude/skills only — an amp copy touches neither \
+			 that nor anything claude reads, so this must stay allowed"
+		);
 	}
 }

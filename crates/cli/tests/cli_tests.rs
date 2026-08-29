@@ -4795,6 +4795,128 @@ fn reconcile_skill_reports_batch_summary() {
 	);
 }
 
+// End-to-end proof that the shared-master preflight reaches the CLI with ZERO
+// CLI changes — the guard lives in core, so `--json` reports it through the
+// ordinary error envelope. Before the guard this printed a batch summary (one
+// success, one failure) on exit 1, with claude's Referrer already on disk.
+#[cfg(unix)]
+#[test]
+fn reconcile_skill_native_reader_removal_is_a_json_error_and_writes_nothing() {
+	let project = tempfile::TempDir::new().unwrap();
+	// A universal Master cursor reads directly; `.claude/skills` marks the root.
+	let master = project.path().join(".agents/skills/mover");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: mover\ndescription: d\n---\nbody\n",
+	)
+	.unwrap();
+	let claude_link = project.path().join(".claude/skills/mover");
+	std::fs::create_dir_all(claude_link.parent().unwrap()).unwrap();
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"cursor",
+			"--name",
+			"mover",
+			"--add",
+			"claude",
+			"--remove",
+			"cursor",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		out.status.code(),
+		Some(1),
+		"stdout: {}\nstderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout)
+		.expect("a refused reconcile must emit the --json error envelope");
+	// The SAME code `delete skills mover -a cursor --yes` returns for the same
+	// domain refusal. Batching is transport; it must not relabel the answer as
+	// "your parameters were wrong" (which is what INVALID_CONFIG, HTTP 400,
+	// tells a client — while the delete verb sent UNSUPPORTED_OPERATION / 422).
+	assert_eq!(
+		json["error"]["code"], "UNSUPPORTED_OPERATION",
+		"error envelope: {json}"
+	);
+	assert!(
+		std::fs::symlink_metadata(&claude_link).is_err(),
+		"nothing may be written when the reconcile is refused"
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"the Master must be untouched"
+	);
+}
+
+// The PREVIEW must refuse what the commit refuses. A `--remove` without
+// `--yes` is the implicit dry-run an agent runs to decide whether to commit, so
+// green-lighting a plan the `--yes` run rejects is worse than no preview at
+// all: it reports "would remove" for something that can never be removed.
+//
+// Same fixture as the committing test above; the only difference is `--yes`.
+#[cfg(unix)]
+#[test]
+fn reconcile_skill_preview_refuses_what_the_commit_refuses() {
+	let project = tempfile::TempDir::new().unwrap();
+	let master = project.path().join(".agents/skills/mover");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: mover\ndescription: d\n---\nbody\n",
+	)
+	.unwrap();
+	std::fs::create_dir_all(project.path().join(".claude/skills")).unwrap();
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"cursor",
+			"--name",
+			"mover",
+			"--add",
+			"claude",
+			"--remove",
+			"cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		out.status.code(),
+		Some(1),
+		"a preview of an impossible removal must not exit 0\nstdout: \
+		 {}\nstderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout)
+		.expect("a refused preview must emit the --json error envelope");
+	assert_eq!(
+		json["error"]["code"], "UNSUPPORTED_OPERATION",
+		"the preview must fail with the code the commit uses: {json}"
+	);
+	assert!(
+		json["dry_run"].is_null(),
+		"a refused preview must not also print a would-do plan: {json}"
+	);
+}
+
 // ── MCP + sub-agent transfer/reconcile arms (finding #2 coverage) ────────────
 //
 // The skill arm above is the tracer; these pin the OTHER two resource kinds the
@@ -7011,7 +7133,13 @@ fn reconcile_rejects_empty_target_set_and_validates_source_in_preview() {
 		String::from_utf8_lossy(&absent.stderr)
 	);
 
-	// A preview for a source that DOES exist still previews (no over-reach).
+	// A preview for a source that DOES exist, and a removal that CAN take
+	// effect, still previews (no over-reach). It removes claude rather than
+	// opencode because `add skills` builds a shared Master: opencode reads that
+	// Master directly, so removing opencode alone is an end state that cannot
+	// exist and the preview now refuses it — see
+	// `reconcile_skill_preview_refuses_what_the_commit_refuses`. Claude has its
+	// own Referrer to give up, so its removal is real.
 	let ok = isolated_cli(home.path(), state.path())
 		.current_dir(project.path())
 		.args([
@@ -7024,7 +7152,7 @@ fn reconcile_rejects_empty_target_set_and_validates_source_in_preview() {
 			"--name",
 			"present",
 			"--remove",
-			"opencode",
+			"claude",
 		])
 		.output()
 		.unwrap();
@@ -9968,11 +10096,18 @@ fn identity_not_path_and_unknown_not_absent() {
 		);
 		assert!(!out.status.success());
 		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		// The refusal must name a REASON the user can act on. Which reason
+		// changed with the holder scan: it used to go through
+		// `load_all_agents`, which parses MCPs too and gives up on the first
+		// error, so a broken `.cursor/mcp.json` made aghub BLIND to cursor and
+		// the only honest answer was "could not be read". The scan now asks the
+		// skill dirs directly, so cursor is seen for what it is — a live reader
+		// of the shared master — and says so by name. Either sentence is a
+		// reason; a bare "unsupported operation" is not.
+		let message = json["error"]["message"].as_str().unwrap_or_default();
 		assert!(
-			json["error"]["message"]
-				.as_str()
-				.unwrap_or_default()
-				.contains("could not be read"),
+			message.contains("could not be read")
+				|| message.contains("still read by"),
 			"the refusal must name why it could not decide: {json}"
 		);
 	}
@@ -10358,18 +10493,34 @@ fn an_unreadable_skill_md_is_not_a_missing_one() {
 		);
 
 		if unreadable {
+			// A holder aghub could not read must not be counted as a
+			// NON-holder — that is what flips this reconcile to `exhaustive`
+			// and widens it into the sweep that destroys gemini's own copy
+			// (the assertion above, which holds in both arms).
+			//
+			// It used to be REFUSED outright, because `skill_holders` went
+			// through `load_all_agents`: an agent it could not read dropped out
+			// of `holders` entirely, and the refusal was the only thing left
+			// between that and the sweep. The holder scan now walks the skill
+			// dirs directly and counts an unreadable agent AS a holder, so
+			// `exhaustive` is false and the request degrades to the per-agent
+			// removal the caller actually asked for — which is safe and
+			// succeeds. The blindness must still be REPORTED, or an unreadable
+			// skill is invisible; that is what the stderr assertions pin.
 			assert!(
-				!out.status.success(),
-				"a holder aghub could not read must REFUSE the removal, not \
-				 be counted as a non-holder: stdout={}",
-				String::from_utf8_lossy(&out.stdout)
+				out.status.success(),
+				"an unreadable holder makes the reconcile non-exhaustive, not \
+				 impossible — the per-agent removal must still run: \
+				 stdout={} stderr={}",
+				String::from_utf8_lossy(&out.stdout),
+				String::from_utf8_lossy(&out.stderr)
 			);
-			// The refusal must name the agent AND the path, or the user has
+			// The warning must name the agent AND the path, or the user has
 			// nothing to act on.
 			let stderr = String::from_utf8_lossy(&out.stderr);
 			assert!(
 				stderr.contains("gemini"),
-				"the refusal must name the unreadable agent: {stderr}"
+				"the warning must name the unreadable agent: {stderr}"
 			);
 			assert!(
 				stderr.contains(".gemini/skills/foo"),
@@ -10638,17 +10789,36 @@ fn an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing() {
 
 		if unreadable {
 			// The peer must be reported, not silently dropped: the caller
-			// asked to remove it everywhere and one place was not touched.
+			// asked to remove it EVERYWHERE and one place was not touched.
+			//
+			// It used to be reported as a successful removal carrying a
+			// `skipped` list. That is the shape `--all-agents` may not have:
+			// the promise is "gone everywhere", the skill is still readable
+			// from the dir that could not be swept, and `outcome: removed`
+			// with a `skipped` array beside it is a success line a caller
+			// keyed on the exit code never sees. It REFUSES now — and still
+			// owes the same information, so the refusal names the dir. Losing
+			// the name is the regression this pins, not the exit code.
+			assert!(
+				!out.status.success(),
+				"an --all-agents delete that provably leaves the skill \
+				 readable must not report success: stdout={}",
+				String::from_utf8_lossy(&out.stdout)
+			);
 			let stdout = String::from_utf8_lossy(&out.stdout);
 			let view: serde_json::Value =
 				serde_json::from_str(&stdout).unwrap();
-			let skipped = view["skipped"].as_array().unwrap();
+			let message = view["error"]["message"]
+				.as_str()
+				.or_else(|| {
+					// A per-agent batch envelope carries it one level in.
+					view["results"][0]["error"].as_str()
+				})
+				.unwrap_or_default();
 			assert!(
-				skipped.iter().any(|p| p
-					.as_str()
-					.is_some_and(|p| p.contains(".gemini/skills"))),
-				"the agent dir that could not be swept must appear in \
-				 `skipped`, or the user cannot tell what was missed: {stdout}"
+				message.contains(".gemini/skills"),
+				"the agent dir that could not be swept must be NAMED, or the \
+				 user cannot tell what was missed: {stdout}"
 			);
 		}
 	}

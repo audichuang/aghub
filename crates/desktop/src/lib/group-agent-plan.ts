@@ -69,10 +69,15 @@ export function computeSkillAgentDiff(
 }
 
 // True when applying `added`/`removed` would leave the skill installed for NO
-// agent while still depending on a fresh copy to a new agent. The reconcile
-// backend copies before removing but does NOT gate the removals on copy
-// success, so a failed copy to the new agent would orphan the skill entirely.
-// The dialog blocks this combo and asks the user to add first, then remove.
+// agent while still depending on a fresh copy to a new agent.
+//
+// This is a UX hint, NOT the data-safety guard. Core owns that now: it skips
+// every removal when a copy fails, and it refuses — before writing anything —
+// any reconcile whose end state cannot exist. Keeping the check here only saves
+// a round-trip and shows a friendlier message than the backend error.
+//
+// Do NOT copy this into other dialogs: they are already covered by core's
+// refusal, and a second copy of the rule is a second copy to keep in sync.
 export function wouldOrphanSkill(
 	installedAgentIds: Set<string>,
 	added: string[],

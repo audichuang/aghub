@@ -224,10 +224,9 @@ export function ManageSkillAgentsDialog({
 
 	const handleApply = () => {
 		if (!hasChanges) return;
-		// Data-safety: "add to new agent(s) + remove every existing copy" in one
-		// apply is unsafe — core copies before removing but does not abort the
-		// removals if the copy fails, so a failed copy would leave the skill
-		// installed nowhere. Make the user add first, then remove.
+		// UX, not data-safety: core already skips the removals when a copy
+		// fails, and refuses an unreachable end state before writing anything.
+		// This just asks for add-then-remove without a round-trip.
 		if (wouldOrphanSkill(installedAgentIds, added, removed)) {
 			toast.danger(t("manageAgentsAddThenRemove"));
 			return;

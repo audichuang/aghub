@@ -1093,10 +1093,10 @@ fn render_removal(
 	// desktop consumers were fixed and the CLI's own human output was not.
 	if payload.get("outcome").and_then(|v| v.as_str()) == Some("kept") {
 		return format!(
-			"{} '{name}' was NOT removed: it lives in the shared \
-			 .agents/skills master and another agent still reads it. Remove it \
-			 from those agents first, or delete it for all agents \
-			 (--all-agents).\n",
+			"{} '{name}' was NOT removed: this agent still reads it from the \
+			 shared .agents/skills master afterwards. Delete it for all agents \
+			 (--all-agents), or remove it from the other agents sharing that \
+			 master first.\n",
 			resource.singular()
 		);
 	}

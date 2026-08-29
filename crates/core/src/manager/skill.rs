@@ -763,7 +763,7 @@ impl ConfigManager {
 			&all_agent_dirs,
 			project_root.as_deref(),
 		);
-		let plan = removal::plan_removal(
+		let mut plan = removal::plan_removal(
 			&skill,
 			own_agent_dir.as_deref(),
 			&all_agent_dirs,
@@ -773,29 +773,177 @@ impl ConfigManager {
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);
 
-		// Refuse rather than report a removal that cannot happen. The planner
-		// keeps a shared universal Master on a single-agent removal (an agent
-		// reading `.agents/skills` directly leaves no per-agent artifact to
-		// take), so executing would remove NOTHING while `RemovalView` reports
-		// `success: true` — `delete skills foo -a cursor --yes` exited 0 saying
-		// it removed no files, and the skill was still there.
+		// Refuse rather than report a removal that cannot happen — and ask
+		// DISCOVERY whether it can, not the plan. `plan.shared_master_kept &&
+		// plan.paths.is_empty()` used to stand in for the question and answered
+		// it wrong twice over: an agent that reads its own dir AND the Master
+		// has a real path to unlink, so the plan looked effective while the
+		// Master went on serving the skill; and a skill whose FOLDER name
+		// differs from its frontmatter `name` planned NOTHING with
+		// `shared_master_kept` false, so `delete --yes` reported `removed` with
+		// the skill untouched on disk.
 		//
-		// Only on an EXECUTING call: a dry-run must still preview the plan
-		// (Master kept, listed in `skipped`), which is the contract
-		// `single_agent_delete_keeps_shared_master_and_reports_it` pins.
-		if executed && plan.shared_master_kept && plan.paths.is_empty() {
+		// This is the ONE home for the verdict. `transfer::reconcile_skill`
+		// used to keep its own copy and refuse shapes that the CLI `delete` and
+		// the API delete routes — which come through here — reported as
+		// `removed`; both now read the same answer.
+		// `--all-agents` promises "gone everywhere", so the question widens with
+		// it: asking only the INITIATING agent's read dirs let an
+		// `all_agents` delete report a clean `removed` while a second agent
+		// went on discovering the skill from a layout the planner had missed.
+		// Same dirs the planner just swept, so the two cannot disagree unless
+		// the planner really did leave something behind.
+		let read_dirs = if all_agents {
+			all_agent_dirs.clone()
+		} else {
+			self.adapter
+				.get_skills_paths(project_root.as_deref(), scope)
+		};
+		let effect =
+			removal::read_effect_after(&read_dirs, &skill.name, &plan.paths);
+		// Survivors alone are NOT the verdict for a single agent: a removal that
+		// really shrinks the set of locations this agent reads from DID take
+		// something away, even though something else still serves the skill.
+		// Requiring zero survivors here made a private copy shadowing a Master
+		// undeletable by every verb the product has (`delete`, both API delete
+		// routes, `reconcile --remove`) except `--all-agents`, which takes the
+		// Master too — and the old behaviour it replaced was not lying, it
+		// really did remove that copy. `--all-agents` promises "gone
+		// everywhere", so THERE any survivor is a broken promise.
+		// A survivor the PLANNER itself kept is not evidence of a broken
+		// promise. `plan_copy_removal` keeps the agent's OWN directory when
+		// another agent's live link points into it, and the symlink sweep keeps
+		// the master when a peer dir could not be swept — in both the planner
+		// understood the request, declined to orphan a peer, and SAID so in
+		// `skipped`. Refusing on top of that tells the user their delete made no
+		// sense AND throws away the one list naming what was missed.
+		//
+		// EVERY survivor must be accounted for, not just one: a survivor the
+		// planner never saw (an npx-era or grouped layout it walked past) is
+		// exactly the silent `removed`-that-removed-nothing this guard exists to
+		// catch, and it is invisible in `skipped` by construction.
+		//
+		// Excluded for a shared MASTER, whose keep IS the shape the refusal was
+		// written for: "remove for this agent alone" really does take nothing
+		// away there. `shared_master_kept` is the planner's own flag, read BEFORE
+		// the fold below, so the two cannot be confused.
+		let accounted_for = |survivor: &std::path::Path| {
+			let survivor =
+				crate::skills::linker::classify::canonicalize_lenient(survivor);
+			plan.skipped.iter().any(|kept| {
+				crate::skills::linker::classify::canonicalize_lenient(kept)
+					== survivor
+			})
+		};
+		let all_survivors_reported = !plan.shared_master_kept
+			&& effect
+				.survivors
+				.iter()
+				.all(|survivor| accounted_for(survivor));
+		let blocks = if all_agents {
+			// No narrowing here, deliberately: `--all-agents` promises "gone
+			// everywhere", so a survivor is a broken promise whether or not
+			// the planner saw it coming. An out-of-tree entry the containment
+			// check refuses IS reported in `skipped` and still leaves the
+			// skill readable — reporting that as `removed` is the lie. What
+			// the refusal owes the caller is the LIST, which it carries below.
+			!effect.survivors.is_empty()
+		} else {
+			// `paths.is_empty()` is what separates the two single-agent
+			// shapes, and it is not decoration. A plan that removes NOTHING
+			// and reports the survivor in `skipped` understood the request and
+			// spared the entry (a peer links into the caller's own directory)
+			// — the `kept` contract. A plan that removes something and STILL
+			// leaves the agent reading the skill is the npx-era Referrer
+			// beside its Master: the unlink looks effective, the Master goes
+			// on serving it, and reporting that as `removed` is the lie this
+			// guard exists to refuse. Both keep the survivor in `skipped`, so
+			// `skipped` alone cannot tell them apart.
+			!effect.survivors.is_empty()
+				&& !effect.changed
+				&& !(all_survivors_reported && plan.paths.is_empty())
+		};
+
+		// A preview must still PREVIEW, so record the fact instead of refusing:
+		// `RemovalView` reads this into `kept`, whose contract is "success, and
+		// THE ENTITY IS STILL THERE". Only an executing call refuses, which is
+		// the contract `single_agent_delete_keeps_shared_master_and_reports_it`
+		// pins.
+		//
+		// This flag is the ONLY producer of `shared_master_kept` with a
+		// non-empty `paths`, which is why `RemovalView` can key `kept` off
+		// `shared_master_kept && (paths.is_empty() || !executed)` without a new
+		// field: a layout with a real path to unlink that STILL leaves the
+		// agent reading the skill (an npx-era Referrer beside the Master it
+		// points at) previews as `kept` instead of promising a `--yes` that only
+		// ever answers `unsupported_operation`. Keep the two in step — a preview
+		// must never green-light what the line below refuses. Fold `blocks`, not
+		// raw survivors: folding survivors would mark the ALLOWED private-copy
+		// removal `kept` while `--yes` went ahead and removed it.
+		plan.shared_master_kept |= blocks;
+
+		// A removal that goes ahead while something else still serves the skill
+		// has to SAY so. `skipped` is the existing carrier for "present and
+		// deliberately not taken", already rendered by the CLI and serialized by
+		// both surfaces, so the honest half of the old behaviour costs no wire
+		// change: the answer becomes "removed <private copy>, and this agent now
+		// reads it from <master>" instead of a bare `removed`.
+		if effect.changed {
+			for survivor in &effect.survivors {
+				if !plan.skipped.contains(survivor) {
+					plan.skipped.push(survivor.clone());
+				}
+			}
+		}
+
+		if executed && blocks {
+			// The `--all-agents` refusal is a DIFFERENT failure — the sweep left
+			// a copy behind somewhere — and "remove for this agent alone …
+			// reads from the shared master" describes neither the request the
+			// user made nor the reason, leaving them nothing to act on.
+			let (operation, reason) = if all_agents {
+				// Name WHERE. A bare "still discoverable somewhere" is the
+				// same dead end `skipped` was added to avoid: the caller asked
+				// for everywhere, one place was not taken, and the only thing
+				// they can act on is which one. Survivors are what still hands
+				// out the skill; `skipped` adds what the sweep could not even
+				// look at (an agent dir it failed to list leaves no survivor
+				// to report, precisely because it could not be read).
+				let mut where_: Vec<String> = effect
+					.survivors
+					.iter()
+					.chain(plan.skipped.iter())
+					.map(|path| path.display().to_string())
+					.collect();
+				where_.dedup();
+				(
+					"remove from every agent".to_string(),
+					format!(
+						"skill still discoverable afterwards in: {}",
+						where_.join(", ")
+					),
+				)
+			} else {
+				(
+					"remove for this agent alone".to_string(),
+					"skill it reads from the shared master".to_string(),
+				)
+			};
 			return Err(ConfigError::unsupported_operation(
-				"remove for this agent alone",
-				"skill it reads from the shared master",
+				&operation,
+				&reason,
 				self.adapter.name(),
 			));
 		}
 
 		if !executed {
 			// Disclose the scope-wide lock prune the COMMIT would run, through
-			// the ONE producer both surfaces use.
+			// the ONE producer both surfaces use — handing it `blocks`, the
+			// SAME flag the refusal a few lines above reads, so a preview can
+			// never promise a prune the commit will refuse to perform.
 			return Ok(removal::RemovalOutcome::preview(
 				plan,
+				blocks,
 				scope,
 				project_root.as_deref(),
 			));

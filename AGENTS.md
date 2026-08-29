@@ -177,7 +177,27 @@ skills` was dead for all 25 agents; core still refuses it for the API path.)
   An already-present target is an **idempotent success** (`already_present:
 true`) for both verbs — a skill because the shared Master is what "already
   there" means, an MCP/sub-agent only when the existing value is EQUIVALENT (a
-  same-named entry holding a different command is still a hard conflict)
+  same-named entry holding a different command is still a hard conflict).
+  **Removing a skill refuses an end state that cannot exist** — if the agent
+  reads the skill from exactly the same set of places afterwards, the removal
+  took nothing away (a private copy shadowing a Master DOES take something
+  away, and stays legal — the Master it falls back to is disclosed in
+  `skipped`). That verdict has ONE home
+  (`removal::read_effect_after`, asked of discovery, never of a
+  `dir.join(name)` guess), so `delete`, the API delete route and
+  `reconcile skill` cannot answer it differently — they used to, and `delete`
+  was the one reporting `removed` for a skill still on disk. `reconcile skill`
+  additionally refuses BEFORE the first write, so the whole batch errors and
+  the disk is untouched (no half-applied copy-then-failed-delete), counting the
+  Master its OWN copies would create — "add windsurf, remove cursor" cannot
+  hand cursor the skill back through a Master the same command just made. Its
+  **preview runs that same check**: a `--remove` without `--yes` that exits 0
+  is a commit that will run. Both spellings report
+  `UNSUPPORTED_OPERATION` / HTTP 422 — batching is transport and must not
+  relabel the refusal as bad parameters. **`reconcile mcp` has NO equivalent
+  guard**: agents that share one backing file (claude + copilot both resolve
+  project MCPs to `<root>/.mcp.json`) still lose the server for BOTH when only
+  one is named, reported as success — verified, unfixed
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
   reads the key from stdin; nothing else does

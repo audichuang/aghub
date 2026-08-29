@@ -131,6 +131,7 @@ export function BulkManageGroupAgentsDialog({
 		setDone(0);
 		let success = 0;
 		let failed = 0;
+		let firstError: string | undefined;
 		try {
 			for (const plan of plans) {
 				try {
@@ -152,8 +153,16 @@ export function BulkManageGroupAgentsDialog({
 					} else {
 						failed += 1;
 					}
-				} catch {
+				} catch (error) {
 					failed += 1;
+					// Keep the FIRST reason. Core refuses an unreachable end
+					// state (e.g. "cursor reads it from the shared master")
+					// before writing anything, and that sentence is the only
+					// part of the failure a user can act on — a bare
+					// "N succeeded, M failed" count leaves them re-clicking the
+					// same impossible plan.
+					firstError ??=
+						error instanceof Error ? error.message : String(error);
 				}
 				setDone(success + failed);
 			}
@@ -164,7 +173,9 @@ export function BulkManageGroupAgentsDialog({
 					}),
 				);
 			} else {
-				toast.danger(t("bulkAgentsSomeFailed", { success, failed }));
+				toast.danger(t("bulkAgentsSomeFailed", { success, failed }), {
+					description: firstError,
+				});
 			}
 			handleClose();
 		} finally {

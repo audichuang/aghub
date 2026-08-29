@@ -79,7 +79,7 @@ impl AgentSkillCoverageView {
 
 /// Classify ONE agent against a scope + project_root + the canonical master
 /// SKILLS-DIR (`.agents/skills`).
-fn canonicalize_lenient(p: &Path) -> PathBuf {
+pub(crate) fn canonicalize_lenient(p: &Path) -> PathBuf {
 	if let Ok(c) = std::fs::canonicalize(p) {
 		return c;
 	}

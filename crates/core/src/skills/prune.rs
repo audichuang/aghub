@@ -490,6 +490,22 @@ pub(crate) mod test_lock {
 	use std::sync::{Mutex, MutexGuard, OnceLock};
 	use tempfile::TempDir;
 
+	/// THE env mutex for the `aghub-core` lib test binary — one per binary, no
+	/// exceptions (see `crates/core/AGENTS.md` Testing). libtest runs a
+	/// binary's tests on parallel threads and on Unix one thread's `setenv`
+	/// racing another's `getenv` is UB, so a SECOND mutex serializes nothing
+	/// against this one and reopens exactly that race. `transfer::tests` swaps
+	/// `HOME`/`XDG_*` under this same mutex for that reason; anything new that
+	/// reads or writes those vars must extend this lock, never add its own.
+	///
+	/// Take it ONCE: `GlobalLockGuard` already holds it, and `std::sync::Mutex`
+	/// is not reentrant, so locking it again while a guard is alive
+	/// self-deadlocks.
+	pub(crate) fn env_lock() -> &'static Mutex<()> {
+		static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+		LOCK.get_or_init(|| Mutex::new(()))
+	}
+
 	/// Serializes + isolates the GLOBAL lock by pointing `XDG_STATE_HOME` at a
 	/// fresh temp dir (core cannot import skill's `pub(crate)` TestLockGuard).
 	pub(crate) struct GlobalLockGuard {
@@ -500,11 +516,7 @@ pub(crate) mod test_lock {
 
 	impl GlobalLockGuard {
 		pub(crate) fn new() -> Self {
-			static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-			let guard = LOCK
-				.get_or_init(|| Mutex::new(()))
-				.lock()
-				.unwrap_or_else(|e| e.into_inner());
+			let guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 			let temp = tempfile::tempdir().unwrap();
 			let old = std::env::var("XDG_STATE_HOME").ok();
 			std::env::set_var("XDG_STATE_HOME", temp.path());
