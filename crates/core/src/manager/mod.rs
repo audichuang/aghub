@@ -111,6 +111,22 @@ impl ConfigManager {
 	pub fn load_both_annotated(
 		&mut self,
 	) -> Result<(Vec<Skill>, Vec<McpServer>, Vec<SubAgent>)> {
+		self.load_both_annotated_checked().map(|(loaded, _)| loaded)
+	}
+
+	/// [`Self::load_both_annotated`] plus whether either scope FAILED to load.
+	///
+	/// The merge deliberately fails open — a broken project config must not
+	/// hide the global results — which is right for a listing and wrong for a
+	/// decision. Without this second value `AgentResources::load_failed` was a
+	/// constant `false` in `Both` scope, so its own contract ("callers that
+	/// decide something must read this flag") could not be honoured there, and
+	/// the `load_failed: true` arm in `all_agents` was dead code implying
+	/// otherwise.
+	#[allow(clippy::type_complexity)]
+	pub fn load_both_annotated_checked(
+		&mut self,
+	) -> Result<((Vec<Skill>, Vec<McpServer>, Vec<SubAgent>), bool)> {
 		debug!(
 			"loading both-scope annotated config for agent '{}'",
 			self.adapter.name()
@@ -120,6 +136,7 @@ impl ConfigManager {
 		let mut sub_agents: Vec<SubAgent> = Vec::new();
 		let mut seen_skills = std::collections::HashSet::new();
 		let mut seen_sub_agents = std::collections::HashSet::new();
+		let mut any_failed = false;
 
 		// Project first (takes precedence)
 		if let Some(root) = self.project_root.clone() {
@@ -131,23 +148,33 @@ impl ConfigManager {
 					.adapter
 					.supports_sub_agent_scope(ResourceScope::ProjectOnly)
 			{
-				if let Ok(project) = self
+				match self
 					.adapter
 					.load_config(Some(&root), ResourceScope::ProjectOnly)
 				{
-					for mut skill in project.skills {
-						seen_skills.insert(skill.name.clone());
-						skill.config_source = Some(ConfigSource::Project);
-						skills.push(skill);
+					Err(error) => {
+						debug!(
+							"project scope failed to load for agent '{}': {}",
+							self.adapter.name(),
+							error
+						);
+						any_failed = true;
 					}
-					for mut mcp in project.mcps {
-						mcp.config_source = Some(ConfigSource::Project);
-						mcps.push(mcp);
-					}
-					for mut agent in project.sub_agents {
-						seen_sub_agents.insert(agent.name.clone());
-						agent.config_source = Some(ConfigSource::Project);
-						sub_agents.push(agent);
+					Ok(project) => {
+						for mut skill in project.skills {
+							seen_skills.insert(skill.name.clone());
+							skill.config_source = Some(ConfigSource::Project);
+							skills.push(skill);
+						}
+						for mut mcp in project.mcps {
+							mcp.config_source = Some(ConfigSource::Project);
+							mcps.push(mcp);
+						}
+						for mut agent in project.sub_agents {
+							seen_sub_agents.insert(agent.name.clone());
+							agent.config_source = Some(ConfigSource::Project);
+							sub_agents.push(agent);
+						}
 					}
 				}
 			}
@@ -160,23 +187,31 @@ impl ConfigManager {
 				.adapter
 				.supports_sub_agent_scope(ResourceScope::GlobalOnly)
 		{
-			if let Ok(global) =
-				self.adapter.load_config(None, ResourceScope::GlobalOnly)
-			{
-				for mut skill in global.skills {
-					if !seen_skills.contains(&skill.name) {
-						skill.config_source = Some(ConfigSource::Global);
-						skills.push(skill);
+			match self.adapter.load_config(None, ResourceScope::GlobalOnly) {
+				Err(error) => {
+					debug!(
+						"global scope failed to load for agent '{}': {}",
+						self.adapter.name(),
+						error
+					);
+					any_failed = true;
+				}
+				Ok(global) => {
+					for mut skill in global.skills {
+						if !seen_skills.contains(&skill.name) {
+							skill.config_source = Some(ConfigSource::Global);
+							skills.push(skill);
+						}
 					}
-				}
-				for mut mcp in global.mcps {
-					mcp.config_source = Some(ConfigSource::Global);
-					mcps.push(mcp);
-				}
-				for mut agent in global.sub_agents {
-					if !seen_sub_agents.contains(&agent.name) {
-						agent.config_source = Some(ConfigSource::Global);
-						sub_agents.push(agent);
+					for mut mcp in global.mcps {
+						mcp.config_source = Some(ConfigSource::Global);
+						mcps.push(mcp);
+					}
+					for mut agent in global.sub_agents {
+						if !seen_sub_agents.contains(&agent.name) {
+							agent.config_source = Some(ConfigSource::Global);
+							sub_agents.push(agent);
+						}
 					}
 				}
 			}
@@ -190,7 +225,7 @@ impl ConfigManager {
 			mcps.len(),
 			sub_agents.len(),
 		);
-		Ok((skills, mcps, sub_agents))
+		Ok(((skills, mcps, sub_agents), any_failed))
 	}
 
 	/// Load and merge configs from both project and global

@@ -9846,3 +9846,105 @@ fn the_new_guards_do_not_refuse_legitimate_work() {
 		assert!(!home.path().join(".agents/skills/holdertest").exists());
 	}
 }
+
+/// "Could not read" must not read as "holds nothing" — on EITHER failure path.
+///
+/// The `load_failed` guard only marked agents whose config load returned `Err`,
+/// which in practice meant a malformed MCP config. Skill discovery swallowed
+/// every `read_dir` error inside a SUCCESSFUL load, so an agent that genuinely
+/// holds the skill but whose skills dir is unreadable was invisible to the
+/// guard — the same silent master deletion, with strictly less signal than the
+/// case the guard was built for (that one at least warns on stderr).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_skills_dir_is_not_an_empty_one() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = home.path().join("src/demo");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+	)
+	.unwrap();
+	// gemini genuinely holds it: a referrer symlink to the master.
+	assert!(isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude,gemini",
+			"add",
+			"skills",
+			"--from",
+			src.to_str().unwrap()
+		])
+		.output()
+		.unwrap()
+		.status
+		.success());
+
+	let gemini_skills = home.path().join(".gemini/skills");
+	std::fs::set_permissions(
+		&gemini_skills,
+		std::fs::Permissions::from_mode(0o000),
+	)
+	.unwrap();
+
+	// Every agent EXCEPT gemini is named, so this is only "exhaustive" if
+	// gemini is believed to hold nothing.
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"demo",
+			"--remove",
+			"claude",
+			"--remove",
+			"codex",
+			"--remove",
+			"opencode",
+			"--remove",
+			"cline",
+			"--remove",
+			"cursor",
+			"--remove",
+			"warp",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	// A single-agent read of the same state must not answer `[]` either.
+	let listed = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "gemini", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+
+	std::fs::set_permissions(
+		&gemini_skills,
+		std::fs::Permissions::from_mode(0o755),
+	)
+	.unwrap();
+
+	// THE assertion.
+	assert!(
+		home.path().join(".agents/skills/demo/SKILL.md").is_file(),
+		"the shared master must survive: a reader aghub could not read is not \
+		 a non-reader. stdout={}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	assert!(!out.status.success());
+
+	assert!(
+		!listed.status.success(),
+		"an unreadable dir must not be reported as an empty one: {}",
+		String::from_utf8_lossy(&listed.stdout)
+	);
+}

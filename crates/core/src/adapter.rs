@@ -155,7 +155,8 @@ impl AgentAdapter for &'static AgentDescriptor {
 		if self.supports_skill_scope(scope) {
 			let skills_paths = self.get_skills_paths(project_root, scope);
 			if !skills_paths.is_empty() {
-				config.skills = load_skills_from_dirs(&skills_paths);
+				config.skills = load_skills_from_dirs(&skills_paths)
+					.map_err(crate::errors::ConfigError::Io)?;
 			}
 		}
 

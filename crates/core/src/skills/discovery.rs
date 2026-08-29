@@ -3,22 +3,31 @@ use crate::skills::linker::Linker;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// Load skills from a directory using skill parser
-pub fn load_skills_from_dir(skills_dir: &Path) -> Vec<Skill> {
+/// Load skills from a directory using skill parser.
+///
+/// `Err` when a directory EXISTS but cannot be read. "Absent" and "unreadable"
+/// are different answers and this used to return the same empty list for both:
+/// `chmod 000` on an agent's skills dir made `get skills` print `[]` on exit 0
+/// with no warning, and — because `load_all_agents` only marks `load_failed`
+/// when the load returns `Err` — made that agent invisible to
+/// `transfer::skill_holders`, whose whole job is to notice a reader before the
+/// shared master is deleted. Same silent data loss, with less signal than the
+/// malformed-config case it sits next to.
+pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
 	let mut skills = Vec::new();
-	collect_skills(skills_dir, &mut skills);
+	collect_skills(skills_dir, &mut skills)?;
 	skills.sort_by(|a, b| a.name.cmp(&b.name));
-	skills
+	Ok(skills)
 }
 
-/// Load skills from multiple directories
-pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> Vec<Skill> {
+/// Load skills from multiple directories. `Err` as for [`load_skills_from_dir`].
+pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> std::io::Result<Vec<Skill>> {
 	let mut all_skills = Vec::new();
 	let mut seen_names = std::collections::HashSet::new();
 
 	for dir in dirs {
 		let mut skills = Vec::new();
-		collect_skills(dir, &mut skills);
+		collect_skills(dir, &mut skills)?;
 
 		for skill in skills {
 			if seen_names.insert(skill.name.clone()) {
@@ -28,12 +37,18 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> Vec<Skill> {
 	}
 
 	all_skills.sort_by(|a, b| a.name.cmp(&b.name));
-	all_skills
+	Ok(all_skills)
 }
 
-fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) {
-	let Ok(entries) = fs::read_dir(dir) else {
-		return;
+fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
+	let entries = match fs::read_dir(dir) {
+		Ok(entries) => entries,
+		// A directory that is not there holds nothing — that IS the answer,
+		// and it is the ordinary state for most agents.
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			return Ok(());
+		}
+		Err(error) => return Err(error),
 	};
 
 	for entry in entries.flatten() {
@@ -57,9 +72,10 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) {
 				}
 				skills.push(skill);
 			}
-			Err(_) => collect_skills(&path, skills),
+			Err(_) => collect_skills(&path, skills)?,
 		}
 	}
+	Ok(())
 }
 
 #[cfg(test)]
@@ -87,7 +103,7 @@ mod tests {
 			"---\nname: skill-b\ndescription: Nested skill\n---\n",
 		)
 		.unwrap();
-		let skills = load_skills_from_dir(root);
+		let skills = load_skills_from_dir(root).unwrap();
 		let names: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
 		assert!(names.contains(&"skill-a"));
 		assert!(names.contains(&"skill-b"));
@@ -114,7 +130,7 @@ mod tests {
 		create_junction(&master.canonicalize().unwrap(), &claude.join("foo"))
 			.unwrap();
 
-		let skills = load_skills_from_dir(&claude);
+		let skills = load_skills_from_dir(&claude).unwrap();
 		let foo = skills
 			.iter()
 			.find(|s| s.name == "foo")

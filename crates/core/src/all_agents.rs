@@ -46,14 +46,18 @@ pub fn load_all_agents(
 				scope,
 			);
 			if scope == ResourceScope::Both {
-				match manager.load_both_annotated() {
-					Ok((skills, mcps, sub_agents)) => AgentResources {
-						agent_id: descriptor.id,
-						skills,
-						mcps,
-						load_failed: false,
-						sub_agents,
-					},
+				match manager.load_both_annotated_checked() {
+					Ok(((skills, mcps, sub_agents), any_failed)) => {
+						AgentResources {
+							agent_id: descriptor.id,
+							skills,
+							mcps,
+							// The merge fails OPEN per scope, so an `Ok` here
+							// can still hide a scope that did not load.
+							load_failed: any_failed,
+							sub_agents,
+						}
+					}
 					Err(error) => {
 						warn!(
 							"failed to load both-scope resources for agent '{}': {}",
