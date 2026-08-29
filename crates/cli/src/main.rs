@@ -81,10 +81,8 @@ struct Cli {
 	/// Read AND write global config only.
 	///
 	/// This is the default for every command EXCEPT the cross-scope
-	/// diagnostics `doctor`, `source list` and `source diff`, which span
-	/// global + the current project unless you narrow them. `check` follows the
-	/// global default, so from inside a project it does NOT report that
-	/// project's skills without `-p` or `--all`.
+	/// diagnostics `doctor`, `check`, `source list` and `source diff`, which
+	/// span global + the current project unless you narrow them.
 	#[arg(short, long, global = true)]
 	global: bool,
 
@@ -286,11 +284,16 @@ enum Commands {
 	///
 	/// SIDE EFFECT (skills, committed runs only): after removing the skill,
 	/// this reconciles the WHOLE scope's lock against disk, so it also drops
-	/// lock entries for OTHER skills that are no longer on disk. Those keys are
-	/// reported as `pruned_lock_entries` in `--json`. The preview does NOT list
-	/// them — unlike `prune-lock`, which gates the same GC behind its own
-	/// `--yes`. It also keeps `.agents/skills/<name>` when another agent still
-	/// reads it; the payload's `skipped` names what was kept.
+	/// lock entries for OTHER skills that are no longer on disk. Committed runs
+	/// report those keys as `pruned_lock_entries` in `--json`; the PREVIEW
+	/// discloses the same keys under `would_prune_lock_entries` — a separate
+	/// key on purpose, so a preview can never read as "these were dropped".
+	///
+	/// Read `outcome`, not `dry_run`/`executed`: `preview` | `removed` |
+	/// `absent` | `partial` | `kept`. `kept` means the shared
+	/// `.agents/skills/<name>` master was left because another agent still reads
+	/// it — `success: true` AND THE SKILL IS STILL THERE; the payload's
+	/// `skipped` names what was kept.
 	Delete {
 		#[arg(value_enum)]
 		resource: ResourceType,
@@ -337,10 +340,14 @@ enum Commands {
 	},
 	/// Check installed skills for available updates (read-only).
 	///
-	/// Scope follows the GLOBAL default: run it inside a project with `-p`
-	/// (that project only) or `--all` (both) to see project-scoped skills. The
-	/// cross-scope diagnostics (`doctor`, `source list`) default to BOTH, so
-	/// their row counts differ from this command's on the same tree.
+	/// Scope defaults to BOTH global and the current project, like the other
+	/// read-only diagnostics (`doctor`, `source list`, `source diff`); `-g` /
+	/// `-p` still narrow it. It used to follow the plain global default and so,
+	/// run inside a project, answered "up to date" from the global lock alone
+	/// without ever reading the project's.
+	///
+	/// Offline by default: remote sources report `uncheckable`/`network` with
+	/// `checked: false`. Pass `--online` for a real update check.
 	Check {
 		/// Skills only — see [`SkillResource`].
 		#[arg(value_enum)]
@@ -428,12 +435,17 @@ enum Commands {
 		/// `doctor --verify-links && echo healthy` prints healthy over a
 		/// dangling referrer — the findings only ever went to stderr.
 		///
-		/// Counts BOTH axes: a `health` other than `ok` (orphan-lock,
-		/// untracked, invalid-skill, master-is-symlink) and, when
-		/// `--verify-links` is given, any per-agent referrer problem.
-		/// `autoCovered` and `unsupported` are not issues — they are the
-		/// correct resting state for an agent that reads the Master directly
-		/// or cannot hold a skill at all.
+		/// Counts BOTH axes: an ACTIONABLE `health` — `orphan-lock` (a lock
+		/// entry with no master on disk) or `invalid-skill` (a master whose
+		/// SKILL.md does not parse) — and, when `--verify-links` is given, any
+		/// per-agent referrer problem.
+		///
+		/// Deliberately NOT every non-`ok` health. `untracked` (a skill written
+		/// by hand into `.agents/skills`, with no lock entry) and
+		/// `master-is-symlink` are supported resting states, and failing CI over
+		/// them would only teach you to append `|| true`. `autoCovered` and
+		/// `unsupported` are likewise correct — an agent that reads the Master
+		/// directly, or that cannot hold a skill at all.
 		#[arg(long)]
 		fail_on_issues: bool,
 	},
