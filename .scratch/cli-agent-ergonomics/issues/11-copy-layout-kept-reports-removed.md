@@ -35,3 +35,9 @@ match guard。擴張它等於在三個決策點改語意，AGENTS.md 對這件�
 `warn!` 點名是**哪一個路徑**擋住了刪除（`keeping <root>: <referrer> still
 references it`）。原本 25 個 agent 的目錄裡任何一個造成的保留，使用者都無從
 得知是誰。`outcome` 仍然錯報 `removed` —— 這一條沒變。
+
+**範圍**：這是 **CLI 獨有**的。API 的
+`crates/api/src/routes/skills.rs` delete-by-path 路徑自己偵測外部 referrer
+並且**有**設 `shared_master_kept: true`,所以它回報的是正確的
+`outcome: "kept"`。同一個判斷、兩個生產者,只有 core 的 `plan_copy_removal`
+那支漏設旗標。
