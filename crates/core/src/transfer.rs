@@ -492,6 +492,7 @@ fn node_id(_path: &Path) -> Option<(u64, u64)> {
 fn ensure_removals_spare<F>(
 	protect: &[InstallTarget],
 	removing: &[InstallTarget],
+	source_agent: AgentType,
 	backing: F,
 ) -> Result<()>
 where
@@ -511,13 +512,23 @@ where
 				continue;
 			};
 			if delete_backing.is(&kept_backing) {
+				// Name WHY the partner is in the protect list. Without it the
+				// message can cite an agent the caller never typed:
+				// `--from-agent warp --add claude --remove cline` answering
+				// "'cline' and 'warp'" reads as a non sequitur.
+				let role = if kept.agent == source_agent {
+					" (the --from-agent source of this reconcile)"
+				} else {
+					""
+				};
 				return Err(ConfigError::InvalidConfig(format!(
-					"'{}' and '{}' resolve to the same place on disk ({}), so \
-					 removing it from the first would take it from the second \
-					 as well — not a state that can exist. Drop '{}' from \
-					 this reconcile.",
+					"'{}' and '{}'{} resolve to the same place on disk ({}), \
+					 so removing it from the first would take it from the \
+					 second as well — not a state that can exist. Drop '{}' \
+					 from this reconcile.",
 					delete.agent.as_str(),
 					kept.agent.as_str(),
+					role,
 					delete_backing.path.display(),
 					delete.agent.as_str(),
 				)));
@@ -555,7 +566,7 @@ where
 		protected_targets(&copies, source, removed.contains(&source.agent));
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
-	ensure_removals_spare(&protect, &removing, backing)
+	ensure_removals_spare(&protect, &removing, source.agent, backing)
 }
 
 /// [`ensure_reconcile_spares`] for a skill — the preview seam.
@@ -1108,7 +1119,7 @@ pub fn reconcile_mcp(
 	let protect = protected_targets(&copies, &source, source_removed);
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
-	ensure_removals_spare(&protect, &removing, mcp_backing_path)?;
+	ensure_removals_spare(&protect, &removing, source.agent, mcp_backing_path)?;
 	// The copy targets, remembered for the RE-CHECK inside the delete arm. Some
 	// resolvers are existence-dependent — Copilot's project path is
 	// `.mcp.json` when that file exists and `.github/mcp.json` otherwise — so
@@ -1143,6 +1154,7 @@ pub fn reconcile_mcp(
 						ensure_removals_spare(
 							&protect,
 							std::slice::from_ref(&plan.target),
+							source.agent,
 							mcp_backing_path,
 						)?;
 						let mut manager = build_manager(&plan.target);
@@ -1254,7 +1266,7 @@ pub fn reconcile_sub_agent(
 	let protect = protected_targets(&copies, &source, source_removed);
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
-	ensure_removals_spare(&protect, &removing, |target| {
+	ensure_removals_spare(&protect, &removing, source.agent, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})?;
 	// …and that preflight is only a SNAPSHOT, which for sub-agents is barely a
@@ -1284,6 +1296,7 @@ pub fn reconcile_sub_agent(
 						ensure_removals_spare(
 							&protect,
 							std::slice::from_ref(&plan.target),
+							source.agent,
 							|target| {
 								sub_agent_backing_path(target, &source.name)
 							},
@@ -1474,7 +1487,12 @@ pub fn reconcile_skill(
 	let protect = protected_targets(&copies, &source, deletes_source);
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
-	ensure_removals_spare(&protect, &removing, skill_backing_dir)?;
+	ensure_removals_spare(
+		&protect,
+		&removing,
+		source.agent,
+		skill_backing_dir,
+	)?;
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -1611,6 +1629,7 @@ pub fn reconcile_skill(
 					ensure_removals_spare(
 						&protect,
 						std::slice::from_ref(&plan.target),
+						source.agent,
 						skill_backing_dir,
 					)?;
 					let mut manager = build_manager(&plan.target);
