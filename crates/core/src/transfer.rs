@@ -319,9 +319,13 @@ enum ContentProof {
 /// without one hashed the same, the reconcile reported "2 succeeded", and the
 /// symlink was gone.
 fn has_unhashed_entries(dir: &Path, depth: usize) -> bool {
-	if depth > 32 {
-		// Deeper than the hash itself walks: treat as unseeable.
-		return true;
+	// The hash's OWN bound, not a second guess at it. A private `32` here
+	// rejected trees 33-64 deep that the hash accepts, and blamed it on
+	// symlinks — a legitimate move refused with a reason that was not true.
+	// Past this depth we simply stop looking: the hash refuses the tree on its
+	// own, and its refusal produces the accurate "could not be hashed" answer.
+	if depth >= skill::hash::MAX_DEPTH {
+		return false;
 	}
 	let Ok(entries) = std::fs::read_dir(dir) else {
 		return true;
@@ -1395,6 +1399,23 @@ pub fn transfer_skill(
 /// One extra scan, taken only to answer "will anyone still be reading the
 /// Master after this reconcile?" — the per-agent removal planner cannot see
 /// that, because a NativeReader leaves no artifact for it to count.
+/// Can this agent hold a skill in this scope at all?
+///
+/// Asked of the descriptor, which is where the answer lives — `target_skills_dir`
+/// is `None` for an agent with no skill support in the scope.
+fn can_hold_skills(
+	agent_id: &str,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+) -> bool {
+	let Ok(agent) = agent_id.parse::<AgentType>() else {
+		return false;
+	};
+	create_adapter(agent)
+		.target_skills_dir(project_root, scope)
+		.is_some()
+}
+
 /// Which agents currently hold this skill, and which agents we could NOT read.
 ///
 /// The second half is load-bearing. `load_all_agents` fails OPEN — a config it
@@ -1419,7 +1440,19 @@ fn skill_holders(
 	let mut unreadable = Vec::new();
 	for agent in crate::load_all_agents(scope, source.project_root.as_deref()) {
 		if agent.load_failed {
-			unreadable.push(agent.agent_id);
+			// Only agents that could actually READ this master count as
+			// unknowns. Several descriptors hold no skills at all in a given
+			// scope (zed holds none in either), and treating a broken zed
+			// config as a possible reader refused an exhaustive removal that
+			// was correct — a guard against blindness must not be blind to
+			// what it is guarding.
+			if can_hold_skills(
+				agent.agent_id,
+				scope,
+				source.project_root.as_deref(),
+			) {
+				unreadable.push(agent.agent_id);
+			}
 			continue;
 		}
 		if agent.skills.iter().any(|s| s.name == name) {

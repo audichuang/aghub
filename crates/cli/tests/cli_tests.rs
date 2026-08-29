@@ -9709,3 +9709,140 @@ fn identity_not_path_and_unknown_not_absent() {
 		assert!(!home.path().join(".agents/skills/demo").exists());
 	}
 }
+
+/// A guard that refuses legitimate work is a defect too. Both of these were
+/// introduced by the guards above and caught by the close-out review.
+#[cfg(unix)]
+#[test]
+fn the_new_guards_do_not_refuse_legitimate_work() {
+	// --- (1) The "can the hash see this?" pre-scan must use the HASH's own
+	// depth bound, not a second guess at it. A private 32 rejected trees the
+	// hash accepts (its limit is 64) and blamed it on symlinks — a legitimate
+	// move refused for a reason that was not true.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let src = home.path().join("src/foo");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: foo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		let mut deep = src.clone();
+		for i in 1..=33 {
+			deep = deep.join(format!("n{i}"));
+		}
+		std::fs::create_dir_all(&deep).unwrap();
+		std::fs::write(deep.join("leaf.txt"), "deep").unwrap();
+
+		assert!(isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"add",
+				"skills",
+				"--from",
+				src.to_str().unwrap()
+			])
+			.output()
+			.unwrap()
+			.status
+			.success());
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"foo",
+				"--add",
+				"cursor",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"a 33-deep tree is within the hash's own limit: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+	}
+
+	// --- (2) An agent we could not read only counts as a possible reader of
+	// the shared master if it could read one AT ALL. zed holds no skills in
+	// either scope, so a broken zed config must not block an exhaustive
+	// removal — the fail-closed guard was blind to what it was guarding.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let src = home.path().join("src/ht");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::create_dir_all(home.path().join(".config/zed")).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: holdertest\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		assert!(isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"add",
+				"skills",
+				"--from",
+				src.to_str().unwrap()
+			])
+			.output()
+			.unwrap()
+			.status
+			.success());
+		std::fs::write(
+			home.path().join(".config/zed/settings.json"),
+			"{ \"broken\": \n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"holdertest",
+				"--remove",
+				"claude",
+				"--remove",
+				"codex",
+				"--remove",
+				"opencode",
+				"--remove",
+				"cline",
+				"--remove",
+				"cursor",
+				"--remove",
+				"warp",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"a broken config for an agent that cannot hold skills must not \
+			 block: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert!(!home.path().join(".agents/skills/holdertest").exists());
+	}
+}

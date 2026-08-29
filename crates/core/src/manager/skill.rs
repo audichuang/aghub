@@ -87,8 +87,10 @@ fn paths_resolve_same(a: &std::path::Path, b: &std::path::Path) -> bool {
 /// had landed while disk kept the old content, and told `transfer`/`reconcile`
 /// that the copy had carried the content over.
 ///
-/// `None` when the Master cannot be parsed, in which case the caller keeps what
-/// it has: a best-effort read must not turn a successful install into an error.
+/// `None` when the Master cannot be parsed. Both callers treat that as an
+/// ERROR, not as a reason to fall back to the caller's own input: nothing can
+/// read a master that does not parse, so an install reporting success over one
+/// is a `get skills` that answers `[]` a second later.
 fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
 	let pkg = skill::parser::parse(canonical).ok()?;
 	let mut found = convert_skill(pkg);
