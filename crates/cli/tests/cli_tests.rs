@@ -7597,10 +7597,17 @@ fn review_found_gaps_stay_fixed() {
 			.args(&argv)
 			.output()
 			.unwrap();
+		// Success is NOT the invariant: `plugin` shells out to the `claude`
+		// binary, which a CI runner does not have, and asserting success made
+		// this test pass only on a machine with Claude Code installed. The
+		// invariant is the one the fix was about — the SCOPE flag must never
+		// decide the answer, so `-p` in a directory with no project root must
+		// not bail the way every other verb does.
+		let stderr = String::from_utf8_lossy(&out.stderr);
 		assert!(
-			out.status.success(),
-			"plugin ignores scope flags, so {argv:?} must not fail: {}",
-			String::from_utf8_lossy(&out.stderr)
+			!stderr.contains("no project root found"),
+			"plugin ignores scope flags, so {argv:?} must not bail on scope: \
+			 {stderr}"
 		);
 	}
 	// Claude-only is still enforced, and still names the fix.
@@ -10451,5 +10458,71 @@ fn a_malformed_skill_md_does_not_brick_the_agent() {
 		!good.exists(),
 		"the healthy skill must actually be gone: {}",
 		String::from_utf8_lossy(&out.stdout)
+	);
+}
+
+/// The macOS shape, reproduced on Linux: a HOME reached through a symlink.
+///
+/// On a macOS runner `$TMPDIR` lives under `/var`, which is a symlink to
+/// `/private/var`. The delete plan then carries the Master as
+/// `/private/var/.../.agents/skills/<name>` (canonicalized) and the agent dirs
+/// as `/var/.../.claude/skills/<name>` (not), so the preview's
+/// "is this directory one of the ones being removed?" comparison — plain path
+/// equality — never matched. An `--all-agents` preview therefore omitted the
+/// key it was certain to drop, and this was invisible on Linux, where nothing
+/// in the path is a symlink.
+///
+/// A symlinked HOME produces the identical ancestor mismatch anywhere.
+#[cfg(unix)]
+#[test]
+fn a_preview_through_a_symlinked_home_still_names_the_keys_it_drops() {
+	let real = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	let link_parent = tempfile::TempDir::new().unwrap();
+	// Every path aghub is handed goes through this symlink; the plan's
+	// canonicalized halves come back as the REAL path. That is the macOS
+	// mismatch, on any platform.
+	let home = link_parent.path().join("home-link");
+	std::os::unix::fs::symlink(real.path(), &home).unwrap();
+
+	// A sourced install, so the skill gets a real lock entry to prune.
+	write_source_skill(src.path(), "keeper", "keeper");
+	let installed =
+		run_sync_install(&home, state.path(), src.path(), "claude", "keeper");
+	assert!(
+		installed.status.success(),
+		"install must succeed: {}",
+		String::from_utf8_lossy(&installed.stderr)
+	);
+
+	// `--all-agents` takes the Master too, so the skill leaves disk entirely
+	// and its lock key is certain to be dropped.
+	let out = isolated_cli(&home, state.path())
+		.args(["-g", "--json", "delete", "skills", "keeper", "--all-agents"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"the preview must succeed: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let view: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	let would: Vec<&str> = view["would_prune_lock_entries"]
+		.as_array()
+		.unwrap_or_else(|| panic!("preview must disclose the prune: {view}"))
+		.iter()
+		.map(|v| v.as_str().unwrap())
+		.collect();
+
+	// THE assertion: the ancestor mismatch must not hide the key.
+	assert!(
+		would.contains(&"keeper"),
+		"an all-agents delete takes the Master, so its key must be named even \
+		 when HOME is reached through a symlink: {view}"
+	);
+	assert!(
+		home.join(".agents/skills/keeper").exists(),
+		"a preview must not delete"
 	);
 }

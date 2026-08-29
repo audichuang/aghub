@@ -290,16 +290,27 @@ pub fn preview_prune_for_removal(
 	// some referrers and KEEPS the shared Master, so the skill is still on disk
 	// through that Master and its key must NOT be listed.
 	//
-	// ponytail: path equality. If `canonical_path` was canonicalized while the
-	// descriptor dirs were not (macOS /private/var, a symlinked HOME), a path
-	// fails to match and its key is simply omitted — i.e. today's behaviour,
-	// never a fabricated key. Upgrade path: compare canonicalized pairs.
-	let excluded: Vec<PathBuf> = removing.to_vec();
+	// Compared through the ANCESTORS, not as raw strings. The upgrade path the
+	// first cut named — "macOS /private/var, a symlinked HOME" — is not
+	// hypothetical: on a macOS runner the plan carries the Master as
+	// `/private/var/...` and the agent dirs as `/var/...`, the two never
+	// matched, and an `--all-agents` preview omitted the key it was certain to
+	// drop. Raw equality stays as a fallback so a path that cannot be resolved
+	// still matches exactly as before.
+	let excluded: Vec<(PathBuf, PathBuf)> = removing
+		.iter()
+		.map(|p| (p.clone(), normalize_ancestors(p)))
+		.collect();
 	let scan = move |dir: &Path| -> Result<Vec<PathBuf>, ScanError> {
 		let dirs = top_level_skill_dirs(dir)?;
 		Ok(dirs
 			.into_iter()
-			.filter(|found| !excluded.iter().any(|gone| gone == found))
+			.filter(|found| {
+				let real = normalize_ancestors(found);
+				!excluded
+					.iter()
+					.any(|(raw, gone)| raw == found || gone == &real)
+			})
 			.collect())
 	};
 
@@ -348,6 +359,23 @@ pub fn preview_prune_for_removal(
 	match keys {
 		Some(keys) => PruneStatus::WouldPrune(keys),
 		None => PruneStatus::NotRun,
+	}
+}
+
+/// Normalize a skill directory's ANCESTORS without resolving the directory
+/// itself.
+///
+/// A full `canonicalize` would follow an agent's referrer symlink through to
+/// the Master it points at — so excluding the referrer would also exclude the
+/// Master, the skill would read as absent, and its key would be pruned while
+/// the Master is still on disk. Only the ancestors need normalizing, and that
+/// is exactly what differs: macOS `/var` → `/private/var`, or a symlinked HOME.
+fn normalize_ancestors(path: &Path) -> PathBuf {
+	match (path.parent(), path.file_name()) {
+		(Some(parent), Some(name)) => std::fs::canonicalize(parent)
+			.map(|real| real.join(name))
+			.unwrap_or_else(|_| path.to_path_buf()),
+		_ => path.to_path_buf(),
 	}
 }
 
