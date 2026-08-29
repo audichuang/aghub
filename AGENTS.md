@@ -131,11 +131,17 @@ Non-obvious invariants:
   bails BEFORE anything happens — for reads too**, so `get`/`check`/`describe`
   cannot answer `[]` from a non-project directory
 - **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
-  needs `--verify-links`
+  needs `--verify-links`. `linkAudit.state` is `verified` ONLY when every agent
+  row is healthy (`issues` otherwise); `orphanMaster` is a leftover master with
+  no lock entry and no slot — do NOT offer `source sync --install-missing` for
+  it, there is no source, and `delete --yes` produces exactly that state when it
+  keeps a master another agent still reads. Exit code is unchanged by default;
+  `--fail-on-issues` opts into a non-zero exit
 - **`check` is offline by default** — remote sources report `uncheckable/network`
   with `checked: false`; pass `--online` for a real update check. Its scope
-  follows the GLOBAL default, unlike `doctor`/`source list`/`source diff`, which
-  span both
+  now defaults to BOTH, like `doctor`/`source list`/`source diff` (it followed
+  the global default and answered "this project is up to date" without reading
+  the project lock)
 - **`source diff` ALWAYS fetches** (no offline mode); `--online` is accepted as a
   no-op alias so the `check` habit does not become a clap error
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
@@ -150,7 +156,11 @@ Non-obvious invariants:
 skills` was dead for all 25 agents; core still refuses it for the API path.)
 - **`transfer`** / **`reconcile`**: cross-agent copy / reconcile of
   skills·mcps·sub-agents (reconcile-with-removals is dry-run — see above).
-  `reconcile` needs at least one `--add`/`--remove`; `-a/--agent` is ignored
+  `reconcile` needs at least one `--add`/`--remove`; `-a/--agent` is ignored.
+  An already-present target is an **idempotent success** (`already_present:
+true`) for both verbs — a skill because the shared Master is what "already
+  there" means, an MCP/sub-agent only when the existing value is EQUIVALENT (a
+  same-named entry holding a different command is still a hard conflict)
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
   reads the key from stdin; nothing else does
@@ -158,7 +168,11 @@ skills` was dead for all 25 agents; core still refuses it for the API path.)
   stdout, exit 1. `code` is `aghub_core::error_codes` — the SAME vocabulary the
   HTTP API sends. clap usage errors stay exit 2 with prose
 - **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
-  `partial`. Read that, not `dry_run`/`executed`: those two cannot separate a
+  `partial` | `kept` (shared Master another agent still reads — `success: true`
+  but THE ENTITY IS STILL THERE; the API adds an api-only `failed` for early
+  errors). A preview also carries `would_prune_lock_entries`: the lock keys the
+  commit would drop, separate from the committed `pruned_lock_entries` because a
+  preview must not claim entries were dropped. Read that, not `dry_run`/`executed`: those two cannot separate a
   refused preview from an already-gone resource, and `executed: true` is set for
   the whole execute branch even when every single delete failed (`partial`).
   `absent` outranks the caller's intent — an unconfirmed delete of something

@@ -46,6 +46,16 @@ enum AgentLinkState {
 	ForeignLink,
 	RealPathConflict,
 	Inaccessible,
+	/// This agent has no slot for the skill AND the master is untracked — a
+	/// leftover, not a missing link.
+	///
+	/// Distinguished from `Missing` because the REMEDY is the opposite. A
+	/// `missing` referrer is repaired by re-linking from its source; an orphan
+	/// master has no source to re-link from, and doctor's blanket
+	/// "`source sync --install-missing`" advice would REINSTALL a skill the
+	/// user had just deleted — `delete --yes` deliberately keeps the master
+	/// when another agent still reads it, and that leftover landed here.
+	OrphanMaster,
 }
 
 impl AgentLinkState {
@@ -59,6 +69,7 @@ impl AgentLinkState {
 			Self::ForeignLink => "foreign-link",
 			Self::RealPathConflict => "real-path-conflict",
 			Self::Inaccessible => "inaccessible",
+			Self::OrphanMaster => "orphan-master",
 		}
 	}
 }
@@ -75,14 +86,42 @@ struct AgentLinkAudit {
 #[serde(tag = "state", rename_all = "camelCase")]
 enum LinkAudit {
 	NotRequested,
-	Verified { agents: Vec<AgentLinkAudit> },
+	/// Every agent row is in a healthy state.
+	Verified {
+		agents: Vec<AgentLinkAudit>,
+	},
+	/// At least one agent row is not. Reported `verified` before, while its own
+	/// rows said `missing` — a summary that contradicted its own detail, and
+	/// the one an automated caller reads first.
+	Issues {
+		agents: Vec<AgentLinkAudit>,
+	},
+}
+
+impl AgentLinkState {
+	/// Is this state something a caller should act on?
+	///
+	/// `autoCovered` and `unsupported` are not problems — they are the correct
+	/// resting state for an agent that reads the master directly or cannot hold
+	/// a skill at all.
+	fn is_issue(self) -> bool {
+		match self {
+			Self::AutoCovered | Self::Unsupported | Self::Linked => false,
+			Self::Missing
+			| Self::Dangling
+			| Self::ForeignLink
+			| Self::RealPathConflict
+			| Self::Inaccessible
+			| Self::OrphanMaster => true,
+		}
+	}
 }
 
 impl LinkAudit {
 	fn label(&self) -> String {
 		match self {
 			Self::NotRequested => "not-requested".to_string(),
-			Self::Verified { agents } => agents
+			Self::Verified { agents } | Self::Issues { agents } => agents
 				.iter()
 				.map(|audit| format!("{}:{}", audit.agent, audit.state.label()))
 				.collect::<Vec<_>>()
@@ -170,12 +209,19 @@ fn resolve_roster(agent: &str) -> Result<Vec<AgentType>> {
 	}
 }
 
+/// `tracked` = the skill has a lock entry.
+///
+/// Passed in rather than derived from the row's `health`: `health_of` checks
+/// `invalid-skill` BEFORE the untracked arm, so an untracked master with a
+/// broken SKILL.md reports `invalid-skill`, and reading `health == "untracked"`
+/// would miss it.
 fn audit_agent_links(
 	skill_name: &str,
 	master: &Path,
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	agents: &[AgentType],
+	tracked: bool,
 ) -> LinkAudit {
 	let master_skill = master.join(skill_name);
 	let agents = agents
@@ -201,11 +247,26 @@ fn audit_agent_links(
 				}
 				LinkNeed::Unsupported => (AgentLinkState::Unsupported, None),
 				LinkNeed::NeedsLink { agent_skills_dir } => {
-					let state = inspect_agent_link(
+					let mut state = inspect_agent_link(
 						&master_skill,
 						&agent_skills_dir,
 						skill_name,
 					);
+					// An absent slot for an UNTRACKED master is a leftover, not
+					// a missing link — there is no source to relink from, and
+					// the blanket sync-repair advice would reinstall a skill the
+					// user just deleted. Gated on `!= Missing` rather than
+					// `== Dir` so a master that is itself a symlink (health
+					// `master-is-symlink`) also stays out of that bucket.
+					// `Dangling` deliberately does NOT downgrade: it is a real
+					// artifact a relink replaces.
+					if state == AgentLinkState::Missing
+						&& !tracked && !matches!(
+						master_state(&master_skill),
+						MasterState::Missing
+					) {
+						state = AgentLinkState::OrphanMaster;
+					}
 					(
 						state,
 						Some(
@@ -223,8 +284,15 @@ fn audit_agent_links(
 				path,
 			}
 		})
-		.collect();
-	LinkAudit::Verified { agents }
+		.collect::<Vec<AgentLinkAudit>>();
+	// `verified` must not be reported while a row says otherwise — the summary
+	// contradicting its own detail is what let `doctor --verify-links && echo
+	// healthy` print healthy over a dangling referrer.
+	if agents.iter().any(|audit| audit.state.is_issue()) {
+		LinkAudit::Issues { agents }
+	} else {
+		LinkAudit::Verified { agents }
+	}
 }
 
 /// Health verdict from lock membership + on-disk master state. Pure so it unit
@@ -343,8 +411,16 @@ fn build_rows(
 }
 
 /// Global lock entries reduced to `(name → (source, source_type))`.
-fn global_locked() -> BTreeMap<String, LockedSkill> {
-	skill::get_all_locked_skills()
+///
+/// Takes the ALREADY-READ lock. `doctor` presents these entries as its answer,
+/// so re-reading here after the fail-closed check left a window in which a
+/// non-aghub writer could truncate the file — the second read falls open to an
+/// empty lock and every still-installed skill is reported `untracked`, with
+/// remediation that says to delete it.
+fn global_locked(
+	lock: skill::lock::SkillLockFile,
+) -> BTreeMap<String, LockedSkill> {
+	lock.skills
 		.into_iter()
 		.map(|(name, entry)| {
 			(
@@ -359,10 +435,12 @@ fn global_locked() -> BTreeMap<String, LockedSkill> {
 		.collect()
 }
 
-/// Project lock entries reduced to `(name → (source, source_type))`.
-fn project_locked(root: &Path) -> BTreeMap<String, LockedSkill> {
-	skill::read_local_lock(Some(root))
-		.skills
+/// Project lock entries reduced to `(name → (source, source_type))`. See
+/// [`global_locked`] for why the lock is passed in.
+fn project_locked(
+	lock: skill::lock::local::LocalSkillLockFile,
+) -> BTreeMap<String, LockedSkill> {
+	lock.skills
 		.into_iter()
 		.map(|(name, entry)| {
 			(
@@ -386,24 +464,28 @@ pub fn execute_with_options(
 	json: bool,
 	verify_links: bool,
 	agent: &str,
+	fail_on_issues: bool,
 ) -> Result<()> {
 	let scopes = crate::commands::source::resolve_read_scopes(global, project)?;
 	// doctor's whole point is reporting lock health, and it must not report a
 	// clean-but-empty world for a lock it could not parse — it classified the
 	// still-present skills `untracked` and told the caller to delete them.
-	crate::commands::source::assert_scope_locks_readable(&scopes)?;
+	// ONE read of each lock, consumed below — see `LockSnapshot`.
+	let mut locks = crate::commands::source::read_scope_locks_checked(&scopes)?;
 	let roster = verify_links.then(|| resolve_roster(agent)).transpose()?;
 
 	let mut rows: Vec<DoctorRow> = Vec::new();
 	for scope in &scopes {
 		let (root, resource_scope, locked) = match scope {
-			SourceScope::Global => {
-				(None, ResourceScope::GlobalOnly, global_locked())
-			}
+			SourceScope::Global => (
+				None,
+				ResourceScope::GlobalOnly,
+				global_locked(locks.global.take().unwrap_or_default()),
+			),
 			SourceScope::Project { root } => (
 				Some(root.as_path()),
 				ResourceScope::ProjectOnly,
-				project_locked(root),
+				project_locked(locks.project.take().unwrap_or_default()),
 			),
 		};
 		if let Some(master) = universal_canonical_dir(root) {
@@ -420,6 +502,7 @@ pub fn execute_with_options(
 						resource_scope,
 						root,
 						agents,
+						locked.contains_key(&row.skill),
 					);
 				}
 			}
@@ -427,9 +510,33 @@ pub fn execute_with_options(
 		}
 	}
 
+	// Counted before the JSON early-return: `--fail-on-issues` must mean the
+	// same thing in both output modes.
+	let issue_count =
+		rows.iter()
+			.filter_map(|row| match &row.link_audit {
+				LinkAudit::NotRequested => None,
+				LinkAudit::Verified { agents }
+				| LinkAudit::Issues { agents } => Some(agents),
+			})
+			.flatten()
+			.filter(|audit| audit.state.is_issue())
+			.count();
+	let gate = |issues: usize| -> Result<()> {
+		if fail_on_issues && issues > 0 {
+			anyhow::bail!(
+				"{issues} agent referrer issue(s) — see the report above"
+			);
+		}
+		Ok(())
+	};
+
 	if json {
 		println!("{}", serde_json::to_string_pretty(&rows)?);
-		return Ok(());
+		// The report above IS the answer; without this the failure renderer
+		// would append a second JSON document and every parse of stdout fails.
+		crate::note_answer_on_stdout();
+		return gate(issue_count);
 	}
 
 	if rows.is_empty() {
@@ -470,32 +577,57 @@ pub fn execute_with_options(
 			 sync never overwrites an existing Master"
 		);
 	}
-	let broken_links = rows
-		.iter()
-		.filter_map(|row| match &row.link_audit {
-			LinkAudit::NotRequested => None,
-			LinkAudit::Verified { agents } => Some(agents),
-		})
-		.flatten()
+	let audits = || {
+		rows.iter()
+			.filter_map(|row| match &row.link_audit {
+				LinkAudit::NotRequested => None,
+				LinkAudit::Verified { agents }
+				| LinkAudit::Issues { agents } => Some(agents),
+			})
+			.flatten()
+	};
+
+	// Orphan masters get their OWN note. The blanket
+	// "source sync --install-missing" advice pointed at reinstalling them —
+	// and `delete --yes` deliberately keeps a master another agent still reads,
+	// so the leftover it produces landed in that bucket. doctor was telling the
+	// caller to put back what they had just removed, while a second note two
+	// lines up told them to delete it.
+	let orphan_masters = audits()
+		.filter(|audit| audit.state == AgentLinkState::OrphanMaster)
+		.count();
+	if orphan_masters > 0 {
+		eprintln!(
+			"note: {orphan_masters} orphan master(s) — a master with no lock \
+			 entry and no slot for this agent. There is no source to relink \
+			 from; remove the master directory if nothing reads it. Check the \
+			 other agents' rows first: an untracked master can still have a \
+			 live `linked` referrer, and deleting it would dangle that link."
+		);
+	}
+
+	let broken_links = audits()
 		.filter(|audit| {
-			matches!(
-				audit.state,
-				AgentLinkState::Missing
-					| AgentLinkState::Dangling
-					| AgentLinkState::ForeignLink
-					| AgentLinkState::RealPathConflict
-					| AgentLinkState::Inaccessible
-			)
+			audit.state != AgentLinkState::OrphanMaster
+				&& audit.state.is_issue()
 		})
 		.count();
 	if broken_links > 0 {
+		// The old text was not a runnable command: `source sync` takes a
+		// required `<SOURCE>` positional and needs `--yes` to write, so copying
+		// it produced a clap usage error, and adding `--yes` alone produced
+		// another silent dry-run.
 		eprintln!(
-			"note: {broken_links} agent referrer issue(s) — repair missing/dangling \
-			 links with an explicit roster and source sync --skill <name> \
-			 --install-missing; foreign or real-path conflicts require inspection"
+			"note: {broken_links} agent referrer issue(s) — repair a missing or \
+			 dangling link with:\n  aghub-cli {scope_flag} -a <agent> source \
+			 sync <source> --skill <name> --install-missing --yes\n\
+			 (<source> is the SOURCE column of `aghub-cli source list`.) \
+			 Foreign links and real-path conflicts are not repaired by sync — \
+			 inspect those.",
+			scope_flag = if project { "-p" } else { "-g" }
 		);
 	}
-	Ok(())
+	gate(issue_count)
 }
 
 #[cfg(test)]
@@ -685,15 +817,23 @@ mod tests {
 	fn native_reader_is_missing_when_master_skill_is_absent() {
 		let tmp = tempfile::tempdir().unwrap();
 		let master = tmp.path().join(".agents/skills");
+		// `tracked: false` on purpose: this is a NativeReader, and the
+		// orphan-master downgrade applies only to a NeedsLink slot. If it ever
+		// leaks here, a Master-reading agent with no master at all would be
+		// reported as a leftover to delete rather than something missing.
 		let audit = audit_agent_links(
 			"gone",
 			&master,
 			ResourceScope::ProjectOnly,
 			Some(tmp.path()),
 			&[AgentType::Codex],
+			false,
 		);
-		let LinkAudit::Verified { agents } = audit else {
-			panic!("link audit should be verified")
+		// `Issues`, not `Verified` — the summary must not contradict its own
+		// rows, which is what let `doctor --verify-links && echo healthy` print
+		// healthy over a broken tree.
+		let LinkAudit::Issues { agents } = audit else {
+			panic!("a missing referrer is an issue, not a clean verification")
 		};
 		assert_eq!(agents.len(), 1);
 		assert_eq!(agents[0].state, AgentLinkState::Missing);

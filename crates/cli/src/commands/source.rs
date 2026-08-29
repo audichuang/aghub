@@ -198,20 +198,31 @@ pub(crate) fn resolve_read_scopes(
 	Ok(scopes)
 }
 
-/// [`crate::commands::assert_locks_readable`] for a resolved read-scope list.
+/// [`crate::commands::read_locks_checked`] for a resolved read-scope list.
 ///
 /// `source list` / `source diff` / `doctor` all report the lock's contents as
 /// their answer, so an unreadable lock must fail here instead of surfacing as
 /// "no sources installed" / "untracked".
-pub(crate) fn assert_scope_locks_readable(
+///
+/// `doctor` CONSUMES the returned snapshot; the two `source` commands route
+/// their reads through `skill_update::sources`, which owns its own lock access,
+/// so they discard it and keep the narrow re-read window. Honest partial, not
+/// an oversight.
+pub(crate) fn read_scope_locks_checked(
 	scopes: &[SourceScope],
-) -> Result<()> {
+) -> Result<crate::commands::LockSnapshot> {
 	let want_global = scopes.iter().any(|s| matches!(s, SourceScope::Global));
 	let project_root = scopes.iter().find_map(|s| match s {
 		SourceScope::Project { root } => Some(root.as_path()),
 		SourceScope::Global => None,
 	});
-	crate::commands::assert_locks_readable(want_global, project_root)
+	// `source list` / `source diff` route their reads through
+	// `skill_update::sources`, which owns its own lock access — there is no
+	// injection point for a snapshot without reshaping that shared crate. So
+	// they keep the fail-closed CHECK (a corrupt lock still fails loudly rather
+	// than reading as "no sources installed") and keep the narrow re-read
+	// window that `check` no longer has. Honest partial, not an oversight.
+	crate::commands::read_locks_checked(want_global, project_root)
 }
 
 fn current_project_root() -> Result<Option<PathBuf>> {
@@ -318,7 +329,10 @@ fn summary_to_view(s: &SourceSummary) -> SourceSummaryView {
 
 fn list(global: bool, project: bool, json: bool) -> Result<()> {
 	let scopes = resolve_read_scopes(global, project)?;
-	assert_scope_locks_readable(&scopes)?;
+	// The snapshot is discarded here — see `read_scope_locks_checked`. What is
+	// kept is the fail-closed check: a corrupt lock must not read as "no
+	// sources installed".
+	read_scope_locks_checked(&scopes)?;
 	let summaries = sources::list_sources(sources::SourceListInput { scopes });
 
 	if json {
@@ -395,7 +409,10 @@ fn diff(
 	json: bool,
 ) -> Result<()> {
 	let scopes = resolve_read_scopes(global, project)?;
-	assert_scope_locks_readable(&scopes)?;
+	// The snapshot is discarded here — see `read_scope_locks_checked`. What is
+	// kept is the fail-closed check: a corrupt lock must not read as "no
+	// sources installed".
+	read_scope_locks_checked(&scopes)?;
 	let source = source.trim().to_string();
 
 	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED

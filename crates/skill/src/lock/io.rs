@@ -133,9 +133,15 @@ where
 	})
 }
 
-/// Is the GLOBAL skill lock readable? `Ok(())` when it parses, is absent, or is
-/// empty; `Err` naming the problem otherwise. Reads nothing into the caller and
-/// takes no mutation lock.
+/// Read the GLOBAL skill lock, failing CLOSED. `Ok` when it parses, is absent,
+/// or is empty; `Err` naming the problem otherwise. Takes no mutation lock.
+///
+/// Returns the PARSED LOCK, not a verdict. A predicate-only probe left the
+/// caller to read the file a second time through the fail-open reader, and
+/// between those two reads a non-aghub writer (an editor, `npx skills`) can
+/// truncate it — the second read then falls open to an empty lock and the
+/// command answers `[]` on exit 0, which is exactly the failure the probe was
+/// added to prevent. One read, no window.
 ///
 /// The read paths above fail OPEN so a corrupt lock does not break every query.
 /// A caller that presents the lock's CONTENTS as its answer needs the
@@ -143,13 +149,15 @@ where
 /// file": `check skills`, `source list` and `doctor` each did exactly that, on
 /// exit 0 with an empty stderr, and `doctor` went on to recommend deleting the
 /// skills it had just failed to see.
-pub fn global_lock_readable() -> std::io::Result<()> {
-	read_lock_for_modify::<SkillLockFile>(
-		&get_skill_lock_path(),
-		GLOBAL_LOCK_FILE,
-	)
-	.map(|_| ())
-	.map_err(|error| unreadable_for_reading(GLOBAL_LOCK_FILE, &error))
+pub fn read_global_lock_checked() -> std::io::Result<SkillLockFile> {
+	// `_versioned`, NOT the bare `read_lock_for_modify`: the bare one skips the
+	// old-format wipe that `read_skill_lock` applies. While this only answered
+	// yes/no that difference was invisible; now that the parsed value is handed
+	// to the caller, using the bare reader would resurrect v2 entries the
+	// fail-open reader treats as an empty lock — a silent behaviour change from
+	// a function that exists to REMOVE a silent behaviour change.
+	read_lock_for_modify_versioned()
+		.map_err(|error| unreadable_for_reading(GLOBAL_LOCK_FILE, &error))
 }
 
 /// Restate a fail-closed read error for a READ-ONLY caller.
@@ -313,6 +321,48 @@ mod tests {
 			updated_at: "t".to_string(),
 			plugin_name: None,
 		}
+	}
+
+	#[test]
+	fn checked_read_applies_the_old_format_wipe() {
+		// THE trap in turning a predicate probe into a reader. The probe was
+		// built on the BARE `read_lock_for_modify`, which does NOT apply the
+		// old-format wipe that `read_skill_lock` does. While it only answered
+		// yes/no that difference was invisible. Handing the parsed value to the
+		// caller with the bare reader would resurrect pre-v3 entries that every
+		// other read path treats as an empty lock — a silent behaviour change
+		// introduced by a function whose entire purpose is removing one.
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let path = get_skill_lock_path();
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		// A structurally VALID lock, in an old format: build it with the real
+		// entry type, then downgrade only the version field, so the test cannot
+		// pass for the wrong reason (a hand-written fixture that simply fails
+		// to parse would also come back empty).
+		let mut old = super::super::types::SkillLockFile::default();
+		old.skills.insert("stale".into(), sample_entry());
+		let mut raw: serde_json::Value =
+			serde_json::to_value(&old).expect("lock serializes");
+		raw["version"] = serde_json::json!(
+			super::super::types::SkillLockFile::current_version() - 1
+		);
+		std::fs::write(&path, serde_json::to_string(&raw).unwrap()).unwrap();
+
+		let checked = read_global_lock_checked()
+			.expect("an old-format lock parses; it is not unreadable");
+		assert!(
+			checked.skills.is_empty(),
+			"a pre-v3 lock must read as empty, exactly as `read_skill_lock` \
+			 reports it — otherwise the checked reader resurrects entries no \
+			 other path can see: {:?}",
+			checked.skills.keys().collect::<Vec<_>>()
+		);
+		assert_eq!(
+			checked.skills.len(),
+			read_skill_lock().skills.len(),
+			"the checked reader and the fail-open reader must agree on what \
+			 this file contains"
+		);
 	}
 
 	#[test]

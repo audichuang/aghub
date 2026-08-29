@@ -419,6 +419,20 @@ enum Commands {
 		/// Supports one id, a comma-separated roster, or `-a all`.
 		#[arg(long)]
 		verify_links: bool,
+
+		/// Exit non-zero when any issue is found, so `doctor` can gate a
+		/// script or a CI step.
+		///
+		/// Opt-in on purpose: the default exit code is unchanged, so anyone
+		/// already running `doctor` in CI is unaffected. Without it,
+		/// `doctor --verify-links && echo healthy` prints healthy over a
+		/// dangling referrer — the findings only ever went to stderr.
+		///
+		/// `autoCovered` and `unsupported` are not issues: they are the correct
+		/// resting state for an agent that reads the Master directly or cannot
+		/// hold a skill at all.
+		#[arg(long)]
+		fail_on_issues: bool,
 	},
 	/// Show Claude skill usage counts, least-used first (read-only).
 	///
@@ -581,6 +595,32 @@ impl ResourceType {
 			Self::Mcps => "mcp",
 		}
 	}
+}
+
+/// Scope for a read-only diagnostic whose default spans BOTH scopes.
+///
+/// `resolve_scope_and_root`'s no-flag default is global-only, which is right
+/// for the generic CRUD paths and wrong for a diagnostic: `doctor`,
+/// `source list` and `source diff` already default to global + project, and
+/// `check` reporting from the global lock alone meant "this project's skills
+/// are up to date" was answered without reading them.
+///
+/// Explicit flags are untouched. Without a project root the result is
+/// global-only — never a bail, because an implicit default never asks for
+/// `ProjectOnly`.
+fn resolve_read_scope_defaulting_to_both(
+	cli: &Cli,
+) -> Result<(ResourceScope, Option<PathBuf>)> {
+	if cli.global || cli.project || cli.all {
+		return resolve_scope_and_root(cli, ScopePolicy::AllowBoth);
+	}
+	let project_root = find_project_root(&std::env::current_dir()?);
+	let scope = if project_root.is_some() {
+		ResourceScope::Both
+	} else {
+		ResourceScope::GlobalOnly
+	};
+	Ok((scope, project_root))
 }
 
 /// Reject `-a all` for a command that does not fan out.
@@ -895,13 +935,18 @@ fn run(cli: Cli) -> Result<()> {
 
 	// `doctor` reconciles the skill lock against the on-disk master across
 	// scopes; not single-agent scoped, so dispatch before adapter setup.
-	if let Commands::Doctor { verify_links } = &cli.command {
+	if let Commands::Doctor {
+		verify_links,
+		fail_on_issues,
+	} = &cli.command
+	{
 		return commands::doctor::execute_with_options(
 			cli.global,
 			cli.project,
 			cli.json,
 			*verify_links,
 			&cli.agent,
+			*fail_on_issues,
 		);
 	}
 
@@ -921,8 +966,20 @@ fn run(cli: Cli) -> Result<()> {
 	// either.
 	if let Commands::Check { resource, online } = &cli.command {
 		reject_agent_all(&cli.agent)?;
+		// `check` defaults to BOTH scopes, like the other read-only
+		// diagnostics (`doctor`, `source list`, `source diff`). It used to
+		// follow the plain global default and silently answered from the global
+		// lock alone: run inside a project, it reported that the project's
+		// skills needed no update — because it never looked at them. Measured
+		// in this repo, 22 rows went missing.
+		//
+		// An explicit `-g` / `-p` / `--all` still means exactly what it says;
+		// only the no-flag default moves. With no project root the default
+		// degrades to global-only rather than failing — the unconditional
+		// project-root guard fires for `ProjectOnly`, which an implicit default
+		// never produces.
 		let (scope, project_root) =
-			resolve_scope_and_root(&cli, ScopePolicy::AllowBoth)?;
+			resolve_read_scope_defaulting_to_both(&cli)?;
 		return check::execute(
 			(*resource).into(),
 			scope,

@@ -240,10 +240,18 @@ fn doctor_verify_links_audits_the_selected_roster() {
 	);
 	let rows: Value = serde_json::from_slice(&out.stdout).unwrap();
 	let agents = rows[0]["linkAudit"]["agents"].as_array().unwrap();
+	// This fixture's master is UNTRACKED (no lock entry), so grok — which needs
+	// a link and has no slot — is an `orphanMaster`, not a `missing` link. The
+	// two have opposite remedies: nothing can relink an orphan, because there
+	// is no source to relink from.
+	//
+	// And claude is `linked` on that SAME untracked master. That combination is
+	// exactly why the orphan-master note has to hedge instead of saying "delete
+	// it": deleting this master would dangle claude's live symlink.
 	for (agent, state) in [
 		("claude", "linked"),
 		("codex", "autoCovered"),
-		("grok", "missing"),
+		("grok", "orphanMaster"),
 	] {
 		assert!(
 			agents
@@ -252,6 +260,11 @@ fn doctor_verify_links_audits_the_selected_roster() {
 			"expected {agent}:{state}, got {agents:?}"
 		);
 	}
+	assert_eq!(
+		rows[0]["linkAudit"]["state"], "issues",
+		"a row carrying an orphanMaster is not `verified`: {}",
+		rows[0]["linkAudit"]
+	);
 }
 
 #[test]
@@ -7939,5 +7952,251 @@ fn a_kept_shared_master_preview_promises_no_prune() {
 		pj["would_prune_lock_entries"].is_null(),
 		"a commit that will REFUSE must not be previewed as one that prunes: \
 		 {pj}"
+	);
+}
+
+/// `check`'s default spans BOTH scopes, like the other read-only diagnostics.
+///
+/// It used to follow the plain global default, so run inside a project it
+/// answered from the global lock alone — reporting that the project's skills
+/// needed no update, because it never looked at them. Nothing tested that
+/// default, in either direction.
+///
+/// The fixture installs through `source sync`, not `add skills`: only the
+/// former writes a lock entry, and `check` reports from the LOCK. Seeding with
+/// `add` would make this pass or fail for the wrong reason.
+#[cfg(unix)]
+#[test]
+fn check_defaults_to_both_scopes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "global-one", "global-one");
+	write_source_skill(src.path(), "project-one", "project-one");
+
+	// One skill in each scope.
+	let g = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"global-one",
+	);
+	assert!(g.status.success(), "{}", String::from_utf8_lossy(&g.stderr));
+	let p = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-p",
+			"-a",
+			"claude",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"project-one",
+			"--install-missing",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(p.status.success(), "{}", String::from_utf8_lossy(&p.stderr));
+
+	let names = |args: &[&str]| -> Vec<String> {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(project.path())
+			.args(args)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"{args:?}: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		let mut n: Vec<String> = json
+			.as_array()
+			.unwrap()
+			.iter()
+			.map(|r| r["name"].as_str().unwrap().to_string())
+			.collect();
+		n.sort();
+		n
+	};
+
+	// The DEFAULT sees both.
+	assert_eq!(
+		names(&["--json", "check", "skills"]),
+		vec!["global-one".to_string(), "project-one".to_string()],
+		"the no-flag default must span both scopes, like doctor and source list"
+	);
+
+	// Explicit flags are untouched.
+	assert_eq!(
+		names(&["-g", "--json", "check", "skills"]),
+		vec!["global-one".to_string()]
+	);
+	assert_eq!(
+		names(&["-p", "--json", "check", "skills"]),
+		vec!["project-one".to_string()]
+	);
+
+	// And with no project root the default degrades to global-only rather than
+	// failing — an implicit default never asks for ProjectOnly, so the
+	// unconditional project-root guard must not fire.
+	let nowhere = tempfile::TempDir::new().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(nowhere.path())
+		.args(["--json", "check", "skills"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"the default must not require a project root: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(
+		json.as_array()
+			.unwrap()
+			.iter()
+			.all(|r| r["scope"] == "global"),
+		"outside a project the default is global-only: {json}"
+	);
+}
+
+/// `doctor` distinguishes an orphan master from a missing link, and can gate.
+///
+/// Two defects, one fixture. (1) `delete --yes` deliberately KEEPS
+/// `.agents/skills/<name>` when another agent still reads it, and doctor
+/// classified that leftover as a repairable referrer issue whose remediation
+/// was `source sync --skill <name> --install-missing` — reinstalling the skill
+/// the user had just deleted, while a second note two lines up said to delete
+/// it. (2) `linkAudit.state` reported `verified` while its own agent rows said
+/// `missing`, and the exit code was 0 either way, so
+/// `doctor --verify-links && echo healthy` printed healthy over a broken tree.
+#[cfg(unix)]
+#[test]
+fn doctor_separates_orphan_masters_and_can_gate_on_issues() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// A master with NO lock entry and no agent slot: exactly what a manual
+	// `.agents/skills/<name>` or a kept-master delete leaves behind.
+	let master = home.path().join(".agents/skills/orphaned");
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		"---\nname: orphaned\ndescription: left behind\n---\n\nbody\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "--json", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"the default exit code must be unchanged: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|r| r["skill"] == "orphaned")
+		.expect("the orphaned master must be reported");
+
+	assert_eq!(
+		row["linkAudit"]["state"], "issues",
+		"the summary must not say `verified` while its own rows do not: {row}"
+	);
+	let claude = row["linkAudit"]["agents"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|a| a["agent"] == "claude")
+		.expect("claude row present");
+	assert_eq!(
+		claude["state"], "orphanMaster",
+		"an untracked master with no slot is a LEFTOVER, not a missing link — \
+		 they have opposite remedies: {row}"
+	);
+
+	// The remediation notes are the HUMAN output — the `--json` path returns
+	// before they are printed, so ask for them without it.
+	let human = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	assert!(human.status.success());
+	let stderr = String::from_utf8_lossy(&human.stderr);
+	assert!(
+		stderr.contains("orphan master"),
+		"orphan masters need their own note: {stderr}"
+	);
+	let orphan_note = stderr
+		.lines()
+		.find(|l| l.contains("orphan master"))
+		.unwrap();
+	assert!(
+		!orphan_note.contains("--install-missing"),
+		"the orphan-master note must not point at reinstalling it: \
+		 {orphan_note}"
+	);
+	// And it must hedge: an untracked master can still have a live referrer
+	// from another agent, so deleting it blindly dangles that link.
+	assert!(
+		orphan_note.contains("other agents"),
+		"the note must warn that another agent may still link to it: \
+		 {orphan_note}"
+	);
+
+	// Opt-in gating.
+	let gated = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"--json",
+			"doctor",
+			"--verify-links",
+			"--fail-on-issues",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!gated.status.success(),
+		"--fail-on-issues must exit non-zero when there are issues"
+	);
+	// stdout must still hold exactly ONE JSON document — the report — not the
+	// report plus a failure document.
+	serde_json::from_slice::<Value>(&gated.stdout).expect(
+		"the report is the answer; a second error document would break every \
+		 parser",
+	);
+
+	// A clean tree gates green.
+	let clean_home = tempfile::TempDir::new().unwrap();
+	let clean_state = tempfile::TempDir::new().unwrap();
+	let clean = isolated_cli(clean_home.path(), clean_state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"--json",
+			"doctor",
+			"--verify-links",
+			"--fail-on-issues",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		clean.status.success(),
+		"--fail-on-issues must not fire on a clean tree: {}",
+		String::from_utf8_lossy(&clean.stderr)
 	);
 }

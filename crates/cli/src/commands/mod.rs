@@ -65,38 +65,54 @@ const DATA_DIR_ENV: &str = "AGHUB_DATA_DIR";
 /// inference path where no keyring (linux secret-service/dbus) is available.
 const TEST_CREDENTIAL_FILE_ENV: &str = "AGHUB_TEST_CREDENTIAL_FILE";
 
-/// Fail when a skill lock the caller is about to REPORT ON exists but cannot be
-/// read.
+/// The skill locks a read-only command is about to REPORT ON, read exactly
+/// once and failing CLOSED.
 ///
 /// The lock read paths fail OPEN to an empty lock, deliberately, so one corrupt
-/// file does not break every query. But `check`, `doctor` and `source list`
-/// present the lock's contents AS their answer, and an empty view there reads
-/// as "nothing is installed" — they answered `[]` on exit 0 with an empty
-/// stderr for a `skills-lock.json` full of entries they simply could not parse.
-/// `doctor` compounded it by classifying the still-present skills as
-/// `untracked` and printing remediation that says to DELETE them.
+/// file does not break every query. But `check` and `doctor` present the lock's
+/// CONTENTS as their answer, and an empty view there reads as "nothing is
+/// installed" — they answered `[]` on exit 0 with an empty stderr for a
+/// `skills-lock.json` full of entries they simply could not parse, and `doctor`
+/// went on to classify the still-present skills `untracked` and recommend
+/// deleting them.
 ///
-/// Absent and empty locks stay fine: this reuses the same
-/// `read_lock_for_modify` predicate `prune-lock --yes` already fails closed on,
-/// so "unreadable" means one thing across every surface.
-pub(crate) fn assert_locks_readable(
+/// This returns the PARSED locks rather than a verdict. A predicate-only probe
+/// left each command to read the file a second time through the fail-open
+/// reader, and a non-aghub writer (an editor, `npx skills`) that truncates it
+/// between the two reads puts the empty answer back — the same bug, in a
+/// narrower window. One read, consumed directly.
+///
+/// `None` means the scope was not requested, NOT that its file is missing: an
+/// absent lock parses as an empty one, exactly as the fail-open reader would
+/// have produced.
+#[derive(Debug, Default)]
+pub(crate) struct LockSnapshot {
+	pub global: Option<skill::lock::SkillLockFile>,
+	pub project: Option<skill::lock::local::LocalSkillLockFile>,
+}
+
+/// See [`LockSnapshot`].
+pub(crate) fn read_locks_checked(
 	want_global: bool,
 	project_root: Option<&std::path::Path>,
-) -> Result<()> {
+) -> Result<LockSnapshot> {
 	// Mapped to `ConfigError::Io` rather than passed through as a raw
 	// `io::Error`: `report_failure` recovers the shared error code by
 	// downcasting to `ConfigError`, and a bare `io::Error` in the anyhow chain
-	// degrades to `CLI_ERROR` instead of `IO_ERROR`.
+	// degrades `IO_ERROR` into the `CLI_ERROR` fallback.
 	let typed = |error: std::io::Error| {
 		anyhow::Error::from(aghub_core::errors::ConfigError::Io(error))
 	};
-	if want_global {
-		skill::lock::global_lock_readable().map_err(typed)?;
-	}
-	if let Some(root) = project_root {
-		skill::lock::local::local_lock_readable(Some(root)).map_err(typed)?;
-	}
-	Ok(())
+	Ok(LockSnapshot {
+		global: want_global
+			.then(skill::lock::read_global_lock_checked)
+			.transpose()
+			.map_err(typed)?,
+		project: project_root
+			.map(|root| skill::lock::local::read_local_lock_checked(Some(root)))
+			.transpose()
+			.map_err(typed)?,
+	})
 }
 
 /// App data directory shared by the CLI, desktop, and HTTP API.

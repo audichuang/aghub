@@ -233,7 +233,11 @@ pub fn execute(
 
 	// `check`'s entire answer comes from the lock, so an unreadable one has to
 	// fail rather than read as "no skills need updating".
-	crate::commands::assert_locks_readable(
+	// ONE read, consumed below. Reading the lock again after a yes/no probe
+	// left a window a non-aghub writer could truncate the file in, and the
+	// second read would fall open to an empty lock — the same "no skills
+	// installed" answer the probe exists to prevent.
+	let locks = crate::commands::read_locks_checked(
 		want_global,
 		want_project.then_some(project_root).flatten(),
 	)?;
@@ -244,10 +248,12 @@ pub fn execute(
 
 	let mut views: Vec<SkillUpdateView> = Vec::new();
 
-	if want_global {
-		let locked = skill::get_all_locked_skills();
-		eprintln_verbose!("Checking {} global locked skill(s)", locked.len());
-		for (name, entry) in locked {
+	if let Some(global) = locks.global {
+		eprintln_verbose!(
+			"Checking {} global locked skill(s)",
+			global.skills.len()
+		);
+		for (name, entry) in global.skills {
 			views.push(SkillUpdateView {
 				name,
 				scope: "global".to_string(),
@@ -260,13 +266,12 @@ pub fn execute(
 		}
 	}
 
-	if want_project {
-		let lock = skill::read_local_lock(project_root);
+	if let Some(project) = locks.project {
 		eprintln_verbose!(
 			"Checking {} project locked skill(s)",
-			lock.skills.len()
+			project.skills.len()
 		);
-		for (name, entry) in lock.skills {
+		for (name, entry) in project.skills {
 			views.push(SkillUpdateView {
 				name,
 				scope: "project".to_string(),
