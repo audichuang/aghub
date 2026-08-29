@@ -331,10 +331,13 @@ fn skill_folders_match(
 
 /// Refuse a reconcile whose add and remove targets share the SAME backing file.
 ///
-/// Several agents deliberately read one file: Claude's project MCP config is
-/// `.mcp.json`, and Copilot uses that same file when it exists. "Add to
-/// copilot, remove from claude" is then not a state the world can be in — the
-/// membership is a property of the file, not of the agent.
+/// Two agents land on one file both by design and by accident. By design:
+/// Claude's project MCP config is `.mcp.json`, and Copilot uses that same file
+/// when it exists. By accident: a symlinked ancestor (deliberately allowed) or
+/// an agent-home env override collapses two declared-distinct sub-agent
+/// directories into one. Either way "add to the first, remove from the second"
+/// is not a state the world can be in — the membership is a property of the
+/// file, not of the agent.
 ///
 /// Left unchecked it does not merely fail, it DESTROYS: the copy finds an
 /// equivalent entry (truthfully — it is the same file) and reports
@@ -360,7 +363,7 @@ where
 			};
 			if copy_path == delete_path {
 				return Err(ConfigError::InvalidConfig(format!(
-					"'{}' and '{}' share one config file ({}), so adding to \
+					"'{}' and '{}' share one file on disk ({}), so adding to \
 					 the first while removing from the second is not a state \
 					 that can exist — the removal would take it from both. \
 					 Drop one of them from this reconcile.",
@@ -377,6 +380,30 @@ where
 /// The file an agent's MCP entries live in, for [`ensure_targets_do_not_share_backing`].
 fn mcp_backing_path(target: &InstallTarget) -> Option<PathBuf> {
 	build_manager(target).config_path()
+}
+
+/// The file one agent's sub-agent of this name lives in, for
+/// [`ensure_targets_do_not_share_backing`].
+///
+/// Sub-agents have no `config_path()` — each one IS its own `.md` file — so the
+/// backing key is the resolved path of the same-named file this target actually
+/// sees. That is also why enumerating the descriptors' declared directories and
+/// finding them all distinct proves nothing: two dirs that differ on paper are
+/// one dir behind a symlinked ancestor (deliberately allowed — see
+/// `agents/src/sub_agents.rs`, where only symlinked LEAVES are refused) or an
+/// agent-home env override. Ask the filesystem, not the table.
+///
+/// `None` when the target has no such sub-agent — the ordinary copy case, and
+/// not a collision: two targets resolving to one directory either both see the
+/// file or neither does.
+fn sub_agent_backing_path(
+	target: &InstallTarget,
+	name: &str,
+) -> Option<PathBuf> {
+	let mut manager = build_manager(target);
+	ensure_loaded(&mut manager).ok()?;
+	let path = manager.get_sub_agent(name)?.source_path.clone()?;
+	Some(PathBuf::from(path))
 }
 
 /// Copy one MCP into a target. `Ok(true)` = the target already had an
@@ -988,6 +1015,14 @@ pub fn reconcile_sub_agent(
 		source.scope,
 		source.project_root.clone(),
 	);
+	// Same shape as the MCP guard above, and the same destruction when it is
+	// missing: the copy finds its OWN file, reports `already_present`
+	// truthfully, the staged gate only asks whether the copy ERRORED, and the
+	// delete then removes the one file both targets were reading. Two success
+	// rows, resource gone from both.
+	ensure_targets_do_not_share_backing(&copies, &deletes, |target| {
+		sub_agent_backing_path(target, &source.name)
+	})?;
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
 		&deletes,
@@ -1168,25 +1203,30 @@ pub fn reconcile_skill(
 
 					// When this reconcile also REMOVES, the copy has to prove
 					// the source content actually landed — not merely that the
-					// call succeeded.
+					// call succeeded. `wrote_master` is the ONLY outcome that
+					// proves it; both other outcomes can leave the source
+					// unwritten:
 					//
-					// `materialize_universal_master` preserves a pre-existing
-					// Master rather than overwriting it (deliberate: see
-					// `add_skill_from_path`). So a target with no skill at all
-					// can be linked to an ALREADY-PRESENT Master holding
-					// DIFFERENT content: the call reports success,
-					// `already_installed` is false — it really did install
-					// something — and not one byte of the source was written.
+					// - `materialize_universal_master` preserves a pre-existing
+					//   Master rather than overwriting it (deliberate: see
+					//   `add_skill_from_path`). A target with no skill at all is
+					//   then LINKED to an already-present Master holding DIFFERENT
+					//   content — success, `already_installed` false, not one byte
+					//   of the source written.
+					// - A NativeReader that already reads such a Master reports
+					//   `already_installed` — truthfully, it does hold a skill by
+					//   that name — and that name is all the two have in common.
+					//
 					// Paired with the delete, the source content is then gone
 					// while a same-named skill remains, so nothing looks wrong.
+					// Hence: whatever the call reported, if we did not write the
+					// Master ourselves, PROVE the content is there before removing
+					// it from the source.
 					//
 					// Only the removing case is tightened. A plain
 					// `transfer`/`--add` writes nothing away, so preserving the
 					// Master there stays the documented behaviour.
-					if deletes_source
-						&& !added.wrote_master
-						&& !added.already_installed
-					{
+					if deletes_source && !added.wrote_master {
 						let landed =
 							crate::skills::skill_source_root(&source_root);
 						let same = skill_folders_match(
@@ -1197,11 +1237,12 @@ pub fn reconcile_skill(
 						if !same {
 							return Err(ConfigError::InvalidConfig(format!(
 								"refusing to remove '{}' from the source: the \
-								 target was linked to an existing \
-								 .agents/skills master whose content differs \
-								 from the source, so the copy did not carry \
-								 it over. Reconcile the master first, or drop \
-								 the --remove.",
+								 target already holds a same-named skill (an \
+								 existing .agents/skills master) whose content \
+								 differs from the source, and aghub preserves an \
+								 existing master rather than overwriting it — so \
+								 the copy did not carry the source content over. \
+								 Reconcile the master first, or drop the --remove.",
 								skill.name
 							)));
 						}

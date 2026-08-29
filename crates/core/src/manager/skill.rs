@@ -77,6 +77,32 @@ fn paths_resolve_same(a: &std::path::Path, b: &std::path::Path) -> bool {
 	resolve(a) == resolve(b)
 }
 
+/// Does an agent's already-present `existing` entry resolve to the Master at
+/// `canonical`?
+///
+/// The NativeReader branch of BOTH universal install entry points asks this,
+/// so it is ONE function. The root `AGENTS.md` names
+/// `add_skill_universal` / `add_skill_from_path_universal` as the pair that
+/// must agree, and while only the second one asked, they answered the same
+/// question in opposite ways: for a NativeReader holding a FOREIGN same-named
+/// skill, `add --from` errored `RESOURCE_EXISTS` while plain `add` returned
+/// `already_installed` — a silent no-op on exit 0 that then pointed at
+/// `update skills <name>`, which would have edited the foreign skill.
+fn entry_reads_master(existing: &Skill, canonical: &Path) -> bool {
+	existing
+		.canonical_path
+		.as_deref()
+		.or(existing.source_path.as_deref())
+		// Entries store the home-relative `~/…` form (root `AGENTS.md`: "`~`
+		// prefix for home-relative, converted at the I/O boundary"), so compare
+		// only after expanding it — a literal comparison never matches.
+		.map(resolve_source_path)
+		// Entries record `<dir>/SKILL.md`; compare the dir.
+		.and_then(|p| p.parent().map(Path::to_path_buf))
+		.map(|dir| paths_resolve_same(&dir, canonical))
+		.unwrap_or(false)
+}
+
 /// Shared preparation for the two universal-install entry points
 /// (`add_skill_universal` / `add_skill_from_path_universal`): resolves the
 /// `.agents` canonical directory plus the current agent's symlink target.
@@ -285,12 +311,18 @@ impl ConfigManager {
 			let canonical = canonical_dir.join(&safe);
 			// (a) NativeReader: the agent reads the Master directly (its write-dir
 			//     IS the Master, or its read paths include it), so it already sees
-			//     the skill — re-add is an idempotent no-op.
+			//     the skill — re-add is an idempotent no-op. Only when the entry
+			//     really is THAT Master, though: a same-named skill the agent holds
+			//     somewhere else entirely is a conflict, not a no-op. Same check,
+			//     same function, as `add_skill_from_path_universal`.
 			if matches!(
 				link_need,
 				crate::skills::linker::LinkNeed::NativeReader
 			) {
-				return Ok(SkillAdd::already_installed(existing));
+				if entry_reads_master(&existing, &canonical) {
+					return Ok(SkillAdd::already_installed(existing));
+				}
+				return Err(ConfigError::resource_exists("skill", &skill.name));
 			}
 			// (b) Correct link already exists at the agent slot (AlreadyLinked).
 			if let Some(ref agent_dir) = agent_write_dir {
@@ -674,7 +706,7 @@ impl ConfigManager {
 			&all_agent_dirs,
 			project_root.as_deref(),
 		);
-		let mut plan = removal::plan_removal(
+		let plan = removal::plan_removal(
 			&skill,
 			own_agent_dir.as_deref(),
 			&all_agent_dirs,
@@ -703,59 +735,28 @@ impl ConfigManager {
 		}
 
 		if !executed {
-			// Disclose the scope-wide lock prune the COMMIT would run. Computed
-			// before the struct literal because `plan` moves into it.
-			//
-			// The `shared_master_kept` guard is load-bearing: for that state the
-			// committed call does not prune, it REFUSES (the
-			// `unsupported_operation` a few lines above). Promising
-			// `would_prune_lock_entries` there would describe a commit that can
-			// never happen — the same never-terminating hint `RemovalKind::
-			// Absent` and `Kept` were added to eliminate.
-			let prune = if plan.shared_master_kept && plan.paths.is_empty() {
-				removal::PruneStatus::NotRun
-			} else {
-				crate::skills::prune::preview_prune_for_removal(
-					self.scope,
-					self.project_root.as_deref(),
-					&plan.paths,
-				)
-			};
-			return Ok(removal::RemovalOutcome {
+			// Disclose the scope-wide lock prune the COMMIT would run, through
+			// the ONE producer both surfaces use.
+			return Ok(removal::RemovalOutcome::preview(
 				plan,
-				executed: false,
-				prune,
-				failed_paths: vec![],
-				// Reached only AFTER the not-found check.
-				absent: false,
-			});
+				scope,
+				project_root.as_deref(),
+			));
 		}
 
 		info!(
 			"removing skill '{}' (layout={:?}, all_agents={})",
 			name, plan.layout, all_agents
 		);
-		let report =
-			removal::execute_removal(&plan, &roots).map_err(ConfigError::Io)?;
-		for p in &report.skipped {
-			warn!(
-				"skipped removal of '{}' (outside skills roots)",
-				p.display()
-			);
-		}
-		for (p, error) in &report.failed {
-			warn!("failed removal of '{}': {}", p.display(), error);
-		}
-		// Reflect what actually happened on disk in the returned plan.
-		plan.paths = report.removed;
-		plan.skipped.extend(report.skipped);
-		// Kept separately as well as folded into `skipped`: `skipped` also holds
-		// paths refused for being outside the allow-list and the shared master
-		// deliberately left behind, so it cannot answer "did anything FAIL?".
-		let failed_paths: Vec<std::path::PathBuf> =
-			report.failed.iter().map(|(path, _)| path.clone()).collect();
-		plan.skipped
-			.extend(report.failed.into_iter().map(|(path, _)| path));
+		// Execute + fold the real result back into the plan + reconcile the
+		// per-scope lock, through the ONE producer both surfaces use.
+		let outcome = removal::RemovalOutcome::commit(
+			plan,
+			&roots,
+			scope,
+			project_root.as_deref(),
+		)
+		.map_err(ConfigError::Io)?;
 
 		// Skills are disk-derived; drop the in-memory view (save_current persists
 		// MCPs, not skills, so this is a best-effort cache update).
@@ -764,22 +765,7 @@ impl ConfigManager {
 			cfg.skills.remove(idx);
 		}
 
-		// Reconcile the per-scope lock against disk now the skill is gone,
-		// through the single core-owned seam (also used by the API by-path copy
-		// branch). It handles GlobalOnly/ProjectOnly/Both with the same lazy
-		// semantics and is non-fatal on error.
-		let prune = crate::skills::prune::prune_lock_for_scope(
-			self.scope,
-			self.project_root.as_deref(),
-		);
-
-		Ok(removal::RemovalOutcome {
-			plan,
-			executed: true,
-			prune,
-			failed_paths,
-			absent: false,
-		})
+		Ok(outcome)
 	}
 
 	fn skill_for_planned_removal(
@@ -928,22 +914,7 @@ impl ConfigManager {
 				crate::skills::linker::LinkNeed::NativeReader
 			) {
 				let existing = installed();
-				let reads_the_master = existing
-					.canonical_path
-					.as_deref()
-					.or(existing.source_path.as_deref())
-					// Entries store the home-relative `~/…` form (root
-					// `AGENTS.md`: "`~` prefix for home-relative, converted at
-					// the I/O boundary"), so compare only after expanding it —
-					// a literal comparison never matches.
-					.map(resolve_source_path)
-					.and_then(|p| {
-						// Entries record `<dir>/SKILL.md`; compare the dir.
-						p.parent().map(std::path::Path::to_path_buf)
-					})
-					.map(|dir| paths_resolve_same(&dir, &canonical))
-					.unwrap_or(false);
-				if reads_the_master {
+				if entry_reads_master(&existing, &canonical) {
 					return Ok(SkillAdd::already_installed(existing));
 				}
 				// A same-named skill this agent holds somewhere else entirely:

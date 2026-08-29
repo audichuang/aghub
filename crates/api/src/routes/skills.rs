@@ -504,64 +504,38 @@ pub async fn delete_skill_by_path(
 				needs_confirm: false,
 				shared_master_kept: false,
 			};
+			// Preview and commit both go through the core-owned producers —
+			// this route used to assemble a `RemovalOutcome` by hand, and it
+			// had drifted from the manager's twice over: the preview
+			// hard-coded `PruneStatus::NotRun`, and the commit hard-coded
+			// `failed_paths` empty, which made `partial` unreachable here.
 			if dry_run {
 				return Ok(Json(super::removal_response(
-					aghub_core::skills::removal::RemovalOutcome {
+					aghub_core::skills::removal::RemovalOutcome::preview(
 						plan,
-						executed: false,
-						prune: aghub_core::skills::removal::PruneStatus::NotRun,
-						// The dir exists (checked above); this is a preview.
-						failed_paths: vec![],
-						absent: false,
-					},
+						resource_scope,
+						project_root.as_deref(),
+					),
 					dry_run,
 				)));
 			}
-			let report = match aghub_core::skills::removal::execute_removal(
-				&plan, &roots,
-			) {
-				Ok(report) => report,
-				Err(e) => {
-					return Ok(Json(DeleteSkillByPathResponse {
-						success: false,
-						error: Some(format!("Failed to delete: {e}")),
-						..Default::default()
-					}));
-				}
-			};
-			let mut executed_plan = plan;
-			executed_plan.paths = report.removed;
-			executed_plan.skipped.extend(report.skipped);
-			// Kept as well as folded into `skipped`: `skipped` also holds paths
-			// refused for being outside the allow-list, so it cannot answer
-			// "did anything FAIL?". Hard-coding this empty (as this route did)
-			// made `RemovalKind::Partial` unreachable HERE, so a delete where
-			// every `remove_dir_all` returned EACCES reported
-			// `outcome: "removed"` with the skill still on disk — and the
-			// desktop closes its dialog on `removed`. The manager path already
-			// collects this; only this hand-written copy did not.
-			let failed_paths: Vec<std::path::PathBuf> =
-				report.failed.iter().map(|(path, _)| path.clone()).collect();
-			executed_plan
-				.skipped
-				.extend(report.failed.into_iter().map(|(path, _)| path));
-			// Reconcile the per-scope lock against disk through the SAME core-owned
-			// seam the manager uses, and report its real PruneStatus (not NotRun) so
-			// `pruned_lock_entries`/`prune_error` truthfully reflect the cleanup.
-			let prune = aghub_core::skills::prune::prune_lock_for_scope(
-				resource_scope,
-				project_root.as_deref(),
-			);
-			return Ok(Json(super::removal_response(
-				aghub_core::skills::removal::RemovalOutcome {
-					plan: executed_plan,
-					executed: true,
-					prune,
-					failed_paths,
-					absent: false,
-				},
-				dry_run,
-			)));
+			let outcome =
+				match aghub_core::skills::removal::RemovalOutcome::commit(
+					plan,
+					&roots,
+					resource_scope,
+					project_root.as_deref(),
+				) {
+					Ok(outcome) => outcome,
+					Err(e) => {
+						return Ok(Json(DeleteSkillByPathResponse {
+							success: false,
+							error: Some(format!("Failed to delete: {e}")),
+							..Default::default()
+						}));
+					}
+				};
+			return Ok(Json(super::removal_response(outcome, dry_run)));
 		}
 
 		match manager.remove_skill_planned(&skill_name, false, dry_run, confirm)

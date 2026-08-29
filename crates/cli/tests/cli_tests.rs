@@ -8496,9 +8496,10 @@ fn third_review_sibling_shapes_stay_fixed() {
 	);
 	assert!(!out.status.success());
 	assert!(
-		String::from_utf8_lossy(&out.stdout).contains("did not carry it over")
+		String::from_utf8_lossy(&out.stdout)
+			.contains("did not carry the source content over")
 			|| String::from_utf8_lossy(&out.stderr)
-				.contains("did not carry it over"),
+				.contains("did not carry the source content over"),
 		"the error must say WHY: stdout={} stderr={}",
 		String::from_utf8_lossy(&out.stdout),
 		String::from_utf8_lossy(&out.stderr)
@@ -8565,4 +8566,288 @@ fn third_review_sibling_shapes_stay_fixed() {
 	// A broken one is not covered, however it is spelled on disk.
 	std::fs::remove_dir_all(&live).unwrap();
 	audit("missing");
+}
+
+/// Fourth review. The two halves each earlier round left open.
+///
+/// Both are the same mistake in two places: a decision made on the skill's
+/// NAME when only its resolved PATH (or content) answers the question.
+#[cfg(unix)]
+#[test]
+fn fourth_review_name_only_decisions_stay_closed() {
+	// --- (1) The content proof must not skip `already_installed`.
+	//
+	// The third round proved the copy landed the source content before a
+	// paired `--remove` ran, but exempted `already_installed`. A NativeReader
+	// that already reads a Master reports exactly that — truthfully, it does
+	// hold a skill by that name — and the name is all the two share. The
+	// exemption therefore reopened the hole for the one shape most likely to
+	// hit it: a Master that already exists.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+
+		// cursor reads `.agents/skills` directly, so this Master IS cursor's
+		// `foo` — and it is not claude's `foo`.
+		let master = home.path().join(".agents/skills/foo");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(
+			master.join("SKILL.md"),
+			"---\nname: foo\ndescription: master\n---\n\nMASTER-C\n",
+		)
+		.unwrap();
+		let claude_skill = home.path().join(".claude/skills/foo");
+		std::fs::create_dir_all(&claude_skill).unwrap();
+		std::fs::write(
+			claude_skill.join("SKILL.md"),
+			"---\nname: foo\ndescription: claude\n---\n\nCLAUDE-A\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"foo",
+				"--add",
+				"cursor",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		// THE assertion.
+		let survived = std::fs::read_to_string(claude_skill.join("SKILL.md"))
+			.expect("the source skill must still exist");
+		assert!(
+			survived.contains("CLAUDE-A"),
+			"the source must survive a copy that only found a same-NAMED \
+			 master: {survived}"
+		);
+		assert!(
+			!out.status.success(),
+			"a copy that carried nothing over must not succeed: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		let copy = json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|r| r["action"] == "copy")
+			.expect("copy row present");
+		assert_eq!(copy["success"], false, "{copy}");
+		let delete = json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|r| r["action"] == "delete")
+			.expect("delete row present");
+		assert_eq!(
+			delete["success"], false,
+			"the delete must be skipped, not merely survived: {delete}"
+		);
+		// And the Master is untouched — nothing was overwritten either way.
+		assert!(std::fs::read_to_string(master.join("SKILL.md"))
+			.unwrap()
+			.contains("MASTER-C"));
+	}
+
+	// --- (2) The two universal install entry points must agree.
+	//
+	// `add --from <path>` verified the resolved path; plain `add -n <name>`
+	// still returned on the name. For a NativeReader holding a FOREIGN
+	// same-named skill that meant exit 0, `already_installed: true`, nothing
+	// written, no master created — and a hint pointing at `update skills foo`,
+	// which would have edited the foreign skill.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let foreign = home.path().join(".cursor/skills/foo");
+		std::fs::create_dir_all(&foreign).unwrap();
+		std::fs::write(
+			foreign.join("SKILL.md"),
+			"---\nname: foo\ndescription: foreign\n---\n\nCURSOR-PRIVATE\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"-a",
+				"cursor",
+				"add",
+				"skills",
+				"-n",
+				"foo",
+				"-d",
+				"brand new",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"a foreign same-named skill is a conflict, not a no-op: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["error"]["code"], "RESOURCE_EXISTS", "{json}");
+		assert!(
+			!home.path().join(".agents/skills/foo").exists(),
+			"the refused add must not leave a master behind"
+		);
+		assert!(std::fs::read_to_string(foreign.join("SKILL.md"))
+			.unwrap()
+			.contains("CURSOR-PRIVATE"));
+	}
+
+	// --- (3) …and the honest no-op still IS one: the same command against a
+	// Master the agent really reads stays idempotent. Tightening (2) by
+	// erroring on everything would pass (2) and break every re-add.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let master = home.path().join(".agents/skills/foo");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(
+			master.join("SKILL.md"),
+			"---\nname: foo\ndescription: master\n---\n\nMASTER\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"-a",
+				"cursor",
+				"add",
+				"skills",
+				"-n",
+				"foo",
+				"-d",
+				"brand new",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"re-adding a skill the agent already reads must stay a no-op: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["already_installed"], true, "{json}");
+		// The Master is reported as it is on disk, not as it was requested.
+		assert_eq!(json["description"], "master", "{json}");
+	}
+}
+
+/// Two agents can resolve to ONE sub-agent file — and then a reconcile that
+/// adds to one while removing from the other deletes it from both.
+///
+/// The reason the earlier rounds missed this is worth keeping: enumerating the
+/// four descriptors that implement sub-agents shows four distinct directories,
+/// which looks like a proof. It is not. `agents/src/sub_agents.rs` deliberately
+/// refuses only symlinked LEAVES, so a symlinked ancestor (or an agent-home env
+/// override) makes two of those "distinct" directories the same directory.
+/// The copy then finds its own file, reports `already_present` truthfully, the
+/// staged gate only asks whether the copy ERRORED, and the delete removes the
+/// single file. exit 0, "2 succeeded", nothing left.
+#[cfg(unix)]
+#[test]
+fn reconcile_sub_agent_refuses_when_both_targets_are_one_file() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let agents = home.path().join(".claude/agents");
+	std::fs::create_dir_all(&agents).unwrap();
+	// grok's home IS claude's home here.
+	std::os::unix::fs::symlink(
+		home.path().join(".claude"),
+		home.path().join(".grok"),
+	)
+	.unwrap();
+	let file = agents.join("reviewer.md");
+	std::fs::write(
+		&file,
+		"---\nname: reviewer\ndescription: the only copy\n---\n\nREVIEWER-BODY\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"sub-agent",
+			"--from-agent",
+			"claude",
+			"--name",
+			"reviewer",
+			"--add",
+			"grok",
+			"--remove",
+			"claude",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	// THE assertion.
+	let survived = std::fs::read_to_string(&file)
+		.expect("the one file both agents read must still exist");
+	assert!(survived.contains("REVIEWER-BODY"), "{survived}");
+
+	assert!(
+		!out.status.success(),
+		"a reconcile that would empty both agents must not report success: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	// Refused as a batch PREFLIGHT — no row ran, so there is nothing to undo.
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["error"]["code"], "INVALID_CONFIG", "{json}");
+
+	// The same reconcile between genuinely separate directories still works —
+	// a guard that refused every sub-agent reconcile would also pass the
+	// assertion above.
+	let home2 = tempfile::TempDir::new().unwrap();
+	let state2 = tempfile::TempDir::new().unwrap();
+	std::fs::create_dir_all(home2.path().join(".claude/agents")).unwrap();
+	std::fs::write(
+		home2.path().join(".claude/agents/reviewer.md"),
+		"---\nname: reviewer\ndescription: moves\n---\n\nBODY\n",
+	)
+	.unwrap();
+	let moved = isolated_cli(home2.path(), state2.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"sub-agent",
+			"--from-agent",
+			"claude",
+			"--name",
+			"reviewer",
+			"--add",
+			"grok",
+			"--remove",
+			"claude",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		moved.status.success(),
+		"distinct dirs must still reconcile: {}",
+		String::from_utf8_lossy(&moved.stdout)
+	);
+	assert!(home2.path().join(".grok/agents/reviewer.md").is_file());
+	assert!(!home2.path().join(".claude/agents/reviewer.md").exists());
 }

@@ -538,6 +538,89 @@ pub struct RemovalOutcome {
 }
 
 impl RemovalOutcome {
+	/// The PREVIEW of `plan` — what a commit would do, including the lock keys
+	/// it would drop.
+	///
+	/// One producer, shared by every surface. Two hand-written copies of this
+	/// (the manager's and the API by-path route's) is exactly the
+	/// "NEVER hand-mirror a transactional flow across surfaces" the root
+	/// `AGENTS.md` forbids, and it had already drifted: the route hard-coded
+	/// `PruneStatus::NotRun`, so its preview silently under-reported the lock
+	/// cleanup its own commit would perform.
+	pub fn preview(
+		plan: RemovalPlan,
+		scope: crate::models::ResourceScope,
+		project_root: Option<&Path>,
+	) -> Self {
+		// Load-bearing: for a kept shared Master the COMMIT does not prune, it
+		// REFUSES. Promising `would_prune_lock_entries` there would describe a
+		// commit that can never happen.
+		let prune = if plan.shared_master_kept && plan.paths.is_empty() {
+			PruneStatus::NotRun
+		} else {
+			crate::skills::prune::preview_prune_for_removal(
+				scope,
+				project_root,
+				&plan.paths,
+			)
+		};
+		Self {
+			plan,
+			executed: false,
+			prune,
+			failed_paths: Vec::new(),
+			// Callers reach a preview only AFTER their not-found check.
+			absent: false,
+		}
+	}
+
+	/// COMMIT `plan`: run the removal, fold what ACTUALLY happened back into the
+	/// plan, and reconcile the per-scope lock.
+	///
+	/// The counterpart of [`Self::preview`], and the same rule applies — this is
+	/// the only place that turns a [`RemovalReport`] into an outcome. The
+	/// duplicate that used to live in the API by-path route hard-coded
+	/// `failed_paths` empty, which made `RemovalKind::Partial` unreachable there:
+	/// a delete where every `remove_dir_all` returned `EACCES` reported
+	/// `outcome: "removed"` with the skill still on disk, and the desktop closes
+	/// its dialog on `removed`.
+	pub fn commit(
+		mut plan: RemovalPlan,
+		roots: &[PathBuf],
+		scope: crate::models::ResourceScope,
+		project_root: Option<&Path>,
+	) -> std::io::Result<Self> {
+		let report = execute_removal(&plan, roots)?;
+		for path in &report.skipped {
+			log::warn!(
+				"skipped removal of '{}' (outside skills roots)",
+				path.display()
+			);
+		}
+		for (path, error) in &report.failed {
+			log::warn!("failed removal of '{}': {}", path.display(), error);
+		}
+		// Reflect what actually happened on disk in the returned plan.
+		plan.paths = report.removed;
+		plan.skipped.extend(report.skipped);
+		// Kept separately as well as folded into `skipped`: `skipped` also holds
+		// paths refused for being outside the allow-list and a shared master
+		// deliberately left behind, so it cannot answer "did anything FAIL?".
+		let failed_paths: Vec<PathBuf> =
+			report.failed.iter().map(|(path, _)| path.clone()).collect();
+		plan.skipped
+			.extend(report.failed.into_iter().map(|(path, _)| path));
+		let prune =
+			crate::skills::prune::prune_lock_for_scope(scope, project_root);
+		Ok(Self {
+			plan,
+			executed: true,
+			prune,
+			failed_paths,
+			absent: false,
+		})
+	}
+
 	/// Idempotent-delete no-op: nothing on disk to remove (missing config or
 	/// missing resource). One shared constructor so the CLI and API serialize
 	/// the SAME `success:true, executed:false, dry_run:true` wire shape for the

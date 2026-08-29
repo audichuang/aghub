@@ -586,13 +586,19 @@ pub fn execute_with_options(
 			let what = if axes.contains("both")
 				|| (axes.contains("health") && axes.contains("links"))
 			{
-				"skill health and agent referrer issue(s)"
+				"skill health and agent referrer issues"
 			} else if axes.contains("links") {
-				"agent referrer issue(s)"
+				"agent referrer issues"
 			} else {
-				"skill health issue(s)"
+				"skill health issues"
 			};
-			anyhow::bail!("{issues} {what} — see the report above");
+			// Name the UNIT. This counts ROWS (skills); the note above counts
+			// per-agent referrer records, so one dangling skill across three
+			// agents legitimately prints "3 …" there and "1 …" here. Two bare
+			// "N issue(s)" lines disagreeing on screen read as a bug.
+			anyhow::bail!(
+				"{issues} skill(s) with {what} — see the report above"
+			);
 		}
 		Ok(())
 	};
