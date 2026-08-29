@@ -192,24 +192,44 @@ fn write_sub_agent_file(file: &Path, content: &str) -> Result<()> {
 // ── Directory-level I/O ──────────────────────────────────────────────────────
 
 /// Load sub-agents from a directory of `*.md` files.
-pub fn load_sub_agents_from_dir(dir: &Path) -> Vec<SubAgent> {
-	let Ok(meta) = fs::symlink_metadata(dir) else {
-		return Vec::new();
-	};
-	let file_type = meta.file_type();
-	if !file_type.is_dir() || file_type.is_symlink() {
-		return Vec::new();
+///
+/// `Err` when the directory EXISTS but cannot be read or traversed. "Absent"
+/// and "unreadable" are different answers and this used to return the same
+/// empty list for both, which turned an I/O anomaly into a confident
+/// `RESOURCE_NOT_FOUND` — and, in the skill loader that made the same mistake,
+/// into a silent deletion of a shared master a genuine holder was still
+/// reading. A refused sub-agent dir (a symlinked one) stays empty: that is a
+/// deliberate policy answer, not a failure to look.
+pub fn load_sub_agents_from_dir(dir: &Path) -> Result<Vec<SubAgent>> {
+	match fs::symlink_metadata(dir) {
+		Ok(meta) => {
+			let file_type = meta.file_type();
+			// Symlink hardening (see `is_regular_file`): a symlinked agents
+			// dir is REFUSED, which is an answer, not an error.
+			if !file_type.is_dir() || file_type.is_symlink() {
+				return Ok(Vec::new());
+			}
+		}
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			return Ok(Vec::new());
+		}
+		Err(error) => return Err(error.into()),
 	}
-	let Ok(entries) = fs::read_dir(dir) else {
-		return Vec::new();
-	};
-	let mut agents: Vec<SubAgent> = entries
-		.flatten()
-		.filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("md"))
-		.filter_map(|e| parse_sub_agent_file(&e.path()))
-		.collect();
+	let mut agents: Vec<SubAgent> = Vec::new();
+	for entry in fs::read_dir(dir)? {
+		// A per-entry error is "could not read", not "not there": with mode
+		// 0400 on the dir, `read_dir` succeeds and every stat under it fails.
+		let entry = entry?;
+		let path = entry.path();
+		if path.extension().and_then(|x| x.to_str()) != Some("md") {
+			continue;
+		}
+		if let Some(agent) = parse_sub_agent_file(&path) {
+			agents.push(agent);
+		}
+	}
 	agents.sort_by(|a, b| a.name.cmp(&b.name));
-	agents
+	Ok(agents)
 }
 
 /// Write a single sub-agent to `dir` as a `*.md` file.
@@ -275,7 +295,7 @@ pub fn load_scoped_sub_agents(
 			let Some(dir) = global_dir.and_then(|f| f()) else {
 				return Ok(Vec::new());
 			};
-			Ok(load_sub_agents_from_dir(&dir))
+			load_sub_agents_from_dir(&dir)
 		}
 		ResourceScope::ProjectOnly => {
 			let Some(root) = project_root else {
@@ -289,7 +309,7 @@ pub fn load_scoped_sub_agents(
 			if ensure_within_project_root(&dir, root).is_err() {
 				return Ok(Vec::new());
 			}
-			Ok(load_sub_agents_from_dir(&dir))
+			load_sub_agents_from_dir(&dir)
 		}
 		ResourceScope::Both => Err(ConfigError::InvalidConfig(
 			"Sub-agent load unavailable for Both scope".to_string(),
@@ -391,7 +411,7 @@ mod tests {
 		};
 		save_sub_agent_to_dir(&dir_path, &agent).unwrap();
 
-		let loaded = load_sub_agents_from_dir(&dir_path);
+		let loaded = load_sub_agents_from_dir(&dir_path).unwrap();
 		assert_eq!(loaded.len(), 1);
 		assert_eq!(loaded[0].name, "Test Agent");
 		assert_eq!(loaded[0].description, Some("desc: with colon".to_string()));
@@ -417,7 +437,7 @@ mod tests {
 		fs::write(&target, "TOP_SECRET").unwrap();
 		symlink(&target, agents_dir.join("leak.md")).unwrap();
 
-		let loaded = load_sub_agents_from_dir(&agents_dir);
+		let loaded = load_sub_agents_from_dir(&agents_dir).unwrap();
 
 		assert!(loaded.is_empty());
 	}
@@ -472,7 +492,7 @@ mod tests {
 
 		// Save must succeed despite the symlinked ancestor, and load back.
 		save_sub_agent_to_dir(&agents_dir, &agent).unwrap();
-		let loaded = load_sub_agents_from_dir(&agents_dir);
+		let loaded = load_sub_agents_from_dir(&agents_dir).unwrap();
 		assert_eq!(loaded.len(), 1);
 		assert_eq!(loaded[0].name, "Ancestor Agent");
 	}

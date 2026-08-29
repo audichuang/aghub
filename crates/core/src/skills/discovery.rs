@@ -51,10 +51,25 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 		Err(error) => return Err(error),
 	};
 
-	for entry in entries.flatten() {
+	for entry in entries {
+		// A per-entry error is "could not read", not "not there" — the same
+		// distinction the `read_dir` arm above makes, and `flatten()` +
+		// `is_dir()` both answered "no" to it. With mode 0400 on the skills
+		// dir `read_dir` SUCCEEDS and every stat under it then fails, so a
+		// directory full of skills read as empty and a genuine holder went
+		// invisible to `transfer::skill_holders`.
+		let entry = entry?;
 		let path = entry.path();
-		if !path.is_dir() {
-			continue;
+		match fs::metadata(&path) {
+			Ok(meta) if meta.is_dir() => {}
+			// A file, or a referrer pointing at nothing: both are real
+			// answers about what is installed, not read failures. A dangling
+			// link is `doctor`'s to report.
+			Ok(_) => continue,
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+				continue;
+			}
+			Err(error) => return Err(error),
 		}
 
 		match skill::parser::parse_skill_dir(&path) {

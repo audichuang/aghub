@@ -9886,9 +9886,13 @@ fn an_unreadable_skills_dir_is_not_an_empty_one() {
 		.success());
 
 	let gemini_skills = home.path().join(".gemini/skills");
+	// 0400, not 0000: `read_dir` SUCCEEDS on this and every stat under it
+	// fails. Fixing only the `read_dir` arm left exactly this shape open —
+	// `entries.flatten()` and `path.is_dir()` each turn a traversal error into
+	// "not a directory", so a dir full of skills still read as empty.
 	std::fs::set_permissions(
 		&gemini_skills,
-		std::fs::Permissions::from_mode(0o000),
+		std::fs::Permissions::from_mode(0o400),
 	)
 	.unwrap();
 
