@@ -10338,32 +10338,13 @@ fn an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing() {
 fn the_referrer_guard_does_not_refuse_where_no_referrer_can_be() {
 	use std::os::unix::fs::PermissionsExt;
 
-	// (label, build the peer path)
-	let shapes: Vec<(&str, Box<dyn Fn(&std::path::Path)>)> = vec![
-		(
-			// `read_dir` succeeds on 0400 and every child stat fails — but a
-			// NAME needs no stat, and this listing is empty.
-			"an empty directory that cannot be traversed",
-			Box::new(|peer: &std::path::Path| {
-				std::fs::create_dir_all(peer).unwrap();
-				std::fs::set_permissions(
-					peer,
-					std::fs::Permissions::from_mode(0o400),
-				)
-				.unwrap();
-			}),
-		),
-		(
-			// ENOTDIR: a file holds no entries at all.
-			"a regular file where the skills dir would be",
-			Box::new(|peer: &std::path::Path| {
-				std::fs::create_dir_all(peer.parent().unwrap()).unwrap();
-				std::fs::write(peer, "not a directory\n").unwrap();
-			}),
-		),
-	];
-
-	for (label, build) in shapes {
+	// `read_dir` succeeds on a 0400 dir and every child stat fails — but a
+	// NAME needs no stat, and an empty listing settles it. ENOTDIR settles it
+	// too: a regular file holds no entries at all.
+	for label in [
+		"an empty directory that cannot be traversed",
+		"a regular file where the skills dir would be",
+	] {
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
 		let owned = home.path().join(".claude/skills/demo");
@@ -10374,7 +10355,17 @@ fn the_referrer_guard_does_not_refuse_where_no_referrer_can_be() {
 		)
 		.unwrap();
 		let peer = home.path().join(".gemini/skills");
-		build(&peer);
+		if label.starts_with("an empty") {
+			std::fs::create_dir_all(&peer).unwrap();
+			std::fs::set_permissions(
+				&peer,
+				std::fs::Permissions::from_mode(0o400),
+			)
+			.unwrap();
+		} else {
+			std::fs::create_dir_all(peer.parent().unwrap()).unwrap();
+			std::fs::write(&peer, "not a directory\n").unwrap();
+		}
 
 		let out = isolated_cli(home.path(), state.path())
 			.args([

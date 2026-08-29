@@ -463,11 +463,19 @@ pub async fn delete_skill_by_path(
 					project_root.as_deref(),
 				);
 			let safe_name = skill::sanitize::sanitize_name(&skill_name);
-			if aghub_core::skills::removal::dir_has_external_referrer(
-				&skill_dir,
-				&all_in_scope,
-				&safe_name,
-			) {
+			if let Some(referrer) =
+				aghub_core::skills::removal::dir_has_external_referrer(
+					&skill_dir,
+					&all_in_scope,
+					&safe_name,
+				) {
+				// Name WHICH path kept it: the sweep runs over every in-scope
+				// agent dir, so "kept" without a pointer is undiagnosable.
+				log::warn!(
+					"keeping {}: {} still references it",
+					skill_dir.display(),
+					referrer.display()
+				);
 				// Kept because SHARED — routed through the same `RemovalView`
 				// seam every other branch uses, so it carries
 				// `outcome: "kept"` instead of a hand-built `success: true`
