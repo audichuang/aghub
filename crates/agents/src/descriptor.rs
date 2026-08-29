@@ -512,7 +512,7 @@ pub fn save_sub_agents_noop(
 pub mod mcp_strategy {
 	use super::*;
 	use crate::format::{
-		json_list, json_map, json_opencode, toml_format, toml_grok, yaml_hermes,
+		json_map, json_opencode, toml_format, toml_grok, yaml_hermes,
 	};
 
 	// JsonMap with "mcpServers" key (most common). Agents with a dialect of
@@ -552,10 +552,6 @@ pub mod mcp_strategy {
 	// JsonOpenCode format
 	pub const PARSE_JSON_OPCODE: McpParseFn = json_opencode::parse;
 	pub const SERIALIZE_JSON_OPCODE: McpSerializeFn = json_opencode::serialize;
-
-	// JsonList format
-	pub const PARSE_JSON_LIST: McpParseFn = json_list::parse;
-	pub const SERIALIZE_JSON_LIST: McpSerializeFn = json_list::serialize;
 
 	// TOML format
 	pub const PARSE_TOML: McpParseFn = toml_format::parse;

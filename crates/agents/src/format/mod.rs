@@ -29,7 +29,6 @@
 //! `tests/format_tests.rs` carries the cross-dialect contract test that fails if
 //! either dialect drifts.
 
-pub mod json_list;
 pub mod json_map;
 pub mod json_openclaw;
 pub mod json_opencode;

@@ -49,8 +49,11 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
 ## ADDING AN AGENT
 
 Wiring steps: root AGENTS.md "Adding / Removing an Agent". Crate-level detail:
-the descriptor is `pub const DESCRIPTOR: AgentDescriptor = …`, and core's
-`ALL_AGENTS` dispatch is find-by-id over the array — no match arm to edit.
+the descriptor is `pub const DESCRIPTOR: AgentDescriptor = …`, and the roster
+it must join is `agents::ALL_DESCRIPTORS` in this crate (`core`'s `ALL_AGENTS`
+is that same const). Dispatch is find-by-id over the array — no match arm to
+edit, which is exactly why the miss is silent; `registry_bijection.rs` is what
+makes it loud.
 
 ## ANTI-PATTERNS
 

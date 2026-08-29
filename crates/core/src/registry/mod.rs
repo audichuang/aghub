@@ -1,32 +1,9 @@
 use aghub_agents::{agents, AgentDescriptor, AgentType};
 
-pub static ALL_AGENTS: &[&AgentDescriptor] = &[
-	&agents::claude::DESCRIPTOR,
-	&agents::codex::DESCRIPTOR,
-	&agents::openclaw::DESCRIPTOR,
-	&agents::opencode::DESCRIPTOR,
-	&agents::gemini::DESCRIPTOR,
-	&agents::cline::DESCRIPTOR,
-	&agents::copilot::DESCRIPTOR,
-	&agents::cursor::DESCRIPTOR,
-	&agents::antigravity::DESCRIPTOR,
-	&agents::kiro::DESCRIPTOR,
-	&agents::windsurf::DESCRIPTOR,
-	&agents::trae::DESCRIPTOR,
-	&agents::zed::DESCRIPTOR,
-	&agents::jetbrains_ai::DESCRIPTOR,
-	&agents::roocode::DESCRIPTOR,
-	&agents::kimi::DESCRIPTOR,
-	&agents::mistral::DESCRIPTOR,
-	&agents::pi::DESCRIPTOR,
-	&agents::augmentcode::DESCRIPTOR,
-	&agents::kilocode::DESCRIPTOR,
-	&agents::amp::DESCRIPTOR,
-	&agents::factory::DESCRIPTOR,
-	&agents::warp::DESCRIPTOR,
-	&agents::hermes::DESCRIPTOR,
-	&agents::grok::DESCRIPTOR,
-];
+/// The shipped descriptors. Single-sourced from `aghub_agents::agents` so this
+/// is not a second hand-written roster that can silently drift from
+/// `AgentType::ALL` — see `tests/registry_bijection.rs`.
+pub static ALL_AGENTS: &[&AgentDescriptor] = agents::ALL_DESCRIPTORS;
 
 pub fn get(agent_type: AgentType) -> &'static AgentDescriptor {
 	let id = agent_type.as_str();

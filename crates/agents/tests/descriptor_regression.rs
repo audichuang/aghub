@@ -97,35 +97,22 @@ fn zed_config_dir() -> Option<PathBuf> {
 	}
 }
 
-/// Get all descriptors from the registry
+/// Every shipped descriptor, paired with the `AgentType` its own id names.
+///
+/// DERIVED from `agents::ALL_DESCRIPTORS`, never hand-listed: a fourth
+/// hand-written roster is how "add an agent" turned into "update three lists
+/// and hope", and a matrix that carried its own copy stayed green while the
+/// registry was missing the agent entirely.
 fn all_descriptors() -> Vec<(AgentType, &'static AgentDescriptor)> {
-	vec![
-		(AgentType::Claude, &agents::claude::DESCRIPTOR),
-		(AgentType::Codex, &agents::codex::DESCRIPTOR),
-		(AgentType::Openclaw, &agents::openclaw::DESCRIPTOR),
-		(AgentType::OpenCode, &agents::opencode::DESCRIPTOR),
-		(AgentType::Gemini, &agents::gemini::DESCRIPTOR),
-		(AgentType::Cline, &agents::cline::DESCRIPTOR),
-		(AgentType::Copilot, &agents::copilot::DESCRIPTOR),
-		(AgentType::Cursor, &agents::cursor::DESCRIPTOR),
-		(AgentType::Antigravity, &agents::antigravity::DESCRIPTOR),
-		(AgentType::Kiro, &agents::kiro::DESCRIPTOR),
-		(AgentType::Windsurf, &agents::windsurf::DESCRIPTOR),
-		(AgentType::Trae, &agents::trae::DESCRIPTOR),
-		(AgentType::Zed, &agents::zed::DESCRIPTOR),
-		(AgentType::JetBrainsAi, &agents::jetbrains_ai::DESCRIPTOR),
-		(AgentType::RooCode, &agents::roocode::DESCRIPTOR),
-		(AgentType::Kimi, &agents::kimi::DESCRIPTOR),
-		(AgentType::Mistral, &agents::mistral::DESCRIPTOR),
-		(AgentType::Pi, &agents::pi::DESCRIPTOR),
-		(AgentType::AugmentCode, &agents::augmentcode::DESCRIPTOR),
-		(AgentType::KiloCode, &agents::kilocode::DESCRIPTOR),
-		(AgentType::Amp, &agents::amp::DESCRIPTOR),
-		(AgentType::Factory, &agents::factory::DESCRIPTOR),
-		(AgentType::Warp, &agents::warp::DESCRIPTOR),
-		(AgentType::Hermes, &agents::hermes::DESCRIPTOR),
-		(AgentType::Grok, &agents::grok::DESCRIPTOR),
-	]
+	agents::ALL_DESCRIPTORS
+		.iter()
+		.map(|descriptor| {
+			let agent: AgentType = descriptor.id.parse().unwrap_or_else(|_| {
+				panic!("descriptor id '{}' is not an AgentType", descriptor.id)
+			});
+			(agent, *descriptor)
+		})
+		.collect()
 }
 
 #[test]

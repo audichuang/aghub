@@ -588,6 +588,13 @@ fn insert_discriminator(
 	}
 }
 
+/// Every `Dialect` below is a FIXTURE for this module's behaviour, and none of
+/// them is any agent's coverage. They used to carry agent names — `KIMI`,
+/// `WINDSURF`, `AMP` — and reading them as coverage is how `gemini.rs` lost
+/// `http_url_key` outright while the "gemini" assertions here stayed green.
+/// What a shipped descriptor actually puts on disk is asserted against the
+/// descriptor's OWN fn pointers, in `aghub-core/tests/mcp_dialect_golden.rs`.
+/// Add an agent-shaped case there, never here.
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -734,7 +741,7 @@ mod tests {
 
 	#[test]
 	fn the_dialects_own_tag_outranks_a_foreign_one() {
-		const KIMI: Dialect = Dialect {
+		const OWN_TAG_TRANSPORT: Dialect = Dialect {
 			discriminator: Some(Discriminator {
 				key: "transport",
 				stdio: "stdio",
@@ -747,12 +754,13 @@ mod tests {
 		// Native `transport` says http; a stray `type` says sse. Letting the
 		// foreign key win would rewrite the native one to `sse` on save.
 		let json = r#"{"mcpServers":{"s":{"transport":"http","type":"sse","url":"https://host/mcp"}}}"#;
-		let config = parse(json, &KIMI).unwrap();
+		let config = parse(json, &OWN_TAG_TRANSPORT).unwrap();
 		assert!(matches!(
 			config.mcps[0].transport,
 			McpTransport::StreamableHttp { .. }
 		));
-		let output = serialize(&config, Some(json), &KIMI).unwrap();
+		let output =
+			serialize(&config, Some(json), &OWN_TAG_TRANSPORT).unwrap();
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 		assert_eq!(value["mcpServers"]["s"]["transport"], "http");
 
@@ -765,7 +773,7 @@ mod tests {
 
 	#[test]
 	fn an_unowned_url_key_is_neither_read_nor_removed_nor_type_checked() {
-		const WINDSURF: Dialect = Dialect {
+		const OWN_URL_KEY: Dialect = Dialect {
 			url_key: "serverUrl",
 			legacy_url_keys: &["url"],
 			..MCP_SERVERS
@@ -774,12 +782,12 @@ mod tests {
 		// fail an otherwise valid entry, so this input is what proves the raw
 		// capture is doing its job.
 		let foreign = r#"{"mcpServers":{"s":{"type":"sse","serverUrl":"https://events","httpUrl":{"plugin":"metadata"}}}}"#;
-		let config = parse(foreign, &WINDSURF).unwrap();
+		let config = parse(foreign, &OWN_URL_KEY).unwrap();
 		match &config.mcps[0].transport {
 			McpTransport::Sse { url, .. } => assert_eq!(url, "https://events"),
 			other => panic!("expected sse, got {other:?}"),
 		}
-		let output = serialize(&config, Some(foreign), &WINDSURF).unwrap();
+		let output = serialize(&config, Some(foreign), &OWN_URL_KEY).unwrap();
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 		assert_eq!(value["mcpServers"]["s"]["serverUrl"], "https://events");
 		assert_eq!(
@@ -790,7 +798,7 @@ mod tests {
 
 	#[test]
 	fn a_legacy_url_key_is_read_then_normalised_to_the_written_one() {
-		const WINDSURF: Dialect = Dialect {
+		const OWN_URL_KEY: Dialect = Dialect {
 			url_key: "serverUrl",
 			legacy_url_keys: &["url"],
 			..MCP_SERVERS
@@ -798,8 +806,8 @@ mod tests {
 		// v2.13.3 wrote `url` for this agent; those entries must still load.
 		let legacy =
 			r#"{"mcpServers":{"s":{"type":"http","url":"https://api/mcp"}}}"#;
-		let config = parse(legacy, &WINDSURF).unwrap();
-		let output = serialize(&config, Some(legacy), &WINDSURF).unwrap();
+		let config = parse(legacy, &OWN_URL_KEY).unwrap();
+		let output = serialize(&config, Some(legacy), &OWN_URL_KEY).unwrap();
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 		assert_eq!(value["mcpServers"]["s"]["serverUrl"], "https://api/mcp");
 		assert!(
@@ -947,7 +955,7 @@ mod tests {
 
 	#[test]
 	fn test_serialize_preserves_nested_non_mcp_fields() {
-		const AMP: Dialect = Dialect {
+		const NESTED_SERVER_KEY: Dialect = Dialect {
 			server_key: "amp.mcpServers",
 			..MCP_SERVERS
 		};
@@ -966,13 +974,14 @@ mod tests {
 			},
 			"otherSetting": 42
 		}"#;
-		let mut config = parse(original, &AMP).unwrap();
+		let mut config = parse(original, &NESTED_SERVER_KEY).unwrap();
 		config.mcps = vec![McpServer::new(
 			"new",
 			McpTransport::stdio("new-cmd", vec![]),
 		)];
 
-		let out = serialize(&config, Some(original), &AMP).unwrap();
+		let out =
+			serialize(&config, Some(original), &NESTED_SERVER_KEY).unwrap();
 		let val: serde_json::Value = serde_json::from_str(&out).unwrap();
 
 		assert_eq!(val["amp"]["mode"], "strict");
@@ -1075,7 +1084,7 @@ mod tests {
 
 	#[test]
 	fn test_native_disabled_option_keeps_disabled_server() {
-		const KEBAB: Dialect = Dialect {
+		const KEBAB_HTTP: Dialect = Dialect {
 			discriminator: Some(Discriminator {
 				key: "type",
 				stdio: "stdio",
@@ -1095,7 +1104,7 @@ mod tests {
 			skills: vec![],
 			sub_agents: vec![],
 		};
-		let output = serialize(&config, None, &KEBAB).unwrap();
+		let output = serialize(&config, None, &KEBAB_HTTP).unwrap();
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 
 		assert_eq!(value["mcpServers"]["off"]["disabled"], true);

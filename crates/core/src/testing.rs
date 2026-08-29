@@ -34,21 +34,17 @@ impl TestConfig {
 		// Determine config file format based on agent type
 		let is_toml =
 			matches!(agent_type, AgentType::Codex | AgentType::Mistral);
-		let is_json_list = matches!(agent_type, AgentType::OpenCode);
-
 		let config_path = if is_toml {
 			temp_dir.path().join("config.toml")
 		} else {
 			temp_dir.path().join("settings.json")
 		};
 
-		let initial_config = if is_json_list {
-			r#"{"mcp_servers": [], "skills": []}"#
-		} else if is_toml {
-			""
-		} else {
-			r#"{"mcpServers": {}, "skills": {}}"#
-		};
+		// A bare `{}` seeds every JSON dialect: each parser looks up its own
+		// server key and finds nothing. The OpenCode special case here seeded
+		// `{"mcp_servers": [], …}` — the shape of the deleted `json_list`
+		// module, which OpenCode's parser has never read.
+		let initial_config = if is_toml { "" } else { "{}" };
 
 		fs::write(&config_path, initial_config).map_err(ConfigError::Io)?;
 		crate::adapter::set_mcp_path_override(
@@ -185,8 +181,6 @@ impl TestConfigBuilder {
 		// Determine config file format based on agent type
 		let is_toml =
 			matches!(self.agent_type, AgentType::Codex | AgentType::Mistral);
-		let is_json_list = matches!(self.agent_type, AgentType::OpenCode);
-
 		let config_path = if is_toml {
 			temp_dir.path().join("config.toml")
 		} else {
@@ -194,12 +188,10 @@ impl TestConfigBuilder {
 		};
 
 		let content = self.initial_content.unwrap_or_else(|| {
-			if is_json_list {
-				r#"{"mcp_servers": [], "skills": []}"#.to_string()
-			} else if is_toml {
+			if is_toml {
 				String::new()
 			} else {
-				r#"{"mcpServers": {}, "skills": {}}"#.to_string()
+				"{}".to_string()
 			}
 		});
 

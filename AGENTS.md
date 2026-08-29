@@ -201,9 +201,16 @@ over silently — no compile error, no runtime error, just Claude's behavior.
 
 1. `crates/agents/src/agents/<name>.rs` — descriptor (naming gotchas:
    `crates/agents/AGENTS.md`)
-2. `crates/agents/src/agents/mod.rs` — `pub mod`
+2. `crates/agents/src/agents/mod.rs` — `pub mod` **and an `ALL_DESCRIPTORS`
+   entry**. That const is the ONE roster; `core`'s `registry::ALL_AGENTS`
+   points at it (find-by-id; no match arm)
 3. `crates/agents/src/models.rs` — `AgentType` + `ALL` + `as_str`/`from_str`
-4. `crates/core/src/registry/mod.rs` — `ALL_AGENTS` entry (find-by-id; no match)
+4. `crates/core/tests/mcp_dialect_golden.rs` — a `row!` naming what the agent
+   writes and how it reads a config aghub did not write. There is no way to
+   skip this: the row is REQUIRED for any agent claiming MCP support
+
+Steps 2 and 3 are asserted bijective in `crates/core/tests/registry_bijection.rs`,
+so a missed roster entry fails loudly instead of silently serving Claude.
 
 ## Testing
 
