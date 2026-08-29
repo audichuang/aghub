@@ -19,4 +19,12 @@ aghub does not model. Both are design decisions.
 the _whole-file_ loss the guards close. This is _field-level_ loss on the same
 flows, and the release notes should say so rather than let the claim over-read.
 
-**Found by:** round-4 workflow (HIGH, confirmed and reproduced).
+**Found by:** round-4 workflow (HIGH, confirmed and reproduced). Codex round 5
+re-raised it as mis-triaged, on the grounds that this branch introduced the CLI
+`transfer`/`reconcile` sub-agent surface that makes the lossy save-all path
+reachable. That premise is wrong — `git show main:crates/cli/src/commands/transfer.rs`
+carries `TransferAction::SubAgent` and `ReconcileAction::SubAgent` already — so
+the triage stands. Its point about severity does not depend on the premise and
+is accepted: this is silent FIELD-level data loss on a flow this release
+otherwise claims to have made safe, which is why it is called out in the release
+note rather than left in this file alone.

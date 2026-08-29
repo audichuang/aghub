@@ -293,39 +293,106 @@ pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
 
 /// Does the target's installed skill hold the same content as `source_root`?
 ///
+/// Can we PROVE the target now holds the source content?
+///
 /// Compared by the npx-compatible folder hash, the same digest the lock files
 /// use, so "same" means the same thing here as everywhere else in the project.
-/// Any error resolving either side answers `false`: this gates a DESTRUCTIVE
-/// step, and an unprovable match must not be read as a match.
-fn skill_folders_match(
+/// That hash has blind spots by design — it skips symlinks and `.git` /
+/// `node_modules`, and refuses above its file/size bounds — and this gates a
+/// DESTRUCTIVE step, so a blind spot answers `Unprovable`, never `Landed`.
+///
+/// Three answers, not two: telling a caller "the content differs" when the real
+/// story is "aghub could not look" sends them to reconcile a difference that
+/// does not exist.
+enum ContentProof {
+	Landed,
+	Differs,
+	/// Why the comparison could not be trusted, phrased for the user.
+	Unprovable(String),
+}
+
+/// Does this tree hold anything the folder hash cannot see?
+///
+/// Symlinks are skipped outright by `skill::hash`, so two trees differing ONLY
+/// in a symlink hash EQUAL — and the removal that equality authorises then
+/// destroys the difference. Verified: a source with a symlink and a Master
+/// without one hashed the same, the reconcile reported "2 succeeded", and the
+/// symlink was gone.
+fn has_unhashed_entries(dir: &Path, depth: usize) -> bool {
+	if depth > 32 {
+		// Deeper than the hash itself walks: treat as unseeable.
+		return true;
+	}
+	let Ok(entries) = std::fs::read_dir(dir) else {
+		return true;
+	};
+	for entry in entries.flatten() {
+		let path = entry.path();
+		let Ok(meta) = std::fs::symlink_metadata(&path) else {
+			return true;
+		};
+		let ft = meta.file_type();
+		if ft.is_symlink() {
+			return true;
+		}
+		if ft.is_dir() {
+			let name = entry.file_name();
+			// The hash skips these two by name; content inside them is
+			// invisible to it, so it cannot authorise a removal either.
+			if name == ".git" || name == "node_modules" {
+				return true;
+			}
+			if has_unhashed_entries(&path, depth + 1) {
+				return true;
+			}
+		}
+	}
+	false
+}
+
+fn prove_content_landed(
 	source_root: &Path,
 	target: &InstallTarget,
 	name: &str,
-) -> bool {
+) -> ContentProof {
+	let unprovable = |why: &str| ContentProof::Unprovable(why.to_string());
 	let mut manager = build_manager(target);
 	if ensure_loaded(&mut manager).is_err() {
-		return false;
+		return unprovable("the target's config could not be read");
 	}
 	let Some(installed) = manager.get_skill(name) else {
-		return false;
+		return unprovable("the target does not report holding it at all");
 	};
 	let Some(recorded) = installed
 		.canonical_path
 		.as_deref()
 		.or(installed.source_path.as_deref())
 	else {
-		return false;
+		return unprovable("the target's entry records no path");
 	};
 	let installed_dir = resolve_skill_file(recorded);
 	let Some(installed_dir) = installed_dir.parent() else {
-		return false;
+		return unprovable("the target's recorded path has no directory");
 	};
+	if has_unhashed_entries(source_root, 0)
+		|| has_unhashed_entries(installed_dir, 0)
+	{
+		return unprovable(
+			"the skill folder contains symbolic links or a .git/node_modules \
+			 directory, which the npx-compatible folder hash deliberately does \
+			 not cover — so two folders differing only there compare EQUAL",
+		);
+	}
 	match (
 		skill::hash::compute_skill_folder_hash(source_root),
 		skill::hash::compute_skill_folder_hash(installed_dir),
 	) {
-		(Ok(a), Ok(b)) => a == b,
-		_ => false,
+		(Ok(a), Ok(b)) if a == b => ContentProof::Landed,
+		(Ok(_), Ok(_)) => ContentProof::Differs,
+		_ => unprovable(
+			"the folder could not be hashed (it may exceed the file or size \
+			 bounds the lock format allows)",
+		),
 	}
 }
 
@@ -1331,6 +1398,27 @@ pub fn reconcile_skill(
 		|plan| {
 			let outcome = match plan.action {
 				OperationAction::Copy => (|| -> Result<bool> {
+					let target_scope = match plan.target.scope {
+						InstallScope::Global => {
+							crate::models::ResourceScope::GlobalOnly
+						}
+						InstallScope::Project => {
+							crate::models::ResourceScope::ProjectOnly
+						}
+					};
+					// ONE guard across check → write → rollback, which is what
+					// `mutation_guard`'s own doc says it is for. The manager's
+					// internal guard is released the moment
+					// `add_skill_from_path` returns, so the proof below and the
+					// rollback after it used to run unlocked — able to unlink a
+					// referrer another aghub process had just recreated. It is
+					// reentrant, so the inner one costs nothing.
+					let _copy_guard = crate::skills::lock::mutation_guard(
+						"reconcile skill copy",
+						target_scope,
+						plan.target.project_root.as_deref(),
+					)
+					.map_err(ConfigError::Io)?;
 					let mut manager = build_manager(&plan.target);
 					ensure_loaded(&mut manager)?;
 					// `add_skill_from_path` owns the already-present decision;
@@ -1365,12 +1453,33 @@ pub fn reconcile_skill(
 					if deletes_source && !added.wrote_master {
 						let landed =
 							crate::skills::skill_source_root(&source_root);
-						let same = skill_folders_match(
+						let why = match prove_content_landed(
 							&landed,
 							&plan.target,
 							&skill.name,
-						);
-						if !same {
+						) {
+							ContentProof::Landed => None,
+							ContentProof::Differs => Some(String::from(
+								"the target already holds a same-named skill \
+								 (an existing .agents/skills master) whose \
+								 content differs from the source, and aghub \
+								 preserves an existing master rather than \
+								 overwriting it — so the copy did not carry \
+								 the source content over. Reconcile the master \
+								 first, or drop the --remove.",
+							)),
+							// NOT folded into "differs": sending someone to
+							// reconcile a difference that may not exist is its
+							// own wrong answer.
+							ContentProof::Unprovable(reason) => Some(format!(
+								"aghub cannot PROVE the target now holds the \
+								 source content — {reason}. It will not remove \
+								 content it cannot account for. Drop the \
+								 --remove, or copy the folder yourself and \
+								 verify it."
+							)),
+						};
+						if let Some(why) = why {
 							// Undo THIS call's own work before refusing.
 							// `add_skill_from_path` has already linked the
 							// target to the master, so returning Err here
@@ -1383,28 +1492,21 @@ pub fn reconcile_skill(
 							// this exists to prevent". The master is NOT
 							// touched: we only get here when we did not write
 							// it, so it belongs to whoever did.
+							//
+							// Under `_copy_guard` below, which spans
+							// check → write → rollback: unlocked, this could
+							// unlink a referrer another aghub process had just
+							// recreated.
 							crate::skills::rename::rollback_materialized_install(
 								&skill.name,
-								match plan.target.scope {
-									InstallScope::Global => {
-										crate::models::ResourceScope::GlobalOnly
-									}
-									InstallScope::Project => {
-										crate::models::ResourceScope::ProjectOnly
-									}
-								},
+								target_scope,
 								plan.target.project_root.as_deref(),
 								&added.created_referrer_dirs,
 								false,
 							);
 							return Err(ConfigError::InvalidConfig(format!(
-								"refusing to remove '{}' from the source: the \
-								 target already holds a same-named skill (an \
-								 existing .agents/skills master) whose content \
-								 differs from the source, and aghub preserves an \
-								 existing master rather than overwriting it — so \
-								 the copy did not carry the source content over. \
-								 Reconcile the master first, or drop the --remove.",
+								"refusing to remove '{}' from the source: \
+								 {why}",
 								skill.name
 							)));
 						}

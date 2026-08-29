@@ -1330,6 +1330,38 @@ fn resolve_scope_and_root(
 	Ok((scope, project_root))
 }
 
+/// One batch row's outcome from `run_for_agent`'s payload.
+///
+/// A payload that says `success: false` is a FAILED row. The batch envelope
+/// only knows what this closure tells it, and it used to be told that any
+/// `Ok(_)` was a success — so `delete skills foo -a claude,cursor` where every
+/// path failed with EACCES reported "2 succeeded, 0 failed" and exited 0, with
+/// the skill still on disk for both. The single-agent path reads the same key;
+/// this is the fan-out half of the same rule.
+fn row_from_payload(
+	payload: Option<serde_json::Value>,
+) -> Result<serde_json::Value, String> {
+	let payload = payload.unwrap_or(serde_json::Value::Null);
+	if payload.get("success").and_then(serde_json::Value::as_bool)
+		!= Some(false)
+	{
+		return Ok(payload);
+	}
+	let still_there: Vec<&str> = payload
+		.get("skipped")
+		.and_then(|v| v.as_array())
+		.map(|a| a.iter().filter_map(|p| p.as_str()).collect())
+		.unwrap_or_default();
+	let detail = if still_there.is_empty() {
+		String::new()
+	} else {
+		format!(" (still there: {})", still_there.join(", "))
+	};
+	Err(format!(
+		"the removal did not complete: some paths could not be deleted{detail}"
+	))
+}
+
 /// Run one command against ONE agent's config. The multi-agent entry points
 /// (`handle_all_agents`, `handle_agent_list`) fan out to this.
 ///
@@ -1688,8 +1720,8 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							agent.as_str()
 						);
 						run_for_agent(cli, agent)
-							.map(|o| o.unwrap_or(serde_json::Value::Null))
 							.map_err(|e| format!("{e:#}"))
+							.and_then(row_from_payload)
 					},
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?
@@ -1705,10 +1737,10 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							agent.as_str()
 						);
 						run_for_agent(cli, agent)
+							.map_err(|e| format!("{e:#}"))
 							// Mutating commands always yield a payload; Null keeps
 							// the row well-formed if that invariant ever slips.
-							.map(|o| o.unwrap_or(serde_json::Value::Null))
-							.map_err(|e| format!("{e:#}"))
+							.and_then(row_from_payload)
 					},
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?

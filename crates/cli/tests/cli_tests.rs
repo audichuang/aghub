@@ -9330,3 +9330,177 @@ fn what_the_tool_reports_matches_what_is_on_disk() {
 		assert_eq!(rows[0]["description"], added["description"], "{rows}");
 	}
 }
+
+/// Round-5 delta: four places where a fix closed only the shape it was aimed at.
+#[cfg(unix)]
+#[test]
+fn round_five_delta_fixes_stay_closed() {
+	use std::os::unix::fs::PermissionsExt;
+
+	// --- (1) The fan-out path must honour a nested `success: false` too.
+	//
+	// `RemovalKind::Partial` was taught to exit non-zero on the SINGLE-agent
+	// path. The batch envelope only knows what its closure tells it, and the
+	// closure said every `Ok(_)` was a success — so the same delete across a
+	// comma list reported "2 succeeded, 0 failed" and exited 0.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let skill = home.path().join(".claude/skills/foo");
+		std::fs::create_dir_all(&skill).unwrap();
+		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
+			.unwrap();
+		std::fs::write(
+			skill.join("SKILL.md"),
+			"---\nname: foo\ndescription: d\n---\n\nB\n",
+		)
+		.unwrap();
+		std::fs::write(
+			home.path().join(".agents/skills/foo/SKILL.md"),
+			"---\nname: foo\ndescription: d\n---\n\nB\n",
+		)
+		.unwrap();
+		std::fs::set_permissions(
+			&skill,
+			std::fs::Permissions::from_mode(0o500),
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude,cursor",
+				"--json",
+				"delete",
+				"skills",
+				"foo",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		std::fs::set_permissions(
+			&skill,
+			std::fs::Permissions::from_mode(0o700),
+		)
+		.unwrap();
+
+		assert!(
+			!out.status.success(),
+			"a fan-out delete that removed nothing must not exit 0: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		// Assert on the CLAUDE row specifically. `failed_count > 0` alone is a
+		// false green: cursor reads the shared master, so its row fails on
+		// every run whatever claude's row says.
+		let claude = json["results"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|r| r["agent"] == "claude")
+			.expect("claude row present");
+		// The BATCH row's own flag (`ok`), not the nested payload's `success`
+		// — the whole defect was `ok: true` wrapping `success: false`.
+		assert_eq!(
+			claude["ok"], false,
+			"the partial removal must be a FAILED row: {claude}"
+		);
+		assert!(skill.join("SKILL.md").is_file());
+	}
+
+	// --- (2) The content proof must not certify what the hash cannot see.
+	//
+	// `skill::hash` skips symlinks by design (npx compatibility), so two trees
+	// differing ONLY in a symlink hash EQUAL — and the removal that equality
+	// authorised then destroyed the difference.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let private = home.path().join(".claude/skills/foo");
+		std::fs::create_dir_all(&private).unwrap();
+		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
+			.unwrap();
+		std::fs::create_dir_all(home.path().join("ext")).unwrap();
+		let body = "---\nname: foo\ndescription: d\n---\n\nSAME\n";
+		std::fs::write(private.join("SKILL.md"), body).unwrap();
+		std::fs::write(home.path().join(".agents/skills/foo/SKILL.md"), body)
+			.unwrap();
+		std::fs::write(home.path().join("ext/real.txt"), "payload").unwrap();
+		std::os::unix::fs::symlink(
+			home.path().join("ext/real.txt"),
+			private.join("extra"),
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"foo",
+				"--add",
+				"cursor",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			private.join("extra").exists(),
+			"the source's symlink must survive a proof that cannot see it"
+		);
+		assert!(!out.status.success());
+		// And the refusal must say it could not PROVE, not that content differs
+		// — sending someone to reconcile a difference that may not exist is its
+		// own wrong answer.
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		assert!(stdout.contains("cannot PROVE"), "stdout={stdout}");
+	}
+
+	// --- (3) An unreadable preserved master is an error, not a reason to echo
+	// the caller's own input back as if it were installed.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
+			.unwrap();
+		std::fs::create_dir_all(home.path().join("import/foo")).unwrap();
+		std::fs::write(
+			home.path().join(".agents/skills/foo/SKILL.md"),
+			"not frontmatter at all\n",
+		)
+		.unwrap();
+		std::fs::write(
+			home.path().join("import/foo/SKILL.md"),
+			"---\nname: foo\ndescription: SOURCE CLAIM\n---\n\nX\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"gemini",
+				"--json",
+				"add",
+				"skills",
+				"--from",
+				home.path().join("import/foo").to_str().unwrap(),
+			])
+			.output()
+			.unwrap();
+		assert!(!out.status.success());
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["error"]["code"], "INVALID_CONFIG", "{json}");
+		assert!(
+			!home.path().join(".gemini/skills/foo").exists(),
+			"the refused add must not leave its referrer behind"
+		);
+	}
+}

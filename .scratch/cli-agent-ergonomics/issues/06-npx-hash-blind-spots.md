@@ -20,4 +20,24 @@ direction for a guard on a destructive step; the cost is a confusing message.
 **Fix direction for (2):** distinguish "hashes differ" from "could not hash" and
 say which.
 
-**Found by:** round-4 workflow (both LOW, confirmed).
+## Update — (1) is FIXED, (2) is fixed as a message
+
+Codex round 5 was right that recording (1) as an accepted low risk understated
+it: the hash's blind spot was being used as PERMISSION for a destructive
+removal. Reproduced — a source with a symlink and a Master without one hashed
+EQUAL, the reconcile reported "2 succeeded", and the symlink was gone.
+
+The content proof now refuses rather than certifies when it cannot see the whole
+tree (`has_unhashed_entries` in `crates/core/src/transfer.rs`): a symlink, a
+`.git` or a `node_modules` directory on either side answers `Unprovable`, and a
+removal is never authorised by a proof that could not look. The hash itself is
+unchanged — it MUST stay npx-compatible — so what remains deferred is only that
+such a skill cannot be reconciled with `--remove` at all until the user copies
+it themselves.
+
+(2) is also addressed: `ContentProof` now separates `Differs` from
+`Unprovable`, so a hash failure no longer produces a message asserting a content
+difference that does not exist.
+
+**Found by:** round-4 workflow (both LOW, confirmed); re-severitied by Codex
+round 5 (HIGH) and fixed.

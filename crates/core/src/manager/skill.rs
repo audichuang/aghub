@@ -422,8 +422,26 @@ impl ConfigManager {
 		fs_skill.canonical_path = Some(canonical_md);
 		// What is ON DISK, which is not `fs_skill` when the Master was preserved.
 		let on_disk = if canonical_existed {
-			master_on_disk(&canonical, &skill.name)
-				.unwrap_or_else(|| fs_skill.clone())
+			match master_on_disk(&canonical, &skill.name) {
+				Some(found) => found,
+				// Same rule as the from-path sibling: an unreadable master is an
+				// error, not a reason to report the caller's own input back.
+				None => {
+					crate::skills::rename::rollback_materialized_install(
+						&skill.name,
+						scope,
+						project_root.as_deref(),
+						&results.created_referrer_dirs,
+						false,
+					);
+					return Err(ConfigError::InvalidConfig(format!(
+						"the existing master at '{}' does not parse, so nothing \
+						 can read it and aghub cannot report what is installed. \
+						 Fix or remove that master, then re-run.",
+						canonical.display()
+					)));
+				}
+			}
 		} else {
 			fs_skill.clone()
 		};
@@ -1022,8 +1040,29 @@ impl ConfigManager {
 				 the source just read (use `aghub update` to refresh content)",
 				canonical.display()
 			);
-			master_on_disk(&canonical, &skill.name)
-				.unwrap_or_else(|| fs_skill.clone())
+			match master_on_disk(&canonical, &skill.name) {
+				Some(found) => found,
+				// Do NOT fall back to the parsed source. The warning above has
+				// just promised the caller that what follows is the master on
+				// disk, and nothing can read a master that does not parse — a
+				// `get skills` right after this returns nothing at all. Undo the
+				// referrer and say what is wrong.
+				None => {
+					crate::skills::rename::rollback_materialized_install(
+						&skill.name,
+						scope,
+						project_root.as_deref(),
+						&results.created_referrer_dirs,
+						false,
+					);
+					return Err(ConfigError::InvalidConfig(format!(
+						"the existing master at '{}' does not parse, so nothing \
+						 can read it and aghub cannot report what is installed. \
+						 Fix or remove that master, then re-run.",
+						canonical.display()
+					)));
+				}
+			}
 		};
 		config.skills.push(on_disk.clone());
 
