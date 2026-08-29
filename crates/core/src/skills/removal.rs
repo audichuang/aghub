@@ -409,8 +409,17 @@ fn plan_copy_removal(
 				if is_universal_master(&root, project_root) {
 					shared_master_kept = true;
 					skipped.push(root);
-				} else if dir_has_external_referrer(&root, all_agent_dirs, safe)
+				} else if let Some(referrer) =
+					dir_has_external_referrer(&root, all_agent_dirs, safe)
 				{
+					// Name the referrer, not just the kept directory: `skipped`
+					// lists only the caller's own path, so a keep decided by one
+					// of 25 OTHER agents' dirs was previously undiagnosable.
+					log::warn!(
+						"keeping {}: {} still references it",
+						root.display(),
+						referrer.display()
+					);
 					skipped.push(root);
 				} else {
 					push_contained(root, roots, &mut paths, &mut skipped);
@@ -454,10 +463,8 @@ pub fn dir_has_external_referrer(
 	target_dir: &Path,
 	all_agent_dirs: &[PathBuf],
 	safe: &str,
-) -> bool {
-	let Ok(target_real) = target_dir.canonicalize() else {
-		return false;
-	};
+) -> Option<PathBuf> {
+	let target_real = target_dir.canonicalize().ok()?;
 	for dir in all_agent_dirs {
 		let entry = dir.join(safe);
 		// `Linker::is_link` and `canonicalize(..).unwrap_or(false)` both answer
@@ -467,15 +474,37 @@ pub fn dir_has_external_referrer(
 		// peer dir's mode either skip the directory (0755) or delete it and
 		// leave the peer's link dangling (0400), both exit 0.
 		//
-		// A candidate we cannot see through is treated as a referrer: this
-		// function only ever KEEPS a directory, so failing closed costs a
-		// refused deletion, never data.
+		// Failing closed on EVERY stat error was too blunt, though: this loop
+		// runs over all 25 agents' skills dirs, so one odd directory blocked
+		// copy-layout deletion of every skill. Narrow it to the cases where a
+		// referrer could actually BE there.
 		match std::fs::symlink_metadata(&entry) {
-			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			Ok(_) => {}
+			// Nothing there, and — for NotADirectory — nothing CAN be: `dir`
+			// itself is a file, so it holds no entries at all.
+			Err(error)
+				if matches!(
+					error.kind(),
+					std::io::ErrorKind::NotFound
+						| std::io::ErrorKind::NotADirectory
+				) =>
+			{
 				continue;
 			}
-			Err(_) => return true,
-			Ok(_) => {}
+			Err(_) => {
+				// Cannot stat the entry — but a NAME needs no stat. Mode 0400
+				// is exactly this shape: `read_dir` succeeds, every child stat
+				// fails. If the listing is complete and `safe` is not in it,
+				// there is provably no referrer here.
+				match dir_lists_name(dir, safe) {
+					Some(false) => continue,
+					// Present but opaque, or not even listable: unknown, and an
+					// unknown referrer keeps the directory. This function only
+					// ever KEEPS, so failing closed costs a refused deletion,
+					// never data.
+					Some(true) | None => return Some(entry),
+				}
+			}
 		}
 		if !Linker::is_link(&entry) {
 			continue;
@@ -483,14 +512,34 @@ pub fn dir_has_external_referrer(
 		match std::fs::canonicalize(&entry) {
 			Ok(resolved) => {
 				if resolved == target_real {
-					return true;
+					return Some(entry);
 				}
 			}
+			// A dangling link cannot be referencing a master that still exists.
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-			Err(_) => return true,
+			Err(_) => return Some(entry),
 		}
 	}
-	false
+	None
+}
+
+/// `Some(true)` / `Some(false)` when `dir`'s listing was read IN FULL and
+/// `safe` was / was not among the names; `None` when the listing could not be
+/// completed and the question stays open.
+///
+/// Deliberately name-only: `read_dir` yields names without stat'ing anything,
+/// which is what makes it usable on a directory whose children cannot be
+/// stat'd.
+fn dir_lists_name(dir: &Path, safe: &str) -> Option<bool> {
+	let mut found = false;
+	for entry in std::fs::read_dir(dir).ok()? {
+		// A per-entry error means the listing is INCOMPLETE — the name could
+		// have been in the part we did not get.
+		if entry.ok()?.file_name() == std::ffi::OsStr::new(safe) {
+			found = true;
+		}
+	}
+	Some(found)
 }
 
 fn push_contained(

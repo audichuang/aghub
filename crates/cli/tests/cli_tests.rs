@@ -10157,9 +10157,11 @@ fn an_unreadable_sub_agent_file_is_not_an_absent_one() {
 /// live link points at was then `remove_dir_all`'d, leaving the peer dangling,
 /// with `success: true` and an empty stderr.
 ///
-/// The same permission bit also drops the peer out of `plan_symlink_removal`'s
-/// sweep (`removal.rs`'s `symlink_metadata` `else { continue }`), so both
-/// sweeps are covered by this pair.
+/// This pair covers the COPY layout only — `canonical_path` is None, so
+/// `plan_removal` routes to `plan_copy_removal` and `plan_symlink_removal` is
+/// never entered. The symlink sweep has its own pair below; an earlier version
+/// of this comment claimed both, and reverting the symlink fix left every test
+/// here green.
 #[cfg(unix)]
 #[test]
 fn a_referrer_we_cannot_stat_still_counts_as_a_referrer() {
@@ -10219,4 +10221,244 @@ fn a_referrer_we_cannot_stat_still_counts_as_a_referrer() {
 			 {stdout}"
 		);
 	}
+}
+
+/// The SYMLINK sweep's own pair — the one the copy-layout test above does not
+/// reach.
+///
+/// `plan_symlink_removal` dropped an agent dir it could not stat out of the
+/// referrer sweep with a bare `else { continue }`, so `delete --all-agents`
+/// neither counted that agent as a holder nor unlinked its referrer, and still
+/// reported `success: true` with the path missing from `paths`.
+///
+/// The invariant that holds in BOTH arms: no agent is left holding a referrer
+/// that points at nothing.
+#[cfg(unix)]
+#[test]
+fn an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing() {
+	use std::os::unix::fs::PermissionsExt;
+
+	for unreadable in [false, true] {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let src = home.path().join("src/demo");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		assert!(isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude,gemini",
+				"add",
+				"skills",
+				"--from",
+				src.to_str().unwrap()
+			])
+			.output()
+			.unwrap()
+			.status
+			.success());
+
+		let peer = home.path().join(".gemini/skills");
+		let referrer = peer.join("demo");
+		assert!(referrer.exists(), "setup: gemini must hold a referrer");
+		if unreadable {
+			std::fs::set_permissions(
+				&peer,
+				std::fs::Permissions::from_mode(0o400),
+			)
+			.unwrap();
+		}
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"--json",
+				"delete",
+				"skills",
+				"demo",
+				"--all-agents",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		let _ = std::fs::set_permissions(
+			&peer,
+			std::fs::Permissions::from_mode(0o755),
+		);
+
+		// THE assertion: gemini's referrer and the master it points at must
+		// agree. Either both go (the readable sweep) or both stay (the
+		// unreadable one) — never a link pointing at a deleted master.
+		let master = home.path().join(".agents/skills/demo");
+		let link_present = referrer.symlink_metadata().is_ok();
+		assert_eq!(
+			link_present,
+			master.exists(),
+			"a referrer must never outlive the master it points at \
+			 (unreadable={unreadable}): link={link_present} \
+			 master={} stdout={}",
+			master.exists(),
+			String::from_utf8_lossy(&out.stdout)
+		);
+
+		if unreadable {
+			// The peer must be reported, not silently dropped: the caller
+			// asked to remove it everywhere and one place was not touched.
+			let stdout = String::from_utf8_lossy(&out.stdout);
+			let view: serde_json::Value =
+				serde_json::from_str(&stdout).unwrap();
+			let skipped = view["skipped"].as_array().unwrap();
+			assert!(
+				skipped.iter().any(|p| p
+					.as_str()
+					.is_some_and(|p| p.contains(".gemini/skills"))),
+				"the agent dir that could not be swept must appear in \
+				 `skipped`, or the user cannot tell what was missed: {stdout}"
+			);
+		}
+	}
+}
+
+/// The guard above must not become "refuse whenever anything is odd".
+///
+/// `dir_has_external_referrer` runs over all 25 agents' skills dirs, so failing
+/// closed on EVERY stat error let one strange directory block copy-layout
+/// deletion of every skill — silently, since `skipped` names only the caller's
+/// own path. Both shapes here are ones where a referrer provably cannot exist.
+#[cfg(unix)]
+#[test]
+fn the_referrer_guard_does_not_refuse_where_no_referrer_can_be() {
+	use std::os::unix::fs::PermissionsExt;
+
+	// (label, build the peer path)
+	let shapes: Vec<(&str, Box<dyn Fn(&std::path::Path)>)> = vec![
+		(
+			// `read_dir` succeeds on 0400 and every child stat fails — but a
+			// NAME needs no stat, and this listing is empty.
+			"an empty directory that cannot be traversed",
+			Box::new(|peer: &std::path::Path| {
+				std::fs::create_dir_all(peer).unwrap();
+				std::fs::set_permissions(
+					peer,
+					std::fs::Permissions::from_mode(0o400),
+				)
+				.unwrap();
+			}),
+		),
+		(
+			// ENOTDIR: a file holds no entries at all.
+			"a regular file where the skills dir would be",
+			Box::new(|peer: &std::path::Path| {
+				std::fs::create_dir_all(peer.parent().unwrap()).unwrap();
+				std::fs::write(peer, "not a directory\n").unwrap();
+			}),
+		),
+	];
+
+	for (label, build) in shapes {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let owned = home.path().join(".claude/skills/demo");
+		std::fs::create_dir_all(&owned).unwrap();
+		std::fs::write(
+			owned.join("SKILL.md"),
+			"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		let peer = home.path().join(".gemini/skills");
+		build(&peer);
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g", "-a", "claude", "--json", "delete", "skills", "demo",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		let _ = std::fs::set_permissions(
+			&peer,
+			std::fs::Permissions::from_mode(0o755),
+		);
+
+		assert!(
+			!owned.exists(),
+			"nothing can reference this directory through {label}; the \
+			 deletion must go through. stdout={} stderr={}",
+			String::from_utf8_lossy(&out.stdout),
+			String::from_utf8_lossy(&out.stderr)
+		);
+	}
+}
+
+/// A SKILL.md whose BYTES are unreadable and one whose CONTENT is malformed are
+/// different answers.
+///
+/// `SkillError::Io` covers both: `read_to_string` raises `InvalidData` for a
+/// file that is not UTF-8 (one latin-1 byte is enough). Treating that as
+/// "unreadable" made a single bad file exit-1 every command for that agent —
+/// including the `delete` that would have removed it, so it could not be
+/// cleaned up through aghub at all.
+#[test]
+fn a_malformed_skill_md_does_not_brick_the_agent() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let bad = home.path().join(".claude/skills/bad");
+	let good = home.path().join(".claude/skills/good");
+	std::fs::create_dir_all(&bad).unwrap();
+	std::fs::create_dir_all(&good).unwrap();
+	// Not UTF-8: `read_to_string` fails with InvalidData, having READ it.
+	std::fs::write(
+		bad.join("SKILL.md"),
+		b"---\nname: bad\ndescription: \xff\xfe\n---\n\nBODY\n",
+	)
+	.unwrap();
+	std::fs::write(
+		good.join("SKILL.md"),
+		"---\nname: good\ndescription: g\n---\n\nBODY\n",
+	)
+	.unwrap();
+
+	for args in [
+		vec!["-g", "-a", "claude", "--json", "get", "mcps"],
+		vec!["-g", "-a", "claude", "--json", "get", "skills"],
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.args(&args)
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"`{}` must not fail over a malformed SKILL.md elsewhere in the \
+			 directory: {}",
+			args.join(" "),
+			String::from_utf8_lossy(&out.stdout)
+		);
+	}
+
+	// And the healthy neighbour must still be removable.
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "--json", "delete", "skills", "good", "--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"deleting an unrelated healthy skill must not fail: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	assert!(
+		!good.exists(),
+		"the healthy skill must actually be gone: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
 }

@@ -110,7 +110,21 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 			// A malformed SKILL.md keeps recursing, as it always has: that is
 			// `doctor`'s `invalid-skill`, and changing it here would be a
 			// separate, wider behaviour change.
-			Err(skill::SkillError::Io(error)) => {
+			// ...but `SkillError::Io` is not a synonym for "unreadable".
+			// `read_to_string` also raises `InvalidData` for a SKILL.md that is
+			// not UTF-8 (one latin-1 byte, a cp1252 smart quote) and
+			// `IsADirectory` for a SKILL.md that is a directory. Those bytes
+			// WERE read; the content is malformed. Propagating them made a
+			// single bad file exit-1 every command for that agent — including
+			// the `delete` that would have removed the offender, so it could
+			// not be cleaned up through aghub at all.
+			Err(skill::SkillError::Io(error))
+				if !matches!(
+					error.kind(),
+					std::io::ErrorKind::InvalidData
+						| std::io::ErrorKind::IsADirectory
+				) =>
+			{
 				return Err(at_path(&path, error));
 			}
 			Err(_) => collect_skills(&path, skills)?,
