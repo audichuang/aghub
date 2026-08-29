@@ -9504,3 +9504,208 @@ fn round_five_delta_fixes_stay_closed() {
 		);
 	}
 }
+
+/// Round-5 delta, the two shapes the widened guard still let through.
+#[cfg(unix)]
+#[test]
+fn identity_not_path_and_unknown_not_absent() {
+	// --- (1) Hard links. The guard's own doc says membership is a property of
+	// the FILE, and it compared resolved path STRINGS. `canonicalize` collapses
+	// symlinks but not hard links — two dentries, one inode — and every writer
+	// truncates in place, so a removal through one name empties the other.
+	// dotfile setups make these deliberately (`cp -l`); de-duplicators
+	// (rdfind, jdupes) make them by accident out of any two identical configs.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+		for agent in ["codex", "claude"] {
+			let out = isolated_cli(home.path(), state.path())
+				.args([
+					"-g", "-a", agent, "add", "mcps", "-n", "srv", "-c",
+					"echo hi",
+				])
+				.output()
+				.unwrap();
+			assert!(out.status.success(), "setup failed for {agent}");
+		}
+		std::fs::hard_link(
+			home.path().join(".claude.json"),
+			home.path().join(".cursor/mcp.json"),
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"mcp",
+				"--from-agent",
+				"codex",
+				"--name",
+				"srv",
+				"--add",
+				"claude",
+				"--remove",
+				"cursor",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"a hard link is the same file: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		// THE assertion: claude is a protected COPY TARGET and must still hold it.
+		let sees = isolated_cli(home.path(), state.path())
+			.args(["-g", "-a", "claude", "--json", "get", "mcps"])
+			.output()
+			.unwrap();
+		let rows: Value = serde_json::from_slice(&sees.stdout).unwrap();
+		assert_eq!(
+			rows.as_array().unwrap().len(),
+			1,
+			"the protected agent's config was emptied: {rows}"
+		);
+	}
+
+	// --- (2) "Could not read" is not "holds nothing".
+	//
+	// `exhaustive` decides whether to delete the SHARED master, and it counted
+	// an agent whose config failed to parse as a non-reader. One truncated,
+	// completely unrelated MCP config therefore turned a reconcile that
+	// correctly refuses into one that deletes the master the broken agent was
+	// reading — "5 succeeded, 0 failed", exit 0, the only signal a stderr
+	// warning no --json consumer ever sees.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let src = home.path().join("src/demo");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::create_dir_all(home.path().join(".cursor")).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		assert!(isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"add",
+				"skills",
+				"--from",
+				src.to_str().unwrap()
+			])
+			.output()
+			.unwrap()
+			.status
+			.success());
+		// Broken, and nothing to do with skills.
+		std::fs::write(
+			home.path().join(".cursor/mcp.json"),
+			"{ \"mcpServers\": { \"x\": { \"command\": \"y\" },\n",
+		)
+		.unwrap();
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"demo",
+				"--remove",
+				"claude",
+				"--remove",
+				"codex",
+				"--remove",
+				"opencode",
+				"--remove",
+				"cline",
+				"--remove",
+				"warp",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			home.path().join(".agents/skills/demo/SKILL.md").is_file(),
+			"the shared master must survive a decision made while blind"
+		);
+		assert!(!out.status.success());
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert!(
+			json["error"]["message"]
+				.as_str()
+				.unwrap_or_default()
+				.contains("could not be read"),
+			"the refusal must name why it could not decide: {json}"
+		);
+	}
+
+	// --- …and naming every reader still removes the master, as designed.
+	{
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let src = home.path().join("src/demo");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		assert!(isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"-a",
+				"claude",
+				"add",
+				"skills",
+				"--from",
+				src.to_str().unwrap()
+			])
+			.output()
+			.unwrap()
+			.status
+			.success());
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"demo",
+				"--remove",
+				"claude",
+				"--remove",
+				"codex",
+				"--remove",
+				"opencode",
+				"--remove",
+				"cline",
+				"--remove",
+				"warp",
+				"--remove",
+				"cursor",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"an exhaustive removal must still work: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert!(!home.path().join(".agents/skills/demo").exists());
+	}
+}

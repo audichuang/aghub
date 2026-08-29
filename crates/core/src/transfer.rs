@@ -414,6 +414,59 @@ fn resolve_through_links(path: PathBuf) -> PathBuf {
 	}
 }
 
+/// A backing file's identity — NOT its path.
+///
+/// `canonicalize` collapses symlinks but NOT hard links: two directory entries,
+/// one inode. Every writer under here truncates in place (`fs::write`), so a
+/// removal through one name empties the other, while comparing resolved path
+/// strings sees two unrelated files. This is not exotic — dotfile setups make
+/// them deliberately (`cp -l`), and de-duplicators (rdfind, jdupes) make them
+/// by accident out of any two identical config files. Verified: with
+/// `~/.claude.json` hard-linked to `~/.cursor/mcp.json`, a reconcile that named
+/// claude as a COPY TARGET emptied claude's config and reported
+/// "2 succeeded, 0 failed".
+struct Backing {
+	/// `(device, inode)` — identity proper. `None` when the path does not
+	/// exist yet, and then there is nothing to alias.
+	node: Option<(u64, u64)>,
+	path: PathBuf,
+}
+
+impl Backing {
+	fn of(path: PathBuf) -> Self {
+		let path = resolve_through_links(path);
+		let node = node_id(&path);
+		Self { node, path }
+	}
+
+	fn is(&self, other: &Self) -> bool {
+		match (self.node, other.node) {
+			(Some(a), Some(b)) => a == b,
+			// Neither exists: the resolved path is all there is.
+			(None, None) => self.path == other.path,
+			// One exists and one does not — not one file.
+			_ => false,
+		}
+	}
+}
+
+#[cfg(unix)]
+fn node_id(path: &Path) -> Option<(u64, u64)> {
+	use std::os::unix::fs::MetadataExt;
+	let meta = std::fs::metadata(path).ok()?;
+	Some((meta.dev(), meta.ino()))
+}
+
+// ponytail: no stable std API for the Windows file index, so hard links there
+// fall back to path comparison. Symlink and junction aliasing is still covered
+// — that is `canonicalize`'s job — leaving only NTFS hard links between two
+// agents' config files, which no documented aghub layout produces. Upgrade
+// path: `GetFileInformationByHandle` via the `windows` crate if it ever bites.
+#[cfg(not(unix))]
+fn node_id(_path: &Path) -> Option<(u64, u64)> {
+	None
+}
+
 /// Refuse a removal that would take the resource from something that must
 /// SURVIVE this reconcile.
 ///
@@ -445,8 +498,7 @@ where
 	F: Fn(&InstallTarget) -> Option<PathBuf>,
 {
 	for delete in removing {
-		let Some(delete_path) = backing(delete).map(resolve_through_links)
-		else {
+		let Some(delete_backing) = backing(delete).map(Backing::of) else {
 			continue;
 		};
 		for kept in protect {
@@ -455,19 +507,18 @@ where
 			if kept.agent == delete.agent {
 				continue;
 			}
-			let Some(kept_path) = backing(kept).map(resolve_through_links)
-			else {
+			let Some(kept_backing) = backing(kept).map(Backing::of) else {
 				continue;
 			};
-			if kept_path == delete_path {
+			if delete_backing.is(&kept_backing) {
 				return Err(ConfigError::InvalidConfig(format!(
-					"'{}' and '{}' resolve to the same file on disk ({}), so \
+					"'{}' and '{}' resolve to the same place on disk ({}), so \
 					 removing it from the first would take it from the second \
 					 as well — not a state that can exist. Drop '{}' from \
 					 this reconcile.",
 					delete.agent.as_str(),
 					kept.agent.as_str(),
-					delete_path.display(),
+					delete_backing.path.display(),
 					delete.agent.as_str(),
 				)));
 			}
@@ -1331,16 +1382,40 @@ pub fn transfer_skill(
 /// One extra scan, taken only to answer "will anyone still be reading the
 /// Master after this reconcile?" — the per-agent removal planner cannot see
 /// that, because a NativeReader leaves no artifact for it to count.
-fn skill_holders(name: &str, source: &ResourceLocator) -> Vec<AgentType> {
+/// Which agents currently hold this skill, and which agents we could NOT read.
+///
+/// The second half is load-bearing. `load_all_agents` fails OPEN — a config it
+/// cannot parse becomes "this agent has nothing", with a warning to stderr —
+/// and for a listing that is right. For the `exhaustive` DECISION below it is a
+/// data-loss bug: that decision asks "has every reader of the shared master
+/// been named?", so an agent counted as a non-reader because it could not be
+/// read gets the master deleted out from under it. Verified: one truncated,
+/// completely unrelated MCP config turned a reconcile that correctly refused
+/// (exit 1, master kept) into one reporting "5 succeeded, 0 failed" with the
+/// master gone — the only signal being a stderr warning no `--json` consumer
+/// ever sees.
+fn skill_holders(
+	name: &str,
+	source: &ResourceLocator,
+) -> (Vec<AgentType>, Vec<&'static str>) {
 	let scope = match source.scope {
 		InstallScope::Global => crate::models::ResourceScope::GlobalOnly,
 		InstallScope::Project => crate::models::ResourceScope::ProjectOnly,
 	};
-	crate::load_all_agents(scope, source.project_root.as_deref())
-		.into_iter()
-		.filter(|agent| agent.skills.iter().any(|s| s.name == name))
-		.filter_map(|agent| agent.agent_id.parse::<AgentType>().ok())
-		.collect()
+	let mut holders = Vec::new();
+	let mut unreadable = Vec::new();
+	for agent in crate::load_all_agents(scope, source.project_root.as_deref()) {
+		if agent.load_failed {
+			unreadable.push(agent.agent_id);
+			continue;
+		}
+		if agent.skills.iter().any(|s| s.name == name) {
+			if let Ok(parsed) = agent.agent_id.parse::<AgentType>() {
+				holders.push(parsed);
+			}
+		}
+	}
+	(holders, unreadable)
 }
 
 pub fn reconcile_skill(
@@ -1367,11 +1442,26 @@ pub fn reconcile_skill(
 	// Does this reconcile take the skill AWAY from its source? Only then must a
 	// copy prove the content actually landed — see the Copy arm below.
 	let deletes_source = removed.contains(&source.agent);
+	let (holders, unreadable) = skill_holders(&skill.name, &source);
 	let exhaustive = !removed.is_empty()
 		&& added.is_empty()
-		&& skill_holders(&skill.name, &source)
-			.iter()
-			.all(|held| removed.contains(held));
+		&& holders.iter().all(|held| removed.contains(held));
+	// `exhaustive` is the ONE answer an unreadable agent can wrongly flip to
+	// TRUE — an agent we could not read is counted as a non-reader — and TRUE
+	// is the answer that deletes the shared master. (It can never wrongly flip
+	// it to false: an unread holder outside `removed` only makes it stricter.)
+	// So refuse exactly here, rather than degrading to a per-agent removal
+	// whose "Cannot remove for this agent alone" says nothing about why.
+	if exhaustive && !unreadable.is_empty() {
+		return Err(ConfigError::InvalidConfig(format!(
+			"cannot decide whether removing '{}' leaves the shared \
+			 .agents/skills master unread: agent(s) {} could not be read, \
+			 and an agent aghub cannot read may still be reading it. Fix \
+			 or remove those configs, then re-run.",
+			skill.name,
+			unreadable.join(", ")
+		)));
+	}
 	let (copies, deletes) = reconcile_plans(
 		added,
 		removed,

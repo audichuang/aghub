@@ -13,6 +13,16 @@ pub struct AgentResources {
 	pub skills: Vec<Skill>,
 	pub mcps: Vec<McpServer>,
 	pub sub_agents: Vec<SubAgent>,
+	/// This agent's config could NOT be read, so the empty lists above mean
+	/// "unknown", not "nothing".
+	///
+	/// This loader fails OPEN by design — a broken agent config must not break
+	/// every other agent's listing — and for a listing that is right. For a
+	/// DECISION it is not: `transfer::skill_holders` asks "has every reader of
+	/// this master been named?", and an agent counted as a non-reader because it
+	/// could not be read got the master deleted out from under it. Callers that
+	/// decide something must read this flag.
+	pub load_failed: bool,
 }
 
 /// Load resources for all registered agents.
@@ -41,6 +51,7 @@ pub fn load_all_agents(
 						agent_id: descriptor.id,
 						skills,
 						mcps,
+						load_failed: false,
 						sub_agents,
 					},
 					Err(error) => {
@@ -54,6 +65,7 @@ pub fn load_all_agents(
 							skills: vec![],
 							mcps: vec![],
 							sub_agents: vec![],
+							load_failed: true,
 						}
 					}
 				}
@@ -92,6 +104,7 @@ pub fn load_all_agents(
 							skills,
 							mcps: config.mcps.clone(),
 							sub_agents,
+							load_failed: false,
 						}
 					}
 					Err(error) => {
@@ -104,6 +117,7 @@ pub fn load_all_agents(
 							skills: vec![],
 							mcps: vec![],
 							sub_agents: vec![],
+							load_failed: true,
 						}
 					}
 				}

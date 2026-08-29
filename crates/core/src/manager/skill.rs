@@ -92,9 +92,13 @@ fn paths_resolve_same(a: &std::path::Path, b: &std::path::Path) -> bool {
 fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
 	let pkg = skill::parser::parse(canonical).ok()?;
 	let mut found = convert_skill(pkg);
-	// Keyed by the requested name: that is the directory it lives in and the
-	// name every later lookup uses, even if the Master's own frontmatter
-	// disagrees.
+	// Keyed by the REQUESTED name, deliberately — but not for the reason it
+	// looks like: discovery reads the frontmatter, not the directory. The point
+	// is that this value is what the caller's own `config.skills` entry and
+	// every later `get_skill(name)` lookup use, so returning the master's
+	// frontmatter name here would hand back a skill findable under neither.
+	// A master whose frontmatter disagrees with its directory is its own
+	// problem, and `doctor` is where it belongs.
 	found.name = name.to_string();
 	let md = canonical.join("SKILL.md").to_string_lossy().to_string();
 	found.source_path = Some(md.clone());
