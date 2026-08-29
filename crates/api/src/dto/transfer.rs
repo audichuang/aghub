@@ -153,6 +153,15 @@ pub struct OperationResultDto {
 	/// `aghub_core::transfer::OperationResultView`, which
 	/// `dto_matches_shared_core_view_byte_for_byte` pins byte-for-byte.
 	pub ok: bool,
+	/// The target already held this resource; nothing was written. Still a
+	/// success row. Always `false` on a Delete row.
+	///
+	/// Emitted unconditionally, and positioned between `ok` and `error` to
+	/// match `OperationResultView` field-for-field —
+	/// `dto_matches_shared_core_view_byte_for_byte` compares the SERIALIZED
+	/// strings, so a correct field in the wrong slot fails and reads like a
+	/// mapping bug.
+	pub already_present: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -169,6 +178,7 @@ impl From<OperationResult> for OperationResultDto {
 			action: value.action.into(),
 			success: value.success,
 			ok: value.success,
+			already_present: value.already_present,
 			error: value.error,
 		}
 	}
@@ -214,6 +224,9 @@ mod tests {
 					},
 					action: OperationAction::Copy,
 					success: true,
+					// Non-default on purpose: a parity test that only ever sees
+					// `false` cannot catch a mapper that hard-codes it.
+					already_present: true,
 					error: None,
 				},
 				OperationResult {
@@ -224,6 +237,7 @@ mod tests {
 					},
 					action: OperationAction::Delete,
 					success: false,
+					already_present: false,
 					error: Some("nope".to_string()),
 				},
 			],
@@ -252,6 +266,7 @@ mod tests {
 			action: OperationAction::Copy,
 			success: true,
 			error: None,
+			already_present: false,
 		};
 		let dto =
 			serde_json::to_string(&OperationResultDto::from(result.clone()))

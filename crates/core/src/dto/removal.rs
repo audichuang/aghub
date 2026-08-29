@@ -45,6 +45,17 @@ pub enum RemovalKind {
 	/// folded into `skipped`, so the only honest signal was a caller manually
 	/// comparing two lists.
 	Partial,
+	/// Nothing was or will be removed because the target is SHARED: it is the
+	/// universal Master another in-scope agent still reads.
+	///
+	/// A single-agent removal cannot express "stop only this agent seeing it",
+	/// so an EXECUTING call refuses outright (`manager/skill.rs`'s
+	/// `unsupported_operation`). Reporting `preview` for the dry-run of that
+	/// state was the same non-terminating hint `Absent` was added to kill:
+	/// "re-run with --yes" pointed straight at a guaranteed error. And the API
+	/// reported it as a plain `success: true`, which is why the desktop's
+	/// delete dialog closed on a skill that is still installed.
+	Kept,
 }
 
 /// Wire view of a [`RemovalOutcome`]: the post-execution plan flattened to
@@ -82,7 +93,19 @@ impl RemovalView {
 		let stringify = |paths: &[std::path::PathBuf]| -> Vec<String> {
 			paths.iter().map(|p| p.display().to_string()).collect()
 		};
-		let kind = if outcome.executed && !outcome.failed_paths.is_empty() {
+		let kind = if outcome.plan.shared_master_kept
+			&& outcome.plan.paths.is_empty()
+		{
+			// Nothing to remove BECAUSE it is shared. Outranks every other
+			// answer: an executing call refuses (the manager guard), so
+			// `preview` would tell a caller to retry into a guaranteed error,
+			// and an `executed` call that took nothing is not a removal.
+			//
+			// `plan.shared_master_kept` has existed since the plan was written
+			// and is read by `manager/skill.rs` and `transfer.rs` — it was just
+			// never read HERE, so the fact never reached the wire at all.
+			RemovalKind::Kept
+		} else if outcome.executed && !outcome.failed_paths.is_empty() {
 			// Ran, but not everything went. Checked BEFORE `Removed`: the
 			// execute branch sets `executed: true` unconditionally, so a run
 			// where every single delete failed is indistinguishable from a
@@ -254,6 +277,60 @@ mod tests {
 		assert_eq!(
 			RemovalView::from_outcome(&clean, false).outcome,
 			RemovalKind::Removed
+		);
+	}
+
+	#[test]
+	fn a_kept_shared_master_is_not_a_removal_or_a_preview() {
+		// `plan.shared_master_kept` existed all along and was read by the
+		// manager and by transfer — but never by this mapper, so the fact never
+		// reached the wire. The dry-run of that state reported `preview`, whose
+		// contract promises `--yes` will change something; `--yes` actually
+		// hits `unsupported_operation`, so the machine answer pointed straight
+		// at a guaranteed error. The API's own branch reported a bare
+		// `success: true`, and the desktop closed its delete dialog on a skill
+		// that is still installed.
+		let kept = RemovalOutcome {
+			plan: RemovalPlan {
+				layout: Layout::Copy,
+				// Nothing to take: the only path is the shared Master.
+				paths: vec![],
+				skipped: vec![PathBuf::from("/a/.agents/skills/shared")],
+				needs_confirm: false,
+				shared_master_kept: true,
+			},
+			executed: false,
+			prune: PruneStatus::NotRun,
+			failed_paths: vec![],
+			absent: false,
+		};
+
+		// Kept regardless of what the caller asked for — the answer is about
+		// the world, not the request.
+		for requested_dry_run in [true, false] {
+			assert_eq!(
+				RemovalView::from_outcome(&kept, requested_dry_run).outcome,
+				RemovalKind::Kept,
+				"shared-master-kept outranks the caller's intent \
+				 (dry_run={requested_dry_run})"
+			);
+		}
+
+		// Guard against over-triggering: a plan that kept the Master but ALSO
+		// removed this agent's own path is a real removal.
+		let removed_own_path = RemovalOutcome {
+			plan: RemovalPlan {
+				paths: vec![PathBuf::from("/a/.claude/skills/shared")],
+				..kept.plan.clone()
+			},
+			executed: true,
+			..kept.clone()
+		};
+		assert_eq!(
+			RemovalView::from_outcome(&removed_own_path, false).outcome,
+			RemovalKind::Removed,
+			"keeping the shared Master while removing this agent's own link \
+			 IS a removal"
 		);
 	}
 

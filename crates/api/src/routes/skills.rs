@@ -468,12 +468,34 @@ pub async fn delete_skill_by_path(
 				&all_in_scope,
 				&safe_name,
 			) {
-				return Ok(Json(DeleteSkillByPathResponse {
-					success: true,
+				// Kept because SHARED — routed through the same `RemovalView`
+				// seam every other branch uses, so it carries
+				// `outcome: "kept"` instead of a hand-built `success: true`
+				// that reads as "deleted". This was the one branch that
+				// returned success for an entity that is still present, and
+				// the desktop's delete dialog closed on it.
+				//
+				// `shared_master_kept: true` is the API's OWN judgement here:
+				// this path detected an external referrer itself
+				// (`dir_has_external_referrer`), whereas core sets that flag in
+				// `plan_copy_removal`. Same wire answer, different producer —
+				// do not read core's flag and conclude it was missed there.
+				return Ok(Json(super::removal_response(
+					aghub_core::skills::removal::RemovalOutcome {
+						plan: aghub_core::skills::removal::RemovalPlan {
+							layout: aghub_core::skills::removal::Layout::Copy,
+							paths: vec![],
+							skipped: vec![skill_dir.clone()],
+							needs_confirm: false,
+							shared_master_kept: true,
+						},
+						executed: false,
+						prune: aghub_core::skills::removal::PruneStatus::NotRun,
+						failed_paths: vec![],
+						absent: false,
+					},
 					dry_run,
-					skipped: vec![skill_dir.display().to_string()],
-					..Default::default()
-				}));
+				)));
 			}
 			let plan = aghub_core::skills::removal::RemovalPlan {
 				layout: aghub_core::skills::removal::Layout::Copy,
@@ -1265,18 +1287,13 @@ pub async fn delete_skill(
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
-	match manager.load() {
-		Ok(_) => {}
-		Err(ConfigError::NotFound { .. }) => {
-			return Ok(Json(DeleteSkillByPathResponse {
-				success: true,
-				dry_run: !params.confirm.unwrap_or(false),
-				executed: false,
-				..Default::default()
-			}));
-		}
-		Err(e) => return Err(ApiError::from(e)),
-	}
+	// No `ConfigError::NotFound` arm: that variant is NEVER constructed
+	// anywhere in the workspace (its only constructor,
+	// `crates/agents/src/errors.rs`'s `not_found`, has no callers), so the arm
+	// this replaces was dead code that also happened to return a `success:
+	// true` body with no removal state. A genuinely missing config surfaces as
+	// `Io(NotFound)` and belongs in the error path like any other load failure.
+	manager.load().map_err(ApiError::from)?;
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "delete").await?;
 	}
@@ -1287,21 +1304,15 @@ pub async fn delete_skill(
 	// Only the lock-taking call moves to the blocking pool; every check above
 	// stays exactly where it was, so which error wins is unchanged.
 	in_mutation_pool(move || {
-		match manager.remove_skill_planned(&name, all_agents, dry_run, confirm)
-		{
-			// `remove_skill_planned` already prunes the lock and records the
-			// status in `outcome.prune`; no route-level re-prune.
-			Ok(outcome) => Ok(Json(super::removal_response(outcome, dry_run))),
-			Err(ConfigError::ResourceNotFound { .. }) => {
-				Ok(Json(DeleteSkillByPathResponse {
-					success: true,
-					dry_run,
-					executed: false,
-					..Default::default()
-				}))
-			}
-			Err(e) => Err(ApiError::from(e)),
-		}
+		// `remove_skill_planned` already prunes the lock and records the status
+		// in `outcome.prune`; no route-level re-prune. The idempotent-delete
+		// contract (ResourceNotFound is a success no-op) is owned ONCE in
+		// `routes::removal_or_noop` — this was its third hand-rolled copy, and
+		// the copy returned no `outcome` at all.
+		super::removal_or_noop(
+			manager.remove_skill_planned(&name, all_agents, dry_run, confirm),
+			dry_run,
+		)
 	})
 	.await
 }

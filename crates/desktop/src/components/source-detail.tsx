@@ -513,7 +513,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		if (result.error) {
 			throw new Error(result.error);
 		}
-		if (!result.executed) {
+		// This helper's post-condition is "the skill is gone", so `absent` is a
+		// success. `!executed` could not express that — nor tell it apart from
+		// `kept`, where the shared master is still there and the skill is still
+		// installed.
+		if (result.outcome !== "removed" && result.outcome !== "absent") {
 			throw new Error(t("sourceRemovedCleanFailed", { name }));
 		}
 	};

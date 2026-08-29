@@ -17,5 +17,16 @@ export type OperationResultDto = {
 	 * `dto_matches_shared_core_view_byte_for_byte` pins byte-for-byte.
 	 */
 	ok: boolean;
+	/**
+	 * The target already held this resource; nothing was written. Still a
+	 * success row. Always `false` on a Delete row.
+	 *
+	 * Emitted unconditionally, and positioned between `ok` and `error` to
+	 * match `OperationResultView` field-for-field —
+	 * `dto_matches_shared_core_view_byte_for_byte` compares the SERIALIZED
+	 * strings, so a correct field in the wrong slot fails and reads like a
+	 * mapping bug.
+	 */
+	already_present: boolean;
 	error: string | null;
 };

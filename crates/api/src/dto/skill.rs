@@ -199,7 +199,7 @@ impl From<&aghub_core::dto::RemovalView> for DeleteSkillByPathResponse {
 			deleted_path: v.deleted_path.clone(),
 			pruned_lock_entries: None,
 			prune_error: None,
-			outcome: Some(v.outcome.into()),
+			outcome: v.outcome.into(),
 			error: None,
 			validation_errors: None,
 		}
@@ -427,9 +427,16 @@ pub struct GitInstallResponse {
 }
 
 /// Mirror of `aghub_core::dto::RemovalKind` for the TS surface (core carries no
-/// ts-rs dependency, so the wire enum is restated here exactly as
-/// `DeleteSkillByPathResponse` restates `RemovalView`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, TS)]
+/// ts-rs dependency, so the wire enum is restated here as
+/// `DeleteSkillByPathResponse` restates `RemovalView`), PLUS one api-only
+/// variant: `Failed`.
+///
+/// Core's kind is built only from a real `RemovalOutcome`, so it cannot name
+/// "this request never reached a removal". The API can, and must: its early
+/// `success: false` bodies are `..Default::default()`, and making `outcome`
+/// required is what lets every consumer read ONE field instead of null-checking
+/// it. `Failed` is that `Default`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovalOutcomeKind {
@@ -443,6 +450,17 @@ pub enum RemovalOutcomeKind {
 	/// what went, `skipped` holds what stayed — when `paths` is empty nothing
 	/// was removed at all. Do not treat this as success.
 	Partial,
+	/// Nothing was removed because the target is the SHARED universal Master
+	/// another in-scope agent still reads. `success` is true — the request was
+	/// understood — but THE ENTITY IS STILL THERE. A caller must not close its
+	/// dialog as if the delete happened.
+	Kept,
+	/// The request never reached a removal (bad scope, validation failure,
+	/// plugin-managed skill, load error). Always paired with `success: false`.
+	/// api-only: core's kind is derived from an outcome that, here, never
+	/// existed.
+	#[default]
+	Failed,
 }
 
 impl From<aghub_core::dto::RemovalKind> for RemovalOutcomeKind {
@@ -452,6 +470,7 @@ impl From<aghub_core::dto::RemovalKind> for RemovalOutcomeKind {
 			aghub_core::dto::RemovalKind::Removed => Self::Removed,
 			aghub_core::dto::RemovalKind::Absent => Self::Absent,
 			aghub_core::dto::RemovalKind::Partial => Self::Partial,
+			aghub_core::dto::RemovalKind::Kept => Self::Kept,
 		}
 	}
 }
@@ -491,9 +510,14 @@ pub struct DeleteSkillByPathResponse {
 	/// never reached a removal at all. Prefer it over reading
 	/// `dry_run`/`executed`: those two could not distinguish a refused preview
 	/// from an already-absent resource, and serialized identically for both.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[ts(optional)]
-	pub outcome: Option<RemovalOutcomeKind>,
+	/// The ONE field that answers "what happened?". ALWAYS present: every
+	/// success body carries a real removal state, every early `success: false`
+	/// body carries `failed` (the `Default`).
+	///
+	/// Read THIS, never `success` or `!executed`. `success: true` used to come
+	/// back for a shared Master that was deliberately KEPT, and the desktop
+	/// closed its delete dialog as if the skill were gone.
+	pub outcome: RemovalOutcomeKind,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub error: Option<String>,
@@ -793,7 +817,7 @@ mod tests {
 		assert!(resp.success);
 		assert_eq!(
 			resp.outcome,
-			Some(RemovalOutcomeKind::Removed),
+			RemovalOutcomeKind::Removed,
 			"the three-way outcome must cross the wrapper too"
 		);
 		assert!(!resp.dry_run);

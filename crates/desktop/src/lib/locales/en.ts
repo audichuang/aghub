@@ -1192,6 +1192,8 @@ export default {
 	sourceRemovedCleaning: "Cleaning...",
 	sourceRemovedCleaned: "Cleaned `{{name}}`.",
 	sourceRemovedCleanedMany: "Cleaned {{count}} removed skills.",
+	deleteSkillKeptSharedMaster:
+		"`{{name}}` was not deleted: another agent still reads the shared .agents/skills master. Remove it from those agents first, or delete it for all agents.",
 	sourceRemovedCleanFailed: "Failed to clean `{{name}}`.",
 	sourceRemovedCleanSomeFailedOne: "Couldn't clean 1 removed skill.",
 	sourceRemovedCleanSomeFailedMany:

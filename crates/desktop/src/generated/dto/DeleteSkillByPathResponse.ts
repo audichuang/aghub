@@ -48,8 +48,15 @@ export type DeleteSkillByPathResponse = {
 	 * never reached a removal at all. Prefer it over reading
 	 * `dry_run`/`executed`: those two could not distinguish a refused preview
 	 * from an already-absent resource, and serialized identically for both.
+	 * The ONE field that answers "what happened?". ALWAYS present: every
+	 * success body carries a real removal state, every early `success: false`
+	 * body carries `failed` (the `Default`).
+	 *
+	 * Read THIS, never `success` or `!executed`. `success: true` used to come
+	 * back for a shared Master that was deliberately KEPT, and the desktop
+	 * closed its delete dialog as if the skill were gone.
 	 */
-	outcome?: RemovalOutcomeKind;
+	outcome: RemovalOutcomeKind;
 	error?: string;
 	validation_errors?: Array<ValidationError>;
 };

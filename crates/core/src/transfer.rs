@@ -58,6 +58,12 @@ pub struct OperationResult {
 	pub target: InstallTarget,
 	pub action: OperationAction,
 	pub success: bool,
+	/// The target ALREADY held this resource and nothing was written — still a
+	/// success. Always `false` on a Delete row.
+	///
+	/// Do not repurpose this to mean "there was nothing to delete": that is
+	/// `RemovalKind`'s vocabulary, in `crate::dto::removal`.
+	pub already_present: bool,
 	pub error: Option<String>,
 }
 
@@ -106,6 +112,14 @@ pub struct OperationResultView {
 	/// row and scored SUCCESSES as failures. Emitting both names costs one bool
 	/// and makes either spelling correct.
 	pub ok: bool,
+	/// The target already held this resource; nothing was written. Still a
+	/// success row (`success`/`ok` true, no `error`).
+	///
+	/// Emitted UNCONDITIONALLY — no `skip_serializing_if`. A client talking to
+	/// a mixed-version server cannot otherwise tell `false` from "this server
+	/// does not report it", and that ambiguity is the whole reason the field
+	/// exists.
+	pub already_present: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub error: Option<String>,
 }
@@ -126,6 +140,7 @@ impl From<&OperationResult> for OperationResultView {
 			action: r.action.to_string(),
 			success: r.success,
 			ok: r.success,
+			already_present: r.already_present,
 			error: r.error.clone(),
 		}
 	}
@@ -274,6 +289,60 @@ pub fn ensure_mcp_exists(source: &ResourceLocator) -> Result<()> {
 /// See [`ensure_skill_exists`].
 pub fn ensure_sub_agent_exists(source: &ResourceLocator) -> Result<()> {
 	load_source_sub_agent(source).map(|_| ())
+}
+
+/// Copy one MCP into a target. `Ok(true)` = the target already had an
+/// EQUIVALENT server and nothing was written.
+///
+/// Equivalence, not mere name collision: unlike a skill (one shared Master), a
+/// same-named MCP entry can hold a completely different command or URL, and
+/// reporting success for that would claim a copy that never happened while the
+/// target keeps serving something else. A differing entry is still a hard
+/// conflict — `update_mcp` is the seam for changing one.
+///
+/// Shared by `transfer_mcp` and `reconcile_mcp`'s Copy arm so the two cannot
+/// disagree about what "already there" means; they disagreeing is the defect
+/// this fixes.
+///
+// ponytail: equivalence compares the in-memory model. A dialect whose writer
+// drops a field aghub does model will re-read unequal, so a repeat transfer
+// into it still errors. Upgrade path: compare the dialect-projected form.
+fn copy_mcp_into(target: &InstallTarget, mcp: &McpServer) -> Result<bool> {
+	let mut manager = build_manager(target);
+	ensure_loaded(&mut manager)?;
+	if let Some(existing) = manager.get_mcp(&mcp.name) {
+		// `config_source` is load-time provenance, not part of the value.
+		let equivalent = existing.enabled == mcp.enabled
+			&& existing.transport == mcp.transport
+			&& existing.timeout == mcp.timeout;
+		if equivalent {
+			return Ok(true);
+		}
+		return Err(ConfigError::resource_exists("MCP server", &mcp.name));
+	}
+	manager.add_mcp(mcp.clone())?;
+	Ok(false)
+}
+
+/// Copy one sub-agent into a target. See [`copy_mcp_into`] for why equivalence
+/// (not name collision) decides. `source_path` / `config_source` are per-agent
+/// file locations, so they are excluded from the comparison.
+fn copy_sub_agent_into(
+	target: &InstallTarget,
+	sub_agent: &SubAgent,
+) -> Result<bool> {
+	let mut manager = build_manager(target);
+	ensure_loaded(&mut manager)?;
+	if let Some(existing) = manager.get_sub_agent(&sub_agent.name) {
+		let equivalent = existing.description == sub_agent.description
+			&& existing.instruction == sub_agent.instruction;
+		if equivalent {
+			return Ok(true);
+		}
+		return Err(ConfigError::resource_exists("sub_agent", &sub_agent.name));
+	}
+	manager.add_sub_agent(sub_agent.clone())?;
+	Ok(false)
 }
 
 fn ensure_loaded(manager: &mut ConfigManager) -> Result<()> {
@@ -523,10 +592,12 @@ fn batch_preflight_error(
 	))
 }
 
+/// The success payload is `bool` = "the target already had it, nothing was
+/// written". This is the ONE place that bool reaches the wire.
 fn operation_batch(
 	report: crate::batch::MultiTargetMutationReport<
 		OperationPlan,
-		(),
+		bool,
 		ConfigError,
 	>,
 ) -> OperationBatchResult {
@@ -534,11 +605,18 @@ fn operation_batch(
 		results: report
 			.results
 			.into_iter()
-			.map(|row| OperationResult {
-				target: row.target.target,
-				action: row.target.action,
-				success: row.result.is_ok(),
-				error: row.result.err().map(|error| error.to_string()),
+			.map(|row| {
+				let (success, already_present, error) = match row.result {
+					Ok(already_present) => (true, already_present, None),
+					Err(error) => (false, false, Some(error.to_string())),
+				};
+				OperationResult {
+					target: row.target.target,
+					action: row.target.action,
+					success,
+					already_present,
+					error,
+				}
 			})
 			.collect(),
 	}
@@ -549,7 +627,7 @@ fn log_operation_outcome(
 	name: &str,
 	action: OperationAction,
 	target: &InstallTarget,
-	outcome: &Result<()>,
+	outcome: &Result<bool>,
 ) {
 	let target_agent = registry::get(target.agent).id;
 	let target_scope = match target.scope {
@@ -557,7 +635,7 @@ fn log_operation_outcome(
 		InstallScope::Project => "project",
 	};
 	match outcome {
-		Ok(()) => info!(
+		Ok(_) => info!(
 			"{} {} '{}' for agent '{}' in {} scope succeeded",
 			action, resource, name, target_agent, target_scope
 		),
@@ -587,11 +665,7 @@ pub fn transfer_mcp(
 			mcp_supported_for_target(target, &mcp, false)
 		},
 		|target| {
-			let outcome = (|| -> Result<()> {
-				let mut manager = build_manager(target);
-				ensure_loaded(&mut manager)?;
-				manager.add_mcp(mcp.clone())
-			})();
+			let outcome = copy_mcp_into(target, &mcp);
 			log_operation_outcome(
 				"MCP",
 				&mcp.name,
@@ -627,11 +701,18 @@ pub fn transfer_mcp(
 	let results = report
 		.results
 		.into_iter()
-		.map(|row| OperationResult {
-			target: row.target,
-			action: OperationAction::Copy,
-			success: row.result.is_ok(),
-			error: row.result.err().map(|error| error.to_string()),
+		.map(|row| {
+			let (success, already_present, error) = match row.result {
+				Ok(already_present) => (true, already_present, None),
+				Err(error) => (false, false, Some(error.to_string())),
+			};
+			OperationResult {
+				target: row.target,
+				action: OperationAction::Copy,
+				success,
+				already_present,
+				error,
+			}
 		})
 		.collect();
 
@@ -675,12 +756,16 @@ pub fn reconcile_mcp(
 			Ok(())
 		},
 		|plan| {
-			let outcome = (|| -> Result<()> {
-				let mut manager = build_manager(&plan.target);
-				ensure_loaded(&mut manager)?;
+			let outcome = (|| -> Result<bool> {
 				match plan.action {
-					OperationAction::Copy => manager.add_mcp(mcp.clone()),
-					OperationAction::Delete => manager.remove_mcp(&source.name),
+					// Same helper as `transfer_mcp` — the two must not disagree
+					// about what "already there" means.
+					OperationAction::Copy => copy_mcp_into(&plan.target, &mcp),
+					OperationAction::Delete => {
+						let mut manager = build_manager(&plan.target);
+						ensure_loaded(&mut manager)?;
+						manager.remove_mcp(&source.name).map(|()| false)
+					}
 				}
 			})();
 			let name = if plan.action == OperationAction::Copy {
@@ -742,11 +827,7 @@ pub fn transfer_sub_agent(
 			sub_agent_supported_for_target(&plan.target)
 		},
 		|plan| {
-			let mut manager = build_manager(&plan.target);
-			let outcome = (|| -> Result<()> {
-				ensure_loaded(&mut manager)?;
-				manager.add_sub_agent(sub_agent.clone())
-			})();
+			let outcome = copy_sub_agent_into(&plan.target, &sub_agent);
 			log_operation_outcome(
 				"sub-agent",
 				&sub_agent.name,
@@ -792,15 +873,16 @@ pub fn reconcile_sub_agent(
 			Ok(())
 		},
 		|plan| {
-			let outcome = (|| -> Result<()> {
-				let mut manager = build_manager(&plan.target);
-				ensure_loaded(&mut manager)?;
+			let outcome = (|| -> Result<bool> {
 				match plan.action {
+					// Same helper as `transfer_sub_agent`.
 					OperationAction::Copy => {
-						manager.add_sub_agent(sub_agent.clone())
+						copy_sub_agent_into(&plan.target, &sub_agent)
 					}
 					OperationAction::Delete => {
-						manager.remove_sub_agent(&source.name)
+						let mut manager = build_manager(&plan.target);
+						ensure_loaded(&mut manager)?;
+						manager.remove_sub_agent(&source.name).map(|()| false)
 					}
 				}
 			})();
@@ -853,17 +935,25 @@ pub fn transfer_skill(
 			skill_target_dir(&plan.target).map(|_| ())
 		},
 		|plan| {
-			let outcome = (|| -> Result<()> {
+			let outcome = (|| -> Result<bool> {
 				let mut manager = build_manager(&plan.target);
 				ensure_loaded(&mut manager)?;
-				if manager.get_skill(&skill.name).is_some() {
-					return Err(ConfigError::resource_exists(
-						"skill",
-						&skill.name,
-					));
-				}
-				manager.add_skill_from_path(&source_root)?;
-				Ok(())
+				// No pre-check: `add_skill_from_path` already owns the
+				// already-present decision, and it is the only code that knows
+				// which kind of "already there" this is. A `get_skill().is_some()`
+				// guard here refused the two cases that are genuine no-ops —
+				// the target reads the shared `.agents` Master (cursor, cline,
+				// codex, opencode, warp all do), or it already holds a valid
+				// link to it — while `reconcile --add` accepted exactly those.
+				// Same operation, opposite verdict.
+				//
+				// A REAL foreign occupant (a same-named directory that is not a
+				// link to the Master) is still refused, by
+				// `add_skill_from_path_universal`. Content is deliberately not
+				// compared: that is the documented `add_skill_from_path`
+				// contract, shared with `aghub add skill --from`.
+				let added = manager.add_skill_from_path(&source_root)?;
+				Ok(added.already_installed)
 			})();
 			log_operation_outcome(
 				"skill",
@@ -940,15 +1030,18 @@ pub fn reconcile_skill(
 		},
 		|plan| {
 			let outcome = match plan.action {
-				OperationAction::Copy => (|| -> Result<()> {
+				OperationAction::Copy => (|| -> Result<bool> {
 					let mut manager = build_manager(&plan.target);
 					ensure_loaded(&mut manager)?;
-					manager.add_skill_from_path(&source_root)?;
-					Ok(())
+					// `add_skill_from_path` owns the already-present decision;
+					// `transfer_skill` now defers to the same call.
+					Ok(manager
+						.add_skill_from_path(&source_root)?
+						.already_installed)
 				})(),
 				// Use the planned-removal seam — never blind-delete a shared
 				// universal master discovered through an agent's read dirs.
-				OperationAction::Delete => (|| -> Result<()> {
+				OperationAction::Delete => (|| -> Result<bool> {
 					let mut manager = build_manager(&plan.target);
 					ensure_loaded(&mut manager)?;
 					match manager.remove_skill_planned(
@@ -975,8 +1068,10 @@ pub fn reconcile_skill(
 								plan.target.agent.as_str(),
 							))
 						}
+						// A Delete row is never `already_present` — that
+						// vocabulary belongs to the Copy direction.
 						Ok(_) | Err(ConfigError::ResourceNotFound { .. }) => {
-							Ok(())
+							Ok(false)
 						}
 						Err(error) => Err(error),
 					}
@@ -2125,7 +2220,7 @@ mod tests {
 	}
 
 	#[test]
-	fn transfer_skill_fails_when_already_exists() {
+	fn transfer_skill_already_present_is_an_idempotent_success() {
 		let _guard = env_lock().lock().unwrap();
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
@@ -2170,12 +2265,44 @@ mod tests {
 		)
 		.unwrap();
 
-		assert_eq!(result.failed_count(), 1);
-		assert!(result.results[0]
-			.error
-			.as_ref()
-			.unwrap()
-			.contains("already exists"));
+		// The destination already holds a skill of this name, installed through
+		// the same universal path — so its `.agents` Master IS the one being
+		// transferred. That is an idempotent no-op, not a conflict.
+		//
+		// This used to assert `failed_count == 1`, because `transfer_skill`
+		// carried its own `get_skill(..).is_some()` guard while
+		// `reconcile_skill --add` had none: the same operation, opposite
+		// verdicts. The guard is gone; `add_skill_from_path` decides, and it
+		// still refuses a REAL foreign occupant (a same-named directory that is
+		// not a link to the Master).
+		assert_eq!(
+			result.failed_count(),
+			0,
+			"an already-present skill is an idempotent success: {:?}",
+			result.results[0].error
+		);
+		assert!(
+			result.results[0].already_present,
+			"and the row must SAY nothing was written, or the caller cannot \
+			 tell this apart from a real copy"
+		);
+		assert!(result.results[0].error.is_none());
+
+		// Nothing was rewritten: the destination keeps its own content.
+		let mut after = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(&dest_root),
+		);
+		after.load().unwrap();
+		assert_eq!(
+			after
+				.get_skill("repo-helper")
+				.and_then(|s| s.description.clone())
+				.as_deref(),
+			Some("Existing skill"),
+			"an already-present transfer must not overwrite the destination"
+		);
 	}
 
 	#[test]

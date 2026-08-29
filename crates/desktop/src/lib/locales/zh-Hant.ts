@@ -1149,6 +1149,8 @@ export default {
 	sourceRemovedCleaning: "清理中...",
 	sourceRemovedCleaned: "已清理 `{{name}}`。",
 	sourceRemovedCleanedMany: "已清理 {{count}} 個已移除技能。",
+	deleteSkillKeptSharedMaster:
+		"`{{name}}` 沒有被刪除:還有其他 agent 在讀共用的 .agents/skills master。請先從那些 agent 移除,或改成對所有 agent 刪除。",
 	sourceRemovedCleanFailed: "清理 `{{name}}` 失敗。",
 	sourceRemovedCleanSomeFailedOne: "有 1 個已移除技能清理失敗。",
 	sourceRemovedCleanSomeFailedMany: "有 {{count}} 個已移除技能清理失敗。",

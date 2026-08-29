@@ -4246,11 +4246,28 @@ fn transfer_json_shape_matches_api_dto() {
 	assert_eq!(row["success"], true);
 }
 
+/// A repeat `transfer` of the same skill into the same target is an idempotent
+/// SUCCESS that says so, not a conflict.
+///
+/// This asserted `!status.success()` and `row["success"] == false` until
+/// `transfer_skill`'s own `get_skill(..).is_some()` guard was removed:
+/// `reconcile --add` accepted exactly the state `transfer --to` refused, so the
+/// same operation had opposite verdicts depending on which verb you reached
+/// for. The refusal also had no remedy in it — it named neither
+/// `reconcile --add` nor the fact that nothing was wrong.
+///
+/// Two INDEPENDENT reverts each turn this red, so it is not a false green:
+///   1. restore the guard in `core/src/transfer.rs` (the
+///      `manager.get_skill(&skill.name).is_some()` early return) → the row goes
+///      `success:false` and the process exits non-zero;
+///   2. hard-code `already_present: false` in `operation_batch`'s row mapping →
+///      exit code and `success` stay right, and the `already_present`
+///      assertion alone goes red.
+#[cfg(unix)]
 #[test]
-fn transfer_skill_second_run_fails_resource_exists() {
+fn transfer_skill_second_run_is_idempotent_and_says_so() {
 	let project = transfer_project("repo-helper");
 
-	// First transfer succeeds.
 	let first = transfer_cli(project.path())
 		.args([
 			"-p",
@@ -4262,13 +4279,26 @@ fn transfer_skill_second_run_fails_resource_exists() {
 			"repo-helper",
 			"--to",
 			"opencode",
+			"--json",
 		])
 		.output()
 		.unwrap();
-	assert!(first.status.success());
+	assert!(
+		first.status.success(),
+		"first transfer must succeed: {}",
+		String::from_utf8_lossy(&first.stderr)
+	);
+	let first_json: Value = serde_json::from_slice(&first.stdout).unwrap();
+	let first_row = first_json["results"]
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
+		.expect("opencode row present");
+	assert_eq!(
+		first_row["already_present"], false,
+		"a REAL copy must not claim it was already there: {first_row}"
+	);
 
-	// Second transfer of the same skill into the same target fails (the
-	// destination already exists) and the CLI exits non-zero on a failed batch.
+	// Second run: same source, same target, nothing left to do.
 	let out = transfer_cli(project.path())
 		.args([
 			"-p",
@@ -4285,19 +4315,101 @@ fn transfer_skill_second_run_fails_resource_exists() {
 		.output()
 		.unwrap();
 	assert!(
-		!out.status.success(),
-		"a failed batch must exit non-zero; stdout: {}",
-		String::from_utf8_lossy(&out.stdout)
+		out.status.success(),
+		"an idempotent re-transfer must exit 0; stdout: {} stderr: {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["failed_count"], 0, "{json}");
 	let row = json["results"]
 		.as_array()
 		.and_then(|a| a.iter().find(|r| r["agent"] == "opencode"))
 		.expect("opencode row present");
-	assert_eq!(row["success"], false);
+	assert_eq!(row["success"], true, "{row}");
+	assert_eq!(row["ok"], true, "{row}");
+	assert_eq!(
+		row["already_present"], true,
+		"the row must say nothing was written, or a caller cannot tell an \
+		 idempotent no-op from a real copy: {row}"
+	);
+	assert!(row["error"].is_null(), "{row}");
+}
+
+/// A Master-reading agent's FIRST transfer must succeed — this is the case the
+/// old guard actually broke, and no test covered it.
+///
+/// cursor, cline, codex, opencode and warp read `.agents/skills` directly. Once
+/// ANY agent in the scope has installed a skill, the Master exists, so those
+/// agents already "hold" it — and `transfer_skill`'s `get_skill(..).is_some()`
+/// guard fired on their very first transfer. The refusal said "Resource already
+/// exists", which reads as a conflict when the truth is the opposite: the
+/// target can already see it, and there is nothing to do.
+#[cfg(unix)]
+#[test]
+fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
+	let project = transfer_project("repo-helper");
+
+	// Materialize the shared Master via a transfer to one agent.
+	let seed = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"opencode",
+		])
+		.output()
+		.unwrap();
 	assert!(
-		row["error"].as_str().is_some(),
-		"a failed row must carry an error string: {row}"
+		seed.status.success(),
+		"seed transfer must succeed: {}",
+		String::from_utf8_lossy(&seed.stderr)
+	);
+	let master = project.path().join(".agents/skills/repo-helper/SKILL.md");
+	let before = std::fs::read_to_string(&master)
+		.expect("the seed transfer must have written the Master");
+
+	// cursor has never been transferred to — but it reads that same Master.
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"cursor",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"a Master-reading agent's first transfer must not fail: {} {}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["failed_count"], 0, "{json}");
+	let row = json["results"]
+		.as_array()
+		.and_then(|a| a.iter().find(|r| r["agent"] == "cursor"))
+		.expect("cursor row present");
+	assert_eq!(row["success"], true, "{row}");
+	assert_eq!(row["already_present"], true, "{row}");
+	assert!(row["error"].is_null(), "{row}");
+
+	assert_eq!(
+		std::fs::read_to_string(&master).unwrap(),
+		before,
+		"an already-present transfer must rewrite nothing"
 	);
 }
 

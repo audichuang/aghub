@@ -69,7 +69,21 @@ export function DeleteSkillLocationDialog({
 
 			const result = await api.skills.deleteByPath(deleteRequest);
 
-			if (!result.success) {
+			if (result.outcome === "kept") {
+				// The `.agents/skills` master is shared and another agent still
+				// reads it, so NOTHING was removed. `success` is true here (the
+				// request was understood), and reading only that closed this
+				// dialog and refreshed the list as if the skill were gone —
+				// while it was still installed and still visible.
+				throw new Error(
+					t("deleteSkillKeptSharedMaster", {
+						name: skillName,
+					}),
+				);
+			}
+			if (result.outcome !== "removed" && result.outcome !== "absent") {
+				// `absent` is a success for a delete: the post-condition
+				// ("the skill is gone") already holds.
 				throw new Error(result.error || "Failed to delete skill");
 			}
 		},

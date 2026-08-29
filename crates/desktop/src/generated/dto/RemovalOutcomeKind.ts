@@ -2,7 +2,20 @@
 
 /**
  * Mirror of `aghub_core::dto::RemovalKind` for the TS surface (core carries no
- * ts-rs dependency, so the wire enum is restated here exactly as
- * `DeleteSkillByPathResponse` restates `RemovalView`).
+ * ts-rs dependency, so the wire enum is restated here as
+ * `DeleteSkillByPathResponse` restates `RemovalView`), PLUS one api-only
+ * variant: `Failed`.
+ *
+ * Core's kind is built only from a real `RemovalOutcome`, so it cannot name
+ * "this request never reached a removal". The API can, and must: its early
+ * `success: false` bodies are `..Default::default()`, and making `outcome`
+ * required is what lets every consumer read ONE field instead of null-checking
+ * it. `Failed` is that `Default`.
  */
-export type RemovalOutcomeKind = "preview" | "removed" | "absent" | "partial";
+export type RemovalOutcomeKind =
+	| "preview"
+	| "removed"
+	| "absent"
+	| "partial"
+	| "kept"
+	| "failed";

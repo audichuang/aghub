@@ -220,7 +220,7 @@ mod removal_or_noop_tests {
 		assert!(resp.success);
 		assert!(resp.executed);
 		assert_eq!(resp.paths, vec!["/x".to_string()]);
-		assert_eq!(resp.outcome, Some(RemovalOutcomeKind::Removed));
+		assert_eq!(resp.outcome, RemovalOutcomeKind::Removed);
 	}
 
 	#[test]
@@ -249,7 +249,7 @@ mod removal_or_noop_tests {
 		);
 		assert_eq!(
 			resp.outcome,
-			Some(RemovalOutcomeKind::Absent),
+			RemovalOutcomeKind::Absent,
 			"an already-gone resource must be distinguishable from a preview"
 		);
 	}
