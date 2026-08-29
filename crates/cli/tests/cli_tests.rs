@@ -9952,3 +9952,270 @@ fn an_unreadable_skills_dir_is_not_an_empty_one() {
 		String::from_utf8_lossy(&listed.stdout)
 	);
 }
+
+/// Round 7: the hardening stopped at the DIRECTORY level. Every fix below is a
+/// read one level lower — a file inside a readable directory — or a sibling
+/// sweep that makes the same "is anyone else still holding this?" decision.
+///
+/// Each test is a control/fault PAIR differing only in one permission bit, so a
+/// regression cannot hide behind an unrelated failure.
+///
+/// An unreadable `SKILL.md` inside a perfectly readable skill directory.
+///
+/// `collect_skills` treated EVERY `parse_skill_dir` error as "this is a group
+/// directory, recurse". `parse_skill_dir` raises `SkillError::Io` when SKILL.md
+/// is there and cannot be read; the recursion then found only files and
+/// returned `Ok`, so `load_failed` stayed false and the agent was counted as
+/// holding nothing. Three independent review lenses landed on this one line.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_skill_md_is_not_a_missing_one() {
+	use std::os::unix::fs::PermissionsExt;
+
+	// The pair differs ONLY in gemini's SKILL.md mode.
+	for unreadable in [false, true] {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let body = "---\nname: foo\ndescription: d\n---\n\nBODY\n";
+		// Copy layout: two agents each hold a private real directory. This is
+		// the shape where the truncation is worst — an exhaustive verdict
+		// widens a single-agent removal into a sweep by NAME across every
+		// agent dir, so the invisible agent's own copy is destroyed.
+		for agent in [".claude/skills/foo", ".gemini/skills/foo"] {
+			let dir = home.path().join(agent);
+			std::fs::create_dir_all(&dir).unwrap();
+			std::fs::write(dir.join("SKILL.md"), body).unwrap();
+		}
+		let gemini_md = home.path().join(".gemini/skills/foo/SKILL.md");
+		if unreadable {
+			std::fs::set_permissions(
+				&gemini_md,
+				std::fs::Permissions::from_mode(0o000),
+			)
+			.unwrap();
+		}
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"foo",
+				"--remove",
+				"claude",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		std::fs::set_permissions(
+			&gemini_md,
+			std::fs::Permissions::from_mode(0o644),
+		)
+		.unwrap();
+
+		// THE assertion, and it holds in BOTH arms: gemini was never named on
+		// the command line, so nothing may touch gemini's copy either way.
+		assert!(
+			gemini_md.is_file(),
+			"gemini was not named on the command line; its own copy must \
+			 survive (unreadable={unreadable}). stdout={} stderr={}",
+			String::from_utf8_lossy(&out.stdout),
+			String::from_utf8_lossy(&out.stderr)
+		);
+
+		if unreadable {
+			assert!(
+				!out.status.success(),
+				"a holder aghub could not read must REFUSE the removal, not \
+				 be counted as a non-holder: stdout={}",
+				String::from_utf8_lossy(&out.stdout)
+			);
+			// The refusal must name the agent AND the path, or the user has
+			// nothing to act on.
+			let stderr = String::from_utf8_lossy(&out.stderr);
+			assert!(
+				stderr.contains("gemini"),
+				"the refusal must name the unreadable agent: {stderr}"
+			);
+			assert!(
+				stderr.contains(".gemini/skills/foo"),
+				"the I/O error must name the path it failed on: {stderr}"
+			);
+		} else {
+			assert!(
+				out.status.success(),
+				"the readable control must still work — this guard must not \
+				 refuse legitimate removals: stdout={} stderr={}",
+				String::from_utf8_lossy(&out.stdout),
+				String::from_utf8_lossy(&out.stderr)
+			);
+		}
+	}
+}
+
+/// An unreadable sub-agent `.md` inside a readable agents directory.
+///
+/// `parse_sub_agent_file` did `fs::read_to_string(path).ok()?` and
+/// `is_regular_file` mapped a stat error to `false`, so an existing sub-agent
+/// that could not be read was reported ABSENT — and `transfer`'s already-exists
+/// check, which reads that same loaded list, let the write through and
+/// overwrote it. `fe0db092` fixed this function's `symlink_metadata` /
+/// `read_dir` / `entry?` and stopped exactly one level above.
+#[cfg(unix)]
+#[test]
+fn an_unreadable_sub_agent_file_is_not_an_absent_one() {
+	use std::os::unix::fs::PermissionsExt;
+
+	const ORIGINAL: &str =
+		"---\nname: foo\ndescription: claude original\n---\n\nDO NOT LOSE\n";
+
+	for unreadable in [false, true] {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		std::fs::create_dir_all(home.path().join(".grok/agents")).unwrap();
+		std::fs::create_dir_all(home.path().join(".claude/agents")).unwrap();
+		std::fs::write(
+			home.path().join(".grok/agents/foo.md"),
+			"---\nname: foo\ndescription: from grok\n---\n\nGROK BODY\n",
+		)
+		.unwrap();
+		let target = home.path().join(".claude/agents/foo.md");
+		std::fs::write(&target, ORIGINAL).unwrap();
+		if unreadable {
+			std::fs::set_permissions(
+				&target,
+				std::fs::Permissions::from_mode(0o000),
+			)
+			.unwrap();
+		}
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"transfer",
+				"sub-agent",
+				"--from-agent",
+				"grok",
+				"--name",
+				"foo",
+				"--to",
+				"claude",
+			])
+			.output()
+			.unwrap();
+
+		std::fs::set_permissions(
+			&target,
+			std::fs::Permissions::from_mode(0o644),
+		)
+		.unwrap();
+
+		// THE assertion: the existing file is never silently replaced. Both
+		// arms must refuse — a readable conflict as "already exists", an
+		// unreadable one as an I/O error — and the bytes must be untouched.
+		assert_eq!(
+			std::fs::read_to_string(&target).unwrap(),
+			ORIGINAL,
+			"the target's own content must survive a refused transfer \
+			 (unreadable={unreadable}). stdout={}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert!(
+			!out.status.success(),
+			"a transfer onto an existing sub-agent must fail \
+			 (unreadable={unreadable}): stdout={}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		let row: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+		assert_eq!(
+			row["results"][0]["success"],
+			serde_json::Value::Bool(false),
+			"the row must report the refusal, not `success: true`: {stdout}"
+		);
+		if unreadable {
+			assert!(
+				stdout.contains(".claude/agents/foo.md"),
+				"the I/O error must name the file it could not read: {stdout}"
+			);
+		}
+	}
+}
+
+/// A cross-agent referrer in a directory that cannot be stat'd.
+///
+/// `dir_has_external_referrer` asks "does another agent's live symlink point at
+/// this directory?" — and both `Linker::is_link` and
+/// `canonicalize(..).unwrap_or(false)` answer "no" to EACCES. The directory the
+/// live link points at was then `remove_dir_all`'d, leaving the peer dangling,
+/// with `success: true` and an empty stderr.
+///
+/// The same permission bit also drops the peer out of `plan_symlink_removal`'s
+/// sweep (`removal.rs`'s `symlink_metadata` `else { continue }`), so both
+/// sweeps are covered by this pair.
+#[cfg(unix)]
+#[test]
+fn a_referrer_we_cannot_stat_still_counts_as_a_referrer() {
+	use std::os::unix::fs::PermissionsExt;
+
+	for unreadable in [false, true] {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		let real = home.path().join(".claude/skills/demo");
+		std::fs::create_dir_all(&real).unwrap();
+		std::fs::write(
+			real.join("SKILL.md"),
+			"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		let peer = home.path().join(".gemini/skills");
+		std::fs::create_dir_all(&peer).unwrap();
+		std::os::unix::fs::symlink(&real, peer.join("demo")).unwrap();
+		if unreadable {
+			std::fs::set_permissions(
+				&peer,
+				std::fs::Permissions::from_mode(0o400),
+			)
+			.unwrap();
+		}
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g", "-a", "claude", "--json", "delete", "skills", "demo",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		std::fs::set_permissions(&peer, std::fs::Permissions::from_mode(0o755))
+			.unwrap();
+
+		// THE assertion, identical in both arms: a live inbound link keeps the
+		// directory it points at, whether or not aghub can see the link.
+		assert!(
+			real.join("SKILL.md").is_file(),
+			"a directory another agent's live symlink points at must not be \
+			 removed (unreadable={unreadable}). stdout={}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert!(
+			peer.join("demo").exists(),
+			"the peer's referrer must not be left dangling \
+			 (unreadable={unreadable})"
+		);
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		let view: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+		assert_eq!(
+			view["paths"].as_array().map(Vec::len),
+			Some(0),
+			"nothing may be reported as deleted (unreadable={unreadable}): \
+			 {stdout}"
+		);
+	}
+}

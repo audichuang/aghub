@@ -30,44 +30,58 @@ struct SubAgentFrontmatter {
 /// Reads YAML frontmatter (`name`, `description`) using the `aghub-markdown`
 /// crate and uses the document body as the instruction.  When the file has no
 /// frontmatter the file stem is used as the name.
-pub fn parse_sub_agent_file(path: &Path) -> Option<SubAgent> {
-	if !is_regular_file(path) {
-		return None;
+pub fn parse_sub_agent_file(path: &Path) -> std::io::Result<Option<SubAgent>> {
+	if !is_regular_file(path)? {
+		return Ok(None);
 	}
-	let content = fs::read_to_string(path).ok()?;
+	// `.ok()?` here was the level BELOW the one `fe0db092` fixed: an
+	// unreadable file read as "no sub-agent by that name", so `transfer`'s
+	// already-exists check passed and the write OVERWROTE it. Verified: the
+	// same command exits 1 "Resource already exists" at mode 0644 and exits 0
+	// `success: true` at mode 0000, having replaced the file's contents.
+	let content = match fs::read_to_string(path) {
+		Ok(content) => content,
+		// Vanished between the stat and the read: gone IS the answer.
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			return Ok(None);
+		}
+		Err(error) => return Err(at_path(path, error)),
+	};
 	let stem = path
 		.file_stem()
 		.and_then(|n| n.to_str())
 		.unwrap_or("unknown")
 		.to_string();
 
-	match aghub_markdown::parse_opt::<SubAgentFrontmatter>(&content) {
-		Ok((Some(front), body)) => Some(SubAgent {
-			name: if front.name.is_empty() {
-				stem
-			} else {
-				front.name
+	Ok(Some(
+		match aghub_markdown::parse_opt::<SubAgentFrontmatter>(&content) {
+			Ok((Some(front), body)) => SubAgent {
+				name: if front.name.is_empty() {
+					stem
+				} else {
+					front.name
+				},
+				description: front.description,
+				instruction: Some(body.to_string()),
+				source_path: Some(path.to_string_lossy().into_owned()),
+				config_source: None,
 			},
-			description: front.description,
-			instruction: Some(body.to_string()),
-			source_path: Some(path.to_string_lossy().into_owned()),
-			config_source: None,
-		}),
-		Ok((None, body)) => Some(SubAgent {
-			name: stem,
-			description: None,
-			instruction: Some(body.to_string()),
-			source_path: Some(path.to_string_lossy().into_owned()),
-			config_source: None,
-		}),
-		Err(_) => Some(SubAgent {
-			name: stem,
-			description: None,
-			instruction: Some(content),
-			source_path: Some(path.to_string_lossy().into_owned()),
-			config_source: None,
-		}),
-	}
+			Ok((None, body)) => SubAgent {
+				name: stem,
+				description: None,
+				instruction: Some(body.to_string()),
+				source_path: Some(path.to_string_lossy().into_owned()),
+				config_source: None,
+			},
+			Err(_) => SubAgent {
+				name: stem,
+				description: None,
+				instruction: Some(content),
+				source_path: Some(path.to_string_lossy().into_owned()),
+				config_source: None,
+			},
+		},
+	))
 }
 
 /// Format a [`SubAgent`] as markdown with YAML frontmatter.
@@ -111,12 +125,29 @@ fn sanitize_filename(name: &str) -> String {
 // symlinked *ancestors* — those are benign and outside the tool's control
 // (e.g. macOS `/var`→`/private`, a symlinked `$HOME` or project dir), and an
 // attacker who controls an ancestor of the user's own config dir has already won.
-fn is_regular_file(path: &Path) -> bool {
-	let Ok(meta) = fs::symlink_metadata(path) else {
-		return false;
+fn is_regular_file(path: &Path) -> std::io::Result<bool> {
+	// NotFound is an answer; every other error means the entry is THERE and we
+	// could not look at it. Mapping that to `false` is the same "unreadable
+	// reads as absent" mistake, one level down from the dir traversal.
+	let meta = match fs::symlink_metadata(path) {
+		Ok(meta) => meta,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			return Ok(false);
+		}
+		Err(error) => return Err(at_path(path, error)),
 	};
 	let file_type = meta.file_type();
-	file_type.is_file() && !file_type.is_symlink()
+	Ok(file_type.is_file() && !file_type.is_symlink())
+}
+
+/// Name the path in an I/O error.
+///
+/// `std::io::Error` out of `fs` carries no path, so these failures reached the
+/// user as a bare `Permission denied (os error 13)` about a directory they had
+/// not asked about — `get mcps` dying on an unreadable `~/.claude/agents` told
+/// them nothing they could act on.
+fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
+	std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
 }
 
 fn ensure_safe_sub_agent_dir(dir: &Path) -> Result<()> {
@@ -213,18 +244,18 @@ pub fn load_sub_agents_from_dir(dir: &Path) -> Result<Vec<SubAgent>> {
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
 			return Ok(Vec::new());
 		}
-		Err(error) => return Err(error.into()),
+		Err(error) => return Err(at_path(dir, error).into()),
 	}
 	let mut agents: Vec<SubAgent> = Vec::new();
-	for entry in fs::read_dir(dir)? {
+	for entry in fs::read_dir(dir).map_err(|e| at_path(dir, e))? {
 		// A per-entry error is "could not read", not "not there": with mode
 		// 0400 on the dir, `read_dir` succeeds and every stat under it fails.
-		let entry = entry?;
+		let entry = entry.map_err(|e| at_path(dir, e))?;
 		let path = entry.path();
 		if path.extension().and_then(|x| x.to_str()) != Some("md") {
 			continue;
 		}
-		if let Some(agent) = parse_sub_agent_file(&path) {
+		if let Some(agent) = parse_sub_agent_file(&path)? {
 			agents.push(agent);
 		}
 	}
@@ -378,7 +409,7 @@ mod tests {
 		)
 		.unwrap();
 
-		let agent = parse_sub_agent_file(&path).unwrap();
+		let agent = parse_sub_agent_file(&path).unwrap().unwrap();
 		assert_eq!(agent.name, "My Agent");
 		assert_eq!(agent.description, Some("does stuff".to_string()));
 		assert_eq!(agent.instruction, Some("Do the thing.".to_string()));
@@ -392,7 +423,7 @@ mod tests {
 		let path = dir_path.join("plain.md");
 		fs::write(&path, "Just plain text.").unwrap();
 
-		let agent = parse_sub_agent_file(&path).unwrap();
+		let agent = parse_sub_agent_file(&path).unwrap().unwrap();
 		assert_eq!(agent.name, "plain"); // file stem
 		assert_eq!(agent.instruction, Some("Just plain text.".to_string()));
 	}

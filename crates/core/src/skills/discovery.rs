@@ -40,6 +40,15 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> std::io::Result<Vec<Skill>> {
 	Ok(all_skills)
 }
 
+/// Name the path in an I/O error.
+///
+/// `std::io::Error` out of `fs` carries no path, so an unreadable skills
+/// directory surfaced as a bare `Permission denied (os error 13)` — on a
+/// command that may not even have been about skills.
+fn at_path(path: &Path, error: std::io::Error) -> std::io::Error {
+	std::io::Error::new(error.kind(), format!("{}: {error}", path.display()))
+}
+
 fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 	let entries = match fs::read_dir(dir) {
 		Ok(entries) => entries,
@@ -48,7 +57,7 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
 			return Ok(());
 		}
-		Err(error) => return Err(error),
+		Err(error) => return Err(at_path(dir, error)),
 	};
 
 	for entry in entries {
@@ -58,7 +67,7 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 		// dir `read_dir` SUCCEEDS and every stat under it then fails, so a
 		// directory full of skills read as empty and a genuine holder went
 		// invisible to `transfer::skill_holders`.
-		let entry = entry?;
+		let entry = entry.map_err(|error| at_path(dir, error))?;
 		let path = entry.path();
 		match fs::metadata(&path) {
 			Ok(meta) if meta.is_dir() => {}
@@ -69,7 +78,7 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
 				continue;
 			}
-			Err(error) => return Err(error),
+			Err(error) => return Err(at_path(&path, error)),
 		}
 
 		match skill::parser::parse_skill_dir(&path) {
@@ -86,6 +95,23 @@ fn collect_skills(dir: &Path, skills: &mut Vec<Skill>) -> std::io::Result<()> {
 					}
 				}
 				skills.push(skill);
+			}
+			// A directory with no SKILL.md is a GROUP directory — recurse.
+			// An I/O error is not: `parse_skill_dir` raises `SkillError::Io`
+			// when SKILL.md is there and cannot be read, and the old blanket
+			// `Err(_)` recursed into it, found only files, and returned `Ok`.
+			// The agent then held the skill while reporting it held nothing:
+			// `load_failed` stayed false, `transfer::skill_holders` counted a
+			// real reader as a non-reader, and the shared master was deleted —
+			// exit 0, "N succeeded, 0 failed", no warning. In a copy layout the
+			// same truncation widened a single-agent removal into a sweep that
+			// deleted an UNTARGETED agent's skill directory.
+			//
+			// A malformed SKILL.md keeps recursing, as it always has: that is
+			// `doctor`'s `invalid-skill`, and changing it here would be a
+			// separate, wider behaviour change.
+			Err(skill::SkillError::Io(error)) => {
+				return Err(at_path(&path, error));
 			}
 			Err(_) => collect_skills(&path, skills)?,
 		}

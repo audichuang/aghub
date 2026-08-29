@@ -292,9 +292,23 @@ fn plan_symlink_removal(
 
 	for dir in all_agent_dirs {
 		let entry = dir.join(safe);
-		let Ok(_meta) = std::fs::symlink_metadata(&entry) else {
-			continue;
-		};
+		// NotFound means this agent simply does not hold it. Any other error
+		// means the entry is THERE and we could not look — dropping it out of
+		// the sweep made `delete --all-agents` neither count it as a holder nor
+		// unlink its referrer, while still reporting `success: true` with the
+		// path silently missing from the JSON. Fail CLOSED: an unknown holder
+		// keeps the shared master, exactly as a known one would.
+		match std::fs::symlink_metadata(&entry) {
+			Ok(_) => {}
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+				continue;
+			}
+			Err(_) => {
+				other_refs = true;
+				skipped.push(entry);
+				continue;
+			}
+		}
 		let targeted =
 			all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
 		match entry.canonicalize() {
@@ -446,14 +460,34 @@ pub fn dir_has_external_referrer(
 	};
 	for dir in all_agent_dirs {
 		let entry = dir.join(safe);
+		// `Linker::is_link` and `canonicalize(..).unwrap_or(false)` both answer
+		// "no" to EACCES, so an unreadable peer directory hid a live inbound
+		// symlink and this function green-lit `remove_dir_all` on the directory
+		// that link points at. Verified: identical runs differing only in the
+		// peer dir's mode either skip the directory (0755) or delete it and
+		// leave the peer's link dangling (0400), both exit 0.
+		//
+		// A candidate we cannot see through is treated as a referrer: this
+		// function only ever KEEPS a directory, so failing closed costs a
+		// refused deletion, never data.
+		match std::fs::symlink_metadata(&entry) {
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+				continue;
+			}
+			Err(_) => return true,
+			Ok(_) => {}
+		}
 		if !Linker::is_link(&entry) {
 			continue;
 		}
-		if std::fs::canonicalize(&entry)
-			.map(|resolved| resolved == target_real)
-			.unwrap_or(false)
-		{
-			return true;
+		match std::fs::canonicalize(&entry) {
+			Ok(resolved) => {
+				if resolved == target_real {
+					return true;
+				}
+			}
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+			Err(_) => return true,
 		}
 	}
 	false
