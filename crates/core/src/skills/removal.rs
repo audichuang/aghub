@@ -506,6 +506,14 @@ fn plan_symlink_removal(
 		// name-matched, so the wide list cannot touch an unrelated skill — and
 		// it is the only list that can see a Referrer whose target will not
 		// parse.
+		// TWO lists, and the split is load-bearing. The wide one exists so a
+		// Referrer whose target will not parse is still SEEN; the narrow one
+		// is the only thing this sweep may UNLINK. Every branch below that
+		// pushes into `paths` must be cleared by one of them: canonical
+		// identity (which a wide entry can prove on its own) or membership in
+		// the narrow list (for a dangling link, which resolves to nothing and
+		// so can never be cleared by identity).
+		let (named, _) = candidate_entries(dir, &skill.name, safe);
 		let (entries, incomplete) = referrer_candidates(dir, safe);
 		incomplete_scan |= incomplete;
 		if incomplete {
@@ -530,8 +538,17 @@ fn plan_symlink_removal(
 					continue;
 				}
 				Err(_) => {
+					// Fail CLOSED on the canonical either way — an entry we
+					// cannot stat may be a referrer. But only REPORT the ones
+					// this removal names: an unrelated entry in `skipped` reads
+					// as "we deliberately kept your skill here", and the
+					// manager's own accounting reads that list. The dir itself
+					// is already reported through `incomplete` above, which the
+					// same stat failure sets.
 					other_refs = true;
-					skipped.push(entry);
+					if named.contains(&entry) {
+						skipped.push(entry);
+					}
 					continue;
 				}
 			}
@@ -553,9 +570,18 @@ fn plan_symlink_removal(
 					// skill; never touch it (match by canonical identity, not name).
 				}
 				Err(_) => {
-					// Dangling/broken link: unlinking it is safe, but we cannot
-					// prove it does not reference the canonical, so keep canonical.
-					if Linker::is_link(&entry) && targeted {
+					// Dangling/broken link: it resolves to NOTHING, so identity
+					// cannot clear it the way the arm above clears a live one.
+					// The wide list makes that decisive — "is a link, and we
+					// are targeted" would unlink every unrelated broken link in
+					// this agent's skills dir, and mark the removal effective
+					// for having done it. Only a link this removal NAMES may
+					// go; the canonical is kept either way, because a dangling
+					// link cannot be proven innocent.
+					if named.contains(&entry)
+						&& Linker::is_link(&entry)
+						&& targeted
+					{
 						paths.push(entry);
 						targeted_anything = true;
 					}
@@ -1312,6 +1338,52 @@ mod tests {
 			Some(referrer),
 			"a grouped referrer must be found by what it POINTS AT, not by a \
 			 frontmatter name nothing can read"
+		);
+	}
+
+	// The wide referrer list may not become a wide DELETION list.
+	//
+	// A dangling link resolves to nothing, so the identity check that clears
+	// every other entry cannot clear it — and the sweep now iterates every
+	// entry in the agent's skills dir, not just the ones this skill names. On
+	// "is a link, and we are targeted" alone it unlinked an unrelated broken
+	// link belonging to a different skill, and counted having done so as the
+	// removal taking effect.
+	#[cfg(unix)]
+	#[test]
+	fn a_sweep_may_not_unlink_an_unrelated_dangling_link() {
+		let tmp = tempdir().unwrap();
+		let canonical = tmp.path().join(".agents/skills/foo");
+		write_skill_md(&canonical);
+		let claude = tmp.path().join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&canonical, &claude.join("foo"));
+		// Broken, and nothing to do with `foo`.
+		let stray = claude.join("other");
+		symlink(&tmp.path().join("nowhere"), &stray);
+
+		let skill = symlink_skill(&canonical, &claude);
+		let plan = plan_removal(
+			&skill,
+			Some(claude.as_path()),
+			std::slice::from_ref(&claude),
+			Some(tmp.path()),
+			false,
+		);
+
+		assert!(
+			!plan.paths.contains(&stray),
+			"a broken link belonging to another skill must survive: {:?}",
+			plan.paths
+		);
+		assert!(
+			plan.paths.contains(&claude.join("foo")),
+			"and the targeted referrer must still go: {:?}",
+			plan.paths
+		);
+		assert!(
+			stray.symlink_metadata().is_ok(),
+			"fixture: the stray link must exist for this to prove anything"
 		);
 	}
 
