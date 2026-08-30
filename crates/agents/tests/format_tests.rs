@@ -1,6 +1,6 @@
 //! Cross-dialect CONTRACT test for the strict preserve-and-merge MCP dialects
 //! (Grok TOML, Hermes YAML). Both delegate their transport semantics to
-//! `format::transport_policy`; this harness pins the shared invariants against
+//! `format::mcp_policy`; this harness pins the shared invariants against
 //! BOTH dialects so neither can drift silently (the harness `format/mod.rs`
 //! asks for). The per-dialect unit tests remain the fine-grained coverage.
 //!

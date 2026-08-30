@@ -208,6 +208,11 @@ over silently — no compile error, no runtime error, just Claude's behavior.
 4. `crates/core/tests/mcp_dialect_golden.rs` — a `row!` naming what the agent
    writes and how it reads a config aghub did not write. There is no way to
    skip this: the row is REQUIRED for any agent claiming MCP support
+5. `crates/core/tests/mcp_dialect_decisions.rs` — a second `row!`, same
+   registry-driven requirement, naming what it does with a mixed entry, an
+   unknown transport tag, a field the model does not own, a value that does not
+   fit, and an SSE server it cannot spell. Also required for a `json_map` agent
+   that introduces no new dialect at all
 
 Steps 2 and 3 are asserted bijective in `crates/core/tests/registry_bijection.rs`,
 so a missed roster entry fails loudly instead of silently serving Claude.

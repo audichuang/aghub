@@ -11,7 +11,7 @@ Role map (not a full file tree — `ls` / codegraph for that):
 - `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns)
 - `models.rs` — `AgentConfig`, `AgentType`, `McpServer`, `McpTransport`, `Skill`
 - `agents/` — one descriptor per agent (authoritative list: `AgentType::ALL` in `models.rs`); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
-- `format/` — serializers: OpenCode native, JSON map/list MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). The strict dialects (Grok TOML / Hermes YAML) share their transport invariants — mixed-key rejection, `url` → Sse/Http split — in `transport_policy.rs`; read it before touching either parser
+- `format/` — serializers: OpenCode native, JSON map MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). Every dialect keeps its own engine (no two share a `Value` type). The **seven hand-written** dialects declare the answers they must not differ on in `mcp_policy.rs` — `RemoteVocabulary` (which remote words it has; `sse: ""` is what `refuse_unwritable` turns into a refusal — but the dialect still has to CALL it, declaring alone writes an empty tag; `mcp_dialect_roundtrip` is what catches a missing call, NOT `mcp_dialect_decisions`), `OwnedKeys`, `reject_mixed_transport`, `remote_transport`, `transport_fields`. The **16 `json_map` agents** answer the same questions through `json_map::Dialect` / `Discriminator` instead — deliberately a separate copy, not a gap. Read whichever applies before touching a parser, and add a row to `crates/core/tests/mcp_dialect_decisions.rs` when you add an **MCP-capable agent** (a `json_map` agent introduces no dialect and still owes a row)
 
 ## KEY TYPES
 

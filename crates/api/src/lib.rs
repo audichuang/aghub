@@ -353,9 +353,10 @@ fn build_rocket_with_state_factories(
 /// parser) has to wait for liftoff rather than guess beforehand.
 pub type PortReporter = std::sync::Arc<dyn Fn(u16) + Send + Sync + 'static>;
 
-// `rocket::Error` is 224 bytes and is not ours to shrink; boxing it would
-// change the signature of the two entry points the desktop and CLI call. Same
-// call this repo already makes in `crates/git/src/credentials.rs`.
+// `rocket::Error` is 224 bytes and belongs to rocket, so we cannot shrink it.
+// Boxing it would change the signature every caller (desktop bring-up, the CLI
+// `serve` path) matches on, to buy nothing: these two functions run once per
+// process and never on a hot path.
 #[allow(clippy::result_large_err)]
 pub async fn start(options: ApiOptions) -> Result<(), rocket::Error> {
 	start_with_port_reporter(options, None).await

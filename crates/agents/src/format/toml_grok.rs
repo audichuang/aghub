@@ -12,14 +12,28 @@
 //! - `enabled` is a native per-server bool (missing defaults to true)
 
 use crate::errors::{ConfigError, Result};
-use crate::format::transport_policy::{
+use crate::format::mcp_policy::{
 	missing_transport_error, reject_mixed_transport, remote_transport,
-	transport_fields, transport_keys, FieldValue,
+	transport_fields, FieldValue, OwnedKeys, RemoteVocabulary,
 };
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use std::collections::HashMap;
 use toml::map::Map;
 use toml::Value;
+
+/// Grok tags its remote transport `type`, spells SSE `sse`, and also reads
+/// `http` for streamable HTTP (which it writes as a bare `url`, no tag).
+const VOCAB: RemoteVocabulary = RemoteVocabulary {
+	tag_key: "type",
+	sse: "sse",
+	http: "",
+	http_read_aliases: &["http"],
+};
+
+const OWNED: OwnedKeys = OwnedKeys {
+	stdio: &["command", "args", "env"],
+	remote: &["url", "headers", "type"],
+};
 
 fn value_to_string_map(
 	v: &Value,
@@ -88,13 +102,13 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		};
 		// Reject mixed families on key PRESENCE before extracting any field so
 		// error precedence matches the pre-extraction behaviour.
-		let has_stdio = ["command", "args", "env"]
-			.iter()
-			.any(|k| server.contains_key(*k));
-		let has_remote = ["url", "headers", "type"]
-			.iter()
-			.any(|k| server.contains_key(*k));
-		reject_mixed_transport(has_stdio, has_remote, name, "Grok", false)?;
+		reject_mixed_transport(
+			OWNED.stdio,
+			OWNED.remote,
+			|key| server.contains_key(key),
+			name,
+			"Grok",
+		)?;
 		// Dispatch on presence, then extract ONLY the chosen branch's fields.
 		let transport = if let Some(cmd) = server.get("command") {
 			let command = cmd
@@ -159,7 +173,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 						.to_string(),
 				),
 			};
-			remote_transport(url, headers, type_key, false, name, "Grok")?
+			remote_transport(url, headers, type_key, &VOCAB, name, "Grok")?
 		} else {
 			return Err(missing_transport_error(name, "Grok"));
 		};
@@ -220,12 +234,21 @@ pub fn serialize(
 				))
 			})?,
 		};
+		// A no-op while `VOCAB.sse` is non-empty, and that is the point:
+		// declaring a spelling is not enough on its own, the dialect has to
+		// ASK. Drop this call and emptying `VOCAB.sse` writes `type = ""`,
+		// which Grok's own parser then refuses — `mcp_dialect_roundtrip`
+		// catches exactly that (verified), `mcp_dialect_decisions` does not.
+		VOCAB.refuse_unwritable(
+			&mcp.transport,
+			&format!("MCP server '{}'", mcp.name),
+		)?;
 		// Remove all transport-owned keys before re-inserting (avoids stale
 		// keys when a server's transport changes, including `type`).
-		for k in transport_keys(false) {
-			entry.remove(*k);
+		for key in OWNED.transport() {
+			entry.remove(key);
 		}
-		for (key, value) in transport_fields(&mcp.transport, false) {
+		for (key, value) in transport_fields(&mcp.transport, &VOCAB) {
 			entry.insert(key.to_string(), field_to_value(value));
 		}
 		entry.insert("enabled".to_string(), Value::Boolean(mcp.enabled));
@@ -661,5 +684,95 @@ enabled = true
 	#[test]
 	fn parse_rejects_non_table_env() {
 		assert!(parse("[mcp_servers.s]\ncommand = \"x\"\nenv = 5\n").is_err());
+	}
+
+	/// `env` earns its place in `OWNED.stdio` twice over, and neither use had a
+	/// test. `transport_fields` emits NO `env` key when `env` is `None`, so the
+	/// blanket strip is the only thing that clears one the user just removed —
+	/// a secret the user deleted otherwise stays on disk and keeps being
+	/// injected.
+	#[test]
+	fn serialize_clears_an_env_the_user_removed() {
+		let original = "[mcp_servers.srv]\ncommand = \"run\"\nargs = []\n\
+enabled = true\n\n[mcp_servers.srv.env]\nSECRET = \"old\"\n";
+		let cfg = AgentConfig {
+			mcps: vec![McpServer::new(
+				"srv",
+				McpTransport::Stdio {
+					command: "run".into(),
+					args: vec![],
+					env: None,
+					timeout: None,
+				},
+			)],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+		let out = serialize(&cfg, Some(original)).unwrap();
+		assert!(
+			!out.contains("SECRET"),
+			"an env the user removed is still on disk:\n{out}"
+		);
+	}
+
+	/// The other half: `env` is a stdio-family PROBE, so `env` + `url` is a
+	/// mixed entry. Without it the entry parses as a pure remote and the next
+	/// save deletes the `env` block.
+	#[test]
+	fn parse_rejects_an_env_plus_url_entry_as_mixed() {
+		let error = parse(
+			"[mcp_servers.s]\nurl = \"https://y\"\n\n[mcp_servers.s.env]\n\
+SECRET = \"v\"\n",
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("mixes stdio keys"), "{error}");
+	}
+
+	/// Grok probes EXACTLY the keys it strips, and that coupling is the
+	/// invariant, not an accident: the blanket strip deletes every key in
+	/// either family, so a key added to the strip set without being added to
+	/// the probe would be deleted from an entry nobody ever read.
+	///
+	/// Read the other way: a vendor key Grok does NOT own must still be
+	/// readable and must survive the rewrite. Widening `OWNED.remote` (an
+	/// `auth` table, say) breaks this test from BOTH sides — the entry starts
+	/// being refused as mixed, or the table starts disappearing.
+	#[test]
+	fn an_unowned_vendor_table_is_readable_and_survives_a_rewrite() {
+		let original = "[mcp_servers.s]\ncommand = \"run\"\n\n\
+[mcp_servers.s.auth]\nkind = \"oauth\"\n";
+		let config = parse(original).expect("an unowned table is not mixed");
+		let out = serialize(&config, Some(original)).unwrap();
+		let value: Value = toml::from_str(&out).unwrap();
+		assert_eq!(
+			value["mcp_servers"]["s"]["auth"]["kind"].as_str(),
+			Some("oauth"),
+			"a key Grok does not own must survive:\n{out}"
+		);
+	}
+
+	/// The mirror of the test above, on the STDIO side — the half that was
+	/// missing. `OWNED.stdio` feeds both the mixed probe and the blanket strip,
+	/// so adding a key to it (a `cwd`, say, purely so a remote → stdio switch
+	/// clears a stale value) ALSO starts refusing every entry where that key
+	/// sits on a REMOTE server. Grok's parse is whole-document, so one such
+	/// entry makes every Grok MCP server unmanageable.
+	#[test]
+	fn a_remote_entry_with_an_unowned_stdio_side_key_stays_readable() {
+		let original = "[mcp_servers.s]\nurl = \"https://y\"\ncwd = \"/tmp\"\n";
+		let config = parse(original)
+			.expect("widening OWNED.stdio would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+		let out = serialize(&config, Some(original)).unwrap();
+		let value: Value = toml::from_str(&out).unwrap();
+		assert_eq!(
+			value["mcp_servers"]["s"]["cwd"].as_str(),
+			Some("/tmp"),
+			"a key Grok does not own must survive:\n{out}"
+		);
 	}
 }

@@ -1,4 +1,6 @@
-use crate::format::transport_policy::reject_mixed_transport;
+use crate::format::mcp_policy::{
+	missing_transport_error, reject_mixed_transport, RemoteVocabulary,
+};
 use crate::{
 	errors::{ConfigError, Result},
 	models::{AgentConfig, McpServer, McpTransport},
@@ -6,6 +8,25 @@ use crate::{
 use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+
+/// OpenCode tags its transports `type`, and `remote` is its ONLY remote word —
+/// an empty `sse` is what makes `refuse_unwritable` refuse an SSE server, so
+/// this module never restates the condition. Writing one anyway would read back
+/// as streamable HTTP and change the user's transport behind their back.
+///
+/// `tag_key` must stay equal to the `#[serde(rename)]` on `server_type` below;
+/// serde cannot read a const, so `vocab_tag_key_matches_the_serialized_key`
+/// pins the two together.
+const VOCAB: RemoteVocabulary = RemoteVocabulary {
+	tag_key: "type",
+	sse: "",
+	http: "remote",
+	http_read_aliases: &[],
+};
+
+/// The stdio tag. NOT remote vocabulary, so it is a literal here rather than a
+/// `RemoteVocabulary` field.
+const LOCAL: &str = "local";
 
 #[derive(Debug, Default, Deserialize)]
 struct OpenCodeConfig {
@@ -71,30 +92,63 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		// A mixed entry has to FAIL: serialization rewrites the server from the
 		// parsed half, so "just ignore the other one" deletes it.
 		reject_mixed_transport(
-			entry.command.is_some(),
-			entry.url.is_some(),
+			&["command"],
+			&["url"],
+			|key| match key {
+				"command" => entry.command.is_some(),
+				"url" => entry.url.is_some(),
+				_ => false,
+			},
 			&name,
 			"OpenCode",
-			true,
 		)?;
-		let is_remote = entry.server_type.as_deref() == Some("remote")
-			|| (entry.server_type.is_none() && entry.url.is_some());
+		if entry.command.is_none() && entry.url.is_none() {
+			return Err(missing_transport_error(&name, "OpenCode"));
+		}
+		// An entry aghub cannot model is an entry the next save DELETES (it
+		// rewrites every server from the parsed half), so an unrecognised tag
+		// is refused rather than falling through to the stdio branch — that
+		// fall-through read `{"type":"sse","url":…}` as a command-less stdio
+		// server and wrote `command: [""]` over the user's URL.
+		let is_remote = match entry.server_type.as_deref() {
+			Some(tag)
+				if tag == VOCAB.http
+					|| VOCAB.http_read_aliases.contains(&tag) =>
+			{
+				true
+			}
+			Some(LOCAL) => false,
+			None => entry.url.is_some(),
+			Some(other) => {
+				return Err(ConfigError::InvalidConfig(format!(
+					"OpenCode MCP server `{name}` has unknown `{key}` `{other}`",
+					key = VOCAB.tag_key
+				)))
+			}
+		};
 		let transport = if is_remote {
+			let Some(url) = entry.url else {
+				return Err(ConfigError::InvalidConfig(format!(
+					"OpenCode MCP server `{name}` is tagged `{tag}` but has no \
+					 `url`",
+					tag = VOCAB.http
+				)));
+			};
 			McpTransport::StreamableHttp {
-				url: entry.url.unwrap_or_default(),
+				url,
 				headers: entry.headers,
 				timeout: entry.timeout,
 			}
 		} else {
 			let cmd = entry.command.unwrap_or_default();
-			let (command, args) = if cmd.is_empty() {
-				(String::new(), vec![])
-			} else {
-				(cmd[0].clone(), cmd[1..].to_vec())
+			let Some((command, args)) = cmd.split_first() else {
+				return Err(ConfigError::InvalidConfig(format!(
+					"OpenCode MCP server `{name}` has no `command`"
+				)));
 			};
 			McpTransport::Stdio {
-				command,
-				args,
+				command: command.clone(),
+				args: args.to_vec(),
 				env: entry.environment,
 				timeout: entry.timeout,
 			}
@@ -134,6 +188,12 @@ pub fn serialize(
 	};
 
 	for mcp in &config.mcps {
+		// `VOCAB.sse` is empty, so this refuses every SSE server — the module
+		// states WHAT IT CAN SPELL, not where to return an error.
+		VOCAB.refuse_unwritable(
+			&mcp.transport,
+			&format!("MCP server '{}'", mcp.name),
+		)?;
 		let extra = original_mcps
 			.get(&mcp.name)
 			.map(|entry| entry.extra.clone())
@@ -149,7 +209,7 @@ pub fn serialize(
 				let mut cmd = vec![command.clone()];
 				cmd.extend(args.iter().cloned());
 				OpenCodeMcpOutput {
-					server_type: "local".to_string(),
+					server_type: LOCAL.to_string(),
 					command: Some(cmd),
 					url: None,
 					enabled: mcp.enabled,
@@ -159,23 +219,21 @@ pub fn serialize(
 					extra,
 				}
 			}
-			// `remote` is the only remote type in this dialect, so an SSE
-			// server written here reads back as streamable HTTP. Refuse rather
-			// than change the user's transport behind their back.
-			McpTransport::Sse { .. } => {
-				return Err(ConfigError::InvalidConfig(format!(
-					"MCP server '{name}' uses SSE, which this agent's config \
-					 format cannot express; use streamable HTTP instead",
-					name = mcp.name
-				)));
-			}
-			McpTransport::StreamableHttp {
+			// Sse is unreachable while `VOCAB.sse` is empty (the guard above
+			// returned). It shares the arm rather than sitting in a panicking
+			// one so that giving this dialect an SSE spelling is a deliberate
+			// edit here, caught by `mcp_dialect_roundtrip`'s NO_NATIVE_SSE.
+			McpTransport::Sse {
 				url,
 				headers,
 				timeout,
-				..
+			}
+			| McpTransport::StreamableHttp {
+				url,
+				headers,
+				timeout,
 			} => OpenCodeMcpOutput {
-				server_type: "remote".to_string(),
+				server_type: VOCAB.http.to_string(),
 				command: None,
 				url: Some(url.clone()),
 				enabled: mcp.enabled,
@@ -293,5 +351,84 @@ mod tests {
 		let out = serialize(&config, Some(original)).unwrap();
 		let val: serde_json::Value = serde_json::from_str(&out).unwrap();
 		assert_eq!(val["mcp"]["remote-srv"]["oauth"]["clientId"], "client-id");
+	}
+
+	/// `VOCAB.tag_key` cannot be reached from `#[serde(rename)]`, so the two
+	/// spellings can only be held together by looking at the bytes serde
+	/// actually writes. Without this, editing the const would change nothing
+	/// and go green — leaving a declaration that says one thing while the wire
+	/// format says another, which is the `single_remote: true` failure again.
+	#[test]
+	fn vocab_tag_key_matches_the_serialized_key() {
+		let config = AgentConfig {
+			mcps: vec![McpServer::new("s", McpTransport::stdio("run", vec![]))],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+		let out = serialize(&config, None).unwrap();
+		let val: serde_json::Value = serde_json::from_str(&out).unwrap();
+		assert_eq!(val["mcp"]["s"][VOCAB.tag_key], LOCAL);
+		assert_eq!(
+			val["mcp"]["s"].as_object().unwrap().len(),
+			3,
+			"only `{}`, `command` and `enabled` — an extra key means the tag \
+			 moved and the assertion above stopped meaning anything: {out}",
+			VOCAB.tag_key
+		);
+	}
+
+	/// A tag this dialect cannot model must be REFUSED, not read as a
+	/// command-less stdio server. `{"type":"sse","url":…}` used to parse into
+	/// `Stdio { command: "" }` and the next save wrote `command: [""]` over
+	/// the user's URL.
+	#[test]
+	fn an_unmodellable_entry_is_refused_instead_of_half_read() {
+		let refusals = [
+			// Unknown tag: the url has nowhere to go.
+			r#"{"mcp":{"t":{"type":"sse","url":"https://x/mcp"}}}"#,
+			r#"{"mcp":{"t":{"type":"grpc","url":"https://x/mcp"}}}"#,
+			// Unknown tag WITH a command: nothing else catches this one, and
+			// reading it as `local` rewrites the user's declared tag on save.
+			r#"{"mcp":{"t":{"type":"grpc","command":["run"]}}}"#,
+			// Tagged remote with no url — used to write `url: ""`.
+			r#"{"mcp":{"t":{"type":"remote"}}}"#,
+			r#"{"mcp":{"t":{"type":"remote","command":["run"]}}}"#,
+			// Tagged local with no command — used to write `command: [""]`.
+			r#"{"mcp":{"t":{"type":"local","url":"https://x/mcp"}}}"#,
+			r#"{"mcp":{"t":{"type":"local","command":[]}}}"#,
+			// Neither key at all.
+			r#"{"mcp":{"t":{}}}"#,
+		];
+		for text in refusals {
+			assert!(
+				parse(text).is_err(),
+				"half-read instead of refused: {text}"
+			);
+		}
+		// Still readable: both native tags, and an untagged url.
+		for text in [
+			r#"{"mcp":{"t":{"type":"remote","url":"https://x/mcp"}}}"#,
+			r#"{"mcp":{"t":{"type":"local","command":["run"]}}}"#,
+			r#"{"mcp":{"t":{"url":"https://x/mcp"}}}"#,
+			r#"{"mcp":{"t":{"command":["run"]}}}"#,
+		] {
+			assert!(parse(text).is_ok(), "wrongly refused: {text}");
+		}
+	}
+
+	/// OpenCode probes `command` × `url` and NOTHING else. It strips nothing at
+	/// all (serde's `extra` catch-all keeps what it never modelled), so an
+	/// inert remote key on a local entry costs nothing to keep reading —
+	/// widening the probe would refuse the WHOLE document over it.
+	#[test]
+	fn a_local_entry_with_an_inert_remote_key_stays_readable() {
+		let config = parse(
+			r#"{"mcp":{"a":{"type":"local","command":["run"],"headers":{"A":"b"}}}}"#,
+		)
+		.expect("widening the remote probe would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::Stdio { .. }
+		));
 	}
 }

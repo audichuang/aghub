@@ -6,13 +6,32 @@
 //! per-server field it does not own, replacing only the transport keys.
 
 use crate::errors::{ConfigError, Result};
-use crate::format::transport_policy::{
-	missing_transport_error, reject_mixed_transport, remote_tag_key,
-	remote_transport, transport_fields, transport_keys, FieldValue,
+use crate::format::mcp_policy::{
+	missing_transport_error, reject_mixed_transport, remote_transport,
+	transport_fields, FieldValue, OwnedKeys, RemoteVocabulary,
 };
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use serde_yaml::{Mapping, Value};
 use std::collections::HashMap;
+
+/// Hermes tags its remote transport `transport` (not `type`), spells SSE `sse`,
+/// and is the only dialect that also reads the spelled-out `streamable-http`.
+const VOCAB: RemoteVocabulary = RemoteVocabulary {
+	tag_key: "transport",
+	sse: "sse",
+	http: "",
+	http_read_aliases: &["http", "streamable-http"],
+};
+
+const OWNED: OwnedKeys = OwnedKeys {
+	stdio: &["command", "args", "env"],
+	remote: &["url", "headers", "transport"],
+};
+
+/// Hermes probes only `url`/`headers` for the remote family — NOT its tag key.
+/// Widening this would reject entries it reads fine today and would change the
+/// wording of the mixed-entry error.
+const REMOTE_PROBE: &[&str] = &["url", "headers"];
 
 fn value_to_string_map(
 	v: &Value,
@@ -90,12 +109,13 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		};
 		// Reject mixed families on key PRESENCE before extracting any field so
 		// error precedence matches the pre-extraction behaviour.
-		let has_stdio = ["command", "args", "env"]
-			.iter()
-			.any(|k| server.contains_key(*k));
-		let has_remote =
-			["url", "headers"].iter().any(|k| server.contains_key(*k));
-		reject_mixed_transport(has_stdio, has_remote, name, "Hermes", true)?;
+		reject_mixed_transport(
+			OWNED.stdio,
+			REMOTE_PROBE,
+			|key| server.contains_key(key),
+			name,
+			"Hermes",
+		)?;
 		// Dispatch on presence, then extract ONLY the chosen branch's fields.
 		let transport = if let Some(cmd) = server.get("command") {
 			let command = cmd
@@ -148,7 +168,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				None => None,
 				Some(v) => Some(value_to_string_map(v, name, "headers")?),
 			};
-			let tag = match server.get(remote_tag_key(true)) {
+			let tag = match server.get(VOCAB.tag_key) {
 				None => None,
 				Some(Value::String(kind)) => Some(kind.clone()),
 				Some(_) => {
@@ -157,7 +177,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 					)));
 				}
 			};
-			remote_transport(url, headers, tag, true, name, "Hermes")?
+			remote_transport(url, headers, tag, &VOCAB, name, "Hermes")?
 		} else {
 			return Err(missing_transport_error(name, "Hermes"));
 		};
@@ -226,12 +246,21 @@ pub fn serialize(
 				))
 			})?,
 		};
+		// A no-op while `VOCAB.sse` is non-empty, and that is the point:
+		// declaring a spelling is not enough on its own, the dialect has to
+		// ASK. Drop this call and emptying `VOCAB.sse` writes `transport: ""`,
+		// which Hermes' own parser then refuses — `mcp_dialect_roundtrip`
+		// catches exactly that, `mcp_dialect_decisions` does not.
+		VOCAB.refuse_unwritable(
+			&mcp.transport,
+			&format!("MCP server '{}'", mcp.name),
+		)?;
 		// Remove all transport-owned keys before re-inserting (avoids stale
 		// keys when a server's transport changes).
-		for k in transport_keys(true) {
-			entry.remove(*k);
+		for key in OWNED.transport() {
+			entry.remove(key);
 		}
-		for (key, value) in transport_fields(&mcp.transport, true) {
+		for (key, value) in transport_fields(&mcp.transport, &VOCAB) {
 			entry.insert(Value::String(key.to_string()), field_to_value(value));
 		}
 		entry.insert(
@@ -527,5 +556,98 @@ mcp_servers:
 			sub_agents: vec![],
 		};
 		assert!(serialize(&cfg, Some("mcp_servers:\n  s: 5\n")).is_err());
+	}
+
+	/// `env` is in `OWNED.stdio` for two independent reasons, and neither had a
+	/// test. `transport_fields` emits no `env` key when `env` is `None`, so the
+	/// blanket strip is the ONLY thing that clears one the user just removed.
+	#[test]
+	fn serialize_clears_an_env_the_user_removed() {
+		let original = concat!(
+			"mcp_servers:\n",
+			"  srv:\n",
+			"    command: run\n",
+			"    args: []\n",
+			"    env:\n",
+			"      SECRET: old\n",
+			"    enabled: true\n"
+		);
+		let cfg = AgentConfig {
+			mcps: vec![McpServer::new(
+				"srv",
+				McpTransport::Stdio {
+					command: "run".into(),
+					args: vec![],
+					env: None,
+					timeout: None,
+				},
+			)],
+			skills: vec![],
+			sub_agents: vec![],
+		};
+		let out = serialize(&cfg, Some(original)).unwrap();
+		assert!(
+			!out.contains("SECRET"),
+			"an env the user removed is still on disk:\n{out}"
+		);
+	}
+
+	/// The other reason: `env` is a stdio-family PROBE, so `env` + `url` is a
+	/// mixed entry rather than a remote server whose `env` the next save eats.
+	#[test]
+	fn parse_rejects_an_env_plus_url_entry_as_mixed() {
+		let error = parse(
+			"mcp_servers:\n  s:\n    url: https://y\n    env:\n      A: v\n",
+		)
+		.unwrap_err()
+		.to_string();
+		assert!(error.contains("mixes stdio keys"), "{error}");
+	}
+
+	/// The one place Hermes deliberately probes LESS than it strips.
+	/// `REMOTE_PROBE` leaves out the tag key, so a vendor stdio entry that
+	/// spells out `transport: stdio` stays readable; adding `transport` to the
+	/// probe would refuse the WHOLE file over a tag Hermes ignores on the stdio
+	/// branch anyway.
+	///
+	/// The rewrite drops that tag (it is in `OWNED.remote`, which is what
+	/// clears a stale `transport: sse` on a remote → stdio switch). That is a
+	/// deliberate normalisation of a key with no meaning for a stdio entry,
+	/// NOT a claim that it is preserved — hence the parse-side assertion only.
+	#[test]
+	fn a_stdio_entry_that_spells_out_its_transport_tag_stays_readable() {
+		let config = parse(
+			"mcp_servers:\n  s:\n    command: run\n    transport: stdio\n",
+		)
+		.expect("widening REMOTE_PROBE would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::Stdio { .. }
+		));
+	}
+
+	/// The other side, which `REMOTE_PROBE` does NOT protect: `OWNED.stdio`
+	/// feeds both the mixed probe and the blanket strip, so adding a key to it
+	/// (a `cwd`, say, purely so a remote → stdio switch clears a stale value)
+	/// ALSO starts refusing every entry where that key sits on a REMOTE server.
+	/// Hermes' parse is whole-document, so one such entry makes every Hermes
+	/// MCP server unmanageable.
+	#[test]
+	fn a_remote_entry_with_an_unowned_stdio_side_key_stays_readable() {
+		let original =
+			"mcp_servers:\n  s:\n    url: https://y\n    cwd: /tmp\n";
+		let config = parse(original)
+			.expect("widening OWNED.stdio would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+		let out = serialize(&config, Some(original)).unwrap();
+		let value: Value = serde_yaml::from_str(&out).unwrap();
+		assert_eq!(
+			value["mcp_servers"]["s"]["cwd"].as_str(),
+			Some("/tmp"),
+			"a key Hermes does not own must survive:\n{out}"
+		);
 	}
 }

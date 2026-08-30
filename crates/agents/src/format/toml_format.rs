@@ -1,8 +1,49 @@
+use crate::format::mcp_policy::{
+	reject_mixed_transport, OwnedKeys, RemoteVocabulary,
+};
 use crate::{
 	errors::{ConfigError, Result},
 	models::{AgentConfig, McpServer, McpTransport},
 };
 use std::collections::HashMap;
+
+/// Codex has NO transport tag at all — a remote entry is a bare `url` — and so
+/// no word for SSE either. Every field being empty is the honest description of
+/// that format, and `sse` being empty is what makes `refuse_unwritable` refuse.
+///
+/// Only `sse` is read here; the other three have no call site, and that is the
+/// point rather than an oversight. An EMPTY field claims nothing, so it cannot
+/// come to disagree with the parser the way `single_remote: true` did in three
+/// modules at once. Give Codex a tag and the fields stop being empty and start
+/// being read on the same edit.
+const VOCAB: RemoteVocabulary = RemoteVocabulary {
+	tag_key: "",
+	sse: "",
+	http: "",
+	http_read_aliases: &[],
+};
+
+/// Deliberately ASYMMETRIC: writing a remote server drops `cwd` and the
+/// experimental env keys, while writing a stdio server keeps them and drops the
+/// remote auth family instead. Each arm strips the OPPOSITE family, so these two
+/// lists are never unioned.
+const OWNED: OwnedKeys = OwnedKeys {
+	stdio: &[
+		"command",
+		"args",
+		"env",
+		"env_vars",
+		"cwd",
+		"experimental_environment",
+	],
+	remote: &[
+		"url",
+		"http_headers",
+		"env_http_headers",
+		"bearer_token_env_var",
+		"auth",
+	],
+};
 
 fn parse_toml(content: &str) -> Result<toml::Value> {
 	toml::from_str(content).map_err(|e| {
@@ -103,11 +144,20 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?),
 		};
-		if command.is_some() && url.is_some() {
-			return Err(ConfigError::InvalidConfig(format!(
-				"MCP server '{name}' cannot contain both command and url"
-			)));
-		}
+		// Presence here means "present AND a string": the per-field type errors
+		// above already fired, so this keeps Codex's original precedence while
+		// the message itself is derived from the two keys actually probed.
+		reject_mixed_transport(
+			&["command"],
+			&["url"],
+			|key| match key {
+				"command" => command.is_some(),
+				"url" => url.is_some(),
+				_ => false,
+			},
+			name,
+			"Codex",
+		)?;
 		if command.is_none() && url.is_none() {
 			return Err(ConfigError::InvalidConfig(format!(
 				"MCP server '{name}' has neither command nor url"
@@ -229,6 +279,15 @@ pub fn serialize(
 			table.insert("enabled".to_string(), toml::Value::Boolean(false));
 		}
 
+		// `VOCAB.sse` is empty — Codex's remote entry is a bare `url` with no
+		// transport tag, so an SSE server written here would come back as
+		// streamable HTTP. Placed at the match so a non-table existing entry
+		// is still skipped first, exactly as before.
+		VOCAB.refuse_unwritable(
+			&mcp.transport,
+			&format!("MCP server '{}'", mcp.name),
+		)?;
+
 		match &mcp.transport {
 			McpTransport::Stdio {
 				command,
@@ -237,14 +296,8 @@ pub fn serialize(
 				timeout,
 			} => {
 				table.remove("type");
-				for key in [
-					"url",
-					"http_headers",
-					"env_http_headers",
-					"bearer_token_env_var",
-					"auth",
-				] {
-					table.remove(key);
+				for key in OWNED.remote {
+					table.remove(*key);
 				}
 				table.insert(
 					"command".to_string(),
@@ -284,13 +337,13 @@ pub fn serialize(
 				}
 				set_timeout(table, *timeout)?;
 			}
+			// Unreachable: `refuse_unwritable` returned just above while
+			// `VOCAB.sse` is empty. It stays an explicit error rather than a
+			// panic so that giving Codex an SSE spelling is a deliberate edit
+			// here, caught by `mcp_dialect_roundtrip`'s NO_NATIVE_SSE list.
 			McpTransport::Sse { .. } => {
-				// Codex's remote MCP entry is a bare `url` with no transport
-				// tag, so writing an SSE server here would silently turn it
-				// into streamable HTTP on the next read.
 				return Err(ConfigError::InvalidConfig(format!(
-					"MCP server '{name}' uses SSE, which this agent's config \
-					 format cannot express; use streamable HTTP instead",
+					"MCP server '{name}' has an unwritable transport",
 					name = mcp.name
 				)));
 			}
@@ -300,15 +353,8 @@ pub fn serialize(
 				timeout,
 			} => {
 				table.remove("type");
-				for key in [
-					"command",
-					"args",
-					"env",
-					"env_vars",
-					"cwd",
-					"experimental_environment",
-				] {
-					table.remove(key);
+				for key in OWNED.stdio {
+					table.remove(*key);
 				}
 				table.insert(
 					"url".to_string(),
@@ -644,5 +690,93 @@ enabled = false
 		assert_eq!(server["required"].as_bool(), Some(true));
 		assert!(server.get("command").is_none());
 		assert!(server.get("enabled").is_none());
+	}
+
+	/// A transport switch must leave NONE of the other family's keys behind: a
+	/// stale `cwd` or `bearer_token_env_var` is read back as a live setting for
+	/// a transport that no longer exists.
+	///
+	/// The key names here are LITERALS on purpose. Iterating `OWNED` would make
+	/// the test agree with whatever the declaration happens to say — deleting a
+	/// name would delete its own check, which is exactly the false green this
+	/// test exists to prevent.
+	#[test]
+	fn switching_transport_strips_every_key_the_other_family_owns() {
+		const STDIO_OWNED: &[&str] = &[
+			"command",
+			"args",
+			"env",
+			"env_vars",
+			"cwd",
+			"experimental_environment",
+		];
+		const REMOTE_OWNED: &[&str] = &[
+			"url",
+			"http_headers",
+			"env_http_headers",
+			"bearer_token_env_var",
+			"auth",
+		];
+
+		fn only(name: &str, transport: McpTransport) -> AgentConfig {
+			AgentConfig {
+				mcps: vec![McpServer::new(name, transport)],
+				skills: vec![],
+				sub_agents: vec![],
+			}
+		}
+		fn saved(original: &str, config: &AgentConfig) -> toml::Value {
+			let out = serialize(config, Some(original)).expect("serialize");
+			toml::from_str(&out).expect("re-parse")
+		}
+
+		// Every stdio-family key present, re-saved as remote.
+		let original = "[mcp_servers.srv]\ncommand = \"old\"\nargs = \
+[\"a\"]\nenv_vars = \"x\"\ncwd = \"/tmp\"\nexperimental_environment = \
+\"x\"\n\n[mcp_servers.srv.env]\nK = \"V\"\n";
+		let value = saved(
+			original,
+			&only("srv", McpTransport::streamable_http("https://x/mcp")),
+		);
+		for key in STDIO_OWNED {
+			assert!(
+				value["mcp_servers"]["srv"].get(key).is_none(),
+				"stdio key `{key}` survived a switch to remote"
+			);
+		}
+
+		// Every remote-family key present, re-saved as stdio.
+		let original = "[mcp_servers.srv]\nurl = \"https://x/mcp\"\n\
+env_http_headers = \"x\"\nbearer_token_env_var = \"TOK\"\n\n\
+[mcp_servers.srv.http_headers]\nH = \"1\"\n\n[mcp_servers.srv.auth]\n\
+kind = \"oauth\"\n";
+		let value =
+			saved(original, &only("srv", McpTransport::stdio("run", vec![])));
+		for key in REMOTE_OWNED {
+			assert!(
+				value["mcp_servers"]["srv"].get(key).is_none(),
+				"remote key `{key}` survived a switch to stdio"
+			);
+		}
+	}
+
+	/// Codex probes `command` × `url` and NOTHING else, and the narrowness is
+	/// the deliberate half of `mcp_policy`'s probe rule: each arm strips only
+	/// the OPPOSITE family, so an inert remote key on a stdio entry costs
+	/// nothing to keep reading. Widening the probe (adding `http_headers`,
+	/// say) would refuse this file — and parse failure is whole-document, so
+	/// EVERY Codex MCP server would become unmanageable over a key that does
+	/// nothing for the transport the entry declares.
+	#[test]
+	fn a_stdio_entry_with_an_inert_remote_key_stays_readable() {
+		let config = parse(
+			"[mcp_servers.a]\ncommand = \"run\"\n\n\
+[mcp_servers.a.http_headers]\nX = \"Y\"\n",
+		)
+		.expect("widening the remote probe would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::Stdio { .. }
+		));
 	}
 }

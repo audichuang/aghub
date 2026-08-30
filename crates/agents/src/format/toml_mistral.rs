@@ -6,11 +6,39 @@
 //! rewrite, an existing remote server keeps its original Vibe transport tag.
 
 use crate::errors::{ConfigError, Result};
-use crate::format::transport_policy::reject_mixed_transport;
+use crate::format::mcp_policy::{
+	reject_mixed_transport, OwnedKeys, RemoteVocabulary,
+};
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use std::collections::{HashMap, HashSet};
 use toml::map::Map;
 use toml::Value;
+
+/// Vibe tags transports with `transport` and has ONE remote word (`http` is a
+/// spelling it still reads, and keeps on a rewrite). No word for SSE, which is
+/// what makes `refuse_unwritable` refuse — this module never restates that.
+const VOCAB: RemoteVocabulary = RemoteVocabulary {
+	tag_key: "transport",
+	sse: "",
+	http: "streamable-http",
+	http_read_aliases: &["http"],
+};
+
+/// The fields each transport owns. Vibe clears the OPPOSITE family and then
+/// patches individual fields, so these are used one family at a time — never
+/// as a single blanket strip (`auth` is preserve-and-patched, not removed, on
+/// the remote side).
+const OWNED: OwnedKeys = OwnedKeys {
+	stdio: &["command", "args", "env", "cwd"],
+	remote: &[
+		"url",
+		"auth",
+		"headers",
+		"api_key_env",
+		"api_key_header",
+		"api_key_format",
+	],
+};
 
 type TomlTable = Map<String, Value>;
 
@@ -253,16 +281,20 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			})?,
 		};
 		reject_mixed_transport(
-			server.contains_key("command"),
-			server.contains_key("url"),
+			&["command"],
+			&["url"],
+			|key| server.contains_key(key),
 			&name,
 			"Mistral Vibe",
-			true,
 		)?;
-		let transport_name = required_string(server, "transport", &name)?;
+		let transport_name = required_string(server, VOCAB.tag_key, &name)?;
 		let transport = match transport_name.as_str() {
 			"stdio" => parse_stdio(server, &name)?,
-			"http" | "streamable-http" => parse_remote(server, &name)?,
+			tag if tag == VOCAB.http
+				|| VOCAB.http_read_aliases.contains(&tag) =>
+			{
+				parse_remote(server, &name)?
+			}
 			other => {
 				return Err(invalid(format!(
 					"Mistral Vibe MCP server `{name}` has unsupported transport `{other}`"
@@ -305,21 +337,14 @@ fn existing_servers(root: &TomlTable) -> Result<HashMap<String, TomlTable>> {
 }
 
 fn clear_stdio_fields(table: &mut TomlTable) {
-	for field in ["command", "args", "env", "cwd"] {
-		table.remove(field);
+	for field in OWNED.stdio {
+		table.remove(*field);
 	}
 }
 
 fn clear_remote_fields(table: &mut TomlTable) {
-	for field in [
-		"url",
-		"auth",
-		"headers",
-		"api_key_env",
-		"api_key_header",
-		"api_key_format",
-	] {
-		table.remove(field);
+	for field in OWNED.remote {
+		table.remove(*field);
 	}
 }
 
@@ -447,9 +472,16 @@ pub fn serialize(
 				mcp.name
 			)));
 		}
+		// `VOCAB.sse` is empty, so this refuses every SSE server. Placed here
+		// so the duplicate-name error still outranks it, as it did when the
+		// refusal lived in the transport match below.
+		VOCAB.refuse_unwritable(
+			&mcp.transport,
+			&format!("Mistral Vibe MCP server `{}`", mcp.name),
+		)?;
 		let mut table = existing.remove(&mcp.name).unwrap_or_default();
 		let old_transport = table
-			.get("transport")
+			.get(VOCAB.tag_key)
 			.and_then(Value::as_str)
 			.map(str::to_string);
 		table.insert("name".to_string(), Value::String(mcp.name.clone()));
@@ -464,7 +496,7 @@ pub fn serialize(
 			} => {
 				clear_remote_fields(&mut table);
 				table.insert(
-					"transport".to_string(),
+					VOCAB.tag_key.to_string(),
 					Value::String("stdio".into()),
 				);
 				table.insert(
@@ -497,23 +529,26 @@ pub fn serialize(
 				timeout,
 			} => {
 				clear_stdio_fields(&mut table);
+				// An existing entry keeps the remote spelling it already had.
 				let native_transport = match old_transport.as_deref() {
-					Some("http") => "http",
-					Some("streamable-http") => "streamable-http",
-					_ => "streamable-http",
+					Some(tag) if VOCAB.http_read_aliases.contains(&tag) => tag,
+					_ => VOCAB.http,
 				};
 				table.insert(
-					"transport".to_string(),
+					VOCAB.tag_key.to_string(),
 					Value::String(native_transport.into()),
 				);
 				table.insert("url".to_string(), Value::String(url.clone()));
 				set_remote_headers(&mut table, &mcp.name, headers)?;
 				set_timeout(&mut table, *timeout)?;
 			}
+			// Unreachable: `refuse_unwritable` returned above while `VOCAB.sse`
+			// is empty. It stays an explicit error rather than a panic so that
+			// giving Vibe an SSE spelling is a deliberate edit here, caught by
+			// `mcp_dialect_roundtrip`'s NO_NATIVE_SSE list.
 			McpTransport::Sse { .. } => {
 				return Err(invalid(format!(
-					"Mistral Vibe MCP server `{}` uses SSE, which this agent's \
-					 config format cannot express; use streamable HTTP instead",
+					"Mistral Vibe MCP server `{}` has an unwritable transport",
 					mcp.name
 				)));
 			}
@@ -851,5 +886,98 @@ tool_timeout_sec = 30
 		let root: Value = toml::from_str(&output).unwrap();
 		let server = &root["mcp_servers"].as_array().unwrap()[0];
 		assert!(server.get("tool_timeout_sec").is_none());
+	}
+
+	/// A transport switch must leave NONE of the other family's keys behind.
+	/// `api_key_env` is the one that matters most: it names the environment
+	/// variable a credential is read from, so a leftover copy is a credential
+	/// source the user already removed still wired into the config.
+	///
+	/// The key names are LITERALS on purpose. Iterating `OWNED` would make this
+	/// agree with whatever the declaration happens to say, so deleting a name
+	/// would delete its own check — the false green this test exists to stop.
+	#[test]
+	fn switching_transport_strips_every_key_the_other_family_owns() {
+		const STDIO_OWNED: &[&str] = &["command", "args", "env", "cwd"];
+		const REMOTE_OWNED: &[&str] = &[
+			"url",
+			"auth",
+			"headers",
+			"api_key_env",
+			"api_key_header",
+			"api_key_format",
+		];
+
+		fn only(transport: McpTransport) -> AgentConfig {
+			AgentConfig {
+				mcps: vec![McpServer::new("srv", transport)],
+				skills: vec![],
+				sub_agents: vec![],
+			}
+		}
+		fn saved(original: &str, config: &AgentConfig) -> Value {
+			let out = serialize(config, Some(original)).expect("serialize");
+			let root: Value = toml::from_str(&out).expect("re-parse");
+			root["mcp_servers"].as_array().expect("array")[0].clone()
+		}
+
+		// Every stdio-family key present, re-saved as remote.
+		let original = concat!(
+			"[[mcp_servers]]\n",
+			"name = \"srv\"\n",
+			"transport = \"stdio\"\n",
+			"command = \"old\"\n",
+			"args = [\"a\"]\n",
+			"cwd = \"/tmp\"\n",
+			"env = { K = \"V\" }\n"
+		);
+		let server = saved(
+			original,
+			&only(McpTransport::streamable_http("https://x/mcp")),
+		);
+		for key in STDIO_OWNED {
+			assert!(
+				server.get(key).is_none(),
+				"stdio key `{key}` survived a switch to remote: {server}"
+			);
+		}
+
+		// Every remote-family key present, re-saved as stdio.
+		let original = concat!(
+			"[[mcp_servers]]\n",
+			"name = \"srv\"\n",
+			"transport = \"http\"\n",
+			"url = \"https://x/mcp\"\n",
+			"headers = { H = \"1\" }\n",
+			"api_key_env = \"TOK\"\n",
+			"api_key_header = \"X-Key\"\n",
+			"api_key_format = \"Bearer {key}\"\n",
+			"auth = { type = \"static\" }\n"
+		);
+		let server = saved(original, &only(McpTransport::stdio("run", vec![])));
+		for key in REMOTE_OWNED {
+			assert!(
+				server.get(key).is_none(),
+				"remote key `{key}` survived a switch to stdio: {server}"
+			);
+		}
+	}
+
+	/// Vibe probes `command` × `url` and NOTHING else. It strips only the
+	/// OPPOSITE family, so an inert remote key on a stdio entry costs nothing
+	/// to keep reading — but widening the probe (adding `api_key_env`, say)
+	/// would refuse this file, and parse failure is whole-document, so EVERY
+	/// Vibe MCP server would become unmanageable.
+	#[test]
+	fn a_stdio_entry_with_an_inert_remote_key_stays_readable() {
+		let config = parse(
+			"[[mcp_servers]]\nname = \"a\"\ntransport = \"stdio\"\n\
+command = \"run\"\napi_key_env = \"TOK\"\n",
+		)
+		.expect("widening the remote probe would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::Stdio { .. }
+		));
 	}
 }

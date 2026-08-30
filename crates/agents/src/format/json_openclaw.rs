@@ -6,11 +6,32 @@
 //! rewrites.
 
 use crate::errors::{ConfigError, Result};
-use crate::format::transport_policy::reject_mixed_transport;
+use crate::format::mcp_policy::{reject_mixed_transport, RemoteVocabulary};
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde_json::{Map, Value};
 use std::collections::HashMap;
+
+/// OpenClaw tags transports with `transport` and spells BOTH remote shapes, so
+/// nothing here is ever refused.
+///
+/// `http_read_aliases` is EMPTY and that is the honest value: the field means
+/// "read as streamable HTTP UNDER `tag_key`", and `transport: "http"` is
+/// refused here (`has unsupported transport `http``). `http` is understood only
+/// under the pre-rename `type` key, which is this module's own syntax layer —
+/// see `LEGACY_TYPE_HTTP`. Declaring it up here would be the `single_remote:
+/// true` mistake again: a field whose value is wrong for the thing it names,
+/// held together only by the one call site that happens to make it read true.
+const VOCAB: RemoteVocabulary = RemoteVocabulary {
+	tag_key: "transport",
+	sse: "sse",
+	http: "streamable-http",
+	http_read_aliases: &[],
+};
+
+/// Spellings the legacy `type` key carried, normalised to `VOCAB.http` on read
+/// and never written back.
+const LEGACY_TYPE_HTTP: &[&str] = &["http"];
 
 const TRANSPORT_KEYS: &[&str] = &[
 	"transport",
@@ -155,41 +176,43 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				))
 			})?,
 		};
-		let transport_name = match server.get("transport") {
+		let transport_name = match server.get(VOCAB.tag_key) {
 			Some(value) => Some(value.as_str().ok_or_else(|| {
 				invalid(format!(
-					"OpenClaw MCP server `{name}` field `transport` must be a string"
+					"OpenClaw MCP server `{name}` field `{key}` must be a string",
+					key = VOCAB.tag_key
 				))
 			})?),
 			None => server.get("type").and_then(Value::as_str).map(|value| {
-				if value == "http" {
-					"streamable-http"
+				if LEGACY_TYPE_HTTP.contains(&value) {
+					VOCAB.http
 				} else {
 					value
 				}
 			}),
 		};
 		reject_mixed_transport(
-			server.contains_key("command"),
-			server.contains_key("url"),
+			&["command"],
+			&["url"],
+			|key| server.contains_key(key),
 			name,
 			"OpenClaw",
-			true,
 		)?;
 		let timeout = optional_timeout(server, name)?;
 		let transport = match transport_name {
+			// `stdio` is not remote vocabulary — it stays a literal.
 			Some("stdio") => McpTransport::Stdio {
 				command: required_string(server, name, "command")?,
 				args: optional_args(server, name)?,
 				env: optional_string_map(server, name, "env")?,
 				timeout,
 			},
-			Some("sse") => McpTransport::Sse {
+			Some(tag) if tag == VOCAB.sse => McpTransport::Sse {
 				url: required_string(server, name, "url")?,
 				headers: optional_string_map(server, name, "headers")?,
 				timeout,
 			},
-			Some("streamable-http") => McpTransport::StreamableHttp {
+			Some(tag) if tag == VOCAB.http => McpTransport::StreamableHttp {
 				url: required_string(server, name, "url")?,
 				headers: optional_string_map(server, name, "headers")?,
 				timeout,
@@ -265,6 +288,15 @@ pub fn serialize(
 				))
 			})?,
 		};
+		// A no-op while `VOCAB.sse` is non-empty, and that is the point:
+		// declaring a spelling is not enough on its own, the dialect has to
+		// ASK. Drop this call and emptying `VOCAB.sse` writes `transport: ""`
+		// instead of refusing — `mcp_dialect_roundtrip` catches a missing call,
+		// `mcp_dialect_decisions` does not.
+		VOCAB.refuse_unwritable(
+			&server.transport,
+			&format!("OpenClaw MCP server `{}`", server.name),
+		)?;
 		for key in TRANSPORT_KEYS {
 			entry.remove(*key);
 		}
@@ -275,7 +307,11 @@ pub fn serialize(
 				env,
 				timeout,
 			} => {
-				entry.insert("transport".into(), Value::String("stdio".into()));
+				// `stdio` is not remote vocabulary — it stays a literal.
+				entry.insert(
+					VOCAB.tag_key.into(),
+					Value::String("stdio".into()),
+				);
 				entry.insert("command".into(), Value::String(command.clone()));
 				if !args.is_empty() {
 					entry.insert(
@@ -297,7 +333,10 @@ pub fn serialize(
 				headers,
 				timeout,
 			} => {
-				entry.insert("transport".into(), Value::String("sse".into()));
+				entry.insert(
+					VOCAB.tag_key.into(),
+					Value::String(VOCAB.sse.into()),
+				);
 				entry.insert("url".into(), Value::String(url.clone()));
 				if let Some(headers) = headers {
 					entry.insert("headers".into(), string_map_value(headers));
@@ -312,8 +351,8 @@ pub fn serialize(
 				timeout,
 			} => {
 				entry.insert(
-					"transport".into(),
-					Value::String("streamable-http".into()),
+					VOCAB.tag_key.into(),
+					Value::String(VOCAB.http.into()),
 				);
 				entry.insert("url".into(), Value::String(url.clone()));
 				if let Some(headers) = headers {
@@ -468,5 +507,88 @@ mod tests {
 			"client-id"
 		);
 		assert_eq!(value["mcp"]["servers"]["kept"]["command"], "new-command");
+	}
+
+	/// `LEGACY_TYPE_HTTP` is the ONLY thing that keeps configs written before
+	/// OpenClaw renamed the key readable. Empty it and the legacy
+	/// `"type": "http"` entry falls through to the `unsupported transport`
+	/// arm — and because a parse failure is whole-document, the user loses
+	/// access to EVERY OpenClaw MCP server, not just that one.
+	///
+	/// The alias lives on the LEGACY key only: `"transport": "http"` is
+	/// refused, which is why `VOCAB.http_read_aliases` is empty.
+	#[test]
+	fn a_legacy_type_http_entry_is_read_and_normalised() {
+		let original = r#"{"mcp":{"servers":{"x":{"type":"http","url":"https://example.test/mcp"}}}}"#;
+		let config = parse(original).expect(
+			"a legacy `type: http` entry must stay readable, or the whole \
+			 config becomes unmanageable",
+		);
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::StreamableHttp { .. }
+		));
+		// Read, then normalised to the current spelling under the current key.
+		let output = serialize(&config, Some(original)).unwrap();
+		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
+		assert_eq!(
+			value["mcp"]["servers"]["x"]["transport"],
+			"streamable-http"
+		);
+		assert!(value["mcp"]["servers"]["x"].get("type").is_none());
+	}
+
+	/// `http_read_aliases` means "read as streamable HTTP UNDER `tag_key`".
+	/// OpenClaw's is EMPTY because it reads none there — `http` lives on the
+	/// legacy key (`LEGACY_TYPE_HTTP`) and `transport: "http"` is refused.
+	/// A declaration the dispatch does not honour is the `single_remote: true`
+	/// lie in a new shape, so bind the list to the parser instead of trusting
+	/// the comment: re-adding an alias without wiring it turns this red.
+	#[test]
+	fn every_declared_read_alias_really_parses_under_the_tag_key() {
+		for alias in VOCAB.http_read_aliases {
+			let text = format!(
+				r#"{{"mcp":{{"servers":{{"x":{{"{key}":"{alias}","url":"https://e.test/m"}}}}}}}}"#,
+				key = VOCAB.tag_key
+			);
+			let config = parse(&text).unwrap_or_else(|error| {
+				panic!(
+					"`{}: {alias}` is declared a read alias but is refused: {error}",
+					VOCAB.tag_key
+				)
+			});
+			assert!(matches!(
+				config.mcps[0].transport,
+				McpTransport::StreamableHttp { .. }
+			));
+		}
+		assert!(
+			parse(
+				r#"{"mcp":{"servers":{"x":{"transport":"http","url":"https://e.test/m"}}}}"#
+			)
+			.is_err(),
+			"`transport: http` is refused today; if that changed, `http` \
+			 belongs in `VOCAB.http_read_aliases`"
+		);
+	}
+
+	/// OpenClaw probes `command` × `url` and nothing else. Widening that probe
+	/// would refuse the WHOLE file — every OpenClaw MCP server, not just this
+	/// entry — over a key that means nothing for the transport it declares.
+	///
+	/// CEILING, deliberately asserted only on the parse side: OpenClaw blanket-
+	/// strips `TRANSPORT_KEYS`, so this `headers` IS dropped by the rewrite.
+	/// That normalisation predates the policy module and is recorded in
+	/// `mcp_policy`'s probe doc; it is not something this test blesses.
+	#[test]
+	fn a_stdio_entry_with_an_inert_remote_key_stays_readable() {
+		let config = parse(
+			r#"{"mcp":{"servers":{"x":{"transport":"stdio","command":"run","headers":{"A":"b"}}}}}"#,
+		)
+		.expect("widening the remote probe would refuse this whole file");
+		assert!(matches!(
+			config.mcps[0].transport,
+			McpTransport::Stdio { .. }
+		));
 	}
 }
