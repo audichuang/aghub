@@ -14,7 +14,7 @@
 use crate::errors::{ConfigError, Result};
 use crate::format::mcp_policy::{
 	missing_transport_error, reject_mixed_transport, remote_transport,
-	transport_fields, FieldValue, OwnedKeys, RemoteVocabulary,
+	transport_fields, FieldValue, MixedWording, OwnedKeys, TransportVocabulary,
 };
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use std::collections::HashMap;
@@ -23,8 +23,9 @@ use toml::Value;
 
 /// Grok tags its remote transport `type`, spells SSE `sse`, and also reads
 /// `http` for streamable HTTP (which it writes as a bare `url`, no tag).
-const VOCAB: RemoteVocabulary = RemoteVocabulary {
+const VOCAB: TransportVocabulary = TransportVocabulary {
 	tag_key: "type",
+	stdio: "",
 	sse: "sse",
 	http: "",
 	http_read_aliases: &["http"],
@@ -107,7 +108,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			OWNED.remote,
 			|key| server.contains_key(key),
 			name,
-			"Grok",
+			MixedWording::NamesTheProbedKeys("Grok"),
 		)?;
 		// Dispatch on presence, then extract ONLY the chosen branch's fields.
 		let transport = if let Some(cmd) = server.get("command") {

@@ -1,22 +1,33 @@
 //! The MCP decisions that are the same for every dialect, expressed as DATA the
 //! dialect declares rather than code it re-states.
 //!
+//! ALL 23 MCP-capable agents route through here: the seven hand-written
+//! dialects declare a [`TransportVocabulary`] each, and the 16 `json_map` agents
+//! declare one inside their [`json_map::Dialect`]. There is no second copy —
+//! there used to be (`json_map::Discriminator`, field-for-field the same, with
+//! its own `writes_sse` and its own mixed-entry rule), and the drift it invites
+//! is on the record: the mixed-key rule landed in Grok and had to be hand-ported
+//! to Hermes.
+//!
+//! [`json_map::Dialect`]: crate::format::json_map::Dialect
+//!
 //! Each dialect owns its SYNTAX: it walks its native `Value`, checks key
 //! PRESENCE, and extracts only the selected transport branch's fields (with
 //! per-field "must be a string/array/table" errors). What lives HERE is the
 //! handful of answers that must not differ between them:
 //!
-//! - [`RemoteVocabulary`] — the words a dialect has for a remote transport.
-//!   [`RemoteVocabulary::writes_sse`] is DERIVED from `sse` being non-empty, so
-//!   [`RemoteVocabulary::refuse_unwritable`] is the only place that decides WHEN
-//!   an SSE server must be refused. Declaring is only half of it: a dialect
-//!   still has to CALL it (all seven do, at the top of their serialize loop).
-//!   Declaring `sse: ""` without the call does not refuse — it writes an EMPTY
-//!   tag, which the dialect's own reader then rejects or calls some other
-//!   transport. `mcp_dialect_roundtrip` is what forces the call, NOT
-//!   `mcp_dialect_decisions`: emptying Grok's `sse` and neutering the call
-//!   leaves the decisions table green (its row says `Spelled`, and writing an
-//!   empty tag still "succeeds"), while
+//! - [`TransportVocabulary`] — the words a dialect has for each transport.
+//!   [`TransportVocabulary::writes_sse`] is DERIVED from `sse` being non-empty,
+//!   so [`TransportVocabulary::refuse_unwritable`] is the only place that
+//!   decides WHEN an SSE server must be refused (`json_map` calls it too, for
+//!   the sentence its 16 agents already emit). Declaring is only half of it: a
+//!   dialect still has to CALL it (all seven do, at the top of their serialize
+//!   loop, as does `json_map`). Declaring `sse: ""` without the call does not
+//!   refuse — it writes an EMPTY tag, which the dialect's own reader then
+//!   rejects or calls some other transport. `mcp_dialect_roundtrip` is what
+//!   forces the call, NOT `mcp_dialect_decisions`: emptying Grok's `sse` and
+//!   neutering the call leaves the decisions table green (its row says
+//!   `Spelled`, and writing an empty tag still "succeeds"), while
 //!   `every_agent_reads_back_the_transport_it_wrote` fails with `grok cannot
 //!   read back its own output`. That guard is registry-driven and bidirectional
 //!   — its `NO_NATIVE_SSE` list also fails an agent that starts refusing SSE
@@ -56,18 +67,27 @@ use crate::errors::{ConfigError, Result};
 use crate::models::McpTransport;
 use std::collections::HashMap;
 
-/// The words a dialect has for a remote transport.
+/// The words a dialect has for each transport, and the key it tags them under.
 ///
 /// An EMPTY string means "this dialect has no such word", which is a fact about
 /// the vendor's format, not an instruction about where to `return Err`. Declare
-/// what you can spell; the refusals follow.
-pub struct RemoteVocabulary {
-	/// The per-server key the remote transport is tagged with (`type`,
-	/// `transport`). Empty when the dialect has no tag at all (Codex writes a
-	/// bare `url`), in which case only [`refuse_unwritable`] applies.
+/// what you can spell; the refusals follow. An ALL-EMPTY vocabulary is a dialect
+/// with no transport tag whatsoever — the shape `json_map` used to spell as a
+/// second `Option::None` case.
+#[derive(Clone, Copy)]
+pub struct TransportVocabulary {
+	/// The per-server key the transport is tagged with (`type`, `transport`).
+	/// Empty when the dialect has no tag at all (Codex writes a bare `url`), in
+	/// which case only [`refuse_unwritable`] applies.
 	///
-	/// [`refuse_unwritable`]: RemoteVocabulary::refuse_unwritable
+	/// [`refuse_unwritable`]: TransportVocabulary::refuse_unwritable
 	pub tag_key: &'static str,
+	/// How this dialect spells stdio under `tag_key`. EMPTY means it tags a
+	/// stdio server not at all and lets `command`'s presence say so (Grok,
+	/// Hermes, Codex, Amp). A dialect that DISPATCHES on the tag must spell it
+	/// here rather than inline the literal at its two call sites: Mistral did,
+	/// and the two literals only agreed by luck.
+	pub stdio: &'static str,
 	/// How this dialect spells SSE. EMPTY means it has no word for SSE, so
 	/// aghub must refuse to write one instead of downgrading it to HTTP behind
 	/// the user's back.
@@ -76,17 +96,42 @@ pub struct RemoteVocabulary {
 	/// a bare `url` with no tag at all (Grok, Hermes, Codex) — which is a fact
 	/// about the format, not an omission.
 	pub http: &'static str,
-	/// Tag values READ as streamable HTTP, besides an absent tag. Only Hermes
-	/// understands the spelled-out `streamable-http`; Grok would reject it.
+	/// Tag values READ as streamable HTTP besides the dialect's own [`http`]
+	/// spelling. Only Hermes understands the spelled-out `streamable-http`;
+	/// Grok would reject it.
+	///
+	/// `json_map` shares ONE wide list across all 16 of its agents — the
+	/// universal set (`http` / `streamable-http` / `streamableHttp`) its parser
+	/// used to hardcode. Narrowing it per dialect would change what those agents
+	/// parse, so the list stays wide; it lives here so the DECLARATION is the
+	/// truth rather than a comment about the truth.
+	///
+	/// [`http`]: TransportVocabulary::http
 	pub http_read_aliases: &'static [&'static str],
 }
 
-impl RemoteVocabulary {
+impl TransportVocabulary {
 	/// Whether the dialect can round-trip an SSE server. DERIVED from the
-	/// spelling, never restated by the dialect — the same shape
-	/// `json_map::Dialect::writes_sse` has used since the first review.
+	/// spelling, never restated by the dialect, and this is the ONLY definition
+	/// — `json_map::Dialect` used to carry a second one that said the same thing
+	/// through an `Option`.
 	pub const fn writes_sse(&self) -> bool {
 		!self.sse.is_empty()
+	}
+
+	/// Whether `tag` READS as streamable HTTP here: the dialect's own writing
+	/// spelling, or one of the extra spellings it accepts. The ONE definition —
+	/// `json_map`, Mistral and OpenCode each used to spell this condition out
+	/// for themselves, which is three places to forget when a dialect gains a
+	/// word. An EMPTY `http` matches nothing (Grok, Hermes and Codex write a
+	/// bare `url`), so a `""` tag never lands here.
+	///
+	/// [`remote_transport`] deliberately does NOT route through this: it treats
+	/// an absent tag as HTTP too, which is a rule about the tag's absence rather
+	/// than about a spelling.
+	pub fn reads_http(&self, tag: &str) -> bool {
+		(!self.http.is_empty() && tag == self.http)
+			|| self.http_read_aliases.contains(&tag)
 	}
 
 	/// Refuse to write a transport this dialect has no word for.
@@ -188,19 +233,45 @@ pub fn reject_mixed_transport(
 	remote_probe: &[&str],
 	present: impl Fn(&str) -> bool,
 	name: &str,
-	dialect: &str,
+	wording: MixedWording,
 ) -> Result<()> {
 	let has_stdio = stdio_probe.iter().any(|key| present(key));
 	let has_remote = remote_probe.iter().any(|key| present(key));
 	if has_stdio && has_remote {
-		return Err(ConfigError::InvalidConfig(format!(
-			"{dialect} MCP server `{name}` mixes stdio keys ({stdio}) with \
-			 remote keys ({remote})",
-			stdio = stdio_probe.join("/"),
-			remote = remote_probe.join("/")
-		)));
+		return Err(ConfigError::InvalidConfig(match wording {
+			MixedWording::NamesTheProbedKeys(dialect) => format!(
+				"{dialect} MCP server `{name}` mixes stdio keys ({stdio}) with \
+				 remote keys ({remote})",
+				stdio = stdio_probe.join("/"),
+				remote = remote_probe.join("/")
+			),
+			MixedWording::CommandAndUrl => format!(
+				"MCP server '{name}' cannot contain both command and url"
+			),
+		}));
 	}
 	Ok(())
+}
+
+/// Which sentence [`reject_mixed_transport`] ends up writing.
+///
+/// The CONDITION above is not the caller's to restate; only the WORDING is
+/// chosen here, the way [`TransportVocabulary::refuse_unwritable`] takes the
+/// caller's own noun phrase because the dialects quote server names
+/// differently. These two are NOT interchangeable — each is what that agent's
+/// users already see on disk today, and unifying them would change 23 agents'
+/// error text for tidiness.
+pub enum MixedWording {
+	/// `` <dialect> MCP server `<name>` mixes stdio keys (…) with remote keys
+	/// (…) `` — the seven hand-written dialects. The key lists are DERIVED from
+	/// the probes passed in, so a dialect cannot claim to have checked a key it
+	/// never read.
+	NamesTheProbedKeys(&'static str),
+	/// `MCP server '<name>' cannot contain both command and url` — verbatim what
+	/// the 16 `json_map` agents have always emitted. It names no key list, so
+	/// unlike the variant above it does NOT track a widened probe; `json_map`
+	/// probes exactly `command` × the URL it owns.
+	CommandAndUrl,
 }
 
 /// Build the remote transport for a `url`-based server. The dialect's own SSE
@@ -211,7 +282,7 @@ pub fn remote_transport(
 	url: String,
 	headers: Option<HashMap<String, String>>,
 	tag: Option<String>,
-	vocab: &RemoteVocabulary,
+	vocab: &TransportVocabulary,
 	name: &str,
 	dialect: &str,
 ) -> Result<McpTransport> {
@@ -263,11 +334,11 @@ pub enum FieldValue {
 /// `StreamableHttp` writes no tag in either dialect; `enabled` is written
 /// separately by the adapter.
 ///
-/// Callers must have run [`RemoteVocabulary::refuse_unwritable`] first: a
+/// Callers must have run [`TransportVocabulary::refuse_unwritable`] first: a
 /// dialect with no SSE spelling has nothing to put in the tag.
 pub fn transport_fields(
 	transport: &McpTransport,
-	vocab: &RemoteVocabulary,
+	vocab: &TransportVocabulary,
 ) -> Vec<(&'static str, FieldValue)> {
 	let mut out = Vec::new();
 	match transport {
@@ -319,37 +390,156 @@ mod tests {
 		stdio: &[&str],
 		remote: &[&str],
 		present: &[&str],
-		dialect: &str,
+		wording: MixedWording,
 	) -> Result<()> {
 		reject_mixed_transport(
 			stdio,
 			remote,
 			|key| present.contains(&key),
 			"m",
-			dialect,
+			wording,
 		)
 	}
 
+	const GROK: MixedWording = MixedWording::NamesTheProbedKeys("Grok");
+	const HERMES: MixedWording = MixedWording::NamesTheProbedKeys("Hermes");
+
 	#[test]
 	fn reject_mixed_only_when_both_families_present() {
-		assert!(mixed(GROK_STDIO, GROK_REMOTE, &["command", "url"], "Grok")
-			.is_err());
-		assert!(mixed(GROK_STDIO, GROK_REMOTE, &["command"], "Grok").is_ok());
-		assert!(mixed(GROK_STDIO, GROK_REMOTE, &["url"], "Grok").is_ok());
+		assert!(
+			mixed(GROK_STDIO, GROK_REMOTE, &["command", "url"], GROK).is_err()
+		);
+		assert!(mixed(GROK_STDIO, GROK_REMOTE, &["command"], GROK).is_ok());
+		assert!(mixed(GROK_STDIO, GROK_REMOTE, &["url"], GROK).is_ok());
 		// The remote-family wording is DERIVED from the keys the dialect
 		// probes, so it cannot claim to have checked a key it never read.
 		let g = format!(
 			"{:?}",
-			mixed(GROK_STDIO, GROK_REMOTE, &["command", "url"], "Grok")
+			mixed(GROK_STDIO, GROK_REMOTE, &["command", "url"], GROK)
 				.unwrap_err()
 		);
 		assert!(g.contains("url/headers/type"));
 		let h = format!(
 			"{:?}",
-			mixed(GROK_STDIO, HERMES_REMOTE, &["command", "url"], "Hermes")
+			mixed(GROK_STDIO, HERMES_REMOTE, &["command", "url"], HERMES)
 				.unwrap_err()
 		);
 		assert!(h.contains("url/headers)") && !h.contains("type"));
+	}
+
+	/// The `json_map` wording is the SAME condition with a different sentence —
+	/// the split the 16 agents' existing error text forces. Both must survive:
+	/// unifying them would rewrite what those users see.
+	#[test]
+	fn the_json_map_wording_names_no_key_list() {
+		let error = format!(
+			"{:?}",
+			mixed(
+				&["command"],
+				&["url"],
+				&["command", "url"],
+				MixedWording::CommandAndUrl
+			)
+			.unwrap_err()
+		);
+		assert!(
+			error
+				.contains("MCP server 'm' cannot contain both command and url"),
+			"{error}"
+		);
+		assert!(!error.contains("mixes stdio keys"), "{error}");
+		// Same condition: one family alone is still fine.
+		assert!(mixed(
+			&["command"],
+			&["url"],
+			&["command"],
+			MixedWording::CommandAndUrl
+		)
+		.is_ok());
+	}
+
+	/// Every mixed-entry sentence, through the dialect's REAL parse path.
+	///
+	/// [`MixedWording`] is a free parameter: the two variants compile at any of
+	/// the seven call sites, so swapping one rewrites what up to 16 agents'
+	/// users see and nothing above notices —
+	/// [`the_json_map_wording_names_no_key_list`] pins the ENUM's sentence, not
+	/// that `json_map` is the caller passing it. This pins the pairing. The
+	/// key lists are DERIVED from each call site's probes, so it also catches a
+	/// widened probe and a copy-pasted dialect NAME (Grok/Hermes assert the
+	/// same shape with different words).
+	///
+	/// [`the_json_map_wording_names_no_key_list`]: self::the_json_map_wording_names_no_key_list
+	#[test]
+	fn every_dialect_emits_the_mixed_sentence_its_users_already_see() {
+		use crate::format::{
+			json_map, json_openclaw, json_opencode, toml_format, toml_mistral,
+		};
+		use crate::models::AgentConfig;
+
+		let cases: [(&str, Result<AgentConfig>, &str); 7] = [
+			(
+				"grok",
+				toml_grok::parse("[mcp_servers.m]\ncommand = \"c\"\nurl = \"u\"\n"),
+				"Grok MCP server `m` mixes stdio keys (command/args/env) with \
+				 remote keys (url/headers/type)",
+			),
+			(
+				"hermes",
+				yaml_hermes::parse("mcp_servers:\n  m:\n    command: c\n    url: u\n"),
+				"Hermes MCP server `m` mixes stdio keys (command/args/env) \
+				 with remote keys (url/headers)",
+			),
+			(
+				"codex",
+				toml_format::parse("[mcp_servers.m]\ncommand = \"c\"\nurl = \"u\"\n"),
+				"Codex MCP server `m` mixes stdio keys (command) with remote \
+				 keys (url)",
+			),
+			(
+				"mistral",
+				toml_mistral::parse(
+					"[[mcp_servers]]\nname = \"m\"\ntransport = \"stdio\"\ncommand = \"c\"\nurl = \"u\"\n",
+				),
+				"Mistral Vibe MCP server `m` mixes stdio keys (command) with \
+				 remote keys (url)",
+			),
+			(
+				"openclaw",
+				json_openclaw::parse(
+					r#"{"mcp":{"servers":{"m":{"command":"c","url":"u"}}}}"#,
+				),
+				"OpenClaw MCP server `m` mixes stdio keys (command) with \
+				 remote keys (url)",
+			),
+			(
+				"opencode",
+				json_opencode::parse(
+					r#"{"mcp":{"m":{"command":["c"],"url":"u"}}}"#,
+				),
+				"OpenCode MCP server `m` mixes stdio keys (command) with \
+				 remote keys (url)",
+			),
+			(
+				// One call site, all 16 json_map agents.
+				"json_map",
+				json_map::parse(
+					r#"{"mcpServers":{"m":{"command":"c","url":"u"}}}"#,
+					&json_map::MCP_SERVERS,
+				),
+				"MCP server 'm' cannot contain both command and url",
+			),
+		];
+
+		for (dialect, result, sentence) in cases {
+			let error = result
+				.expect_err("a mixed entry must be refused, never half-parsed")
+				.to_string();
+			assert!(
+				error.contains(sentence),
+				"{dialect}: users see `{error}`, not `{sentence}`"
+			);
+		}
 	}
 
 	/// The vocabularies the dialects actually ship, borrowed through their own
@@ -421,14 +611,16 @@ mod tests {
 
 	#[test]
 	fn refuse_unwritable_fires_only_where_sse_has_no_spelling() {
-		let spells_sse = RemoteVocabulary {
+		let spells_sse = TransportVocabulary {
 			tag_key: "type",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &[],
 		};
-		let no_sse = RemoteVocabulary {
+		let no_sse = TransportVocabulary {
 			tag_key: "type",
+			stdio: "",
 			sse: "",
 			http: "",
 			http_read_aliases: &[],
@@ -469,14 +661,16 @@ mod tests {
 
 	#[test]
 	fn every_written_key_is_also_a_stripped_key() {
-		let grok = RemoteVocabulary {
+		let grok = TransportVocabulary {
 			tag_key: "type",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &["http"],
 		};
-		let hermes = RemoteVocabulary {
+		let hermes = TransportVocabulary {
 			tag_key: "transport",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &["http", "streamable-http"],
@@ -513,8 +707,9 @@ mod tests {
 
 	#[test]
 	fn serialize_fields_stdio_carry_exact_values_and_omit_absent_env() {
-		let vocab = RemoteVocabulary {
+		let vocab = TransportVocabulary {
 			tag_key: "type",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &["http"],
@@ -553,14 +748,16 @@ mod tests {
 
 	#[test]
 	fn serialize_fields_sse_writes_each_dialects_own_tag() {
-		let grok = RemoteVocabulary {
+		let grok = TransportVocabulary {
 			tag_key: "type",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &["http"],
 		};
-		let hermes = RemoteVocabulary {
+		let hermes = TransportVocabulary {
 			tag_key: "transport",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &["http", "streamable-http"],
@@ -588,8 +785,9 @@ mod tests {
 
 	#[test]
 	fn serialize_fields_http_is_url_only_and_omits_absent_headers() {
-		let vocab = RemoteVocabulary {
+		let vocab = TransportVocabulary {
 			tag_key: "type",
+			stdio: "",
 			sse: "sse",
 			http: "",
 			http_read_aliases: &["http"],

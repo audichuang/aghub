@@ -1,5 +1,5 @@
 use crate::format::mcp_policy::{
-	reject_mixed_transport, OwnedKeys, RemoteVocabulary,
+	reject_mixed_transport, MixedWording, OwnedKeys, TransportVocabulary,
 };
 use crate::{
 	errors::{ConfigError, Result},
@@ -16,8 +16,9 @@ use std::collections::HashMap;
 /// come to disagree with the parser the way `single_remote: true` did in three
 /// modules at once. Give Codex a tag and the fields stop being empty and start
 /// being read on the same edit.
-const VOCAB: RemoteVocabulary = RemoteVocabulary {
+const VOCAB: TransportVocabulary = TransportVocabulary {
 	tag_key: "",
+	stdio: "",
 	sse: "",
 	http: "",
 	http_read_aliases: &[],
@@ -156,7 +157,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				_ => false,
 			},
 			name,
-			"Codex",
+			MixedWording::NamesTheProbedKeys("Codex"),
 		)?;
 		if command.is_none() && url.is_none() {
 			return Err(ConfigError::InvalidConfig(format!(

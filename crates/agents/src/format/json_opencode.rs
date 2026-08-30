@@ -1,5 +1,6 @@
 use crate::format::mcp_policy::{
-	missing_transport_error, reject_mixed_transport, RemoteVocabulary,
+	missing_transport_error, reject_mixed_transport, MixedWording,
+	TransportVocabulary,
 };
 use crate::{
 	errors::{ConfigError, Result},
@@ -17,16 +18,13 @@ use std::collections::HashMap;
 /// `tag_key` must stay equal to the `#[serde(rename)]` on `server_type` below;
 /// serde cannot read a const, so `vocab_tag_key_matches_the_serialized_key`
 /// pins the two together.
-const VOCAB: RemoteVocabulary = RemoteVocabulary {
+const VOCAB: TransportVocabulary = TransportVocabulary {
 	tag_key: "type",
+	stdio: "local",
 	sse: "",
 	http: "remote",
 	http_read_aliases: &[],
 };
-
-/// The stdio tag. NOT remote vocabulary, so it is a literal here rather than a
-/// `RemoteVocabulary` field.
-const LOCAL: &str = "local";
 
 #[derive(Debug, Default, Deserialize)]
 struct OpenCodeConfig {
@@ -100,7 +98,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 				_ => false,
 			},
 			&name,
-			"OpenCode",
+			MixedWording::NamesTheProbedKeys("OpenCode"),
 		)?;
 		if entry.command.is_none() && entry.url.is_none() {
 			return Err(missing_transport_error(&name, "OpenCode"));
@@ -111,13 +109,8 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 		// fall-through read `{"type":"sse","url":…}` as a command-less stdio
 		// server and wrote `command: [""]` over the user's URL.
 		let is_remote = match entry.server_type.as_deref() {
-			Some(tag)
-				if tag == VOCAB.http
-					|| VOCAB.http_read_aliases.contains(&tag) =>
-			{
-				true
-			}
-			Some(LOCAL) => false,
+			Some(tag) if VOCAB.reads_http(tag) => true,
+			Some(tag) if tag == VOCAB.stdio => false,
 			None => entry.url.is_some(),
 			Some(other) => {
 				return Err(ConfigError::InvalidConfig(format!(
@@ -209,7 +202,7 @@ pub fn serialize(
 				let mut cmd = vec![command.clone()];
 				cmd.extend(args.iter().cloned());
 				OpenCodeMcpOutput {
-					server_type: LOCAL.to_string(),
+					server_type: VOCAB.stdio.to_string(),
 					command: Some(cmd),
 					url: None,
 					enabled: mcp.enabled,
@@ -367,7 +360,7 @@ mod tests {
 		};
 		let out = serialize(&config, None).unwrap();
 		let val: serde_json::Value = serde_json::from_str(&out).unwrap();
-		assert_eq!(val["mcp"]["s"][VOCAB.tag_key], LOCAL);
+		assert_eq!(val["mcp"]["s"][VOCAB.tag_key], VOCAB.stdio);
 		assert_eq!(
 			val["mcp"]["s"].as_object().unwrap().len(),
 			3,

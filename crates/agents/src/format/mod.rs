@@ -15,17 +15,20 @@
 //!
 //! No two dialects share a `Value` type (serde_json vs serde_yaml vs toml differ
 //! on key types, null semantics, comment retention and numeric fit), so each
-//! keeps its own engine. What the seven HAND-WRITTEN dialects share is the
-//! ANSWERS to a handful of questions, and those live in [`mcp_policy`] as DATA
-//! each of them declares: a `RemoteVocabulary` (which remote words it has — an
+//! keeps its own engine. What ALL 23 MCP-capable agents share is the ANSWERS to
+//! a handful of questions, and those live in [`mcp_policy`] as DATA each dialect
+//! declares: a `TransportVocabulary` (which word it has for each transport — an
 //! empty SSE spelling is what `refuse_unwritable` turns into a refusal, so no
 //! dialect restates the CONDITION, though each still has to call it), an
 //! `OwnedKeys` (which keys a transport owns), plus `reject_mixed_transport`,
 //! `remote_transport`, `missing_transport_error` and `transport_fields` over the
-//! neutral `FieldValue`. The 16 `json_map` agents answer the same questions
-//! through [`json_map::Dialect`] and its `Discriminator` instead — a separate,
-//! deliberately untouched copy, because one parse/serialize pair already serves
-//! all 16 and merging the two would rewrite 16 agents' error text for tidiness.
+//! neutral `FieldValue`. The seven hand-written dialects declare a vocabulary
+//! each; the 16 `json_map` agents declare one INSIDE their
+//! [`json_map::Dialect`], which is the same type — it used to be a second
+//! declaration (`Discriminator`, field-for-field the same, plus its own
+//! `writes_sse` and its own mixed-entry rule). What stays split is only the
+//! WORDING: `MixedWording::CommandAndUrl` keeps the sentence 16 agents' users
+//! already see, because unifying the text is a user-visible change, not a merge.
 //! Each dialect keeps its own SYNTAX and phase order
 //! (validate `enabled` → reject mixed on key presence → dispatch on presence →
 //! extract the chosen branch → build), so error precedence is byte-identical to

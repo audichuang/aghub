@@ -7,7 +7,7 @@
 
 use crate::errors::{ConfigError, Result};
 use crate::format::mcp_policy::{
-	reject_mixed_transport, OwnedKeys, RemoteVocabulary,
+	reject_mixed_transport, MixedWording, OwnedKeys, TransportVocabulary,
 };
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use std::collections::{HashMap, HashSet};
@@ -17,8 +17,9 @@ use toml::Value;
 /// Vibe tags transports with `transport` and has ONE remote word (`http` is a
 /// spelling it still reads, and keeps on a rewrite). No word for SSE, which is
 /// what makes `refuse_unwritable` refuse — this module never restates that.
-const VOCAB: RemoteVocabulary = RemoteVocabulary {
+const VOCAB: TransportVocabulary = TransportVocabulary {
 	tag_key: "transport",
+	stdio: "stdio",
 	sse: "",
 	http: "streamable-http",
 	http_read_aliases: &["http"],
@@ -285,16 +286,12 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			&["url"],
 			|key| server.contains_key(key),
 			&name,
-			"Mistral Vibe",
+			MixedWording::NamesTheProbedKeys("Mistral Vibe"),
 		)?;
 		let transport_name = required_string(server, VOCAB.tag_key, &name)?;
 		let transport = match transport_name.as_str() {
-			"stdio" => parse_stdio(server, &name)?,
-			tag if tag == VOCAB.http
-				|| VOCAB.http_read_aliases.contains(&tag) =>
-			{
-				parse_remote(server, &name)?
-			}
+			tag if tag == VOCAB.stdio => parse_stdio(server, &name)?,
+			tag if VOCAB.reads_http(tag) => parse_remote(server, &name)?,
 			other => {
 				return Err(invalid(format!(
 					"Mistral Vibe MCP server `{name}` has unsupported transport `{other}`"
@@ -497,7 +494,7 @@ pub fn serialize(
 				clear_remote_fields(&mut table);
 				table.insert(
 					VOCAB.tag_key.to_string(),
-					Value::String("stdio".into()),
+					Value::String(VOCAB.stdio.into()),
 				);
 				table.insert(
 					"command".to_string(),

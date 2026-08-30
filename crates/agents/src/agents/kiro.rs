@@ -9,12 +9,6 @@ use crate::{define_mcp_paths, json_map_dialect};
 // read, and v2.13.3 already wrote it — removing it would strand every
 // config that release produced.
 json_map_dialect!(json_map::Dialect {
-	discriminator: Some(json_map::Discriminator {
-		key: "type",
-		stdio: "stdio",
-		sse: "sse",
-		http: "http",
-	}),
 	toggle_key: json_map::ToggleKey::Disabled,
 	..json_map::MCP_SERVERS
 });

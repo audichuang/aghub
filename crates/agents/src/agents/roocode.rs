@@ -1,17 +1,15 @@
 use crate::define_skill_paths;
 use crate::descriptor::*;
-use crate::format::json_map;
+use crate::format::{json_map, mcp_policy};
 use crate::json_map_dialect;
 use std::path::{Path, PathBuf};
 
 // Roo Code spells streamable HTTP in kebab-case and toggles with `disabled`.
 json_map_dialect!(json_map::Dialect {
-	discriminator: Some(json_map::Discriminator {
-		key: "type",
-		stdio: "stdio",
-		sse: "sse",
+	vocab: mcp_policy::TransportVocabulary {
 		http: "streamable-http",
-	}),
+		..json_map::MCP_SERVERS.vocab
+	},
 	toggle_key: json_map::ToggleKey::Disabled,
 	..json_map::MCP_SERVERS
 });

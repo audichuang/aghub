@@ -8,12 +8,6 @@ use std::path::{Path, PathBuf};
 // read, and v2.13.3 already wrote it — removing it would strand every
 // config that release produced.
 json_map_dialect!(json_map::Dialect {
-	discriminator: Some(json_map::Discriminator {
-		key: "type",
-		stdio: "stdio",
-		sse: "sse",
-		http: "http",
-	}),
 	..json_map::MCP_SERVERS
 });
 

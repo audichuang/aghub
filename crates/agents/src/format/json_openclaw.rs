@@ -6,7 +6,9 @@
 //! rewrites.
 
 use crate::errors::{ConfigError, Result};
-use crate::format::mcp_policy::{reject_mixed_transport, RemoteVocabulary};
+use crate::format::mcp_policy::{
+	reject_mixed_transport, MixedWording, TransportVocabulary,
+};
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde_json::{Map, Value};
@@ -22,8 +24,9 @@ use std::collections::HashMap;
 /// see `LEGACY_TYPE_HTTP`. Declaring it up here would be the `single_remote:
 /// true` mistake again: a field whose value is wrong for the thing it names,
 /// held together only by the one call site that happens to make it read true.
-const VOCAB: RemoteVocabulary = RemoteVocabulary {
+const VOCAB: TransportVocabulary = TransportVocabulary {
 	tag_key: "transport",
+	stdio: "stdio",
 	sse: "sse",
 	http: "streamable-http",
 	http_read_aliases: &[],
@@ -196,12 +199,11 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			&["url"],
 			|key| server.contains_key(key),
 			name,
-			"OpenClaw",
+			MixedWording::NamesTheProbedKeys("OpenClaw"),
 		)?;
 		let timeout = optional_timeout(server, name)?;
 		let transport = match transport_name {
-			// `stdio` is not remote vocabulary — it stays a literal.
-			Some("stdio") => McpTransport::Stdio {
+			Some(tag) if tag == VOCAB.stdio => McpTransport::Stdio {
 				command: required_string(server, name, "command")?,
 				args: optional_args(server, name)?,
 				env: optional_string_map(server, name, "env")?,
@@ -307,10 +309,9 @@ pub fn serialize(
 				env,
 				timeout,
 			} => {
-				// `stdio` is not remote vocabulary — it stays a literal.
 				entry.insert(
 					VOCAB.tag_key.into(),
-					Value::String("stdio".into()),
+					Value::String(VOCAB.stdio.into()),
 				);
 				entry.insert("command".into(), Value::String(command.clone()));
 				if !args.is_empty() {

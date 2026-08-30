@@ -1,6 +1,6 @@
 use crate::define_skill_paths;
 use crate::descriptor::*;
-use crate::format::json_map;
+use crate::format::{json_map, mcp_policy};
 use crate::json_map_dialect;
 use std::path::{Path, PathBuf};
 
@@ -8,12 +8,11 @@ use std::path::{Path, PathBuf};
 // and leaves stdio untagged, and toggles with `disabled`.
 json_map_dialect!(json_map::Dialect {
 	server_key: "amp.mcpServers",
-	discriminator: Some(json_map::Discriminator {
-		key: "transport",
+	vocab: mcp_policy::TransportVocabulary {
+		tag_key: "transport",
 		stdio: "",
-		sse: "sse",
-		http: "http",
-	}),
+		..json_map::MCP_SERVERS.vocab
+	},
 	toggle_key: json_map::ToggleKey::Disabled,
 	..json_map::MCP_SERVERS
 });

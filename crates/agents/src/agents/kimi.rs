@@ -1,6 +1,6 @@
 use crate::define_skill_paths;
 use crate::descriptor::*;
-use crate::format::json_map;
+use crate::format::{json_map, mcp_policy};
 use crate::json_map_dialect;
 use std::path::{Path, PathBuf};
 
@@ -31,12 +31,10 @@ fn global_data_dir() -> Option<PathBuf> {
 // Kimi CLI 1.49.0 writes `transport: "http"`; the shared parser also accepts
 // the compatible `streamable-http` spelling found in existing configs.
 json_map_dialect!(json_map::Dialect {
-	discriminator: Some(json_map::Discriminator {
-		key: "transport",
-		stdio: "stdio",
-		sse: "sse",
-		http: "http",
-	}),
+	vocab: mcp_policy::TransportVocabulary {
+		tag_key: "transport",
+		..json_map::MCP_SERVERS.vocab
+	},
 	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });

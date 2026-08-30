@@ -10,12 +10,6 @@ use crate::json_map_dialect;
 // config that release produced.
 json_map_dialect!(json_map::Dialect {
 	server_key: "context_servers",
-	discriminator: Some(json_map::Discriminator {
-		key: "type",
-		stdio: "stdio",
-		sse: "sse",
-		http: "http",
-	}),
 	..json_map::MCP_SERVERS
 });
 

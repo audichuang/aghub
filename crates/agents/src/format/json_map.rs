@@ -8,6 +8,9 @@
 //! now refuses to write it instead of quietly downgrading it, and never parses
 //! into one either.
 
+use crate::format::mcp_policy::{
+	reject_mixed_transport, MixedWording, TransportVocabulary,
+};
 use crate::{
 	errors::{ConfigError, Result},
 	models::{AgentConfig, McpServer, McpTransport},
@@ -30,22 +33,16 @@ pub enum UntypedRemote {
 	StreamableHttp,
 }
 
-/// The native transport tag. An EMPTY spelling means the dialect has no word
-/// for that transport, so aghub must neither write nor infer it.
-#[derive(Clone, Copy)]
-pub struct Discriminator {
-	pub key: &'static str,
-	pub stdio: &'static str,
-	pub sse: &'static str,
-	pub http: &'static str,
-}
-
 /// One agent's map dialect: where the servers live and how each field is spelled.
 #[derive(Clone, Copy)]
 pub struct Dialect {
 	/// Dotted path to the server map (`"mcpServers"`, `"amp.mcpServers"`, …).
 	pub server_key: &'static str,
-	pub discriminator: Option<Discriminator>,
+	/// The transport words, in the SAME type the seven hand-written dialects
+	/// declare. This used to be an `Option<Discriminator>` — the same fields
+	/// under different names, with its own `writes_sse` — and the `None` case
+	/// is now what it always meant: an all-empty vocabulary.
+	pub vocab: TransportVocabulary,
 	/// The URL key this dialect WRITES.
 	pub url_key: &'static str,
 	/// URL keys it also READS and STRIPS: spellings an older aghub wrote for
@@ -63,14 +60,6 @@ pub struct Dialect {
 }
 
 impl Dialect {
-	/// Whether the dialect can round-trip an SSE server.
-	pub const fn writes_sse(&self) -> bool {
-		match self.discriminator {
-			Some(discriminator) => !discriminator.sse.is_empty(),
-			None => false,
-		}
-	}
-
 	/// Whether the dialect has a persisted per-server on/off field.
 	pub const fn writes_toggle(&self) -> bool {
 		!matches!(self.toggle_key, ToggleKey::None)
@@ -80,12 +69,16 @@ impl Dialect {
 /// The `mcpServers` + `type: stdio|sse|http` dialect used by most agents.
 pub const MCP_SERVERS: Dialect = Dialect {
 	server_key: "mcpServers",
-	discriminator: Some(Discriminator {
-		key: "type",
+	vocab: TransportVocabulary {
+		tag_key: "type",
 		stdio: "stdio",
 		sse: "sse",
 		http: "http",
-	}),
+		// The universal set EVERY json_map agent reads, whatever its own `http`
+		// spelling is: Cline writes `streamableHttp` and still reads `http`, so
+		// this list is shared, not narrowed per dialect.
+		http_read_aliases: &["http", "streamable-http", "streamableHttp"],
+	},
 	url_key: "url",
 	legacy_url_keys: &[],
 	http_url_key: None,
@@ -271,11 +264,21 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 			))
 		})?;
 		let (url, declared_http) = owned_url(&rest, dialect, &name)?;
-		if command.is_some() && url.is_some() {
-			return Err(ConfigError::InvalidConfig(format!(
-				"MCP server '{name}' cannot contain both command and url"
-			)));
-		}
+		// Probes the URL SPELLING THIS DIALECT OWNS (`serverUrl`, `httpUrl`, a
+		// legacy `url`), which `owned_url` has already resolved — so the probe
+		// stays `command` × the one URL, and a per-field "must be a string"
+		// error still fires BEFORE this, as it always has.
+		reject_mixed_transport(
+			&["command"],
+			&["url"],
+			|key| match key {
+				"command" => command.is_some(),
+				"url" => url.is_some(),
+				_ => false,
+			},
+			&name,
+			MixedWording::CommandAndUrl,
+		)?;
 		let args = string_list(&args, &name, "args")?;
 		let env = env.map(|env| string_map(env, &name, "env")).transpose()?;
 		let nested_transport = transport.as_ref().and_then(|value| {
@@ -287,14 +290,12 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 		// present lets a foreign one decide: a Kimi entry carrying both
 		// `transport: "http"` (native) and a stray `type: "sse"` would parse as
 		// SSE, and the save then rewrites the native key to `sse`.
-		let own_tag =
-			dialect
-				.discriminator
-				.and_then(|discriminator| match discriminator.key {
-					"type" => server_type.as_deref(),
-					"transport" => nested_transport,
-					_ => None,
-				});
+		let own_tag = match dialect.vocab.tag_key {
+			"type" => server_type.as_deref(),
+			"transport" => nested_transport,
+			// Including `""` — a dialect with no tag at all.
+			_ => None,
+		};
 		let tag = own_tag.or(server_type.as_deref()).or(nested_transport);
 		let transport = if declared_http {
 			McpTransport::StreamableHttp {
@@ -323,7 +324,7 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 					headers,
 					timeout: None,
 				},
-				Some("http" | "streamable-http" | "streamableHttp") => {
+				Some(tag) if dialect.vocab.reads_http(tag) => {
 					McpTransport::StreamableHttp {
 						url: url.ok_or_else(|| {
 							ConfigError::InvalidConfig(format!(
@@ -349,7 +350,7 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 						}
 					} else if let Some(url) = url {
 						// Never infer a transport the dialect could not write back.
-						let is_sse = dialect.writes_sse()
+						let is_sse = dialect.vocab.writes_sse()
 							&& dialect.untyped_remote
 								== UntypedRemote::InferSseFromUrl
 							&& url_has_sse_path(&url);
@@ -464,15 +465,12 @@ pub fn serialize(
 	let mut servers_map = serde_json::Map::new();
 
 	for mcp in &config.mcps {
-		if matches!(mcp.transport, McpTransport::Sse { .. })
-			&& !dialect.writes_sse()
-		{
-			return Err(ConfigError::InvalidConfig(format!(
-				"MCP server '{name}' uses SSE, which this agent's config format \
-				 cannot express; use streamable HTTP instead",
-				name = mcp.name
-			)));
-		}
+		// Same sentence these 16 agents already emit, now built where every
+		// other dialect builds it.
+		dialect.vocab.refuse_unwritable(
+			&mcp.transport,
+			&format!("MCP server '{name}'", name = mcp.name),
+		)?;
 		// A dialect without a persisted toggle cannot represent a disabled
 		// server, so it is left out rather than written back as enabled.
 		if !mcp.enabled && !dialect.writes_toggle() {
@@ -521,11 +519,7 @@ pub fn serialize(
 			McpTransport::Stdio {
 				command, args, env, ..
 			} => {
-				insert_discriminator(
-					&mut entry,
-					dialect.discriminator,
-					|discriminator| discriminator.stdio,
-				);
+				insert_tag(&mut entry, &dialect.vocab, dialect.vocab.stdio);
 				entry.insert("command".into(), command.clone().into());
 				if !args.is_empty() {
 					entry.insert("args".into(), serde_json::json!(args));
@@ -536,11 +530,7 @@ pub fn serialize(
 				}
 			}
 			McpTransport::Sse { url, headers, .. } => {
-				insert_discriminator(
-					&mut entry,
-					dialect.discriminator,
-					|discriminator| discriminator.sse,
-				);
+				insert_tag(&mut entry, &dialect.vocab, dialect.vocab.sse);
 				entry.insert(dialect.url_key.into(), url.clone().into());
 				if let Some(headers) =
 					headers.as_ref().filter(|headers| !headers.is_empty())
@@ -549,11 +539,7 @@ pub fn serialize(
 				}
 			}
 			McpTransport::StreamableHttp { url, headers, .. } => {
-				insert_discriminator(
-					&mut entry,
-					dialect.discriminator,
-					|discriminator| discriminator.http,
-				);
+				insert_tag(&mut entry, &dialect.vocab, dialect.vocab.http);
 				entry.insert(dialect.url_key.into(), url.clone().into());
 				if let Some(headers) =
 					headers.as_ref().filter(|headers| !headers.is_empty())
@@ -575,16 +561,17 @@ pub fn serialize(
 		.map_err(|error| ConfigError::InvalidConfig(error.to_string()))
 }
 
-fn insert_discriminator(
+/// Write the dialect's word for this transport, if it has one. An empty
+/// spelling writes NOTHING — the same derivation `mcp_policy::transport_fields`
+/// uses for the hand-written dialects, so a dialect that later gains a word
+/// starts emitting it without a second edit here.
+fn insert_tag(
 	entry: &mut serde_json::Map<String, serde_json::Value>,
-	discriminator: Option<Discriminator>,
-	value: impl FnOnce(Discriminator) -> &'static str,
+	vocab: &TransportVocabulary,
+	spelling: &'static str,
 ) {
-	if let Some(discriminator) = discriminator {
-		let value = value(discriminator);
-		if !value.is_empty() {
-			entry.insert(discriminator.key.into(), value.into());
-		}
+	if !spelling.is_empty() {
+		entry.insert(vocab.tag_key.into(), spelling.into());
 	}
 }
 
@@ -604,8 +591,15 @@ mod tests {
 		toggle_key: ToggleKey::Disabled,
 		..MCP_SERVERS
 	};
+	/// No transport tag at all — what `Option<Discriminator>::None` used to say.
 	const NO_SSE: Dialect = Dialect {
-		discriminator: None,
+		vocab: TransportVocabulary {
+			tag_key: "",
+			stdio: "",
+			sse: "",
+			http: "",
+			http_read_aliases: &[],
+		},
 		untyped_remote: UntypedRemote::StreamableHttp,
 		..MCP_SERVERS
 	};
@@ -652,6 +646,47 @@ mod tests {
 			config.mcps[0].transport,
 			McpTransport::StreamableHttp { .. }
 		));
+	}
+
+	/// The three spellings all 16 `json_map` agents read as streamable HTTP.
+	/// Pinned as LITERALS, never read off the dialect: a test that iterates
+	/// `http_read_aliases` passes vacuously the moment the list is emptied.
+	const UNIVERSAL_HTTP_TAGS: [&str; 3] =
+		["http", "streamable-http", "streamableHttp"];
+
+	/// `http_read_aliases` is what the parser READS, not decoration. The `/sse`
+	/// URL is the load-bearing half: drop a spelling from the vocabulary and the
+	/// entry no longer matches the HTTP arm, falls through to
+	/// `InferSseFromUrl`, and parses as SSE — a transport the next save then
+	/// writes back over the user's HTTP server.
+	#[test]
+	fn every_universal_http_tag_outranks_an_sse_shaped_url() {
+		// Cline's shape: a different `http` spelling, the SAME read set — so
+		// dropping `"http"` from the aliases shows up here even though
+		// `MCP_SERVERS` would still match it as its own spelling.
+		const WRITES_STREAMABLE_HTTP: Dialect = Dialect {
+			vocab: TransportVocabulary {
+				http: "streamableHttp",
+				..MCP_SERVERS.vocab
+			},
+			..MCP_SERVERS
+		};
+		for dialect in [&MCP_SERVERS, &WRITES_STREAMABLE_HTTP] {
+			for tag in UNIVERSAL_HTTP_TAGS {
+				let json = format!(
+					r#"{{"mcpServers":{{"s":{{"type":"{tag}","url":"https://example.com/sse"}}}}}}"#
+				);
+				let config = parse(&json, dialect).unwrap();
+				assert!(
+					matches!(
+						config.mcps[0].transport,
+						McpTransport::StreamableHttp { .. }
+					),
+					"tag `{tag}` parsed as {:?}, not streamable HTTP",
+					config.mcps[0].transport
+				);
+			}
+		}
 	}
 
 	#[test]
@@ -742,12 +777,10 @@ mod tests {
 	#[test]
 	fn the_dialects_own_tag_outranks_a_foreign_one() {
 		const OWN_TAG_TRANSPORT: Dialect = Dialect {
-			discriminator: Some(Discriminator {
-				key: "transport",
-				stdio: "stdio",
-				sse: "sse",
-				http: "http",
-			}),
+			vocab: TransportVocabulary {
+				tag_key: "transport",
+				..MCP_SERVERS.vocab
+			},
 			untyped_remote: UntypedRemote::StreamableHttp,
 			..MCP_SERVERS
 		};
@@ -1085,12 +1118,10 @@ mod tests {
 	#[test]
 	fn test_native_disabled_option_keeps_disabled_server() {
 		const KEBAB_HTTP: Dialect = Dialect {
-			discriminator: Some(Discriminator {
-				key: "type",
-				stdio: "stdio",
-				sse: "sse",
+			vocab: TransportVocabulary {
 				http: "streamable-http",
-			}),
+				..MCP_SERVERS.vocab
+			},
 			toggle_key: ToggleKey::Disabled,
 			..MCP_SERVERS
 		};

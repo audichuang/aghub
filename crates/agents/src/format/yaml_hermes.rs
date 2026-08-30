@@ -8,7 +8,7 @@
 use crate::errors::{ConfigError, Result};
 use crate::format::mcp_policy::{
 	missing_transport_error, reject_mixed_transport, remote_transport,
-	transport_fields, FieldValue, OwnedKeys, RemoteVocabulary,
+	transport_fields, FieldValue, MixedWording, OwnedKeys, TransportVocabulary,
 };
 use crate::models::{AgentConfig, McpServer, McpTransport};
 use serde_yaml::{Mapping, Value};
@@ -16,8 +16,9 @@ use std::collections::HashMap;
 
 /// Hermes tags its remote transport `transport` (not `type`), spells SSE `sse`,
 /// and is the only dialect that also reads the spelled-out `streamable-http`.
-const VOCAB: RemoteVocabulary = RemoteVocabulary {
+const VOCAB: TransportVocabulary = TransportVocabulary {
 	tag_key: "transport",
+	stdio: "",
 	sse: "sse",
 	http: "",
 	http_read_aliases: &["http", "streamable-http"],
@@ -114,7 +115,7 @@ pub fn parse(content: &str) -> Result<AgentConfig> {
 			REMOTE_PROBE,
 			|key| server.contains_key(key),
 			name,
-			"Hermes",
+			MixedWording::NamesTheProbedKeys("Hermes"),
 		)?;
 		// Dispatch on presence, then extract ONLY the chosen branch's fields.
 		let transport = if let Some(cmd) = server.get("command") {
