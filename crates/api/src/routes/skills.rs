@@ -535,6 +535,7 @@ pub async fn delete_skill_by_path(
 							skipped: vec![skill_dir.clone()],
 							needs_confirm: false,
 							shared_master_kept: true,
+							incomplete: false,
 						},
 						executed: false,
 						prune: aghub_core::skills::removal::PruneStatus::NotRun,
@@ -550,6 +551,7 @@ pub async fn delete_skill_by_path(
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
+				incomplete: false,
 			};
 			// Preview and commit both go through the core-owned producers —
 			// this route used to assemble a `RemovalOutcome` by hand, and it

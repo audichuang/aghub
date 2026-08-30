@@ -89,6 +89,7 @@ impl ConfigManager {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			incomplete: false,
 		};
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);

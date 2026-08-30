@@ -3042,8 +3042,8 @@ mod tests {
 	// Treating it as nothing is what garbage-collected a Master out from under
 	// an agent the user never named.
 	//
-	// A plain FILE where the skills dir belongs, not a chmod: `read_dir` fails
-	// for any user, including a CI job running as root.
+	// The dir must be genuinely UNLISTABLE, not merely "not a directory": see
+	// the fixture below for why the two are different answers.
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_keeps_the_master_when_a_holders_dir_cannot_be_listed() {
@@ -3059,7 +3059,16 @@ mod tests {
 		)
 		.unwrap();
 		fs::create_dir_all(root.join(".windsurf")).unwrap();
-		fs::write(root.join(".windsurf/skills"), "not a directory").unwrap();
+		// A self-referential symlink, NOT a plain file: `read_dir` fails with
+		// ELOOP for any user, including a CI job running as root. A plain file
+		// is the wrong fixture — a path that is not a directory holds no
+		// entries at all, which is a COMPLETE answer ("nothing here"), not the
+		// "cannot tell" this test is about.
+		std::os::unix::fs::symlink(
+			std::path::Path::new("skills"),
+			root.join(".windsurf/skills"),
+		)
+		.unwrap();
 
 		let holders = holders_via_agent_roster(&root, "mover");
 		assert!(
@@ -3123,7 +3132,16 @@ mod tests {
 		// A regular FILE where the skills dir belongs: `read_dir` fails for
 		// every user, including a CI job running as root.
 		fs::create_dir_all(root.join(".windsurf")).unwrap();
-		fs::write(root.join(".windsurf/skills"), "not a directory").unwrap();
+		// A self-referential symlink, NOT a plain file: `read_dir` fails with
+		// ELOOP for any user, including a CI job running as root. A plain file
+		// is the wrong fixture — a path that is not a directory holds no
+		// entries at all, which is a COMPLETE answer ("nothing here"), not the
+		// "cannot tell" this test is about.
+		std::os::unix::fs::symlink(
+			std::path::Path::new("skills"),
+			root.join(".windsurf/skills"),
+		)
+		.unwrap();
 
 		let mut removed = holders_via_agent_roster(&root, "mover");
 		// THE input under test: the caller names the agent aghub cannot read.

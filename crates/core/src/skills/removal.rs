@@ -215,6 +215,15 @@ pub enum Layout {
 /// can list the exact paths; the manager re-checks each path at delete time.
 #[derive(Debug, Clone)]
 pub struct RemovalPlan {
+	/// At least one agent dir could not be enumerated completely, so `paths`
+	/// may be SHORT and `skipped` names the dir that hid the rest.
+	///
+	/// A field rather than a re-derivation, because the consumer that needs it
+	/// most is the one furthest from the scan: an EXHAUSTIVE executor
+	/// (`accept_rename`) which must not delete a partial result set — it goes
+	/// straight to `execute_removal`, and `execute_removal` acts on `paths`
+	/// alone and cannot see why `skipped` is non-empty.
+	pub incomplete: bool,
 	pub layout: Layout,
 	/// Absolute paths that would be removed (symlinks unlinked, dirs `remove_dir_all`'d).
 	pub paths: Vec<std::path::PathBuf>,
@@ -289,7 +298,28 @@ fn discovered_entry_dir(skill: &crate::models::Skill) -> Option<PathBuf> {
 /// collapsed to the slot, and a directory another agent still links into looked
 /// unreferenced. Every destructive caller must fail closed on it; none may
 /// treat it as "nothing found".
-fn candidate_entries(
+/// Candidates for an IDENTITY question — "does anything in here resolve to that
+/// directory?" — which needs no frontmatter at all.
+///
+/// Separate from [`candidate_entries`] because that one feeds a sweep that
+/// DELETES by name and must stay narrow, while this one feeds checks that only
+/// ever act on a canonical-target match and must stay wide: a Referrer whose
+/// own `SKILL.md` will not parse never becomes a `Skill`, so a name-matched
+/// list cannot see it, and the directory it points at was `remove_dir_all`'d
+/// with the link left dangling.
+pub(crate) fn referrer_candidates(
+	dir: &Path,
+	safe: &str,
+) -> (Vec<PathBuf>, bool) {
+	let (mut out, incomplete) = crate::skills::discovery::entry_paths(dir);
+	let slot = dir.join(safe);
+	if !out.contains(&slot) {
+		out.push(slot);
+	}
+	(out, incomplete)
+}
+
+pub(crate) fn candidate_entries(
 	dir: &Path,
 	name: &str,
 	safe: &str,
@@ -465,13 +495,19 @@ fn plan_symlink_removal(
 	let mut other_refs = false;
 	let mut unresolvable = false;
 	let mut targeted_anything = false;
+	let mut incomplete_scan = false;
 
 	// The union `candidate_entries` returns, not the `<dir>/<safe>` slot alone:
 	// `npx skills` and older aghub releases wrote `<dir>/<folder>` under a
 	// different frontmatter name, and a grouped layout nests it deeper still, so
 	// a sweep keyed on the slot walked straight past a live referrer.
 	for dir in all_agent_dirs {
-		let (entries, incomplete) = candidate_entries(dir, &skill.name, safe);
+		// Identity-matched below (`canonicalize() == canonical_real`), never
+		// name-matched, so the wide list cannot touch an unrelated skill — and
+		// it is the only list that can see a Referrer whose target will not
+		// parse.
+		let (entries, incomplete) = referrer_candidates(dir, safe);
+		incomplete_scan |= incomplete;
 		if incomplete {
 			// The sweep could not see all of this dir, so it cannot promise it
 			// unlinked every referrer in it. Same verdict as a referrer it CAN
@@ -549,6 +585,7 @@ fn plan_symlink_removal(
 		skipped,
 		needs_confirm: true,
 		shared_master_kept: false,
+		incomplete: incomplete_scan,
 	}
 }
 
@@ -565,10 +602,12 @@ fn plan_copy_removal(
 	let mut paths: Vec<PathBuf> = Vec::new();
 	let mut skipped: Vec<PathBuf> = Vec::new();
 
+	let mut incomplete_scan = false;
 	if all_agents {
 		for dir in all_agent_dirs {
 			let (entries, incomplete) =
 				candidate_entries(dir, &skill.name, safe);
+			incomplete_scan |= incomplete;
 			if incomplete && !skipped.contains(dir) {
 				// `--all-agents` promises "gone everywhere" and this dir could
 				// not be fully listed, so the promise is unverifiable. Report
@@ -588,6 +627,7 @@ fn plan_copy_removal(
 			skipped,
 			needs_confirm: true,
 			shared_master_kept: false,
+			incomplete: incomplete_scan,
 		}
 	} else {
 		let mut shared_master_kept = false;
@@ -629,6 +669,11 @@ fn plan_copy_removal(
 			skipped,
 			needs_confirm: false,
 			shared_master_kept,
+			// The single-agent copy path asks `single_agent_keep_reason`, which
+			// fails CLOSED on an unfinished listing by keeping the directory —
+			// so an incomplete scan can only produce a KEEP here, never a short
+			// `paths`.
+			incomplete: false,
 		}
 	}
 }
@@ -718,7 +763,7 @@ pub fn dir_has_external_referrer(
 	// names an npx-era or grouped layout.
 	for dir in all_agent_dirs {
 		let dir = dir.as_path();
-		let (entries, incomplete) = candidate_entries(dir, name, &safe);
+		let (entries, incomplete) = referrer_candidates(dir, &safe);
 		if incomplete {
 			// A dir this walk could not finish may hold a Referrer it never
 			// listed, and this function only ever KEEPS — so an unfinished
@@ -1036,6 +1081,7 @@ impl RemovalOutcome {
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
+				incomplete: false,
 			},
 			executed: false,
 			prune: PruneStatus::NotRun,
@@ -1233,6 +1279,41 @@ mod tests {
 	use crate::models::Skill;
 	#[cfg(unix)]
 	use std::path::PathBuf;
+
+	// A Referrer is found by IDENTITY, not by name — so one whose target's
+	// `SKILL.md` will not parse must still be seen.
+	//
+	// The name-matched list is built from parsed `Skill`s, so a target that
+	// fails to parse produces no entry at all: the grouped link below was
+	// invisible, the Master it points at went to `remove_dir_all`, and the link
+	// was left dangling. Non-UTF-8 bytes, not a permission bit: the file is
+	// perfectly readable, its CONTENT is what will not parse, and that is the
+	// case a "can we read it?" check cannot catch.
+	#[cfg(unix)]
+	#[test]
+	fn a_referrer_whose_target_will_not_parse_is_still_seen() {
+		let tmp = tempdir().unwrap();
+		let master = tmp.path().join(".agents/skills/demo");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(master.join("SKILL.md"), [0xff]).unwrap();
+
+		let peer = tmp.path().join(".gemini/skills");
+		let group = peer.join("team");
+		std::fs::create_dir_all(&group).unwrap();
+		let referrer = group.join("legacy");
+		symlink(&master, &referrer);
+
+		assert_eq!(
+			dir_has_external_referrer(
+				&master,
+				std::slice::from_ref(&peer),
+				"demo"
+			),
+			Some(referrer),
+			"a grouped referrer must be found by what it POINTS AT, not by a \
+			 frontmatter name nothing can read"
+		);
+	}
 
 	fn write_skill_md(dir: &Path) {
 		std::fs::create_dir_all(dir).unwrap();
@@ -1543,6 +1624,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: true,
 			shared_master_kept: false,
+			incomplete: false,
 		};
 		let report =
 			execute_removal(&plan, std::slice::from_ref(&claude)).unwrap();
@@ -1566,6 +1648,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			incomplete: false,
 		};
 		execute_removal(&plan, std::slice::from_ref(&skills)).unwrap();
 		assert!(!foo.exists());
@@ -1584,6 +1667,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			incomplete: false,
 		};
 		let report = execute_removal(&plan, &[skills]).unwrap();
 		assert!(outside.exists(), "out-of-allowlist dir must survive");
@@ -1601,6 +1685,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			incomplete: false,
 		};
 		let report =
 			execute_removal(&plan, &[tmp.path().to_path_buf()]).unwrap();
@@ -1638,6 +1723,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			incomplete: false,
 		};
 		let report =
 			execute_removal(&plan, &[root.clone(), blocked_parent.clone()])
@@ -1667,6 +1753,7 @@ mod tests {
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
+				incomplete: false,
 			},
 			executed: false,
 			prune: PruneStatus::Pruned(vec!["a".to_string()]),

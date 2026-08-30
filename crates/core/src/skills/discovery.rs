@@ -39,6 +39,63 @@ pub fn load_skills_from_dir_partial(skills_dir: &Path) -> (Vec<Skill>, bool) {
 	(skills, unlisted)
 }
 
+/// Every entry path under `dir`, WITHOUT parsing any of them, plus whether the
+/// listing may be short.
+///
+/// For the questions answered by IDENTITY rather than name: "does a link in
+/// here resolve to that directory?" needs no frontmatter, and demanding one
+/// hides the referrer whose own `SKILL.md` will not parse — the exact entry a
+/// deletion is about to orphan. Recurses into real directories only (a link is
+/// reported, never followed), so a symlink cycle cannot loop it.
+pub fn entry_paths(dir: &Path) -> (Vec<PathBuf>, bool) {
+	let mut out = Vec::new();
+	let mut unlisted = false;
+	collect_entry_paths(dir, &mut out, &mut unlisted);
+	(out, unlisted)
+}
+
+fn collect_entry_paths(
+	dir: &Path,
+	out: &mut Vec<PathBuf>,
+	unlisted: &mut bool,
+) {
+	let entries = match fs::read_dir(dir) {
+		Ok(entries) => entries,
+		// Absent, or not a directory at all: both hold no entries.
+		Err(error)
+			if matches!(
+				error.kind(),
+				std::io::ErrorKind::NotFound
+					| std::io::ErrorKind::NotADirectory
+			) =>
+		{
+			return;
+		}
+		Err(_) => {
+			*unlisted = true;
+			return;
+		}
+	};
+	for entry in entries {
+		let Ok(entry) = entry else {
+			*unlisted = true;
+			continue;
+		};
+		let path = entry.path();
+		out.push(path.clone());
+		// Recurse only into a REAL directory. A link is an answer, not a door:
+		// following one would leave the dir being swept and could cycle.
+		match fs::symlink_metadata(&path) {
+			Ok(meta) if meta.is_dir() => {
+				collect_entry_paths(&path, out, unlisted)
+			}
+			Ok(_) => {}
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+			Err(_) => *unlisted = true,
+		}
+	}
+}
+
 fn walk_dir(skills_dir: &Path) -> (Vec<Skill>, Option<std::io::Error>, bool) {
 	let mut skills = Vec::new();
 	let mut failure = None;
@@ -112,12 +169,17 @@ fn collect_skills(
 		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
 			return;
 		}
+		// A path that is not a directory holds no ENTRIES, and that is a
+		// complete answer, not a failure to read one. Recording it as an error
+		// made `skill_holders` count a provably-empty path as a holder it
+		// could not verify, and the exhaustive guard then refused a collection
+		// that was safe. "Cannot tell" must mean a directory whose CONTENTS
+		// are hidden.
+		Err(error) if error.kind() == std::io::ErrorKind::NotADirectory => {
+			return;
+		}
 		Err(error) => {
-			// A path that is not a directory holds no entries — nothing CAN be
-			// missing from the list, so this is not an unfinished enumeration.
-			// The error is still recorded: `skill_holders` must fail CLOSED on
-			// a peer whose skills dir it cannot even open.
-			*unlisted |= error.kind() != std::io::ErrorKind::NotADirectory;
+			*unlisted = true;
 			note(failure, at_path(dir, error));
 			return;
 		}

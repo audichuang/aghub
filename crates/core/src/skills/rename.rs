@@ -605,6 +605,19 @@ pub fn accept_rename(
 		project_root,
 		true,
 	);
+	if removal_plan.incomplete {
+		// An EXHAUSTIVE consumer may not act on a partial result set.
+		// `execute_removal` reads `paths` alone — it cannot see that `skipped`
+		// names a dir whose contents were hidden — so the rename would delete
+		// the old-name entries it COULD see and report success while an agent
+		// that never received the new name kept an entry under the old one.
+		rollback_all(Some(&install_report));
+		return Err(RenameError::RemovalFailed(format!(
+			"Cannot finish renaming '{}': a skills directory could not be \
+			 listed completely, so the old name cannot be removed everywhere.",
+			req.old_name
+		)));
+	}
 	let removal_roots =
 		crate::skills::removal::allowed_skill_roots(&agent_dirs, project_root);
 	let removal_report = match crate::skills::removal::execute_removal(
@@ -767,8 +780,26 @@ fn snapshot_old_skill(
 	let mut entries: Vec<(PathBuf, PathBuf)> = Vec::new();
 	let mut captured = std::collections::HashSet::new();
 
-	let mut targets: Vec<PathBuf> =
-		agent_dirs.iter().map(|d| d.join(&safe)).collect();
+	// The SAME set `plan_removal` will delete, not `<dir>/<safe>` alone.
+	// Discovery reaches a differently-named or grouped entry
+	// (`<dir>/team/legacy`) that the slot spelling never names, so step 8 could
+	// delete a path step 6 never backed up — and a later failure then rolled
+	// back into a permanently missing old skill. An unfinished listing aborts
+	// BEFORE any mutation: a snapshot that cannot enumerate what it is
+	// protecting is not a snapshot.
+	let mut targets: Vec<PathBuf> = Vec::new();
+	for dir in agent_dirs {
+		let (candidates, incomplete) =
+			crate::skills::removal::candidate_entries(dir, name, &safe);
+		if incomplete {
+			return Err(format!(
+				"Cannot rename '{name}': a skills directory could not be \
+				 listed completely, so aghub cannot back up everything the \
+				 rename would remove. Fix that directory, then re-run."
+			));
+		}
+		targets.extend(candidates);
+	}
 	let canonical_root = if matches!(scope, ResourceScope::ProjectOnly) {
 		project_root
 	} else {
@@ -907,6 +938,71 @@ pub fn rollback_materialized_install(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// The snapshot must cover everything the removal step will DELETE.
+	///
+	/// `plan_removal` reaches a differently-named or grouped entry through
+	/// discovery — `<dir>/team/legacy` holding frontmatter `name: old-skill` —
+	/// while the snapshot backed up `<dir>/<sanitized-name>` only. Step 8 then
+	/// deleted a path step 6 never captured, and the rollback a later failure
+	/// runs restored nothing: the old skill was gone for good, with the rename
+	/// reported as failed.
+	#[cfg(unix)]
+	#[test]
+	fn snapshot_covers_the_nested_entries_removal_will_delete() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let skills = root.join(".claude/skills");
+		let nested = skills.join("team/legacy");
+		std::fs::create_dir_all(&nested).unwrap();
+		std::fs::write(
+			nested.join("SKILL.md"),
+			"---\nname: old-skill\ndescription: d\n---\n\nORIGINAL\n",
+		)
+		.unwrap();
+
+		let agent_dirs = vec![skills.clone()];
+		let snapshot = snapshot_old_skill(
+			"old-skill",
+			ResourceScope::ProjectOnly,
+			Some(root),
+			&agent_dirs,
+		)
+		.expect("snapshot must succeed on a readable tree");
+
+		let mut old_skill = crate::models::Skill::new("old-skill");
+		old_skill.source_path =
+			Some(skills.join("old-skill/SKILL.md").display().to_string());
+		let plan = crate::skills::removal::plan_removal(
+			&old_skill,
+			None,
+			&agent_dirs,
+			Some(root),
+			true,
+		);
+		let roots = crate::skills::removal::allowed_skill_roots(
+			&agent_dirs,
+			Some(root),
+		);
+		crate::skills::removal::execute_removal(&plan, &roots).unwrap();
+		assert!(
+			!nested.join("SKILL.md").exists(),
+			"fixture: the removal must actually reach the nested entry, or \
+			 this test proves nothing"
+		);
+
+		restore_snapshot(&snapshot);
+		assert!(
+			nested.join("SKILL.md").is_file(),
+			"rollback must put back every path the removal took"
+		);
+		assert!(
+			std::fs::read_to_string(nested.join("SKILL.md"))
+				.unwrap()
+				.contains("ORIGINAL"),
+			"and put back its CONTENT, not an empty shell"
+		);
+	}
 
 	/// Exactly which variants carry a machine code, and WHICH code — checked
 	/// exhaustively, so attaching one to the wrong variant fails here.

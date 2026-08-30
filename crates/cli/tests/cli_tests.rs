@@ -10214,16 +10214,22 @@ fn identity_not_path_and_unknown_not_absent() {
 			.unwrap()
 			.status
 			.success());
-		// A regular FILE where cursor's skills dir belongs: `read_dir` fails
-		// for every user, including a CI job running as root, so cursor is a
-		// holder aghub cannot inspect.
+		// A self-referential symlink where cursor's skills dir belongs:
+		// `read_dir` fails with ELOOP for every user, including a CI job
+		// running as root, so cursor is a holder aghub genuinely cannot
+		// inspect.
 		//
 		// It used to be a malformed `.cursor/mcp.json`, which stopped working
 		// as a fixture the moment the holder scan stopped going through
 		// `load_all_agents`: nothing about cursor's SKILLS was broken, so the
-		// scan reads it fine and the test proved nothing about blindness.
-		std::fs::write(home.path().join(".cursor/skills"), "not a directory\n")
-			.unwrap();
+		// scan reads it fine and the test proved nothing about blindness. A
+		// plain FILE is wrong for the opposite reason — a path that is not a
+		// directory holds no entries, which is a complete answer, not doubt.
+		std::os::unix::fs::symlink(
+			std::path::Path::new("skills"),
+			home.path().join(".cursor/skills"),
+		)
+		.unwrap();
 
 		let out = isolated_cli(home.path(), state.path())
 			.args([
