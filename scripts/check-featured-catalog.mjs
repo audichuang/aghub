@@ -72,7 +72,9 @@ function main() {
 		try {
 			tree = gh(`repos/${owner}/${repo}/git/trees/HEAD?recursive=1`);
 		} catch {
-			console.error(`✗ ${source}: repository unreachable (renamed? private?)`);
+			console.error(
+				`✗ ${source}: repository unreachable (renamed? private?)`,
+			);
 			dead += wanted.length;
 			continue;
 		}
@@ -109,7 +111,9 @@ function main() {
 		);
 		process.exit(1);
 	}
-	console.log(`\nAll ${catalog.skills.length} featured entries install-able.`);
+	console.log(
+		`\nAll ${catalog.skills.length} featured entries install-able.`,
+	);
 }
 
 main();

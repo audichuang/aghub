@@ -13,16 +13,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const SIDECAR_NAME: &str = "skill-check-last.json";
-// Unit FILE names: only the Linux backend writes them. The unit CONTENT
-// builders below stay platform-independent so their tests run everywhere.
-#[cfg(target_os = "linux")]
-const SYSTEMD_SERVICE: &str = "aghub-skillcheck.service";
-#[cfg(target_os = "linux")]
-const SYSTEMD_TIMER: &str = "aghub-skillcheck.timer";
-#[allow(dead_code)] // one backend per platform; the rest are tested, not called
-const LAUNCHD_LABEL: &str = "com.aghub.skillcheck";
-#[allow(dead_code)] // one backend per platform; the rest are tested, not called
-const WINDOWS_TASK: &str = "aghub-skillcheck";
 
 /// Local wall-clock hour for the daily run, identical on all three backends.
 /// Not midnight: a laptop that is off overnight would simply never run the
@@ -88,48 +78,66 @@ pub fn default_sidecar_path() -> PathBuf {
 }
 
 // ---------------------------------------------------------------------------
-// Task payloads (pure; compiled and tested on every platform)
+// Task payloads + registration backends
+//
+// EVERY backend is compiled on EVERY platform, so the two this build cannot
+// dispatch to are dead code by design — hence the module-wide allow. That is
+// the point: without it, the only machine that ever compiles `register_launchd`
+// is a mac, and the only run that ever notices a wrong launchctl subcommand is
+// a user's. Each backend takes its world through `Env` (a HOME and a command
+// runner) so the tests below drive all three on Linux against a temp dir and a
+// recording runner. What injection cannot prove is the last step — whether
+// launchd / Task Scheduler accepts the definition we wrote — so that still
+// needs a real machine.
 // ---------------------------------------------------------------------------
 
-fn shell_single_quote(value: &str) -> String {
-	format!("'{}'", value.replace('\'', "'\\''"))
-}
+pub mod schedule_backend {
+	#![allow(dead_code)]
 
-#[allow(dead_code)] // one backend per platform; the rest are tested, not called
-fn xml_escape(value: &str) -> String {
-	value
-		.replace('&', "&amp;")
-		.replace('<', "&lt;")
-		.replace('>', "&gt;")
-}
+	use super::*;
 
-pub fn systemd_service_unit(
-	cli: &Path,
-	sidecar: &Path,
-) -> Result<String, String> {
-	let exec = checked_argv(cli, sidecar)?
-		.iter()
-		.map(|part| shell_single_quote(part))
-		.collect::<Vec<_>>()
-		.join(" ");
-	Ok(format!(
+	pub const SYSTEMD_SERVICE: &str = "aghub-skillcheck.service";
+	pub const SYSTEMD_TIMER: &str = "aghub-skillcheck.timer";
+	pub const LAUNCHD_LABEL: &str = "com.aghub.skillcheck";
+	pub const WINDOWS_TASK: &str = "aghub-skillcheck";
+
+	fn shell_single_quote(value: &str) -> String {
+		format!("'{}'", value.replace('\'', "'\\''"))
+	}
+
+	fn xml_escape(value: &str) -> String {
+		value
+			.replace('&', "&amp;")
+			.replace('<', "&lt;")
+			.replace('>', "&gt;")
+	}
+
+	pub fn systemd_service_unit(
+		cli: &Path,
+		sidecar: &Path,
+	) -> Result<String, String> {
+		let exec = checked_argv(cli, sidecar)?
+			.iter()
+			.map(|part| shell_single_quote(part))
+			.collect::<Vec<_>>()
+			.join(" ");
+		Ok(format!(
 		"[Unit]\nDescription=aghub skill update check (read-only)\n\n[Service]\nType=oneshot\nExecStart={exec}\n"
 	))
-}
+	}
 
-pub fn systemd_timer_unit() -> String {
-	format!(
+	pub fn systemd_timer_unit() -> String {
+		format!(
 		"[Unit]\nDescription=Daily aghub skill update check\n\n[Timer]\nOnCalendar=*-*-* {SCHEDULE_HOUR:02}:00:00\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n"
 	)
-}
+	}
 
-#[allow(dead_code)] // one backend per platform; the rest are tested, not called
-pub fn launchd_plist(cli: &Path, sidecar: &Path) -> Result<String, String> {
-	let args = checked_argv(cli, sidecar)?
-		.iter()
-		.map(|part| format!("\t\t<string>{}</string>\n", xml_escape(part)))
-		.collect::<String>();
-	Ok(format!(
+	pub fn launchd_plist(cli: &Path, sidecar: &Path) -> Result<String, String> {
+		let args = checked_argv(cli, sidecar)?
+			.iter()
+			.map(|part| format!("\t\t<string>{}</string>\n", xml_escape(part)))
+			.collect::<String>();
+		Ok(format!(
 		"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 		 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"http://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
 		 <plist version=\"1.0\">\n\
@@ -150,135 +158,144 @@ pub fn launchd_plist(cli: &Path, sidecar: &Path) -> Result<String, String> {
 		 </dict>\n\
 		 </plist>\n"
 	))
-}
-
-/// Arguments for `schtasks` itself (the program is `schtasks`, not the CLI).
-/// `/TR` is ONE string that the task scheduler re-parses, so the program path
-/// is quoted inside it.
-#[allow(dead_code)] // one backend per platform; the rest are tested, not called
-pub fn schtasks_create_args(
-	cli: &Path,
-	sidecar: &Path,
-) -> Result<Vec<String>, String> {
-	let argv = checked_argv(cli, sidecar)?;
-	let (program, rest) = argv.split_first().expect("argv[0] is the program");
-	let run = format!("\"{}\" {}", program, rest.join(" "));
-	Ok(vec![
-		"/Create".into(),
-		"/TN".into(),
-		WINDOWS_TASK.into(),
-		"/TR".into(),
-		run,
-		"/SC".into(),
-		"DAILY".into(),
-		"/ST".into(),
-		format!("{SCHEDULE_HOUR:02}:00"),
-		"/F".into(),
-	])
-}
-
-// ---------------------------------------------------------------------------
-// Process helpers
-// ---------------------------------------------------------------------------
-
-/// `Command` with the Windows console window suppressed — every one of these
-/// runs from the GUI app, and a flashing `cmd` window is a visible bug.
-fn quiet(program: &str) -> Command {
-	#[allow(unused_mut)]
-	let mut cmd = Command::new(program);
-	#[cfg(windows)]
-	{
-		use std::os::windows::process::CommandExt;
-		cmd.creation_flags(crate::CREATE_NO_WINDOW);
 	}
-	cmd
-}
 
-#[allow(dead_code)] // used by the platform backends only
-fn run(program: &str, args: &[&str]) -> Result<(), String> {
-	let out = quiet(program)
-		.args(args)
-		.output()
-		.map_err(|err| format!("{program} failed to start: {err}"))?;
-	if out.status.success() {
-		return Ok(());
+	/// Arguments for `schtasks` itself (the program is `schtasks`, not the CLI).
+	/// `/TR` is ONE string that the task scheduler re-parses, so the program path
+	/// is quoted inside it.
+	pub fn schtasks_create_args(
+		cli: &Path,
+		sidecar: &Path,
+	) -> Result<Vec<String>, String> {
+		let argv = checked_argv(cli, sidecar)?;
+		let (program, rest) =
+			argv.split_first().expect("argv[0] is the program");
+		let run = format!("\"{}\" {}", program, rest.join(" "));
+		Ok(vec![
+			"/Create".into(),
+			"/TN".into(),
+			WINDOWS_TASK.into(),
+			"/TR".into(),
+			run,
+			"/SC".into(),
+			"DAILY".into(),
+			"/ST".into(),
+			format!("{SCHEDULE_HOUR:02}:00"),
+			"/F".into(),
+		])
 	}
-	let stderr = String::from_utf8_lossy(&out.stderr);
-	let stdout = String::from_utf8_lossy(&out.stdout);
-	let detail = if stderr.trim().is_empty() {
-		stdout.trim().to_string()
-	} else {
-		stderr.trim().to_string()
-	};
-	Err(format!("{program} {} failed: {detail}", args.join(" ")))
-}
 
-#[allow(dead_code)] // used by the platform backends only
-fn succeeds(program: &str, args: &[&str]) -> bool {
-	quiet(program)
-		.args(args)
-		.output()
-		.map(|out| out.status.success())
-		.unwrap_or(false)
-}
+	// ---------------------------------------------------------------------------
+	// Process helpers
+	// ---------------------------------------------------------------------------
 
-fn resolve_aghub_cli_path(explicit: Option<String>) -> Result<PathBuf, String> {
-	if let Some(path) = explicit {
-		let path = PathBuf::from(path);
-		if path.is_file() {
-			return Ok(path);
+	/// `Command` with the Windows console window suppressed — every one of these
+	/// runs from the GUI app, and a flashing `cmd` window is a visible bug.
+	pub fn quiet(program: &str) -> Command {
+		#[allow(unused_mut)]
+		let mut cmd = Command::new(program);
+		#[cfg(windows)]
+		{
+			use std::os::windows::process::CommandExt;
+			cmd.creation_flags(crate::CREATE_NO_WINDOW);
 		}
-		return Err(format!("aghub-cli not found at {}", path.display()));
+		cmd
 	}
-	let finder = if cfg!(windows) { "where" } else { "which" };
-	let output = quiet(finder)
-		.arg("aghub-cli")
-		.output()
-		.map_err(|err| err.to_string())?;
-	if !output.status.success() {
-		return Err(
+
+	pub fn run(program: &str, args: &[&str]) -> Result<(), String> {
+		let out = quiet(program)
+			.args(args)
+			.output()
+			.map_err(|err| format!("{program} failed to start: {err}"))?;
+		if out.status.success() {
+			return Ok(());
+		}
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		let detail = if stderr.trim().is_empty() {
+			stdout.trim().to_string()
+		} else {
+			stderr.trim().to_string()
+		};
+		Err(format!("{program} {} failed: {detail}", args.join(" ")))
+	}
+
+	pub fn succeeds(program: &str, args: &[&str]) -> bool {
+		quiet(program)
+			.args(args)
+			.output()
+			.map(|out| out.status.success())
+			.unwrap_or(false)
+	}
+
+	pub fn resolve_aghub_cli_path(
+		explicit: Option<String>,
+	) -> Result<PathBuf, String> {
+		if let Some(path) = explicit {
+			let path = PathBuf::from(path);
+			if path.is_file() {
+				return Ok(path);
+			}
+			return Err(format!("aghub-cli not found at {}", path.display()));
+		}
+		let finder = if cfg!(windows) { "where" } else { "which" };
+		let output = quiet(finder)
+			.arg("aghub-cli")
+			.output()
+			.map_err(|err| err.to_string())?;
+		if !output.status.success() {
+			return Err(
 			"aghub-cli not on PATH; install the CLI or set an explicit path"
 				.into(),
 		);
-	}
-	// `where` prints one match per line; take the first.
-	let found = String::from_utf8_lossy(&output.stdout)
-		.lines()
-		.map(str::trim)
-		.find(|line| !line.is_empty())
-		.unwrap_or_default()
-		.to_string();
-	if found.is_empty() {
-		return Err("aghub-cli not on PATH".into());
-	}
-	Ok(PathBuf::from(found))
-}
-
-#[allow(dead_code)] // used by the platform backends only
-fn home_dir() -> Result<PathBuf, String> {
-	#[cfg(windows)]
-	let var = "USERPROFILE";
-	#[cfg(not(windows))]
-	let var = "HOME";
-	std::env::var_os(var)
-		.map(PathBuf::from)
-		.ok_or_else(|| format!("{var} is not set"))
-}
-
-// ---------------------------------------------------------------------------
-// Linux — systemd --user timer
-// ---------------------------------------------------------------------------
-
-#[cfg(target_os = "linux")]
-mod backend {
-	use super::*;
-
-	fn unit_dir() -> Result<PathBuf, String> {
-		Ok(home_dir()?.join(".config/systemd/user"))
+		}
+		// `where` prints one match per line; take the first.
+		let found = String::from_utf8_lossy(&output.stdout)
+			.lines()
+			.map(str::trim)
+			.find(|line| !line.is_empty())
+			.unwrap_or_default()
+			.to_string();
+		if found.is_empty() {
+			return Err("aghub-cli not on PATH".into());
+		}
+		Ok(PathBuf::from(found))
 	}
 
-	pub fn register(cli: &Path, sidecar: &Path) -> Result<(), String> {
-		let dir = unit_dir()?;
+	pub fn home_dir() -> Result<PathBuf, String> {
+		#[cfg(windows)]
+		let var = "USERPROFILE";
+		#[cfg(not(windows))]
+		let var = "HOME";
+		std::env::var_os(var)
+			.map(PathBuf::from)
+			.ok_or_else(|| format!("{var} is not set"))
+	}
+
+	/// Run a command, failing with its stderr.
+	pub type RunFn<'a> = dyn Fn(&str, &[&str]) -> Result<(), String> + 'a;
+	/// Run a command purely for its exit status.
+	pub type ProbeFn<'a> = dyn Fn(&str, &[&str]) -> bool + 'a;
+
+	pub struct Env<'a> {
+		/// `$HOME` (`%USERPROFILE%` on Windows).
+		pub home: PathBuf,
+		pub run: &'a RunFn<'a>,
+		pub probe: &'a ProbeFn<'a>,
+	}
+
+	// --- Linux: systemd --user timer -------------------------------------------
+
+	fn systemd_dir(env: &Env) -> PathBuf {
+		env.home.join(".config/systemd/user")
+	}
+
+	pub fn register_systemd(
+		env: &Env,
+		cli: &Path,
+		sidecar: &Path,
+	) -> Result<(), String> {
+		let dir = systemd_dir(env);
 		std::fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
 		std::fs::write(
 			dir.join(SYSTEMD_SERVICE),
@@ -287,133 +304,191 @@ mod backend {
 		.map_err(|err| err.to_string())?;
 		std::fs::write(dir.join(SYSTEMD_TIMER), systemd_timer_unit())
 			.map_err(|err| err.to_string())?;
-		run("systemctl", &["--user", "daemon-reload"])?;
-		run("systemctl", &["--user", "enable", "--now", SYSTEMD_TIMER])
+		(env.run)("systemctl", &["--user", "daemon-reload"])?;
+		(env.run)("systemctl", &["--user", "enable", "--now", SYSTEMD_TIMER])
 	}
 
-	pub fn unregister() -> Result<(), String> {
-		let _ =
-			run("systemctl", &["--user", "disable", "--now", SYSTEMD_TIMER]);
-		if let Ok(dir) = unit_dir() {
-			let _ = std::fs::remove_file(dir.join(SYSTEMD_TIMER));
-			let _ = std::fs::remove_file(dir.join(SYSTEMD_SERVICE));
-		}
+	pub fn unregister_systemd(env: &Env) -> Result<(), String> {
+		let _ = (env.run)(
+			"systemctl",
+			&["--user", "disable", "--now", SYSTEMD_TIMER],
+		);
+		let dir = systemd_dir(env);
+		let _ = std::fs::remove_file(dir.join(SYSTEMD_TIMER));
+		let _ = std::fs::remove_file(dir.join(SYSTEMD_SERVICE));
 		Ok(())
 	}
 
-	pub fn is_enabled() -> bool {
-		succeeds("systemctl", &["--user", "is-enabled", SYSTEMD_TIMER])
+	pub fn systemd_enabled(env: &Env) -> bool {
+		(env.probe)("systemctl", &["--user", "is-enabled", SYSTEMD_TIMER])
 	}
-}
 
-// ---------------------------------------------------------------------------
-// macOS — launchd user agent
-// ---------------------------------------------------------------------------
+	// --- macOS: launchd user agent ---------------------------------------------
 
-#[cfg(target_os = "macos")]
-mod backend {
-	use super::*;
-
-	fn plist_path() -> Result<PathBuf, String> {
-		Ok(home_dir()?
+	fn launchd_plist_path(env: &Env) -> PathBuf {
+		env.home
 			.join("Library/LaunchAgents")
-			.join(format!("{LAUNCHD_LABEL}.plist")))
+			.join(format!("{LAUNCHD_LABEL}.plist"))
 	}
 
-	/// launchd's user domain is addressed as `gui/<uid>`; no env var reliably
-	/// carries the uid inside an app bundle.
-	fn gui_domain() -> Result<String, String> {
-		let out = quiet("id")
-			.arg("-u")
-			.output()
-			.map_err(|err| format!("id -u failed to start: {err}"))?;
-		let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-		if !out.status.success() || uid.is_empty() {
-			return Err("could not resolve the current uid".into());
-		}
-		Ok(format!("gui/{uid}"))
-	}
-
-	pub fn register(cli: &Path, sidecar: &Path) -> Result<(), String> {
-		let path = plist_path()?;
+	pub fn register_launchd(
+		env: &Env,
+		uid: &str,
+		cli: &Path,
+		sidecar: &Path,
+	) -> Result<(), String> {
+		let path = launchd_plist_path(env);
 		let plist = launchd_plist(cli, sidecar)?;
 		if let Some(parent) = path.parent() {
 			std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
 		}
 		std::fs::write(&path, plist).map_err(|err| err.to_string())?;
-		let domain = gui_domain()?;
+		let domain = format!("gui/{uid}");
 		// Not loaded yet on a first enable, so a failing bootout is expected.
-		let _ = run(
+		let _ = (env.run)(
 			"launchctl",
 			&["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
 		);
-		run(
+		(env.run)(
 			"launchctl",
 			&["bootstrap", &domain, &path.to_string_lossy()],
 		)
 	}
 
-	pub fn unregister() -> Result<(), String> {
-		if let Ok(domain) = gui_domain() {
-			let _ = run(
-				"launchctl",
-				&["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
-			);
-		}
-		if let Ok(path) = plist_path() {
-			let _ = std::fs::remove_file(path);
-		}
+	pub fn unregister_launchd(env: &Env, uid: &str) -> Result<(), String> {
+		let _ = (env.run)(
+			"launchctl",
+			&["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")],
+		);
+		let _ = std::fs::remove_file(launchd_plist_path(env));
 		Ok(())
 	}
 
 	/// The plist is the durable state: launchd reloads it at every login, so a
 	/// present file means "scheduled" even before `launchctl` is asked.
-	pub fn is_enabled() -> bool {
-		plist_path().map(|path| path.is_file()).unwrap_or(false)
+	pub fn launchd_enabled(env: &Env) -> bool {
+		launchd_plist_path(env).is_file()
 	}
-}
 
-// ---------------------------------------------------------------------------
-// Windows — schtasks daily task
-// ---------------------------------------------------------------------------
+	// --- Windows: schtasks daily task ------------------------------------------
 
-#[cfg(target_os = "windows")]
-mod backend {
-	use super::*;
-
-	pub fn register(cli: &Path, sidecar: &Path) -> Result<(), String> {
+	pub fn register_schtasks(
+		env: &Env,
+		cli: &Path,
+		sidecar: &Path,
+	) -> Result<(), String> {
 		let args = schtasks_create_args(cli, sidecar)?;
 		let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
-		run("schtasks", &borrowed)
+		(env.run)("schtasks", &borrowed)
 	}
 
-	pub fn unregister() -> Result<(), String> {
-		let _ = run("schtasks", &["/Delete", "/TN", WINDOWS_TASK, "/F"]);
+	pub fn unregister_schtasks(env: &Env) -> Result<(), String> {
+		let _ = (env.run)("schtasks", &["/Delete", "/TN", WINDOWS_TASK, "/F"]);
 		Ok(())
 	}
 
-	pub fn is_enabled() -> bool {
-		succeeds("schtasks", &["/Query", "/TN", WINDOWS_TASK])
+	pub fn schtasks_enabled(env: &Env) -> bool {
+		(env.probe)("schtasks", &["/Query", "/TN", WINDOWS_TASK])
 	}
 }
 
-#[cfg(not(any(
-	target_os = "linux",
-	target_os = "macos",
-	target_os = "windows"
-)))]
-mod backend {
-	use super::*;
+pub use schedule_backend::*;
 
-	pub fn register(_cli: &Path, _sidecar: &Path) -> Result<(), String> {
+// --- the real environment + platform dispatch ------------------------------
+
+fn real_env() -> Result<Env<'static>, String> {
+	Ok(Env {
+		home: home_dir()?,
+		run: &run,
+		probe: &succeeds,
+	})
+}
+
+/// launchd's user domain is addressed as `gui/<uid>`; no env var reliably
+/// carries the uid inside an app bundle.
+#[cfg(target_os = "macos")]
+fn current_uid() -> Result<String, String> {
+	let out = quiet("id")
+		.arg("-u")
+		.output()
+		.map_err(|err| format!("id -u failed to start: {err}"))?;
+	let uid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+	if !out.status.success() || uid.is_empty() {
+		return Err("could not resolve the current uid".into());
+	}
+	Ok(uid)
+}
+
+fn backend_register(cli: &Path, sidecar: &Path) -> Result<(), String> {
+	#[cfg(target_os = "linux")]
+	{
+		register_systemd(&real_env()?, cli, sidecar)
+	}
+	#[cfg(target_os = "macos")]
+	{
+		register_launchd(&real_env()?, &current_uid()?, cli, sidecar)
+	}
+	#[cfg(target_os = "windows")]
+	{
+		register_schtasks(&real_env()?, cli, sidecar)
+	}
+	#[cfg(not(any(
+		target_os = "linux",
+		target_os = "macos",
+		target_os = "windows"
+	)))]
+	{
+		let _ = (cli, sidecar);
 		Err("no OS schedule backend on this platform".into())
 	}
+}
 
-	pub fn unregister() -> Result<(), String> {
+fn backend_unregister() -> Result<(), String> {
+	#[cfg(target_os = "linux")]
+	{
+		unregister_systemd(&real_env()?)
+	}
+	#[cfg(target_os = "macos")]
+	{
+		unregister_launchd(&real_env()?, &current_uid()?)
+	}
+	#[cfg(target_os = "windows")]
+	{
+		unregister_schtasks(&real_env()?)
+	}
+	#[cfg(not(any(
+		target_os = "linux",
+		target_os = "macos",
+		target_os = "windows"
+	)))]
+	{
 		Ok(())
 	}
+}
 
-	pub fn is_enabled() -> bool {
+fn backend_enabled() -> bool {
+	let Ok(env) = real_env() else {
+		return false;
+	};
+	#[cfg(target_os = "linux")]
+	{
+		systemd_enabled(&env)
+	}
+	#[cfg(target_os = "macos")]
+	{
+		launchd_enabled(&env)
+	}
+	#[cfg(target_os = "windows")]
+	{
+		schtasks_enabled(&env)
+	}
+	#[cfg(not(any(
+		target_os = "linux",
+		target_os = "macos",
+		target_os = "windows"
+	)))]
+	{
+		let _ = env;
 		false
 	}
 }
@@ -442,7 +517,7 @@ pub fn resolve_aghub_cli(explicit: Option<String>) -> Result<String, String> {
 pub fn get_skill_check_schedule() -> SkillCheckScheduleStatus {
 	SkillCheckScheduleStatus {
 		supported: SCHEDULE_SUPPORTED,
-		enabled: backend::is_enabled(),
+		enabled: backend_enabled(),
 		cli_path: resolve_aghub_cli_path(None)
 			.ok()
 			.map(|p| p.display().to_string()),
@@ -461,9 +536,9 @@ pub fn set_skill_check_schedule(
 		if let Some(parent) = sidecar.parent() {
 			std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
 		}
-		backend::register(&cli, &sidecar)?;
+		backend_register(&cli, &sidecar)?;
 	} else {
-		backend::unregister()?;
+		backend_unregister()?;
 	}
 	Ok(get_skill_check_schedule())
 }
@@ -599,6 +674,164 @@ mod tests {
 			let err = payload.expect_err("a non-check payload must be refused");
 			assert!(err.contains("non-check"), "{err}");
 		}
+	}
+
+	/// Declares `$log` (every OS command, in order) and `$env` (a temp HOME +
+	/// a runner that records instead of executing). Lets the macOS and Windows
+	/// registration paths be driven on Linux — the only place a wrong
+	/// `launchctl` subcommand would otherwise surface is a mac user's machine.
+	macro_rules! recording_env {
+		($tmp:ident, $log:ident, $env:ident) => {
+			let $log: std::cell::RefCell<Vec<String>> =
+				std::cell::RefCell::new(Vec::new());
+			let run = |program: &str, args: &[&str]| {
+				$log.borrow_mut()
+					.push(format!("{program} {}", args.join(" ")));
+				Ok(())
+			};
+			let probe = |_: &str, _: &[&str]| true;
+			let $env = Env {
+				home: $tmp.path().to_path_buf(),
+				run: &run,
+				probe: &probe,
+			};
+		};
+	}
+
+	#[test]
+	fn systemd_register_writes_both_units_then_enables_the_timer() {
+		let tmp = tempfile::tempdir().unwrap();
+		recording_env!(tmp, log, env);
+
+		register_systemd(&env, &cli(), &sidecar()).unwrap();
+
+		let dir = tmp.path().join(".config/systemd/user");
+		let service =
+			std::fs::read_to_string(dir.join(SYSTEMD_SERVICE)).unwrap();
+		let timer = std::fs::read_to_string(dir.join(SYSTEMD_TIMER)).unwrap();
+		assert_check_only_payload(&service);
+		assert!(timer.contains("OnCalendar=*-*-* 09:00:00"), "{timer}");
+		assert_eq!(
+			*log.borrow(),
+			vec![
+				"systemctl --user daemon-reload".to_string(),
+				format!("systemctl --user enable --now {SYSTEMD_TIMER}"),
+			]
+		);
+
+		log.borrow_mut().clear();
+		unregister_systemd(&env).unwrap();
+		assert!(!dir.join(SYSTEMD_SERVICE).exists());
+		assert!(!dir.join(SYSTEMD_TIMER).exists());
+		assert_eq!(
+			*log.borrow(),
+			vec![format!("systemctl --user disable --now {SYSTEMD_TIMER}")]
+		);
+	}
+
+	#[test]
+	fn launchd_register_writes_the_agent_plist_and_bootstraps_it() {
+		let tmp = tempfile::tempdir().unwrap();
+		recording_env!(tmp, log, env);
+
+		assert!(!launchd_enabled(&env), "nothing scheduled yet");
+		register_launchd(&env, "501", &cli(), &sidecar()).unwrap();
+
+		let plist_path = tmp
+			.path()
+			.join("Library/LaunchAgents")
+			.join(format!("{LAUNCHD_LABEL}.plist"));
+		let plist = std::fs::read_to_string(&plist_path).unwrap();
+		assert_check_only_payload(&plist);
+		assert!(launchd_enabled(&env), "the plist IS the durable state");
+		assert_eq!(
+			*log.borrow(),
+			vec![
+				format!("launchctl bootout gui/501/{LAUNCHD_LABEL}"),
+				format!("launchctl bootstrap gui/501 {}", plist_path.display()),
+			]
+		);
+
+		log.borrow_mut().clear();
+		unregister_launchd(&env, "501").unwrap();
+		assert!(!plist_path.exists());
+		assert!(!launchd_enabled(&env));
+		assert_eq!(
+			*log.borrow(),
+			vec![format!("launchctl bootout gui/501/{LAUNCHD_LABEL}")]
+		);
+	}
+
+	#[test]
+	fn schtasks_register_creates_a_daily_task_and_delete_removes_it() {
+		let tmp = tempfile::tempdir().unwrap();
+		recording_env!(tmp, log, env);
+
+		register_schtasks(&env, &cli(), &sidecar()).unwrap();
+		let created = log.borrow()[0].clone();
+		assert_check_only_payload(&created);
+		assert!(created.starts_with("schtasks /Create /TN aghub-skillcheck"));
+		assert!(created.contains("/SC DAILY"), "{created}");
+		assert!(created.contains("/ST 09:00"), "{created}");
+		assert!(created.ends_with("/F"), "{created}");
+
+		log.borrow_mut().clear();
+		unregister_schtasks(&env).unwrap();
+		assert_eq!(
+			*log.borrow(),
+			vec![format!("schtasks /Delete /TN {WINDOWS_TASK} /F")]
+		);
+	}
+
+	/// The check-only gate must run BEFORE the write, on all three backends:
+	/// a refused payload must leave no task definition behind at all.
+	#[test]
+	fn a_refused_payload_never_reaches_disk_or_the_os() {
+		let tmp = tempfile::tempdir().unwrap();
+		recording_env!(tmp, log, env);
+		let evil = Path::new("/tmp/apply-update/skill-check-last.json");
+
+		register_systemd(&env, &cli(), evil).unwrap_err();
+		register_launchd(&env, "501", &cli(), evil).unwrap_err();
+		register_schtasks(&env, &cli(), evil).unwrap_err();
+
+		assert!(!tmp
+			.path()
+			.join(".config/systemd/user")
+			.join(SYSTEMD_SERVICE)
+			.exists());
+		assert!(!launchd_enabled(&env));
+		assert!(log.borrow().is_empty(), "no OS command may run");
+	}
+
+	/// REAL machine, REAL systemd: registers the timer in this user's own
+	/// session, asserts systemd accepted it, then removes it. `#[ignore]` so it
+	/// only ever runs when asked (`cargo test -p aghub -- --ignored`) — it
+	/// touches `~/.config/systemd/user`, which no CI job should do.
+	///
+	/// This is the step injection cannot prove: whether the unit we write is
+	/// one systemd will actually load.
+	#[test]
+	#[ignore = "touches the real systemd --user session"]
+	#[cfg(target_os = "linux")]
+	fn linux_systemd_registration_is_accepted_by_the_real_session() {
+		let env = real_env().expect("HOME");
+		assert!(
+			!systemd_enabled(&env),
+			"refusing to run: the timer is already registered"
+		);
+		let cli = resolve_aghub_cli_path(None).expect("aghub-cli on PATH");
+		let sidecar = default_sidecar_path();
+
+		let registered = register_systemd(&env, &cli, &sidecar);
+		let enabled = systemd_enabled(&env);
+		// Always clean up, even if the assertions below fail.
+		let removed = unregister_systemd(&env);
+
+		registered.expect("systemd must accept the unit");
+		assert!(enabled, "systemctl is-enabled must see the timer");
+		removed.expect("unregister");
+		assert!(!systemd_enabled(&env), "the timer must be gone again");
 	}
 
 	/// The scheduled CLI writes into `dirs::data_dir()/aghub`. Reading Tauri's
