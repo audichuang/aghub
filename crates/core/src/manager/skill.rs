@@ -877,6 +877,16 @@ impl ConfigManager {
 				.survivors
 				.iter()
 				.all(|survivor| accounted_for(survivor));
+		// The planner took NOTHING and named everything that survived: it
+		// understood the request and spared the entry (another agent's live
+		// link points into the caller's own directory).
+		let spared_everything = all_survivors_reported
+			&& plan.paths.is_empty()
+			&& !effect.survivors.is_empty();
+		// `--all-agents` asserts a POSTCONDITION ("nothing reads it anymore"),
+		// and a read dir that could not be enumerated cannot support one. The
+		// single-agent branch deliberately ignores it: that one decides whether
+		// to REFUSE, and one odd sibling must not make a skill undeletable.
 		let blocks = if all_agents {
 			// No narrowing here, deliberately: `--all-agents` promises "gone
 			// everywhere", so a survivor is a broken promise whether or not
@@ -884,7 +894,7 @@ impl ConfigManager {
 			// check refuses IS reported in `skipped` and still leaves the
 			// skill readable — reporting that as `removed` is the lie. What
 			// the refusal owes the caller is the LIST, which it carries below.
-			!effect.survivors.is_empty()
+			!effect.survivors.is_empty() || effect.incomplete
 		} else {
 			// `paths.is_empty()` is what separates the two single-agent
 			// shapes, and it is not decoration. A plan that removes NOTHING
@@ -898,7 +908,7 @@ impl ConfigManager {
 			// `skipped` alone cannot tell them apart.
 			!effect.survivors.is_empty()
 				&& !effect.changed
-				&& !(all_survivors_reported && plan.paths.is_empty())
+				&& !spared_everything
 		};
 
 		// A preview must still PREVIEW, so record the fact instead of refusing:
@@ -970,6 +980,28 @@ impl ConfigManager {
 				&operation,
 				&reason,
 				self.adapter.name(),
+			));
+		}
+
+		if spared_everything {
+			// NOT `commit`, even for a confirmed call. `commit` sets
+			// `executed: true` for the whole branch, so a run that removed
+			// nothing serialized as `outcome: "removed"` with the skill still
+			// on disk — and its lock prune dropped the entry for a skill that
+			// is still installed, taking the source provenance with it.
+			//
+			// `shared_master_kept` is what `RemovalView` keys `kept` off, and
+			// that is what this IS: kept because another agent shares it. It
+			// is set HERE rather than in the planner because only this layer
+			// knows the removal took nothing away; the planner's own flag
+			// stays reserved for the universal Master, which `blocks` above
+			// still reads before this line.
+			plan.shared_master_kept = true;
+			return Ok(removal::RemovalOutcome::preview(
+				plan,
+				true,
+				scope,
+				project_root.as_deref(),
 			));
 		}
 

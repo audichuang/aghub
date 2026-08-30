@@ -1538,6 +1538,32 @@ fn plan_reconcile_skill(
 	let exhaustive =
 		collectable && holders.iter().all(|held| removed.contains(held));
 
+	// Naming the unreadable agent is NOT enough authority to collect the
+	// Master. Counting it as a holder keeps `exhaustive` false while it is
+	// unnamed — but the moment the caller names it, `exhaustive` flips true and
+	// the batch will happily delete the Master from a READABLE row while the
+	// unreadable agent's own row is still ahead of it: its preflight fails OPEN
+	// on a config it cannot load, and rows use attempt-all semantics, so
+	// ordering saves nothing. The result is the Master gone and an opaque copy
+	// or Referrer left behind — the exact data loss the holder scan exists to
+	// prevent, reached by the one input that was supposed to authorize it.
+	//
+	// "Take it from that one too" can only be honoured by a batch that CAN take
+	// it from that one. Refuse before any row runs; fixing the directory is the
+	// way through, and it is recoverable.
+	if exhaustive && !unreadable.is_empty() {
+		return Err(ConfigError::InvalidConfig(format!(
+			"cannot decide whether removing '{}' leaves the shared \
+			 .agents/skills master unread: agent(s) '{}' could not be read \
+			 (skills directory unreadable), and an agent aghub cannot read may \
+			 still be holding it — naming it in --remove cannot authorize a \
+			 collection this run is unable to carry out on it. Fix or remove \
+			 those configs, then re-run.",
+			skill.name,
+			unreadable.join("', '")
+		)));
+	}
+
 	let (copies, deletes) = reconcile_plans(
 		added.to_vec(),
 		removed.to_vec(),
@@ -3069,6 +3095,69 @@ mod tests {
 				&& message.contains("skills directory unreadable"),
 			"the refusal must name the agent it could not read and why, or the \
 			 user has nothing to act on; got: {message}"
+		);
+	}
+
+	// NAMING the unreadable holder is not authority to collect the Master.
+	//
+	// Counting it as a holder keeps `exhaustive` false while it is unnamed —
+	// but `--remove windsurf` flips `exhaustive` true, and the batch would then
+	// let a READABLE row delete the Master while windsurf's own row is still
+	// ahead of it: its preflight fails OPEN on a config it cannot load, and
+	// rows are attempt-all, so ordering saves nothing. Master gone, opaque copy
+	// left behind — reached through the one input meant to authorize it.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_refuses_when_the_named_holder_is_the_unreadable_one() {
+		let _guard = env_lock().lock().unwrap();
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(&root).unwrap();
+		let master = root.join(".agents/skills/mover");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
+		)
+		.unwrap();
+		// A regular FILE where the skills dir belongs: `read_dir` fails for
+		// every user, including a CI job running as root.
+		fs::create_dir_all(root.join(".windsurf")).unwrap();
+		fs::write(root.join(".windsurf/skills"), "not a directory").unwrap();
+
+		let mut removed = holders_via_agent_roster(&root, "mover");
+		// THE input under test: the caller names the agent aghub cannot read.
+		removed.push(AgentType::Windsurf);
+
+		let outcome = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "mover".to_string(),
+			},
+			vec![],
+			removed,
+			true, // confirm
+		);
+
+		// Disk first: the regression is data loss, not a `Result` shape.
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the Master must survive: this run cannot verify what windsurf \
+			 holds, so it cannot honour \"take it from windsurf too\""
+		);
+		let message = outcome
+			.expect_err(
+				"naming an agent the run cannot mutate must not authorize the \
+				 collection",
+			)
+			.to_string();
+		assert!(
+			message.contains("windsurf")
+				&& message.contains("skills directory unreadable"),
+			"the refusal must name the agent it could not read and why; got: \
+			 {message}"
 		);
 	}
 

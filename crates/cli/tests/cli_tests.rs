@@ -10214,12 +10214,16 @@ fn identity_not_path_and_unknown_not_absent() {
 			.unwrap()
 			.status
 			.success());
-		// Broken, and nothing to do with skills.
-		std::fs::write(
-			home.path().join(".cursor/mcp.json"),
-			"{ \"mcpServers\": { \"x\": { \"command\": \"y\" },\n",
-		)
-		.unwrap();
+		// A regular FILE where cursor's skills dir belongs: `read_dir` fails
+		// for every user, including a CI job running as root, so cursor is a
+		// holder aghub cannot inspect.
+		//
+		// It used to be a malformed `.cursor/mcp.json`, which stopped working
+		// as a fixture the moment the holder scan stopped going through
+		// `load_all_agents`: nothing about cursor's SKILLS was broken, so the
+		// scan reads it fine and the test proved nothing about blindness.
+		std::fs::write(home.path().join(".cursor/skills"), "not a directory\n")
+			.unwrap();
 
 		let out = isolated_cli(home.path(), state.path())
 			.args([
@@ -10251,19 +10255,15 @@ fn identity_not_path_and_unknown_not_absent() {
 		);
 		assert!(!out.status.success());
 		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-		// The refusal must name a REASON the user can act on. Which reason
-		// changed with the holder scan: it used to go through
-		// `load_all_agents`, which parses MCPs too and gives up on the first
-		// error, so a broken `.cursor/mcp.json` made aghub BLIND to cursor and
-		// the only honest answer was "could not be read". The scan now asks the
-		// skill dirs directly, so cursor is seen for what it is — a live reader
-		// of the shared master — and says so by name. Either sentence is a
-		// reason; a bare "unsupported operation" is not.
+		// The refusal must NAME the holder it could not inspect. Treating a
+		// discovery `Err` as "no holder" would make the Master assertion above
+		// fail instead; this one pins that the user is told WHICH agent and
+		// WHY, which is the only thing they can act on.
 		let message = json["error"]["message"].as_str().unwrap_or_default();
 		assert!(
-			message.contains("could not be read")
-				|| message.contains("still read by"),
-			"the refusal must name why it could not decide: {json}"
+			message.contains("cursor")
+				&& message.contains("skills directory unreadable"),
+			"the refusal must identify the holder it could not inspect: {json}"
 		);
 	}
 
@@ -10854,6 +10854,141 @@ fn a_referrer_we_cannot_stat_still_counts_as_a_referrer() {
 			 {stdout}"
 		);
 	}
+}
+
+/// P0: an unrelated broken sibling in a peer dir must not hide a NESTED
+/// referrer.
+///
+/// `candidate_entries` asks discovery for the entries a peer dir really holds,
+/// and discovery used to abort the whole walk at the first unreadable entry —
+/// throwing away every skill it had already found in that same tree. The union
+/// then collapsed to `<dir>/<sanitized-name>`, the grouped `team/legacy`
+/// referrer was never probed, and the directory it points at went to
+/// `remove_dir_all` with `success: true`.
+///
+/// The pair differs ONLY in whether an unrelated sibling is readable.
+#[cfg(unix)]
+#[test]
+fn a_broken_sibling_must_not_hide_a_nested_referrer() {
+	use std::os::unix::fs::PermissionsExt;
+
+	for broken_sibling in [false, true] {
+		let home = tempfile::TempDir::new().unwrap();
+		let state = tempfile::TempDir::new().unwrap();
+		// Claude's own directory is NOT named `demo` — the frontmatter is.
+		// That is the layout `npx skills` and older aghub releases wrote, and
+		// the slot spelling never names it.
+		let owned = home.path().join(".claude/skills/owned-folder");
+		std::fs::create_dir_all(&owned).unwrap();
+		std::fs::write(
+			owned.join("SKILL.md"),
+			"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+		)
+		.unwrap();
+		// Gemini reaches it through a GROUPED referrer, two levels in.
+		let group = home.path().join(".gemini/skills/team");
+		std::fs::create_dir_all(&group).unwrap();
+		let referrer = group.join("legacy");
+		std::os::unix::fs::symlink(&owned, &referrer).unwrap();
+		// An unrelated, badly-behaved sibling in the SAME peer dir.
+		let sibling = home.path().join(".gemini/skills/bad");
+		std::fs::create_dir_all(&sibling).unwrap();
+		std::fs::write(sibling.join("SKILL.md"), "---\nname: bad\n---\n")
+			.unwrap();
+		if broken_sibling {
+			std::fs::set_permissions(
+				sibling.join("SKILL.md"),
+				std::fs::Permissions::from_mode(0o000),
+			)
+			.unwrap();
+		}
+
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g", "-a", "claude", "--json", "delete", "skills", "demo",
+				"--yes",
+			])
+			.output()
+			.unwrap();
+
+		let _ = std::fs::set_permissions(
+			sibling.join("SKILL.md"),
+			std::fs::Permissions::from_mode(0o644),
+		);
+
+		// THE assertion, identical in both arms: a live inbound link keeps the
+		// directory it points at, and an unrelated broken sibling next to that
+		// link may not change the answer.
+		assert!(
+			owned.join("SKILL.md").is_file(),
+			"a directory a nested referrer points at must not be removed \
+			 (broken_sibling={broken_sibling}). stdout={}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert!(
+			referrer.symlink_metadata().is_ok()
+				&& referrer.join("SKILL.md").is_file(),
+			"the nested referrer must not be left dangling \
+			 (broken_sibling={broken_sibling})"
+		);
+	}
+}
+
+/// P0: a delete that removed NOTHING must not report `removed`, and must not
+/// prune the lock entry of a skill that is still installed.
+///
+/// The planner spares the caller's own directory when a peer links into it —
+/// the `kept` contract. Routing that through `commit` set `executed: true` for
+/// the whole branch, so it serialized as `outcome: "removed"` with the skill
+/// still on disk, and the scope-wide lock prune dropped the entry (and its
+/// source provenance) for a skill nobody removed.
+#[cfg(unix)]
+#[test]
+fn a_spared_directory_is_kept_not_reported_removed() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let owned = home.path().join(".claude/skills/demo");
+	std::fs::create_dir_all(&owned).unwrap();
+	std::fs::write(
+		owned.join("SKILL.md"),
+		"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+	)
+	.unwrap();
+	let peer = home.path().join(".gemini/skills");
+	std::fs::create_dir_all(&peer).unwrap();
+	std::os::unix::fs::symlink(&owned, peer.join("demo")).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "--json", "delete", "skills", "demo", "--yes",
+		])
+		.output()
+		.unwrap();
+
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(out.status.success(), "a keep is a success: {stdout}");
+	let view: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+	assert_eq!(
+		view["outcome"], "kept",
+		"nothing was removed, so `removed` is a lie: {stdout}"
+	);
+	assert_eq!(view["executed"], false, "no destructive step ran: {stdout}");
+	assert_eq!(
+		view["paths"].as_array().map(Vec::len),
+		Some(0),
+		"nothing may be reported as deleted: {stdout}"
+	);
+	assert!(
+		view["pruned_lock_entries"]
+			.as_array()
+			.is_none_or(|entries| entries.is_empty()),
+		"the lock entry of a skill that is still installed must survive: \
+		 {stdout}"
+	);
+	assert!(
+		owned.join("SKILL.md").is_file(),
+		"and the skill really is still there"
+	);
 }
 
 /// The SYMLINK sweep's own pair — the one the copy-layout test above does not

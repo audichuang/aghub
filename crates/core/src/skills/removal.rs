@@ -283,15 +283,21 @@ fn discovered_entry_dir(skill: &crate::models::Skill) -> Option<PathBuf> {
 /// Existence is NOT filtered here — callers disagree on what counts (the
 /// symlink planner must see a DANGLING link, which `exists()` hides), so each
 /// keeps its own probe.
-fn candidate_entries(dir: &Path, name: &str, safe: &str) -> Vec<PathBuf> {
+/// The second half of the pair says the list may be SHORT — `dir` held
+/// something this walk could not read. Silence there is how a nested Referrer
+/// disappears: one unreadable sibling used to abort the whole scan, the union
+/// collapsed to the slot, and a directory another agent still links into looked
+/// unreferenced. Every destructive caller must fail closed on it; none may
+/// treat it as "nothing found".
+fn candidate_entries(
+	dir: &Path,
+	name: &str,
+	safe: &str,
+) -> (Vec<PathBuf>, bool) {
 	let mut out = vec![dir.join(safe)];
-	// Fail-OPEN to the slot alone when the dir cannot be walked: that IS the
-	// answer every earlier release gave, and the slot is still probed by the
-	// caller's own fail-CLOSED stat, so an unreadable dir cannot silently
-	// green-light a deletion here.
-	for skill in
-		crate::skills::discovery::load_skills_from_dir(dir).unwrap_or_default()
-	{
+	let (found, incomplete) =
+		crate::skills::discovery::load_skills_from_dir_partial(dir);
+	for skill in found {
 		if skill.name != name {
 			continue;
 		}
@@ -301,7 +307,7 @@ fn candidate_entries(dir: &Path, name: &str, safe: &str) -> Vec<PathBuf> {
 			}
 		}
 	}
-	out
+	(out, incomplete)
 }
 
 /// What a removal actually does to ONE agent's view of a skill.
@@ -315,6 +321,12 @@ pub struct ReadEffect {
 	/// smaller — the removal took something away even when `survivors` is
 	/// non-empty.
 	pub changed: bool,
+	/// At least one read dir could not be enumerated completely, so
+	/// `survivors` may be SHORT. Only a caller asserting a postcondition
+	/// ("nothing reads it anymore") needs this; a caller deciding whether to
+	/// REFUSE must keep ignoring it, or one odd sibling makes a skill
+	/// undeletable.
+	pub incomplete: bool,
 }
 
 /// Did this removal take anything away from the agent reading `read_dirs`, and
@@ -364,12 +376,12 @@ pub fn read_effect_after(
 	let mut after: BTreeSet<PathBuf> = BTreeSet::new();
 	let mut survivors: Vec<PathBuf> = Vec::new();
 
+	let mut incomplete = false;
 	for dir in read_dirs {
-		for skill in crate::skills::discovery::load_skills_from_dir(dir)
-			.unwrap_or_default()
-			.iter()
-			.filter(|skill| skill.name == name)
-		{
+		let (found, dir_incomplete) =
+			crate::skills::discovery::load_skills_from_dir_partial(dir);
+		incomplete |= dir_incomplete;
+		for skill in found.iter().filter(|skill| skill.name == name) {
 			let Some(entry) = discovered_entry_dir(skill) else {
 				continue;
 			};
@@ -391,6 +403,7 @@ pub fn read_effect_after(
 	ReadEffect {
 		changed: before != after,
 		survivors,
+		incomplete,
 	}
 }
 
@@ -457,53 +470,61 @@ fn plan_symlink_removal(
 	// `npx skills` and older aghub releases wrote `<dir>/<folder>` under a
 	// different frontmatter name, and a grouped layout nests it deeper still, so
 	// a sweep keyed on the slot walked straight past a live referrer.
-	for (dir, entry) in all_agent_dirs.iter().flat_map(|dir| {
-		candidate_entries(dir, &skill.name, safe)
-			.into_iter()
-			.map(move |entry| (dir, entry))
-	}) {
-		// NotFound means this agent simply does not hold it. Any other error
-		// means the entry is THERE and we could not look — dropping it out of
-		// the sweep made `delete --all-agents` neither count it as a holder nor
-		// unlink its referrer, while still reporting `success: true` with the
-		// path silently missing from the JSON. Fail CLOSED: an unknown holder
-		// keeps the shared master, exactly as a known one would.
-		match std::fs::symlink_metadata(&entry) {
-			Ok(_) => {}
-			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-				continue;
-			}
-			Err(_) => {
-				other_refs = true;
-				skipped.push(entry);
-				continue;
+	for dir in all_agent_dirs {
+		let (entries, incomplete) = candidate_entries(dir, &skill.name, safe);
+		if incomplete {
+			// The sweep could not see all of this dir, so it cannot promise it
+			// unlinked every referrer in it. Same verdict as a referrer it CAN
+			// see: keep the canonical and report the dir.
+			other_refs = true;
+			if !skipped.contains(dir) {
+				skipped.push(dir.clone());
 			}
 		}
-		let targeted =
-			all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
-		match entry.canonicalize() {
-			Ok(resolved) => {
-				if canonical_real.as_deref() == Some(resolved.as_path()) {
+		for entry in entries {
+			// NotFound means this agent simply does not hold it. Any other error
+			// means the entry is THERE and we could not look — dropping it out of
+			// the sweep made `delete --all-agents` neither count it as a holder nor
+			// unlink its referrer, while still reporting `success: true` with the
+			// path silently missing from the JSON. Fail CLOSED: an unknown holder
+			// keeps the shared master, exactly as a known one would.
+			match std::fs::symlink_metadata(&entry) {
+				Ok(_) => {}
+				Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+					continue;
+				}
+				Err(_) => {
+					other_refs = true;
+					skipped.push(entry);
+					continue;
+				}
+			}
+			let targeted =
+				all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
+			match entry.canonicalize() {
+				Ok(resolved) => {
+					if canonical_real.as_deref() == Some(resolved.as_path()) {
+						if Linker::is_link(&entry) && targeted {
+							paths.push(entry);
+							targeted_anything = true;
+						} else if targeted {
+							targeted_anything = true;
+						} else {
+							other_refs = true;
+						}
+					}
+					// Resolves to a DIFFERENT target => a same-named but unrelated
+					// skill; never touch it (match by canonical identity, not name).
+				}
+				Err(_) => {
+					// Dangling/broken link: unlinking it is safe, but we cannot
+					// prove it does not reference the canonical, so keep canonical.
 					if Linker::is_link(&entry) && targeted {
 						paths.push(entry);
 						targeted_anything = true;
-					} else if targeted {
-						targeted_anything = true;
-					} else {
-						other_refs = true;
 					}
+					unresolvable = true;
 				}
-				// Resolves to a DIFFERENT target => a same-named but unrelated
-				// skill; never touch it (match by canonical identity, not name).
-			}
-			Err(_) => {
-				// Dangling/broken link: unlinking it is safe, but we cannot
-				// prove it does not reference the canonical, so keep canonical.
-				if Linker::is_link(&entry) && targeted {
-					paths.push(entry);
-					targeted_anything = true;
-				}
-				unresolvable = true;
 			}
 		}
 	}
@@ -546,7 +567,16 @@ fn plan_copy_removal(
 
 	if all_agents {
 		for dir in all_agent_dirs {
-			for copy in candidate_entries(dir, &skill.name, safe) {
+			let (entries, incomplete) =
+				candidate_entries(dir, &skill.name, safe);
+			if incomplete && !skipped.contains(dir) {
+				// `--all-agents` promises "gone everywhere" and this dir could
+				// not be fully listed, so the promise is unverifiable. Report
+				// it: `read_effect_after` finds no survivor in a dir it also
+				// cannot read, so `skipped` is the only place the gap shows.
+				skipped.push(dir.clone());
+			}
+			for copy in entries {
 				if copy.exists() && !paths.contains(&copy) {
 					push_contained(copy, roots, &mut paths, &mut skipped);
 				}
@@ -686,70 +716,78 @@ pub fn dir_has_external_referrer(
 	// Same union as the symlink sweep: a Referrer this loop cannot see is one
 	// the caller then orphans with `remove_dir_all`, and the slot spelling never
 	// names an npx-era or grouped layout.
-	for (dir, entry) in all_agent_dirs.iter().flat_map(|dir| {
-		candidate_entries(dir, name, &safe)
-			.into_iter()
-			.map(move |entry| (dir.as_path(), entry))
-	}) {
-		// `Linker::is_link` and `canonicalize(..).unwrap_or(false)` both answer
-		// "no" to EACCES, so an unreadable peer directory hid a live inbound
-		// symlink and this function green-lit `remove_dir_all` on the directory
-		// that link points at. Verified: identical runs differing only in the
-		// peer dir's mode either skip the directory (0755) or delete it and
-		// leave the peer's link dangling (0400), both exit 0.
-		//
-		// Failing closed on EVERY stat error was too blunt, though: this loop
-		// runs over all 25 agents' skills dirs, so one odd directory blocked
-		// copy-layout deletion of every skill. Narrow it to the cases where a
-		// referrer could actually BE there.
-		match std::fs::symlink_metadata(&entry) {
-			Ok(_) => {}
-			// Nothing there, and — for NotADirectory — nothing CAN be: the
-			// parent itself is a file, so it holds no entries at all.
-			Err(error)
-				if matches!(
-					error.kind(),
-					std::io::ErrorKind::NotFound
-						| std::io::ErrorKind::NotADirectory
-				) =>
-			{
+	for dir in all_agent_dirs {
+		let dir = dir.as_path();
+		let (entries, incomplete) = candidate_entries(dir, name, &safe);
+		if incomplete {
+			// A dir this walk could not finish may hold a Referrer it never
+			// listed, and this function only ever KEEPS — so an unfinished
+			// listing is an unknown referrer, exactly like an unstat-able
+			// entry below. Naming the DIR (not a guessed entry) is the honest
+			// answer: that is the thing that could not be read.
+			return Some(dir.to_path_buf());
+		}
+		for entry in entries {
+			// `Linker::is_link` and `canonicalize(..).unwrap_or(false)` both answer
+			// "no" to EACCES, so an unreadable peer directory hid a live inbound
+			// symlink and this function green-lit `remove_dir_all` on the directory
+			// that link points at. Verified: identical runs differing only in the
+			// peer dir's mode either skip the directory (0755) or delete it and
+			// leave the peer's link dangling (0400), both exit 0.
+			//
+			// Failing closed on EVERY stat error was too blunt, though: this loop
+			// runs over all 25 agents' skills dirs, so one odd directory blocked
+			// copy-layout deletion of every skill. Narrow it to the cases where a
+			// referrer could actually BE there.
+			match std::fs::symlink_metadata(&entry) {
+				Ok(_) => {}
+				// Nothing there, and — for NotADirectory — nothing CAN be: the
+				// parent itself is a file, so it holds no entries at all.
+				Err(error)
+					if matches!(
+						error.kind(),
+						std::io::ErrorKind::NotFound
+							| std::io::ErrorKind::NotADirectory
+					) =>
+				{
+					continue;
+				}
+				Err(_) => {
+					// Cannot stat the entry — but a NAME needs no stat. Mode 0400
+					// is exactly this shape: `read_dir` succeeds, every child stat
+					// fails. If the listing is complete and the leaf is not in it,
+					// there is provably no referrer here. Asked of the entry's OWN
+					// parent and leaf, because a discovered entry can sit nested
+					// below `dir` — `<dir>/<safe>` is just the depth-0 case.
+					let listed = entry
+						.file_name()
+						.and_then(|leaf| leaf.to_str())
+						.and_then(|leaf| {
+							dir_lists_name(entry.parent().unwrap_or(dir), leaf)
+						});
+					match listed {
+						Some(false) => continue,
+						// Present but opaque, or not even listable: unknown, and an
+						// unknown referrer keeps the directory. This function only
+						// ever KEEPS, so failing closed costs a refused deletion,
+						// never data.
+						Some(true) | None => return Some(entry),
+					}
+				}
+			}
+			if !Linker::is_link(&entry) {
 				continue;
 			}
-			Err(_) => {
-				// Cannot stat the entry — but a NAME needs no stat. Mode 0400
-				// is exactly this shape: `read_dir` succeeds, every child stat
-				// fails. If the listing is complete and the leaf is not in it,
-				// there is provably no referrer here. Asked of the entry's OWN
-				// parent and leaf, because a discovered entry can sit nested
-				// below `dir` — `<dir>/<safe>` is just the depth-0 case.
-				let listed = entry
-					.file_name()
-					.and_then(|leaf| leaf.to_str())
-					.and_then(|leaf| {
-						dir_lists_name(entry.parent().unwrap_or(dir), leaf)
-					});
-				match listed {
-					Some(false) => continue,
-					// Present but opaque, or not even listable: unknown, and an
-					// unknown referrer keeps the directory. This function only
-					// ever KEEPS, so failing closed costs a refused deletion,
-					// never data.
-					Some(true) | None => return Some(entry),
+			match std::fs::canonicalize(&entry) {
+				Ok(resolved) => {
+					if resolved == target_real {
+						return Some(entry);
+					}
 				}
+				// A dangling link cannot be referencing a master that still exists.
+				Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+				Err(_) => return Some(entry),
 			}
-		}
-		if !Linker::is_link(&entry) {
-			continue;
-		}
-		match std::fs::canonicalize(&entry) {
-			Ok(resolved) => {
-				if resolved == target_real {
-					return Some(entry);
-				}
-			}
-			// A dangling link cannot be referencing a master that still exists.
-			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-			Err(_) => return Some(entry),
 		}
 	}
 	None
