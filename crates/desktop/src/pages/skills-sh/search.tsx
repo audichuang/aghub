@@ -23,6 +23,7 @@ import {
 import { InstallModal } from "./components/install-modal";
 import { SkillsHeader } from "./components/skills-header";
 import { useSkillInstall } from "./hooks/use-skill-install";
+import { buildInstalledSet, isSkillInstalled } from "./installed-set";
 
 const BATCH_SIZE = 20;
 const FETCH_SIZE = 100;
@@ -86,19 +87,13 @@ export default function SkillsSearchPage() {
 	});
 
 	const installedSet = useMemo(() => {
-		const set = new Set<string>();
-		// Global lock entries
-		for (const entry of globalLock?.skills ?? []) {
-			// Key: "<source>|<name>" matching MarketSkill fields
-			set.add(`${entry.source}|${entry.name}`);
-		}
-		// Project lock entries for every registered project
-		for (const result of projectLockResults) {
-			for (const entry of result.data?.skills ?? []) {
-				set.add(`${entry.source}|${entry.name}`);
-			}
-		}
-		return set;
+		const entries = [
+			...(globalLock?.skills ?? []),
+			...projectLockResults.flatMap(
+				(result) => result.data?.skills ?? [],
+			),
+		];
+		return buildInstalledSet(entries);
 	}, [globalLock, projectLockResults]);
 
 	const compactFormatter = useMemo(
@@ -201,8 +196,10 @@ export default function SkillsSearchPage() {
 						style={{ height: "100%" }}
 						components={tableComponents}
 						itemContent={(_index, skill) => {
-							const isInstalled = installedSet.has(
-								`${skill.source}|${skill.name}`,
+							const isInstalled = isSkillInstalled(
+								installedSet,
+								skill.source,
+								skill.name,
 							);
 							return (
 								<>

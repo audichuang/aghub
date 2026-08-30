@@ -1,0 +1,221 @@
+{
+	"updated_at": "2026-08-30",
+	"skills": [
+		{
+			"name": "pdf",
+			"slug": "pdf",
+			"summary": "Read, create, and fill PDF documents, including forms and scanned pages.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "pptx",
+			"slug": "pptx",
+			"summary": "Create and edit PowerPoint decks with layouts, charts, and speaker notes.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "xlsx",
+			"slug": "xlsx",
+			"summary": "Build and analyze spreadsheets, formulas, and tabular data in Excel files.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "docx",
+			"slug": "docx",
+			"summary": "Write and revise Word documents with headings, tables, and tracked structure.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "frontend-design",
+			"slug": "frontend-design",
+			"summary": "Produce distinctive, production-grade frontend interfaces instead of generic AI layouts.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "algorithmic-art",
+			"slug": "algorithmic-art",
+			"summary": "Create generative art with seeded randomness and interactive parameters.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "brand-guidelines",
+			"slug": "brand-guidelines",
+			"summary": "Apply Anthropic brand colors and typography to artifacts that need a consistent look.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "mcp-builder",
+			"slug": "mcp-builder",
+			"summary": "Design and scaffold MCP servers with tools, resources, and evaluation loops.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "webapp-testing",
+			"slug": "webapp-testing",
+			"summary": "Exercise a web app in a real browser and report what actually happens.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "skill-creator",
+			"slug": "skill-creator",
+			"summary": "Author a new skill with the right frontmatter, structure, and evaluation checks.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "canvas-design",
+			"slug": "canvas-design",
+			"summary": "Design visual canvases, posters, and static layouts with deliberate composition.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "theme-factory",
+			"slug": "theme-factory",
+			"summary": "Generate coherent color themes and apply them across an interface.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "internal-comms",
+			"slug": "internal-comms",
+			"summary": "Draft internal updates, status reports, and company-wide notes.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "doc-coauthoring",
+			"slug": "doc-coauthoring",
+			"summary": "Co-author long documents with structure, citations, and revision discipline.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "slack-gif-creator",
+			"slug": "slack-gif-creator",
+			"summary": "Make small animated GIFs suited to Slack reactions and status updates.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "web-artifacts-builder",
+			"slug": "web-artifacts-builder",
+			"summary": "Build self-contained HTML artifacts for sharing interactive results.",
+			"source": "github/anthropics/skills",
+			"author": "anthropics",
+			"installs": 0
+		},
+		{
+			"name": "brainstorming",
+			"slug": "brainstorming",
+			"summary": "Turn a vague idea into a validated design before any implementation starts.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "test-driven-development",
+			"slug": "test-driven-development",
+			"summary": "Drive a change with a failing test first, then the smallest passing implementation.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "writing-plans",
+			"slug": "writing-plans",
+			"summary": "Write an implementation plan another engineer can execute without re-deciding.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "executing-plans",
+			"slug": "executing-plans",
+			"summary": "Execute a written plan in small, reviewable slices with verification after each step.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "systematic-debugging",
+			"slug": "systematic-debugging",
+			"summary": "Follow a strict reproduce-isolate-fix loop instead of guessing at the cause.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "verification-before-completion",
+			"slug": "verification-before-completion",
+			"summary": "Prove the change works on the real path before calling the work done.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "using-superpowers",
+			"slug": "using-superpowers",
+			"summary": "Load the right Superpowers skill at the right time instead of skipping process.",
+			"source": "github/obra/superpowers",
+			"author": "obra",
+			"installs": 0
+		},
+		{
+			"name": "find-skills",
+			"slug": "find-skills",
+			"summary": "Search the skills.sh registry and pick an installable skill from the results.",
+			"source": "github/vercel-labs/skills",
+			"author": "vercel-labs",
+			"installs": 0
+		},
+		{
+			"name": "web-design-guidelines",
+			"slug": "web-design-guidelines",
+			"summary": "Apply Vercel web interface guidelines when reviewing or building UI.",
+			"source": "github/vercel-labs/agent-skills",
+			"author": "vercel-labs",
+			"installs": 0
+		},
+		{
+			"name": "vercel-react-best-practices",
+			"slug": "vercel-react-best-practices",
+			"summary": "Review React code against Vercel composition, purity, and performance rules.",
+			"source": "github/vercel-labs/agent-skills",
+			"author": "vercel-labs",
+			"installs": 0
+		},
+		{
+			"name": "deploy-to-vercel",
+			"slug": "deploy-to-vercel",
+			"summary": "Deploy an app to Vercel from the current project with the right project settings.",
+			"source": "github/vercel-labs/agent-skills",
+			"author": "vercel-labs",
+			"installs": 0
+		}
+	]
+}

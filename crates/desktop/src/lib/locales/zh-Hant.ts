@@ -779,6 +779,9 @@ export default {
 	searchToFindSkills: "搜尋以從 skills.sh 尋找技能",
 	poweredByVercel: "由 Vercel 提供支援",
 	dataFromSkillsSh: "資料來自 skills.sh",
+	featuredSkills: "精選",
+	featuredSkillsHint: "精選技能，不必先搜尋即可安裝。",
+	featuredEmptySummary: "沒有簡介",
 
 	// Projects
 	addProject: "新增專案",

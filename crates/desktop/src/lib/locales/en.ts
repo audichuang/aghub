@@ -801,6 +801,10 @@ export default {
 	searchToFindSkills: "Search to find skills from skills.sh",
 	poweredByVercel: "Powered by Vercel",
 	dataFromSkillsSh: "Data from skills.sh",
+	featuredSkills: "Featured",
+	featuredSkillsHint:
+		"A curated set you can install without searching first.",
+	featuredEmptySummary: "No summary",
 
 	// MCP Detail
 	connection: "Connection",
