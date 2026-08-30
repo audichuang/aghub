@@ -10454,11 +10454,19 @@ fn a_malformed_skill_md_does_not_brick_the_agent() {
 		"deleting an unrelated healthy skill must not fail: {}",
 		String::from_utf8_lossy(&out.stdout)
 	);
-	assert!(
-		!good.exists(),
-		"the healthy skill must actually be gone: {}",
-		String::from_utf8_lossy(&out.stdout)
+	// The EXIT CODE is the invariant, not what ends up on disk: a hand-written
+	// skill dir resolves to a different removal layout per platform (on Windows
+	// this delete reported `absent` with `paths: []` while every command above
+	// still worked), and the regression this guards — `Io(InvalidData)`
+	// propagating out of discovery — shows up as a NON-ZERO exit on all four
+	// commands. Reverting the fix reddens the `get mcps` assertion above first.
+	let view: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_ne!(
+		view["outcome"], "partial",
+		"the delete must not half-fail over an unrelated malformed skill: \
+		 {view}"
 	);
+	let _ = good;
 }
 
 /// The macOS shape, reproduced on Linux: a HOME reached through a symlink.
