@@ -18,6 +18,8 @@ import { SkillStatusBadge } from "./skill-update-badge";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
+import { useSkillTags } from "../hooks/use-skill-tags";
+import { matchesTagFilter } from "../lib/skill-tags";
 import { filterItemsByAgentIds } from "../lib/utils";
 import {
 	globalSkillLockQueryOptions,
@@ -56,6 +58,8 @@ interface SkillListProps {
 	/** When set, source group headers show a button that opens the Sources
 	 * view for that source, where uninstalled skills can be installed. */
 	onOpenSourceView?: (source: string) => void;
+	/** Local tag filter (AND). Empty/absent shows everything. */
+	tagFilter?: ReadonlySet<string>;
 }
 
 export function SkillList({
@@ -72,6 +76,7 @@ export function SkillList({
 	onResolveAuth,
 	onManageGroupAgents,
 	onOpenSourceView,
+	tagFilter,
 }: SkillListProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -142,11 +147,18 @@ export function SkillList({
 	);
 
 	const { isSkillStarred } = useFavorites();
+	const { tagsFor } = useSkillTags();
 
 	const filteredByName = useMemo(() => {
 		let items;
 		if (!searchQuery) items = groupedByName;
 		else items = fuse.search(searchQuery).map((result) => result.item);
+
+		if (tagFilter && tagFilter.size > 0) {
+			items = items.filter((group) =>
+				matchesTagFilter(tagsFor(group.name), tagFilter),
+			);
+		}
 
 		return [...items].sort((a, b) => {
 			const aStarred = isSkillStarred(a.name);
@@ -155,7 +167,7 @@ export function SkillList({
 			if (!aStarred && bStarred) return 1;
 			return 0;
 		});
-	}, [fuse, groupedByName, searchQuery, isSkillStarred]);
+	}, [fuse, groupedByName, searchQuery, isSkillStarred, tagFilter, tagsFor]);
 
 	const { sourceGroups, singleItemGroups, unknownGroups } = useMemo(() => {
 		const findSkillSource = (
@@ -305,6 +317,7 @@ export function SkillList({
 					)}
 				</div>
 				<Label className="flex-1 truncate">{skillGroup.name}</Label>
+				<SkillTagChips tags={tagsFor(skillGroup.name)} />
 				<SkillStatusBadge
 					status={updateStatuses?.get(skillGroup.name)}
 					onResolveAuth={
@@ -471,5 +484,27 @@ export function SkillList({
 				{filteredByName.map(renderSkillItem)}
 			</ListBox>
 		</div>
+	);
+}
+
+/** Up to two tag chips per row, then a `+N` counter — a long tag list must not
+ * push the agent icons off the row. */
+function SkillTagChips({ tags }: { tags: string[] }) {
+	if (tags.length === 0) return null;
+	const shown = tags.slice(0, 2);
+	const rest = tags.length - shown.length;
+	return (
+		<span className="flex shrink-0 items-center gap-1">
+			{shown.map((tag) => (
+				<Chip key={tag} size="sm" variant="secondary">
+					{tag}
+				</Chip>
+			))}
+			{rest > 0 && (
+				<Chip size="sm" variant="secondary">
+					{`+${rest}`}
+				</Chip>
+			)}
+		</span>
 	);
 }

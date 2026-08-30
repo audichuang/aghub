@@ -29,6 +29,9 @@ import { CreateSkillPanel } from "../../components/create-skill-panel";
 import { ImportGithubSkillPanel } from "../../components/import-github-skill-panel";
 import { ImportSkillPanel } from "../../components/import-skill-panel";
 import { ListSearchHeader } from "../../components/list-search-header";
+import { EditSkillTagsDialog } from "../../components/edit-skill-tags-dialog";
+import { useSkillTags } from "../../hooks/use-skill-tags";
+import { allTags, UNTAGGED } from "../../lib/skill-tags";
 import { MultiSelectFloatingBar } from "../../components/multi-select-floating-bar";
 import {
 	PROJECT_KEY_PREFIX,
@@ -414,6 +417,9 @@ export default function SkillsPage() {
 
 	// ── Agent-view state ──
 	const [searchQuery, setSearchQuery] = useState("");
+	const [tagFilter, setTagFilter] = useState<Set<string>>(() => new Set());
+	// Non-null while the tag dialog is open; holds the names it edits.
+	const [tagDialogNames, setTagDialogNames] = useState<string[] | null>(null);
 	const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
 		() => new Set(),
 	);
@@ -745,10 +751,16 @@ export default function SkillsPage() {
 								{refreshButton}
 							</ListSearchHeader>
 
+							<SkillTagFilterRow
+								selected={tagFilter}
+								onChange={setTagFilter}
+							/>
+
 							<SkillList
 								skills={skills}
 								selectedKeys={effectiveSelectedKeys}
 								searchQuery={searchQuery}
+								tagFilter={tagFilter}
 								onSelectionChange={handleSelectionChange}
 								selectionMode="multiple"
 								isMultiSelectMode={isMultiSelectMode}
@@ -788,6 +800,9 @@ export default function SkillsPage() {
 								<MultiSelectFloatingBar
 									selectedCount={selectedKeys.size}
 									totalCount={groupedSkills.length}
+									onManageTags={() =>
+										setTagDialogNames([...selectedKeys])
+									}
 									onDelete={() =>
 										setIsBulkDeleteDialogOpen(true)
 									}
@@ -897,6 +912,12 @@ export default function SkillsPage() {
 						</div>
 					)}
 
+					<EditSkillTagsDialog
+						isOpen={tagDialogNames !== null}
+						names={tagDialogNames ?? []}
+						onClose={() => setTagDialogNames(null)}
+					/>
+
 					<BulkDeleteDialog
 						isOpen={isBulkDeleteDialogOpen}
 						onClose={() => setIsBulkDeleteDialogOpen(false)}
@@ -941,6 +962,52 @@ export default function SkillsPage() {
 					)}
 				</div>
 			</div>
+		</div>
+	);
+}
+
+/** Tag filter chips. Renders nothing until at least one tag exists, so a user
+ * who never tags anything sees the list exactly as before. */
+function SkillTagFilterRow({
+	selected,
+	onChange,
+}: {
+	selected: Set<string>;
+	onChange: (next: Set<string>) => void;
+}) {
+	const { t } = useTranslation();
+	const { tags } = useSkillTags();
+	const available = allTags(tags);
+	if (available.length === 0) return null;
+
+	const toggle = (tag: string) => {
+		const next = new Set(selected);
+		if (next.has(tag)) next.delete(tag);
+		else next.add(tag);
+		onChange(next);
+	};
+
+	const chip = (tag: string, label: string) => (
+		<button
+			key={tag}
+			type="button"
+			onClick={() => toggle(tag)}
+			aria-pressed={selected.has(tag)}
+			className={cn(
+				"rounded-full border border-separator px-2 py-0.5 text-xs transition-colors",
+				selected.has(tag)
+					? "bg-accent/10 text-accent"
+					: "text-muted hover:bg-surface-secondary",
+			)}
+		>
+			{label}
+		</button>
+	);
+
+	return (
+		<div className="flex flex-wrap items-center gap-1.5 px-3 pb-2">
+			{available.map((tag) => chip(tag, tag))}
+			{chip(UNTAGGED, t("untagged"))}
 		</div>
 	);
 }

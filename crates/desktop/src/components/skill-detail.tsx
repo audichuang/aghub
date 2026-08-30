@@ -11,6 +11,7 @@ import {
 	MagnifyingGlassIcon,
 	PlusIcon,
 	StarIcon as StarIconSolid,
+	TagIcon,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
 import { Accordion, Button, Card, Chip, toast, Tooltip } from "@heroui/react";
@@ -39,6 +40,7 @@ import {
 	skillUsageQueryOptions,
 } from "../requests/skills";
 import { SkillStatusBadge } from "./skill-update-badge";
+import { EditSkillTagsDialog } from "./edit-skill-tags-dialog";
 import { ManageSkillAgentsDialog } from "./manage-skill-agents-dialog";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import {
@@ -95,6 +97,7 @@ export function SkillDetail({
 	const [showAllLocations, setShowAllLocations] = useState(false);
 	const [transferDialogOpen, setTransferDialogOpen] = useState(false);
 	const [manageDialogOpen, setManageDialogOpen] = useState(false);
+	const [tagsDialogOpen, setTagsDialogOpen] = useState(false);
 	const [syncDialogOpen, setSyncDialogOpen] = useState(false);
 	// Initialize from openCredDialog so auth-uncheckable skills opened from
 	// the list immediately show the credential binding dialog.
@@ -405,6 +408,21 @@ export function SkillDetail({
 										{isStarred
 											? t("unstarSkill")
 											: t("starSkill")}
+									</Tooltip.Content>
+								</Tooltip>
+								<Tooltip delay={0}>
+									<Button
+										isIconOnly
+										variant="ghost"
+										size="md"
+										className="text-muted min-w-[44px] min-h-[44px] hover:text-foreground"
+										aria-label={t("manageTags")}
+										onPress={() => setTagsDialogOpen(true)}
+									>
+										<TagIcon className="size-5" />
+									</Button>
+									<Tooltip.Content>
+										{t("manageTags")}
 									</Tooltip.Content>
 								</Tooltip>
 								<Tooltip delay={0}>
@@ -840,6 +858,12 @@ export function SkillDetail({
 				isOpen={manageDialogOpen}
 				onClose={() => setManageDialogOpen(false)}
 				projectPath={projectPath}
+			/>
+
+			<EditSkillTagsDialog
+				isOpen={tagsDialogOpen}
+				names={[skill.name]}
+				onClose={() => setTagsDialogOpen(false)}
 			/>
 			{sourceUrl && (
 				<SyncGithubSkillDialog

@@ -690,6 +690,14 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
+	manageTags: "标签",
+	untagged: "未标记",
+	noTagsYet: "还没有标签。",
+	addTag: "加入标签",
+	addTagPlaceholder: "输入标签后按 Enter",
+	removeTag: "移除标签「{{tag}}」",
+	editTagsFor: "「{{name}}」的标签",
+	editTagsForSelection: "已选 {{count}} 个技能的标签",
 	manageAgents: "管理代理",
 	manageAgentsTooltip: "选择使用此服务器的代理",
 	adding: "添加",

@@ -1,4 +1,4 @@
-import { TrashIcon, UserGroupIcon } from "@heroicons/react/24/solid";
+import { TagIcon, TrashIcon, UserGroupIcon } from "@heroicons/react/24/solid";
 import { Button } from "@heroui/react";
 import { useTranslation } from "react-i18next";
 
@@ -8,6 +8,8 @@ interface MultiSelectFloatingBarProps {
 	onDelete: () => void;
 	/** Optional "manage agents" action rendered before delete when provided. */
 	onManageAgents?: () => void;
+	/** Optional "tags" action rendered before delete when provided. */
+	onManageTags?: () => void;
 }
 
 export function MultiSelectFloatingBar({
@@ -15,6 +17,7 @@ export function MultiSelectFloatingBar({
 	totalCount,
 	onDelete,
 	onManageAgents,
+	onManageTags,
 }: MultiSelectFloatingBarProps) {
 	const { t } = useTranslation();
 
@@ -38,6 +41,17 @@ export function MultiSelectFloatingBar({
 						>
 							<UserGroupIcon className="size-4 mr-1.5" />
 							{t("manageAgents")}
+						</Button>
+					)}
+					{onManageTags && (
+						<Button
+							variant="secondary"
+							size="sm"
+							onPress={onManageTags}
+							className="pointer-events-auto min-h-[32px]"
+						>
+							<TagIcon className="size-4 mr-1.5" />
+							{t("manageTags")}
 						</Button>
 					)}
 					<Button

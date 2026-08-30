@@ -725,6 +725,14 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
+	manageTags: "Tags",
+	untagged: "Untagged",
+	noTagsYet: "No tags yet.",
+	addTag: "Add tag",
+	addTagPlaceholder: "Type a tag and press Enter",
+	removeTag: 'Remove tag "{{tag}}"',
+	editTagsFor: 'Tags for "{{name}}"',
+	editTagsForSelection: "Tags for {{count}} selected skills",
 	manageAgents: "Manage Agents",
 	manageAgentsTooltip: "Choose which agents use this server",
 	adding: "Adding",

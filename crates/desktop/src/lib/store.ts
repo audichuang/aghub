@@ -14,6 +14,7 @@ export {
 	getLastKnownAvailableAgents,
 	setLastKnownAvailableAgents,
 } from "./store/new-tools";
+export { getSkillTags, setSkillTags } from "./store/tags";
 export {
 	getOnboardingProgress,
 	updateOnboardingProgress,
