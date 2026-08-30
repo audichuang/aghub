@@ -440,6 +440,19 @@ export default {
 	settingsAutostartEnabled: "已启用开机自启动",
 	settingsAutostartDisabled: "已关闭开机自启动",
 	settingsAutostartError: "更新开机自启动失败",
+	skillCheckScheduleHeading: "定期检查 skill 更新",
+	skillCheckScheduleDescription:
+		"每天 09:00 在应用关闭时运行 `aghub-cli check --online`，不会自动套用更新。",
+	skillCheckScheduleNeedCli:
+		"需要安装 aghub-cli（或将其加入 PATH）才能启用定期检查。",
+	skillCheckScheduleEnabled: "已启用定期 skill 检查",
+	skillCheckScheduleDisabled: "已关闭定期 skill 检查",
+	skillCheckScheduleError: "无法更新 skill 检查排程",
+	skillCheckScheduleNever: "尚未跑过后台检查。",
+	skillCheckScheduleNeedsAuth:
+		"{{count}} 个私有来源被略过：排程只读 GIT_PASSWORD／GITHUB_TOKEN，读不到桌面 keyring。",
+	skillCheckScheduleLast:
+		"上次检查：{{available}} 个可更新，{{failed}} 个失败（{{when}}）",
 	onboardingSkip: "跳过",
 	onboardingBack: "返回",
 	onboardingNext: "下一步",

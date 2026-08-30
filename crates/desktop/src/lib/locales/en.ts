@@ -470,6 +470,19 @@ export default {
 	settingsAutostartEnabled: "Startup launch enabled",
 	settingsAutostartDisabled: "Startup launch disabled",
 	settingsAutostartError: "Failed to update startup launch",
+	skillCheckScheduleHeading: "Check skill updates on a schedule",
+	skillCheckScheduleDescription:
+		"Runs `aghub-cli check --online` daily at 09:00 while the app is closed. Never applies updates.",
+	skillCheckScheduleNeedCli:
+		"Install aghub-cli (or put it on PATH) to enable scheduled checks.",
+	skillCheckScheduleEnabled: "Scheduled skill check enabled",
+	skillCheckScheduleDisabled: "Scheduled skill check disabled",
+	skillCheckScheduleError: "Could not update the skill-check schedule",
+	skillCheckScheduleNever: "No background check has run yet.",
+	skillCheckScheduleNeedsAuth:
+		"{{count}} private source(s) skipped: the schedule reads GIT_PASSWORD / GITHUB_TOKEN, not the desktop keyring.",
+	skillCheckScheduleLast:
+		"Last check: {{available}} update(s), {{failed}} failed ({{when}})",
 	onboardingSkip: "Skip",
 	onboardingBack: "Back",
 	onboardingNext: "Next",

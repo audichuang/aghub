@@ -2,6 +2,7 @@ pub mod credentials;
 pub mod logging;
 pub mod remote;
 pub mod server;
+pub mod skill_check;
 pub mod window;
 
 pub use credentials::{list_bound_sources, resolve_git_token};
@@ -16,4 +17,8 @@ pub use remote::{
 	remote_status, test_connection, RemoteState,
 };
 pub use server::start_server;
+pub use skill_check::{
+	get_last_skill_check, get_skill_check_schedule, resolve_aghub_cli,
+	set_skill_check_schedule,
+};
 pub use window::minimize_to_tray;

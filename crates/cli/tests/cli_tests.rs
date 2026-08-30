@@ -6688,6 +6688,62 @@ fn check_skills_default_output_is_a_table_with_the_offline_hint() {
 	);
 }
 
+/// `--write-result` is the scheduler's receipt. Check stays read-only: two
+/// runs must produce a parseable sidecar with a `results` array and leave the
+/// lock bytes untouched.
+#[test]
+fn check_write_result_sidecar_is_parseable_and_does_not_mutate_lock() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let sidecar_dir = tempfile::TempDir::new().unwrap();
+	let sidecar = sidecar_dir.path().join("skill-check-last.json");
+	// isolated_cli sets XDG_STATE_HOME, so the global lock is
+	// `$XDG_STATE_HOME/skills/.skill-lock.json`, not `~/.agents/`.
+	let lock_dir = state.path().join("skills");
+	std::fs::create_dir_all(&lock_dir).unwrap();
+	let lock_path = lock_dir.join(".skill-lock.json");
+	std::fs::write(&lock_path, r#"{"version":3,"skills":{}}"#).unwrap();
+	let lock_before = std::fs::read(&lock_path).unwrap();
+
+	for _ in 0..2 {
+		let out = isolated_cli(home.path(), state.path())
+			.args([
+				"-g",
+				"--json",
+				"check",
+				"skills",
+				"--write-result",
+				sidecar.to_str().unwrap(),
+			])
+			.output()
+			.unwrap();
+		assert!(
+			out.status.success(),
+			"stderr: {}",
+			String::from_utf8_lossy(&out.stderr)
+		);
+		let stdout: Value =
+			serde_json::from_slice(&out.stdout).expect("stdout json");
+		assert!(
+			stdout.is_array(),
+			"stdout must stay the check array: {stdout}"
+		);
+	}
+
+	let sidecar_body = std::fs::read_to_string(&sidecar).unwrap();
+	let parsed: Value =
+		serde_json::from_str(&sidecar_body).expect("sidecar json");
+	assert!(
+		parsed["results"].is_array(),
+		"sidecar must carry results: {parsed}"
+	);
+	assert!(parsed["startedAt"].is_string());
+	assert!(parsed["finishedAt"].is_string());
+	assert_eq!(parsed["online"], false);
+	assert_eq!(parsed["scope"], "global");
+	assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
+}
+
 /// The offline default's reasons come from the SHARED orchestrator, not from a
 /// table in this crate.
 ///

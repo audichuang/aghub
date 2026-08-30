@@ -22,13 +22,14 @@
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
-use anyhow::Result;
+use anyhow::{bail, Context, Result};
 use serde::Serialize;
 use skill_update::{
 	check_updates, projection, CheckDeps, EntryInput, Fetcher, GitFetcher,
 	RefResolver, ResultCache,
 };
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tabled::builder::Builder;
@@ -36,7 +37,7 @@ use tabled::settings::Style;
 
 /// Flattened, camelCase status mirroring `aghub-api`'s `SkillUpdateStatusResponse`
 /// (the CLI does not depend on the api crate, so the shape is duplicated here).
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(tag = "status", rename_all = "camelCase")]
 // Mirrors `aghub-api`'s `SkillUpdateStatusResponse`. The offline path only ever
 // emits `Uncheckable`; `--online` emits all three.
@@ -57,7 +58,7 @@ enum StatusView {
 
 /// One skill's name plus its flattened update status. Mirrors
 /// `aghub-api`'s `SkillUpdateResponse`.
-#[derive(Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SkillUpdateView {
 	name: String,
@@ -180,6 +181,38 @@ fn uncheckable_reason_str(reason: UncheckableReason) -> &'static str {
 	}
 }
 
+/// What a reader of the sidecar should DO about an uncheckable row.
+///
+/// The desktop's schedule summary used to call EVERY uncheckable row a
+/// failure, so a healthy machine whose sources are private or local reported
+/// "N failed" every single day. Only a row an online run really attempted and
+/// could not finish is a failure.
+#[derive(Debug, PartialEq, Eq)]
+enum UncheckableBucket {
+	/// Tried and did not finish — worth surfacing.
+	Failed,
+	/// The source needs credentials this run did not have. EXPECTED under the
+	/// OS schedule: the CLI resolves tokens from `GIT_PASSWORD` /
+	/// `GITHUB_TOKEN`, never from the desktop keyring, so every private source
+	/// lands here.
+	NeedsAuth,
+	/// Nothing could have been fetched: a local/ssh/unsupported source, a lock
+	/// entry with no path, or the offline default — where `network` means
+	/// "we did not look", not "the network failed".
+	Skipped,
+}
+
+fn uncheckable_bucket(reason: &str, online: bool) -> UncheckableBucket {
+	if !online {
+		return UncheckableBucket::Skipped;
+	}
+	match reason {
+		"auth" => UncheckableBucket::NeedsAuth,
+		"network" | "timeout" => UncheckableBucket::Failed,
+		_ => UncheckableBucket::Skipped,
+	}
+}
+
 /// Flatten an orchestrator [`SkillUpdateStatus`] into the CLI's `StatusView`.
 fn status_view(status: SkillUpdateStatus) -> StatusView {
 	match status {
@@ -202,6 +235,7 @@ pub fn execute(
 	project_root: Option<&Path>,
 	online: bool,
 	json: bool,
+	write_result: Option<PathBuf>,
 ) -> Result<()> {
 	match resource {
 		// Unreachable from the CLI: `Commands::Check` takes the narrowed
@@ -234,7 +268,7 @@ pub fn execute(
 	// not a second implementation: the CLI used to build its own offline rows
 	// and map a `local` lock entry to reason `local` while the orchestrator
 	// answered `network` for the very same entry under the very same flag.
-	run_check(locks, project_root, online, json)
+	run_check(locks, project_root, scope, online, json, write_result)
 }
 
 /// Per-fetch timeout / deadline / concurrency for an online check (mirrors the
@@ -267,9 +301,14 @@ use super::source::EnvTokenResolver;
 fn run_check(
 	locks: crate::commands::LockSnapshot,
 	project_root: Option<&Path>,
+	scope: ResourceScope,
 	online: bool,
 	json: bool,
+	write_result: Option<PathBuf>,
 ) -> Result<()> {
+	// Stamped before any fetch so the sidecar's `startedAt` is the real start,
+	// not a second copy of `finishedAt`.
+	let started_at = chrono::Utc::now().to_rfc3339();
 	// The SHARED projection: `wanted`-scoped hashing, the per-root memo, and the
 	// lock-before-disk read order all come from `skill_update::projection`
 	// rather than a private copy that drifted from the API's.
@@ -333,6 +372,129 @@ fn run_check(
 	views.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
 	print_updates(&views, json, online)?;
+	if let Some(path) = write_result {
+		let path = if path.as_os_str().is_empty() {
+			default_sidecar_path()
+		} else {
+			path
+		};
+		write_check_sidecar(
+			&path,
+			started_at,
+			online,
+			scope_label(scope),
+			&views,
+		)?;
+	}
+	Ok(())
+}
+
+fn scope_label(scope: ResourceScope) -> &'static str {
+	match scope {
+		ResourceScope::GlobalOnly => "global",
+		ResourceScope::ProjectOnly => "project",
+		ResourceScope::Both => "both",
+	}
+}
+
+fn default_sidecar_path() -> PathBuf {
+	crate::commands::app_data_dir().join("skill-check-last.json")
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CheckSidecar {
+	started_at: String,
+	finished_at: String,
+	online: bool,
+	scope: String,
+	results: Vec<SkillUpdateView>,
+	/// Rows an online run tried and could not finish.
+	failed: usize,
+	/// Rows whose source needs credentials the run did not have.
+	needs_auth: usize,
+	/// Rows nothing could have answered (local/ssh/unsupported/no path, or the
+	/// whole offline default).
+	skipped: usize,
+	update_available: usize,
+}
+
+fn sidecar_from_views(
+	started_at: String,
+	finished_at: String,
+	online: bool,
+	scope: &str,
+	views: &[SkillUpdateView],
+) -> CheckSidecar {
+	let mut failed = 0usize;
+	let mut needs_auth = 0usize;
+	let mut skipped = 0usize;
+	for view in views {
+		if let StatusView::Uncheckable { reason } = &view.status {
+			match uncheckable_bucket(reason, online) {
+				UncheckableBucket::Failed => failed += 1,
+				UncheckableBucket::NeedsAuth => needs_auth += 1,
+				UncheckableBucket::Skipped => skipped += 1,
+			}
+		}
+	}
+	let update_available = views
+		.iter()
+		.filter(|view| {
+			matches!(view.status, StatusView::UpdateAvailable { .. })
+		})
+		.count();
+	CheckSidecar {
+		started_at,
+		finished_at,
+		online,
+		scope: scope.to_string(),
+		results: views.to_vec(),
+		failed,
+		needs_auth,
+		skipped,
+		update_available,
+	}
+}
+
+fn write_check_sidecar(
+	path: &Path,
+	started_at: String,
+	online: bool,
+	scope: &str,
+	views: &[SkillUpdateView],
+) -> Result<()> {
+	let payload = sidecar_from_views(
+		started_at,
+		chrono::Utc::now().to_rfc3339(),
+		online,
+		scope,
+		views,
+	);
+	write_sidecar_atomic(path, &payload)
+}
+
+fn write_sidecar_atomic(path: &Path, payload: &CheckSidecar) -> Result<()> {
+	if path.is_dir() {
+		bail!(
+			"--write-result path is a directory, not a file: {}",
+			path.display()
+		);
+	}
+	if let Some(parent) = path.parent() {
+		if !parent.as_os_str().is_empty() {
+			fs::create_dir_all(parent).with_context(|| {
+				format!("create sidecar parent {}", parent.display())
+			})?;
+		}
+	}
+	let tmp = path.with_extension("json.tmp");
+	let body = serde_json::to_vec_pretty(payload)
+		.context("serialize skill-check sidecar")?;
+	fs::write(&tmp, body)
+		.with_context(|| format!("write sidecar temp {}", tmp.display()))?;
+	fs::rename(&tmp, path)
+		.with_context(|| format!("rename sidecar into {}", path.display()))?;
 	Ok(())
 }
 
@@ -414,5 +576,82 @@ mod tests {
 		});
 		assert_eq!(json["status"], "uncheckable");
 		assert_eq!(json["reason"], "auth");
+	}
+
+	#[test]
+	fn sidecar_write_creates_parseable_file_with_results() {
+		let tmp = tempfile::tempdir().unwrap();
+		let path = tmp.path().join("skill-check-last.json");
+		let payload = sidecar_from_views(
+			"t0".into(),
+			"t1".into(),
+			false,
+			"global",
+			&[uncheckable("network")],
+		);
+		write_sidecar_atomic(&path, &payload).unwrap();
+		let parsed: serde_json::Value =
+			serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+		assert!(parsed["results"].is_array());
+		assert_eq!(parsed["results"].as_array().unwrap().len(), 1);
+		// Offline: `network` means "we did not look", so nothing failed.
+		assert_eq!(parsed["failed"], 0);
+		assert_eq!(parsed["skipped"], 1);
+		assert_eq!(parsed["updateAvailable"], 0);
+		assert_eq!(parsed["online"], false);
+		assert_eq!(parsed["scope"], "global");
+		assert_eq!(parsed["startedAt"], "t0");
+		assert_eq!(parsed["finishedAt"], "t1");
+	}
+
+	/// A scheduled run over private + local sources is HEALTHY. Counting those
+	/// rows as failures made the desktop report "N failed" every single day on
+	/// a machine where nothing was wrong.
+	#[test]
+	fn online_sidecar_separates_real_failures_from_auth_and_unfetchable() {
+		let payload = sidecar_from_views(
+			"t0".into(),
+			"t1".into(),
+			true,
+			"global",
+			&[
+				uncheckable("auth"),
+				uncheckable("auth"),
+				uncheckable("local"),
+				uncheckable("ssh"),
+				uncheckable("unsupportedScheme"),
+				uncheckable("noPath"),
+				uncheckable("network"),
+				uncheckable("timeout"),
+			],
+		);
+		assert_eq!(payload.failed, 2, "only network/timeout are failures");
+		assert_eq!(payload.needs_auth, 2);
+		assert_eq!(payload.skipped, 4);
+	}
+
+	/// Offline is not a failure report at all: no row was attempted.
+	#[test]
+	fn offline_sidecar_never_reports_a_failure() {
+		let payload = sidecar_from_views(
+			"t0".into(),
+			"t1".into(),
+			false,
+			"global",
+			&[uncheckable("network"), uncheckable("auth")],
+		);
+		assert_eq!(payload.failed, 0);
+		assert_eq!(payload.needs_auth, 0);
+		assert_eq!(payload.skipped, 2);
+	}
+
+	#[test]
+	fn sidecar_refuses_a_directory_without_deleting_it() {
+		let tmp = tempfile::tempdir().unwrap();
+		let payload =
+			sidecar_from_views("t0".into(), "t1".into(), false, "global", &[]);
+		let err = write_sidecar_atomic(tmp.path(), &payload).unwrap_err();
+		assert!(tmp.path().is_dir());
+		assert!(err.to_string().contains("directory"));
 	}
 }

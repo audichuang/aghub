@@ -1,6 +1,7 @@
 import { Avatar, Button, Card, Switch, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getName, getVersion } from "@tauri-apps/api/app";
+import { invoke } from "@tauri-apps/api/core";
 import {
 	disable as disableAutostart,
 	enable as enableAutostart,
@@ -254,6 +255,8 @@ export default function ApplicationPanel() {
 						</div>
 					) : null}
 
+					<SkillCheckScheduleRow />
+
 					<div className="flex items-center justify-between">
 						<div className="space-y-0.5">
 							<span className="text-sm font-medium text-(--foreground)">
@@ -334,6 +337,110 @@ export default function ApplicationPanel() {
 					</div>
 				</Card.Content>
 			</Card>
+		</div>
+	);
+}
+
+interface SkillCheckScheduleStatus {
+	supported: boolean;
+	enabled: boolean;
+	cliPath: string | null;
+	sidecarPath: string;
+}
+
+interface LastSkillCheck {
+	finishedAt?: string;
+	updateAvailable?: number;
+	failed?: number;
+	/** Private sources the schedule cannot reach: the CLI resolves tokens from
+	 * GIT_PASSWORD / GITHUB_TOKEN, never from the desktop keyring. */
+	needsAuth?: number;
+	skipped?: number;
+}
+
+function SkillCheckScheduleRow() {
+	const { t } = useTranslation();
+	const queryClient = useQueryClient();
+
+	const { data: status, isPending } = useQuery({
+		queryKey: ["skill-check-schedule"],
+		queryFn: async () =>
+			invoke<SkillCheckScheduleStatus>("get_skill_check_schedule"),
+		retry: false,
+	});
+
+	const { data: last } = useQuery({
+		queryKey: ["skill-check-last"],
+		queryFn: async () =>
+			invoke<LastSkillCheck | null>("get_last_skill_check"),
+		retry: false,
+	});
+
+	const mutation = useMutation({
+		mutationFn: async (enabled: boolean) =>
+			invoke<SkillCheckScheduleStatus>("set_skill_check_schedule", {
+				enabled,
+				cliPath: status?.cliPath ?? null,
+			}),
+		onSuccess: (next) => {
+			queryClient.setQueryData(["skill-check-schedule"], next);
+			toast.success(
+				next.enabled
+					? t("skillCheckScheduleEnabled")
+					: t("skillCheckScheduleDisabled"),
+			);
+		},
+		onError: (error) => {
+			toast.danger(
+				error instanceof Error
+					? error.message
+					: t("skillCheckScheduleError"),
+			);
+		},
+	});
+
+	// v1 registers a systemd --user timer; macOS/Windows have no backend yet, so
+	// the row is hidden rather than offering a switch whose flip always errors.
+	if (status != null && !status.supported) return null;
+
+	const cliMissing = status != null && !status.cliPath;
+	const summary = last
+		? t("skillCheckScheduleLast", {
+				available: last.updateAvailable ?? 0,
+				failed: last.failed ?? 0,
+				when: last.finishedAt ?? "",
+			})
+		: t("skillCheckScheduleNever");
+	const needsAuth = last?.needsAuth ?? 0;
+
+	return (
+		<div className="flex items-center justify-between gap-4">
+			<div className="space-y-0.5">
+				<span className="text-sm font-medium text-(--foreground)">
+					{t("skillCheckScheduleHeading")}
+				</span>
+				<span className="block text-xs text-muted">
+					{cliMissing
+						? t("skillCheckScheduleNeedCli")
+						: t("skillCheckScheduleDescription")}
+				</span>
+				<span className="block text-xs text-muted">{summary}</span>
+				{needsAuth > 0 ? (
+					<span className="block text-xs text-muted">
+						{t("skillCheckScheduleNeedsAuth", { count: needsAuth })}
+					</span>
+				) : null}
+			</div>
+			<Switch
+				isSelected={status?.enabled ?? false}
+				onChange={(checked) => mutation.mutate(checked)}
+				isDisabled={isPending || mutation.isPending || cliMissing}
+				aria-label={t("skillCheckScheduleHeading")}
+			>
+				<Switch.Control>
+					<Switch.Thumb />
+				</Switch.Control>
+			</Switch>
 		</div>
 	);
 }

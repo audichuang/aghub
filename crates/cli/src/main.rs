@@ -360,6 +360,13 @@ enum Commands {
 		/// both locks.
 		#[arg(long, visible_alias = "check-remote")]
 		online: bool,
+
+		/// Write a sidecar JSON summary (started/finished, counts, per-skill
+		/// views). Check itself stays read-only and does not mutate locks.
+		/// Omit PATH to use `$AGHUB_DATA_DIR/skill-check-last.json` (or the
+		/// platform app data dir).
+		#[arg(long = "write-result", value_name = "PATH", num_args = 0..=1, default_missing_value = "")]
+		write_result: Option<PathBuf>,
 	},
 	/// Apply an available skill update from the lock's source/ref/skillPath.
 	ApplyUpdate {
@@ -937,7 +944,12 @@ fn run(cli: Cli) -> Result<()> {
 	// config stops reading as an empty one) otherwise made a broken
 	// `.mcp.json` fail `check skills` and `prune-lock`, which is unrelated to
 	// either.
-	if let Commands::Check { resource, online } = &cli.command {
+	if let Commands::Check {
+		resource,
+		online,
+		write_result,
+	} = &cli.command
+	{
 		reject_agent_all(&cli.agent)?;
 		// `check` defaults to BOTH scopes, like the other read-only
 		// diagnostics (`doctor`, `source list`, `source diff`). It used to
@@ -958,6 +970,7 @@ fn run(cli: Cli) -> Result<()> {
 			resolved.project_root(),
 			*online,
 			cli.json,
+			write_result.clone(),
 		);
 	}
 	if let Commands::PruneLock { dry_run, yes } = &cli.command {

@@ -53,7 +53,12 @@ impl ApiOptions {
 	}
 }
 
-pub(crate) fn default_app_data_dir() -> PathBuf {
+/// `dirs::data_dir()/aghub` — the root the CLI (`commands::app_data_dir`) and
+/// the desktop's skill-check sidecar also resolve to. Public because the
+/// desktop needs the SAME root the scheduled CLI writes into; Tauri's own
+/// `app_data_dir()` is identifier-scoped (`<data>/com.akrc.aghub`) and would
+/// point somewhere else.
+pub fn default_app_data_dir() -> PathBuf {
 	dirs::data_dir()
 		.unwrap_or_else(std::env::temp_dir)
 		.join("aghub")
