@@ -490,6 +490,9 @@ function SkillCheckScheduleRow() {
 				onChange={(checked) => mutation.mutate(checked)}
 				isDisabled={isPending || mutation.isPending || cliMissing}
 				aria-label={t("skillCheckScheduleHeading")}
+				// The compound root reserves a label slot and is wider than the
+				// visible control, which throws off this row's right edge.
+				className="w-10 shrink-0"
 			>
 				<Switch.Control>
 					<Switch.Thumb />

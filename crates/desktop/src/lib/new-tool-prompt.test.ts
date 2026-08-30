@@ -98,6 +98,7 @@ test("reconcileAddsForNewAgents skips agents that already hold the skill", () =>
 			{ name: "pptx", agent: "codex" },
 		],
 		["claude", "kilocode"],
+		new Set(["pdf", "pptx"]),
 	);
 	assert.deepEqual(plans, [
 		{ name: "pdf", sourceAgent: "codex", added: ["kilocode"] },
@@ -107,4 +108,32 @@ test("reconcileAddsForNewAgents skips agents that already hold the skill", () =>
 			added: ["claude", "kilocode"],
 		},
 	]);
+});
+
+test("a skill the lock does not own is never reconciled", () => {
+	// A hand-made ~/.claude/skills/private-notes shows up in discovery but is
+	// not managed by aghub. Reconciling it would promote it into the shared
+	// Master and link it to other agents — a migration nobody asked for.
+	const plans = reconcileAddsForNewAgents(
+		[
+			{ name: "pdf", agent: "codex" },
+			{ name: "private-notes", agent: "claude" },
+		],
+		["kilocode"],
+		new Set(["pdf"]),
+	);
+	assert.deepEqual(plans, [
+		{ name: "pdf", sourceAgent: "codex", added: ["kilocode"] },
+	]);
+});
+
+test("an empty lock produces no plans at all", () => {
+	assert.deepEqual(
+		reconcileAddsForNewAgents(
+			[{ name: "private-notes", agent: "claude" }],
+			["kilocode"],
+			new Set(),
+		),
+		[],
+	);
 });

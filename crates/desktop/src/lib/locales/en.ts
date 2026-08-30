@@ -472,7 +472,7 @@ export default {
 	settingsAutostartError: "Failed to update startup launch",
 	skillCheckScheduleHeading: "Check skill updates on a schedule",
 	skillCheckScheduleDescription:
-		"Runs `aghub-cli check --online` daily at 09:00 while the app is closed. Never applies updates.",
+		"Runs `aghub-cli check skills --online` daily at 09:00 while the app is closed. Never applies updates.",
 	skillCheckScheduleNeedCli:
 		"Install aghub-cli (or put it on PATH) to enable scheduled checks.",
 	skillCheckScheduleEnabled: "Scheduled skill check enabled",

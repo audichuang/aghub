@@ -28,7 +28,6 @@ use skill_update::{
 	check_updates, projection, CheckDeps, EntryInput, Fetcher, GitFetcher,
 	RefResolver, ResultCache,
 };
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -378,13 +377,22 @@ fn run_check(
 		} else {
 			path
 		};
-		write_check_sidecar(
+		if let Err(error) = write_check_sidecar(
 			&path,
 			started_at,
 			online,
 			scope_label(scope),
 			&views,
-		)?;
+		) {
+			// stdout already carries the check answer under `--json`; the
+			// shared failure reporter must not append a second JSON document
+			// (see `note_answer_on_stdout`). The prose still goes to stderr and
+			// the exit code is still non-zero.
+			if json {
+				crate::note_answer_on_stdout();
+			}
+			return Err(error);
+		}
 	}
 	Ok(())
 }
@@ -481,20 +489,14 @@ fn write_sidecar_atomic(path: &Path, payload: &CheckSidecar) -> Result<()> {
 			path.display()
 		);
 	}
-	if let Some(parent) = path.parent() {
-		if !parent.as_os_str().is_empty() {
-			fs::create_dir_all(parent).with_context(|| {
-				format!("create sidecar parent {}", parent.display())
-			})?;
-		}
-	}
-	let tmp = path.with_extension("json.tmp");
-	let body = serde_json::to_vec_pretty(payload)
-		.context("serialize skill-check sidecar")?;
-	fs::write(&tmp, body)
-		.with_context(|| format!("write sidecar temp {}", tmp.display()))?;
-	fs::rename(&tmp, path)
-		.with_context(|| format!("rename sidecar into {}", path.display()))?;
+	let body = serde_json::to_string_pretty(payload)
+		.context("serialize skill-check sidecar")?
+		+ "\n";
+	// The lock writer's atomic write, not a second one: a unique temp file in
+	// the destination directory, fsync, then a replacing persist. A fixed
+	// `.json.tmp` name would also have two concurrent runs clobber each other.
+	skill::lock::atomic_write_json(path, &body)
+		.with_context(|| format!("write sidecar {}", path.display()))?;
 	Ok(())
 }
 

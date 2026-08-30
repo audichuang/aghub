@@ -39,7 +39,9 @@ export function backgroundUpdateNews(
 ): number | null {
 	const available = last?.updateAvailable ?? 0;
 	if (available <= 0) return null;
-	const finished = last?.finishedAt ? Date.parse(last.finishedAt) : Number.NaN;
+	const finished = last?.finishedAt
+		? Date.parse(last.finishedAt)
+		: Number.NaN;
 	if (Number.isNaN(finished)) return null;
 	if (appLastChecked && finished <= appLastChecked.getTime()) return null;
 	return available;

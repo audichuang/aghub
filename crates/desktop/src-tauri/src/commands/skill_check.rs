@@ -163,14 +163,25 @@ pub mod schedule_backend {
 	/// Arguments for `schtasks` itself (the program is `schtasks`, not the CLI).
 	/// `/TR` is ONE string that the task scheduler re-parses, so the program path
 	/// is quoted inside it.
+	/// `/TR` is ONE string that Task Scheduler re-parses with Windows
+	/// command-line rules, so EVERY argument needs quoting — not only the
+	/// program. `%LOCALAPPDATA%` under `C:\Users\First Last\...` would
+	/// otherwise split the sidecar path into two argv entries, and the daily
+	/// task would die on a clap error nobody ever sees.
+	fn windows_quote(arg: &str) -> String {
+		format!("\"{}\"", arg.replace('"', "\\\""))
+	}
+
 	pub fn schtasks_create_args(
 		cli: &Path,
 		sidecar: &Path,
 	) -> Result<Vec<String>, String> {
 		let argv = checked_argv(cli, sidecar)?;
-		let (program, rest) =
-			argv.split_first().expect("argv[0] is the program");
-		let run = format!("\"{}\" {}", program, rest.join(" "));
+		let run = argv
+			.iter()
+			.map(|part| windows_quote(part))
+			.collect::<Vec<_>>()
+			.join(" ");
 		Ok(vec![
 			"/Create".into(),
 			"/TN".into(),
@@ -233,6 +244,15 @@ pub mod schedule_backend {
 	) -> Result<PathBuf, String> {
 		if let Some(path) = explicit {
 			let path = PathBuf::from(path);
+			// Absolute only: systemd/launchd/schtasks run the task from their
+			// own working directory, so a relative path that resolves from the
+			// desktop app would silently fail every scheduled run.
+			if !path.is_absolute() {
+				return Err(
+					"the aghub-cli path must be absolute (the scheduler runs from a different directory)"
+						.into(),
+				);
+			}
 			if path.is_file() {
 				return Ok(path);
 			}
@@ -349,10 +369,17 @@ pub mod schedule_backend {
 			"launchctl",
 			&["bootout", &format!("{domain}/{LAUNCHD_LABEL}")],
 		);
-		(env.run)(
+		let bootstrapped = (env.run)(
 			"launchctl",
 			&["bootstrap", &domain, &path.to_string_lossy()],
-		)
+		);
+		if bootstrapped.is_err() {
+			// `launchd_enabled` reads the plist's existence, so a plist left
+			// behind by a failed bootstrap would report a schedule launchd
+			// never loaded.
+			let _ = std::fs::remove_file(&path);
+		}
+		bootstrapped
 	}
 
 	pub fn unregister_launchd(env: &Env, uid: &str) -> Result<(), String> {
@@ -508,13 +535,28 @@ pub struct SkillCheckScheduleStatus {
 	pub sidecar_path: String,
 }
 
-#[tauri::command]
-pub fn resolve_aghub_cli(explicit: Option<String>) -> Result<String, String> {
-	resolve_aghub_cli_path(explicit).map(|path| path.display().to_string())
+// Every command here is `async` + `spawn_blocking`: a SYNC `#[tauri::command]`
+// runs on the main (UI) thread, and these shell out to
+// `which`/`systemctl`/`launchctl`/`schtasks` and touch the filesystem. A wedged
+// OS command in a sync command freezes the webview (worked example and the rule
+// itself: `commands/remote.rs`).
+
+fn join_error(e: tauri::Error) -> String {
+	format!("skill-check task failed to join: {e}")
 }
 
 #[tauri::command]
-pub fn get_skill_check_schedule() -> SkillCheckScheduleStatus {
+pub async fn resolve_aghub_cli(
+	explicit: Option<String>,
+) -> Result<String, String> {
+	tauri::async_runtime::spawn_blocking(move || {
+		resolve_aghub_cli_path(explicit).map(|path| path.display().to_string())
+	})
+	.await
+	.map_err(join_error)?
+}
+
+fn schedule_status() -> SkillCheckScheduleStatus {
 	SkillCheckScheduleStatus {
 		supported: SCHEDULE_SUPPORTED,
 		enabled: backend_enabled(),
@@ -526,32 +568,52 @@ pub fn get_skill_check_schedule() -> SkillCheckScheduleStatus {
 }
 
 #[tauri::command]
-pub fn set_skill_check_schedule(
-	enabled: bool,
-	cli_path: Option<String>,
+pub async fn get_skill_check_schedule(
 ) -> Result<SkillCheckScheduleStatus, String> {
-	if enabled {
-		let cli = resolve_aghub_cli_path(cli_path)?;
-		let sidecar = default_sidecar_path();
-		if let Some(parent) = sidecar.parent() {
-			std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-		}
-		backend_register(&cli, &sidecar)?;
-	} else {
-		backend_unregister()?;
-	}
-	Ok(get_skill_check_schedule())
+	tauri::async_runtime::spawn_blocking(schedule_status)
+		.await
+		.map_err(join_error)
 }
 
 #[tauri::command]
-pub fn get_last_skill_check() -> Result<Option<serde_json::Value>, String> {
-	let path = default_sidecar_path();
-	if !path.is_file() {
-		return Ok(None);
-	}
-	let body = std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
-	let value = serde_json::from_str(&body).map_err(|err| err.to_string())?;
-	Ok(Some(value))
+pub async fn set_skill_check_schedule(
+	enabled: bool,
+	cli_path: Option<String>,
+) -> Result<SkillCheckScheduleStatus, String> {
+	tauri::async_runtime::spawn_blocking(move || {
+		if enabled {
+			let cli = resolve_aghub_cli_path(cli_path)?;
+			let sidecar = default_sidecar_path();
+			if let Some(parent) = sidecar.parent() {
+				std::fs::create_dir_all(parent)
+					.map_err(|err| err.to_string())?;
+			}
+			backend_register(&cli, &sidecar)?;
+		} else {
+			backend_unregister()?;
+		}
+		Ok(schedule_status())
+	})
+	.await
+	.map_err(join_error)?
+}
+
+#[tauri::command]
+pub async fn get_last_skill_check() -> Result<Option<serde_json::Value>, String>
+{
+	tauri::async_runtime::spawn_blocking(|| {
+		let path = default_sidecar_path();
+		if !path.is_file() {
+			return Ok(None);
+		}
+		let body =
+			std::fs::read_to_string(&path).map_err(|err| err.to_string())?;
+		let value =
+			serde_json::from_str(&body).map_err(|err| err.to_string())?;
+		Ok(Some(value))
+	})
+	.await
+	.map_err(join_error)?
 }
 
 #[cfg(test)]
@@ -655,6 +717,30 @@ mod tests {
 		// The program inside /TR must stay quoted: Program Files has a space.
 		let run = &args[4];
 		assert!(run.starts_with("\"/usr/bin/aghub-cli\" "), "{run}");
+	}
+
+	/// Task Scheduler re-parses `/TR`, so a Windows profile with a space
+	/// (`C:\Users\First Last`) must not split into extra argv entries.
+	#[test]
+	fn schtasks_quotes_every_argument_not_just_the_program() {
+		let args = schtasks_create_args(
+			Path::new("C:\\Program Files\\aghub\\aghub-cli.exe"),
+			Path::new("C:\\Users\\First Last\\AppData\\aghub\\last.json"),
+		)
+		.unwrap();
+		let run = &args[4];
+		assert!(
+			run.contains(
+				"\"C:\\Users\\First Last\\AppData\\aghub\\last.json\""
+			),
+			"the sidecar path must stay ONE argument: {run}"
+		);
+		assert!(
+			run.starts_with("\"C:\\Program Files\\aghub\\aghub-cli.exe\" "),
+			"{run}"
+		);
+		// Every token is quoted, so re-parsing yields exactly our argv.
+		assert_eq!(run.matches('"').count() % 2, 0, "unbalanced quotes: {run}");
 	}
 
 	#[test]

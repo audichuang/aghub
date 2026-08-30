@@ -19,6 +19,7 @@ import {
 } from "../lib/store";
 import { useSkillCoverage } from "../requests/agents";
 import {
+	globalSkillLockQueryOptions,
 	reconcileSkillsMutationOptions,
 	skillListQueryOptions,
 } from "../requests/skills";
@@ -28,10 +29,20 @@ export function NewToolsPromptController() {
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
-	const { availableAgents } = useAgentAvailability();
+	const { availableAgents, disabledAgentsLoaded } = useAgentAvailability();
 	const { coverage, isLoading: coverageLoading } = useSkillCoverage("global");
 	const { data: skills = [], isLoading: skillsLoading } = useQuery(
 		skillListQueryOptions({ api, scope: "global" }),
+	);
+	// Only lock-owned skills are aghub's to move. Discovery also lists private
+	// hand-made skills, and reconciling one would promote it into the shared
+	// Master (see `reconcileAddsForNewAgents`).
+	const { data: globalLock, isLoading: lockLoading } = useQuery(
+		globalSkillLockQueryOptions({ api }),
+	);
+	const lockedNames = useMemo(
+		() => new Set((globalLock?.skills ?? []).map((entry) => entry.name)),
+		[globalLock],
 	);
 	const { data: lastKnown, isLoading: lastKnownLoading } = useQuery({
 		queryKey: ["lastKnownAvailableAgents"],
@@ -41,7 +52,10 @@ export function NewToolsPromptController() {
 		reconcileSkillsMutationOptions({ api, queryClient }),
 	);
 	const [dismissed, setDismissed] = useState(false);
-	const persistedRef = useRef(false);
+	/** Last seed written this session, so an agent that DISAPPEARS is dropped
+	 * from `lastKnown` even without an app restart — otherwise an
+	 * uninstall→reinstall inside one session would never prompt again. */
+	const persistedSeedRef = useRef<string | null>(null);
 
 	const promptAgents: NewToolPromptAgent[] = useMemo(
 		() =>
@@ -56,30 +70,42 @@ export function NewToolsPromptController() {
 	);
 
 	const delta = useMemo(() => {
-		if (coverageLoading || skillsLoading || lastKnownLoading) return null;
+		if (
+			coverageLoading ||
+			skillsLoading ||
+			lockLoading ||
+			lastKnownLoading ||
+			!disabledAgentsLoaded
+		) {
+			// `disabledAgents` is read from the store AFTER the provider first
+			// renders, so every agent looks enabled for one commit. Seeding on
+			// that frame would record a disabled agent as "known" and never
+			// prompt for it once the user enables it.
+			return null;
+		}
 		return newToolPromptDelta({
 			lastKnown: lastKnown ?? null,
 			agents: promptAgents,
 		});
 	}, [
 		coverageLoading,
+		disabledAgentsLoaded,
 		lastKnown,
 		lastKnownLoading,
+		lockLoading,
 		promptAgents,
 		skillsLoading,
 	]);
 
 	useEffect(() => {
-		if (!delta || persistedRef.current) return;
-		if (delta.kind === "seedOnly" || delta.kind === "quiet") {
-			persistedRef.current = true;
-			void setLastKnownAvailableAgents(delta.seed).then(() => {
-				queryClient.setQueryData(
-					["lastKnownAvailableAgents"],
-					delta.seed,
-				);
-			});
-		}
+		if (!delta) return;
+		if (delta.kind !== "seedOnly" && delta.kind !== "quiet") return;
+		const fingerprint = delta.seed.join("\u0000");
+		if (persistedSeedRef.current === fingerprint) return;
+		persistedSeedRef.current = fingerprint;
+		void setLastKnownAvailableAgents(delta.seed).then(() => {
+			queryClient.setQueryData(["lastKnownAvailableAgents"], delta.seed);
+		});
 	}, [delta, queryClient]);
 
 	const persistSeed = async (seed: string[]) => {
@@ -101,11 +127,11 @@ export function NewToolsPromptController() {
 
 	const handleLink = async () => {
 		if (!promptIds || !pendingSeed) return;
-		const plans = reconcileAddsForNewAgents(skills, promptIds);
+		const plans = reconcileAddsForNewAgents(skills, promptIds, lockedNames);
 		let failed = 0;
 		for (const plan of plans) {
 			try {
-				await reconcileMutation.mutateAsync({
+				const result = await reconcileMutation.mutateAsync({
 					source: {
 						agent: plan.sourceAgent,
 						scope: "global",
@@ -115,6 +141,10 @@ export function NewToolsPromptController() {
 					added: plan.added,
 					removed: null,
 				});
+				// A batch answers HTTP 200 with per-row failures inside the
+				// envelope, so a resolved promise is NOT success. Counting only
+				// thrown requests reported "linked!" while agents were skipped.
+				if (result.failed_count > 0) failed += 1;
 			} catch {
 				failed += 1;
 			}

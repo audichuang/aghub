@@ -441,7 +441,7 @@ export default {
 	settingsAutostartError: "更新開機自動啟動失敗",
 	skillCheckScheduleHeading: "定期檢查 skill 更新",
 	skillCheckScheduleDescription:
-		"每天 09:00 在應用程式關閉時執行 `aghub-cli check --online`，不會自動套用更新。",
+		"每天 09:00 在應用程式關閉時執行 `aghub-cli check skills --online`，不會自動套用更新。",
 	skillCheckScheduleNeedCli:
 		"需要安裝 aghub-cli（或把它加進 PATH）才能啟用定期檢查。",
 	skillCheckScheduleEnabled: "已啟用定期 skill 檢查",

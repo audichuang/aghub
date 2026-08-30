@@ -1002,8 +1002,16 @@ function SkillTagFilterRow({
 }) {
 	const { t } = useTranslation();
 	const { tags } = useSkillTags();
-	const available = allTags(tags);
-	if (available.length === 0) return null;
+	// A tag stays in the row while it is SELECTED even after its last skill
+	// loses it — otherwise the chip vanishes with the filter still active and
+	// the list is empty with nothing left to click.
+	const available = [
+		...new Set([
+			...allTags(tags),
+			...[...selected].filter((tag) => tag !== UNTAGGED),
+		]),
+	].sort((a, b) => a.localeCompare(b));
+	if (available.length === 0 && !selected.has(UNTAGGED)) return null;
 
 	const toggle = (tag: string) => {
 		const next = new Set(selected);

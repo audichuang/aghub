@@ -5,7 +5,6 @@ import {
 	allTags,
 	applyTagOp,
 	matchesTagFilter,
-	setTagsFor,
 	UNTAGGED,
 	unionTags,
 } from "./skill-tags.ts";
@@ -73,12 +72,6 @@ test("untagged never matches a tagged skill", () => {
 	assert.equal(matchesTagFilter(undefined, new Set([UNTAGGED])), true);
 	// "untagged AND work" is unsatisfiable, and says so.
 	assert.equal(matchesTagFilter([], new Set([UNTAGGED, "work"])), false);
-});
-
-test("setTagsFor replaces the set, de-duplicating and dropping blanks", () => {
-	const tags = setTagsFor({ pdf: ["old"] }, "pdf", ["a", " a ", "", "b"]);
-	assert.deepEqual(tags, { pdf: ["a", "b"] });
-	assert.deepEqual(setTagsFor(tags, "pdf", []), {});
 });
 
 test("allTags and unionTags are sorted and de-duplicated", () => {

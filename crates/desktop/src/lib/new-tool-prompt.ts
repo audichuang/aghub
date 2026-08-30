@@ -56,14 +56,26 @@ export function newToolPromptDelta(args: {
 	return { kind: "prompt", ids, seed };
 }
 
+/**
+ * Which skills to hand the new agent, and from where.
+ *
+ * `lockedNames` is the gate: only skills the GLOBAL LOCK owns are managed by
+ * aghub. The discovery list also carries hand-made private skills (a
+ * `~/.claude/skills/foo` nobody installed through us); reconciling one of those
+ * would promote it into the Universal Master and link it everywhere — a
+ * migration the user never asked for. Discovery rows are used only to find an
+ * agent that already has the skill, i.e. a legal `source` for reconcile.
+ */
 export function reconcileAddsForNewAgents(
 	skills: SkillAgentRow[],
 	addedIds: string[],
+	lockedNames: ReadonlySet<string>,
 ): NewAgentReconcilePlan[] {
 	const byName = new Map<string, Set<string>>();
 	const order: string[] = [];
 	for (const row of skills) {
 		if (!row.agent) continue;
+		if (!lockedNames.has(row.name)) continue;
 		let agents = byName.get(row.name);
 		if (!agents) {
 			agents = new Set();

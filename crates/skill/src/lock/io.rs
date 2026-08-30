@@ -233,10 +233,12 @@ fn write_skill_lock_locked(lock: &SkillLockFile) -> std::io::Result<()> {
 	atomic_write_json(&lock_path, &content)
 }
 
-pub(crate) fn atomic_write_json(
-	path: &Path,
-	content: &str,
-) -> std::io::Result<()> {
+/// Atomic JSON write: unique temp file in the destination directory, fsync,
+/// then `persist` (which REPLACES an existing destination on every platform).
+/// Public so other surfaces that must not hand-roll this — the CLI's
+/// `check --write-result` sidecar — reuse the one implementation instead of a
+/// fixed `.tmp` name and a bare rename.
+pub fn atomic_write_json(path: &Path, content: &str) -> std::io::Result<()> {
 	if let Some(parent) = path.parent() {
 		std::fs::create_dir_all(parent)?;
 		let mut tmp = tempfile::Builder::new()

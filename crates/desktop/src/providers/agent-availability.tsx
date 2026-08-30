@@ -22,6 +22,7 @@ export function AgentAvailabilityProvider({
 	const [disabledAgents, setDisabledAgents] = useState<Set<string>>(
 		() => new Set(),
 	);
+	const [disabledAgentsLoaded, setDisabledAgentsLoaded] = useState(false);
 
 	// Fetch all agents
 	const {
@@ -45,6 +46,7 @@ export function AgentAvailabilityProvider({
 	useEffect(() => {
 		getDisabledAgents().then((disabled: string[]) => {
 			setDisabledAgents(new Set(disabled));
+			setDisabledAgentsLoaded(true);
 		});
 	}, []);
 
@@ -99,6 +101,7 @@ export function AgentAvailabilityProvider({
 		availableAgents,
 		allAgents,
 		isLoading,
+		disabledAgentsLoaded,
 		refetch,
 		refreshDisabledAgents,
 	};
