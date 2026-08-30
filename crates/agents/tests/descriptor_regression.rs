@@ -295,7 +295,7 @@ fn test_project_markers() {
 		(AgentType::Kimi, &[".kimi"]),
 		(AgentType::Mistral, &[".vibe"]),
 		(AgentType::Pi, &[".pi"]),
-		(AgentType::AugmentCode, &[]),
+		(AgentType::AugmentCode, &[".augment"]),
 		(
 			AgentType::KiloCode,
 			&["kilo.json", "kilo.jsonc", ".kilo", ".kilocode"],
@@ -935,7 +935,7 @@ fn test_skills_capabilities_scopes_global() {
 		(AgentType::Kimi, true),
 		(AgentType::Mistral, true),
 		(AgentType::Pi, true),
-		(AgentType::AugmentCode, false),
+		(AgentType::AugmentCode, true),
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
@@ -980,7 +980,7 @@ fn test_skills_capabilities_scopes_project() {
 		(AgentType::Kimi, true),
 		(AgentType::Mistral, true),
 		(AgentType::Pi, true),
-		(AgentType::AugmentCode, false),
+		(AgentType::AugmentCode, true),
 		(AgentType::KiloCode, true),
 		(AgentType::Amp, true),
 		(AgentType::Warp, true),
@@ -1188,7 +1188,7 @@ fn test_global_skill_paths() {
 		), // universal=true adds extra path
 		(AgentType::Mistral, Some(&[".vibe/skills"])),
 		(AgentType::Pi, Some(&[".pi/agent/skills"])),
-		(AgentType::AugmentCode, None),
+		(AgentType::AugmentCode, Some(&[".augment/skills"])),
 		(AgentType::KiloCode, Some(&[".kilocode/skills"])),
 		(
 			AgentType::Amp,
@@ -1309,7 +1309,7 @@ fn test_project_skill_paths() {
 		(AgentType::Kimi, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
 		(AgentType::Mistral, Some(&[".vibe/skills"])),
 		(AgentType::Pi, Some(&[".pi/skills"])),
-		(AgentType::AugmentCode, None),
+		(AgentType::AugmentCode, Some(&[".augment/skills"])),
 		(AgentType::KiloCode, Some(&[".kilocode/skills"])),
 		(AgentType::Amp, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
 		(AgentType::Warp, Some(&[".agents/skills"])),

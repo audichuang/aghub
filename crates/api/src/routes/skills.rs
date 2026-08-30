@@ -5237,7 +5237,10 @@ mod tests {
 				.json(&serde_json::json!({
 					"session_id": "mixed-session",
 					"skill_paths": ["my-skill"],
-					"agents": ["claude", "augmentcode"],
+					// jetbrains-ai declares no skills scopes: the stable
+					// unsupported sentinel (augmentcode was one until it
+					// gained `.augment/skills`).
+					"agents": ["claude", "jetbrains-ai"],
 					"scope": "project",
 					"project_root": project.display().to_string()
 				}))
@@ -6426,7 +6429,8 @@ mod tests {
 					.header(Header::new("X-Aghub-Git-Tokens", encoded))
 					.json(&serde_json::json!({
 						"source": "https://github.com/acme/skills.git",
-						"agents": ["claude", "augmentcode"],
+						// jetbrains-ai = the skills-unsupported sentinel.
+						"agents": ["claude", "jetbrains-ai"],
 						"skills": ["music"],
 						"scope": "project",
 						"project_path": project.display().to_string(),

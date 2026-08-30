@@ -287,6 +287,54 @@ mod tests {
 	}
 
 	#[test]
+	fn augmentcode_is_needs_link_even_when_master_dir_exists() {
+		let global = plan_for("augmentcode", ResourceScope::GlobalOnly, None);
+		assert!(
+			matches!(global.need, LinkNeed::NeedsLink { .. }),
+			"augmentcode @global should NeedsLink, got {:?}",
+			global.need
+		);
+		assert!(
+			!global.reads_master,
+			"augmentcode must not list the Master in its read paths"
+		);
+		match &global.need {
+			LinkNeed::NeedsLink { agent_skills_dir } => {
+				assert!(
+					agent_skills_dir.ends_with(".augment/skills"),
+					"write dir should be .augment/skills, got {}",
+					agent_skills_dir.display()
+				);
+			}
+			other => panic!("expected NeedsLink, got {other:?}"),
+		}
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = std::fs::canonicalize(tmp.path()).unwrap();
+		std::fs::create_dir_all(root.join(".agents/skills")).unwrap();
+		let project = plan_for(
+			"augmentcode",
+			ResourceScope::ProjectOnly,
+			Some(root.as_path()),
+		);
+		assert!(
+			matches!(project.need, LinkNeed::NeedsLink { .. }),
+			"augmentcode @project should NeedsLink even when <root>/.agents/skills exists, got {:?}",
+			project.need
+		);
+		assert!(
+			!project.reads_master,
+			"adding Master to Augment read paths would skip the Referrer"
+		);
+		match &project.need {
+			LinkNeed::NeedsLink { agent_skills_dir } => {
+				assert_eq!(agent_skills_dir, &root.join(".augment/skills"));
+			}
+			other => panic!("expected NeedsLink, got {other:?}"),
+		}
+	}
+
+	#[test]
 	fn agent_without_skill_support_is_unsupported() {
 		// jetbrains-ai has no skills scopes => no write dir, no master read.
 		let plan = plan_for("jetbrains-ai", ResourceScope::GlobalOnly, None);

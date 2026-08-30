@@ -1,3 +1,4 @@
+use crate::define_skill_paths;
 use crate::descriptor::*;
 use std::path::{Path, PathBuf};
 
@@ -38,6 +39,10 @@ fn save_mcps(
 	)
 }
 
+define_skill_paths! {
+	symmetric: ".augment/skills",
+}
+
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	id: "augmentcode",
 	display_name: "AugmentCode",
@@ -51,8 +56,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	capabilities: Capabilities {
 		skills: SkillCapabilities {
 			scopes: ScopeSupport {
-				global: false,
-				project: false,
+				global: true,
+				project: true,
 			},
 			universal: false,
 		},
@@ -72,12 +77,18 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 			},
 		},
 	},
-	global_skill_paths: None,
-	project_skill_paths: None,
+	global_skill_paths: Some(GlobalSkillPaths {
+		read: global_skills_paths,
+		write: global_skill_write_path,
+	}),
+	project_skill_paths: Some(ProjectSkillPaths {
+		read: project_skills_paths,
+		write: project_skill_write_path,
+	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
 	cli_name: "augmentcode",
 	validate_args: &["--version"],
-	project_markers: &[],
+	project_markers: &[".augment"],
 	skills_cli_name: Some("augment"),
 };

@@ -1140,12 +1140,14 @@ fn source_sync_agent_list_preflights_before_writing_master() {
 	let source = tempfile::TempDir::new().unwrap();
 	write_source_skill(source.path(), "alpha", "alpha");
 
+	// jetbrains-ai is the stable skills-unsupported sentinel (augmentcode used
+	// to be one until it gained `.augment/skills`).
 	let out = isolated_cli(home.path(), state.path())
 		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", source.path())
 		.args([
 			"-g",
 			"-a",
-			"claude,augmentcode",
+			"claude,jetbrains-ai",
 			"source",
 			"sync",
 			"owner/repo",

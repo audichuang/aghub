@@ -1046,8 +1046,10 @@ fn all_unsupported_targets_preflight_before_master_or_lock_write() {
 	let fetched = tempdir().unwrap();
 	let skill_md = write_skill(fetched.path(), "gamma", "gamma");
 
-	// AugmentCode does not support skill creation in project scope. No override
-	// is set for it, so a preflight regression cannot hide behind a test path.
+	// jetbrains-ai declares no skills scopes at all, so it is the stable
+	// "unsupported" sentinel (augmentcode used to be one until it gained
+	// `.augment/skills`). No override is set for it, so a preflight regression
+	// cannot hide behind a test path.
 	let source = sample_source();
 	let result = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
 		skill_file: &skill_md,
@@ -1056,7 +1058,7 @@ fn all_unsupported_targets_preflight_before_master_or_lock_write() {
 		ref_commit: None,
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
-		target_agents: &[AgentType::AugmentCode],
+		target_agents: &[AgentType::JetBrainsAi],
 		expected_name: None,
 		target: LinkTarget::Relative,
 	});
@@ -1090,7 +1092,7 @@ fn mixed_supported_and_unsupported_targets_preflight_before_master_write() {
 		ref_commit: None,
 		scope: ResourceScope::ProjectOnly,
 		project_root: Some(&project_root),
-		target_agents: &[AgentType::Claude, AgentType::AugmentCode],
+		target_agents: &[AgentType::Claude, AgentType::JetBrainsAi],
 		expected_name: None,
 		target: LinkTarget::Relative,
 	});
