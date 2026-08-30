@@ -58,6 +58,14 @@ preflight:
     cargo test --workspace
     cargo test --workspace --doc
 
+# Check the bundled skills-sh featured catalog still installs (network + `gh`).
+#
+# Hand-maintained data pointing at other people's repos, so it rots on their
+# schedule, not ours: NOT part of `preflight` (needs the network and a GitHub
+# login). Run it before shipping a release, or when editing the catalog.
+featured-check:
+    node ./scripts/check-featured-catalog.mjs
+
 # Clean build artifacts
 clean:
     cargo clean
