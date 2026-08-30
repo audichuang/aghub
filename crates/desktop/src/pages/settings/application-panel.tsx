@@ -1,4 +1,12 @@
-import { Avatar, Button, Card, Switch, toast } from "@heroui/react";
+import {
+	Avatar,
+	Button,
+	Card,
+	Input,
+	Switch,
+	TextField,
+	toast,
+} from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { getName, getVersion } from "@tauri-apps/api/app";
 import { invoke } from "@tauri-apps/api/core";
@@ -10,8 +18,11 @@ import {
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { check } from "@tauri-apps/plugin-updater";
+import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useLastSkillCheck } from "../../hooks/use-last-skill-check";
 import { dispatchOnboardingCommand } from "../../lib/onboarding";
+import { getAghubCliPath, setAghubCliPath } from "../../lib/store";
 import { isWindows } from "../../lib/platform";
 
 export default function ApplicationPanel() {
@@ -348,19 +359,10 @@ interface SkillCheckScheduleStatus {
 	sidecarPath: string;
 }
 
-interface LastSkillCheck {
-	finishedAt?: string;
-	updateAvailable?: number;
-	failed?: number;
-	/** Private sources the schedule cannot reach: the CLI resolves tokens from
-	 * GIT_PASSWORD / GITHUB_TOKEN, never from the desktop keyring. */
-	needsAuth?: number;
-	skipped?: number;
-}
-
 function SkillCheckScheduleRow() {
 	const { t } = useTranslation();
 	const queryClient = useQueryClient();
+	const [pathDraft, setPathDraft] = useState("");
 
 	const { data: status, isPending } = useQuery({
 		queryKey: ["skill-check-schedule"],
@@ -369,18 +371,43 @@ function SkillCheckScheduleRow() {
 		retry: false,
 	});
 
-	const { data: last } = useQuery({
-		queryKey: ["skill-check-last"],
-		queryFn: async () =>
-			invoke<LastSkillCheck | null>("get_last_skill_check"),
-		retry: false,
+	const { data: last } = useLastSkillCheck();
+
+	// An explicit path the user pointed at. Checked BEFORE PATH resolution, so
+	// a GUI app whose PATH lacks the CLI is still usable without a relaunch.
+	const { data: storedCliPath } = useQuery({
+		queryKey: ["aghubCliPath"],
+		queryFn: getAghubCliPath,
+	});
+	const effectiveCliPath = storedCliPath ?? status?.cliPath ?? null;
+
+	const savePath = useMutation({
+		mutationFn: async (path: string) => {
+			// Validated by the backend (must be an existing file) before it is
+			// stored, so a typo cannot silently disable the schedule later.
+			const resolved = await invoke<string>("resolve_aghub_cli", {
+				explicit: path,
+			});
+			await setAghubCliPath(resolved);
+			return resolved;
+		},
+		onSuccess: (resolved) => {
+			queryClient.setQueryData(["aghubCliPath"], resolved);
+			setPathDraft("");
+			toast.success(t("skillCheckScheduleCliPathSaved"));
+		},
+		onError: (error) => {
+			toast.danger(
+				error instanceof Error ? error.message : String(error),
+			);
+		},
 	});
 
 	const mutation = useMutation({
 		mutationFn: async (enabled: boolean) =>
 			invoke<SkillCheckScheduleStatus>("set_skill_check_schedule", {
 				enabled,
-				cliPath: status?.cliPath ?? null,
+				cliPath: effectiveCliPath,
 			}),
 		onSuccess: (next) => {
 			queryClient.setQueryData(["skill-check-schedule"], next);
@@ -403,7 +430,7 @@ function SkillCheckScheduleRow() {
 	// the row is hidden rather than offering a switch whose flip always errors.
 	if (status != null && !status.supported) return null;
 
-	const cliMissing = status != null && !status.cliPath;
+	const cliMissing = status != null && !effectiveCliPath;
 	const summary = last
 		? t("skillCheckScheduleLast", {
 				available: last.updateAvailable ?? 0,
@@ -414,7 +441,7 @@ function SkillCheckScheduleRow() {
 	const needsAuth = last?.needsAuth ?? 0;
 
 	return (
-		<div className="flex items-center justify-between gap-4">
+		<div className="flex items-start justify-between gap-4">
 			<div className="space-y-0.5">
 				<span className="text-sm font-medium text-(--foreground)">
 					{t("skillCheckScheduleHeading")}
@@ -429,6 +456,33 @@ function SkillCheckScheduleRow() {
 					<span className="block text-xs text-muted">
 						{t("skillCheckScheduleNeedsAuth", { count: needsAuth })}
 					</span>
+				) : null}
+				{cliMissing ? (
+					<div className="flex items-center gap-2 pt-1">
+						<TextField
+							className="w-72"
+							aria-label={t("skillCheckScheduleCliPathLabel")}
+						>
+							<Input
+								value={pathDraft}
+								variant="secondary"
+								placeholder={t(
+									"skillCheckScheduleCliPathPlaceholder",
+								)}
+								onChange={(e) => setPathDraft(e.target.value)}
+							/>
+						</TextField>
+						<Button
+							variant="secondary"
+							size="sm"
+							isDisabled={
+								pathDraft.trim() === "" || savePath.isPending
+							}
+							onPress={() => savePath.mutate(pathDraft.trim())}
+						>
+							{t("skillCheckScheduleCliPathSave")}
+						</Button>
+					</div>
 				) : null}
 			</div>
 			<Switch

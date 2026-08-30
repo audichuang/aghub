@@ -30,6 +30,10 @@ import { ImportGithubSkillPanel } from "../../components/import-github-skill-pan
 import { ImportSkillPanel } from "../../components/import-skill-panel";
 import { ListSearchHeader } from "../../components/list-search-header";
 import { EditSkillTagsDialog } from "../../components/edit-skill-tags-dialog";
+import {
+	backgroundUpdateNews,
+	useLastSkillCheck,
+} from "../../hooks/use-last-skill-check";
 import { useSkillTags } from "../../hooks/use-skill-tags";
 import { allTags, UNTAGGED } from "../../lib/skill-tags";
 import { MultiSelectFloatingBar } from "../../components/multi-select-floating-bar";
@@ -340,6 +344,13 @@ export default function SkillsPage() {
 		[checksUpdatedAt],
 	);
 
+	// What the OS-scheduled `aghub-cli check` found while the app was closed.
+	const { data: lastBackgroundCheck } = useLastSkillCheck();
+	const backgroundNews = backgroundUpdateNews(
+		lastBackgroundCheck,
+		lastCheckedDate,
+	);
+
 	// Manual refresh mutation — keeps explicit isPending for the button spinner.
 	const checkUpdatesMutation = useMutation(
 		checkSkillUpdatesMutationOptions({
@@ -620,6 +631,20 @@ export default function SkillsPage() {
 							onChange={handleScopeSelect}
 						/>
 					</div>
+
+					{backgroundNews !== null && (
+						<button
+							type="button"
+							className="mx-3 mb-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-surface"
+							onClick={() => {
+								void handleRefreshSkills();
+							}}
+						>
+							{t("backgroundCheckFoundUpdates", {
+								count: backgroundNews,
+							})}
+						</button>
+					)}
 
 					{view === "agent" ? (
 						<>

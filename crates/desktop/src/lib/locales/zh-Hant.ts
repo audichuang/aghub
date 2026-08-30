@@ -447,6 +447,10 @@ export default {
 	skillCheckScheduleEnabled: "已啟用定期 skill 檢查",
 	skillCheckScheduleDisabled: "已關閉定期 skill 檢查",
 	skillCheckScheduleError: "無法更新 skill 檢查排程",
+	skillCheckScheduleCliPathLabel: "aghub-cli 路徑",
+	skillCheckScheduleCliPathPlaceholder: "/usr/local/bin/aghub-cli",
+	skillCheckScheduleCliPathSave: "使用這個路徑",
+	skillCheckScheduleCliPathSaved: "已存下 aghub-cli 路徑",
 	skillCheckScheduleNever: "尚未跑過背景檢查。",
 	skillCheckScheduleNeedsAuth:
 		"{{count}} 個私有來源被略過：排程只讀 GIT_PASSWORD／GITHUB_TOKEN，讀不到桌面 keyring。",
@@ -689,6 +693,8 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
+	backgroundCheckFoundUpdates:
+		"背景排程檢查發現 {{count}} 個可更新。重新整理以顯示是哪些技能。",
 	manageTags: "標籤",
 	untagged: "未標記",
 	noTagsYet: "還沒有標籤。",

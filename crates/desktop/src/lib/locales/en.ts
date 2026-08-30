@@ -478,6 +478,10 @@ export default {
 	skillCheckScheduleEnabled: "Scheduled skill check enabled",
 	skillCheckScheduleDisabled: "Scheduled skill check disabled",
 	skillCheckScheduleError: "Could not update the skill-check schedule",
+	skillCheckScheduleCliPathLabel: "Path to aghub-cli",
+	skillCheckScheduleCliPathPlaceholder: "/usr/local/bin/aghub-cli",
+	skillCheckScheduleCliPathSave: "Use this path",
+	skillCheckScheduleCliPathSaved: "aghub-cli path saved",
 	skillCheckScheduleNever: "No background check has run yet.",
 	skillCheckScheduleNeedsAuth:
 		"{{count}} private source(s) skipped: the schedule reads GIT_PASSWORD / GITHUB_TOKEN, not the desktop keyring.",
@@ -725,6 +729,8 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
+	backgroundCheckFoundUpdates:
+		"The scheduled background check found {{count}} update(s). Refresh to see which skills.",
 	manageTags: "Tags",
 	untagged: "Untagged",
 	noTagsYet: "No tags yet.",
