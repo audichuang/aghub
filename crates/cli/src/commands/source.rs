@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
-use aghub_core::paths::find_project_root;
+
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::update::UncheckableReason;
 use anyhow::{bail, Result};
@@ -24,7 +24,7 @@ use skill_update::{FetchError, FetchSelection, SourceRef};
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
-use crate::SourceAction;
+use crate::{Scope, SourceAction};
 
 /// A source string safe to put in a message. `<SOURCE>` comes straight from
 /// argv (or from a lock), and a user who typed `https://user:token@host/repo`
@@ -221,34 +221,48 @@ impl skill_update::Fetcher for MemoFetcher<'_> {
 
 // ──────────────────────────── scope resolution ─────────────────────────────
 
-/// Resolve the read scopes for `list`/`diff` from the global flags:
-/// `-g` → global only; `-p` → project only; otherwise global plus the current
-/// project (when a project root is detected).
-pub(crate) fn resolve_read_scopes(
-	global: bool,
-	project: bool,
-) -> Result<Vec<SourceScope>> {
-	if global && project {
-		bail!("choose either -g or -p, not both");
+/// The `source`-flavoured view of an already-resolved [`Scope`].
+///
+/// TOTAL — it cannot fail. Every rejection (`-g` with `-p`, `--all` where it
+/// is meaningless, `-p` with no project root) happened in `main`'s ONE
+/// resolver, before this is reached. This file used to carry four private
+/// resolvers of its own and three hand-copied versions of the same
+/// "no project root found" sentence.
+pub(crate) fn read_scopes(scope: &Scope) -> Vec<SourceScope> {
+	match (scope.resource_scope(), scope.project_root()) {
+		(ResourceScope::GlobalOnly, _) => vec![SourceScope::Global],
+		(ResourceScope::ProjectOnly, Some(root)) => {
+			vec![SourceScope::Project {
+				root: root.to_path_buf(),
+			}]
+		}
+		// `ProjectOnly` always carries a root — the resolver bails otherwise.
+		(ResourceScope::ProjectOnly, None) => Vec::new(),
+		(ResourceScope::Both, root) => {
+			let mut scopes = vec![SourceScope::Global];
+			if let Some(root) = root {
+				scopes.push(SourceScope::Project {
+					root: root.to_path_buf(),
+				});
+			}
+			scopes
+		}
 	}
-	if global {
-		return Ok(vec![SourceScope::Global]);
-	}
-	let project_root = current_project_root()?;
-	if project {
-		return match project_root {
-			Some(root) => Ok(vec![SourceScope::Project { root }]),
-			None => bail!(
-				"no project root found (need an agent marker like .claude/, \
-				 .opencode/, .mcp.json, …)"
-			),
-		};
-	}
-	let mut scopes = vec![SourceScope::Global];
-	if let Some(root) = project_root {
-		scopes.push(SourceScope::Project { root });
-	}
-	Ok(scopes)
+}
+
+/// The single writing scope for `sync` / `accept-rename`.
+///
+/// `--all` and an unscoped invocation are refused by their scope policies in
+/// `main`; [`Scope::write_target`] refuses anything else rather than falling
+/// back to a silent GLOBAL write, which is what the `_ =>` arm this replaced
+/// did.
+fn write_scope(scope: &Scope) -> Result<SourceScope> {
+	Ok(match scope.write_target()? {
+		Some(root) => SourceScope::Project {
+			root: root.to_path_buf(),
+		},
+		None => SourceScope::Global,
+	})
 }
 
 /// [`crate::commands::read_locks_checked`] for a resolved read-scope list.
@@ -278,11 +292,6 @@ pub(crate) fn read_scope_locks_checked(
 	crate::commands::read_locks_checked(want_global, project_root)
 }
 
-fn current_project_root() -> Result<Option<PathBuf>> {
-	let cwd = std::env::current_dir()?;
-	Ok(find_project_root(&cwd))
-}
-
 fn scope_kind_str(kind: SourceScopeKind) -> &'static str {
 	match kind {
 		SourceScopeKind::Global => "global",
@@ -302,20 +311,18 @@ pub(crate) fn scope_label(scope: &SourceScope) -> &'static str {
 /// Dispatch a `source` subcommand action.
 pub fn execute(
 	action: &SourceAction,
-	global: bool,
-	project: bool,
-	all: bool,
+	scope: &Scope,
 	agent: &str,
 	json: bool,
 ) -> Result<()> {
 	match action {
-		SourceAction::List => list(global, project, json),
+		SourceAction::List => list(scope, json),
 		SourceAction::Diff {
 			source,
 			git_ref,
 			// Accepted and ignored — `diff` has no offline mode.
 			online: _,
-		} => diff(source, git_ref.as_deref(), global, project, json),
+		} => diff(source, git_ref.as_deref(), scope, json),
 		SourceAction::Sync {
 			source,
 			git_ref,
@@ -333,9 +340,7 @@ pub fn execute(
 			universal: *universal,
 			yes: *yes,
 			json,
-			global,
-			project,
-			all,
+			scope,
 			agent,
 		}),
 		SourceAction::AcceptRename {
@@ -349,9 +354,7 @@ pub fn execute(
 			git_ref: git_ref.as_deref(),
 			yes: *yes,
 			json,
-			global,
-			project,
-			all,
+			scope,
 		}),
 	}
 }
@@ -380,8 +383,8 @@ fn summary_to_view(s: &SourceSummary) -> SourceSummaryView {
 	}
 }
 
-fn list(global: bool, project: bool, json: bool) -> Result<()> {
-	let scopes = resolve_read_scopes(global, project)?;
+fn list(scope: &Scope, json: bool) -> Result<()> {
+	let scopes = read_scopes(scope);
 	// The snapshot is discarded here — see `read_scope_locks_checked`. What is
 	// kept is the fail-closed check: a corrupt lock must not read as "no
 	// sources installed".
@@ -465,11 +468,10 @@ fn diff_skill_to_view(d: &SourceSkillDiff) -> DiffSkillView {
 fn diff(
 	source: &str,
 	git_ref: Option<&str>,
-	global: bool,
-	project: bool,
+	scope: &Scope,
 	json: bool,
 ) -> Result<()> {
-	let scopes = resolve_read_scopes(global, project)?;
+	let scopes = read_scopes(scope);
 	// The snapshot is discarded here — see `read_scope_locks_checked`. What is
 	// kept is the fail-closed check: a corrupt lock must not read as "no
 	// sources installed".
@@ -680,9 +682,7 @@ struct SyncArgs<'a> {
 	universal: bool,
 	yes: bool,
 	json: bool,
-	global: bool,
-	project: bool,
-	all: bool,
+	scope: &'a Scope,
 	agent: &'a str,
 }
 
@@ -776,42 +776,6 @@ fn plan_target_agents(
 	}
 }
 
-/// Resolve the single writing scope for `sync`. Exactly one of `-g`/`-p` must
-/// be chosen; `--all` and an unscoped invocation are rejected.
-fn resolve_write_scope(
-	args: &SyncArgs,
-) -> Result<(ResourceScope, Option<PathBuf>, SourceScope, &'static str)> {
-	if args.all {
-		bail!("`source sync` needs exactly one scope; --all is not allowed");
-	}
-	if args.global && args.project {
-		bail!("choose either -g or -p, not both");
-	}
-	if args.global {
-		return Ok((
-			ResourceScope::GlobalOnly,
-			None,
-			SourceScope::Global,
-			"global",
-		));
-	}
-	if args.project {
-		let root = current_project_root()?.ok_or_else(|| {
-			anyhow::anyhow!(
-				"no project root found (need an agent marker like .claude/, \
-				 .opencode/, .mcp.json, …)"
-			)
-		})?;
-		return Ok((
-			ResourceScope::ProjectOnly,
-			Some(root.clone()),
-			SourceScope::Project { root },
-			"project",
-		));
-	}
-	bail!("`source sync` needs a scope: pass -g (global) or -p (project)")
-}
-
 fn sync(args: SyncArgs) -> Result<()> {
 	if args.universal {
 		eprintln!(
@@ -822,8 +786,12 @@ fn sync(args: SyncArgs) -> Result<()> {
 	}
 	let source = args.source.trim().to_string();
 
-	let (scope, project_root, source_scope, scope_label) =
-		resolve_write_scope(&args)?;
+	// Scope was resolved and validated ONCE, in `main` — `--all`, an unscoped
+	// run and `-p` with no project root were all refused there.
+	let scope = args.scope.resource_scope();
+	let project_root = args.scope.project_root().map(Path::to_path_buf);
+	let source_scope = write_scope(args.scope)?;
+	let scope_label = args.scope.label();
 
 	// Parse the agent selection BEFORE any network work, so an invalid
 	// --agent fails here (offline runs included) instead of surfacing a
@@ -1475,9 +1443,7 @@ struct AcceptRenameArgs<'a> {
 	git_ref: Option<&'a str>,
 	yes: bool,
 	json: bool,
-	global: bool,
-	project: bool,
-	all: bool,
+	scope: &'a Scope,
 }
 
 /// `source accept-rename <old> <new>` — thin adapter over the core rename
@@ -1491,26 +1457,16 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		FetchedRenameRequest,
 	};
 
-	if args.all {
-		bail!(
-			"`source accept-rename` needs exactly one scope; --all is not allowed"
-		);
-	}
-	if args.global && args.project {
-		bail!("choose either -g or -p, not both");
-	}
-	let scope = if args.project {
-		let root = current_project_root()?.ok_or_else(|| {
-			anyhow::anyhow!(
-				"no project root found (need an agent marker like .claude/, \
-				 .opencode/, .mcp.json, …)"
-			)
-		})?;
-		RenameScope::Project { root }
-	} else {
-		RenameScope::Global
+	// Scope was resolved and validated ONCE, in `main`; `write_target` refuses
+	// anything that is not a single write target instead of defaulting to
+	// global.
+	let scope = match args.scope.write_target()? {
+		Some(root) => RenameScope::Project {
+			root: root.to_path_buf(),
+		},
+		None => RenameScope::Global,
 	};
-	let scope_label = if args.project { "project" } else { "global" };
+	let scope_label = args.scope.label();
 
 	// P0-2 guard (a): refuse a degenerate rename before any lock read / fetch.
 	//

@@ -491,23 +491,13 @@ fn generic_mutations_reject_all_scope_before_writing() {
 	let project = tempfile::TempDir::new().unwrap();
 	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
 
-	let cases: &[&[&str]] = &[
-		&["--all", "add", "skills", "--name", "blocked"],
-		&[
-			"--all",
-			"update",
-			"skills",
-			"blocked",
-			"--description",
-			"changed",
-		],
-		&["--all", "delete", "skills", "blocked"],
-		// enable/disable take the narrowed `McpResource` (clap rejects
-		// `skills` at parse time — no agent supports it), so the scope guard
-		// has to be exercised through their real resource.
-		&["--all", "enable", "mcps", "blocked"],
-		&["--all", "disable", "mcps", "blocked"],
-	];
+	// ONE case. That every generic mutation maps to `SINGLE_WRITE_SCOPE`, and
+	// that the policy refuses `--all` before any cwd IO, is a table unit test
+	// in `main.rs` (`every_generic_mutation_rejects_all_scope`,
+	// `scope_policy_classifies_every_subcommand`) — five subprocesses proving
+	// the same rule bought nothing the table does not. What only a spawn can
+	// show is kept: the real binary's exit code and stderr wording.
+	let cases: &[&[&str]] = &[&["--all", "add", "skills", "--name", "blocked"]];
 
 	for args in cases {
 		let out = isolated_cli(home.path(), state.path())
@@ -5306,20 +5296,13 @@ fn project_scope_mutation_without_project_root_fails_before_writing() {
 		return;
 	}
 
-	let cases: &[&[&str]] = &[
-		&["-p", "add", "skills", "--name", "leaked"],
-		&[
-			"-p",
-			"update",
-			"skills",
-			"leaked",
-			"--description",
-			"changed",
-		],
-		&["-p", "delete", "skills", "leaked"],
-		&["-p", "enable", "mcps", "leaked"],
-		&["-p", "disable", "mcps", "leaked"],
-	];
+	// ONE case — `add`, the only one of the five that could actually write a
+	// Master. That all five mutations share `SINGLE_WRITE_SCOPE`, and that the
+	// policy bails on a rootless `-p`, is unit-tested in `main.rs`
+	// (`scope_policy_classifies_every_subcommand` +
+	// `rootless_project_scope_bails_with_one_message_everywhere`). The on-disk
+	// "nothing leaked" assertion below is what needs a real process.
+	let cases: &[&[&str]] = &[&["-p", "add", "skills", "--name", "leaked"]];
 
 	for args in cases {
 		let out = isolated_cli(home.path(), state.path())
@@ -6904,11 +6887,14 @@ fn project_scope_without_project_root_fails_on_read_commands_too() {
 	// No agent marker anywhere in this tree.
 	let nowhere = tempfile::TempDir::new().unwrap();
 
+	// One case per DISPATCH SITE, not per command: `get` goes through the
+	// generic single-agent path, `check` through its own early dispatch. That
+	// the rule holds for `get mcps` / `describe` / `coverage` / `source list`
+	// too is `rootless_project_scope_fails_on_reads_too` in `main.rs` — it
+	// asserts the exact shared sentence for each, without a subprocess.
 	let cases: &[&[&str]] = &[
 		&["-p", "--json", "get", "skills"],
-		&["-p", "--json", "get", "mcps"],
 		&["-p", "--json", "check", "skills"],
-		&["-p", "describe", "skills", "anything"],
 	];
 
 	for args in cases {
@@ -10867,4 +10853,96 @@ fn a_preview_through_a_symlinked_home_still_names_the_keys_it_drops() {
 		home.join(".agents/skills/keeper").exists(),
 		"a preview must not delete"
 	);
+}
+/// `transfer`/`reconcile` under a rootless `-p` must keep the machine-readable
+/// `RESOURCE_NOT_FOUND` they have always emitted.
+///
+/// They are the ONE policy with `rootless_project_passthrough`: unlike every
+/// other command they never resolved a project root in the CLI, so the scope
+/// reaches core and its source lookup fails with a typed `ConfigError`. Making
+/// them bail early on the shared `NO_PROJECT_ROOT` sentence reads better but
+/// silently rewrites `error.code` to the untyped `CLI_ERROR` — and `code` is
+/// the SAME vocabulary the HTTP API sends, so a script branching on it breaks
+/// with no other visible change (same exit code, same JSON shape).
+#[cfg(unix)]
+#[test]
+fn rootless_project_transfer_keeps_resource_not_found_code() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// A directory with NO agent marker: `find_project_root` answers None.
+	let rootless = tempfile::TempDir::new().unwrap();
+
+	for argv in [
+		&[
+			"--json",
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"zz",
+			"--to",
+			"codex",
+		][..],
+		&[
+			"--json",
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"zz",
+			"--add",
+			"codex",
+		][..],
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(rootless.path())
+			.args(argv)
+			.output()
+			.unwrap();
+		assert!(!out.status.success(), "{argv:?} must fail");
+		let json: Value =
+			serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+				panic!("{argv:?}: stdout must be one JSON document: {e}")
+			});
+		assert_eq!(
+			json["error"]["code"], "RESOURCE_NOT_FOUND",
+			"{argv:?}: the code the API shares must not drift: {json}"
+		);
+	}
+}
+
+/// `skill-usage` is Claude-global: `-p` and `--all` are REFUSED, not ignored.
+///
+/// The refusal lives in `main`'s policy table, so the only thing keeping it
+/// alive is the dispatch site actually calling the resolver. That call is held
+/// up by an ignored `_scope` parameter no lint flags — delete the call and the
+/// parameter together and the whole suite stayed green while `-p skill-usage`
+/// went from "rejected" to printing the GLOBAL usage table. This is the check
+/// that goes red instead.
+#[cfg(unix)]
+#[test]
+fn skill_usage_refuses_project_and_all_scopes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// Isolated even though the rejection precedes every read: under the
+	// mutation this test exists to catch, the binary reads `~/.claude.json`.
+	for flag in ["-p", "--all"] {
+		let out = isolated_cli(home.path(), state.path())
+			.args([flag, "skill-usage"])
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"`{flag} skill-usage` must fail, not answer from the global counter"
+		);
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert!(
+			stderr.contains("skill-usage is Claude-global only"),
+			"`{flag}`: {stderr}"
+		);
+	}
 }

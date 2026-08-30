@@ -112,7 +112,8 @@ const SCOPE_HELP: &str = "\
 Scope flags (-g / -p / --all) are mutually exclusive and may appear before or \
 after the subcommand:
   -g/--global   global config only (default)
-  -p/--project  the current project only; a mutation fails if no project root
+  -p/--project  the current project only; ANY command (reads included) fails
+                if no project root is found from the current directory
   --all         both scopes. Accepted by the read-only commands and by
                 prune-lock, which then writes BOTH locks. Rejected by
                 add/update/delete/enable/disable, transfer, reconcile,
@@ -612,32 +613,6 @@ impl ResourceType {
 	}
 }
 
-/// Scope for a read-only diagnostic whose default spans BOTH scopes.
-///
-/// `resolve_scope_and_root`'s no-flag default is global-only, which is right
-/// for the generic CRUD paths and wrong for a diagnostic: `doctor`,
-/// `source list` and `source diff` already default to global + project, and
-/// `check` reporting from the global lock alone meant "this project's skills
-/// are up to date" was answered without reading them.
-///
-/// Explicit flags are untouched. Without a project root the result is
-/// global-only — never a bail, because an implicit default never asks for
-/// `ProjectOnly`.
-fn resolve_read_scope_defaulting_to_both(
-	cli: &Cli,
-) -> Result<(ResourceScope, Option<PathBuf>)> {
-	if cli.global || cli.project || cli.all {
-		return resolve_scope_and_root(cli, ScopePolicy::AllowBoth);
-	}
-	let project_root = find_project_root(&std::env::current_dir()?);
-	let scope = if project_root.is_some() {
-		ResourceScope::Both
-	} else {
-		ResourceScope::GlobalOnly
-	};
-	Ok((scope, project_root))
-}
-
 /// Reject `-a all` for a command that does not fan out.
 ///
 /// The generic path rejects it inside `handle_all_agents`. `check` and
@@ -844,13 +819,9 @@ fn run(cli: Cli) -> Result<()> {
 	// agent's config. Dispatch it BEFORE the `-a all` special-case and the
 	// adapter/ConfigManager setup so it never fails on a missing agent config.
 	if let Commands::Source { action } = &cli.command {
+		let resolved = resolve_cli_scope(&cli)?;
 		return commands::source::execute(
-			action,
-			cli.global,
-			cli.project,
-			cli.all,
-			&cli.agent,
-			cli.json,
+			action, &resolved, &cli.agent, cli.json,
 		);
 	}
 
@@ -863,13 +834,12 @@ fn run(cli: Cli) -> Result<()> {
 		yes,
 	} = &cli.command
 	{
-		let (scope, project_root) =
-			resolve_scope_and_root(&cli, ScopePolicy::AllowBoth)?;
+		let resolved = resolve_cli_scope(&cli)?;
 		return commands::apply_update::execute(
 			(*resource).into(),
 			name.clone(),
-			scope,
-			project_root.as_deref(),
+			resolved.resource_scope(),
+			resolved.project_root(),
 			*yes,
 			cli.json,
 		);
@@ -908,44 +878,26 @@ fn run(cli: Cli) -> Result<()> {
 	// `transfer` / `reconcile` span MULTIPLE agents (source + targets), so they
 	// resolve their own per-target scope and are dispatched before the
 	// single-agent adapter/ConfigManager setup. They take a single writing
-	// scope (-g/-p); the top-level `--all` has no meaning here, so reject it
-	// rather than silently ignoring it (mirrors `coverage`).
-	if matches!(
-		cli.command,
-		Commands::Transfer { .. } | Commands::Reconcile { .. }
-	) && cli.all
-	{
-		anyhow::bail!(
-			"transfer/reconcile support only 'global' or 'project' scope, not \
-			 'all'; pass -g/--global or -p/--project"
-		);
-	}
+	// scope (-g/-p); the top-level `--all` has no meaning here and is rejected
+	// by `TRANSFER_SCOPE` in the policy table (mirrors `coverage`).
 	if let Commands::Transfer { action } = &cli.command {
+		let resolved = resolve_cli_scope(&cli)?;
 		return commands::transfer::execute_transfer(
-			action,
-			cli.global,
-			cli.project,
-			cli.json,
+			action, &resolved, cli.json,
 		);
 	}
 	if let Commands::Reconcile { action } = &cli.command {
+		let resolved = resolve_cli_scope(&cli)?;
 		return commands::transfer::execute_reconcile(
-			action,
-			cli.global,
-			cli.project,
-			cli.json,
+			action, &resolved, cli.json,
 		);
 	}
 
 	// `coverage` classifies EVERY registered agent against the per-scope master,
 	// so it is not single-agent scoped; dispatch it before the adapter setup.
 	if let Commands::Coverage = &cli.command {
-		return commands::coverage::execute(
-			cli.global,
-			cli.project,
-			cli.all,
-			cli.json,
-		);
+		let resolved = resolve_cli_scope(&cli)?;
+		return commands::coverage::execute(&resolved, cli.json);
 	}
 
 	// `doctor` reconciles the skill lock against the on-disk master across
@@ -955,9 +907,9 @@ fn run(cli: Cli) -> Result<()> {
 		fail_on_issues,
 	} = &cli.command
 	{
+		let resolved = resolve_cli_scope(&cli)?;
 		return commands::doctor::execute_with_options(
-			cli.global,
-			cli.project,
+			&resolved,
 			cli.json,
 			*verify_links,
 			&cli.agent,
@@ -968,7 +920,13 @@ fn run(cli: Cli) -> Result<()> {
 	// `skill-usage` reads Claude's global `skillUsage` counter — it is
 	// Claude-global, not single-agent scoped, so dispatch before adapter setup.
 	if let Commands::SkillUsage = &cli.command {
-		return commands::skill_usage::execute(cli.project, cli.all, cli.json);
+		// The resolved scope is passed in even though `skill-usage` has only
+		// one: a dispatch that merely CALLED the resolver for its rejections
+		// and dropped the result could be deleted without a compile error, so
+		// the one command whose scope is pure validation was also the one that
+		// could silently skip the policy table.
+		let resolved = resolve_cli_scope(&cli)?;
+		return commands::skill_usage::execute(&resolved, cli.json);
 	}
 
 	// `check` and `prune-lock` answer from the SKILL LOCK alone — they never
@@ -993,23 +951,21 @@ fn run(cli: Cli) -> Result<()> {
 		// degrades to global-only rather than failing — the unconditional
 		// project-root guard fires for `ProjectOnly`, which an implicit default
 		// never produces.
-		let (scope, project_root) =
-			resolve_read_scope_defaulting_to_both(&cli)?;
+		let resolved = resolve_cli_scope(&cli)?;
 		return check::execute(
 			(*resource).into(),
-			scope,
-			project_root.as_deref(),
+			resolved.resource_scope(),
+			resolved.project_root(),
 			*online,
 			cli.json,
 		);
 	}
 	if let Commands::PruneLock { dry_run, yes } = &cli.command {
 		reject_agent_all(&cli.agent)?;
-		let (scope, project_root) =
-			resolve_scope_and_root(&cli, ScopePolicy::AllowBoth)?;
+		let resolved = resolve_cli_scope(&cli)?;
 		return prune::execute(
-			scope,
-			project_root.as_deref(),
+			resolved.resource_scope(),
+			resolved.project_root(),
 			*dry_run || !*yes,
 			cli.json,
 		);
@@ -1256,78 +1212,404 @@ fn takes_agent_list(command: &Commands) -> bool {
 	)
 }
 
-#[derive(Clone, Copy)]
-enum ScopePolicy {
-	AllowBoth,
-	SingleWrite,
+// ──────────────────────────── scope resolution ─────────────────────────────
+//
+// ONE table (`scope_policy`), ONE resolver (`resolve_scope`), ONE resolved
+// value (`Scope`). Command modules receive the `Scope`, never the three
+// booleans, so there is nothing left for them to re-derive — which is what
+// used to grow a private resolver, and its own project-root bail, inside
+// `source`, `coverage` and `transfer`.
+
+/// The scope flags exactly as parsed. Only [`resolve_scope`] reads them.
+#[derive(Clone, Copy, Default, Debug)]
+struct ScopeFlags {
+	global: bool,
+	project: bool,
+	all: bool,
 }
 
-fn scope_policy(command: &Commands) -> ScopePolicy {
-	match command {
+impl From<&Cli> for ScopeFlags {
+	fn from(cli: &Cli) -> Self {
+		Self {
+			global: cli.global,
+			project: cli.project,
+			all: cli.all,
+		}
+	}
+}
+
+/// The one project-root failure. It used to be copied, in five different
+/// wordings, into every module that resolved a scope of its own.
+const NO_PROJECT_ROOT: &str =
+	"no project root found from the current directory; run this inside a \
+	 project (a directory with an agent config marker, e.g. .claude/, \
+	 .mcp.json, or skills-lock.json) or pass -g/--global";
+
+/// What one subcommand accepts as a scope.
+///
+/// Each rejection carries its own verbatim message, so a per-command wording
+/// survives WITHOUT a per-command resolver — that trade is the whole reason
+/// the private resolvers existed.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ScopePolicy {
+	/// Rejection message for `--all`, or `None` when both scopes are allowed.
+	reject_all: Option<&'static str>,
+	/// Rejection message for `-p`, or `None` when the project scope is fine.
+	reject_project: Option<&'static str>,
+	/// Rejection message for "no scope flag at all", or `None` to default.
+	require_explicit: Option<&'static str>,
+	/// With no flag, span BOTH scopes (when a project root exists) instead of
+	/// global-only.
+	default_both: bool,
+	/// Let a `-p` with NO project root through as `ProjectOnly` + no root
+	/// instead of failing with [`NO_PROJECT_ROOT`].
+	///
+	/// True ONLY for `transfer`/`reconcile`, which never resolved the root in
+	/// the CLI at all: they hand the scope to core, whose source lookup fails
+	/// with a typed `ResourceNotFound` — so `--json` reports
+	/// `code: RESOURCE_NOT_FOUND`, not the untyped `CLI_ERROR` an early bail
+	/// here would produce. Bailing early reads better but silently rewrites a
+	/// machine-readable error code that the HTTP API shares.
+	rootless_project_passthrough: bool,
+}
+
+/// Read-only, any scope; no flag means global.
+const READ_ANY_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: None,
+	reject_project: None,
+	require_explicit: None,
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+/// Read-only diagnostic: no flag means global PLUS the current project.
+/// `doctor`, `source list`, `source diff` and `check` all share this — `check`
+/// following the plain global default meant "this project is up to date" was
+/// answered without ever reading the project lock.
+const READ_BOTH_BY_DEFAULT: ScopePolicy = ScopePolicy {
+	reject_all: None,
+	reject_project: None,
+	require_explicit: None,
+	default_both: true,
+	rootless_project_passthrough: false,
+};
+
+/// Generic single-agent CRUD mutation: exactly one write target, so a read
+/// scope can never disagree with the config that is mutated.
+const SINGLE_WRITE_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some(
+		"generic mutation does not support --all; pass -g/--global or \
+		 -p/--project",
+	),
+	reject_project: None,
+	require_explicit: None,
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+const TRANSFER_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some(
+		"transfer/reconcile support only 'global' or 'project' scope, not \
+		 'all'; pass -g/--global or -p/--project",
+	),
+	reject_project: None,
+	require_explicit: None,
+	default_both: false,
+	// The ONE policy that does not bail on a rootless `-p`; see the field's
+	// doc. Flipping this to `false` changes `--json`'s `error.code` from
+	// `RESOURCE_NOT_FOUND` to `CLI_ERROR`, which
+	// `rootless_project_transfer_keeps_resource_not_found_code` pins.
+	rootless_project_passthrough: true,
+};
+
+const COVERAGE_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some(
+		"coverage supports only 'global' or 'project' scope, not 'all'; pass \
+		 -g/--global or -p/--project",
+	),
+	reject_project: None,
+	require_explicit: None,
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+const SOURCE_SYNC_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some(
+		"`source sync` needs exactly one scope; --all is not allowed",
+	),
+	reject_project: None,
+	require_explicit: Some(
+		"`source sync` needs a scope: pass -g (global) or -p (project)",
+	),
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+/// `apply-update` reads the lock, but it REWRITES the skill on disk, and core
+/// (`LockedResyncError::UnsupportedScope`) has always refused `Both`. Saying so
+/// here, with core's own sentence verbatim, is what makes "every rejection runs
+/// before the cwd is touched" true for it too: the refusal used to arrive after
+/// a project-root lookup and a lock read.
+const APPLY_UPDATE_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some("apply-update requires --global or --project, not --all"),
+	reject_project: None,
+	require_explicit: None,
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+const ACCEPT_RENAME_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some(
+		"`source accept-rename` needs exactly one scope; --all is not allowed",
+	),
+	reject_project: None,
+	require_explicit: None,
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+const CLAUDE_GLOBAL_ONLY_SCOPE: ScopePolicy = ScopePolicy {
+	reject_all: Some(
+		"skill-usage is Claude-global only; it does not accept -p/--project \
+		 or --all",
+	),
+	reject_project: Some(
+		"skill-usage is Claude-global only; it does not accept -p/--project \
+		 or --all",
+	),
+	require_explicit: None,
+	default_both: false,
+	rootless_project_passthrough: false,
+};
+
+/// THE scope policy table.
+///
+/// Exhaustive on purpose. The old table ended in `_ => AllowBoth` and relied
+/// on a comment ("Any new MUTATING subcommand must be added to the SingleWrite
+/// arm above, or it silently bypasses the project-root guard") to keep itself
+/// correct; now a new subcommand does not COMPILE until it is classified here.
+/// The compiler forces a classification, not a correct one — but silence is no
+/// longer an option.
+///
+/// `None` means the command ignores the scope flags entirely and must NOT go
+/// through the resolver: `inference` and `plugin` manage a shared store, not
+/// per-scope agent config, and `-p plugin list` would otherwise fail with "no
+/// project root found" for a command that never wanted a scope.
+fn scope_policy(command: &Commands) -> Option<ScopePolicy> {
+	Some(match command {
 		Commands::Add { .. }
 		| Commands::Update { .. }
 		| Commands::Delete { .. }
 		| Commands::Enable { .. }
-		| Commands::Disable { .. } => ScopePolicy::SingleWrite,
-		// Any new MUTATING subcommand must be added to the SingleWrite arm
-		// above, or it silently bypasses the project-root guard.
-		_ => ScopePolicy::AllowBoth,
+		| Commands::Disable { .. } => SINGLE_WRITE_SCOPE,
+		Commands::Get { .. }
+		| Commands::Describe { .. }
+		| Commands::PruneLock { .. } => READ_ANY_SCOPE,
+		Commands::ApplyUpdate { .. } => APPLY_UPDATE_SCOPE,
+		Commands::Check { .. } | Commands::Doctor { .. } => {
+			READ_BOTH_BY_DEFAULT
+		}
+		Commands::Coverage => COVERAGE_SCOPE,
+		Commands::Transfer { .. } | Commands::Reconcile { .. } => {
+			TRANSFER_SCOPE
+		}
+		Commands::SkillUsage => CLAUDE_GLOBAL_ONLY_SCOPE,
+		// Nested, and exhaustive too: a new `source` action must be classified
+		// here or it does not compile either.
+		Commands::Source { action } => match action {
+			SourceAction::List | SourceAction::Diff { .. } => {
+				READ_BOTH_BY_DEFAULT
+			}
+			SourceAction::Sync { .. } => SOURCE_SYNC_SCOPE,
+			SourceAction::AcceptRename { .. } => ACCEPT_RENAME_SCOPE,
+		},
+		Commands::Inference { .. } | Commands::Plugin { .. } => return None,
+	})
+}
+
+/// The seal around [`Scope`]'s fields.
+///
+/// Rust privacy is per-DEFINING-module and reaches every DESCENDANT, so a
+/// `Scope` declared in the crate root has "private" fields that
+/// `commands::source` can still write: a command module could forge
+/// `Scope { scope: ProjectOnly, project_root: None }` and skip the policy
+/// table entirely — the exact state `write_target` calls unreachable. Inside
+/// its own module the fields are reachable only here, so `resolve_scope` is
+/// the only way to obtain one.
+mod scope {
+	use super::*;
+
+	/// A resolved, validated scope. Its fields are private TO THIS MODULE and
+	/// only [`resolve_scope`] builds one, so a command module holding a
+	/// `Scope` has nothing left to derive.
+	#[derive(Clone, Debug, PartialEq, Eq)]
+	pub struct Scope {
+		scope: ResourceScope,
+		project_root: Option<PathBuf>,
+	}
+
+	impl Scope {
+		pub fn resource_scope(&self) -> ResourceScope {
+			self.scope
+		}
+
+		pub fn project_root(&self) -> Option<&std::path::Path> {
+			self.project_root.as_deref()
+		}
+
+		/// The `scope` string the JSON payloads carry.
+		pub fn label(&self) -> &'static str {
+			match self.scope {
+				ResourceScope::GlobalOnly => "global",
+				ResourceScope::ProjectOnly => "project",
+				ResourceScope::Both => "both",
+			}
+		}
+
+		/// Which config file the SINGLE-AGENT path writes. `Both` writes the
+		/// GLOBAL config when a project root exists (`with_scope(global = true)`
+		/// sets `write_scope = GlobalOnly`) — surprising, but it is verbatim the
+		/// answer the hand-rolled `use_global_config` ladder in `run_for_agent`
+		/// gave from the raw flags, and `--all` is refused by every generic
+		/// mutation anyway. Do NOT "fix" the arm to match a nicer sentence: it
+		/// would flip which config `--all get mcps` reads.
+		pub fn writes_global(&self) -> bool {
+			match self.scope {
+				ResourceScope::GlobalOnly => true,
+				ResourceScope::ProjectOnly => false,
+				ResourceScope::Both => self.project_root.is_some(),
+			}
+		}
+
+		/// THE single write target for the commands that have exactly one:
+		/// `Some(root)` = that project's store, `None` = the global one.
+		///
+		/// Fails for a scope no writing policy should ever produce. `source`'s
+		/// `write_scope`, `accept-rename`'s `RenameScope` and `transfer`'s
+		/// `install_scope` each used to close this same match with
+		/// `_ => …::Global`, so a scope that slipped past the policy table became
+		/// a silent write to the GLOBAL lock. Now it is an error, in one place.
+		pub fn write_target(&self) -> Result<Option<&std::path::Path>> {
+			match (self.scope, self.project_root.as_deref()) {
+				(ResourceScope::GlobalOnly, _) => Ok(None),
+				(ResourceScope::ProjectOnly, Some(root)) => Ok(Some(root)),
+				// Unreachable through `resolve_scope` for every policy that
+				// calls this: they reject `--all`, and a rootless `-p` bails.
+				// (`TRANSFER_SCOPE` lets a rootless `-p` through, and for that
+				// reason `transfer` maps the scope itself instead of calling
+				// here.) That is exactly why it must not fall back to "global".
+				(ResourceScope::ProjectOnly, None)
+				| (ResourceScope::Both, _) => {
+					anyhow::bail!(
+					"internal: a single-write command resolved '{}' scope, which \
+					 is not one write target — the scope policy table should have \
+					 refused it",
+					self.label()
+				)
+				}
+			}
+		}
+	}
+
+	/// Resolve the flags into a [`Scope`] under `policy`.
+	///
+	/// `find_root` is called ONLY when the answer depends on it: `-g` and the
+	/// plain global default must not touch the cwd, because a global-only command
+	/// has no business dying of a deleted cwd (`current_dir()` → ENOENT). Every
+	/// rejection runs BEFORE it for the same reason — `--all source sync` must
+	/// fail with the scope error, not "No such file or directory".
+	pub fn resolve_scope(
+		flags: ScopeFlags,
+		policy: ScopePolicy,
+		find_root: impl FnOnce() -> Result<Option<PathBuf>>,
+	) -> Result<Scope> {
+		if flags.all {
+			if let Some(msg) = policy.reject_all {
+				anyhow::bail!("{msg}");
+			}
+		}
+		if flags.project {
+			if let Some(msg) = policy.reject_project {
+				anyhow::bail!("{msg}");
+			}
+		}
+		if !(flags.global || flags.project || flags.all) {
+			if let Some(msg) = policy.require_explicit {
+				anyhow::bail!("{msg}");
+			}
+		}
+
+		if flags.all {
+			// Both scopes; simply no project half when there is no root.
+			return Ok(Scope {
+				scope: ResourceScope::Both,
+				project_root: find_root()?,
+			});
+		}
+		if flags.project {
+			let project_root = find_root()?;
+			// THE project-root guard: `-p` with no root fails here, before any
+			// config is touched, rather than silently falling back to the global
+			// write. NOT limited to mutations — gating it on writes let
+			// `-p get skills --json` answer `[]` on exit 0 from a directory that
+			// is not a project at all, byte-identical on all three channels to a
+			// real project holding no skills.
+			//
+			// `transfer`/`reconcile` opt out (`rootless_project_passthrough`):
+			// they never resolved a root in the CLI, so bailing here would swap
+			// core's typed `RESOURCE_NOT_FOUND` for an untyped `CLI_ERROR`.
+			if project_root.is_none() && !policy.rootless_project_passthrough {
+				anyhow::bail!("{NO_PROJECT_ROOT}");
+			}
+			return Ok(Scope {
+				scope: ResourceScope::ProjectOnly,
+				project_root,
+			});
+		}
+		if flags.global || !policy.default_both {
+			return Ok(Scope {
+				scope: ResourceScope::GlobalOnly,
+				project_root: None,
+			});
+		}
+
+		// No flag on a diagnostic that defaults to both scopes. With no project
+		// root it degrades to global-only rather than failing: an implicit default
+		// never asked for `ProjectOnly`, so the guard above must not fire.
+		let project_root = find_root()?;
+		let scope = if project_root.is_some() {
+			ResourceScope::Both
+		} else {
+			ResourceScope::GlobalOnly
+		};
+		Ok(Scope {
+			scope,
+			project_root,
+		})
 	}
 }
 
-/// Resolve top-level scope flags once for every generic command path.
+use scope::{resolve_scope, Scope};
+
+/// [`resolve_scope`] against the real cwd.
+fn resolve_scope_and_root(cli: &Cli, policy: ScopePolicy) -> Result<Scope> {
+	resolve_scope(ScopeFlags::from(cli), policy, || {
+		Ok(find_project_root(&std::env::current_dir()?))
+	})
+}
+
+/// [`resolve_scope_and_root`] with the policy this command is classified under.
 ///
-/// Read-only commands may span both scopes. Generic CRUD mutations must pick
-/// one write target so a read scope can never disagree with the config that is
-/// mutated.
-fn resolve_scope_and_root(
-	cli: &Cli,
-	policy: ScopePolicy,
-) -> Result<(ResourceScope, Option<PathBuf>)> {
-	if cli.all && matches!(policy, ScopePolicy::SingleWrite) {
-		anyhow::bail!(
-			"generic mutation does not support --all; pass -g/--global or \
-			 -p/--project"
-		);
-	}
-
-	let scope = if cli.all {
-		ResourceScope::Both
-	} else if cli.project {
-		ResourceScope::ProjectOnly
-	} else {
-		ResourceScope::GlobalOnly
+/// Panics for `inference`/`plugin`, which the table marks as scope-free and
+/// which are dispatched before any scope is resolved.
+fn resolve_cli_scope(cli: &Cli) -> Result<Scope> {
+	let Some(policy) = scope_policy(&cli.command) else {
+		unreachable!(
+			"`inference` and `plugin` ignore the scope flags and are \
+			 dispatched before any scope resolution"
+		)
 	};
-	let project_root = if scope == ResourceScope::GlobalOnly {
-		None
-	} else {
-		let current_dir = std::env::current_dir()?;
-		find_project_root(&current_dir)
-	};
-
-	// `-p` with no project root fails here, before any config is touched,
-	// rather than silently falling back to the global write.
-	//
-	// This guard is NOT limited to mutations. It used to be, and the read side
-	// then answered `-p get skills --json` with `[]` on exit 0 from a directory
-	// that is not a project at all — byte-identical to a real project holding
-	// no skills, on all three channels (stdout, stderr, exit code). An agent
-	// asking "does this project have skill X" from the wrong cwd got an
-	// authoritative "no". `coverage`, `doctor`, `source list` and `prune-lock`
-	// already bailed; `get`, `describe` and `check` did not, and `describe`
-	// blamed the resource name ("Skill 'x' not found") for a missing project.
-	// `--all` is unaffected: it spans both scopes and simply has no project
-	// half when there is no root.
-	if scope == ResourceScope::ProjectOnly && project_root.is_none() {
-		anyhow::bail!(
-			"no project root found from the current directory; run this \
-			 inside a project (a directory with an agent config marker, \
-			 e.g. .claude/, .mcp.json, or skills-lock.json) or pass \
-			 -g/--global"
-		);
-	}
-
-	Ok((scope, project_root))
+	resolve_scope_and_root(cli, policy)
 }
 
 /// One batch row's outcome from `run_for_agent`'s payload.
@@ -1372,23 +1654,11 @@ fn run_for_agent(
 	cli: &Cli,
 	agent_type: AgentType,
 ) -> Result<Option<serde_json::Value>> {
-	let (scope, project_root) =
-		resolve_scope_and_root(cli, scope_policy(&cli.command))?;
-
-	// Determine which config file to use for writes (primary scope)
-	let use_global_config = if cli.global {
-		true
-	} else if cli.project {
-		false
-	} else if cli.all {
-		// For --all, use project config as primary if available
-		project_root.is_some()
-	} else {
-		true // default to global
-	};
+	let resolved = resolve_cli_scope(cli)?;
+	let scope = resolved.resource_scope();
 
 	eprintln_verbose!("Resource scope: {:?}", scope);
-	if let Some(ref root) = project_root {
+	if let Some(root) = resolved.project_root() {
 		eprintln_verbose!("Project root: {}", root.display());
 	}
 
@@ -1396,8 +1666,8 @@ fn run_for_agent(
 	let adapter = create_adapter(agent_type);
 	let mut manager = ConfigManager::with_scope(
 		adapter,
-		use_global_config,
-		project_root.as_deref(),
+		resolved.writes_global(),
+		resolved.project_root(),
 		scope,
 	);
 	eprintln_verbose!("Config manager created");
@@ -1611,10 +1881,10 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 		}
 	};
 
-	let (scope, project_root) =
-		resolve_scope_and_root(cli, ScopePolicy::AllowBoth)?;
+	let resolved = resolve_cli_scope(cli)?;
+	let scope = resolved.resource_scope();
 	eprintln_verbose!("Loading resources for all agents (scope: {:?})", scope);
-	let resources = load_all_agents(scope, project_root.as_deref());
+	let resources = load_all_agents(scope, resolved.project_root());
 	get::execute_all(resources, resource, cli.json)
 }
 
@@ -1669,9 +1939,11 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	match &cli.command {
 		Commands::Get { resource } => {
 			let resource = *resource;
-			let (scope, project_root) =
-				resolve_scope_and_root(cli, ScopePolicy::AllowBoth)?;
-			let mut resources = load_all_agents(scope, project_root.as_deref());
+			let resolved = resolve_cli_scope(cli)?;
+			let mut resources = load_all_agents(
+				resolved.resource_scope(),
+				resolved.project_root(),
+			);
 			resources
 				.retain(|r| agents.iter().any(|a| a.as_str() == r.agent_id));
 			get::execute_all(resources, resource, cli.json)
@@ -1697,8 +1969,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 			// the policy itself (which capabilities, all-before-any-write)
 			// lives in core; MCPs share it with the API's /mcps/batch.
 			let view = if matches!(resource, ResourceType::Mcps) {
-				let (write_scope, _) =
-					resolve_scope_and_root(cli, ScopePolicy::SingleWrite)?;
+				let write_scope = resolve_cli_scope(cli)?.resource_scope();
 				let is_toggle = matches!(
 					cli.command,
 					Commands::Enable { .. } | Commands::Disable { .. }
@@ -1726,8 +1997,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?
 			} else {
-				let (write_scope, _) =
-					resolve_scope_and_root(cli, ScopePolicy::SingleWrite)?;
+				let write_scope = resolve_cli_scope(cli)?.resource_scope();
 				aghub_core::batch::run_skill_agent_mutation(
 					agents,
 					write_scope,
@@ -1850,5 +2120,478 @@ mod describe {
 		}
 
 		Ok(())
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use std::cell::Cell;
+
+	/// Run the resolver against a fake project-root lookup, and report whether
+	/// that lookup ran at all. The "did it run" half is the point: `-g`, the
+	/// plain global default, and EVERY rejection must answer without touching
+	/// the cwd, because a deleted cwd makes `current_dir()` fail and a
+	/// global-only command has no business dying of it.
+	fn resolve(
+		flags: ScopeFlags,
+		policy: ScopePolicy,
+		root: Option<&str>,
+	) -> (Result<Scope>, bool) {
+		let looked_up = Cell::new(false);
+		let out = resolve_scope(flags, policy, || {
+			looked_up.set(true);
+			Ok(root.map(PathBuf::from))
+		});
+		(out, looked_up.get())
+	}
+
+	const GLOBAL: ScopeFlags = ScopeFlags {
+		global: true,
+		project: false,
+		all: false,
+	};
+	const PROJECT: ScopeFlags = ScopeFlags {
+		global: false,
+		project: true,
+		all: false,
+	};
+	const ALL: ScopeFlags = ScopeFlags {
+		global: false,
+		project: false,
+		all: true,
+	};
+	const NO_FLAG: ScopeFlags = ScopeFlags {
+		global: false,
+		project: false,
+		all: false,
+	};
+
+	/// Every policy that accepts `-p` fails a rootless project scope with the
+	/// SAME sentence. Before this table there were five wordings of it, spread
+	/// over five modules.
+	#[test]
+	fn rootless_project_scope_bails_with_one_message_everywhere() {
+		for policy in [
+			READ_ANY_SCOPE,
+			READ_BOTH_BY_DEFAULT,
+			SINGLE_WRITE_SCOPE,
+			COVERAGE_SCOPE,
+			SOURCE_SYNC_SCOPE,
+			ACCEPT_RENAME_SCOPE,
+			APPLY_UPDATE_SCOPE,
+		] {
+			assert!(
+				!policy.rootless_project_passthrough,
+				"this list is the BAILING policies"
+			);
+			let (out, _) = resolve(PROJECT, policy, None);
+			let err = out.expect_err("-p with no root must fail").to_string();
+			assert_eq!(
+				err, NO_PROJECT_ROOT,
+				"every policy must fail with the one shared sentence"
+			);
+		}
+	}
+
+	/// `transfer`/`reconcile` are the ONE exception: a rootless `-p` resolves
+	/// to `ProjectOnly` with no root and reaches core, whose source lookup
+	/// fails with a typed `ResourceNotFound`. Bailing here instead would
+	/// rewrite `--json`'s `error.code` to the untyped `CLI_ERROR` — the shape
+	/// `rootless_project_transfer_keeps_resource_not_found_code` pins from the
+	/// real binary.
+	#[test]
+	fn transfer_lets_a_rootless_project_scope_reach_core() {
+		let (out, looked_up) = resolve(PROJECT, TRANSFER_SCOPE, None);
+		let scope = out.expect("transfer must not bail on a rootless -p");
+		assert!(looked_up, "it still asks for the root");
+		assert_eq!(scope.resource_scope(), ResourceScope::ProjectOnly);
+		assert_eq!(scope.project_root(), None);
+	}
+
+	/// A `-p` that DOES find a root resolves; nothing else may fire.
+	#[test]
+	fn project_scope_with_a_root_resolves() {
+		let (out, looked_up) = resolve(PROJECT, READ_ANY_SCOPE, Some("/p"));
+		let scope = out.unwrap();
+		assert!(looked_up);
+		assert_eq!(scope.resource_scope(), ResourceScope::ProjectOnly);
+		assert_eq!(scope.project_root(), Some(std::path::Path::new("/p")));
+		assert_eq!(scope.label(), "project");
+		assert!(!scope.writes_global());
+	}
+
+	/// Every rejection answers BEFORE the cwd is touched. `--all source sync`
+	/// from a deleted cwd must fail with the scope error, not with
+	/// "No such file or directory".
+	#[test]
+	fn rejections_never_touch_the_cwd() {
+		let cases: &[(ScopeFlags, ScopePolicy, &str)] = &[
+			(ALL, SINGLE_WRITE_SCOPE, "does not support --all"),
+			(ALL, TRANSFER_SCOPE, "not 'all'"),
+			(ALL, COVERAGE_SCOPE, "not 'all'"),
+			(ALL, SOURCE_SYNC_SCOPE, "--all is not allowed"),
+			(ALL, APPLY_UPDATE_SCOPE, "not --all"),
+			(ALL, ACCEPT_RENAME_SCOPE, "--all is not allowed"),
+			(ALL, CLAUDE_GLOBAL_ONLY_SCOPE, "Claude-global only"),
+			(PROJECT, CLAUDE_GLOBAL_ONLY_SCOPE, "Claude-global only"),
+			(NO_FLAG, SOURCE_SYNC_SCOPE, "needs a scope"),
+		];
+		for (flags, policy, needle) in cases {
+			let (out, looked_up) = resolve(*flags, *policy, Some("/p"));
+			let err = out
+				.expect_err(&format!("{flags:?} must be rejected"))
+				.to_string();
+			assert!(
+				err.contains(needle),
+				"{flags:?}: {err:?} must contain {needle:?}"
+			);
+			assert!(
+				!looked_up,
+				"{flags:?}: a rejection must not resolve a project root"
+			);
+		}
+	}
+
+	/// `-g` — and the plain global default — resolve without a cwd lookup.
+	#[test]
+	fn global_scope_never_touches_the_cwd() {
+		for policy in [
+			READ_ANY_SCOPE,
+			READ_BOTH_BY_DEFAULT,
+			SINGLE_WRITE_SCOPE,
+			TRANSFER_SCOPE,
+			COVERAGE_SCOPE,
+			SOURCE_SYNC_SCOPE,
+			ACCEPT_RENAME_SCOPE,
+			CLAUDE_GLOBAL_ONLY_SCOPE,
+		] {
+			let (out, looked_up) = resolve(GLOBAL, policy, Some("/p"));
+			let scope = out.unwrap();
+			assert_eq!(scope.resource_scope(), ResourceScope::GlobalOnly);
+			assert_eq!(scope.project_root(), None);
+			assert!(!looked_up, "-g must not resolve a project root");
+		}
+
+		let (out, looked_up) = resolve(NO_FLAG, READ_ANY_SCOPE, Some("/p"));
+		assert_eq!(out.unwrap().resource_scope(), ResourceScope::GlobalOnly);
+		assert!(!looked_up, "the global default must not resolve a root");
+	}
+
+	/// The diagnostics' no-flag default spans both scopes, and degrades to
+	/// global-only — never a bail — when there is no project.
+	#[test]
+	fn read_both_by_default_needs_a_root_and_degrades_without_one() {
+		let (out, looked_up) =
+			resolve(NO_FLAG, READ_BOTH_BY_DEFAULT, Some("/p"));
+		let scope = out.unwrap();
+		assert!(looked_up, "the both-scopes default depends on the root");
+		assert_eq!(scope.resource_scope(), ResourceScope::Both);
+		assert_eq!(scope.project_root(), Some(std::path::Path::new("/p")));
+
+		let (out, _) = resolve(NO_FLAG, READ_BOTH_BY_DEFAULT, None);
+		let scope = out.expect("an implicit default must never bail");
+		assert_eq!(scope.resource_scope(), ResourceScope::GlobalOnly);
+		assert_eq!(scope.project_root(), None);
+	}
+
+	/// `--all` spans whatever scopes exist; a missing project root is simply
+	/// no project half, never a failure.
+	#[test]
+	fn all_scope_survives_a_missing_project_root() {
+		let (out, _) = resolve(ALL, READ_ANY_SCOPE, None);
+		let scope = out.expect("--all must not require a project root");
+		assert_eq!(scope.resource_scope(), ResourceScope::Both);
+		assert_eq!(scope.project_root(), None);
+		assert_eq!(scope.label(), "both");
+	}
+
+	/// `writes_global` replaced a hand-rolled `if global {…} else if project
+	/// {…} else if all {…}` ladder that re-read the raw flags inside
+	/// `run_for_agent`, immediately below the resolver call. Same answers.
+	#[test]
+	fn writes_global_matches_the_flag_ladder_it_replaced() {
+		let cases: &[(ScopeFlags, Option<&str>, bool)] = &[
+			(GLOBAL, Some("/p"), true),
+			(NO_FLAG, Some("/p"), true),
+			(PROJECT, Some("/p"), false),
+			// `--all` writes the project's config when there is one.
+			(ALL, Some("/p"), true),
+			(ALL, None, false),
+		];
+		for (flags, root, expected) in cases {
+			let (out, _) = resolve(*flags, READ_ANY_SCOPE, *root);
+			assert_eq!(
+				out.unwrap().writes_global(),
+				*expected,
+				"{flags:?} with root {root:?}"
+			);
+		}
+	}
+
+	fn policy_for(argv: &[&str]) -> Option<ScopePolicy> {
+		let cli = Cli::try_parse_from(argv)
+			.unwrap_or_else(|e| panic!("{argv:?} must parse: {e}"));
+		scope_policy(&cli.command)
+	}
+
+	/// One invocation per subcommand, with the policy it must resolve under.
+	///
+	/// `scope_policy_classifies_every_subcommand` checks the classifications;
+	/// `every_subcommand_has_a_policy_case` checks that this list still names
+	/// every subcommand clap knows about, so a NEW command cannot be added
+	/// without landing here. Neither can prove a classification is the RIGHT
+	/// one — that stays a review call.
+	const POLICY_CASES: &[(&[&str], Option<ScopePolicy>)] = &[
+		(
+			&["aghub-cli", "add", "skills", "--name", "x"],
+			Some(SINGLE_WRITE_SCOPE),
+		),
+		(
+			&["aghub-cli", "update", "skills", "x"],
+			Some(SINGLE_WRITE_SCOPE),
+		),
+		(
+			&["aghub-cli", "delete", "skills", "x"],
+			Some(SINGLE_WRITE_SCOPE),
+		),
+		(
+			&["aghub-cli", "enable", "mcps", "x"],
+			Some(SINGLE_WRITE_SCOPE),
+		),
+		(
+			&["aghub-cli", "disable", "mcps", "x"],
+			Some(SINGLE_WRITE_SCOPE),
+		),
+		(&["aghub-cli", "get", "skills"], Some(READ_ANY_SCOPE)),
+		(
+			&["aghub-cli", "describe", "skills", "x"],
+			Some(READ_ANY_SCOPE),
+		),
+		(
+			&["aghub-cli", "apply-update", "skills", "x"],
+			Some(APPLY_UPDATE_SCOPE),
+		),
+		(&["aghub-cli", "prune-lock"], Some(READ_ANY_SCOPE)),
+		(
+			&["aghub-cli", "check", "skills"],
+			Some(READ_BOTH_BY_DEFAULT),
+		),
+		(&["aghub-cli", "doctor"], Some(READ_BOTH_BY_DEFAULT)),
+		(&["aghub-cli", "source", "list"], Some(READ_BOTH_BY_DEFAULT)),
+		(
+			&["aghub-cli", "source", "diff", "o/r"],
+			Some(READ_BOTH_BY_DEFAULT),
+		),
+		(
+			&["aghub-cli", "source", "sync", "o/r"],
+			Some(SOURCE_SYNC_SCOPE),
+		),
+		(
+			&["aghub-cli", "source", "accept-rename", "a", "b"],
+			Some(ACCEPT_RENAME_SCOPE),
+		),
+		(&["aghub-cli", "coverage"], Some(COVERAGE_SCOPE)),
+		(
+			&[
+				"aghub-cli",
+				"transfer",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"x",
+				"--to",
+				"opencode",
+			],
+			Some(TRANSFER_SCOPE),
+		),
+		(
+			&[
+				"aghub-cli",
+				"reconcile",
+				"skill",
+				"--from-agent",
+				"claude",
+				"--name",
+				"x",
+				"--add",
+				"opencode",
+			],
+			Some(TRANSFER_SCOPE),
+		),
+		(
+			&["aghub-cli", "skill-usage"],
+			Some(CLAUDE_GLOBAL_ONLY_SCOPE),
+		),
+		// Scope-free: these manage a shared store, not per-scope agent
+		// config, and must NOT reach the resolver — `-p plugin list` used
+		// to fail with "no project root found" for a command that never
+		// wanted a scope.
+		(&["aghub-cli", "plugin", "list"], None),
+		(&["aghub-cli", "inference", "list"], None),
+	];
+
+	/// The policy table itself. It is exhaustive over `Commands` (and over
+	/// `SourceAction`), so a new subcommand does not compile until it is
+	/// classified — this pins WHICH class each existing one landed in.
+	#[test]
+	fn scope_policy_classifies_every_subcommand() {
+		for (argv, expected) in POLICY_CASES {
+			assert!(
+				policy_for(argv) == *expected,
+				"{argv:?} is classified under the wrong scope policy"
+			);
+		}
+	}
+
+	/// …and the case list is complete, asked of CLAP rather than of a second
+	/// hand-written list.
+	///
+	/// The exhaustive `match` in `scope_policy` forces a new subcommand to be
+	/// CLASSIFIED, but nothing forced it to be TESTED: a command missing from
+	/// `POLICY_CASES` was simply invisible to the test above, which is the one
+	/// place a wrong classification would show up. Now it goes red.
+	#[test]
+	fn every_subcommand_has_a_policy_case() {
+		use clap::CommandFactory;
+
+		let command = Cli::command();
+		let mut required: Vec<Vec<&str>> = Vec::new();
+		for sub in command.get_subcommands() {
+			let name = sub.get_name();
+			// clap's own generated `help` subcommand is not ours.
+			if name == "help" {
+				continue;
+			}
+			// `source` is the ONLY command `scope_policy` branches on per
+			// action (`SourceAction`), so it is the only one that needs a case
+			// per action. `plugin`/`inference` actions all share one answer
+			// (`None`).
+			if name == "source" {
+				required.extend(
+					sub.get_subcommands()
+						.map(clap::Command::get_name)
+						.filter(|n| *n != "help")
+						.map(|action| vec![name, action]),
+				);
+			} else {
+				required.push(vec![name]);
+			}
+		}
+		assert!(required.len() > 10, "clap introspection found nothing");
+
+		for want in &required {
+			assert!(
+				POLICY_CASES.iter().any(|(argv, _)| {
+					argv.len() > want.len() && argv[1..=want.len()] == want[..]
+				}),
+				"subcommand {want:?} has no case in POLICY_CASES: classify it \
+				 in `scope_policy` and pin the classification here"
+			);
+		}
+	}
+
+	/// `write_target` is the ONE answer to "which store does this write?".
+	/// `source`'s `write_scope`, `accept-rename`'s `RenameScope` and
+	/// `transfer`'s `install_scope` each used to close this match with
+	/// `_ => …::Global`, so a scope that got past the policy table became a
+	/// silent write to the GLOBAL lock.
+	///
+	/// `ProjectOnly` with no root is not constructible through `resolve_scope`
+	/// (the guard bails first), so only the `Both` arm is reachable here.
+	#[test]
+	fn write_target_refuses_a_scope_that_is_not_one_store() {
+		let (out, _) = resolve(GLOBAL, READ_ANY_SCOPE, Some("/p"));
+		assert_eq!(out.unwrap().write_target().unwrap(), None);
+
+		let (out, _) = resolve(PROJECT, READ_ANY_SCOPE, Some("/p"));
+		assert_eq!(
+			out.unwrap().write_target().unwrap(),
+			Some(std::path::Path::new("/p"))
+		);
+
+		let (out, _) = resolve(ALL, READ_ANY_SCOPE, Some("/p"));
+		let err = out
+			.unwrap()
+			.write_target()
+			.expect_err("'both' is not a single write target")
+			.to_string();
+		assert!(err.contains("not one write target"), "{err}");
+	}
+
+	/// `read_scopes` is the read-side counterpart, and nothing pinned it: a
+	/// mutation making a rooted `-p` return NO scopes reddened one spawn test,
+	/// indirectly. `source list -p` listing nothing is a silent wrong answer.
+	#[test]
+	fn read_scopes_spans_exactly_the_resolved_scopes() {
+		use crate::commands::source::read_scopes;
+		use skill_update::sources::SourceScope;
+
+		// `SourceScope` has no `PartialEq`; describe it instead.
+		fn describe(scopes: &[SourceScope]) -> Vec<String> {
+			scopes
+				.iter()
+				.map(|s| match s {
+					SourceScope::Global => "global".to_string(),
+					SourceScope::Project { root } => {
+						format!("project:{}", root.display())
+					}
+				})
+				.collect()
+		}
+		let spans = |flags, root| {
+			let (out, _) = resolve(flags, READ_BOTH_BY_DEFAULT, root);
+			describe(&read_scopes(&out.unwrap()))
+		};
+
+		assert_eq!(spans(GLOBAL, Some("/p")), ["global"]);
+		assert_eq!(spans(PROJECT, Some("/p")), ["project:/p"]);
+		assert_eq!(spans(NO_FLAG, Some("/p")), ["global", "project:/p"]);
+		// No project root: the both-scopes default degrades to global alone.
+		assert_eq!(spans(NO_FLAG, None), ["global"]);
+	}
+
+	/// The generic mutations reject `--all` before anything is written. This
+	/// is the rule the five-case spawn loop used to re-prove one subprocess at
+	/// a time; the spawn test now keeps ONE case, for the on-disk proof that
+	/// nothing leaked.
+	#[test]
+	fn every_generic_mutation_rejects_all_scope() {
+		for argv in [
+			&["aghub-cli", "--all", "add", "skills", "--name", "x"][..],
+			&["aghub-cli", "--all", "update", "skills", "x"][..],
+			&["aghub-cli", "--all", "delete", "skills", "x"][..],
+			&["aghub-cli", "--all", "enable", "mcps", "x"][..],
+			&["aghub-cli", "--all", "disable", "mcps", "x"][..],
+		] {
+			let policy = policy_for(argv).expect("a mutation has a policy");
+			let (out, looked_up) = resolve(ALL, policy, Some("/p"));
+			let err = out.expect_err("--all must be rejected").to_string();
+			assert!(err.contains("does not support --all"), "{argv:?}: {err}");
+			assert!(!looked_up, "{argv:?}: rejected before any cwd IO");
+		}
+	}
+
+	/// `-p` with no project root fails on READ commands too. Gating the guard
+	/// on mutations let `-p get skills --json` answer `[]` on exit 0 from a
+	/// directory that is not a project at all.
+	#[test]
+	fn rootless_project_scope_fails_on_reads_too() {
+		for argv in [
+			&["aghub-cli", "-p", "get", "skills"][..],
+			&["aghub-cli", "-p", "describe", "skills", "x"][..],
+			&["aghub-cli", "-p", "check", "skills"][..],
+			&["aghub-cli", "-p", "coverage"][..],
+			&["aghub-cli", "-p", "source", "list"][..],
+		] {
+			let policy = policy_for(argv).expect("a read command has a policy");
+			let (out, _) = resolve(PROJECT, policy, None);
+			assert_eq!(
+				out.expect_err("-p with no root must fail").to_string(),
+				NO_PROJECT_ROOT,
+				"{argv:?}"
+			);
+		}
 	}
 }

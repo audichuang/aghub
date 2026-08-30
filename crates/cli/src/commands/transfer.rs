@@ -12,8 +12,7 @@
 // ponytail: render the OperationBatchResult directly via tabled + serde_json;
 // do NOT drag the api transfer DTO crate into the CLI.
 
-use aghub_core::models::AgentType;
-use aghub_core::paths::find_project_root;
+use aghub_core::models::{AgentType, ResourceScope};
 use aghub_core::transfer::{
 	ensure_disjoint, ensure_mcp_exists, ensure_mcp_reconcile_spares,
 	ensure_skill_exists, ensure_skill_reconcile_spares,
@@ -119,35 +118,38 @@ fn parse_agent(value: &str) -> Result<AgentType, String> {
 	value.parse()
 }
 
-/// Resolve the top-level `-g`/`-p` flags into the transfer-local
-/// [`InstallScope`] plus a project root.
+/// The transfer-local [`InstallScope`] for an already-resolved [`crate::Scope`].
 ///
-/// `-p`/Project resolves the project root from the current dir; the actual
-/// "project root is required" check is left to the core `validate_target` so its
-/// message is the single source of truth. Default (neither flag) is Global, the
-/// same default `main.rs` uses for single-agent ops.
-fn resolve_scope(
-	global: bool,
-	project: bool,
-) -> Result<(InstallScope, Option<std::path::PathBuf>)> {
-	if global && project {
-		bail!("pass at most one of -g/--global or -p/--project");
+/// `--all` is refused by `TRANSFER_SCOPE` in `main`'s ONE policy table; this
+/// used to be a private resolver that re-read `cli.global`/`cli.project`.
+///
+/// It maps the resolved scope rather than calling
+/// [`crate::Scope::write_target`], because `transfer`/`reconcile` are the one
+/// policy with `rootless_project_passthrough`: a `-p` with no root stays
+/// `ProjectOnly` + `project_root: None` and core's source lookup answers with a
+/// typed `RESOURCE_NOT_FOUND`, exactly as it did before the scope flags were
+/// centralized. Total match, no `_ => Global` catch-all — that arm is how a
+/// scope the table let through became a silent write to the GLOBAL lock.
+fn install_scope(resolved: &crate::Scope) -> Result<InstallScope> {
+	match resolved.resource_scope() {
+		ResourceScope::GlobalOnly => Ok(InstallScope::Global),
+		ResourceScope::ProjectOnly => Ok(InstallScope::Project),
+		ResourceScope::Both => bail!(
+			"internal: transfer/reconcile resolved 'both' scope, which is not \
+			 one install target — the scope policy table should have refused it"
+		),
 	}
-	if project {
-		let cwd = std::env::current_dir()?;
-		return Ok((InstallScope::Project, find_project_root(&cwd)));
-	}
-	Ok((InstallScope::Global, None))
 }
 
 /// Dispatch a `transfer` subcommand action.
 pub fn execute_transfer(
 	action: &TransferAction,
-	global: bool,
-	project: bool,
+	resolved: &crate::Scope,
 	json: bool,
 ) -> Result<()> {
-	let (scope, project_root) = resolve_scope(global, project)?;
+	let scope = install_scope(resolved)?;
+	let project_root =
+		resolved.project_root().map(std::path::Path::to_path_buf);
 	let (args, run): (&TransferArgs, TransferFn) = match action {
 		TransferAction::Skill(a) => (a, transfer_skill),
 		TransferAction::Mcp(a) => (a, transfer_mcp),
@@ -177,11 +179,12 @@ pub fn execute_transfer(
 /// Dispatch a `reconcile` subcommand action.
 pub fn execute_reconcile(
 	action: &ReconcileAction,
-	global: bool,
-	project: bool,
+	resolved: &crate::Scope,
 	json: bool,
 ) -> Result<()> {
-	let (scope, project_root) = resolve_scope(global, project)?;
+	let scope = install_scope(resolved)?;
+	let project_root =
+		resolved.project_root().map(std::path::Path::to_path_buf);
 	let (args, run, exists, spares): (
 		&ReconcileArgs,
 		ReconcileFn,

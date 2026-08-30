@@ -515,14 +515,13 @@ fn project_locked(
 /// Scope resolution is shared with `source` (`-g` global only, `-p` project
 /// only, default = global plus the current project when a root is detected).
 pub fn execute_with_options(
-	global: bool,
-	project: bool,
+	scope: &crate::Scope,
 	json: bool,
 	verify_links: bool,
 	agent: &str,
 	fail_on_issues: bool,
 ) -> Result<()> {
-	let scopes = crate::commands::source::resolve_read_scopes(global, project)?;
+	let scopes = crate::commands::source::read_scopes(scope);
 	// doctor's whole point is reporting lock health, and it must not report a
 	// clean-but-empty world for a lock it could not parse — it classified the
 	// still-present skills `untracked` and told the caller to delete them.
@@ -696,7 +695,13 @@ pub fn execute_with_options(
 			 (<source> is the SOURCE column of `aghub-cli source list`.) \
 			 Foreign links and real-path conflicts are not repaired by sync — \
 			 inspect those.",
-			scope_flag = if project { "-p" } else { "-g" }
+			scope_flag = if scope.resource_scope()
+				== ResourceScope::ProjectOnly
+			{
+				"-p"
+			} else {
+				"-g"
+			}
 		);
 	}
 	gate(issue_count)

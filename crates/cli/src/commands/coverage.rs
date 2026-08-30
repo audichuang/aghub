@@ -8,64 +8,32 @@
 //! `AgentSkillCoverageDto` mirrors — so the two surfaces emit one wire shape
 //! defined in one place and can never drift.
 
-use aghub_core::models::ResourceScope;
-use aghub_core::paths::find_project_root;
 use aghub_core::skills::linker::classify::{classify_all, LinkNeed};
 use aghub_core::skills::linker::{
 	universal_canonical_dir, AgentSkillCoverageView,
 };
-use anyhow::{bail, Result};
+use anyhow::Result;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
+/// Dispatch the `coverage` subcommand.
+///
 /// Coverage supports only `global` or `project` scope (the master is resolved
 /// per-scope); `--all`/`Both` has no single master to classify against and is
-/// rejected — mirroring the API route, which rejects `scope=all`.
-fn resolve_scope(
-	global: bool,
-	project: bool,
-	all: bool,
-) -> Result<(ResourceScope, Option<std::path::PathBuf>, &'static str)> {
-	if all {
-		bail!(
-			"coverage supports only 'global' or 'project' scope, not 'all'; \
-			 pass -g/--global or -p/--project"
-		);
-	}
-	if global && project {
-		bail!("pass at most one of -g/--global or -p/--project");
-	}
-	if project {
-		let cwd = std::env::current_dir()?;
-		let Some(root) = find_project_root(&cwd) else {
-			bail!(
-				"project scope requires a project root, but none was found from \
-				 the current directory"
-			);
-		};
-		return Ok((ResourceScope::ProjectOnly, Some(root), "project"));
-	}
-	// Default (neither flag) is global, matching the single-agent default.
-	Ok((ResourceScope::GlobalOnly, None, "global"))
-}
+/// rejected — by `COVERAGE_SCOPE` in `main`'s ONE policy table, mirroring the
+/// API route, which rejects `scope=all`. So is `-p` with no project root.
+pub fn execute(resolved: &crate::Scope, json: bool) -> Result<()> {
+	let scope = resolved.resource_scope();
+	let project_root = resolved.project_root();
+	let scope_str = resolved.label();
 
-/// Dispatch the `coverage` subcommand.
-pub fn execute(
-	global: bool,
-	project: bool,
-	all: bool,
-	json: bool,
-) -> Result<()> {
-	let (scope, project_root, scope_str) = resolve_scope(global, project, all)?;
+	let master = universal_canonical_dir(project_root).ok_or_else(|| {
+		anyhow::anyhow!(
+			"could not resolve the universal master skills directory"
+		)
+	})?;
 
-	let master =
-		universal_canonical_dir(project_root.as_deref()).ok_or_else(|| {
-			anyhow::anyhow!(
-				"could not resolve the universal master skills directory"
-			)
-		})?;
-
-	let plans = classify_all(scope, project_root.as_deref(), &master);
+	let plans = classify_all(scope, project_root, &master);
 
 	if json {
 		let rows: Vec<_> = plans

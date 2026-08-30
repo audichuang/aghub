@@ -123,13 +123,17 @@ Non-obvious invariants:
 
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`, `source sync`,
   `source accept-rename`, reconcile-with-removals → **dry-run unless `--yes`**
-  (`apply-update` refuses outright instead of printing a preview)
+  (`apply-update` refuses outright instead of printing a preview; it also
+  rejects `--all` — core never supported it, and the refusal now arrives from
+  the scope table, i.e. BEFORE the `--yes` one)
 - **Scope flags are mutually exclusive**, enforced MANUALLY in `main()` before
   every dispatch (a clap `ArgGroup` does not propagate to `global = true` args —
   so this is exit **1**, not clap's exit 2). A generic mutation must resolve
   exactly ONE write scope: `--all` is rejected, and **`-p` with no project root
   bails BEFORE anything happens — for reads too**, so `get`/`check`/`describe`
-  cannot answer `[]` from a non-project directory
+  cannot answer `[]` from a non-project directory. ONE exception:
+  `transfer`/`reconcile` let a rootless `-p` reach core, so their `--json`
+  failure keeps `code: RESOURCE_NOT_FOUND` instead of the bail's `CLI_ERROR`
 - **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
   needs `--verify-links`. `linkAudit.state` is `verified` ONLY when every agent
   row is healthy (`issues` otherwise); `orphanMaster` is a leftover master with

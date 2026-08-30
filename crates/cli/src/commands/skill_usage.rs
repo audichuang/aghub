@@ -8,7 +8,7 @@
 //! same data the HTTP API's `SkillUsageResponse` wraps.
 
 use aghub_core::skills::usage::list_claude_skill_usage;
-use anyhow::{bail, Result};
+use anyhow::Result;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
@@ -27,15 +27,15 @@ fn format_last_used(last_used_at: Option<i64>) -> String {
 /// Dispatch the `skill-usage` subcommand.
 ///
 /// `skillUsage` is user-global, so this command is inherently global-scope;
-/// `-p`/`--project` and `--all` are rejected rather than silently ignored.
-pub fn execute(project: bool, all: bool, json: bool) -> Result<()> {
-	if project || all {
-		bail!(
-			"skill-usage is Claude-global only; it does not accept \
-			 -p/--project or --all"
-		);
-	}
-
+/// `-p`/`--project` and `--all` are rejected rather than silently ignored — by
+/// `CLAUDE_GLOBAL_ONLY_SCOPE` in `main`'s ONE policy table.
+///
+/// The resolved scope is taken and ignored ON PURPOSE: it is the only thing
+/// making the dispatch site's call to the resolver load-bearing. Drop the
+/// parameter and `main` can stop consulting the policy table for this command
+/// without a compile error — which is exactly how `-p skill-usage` would go
+/// from "rejected" to "silently accepted".
+pub fn execute(_scope: &crate::Scope, json: bool) -> Result<()> {
 	let rows = list_claude_skill_usage();
 
 	if json {
