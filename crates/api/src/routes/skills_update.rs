@@ -11,14 +11,12 @@
 //! resolution. Every gix error string is redacted of URL userinfo upstream so a
 //! token can never leak into the response.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::lock::EntryIdentity;
-use aghub_core::skills::removal::skill_root;
 use chrono::Utc;
 use rocket::http::Status;
 use rocket::serde::json::Json;
@@ -39,13 +37,14 @@ use skill_update::mutation::{
 	resync_locked_skills, FetchRenameError, FetchedRenameRequest,
 	LockedResyncError, LockedResyncRequest, LockedSkillsResyncRequest,
 };
+use skill_update::projection::{self, HealPrecondition, Identities};
 // Only the `#[cfg(unix)]` StubBackendUnavailableResolver test uses this —
 // match its gate exactly or Windows clippy flags an unused import.
 #[cfg(all(test, unix))]
 use skill_update::TokenResolution;
 use skill_update::{
 	check_updates, CheckDeps, CheckOutput, EntryInput, FetchError, Fetcher,
-	GitFetcher, RefResolver, ResultCache, SourceRef, TokenResolver,
+	GitFetcher, RefResolver, ResultCache, TokenResolver,
 };
 
 /// Default per-fetch timeout. Generous enough for a small skill repo clone but
@@ -87,240 +86,26 @@ pub struct CheckUpdatesParams {
 	project_root: Option<String>,
 }
 
-/// Folder hashes for the installed copies of `wanted`, keyed by skill name.
-///
-/// `wanted` is the lock's key set, and restricting the sweep to it is what keeps
-/// this off every unlocked skill on the machine: folder-hashing reads every file
-/// of every skill folder, and a real host measured 464 folders hashed to answer
-/// 34 locked names — 10.4s of the check's 18.6s, ~93% of it discarded.
-///
-/// The filter is by NAME only, so every agent's copy of a wanted name is still
-/// seen and the ambiguity detection below is unchanged.
-fn local_hashes_for_scope(
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-	wanted: &HashSet<String>,
-) -> HashMap<String, String> {
-	let mut hashes = HashMap::new();
-	let mut ambiguous = HashSet::new();
-	if wanted.is_empty() {
-		return hashes;
-	}
-	let started = std::time::Instant::now();
-	let mut hashed = 0usize;
-	let mut reused = 0usize;
-	// Agents that link to the same universal master resolve to the SAME root,
-	// and a folder hash is a pure function of that folder — so the second agent
-	// carrying a linked skill costs a map lookup instead of a full tree read.
-	// One master was observed being re-hashed 19 times without this.
-	let mut hash_by_root: HashMap<std::path::PathBuf, String> = HashMap::new();
-	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
-			if !wanted.contains(&skill.name) || ambiguous.contains(&skill.name)
-			{
-				continue;
-			}
-			let Some(root) = skill_root(&skill) else {
-				continue;
-			};
-			let hash = if let Some(known) = hash_by_root.get(&root) {
-				reused += 1;
-				known.clone()
-			} else {
-				hashed += 1;
-				let Ok(fresh) = skill::compute_skill_folder_hash(&root) else {
-					continue;
-				};
-				hash_by_root.insert(root.clone(), fresh.clone());
-				fresh
-			};
-			match hashes.get(&skill.name) {
-				Some(existing) if existing != &hash => {
-					hashes.remove(&skill.name);
-					ambiguous.insert(skill.name);
-				}
-				Some(_) => {}
-				None => {
-					hashes.insert(skill.name, hash);
-				}
-			}
-		}
-	}
-	log::info!(
-		"check-updates: local hashes wanted={} folders_hashed={} \
-		 root_reused={} distinct_names={} ambiguous={} took={:?}",
-		wanted.len(),
-		hashed,
-		reused,
-		hashes.len(),
-		ambiguous.len(),
-		started.elapsed()
-	);
-	hashes
-}
-
-/// What one entry looked like BEFORE the check fetched: its coordinates, and
-/// the metadata the check's heals are computed relative to.
-///
-/// A check decides WHAT to fetch from an unlocked read and only takes the
-/// mutation lock afterwards to write its heals, so it owes the same
-/// compare-and-set every other post-fetch writer does — see [`EntryIdentity`].
-/// The identity alone is not enough: `apply-update` on this very entry leaves
-/// the coordinates IDENTICAL while advancing `contentHash`/`refCommit`, so a
-/// heal that only checked the identity would roll those newer values back to
-/// what the stale check saw.
-#[derive(PartialEq, Eq)]
-struct HealPrecondition {
-	identity: EntryIdentity,
-	content_hash: Option<String>,
-	ref_commit: Option<String>,
-	/// npx's own baseline. Not just another field to compare: `apply_content_hash`
-	/// CLEARS it, so a stale heal that ignored it would destroy a newer `npx
-	/// skills update`'s record — and npx skips its update check outright when it
-	/// is empty, leaving that skill silently frozen on both sides.
-	skill_folder_hash: String,
-}
-
-impl HealPrecondition {
-	fn of_global_entry(entry: &skill::SkillLockEntry) -> Self {
-		Self {
-			identity: EntryIdentity::of_global_entry(entry),
-			content_hash: entry.content_hash.clone(),
-			ref_commit: entry.ref_commit.clone(),
-			skill_folder_hash: entry.skill_folder_hash.clone(),
-		}
-	}
-
-	/// The project lock has no folder-hash field, so there is nothing to compare
-	/// — `computed_hash` is its whole content baseline.
-	fn of_project_entry(entry: &skill::LocalSkillLockEntry) -> Self {
-		Self {
-			identity: EntryIdentity::of_project_entry(entry),
-			content_hash: Some(entry.computed_hash.clone()),
-			ref_commit: entry.ref_commit.clone(),
-			skill_folder_hash: String::new(),
-		}
-	}
-}
-
-/// Pre-fetch preconditions keyed by skill name within a scope.
-type Identities = HashMap<String, HealPrecondition>;
-
-/// Project the global skill lock into the orchestrator's per-entry inputs, plus
-/// the identity of each entry AS READ HERE (the read that decides what to fetch).
-///
-/// Takes `offline` rather than pre-computed hashes so the ORDER of its two reads
-/// cannot be got wrong by a caller. The lock snapshot must not be NEWER than the
-/// disk hashes paired with it: hashing disk first lets a concurrent `npx skills
-/// update` land in between, and the check then pairs the OLD disk hash with a
-/// lock snapshot that already reflects npx's write. The heal derived from that
-/// stale hash matches the live lock, passes the precondition, and overwrites
-/// npx's newer state. Snapshotting the lock first inverts that: any interleaved
-/// write leaves the live lock ahead of the snapshot, so the precondition
-/// rejects the heal instead.
+/// The global half of a check's pre-fetch read, bound to this surface's
+/// policy: the lock is read FAIL-OPEN here (an unreadable global lock must not
+/// take the route down), unlike the CLI which probes it fail-closed first.
+/// Everything else — read order, the `wanted` filter, the offline skip — lives
+/// in `skill_update::projection`.
 fn global_lock_entries(offline: bool) -> (Vec<EntryInput>, Identities) {
-	global_lock_entries_with(skill::lock::global::read_skill_lock, |wanted| {
-		if offline {
-			HashMap::new()
-		} else {
-			local_hashes_for_scope(ResourceScope::GlobalOnly, None, wanted)
-		}
-	})
+	projection::global_lock_entries(
+		offline,
+		skill::lock::global::read_skill_lock,
+	)
 }
 
-/// The seam the order above is testable through: a test supplies a `read_hashes`
-/// that performs an npx-style write before returning, which is exactly the
-/// interleaving the ordering defends against — deterministically, with no sleep.
-fn global_lock_entries_with(
-	read_lock: impl FnOnce() -> skill::SkillLockFile,
-	read_hashes: impl FnOnce(&HashSet<String>) -> HashMap<String, String>,
-) -> (Vec<EntryInput>, Identities) {
-	let lock = read_lock();
-	// The lock snapshot decides which names are worth hashing. Deriving the set
-	// HERE rather than inside `read_hashes` keeps the documented order intact:
-	// the lock is still read first, and the hashes still come from a disk read
-	// that happens after it.
-	let wanted: HashSet<String> = lock.skills.keys().cloned().collect();
-	let local_hashes = &read_hashes(&wanted);
-	let mut identities = Identities::new();
-	let entries = lock
-		.skills
-		.into_iter()
-		.map(|(name, entry)| {
-			identities.insert(
-				name.clone(),
-				HealPrecondition::of_global_entry(&entry),
-			);
-			EntryInput {
-				local_hash: local_hashes.get(&name).cloned(),
-				name,
-				scope: "global".to_string(),
-				source_ref: SourceRef {
-					source: skill_update::sources::entry_clone_source(
-						&entry.source,
-						Some(&entry.source_url),
-						&entry.source_type,
-					),
-					ref_: entry.ref_name,
-				},
-				source_type: entry.source_type,
-				skill_path: entry.skill_path,
-				stored_hash: entry.content_hash,
-				ref_commit: entry.ref_commit,
-			}
-		})
-		.collect();
-	(entries, identities)
-}
-
-/// [`global_lock_entries`] for the project lock — same read-order rule.
+/// [`global_lock_entries`] for the project lock.
 fn project_lock_entries(
 	project_root: Option<&Path>,
 	offline: bool,
 ) -> (Vec<EntryInput>, Identities) {
-	let lock = skill::lock::local::read_local_lock(project_root);
-	let wanted: HashSet<String> = lock.skills.keys().cloned().collect();
-	let local_hashes = &if offline {
-		HashMap::new()
-	} else {
-		local_hashes_for_scope(
-			ResourceScope::ProjectOnly,
-			project_root,
-			&wanted,
-		)
-	};
-	let mut identities = Identities::new();
-	let entries = lock
-		.skills
-		.into_iter()
-		.map(|(name, entry)| {
-			identities.insert(
-				name.clone(),
-				HealPrecondition::of_project_entry(&entry),
-			);
-			EntryInput {
-				local_hash: local_hashes.get(&name).cloned(),
-				name,
-				scope: "project".to_string(),
-				source_ref: SourceRef {
-					// The shared coordinate — NOT a local `source_url.unwrap_or(
-					// source)`, which reads a legacy GitLab entry's `group/repo` as
-					// GitHub shorthand and checks it against the wrong repository.
-					source: skill_update::sources::entry_clone_source(
-						&entry.source,
-						entry.source_url.as_deref(),
-						&entry.source_type,
-					),
-					ref_: entry.ref_name,
-				},
-				source_type: entry.source_type,
-				skill_path: entry.skill_path,
-				stored_hash: Some(entry.computed_hash),
-				ref_commit: entry.ref_commit,
-			}
-		})
-		.collect();
-	(entries, identities)
+	projection::project_lock_entries(offline, project_root, || {
+		skill::lock::local::read_local_lock(project_root)
+	})
 }
 
 /// Everything one check read BEFORE fetching: the orchestrator inputs, the write
@@ -1164,7 +949,7 @@ mod tests {
 	use super::*;
 	use aghub_core::skills::lock::update_lock_hash;
 	use aghub_core::skills::update::SkillUpdateStatus;
-	use skill_update::EntryKey;
+	use skill_update::{EntryKey, SourceRef};
 
 	/// Empty source-auth snapshot for synchronous route-core tests.
 	fn empty_keyring_resolver() -> SourceAuth {
@@ -1909,53 +1694,6 @@ mod tests {
 		});
 	}
 
-	/// The hash sweep must cover EXACTLY the locked names — and carry the right
-	/// value for them.
-	///
-	/// Both halves are load-bearing. Hashing beyond the lock is pure waste (a
-	/// real host hashed 464 folders to answer 34 names, 10.4s of an 18.6s
-	/// check), but a filter that drops a name the lock DOES ask about is worse
-	/// than slow: `local_hash: None` makes the check compare against nothing and
-	/// report a locally-modified skill as up to date. The value assertion is
-	/// what separates "filtered correctly" from "filtered everything out".
-	#[test]
-	fn local_hashes_cover_exactly_the_locked_names() {
-		let project = tempfile::tempdir().unwrap();
-		for name in ["locked", "unlocked"] {
-			let dir = project.path().join(format!(".claude/skills/{name}"));
-			std::fs::create_dir_all(&dir).unwrap();
-			std::fs::write(
-				dir.join("SKILL.md"),
-				format!(
-					"---\nname: {name}\ndescription: d\n---\nbody {name}\n"
-				),
-			)
-			.unwrap();
-		}
-
-		let wanted: HashSet<String> =
-			std::iter::once("locked".to_string()).collect();
-		let hashes = local_hashes_for_scope(
-			ResourceScope::ProjectOnly,
-			Some(project.path()),
-			&wanted,
-		);
-
-		let expected = skill::compute_skill_folder_hash(
-			&project.path().join(".claude/skills/locked"),
-		)
-		.expect("the locked skill folder hashes");
-		assert_eq!(
-			hashes.get("locked"),
-			Some(&expected),
-			"a locked name must carry its real folder hash"
-		);
-		assert!(
-			!hashes.contains_key("unlocked"),
-			"a skill absent from the lock must not be hashed"
-		);
-	}
-
 	fn with_isolated_state<T>(f: impl FnOnce() -> T) -> T {
 		let _guard = crate::routes::test_env_lock()
 			.lock()
@@ -2019,6 +1757,61 @@ mod tests {
 			heal_hash: Some(hash.to_string()),
 			heal_oid: None,
 		}
+	}
+
+	/// The route's `offline` reaches the DISK SWEEP, not just the orchestrator.
+	///
+	/// Nothing downstream can catch a mis-wire here: the orchestrator's offline
+	/// gate answers `Uncheckable{network}` without ever reading `local_hash`, so
+	/// every response is byte-identical whether or not the sweep ran — only the
+	/// wasted folder hashing differs. `local_hash` on the projected entry is the
+	/// one place it is visible. Project scope on purpose: no `HOME` to isolate,
+	/// so this needs no env lock.
+	#[test]
+	fn the_route_passes_offline_to_the_disk_sweep_too() {
+		let project = tempfile::tempdir().unwrap();
+		let installed = project.path().join(".claude/skills/locked");
+		std::fs::create_dir_all(&installed).unwrap();
+		std::fs::write(
+			installed.join("SKILL.md"),
+			"---\nname: locked\ndescription: d\n---\nbody\n",
+		)
+		.unwrap();
+		let mut lock = skill::lock::local::LocalSkillLockFile::new();
+		lock.skills.insert(
+			"locked".to_string(),
+			skill::LocalSkillLockEntry {
+				source: "owner/repo".to_string(),
+				source_url: None,
+				source_type: "github".to_string(),
+				ref_name: Some("main".to_string()),
+				skill_path: Some("locked/SKILL.md".to_string()),
+				computed_hash: "stale".to_string(),
+				ref_commit: None,
+			},
+		);
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+		let scope = ResolvedScope::Project {
+			root: project.path().to_path_buf(),
+		};
+
+		let Ok(online) = lock_entries_for_scope(&scope, false) else {
+			panic!("the project lock projects without error");
+		};
+		assert_eq!(
+			online.entries[0].local_hash,
+			skill::compute_skill_folder_hash(&installed).ok(),
+			"an online check must carry the installed copy's real hash, or a \
+			 locally-modified skill reads as up to date"
+		);
+
+		let Ok(offline) = lock_entries_for_scope(&scope, true) else {
+			panic!("the project lock projects without error");
+		};
+		assert_eq!(
+			offline.entries[0].local_hash, None,
+			"an offline check must not hash a single folder"
+		);
 	}
 
 	/// Offline short-circuits every entry without touching the network. With an
@@ -2170,7 +1963,7 @@ mod tests {
 			lock.skills.insert("legacy".into(), entry);
 			skill::lock::global::write_skill_lock(&lock).unwrap();
 
-			let (_entries, identities) = global_lock_entries_with(
+			let (_entries, identities) = projection::global_lock_entries_with(
 				skill::lock::global::read_skill_lock,
 				|_wanted| {
 					// npx finishes updating to tree B right here.

@@ -137,13 +137,26 @@ Non-obvious invariants:
   it, there is no source, and `delete --yes` produces exactly that state when it
   keeps a master another agent still reads. Exit code is unchanged by default;
   `--fail-on-issues` opts into a non-zero exit
-- **`check` is offline by default** — remote sources report `uncheckable/network`
-  with `checked: false`; pass `--online` for a real update check. Its scope
-  now defaults to BOTH, like `doctor`/`source list`/`source diff` (it followed
-  the global default and answered "this project is up to date" without reading
-  the project lock)
+- **`check` is offline by default** — `checked: false`, and the reason is the
+  ORCHESTRATOR's, not the surface's: a source nothing could fetch keeps its
+  permanent reason (`local` / `ssh` / `unsupportedScheme`) and everything else
+  reports `network`, meaning "we did not look". `network` is reserved for rows an
+  `--online` run really would answer, so `--online` is only ever suggested for
+  those. Offline hashes NO skill folder on either surface. Pass `--online` for a
+  real update check. Its scope defaults to BOTH, like
+  `doctor`/`source list`/`source diff` (it followed the global default and
+  answered "this project is up to date" without reading the project lock)
 - **`source diff` ALWAYS fetches** (no offline mode); `--online` is accepted as a
-  no-op alias so the `check` habit does not become a clap error
+  no-op alias so the `check` habit does not become a clap error. It judges each
+  read scope against the origin THAT scope's lock records, so a host-blind
+  `owner/repo` spanning two forges is reported per scope instead of refused —
+  every JSON scope view carries `origin`, and the human table gets a stderr note
+  when the origins disagree. Ambiguity within ONE scope is still a refusal.
+  `GET /skills/sources/diff?scope=all` deliberately answers DIFFERENTLY: it
+  judges the union of both locks and refuses (`SOURCE_AMBIGUOUS`), because its
+  response is one flat merged list with a single `source` field and has nowhere
+  to attribute a forge per scope — a consequence of the merged-vs-per-scope
+  shapes, not a second ambiguity rule. Both sides are pinned by tests
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
 - Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 - **`skill-usage`**: Claude-global only; rejects project/`--all`

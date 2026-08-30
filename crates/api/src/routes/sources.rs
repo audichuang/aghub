@@ -222,16 +222,18 @@ pub async fn diff_source(
 	})?;
 
 	match outcome {
-		SourceDiffOutcome::Ok { git_ref, skills } => {
-			Ok(Json(SourceDiffResponse {
-				source,
-				git_ref,
-				session_id: None,
-				needs_credential: false,
-				uncheckable_reason: None,
-				skills: skills.into_iter().map(map_diff_to_dto).collect(),
-			}))
-		}
+		// `source` in the response stays the caller's own argument — the DTO is
+		// shipped and the resolved origin is a CLI-side rendering concern.
+		SourceDiffOutcome::Ok {
+			git_ref, skills, ..
+		} => Ok(Json(SourceDiffResponse {
+			source,
+			git_ref,
+			session_id: None,
+			needs_credential: false,
+			uncheckable_reason: None,
+			skills: skills.into_iter().map(map_diff_to_dto).collect(),
+		})),
 		SourceDiffOutcome::NeedsCredential { git_ref } => {
 			Ok(Json(SourceDiffResponse {
 				source,
@@ -242,7 +244,9 @@ pub async fn diff_source(
 				skills: Vec::new(),
 			}))
 		}
-		SourceDiffOutcome::FetchFailed => Err(ApiError::new(
+		// The detail stays inside the process: it can name an internal host or
+		// path, and the wire message is deliberately fixed.
+		SourceDiffOutcome::FetchFailed { detail: _ } => Err(ApiError::new(
 			Status::BadGateway,
 			"Failed to fetch source repository",
 			"SOURCE_FETCH_FAILED",
@@ -428,6 +432,66 @@ mod tests {
 			"an uncheckable source must say why, got {value}"
 		);
 		assert_eq!(value["needsCredential"], false);
+	}
+
+	/// `scope=all` judges a host-blind source against the UNION of both locks,
+	/// so a source that spans two forges across scopes is refused.
+	///
+	/// This is where this route and CLI `source diff` deliberately answer
+	/// differently: the CLI calls the deep entry point once per scope and diffs
+	/// each against its OWN recorded origin, which it can do because its rows
+	/// are grouped per scope and carry that origin. This response is one FLAT
+	/// merged list with a single `source` field — it has nowhere to say which
+	/// half came from where, so guessing one forge for both is the wrong
+	/// answer, not a stricter one. Pinned here so the divergence stays a
+	/// deliberate consequence of the merged shape rather than drift.
+	#[test]
+	fn cross_scope_forge_ambiguity_is_refused_on_the_merged_scope() {
+		let _global = GlobalLockGuard::new();
+		let _keyring =
+			crate::credentials::test_hooks::MockKeyringBackend::new();
+		let project = tempdir().unwrap();
+
+		let mut global = global_entry("acme/skills", "alpha/SKILL.md");
+		global.source_url = "https://forge-a.example/acme/skills".to_string();
+		skill::lock::add_skill_to_lock("alpha", global).unwrap();
+
+		let mut project_lock = skill::LocalSkillLockFile::new();
+		project_lock.skills.insert(
+			"alpha".to_string(),
+			skill::LocalSkillLockEntry {
+				source: "acme/skills".to_string(),
+				source_url: Some(
+					"https://forge-b.example/acme/skills".to_string(),
+				),
+				source_type: "github".to_string(),
+				ref_name: None,
+				skill_path: Some("alpha/SKILL.md".to_string()),
+				computed_hash: "h".to_string(),
+				ref_commit: None,
+			},
+		);
+		skill::write_local_lock(&project_lock, Some(project.path())).unwrap();
+
+		let client =
+			Client::tracked(rocket::build().mount("/", routes![diff_source]))
+				.expect("client");
+		let response = client
+			.get(format!(
+				"/skills/sources/diff?scope=all&source=acme%2Fskills\
+				 &project_root={}",
+				project.path().display()
+			))
+			.dispatch();
+
+		assert_eq!(response.status(), Status::BadRequest);
+		let value: Value =
+			serde_json::from_str(&response.into_string().expect("body"))
+				.expect("valid JSON");
+		assert_eq!(
+			value["code"], "SOURCE_AMBIGUOUS",
+			"the merged scope cannot attribute a forge per scope, got {value}"
+		);
 	}
 
 	#[test]

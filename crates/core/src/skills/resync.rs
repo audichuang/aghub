@@ -89,6 +89,31 @@ impl std::fmt::Display for ResyncError {
 	}
 }
 
+/// The stable machine code for a resync failure — ONE classification, read by
+/// every surface.
+///
+/// Surfaces own their WORDING (the API must stay path-free; the CLI names the
+/// skill), but not the classification: the CLI's `source sync` used to render a
+/// `StaleFetch` as free text with no code at all, while the API answered 409 +
+/// `SOURCE_CHANGED_DURING_FETCH` for the very same condition — and the API's own
+/// comment claimed that was "the same answer the CLI's sync gives".
+pub fn resync_error_code(error: &ResyncError) -> &'static str {
+	match error {
+		ResyncError::Locked(_) => crate::skills::lock::MUTATION_LOCK_BUSY_CODE,
+		ResyncError::StaleFetch(_) => {
+			crate::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE
+		}
+		ResyncError::NotInstalled => "SKILL_NOT_INSTALLED",
+		ResyncError::Renamed { .. } => {
+			crate::skills::update::SKILL_RENAMED_CODE
+		}
+		ResyncError::Parse(_) => "SKILL_PARSE_FAILED",
+		ResyncError::OutOfTree(_) => "SKILL_TARGET_OUT_OF_TREE",
+		ResyncError::Hash(_) | ResyncError::Swap(_) => "SKILL_SYNC_ERROR",
+		ResyncError::LockUpdate(_) => "SKILL_LOCK_ERROR",
+	}
+}
+
 /// Replace every installed copy of `name` with the content at `source_dir` and
 /// re-stamp the lock. See the module docs for the seam and the ordering.
 pub fn resync_installed_skill(
@@ -191,6 +216,53 @@ pub fn resync_installed_skill(
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	/// Every variant has a code, they are distinct where the surfaces treat them
+	/// differently, and the two that carry a documented wire contract are
+	/// spelled exactly as the HTTP API already publishes them.
+	#[test]
+	fn every_resync_error_has_its_published_code() {
+		let cases = [
+			(ResyncError::Locked("x".into()), "SKILL_MUTATION_LOCK_BUSY"),
+			(
+				ResyncError::StaleFetch("x".into()),
+				"SKILL_SOURCE_CHANGED_DURING_FETCH",
+			),
+			(ResyncError::NotInstalled, "SKILL_NOT_INSTALLED"),
+			(
+				ResyncError::Renamed {
+					new_name: "n".into(),
+				},
+				"SKILL_RENAMED_IN_SOURCE",
+			),
+			(ResyncError::Parse("x".into()), "SKILL_PARSE_FAILED"),
+			(
+				ResyncError::OutOfTree("x".into()),
+				"SKILL_TARGET_OUT_OF_TREE",
+			),
+			(ResyncError::Hash("x".into()), "SKILL_SYNC_ERROR"),
+			(ResyncError::Swap("x".into()), "SKILL_SYNC_ERROR"),
+			(ResyncError::LockUpdate("x".into()), "SKILL_LOCK_ERROR"),
+		];
+		for (error, expected) in cases {
+			assert_eq!(
+				resync_error_code(&error),
+				expected,
+				"{error:?} must keep the code both surfaces publish"
+			);
+		}
+	}
+
+	/// A code that leaked the error's own text would be neither stable nor
+	/// machine-readable, and a fetch race must never read as a lock-busy retry.
+	#[test]
+	fn a_stale_fetch_is_not_confused_with_a_busy_lock() {
+		assert_ne!(
+			resync_error_code(&ResyncError::StaleFetch("x".into())),
+			resync_error_code(&ResyncError::Locked("x".into())),
+			"one is retryable by waiting, the other needs a re-fetch"
+		);
+	}
 
 	fn write_skill(dir: &Path, name: &str, desc: &str) {
 		std::fs::create_dir_all(dir).unwrap();

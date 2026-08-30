@@ -13,16 +13,17 @@ routes and CLI `apply-update` / `source`. Network/credentials live here;
 
 ## WHERE TO LOOK
 
-| Task                      | Location                     | Notes                                                                                               |
-| ------------------------- | ---------------------------- | --------------------------------------------------------------------------------------------------- |
-| Entry point               | `lib.rs` `check_updates()`   | Async; `CheckDeps` + entries; grouping is inline — invariant: each `SourceRef` fetched at most once |
-| TTL result cache          | `lib.rs` `ResultCache`       | Keyed by `SourceRef`                                                                                |
-| Inject auth               | `lib.rs` `TokenResolver`     | CLI env / API own resolver                                                                          |
-| Source list/diff/classify | `sources.rs`                 | API + CLI `source`                                                                                  |
-| Source mutation flows     | `mutation.rs`                | install / resync / accept-rename — API + CLI                                                        |
-| Repo fetch + catalog      | `repository.rs`              | `SkillRepository` + `FetchSelection` (consumes `aghub-git`'s `RepoSnapshot`)                        |
-| Network adapters          | `git.rs`                     | `GitFetcher` / `GitRefResolver`                                                                     |
-| Hash compare / rename     | `aghub_core::skills::update` | Pure — never move here                                                                              |
+| Task                      | Location                     | Notes                                                                                                                                      |
+| ------------------------- | ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| Entry point               | `lib.rs` `check_updates()`   | Async; `CheckDeps` + entries; grouping is inline — invariant: each `SourceRef` fetched at most once                                        |
+| TTL result cache          | `lib.rs` `ResultCache`       | Keyed by `SourceRef`                                                                                                                       |
+| Inject auth               | `lib.rs` `TokenResolver`     | CLI env / API own resolver                                                                                                                 |
+| Source list/diff/classify | `sources.rs`                 | API + CLI `source`. Exactly THREE public entry points — `list_sources`, `diff_source`, `plan_source_sync`; everything else is `pub(crate)` |
+| Lock → check inputs       | `projection.rs`              | API route + CLI `check` share it: the `wanted` hash filter, the per-root hash memo, the offline skip, and the lock-before-disk read order  |
+| Source mutation flows     | `mutation.rs`                | install / resync / accept-rename — API + CLI                                                                                               |
+| Repo fetch + catalog      | `repository.rs`              | `SkillRepository` + `FetchSelection` (consumes `aghub-git`'s `RepoSnapshot`)                                                               |
+| Network adapters          | `git.rs`                     | `GitFetcher` / `GitRefResolver`                                                                                                            |
+| Hash compare / rename     | `aghub_core::skills::update` | Pure — never move here                                                                                                                     |
 
 ## KEY ABSTRACTIONS
 
@@ -96,4 +97,13 @@ The older `GitFetcher` network E2E also lives in `aghub-api`
 - **NEVER** hardcode credentials — inject `TokenResolver`
 - **NEVER** fetch per-entry — group by `SourceRef`
 - **NEVER** skip on `ref_commit == None`
-- **NEVER** let CLI and API fork — both call `check_updates()`
+- **NEVER** let CLI and API fork — both call `check_updates()`, and both project
+  the lock through `projection.rs`
+- **NEVER** reorder `check_updates`'s group gates. Precheck runs FIRST so a
+  permanently unfetchable source keeps its own reason offline; `offline` runs
+  before the pinned-SHA shortcut so an offline check never reads `local_hash`
+  (i.e. never hashes disk)
+- **NEVER** re-assemble a deep entry point's preamble at a call site. Resolving
+  the coordinate, refusing an ambiguous source and prechecking it is ONE private
+  `prepare()` behind `diff_source` / `plan_source_sync` — the CLI used to carry
+  a hand-copy of it beside each of its two fetches

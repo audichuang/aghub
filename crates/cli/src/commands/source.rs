@@ -8,11 +8,13 @@
 //! scope resolution, an env-backed credential resolver, a debug-only fetch
 //! hook for tests, dry-run/`--yes` gating, and output rendering.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
 use aghub_core::paths::find_project_root;
 use aghub_core::skills::lock::EntryIdentity;
+use aghub_core::skills::update::UncheckableReason;
 use anyhow::{bail, Result};
 use serde::Serialize;
 use skill_update::sources::{
@@ -23,50 +25,6 @@ use tabled::builder::Builder;
 use tabled::settings::Style;
 
 use crate::SourceAction;
-
-/// `source diff` / `source sync` fetch the repository ONCE and reuse that tree
-/// for every matched entry. A Sources row is one repository but its entries need
-/// not share a branch, so that is only sound when they do: judged against
-/// `main`, a `v1`-pinned skill reads as outdated forever (its own update fetches
-/// `v1`, so the hash never converges) or as removed when its folder is absent
-/// there — and `--update` would overwrite it with `main`'s content.
-///
-/// An explicit `--ref` IS the caller picking one tree, so it passes.
-///
-/// Takes ALL the scopes the command will classify, not one at a time: the fetch
-/// is shared across them, so a global entry on `main` and a project entry on
-/// `v1` is exactly the hazard even though each scope alone looks uniform.
-///
-/// The API `/sources/diff` does not need this: it owns its fetches and splits
-/// into one cohort per ref (`skill_update::sources::baseline_by_ref`). Teaching
-/// this command to do the same means holding one fetched tree per ref through
-/// the install/update flow — see `.scratch/source-grouping/spec.md`.
-fn assert_one_tree_can_serve(
-	source: &str,
-	scopes: &[SourceScope],
-	git_ref: Option<&str>,
-) -> Result<()> {
-	if git_ref.is_some() {
-		return Ok(());
-	}
-	let refs = scopes
-		.iter()
-		.flat_map(|scope| sources::scope_ref_cohorts(scope, source))
-		.collect::<std::collections::BTreeSet<_>>();
-	if refs.len() < 2 {
-		return Ok(());
-	}
-	bail!(
-		"source '{}' has skills pinned to {} different refs:\n  {}\nRun \
-		 it again with --ref to work on one of them.",
-		safe_source(source),
-		refs.len(),
-		refs.iter()
-			.map(|name| name.as_deref().unwrap_or("(default branch)"))
-			.collect::<Vec<_>>()
-			.join("\n  ")
-	)
-}
 
 /// A source string safe to put in a message. `<SOURCE>` comes straight from
 /// argv (or from a lock), and a user who typed `https://user:token@host/repo`
@@ -163,6 +121,101 @@ impl skill_update::Fetcher for CliFetcher {
 			};
 		}
 		skill_update::GitFetcher::new().fetch(sr, token, selection)
+	}
+}
+
+/// What makes two fetches the same fetch: the repository's IDENTITY and the ref
+/// — never the coordinate string.
+///
+/// The two calls being deduplicated resolve their coordinate independently, per
+/// scope, and a scope with no matching lock entry falls back to the string the
+/// user typed while a scope that HAS one resolves the entry's recorded clone
+/// URL. `owner/repo` and `https://github.com/owner/repo(.git)` are then two
+/// spellings of one repository, and a key of raw strings would fetch it twice —
+/// the exact shape of "installed globally, run from a project", which is the
+/// common case, not a corner.
+///
+/// `host` stays IN the key. Two forges serving the same `owner/repo` are two
+/// repositories, and each scope diffing its own is the point.
+#[derive(PartialEq, Eq, Hash)]
+struct FetchKey {
+	host: Option<String>,
+	repo: String,
+	ref_: Option<String>,
+}
+
+fn fetch_key(sr: &SourceRef) -> FetchKey {
+	match aghub_git::resolve_remote_source(&sr.source) {
+		Ok(resolved) => FetchKey {
+			host: resolved.host,
+			repo: resolved.source,
+			ref_: sr.ref_.clone(),
+		},
+		// Nothing parseable as a remote (a local directory, an unsupported
+		// spelling): key on the raw string, which is exactly the un-normalized
+		// behavior — it can only fail to dedup, never merge two repositories.
+		Err(_) => FetchKey {
+			host: None,
+			repo: sr.source.clone(),
+			ref_: sr.ref_.clone(),
+		},
+	}
+}
+
+/// Fetch at most once per `(repository, ref)` for the whole command.
+///
+/// The deep entry points own their fetches, and `source diff` calls
+/// [`sources::diff_source`] once per read scope — so without this a two-scope
+/// diff of one source pays two identical round trips. `FetchedRepo`'s temp-dir
+/// guard is an `Arc`, so a memo hit hands back the same root with a clone of the
+/// same keep-alive: the tree cannot be dropped while a later caller is reading
+/// it.
+struct MemoFetcher<'a> {
+	inner: &'a dyn skill_update::Fetcher,
+	seen: std::sync::Mutex<HashMap<FetchKey, skill_update::FetchedRepo>>,
+	/// Round trips the inner fetcher actually performed. Counted, not timed —
+	/// a warm HTTP cache and a memo hit look identical on a clock.
+	fetches: std::sync::atomic::AtomicUsize,
+}
+
+impl<'a> MemoFetcher<'a> {
+	fn new(inner: &'a dyn skill_update::Fetcher) -> Self {
+		Self {
+			inner,
+			seen: std::sync::Mutex::new(HashMap::new()),
+			fetches: std::sync::atomic::AtomicUsize::new(0),
+		}
+	}
+}
+
+fn clone_repo(repo: &skill_update::FetchedRepo) -> skill_update::FetchedRepo {
+	skill_update::FetchedRepo {
+		root: repo.root.clone(),
+		snapshot: repo.snapshot.clone(),
+		_guard: repo._guard.clone(),
+	}
+}
+
+impl skill_update::Fetcher for MemoFetcher<'_> {
+	fn fetch(
+		&self,
+		sr: &SourceRef,
+		token: Option<&str>,
+		selection: FetchSelection<'_>,
+	) -> Result<skill_update::FetchedRepo, FetchError> {
+		let key = fetch_key(sr);
+		let mut seen = self.seen.lock().unwrap_or_else(|e| e.into_inner());
+		if let Some(hit) = seen.get(&key) {
+			return Ok(clone_repo(hit));
+		}
+		// Failures are NOT memoized: a refusal is the caller's to see per call,
+		// and nothing here retries.
+		let repo = self.inner.fetch(sr, token, selection)?;
+		self.fetches
+			.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+		let out = clone_repo(&repo);
+		seen.insert(key, repo);
+		Ok(out)
 	}
 }
 
@@ -387,6 +440,14 @@ struct DiffSkillView {
 #[derive(Serialize)]
 struct DiffScopeView {
 	scope: &'static str,
+	/// The repository THIS scope was judged against.
+	///
+	/// A host-blind `owner/repo` resolves per scope, from that scope's own lock,
+	/// so two scopes can legitimately diff two different forges. This used to be
+	/// refused outright as an ambiguous source; judging each scope against its
+	/// own recorded origin is the better answer, but only if the rows say which
+	/// origin that was.
+	origin: String,
 	skills: Vec<DiffSkillView>,
 }
 
@@ -413,91 +474,68 @@ fn diff(
 	// kept is the fail-closed check: a corrupt lock must not read as "no
 	// sources installed".
 	read_scope_locks_checked(&scopes)?;
-	let source = source.trim().to_string();
-
-	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
-	// helper — the SAME resolution the API `diff_source` runs — so the CLI checks
-	// the recorded ref (not the default branch) and prechecks with the recorded
-	// source_type (not a hard-coded "github"). No fetch happens here.
-	let meta = sources::resolve_source_meta(&source, &scopes, git_ref);
-
-	assert_one_tree_can_serve(&source, &scopes, git_ref)?;
-
-	// Skip sources we cannot fetch (local/ssh/unsupported scheme) up front,
-	// before paying for a fetch — honoring the precheck the API path honors.
-	// One fetched tree cannot judge two forges. `source list` prints the lock's
-	// host-blind SOURCE, and pasting that back selects every forge serving the
-	// same path — so refuse rather than fetch one of them and apply it to all.
-	if let Some(origins) = meta.ambiguous_origins() {
-		bail!(
-			"source '{}' matches {} repositories:\n  {}\nRun it again \
-			 with the SOURCE_URL of the one you mean.",
-			safe_source(&source),
-			origins.len(),
-			origins.join("\n  ")
-		);
-	}
-
-	if let Some(reason) = aghub_core::skills::update::precheck_source(
-		&meta.source_type,
-		meta.effective_source.as_deref().unwrap_or(&source),
-	) {
-		bail!(
-			"source '{}' cannot be fetched ({reason:?}); only HTTPS / \
-			 owner/repo git sources are supported",
-			safe_source(&source)
-		);
-	}
-
-	let repo = match sources::fetch_source_with_resolver(
-		&SourceRef {
-			source: meta
-				.effective_source
-				.clone()
-				.unwrap_or_else(|| source.clone()),
-			ref_: meta.effective_ref.clone(),
-		},
+	diff_with(
+		source,
+		git_ref,
+		&scopes,
+		json,
 		&CliFetcher,
 		&EnvTokenResolver,
-		FetchSelection::CatalogSnapshot,
-	) {
-		Ok(repo) => repo,
-		Err(FetchError::BackendUnavailable) => {
-			bail!("Credential backend is unavailable; retry later.")
-		}
-		Err(FetchError::Auth) => bail!(
-			"Could not read this source. Either it needs a credential (set \
-			 GIT_PASSWORD for any host, or GITHUB_TOKEN for github.com, in \
-			 the environment and retry) or the repo/ref does not exist or is \
-			 not visible to the credential already in use."
-		),
-		Err(FetchError::Network(detail)) => {
-			bail!(
-				"Failed to fetch source repository '{}': {}",
-				safe_source(&source),
-				safe_source(&detail)
-			)
-		}
-	};
+	)
+}
 
-	let per_scope: Vec<(&SourceScope, Vec<SourceSkillDiff>)> = scopes
-		.iter()
-		.map(|scope| {
-			let diffs = sources::classify_scope(
-				repo.root.as_path(),
-				scope,
-				&source,
-				repo.upstream_commit_time(),
-			);
-			(scope, diffs)
-		})
-		.collect();
+/// `diff` with its network seams injected.
+///
+/// The memo is built HERE rather than in `diff`, so a test that counts round
+/// trips drives the same wiring production does. Constructing a `MemoFetcher`
+/// beside the call under test instead only proves the type compiles: dropping
+/// the wrap from `diff` was invisible to the suite, and the cost of dropping it
+/// is one full round trip per scope (a token-holding user's `source diff` spends
+/// GitHub REST quota, 60/hr).
+fn diff_with(
+	source: &str,
+	git_ref: Option<&str>,
+	scopes: &[SourceScope],
+	json: bool,
+	inner: &dyn skill_update::Fetcher,
+	resolver: &dyn skill_update::TokenResolver,
+) -> Result<()> {
+	let source = source.trim().to_string();
+
+	// ONE call into the deep entry point per read scope. It owns the whole
+	// pre-fetch settlement (coordinate resolution, the ambiguous-source refusal,
+	// the precheck) AND the per-ref cohort split, so a source whose entries are
+	// pinned to different refs is reported row by row instead of refused —
+	// the answer `/sources/diff` has always given.
+	//
+	// The fetcher is shared and memoizing, so N scopes over one ref still cost
+	// one round trip.
+	let fetcher = MemoFetcher::new(inner);
+
+	let mut per_scope: Vec<(&SourceScope, String, Vec<SourceSkillDiff>)> =
+		Vec::new();
+	for scope in scopes {
+		let outcome = sources::diff_source(
+			sources::SourceDiffInput {
+				source: source.clone(),
+				git_ref: git_ref.map(str::to_string),
+				scopes: vec![scope.clone()],
+			},
+			sources::SourceDiffDeps {
+				fetcher: &fetcher,
+				resolver,
+			},
+		);
+		let (origin, diffs) = diff_outcome_skills(&source, outcome)?;
+		per_scope.push((scope, origin, diffs));
+	}
 
 	if json {
 		let views: Vec<DiffScopeView> = per_scope
 			.iter()
-			.map(|(scope, diffs)| DiffScopeView {
+			.map(|(scope, origin, diffs)| DiffScopeView {
 				scope: scope_label(scope),
+				origin: origin.clone(),
 				skills: diffs.iter().map(diff_skill_to_view).collect(),
 			})
 			.collect();
@@ -507,7 +545,7 @@ fn diff(
 
 	let mut builder = Builder::default();
 	builder.push_record(["STATE", "NAME", "SKILL_PATH", "SCOPE"]);
-	for (scope, diffs) in &per_scope {
+	for (scope, _origin, diffs) in &per_scope {
 		for d in diffs {
 			builder.push_record([
 				d.state.as_wire().to_string(),
@@ -520,7 +558,115 @@ fn diff(
 	let mut table = builder.build();
 	table.with(Style::sharp());
 	println!("{table}");
+	// The table's four columns are unchanged, so say this only when it is true:
+	// the scopes resolved DIFFERENT repositories from the same argument. That
+	// used to be an outright refusal ("matches 2 repositories"); each scope now
+	// diffs its own recorded origin, which is a better answer only if the reader
+	// is told the rows came from two places.
+	let distinct: std::collections::BTreeSet<&str> = per_scope
+		.iter()
+		.map(|(_, origin, _)| origin.as_str())
+		.collect();
+	if distinct.len() > 1 {
+		eprintln!(
+			"note: '{}' resolves to a different repository per scope; each \
+			 scope was diffed against its own:",
+			safe_source(&source)
+		);
+		for (scope, origin, _) in &per_scope {
+			eprintln!("  {}: {origin}", scope_label(scope));
+		}
+	}
 	Ok(())
+}
+
+/// Project one scope's [`sources::SourceDiffOutcome`] into `(origin, rows)`, or
+/// fail. The origin is the repository the rows were judged against — see
+/// [`DiffScopeView::origin`].
+fn diff_outcome_skills(
+	source: &str,
+	outcome: sources::SourceDiffOutcome,
+) -> Result<(String, Vec<SourceSkillDiff>)> {
+	match outcome {
+		sources::SourceDiffOutcome::Ok {
+			source: origin,
+			skills,
+			..
+		} => Ok((origin, skills)),
+		other => Err(refusal_error(source, other)),
+	}
+}
+
+/// The wording for every pre-write refusal both deep entry points can return.
+///
+/// It lives HERE, not in the domain: these are the strings the CLI has always
+/// printed, and they name flags (`--ref`, `GIT_PASSWORD`) that exist only on
+/// this surface. ONE copy, so `diff` and `sync` cannot word the same refusal
+/// two ways — which is exactly what they did while each owned its own
+/// three-branch `FetchError` match.
+fn refusal_error(
+	source: &str,
+	outcome: sources::SourceDiffOutcome,
+) -> anyhow::Error {
+	use sources::SourceDiffOutcome as O;
+	match outcome {
+		O::Ok { .. } => unreachable!("callers take the Ok arm themselves"),
+		O::AmbiguousSource { origins } => anyhow::anyhow!(
+			"source '{}' matches {} repositories:\n  {}\nRun it again \
+			 with the SOURCE_URL of the one you mean.",
+			safe_source(source),
+			origins.len(),
+			origins.join("\n  ")
+		),
+		// `precheck_source` never yields `Network`, so this reason can only come
+		// from the credential backend being unreachable — a distinct, actionable
+		// failure that must not read as "this source is not fetchable".
+		O::UncheckableSource {
+			reason: UncheckableReason::Network,
+			..
+		} => anyhow::anyhow!("Credential backend is unavailable; retry later."),
+		O::UncheckableSource { reason, .. } => anyhow::anyhow!(
+			"source '{}' cannot be fetched ({reason:?}); only HTTPS / \
+			 owner/repo git sources are supported",
+			safe_source(source)
+		),
+		O::NeedsCredential { .. } => anyhow::anyhow!(
+			"Could not read this source. Either it needs a credential (set \
+			 GIT_PASSWORD for any host, or GITHUB_TOKEN for github.com, in \
+			 the environment and retry) or the repo/ref does not exist or is \
+			 not visible to the credential already in use."
+		),
+		O::FetchFailed { detail } => anyhow::anyhow!(
+			"Failed to fetch source repository '{}': {}",
+			safe_source(source),
+			safe_source(&detail)
+		),
+	}
+}
+
+/// A sync refusal, as the diff refusal that words it.
+///
+/// Two enums because the SUCCESS payloads differ (a diff returns rows; a sync
+/// returns the tree it fetched plus the identities it captured). The refusals
+/// are the same set of pre-write facts, so they share one renderer instead of a
+/// second copy of the same four sentences.
+fn sync_refusal_as_diff(
+	outcome: sources::SourceSyncOutcome,
+) -> sources::SourceDiffOutcome {
+	use sources::{SourceDiffOutcome as D, SourceSyncOutcome as S};
+	match outcome {
+		S::NeedsCredential { git_ref } => D::NeedsCredential { git_ref },
+		S::FetchFailed { detail } => D::FetchFailed { detail },
+		S::UncheckableSource { git_ref, reason } => {
+			D::UncheckableSource { git_ref, reason }
+		}
+		S::AmbiguousSource { origins } => D::AmbiguousSource { origins },
+		// Both carry a sync-only payload and are answered by the caller before
+		// this is reached.
+		S::Ok(_) | S::MultipleRefs { .. } => {
+			unreachable!("answered at the call site")
+		}
+	}
 }
 
 // ─────────────────────────────── source sync ───────────────────────────────
@@ -560,6 +706,12 @@ struct SyncActionView {
 	applied: bool,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	error: Option<String>,
+	/// Stable machine code for `error`, from the ONE classification in
+	/// `aghub_core::skills::resync` — the same vocabulary the HTTP API sends.
+	/// Additive: absent on success and on rows whose failure has no shared code
+	/// yet, so a reader that never looked at it is unaffected.
+	#[serde(rename = "errorCode", skip_serializing_if = "Option::is_none")]
+	error_code: Option<&'static str>,
 	/// Per-agent breakdown (install actions only; empty for update). Lets a
 	/// multi-agent (`-a all`) sync show exactly which agents were linked vs
 	/// already-present vs failed, instead of a single collapsed status.
@@ -568,6 +720,24 @@ struct SyncActionView {
 }
 
 impl SyncActionView {
+	/// The failed-update row: message AND machine code both come from
+	/// [`resync_row_error`], so a row can never carry one without the other.
+	fn update_failed(
+		d: &SourceSkillDiff,
+		error: skill_update::mutation::ResyncMutationError,
+	) -> Self {
+		let (message, code) = resync_row_error(&d.name, error);
+		Self {
+			action: "update",
+			name: d.name.clone(),
+			skill_path: d.skill_path.clone(),
+			applied: false,
+			error: Some(message),
+			error_code: Some(code),
+			agents: Vec::new(),
+		}
+	}
+
 	/// A hard failure = at least one target agent reported an error (link
 	/// failure or occupied slot), OR the action itself failed before reaching
 	/// any agent. "Already present" (installed:false, error:None) is NOT a
@@ -677,100 +847,43 @@ fn sync(args: SyncArgs) -> Result<()> {
 		);
 	}
 
-	// Snapshot every in-scope lock entry's identity FIRST, before the resolution
-	// below reads those same entries to decide what to fetch. Captured (never
-	// reconstructed) because a project entry's `sourceUrl` is optional — an
-	// npx-written one has none, and its effective source is the `owner/repo`
-	// shorthand, so comparing a rebuilt HTTPS URL would falsely reject it.
-	//
-	// Ordered before the resolution on purpose: if another process repoints an
-	// entry between the two reads, the identity is the OLDER observation, so the
-	// compare-after-fetch refuses rather than approving a fetch that used the
-	// newer coordinates. The reverse order approves exactly that mismatch.
-	let pre_fetch_identities =
-		capture_scope_identities(scope, project_root.as_deref());
-
-	// Resolve `(source_type, effective_ref)` from the lock entries via the SHARED
-	// helper (the SAME resolution the API runs) BEFORE the single fetch, so sync
-	// fetches/installs from the recorded ref — not the default branch — and
-	// prechecks with the recorded source_type rather than a hard-coded "github".
-	let meta = sources::resolve_source_meta(
-		&source,
-		std::slice::from_ref(&source_scope),
-		args.git_ref,
-	);
-
-	assert_one_tree_can_serve(
-		&source,
-		std::slice::from_ref(&source_scope),
-		args.git_ref,
-	)?;
-
-	// One fetched tree cannot judge two forges. `source list` prints the lock's
-	// host-blind SOURCE, and pasting that back selects every forge serving the
-	// same path — so refuse rather than fetch one of them and apply it to all.
-	if let Some(origins) = meta.ambiguous_origins() {
-		bail!(
-			"source '{}' matches {} repositories:\n  {}\nRun it again \
-			 with the SOURCE_URL of the one you mean.",
-			safe_source(&source),
-			origins.len(),
-			origins.join("\n  ")
-		);
-	}
-
-	if let Some(reason) = aghub_core::skills::update::precheck_source(
-		&meta.source_type,
-		meta.effective_source.as_deref().unwrap_or(&source),
-	) {
-		bail!(
-			"source '{}' cannot be fetched ({reason:?}); only HTTPS / \
-			 owner/repo git sources are supported",
-			safe_source(&source)
-		);
-	}
-
-	// Fetch ONCE; reuse the repo for classification AND every install/update.
-	// Fetch + classify happen BEFORE the flag branch so the neither-flag
-	// informational path can print the same plan without a second fetch.
-	// CatalogSnapshot: classify needs the whole tree (renames/removals).
-	let repo = match sources::fetch_source_with_resolver(
-		&SourceRef {
-			source: meta
-				.effective_source
-				.clone()
-				.unwrap_or_else(|| source.clone()),
-			ref_: meta.effective_ref.clone(),
+	// ONE call into the deep entry point. It owns the identity snapshot, the
+	// coordinate resolution, the single-tree assertion, the ambiguous-source and
+	// precheck refusals, the single fetch, and the classification — the sequence
+	// this file used to re-assemble here and again in `diff`, with the branches
+	// copied word for word.
+	let inner = CliFetcher;
+	let sync_plan = match sources::plan_source_sync(
+		sources::SourceSyncInput {
+			source: source.clone(),
+			git_ref: args.git_ref.map(str::to_string),
+			scope: source_scope.clone(),
 		},
-		&CliFetcher,
-		&EnvTokenResolver,
-		FetchSelection::CatalogSnapshot,
+		sources::SourceDiffDeps {
+			fetcher: &inner,
+			resolver: &EnvTokenResolver,
+		},
 	) {
-		Ok(repo) => repo,
-		Err(FetchError::BackendUnavailable) => {
-			bail!("Credential backend is unavailable; retry later.")
-		}
-		Err(FetchError::Auth) => bail!(
-			"Could not read this source. Either it needs a credential (set \
-			 GIT_PASSWORD for any host, or GITHUB_TOKEN for github.com, in \
-			 the environment and retry) or the repo/ref does not exist or is \
-			 not visible to the credential already in use."
+		sources::SourceSyncOutcome::Ok(plan) => *plan,
+		sources::SourceSyncOutcome::MultipleRefs { refs } => bail!(
+			"source '{}' has skills pinned to {} different refs:\n  {}\nRun \
+			 it again with --ref to work on one of them.",
+			safe_source(&source),
+			refs.len(),
+			refs.iter()
+				.map(|name| name.as_deref().unwrap_or("(default branch)"))
+				.collect::<Vec<_>>()
+				.join("\n  ")
 		),
-		Err(FetchError::Network(detail)) => {
-			bail!(
-				"Failed to fetch source repository '{}': {}",
-				safe_source(&source),
-				safe_source(&detail)
-			)
+		// Every remaining refusal is shaped exactly like `diff`'s, so it renders
+		// through the same words.
+		other => {
+			return Err(refusal_error(&source, sync_refusal_as_diff(other)))
 		}
 	};
-
-	let diffs = sources::classify_scope(
-		repo.root.as_path(),
-		&source_scope,
-		&source,
-		repo.upstream_commit_time(),
-	);
+	let pre_fetch_identities = sync_plan.pre_fetch_identities;
+	let repo = sync_plan.repo;
+	let diffs = sync_plan.diffs;
 
 	// `--skill a,b` narrows every downstream path (overview, --install-missing,
 	// --update) to the named skills. Unknown names are reported (not silently
@@ -900,10 +1013,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// github-shorthand parsing and a 2-segment non-github source would
 	// normalize to the wrong github lock source. Normalization lives in
 	// `aghub_git`; we never re-implement it.
-	let fetch_source = meta
-		.effective_source
-		.clone()
-		.unwrap_or_else(|| source.clone());
+	let fetch_source = sync_plan.fetch_source.clone();
 	let resolved =
 		aghub_git::resolve_remote_source(&fetch_source).map_err(|e| {
 			anyhow::anyhow!(
@@ -927,7 +1037,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 		source: resolved.lock_source(),
 		source_type: resolved.source_type.as_str().to_string(),
 		source_url: resolved.source_url.clone(),
-		ref_name: meta.effective_ref.clone(),
+		ref_name: sync_plan.git_ref.clone(),
 	};
 	let fetched = skill_update::mutation::FetchedSource::from_repo(repo);
 
@@ -1154,6 +1264,7 @@ fn print_dry_run(
 				skill_path: d.skill_path.clone(),
 				applied: false,
 				error: None,
+				error_code: None,
 				agents: Vec::new(),
 			})
 			.collect();
@@ -1239,6 +1350,7 @@ fn apply_install(
 				skill_path: d.skill_path.clone(),
 				applied,
 				error,
+				error_code: None,
 				agents,
 			}
 		}
@@ -1253,36 +1365,10 @@ fn apply_install(
 				}
 				InstallMutationError::Install(error) => error.to_string(),
 			}),
+			error_code: None,
 			agents: Vec::new(),
 		},
 	}
-}
-
-/// Every in-scope lock entry's identity, keyed by skill name. Taken before a
-/// fetch; see the call site.
-fn capture_scope_identities(
-	scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> std::collections::BTreeMap<String, EntryIdentity> {
-	let names: Vec<String> = match scope {
-		ResourceScope::ProjectOnly => project_root
-			.map(|root| {
-				skill::lock::local::read_local_lock(Some(root))
-					.skills
-					.keys()
-					.cloned()
-					.collect()
-			})
-			.unwrap_or_default(),
-		_ => skill::get_all_locked_skills().keys().cloned().collect(),
-	};
-	names
-		.into_iter()
-		.filter_map(|name| {
-			EntryIdentity::capture(&name, scope, project_root)
-				.map(|id| (name, id))
-		})
-		.collect()
 }
 
 fn apply_update_row(
@@ -1308,6 +1394,12 @@ fn apply_update_row(
 				 nothing was written"
 					.to_string(),
 			),
+			// The API answers this exact condition with 409 +
+			// SOURCE_CHANGED_DURING_FETCH. It is the same refusal for the same
+			// reason, so it carries the same code.
+			error_code: Some(
+				aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE,
+			),
 			agents: Vec::new(),
 		};
 	};
@@ -1328,38 +1420,50 @@ fn apply_update_row(
 			skill_path: d.skill_path.clone(),
 			applied: !report.swapped.is_empty(),
 			error: None,
+			error_code: None,
 			agents: Vec::new(),
 		},
-		Err(error) => SyncActionView {
-			action: "update",
-			name: d.name.clone(),
-			skill_path: d.skill_path.clone(),
-			applied: false,
-			error: Some(resync_row_error(&d.name, error)),
-			agents: Vec::new(),
-		},
+		Err(error) => SyncActionView::update_failed(d, error),
 	}
 }
 
-/// Map a sync update-row resync failure to its user-facing row message.
+/// Map a sync update-row resync failure to its row MESSAGE plus the shared
+/// machine CODE.
+///
+/// Only the wording is this surface's: a CLI row can name the skill and quote
+/// the underlying detail, where the HTTP API owes a path-free sentence. The
+/// classification is `aghub_core::skills::resync::resync_error_code`, so a
+/// `StaleFetch` — the source moving mid-fetch — now reaches a script here as
+/// `SKILL_SOURCE_CHANGED_DURING_FETCH` instead of untyped prose.
 fn resync_row_error(
 	name: &str,
 	error: skill_update::mutation::ResyncMutationError,
-) -> String {
-	use aghub_core::skills::resync::ResyncError;
+) -> (String, &'static str) {
+	use aghub_core::skills::resync::{resync_error_code, ResyncError};
 	use skill_update::mutation::ResyncMutationError;
 
 	match error {
-		ResyncMutationError::InvalidSkillPath => {
-			"locked skillPath was not found in source".to_string()
+		// Not a `ResyncError` at all: the fetched tree simply has no such path.
+		// Same code the API's git-sync route answers with.
+		ResyncMutationError::InvalidSkillPath => (
+			"locked skillPath was not found in source".to_string(),
+			"SKILL_PATH_NOT_FOUND",
+		),
+		ResyncMutationError::Resync(error) => {
+			let code = resync_error_code(&error);
+			let message = match error {
+				ResyncError::NotInstalled => format!(
+					"skill '{name}' is locked but no installed copy was found"
+				),
+				ResyncError::Renamed { new_name } => {
+					aghub_core::skills::update::skill_renamed_message(
+						name, &new_name,
+					)
+				}
+				other => other.to_string(),
+			};
+			(message, code)
 		}
-		ResyncMutationError::Resync(ResyncError::NotInstalled) => {
-			format!("skill '{name}' is locked but no installed copy was found")
-		}
-		ResyncMutationError::Resync(ResyncError::Renamed { new_name }) => {
-			aghub_core::skills::update::skill_renamed_message(name, &new_name)
-		}
-		ResyncMutationError::Resync(other) => other.to_string(),
 	}
 }
 
@@ -1562,8 +1666,8 @@ fn narrow_by_name<T>(
 #[cfg(test)]
 mod tests {
 	use super::{
-		assert_one_tree_can_serve, narrow_by_name, plan_target_agents,
-		resync_row_error, select_env_token,
+		diff_with, narrow_by_name, plan_target_agents, resync_row_error,
+		select_env_token, FetchError, PathBuf, SyncActionView,
 	};
 	use aghub_core::models::AgentType;
 	use skill_update::sources::{
@@ -1574,115 +1678,97 @@ mod tests {
 		Some(v.to_string())
 	}
 
-	fn lock_entry(ref_name: &str) -> skill::LocalSkillLockEntry {
-		skill::LocalSkillLockEntry {
-			source: "owner/repo".to_string(),
-			ref_name: Some(ref_name.to_string()),
-			source_type: "github".to_string(),
-			skill_path: None,
-			computed_hash: "h".to_string(),
-			ref_commit: None,
-			source_url: None,
-		}
-	}
-
-	/// `source diff`/`sync` fetch ONE tree and reuse it for every entry, so they
-	/// must refuse a scope whose entries are pinned to different refs — judged
-	/// against the wrong ref a skill reads as outdated forever, or as removed,
-	/// and `--update` overwrites it with the other ref's content. An explicit
-	/// `--ref` is the caller picking one tree, so it passes.
+	/// `source diff` calls the deep entry point ONCE PER SCOPE, and each call
+	/// owns its own fetch — so without the memo a two-scope diff of one source
+	/// pays two identical round trips.
+	///
+	/// Counted, not timed: both git backends cache, so a clock cannot tell a
+	/// second round trip from a warm one. This drives `diff_with` — the
+	/// PRODUCTION function, memo and all — so removing the wrap goes red;
+	/// building a `MemoFetcher` beside a bare `diff_source` call would only
+	/// prove the type compiles.
+	///
+	/// The two scopes resolve the coordinate DIFFERENTLY on purpose: one has a
+	/// lock entry recording the full clone URL, the other has no lock at all and
+	/// falls back to the `owner/repo` the caller typed. That is "installed
+	/// globally, run from a project", and keying the memo on the raw strings
+	/// fetched the one repository twice.
 	#[test]
-	fn a_scope_spanning_two_refs_is_refused_without_an_explicit_ref() {
-		let project = tempfile::tempdir().unwrap();
-		let mut lock = skill::LocalSkillLockFile::new();
-		for (name, ref_name) in [("alpha", "main"), ("zeta", "v1")] {
-			let mut entry = lock_entry(ref_name);
-			entry.skill_path = Some(format!("{name}/SKILL.md"));
-			lock.skills.insert(name.to_string(), entry);
+	fn two_scopes_over_one_ref_cost_one_fetch() {
+		use skill_update::{FetchSelection, Fetcher, SourceRef};
+
+		struct CountingFetcher {
+			root: PathBuf,
+			calls: std::sync::atomic::AtomicUsize,
 		}
-		skill::write_local_lock(&lock, Some(project.path())).unwrap();
-		let scope = SourceScope::Project {
-			root: project.path().to_path_buf(),
+		impl Fetcher for CountingFetcher {
+			fn fetch(
+				&self,
+				_sr: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<skill_update::FetchedRepo, FetchError> {
+				self.calls
+					.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+				Ok(skill_update::FetchedRepo {
+					root: self.root.clone(),
+					snapshot: aghub_git::RepoSnapshot::default(),
+					_guard: None,
+				})
+			}
+		}
+		struct NoToken;
+		impl skill_update::TokenResolver for NoToken {
+			fn resolve(&self, _source: &str) -> skill_update::TokenResolution {
+				skill_update::TokenResolution::NoToken
+			}
+		}
+
+		let upstream = tempfile::tempdir().unwrap();
+		let skill_dir = upstream.path().join("alpha");
+		std::fs::create_dir_all(&skill_dir).unwrap();
+		std::fs::write(
+			skill_dir.join("SKILL.md"),
+			"---\nname: alpha\ndescription: d\n---\nbody\n",
+		)
+		.unwrap();
+
+		let inner = CountingFetcher {
+			root: upstream.path().to_path_buf(),
+			calls: std::sync::atomic::AtomicUsize::new(0),
 		};
 
-		let refused = assert_one_tree_can_serve(
-			"owner/repo",
-			std::slice::from_ref(&scope),
-			None,
+		// Scope A knows the source: its lock records the full clone URL, so the
+		// deep entry point fetches THAT. No recorded ref — a different ref is a
+		// different tree, and would be two fetches by design.
+		let locked = tempfile::tempdir().unwrap();
+		std::fs::write(
+			locked.path().join("skills-lock.json"),
+			r#"{"version":1,"skills":{"alpha":{"source":"owner/repo",
+			  "sourceType":"github","sourceUrl":"https://github.com/owner/repo.git",
+			  "skillPath":"alpha/SKILL.md","computedHash":"stale"}}}"#,
 		)
-		.expect_err("two refs cannot share one fetched tree");
-		let message = refused.to_string();
-		assert!(message.contains("main"), "{message}");
-		assert!(message.contains("v1"), "{message}");
+		.unwrap();
+		// Scope B has no lock, so it falls back to the raw `owner/repo` argument.
+		let bare = tempfile::tempdir().unwrap();
+		let scopes = [
+			SourceScope::Project {
+				root: locked.path().to_path_buf(),
+			},
+			SourceScope::Project {
+				root: bare.path().to_path_buf(),
+			},
+		];
 
-		assert!(
-			assert_one_tree_can_serve("owner/repo", &[scope], Some("main"))
-				.is_ok(),
-			"an explicit --ref picks one tree"
+		diff_with("owner/repo", None, &scopes, true, &inner, &NoToken).unwrap();
+
+		assert_eq!(
+			inner.calls.load(std::sync::atomic::Ordering::Relaxed),
+			1,
+			"one repository at one ref, one round trip — the second scope must \
+			 be served from the memo even though it resolved a different \
+			 SPELLING of the same repo"
 		);
-	}
-
-	/// The refs must be unioned ACROSS the scopes the command will classify, not
-	/// checked one scope at a time: `diff` fetches once and classifies every
-	/// scope against that tree, so one scope on `main` and another on `v1` is the
-	/// hazard even though each looks uniform on its own.
-	#[test]
-	fn refs_are_unioned_across_scopes_not_checked_per_scope() {
-		let uniform_scope = |ref_name: &str| {
-			let dir = tempfile::tempdir().unwrap();
-			let mut lock = skill::LocalSkillLockFile::new();
-			let mut entry = lock_entry(ref_name);
-			entry.skill_path = Some("alpha/SKILL.md".to_string());
-			lock.skills.insert("alpha".to_string(), entry);
-			skill::write_local_lock(&lock, Some(dir.path())).unwrap();
-			let scope = SourceScope::Project {
-				root: dir.path().to_path_buf(),
-			};
-			(dir, scope)
-		};
-		let (_a, on_main) = uniform_scope("main");
-		let (_b, on_v1) = uniform_scope("v1");
-
-		// Each scope alone is uniform, so a per-scope check passes both.
-		for scope in [&on_main, &on_v1] {
-			assert!(assert_one_tree_can_serve(
-				"owner/repo",
-				std::slice::from_ref(scope),
-				None,
-			)
-			.is_ok());
-		}
-		let refused =
-			assert_one_tree_can_serve("owner/repo", &[on_main, on_v1], None)
-				.expect_err(
-					"one fetched tree serves both scopes, so both count",
-				);
-		let message = refused.to_string();
-		assert!(message.contains("main"), "{message}");
-		assert!(message.contains("v1"), "{message}");
-	}
-
-	/// The guard must not fire on the ordinary single-ref source — it would make
-	/// every `source diff` bail.
-	#[test]
-	fn one_ref_passes() {
-		let project = tempfile::tempdir().unwrap();
-		let mut lock = skill::LocalSkillLockFile::new();
-		for name in ["alpha", "zeta"] {
-			let mut entry = lock_entry("main");
-			entry.skill_path = Some(format!("{name}/SKILL.md"));
-			lock.skills.insert(name.to_string(), entry);
-		}
-		skill::write_local_lock(&lock, Some(project.path())).unwrap();
-
-		assert!(assert_one_tree_can_serve(
-			"owner/repo",
-			&[SourceScope::Project {
-				root: project.path().to_path_buf(),
-			}],
-			None,
-		)
-		.is_ok());
 	}
 
 	fn diff(name: &str, state: SourceSkillState) -> SourceSkillDiff {
@@ -1709,17 +1795,18 @@ mod tests {
 		use skill_update::mutation::ResyncMutationError;
 
 		assert_eq!(
-			resync_row_error("keep", ResyncMutationError::InvalidSkillPath),
+			resync_row_error("keep", ResyncMutationError::InvalidSkillPath).0,
 			"locked skillPath was not found in source"
 		);
 		assert_eq!(
 			resync_row_error(
 				"keep",
 				ResyncMutationError::Resync(ResyncError::NotInstalled)
-			),
+			)
+			.0,
 			"skill 'keep' is locked but no installed copy was found"
 		);
-		let renamed = resync_row_error(
+		let (renamed, _) = resync_row_error(
 			"keep",
 			ResyncMutationError::Resync(ResyncError::Renamed {
 				new_name: "keep-v2".to_string(),
@@ -1729,6 +1816,60 @@ mod tests {
 			renamed.contains("keep") && renamed.contains("keep-v2"),
 			"rename mapping must carry both names, got: {renamed}"
 		);
+	}
+
+	/// A `source sync` row that failed because the source moved mid-fetch must
+	/// carry the SAME machine code the HTTP API answers with, and it must reach
+	/// the JSON as `errorCode`.
+	///
+	/// This is what the API's own comment already claimed ("the same answer the
+	/// CLI's sync gives") while the CLI in fact emitted untyped prose: a script
+	/// could not tell a re-fetchable race from a genuine sync failure.
+	#[test]
+	fn a_source_that_moved_mid_fetch_carries_the_shared_code() {
+		use aghub_core::skills::resync::ResyncError;
+		use skill_update::mutation::ResyncMutationError;
+
+		let (_message, code) = resync_row_error(
+			"keep",
+			ResyncMutationError::Resync(ResyncError::StaleFetch(
+				"entry moved".to_string(),
+			)),
+		);
+		assert_eq!(
+			code,
+			aghub_core::skills::lock::SOURCE_CHANGED_DURING_FETCH_CODE
+		);
+
+		// Through the PRODUCTION constructor, not a hand-built row: the failed
+		// branch of `apply_update_row` builds it this way, so a row that
+		// dropped the code on the way to the wire fails here.
+		let row = SyncActionView::update_failed(
+			&diff("keep", SourceSkillState::InstalledOutdated),
+			ResyncMutationError::Resync(ResyncError::StaleFetch(
+				"entry moved".to_string(),
+			)),
+		);
+		let json = serde_json::to_value(&row).unwrap();
+		assert_eq!(json["errorCode"], "SKILL_SOURCE_CHANGED_DURING_FETCH");
+		assert_eq!(json["applied"], false);
+
+		// Additive: a row with nothing to report omits the field entirely, so a
+		// reader that never looked at it sees the shape it always saw.
+		let ok = SyncActionView {
+			action: "update",
+			name: "keep".to_string(),
+			skill_path: "keep/SKILL.md".to_string(),
+			applied: true,
+			error: None,
+			error_code: None,
+			agents: Vec::new(),
+		};
+		assert!(serde_json::to_value(&ok)
+			.unwrap()
+			.get("errorCode")
+			.is_none());
+		let _ = code;
 	}
 
 	#[test]

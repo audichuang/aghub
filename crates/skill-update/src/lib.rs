@@ -23,6 +23,8 @@ pub use repository::{
 	SkillRepository,
 };
 
+pub mod projection;
+
 pub mod sources;
 
 /// Tokens are HTTPS-only. Passing one to ssh/scp/git would turn transport auth
@@ -594,10 +596,14 @@ fn apply_cached_group(
 
 /// Run the update check for `entries`, returning a per-skill status map.
 ///
-/// For each `(source, ref)` group: consult the cache; SHA/tag-pinned refs are
-/// `UpToDate` without a fetch; offline short-circuits to `Uncheckable{Network}`;
+/// Per `(source, ref)` group, in this order: an unfetchable source gets its
+/// permanent `Uncheckable` reason (local / ssh / unsupported scheme); then
+/// offline short-circuits the rest to `Uncheckable{Network}`; then SHA-pinned
+/// refs whose copies are intact are `UpToDate` without a fetch; then the cache;
 /// otherwise resolve a token and fetch under a per-fetch timeout and a bounded
 /// concurrency semaphore, then compare each skill's recomputed hash.
+///
+/// The order is load-bearing — see the numbered comments in the loop.
 pub async fn check_updates(
 	entries: Vec<EntryInput>,
 	deps: CheckDeps<'_>,
@@ -616,44 +622,15 @@ pub async fn check_updates(
 	let mut jobs: Vec<FetchJob> = Vec::new();
 
 	for (sr, members) in groups {
-		// 1) Offline → Uncheckable{Network}; do not cache (transient).
-		if deps.offline {
-			for m in &members {
-				out.push(terminal_output(
-					m,
-					&SkillUpdateStatus::Uncheckable {
-						reason: UncheckableReason::Network,
-					},
-				));
-			}
-			continue;
-		}
-
-		// 2) Pinned SHA → UpToDate without fetching, but ONLY while every
-		//    installed copy still matches its baseline.
-		//
-		//    A commit pin means upstream cannot have moved, so skipping the
-		//    network is sound. It says nothing about the local copy, and this
-		//    shortcut used to answer `UpToDate` for a pinned skill whose folder
-		//    had been deleted. It is also the only thing standing behind
-		//    `is_pinned_sha`, which infers immutability from SPELLING — a branch
-		//    or force-moved tag named like a 40-hex OID lands here too, so
-		//    falling through on local drift is what stops that inference from
-		//    also skipping every other check.
-		if let Some(r) = &sr.ref_ {
-			if is_pinned_sha(r) && members.iter().all(locally_intact) {
-				deps.cache.put(
-					sr.clone(),
-					CachedGroup::Terminal(SkillUpdateStatus::UpToDate),
-					now,
-				);
-				for m in &members {
-					out.push(terminal_output(m, &SkillUpdateStatus::UpToDate));
-				}
-				continue;
-			}
-		}
-
+		// 1) Precheck: a source nothing can fetch over HTTPS (local, ssh,
+		//    unsupported scheme) gets its PERMANENT reason — and it gets it
+		//    offline too, because `precheck_source` is a pure string decision
+		//    that does not change with connectivity. Running it first is what
+		//    stops `offline` from overwriting a permanent answer with
+		//    `network`: "we did not look" is only the honest reason when
+		//    looking WOULD have produced an answer, and it was the sole reason
+		//    a `local` entry got from this surface while the CLI's own offline
+		//    path called the same entry `local`.
 		let mut fetch_members = Vec::new();
 		for member in members {
 			if let Some(reason) = aghub_core::skills::update::precheck_source(
@@ -672,7 +649,52 @@ pub async fn check_updates(
 			continue;
 		}
 
-		// 3) Cache hit → reuse the group status for every fetchable member.
+		// 2) Offline → Uncheckable{Network}; do not cache (transient).
+		//
+		//    Ahead of the pinned-SHA shortcut on purpose: that shortcut reads
+		//    `local_hash`, and making the default-offline path depend on it
+		//    would drag a full disk hash sweep back into a check that never goes
+		//    to the network. Neither surface hashes disk offline, and this
+		//    ordering is what keeps that true without both callers having to
+		//    remember to pass an empty hash map.
+		if deps.offline {
+			for m in &fetch_members {
+				out.push(terminal_output(
+					m,
+					&SkillUpdateStatus::Uncheckable {
+						reason: UncheckableReason::Network,
+					},
+				));
+			}
+			continue;
+		}
+
+		// 3) Pinned SHA → UpToDate without fetching, but ONLY while every
+		//    installed copy still matches its baseline.
+		//
+		//    A commit pin means upstream cannot have moved, so skipping the
+		//    network is sound. It says nothing about the local copy, and this
+		//    shortcut used to answer `UpToDate` for a pinned skill whose folder
+		//    had been deleted. It is also the only thing standing behind
+		//    `is_pinned_sha`, which infers immutability from SPELLING — a branch
+		//    or force-moved tag named like a 40-hex OID lands here too, so
+		//    falling through on local drift is what stops that inference from
+		//    also skipping every other check.
+		if let Some(r) = &sr.ref_ {
+			if is_pinned_sha(r) && fetch_members.iter().all(locally_intact) {
+				deps.cache.put(
+					sr.clone(),
+					CachedGroup::Terminal(SkillUpdateStatus::UpToDate),
+					now,
+				);
+				for m in &fetch_members {
+					out.push(terminal_output(m, &SkillUpdateStatus::UpToDate));
+				}
+				continue;
+			}
+		}
+
+		// 4) Cache hit → reuse the group status for every fetchable member.
 		if let Some(cached) = deps.cache.get(&sr, now) {
 			out.extend(apply_cached_group(&fetch_members, &cached, None));
 			continue;
@@ -1641,6 +1663,101 @@ mod tests {
 			}
 		);
 		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "offline must not fetch");
+	}
+
+	/// Run one entry through the orchestrator with no network available, and
+	/// return its single row. `calls` is asserted zero: every case below must
+	/// answer without a fetch.
+	async fn check_one(entry: EntryInput, offline: bool) -> SkillUpdateStatus {
+		let fetcher = Arc::new(StubFetcher {
+			root: None,
+			err: None,
+			calls: Mutex::new(0),
+		});
+		let resolver = StubResolver(None);
+		let mut cache = ResultCache::new(Duration::from_secs(300));
+		let deps = CheckDeps {
+			ref_resolver: None,
+			fetcher: fetcher.clone(),
+			resolver: &resolver,
+			cache: &mut cache,
+			per_fetch: Duration::from_secs(5),
+			concurrency: 4,
+			offline,
+			overall_deadline: Duration::from_secs(30),
+		};
+		let out = check_updates(vec![entry], deps).await;
+		assert_eq!(*fetcher.calls.lock().unwrap(), 0, "must not fetch");
+		assert_eq!(out.len(), 1);
+		out.into_iter().next().unwrap().status
+	}
+
+	/// `offline` means "we did not look", and that is only an honest reason when
+	/// looking would have produced an answer. A `local` source has no remote at
+	/// all, so `--online` cannot help and saying `network` sends the user to
+	/// re-run with a flag that changes nothing.
+	///
+	/// This is the divergence the CLI and the API used to answer differently for
+	/// the SAME lock entry under the SAME flag: the CLI's own offline loop said
+	/// `local`, this orchestrator said `network`. Pinning the ORDER (precheck
+	/// before the offline short-circuit) is what makes one answer possible.
+	#[tokio::test]
+	async fn offline_keeps_a_local_sources_permanent_reason() {
+		let mut e = entry("a", "/home/me/skills", Some("main"));
+		e.source_type = "local".into();
+		assert_eq!(
+			check_one(e, true).await,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Local
+			}
+		);
+	}
+
+	/// Same rule for a transport this surface cannot use at all: ssh is
+	/// permanently unfetchable here, online or off.
+	#[tokio::test]
+	async fn offline_keeps_an_ssh_sources_permanent_reason() {
+		let e = entry("a", "git@github.com:o/r", Some("main"));
+		assert_eq!(
+			check_one(e, true).await,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Ssh
+			}
+		);
+	}
+
+	/// The ONLINE half of the same ordering: the pinned-SHA shortcut now sits
+	/// BEHIND the precheck, so a SHA-pinned entry on an unfetchable transport
+	/// reports why it cannot be checked instead of claiming `upToDate` for a
+	/// source this build could never have compared against.
+	///
+	/// EVERY permanent reason moves, not just `ssh` — `local` reaches the same
+	/// reorder and used to answer `upToDate` here. `local` is the one aghub
+	/// cannot write itself (it records `ref: None`, so `is_pinned_sha` never
+	/// fires), which is exactly why it needs a test: only an npx-written or
+	/// hand-edited lock produces it, and no fixture would otherwise.
+	#[tokio::test]
+	async fn a_pinned_sha_on_an_unfetchable_source_reports_its_reason() {
+		let sha = "abc123def456abc123def456abc123def456abc1";
+		let pinned = |source: &str, source_type: &str| {
+			let mut e = entry("a", source, Some(sha));
+			e.source_type = source_type.into();
+			e.stored_hash = Some("h".to_string());
+			e.local_hash = Some("h".to_string());
+			e
+		};
+		assert_eq!(
+			check_one(pinned("git@github.com:o/r", "github"), false).await,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Ssh
+			}
+		);
+		assert_eq!(
+			check_one(pinned("/home/me/skills", "local"), false).await,
+			SkillUpdateStatus::Uncheckable {
+				reason: UncheckableReason::Local
+			}
+		);
 	}
 
 	#[tokio::test]

@@ -2,7 +2,7 @@
 //! so the API and the CLI share one implementation. Fetch + credentials are
 //! injected via [`crate::Fetcher`] / [`crate::TokenResolver`].
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::{
@@ -10,6 +10,7 @@ use crate::{
 	TokenResolver,
 };
 use aghub_core::models::ResourceScope;
+use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::update::{
 	compare_known_hashes, detect_rename, precheck_source, SkillUpdateStatus,
 	UncheckableReason,
@@ -122,15 +123,22 @@ pub enum SourceDiffOutcome {
 	/// so the API response keeps the old recorded-ref fallback.
 	Ok {
 		git_ref: Option<String>,
+		/// The repository these rows were actually judged against — the matching
+		/// entry's recorded clone URL, or the caller's own string when no entry
+		/// matched. A host-blind source can resolve DIFFERENTLY per scope, and
+		/// then the rows only mean something next to the origin that produced
+		/// them. Already redacted of any userinfo.
+		source: String,
 		skills: Vec<SourceSkillDiff>,
 	},
 	/// Resolved `git_ref` (query override -> recorded ref -> None) -- same as
 	/// `Ok`, so the API response keeps the recorded-ref fallback on a
 	/// credential miss.
-	NeedsCredential {
-		git_ref: Option<String>,
-	},
-	FetchFailed,
+	NeedsCredential { git_ref: Option<String> },
+	/// The fetch failed for a network reason. Carries the (already redacted)
+	/// detail: the CLI prints it, and without it a `source diff` degrades from
+	/// naming the host/DNS failure to a bare "could not fetch".
+	FetchFailed { detail: String },
 	/// Local/ssh/unsupported scheme — known before any fetch. Carries the
 	/// resolved git_ref too (the old route returned it on the early-out).
 	UncheckableSource {
@@ -142,9 +150,7 @@ pub enum SourceDiffOutcome {
 	/// one-click "clean up removed" and CLI `source sync --update`, both of which
 	/// would act on the other forge's entries. Carries the origins so the caller
 	/// can name them.
-	AmbiguousSource {
-		origins: Vec<String>,
-	},
+	AmbiguousSource { origins: Vec<String> },
 }
 
 pub struct SourceListInput {
@@ -290,7 +296,7 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 /// fetch, both update-check projections (API and CLI), CLI `source diff`/`sync`,
 /// and the bulk apply's `SourceRef`. Hand-mirroring
 /// `source_url.unwrap_or(source)` at each of them is what let them drift.
-pub fn entry_clone_source(
+pub(crate) fn entry_clone_source(
 	source: &str,
 	source_url: Option<&str>,
 	source_type: &str,
@@ -310,7 +316,10 @@ pub fn entry_clone_source(
 /// `gitlab` are single-host services. A `git`/custom/`local` type keeps its own
 /// spelling; inventing a host advertises, and then fetches from, a repository
 /// nobody installed from.
-pub fn reconstruct_source_url(source: &str, source_type: &str) -> String {
+pub(crate) fn reconstruct_source_url(
+	source: &str,
+	source_type: &str,
+) -> String {
 	let source = source.trim();
 	if source_type.eq_ignore_ascii_case("local") {
 		// A Windows path (`C:\skills\a`) would otherwise read as an SCP-like URL
@@ -362,7 +371,7 @@ pub fn reconstruct_source_url(source: &str, source_type: &str) -> String {
 /// Fetch a source with the source-scoped token on the first attempt when one is
 /// available. Without a token, performs one anonymous attempt. The repository
 /// backend owns the gix→system-git tail.
-pub fn fetch_source_with_resolver(
+pub(crate) fn fetch_source_with_resolver(
 	source_ref: &SourceRef,
 	fetcher: &dyn Fetcher,
 	resolver: &dyn TokenResolver,
@@ -667,6 +676,13 @@ pub(crate) fn merged_baseline_for_source(
 	scopes: &[SourceScope],
 	source: &str,
 ) -> (Baseline, String, Option<String>) {
+	// Counts baseline sweeps on THIS thread. The sweep folder-hashes every
+	// installed copy of every matching entry, so a caller that runs it before a
+	// refusal it was always going to reach pays for nothing — and that is
+	// invisible in the answer, which is why it needs its own observable.
+	// Thread-local, not a process-global atomic: these tests run in parallel.
+	#[cfg(test)]
+	BASELINE_SCANS.with(|c| c.set(c.get() + 1));
 	let mut baseline = Baseline::new();
 	let mut source_type = String::new();
 	let mut recorded_ref: Option<String> = None;
@@ -729,8 +745,8 @@ pub(crate) fn baseline_for_scope(
 /// matching entry's recorded clone URL (the fetch coordinate), so a caller that
 /// was handed a host-stripped `owner/repo` can recover the real non-github host
 /// (TFS/Azure DevOps) instead of reconstructing `github.com`.
-fn recorded_meta_for_source(
-	scopes: &[SourceScope],
+fn recorded_meta_from(
+	locks: &[ScopeLock],
 	source: &str,
 ) -> (String, Option<String>, Option<String>, Vec<String>) {
 	let mut source_type = String::new();
@@ -774,30 +790,18 @@ fn recorded_meta_for_source(
 			));
 		}
 	};
-	// Global first, then project — same order as `merged_baseline_for_source`.
-	for scope in scopes {
-		if matches!(scope, SourceScope::Global) {
-			for (_name, entry) in skill::get_all_locked_skills() {
-				visit(
-					&entry.source,
-					Some(&entry.source_url),
-					&entry.source_type,
-					entry.ref_name.as_deref(),
-				);
-			}
-		}
+	// Global first, then project — same order as `merged_baseline_for_source`,
+	// which is what makes "first non-empty wins" agree with the row
+	// `list_sources` advertises.
+	for lock in locks.iter().filter(|l| l.is_global()) {
+		lock.visit(|src, url, src_type, ref_name, _path| {
+			visit(src, url, src_type, ref_name)
+		});
 	}
-	for scope in scopes {
-		if let SourceScope::Project { root } = scope {
-			for (_name, entry) in skill::read_local_lock(Some(root)).skills {
-				visit(
-					&entry.source,
-					entry.source_url.as_deref(),
-					&entry.source_type,
-					entry.ref_name.as_deref(),
-				);
-			}
-		}
+	for lock in locks.iter().filter(|l| !l.is_global()) {
+		lock.visit(|src, url, src_type, ref_name, _path| {
+			visit(src, url, src_type, ref_name)
+		});
 	}
 	(
 		source_type,
@@ -811,13 +815,13 @@ fn recorded_meta_for_source(
 /// (NO fetch). Lets the CLI — which fetches once itself — agree with the API
 /// `diff_source` on `(source_type, effective_ref)` BEFORE the single fetch.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ResolvedSourceMeta {
+pub(crate) struct ResolvedSourceMeta {
 	/// The lock's recorded source type, defaulted to `"github"` when empty —
 	/// the same default `diff_source` applies before its `precheck_source`.
-	pub source_type: String,
+	pub(crate) source_type: String,
 	/// Explicit `--ref` override, else the source's recorded lock ref, else
 	/// `None` (the upstream default branch).
-	pub effective_ref: Option<String>,
+	pub(crate) effective_ref: Option<String>,
 	/// The matching lock entry's [`entry_clone_source`] — its recorded clone URL,
 	/// or the coordinate reconstructed from `(source, source_type)` when it
 	/// recorded none. Lets a caller handed a host-stripped `owner/repo` (e.g.
@@ -827,11 +831,11 @@ pub struct ResolvedSourceMeta {
 	/// `None` means ONLY that no lock entry matched — not "the entry recorded no
 	/// URL". A matching entry always yields `Some`, so the diff resolves the same
 	/// repository the row advertises and the apply installs from.
-	pub effective_source: Option<String>,
+	pub(crate) effective_source: Option<String>,
 	/// Every DISTINCT origin the caller's source selected, sorted. More than one
 	/// means the caller named something host-blind that spans forges — see
 	/// [`ResolvedSourceMeta::ambiguous_origins`].
-	pub matched_origins: Vec<String>,
+	pub(crate) matched_origins: Vec<String>,
 }
 
 impl ResolvedSourceMeta {
@@ -847,7 +851,7 @@ impl ResolvedSourceMeta {
 	/// apply does not: each row fetches its own entry's coordinate, so a
 	/// host-blind group merely admits more rows, each still updated from its own
 	/// forge.
-	pub fn ambiguous_origins(&self) -> Option<&[String]> {
+	pub(crate) fn ambiguous_origins(&self) -> Option<&[String]> {
 		(self.matched_origins.len() > 1).then_some(&self.matched_origins[..])
 	}
 }
@@ -859,13 +863,13 @@ impl ResolvedSourceMeta {
 ///
 /// `effective_ref = explicit_ref OR recorded lock ref OR None`; `source_type`
 /// is the lock's recorded type, defaulted to `"github"` when empty.
-pub fn resolve_source_meta(
+fn resolve_source_meta_from(
 	source: &str,
-	scopes: &[SourceScope],
+	locks: &[ScopeLock],
 	explicit_ref: Option<&str>,
 ) -> ResolvedSourceMeta {
 	let (mut source_type, recorded_ref, recorded_source_url, matched_origins) =
-		recorded_meta_for_source(scopes, source);
+		recorded_meta_from(locks, source);
 	if source_type.is_empty() {
 		source_type = "github".to_string();
 	}
@@ -1237,7 +1241,7 @@ fn reason_str(reason: UncheckableReason) -> String {
 /// PUBLIC CLI entry: build the baseline for one scope and classify the fetched
 /// repo against it. Does NOT fetch (caller passes the already-fetched `root`),
 /// so the CLI reuses one `FetchedRepo` for every scope and for install.
-pub fn classify_scope(
+pub(crate) fn classify_scope(
 	root: &Path,
 	scope: &SourceScope,
 	source: &str,
@@ -1247,18 +1251,381 @@ pub fn classify_scope(
 	classify_repo_skills(root, &baseline, upstream_commit_time)
 }
 
-/// The distinct refs the entries of `source` in `scope` are pinned to, sorted.
+/// One scope's lock file, read ONCE.
 ///
-/// [`classify_scope`] judges a whole scope against ONE already-fetched tree, so
-/// a caller holding a single tree must first know whether that is sound. More
-/// than one ref means it is not: `diff_source`, which owns its fetches, splits
-/// into cohorts instead ([`baseline_by_ref`]).
-pub fn scope_ref_cohorts(
-	scope: &SourceScope,
+/// A sync derives THREE things from a lock — every entry's pre-fetch identity,
+/// the repository/ref to fetch, and whether one tree can serve the scope — and
+/// all three must come from the SAME observation. Two reads can straddle
+/// another process's repoint: the identity then matches the live entry while
+/// the bytes came from the other coordinates, and the compare-after-fetch waves
+/// it through. See [`EntryIdentity`] and `core/AGENTS.md`.
+enum ScopeLock {
+	Global(BTreeMap<String, skill::SkillLockEntry>),
+	Project(skill::LocalSkillLockFile),
+}
+
+// Counts `read_scope_lock` calls on THIS thread, so a test can assert a flow
+// took one snapshot rather than several, and `merged_baseline_for_source`
+// sweeps likewise. Thread-local, not process-global atomics: this crate's unit
+// tests run in parallel in one binary.
+#[cfg(test)]
+thread_local! {
+	static SCOPE_LOCK_READS: std::cell::Cell<usize> =
+		const { std::cell::Cell::new(0) };
+	static BASELINE_SCANS: std::cell::Cell<usize> =
+		const { std::cell::Cell::new(0) };
+}
+
+fn read_scope_lock(scope: &SourceScope) -> ScopeLock {
+	#[cfg(test)]
+	SCOPE_LOCK_READS.with(|c| c.set(c.get() + 1));
+	match scope {
+		SourceScope::Global => {
+			ScopeLock::Global(skill::get_all_locked_skills())
+		}
+		SourceScope::Project { root } => {
+			ScopeLock::Project(skill::read_local_lock(Some(root)))
+		}
+	}
+}
+
+impl ScopeLock {
+	fn is_global(&self) -> bool {
+		matches!(self, ScopeLock::Global(_))
+	}
+
+	/// `(source, source_url, source_type, ref_name, skill_path)` per entry.
+	fn visit(
+		&self,
+		mut f: impl FnMut(&str, Option<&str>, &str, Option<&str>, Option<&str>),
+	) {
+		match self {
+			ScopeLock::Global(skills) => {
+				for entry in skills.values() {
+					f(
+						&entry.source,
+						Some(&entry.source_url),
+						&entry.source_type,
+						entry.ref_name.as_deref(),
+						entry.skill_path.as_deref(),
+					);
+				}
+			}
+			ScopeLock::Project(lock) => {
+				for entry in lock.skills.values() {
+					f(
+						&entry.source,
+						entry.source_url.as_deref(),
+						&entry.source_type,
+						entry.ref_name.as_deref(),
+						entry.skill_path.as_deref(),
+					);
+				}
+			}
+		}
+	}
+
+	/// Every entry's identity, keyed by skill name — built from THIS snapshot
+	/// via `of_*_entry`, never a second [`EntryIdentity::capture`].
+	fn identities(&self) -> BTreeMap<String, EntryIdentity> {
+		match self {
+			ScopeLock::Global(skills) => skills
+				.iter()
+				.map(|(name, e)| {
+					(name.clone(), EntryIdentity::of_global_entry(e))
+				})
+				.collect(),
+			ScopeLock::Project(lock) => lock
+				.skills
+				.iter()
+				.map(|(name, e)| {
+					(name.clone(), EntryIdentity::of_project_entry(e))
+				})
+				.collect(),
+		}
+	}
+
+	/// The distinct refs this scope's entries for `source` are pinned to.
+	///
+	/// [`classify_scope`] judges a whole scope against ONE already-fetched tree,
+	/// so a caller holding a single tree must first know whether that is sound.
+	/// More than one ref means it is not: `diff_source`, which owns its fetches,
+	/// splits into cohorts instead ([`baseline_by_ref`]).
+	///
+	/// Derived from the snapshot, NOT from `baseline_for_scope`: the baseline
+	/// folder-hashes every installed copy of every matching entry, and this
+	/// question needs none of that. Same membership rule as the baseline
+	/// (matching source, `skill_path` present) and the same `Option` ordering,
+	/// so the refs reported here are the cohort keys a diff would produce.
+	fn recorded_refs(&self, source: &str) -> Vec<Option<String>> {
+		let want = source.trim();
+		let mut refs: BTreeSet<Option<String>> = BTreeSet::new();
+		self.visit(|src, url, src_type, ref_name, skill_path| {
+			if skill_path.is_some() && source_matches(want, src, url, src_type)
+			{
+				refs.insert(ref_name.map(str::to_string));
+			}
+		});
+		refs.into_iter().collect()
+	}
+}
+
+/// What both deep entry points settle BEFORE spending a fetch: which repository
+/// this source actually names, at which ref, and whether it can be fetched at
+/// all. No network, no disk hashing.
+struct PreparedFetch {
+	/// Explicit `--ref`/`?ref=`, else the source's RECORDED lock ref, else
+	/// `None` (the repo's default branch).
+	git_ref: Option<String>,
+	/// The clone coordinate: the matching entry's recorded URL when there is
+	/// one, so a caller who passed the host-stripped lock `source`
+	/// (`owner/repo`) still reaches a non-github forge.
+	fetch_source: String,
+}
+
+/// A refusal `prepare` reaches before any fetch. Both entry points project it
+/// into their own outcome enum.
+enum PrepareRefusal {
+	Ambiguous {
+		origins: Vec<String>,
+	},
+	Uncheckable {
+		git_ref: Option<String>,
+		reason: UncheckableReason,
+	},
+}
+
+/// The one pre-fetch settlement. Extracted so `diff_source` and
+/// [`plan_source_sync`] cannot drift: the CLI used to re-assemble exactly this
+/// sequence — resolve meta, refuse an ambiguous source, refuse an unfetchable
+/// one — beside every call, twice, with the branches copied word for word.
+fn prepare(
 	source: &str,
-) -> Vec<Option<String>> {
-	let (baseline, _src_type, _ref) = baseline_for_scope(scope, source);
-	baseline_by_ref(baseline).into_keys().collect()
+	scopes: &[SourceScope],
+	explicit_ref: Option<&str>,
+) -> Result<PreparedFetch, PrepareRefusal> {
+	let locks: Vec<ScopeLock> = scopes.iter().map(read_scope_lock).collect();
+	prepare_from(source, &locks, explicit_ref)
+}
+
+/// [`prepare`] over snapshots the caller already holds — see [`ScopeLock`].
+fn prepare_from(
+	source: &str,
+	locks: &[ScopeLock],
+	explicit_ref: Option<&str>,
+) -> Result<PreparedFetch, PrepareRefusal> {
+	// `effective_ref` = explicit ref, else the source's RECORDED ref, else None.
+	let meta = resolve_source_meta_from(source, locks, explicit_ref);
+	// One fetched tree cannot judge two forges. `source list` prints the lock's
+	// host-blind SOURCE, and pasting that back selects every forge serving the
+	// same path — so refuse rather than fetch one of them and apply it to all.
+	if let Some(origins) = meta.ambiguous_origins() {
+		return Err(PrepareRefusal::Ambiguous {
+			origins: origins.to_vec(),
+		});
+	}
+	let git_ref = meta.effective_ref;
+	let fetch_source =
+		meta.effective_source.unwrap_or_else(|| source.to_string());
+	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
+	if let Some(reason) = precheck_source(&meta.source_type, &fetch_source) {
+		return Err(PrepareRefusal::Uncheckable { git_ref, reason });
+	}
+	Ok(PreparedFetch {
+		git_ref,
+		fetch_source,
+	})
+}
+
+/// One `source sync`'s whole pre-decision read: the fetched tree, what it is,
+/// and the lock identities captured before any of it happened.
+#[derive(Debug)]
+pub struct SourceSyncPlan {
+	/// The fetched tree. Reused for classification AND for every install /
+	/// update the caller then applies — a sync fetches exactly once.
+	pub repo: crate::FetchedRepo,
+	/// The ref that was fetched (explicit, else recorded, else None). Callers
+	/// record THIS in the lock, so a source pinned to a tag stays pinned.
+	pub git_ref: Option<String>,
+	/// The coordinate actually fetched. Callers normalize the lock source from
+	/// this, never from the raw argument.
+	pub fetch_source: String,
+	/// The write scope's skills, classified against the fetched tree.
+	pub diffs: Vec<SourceSkillDiff>,
+	/// Every in-scope lock entry's identity AS OF BEFORE the fetch. A row whose
+	/// name is missing here was not in the lock when this sync started.
+	pub pre_fetch_identities: BTreeMap<String, EntryIdentity>,
+}
+
+/// Why a sync could not even reach a plan. Everything here happened before any
+/// write, so nothing was mutated.
+#[derive(Debug)]
+pub enum SourceSyncOutcome {
+	Ok(Box<SourceSyncPlan>),
+	NeedsCredential {
+		git_ref: Option<String>,
+	},
+	FetchFailed {
+		/// Already redacted of URL userinfo.
+		detail: String,
+	},
+	/// Local / ssh / unsupported scheme, or an unreachable credential backend
+	/// (`Network`) — see [`SourceDiffOutcome::UncheckableSource`].
+	UncheckableSource {
+		git_ref: Option<String>,
+		reason: UncheckableReason,
+	},
+	AmbiguousSource {
+		origins: Vec<String>,
+	},
+	/// This scope's entries are pinned to more than one ref, so no single
+	/// fetched tree can serve them — see [`assert_one_tree_can_serve`].
+	MultipleRefs {
+		refs: Vec<Option<String>>,
+	},
+}
+
+pub struct SourceSyncInput {
+	pub source: String,
+	pub git_ref: Option<String>,
+	/// The ONE scope this sync writes to. A sync resolves exactly one write
+	/// scope (the CLI refuses `--all` long before here), which is why the tree
+	/// it fetches has to serve that scope alone.
+	pub scope: SourceScope,
+}
+
+/// A sync classifies a whole scope against ONE fetched tree, so it must first
+/// know that one tree can serve it. More than one recorded ref means it cannot:
+/// with entries on both `main` and `v1`, a `v1`-pinned skill reads as outdated
+/// forever (its own update fetches `v1`, so the hash never converges) or as
+/// removed when its folder is absent there — and `--update` would overwrite it
+/// with `main`'s content.
+///
+/// An explicit `--ref` IS the caller picking one tree, so it passes.
+///
+/// [`diff_source`] does NOT need this: it owns its fetches and splits into one
+/// cohort per ref. Teaching a sync to do the same means holding one fetched tree
+/// per ref through the install/update flow — see
+/// `.scratch/source-grouping/spec.md`.
+fn assert_one_tree_can_serve(
+	source: &str,
+	lock: &ScopeLock,
+	explicit_ref: Option<&str>,
+) -> Option<Vec<Option<String>>> {
+	if explicit_ref.is_some() {
+		return None;
+	}
+	let refs = lock.recorded_refs(source);
+	(refs.len() >= 2).then_some(refs)
+}
+
+/// PUBLIC entry: everything one `source sync` must read and fetch before it can
+/// decide anything — identities, coordinate resolution, refusals, the single
+/// fetch, and the write scope's classification.
+///
+/// The caller keeps what is genuinely its own policy: which agents to target,
+/// `--skill` narrowing, dry-run rendering, and the writes themselves.
+pub fn plan_source_sync(
+	input: SourceSyncInput,
+	deps: SourceDiffDeps<'_>,
+) -> SourceSyncOutcome {
+	let source = input.source.trim().to_string();
+	let source_log = aghub_git::redact_source_credentials(&source);
+
+	// ONE snapshot of the write scope's lock. The identities this sync will
+	// verify against after the fetch, the coordinates it fetches, and the
+	// single-tree decision all come from THIS read — a second read could
+	// straddle another process's repoint and hand back an identity that matches
+	// the live entry while the bytes came from the other coordinates, which the
+	// compare-after-fetch would then wave through. Derived (never
+	// `EntryIdentity::capture`d) for the same reason.
+	//
+	// Note this is NOT "the lock is read once": the post-fetch classification
+	// re-reads it to build the baseline. That read only decides what to REPORT,
+	// and every write the caller then applies is still gated on the identities
+	// captured here.
+	let scope_lock = read_scope_lock(&input.scope);
+	let pre_fetch_identities = scope_lock.identities();
+
+	// Resolve → ambiguity → precheck → single-tree, in that order: a source that
+	// can never be fetched at all (ssh/local/unsupported) must say so before a
+	// refusal the user could act on ("pass --ref"), or they retry into a wall.
+	let prepared = match prepare_from(
+		&source,
+		std::slice::from_ref(&scope_lock),
+		input.git_ref.as_deref(),
+	) {
+		Ok(prepared) => prepared,
+		Err(PrepareRefusal::Ambiguous { origins }) => {
+			return SourceSyncOutcome::AmbiguousSource { origins }
+		}
+		Err(PrepareRefusal::Uncheckable { git_ref, reason }) => {
+			return SourceSyncOutcome::UncheckableSource { git_ref, reason }
+		}
+	};
+
+	if let Some(refs) = assert_one_tree_can_serve(
+		&source,
+		&scope_lock,
+		input.git_ref.as_deref(),
+	) {
+		return SourceSyncOutcome::MultipleRefs { refs };
+	}
+
+	// Fetch ONCE; the tree is reused for classification AND every install or
+	// update the caller applies. `CatalogSnapshot` because classification needs
+	// the whole tree (renames/removals).
+	let source_ref = SourceRef {
+		source: prepared.fetch_source.clone(),
+		ref_: prepared.git_ref.clone(),
+	};
+	let fetched = fetch_source_with_resolver(
+		&source_ref,
+		deps.fetcher,
+		deps.resolver,
+		FetchSelection::CatalogSnapshot,
+	);
+	log::info!(
+		"source sync [{source_log}]: ref={:?} fetch {}",
+		source_ref.ref_,
+		match &fetched {
+			Ok(_) => "ok",
+			Err(FetchError::Auth) => "auth-failed",
+			Err(FetchError::BackendUnavailable) => "backend-unavailable",
+			Err(FetchError::Network(_)) => "network-failed",
+		}
+	);
+	let repo = match fetched {
+		Ok(repo) => repo,
+		Err(FetchError::BackendUnavailable) => {
+			return SourceSyncOutcome::UncheckableSource {
+				git_ref: prepared.git_ref,
+				reason: UncheckableReason::Network,
+			}
+		}
+		Err(FetchError::Auth) => {
+			return SourceSyncOutcome::NeedsCredential {
+				git_ref: prepared.git_ref,
+			}
+		}
+		Err(FetchError::Network(detail)) => {
+			return SourceSyncOutcome::FetchFailed { detail }
+		}
+	};
+
+	let diffs = classify_scope(
+		repo.root.as_path(),
+		&input.scope,
+		&source,
+		repo.upstream_commit_time(),
+	);
+	SourceSyncOutcome::Ok(Box::new(SourceSyncPlan {
+		git_ref: prepared.git_ref,
+		fetch_source: prepared.fetch_source,
+		diffs,
+		pre_fetch_identities,
+		repo,
+	}))
 }
 
 /// PUBLIC API entry: merged-baseline, single-classification, flat output —
@@ -1273,6 +1640,21 @@ pub fn diff_source(
 	// no later log line has to remember to.
 	let source_log = aghub_git::redact_source_credentials(&source);
 	let diff_started = std::time::Instant::now();
+	// BEFORE the baseline, not after. `prepare` is lock-reads only, while the
+	// baseline folder-hashes every installed copy of every matching entry — so
+	// an ssh/local/ambiguous source that is going to be refused anyway must be
+	// refused before that sweep, not after paying for it.
+	let (git_ref, fetch_source) =
+		match prepare(&source, &input.scopes, input.git_ref.as_deref()) {
+			Ok(prepared) => (prepared.git_ref, prepared.fetch_source),
+			Err(PrepareRefusal::Ambiguous { origins }) => {
+				return SourceDiffOutcome::AmbiguousSource { origins }
+			}
+			Err(PrepareRefusal::Uncheckable { git_ref, reason }) => {
+				return SourceDiffOutcome::UncheckableSource { git_ref, reason }
+			}
+		};
+
 	let baseline_started = std::time::Instant::now();
 	let (baseline, _src_type, _recorded_ref) =
 		merged_baseline_for_source(&input.scopes, &source);
@@ -1284,26 +1666,6 @@ pub fn diff_source(
 		baseline.len(),
 		baseline_started.elapsed()
 	);
-
-	// Resolve `(source_type, effective_ref)` via the SHARED helper so the API
-	// and CLI agree on the fetch coordinate. `effective_ref` = explicit query
-	// ref, else the source's RECORDED ref, else None (the repo default branch).
-	let meta =
-		resolve_source_meta(&source, &input.scopes, input.git_ref.as_deref());
-	if let Some(origins) = meta.ambiguous_origins() {
-		return SourceDiffOutcome::AmbiguousSource {
-			origins: origins.to_vec(),
-		};
-	}
-	let git_ref = meta.effective_ref;
-	// Recover the recorded clone URL so a caller who passed the host-stripped
-	// lock `source` (owner/repo) still fetches a non-github host correctly.
-	let fetch_source = meta.effective_source.unwrap_or_else(|| source.clone());
-
-	// Skip sources we cannot fetch (local/ssh/unsupported) up front.
-	if let Some(reason) = precheck_source(&meta.source_type, &fetch_source) {
-		return SourceDiffOutcome::UncheckableSource { git_ref, reason };
-	}
 
 	// One cohort per recorded ref, so no entry is judged against a tree it was
 	// never installed from. An explicit `?ref=` is the caller asking "what would
@@ -1374,8 +1736,8 @@ pub fn diff_source(
 			Err(FetchError::Auth) => {
 				return SourceDiffOutcome::NeedsCredential { git_ref };
 			}
-			Err(FetchError::Network(_)) => {
-				return SourceDiffOutcome::FetchFailed
+			Err(FetchError::Network(detail)) => {
+				return SourceDiffOutcome::FetchFailed { detail }
 			}
 		};
 		let classify_started = std::time::Instant::now();
@@ -1415,7 +1777,11 @@ pub fn diff_source(
 		skills.len(),
 		diff_started.elapsed()
 	);
-	SourceDiffOutcome::Ok { git_ref, skills }
+	SourceDiffOutcome::Ok {
+		git_ref,
+		source: aghub_git::redact_source_credentials(&fetch_source),
+		skills,
+	}
 }
 
 #[cfg(test)]
@@ -2195,6 +2561,18 @@ mod diff_tests {
 	use std::fs;
 	use tempfile::TempDir;
 
+	/// [`resolve_source_meta_from`] straight off `scopes`, for the resolution
+	/// tests that do not care about the snapshot seam.
+	fn resolve_source_meta(
+		source: &str,
+		scopes: &[SourceScope],
+		explicit_ref: Option<&str>,
+	) -> ResolvedSourceMeta {
+		let locks: Vec<ScopeLock> =
+			scopes.iter().map(read_scope_lock).collect();
+		resolve_source_meta_from(source, &locks, explicit_ref)
+	}
+
 	/// A [`Fetcher`] that serves a fixed local dir as the fetched repo, ignoring
 	/// the source/token.
 	struct DirFetcher {
@@ -2227,6 +2605,162 @@ mod diff_tests {
 		}
 	}
 
+	fn ref_pinned_entry(ref_name: &str) -> skill::LocalSkillLockEntry {
+		skill::LocalSkillLockEntry {
+			source: "owner/repo".to_string(),
+			ref_name: Some(ref_name.to_string()),
+			source_type: "github".to_string(),
+			skill_path: None,
+			computed_hash: "h".to_string(),
+			ref_commit: None,
+			source_url: None,
+		}
+	}
+
+	/// A scope whose entries are pinned to different refs cannot be served by
+	/// ONE fetched tree, and a sync only ever holds one: judged against the
+	/// wrong ref a skill reads as outdated forever, or as removed, and
+	/// `--update` overwrites it with the other ref's content. An explicit
+	/// `--ref` is the caller picking one tree, so it passes.
+	///
+	/// `diff_source` does NOT share this limit — it owns its fetches and splits
+	/// into one cohort per ref.
+	#[test]
+	fn a_scope_spanning_two_refs_cannot_be_served_by_one_tree() {
+		let project = TempDir::new().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, ref_name) in [("alpha", "main"), ("zeta", "v1")] {
+			let mut entry = ref_pinned_entry(ref_name);
+			entry.skill_path = Some(format!("{name}/SKILL.md"));
+			lock.skills.insert(name.to_string(), entry);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+		let scope = SourceScope::Project {
+			root: project.path().to_path_buf(),
+		};
+
+		let lock = read_scope_lock(&scope);
+		let refused = assert_one_tree_can_serve("owner/repo", &lock, None)
+			.expect("two refs cannot share one fetched tree");
+		assert_eq!(
+			refused,
+			vec![Some("main".to_string()), Some("v1".to_string())],
+			"the caller names the refs in its message, so both must come back"
+		);
+
+		assert!(
+			assert_one_tree_can_serve("owner/repo", &lock, Some("main"))
+				.is_none(),
+			"an explicit --ref picks one tree"
+		);
+	}
+
+	/// The guard must not fire on the ordinary single-ref source — it would make
+	/// every `source sync` bail.
+	#[test]
+	fn one_ref_can_be_served_by_one_tree() {
+		let project = TempDir::new().unwrap();
+		let mut lock = skill::LocalSkillLockFile::new();
+		for name in ["alpha", "zeta"] {
+			let mut entry = ref_pinned_entry("main");
+			entry.skill_path = Some(format!("{name}/SKILL.md"));
+			lock.skills.insert(name.to_string(), entry);
+		}
+		skill::write_local_lock(&lock, Some(project.path())).unwrap();
+
+		assert!(assert_one_tree_can_serve(
+			"owner/repo",
+			&read_scope_lock(&SourceScope::Project {
+				root: project.path().to_path_buf(),
+			}),
+			None,
+		)
+		.is_none());
+	}
+
+	/// A fetch that fails for a network reason must carry WHY. The CLI prints
+	/// the detail; without it `source diff` degrades from naming the host to a
+	/// bare "could not fetch".
+	#[test]
+	fn a_network_failure_carries_its_redacted_detail() {
+		struct FailingFetcher;
+		impl Fetcher for FailingFetcher {
+			fn fetch(
+				&self,
+				_sr: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<crate::FetchedRepo, FetchError> {
+				Err(FetchError::network("no-such-host.invalid: not found"))
+			}
+		}
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "owner/repo".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Project {
+					root: TempDir::new().unwrap().path().to_path_buf(),
+				}],
+			},
+			SourceDiffDeps {
+				fetcher: &FailingFetcher,
+				resolver: &NoToken,
+			},
+		);
+		match outcome {
+			SourceDiffOutcome::FetchFailed { detail } => assert!(
+				detail.contains("no-such-host.invalid"),
+				"detail lost: {detail}"
+			),
+			other => panic!("expected FetchFailed, got {other:?}"),
+		}
+	}
+
+	/// `FetchError::Auth` and `BackendUnavailable` are unreachable from the
+	/// CLI's own test hook (it can only produce `Ok` or `Network`), so this is
+	/// the only place their mapping is pinned at all.
+	#[test]
+	fn auth_and_backend_failures_are_distinct_outcomes() {
+		struct ErrFetcher(fn() -> FetchError);
+		impl Fetcher for ErrFetcher {
+			fn fetch(
+				&self,
+				_sr: &SourceRef,
+				_token: Option<&str>,
+				_selection: FetchSelection<'_>,
+			) -> Result<crate::FetchedRepo, FetchError> {
+				Err((self.0)())
+			}
+		}
+		let run = |make: fn() -> FetchError| {
+			diff_source(
+				SourceDiffInput {
+					source: "owner/repo".to_string(),
+					git_ref: None,
+					scopes: vec![SourceScope::Project {
+						root: TempDir::new().unwrap().path().to_path_buf(),
+					}],
+				},
+				SourceDiffDeps {
+					fetcher: &ErrFetcher(make),
+					resolver: &NoToken,
+				},
+			)
+		};
+		assert!(matches!(
+			run(|| FetchError::Auth),
+			SourceDiffOutcome::NeedsCredential { .. }
+		));
+		// A dead credential backend is NOT "this source needs a credential":
+		// nothing was asked of the user, and the CLI says so in its own words.
+		assert!(matches!(
+			run(|| FetchError::BackendUnavailable),
+			SourceDiffOutcome::UncheckableSource {
+				reason: UncheckableReason::Network,
+				..
+			}
+		));
+	}
 	/// A [`Fetcher`] that records the `ref_` it was asked to fetch so a test
 	/// can assert the resolved ref handed to the fetch (recorded-ref fallback).
 	struct RefCapturingFetcher {
@@ -2933,5 +3467,262 @@ mod diff_tests {
 			precheck_source(&meta.source_type, source),
 			Some(UncheckableReason::Local)
 		));
+	}
+}
+
+#[cfg(test)]
+mod snapshot_tests {
+	use super::*;
+	use tempfile::TempDir;
+
+	struct NoToken;
+	impl TokenResolver for NoToken {
+		fn resolve(&self, _source: &str) -> TokenResolution {
+			TokenResolution::NoToken
+		}
+	}
+
+	/// A [`Fetcher`] that must never run.
+	struct PanicFetcher;
+	impl Fetcher for PanicFetcher {
+		fn fetch(
+			&self,
+			_sr: &SourceRef,
+			_token: Option<&str>,
+			_selection: FetchSelection<'_>,
+		) -> Result<crate::FetchedRepo, FetchError> {
+			panic!("the refusal must be reached before any fetch")
+		}
+	}
+
+	fn entry(
+		source: &str,
+		source_type: &str,
+		ref_name: Option<&str>,
+		skill_path: &str,
+	) -> skill::LocalSkillLockEntry {
+		skill::LocalSkillLockEntry {
+			source: source.to_string(),
+			source_url: None,
+			source_type: source_type.to_string(),
+			ref_name: ref_name.map(str::to_string),
+			skill_path: Some(skill_path.to_string()),
+			computed_hash: "h".to_string(),
+			ref_commit: None,
+		}
+	}
+
+	fn write_lock(root: &Path, entries: &[(&str, skill::LocalSkillLockEntry)]) {
+		let mut lock = skill::LocalSkillLockFile::new();
+		for (name, e) in entries {
+			lock.skills.insert((*name).to_string(), e.clone());
+		}
+		skill::write_local_lock(&lock, Some(root)).unwrap();
+	}
+
+	/// The identity a sync verifies against after its fetch and the coordinates
+	/// it fetched must come from the SAME observation of the lock.
+	///
+	/// Proved by making the two disagree: the snapshot is taken, the lock on
+	/// disk is then repointed, and BOTH answers must still describe what the
+	/// snapshot saw. A derivation that goes back to disk (an
+	/// `EntryIdentity::capture`, a re-resolve) returns the NEW entry here — and
+	/// that is exactly the interleaving that lets a compare-after-fetch approve
+	/// bytes fetched from the other coordinates.
+	#[test]
+	fn a_snapshot_answers_both_questions_from_itself() {
+		let project = TempDir::new().unwrap();
+		write_lock(
+			project.path(),
+			&[(
+				"s",
+				entry("owner/repo", "github", Some("main"), "s/SKILL.md"),
+			)],
+		);
+		let scope = SourceScope::Project {
+			root: project.path().to_path_buf(),
+		};
+
+		let snapshot = read_scope_lock(&scope);
+		// Another process repoints the entry while this one holds the snapshot.
+		write_lock(
+			project.path(),
+			&[("s", entry("owner/repo", "github", Some("v2"), "s/SKILL.md"))],
+		);
+
+		let identity = snapshot.identities().remove("s").expect("entry 's'");
+		assert_eq!(
+			identity,
+			EntryIdentity::of_project_entry(&entry(
+				"owner/repo",
+				"github",
+				Some("main"),
+				"s/SKILL.md"
+			)),
+			"the identity must be the snapshot's, not the live lock's"
+		);
+		assert_eq!(
+			resolve_source_meta_from(
+				"owner/repo",
+				std::slice::from_ref(&snapshot),
+				None
+			)
+			.effective_ref,
+			Some("main".to_string()),
+			"the fetch coordinate must be the snapshot's too, or the two \
+			 straddle the repoint"
+		);
+		assert_eq!(
+			snapshot.recorded_refs("owner/repo"),
+			vec![Some("main".to_string())],
+			"so must the single-tree decision"
+		);
+	}
+
+	/// And the sync takes exactly ONE such snapshot. Two would reopen the
+	/// window even if each half were internally consistent.
+	#[test]
+	fn a_sync_snapshots_the_write_scope_once() {
+		let project = TempDir::new().unwrap();
+		write_lock(
+			project.path(),
+			&[(
+				"s",
+				entry(
+					"git@github.com:owner/repo.git",
+					"github",
+					Some("main"),
+					"s/SKILL.md",
+				),
+			)],
+		);
+		SCOPE_LOCK_READS.with(|c| c.set(0));
+
+		// An ssh source is refused by the precheck, so this counts the pre-fetch
+		// reads alone — no network, no post-fetch classification.
+		let outcome = plan_source_sync(
+			SourceSyncInput {
+				source: "git@github.com:owner/repo.git".to_string(),
+				git_ref: None,
+				scope: SourceScope::Project {
+					root: project.path().to_path_buf(),
+				},
+			},
+			SourceDiffDeps {
+				fetcher: &PanicFetcher,
+				resolver: &NoToken,
+			},
+		);
+		assert!(matches!(
+			outcome,
+			SourceSyncOutcome::UncheckableSource { .. }
+		));
+		assert_eq!(
+			SCOPE_LOCK_READS.with(|c| c.get()),
+			1,
+			"identities, coordinates and the single-tree decision all come \
+			 from one snapshot"
+		);
+	}
+
+	/// A source nothing can ever fetch must say so BEFORE the "pass --ref"
+	/// refusal. Both are pre-fetch refusals, so the answer is free either way —
+	/// but told to add `--ref` first, the user retries into a source that was
+	/// never fetchable at all.
+	#[test]
+	fn an_unfetchable_source_is_refused_before_the_multi_ref_bail() {
+		let project = TempDir::new().unwrap();
+		write_lock(
+			project.path(),
+			&[
+				(
+					"alpha",
+					entry(
+						"git@github.com:owner/repo.git",
+						"github",
+						Some("main"),
+						"alpha/SKILL.md",
+					),
+				),
+				(
+					"zeta",
+					entry(
+						"git@github.com:owner/repo.git",
+						"github",
+						Some("v1"),
+						"zeta/SKILL.md",
+					),
+				),
+			],
+		);
+
+		let outcome = plan_source_sync(
+			SourceSyncInput {
+				source: "git@github.com:owner/repo.git".to_string(),
+				git_ref: None,
+				scope: SourceScope::Project {
+					root: project.path().to_path_buf(),
+				},
+			},
+			SourceDiffDeps {
+				fetcher: &PanicFetcher,
+				resolver: &NoToken,
+			},
+		);
+
+		match outcome {
+			SourceSyncOutcome::UncheckableSource { reason, .. } => {
+				assert_eq!(reason, UncheckableReason::Ssh)
+			}
+			other => panic!(
+				"the permanent reason must win over MultipleRefs, got {other:?}"
+			),
+		}
+	}
+
+	/// `diff_source` settles its refusals before it builds the baseline. The
+	/// baseline folder-hashes every installed copy of every matching entry, so
+	/// running it ahead of a refusal that was always coming is pure waste — and
+	/// it is invisible in the answer, hence the counter.
+	#[test]
+	fn a_refused_diff_never_builds_the_baseline() {
+		let project = TempDir::new().unwrap();
+		write_lock(
+			project.path(),
+			&[(
+				"s",
+				entry(
+					"git@github.com:owner/repo.git",
+					"github",
+					Some("main"),
+					"s/SKILL.md",
+				),
+			)],
+		);
+		BASELINE_SCANS.with(|c| c.set(0));
+
+		let outcome = diff_source(
+			SourceDiffInput {
+				source: "git@github.com:owner/repo.git".to_string(),
+				git_ref: None,
+				scopes: vec![SourceScope::Project {
+					root: project.path().to_path_buf(),
+				}],
+			},
+			SourceDiffDeps {
+				fetcher: &PanicFetcher,
+				resolver: &NoToken,
+			},
+		);
+
+		assert!(matches!(
+			outcome,
+			SourceDiffOutcome::UncheckableSource { .. }
+		));
+		assert_eq!(
+			BASELINE_SCANS.with(|c| c.get()),
+			0,
+			"the precheck refusal must come before the hashing sweep"
+		);
 	}
 }

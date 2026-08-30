@@ -2183,6 +2183,99 @@ fn source_sync_skill_filter_installs_only_named_skill() {
 	);
 }
 
+/// The `source sync --update` WRITE path, end to end.
+///
+/// The suite had no successful `--update` at all: the only e2e that passed the
+/// flag asserted a refusal. That left the plan's `pre_fetch_identities` — the
+/// compare-and-set every post-fetch writer owes, carried across the crate
+/// boundary from `plan_source_sync` into `apply_update_row` — completely
+/// unobserved. Emptying it makes every row answer "skill appeared in the lock
+/// while this sync was fetching" and write nothing, silently, with the suite
+/// green.
+///
+/// Asserted as OUTCOMES, not as the row's `applied` flag alone: the installed
+/// file must hold the new bytes and the lock hash must have moved.
+#[cfg(unix)]
+#[test]
+fn source_sync_update_rewrites_the_installed_skill_and_the_lock() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"alpha",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+	let lock_path = state.path().join("skills/.skill-lock.json");
+	let hash_before: Value =
+		serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap())
+			.unwrap();
+	let hash_before = hash_before["skills"]["alpha"]["contentHash"].clone();
+	assert!(
+		hash_before.as_str().is_some_and(|h| !h.is_empty()),
+		"seed must record a content hash"
+	);
+
+	// Upstream moves.
+	std::fs::write(
+		src.path().join("alpha/SKILL.md"),
+		"---\nname: alpha\ndescription: d\n---\nupdated body\n",
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args([
+			"-g",
+			"source",
+			"sync",
+			"owner/repo",
+			"--skill",
+			"alpha",
+			"--update",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let raw = json.to_string();
+	assert!(
+		raw.contains("\"applied\":true"),
+		"the update row must report a write: {raw}"
+	);
+
+	let installed = std::fs::read_to_string(
+		home.path().join(".claude/skills/alpha/SKILL.md"),
+	)
+	.unwrap();
+	assert!(
+		installed.contains("updated body"),
+		"the installed copy must hold the new bytes: {installed}"
+	);
+	let after: Value =
+		serde_json::from_str(&std::fs::read_to_string(&lock_path).unwrap())
+			.unwrap();
+	assert_ne!(
+		after["skills"]["alpha"]["contentHash"], hash_before,
+		"the lock hash must advance with the content: {after}"
+	);
+}
+
 #[cfg(unix)]
 #[test]
 fn source_sync_skill_filter_unknown_name_warns_and_installs_nothing() {
@@ -2923,6 +3016,176 @@ fn source_list_json_runs_with_no_agent_config() {
 	// Empty lock -> empty JSON array.
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert!(json.is_array(), "expected a JSON array, got: {json}");
+}
+
+/// A source whose entries are pinned to DIFFERENT refs: `diff` reports them,
+/// `sync` still refuses.
+///
+/// `diff` now runs through `sources::diff_source`, which owns its fetches and
+/// splits into one cohort per recorded ref — so it answers per row, exactly as
+/// `GET /sources/diff` always has. It used to refuse the whole command, giving
+/// the two surfaces two answers for one lock.
+///
+/// `sync` cannot follow: applying updates needs one fetched tree per ref held
+/// through the whole install flow, so it keeps refusing — with the message that
+/// names the refs and points at `--ref`.
+#[test]
+fn a_multi_ref_source_diffs_per_ref_but_still_refuses_to_sync() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+	write_source_skill(src.path(), "zeta", "zeta");
+
+	std::fs::create_dir_all(project.path().join(".claude")).unwrap();
+	std::fs::write(
+		project.path().join("skills-lock.json"),
+		r#"{"version":1,"skills":{
+		  "alpha":{"source":"owner/repo","sourceType":"github","ref":"main",
+		    "skillPath":"alpha/SKILL.md","computedHash":"stale"},
+		  "zeta":{"source":"owner/repo","sourceType":"github","ref":"v1",
+		    "skillPath":"zeta/SKILL.md","computedHash":"stale"}}}"#,
+	)
+	.unwrap();
+
+	let diff = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-p", "source", "diff", "owner/repo", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		diff.status.success(),
+		"diff must report the refs, not refuse them; stderr: {}",
+		String::from_utf8_lossy(&diff.stderr)
+	);
+	let json: Value = serde_json::from_slice(&diff.stdout).unwrap();
+	let row_state = |name: &str| -> String {
+		json[0]["skills"]
+			.as_array()
+			.unwrap()
+			.iter()
+			.find(|s| s["name"] == name)
+			.unwrap_or_else(|| panic!("row {name} missing from {json}"))["state"]
+			.as_str()
+			.unwrap()
+			.to_string()
+	};
+	// Each entry is judged against ITS OWN recorded ref. Judging both against
+	// one cohort would report the other ref's skill as `notInstalled` — the
+	// verdict a "clean up removed" acts on.
+	assert_eq!(row_state("alpha"), "installedOutdated", "json: {json}");
+	assert_eq!(row_state("zeta"), "installedOutdated", "json: {json}");
+
+	let sync = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["-p", "source", "sync", "owner/repo", "--update", "--yes"])
+		.output()
+		.unwrap();
+	assert!(
+		!sync.status.success(),
+		"sync holds ONE tree, so two refs must still refuse; stdout: {}",
+		String::from_utf8_lossy(&sync.stdout)
+	);
+	let stderr = String::from_utf8_lossy(&sync.stderr);
+	assert!(
+		stderr.contains("different refs")
+			&& stderr.contains("main")
+			&& stderr.contains("v1")
+			&& stderr.contains("--ref"),
+		"the refusal must name both refs and the way out: {stderr}"
+	);
+}
+
+/// A host-blind source that resolves to a DIFFERENT forge in each scope.
+///
+/// `source list` prints the lock's host-blind `SOURCE`, so pasting it back can
+/// select two forges at once. The old CLI refused the whole command ("matches 2
+/// repositories"); each scope now diffs the origin ITS OWN lock records, which
+/// is the better answer — one fetched tree never judges the other forge's rows.
+///
+/// The refusal carried one thing the rows do not: that there were two
+/// repositories. So `origin` is on every scope view, and the human table gets a
+/// note when the origins disagree. Without those, a user reads two tables and
+/// cannot tell they describe different repos.
+#[test]
+fn a_source_spanning_two_forges_diffs_each_scope_against_its_own_origin() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	write_source_skill(src.path(), "alpha", "alpha");
+
+	let global = state.path().join("skills");
+	std::fs::create_dir_all(&global).unwrap();
+	std::fs::write(
+		global.join(".skill-lock.json"),
+		r#"{"version":3,"skills":{
+		  "alpha":{"source":"acme/skills","sourceType":"github",
+		    "sourceUrl":"https://forge-a.example/acme/skills",
+		    "skillPath":"alpha/SKILL.md","skillFolderHash":"stale",
+		    "installedAt":"t","updatedAt":"t"}}}"#,
+	)
+	.unwrap();
+	std::fs::write(
+		project.path().join("skills-lock.json"),
+		r#"{"version":1,"skills":{
+		  "alpha":{"source":"acme/skills","sourceType":"github",
+		    "sourceUrl":"https://forge-b.example/acme/skills",
+		    "skillPath":"alpha/SKILL.md","computedHash":"stale"}}}"#,
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["source", "diff", "acme/skills", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"per-scope resolution must not refuse; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let views = json.as_array().expect("one view per scope");
+	assert_eq!(views.len(), 2, "json: {json}");
+	let origin_of = |scope: &str| -> String {
+		views
+			.iter()
+			.find(|v| v["scope"] == scope)
+			.unwrap_or_else(|| panic!("scope {scope} missing from {json}"))["origin"]
+			.as_str()
+			.unwrap()
+			.to_string()
+	};
+	assert!(
+		origin_of("global").contains("forge-a.example"),
+		"json: {json}"
+	);
+	assert!(
+		origin_of("project").contains("forge-b.example"),
+		"json: {json}"
+	);
+
+	// The human table has no origin column, so the disagreement is called out
+	// beside it — the one thing the removed refusal used to say.
+	let human = isolated_cli(home.path(), state.path())
+		.current_dir(project.path())
+		.env("AGHUB_TEST_SOURCE_FETCH_ROOT", src.path())
+		.args(["source", "diff", "acme/skills"])
+		.output()
+		.unwrap();
+	assert!(human.status.success());
+	let note = String::from_utf8_lossy(&human.stderr);
+	assert!(
+		note.contains("different repository per scope")
+			&& note.contains("forge-a.example")
+			&& note.contains("forge-b.example"),
+		"the two origins must be named: {note}"
+	);
 }
 
 #[test]
@@ -6127,11 +6390,23 @@ fn check_skills_default_output_is_a_table_with_the_offline_hint() {
 		String::from_utf8_lossy(&install.stderr)
 	);
 
+	// `-v` only to read the projection's own accounting off stderr; it changes
+	// nothing on stdout, which the assertions below still check.
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-g", "check", "skills"])
+		.args(["-v", "-g", "check", "skills"])
 		.output()
 		.unwrap();
 	assert!(out.status.success());
+	// The offline default must not pay for a disk sweep. Nothing in the OUTPUT
+	// can show this — the orchestrator's offline gate never reads a local hash,
+	// so hashing anyway produces identical rows. The projection's own counter is
+	// the only observable, and this is the call site that supplies the flag.
+	let log = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		log.contains("folders_hashed=0"),
+		"an offline check must hash nothing, and there IS an installed locked \
+		 skill here for it to have hashed: {log}"
+	);
 	let text = String::from_utf8_lossy(&out.stdout);
 	assert!(
 		text.contains("SKILL") && text.contains("STATUS"),
@@ -6148,6 +6423,65 @@ fn check_skills_default_output_is_a_table_with_the_offline_hint() {
 	assert!(
 		serde_json::from_str::<Value>(&text).is_err(),
 		"the default must not be JSON: {text}"
+	);
+}
+
+/// The offline default's reasons come from the SHARED orchestrator, not from a
+/// table in this crate.
+///
+/// `network` means "we did not look", and it is only honest when looking WOULD
+/// have answered. A source this build can never fetch — an ssh remote, a
+/// `local` entry — is permanently uncheckable, so `--online` changes nothing and
+/// the row has to say which permanent reason applies. The CLI used to answer
+/// `local` where the API answered `network` for the SAME lock entry under the
+/// SAME flag; both now read the one orchestrator.
+#[test]
+fn check_offline_reports_permanent_reasons_not_network() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let dir = state.path().join("skills");
+	std::fs::create_dir_all(&dir).unwrap();
+	std::fs::write(
+		dir.join(".skill-lock.json"),
+		r#"{"version":3,"skills":{
+		  "ssh-one":{"source":"git@github.com:owner/repo","sourceType":"git",
+		    "sourceUrl":"git@github.com:owner/repo","skillPath":"SKILL.md",
+		    "skillFolderHash":"","installedAt":"t","updatedAt":"t"},
+		  "local-one":{"source":"/somewhere/skills","sourceType":"local",
+		    "sourceUrl":"/somewhere/skills","skillPath":"SKILL.md",
+		    "skillFolderHash":"","installedAt":"t","updatedAt":"t"},
+		  "remote-one":{"source":"owner/repo","sourceType":"github",
+		    "sourceUrl":"https://github.com/owner/repo","skillPath":"SKILL.md",
+		    "skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#,
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "check", "skills", "--json"])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let rows: Vec<Value> =
+		serde_json::from_slice(&out.stdout).expect("json array");
+	let reason = |name: &str| -> String {
+		rows.iter()
+			.find(|r| r["name"] == name)
+			.unwrap_or_else(|| panic!("row {name} missing from {rows:?}"))["reason"]
+			.as_str()
+			.unwrap()
+			.to_string()
+	};
+	assert_eq!(reason("ssh-one"), "ssh", "rows: {rows:?}");
+	assert_eq!(reason("local-one"), "local", "rows: {rows:?}");
+	// The row that a network run really could answer keeps "we did not look".
+	assert_eq!(reason("remote-one"), "network", "rows: {rows:?}");
+	assert!(
+		rows.iter().all(|r| r["checked"] == false),
+		"nothing was looked up offline: {rows:?}"
 	);
 }
 

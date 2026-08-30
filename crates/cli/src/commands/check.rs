@@ -3,9 +3,10 @@
 //! Reports each locked skill's update status as a `SkillUpdateResponse`-shaped
 //! JSON array (camelCase, `status`-tagged).
 //!
-//! **Default (offline).** No network: any skill whose freshness needs a remote
-//! fetch is reported `Uncheckable` (reason `network` for remote sources,
-//! `local` for local-only sources).
+//! **Default (offline).** No network, and no disk hashing either: the SHARED
+//! orchestrator is run with `offline`, so a source it could never fetch keeps
+//! its permanent reason (`local`, `ssh`, `unsupportedScheme`) and everything
+//! else is reported `Uncheckable { network }` — "we did not look".
 //!
 //! **`--online` (alias `--check-remote`).** Opt-in network check that runs the
 //! shared [`skill_update`] orchestrator with the same env token resolver as
@@ -20,15 +21,13 @@
 
 use crate::{eprintln_verbose, ResourceType};
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::removal::skill_root;
 use aghub_core::skills::update::{SkillUpdateStatus, UncheckableReason};
 use anyhow::Result;
 use serde::Serialize;
 use skill_update::{
-	check_updates, CheckDeps, EntryInput, Fetcher, GitFetcher, RefResolver,
-	ResultCache, SourceRef,
+	check_updates, projection, CheckDeps, EntryInput, Fetcher, GitFetcher,
+	RefResolver, ResultCache,
 };
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -167,17 +166,6 @@ fn short(hash: &str) -> String {
 	}
 }
 
-/// Map a lock entry's `source_type` to the offline `Uncheckable` reason.
-/// Local sources can never be checked from a committed lock without a remote;
-/// everything else needs a network fetch that lives in `crates/api`.
-fn offline_reason(source_type: &str) -> &'static str {
-	if source_type.eq_ignore_ascii_case("local") {
-		"local"
-	} else {
-		"network"
-	}
-}
-
 /// Map an orchestrator [`UncheckableReason`] to the camelCase reason string used
 /// in the response (parity with `aghub-api`'s `SkillUpdateStatusResponse`).
 fn uncheckable_reason_str(reason: UncheckableReason) -> &'static str {
@@ -242,52 +230,11 @@ pub fn execute(
 		want_project.then_some(project_root).flatten(),
 	)?;
 
-	if online {
-		// Consumes the SAME snapshot the offline path does — reading the lock
-		// again here left the online path with the very window the probe
-		// closes.
-		return execute_online(locks, project_root, json);
-	}
-
-	let mut views: Vec<SkillUpdateView> = Vec::new();
-
-	if let Some(global) = locks.global {
-		eprintln_verbose!(
-			"Checking {} global locked skill(s)",
-			global.skills.len()
-		);
-		for (name, entry) in global.skills {
-			views.push(SkillUpdateView {
-				name,
-				scope: "global".to_string(),
-				// Offline default: nothing was looked up.
-				checked: false,
-				status: StatusView::Uncheckable {
-					reason: offline_reason(&entry.source_type).to_string(),
-				},
-			});
-		}
-	}
-
-	if let Some(project) = locks.project {
-		eprintln_verbose!(
-			"Checking {} project locked skill(s)",
-			project.skills.len()
-		);
-		for (name, entry) in project.skills {
-			views.push(SkillUpdateView {
-				name,
-				scope: "project".to_string(),
-				checked: false,
-				status: StatusView::Uncheckable {
-					reason: offline_reason(&entry.source_type).to_string(),
-				},
-			});
-		}
-	}
-
-	print_updates(&views, json, false)?;
-	Ok(())
+	// ONE path for both modes. `offline` is a flag on the shared orchestrator,
+	// not a second implementation: the CLI used to build its own offline rows
+	// and map a `local` lock entry to reason `local` while the orchestrator
+	// answered `network` for the very same entry under the very same flag.
+	run_check(locks, project_root, online, json)
 }
 
 /// Per-fetch timeout / deadline / concurrency for an online check (mirrors the
@@ -305,26 +252,46 @@ const CACHE_TTL: Duration = Duration::from_secs(60);
 // `GIT_USERNAME`/`GIT_PASSWORD` basic-auth semantics.
 use super::source::EnvTokenResolver;
 
-/// `--online` update check: run the shared `skill-update` orchestrator with the
-/// env token resolver and the default git adapters. **Read-only** — it never
-/// heals either lock (the desktop API owns global-lock self-heal; the CLI
-/// `check` stays non-mutating, and the project lock is VCS-tracked).
-fn execute_online(
+/// Run the shared `skill-update` orchestrator over the already-read locks, with
+/// the env token resolver and the default git adapters.
+///
+/// `online == false` is the DEFAULT `check`: the orchestrator is told `offline`
+/// and answers every row without touching the network — a source it could never
+/// fetch (local / ssh / unsupported scheme) still gets its permanent reason,
+/// everything else gets `network`, meaning "we did not look". That distinction
+/// is the orchestrator's, not this file's.
+///
+/// **Read-only** either way — it never heals either lock (the desktop API owns
+/// global-lock self-heal; the CLI `check` stays non-mutating, and the project
+/// lock is VCS-tracked).
+fn run_check(
 	locks: crate::commands::LockSnapshot,
 	project_root: Option<&Path>,
+	online: bool,
 	json: bool,
 ) -> Result<()> {
+	// The SHARED projection: `wanted`-scoped hashing, the per-root memo, and the
+	// lock-before-disk read order all come from `skill_update::projection`
+	// rather than a private copy that drifted from the API's.
+	//
+	// The lock closures hand back the ALREADY-READ snapshot. Reading it again
+	// here would reopen the window the fail-closed probe exists to close — see
+	// `LockSnapshot`.
 	let mut entries: Vec<EntryInput> = Vec::new();
 	if let Some(global) = locks.global {
-		let local = local_hashes_for_scope(ResourceScope::GlobalOnly, None);
-		entries.extend(global_lock_entries(global, &local));
+		entries.extend(projection::global_lock_entries(!online, || global).0);
 	}
 	if let Some(project) = locks.project {
-		let local =
-			local_hashes_for_scope(ResourceScope::ProjectOnly, project_root);
-		entries.extend(project_lock_entries(project, &local));
+		entries.extend(
+			projection::project_lock_entries(!online, project_root, || project)
+				.0,
+		);
 	}
-	eprintln_verbose!("Checking {} locked skill(s) online", entries.len());
+	eprintln_verbose!(
+		"Checking {} locked skill(s) ({})",
+		entries.len(),
+		if online { "online" } else { "offline" }
+	);
 
 	// One repository behind both: the preflight's tip resolution and the fetch
 	// that may follow it share the composite, its snapshot memo, and its token
@@ -342,7 +309,7 @@ fn execute_online(
 		cache: &mut cache,
 		per_fetch: PER_FETCH,
 		concurrency: CONCURRENCY,
-		offline: false,
+		offline: !online,
 		overall_deadline: OVERALL_DEADLINE,
 	};
 
@@ -356,111 +323,17 @@ fn execute_online(
 		.map(|output| SkillUpdateView {
 			name: output.key.name,
 			scope: output.key.scope,
-			// --online: this row IS the result of a real lookup, so an
-			// `Uncheckable { reason: "network" }` here is a genuine failure.
-			checked: true,
+			// Only `--online` looked upstream, so an `Uncheckable { reason:
+			// "network" }` is a genuine failure there and "we did not look"
+			// otherwise.
+			checked: online,
 			status: status_view(output.status),
 		})
 		.collect();
 	views.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
-	print_updates(&views, json, true)?;
+	print_updates(&views, json, online)?;
 	Ok(())
-}
-
-/// Hash each installed skill folder so the C1 trustworthiness gate has a
-/// `local_hash` baseline. Names that resolve to differing hashes across agents
-/// are dropped as ambiguous. Mirrors the API route's `local_hashes_for_scope`.
-fn local_hashes_for_scope(
-	resource_scope: ResourceScope,
-	project_root: Option<&Path>,
-) -> HashMap<String, String> {
-	let mut hashes = HashMap::new();
-	let mut ambiguous = HashSet::new();
-	for agent in aghub_core::load_all_agents(resource_scope, project_root) {
-		for skill in agent.skills {
-			if ambiguous.contains(&skill.name) {
-				continue;
-			}
-			let Some(root) = skill_root(&skill) else {
-				continue;
-			};
-			let Ok(hash) = skill::compute_skill_folder_hash(&root) else {
-				continue;
-			};
-			match hashes.get(&skill.name) {
-				Some(existing) if existing != &hash => {
-					hashes.remove(&skill.name);
-					ambiguous.insert(skill.name);
-				}
-				Some(_) => {}
-				None => {
-					hashes.insert(skill.name, hash);
-				}
-			}
-		}
-	}
-	hashes
-}
-
-/// Project the global skill lock into the orchestrator's per-entry inputs.
-/// Takes the ALREADY-READ lock. Reading it again here would reopen the window
-/// the fail-closed probe exists to close — see `LockSnapshot`.
-fn global_lock_entries(
-	lock: skill::lock::SkillLockFile,
-	local_hashes: &HashMap<String, String>,
-) -> Vec<EntryInput> {
-	lock.skills
-		.into_iter()
-		.map(|(name, entry)| EntryInput {
-			local_hash: local_hashes.get(&name).cloned(),
-			name,
-			scope: "global".to_string(),
-			source_ref: SourceRef {
-				source: skill_update::sources::entry_clone_source(
-					&entry.source,
-					Some(&entry.source_url),
-					&entry.source_type,
-				),
-				ref_: entry.ref_name,
-			},
-			source_type: entry.source_type,
-			skill_path: entry.skill_path,
-			stored_hash: entry.content_hash,
-			ref_commit: entry.ref_commit,
-		})
-		.collect()
-}
-
-/// Project the project skill lock into the orchestrator's per-entry inputs.
-/// See [`global_lock_entries`] for why the lock is passed in.
-fn project_lock_entries(
-	lock: skill::lock::local::LocalSkillLockFile,
-	local_hashes: &HashMap<String, String>,
-) -> Vec<EntryInput> {
-	lock.skills
-		.into_iter()
-		.map(|(name, entry)| EntryInput {
-			local_hash: local_hashes.get(&name).cloned(),
-			name,
-			scope: "project".to_string(),
-			source_ref: SourceRef {
-				// The shared coordinate — NOT a local `source_url.unwrap_or(
-				// source)`, which reads a legacy GitLab entry's `group/repo` as
-				// GitHub shorthand and checks it against the wrong repository.
-				source: skill_update::sources::entry_clone_source(
-					&entry.source,
-					entry.source_url.as_deref(),
-					&entry.source_type,
-				),
-				ref_: entry.ref_name,
-			},
-			source_type: entry.source_type,
-			skill_path: entry.skill_path,
-			stored_hash: Some(entry.computed_hash),
-			ref_commit: entry.ref_commit,
-		})
-		.collect()
 }
 
 #[cfg(test)]
