@@ -563,39 +563,33 @@ fn plan_copy_removal(
 		let mut shared_master_kept = false;
 		if let Some(root) = crate::transfer::skill_root_unchecked(skill) {
 			if root.exists() {
-				// Guard against orphaning a live symlink: when this dir is a
-				// shared universal master that ANOTHER in-scope agent view still
-				// symlinks into (e.g. a `.agents/skills/<name>` master read
-				// directly by this agent, but symlinked by Claude), keep it and
-				// report it instead of `remove_dir_all`-ing it. Plain per-agent
-				// copies have no inbound symlinks, so this never blocks them.
-				//
-				// The referrer sweep alone is not enough: a NativeReader leaves
-				// NO symlink behind, so a second agent reading the same Master
-				// is invisible to it and the Master got `remove_dir_all`'d out
-				// from under that agent while the operation reported success.
-				// The Master is shared BY CONSTRUCTION, so a single-agent
-				// removal may never take it — only `--all-agents` (which means
-				// "remove everywhere") may, through the branch above.
-				if is_universal_master(&root, project_root) {
-					shared_master_kept = true;
-					skipped.push(root);
-				} else if let Some(referrer) = dir_has_external_referrer(
+				match single_agent_keep_reason(
 					&root,
 					all_agent_dirs,
 					&skill.name,
+					project_root,
 				) {
-					// Name the referrer, not just the kept directory: `skipped`
-					// lists only the caller's own path, so a keep decided by one
-					// of 25 OTHER agents' dirs was previously undiagnosable.
-					log::warn!(
-						"keeping {}: {} still references it",
-						root.display(),
-						referrer.display()
-					);
-					skipped.push(root);
-				} else {
-					push_contained(root, roots, &mut paths, &mut skipped);
+					Some(KeepReason::UniversalMaster) => {
+						shared_master_kept = true;
+						skipped.push(root);
+					}
+					Some(KeepReason::ExternalReferrer(referrer)) => {
+						// Name the referrer, not just the kept directory:
+						// `skipped` lists only the caller's own path, so a keep
+						// decided by one of 25 OTHER agents' dirs was
+						// previously undiagnosable. The reason CARRIES the
+						// path for exactly this — an extraction that dropped
+						// it would silently undo the diagnosis.
+						log::warn!(
+							"keeping {}: {} still references it",
+							root.display(),
+							referrer.display()
+						);
+						skipped.push(root);
+					}
+					None => {
+						push_contained(root, roots, &mut paths, &mut skipped)
+					}
 				}
 			}
 		}
@@ -778,6 +772,46 @@ fn dir_lists_name(dir: &Path, safe: &str) -> Option<bool> {
 		}
 	}
 	Some(found)
+}
+
+/// Why a SINGLE-agent removal must keep a skill folder instead of deleting it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeepReason {
+	/// The dir is a shared universal Master — shared BY CONSTRUCTION, so no
+	/// single-agent removal may take it. Reported to the caller as
+	/// `shared_master_kept`.
+	UniversalMaster,
+	/// Not a Master, but another in-scope agent's symlink resolves into it;
+	/// deleting it would orphan that live link. Carries THAT link, because the
+	/// caller can only report a keep it can name.
+	ExternalReferrer(PathBuf),
+}
+
+/// The one rule for "may a single-agent removal `remove_dir_all` this folder?".
+///
+/// Two criteria, and BOTH are load-bearing:
+/// - [`is_universal_master`] — the referrer sweep alone is not enough, because
+///   a NativeReader leaves NO symlink behind, so every other agent reading the
+///   same Master is invisible to it and the Master got `remove_dir_all`'d out
+///   from under them while the operation reported success.
+/// - [`dir_has_external_referrer`] — a plain copy OUTSIDE the universal roots
+///   can still have an inbound symlink, which the first criterion cannot see.
+///
+/// Shared on purpose: [`plan_copy_removal`] and `ConfigManager::remove_skill`
+/// both answer this question, and hand-mirroring an OR across the two is how
+/// the seam ended up enforcing only half of it.
+pub fn single_agent_keep_reason(
+	dir: &Path,
+	all_agent_dirs: &[PathBuf],
+	name: &str,
+	project_root: Option<&Path>,
+) -> Option<KeepReason> {
+	if is_universal_master(dir, project_root) {
+		Some(KeepReason::UniversalMaster)
+	} else {
+		dir_has_external_referrer(dir, all_agent_dirs, name)
+			.map(KeepReason::ExternalReferrer)
+	}
 }
 
 fn push_contained(
@@ -1632,6 +1666,54 @@ mod tests {
 			None,
 		);
 		assert!(!dirs.is_empty(), "agents define global skill dirs");
+	}
+
+	// The shared single-agent rule, pinned on all three outcomes — both
+	// criteria are load-bearing and each catches what the other cannot.
+	#[cfg(unix)]
+	#[test]
+	fn single_agent_keep_reason_covers_both_criteria() {
+		// `is_universal_master` reads HOME / XDG_CONFIG_HOME through
+		// `universal_master_roots`; one env mutex per test binary.
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let tmp = tempdir().unwrap();
+		let root = tmp.path();
+
+		// (1) A universal Master with NO inbound link: only the roots test
+		// sees it, and every project Master has NativeReaders.
+		let master = root.join(".agents/skills/shared");
+		write_skill_md(&master);
+		// (2) A private copy that another agent's symlink points into: outside
+		// the universal roots, so only the referrer sweep sees it.
+		let copy = root.join(".codex/skills/linked");
+		write_skill_md(&copy);
+		let claude = root.join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		std::os::unix::fs::symlink(&copy, claude.join("linked")).unwrap();
+		// (3) A private copy nothing references.
+		let lone = root.join(".codex/skills/lone");
+		write_skill_md(&lone);
+
+		let dirs = vec![claude.clone(), root.join(".codex/skills")];
+		assert_eq!(
+			single_agent_keep_reason(&master, &dirs, "shared", Some(root)),
+			Some(KeepReason::UniversalMaster)
+		);
+		assert!(
+			matches!(
+				single_agent_keep_reason(&copy, &dirs, "linked", Some(root)),
+				Some(KeepReason::ExternalReferrer(ref r))
+					if r == &claude.join("linked")
+			),
+			"the reason must name the link that decided it: {:?}",
+			single_agent_keep_reason(&copy, &dirs, "linked", Some(root))
+		);
+		assert_eq!(
+			single_agent_keep_reason(&lone, &dirs, "lone", Some(root)),
+			None
+		);
 	}
 
 	// T-PLAN-JUNCTION-REFERRER: a targeted junction referrer is planned for

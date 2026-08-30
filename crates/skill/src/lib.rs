@@ -72,4 +72,9 @@ pub use validator::{
 };
 
 // Re-export from skills-ref for convenience
+/// The RAW frontmatter map, for callers that must preserve keys this crate's
+/// [`Skill`] does not model (`license`, `compatibility`, anything a future
+/// SKILL.md adds). Re-exported rather than re-implemented: a second `---`
+/// splitter would be a second dialect of the same file format.
+pub use skills_ref::parser::parse_frontmatter;
 pub use skills_ref::{validate as validate_skill_properties, SkillProperties};

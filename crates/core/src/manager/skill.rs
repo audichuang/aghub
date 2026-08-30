@@ -393,7 +393,7 @@ impl ConfigManager {
 			std::fs::create_dir_all(&canonical)?;
 			std::fs::write(
 				canonical.join("SKILL.md"),
-				format_skill(&skill, None),
+				format_skill(&skill, None, &BTreeMap::new()),
 			)?;
 		}
 
@@ -536,6 +536,9 @@ impl ConfigManager {
 					)));
 				}
 			};
+			// Likewise read BEFORE the rename moves the file: the author's own
+			// frontmatter keys, which the reduced model below cannot carry.
+			let preserved = preserved_frontmatter(&path);
 
 			let mut final_file_path = path.clone();
 			// A universal skill is rename-relinked (per-agent symlinks re-pointed)
@@ -597,7 +600,8 @@ impl ConfigManager {
 				}
 			}
 
-			let content = format_skill(&skill, existing_body.as_deref());
+			let content =
+				format_skill(&skill, existing_body.as_deref(), &preserved);
 			std::fs::write(&final_file_path, content)?;
 
 			let mut fs_skill = skill.clone();
@@ -640,10 +644,10 @@ impl ConfigManager {
 			.as_ref()
 			.is_some_and(|c| c.skills.iter().any(|s| s.name == name));
 
-		// Guarded like every other disk mutation: this deletes a Master or a
-		// Referrer. Its one production caller is CLI `add --from … --name X`,
-		// which removes the imported name and re-adds it under X — so the
-		// deletion must be attributed to us across that pair. Re-reads config
+		// Guarded like every other disk mutation: this unlinks a Referrer or
+		// deletes a private copy. It may NOT take a shared Master — see the
+		// `single_agent_keep_reason` guard below; `remove_skill_planned` is the
+		// layout-aware seam that can. Re-reads config
 		// under the lock because the PATHS it deletes come from the entry
 		// (`source_path` / `canonical_path`), and a stale entry points at whatever
 		// another process has since put there.
@@ -652,19 +656,17 @@ impl ConfigManager {
 
 		let target_dir = self.target_skills_dir();
 		let agent_name = self.adapter.name().to_string();
-		// Allow-listed roots for the containment guard, computed before the
-		// mutable borrow below.
-		let roots = {
-			let all_agent_dirs =
-				crate::skills::removal::agent_skill_dirs_in_scope(
-					self.scope,
-					self.project_root.as_deref(),
-				);
-			crate::skills::removal::allowed_skill_roots(
-				&all_agent_dirs,
-				self.project_root.as_deref(),
-			)
-		};
+		// Allow-listed roots for the containment guard, plus the agent dirs the
+		// referrer guard sweeps. Both computed before the mutable borrow below.
+		let project_root = self.project_root.clone();
+		let all_agent_dirs = crate::skills::removal::agent_skill_dirs_in_scope(
+			self.scope,
+			project_root.as_deref(),
+		);
+		let roots = crate::skills::removal::allowed_skill_roots(
+			&all_agent_dirs,
+			project_root.as_deref(),
+		);
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})?;
@@ -695,6 +697,41 @@ impl ConfigManager {
 
 		if let Some(path) = file_path {
 			if path.exists() {
+				// This is a PUBLIC seam whose `!is_link` branch ends in
+				// `remove_dir_all`, and the entry it deletes comes from
+				// discovery: an agent that reads `.agents/skills` directly gets
+				// the shared Master with `canonical_path = None`, so without
+				// this the seam ate a shared Master and returned Ok. The
+				// single-agent rule is `plan_copy_removal`'s, shared verbatim
+				// rather than restated — a `dir_has_external_referrer`-only
+				// version of it let a Master with no symlinks but ~10 other
+				// NativeReaders through, which is silent data loss with no
+				// dangling link left behind to notice it by.
+				//
+				// Nothing legitimately deletes a Master through here: this is
+				// single-agent by construction, and every project Master has
+				// NativeReaders. Layout-aware removal that may take one is
+				// `remove_skill_planned`, per this method's doc.
+				if !is_link {
+					if let Some(dir) = path.parent() {
+						if crate::skills::removal::single_agent_keep_reason(
+							dir,
+							&all_agent_dirs,
+							name,
+							project_root.as_deref(),
+						)
+						.is_some()
+						{
+							return Err(ConfigError::unsupported_operation(
+								"remove for this agent alone",
+								"shared universal master (or a folder another \
+								 agent's link still points at) — use \
+								 remove_skill_planned",
+								&agent_name,
+							));
+						}
+					}
+				}
 				remove_skill_path(
 					&path,
 					&safe_name,
@@ -1043,7 +1080,7 @@ impl ConfigManager {
 		// Symlink-only model (Locked Decision 1): every install-from-path writes
 		// a single .agents/skills/<name> Master and links THIS agent to it. The
 		// old isolated-copy body is removed; there is no copy install path.
-		self.add_skill_from_path_universal(path)
+		self.add_skill_from_path_universal(path, None)
 	}
 
 	/// Symlink-only install from a local path (Locked Decision 1): parses the
@@ -1053,9 +1090,17 @@ impl ConfigManager {
 	/// now delegate here; `--universal` is a deprecated no-op. The full
 	/// source tree (`assets/`, `scripts/`, `examples/`, etc.) is preserved
 	/// — matching the API path's `install_git_skill_universal` behaviour.
+	///
+	/// `as_name` installs the source under a name of the caller's choosing (CLI
+	/// `add --from <path> --name <new>`). It is applied BEFORE the duplicate
+	/// check, so the whole install is ONE step inside ONE lock span. It used to
+	/// be import-then-`update_skill`-rename in the CLI, which released the lock
+	/// between the two halves (another process could swap the Master out from
+	/// under the rename) and stranded the imported skill when the rename failed.
 	pub fn add_skill_from_path_universal(
 		&mut self,
 		path: &Path,
+		as_name: Option<&str>,
 	) -> Result<SkillAdd> {
 		debug!(
 			"adding skill (universal) from path '{}' for agent '{}'",
@@ -1065,7 +1110,13 @@ impl ConfigManager {
 		let skill_pkg = skill::parser::parse(path).map_err(|e| {
 			ConfigError::InvalidConfig(format!("Failed to parse skill: {e}"))
 		})?;
-		let skill = convert_skill(skill_pkg);
+		let mut skill = convert_skill(skill_pkg);
+		// The source's OWN name, kept because the Master's SKILL.md still
+		// carries it after the copy and discovery keys on that field.
+		let source_name = skill.name.clone();
+		if let Some(requested) = as_name {
+			skill.name = requested.to_string();
+		}
 
 		let UniversalPrep {
 			agent_name,
@@ -1087,6 +1138,14 @@ impl ConfigManager {
 
 		let config = self.config_mut()?;
 		if config.skills.iter().any(|s| s.name == skill.name) {
+			// An explicit `--name` never takes the idempotent no-op branches
+			// below: those report success having written NOTHING, which for a
+			// caller who pointed at a specific source silently discards it. A
+			// hard refusal BEFORE any write is also what makes this flow need
+			// no rollback — there is nothing half-installed to undo.
+			if as_name.is_some() {
+				return Err(ConfigError::resource_exists("skill", &skill.name));
+			}
 			let safe = sanitize_name(&skill.name);
 			let canonical = canonical_dir.join(&safe);
 			// Both no-op branches below report the INSTALLED skill, never the
@@ -1174,6 +1233,30 @@ impl ConfigManager {
 			&skill.name,
 		)?;
 
+		// The copy carried the SOURCE's SKILL.md verbatim, so its frontmatter
+		// still says `name: <source_name>` — and discovery reads that field,
+		// not the folder name (see `skills::discovery`), so without this the
+		// renamed install would be rediscovered under the source's name.
+		//
+		// Gated on the materializer's OWN receipt: rewriting a Master this call
+		// did NOT create edits a folder someone else owns, and with it the
+		// folder hash the npx lock contract is checked against. `created_master`
+		// is an atomic create-claim, not an exists-probe, so it is safe to trust
+		// here (crates/core/AGENTS.md "Mutation attribution").
+		if skill.name != source_name {
+			if !results.created_master {
+				undo_created_referrers(&results, &safe_name);
+				return Err(ConfigError::resource_exists("skill", &skill.name));
+			}
+			if let Err(e) = rewrite_master_skill_name(&canonical, &skill.name) {
+				// Undo this call's own writes: the Master it just claimed and
+				// every referrer it just linked.
+				undo_created_referrers(&results, &safe_name);
+				let _ = std::fs::remove_dir_all(&canonical);
+				return Err(ConfigError::Io(e));
+			}
+		}
+
 		let canonical_md =
 			canonical.join("SKILL.md").to_string_lossy().to_string();
 		let mut fs_skill = skill.clone();
@@ -1220,6 +1303,12 @@ impl ConfigManager {
 		};
 		config.skills.push(on_disk.clone());
 
+		// Report the entry as it now exists ON DISK, like `add_skill_universal`
+		// does — never the parsed source, whose `source_path` still names the
+		// caller's input directory. The CLI used to paper over this by re-reading
+		// config after its rename step; with the rename gone the wrong paths
+		// would have reached `--json` verbatim.
+		//
 		// Not `save_current()` — see `add_skill`.
 		Ok(SkillAdd::installed(on_disk, &results))
 	}
@@ -1368,7 +1457,7 @@ fn universal_relink_agents(
 			})?;
 		}
 	}
-	crate::skills::linker::link_agents_to_canonical(
+	let report = crate::skills::linker::link_agents_to_canonical(
 		new_canonical,
 		referrers,
 		if use_relative {
@@ -1378,7 +1467,46 @@ fn universal_relink_agents(
 		},
 	)
 	.map_err(|e| ConfigError::Io(std::io::Error::other(e.to_string())))?;
+	// A per-agent conflict or failure is DATA to an INSTALL (the caller reports
+	// it as an "already covered" row) and a hard FAILURE to a RENAME: the
+	// old-name link was unlinked a few lines up, so a referrer that did not get
+	// its new-name link now has no link at all — the skill vanishes for that
+	// agent while the rename returns Ok. Erroring hands `rename_skill_master`
+	// its rollback, which puts the master and the old-name links back. The
+	// check belongs HERE and not in `link_agents_to_canonical`: that primitive
+	// is shared with the install paths, which legitimately consume the rows.
+	if let Some(shortfall) = relink_shortfall(&report) {
+		return Err(ConfigError::Io(std::io::Error::other(shortfall)));
+	}
 	Ok(())
+}
+
+/// The referrers a relink failed to re-point, as one error message — `None`
+/// when every referrer was linked. Shared by the relink and its rollback: a
+/// rollback that silently tolerated a conflict would leave the very dangling
+/// referrer the rollback exists to prevent.
+fn relink_shortfall(
+	report: &crate::skills::linker::UniversalInstallReport,
+) -> Option<String> {
+	if report.conflicts.is_empty() && report.failed.is_empty() {
+		return None;
+	}
+	let mut blocked: Vec<String> = report
+		.conflicts
+		.iter()
+		.map(|p| format!("{} (occupied)", p.display()))
+		.collect();
+	blocked.extend(
+		report
+			.failed
+			.iter()
+			.map(|(p, e)| format!("{} ({e})", p.display())),
+	);
+	Some(format!(
+		"could not re-point {} skill referrer(s) at the renamed master: {}",
+		blocked.len(),
+		blocked.join(", ")
+	))
 }
 
 /// Rename a skill's master directory and, for a universal skill, re-point its
@@ -1502,7 +1630,7 @@ fn rollback_master_rename(
 		}
 		// Recreate any old-name symlinks the partial relink removed; ones still
 		// present resolve to the restored master and are left untouched.
-		crate::skills::linker::link_agents_to_canonical(
+		let report = crate::skills::linker::link_agents_to_canonical(
 			old_master,
 			referrers,
 			if use_relative {
@@ -1515,6 +1643,16 @@ fn rollback_master_rename(
 			err: std::io::Error::other(e.to_string()),
 			link: old_master.to_path_buf(),
 		})?;
+		// Same reason as the forward relink: a per-agent row that is `Ok` but
+		// not LINKED still leaves that referrer missing, and here it is the
+		// rollback's own promise ("the old-name symlinks are restored") that
+		// would be false.
+		if let Some(shortfall) = relink_shortfall(&report) {
+			return Err(RbFail::Relink {
+				err: std::io::Error::other(shortfall),
+				link: old_master.to_path_buf(),
+			});
+		}
 		Ok(())
 	};
 	match do_rollback() {
@@ -1546,9 +1684,87 @@ fn rollback_master_rename(
 	}
 }
 
-/// Serialize frontmatter fields as structured YAML via serde_yaml
-fn serialize_frontmatter(skill: &Skill) -> String {
-	let mut map = BTreeMap::new();
+/// Point a freshly-copied Master's frontmatter `name:` at the name it was
+/// installed under. Everything else — body, `license`, `compatibility`, any key
+/// the author wrote — is carried through the raw map untouched; only `name` is
+/// replaced. Deliberately NOT via `format_skill`, which reserializes from the
+/// reduced model and would drop exactly those keys.
+fn rewrite_master_skill_name(
+	master: &Path,
+	new_name: &str,
+) -> std::io::Result<()> {
+	let md = master.join("SKILL.md");
+	let text = std::fs::read_to_string(&md)?;
+	let (metadata, body) = skill::parse_frontmatter(&text).map_err(|e| {
+		std::io::Error::other(format!(
+			"cannot rename '{}': unreadable frontmatter ({e})",
+			md.display()
+		))
+	})?;
+	let mut map: BTreeMap<String, serde_yaml::Value> =
+		metadata.into_iter().collect();
+	map.insert(
+		"name".to_string(),
+		serde_yaml::Value::String(new_name.to_string()),
+	);
+	let yaml = serde_yaml::to_string(&map).map_err(std::io::Error::other)?;
+	std::fs::write(&md, format!("---\n{yaml}---\n\n{body}\n"))
+}
+
+/// Drop the referrer links THIS install created, by the linker's own receipt.
+/// Best-effort: it runs on a path that is already returning an error, and a
+/// link that is gone is the state we wanted anyway.
+fn undo_created_referrers(
+	results: &crate::skills::install_fetched::MaterializedMaster,
+	safe_name: &str,
+) {
+	for dir in &results.created_referrer_dirs {
+		let link = dir.join(safe_name);
+		if Linker::is_link(&link) {
+			let _ = Linker::unlink(&link);
+		}
+	}
+}
+
+/// The frontmatter keys aghub's reduced [`Skill`] model owns. Everything else
+/// in a SKILL.md's frontmatter belongs to the skill's author and is carried
+/// through untouched by [`preserved_frontmatter`].
+const MODELED_FRONTMATTER_KEYS: [&str; 5] =
+	["name", "description", "author", "version", "allowed-tools"];
+
+/// The frontmatter keys of an existing SKILL.md that aghub does NOT model, so a
+/// rewrite can put them back.
+///
+/// Without this, every `update_skill` — a `--description` edit, and since the
+/// rename went transactional a plain rename too — reserialized the file from a
+/// model that has no `license` / `compatibility` / anything else, silently
+/// deleting fields the author wrote. The MODELED keys are stripped rather than
+/// merged, so clearing one (`author: None`) still clears it.
+///
+/// Best-effort by design: an unreadable or frontmatter-less file yields an
+/// empty map, i.e. exactly the previous behaviour, so this can never turn a
+/// working update into a failure.
+fn preserved_frontmatter(path: &Path) -> BTreeMap<String, serde_yaml::Value> {
+	let Ok(text) = std::fs::read_to_string(path) else {
+		return BTreeMap::new();
+	};
+	let Ok((metadata, _)) = skill::parse_frontmatter(&text) else {
+		return BTreeMap::new();
+	};
+	metadata
+		.into_iter()
+		.filter(|(key, _)| !MODELED_FRONTMATTER_KEYS.contains(&key.as_str()))
+		.collect()
+}
+
+/// Serialize frontmatter fields as structured YAML via serde_yaml, on top of
+/// the author's own unmodeled keys (`preserved`, from [`preserved_frontmatter`];
+/// empty when writing a brand-new file).
+fn serialize_frontmatter(
+	skill: &Skill,
+	preserved: &BTreeMap<String, serde_yaml::Value>,
+) -> String {
+	let mut map = preserved.clone();
 	map.insert(
 		"name".to_string(),
 		serde_yaml::Value::String(skill.name.clone()),
@@ -1585,8 +1801,12 @@ fn serialize_frontmatter(skill: &Skill) -> String {
 
 /// Format a Skill as a valid SKILL.md, preserving existing body content
 /// unless new body content is explicitly supplied.
-fn format_skill(skill: &Skill, existing_body: Option<&str>) -> String {
-	let yaml = serialize_frontmatter(skill);
+fn format_skill(
+	skill: &Skill,
+	existing_body: Option<&str>,
+	preserved: &BTreeMap<String, serde_yaml::Value>,
+) -> String {
+	let yaml = serialize_frontmatter(skill, preserved);
 	let mut out = String::from("---\n");
 	out.push_str(&yaml);
 	out.push_str("---\n");
@@ -2001,7 +2221,7 @@ mod tests {
 		let mut skill = Skill::new("test-skill");
 		skill.description = Some("A test".to_string());
 		let body = "\n# Original Title\n\nInstruction content.\n";
-		let output = format_skill(&skill, Some(body));
+		let output = format_skill(&skill, Some(body), &BTreeMap::new());
 		assert!(output.contains("# Original Title"));
 		assert!(output.contains("Instruction content."));
 		// Frontmatter should be valid YAML
@@ -2012,14 +2232,14 @@ mod tests {
 	#[test]
 	fn test_format_skill_generates_placeholder_without_body() {
 		let skill = Skill::new("test-skill");
-		let output = format_skill(&skill, None);
+		let output = format_skill(&skill, None, &BTreeMap::new());
 		assert!(output.contains("# test-skill"));
 	}
 
 	#[test]
 	fn test_format_skill_stays_parseable_by_skill_crate() {
 		let skill = Skill::new("test-skill");
-		let output = format_skill(&skill, None);
+		let output = format_skill(&skill, None, &BTreeMap::new());
 		let parsed = skill::parser::parse_skill_md(&output).unwrap();
 		assert_eq!(parsed.name, "test-skill");
 		assert_eq!(parsed.description, "");
@@ -2029,7 +2249,7 @@ mod tests {
 	fn test_format_skill_quotes_colon_in_description() {
 		let mut skill = Skill::new("test");
 		skill.description = Some("Source: https://example.com".to_string());
-		let output = format_skill(&skill, None);
+		let output = format_skill(&skill, None, &BTreeMap::new());
 		// serde_yaml should quote the value containing ':'
 		let reparsed: BTreeMap<String, String> = serde_yaml::from_str(
 			output
@@ -2047,7 +2267,7 @@ mod tests {
 		let mut skill = Skill::new("test");
 		skill.version = Some("123".to_string());
 		skill.author = Some("true".to_string());
-		let output = format_skill(&skill, None);
+		let output = format_skill(&skill, None, &BTreeMap::new());
 		let reparsed: BTreeMap<String, String> = serde_yaml::from_str(
 			output
 				.trim_start_matches("---\n")
@@ -2199,6 +2419,170 @@ mod tests {
 		);
 	}
 
+	// The `remove_skill` seam's own guard: a NativeReader (reads
+	// `.agents/skills` directly, so its discovered entry has
+	// `canonical_path = None`) must not `remove_dir_all` a Master another
+	// agent's symlink still resolves to. Before the guard this returned Ok,
+	// deleted the Master, and left Claude's referrer dangling.
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_refuses_master_another_agent_links_to() {
+		// `universal_master_roots` (through the guard under test) reads HOME /
+		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
+		// crates/core/AGENTS.md Testing.
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+
+		let mut claude = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		claude.load().unwrap();
+		let mut skill = Skill::new("shared-master");
+		skill.description = Some("test".to_string());
+		claude.add_skill_universal(skill).unwrap();
+
+		let master = root.join(".agents/skills/shared-master");
+		let claude_link = root.join(".claude/skills/shared-master");
+		assert!(master.join("SKILL.md").exists());
+		assert!(claude_link.exists());
+
+		let mut cursor = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(root),
+		);
+		cursor.load().unwrap();
+		// Precondition for the branch under test: the copy layout, i.e. the
+		// `remove_dir_all` path, not the harmless unlink one.
+		assert!(
+			cursor
+				.get_skill("shared-master")
+				.expect("cursor reads the master directly")
+				.canonical_path
+				.is_none(),
+			"a directly-read master must take the remove_dir_all branch"
+		);
+
+		let err = cursor
+			.remove_skill("shared-master")
+			.expect_err("must refuse: Claude's link still points here");
+		assert!(
+			matches!(err, ConfigError::UnsupportedOperation(_)),
+			"unexpected error: {err:?}"
+		);
+		assert!(
+			master.join("SKILL.md").exists(),
+			"the shared master must survive"
+		);
+		assert!(
+			claude_link.exists(),
+			"Claude's referrer must still resolve (not dangle)"
+		);
+	}
+
+	// The case a referrer sweep CANNOT see: a Master with ZERO symlinks that
+	// nine other NativeReaders (Codex, OpenCode, Cline, Warp, …) read directly.
+	// A `dir_has_external_referrer`-only guard returned Ok here and
+	// `remove_dir_all`'d the Master out from under every one of them — silent
+	// loss, with no dangling link left behind to notice it by.
+	#[cfg(unix)]
+	#[test]
+	fn remove_skill_refuses_master_other_native_readers_share() {
+		// `universal_master_roots` (through the guard under test) reads HOME /
+		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
+		// crates/core/AGENTS.md Testing.
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let master = root.join(".agents/skills/native-shared");
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(
+			master.join("SKILL.md"),
+			"---\nname: native-shared\ndescription: test\n---\n",
+		)
+		.unwrap();
+		// The point of the test: nothing links to it.
+		assert!(!root.join(".claude/skills").exists());
+
+		// A second NativeReader that would lose the skill silently.
+		let mut opencode = ConfigManager::new(
+			create_adapter(AgentType::OpenCode),
+			false,
+			Some(root),
+		);
+		opencode.load().unwrap();
+		assert!(opencode.get_skill("native-shared").is_some());
+
+		let mut cursor = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
+			false,
+			Some(root),
+		);
+		cursor.load().unwrap();
+		let err = cursor
+			.remove_skill("native-shared")
+			.expect_err("a shared universal master is not this seam's to take");
+		assert!(
+			matches!(err, ConfigError::UnsupportedOperation(_)),
+			"unexpected error: {err:?}"
+		);
+		assert!(master.join("SKILL.md").exists(), "the master must survive");
+		assert!(
+			opencode.get_skill("native-shared").is_some(),
+			"the other NativeReader must still read it"
+		);
+	}
+
+	// The direction that must NOT regress: a private per-agent copy (a real dir
+	// outside the universal roots, nothing linking into it) is still deletable
+	// through the seam. The guard is about shared storage, not about dirs.
+	#[test]
+	fn remove_skill_still_deletes_private_copy() {
+		// `universal_master_roots` (through the guard under test) reads HOME /
+		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
+		// crates/core/AGENTS.md Testing.
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let copy = root.join(".claude/skills/private-copy");
+		std::fs::create_dir_all(&copy).unwrap();
+		std::fs::write(
+			copy.join("SKILL.md"),
+			"---\nname: private-copy\ndescription: test\n---\n",
+		)
+		.unwrap();
+
+		let mut claude = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		claude.load().unwrap();
+		assert!(claude.get_skill("private-copy").is_some());
+
+		claude.remove_skill("private-copy").unwrap();
+
+		assert!(!copy.exists(), "a private copy must stay deletable");
+	}
+
 	// -----------------------------------------------------------------------
 	// P1 fix: renaming a universal skill must re-point the per-agent symlinks
 	// and preserve the symlink layout (canonical_path), not dangle + downgrade.
@@ -2259,6 +2643,115 @@ mod tests {
 			s.canonical_path.is_some(),
 			"canonical_path must be preserved on a universal rename"
 		);
+	}
+
+	// A rename unlinks every old-name referrer BEFORE re-pointing it. If the
+	// new-name slot is occupied the linker reports a per-agent `conflict` and
+	// still returns Ok — which the rename used to discard, leaving that agent
+	// with NO link at all while reporting success. It must fail and roll back.
+	#[cfg(unix)]
+	#[test]
+	fn update_skill_rename_rolls_back_when_a_referrer_slot_is_occupied() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+		let mut skill = Skill::new("old-uni");
+		skill.description = Some("universal".to_string());
+		mgr.add_skill_universal(skill).unwrap();
+
+		// A foreign directory already occupies Claude's slot for the NEW name.
+		// Not a link, so the linker refuses to clobber it — and the rollback
+		// below must not clobber it either.
+		let occupied = root.join(".claude/skills/new-uni");
+		std::fs::create_dir_all(&occupied).unwrap();
+		std::fs::write(occupied.join("SKILL.md"), "FOREIGN").unwrap();
+
+		let mut renamed = Skill::new("new-uni");
+		renamed.description = Some("universal".to_string());
+		mgr.update_skill("old-uni", renamed).expect_err(
+			"a referrer that cannot be re-pointed must fail the rename",
+		);
+
+		// Rolled back: master back under the old name, old-name link restored
+		// and resolving, no half-renamed master left behind.
+		assert!(
+			root.join(".agents/skills/old-uni/SKILL.md").exists(),
+			"the master must be restored to its old name"
+		);
+		assert!(
+			!root.join(".agents/skills/new-uni").exists(),
+			"no master may survive under the new name"
+		);
+		let old_link = root.join(".claude/skills/old-uni");
+		assert!(
+			old_link
+				.symlink_metadata()
+				.is_ok_and(|m| m.file_type().is_symlink()),
+			"the old-name referrer must be restored as a link"
+		);
+		assert!(
+			old_link.join("SKILL.md").exists(),
+			"the restored referrer must resolve, not dangle"
+		);
+		// The occupant is someone else's: never touched by either direction.
+		assert_eq!(
+			std::fs::read_to_string(occupied.join("SKILL.md")).unwrap(),
+			"FOREIGN"
+		);
+	}
+
+	// A SKILL.md's frontmatter belongs to its author. aghub's model carries five
+	// keys of it, and `update_skill` reserializes the file from that model — so
+	// without preservation every edit (and, since the rename went transactional,
+	// every rename) silently deleted `license`, `compatibility`, and anything
+	// else the author wrote.
+	#[test]
+	fn update_skill_preserves_frontmatter_keys_aghub_does_not_model() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let dir = root.join(".claude/skills/keeper");
+		std::fs::create_dir_all(&dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			"---\nname: keeper\ndescription: before\nauthor: someone\n\
+			 license: MIT\nmetadata:\n  team: platform\n  tier: 2\n---\n\nBODY\n",
+		)
+		.unwrap();
+
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+		let mut updated = mgr.get_skill("keeper").unwrap().clone();
+		updated.description = Some("after".to_string());
+		// Clearing a MODELED key must still clear it — preservation may not
+		// resurrect a field the caller deliberately dropped.
+		updated.author = None;
+		mgr.update_skill("keeper", updated).unwrap();
+
+		let md = std::fs::read_to_string(dir.join("SKILL.md")).unwrap();
+		assert!(md.contains("license: MIT"), "unmodeled scalar lost: {md}");
+		assert!(md.contains("team: platform"), "unmodeled map lost: {md}");
+		assert!(md.contains("tier: 2"), "unmodeled map lost: {md}");
+		assert!(md.contains("description: after"), "edit not applied: {md}");
+		assert!(
+			!md.contains("author:"),
+			"a cleared modeled key must not come back: {md}"
+		);
+		assert!(md.contains("BODY"), "body lost: {md}");
 	}
 
 	#[cfg(unix)]
@@ -2803,7 +3296,7 @@ mod tests {
 		std::fs::write(src.join("scripts/setup.sh"), "#!/bin/sh\necho ok")
 			.unwrap();
 
-		let added = mgr.add_skill_from_path_universal(&src).unwrap();
+		let added = mgr.add_skill_from_path_universal(&src, None).unwrap();
 		assert_eq!(added.skill.name, "my-skill");
 		assert!(!added.already_installed);
 
@@ -2858,7 +3351,7 @@ mod tests {
 		std::fs::write(src.join("extra.txt"), "bonus").unwrap();
 
 		let skill_md = src.join("SKILL.md");
-		let added = mgr.add_skill_from_path_universal(&skill_md).unwrap();
+		let added = mgr.add_skill_from_path_universal(&skill_md, None).unwrap();
 		assert_eq!(added.skill.name, "other-skill");
 		assert!(!added.already_installed);
 
@@ -2868,6 +3361,64 @@ mod tests {
 		assert_eq!(
 			std::fs::read_to_string(canonical.join("extra.txt")).unwrap(),
 			"bonus"
+		);
+	}
+
+	// A `--name` install rewrites the copied Master's frontmatter `name:`. That
+	// is only ever ITS OWN copy: a Master this call did not create belongs to
+	// someone else, and rewriting it would change the folder hash the npx lock
+	// contract is checked against. Here `.agents/skills/renamed` exists but is
+	// discovered under a DIFFERENT name, so the duplicate check cannot see it
+	// and only the materializer's `created_master` receipt catches it.
+	#[cfg(unix)]
+	#[test]
+	fn add_skill_from_path_universal_refuses_to_rename_onto_a_foreign_master() {
+		use crate::create_adapter;
+		use crate::models::AgentType;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let foreign = root.join(".agents/skills/renamed");
+		std::fs::create_dir_all(&foreign).unwrap();
+		std::fs::write(
+			foreign.join("SKILL.md"),
+			"---\nname: something-else\ndescription: foreign\n---\nFOREIGN\n",
+		)
+		.unwrap();
+
+		let src = root.join("src/fresh");
+		std::fs::create_dir_all(&src).unwrap();
+		std::fs::write(
+			src.join("SKILL.md"),
+			"---\nname: fresh\ndescription: mine\n---\nMINE\n",
+		)
+		.unwrap();
+
+		let mut mgr = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		mgr.load().unwrap();
+		mgr.add_skill_from_path_universal(&src, Some("renamed"))
+			.expect_err(
+				"a Master this call did not create is not ours to edit",
+			);
+
+		let content =
+			std::fs::read_to_string(foreign.join("SKILL.md")).unwrap();
+		assert!(
+			content.contains("name: something-else")
+				&& content.contains("FOREIGN"),
+			"the foreign master must be untouched: {content}"
+		);
+		// The link the materializer created on the way in is undone, so the
+		// refusal leaves nothing of this call behind.
+		assert!(
+			root.join(".claude/skills/renamed")
+				.symlink_metadata()
+				.is_err(),
+			"the referrer this call created must be undone"
 		);
 	}
 
@@ -2906,7 +3457,7 @@ mod tests {
 			Some(root),
 		);
 		mgr.load().unwrap();
-		mgr.add_skill_from_path_universal(&src).unwrap();
+		mgr.add_skill_from_path_universal(&src, None).unwrap();
 
 		let content =
 			std::fs::read_to_string(canonical.join("SKILL.md")).unwrap();
@@ -3817,7 +4368,7 @@ mod tests {
 			Some(&cli_root),
 		);
 		mgr.load().unwrap();
-		mgr.add_skill_from_path_universal(&src).unwrap();
+		mgr.add_skill_from_path_universal(&src, None).unwrap();
 
 		// Path B: fetched/desktop universal install of the same source.
 		let fetched_root_tmp = tempfile::tempdir().unwrap();

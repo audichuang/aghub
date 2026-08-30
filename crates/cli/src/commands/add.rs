@@ -56,54 +56,21 @@ pub fn execute(
 					"Importing skill from: {}",
 					from_path.display()
 				);
-				let added = manager.add_skill_from_path(&from_path)?;
-				let mut skill = added.skill;
-				// `--name` is implemented as import-then-rename, which only
-				// works when the import actually imported something. When the
-				// source's own name is ALREADY installed the import is a no-op
-				// and `skill` is the pre-existing master — so the rename would
-				// remove that master and re-add the OLD content under the new
-				// name, discarding the source the user pointed at and deleting
-				// a skill they never asked to touch. Refuse instead: nothing
-				// has been written yet, so there is nothing to roll back.
-				if added.already_installed && name.is_some() {
-					return Err(anyhow!(
-						"cannot import '{}' as a different name: a skill named \
-						 '{}' (this source's own name) is already installed, so \
-						 nothing was imported to rename. Delete '{}' first, or \
-						 rename the skill in the source's SKILL.md.",
-						from_path.display(),
-						skill.name,
-						skill.name
-					));
-				}
-				// A `--name` rename REMOVES and RE-ADDS under the new name, so
-				// it always writes. Inheriting the inner `already_installed`
-				// would report a genuine install as a no-op.
-				let renamed = name.is_some();
+				// `--name` is NOT a second step. It used to be
+				// import-then-`update_skill`-rename, which released the
+				// mutation lock between the halves and stranded the imported
+				// skill whenever the rename failed. The install now writes the
+				// requested name directly, so the duplicate check, the copy and
+				// the frontmatter fix are one span under one lock — and a
+				// conflict is refused BEFORE anything is written, which is why
+				// this flow needs no rollback of its own.
+				let added = manager.add_skill_from_path_universal(
+					&from_path,
+					name.as_deref(),
+				)?;
+				let skill = added.skill;
 
-				if let Some(custom_name) = name {
-					eprintln_verbose!(
-						"Renaming skill from '{}' to '{}'",
-						skill.name,
-						custom_name
-					);
-					manager.remove_skill(&skill.name)?;
-					skill.name = custom_name.clone();
-					manager.add_skill(skill.clone())?;
-					// Re-read the entry the rename just wrote: `skill` still
-					// carries the ORIGINAL skill's paths, only its name having
-					// been reassigned above.
-					if let Some(installed) = manager
-						.config()
-						.and_then(|c| {
-							c.skills.iter().find(|s| s.name == custom_name)
-						})
-						.cloned()
-					{
-						skill = installed;
-					}
-				} else if added.already_installed
+				if added.already_installed
 					&& !manager.skill_target_is_native_reader()
 				{
 					// The install wrote NOTHING: the Master was already there.
@@ -134,9 +101,10 @@ pub fn execute(
 				// to tell it from a real install.
 				let view = aghub_core::dto::SkillView::from(&skill)
 					.with_native_reader(manager.skill_target_is_native_reader())
-					.with_already_installed(
-						added.already_installed && !renamed,
-					);
+					// No `&& !renamed` correction any more: an explicit
+					// `--name` that finds the name taken is now an ERROR, so a
+					// successful rename can never report `already_installed`.
+					.with_already_installed(added.already_installed);
 				serde_json::to_value(&view)?
 			} else {
 				let skill_name = name.ok_or_else(|| {

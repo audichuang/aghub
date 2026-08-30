@@ -6179,13 +6179,14 @@ fn embedded_credentials_never_survive_into_a_cli_error() {
 
 // ────────── Findings from the three-way review round (2.11) ──────────
 
-/// `--from X --name NEW` is import-then-rename. When X's OWN name is already
-/// installed the import no-ops, so the rename would remove that master and
-/// re-add its OLD content as NEW — writing content the user never pointed at
-/// and deleting a skill they never asked to touch. It must refuse instead.
+/// `--from X --name NEW` installs the source DIRECTLY under NEW — it is no
+/// longer import-then-rename, so X's own name being installed is simply
+/// irrelevant and must not be refused. What still has to hold is that the
+/// same-named pre-existing skill is not touched: the old two-step would have
+/// removed ITS master and re-added ITS old content as NEW.
 #[cfg(unix)]
 #[test]
-fn rename_import_refuses_when_the_source_name_is_already_installed() {
+fn rename_import_leaves_the_same_named_skill_alone() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	let src1 = tempfile::TempDir::new().unwrap();
@@ -6213,13 +6214,26 @@ fn rename_import_refuses_when_the_source_name_is_already_installed() {
 		.arg(src2.path().join("foo"))
 		.output()
 		.unwrap();
-	assert!(!out.status.success(), "the rename import must be refused");
-
-	// Nothing was written and nothing was destroyed.
 	assert!(
-		!home.path().join(".agents/skills/bar").exists(),
-		"a refused import must not create the renamed skill"
+		out.status.success(),
+		"the source's own name being taken says nothing about NEW; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
 	);
+
+	// The NEW skill holds the source the user pointed at...
+	let bar = std::fs::read_to_string(
+		home.path().join(".agents/skills/bar/SKILL.md"),
+	)
+	.expect("the renamed skill must be created");
+	assert!(bar.contains("NEWCONTENT"), "wrong source landed: {bar}");
+	// ...under the requested name. Discovery keys on the frontmatter `name`,
+	// not the folder, so a stale `name: foo` here would resurface the skill
+	// under the source's name and collide with the entry below.
+	assert!(
+		bar.contains("name: bar"),
+		"the master's frontmatter must carry the requested name: {bar}"
+	);
+	// ...and the same-named pre-existing skill is untouched.
 	let foo = std::fs::read_to_string(
 		home.path().join(".agents/skills/foo/SKILL.md"),
 	)
@@ -6227,6 +6241,62 @@ fn rename_import_refuses_when_the_source_name_is_already_installed() {
 	assert!(
 		foo.contains("ORIGINAL"),
 		"the pre-existing skill must be untouched: {foo}"
+	);
+}
+
+/// The conflict that IS real: the requested NEW name is already installed.
+/// That must fail before anything is written — never the idempotent
+/// `already_installed` no-op, which would report success while silently
+/// discarding the source the user explicitly pointed at, and never after a
+/// half-install that leaves the source's own name behind.
+#[cfg(unix)]
+#[test]
+fn rename_import_refuses_when_the_target_name_is_taken() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	for (dir, body) in [("bar", "ORIGINAL"), ("fresh", "NEWCONTENT")] {
+		std::fs::create_dir_all(src.path().join(dir)).unwrap();
+		std::fs::write(
+			src.path().join(dir).join("SKILL.md"),
+			format!("---\nname: {dir}\ndescription: {body}\n---\n\n{body}\n"),
+		)
+		.unwrap();
+	}
+
+	let seed = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "add", "skills", "--from"])
+		.arg(src.path().join("bar"))
+		.output()
+		.unwrap();
+	assert!(seed.status.success(), "seed install must succeed");
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "claude", "add", "skills", "--name", "bar", "--from",
+		])
+		.arg(src.path().join("fresh"))
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"an occupied target name must be an error, not a silent no-op; \
+		 stdout: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	// Nothing stranded: the refusal happens BEFORE the copy, so the source's
+	// own name must not have been installed on the way.
+	assert!(
+		!home.path().join(".agents/skills/fresh").exists(),
+		"a refused rename import must not leave the source's own name behind"
+	);
+	let bar = std::fs::read_to_string(
+		home.path().join(".agents/skills/bar/SKILL.md"),
+	)
+	.expect("the occupant must survive");
+	assert!(
+		bar.contains("ORIGINAL"),
+		"the occupant was overwritten: {bar}"
 	);
 }
 
@@ -6279,6 +6349,91 @@ fn rename_import_still_works_when_the_source_name_is_free() {
 	assert!(
 		body.contains("BODY"),
 		"the source content must land: {body}"
+	);
+}
+
+/// `--from X --name NEW` copies the WHOLE source tree straight to the NEW
+/// Master. The old import-then-rename pair re-added a bare `SKILL.md` after
+/// deleting what the import had just written, so `scripts/`, `references/` and
+/// `assets/` were silently dropped.
+///
+/// It also never writes the source's own name anywhere — pinned here with a
+/// stale referrer another agent left behind for that name. The old pair
+/// materialised `.agents/skills/fresh`, which made that dangling link start
+/// resolving mid-flight to content nobody asked for; the one-step install never
+/// creates it, and must leave the foreign agent's dir alone rather than
+/// "tidying" a link it did not make.
+#[cfg(unix)]
+#[test]
+fn rename_import_copies_the_whole_tree_and_never_writes_the_source_name() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	let skill_src = src.path().join("fresh");
+	std::fs::create_dir_all(skill_src.join("scripts")).unwrap();
+	std::fs::write(
+		skill_src.join("SKILL.md"),
+		"---\nname: fresh\ndescription: BODY\n---\n\nBODY\n",
+	)
+	.unwrap();
+	std::fs::write(skill_src.join("scripts/setup.sh"), "echo setup").unwrap();
+
+	// A referrer another agent left behind for the SOURCE name, dangling until
+	// the import lands the Master it points at.
+	let stale = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&stale).unwrap();
+	std::os::unix::fs::symlink(
+		home.path().join(".agents/skills/fresh"),
+		stale.join("fresh"),
+	)
+	.unwrap();
+
+	// `cursor` reads `.agents/skills` directly, so the install writes the
+	// Master and no link of its own — the layout the old two-step mishandled.
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", "cursor", "add", "skills", "--name", "renamed",
+			"--from",
+		])
+		.arg(&skill_src)
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"a stale referrer must not break the install; stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let renamed = home.path().join(".agents/skills/renamed");
+	assert!(
+		renamed.join("scripts/setup.sh").exists(),
+		"the install must keep the source's resources, not just SKILL.md"
+	);
+	let md = std::fs::read_to_string(renamed.join("SKILL.md"))
+		.expect("the renamed master must exist");
+	assert!(
+		md.contains("name: renamed"),
+		"discovery keys on frontmatter `name`, so it must be rewritten: {md}"
+	);
+	assert!(
+		md.contains("BODY"),
+		"the source body must survive the name rewrite: {md}"
+	);
+	assert!(
+		!home.path().join(".agents/skills/fresh").exists(),
+		"the source's own name must never be materialised"
+	);
+	// `symlink_metadata`, NOT `exists()`: `exists()` follows the link and is
+	// false for a dangling one, so it cannot tell "left untouched" (correct)
+	// from "deleted" (a single-agent add reaching into Claude's dir).
+	let link = stale
+		.join("fresh")
+		.symlink_metadata()
+		.expect("the foreign agent's stale link must be left where it was");
+	assert!(link.file_type().is_symlink(), "it must still be the link");
+	assert!(
+		!stale.join("renamed").exists(),
+		"a cursor-targeted add must not link the skill into Claude's dir"
 	);
 }
 
