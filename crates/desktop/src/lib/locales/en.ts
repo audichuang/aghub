@@ -805,6 +805,13 @@ export default {
 	featuredSkillsHint:
 		"A curated set you can install without searching first.",
 	featuredEmptySummary: "No summary",
+	newToolsTitle: "New agent detected",
+	newToolsBody: "Link {{count}} installed global skill(s) to: {{agents}}",
+	newToolsSkip: "Skip",
+	newToolsLink: "Link skills",
+	newToolsLinkSuccess: "Linked existing skills to the new agent(s)",
+	newToolsLinkPartial: "Linked with {{failed}} of {{total}} skill(s) failing",
+	newToolsLinkError: "Could not link existing skills",
 
 	// MCP Detail
 	connection: "Connection",

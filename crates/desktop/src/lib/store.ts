@@ -11,6 +11,10 @@ export {
 	saveIntegrationPreferences,
 } from "./store/integrations";
 export {
+	getLastKnownAvailableAgents,
+	setLastKnownAvailableAgents,
+} from "./store/new-tools";
+export {
 	getOnboardingProgress,
 	updateOnboardingProgress,
 } from "./store/onboarding";

@@ -782,6 +782,13 @@ export default {
 	featuredSkills: "精選",
 	featuredSkillsHint: "精選技能，不必先搜尋即可安裝。",
 	featuredEmptySummary: "沒有簡介",
+	newToolsTitle: "偵測到新代理",
+	newToolsBody: "將 {{count}} 個已安裝的全域技能掛到：{{agents}}",
+	newToolsSkip: "略過",
+	newToolsLink: "建立連結",
+	newToolsLinkSuccess: "已將現有技能掛到新代理",
+	newToolsLinkPartial: "{{total}} 個技能中有 {{failed}} 個未能掛上",
+	newToolsLinkError: "無法將現有技能掛到新代理",
 
 	// Projects
 	addProject: "新增專案",

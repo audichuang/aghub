@@ -784,6 +784,13 @@ export default {
 	featuredSkills: "精选",
 	featuredSkillsHint: "精选技能，无需先搜索即可安装。",
 	featuredEmptySummary: "暂无简介",
+	newToolsTitle: "检测到新代理",
+	newToolsBody: "将 {{count}} 个已安装的全局技能挂到：{{agents}}",
+	newToolsSkip: "跳过",
+	newToolsLink: "建立链接",
+	newToolsLinkSuccess: "已将现有技能挂到新代理",
+	newToolsLinkPartial: "{{total}} 个技能中有 {{failed}} 个未能挂上",
+	newToolsLinkError: "无法将现有技能挂到新代理",
 
 	// Projects
 	addProject: "添加项目",
