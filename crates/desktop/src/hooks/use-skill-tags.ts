@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 import { applyTagOp, type SkillTags } from "../lib/skill-tags";
 import { getSkillTags, setSkillTags } from "../lib/store";
@@ -6,7 +6,7 @@ import { getSkillTags, setSkillTags } from "../lib/store";
 export const SKILL_TAGS_QUERY_KEY = ["skillTags"] as const;
 
 /** Read/write the local skill-tag overlay. Mirrors `useFavorites`: the query
- * cache is the read model, and every write goes through one mutation so the
+ * cache is the read model, and every write goes through one function so the
  * list and the dialogs never disagree. */
 export function useSkillTags() {
 	const queryClient = useQueryClient();
@@ -16,32 +16,38 @@ export function useSkillTags() {
 		queryFn: getSkillTags,
 	});
 
-	const { mutateAsync: write } = useMutation({
-		mutationFn: async (next: SkillTags) => {
-			await setSkillTags(next);
-			return next;
-		},
-		onSuccess: (next) => {
-			queryClient.setQueryData(SKILL_TAGS_QUERY_KEY, next);
-		},
-	});
-
 	const tagsFor = useCallback(
 		(name: string): string[] => tags[name] ?? [],
 		[tags],
 	);
 
 	const applyTag = useCallback(
-		(names: string[], op: "add" | "remove", tag: string) => {
-			// Read the CACHE, not this render's `tags`: two quick clicks in the
-			// dialog would otherwise both derive from the same stale snapshot
-			// and the second write would silently discard the first.
-			const current =
+		async (names: string[], op: "add" | "remove", tag: string) => {
+			// Read AND advance the cache SYNCHRONOUSLY, before awaiting the
+			// store. Only reading it is not enough: the cache would move after
+			// the await, so two quick clicks would both derive from the
+			// pre-edit value and the second write would discard the first.
+			const before =
 				queryClient.getQueryData<SkillTags>(SKILL_TAGS_QUERY_KEY) ??
 				tags;
-			return write(applyTagOp(current, names, op, tag));
+			const next = applyTagOp(before, names, op, tag);
+			if (next === before) return before; // blank tag / empty selection
+			queryClient.setQueryData(SKILL_TAGS_QUERY_KEY, next);
+			try {
+				await setSkillTags(next);
+			} catch (error) {
+				// Re-read rather than restoring `before`: another edit may have
+				// landed while this one was in flight, and the store is the
+				// authority on what actually persisted.
+				queryClient.setQueryData(
+					SKILL_TAGS_QUERY_KEY,
+					await getSkillTags(),
+				);
+				throw error;
+			}
+			return next;
 		},
-		[queryClient, tags, write],
+		[queryClient, tags],
 	);
 
 	return { tags, tagsFor, applyTag };

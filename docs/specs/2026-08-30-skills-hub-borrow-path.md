@@ -79,13 +79,13 @@
 
 ## 產品對照（只保留會驅動這五個 PR 的列）
 
-| 缺口 | skills-hub | aghub 現況 | 本路徑怎麼接 |
-|---|---|---|---|
-| 冷啟動探索 | `ExplorePage.tsx` 空 query 畫 featured 卡 | `/skills-sh` 只有搜尋框（`pages/skills-sh/index.tsx`） | PR1：同頁精選牆；安裝沿用 `InstallModal` |
-| 標籤 | SQLite `skill_tags` overlay | 只有 `starredSkills` | PR2：`store.json` overlay |
-| 新 CLI | `NewToolsModal` + `sync_skill_to_tool`（含 copy） | coverage／reconcile 已能掛 Referrer，沒有「新出現」事件 | PR3：desktop 提示 → `POST /skills/reconcile` |
-| 關機仍 check | 重開 GUI binary 直接套用 | 進頁才 check，`staleTime=600_000` | PR4：排 `aghub-cli check --online`，寫 sidecar |
-| Augment skills | `.augment/skills` | `augmentcode.rs` skills 全關 | PR5：打開 write path，NeedsLink |
+| 缺口           | skills-hub                                        | aghub 現況                                              | 本路徑怎麼接                                   |
+| -------------- | ------------------------------------------------- | ------------------------------------------------------- | ---------------------------------------------- |
+| 冷啟動探索     | `ExplorePage.tsx` 空 query 畫 featured 卡         | `/skills-sh` 只有搜尋框（`pages/skills-sh/index.tsx`）  | PR1：同頁精選牆；安裝沿用 `InstallModal`       |
+| 標籤           | SQLite `skill_tags` overlay                       | 只有 `starredSkills`                                    | PR2：`store.json` overlay                      |
+| 新 CLI         | `NewToolsModal` + `sync_skill_to_tool`（含 copy） | coverage／reconcile 已能掛 Referrer，沒有「新出現」事件 | PR3：desktop 提示 → `POST /skills/reconcile`   |
+| 關機仍 check   | 重開 GUI binary 直接套用                          | 進頁才 check，`staleTime=600_000`                       | PR4：排 `aghub-cli check --online`，寫 sidecar |
+| Augment skills | `.augment/skills`                                 | `augmentcode.rs` skills 全關                            | PR5：打開 write path，NeedsLink                |
 
 ---
 
@@ -122,12 +122,12 @@ flowchart LR
 
 ```ts
 type FeaturedSkill = {
-  name: string;      // 安裝時的 skill 名，對應 SKILL.md / 資料夾
-  slug: string;
-  summary: string;
-  source: string;    // 必須已是 install API 吃的形狀，例如 "github/anthropics/skills"
-  author?: string;
-  installs?: number; // 純展示，可 0
+	name: string; // 安裝時的 skill 名，對應 SKILL.md / 資料夾
+	slug: string;
+	summary: string;
+	source: string; // 必須已是 install API 吃的形狀，例如 "github/anthropics/skills"
+	author?: string;
+	installs?: number; // 純展示，可 0
 };
 ```
 
@@ -135,12 +135,12 @@ type FeaturedSkill = {
 
 ### 🧱 Desktop overlay keys（PR2／PR3／PR4 各加各的，互不遷移）
 
-| key | 擁有者 | 預設 | 寫入時機 |
-|---|---|---|---|
-| `skillTags` | PR2 | `{}` as `Record<string, string[]>` | 使用者加／減標，且只在 skill 已存在於清單之後 |
-| `lastKnownAvailableAgents` | PR3 | 缺 key = 首次，seed 後不彈窗 | 彈窗 Skip／Confirm 之後、以及首次 seed |
-| `skillCheckSchedule` | PR4 | `{ enabled: false, interval: "daily" }` | Settings 開關 |
-| sidecar 檔（不是 store） | PR4 | 缺檔 = 尚未跑過 | CLI `--write-result` |
+| key                        | 擁有者 | 預設                                    | 寫入時機                                      |
+| -------------------------- | ------ | --------------------------------------- | --------------------------------------------- |
+| `skillTags`                | PR2    | `{}` as `Record<string, string[]>`      | 使用者加／減標，且只在 skill 已存在於清單之後 |
+| `lastKnownAvailableAgents` | PR3    | 缺 key = 首次，seed 後不彈窗            | 彈窗 Skip／Confirm 之後、以及首次 seed        |
+| `skillCheckSchedule`       | PR4    | `{ enabled: false, interval: "daily" }` | Settings 開關                                 |
+| sidecar 檔（不是 store）   | PR4    | 缺檔 = 尚未跑過                         | CLI `--write-result`                          |
 
 Sidecar 路徑與 API 的 `app_data_dir` 對齊：`dirs::data_dir()/aghub/skill-check-last.json`（沒有 `data_dir` 則不寫、CLI 非零退出並說明）。桌面用既有 store 只存「排程開不開」，**不**把 check 結果當技能 SSOT。
 
@@ -148,11 +148,11 @@ Sidecar 路徑與 API 的 `app_data_dir` 對齊：`dirs::data_dir()/aghub/skill-
 
 ```ts
 function newToolPromptDelta(args: {
-  lastKnown: string[] | null;          // null = 從未 seed
-  available: AgentInfo[];              // is_available
-  disabled: string[];
-  coverageById: Map<string, AgentSkillCoverageDto>;
-}): { seedOnly: string[] } | { prompt: string[] }
+	lastKnown: string[] | null; // null = 從未 seed
+	available: AgentInfo[]; // is_available
+	disabled: string[];
+	coverageById: Map<string, AgentSkillCoverageDto>;
+}): { seedOnly: string[] } | { prompt: string[] };
 ```
 
 `prompt` 裡每一個 id 必須同時滿足：`AgentType` 可 parse、`is_available`、不在 `disabledAgents`、`supportsSkillMutation(agent, "global")`、`needsMasterLink(coverage) === true`。NativeReader 與 Unsupported 不進 prompt。
@@ -304,15 +304,15 @@ function newToolPromptDelta(args: {
 ### 設計
 
 1. **CLI**：`aghub-cli check skills --online -g --json --write-result <path>`。
-   - `--write-result` 寫入 sidecar：`{ startedAt, finishedAt, online, scope, results: SkillUpdateView[], failed: number, updateAvailable: number }`。原子寫（temp + rename）。
-   - 預設 path 若省略：`app_data_dir()/skill-check-last.json`。與 API `default_app_data_dir` 同一函式來源——**把 app_data_dir 抽到兩表面能共用的地方**（CLI 已有一份註解要求對齊 api；本 PR 若發現仍是複本，只加註解 + 測試釘路徑尾段 `aghub/skill-check-last.json`，不趁機做 #1 credential 大搬遷）。
-   - check 本體仍唯讀。sidecar 失敗（磁碟滿）→ 非零退出，stdout JSON 仍印。
+    - `--write-result` 寫入 sidecar：`{ startedAt, finishedAt, online, scope, results: SkillUpdateView[], failed: number, updateAvailable: number }`。原子寫（temp + rename）。
+    - 預設 path 若省略：`app_data_dir()/skill-check-last.json`。與 API `default_app_data_dir` 同一函式來源——**把 app_data_dir 抽到兩表面能共用的地方**（CLI 已有一份註解要求對齊 api；本 PR 若發現仍是複本，只加註解 + 測試釘路徑尾段 `aghub/skill-check-last.json`，不趁機做 #1 credential 大搬遷）。
+    - check 本體仍唯讀。sidecar 失敗（磁碟滿）→ 非零退出，stdout JSON 仍印。
 2. **排程註冊**（desktop-only，`src-tauri`）：
-   - macOS launchd agent：`~/Library/LaunchAgents/com.aghub.skillcheck.plist`，`StartCalendarInterval` daily（v1 只 daily；weekly 是設定裡預留但不實作）。
-   - Linux systemd --user：`~/.config/systemd/user/aghub-skillcheck.timer` + service。
-   - Windows schtasks：`/SC DAILY`。
-   - Program arguments：解析到的 `aghub-cli` 絕對路徑 + `check skills --online -g --json --write-result <sidecar>`。
-   - **不**傳 `--yes`，**不**呼叫 apply-update，**不**啟動 desktop binary。
+    - macOS launchd agent：`~/Library/LaunchAgents/com.aghub.skillcheck.plist`，`StartCalendarInterval` daily（v1 只 daily；weekly 是設定裡預留但不實作）。
+    - Linux systemd --user：`~/.config/systemd/user/aghub-skillcheck.timer` + service。
+    - Windows schtasks：`/SC DAILY`。
+    - Program arguments：解析到的 `aghub-cli` 絕對路徑 + `check skills --online -g --json --write-result <sidecar>`。
+    - **不**傳 `--yes`，**不**呼叫 apply-update，**不**啟動 desktop binary。
 3. **解析 `aghub-cli`**：註冊當下 `which`／`where`；允許 Settings 填絕對路徑。找不到 → Switch disabled + 說明文案。不靜默成功。
 4. **Settings → Application**（已有 autostart／updater）：加「定期檢查 skill 更新」開關。開 = 安裝 OS 任務；關 = 卸載。上次結果：讀 sidecar，顯示 `updateAvailable`／`failed`／`finishedAt`。點「現在檢查」仍走現有進頁 check（API），不要跟 sidecar 搶寫 lock。
 5. 技能頁 badge：若 sidecar `updateAvailable > 0` 且比 react-query 的 `lastCheckedDate` 新，顯示「背景檢查發現 N 個更新」。點了仍進現有 apply 流程（使用者確認 + `--yes` 等價）。
@@ -368,9 +368,9 @@ Zed（`zed.rs` skills 全關、`skills_cli_name: None`）**本 PR 不碰**。
 ### 設計
 
 1. 在 `augmentcode.rs` 用 `define_skill_paths!`（或手寫與 Claude 同形的 path fn）：
-   - global read/write：`~/.augment/skills`
-   - project read/write：`<root>/.augment/skills`
-   - **read 集合不含** `~/.agents/skills`／`<root>/.agents/skills`
+    - global read/write：`~/.augment/skills`
+    - project read/write：`<root>/.augment/skills`
+    - **read 集合不含** `~/.agents/skills`／`<root>/.agents/skills`
 2. `capabilities.skills.scopes`：global `true`、project `true`；`universal: false`。
 3. `project_markers`：現是 `&[]`，加上 `".augment"`（MCP 無專案檔，但 skills 專案目錄需要專案根偵測）。
 4. MCP／sub-agents 能力不動。
@@ -408,16 +408,16 @@ Zed（`zed.rs` skills 全關、`skills_cli_name: None`）**本 PR 不碰**。
 
 ## Key Decisions
 
-| # | 決策 | 替代方案 | 為什麼選這個 |
-|---|---|---|---|
-| D1 | 五個獨立 PR，不開史詩 | 一個「skills-hub parity」PR | 檔案面幾乎不重疊；史詩會把 catalog UX 和 descriptor 正確性綁在一起，review 不可審計 |
-| D2 | 精選是 bundled catalog，不是 market `source=` | API 新 source；打 skills-hub raw | `skills-sh` 維持 search-only；對方 JSON 品質差且 tree URL 會污染 install |
-| D3 | 標籤只在 `store.json` | 寫 frontmatter／lock | npx hash 會變；CLI／遠端／其他 agent 讀不到 frontmatter tag 是技能內容，不是使用者分類 |
-| D4 | 新工具提示走 reconcile，lastKnown 缺 key 只 seed | 空 lastKnown 當「全部新出現」（skills-hub） | 升級後對老用戶彈 20+ 代理是騷擾；primitive 已存在，缺的是可發現性 |
-| D5 | Augment **NeedsLink**，read 不含 Master | 比照 cursor 把 Master 加進 read | Augment 不讀 `.agents/skills`；NativeReader 會跳過 Referrer，洞補不上 |
-| D6 | 排程跑 CLI check，不跑 desktop、不 apply | 重開 GUI binary 做 `update_managed_skill` | single_instance、API self-heal、dry-run 預設、skills-hub swap 無 mutation lock |
-| D7 | 新 store key 不 bump `CURRENT_VERSION` | 每個 overlay 一個 migration | 避免 PR2／PR3 搶 v8；`?? default` 與現有 `getStarredSkills` 一致 |
-| D8 | 本路徑不發明 skill enable／disable | unlink Referrer 當停用 | NativeReader 仍讀 Master；`set_skill_enabled` 已明示 unsupported |
+| #   | 決策                                             | 替代方案                                    | 為什麼選這個                                                                           |
+| --- | ------------------------------------------------ | ------------------------------------------- | -------------------------------------------------------------------------------------- |
+| D1  | 五個獨立 PR，不開史詩                            | 一個「skills-hub parity」PR                 | 檔案面幾乎不重疊；史詩會把 catalog UX 和 descriptor 正確性綁在一起，review 不可審計    |
+| D2  | 精選是 bundled catalog，不是 market `source=`    | API 新 source；打 skills-hub raw            | `skills-sh` 維持 search-only；對方 JSON 品質差且 tree URL 會污染 install               |
+| D3  | 標籤只在 `store.json`                            | 寫 frontmatter／lock                        | npx hash 會變；CLI／遠端／其他 agent 讀不到 frontmatter tag 是技能內容，不是使用者分類 |
+| D4  | 新工具提示走 reconcile，lastKnown 缺 key 只 seed | 空 lastKnown 當「全部新出現」（skills-hub） | 升級後對老用戶彈 20+ 代理是騷擾；primitive 已存在，缺的是可發現性                      |
+| D5  | Augment **NeedsLink**，read 不含 Master          | 比照 cursor 把 Master 加進 read             | Augment 不讀 `.agents/skills`；NativeReader 會跳過 Referrer，洞補不上                  |
+| D6  | 排程跑 CLI check，不跑 desktop、不 apply         | 重開 GUI binary 做 `update_managed_skill`   | single_instance、API self-heal、dry-run 預設、skills-hub swap 無 mutation lock         |
+| D7  | 新 store key 不 bump `CURRENT_VERSION`           | 每個 overlay 一個 migration                 | 避免 PR2／PR3 搶 v8；`?? default` 與現有 `getStarredSkills` 一致                       |
+| D8  | 本路徑不發明 skill enable／disable               | unlink Referrer 當停用                      | NativeReader 仍讀 Master；`set_skill_enabled` 已明示 unsupported                       |
 
 ---
 
@@ -488,6 +488,30 @@ Zed（`zed.rs` skills 全關、`skills_cli_name: None`）**本 PR 不碰**。
 - `custom-agents.tsx` 真做（不可進 `AgentType`；若做，是「自訂 skills 目錄 overlay」，另開 spec）
 
 ---
+
+## 實作偏離（落地後補記，2026-08-31）
+
+四段旅程都已落地（PR1／PR2／PR3／PR4／PR5 全部），以下是與上文有意識的差異，
+不是遺漏：
+
+1. **`app_data_dir` 的 fallback 不 fail-closed。** 上文「沒有 `data_dir` 則不寫、
+   CLI 非零退出」沒有照做：`dirs::data_dir().unwrap_or_else(temp_dir)` 是
+   `aghub-api` 與 `aghub-cli` **既有的共用公式**，同時也是 inference SQLite 的
+   根。只為 sidecar 改它會動到不相干的東西，超出本路徑範圍。要改請另開 PR，
+   對三個表面一起改。
+2. **Settings 沒有「現在檢查」按鈕。** 技能頁本來就有一顆重新整理跑同一條 API
+   check，再加一顆是重複的入口。背景結果改成在技能頁顯示可點的提示列。
+3. **標籤篩選不在 `ListSearchHeader` 的 children 裡**，改成 header 下方獨立一列。
+   那個 children 區是 `shrink-0` 的按鈕列，塞可變數量的 tag chip 會擠爆版面。
+   沒有任何標籤時整列不渲染。
+4. **排程的 macOS／Windows 只驗到「OS 接受之前」。** 三個 backend 都走可注入的
+   `Env`，在 Linux 上驗過寫了哪個檔、下了哪些指令、被拒絕的 payload 不落地；
+   launchd／Task Scheduler 本身接不接受那份定義沒有機器可驗。Linux 有一個
+   `#[ignore]` 的真機測試（`cargo test -p aghub -- --ignored`）。
+5. **Tauri capabilities 沒有為新指令加 ACL。** 這個 repo 目前對 `generate_handler`
+   的 app command 一律不掛 ACL（`start_server`／`connect_remote` 等都沒有），
+   新指令沿用同一慣例。要收緊是整個 repo 一起導入 ACL 的獨立工作，不是這四個
+   指令的問題。
 
 ## Open questions
 

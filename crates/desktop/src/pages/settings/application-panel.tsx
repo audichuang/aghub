@@ -391,10 +391,20 @@ function SkillCheckScheduleRow() {
 			await setAghubCliPath(resolved);
 			return resolved;
 		},
-		onSuccess: (resolved) => {
+		onSuccess: async (resolved) => {
 			queryClient.setQueryData(["aghubCliPath"], resolved);
 			setPathDraft("");
 			toast.success(t("skillCheckScheduleCliPathSaved"));
+			// An already-registered task still points at the OLD program, so
+			// re-register it — otherwise "saved" fixes nothing until the user
+			// toggles the switch off and on.
+			if (status?.enabled) {
+				const next = await invoke<SkillCheckScheduleStatus>(
+					"set_skill_check_schedule",
+					{ enabled: true, cliPath: resolved },
+				);
+				queryClient.setQueryData(["skill-check-schedule"], next);
+			}
 		},
 		onError: (error) => {
 			toast.danger(
@@ -457,7 +467,7 @@ function SkillCheckScheduleRow() {
 						{t("skillCheckScheduleNeedsAuth", { count: needsAuth })}
 					</span>
 				) : null}
-				{cliMissing ? (
+				{cliMissing || storedCliPath ? (
 					<div className="flex items-center gap-2 pt-1">
 						<TextField
 							className="w-72"
@@ -466,9 +476,10 @@ function SkillCheckScheduleRow() {
 							<Input
 								value={pathDraft}
 								variant="secondary"
-								placeholder={t(
-									"skillCheckScheduleCliPathPlaceholder",
-								)}
+								placeholder={
+									storedCliPath ??
+									t("skillCheckScheduleCliPathPlaceholder")
+								}
 								onChange={(e) => setPathDraft(e.target.value)}
 							/>
 						</TextField>

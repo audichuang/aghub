@@ -6744,6 +6744,91 @@ fn check_write_result_sidecar_is_parseable_and_does_not_mutate_lock() {
 	assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
 }
 
+/// `--write-result` must never be able to aim the sidecar at a skill lock:
+/// `check` is read-only and the atomic write would replace the very file it
+/// just read, with no mutation guard and no rollback.
+#[test]
+fn check_write_result_refuses_to_target_a_skill_lock() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let lock_dir = state.path().join("skills");
+	std::fs::create_dir_all(&lock_dir).unwrap();
+	let lock_path = lock_dir.join(".skill-lock.json");
+	let body = r#"{"version":3,"skills":{"alpha":{"source":"o/r","sourceType":"github","sourceUrl":"https://github.com/o/r","skillPath":"alpha/SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#;
+	std::fs::write(&lock_path, body).unwrap();
+	let before = std::fs::read(&lock_path).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"check",
+			"skills",
+			"--write-result",
+			lock_path.to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "targeting the lock must fail");
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("read-only") || stderr.contains("skill lock"),
+		"the refusal must say why: {stderr}"
+	);
+	assert_eq!(
+		std::fs::read(&lock_path).unwrap(),
+		before,
+		"the lock must be byte-identical"
+	);
+}
+
+/// A populated lock proves the read-only guarantee on real rows — an empty one
+/// cannot: with no entries there is nothing a write could have damaged.
+#[test]
+fn check_write_result_leaves_a_populated_lock_byte_identical() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let sidecar_dir = tempfile::TempDir::new().unwrap();
+	let lock_dir = state.path().join("skills");
+	std::fs::create_dir_all(&lock_dir).unwrap();
+	let lock_path = lock_dir.join(".skill-lock.json");
+	let body = r#"{"version":3,"skills":{"alpha":{"source":"o/r","sourceType":"github","sourceUrl":"https://github.com/o/r","skillPath":"alpha/SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"},"beta":{"source":"o/r2","sourceType":"github","sourceUrl":"https://github.com/o/r2","skillPath":"beta/SKILL.md","skillFolderHash":"","installedAt":"t","updatedAt":"t"}}}"#;
+	std::fs::write(&lock_path, body).unwrap();
+	let before = std::fs::read(&lock_path).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"check",
+			"skills",
+			"--write-result",
+			sidecar_dir.path().join("last.json").to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"stderr: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	let sidecar: Value = serde_json::from_slice(
+		&std::fs::read(sidecar_dir.path().join("last.json")).unwrap(),
+	)
+	.expect("sidecar json");
+	assert_eq!(
+		sidecar["results"].as_array().unwrap().len(),
+		2,
+		"both locked skills must appear: {sidecar}"
+	);
+	assert_eq!(
+		std::fs::read(&lock_path).unwrap(),
+		before,
+		"check must not rewrite the lock it read"
+	);
+}
+
 /// The offline default's reasons come from the SHARED orchestrator, not from a
 /// table in this crate.
 ///

@@ -228,7 +228,10 @@ pub mod schedule_backend {
 		} else {
 			stderr.trim().to_string()
 		};
-		Err(format!("{program} {} failed: {detail}", args.join(" ")))
+		// Program + its own stderr only. The ARGS carry paths WE generated —
+		// the sidecar inside Windows `/TR`, the plist handed to
+		// `launchctl bootstrap` — and this string reaches the renderer.
+		Err(format!("{program} failed: {detail}"))
 	}
 
 	pub fn succeeds(program: &str, args: &[&str]) -> bool {
@@ -888,6 +891,56 @@ mod tests {
 			.exists());
 		assert!(!launchd_enabled(&env));
 		assert!(log.borrow().is_empty(), "no OS command may run");
+	}
+
+	#[test]
+	fn a_failed_launchd_bootstrap_leaves_no_plist_claiming_to_be_scheduled() {
+		let tmp = tempfile::tempdir().unwrap();
+		let run = |_: &str, _: &[&str]| {
+			Err("launchctl: Operation not permitted".to_string())
+		};
+		let probe = |_: &str, _: &[&str]| true;
+		let env = Env {
+			home: tmp.path().to_path_buf(),
+			run: &run,
+			probe: &probe,
+		};
+
+		register_launchd(&env, "501", &cli(), &sidecar()).unwrap_err();
+		assert!(
+			!launchd_enabled(&env),
+			"a plist left behind would report a schedule launchd never loaded"
+		);
+	}
+
+	#[test]
+	fn an_explicit_cli_path_must_be_absolute() {
+		// The scheduler runs from its own working directory, so a relative path
+		// that resolves from the desktop app fails every scheduled run.
+		let err =
+			resolve_aghub_cli_path(Some("bin/aghub-cli".into())).unwrap_err();
+		assert!(err.contains("absolute"), "{err}");
+	}
+
+	#[test]
+	fn a_command_failure_never_echoes_the_paths_we_generated() {
+		let tmp = tempfile::tempdir().unwrap();
+		let run = |program: &str, args: &[&str]| {
+			// Mirrors the real `run`'s message shape.
+			let _ = args;
+			Err(format!("{program} failed: denied"))
+		};
+		let probe = |_: &str, _: &[&str]| false;
+		let env = Env {
+			home: tmp.path().to_path_buf(),
+			run: &run,
+			probe: &probe,
+		};
+		let err = register_schtasks(&env, &cli(), &sidecar()).unwrap_err();
+		assert!(
+			!err.contains("skill-check-last.json"),
+			"generated paths must not reach the renderer: {err}"
+		);
 	}
 
 	/// REAL machine, REAL systemd: registers the timer in this user's own

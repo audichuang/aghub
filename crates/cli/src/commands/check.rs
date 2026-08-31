@@ -379,6 +379,7 @@ fn run_check(
 		};
 		if let Err(error) = write_check_sidecar(
 			&path,
+			project_root,
 			started_at,
 			online,
 			scope_label(scope),
@@ -465,13 +466,62 @@ fn sidecar_from_views(
 	}
 }
 
+/// Compare two paths that may not exist yet: canonicalize the deepest existing
+/// ancestor and re-attach the rest, so `~/x/../.skill-lock.json`, a symlinked
+/// `$HOME`, and the plain spelling all collapse to the same answer.
+fn normalized(path: &Path) -> PathBuf {
+	let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+	let mut cursor = path.to_path_buf();
+	loop {
+		if let Ok(real) = cursor.canonicalize() {
+			let mut out = real;
+			for part in suffix.iter().rev() {
+				out.push(part);
+			}
+			return out;
+		}
+		match (cursor.file_name(), cursor.parent()) {
+			(Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
+				suffix.push(name.to_os_string());
+				cursor = parent.to_path_buf();
+			}
+			_ => return path.to_path_buf(),
+		}
+	}
+}
+
+/// `check` is READ-ONLY. `--write-result` takes an arbitrary path, so without
+/// this a caller could aim the sidecar at a skill lock and have the atomic
+/// write replace it — no `MutationGuard`, no rollback, and the very file this
+/// command just read as its answer. Refuse both locks in every scope, whether
+/// or not they exist yet.
+fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
+	let target = normalized(path);
+	let mut forbidden = vec![skill::lock::get_skill_lock_path()];
+	forbidden.push(skill::lock::local::get_local_lock_path(project_root));
+	if let Some(root) = project_root {
+		forbidden.push(skill::lock::local::get_local_lock_path(Some(root)));
+	}
+	for lock in forbidden {
+		if normalized(&lock) == target {
+			bail!(
+				"--write-result must not target a skill lock ({}): check is read-only",
+				lock.display()
+			);
+		}
+	}
+	Ok(())
+}
+
 fn write_check_sidecar(
 	path: &Path,
+	project_root: Option<&Path>,
 	started_at: String,
 	online: bool,
 	scope: &str,
 	views: &[SkillUpdateView],
 ) -> Result<()> {
+	refuse_lock_targets(path, project_root)?;
 	let payload = sidecar_from_views(
 		started_at,
 		chrono::Utc::now().to_rfc3339(),

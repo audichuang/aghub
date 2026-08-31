@@ -31,27 +31,30 @@ export function NewToolsPromptController() {
 	const queryClient = useQueryClient();
 	const { availableAgents, disabledAgentsLoaded } = useAgentAvailability();
 	const { coverage, isLoading: coverageLoading } = useSkillCoverage("global");
-	const { data: skills = [], isLoading: skillsLoading } = useQuery(
+	const { data: skills = [], isSuccess: skillsReady } = useQuery(
 		skillListQueryOptions({ api, scope: "global" }),
 	);
 	// Only lock-owned skills are aghub's to move. Discovery also lists private
 	// hand-made skills, and reconciling one would promote it into the shared
 	// Master (see `reconcileAddsForNewAgents`).
-	const { data: globalLock, isLoading: lockLoading } = useQuery(
+	const { data: globalLock, isSuccess: lockReady } = useQuery(
 		globalSkillLockQueryOptions({ api }),
 	);
 	const lockedNames = useMemo(
 		() => new Set((globalLock?.skills ?? []).map((entry) => entry.name)),
 		[globalLock],
 	);
-	const { data: lastKnown, isLoading: lastKnownLoading } = useQuery({
+	const { data: lastKnown, isSuccess: lastKnownReady } = useQuery({
 		queryKey: ["lastKnownAvailableAgents"],
 		queryFn: getLastKnownAvailableAgents,
 	});
 	const reconcileMutation = useMutation(
 		reconcileSkillsMutationOptions({ api, queryClient }),
 	);
-	const [dismissed, setDismissed] = useState(false);
+	/** The delta already handled. Keyed by its ids, not a bare boolean: a plain
+	 * "dismissed" flag silenced every LATER prompt in the same session, so a
+	 * second newly-installed agent could not be offered until an app restart. */
+	const [handledIds, setHandledIds] = useState<string | null>(null);
 	/** Last seed written this session, so an agent that DISAPPEARS is dropped
 	 * from `lastKnown` even without an app restart — otherwise an
 	 * uninstall→reinstall inside one session would never prompt again. */
@@ -70,13 +73,14 @@ export function NewToolsPromptController() {
 	);
 
 	const delta = useMemo(() => {
-		if (
-			coverageLoading ||
-			skillsLoading ||
-			lockLoading ||
-			lastKnownLoading ||
-			!disabledAgentsLoaded
-		) {
+		// Every input must have SUCCEEDED, not merely stopped loading. A failed
+		// lock query would otherwise read as an empty lock: Confirm would make
+		// zero plans, claim success, and still advance `lastKnown` — silently
+		// burning the one chance to ask about this agent.
+		if (coverageLoading || !skillsReady || !lockReady || !lastKnownReady) {
+			return null;
+		}
+		if (!disabledAgentsLoaded) {
 			// `disabledAgents` is read from the store AFTER the provider first
 			// renders, so every agent looks enabled for one commit. Seeding on
 			// that frame would record a disabled agent as "known" and never
@@ -91,10 +95,10 @@ export function NewToolsPromptController() {
 		coverageLoading,
 		disabledAgentsLoaded,
 		lastKnown,
-		lastKnownLoading,
-		lockLoading,
+		lastKnownReady,
+		lockReady,
 		promptAgents,
-		skillsLoading,
+		skillsReady,
 	]);
 
 	useEffect(() => {
@@ -102,24 +106,42 @@ export function NewToolsPromptController() {
 		if (delta.kind !== "seedOnly" && delta.kind !== "quiet") return;
 		const fingerprint = delta.seed.join("\u0000");
 		if (persistedSeedRef.current === fingerprint) return;
-		persistedSeedRef.current = fingerprint;
-		void setLastKnownAvailableAgents(delta.seed).then(() => {
-			queryClient.setQueryData(["lastKnownAvailableAgents"], delta.seed);
-		});
+		let cancelled = false;
+		void setLastKnownAvailableAgents(delta.seed)
+			.then(() => {
+				if (cancelled) return;
+				// Recorded only AFTER the store accepted it: a rejected write
+				// must stay retryable this session, not be remembered as done.
+				persistedSeedRef.current = fingerprint;
+				queryClient.setQueryData(
+					["lastKnownAvailableAgents"],
+					delta.seed,
+				);
+			})
+			.catch(() => {
+				// Nothing to show the user: the next render retries, and until
+				// it lands the prompt simply stays un-suppressed.
+			});
+		return () => {
+			cancelled = true;
+		};
 	}, [delta, queryClient]);
 
+	const deltaIds = delta?.kind === "prompt" ? delta.ids.join("\u0000") : null;
+
 	const persistSeed = async (seed: string[]) => {
+		setHandledIds(deltaIds);
 		await setLastKnownAvailableAgents(seed);
 		queryClient.setQueryData(["lastKnownAvailableAgents"], seed);
-		setDismissed(true);
 	};
 
-	const promptIds = !dismissed && delta?.kind === "prompt" ? delta.ids : null;
+	const promptIds =
+		delta?.kind === "prompt" && handledIds !== deltaIds ? delta.ids : null;
 	const pendingSeed = delta?.kind === "prompt" ? delta.seed : null;
 
 	const handleSkip = () => {
 		if (!pendingSeed) {
-			setDismissed(true);
+			setHandledIds(deltaIds);
 			return;
 		}
 		void persistSeed(pendingSeed);
@@ -128,9 +150,16 @@ export function NewToolsPromptController() {
 	const handleLink = async () => {
 		if (!promptIds || !pendingSeed) return;
 		const plans = reconcileAddsForNewAgents(skills, promptIds, lockedNames);
+		// Count AGENT LINKS, not plans: one skill reconciled onto two agents
+		// where only one succeeds is a partial failure, and per-plan counting
+		// would call the whole plan failed.
+		let attempted = 0;
 		let failed = 0;
 		for (const plan of plans) {
+			attempted += plan.added.length;
 			try {
+				// A batch answers HTTP 200 with per-row failures INSIDE the
+				// envelope, so a resolved promise is not success on its own.
 				const result = await reconcileMutation.mutateAsync({
 					source: {
 						agent: plan.sourceAgent,
@@ -141,21 +170,18 @@ export function NewToolsPromptController() {
 					added: plan.added,
 					removed: null,
 				});
-				// A batch answers HTTP 200 with per-row failures inside the
-				// envelope, so a resolved promise is NOT success. Counting only
-				// thrown requests reported "linked!" while agents were skipped.
-				if (result.failed_count > 0) failed += 1;
+				failed += result.failed_count;
 			} catch {
-				failed += 1;
+				failed += plan.added.length;
 			}
 		}
 		if (failed === 0) {
 			toast.success(t("newToolsLinkSuccess"));
-		} else if (failed < plans.length) {
+		} else if (failed < attempted) {
 			toast.danger(
-				t("newToolsLinkPartial", { failed, total: plans.length }),
+				t("newToolsLinkPartial", { failed, total: attempted }),
 			);
-		} else if (plans.length > 0) {
+		} else if (attempted > 0) {
 			toast.danger(t("newToolsLinkError"));
 		}
 		await persistSeed(pendingSeed);
@@ -170,7 +196,9 @@ export function NewToolsPromptController() {
 		<NewToolsModal
 			isOpen={promptIds !== null}
 			agentLabels={agentLabels}
-			skillCount={new Set(skills.map((skill) => skill.name)).size}
+			// What will ACTUALLY be linked: lock-owned skills only. Counting the
+			// discovery list would promise to move private skills we now skip.
+			skillCount={lockedNames.size}
 			isLinking={reconcileMutation.isPending}
 			onSkip={handleSkip}
 			onLink={() => {
