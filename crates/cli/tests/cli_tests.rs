@@ -6848,19 +6848,28 @@ fn check_write_result_refuses_to_target_managed_skill_content() {
 	std::fs::write(&skill_md, "---\nname: alpha\n---\n").unwrap();
 	let before = std::fs::read(&skill_md).unwrap();
 
-	let out = isolated_cli(home.path(), state.path())
-		.args([
-			"-g",
-			"check",
-			"skills",
-			"--write-result",
-			skill_md.to_str().unwrap(),
-		])
-		.output()
-		.unwrap();
-
-	assert!(!out.status.success(), "writing into the Master must fail");
-	assert_eq!(std::fs::read(&skill_md).unwrap(), before);
+	for spelling in [
+		skill_md.display().to_string(),
+		master.join("nested/deep.json").display().to_string(),
+		home.path()
+			.join(".agents/skills/../skills/alpha/SKILL.md")
+			.display()
+			.to_string(),
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.args(["-g", "check", "skills", "--write-result", &spelling])
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"writing into the Master must fail: {spelling}"
+		);
+		assert_eq!(std::fs::read(&skill_md).unwrap(), before);
+		assert!(
+			!master.join("nested").exists(),
+			"the refusal must precede any directory creation"
+		);
+	}
 }
 
 /// A populated lock proves the read-only guarantee on real rows — an empty one
