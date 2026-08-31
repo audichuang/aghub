@@ -15,7 +15,8 @@ pub use global::{
 	save_selected_agents,
 };
 pub use guard::{
-	mutation_guard, mutation_guard_with_timeout, MutationGuard, MutationScope,
+	mutation_guard, mutation_guard_with_timeout, resolve_existing,
+	MutationGuard, MutationScope,
 };
 pub use io::{
 	atomic_write_json, ensure_locks_writable, get_skill_lock_path,

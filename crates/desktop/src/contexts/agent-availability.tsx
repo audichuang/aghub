@@ -16,6 +16,10 @@ export interface AgentAvailabilityContextValue {
 	 * render, so `isDisabled` is `false` for everything until this flips.
 	 * Anything that PERSISTS a decision about agents must wait for it. */
 	disabledAgentsLoaded: boolean;
+	/** Both server queries SUCCEEDED. On failure the provider still renders
+	 * children with EMPTY arrays, which reads as "this machine has no agents" —
+	 * fine for a list, fatal for anything that records that as a fact. */
+	agentsReady: boolean;
 	refetch: () => void;
 	refreshDisabledAgents: () => Promise<void>;
 }

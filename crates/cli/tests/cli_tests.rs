@@ -6782,6 +6782,87 @@ fn check_write_result_refuses_to_target_a_skill_lock() {
 	);
 }
 
+/// The spellings a naive parent/file_name normalizer let through. Each of these
+/// reaches a real lock, so each must be refused BEFORE anything is written.
+#[cfg(unix)]
+#[test]
+fn check_write_result_refuses_every_spelling_that_reaches_a_lock() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = tempfile::TempDir::new().unwrap();
+	let root = std::fs::canonicalize(project.path()).unwrap();
+	// A project marker so `-p` resolves this dir as the project root.
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+	let project_lock = root.join("skills-lock.json");
+	// A VALID lock: an unreadable one makes `check` bail while READING it, so
+	// the test would pass without ever reaching the sidecar write (it did).
+	std::fs::write(
+		&project_lock,
+		r#"{"version":1,"skills":{"alpha":{"source":"o/r","sourceType":"github","computedHash":"deadbeef"}}}"#,
+	)
+	.unwrap();
+	let before = std::fs::read(&project_lock).unwrap();
+
+	// `..` through a component that does not exist: canonicalize fails and a
+	// `file_name()` walk gives up, but the OS still resolves it to the lock.
+	let through_missing = root
+		.join("missing/../skills-lock.json")
+		.display()
+		.to_string();
+	// Relative, from the project root as cwd.
+	let bare = "skills-lock.json".to_string();
+
+	for spelling in [through_missing, bare] {
+		let out = isolated_cli(home.path(), state.path())
+			.current_dir(&root)
+			.args(["-p", "check", "skills", "--write-result", &spelling])
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"spelling {spelling} must be refused; stdout: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert_eq!(
+			std::fs::read(&project_lock).unwrap(),
+			before,
+			"spelling {spelling} rewrote the project lock"
+		);
+		assert!(
+			!root.join("missing").exists(),
+			"the refusal must happen before any directory is created"
+		);
+	}
+}
+
+/// An online check HASHES the installed skill folders, so a sidecar written
+/// into one would rewrite managed content the command just measured.
+#[cfg(unix)]
+#[test]
+fn check_write_result_refuses_to_target_managed_skill_content() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let master = home.path().join(".agents/skills/alpha");
+	std::fs::create_dir_all(&master).unwrap();
+	let skill_md = master.join("SKILL.md");
+	std::fs::write(&skill_md, "---\nname: alpha\n---\n").unwrap();
+	let before = std::fs::read(&skill_md).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"check",
+			"skills",
+			"--write-result",
+			skill_md.to_str().unwrap(),
+		])
+		.output()
+		.unwrap();
+
+	assert!(!out.status.success(), "writing into the Master must fail");
+	assert_eq!(std::fs::read(&skill_md).unwrap(), before);
+}
+
 /// A populated lock proves the read-only guarantee on real rows — an empty one
 /// cannot: with no entries there is nothing a write could have damaged.
 #[test]

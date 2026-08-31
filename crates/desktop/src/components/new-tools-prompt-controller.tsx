@@ -29,8 +29,9 @@ export function NewToolsPromptController() {
 	const { t } = useTranslation();
 	const api = useApi();
 	const queryClient = useQueryClient();
-	const { availableAgents, disabledAgentsLoaded } = useAgentAvailability();
-	const { coverage, isLoading: coverageLoading } = useSkillCoverage("global");
+	const { availableAgents, disabledAgentsLoaded, agentsReady } =
+		useAgentAvailability();
+	const { coverage, isSuccess: coverageReady } = useSkillCoverage("global");
 	const { data: skills = [], isSuccess: skillsReady } = useQuery(
 		skillListQueryOptions({ api, scope: "global" }),
 	);
@@ -77,7 +78,18 @@ export function NewToolsPromptController() {
 		// lock query would otherwise read as an empty lock: Confirm would make
 		// zero plans, claim success, and still advance `lastKnown` — silently
 		// burning the one chance to ask about this agent.
-		if (coverageLoading || !skillsReady || !lockReady || !lastKnownReady) {
+		// EVERY input must have succeeded. A failed coverage or availability
+		// query yields empty data that reads as "no agent needs a link", and
+		// persisting THAT seeds an empty `lastKnown` — so when the query later
+		// recovers, every pre-existing agent looks newly installed and the user
+		// gets the upgrade-time prompt spam locked decision D4 forbids.
+		if (
+			!coverageReady ||
+			!agentsReady ||
+			!skillsReady ||
+			!lockReady ||
+			!lastKnownReady
+		) {
 			return null;
 		}
 		if (!disabledAgentsLoaded) {
@@ -92,7 +104,8 @@ export function NewToolsPromptController() {
 			agents: promptAgents,
 		});
 	}, [
-		coverageLoading,
+		agentsReady,
+		coverageReady,
 		disabledAgentsLoaded,
 		lastKnown,
 		lastKnownReady,
@@ -129,10 +142,23 @@ export function NewToolsPromptController() {
 
 	const deltaIds = delta?.kind === "prompt" ? delta.ids.join("\u0000") : null;
 
+	// Forget the handled delta as soon as we are no longer prompting. Without
+	// this, handling agent A, uninstalling it (which removes it from
+	// `lastKnown`), then REINSTALLING it produces the identical id list and the
+	// modal would never reopen — the documented reinstall case.
+	if (deltaIds === null && handledIds !== null) setHandledIds(null);
+
 	const persistSeed = async (seed: string[]) => {
 		setHandledIds(deltaIds);
-		await setLastKnownAvailableAgents(seed);
-		queryClient.setQueryData(["lastKnownAvailableAgents"], seed);
+		try {
+			await setLastKnownAvailableAgents(seed);
+			queryClient.setQueryData(["lastKnownAvailableAgents"], seed);
+		} catch {
+			// The store refused: re-open rather than silently swallowing it,
+			// otherwise the agent is never offered again this session.
+			setHandledIds(null);
+			toast.danger(t("newToolsLinkError"));
+		}
 	};
 
 	const promptIds =
@@ -175,7 +201,11 @@ export function NewToolsPromptController() {
 				failed += plan.added.length;
 			}
 		}
-		if (failed === 0) {
+		if (attempted === 0) {
+			// Locked skills the discovery list does not show yet: nothing was
+			// reconciled, so claiming success would be a lie.
+			toast.danger(t("newToolsLinkError"));
+		} else if (failed === 0) {
 			toast.success(t("newToolsLinkSuccess"));
 		} else if (failed < attempted) {
 			toast.danger(

@@ -36,13 +36,14 @@ export function useSkillTags() {
 			try {
 				await setSkillTags(next);
 			} catch (error) {
-				// Re-read rather than restoring `before`: another edit may have
-				// landed while this one was in flight, and the store is the
-				// authority on what actually persisted.
-				queryClient.setQueryData(
-					SKILL_TAGS_QUERY_KEY,
-					await getSkillTags(),
-				);
+				// Restore the pre-edit value. Re-reading is NOT an option: the
+				// Tauri store mutates its in-memory cache in `set()` before
+				// `save()`, so after a failed save `getSkillTags()` hands back
+				// the very value that did not persist — the UI would show a tag
+				// that disappears on restart.
+				// ponytail: last-writer-wins if two edits overlap AND one
+				// fails; per-key writes if that ever matters.
+				queryClient.setQueryData(SKILL_TAGS_QUERY_KEY, before);
 				throw error;
 			}
 			return next;

@@ -45,12 +45,19 @@ export function agentSkillCoverageQueryOptions({
 export function useSkillCoverage(
 	scope: AgentScope,
 	projectRoot?: string | null,
-): { coverage: Record<string, AgentSkillCoverageDto>; isLoading: boolean } {
+): {
+	coverage: Record<string, AgentSkillCoverageDto>;
+	isLoading: boolean;
+	/** The query SUCCEEDED. A failed one yields an empty `coverage`, which is
+	 * indistinguishable from "no agent needs a link" — anything that persists a
+	 * decision from coverage must gate on this, not on `!isLoading`. */
+	isSuccess: boolean;
+} {
 	const api = useApi();
-	const { data, isLoading } = useQuery(
+	const { data, isLoading, isSuccess } = useQuery(
 		agentSkillCoverageQueryOptions({ api, scope, projectRoot }),
 	);
 	const coverage: Record<string, AgentSkillCoverageDto> = {};
 	for (const entry of data ?? []) coverage[entry.id] = entry;
-	return { coverage, isLoading };
+	return { coverage, isLoading, isSuccess };
 }

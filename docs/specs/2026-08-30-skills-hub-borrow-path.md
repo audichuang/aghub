@@ -508,7 +508,12 @@ Zed（`zed.rs` skills 全關、`skills_cli_name: None`）**本 PR 不碰**。
    `Env`，在 Linux 上驗過寫了哪個檔、下了哪些指令、被拒絕的 payload 不落地；
    launchd／Task Scheduler 本身接不接受那份定義沒有機器可驗。Linux 有一個
    `#[ignore]` 的真機測試（`cargo test -p aghub -- --ignored`）。
-5. **Tauri capabilities 沒有為新指令加 ACL。** 這個 repo 目前對 `generate_handler`
+5. **`useEffect` 用來把 seed 寫進持久層。** `crates/desktop/AGENTS.md` 禁的是
+   「用 `useEffect` 取資料或同步 state」;這裡是把衍生結果寫進**外部系統**
+   (`store.json`),那是 effect 本來就該做的事,而且沒有第二個地方可以掛。
+   已加上 cancelled 旗標與失敗不記錄 fingerprint。若之後要拿掉,得先有一個
+   「delta 變化時觸發一次持久化」的非 effect 機制。
+6. **Tauri capabilities 沒有為新指令加 ACL。** 這個 repo 目前對 `generate_handler`
    的 app command 一律不掛 ACL（`start_server`／`connect_remote` 等都沒有），
    新指令沿用同一慣例。要收緊是整個 repo 一起導入 ACL 的獨立工作，不是這四個
    指令的問題。

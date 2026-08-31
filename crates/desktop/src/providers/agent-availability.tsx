@@ -28,6 +28,7 @@ export function AgentAvailabilityProvider({
 	const {
 		data: allAgents = [],
 		isLoading: isLoadingAgents,
+		isSuccess: agentsLoaded,
 		refetch: refetchAgents,
 	} = useQuery({
 		...agentsListQueryOptions({ api }),
@@ -37,6 +38,7 @@ export function AgentAvailabilityProvider({
 	const {
 		data: availabilityData = [],
 		isLoading: isLoadingAvailability,
+		isSuccess: availabilityLoaded,
 		refetch: refetchAvailability,
 	} = useQuery({
 		...agentAvailabilityQueryOptions({ api }),
@@ -102,6 +104,7 @@ export function AgentAvailabilityProvider({
 		allAgents,
 		isLoading,
 		disabledAgentsLoaded,
+		agentsReady: agentsLoaded && availabilityLoaded,
 		refetch,
 		refreshDisabledAgents,
 	};

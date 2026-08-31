@@ -383,28 +383,31 @@ function SkillCheckScheduleRow() {
 
 	const savePath = useMutation({
 		mutationFn: async (path: string) => {
-			// Validated by the backend (must be an existing file) before it is
-			// stored, so a typo cannot silently disable the schedule later.
+			// Validated by the backend (must be an absolute, existing file)
+			// before anything is stored, so a typo cannot silently disable the
+			// schedule later.
 			const resolved = await invoke<string>("resolve_aghub_cli", {
 				explicit: path,
 			});
-			await setAghubCliPath(resolved);
-			return resolved;
-		},
-		onSuccess: async (resolved) => {
-			queryClient.setQueryData(["aghubCliPath"], resolved);
-			setPathDraft("");
-			toast.success(t("skillCheckScheduleCliPathSaved"));
-			// An already-registered task still points at the OLD program, so
-			// re-register it — otherwise "saved" fixes nothing until the user
-			// toggles the switch off and on.
+			// Re-register BEFORE committing: an already-registered task still
+			// points at the OLD program, and reporting "saved" while the OS
+			// task runs something else is the lie worth avoiding. A failure
+			// here rejects the whole save.
+			let next: SkillCheckScheduleStatus | null = null;
 			if (status?.enabled) {
-				const next = await invoke<SkillCheckScheduleStatus>(
+				next = await invoke<SkillCheckScheduleStatus>(
 					"set_skill_check_schedule",
 					{ enabled: true, cliPath: resolved },
 				);
-				queryClient.setQueryData(["skill-check-schedule"], next);
 			}
+			await setAghubCliPath(resolved);
+			return { resolved, next };
+		},
+		onSuccess: ({ resolved, next }) => {
+			queryClient.setQueryData(["aghubCliPath"], resolved);
+			if (next) queryClient.setQueryData(["skill-check-schedule"], next);
+			setPathDraft("");
+			toast.success(t("skillCheckScheduleCliPathSaved"));
 		},
 		onError: (error) => {
 			toast.danger(
@@ -499,7 +502,12 @@ function SkillCheckScheduleRow() {
 			<Switch
 				isSelected={status?.enabled ?? false}
 				onChange={(checked) => mutation.mutate(checked)}
-				isDisabled={isPending || mutation.isPending || cliMissing}
+				isDisabled={
+					isPending ||
+					mutation.isPending ||
+					savePath.isPending ||
+					cliMissing
+				}
 				aria-label={t("skillCheckScheduleHeading")}
 				// The compound root reserves a label slot and is wider than the
 				// visible control, which throws off this row's right edge.

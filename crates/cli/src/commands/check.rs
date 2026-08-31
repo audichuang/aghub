@@ -466,51 +466,71 @@ fn sidecar_from_views(
 	}
 }
 
-/// Compare two paths that may not exist yet: canonicalize the deepest existing
-/// ancestor and re-attach the rest, so `~/x/../.skill-lock.json`, a symlinked
-/// `$HOME`, and the plain spelling all collapse to the same answer.
-fn normalized(path: &Path) -> PathBuf {
-	let mut suffix: Vec<std::ffi::OsString> = Vec::new();
-	let mut cursor = path.to_path_buf();
-	loop {
-		if let Ok(real) = cursor.canonicalize() {
-			let mut out = real;
-			for part in suffix.iter().rev() {
-				out.push(part);
-			}
-			return out;
-		}
-		match (cursor.file_name(), cursor.parent()) {
-			(Some(name), Some(parent)) if !parent.as_os_str().is_empty() => {
-				suffix.push(name.to_os_string());
-				cursor = parent.to_path_buf();
-			}
-			_ => return path.to_path_buf(),
-		}
-	}
-}
-
 /// `check` is READ-ONLY. `--write-result` takes an arbitrary path, so without
-/// this a caller could aim the sidecar at a skill lock and have the atomic
-/// write replace it — no `MutationGuard`, no rollback, and the very file this
-/// command just read as its answer. Refuse both locks in every scope, whether
-/// or not they exist yet.
+/// this a caller could aim the sidecar at managed state and have the atomic
+/// write replace it — no `MutationGuard`, no rollback, and in the lock's case
+/// the very file this command just read as its answer.
+///
+/// Refused: both skill locks in every spelling, and anything inside a
+/// `.agents/skills` Master (an online check HASHES those folders, so a write
+/// there would rewrite skill content the command just measured).
+///
+/// Normalization is `skill::lock::resolve_existing` — the tested one the
+/// mutation lock already uses to give one directory one identity. A hand-rolled
+/// parent/file_name walk is NOT good enough: `file_name()` is `None` for a path
+/// ending in `..`, so `<root>/missing/../skills-lock.json` walked off the end
+/// unnormalized and wrote straight through to the real lock.
 fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
-	let target = normalized(path);
-	let mut forbidden = vec![skill::lock::get_skill_lock_path()];
-	forbidden.push(skill::lock::local::get_local_lock_path(project_root));
+	let target = skill::lock::resolve_existing(path);
+
+	let mut forbidden_files = vec![
+		skill::lock::get_skill_lock_path(),
+		// Both spellings: the resolved project root AND the cwd, which differ
+		// whenever the command was run from a subdirectory.
+		skill::lock::local::get_local_lock_path(None),
+	];
 	if let Some(root) = project_root {
-		forbidden.push(skill::lock::local::get_local_lock_path(Some(root)));
+		forbidden_files
+			.push(skill::lock::local::get_local_lock_path(Some(root)));
 	}
-	for lock in forbidden {
-		if normalized(&lock) == target {
+	for lock in forbidden_files {
+		if same_path(&skill::lock::resolve_existing(&lock), &target) {
 			bail!(
 				"--write-result must not target a skill lock ({}): check is read-only",
 				lock.display()
 			);
 		}
 	}
+
+	let mut forbidden_dirs = Vec::new();
+	if let Some(home) = dirs::home_dir() {
+		forbidden_dirs.push(home.join(".agents").join("skills"));
+	}
+	if let Some(root) = project_root {
+		forbidden_dirs.push(root.join(".agents").join("skills"));
+	}
+	for dir in forbidden_dirs {
+		let dir = skill::lock::resolve_existing(&dir);
+		if target.starts_with(&dir) {
+			bail!(
+				"--write-result must not target managed skill content ({}): check is read-only",
+				dir.display()
+			);
+		}
+	}
 	Ok(())
+}
+
+/// Path equality that matches the filesystem's own answer: byte-exact on Linux,
+/// case-insensitive where the default filesystem is (macOS, Windows) — a
+/// case-variant spelling reaches the same file there.
+fn same_path(a: &Path, b: &Path) -> bool {
+	if cfg!(any(target_os = "macos", target_os = "windows")) {
+		let lower = |p: &Path| p.to_string_lossy().to_lowercase();
+		lower(a) == lower(b)
+	} else {
+		a == b
+	}
 }
 
 fn write_check_sidecar(

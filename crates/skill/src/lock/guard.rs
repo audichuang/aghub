@@ -151,7 +151,7 @@ impl MutationScope {
 /// exact: a path component that does not exist cannot be a symlink. Not a
 /// security boundary — every mutating flow has its own containment guards — just
 /// one identity per directory.
-fn resolve_existing(path: &Path) -> PathBuf {
+pub fn resolve_existing(path: &Path) -> PathBuf {
 	let absolute =
 		std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
 	let components: Vec<std::path::Component<'_>> =

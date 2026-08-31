@@ -47,16 +47,36 @@ pub fn build_check_argv(program: &Path, sidecar: &Path) -> Vec<String> {
 	argv
 }
 
+/// Judge the ARGV, never the joined string. A substring test asked whether the
+/// text "apply-update" appears anywhere — so a data directory named
+/// `.../apply-update/` would refuse a perfectly good schedule, while a mutating
+/// verb spelled differently could have passed.
 pub fn schedule_is_check_only(argv: &[String]) -> bool {
-	let hay = argv.join(" ");
-	hay.contains("check")
-		&& hay.contains("--online")
-		&& !hay.contains("apply-update")
-		&& !argv.iter().any(|a| a == "--yes")
-		&& !hay.contains("--background-task")
+	// argv[0] is the program; the VERB must be exactly `check`.
+	let Some(verb) = argv.get(1) else {
+		return false;
+	};
+	if verb != "check" {
+		return false;
+	}
+	let flags = &argv[1..];
+	if !flags.iter().any(|a| a == "--online") {
+		return false;
+	}
+	!flags.iter().any(|a| {
+		a == "apply-update"
+			|| a == "--yes"
+			|| a == "-y"
+			|| a == "--background-task"
+	})
 }
 
 /// The one gate every backend goes through before writing a task definition.
+///
+/// Defence in depth: `build_check_args` is a constant, so this cannot fail
+/// today — it exists so a future edit to those args cannot reach an OS
+/// scheduler. The predicate itself is covered by
+/// `the_check_only_gate_judges_argv_not_the_joined_string`.
 fn checked_argv(cli: &Path, sidecar: &Path) -> Result<Vec<String>, String> {
 	let argv = build_check_argv(cli, sidecar);
 	if !schedule_is_check_only(&argv) {
@@ -339,6 +359,15 @@ pub mod schedule_backend {
 		let dir = systemd_dir(env);
 		let _ = std::fs::remove_file(dir.join(SYSTEMD_TIMER));
 		let _ = std::fs::remove_file(dir.join(SYSTEMD_SERVICE));
+		// `disable` legitimately fails when nothing was registered, so its
+		// error is not the verdict — the state AFTERWARDS is. Reporting
+		// "disabled" while the OS still runs the job is the failure that
+		// matters.
+		if systemd_enabled(env) {
+			return Err(
+				"the systemd timer is still enabled after removing it".into()
+			);
+		}
 		Ok(())
 	}
 
@@ -386,11 +415,17 @@ pub mod schedule_backend {
 	}
 
 	pub fn unregister_launchd(env: &Env, uid: &str) -> Result<(), String> {
-		let _ = (env.run)(
-			"launchctl",
-			&["bootout", &format!("gui/{uid}/{LAUNCHD_LABEL}")],
-		);
+		let label = format!("gui/{uid}/{LAUNCHD_LABEL}");
+		let _ = (env.run)("launchctl", &["bootout", &label]);
 		let _ = std::fs::remove_file(launchd_plist_path(env));
+		// Deleting the plist stops the NEXT login from loading it; it does not
+		// unload a job launchd already holds. Ask launchd, or the UI reports
+		// "disabled" while the job keeps running.
+		if (env.probe)("launchctl", &["print", &label]) {
+			return Err(
+				"launchd still has the job loaded after removing it".into()
+			);
+		}
 		Ok(())
 	}
 
@@ -414,6 +449,11 @@ pub mod schedule_backend {
 
 	pub fn unregister_schtasks(env: &Env) -> Result<(), String> {
 		let _ = (env.run)("schtasks", &["/Delete", "/TN", WINDOWS_TASK, "/F"]);
+		if schtasks_enabled(env) {
+			return Err(
+				"the scheduled task still exists after deleting it".into()
+			);
+		}
 		Ok(())
 	}
 
@@ -746,25 +786,6 @@ mod tests {
 		assert_eq!(run.matches('"').count() % 2, 0, "unbalanced quotes: {run}");
 	}
 
-	#[test]
-	fn every_backend_payload_refuses_a_non_check_command() {
-		// The guard lives in `checked_argv`, so proving it once per builder is
-		// what stops a future edit from scheduling `apply-update`. The args
-		// themselves are hardcoded, so the only way to trip the guard from a
-		// test is a path that carries the forbidden word — contrived, but it
-		// proves all three builders really route through the gate.
-		let cli = Path::new("/usr/bin/aghub-cli");
-		let evil = Path::new("/tmp/apply-update/skill-check-last.json");
-		for payload in [
-			systemd_service_unit(cli, evil).map(|_| ()),
-			launchd_plist(cli, evil).map(|_| ()),
-			schtasks_create_args(cli, evil).map(|_| ()),
-		] {
-			let err = payload.expect_err("a non-check payload must be refused");
-			assert!(err.contains("non-check"), "{err}");
-		}
-	}
-
 	/// Declares `$log` (every OS command, in order) and `$env` (a temp HOME +
 	/// a runner that records instead of executing). Lets the macOS and Windows
 	/// registration paths be driven on Linux — the only place a wrong
@@ -778,13 +799,76 @@ mod tests {
 					.push(format!("{program} {}", args.join(" ")));
 				Ok(())
 			};
-			let probe = |_: &str, _: &[&str]| true;
+			// "the OS reports nothing scheduled" — the state after a removal,
+			// which `unregister_*` now verifies instead of trusting the
+			// removal command's exit code.
+			let probe = |_: &str, _: &[&str]| false;
 			let $env = Env {
 				home: $tmp.path().to_path_buf(),
 				run: &run,
 				probe: &probe,
 			};
 		};
+	}
+
+	/// The gate judges ARGV. Each mutation below is a command that must never
+	/// reach an OS scheduler; the last two are the false positives a substring
+	/// test produced.
+	#[test]
+	fn the_check_only_gate_judges_argv_not_the_joined_string() {
+		let ok = build_check_argv(&cli(), &sidecar());
+		assert!(schedule_is_check_only(&ok));
+
+		let mutate = |f: &dyn Fn(&mut Vec<String>)| {
+			let mut argv = ok.clone();
+			f(&mut argv);
+			schedule_is_check_only(&argv)
+		};
+		assert!(!mutate(&|a| a[1] = "apply-update".into()), "mutating verb");
+		assert!(!mutate(&|a| a.push("--yes".into())), "--yes");
+		assert!(!mutate(&|a| a.push("-y".into())), "-y short form");
+		assert!(
+			!mutate(&|a| a.push("--background-task".into())),
+			"desktop background task"
+		);
+		assert!(
+			!mutate(&|a| a.retain(|x| x != "--online")),
+			"an offline schedule is not the contract either"
+		);
+		assert!(!schedule_is_check_only(&[]), "empty argv");
+		assert!(
+			!schedule_is_check_only(&["aghub-cli".into()]),
+			"program with no verb"
+		);
+
+		// A PATH that merely contains the words must NOT be refused: a real
+		// data directory can be called anything.
+		let awkward = build_check_argv(
+			&cli(),
+			Path::new("/home/u/apply-update/--yes/last.json"),
+		);
+		assert!(
+			schedule_is_check_only(&awkward),
+			"a path is data, not a verb: {awkward:?}"
+		);
+	}
+
+	/// Turning the schedule OFF must not report success while the OS still has
+	/// it. The verdict is the state afterwards, not the removal command's exit.
+	#[test]
+	fn unregister_reports_failure_when_the_os_still_has_the_job() {
+		let tmp = tempfile::tempdir().unwrap();
+		let run = |_: &str, _: &[&str]| Ok(());
+		// The OS insists it is still scheduled.
+		let probe = |_: &str, _: &[&str]| true;
+		let env = Env {
+			home: tmp.path().to_path_buf(),
+			run: &run,
+			probe: &probe,
+		};
+		assert!(unregister_systemd(&env).is_err());
+		assert!(unregister_schtasks(&env).is_err());
+		assert!(unregister_launchd(&env, "501").is_err());
 	}
 
 	#[test]
@@ -870,27 +954,6 @@ mod tests {
 			*log.borrow(),
 			vec![format!("schtasks /Delete /TN {WINDOWS_TASK} /F")]
 		);
-	}
-
-	/// The check-only gate must run BEFORE the write, on all three backends:
-	/// a refused payload must leave no task definition behind at all.
-	#[test]
-	fn a_refused_payload_never_reaches_disk_or_the_os() {
-		let tmp = tempfile::tempdir().unwrap();
-		recording_env!(tmp, log, env);
-		let evil = Path::new("/tmp/apply-update/skill-check-last.json");
-
-		register_systemd(&env, &cli(), evil).unwrap_err();
-		register_launchd(&env, "501", &cli(), evil).unwrap_err();
-		register_schtasks(&env, &cli(), evil).unwrap_err();
-
-		assert!(!tmp
-			.path()
-			.join(".config/systemd/user")
-			.join(SYSTEMD_SERVICE)
-			.exists());
-		assert!(!launchd_enabled(&env));
-		assert!(log.borrow().is_empty(), "no OS command may run");
 	}
 
 	#[test]
