@@ -32,4 +32,16 @@ Role map:
 - Grouping/merge and bulk plan/diff utilities live in `lib/` (e.g.
   `getMcpMergeKey`, `group-agent-plan.ts`) — search there before
   re-implementing a Map-reduce or bulk-diff in a page.
+- **`!isLoading` is not "the data is trustworthy".** A failed query settles with
+  `data` undefined, which every `?? []` / `?? {}` turns into "the server says
+  there is nothing" — indistinguishable from a real empty answer. Anything that
+  PERSISTS a decision from query data (a store write, a seed, a "handled" flag)
+  must gate on `isSuccess`; a transient failure otherwise records an empty world
+  as fact and the recovery looks like a first run.
+- **Tauri store: `set()` mutates memory, only `save()` reaches disk.** A failed
+  `save()` leaves the new value in the store's in-memory map, so the next
+  `save()` from ANYWHERE else in the app (autostart toggle, a settings field)
+  flushes the edit that just failed, and a re-read hands back the unpersisted
+  value. Snapshot the previous value and restore it in the catch — do not
+  recover by re-reading.
 - **Pure logic gets a colocated `*.test.ts`** (node:test, run via `bun run test`). When you add a pure helper to `lib/` (or a pure type-contract next to a component), add the test beside it — CI runs the whole `src/**/*.test.ts` glob.

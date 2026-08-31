@@ -72,6 +72,14 @@ Only where the obvious guess is wrong; everything else, ask CodeGraph. The one
 that catches everybody: the `AgentAdapter` **trait** is in
 `crates/core/src/adapters/mod.rs`, but the impl is in `core/src/adapter.rs`.
 
+**Three different "app data roots" exist.** `aghub-cli`'s `app_data_dir()` and
+`aghub_api::default_app_data_dir()` are both `$AGHUB_DATA_DIR` else
+`dirs::data_dir()/aghub`; the desktop starts its embedded api with **Tauri's**
+`app_data_dir()`, which is identifier-scoped (`<data>/com.akrc.aghub`). Any file
+one surface WRITES and another READS must use the CLI formula — Tauri's, or a
+hand-rolled `$XDG_DATA_HOME` guess, agrees on Linux and diverges on
+macOS/Windows, so the mismatch never shows up locally.
+
 ## Key Design Patterns
 
 - **Adapter pattern**: `create_adapter(agent_type)` → `registry::get` →
@@ -109,6 +117,14 @@ round-trip, what a rewrite preserves) live with the descriptors:
 
 - `just preflight` = fmt + clippy + **desktop typecheck** + workspace tests +
   doc tests. It is the release gate; its `just --list` blurb is truncated
+- **preflight does NOT run prettier or eslint** — the pre-push hook does, and it
+  runs `bun run format:check` from the REPO ROOT (`prettier --check .`), so it
+  covers `scripts/` and `docs/`. A green preflight is not a pushable tree;
+  `crates/desktop`'s own `format:check` never sees root files
+- `just featured-check` (bundled skills-sh catalog still installable) needs the
+  network and a `gh` login, so it is deliberately outside preflight. Run it
+  after editing `crates/desktop/src/data/featured-skills.json` — the catalog
+  points at other people's repos and rots on their schedule
 - Prefer file-scoped over the full suite: `cargo test -p aghub-core <name> -- --exact`
 - Desktop frontend commands run from `crates/desktop` via `bun run …`
 
@@ -150,6 +166,15 @@ Non-obvious invariants:
   real update check. Its scope defaults to BOTH, like
   `doctor`/`source list`/`source diff` (it followed the global default and
   answered "this project is up to date" without reading the project lock)
+- **`check` never writes, and `--write-result` is why that needs a guard.** The
+  sidecar path is arbitrary, so the write is refused by **file NAME**
+  (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`) and by
+  `.agents/skills` appearing as adjacent path SEGMENTS, before any
+  resolved-path comparison. Do not "simplify" it back to comparing resolved
+  paths: three review rounds each found a new spelling that slipped through,
+  because the scope never resolved the target (`-g` resolves no project root at
+  all, so the project lock one `../` away was invisible). Normalize with
+  `skill::lock::resolve_existing`
 - **`source diff` ALWAYS fetches** (no offline mode); `--online` is accepted as a
   no-op alias so the `check` habit does not become a clap error. It judges each
   read scope against the origin THAT scope's lock records, so a host-blind
@@ -254,6 +279,14 @@ over silently — no compile error, no runtime error, just Claude's behavior.
 Steps 2 and 3 are asserted bijective in `crates/core/tests/registry_bijection.rs`,
 so a missed roster entry fails loudly instead of silently serving Claude.
 
+**Opening a capability on an EXISTING agent has a hidden blast radius**: tests
+across `cli`, `core` and `api` pick some agent that does not support skills as
+their "unsupported target" sentinel, and assert that a mutation is refused. Give
+that agent the capability and those tests stop testing anything — they go red if
+you are lucky, and silently pass a real write if you are not. Grep the agent's
+id across `crates/*/tests/` and `crates/api/src/routes/` BEFORE changing its
+capabilities, and move the sentinel rather than deleting the assertion.
+
 ## Testing
 
 **Do not pollute real home**: clearing `set_skills_path_override` under
@@ -266,7 +299,12 @@ is worse than none (it reads as "covered"). Assert observable OUTCOMES (values,
 on-disk / lock state), not a variant or `is_err()`; for a safety-critical flow
 exercise the FAILURE path (rollback AFTER the destructive step, not just the
 happy path). PROVE it: revert the fix, watch the assertion go red, restore —
-reasoning that it _would_ fail is how false greens survive. Worked example:
+reasoning that it _would_ fail is how false greens survive. **A malformed
+fixture is the sneakiest false green here**: the lock read paths fail CLOSED for
+the commands that report lock contents (`check`, `doctor`, `source list`/`diff`),
+so a lock fixture missing a required field makes the command bail while READING
+and the assertion passes with the code under test never reached. Copy a fixture
+shape from an existing test rather than hand-writing a minimal one. Worked example:
 `docs/specs/2026-07-15-skill-rename-transaction-deepening.md`.
 
 ## Agent permissions / approval boundaries
@@ -293,6 +331,12 @@ Never commit secrets.
   example: the multi-agent batch policy, extracted to `core/src/batch.rs`).
   Extract the invariant to `core` / a shared policy behind ONE tested interface;
   surfaces stay thin adapters.
+- NEVER hand-roll path normalization to compare two paths. Use
+  `skill::lock::resolve_existing` (the one the mutation lock uses): it resolves
+  the longest existing prefix so the FILESYSTEM answers `..` after a symlink,
+  then treats only the unresolvable tail lexically. A `parent()`/`file_name()`
+  walk is the trap — `file_name()` is `None` for a path ending in `..`, so the
+  walk abandons and returns the path unnormalized
 - When promoting a **private** flow to a **public** seam, re-assert the
   preconditions the old callers used to guarantee (e.g. `accept_rename`
   re-checks the lock itself) — a public entry point is only as safe as its own
