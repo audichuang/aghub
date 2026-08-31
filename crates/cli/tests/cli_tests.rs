@@ -6835,6 +6835,62 @@ fn check_write_result_refuses_every_spelling_that_reaches_a_lock() {
 	}
 }
 
+/// The `-g` bypass: with a global scope the command never RESOLVES a project
+/// root, so a path-comparison guard cannot know about the project lock one
+/// `../` away. Managed state is refused by NAME for exactly this reason.
+#[cfg(unix)]
+#[test]
+fn check_write_result_refuses_managed_names_from_any_scope_or_directory() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let repo = tempfile::TempDir::new().unwrap();
+	let root = std::fs::canonicalize(repo.path()).unwrap();
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+	std::fs::create_dir_all(root.join("src")).unwrap();
+	let project_lock = root.join("skills-lock.json");
+	std::fs::write(
+		&project_lock,
+		r#"{"version":1,"skills":{"alpha":{"source":"o/r","sourceType":"github","computedHash":"deadbeef"}}}"#,
+	)
+	.unwrap();
+	let before = std::fs::read(&project_lock).unwrap();
+
+	// The interprocess mutation lock: replacing its inode would break `flock`
+	// for any process already holding the old one.
+	let agents = home.path().join(".agents");
+	std::fs::create_dir_all(&agents).unwrap();
+	let mutation_lock = agents.join(".aghub-mutation.lock");
+	std::fs::write(&mutation_lock, "held").unwrap();
+
+	for spelling in [
+		"../skills-lock.json".to_string(),
+		mutation_lock.display().to_string(),
+		"../.agents/skills/whatever.json".to_string(),
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			// GLOBAL scope, run from a SUBDIRECTORY of the project.
+			.current_dir(root.join("src"))
+			.args(["-g", "check", "skills", "--write-result", &spelling])
+			.output()
+			.unwrap();
+		assert!(
+			!out.status.success(),
+			"{spelling} must be refused even under -g; stdout: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		assert_eq!(
+			std::fs::read(&project_lock).unwrap(),
+			before,
+			"{spelling} rewrote the project lock"
+		);
+		assert_eq!(
+			std::fs::read(&mutation_lock).unwrap(),
+			b"held",
+			"{spelling} rewrote the mutation lock"
+		);
+	}
+}
+
 /// An online check HASHES the installed skill folders, so a sidecar written
 /// into one would rewrite managed content the command just measured.
 #[cfg(unix)]

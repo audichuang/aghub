@@ -466,55 +466,72 @@ fn sidecar_from_views(
 	}
 }
 
+/// Managed filenames. A sidecar has no business being named any of these
+/// ANYWHERE, so the first test is the name — not a path comparison.
+///
+/// Three review rounds broke a comparison-only guard, each through a spelling
+/// or a scope the comparison did not enumerate (a `..` through a missing
+/// component; a bare relative path; and `-g` from a subdirectory, where the
+/// project lock the command never resolved is still one `../` away). A name
+/// test does not care how the caller spelled it or which scope was asked for.
+const MANAGED_FILE_NAMES: &[&str] = &[
+	".skill-lock.json",     // global lock
+	"skills-lock.json",     // project lock (npx-compatible)
+	".aghub-mutation.lock", // interprocess mutation lock
+];
+
+/// True when `.agents/skills` appears as ADJACENT path segments — the Master.
+/// Segment-wise, not a substring: `~/my.agents/skills-notes` is the user's own
+/// file and must stay writable.
+fn is_inside_master(path: &Path) -> bool {
+	let segments: Vec<String> = path
+		.components()
+		.map(|c| c.as_os_str().to_string_lossy().into_owned())
+		.collect();
+	segments
+		.windows(2)
+		.any(|pair| pair[0] == ".agents" && pair[1] == "skills")
+}
+
 /// `check` is READ-ONLY. `--write-result` takes an arbitrary path, so without
-/// this a caller could aim the sidecar at managed state and have the atomic
-/// write replace it — no `MutationGuard`, no rollback, and in the lock's case
-/// the very file this command just read as its answer.
+/// this a caller could aim the atomic write at managed state — no
+/// `MutationGuard`, no rollback, and in the lock's case the very file this
+/// command just read as its answer.
 ///
-/// Refused: both skill locks in every spelling, and anything inside a
-/// `.agents/skills` Master (an online check HASHES those folders, so a write
-/// there would rewrite skill content the command just measured).
-///
-/// Normalization is `skill::lock::resolve_existing` — the tested one the
-/// mutation lock already uses to give one directory one identity. A hand-rolled
-/// parent/file_name walk is NOT good enough: `file_name()` is `None` for a path
-/// ending in `..`, so `<root>/missing/../skills-lock.json` walked off the end
-/// unnormalized and wrote straight through to the real lock.
+/// Three independent tests, deliberately overlapping: the FILE NAME, the
+/// `.agents/skills` containment, and the resolved paths of the locks this scope
+/// actually knows about.
 fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
 	let target = skill::lock::resolve_existing(path);
 
-	let mut forbidden_files = vec![
-		skill::lock::get_skill_lock_path(),
-		// Both spellings: the resolved project root AND the cwd, which differ
-		// whenever the command was run from a subdirectory.
-		skill::lock::local::get_local_lock_path(None),
-	];
-	if let Some(root) = project_root {
-		forbidden_files
-			.push(skill::lock::local::get_local_lock_path(Some(root)));
-	}
-	for lock in forbidden_files {
-		if same_path(&skill::lock::resolve_existing(&lock), &target) {
+	if let Some(name) = target.file_name().and_then(|n| n.to_str()) {
+		if MANAGED_FILE_NAMES.contains(&name) {
 			bail!(
-				"--write-result must not target a skill lock ({}): check is read-only",
-				lock.display()
+				"--write-result must not be named '{name}': that is aghub-managed state and check is read-only"
 			);
 		}
 	}
 
-	let mut forbidden_dirs = Vec::new();
-	if let Some(home) = dirs::home_dir() {
-		forbidden_dirs.push(home.join(".agents").join("skills"));
+	if is_inside_master(&target) {
+		bail!(
+			"--write-result must not target managed skill content under .agents/skills: check is read-only"
+		);
 	}
+
+	// Belt and braces: the locks THIS scope resolved, by identity rather than
+	// by name, so a future rename of a lock file is still covered.
+	let mut forbidden = vec![
+		skill::lock::get_skill_lock_path(),
+		skill::lock::local::get_local_lock_path(None),
+	];
 	if let Some(root) = project_root {
-		forbidden_dirs.push(root.join(".agents").join("skills"));
+		forbidden.push(skill::lock::local::get_local_lock_path(Some(root)));
 	}
-	for dir in forbidden_dirs {
-		let dir = skill::lock::resolve_existing(&dir);
-		if target.starts_with(&dir) {
+	for lock in forbidden {
+		if same_path(&skill::lock::resolve_existing(&lock), &target) {
 			bail!(
-				"--write-result must not target managed skill content ({}): check is read-only",
-				dir.display()
+				"--write-result must not target a skill lock ({}): check is read-only",
+				lock.display()
 			);
 		}
 	}

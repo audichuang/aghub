@@ -417,15 +417,17 @@ pub mod schedule_backend {
 	pub fn unregister_launchd(env: &Env, uid: &str) -> Result<(), String> {
 		let label = format!("gui/{uid}/{LAUNCHD_LABEL}");
 		let _ = (env.run)("launchctl", &["bootout", &label]);
-		let _ = std::fs::remove_file(launchd_plist_path(env));
-		// Deleting the plist stops the NEXT login from loading it; it does not
-		// unload a job launchd already holds. Ask launchd, or the UI reports
-		// "disabled" while the job keeps running.
+		// Ask launchd BEFORE deleting the plist. Deleting it only stops the
+		// NEXT login from loading the job; it does not unload one launchd
+		// already holds — and `launchd_enabled` reads the plist's existence, so
+		// deleting first would report "disabled" while the job keeps running.
+		// Leaving the plist in place on failure keeps the UI honest.
 		if (env.probe)("launchctl", &["print", &label]) {
 			return Err(
 				"launchd still has the job loaded after removing it".into()
 			);
 		}
+		let _ = std::fs::remove_file(launchd_plist_path(env));
 		Ok(())
 	}
 
@@ -954,6 +956,34 @@ mod tests {
 			*log.borrow(),
 			vec![format!("schtasks /Delete /TN {WINDOWS_TASK} /F")]
 		);
+	}
+
+	/// Mirror image of the bootstrap case: if launchd still holds the job, the
+	/// plist must SURVIVE so `launchd_enabled` keeps reporting the truth.
+	#[test]
+	fn a_failed_launchd_unload_keeps_the_plist_so_the_ui_stays_honest() {
+		let tmp = tempfile::tempdir().unwrap();
+		let run = |_: &str, _: &[&str]| Ok(());
+		// launchd says the job is still loaded.
+		let probe = |_: &str, _: &[&str]| true;
+		let env = Env {
+			home: tmp.path().to_path_buf(),
+			run: &run,
+			probe: &probe,
+		};
+		let plist = tmp
+			.path()
+			.join("Library/LaunchAgents")
+			.join(format!("{LAUNCHD_LABEL}.plist"));
+		std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+		std::fs::write(&plist, "<plist/>").unwrap();
+
+		unregister_launchd(&env, "501").unwrap_err();
+		assert!(
+			plist.exists(),
+			"deleting the plist would report 'disabled' while the job runs"
+		);
+		assert!(launchd_enabled(&env));
 	}
 
 	#[test]

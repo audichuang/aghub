@@ -201,18 +201,28 @@ export function NewToolsPromptController() {
 				failed += plan.added.length;
 			}
 		}
-		if (attempted === 0) {
-			// Locked skills the discovery list does not show yet: nothing was
-			// reconciled, so claiming success would be a lie.
-			toast.danger(t("newToolsLinkError"));
-		} else if (failed === 0) {
+		// Advancing `lastKnown` marks this agent handled FOREVER, so it may only
+		// happen when there was nothing to do or everything succeeded. On any
+		// failure the prompt must stay available — otherwise one bad network
+		// moment permanently costs the user the offer.
+		if (lockedNames.size === 0) {
+			// No managed skills at all: nothing to link, and nothing failed.
 			toast.success(t("newToolsLinkSuccess"));
-		} else if (failed < attempted) {
+		} else if (attempted === 0) {
+			// Locked skills exist but discovery has not caught up, so no plan
+			// was built. Not a success, and not something to record as done.
+			toast.danger(t("newToolsLinkError"));
+			return;
+		} else if (failed === attempted) {
+			toast.danger(t("newToolsLinkError"));
+			return;
+		} else if (failed > 0) {
 			toast.danger(
 				t("newToolsLinkPartial", { failed, total: attempted }),
 			);
-		} else if (attempted > 0) {
-			toast.danger(t("newToolsLinkError"));
+			return;
+		} else {
+			toast.success(t("newToolsLinkSuccess"));
 		}
 		await persistSeed(pendingSeed);
 	};
