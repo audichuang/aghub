@@ -72,9 +72,13 @@ Only where the obvious guess is wrong; everything else, ask CodeGraph. The one
 that catches everybody: the `AgentAdapter` **trait** is in
 `crates/core/src/adapters/mod.rs`, but the impl is in `core/src/adapter.rs`.
 
-**Three different "app data roots" exist.** `aghub-cli`'s `app_data_dir()` and
-`aghub_api::default_app_data_dir()` are both `$AGHUB_DATA_DIR` else
-`dirs::data_dir()/aghub`; the desktop starts its embedded api with **Tauri's**
+**Three different "app data roots" exist.** `aghub-cli`'s `app_data_dir()` is
+`$AGHUB_DATA_DIR` else `dirs::data_dir()/aghub`; `aghub_api::default_app_data_dir()`
+is the SAME formula **minus the env override** — it never reads `$AGHUB_DATA_DIR`,
+so pinning that var isolates the CLI (and the desktop's own hand-rolled copy in
+`skill_check.rs`) while a standalone `aghub-api` keeps writing the real root. The
+parity test says so itself: it removes the var before asserting equality. The
+desktop starts its embedded api with **Tauri's**
 `app_data_dir()`, which is identifier-scoped (`<data>/com.akrc.aghub`). Any file
 one surface WRITES and another READS must use the CLI formula — Tauri's, or a
 hand-rolled `$XDG_DATA_HOME` guess, agrees on Linux and diverges on
@@ -219,10 +223,16 @@ true`) for both verbs — a skill because the shared Master is what "already
   **preview runs that same check**: a `--remove` without `--yes` that exits 0
   is a commit that will run. Both spellings report
   `UNSUPPORTED_OPERATION` / HTTP 422 — batching is transport and must not
-  relabel the refusal as bad parameters. **`reconcile mcp` has NO equivalent
-  guard**: agents that share one backing file (claude + copilot both resolve
-  project MCPs to `<root>/.mcp.json`) still lose the server for BOTH when only
-  one is named, reported as success — verified, unfixed
+  relabel the refusal as bad parameters. **`reconcile mcp`'s guard is narrower
+  than it looks**: `ensure_removals_spare` DOES compare resolved backing paths
+  (preflight, then re-checked at delete time), but its protect set is only the
+  COPY TARGETS + the source. An agent that shares the backing file and is named
+  NOWHERE in the command is in neither list, so `reconcile mcp --remove claude`
+  still takes the server from copilot too when both resolve project MCPs to
+  `<root>/.mcp.json`, reported as success — verified, unfixed. `reconcile skill`
+  builds its protect set from the SAME `protected_targets`, so do not assume the
+  skill side is closed against an unnamed dir-sharer without testing it; what IS
+  closed there is the shared-Master case, by the keep rules
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
   reads the key from stdin; nothing else does
