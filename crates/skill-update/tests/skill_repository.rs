@@ -961,18 +961,28 @@ fn probe_ls_remote(url: &str, expected_head: &str, timeout: Duration) -> bool {
 /// daemon serving OUR repo), and a child that lost the port race (bind
 /// failure → immediate exit) is retried on a fresh port. Shared by every
 /// daemon-backed test.
+///
+/// Execs `git-daemon` from `git --exec-path` rather than `git daemon`: the
+/// latter is a dashed external, so the `git` wrapper fork+execs the daemon
+/// and waits on it. `ChildGuard` would then hold the WRAPPER's pid, and its
+/// SIGKILL cannot be forwarded — every clean run orphaned one daemon to init,
+/// still holding its listen port forever.
 fn spawn_git_daemon(
 	base_path: &Path,
 	probe_repo: &str,
 	expected_head: &str,
 ) -> (ChildGuard, std::net::SocketAddr) {
+	let exec_path = Command::new("git").arg("--exec-path").output().unwrap();
+	assert!(exec_path.status.success(), "git --exec-path failed");
+	let daemon_bin =
+		Path::new(String::from_utf8(exec_path.stdout).unwrap().trim())
+			.join("git-daemon");
 	for _attempt in 0..5 {
 		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
 		let address = listener.local_addr().unwrap();
 		drop(listener);
-		let child = Command::new("git")
+		let child = Command::new(&daemon_bin)
 			.args([
-				"daemon".to_string(),
 				"--reuseaddr".to_string(),
 				"--export-all".to_string(),
 				"--listen=127.0.0.1".to_string(),
