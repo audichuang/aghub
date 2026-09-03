@@ -7228,6 +7228,7 @@ dependencies = [
  "aghub-core",
  "aghub-git",
  "dirs 6.0.0",
+ "libc",
  "log",
  "skill",
  "tempfile",

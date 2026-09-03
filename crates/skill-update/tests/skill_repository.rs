@@ -14,6 +14,8 @@
 use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::net::TcpListener;
+#[cfg(target_os = "linux")]
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -967,6 +969,10 @@ fn probe_ls_remote(url: &str, expected_head: &str, timeout: Duration) -> bool {
 /// and waits on it. `ChildGuard` would then hold the WRAPPER's pid, and its
 /// SIGKILL cannot be forwarded — every clean run orphaned one daemon to init,
 /// still holding its listen port forever.
+///
+/// On Linux the daemon additionally arms `PR_SET_PDEATHSIG` so it dies with a
+/// SIGKILLed harness, where `ChildGuard::drop` never runs at all. macOS has no
+/// equivalent and keeps guard-only behaviour.
 fn spawn_git_daemon(
 	base_path: &Path,
 	probe_repo: &str,
@@ -981,20 +987,36 @@ fn spawn_git_daemon(
 		let listener = TcpListener::bind("127.0.0.1:0").unwrap();
 		let address = listener.local_addr().unwrap();
 		drop(listener);
-		let child = Command::new(&daemon_bin)
-			.args([
-				"--reuseaddr".to_string(),
-				"--export-all".to_string(),
-				"--listen=127.0.0.1".to_string(),
-				format!("--port={}", address.port()),
-				format!("--base-path={}", base_path.display()),
-			])
-			.env("GIT_CONFIG_GLOBAL", "/dev/null")
-			.env("GIT_CONFIG_SYSTEM", "/dev/null")
-			.stdout(Stdio::null())
-			.stderr(Stdio::null())
-			.spawn()
-			.unwrap();
+		let mut cmd = Command::new(&daemon_bin);
+		cmd.args([
+			"--reuseaddr".to_string(),
+			"--export-all".to_string(),
+			"--listen=127.0.0.1".to_string(),
+			format!("--port={}", address.port()),
+			format!("--base-path={}", base_path.display()),
+		])
+		.env("GIT_CONFIG_GLOBAL", "/dev/null")
+		.env("GIT_CONFIG_SYSTEM", "/dev/null")
+		.stdout(Stdio::null())
+		.stderr(Stdio::null());
+		// SAFETY: `pre_exec` runs in the forked child before exec; both calls
+		// are async-signal-safe raw syscalls that touch no allocator state.
+		#[cfg(target_os = "linux")]
+		unsafe {
+			let harness = std::process::id();
+			cmd.pre_exec(move || {
+				if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) == -1 {
+					return Err(std::io::Error::last_os_error());
+				}
+				// The harness can die inside the fork→prctl window, in which
+				// case the signal never arrives — refuse to exec instead.
+				if libc::getppid() as u32 != harness {
+					return Err(std::io::Error::other("harness died pre-arm"));
+				}
+				Ok(())
+			});
+		}
+		let child = cmd.spawn().unwrap();
 		let mut guard = ChildGuard(child);
 		let probe_url = format!("git://{address}/{probe_repo}");
 		let ready_by = Instant::now() + Duration::from_secs(10);
