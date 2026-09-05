@@ -5,6 +5,7 @@ pub mod lock;
 pub mod prune;
 pub mod removal;
 pub mod rename;
+pub mod repair;
 pub mod resync;
 pub mod shape;
 pub mod update;
