@@ -452,21 +452,19 @@ pub async fn delete_skill_by_path(
 		if !canonical_layout {
 			// Guard: this non-link branch bypasses `plan_removal`'s referrer
 			// sweep (`Linker::is_link` covers symlinks AND Windows junctions),
-			// so re-apply it here. If the targeted dir is a shared universal
-			// master that ANOTHER in-scope agent still symlinks into (discovered
-			// as a real dir by a direct `.agents/skills` reader, so
-			// canonical_path=None), refuse to `remove_dir_all` it — that would
-			// orphan the live symlink and lose the skill for every other agent.
+			// so re-apply it here. If the targeted dir is a real directory in
+			// the SHARED `.agents/skills` slot that other in-scope agents read
+			// (discovered as a plain dir, so canonical_path=None), refuse to
+			// `remove_dir_all` it — that would take the skill from every one of
+			// them, none of which the request named.
 			//
-			// The referrer sweep alone is NOT that guard, for exactly the
-			// reason `plan_copy_removal` spells out: a NativeReader leaves no
-			// symlink, so a project whose readers are all NativeReaders
-			// (cline/warp/cursor/codex/…) has ZERO links pointing at its
-			// Master and the sweep answers "nobody references it". This route
-			// then `remove_dir_all`'d the shared Master and reported
-			// `removed`, while `DELETE /agents/<a>/skills/<n>` and the CLI
-			// `delete` refused the same request — the one delete surface that
-			// never came through `remove_skill_planned`.
+			// The referrer sweep alone is NOT that guard: a shared slot is read
+			// by scanning the directory, so up to ten project agents can be
+			// reading it with ZERO links pointing at it, and the sweep answers
+			// "nobody references it". This route then `remove_dir_all`'d it and
+			// reported `removed`, while `DELETE /agents/<a>/skills/<n>` and the
+			// CLI `delete` refused the same request — the one delete surface
+			// that never came through `remove_skill_planned`.
 			//
 			// The second half is `skill_dir_readers_outside`, NOT "is this a
 			// Master?": a Master is shared BY CONSTRUCTION, so that question
@@ -503,9 +501,10 @@ pub async fn delete_skill_by_path(
 					referrer.display()
 				);
 			}
-			// A NativeReader leaves NO symlink behind, so the referrer sweep
-			// alone is blind to a second agent reading the same Master —
-			// `skill_dir_readers_outside` is the half that sees it.
+			// A directory-scanning reader leaves NO symlink behind, so the
+			// referrer sweep alone is blind to a second agent reading the same
+			// shared slot — `skill_dir_readers_outside` is the half that sees
+			// it.
 			if referrer.is_some()
 				|| !aghub_core::skills::removal::skill_dir_readers_outside(
 					&skill_dir,
