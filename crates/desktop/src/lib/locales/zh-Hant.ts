@@ -1284,4 +1284,11 @@ export default {
 	skillRepairOutcome_relinked: "將重新連結",
 	skillRepairOutcome_reconciled: "將協調",
 	skillRepairOutcome_refused: "需要你處理",
+	skillLayoutMasterMovedTo: "已移動到 {{path}}",
+	skillLayoutNewLinksDone: "已建立 {{count}} 個各自的 agent 連結",
+	skillRepairOutcome_done_conformant: "已經正確",
+	skillRepairOutcome_done_migrated: "已遷移",
+	skillRepairOutcome_done_relinked: "已重新連結",
+	skillRepairOutcome_done_reconciled: "已協調",
+	skillRepairOutcome_done_refused: "需要你處理",
 };

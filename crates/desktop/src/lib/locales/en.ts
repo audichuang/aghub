@@ -1330,4 +1330,11 @@ export default {
 	skillRepairOutcome_relinked: "will relink",
 	skillRepairOutcome_reconciled: "will reconcile",
 	skillRepairOutcome_refused: "needs your attention",
+	skillLayoutMasterMovedTo: "Moved to {{path}}",
+	skillLayoutNewLinksDone: "Created {{count}} per-agent link(s)",
+	skillRepairOutcome_done_conformant: "already correct",
+	skillRepairOutcome_done_migrated: "migrated",
+	skillRepairOutcome_done_relinked: "relinked",
+	skillRepairOutcome_done_reconciled: "reconciled",
+	skillRepairOutcome_done_refused: "needs your attention",
 };

@@ -5,6 +5,10 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RepairReportDto } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
+import {
+	migrationBannerModel,
+	migrationRowFacts,
+} from "../lib/skill-migration";
 import { queryKeys } from "../requests/keys";
 import {
 	repairPreviewQueryOptions,
@@ -68,11 +72,8 @@ export function SkillLayoutMigrationBanner({
 		}),
 	});
 
-	// `isSuccess`, not `!isLoading`: a FAILED query settles with `data`
-	// undefined, and `?? []` would render that as "nothing to migrate" —
-	// indistinguishable from a real all-clear.
-	const rows = isSuccess ? data.skills : [];
-	if (rows.length === 0) {
+	const { visible, rows } = migrationBannerModel(data, isSuccess);
+	if (!visible) {
 		return null;
 	}
 
@@ -110,7 +111,12 @@ export function SkillLayoutMigrationBanner({
 				onOpenChange={() => setIsOpen(false)}
 			>
 				<Modal.Container>
-					<Modal.Dialog>
+					{/* The height bound is what makes `Modal.Body`'s
+					    `min-h-0 flex-1 overflow-y-auto` actually scroll — without
+					    it the dialog just grows past the viewport and the footer
+					    (with the Migrate button) is unreachable. Same shape as
+					    `bulk-manage-group-agents-dialog`. */}
+					<Modal.Dialog className="flex max-h-[85vh] w-[calc(100vw-2rem)] max-w-md flex-col overflow-hidden sm:max-w-lg">
 						<Modal.CloseTrigger />
 						<Modal.Header>
 							<div className="flex items-center gap-2">
@@ -120,13 +126,27 @@ export function SkillLayoutMigrationBanner({
 								</Modal.Heading>
 							</div>
 						</Modal.Header>
-						<Modal.Body>
+						{/* Scrolls, matching `bulk-manage-group-agents-dialog`.
+						    Without it a bulk migration of twenty skills pushed
+						    the footer off-screen and the Migrate button became
+						    unreachable — visible only by rendering it with a
+						    realistic list. */}
+						<Modal.Body className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
 							<p className="mb-4 text-sm text-muted">
 								{t("skillLayoutMigrateExplain")}
 							</p>
 							<ul className="space-y-4">
 								{shown.map((row) => (
-									<MigrationRow key={row.name} row={row} />
+									<MigrationRow
+										key={row.name}
+										row={row}
+										// After a real run these rows describe
+										// what HAPPENED. Reusing the preview's
+										// future-tense label made a finished
+										// migration read as a plan that had not
+										// run yet.
+										done={result ? !result.dry_run : false}
+									/>
 								))}
 							</ul>
 						</Modal.Body>
@@ -139,7 +159,7 @@ export function SkillLayoutMigrationBanner({
 								isDisabled={repair.isPending}
 								className="min-h-[44px]"
 							>
-								{t("close")}
+								{t("cancel")}
 							</Button>
 							<Button
 								variant="primary"
@@ -180,9 +200,11 @@ export function SkillLayoutMigrationBanner({
  * One skill's row. Shows the three things the preview has to answer: where the
  * master goes, which per-agent links appear, and who stays fused afterwards.
  */
-function MigrationRow({ row }: { row: RepairReportDto }) {
+function MigrationRow({ row, done }: { row: RepairReportDto; done: boolean }) {
 	const { t } = useTranslation();
-	const refused = row.outcome === "refused";
+	// Derived in `lib/skill-migration`, which node can test — this component
+	// only lays the facts out.
+	const { refused, master, linkCount, fused } = migrationRowFacts(row);
 	return (
 		<li className="rounded-md border border-default p-3 text-sm">
 			<div className="flex items-center justify-between gap-2">
@@ -192,7 +214,9 @@ function MigrationRow({ row }: { row: RepairReportDto }) {
 						refused ? "text-danger text-xs" : "text-muted text-xs"
 					}
 				>
-					{t(`skillRepairOutcome_${row.outcome}`)}
+					{t(
+						`skillRepairOutcome_${done ? "done_" : ""}${row.outcome}`,
+					)}
 				</span>
 			</div>
 			{refused ? (
@@ -200,31 +224,44 @@ function MigrationRow({ row }: { row: RepairReportDto }) {
 					<p className="text-danger text-xs">{row.reason}</p>
 					{/* Shown verbatim and selectable: it is the literal command
 					    that unsticks the user. Paraphrasing it would leave them
-					    with a diagnosis and no way out. */}
-					<pre className="overflow-x-auto rounded bg-muted p-2 text-xs select-text">
+					    with a diagnosis and no way out.
+					    NOT `bg-muted` — that token is a FOREGROUND grey
+					    (`--muted`), so it painted the box in the text colour and
+					    the command rendered as a blank bar. `bg-surface-secondary`
+					    + `text-foreground` is what every other code block in this
+					    app uses. Only visible by actually rendering it. */}
+					<pre className="max-h-28 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface-secondary px-3 py-2 font-mono text-foreground text-xs select-text">
 						{row.fix}
 					</pre>
 				</div>
 			) : (
 				<div className="mt-2 space-y-1 text-muted text-xs">
 					<p className="break-all">
-						{t("skillLayoutMasterMovesTo", { path: row.master })}
+						{t(
+							done
+								? "skillLayoutMasterMovedTo"
+								: "skillLayoutMasterMovesTo",
+							{ path: master },
+						)}
 					</p>
-					{row.referrers.length > 0 && (
+					{linkCount > 0 && (
 						<p>
-							{t("skillLayoutNewLinks", {
-								count: row.referrers.length,
-							})}
+							{t(
+								done
+									? "skillLayoutNewLinksDone"
+									: "skillLayoutNewLinks",
+								{ count: linkCount },
+							)}
 						</p>
 					)}
-					{row.fused.length > 0 && (
+					{fused.length > 0 && (
 						// The honest half. These agents do NOT become
 						// individually revocable, and saying so is the
 						// difference between a migration the user understands
 						// and one they merely trust.
 						<p>
 							{t("skillLayoutStillShared", {
-								agents: row.fused.join(", "),
+								agents: fused.join(", "),
 							})}
 						</p>
 					)}
