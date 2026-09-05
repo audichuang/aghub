@@ -885,37 +885,30 @@ export default function SkillsPage() {
 										</Dropdown.Menu>
 									</Dropdown.Popover>
 								</Dropdown>
-								{pendingUpdateCount > 0 && (
-									<Tooltip delay={0}>
-										<Button
-											variant="ghost"
-											size="sm"
-											className="shrink-0"
-											isDisabled={
-												isApplying || isRefreshingSkills
-											}
-											onPress={() => {
-												void handleUpdateAll();
-											}}
-										>
-											{isApplying ? (
-												<Spinner size="sm" />
-											) : (
-												<ArrowPathIcon className="size-4 text-warning" />
-											)}
-											{t("updateAllSkills", {
-												count: pendingUpdateCount,
-											})}
-										</Button>
-										<Tooltip.Content>
-											{t("updateAllSkills", {
-												count: pendingUpdateCount,
-											})}
-										</Tooltip.Content>
-									</Tooltip>
-								)}
 								{refreshButton}
 							</ListSearchHeader>
+
+							{pendingUpdateCount > 0 && (
+								<button
+									type="button"
+									disabled={isApplying || isRefreshingSkills}
+									className="mx-3 mb-2 flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-surface disabled:opacity-60"
+									onClick={() => {
+										void handleUpdateAll();
+									}}
+								>
+									{isApplying ? (
+										<Spinner size="sm" />
+									) : (
+										<ArrowPathIcon className="size-4 shrink-0 text-warning" />
+									)}
+									<span>
+										{t("updateAllSkills", {
+											count: pendingUpdateCount,
+										})}
+									</span>
+								</button>
+							)}
 
 							<SkillAgentFilterRow
 								skills={skills}
