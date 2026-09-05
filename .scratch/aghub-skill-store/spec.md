@@ -267,6 +267,33 @@ not trigger the refusal.
 Also dedup the per-peer `read_effect_after` by canonical directory — at project scope it
 would otherwise scan one shared directory eight times.
 
+### Desktop UI
+
+The install panel currently renders the leak as a feature. `partitionByCoverage`
+(`lib/agent-capabilities.ts:88-100`) splits installable agents into `linkTargets`
+(checkboxes) and `autoCovered` (read-only chips), and the `autoCovered` hint says
+verbatim: _"這些 Agent 會直接讀取共用的 .agents 主檔,因此不會建立連結。"_ — which is
+precisely "these five get it and you cannot opt out", presented as coverage.
+
+After the change `autoCovered` is **permanently empty** (nothing reads `.aghub`), so the
+bucket must be deleted rather than left to render an empty section. Concretely:
+
+- Delete `isAutoCoveredByMaster`, the `autoCovered` half of `partitionByCoverage`, and
+  its two render sites (`import-github-skill-panel.tsx:989`, `source-detail.tsx:1494`).
+- Retire the `sourceInstallCoveredTitle` / `sourceInstallCoveredHint` /
+  `agentCoveredBadge` strings in all three locales; the `linkTargets` hint must stop
+  saying "指向共用 .agents 主檔" — the target is now the `.aghub` store.
+- codex / cursor / opencode move from read-only chips to ordinary checkboxes. That
+  transition **is** the user-visible feature.
+- Shared-slot agents (global cline+warp; the project eight) need a grouped control
+  driven by `shared_with`: checking one checks the group, and the group is labelled as
+  an agent-side limitation, not an aghub choice. Without it a user unchecks codex at
+  project scope, sees success, and seven other agents silently keep the skill — or,
+  post-Q3, gets a refusal they cannot act on because the dialog never listed the other
+  seven.
+- `SkillResponse`'s doc comment and `agents.ts:43` both describe the NativeReader
+  split; both become false.
+
 ### `capabilities.skills.universal` (Q4 decided)
 
 **Delete the flag.** Inline the two paths it appends directly into amp's and kimi's
@@ -471,10 +498,53 @@ Migration runs **outside `verify_shape`** — its input is `legacy` by construct
 contradicting AGENTS.md ("read paths are deliberately unlocked"), `check.rs:496-500`'s
 own read-only premise, and doctor's read-only doc.
 
-The bulk command is an ordinary CLI verb and an API route. For an api-only host
-(`crates/remote`'s VM, any standalone `aghub-api`) the operator invokes the route; under
-D7 nothing migrates behind their back, which also **dissolves the remote version-skew
-question** revision 2 left open.
+The bulk command is an ordinary CLI verb, an API route, **and a desktop entry point**.
+For an api-only host (`crates/remote`'s VM, any standalone `aghub-api`) the operator
+invokes the route; under D7 nothing migrates behind their back, which also **dissolves
+the remote version-skew question** revision 2 left open.
+
+### Migration expands implicit reads into explicit grants — this is the point
+
+Moving the Master alone is worthless. Today codex, cursor and opencode read
+`~/.agents/skills` **implicitly**, holding no link of their own; if migration only
+recreates the shared `.agents/skills` Referrer, those three stay fused to cline and warp
+and revoking one of them is still impossible. The feature would be un-delivered.
+
+So migration step 2 (private-dir Referrers) is load-bearing, not an optimization: it
+converts every implicit read into an explicit, individually revocable link.
+
+```
+before                                    after
+~/.agents/skills/foo/       (Master)      ~/.aghub/foo/                      (Master)
+  implicitly read by:                     ~/.agents/skills/foo -> Master     (cline, warp)
+    codex cursor opencode cline warp      ~/.codex/skills/foo  -> Master     NEW
+~/.claude/skills/foo -> Master            ~/.cursor/skills/foo -> Master     NEW
+                                          ~/.config/opencode/skills/foo -> Master  NEW
+                                          ~/.claude/skills/foo -> Master     repointed
+```
+
+`delete foo -a codex` is impossible before and correct after. The acceptance suite must
+pin this: migrate a fixture, then revoke codex, and assert cursor / opencode / cline /
+warp still resolve the skill.
+
+### Desktop entry point
+
+The desktop must expose the bulk migration, because "one click" is the whole value for a
+GUI user, and because the desktop cannot reach core directly (it depends on `aghub-api`,
+not `aghub-core`) — the route is its only path.
+
+Requirements:
+
+- A per-scope banner when any lock entry is `legacy`, stating how many skills are
+  un-migrated and what migrating will do — not a silent nag.
+- The action shows a **preview first**: which Masters move, which new per-agent
+  Referrers appear, which agents remain fused to the shared slot afterwards. A user who
+  cannot see that codex is about to become individually revocable does not know what
+  the button bought them.
+- Progress is per skill, and a partial run is resumable: D7 migration is idempotent, so
+  re-running after a failure is safe and must be offered rather than requiring a reset.
+- The banner must not appear for a host with nothing to migrate, and must not appear at
+  all in a project whose `legacy` directories are unlocked (D5 leaves those alone).
 
 ### Link target
 
