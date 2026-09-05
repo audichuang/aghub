@@ -1,0 +1,827 @@
+{
+	"summary": "Adversarially verify the new shape/derivation/planner code and prove its tests can actually fail",
+	"agentCount": 6,
+	"logs": ["Verify: 27 個發現;25 條測試舉證,其中 7 條沒變紅"],
+	"result": {
+		"surviving": [
+			{
+				"title": "plan_repair 的 Relink arm 完全沒有測試 —— repair 可以對每一個壞掉的 Referrer 都計畫 Leave 而全綠",
+				"problem": "shape.rs:702-706 把 Chain / ForeignTarget / Dangling 三種形狀映射成 ReferrerAction::Relink。這是 repair 存在的全部理由:把鏈式、外指、懸空的 Referrer 重新指回 Master。15 條測試沒有任何一條斷言過這個 arm 的產物。classify_shape 層有三條測試(two_hop_chain / dangling / link_to_someone_elses)確認形狀分類正確,但沒有人問過「分類正確之後,計畫要做什麼」。",
+				"evidence": "M15:把 shape.rs:706 的 ) => ReferrerAction::Relink, 改成 ) => ReferrerAction::Leave,。跑 cargo test -p aghub-core --lib skills::shape::tests → test result: ok. 15 passed; 0 failed。一條都沒紅。",
+				"ran_it": true,
+				"fix": "加一條 plan 層測試:project fixture 裡放一個懸空(或指向 .agents/skills 槽的鏈式)Referrer,斷言該 agent 的 action == ReferrerAction::Relink,並斷言 plan.is_noop() 為 false。同一條測試可同時覆蓋 Chain 與 Dangling。",
+				"severity": "required",
+				"audit": "17 mutations run against crates/core/src/skills/shape.rs on commit c0c90e2c. Method: apply one targeted source change, run the WHOLE module (cargo test -p aghub-core --lib skills::shape::tests, 15 tests), record which tests went red, then git checkout -- the file and confirm git status clean before the next one. Final state: tree clean, cargo test -p aghub-core --lib = 282 passed, 0 failed.\n\nHeadline: NO FALSE GREENS. All 11 previously unproven tests went red on a targeted, realistic regression. The four the host flagged as suspicious all pin something real:\n- a_fully_linked_skill_plans_nothing is the SOLE test that catches Absent to Relink at the plan level (M14). Its name is wrong, not the test.\n- missing_referrer_is_absent / healthy_symlink_is_conformant each went red as the sole failure (M2, M1).\n- only_conformant_absent_and_legacy_are_actionable went red as the sole failure (M13).\n- npx_forked_copy_plans_a_comparison_never_a_delete IS guarded: its assert!(!slot_actions.is_empty()) fired when candidate_referrers was made to return nothing (M12).\n\nThe real findings are elsewhere: FOUR of plan_repair's shape-to-action arms are completely untested. Mutating them leaves all 15 green. Execution is not implemented yet and will consume this plan, so these are gaps in the foundation, not in a dead branch.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "MasterIsLink 的 Refuse 沒有被 plan 層釘住 —— 可以改成 Relink 而全綠",
+				"problem": "shape.rs:694-698 對 Violation(MasterIsLink) 回傳 Refuse{MasterIsLink}。RefuseReason::MasterIsLink 這個變體在整個測試模組裡從來沒被斷言過(an_aliased_master_refuses_the_whole_plan 只斷言 AliasedMaster)。把它降級成 Relink,等於在一個 Master 是 symlink、真正 bytes 在 aghub 管不到的地方的 store 裡寫入 Referrer —— spec 明說的 hazard。",
+				"evidence": "M16:把 shape.rs:694-698 的 Refuse{reason: RefuseReason::MasterIsLink} 改成 ReferrerAction::Relink。→ test result: ok. 15 passed; 0 failed。a_linked_master_is_reported_once_not_as_five_broken_referrers 只驗 classify_shape,完全看不到 plan。",
+				"ran_it": true,
+				"fix": "在 an_aliased_master_refuses_the_whole_plan 旁邊加一條姊妹測試:store 裡把 Master 做成 symlink,斷言 plan.refusals() 非空且全部是 RefuseReason::MasterIsLink。fixture 可直接抄 a_linked_master_is_reported_once 的建法。",
+				"severity": "required",
+				"audit": "17 mutations run against crates/core/src/skills/shape.rs on commit c0c90e2c. Method: apply one targeted source change, run the WHOLE module (cargo test -p aghub-core --lib skills::shape::tests, 15 tests), record which tests went red, then git checkout -- the file and confirm git status clean before the next one. Final state: tree clean, cargo test -p aghub-core --lib = 282 passed, 0 failed.\n\nHeadline: NO FALSE GREENS. All 11 previously unproven tests went red on a targeted, realistic regression. The four the host flagged as suspicious all pin something real:\n- a_fully_linked_skill_plans_nothing is the SOLE test that catches Absent to Relink at the plan level (M14). Its name is wrong, not the test.\n- missing_referrer_is_absent / healthy_symlink_is_conformant each went red as the sole failure (M2, M1).\n- only_conformant_absent_and_legacy_are_actionable went red as the sole failure (M13).\n- npx_forked_copy_plans_a_comparison_never_a_delete IS guarded: its assert!(!slot_actions.is_empty()) fired when candidate_referrers was made to return nothing (M12).\n\nThe real findings are elsewhere: FOUR of plan_repair's shape-to-action arms are completely untested. Mutating them leaves all 15 green. Execution is not implemented yet and will consume this plan, so these are gaps in the foundation, not in a dead branch.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Conformant => Leave 在 plan 層沒有測試,而名字宣稱有覆蓋的正是 a_fully_linked_skill_plans_nothing",
+				"problem": "shape.rs:684-686 是 Conformant | Absent => Leave 的合併 arm。拆開後只把 Conformant 改成 Relink,15 條全綠 —— 表示「已經健康的 Referrer 不該被重寫」在 plan 層無人把關。名字叫 a_fully_linked_skill_plans_nothing 的那條測試,fixture 裡一條 symlink 都沒有:只建了 root/.aghub/foo 這個 Master,所有候選都是 Absent。它測的是 Absent 而不是 fully linked。",
+				"evidence": "M8:把 684-686 拆成 SkillShape::Conformant => ReferrerAction::Relink, 與 SkillShape::Absent => ReferrerAction::Leave, → test result: ok. 15 passed; 0 failed。反向的 M14(Conformant => Leave / Absent => Relink)只有 a_fully_linked_skill_plans_nothing 一條紅,證明它唯一釘住的是 Absent。",
+				"ran_it": true,
+				"fix": "在該測試的 fixture 裡真的建一條健康 symlink(例如把 .claude/skills/foo 連到 .aghub/foo),再斷言 is_noop()。這樣名字才對得上,同時把 Conformant => Leave 一起釘住。或把它改名成 a_master_granted_to_nobody_plans_nothing,另加一條 fully-linked 測試。",
+				"severity": "required",
+				"audit": "17 mutations run against crates/core/src/skills/shape.rs on commit c0c90e2c. Method: apply one targeted source change, run the WHOLE module (cargo test -p aghub-core --lib skills::shape::tests, 15 tests), record which tests went red, then git checkout -- the file and confirm git status clean before the next one. Final state: tree clean, cargo test -p aghub-core --lib = 282 passed, 0 failed.\n\nHeadline: NO FALSE GREENS. All 11 previously unproven tests went red on a targeted, realistic regression. The four the host flagged as suspicious all pin something real:\n- a_fully_linked_skill_plans_nothing is the SOLE test that catches Absent to Relink at the plan level (M14). Its name is wrong, not the test.\n- missing_referrer_is_absent / healthy_symlink_is_conformant each went red as the sole failure (M2, M1).\n- only_conformant_absent_and_legacy_are_actionable went red as the sole failure (M13).\n- npx_forked_copy_plans_a_comparison_never_a_delete IS guarded: its assert!(!slot_actions.is_empty()) fired when candidate_referrers was made to return nothing (M12).\n\nThe real findings are elsewhere: FOUR of plan_repair's shape-to-action arms are completely untested. Mutating them leaves all 15 green. Execution is not implemented yet and will consume this plan, so these are gaps in the foundation, not in a dead branch.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Legacy => Relink 沒有測試 —— 遷移後其他 agent 拿不到連結也不會有人發現",
+				"problem": "shape.rs:690 的 SkillShape::Legacy => ReferrerAction::Relink,依註解是「legacy 目錄被收編成 Master 之後,其他原本讀它的 agent 需要一條連結」。an_unmigrated_skill_plans_a_migration_and_names_its_source 只斷言 needs_migration / migrate_from / master / !is_noop() / refusals 為空 —— !is_noop() 光靠 needs_migration 就成立,所以完全不碰 action。",
+				"evidence": "M9:把 shape.rs:690 改成 SkillShape::Legacy => ReferrerAction::Leave, → test result: ok. 15 passed; 0 failed。",
+				"ran_it": true,
+				"fix": "在 an_unmigrated_skill_plans_a_migration_and_names_its_source 尾端加一行:斷言該 legacy 候選的 action == ReferrerAction::Relink。零額外 fixture 成本。",
+				"severity": "required",
+				"audit": "17 mutations run against crates/core/src/skills/shape.rs on commit c0c90e2c. Method: apply one targeted source change, run the WHOLE module (cargo test -p aghub-core --lib skills::shape::tests, 15 tests), record which tests went red, then git checkout -- the file and confirm git status clean before the next one. Final state: tree clean, cargo test -p aghub-core --lib = 282 passed, 0 failed.\n\nHeadline: NO FALSE GREENS. All 11 previously unproven tests went red on a targeted, realistic regression. The four the host flagged as suspicious all pin something real:\n- a_fully_linked_skill_plans_nothing is the SOLE test that catches Absent to Relink at the plan level (M14). Its name is wrong, not the test.\n- missing_referrer_is_absent / healthy_symlink_is_conformant each went red as the sole failure (M2, M1).\n- only_conformant_absent_and_legacy_are_actionable went red as the sole failure (M13).\n- npx_forked_copy_plans_a_comparison_never_a_delete IS guarded: its assert!(!slot_actions.is_empty()) fired when candidate_referrers was made to return nothing (M12).\n\nThe real findings are elsewhere: FOUR of plan_repair's shape-to-action arms are completely untested. Mutating them leaves all 15 green. Execution is not implemented yet and will consume this plan, so these are gaps in the foundation, not in a dead branch.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "a_fully_linked_skill_plans_nothing 對「推導回傳空集合」完全無感",
+				"problem": "is_noop() 的定義是 !needs_migration && 所有 action 都是 Leave。actions 為空時它恆為 true,所以只要 candidate_referrers 一個候選都不產出,這條測試依然綠。它不是假綠(M14 證明它唯一釘住 Absent => Leave),但它的斷言形狀對「推導壞掉」這一類回歸是盲的。",
+				"evidence": "M12:在 candidate_referrers(shape.rs:62-63)開頭插入 if !name.is_empty() { return Vec::new(); } → 4 條紅(global_candidates / an_aliased_master_refuses / an_unmigrated_skill_plans / npx_forked_copy),a_fully_linked_skill_plans_nothing 綠。",
+				"ran_it": true,
+				"fix": "在 assert!(plan.is_noop()) 之前補一行 assert!(!plan.actions.is_empty(), ...) —— 一行,和 npx_forked_copy_plans_a_comparison_never_a_delete 已經有的 !slot_actions.is_empty() 守衛同一招。",
+				"severity": "cosmetic",
+				"audit": "17 mutations run against crates/core/src/skills/shape.rs on commit c0c90e2c. Method: apply one targeted source change, run the WHOLE module (cargo test -p aghub-core --lib skills::shape::tests, 15 tests), record which tests went red, then git checkout -- the file and confirm git status clean before the next one. Final state: tree clean, cargo test -p aghub-core --lib = 282 passed, 0 failed.\n\nHeadline: NO FALSE GREENS. All 11 previously unproven tests went red on a targeted, realistic regression. The four the host flagged as suspicious all pin something real:\n- a_fully_linked_skill_plans_nothing is the SOLE test that catches Absent to Relink at the plan level (M14). Its name is wrong, not the test.\n- missing_referrer_is_absent / healthy_symlink_is_conformant each went red as the sole failure (M2, M1).\n- only_conformant_absent_and_legacy_are_actionable went red as the sole failure (M13).\n- npx_forked_copy_plans_a_comparison_never_a_delete IS guarded: its assert!(!slot_actions.is_empty()) fired when candidate_referrers was made to return nothing (M12).\n\nThe real findings are elsewhere: FOUR of plan_repair's shape-to-action arms are completely untested. Mutating them leaves all 15 green. Execution is not implemented yet and will consume this plan, so these are gaps in the foundation, not in a dead branch.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "A second Legacy directory is planned for Relink — the one action that destroys it",
+				"problem": "plan_repair maps every SkillShape::Legacy to ReferrerAction::Relink. Only the FIRST Legacy candidate in ALL_DESCRIPTORS order becomes migrate_from; any other real directory holding possibly-unique bytes gets Relink, whose own doc says it points the referrer at the Master — i.e. replaces the directory with a symlink. The identical disk state with .aghub/foo present gets CompareThenQuarantine instead, whose doc says these bytes may exist nowhere else and are never deleted. The protection is keyed on whether the store dir exists, not on the referrer being a real directory. Second consequence: claude is index 0 of ALL_DESCRIPTORS (crates/agents/src/agents/mod.rs:40), so a real .claude/skills/foo beats .agents/skills/foo for adoption — contradicting spec.md:115 (legacy is defined as .agents/skills/name) and D5 (worklist is the lock; classify_shape never consults it). The adopted-source-also-gets-Relink comment at shape.rs:689 is the mechanism hiding this, not a separate bug. Reachable via npx copy-install, a hand-authored skill, or the post-crash state spec.md:475 itself describes.",
+				"evidence": "probe_01: two real dirs .claude/skills/foo (PRIVATE claude copy) and .agents/skills/foo (THE REAL OLD MASTER), no .aghub. Output: needs_migration=true migrate_from=Some(.claude/skills/foo); all 9 rows printed Relink, including the 8 agents sharing .agents/skills/foo. probe_02: same two dirs plus .aghub/foo -> both become CompareThenQuarantine. Same bytes, opposite action. Code: shape.rs:679 (migrate_from takes the first Legacy) and shape.rs:690 (Legacy => Relink).",
+				"ran_it": true,
+				"fix": "Split the Legacy arm. Only the adopted candidate may be Relink (or better, a dedicated MigrateSource action so execution cannot confuse it); every OTHER Legacy candidate gets CompareThenQuarantine, the same treatment ForkedCopy gets. Pick migrate_from from the shared referrer dir (linker::shared_referrer_dir) rather than registry order, and refuse when two distinct real dirs disagree instead of silently dropping one.",
+				"severity": "blocker",
+				"audit": "Read shape.rs (718 lines), linker/mod.rs master_store_dir/shared_referrer_dir, skill/src/sanitize.rs, descriptor.rs skill_write_path, agents/mod.rs ALL_DESCRIPTORS, and spec.md Contract + Migration sections. This disposable worktree was on main's tip, so I moved its HEAD to c0c90e2c with git reset --hard (same branch name worktree-wf_54b0a4b8-e5a-2, no checkout, no push) to be able to build the branch under review.\n\nWrote a 12-test probe at crates/core/tests/shape_probe.rs and ran it: cargo test -p aghub-core --test shape_probe -- --nocapture --test-threads=1 => 12 passed, 0 failed. Every finding below is an assertion that ran, not reasoning. All fixtures use canonicalized tempdirs under ProjectOnly scope except probe_08, which only READS the real HOME (no writes, no env mutation).\n\nRan one mutation proof and reverted it with git checkout -- crates/core/src/skills/shape.rs; the 15 in-file unit tests are green again (cargo test -p aghub-core --lib skills::shape).\n\nChecked attack-findings.json and attack2-findings.json for migrate_from / plan_repair / classify_shape / Legacy / ForkedCopy: zero hits (both predate this code), so nothing here is a re-report.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Nothing checks is_dir — a regular file is adopted as the Master, and a file Master certifies healthy",
+				"problem": "classify_shape branches on symlink_metadata and Linker::is_link only. Both Legacy and ForkedCopy are documented (and spec.md:115) as a real DIRECTORY, but a regular file at an agent's candidate path takes the same arm. With no Master it becomes Legacy, so plan_repair sets needs_migration=true and migrate_from to the file — migration would adopt a non-directory as the Master. Symmetrically, MasterIsLink is the only check on the Master: a regular file at .aghub/foo with a symlink referrer is Conformant and plan_repair returns is_noop()==true, so repair certifies a store that holds no skill directory at all.",
+				"evidence": "probe_03: a regular file at .claude/skills/foo, no .aghub -> classify_shape returns Legacy; plan.needs_migration true, plan.migrate_from == that file. probe_04: .aghub/foo written as a file plus a symlink referrer -> Conformant, is_noop = true.",
+				"ran_it": true,
+				"fix": "Require path.is_dir() (after the link checks) before the Legacy and ForkedCopy arms — a non-directory at a referrer path is a violation of its own, not something to migrate. Add a MasterIsNotADir violation beside MasterIsLink so the Master check covers both ways the store can hold a non-directory.",
+				"severity": "required",
+				"audit": "Read shape.rs (718 lines), linker/mod.rs master_store_dir/shared_referrer_dir, skill/src/sanitize.rs, descriptor.rs skill_write_path, agents/mod.rs ALL_DESCRIPTORS, and spec.md Contract + Migration sections. This disposable worktree was on main's tip, so I moved its HEAD to c0c90e2c with git reset --hard (same branch name worktree-wf_54b0a4b8-e5a-2, no checkout, no push) to be able to build the branch under review.\n\nWrote a 12-test probe at crates/core/tests/shape_probe.rs and ran it: cargo test -p aghub-core --test shape_probe -- --nocapture --test-threads=1 => 12 passed, 0 failed. Every finding below is an assertion that ran, not reasoning. All fixtures use canonicalized tempdirs under ProjectOnly scope except probe_08, which only READS the real HOME (no writes, no env mutation).\n\nRan one mutation proof and reverted it with git checkout -- crates/core/src/skills/shape.rs; the 15 in-file unit tests are green again (cargo test -p aghub-core --lib skills::shape).\n\nChecked attack-findings.json and attack2-findings.json for migrate_from / plan_repair / classify_shape / Legacy / ForkedCopy: zero hits (both predate this code), so nothing here is a re-report.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "master_path ignores scope, so repair -g inside a project pairs a project Master with global Referrers",
+				"problem": "master_path calls master_store_dir(project_root) with whatever root the caller passes, while candidate_referrers goes through skill_write_path, which for GlobalOnly ignores project_root entirely (crates/agents/src/descriptor.rs:161-166). A caller in a project directory running the global scope — the normal shape, since project_root is resolved once and passed alongside scope — gets master = project/.aghub/foo, which does not exist, so every healthy home/.x/skills/foo link classifies as ForeignTarget -> Relink and home/.agents/skills/foo classifies as Legacy -> migrate_from. The plan is a global-to-project migration of a skill that is fine. Every other seam in the tree does the scope gate explicitly before calling the store resolver: crates/core/src/manager/skill.rs:1393-1399 and crates/core/src/skills/install_fetched.rs:417-421 both null project_root unless scope is ProjectOnly. This one skips it.",
+				"evidence": "probe_08: plan_repair(GlobalOnly, Some(tempdir), foo) printed master = /tmp/.tmpi6UP8k/.aghub/foo and action0 = /home/audichuang/.claude/skills/foo — a project-local Master paired with global candidates.",
+				"ran_it": true,
+				"fix": "Gate inside master_path the way the other two call sites do: take scope, and pass project_root to master_store_dir only for ProjectOnly. That also removes the trap for future callers rather than adding a rule they must remember.",
+				"severity": "required",
+				"audit": "Read shape.rs (718 lines), linker/mod.rs master_store_dir/shared_referrer_dir, skill/src/sanitize.rs, descriptor.rs skill_write_path, agents/mod.rs ALL_DESCRIPTORS, and spec.md Contract + Migration sections. This disposable worktree was on main's tip, so I moved its HEAD to c0c90e2c with git reset --hard (same branch name worktree-wf_54b0a4b8-e5a-2, no checkout, no push) to be able to build the branch under review.\n\nWrote a 12-test probe at crates/core/tests/shape_probe.rs and ran it: cargo test -p aghub-core --test shape_probe -- --nocapture --test-threads=1 => 12 passed, 0 failed. Every finding below is an assertion that ran, not reasoning. All fixtures use canonicalized tempdirs under ProjectOnly scope except probe_08, which only READS the real HOME (no writes, no env mutation).\n\nRan one mutation proof and reverted it with git checkout -- crates/core/src/skills/shape.rs; the 15 in-file unit tests are green again (cargo test -p aghub-core --lib skills::shape).\n\nChecked attack-findings.json and attack2-findings.json for migrate_from / plan_repair / classify_shape / Legacy / ForkedCopy: zero hits (both predate this code), so nothing here is a re-report.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "ResourceScope::Both yields an empty plan that reports is_noop() == true",
+				"problem": "skill_write_path returns None for ResourceScope::Both (descriptor.rs:177), so candidate_referrers filters out all 25 agents and plan_repair returns Some(plan) with zero actions. is_noop() is !needs_migration && actions.iter().all(...) — all() on an empty vector is vacuously true — so an un-migrated skill reports nothing to do. Both is the default scope for doctor / check / source list, so a caller reaching plan_repair with it gets a silent green at the core seam instead of a refusal, which is exactly the false-green shape AGENTS.md Testing warns about.",
+				"evidence": "probe_09: .agents/skills/foo is a real dir needing migration; plan_repair(Both, Some(root), foo) printed Both: 0 actions, is_noop=true.",
+				"ran_it": true,
+				"fix": "Return None from plan_repair for ResourceScope::Both, mirroring skill_write_path — repair must resolve exactly one write scope (spec.md:549), and the refusal belongs at the seam, not only in the CLI guard that has not been written yet.",
+				"severity": "required",
+				"audit": "Read shape.rs (718 lines), linker/mod.rs master_store_dir/shared_referrer_dir, skill/src/sanitize.rs, descriptor.rs skill_write_path, agents/mod.rs ALL_DESCRIPTORS, and spec.md Contract + Migration sections. This disposable worktree was on main's tip, so I moved its HEAD to c0c90e2c with git reset --hard (same branch name worktree-wf_54b0a4b8-e5a-2, no checkout, no push) to be able to build the branch under review.\n\nWrote a 12-test probe at crates/core/tests/shape_probe.rs and ran it: cargo test -p aghub-core --test shape_probe -- --nocapture --test-threads=1 => 12 passed, 0 failed. Every finding below is an assertion that ran, not reasoning. All fixtures use canonicalized tempdirs under ProjectOnly scope except probe_08, which only READS the real HOME (no writes, no env mutation).\n\nRan one mutation proof and reverted it with git checkout -- crates/core/src/skills/shape.rs; the 15 in-file unit tests are green again (cargo test -p aghub-core --lib skills::shape).\n\nChecked attack-findings.json and attack2-findings.json for migrate_from / plan_repair / classify_shape / Legacy / ForkedCopy: zero hits (both predate this code), so nothing here is a re-report.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "The shared slot appears once per agent, so one path yields 8 duplicate actions and refusals",
+				"problem": "candidate_referrers emits one entry per agent, and 8 project-scope agents (codex, gemini, cline, copilot, antigravity, kimi, amp, warp) resolve to the same .agents/skills/name path. plan_repair does not dedupe, so actions holds that one path 8 times and refusals() returns 8 rows for one inode. A repair preview would print the same refusal eight times, and execution would repeat the same write eight times.",
+				"evidence": "probe_10: with .agents/skills symlinked to .aghub, the probe printed: shared slot appears 8 times; refusals=8. probe_00 lists the 8 agent ids that share the path.",
+				"ran_it": true,
+				"fix": "Dedupe actions by resolved path while keeping the agent ids as a Vec on the entry, so the preview names all readers of the slot once — which is also what removal::skill_dir_readers_outside already does for the delete path.",
+				"severity": "cosmetic",
+				"audit": "Read shape.rs (718 lines), linker/mod.rs master_store_dir/shared_referrer_dir, skill/src/sanitize.rs, descriptor.rs skill_write_path, agents/mod.rs ALL_DESCRIPTORS, and spec.md Contract + Migration sections. This disposable worktree was on main's tip, so I moved its HEAD to c0c90e2c with git reset --hard (same branch name worktree-wf_54b0a4b8-e5a-2, no checkout, no push) to be able to build the branch under review.\n\nWrote a 12-test probe at crates/core/tests/shape_probe.rs and ran it: cargo test -p aghub-core --test shape_probe -- --nocapture --test-threads=1 => 12 passed, 0 failed. Every finding below is an assertion that ran, not reasoning. All fixtures use canonicalized tempdirs under ProjectOnly scope except probe_08, which only READS the real HOME (no writes, no env mutation).\n\nRan one mutation proof and reverted it with git checkout -- crates/core/src/skills/shape.rs; the 15 in-file unit tests are green again (cargo test -p aghub-core --lib skills::shape).\n\nChecked attack-findings.json and attack2-findings.json for migrate_from / plan_repair / classify_shape / Legacy / ForkedCopy: zero hits (both predate this code), so nothing here is a re-report.",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Linker::is_link 比 std 的 is_symlink 寬,新的 shape 分類把這個寬度變成寫入計畫,Master 側更會整盤拒絕",
+				"problem": "linker/mod.rs:341-348 的 cfg(windows) 分支在 file_type().is_symlink() 之外,再認任何 FILE_ATTRIBUTE_REPARSE_POINT。但 std 在 Windows 的 is_symlink 已經是「reparse point 且 name-surrogate 位元 0x20000000」,junction 本來就吃得到,所以那個分支只多認「不是 link 的 reparse point」:OneDrive Files-On-Demand placeholder、dedup stub、WOF 壓縮、AppExecLink。對這些 tag,read_link 回 Err,但 canonicalize 會成功且回它自己。走進 classify_shape:referrer 側於 shape.rs:216 進 link 分支,shape.rs:225 判 target != master,得 ForeignTarget,plan_repair 於 shape.rs:706 映到 Relink;正確答案是 ForkedCopy 到 CompareThenQuarantine,或未遷移時的 Legacy。未遷移主機更糟:Legacy 分支(shape.rs:245)永不 fire,needs_migration 為 false,Master 從不建立,所有 Relink 指向不存在的 Master。Master 側症狀最大:專案放在 OneDrive 同步資料夾時 <root>/.aghub/<n> 自己也是 reparse point,shape.rs:201 直接回 MasterIsLink,plan_repair 對每一對都 Refuse,repair 在那台機器上永遠不能跑。",
+				"evidence": "std windows.rs:1191-1194(is_symlink = is_reparse_point && name-surrogate 0x20000000);windows.rs:739-750(read_link 支援 MOUNT_POINT,其他 tag 回 Unsupported reparse point type);crates/core/src/skills/linker/mod.rs:336-350;crates/core/src/skills/shape.rs:201-202、216-226、241-245、690、699-706。attack2 已在 spec 層記過 is_link 的寬度並判 cosmetic,但 spec 修訂版 3 的 predicate(spec.md:128-132)仍以 Linker::is_link 當 clause 1,也沒採納它建議的「legacy 分支改成正面測 is_dir」;這裡新增的是實作把它變成一個寫動作,以及 Master 側的全盤拒絕。Windows 前提未實跑,classify 到 plan 的映射是讀碼確認。",
+				"ran_it": false,
+				"fix": "先驗證 std 的 is_symlink 對 junction 已回 true(windows.rs:1191);確認後 linker/mod.rs:341-348 的 cfg(windows) 分支就只剩偽陽性,刪掉它是最短的修法。若要保留,shape.rs 的 legacy/forked 分支必須正面測 is_dir 而不是「非 is_link」,而且 read_link 回 Err 要有自己的分類,既不是 Dangling 也不是 Conformant。",
+				"severity": "required",
+				"audit": "受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs 的 master_store_dir / shared_referrer_dir / MASTER_STORE_DIR_NAME、removal.rs 的 skill_store_roots 更名 + 納入 .aghub。全部在 Linux 上讀碼 + 兩次可逆 mutation 驗證;Windows/macOS 半邊沒有實際編譯或執行(本機無 MSVC toolchain,AGENTS.md 已記),Windows 的斷言全部來自 rustc 1.95 std 原始碼與 Win32 路徑語意,已逐項標示。\n\n結論:計畫階段在 Windows/macOS 上沒有 blocker,但有一個 required 的 Windows 誤分類(Linker::is_link 比 std 的 is_symlink 寬,新的 shape 分類把這個寬度變成一個「寫」的動作,Master 側更會整盤拒絕),以及一個 required 的測試缺口(.aghub 兩條 store root 沒有任何測試守著,已用 mutation 證明)。\n\n任務給的假設「Windows 上鏈檢查完全失效」我推翻了:std 的 read_link 讀得到 junction,而會讓 read_link 失敗的那批 reparse tag,同一批 canonicalize 也不會回到 Master,所以那條 fallback 沒有可達的 false-Conformant。註解本身是錯的(cosmetic)。\n\n大小寫問題已消失:sanitize_name 會轉小寫,aghub 自己永遠不會產出 .aghub/Foo。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "skill_store_roots 新增的兩條 .aghub 路徑沒有任何測試守著",
+				"problem": "removal.rs:34 與 :38 這兩行的 doc comment 自己說是載重的:少了它們,allowed_skill_roots 會把每次 Master 刪除當成 out-of-tree 拒絕,is_universal_master 會讓單一 agent 的刪除 remove_dir_all 掉 Master。但唯一檢查 roots 內容的測試 both_store_spellings_are_listed(removal.rs:2123-2131)只斷言兩種 .agents 拼法,更名時被同步改了名字卻沒被擴充。依 AGENTS.md「測試必須有能力對真的迴歸變紅」,這是綠色假象。",
+				"evidence": "sed 刪掉 removal.rs:34 與 :38 兩行後,cargo test -p aghub-core --lib 連續 5 次全綠(含一次 --test-threads=1,282 passed),完整 cargo test -p aghub-core 也全綠;已還原,git status 乾淨。誠實補充:第一次跑出現過一次 lib binary 281 passed / 1 failed,之後 5 次無法重現,而且那一刻 git diff 顯示 shape.rs 正被外部程序改寫,所以我不把它當這個 mutation 的證據,但我也沒能指出紅的是哪個測試。",
+				"ran_it": true,
+				"fix": "擴充 both_store_spellings_are_listed(或加一條 sibling),斷言 roots 同時包含 <root>/.aghub 與 home/.aghub。這條測試不碰檔案系統也不讀 HOME 以外的東西,一行斷言就夠。",
+				"severity": "required",
+				"audit": "受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs 的 master_store_dir / shared_referrer_dir / MASTER_STORE_DIR_NAME、removal.rs 的 skill_store_roots 更名 + 納入 .aghub。全部在 Linux 上讀碼 + 兩次可逆 mutation 驗證;Windows/macOS 半邊沒有實際編譯或執行(本機無 MSVC toolchain,AGENTS.md 已記),Windows 的斷言全部來自 rustc 1.95 std 原始碼與 Win32 路徑語意,已逐項標示。\n\n結論:計畫階段在 Windows/macOS 上沒有 blocker,但有一個 required 的 Windows 誤分類(Linker::is_link 比 std 的 is_symlink 寬,新的 shape 分類把這個寬度變成一個「寫」的動作,Master 側更會整盤拒絕),以及一個 required 的測試缺口(.aghub 兩條 store root 沒有任何測試守著,已用 mutation 證明)。\n\n任務給的假設「Windows 上鏈檢查完全失效」我推翻了:std 的 read_link 讀得到 junction,而會讓 read_link 失敗的那批 reparse tag,同一批 canonicalize 也不會回到 Master,所以那條 fallback 沒有可達的 false-Conformant。註解本身是錯的(cosmetic)。\n\n大小寫問題已消失:sanitize_name 會轉小寫,aghub 自己永遠不會產出 .aghub/Foo。",
+				"reviewer_note": "我自己重跑：python 移除 removal.rs 兩行 roots.push(MASTER_STORE_DIR_NAME)（斷言 count==0 確認真的刪掉，git diff --numstat 0/2），cargo test -p aghub-core --lib = 282 passed 0 failed，完整 cargo test -p aghub-core 也沒有任何 FAILED。讀 removal.rs:2125-2132 確認 both_store_spellings_are_listed 只斷言兩種 .agents 拼法。與下面第 19 項是同一個缺口。",
+				"corrected_fix": "both_store_spellings_are_listed 加 ends_with(.aghub) 兩條斷言（root 與 home）；再補一支 is_universal_master(root/.aghub/foo)==true，記得先 create_dir_all，因為 assert_strictly_contained 會 canonicalize target。"
+			},
+			{
+				"title": "shape.rs:229-230 的註解把一個已被推翻的前提寫回程式碼,替一條真的有牙的 fallback 背書",
+				"problem": "註解說「A Windows junction may not be readable as a link; when the hop cannot be read, endpoint equality stands」。事實相反:std 的 read_link 讀得到 junction(IO_REPARSE_TAG_MOUNT_POINT),attack2 自己也寫過「Junctions themselves are fine: read_link returns an absolute target」。所以這段註解用一個不存在的情境,替一條「hop 讀不到就退回端點相等」的規則背書,而那條規則確實有牙。反過來說,任務假設的「Windows 上鏈檢查完全失效」不成立:會讓 read_link 失敗的那批 tag,同一批要嘛 CreateFileW 也開不了(canonicalize 失敗,落到 Dangling),要嘛 canonicalize 回它自己(落到 ForeignTarget),我找不到可達的 false-Conformant。",
+				"evidence": "std windows.rs:739-750 與 1191-1194;shape.rs:228-237。實測:在 one_hop_target 開頭插一行讀環境變數就回 None,跑 cargo test -p aghub-core --lib skills::shape::tests::two_hop_chain_is_a_violation_even_though_the_endpoint_matches -- --exact,結果 FAILED(該鏈被判為 Conformant);已 git checkout 還原。",
+				"ran_it": true,
+				"fix": "把註解改成講 None 的真正語意:hop 讀不到的 reparse point 不是 link,不該被端點相等救回 Conformant;不要點名 junction。這條與第一個發現同源,一起修最省。",
+				"severity": "cosmetic",
+				"audit": "受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs 的 master_store_dir / shared_referrer_dir / MASTER_STORE_DIR_NAME、removal.rs 的 skill_store_roots 更名 + 納入 .aghub。全部在 Linux 上讀碼 + 兩次可逆 mutation 驗證;Windows/macOS 半邊沒有實際編譯或執行(本機無 MSVC toolchain,AGENTS.md 已記),Windows 的斷言全部來自 rustc 1.95 std 原始碼與 Win32 路徑語意,已逐項標示。\n\n結論:計畫階段在 Windows/macOS 上沒有 blocker,但有一個 required 的 Windows 誤分類(Linker::is_link 比 std 的 is_symlink 寬,新的 shape 分類把這個寬度變成一個「寫」的動作,Master 側更會整盤拒絕),以及一個 required 的測試缺口(.aghub 兩條 store root 沒有任何測試守著,已用 mutation 證明)。\n\n任務給的假設「Windows 上鏈檢查完全失效」我推翻了:std 的 read_link 讀得到 junction,而會讓 read_link 失敗的那批 reparse tag,同一批 canonicalize 也不會回到 Master,所以那條 fallback 沒有可達的 false-Conformant。註解本身是錯的(cosmetic)。\n\n大小寫問題已消失:sanitize_name 會轉小寫,aghub 自己永遠不會產出 .aghub/Foo。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "「OS 會解 join 裡的 ..」是 POSIX-only,Windows 是詞法解,而這句話被拿來滿足 AGENTS.md 的正規化禁令",
+				"problem": "shape.rs:178-181 與 spec.md:141-143 都主張 one_hop_target 的 base.join(target) 由檔案系統解 .. ,所以沒有違反 AGENTS.md 禁止手刻路徑正規化的規定。Win32 在把路徑交給 object manager 之前就先詞法收掉 . 與 ..(RtlGetFullPathName),.. 不會穿回 symlink 或 junction 的來源。當某 agent 的 skills 目錄自己是 junction、而 referrer 是相對 symlink(Dev Mode 開啟時 create_link 走 symlink_dir 會保留相對目標)時,hop 會算到跟 POSIX 不同的位置,Chain 漏掉而端點比較仍通過,結果是 Conformant。canonicalize 與 resolve_existing 都救不了,Win32 沒有 POSIX 的 .. 語意。",
+				"evidence": "crates/core/src/skills/shape.rs:176-187;.scratch/aghub-skill-store/spec.md:141-143;crates/core/src/skills/linker/mod.rs:536-548(Windows 先試 symlink_dir 並保留相對目標,失敗才退 junction 用絕對路徑)。純讀碼與平台語意,未在 Windows 實跑。",
+				"ran_it": false,
+				"fix": "兩份文件各加一句限定:這條 clause 的 .. 語意是 POSIX 的;Windows 上詞法收斂在先,所以在 skills 目錄本身是 reparse point 的佈局下,鏈檢查是盡力而為。不要改成手刻 walk,那反而踩到禁令。",
+				"severity": "cosmetic",
+				"audit": "受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs 的 master_store_dir / shared_referrer_dir / MASTER_STORE_DIR_NAME、removal.rs 的 skill_store_roots 更名 + 納入 .aghub。全部在 Linux 上讀碼 + 兩次可逆 mutation 驗證;Windows/macOS 半邊沒有實際編譯或執行(本機無 MSVC toolchain,AGENTS.md 已記),Windows 的斷言全部來自 rustc 1.95 std 原始碼與 Win32 路徑語意,已逐項標示。\n\n結論:計畫階段在 Windows/macOS 上沒有 blocker,但有一個 required 的 Windows 誤分類(Linker::is_link 比 std 的 is_symlink 寬,新的 shape 分類把這個寬度變成一個「寫」的動作,Master 側更會整盤拒絕),以及一個 required 的測試缺口(.aghub 兩條 store root 沒有任何測試守著,已用 mutation 證明)。\n\n任務給的假設「Windows 上鏈檢查完全失效」我推翻了:std 的 read_link 讀得到 junction,而會讓 read_link 失敗的那批 reparse tag,同一批 canonicalize 也不會回到 Master,所以那條 fallback 沒有可達的 false-Conformant。註解本身是錯的(cosmetic)。\n\n大小寫問題已消失:sanitize_name 會轉小寫,aghub 自己永遠不會產出 .aghub/Foo。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "shared_referrer_dir 零呼叫者",
+				"problem": "linker/mod.rs:44 的 shared_referrer_dir 只是 universal_canonical_dir 的別名,全 repo 沒有任何呼叫者。因為是 pub mod 裡的 pub fn,不會有 dead_code 警告,所以它會一直留著沒人發現。",
+				"evidence": "grep -rn \"shared_referrer_dir\" crates/ --include=*.rs 只命中定義本身(linker/mod.rs:40、:44)與 shape.rs 的文件註解。",
+				"ran_it": true,
+				"fix": "等到真的有第一個呼叫者再加。現在刪掉,執行半邊要用時再引入。",
+				"severity": "cosmetic",
+				"audit": "受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs 的 master_store_dir / shared_referrer_dir / MASTER_STORE_DIR_NAME、removal.rs 的 skill_store_roots 更名 + 納入 .aghub。全部在 Linux 上讀碼 + 兩次可逆 mutation 驗證;Windows/macOS 半邊沒有實際編譯或執行(本機無 MSVC toolchain,AGENTS.md 已記),Windows 的斷言全部來自 rustc 1.95 std 原始碼與 Win32 路徑語意,已逐項標示。\n\n結論:計畫階段在 Windows/macOS 上沒有 blocker,但有一個 required 的 Windows 誤分類(Linker::is_link 比 std 的 is_symlink 寬,新的 shape 分類把這個寬度變成一個「寫」的動作,Master 側更會整盤拒絕),以及一個 required 的測試缺口(.aghub 兩條 store root 沒有任何測試守著,已用 mutation 證明)。\n\n任務給的假設「Windows 上鏈檢查完全失效」我推翻了:std 的 read_link 讀得到 junction,而會讓 read_link 失敗的那批 reparse tag,同一批 canonicalize 也不會回到 Master,所以那條 fallback 沒有可達的 false-Conformant。註解本身是錯的(cosmetic)。\n\n大小寫問題已消失:sanitize_name 會轉小寫,aghub 自己永遠不會產出 .aghub/Foo。",
+				"reviewer_note": "grep -rn 全 crates 確認：shared_referrer_dir 只在 linker/mod.rs:40、:44 的定義與 doc 出現，零呼叫者。master_store_dir 也只有 shape.rs 用。pub fn in pub mod 不會有 dead_code 警告。",
+				"corrected_fix": "執行半邊反正馬上要用（Legacy 判準與 migrate_from 都需要它），留著就好；真要清就等第一個呼叫者出現時再引入。"
+			},
+			{
+				"title": "plan_repair 的 migrate_from 用 registry 順序挑第一個 Legacy,會把 agent 私有副本當成 Master 正本,其餘分歧副本被判 Relink",
+				"problem": "classify_shape 在 Master 不存在時,把「任何 candidate 路徑上的真實目錄」都判成 Legacy(shape.rs:243-249),plan_repair 再取迭代到的第一個 Legacy 當 migrate_from(shape.rs:671-676)。ALL_AGENTS 第一個是 claude,所以只要 claude 有私有真實目錄,被 adopt 成 Master 的就是它,而共用的 .agents/skills/<n>(內容可能完全不同)會被判 Relink —— 執行半邊照這個 plan 做,就是拿舊副本蓋掉另一份唯一的位元組。spec 對 legacy 的定義寫死是 .agents/skills/<n>,遷移步驟 3 也只 rename 共用槽。ForkedCopy 的「先比對、絕不刪」保護在遷移前根本觸發不到,因為它要求 Master 已存在。",
+				"evidence": "暫時 integration test(已刪):project root 下建 .agents/skills/foo(內容 SHARED v2)與 .claude/skills/foo(內容 CLAUDE v1 stale),不建 .aghub。plan_repair(ProjectOnly, Some(root), foo) 實測輸出 migrate_from=Some(<root>/.claude/skills/foo);<root>/.agents/skills/foo 被 codex/gemini/cline/copilot/antigravity/kimi/amp/warp 各判一次 ReferrerAction::Relink;classify_shape 對兩個路徑都回 Legacy。程式:crates/core/src/skills/shape.rs:243-249、:671-676。spec:.scratch/aghub-skill-store/spec.md:115(legacy 定義綁 .agents/skills/<n>)、:466-471(步驟 3 只 rename the old real directory)。crates/core/src/skills/removal.rs:218 Layout::Copy 的註解「Independent per-agent copies」證明 N 份獨立真實副本是現存支援的佈局,不是假想情境。",
+				"ran_it": true,
+				"fix": "migrate_from 不能靠迭代順序決定。兩條路擇一:(a) 只接受 linker::shared_referrer_dir(root).join(safe_name) 當 adopt 來源,其他 Legacy 一律不當正本;(b) 出現一個以上 Legacy 時先比對內容,不相等就整個 plan Refuse(新增 RefuseReason::DivergentLegacy),比照 ForkedCopy 的 CompareThenQuarantine 語義。順帶修 shape.rs:689 的註解 —— 被 adopt 的那條路徑其實也留在 actions 裡而且是 Relink。",
+				"severity": "blocker",
+				"audit": "讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220 行與 640-760、classify.rs、install_fetched.rs 的兩個 materialize 入口、linker/mod.rs 的 install_universal/link_agents_to_canonical、descriptor.rs 的 skill_write_path，以及 spec.md 的 Contract 與 Migration 兩節。跑了一支暫時的 integration test（crates/core/tests/zz_scratch.rs，跑完已刪除）實測 plan_repair 在三種 scope 下的輸出與 allowed_skill_roots 的存在性過濾。做了兩次 revert 舉證（一次砍 .aghub roots、一次把 classify_shape 的 trap-2 守衛換回 Option-fold），兩次都已 git checkout 還原，最後 git status --porcelain 為空。沒有 commit、沒有 push、沒有切分支。\n\n三個目標的答案：(1) allowed_skill_roots 那半確實現在無作用，is_universal_master 那半技術上已生效但走不到，沒有東西從能刪變成不能刪，更名沒漏呼叫點。(2) 對 NeedsLink agent 兩邊路徑一致，但 plan_repair 的 scope/root 處理跟 materialize_universal_master 不一致，且 Legacy 的 adopt 來源挑法跟 spec 不一致 —— 兩個都會在執行半邊變成資料遺失。(3) 沒有既有測試變成不測任何東西，但新增的兩行 .aghub 零覆蓋。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "master_path 無條件吃 project_root,GlobalOnly 的 plan 會把 Master 指到專案內的 .aghub",
+				"problem": "shape.rs:102-104 的 master_path 直接 master_store_dir(project_root),不看 scope;candidate_referrers 則透過 target_skills_dir 拿到隨 scope 變化的路徑。結果在 GlobalOnly + 有 project_root 時,candidates 全在 $HOME,master 卻在 <project>/.aghub。實際呼叫端會不分 scope 帶 self.project_root(manager/skill.rs:659 的 remove_skill 就是這樣),所以在專案目錄下跑 repair -g,全域的 legacy 目錄會被 migrate 進專案 store,全域 Referrer 則全部判成 ForeignTarget/Dangling 而被 Relink 到專案 store。install 那半有守衛,repair 這半沒有。",
+				"evidence": "暫時 integration test(已刪)實測:plan_repair(GlobalOnly, Some(tmp), foo).master = <tmp>/.aghub/foo,前 6 個 candidate 是 /home/audichuang/.claude/skills/foo、/home/audichuang/.codex/skills/foo、…(共 22 個,全在 $HOME);plan_repair(GlobalOnly, None, foo).master = /home/audichuang/.aghub/foo,兩次的 actions 路徑逐項相等(印出 candidates identical = true)。對照組:crates/core/src/skills/install_fetched.rs:417 與 :623 兩個 materialize 入口都寫 canonical_root = project_root only if matches!(scope, ResourceScope::ProjectOnly),存在的理由就是擋這件事。",
+				"ran_it": true,
+				"fix": "master_path/plan_repair 比照 install_fetched.rs:623,非 ProjectOnly 時把 project_root 視為 None;或改成要求呼叫端傳已解析好的 store dir,讓型別擋掉這個錯配。",
+				"severity": "blocker",
+				"audit": "讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220 行與 640-760、classify.rs、install_fetched.rs 的兩個 materialize 入口、linker/mod.rs 的 install_universal/link_agents_to_canonical、descriptor.rs 的 skill_write_path，以及 spec.md 的 Contract 與 Migration 兩節。跑了一支暫時的 integration test（crates/core/tests/zz_scratch.rs，跑完已刪除）實測 plan_repair 在三種 scope 下的輸出與 allowed_skill_roots 的存在性過濾。做了兩次 revert 舉證（一次砍 .aghub roots、一次把 classify_shape 的 trap-2 守衛換回 Option-fold），兩次都已 git checkout 還原，最後 git status --porcelain 為空。沒有 commit、沒有 push、沒有切分支。\n\n三個目標的答案：(1) allowed_skill_roots 那半確實現在無作用，is_universal_master 那半技術上已生效但走不到，沒有東西從能刪變成不能刪，更名沒漏呼叫點。(2) 對 NeedsLink agent 兩邊路徑一致，但 plan_repair 的 scope/root 處理跟 materialize_universal_master 不一致，且 Legacy 的 adopt 來源挑法跟 spec 不一致 —— 兩個都會在執行半邊變成資料遺失。(3) 沒有既有測試變成不測任何東西，但新增的兩行 .aghub 零覆蓋。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "plan_repair 收到 ResourceScope::Both 時靜默回一個空的 no-op plan",
+				"problem": "descriptor.rs:177 的 skill_write_path 對 Both 直接回 None,於是 candidate_referrers 的 filter_map 把 25 個 agent 全部濾掉,plan_repair 回 Some(RepairPlan) 但 actions 空、needs_migration=false、is_noop()=true。root AGENTS.md 記 doctor / check / source list / source diff 的預設 scope 就是 Both,而 spec 又要求 check 把 shape 當 per-skill status 回報 —— 這條路上會回報「一切健康」而磁碟上明明有未遷移的 legacy 目錄。這個 seam 在 attack2-findings.json survivingNew #28 已經記載,但它的 corrected_fix(「make the derivation function reject Both with an error rather than returning an empty vector」)spec.md 沒有吸收,落地的程式碼也沒有實作。",
+				"evidence": "暫時 integration test(已刪):<root>/.agents/skills/foo 含 SKILL.md 確實存在的情況下,plan_repair(Both, Some(root), foo) 實測 actions=0 needs_migration=false is_noop=true master=<root>/.aghub/foo;同一個 fixture 下 plan_repair(ProjectOnly, …) 得到 actions=21 needs_migration=true。程式:crates/agents/src/descriptor.rs:177;crates/core/src/skills/shape.rs:57-74。spec 檢核:grep Both .scratch/aghub-skill-store/spec.md 只有 7 筆無關命中,沒有一筆講 scope 契約。",
+				"ran_it": true,
+				"fix": "candidate_referrers 與 plan_repair 對 ResourceScope::Both 回錯誤(或 None)而不是空集合,把「推導只定義在具體 scope」寫進 spec 的 Contract,Both 的呼叫端自己跑兩次再合併。",
+				"severity": "required",
+				"audit": "讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220 行與 640-760、classify.rs、install_fetched.rs 的兩個 materialize 入口、linker/mod.rs 的 install_universal/link_agents_to_canonical、descriptor.rs 的 skill_write_path，以及 spec.md 的 Contract 與 Migration 兩節。跑了一支暫時的 integration test（crates/core/tests/zz_scratch.rs，跑完已刪除）實測 plan_repair 在三種 scope 下的輸出與 allowed_skill_roots 的存在性過濾。做了兩次 revert 舉證（一次砍 .aghub roots、一次把 classify_shape 的 trap-2 守衛換回 Option-fold），兩次都已 git checkout 還原，最後 git status --porcelain 為空。沒有 commit、沒有 push、沒有切分支。\n\n三個目標的答案：(1) allowed_skill_roots 那半確實現在無作用，is_universal_master 那半技術上已生效但走不到，沒有東西從能刪變成不能刪，更名沒漏呼叫點。(2) 對 NeedsLink agent 兩邊路徑一致，但 plan_repair 的 scope/root 處理跟 materialize_universal_master 不一致，且 Legacy 的 adopt 來源挑法跟 spec 不一致 —— 兩個都會在執行半邊變成資料遺失。(3) 沒有既有測試變成不測任何東西，但新增的兩行 .aghub 零覆蓋。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "skill_store_roots 新增的兩行 .aghub 零測試覆蓋,現況下也完全無作用",
+				"problem": "這批改動宣稱已修好 Day-one hazard,但 allowed_skill_roots 會 canonicalize 並丟掉不存在的路徑,而目前沒有任何程式碼寫入 .aghub,所以那半現在完全無作用;is_universal_master 那半雖然技術上已生效(它走 skill_store_roots 原始清單,assert_strictly_contained 對 canonicalize 失敗的 root 會 fallback 到原字串),但沒有任何 agent 的讀取路徑在 .aghub 底下,兩個呼叫端也拿不到 .aghub 路徑。更關鍵的是:把這兩行拿掉,整個 removal 與 remove_skill 測試群全綠 —— 新增的行為沒有任何測試綁住,執行半邊實作時把它改掉不會有東西變紅。",
+				"evidence": "實測 allowed_skill_roots(&[], Some(root)):建 .aghub 之前回 3 筆(~/.config/agents/skills、~/.agents/skills、<root>/.agents/skills),mkdir <root>/.aghub 之後才變 4 筆。revert 舉證:刪掉 crates/core/src/skills/removal.rs:34 與 :38 兩行 roots.push(crate::skills::linker::MASTER_STORE_DIR_NAME) 後,cargo test -p aghub-core --lib skills::removal → 35 passed 0 failed;cargo test -p aghub-core --lib manager::skill::tests::remove_skill → 18 passed 0 failed。universal_master_tests 四支測試沒有一支提到 .aghub;both_store_spellings_are_listed 只斷言 .agents/skills 與 XDG agents/skills 兩種拼法(removal.rs:2123-2131)。改動已 git checkout 還原。",
+				"ran_it": true,
+				"fix": "both_store_spellings_are_listed 加斷言 roots 含 <root>/.aghub 與 ~/.aghub;再補一支 is_universal_master(<root>/.aghub/foo)==true 的測試(要先 create_dir_all,因為 assert_strictly_contained 會先 canonicalize target,不存在就直接 None)。",
+				"severity": "required",
+				"audit": "讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220 行與 640-760、classify.rs、install_fetched.rs 的兩個 materialize 入口、linker/mod.rs 的 install_universal/link_agents_to_canonical、descriptor.rs 的 skill_write_path，以及 spec.md 的 Contract 與 Migration 兩節。跑了一支暫時的 integration test（crates/core/tests/zz_scratch.rs，跑完已刪除）實測 plan_repair 在三種 scope 下的輸出與 allowed_skill_roots 的存在性過濾。做了兩次 revert 舉證（一次砍 .aghub roots、一次把 classify_shape 的 trap-2 守衛換回 Option-fold），兩次都已 git checkout 還原，最後 git status --porcelain 為空。沒有 commit、沒有 push、沒有切分支。\n\n三個目標的答案：(1) allowed_skill_roots 那半確實現在無作用，is_universal_master 那半技術上已生效但走不到，沒有東西從能刪變成不能刪，更名沒漏呼叫點。(2) 對 NeedsLink agent 兩邊路徑一致，但 plan_repair 的 scope/root 處理跟 materialize_universal_master 不一致，且 Legacy 的 adopt 來源挑法跟 spec 不一致 —— 兩個都會在執行半邊變成資料遺失。(3) 沒有既有測試變成不測任何東西，但新增的兩行 .aghub 零覆蓋。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "更名後三處文件敘述與程式碼不符",
+				"problem": "程式碼呼叫點的更名是乾淨的,但三處敘述沒跟上:removal.rs 的模組註解與 allowed_skill_roots 的 doc 仍逐條列舉 allow-listed roots 卻沒有 .aghub;shape.rs 的註解說被 adopt 的那個目錄由 migration step 自己處理,但實測它同時也留在 actions 裡而且是 Relink。",
+				"evidence": "crates/core/src/skills/removal.rs:1-4(模組註解列 ~/.config/agents/skills、~/.agents/skills、<project>/.agents/skills、agent 自己的 skills dir,沒有 .aghub);同檔 :45-49(allowed_skill_roots 的 doc,同樣沒列 .aghub);crates/core/src/skills/shape.rs:686-689 的註解 vs 我實測的 plan_repair 輸出(migrate_from=<root>/.agents/skills/foo 的同時,同一條路徑在 actions 裡出現 8 次且全是 Relink)。",
+				"ran_it": true,
+				"fix": "兩處 doc 補上 .aghub;shape.rs:689 的註解改成如實描述(被 adopt 的路徑本身也會拿到 Relink,因為遷移後那裡要變成指向 Master 的 symlink)。",
+				"severity": "cosmetic",
+				"audit": "讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220 行與 640-760、classify.rs、install_fetched.rs 的兩個 materialize 入口、linker/mod.rs 的 install_universal/link_agents_to_canonical、descriptor.rs 的 skill_write_path，以及 spec.md 的 Contract 與 Migration 兩節。跑了一支暫時的 integration test（crates/core/tests/zz_scratch.rs，跑完已刪除）實測 plan_repair 在三種 scope 下的輸出與 allowed_skill_roots 的存在性過濾。做了兩次 revert 舉證（一次砍 .aghub roots、一次把 classify_shape 的 trap-2 守衛換回 Option-fold），兩次都已 git checkout 還原，最後 git status --porcelain 為空。沒有 commit、沒有 push、沒有切分支。\n\n三個目標的答案：(1) allowed_skill_roots 那半確實現在無作用，is_universal_master 那半技術上已生效但走不到，沒有東西從能刪變成不能刪，更名沒漏呼叫點。(2) 對 NeedsLink agent 兩邊路徑一致，但 plan_repair 的 scope/root 處理跟 materialize_universal_master 不一致，且 Legacy 的 adopt 來源挑法跟 spec 不一致 —— 兩個都會在執行半邊變成資料遺失。(3) 沒有既有測試變成不測任何東西，但新增的兩行 .aghub 零覆蓋。",
+				"reviewer_note": "三處都親自打開確認：removal.rs:1-4 模組註解列 ~/.config/agents/skills、~/.agents/skills、project/.agents/skills、agent 自己的 skills dir，沒有 .aghub；removal.rs:44-49 allowed_skill_roots 的 doc 同樣沒列；shape.rs:687-689 註解說被 adopt 的那個「由 migration step 自己處理」，但 P3 實測它同時在 actions 裡且是 Relink。",
+				"corrected_fix": "兩處 doc 補 .aghub；shape.rs:689 的註解改成如實描述（若採納 Legacy 動作拆分，這段註解直接重寫）。"
+			},
+			{
+				"title": "Legacy 判準沒有 lock 守門也沒有路徑守門，會把使用者手放的目錄選成 migrate_from（違反 D5）",
+				"problem": "spec 114-118 的 legacy 定義是三個條件的合取：lock 有記錄 + .agents/skills/<n> 是實體目錄 + M 不存在。實作只剩最後一個半：shape.rs:241-246 的 else 分支是「referrer 不是連結、也不是 AliasedMaster、且 master 不存在」就回 Legacy。它不看 lock，不限定路徑必須是共用槽位，也不檢查 is_dir()。plan_repair（shape.rs:677-679）再把第一個 Legacy candidate 直接指定成 migrate_from。candidate_referrers 涵蓋全部 21 個有 write dir 的 agent，所以任何一個 agent 私有 skills 目錄裡、使用者自己放的、aghub 從未碰過、lock 也沒記錄的目錄，都會被判成「未遷移的 Master」。D5 明說這種東西要留著不動並回報。",
+				"evidence": "probe（暫時測試，已還原）：在 tempdir 專案根只建 .cursor/skills/foo/SKILL.md（內容 MY OWN NOTES），沒有 .aghub、沒有 lock、沒有 .agents。classify_shape 回 Legacy；plan_repair 回 needs_migration = true、migrate_from = Some(<root>/.cursor/skills/foo)、refusals = []。另一支 probe 在 .agents/skills/foo 放一個「普通檔案」（不是目錄），同樣得到 shape = Legacy、migrate_from = Some(.agents/skills/foo)。原始碼：shape.rs:241-246、shape.rs:677-679。",
+				"ran_it": true,
+				"fix": "Legacy 這一臂加上 spec 的另外兩個條件：(a) 呼叫端傳入的 name 必須來自 fail-closed lock 讀取，且把「lock 是否記錄」變成 classify_shape 的顯式輸入而不是隱含假設；(b) 只有 referrer 落在 linker::shared_referrer_dir(project_root) 之下才可能是 Legacy，其餘位置的實體目錄一律走 ForkedCopy 或新增一個 UnmanagedDirectory 形狀交給 D5 的「回報但不動」；(c) 加 is_dir() 判斷，普通檔案不是 Legacy。",
+				"severity": "blocker",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Legacy 被映射成 Relink —— 一個只為「連結」定義的動作被套在實體目錄上，繞過 CompareThenQuarantine 規則",
+				"problem": "shape.rs:690 是 SkillShape::Legacy => ReferrerAction::Relink。但 Relink 自己的 doc（shape.rs:604-606）寫明它只涵蓋 chain / foreign target / dangling link，三者都是連結，「the fix is the same write」。Legacy 是實體目錄。用同一個寫入把實體目錄換成 symlink，就必須先移除那個目錄 —— 而 spec 的 Repair policy（408-450）與 shape.rs:117-120 的 ForkedCopy doc 都寫死「bytes may exist NOWHERE else，never safe to delete without comparing」。當同一個技能名下有兩個以上實體目錄時（例如真正的 legacy master 在 .agents/skills/foo、使用者手放的另一份在 .cursor/skills/foo），只有排序最前的那個被 migrate_from 收走，其餘每一個都拿到 Relink，也就是被規劃成「刪掉再連過去」。此外被收走當 Master 的那一份，在 actions 裡同樣是 Relink（8 筆共用槽位全部 Relink），plan 沒有任何欄位標記它已被 migrate_from 認領，執行端必須自己拿 migrate_from 去交叉比對才不會把 Master 自己刪掉。",
+				"evidence": "probe（已還原）：專案根同時建 .agents/skills/foo/SKILL.md（THE REAL SKILL）與 .cursor/skills/foo/SKILL.md（UNRELATED HAND-PLACED），無 .aghub。plan_repair 輸出 migrate_from = Some(.agents/skills/foo)，而 actions 含 cursor .cursor/skills/foo -> Relink，同時 codex/gemini/cline/copilot/antigravity/kimi/amp/warp 八筆全部是 .agents/skills/foo -> Relink（也就是 migrate_from 自己）。原始碼：shape.rs:690（映射）、shape.rs:604-606（Relink 的 doc）、shape.rs:687-689（註解宣稱「被收養的那個由 migration step 處理」，但沒有任何欄位表達）。",
+				"ran_it": true,
+				"fix": "Legacy 不該共用 Relink。分兩個動作：AdoptAsMaster（只給 migrate_from 選中的那一個）與 CompareThenQuarantine（其餘每一個實體目錄，走跟 ForkedCopy 相同的比對後隔離路徑，永不直接刪）。並在 RepairPlan 裡讓被收養的那一筆帶自己的動作，執行端不必再交叉比對 migrate_from。",
+				"severity": "blocker",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "遷移步驟 2（把隱性讀取轉成顯式 Referrer）在 RepairPlan 裡完全不存在 —— Absent 一律 Leave",
+				"problem": "spec 506-528「Migration expands implicit reads into explicit grants — this is the point」寫明步驟 2 是 load-bearing 而非最佳化：今天 codex/cursor/opencode 是隱性讀 ~/.agents/skills、自己不持有連結，如果遷移只重建共用槽位的 Referrer，這三個仍與 cline/warp 綁死，單獨撤銷其中一個依然不可能，整個功能等於沒交付。spec 的 before/after 圖裡那三行標了 NEW 的私有連結，就是步驟 2 的產物。但 plan_repair（shape.rs:684-686）把 Absent 一律映射成 Leave，且映射時完全沒有讀 needs_migration。結果是：在遷移情境下，每一個有私有目錄但目前空的 agent 都拿到 Leave，沒有任何一條 NEW 連結被規劃出來。RepairPlan 也沒有第二種動作可以表達「建立新 Referrer」。needs_migration 這個 bit 就在 plan 上，卻沒有被 actions 的計算讀到。",
+				"evidence": "probe（已還原）：專案根只建 .agents/skills/foo/SKILL.md，其餘皆無。plan_repair 的 21 筆 actions 中，8 筆共用槽位是 Relink，其餘 13 筆（claude/opencode/cursor/kiro/windsurf/trae/roocode/mistral/pi/augmentcode/kilocode/factory/grok）全部是 Leave。全域 scope 下 codex/cursor 的 candidate 是私有目錄，由 repo 自己的測試 global_candidates_prefer_private_dirs_over_the_shared_slot（shape.rs:439-485）證實，因此同樣落在 Absent -> Leave。原始碼：shape.rs:684-686、shape.rs:711-717（RepairPlan 欄位）、ReferrerAction 只有四個變體，沒有 Create。",
+				"ran_it": true,
+				"fix": "actions 的計算要讀 needs_migration：遷移時，凡是「今天讀得到舊 master」的 agent，其 Absent 要變成一個新的 ReferrerAction::Create 而不是 Leave。「今天讀得到」必須用 spec 90-105 的 migration-time 推導（舊 master 路徑 / descriptor read paths 含 .agents/skills），不是拿全部有私有目錄的 agent —— 否則會把技能發給本來就讀不到的 agent，方向剛好相反。",
+				"severity": "required",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Master 不存在時仍規劃 Relink，且 refusals 為空、is_noop 為 false —— 違反「Never create a Referrer before its Master exists」",
+				"problem": "spec 176-186 的 Ordering 第一條是「Never create a Referrer before its Master exists」。classify_shape 在 referrer 是 dangling link、而 master 自己也 canonicalize 失敗時（shape.rs:222-224）回 ForeignTarget，plan_repair（shape.rs:702-706）把 ForeignTarget 映射成 Relink。此時沒有任何 Legacy candidate，所以 needs_migration = false、migrate_from = None，plan 上沒有任何欄位表示 Master 缺席。refusals() 為空、is_noop() 為 false，執行端會照著 plan 去建立指向不存在 Master 的 Referrer，修完還是 dangling，且永遠不會收斂。附帶一個標籤問題：這個狀態的實際成因是 Master 不見了，不是 referrer 指去別處，回 ForeignTarget 會把使用者導向錯誤方向；模組自己的測試 dangling_referrer_with_missing_master_is_never_conformant 只斷言「是某種 Violation」，抓不到這個誤標。",
+				"evidence": "probe（已還原）：專案根只建 .claude/skills/foo 這條 symlink 指向不存在的 <root>/.aghub/foo。plan_repair 輸出 master exists = false、needs_migration = false、refusals = []、is_noop = false、claude .claude/skills/foo -> Relink。原始碼：shape.rs:222-226、shape.rs:702-706、shape.rs:642-648（is_noop 只看 needs_migration 與 Leave）。",
+				"ran_it": true,
+				"fix": "plan_repair 在 master 不存在且沒有 migrate_from 時，整個 plan 要回一個 refusal（新增 RefuseReason::MasterMissing）而不是一堆 Relink；或至少讓 is_noop/refusals 能表達「無法從這個 plan 前進」。同時把「referrer dangling 且 master 也解不開」從 ForeignTarget 拆出來單獨命名。",
+				"severity": "required",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "RepairPlan 沒有表達遷移順序，共用槽位散在中間且重複 8 筆",
+				"problem": "spec 467-491 的 Order 是三步且順序是契約的一部分：先 copy 到 .aghub、再建私有 Referrer、共用槽位最後（temp link + rename 的三段舞）。spec 176-186 還特別示範過怎麼把順序變成可斷言的產物（RemovalPlan.paths 的 vector 順序，反轉排序就會紅）。RepairPlan.actions 是 Vec<(&str, PathBuf, ReferrerAction)>，順序就是 registry::ALL_AGENTS 的順序，共用槽位夾在私有目錄中間，不是最後。而且同一個 .agents/skills/<n> 路徑會出現 8 次（8 個沒有私有目錄的 agent 各一筆），動作完全相同 —— 執行端若照 Vec 走，會對同一個路徑執行 8 次 CompareThenQuarantine（第 2 次起看到的已經是自己剛建好的 symlink，形狀已變）。順序與去重都被推給尚未實作的執行階段自己重新推導，而那正是 spec 說「preview 與 commit 不能不一致，因為只有一份計算」要避免的事。",
+				"evidence": "probe（已還原）純 legacy 情境的 21 筆 actions 依序為 claude(Leave)、codex(.agents/skills Relink)、opencode(Leave)、gemini(.agents Relink)、cline(.agents Relink)、copilot(.agents Relink)、cursor(Leave)、antigravity(.agents Relink)、kiro、windsurf、trae、roocode、kimi(.agents Relink)、mistral、pi、augmentcode、kilocode、amp(.agents Relink)、factory、warp(.agents Relink)、grok —— 共用槽位共 8 筆同路徑、且散在第 2 到第 20 位。原始碼：shape.rs:636（actions 型別）、shape.rs:673-709（依 candidates 順序 push，無排序無去重）。",
+				"ran_it": true,
+				"fix": "actions 依 spec 的階段排序（master 物化 -> 私有 Referrer -> 共用槽位）並對路徑去重，把共用該路徑的 agent id 收成一個 Vec<&str> 掛在同一筆上（順帶滿足 spec 187-217 對共用槽位揭露的要求）。用一個「反轉排序就變紅」的測試釘住順序，照 spec 176-186 的作法。",
+				"severity": "required",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": "P7 probe 實測 index=[1,3,4,5,7,12,17,19]，共用槽位 8 筆同路徑、散在第 2 到第 20 位。讀 shape.rs:673-709 確認順序就是 registry 順序，無排序無去重。spec 的 Order 三步（copy 到 .aghub -> 私有 Referrer -> 共用槽位最後）是契約的一部分，且 spec 自己示範過怎麼用 vector 順序把它變成可斷言產物。與第 10 項是同一個修法。",
+				"corrected_fix": "actions 依 spec 階段排序並用構造出來的 PathBuf == 去重（不要用 resolved path），agent id 收成 Vec。用一個「反轉排序就變紅」的測試釘住。"
+			},
+			{
+				"title": "is_actionable(Legacy) = true 與 D7 衝突：它說「不用先修就能繼續」，D7 說必須先在同一個交易裡遷移",
+				"problem": "shape.rs:148-153 的 doc 寫「Whether a mutating flow may proceed against this pair without repairing first」，並把 Legacy 納入。D7（spec:52）與 spec 60-72 說的是相反的事：mutating flow 遇到 legacy 技能，要在自己的交易裡把那一個技能遷移掉；spec 68-71 還明白指出這正是用來堵住「apply-update 在 legacy 技能上會寫 .aghub/<n>、而 agent 還在讀實體目錄」這個 silent-green 破洞。一個 bool 表達不出「先遷移再繼續」，只要有呼叫端相信 is_actionable 就直接放行，那個破洞就原封不動地回來。目前 shape.rs 尚無 crate 外呼叫端（grep 全 crates 只有 shape.rs 自己），所以還沒實際發生，但這個 API 形狀就是誘導它發生。",
+				"evidence": "shape.rs:148-153（doc 與 matches! 三個變體）；spec.md:52（D7）、spec.md:68-71（apply-update 破洞）。grep -rn 'plan_repair|candidate_referrers|classify_shape|RepairPlan' --include=*.rs crates/ 除 shape.rs 外零命中，確認尚無呼叫端。既有測試 only_conformant_absent_and_legacy_are_actionable（shape.rs:584-592）把這個語義釘死了，等於把錯誤的契約寫進測試。",
+				"ran_it": true,
+				"fix": "改成三態：Proceed（Conformant/Absent）、MigrateFirst（Legacy）、Refuse（AliasedMaster/Violation）。編譯器會逼每個未來呼叫端處理 MigrateFirst，而不是把它折進 Proceed。",
+				"severity": "required",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			},
+			{
+				"title": "Linker::is_link 的 leaf-only 盲點沒有在共用 helper 修掉，spec 明令的是「fix at the shared helper, not per caller」",
+				"problem": "spec 155-168「Identity before hash, always」結尾寫明：Linker::is_link（linker/mod.rs:303-318）有一樣的 leaf-only 盲點，install_fetched.rs:437 已經抄了這個 pattern，「Fix at the shared helper, not per caller」。本分支對 linker/mod.rs 的改動只新增了 MASTER_STORE_DIR_NAME / master_store_dir / shared_referrer_dir 三樣，is_link 一行未動；install_fetched.rs 的 Linker::is_link(canonical) 守衛也原封不動。shape.rs 選擇在自己的 classify_shape 裡用 same_object 做 per-caller 的補救（shape.rs:212-214），正是 spec 說不要的那種修法。後果：install_fetched 那條「Master slot for skill is a link; refusing to follow or adopt it」的守衛，在 .agents/skills 是 symlink 的佈局下仍會被繞過，而它守的是 adopt 既有 Master 的路徑。",
+				"evidence": "git diff main..HEAD -- crates/core/src/skills/linker/mod.rs 只有 +33 行，全部是新增的三個 store 相關項目，is_link 不在 diff 裡。crates/core/src/skills/install_fetched.rs:438 仍是 if Linker::is_link(canonical) 單獨判斷。shape.rs:212-214 是 per-caller 的補救。spec.md 的 Identity before hash 段末段點名這兩處。",
+				"ran_it": true,
+				"fix": "在 Linker 上加一個 is_link_or_aliases(path, expected_real) 之類的共用判準（先 lstat 判 link-ness、再對兩邊 canonicalize 比身份），讓 shape.rs 與 install_fetched.rs 共用；或至少在 install_fetched 那個守衛旁加同樣的 same_object 檢查並註明兩處必須一起改。",
+				"severity": "required",
+				"audit": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重報。\n\n結論：classify_shape 的 conformant 三個 clause 與 spec 逐字一致且順序相同，one_hop_target 就是 spec 的公式，沒有用 resolve_existing 當鏈檢查替代品，只用一個具名 normalizer，Absent/D8 語義正確 —— 判斷層（classify_shape）對得起 spec。\n\n對不起來的是計畫層（plan_repair）與 Legacy 判準。Legacy 完全不看 lock、也不限定 .agents/skills，任何 agent 私有目錄裡使用者手放的目錄（甚至一個普通檔案）都會被判成 Legacy 並被選為 migrate_from —— 這正是 D5 明令「留著不動並回報」的東西。這是 blocker。第二個 blocker 是 Legacy 被映射成 Relink，而 Relink 的自家 doc 只涵蓋連結。",
+				"reviewer_note": null,
+				"corrected_fix": null
+			}
+		],
+		"verdict": {
+			"verdicts": [
+				{
+					"title": "plan_repair 的 Relink arm 完全沒有測試 (M15)",
+					"refuted": false,
+					"reason": "自己重跑並驗證 patch 真的套上 (git diff --numstat 1/1)：把 shape.rs:706 的 ) => ReferrerAction::Relink 改成 Leave，cargo test -p aghub-core --lib skills::shape::tests = 15 passed 0 failed。行號正確：702-706 就是 Chain|ForeignTarget|Dangling 的合併 arm。這是覆蓋缺口，不是假綠。",
+					"severity_after_review": "required",
+					"corrected_fix": "在 project fixture 裡放一條懸空 Referrer (.claude/skills/foo 指向不存在的 .aghub/foo)，斷言該 agent 的 action == ReferrerAction::Relink。同一條可順帶覆蓋 Chain。"
+				},
+				{
+					"title": "MasterIsLink 的 Refuse 沒有被 plan 層釘住 (M16)",
+					"refuted": false,
+					"reason": "驗證過的 patch（1 加 3 刪）把 shape.rs:694-698 的 Refuse{MasterIsLink} 換成 Relink 後 15 passed 0 failed。RefuseReason::MasterIsLink 在整個 tests 模組沒有任何斷言；a_linked_master_is_reported_once (shape.rs:419) 只呼叫 classify_shape。",
+					"severity_after_review": "required",
+					"corrected_fix": "抄 a_linked_master_is_reported_once 的 fixture 建法，改跑 plan_repair，斷言 refusals() 非空且全部是 RefuseReason::MasterIsLink。"
+				},
+				{
+					"title": "Conformant => Leave 在 plan 層沒有測試，而 a_fully_linked_skill_plans_nothing 名不符實",
+					"refuted": false,
+					"reason": "M8 驗證過（2 加 3 刪）：拆成 Conformant => Relink / Absent => Leave 後 15 passed。讀 shape.rs:515-529 確認該測試 fixture 只建 root/.aghub/foo，一條 symlink 都沒有，所以每個候選都是 Absent。名字宣稱的 fully linked 不存在。",
+					"severity_after_review": "required",
+					"corrected_fix": "在同一 fixture 加一條健康 symlink (.claude/skills/foo -> .aghub/foo) 再斷言 is_noop()。不要刪掉這條測試 —— M14 證明它是 Absent => Leave 的唯一守門人。"
+				},
+				{
+					"title": "Legacy => Relink 沒有測試 (M9)",
+					"refuted": false,
+					"reason": "驗證過的 patch（1/1）把 shape.rs:690 改成 Leave 後 15 passed 0 failed。an_unmigrated_skill_plans_a_migration (shape.rs:495-512) 只斷言 needs_migration / migrate_from / master / !is_noop() / refusals；!is_noop() 光靠 needs_migration 就成立，完全不碰 action。",
+					"severity_after_review": "required",
+					"corrected_fix": "該測試尾端加一行斷言 legacy 候選的 action。注意：若採納下面 Legacy 動作拆分的修法，這條要釘的是新動作而不是 Relink。"
+				},
+				{
+					"title": "a_fully_linked_skill_plans_nothing 對推導回傳空集合無感",
+					"refuted": false,
+					"reason": "讀 shape.rs:642-648，is_noop() 是 !needs_migration && actions.iter().all(...)，空 vector 上 all() 恆真。我的 P1 probe 實測 ResourceScope::Both 下 actions=0 needs_migration=false is_noop=true，直接證實這個形狀。不是假綠，是斷言形狀對推導回歸盲。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "assert!(plan.is_noop()) 前補一行 assert!(!plan.actions.is_empty())，與 npx_forked_copy 已有的 !slot_actions.is_empty() 同一招。"
+				},
+				{
+					"title": "第二個 Legacy 目錄被規劃成 Relink，而 claude 的私有副本會贏過共用槽位",
+					"refuted": false,
+					"reason": "我自己的 P3 probe 實測：專案根同時有 .claude/skills/foo (CLAUDE v1) 與 .agents/skills/foo (SHARED v2)、無 .aghub，plan_repair 回 migrate_from = .claude/skills/foo，而 .agents/skills/foo 被 codex/gemini/cline/copilot/antigravity/kimi/amp/warp 各判一次 Relink。crates/agents/src/agents/mod.rs:40 確認 claude 是 ALL_DESCRIPTORS 第 0 個。spec 的 legacy 定義綁 .agents/skills/name，這裡完全沒有路徑約束。removal.rs:209 Layout::Copy 註解證明多份獨立真實副本是現存支援的佈局。",
+					"severity_after_review": "blocker",
+					"corrected_fix": "Legacy 只在候選路徑就是共用槽位時成立；migrate_from 只從共用槽位取。其餘真實目錄走 CompareThenQuarantine。比較用已在檔內的 same_object（候選存在時）或直接比 PathBuf ==（P7 證實 8 個共用槽位候選是同一個構造出來的 PathBuf），不要用 starts_with 也不要手刻正規化。"
+				},
+				{
+					"title": "沒有任何 is_dir 檢查：普通檔案被收養成 Master，檔案 Master 認證健康",
+					"refuted": false,
+					"reason": "P2 probe：.agents/skills/foo 是一個普通檔案、無 .aghub，classify_shape 回 Legacy，plan_repair 回 needs_migration=true migrate_from=該檔案。P8 probe：.aghub/foo 寫成檔案 + 一條指向它的 symlink referrer，classify_shape 回 Conformant，plan_repair is_noop=true。讀 shape.rs:201-247 確認分支只看 symlink_metadata 與 Linker::is_link。",
+					"severity_after_review": "required",
+					"corrected_fix": "Legacy 與 ForkedCopy 兩臂在 link 檢查之後加 path.is_dir()；Master 側加一個 MasterIsNotADir violation，與 MasterIsLink 並列。"
+				},
+				{
+					"title": "master_path 不看 scope，repair -g 在專案目錄下會把專案 Master 配上全域 Referrer",
+					"refuted": false,
+					"reason": "P6 probe：plan_repair(GlobalOnly, Some(tempdir), foo) 回 master = tmp/.aghub/foo，而 action 0..2 是 /home/audichuang/.claude/skills/foo、.codex/skills/foo、.openclaw/skills/foo。讀 shape.rs:102-104 確認 master_path 直接 master_store_dir(project_root) 不看 scope；descriptor.rs:161-166 確認 GlobalOnly 完全忽略 project_root。對照組 install_fetched.rs:417-421 與 :623-627 兩處都先把非 ProjectOnly 的 project_root 歸零。",
+					"severity_after_review": "required",
+					"corrected_fix": "master_path 收 scope，只在 ProjectOnly 時把 project_root 傳給 master_store_dir，比照 install_fetched.rs:623。"
+				},
+				{
+					"title": "ResourceScope::Both 產出空 plan 且回報 is_noop() == true",
+					"refuted": false,
+					"reason": "P1 probe：同一個 fixture（.agents/skills/foo 是實體目錄需要遷移）下，Both 回 actions=0 needs_migration=false is_noop=true，ProjectOnly 回 actions=21 needs_migration=true。descriptor.rs:177 確認 Both => None。這在 attack2-findings.json 已記載為「兩個 seam 對 Both 解讀不一致」，但 spec 修訂版 3 未吸收（grep Both 無契約段落），落地程式碼也沒實作，所以不算重報。",
+					"severity_after_review": "required",
+					"corrected_fix": "plan_repair 對 Both 回 None（或錯誤），把「推導只定義在單一寫入 scope」寫進 spec Contract。呼叫端要 Both 就自己跑兩次。"
+				},
+				{
+					"title": "共用槽位每個 agent 出現一次，一條路徑產生 8 筆重複 action",
+					"refuted": false,
+					"reason": "P7 probe：8 筆同路徑，index=[1,3,4,5,7,12,17,19]，總共 21 筆 —— 共用槽位散在中間不是最後。讀 shape.rs:673-709 確認無排序無去重。與下面的排序發現同源。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "用構造出來的 PathBuf 做 == 去重（不要用 resolved path：Absent 候選 canonicalize 會失敗，全部會被丟掉），agent id 收成 Vec 掛在同一筆上。"
+				},
+				{
+					"title": "Linker::is_link 比 std 的 is_symlink 寬，新的 shape 分類把這個寬度變成寫入計畫",
+					"refuted": false,
+					"reason": "linker/mod.rs:336-351 的 cfg(windows) 分支確實在 is_symlink 之外再認 FILE_ATTRIBUTE_REPARSE_POINT；shape.rs:201-202、216-226、690、702-706 的映射也如描述。但 attack2-findings.json 已以 cosmetic 記載同一個寬度問題（On Windows, clause 1 and clause 3 use different link definitions），本機無 std 原始碼也無 Windows toolchain，所有 Windows 斷言未實跑。增量只是「分類層的錯誤在計畫層變成寫動作」這個推論。",
+					"severity_after_review": "cosmetic"
+				},
+				{
+					"title": "skill_store_roots 新增的兩條 .aghub 路徑沒有任何測試守著",
+					"refuted": false,
+					"reason": "我自己重跑：python 移除 removal.rs 兩行 roots.push(MASTER_STORE_DIR_NAME)（斷言 count==0 確認真的刪掉，git diff --numstat 0/2），cargo test -p aghub-core --lib = 282 passed 0 failed，完整 cargo test -p aghub-core 也沒有任何 FAILED。讀 removal.rs:2125-2132 確認 both_store_spellings_are_listed 只斷言兩種 .agents 拼法。與下面第 19 項是同一個缺口。",
+					"severity_after_review": "required",
+					"corrected_fix": "both_store_spellings_are_listed 加 ends_with(.aghub) 兩條斷言（root 與 home）；再補一支 is_universal_master(root/.aghub/foo)==true，記得先 create_dir_all，因為 assert_strictly_contained 會 canonicalize target。"
+				},
+				{
+					"title": "shape.rs:229-230 的 junction 註解替一條有牙的 fallback 背書",
+					"refuted": false,
+					"reason": "讀 shape.rs:228-238 確認：one_hop_target 回 None 時直接落到 return Conformant，這條 fallback 確實有牙（舉證者用「插一行提前回 None」讓 two_hop_chain 測試變紅，機制與程式碼一致）。但註解點名 junction 這半我無法在本機驗證 —— rustc sysroot 沒有 std 原始碼，也沒有 Windows toolchain。純註解問題。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "註解改成講 None 的真正語意（讀不到 hop 的 reparse point 不該被端點相等救回 Conformant），不要點名 junction。"
+				},
+				{
+					"title": "OS 會解 join 裡的 .. 是 POSIX-only，Windows 是詞法解",
+					"refuted": false,
+					"reason": "shape.rs:176-187 與 spec.md 的 predicate 段落確實都用「OS 解 .. 所以不違反手刻正規化禁令」當論證。Win32 在交給 object manager 前詞法收斂 . 與 .. 是既知語意。但這是 spec/註解的限定詞問題，未在 Windows 實跑，且觸發條件（agent skills 目錄本身是 reparse point + 相對 symlink）極窄。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "兩份文件各加一句：這條 clause 的 .. 語意是 POSIX 的，Windows 上是盡力而為。不要改成手刻 walk。"
+				},
+				{
+					"title": "shared_referrer_dir 零呼叫者",
+					"refuted": false,
+					"reason": "grep -rn 全 crates 確認：shared_referrer_dir 只在 linker/mod.rs:40、:44 的定義與 doc 出現，零呼叫者。master_store_dir 也只有 shape.rs 用。pub fn in pub mod 不會有 dead_code 警告。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "執行半邊反正馬上要用（Legacy 判準與 migrate_from 都需要它），留著就好；真要清就等第一個呼叫者出現時再引入。"
+				},
+				{
+					"title": "migrate_from 用 registry 順序挑第一個 Legacy",
+					"refuted": false,
+					"reason": "與第 6 項同一個缺陷，兩位舉證者各自實測到同一結果。我的 P3 probe 獨立複現：migrate_from = .claude/skills/foo，共用槽位被判 8 次 Relink。shape.rs:677-679 就是「第一個 Legacy 且 migrate_from.is_none()」。",
+					"severity_after_review": "blocker",
+					"corrected_fix": "見第 6 項：migrate_from 只從共用槽位取；同一名字下出現兩個以上實體目錄時其餘走 CompareThenQuarantine，不要靠迭代順序。"
+				},
+				{
+					"title": "master_path 無條件吃 project_root（重複）",
+					"refuted": false,
+					"reason": "與第 8 項同一個缺陷，P6 probe 同時證實兩者。舉證者標 blocker、另一位標 required；由於 shape.rs 目前零呼叫者、產品行為未變，我統一裁為 required 並列入必修。",
+					"severity_after_review": "required",
+					"corrected_fix": "同第 8 項。"
+				},
+				{
+					"title": "plan_repair 收到 Both 靜默回空的 no-op plan（重複）",
+					"refuted": false,
+					"reason": "與第 9 項同一個缺陷，P1 probe 證實。舉證者對 attack2 重報的自我檢核也正確：該筆已記載但 spec 未吸收、程式碼未實作。",
+					"severity_after_review": "required",
+					"corrected_fix": "同第 9 項。"
+				},
+				{
+					"title": "skill_store_roots 兩行 .aghub 零測試覆蓋，現況下也完全無作用",
+					"refuted": false,
+					"reason": "覆蓋那半我自己重跑證實（見第 12 項）。「現況無作用」那半也確認：allowed_skill_roots (removal.rs:57-65) 會 canonicalize 並丟掉不存在的路徑，而全 repo 目前沒有任何程式碼寫入 .aghub（master_store_dir 只被 shape.rs 這個純讀模組用）。is_universal_master 走原始清單所以技術上生效，但兩個呼叫端拿不到 .aghub 路徑。",
+					"severity_after_review": "required",
+					"corrected_fix": "同第 12 項。"
+				},
+				{
+					"title": "更名後三處文件敘述與程式碼不符",
+					"refuted": false,
+					"reason": "三處都親自打開確認：removal.rs:1-4 模組註解列 ~/.config/agents/skills、~/.agents/skills、project/.agents/skills、agent 自己的 skills dir，沒有 .aghub；removal.rs:44-49 allowed_skill_roots 的 doc 同樣沒列；shape.rs:687-689 註解說被 adopt 的那個「由 migration step 自己處理」，但 P3 實測它同時在 actions 裡且是 Relink。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "兩處 doc 補 .aghub；shape.rs:689 的註解改成如實描述（若採納 Legacy 動作拆分，這段註解直接重寫）。"
+				},
+				{
+					"title": "Legacy 判準沒有 lock 守門也沒有路徑守門（違反 D5）",
+					"refuted": false,
+					"reason": "P4 probe：專案根只有 .cursor/skills/foo/SKILL.md（使用者手放、無 lock、無 .agents、無 .aghub），plan_repair 回 needs_migration=true migrate_from=.cursor/skills/foo refusals=0。P2 probe 證實普通檔案同樣被收養。spec.md 的 legacy 定義是三個條件的合取（lock 有記錄 + .agents/skills/name 是實體目錄 + M 不存在），實作只剩最後一個；D5 明說 lock 沒記錄的實體目錄要留著不動並回報。",
+					"severity_after_review": "blocker",
+					"corrected_fix": "分兩層：is_dir + 共用槽位路徑這兩個 clause 屬於 classify_shape；lock 這個 clause 不要塞進 classify_shape（它是 per-pair 純函式，看不到 lock），依 D5 由 plan_repair 的呼叫端或 plan_repair 收一個 lock 推導出的名字集合來守。"
+				},
+				{
+					"title": "Legacy 被映射成 Relink —— 只為連結定義的動作被套在實體目錄上",
+					"refuted": false,
+					"reason": "shape.rs:604-606 的 Relink doc 確實只寫 chain / foreign target / dangling link 三種連結；shape.rs:690 把實體目錄 Legacy 映到同一個動作。spec 的 repair 結果詞彙表也把 migrated（from legacy）與 relinked（from chain or a Referrer pointing elsewhere）分成兩個。P3 實測 migrate_from 自己也在 actions 裡是 Relink，plan 沒有任何欄位標記它已被認領。",
+					"severity_after_review": "blocker",
+					"corrected_fix": "Legacy 拆出自己的動作（AdoptAsMaster 給被選中的那一個），其餘實體目錄走 CompareThenQuarantine。被收養的那一筆帶自己的動作，執行端不必再拿 migrate_from 交叉比對。"
+				},
+				{
+					"title": "遷移步驟 2（隱性讀取展開成顯式 Referrer）在 RepairPlan 裡完全不存在",
+					"refuted": false,
+					"reason": "讀 shape.rs:601-613 確認 ReferrerAction 只有 Leave / Relink / CompareThenQuarantine / Refuse，沒有 Create；shape.rs:684-686 把 Absent 一律映成 Leave，映射過程完全不讀 needs_migration。spec 的 Migration expands implicit reads into explicit grants 一節明說步驟 2 是 load-bearing 而非最佳化，before/after 圖裡三行標 NEW 的私有連結就是它的產物。P1 的 ProjectOnly 21 筆 actions 裡沒有任何一筆能表達建立新連結。",
+					"severity_after_review": "required",
+					"corrected_fix": "加 ReferrerAction::Create，且用 spec 的 migration-time 推導（今天讀得到舊 master 的 agent）決定誰拿到它 —— 不是所有有私有目錄的 agent，否則方向剛好相反。或者明文修 spec 說 plan 不表達步驟 2、由執行端另算 —— 但那就是 spec 自己禁止的兩份計算。"
+				},
+				{
+					"title": "Master 不存在時仍規劃 Relink，refusals 為空、is_noop 為 false",
+					"refuted": false,
+					"reason": "實質成立但標籤那半錯了。P5 probe：只有一條指向不存在 .aghub/foo 的 symlink，classify_shape 回的是 Violation(Dangling) 不是 ForeignTarget —— shape.rs:217-218 的 resolved(referrer) let-else 先 fire，根本走不到 :222。ForeignTarget 那條路仍可達（referrer 解得到別的真目錄、master 缺席），後果相同。plan 那半完全如述：master_exists=false needs_migration=false refusals=0 is_noop=false claude -> Relink，違反 spec 的 Never create a Referrer before its Master exists。",
+					"severity_after_review": "required",
+					"corrected_fix": "plan_repair 在 master 不存在且無 migrate_from 時整盤 refuse（新增 RefuseReason::MasterMissing）。不需要把 Dangling 從 ForeignTarget 拆出來 —— 它本來就已經分開了。"
+				},
+				{
+					"title": "RepairPlan 沒有表達遷移順序，共用槽位散在中間且重複 8 筆",
+					"refuted": false,
+					"reason": "P7 probe 實測 index=[1,3,4,5,7,12,17,19]，共用槽位 8 筆同路徑、散在第 2 到第 20 位。讀 shape.rs:673-709 確認順序就是 registry 順序，無排序無去重。spec 的 Order 三步（copy 到 .aghub -> 私有 Referrer -> 共用槽位最後）是契約的一部分，且 spec 自己示範過怎麼用 vector 順序把它變成可斷言產物。與第 10 項是同一個修法。",
+					"severity_after_review": "required",
+					"corrected_fix": "actions 依 spec 階段排序並用構造出來的 PathBuf == 去重（不要用 resolved path），agent id 收成 Vec。用一個「反轉排序就變紅」的測試釘住。"
+				},
+				{
+					"title": "is_actionable(Legacy) = true 與 D7 衝突",
+					"refuted": false,
+					"reason": "事實對：shape.rs:148-153 的 doc 與 matches! 如述，D7 說的是 mutating flow 要在自己的交易裡遷移那一個技能。但這兩者不矛盾 —— doc 明說 Legacy 刻意納入是因為「拒絕它就等於拒絕修好它的那次遷移」，呼叫端仍得自己遷。目前零 crate 外呼叫端，所以是 API 人體工學而非缺陷。三態化是好建議但不是必修。",
+					"severity_after_review": "cosmetic",
+					"corrected_fix": "若要做，改三態 Proceed / MigrateFirst / Refuse，讓編譯器逼未來呼叫端處理 MigrateFirst。"
+				},
+				{
+					"title": "Linker::is_link 的 leaf-only 盲點沒有在共用 helper 修掉",
+					"refuted": false,
+					"reason": "事實三項全對：git diff main..HEAD -- linker/mod.rs 只有 +33 行三個新項目，is_link 未動；install_fetched.rs:438-444 的 Linker::is_link(canonical) 守衛原封不動；shape.rs:212-214 是 per-caller 的 same_object 補救。spec 的 Identity before hash 段落確實寫 Fix at the shared helper, not per caller。但 git show main:install_fetched.rs 確認那個守衛與 main 完全相同 —— 是既有債，這批 commit 沒有讓它變糟。",
+					"severity_after_review": "required",
+					"corrected_fix": "在 Linker 上加一個吃 expected_real 的共用判準（先 lstat 判 link-ness、再對兩邊 canonicalize 比身份），shape.rs 與 install_fetched 共用。可以在執行半邊做，不必卡住地基。"
+				}
+			],
+			"must_fix_first": [
+				"Legacy 判準太寬：classify_shape 的 Legacy 臂要加 is_dir()，並限定候選路徑必須是共用槽位（linker::shared_referrer_dir 下）。其餘位置的實體目錄與普通檔案不得成為 Legacy。實測 P2 一個普通檔案、P4 一個使用者手放的 .cursor/skills/foo 都被判 Legacy 並選為 migrate_from，違反 D5。lock 那個 clause 不要塞進 classify_shape（純函式看不到 lock），留給 plan_repair 的呼叫端或讓 plan_repair 收 lock 推導出的名字集合。",
+				"Legacy 要有自己的動作，不能共用 Relink：Relink 的 doc 只涵蓋三種連結，套在實體目錄上就是「刪掉再連過去」。被收養的那一個給 AdoptAsMaster，其餘實體目錄走 CompareThenQuarantine。migrate_from 只從共用槽位取，不靠 ALL_DESCRIPTORS 順序 —— P3 實測 claude 的私有副本會贏過 .agents/skills 的真正 master。",
+				"master_path 要 scope-gate：收 scope，只在 ProjectOnly 時把 project_root 傳給 master_store_dir，比照 install_fetched.rs:417 與 :623。P6 實測 GlobalOnly + Some(root) 會把專案 Master 配上一整組 $HOME 的候選。",
+				"plan_repair 對 ResourceScope::Both 回 None（或錯誤），不要回空 plan。P1 實測一個明明需要遷移的 fixture 在 Both 下回 is_noop=true。Both 是 doctor / check / source list 的預設 scope。",
+				"RepairPlan.actions 依 spec 三階段排序（master 物化 -> 私有 Referrer -> 共用槽位最後）並去重。去重用構造出來的 PathBuf ==（P7 證實 8 筆共用槽位是同一個構造路徑），不要用 resolved path —— Absent 候選 canonicalize 會失敗，全部會被丟掉。agent id 收成 Vec 掛同一筆。用反轉排序就變紅的測試釘住。",
+				"遷移步驟 2 要能被 plan 表達：加 ReferrerAction::Create，用 spec 的 migration-time 推導決定誰拿到（今天讀得到舊 master 的 agent，不是所有有私有目錄的 agent）。或明文修 spec 承認 plan 不表達步驟 2 —— 但那就是 spec 自己禁止的兩份計算。",
+				"Master 不存在且無 migrate_from 時整盤 refuse（新增 RefuseReason::MasterMissing）。P5 實測目前 refusals=0 is_noop=false 且規劃 Relink，違反 spec 的 Never create a Referrer before its Master exists。",
+				"補 is_dir 的 Master 側對應：加 MasterIsNotADir violation。P8 實測一個檔案 Master 加一條 symlink referrer 會認證 Conformant 且 is_noop=true。",
+				"補測試（四個 plan arm + .aghub roots + 修 a_fully_linked 的 fixture）：M8/M9/M15/M16 我逐一驗證 patch 真的套上後全部 15 passed；removal.rs 兩行 .aghub 拿掉後整個 aghub-core 全綠。"
+			],
+			"false_green_rulings": [
+				{
+					"test": "a_fully_linked_skill_plans_nothing (M8: Conformant => Relink / Absent => Leave)",
+					"really_false_green": false,
+					"reason": "這條測試有效，只是名字錯。M14（反向拆分）證明它是 Absent => Leave 在 plan 層的唯一守門人 —— 刪掉它反而弄丟一個真的覆蓋。它綠是因為 fixture（shape.rs:515-529）只建 root/.aghub/foo、一條 symlink 都沒有，所以根本沒有 Conformant 候選可測，不是斷言軟。",
+					"action": "不要刪。在同一個 fixture 加一條健康 symlink (.claude/skills/foo -> .aghub/foo)，再斷言 is_noop()。這樣 M8 會變紅、M14 仍然變紅，名字也對得上。順便改名或加一條姊妹測試講清楚 Absent 那半。"
+				},
+				{
+					"test": "a_fully_linked_skill_plans_nothing (M12: candidate_referrers 回空集合)",
+					"really_false_green": false,
+					"reason": "同一條測試，同樣不是假綠。M12 打的是 is_noop() 在空 vector 上恆真這個斷言形狀的盲點，不是斷言軟弱。我用 P1 probe 獨立證實這個形狀（Both scope 下 actions=0 -> is_noop=true）。同批 M12 有 4 條測試變紅，推導壞掉本身是被抓得到的。",
+					"action": "一行守衛：assert!(plan.is_noop()) 之前補 assert!(!plan.actions.is_empty())，與 npx_forked_copy 已有的 !slot_actions.is_empty() 同一招。"
+				},
+				{
+					"test": "none — Legacy => Relink arm (M9)",
+					"really_false_green": false,
+					"reason": "沒有測試可以是假綠 —— 這是純覆蓋缺口。舉證者的 mutation 打得很準：我用 python 斷言 pattern 確實命中（git diff --numstat 顯示 1 加 1 刪）後重跑，15 passed 0 failed。an_unmigrated_skill_plans_a_migration 的 !is_noop() 光靠 needs_migration 就成立，完全不碰 action。",
+					"action": "補測試，不是重寫。在 an_unmigrated_skill_plans_a_migration 尾端加一行斷言 legacy 候選的 action（若採納 Legacy 動作拆分，釘的是新動作而非 Relink）。零額外 fixture 成本。"
+				},
+				{
+					"test": "none — Chain / ForeignTarget / Dangling => Relink arm (M15)",
+					"really_false_green": false,
+					"reason": "純覆蓋缺口。驗證過的 patch（1 加 1 刪，diff 已目視確認改的就是 702-706 那一行）後 15 passed 0 failed。classify_shape 層有三條測試釘住形狀分類，但沒有任何一條問「分類正確之後計畫要做什麼」。這是 repair 存在的全部理由。",
+					"action": "補一條 plan 層測試：project fixture 放一條懸空 Referrer，斷言 action == ReferrerAction::Relink 且 !plan.is_noop()。"
+				},
+				{
+					"test": "none — MasterIsLink => Refuse arm (M16)",
+					"really_false_green": false,
+					"reason": "純覆蓋缺口。驗證過的 patch（1 加 3 刪）後 15 passed 0 failed。RefuseReason::MasterIsLink 這個變體在整個 tests 模組零斷言；a_linked_master_is_reported_once (shape.rs:419) 只驗 classify_shape，看不到 plan。降級成 Relink 等於對一個 Master 是 symlink 的 store 寫入 Referrer。",
+					"action": "補一條姊妹測試放在 an_aliased_master_refuses_the_whole_plan 旁邊，fixture 抄 a_linked_master_is_reported_once，斷言 refusals() 非空且全部是 MasterIsLink。"
+				},
+				{
+					"test": "整個 aghub-core 測試套（lib 282 + 全部 integration target），mutation = 拿掉 removal.rs 兩行 .aghub roots.push",
+					"really_false_green": false,
+					"reason": "沒有測試「變成不測任何東西」—— 是新增的行為從一開始就零覆蓋。我自己重跑（python 斷言 MASTER_STORE_DIR_NAME 出現次數歸零，git diff --numstat 0 加 2 刪）：cargo test -p aghub-core --lib = 282 passed 0 failed，完整 cargo test -p aghub-core 沒有任何 FAILED。舉證者提到的那次 281/1 flake 我沒有重現，也不採信為證據。",
+					"action": "擴充 both_store_spellings_are_listed（removal.rs:2125）加 ends_with(.aghub) 兩條斷言（root 與 home）。既有的 .agents 斷言留著 —— 它們本來就有效。"
+				},
+				{
+					"test": "cargo test -p aghub-core --lib skills::removal 與 manager::skill::tests::remove_skill，同一個 .aghub roots mutation",
+					"really_false_green": false,
+					"reason": "與上一條同一個缺口的較窄跑法，結論相同：existing 的 removal 測試群測的是 .agents 那半，它們對真的 .agents 回歸仍會變紅。universal_master_tests 四支測試沒有一支提到 .aghub，both_store_spellings_are_listed 更名時只改了函式名沒擴充斷言。",
+					"action": "除了上一條的斷言，再補一支 is_universal_master(root/.aghub/foo) == true。記得先 create_dir_all —— assert_strictly_contained 會先 canonicalize target，路徑不存在會直接回 None，寫成不建目錄就是又一個假綠。"
+				}
+			],
+			"safe_to_continue": false
+		},
+		"proofs": [
+			{
+				"test": "healthy_symlink_is_conformant",
+				"mutation": "M1 shape.rs:232 — 把 if Linker::is_link(&hop) 改成 if hop.exists(),模擬「拿掉 hop 的 is_link 判斷」的鏈式誤判回歸",
+				"went_red": true
+			},
+			{
+				"test": "missing_referrer_is_absent",
+				"mutation": "M2 shape.rs:206 — Absent 早退條件加上 && !master_exists,模擬「只有 Master 也不存在時才算 Absent」的收窄錯誤;缺席的 Referrer 變成 ForkedCopy",
+				"went_red": true
+			},
+			{
+				"test": "real_directory_beside_a_live_master_is_a_forked_copy",
+				"mutation": "M3 shape.rs:242 — if master_exists 改成 if false,ForkedCopy 分支永不進入,一律回 Legacy",
+				"went_red": true
+			},
+			{
+				"test": "real_directory_with_no_master_is_legacy_not_a_violation",
+				"mutation": "M4 shape.rs:242 — if master_exists 改成 if true,Legacy 分支永不進入,未遷移主機一律被判違規",
+				"went_red": true
+			},
+			{
+				"test": "link_to_someone_elses_skill_is_a_foreign_target",
+				"mutation": "M5 shape.rs:225-227 — 刪掉 if target != master_real 的 ForeignTarget 早退,改成 let _ = (&target, &master_real);",
+				"went_red": true
+			},
+			{
+				"test": "a_linked_master_is_reported_once_not_as_five_broken_referrers",
+				"mutation": "M6 shape.rs:201-203 — 整段刪掉 MasterIsLink 早退。失敗訊息:left: Violation(Chain { via: /tmp/.tmppitZVs/.aghub/foo }), right: Violation(MasterIsLink) —— 正好證實註解說的「一個病因報成五個症狀」",
+				"went_red": true
+			},
+			{
+				"test": "an_unmigrated_skill_plans_a_migration_and_names_its_source",
+				"mutation": "M7 shape.rs:677-679 — 刪掉 if matches!(shape, Legacy) && migrate_from.is_none() { migrate_from = ... },needs_migration 永遠 false",
+				"went_red": true
+			},
+			{
+				"test": "a_fully_linked_skill_plans_nothing (name implies Conformant coverage)",
+				"mutation": "M8 shape.rs:684-686 — 把合併 arm 拆開,Conformant => Relink、Absent => Leave。健康的 Referrer 被計畫重寫",
+				"went_red": false
+			},
+			{
+				"test": "none (Legacy => Relink arm)",
+				"mutation": "M9 shape.rs:690 — SkillShape::Legacy => ReferrerAction::Relink 改成 Leave",
+				"went_red": false
+			},
+			{
+				"test": "an_aliased_master_refuses_the_whole_plan",
+				"mutation": "M10 shape.rs:691-693 — AliasedMaster => Refuse{AliasedMaster} 改成 Leave,refusals() 變空",
+				"went_red": true
+			},
+			{
+				"test": "npx_forked_copy_plans_a_comparison_never_a_delete",
+				"mutation": "M11 shape.rs:699-701 — ForkedCopy => CompareThenQuarantine 改成 Relink,等於用連結蓋掉可能唯一存在的 bytes",
+				"went_red": true
+			},
+			{
+				"test": "a_fully_linked_skill_plans_nothing (empty-derivation blind spot)",
+				"mutation": "M12 shape.rs:62-63 — candidate_referrers 開頭 return Vec::new()。同批有 4 條紅(global_candidates / an_aliased_master_refuses / an_unmigrated_skill_plans / npx_forked_copy),這條綠",
+				"went_red": false
+			},
+			{
+				"test": "npx_forked_copy_plans_a_comparison_never_a_delete (empty-filter guard)",
+				"mutation": "M12 同上 —— 用來驗它的 assert!(!slot_actions.is_empty()) 守衛是否真的擋得住空 filter 結果",
+				"went_red": true
+			},
+			{
+				"test": "only_conformant_absent_and_legacy_are_actionable",
+				"mutation": "M13 shape.rs:152 — is_actionable 的 matches! 加上 | Self::AliasedMaster",
+				"went_red": true
+			},
+			{
+				"test": "a_fully_linked_skill_plans_nothing",
+				"mutation": "M14 shape.rs:684-686 — 拆開後 Conformant => Leave、Absent => Relink。唯一紅的就是這條,證明它確實唯一釘住 Absent => Leave",
+				"went_red": true
+			},
+			{
+				"test": "none (Chain / ForeignTarget / Dangling => Relink arm)",
+				"mutation": "M15 shape.rs:706 — ) => ReferrerAction::Relink, 改成 ) => ReferrerAction::Leave,。repair 對每一個壞掉的連結都計畫「什麼都不做」",
+				"went_red": false
+			},
+			{
+				"test": "none (MasterIsLink => Refuse arm)",
+				"mutation": "M16 shape.rs:694-698 — Refuse{MasterIsLink} 改成 ReferrerAction::Relink",
+				"went_red": false
+			},
+			{
+				"test": "an_aliased_master_refuses_the_whole_plan (doc-claimed pin at shape.rs:85-86)",
+				"mutation": "M17 shape.rs:92-98 — 把 skill_write_dir 改成走 agent_link_need,只取 LinkNeed::NeedsLink 的路徑,其餘回 None。這正是 skill_write_dir 註解點名的那個回歸",
+				"went_red": true
+			},
+			{
+				"test": "crates/core/tests/shape_probe.rs probe_03_regular_file_is_legacy_and_gets_adopted",
+				"mutation": "Added the missing guard to plan_repair in crates/core/src/skills/shape.rs:679 — if matches!(shape, SkillShape::Legacy) && candidate.path.is_dir() && migrate_from.is_none() — then reverted with git checkout -- crates/core/src/skills/shape.rs and re-ran the 15 in-file unit tests green.",
+				"went_red": true
+			},
+			{
+				"test": "skills::shape::tests::two_hop_chain_is_a_violation_even_though_the_endpoint_matches",
+				"mutation": "在 one_hop_target 開頭插一行,讀到環境變數就提前回 None(模擬 read_link 對不支援的 reparse tag 失敗)",
+				"went_red": true
+			},
+			{
+				"test": "整個 aghub-core 測試套(lib 282 tests + 全部 integration targets)",
+				"mutation": "sed 刪掉 removal.rs 的 roots.push(home.join(MASTER_STORE_DIR_NAME)) 與 roots.push(root.join(MASTER_STORE_DIR_NAME)) 兩行,亦即把 .aghub 從 skill_store_roots 拿掉",
+				"went_red": false
+			},
+			{
+				"test": "cargo test -p aghub-core --lib skills::removal 與 cargo test -p aghub-core --lib manager::skill::tests::remove_skill",
+				"mutation": "刪掉 crates/core/src/skills/removal.rs:34 與 :38 兩行 roots.push(crate::skills::linker::MASTER_STORE_DIR_NAME),也就是把這批改動新增的 .aghub 根整個拿掉",
+				"went_red": false
+			},
+			{
+				"test": "cargo test -p aghub-core --lib skills::shape,具體是 dangling_referrer_with_missing_master_is_never_conformant",
+				"mutation": "把 classify_shape 裡兩個 let-else(resolved(referrer) 與 resolved(master) 各自必須 Ok)換成原始的 Option-fold 寫法 if resolved(referrer) != resolved(master),重現 trap 2 的 None == None bug",
+				"went_red": true
+			},
+			{
+				"test": "crates/core/src/skills/shape.rs tests::aliased_master_through_a_symlinked_parent_is_not_a_forked_copy",
+				"mutation": "把 shape.rs:212-214 的 return SkillShape::AliasedMaster 改成 return SkillShape::Violation(ViolationKind::ForkedCopy)（trap 3 的守衛失效）",
+				"went_red": true
+			},
+			{
+				"test": "crates/core/src/skills/shape.rs tests::two_hop_chain_is_a_violation_even_though_the_endpoint_matches",
+				"mutation": "刪掉 shape.rs:231-237 整個 one_hop_target / Chain 區塊，只留端點相等就回 Conformant（trap 1 的守衛失效）",
+				"went_red": true
+			}
+		],
+		"counts": {
+			"raw": 27,
+			"surviving": 27,
+			"proofs": 25
+		}
+	},
+	"workflowProgress": [
+		{
+			"type": "workflow_phase",
+			"index": 1,
+			"title": "Verify"
+		},
+		{
+			"type": "workflow_phase",
+			"index": 2,
+			"title": "Adjudicate"
+		},
+		{
+			"type": "workflow_agent",
+			"index": 1,
+			"label": "audit:false-green",
+			"phaseIndex": 1,
+			"phaseTitle": "Verify",
+			"agentId": "a2bf8cbe14ef93494",
+			"isolation": "worktree",
+			"model": "claude-opus-5[1m]",
+			"state": "done",
+			"startedAt": 1788574634994,
+			"queuedAt": 1788574634237,
+			"attempt": 1,
+			"lastToolName": "StructuredOutput",
+			"lastToolSummary": "17 mutations run against crates/core/src/skills/shape.rs on…",
+			"promptPreview": "repo: /home/audichuang/research/aghub,分支 `feat/skill-store-decoupling`(工作區乾淨)。\n用 `codegraph explore \"<symbols>\"` 比 grep 快。\n\n## 受檢對象\n\n這一批 commit(`git log --oneline main..HEAD`)實作了一個技能儲存佈局變更的地基。\n**主要新檔案:`crates/core/src/skills/shape.rs`**,加上\n`crates/core/src/skills/linker/mod.rs` 的 master_store_dir / shared_referrer_dir /\nMASTER_STORE_DIR_NAME,以及 `crates/core/src/skills/removal.rs` 的\nuniversal_maste…",
+			"lastProgressAt": 1788575234275,
+			"tokens": 130343,
+			"toolCalls": 41,
+			"durationMs": 599281,
+			"resultPreview": "{\"audit\":\"17 mutations run against crates/core/src/skills/shape.rs on commit c0c90e2c. Method: apply one targeted source change, run the WHOLE module (cargo test -p aghub-core --lib skills::shape::tests, 15 tests), record which tests went red, then git checkout -- the file and confirm git status clean before the next one. Final state: tree clean, cargo test -p aghub-core --lib = 282 passed, 0 fail…"
+		},
+		{
+			"type": "workflow_agent",
+			"index": 2,
+			"label": "audit:correctness",
+			"phaseIndex": 1,
+			"phaseTitle": "Verify",
+			"agentId": "a427d871ae6b5269c",
+			"isolation": "worktree",
+			"model": "claude-opus-5[1m]",
+			"state": "done",
+			"startedAt": 1788574635084,
+			"queuedAt": 1788574634237,
+			"attempt": 1,
+			"lastToolName": "StructuredOutput",
+			"lastToolSummary": "Read shape.rs (718 lines), linker/mod.rs master_store_dir/s…",
+			"promptPreview": "repo: /home/audichuang/research/aghub,分支 `feat/skill-store-decoupling`(工作區乾淨)。\n用 `codegraph explore \"<symbols>\"` 比 grep 快。\n\n## 受檢對象\n\n這一批 commit(`git log --oneline main..HEAD`)實作了一個技能儲存佈局變更的地基。\n**主要新檔案:`crates/core/src/skills/shape.rs`**,加上\n`crates/core/src/skills/linker/mod.rs` 的 master_store_dir / shared_referrer_dir /\nMASTER_STORE_DIR_NAME,以及 `crates/core/src/skills/removal.rs` 的\nuniversal_maste…",
+			"lastProgressAt": 1788575278200,
+			"tokens": 130254,
+			"toolCalls": 37,
+			"durationMs": 643116,
+			"resultPreview": "{\"audit\":\"Read shape.rs (718 lines), linker/mod.rs master_store_dir/shared_referrer_dir, skill/src/sanitize.rs, descriptor.rs skill_write_path, agents/mod.rs ALL_DESCRIPTORS, and spec.md Contract + Migration sections. This disposable worktree was on main's tip, so I moved its HEAD to c0c90e2c with git reset --hard (same branch name worktree-wf_54b0a4b8-e5a-2, no checkout, no push) to be able to bu…"
+		},
+		{
+			"type": "workflow_agent",
+			"index": 3,
+			"label": "audit:cross-platform",
+			"phaseIndex": 1,
+			"phaseTitle": "Verify",
+			"agentId": "a037955bd16a4b553",
+			"model": "claude-opus-5[1m]",
+			"state": "done",
+			"startedAt": 1788574634271,
+			"queuedAt": 1788574634237,
+			"attempt": 1,
+			"lastToolName": "StructuredOutput",
+			"lastToolSummary": "受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs…",
+			"promptPreview": "repo: /home/audichuang/research/aghub,分支 `feat/skill-store-decoupling`(工作區乾淨)。\n用 `codegraph explore \"<symbols>\"` 比 grep 快。\n\n## 受檢對象\n\n這一批 commit(`git log --oneline main..HEAD`)實作了一個技能儲存佈局變更的地基。\n**主要新檔案:`crates/core/src/skills/shape.rs`**,加上\n`crates/core/src/skills/linker/mod.rs` 的 master_store_dir / shared_referrer_dir /\nMASTER_STORE_DIR_NAME,以及 `crates/core/src/skills/removal.rs` 的\nuniversal_maste…",
+			"lastProgressAt": 1788575514848,
+			"tokens": 154351,
+			"toolCalls": 46,
+			"durationMs": 880562,
+			"resultPreview": "{\"audit\":\"受檢範圍:crates/core/src/skills/shape.rs(新)、linker/mod.rs 的 master_store_dir / shared_referrer_dir / MASTER_STORE_DIR_NAME、removal.rs 的 skill_store_roots 更名 + 納入 .aghub。全部在 Linux 上讀碼 + 兩次可逆 mutation 驗證;Windows/macOS 半邊沒有實際編譯或執行(本機無 MSVC toolchain,AGENTS.md 已記),Windows 的斷言全部來自 rustc 1.95 std 原始碼與 Win32 路徑語意,已逐項標示。\\n\\n結論:計畫階段在 Windows/macOS 上沒有 blocker,但有一個 required 的 Windows 誤分類(Linker::is_li…"
+		},
+		{
+			"type": "workflow_agent",
+			"index": 4,
+			"label": "audit:integration",
+			"phaseIndex": 1,
+			"phaseTitle": "Verify",
+			"agentId": "a0aa4ac779c998204",
+			"model": "claude-opus-5[1m]",
+			"state": "done",
+			"startedAt": 1788574634277,
+			"queuedAt": 1788574634237,
+			"attempt": 1,
+			"lastToolName": "StructuredOutput",
+			"lastToolSummary": "讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220…",
+			"promptPreview": "repo: /home/audichuang/research/aghub,分支 `feat/skill-store-decoupling`(工作區乾淨)。\n用 `codegraph explore \"<symbols>\"` 比 grep 快。\n\n## 受檢對象\n\n這一批 commit(`git log --oneline main..HEAD`)實作了一個技能儲存佈局變更的地基。\n**主要新檔案:`crates/core/src/skills/shape.rs`**,加上\n`crates/core/src/skills/linker/mod.rs` 的 master_store_dir / shared_referrer_dir /\nMASTER_STORE_DIR_NAME,以及 `crates/core/src/skills/removal.rs` 的\nuniversal_maste…",
+			"lastProgressAt": 1788575265929,
+			"tokens": 127607,
+			"toolCalls": 39,
+			"durationMs": 630365,
+			"resultPreview": "{\"audit\":\"讀了 main..HEAD 全部 diff、shape.rs 全檔、removal.rs 前 220 行與 640-760、classify.rs、install_fetched.rs 的兩個 materialize 入口、linker/mod.rs 的 install_universal/link_agents_to_canonical、descriptor.rs 的 skill_write_path，以及 spec.md 的 Contract 與 Migration 兩節。跑了一支暫時的 integration test（crates/core/tests/zz_scratch.rs，跑完已刪除）實測 plan_repair 在三種 scope 下的輸出與 allowed_skill_roots 的存在性過濾。做了兩次 revert 舉證（一次砍 .aghub ro…"
+		},
+		{
+			"type": "workflow_agent",
+			"index": 5,
+			"label": "audit:spec-conformance",
+			"phaseIndex": 1,
+			"phaseTitle": "Verify",
+			"agentId": "a95227c18e8027538",
+			"model": "claude-opus-5[1m]",
+			"state": "done",
+			"startedAt": 1788574634282,
+			"queuedAt": 1788574634237,
+			"attempt": 1,
+			"lastToolName": "StructuredOutput",
+			"lastToolSummary": "逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/s…",
+			"promptPreview": "repo: /home/audichuang/research/aghub,分支 `feat/skill-store-decoupling`(工作區乾淨)。\n用 `codegraph explore \"<symbols>\"` 比 grep 快。\n\n## 受檢對象\n\n這一批 commit(`git log --oneline main..HEAD`)實作了一個技能儲存佈局變更的地基。\n**主要新檔案:`crates/core/src/skills/shape.rs`**,加上\n`crates/core/src/skills/linker/mod.rs` 的 master_store_dir / shared_referrer_dir /\nMASTER_STORE_DIR_NAME,以及 `crates/core/src/skills/removal.rs` 的\nuniversal_maste…",
+			"lastProgressAt": 1788575224557,
+			"tokens": 121464,
+			"toolCalls": 29,
+			"durationMs": 588993,
+			"resultPreview": "{\"audit\":\"逐條比對 spec 修訂版 3 Contract 與 crates/core/src/skills/shape.rs（718 行，本分支唯一新檔）。方法：讀 spec 88-330、461-530 全文；讀 shape.rs 全檔；在 tests 模組插入 6 支暫時 probe 實跑（cargo test -p aghub-core --lib）取得真實 plan 輸出；再對 shape.rs 做 2 次 mutation 驗證既有測試會變紅；全部改動已 git checkout 還原，git status 乾淨。另用 python3 讀 attack-findings.json / attack2-findings.json 的 result.surviving（24 筆）與 result.survivingNew（30 筆）標題與 severity，逐筆比對避免重…"
+		},
+		{
+			"type": "workflow_agent",
+			"index": 6,
+			"label": "adjudicate",
+			"phaseIndex": 2,
+			"phaseTitle": "Adjudicate",
+			"agentId": "a541067e93a1648bd",
+			"model": "claude-opus-5[1m]",
+			"state": "done",
+			"startedAt": 1788575514875,
+			"queuedAt": 1788575514852,
+			"attempt": 1,
+			"lastToolName": "StructuredOutput",
+			"promptPreview": "repo: /home/audichuang/research/aghub,分支 `feat/skill-store-decoupling`(工作區乾淨)。\n用 `codegraph explore \"<symbols>\"` 比 grep 快。\n\n## 受檢對象\n\n這一批 commit(`git log --oneline main..HEAD`)實作了一個技能儲存佈局變更的地基。\n**主要新檔案:`crates/core/src/skills/shape.rs`**,加上\n`crates/core/src/skills/linker/mod.rs` 的 master_store_dir / shared_referrer_dir /\nMASTER_STORE_DIR_NAME,以及 `crates/core/src/skills/removal.rs` 的\nuniversal_maste…",
+			"lastProgressAt": 1788576060643,
+			"tokens": 146133,
+			"toolCalls": 24,
+			"durationMs": 545767,
+			"resultPreview": "{\"verdicts\":[{\"title\":\"plan_repair 的 Relink arm 完全沒有測試 (M15)\",\"refuted\":false,\"reason\":\"自己重跑並驗證 patch 真的套上 (git diff --numstat 1/1)：把 shape.rs:706 的 ) => ReferrerAction::Relink 改成 Leave，cargo test -p aghub-core --lib skills::shape::tests = 15 passed 0 failed。行號正確：702-706 就是 Chain|ForeignTarget|Dangling 的合併 arm。這是覆蓋缺口，不是假綠。\",\"severity_after_review\":\"required\",\"corrected_fix\":\"在 project fixture 裡放一條…"
+		}
+	],
+	"totalTokens": 810152,
+	"totalToolCalls": 216
+}
