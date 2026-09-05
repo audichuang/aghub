@@ -13,6 +13,11 @@
  * algorithm we could read. Codex and Grok inject the same two fields with a
  * different wrapper, so their real numbers are near this one but not equal —
  * hence every value here is presented as an estimate.
+ *
+ * One deliberate understatement: the budget is shared with slash commands,
+ * which aghub does not manage and therefore cannot count. A listing that fits
+ * here can still be demoted in the agent. The UI says so; do not "fix" it by
+ * inventing a command count.
  */
 
 /** Claude Code's `skillListingMaxDescChars` default. */

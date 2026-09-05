@@ -399,7 +399,7 @@ export default {
 	allAgentsFilter: "全部",
 	skillContextCost: "每回合約 {{tokens}} tokens({{chars}}/{{budget}} 字元)",
 	skillContextCostTooltip:
-		"agent 會把每個技能的名稱與描述各一行放進系統提示,每回合都算;完整的 SKILL.md 只有技能真的被呼叫時才載入。這裡的預算是 Claude Code 對 200k 模型的預設值(1M 模型為 40,000 字元),可用 SLASH_COMMAND_TOOL_CHAR_BUDGET 覆寫。token 數以每 4 個字元 1 個 token 估算,與 agent 自己編預算用的常數相同。",
+		"agent 會把每個技能的名稱與描述各一行放進系統提示,每回合都算;完整的 SKILL.md 只有技能真的被呼叫時才載入。這裡的預算是 Claude Code 對 200k 模型的預設值(1M 模型為 40,000 字元),可用 SLASH_COMMAND_TOOL_CHAR_BUDGET 覆寫。斜線指令與技能共用同一份預算,所以真正的壓力比這裡只算技能的數字更大。token 數以每 4 個字元 1 個 token 估算,與 agent 自己編預算用的常數相同。",
 	skillContextOverBudget: "超出預算:至少 {{count}} 個描述會被拿掉",
 	// --- 從 agent 檢視批次更新 ---
 	updateAllSkills: "全部更新({{count}})",

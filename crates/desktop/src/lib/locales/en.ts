@@ -416,7 +416,7 @@ export default {
 	skillContextCost:
 		"≈{{tokens}} tokens every turn ({{chars}}/{{budget}} chars)",
 	skillContextCostTooltip:
-		"Agents put one line per skill — its name and description — into the system prompt on every turn, and load the full SKILL.md only when the skill runs. The budget shown is Claude Code's default for a 200k-token model (40,000 chars at 1M); SLASH_COMMAND_TOOL_CHAR_BUDGET overrides it. Token counts are estimated at 4 characters per token, the same constant the agent budgets with.",
+		"Agents put one line per skill — its name and description — into the system prompt on every turn, and load the full SKILL.md only when the skill runs. The budget shown is Claude Code's default for a 200k-token model (40,000 chars at 1M); SLASH_COMMAND_TOOL_CHAR_BUDGET overrides it. Slash commands share this same budget, so the real pressure is higher than the skills alone. Token counts are estimated at 4 characters per token, the same constant the agent budgets with.",
 	skillContextOverBudget:
 		"over budget: at least {{count}} description(s) will be dropped",
 	// --- Bulk update from the agent view ---
