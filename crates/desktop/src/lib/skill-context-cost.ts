@@ -48,7 +48,7 @@ export const CHARS_PER_TOKEN_CJK = 1.03;
 
 /** CJK ideographs, kana and full-width forms. */
 const CJK_RE =
-	/[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/u;
+	/[\u3000-\u303F\u3040-\u30FF\u3400-\u4DBF\u4E00-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF]/u;
 
 /** Estimate tokens for a string, bucketing CJK separately from everything else. */
 export function estimateTokens(text: string): number {

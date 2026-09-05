@@ -43,6 +43,18 @@ export function SkillAgentFilterRow({
 	const { t } = useTranslation();
 	const { allAgents, availableAgents } = useAgentAvailability();
 
+	// `SkillList` hides the rows of agents that are not usable, so a chip for
+	// one would filter the list down to nothing.
+	const usableAgentIds = useMemo(
+		() =>
+			new Set(
+				availableAgents
+					.filter((agent) => agent.isUsable)
+					.map((agent) => agent.id),
+			),
+		[availableAgents],
+	);
+
 	const displayNames = useMemo(() => {
 		const map = new Map<string, string>();
 		for (const agent of [...allAgents, ...availableAgents]) {
@@ -54,7 +66,7 @@ export function SkillAgentFilterRow({
 	const rows = useMemo<AgentRow[]>(() => {
 		const counts = new Map<string, Set<string>>();
 		for (const skill of skills) {
-			if (!skill.agent) continue;
+			if (!skill.agent || !usableAgentIds.has(skill.agent)) continue;
 			const seen = counts.get(skill.agent) ?? new Set<string>();
 			seen.add(skill.name);
 			counts.set(skill.agent, seen);
@@ -70,7 +82,23 @@ export function SkillAgentFilterRow({
 					b.count - a.count ||
 					a.displayName.localeCompare(b.displayName),
 			);
-	}, [skills, displayNames]);
+	}, [skills, displayNames, usableAgentIds]);
+
+	const singleAgentCost = useMemo(() => {
+		const ids = new Set(
+			skills.map((s) => s.agent).filter((a): a is string => Boolean(a)),
+		);
+		if (ids.size !== 1) return null;
+		const only = [...ids][0];
+		return estimateSkillContextCost(
+			skills
+				.filter((skill) => skill.agent === only)
+				.map((skill) => ({
+					name: skill.name,
+					description: skill.description ?? "",
+				})),
+		);
+	}, [skills]);
 
 	const cost = useMemo(() => {
 		if (!selected) return null;
@@ -84,8 +112,11 @@ export function SkillAgentFilterRow({
 		);
 	}, [skills, selected]);
 
-	// A filter with one option filters nothing.
-	if (rows.length < 2) return null;
+	// A one-agent machine gets no chips — but it still gets the cost line,
+	// which is the point of the row.
+	const showChips = rows.length >= 2;
+	const effectiveCost = cost ?? singleAgentCost;
+	if (!showChips && effectiveCost === null) return null;
 
 	const chip = (id: string | null, label: string, count?: number) => {
 		const isActive = selected === id;
@@ -109,29 +140,33 @@ export function SkillAgentFilterRow({
 
 	return (
 		<div className="flex flex-col gap-1 px-3 pb-2">
-			<div className="flex flex-wrap items-center gap-1.5">
-				{chip(null, t("allAgentsFilter"))}
-				{rows.map((row) => chip(row.id, row.displayName, row.count))}
-			</div>
-			{cost !== null && cost.skillCount > 0 && (
+			{showChips && (
+				<div className="flex flex-wrap items-center gap-1.5">
+					{chip(null, t("allAgentsFilter"))}
+					{rows.map((row) =>
+						chip(row.id, row.displayName, row.count),
+					)}
+				</div>
+			)}
+			{effectiveCost !== null && effectiveCost.skillCount > 0 && (
 				<Tooltip delay={0}>
 					<Tooltip.Trigger>
 						<span
 							className={cn(
 								"cursor-default text-xs tabular-nums",
-								cost.overBudgetChars > 0
+								effectiveCost.overBudgetChars > 0
 									? "text-warning"
 									: "text-muted",
 							)}
 						>
 							{t("skillContextCost", {
-								tokens: cost.totalTokens.toLocaleString(),
-								chars: cost.totalChars.toLocaleString(),
-								budget: cost.budgetChars.toLocaleString(),
+								tokens: effectiveCost.totalTokens.toLocaleString(),
+								chars: effectiveCost.totalChars.toLocaleString(),
+								budget: effectiveCost.budgetChars.toLocaleString(),
 							})}
-							{cost.overBudgetChars > 0 &&
+							{effectiveCost.overBudgetChars > 0 &&
 								` · ${t("skillContextOverBudget", {
-									count: cost.minDemotedSkills,
+									count: effectiveCost.minDemotedSkills,
 								})}`}
 						</span>
 					</Tooltip.Trigger>

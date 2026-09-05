@@ -19,6 +19,7 @@ import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
 import { useSkillTags } from "../hooks/use-skill-tags";
+import { filterGroupsByAgent } from "../lib/skill-agent-filter";
 import { matchesTagFilter } from "../lib/skill-tags";
 import { filterItemsByAgentIds } from "../lib/utils";
 import {
@@ -60,6 +61,15 @@ interface SkillListProps {
 	onOpenSourceView?: (source: string) => void;
 	/** Local tag filter (AND). Empty/absent shows everything. */
 	tagFilter?: ReadonlySet<string>;
+	/**
+	 * Show only skills this agent reads. `null`/absent shows everything.
+	 *
+	 * Filters WHICH GROUPS are listed, never what a group CONTAINS: the
+	 * members are what tells the detail panel and the manage-agents dialog
+	 * which agents already hold the skill, and a filtered-down `items` would
+	 * make a skill installed for 21 agents look like it belongs to one.
+	 */
+	agentFilter?: string | null;
 }
 
 export function SkillList({
@@ -77,6 +87,7 @@ export function SkillList({
 	onManageGroupAgents,
 	onOpenSourceView,
 	tagFilter,
+	agentFilter = null,
 }: SkillListProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -154,6 +165,8 @@ export function SkillList({
 		if (!searchQuery) items = groupedByName;
 		else items = fuse.search(searchQuery).map((result) => result.item);
 
+		items = filterGroupsByAgent(items, agentFilter);
+
 		if (tagFilter && tagFilter.size > 0) {
 			items = items.filter((group) =>
 				matchesTagFilter(tagsFor(group.name), tagFilter),
@@ -167,7 +180,15 @@ export function SkillList({
 			if (!aStarred && bStarred) return 1;
 			return 0;
 		});
-	}, [fuse, groupedByName, searchQuery, isSkillStarred, tagFilter, tagsFor]);
+	}, [
+		fuse,
+		groupedByName,
+		searchQuery,
+		isSkillStarred,
+		tagFilter,
+		tagsFor,
+		agentFilter,
+	]);
 
 	const { sourceGroups, singleItemGroups, unknownGroups } = useMemo(() => {
 		const findSkillSource = (

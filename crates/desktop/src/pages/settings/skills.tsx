@@ -58,6 +58,7 @@ import { useApplyAllSkillUpdates } from "../../hooks/use-apply-all-skill-updates
 import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
+import { filterGroupsByAgent } from "../../lib/skill-agent-filter";
 import {
 	batchedSkillCount,
 	groupUpdatesBySource,
@@ -543,20 +544,9 @@ export default function SkillsPage() {
 		"create" | "import" | "import-github" | null
 	>(null);
 
-	// One row per (skill, agent), so filtering on `agent` keeps exactly the
-	// rows that agent reads — including a skill it reaches through a SHARED
-	// referrer directory, which the loader emits once per reading agent.
-	const agentFilteredSkills = useMemo(
-		() =>
-			agentFilter === null
-				? skills
-				: skills.filter((skill) => skill.agent === agentFilter),
-		[skills, agentFilter],
-	);
-
 	const groupedSkills = useMemo(() => {
 		const map = new Map<string, SkillResponse[]>();
-		for (const skill of agentFilteredSkills) {
+		for (const skill of skills) {
 			const existing = map.get(skill.name) ?? [];
 			map.set(skill.name, [...existing, skill]);
 		}
@@ -565,7 +555,15 @@ export default function SkillsPage() {
 			items,
 			description: items.find((s) => s.description)?.description ?? "",
 		}));
-	}, [agentFilteredSkills]);
+	}, [skills]);
+
+	// Which groups the agent filter leaves visible. Groups keep ALL their
+	// members either way — `items` is what tells the detail panel and the
+	// manage-agents dialog which agents already hold the skill.
+	const visibleGroups = useMemo(
+		() => filterGroupsByAgent(groupedSkills, agentFilter),
+		[groupedSkills, agentFilter],
+	);
 
 	const activeGroup = useMemo(() => {
 		if (selectedSkillName) {
@@ -573,8 +571,10 @@ export default function SkillsPage() {
 				groupedSkills.find((g) => g.name === selectedSkillName) ?? null
 			);
 		}
-		return groupedSkills[0] ?? null;
-	}, [selectedSkillName, groupedSkills]);
+		// Fall back within the VISIBLE set, or filtering to one agent leaves
+		// the detail panel parked on a skill that agent does not have.
+		return visibleGroups[0] ?? null;
+	}, [selectedSkillName, groupedSkills, visibleGroups]);
 
 	const selectedGroups = useMemo(
 		() => groupedSkills.filter((g) => selectedKeys.has(g.name)),
@@ -929,7 +929,8 @@ export default function SkillsPage() {
 							/>
 
 							<SkillList
-								skills={agentFilteredSkills}
+								skills={skills}
+								agentFilter={agentFilter}
 								selectedKeys={effectiveSelectedKeys}
 								searchQuery={searchQuery}
 								tagFilter={tagFilter}

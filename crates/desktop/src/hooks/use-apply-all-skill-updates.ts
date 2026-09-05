@@ -131,10 +131,14 @@ export function useApplyAllSkillUpdates() {
 				(sum, batch) => sum + batch.names.length,
 				0,
 			);
+			// Rows an EARLIER batch already returned are real outcomes; a later
+			// batch's 4xx must not erase them, or a run that updated five and
+			// failed three reports only the three.
+			const answered = results.filter((result) => !result.success);
 			return {
 				results,
-				failures: [],
-				updated: 0,
+				failures: answered,
+				updated: results.length - answered.length,
 				unconfirmed: !failure.definite,
 				// Only a DEFINITE error licenses a count. Reporting 0 here
 				// while `unconfirmed` is set would read as "nothing failed".
