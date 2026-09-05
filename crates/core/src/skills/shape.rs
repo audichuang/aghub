@@ -28,9 +28,9 @@ use std::path::{Path, PathBuf};
 
 use aghub_agents::ResourceScope;
 
-use crate::skills::linker::{
-	agent_link_need, master_store_dir, LinkNeed, Linker,
-};
+use std::str::FromStr;
+
+use crate::skills::linker::{master_store_dir, Linker};
 
 /// One agent's candidate Referrer for a skill at a scope.
 pub struct CandidateReferrer {
@@ -52,37 +52,50 @@ pub struct CandidateReferrer {
 /// cursor / codex / opencode lost their private dirs — the exact agents the
 /// per-agent-Referrer decision exists to serve.
 ///
-/// Asking `agent_link_need` against the **`.aghub` store** answers both at once:
-/// no agent reads that directory, so every agent resolves to its own write dir —
-/// a private one where it has one, the shared `.agents/skills` slot where it does
-/// not.
+/// Taking each agent's own WRITE dir answers both at once: a private one where
+/// the agent has one, the shared `.agents/skills` slot where it does not.
 pub fn candidate_referrers(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	name: &str,
 ) -> Vec<CandidateReferrer> {
-	let Some(store) = master_store_dir(project_root) else {
-		return Vec::new();
-	};
 	let safe = skill::sanitize_name(name);
 	crate::registry::ALL_AGENTS
 		.iter()
 		.filter_map(|descriptor| {
-			match agent_link_need(descriptor, scope, project_root, &store) {
-				LinkNeed::NeedsLink { agent_skills_dir } => {
-					Some(CandidateReferrer {
-						agent_id: descriptor.id,
-						path: agent_skills_dir.join(&safe),
-					})
+			skill_write_dir(descriptor, scope, project_root).map(|dir| {
+				CandidateReferrer {
+					agent_id: descriptor.id,
+					path: dir.join(&safe),
 				}
-				// The agent cannot hold a skill at this scope at all.
-				LinkNeed::Unsupported => None,
-				// Unreachable against a store nothing reads; if it ever fires,
-				// the agent has no path to offer and must not be invented one.
-				LinkNeed::NativeReader => None,
-			}
+			})
 		})
 		.collect()
+}
+
+/// One agent's skills WRITE dir for a scope, or `None` when it cannot hold a
+/// skill there at all.
+///
+/// Deliberately NOT routed through `agent_link_need`. That returns a 3-state
+/// whose `NativeReader` arm carries no path, and it reaches that arm whenever
+/// the agent's dir resolves to the store — which happens for real: with
+/// `.agents/skills` symlinked into `.aghub` (stow, or a user hand-fixing their
+/// layout) every shared-slot agent classifies as a native reader and drops out
+/// of the candidate set entirely, so a repair silently does nothing about the
+/// eight agents that most need it. Pinned by
+/// `an_aliased_master_refuses_the_whole_plan`.
+fn skill_write_dir(
+	descriptor: &aghub_agents::AgentDescriptor,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Option<PathBuf> {
+	match crate::AgentType::from_str(descriptor.id) {
+		Ok(agent_type) => crate::create_adapter(agent_type)
+			.target_skills_dir(project_root, scope),
+		// Defensive: every registry id resolves today. Falling back to the
+		// descriptor bypasses the test path override, same as `classify_paths`.
+		Err(_) => descriptor.skill_write_path(project_root, scope),
+	}
 }
 
 /// The Master path for `name` at a scope.
@@ -471,6 +484,102 @@ mod tests {
 		);
 	}
 
+	/// Project scope with a tempdir root — no real HOME involved.
+	fn project_fixture() -> (tempfile::TempDir, PathBuf) {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = fs::canonicalize(tmp.path()).unwrap();
+		(tmp, root)
+	}
+
+	#[test]
+	fn an_unmigrated_skill_plans_a_migration_and_names_its_source() {
+		let (_tmp, root) = project_fixture();
+		let legacy = root.join(".agents").join("skills").join("foo");
+		fs::create_dir_all(&legacy).unwrap();
+		fs::write(legacy.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+
+		let plan = plan_repair(ResourceScope::ProjectOnly, Some(&root), "foo")
+			.unwrap();
+		assert!(plan.needs_migration, "a real dir with no Master is legacy");
+		assert_eq!(plan.migrate_from.as_deref(), Some(legacy.as_path()));
+		assert_eq!(plan.master, root.join(".aghub").join("foo"));
+		assert!(!plan.is_noop());
+		assert!(
+			plan.refusals().is_empty(),
+			"legacy must never be a refusal — it is the state repair exists \
+			 to fix"
+		);
+	}
+
+	#[test]
+	fn a_fully_linked_skill_plans_nothing() {
+		let (_tmp, root) = project_fixture();
+		let master = root.join(".aghub").join("foo");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+
+		let plan = plan_repair(ResourceScope::ProjectOnly, Some(&root), "foo")
+			.unwrap();
+		assert!(
+			plan.is_noop(),
+			"every Referrer is Absent (granted to nobody) and the Master \
+			 exists — that is the withheld state, not a problem: {:?}",
+			plan.actions
+		);
+	}
+
+	/// A refusal must surface through `refusals()` so execution can abort the
+	/// WHOLE plan. A partially applied repair is how a skill ends up readable
+	/// from nowhere.
+	#[test]
+	fn an_aliased_master_refuses_the_whole_plan() {
+		let (_tmp, root) = project_fixture();
+		let store = root.join(".aghub");
+		let master = store.join("foo");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+		fs::create_dir_all(root.join(".agents")).unwrap();
+		unix_fs::symlink(&store, root.join(".agents").join("skills")).unwrap();
+
+		let plan = plan_repair(ResourceScope::ProjectOnly, Some(&root), "foo")
+			.unwrap();
+		let refusals = plan.refusals();
+		assert!(
+			!refusals.is_empty(),
+			"the shared slot aliases the store; repair must not proceed"
+		);
+		assert!(refusals
+			.iter()
+			.all(|(_, r)| **r == RefuseReason::AliasedMaster));
+	}
+
+	#[test]
+	fn npx_forked_copy_plans_a_comparison_never_a_delete() {
+		let (_tmp, root) = project_fixture();
+		let master = root.join(".aghub").join("foo");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(master.join("SKILL.md"), "master").unwrap();
+		let slot = root.join(".agents").join("skills").join("foo");
+		fs::create_dir_all(&slot).unwrap();
+		fs::write(slot.join("SKILL.md"), "npx wrote this").unwrap();
+
+		let plan = plan_repair(ResourceScope::ProjectOnly, Some(&root), "foo")
+			.unwrap();
+		let slot_actions: Vec<_> = plan
+			.actions
+			.iter()
+			.filter(|(_, p, _)| p == &slot)
+			.map(|(_, _, a)| a)
+			.collect();
+		assert!(!slot_actions.is_empty(), "the shared slot must be planned");
+		assert!(
+			slot_actions
+				.iter()
+				.all(|a| **a == ReferrerAction::CompareThenQuarantine),
+			"bytes that may exist nowhere else are never planned for deletion"
+		);
+	}
+
 	#[test]
 	fn only_conformant_absent_and_legacy_are_actionable() {
 		assert!(SkillShape::Conformant.is_actionable());
@@ -481,4 +590,129 @@ mod tests {
 			!SkillShape::Violation(ViolationKind::ForkedCopy).is_actionable()
 		);
 	}
+}
+
+/// What `repair` would do about one Referrer.
+///
+/// Planning is separated from execution so preview and commit consume the SAME
+/// plan: they cannot disagree, because there is only one computation. This
+/// mirrors `RemovalPlan` / `RemovalOutcome`, for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReferrerAction {
+	/// Already correct, or deliberately not granted.
+	Leave,
+	/// Point this Referrer at the Master. Covers a chain, a foreign target and
+	/// a dangling link alike — all three are "the link is wrong", and the fix is
+	/// the same write.
+	Relink,
+	/// A real directory holding possibly-unique bytes. Compare against the
+	/// Master before touching it; never delete.
+	CompareThenQuarantine,
+	/// Nothing may be written for this pair until a human intervenes.
+	Refuse { reason: RefuseReason },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RefuseReason {
+	/// The Referrer IS the Master, reached through a symlinked parent. Removing
+	/// the "duplicate" would delete the only copy.
+	AliasedMaster,
+	/// The store holds a link where it must hold a real directory.
+	MasterIsLink,
+}
+
+/// The plan for one skill at one scope: what to do about each candidate
+/// Referrer, plus whether the Master itself must be created first.
+#[derive(Debug, Clone)]
+pub struct RepairPlan {
+	pub name: String,
+	pub master: PathBuf,
+	/// True when the skill is un-migrated: a real directory is serving it and
+	/// no Master exists. Execution must materialize the Master BEFORE any
+	/// Referrer is written — a Referrer must never precede its Master.
+	pub needs_migration: bool,
+	/// The legacy directory to adopt as the Master, when `needs_migration`.
+	pub migrate_from: Option<PathBuf>,
+	pub actions: Vec<(&'static str, PathBuf, ReferrerAction)>,
+}
+
+impl RepairPlan {
+	/// Nothing to do — every Referrer is already `Leave` and no migration is
+	/// pending.
+	pub fn is_noop(&self) -> bool {
+		!self.needs_migration
+			&& self
+				.actions
+				.iter()
+				.all(|(_, _, a)| matches!(a, ReferrerAction::Leave))
+	}
+
+	/// Refusals block the WHOLE plan: a partially applied repair is how a skill
+	/// ends up readable from nowhere.
+	pub fn refusals(&self) -> Vec<(&'static str, &RefuseReason)> {
+		self.actions
+			.iter()
+			.filter_map(|(id, _, a)| match a {
+				ReferrerAction::Refuse { reason } => Some((*id, reason)),
+				_ => None,
+			})
+			.collect()
+	}
+}
+
+/// Compute the repair plan for one skill. Pure: reads the filesystem, writes
+/// nothing.
+pub fn plan_repair(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+) -> Option<RepairPlan> {
+	let master = master_path(project_root, name)?;
+	let candidates = candidate_referrers(scope, project_root, name);
+
+	let mut actions = Vec::with_capacity(candidates.len());
+	let mut migrate_from = None;
+	for candidate in &candidates {
+		let shape = classify_shape(&candidate.path, &master);
+		if matches!(shape, SkillShape::Legacy) && migrate_from.is_none() {
+			migrate_from = Some(candidate.path.clone());
+		}
+		actions.push((
+			candidate.agent_id,
+			candidate.path.clone(),
+			match shape {
+				SkillShape::Conformant | SkillShape::Absent => {
+					ReferrerAction::Leave
+				}
+				// The legacy directory becomes the Master; every OTHER agent that
+				// was reading it needs a link once it moves. The one being adopted
+				// is handled by the migration step itself.
+				SkillShape::Legacy => ReferrerAction::Relink,
+				SkillShape::AliasedMaster => ReferrerAction::Refuse {
+					reason: RefuseReason::AliasedMaster,
+				},
+				SkillShape::Violation(ViolationKind::MasterIsLink) => {
+					ReferrerAction::Refuse {
+						reason: RefuseReason::MasterIsLink,
+					}
+				}
+				SkillShape::Violation(ViolationKind::ForkedCopy) => {
+					ReferrerAction::CompareThenQuarantine
+				}
+				SkillShape::Violation(
+					ViolationKind::Chain { .. }
+					| ViolationKind::ForeignTarget
+					| ViolationKind::Dangling,
+				) => ReferrerAction::Relink,
+			},
+		));
+	}
+
+	Some(RepairPlan {
+		name: name.to_string(),
+		needs_migration: migrate_from.is_some(),
+		migrate_from,
+		master,
+		actions,
+	})
 }
