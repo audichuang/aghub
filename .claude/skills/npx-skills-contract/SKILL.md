@@ -6,15 +6,28 @@ description: The interop contract aghub must preserve to stay round-trip compati
 # npx `skills` interop contract
 
 aghub must round-trip with the upstream `skills` CLI (source of truth:
-`/home/audichuang/research/skills/src`). Keep these identical; additions are only
-safe when they are ignored by the other tool. Layout/removal already match — see
-[aghub-skills](../aghub-skills/SKILL.md) for the aghub-side map.
+`/home/audichuang/research/vercel_npx_skill` — its `package.json` is
+`name: "skills"`, currently v1.5.19. NOT `/home/audichuang/research/skills`, which
+is a skills-content repo with no CLI source). Keep these identical; additions are
+only safe when they are ignored by the other tool. Layout/removal already match —
+see [aghub-skills](../aghub-skills/SKILL.md) for the aghub-side map.
 
 ## Frozen — never change
 
 - **Lock versions**: global `.skill-lock.json` = v3, project `skills-lock.json` =
   v1. NEVER bump — npx resets a lock to empty on a version it considers older,
   silently wiping cross-tool state.
+- **Global lock PATH**: `$XDG_STATE_HOME/skills/.skill-lock.json` when that var is
+  set, else **`~/.agents/.skill-lock.json`** — inside `.agents`, not `~/.skill-lock.json`
+  (upstream `skill-lock.ts:67-73`; aghub `crates/skill/src/lock/io.rs:20-31`).
+  Consequence: **never delete `~/.agents/`**, however empty it looks. Upstream
+  `readSkillLock` returns an empty lock rather than erroring on a failed read, so
+  wiping it presents as "no skills tracked" instead of a fault.
+- **npx overwrites the whole lock entry.** `addSkillToLock` (`skill-lock.ts:205-221`)
+  writes `lock.skills[name] = { ...entry, installedAt, updatedAt }`, so any npx
+  write erases aghub's `contentHash` and `refCommit`. No aghub key can be added to
+  the npx lock, and bumping the version to add one cleanly makes npx's
+  `readSkillLock` (`:93-98`) return `createEmptyLockFile()` — every user entry at once.
 - **Master location & name**: `<home if global | project-root if project>/.agents/skills/<sanitized-name>`.
   `sanitize_name` is a direct port of upstream `sanitizeName` (lowercase, runs of
   `[^a-z0-9._]+` → `-`, trim `.-`, 255-cap, `unnamed-skill` fallback).
@@ -29,6 +42,25 @@ safe when they are ignored by the other tool. Layout/removal already match — s
 - **skillPath**: repo-relative POSIX to SKILL.md (`SKILL.md` at root, else
   `<dir>/SKILL.md`); omit when absent. Locks are keyed by the **raw** frontmatter
   `name`, not the sanitized dir name.
+
+## Which npx verbs WRITE (verified v1.5.19, live fixtures on Node v26.8.1)
+
+Do not assert "npx interop is unaffected" from `sync` evidence alone — `sync` is the
+only discovery-driven verb, and it is not representative.
+
+| verb                                                    | effect                                                                                               |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `list`, folder hash                                     | Follows a symlinked skill dir (`installer.ts:86` `isDirEntryOrSymlinkToDir`); digest identical       |
+| `experimental_sync` (`cli.ts:368`)                      | Worklist from `node_modules` only, never the lock — safe except on a frontmatter-name collision      |
+| `remove`                                                | `scanDir` (`remove.ts:45`) filters on `isDirectory()`, false for symlinks → **silent no-op, exit 0** |
+| `add`/`install`/`i`/`a` (`cli.ts:334`)                  | `cleanAndCreateDirectory` (`installer.ts:359`) unlinks any symlink and writes a **real directory**   |
+| `update`/`upgrade`/**`check`** (`cli.ts:378`)           | `check` is an ALIAS for `update`, not a read. Re-runs `add` unconditionally per lock entry           |
+| `experimental_install` (`cli.ts:329` → `install.ts:18`) | The lock-driven wholesale rebuild — writes `.agents/skills/<n>` for every project-lock entry         |
+
+`fs.rm` dispatches on `lstat`, so npx unlinks a symlink without descending — it can
+never delete through a link into aghub's store. The loss risk is the reverse: after
+any npx write the directory holds bytes existing nowhere else, so aghub code that
+assumes that path is a symlink and `remove_dir_all`s it destroys the only copy.
 
 ## Additive rule (how aghub extends safely)
 
