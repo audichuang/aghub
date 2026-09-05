@@ -126,6 +126,35 @@ pub fn master_path(
 		.map(|s| s.join(skill::sanitize_name(name)))
 }
 
+/// Which agents can READ `name` at this scope right now.
+///
+/// This is migration's `grant_to`: D6 says an agent that reads the skill today
+/// is owed an explicit Referrer once the Master moves, and "today" means
+/// against the layout as it currently stands — so this must be called BEFORE
+/// anything is moved. Read paths, not write dirs: an agent can read the shared
+/// slot while writing to its own directory, and it is exactly those agents that
+/// would silently lose the skill if migration only linked the writers.
+///
+/// A path counts when the skill is actually present there, so an agent that
+/// merely COULD read the slot does not get a grant for a skill nobody put in it.
+pub fn readers_of(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+) -> Vec<&'static str> {
+	let safe = skill::sanitize_name(name);
+	crate::registry::ALL_AGENTS
+		.iter()
+		.filter(|descriptor| {
+			descriptor
+				.skill_read_paths(project_root, scope)
+				.iter()
+				.any(|dir| referrer_or_master_exists(&dir.join(&safe)))
+		})
+		.map(|descriptor| descriptor.id)
+		.collect()
+}
+
 /// Why a `(referrer, master)` pair is not usable as-is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViolationKind {
@@ -1014,17 +1043,44 @@ pub fn plan_repair(
 	}
 
 	let master_exists = referrer_or_master_exists(&master);
-	let mut planned: Vec<PlannedReferrer> = order
+
+	// TWO passes, and the split is load-bearing. Shapes first, because whether
+	// a Referrer is owed depends on whether a Master will EXIST — and during a
+	// migration it does not exist yet, it is about to be adopted out of the
+	// shared slot. Deciding actions in the same pass that observes the shapes
+	// gated `Create` on `master_exists` alone, so a migration created no
+	// per-agent Referrer at all: the Master moved into the store and every
+	// agent that used to read the slot silently kept reading it through the one
+	// shared link. That is D6 ("relink every agent that can read the skill
+	// today") failing closed, and it is the entire point of moving the store.
+	let shaped: Vec<(PathBuf, bool, SkillShape, Vec<&'static str>)> = order
 		.into_iter()
 		.map(|path| {
 			let shared = shared_slot.as_deref() == Some(path.as_path());
 			let shape = classify_shape(&path, &master);
 			let agents = by_path.remove(&path).unwrap_or_default();
+			(path, shared, shape, agents)
+		})
+		.collect();
+
+	// Exactly one adoption, and only from the shared slot. Registry order must
+	// never decide this: it once let an agent's PRIVATE copy win over the shared
+	// slot and become the Master, while the real Master-to-be was planned for
+	// Relink — the one action that destroys a directory.
+	let adopting = shaped.iter().any(|(_, shared, shape, _)| {
+		*shared && in_lock && *shape == SkillShape::UnmigratedCopy
+	});
+	// "Is there something to point at by the time Referrers are written?"
+	let will_have_master = master_exists || adopting;
+
+	let mut planned: Vec<PlannedReferrer> = shaped
+		.into_iter()
+		.map(|(path, shared, shape, agents)| {
 			let action = action_for(
 				&shape,
 				shared,
 				in_lock,
-				master_exists,
+				will_have_master,
 				&agents,
 				grant_to,
 			);
@@ -1038,17 +1094,9 @@ pub fn plan_repair(
 		})
 		.collect();
 
-	// Exactly one adoption, and only from the shared slot. Registry order must
-	// never decide this: it once let an agent's PRIVATE copy win over the shared
-	// slot and become the Master, while the real Master-to-be was planned for
-	// Relink — the one action that destroys a directory.
-	let adopting = planned
-		.iter()
-		.any(|p| p.action == ReferrerAction::AdoptAsMaster);
-
 	// Nothing to point at and nothing to adopt: writing Referrers now would
 	// create links to nothing. Refuse the whole plan rather than half-build it.
-	if !master_exists && !adopting {
+	if !will_have_master {
 		for entry in &mut planned {
 			if matches!(
 				entry.action,

@@ -440,6 +440,64 @@ mod tests {
 		);
 	}
 
+	/// THE POINT OF THE WHOLE CHANGE: migrating expands implicit reads into
+	/// explicit per-agent Referrers.
+	///
+	/// Before, every agent read one shared directory, so a skill could not be
+	/// granted or revoked per agent. Migration must hand each agent that reads
+	/// the skill TODAY its own link — otherwise the Master just moves and every
+	/// agent keeps reading it through the single shared slot, which buys the
+	/// user nothing.
+	///
+	/// This is the case `master_exists` used to gate wrongly: during a migration
+	/// the Master does not exist YET, so a one-pass plan created no Referrer at
+	/// all. Collapse `will_have_master` back to `master_exists` in `plan_repair`
+	/// and this goes red.
+	#[test]
+	fn migrating_gives_each_reader_its_own_referrer() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let slot = root.join(".agents").join("skills").join(name);
+		write_skill(&slot, name, "legacy");
+
+		// Answered against the CURRENT layout, exactly as the CLI does.
+		let readers = crate::skills::shape::readers_of(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			name,
+		);
+		assert!(
+			readers.contains(&"cursor"),
+			"fixture premise: cursor must read the shared slot today, got 			 {readers:?}"
+		);
+		let p = plan_repair(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			name,
+			true,
+			&readers,
+		)
+		.unwrap();
+		execute_repair(&p, false).unwrap();
+
+		let master = root.join(".aghub").join(name);
+		let private = root.join(".cursor").join("skills").join(name);
+		assert!(
+			Linker::is_link(&private),
+			"cursor read the skill through the shared slot, so migration owes 			 it an explicit referrer it can individually revoke"
+		);
+		assert_eq!(
+			fs::canonicalize(&private).unwrap(),
+			fs::canonicalize(&master).unwrap()
+		);
+		// And nobody NEW was granted: an agent that could not read it before
+		// must not be handed it by a repair.
+		assert!(
+			!root.join(".windsurf").join("skills").join(name).exists(),
+			"repair must not grant a skill to an agent nobody asked for"
+		);
+	}
+
 	/// A diverged fork must leave the disk EXACTLY as it found it. This is the
 	/// test that fails if the hash comparison is ever moved after the adopt.
 	#[test]

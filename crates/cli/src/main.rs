@@ -15,7 +15,7 @@ use aghub_core::{
 mod commands;
 
 use commands::{
-	add, check, delete, disable, enable, get, inference, plugin, prune,
+	add, check, delete, disable, enable, get, inference, plugin, prune, repair,
 	transfer, update,
 };
 
@@ -391,6 +391,21 @@ enum Commands {
 		dry_run: bool,
 
 		/// Actually write the pruned lock. Without it prune-lock only previews.
+		#[arg(short = 'y', long = "yes")]
+		yes: bool,
+	},
+	/// Repair a skill's on-disk layout: migrate, relink, or reconcile it.
+	///
+	/// One verb for every non-conformant shape — from inside an agent session you
+	/// know the skill is misbehaving, not which shape you hit. Omit <NAME> to
+	/// repair every skill the lock names at this scope. Defaults to a dry-run;
+	/// pass --yes to apply. Exits 1 when something was refused.
+	#[command(alias = "migrate")]
+	Repair {
+		/// Skill to repair. Omitted = every skill the lock names at this scope.
+		name: Option<String>,
+
+		/// Actually write. Without it repair only previews.
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
 	},
@@ -973,6 +988,17 @@ fn run(cli: Cli) -> Result<()> {
 			write_result.clone(),
 		);
 	}
+	if let Commands::Repair { name, yes } = &cli.command {
+		reject_agent_all(&cli.agent)?;
+		let resolved = resolve_cli_scope(&cli)?;
+		return repair::execute(
+			resolved.resource_scope(),
+			resolved.project_root(),
+			name.as_deref(),
+			!*yes,
+			cli.json,
+		);
+	}
 	if let Commands::PruneLock { dry_run, yes } = &cli.command {
 		reject_agent_all(&cli.agent)?;
 		let resolved = resolve_cli_scope(&cli)?;
@@ -1414,7 +1440,8 @@ fn scope_policy(command: &Commands) -> Option<ScopePolicy> {
 		| Commands::Update { .. }
 		| Commands::Delete { .. }
 		| Commands::Enable { .. }
-		| Commands::Disable { .. } => SINGLE_WRITE_SCOPE,
+		| Commands::Disable { .. }
+		| Commands::Repair { .. } => SINGLE_WRITE_SCOPE,
 		Commands::Get { .. }
 		| Commands::Describe { .. }
 		| Commands::PruneLock { .. } => READ_ANY_SCOPE,
@@ -1844,6 +1871,9 @@ fn run_for_agent(
 		}
 		Commands::PruneLock { .. } => {
 			unreachable!("`prune-lock` is dispatched before agent-config setup")
+		}
+		Commands::Repair { .. } => {
+			unreachable!("`repair` is dispatched before agent-config setup")
 		}
 		Commands::Plugin { .. } => {
 			unreachable!("`plugin` is dispatched before agent-config setup")
@@ -2386,6 +2416,9 @@ mod tests {
 			Some(APPLY_UPDATE_SCOPE),
 		),
 		(&["aghub-cli", "prune-lock"], Some(READ_ANY_SCOPE)),
+		// Repair resolves exactly ONE write scope: it moves directories, and
+		// `--all` would leave it guessing which store to migrate into.
+		(&["aghub-cli", "repair"], Some(SINGLE_WRITE_SCOPE)),
 		(
 			&["aghub-cli", "check", "skills"],
 			Some(READ_BOTH_BY_DEFAULT),
