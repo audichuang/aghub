@@ -1714,7 +1714,7 @@ impl ReconcileSkillPlan {
 	/// canonicalized so two spellings of one directory compare equal.
 	///
 	/// Installs are symlink-only, so a copy touches two places: it materialises
-	/// the shared Master (`universal_canonical_dir` — the same resolution
+	/// the shared Master (`master_store_dir` — the same resolution
 	/// `universal_install_prep` uses), and, for a `NeedsLink` agent, it links
 	/// that agent's own skills dir to it. A `NativeReader` gets no link; the
 	/// Master already IS one of its read dirs.
@@ -1736,19 +1736,17 @@ impl ReconcileSkillPlan {
 				_ => None,
 			};
 			let Some(master) =
-				crate::skills::linker::universal_canonical_dir(canonical_root)
+				crate::skills::linker::master_store_dir(canonical_root)
 			else {
 				continue;
 			};
-			if let crate::skills::linker::LinkNeed::NeedsLink {
-				agent_skills_dir,
-			} = crate::skills::linker::agent_link_need(
-				crate::registry::get(copy.target.agent),
-				scope,
-				copy.target.project_root.as_deref(),
-				&master,
-			) {
-				push(&agent_skills_dir);
+			if let crate::skills::linker::LinkNeed::NeedsLink { referrer_dir } =
+				crate::skills::linker::agent_link_need(
+					crate::registry::get(copy.target.agent),
+					scope,
+					copy.target.project_root.as_deref(),
+				) {
+				push(&referrer_dir);
 			}
 			push(&master);
 		}
@@ -2096,7 +2094,7 @@ mod tests {
 
 	#[test]
 	fn transfer_mcp_copies_to_other_agent_project() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root = temp.path().join("dest");
@@ -2147,7 +2145,7 @@ mod tests {
 		// Finding #4: a transfer with no destinations is a no-op the caller
 		// almost certainly did not intend. It must be an actionable error, not
 		// a silent `Ok` with an empty result set (which exits 0).
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		fs::create_dir_all(&source_root).unwrap();
@@ -2183,7 +2181,7 @@ mod tests {
 
 	#[test]
 	fn transfer_mcp_preflight_prevents_partial_writes() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temporary = tempdir().unwrap();
 		let source_root = temporary.path().join("source");
 		let valid_root = temporary.path().join("valid-target");
@@ -2249,7 +2247,7 @@ mod tests {
 	/// copy would be the one missing the timeout.
 	#[test]
 	fn reconcile_mcp_refuses_a_lossy_copy_and_keeps_the_source() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -2348,7 +2346,7 @@ mod tests {
 
 	#[test]
 	fn reconcile_mcp_deletes_when_removed() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -2404,7 +2402,7 @@ mod tests {
 	// `None` afterward.
 	#[test]
 	fn reconcile_mcp_keeps_source_when_a_copy_fails_at_runtime() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -2493,7 +2491,7 @@ mod tests {
 
 	#[test]
 	fn transfer_skill_materializes_master_and_referrer() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root = temp.path().join("dest");
@@ -2529,7 +2527,7 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(result.success_count(), 1);
-		let master = dest_root.join(".agents/skills/repo-helper");
+		let master = dest_root.join(".aghub/repo-helper");
 		let referrer = dest_root.join(".windsurf/skills/repo-helper");
 		assert!(master.join("assets/notes.txt").exists());
 		assert!(
@@ -2541,7 +2539,7 @@ mod tests {
 	#[test]
 	fn skill_root_unchecked_returns_nonexistent_dir_as_is() {
 		let temp = tempdir().unwrap();
-		let missing = temp.path().join(".agents/skills/foo");
+		let missing = temp.path().join(".aghub/foo");
 		let mut skill = Skill::new("foo");
 		skill.canonical_path = Some(missing.to_string_lossy().to_string());
 
@@ -2550,7 +2548,7 @@ mod tests {
 
 	#[test]
 	fn reconcile_skill_deletes_when_removed() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -2597,7 +2595,7 @@ mod tests {
 	// pin the contract it could break.
 	#[test]
 	fn reconcile_skill_removing_a_never_holder_still_succeeds() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		// A PRIVATE copy under claude's own dir: no `.agents/skills` Master, so
@@ -2638,9 +2636,17 @@ mod tests {
 	// Fixture shared by the shared-master preflight tests: a universal Master
 	// every NativeReader (cursor, codex, …) reads directly, plus claude's
 	// symlink Referrer into it.
+	/// The Master in the store, plus TWO Referrers: claude's private one and the
+	/// shared `.agents/skills` slot.
+	///
+	/// The shared link is not decoration. Cursor, codex, cline, warp and five
+	/// others reach a project skill only by scanning that directory, and it used
+	/// to hold the Master itself — so storing the skill granted it to all of
+	/// them for free. Now the grant is a link, and a fixture that omits it is
+	/// testing an agent that simply does not have the skill.
 	#[cfg(unix)]
 	fn master_with_claude_referrer(root: &std::path::Path, name: &str) {
-		let master = root.join(".agents/skills").join(name);
+		let master = root.join(".aghub").join(name);
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
@@ -2652,6 +2658,9 @@ mod tests {
 		let claude_skills = root.join(".claude/skills");
 		fs::create_dir_all(&claude_skills).unwrap();
 		std::os::unix::fs::symlink(&master, claude_skills.join(name)).unwrap();
+		let shared = root.join(".agents/skills");
+		fs::create_dir_all(&shared).unwrap();
+		std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
 	}
 
 	// G3: "add to claude, remove from cursor" is an END STATE that cannot exist
@@ -2663,12 +2672,12 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_refuses_native_reader_removal_that_cannot_take_effect() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
 		master_with_claude_referrer(&root, "mover");
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		// Claude already has a Referrer, so give the copy a fresh target.
 		let windsurf_link = root.join(".windsurf/skills/mover");
 
@@ -2724,12 +2733,12 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_will_not_gc_the_master_when_a_holder_is_unreadable() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
 		master_with_claude_referrer(&root, "mover");
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		let claude_referrer = root.join(".claude/skills/mover");
 		// Claude's project MCP config exists but cannot be parsed, so its whole
 		// config load fails and its Referrer used to become invisible.
@@ -2798,12 +2807,12 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn an_unreadable_agent_does_not_block_a_referrer_unlink() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
 		master_with_claude_referrer(&root, "mover");
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		let windsurf_skills = root.join(".windsurf/skills");
 		let windsurf_referrer = windsurf_skills.join("mover");
 		fs::create_dir_all(&windsurf_skills).unwrap();
@@ -2843,7 +2852,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_still_allows_add_then_remove_of_a_private_copy() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		let private = root.join(".claude/skills/solo");
@@ -2872,7 +2881,7 @@ mod tests {
 			assert!(row.success, "{:?}: {:?}", row.action, row.error);
 		}
 		assert!(
-			root.join(".agents/skills/solo/SKILL.md").exists(),
+			root.join(".aghub/solo/SKILL.md").exists(),
 			"the copy must have materialised the Master"
 		);
 		assert!(
@@ -2892,7 +2901,7 @@ mod tests {
 	//
 	// Cursor holds `solo` as a private folder and also reads `.agents/skills`.
 	// The preflight probe looks at a disk where that Master does not exist yet,
-	// so every row passed: the copy materialised `.agents/skills/solo` +
+	// so every row passed: the copy materialised `.aghub/solo` +
 	// windsurf's link, the delete took cursor's private folder, BOTH rows
 	// reported success — and cursor could still see `solo`, now via the Master.
 	// Nothing on disk recorded that anything was wrong.
@@ -2904,7 +2913,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_refuses_a_removal_the_paired_copy_would_undo() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		let private = root.join(".cursor/skills/solo");
@@ -2915,6 +2924,13 @@ mod tests {
 		)
 		.unwrap();
 
+		// The copy target must SHARE cursor's directory for the removal to be
+		// unreachable. Cline writes the same `.agents/skills` cursor reads, so
+		// "add cline, remove cursor" hands the skill straight back. A copy to
+		// windsurf — which this test used to make — now writes only
+		// `.windsurf/skills` and the store, reaches cursor not at all, and the
+		// removal is perfectly legal.
+		//
 		// Disk state is asserted BEFORE the return value: the old behaviour
 		// returned Ok, so only "nothing landed" separates the two.
 		let outcome = reconcile_skill(
@@ -2924,7 +2940,7 @@ mod tests {
 				project_root: Some(root.clone()),
 				name: "solo".to_string(),
 			},
-			vec![AgentType::Windsurf],
+			vec![AgentType::Cline],
 			vec![AgentType::Cursor],
 			true, // confirm
 		);
@@ -2934,14 +2950,14 @@ mod tests {
 			"cursor's copy must survive a removal that could not take effect"
 		);
 		assert!(
-			!root.join(".agents/skills/solo").exists(),
+			!root.join(".aghub/solo").exists(),
 			"the copy must NOT have landed: it is the thing that would hand \
 			 the skill straight back to cursor"
 		);
 		let message = outcome
 			.expect_err(
-				"cursor reads `.agents/skills`, so the copy this reconcile \
-				 makes would restore what the delete takes",
+				"cline writes the very `.agents/skills` cursor reads, so the \
+				 copy this reconcile makes would restore what the delete takes",
 			)
 			.to_string();
 		assert!(message.contains("nothing was written"), "got: {message}");
@@ -2983,17 +2999,23 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn a_broken_mcp_file_of_a_non_holder_does_not_block_master_collection() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
 			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
 		)
 		.unwrap();
+		// Codex reads the shared `.agents/skills` slot and holds a Referrer
+		// there. It used to need none: the Master itself lived in that
+		// directory, so storing the skill granted it. Now the grant is the link.
+		fs::create_dir_all(root.join(".agents/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".agents/skills/mover"))
+			.unwrap();
 		// roocode holds no skill here and reads no `.agents/skills`; only its
 		// MCP config is broken.
 		fs::create_dir_all(root.join(".roo")).unwrap();
@@ -3047,17 +3069,23 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_keeps_the_master_when_a_holders_dir_cannot_be_listed() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
 			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
 		)
 		.unwrap();
+		// Codex reads the shared `.agents/skills` slot and holds a Referrer
+		// there. It used to need none: the Master itself lived in that
+		// directory, so storing the skill granted it. Now the grant is the link.
+		fs::create_dir_all(root.join(".agents/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".agents/skills/mover"))
+			.unwrap();
 		fs::create_dir_all(root.join(".windsurf")).unwrap();
 		// A self-referential symlink, NOT a plain file: `read_dir` fails with
 		// ELOOP for any user, including a CI job running as root. A plain file
@@ -3118,17 +3146,23 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_refuses_when_the_named_holder_is_the_unreadable_one() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
 			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
 		)
 		.unwrap();
+		// Codex reads the shared `.agents/skills` slot and holds a Referrer
+		// there. It used to need none: the Master itself lived in that
+		// directory, so storing the skill granted it. Now the grant is the link.
+		fs::create_dir_all(root.join(".agents/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".agents/skills/mover"))
+			.unwrap();
 		// A regular FILE where the skills dir belongs: `read_dir` fails for
 		// every user, including a CI job running as root.
 		fs::create_dir_all(root.join(".windsurf")).unwrap();
@@ -3189,17 +3223,23 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_refuses_a_removal_the_master_would_undo() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
 			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
 		)
 		.unwrap();
+		// Codex reads the shared `.agents/skills` slot and holds a Referrer
+		// there. It used to need none: the Master itself lived in that
+		// directory, so storing the skill granted it. Now the grant is the link.
+		fs::create_dir_all(root.join(".agents/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".agents/skills/mover"))
+			.unwrap();
 		// opencode reads `.opencode/skills` FIRST and `.agents/skills` second,
 		// so this stale link is what its config load discovers.
 		let stale = root.join(".opencode/skills/mover");
@@ -3243,17 +3283,23 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn a_broken_config_on_a_delete_target_does_not_cancel_the_paired_copy() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
-		let master = root.join(".agents/skills/mover");
+		let master = root.join(".aghub/mover");
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
 			"---\nname: mover\ndescription: Shared\n---\n\n# Mover\n",
 		)
 		.unwrap();
+		// Codex reads the shared `.agents/skills` slot and holds a Referrer
+		// there. It used to need none: the Master itself lived in that
+		// directory, so storing the skill granted it. Now the grant is the link.
+		fs::create_dir_all(root.join(".agents/skills")).unwrap();
+		std::os::unix::fs::symlink(&master, root.join(".agents/skills/mover"))
+			.unwrap();
 		fs::create_dir_all(root.join(".cursor")).unwrap();
 		fs::write(root.join(".cursor/mcp.json"), "{ oops").unwrap();
 
@@ -3295,7 +3341,7 @@ mod tests {
 	// guard ran AFTER the deletes, so this also proves the skill survived.
 	#[test]
 	fn reconcile_skill_without_confirm_refuses_and_removes_nothing() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -3341,7 +3387,7 @@ mod tests {
 	// them — otherwise the guard silently breaks every install-only reconcile.
 	#[test]
 	fn reconcile_skill_adds_without_confirm() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -3406,7 +3452,7 @@ mod tests {
 	// `false` afterward.
 	#[test]
 	fn reconcile_skill_keeps_source_when_a_copy_fails_at_runtime() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 
@@ -3501,10 +3547,10 @@ mod tests {
 			}
 		}
 
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path();
-		let master = root.join(".agents/skills/my-skill");
+		let master = root.join(".aghub/my-skill");
 		let claude_skills = root.join(".claude/skills");
 		let referrer = claude_skills.join("my-skill");
 		let skill_md =
@@ -3514,6 +3560,13 @@ mod tests {
 		fs::write(master.join("SKILL.md"), skill_md).unwrap();
 		fs::create_dir_all(&claude_skills).unwrap();
 		std::os::unix::fs::symlink(&master, &referrer).unwrap();
+		// Cursor reaches a project skill only through the shared
+		// `.agents/skills` slot, which used to hold the Master itself. Without
+		// this link cursor simply does not have the skill, and a test about
+		// removing it from cursor measures nothing.
+		let shared = root.join(".agents/skills");
+		fs::create_dir_all(&shared).unwrap();
+		std::os::unix::fs::symlink(&master, shared.join("my-skill")).unwrap();
 		set_skills_path_override("claude", Some(claude_skills));
 		let _reset_override = SkillsPathOverrideReset;
 
@@ -3569,10 +3622,10 @@ mod tests {
 			}
 		}
 
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path();
-		let master = root.join(".agents/skills/my-skill");
+		let master = root.join(".aghub/my-skill");
 		let sentinel = master.join("sentinel.txt");
 		let claude_skills = root.join(".claude/skills");
 		let referrer = claude_skills.join("my-skill");
@@ -3584,6 +3637,13 @@ mod tests {
 		fs::write(&sentinel, "keep-me").unwrap();
 		fs::create_dir_all(&claude_skills).unwrap();
 		std::os::unix::fs::symlink(&master, &referrer).unwrap();
+		// Cursor reaches a project skill only through the shared
+		// `.agents/skills` slot, which used to hold the Master itself. Without
+		// this link cursor simply does not have the skill, and a test about
+		// removing it from cursor measures nothing.
+		let shared = root.join(".agents/skills");
+		fs::create_dir_all(&shared).unwrap();
+		std::os::unix::fs::symlink(&master, shared.join("my-skill")).unwrap();
 		set_skills_path_override("claude", Some(claude_skills));
 		let _reset_override = SkillsPathOverrideReset;
 
@@ -3647,10 +3707,10 @@ mod tests {
 			}
 		}
 
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path();
-		let master = root.join(".agents/skills/my-skill");
+		let master = root.join(".aghub/my-skill");
 		let sentinel = master.join("sentinel.txt");
 		let claude_skills = root.join(".claude/skills");
 		let referrer = claude_skills.join("my-skill");
@@ -3711,7 +3771,7 @@ mod tests {
 
 	#[test]
 	fn transfer_sub_agent_copies_to_other_agent_project() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root = temp.path().join("dest");
@@ -3758,7 +3818,7 @@ mod tests {
 
 	#[test]
 	fn reconcile_sub_agent_adds_and_removes() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -3798,7 +3858,7 @@ mod tests {
 
 	#[test]
 	fn transfer_mcp_to_multiple_targets() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root_cursor = temp.path().join("dest_cursor");
@@ -3863,7 +3923,7 @@ mod tests {
 
 	#[test]
 	fn transfer_skill_to_multiple_targets() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root_cursor = temp.path().join("dest_cursor");
@@ -3906,10 +3966,10 @@ mod tests {
 
 		assert_eq!(result.success_count(), 2);
 		assert!(dest_root_cursor
-			.join(".agents/skills/repo-helper/SKILL.md")
+			.join(".aghub/repo-helper/SKILL.md")
 			.exists());
 		assert!(dest_root_windsurf
-			.join(".agents/skills/repo-helper/SKILL.md")
+			.join(".aghub/repo-helper/SKILL.md")
 			.exists());
 		assert!(crate::skills::linker::Linker::is_link(
 			&dest_root_windsurf.join(".windsurf/skills/repo-helper")
@@ -3918,7 +3978,7 @@ mod tests {
 
 	#[test]
 	fn transfer_skill_already_present_is_an_idempotent_success() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root = temp.path().join("dest");
@@ -4004,7 +4064,7 @@ mod tests {
 
 	#[test]
 	fn reconcile_skill_adds_multiple_agents_to_same_dir() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
@@ -4038,7 +4098,7 @@ mod tests {
 		// Referrer to that same Master.
 		assert_eq!(result.success_count(), 2);
 
-		assert!(root.join(".agents/skills/shared-skill/SKILL.md").exists());
+		assert!(root.join(".aghub/shared-skill/SKILL.md").exists());
 		assert!(crate::skills::linker::Linker::is_link(
 			&root.join(".windsurf/skills/shared-skill")
 		));
@@ -4063,7 +4123,7 @@ mod tests {
 
 	#[test]
 	fn transfer_duplicate_targets_are_deduplicated() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let source_root = temp.path().join("source");
 		let dest_root = temp.path().join("dest");
@@ -4133,7 +4193,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn copy_collision_is_checked_when_delete_target_is_initially_absent() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let home = tempdir().unwrap();
 		let _home = EnvVarGuard::set("HOME", home.path());
 		let _config =
@@ -4164,7 +4224,7 @@ mod tests {
 		);
 
 		assert!(
-			!home.path().join(".agents/skills/solo").exists(),
+			!home.path().join(".aghub/solo").exists(),
 			"preflight must reject before Amp's copy materialises the Master"
 		);
 		assert!(
@@ -4182,7 +4242,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn copy_collision_uses_recursive_read_dir_containment() {
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let home = tempdir().unwrap();
 		let _home = EnvVarGuard::set("HOME", home.path());
 		let _config =
@@ -4196,7 +4256,7 @@ mod tests {
 			&home.path().join(".claude/skills"),
 		);
 
-		let master = home.path().join(".agents/skills/solo");
+		let master = home.path().join(".aghub/solo");
 		fs::create_dir_all(&master).unwrap();
 		fs::write(
 			master.join("SKILL.md"),
@@ -4268,17 +4328,15 @@ mod tests {
 	/// where the copy lands (`agent_link_need`) and where the target reads
 	/// (`get_skills_paths`) — never from `skill_store_roots` membership.
 	///
-	/// That list also names the XDG `~/.config/agents/skills`. Amp and Kimi
-	/// read it at GLOBAL scope, but a global install writes `~/.agents/skills`
-	/// and links them into it — the classifier's own
-	/// `amp_kimi_global_needs_link_but_project_is_native` says so. So
-	/// `reconcile skills X --add claude --remove amp -g --yes` was refused
-	/// outright (batch preflight => nothing written at all) on the false claim
-	/// that a copy to CLAUDE would hand the skill back to Amp.
+	/// The half that must still REFUSE is now slot sharing, not master reading:
+	/// cline and warp have no private skills dir at global scope, so a copy to
+	/// cline writes the very directory warp reads. A copy to claude, by
+	/// contrast, writes only `~/.claude/skills` and the store — it reaches
+	/// nobody else, which is the whole point of the change.
 	#[test]
 	fn a_copy_restores_it_asks_the_classifier_not_the_master_root_list() {
 		// Reads HOME/XDG through `dirs`; see core AGENTS.md Testing.
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		// Non-empty so the "no copies at all" short-circuit is not what is
 		// being measured.
 		let plan = plan_copying_to(&[AgentType::Claude]);
@@ -4291,9 +4349,17 @@ mod tests {
 			);
 		}
 		assert!(
-			plan.a_copy_restores_it(&global_target(AgentType::OpenCode)),
-			"opencode DOES read ~/.agents/skills at global scope, so a copy \
-			 really does restore it — this is the half that must keep refusing"
+			!plan.a_copy_restores_it(&global_target(AgentType::OpenCode)),
+			"opencode has its OWN referrer dir now; a copy to claude writes \
+			 neither it nor the shared slot, so removing opencode is legal"
+		);
+
+		// The half that must keep refusing: cline and warp share one directory.
+		let to_cline = plan_copying_to(&[AgentType::Cline]);
+		assert!(
+			to_cline.a_copy_restores_it(&global_target(AgentType::Warp)),
+			"a copy to cline writes the very slot warp reads — removing warp \
+			 in the same breath cannot take anything away"
 		);
 	}
 
@@ -4310,7 +4376,7 @@ mod tests {
 	#[test]
 	fn a_copy_restores_it_sees_a_referrer_dir_the_copy_and_the_delete_share() {
 		// Reads HOME/XDG through `dirs`; see core AGENTS.md Testing.
-		let _guard = env_lock().lock().unwrap();
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let plan = plan_copying_to(&[AgentType::Amp]);
 
 		assert!(

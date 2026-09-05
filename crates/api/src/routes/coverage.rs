@@ -6,9 +6,7 @@ use crate::error::ApiResult;
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::linker::classify::classify_all;
-use aghub_core::skills::linker::{
-	universal_canonical_dir, AgentSkillCoverageView,
-};
+use aghub_core::skills::linker::{master_store_dir, AgentSkillCoverageView};
 
 /// `GET /api/v1/skills/coverage?scope=<global|project>&project_root=<path?>`
 ///
@@ -37,16 +35,7 @@ pub async fn skills_coverage(
 		}
 	};
 
-	let master_skills_dir =
-		universal_canonical_dir(project_root).ok_or_else(|| {
-			crate::error::ApiError::new(
-				rocket::http::Status::InternalServerError,
-				"could not resolve the universal master skills directory",
-				"COVERAGE_ERROR",
-			)
-		})?;
-
-	let plans = classify_all(scope, project_root, &master_skills_dir);
+	let plans = classify_all(scope, project_root);
 	// Build through the SHARED core view so the API and CLI project a plan
 	// identically (single-source); then wrap it in the ts-rs DTO for export.
 	let dtos = plans
@@ -56,11 +45,9 @@ pub async fn skills_coverage(
 			AgentSkillCoverageDto {
 				id: view.id,
 				scope: view.scope,
-				reads_master: view.reads_master,
-				writes_master: view.writes_master,
 				needs_link: view.needs_link,
-				auto_covered: view.auto_covered,
 				supported: view.supported,
+				shared_with: view.shared_with,
 			}
 		})
 		.collect();
@@ -100,9 +87,20 @@ mod tests {
 			.iter()
 			.find(|d| d.id == "codex")
 			.expect("codex present");
-		assert!(codex.auto_covered, "codex @global reads .agents/skills");
-		assert!(!codex.needs_link);
+		// codex used to come back `auto_covered` — it read `.agents/skills`
+		// natively and the wire said "already covered", meaning the user had no
+		// say. It now gets a Referrer of its own into `~/.codex/skills`, which
+		// is what makes it individually revocable.
+		assert!(
+			codex.needs_link,
+			"codex now takes a link like everyone else"
+		);
 		assert!(codex.supported);
+		assert!(
+			!codex.shared_with.contains(&"cline".to_string()),
+			"codex has a private dir, so it shares with nobody: {:?}",
+			codex.shared_with
+		);
 		let claude = dtos
 			.iter()
 			.find(|d| d.id == "claude")
@@ -111,7 +109,17 @@ mod tests {
 			claude.needs_link,
 			"claude @global has a private skills dir => NeedsLink"
 		);
-		assert!(!claude.auto_covered);
+		// cline has no private dir anywhere, so the shared slot IS its dir and
+		// the wire must disclose who else that reaches.
+		let cline = dtos
+			.iter()
+			.find(|d| d.id == "cline")
+			.expect("cline present");
+		assert!(
+			cline.shared_with.contains(&"warp".to_string()),
+			"got {:?}",
+			cline.shared_with
+		);
 	}
 
 	#[test]

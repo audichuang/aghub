@@ -2,23 +2,25 @@ use serde::Serialize;
 use ts_rs::TS;
 
 /// Per-agent skill-coverage projection for GET /api/v1/skills/coverage.
-/// needs_link/auto_covered/supported are the FE-partitioning projection of
-/// the LinkNeed 3-state; reads_master/writes_master are the REAL
-/// classifier facts (whether the agent's resolved read/write skills-dir
-/// resolves to the .agents/skills master), carried verbatim from
-/// AgentLinkPlan (P2-G) rather than guessed. No raw paths are exposed. The
-/// frontend partitions on auto_covered/needs_link; the master booleans are
-/// honest diagnostics.
+///
+/// `reads_master` / `writes_master` / `auto_covered` were removed with
+/// `LinkNeed::NativeReader`. Against the `.aghub` store — which no agent reads —
+/// all three are permanently false, and the frontend partitioned on
+/// `auto_covered`, so it would have rendered an empty bucket forever while
+/// presenting three constants as classifier facts.
+///
+/// `shared_with` is what replaced them: the other agents that receive a skill
+/// through the SAME Referrer directory. It is the only thing that lets the UI
+/// present a shared slot honestly — checking one checks the group, and
+/// unchecking one unchecks the group. No raw paths are exposed.
 #[derive(Debug, Serialize, TS)]
 #[ts(export)]
 pub struct AgentSkillCoverageDto {
 	pub id: String,
 	pub scope: String,
-	pub reads_master: bool,
-	pub writes_master: bool,
 	pub needs_link: bool,
-	pub auto_covered: bool,
 	pub supported: bool,
+	pub shared_with: Vec<String>,
 }
 
 #[cfg(test)]
@@ -30,11 +32,9 @@ mod tests {
 		let dto = AgentSkillCoverageDto {
 			id: "claude".to_string(),
 			scope: "global".to_string(),
-			reads_master: false,
-			writes_master: false,
 			needs_link: true,
-			auto_covered: false,
 			supported: true,
+			shared_with: vec!["warp".to_string()],
 		};
 		let json = serde_json::to_string(&dto).unwrap();
 		assert_eq!(
@@ -53,11 +53,10 @@ mod tests {
 		let plan = AgentLinkPlan {
 			agent_id: "claude",
 			need: LinkNeed::NeedsLink {
-				agent_skills_dir: std::path::PathBuf::from("/x"),
+				referrer_dir: std::path::PathBuf::from("/x"),
 			},
 			installed: false,
-			reads_master: false,
-			writes_master: true,
+			shared_with: vec!["warp"],
 		};
 		let view =
 			aghub_core::skills::linker::AgentSkillCoverageView::from_plan(
@@ -66,11 +65,9 @@ mod tests {
 		let dto = AgentSkillCoverageDto {
 			id: view.id.clone(),
 			scope: view.scope.clone(),
-			reads_master: view.reads_master,
-			writes_master: view.writes_master,
 			needs_link: view.needs_link,
-			auto_covered: view.auto_covered,
 			supported: view.supported,
+			shared_with: view.shared_with.clone(),
 		};
 		assert_eq!(
 			serde_json::to_string(&dto).unwrap(),

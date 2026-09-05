@@ -86,17 +86,17 @@ pub struct SkillResponse {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub agent: Option<String>,
-	/// Advisory: the target agent reads the `.agents` master directly
-	/// (NativeReader), so a universal install writes only the master with no
-	/// per-agent link. Always serialized (default false) so the wire matches the
-	/// generated `native_reader: boolean` ts-rs type — no DTO drift.
-	pub native_reader: bool,
+	/// Advisory: other agents that receive this skill through the SAME Referrer
+	/// directory, because their own agents provide no separate one. Empty for a
+	/// private dir. Always serialized (default `[]`) so the wire matches the
+	/// generated `shared_with: string[]` ts-rs type — no DTO drift.
+	pub shared_with: Vec<String>,
 	/// Advisory: this import was a no-op — the skill was already installed, so
 	/// nothing was written and the fields above describe the EXISTING master,
 	/// not the source that was just submitted. Mirrors
 	/// `aghub_core::dto::SkillView::already_installed`, which is where the
 	/// field is defined so both surfaces keep ONE wire shape. Always
-	/// serialized, like `native_reader`, so the ts-rs type stays non-optional.
+	/// serialized, like `shared_with`, so the ts-rs type stays non-optional.
 	pub already_installed: bool,
 }
 
@@ -178,7 +178,7 @@ impl From<&aghub_core::dto::SkillView> for SkillResponse {
 			tools: v.tools.clone(),
 			source: v.source.map(Into::into),
 			agent: v.agent.clone(),
-			native_reader: v.native_reader,
+			shared_with: v.shared_with.clone(),
 			already_installed: v.already_installed,
 		}
 	}
@@ -899,7 +899,7 @@ mod tests {
 		// `native_reader: boolean` ts-rs type (default false, no drift).
 		let skill = aghub_core::models::Skill::new("foo");
 		let resp = SkillResponse::from(&skill);
-		assert!(!resp.native_reader);
+		assert!(resp.shared_with.is_empty());
 		let json = serde_json::to_value(&resp).unwrap();
 		assert_eq!(
 			json["native_reader"],
@@ -937,7 +937,7 @@ mod tests {
 		skill.config_source = Some(aghub_core::models::ConfigSource::Global);
 		let view = aghub_core::dto::SkillView::from(&skill)
 			.with_agent("claude")
-			.with_native_reader(true);
+			.with_shared_with(vec!["warp".to_string()]);
 		let resp = SkillResponse::from(&view);
 		let view_json = serde_json::to_value(&view).unwrap();
 		let resp_json = serde_json::to_value(&resp).unwrap();
@@ -973,10 +973,10 @@ mod tests {
 		// Building from a core SkillView with the advisory set surfaces the
 		// `native_reader` key (= true).
 		let skill = aghub_core::models::Skill::new("foo");
-		let view =
-			aghub_core::dto::SkillView::from(&skill).with_native_reader(true);
+		let view = aghub_core::dto::SkillView::from(&skill)
+			.with_shared_with(vec!["warp".to_string()]);
 		let resp = SkillResponse::from(&view);
-		assert!(resp.native_reader);
+		assert_eq!(resp.shared_with, vec!["warp".to_string()]);
 		let json = serde_json::to_value(&resp).unwrap();
 		assert_eq!(json["native_reader"], serde_json::json!(true));
 	}

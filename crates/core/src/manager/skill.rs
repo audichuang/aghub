@@ -340,22 +340,12 @@ impl ConfigManager {
 			// Classify the already-installed state before deciding to error.
 			let safe = sanitize_name(&skill.name);
 			let canonical = canonical_dir.join(&safe);
-			// (a) NativeReader: the agent reads the Master directly (its write-dir
-			//     IS the Master, or its read paths include it), so it already sees
-			//     the skill — re-add is an idempotent no-op. Only when the entry
-			//     really is THAT Master, though: a same-named skill the agent holds
-			//     somewhere else entirely is a conflict, not a no-op. Same check,
-			//     same function, as `add_skill_from_path_universal`.
-			if matches!(
-				link_need,
-				crate::skills::linker::LinkNeed::NativeReader
-			) {
-				if entry_reads_master(&existing, &canonical) {
-					return Ok(SkillAdd::already_installed(existing));
-				}
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
-			// (b) Correct link already exists at the agent slot (AlreadyLinked).
+			// The "agent reads the Master directly" branch lived here. It is
+			// gone with `LinkNeed::NativeReader`: nothing reads the `.aghub`
+			// store, so idempotence is decided by the link below and by nothing
+			// else. Re-adding for an agent whose Referrer already resolves to
+			// this Master is the no-op; anything else at that slot is a conflict.
+			// (a) Correct link already exists at the agent slot (AlreadyLinked).
 			if let Some(ref agent_dir) = agent_write_dir {
 				let slot = agent_dir.join(&safe);
 				if Linker::is_link(&slot) {
@@ -1193,30 +1183,13 @@ impl ConfigManager {
 					.cloned()
 					.unwrap_or_else(|| skill.clone())
 			};
-			// NativeReader: reads the Master directly → re-add is a no-op —
-			// but ONLY when the entry it already has really IS that Master.
-			//
-			// This used to return on the name alone. A NativeReader's read
-			// paths include its OWN private dir as well as the Master, so an
-			// agent holding an unrelated `<own-dir>/<name>` matched here and the
-			// call reported `already_installed`. Nothing was written, and the
-			// transfer path — which now defers its already-present decision to
-			// this function — reported a success. Paired with a `reconcile
-			// --remove`, whose gate only asks whether the copy ERRORED, that
-			// silently deleted the source: the copy did nothing, the delete ran,
-			// and the content was gone. Verified by resolved path, not by name.
-			if matches!(
-				link_need,
-				crate::skills::linker::LinkNeed::NativeReader
-			) {
-				let existing = installed();
-				if entry_reads_master(&existing, &canonical) {
-					return Ok(SkillAdd::already_installed(existing));
-				}
-				// A same-named skill this agent holds somewhere else entirely:
-				// a real conflict, exactly as for a NeedsLink agent.
-				return Err(ConfigError::resource_exists("skill", &skill.name));
-			}
+			// The NativeReader branch is gone with the variant. Its hard-won
+			// lesson survives in the check below: idempotence is decided by the
+			// RESOLVED link target, never by the skill name. Deciding on the name
+			// once reported `already_installed` for an agent holding an unrelated
+			// same-named skill, and paired with a `reconcile --remove` — whose
+			// gate only asks whether the copy ERRORED — it silently deleted the
+			// source: the copy did nothing, the delete ran, the content was gone.
 			if let Some(ref agent_dir) = agent_write_dir {
 				let slot = agent_dir.join(&safe);
 				if Linker::is_link(&slot) {
@@ -1397,7 +1370,7 @@ impl ConfigManager {
 			}
 			_ => None,
 		};
-		let canonical_dir = crate::skills::linker::universal_canonical_dir(
+		let canonical_dir = crate::skills::linker::master_store_dir(
 			project_root_for_canonical.as_deref(),
 		)
 		.ok_or_else(|| {
@@ -1405,17 +1378,13 @@ impl ConfigManager {
 				"Cannot resolve .agents canonical skills directory".into(),
 			)
 		})?;
-		// Classify THIS agent against the Master with the same scope/root that
-		// derived `canonical_dir`, mirroring the fetched/desktop install path. A
-		// read-only-master NativeReader (e.g. OpenCode, which writes
-		// `.opencode/skills` but reads `.agents/skills`) is detected here — the
-		// narrow `agent_write_dir == canonical_dir` test used to miss it.
+		// Where THIS agent's Referrer goes, with the same scope/root that derived
+		// `canonical_dir`, mirroring the fetched/desktop install path.
 		let descriptor = crate::registry::get(self.agent_type());
 		let link_need = crate::skills::linker::agent_link_need(
 			descriptor,
 			self.write_scope,
 			self.project_root.as_deref(),
-			&canonical_dir,
 		);
 		Ok(UniversalPrep {
 			agent_name: self.adapter.name().to_string(),
@@ -1426,18 +1395,27 @@ impl ConfigManager {
 		})
 	}
 
-	/// Whether THIS manager's agent reads the `.agents/skills` Master directly at
-	/// its scope (a NativeReader) and so receives the Master only, with no
-	/// per-agent link. Used by the CLI to report "already covered" after an add.
-	pub fn skill_target_is_native_reader(&self) -> bool {
+	/// Every OTHER agent that would receive this skill through the SAME Referrer
+	/// directory at this scope.
+	///
+	/// Replaces `skill_target_is_native_reader`, whose question ("does this agent
+	/// already see the Master without a link") has no answer any more — nothing
+	/// reads the store. The question that took its place is the one a user
+	/// actually needs answered before granting: who else does this reach.
+	pub fn skill_target_shares_with(&self) -> Vec<&'static str> {
 		self.universal_install_prep()
-			.map(|prep| {
-				matches!(
-					prep.link_need,
-					crate::skills::linker::LinkNeed::NativeReader
-				)
+			.map(|prep| match prep.link_need {
+				crate::skills::linker::LinkNeed::NeedsLink {
+					ref referrer_dir,
+				} => crate::skills::linker::shared_with(
+					self.agent_type().as_str(),
+					referrer_dir,
+					self.write_scope,
+					self.project_root.as_deref(),
+				),
+				crate::skills::linker::LinkNeed::Unsupported => Vec::new(),
 			})
-			.unwrap_or(false)
+			.unwrap_or_default()
 	}
 }
 
@@ -1931,7 +1909,7 @@ mod tests {
 		mgr.add_skill_universal(skill).unwrap();
 
 		// Real master lives under .agents/skills (NOT duplicated per agent).
-		assert!(root.join(".agents/skills/uni-skill/SKILL.md").exists());
+		assert!(root.join(".aghub/uni-skill/SKILL.md").exists());
 		// Claude's own dir holds a symlink that resolves to the master.
 		let link = root.join(".claude/skills/uni-skill");
 		assert!(std::fs::symlink_metadata(&link)
@@ -1963,7 +1941,7 @@ mod tests {
 		// First install must succeed.
 		mgr.add_skill_universal(skill.clone()).unwrap();
 
-		let master = root.join(".agents/skills/idem-skill");
+		let master = root.join(".aghub/idem-skill");
 		let link = root.join(".claude/skills/idem-skill");
 		assert!(
 			master.join("SKILL.md").exists(),
@@ -2037,7 +2015,7 @@ mod tests {
 		skill.description = Some("manual test".to_string());
 		mgr.add_skill(skill).unwrap();
 
-		assert!(root.join(".agents/skills/manual-skill/SKILL.md").exists());
+		assert!(root.join(".aghub/manual-skill/SKILL.md").exists());
 		let link = root.join(".claude/skills/manual-skill");
 		assert!(std::fs::symlink_metadata(&link)
 			.unwrap()
@@ -2078,7 +2056,7 @@ mod tests {
 
 		mgr.add_skill_from_path(&src.join("SKILL.md")).unwrap();
 
-		let canonical = root.join(".agents/skills/my-skill");
+		let canonical = root.join(".aghub/my-skill");
 		let link = root.join(".claude/skills/my-skill");
 		assert!(canonical.join("SKILL.md").exists(), "Master materialized");
 		assert!(
@@ -2111,7 +2089,7 @@ mod tests {
 		skill.description = Some("manual create test".to_string());
 		mgr.add_skill(skill).unwrap();
 
-		let canonical = root.join(".agents/skills/manual-skill");
+		let canonical = root.join(".aghub/manual-skill");
 		let link = root.join(".claude/skills/manual-skill");
 		assert!(
 			canonical.join("SKILL.md").exists(),
@@ -2129,14 +2107,13 @@ mod tests {
 		);
 	}
 
-	// T3: a project NativeReader (OpenCode reads `.agents/skills` directly) must
-	// receive the Master ONLY — no redundant per-agent symlink in its own dir —
-	// matching the fetched/desktop install path's classify-based behaviour. The
-	// old `agent_write_dir == canonical_dir` check missed read-only-master
-	// NativeReaders (OpenCode writes `.opencode/skills` but reads `.agents`).
+	// OpenCode used to be a project NativeReader: it writes `.opencode/skills`
+	// but READ `.agents/skills`, so an install gave it the Master and no link of
+	// its own — along with nine other agents reading that same directory. Now it
+	// gets its own Referrer into the store and the shared slot stays untouched.
 	#[cfg(unix)]
 	#[test]
-	fn add_skill_native_reader_writes_master_without_link() {
+	fn add_skill_opencode_gets_its_own_referrer_into_the_store() {
 		use crate::create_adapter;
 		use crate::models::AgentType;
 
@@ -2153,12 +2130,19 @@ mod tests {
 		skill.description = Some("native reader test".to_string());
 		mgr.add_skill(skill).unwrap();
 
-		// Master materialized once under `.agents/skills`.
-		assert!(root.join(".agents/skills/native-skill/SKILL.md").exists());
-		// OpenCode reads the Master directly → NO link in its own skills dir.
+		// Master materialized once in the store — NOT in `.agents/skills`,
+		// which is what made storing equal granting.
+		assert!(root.join(".aghub/native-skill/SKILL.md").exists());
 		assert!(
-			!root.join(".opencode/skills/native-skill").exists(),
-			"NativeReader must not get a redundant per-agent link"
+			std::fs::symlink_metadata(root.join(".agents/skills/native-skill"))
+				.is_err(),
+			"no shared-slot agent was targeted, so nothing may occupy the slot"
+		);
+		// OpenCode now gets its OWN Referrer — it used to get none at all,
+		// reading the Master through `.agents/skills` along with four others.
+		assert!(
+			Linker::is_link(&root.join(".opencode/skills/native-skill")),
+			"OpenCode must hold its own link into the store"
 		);
 		// Still recorded with universal provenance.
 		assert!(mgr
@@ -2166,8 +2150,12 @@ mod tests {
 			.unwrap()
 			.canonical_path
 			.is_some());
-		// And the classifier agrees this agent needs no link.
-		assert!(mgr.skill_target_is_native_reader());
+		// OpenCode's dir is private, so this grant reaches nobody else.
+		assert!(
+			mgr.skill_target_shares_with().is_empty(),
+			"got {:?}",
+			mgr.skill_target_shares_with()
+		);
 	}
 
 	#[test]
@@ -2218,7 +2206,7 @@ mod tests {
 	fn remove_skill_path_unlinks_junction_keeps_master() {
 		use crate::skills::linker::create_junction;
 		let tmp = tempfile::tempdir().unwrap();
-		let master = tmp.path().join(".agents/skills/foo");
+		let master = tmp.path().join(".aghub/foo");
 		std::fs::create_dir_all(&master).unwrap();
 		std::fs::write(master.join("SKILL.md"), "---\nname: foo\n---\n")
 			.unwrap();
@@ -2336,7 +2324,7 @@ mod tests {
 		skill.description = Some("test".to_string());
 		mgr.add_skill_universal(skill).unwrap();
 
-		let canonical = root.join(".agents/skills/rm-test/SKILL.md");
+		let canonical = root.join(".aghub/rm-test/SKILL.md");
 		let link = root.join(".claude/skills/rm-test");
 		assert!(canonical.exists());
 		assert!(std::fs::symlink_metadata(&link)
@@ -2404,9 +2392,9 @@ mod tests {
 		skill.description = Some("test".to_string());
 		mgr.add_skill_universal(skill).unwrap();
 
-		// Cursor discovers the skill from .agents/skills/ on load (Cursor
-		// scans that directory). No need to install again — the canonical is
-		// shared and Cursor reads it directly.
+		// Cursor must NOT see it. Installing for Claude used to hand the skill
+		// to Cursor too, because both read `.agents/skills` and that directory
+		// held the Master. This assertion pinned that leak as a feature.
 		let mut mgr2 = ConfigManager::new(
 			create_adapter(AgentType::Cursor),
 			false,
@@ -2414,16 +2402,17 @@ mod tests {
 		);
 		mgr2.load().unwrap();
 		assert!(
-			mgr2.config
+			!mgr2
+				.config
 				.as_ref()
 				.unwrap()
 				.skills
 				.iter()
 				.any(|s| s.name == "multi-ref"),
-			"Cursor should discover multi-ref from .agents/skills/ on load"
+			"Cursor was never granted multi-ref and must not see it"
 		);
 
-		let canonical = root.join(".agents/skills/multi-ref/SKILL.md");
+		let canonical = root.join(".aghub/multi-ref/SKILL.md");
 		assert!(canonical.exists());
 
 		// Remove from Claude only
@@ -2433,7 +2422,9 @@ mod tests {
 		assert!(!root.join(".claude/skills/multi-ref").exists());
 		assert!(canonical.exists());
 
-		// Cursor can still discover the skill (canonical is intact)
+		// Cursor still cannot see it — it never could, and the Master surviving
+		// is about the STORE keeping the bytes, not about another agent
+		// silently inheriting them.
 		let mut mgr3 = ConfigManager::new(
 			create_adapter(AgentType::Cursor),
 			false,
@@ -2441,19 +2432,20 @@ mod tests {
 		);
 		mgr3.load().unwrap();
 		assert!(
-			mgr3.config
+			!mgr3
+				.config
 				.as_ref()
 				.unwrap()
 				.skills
 				.iter()
 				.any(|s| s.name == "multi-ref"),
-			"Cursor should still find multi-ref after Claude's removal"
+			"removing Claude's grant must not hand the skill to Cursor"
 		);
 	}
 
-	// The `remove_skill` seam's own guard: a NativeReader (reads
-	// `.agents/skills` directly, so its discovered entry has
-	// `canonical_path = None`) must not `remove_dir_all` a Master another
+	// The `remove_skill` seam's own guard: an agent reading a real directory in
+	// the shared `.agents/skills` slot (so its discovered entry has
+	// `canonical_path = None`) must not `remove_dir_all` content another
 	// agent's symlink still resolves to. Before the guard this returned Ok,
 	// deleted the Master, and left Claude's referrer dangling.
 	#[cfg(unix)]
@@ -2481,10 +2473,22 @@ mod tests {
 		skill.description = Some("test".to_string());
 		claude.add_skill_universal(skill).unwrap();
 
-		let master = root.join(".agents/skills/shared-master");
+		let master = root.join(".aghub/shared-master");
 		let claude_link = root.join(".claude/skills/shared-master");
 		assert!(master.join("SKILL.md").exists());
 		assert!(claude_link.exists());
+
+		// The directly-read Master is gone, but the protection it needed is not:
+		// a real directory in the SHARED `.agents/skills` slot is read by up to
+		// ten agents, and one agent's removal must not `remove_dir_all` it out
+		// from under the rest. Put the skill exactly there.
+		let shared = root.join(".agents/skills/shared-master");
+		std::fs::create_dir_all(&shared).unwrap();
+		std::fs::write(
+			shared.join("SKILL.md"),
+			"---\nname: shared-master\ndescription: test\n---\n",
+		)
+		.unwrap();
 
 		let mut cursor = ConfigManager::new(
 			create_adapter(AgentType::Cursor),
@@ -2497,22 +2501,26 @@ mod tests {
 		assert!(
 			cursor
 				.get_skill("shared-master")
-				.expect("cursor reads the master directly")
+				.expect("cursor reads the shared slot")
 				.canonical_path
 				.is_none(),
-			"a directly-read master must take the remove_dir_all branch"
+			"a real directory in the shared slot takes the remove_dir_all branch"
 		);
 
 		let err = cursor
 			.remove_skill("shared-master")
-			.expect_err("must refuse: Claude's link still points here");
+			.expect_err("must refuse: other slot readers would lose it");
 		assert!(
 			matches!(err, ConfigError::UnsupportedOperation(_)),
 			"unexpected error: {err:?}"
 		);
 		assert!(
+			shared.join("SKILL.md").exists(),
+			"the shared slot must survive a single agent's removal"
+		);
+		assert!(
 			master.join("SKILL.md").exists(),
-			"the shared master must survive"
+			"and so must the store Master"
 		);
 		assert!(
 			claude_link.exists(),
@@ -2520,14 +2528,15 @@ mod tests {
 		);
 	}
 
-	// The case a referrer sweep CANNOT see: a Master with ZERO symlinks that
-	// nine other NativeReaders (Codex, OpenCode, Cline, Warp, …) read directly.
-	// A `dir_has_external_referrer`-only guard returned Ok here and
-	// `remove_dir_all`'d the Master out from under every one of them — silent
-	// loss, with no dangling link left behind to notice it by.
+	// The case a referrer sweep CANNOT see: a real directory in the shared
+	// `.agents/skills` slot with ZERO symlinks pointing at it, which up to ten
+	// agents read simply by scanning that directory. A
+	// `dir_has_external_referrer`-only guard returned Ok here and
+	// `remove_dir_all`'d it out from under every one of them — silent loss, with
+	// no dangling link left behind to notice it by.
 	#[cfg(unix)]
 	#[test]
-	fn remove_skill_refuses_master_other_native_readers_share() {
+	fn remove_skill_refuses_a_shared_slot_other_agents_read() {
 		// `skill_store_roots` (through the guard under test) reads HOME /
 		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
 		// crates/core/AGENTS.md Testing.
@@ -2549,7 +2558,7 @@ mod tests {
 		// The point of the test: nothing links to it.
 		assert!(!root.join(".claude/skills").exists());
 
-		// A second NativeReader that would lose the skill silently.
+		// A second slot reader that would lose the skill silently.
 		let mut opencode = ConfigManager::new(
 			create_adapter(AgentType::OpenCode),
 			false,
@@ -2645,8 +2654,8 @@ mod tests {
 		mgr.update_skill("old-uni", renamed).unwrap();
 
 		// Canonical master is renamed (old gone, new present).
-		assert!(root.join(".agents/skills/new-uni/SKILL.md").exists());
-		assert!(!root.join(".agents/skills/old-uni").exists());
+		assert!(root.join(".aghub/new-uni/SKILL.md").exists());
+		assert!(!root.join(".aghub/old-uni").exists());
 
 		// The old-name agent symlink is fully removed (not left dangling).
 		assert!(
@@ -2715,11 +2724,11 @@ mod tests {
 		// Rolled back: master back under the old name, old-name link restored
 		// and resolving, no half-renamed master left behind.
 		assert!(
-			root.join(".agents/skills/old-uni/SKILL.md").exists(),
+			root.join(".aghub/old-uni/SKILL.md").exists(),
 			"the master must be restored to its old name"
 		);
 		assert!(
-			!root.join(".agents/skills/new-uni").exists(),
+			!root.join(".aghub/new-uni").exists(),
 			"no master may survive under the new name"
 		);
 		let old_link = root.join(".claude/skills/old-uni");
@@ -2808,14 +2817,13 @@ mod tests {
 		// A DIFFERENT (e.g. another skill's) master already occupies the target
 		// name. `fs::rename` onto an empty target dir would silently succeed and
 		// clobber it; the rename must refuse instead.
-		std::fs::create_dir_all(root.join(".agents/skills/collide-new"))
-			.unwrap();
+		std::fs::create_dir_all(root.join(".aghub/collide-new")).unwrap();
 
 		let res = mgr.update_skill("collide-old", Skill::new("collide-new"));
 
 		assert!(res.is_err(), "must refuse to rename onto an existing dir");
 		assert!(
-			root.join(".agents/skills/collide-old/SKILL.md").exists(),
+			root.join(".aghub/collide-old/SKILL.md").exists(),
 			"the original master must be preserved on conflict"
 		);
 	}
@@ -2907,11 +2915,11 @@ mod tests {
 			"a recovered rollback must not emit ManualRestore wording: {msg}"
 		);
 		assert!(
-			root.join(".agents/skills/roll-old/SKILL.md").exists(),
+			root.join(".aghub/roll-old/SKILL.md").exists(),
 			"rollback must rename the master back to its old name"
 		);
 		assert!(
-			!root.join(".agents/skills/roll-new").exists(),
+			!root.join(".aghub/roll-new").exists(),
 			"no half-renamed master may be left behind"
 		);
 		let link = referrer_dir.join("roll-old");
@@ -2956,7 +2964,7 @@ mod tests {
 		// Claude in AgentType::ALL, so Claude's symlink is removed first, then
 		// RooCode's removal fails — forcing the rollback to RESTORE Claude's
 		// already-removed symlink).
-		let master = root.join(".agents/skills/roll2-old");
+		let master = root.join(".aghub/roll2-old");
 		let roo_dir = root.join(".roo/skills");
 		std::fs::create_dir_all(&roo_dir).unwrap();
 		std::os::unix::fs::symlink(&master, roo_dir.join("roll2-old")).unwrap();
@@ -3235,7 +3243,7 @@ mod tests {
 		mgr.load().unwrap();
 
 		// Manually pre-create the canonical with old content
-		let canonical = root.join(".agents/skills/preexist");
+		let canonical = root.join(".aghub/preexist");
 		std::fs::create_dir_all(&canonical).unwrap();
 		std::fs::write(
 			canonical.join("SKILL.md"),
@@ -3283,7 +3291,7 @@ mod tests {
 		skill.description = Some("fresh install".to_string());
 		mgr.add_skill_universal(skill).unwrap();
 
-		let canonical = root.join(".agents/skills/fresh/SKILL.md");
+		let canonical = root.join(".aghub/fresh/SKILL.md");
 		assert!(canonical.exists());
 		let content = std::fs::read_to_string(&canonical).unwrap();
 		assert!(content.contains("fresh install"));
@@ -3333,7 +3341,7 @@ mod tests {
 		assert!(!added.already_installed);
 
 		// Canonical should have the full tree
-		let canonical = root.join(".agents/skills/my-skill");
+		let canonical = root.join(".aghub/my-skill");
 		assert!(canonical.join("SKILL.md").exists());
 		assert!(canonical.join("assets/data.json").exists());
 		assert!(canonical.join("scripts/setup.sh").exists());
@@ -3388,7 +3396,7 @@ mod tests {
 		assert!(!added.already_installed);
 
 		// extra.txt should have been copied to canonical
-		let canonical = root.join(".agents/skills/other-skill");
+		let canonical = root.join(".aghub/other-skill");
 		assert!(canonical.join("extra.txt").exists());
 		assert_eq!(
 			std::fs::read_to_string(canonical.join("extra.txt")).unwrap(),
@@ -3399,7 +3407,7 @@ mod tests {
 	// A `--name` install rewrites the copied Master's frontmatter `name:`. That
 	// is only ever ITS OWN copy: a Master this call did not create belongs to
 	// someone else, and rewriting it would change the folder hash the npx lock
-	// contract is checked against. Here `.agents/skills/renamed` exists but is
+	// contract is checked against. Here `.aghub/renamed` exists but is
 	// discovered under a DIFFERENT name, so the duplicate check cannot see it
 	// and only the materializer's `created_master` receipt catches it.
 	#[cfg(unix)]
@@ -3410,7 +3418,7 @@ mod tests {
 
 		let tmp = tempfile::tempdir().unwrap();
 		let root = tmp.path();
-		let foreign = root.join(".agents/skills/renamed");
+		let foreign = root.join(".aghub/renamed");
 		std::fs::create_dir_all(&foreign).unwrap();
 		std::fs::write(
 			foreign.join("SKILL.md"),
@@ -3464,7 +3472,7 @@ mod tests {
 		let root = tmp.path();
 
 		// Pre-create canonical with old content
-		let canonical = root.join(".agents/skills/shared-skill");
+		let canonical = root.join(".aghub/shared-skill");
 		std::fs::create_dir_all(&canonical).unwrap();
 		std::fs::write(
 			canonical.join("SKILL.md"),
@@ -3498,9 +3506,10 @@ mod tests {
 			"Canonical should not be overwritten: {content}"
 		);
 
-		// Cursor discovers the skill from .agents/skills/ on load (Cursor
-		// scans that directory), confirming the canonical is intact and
-		// accessible to other agents.
+		// Cursor must NOT discover the skill. It was installed for another
+		// agent, and Cursor now has its own Referrer directory rather than
+		// reading the store. This assertion used to say the opposite — it
+		// pinned the leak as a feature.
 		let mut mgr2 = ConfigManager::new(
 			create_adapter(AgentType::Cursor),
 			false,
@@ -3508,13 +3517,14 @@ mod tests {
 		);
 		mgr2.load().unwrap();
 		assert!(
-			mgr2.config
+			!mgr2
+				.config
 				.as_ref()
 				.unwrap()
 				.skills
 				.iter()
 				.any(|s| s.name == "shared-skill"),
-			"Cursor should discover shared-skill from .agents/skills/ on load"
+			"Cursor was never granted shared-skill and must not see it"
 		);
 	}
 
@@ -4291,8 +4301,8 @@ mod tests {
 	// T3: exhaustive branch coverage of the helper that maps the shared
 	// materializer's single-agent result onto the CLI add path's historical
 	// error contract. NeedsLink-ok -> Ok; NeedsLink-error -> Err(resource_exists);
-	// NativeReader / Unsupported -> Ok regardless of the result (the agent reads
-	// the Master directly, or had no writable dir — neither was ever an error).
+	// Unsupported -> Ok regardless of the result (no writable dir was never an
+	// error). The `NativeReader` arm went with the variant.
 	#[test]
 	fn ensure_single_agent_installed_covers_every_branch() {
 		use crate::models::AgentType;
@@ -4300,7 +4310,7 @@ mod tests {
 		use crate::skills::linker::LinkNeed;
 
 		let needs_link = LinkNeed::NeedsLink {
-			agent_skills_dir: PathBuf::from("/x"),
+			referrer_dir: PathBuf::from("/x"),
 		};
 
 		// NeedsLink + error-free result -> Ok.
@@ -4340,14 +4350,6 @@ mod tests {
 			"s"
 		)
 		.is_err());
-
-		// NativeReader -> Ok even with a soft-failure result (never an error).
-		assert!(ConfigManager::ensure_single_agent_installed(
-			&conflict,
-			&LinkNeed::NativeReader,
-			"s"
-		)
-		.is_ok());
 
 		// Unsupported -> Ok (defensive arm only: the add path never reaches
 		// this helper — the materialize preflight hard-errors first; that
@@ -4425,9 +4427,8 @@ mod tests {
 		install_fetched_skill_and_lock(req).unwrap();
 
 		// The canonical Master SKILL.md must be byte-identical across paths.
-		let cli_master = cli_root.join(".agents/skills/parity-skill/SKILL.md");
-		let fetched_master =
-			fetched_root.join(".agents/skills/parity-skill/SKILL.md");
+		let cli_master = cli_root.join(".aghub/parity-skill/SKILL.md");
+		let fetched_master = fetched_root.join(".aghub/parity-skill/SKILL.md");
 		let cli_bytes = std::fs::read(&cli_master).unwrap();
 		let fetched_bytes = std::fs::read(&fetched_master).unwrap();
 		assert_eq!(
@@ -4444,12 +4445,11 @@ mod tests {
 		// The asset must survive on both (whole-tree copy, not SKILL.md only).
 		assert_eq!(
 			std::fs::read_to_string(
-				cli_root.join(".agents/skills/parity-skill/assets/data.json")
+				cli_root.join(".aghub/parity-skill/assets/data.json")
 			)
 			.unwrap(),
 			std::fs::read_to_string(
-				fetched_root
-					.join(".agents/skills/parity-skill/assets/data.json")
+				fetched_root.join(".aghub/parity-skill/assets/data.json")
 			)
 			.unwrap(),
 		);

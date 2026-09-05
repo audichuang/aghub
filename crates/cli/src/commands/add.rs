@@ -8,16 +8,22 @@ use std::path::PathBuf;
 
 use super::parse_mcp_transport;
 
-/// After a skill add, tell the user when the target agent reads the
-/// `.agents/skills` master directly (a NativeReader) and so got the master only,
-/// with no per-agent symlink — the CLI equivalent of the desktop "already
-/// covered" chip.
-fn note_if_native_reader(manager: &ConfigManager) {
-	if manager.skill_target_is_native_reader() {
+/// After a skill add, tell the user when the Referrer just written is SHARED —
+/// several agents read the same directory, so this grant reached all of them.
+///
+/// This replaces the old "already covered" note. That note described the leak as
+/// a feature: those agents got the skill because storing it granted it, and the
+/// user had no way to opt out. Now they get it only when their slot is written,
+/// and the ones sharing that slot are named.
+fn note_shared_slot(manager: &ConfigManager) {
+	let shared = manager.skill_target_shares_with();
+	if !shared.is_empty() {
 		eprintln!(
-			"note: agent '{}' reads the .agents/skills master directly; \
-			 no per-agent link was created (already covered)",
-			manager.agent_name()
+			"note: agent '{}' shares its skills directory with {}; they can \
+			 read this skill too, and removing it from one removes it from all \
+			 of them (their own agents provide no separate directory)",
+			manager.agent_name(),
+			shared.join(", ")
 		);
 	}
 }
@@ -70,23 +76,15 @@ pub fn execute(
 				)?;
 				let skill = added.skill;
 
-				if added.already_installed
-					&& !manager.skill_target_is_native_reader()
-				{
+				if added.already_installed {
 					// The install wrote NOTHING: the Master was already there.
 					// Say so, because the payload below reports that untouched
 					// Master and a user who just edited the source would
 					// otherwise read it as a successful overwrite.
 					//
-					// NOT for a NativeReader: that agent reads the Master
-					// directly, so it no-ops the moment ANY agent has the skill
-					// — including a sibling row of this very `-a a,b` run, which
-					// just installed it from this same source. There is no drift
-					// to warn about there, and `note_if_native_reader` below
-					// already explains the coverage.
 					eprintln!(
 						"note: nothing was written — the existing \
-						 .agents/skills master was left as-is. To take the \
+						 master was left as-is. To take the \
 						 source's current content, delete the skill \
 						 (aghub-cli delete skills {} --yes) and remove the \
 						 master it reports as kept, then add it again.",
@@ -95,12 +93,18 @@ pub fn execute(
 				}
 
 				eprintln_verbose!("Skill '{}' added successfully", skill.name);
-				note_if_native_reader(manager);
+				note_shared_slot(manager);
 				// An idempotent re-add is a no-op, and both the human verb
 				// ("added" vs "already installed") and a scripted caller need
 				// to tell it from a real install.
 				let view = aghub_core::dto::SkillView::from(&skill)
-					.with_native_reader(manager.skill_target_is_native_reader())
+					.with_shared_with(
+						manager
+							.skill_target_shares_with()
+							.iter()
+							.map(|s| (*s).to_string())
+							.collect(),
+					)
 					// No `&& !renamed` correction any more: an explicit
 					// `--name` that finds the name taken is now an ERROR, so a
 					// successful rename can never report `already_installed`.
@@ -118,7 +122,7 @@ pub fn execute(
 				skill.tools = tools;
 				let added = manager.add_skill(skill)?;
 				eprintln_verbose!("Skill added successfully");
-				note_if_native_reader(manager);
+				note_shared_slot(manager);
 				// Serialize the skill the manager reports on disk, NOT the one
 				// that was requested, and carry `already_installed` through.
 				// This branch used to build the view from the request and hard-
@@ -136,7 +140,13 @@ pub fn execute(
 					);
 				}
 				let view = aghub_core::dto::SkillView::from(&added.skill)
-					.with_native_reader(manager.skill_target_is_native_reader())
+					.with_shared_with(
+						manager
+							.skill_target_shares_with()
+							.iter()
+							.map(|s| (*s).to_string())
+							.collect(),
+					)
 					.with_already_installed(added.already_installed);
 				serde_json::to_value(&view)?
 			}

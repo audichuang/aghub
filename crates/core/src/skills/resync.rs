@@ -522,7 +522,7 @@ mod tests {
 
 		let tmp = tempfile::tempdir().unwrap();
 		let project = tmp.path().join("project");
-		let master = project.join(".agents/skills/sync-me");
+		let master = project.join(".aghub/sync-me");
 		let referrers = [
 			project.join(".claude/skills/sync-me"),
 			project.join(".cursor/skills/sync-me"),

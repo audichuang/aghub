@@ -5,7 +5,7 @@
 
 pub mod classify;
 pub use classify::{
-	agent_link_need, classify_agent, classify_all, AgentLinkPlan,
+	agent_link_need, classify_agent, classify_all, shared_with, AgentLinkPlan,
 	AgentSkillCoverageView, LinkNeed,
 };
 

@@ -892,10 +892,10 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let target_agents: Vec<AgentType> = match &selection {
 		AgentSelection::All => {
 			use aghub_core::skills::linker::{
-				agent_link_need, universal_canonical_dir, LinkNeed,
+				agent_link_need, master_store_dir, LinkNeed,
 			};
-			let master = universal_canonical_dir(project_root.as_deref())
-				.ok_or_else(|| {
+			let master =
+				master_store_dir(project_root.as_deref()).ok_or_else(|| {
 					anyhow::anyhow!(
 						"could not resolve the universal master skills \
 						 directory"
@@ -912,12 +912,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 				.copied()
 				.filter(|d| {
 					!matches!(
-						agent_link_need(
-							d,
-							scope,
-							project_root.as_deref(),
-							&master,
-						),
+						agent_link_need(d, scope, project_root.as_deref()),
 						LinkNeed::Unsupported
 					)
 				})

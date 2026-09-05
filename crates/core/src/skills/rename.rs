@@ -15,7 +15,7 @@
 
 use crate::models::ResourceScope;
 use crate::skills::install_fetched::FetchedSkillInstallReport;
-use crate::skills::linker::{universal_canonical_dir, LinkTarget, Linker};
+use crate::skills::linker::{master_store_dir, LinkTarget, Linker};
 use std::path::{Path, PathBuf};
 
 /// Machine code surfaced when a rename target already exists (lock entry or
@@ -700,7 +700,7 @@ fn new_name_exists_in_scope(
 	} else {
 		None
 	};
-	if let Some(master) = universal_canonical_dir(canonical_root) {
+	if let Some(master) = master_store_dir(canonical_root) {
 		targets.push(master.join(&safe));
 	}
 	targets.iter().any(|p| std::fs::symlink_metadata(p).is_ok())
@@ -805,7 +805,7 @@ fn snapshot_old_skill(
 	} else {
 		None
 	};
-	if let Some(master) = universal_canonical_dir(canonical_root) {
+	if let Some(master) = master_store_dir(canonical_root) {
 		targets.push(master.join(&safe));
 	}
 
@@ -924,7 +924,7 @@ pub fn rollback_materialized_install(
 	} else {
 		None
 	};
-	if let Some(canonical_dir) = universal_canonical_dir(canonical_root) {
+	if let Some(canonical_dir) = master_store_dir(canonical_root) {
 		let canonical = canonical_dir.join(&safe);
 		if canonical.exists()
 			&& crate::skills::removal::assert_contained(&canonical, &roots)
@@ -1085,7 +1085,7 @@ mod tests {
 	fn rollback_keeps_a_master_and_referrer_it_did_not_create() {
 		let tmp = tempfile::tempdir().unwrap();
 		let root = tmp.path();
-		let master = universal_canonical_dir(Some(root)).unwrap();
+		let master = master_store_dir(Some(root)).unwrap();
 		let mine = root.join(".claude/skills");
 		let theirs = root.join(".other/skills");
 		std::fs::create_dir_all(&master).unwrap();
@@ -1138,7 +1138,7 @@ mod tests {
 		let tmp = tempfile::tempdir().unwrap();
 		let root = tmp.path();
 		let claude = root.join(".claude/skills");
-		let master = universal_canonical_dir(Some(root)).unwrap();
+		let master = master_store_dir(Some(root)).unwrap();
 		std::fs::create_dir_all(&claude).unwrap();
 		std::fs::create_dir_all(&master).unwrap();
 		// Universal layout for old-skill: Master (real dir) + Claude referrer

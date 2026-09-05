@@ -2,9 +2,12 @@
 //!
 //! [`SkillView`] is the single source of truth for the field list both the CLI
 //! (`describe`/`add` output) and the API (`SkillResponse`) serialize from a
-//! [`Skill`]. The `native_reader` advisory (target agent reads the `.agents`
-//! Master directly, so no per-agent symlink is created) is a DTO field both
-//! surfaces can emit instead of only the CLI's stderr note.
+//! [`Skill`]. The `shared_with` advisory (this grant also reaches these other
+//! agents, because they read the SAME Referrer directory) is a DTO field both
+//! surfaces emit instead of only the CLI's stderr note. It replaces the old
+//! `native_reader` boolean, which answered "does this agent see the Master
+//! without a link" — a question with no answer once the Master moved to a store
+//! nothing reads.
 //!
 //! Serde defaults to snake_case. No ts-rs here — the ts-rs `SkillResponse`
 //! stays in `crates/api` as a thin wrapper over this view.
@@ -12,7 +15,7 @@
 use crate::models::{ConfigSource, Skill};
 use serde::Serialize;
 
-/// Wire view of a [`Skill`] plus the `native_reader` install advisory.
+/// Wire view of a [`Skill`] plus the `shared_with` install advisory.
 ///
 /// The `skip_serializing_if` attributes here must mirror the api
 /// `SkillResponse` exactly (`canonical_path`/`source`/`agent` skipped when
@@ -35,10 +38,11 @@ pub struct SkillView {
 	pub source: Option<ConfigSource>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub agent: Option<String>,
-	/// Advisory: the target agent is a NativeReader (reads the `.agents`
-	/// master directly), so a universal install writes only the master with
-	/// no per-agent link.
-	pub native_reader: bool,
+	/// Advisory: other agents that receive this skill through the SAME Referrer
+	/// directory. Empty for a private dir. Non-empty is the disclosure a user
+	/// needs BEFORE granting — and before a later removal takes it from all of
+	/// them at once.
+	pub shared_with: Vec<String>,
 	/// Advisory: the install that produced this view was a no-op — the skill
 	/// was already present, so NOTHING was written and every field above
 	/// describes the EXISTING master, not the source that was submitted.
@@ -59,7 +63,7 @@ impl From<&Skill> for SkillView {
 			tools: skill.tools.clone(),
 			source: skill.config_source,
 			agent: None,
-			native_reader: false,
+			shared_with: Vec::new(),
 			already_installed: false,
 		}
 	}
@@ -72,9 +76,9 @@ impl SkillView {
 		self
 	}
 
-	/// Set the `native_reader` install advisory.
-	pub fn with_native_reader(mut self, v: bool) -> Self {
-		self.native_reader = v;
+	/// Set the `shared_with` install advisory.
+	pub fn with_shared_with(mut self, v: Vec<String>) -> Self {
+		self.shared_with = v;
 		self
 	}
 
@@ -90,28 +94,28 @@ mod tests {
 	use super::*;
 
 	#[test]
-	fn skill_view_serializes_snake_case_and_native_reader_field() {
+	fn skill_view_serializes_snake_case_and_shared_with_field() {
 		let mut skill = Skill::new("foo");
 		skill.source_path = Some("~/.claude/skills/foo/SKILL.md".to_string());
 		skill.config_source = Some(ConfigSource::Global);
 		let view = SkillView::from(&skill);
 		let json = serde_json::to_value(&view).unwrap();
 		assert!(json.get("source_path").is_some(), "snake_case key present");
-		assert_eq!(json["native_reader"], serde_json::json!(false));
+		assert_eq!(json["shared_with"], serde_json::json!([]));
 		assert_eq!(json["source"], serde_json::json!("global"));
 		assert!(json.get("content").is_none(), "content not on the view");
 	}
 
 	#[test]
-	fn with_agent_and_native_reader_builders_set_fields() {
+	fn with_agent_and_shared_with_builders_set_fields() {
 		let skill = Skill::new("foo");
 		let view = SkillView::from(&skill)
 			.with_agent("claude")
-			.with_native_reader(true);
+			.with_shared_with(vec!["warp".to_string()]);
 		assert_eq!(view.agent.as_deref(), Some("claude"));
-		assert!(view.native_reader);
+		assert_eq!(view.shared_with, vec!["warp".to_string()]);
 		let json = serde_json::to_value(&view).unwrap();
 		assert_eq!(json["agent"], serde_json::json!("claude"));
-		assert_eq!(json["native_reader"], serde_json::json!(true));
+		assert_eq!(json["shared_with"], serde_json::json!(["warp"]));
 	}
 }

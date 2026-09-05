@@ -19,7 +19,7 @@ use std::path::{Path, PathBuf};
 use crate::models::ResourceScope;
 use crate::skills::linker::classify::{classify_agent, LinkNeed};
 use crate::skills::linker::{
-	install_universal, universal_canonical_dir, LinkTarget, Linker,
+	install_universal, master_store_dir, LinkTarget, Linker,
 };
 use crate::skills::skill_source_root;
 use crate::skills::update::{detect_rename, skill_renamed_message};
@@ -419,7 +419,7 @@ pub fn install_fetched_skill_and_lock(
 	} else {
 		None
 	};
-	let canonical = universal_canonical_dir(canonical_root)
+	let canonical = master_store_dir(canonical_root)
 		.map(|skills_dir| skills_dir.join(&safe_name));
 	let existing_owner = skill_lock_source(&name, req.scope, req.project_root);
 	if let Some(existing_owner) = existing_owner.as_ref() {
@@ -625,8 +625,7 @@ pub fn materialize_universal_master(
 	} else {
 		None
 	};
-	let Some(canonical_skills_dir) = universal_canonical_dir(canonical_root)
-	else {
+	let Some(canonical_skills_dir) = master_store_dir(canonical_root) else {
 		let results = target_agents
 			.iter()
 			.map(|&agent| AgentInstallResult {
@@ -651,16 +650,7 @@ pub fn materialize_universal_master(
 		.iter()
 		.map(|&agent| {
 			let descriptor = crate::registry::get(agent);
-			(
-				agent,
-				classify_agent(
-					descriptor,
-					scope,
-					project_root,
-					&canonical_skills_dir,
-				)
-				.need,
-			)
+			(agent, classify_agent(descriptor, scope, project_root).need)
 		})
 		.collect();
 	if plans.is_empty() {
@@ -686,14 +676,20 @@ pub fn materialize_universal_master(
 			_ => Ok(()),
 		},
 		|plans| {
+			// Dedup: up to eight agents resolve to the SAME shared
+			// `.agents/skills`, and asking the linker to create one link eight
+			// times makes seven of them report `AlreadyLinked` against work this
+			// very call just did.
+			let mut seen = std::collections::HashSet::new();
 			let symlink_dirs = plans
 				.iter()
 				.filter_map(|(_, need)| match need {
-					LinkNeed::NeedsLink { agent_skills_dir } => {
-						Some(agent_skills_dir.clone())
+					LinkNeed::NeedsLink { referrer_dir } => {
+						Some(referrer_dir.clone())
 					}
 					_ => None,
 				})
+				.filter(|dir| seen.insert(dir.clone()))
 				.collect::<Vec<_>>();
 			let install = install_universal(
 				source_root,
@@ -722,20 +718,33 @@ pub fn materialize_universal_master(
 				.iter()
 				.filter_map(|link| link.parent().map(Path::to_path_buf))
 				.collect::<std::collections::HashSet<_>>();
-			// The linker's own record of what it linked -- the only sound
-			// attribution for a rollback.
+			// The linker's own record of what it CREATED -- the only sound
+			// attribution for a rollback. Deliberately excludes
+			// `already_linked`: rolling back a link this call did not create
+			// would remove a grant that was already there.
 			created_referrer_dirs = linked_dirs.iter().cloned().collect();
-			Ok((failed_by_dir, conflict_dirs, linked_dirs))
+			// Attribution is a different question from rollback. An agent whose
+			// slot was ALREADY correctly linked is installed — it can read the
+			// skill. Folding these in became load-bearing the moment
+			// `NativeReader` was deleted: eight agents now share one
+			// `.agents/skills` slot, so one is `Linked` and seven are
+			// `AlreadyLinked`, and reporting those seven as
+			// `installed: false, error: None` is a first-install failure with no
+			// error attached.
+			let mut present_dirs = linked_dirs.clone();
+			present_dirs.extend(
+				install
+					.already_linked
+					.iter()
+					.filter_map(|link| link.parent().map(Path::to_path_buf)),
+			);
+			Ok((failed_by_dir, conflict_dirs, present_dirs))
 		},
 		|&(agent, ref need), prepared| {
 			let result = match need {
-				LinkNeed::NativeReader => AgentInstallResult {
-					agent,
-					installed: true,
-					error: None,
-				},
-				LinkNeed::NeedsLink { agent_skills_dir } => {
-					let (failed_by_dir, conflict_dirs, linked_dirs) = prepared;
+				LinkNeed::NeedsLink { referrer_dir } => {
+					let (failed_by_dir, conflict_dirs, present_dirs) = prepared;
+					let agent_skills_dir = referrer_dir;
 					if let Some(message) = failed_by_dir.get(agent_skills_dir) {
 						AgentInstallResult {
 							agent,
@@ -755,7 +764,7 @@ pub fn materialize_universal_master(
 					} else {
 						AgentInstallResult {
 							agent,
-							installed: linked_dirs.contains(agent_skills_dir),
+							installed: present_dirs.contains(agent_skills_dir),
 							error: None,
 						}
 					}
@@ -845,7 +854,7 @@ mod nocopy_tests {
 		let report = install_fetched_skill_and_lock(req).unwrap();
 		assert_eq!(report.name, "my-skill");
 
-		let canonical = root.join(".agents/skills/my-skill");
+		let canonical = root.join(".aghub/my-skill");
 		let link = root.join(".claude/skills/my-skill");
 		assert!(Linker::is_link(&link), "agent dir must hold a link");
 		fs::write(canonical.join("sentinel.txt"), "live").unwrap();

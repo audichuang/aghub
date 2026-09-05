@@ -13,7 +13,7 @@ use aghub_core::{
 	registry,
 	skills::linker::{
 		classify::{agent_link_need, LinkNeed},
-		universal_canonical_dir, Linker,
+		master_store_dir, Linker,
 	},
 };
 use anyhow::{anyhow, Result};
@@ -38,7 +38,18 @@ enum MasterState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum AgentLinkState {
-	AutoCovered,
+	/// The agent holds no Referrer while the Master is healthy — the skill is
+	/// installed and deliberately NOT granted to this agent.
+	///
+	/// This is the state the whole `.aghub` store exists to make expressible, so
+	/// it is NOT an issue. It replaces `AutoCovered`, whose question ("does this
+	/// agent read the Master without a link") stopped having an answer when the
+	/// Master moved to a store nothing reads.
+	///
+	/// Under D8 (no persisted authorization) `Withheld` is indistinguishable
+	/// from a grant the user removed by hand. Accepted: the alternative is a
+	/// second source of truth that drifts, and a doctor that cries wolf.
+	Withheld,
 	Unsupported,
 	Linked,
 	Missing,
@@ -61,7 +72,7 @@ enum AgentLinkState {
 impl AgentLinkState {
 	fn label(self) -> &'static str {
 		match self {
-			Self::AutoCovered => "auto-covered",
+			Self::Withheld => "withheld",
 			Self::Unsupported => "unsupported",
 			Self::Linked => "linked",
 			Self::Missing => "missing",
@@ -106,7 +117,7 @@ impl AgentLinkState {
 	/// a skill at all.
 	fn is_issue(self) -> bool {
 		match self {
-			Self::AutoCovered | Self::Unsupported | Self::Linked => false,
+			Self::Withheld | Self::Unsupported | Self::Linked => false,
 			Self::Missing
 			| Self::Dangling
 			| Self::ForeignLink
@@ -273,36 +284,12 @@ fn audit_agent_links(
 	let agents = agents
 		.iter()
 		.map(|agent| {
-			let need = agent_link_need(
-				registry::get(*agent),
-				scope,
-				project_root,
-				master,
-			);
+			let need =
+				agent_link_need(registry::get(*agent), scope, project_root);
 			let (state, path) = match need {
-				LinkNeed::NativeReader => {
-					// A master that is itself a symlink is a SUPPORTED layout
-					// (it has its own `health` label), so `== Dir` wrongly
-					// called it `missing` for every Master-reading agent. But
-					// `master_state` uses `symlink_metadata`, so a DANGLING
-					// symlink also reports `Link` — and simply accepting
-					// `!= Missing` then certified a broken tree as
-					// `autoCovered` while `get skills` returned `[]`. That is
-					// precisely the false green `--verify-links` exists to
-					// prevent.
-					//
-					// So: resolve it. Covered when the master actually leads to
-					// a readable skill; missing when it does not, however it is
-					// spelled on disk.
-					let state = if master_skill.join("SKILL.md").is_file() {
-						AgentLinkState::AutoCovered
-					} else {
-						AgentLinkState::Missing
-					};
-					(state, Some(master_skill.to_string_lossy().into_owned()))
-				}
 				LinkNeed::Unsupported => (AgentLinkState::Unsupported, None),
-				LinkNeed::NeedsLink { agent_skills_dir } => {
+				LinkNeed::NeedsLink { referrer_dir } => {
+					let agent_skills_dir = referrer_dir;
 					let mut state = inspect_agent_link(
 						&master_skill,
 						&agent_skills_dir,
@@ -317,11 +304,21 @@ fn audit_agent_links(
 					// `Dangling` deliberately does NOT downgrade: it is a real
 					// artifact a relink replaces.
 					if state == AgentLinkState::Missing
-						&& !tracked && !matches!(
-						master_state(&master_skill),
-						MasterState::Missing
-					) {
-						state = AgentLinkState::OrphanMaster;
+						&& !matches!(
+							master_state(&master_skill),
+							MasterState::Missing
+						) {
+						// An absent slot beside a live Master is either a
+						// leftover (untracked: nothing to relink FROM) or the
+						// withheld state this feature exists to create. Neither
+						// is a missing link, and the blanket
+						// `source sync --install-missing` advice would
+						// reinstall a skill the user deliberately narrowed.
+						state = if tracked {
+							AgentLinkState::Withheld
+						} else {
+							AgentLinkState::OrphanMaster
+						};
 					}
 					(
 						state,
@@ -543,7 +540,7 @@ pub fn execute_with_options(
 				project_locked(locks.project.take().unwrap_or_default()),
 			),
 		};
-		if let Some(master) = universal_canonical_dir(root) {
+		if let Some(master) = master_store_dir(root) {
 			let mut scope_rows = build_rows(
 				crate::commands::source::scope_label(scope),
 				&master,

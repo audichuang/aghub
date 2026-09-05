@@ -9,9 +9,7 @@
 //! defined in one place and can never drift.
 
 use aghub_core::skills::linker::classify::{classify_all, LinkNeed};
-use aghub_core::skills::linker::{
-	universal_canonical_dir, AgentSkillCoverageView,
-};
+use aghub_core::skills::linker::{master_store_dir, AgentSkillCoverageView};
 use anyhow::Result;
 use tabled::builder::Builder;
 use tabled::settings::Style;
@@ -27,13 +25,7 @@ pub fn execute(resolved: &crate::Scope, json: bool) -> Result<()> {
 	let project_root = resolved.project_root();
 	let scope_str = resolved.label();
 
-	let master = universal_canonical_dir(project_root).ok_or_else(|| {
-		anyhow::anyhow!(
-			"could not resolve the universal master skills directory"
-		)
-	})?;
-
-	let plans = classify_all(scope, project_root, &master);
+	let plans = classify_all(scope, project_root);
 
 	if json {
 		let rows: Vec<_> = plans
@@ -44,25 +36,26 @@ pub fn execute(resolved: &crate::Scope, json: bool) -> Result<()> {
 		return Ok(());
 	}
 
+	// "READS MASTER" / "WRITES MASTER" / "AUTO COVERED" are gone with
+	// `LinkNeed::NativeReader`: against a store nothing reads they would print
+	// three constants. SHARES WITH replaces them with the fact a user acts on —
+	// granting here grants to those agents too, and revoking here revokes from
+	// all of them.
 	let mut builder = Builder::default();
-	builder.push_record([
-		"AGENT",
-		"READS MASTER",
-		"WRITES MASTER",
-		"NEEDS LINK",
-		"AUTO COVERED",
-		"SUPPORTED",
-	]);
+	builder.push_record(["AGENT", "SUPPORTED", "REFERRER DIR", "SHARES WITH"]);
 	for p in &plans {
-		let yn = |b: bool| if b { "yes" } else { "no" }.to_string();
-		builder.push_record([
-			p.agent_id.to_string(),
-			yn(p.reads_master),
-			yn(p.writes_master),
-			yn(matches!(p.need, LinkNeed::NeedsLink { .. })),
-			yn(matches!(p.need, LinkNeed::NativeReader)),
-			yn(!matches!(p.need, LinkNeed::Unsupported)),
-		]);
+		let (supported, dir) = match &p.need {
+			LinkNeed::NeedsLink { referrer_dir } => {
+				("yes".to_string(), referrer_dir.display().to_string())
+			}
+			LinkNeed::Unsupported => ("no".to_string(), "-".to_string()),
+		};
+		let shares = if p.shared_with.is_empty() {
+			"-".to_string()
+		} else {
+			p.shared_with.join(", ")
+		};
+		builder.push_record([p.agent_id.to_string(), supported, dir, shares]);
 	}
 	let mut table = builder.build();
 	table.with(Style::sharp());
