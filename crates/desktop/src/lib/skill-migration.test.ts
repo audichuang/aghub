@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { RepairReportDto, RepairResponse } from "../generated/dto";
 import {
+	isBlocked,
 	migrationBannerModel,
 	migrationRowFacts,
 	migrationSummary,
@@ -134,4 +135,25 @@ test("an all-refused preview promises no store path", () => {
 test("a windows master path is cut at its own separator", () => {
 	const s = migrationSummary([row({ master: "C:\\Users\\u\\.aghub\\a" })]);
 	assert.equal(s.masterParent, "C:\\Users\\u\\.aghub");
+});
+
+// `failed` is a second blocked kind: core keeps it apart from `refused` because
+// re-running helps only for one of them, but the dialog owes the user the same
+// treatment for both — and the summary must not count either as migrating.
+test("a failed row is blocked exactly like a refused one", () => {
+	const failed = row({
+		outcome: "failed",
+		reason: "Permission denied",
+		fix: "fix the permission, then re-run",
+	});
+	assert.equal(isBlocked(failed), true);
+	const facts = migrationRowFacts(failed);
+	assert.equal(facts.refused, true, "it renders through the blocked branch");
+	assert.equal(facts.master, null, "nothing landed; promise no path");
+	assert.equal(facts.linkCount, 0);
+
+	const s = migrationSummary([row({ name: "ok" }), failed]);
+	assert.equal(s.migrating, 1);
+	assert.equal(s.refused, 1, "blocked is blocked, whichever kind");
+	assert.equal(s.totalLinks, 1, "a failed row promises no links");
 });

@@ -1308,6 +1308,11 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} 个技能已移到 {{path}},并建立 {{links}} 个各自的 agent 链接。",
 	skillLayoutRowLinks: "{{count}} 个链接",
+	skillLayoutApplyN: "迁移 {{count}} 个",
+	skillLayoutSummaryBlocked:
+		"有 {{count}} 个技能需要你处理,下面列出了该怎么做。",
+	skillRepairOutcome_failed: "没能迁移",
+	skillRepairOutcome_done_failed: "没能迁移",
 	skillLayoutMigrateFailed:
 		"迁移中途停止:{{message}}。部分技能可能已经搬完,重新打开这个窗口看看还剩下哪些。",
 	skillRepairOutcome_conformant: "已经正确",

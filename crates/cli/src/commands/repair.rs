@@ -9,7 +9,8 @@
 //! and not a nicety: `--json` carries the shape found, what was done, every path
 //! involved, and for a refusal a `fix` string that reads as an instruction
 //! rather than a diagnosis. Exit `0` when nothing needed doing or everything was
-//! repaired, `1` when something was refused.
+//! repaired, `1` when something was refused OR failed — both mean a skill the
+//! user still has to deal with.
 //!
 //! Dry-run unless `--yes`, per the house rule for layout-changing verbs. The
 //! preview is the same code path with the writes withheld — `execute_repair`
@@ -17,7 +18,7 @@
 //! "what would happen" implementation that drifts.
 
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::repair::{repair_skill, RepairOutcome, RepairReport};
+use aghub_core::skills::repair::{repair_all, RepairOutcome, RepairReport};
 use anyhow::Result;
 use serde_json::json;
 use std::path::Path;
@@ -29,67 +30,18 @@ pub fn execute(
 	dry_run: bool,
 	json_out: bool,
 ) -> Result<()> {
-	// Fail CLOSED. The lock IS this command's worklist (D5) and it decides
-	// which directories may be adopted as a Master, so an unreadable lock must
-	// not read as "nothing to repair" — that answer looks like success.
-	let want_global = matches!(scope, ResourceScope::GlobalOnly);
-	let locks = crate::commands::read_locks_checked(want_global, project_root)?;
-	let in_lock: std::collections::BTreeSet<String> = locks
-		.global
-		.iter()
-		.flat_map(|l| l.skills.keys().cloned())
-		.chain(locks.project.iter().flat_map(|l| l.skills.keys().cloned()))
-		.collect();
+	// The worklist, the fail-closed lock read, the bulk mutation guard and the
+	// per-skill error capture all live in `repair_all`. This used to be a
+	// hand-written copy of the loop the API route also carried, and the two had
+	// already drifted apart — see that function's docs.
+	let reports = repair_all(scope, project_root, name, dry_run)?;
 
-	// A named skill is repaired whether or not the lock knows it — the lock
-	// only decides ADOPTION, and refusing to look at an unlocked skill would
-	// leave the user with no way to diagnose it.
-	let worklist: Vec<String> = match name {
-		Some(one) => vec![one.to_string()],
-		None => in_lock.iter().cloned().collect(),
-	};
-
-	// ONE guard around the whole bulk run, not one per skill. `repair_skill`
-	// takes its own (reentrant per thread, so the inner acquire is free), but
-	// without this outer one a 20-skill migration would be twenty independently
-	// racing mutations that another aghub could interleave halfway through.
-	// Dry runs take none, matching the seam.
-	let _bulk_guard = if dry_run {
-		None
-	} else {
-		Some(aghub_core::skills::lock::mutation_guard(
-			"skill repair (bulk)",
-			scope,
-			project_root,
-		)?)
-	};
-
-	let mut reports: Vec<RepairReport> = Vec::new();
-	for skill_name in &worklist {
-		// Through the core seam, which takes the interprocess mutation lock
-		// across plan AND write. Calling `execute_repair` here instead would
-		// leave the hash-compare → rename window open to a concurrent aghub.
-		let Some(report) = repair_skill(
-			scope,
-			project_root,
-			skill_name,
-			in_lock.contains(skill_name),
-			dry_run,
-		)?
-		else {
-			continue;
-		};
-		// In a bulk run, silence about the already-correct skills is the point;
-		// a named one still reports so the user learns it was fine.
-		if report.outcome == RepairOutcome::Conformant && name.is_none() {
-			continue;
-		}
-		reports.push(report);
-	}
-
-	let refused = reports
-		.iter()
-		.any(|r| matches!(r.outcome, RepairOutcome::Refused { .. }));
+	let unresolved = reports.iter().any(|r| {
+		matches!(
+			r.outcome,
+			RepairOutcome::Refused { .. } | RepairOutcome::Failed { .. }
+		)
+	});
 
 	if json_out {
 		println!(
@@ -107,7 +59,7 @@ pub fn execute(
 		render(&reports, dry_run);
 	}
 
-	if refused {
+	if unresolved {
 		// The JSON already said what and why; a second prose error on stderr
 		// would be noise for the agent parsing stdout.
 		std::process::exit(1);
@@ -139,6 +91,14 @@ fn render(reports: &[RepairReport], dry_run: bool) {
 			}
 			RepairOutcome::Refused { reason, fix } => {
 				println!("  REFUSED   {}", r.name);
+				println!("            why: {reason}");
+				println!("            fix: {fix}");
+			}
+			RepairOutcome::Failed { reason, fix } => {
+				// Distinct from REFUSED in the prose too: this one is worth
+				// re-running, and a user who cannot tell them apart re-runs the
+				// refusals forever instead of acting on their fix.
+				println!("  FAILED    {}", r.name);
 				println!("            why: {reason}");
 				println!("            fix: {fix}");
 			}

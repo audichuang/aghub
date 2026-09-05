@@ -677,8 +677,17 @@ export function gitSyncSkillMutationOptions({
 interface RepairSkillsVariables {
 	scope: "global" | "project";
 	projectRoot?: string;
-	/** Omitted = every skill the lock names at this scope (bulk migration). */
-	name?: string;
+	/**
+	 * The skills to repair. Omitted = every skill the lock names at this scope
+	 * (the bulk migration).
+	 *
+	 * The route takes ONE name, so a subset is sent as one request per skill
+	 * and the reports are concatenated. That is deliberately not pushed into
+	 * the route: each request takes the bulk mutation guard for its own run, so
+	 * a partial selection is still serialized against another aghub, and a
+	 * failing skill no longer stops the others either way.
+	 */
+	names?: readonly string[];
 	dryRun: boolean;
 }
 
@@ -705,18 +714,33 @@ export function repairSkillsMutationOptions({
 	onError,
 }: RepairSkillsMutationParams) {
 	return mutationOptions({
-		mutationFn: ({
+		mutationFn: async ({
 			scope,
 			projectRoot,
-			name,
+			names,
 			dryRun,
-		}: RepairSkillsVariables) =>
-			api.skills.repair({
-				scope,
-				project_root: projectRoot,
-				name,
+		}: RepairSkillsVariables) => {
+			const one = (name?: string) =>
+				api.skills.repair({
+					scope,
+					project_root: projectRoot,
+					name,
+					dry_run: dryRun,
+				});
+			if (names === undefined) return one();
+			const parts: RepairResponse[] = [];
+			// Sequential, not `Promise.all`: each request takes the same
+			// interprocess mutation guard, so parallel ones would queue on it
+			// anyway — and a serial loop keeps the reports in the order the
+			// user sees them listed.
+			for (const name of names) parts.push(await one(name));
+			return {
 				dry_run: dryRun,
-			}),
+				scope,
+				skills: parts.flatMap((p) => p.skills),
+				refused: parts.some((p) => p.refused),
+			} satisfies RepairResponse;
+		},
 		onSuccess: async (data) => {
 			if (!data.dry_run) {
 				await invalidateSkillQueries(queryClient);

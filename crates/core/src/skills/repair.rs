@@ -52,6 +52,14 @@ pub enum RepairOutcome {
 	/// Nothing written. `reason` says why, `fix` is the literal next command or
 	/// path — a refused row must read as an instruction, not a diagnosis.
 	Refused { reason: String, fix: String },
+	/// The repair was attempted and the OS said no (EACCES, ENOSPC, a Windows
+	/// sharing violation). Distinct from `Refused` on purpose: a refusal is a
+	/// DECISION and the next run repeats it, whereas this is a transient state
+	/// the next run absorbs — steps 4 and 5 fail after the master exists, so
+	/// re-running reports the same skill as `Relinked` or `Reconciled`, not as
+	/// this. Folding the two together would break dry-run parity, which
+	/// promises a preview and its commit reach the same verdict.
+	Failed { reason: String, fix: String },
 }
 
 /// The result of one skill's repair.
@@ -173,6 +181,131 @@ pub fn repair_skill(
 	execute_repair(&plan, dry_run).map(Some)
 }
 
+/// Repair EVERY skill the lock names at this scope (or just `name`).
+///
+/// **The one home for the batch.** The CLI and the API route each grew their own
+/// copy of this loop — same worklist, same fail-closed lock read, same
+/// "stay quiet about the conformant ones" rule — and they had already drifted:
+/// the route took no outer bulk guard, so a fifty-skill desktop migration was
+/// fifty independently racing mutations, which is exactly what the CLI's own
+/// comment says must not happen. That is the "NEVER hand-mirror a mutating flow
+/// across surfaces" rule in the root `AGENTS.md`; surfaces are adapters now.
+///
+/// **A failing skill does not abort the batch.** Both loops used `?`, so an
+/// EACCES on skill 25 of 50 threw away the report for the 24 that had already
+/// migrated — the disk was fine (every step is crash-safe and re-running is
+/// idempotent) but the user was told nothing at all. Each skill's error becomes
+/// a [`RepairOutcome::Failed`] row instead, so the answer is always a complete
+/// receipt of what happened to all of them.
+pub fn repair_all(
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+	name: Option<&str>,
+	dry_run: bool,
+) -> Result<Vec<RepairReport>> {
+	// Fail CLOSED. The lock IS the worklist and it decides which directories may
+	// be adopted as a Master, so an unreadable lock must not come back as
+	// "nothing to repair" — that answer looks like success and the user would
+	// believe they had migrated.
+	let mut in_lock: std::collections::BTreeSet<String> =
+		std::collections::BTreeSet::new();
+	if matches!(scope, crate::models::ResourceScope::GlobalOnly) {
+		in_lock.extend(
+			skill::lock::read_global_lock_checked()
+				.map_err(|e| io_err("read the global skill lock", e))?
+				.skills
+				.into_keys(),
+		);
+	}
+	if let Some(root) = project_root {
+		in_lock.extend(
+			skill::lock::local::read_local_lock_checked(Some(root))
+				.map_err(|e| io_err("read the project skill lock", e))?
+				.skills
+				.into_keys(),
+		);
+	}
+
+	// A named skill is repaired whether or not the lock knows it — the lock only
+	// decides ADOPTION, and refusing to look at an unlocked skill would leave the
+	// user with no way to diagnose it.
+	let worklist: Vec<String> = match name {
+		Some(one) => vec![one.to_string()],
+		None => in_lock.iter().cloned().collect(),
+	};
+
+	// ONE guard around the whole bulk run, not one per skill. `repair_skill`
+	// takes its own (reentrant per thread, so the inner acquire is free), but
+	// without this outer one a fifty-skill migration is fifty independently
+	// racing mutations another aghub could interleave halfway through. Dry runs
+	// take none, matching the seam.
+	let _bulk_guard = if dry_run {
+		None
+	} else {
+		Some(
+			crate::skills::lock::mutation_guard(
+				"skill repair (bulk)",
+				scope,
+				project_root,
+			)
+			.map_err(|e| io_err("acquire the mutation lock", e))?,
+		)
+	};
+
+	let mut reports = Vec::new();
+	for skill_name in &worklist {
+		match repair_skill(
+			scope,
+			project_root,
+			skill_name,
+			in_lock.contains(skill_name),
+			dry_run,
+		) {
+			// `Ok(None)` = the scope names no single store; nothing to say.
+			Ok(None) => continue,
+			Ok(Some(report)) => {
+				// In a bulk run, silence about the already-correct skills is the
+				// point; a named one still reports so the user learns it was
+				// fine.
+				if report.outcome == RepairOutcome::Conformant && name.is_none()
+				{
+					continue;
+				}
+				reports.push(report);
+			}
+			Err(e) => reports.push(failed_report(skill_name, dry_run, &e)),
+		}
+	}
+	Ok(reports)
+}
+
+/// The row a skill gets when its own repair errored.
+///
+/// Carries no master, no referrers and no quarantine path: none of them
+/// happened, or happened only partly, and naming a path here would tell the user
+/// a write landed. `fix` names re-running because repair is idempotent — the
+/// next run picks the skill up in whatever state it now holds.
+fn failed_report(name: &str, dry_run: bool, e: &ConfigError) -> RepairReport {
+	RepairReport {
+		name: name.to_string(),
+		shape: None,
+		outcome: RepairOutcome::Failed {
+			reason: e.to_string(),
+			fix: format!(
+				"fix the cause above (most often a permission on the skill \
+				 directory), then re-run `aghub skills repair {name}` — repair \
+				 is idempotent, so a partly-applied skill is picked up where it \
+				 stands"
+			),
+		},
+		master: PathBuf::new(),
+		referrers: Vec::new(),
+		quarantined: None,
+		fused: Vec::new(),
+		dry_run,
+	}
+}
+
 /// Apply `plan`. With `dry_run`, decides everything and writes nothing.
 pub fn execute_repair(
 	plan: &RepairPlan,
@@ -267,13 +400,26 @@ pub fn execute_repair(
 	let adopt = plan.adopts().map(|p| p.to_path_buf());
 	if let Some(src) = &adopt {
 		report.outcome = RepairOutcome::Migrated;
+		// The `!exists` guard is what scopes the cleanup below. It claims
+		// exactly one thing and no more: the master did not exist at plan time
+		// and does not exist now, so anything sitting at that path after a
+		// failed copy is THIS call's own partial write. It is NOT a claim that
+		// the path is ours in general — removing a master that pre-existed
+		// would delete the user's only intact copy, which is why the cleanup
+		// lives inside this branch and nowhere else.
 		if !dry_run && !plan.master.exists() {
 			if let Some(parent) = plan.master.parent() {
 				std::fs::create_dir_all(parent)
 					.map_err(|e| io_err("create master store", e))?;
 			}
-			Linker::copy_preserving_links(src, &plan.master)
-				.map_err(|e| io_err("copy master out of the shared slot", e))?;
+			if let Err(e) = Linker::copy_preserving_links(src, &plan.master) {
+				// Without this the failed run leaves an EMPTY master behind,
+				// and the next run compares the intact slot against it, calls
+				// it a diverged fork and refuses forever — the user has to
+				// `rm -rf` the store entry by hand before anything works.
+				let _ = std::fs::remove_dir_all(&plan.master);
+				return Err(io_err("copy master out of the shared slot", e));
+			}
 		}
 	}
 
@@ -657,6 +803,188 @@ mod tests {
 		// And the commit agrees.
 		let commit = execute_repair(&plan(&root, name, true), false).unwrap();
 		assert_eq!(commit.outcome, preview.outcome);
+	}
+
+	/// Seed a project lock naming `names`, which is `repair_all`'s worklist.
+	///
+	/// The shape is copied from a shipped fixture rather than hand-minimized:
+	/// the lock read paths fail CLOSED here, so a lock missing a required field
+	/// makes the command bail while READING and every assertion below passes
+	/// with the code under test never reached.
+	fn seed_project_lock(root: &Path, names: &[&str]) {
+		let entries: Vec<String> = names
+			.iter()
+			.map(|n| {
+				// The PROJECT lock schema (version 1, `computedHash`), copied
+				// from the shipped `cli_tests.rs` fixtures. The global lock's
+				// shape is different and reading it here fails closed, which
+				// makes every assertion below pass without running the code.
+				format!(
+					r#""{n}":{{"source":"o/r","sourceType":"github","computedHash":"deadbeef"}}"#
+				)
+			})
+			.collect();
+		fs::write(
+			root.join("skills-lock.json"),
+			format!(r#"{{"version":1,"skills":{{{}}}}}"#, entries.join(",")),
+		)
+		.unwrap();
+	}
+
+	fn perms_enforced(path: &Path) -> bool {
+		use std::os::unix::fs::PermissionsExt;
+		let probe = path.join(".perm-probe");
+		fs::create_dir_all(&probe).unwrap();
+		let orig = fs::metadata(&probe).unwrap().permissions();
+		fs::set_permissions(&probe, fs::Permissions::from_mode(0o000)).unwrap();
+		let denied = fs::read_dir(&probe).is_err();
+		fs::set_permissions(&probe, orig).unwrap();
+		fs::remove_dir_all(&probe).unwrap();
+		denied
+	}
+
+	/// THE regression this batch seam exists for.
+	///
+	/// Both surfaces used to `?` out of the loop, so an EACCES on one skill
+	/// threw away the report for every skill already migrated — observed live
+	/// through the API route: HTTP 500, 29 of 50 migrated, and a response that
+	/// mentioned none of them. The batch must answer with a COMPLETE receipt.
+	///
+	/// Revert the `Err(e) => reports.push(failed_report(...))` arm back to `?`
+	/// and this goes red on the row count.
+	#[test]
+	fn one_failing_skill_does_not_throw_away_the_rest_of_the_batch() {
+		use std::os::unix::fs::PermissionsExt;
+		let (_tmp, root) = fixture();
+		if !perms_enforced(&root) {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		for n in ["alpha", "beta", "gamma"] {
+			write_skill(&root.join(".agents").join("skills").join(n), n, "x");
+		}
+		seed_project_lock(&root, &["alpha", "beta", "gamma"]);
+		// `beta`'s own directory cannot be read, so its copy fails with EACCES.
+		let beta = root.join(".agents").join("skills").join("beta");
+		fs::set_permissions(&beta, fs::Permissions::from_mode(0o000)).unwrap();
+
+		let reports =
+			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
+				.unwrap();
+
+		fs::set_permissions(&beta, fs::Permissions::from_mode(0o755)).unwrap();
+
+		assert_eq!(
+			reports.len(),
+			3,
+			"every skill must be accounted for, not just the ones before the \
+			 failure: {reports:?}"
+		);
+		let by_name = |n: &str| {
+			reports
+				.iter()
+				.find(|r| r.name == n)
+				.unwrap()
+				.outcome
+				.clone()
+		};
+		assert!(
+			matches!(by_name("beta"), RepairOutcome::Failed { .. }),
+			"the unreadable skill is reported as failed, got {:?}",
+			by_name("beta")
+		);
+		assert_eq!(by_name("alpha"), RepairOutcome::Migrated);
+		assert_eq!(by_name("gamma"), RepairOutcome::Migrated);
+		// And the two that worked really did land on disk — a row saying
+		// "migrated" that wrote nothing would be the worse bug.
+		for n in ["alpha", "gamma"] {
+			assert!(
+				root.join(".aghub").join(n).join("SKILL.md").is_file(),
+				"{n} must have a real master"
+			);
+			assert!(
+				Linker::is_link(&root.join(".agents").join("skills").join(n)),
+				"{n}'s shared slot must have become a referrer"
+			);
+		}
+	}
+
+	/// A failed copy must not leave the empty master it created behind.
+	///
+	/// Observed live: the next run compared the intact slot against the empty
+	/// store entry, called it a diverged fork and refused FOREVER — the user
+	/// had to `rm -rf` the store entry by hand before anything worked again.
+	/// So the second run must get the skill migrated, not refuse it.
+	///
+	/// Delete the `remove_dir_all` in step 3 and this goes red on the re-run.
+	#[test]
+	fn a_failed_copy_leaves_no_empty_master_to_wedge_the_next_run() {
+		use std::os::unix::fs::PermissionsExt;
+		let (_tmp, root) = fixture();
+		if !perms_enforced(&root) {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		let name = "demo";
+		let slot = root.join(".agents").join("skills").join(name);
+		write_skill(&slot, name, "legacy");
+		seed_project_lock(&root, &[name]);
+		fs::set_permissions(&slot, fs::Permissions::from_mode(0o000)).unwrap();
+
+		let first =
+			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
+				.unwrap();
+		assert!(matches!(first[0].outcome, RepairOutcome::Failed { .. }));
+		assert!(
+			!root.join(".aghub").join(name).exists(),
+			"a failed copy must clean up the master it created, or the next \
+			 run sees a diverged fork that can never be resolved"
+		);
+
+		// Now make it readable and re-run: repair is idempotent, so this must
+		// simply migrate.
+		fs::set_permissions(&slot, fs::Permissions::from_mode(0o755)).unwrap();
+		let second =
+			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
+				.unwrap();
+		assert_eq!(
+			second[0].outcome,
+			RepairOutcome::Migrated,
+			"the re-run must migrate, not refuse: {:?}",
+			second[0].outcome
+		);
+		assert!(root.join(".aghub").join(name).join("SKILL.md").is_file());
+	}
+
+	/// A bulk run stays quiet about the skills that were already correct, and
+	/// re-running the whole batch is a no-op rather than a second migration.
+	#[test]
+	fn a_second_bulk_run_reports_nothing_left_to_do() {
+		let (_tmp, root) = fixture();
+		for n in ["alpha", "beta"] {
+			write_skill(&root.join(".agents").join("skills").join(n), n, "x");
+		}
+		seed_project_lock(&root, &["alpha", "beta"]);
+
+		let first =
+			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
+				.unwrap();
+		assert_eq!(first.len(), 2);
+
+		let second =
+			repair_all(ResourceScope::ProjectOnly, Some(&root), None, false)
+				.unwrap();
+		assert!(
+			second.is_empty(),
+			"a conformant bulk re-run must say nothing, got {second:?}"
+		);
+		// And the quarantine did not grow a second copy.
+		let q = root.join(".aghub").join(".quarantine").join("alpha");
+		assert_eq!(
+			fs::read_dir(&q).unwrap().count(),
+			1,
+			"a no-op re-run must not quarantine anything again"
+		);
 	}
 
 	/// Re-running after a crashed repair must not wedge the skill: a private

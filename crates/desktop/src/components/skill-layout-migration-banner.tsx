@@ -1,11 +1,12 @@
 import { ArrowPathIcon } from "@heroicons/react/24/outline";
-import { Alert, Button, Modal, Spinner, toast } from "@heroui/react";
+import { Alert, Button, Checkbox, Modal, Spinner, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RepairReportDto } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
 import {
+	isBlocked,
 	migrationBannerModel,
 	migrationRowFacts,
 	migrationSummary,
@@ -43,6 +44,10 @@ export function SkillLayoutMigrationBanner({
 	const api = useApi();
 	const queryClient = useQueryClient();
 	const [isOpen, setIsOpen] = useState(false);
+	// `null` = everything, which is also what a fresh dialog shows. Kept as a
+	// set of NAMES rather than indices so it survives the preview refetching
+	// underneath (a skill migrated elsewhere simply drops out).
+	const [picked, setPicked] = useState<Set<string> | null>(null);
 
 	const { data, isSuccess } = useQuery(
 		repairPreviewQueryOptions({ api, scope, projectRoot: projectPath }),
@@ -89,16 +94,27 @@ export function SkillLayoutMigrationBanner({
 	});
 
 	const { visible, rows } = migrationBannerModel(data, isSuccess);
-	if (!visible) {
-		return null;
-	}
 
 	const result = repair.data;
 	const shown: RepairReportDto[] = result ? result.skills : rows;
 	const done = result ? !result.dry_run : false;
-	// The store path and the fused-agent sentence are the same for every row.
-	// Repeated per skill they buried the list; hoisted they are one sentence.
-	const summary = migrationSummary(shown);
+	// A blocked row is not something the user can choose to migrate, so it is
+	// never selectable and never counted in the button.
+	const selectable = useMemo(
+		() => shown.filter((r) => !isBlocked(r)).map((r) => r.name),
+		[shown],
+	);
+	const isPicked = (name: string) => picked === null || picked.has(name);
+	const pickedNames = selectable.filter(isPicked);
+	// The summary describes what the BUTTON will do, so before a run it counts
+	// only the selected rows; after one it describes what happened to all.
+	const summary = migrationSummary(
+		done ? shown : shown.filter((r) => isBlocked(r) || isPicked(r.name)),
+	);
+
+	if (!visible) {
+		return null;
+	}
 
 	return (
 		<>
@@ -118,7 +134,17 @@ export function SkillLayoutMigrationBanner({
 						<Button
 							variant="secondary"
 							size="sm"
-							onPress={() => setIsOpen(true)}
+							onPress={() => {
+								// The dialog reads the last run's rows when
+								// there are any, so without this a re-open
+								// shows the PREVIOUS result — "3 migrated" —
+								// instead of the fresh preview of what is
+								// still left. Only visible once a partial run
+								// became possible.
+								repair.reset();
+								setPicked(null);
+								setIsOpen(true);
+							}}
 						>
 							{t("skillLayoutReview")}
 						</Button>
@@ -170,6 +196,16 @@ export function SkillLayoutMigrationBanner({
 										)}
 									</p>
 								)}
+								{summary.refused > 0 && (
+									// Never buried: these are the rows the user
+									// still has to act on, and the list below
+									// may be scrolled past them.
+									<p className="text-danger">
+										{t("skillLayoutSummaryBlocked", {
+											count: summary.refused,
+										})}
+									</p>
+								)}
 								{summary.fused.length > 0 && (
 									// The honest half, said ONCE. These agents
 									// do not become individually revocable, and
@@ -193,6 +229,25 @@ export function SkillLayoutMigrationBanner({
 										// migration read as a plan that had not
 										// run yet.
 										done={done}
+										// Only offered BEFORE a run: after one,
+										// a checkbox would suggest the finished
+										// rows can still be chosen.
+										picked={
+											done ? null : isPicked(row.name)
+										}
+										onToggle={() =>
+											setPicked((prev) => {
+												const next = new Set(
+													prev ?? selectable,
+												);
+												if (next.has(row.name)) {
+													next.delete(row.name);
+												} else {
+													next.add(row.name);
+												}
+												return next;
+											})
+										}
 									/>
 								))}
 							</ul>
@@ -215,10 +270,22 @@ export function SkillLayoutMigrationBanner({
 									repair.mutate({
 										scope,
 										projectRoot: projectPath,
+										// Everything selected stays ONE bulk
+										// request — the common case must not
+										// become fifty round trips just
+										// because the dialog can now narrow.
+										names:
+											pickedNames.length ===
+											selectable.length
+												? undefined
+												: pickedNames,
 										dryRun: false,
 									})
 								}
-								isDisabled={repair.isPending}
+								isDisabled={
+									repair.isPending ||
+									(!done && pickedNames.length === 0)
+								}
 								className="min-h-[44px] min-w-[140px]"
 							>
 								{repair.isPending ? (
@@ -231,7 +298,8 @@ export function SkillLayoutMigrationBanner({
 									t(
 										result
 											? "skillLayoutRunAgain"
-											: "skillLayoutApply",
+											: "skillLayoutApplyN",
+										{ count: pickedNames.length },
 									)
 								)}
 							</Button>
@@ -251,7 +319,18 @@ export function SkillLayoutMigrationBanner({
  * stays expanded: it carries the literal command that unsticks the user, and
  * that is per-skill by nature.
  */
-function MigrationRow({ row, done }: { row: RepairReportDto; done: boolean }) {
+function MigrationRow({
+	row,
+	done,
+	picked,
+	onToggle,
+}: {
+	row: RepairReportDto;
+	done: boolean;
+	/** `null` = not selectable (a finished run, or a blocked row). */
+	picked: boolean | null;
+	onToggle: () => void;
+}) {
 	const { t } = useTranslation();
 	// Derived in `lib/skill-migration`, which node can test — this component
 	// only lays the facts out.
@@ -263,7 +342,9 @@ function MigrationRow({ row, done }: { row: RepairReportDto; done: boolean }) {
 				<div className="flex items-center justify-between gap-2">
 					<span className="font-medium">{row.name}</span>
 					<span className="text-danger text-xs">
-						{t(`skillRepairOutcome_${done ? "done_" : ""}refused`)}
+						{t(
+							`skillRepairOutcome_${done ? "done_" : ""}${row.outcome}`,
+						)}
 					</span>
 				</div>
 				<p className="mt-2 text-danger text-xs">{row.reason}</p>
@@ -283,8 +364,25 @@ function MigrationRow({ row, done }: { row: RepairReportDto; done: boolean }) {
 	}
 
 	return (
-		<li className="flex items-center justify-between gap-3 px-1 py-1 text-sm">
-			<span className="truncate">{row.name}</span>
+		<li className="flex items-center gap-3 px-1 py-1 text-sm">
+			{picked !== null && (
+				/* Compound children with no label slot, and the root width
+				   pinned: a bare `<Checkbox aria-label>` renders a ~35px root
+				   that reserves room for a label, which throws the name column
+				   out of line with the refused rows above it. Desktop
+				   AGENTS.md names this trap. */
+				<Checkbox
+					aria-label={row.name}
+					className="size-4 shrink-0"
+					isSelected={picked}
+					onChange={onToggle}
+				>
+					<Checkbox.Control>
+						<Checkbox.Indicator />
+					</Checkbox.Control>
+				</Checkbox>
+			)}
+			<span className="min-w-0 flex-1 truncate">{row.name}</span>
 			<span className="shrink-0 text-muted text-xs">
 				{/* The outcome stays on the row even though most will read
 				    the same: `reconciled` quarantines a fork the user edited,

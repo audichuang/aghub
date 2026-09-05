@@ -21,10 +21,11 @@ pub struct RepairReportDto {
 	/// The shape found, snake_case (`unmigrated_copy`, `conformant`, …), or
 	/// null when the scope named no candidate directory at all.
 	pub shape: Option<String>,
-	/// `conformant` | `migrated` | `relinked` | `reconciled` | `refused`.
+	/// `conformant` | `migrated` | `relinked` | `reconciled` | `refused` |
+	/// `failed`.
 	pub outcome: String,
-	/// Set only for `refused`: why, and the literal next step. Kept as prose
-	/// the UI can show verbatim — a refusal must read as an instruction.
+	/// Set for `refused` and `failed`: why, and the literal next step. Kept as
+	/// prose the UI can show verbatim — neither may read as a bare diagnosis.
 	pub reason: Option<String>,
 	pub fix: Option<String>,
 	pub master: String,
@@ -42,7 +43,8 @@ pub struct RepairResponse {
 	pub dry_run: bool,
 	pub scope: String,
 	pub skills: Vec<RepairReportDto>,
-	/// True when any row is `refused`, so the UI does not have to re-derive it.
+	/// True when any row is `refused` OR `failed` — anything the user still has
+	/// to act on, so the UI does not have to re-derive it.
 	pub refused: bool,
 }
 
@@ -56,6 +58,9 @@ impl From<&aghub_core::skills::repair::RepairReport> for RepairReportDto {
 			RepairOutcome::Reconciled => ("reconciled", None, None),
 			RepairOutcome::Refused { reason, fix } => {
 				("refused", Some(reason.clone()), Some(fix.clone()))
+			}
+			RepairOutcome::Failed { reason, fix } => {
+				("failed", Some(reason.clone()), Some(fix.clone()))
 			}
 		};
 		Self {

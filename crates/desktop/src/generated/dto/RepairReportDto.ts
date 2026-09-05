@@ -11,12 +11,13 @@ export type RepairReportDto = {
 	 */
 	shape: string | null;
 	/**
-	 * `conformant` | `migrated` | `relinked` | `reconciled` | `refused`.
+	 * `conformant` | `migrated` | `relinked` | `reconciled` | `refused` |
+	 * `failed`.
 	 */
 	outcome: string;
 	/**
-	 * Set only for `refused`: why, and the literal next step. Kept as prose
-	 * the UI can show verbatim — a refusal must read as an instruction.
+	 * Set for `refused` and `failed`: why, and the literal next step. Kept as
+	 * prose the UI can show verbatim — neither may read as a bare diagnosis.
 	 */
 	reason: string | null;
 	fix: string | null;

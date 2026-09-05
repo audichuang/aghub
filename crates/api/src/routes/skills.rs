@@ -7161,6 +7161,303 @@ mod tests {
 			);
 		}
 	}
+
+	/// `POST /skills/repair` had ZERO tests until this block — the desktop's
+	/// one-click migration button, unexercised, on a route whose loop had
+	/// already drifted from the CLI verb it claims to mirror.
+	mod repair_route {
+		use super::*;
+		use std::path::{Path, PathBuf};
+
+		fn client() -> rocket::local::blocking::Client {
+			let app_data = tempdir().unwrap();
+			rocket::local::blocking::Client::tracked(crate::build_rocket(
+				rocket::Config::default(),
+				app_data.path().to_path_buf(),
+			))
+			.expect("client")
+		}
+
+		/// The un-migrated layout: real directories in the shared slot, named
+		/// by the PROJECT lock (version 1, `computedHash` — the global lock's
+		/// shape reads as corrupt here and the fail-closed read would make
+		/// every assertion pass without the route running).
+		fn legacy_project(names: &[&str]) -> (tempfile::TempDir, PathBuf) {
+			let temp = tempdir().unwrap();
+			let root = temp.path().join("project");
+			std::fs::create_dir_all(root.join(".claude")).unwrap();
+			for n in names {
+				let slot = root.join(".agents").join("skills").join(n);
+				std::fs::create_dir_all(&slot).unwrap();
+				std::fs::write(
+					slot.join("SKILL.md"),
+					format!("---\nname: {n}\ndescription: legacy\n---\n"),
+				)
+				.unwrap();
+			}
+			let entries: Vec<String> = names
+				.iter()
+				.map(|n| {
+					format!(
+						r#""{n}":{{"source":"o/r","sourceType":"github","computedHash":"deadbeef"}}"#
+					)
+				})
+				.collect();
+			std::fs::write(
+				root.join("skills-lock.json"),
+				format!(
+					r#"{{"version":1,"skills":{{{}}}}}"#,
+					entries.join(",")
+				),
+			)
+			.unwrap();
+			(temp, root)
+		}
+
+		fn post(
+			client: &rocket::local::blocking::Client,
+			root: &Path,
+			dry_run: bool,
+		) -> (Status, serde_json::Value) {
+			let response = client
+				.post("/api/v1/skills/repair")
+				.json(&serde_json::json!({
+					"scope": "project",
+					"project_root": root.to_str().unwrap(),
+					"dry_run": dry_run,
+				}))
+				.dispatch();
+			let status = response.status();
+			let body: serde_json::Value = serde_json::from_str(
+				&response.into_string().expect("response body"),
+			)
+			.expect("json body");
+			(status, body)
+		}
+
+		/// `#[cfg(unix)]` on the HELPER too, not just on its caller: Windows
+		/// clippy runs the whole test module and a `std::os::unix` import left
+		/// ungated goes red there — a gap that only surfaces on push to main.
+		#[cfg(unix)]
+		fn perms_enforced(path: &Path) -> bool {
+			use std::os::unix::fs::PermissionsExt;
+			let probe = path.join(".perm-probe");
+			std::fs::create_dir_all(&probe).unwrap();
+			let orig = std::fs::metadata(&probe).unwrap().permissions();
+			std::fs::set_permissions(
+				&probe,
+				std::fs::Permissions::from_mode(0o000),
+			)
+			.unwrap();
+			let denied = std::fs::read_dir(&probe).is_err();
+			std::fs::set_permissions(&probe, orig).unwrap();
+			std::fs::remove_dir_all(&probe).unwrap();
+			denied
+		}
+
+		/// The button, working. Asserts DISK, not just the response — a route
+		/// that answers `migrated` and writes nothing is the worse bug.
+		#[test]
+		fn a_bulk_repair_migrates_every_skill_the_lock_names() {
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let c = client();
+			let (_temp, root) = legacy_project(&["alpha", "beta", "gamma"]);
+
+			let (status, body) = post(&c, &root, false);
+
+			assert_eq!(status, Status::Ok, "body: {body}");
+			assert_eq!(body["skills"].as_array().unwrap().len(), 3);
+			assert_eq!(body["refused"], false);
+			for n in ["alpha", "beta", "gamma"] {
+				assert!(
+					root.join(".aghub").join(n).join("SKILL.md").is_file(),
+					"{n} must have a real master on disk"
+				);
+				assert!(
+					aghub_core::skills::linker::Linker::is_link(
+						&root.join(".agents").join("skills").join(n)
+					),
+					"{n}'s shared slot must have become a referrer"
+				);
+			}
+		}
+
+		/// The preview must decide everything and write nothing — the desktop
+		/// banner runs this on every render.
+		#[test]
+		fn a_dry_run_previews_without_touching_the_disk() {
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let c = client();
+			let (_temp, root) = legacy_project(&["alpha", "beta"]);
+
+			let (status, body) = post(&c, &root, true);
+
+			assert_eq!(status, Status::Ok, "body: {body}");
+			assert_eq!(body["dry_run"], true);
+			assert_eq!(body["skills"].as_array().unwrap().len(), 2);
+			assert!(
+				!root.join(".aghub").exists(),
+				"a preview must not create the store"
+			);
+			assert!(
+				root.join(".agents/skills/alpha/SKILL.md").is_file(),
+				"and the shared slot must still be the real directory"
+			);
+		}
+
+		/// THE regression. One unreadable skill used to abort the whole loop
+		/// with `?`, so the route answered HTTP 500 with no mention of the
+		/// skills it had ALREADY migrated — observed live at 29 of 50.
+		///
+		/// Revert `repair_all`'s `Err` arm back to `?` and this goes red on the
+		/// status code.
+		#[test]
+		#[cfg(unix)]
+		fn one_unreadable_skill_still_returns_a_full_receipt() {
+			use std::os::unix::fs::PermissionsExt;
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let c = client();
+			let (_temp, root) = legacy_project(&["alpha", "beta", "gamma"]);
+			if !perms_enforced(&root) {
+				eprintln!("skip: perms not enforced (root)");
+				return;
+			}
+			let beta = root.join(".agents").join("skills").join("beta");
+			std::fs::set_permissions(
+				&beta,
+				std::fs::Permissions::from_mode(0o000),
+			)
+			.unwrap();
+
+			let (status, body) = post(&c, &root, false);
+
+			std::fs::set_permissions(
+				&beta,
+				std::fs::Permissions::from_mode(0o755),
+			)
+			.unwrap();
+
+			assert_eq!(
+				status,
+				Status::Ok,
+				"a single failing skill must not 500 the whole batch: {body}"
+			);
+			let rows = body["skills"].as_array().unwrap();
+			assert_eq!(rows.len(), 3, "every skill must be accounted for");
+			let outcome = |n: &str| {
+				rows.iter().find(|r| r["name"] == n).unwrap()["outcome"]
+					.as_str()
+					.unwrap()
+					.to_string()
+			};
+			assert_eq!(outcome("beta"), "failed");
+			assert_eq!(outcome("alpha"), "migrated");
+			assert_eq!(outcome("gamma"), "migrated");
+			assert_eq!(
+				body["refused"], true,
+				"`refused` gates the desktop keeping its dialog open, and a \
+				 failed row is exactly a row the user must still act on"
+			);
+			// The two that worked really landed.
+			for n in ["alpha", "gamma"] {
+				assert!(
+					root.join(".aghub").join(n).join("SKILL.md").is_file(),
+					"{n} migrated before the failure and must be on disk"
+				);
+			}
+			// And nothing is unreadable: the whole safety claim.
+			assert!(
+				beta.join("SKILL.md").is_file(),
+				"the failed skill must still be served by its old directory"
+			);
+		}
+
+		/// The `name` path — the one the desktop's per-skill selection drives,
+		/// one request per checked row.
+		///
+		/// Two things it must get right, neither of which the bulk tests touch:
+		/// a NAMED repair reports the skill even when there is nothing to do
+		/// (the caller asked about it), and the lock still gates ADOPTION, so a
+		/// skill the lock does not name must not have its shared directory
+		/// promoted to a master just because someone named it.
+		#[test]
+		fn a_named_repair_will_not_adopt_a_skill_the_lock_does_not_name() {
+			let _guard = crate::routes::test_env_lock()
+				.lock()
+				.unwrap_or_else(|e| e.into_inner());
+			let c = client();
+			// The lock names `alpha` only; `orphan` is on disk but unlocked.
+			let (_temp, root) = legacy_project(&["alpha"]);
+			let orphan = root.join(".agents").join("skills").join("orphan");
+			std::fs::create_dir_all(&orphan).unwrap();
+			std::fs::write(
+				orphan.join("SKILL.md"),
+				"---\nname: orphan\ndescription: unlocked\n---\n",
+			)
+			.unwrap();
+
+			let response = c
+				.post("/api/v1/skills/repair")
+				.json(&serde_json::json!({
+					"scope": "project",
+					"project_root": root.to_str().unwrap(),
+					"name": "orphan",
+					"dry_run": false,
+				}))
+				.dispatch();
+			assert_eq!(response.status(), Status::Ok);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+
+			let rows = body["skills"].as_array().unwrap();
+			assert_eq!(
+				rows.len(),
+				1,
+				"a NAMED repair always reports its skill, even with nothing \
+				 to do: {body}"
+			);
+			assert_eq!(rows[0]["name"], "orphan");
+			// `conformant`, not `refused`: with no lock entry there is nothing
+			// repair MAY do, so it reports that it did nothing. Arguably
+			// generous wording for a skill still in the legacy layout, but it
+			// is the shipped answer and the load-bearing part is below — the
+			// store must not gain an entry.
+			assert_eq!(rows[0]["outcome"], "conformant", "{body}");
+			assert!(
+				!root.join(".aghub").join("orphan").exists(),
+				"naming a skill must not promote it into the store — the lock \
+				 is what decides adoption"
+			);
+			assert!(
+				orphan.join("SKILL.md").is_file(),
+				"and its directory must be left exactly as it was"
+			);
+		}
+
+		/// A scope the route cannot resolve to one store is a 400, not a
+		/// silent global write.
+		#[test]
+		fn project_scope_without_a_root_is_refused() {
+			let c = client();
+			let response = c
+				.post("/api/v1/skills/repair")
+				.json(&serde_json::json!({
+					"scope": "project",
+					"dry_run": true,
+				}))
+				.dispatch();
+			assert_eq!(response.status(), Status::BadRequest);
+			let body: serde_json::Value =
+				serde_json::from_str(&response.into_string().unwrap()).unwrap();
+			assert_eq!(body["code"], "PROJECT_ROOT_REQUIRED");
+		}
+	}
 }
 
 /// `POST /skills/repair` — the desktop's one-click migration.
@@ -7222,72 +7519,35 @@ pub async fn repair_skills_route(
 	let dry_run = req.dry_run;
 
 	in_mutation_pool(move || {
-		let root = project_root.as_deref();
-		// Fail CLOSED. The lock IS the worklist and it decides which
-		// directories may be adopted as a Master, so an unreadable lock must
-		// not come back as "nothing to repair" — that answer looks like
-		// success and the user would believe they had migrated.
-		let in_lock: std::collections::BTreeSet<String> = match scope {
-			ResourceScope::GlobalOnly => {
-				skill::lock::read_global_lock_checked()
-					.map_err(|e| {
-						ApiError::new(
-							Status::InternalServerError,
-							format!("skill lock could not be read: {e}"),
-							"IO_ERROR",
-						)
-					})?
-					.skills
-					.into_keys()
-					.collect()
-			}
-			_ => skill::lock::local::read_local_lock_checked(root)
-				.map_err(|e| {
-					ApiError::new(
-						Status::InternalServerError,
-						format!("skill lock could not be read: {e}"),
-						"IO_ERROR",
-					)
-				})?
-				.skills
-				.into_keys()
-				.collect(),
-		};
+		// The whole batch — worklist, fail-closed lock read, the ONE outer
+		// mutation guard, and turning a single skill's I/O error into a row
+		// rather than aborting — lives in core, so this route and the CLI verb
+		// cannot answer differently. They used to: this loop took no bulk guard,
+		// making a fifty-skill desktop migration fifty independently racing
+		// mutations, and it aborted on the first error with no report of the
+		// skills already migrated.
+		let reports = aghub_core::skills::repair::repair_all(
+			scope,
+			project_root.as_deref(),
+			name.as_deref(),
+			dry_run,
+		)
+		.map_err(ApiError::from)?;
 
-		let worklist: Vec<String> = match &name {
-			Some(one) => vec![one.clone()],
-			None => in_lock.iter().cloned().collect(),
-		};
-
-		let mut skills = Vec::new();
-		for skill_name in &worklist {
-			let Some(report) = aghub_core::skills::repair::repair_skill(
-				scope,
-				root,
-				skill_name,
-				in_lock.contains(skill_name),
-				dry_run,
-			)
-			.map_err(ApiError::from)?
-			else {
-				continue;
-			};
-			// A bulk run stays quiet about the already-correct skills; a named
-			// one always reports, so the caller learns it was fine.
-			if matches!(
-				report.outcome,
-				aghub_core::skills::repair::RepairOutcome::Conformant
-			) && name.is_none()
-			{
-				continue;
-			}
-			skills.push(crate::dto::repair::RepairReportDto::from(&report));
-		}
+		let skills: Vec<crate::dto::repair::RepairReportDto> = reports
+			.iter()
+			.map(crate::dto::repair::RepairReportDto::from)
+			.collect();
 
 		Ok(Json(crate::dto::repair::RepairResponse {
 			dry_run,
 			scope: req.scope.clone(),
-			refused: skills.iter().any(|s| s.outcome == "refused"),
+			// `failed` counts too: the desktop reads this flag to keep the
+			// dialog open, and a row the user still has to act on is exactly
+			// what that is for.
+			refused: skills
+				.iter()
+				.any(|s| s.outcome == "refused" || s.outcome == "failed"),
 			skills,
 		}))
 	})

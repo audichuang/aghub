@@ -22,10 +22,22 @@ export function migrationBannerModel(
 }
 
 /**
+ * Rows that need the user's attention rather than a one-line summary.
+ *
+ * `refused` is a DECISION (repair looked and declined) and `failed` is the OS
+ * saying no mid-attempt. They differ in whether re-running helps — which is why
+ * core keeps them apart — but they render identically: both carry a `reason` and
+ * a literal `fix`, and both mean this skill did not migrate.
+ */
+export function isBlocked(row: RepairReportDto): boolean {
+	return row.outcome === "refused" || row.outcome === "failed";
+}
+
+/**
  * The per-row facts the spec's preview must answer, derived once so the
  * component only lays them out.
  *
- * `refused` rows deliberately carry NO migration facts: nothing is moving, and
+ * A blocked row deliberately carries NO migration facts: nothing landed, and
  * showing "Moves to …" beside a refusal would describe a write that will not
  * happen.
  */
@@ -35,7 +47,7 @@ export function migrationRowFacts(row: RepairReportDto): {
 	linkCount: number;
 	fused: string[];
 } {
-	const refused = row.outcome === "refused";
+	const refused = isBlocked(row);
 	return {
 		refused,
 		master: refused ? null : row.master,
@@ -54,6 +66,9 @@ export function migrationRowFacts(row: RepairReportDto): {
  *
  * `masterParent` is taken from the rows rather than composed from a home dir:
  * the store path is the backend's answer and the UI must not re-derive it.
+ * `refused` counts blocked rows of BOTH kinds — the summary's job is to say
+ * how many skills the user still has to deal with, and that number does not
+ * care whether repair declined or the OS did.
  * `fused` is the UNION — a mixed scope shows the superset, which is the honest
  * reading of "these agents stay fused".
  */
@@ -64,7 +79,7 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 	totalLinks: number;
 	fused: string[];
 } {
-	const acting = rows.filter((r) => r.outcome !== "refused");
+	const acting = rows.filter((r) => !isBlocked(r));
 	const fused = new Set<string>();
 	let totalLinks = 0;
 	for (const row of acting) {

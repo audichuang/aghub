@@ -13,7 +13,8 @@ export type RepairResponse = {
 	scope: string;
 	skills: Array<RepairReportDto>;
 	/**
-	 * True when any row is `refused`, so the UI does not have to re-derive it.
+	 * True when any row is `refused` OR `failed` — anything the user still has
+	 * to act on, so the UI does not have to re-derive it.
 	 */
 	refused: boolean;
 };
