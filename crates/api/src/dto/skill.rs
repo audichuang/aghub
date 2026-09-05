@@ -157,14 +157,14 @@ impl SkillResponse {
 impl From<&Skill> for SkillResponse {
 	fn from(s: &Skill) -> Self {
 		// Delegate the field mapping to the one core SkillView seam; this
-		// wrapper only maps ConfigSource and the native_reader advisory.
+		// wrapper only maps ConfigSource and the shared_with advisory.
 		SkillResponse::from(&aghub_core::dto::SkillView::from(s))
 	}
 }
 
 /// Thin ts-rs wrapper over the core [`SkillView`]: the field list lives once in
 /// `aghub_core::dto`, so this only maps `ConfigSource` and carries the
-/// `native_reader` advisory across.
+/// `shared_with` advisory across.
 impl From<&aghub_core::dto::SkillView> for SkillResponse {
 	fn from(v: &aghub_core::dto::SkillView) -> Self {
 		SkillResponse {
@@ -894,17 +894,17 @@ mod tests {
 	}
 
 	#[test]
-	fn skill_response_serializes_native_reader_false() {
-		// native_reader is always serialized so the wire matches the generated
-		// `native_reader: boolean` ts-rs type (default false, no drift).
+	fn skill_response_serializes_shared_with_empty() {
+		// shared_with is always serialized so the wire matches the generated
+		// `shared_with: string[]` ts-rs type (default [], no drift).
 		let skill = aghub_core::models::Skill::new("foo");
 		let resp = SkillResponse::from(&skill);
 		assert!(resp.shared_with.is_empty());
 		let json = serde_json::to_value(&resp).unwrap();
 		assert_eq!(
-			json["native_reader"],
-			serde_json::json!(false),
-			"native_reader must be present (= false)"
+			json["shared_with"],
+			serde_json::json!([]),
+			"shared_with must be present (= [])"
 		);
 	}
 
@@ -959,7 +959,7 @@ mod tests {
 			"tools",
 			"source",
 			"agent",
-			"native_reader",
+			"shared_with",
 		] {
 			assert!(
 				resp_json.get(key).is_some(),
@@ -969,16 +969,16 @@ mod tests {
 	}
 
 	#[test]
-	fn skill_response_from_view_carries_native_reader() {
+	fn skill_response_from_view_carries_shared_with() {
 		// Building from a core SkillView with the advisory set surfaces the
-		// `native_reader` key (= true).
+		// `shared_with` key.
 		let skill = aghub_core::models::Skill::new("foo");
 		let view = aghub_core::dto::SkillView::from(&skill)
 			.with_shared_with(vec!["warp".to_string()]);
 		let resp = SkillResponse::from(&view);
 		assert_eq!(resp.shared_with, vec!["warp".to_string()]);
 		let json = serde_json::to_value(&resp).unwrap();
-		assert_eq!(json["native_reader"], serde_json::json!(true));
+		assert_eq!(json["shared_with"], serde_json::json!(["warp"]));
 	}
 
 	#[test]

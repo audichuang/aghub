@@ -39,7 +39,7 @@ mod tests {
 		let json = serde_json::to_string(&dto).unwrap();
 		assert_eq!(
 			json,
-			r#"{"id":"claude","scope":"global","reads_master":false,"writes_master":false,"needs_link":true,"auto_covered":false,"supported":true}"#
+			r#"{"id":"claude","scope":"global","needs_link":true,"supported":true,"shared_with":["warp"]}"#
 		);
 	}
 

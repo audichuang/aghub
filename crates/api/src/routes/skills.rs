@@ -2114,7 +2114,7 @@ pub fn get_skill_tree(
 		"SKILL_PATH_NOT_FOUND",
 	)?;
 	// Thread the allow-listed roots down so symlink ENTRIES (e.g. the
-	// universal-install `<agent>/skills/foo -> .agents/skills/foo`) are
+	// universal-install `<agent>/skills/foo -> .aghub/foo`) are
 	// included when their canonical target stays inside the roots, and silently
 	// skipped (not 400'd) when they escape.
 	let roots = skill_read_roots(resource_scope, project_root.as_deref());
@@ -3229,7 +3229,7 @@ mod tests {
 			// cursor must NOT remove the shared master (it would orphan claude's
 			// live symlink + lose the skill for every other agent).
 			let proj = home;
-			let master = proj.join(".agents/skills/shared");
+			let master = proj.join(".aghub/shared");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -3239,6 +3239,12 @@ mod tests {
 			let claude = proj.join(".claude/skills");
 			std::fs::create_dir_all(&claude).unwrap();
 			std::os::unix::fs::symlink(&master, claude.join("shared")).unwrap();
+			// Cursor reaches a project skill only through the shared
+			// `.agents/skills` slot, which used to BE the Master. Without this
+			// link it simply does not have the skill.
+			let shared = proj.join(".agents/skills");
+			std::fs::create_dir_all(&shared).unwrap();
+			std::os::unix::fs::symlink(&master, shared.join("shared")).unwrap();
 
 			let req = DeleteSkillByPathRequest {
 				source_path: master.join("SKILL.md").display().to_string(),
@@ -3287,7 +3293,7 @@ mod tests {
 	fn delete_by_path_keeps_master_read_by_another_native_reader() {
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let master = proj.join(".agents/skills/shared");
+			let master = proj.join(".aghub/shared");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -3359,7 +3365,7 @@ mod tests {
 	fn delete_by_path_removes_master_when_every_reader_is_in_the_request() {
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let master = proj.join(".agents/skills/shared");
+			let master = proj.join(".aghub/shared");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -3413,7 +3419,7 @@ mod tests {
 	fn delete_by_path_full_group_keeps_master_with_legacy_named_referrer() {
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let master = proj.join(".agents/skills/dirname");
+			let master = proj.join(".aghub/dirname");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -3472,7 +3478,7 @@ mod tests {
 			let home = home.as_path();
 			// A project with a .claude marker + a symlinked install.
 			let proj = home.join("proj");
-			let master = proj.join(".agents/skills/linked");
+			let master = proj.join(".aghub/linked");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -3668,7 +3674,7 @@ mod tests {
 				"a real install must refuse while the lock is corrupt",
 			);
 			assert!(
-				!project.join(".agents/skills/fresh-skill").exists(),
+				!project.join(".aghub/fresh-skill").exists(),
 				"the refusal must happen before the Master is written"
 			);
 			assert_eq!(
@@ -3743,7 +3749,7 @@ mod tests {
 
 			result.expect_err("a failed lock write must fail the import");
 			assert!(
-				!project.join(".agents/skills/rollback-skill").exists(),
+				!project.join(".aghub/rollback-skill").exists(),
 				"the Master this call created must be rolled back"
 			);
 			assert!(
@@ -3789,9 +3795,7 @@ mod tests {
 
 			// 1. .agents Master exists
 			assert!(
-				project
-					.join(".agents/skills/my-import-skill/SKILL.md")
-					.exists(),
+				project.join(".aghub/my-import-skill/SKILL.md").exists(),
 				".agents master must exist",
 			);
 			// 2. Claude link is a symlink (symlink-only model)
@@ -3874,7 +3878,7 @@ mod tests {
 
 			// The Master really was left alone...
 			let master = std::fs::read_to_string(
-				project.join(".agents/skills/dup-skill/SKILL.md"),
+				project.join(".aghub/dup-skill/SKILL.md"),
 			)
 			.unwrap();
 			assert!(
@@ -4119,7 +4123,7 @@ mod tests {
 
 			// And nothing from outside the clone may reach the master.
 			assert!(
-				!home.join(".agents/skills/evil").exists(),
+				!home.join(".aghub/evil").exists(),
 				"out-of-tree skill must not be materialized into the master",
 			);
 		});
@@ -4497,7 +4501,7 @@ mod tests {
 
 		assert_eq!(result.success_count(), 1);
 		assert!(project_root
-			.join(".agents/skills/repo-helper/assets/notes.txt")
+			.join(".aghub/repo-helper/assets/notes.txt")
 			.exists());
 		assert!(
 			!project_root.join(".opencode/skills/repo-helper").exists(),
@@ -4598,8 +4602,8 @@ mod tests {
 		use std::os::unix::fs::symlink;
 		with_isolated_env(|_, _| {
 			let project = tempdir().unwrap();
-			// Universal master: <project>/.agents/skills/foo
-			let master = project.path().join(".agents/skills/foo");
+			// Universal master: <project>/.aghub/foo
+			let master = project.path().join(".aghub/foo");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -5183,7 +5187,7 @@ mod tests {
 				results.iter().any(|r| r["agent"] == "claude"),
 				"per-agent row present"
 			);
-			let master = home.join(".agents/skills/my-skill/SKILL.md");
+			let master = home.join(".aghub/my-skill/SKILL.md");
 			assert!(master.exists(), "universal master written: {master:?}");
 			let lock = state.join("skills/.skill-lock.json");
 			let lock_alt = home.join(".agents/.skill-lock.json");
@@ -5253,7 +5257,7 @@ mod tests {
 			.expect("json response");
 			assert_eq!(body["results"].as_array().unwrap().len(), 2);
 			assert!(
-				!project.join(".agents/skills/my-skill").exists(),
+				!project.join(".aghub/my-skill").exists(),
 				"route preflight must happen before the shared Master write",
 			);
 			assert!(
@@ -5346,7 +5350,7 @@ mod tests {
 				"per-agent rows present"
 			);
 			assert!(
-				home.join(".agents/skills/my-skill/SKILL.md").exists(),
+				home.join(".aghub/my-skill/SKILL.md").exists(),
 				"master materialized (symlink-only)"
 			);
 		});
@@ -5470,7 +5474,7 @@ mod tests {
 	#[test]
 	fn delete_by_path_symlinked_install_uses_canonical_layout() {
 		with_isolated_env(|home, _state| {
-			let master = home.join(".agents/skills/linked");
+			let master = home.join(".aghub/linked");
 			std::fs::create_dir_all(&master).unwrap();
 			std::fs::write(
 				master.join("SKILL.md"),
@@ -5650,7 +5654,7 @@ mod tests {
 				"no NonAbsoluteTarget error rows"
 			);
 			assert!(
-				proj.join(".agents/skills/my-skill/SKILL.md").exists(),
+				proj.join(".aghub/my-skill/SKILL.md").exists(),
 				"master written at absolutized project root"
 			);
 		});
@@ -5755,8 +5759,7 @@ mod tests {
 			)
 			.expect("dir must resolve");
 			let installed_path = expected_dir.join("hello-skill/SKILL.md");
-			let master_path =
-				project_root.join(".agents/skills/hello-skill/SKILL.md");
+			let master_path = project_root.join(".aghub/hello-skill/SKILL.md");
 			if agent_result.error.is_none() {
 				assert!(
 					installed_path.exists() || master_path.exists(),
@@ -6148,7 +6151,7 @@ mod tests {
 				);
 
 				assert!(
-					home.join(".agents/skills/music/SKILL.md").exists(),
+					home.join(".aghub/music/SKILL.md").exists(),
 					"the selected skill materialized into the master"
 				);
 			});
@@ -6302,10 +6305,9 @@ mod tests {
 				drop(reqs);
 
 				// The installed content is the pinned commit's version.
-				let body = std::fs::read_to_string(
-					home.join(".agents/skills/music/SKILL.md"),
-				)
-				.expect("master SKILL.md present");
+				let body =
+					std::fs::read_to_string(home.join(".aghub/music/SKILL.md"))
+						.expect("master SKILL.md present");
 				assert!(
 					body.contains("A version"),
 					"install materialized the pinned commit's content, got: {body}"
@@ -6389,7 +6391,7 @@ mod tests {
 				);
 
 				assert!(
-					home.join(".agents/skills/music/SKILL.md").exists(),
+					home.join(".aghub/music/SKILL.md").exists(),
 					"the named skill materialized into the master"
 				);
 			});
@@ -6446,7 +6448,7 @@ mod tests {
 				assert_eq!(body["success"], false);
 				assert_eq!(body["agents"].as_array().unwrap().len(), 2);
 				assert!(
-					!project.join(".agents/skills/music").exists(),
+					!project.join(".aghub/music").exists(),
 					"capability preflight must happen before the Master write",
 				);
 				assert!(
@@ -6764,8 +6766,7 @@ mod tests {
 				assert!(resp.success, "surface A install: {:?}", resp.agents);
 				let lock = skill::lock::local::read_local_lock(Some(&project));
 				let entry = lock.skills.get("music").expect("A: music").clone();
-				let master =
-					dir_snapshot(&project.join(".agents/skills/music"));
+				let master = dir_snapshot(&project.join(".aghub/music"));
 				(entry, master)
 			});
 
@@ -6819,8 +6820,7 @@ mod tests {
 				assert_eq!(resp.status(), Status::Ok);
 				let lock = skill::lock::local::read_local_lock(Some(&project));
 				let entry = lock.skills.get("music").expect("B: music").clone();
-				let master =
-					dir_snapshot(&project.join(".agents/skills/music"));
+				let master = dir_snapshot(&project.join(".aghub/music"));
 				(entry, master)
 			});
 
@@ -7018,8 +7018,7 @@ mod tests {
 							.get("foo")
 							.expect("foo locked")
 							.clone();
-					let master =
-						dir_snapshot(&project.join(".agents/skills/foo"));
+					let master = dir_snapshot(&project.join(".aghub/foo"));
 					(entry, master)
 				})
 			};
