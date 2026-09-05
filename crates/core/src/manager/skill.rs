@@ -62,21 +62,6 @@ impl SkillAdd {
 	}
 }
 
-/// Do two paths resolve to the same directory?
-///
-/// `canonicalize` on both sides when it succeeds, so a symlinked HOME
-/// (`/private/var` on macOS) or a linked agent dir does not read as a different
-/// location; falls back to a literal comparison when a side does not exist yet.
-/// Used to tell "this agent already reads the Master" from "this agent holds an
-/// unrelated skill of the same name" — a distinction that decides whether a
-/// no-op is honest or a silent conflict.
-fn paths_resolve_same(a: &std::path::Path, b: &std::path::Path) -> bool {
-	let resolve = |p: &std::path::Path| {
-		std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
-	};
-	resolve(a) == resolve(b)
-}
-
 /// The skill as it exists at the Master on disk, with its paths pointed there.
 ///
 /// `materialize_universal_master` PRESERVES a pre-existing Master rather than
@@ -106,32 +91,6 @@ fn master_on_disk(canonical: &Path, name: &str) -> Option<Skill> {
 	found.source_path = Some(md.clone());
 	found.canonical_path = Some(md);
 	Some(found)
-}
-
-/// Does an agent's already-present `existing` entry resolve to the Master at
-/// `canonical`?
-///
-/// The NativeReader branch of BOTH universal install entry points asks this,
-/// so it is ONE function. The root `AGENTS.md` names
-/// `add_skill_universal` / `add_skill_from_path_universal` as the pair that
-/// must agree, and while only the second one asked, they answered the same
-/// question in opposite ways: for a NativeReader holding a FOREIGN same-named
-/// skill, `add --from` errored `RESOURCE_EXISTS` while plain `add` returned
-/// `already_installed` — a silent no-op on exit 0 that then pointed at
-/// `update skills <name>`, which would have edited the foreign skill.
-fn entry_reads_master(existing: &Skill, canonical: &Path) -> bool {
-	existing
-		.canonical_path
-		.as_deref()
-		.or(existing.source_path.as_deref())
-		// Entries store the home-relative `~/…` form (root `AGENTS.md`: "`~`
-		// prefix for home-relative, converted at the I/O boundary"), so compare
-		// only after expanding it — a literal comparison never matches.
-		.map(resolve_source_path)
-		// Entries record `<dir>/SKILL.md`; compare the dir.
-		.and_then(|p| p.parent().map(Path::to_path_buf))
-		.map(|dir| paths_resolve_same(&dir, canonical))
-		.unwrap_or(false)
 }
 
 /// Shared preparation for the two universal-install entry points

@@ -6,7 +6,7 @@ use crate::error::ApiResult;
 use crate::extractors::{ResolvedScope, ScopeParams, TrustedLocalOrigin};
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::linker::classify::classify_all;
-use aghub_core::skills::linker::{master_store_dir, AgentSkillCoverageView};
+use aghub_core::skills::linker::AgentSkillCoverageView;
 
 /// `GET /api/v1/skills/coverage?scope=<global|project>&project_root=<path?>`
 ///

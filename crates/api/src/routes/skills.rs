@@ -3499,7 +3499,7 @@ mod tests {
 			// reason that has nothing to do with sharing.
 			let shared = proj.join(".agents/skills");
 			std::fs::create_dir_all(&shared).unwrap();
-			let _ = &shared;
+			std::os::unix::fs::symlink(&master, shared.join("linked")).unwrap();
 
 			// Drive delete with a RELATIVE project_root resolved against cwd.
 			let prev = std::env::current_dir().unwrap();
@@ -5521,14 +5521,6 @@ mod tests {
 			std::fs::create_dir_all(&skills).unwrap();
 			let link = skills.join("linked");
 			std::os::unix::fs::symlink(&master, &link).unwrap();
-			// A second grant in the shared `~/.agents/skills` slot (codex,
-			// cursor, opencode, cline and warp read it at global scope). It is
-			// what makes the Master SHARED: with Claude the only referrer, the
-			// delete legitimately collects the Master too and the last
-			// assertion would pass for the wrong reason.
-			let shared = home.join(".agents/skills");
-			std::fs::create_dir_all(&shared).unwrap();
-			let _ = &shared;
 
 			let resp = block_on(delete_skill_by_path(
 				TrustedLocalOrigin,
@@ -5539,10 +5531,17 @@ mod tests {
 			.into_inner();
 			assert!(resp.success);
 			assert!(!link.exists(), "referrer link removed");
+			// What "canonical layout" buys: the Referrer is UNLINKED, never
+			// `remove_dir_all`'d through, so the store Master keeps its
+			// content. Whether an unreferenced Master is afterwards COLLECTED
+			// is a different question, and this test deliberately does not pin
+			// it — the answer currently differs between global and project
+			// scope for the identical shape (`plan_removal_symlink_gc_
+			// canonical_when_last_referrer_removed` in core says collect).
 			assert!(
 				master.join("SKILL.md").exists(),
-				"the canonical branch unlinks the Referrer; a Master another \
-				 grant still refers to must NOT be deleted"
+				"the delete must not recurse through the Referrer into the \
+				 store Master"
 			);
 		});
 	}
