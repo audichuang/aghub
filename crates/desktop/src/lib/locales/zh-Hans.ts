@@ -1218,14 +1218,12 @@ export default {
 	sourceInstallSomeFailedOne: "有 1 个安装目标失败。",
 	sourceInstallSomeFailedMany: "有 {{count}} 个安装目标失败。",
 	sourceInstallFailed: "安装技能失败。",
-	sourceInstallCoveredTitle: "已覆盖",
-	sourceInstallCoveredHint:
-		"这些 Agent 会直接读取共享的 .agents 主文件，因此不会创建链接。",
 	sourceInstallLinkTargetsTitle: "将创建链接",
 	sourceInstallLinkTargetsHint:
-		"这些 Agent 会获得指向共享 .agents 主文件的软链接。",
-	sourceInstallNoLinkTargets: "此处没有 Agent 需要链接 — 只会写入主文件。",
-	agentCoveredBadge: "已覆盖",
+		"这些 Agent 会取得指向 .aghub 主文件的软链接。",
+	sourceInstallNoLinkTargets: "此处没有 Agent 可以接收技能。",
+	sourceInstallSharedSlotHint:
+		"这些 Agent 没有自己的技能目录,共用同一个 —— 勾选其中一个等于全部勾选,之后移除也会一起移除。",
 	selectSource: "选择一个来源",
 	// SourceDetail summary bar
 	summaryUpdatable: "{{count}} 可更新",

@@ -34,7 +34,8 @@ import type {
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import {
-	partitionByCoverage,
+	expandSelection,
+	groupAgentsBySlot,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
 import { useSkillCoverage } from "../requests/agents";
@@ -106,9 +107,22 @@ export function ImportGithubSkillPanel({
 		scope,
 		projectPath ?? null,
 	);
-	const { autoCovered, linkTargets } = useMemo(
-		() => partitionByCoverage(skillAgents, coverage),
+	// One row per independently-selectable unit. Agents that share a directory
+	// come back as ONE group: checking any member checks them all, because the
+	// write is one directory. The old `autoCovered` bucket is gone — it listed
+	// agents that got the skill whether the user asked or not, as read-only
+	// chips they could not uncheck.
+	const slotGroups = useMemo(
+		() => groupAgentsBySlot(skillAgents, coverage),
 		[skillAgents, coverage],
+	);
+	const linkTargets = useMemo(
+		() => slotGroups.flatMap((g) => g.members),
+		[slotGroups],
+	);
+	const sharedGroups = useMemo(
+		() => slotGroups.filter((g) => g.shared),
+		[slotGroups],
 	);
 
 	const [phase, setPhase] = useState<Phase>("scanning");
@@ -960,9 +974,26 @@ export function ImportGithubSkillPanel({
 														keys,
 													) => {
 														setCoverageSeeded(true);
-														field.onChange([
-															...keys,
-														]);
+														// Expand through the
+														// shared slot: the
+														// request must name
+														// every agent the write
+														// actually reaches, or
+														// the result rows
+														// disagree with the
+														// boxes the user
+														// ticked.
+														field.onChange(
+															expandSelection(
+																[...keys].map(
+																	String,
+																),
+																coverage,
+																linkTargets.map(
+																	(a) => a.id,
+																),
+															),
+														);
 													}}
 													label={t(
 														"sourceInstallLinkTargetsTitle",
@@ -986,31 +1017,40 @@ export function ImportGithubSkillPanel({
 													)}
 												</p>
 											)}
-											{autoCovered.length > 0 && (
+											{sharedGroups.length > 0 && (
 												<div className="space-y-1.5">
-													<span className="text-sm font-medium text-foreground">
-														{t(
-															"sourceInstallCoveredTitle",
-														)}
-													</span>
 													<span className="block text-xs text-muted">
 														{t(
-															"sourceInstallCoveredHint",
+															"sourceInstallSharedSlotHint",
 														)}
 													</span>
 													<div className="flex flex-wrap gap-1.5 pt-1">
-														{autoCovered.map(
-															(agent) => (
+														{sharedGroups.map(
+															(group) => (
 																<Chip
-																	key={
-																		agent.id
-																	}
+																	key={group.members
+																		.map(
+																			(
+																				a,
+																			) =>
+																				a.id,
+																		)
+																		.join(
+																			"+",
+																		)}
 																	size="sm"
 																	variant="secondary"
 																>
-																	{
-																		agent.display_name
-																	}
+																	{group.members
+																		.map(
+																			(
+																				a,
+																			) =>
+																				a.display_name,
+																		)
+																		.join(
+																			" + ",
+																		)}
 																</Chip>
 															),
 														)}

@@ -1258,15 +1258,11 @@ export default {
 	sourceInstallSomeFailedOne: "Couldn't install 1 target.",
 	sourceInstallSomeFailedMany: "Couldn't install {{count}} targets.",
 	sourceInstallFailed: "Failed to install skill.",
-	sourceInstallCoveredTitle: "Already covered",
-	sourceInstallCoveredHint:
-		"These agents read the shared .agents master directly, so no link is created.",
 	sourceInstallLinkTargetsTitle: "Will be linked",
 	sourceInstallLinkTargetsHint:
-		"These agents get a symlink to the shared .agents master.",
+		"These agents get a symlink pointing at the .aghub master.",
 	sourceInstallNoLinkTargets:
 		"No agents need a link here — the master is written on its own.",
-	agentCoveredBadge: "Covered",
 	selectSource: "Select a source",
 	// SourceDetail summary bar
 	summaryUpdatable: "{{count}} updatable",

@@ -2,20 +2,22 @@
 
 /**
  * Per-agent skill-coverage projection for GET /api/v1/skills/coverage.
- * needs_link/auto_covered/supported are the FE-partitioning projection of
- * the LinkNeed 3-state; reads_master/writes_master are the REAL
- * classifier facts (whether the agent's resolved read/write skills-dir
- * resolves to the .agents/skills master), carried verbatim from
- * AgentLinkPlan (P2-G) rather than guessed. No raw paths are exposed. The
- * frontend partitions on auto_covered/needs_link; the master booleans are
- * honest diagnostics.
+ *
+ * `reads_master` / `writes_master` / `auto_covered` were removed with
+ * `LinkNeed::NativeReader`. Against the `.aghub` store — which no agent reads —
+ * all three are permanently false, and the frontend partitioned on
+ * `auto_covered`, so it would have rendered an empty bucket forever while
+ * presenting three constants as classifier facts.
+ *
+ * `shared_with` is what replaced them: the other agents that receive a skill
+ * through the SAME Referrer directory. It is the only thing that lets the UI
+ * present a shared slot honestly — checking one checks the group, and
+ * unchecking one unchecks the group. No raw paths are exposed.
  */
 export type AgentSkillCoverageDto = {
 	id: string;
 	scope: string;
-	reads_master: boolean;
-	writes_master: boolean;
 	needs_link: boolean;
-	auto_covered: boolean;
 	supported: boolean;
+	shared_with: Array<string>;
 };

@@ -13,19 +13,19 @@ export type SkillResponse = {
 	source?: ConfigSource;
 	agent?: string;
 	/**
-	 * Advisory: the target agent reads the `.agents` master directly
-	 * (NativeReader), so a universal install writes only the master with no
-	 * per-agent link. Always serialized (default false) so the wire matches the
-	 * generated `native_reader: boolean` ts-rs type — no DTO drift.
+	 * Advisory: other agents that receive this skill through the SAME Referrer
+	 * directory, because their own agents provide no separate one. Empty for a
+	 * private dir. Always serialized (default `[]`) so the wire matches the
+	 * generated `shared_with: string[]` ts-rs type — no DTO drift.
 	 */
-	native_reader: boolean;
+	shared_with: Array<string>;
 	/**
 	 * Advisory: this import was a no-op — the skill was already installed, so
 	 * nothing was written and the fields above describe the EXISTING master,
 	 * not the source that was just submitted. Mirrors
 	 * `aghub_core::dto::SkillView::already_installed`, which is where the
 	 * field is defined so both surfaces keep ONE wire shape. Always
-	 * serialized, like `native_reader`, so the ts-rs type stays non-optional.
+	 * serialized, like `shared_with`, so the ts-rs type stays non-optional.
 	 */
 	already_installed: boolean;
 };

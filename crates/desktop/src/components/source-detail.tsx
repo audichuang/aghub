@@ -26,7 +26,7 @@ import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import {
-	partitionByCoverage,
+	groupAgentsBySlot,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
 import { sendInBatches } from "../lib/batch-names";
@@ -423,9 +423,17 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		updateScope,
 		updateProjectRoot,
 	);
-	const { autoCovered, linkTargets } = useMemo(
-		() => partitionByCoverage(installableAgents, coverage),
+	const slotGroups = useMemo(
+		() => groupAgentsBySlot(installableAgents, coverage),
 		[installableAgents, coverage],
+	);
+	const linkTargets = useMemo(
+		() => slotGroups.flatMap((g) => g.members),
+		[slotGroups],
+	);
+	const sharedGroups = useMemo(
+		() => slotGroups.filter((g) => g.shared),
+		[slotGroups],
 	);
 	const linkTargetAgentIds = useMemo(
 		() => linkTargets.map((a) => a.id),
@@ -1481,37 +1489,40 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 								</div>
 							)}
 
-						{/* Agent coverage hint */}
-						{(autoCovered.length > 0 || linkTargets.length > 0) &&
-							notInstalled.length > 0 && (
-								<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
-									<span>
-										{linkTargets.length}{" "}
-										{t("sourceInstallLinkTargetsTitle")} /{" "}
-										{autoCovered.length}{" "}
-										{t("sourceInstallCoveredTitle")}
-									</span>
-									{autoCovered.length > 0 && (
-										<>
-											<span className="mx-1 text-muted/50">
-												·
-											</span>
-											<span className="text-muted">
-												{t("agentCoveredBadge")}:
-											</span>
-											{autoCovered.map((agent) => (
-												<Chip
-													key={agent.id}
-													size="sm"
-													variant="secondary"
-												>
-													{agent.display_name}
-												</Chip>
-											))}
-										</>
-									)}
-								</div>
-							)}
+						{/* Agent coverage hint. The old version counted an
+						 * "already covered" bucket beside the link targets —
+						 * agents that received the skill whether or not the
+						 * user picked them. That bucket is empty by
+						 * construction now; what is worth surfacing instead is
+						 * which agents cannot be chosen apart. */}
+						{linkTargets.length > 0 && notInstalled.length > 0 && (
+							<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
+								<span>
+									{linkTargets.length}{" "}
+									{t("sourceInstallLinkTargetsTitle")}
+								</span>
+								{sharedGroups.length > 0 && (
+									<>
+										<span className="mx-1 text-muted/50">
+											·
+										</span>
+										{sharedGroups.map((group) => (
+											<Chip
+												key={group.members
+													.map((a) => a.id)
+													.join("+")}
+												size="sm"
+												variant="secondary"
+											>
+												{group.members
+													.map((a) => a.display_name)
+													.join(" + ")}
+											</Chip>
+										))}
+									</>
+								)}
+							</div>
+						)}
 					</div>
 				)}
 			</div>
