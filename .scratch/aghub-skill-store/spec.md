@@ -527,6 +527,61 @@ before                                    after
 pin this: migrate a fixture, then revoke codex, and assert cursor / opencode / cline /
 warp still resolve the skill.
 
+### CLI: `aghub skills repair` (alias `migrate`)
+
+**One verb for every non-conformant shape**, because from inside an agent session the
+user does not know _which_ shape they hit — they know the skill is misbehaving. Migration
+is what repair does to a `legacy` skill; it is not a separate command.
+
+`Relink` is already taken (CONTEXT.md: re-pointing Referrers after the Master **moves**),
+and it is a _step inside_ migration, not a synonym for it. Do not overload it.
+
+```
+aghub skills repair [<name>]  [-g | -p] [--yes] [--json]
+aghub skills migrate ...          # clap alias, same implementation
+```
+
+- **`<name>` omitted** = every non-conformant skill at that scope. This is D7's bulk
+  command; there is no second verb for it.
+- **Dry-run unless `--yes`**, per the house rule for layout-changing verbs
+  (`delete`, `apply-update`, `prune-lock`, `source sync`, …).
+- Scope flags follow the global rules: mutually exclusive, `-p` with no project root
+  bails before anything happens, `--all` rejected (repair resolves exactly one write
+  scope).
+
+Per-skill outcome vocabulary, one per shape — the verb reports what it _did_, not what
+it _is_:
+
+| outcome      | from shape                                       | action                                                                  |
+| ------------ | ------------------------------------------------ | ----------------------------------------------------------------------- |
+| `conformant` | conformant                                       | nothing                                                                 |
+| `migrated`   | legacy                                           | Master moved to `.aghub`, implicit reads expanded to explicit Referrers |
+| `relinked`   | chain, or a Referrer pointing elsewhere          | repointed at the Master                                                 |
+| `reconciled` | npx-clobbered, contents hash-equal               | fork quarantined, Referrer restored                                     |
+| `refused`    | aliased-master, or contents diverged/undecidable | nothing written — see `reason`                                          |
+
+### Designed for an agent to drive
+
+The stated use case is a human or an agent hitting a problem mid-session and reaching
+for the CLI to fix it. That is a real constraint on the output, not a nicety:
+
+- **`--json` must carry enough to choose the next action without a second command**:
+  per skill, the shape found, the outcome, every path involved, and for `refused` a
+  machine-readable `reason` plus the exact command that would resolve it (the `-a`
+  spelling, or "this parent is a symlink: `<path>`").
+- **A dry run and its commit must agree.** The preview is the same code path with the
+  writes withheld — the `RemovalOutcome` precedent: preview and commit share the check by
+  construction, never by two call sites kept in step by hand.
+- **Exit codes are the agent's branch**: `0` nothing to do or repaired; `1` something was
+  refused (the JSON says what); clap usage errors stay `2`.
+- **`--json` failures are JSON** — `{"error":{code,message,retryable}}` on stdout with
+  `code` from `aghub_core::error_codes`, like every other command.
+- Never require the user to know the shape vocabulary to get unstuck. A `refused` row
+  must read as an instruction, not a diagnosis.
+
+`doctor` keeps reporting; `repair` acts. `doctor --verify-links` must name the same
+shapes with the same words, or the two commands teach two vocabularies for one problem.
+
 ### Desktop entry point
 
 The desktop must expose the bulk migration, because "one click" is the whole value for a
