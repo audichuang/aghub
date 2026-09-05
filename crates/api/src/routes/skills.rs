@@ -7151,3 +7151,134 @@ mod tests {
 		}
 	}
 }
+
+/// `POST /skills/repair` — the desktop's one-click migration.
+///
+/// Same core seam as the CLI verb (`repair_skill`), so the two surfaces cannot
+/// answer differently: the mutation lock, the "who reads this today" question
+/// and the plan all live in core, and this route is a thin adapter.
+///
+/// Runs in `in_mutation_pool` because acquiring the guard BLOCKS the thread —
+/// on a Rocket worker, enough contended requests would park every worker and
+/// the server would stop answering even unlocked reads.
+#[derive(serde::Deserialize)]
+pub struct RepairRequest {
+	/// `"global"` or `"project"`. There is no `both`: repair moves directories
+	/// and must resolve exactly ONE store.
+	pub scope: String,
+	pub project_root: Option<String>,
+	/// Omitted = every skill the lock names at this scope (the bulk migration).
+	pub name: Option<String>,
+	/// Defaults to a PREVIEW. A client that forgets the field gets the safe
+	/// answer, matching the CLI's dry-run-unless-`--yes` house rule.
+	#[serde(default = "default_true")]
+	pub dry_run: bool,
+}
+
+fn default_true() -> bool {
+	true
+}
+
+#[post("/skills/repair", format = "json", data = "<body>")]
+pub async fn repair_skills_route(
+	_origin: TrustedLocalOrigin,
+	body: Json<RepairRequest>,
+) -> ApiResult<crate::dto::repair::RepairResponse> {
+	let req = body.into_inner();
+	let scope = match req.scope.as_str() {
+		"global" => ResourceScope::GlobalOnly,
+		"project" => ResourceScope::ProjectOnly,
+		other => {
+			return Err(ApiError::new(
+				Status::BadRequest,
+				format!(
+					"scope must be \"global\" or \"project\", got {other:?} — \
+					 repair resolves exactly one store"
+				),
+				"INVALID_SCOPE",
+			))
+		}
+	};
+	let project_root = req.project_root.clone().map(std::path::PathBuf::from);
+	if scope == ResourceScope::ProjectOnly && project_root.is_none() {
+		return Err(ApiError::new(
+			Status::BadRequest,
+			"project scope requires project_root",
+			"PROJECT_ROOT_REQUIRED",
+		));
+	}
+	let name = req.name.clone();
+	let dry_run = req.dry_run;
+
+	in_mutation_pool(move || {
+		let root = project_root.as_deref();
+		// Fail CLOSED. The lock IS the worklist and it decides which
+		// directories may be adopted as a Master, so an unreadable lock must
+		// not come back as "nothing to repair" — that answer looks like
+		// success and the user would believe they had migrated.
+		let in_lock: std::collections::BTreeSet<String> = match scope {
+			ResourceScope::GlobalOnly => {
+				skill::lock::read_global_lock_checked()
+					.map_err(|e| {
+						ApiError::new(
+							Status::InternalServerError,
+							format!("skill lock could not be read: {e}"),
+							"IO_ERROR",
+						)
+					})?
+					.skills
+					.into_keys()
+					.collect()
+			}
+			_ => skill::lock::local::read_local_lock_checked(root)
+				.map_err(|e| {
+					ApiError::new(
+						Status::InternalServerError,
+						format!("skill lock could not be read: {e}"),
+						"IO_ERROR",
+					)
+				})?
+				.skills
+				.into_keys()
+				.collect(),
+		};
+
+		let worklist: Vec<String> = match &name {
+			Some(one) => vec![one.clone()],
+			None => in_lock.iter().cloned().collect(),
+		};
+
+		let mut skills = Vec::new();
+		for skill_name in &worklist {
+			let Some(report) = aghub_core::skills::repair::repair_skill(
+				scope,
+				root,
+				skill_name,
+				in_lock.contains(skill_name),
+				dry_run,
+			)
+			.map_err(ApiError::from)?
+			else {
+				continue;
+			};
+			// A bulk run stays quiet about the already-correct skills; a named
+			// one always reports, so the caller learns it was fine.
+			if matches!(
+				report.outcome,
+				aghub_core::skills::repair::RepairOutcome::Conformant
+			) && name.is_none()
+			{
+				continue;
+			}
+			skills.push(crate::dto::repair::RepairReportDto::from(&report));
+		}
+
+		Ok(Json(crate::dto::repair::RepairResponse {
+			dry_run,
+			scope: req.scope.clone(),
+			refused: skills.iter().any(|s| s.outcome == "refused"),
+			skills,
+		}))
+	})
+	.await
+}

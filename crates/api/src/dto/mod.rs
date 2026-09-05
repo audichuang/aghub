@@ -8,6 +8,7 @@ pub mod limits;
 pub mod market;
 pub mod mcp;
 pub mod plugin;
+pub mod repair;
 pub mod skill;
 pub mod sources;
 pub mod sub_agent;

@@ -306,6 +306,7 @@ fn build_rocket_with_state_factories(
 				routes::skills::get_global_skill_lock,
 				routes::skills::get_project_skill_lock,
 				routes::skills::delete_skill_by_path,
+				routes::skills::repair_skills_route,
 				routes::skills::prune_lock_route,
 				routes::skills::git_credential_status,
 				routes::skills::git_scan_skills,

@@ -57,6 +57,7 @@ use aghub_api::dto::{
 		CCPluginUpdateResponse, CCPluginValidateRequest,
 		CCPluginValidateResponse,
 	},
+	repair::{RepairReportDto, RepairResponse},
 	skill::{
 		AcceptRenameRequest, AcceptRenameResponse, ApplySkillUpdateRequest,
 		ApplySkillUpdateResponse, ApplySkillUpdatesRequest,
@@ -215,6 +216,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 	export_type::<OpenSkillFolderRequest>(&cfg)?;
 	export_type::<EditSkillFolderRequest>(&cfg)?;
 	export_type::<MarketSkill>(&cfg)?;
+	export_type::<RepairReportDto>(&cfg)?;
+	export_type::<RepairResponse>(&cfg)?;
 	export_type::<TransportDto>(&cfg)?;
 	export_type::<CreateMcpRequest>(&cfg)?;
 	export_type::<BatchCreateMcpRequest>(&cfg)?;
