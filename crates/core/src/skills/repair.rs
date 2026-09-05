@@ -68,6 +68,11 @@ pub struct RepairReport {
 	pub referrers: Vec<PathBuf>,
 	/// Where a fork was moved, when one was.
 	pub quarantined: Option<PathBuf>,
+	/// Agents that STILL share one directory after this repair — they have no
+	/// private skills dir, so granting or revoking for one of them does it for
+	/// all. The preview has to say so: a user who cannot see that codex remains
+	/// fused does not know what the migration bought them.
+	pub fused: Vec<String>,
 	/// True when the writes were withheld. A dry run walks the SAME branches —
 	/// including the hash comparison that decides `Reconciled` vs `Refused` —
 	/// so a preview that reports `reconciled` is a commit that will reconcile.
@@ -188,6 +193,12 @@ pub fn execute_repair(
 		master: plan.master.clone(),
 		referrers: Vec::new(),
 		quarantined: None,
+		fused: plan
+			.actions
+			.iter()
+			.filter(|a| a.shared)
+			.flat_map(|a| a.agents.iter().map(|id| id.to_string()))
+			.collect(),
 		dry_run,
 	};
 

@@ -149,5 +149,13 @@ fn render(reports: &[RepairReport], dry_run: bool) {
 		if let Some(q) = &r.quarantined {
 			println!("            kept:  {}", q.display());
 		}
+		if !r.fused.is_empty() {
+			// Say it plainly: these agents did NOT become individually
+			// revocable, which is the thing the migration is sold on.
+			println!(
+				"            still shared by: {} (no private skills dir)",
+				r.fused.join(", ")
+			);
+		}
 	}
 }
