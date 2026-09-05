@@ -12211,3 +12211,65 @@ fn repair_refuses_when_the_mutation_lock_cannot_be_created() {
 		"no master may be adopted by a repair that never held the lock"
 	);
 }
+
+/// After a migration, `doctor` must not report aghub's own bookkeeping as a
+/// broken skill.
+///
+/// `repair` keeps every fork it moves aside in `.aghub/.quarantine/<n>/<stamp>/`
+/// — deliberately, because hash equality is npx-parity and skips symlinks,
+/// `.git` and empty dirs, so "equal" is never "identical" and deleting would be
+/// data loss. But doctor enumerated the store directly and listed `.quarantine`
+/// as `invalid-skill`, which made `doctor --fail-on-issues` exit non-zero
+/// FOREVER for anybody who had ever migrated — a permanent red in CI earned by
+/// following the migration instructions.
+#[cfg(unix)]
+#[test]
+fn doctor_ignores_the_repair_quarantine_after_a_migration() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let root = home.path();
+	let name = "my-skill";
+
+	std::fs::create_dir_all(root.join(".claude")).unwrap();
+	let slot = root.join(".agents").join("skills").join(name);
+	std::fs::create_dir_all(&slot).unwrap();
+	std::fs::write(
+		slot.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: legacy\n---\n"),
+	)
+	.unwrap();
+	std::fs::write(
+		root.join("skills-lock.json"),
+		format!(
+			r#"{{"version":1,"skills":{{"{name}":{{"source":"me/s","ref":"main","sourceType":"github","computedHash":"d"}}}}}}"#
+		),
+	)
+	.unwrap();
+
+	let migrate = isolated_cli(root, state.path())
+		.args(["-p", "repair", "--yes"])
+		.output()
+		.unwrap();
+	assert!(migrate.status.success());
+	// Fixture premise: the quarantine really is there. Without this the
+	// assertions below would pass for a migration that quarantined nothing.
+	assert!(
+		root.join(".aghub").join(".quarantine").join(name).is_dir(),
+		"the fork must have been kept aside"
+	);
+
+	let out = isolated_cli(root, state.path())
+		.args(["-p", "doctor", "--fail-on-issues"])
+		.output()
+		.unwrap();
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		!stdout.contains("quarantine"),
+		"aghub's own bookkeeping is not a skill: {stdout}"
+	);
+	assert_eq!(
+		out.status.code(),
+		Some(0),
+		"a clean migrated tree must not fail --fail-on-issues: {stdout}"
+	);
+}

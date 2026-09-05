@@ -41,6 +41,25 @@ pub fn master_store_dir(project_root: Option<&Path>) -> Option<PathBuf> {
 /// Referrer slot like any agent's private skills dir — except that it is shared:
 /// ten agent/scope combinations read it, and eight of them have no private dir to
 /// use instead, so granting to one grants to all of them.
+/// Is this entry in the Master store aghub's own bookkeeping rather than a
+/// skill?
+///
+/// The store holds skills at exactly ONE level; everything aghub keeps for
+/// itself is dot-prefixed — `.quarantine/<name>/<stamp>/` (forks kept aside by
+/// repair) and the transient `.<name>.aghub-migrating` link a slot swap leaves
+/// if it dies mid-way.
+///
+/// **Every enumerator of the store must apply this**, and "it is structurally
+/// invisible" is a property of one function, not of the layout:
+/// `top_level_skill_dirs` happens to be safe because it is one level deep AND
+/// requires a root `SKILL.md`, so the quarantine's `<name>/<stamp>/SKILL.md`
+/// falls outside it — but `doctor` enumerated the store directly and listed
+/// `.quarantine` as an `invalid-skill`, which permanently reddened
+/// `--fail-on-issues` for anybody who had ever migrated.
+pub fn is_store_bookkeeping(file_name: &str) -> bool {
+	file_name.starts_with('.')
+}
+
 pub fn shared_referrer_dir(project_root: Option<&Path>) -> Option<PathBuf> {
 	universal_canonical_dir(project_root)
 }

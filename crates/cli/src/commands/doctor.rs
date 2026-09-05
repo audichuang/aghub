@@ -13,7 +13,7 @@ use aghub_core::{
 	registry,
 	skills::linker::{
 		classify::{agent_link_need, LinkNeed},
-		master_store_dir, Linker,
+		is_store_bookkeeping, master_store_dir, Linker,
 	},
 };
 use anyhow::{anyhow, Result};
@@ -413,6 +413,10 @@ fn master_skills_on_disk(master: &Path) -> Vec<String> {
 	rd.filter_map(|e| e.ok())
 		.filter(|e| Linker::is_link(&e.path()) || e.path().is_dir())
 		.filter_map(|e| e.file_name().into_string().ok())
+		// aghub's own bookkeeping is not a skill. Without this, every user who
+		// had ever run `repair` got a permanent `invalid-skill` row for
+		// `.quarantine` and a non-zero `doctor --fail-on-issues` forever.
+		.filter(|name| !is_store_bookkeeping(name))
 		.collect()
 }
 
