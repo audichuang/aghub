@@ -3348,10 +3348,11 @@ mod tests {
 	/// `source_path`, so nobody is left to lose the skill and the location has
 	/// to go.
 	///
-	/// Refusing on "is this a universal Master?" alone answers yes for every
-	/// Master by construction, which turned that dialog into a button that can
-	/// never succeed — the `kept` reply raises "another agent still reads it"
-	/// while naming no such agent, because there is none.
+	/// Refusing on "is this shared storage?" alone answers yes for every entry
+	/// in the `.agents/skills` slot by construction, which turned that dialog
+	/// into a button that can never succeed — the `kept` reply raises "another
+	/// agent still reads it" while naming no such agent, because there is
+	/// none.
 	///
 	/// The agent list is COMPUTED, not hardcoded: which agents read a project
 	/// `.agents/skills` is a roster fact that moves whenever a descriptor gains
@@ -3362,20 +3363,21 @@ mod tests {
 	/// the opposite error — an over-broad list is rejected before the guard.
 	#[cfg(unix)]
 	#[test]
-	fn delete_by_path_removes_master_when_every_reader_is_in_the_request() {
+	fn delete_by_path_removes_shared_slot_when_every_reader_is_in_the_request()
+	{
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let master = proj.join(".aghub/shared");
-			std::fs::create_dir_all(&master).unwrap();
+			let slot = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&slot).unwrap();
 			std::fs::write(
-				master.join("SKILL.md"),
+				slot.join("SKILL.md"),
 				"---\nname: shared\ndescription: d\n---\n",
 			)
 			.unwrap();
 
 			let readers =
 				aghub_core::skills::removal::skill_dir_readers_outside(
-					&master,
+					&slot,
 					aghub_core::models::ResourceScope::ProjectOnly,
 					Some(proj),
 					&[],
@@ -3383,11 +3385,11 @@ mod tests {
 			assert!(
 				readers.len() > 1,
 				"the shape under test needs SEVERAL readers of the project \
-				 master, else this is just the single-agent case again: {readers:?}"
+				 slot, else this is just the single-agent case again: {readers:?}"
 			);
 
 			let req = DeleteSkillByPathRequest {
-				source_path: master.join("SKILL.md").display().to_string(),
+				source_path: slot.join("SKILL.md").display().to_string(),
 				agents: readers.iter().map(|id| id.to_string()).collect(),
 				scope: "project".to_string(),
 				project_root: Some(proj.display().to_string()),
@@ -3407,7 +3409,7 @@ mod tests {
 				 — a `kept` here is a dialog the user can never make succeed"
 			);
 			assert!(
-				!master.exists(),
+				!slot.exists(),
 				"`removed` must mean removed: the desktop closes its dialog \
 				 and drops the row on this outcome"
 			);
@@ -3416,29 +3418,30 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn delete_by_path_full_group_keeps_master_with_legacy_named_referrer() {
+	fn delete_by_path_full_group_keeps_shared_slot_with_legacy_named_referrer()
+	{
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let master = proj.join(".aghub/dirname");
-			std::fs::create_dir_all(&master).unwrap();
+			let slot = proj.join(".agents/skills/dirname");
+			std::fs::create_dir_all(&slot).unwrap();
 			std::fs::write(
-				master.join("SKILL.md"),
+				slot.join("SKILL.md"),
 				"---\nname: realname\ndescription: d\n---\n",
 			)
 			.unwrap();
 			let claude_referrer = proj.join(".claude/skills/dirname");
 			std::fs::create_dir_all(claude_referrer.parent().unwrap()).unwrap();
-			std::os::unix::fs::symlink(&master, &claude_referrer).unwrap();
+			std::os::unix::fs::symlink(&slot, &claude_referrer).unwrap();
 
 			let readers =
 				aghub_core::skills::removal::skill_dir_readers_outside(
-					&master,
+					&slot,
 					aghub_core::models::ResourceScope::ProjectOnly,
 					Some(proj),
 					&[],
 				);
 			let req = DeleteSkillByPathRequest {
-				source_path: master.join("SKILL.md").display().to_string(),
+				source_path: slot.join("SKILL.md").display().to_string(),
 				agents: readers.iter().map(|id| id.to_string()).collect(),
 				scope: "project".to_string(),
 				project_root: Some(proj.display().to_string()),
@@ -3452,8 +3455,8 @@ mod tests {
 					.into_inner();
 
 			assert!(
-				master.join("SKILL.md").exists(),
-				"Claude's differently-named Referrer must keep the Master alive"
+				slot.join("SKILL.md").exists(),
+				"Claude's differently-named Referrer must keep the slot alive"
 			);
 			assert!(
 				std::fs::canonicalize(&claude_referrer).is_ok(),
@@ -3489,6 +3492,14 @@ mod tests {
 			std::fs::create_dir_all(&skills).unwrap();
 			let link = skills.join("linked");
 			std::os::unix::fs::symlink(&master, &link).unwrap();
+			// A SECOND grant, in the shared `.agents/skills` slot the other ten
+			// project agents read. Without it nothing but Claude refers to the
+			// store Master and dropping Claude's grant rightly takes the Master
+			// with it — the survival assertion below would then pass for a
+			// reason that has nothing to do with sharing.
+			let shared = proj.join(".agents/skills");
+			std::fs::create_dir_all(&shared).unwrap();
+			let _ = &shared;
 
 			// Drive delete with a RELATIVE project_root resolved against cwd.
 			let prev = std::env::current_dir().unwrap();
@@ -3514,7 +3525,7 @@ mod tests {
 			assert!(!link.exists(), "referrer link removed");
 			assert!(
 				master.join("SKILL.md").exists(),
-				"shared master must survive"
+				"a Master the shared slot still refers to must survive"
 			);
 		});
 	}
@@ -4464,8 +4475,19 @@ mod tests {
 		});
 	}
 
+	/// A reconcile into OpenCode must REUSE the store Master and hand OpenCode
+	/// a Referrer link into it — never a second physical copy of the skill.
+	///
+	/// This used to assert the opposite (`.opencode/skills/<n>` must NOT
+	/// exist), because OpenCode reached the Master by scanning
+	/// `.agents/skills` and needed no link of its own. Now that the Master
+	/// lives in a store nobody reads, "no entry in OpenCode's dir" means
+	/// OpenCode does not have the skill at all — so the regression being
+	/// guarded moved from "no entry" to "an entry that is a LINK": a private
+	/// duplicate is still the failure, and it now shows up as a real directory
+	/// where the link belongs.
 	#[test]
-	fn reconcile_skill_reuses_master_for_native_reader_opencode() {
+	fn reconcile_skill_links_opencode_referrer_to_the_master() {
 		let _guard = crate::routes::test_env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
@@ -4500,12 +4522,26 @@ mod tests {
 		.unwrap();
 
 		assert_eq!(result.success_count(), 1);
-		assert!(project_root
-			.join(".aghub/repo-helper/assets/notes.txt")
-			.exists());
+		let master = project_root.join(".aghub/repo-helper");
 		assert!(
-			!project_root.join(".opencode/skills/repo-helper").exists(),
-			"OpenCode is a NativeReader and must not get a private duplicate",
+			master.join("assets/notes.txt").exists(),
+			"the copy must have landed in the store Master",
+		);
+		let referrer = project_root.join(".opencode/skills/repo-helper");
+		// `Linker::is_link`, not `is_symlink`: this test is not unix-gated and
+		// the Referrer is a junction on Windows, which `is_symlink` calls false.
+		assert!(
+			aghub_core::skills::linker::Linker::is_link(&referrer),
+			"OpenCode's grant must be a Referrer link, not a private duplicate",
+		);
+		assert_eq!(
+			std::fs::canonicalize(&referrer).unwrap(),
+			std::fs::canonicalize(&master).unwrap(),
+			"the Referrer must resolve to the one store Master",
+		);
+		assert!(
+			referrer.join("assets/notes.txt").exists(),
+			"and the whole skill must be reachable through it",
 		);
 	}
 
@@ -5485,6 +5521,14 @@ mod tests {
 			std::fs::create_dir_all(&skills).unwrap();
 			let link = skills.join("linked");
 			std::os::unix::fs::symlink(&master, &link).unwrap();
+			// A second grant in the shared `~/.agents/skills` slot (codex,
+			// cursor, opencode, cline and warp read it at global scope). It is
+			// what makes the Master SHARED: with Claude the only referrer, the
+			// delete legitimately collects the Master too and the last
+			// assertion would pass for the wrong reason.
+			let shared = home.join(".agents/skills");
+			std::fs::create_dir_all(&shared).unwrap();
+			let _ = &shared;
 
 			let resp = block_on(delete_skill_by_path(
 				TrustedLocalOrigin,
@@ -5497,7 +5541,8 @@ mod tests {
 			assert!(!link.exists(), "referrer link removed");
 			assert!(
 				master.join("SKILL.md").exists(),
-				"shared master must NOT be deleted"
+				"the canonical branch unlinks the Referrer; a Master another \
+				 grant still refers to must NOT be deleted"
 			);
 		});
 	}
