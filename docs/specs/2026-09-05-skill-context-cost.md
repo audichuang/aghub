@@ -155,3 +155,48 @@ trae / warp / windsurf / zed)。**全部都是 descriptionOnly**,沒有一個
 | grok   | `<skill><name>…</name>…</skill>`         | 最大(含絕對路徑) |
 
 aghub 目前用 claude 的公式當共同基準,並在 UI 標明是估計值。
+
+## MCP:查完了,結論是「這不是你的問題」
+
+使用者要的是「MCP 也算一下 token」。查了啟動載入方式之後,答案跟直覺相反。
+
+### 啟動時 MCP 到底放什麼進 context
+
+- **tool 名稱** + 每個 server 的 **`instructions`**(initialize 回應裡的那段
+  markdown,可以很長 —— 本機 codegraph 那份 650+ 字)→ 立刻進 context
+- **完整的 inputSchema JSON → 預設不進去**。Claude Code 的 tool search 預設
+  開著,schema 是 deferred,要用到那個 tool 才載入
+
+也就是說:**閒置的 MCP tool 很便宜**。天真地把所有 schema 加總會嚴重高估。
+這跟 skill 的情況剛好相反 —— skill 的描述是每回合都在的固定成本。
+
+### 為什麼 aghub 算不出精確數字
+
+`McpServer` 只有連線設定(command / args / env / url / transport),沒有
+tool 清單。要拿到 `tools/list` 就得真的連上去。
+
+找過所有離線來源:
+
+| 來源                                                     | 有沒有                                   | 涵蓋率                                                     |
+| -------------------------------------------------------- | ---------------------------------------- | ---------------------------------------------------------- |
+| Cursor `~/.cursor/projects/*/mcps/<server>/tools/*.json` | **有**,含完整 schema + `INSTRUCTIONS.md` | 本機 **0/6** —— 只快取了 Cursor 自己的內建與 plugin server |
+| Claude Code `~/.claude/`                                 | 沒有。只有 `~/.claude.json` 的連線設定   | 0                                                          |
+| Claude Code transcript `prompt_snapshot`                 | 格式存在於 binary,但實際沒有落檔         | 0                                                          |
+| Codex / Grok                                             | 只有 OAuth lock 與 log,無 schema         | 0                                                          |
+
+Cursor 的快取格式是可用的,但只有 Cursor 連過的 server 才有。使用者實際在
+用的 6 個(codegraph / firecrawl / hindsight / medium / notebooklm /
+ticktick-ts)一個都不在裡面,所以照這條路做出來的面板會是全空的。
+
+### 建議
+
+不要為了湊一個數字去 spawn 使用者的 process。真要做,唯一可行的是
+**每個 server 一顆明確 opt-in 的「連線並量測」按鈕**:
+
+- 需要新增 Rust MCP client 相依(專案規定新 workspace 相依要先問)
+- 需要 spawn 使用者的 process、帶他們的密鑰(對外行為,要先確認)
+- 量到之後可以把結果快取起來,之後就離線可用 —— 也順便補上 Cursor 那條路
+  的空白
+
+在那之前,可以講給使用者聽的正確結論是:**MCP 閒置成本低,技能描述才是
+每回合都在付的錢。**
