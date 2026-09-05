@@ -1347,6 +1347,11 @@ export default {
 	skillLayoutNewLinks: "Creates {{count}} per-agent link(s)",
 	skillLayoutStillShared:
 		"Still shared by: {{agents}} (no skills folder of their own)",
+	skillLayoutSummary:
+		"{{count}} skill(s) move to {{path}}, creating {{links}} per-agent link(s).",
+	skillLayoutSummaryDone:
+		"{{count}} skill(s) moved to {{path}}, creating {{links}} per-agent link(s).",
+	skillLayoutRowLinks: "{{count}} link(s)",
 	skillRepairOutcome_conformant: "already correct",
 	skillRepairOutcome_migrated: "will migrate",
 	skillRepairOutcome_relinked: "will relink",

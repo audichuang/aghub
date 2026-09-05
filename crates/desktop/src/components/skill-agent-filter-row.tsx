@@ -1,4 +1,4 @@
-import { Tooltip } from "@heroui/react";
+import { ListBox, Select, Tooltip } from "@heroui/react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { SkillResponse } from "../generated/dto";
@@ -15,6 +15,9 @@ import { cn } from "../lib/utils";
  * about what its own budget would do with it.
  */
 const BUDGETED_AGENT_ID = "claude";
+
+/** Sentinel key for "no agent filter" — `null` is not a valid Select key. */
+const ALL_AGENTS_KEY = "__all__";
 
 interface SkillAgentFilterRowProps {
 	/**
@@ -125,45 +128,63 @@ export function SkillAgentFilterRow({
 		);
 	}, [skills, costAgentId]);
 
-	// One usable agent means no chips worth showing — but the cost line is the
-	// point of the row, so it still renders. An ACTIVE filter always shows the
-	// chips, or there would be no way to clear it.
-	const showChips = rows.length >= 2 || selected !== null;
+	// One usable agent means no choice worth offering — but the cost line is
+	// the point of the row, so it still renders. An ACTIVE filter always shows
+	// the Select, or there would be no way to clear it.
+	const showSelect = rows.length >= 2 || selected !== null;
 	const showCost = cost !== null && cost.skillCount > 0;
-	if (!showChips && !showCost) return null;
-
-	const chip = (id: string | null, label: string, count?: number) => {
-		const isActive = selected === id;
-		return (
-			<button
-				key={id ?? "__all__"}
-				type="button"
-				onClick={() => onChange(isActive && id !== null ? null : id)}
-				aria-pressed={isActive}
-				className={cn(
-					"rounded-full border border-separator px-2 py-0.5 text-xs transition-colors",
-					isActive
-						? "bg-accent/10 text-accent"
-						: "text-muted hover:bg-surface-secondary",
-				)}
-			>
-				{count === undefined ? label : `${label} ${count}`}
-			</button>
-		);
-	};
+	if (!showSelect && !showCost) return null;
 
 	const isBudgeted = costAgentId === BUDGETED_AGENT_ID;
 	const overBudget = isBudgeted && cost !== null && cost.overBudgetChars > 0;
 
 	return (
 		<div className="flex flex-col gap-1 px-3 pb-2">
-			{showChips && (
-				<div className="flex flex-wrap items-center gap-1.5">
-					{chip(null, t("allAgentsFilter"))}
-					{rows.map((row) =>
-						chip(row.id, row.displayName, row.count),
-					)}
-				</div>
+			{showSelect && (
+				<Select
+					aria-label={t("agents")}
+					className="min-w-0"
+					variant="secondary"
+					// `null` is not a valid Select key, so "no filter" gets a
+					// sentinel id. Leaving `selectedKey` undefined instead
+					// would render the placeholder while the list is in fact
+					// unfiltered.
+					selectedKey={selected ?? ALL_AGENTS_KEY}
+					onSelectionChange={(key) => {
+						const k = String(key);
+						onChange(k === ALL_AGENTS_KEY ? null : k);
+					}}
+				>
+					<Select.Trigger>
+						<Select.Value />
+						<Select.Indicator />
+					</Select.Trigger>
+					<Select.Popover>
+						<ListBox>
+							<ListBox.Item
+								id={ALL_AGENTS_KEY}
+								textValue={t("allAgentsFilter")}
+							>
+								{t("allAgentsFilter")}
+								<ListBox.ItemIndicator />
+							</ListBox.Item>
+							{rows.map((row) => (
+								<ListBox.Item
+									key={row.id}
+									id={row.id}
+									// The count belongs in the label, not a
+									// sibling node: `Select.Value` renders the
+									// item's text, so anything outside it is
+									// invisible on the closed trigger.
+									textValue={`${row.displayName} (${row.count})`}
+								>
+									{`${row.displayName} (${row.count})`}
+									<ListBox.ItemIndicator />
+								</ListBox.Item>
+							))}
+						</ListBox>
+					</Select.Popover>
+				</Select>
 			)}
 			{showCost && cost !== null && (
 				<Tooltip delay={0}>

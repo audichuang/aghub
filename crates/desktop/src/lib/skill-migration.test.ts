@@ -4,7 +4,11 @@ import assert from "node:assert/strict";
 // eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import type { RepairReportDto, RepairResponse } from "../generated/dto";
-import { migrationBannerModel, migrationRowFacts } from "./skill-migration.ts";
+import {
+	migrationBannerModel,
+	migrationRowFacts,
+	migrationSummary,
+} from "./skill-migration.ts";
 
 function row(over: Partial<RepairReportDto> = {}): RepairReportDto {
 	return {
@@ -87,4 +91,47 @@ test("a refused row carries no migration facts", () => {
 	);
 	assert.equal(facts.linkCount, 0);
 	assert.deepEqual(facts.fused, []);
+});
+
+// The whole point of the summary: the repeated facts are hoisted, and the
+// refused rows are counted apart because they migrate nothing.
+test("the summary hoists the scope-wide facts and excludes refusals", () => {
+	const s = migrationSummary([
+		row({ name: "a", fused: ["cline", "warp"] }),
+		row({
+			name: "b",
+			master: "/home/u/.aghub/b",
+			referrers: ["/home/u/.claude/skills/b", "/home/u/.codex/skills/b"],
+			fused: ["warp"],
+		}),
+		row({
+			name: "c",
+			outcome: "refused",
+			referrers: ["x"],
+			fused: ["nope"],
+		}),
+	]);
+	assert.equal(s.migrating, 2);
+	assert.equal(s.refused, 1);
+	assert.equal(s.masterParent, "/home/u/.aghub");
+	assert.equal(s.totalLinks, 3, "a refused row promises no links");
+	assert.deepEqual(
+		s.fused,
+		["cline", "warp"],
+		"the union, deduped — and never an agent named only by a refusal",
+	);
+});
+
+test("an all-refused preview promises no store path", () => {
+	const s = migrationSummary([row({ outcome: "refused" })]);
+	assert.equal(s.migrating, 0);
+	assert.equal(s.masterParent, null, "nothing is moving anywhere");
+	assert.equal(s.totalLinks, 0);
+});
+
+// The backend answers with the host's separators; a Windows master must not
+// report itself as its own parent.
+test("a windows master path is cut at its own separator", () => {
+	const s = migrationSummary([row({ master: "C:\\Users\\u\\.aghub\\a" })]);
+	assert.equal(s.masterParent, "C:\\Users\\u\\.aghub");
 });

@@ -721,6 +721,18 @@ export function repairSkillsMutationOptions({
 			}
 			await onSuccess?.(data);
 		},
+		// A bulk repair is NOT atomic: the server walks the worklist skill by
+		// skill and an I/O error aborts the loop, so a failed request may still
+		// have migrated everything before the one that broke — and answers with
+		// no report of them. Re-reading the preview is the only way the banner
+		// can tell the user what is actually left; without this it keeps
+		// offering migrations that already happened.
+		onError: async () => {
+			await invalidateSkillQueries(queryClient);
+			await queryClient.invalidateQueries({
+				queryKey: queryKeys.skills.repairPreviews(),
+			});
+		},
 	});
 }
 

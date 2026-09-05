@@ -43,3 +43,47 @@ export function migrationRowFacts(row: RepairReportDto): {
 		fused: refused ? [] : row.fused,
 	};
 }
+
+/**
+ * The facts that are the SAME for every row, hoisted out of the per-skill list.
+ *
+ * A fifty-skill preview repeated the store path and the fused-agent sentence
+ * fifty times, which buried the two things that actually differ per skill (the
+ * name, and whether it was refused). These are scope-wide facts, so they belong
+ * in one sentence above the list.
+ *
+ * `masterParent` is taken from the rows rather than composed from a home dir:
+ * the store path is the backend's answer and the UI must not re-derive it.
+ * `fused` is the UNION — a mixed scope shows the superset, which is the honest
+ * reading of "these agents stay fused".
+ */
+export function migrationSummary(rows: readonly RepairReportDto[]): {
+	migrating: number;
+	refused: number;
+	masterParent: string | null;
+	totalLinks: number;
+	fused: string[];
+} {
+	const acting = rows.filter((r) => r.outcome !== "refused");
+	const fused = new Set<string>();
+	let totalLinks = 0;
+	for (const row of acting) {
+		totalLinks += row.referrers.length;
+		for (const agent of row.fused) fused.add(agent);
+	}
+	// Cut at the last separator of either flavour: these paths come from the
+	// backend, so a Windows master arrives with backslashes and a `lastIndexOf`
+	// on "/" alone would return the whole path as its own parent.
+	const first = acting[0]?.master ?? null;
+	const cut =
+		first === null
+			? -1
+			: Math.max(first.lastIndexOf("/"), first.lastIndexOf("\\"));
+	return {
+		migrating: acting.length,
+		refused: rows.length - acting.length,
+		masterParent: first === null || cut <= 0 ? first : first.slice(0, cut),
+		totalLinks,
+		fused: [...fused].sort(),
+	};
+}

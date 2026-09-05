@@ -8,6 +8,7 @@ import { useApi } from "../hooks/use-api";
 import {
 	migrationBannerModel,
 	migrationRowFacts,
+	migrationSummary,
 } from "../lib/skill-migration";
 import { queryKeys } from "../requests/keys";
 import {
@@ -79,6 +80,10 @@ export function SkillLayoutMigrationBanner({
 
 	const result = repair.data;
 	const shown: RepairReportDto[] = result ? result.skills : rows;
+	const done = result ? !result.dry_run : false;
+	// The store path and the fused-agent sentence are the same for every row.
+	// Repeated per skill they buried the list; hoisted they are one sentence.
+	const summary = migrationSummary(shown);
 
 	return (
 		<>
@@ -132,10 +137,37 @@ export function SkillLayoutMigrationBanner({
 						    unreachable — visible only by rendering it with a
 						    realistic list. */}
 						<Modal.Body className="flex min-h-0 flex-1 flex-col overflow-y-auto p-4">
-							<p className="mb-4 text-sm text-muted">
+							<p className="mb-3 text-sm text-muted">
 								{t("skillLayoutMigrateExplain")}
 							</p>
-							<ul className="space-y-4">
+							<div className="mb-3 space-y-1 rounded-md border border-default bg-surface-secondary p-3 text-muted text-xs">
+								{summary.masterParent !== null && (
+									<p className="break-all">
+										{t(
+											done
+												? "skillLayoutSummaryDone"
+												: "skillLayoutSummary",
+											{
+												count: summary.migrating,
+												path: summary.masterParent,
+												links: summary.totalLinks,
+											},
+										)}
+									</p>
+								)}
+								{summary.fused.length > 0 && (
+									// The honest half, said ONCE. These agents
+									// do not become individually revocable, and
+									// that is a property of the scope, not of
+									// any one skill.
+									<p>
+										{t("skillLayoutStillShared", {
+											agents: summary.fused.join(", "),
+										})}
+									</p>
+								)}
+							</div>
+							<ul className="space-y-1">
 								{shown.map((row) => (
 									<MigrationRow
 										key={row.name}
@@ -145,7 +177,7 @@ export function SkillLayoutMigrationBanner({
 										// future-tense label made a finished
 										// migration read as a plan that had not
 										// run yet.
-										done={result ? !result.dry_run : false}
+										done={done}
 									/>
 								))}
 							</ul>
@@ -197,76 +229,56 @@ export function SkillLayoutMigrationBanner({
 }
 
 /**
- * One skill's row. Shows the three things the preview has to answer: where the
- * master goes, which per-agent links appear, and who stays fused afterwards.
+ * One skill's row — ONE LINE for anything that is going fine.
+ *
+ * The store path and the fused set moved into the dialog's summary, so all a
+ * healthy row still has to answer is which skill and how many links. A refusal
+ * stays expanded: it carries the literal command that unsticks the user, and
+ * that is per-skill by nature.
  */
 function MigrationRow({ row, done }: { row: RepairReportDto; done: boolean }) {
 	const { t } = useTranslation();
 	// Derived in `lib/skill-migration`, which node can test — this component
 	// only lays the facts out.
-	const { refused, master, linkCount, fused } = migrationRowFacts(row);
+	const { refused, linkCount } = migrationRowFacts(row);
+
+	if (refused) {
+		return (
+			<li className="rounded-md border border-danger/40 p-3 text-sm">
+				<div className="flex items-center justify-between gap-2">
+					<span className="font-medium">{row.name}</span>
+					<span className="text-danger text-xs">
+						{t(`skillRepairOutcome_${done ? "done_" : ""}refused`)}
+					</span>
+				</div>
+				<p className="mt-2 text-danger text-xs">{row.reason}</p>
+				{/* Shown verbatim and selectable: it is the literal command
+				    that unsticks the user. Paraphrasing it would leave them
+				    with a diagnosis and no way out.
+				    NOT `bg-muted` — that token is a FOREGROUND grey
+				    (`--muted`), so it painted the box in the text colour and
+				    the command rendered as a blank bar. `bg-surface-secondary`
+				    + `text-foreground` is what every other code block in this
+				    app uses. Only visible by actually rendering it. */}
+				<pre className="mt-1 max-h-28 select-text overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface-secondary px-3 py-2 font-mono text-foreground text-xs">
+					{row.fix}
+				</pre>
+			</li>
+		);
+	}
+
 	return (
-		<li className="rounded-md border border-default p-3 text-sm">
-			<div className="flex items-center justify-between gap-2">
-				<span className="font-medium">{row.name}</span>
-				<span
-					className={
-						refused ? "text-danger text-xs" : "text-muted text-xs"
-					}
-				>
-					{t(
-						`skillRepairOutcome_${done ? "done_" : ""}${row.outcome}`,
-					)}
-				</span>
-			</div>
-			{refused ? (
-				<div className="mt-2 space-y-1">
-					<p className="text-danger text-xs">{row.reason}</p>
-					{/* Shown verbatim and selectable: it is the literal command
-					    that unsticks the user. Paraphrasing it would leave them
-					    with a diagnosis and no way out.
-					    NOT `bg-muted` — that token is a FOREGROUND grey
-					    (`--muted`), so it painted the box in the text colour and
-					    the command rendered as a blank bar. `bg-surface-secondary`
-					    + `text-foreground` is what every other code block in this
-					    app uses. Only visible by actually rendering it. */}
-					<pre className="max-h-28 overflow-auto whitespace-pre-wrap break-all rounded-lg bg-surface-secondary px-3 py-2 font-mono text-foreground text-xs select-text">
-						{row.fix}
-					</pre>
-				</div>
-			) : (
-				<div className="mt-2 space-y-1 text-muted text-xs">
-					<p className="break-all">
-						{t(
-							done
-								? "skillLayoutMasterMovedTo"
-								: "skillLayoutMasterMovesTo",
-							{ path: master },
-						)}
-					</p>
-					{linkCount > 0 && (
-						<p>
-							{t(
-								done
-									? "skillLayoutNewLinksDone"
-									: "skillLayoutNewLinks",
-								{ count: linkCount },
-							)}
-						</p>
-					)}
-					{fused.length > 0 && (
-						// The honest half. These agents do NOT become
-						// individually revocable, and saying so is the
-						// difference between a migration the user understands
-						// and one they merely trust.
-						<p>
-							{t("skillLayoutStillShared", {
-								agents: fused.join(", "),
-							})}
-						</p>
-					)}
-				</div>
-			)}
+		<li className="flex items-center justify-between gap-3 px-1 py-1 text-sm">
+			<span className="truncate">{row.name}</span>
+			<span className="shrink-0 text-muted text-xs">
+				{/* The outcome stays on the row even though most will read
+				    the same: `reconciled` quarantines a fork the user edited,
+				    which is a materially different action from `migrated` and
+				    must not be averaged away by the summary. */}
+				{t(`skillRepairOutcome_${done ? "done_" : ""}${row.outcome}`)}
+				{linkCount > 0 &&
+					` · ${t("skillLayoutRowLinks", { count: linkCount })}`}
+			</span>
 		</li>
 	);
 }

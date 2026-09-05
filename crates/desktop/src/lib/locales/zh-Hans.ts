@@ -1303,6 +1303,11 @@ export default {
 	skillLayoutNewLinks: "将建立 {{count}} 个各自的 agent 链接",
 	skillLayoutStillShared:
 		"仍为这些 agent 共用:{{agents}}(它们没有自己的技能文件夹)",
+	skillLayoutSummary:
+		"{{count}} 个技能将移到 {{path}},并建立 {{links}} 个各自的 agent 链接。",
+	skillLayoutSummaryDone:
+		"{{count}} 个技能已移到 {{path}},并建立 {{links}} 个各自的 agent 链接。",
+	skillLayoutRowLinks: "{{count}} 个链接",
 	skillRepairOutcome_conformant: "已经正确",
 	skillRepairOutcome_migrated: "将迁移",
 	skillRepairOutcome_relinked: "将重新链接",
