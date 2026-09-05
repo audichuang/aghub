@@ -6,6 +6,7 @@ pub mod prune;
 pub mod removal;
 pub mod rename;
 pub mod resync;
+pub mod shape;
 pub mod update;
 pub mod usage;
 
