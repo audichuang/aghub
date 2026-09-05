@@ -11701,3 +11701,151 @@ fn skill_usage_refuses_project_and_all_scopes() {
 		);
 	}
 }
+
+// ---------------------------------------------------------------------------
+// Acceptance for the `.aghub` skill-store decoupling
+// (`.scratch/aghub-skill-store/spec.md` §Acceptance).
+//
+// Both are `#[ignore]`d until the linker cascade lands: `install_universal`
+// still materializes the Master at `~/.agents/skills/<n>`, and `verify_shape`
+// is not yet wired into `RemovalOutcome`. They are committed AHEAD of that work
+// on purpose — an acceptance test written after the fact only ever proves the
+// implementation matches itself.
+//
+// Un-ignore in the commit that flips `universal_canonical_dir` to
+// `master_store_dir` and deletes `LinkNeed::NativeReader`.
+// ---------------------------------------------------------------------------
+
+/// THE central promise: installing for one agent grants it to that agent ONLY.
+///
+/// Today this cannot hold. grok's Referrer needs something to point at, so
+/// `install_universal` materializes `~/.agents/skills/<n>` — and codex, cursor,
+/// opencode, cline and warp all read that directory natively. Storing IS
+/// granting.
+///
+/// Line-by-line, only assertion 4 can fail before the change; 2, 3 and 5 are
+/// already green today and prove nothing on their own.
+#[test]
+#[ignore = "un-ignore with the linker cascade (master_store_dir + NativeReader deletion)"]
+fn installing_for_one_agent_does_not_leak_to_the_shared_slot() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let src = tempfile::tempdir().unwrap();
+
+	// A name that cannot collide with the one un-isolatable read path:
+	// codex's descriptor hard-codes `/etc/codex/skills`.
+	let name = "aghub-withhold-fixture";
+	let skill_dir = src.path().join(name);
+	std::fs::create_dir_all(&skill_dir).unwrap();
+	std::fs::write(
+		skill_dir.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: fixture\n---\n"),
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "grok", "add", "skills", "--from"])
+		.arg(&skill_dir)
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"add failed: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+
+	// 2. The Master is a real directory in the store.
+	let master = home.path().join(".aghub").join(name);
+	let meta = std::fs::symlink_metadata(&master)
+		.unwrap_or_else(|e| panic!("no Master at {}: {e}", master.display()));
+	assert!(meta.is_dir(), "the Master must be a real directory");
+	assert!(master.join("SKILL.md").is_file());
+
+	// 3. grok reads it through a link into the store.
+	let grok = home.path().join(".grok").join("skills").join(name);
+	assert!(
+		std::fs::symlink_metadata(&grok).is_ok_and(|m| m.is_symlink()),
+		"grok must hold a Referrer at {}",
+		grok.display()
+	);
+	assert_eq!(
+		std::fs::canonicalize(&grok).unwrap(),
+		std::fs::canonicalize(&master).unwrap(),
+	);
+
+	// 4. THE PROOF. `exists()` is wrong here: it follows links and returns
+	// false for a dangling one, so it would pass a broken leftover as success.
+	let shared = home.path().join(".agents").join("skills").join(name);
+	assert!(
+		std::fs::symlink_metadata(&shared).is_err(),
+		"nothing may occupy the shared slot when no shared-slot agent was \
+		 named — found {:?} at {}",
+		std::fs::symlink_metadata(&shared).map(|m| m.file_type()),
+		shared.display()
+	);
+
+	// 5. And the five natives see nothing.
+	for (agent, dir) in [
+		("codex", home.path().join(".codex").join("skills")),
+		("cursor", home.path().join(".cursor").join("skills")),
+		("cline", home.path().join(".agents").join("skills")),
+		("warp", home.path().join(".agents").join("skills")),
+	] {
+		assert!(
+			std::fs::symlink_metadata(dir.join(name)).is_err(),
+			"{agent} was not named and must not receive the skill"
+		);
+	}
+}
+
+/// Preview and commit must agree. A delete WITHOUT `--yes` has to refuse the
+/// npx-clobbered shape, not print a preview that the same command with `--yes`
+/// then rejects.
+///
+/// Reproduces what every npx write verb leaves behind: `cleanAndCreateDirectory`
+/// unlinks the Referrer and writes a real directory holding bytes that exist
+/// nowhere else.
+#[test]
+#[ignore = "un-ignore when verify_shape lands on RemovalOutcome::preview/commit"]
+fn a_delete_preview_refuses_the_npx_clobbered_shape() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let name = "aghub-forked-fixture";
+
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: master\n---\n"),
+	)
+	.unwrap();
+
+	// npx replaced the shared Referrer with a real directory of its own.
+	let shared = home.path().join(".agents").join("skills").join(name);
+	std::fs::create_dir_all(&shared).unwrap();
+	std::fs::write(
+		shared.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: npx wrote this\n---\n"),
+	)
+	.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "delete", "skills", name])
+		.output()
+		.unwrap();
+
+	assert_eq!(
+		out.status.code(),
+		Some(1),
+		"a refused shape must exit 1, not print a preview: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let payload: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(
+		payload.get("error").is_some(),
+		"--json failures are JSON too: {payload}"
+	);
+	// The forked copy is never deleted by a refused command.
+	assert!(shared.join("SKILL.md").is_file());
+	assert!(master.join("SKILL.md").is_file());
+}
