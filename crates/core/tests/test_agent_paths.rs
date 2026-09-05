@@ -66,7 +66,7 @@ fn test_opencode_global_config_respects_xdg_config_home() {
 			}
 		}
 	}
-	let keys = ["OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "XDG_CONFIG_HOME"];
+	let keys = aghub_core::PATH_OVERRIDE_VARS;
 	let _restore = RestoreEnv(
 		keys.iter()
 			.map(|key| (*key, std::env::var_os(key)))
@@ -285,15 +285,14 @@ fn test_opencode_global_creation_persists() {
 			}
 		}
 	}
-	let _restore_config: Vec<RestoreVar> =
-		["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG"]
-			.into_iter()
-			.map(|key| {
-				let saved = RestoreVar(key, std::env::var_os(key));
-				std::env::remove_var(key);
-				saved
-			})
-			.collect();
+	let _restore_config: Vec<RestoreVar> = aghub_core::PATH_OVERRIDE_VARS
+		.iter()
+		.map(|key| {
+			let saved = RestoreVar(key, std::env::var_os(key));
+			std::env::remove_var(key);
+			saved
+		})
+		.collect();
 
 	// RAII: always restore $HOME, even if an assert panics mid-test.
 	struct RestoreHome(Option<OsString>);

@@ -26,7 +26,7 @@ pub use aghub_agents::{
 	AgentConfig, AgentDescriptor, AgentType, Capabilities, ConfigError,
 	ConfigSource, LoadMcpsFn, LoadSubAgentsFn, McpParseFn, McpSerializeFn,
 	McpServer, McpTransport, ResourceScope, Result, SaveMcpsFn,
-	SaveSubAgentsFn, Skill, SubAgent,
+	SaveSubAgentsFn, Skill, SubAgent, PATH_OVERRIDE_VARS,
 };
 
 #[cfg(feature = "testing")]

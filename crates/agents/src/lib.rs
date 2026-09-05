@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod descriptor;
+pub mod env_overrides;
 pub mod errors;
 pub mod format;
 pub mod macros;
@@ -12,6 +13,7 @@ pub use descriptor::{
 	ProjectSkillPaths, SaveMcpsFn, SaveSubAgentsFn, ScopeSupport,
 	SkillCapabilities, SubAgentCapabilities,
 };
+pub use env_overrides::PATH_OVERRIDE_VARS;
 pub use errors::{ConfigError, Result};
 pub use models::{
 	AgentConfig, AgentType, ConfigSource, McpServer, McpTransport,

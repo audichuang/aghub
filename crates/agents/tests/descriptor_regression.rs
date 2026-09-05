@@ -19,20 +19,83 @@ fn home() -> PathBuf {
 /// path. The tables below pin the DEFAULTS, so a test that reads a global path
 /// must clear these first — otherwise the suite goes red on any machine that
 /// happens to export one, and a bare `XDG_CONFIG_HOME` is enough to do it.
-const PATH_OVERRIDES: &[&str] = &[
-	"OPENCODE_CONFIG",
-	"OPENCODE_CONFIG_DIR",
-	"XDG_CONFIG_HOME",
-	"CODEX_HOME",
-	"COPILOT_HOME",
-	"KIMI_SHARE_DIR",
-	"VIBE_HOME",
-	"HERMES_HOME",
-	"GROK_HOME",
-	"OPENCLAW_CONFIG_PATH",
-	"OPENCLAW_STATE_DIR",
-];
+///
+/// The list itself is `aghub_agents::PATH_OVERRIDE_VARS` — every harness that
+/// isolates a run shares that one const rather than hand-copying it.
+const PATH_OVERRIDES: &[&str] = aghub_agents::PATH_OVERRIDE_VARS;
 
+/// The const above is only as good as its completeness, and nothing in the type
+/// system ties it to the descriptors that read the variables — so read the
+/// descriptor sources and check. A new agent honouring a new `FOO_HOME` fails
+/// HERE, instead of silently letting some future harness write into the
+/// developer's real config (which is how the last three leaks happened).
+#[test]
+fn path_override_vars_covers_every_descriptor_read() {
+	let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+	let mut missing: Vec<(String, String)> = Vec::new();
+	let mut stack = vec![dir];
+	while let Some(dir) = stack.pop() {
+		for entry in std::fs::read_dir(&dir).expect("read src dir") {
+			let path = entry.expect("dir entry").path();
+			if path.is_dir() {
+				stack.push(path);
+				continue;
+			}
+			if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+				continue;
+			}
+			let src = std::fs::read_to_string(&path).expect("read source");
+			for var in env_vars_read(&src) {
+				// $HOME and the XDG bases are the platform's own, isolated by
+				// every harness on their own terms (one is SET, not cleared).
+				if matches!(
+					var.as_str(),
+					"HOME" | "XDG_DATA_HOME" | "XDG_STATE_HOME" | "APPDATA"
+				) {
+					continue;
+				}
+				if !PATH_OVERRIDES.contains(&var.as_str()) {
+					missing.push((
+						path.file_name()
+							.unwrap()
+							.to_string_lossy()
+							.into_owned(),
+						var,
+					));
+				}
+			}
+		}
+	}
+	assert!(
+		missing.is_empty(),
+		"these descriptor env reads are not in aghub_agents::PATH_OVERRIDE_VARS, \
+		 so a harness clearing that list still leaks the developer's real \
+		 config: {missing:?}"
+	);
+}
+
+/// Pull `"FOO"` out of `env::var("FOO")`, `env::var_os("FOO")` and the
+/// `env_path("FOO")` wrapper. Deliberately literal-only — a variable read
+/// through a runtime-computed name could not be pinned by a const list anyway.
+#[cfg(test)]
+fn env_vars_read(src: &str) -> Vec<String> {
+	let mut out = Vec::new();
+	for opener in ["env::var(\"", "env::var_os(\"", "env_path(\""] {
+		let mut rest = src;
+		while let Some(at) = rest.find(opener) {
+			rest = &rest[at + opener.len()..];
+			if let Some(end) = rest.find('"') {
+				let name = &rest[..end];
+				if name.chars().all(|c| c.is_ascii_uppercase() || c == '_')
+					&& !name.is_empty()
+				{
+					out.push(name.to_string());
+				}
+			}
+		}
+	}
+	out
+}
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct DefaultEnv {

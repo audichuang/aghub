@@ -426,19 +426,7 @@ fn isolated_cli(home: &std::path::Path, state: &std::path::Path) -> Command {
 /// an ambient `OPENCODE_CONFIG_DIR` had these tests writing MCP servers into a
 /// live `opencode.json`.) Clear every such variable for the child process.
 fn clear_agent_home_overrides(cmd: &mut Command) {
-	for key in [
-		"OPENCODE_CONFIG",
-		"OPENCODE_CONFIG_DIR",
-		"XDG_CONFIG_HOME",
-		"CODEX_HOME",
-		"COPILOT_HOME",
-		"KIMI_SHARE_DIR",
-		"VIBE_HOME",
-		"HERMES_HOME",
-		"GROK_HOME",
-		"OPENCLAW_CONFIG_PATH",
-		"OPENCLAW_STATE_DIR",
-	] {
+	for key in aghub_core::PATH_OVERRIDE_VARS {
 		cmd.env_remove(key);
 	}
 }

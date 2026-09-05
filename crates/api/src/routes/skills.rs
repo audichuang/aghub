@@ -2885,19 +2885,7 @@ mod tests {
 		// allow-listed roots, which makes the outcome depend on what happens to
 		// be installed on the machine. Same list as the CLI harness's
 		// `clear_agent_home_overrides`, for the same reason.
-		const OVERRIDES: &[&str] = &[
-			"XDG_CONFIG_HOME",
-			"OPENCODE_CONFIG",
-			"OPENCODE_CONFIG_DIR",
-			"CODEX_HOME",
-			"COPILOT_HOME",
-			"KIMI_SHARE_DIR",
-			"VIBE_HOME",
-			"HERMES_HOME",
-			"GROK_HOME",
-			"OPENCLAW_CONFIG_PATH",
-			"OPENCLAW_STATE_DIR",
-		];
+		const OVERRIDES: &[&str] = aghub_core::PATH_OVERRIDE_VARS;
 		let saved: Vec<(&str, Option<String>)> = OVERRIDES
 			.iter()
 			.map(|k| (*k, std::env::var(k).ok()))
