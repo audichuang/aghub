@@ -1265,4 +1265,23 @@ export default {
 		"這會從 {{count}} 個代理移除此技能，且無法復原。",
 	manageAgentsAddThenRemove:
 		"請先新增到新代理並套用，再移除原有代理；否則複製失敗時技能會無處可留。",
+	skillLayoutOutdatedTitle: "有技能仍使用共用版面",
+	skillLayoutOutdatedHint:
+		"有 {{count}} 個技能放在所有 agent 都會讀的共用資料夾,因此無法針對單一 agent 授權或撤銷。遷移會把它們移到獨立的儲存區,並為每個 agent 建立各自的連結。",
+	skillLayoutReview: "檢視",
+	skillLayoutMigrateTitle: "遷移技能版面",
+	skillLayoutMigrateExplain:
+		"不會刪除任何東西:每個技能目前的副本都會保留在一旁,隨時可以取回。沒有自己技能資料夾的 agent 仍會共用同一個目錄,清單如下。",
+	skillLayoutApply: "開始遷移",
+	skillLayoutRunAgain: "再執行一次",
+	skillLayoutMigrated: "已遷移 {{count}} 個技能",
+	skillLayoutMasterMovesTo: "將移動到 {{path}}",
+	skillLayoutNewLinks: "將建立 {{count}} 個各自的 agent 連結",
+	skillLayoutStillShared:
+		"仍為這些 agent 共用:{{agents}}(它們沒有自己的技能資料夾)",
+	skillRepairOutcome_conformant: "已經正確",
+	skillRepairOutcome_migrated: "將遷移",
+	skillRepairOutcome_relinked: "將重新連結",
+	skillRepairOutcome_reconciled: "將協調",
+	skillRepairOutcome_refused: "需要你處理",
 };

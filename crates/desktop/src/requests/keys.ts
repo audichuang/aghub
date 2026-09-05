@@ -40,6 +40,13 @@ export const queryKeys = {
 		/// Prefix covering every scope's update check — an applied update
 		/// invalidates the outdated-or-not answer for all of them.
 		updateChecksAll: () => ["skills", "check-updates"] as const,
+		/// The DRY-RUN repair preview: which skills are not conformant at this
+		/// scope. Under `skills.all()` so any skill mutation marks it stale —
+		/// installing or deleting a skill changes what needs migrating.
+		repairPreview: (
+			scope: "global" | "project" = "global",
+			projectRoot?: string,
+		) => ["skills", "repair-preview", scope, projectRoot ?? null] as const,
 		/// Prefixes for a skill's rendered BODY — the SKILL.md text and its file
 		/// tree. A flow that rewrites files on disk owes these a refetch: the
 		/// path (and so the key) is unchanged, so nothing else brings the open

@@ -1311,4 +1311,23 @@ export default {
 		"This removes the skill from {{count}} agent(s). This cannot be undone.",
 	manageAgentsAddThenRemove:
 		"Add the skill to the new agent(s) and apply first, then remove the existing ones — otherwise a failed copy could leave the skill installed nowhere.",
+	skillLayoutOutdatedTitle: "Some skills still use the shared layout",
+	skillLayoutOutdatedHint:
+		"{{count}} skill(s) are stored in the shared folder every agent reads, so they cannot be granted or revoked per agent. Migrating moves them to a private store and gives each agent its own link.",
+	skillLayoutReview: "Review",
+	skillLayoutMigrateTitle: "Migrate skill layout",
+	skillLayoutMigrateExplain:
+		"Nothing is deleted: the current copy of each skill is kept aside so you can recover it. Agents with no skills folder of their own keep sharing one directory — they are listed below.",
+	skillLayoutApply: "Migrate",
+	skillLayoutRunAgain: "Run again",
+	skillLayoutMigrated: "Migrated {{count}} skill(s)",
+	skillLayoutMasterMovesTo: "Moves to {{path}}",
+	skillLayoutNewLinks: "Creates {{count}} per-agent link(s)",
+	skillLayoutStillShared:
+		"Still shared by: {{agents}} (no skills folder of their own)",
+	skillRepairOutcome_conformant: "already correct",
+	skillRepairOutcome_migrated: "will migrate",
+	skillRepairOutcome_relinked: "will relink",
+	skillRepairOutcome_reconciled: "will reconcile",
+	skillRepairOutcome_refused: "needs your attention",
 };

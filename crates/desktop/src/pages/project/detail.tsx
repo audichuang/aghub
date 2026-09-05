@@ -4,6 +4,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { SkillLayoutMigrationBanner } from "../../components/skill-layout-migration-banner";
 import { useParams } from "wouter";
 import { BulkDeleteDialog } from "../../components/bulk-delete-dialog";
 import { CreateMcpPanel } from "../../components/create-mcp-panel";
@@ -291,168 +292,180 @@ export default function ProjectDetailPage() {
 	}
 
 	return (
-		<div className="flex h-full">
-			{/* List Panel */}
-			<UnifiedResourceList
-				mcps={projectMcps}
-				skills={projectSkills}
-				subAgents={projectSubAgents}
-				selectedMcpKeys={
-					isMultiSelectMode
-						? selectedMcpKeys
-						: resourceType === "mcp" && selectedResource
+		<div className="flex h-full flex-col">
+			{/* Project scope is where most legacy layouts actually live — a
+			    project's `.agents/skills` is what npx and older aghub wrote
+			    into. Renders nothing when there is nothing to migrate. */}
+			<div className="px-3 pt-3 empty:hidden">
+				<SkillLayoutMigrationBanner
+					scope="project"
+					projectPath={project.path}
+				/>
+			</div>
+			<div className="flex min-h-0 flex-1">
+				{/* List Panel */}
+				<UnifiedResourceList
+					mcps={projectMcps}
+					skills={projectSkills}
+					subAgents={projectSubAgents}
+					selectedMcpKeys={
+						isMultiSelectMode
+							? selectedMcpKeys
+							: resourceType === "mcp" && selectedResource
+								? new Set([selectedResource])
+								: new Set()
+					}
+					selectedSkillKeys={
+						isMultiSelectMode
+							? selectedSkillKeys
+							: resourceType === "skill" && selectedResource
+								? new Set([selectedResource])
+								: new Set()
+					}
+					selectedSubAgentKeys={
+						resourceType === "sub-agent" && selectedResource
 							? new Set([selectedResource])
 							: new Set()
-				}
-				selectedSkillKeys={
-					isMultiSelectMode
-						? selectedSkillKeys
-						: resourceType === "skill" && selectedResource
-							? new Set([selectedResource])
-							: new Set()
-				}
-				selectedSubAgentKeys={
-					resourceType === "sub-agent" && selectedResource
-						? new Set([selectedResource])
-						: new Set()
-				}
-				onSelectionChange={handleSelectionChange}
-				onSubAgentSelectionChange={handleSubAgentSelectionChange}
-				onCreateMcp={(type) => {
-					if (type === "manual") setPanelMode("create-mcp");
-					else if (type === "import") setPanelMode("import-mcp");
-				}}
-				onCreateSkill={(type) => {
-					if (type === "local") setPanelMode("create-skill");
-					else if (type === "import") setPanelMode("import-skill");
-					else if (type === "github")
-						setPanelMode("import-github-skill");
-				}}
-				onCreateSubAgent={() => setPanelMode("create-sub-agent")}
-				onRefresh={handleRefresh}
-				isRefreshing={isRefreshing}
-				isLoading={isLoading}
-				searchQuery={searchQuery}
-				onSearchChange={setSearchQuery}
-				projectPath={project.path}
-				isMultiSelectMode={isMultiSelectMode}
-				onMultiSelectModeChange={handleMultiSelectModeChange}
-				onDeleteSelected={() => setIsBulkDeleteDialogOpen(true)}
-			/>
+					}
+					onSelectionChange={handleSelectionChange}
+					onSubAgentSelectionChange={handleSubAgentSelectionChange}
+					onCreateMcp={(type) => {
+						if (type === "manual") setPanelMode("create-mcp");
+						else if (type === "import") setPanelMode("import-mcp");
+					}}
+					onCreateSkill={(type) => {
+						if (type === "local") setPanelMode("create-skill");
+						else if (type === "import")
+							setPanelMode("import-skill");
+						else if (type === "github")
+							setPanelMode("import-github-skill");
+					}}
+					onCreateSubAgent={() => setPanelMode("create-sub-agent")}
+					onRefresh={handleRefresh}
+					isRefreshing={isRefreshing}
+					isLoading={isLoading}
+					searchQuery={searchQuery}
+					onSearchChange={setSearchQuery}
+					projectPath={project.path}
+					isMultiSelectMode={isMultiSelectMode}
+					onMultiSelectModeChange={handleMultiSelectModeChange}
+					onDeleteSelected={() => setIsBulkDeleteDialogOpen(true)}
+				/>
 
-			{/* Detail Panel */}
-			<div
-				data-tour="project-detail-panel"
-				className="flex-1 overflow-hidden"
-			>
-				{!panelMode && selectedMcpGroup && (
-					<McpDetail
-						key={`mcp-${selectedMcpGroup.mergeKey}`}
-						group={selectedMcpGroup}
-						onEdit={() => setPanelMode("edit-mcp")}
-						projectPath={project.path}
-					/>
-				)}
-				{!panelMode && selectedSkillGroup && (
-					<SkillDetail
-						key={`skill-${selectedSkillGroup.name}`}
-						group={selectedSkillGroup}
-						projectPath={project.path}
-					/>
-				)}
-				{!panelMode && selectedSubAgentGroup && (
-					<SubAgentDetail
-						group={selectedSubAgentGroup}
-						onEdit={() => {}}
-						onDelete={() =>
-							handleDeleteSubAgentGroup(selectedSubAgentGroup)
-						}
-						isDeleting={false}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "create-mcp" && (
-					<CreateMcpPanel
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "import-mcp" && (
-					<ImportMcpPanel
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "create-skill" && (
-					<CreateSkillPanel
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "import-skill" && (
-					<ImportSkillPanel
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "import-github-skill" && (
-					<ImportGithubSkillPanel
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "edit-mcp" && selectedMcpGroup && (
-					<EditMcpPanel
-						key={selectedMcpGroup.mergeKey}
-						group={selectedMcpGroup}
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{panelMode === "create-sub-agent" && (
-					<CreateSubAgentPanel
-						onDone={() => setPanelMode(null)}
-						projectPath={project.path}
-					/>
-				)}
-				{!panelMode &&
-					!selectedMcpGroup &&
-					!selectedSkillGroup &&
-					!selectedSubAgentGroup && (
-						<div className="flex h-full flex-col items-center justify-center gap-3">
-							<div
-								className="
+				{/* Detail Panel */}
+				<div
+					data-tour="project-detail-panel"
+					className="flex-1 overflow-hidden"
+				>
+					{!panelMode && selectedMcpGroup && (
+						<McpDetail
+							key={`mcp-${selectedMcpGroup.mergeKey}`}
+							group={selectedMcpGroup}
+							onEdit={() => setPanelMode("edit-mcp")}
+							projectPath={project.path}
+						/>
+					)}
+					{!panelMode && selectedSkillGroup && (
+						<SkillDetail
+							key={`skill-${selectedSkillGroup.name}`}
+							group={selectedSkillGroup}
+							projectPath={project.path}
+						/>
+					)}
+					{!panelMode && selectedSubAgentGroup && (
+						<SubAgentDetail
+							group={selectedSubAgentGroup}
+							onEdit={() => {}}
+							onDelete={() =>
+								handleDeleteSubAgentGroup(selectedSubAgentGroup)
+							}
+							isDeleting={false}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "create-mcp" && (
+						<CreateMcpPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "import-mcp" && (
+						<ImportMcpPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "create-skill" && (
+						<CreateSkillPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "import-skill" && (
+						<ImportSkillPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "import-github-skill" && (
+						<ImportGithubSkillPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "edit-mcp" && selectedMcpGroup && (
+						<EditMcpPanel
+							key={selectedMcpGroup.mergeKey}
+							group={selectedMcpGroup}
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{panelMode === "create-sub-agent" && (
+						<CreateSubAgentPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={project.path}
+						/>
+					)}
+					{!panelMode &&
+						!selectedMcpGroup &&
+						!selectedSkillGroup &&
+						!selectedSubAgentGroup && (
+							<div className="flex h-full flex-col items-center justify-center gap-3">
+								<div
+									className="
          flex size-16 items-center justify-center rounded-full
          bg-surface-secondary
        "
-							>
-								<FolderIcon className="size-8 text-muted" />
+								>
+									<FolderIcon className="size-8 text-muted" />
+								</div>
+								<div className="text-center">
+									<h3 className="mb-1 text-lg font-semibold">
+										{project.name}
+									</h3>
+									<p className="max-w-sm text-sm text-muted">
+										{t("selectResourceToView")}
+									</p>
+								</div>
 							</div>
-							<div className="text-center">
-								<h3 className="mb-1 text-lg font-semibold">
-									{project.name}
-								</h3>
-								<p className="max-w-sm text-sm text-muted">
-									{t("selectResourceToView")}
-								</p>
-							</div>
-						</div>
-					)}
+						)}
 
-				<BulkDeleteDialog
-					isOpen={isBulkDeleteDialogOpen}
-					onClose={() => setIsBulkDeleteDialogOpen(false)}
-					groups={selectedGroups}
-					onSuccess={() => {
-						setSelectedMcpKeys(new Set());
-						setSelectedSkillKeys(new Set());
-						setSelectedResource(null);
-						setResourceType("");
-						setIsMultiSelectMode(false);
-					}}
-					resourceType="mixed"
-					projectPath={project.path}
-				/>
+					<BulkDeleteDialog
+						isOpen={isBulkDeleteDialogOpen}
+						onClose={() => setIsBulkDeleteDialogOpen(false)}
+						groups={selectedGroups}
+						onSuccess={() => {
+							setSelectedMcpKeys(new Set());
+							setSelectedSkillKeys(new Set());
+							setSelectedResource(null);
+							setResourceType("");
+							setIsMultiSelectMode(false);
+						}}
+						resourceType="mixed"
+						projectPath={project.path}
+					/>
+				</div>
 			</div>
 		</div>
 	);

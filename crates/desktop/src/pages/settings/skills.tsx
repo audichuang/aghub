@@ -23,6 +23,7 @@ import {
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { SkillLayoutMigrationBanner } from "../../components/skill-layout-migration-banner";
 import { BulkDeleteDialog } from "../../components/bulk-delete-dialog";
 import { BulkManageGroupAgentsDialog } from "../../components/bulk-manage-group-agents-dialog";
 import { CreateSkillPanel } from "../../components/create-skill-panel";
@@ -602,6 +603,12 @@ export default function SkillsPage() {
 
 	return (
 		<div className="flex h-full flex-col">
+			{/* Above the panels, not inside the list: the layout is a property
+			    of the whole scope, not of whichever skill happens to be
+			    selected. Renders nothing when there is nothing to migrate. */}
+			<div className="px-3 pt-3 empty:hidden">
+				<SkillLayoutMigrationBanner scope="global" />
+			</div>
 			<div className="flex min-h-0 flex-1">
 				{/* Left panel: list */}
 				<div className="relative flex w-80 shrink-0 flex-col border-r border-border">

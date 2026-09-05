@@ -46,6 +46,7 @@ import type {
 	InferenceProviderResponse,
 	InstallSkillRequest,
 	InstallSkillResponse,
+	RepairResponse,
 	CCPluginMarketResponse,
 	MarketSkill,
 	McpResponse,
@@ -245,6 +246,23 @@ export function createApi(baseUrl: string) {
 						},
 						json: data,
 					})
+					.json();
+			},
+			/**
+			 * Repair / migrate skill layout. `dryRun` defaults to true on the
+			 * server too, so a forgotten flag previews rather than writes.
+			 *
+			 * Long timeout: a bulk migration copies every skill folder and the
+			 * call holds the interprocess mutation lock while it does.
+			 */
+			repair(data: {
+				scope: "global" | "project";
+				project_root?: string;
+				name?: string;
+				dry_run: boolean;
+			}): Promise<RepairResponse> {
+				return client
+					.post("skills/repair", { json: data, timeout: 300000 })
 					.json();
 			},
 			install(data: InstallSkillRequest): Promise<InstallSkillResponse> {

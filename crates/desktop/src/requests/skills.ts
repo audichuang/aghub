@@ -18,6 +18,7 @@ import type {
 	ImportSkillRequest,
 	InstallSkillRequest,
 	InstallSkillResponse,
+	RepairResponse,
 	OperationBatchResponse,
 	ReconcileRequest,
 	SkillResponse,
@@ -670,5 +671,89 @@ export function gitSyncSkillMutationOptions({
 			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},
+	});
+}
+
+interface RepairSkillsVariables {
+	scope: "global" | "project";
+	projectRoot?: string;
+	/** Omitted = every skill the lock names at this scope (bulk migration). */
+	name?: string;
+	dryRun: boolean;
+}
+
+interface RepairSkillsMutationParams {
+	api: ApiClient;
+	queryClient: QueryClient;
+	onSuccess?: (data: RepairResponse) => void | Promise<void>;
+}
+
+/**
+ * Repair / migrate skill layout.
+ *
+ * A DRY RUN must not invalidate: it changed nothing, and refetching every skill
+ * query to redraw the same rows is pure churn on a screen the user is still
+ * deciding on. Only a real run invalidates — and it must, because migration
+ * moves the master and creates per-agent links, which is exactly what the skill
+ * list and the lock views render.
+ */
+export function repairSkillsMutationOptions({
+	api,
+	queryClient,
+	onSuccess,
+}: RepairSkillsMutationParams) {
+	return mutationOptions({
+		mutationFn: ({
+			scope,
+			projectRoot,
+			name,
+			dryRun,
+		}: RepairSkillsVariables) =>
+			api.skills.repair({
+				scope,
+				project_root: projectRoot,
+				name,
+				dry_run: dryRun,
+			}),
+		onSuccess: async (data) => {
+			if (!data.dry_run) {
+				await invalidateSkillQueries(queryClient);
+			}
+			await onSuccess?.(data);
+		},
+	});
+}
+
+interface RepairPreviewParams {
+	api: ApiClient;
+	scope: "global" | "project";
+	projectRoot?: string;
+	enabled?: boolean;
+}
+
+/**
+ * The dry-run repair preview that drives the migration banner AND the dialog.
+ *
+ * One query for both, so the count in the banner and the rows in the dialog
+ * cannot disagree — the user is never told "3 skills need migrating" and then
+ * shown 2. It is a POST, but it writes nothing, so a query is the right shape.
+ */
+export function repairPreviewQueryOptions({
+	api,
+	scope,
+	projectRoot,
+	enabled = true,
+}: RepairPreviewParams) {
+	return queryOptions({
+		queryKey: queryKeys.skills.repairPreview(scope, projectRoot),
+		queryFn: () =>
+			api.skills.repair({
+				scope,
+				project_root: projectRoot,
+				dry_run: true,
+			}),
+		// Project scope without a root cannot resolve a store; asking anyway
+		// would surface a 400 as a broken banner.
+		enabled: enabled && (scope === "global" || Boolean(projectRoot)),
 	});
 }
