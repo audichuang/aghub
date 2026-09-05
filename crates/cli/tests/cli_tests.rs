@@ -11930,6 +11930,154 @@ fn installing_for_one_agent_does_not_leak_to_the_shared_slot() {
 	}
 }
 
+/// Q3 — a removal that takes nothing away reports `kept` and NAMES the leftover.
+///
+/// The spec drafted this as "`--yes` returns `unsupported_operation` and exit
+/// 1". Measured, that is wrong and the documented contract wins: root
+/// `AGENTS.md` defines `kept` as "shared Master another agent still reads —
+/// `success: true` but THE ENTITY IS STILL THERE". `spared_everything` returns
+/// its preview BEFORE the `executed` branch, so `--yes` lands there too and
+/// exits 0 with nothing deleted. Refusing would be a second, contradictory
+/// spelling of the same answer.
+///
+/// What makes this falsifiable: drop `plan.shared_master_kept = true` in
+/// `remove_skill_planned` and the outcome becomes `removed`/`absent` — a
+/// success line for a skill still sitting on disk.
+#[cfg(unix)]
+#[test]
+fn removing_for_a_non_owner_keeps_the_shared_master_and_names_it() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	// codex's global read path hard-codes /etc/codex/skills and cannot be
+	// isolated, so the name must not collide with anything real.
+	let name = "aghub-withhold-fixture";
+
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: master\n---\n"),
+	)
+	.unwrap();
+	let shared = home.path().join(".agents").join("skills");
+	std::fs::create_dir_all(&shared).unwrap();
+	std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
+
+	// cursor READS the shared slot but WRITES to its own dir, where nothing is.
+	// So there is nothing of cursor's to take away.
+	for args in [
+		vec!["-g", "-a", "cursor", "--json", "delete", "skills", name],
+		vec![
+			"-g", "-a", "cursor", "--json", "delete", "skills", name, "--yes",
+		],
+	] {
+		let confirmed = args.contains(&"--yes");
+		let out = isolated_cli(home.path(), state.path())
+			.args(&args)
+			.output()
+			.unwrap();
+		let stdout = String::from_utf8_lossy(&out.stdout);
+		assert_eq!(
+			out.status.code(),
+			Some(0),
+			"`kept` is a success, confirmed or not: {stdout}"
+		);
+		let payload: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(
+			payload["outcome"], "kept",
+			"confirmed={confirmed}: {stdout}"
+		);
+		// Naming WHERE the leftover is, not just that there is one — the user
+		// cannot act on "still discoverable somewhere".
+		let skipped = payload["skipped"].as_array().unwrap();
+		assert!(
+			skipped
+				.iter()
+				.any(|p| p.as_str().is_some_and(|p| p.contains(".aghub"))),
+			"the kept master must be disclosed: {stdout}"
+		);
+		assert!(
+			master.join("SKILL.md").is_file(),
+			"confirmed={confirmed}: `kept` means the entity is STILL THERE"
+		);
+	}
+}
+
+/// KNOWN GAP, verified and deliberately unfixed — pinned so a future fix is a
+/// visible red rather than a silent behaviour change.
+///
+/// Naming the shared slot's WRITERS (`-a cline,warp`) deletes the Master, which
+/// takes the skill from cursor and codex as well — they read `.agents/skills`
+/// but the command never mentioned them, and the result reports plain success.
+/// Same shape as the documented `reconcile mcp --remove` gap in the root
+/// `AGENTS.md`: the protect set is built from the agents NAMED, so a
+/// slot-sharer nobody named is in neither list.
+///
+/// `--all-agents` is unaffected — it promises "gone everywhere" and delivers it.
+///
+/// ponytail: the fix is to build the protect set from READERS of each doomed
+/// path rather than from the named agents; out of scope here because it changes
+/// the multi-agent batch policy in `core/src/batch.rs`, not just this verb.
+#[cfg(unix)]
+#[test]
+fn naming_only_a_slots_writers_still_takes_it_from_unnamed_readers() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let name = "aghub-withhold-fixture";
+
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: master\n---\n"),
+	)
+	.unwrap();
+	let shared = home.path().join(".agents").join("skills");
+	std::fs::create_dir_all(&shared).unwrap();
+	std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
+
+	// Precondition: cursor really does read it before the delete. Without this
+	// the assertion below would pass for a skill cursor never had.
+	let before = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+	assert!(
+		String::from_utf8_lossy(&before.stdout).contains(name),
+		"fixture must be visible to cursor first"
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"cline,warp",
+			"--json",
+			"delete",
+			"skills",
+			name,
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert_eq!(out.status.code(), Some(0));
+
+	// The gap: cursor was never named, and lost the skill anyway.
+	assert!(
+		!master.exists(),
+		"documenting today's behaviour: the master goes with the writers"
+	);
+	let after = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+	assert!(
+		!String::from_utf8_lossy(&after.stdout).contains(name),
+		"if this goes GREEN-to-RED someone fixed the gap — update the doc \
+		 comment above rather than restoring this assertion"
+	);
+}
+
 /// D4 DETECTION, not deletion-prevention — be precise about which claim this
 /// pins. Measured: with `verify_shape` removed, this same command answers
 /// `outcome: "kept"` with `paths: []`, so no delete would have touched the
