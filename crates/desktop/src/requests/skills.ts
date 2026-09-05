@@ -686,6 +686,7 @@ interface RepairSkillsMutationParams {
 	api: ApiClient;
 	queryClient: QueryClient;
 	onSuccess?: (data: RepairResponse) => void | Promise<void>;
+	onError?: (error: unknown) => void;
 }
 
 /**
@@ -701,6 +702,7 @@ export function repairSkillsMutationOptions({
 	api,
 	queryClient,
 	onSuccess,
+	onError,
 }: RepairSkillsMutationParams) {
 	return mutationOptions({
 		mutationFn: ({
@@ -727,11 +729,15 @@ export function repairSkillsMutationOptions({
 		// no report of them. Re-reading the preview is the only way the banner
 		// can tell the user what is actually left; without this it keeps
 		// offering migrations that already happened.
-		onError: async () => {
+		onError: async (error) => {
 			await invalidateSkillQueries(queryClient);
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.repairPreviews(),
 			});
+			// The caller owns the message: this seam does not toast, and a
+			// failed bulk repair that says nothing at all is the worst version
+			// of the same problem.
+			onError?.(error);
 		},
 	});
 }

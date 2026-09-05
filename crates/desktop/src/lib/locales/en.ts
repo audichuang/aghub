@@ -1352,6 +1352,8 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} skill(s) moved to {{path}}, creating {{links}} per-agent link(s).",
 	skillLayoutRowLinks: "{{count}} link(s)",
+	skillLayoutMigrateFailed:
+		"Migration stopped partway: {{message}}. Some skills may already have moved — reopen this dialog to see what is left.",
 	skillRepairOutcome_conformant: "already correct",
 	skillRepairOutcome_migrated: "will migrate",
 	skillRepairOutcome_relinked: "will relink",

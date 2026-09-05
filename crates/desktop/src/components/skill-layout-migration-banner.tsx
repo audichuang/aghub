@@ -70,6 +70,21 @@ export function SkillLayoutMigrationBanner({
 					t("skillLayoutMigrated", { count: result.skills.length }),
 				);
 			},
+			// A bulk repair aborts on the first failing skill, so this fires
+			// with an unknown number of skills ALREADY migrated. The banner
+			// re-reads its preview either way (see the mutation options), but
+			// silence would leave the user watching the list shrink with no
+			// idea why — and the whole complaint about this flow is not
+			// knowing what it did.
+			onError: (error) =>
+				toast.danger(
+					t("skillLayoutMigrateFailed", {
+						message:
+							error instanceof Error
+								? error.message
+								: String(error),
+					}),
+				),
 		}),
 	});
 
@@ -244,7 +259,7 @@ function MigrationRow({ row, done }: { row: RepairReportDto; done: boolean }) {
 
 	if (refused) {
 		return (
-			<li className="rounded-md border border-danger/40 p-3 text-sm">
+			<li className="rounded-md border border-danger/30 p-3 text-sm">
 				<div className="flex items-center justify-between gap-2">
 					<span className="font-medium">{row.name}</span>
 					<span className="text-danger text-xs">
