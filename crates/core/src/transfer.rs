@@ -1683,7 +1683,7 @@ impl ReconcileSkillPlan {
 	/// is what catches it at preflight: the shared entry need not exist on disk
 	/// yet for the collision to be certain.
 	///
-	/// Do NOT re-derive either half from `universal_master_roots` membership:
+	/// Do NOT re-derive either half from `skill_store_roots` membership:
 	/// that list includes the XDG `~/.config/agents/skills`, which Amp and Kimi
 	/// read at global scope but no copy to a DIFFERENT agent ever writes
 	/// (global installs materialise `~/.agents/skills`). Doing so refused
@@ -4266,7 +4266,7 @@ mod tests {
 	/// "Will one of this reconcile's own copies leave the skill where the
 	/// delete target reads?" must be answered from BOTH real locations —
 	/// where the copy lands (`agent_link_need`) and where the target reads
-	/// (`get_skills_paths`) — never from `universal_master_roots` membership.
+	/// (`get_skills_paths`) — never from `skill_store_roots` membership.
 	///
 	/// That list also names the XDG `~/.config/agents/skills`. Amp and Kimi
 	/// read it at GLOBAL scope, but a global install writes `~/.agents/skills`

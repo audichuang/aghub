@@ -2459,7 +2459,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn remove_skill_refuses_master_another_agent_links_to() {
-		// `universal_master_roots` (through the guard under test) reads HOME /
+		// `skill_store_roots` (through the guard under test) reads HOME /
 		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
 		// crates/core/AGENTS.md Testing.
 		let _env = crate::skills::prune::test_lock::env_lock()
@@ -2528,7 +2528,7 @@ mod tests {
 	#[cfg(unix)]
 	#[test]
 	fn remove_skill_refuses_master_other_native_readers_share() {
-		// `universal_master_roots` (through the guard under test) reads HOME /
+		// `skill_store_roots` (through the guard under test) reads HOME /
 		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
 		// crates/core/AGENTS.md Testing.
 		let _env = crate::skills::prune::test_lock::env_lock()
@@ -2583,7 +2583,7 @@ mod tests {
 	// through the seam. The guard is about shared storage, not about dirs.
 	#[test]
 	fn remove_skill_still_deletes_private_copy() {
-		// `universal_master_roots` (through the guard under test) reads HOME /
+		// `skill_store_roots` (through the guard under test) reads HOME /
 		// XDG_CONFIG_HOME, so this must hold the binary's ONE env mutex — see
 		// crates/core/AGENTS.md Testing.
 		let _env = crate::skills::prune::test_lock::env_lock()

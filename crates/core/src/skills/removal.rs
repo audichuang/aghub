@@ -7,14 +7,20 @@ use std::path::{Path, PathBuf};
 
 use crate::skills::linker::Linker;
 
-/// The universal-Master stores for a scope — the shared `.agents/skills` (and
-/// the XDG `agents/skills`, which has NO leading dot) that every agent may read,
-/// as opposed to any single agent's private skills dir.
+/// The shared skill-store roots for a scope: the `.aghub` Master store plus the
+/// shared Referrer roots (`.agents/skills`, and the XDG `agents/skills`, which
+/// has NO leading dot) that several agents read at once — as opposed to any
+/// single agent's private skills dir.
 ///
 /// Kept separate from [`allowed_skill_roots`] (which adds the per-agent dirs)
 /// because "may this path be deleted at all" and "is this path SHARED" are
 /// different questions: a private per-agent copy is deletable, a Master is not.
-pub fn universal_master_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
+///
+/// Both consumers need the `.aghub` entries and neither tolerates their absence:
+/// [`allowed_skill_roots`] would refuse every Master deletion as out-of-tree, and
+/// [`is_universal_master`] would let a single-agent removal `remove_dir_all` the
+/// Master itself. See `.scratch/aghub-skill-store/spec.md` "Day-one hazards".
+pub fn skill_store_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 	let mut roots: Vec<PathBuf> = Vec::new();
 	// Universal global root: $XDG_CONFIG_HOME/agents/skills (dirs resolves XDG).
 	if let Some(config) = dirs::config_dir() {
@@ -23,11 +29,13 @@ pub fn universal_master_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 	if let Some(home) = dirs::home_dir() {
 		// Explicit ~/.config fallback (in case XDG_CONFIG_HOME points elsewhere).
 		roots.push(home.join(".config").join("agents").join("skills"));
-		// Legacy ~/.agents/skills.
+		// Legacy ~/.agents/skills — a shared Referrer root, no longer the Master.
 		roots.push(home.join(".agents").join("skills"));
+		roots.push(home.join(crate::skills::linker::MASTER_STORE_DIR_NAME));
 	}
 	if let Some(root) = project_root {
 		roots.push(root.join(".agents").join("skills"));
+		roots.push(root.join(crate::skills::linker::MASTER_STORE_DIR_NAME));
 	}
 	roots
 }
@@ -43,7 +51,7 @@ pub fn allowed_skill_roots(
 	agent_skill_dirs: &[PathBuf],
 	project_root: Option<&Path>,
 ) -> Vec<PathBuf> {
-	let mut candidates: Vec<PathBuf> = universal_master_roots(project_root);
+	let mut candidates: Vec<PathBuf> = skill_store_roots(project_root);
 	candidates.extend(agent_skill_dirs.iter().cloned());
 
 	let mut roots: Vec<PathBuf> = Vec::new();
@@ -719,8 +727,7 @@ fn plan_copy_removal(
 /// "Is this SHARED?" is not on its own a reason to keep a directory — see
 /// [`skill_dir_readers_outside`] for the question a location delete asks.
 fn is_universal_master(dir: &Path, project_root: Option<&Path>) -> bool {
-	assert_strictly_contained(dir, &universal_master_roots(project_root))
-		.is_some()
+	assert_strictly_contained(dir, &skill_store_roots(project_root)).is_some()
 }
 
 /// Which in-scope agents read the skill folder `dir` WITHOUT being named in
@@ -1871,7 +1878,7 @@ mod tests {
 	#[test]
 	fn single_agent_keep_reason_covers_both_criteria() {
 		// `is_universal_master` reads HOME / XDG_CONFIG_HOME through
-		// `universal_master_roots`; one env mutex per test binary.
+		// `skill_store_roots`; one env mutex per test binary.
 		let _env = crate::skills::prune::test_lock::env_lock()
 			.lock()
 			.unwrap_or_else(|e| e.into_inner());
@@ -2067,7 +2074,7 @@ mod tests {
 
 #[cfg(test)]
 mod universal_master_tests {
-	use super::{is_universal_master, universal_master_roots};
+	use super::{is_universal_master, skill_store_roots};
 
 	/// Containment, not path shape. Discovery recurses, so a Master can live at
 	/// `.agents/skills/<team>/<name>` — a `parent == "skills"` test misses it
@@ -2116,7 +2123,7 @@ mod universal_master_tests {
 	/// (no leading dot — root AGENTS.md).
 	#[test]
 	fn both_store_spellings_are_listed() {
-		let roots = universal_master_roots(Some(std::path::Path::new("/p")));
+		let roots = skill_store_roots(Some(std::path::Path::new("/p")));
 		assert!(roots.iter().any(|r| r.ends_with(".agents/skills")));
 		assert!(roots
 			.iter()

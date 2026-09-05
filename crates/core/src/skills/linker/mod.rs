@@ -12,6 +12,39 @@ pub use classify::{
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+/// Directory name of the Master store — the ONE place a skill's bytes live.
+///
+/// Deliberately a directory NO agent reads: storing a skill must not grant it.
+/// `.agents/skills` cannot serve this role because ten agent/scope combinations
+/// scan it natively, so materializing a Master there hands the skill to every one
+/// of them. See `.scratch/aghub-skill-store/spec.md`.
+pub const MASTER_STORE_DIR_NAME: &str = ".aghub";
+
+/// Resolve the `.aghub` Master store dir for a scope.
+///
+/// `project_root.is_some()` => `<root>/.aghub`; `None` => `~/.aghub`. The
+/// returned path is absolute iff the input root is absolute (callers MUST pass an
+/// absolute project_root — Decision 6).
+///
+/// This is the STORE, not a skill dir: a skill's Master is
+/// `master_store_dir(root)?.join(sanitize_name(name))`.
+pub fn master_store_dir(project_root: Option<&Path>) -> Option<PathBuf> {
+	match project_root {
+		Some(root) => Some(root.join(MASTER_STORE_DIR_NAME)),
+		None => dirs::home_dir().map(|home| home.join(MASTER_STORE_DIR_NAME)),
+	}
+}
+
+/// Resolve the shared `.agents/skills` Referrer root for a scope.
+///
+/// Once the Master moves to [`master_store_dir`], this directory is an ordinary
+/// Referrer slot like any agent's private skills dir — except that it is shared:
+/// ten agent/scope combinations read it, and eight of them have no private dir to
+/// use instead, so granting to one grants to all of them.
+pub fn shared_referrer_dir(project_root: Option<&Path>) -> Option<PathBuf> {
+	universal_canonical_dir(project_root)
+}
+
 /// Resolve the `.agents/skills` canonical SKILLS-DIR for a scope.
 ///
 /// `project_root.is_some()` => `<root>/.agents/skills`; `None` =>
