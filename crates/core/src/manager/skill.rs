@@ -3144,13 +3144,16 @@ mod tests {
 		renamed.description = Some("universal".to_string());
 		mgr.update_skill("old-uni-win", renamed).unwrap();
 
-		// Canonical master is renamed (old gone, new present).
+		// Canonical master is renamed (old gone, new present). The store is
+		// `.aghub`, not `.agents\skills` — that slot is now an ordinary
+		// Referrer directory. Windows-only, so `just preflight` never ran this
+		// and the stale path survived the store move.
 		assert!(
-			root.join(".agents\\skills\\new-uni-win\\SKILL.md").exists(),
+			root.join(".aghub\\new-uni-win\\SKILL.md").exists(),
 			"renamed master must exist"
 		);
 		assert!(
-			!root.join(".agents\\skills\\old-uni-win").exists(),
+			!root.join(".aghub\\old-uni-win").exists(),
 			"old master must be gone"
 		);
 

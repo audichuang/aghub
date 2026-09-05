@@ -3726,6 +3726,17 @@ mod tests {
 		let abs_master = master.canonicalize().unwrap();
 		create_junction(&abs_master, &referrer).unwrap();
 
+		// A SECOND agent reading the same Master through its own junction.
+		// Without it this test no longer proves anything: removing the LAST
+		// Referrer now collects the Master by design, so the sentinel would
+		// vanish legitimately and "recursed through the junction" would look
+		// identical on disk to "collected correctly". With cursor still reading
+		// it, the Master MUST survive — and the sentinel is once again the
+		// evidence that `remove_dir_all` did not follow the junction.
+		let cursor_skills = root.join(".cursor/skills");
+		fs::create_dir_all(&cursor_skills).unwrap();
+		create_junction(&abs_master, &cursor_skills.join("my-skill")).unwrap();
+
 		set_skills_path_override("claude", Some(claude_skills));
 		let _reset_override = SkillsPathOverrideReset;
 

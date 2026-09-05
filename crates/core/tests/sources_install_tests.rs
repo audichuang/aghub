@@ -17,7 +17,6 @@ use aghub_core::skills::install_fetched::{
 	install_fetched_skill_and_lock, FetchedSkillInstallRequest,
 };
 use aghub_core::skills::linker::LinkTarget;
-use aghub_core::skills::linker::Linker;
 use aghub_core::AgentType;
 use tempfile::{tempdir, TempDir};
 
@@ -1401,6 +1400,10 @@ fn same_owner_reinstall_heals_stale_update_coordinates() {
 #[test]
 #[cfg(unix)]
 fn install_attributes_the_referrer_dir_it_created_never_the_master() {
+	// Imported HERE, not at the top: this test is `#[cfg(unix)]`, so a
+	// top-level `use` is dead on Windows and `-D warnings` fails the crate.
+	use aghub_core::skills::linker::Linker;
+
 	let _g = GlobalLockGuard::new();
 
 	let project = tempdir().unwrap();

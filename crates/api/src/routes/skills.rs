@@ -5577,12 +5577,23 @@ mod tests {
 			// The plan can. Canonical layout lists BOTH paths, Referrer FIRST:
 			// a Referrer must never outlive the Master it points at, so
 			// unlinking leads. Recursing through the link would name one path.
-			let paths: Vec<String> = resp.paths.clone();
-			let referrer_at =
-				paths.iter().position(|p| p == &link.display().to_string());
-			let master_at = paths
+			// Compare NORMALIZED paths, never raw strings. The response
+			// carries resolved paths, and on macOS the tempdir root is
+			// `/var/...` while its resolved form is `/private/var/...` — so a
+			// string compare passed on Linux and failed on macOS only. Root
+			// `AGENTS.md`: never hand-roll path normalization; use
+			// `resolve_existing`, which resolves the longest EXISTING prefix
+			// and so still works for the paths this delete just removed.
+			let norm = |p: &std::path::Path| {
+				skill::lock::resolve_existing(p).display().to_string()
+			};
+			let paths: Vec<String> = resp
+				.paths
 				.iter()
-				.position(|p| p == &master.display().to_string());
+				.map(|p| norm(std::path::Path::new(p)))
+				.collect();
+			let referrer_at = paths.iter().position(|p| p == &norm(&link));
+			let master_at = paths.iter().position(|p| p == &norm(&master));
 			assert!(
 				referrer_at.is_some() && master_at.is_some(),
 				"canonical layout removes the Referrer and the Master as two \

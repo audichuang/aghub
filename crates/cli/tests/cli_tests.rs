@@ -11857,6 +11857,15 @@ fn skill_usage_refuses_project_and_all_scopes() {
 // Each test's own doc comment carries the detail.
 // ---------------------------------------------------------------------------
 
+/// `#[cfg(unix)]` because this fixture CANNOT be isolated on Windows, not
+/// because the behaviour differs there. `dirs::home_dir()` on Windows resolves
+/// `known_folder(FOLDERID_Profile)` and ignores `USERPROFILE`
+/// (`dirs-sys-0.5.0/src/lib.rs:173`), so `isolated_cli`'s `HOME`/`USERPROFILE`
+/// override does not redirect the global `.aghub` store. CI proved it: the run
+/// looked for the Master in the tempdir, did not find it, and had written it
+/// into the runner's REAL profile at `C:\Users\runneradmin\.aghub\` — the
+/// "do not pollute real home" hazard in the root `AGENTS.md`, on Windows.
+/// Global-scope store assertions therefore need a project `tempdir`, or Unix.
 /// THE central promise: installing for one agent grants it to that agent ONLY.
 ///
 /// Before the store moved this could not hold: grok's Referrer needed something
@@ -11866,6 +11875,7 @@ fn skill_usage_refuses_project_and_all_scopes() {
 ///
 /// Line-by-line, only assertion 4 could fail before the change; 2, 3 and 5 were
 /// already green then and prove nothing on their own.
+#[cfg(unix)]
 #[test]
 fn installing_for_one_agent_does_not_leak_to_the_shared_slot() {
 	let home = tempfile::tempdir().unwrap();
@@ -12086,6 +12096,15 @@ fn naming_only_a_slots_writers_still_takes_it_from_unnamed_readers() {
 	);
 }
 
+/// `#[cfg(unix)]` because this fixture CANNOT be isolated on Windows, not
+/// because the behaviour differs there. `dirs::home_dir()` on Windows resolves
+/// `known_folder(FOLDERID_Profile)` and ignores `USERPROFILE`
+/// (`dirs-sys-0.5.0/src/lib.rs:173`), so `isolated_cli`'s `HOME`/`USERPROFILE`
+/// override does not redirect the global `.aghub` store. CI proved it: the run
+/// looked for the Master in the tempdir, did not find it, and had written it
+/// into the runner's REAL profile at `C:\Users\runneradmin\.aghub\` — the
+/// "do not pollute real home" hazard in the root `AGENTS.md`, on Windows.
+/// Global-scope store assertions therefore need a project `tempdir`, or Unix.
 /// D4 DETECTION, not deletion-prevention — be precise about which claim this
 /// pins. Measured: with `verify_shape` removed, this same command answers
 /// `outcome: "kept"` with `paths: []`, so no delete would have touched the
@@ -12105,6 +12124,7 @@ fn naming_only_a_slots_writers_still_takes_it_from_unnamed_readers() {
 /// ponytail: accepted ceiling — a delete for ANY agent refuses while the shared
 /// slot is forked, even one whose own directory is fine. Under D4 that is the
 /// intended "repair first" nudge; narrow it only if a user complains.
+#[cfg(unix)]
 #[test]
 fn a_delete_preview_refuses_the_npx_clobbered_shape() {
 	let home = tempfile::tempdir().unwrap();
