@@ -487,7 +487,14 @@ pub fn install_fetched_skill_and_lock(
 	// additional case is safe: an untracked, byte-identical Master with at least
 	// one successfully covered target (including an already-correct Referrer)
 	// may be adopted without manufacturing a filesystem change.
-	let installed_any = agent_results.iter().any(|r| r.installed);
+	// The lock-write signal must come from the CREATION receipt, not from
+	// "can this agent read it". Those diverged the moment `installed` started
+	// folding in `already_linked` — which it had to, or the second through
+	// eighth agent of a shared slot reported `installed: false` with no error on
+	// a first install. Keying the lock write on readability instead made an
+	// idempotent re-run rewrite the lock, because every already-correct link
+	// reports readable.
+	let linked_any = !created_referrer_dirs.is_empty();
 	let covered_any = agent_results.iter().any(|r| r.error.is_none());
 	// A same-owner re-install that changed nothing on disk still has to correct
 	// stale update coordinates; ownership and Master content are already proven
@@ -501,7 +508,7 @@ pub fn install_fetched_skill_and_lock(
 		)
 	});
 	let wrote_lock = wrote_master
-		|| installed_any
+		|| linked_any
 		|| (existing_owner.is_none() && covered_any)
 		|| heal_coordinates;
 	// Filled from the write below, never from `existing_owner`: an observation

@@ -17,6 +17,7 @@ use aghub_core::skills::install_fetched::{
 	install_fetched_skill_and_lock, FetchedSkillInstallRequest,
 };
 use aghub_core::skills::linker::LinkTarget;
+use aghub_core::skills::linker::Linker;
 use aghub_core::AgentType;
 use tempfile::{tempdir, TempDir};
 
@@ -122,7 +123,7 @@ fn project_existing_different_master_rejects_before_native_or_link_mutation() {
 		"fetched bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"local bytes that must survive",
@@ -178,7 +179,7 @@ fn global_existing_different_master_rejects_before_native_or_link_mutation() {
 		"fetched bytes",
 	);
 	let master_md = write_skill_with_body(
-		&g.home().join(".agents/skills"),
+		&g.home().join(".aghub"),
 		"alpha",
 		"alpha",
 		"global local bytes that must survive",
@@ -234,7 +235,7 @@ fn exact_byte_untracked_master_is_adopted_for_native_and_link_targets() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -278,7 +279,7 @@ fn exact_byte_untracked_master_is_adopted_for_native_and_link_targets() {
 	);
 	assert_eq!(
 		skill::compute_skill_folder_hash(
-			project_root.join(".agents/skills/alpha").as_path()
+			project_root.join(".aghub/alpha").as_path()
 		)
 		.unwrap(),
 		expected_hash,
@@ -306,7 +307,7 @@ fn exact_byte_untracked_master_with_existing_referrer_is_adopted() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -365,7 +366,7 @@ fn symlink_master_is_rejected_before_referrer_or_lock_mutation() {
 		"alpha",
 		"identical bytes",
 	);
-	let master = project_root.join(".agents/skills/alpha");
+	let master = project_root.join(".aghub/alpha");
 	std::fs::create_dir_all(master.parent().unwrap()).unwrap();
 	symlink(outside_md.parent().unwrap(), &master).unwrap();
 
@@ -417,7 +418,7 @@ fn master_with_nested_symlink_is_rejected_before_referrer_or_lock_mutation() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -479,7 +480,7 @@ fn matching_master_with_different_project_source_owner_is_not_reassigned() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -554,7 +555,7 @@ fn matching_master_with_same_repo_path_on_another_host_is_not_reassigned() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -619,7 +620,7 @@ fn legacy_remote_lock_without_host_identity_is_not_reassigned() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&project_root.join(".agents/skills"),
+		&project_root.join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -680,7 +681,7 @@ fn matching_master_with_different_global_source_owner_is_not_reassigned() {
 		"identical bytes",
 	);
 	let master_md = write_skill_with_body(
-		&g.home().join(".agents/skills"),
+		&g.home().join(".aghub"),
 		"alpha",
 		"alpha",
 		"identical bytes",
@@ -765,7 +766,7 @@ fn isolated_copy_installs_writes_global_lock_and_per_agent_result() {
 	set_skills_path_override("claude", None);
 
 	// (a) Under symlink-only, the agent dir entry is a link; the SKILL.md
-	// resolves through it to the global master in ~/.agents/skills/alpha.
+	// resolves through it to the global master in ~/.aghub/alpha.
 	let agent_skill_entry = agent_dir.path().join("alpha");
 	assert!(
 		agent_skill_entry.join("SKILL.md").exists(),
@@ -833,8 +834,8 @@ fn universal_writes_master_to_canonical_and_links_agent() {
 
 	set_skills_path_override("claude", None);
 
-	// Master lives once in the canonical `.agents/skills/alpha`.
-	let canonical = project_root.join(".agents/skills/alpha");
+	// Master lives once in the canonical `.aghub/alpha`.
+	let canonical = project_root.join(".aghub/alpha");
 	assert!(
 		canonical.join("SKILL.md").exists(),
 		"master SKILL.md should be in the canonical dir"
@@ -941,7 +942,7 @@ fn universal_install_universal_error_fails_all_agents() {
 	// file, so breaking it would fail the guard BEFORE the install runs and this
 	// test would stop covering per-agent error attribution at all.
 	std::fs::create_dir_all(project_root.join(".agents")).unwrap();
-	std::fs::write(project_root.join(".agents/skills"), b"not a dir").unwrap();
+	std::fs::write(project_root.join(".aghub"), b"not a dir").unwrap();
 
 	let fetched = tempdir().unwrap();
 	let skill_md = write_skill(fetched.path(), "alpha", "alpha");
@@ -1065,7 +1066,7 @@ fn all_unsupported_targets_preflight_before_master_or_lock_write() {
 	let error = result.expect_err("unsupported targets must fail preflight");
 	assert!(error.to_string().contains("nothing was written"));
 	assert!(
-		!project_root.join(".agents/skills/gamma").exists(),
+		!project_root.join(".aghub/gamma").exists(),
 		"an all-unsupported mutation must not leave an orphan Master",
 	);
 	let local_lock = skill::lock::local::read_local_lock(Some(&project_root));
@@ -1106,7 +1107,7 @@ fn mixed_supported_and_unsupported_targets_preflight_before_master_write() {
 		"preflight error must state the no-write guarantee: {error}",
 	);
 	assert!(
-		!project_root.join(".agents/skills/mixed").exists(),
+		!project_root.join(".aghub/mixed").exists(),
 		"preflight must run before the shared Master is materialized",
 	);
 	assert!(
@@ -1138,8 +1139,7 @@ fn shared_master_failure_is_attributed_to_every_agent() {
 	// `.agents` itself would instead fail the mutation guard (its lock file lives
 	// there) before the install could attribute anything.
 	std::fs::create_dir_all(project_root.join(".agents")).unwrap();
-	std::fs::write(project_root.join(".agents/skills"), "not a directory")
-		.unwrap();
+	std::fs::write(project_root.join(".aghub"), "not a directory").unwrap();
 	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
 		skill_file: &skill_md,
 		source: &sample_source(),
@@ -1389,15 +1389,18 @@ fn same_owner_reinstall_heals_stale_update_coordinates() {
 	);
 }
 
-/// A NativeReader agent reads the Master directly: its row reports
-/// `installed: true` with NO link created, and its first skills path IS the
-/// Master. Attribution must come from the linker's own `linked` set, so
-/// `created_referrer_dirs` stays empty here — a rollback that re-derived dirs
-/// from `installed` would delete the Master through the referrer loop, before
+/// Attribution must come from the linker's own `linked` set, never re-derived
+/// from `installed`, and it must NEVER name the Master's own directory — a
+/// rollback that did would delete the Master through the referrer loop, before
 /// any `wrote_master` check could stop it.
+///
+/// Codex at project scope writes the SHARED `.agents/skills` slot, so this
+/// install really does create a Referrer there. The old version of this test
+/// asserted `created_referrer_dirs` was EMPTY, because codex read the Master
+/// directly and got no link at all — the leak, asserted as a property.
 #[test]
 #[cfg(unix)]
-fn native_reader_install_attributes_no_referrer_dir() {
+fn install_attributes_the_referrer_dir_it_created_never_the_master() {
 	let _g = GlobalLockGuard::new();
 
 	let project = tempdir().unwrap();
@@ -1423,18 +1426,24 @@ fn native_reader_install_attributes_no_referrer_dir() {
 		.agent_results
 		.first()
 		.expect("one target agent, one row");
-	assert!(row.installed, "a NativeReader row reports installed");
+	assert!(row.installed, "the row reports installed");
 	assert!(row.error.is_none(), "and carries no error");
-	let master = project_root.join(".agents/skills/alpha");
+	let master = project_root.join(".aghub/alpha");
 	assert!(master.is_dir(), "the Master must exist");
 	assert!(
 		report.wrote_master,
 		"this call claimed and wrote the Master"
 	);
+	// Codex's grant IS the shared slot, and this call created it.
+	let shared = project_root.join(".agents/skills");
+	assert_eq!(
+		report.created_referrer_dirs,
+		vec![shared.clone()],
+		"attribution must name exactly the dir the linker linked into"
+	);
 	assert!(
-		report.created_referrer_dirs.is_empty(),
-		"no link was created, so no referrer dir may be attributed -- got {:?}",
-		report.created_referrer_dirs
+		Linker::is_link(&shared.join("alpha")),
+		"and that grant is a link into the store, not a copy"
 	);
 	assert!(
 		!report
@@ -1474,7 +1483,7 @@ fn unsupported_scope_rejected_before_any_write() {
 	})
 	.expect_err("Combined scope must be refused");
 
-	let home_canonical = home.join(".agents/skills/alpha");
+	let home_canonical = home.join(".aghub/alpha");
 	let home_agents = home.join(".agents");
 
 	assert!(
@@ -1752,7 +1761,7 @@ fn corrupt_lock_refuses_before_materializing_anything() {
 	// agent's skills dir, and the rollback removes only the skill entries
 	// inside them. Their absence is what proves nothing ran.
 	assert!(
-		!project_root.join(".agents/skills").exists(),
+		!project_root.join(".aghub").exists(),
 		"materialization must not have run at all — its parent dir exists, so \
 		 the refusal happened AFTER the Master write rather than before it"
 	);
@@ -1761,7 +1770,7 @@ fn corrupt_lock_refuses_before_materializing_anything() {
 		"materialization must not have run at all — the agent skills dir exists"
 	);
 	assert!(
-		!project_root.join(".agents/skills/alpha").exists(),
+		!project_root.join(".aghub/alpha").exists(),
 		"no Master may exist after a refused install"
 	);
 	assert!(
@@ -1790,7 +1799,7 @@ fn lock_write_failure_rolls_back_master_and_referrer() {
 
 	// Pre-create the dirs the install writes INTO, so only a new entry directly
 	// under the project root (the lock) is blocked by the mode below.
-	std::fs::create_dir_all(project_root.join(".agents/skills")).unwrap();
+	std::fs::create_dir_all(project_root.join(".aghub")).unwrap();
 	std::fs::create_dir_all(project_root.join(".claude/skills")).unwrap();
 
 	let original = std::fs::metadata(&project_root).unwrap().permissions();
@@ -1830,13 +1839,13 @@ fn lock_write_failure_rolls_back_master_and_referrer() {
 
 	if !permissions_enforced {
 		result.expect("with a writable lock the install must succeed");
-		assert!(project_root.join(".agents/skills/alpha").exists());
+		assert!(project_root.join(".aghub/alpha").exists());
 		return;
 	}
 
 	result.expect_err("a failed lock write must fail the install");
 	assert!(
-		!project_root.join(".agents/skills/alpha").exists(),
+		!project_root.join(".aghub/alpha").exists(),
 		"the Master this call created must be rolled back"
 	);
 	assert!(

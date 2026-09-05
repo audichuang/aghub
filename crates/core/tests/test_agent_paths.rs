@@ -248,7 +248,7 @@ fn test_openclaw_skills_enabled() {
 // ─── Regression Tests for Mutation Targeting ────────────────────────────────
 
 // Unix-only: dirs::home_dir() reads $HOME on Unix, so we can redirect the
-// global master (`~/.agents/skills`) into a temp dir. On Windows the profile
+// global master (`~/.aghub`) into a temp dir. On Windows the profile
 // comes from the known-folder API and ignores env, so this isolation would
 // silently write to the real user profile again.
 #[cfg(unix)]
@@ -257,7 +257,7 @@ fn test_opencode_global_creation_persists() {
 	use std::ffi::OsString;
 
 	// Global skill install resolves the master via dirs::home_dir() →
-	// `$HOME/.agents/skills`. Isolate HOME so real path logic still runs
+	// `$HOME/.aghub`. Isolate HOME so real path logic still runs
 	// without writing under the developer's real skill tree (this test used
 	// to create one `test-skill-opencode-<millis>/` per run with no teardown).
 	// This test mutates $HOME, so hold the binary's env lock to exclude other
@@ -269,6 +269,31 @@ fn test_opencode_global_creation_persists() {
 	// making the Drop below wrongly `remove_var` and pollute later tests.
 	let previous_home = std::env::var_os("HOME");
 	std::env::set_var("HOME", fake_home.path());
+
+	// $HOME alone does NOT isolate this agent. OpenCode's global skills dir is
+	// `dirs::config_dir()/opencode/skills`, and `config_dir()` prefers
+	// `XDG_CONFIG_HOME` over `$HOME/.config` — so with the developer's own
+	// variable set, the install read and wrote their REAL `~/.config/opencode`
+	// and came back `ResourceExists` for a name it had never seen. The agent's
+	// own override outranks both, so clear that too.
+	struct RestoreVar(&'static str, Option<OsString>);
+	impl Drop for RestoreVar {
+		fn drop(&mut self) {
+			match self.1.take() {
+				Some(v) => std::env::set_var(self.0, v),
+				None => std::env::remove_var(self.0),
+			}
+		}
+	}
+	let _restore_config: Vec<RestoreVar> =
+		["XDG_CONFIG_HOME", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG"]
+			.into_iter()
+			.map(|key| {
+				let saved = RestoreVar(key, std::env::var_os(key));
+				std::env::remove_var(key);
+				saved
+			})
+			.collect();
 
 	// RAII: always restore $HOME, even if an assert panics mid-test.
 	struct RestoreHome(Option<OsString>);
@@ -301,8 +326,7 @@ fn test_opencode_global_creation_persists() {
 	}
 
 	let skill_name = "test-skill-opencode-persist";
-	let isolated_master =
-		fake_home.path().join(".agents/skills").join(skill_name);
+	let isolated_master = fake_home.path().join(".aghub").join(skill_name);
 	let isolated_agent = fake_home
 		.path()
 		.join(".config/opencode/skills")
@@ -335,7 +359,7 @@ fn test_opencode_global_creation_persists() {
 		"Skill should survive reload"
 	);
 
-	// The write landing under the isolated `$HOME/.agents/skills` proves it
+	// The write landing under the isolated `$HOME/.aghub` proves it
 	// went through home-dir resolution (not the TestConfig override) and that
 	// isolation redirected the write off the real user home. (It cannot by
 	// itself rule out a hypothetical double-write also hitting real home —
@@ -343,7 +367,7 @@ fn test_opencode_global_creation_persists() {
 	let master_md = isolated_master.join("SKILL.md");
 	assert!(
 		master_md.is_file(),
-		"master should land under isolated $HOME/.agents/skills, got missing {}",
+		"master should land under isolated $HOME/.aghub, got missing {}",
 		master_md.display()
 	);
 
@@ -500,7 +524,7 @@ fn skill_import_directory_preserves_body_and_resources() {
 		.unwrap()
 		.contains("# Real imported instructions"));
 
-	let target_dir = project_root.join(".agents/skills/imported-skill");
+	let target_dir = project_root.join(".aghub/imported-skill");
 	let target_content =
 		std::fs::read_to_string(target_dir.join("SKILL.md")).unwrap();
 	assert!(target_content.contains("# Real imported instructions"));
@@ -554,7 +578,7 @@ fn add_skill_from_path_unsupported_scope_errors_and_writes_nothing() {
 		"preflight rejection must state the contract, got: {msg}"
 	);
 	assert!(
-		!project_root.join(".agents/skills/orphan-skill").exists(),
+		!project_root.join(".aghub/orphan-skill").exists(),
 		"a rejected preflight must not write the Master"
 	);
 
@@ -595,7 +619,7 @@ fn skill_import_skill_md_file_copies_sibling_resources() {
 		.skill;
 
 	assert_eq!(imported.name, "md-skill");
-	let target_dir = project_root.join(".agents/skills/md-skill");
+	let target_dir = project_root.join(".aghub/md-skill");
 	assert!(target_dir.join("scripts/setup.sh").exists());
 	assert!(target_dir.join("assets/logo.txt").exists());
 	let target_content =
