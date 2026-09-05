@@ -156,7 +156,8 @@ pub fn readers_of(
 }
 
 /// Why a `(referrer, master)` pair is not usable as-is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ViolationKind {
 	/// The Referrer is a link whose target is ANOTHER link — the chain npx's
 	/// `createSymlink` leaves when it repoints an agent Referrer at the shared
@@ -193,7 +194,8 @@ pub enum ViolationKind {
 /// D5 forbids outright. Whether an [`Self::UnmigratedCopy`] may be adopted is
 /// [`plan_repair`]'s call, because that is where the lock and the slot identity
 /// are known.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkillShape {
 	/// Referrer is a link resolving to the Master in exactly one hop.
 	Conformant,

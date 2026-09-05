@@ -58,6 +58,10 @@ pub enum RepairOutcome {
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RepairReport {
 	pub name: String,
+	/// The shape repair FOUND, alongside what it did about it. An agent
+	/// choosing its next action should not need a second command to learn why
+	/// the outcome was what it was.
+	pub shape: Option<crate::skills::shape::SkillShape>,
 	pub outcome: RepairOutcome,
 	pub master: PathBuf,
 	/// Referrers created or repointed.
@@ -115,6 +119,15 @@ pub fn execute_repair(
 ) -> Result<RepairReport> {
 	let mut report = RepairReport {
 		name: plan.name.clone(),
+		// The shape of the directory this repair is ABOUT: the shared slot
+		// where there is one, since that is the slot every non-conformant
+		// shape shows up in.
+		shape: plan
+			.actions
+			.iter()
+			.find(|a| a.shared)
+			.or_else(|| plan.actions.first())
+			.map(|a| a.shape.clone()),
 		outcome: RepairOutcome::Conformant,
 		master: plan.master.clone(),
 		referrers: Vec::new(),
