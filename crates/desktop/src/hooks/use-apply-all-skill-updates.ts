@@ -32,11 +32,17 @@ export interface ApplyAllOutcome {
 	/**
 	 * A transport error or timeout, which proves NOTHING about what was
 	 * written: the server does not abort with the client, it holds the
-	 * mutation lock to completion. `definite` is false in that case and the
-	 * caller must not claim a failure count.
+	 * mutation lock to completion. The caller must not claim a failure count
+	 * when this is set.
 	 */
 	unconfirmed: boolean;
-	unconfirmedDescription?: string;
+	/**
+	 * Skills a DEFINITE error (a 4xx, answered before the handler ran) left
+	 * unwritten. Separate from `failures`, which are per-skill rows the server
+	 * actually returned — and non-zero here must never be reported as success.
+	 */
+	definiteFailureCount: number;
+	failureDescription?: string;
 }
 
 /**
@@ -105,6 +111,7 @@ export function useApplyAllSkillUpdates() {
 				failures,
 				updated: results.length - failures.length,
 				unconfirmed: false,
+				definiteFailureCount: 0,
 			};
 		} catch (error) {
 			// A 4xx was answered before the handler ran, so nothing was written
@@ -120,12 +127,21 @@ export function useApplyAllSkillUpdates() {
 			void queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});
+			const requested = pending.reduce(
+				(sum, batch) => sum + batch.names.length,
+				0,
+			);
 			return {
 				results,
 				failures: [],
 				updated: 0,
 				unconfirmed: !failure.definite,
-				unconfirmedDescription: failure.description,
+				// Only a DEFINITE error licenses a count. Reporting 0 here
+				// while `unconfirmed` is set would read as "nothing failed".
+				definiteFailureCount: failure.definite
+					? Math.max(1, requested - results.length)
+					: 0,
+				failureDescription: failure.description,
 			};
 		} finally {
 			setIsApplying(false);

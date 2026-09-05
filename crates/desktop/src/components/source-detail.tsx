@@ -18,32 +18,24 @@ import { useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { SourceCredentialBindingDialog } from "./source-credential-binding-dialog";
 import { SourceSkillRow } from "./source-skill-row";
-import type {
-	ApplySkillUpdateResponse,
-	SourceSkillDiff,
-} from "../generated/dto";
+import type { SourceSkillDiff } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
+import { useApplyAllSkillUpdates } from "../hooks/use-apply-all-skill-updates";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import {
 	groupAgentsBySlot,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
-import { sendInBatches } from "../lib/batch-names";
 import {
 	allSkillPaths,
 	selectedSkills,
 	toggleSkillPath,
 } from "../lib/source-skill-selection";
-import { describeRequestFailure } from "../lib/request-failure";
 import { cn } from "../lib/utils";
 import { useSkillCoverage } from "../requests/agents";
 import { queryKeys } from "../requests/keys";
-import {
-	applySkillUpdateMutationOptions,
-	applySkillUpdatesMutationOptions,
-	invalidateSkillQueries,
-} from "../requests/skills";
+import { applySkillUpdateMutationOptions } from "../requests/skills";
 import { sourceDiffQueryOptions } from "../requests/sources";
 
 const SKILL_FILE_SUFFIX_RE = /\/SKILL\.md$/;
@@ -331,7 +323,6 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const [expandedSkillPath, setExpandedSkillPath] = useState<string | null>(
 		null,
 	);
-	const [isApplyingAll, setIsApplyingAll] = useState(false);
 	const [isInstallingAll, setIsInstallingAll] = useState(false);
 	const [isDeletingAllRemoved, setIsDeletingAllRemoved] = useState(false);
 	// Count of skills processed so far by the active batch (update / clean-up)
@@ -459,13 +450,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		}),
 	);
 
-	const applyUpdatesMutation = useMutation(
-		applySkillUpdatesMutationOptions({
-			api,
-			queryClient,
-			forwardForSource,
-		}),
-	);
+	const { applyAll, isApplying: isApplyingAll } = useApplyAllSkillUpdates();
 
 	const prunePreviewQuery = useQuery({
 		queryKey: queryKeys.skills.pruneLock(updateScope, updateProjectRoot),
@@ -611,79 +596,46 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	};
 
 	const applyAllUpdates = async (skills: SourceSkillDiff[]) => {
-		if (skills.length === 0 || isApplyingAll || isDeletingAllRemoved)
+		if (isDeletingAllRemoved) return;
+		// Batching, ordering and the "a transport error proves nothing" rule
+		// live in the shared hook — the agent view runs the same flow across
+		// several sources and the two must not drift apart.
+		const outcome = await applyAll([
+			{
+				source: diffSource,
+				names: skills.map((skill) => skill.name),
+				scope: updateScope,
+				projectRoot: updateProjectRoot,
+			},
+		]);
+		if (!outcome) return;
+		if (outcome.unconfirmed) {
+			toast.danger(t("sourceUpdateUnconfirmed"), {
+				description: outcome.failureDescription,
+			});
 			return;
-		setIsApplyingAll(true);
-		try {
-			// Batched, not one body: the server REFUSES an oversized batch
-			// rather than truncating it, so a Source with more outdated skills
-			// than one batch holds would make "Update all" fail entirely
-			// instead of updating anything. Ordering and cap live in
-			// `sendInBatches`, which is tested.
-			const results = await sendInBatches<ApplySkillUpdateResponse>(
-				skills.map((skill) => skill.name),
-				async (names) => {
-					const response = await applyUpdatesMutation.mutateAsync({
-						body: {
-							source: diffSource,
-							names,
-							scope: updateScope,
-							projectRoot: updateProjectRoot,
-							confirm: true,
-						},
-						sourceUrl: diffSource,
-					});
-					return response.results;
+		}
+		const failureCount =
+			outcome.failures.length + outcome.definiteFailureCount;
+		if (failureCount > 0) {
+			// Per-row reasons are the only actionable part — a repointed
+			// source or a skill missing upstream needs a different response
+			// from the user than a network failure. Same as the per-row
+			// button, which already surfaces `result.error`.
+			toast.danger(
+				failureCount === 1
+					? t("sourceUpdateSomeFailedOne", { count: 1 })
+					: t("sourceUpdateSomeFailedMany", { count: failureCount }),
+				{
+					description:
+						outcome.failures[0]?.error ??
+						outcome.failureDescription ??
+						undefined,
 				},
 			);
-			const failures = results.filter((result) => !result.success);
-			const updated = results.length - failures.length;
-			await queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.sources.all(),
-			});
-			if (failures.length > 0) {
-				// Per-row reasons are the only actionable part — a repointed
-				// source or a skill missing upstream needs a different response
-				// from the user than a network failure. Same as the per-row
-				// button, which already surfaces `result.error`.
-				toast.danger(
-					failures.length === 1
-						? t("sourceUpdateSomeFailedOne", { count: 1 })
-						: t("sourceUpdateSomeFailedMany", {
-								count: failures.length,
-							}),
-					{ description: failures[0]?.error ?? undefined },
-				);
-			} else {
-				toast.success(t("sourceUpdatesApplied", { count: updated }));
-			}
-		} catch (error) {
-			// A 4xx was answered before the handler ran, so nothing was written
-			// and reporting failure is accurate. A timeout or transport error
-			// proves nothing: the server does not abort with the client (it
-			// holds the mutation lock to completion), so claiming N failures
-			// would be a lie the user acts on.
-			const failure = describeRequestFailure(error);
-			toast.danger(
-				failure.definite
-					? skills.length === 1
-						? t("sourceUpdateSomeFailedOne", { count: 1 })
-						: t("sourceUpdateSomeFailedMany", {
-								count: skills.length,
-							})
-					: t("sourceUpdateUnconfirmed"),
-				{ description: failure.description },
-			);
-			// Not the broad `skills.all()` invalidate: that one AWAITS every
-			// active refetch (the 120s check and source diff) before `finally`
-			// re-enables the buttons, over the connection that just failed.
-			await invalidateSkillQueries(queryClient);
-			void queryClient.invalidateQueries({
-				queryKey: queryKeys.skills.sources.all(),
-			});
-		} finally {
-			setIsApplyingAll(false);
+			return;
 		}
+		toast.success(t("sourceUpdatesApplied", { count: outcome.updated }));
 	};
 
 	const deleteAllRemovedSkills = async (skills: SourceSkillDiff[]) => {

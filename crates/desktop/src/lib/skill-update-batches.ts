@@ -1,8 +1,19 @@
-import type {
-	SkillLockEntryResponse,
-	SkillUpdateResponse,
-} from "../generated/dto";
+import type { SkillUpdateResponse } from "../generated/dto";
 import type { SourceUpdateBatch } from "../hooks/use-apply-all-skill-updates";
+
+/**
+ * The lock fields this grouping needs, structurally — the GLOBAL lock
+ * (`SkillLockEntryResponse`) records `sourceUrl`, the PROJECT lock
+ * (`LocalSkillLockEntryResponse`) does not, and both must be groupable.
+ * Project scope therefore groups on the host-blind `source`, which merges two
+ * forges serving one `owner/repo`; the server refuses that batch rather than
+ * fetching the wrong origin, so the failure is loud, not silent.
+ */
+export interface LockSourceEntry {
+	name: string;
+	source: string;
+	sourceUrl?: string | null;
+}
 
 export interface GroupedUpdates {
 	/** One batch per source, sources in first-seen order, names sorted. */
@@ -34,11 +45,11 @@ export interface GroupedUpdates {
  */
 export function groupUpdatesBySource(
 	statuses: Iterable<SkillUpdateResponse>,
-	lockEntries: readonly SkillLockEntryResponse[],
+	lockEntries: readonly LockSourceEntry[],
 	scope: "global" | "project",
 	projectRoot: string | null,
 ): GroupedUpdates {
-	const bySkillName = new Map<string, SkillLockEntryResponse>();
+	const bySkillName = new Map<string, LockSourceEntry>();
 	for (const entry of lockEntries) {
 		if (!bySkillName.has(entry.name)) bySkillName.set(entry.name, entry);
 	}

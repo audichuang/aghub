@@ -395,6 +395,21 @@ export default {
 	skillUpdateAvailableBadge: "有更新",
 	skillUpdateAvailableTooltip:
 		"來源已變更：{{current}} → {{available}}。同步以更新。",
+	// --- 依 agent 過濾 + 啟動 context 成本(技能頁) ---
+	allAgentsFilter: "全部",
+	skillContextCost: "每回合約 {{tokens}} tokens({{chars}}/{{budget}} 字元)",
+	skillContextCostTooltip:
+		"agent 會把每個技能的名稱與描述各一行放進系統提示,每回合都算;完整的 SKILL.md 只有技能真的被呼叫時才載入。這裡的預算是 Claude Code 對 200k 模型的預設值(1M 模型為 40,000 字元),可用 SLASH_COMMAND_TOOL_CHAR_BUDGET 覆寫。token 數以每 4 個字元 1 個 token 估算,與 agent 自己編預算用的常數相同。",
+	skillContextOverBudget: "超出預算:至少 {{count}} 個描述會被拿掉",
+	// --- 從 agent 檢視批次更新 ---
+	updateAllSkills: "全部更新({{count}})",
+	updateAllSkillsNone: "全部都是最新的",
+	skillUpdateRenamedExcluded:
+		"{{count}} 個已改名的技能不在這批裡,請到來源檢視處理。",
+	skillUpdateUnresolvedSource:
+		"{{count}} 個技能在 lock 裡沒有記錄來源,已略過。",
+	skillUpdateAvailableTooltipDated:
+		"來源已變更:{{current}} → {{available}}(上游 {{date}})。同步以更新。",
 	skillRenamedBadge: "已改名",
 	skillRenamedTooltip:
 		"來源已將此技能改名為 {{newName}}。請刪除舊技能，再安裝改名後的技能。",

@@ -42,6 +42,7 @@ import {
 	PROJECT_KEY_PREFIX,
 	ScopeControl,
 } from "../../components/scope-control";
+import { SkillAgentFilterRow } from "../../components/skill-agent-filter-row";
 import { SkillDetail } from "../../components/skill-detail";
 import { SkillList } from "../../components/skill-list";
 import type { SourceGroup } from "../../components/skill-list";
@@ -53,13 +54,20 @@ import type {
 	SourcesListResponse,
 } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
+import { useApplyAllSkillUpdates } from "../../hooks/use-apply-all-skill-updates";
 import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
+import {
+	batchedSkillCount,
+	groupUpdatesBySource,
+} from "../../lib/skill-update-batches";
 import { cn } from "../../lib/utils";
 import {
 	checkSkillUpdatesMutationOptions,
 	checkSkillUpdatesQueryOptions,
+	globalSkillLockQueryOptions,
+	projectSkillLockQueryOptions,
 	skillListQueryOptions,
 } from "../../requests/skills";
 import { sourcesListQueryOptions } from "../../requests/sources";
@@ -395,6 +403,89 @@ export default function SkillsPage() {
 		[cachedUpdateChecks],
 	);
 
+	// The lock is the only place a skill's SOURCE is recorded, and
+	// `apply-updates` fetches one source per request — so "update all" needs
+	// it to know how many requests to send and to which origins. Same query
+	// options `SkillList` already uses, so react-query serves one fetch.
+	const { data: globalLock } = useQuery({
+		...globalSkillLockQueryOptions({ api, enabled: scope === "global" }),
+	});
+	const { data: projectLock } = useQuery({
+		...projectSkillLockQueryOptions({
+			api,
+			projectPath: selectedProjectPath ?? undefined,
+			enabled: scope === "project" && Boolean(selectedProjectPath),
+		}),
+	});
+
+	const pendingUpdates = useMemo(
+		() =>
+			groupUpdatesBySource(
+				cachedUpdateChecks ?? [],
+				(scope === "global" ? globalLock : projectLock)?.skills ?? [],
+				scope,
+				scope === "project" ? selectedProjectPath : null,
+			),
+		[
+			cachedUpdateChecks,
+			globalLock,
+			projectLock,
+			scope,
+			selectedProjectPath,
+		],
+	);
+	const pendingUpdateCount = batchedSkillCount(pendingUpdates.batches);
+
+	const { applyAll, isApplying } = useApplyAllSkillUpdates();
+
+	const handleUpdateAll = async () => {
+		const outcome = await applyAll(pendingUpdates.batches);
+		if (!outcome) return;
+		if (outcome.unconfirmed) {
+			toast.danger(t("sourceUpdateUnconfirmed"), {
+				description: outcome.failureDescription,
+			});
+			return;
+		}
+		const failureCount =
+			outcome.failures.length + outcome.definiteFailureCount;
+		if (failureCount > 0) {
+			// Per-row reasons are the only actionable part — a repointed
+			// source needs a different response from a network failure.
+			toast.danger(
+				failureCount === 1
+					? t("sourceUpdateSomeFailedOne", { count: 1 })
+					: t("sourceUpdateSomeFailedMany", { count: failureCount }),
+				{
+					description:
+						outcome.failures[0]?.error ??
+						outcome.failureDescription ??
+						undefined,
+				},
+			);
+		} else {
+			toast.success(
+				t("sourceUpdatesApplied", { count: outcome.updated }),
+			);
+		}
+		// Both are reported AFTER the batch result: they are things this run
+		// deliberately did not touch, not failures of what it did.
+		if (pendingUpdates.renamed.length > 0) {
+			toast.info(
+				t("skillUpdateRenamedExcluded", {
+					count: pendingUpdates.renamed.length,
+				}),
+			);
+		}
+		if (pendingUpdates.unresolved.length > 0) {
+			toast.warning(
+				t("skillUpdateUnresolvedSource", {
+					count: pendingUpdates.unresolved.length,
+				}),
+			);
+		}
+	};
+
 	const isRefreshingSkills =
 		isFetching || checkUpdatesMutation.isPending || isAutoChecking;
 
@@ -430,6 +521,9 @@ export default function SkillsPage() {
 	// ── Agent-view state ──
 	const [searchQuery, setSearchQuery] = useState("");
 	const [tagFilter, setTagFilter] = useState<Set<string>>(() => new Set());
+	// Which agent's skills to show. `null` = every agent. Answers "what does
+	// Claude Code actually have installed", which the flat list cannot.
+	const [agentFilter, setAgentFilter] = useState<string | null>(null);
 	// Non-null while the tag dialog is open; holds the names it edits.
 	const [tagDialogNames, setTagDialogNames] = useState<string[] | null>(null);
 	const [selectedKeys, setSelectedKeys] = useState<Set<string>>(
@@ -449,9 +543,20 @@ export default function SkillsPage() {
 		"create" | "import" | "import-github" | null
 	>(null);
 
+	// One row per (skill, agent), so filtering on `agent` keeps exactly the
+	// rows that agent reads — including a skill it reaches through a SHARED
+	// referrer directory, which the loader emits once per reading agent.
+	const agentFilteredSkills = useMemo(
+		() =>
+			agentFilter === null
+				? skills
+				: skills.filter((skill) => skill.agent === agentFilter),
+		[skills, agentFilter],
+	);
+
 	const groupedSkills = useMemo(() => {
 		const map = new Map<string, SkillResponse[]>();
-		for (const skill of skills) {
+		for (const skill of agentFilteredSkills) {
 			const existing = map.get(skill.name) ?? [];
 			map.set(skill.name, [...existing, skill]);
 		}
@@ -460,7 +565,7 @@ export default function SkillsPage() {
 			items,
 			description: items.find((s) => s.description)?.description ?? "",
 		}));
-	}, [skills]);
+	}, [agentFilteredSkills]);
 
 	const activeGroup = useMemo(() => {
 		if (selectedSkillName) {
@@ -780,8 +885,43 @@ export default function SkillsPage() {
 										</Dropdown.Menu>
 									</Dropdown.Popover>
 								</Dropdown>
+								{pendingUpdateCount > 0 && (
+									<Tooltip delay={0}>
+										<Button
+											variant="ghost"
+											size="sm"
+											className="shrink-0"
+											isDisabled={
+												isApplying || isRefreshingSkills
+											}
+											onPress={() => {
+												void handleUpdateAll();
+											}}
+										>
+											{isApplying ? (
+												<Spinner size="sm" />
+											) : (
+												<ArrowPathIcon className="size-4 text-warning" />
+											)}
+											{t("updateAllSkills", {
+												count: pendingUpdateCount,
+											})}
+										</Button>
+										<Tooltip.Content>
+											{t("updateAllSkills", {
+												count: pendingUpdateCount,
+											})}
+										</Tooltip.Content>
+									</Tooltip>
+								)}
 								{refreshButton}
 							</ListSearchHeader>
+
+							<SkillAgentFilterRow
+								skills={skills}
+								selected={agentFilter}
+								onChange={setAgentFilter}
+							/>
 
 							<SkillTagFilterRow
 								selected={tagFilter}
@@ -789,7 +929,7 @@ export default function SkillsPage() {
 							/>
 
 							<SkillList
-								skills={skills}
+								skills={agentFilteredSkills}
 								selectedKeys={effectiveSelectedKeys}
 								searchQuery={searchQuery}
 								tagFilter={tagFilter}

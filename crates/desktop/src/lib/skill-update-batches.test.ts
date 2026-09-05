@@ -3,10 +3,8 @@ import assert from "node:assert/strict";
 // runner, same as the sibling tests.
 // eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
-import type {
-	SkillLockEntryResponse,
-	SkillUpdateResponse,
-} from "../generated/dto";
+import type { SkillUpdateResponse } from "../generated/dto";
+import type { LockSourceEntry } from "./skill-update-batches.ts";
 import {
 	batchedSkillCount,
 	groupUpdatesBySource,
@@ -16,18 +14,13 @@ function lockEntry(
 	name: string,
 	source: string,
 	sourceUrl: string,
-): SkillLockEntryResponse {
-	return {
-		name,
-		source,
-		sourceType: "git",
-		sourceUrl,
-		skillPath: `${name}/SKILL.md`,
-		skillFolderHash: "deadbeef",
-		installedAt: "2026-01-01T00:00:00Z",
-		updatedAt: "2026-01-01T00:00:00Z",
-		pluginName: null,
-	};
+): LockSourceEntry {
+	return { name, source, sourceUrl };
+}
+
+/** A project-lock row: no `sourceUrl` field at all. */
+function projectLockEntry(name: string, source: string): LockSourceEntry {
+	return { name, source };
 }
 
 function updatable(name: string): SkillUpdateResponse {
@@ -137,4 +130,16 @@ test("an entry with no recorded URL falls back to the host-blind source", () => 
 		null,
 	);
 	assert.equal(batches[0].source, "/local/path");
+});
+
+test("a project lock row, which records no URL, still groups", () => {
+	const { batches, unresolved } = groupUpdatesBySource(
+		[updatable("alpha"), updatable("beta")],
+		[projectLockEntry("alpha", "o/one"), projectLockEntry("beta", "o/one")],
+		"project",
+		"/repo",
+	);
+	assert.deepEqual(unresolved, []);
+	assert.equal(batches.length, 1);
+	assert.equal(batches[0].source, "o/one");
 });

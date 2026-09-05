@@ -81,10 +81,22 @@ export function SkillStatusBadge({
 					</span>
 				</Tooltip.Trigger>
 				<Tooltip.Content>
-					{t("skillUpdateAvailableTooltip", {
-						current: status.current.slice(0, 8),
-						available: status.available.slice(0, 8),
-					})}
+					{/* The hashes are folder-content hashes, not commits, so
+					    there is no changelog to derive from them. The upstream
+					    tip's DATE is the one thing that says how old the
+					    pending change is, and the check already carries it. */}
+					{status.upstreamCommitTime
+						? t("skillUpdateAvailableTooltipDated", {
+								current: status.current.slice(0, 8),
+								available: status.available.slice(0, 8),
+								date: new Date(
+									status.upstreamCommitTime,
+								).toLocaleDateString(),
+							})
+						: t("skillUpdateAvailableTooltip", {
+								current: status.current.slice(0, 8),
+								available: status.available.slice(0, 8),
+							})}
 				</Tooltip.Content>
 			</Tooltip>
 		);
