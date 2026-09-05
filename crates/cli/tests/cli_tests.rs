@@ -47,7 +47,7 @@ fn test_agent_all_get_skills_is_valid_json_array() {
 
 	// Cline has universal_skills + project_skills_path = root/.agents/skills.
 	// fixtures/.cline/ makes fixtures/ the project root, so cline sees:
-	// fixtures/.agents/skills/vercel-react-best-practices/SKILL.md
+	// fixtures/.aghub/vercel-react-best-practices/SKILL.md
 	assert!(
 		arr.iter().any(|s| s["agent"] == "cline"
 			&& s["name"] == "vercel-react-best-practices"),
@@ -208,7 +208,7 @@ fn doctor_verify_links_audits_the_selected_roster() {
 
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
-	let master = home.path().join(".agents/skills/rostered");
+	let master = home.path().join(".aghub/rostered");
 	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
 		master.join("SKILL.md"),
@@ -520,11 +520,11 @@ fn generic_mutations_reject_all_scope_before_writing() {
 	}
 
 	assert!(
-		!home.path().join(".agents/skills/blocked").exists(),
+		!home.path().join(".aghub/blocked").exists(),
 		"a rejected --all mutation must not create the global Master"
 	);
 	assert!(
-		!project.path().join(".agents/skills/blocked").exists(),
+		!project.path().join(".aghub/blocked").exists(),
 		"a rejected --all mutation must not create the project Master"
 	);
 }
@@ -1049,7 +1049,7 @@ fn source_sync_dry_run_json_lists_target_agents() {
 	);
 	assert_eq!(json["actions"][0]["action"], "install");
 	// Dry-run wrote nothing.
-	assert!(!home.path().join(".agents/skills/my-skill").exists());
+	assert!(!home.path().join(".aghub/my-skill").exists());
 }
 
 /// An invalid agent list must fail BEFORE any fetch: no fetch root is set
@@ -1118,7 +1118,7 @@ fn source_sync_agent_list_installs_for_each_listed_agent() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	// Master installed once; claude linked to it.
-	let master = home.path().join(".agents/skills/my-skill");
+	let master = home.path().join(".aghub/my-skill");
 	assert!(master.join("SKILL.md").exists(), "master must exist");
 	let claude_link = home.path().join(".claude/skills/my-skill");
 	assert!(
@@ -1161,7 +1161,7 @@ fn source_sync_agent_list_preflights_before_writing_master() {
 
 	assert!(!out.status.success(), "unsupported target must reject sync");
 	assert!(
-		!home.path().join(".agents/skills/alpha").exists(),
+		!home.path().join(".aghub/alpha").exists(),
 		"capability preflight must happen before the shared Master write",
 	);
 	assert!(
@@ -1307,12 +1307,12 @@ fn cli_delete_mcp_missing_name_is_noop_ok() {
 // ==================== #4: SkillView command-surface contract ====================
 //
 // get/update/describe/add all now emit the core SkillView shape (snake_case,
-// native_reader present, raw Skill `content` absent). These pin the exact wire
+// shared_with present, raw Skill `content` absent). These pin the exact wire
 // keys so the changed command surfaces can't silently revert to the raw Skill
 // serialization. Unix-gated for the same HOME-redirection reason as the delete
 // tests above.
 
-/// Assert a JSON object is a SkillView: snake_case keys, `native_reader`
+/// Assert a JSON object is a SkillView: snake_case keys, `shared_with`
 /// present (the #4 advisory), and the raw-Skill-only `content` field absent.
 #[cfg(unix)]
 fn assert_skill_view_shape(obj: &Value) {
@@ -1321,8 +1321,8 @@ fn assert_skill_view_shape(obj: &Value) {
 		"snake_case source_path key"
 	);
 	assert!(
-		obj.get("native_reader").is_some(),
-		"native_reader advisory present"
+		obj.get("shared_with").is_some(),
+		"shared_with advisory present"
 	);
 	assert!(
 		obj.get("content").is_none(),
@@ -1354,13 +1354,13 @@ fn get_skills_outputs_skill_view_shape() {
 		.find(|s| s["name"] == "mytool")
 		.expect("mytool in output");
 	assert_skill_view_shape(entry);
-	assert_eq!(entry["native_reader"], false);
+	assert_eq!(entry["shared_with"], serde_json::json!([]));
 	assert_eq!(entry["agent"], Value::Null, "single-agent get has no agent");
 }
 
 #[cfg(unix)]
 #[test]
-fn get_skills_all_agents_tags_agent_and_native_reader() {
+fn get_skills_all_agents_tags_agent_and_shared_with() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	write_claude_skill(home.path(), "mytool");
@@ -1416,7 +1416,7 @@ fn update_skill_outputs_skill_view_shape() {
 	assert_eq!(json["name"], "mytool");
 	assert_eq!(json["description"], "newdesc");
 	// update does no install prep, so the advisory stays false.
-	assert_eq!(json["native_reader"], false);
+	assert_eq!(json["shared_with"], serde_json::json!([]));
 }
 
 #[cfg(unix)]
@@ -1443,7 +1443,7 @@ fn describe_skill_outputs_skill_view_shape() {
 
 #[cfg(unix)]
 #[test]
-fn add_skill_from_path_outputs_skill_view_with_native_reader() {
+fn add_skill_from_path_outputs_skill_view_with_shared_with() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	// A source skill on disk to import from.
@@ -1479,7 +1479,7 @@ fn add_skill_from_path_outputs_skill_view_with_native_reader() {
 	assert_eq!(json["name"], "myimport");
 	assert_eq!(json["description"], "imported");
 	// Claude is not a NativeReader, so an isolated copy install => false.
-	assert_eq!(json["native_reader"], false);
+	assert_eq!(json["shared_with"], serde_json::json!([]));
 }
 
 /// Root bypasses `0o555`, so probe + skip (CI often runs as root).
@@ -2324,7 +2324,7 @@ fn source_sync_all_agents_links_more_than_one_agent() {
 	// Master materialized once; MANY agents linked (far more than the single
 	// claude link a default sync would create).
 	assert!(
-		home.path().join(".agents/skills/alpha").is_dir(),
+		home.path().join(".aghub/alpha").is_dir(),
 		"the shared master must exist"
 	);
 	let links = count_symlinks_named(home.path(), "alpha");
@@ -3317,7 +3317,7 @@ fn cli_add_skill_from_path_is_symlink_only() {
 		.arg(src.join("SKILL.md"));
 	cmd.assert().success();
 
-	let canonical = project.join(".agents/skills/my-skill");
+	let canonical = project.join(".aghub/my-skill");
 	let link = project.join(".claude/skills/my-skill");
 	assert!(
 		canonical.join("SKILL.md").exists(),
@@ -3415,7 +3415,7 @@ fn add_skill_universal_flag_prints_deprecation_notice() {
 	);
 
 	// master + per-agent symlink produced (not a copy)
-	let master = project.join(".agents/skills/dep-skill");
+	let master = project.join(".aghub/dep-skill");
 	let link = project.join(".claude/skills/dep-skill");
 	assert!(
 		master.join("SKILL.md").exists(),
@@ -3801,11 +3801,11 @@ fn delete_skill_dry_run_outputs_snake_case_keys() {
 }
 
 /// CLI `add skill` output is now a `SkillView`, which carries the
-/// `native_reader` advisory field. For Claude at global scope the agent is NOT a
+/// `shared_with` advisory field. Claude at global scope has a PRIVATE skills
 /// NativeReader, so the field is present and `false`.
 #[cfg(unix)]
 #[test]
-fn add_skill_output_includes_native_reader_field() {
+fn add_skill_output_includes_shared_with_field() {
 	let tmp = tempfile::tempdir().unwrap();
 	let project = tmp.path();
 	std::fs::create_dir_all(project.join(".claude")).unwrap();
@@ -3838,7 +3838,8 @@ fn add_skill_output_includes_native_reader_field() {
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert_eq!(json["name"], "nrtool");
 	assert_eq!(
-		json["native_reader"], false,
+		json["shared_with"],
+		serde_json::json!([]),
 		"claude global add is not a NativeReader: {json}"
 	);
 	// SkillView shape: source_path key present, raw-Skill `content` absent.
@@ -3849,12 +3850,12 @@ fn add_skill_output_includes_native_reader_field() {
 	);
 }
 
-/// The other branch of the `native_reader` advisory: OpenCode at global scope
+/// The other branch of the `shared_with` advisory: an agent with no private
 /// reads the `~/.agents/skills` master directly (a NativeReader), so the
-/// `add skill` SkillView reports `native_reader: true`.
+/// skills directory shares one, and the SkillView must name the co-grantees.
 #[cfg(unix)]
 #[test]
-fn add_skill_output_native_reader_true_for_opencode() {
+fn add_skill_output_shared_with_names_co_grantees_for_cline() {
 	let tmp = tempfile::tempdir().unwrap();
 	let home = tmp.path();
 	std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
@@ -3886,7 +3887,8 @@ fn add_skill_output_native_reader_true_for_opencode() {
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert_eq!(
-		json["native_reader"], true,
+		json["shared_with"],
+		serde_json::json!(["warp"]),
 		"opencode global is a NativeReader: {json}"
 	);
 }
@@ -4428,10 +4430,7 @@ fn transfer_skill_copies_claude_to_opencode_project() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	assert!(
-		project
-			.path()
-			.join(".agents/skills/repo-helper/SKILL.md")
-			.exists(),
+		project.path().join(".aghub/repo-helper/SKILL.md").exists(),
 		"OpenCode is a NativeReader and must use the shared Master",
 	);
 }
@@ -4638,7 +4637,7 @@ fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
 		"seed transfer must succeed: {}",
 		String::from_utf8_lossy(&seed.stderr)
 	);
-	let master = project.path().join(".agents/skills/repo-helper/SKILL.md");
+	let master = project.path().join(".aghub/repo-helper/SKILL.md");
 	let before = std::fs::read_to_string(&master)
 		.expect("the seed transfer must have written the Master");
 
@@ -4789,10 +4788,7 @@ fn reconcile_skill_reports_batch_summary() {
 		"reconcile --add opencode must copy into OpenCode: {json}"
 	);
 	assert!(
-		project
-			.path()
-			.join(".agents/skills/repo-helper/SKILL.md")
-			.exists(),
+		project.path().join(".aghub/repo-helper/SKILL.md").exists(),
 		"reconcile --add must retain the Master OpenCode reads natively"
 	);
 }
@@ -4803,10 +4799,10 @@ fn reconcile_skill_reports_batch_summary() {
 // success, one failure) on exit 1, with claude's Referrer already on disk.
 #[cfg(unix)]
 #[test]
-fn reconcile_skill_native_reader_removal_is_a_json_error_and_writes_nothing() {
+fn reconcile_skill_shared_slot_removal_is_a_json_error_and_writes_nothing() {
 	let project = tempfile::TempDir::new().unwrap();
 	// A universal Master cursor reads directly; `.claude/skills` marks the root.
-	let master = project.path().join(".agents/skills/mover");
+	let master = project.path().join(".aghub/mover");
 	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
 		master.join("SKILL.md"),
@@ -4872,7 +4868,7 @@ fn reconcile_skill_native_reader_removal_is_a_json_error_and_writes_nothing() {
 #[test]
 fn reconcile_skill_preview_refuses_what_the_commit_refuses() {
 	let project = tempfile::TempDir::new().unwrap();
-	let master = project.path().join(".agents/skills/mover");
+	let master = project.path().join(".aghub/mover");
 	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
 		master.join("SKILL.md"),
@@ -5200,10 +5196,12 @@ fn coverage_json_uses_id_key_like_api_dto() {
 }
 
 #[test]
-fn coverage_global_json_codex_native_claude_needs_link() {
-	// Mirrors api `global_scope_buckets_codex_native_claude_needs_link`: codex
-	// @global reads `~/.agents/skills` (the master) so it is auto_covered with no
-	// link; claude @global has a private `~/.claude/skills` so it NeedsLink.
+fn coverage_global_json_every_agent_takes_a_link() {
+	// codex @global used to come back `auto_covered` — it read `~/.agents/skills`
+	// and the wire said "already covered", meaning the user had no say. It now
+	// takes a Referrer into `~/.codex/skills` like everyone else, which is what
+	// makes it individually revocable. cline has no private dir anywhere, so the
+	// shared slot IS its directory and the wire must disclose the co-grantees.
 	let home = tempfile::TempDir::new().unwrap();
 
 	let out = coverage_cli(home.path())
@@ -5225,12 +5223,25 @@ fn coverage_global_json_codex_native_claude_needs_link() {
 		.expect("codex row present");
 	assert_eq!(codex["scope"], "global");
 	assert_eq!(
-		codex["auto_covered"], true,
-		"codex @global reads .agents/skills: {codex}"
+		codex["needs_link"], true,
+		"codex now takes a link like everyone else: {codex}"
 	);
-	assert_eq!(codex["needs_link"], false);
 	assert_eq!(codex["supported"], true);
-	assert_eq!(codex["reads_master"], true);
+	assert_eq!(
+		codex["shared_with"],
+		serde_json::json!([]),
+		"codex has a private dir, so it shares with nobody: {codex}"
+	);
+
+	let cline = arr
+		.iter()
+		.find(|r| r["id"] == "cline")
+		.expect("cline row present");
+	assert_eq!(
+		cline["shared_with"],
+		serde_json::json!(["warp"]),
+		"cline has no private dir; granting to it grants to warp: {cline}"
+	);
 
 	let claude = arr
 		.iter()
@@ -5240,7 +5251,7 @@ fn coverage_global_json_codex_native_claude_needs_link() {
 		claude["needs_link"], true,
 		"claude @global has a private skills dir => NeedsLink: {claude}"
 	);
-	assert_eq!(claude["auto_covered"], false);
+	assert_eq!(claude["shared_with"], serde_json::json!([]));
 	assert_eq!(claude["supported"], true);
 }
 
@@ -5269,9 +5280,13 @@ fn coverage_project_json_classifies_against_project_master() {
 		.find(|r| r["id"] == "opencode")
 		.expect("opencode row present");
 	assert_eq!(opencode["scope"], "project");
+	// opencode @project writes `<root>/.opencode/skills` — its own directory —
+	// so it is individually revocable and shares with nobody. Before the store
+	// moved it read `<root>/.agents/skills` and came back `auto_covered`: the
+	// user could not opt it out.
 	assert_eq!(
-		opencode["auto_covered"], true,
-		"opencode @project reads <root>/.agents/skills: {opencode}"
+		opencode["needs_link"], true,
+		"opencode @project takes a link into its own dir: {opencode}"
 	);
 	let claude = arr
 		.iter()
@@ -5349,7 +5364,7 @@ fn coverage_default_table_lists_agents() {
 	);
 	let stdout = String::from_utf8_lossy(&out.stdout);
 	assert!(
-		stdout.contains("AGENT") && stdout.contains("AUTO COVERED"),
+		stdout.contains("AGENT") && stdout.contains("SHARES WITH"),
 		"table header must list the coverage columns: {stdout}"
 	);
 	assert!(
@@ -5450,7 +5465,7 @@ fn project_scope_mutation_without_project_root_fails_before_writing() {
 	}
 
 	assert!(
-		!home.path().join(".agents/skills/leaked").exists(),
+		!home.path().join(".aghub/leaked").exists(),
 		"a rejected -p mutation must not leak the global Master onto disk"
 	);
 }
@@ -5750,7 +5765,7 @@ fn delete_discloses_the_master_it_leaves_behind() {
 		"a committed delete must name the surviving master: {text}"
 	);
 	assert!(
-		home.path().join(".agents/skills/kept").exists(),
+		home.path().join(".aghub/kept").exists(),
 		"the master really does survive — that is why it must be reported"
 	);
 }
@@ -5823,10 +5838,9 @@ fn re_add_reports_the_installed_master_not_the_source_file() {
 		verb.contains("already installed") && !verb.contains("added skill"),
 		"a no-op re-add must not say 'added': {verb}"
 	);
-	let master = std::fs::read_to_string(
-		home.path().join(".agents/skills/drifted/SKILL.md"),
-	)
-	.unwrap();
+	let master =
+		std::fs::read_to_string(home.path().join(".aghub/drifted/SKILL.md"))
+			.unwrap();
 	assert!(
 		master.contains("original") && !master.contains("EDITED"),
 		"master really was left alone: {master}"
@@ -6223,10 +6237,8 @@ fn rename_import_leaves_the_same_named_skill_alone() {
 	);
 
 	// The NEW skill holds the source the user pointed at...
-	let bar = std::fs::read_to_string(
-		home.path().join(".agents/skills/bar/SKILL.md"),
-	)
-	.expect("the renamed skill must be created");
+	let bar = std::fs::read_to_string(home.path().join(".aghub/bar/SKILL.md"))
+		.expect("the renamed skill must be created");
 	assert!(bar.contains("NEWCONTENT"), "wrong source landed: {bar}");
 	// ...under the requested name. Discovery keys on the frontmatter `name`,
 	// not the folder, so a stale `name: foo` here would resurface the skill
@@ -6236,10 +6248,8 @@ fn rename_import_leaves_the_same_named_skill_alone() {
 		"the master's frontmatter must carry the requested name: {bar}"
 	);
 	// ...and the same-named pre-existing skill is untouched.
-	let foo = std::fs::read_to_string(
-		home.path().join(".agents/skills/foo/SKILL.md"),
-	)
-	.expect("the pre-existing skill must survive");
+	let foo = std::fs::read_to_string(home.path().join(".aghub/foo/SKILL.md"))
+		.expect("the pre-existing skill must survive");
 	assert!(
 		foo.contains("ORIGINAL"),
 		"the pre-existing skill must be untouched: {foo}"
@@ -6289,13 +6299,11 @@ fn rename_import_refuses_when_the_target_name_is_taken() {
 	// Nothing stranded: the refusal happens BEFORE the copy, so the source's
 	// own name must not have been installed on the way.
 	assert!(
-		!home.path().join(".agents/skills/fresh").exists(),
+		!home.path().join(".aghub/fresh").exists(),
 		"a refused rename import must not leave the source's own name behind"
 	);
-	let bar = std::fs::read_to_string(
-		home.path().join(".agents/skills/bar/SKILL.md"),
-	)
-	.expect("the occupant must survive");
+	let bar = std::fs::read_to_string(home.path().join(".aghub/bar/SKILL.md"))
+		.expect("the occupant must survive");
 	assert!(
 		bar.contains("ORIGINAL"),
 		"the occupant was overwritten: {bar}"
@@ -6344,10 +6352,9 @@ fn rename_import_still_works_when_the_source_name_is_free() {
 			"{key} must point at the renamed skill, got {path}"
 		);
 	}
-	let body = std::fs::read_to_string(
-		home.path().join(".agents/skills/renamed/SKILL.md"),
-	)
-	.unwrap();
+	let body =
+		std::fs::read_to_string(home.path().join(".aghub/renamed/SKILL.md"))
+			.unwrap();
 	assert!(
 		body.contains("BODY"),
 		"the source content must land: {body}"
@@ -6361,7 +6368,7 @@ fn rename_import_still_works_when_the_source_name_is_free() {
 ///
 /// It also never writes the source's own name anywhere — pinned here with a
 /// stale referrer another agent left behind for that name. The old pair
-/// materialised `.agents/skills/fresh`, which made that dangling link start
+/// materialised `.aghub/fresh`, which made that dangling link start
 /// resolving mid-flight to content nobody asked for; the one-step install never
 /// creates it, and must leave the foreign agent's dir alone rather than
 /// "tidying" a link it did not make.
@@ -6385,7 +6392,7 @@ fn rename_import_copies_the_whole_tree_and_never_writes_the_source_name() {
 	let stale = home.path().join(".claude/skills");
 	std::fs::create_dir_all(&stale).unwrap();
 	std::os::unix::fs::symlink(
-		home.path().join(".agents/skills/fresh"),
+		home.path().join(".aghub/fresh"),
 		stale.join("fresh"),
 	)
 	.unwrap();
@@ -6406,7 +6413,7 @@ fn rename_import_copies_the_whole_tree_and_never_writes_the_source_name() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 
-	let renamed = home.path().join(".agents/skills/renamed");
+	let renamed = home.path().join(".aghub/renamed");
 	assert!(
 		renamed.join("scripts/setup.sh").exists(),
 		"the install must keep the source's resources, not just SKILL.md"
@@ -6422,7 +6429,7 @@ fn rename_import_copies_the_whole_tree_and_never_writes_the_source_name() {
 		"the source body must survive the name rewrite: {md}"
 	);
 	assert!(
-		!home.path().join(".agents/skills/fresh").exists(),
+		!home.path().join(".aghub/fresh").exists(),
 		"the source's own name must never be materialised"
 	);
 	// `symlink_metadata`, NOT `exists()`: `exists()` follows the link and is
@@ -6495,7 +6502,7 @@ fn fresh_multi_agent_install_does_not_warn_about_drift() {
 		"a fresh install must not claim its content did not land: {stderr}"
 	);
 	assert!(
-		home.path().join(".agents/skills/shared").exists(),
+		home.path().join(".aghub/shared").exists(),
 		"and it really did install"
 	);
 }
@@ -6518,7 +6525,7 @@ fn describe_hides_install_advisories_from_the_human_block() {
 	assert!(text_out.status.success());
 	assert!(text.contains("described"), "sanity: {text}");
 	assert!(
-		!text.contains("already_installed") && !text.contains("native_reader"),
+		!text.contains("already_installed") && !text.contains("shared_with"),
 		"install advisories are noise on a read: {text}"
 	);
 
@@ -6539,7 +6546,7 @@ fn describe_hides_install_advisories_from_the_human_block() {
 		json["already_installed"], false,
 		"--json keeps the full wire shape"
 	);
-	assert_eq!(json["native_reader"], false);
+	assert_eq!(json["shared_with"], serde_json::json!([]));
 }
 
 /// The multi-agent batch's HUMAN output. All six batch tests assert the JSON
@@ -6865,7 +6872,7 @@ fn check_write_result_refuses_managed_names_from_any_scope_or_directory() {
 	for spelling in [
 		"../skills-lock.json".to_string(),
 		mutation_lock.display().to_string(),
-		"../.agents/skills/whatever.json".to_string(),
+		"../.aghub/whatever.json".to_string(),
 	] {
 		let out = isolated_cli(home.path(), state.path())
 			// GLOBAL scope, run from a SUBDIRECTORY of the project.
@@ -6898,7 +6905,7 @@ fn check_write_result_refuses_managed_names_from_any_scope_or_directory() {
 fn check_write_result_refuses_to_target_managed_skill_content() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
-	let master = home.path().join(".agents/skills/alpha");
+	let master = home.path().join(".aghub/alpha");
 	std::fs::create_dir_all(&master).unwrap();
 	let skill_md = master.join("SKILL.md");
 	std::fs::write(&skill_md, "---\nname: alpha\n---\n").unwrap();
@@ -7360,7 +7367,7 @@ fn readd_existing_skill_reports_already_installed_and_keeps_disk_content() {
 		 one: {json}"
 	);
 
-	let master = project.path().join(".agents/skills/dup/SKILL.md");
+	let master = project.path().join(".aghub/dup/SKILL.md");
 	let body = std::fs::read_to_string(&master).unwrap();
 	assert!(
 		body.contains("description: first desc"),
@@ -8232,7 +8239,7 @@ fn json_payload_key_sets_are_pinned() {
 				"description",
 				"enabled",
 				"name",
-				"native_reader",
+				"shared_with",
 				"source_path",
 				"tools",
 				"version",
@@ -8247,7 +8254,7 @@ fn json_payload_key_sets_are_pinned() {
 				"description",
 				"enabled",
 				"name",
-				"native_reader",
+				"shared_with",
 				"source_path",
 				"tools",
 				"version",
@@ -8690,8 +8697,7 @@ fn delete_preview_discloses_the_lock_entries_it_would_prune() {
 
 	// `ghosted` disappears from disk WITHOUT going through aghub — the everyday
 	// way an orphan lock entry appears.
-	std::fs::remove_dir_all(home.path().join(".agents/skills/ghosted"))
-		.unwrap();
+	std::fs::remove_dir_all(home.path().join(".aghub/ghosted")).unwrap();
 	std::fs::remove_dir_all(home.path().join(".claude/skills/ghosted")).ok();
 
 	let preview = isolated_cli(home.path(), state.path())
@@ -8754,7 +8760,7 @@ fn delete_preview_discloses_the_lock_entries_it_would_prune() {
 
 	// A preview writes NOTHING.
 	assert!(
-		home.path().join(".agents/skills/keeper").exists(),
+		home.path().join(".aghub/keeper").exists(),
 		"a preview must not delete"
 	);
 	let after_preview = isolated_cli(home.path(), state.path())
@@ -8984,7 +8990,7 @@ fn doctor_separates_orphan_masters_and_can_gate_on_issues() {
 
 	// A master with NO lock entry and no agent slot: exactly what a manual
 	// `.agents/skills/<name>` or a kept-master delete leaves behind.
-	let master = home.path().join(".agents/skills/orphaned");
+	let master = home.path().join(".aghub/orphaned");
 	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
 		master.join("SKILL.md"),
@@ -9274,8 +9280,7 @@ fn second_review_found_gaps_stay_fixed() {
 	);
 	// The master disappears WITHOUT going through aghub: the lock entry is now
 	// an orphan, which is genuinely actionable.
-	std::fs::remove_dir_all(home.path().join(".agents/skills/will-vanish"))
-		.unwrap();
+	std::fs::remove_dir_all(home.path().join(".aghub/will-vanish")).unwrap();
 	std::fs::remove_dir_all(home.path().join(".claude/skills/will-vanish"))
 		.ok();
 
@@ -9349,7 +9354,7 @@ fn third_review_sibling_shapes_stay_fixed() {
 	// source. Strengthening `already_present`, or the staged gate, closes
 	// neither: the copy did not lie about being a no-op, it lied about having
 	// carried the content over.
-	let master = home.path().join(".agents/skills/collide2");
+	let master = home.path().join(".aghub/collide2");
 	std::fs::create_dir_all(&master).unwrap();
 	std::fs::write(
 		master.join("SKILL.md"),
@@ -9408,7 +9413,7 @@ fn third_review_sibling_shapes_stay_fixed() {
 	// designed. A hand-written skill in `.agents/skills` with no lock entry is
 	// `untracked` — this very repo is that layout — and gating on it made the
 	// flag permanently red for anyone authoring skills in place.
-	let handwritten = home.path().join(".agents/skills/authored-here");
+	let handwritten = home.path().join(".aghub/authored-here");
 	std::fs::create_dir_all(&handwritten).unwrap();
 	std::fs::write(
 		handwritten.join("SKILL.md"),
@@ -9439,7 +9444,7 @@ fn third_review_sibling_shapes_stay_fixed() {
 		"---\nname: live\ndescription: d\n---\n\nx\n",
 	)
 	.unwrap();
-	let link = home.path().join(".agents/skills/live");
+	let link = home.path().join(".aghub/live");
 	std::os::unix::fs::symlink(&live, &link).unwrap();
 
 	let audit = |expect_state: &str| {
@@ -9488,7 +9493,7 @@ fn fourth_review_name_only_decisions_stay_closed() {
 
 		// cursor reads `.agents/skills` directly, so this Master IS cursor's
 		// `foo` — and it is not claude's `foo`.
-		let master = home.path().join(".agents/skills/foo");
+		let master = home.path().join(".aghub/foo");
 		std::fs::create_dir_all(&master).unwrap();
 		std::fs::write(
 			master.join("SKILL.md"),
@@ -9600,7 +9605,7 @@ fn fourth_review_name_only_decisions_stay_closed() {
 		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
 		assert_eq!(json["error"]["code"], "RESOURCE_EXISTS", "{json}");
 		assert!(
-			!home.path().join(".agents/skills/foo").exists(),
+			!home.path().join(".aghub/foo").exists(),
 			"the refused add must not leave a master behind"
 		);
 		assert!(std::fs::read_to_string(foreign.join("SKILL.md"))
@@ -9614,7 +9619,7 @@ fn fourth_review_name_only_decisions_stay_closed() {
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
-		let master = home.path().join(".agents/skills/foo");
+		let master = home.path().join(".aghub/foo");
 		std::fs::create_dir_all(&master).unwrap();
 		std::fs::write(
 			master.join("SKILL.md"),
@@ -9887,8 +9892,7 @@ fn a_removal_that_would_take_it_from_the_source_is_refused() {
 		let state = tempfile::TempDir::new().unwrap();
 		std::fs::create_dir_all(home.path().join(".claude/skills/foo"))
 			.unwrap();
-		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
-			.unwrap();
+		std::fs::create_dir_all(home.path().join(".aghub/foo")).unwrap();
 		std::os::unix::fs::symlink(
 			home.path().join(".claude"),
 			home.path().join(".gemini"),
@@ -9901,7 +9905,7 @@ fn a_removal_that_would_take_it_from_the_source_is_refused() {
 		)
 		.unwrap();
 		std::fs::write(
-			home.path().join(".agents/skills/foo/SKILL.md"),
+			home.path().join(".aghub/foo/SKILL.md"),
 			"---\nname: foo\ndescription: C\n---\n\nMASTER-C\n",
 		)
 		.unwrap();
@@ -10076,15 +10080,14 @@ fn what_the_tool_reports_matches_what_is_on_disk() {
 		let state = tempfile::TempDir::new().unwrap();
 		std::fs::create_dir_all(home.path().join(".claude/skills/foo"))
 			.unwrap();
-		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
-			.unwrap();
+		std::fs::create_dir_all(home.path().join(".aghub/foo")).unwrap();
 		std::fs::write(
 			home.path().join(".claude/skills/foo/SKILL.md"),
 			"---\nname: foo\ndescription: A\n---\n\nCLAUDE-A\n",
 		)
 		.unwrap();
 		std::fs::write(
-			home.path().join(".agents/skills/foo/SKILL.md"),
+			home.path().join(".aghub/foo/SKILL.md"),
 			"---\nname: foo\ndescription: C\n---\n\nMASTER-C\n",
 		)
 		.unwrap();
@@ -10247,15 +10250,14 @@ fn round_five_delta_fixes_stay_closed() {
 		let state = tempfile::TempDir::new().unwrap();
 		let skill = home.path().join(".claude/skills/foo");
 		std::fs::create_dir_all(&skill).unwrap();
-		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
-			.unwrap();
+		std::fs::create_dir_all(home.path().join(".aghub/foo")).unwrap();
 		std::fs::write(
 			skill.join("SKILL.md"),
 			"---\nname: foo\ndescription: d\n---\n\nB\n",
 		)
 		.unwrap();
 		std::fs::write(
-			home.path().join(".agents/skills/foo/SKILL.md"),
+			home.path().join(".aghub/foo/SKILL.md"),
 			"---\nname: foo\ndescription: d\n---\n\nB\n",
 		)
 		.unwrap();
@@ -10318,13 +10320,11 @@ fn round_five_delta_fixes_stay_closed() {
 		let state = tempfile::TempDir::new().unwrap();
 		let private = home.path().join(".claude/skills/foo");
 		std::fs::create_dir_all(&private).unwrap();
-		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
-			.unwrap();
+		std::fs::create_dir_all(home.path().join(".aghub/foo")).unwrap();
 		std::fs::create_dir_all(home.path().join("ext")).unwrap();
 		let body = "---\nname: foo\ndescription: d\n---\n\nSAME\n";
 		std::fs::write(private.join("SKILL.md"), body).unwrap();
-		std::fs::write(home.path().join(".agents/skills/foo/SKILL.md"), body)
-			.unwrap();
+		std::fs::write(home.path().join(".aghub/foo/SKILL.md"), body).unwrap();
 		std::fs::write(home.path().join("ext/real.txt"), "payload").unwrap();
 		std::os::unix::fs::symlink(
 			home.path().join("ext/real.txt"),
@@ -10367,11 +10367,10 @@ fn round_five_delta_fixes_stay_closed() {
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
-		std::fs::create_dir_all(home.path().join(".agents/skills/foo"))
-			.unwrap();
+		std::fs::create_dir_all(home.path().join(".aghub/foo")).unwrap();
 		std::fs::create_dir_all(home.path().join("import/foo")).unwrap();
 		std::fs::write(
-			home.path().join(".agents/skills/foo/SKILL.md"),
+			home.path().join(".aghub/foo/SKILL.md"),
 			"not frontmatter at all\n",
 		)
 		.unwrap();
@@ -10545,7 +10544,7 @@ fn identity_not_path_and_unknown_not_absent() {
 			.output()
 			.unwrap();
 		assert!(
-			home.path().join(".agents/skills/demo/SKILL.md").is_file(),
+			home.path().join(".aghub/demo/SKILL.md").is_file(),
 			"the shared master must survive a decision made while blind"
 		);
 		assert!(!out.status.success());
@@ -10618,7 +10617,7 @@ fn identity_not_path_and_unknown_not_absent() {
 			"an exhaustive removal must still work: {}",
 			String::from_utf8_lossy(&out.stdout)
 		);
-		assert!(!home.path().join(".agents/skills/demo").exists());
+		assert!(!home.path().join(".aghub/demo").exists());
 	}
 }
 
@@ -10755,7 +10754,7 @@ fn the_new_guards_do_not_refuse_legitimate_work() {
 			 block: {}",
 			String::from_utf8_lossy(&out.stdout)
 		);
-		assert!(!home.path().join(".agents/skills/holdertest").exists());
+		assert!(!home.path().join(".aghub/holdertest").exists());
 	}
 }
 
@@ -10851,7 +10850,7 @@ fn an_unreadable_skills_dir_is_not_an_empty_one() {
 
 	// THE assertion.
 	assert!(
-		home.path().join(".agents/skills/demo/SKILL.md").is_file(),
+		home.path().join(".aghub/demo/SKILL.md").is_file(),
 		"the shared master must survive: a reader aghub could not read is not \
 		 a non-reader. stdout={}",
 		String::from_utf8_lossy(&out.stdout)
@@ -11360,7 +11359,7 @@ fn an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing() {
 		// THE assertion: gemini's referrer and the master it points at must
 		// agree. Either both go (the readable sweep) or both stay (the
 		// unreadable one) — never a link pointing at a deleted master.
-		let master = home.path().join(".agents/skills/demo");
+		let master = home.path().join(".aghub/demo");
 		let link_present = referrer.symlink_metadata().is_ok();
 		assert_eq!(
 			link_present,
@@ -11605,7 +11604,7 @@ fn a_preview_through_a_symlinked_home_still_names_the_keys_it_drops() {
 		 when HOME is reached through a symlink: {view}"
 	);
 	assert!(
-		home.join(".agents/skills/keeper").exists(),
+		home.join(".aghub/keeper").exists(),
 		"a preview must not delete"
 	);
 }

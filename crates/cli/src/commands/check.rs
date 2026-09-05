@@ -480,14 +480,28 @@ const MANAGED_FILE_NAMES: &[&str] = &[
 	".aghub-mutation.lock", // interprocess mutation lock
 ];
 
-/// True when `.agents/skills` appears as ADJACENT path segments — the Master.
-/// Segment-wise, not a substring: `~/my.agents/skills-notes` is the user's own
-/// file and must stay writable.
+/// True when the path lies inside aghub-managed skill content: the `.aghub`
+/// Master store, or the shared `.agents/skills` Referrer root.
+///
+/// Segment-wise, never a substring: `~/my.agents/skills-notes` and
+/// `~/notes.aghub.md` are the user's own files and must stay writable.
+///
+/// `.aghub` is a SECOND managed directory, and every prior review round found a
+/// new spelling that slipped past a narrower test — so it is checked here, by
+/// segment, rather than by resolving and comparing paths. A resolved comparison
+/// cannot work: `-g` resolves no project root at all, so a project store one
+/// `../` away is invisible to it.
 fn is_inside_master(path: &Path) -> bool {
 	let segments: Vec<String> = path
 		.components()
 		.map(|c| c.as_os_str().to_string_lossy().into_owned())
 		.collect();
+	if segments
+		.iter()
+		.any(|seg| seg == aghub_core::skills::linker::MASTER_STORE_DIR_NAME)
+	{
+		return true;
+	}
 	segments
 		.windows(2)
 		.any(|pair| pair[0] == ".agents" && pair[1] == "skills")
@@ -499,7 +513,8 @@ fn is_inside_master(path: &Path) -> bool {
 /// command just read as its answer.
 ///
 /// Three independent tests, deliberately overlapping: the FILE NAME, the
-/// `.agents/skills` containment, and the resolved paths of the locks this scope
+/// managed-directory containment (`.aghub`, `.agents/skills`), and the resolved
+/// paths of the locks this scope
 /// actually knows about.
 fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
 	let target = skill::lock::resolve_existing(path);
@@ -514,7 +529,7 @@ fn refuse_lock_targets(path: &Path, project_root: Option<&Path>) -> Result<()> {
 
 	if is_inside_master(&target) {
 		bail!(
-			"--write-result must not target managed skill content under .agents/skills: check is read-only"
+			"--write-result must not target managed skill content under .aghub or .agents/skills: check is read-only"
 		);
 	}
 

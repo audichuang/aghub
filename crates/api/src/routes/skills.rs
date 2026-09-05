@@ -3222,32 +3222,32 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn delete_by_path_keeps_master_referenced_by_another_agent_symlink() {
+	fn delete_by_path_keeps_shared_slot_referenced_by_another_agent_symlink() {
 		with_isolated_env(|home, _state| {
-			// Project-scope universal master, read DIRECTLY (real dir) by cursor
-			// and symlinked by another agent (claude). Deleting it by-path for
-			// cursor must NOT remove the shared master (it would orphan claude's
-			// live symlink + lose the skill for every other agent).
+			// An un-migrated REAL directory in the shared `.agents/skills`
+			// slot: read directly by cursor and nine other project agents, and
+			// symlinked on top by claude. Deleting it by-path for cursor must
+			// NOT remove it — that orphans claude's live symlink and loses the
+			// skill for every other slot reader.
+			//
+			// The store Master (`.aghub/<name>`) is deliberately NOT the target
+			// here: no agent reads the store, so a by-path delete can never
+			// name it — the route's own per-agent path validation rejects it
+			// before any guard runs.
 			let proj = home;
-			let master = proj.join(".aghub/shared");
-			std::fs::create_dir_all(&master).unwrap();
+			let slot = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&slot).unwrap();
 			std::fs::write(
-				master.join("SKILL.md"),
+				slot.join("SKILL.md"),
 				"---\nname: shared\ndescription: d\n---\n",
 			)
 			.unwrap();
 			let claude = proj.join(".claude/skills");
 			std::fs::create_dir_all(&claude).unwrap();
-			std::os::unix::fs::symlink(&master, claude.join("shared")).unwrap();
-			// Cursor reaches a project skill only through the shared
-			// `.agents/skills` slot, which used to BE the Master. Without this
-			// link it simply does not have the skill.
-			let shared = proj.join(".agents/skills");
-			std::fs::create_dir_all(&shared).unwrap();
-			std::os::unix::fs::symlink(&master, shared.join("shared")).unwrap();
+			std::os::unix::fs::symlink(&slot, claude.join("shared")).unwrap();
 
 			let req = DeleteSkillByPathRequest {
-				source_path: master.join("SKILL.md").display().to_string(),
+				source_path: slot.join("SKILL.md").display().to_string(),
 				agents: vec!["cursor".to_string()],
 				scope: "project".to_string(),
 				project_root: Some(proj.display().to_string()),
@@ -3261,48 +3261,48 @@ mod tests {
 					.into_inner();
 
 			assert!(
-				master.join("SKILL.md").exists(),
-				"shared master must survive a single-agent by-path delete"
+				slot.join("SKILL.md").exists(),
+				"the shared slot must survive a single-agent by-path delete"
 			);
 			assert!(
 				claude.join("shared").join("SKILL.md").exists(),
-				"the other agent's symlink must still resolve to the master"
+				"the other agent's symlink must still resolve into the slot"
 			);
 			assert!(
 				resp.skipped.iter().any(|p| p.contains("shared")),
-				"the kept master should be reported as skipped, got {:?}",
+				"the kept slot should be reported as skipped, got {:?}",
 				resp.skipped
 			);
 		});
 	}
 
-	/// The same shared Master, with NO symlink anywhere — the shape the
-	/// referrer sweep is blind to.
+	/// The same shared slot, with NO symlink anywhere — the shape the referrer
+	/// sweep is blind to.
 	///
 	/// This branch builds its own plan instead of coming through
 	/// `remove_skill_planned`, and its only guard was
-	/// `dir_has_external_referrer`. A NativeReader leaves no link behind, so a
-	/// project whose readers are all NativeReaders (cursor/opencode/cline/…)
-	/// has zero links pointing at its Master, the sweep answered "nobody
-	/// references it", and the route `remove_dir_all`'d the Master and reported
+	/// `dir_has_external_referrer`. Ten project agents reach a real directory
+	/// in `.agents/skills` by SCANNING that directory, leaving no link behind,
+	/// so the sweep answered "nobody references it" and the route
+	/// `remove_dir_all`'d the directory out from under all of them and reported
 	/// `removed` — while `DELETE /agents/<a>/skills/<n>` and `aghub delete`
 	/// refused the identical request. This is the delete surface that never
 	/// converged on core's answer.
 	#[cfg(unix)]
 	#[test]
-	fn delete_by_path_keeps_master_read_by_another_native_reader() {
+	fn delete_by_path_keeps_shared_slot_read_by_other_agents() {
 		with_isolated_env(|home, _state| {
 			let proj = home;
-			let master = proj.join(".aghub/shared");
-			std::fs::create_dir_all(&master).unwrap();
+			let slot = proj.join(".agents/skills/shared");
+			std::fs::create_dir_all(&slot).unwrap();
 			std::fs::write(
-				master.join("SKILL.md"),
+				slot.join("SKILL.md"),
 				"---\nname: shared\ndescription: d\n---\n",
 			)
 			.unwrap();
 
 			let req = DeleteSkillByPathRequest {
-				source_path: master.join("SKILL.md").display().to_string(),
+				source_path: slot.join("SKILL.md").display().to_string(),
 				agents: vec!["cursor".to_string()],
 				scope: "project".to_string(),
 				project_root: Some(proj.display().to_string()),
@@ -3316,9 +3316,9 @@ mod tests {
 					.into_inner();
 
 			assert!(
-				master.join("SKILL.md").exists(),
-				"a single-agent by-path delete may not take the shared Master \
-				 — every other NativeReader reads it from there"
+				slot.join("SKILL.md").exists(),
+				"a single-agent by-path delete may not take the shared slot \
+				 — nine other project agents read it from there"
 			);
 			assert_eq!(
 				resp.outcome,
