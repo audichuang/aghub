@@ -3858,20 +3858,20 @@ fn add_skill_output_includes_shared_with_field() {
 #[cfg(unix)]
 #[test]
 fn add_skill_output_shared_with_names_co_grantees_for_cline() {
-	let tmp = tempfile::tempdir().unwrap();
-	let home = tmp.path();
-	std::fs::create_dir_all(home.join(".config/opencode")).unwrap();
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
 
-	let out = assert_cmd::Command::cargo_bin("aghub-cli")
-		.unwrap()
-		.env("HOME", home)
-		.env("USERPROFILE", home)
-		.env("APPDATA", home)
-		.current_dir(home)
+	// `isolated_cli`, not a hand-rolled Command: it clears the eleven
+	// agent-specific home/config vars on top of HOME. This test used to build
+	// its own and inherit the developer's `XDG_CONFIG_HOME` — harmless while
+	// the agent under test never wrote to its own config dir, and an immediate
+	// failure the moment it started taking a Referrer there.
+	let out = isolated_cli(home.path(), state.path())
 		.args([
 			"--json",
+			"-g",
 			"-a",
-			"opencode",
+			"cline",
 			"add",
 			"skill",
 			"--name",
@@ -3888,10 +3888,14 @@ fn add_skill_output_shared_with_names_co_grantees_for_cline() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	// cline has no skills directory of its own at any scope: it reads the shared
+	// `.agents/skills`, and so does warp. The advisory must name warp, because
+	// this one write granted the skill to it too — and a later removal will take
+	// it from both.
 	assert_eq!(
 		json["shared_with"],
 		serde_json::json!(["warp"]),
-		"opencode global is a NativeReader: {json}"
+		"granting to cline grants to warp: {json}"
 	);
 }
 
