@@ -2092,6 +2092,33 @@ mod universal_master_tests {
 		assert!(is_universal_master(&nested, Some(root)), "nested master");
 	}
 
+	/// The `.aghub` Master store must be in the roots for BOTH consumers, and
+	/// neither tolerates its absence: `allowed_skill_roots` would refuse every
+	/// Master deletion as out-of-tree, and `is_universal_master` would let a
+	/// single-agent removal `remove_dir_all` the one physical copy.
+	///
+	/// Drop either `.aghub` line from `skill_store_roots` and this goes red.
+	#[test]
+	fn the_aghub_master_store_is_a_protected_root() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let master = root.join(".aghub/foo");
+		std::fs::create_dir_all(&master).unwrap();
+
+		assert!(
+			is_universal_master(&master, Some(root)),
+			"a skill in the .aghub store is shared by construction and must \
+			 never be deleted by a single-agent removal"
+		);
+		let roots = super::allowed_skill_roots(&[], Some(root));
+		let store = std::fs::canonicalize(root.join(".aghub")).unwrap();
+		assert!(
+			roots.contains(&store),
+			"the store must be allow-listed or every Master deletion is \
+			 refused as out-of-tree; got {roots:?}"
+		);
+	}
+
 	/// The inverse error: a private per-agent copy that merely LOOKS like the
 	/// store must stay deletable, or single-agent delete silently stops working.
 	#[test]
