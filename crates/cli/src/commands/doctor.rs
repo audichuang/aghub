@@ -112,9 +112,11 @@ enum LinkAudit {
 impl AgentLinkState {
 	/// Is this state something a caller should act on?
 	///
-	/// `autoCovered` and `unsupported` are not problems — they are the correct
-	/// resting state for an agent that reads the master directly or cannot hold
-	/// a skill at all.
+	/// `withheld` and `unsupported` are not problems — they are the correct
+	/// resting state for a skill deliberately not granted to that agent, and
+	/// for an agent that cannot hold a skill at all. (This said `autoCovered`
+	/// and "reads the master directly" long after that state was renamed and
+	/// the concept deleted — the Master now lives in a store NOTHING reads.)
 	fn is_issue(self) -> bool {
 		match self {
 			Self::Withheld | Self::Unsupported | Self::Linked => false,

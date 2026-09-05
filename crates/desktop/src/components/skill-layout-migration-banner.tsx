@@ -5,6 +5,7 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { RepairReportDto } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
+import { queryKeys } from "../requests/keys";
 import {
 	repairPreviewQueryOptions,
 	repairSkillsMutationOptions,
@@ -51,7 +52,7 @@ export function SkillLayoutMigrationBanner({
 				// changed the answer. Without this the banner keeps offering a
 				// migration that already happened.
 				await queryClient.invalidateQueries({
-					queryKey: ["skills", "repair-preview"],
+					queryKey: queryKeys.skills.repairPreviews(),
 				});
 				if (result.refused) {
 					// Deliberately NOT auto-closing: the refusal rows carry the
@@ -87,15 +88,21 @@ export function SkillLayoutMigrationBanner({
 					<Alert.Description>
 						{t("skillLayoutOutdatedHint", { count: rows.length })}
 					</Alert.Description>
+					{/* Inside Alert.Content, wrapped — the shape every other
+					    Alert-with-action in this app uses (see
+					    `source-detail.tsx`'s orphan-lock and prune-retry
+					    alerts). A Button as a direct sibling of Alert.Content
+					    is not a layout HeroUI v3 promises anything about. */}
+					<div className="mt-3">
+						<Button
+							variant="secondary"
+							size="sm"
+							onPress={() => setIsOpen(true)}
+						>
+							{t("skillLayoutReview")}
+						</Button>
+					</div>
 				</Alert.Content>
-				<Button
-					variant="secondary"
-					size="sm"
-					onPress={() => setIsOpen(true)}
-					className="min-h-[36px] shrink-0"
-				>
-					{t("skillLayoutReview")}
-				</Button>
 			</Alert>
 
 			<Modal.Backdrop

@@ -47,6 +47,11 @@ export const queryKeys = {
 			scope: "global" | "project" = "global",
 			projectRoot?: string,
 		) => ["skills", "repair-preview", scope, projectRoot ?? null] as const,
+		/// Prefix covering every scope's repair preview — a real repair changes
+		/// what needs migrating at BOTH scopes' answer, and the banner reads
+		/// this. Hand-rolling the array at the call site is how the string and
+		/// the key drift apart.
+		repairPreviews: () => ["skills", "repair-preview"] as const,
 		/// Prefixes for a skill's rendered BODY — the SKILL.md text and its file
 		/// tree. A flow that rewrites files on disk owes these a refetch: the
 		/// path (and so the key) is unchanged, so nothing else brings the open

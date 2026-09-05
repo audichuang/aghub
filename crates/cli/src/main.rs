@@ -223,9 +223,9 @@ enum Commands {
 		tools: Vec<String>,
 
 		/// DEPRECATED — no-op. Installs are always symlink-only now: a single
-		/// `.agents/skills/<name>` master plus a per-agent link (npx-style). The
-		/// flag is accepted (so existing scripts don't error) but ignored; there
-		/// is no copy install path.
+		/// `.aghub/<name>` master plus a per-agent link. The flag is accepted
+		/// (so existing scripts don't error) but ignored; there is no copy
+		/// install path.
 		#[arg(long, hide = true)]
 		universal: bool,
 	},
@@ -291,10 +291,9 @@ enum Commands {
 	/// key on purpose, so a preview can never read as "these were dropped".
 	///
 	/// Read `outcome`, not `dry_run`/`executed`: `preview` | `removed` |
-	/// `absent` | `partial` | `kept`. `kept` means the shared
-	/// `.agents/skills/<name>` master was left because another agent still reads
-	/// it — `success: true` AND THE SKILL IS STILL THERE; the payload's
-	/// `skipped` names what was kept.
+	/// `absent` | `partial` | `kept`. `kept` means the `.aghub/<name>` master
+	/// was left because another agent still reads it — `success: true` AND THE
+	/// SKILL IS STILL THERE; the payload's `skipped` names what was kept.
 	Delete {
 		#[arg(value_enum)]
 		resource: ResourceType,
@@ -435,8 +434,8 @@ enum Commands {
 		#[command(subcommand)]
 		action: transfer::ReconcileAction,
 	},
-	/// Show which agents read/write the .agents/skills master and which need a
-	/// per-agent link (read-only).
+	/// Show which agents share a skills directory and which need a per-agent
+	/// link (read-only).
 	///
 	/// A static per-agent CAPABILITY matrix — it does not name skills or count
 	/// them, and its output is identical for an empty project and a full one.
@@ -463,12 +462,12 @@ enum Commands {
 		/// SKILL.md does not parse) — and, when `--verify-links` is given, any
 		/// per-agent referrer problem.
 		///
-		/// Deliberately NOT every non-`ok` health. `untracked` (a skill written
-		/// by hand into `.agents/skills`, with no lock entry) and
-		/// `master-is-symlink` are supported resting states, and failing CI over
-		/// them would only teach you to append `|| true`. `autoCovered` and
-		/// `unsupported` are likewise correct — an agent that reads the Master
-		/// directly, or that cannot hold a skill at all.
+		/// Deliberately NOT every non-`ok` health. `untracked` (a master with no
+		/// lock entry — a skill placed by hand) and `master-is-symlink` are
+		/// supported resting states, and failing CI over them would only teach
+		/// you to append `|| true`. `withheld` and `unsupported` are likewise
+		/// correct — a skill deliberately not granted to that agent, or an
+		/// agent that cannot hold a skill at all.
 		#[arg(long)]
 		fail_on_issues: bool,
 	},
@@ -548,8 +547,8 @@ pub enum SourceAction {
 		/// Without it, every matching skill in the source is targeted.
 		#[arg(long = "skill", value_delimiter = ',', value_name = "NAME")]
 		skills: Vec<String>,
-		/// DEPRECATED — no-op. `source sync` is always symlink-only now (a single
-		/// `.agents/skills/<name>` master plus per-agent links). Accepted so
+		/// DEPRECATED — no-op. `source sync` is always symlink-only now (a
+		/// single `.aghub/<name>` master plus per-agent links). Accepted so
 		/// existing scripts don't error, but ignored; there is no copy install.
 		#[arg(long, hide = true)]
 		universal: bool,
