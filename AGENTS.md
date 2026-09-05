@@ -59,8 +59,8 @@ crates/
   markdown/      # YAML frontmatter helpers
 ```
 
-Also at the repo root: `.agents/skills/` (universal skill Master, when aghub is
-used as a project) and `justfile` (task runner).
+Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills —
+a legacy real-directory layout that migration deliberately leaves alone, D7) and `justfile` (task runner).
 
 Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `api`
 (+ `remote`), not core directly. Tool crates used laterally.
@@ -106,13 +106,18 @@ Per-agent dialect gotchas (which key holds MCPs, which transports survive a
 round-trip, what a rewrite preserves) live with the descriptors:
 **`crates/agents/AGENTS.md`**. The two rules that span crates stay here:
 
-- **Universal Master (`.agents/skills`)**: an agent reads the Master **only**
-  where its own descriptor maps that scope's skill paths there — per-agent AND
-  per-scope, so read the descriptor rather than trusting any list. Invariant:
-  an agent reads its own dir + a mapped Master, never another agent's private
-  dir. `capabilities.skills.universal: true` ALSO appends XDG
-  `$XDG_CONFIG_HOME/agents/skills` (default `~/.config/agents/skills`) — which is
-  **not** `~/.agents/skills`.
+- **Master store vs Referrer (`.aghub` vs `.agents/skills`)**: the ONE physical
+  copy lives in `.aghub/<sanitized-name>` (`~/.aghub` global,
+  `<root>/.aghub` project), a directory **no agent reads** — storing a skill
+  must not grant it. Every grant is a symlink Referrer in an agent's own skills
+  dir. `.agents/skills` is now an ordinary Referrer slot, except that it is
+  **shared**: ten agent/scope combinations read it and eight of those have no
+  private dir, so granting to one grants to all of them. `classify` computes
+  that sharing once and carries it as `shared_with`; never re-derive it per
+  consumer. Read the descriptor, never a list — per-agent AND per-scope.
+  `capabilities.skills.universal: true` ALSO appends XDG
+  `$XDG_CONFIG_HOME/agents/skills` (default `~/.config/agents/skills`) — a
+  SECOND shared slot (amp + kimi at global), and **not** `~/.agents/skills`.
 - **`registry::get()` fallback**: unknown id → Claude's descriptor silently.
 
 ## Commands
@@ -172,8 +177,8 @@ Non-obvious invariants:
   answered "this project is up to date" without reading the project lock)
 - **`check` never writes, and `--write-result` is why that needs a guard.** The
   sidecar path is arbitrary, so the write is refused by **file NAME**
-  (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`) and by
-  `.agents/skills` appearing as adjacent path SEGMENTS, before any
+  (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`), by an
+  `.aghub` path SEGMENT, and by `.agents/skills` as adjacent SEGMENTS, before any
   resolved-path comparison. Do not "simplify" it back to comparing resolved
   paths: three review rounds each found a new spelling that slipped through,
   because the scope never resolved the target (`-g` resolves no project root at
@@ -261,10 +266,20 @@ serializes aghub against aghub only. Invariants and the call-site rule:
 `crates/core/AGENTS.md` "Mutation attribution".
 
 **Link decision**: `classify_agent` / `agent_link_need`
-(`crates/core/src/skills/linker/classify.rs`). NativeReader → Master only, **no**
-per-agent link. Both install paths must use it — CLI
-`add_skill_universal` / `add_skill_from_path_universal` and fetched
+(`crates/core/src/skills/linker/classify.rs`). Every supported agent takes a
+Referrer — there is no "reads the Master directly" case any more, and the
+`LinkNeed::NativeReader` variant was DELETED rather than left unreachable
+(a variant still constructed but never produced draws no dead-code warning and
+silently kills every `matches!` arm testing for it). Both install paths must use
+it — CLI `add_skill_universal` / `add_skill_from_path_universal` and fetched
 `install_universal`.
+
+**Shape classification**: `skills::shape` — `classify_shape` (one
+`(referrer, master)` pair), `candidate_referrers` (each agent's Referrer PATH,
+derived from its write dir, never from what is on disk) and `plan_repair`.
+Three traps with their own tests: `symlink_metadata` alone cannot decide
+conformance; two canonicalize `Err`s must never compare equal; and identity
+(same inode through a symlinked parent) comes before any content comparison.
 
 ## Adding / Removing an Agent
 
@@ -300,7 +315,11 @@ capabilities, and move the sentinel rather than deleting the assertion.
 ## Testing
 
 **Do not pollute real home**: clearing `set_skills_path_override` under
-**global** scope still writes the master to `dirs::home_dir()/.agents/skills`.
+**global** scope still writes the master to `dirs::home_dir()/.aghub`, and
+Referrers into the agents' own dirs. Overriding `$HOME` alone is NOT enough —
+`dirs::config_dir()` prefers `$XDG_CONFIG_HOME` and several descriptors honour
+their own variable ahead of both, so a developer's real `~/.config` leaks in
+(observed: a live `~/.config/orca/...` in a test's allow-listed roots).
 Isolate `$HOME` (Unix) or use a project `tempdir` + teardown — mechanics and the
 env-lock rule in `crates/core/AGENTS.md` Testing.
 
