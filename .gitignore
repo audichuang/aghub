@@ -27,6 +27,10 @@ target
 # Claude Code scratch worktrees (transient git worktrees of other branches)
 .claude/worktrees/
 
+# Local agent scratch dirs. `.grok/` was swept in once by a `git add -A` while
+# an agent had the tree — it is personal workflow config, not project source.
+.grok/
+
 # Node.js
 node_modules/
 dist/
