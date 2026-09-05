@@ -112,6 +112,62 @@ fn io_err(context: &str, e: std::io::Error) -> ConfigError {
 	ConfigError::Io(std::io::Error::new(e.kind(), format!("{context}: {e}")))
 }
 
+/// Plan and apply a repair for ONE skill, under the interprocess mutation lock.
+///
+/// **This is the seam both surfaces call.** `execute_repair` below is the pure
+/// applier and takes no lock; calling it directly from a surface skips the
+/// guard, and hand-mirroring the lock across the CLI and the API route is the
+/// "NEVER hand-mirror a mutating flow across surfaces" the root `AGENTS.md`
+/// forbids.
+///
+/// The guard is taken BEFORE `plan_repair`, not just before the writes: the plan
+/// IS the state read that decides the mutation, and a plan chosen outside the
+/// lock is a view another process may already have invalidated. That matters
+/// here more than almost anywhere — this module exists because npx rewrites
+/// these very directories, and the hash-compare → rename window is exactly what
+/// a concurrent `aghub skills add` of the same name would tear.
+///
+/// A dry run takes NO guard, same as every other verb: it decides and writes
+/// nothing, so there is nothing to serialize.
+///
+/// `grant_to` is computed in here rather than passed in, so the "answered
+/// against the layout as it stands, before anything moves" rule cannot be got
+/// wrong by a caller — and so it is answered under the same lock as the plan.
+///
+/// `Ok(None)` when the scope names no single store (`Both`), matching
+/// [`plan_repair`].
+pub fn repair_skill(
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+	in_lock: bool,
+	dry_run: bool,
+) -> Result<Option<RepairReport>> {
+	let _guard = if dry_run {
+		None
+	} else {
+		Some(
+			crate::skills::lock::mutation_guard(
+				"skill repair",
+				scope,
+				project_root,
+			)
+			.map_err(|e| io_err("acquire the mutation lock", e))?,
+		)
+	};
+	let grant_to = crate::skills::shape::readers_of(scope, project_root, name);
+	let Some(plan) = crate::skills::shape::plan_repair(
+		scope,
+		project_root,
+		name,
+		in_lock,
+		&grant_to,
+	) else {
+		return Ok(None);
+	};
+	execute_repair(&plan, dry_run).map(Some)
+}
+
 /// Apply `plan`. With `dry_run`, decides everything and writes nothing.
 pub fn execute_repair(
 	plan: &RepairPlan,

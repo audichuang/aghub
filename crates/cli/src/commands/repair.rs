@@ -17,8 +17,7 @@
 //! "what would happen" implementation that drifts.
 
 use aghub_core::models::ResourceScope;
-use aghub_core::skills::repair::{execute_repair, RepairOutcome, RepairReport};
-use aghub_core::skills::shape::{plan_repair, readers_of};
+use aghub_core::skills::repair::{repair_skill, RepairOutcome, RepairReport};
 use anyhow::Result;
 use serde_json::json;
 use std::path::Path;
@@ -50,26 +49,42 @@ pub fn execute(
 		None => in_lock.iter().cloned().collect(),
 	};
 
+	// ONE guard around the whole bulk run, not one per skill. `repair_skill`
+	// takes its own (reentrant per thread, so the inner acquire is free), but
+	// without this outer one a 20-skill migration would be twenty independently
+	// racing mutations that another aghub could interleave halfway through.
+	// Dry runs take none, matching the seam.
+	let _bulk_guard = if dry_run {
+		None
+	} else {
+		Some(aghub_core::skills::lock::mutation_guard(
+			"skill repair (bulk)",
+			scope,
+			project_root,
+		)?)
+	};
+
 	let mut reports: Vec<RepairReport> = Vec::new();
 	for skill_name in &worklist {
-		let Some(plan) = plan_repair(
+		// Through the core seam, which takes the interprocess mutation lock
+		// across plan AND write. Calling `execute_repair` here instead would
+		// leave the hash-compare → rename window open to a concurrent aghub.
+		let Some(report) = repair_skill(
 			scope,
 			project_root,
 			skill_name,
 			in_lock.contains(skill_name),
-			// Answered against the CURRENT layout, before anything moves: an
-			// agent that reads the skill today is owed an explicit Referrer
-			// once the Master leaves the slot it was reading.
-			&readers_of(scope, project_root, skill_name),
-		) else {
+			dry_run,
+		)?
+		else {
 			continue;
 		};
 		// In a bulk run, silence about the already-correct skills is the point;
 		// a named one still reports so the user learns it was fine.
-		if plan.is_noop() && name.is_none() {
+		if report.outcome == RepairOutcome::Conformant && name.is_none() {
 			continue;
 		}
-		reports.push(execute_repair(&plan, dry_run)?);
+		reports.push(report);
 	}
 
 	let refused = reports

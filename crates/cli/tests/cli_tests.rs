@@ -12149,3 +12149,65 @@ fn a_delete_preview_refuses_the_npx_clobbered_shape() {
 	assert!(shared.join("SKILL.md").is_file());
 	assert!(master.join("SKILL.md").is_file());
 }
+
+/// `repair` must never run unlocked.
+///
+/// This module's whole reason to exist is that npx rewrites the very
+/// directories it moves — and the hash-compare → rename window is precisely
+/// what a concurrent `aghub skills add` of the same name would tear. So when
+/// the interprocess mutation lock cannot even be CREATED, the repair is
+/// REFUSED, not run unprotected. Follows the same shape as
+/// `delete_skill_refuses_when_the_mutation_lock_cannot_be_created`.
+#[cfg(unix)]
+#[test]
+fn repair_refuses_when_the_mutation_lock_cannot_be_created() {
+	use std::os::unix::fs::PermissionsExt;
+
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	// The un-migrated shape repair exists to fix: a real directory in the
+	// shared slot, with no master yet.
+	let name = "orphan";
+	let slot = home.path().join(".agents").join("skills").join(name);
+	std::fs::create_dir_all(&slot).unwrap();
+	std::fs::write(
+		slot.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: legacy\n---\n"),
+	)
+	.unwrap();
+	// ORPHAN_LOCK names exactly this skill, so it IS the worklist.
+	let lock_path = seed_global_lock(state.path());
+	let lock_dir = lock_path.parent().unwrap().to_path_buf();
+
+	if !perms_enforced(&lock_dir) {
+		eprintln!("skip: perms not enforced (root)");
+		return;
+	}
+	// Readable (so the lock read still succeeds and the worklist is real) but
+	// not writable, so the guard cannot create its lock file.
+	let orig = std::fs::metadata(&lock_dir).unwrap().permissions();
+	std::fs::set_permissions(&lock_dir, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "repair", "--yes"])
+		.output()
+		.unwrap();
+
+	std::fs::set_permissions(&lock_dir, orig).unwrap();
+
+	assert!(
+		!out.status.success(),
+		"an unacquirable mutation lock must refuse the repair: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	// And nothing moved: the legacy directory is still serving the skill.
+	assert!(
+		slot.join("SKILL.md").is_file(),
+		"a refused repair must leave the old layout exactly as it was"
+	);
+	assert!(
+		!home.path().join(".aghub").join(name).exists(),
+		"no master may be adopted by a repair that never held the lock"
+	);
+}
