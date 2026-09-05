@@ -101,7 +101,8 @@ export function listingBudgetChars(
 
 export interface SkillCostInput {
 	name: string;
-	description: string;
+	/** `null` is the DTO's own shape for a skill with no description. */
+	description: string | null;
 }
 
 export interface SkillContextCost {
