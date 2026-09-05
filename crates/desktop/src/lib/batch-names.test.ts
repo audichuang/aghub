@@ -46,3 +46,36 @@ test("an oversized list becomes several requests, each within the cap", async ()
 		all,
 	);
 });
+
+test("a throw on a later chunk still delivers the rows earlier chunks returned", async () => {
+	// The server writes each chunk before answering the next, so rows from a
+	// chunk that succeeded describe skills that ARE updated on disk. Losing
+	// them makes the caller report already-updated skills as failures.
+	const all = names(MAX_BATCH_NAMES + 1);
+	const delivered: { name: string; success: boolean }[] = [];
+	let sent = 0;
+
+	await assert.rejects(
+		sendInBatches<{ name: string; success: boolean }>(
+			all,
+			async (chunk) => {
+				sent += 1;
+				if (sent > 1) throw new Error("403 Forbidden");
+				return chunk.map((name) => ({ name, success: true }));
+			},
+			(rows) => delivered.push(...rows),
+		),
+		/403/,
+	);
+
+	assert.equal(sent, 2, "the second chunk must have been attempted");
+	assert.equal(
+		delivered.length,
+		MAX_BATCH_NAMES,
+		"the first chunk's rows must survive the second chunk's failure",
+	);
+	assert.deepEqual(
+		delivered.map((row) => row.name),
+		all.slice(0, MAX_BATCH_NAMES),
+	);
+});

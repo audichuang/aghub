@@ -28,14 +28,22 @@ export function chunkNames(names: string[]): string[][] {
  *
  * Sequential on purpose — each batch occupies a mutation worker for its whole
  * span, and the server serializes them anyway.
+ *
+ * `onChunk` receives each chunk's rows AS THEY ARRIVE. Without it, a throw on
+ * chunk 2 discards chunk 1's rows even though the server already wrote them,
+ * and the caller reports every name as failed — including the ones that are
+ * now updated on disk.
  */
 export async function sendInBatches<T>(
 	names: string[],
 	send: (chunk: string[]) => Promise<T[]>,
+	onChunk?: (rows: T[]) => void,
 ): Promise<T[]> {
 	const results: T[] = [];
 	for (const chunk of chunkNames(names)) {
-		results.push(...(await send(chunk)));
+		const rows = await send(chunk);
+		onChunk?.(rows);
+		results.push(...rows);
 	}
 	return results;
 }

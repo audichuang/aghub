@@ -5,9 +5,14 @@ import type { SourceUpdateBatch } from "../hooks/use-apply-all-skill-updates";
  * The lock fields this grouping needs, structurally — the GLOBAL lock
  * (`SkillLockEntryResponse`) records `sourceUrl`, the PROJECT lock
  * (`LocalSkillLockEntryResponse`) does not, and both must be groupable.
- * Project scope therefore groups on the host-blind `source`, which merges two
- * forges serving one `owner/repo`; the server refuses that batch rather than
- * fetching the wrong origin, so the failure is loud, not silent.
+ *
+ * Project scope therefore groups on the host-blind `source`. That is safe, but
+ * not because anything refuses it: `want_origin` in `skill-update/src/sources.rs`
+ * returns `None` for an identifier carrying no host, so the server compares the
+ * string, admits every matching row, and fetches each one from the ref its OWN
+ * lock entry records. Nothing is refused and nothing is fetched from the wrong
+ * origin — and the project lock cannot express two origins under one `source`
+ * anyway.
  */
 export interface LockSourceEntry {
 	name: string;

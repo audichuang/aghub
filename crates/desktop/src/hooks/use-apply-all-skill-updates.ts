@@ -82,25 +82,28 @@ export function useApplyAllSkillUpdates() {
 				// skills than one batch holds would fail entirely instead of
 				// updating anything. Ordering and cap live in `sendInBatches`,
 				// which is tested.
-				const batchResults =
-					await sendInBatches<ApplySkillUpdateResponse>(
-						batch.names,
-						async (names) => {
-							const response =
-								await applyUpdatesMutation.mutateAsync({
-									body: {
-										source: batch.source,
-										names,
-										scope: batch.scope,
-										projectRoot: batch.projectRoot,
-										confirm: true,
-									},
-									sourceUrl: batch.source,
-								});
-							return response.results;
-						},
-					);
-				results.push(...batchResults);
+				await sendInBatches<ApplySkillUpdateResponse>(
+					batch.names,
+					async (names) => {
+						const response = await applyUpdatesMutation.mutateAsync(
+							{
+								body: {
+									source: batch.source,
+									names,
+									scope: batch.scope,
+									projectRoot: batch.projectRoot,
+									confirm: true,
+								},
+								sourceUrl: batch.source,
+							},
+						);
+						return response.results;
+					},
+					// Accumulate per CHUNK, not per batch: a throw on a later
+					// chunk of the same source must not discard the rows the
+					// server already returned for the earlier ones.
+					(rows) => results.push(...rows),
+				);
 			}
 			const failures = results.filter((result) => !result.success);
 			await queryClient.invalidateQueries({

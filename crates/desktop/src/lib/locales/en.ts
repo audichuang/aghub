@@ -416,7 +416,10 @@ export default {
 	skillContextCost:
 		"≈{{tokens}} tokens every turn ({{chars}}/{{budget}} chars)",
 	skillContextCostTooltip:
-		"Agents put one line per skill — its name and description — into the system prompt on every turn, and load the full SKILL.md only when the skill runs. The budget shown is Claude Code's default for a 200k-token model (40,000 chars at 1M); SLASH_COMMAND_TOOL_CHAR_BUDGET overrides it. Slash commands share this same budget, so the real pressure is higher than the skills alone. Token counts are estimated at 4 characters per token, the same constant the agent budgets with.",
+		"Claude Code puts one line per skill — its name and description — into the system prompt on every turn, and loads the full SKILL.md only when the skill runs. Over budget it drops whole descriptions, least-used first, silently. The budget is measured in CHARACTERS, so that verdict is exact; it is Claude Code's default for a 200k-token model (40,000 chars at 1M) and SLASH_COMMAND_TOOL_CHAR_BUDGET overrides it. Slash commands share the same budget, so the real pressure is higher than skills alone. Only the token figure is an estimate — about 4.75 characters per token for Latin text and about 1 for Han.",
+	skillContextCostNoBudget: "≈{{tokens}} tokens every turn ({{chars}} chars)",
+	skillContextCostTooltipNoBudget:
+		"This agent puts one line per skill — its name and description — into the system prompt on every turn, and loads the full SKILL.md only when the skill runs. No budget is shown: the character budget we could measure exactly is Claude Code's, and this agent wraps its listing differently. The token figure is an estimate — about 4.75 characters per token for Latin text and about 1 for Han.",
 	skillContextOverBudget:
 		"over budget: at least {{count}} description(s) will be dropped",
 	// --- Bulk update from the agent view ---
@@ -426,6 +429,8 @@ export default {
 		"{{count}} renamed skill(s) are not included — handle those in the source view.",
 	skillUpdateUnresolvedSource:
 		"{{count}} skill(s) have no source recorded in the lock and were skipped.",
+	sourceUpdatePartialUnconfirmed:
+		"{{count}} updated; the rest could not be confirmed.",
 	skillUpdateAvailableTooltipDated:
 		"Source changed: {{current}} → {{available}} (upstream {{date}}). Sync to update.",
 	skillRenamedBadge: "Renamed",

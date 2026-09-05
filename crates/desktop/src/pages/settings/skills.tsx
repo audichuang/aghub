@@ -443,9 +443,17 @@ export default function SkillsPage() {
 		const outcome = await applyAll(pendingUpdates.batches);
 		if (!outcome) return;
 		if (outcome.unconfirmed) {
-			toast.danger(t("sourceUpdateUnconfirmed"), {
-				description: outcome.failureDescription,
-			});
+			// Rows an earlier source already returned are confirmed outcomes;
+			// only what came after the failure is unknown. Reporting the whole
+			// run as unconfirmed would understate what actually happened.
+			toast.danger(
+				outcome.updated > 0
+					? t("sourceUpdatePartialUnconfirmed", {
+							count: outcome.updated,
+						})
+					: t("sourceUpdateUnconfirmed"),
+				{ description: outcome.failureDescription },
+			);
 			return;
 		}
 		const failureCount =
@@ -566,15 +574,18 @@ export default function SkillsPage() {
 	);
 
 	const activeGroup = useMemo(() => {
+		// Resolved within the VISIBLE set, including the explicit selection:
+		// filtering to an agent that does not have the selected skill would
+		// otherwise leave the detail panel showing a skill the list no longer
+		// contains, with no row highlighted anywhere.
 		if (selectedSkillName) {
-			return (
-				groupedSkills.find((g) => g.name === selectedSkillName) ?? null
+			const selected = visibleGroups.find(
+				(g) => g.name === selectedSkillName,
 			);
+			if (selected) return selected;
 		}
-		// Fall back within the VISIBLE set, or filtering to one agent leaves
-		// the detail panel parked on a skill that agent does not have.
 		return visibleGroups[0] ?? null;
-	}, [selectedSkillName, groupedSkills, visibleGroups]);
+	}, [selectedSkillName, visibleGroups]);
 
 	const selectedGroups = useMemo(
 		() => groupedSkills.filter((g) => selectedKeys.has(g.name)),

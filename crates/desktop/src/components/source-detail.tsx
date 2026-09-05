@@ -610,9 +610,16 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		]);
 		if (!outcome) return;
 		if (outcome.unconfirmed) {
-			toast.danger(t("sourceUpdateUnconfirmed"), {
-				description: outcome.failureDescription,
-			});
+			// Chunks the server already answered are confirmed; only what came
+			// after the failure is unknown.
+			toast.danger(
+				outcome.updated > 0
+					? t("sourceUpdatePartialUnconfirmed", {
+							count: outcome.updated,
+						})
+					: t("sourceUpdateUnconfirmed"),
+				{ description: outcome.failureDescription },
+			);
 			return;
 		}
 		const failureCount =

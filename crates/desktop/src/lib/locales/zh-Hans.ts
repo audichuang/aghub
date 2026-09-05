@@ -400,7 +400,10 @@ export default {
 	allAgentsFilter: "全部",
 	skillContextCost: "每轮约 {{tokens}} tokens({{chars}}/{{budget}} 字符)",
 	skillContextCostTooltip:
-		"agent 会把每个技能的名称与描述各一行放进系统提示,每轮都算;完整的 SKILL.md 只有技能真的被调用时才加载。这里的预算是 Claude Code 对 200k 模型的默认值(1M 模型为 40,000 字符),可用 SLASH_COMMAND_TOOL_CHAR_BUDGET 覆盖。斜杠命令与技能共用同一份预算,所以真正的压力比这里只算技能的数字更大。token 数以每 4 个字符 1 个 token 估算,与 agent 自己编预算用的常数相同。",
+		"Claude Code 会把每个技能的名称与描述各一行放进系统提示,每轮都算;完整的 SKILL.md 只有技能真的被调用时才加载。超出预算时它会整条描述拿掉、最少用的先牺牲,而且完全静默。预算是以「字符」计算的,所以超不超出这个判断是精确的;这里是 Claude Code 对 200k 模型的默认值(1M 模型为 40,000 字符),可用 SLASH_COMMAND_TOOL_CHAR_BUDGET 覆盖。斜杠命令与技能共用同一份预算,所以真正的压力比这里只算技能更大。只有 token 数字是估计值 —— 拉丁文字约 4.75 个字符 1 个 token,汉字约 1 个字符 1 个 token。",
+	skillContextCostNoBudget: "每轮约 {{tokens}} tokens({{chars}} 字符)",
+	skillContextCostTooltipNoBudget:
+		"这个 agent 会把每个技能的名称与描述各一行放进系统提示,每轮都算;完整的 SKILL.md 只有技能真的被调用时才加载。这里不显示预算:我们能精确量到的字符预算是 Claude Code 的,而这个 agent 的清单包装方式不同。token 数字是估计值 —— 拉丁文字约 4.75 个字符 1 个 token,汉字约 1 个字符 1 个 token。",
 	skillContextOverBudget: "超出预算:至少 {{count}} 个描述会被拿掉",
 	// --- 从 agent 视图批量更新 ---
 	updateAllSkills: "全部更新({{count}})",
@@ -409,6 +412,7 @@ export default {
 		"{{count}} 个已改名的技能不在这批里,请到来源视图处理。",
 	skillUpdateUnresolvedSource:
 		"{{count}} 个技能在 lock 里没有记录来源,已跳过。",
+	sourceUpdatePartialUnconfirmed: "已更新 {{count}} 个,其余无法确认。",
 	skillUpdateAvailableTooltipDated:
 		"来源已变更:{{current}} → {{available}}(上游 {{date}})。同步以更新。",
 	skillRenamedBadge: "已改名",

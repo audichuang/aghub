@@ -6,6 +6,16 @@ import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { estimateSkillContextCost } from "../lib/skill-context-cost";
 import { cn } from "../lib/utils";
 
+/**
+ * The one agent whose listing arithmetic we read out of a shipped binary.
+ * The budget, and dropping a whole description when it is exceeded, are Claude
+ * Code's behaviour — Codex shortens descriptions instead and Grok wraps each
+ * skill in XML with no comparable budget. So only Claude Code gets the budget
+ * verdict; every other agent gets the size of its listing without a claim
+ * about what its own budget would do with it.
+ */
+const BUDGETED_AGENT_ID = "claude";
+
 interface SkillAgentFilterRowProps {
 	/**
 	 * The raw skill rows, ONE PER (skill, agent) pair — the shape
@@ -71,6 +81,13 @@ export function SkillAgentFilterRow({
 			seen.add(skill.name);
 			counts.set(skill.agent, seen);
 		}
+		// A SELECTED agent stays in the row even after its last skill goes —
+		// otherwise its chip vanishes with the filter still active and the
+		// list is empty with nothing left to click. Same rule the tag filter
+		// row states for tags.
+		if (selected !== null && !counts.has(selected)) {
+			counts.set(selected, new Set());
+		}
 		return [...counts.entries()]
 			.map(([id, names]) => ({
 				id,
@@ -82,41 +99,38 @@ export function SkillAgentFilterRow({
 					b.count - a.count ||
 					a.displayName.localeCompare(b.displayName),
 			);
-	}, [skills, displayNames, usableAgentIds]);
+	}, [skills, displayNames, usableAgentIds, selected]);
 
-	const singleAgentCost = useMemo(() => {
-		const ids = new Set(
-			skills.map((s) => s.agent).filter((a): a is string => Boolean(a)),
-		);
-		if (ids.size !== 1) return null;
-		const only = [...ids][0];
-		return estimateSkillContextCost(
-			skills
-				.filter((skill) => skill.agent === only)
-				.map((skill) => ({
-					name: skill.name,
-					description: skill.description ?? "",
-				})),
-		);
-	}, [skills]);
+	/**
+	 * The agent the readout describes: the one picked, else the only usable
+	 * one on this machine.
+	 *
+	 * Derived from `rows`, NOT from the raw `skills`: one skill in a shared
+	 * referrer directory arrives once per agent that reads it, so a machine
+	 * with a single usable agent still sees a dozen distinct `agent` values in
+	 * the raw rows — asking those "is there exactly one agent" answers no on
+	 * exactly the machine this fallback exists for.
+	 */
+	const costAgentId = selected ?? (rows.length === 1 ? rows[0].id : null);
 
 	const cost = useMemo(() => {
-		if (!selected) return null;
+		if (costAgentId === null) return null;
 		return estimateSkillContextCost(
 			skills
-				.filter((skill) => skill.agent === selected)
+				.filter((skill) => skill.agent === costAgentId)
 				.map((skill) => ({
 					name: skill.name,
-					description: skill.description ?? "",
+					description: skill.description,
 				})),
 		);
-	}, [skills, selected]);
+	}, [skills, costAgentId]);
 
-	// A one-agent machine gets no chips — but it still gets the cost line,
-	// which is the point of the row.
-	const showChips = rows.length >= 2;
-	const effectiveCost = cost ?? singleAgentCost;
-	if (!showChips && effectiveCost === null) return null;
+	// One usable agent means no chips worth showing — but the cost line is the
+	// point of the row, so it still renders. An ACTIVE filter always shows the
+	// chips, or there would be no way to clear it.
+	const showChips = rows.length >= 2 || selected !== null;
+	const showCost = cost !== null && cost.skillCount > 0;
+	if (!showChips && !showCost) return null;
 
 	const chip = (id: string | null, label: string, count?: number) => {
 		const isActive = selected === id;
@@ -138,6 +152,9 @@ export function SkillAgentFilterRow({
 		);
 	};
 
+	const isBudgeted = costAgentId === BUDGETED_AGENT_ID;
+	const overBudget = isBudgeted && cost !== null && cost.overBudgetChars > 0;
+
 	return (
 		<div className="flex flex-col gap-1 px-3 pb-2">
 			{showChips && (
@@ -148,30 +165,35 @@ export function SkillAgentFilterRow({
 					)}
 				</div>
 			)}
-			{effectiveCost !== null && effectiveCost.skillCount > 0 && (
+			{showCost && cost !== null && (
 				<Tooltip delay={0}>
 					<Tooltip.Trigger>
 						<span
 							className={cn(
 								"cursor-default text-xs tabular-nums",
-								effectiveCost.overBudgetChars > 0
-									? "text-warning"
-									: "text-muted",
+								overBudget ? "text-warning" : "text-muted",
 							)}
 						>
-							{t("skillContextCost", {
-								tokens: effectiveCost.totalTokens.toLocaleString(),
-								chars: effectiveCost.totalChars.toLocaleString(),
-								budget: effectiveCost.budgetChars.toLocaleString(),
-							})}
-							{effectiveCost.overBudgetChars > 0 &&
+							{isBudgeted
+								? t("skillContextCost", {
+										tokens: cost.totalTokens.toLocaleString(),
+										chars: cost.totalChars.toLocaleString(),
+										budget: cost.budgetChars.toLocaleString(),
+									})
+								: t("skillContextCostNoBudget", {
+										tokens: cost.totalTokens.toLocaleString(),
+										chars: cost.totalChars.toLocaleString(),
+									})}
+							{overBudget &&
 								` · ${t("skillContextOverBudget", {
-									count: effectiveCost.minDemotedSkills,
+									count: cost.minDemotedSkills,
 								})}`}
 						</span>
 					</Tooltip.Trigger>
 					<Tooltip.Content>
-						{t("skillContextCostTooltip")}
+						{isBudgeted
+							? t("skillContextCostTooltip")
+							: t("skillContextCostTooltipNoBudget")}
 					</Tooltip.Content>
 				</Tooltip>
 			)}
