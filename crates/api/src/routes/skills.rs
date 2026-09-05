@@ -2877,18 +2877,55 @@ mod tests {
 			.unwrap_or_else(|e| e.into_inner());
 		let home = tempdir().unwrap();
 		let state = tempdir().unwrap();
+
+		// Overriding HOME is NOT enough. `dirs::config_dir()` prefers
+		// `XDG_CONFIG_HOME`, and several descriptors honour their own agent
+		// variable ahead of both — so a developer's real `~/.config` leaked
+		// straight into these tests. It was observed: a live
+		// `~/.config/orca/opencode-hooks/shared/skills` turned up in a test's
+		// allow-listed roots, which makes the outcome depend on what happens to
+		// be installed on the machine. Same list as the CLI harness's
+		// `clear_agent_home_overrides`, for the same reason.
+		const OVERRIDES: &[&str] = &[
+			"XDG_CONFIG_HOME",
+			"OPENCODE_CONFIG",
+			"OPENCODE_CONFIG_DIR",
+			"CODEX_HOME",
+			"COPILOT_HOME",
+			"KIMI_SHARE_DIR",
+			"VIBE_HOME",
+			"HERMES_HOME",
+			"GROK_HOME",
+			"OPENCLAW_CONFIG_PATH",
+			"OPENCLAW_STATE_DIR",
+		];
+		let saved: Vec<(&str, Option<String>)> = OVERRIDES
+			.iter()
+			.map(|k| (*k, std::env::var(k).ok()))
+			.collect();
+		for (key, _) in &saved {
+			std::env::remove_var(key);
+		}
 		let old_home = std::env::var("HOME").ok();
-		let old_xdg = std::env::var("XDG_STATE_HOME").ok();
+		let old_state = std::env::var("XDG_STATE_HOME").ok();
 		std::env::set_var("HOME", home.path());
 		std::env::set_var("XDG_STATE_HOME", state.path());
+
 		let result = f(home.path(), state.path());
+
 		match old_home {
 			Some(v) => std::env::set_var("HOME", v),
 			None => std::env::remove_var("HOME"),
 		}
-		match old_xdg {
+		match old_state {
 			Some(v) => std::env::set_var("XDG_STATE_HOME", v),
 			None => std::env::remove_var("XDG_STATE_HOME"),
+		}
+		for (key, value) in saved {
+			match value {
+				Some(v) => std::env::set_var(key, v),
+				None => std::env::remove_var(key),
+			}
 		}
 		result
 	}
@@ -5531,17 +5568,32 @@ mod tests {
 			.into_inner();
 			assert!(resp.success);
 			assert!(!link.exists(), "referrer link removed");
-			// What "canonical layout" buys: the Referrer is UNLINKED, never
-			// `remove_dir_all`'d through, so the store Master keeps its
-			// content. Whether an unreferenced Master is afterwards COLLECTED
-			// is a different question, and this test deliberately does not pin
-			// it — the answer currently differs between global and project
-			// scope for the identical shape (`plan_removal_symlink_gc_
-			// canonical_when_last_referrer_removed` in core says collect).
+
+			// This was the LAST Referrer, so the Master is collected too — core
+			// pins that (`plan_removal_symlink_gc_canonical_when_last_referrer_
+			// removed`). Both endings leave the same disk, so disk state cannot
+			// tell "unlink the Referrer, then collect the Master" from
+			// "`remove_dir_all` straight through the Referrer".
+			//
+			// The plan can. Canonical layout lists BOTH paths, Referrer FIRST:
+			// a Referrer must never outlive the Master it points at, so
+			// unlinking leads. Recursing through the link would name one path.
+			let paths: Vec<String> = resp.paths.clone();
+			let referrer_at =
+				paths.iter().position(|p| p == &link.display().to_string());
+			let master_at = paths
+				.iter()
+				.position(|p| p == &master.display().to_string());
 			assert!(
-				master.join("SKILL.md").exists(),
-				"the delete must not recurse through the Referrer into the \
-				 store Master"
+				referrer_at.is_some() && master_at.is_some(),
+				"canonical layout removes the Referrer and the Master as two \
+				 named steps, not one recursive delete: {paths:?}"
+			);
+			assert!(
+				referrer_at < master_at,
+				"the Referrer must be unlinked BEFORE the Master it points at, \
+				 or a crash between the two leaves a dangling link that breaks \
+				 npx's folder hash: {paths:?}"
 			);
 		});
 	}
