@@ -1127,3 +1127,115 @@ fn action_for(
 		},
 	}
 }
+
+/// Refuse a removal that would destroy bytes existing nowhere else.
+///
+/// **Shares [`plan_repair`]'s observation, NOT its policy.** It reuses the
+/// collapsed candidate set (one entry per directory, with the `shared` flag)
+/// because deriving that twice is how two answers drift apart. It deliberately
+/// ignores the action column, because repair and removal refuse different
+/// things: repair refuses what it cannot FIX (a link pointing at nothing is
+/// `Refuse { MasterMissing }` — unfixable without a Master), while removal
+/// refuses only what it cannot UNDO. Unlinking a dangling link destroys
+/// nothing, so mapping repair's refusals onto delete refused every
+/// pre-migration user's delete outright.
+///
+/// Exactly two shapes block:
+///
+/// - [`ViolationKind::ForkedCopy`] **at the shared slot**. That directory is
+///   supposed to be a link; real content there was written by something else
+///   (every npx write verb calls `cleanAndCreateDirectory`), so its bytes may
+///   exist nowhere else.
+/// - [`SkillShape::AliasedMaster`] — the "duplicate" is the original, reached
+///   through a symlinked parent. Removing it removes the only copy.
+///
+/// Everything else is allowed, and two exclusions are load-bearing:
+///
+/// - A forked copy in an agent's PRIVATE directory stays legal. Removing a
+///   private copy that shadows a Master is documented, tested behaviour (root
+///   `AGENTS.md`: it "DOES take something away, and stays legal — the Master it
+///   falls back to is disclosed in `skipped`"). A guard must not quietly
+///   relitigate a spec decision.
+/// - Link shapes (`Dangling`, `ForeignTarget`, `Chain`) and the master-side
+///   violations are repair problems, not delete hazards.
+///
+/// `in_lock: false` is passed deliberately and cannot change the verdict — it
+/// only picks between `AdoptAsMaster` and `LeaveForeign`, neither of which this
+/// function reads. A lock read here would fail open at a layer whose job is to
+/// fail closed.
+///
+/// `Ok(())` for [`ResourceScope::Both`] and for a scope with no store root:
+/// `plan_repair` names no single store there, and refusing every removal a
+/// scopeless caller makes would be a guess, not a guard.
+pub fn verify_shape(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+) -> crate::errors::Result<()> {
+	let Some(plan) = plan_repair(scope, project_root, name, false, &[]) else {
+		return Ok(());
+	};
+	// Exhaustive on the blocking shapes ON PURPOSE. An earlier version matched
+	// the action and fell through a `_` arm for the detail text, which printed
+	// "a foreign link target … something that is neither a link nor a
+	// directory" — two different shapes in one sentence. With the blocking set
+	// enumerated here, a wrong detail is unreachable.
+	let blocker = plan.actions.iter().find_map(|a| match &a.shape {
+		SkillShape::Violation(ViolationKind::ForkedCopy) if a.shared => Some((
+			a,
+			"a real directory sits in the shared slot where a link to the \
+			 store belongs, and its content may exist nowhere else",
+		)),
+		SkillShape::AliasedMaster => Some((
+			a,
+			"it IS the master reached through a symlinked parent, so the \
+			 \"duplicate\" is the only copy",
+		)),
+		_ => None,
+	});
+	let Some((blocker, detail)) = blocker else {
+		return Ok(());
+	};
+	// Built directly rather than through `ConfigError::unsupported_operation`,
+	// whose "Cannot {op} {noun} for {agent} agent" template has no room for an
+	// explanation and would name the target agent — misleading here, because the
+	// blocking directory is the SHARED slot, read by agents the command never
+	// mentioned. The error CODE is what the wire contract pins
+	// (`UNSUPPORTED_OPERATION` / HTTP 422), not the prose.
+	let writers = if blocker.agents.is_empty() {
+		String::new()
+	} else {
+		// Their WRITE dir, which is what `PlannedReferrer::agents` holds.
+		// Deliberately not "read by": more agents than these read a shared
+		// slot, and naming only the writers as readers would under-report.
+		format!(" (the skills directory of {})", blocker.agents.join(", "))
+	};
+	Err(crate::errors::ConfigError::UnsupportedOperation(format!(
+		"Cannot remove skill '{name}': {} at {}{writers} — {detail}. Run \
+		 `aghub skills repair {name}` first; deleting now could destroy content \
+		 aghub cannot recover.",
+		blocker.shape_label(),
+		blocker.path.display(),
+	)))
+}
+
+impl PlannedReferrer {
+	/// Short human label for the observed shape, for error text.
+	fn shape_label(&self) -> &'static str {
+		match &self.shape {
+			SkillShape::Conformant => "a conformant referrer",
+			SkillShape::Absent => "nothing",
+			SkillShape::UnmigratedCopy => "an un-migrated copy",
+			SkillShape::AliasedMaster => "an aliased master",
+			SkillShape::Violation(kind) => match kind {
+				ViolationKind::Chain { .. } => "a link chain",
+				ViolationKind::ForeignTarget => "a foreign link target",
+				ViolationKind::Dangling => "a dangling link",
+				ViolationKind::ForkedCopy => "a forked copy",
+				ViolationKind::MasterIsLink => "a linked master",
+				ViolationKind::MasterIsNotADir => "a non-directory master",
+				ViolationKind::ReferrerIsNotADir => "a non-directory referrer",
+			},
+		}
+	}
+}

@@ -1024,12 +1024,19 @@ impl RemovalOutcome {
 	/// npx-era Referrer sitting BESIDE the Master it points at, where there is
 	/// a real path to unlink and the commit still refuses. A caller with no
 	/// such verdict passes `false` and keeps the proxy.
+	/// `name` is here so the shape check runs INSIDE the producer. Leaving it
+	/// to the two call sites is the "hand-mirror a transactional flow across
+	/// surfaces" the root `AGENTS.md` forbids: preview and commit would each
+	/// carry their own copy, and the CLI already shipped a preview that printed
+	/// a plan the commit then refused.
 	pub fn preview(
 		plan: RemovalPlan,
 		blocks: bool,
 		scope: crate::models::ResourceScope,
 		project_root: Option<&Path>,
-	) -> Self {
+		name: &str,
+	) -> crate::errors::Result<Self> {
+		crate::skills::shape::verify_shape(scope, project_root, name)?;
 		// Load-bearing: for a kept shared Master the COMMIT does not prune, it
 		// REFUSES. Promising `would_prune_lock_entries` there would describe a
 		// commit that can never happen.
@@ -1043,14 +1050,14 @@ impl RemovalOutcome {
 					&plan.paths,
 				)
 			};
-		Self {
+		Ok(Self {
 			plan,
 			executed: false,
 			prune,
 			failed_paths: Vec::new(),
 			// Callers reach a preview only AFTER their not-found check.
 			absent: false,
-		}
+		})
 	}
 
 	/// COMMIT `plan`: run the removal, fold what ACTUALLY happened back into the
@@ -1068,8 +1075,14 @@ impl RemovalOutcome {
 		roots: &[PathBuf],
 		scope: crate::models::ResourceScope,
 		project_root: Option<&Path>,
-	) -> std::io::Result<Self> {
-		let report = execute_removal(&plan, roots)?;
+		name: &str,
+	) -> crate::errors::Result<Self> {
+		// BEFORE the first delete. The same check the preview ran, from the
+		// same producer, so the two cannot disagree — and a refusal here leaves
+		// the disk untouched rather than half-removed.
+		crate::skills::shape::verify_shape(scope, project_root, name)?;
+		let report = execute_removal(&plan, roots)
+			.map_err(crate::errors::ConfigError::Io)?;
 		for path in &report.skipped {
 			log::warn!(
 				"skipped removal of '{}' (outside skills roots)",
@@ -1816,6 +1829,64 @@ mod tests {
 		assert!(!first.exists());
 		assert!(!second.exists());
 		assert!(blocked.exists());
+	}
+
+	/// `commit` runs the shape check BEFORE the first delete.
+	///
+	/// This is a producer-level test on purpose. No CLI path can reach it: for
+	/// every forked-copy fixture the `blocks` verdict in `remove_skill_planned`
+	/// refuses earlier, so a CLI test of this would pass with the check deleted
+	/// — it did, which is how this test came to live here instead. The API's
+	/// `DELETE /skills/by-path` route builds its plan by hand and calls this
+	/// producer DIRECTLY, bypassing that guard entirely, so the check has a real
+	/// caller and needs a test that can actually fail.
+	#[cfg(unix)]
+	#[test]
+	fn commit_refuses_a_forked_copy_before_deleting_anything() {
+		let root = tempfile::tempdir().unwrap();
+		let name = "forked-at-commit";
+
+		let master = root.path().join(".aghub").join(name);
+		std::fs::create_dir_all(&master).unwrap();
+		std::fs::write(master.join("SKILL.md"), "master bytes").unwrap();
+
+		// npx's `cleanAndCreateDirectory`: the Referrer is a real directory
+		// holding content that exists nowhere else.
+		let forked = root.path().join(".agents").join("skills").join(name);
+		std::fs::create_dir_all(&forked).unwrap();
+		std::fs::write(forked.join("SKILL.md"), "bytes only here").unwrap();
+
+		let plan = RemovalPlan {
+			layout: Layout::Copy,
+			// The plan WOULD delete the forked directory. If the check ran
+			// after `execute_removal` instead of before it, these bytes would
+			// already be gone by the time the error was returned.
+			paths: vec![forked.clone()],
+			skipped: vec![],
+			needs_confirm: false,
+			shared_master_kept: false,
+			incomplete: false,
+		};
+
+		let result = RemovalOutcome::commit(
+			plan,
+			&[root.path().to_path_buf()],
+			crate::models::ResourceScope::ProjectOnly,
+			Some(root.path()),
+			name,
+		);
+
+		assert!(
+			result.is_err(),
+			"a forked copy must refuse the commit, not be deleted"
+		);
+		assert_eq!(
+			std::fs::read_to_string(forked.join("SKILL.md")).unwrap(),
+			"bytes only here",
+			"the refusal must land BEFORE execute_removal — these bytes exist \
+			 nowhere else"
+		);
+		assert!(master.join("SKILL.md").is_file());
 	}
 
 	#[test]

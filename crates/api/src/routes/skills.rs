@@ -558,16 +558,27 @@ pub async fn delete_skill_by_path(
 			// hard-coded `PruneStatus::NotRun`, and the commit hard-coded
 			// `failed_paths` empty, which made `partial` unreachable here.
 			if dry_run {
-				return Ok(Json(super::removal_response(
-					aghub_core::skills::removal::RemovalOutcome::preview(
+				let preview =
+					match aghub_core::skills::removal::RemovalOutcome::preview(
 						plan,
 						// Reaching here means the guard above did not block.
 						false,
 						resource_scope,
 						project_root.as_deref(),
-					),
-					dry_run,
-				)));
+						&skill_name,
+					) {
+						Ok(preview) => preview,
+						// An ambiguous shape is refused by the PREVIEW too, or
+						// the dialog offers a delete the commit then rejects.
+						Err(e) => {
+							return Ok(Json(DeleteSkillByPathResponse {
+								success: false,
+								error: Some(format!("Failed to delete: {e}")),
+								..Default::default()
+							}));
+						}
+					};
+				return Ok(Json(super::removal_response(preview, dry_run)));
 			}
 			let outcome =
 				match aghub_core::skills::removal::RemovalOutcome::commit(
@@ -575,6 +586,7 @@ pub async fn delete_skill_by_path(
 					&roots,
 					resource_scope,
 					project_root.as_deref(),
+					&skill_name,
 				) {
 					Ok(outcome) => outcome,
 					Err(e) => {

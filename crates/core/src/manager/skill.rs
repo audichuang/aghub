@@ -946,12 +946,13 @@ impl ConfigManager {
 			// stays reserved for the universal Master, which `blocks` above
 			// still reads before this line.
 			plan.shared_master_kept = true;
-			return Ok(removal::RemovalOutcome::preview(
+			return removal::RemovalOutcome::preview(
 				plan,
 				true,
 				scope,
 				project_root.as_deref(),
-			));
+				name,
+			);
 		}
 
 		if !executed {
@@ -959,12 +960,13 @@ impl ConfigManager {
 			// the ONE producer both surfaces use — handing it `blocks`, the
 			// SAME flag the refusal a few lines above reads, so a preview can
 			// never promise a prune the commit will refuse to perform.
-			return Ok(removal::RemovalOutcome::preview(
+			return removal::RemovalOutcome::preview(
 				plan,
 				blocks,
 				scope,
 				project_root.as_deref(),
-			));
+				name,
+			);
 		}
 
 		info!(
@@ -978,8 +980,8 @@ impl ConfigManager {
 			&roots,
 			scope,
 			project_root.as_deref(),
-		)
-		.map_err(ConfigError::Io)?;
+			name,
+		)?;
 
 		// Skills are disk-derived; drop the in-memory view (save_current persists
 		// MCPs, not skills, so this is a best-effort cache update).

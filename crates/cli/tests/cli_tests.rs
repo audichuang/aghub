@@ -11930,15 +11930,26 @@ fn installing_for_one_agent_does_not_leak_to_the_shared_slot() {
 	}
 }
 
-/// Preview and commit must agree. A delete WITHOUT `--yes` has to refuse the
-/// npx-clobbered shape, not print a preview that the same command with `--yes`
-/// then rejects.
+/// D4 DETECTION, not deletion-prevention — be precise about which claim this
+/// pins. Measured: with `verify_shape` removed, this same command answers
+/// `outcome: "kept"` with `paths: []`, so no delete would have touched the
+/// forked directory anyway. What the guard buys here is that the user is TOLD
+/// their layout is broken and pointed at `repair`, instead of getting a
+/// reassuring `kept` that hides an npx clobber.
+///
+/// The deletion-PREVENTION proof is
+/// `removal::tests::commit_refuses_a_forked_copy_before_deleting_anything`,
+/// which drives the producer directly — the path the API's by-path route takes,
+/// bypassing the `blocks` guard that intercepts every CLI spelling.
 ///
 /// Reproduces what every npx write verb leaves behind: `cleanAndCreateDirectory`
 /// unlinks the Referrer and writes a real directory holding bytes that exist
 /// nowhere else.
+///
+/// ponytail: accepted ceiling — a delete for ANY agent refuses while the shared
+/// slot is forked, even one whose own directory is fine. Under D4 that is the
+/// intended "repair first" nudge; narrow it only if a user complains.
 #[test]
-#[ignore = "un-ignore when verify_shape lands on RemovalOutcome::preview/commit"]
 fn a_delete_preview_refuses_the_npx_clobbered_shape() {
 	let home = tempfile::tempdir().unwrap();
 	let state = tempfile::tempdir().unwrap();
@@ -11961,8 +11972,12 @@ fn a_delete_preview_refuses_the_npx_clobbered_shape() {
 	)
 	.unwrap();
 
+	// `-a cursor`, not the default agent: under the new layout claude does NOT
+	// read `.agents/skills`, so a forked copy there is genuinely invisible to it
+	// and `absent` is the honest answer. cursor reads the slot, so this is a
+	// delete that really would walk into the forked directory.
 	let out = isolated_cli(home.path(), state.path())
-		.args(["-g", "--json", "delete", "skills", name])
+		.args(["-g", "-a", "cursor", "--json", "delete", "skills", name])
 		.output()
 		.unwrap();
 
@@ -11971,6 +11986,11 @@ fn a_delete_preview_refuses_the_npx_clobbered_shape() {
 		Some(1),
 		"a refused shape must exit 1, not print a preview: {}",
 		String::from_utf8_lossy(&out.stdout)
+	);
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		stdout.contains("UNSUPPORTED_OPERATION"),
+		"batching/preview is transport; the refusal keeps its own code: {stdout}"
 	);
 	let payload: Value = serde_json::from_slice(&out.stdout).unwrap();
 	assert!(
