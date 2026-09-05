@@ -26,7 +26,69 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::skills::linker::Linker;
+use aghub_agents::ResourceScope;
+
+use crate::skills::linker::{
+	agent_link_need, master_store_dir, LinkNeed, Linker,
+};
+
+/// One agent's candidate Referrer for a skill at a scope.
+pub struct CandidateReferrer {
+	pub agent_id: &'static str,
+	/// `<that agent's skills dir>/<sanitized-name>`. Present whether or not
+	/// anything is there — the whole point is that a MISSING or BROKEN Referrer
+	/// is reported rather than filtered out of existence.
+	pub path: PathBuf,
+}
+
+/// Every agent's candidate Referrer path for `name` at a scope.
+///
+/// **One derivation, and it is path-derived rather than shape-derived.** An
+/// earlier design took the union of "links that already resolve to the Master"
+/// and "agents that natively read `.agents/skills`"; both halves were wrong. The
+/// first admits only paths that are ALREADY conformant, so a dangling link, a
+/// foreign target and npx's real directory were filtered out before anything
+/// could report them. The second returns a variant carrying no path at all, so
+/// cursor / codex / opencode lost their private dirs — the exact agents the
+/// per-agent-Referrer decision exists to serve.
+///
+/// Asking `agent_link_need` against the **`.aghub` store** answers both at once:
+/// no agent reads that directory, so every agent resolves to its own write dir —
+/// a private one where it has one, the shared `.agents/skills` slot where it does
+/// not.
+pub fn candidate_referrers(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	name: &str,
+) -> Vec<CandidateReferrer> {
+	let Some(store) = master_store_dir(project_root) else {
+		return Vec::new();
+	};
+	let safe = skill::sanitize_name(name);
+	crate::registry::ALL_AGENTS
+		.iter()
+		.filter_map(|descriptor| {
+			match agent_link_need(descriptor, scope, project_root, &store) {
+				LinkNeed::NeedsLink { agent_skills_dir } => {
+					Some(CandidateReferrer {
+						agent_id: descriptor.id,
+						path: agent_skills_dir.join(&safe),
+					})
+				}
+				// The agent cannot hold a skill at this scope at all.
+				LinkNeed::Unsupported => None,
+				// Unreachable against a store nothing reads; if it ever fires,
+				// the agent has no path to offer and must not be invented one.
+				LinkNeed::NativeReader => None,
+			}
+		})
+		.collect()
+}
+
+/// The Master path for `name` at a scope.
+pub fn master_path(project_root: Option<&Path>, name: &str) -> Option<PathBuf> {
+	master_store_dir(project_root).map(|s| s.join(skill::sanitize_name(name)))
+}
 
 /// Why a `(referrer, master)` pair is not usable as-is.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -353,6 +415,59 @@ mod tests {
 		assert_eq!(
 			classify_shape(&referrer, &master),
 			SkillShape::Violation(ViolationKind::MasterIsLink)
+		);
+	}
+
+	/// The load-bearing claim of the whole change: asking against the `.aghub`
+	/// store, the three agents that today read `~/.agents/skills` *and* own a
+	/// private dir resolve to the PRIVATE one — which is what makes them
+	/// individually revocable. Point this at `~/.agents/skills` instead and all
+	/// three collapse to `NativeReader`, carry no path, and the feature is gone.
+	#[test]
+	fn global_candidates_prefer_private_dirs_over_the_shared_slot() {
+		// Reads HOME through `master_store_dir` / the descriptors.
+		let _env = crate::skills::prune::test_lock::env_lock();
+		let home = dirs::home_dir().expect("home");
+
+		let by_id: std::collections::HashMap<_, _> =
+			candidate_referrers(ResourceScope::GlobalOnly, None, "foo")
+				.into_iter()
+				.map(|c| (c.agent_id, c.path))
+				.collect();
+
+		for (id, private_suffix) in
+			[("codex", ".codex/skills"), ("cursor", ".cursor/skills")]
+		{
+			let path = by_id
+				.get(id)
+				.unwrap_or_else(|| panic!("{id} must have a candidate"));
+			assert!(
+				path.starts_with(home.join(private_suffix)),
+				"{id} must resolve to its PRIVATE dir, got {}",
+				path.display()
+			);
+		}
+
+		// cline and warp have no private skills dir anywhere — their only
+		// skills path IS the shared slot, so they land there. This is the
+		// documented floor, not a defect.
+		let shared = home.join(".agents").join("skills");
+		for id in ["cline", "warp"] {
+			let path = by_id
+				.get(id)
+				.unwrap_or_else(|| panic!("{id} must have a candidate"));
+			assert!(
+				path.starts_with(&shared),
+				"{id} has no private dir and must share the slot, got {}",
+				path.display()
+			);
+		}
+
+		assert_eq!(
+			by_id.get("cline").and_then(|p| p.parent()),
+			by_id.get("warp").and_then(|p| p.parent()),
+			"the shared slot must be ONE directory — granting to either grants \
+			 to both, and callers depend on comparing these paths"
 		);
 	}
 
