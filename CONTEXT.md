@@ -25,15 +25,15 @@ A layout where a skill lives once as a shared Master and each agent's skills dir
 _Avoid_: "symlink mode" / "linked skill" as the canonical name.
 
 **Master**:
-The single `.agents/skills/<name>` directory that a Universal install's per-agent symlinks resolve to. Renaming or removing it is the operation that must account for every Referrer.
+The single `.aghub/<sanitized-name>` directory that every per-agent symlink resolves to. It lives in a store **no agent reads**, so materializing it grants nothing on its own; renaming or removing it is the operation that must account for every Referrer. It used to live at `.agents/skills/<name>` — a directory ten agent/scope combinations scan — which is why storing a skill there granted it to all of them.
 _Avoid_: "canonical dir" (that is the storage key), "source".
 
 **Master GC (on removal)**:
-Removing a skill deletes the Master **only** when the removal targets the view that reads the Master directly **and** no other view still references it. Removing one linking agent's Referrer (the common `delete -a <agent>` case) unlinks that Referrer but **keeps** the Master, because `.agents/skills` is itself in the swept agent-dir union — every project NativeReader (Codex, OpenCode, Cursor, Cline, Warp, …) reads the Master directly, so it counts as a live reference. The Master is GC'd only once the last such reference goes (e.g. deleting via the NativeReader whose skills dir _is_ `.agents/skills`).
-_Avoid_: "removing the last referrer GCs the Master" — that overstates it; a lone linker removal does not, and the `.agents/skills` reader always counts as a referrer. Two authoritative rules, both in `crates/core/src/skills/removal.rs`: `plan_symlink_removal` for a Referrer-layout entry (`canonical_path` set), and `single_agent_keep_reason` for a Master discovered as a plain dir — the latter is shared verbatim by `plan_copy_removal` and by the `ConfigManager::remove_skill` seam, so no caller of the copy rule can take a Master — the GC above happens through `remove_skill_planned` (or `--all-agents`), never through the plain `remove_skill` seam.
+Removing a skill deletes the Master **only** once no view still references it. Removing one agent's Referrer (the common `delete -a <agent>` case) unlinks that Referrer and keeps the Master while any other Referrer remains — including the shared `.agents/skills` slot, which is itself in the swept agent-dir union and stands for every agent that reads it. The Master is GC'd when the last reference goes.
+_Avoid_: "removing any referrer GCs the Master" — a removal that leaves another Referrer standing does not, and the shared `.agents/skills` slot counts as one. Two authoritative rules, both in `crates/core/src/skills/removal.rs`: `plan_symlink_removal` for a Referrer-layout entry (`canonical_path` set), and `single_agent_keep_reason` for a Master discovered as a plain dir — the latter is shared verbatim by `plan_copy_removal` and by the `ConfigManager::remove_skill` seam, so no caller of the copy rule can take a Master — the GC above happens through `remove_skill_planned` (or `--all-agents`), never through the plain `remove_skill` seam.
 
 **Referrer**:
-An agent's skills entry that is a symlink resolving to a Master. When the Master is renamed or removed, its Referrers must be re-pointed or pruned. For GC purposes a project NativeReader that reads `.agents/skills` directly (no symlink) also counts as a referrer that keeps the Master alive.
+An agent's skills entry that is a symlink resolving to a Master. When the Master is renamed or removed, its Referrers must be re-pointed or pruned. For GC purposes a real directory in the shared `.agents/skills` slot also counts as a referrer that keeps the Master alive — up to ten agents read it by scanning, leaving no link of their own.
 _Avoid_: "link", "alias".
 
 **Relink**:
