@@ -6,6 +6,7 @@ import { test } from "node:test";
 import {
 	DEFAULT_CONTEXT_WINDOW,
 	estimateSkillContextCost,
+	estimateTokens,
 	listingBudgetChars,
 	MAX_DESCRIPTION_CHARS,
 	skillEntryChars,
@@ -26,14 +27,27 @@ test("budget is 8000 chars at a 200k window and scales with it", () => {
 	assert.equal(listingBudgetChars(1_000_000), 40_000);
 });
 
-test("total joins entries with newlines and estimates tokens at 4 chars", () => {
+test("Chinese text costs far more tokens per character than English", () => {
+	// 20 Han characters are ~20 tokens; 20 English characters are ~4. A single
+	// chars/N constant would report these as equal, understating the Chinese
+	// listing by about 4x — and Chinese descriptions are normal here.
+	const han = estimateTokens("這是一個用來測試的中文技能描述文字內容範例");
+	const latin = estimateTokens("this is twenty-plus ch");
+	assert.ok(
+		han > latin * 3,
+		`expected Han (${han}) to cost far more than Latin (${latin})`,
+	);
+	assert.ok(han >= 20, `21 Han chars should be ~21 tokens, got ${han}`);
+});
+
+test("total joins entries with newlines and estimates tokens", () => {
 	const cost = estimateSkillContextCost([
 		{ name: "a", description: "one" }, // 1 + 4 + 3 = 8
 		{ name: "b", description: "two" }, // 8
 	]);
 	assert.equal(cost.skillCount, 2);
 	assert.equal(cost.totalChars, 8 + 8 + 1); // + one newline
-	assert.equal(cost.totalTokens, Math.ceil(17 / 4));
+	assert.ok(cost.totalTokens > 0 && cost.totalTokens < 17);
 	assert.equal(cost.overBudgetChars, 0);
 	assert.equal(cost.minDemotedSkills, 0);
 });

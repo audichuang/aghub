@@ -107,6 +107,34 @@ truncated_description_chars_per_skill, truncated_skill_descriptions
 一樣是 description-only,但**每個 skill 的固定開銷最大**:XML 標籤約 60 字元
 再加一個 `<location>` 絕對路徑。Grok 還會讀 `~/.claude/skills/`。
 
+## 其餘 22 個 agent
+
+平行查了 `AgentType::ALL` 剩下的每一個(amp / antigravity / augmentcode /
+cline / copilot / cursor / factory / gemini / hermes / jetbrains_ai /
+kilocode / kimi / kiro / mistral / openclaw / opencode / pi / roocode /
+trae / warp / windsurf / zed)。**全部都是 descriptionOnly**,沒有一個
+把 SKILL.md body 灌進啟動 context。
+
+結論:**不需要**在 descriptor 上加 `startup_load` 之類的欄位。沒有變異
+要編碼,加了就是一個永遠只有一種值的欄位。
+
+## Tokenizer:一個常數會錯四倍
+
+在本機真實語料上量過(146 個真的 SKILL.md description + 使用者自己的
+繁體中文技術筆記,o200k_base):
+
+| 文字     | 字元/token |
+| -------- | ---------- |
+| 英文散文 | 4.75       |
+| 純漢字   | 1.03       |
+
+也就是漢字幾乎**一字一 token**。用單一 chars/4 常數,中文描述會被低估
+約四倍 —— 而這個專案的技能描述常常是中文。所以 token 估算分兩桶算。
+
+**但預算判定不受影響**:Claude Code 的預算是**字元**制,不是 token 制。
+所以「有沒有超出預算、幾個描述會被丟掉」是精確的,只有顯示的 token
+數字是估計值。
+
 ## 對 aghub 的意義
 
 | 項目                          | 結論                                                                  |

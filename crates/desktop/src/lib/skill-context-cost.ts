@@ -24,15 +24,41 @@
 export const MAX_DESCRIPTION_CHARS = 1536;
 
 /**
- * Claude Code's own bytes-per-token constant, used to derive the listing
- * budget from a context window. We reuse it as the token estimator rather
- * than shipping a tokenizer: Anthropic's is not public, and a wrong tokenizer
- * would be no more honest than the constant the agent itself budgets with.
- *
- * ponytail: chars/4. Swap for a real tokenizer only if users report the
- * estimate is misleading — CJK descriptions tokenize denser than this.
+ * Claude Code's own bytes-per-token constant. It derives the listing BUDGET
+ * from a context window, so it belongs to the budget arithmetic — not to
+ * counting tokens, which `estimateTokens` does separately.
  */
 export const BYTES_PER_TOKEN = 4;
+
+/**
+ * Characters per token, measured on this project's own corpus (real SKILL.md
+ * descriptions and Traditional-Chinese notes) with o200k_base.
+ *
+ * A single constant is wrong by ~4x on Chinese text: Han characters run about
+ * one token EACH, where English prose runs ~4.75 characters per token. Skill
+ * descriptions here are routinely Chinese, so a flat chars/4 would quietly
+ * understate the very number the feature exists to show.
+ *
+ * ponytail: two-bucket heuristic, no tokenizer dependency. The BUDGET verdict
+ * does not depend on it at all — Claude Code budgets in characters — so this
+ * only affects the displayed token figure.
+ */
+export const CHARS_PER_TOKEN_LATIN = 4.75;
+export const CHARS_PER_TOKEN_CJK = 1.03;
+
+/** CJK ideographs, kana and full-width forms. */
+const CJK_RE =
+	/[\u3000-\u303f\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uff00-\uffef]/u;
+
+/** Estimate tokens for a string, bucketing CJK separately from everything else. */
+export function estimateTokens(text: string): number {
+	let cjk = 0;
+	for (const char of text) {
+		if (CJK_RE.test(char)) cjk += 1;
+	}
+	const latin = [...text].length - cjk;
+	return Math.ceil(cjk / CHARS_PER_TOKEN_CJK + latin / CHARS_PER_TOKEN_LATIN);
+}
 
 /** Claude Code's `skillListingBudgetFraction` default: 1% of the window. */
 export const LISTING_BUDGET_FRACTION = 0.01;
@@ -118,6 +144,12 @@ export function estimateSkillContextCost(
 	const entries = unique.map((skill) => ({
 		entry: skillEntryChars(skill.name, skill.description ?? ""),
 		nameOnly: skillNameOnlyChars(skill.name),
+		// The line as the agent writes it, so the token estimate sees the real
+		// script mix rather than a character count that has lost it.
+		line: `- ${skill.name}: ${(skill.description ?? "").slice(
+			0,
+			MAX_DESCRIPTION_CHARS,
+		)}`,
 	}));
 
 	const totalChars =
@@ -142,7 +174,7 @@ export function estimateSkillContextCost(
 	return {
 		skillCount: unique.length,
 		totalChars,
-		totalTokens: Math.ceil(totalChars / BYTES_PER_TOKEN),
+		totalTokens: estimateTokens(entries.map((e) => e.line).join("\n")),
 		budgetChars,
 		overBudgetChars,
 		minDemotedSkills,
