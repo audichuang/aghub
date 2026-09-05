@@ -2116,7 +2116,7 @@ mod describe {
 				// contradiction. --json keeps them (one wire shape).
 				if !json {
 					if let Some(map) = value.as_object_mut() {
-						map.remove("native_reader");
+						map.remove("shared_with");
 						map.remove("already_installed");
 					}
 				}

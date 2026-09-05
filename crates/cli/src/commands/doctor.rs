@@ -303,11 +303,14 @@ fn audit_agent_links(
 					// `master-is-symlink`) also stays out of that bucket.
 					// `Dangling` deliberately does NOT downgrade: it is a real
 					// artifact a relink replaces.
-					if state == AgentLinkState::Missing
-						&& !matches!(
-							master_state(&master_skill),
-							MasterState::Missing
-						) {
+					// `exists()`, not `master_state(..) != Missing`:
+					// `master_state` uses `symlink_metadata`, so a DANGLING
+					// master symlink still reports `Link` and a broken tree got
+					// downgraded out of `missing` — the very false green
+					// `--verify-links` exists to prevent. `exists()` follows the
+					// link and answers whether a skill is actually reachable.
+					if state == AgentLinkState::Missing && master_skill.exists()
+					{
 						// An absent slot beside a live Master is either a
 						// leftover (untracked: nothing to relink FROM) or the
 						// withheld state this feature exists to create. Neither

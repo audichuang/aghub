@@ -1480,7 +1480,7 @@ fn add_skill_from_path_outputs_skill_view_with_shared_with() {
 	assert_skill_view_shape(&json);
 	assert_eq!(json["name"], "myimport");
 	assert_eq!(json["description"], "imported");
-	// Claude is not a NativeReader, so an isolated copy install => false.
+	// Claude's global skills dir is private, so this grant reaches nobody else.
 	assert_eq!(json["shared_with"], serde_json::json!([]));
 }
 
@@ -3803,8 +3803,8 @@ fn delete_skill_dry_run_outputs_snake_case_keys() {
 }
 
 /// CLI `add skill` output is now a `SkillView`, which carries the
-/// `shared_with` advisory field. Claude at global scope has a PRIVATE skills
-/// NativeReader, so the field is present and `false`.
+/// `shared_with` advisory field. Claude at global scope writes into a PRIVATE
+/// skills dir, so the field is present and empty.
 #[cfg(unix)]
 #[test]
 fn add_skill_output_includes_shared_with_field() {
@@ -3842,7 +3842,7 @@ fn add_skill_output_includes_shared_with_field() {
 	assert_eq!(
 		json["shared_with"],
 		serde_json::json!([]),
-		"claude global add is not a NativeReader: {json}"
+		"claude's global skills dir is private, so nobody co-grants: {json}"
 	);
 	// SkillView shape: source_path key present, raw-Skill `content` absent.
 	assert!(json.get("source_path").is_some(), "json: {json}");
@@ -3853,8 +3853,8 @@ fn add_skill_output_includes_shared_with_field() {
 }
 
 /// The other branch of the `shared_with` advisory: an agent with no private
-/// reads the `~/.agents/skills` master directly (a NativeReader), so the
-/// skills directory shares one, and the SkillView must name the co-grantees.
+/// skills directory takes its Referrer in the shared `~/.agents/skills` slot,
+/// which another agent reads too — so the SkillView must name the co-grantees.
 #[cfg(unix)]
 #[test]
 fn add_skill_output_shared_with_names_co_grantees_for_cline() {
@@ -4402,11 +4402,21 @@ fn transfer_project(skill: &str) -> tempfile::TempDir {
 
 /// An aghub-cli command rooted at `project` (cwd + redirected HOME) so transfer
 /// scope resolution and any global lookups stay inside the throwaway dir.
+///
+/// `clear_agent_home_overrides` for the same reason `isolated_cli` calls it:
+/// redirecting `$HOME` alone leaves the eleven agent-specific home/config vars
+/// pointing at the developer's real config, and they OUTRANK `$HOME`. That was
+/// harmless only while these fixtures never made an agent write to its own
+/// directory — which stopped being true the moment every grant became a
+/// per-agent Referrer. `XDG_STATE_HOME` goes too, so the global skill lock lands
+/// under `<project>/.local/state` instead of the developer's real state dir.
 fn transfer_cli(project: &std::path::Path) -> Command {
 	let mut cmd = Command::cargo_bin("aghub-cli").unwrap();
 	cmd.env("HOME", project);
 	cmd.env("USERPROFILE", project);
 	cmd.env("APPDATA", project);
+	cmd.env_remove("XDG_STATE_HOME");
+	clear_agent_home_overrides(&mut cmd);
 	cmd.current_dir(project);
 	cmd
 }
@@ -4437,7 +4447,8 @@ fn transfer_skill_copies_claude_to_opencode_project() {
 	);
 	assert!(
 		project.path().join(".aghub/repo-helper/SKILL.md").exists(),
-		"OpenCode is a NativeReader and must use the shared Master",
+		"a transfer must materialize the Master in the store, not copy bytes \
+		 into the target",
 	);
 }
 
@@ -4609,21 +4620,22 @@ fn transfer_skill_second_run_is_idempotent_and_says_so() {
 	assert!(row["error"].is_null(), "{row}");
 }
 
-/// A Master-reading agent's FIRST transfer must succeed — this is the case the
-/// old guard actually broke, and no test covered it.
+/// A shared-slot agent's FIRST transfer must succeed — this is the case the old
+/// guard actually broke, and no test covered it.
 ///
-/// cursor, cline, codex, opencode and warp read `.agents/skills` directly. Once
-/// ANY agent in the scope has installed a skill, the Master exists, so those
-/// agents already "hold" it — and `transfer_skill`'s `get_skill(..).is_some()`
-/// guard fired on their very first transfer. The refusal said "Resource already
-/// exists", which reads as a conflict when the truth is the opposite: the
-/// target can already see it, and there is nothing to do.
+/// cline and warp have no private skills dir at any scope: both resolve to
+/// `<root>/.agents/skills`, so ONE Referrer there is the grant for both. Once a
+/// transfer to cline has written it, warp already "holds" the skill — and
+/// `transfer_skill`'s `get_skill(..).is_some()` guard fired on warp's very
+/// first transfer. The refusal said "Resource already exists", which reads as a
+/// conflict when the truth is the opposite: the target can already see it, and
+/// there is nothing to do.
 #[cfg(unix)]
 #[test]
-fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
+fn transfer_skill_to_shared_slot_agent_first_use_is_idempotent() {
 	let project = transfer_project("repo-helper");
 
-	// Materialize the shared Master via a transfer to one agent.
+	// Materialize the Master + the shared-slot Referrer via one agent.
 	let seed = transfer_cli(project.path())
 		.args([
 			"-p",
@@ -4634,7 +4646,7 @@ fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
 			"--name",
 			"repo-helper",
 			"--to",
-			"opencode",
+			"cline",
 		])
 		.output()
 		.unwrap();
@@ -4646,8 +4658,15 @@ fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
 	let master = project.path().join(".aghub/repo-helper/SKILL.md");
 	let before = std::fs::read_to_string(&master)
 		.expect("the seed transfer must have written the Master");
+	assert!(
+		std::fs::symlink_metadata(
+			project.path().join(".agents/skills/repo-helper")
+		)
+		.is_ok(),
+		"the seed must have written the shared-slot Referrer warp reads"
+	);
 
-	// cursor has never been transferred to — but it reads that same Master.
+	// warp has never been transferred to — but its Referrer dir IS that slot.
 	let out = transfer_cli(project.path())
 		.args([
 			"-p",
@@ -4658,14 +4677,14 @@ fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
 			"--name",
 			"repo-helper",
 			"--to",
-			"cursor",
+			"warp",
 			"--json",
 		])
 		.output()
 		.unwrap();
 	assert!(
 		out.status.success(),
-		"a Master-reading agent's first transfer must not fail: {} {}",
+		"a shared-slot agent's first transfer must not fail: {} {}",
 		String::from_utf8_lossy(&out.stdout),
 		String::from_utf8_lossy(&out.stderr)
 	);
@@ -4673,8 +4692,8 @@ fn transfer_skill_to_master_reading_agent_first_use_is_idempotent() {
 	assert_eq!(json["failed_count"], 0, "{json}");
 	let row = json["results"]
 		.as_array()
-		.and_then(|a| a.iter().find(|r| r["agent"] == "cursor"))
-		.expect("cursor row present");
+		.and_then(|a| a.iter().find(|r| r["agent"] == "warp"))
+		.expect("warp row present");
 	assert_eq!(row["success"], true, "{row}");
 	assert_eq!(row["already_present"], true, "{row}");
 	assert!(row["error"].is_null(), "{row}");
@@ -4799,7 +4818,44 @@ fn reconcile_skill_reports_batch_summary() {
 	);
 }
 
-// End-to-end proof that the shared-master preflight reaches the CLI with ZERO
+/// The one shape where removing a skill from ONE agent still takes nothing
+/// away, built by hand so both the commit and the preview test share it.
+///
+/// cursor at project scope has TWO read dirs: its own `<root>/.cursor/skills`
+/// and the shared `<root>/.agents/skills` (which it reads natively, and which
+/// is cline's/warp's only slot). With a Referrer in each — both resolving to
+/// the same `.aghub` Master — unlinking cursor's private one leaves the set of
+/// locations cursor reads from unchanged, so the removal is refused rather
+/// than reported as a removal that removed nothing.
+///
+/// Returns the Master dir. `.claude/skills` is created because it is what marks
+/// the temp dir as a project root.
+#[cfg(unix)]
+fn seed_shared_slot_leak(
+	project: &std::path::Path,
+	name: &str,
+) -> std::path::PathBuf {
+	let master = project.join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: d\n---\nbody\n"),
+	)
+	.unwrap();
+	for referrer_dir in [".cursor/skills", ".agents/skills", ".claude/skills"] {
+		std::fs::create_dir_all(project.join(referrer_dir)).unwrap();
+	}
+	for referrer_dir in [".cursor/skills", ".agents/skills"] {
+		std::os::unix::fs::symlink(
+			&master,
+			project.join(referrer_dir).join(name),
+		)
+		.unwrap();
+	}
+	master
+}
+
+// End-to-end proof that the shared-slot preflight reaches the CLI with ZERO
 // CLI changes — the guard lives in core, so `--json` reports it through the
 // ordinary error envelope. Before the guard this printed a batch summary (one
 // success, one failure) on exit 1, with claude's Referrer already on disk.
@@ -4807,16 +4863,8 @@ fn reconcile_skill_reports_batch_summary() {
 #[test]
 fn reconcile_skill_shared_slot_removal_is_a_json_error_and_writes_nothing() {
 	let project = tempfile::TempDir::new().unwrap();
-	// A universal Master cursor reads directly; `.claude/skills` marks the root.
-	let master = project.path().join(".aghub/mover");
-	std::fs::create_dir_all(&master).unwrap();
-	std::fs::write(
-		master.join("SKILL.md"),
-		"---\nname: mover\ndescription: d\n---\nbody\n",
-	)
-	.unwrap();
+	let master = seed_shared_slot_leak(project.path(), "mover");
 	let claude_link = project.path().join(".claude/skills/mover");
-	std::fs::create_dir_all(claude_link.parent().unwrap()).unwrap();
 
 	let out = transfer_cli(project.path())
 		.args([
@@ -4874,14 +4922,8 @@ fn reconcile_skill_shared_slot_removal_is_a_json_error_and_writes_nothing() {
 #[test]
 fn reconcile_skill_preview_refuses_what_the_commit_refuses() {
 	let project = tempfile::TempDir::new().unwrap();
-	let master = project.path().join(".aghub/mover");
-	std::fs::create_dir_all(&master).unwrap();
-	std::fs::write(
-		master.join("SKILL.md"),
-		"---\nname: mover\ndescription: d\n---\nbody\n",
-	)
-	.unwrap();
-	std::fs::create_dir_all(project.path().join(".claude/skills")).unwrap();
+	let master = seed_shared_slot_leak(project.path(), "mover");
+	let claude_link = project.path().join(".claude/skills/mover");
 
 	let out = transfer_cli(project.path())
 		.args([
@@ -4918,6 +4960,16 @@ fn reconcile_skill_preview_refuses_what_the_commit_refuses() {
 	assert!(
 		json["dry_run"].is_null(),
 		"a refused preview must not also print a would-do plan: {json}"
+	);
+	// And a preview writes nothing either — the refusal happens in preflight,
+	// before the first copy row runs.
+	assert!(
+		std::fs::symlink_metadata(&claude_link).is_err(),
+		"a refused preview must not have created the copy target's Referrer"
+	);
+	assert!(
+		master.join("SKILL.md").exists(),
+		"the Master must be untouched"
 	);
 }
 
@@ -5263,9 +5315,9 @@ fn coverage_global_json_every_agent_takes_a_link() {
 
 #[test]
 fn coverage_project_json_classifies_against_project_master() {
-	// Project scope with a real project_root: opencode reads `<root>/.agents/
-	// skills` at project scope (auto_covered), claude still needs a link. The
-	// `.claude/` dir makes `find_project_root` detect the project from cwd.
+	// Project scope with a real project_root: both opencode and claude take a
+	// Referrer into their own directory. The `.claude/` dir makes
+	// `find_project_root` detect the project from cwd.
 	let project = transfer_project("anything");
 
 	let out = coverage_cli(project.path())
@@ -5734,10 +5786,15 @@ fn delete_preview_tells_you_how_to_commit_it() {
 	assert!(skill_dir.exists(), "preview must not delete");
 }
 
-/// A committed delete must disclose the `.agents/skills` Master it leaves
-/// behind: `source sync` refuses to overwrite an existing Master, so a user who
-/// believes the skill is gone cannot reinstall it from git. The JSON always
-/// carried this in `skipped`; the human path printed nothing.
+/// A committed delete must disclose the Master it leaves behind: `source sync`
+/// refuses to overwrite an existing Master, so a user who believes the skill is
+/// gone cannot reinstall it from git. The JSON always carried this in
+/// `skipped`; the human path printed nothing.
+///
+/// Two agents, because that is what makes the Master survive now that it lives
+/// in `.aghub`: cursor's Referrer still points at it, so the symlink sweep
+/// keeps it and reports it. A single-agent install would take the Master with
+/// the link and have nothing to disclose.
 #[cfg(unix)]
 #[test]
 fn delete_discloses_the_master_it_leaves_behind() {
@@ -5745,18 +5802,20 @@ fn delete_discloses_the_master_it_leaves_behind() {
 	let state = tempfile::TempDir::new().unwrap();
 	let src = tempfile::TempDir::new().unwrap();
 	write_source_skill(src.path(), "kept", "kept");
-	let install = run_sync_install(
-		home.path(),
-		state.path(),
-		src.path(),
-		"claude",
-		"kept",
-	);
-	assert!(
-		install.status.success(),
-		"seed install: {}",
-		String::from_utf8_lossy(&install.stderr)
-	);
+	for agent in ["claude", "cursor"] {
+		let install = run_sync_install(
+			home.path(),
+			state.path(),
+			src.path(),
+			agent,
+			"kept",
+		);
+		assert!(
+			install.status.success(),
+			"seed install for {agent}: {}",
+			String::from_utf8_lossy(&install.stderr)
+		);
+	}
 
 	let out = isolated_cli(home.path(), state.path())
 		.args(["-a", "claude", "delete", "skills", "kept", "--yes"])
@@ -5765,14 +5824,24 @@ fn delete_discloses_the_master_it_leaves_behind() {
 	let text = String::from_utf8_lossy(&out.stdout);
 	assert!(out.status.success());
 	// Pins the FACTS (the master path is named, and it is called out as kept),
-	// not the heading's exact wording — a reword should not turn this red.
+	// not the heading's exact wording — a reword should not turn this red. The
+	// PATH is what is asserted, deliberately: the surrounding note still spells
+	// the store `.agents/skills`, so matching that string would pass on the
+	// stale prose alone and prove nothing about the path being listed.
+	let master = home.path().join(".aghub/kept");
 	assert!(
-		text.contains(".agents/skills") && text.contains("NOT removed"),
+		text.contains(&*master.to_string_lossy())
+			&& text.contains("NOT removed"),
 		"a committed delete must name the surviving master: {text}"
 	);
 	assert!(
-		home.path().join(".aghub/kept").exists(),
+		master.exists(),
 		"the master really does survive — that is why it must be reported"
+	);
+	assert!(
+		std::fs::symlink_metadata(home.path().join(".cursor/skills/kept"))
+			.is_ok(),
+		"and it survives BECAUSE cursor's Referrer still reads it"
 	);
 }
 
@@ -6476,8 +6545,8 @@ fn delete_yes_on_an_absent_resource_does_not_ask_for_yes_again() {
 }
 
 /// A fresh multi-agent install must not print the "nothing was written" drift
-/// warning. A NativeReader no-ops as soon as ANY agent has the skill —
-/// including a sibling row of the same run — so that warning told users to
+/// warning. A row whose Master a SIBLING row of the same run just created
+/// legitimately writes no bytes of its own, so that warning told users to
 /// delete a skill that had just installed correctly.
 #[cfg(unix)]
 #[test]
@@ -8392,6 +8461,13 @@ fn json_payload_key_sets_are_pinned() {
 	// transfer/reconcile share the envelope but a DIFFERENT row struct, whose
 	// success predicate was `success` only — a parser written against `ok`
 	// scored every successful row as a failure. Both names now appear.
+	//
+	// windsurf, not opencode: the `claude,codex` fan-out above put a Referrer
+	// in `<root>/.agents/skills`, which opencode and cursor READ natively at
+	// project scope even though they write to their own dirs, and a copy into
+	// an agent that can already see the skill is currently refused
+	// (RESOURCE_EXISTS). windsurf neither reads nor writes that slot, so this
+	// test pins the row's KEY SET without also pinning that semantics.
 	let reconciled = run(&[
 		"-p",
 		"--json",
@@ -8402,7 +8478,7 @@ fn json_payload_key_sets_are_pinned() {
 		"--name",
 		"fanned",
 		"--add",
-		"opencode",
+		"windsurf",
 	]);
 	assert!(
 		reconciled.status.success(),
@@ -8675,20 +8751,27 @@ fn delete_preview_discloses_the_lock_entries_it_would_prune() {
 	let state = tempfile::TempDir::new().unwrap();
 	let src = tempfile::TempDir::new().unwrap();
 
-	// Two skills from a source, so both get real lock entries.
+	// Two skills from a source, so both get real lock entries. `keeper` goes to
+	// TWO agents: the single-agent delete below must leave the Master standing
+	// (cursor's Referrer still points at it), which is the whole premise of the
+	// "its own key is NOT listed" assertion.
 	write_source_skill(src.path(), "keeper", "keeper");
 	write_source_skill(src.path(), "ghosted", "ghosted");
-	for name in ["keeper", "ghosted"] {
+	for (name, agent) in [
+		("keeper", "claude"),
+		("keeper", "cursor"),
+		("ghosted", "claude"),
+	] {
 		let out = run_sync_install(
 			home.path(),
 			state.path(),
 			src.path(),
-			"claude",
+			agent,
 			name,
 		);
 		assert!(
 			out.status.success(),
-			"install {name} must succeed: {}",
+			"install {name} for {agent} must succeed: {}",
 			String::from_utf8_lossy(&out.stderr)
 		);
 	}
@@ -8721,11 +8804,11 @@ fn delete_preview_discloses_the_lock_entries_it_would_prune() {
 		"the OTHER skill's orphaned entry is what the caller cannot otherwise \
 		 see: {pj}"
 	);
-	// And NOT the target's own key: this single-agent delete removes the agent
-	// link but KEEPS the shared `.agents/skills` Master (see `skipped`), so the
-	// skill is still on disk and its lock entry survives. This is why exclusion
-	// is by PATH and not by folder name — excluding the name would have
-	// promised to drop an entry the commit keeps.
+	// And NOT the target's own key: this single-agent delete removes claude's
+	// Referrer but KEEPS the Master (see `skipped`) because cursor still reads
+	// it, so the skill is still on disk and its lock entry survives. This is
+	// why exclusion is by PATH and not by folder name — excluding the name
+	// would have promised to drop an entry the commit keeps.
 	assert!(
 		!would.contains(&"keeper"),
 		"the Master is kept, so the target's own entry must NOT be listed: {pj}"
@@ -8799,17 +8882,19 @@ fn delete_preview_discloses_the_lock_entries_it_would_prune() {
 /// exact never-terminating hint `absent` and `kept` were introduced to kill.
 #[cfg(unix)]
 #[test]
-#[ignore = "the `kept` outcome now requires the shared-slot removal refusal (spec Q3), which is not implemented yet; un-ignore with it"]
 fn a_kept_shared_master_preview_promises_no_prune() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	let src = tempfile::TempDir::new().unwrap();
 	write_source_skill(src.path(), "shared-one", "shared-one");
 
-	// Install for an agent that NEEDS a link, then for one that reads the
-	// Master directly — so removing it from the Master-reader alone cannot
-	// express anything.
-	for agent in ["claude", "cursor"] {
+	// cline has no private skills dir, so its grant IS `~/.agents/skills` —
+	// which codex ALSO reads, on top of its own `~/.codex/skills`. Unlinking
+	// codex's private Referrer therefore leaves codex reading the skill from
+	// exactly the same place, which is what `kept` means. (This does NOT need
+	// the spec's Q3 shared-slot refusal: it is the two-read-dirs shape, and
+	// aghub writes both halves itself.)
+	for agent in ["cline", "codex"] {
 		let out = run_sync_install(
 			home.path(),
 			state.path(),
@@ -8824,13 +8909,13 @@ fn a_kept_shared_master_preview_promises_no_prune() {
 		);
 	}
 
-	// cursor reads `.agents/skills` directly: there is no cursor-only artifact
-	// to remove, so this delete keeps the Master.
+	// Removing codex's own Referrer changes nothing about what codex reads, so
+	// this delete keeps the Master and refuses on `--yes`.
 	let preview = isolated_cli(home.path(), state.path())
 		.args([
 			"-g",
 			"-a",
-			"cursor",
+			"codex",
 			"--json",
 			"delete",
 			"skills",
@@ -9303,9 +9388,17 @@ fn second_review_found_gaps_stay_fixed() {
 	// --- A `kept` delete must not tell the human to re-run with --yes: that
 	// run fails with `Unsupported operation`. The JSON and the desktop were
 	// fixed; the CLI's own human renderer still printed the dead-end hint.
+	//
+	// cline + codex is the shape that still reaches `kept`, and both halves are
+	// written by aghub itself: cline has no private dir, so its grant IS
+	// `~/.agents/skills/shared-skill`, while codex gets `~/.codex/skills/…` —
+	// and codex reads BOTH. Unlinking codex's own Referrer therefore leaves the
+	// set of places codex reads the skill from unchanged, which is exactly what
+	// `kept` means. (cursor + claude no longer produces it: each holds one
+	// private Referrer, so removing cursor's really does take something away.)
 	let src = tempfile::TempDir::new().unwrap();
 	write_source_skill(src.path(), "shared-skill", "shared-skill");
-	for agent in ["claude", "cursor"] {
+	for agent in ["cline", "codex"] {
 		let out = run_sync_install(
 			home.path(),
 			state.path(),
@@ -9319,8 +9412,26 @@ fn second_review_found_gaps_stay_fixed() {
 			String::from_utf8_lossy(&out.stderr)
 		);
 	}
+	let kept_json = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"codex",
+			"--json",
+			"delete",
+			"skills",
+			"shared-skill",
+		])
+		.output()
+		.unwrap();
+	let kj: Value = serde_json::from_slice(&kept_json.stdout).unwrap();
+	assert_eq!(
+		kj["outcome"], "kept",
+		"the fixture must actually reach the `kept` branch, or the human \
+		 assertions below test a different renderer path: {kj}"
+	);
 	let kept = isolated_cli(home.path(), state.path())
-		.args(["-g", "-a", "cursor", "delete", "skills", "shared-skill"])
+		.args(["-g", "-a", "codex", "delete", "skills", "shared-skill"])
 		.output()
 		.unwrap();
 	assert!(kept.status.success());
@@ -9483,17 +9594,17 @@ fn fourth_review_name_only_decisions_stay_closed() {
 	// --- (1) The content proof must not skip `already_installed`.
 	//
 	// The third round proved the copy landed the source content before a
-	// paired `--remove` ran, but exempted `already_installed`. A NativeReader
-	// that already reads a Master reports exactly that — truthfully, it does
-	// hold a skill by that name — and the name is all the two share. The
-	// exemption therefore reopened the hole for the one shape most likely to
-	// hit it: a Master that already exists.
+	// paired `--remove` ran, but exempted `already_installed`. An agent that is
+	// linked to a Master reports exactly that — truthfully, it does hold a
+	// skill by that name — and the name is all the two share. The exemption
+	// therefore reopened the hole for the one shape most likely to hit it: a
+	// Master that already exists.
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
 
-		// cursor reads `.agents/skills` directly, so this Master IS cursor's
-		// `foo` — and it is not claude's `foo`.
+		// A Master holding a DIFFERENT `foo` than claude's private copy. The
+		// copy to cursor must not report success off the shared NAME alone.
 		let master = home.path().join(".aghub/foo");
 		std::fs::create_dir_all(&master).unwrap();
 		std::fs::write(
@@ -9568,10 +9679,10 @@ fn fourth_review_name_only_decisions_stay_closed() {
 	// --- (2) The two universal install entry points must agree.
 	//
 	// `add --from <path>` verified the resolved path; plain `add -n <name>`
-	// still returned on the name. For a NativeReader holding a FOREIGN
-	// same-named skill that meant exit 0, `already_installed: true`, nothing
-	// written, no master created — and a hint pointing at `update skills foo`,
-	// which would have edited the foreign skill.
+	// still returned on the name. For an agent holding a FOREIGN same-named
+	// skill that meant exit 0, `already_installed: true`, nothing written, no
+	// master created — and a hint pointing at `update skills foo`, which would
+	// have edited the foreign skill.
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
@@ -9617,6 +9728,10 @@ fn fourth_review_name_only_decisions_stay_closed() {
 	// --- (3) …and the honest no-op still IS one: the same command against a
 	// Master the agent really reads stays idempotent. Tightening (2) by
 	// erroring on everything would pass (2) and break every re-add.
+	//
+	// "Really reads" is now a RESOLVED LINK, not the store: nothing reads
+	// `.aghub`, so the Master alone is (2)'s foreign-occupant shape. The
+	// Referrer is what makes this cursor's `foo`.
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
@@ -9627,6 +9742,9 @@ fn fourth_review_name_only_decisions_stay_closed() {
 			"---\nname: foo\ndescription: master\n---\n\nMASTER\n",
 		)
 		.unwrap();
+		let cursor_skills = home.path().join(".cursor/skills");
+		std::fs::create_dir_all(&cursor_skills).unwrap();
+		std::os::unix::fs::symlink(&master, cursor_skills.join("foo")).unwrap();
 
 		let out = isolated_cli(home.path(), state.path())
 			.args([
@@ -10476,8 +10594,15 @@ fn identity_not_path_and_unknown_not_absent() {
 	// an agent whose config failed to parse as a non-reader. One truncated,
 	// completely unrelated MCP config therefore turned a reconcile that
 	// correctly refuses into one that deletes the master the broken agent was
-	// reading — "5 succeeded, 0 failed", exit 0, the only signal a stderr
+	// reading — "2 succeeded, 0 failed", exit 0, the only signal a stderr
 	// warning no --json consumer ever sees.
+	//
+	// cursor is NAMED in `--remove` on purpose: that is what makes the run
+	// exhaustive (claude is the only other holder), which is the only state in
+	// which the Master is collectable at all. An unreadable agent must then
+	// veto the collection instead of authorizing it — count cursor's `Err` as
+	// "holds nothing" and `unreadable` is empty, the refusal never fires, and
+	// the master assertion below goes red.
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
@@ -10533,13 +10658,7 @@ fn identity_not_path_and_unknown_not_absent() {
 				"--remove",
 				"claude",
 				"--remove",
-				"codex",
-				"--remove",
-				"opencode",
-				"--remove",
-				"cline",
-				"--remove",
-				"warp",
+				"cursor",
 				"--yes",
 			])
 			.output()
@@ -10856,7 +10975,36 @@ fn an_unreadable_skills_dir_is_not_an_empty_one() {
 		 a non-reader. stdout={}",
 		String::from_utf8_lossy(&out.stdout)
 	);
-	assert!(!out.status.success());
+	// …and gemini keeps the grant it was never asked to give up, while the
+	// agent that WAS named loses its own. A sweep that mistook the unreadable
+	// dir for an empty one would go exhaustive and take both, so this pins the
+	// same regression one level below the master.
+	assert!(
+		std::fs::symlink_metadata(gemini_skills.join("demo")).is_ok(),
+		"the unreadable holder's Referrer must be untouched"
+	);
+	// …and the scan SAID it could not read gemini. Without this the master
+	// assertion above cannot tell "gemini was counted as a holder" from "no
+	// removal reached the master anyway" — identical disk states. The warning
+	// is the whole difference the test's own doc names: an invisible holder
+	// leaves strictly less signal than the case the guard was built for.
+	assert!(
+		String::from_utf8_lossy(&out.stderr).contains("gemini"),
+		"the holder scan must SAY it counted gemini rather than proceed \
+		 silently: {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		std::fs::symlink_metadata(home.path().join(".claude/skills/demo"))
+			.is_err(),
+		"claude WAS named, so its Referrer must be gone: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	// Exit code is deliberately NOT asserted: with gemini unnamed the run is
+	// not exhaustive, every named agent's removal is either a real unlink
+	// (claude) or an idempotent no-op, and exit 0 is the correct answer. It
+	// used to be non-zero only because the five shared-slot readers each hit
+	// the per-row "reads it from the shared master" refusal.
 
 	assert!(
 		!listed.status.success(),
@@ -11706,27 +11854,23 @@ fn skill_usage_refuses_project_and_all_scopes() {
 // Acceptance for the `.aghub` skill-store decoupling
 // (`.scratch/aghub-skill-store/spec.md` §Acceptance).
 //
-// Both are `#[ignore]`d until the linker cascade lands: `install_universal`
-// still materializes the Master at `~/.agents/skills/<n>`, and `verify_shape`
-// is not yet wired into `RemovalOutcome`. They are committed AHEAD of that work
-// on purpose — an acceptance test written after the fact only ever proves the
-// implementation matches itself.
-//
-// Un-ignore in the commit that flips `universal_canonical_dir` to
-// `master_store_dir` and deletes `LinkNeed::NativeReader`.
+// Both were committed AHEAD of the implementation on purpose — an acceptance
+// test written after the fact only ever proves the implementation matches
+// itself. The first is live now that the linker cascade has landed
+// (`master_store_dir` + the `LinkNeed::NativeReader` deletion); the second
+// stays `#[ignore]`d until `verify_shape` is wired into `RemovalOutcome`.
 // ---------------------------------------------------------------------------
 
 /// THE central promise: installing for one agent grants it to that agent ONLY.
 ///
-/// Today this cannot hold. grok's Referrer needs something to point at, so
-/// `install_universal` materializes `~/.agents/skills/<n>` — and codex, cursor,
-/// opencode, cline and warp all read that directory natively. Storing IS
-/// granting.
+/// Before the store moved this could not hold: grok's Referrer needed something
+/// to point at, so `install_universal` materialized `~/.agents/skills/<n>` —
+/// and codex, cursor, opencode, cline and warp all read that directory
+/// natively. Storing WAS granting.
 ///
-/// Line-by-line, only assertion 4 can fail before the change; 2, 3 and 5 are
-/// already green today and prove nothing on their own.
+/// Line-by-line, only assertion 4 could fail before the change; 2, 3 and 5 were
+/// already green then and prove nothing on their own.
 #[test]
-#[ignore = "un-ignore with the linker cascade (master_store_dir + NativeReader deletion)"]
 fn installing_for_one_agent_does_not_leak_to_the_shared_slot() {
 	let home = tempfile::tempdir().unwrap();
 	let state = tempfile::tempdir().unwrap();

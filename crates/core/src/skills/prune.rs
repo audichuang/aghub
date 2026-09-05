@@ -449,7 +449,14 @@ fn locked_keys_checked(
 	}
 }
 
-/// The union of every agent's skill read dirs for `scope`.
+/// Every directory a skill can physically live in for `scope`: the agents' read
+/// dirs, PLUS the `.aghub` Master store.
+///
+/// The store is not optional. No agent reads it — that is its whole purpose —
+/// so an agent-dirs-only union sees nothing but Referrers, and combined with the
+/// symlink blindness below every installed skill read as an orphan. Since
+/// `delete --yes` prunes its scope's lock as a side effect, the first delete
+/// after upgrading would have wiped the entire lock's provenance.
 fn scope_skill_dirs(
 	scope: PruneScope,
 	project_root: Option<&Path>,
@@ -458,7 +465,16 @@ fn scope_skill_dirs(
 		PruneScope::Global => ResourceScope::GlobalOnly,
 		PruneScope::Project => ResourceScope::ProjectOnly,
 	};
-	super::removal::agent_skill_dirs_in_scope(resource_scope, project_root)
+	let mut dirs =
+		super::removal::agent_skill_dirs_in_scope(resource_scope, project_root);
+	let store_root = match scope {
+		PruneScope::Global => None,
+		PruneScope::Project => project_root,
+	};
+	if let Some(store) = super::linker::master_store_dir(store_root) {
+		dirs.push(store);
+	}
+	dirs
 }
 
 fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
@@ -474,7 +490,12 @@ fn top_level_skill_dirs(dir: &Path) -> Result<Vec<PathBuf>, ScanError> {
 		let file_type = entry
 			.file_type()
 			.map_err(|_| ScanError::PermissionDenied(entry.path()))?;
-		if file_type.is_dir() && entry.path().join("SKILL.md").is_file() {
+		// `is_dir()` is FALSE for a symlink, and every grant is now a symlink,
+		// so a name-only test would call each one an orphan. Accept a link too
+		// and let the `SKILL.md` probe decide: that probe FOLLOWS the link, so a
+		// dangling Referrer still fails it and cannot false-present.
+		let usable = file_type.is_dir() || file_type.is_symlink();
+		if usable && entry.path().join("SKILL.md").is_file() {
 			dirs.push(entry.path());
 		}
 	}

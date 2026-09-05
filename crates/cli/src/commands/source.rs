@@ -891,16 +891,7 @@ fn sync(args: SyncArgs) -> Result<()> {
 	// Default is one agent (claude).
 	let target_agents: Vec<AgentType> = match &selection {
 		AgentSelection::All => {
-			use aghub_core::skills::linker::{
-				agent_link_need, master_store_dir, LinkNeed,
-			};
-			let master =
-				master_store_dir(project_root.as_deref()).ok_or_else(|| {
-					anyhow::anyhow!(
-						"could not resolve the universal master skills \
-						 directory"
-					)
-				})?;
+			use aghub_core::skills::linker::{agent_link_need, LinkNeed};
 			// Iterate the registry in its stable order (claude first) and
 			// keep agents that can hold a skill here. `agent_link_need` is
 			// the probe-free classifier — no per-agent availability

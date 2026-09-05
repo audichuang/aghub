@@ -9,7 +9,7 @@
 //! defined in one place and can never drift.
 
 use aghub_core::skills::linker::classify::{classify_all, LinkNeed};
-use aghub_core::skills::linker::{master_store_dir, AgentSkillCoverageView};
+use aghub_core::skills::linker::AgentSkillCoverageView;
 use anyhow::Result;
 use tabled::builder::Builder;
 use tabled::settings::Style;
