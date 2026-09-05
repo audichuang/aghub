@@ -11844,9 +11844,17 @@ fn skill_usage_refuses_project_and_all_scopes() {
 //
 // Both were committed AHEAD of the implementation on purpose — an acceptance
 // test written after the fact only ever proves the implementation matches
-// itself. The first is live now that the linker cascade has landed
-// (`master_store_dir` + the `LinkNeed::NativeReader` deletion); the second
-// stays `#[ignore]`d until `verify_shape` is wired into `RemovalOutcome`.
+// itself. BOTH ARE LIVE: the first since the linker cascade landed
+// (`master_store_dir` + the `LinkNeed::NativeReader` deletion), the second
+// since `verify_shape` was wired into `RemovalOutcome::preview`/`commit`.
+//
+// One correction the implementation forced on the spec: acceptance Test 2 was
+// written expecting the DEFAULT agent to see the clobbered slot. It does not —
+// claude has its own directory and never reads `.agents/skills`, so `absent`
+// was the honest answer and the test targets `-a cursor` instead. And what it
+// proves is D4 DETECTION, not deletion-prevention; the prevention proof is
+// `removal::tests::commit_refuses_a_forked_copy_before_deleting_anything`.
+// Each test's own doc comment carries the detail.
 // ---------------------------------------------------------------------------
 
 /// THE central promise: installing for one agent grants it to that agent ONLY.

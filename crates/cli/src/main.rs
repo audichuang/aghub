@@ -1132,8 +1132,13 @@ fn render_removal(
 	// desktop consumers were fixed and the CLI's own human output was not.
 	if payload.get("outcome").and_then(|v| v.as_str()) == Some("kept") {
 		return format!(
-			"{} '{name}' was NOT removed: this agent still reads it from the \
-			 shared .agents/skills master afterwards. Delete it for all agents \
+			// Deliberately does NOT name a directory. The Master moved to the
+			// `.aghub` store, and this string still said `.agents/skills` —
+			// sending anyone who followed it to look in the wrong place. The
+			// path is not needed to act on the message anyway; the two
+			// remedies are.
+			"{} '{name}' was NOT removed: this agent still reads it from a \
+			 master shared with other agents. Delete it for all agents \
 			 (--all-agents), or remove it from the other agents sharing that \
 			 master first.\n",
 			resource.singular()
@@ -1220,9 +1225,11 @@ fn render_removal(
 			out.push_str(&format!("  {p}\n"));
 		}
 		out.push_str(
-			"note: the .agents/skills Master above is NOT removed. `source \
-			 sync` refuses to overwrite an existing Master, so delete it by \
-			 hand before reinstalling this skill from git.\n",
+			// The path is printed immediately above, so naming a directory
+			// here was redundant AND wrong once the store moved to `.aghub`.
+			"note: the Master listed above is NOT removed. `source sync` \
+			 refuses to overwrite an existing Master, so delete it by hand \
+			 before reinstalling this skill from git.\n",
 		);
 	}
 	if let Some(err) = payload.get("prune_error").and_then(|v| v.as_str()) {
