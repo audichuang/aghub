@@ -37,8 +37,8 @@ pub mod validator;
 // Re-export commonly used items
 pub use error::SkillError;
 pub use hash::{
-	compute_skill_folder_hash, is_placeholder_digest, HashError,
-	EMPTY_SKILLS_LOCK_DIGEST,
+	collect_skill_files, compute_skill_folder_hash, is_placeholder_digest,
+	HashError, EMPTY_SKILLS_LOCK_DIGEST,
 };
 pub use install::{
 	discover_repo_skills, lock_skill_file_path, select_repo_skills,

@@ -52,6 +52,14 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 			code,
 			status: Status::BadRequest,
 		},
+		// The findings themselves stay in the server log: `message` is
+		// `&'static str` by design, and the surface that should render a rule
+		// list is a UI, not an error string.
+		ResyncError::Audit(_) => SafeResyncError {
+			message: "Skill update was refused by the security audit",
+			code,
+			status: Status::BadRequest,
+		},
 		ResyncError::OutOfTree(_) => SafeResyncError {
 			message: "Refusing to sync out-of-tree target",
 			code,

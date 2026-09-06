@@ -521,6 +521,11 @@ pub fn accept_rename(
 			} else {
 				LinkTarget::Absolute
 			},
+			// Freshly fetched content, so it audits like any other install.
+			// No override here: accepting a rename is not the place to argue
+			// with a malicious verdict — delete and re-add with
+			// `--force-unsafe` if the finding is a reviewed false positive.
+			force_unsafe: false,
 		};
 	let install_report =
 		match crate::skills::install_fetched::install_fetched_skill_and_lock(

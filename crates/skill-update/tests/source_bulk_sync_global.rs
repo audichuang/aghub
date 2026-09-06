@@ -180,6 +180,7 @@ fn global_source_row_covers_only_its_own_origin() {
 				names: &names,
 				scope: ResourceScope::GlobalOnly,
 				project_root: None,
+				force_unsafe: false,
 			},
 			&fetcher,
 			&PerSourceToken,

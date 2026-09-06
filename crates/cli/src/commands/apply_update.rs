@@ -10,6 +10,7 @@ pub fn execute(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	yes: bool,
+	force_unsafe: bool,
 	json: bool,
 ) -> Result<()> {
 	match resource {
@@ -26,6 +27,7 @@ pub fn execute(
 			name: &name,
 			scope,
 			project_root,
+			force_unsafe,
 		},
 		&skill_update::GitFetcher::new(),
 		&crate::commands::source::EnvTokenResolver,

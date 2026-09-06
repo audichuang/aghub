@@ -645,6 +645,9 @@ pub(crate) async fn apply_skill_update_inner(
 				name: &name,
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
+				// No "apply anyway" affordance in the desktop yet; the
+				// CLI's --force-unsafe is the escape hatch.
+				force_unsafe: false,
 			},
 			fetcher,
 			resolver,
@@ -721,6 +724,9 @@ pub(crate) async fn apply_skill_updates_inner(
 				names: &names,
 				scope: resource_scope,
 				project_root: project_root.as_deref(),
+				// No "apply anyway" affordance in the desktop yet; the
+				// CLI's --force-unsafe is the escape hatch.
+				force_unsafe: false,
 			},
 			fetcher,
 			resolver,

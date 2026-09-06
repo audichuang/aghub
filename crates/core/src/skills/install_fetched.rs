@@ -59,6 +59,9 @@ pub struct FetchedSkillInstallRequest<'a> {
 	/// Link style: relative links (project scope, portable) vs absolute
 	/// (global scope). Junctions always resolve absolute regardless.
 	pub target: LinkTarget,
+	/// Install even when the security audit calls the fetched source malicious.
+	/// The audit is a heuristic; a reviewed false positive must stay installable.
+	pub force_unsafe: bool,
 }
 
 /// Result of [`install_fetched_skill_and_lock`].
@@ -407,6 +410,14 @@ pub fn install_fetched_skill_and_lock(
 	.map_err(crate::ConfigError::Io)?;
 
 	let source_root = skill_source_root(req.skill_file);
+	// Under the mutation lock and BEFORE the first write, so a refusal leaves
+	// nothing half-installed. The update path gates the same way in
+	// `resync_installed_skill` — see `crate::skills::audit`.
+	crate::skills::audit::guard_fetched_source(
+		&name,
+		&source_root,
+		req.force_unsafe,
+	)?;
 	let safe_name = sanitize_name(&name);
 	let installed_hash = skill::compute_skill_folder_hash(&source_root)
 		.map_err(|e| {
@@ -857,6 +868,7 @@ mod nocopy_tests {
 			target_agents: &[AgentType::Claude],
 			expected_name: None,
 			target: LinkTarget::Relative,
+			force_unsafe: false,
 		};
 		let report = install_fetched_skill_and_lock(req).unwrap();
 		assert_eq!(report.name, "my-skill");
@@ -910,6 +922,7 @@ mod nocopy_tests {
 			target_agents: &[AgentType::Claude],
 			expected_name: None,
 			target: LinkTarget::Relative,
+			force_unsafe: false,
 		};
 		let report = install_fetched_skill_and_lock(req).unwrap();
 		assert!(report.wrote_lock, "lock must be written");

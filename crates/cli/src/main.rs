@@ -378,6 +378,13 @@ enum Commands {
 		/// refuses outright — it has no preview mode.
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
+
+		/// Apply even when the security audit calls the fetched update
+		/// malicious. Publishing something benign and pushing a malicious
+		/// update later is exactly what the audit watches for here, so override
+		/// only after reading the diff.
+		#[arg(long = "force-unsafe")]
+		force_unsafe: bool,
 	},
 	/// Prune skill lock entries whose skill is no longer on disk (skills only).
 	///
@@ -555,6 +562,12 @@ pub enum SourceAction {
 		/// Actually install/update. Without it sync only previews.
 		#[arg(long)]
 		yes: bool,
+		/// Install/update even when the security audit calls fetched content
+		/// malicious. Applies to every skill this run touches — the audit is a
+		/// heuristic, but "publish something benign, push a malicious update"
+		/// is precisely what it watches for here.
+		#[arg(long = "force-unsafe")]
+		force_unsafe: bool,
 	},
 	/// Accept an upstream rename: install the new name and remove the old one
 	/// as a single transaction (rolls back on any failure).
@@ -853,6 +866,7 @@ fn run(cli: Cli) -> Result<()> {
 		resource,
 		name,
 		yes,
+		force_unsafe,
 	} = &cli.command
 	{
 		let resolved = resolve_cli_scope(&cli)?;
@@ -862,6 +876,7 @@ fn run(cli: Cli) -> Result<()> {
 			resolved.resource_scope(),
 			resolved.project_root(),
 			*yes,
+			*force_unsafe,
 			cli.json,
 		);
 	}

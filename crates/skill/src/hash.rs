@@ -70,6 +70,24 @@ pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
 	Ok(format!("{:x}", hasher.finalize()))
 }
 
+/// Every regular file under `dir`, as `(path relative to `dir`, absolute path)`.
+///
+/// Shares the traversal of [`compute_skill_folder_hash`], so the bounds
+/// (`MAX_FILES` / `MAX_TOTAL_BYTES` / `MAX_DEPTH`) and the symlink policy have
+/// ONE definition — an auditor and the hash can never disagree about what a
+/// skill folder contains.
+///
+/// Order is filesystem order, NOT the collated order the hash uses. Nothing
+/// here may be fed back into a digest; use the hash for that.
+pub fn collect_skill_files(
+	dir: &Path,
+) -> Result<Vec<(String, std::path::PathBuf)>, HashError> {
+	let mut files = Vec::new();
+	let mut total_bytes = 0;
+	collect(dir, dir, 0, &mut files, &mut total_bytes)?;
+	Ok(files)
+}
+
 fn update_hasher_from_file(
 	hasher: &mut Sha256,
 	path: &Path,

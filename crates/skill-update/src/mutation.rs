@@ -100,6 +100,8 @@ pub struct FetchedInstallRequest<'a> {
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
 	pub target_agents: &'a [AgentType],
+	/// Install even when the security audit calls the fetched source malicious.
+	pub force_unsafe: bool,
 }
 
 #[derive(Debug)]
@@ -143,6 +145,7 @@ pub fn install_fetched_source(
 		} else {
 			LinkTarget::Absolute
 		},
+		force_unsafe: request.force_unsafe,
 	})
 	.map_err(InstallMutationError::Install)
 }
@@ -242,6 +245,8 @@ pub struct FetchedResyncRequest<'a> {
 	/// fetch. Required: a caller whose capture found no entry has no mandate to
 	/// overwrite that skill and must refuse instead of syncing.
 	pub expected: aghub_core::skills::lock::EntryIdentity,
+	/// Apply even when the security audit calls the fetched update malicious.
+	pub force_unsafe: bool,
 }
 
 #[derive(Debug)]
@@ -271,6 +276,7 @@ pub fn resync_fetched_source(
 			project_root: request.project_root,
 			ref_commit: Some(fetched.oid()),
 			expected: request.expected,
+			force_unsafe: request.force_unsafe,
 		},
 	)
 	.map_err(ResyncMutationError::Resync)
@@ -280,6 +286,8 @@ pub struct LockedResyncRequest<'a> {
 	pub name: &'a str,
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
+	/// Apply even when the security audit calls the fetched update malicious.
+	pub force_unsafe: bool,
 }
 
 pub struct LockedSkillsResyncRequest<'a> {
@@ -300,6 +308,10 @@ pub struct LockedSkillsResyncRequest<'a> {
 	pub names: &'a [String],
 	pub scope: ResourceScope,
 	pub project_root: Option<&'a Path>,
+	/// Apply even when the security audit calls a fetched update malicious.
+	/// Applies to EVERY row in the batch — a per-row override would need a
+	/// per-row answer from the user, which no batch caller has.
+	pub force_unsafe: bool,
 }
 
 #[derive(Debug)]
@@ -706,6 +718,7 @@ pub fn resync_locked_skills(
 						scope: request.scope,
 						project_root: request.project_root,
 						expected: item.expected,
+						force_unsafe: request.force_unsafe,
 					},
 				)
 				.map_err(|error| match error {
@@ -740,6 +753,7 @@ pub fn resync_locked_skill(
 			names: &names,
 			scope: request.scope,
 			project_root: request.project_root,
+			force_unsafe: request.force_unsafe,
 		},
 		fetcher,
 		resolver,
@@ -954,6 +968,7 @@ mod tests {
 					Some(&project),
 				)
 				.expect("fixture entry exists"),
+				force_unsafe: false,
 			},
 		)
 		.expect("Fetched Source should Resync the installed skill");
@@ -1047,6 +1062,7 @@ mod tests {
 				names: &owned,
 				scope: ResourceScope::ProjectOnly,
 				project_root: Some(&project),
+				force_unsafe: false,
 			},
 			&StubFetcher { root: fetched_root },
 			&NoToken,
@@ -1140,6 +1156,7 @@ mod tests {
 				name: "sync-me",
 				scope: ResourceScope::ProjectOnly,
 				project_root: Some(&project),
+				force_unsafe: false,
 			},
 			&fetcher,
 			&Token,

@@ -1638,6 +1638,7 @@ fn install_test_clone(
 			} else {
 				aghub_core::skills::linker::LinkTarget::Absolute
 			},
+			force_unsafe: false,
 		},
 	)
 	.map_err(|error| ApiError::from(error).body.error)
@@ -1902,6 +1903,11 @@ pub(crate) async fn install_skill_with_repo(
 							scope: resource_scope,
 							project_root: project_root.as_deref(),
 							target_agents: &agent_types,
+							// The desktop has no "install anyway"
+							// affordance yet, so the API never forces.
+							// The CLI's --force-unsafe is the escape
+							// hatch for a reviewed false positive.
+							force_unsafe: false,
 						},
 					)
 					.map_err(fetched_install_error_message)
@@ -2602,6 +2608,9 @@ pub async fn git_install_skills(
 					scope: resource_scope,
 					project_root: project_root.as_deref(),
 					target_agents: &target_agents,
+					// No "install anyway" affordance in the desktop yet;
+					// the CLI's --force-unsafe is the escape hatch.
+					force_unsafe: false,
 				},
 			) {
 				Ok(report) => {
@@ -2821,6 +2830,9 @@ pub async fn git_sync_skill(
 				// Captured before the fetch above, and proven present as of then
 				// by the check directly above.
 				expected: pre_fetch_identity,
+				// No "apply anyway" affordance in the desktop yet; the
+				// CLI's --force-unsafe is the escape hatch.
+				force_unsafe: false,
 			},
 		)
 		.map_err(|e| match e {
@@ -5836,6 +5848,7 @@ mod tests {
 				target_agents: &target_agents,
 				expected_name: None,
 				target: aghub_core::skills::linker::LinkTarget::Relative,
+				force_unsafe: false,
 			};
 
 		let report =
