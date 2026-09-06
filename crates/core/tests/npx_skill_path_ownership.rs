@@ -380,6 +380,61 @@ fn delete_refuses_when_the_agent_keeps_reading_it_from_the_master() {
 	);
 }
 
+/// Grok reads the universal Master slot too, so unlinking its private Referrer
+/// takes nothing away.
+///
+/// Grok's own docs say it scans `.agents/skills/` "at each tier (alongside
+/// `.grok/`)". Before that was modelled, aghub believed grok read ONLY
+/// `.grok/skills`, so `delete -a grok -p` unlinked the Referrer and reported
+/// `removed` while grok kept loading the identical skill from the Master one
+/// directory over. The refusal below is the user-visible consequence of telling
+/// the truth about the read set — verify by deleting `.agents/skills` from
+/// `grok::project_skills_paths` and watching this go green with the skill gone.
+#[cfg(unix)]
+#[test]
+fn grok_delete_refuses_when_the_master_slot_still_serves_it() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let master = root.join(".agents/skills/shared");
+	write_skill_md(&master, "shared");
+	let referrer = root.join(".grok/skills/shared");
+	std::fs::create_dir_all(referrer.parent().unwrap()).unwrap();
+	symlink(&master, &referrer);
+
+	let mut mgr =
+		ConfigManager::new(create_adapter(AgentType::Grok), false, Some(root));
+	mgr.load().unwrap();
+	assert!(
+		mgr.get_skill("shared").is_some(),
+		"grok must discover the skill through its own Referrer"
+	);
+
+	// Unconfirmed first: a preview the commit would refuse must say `kept`, not
+	// pretend a removal is pending.
+	let preview = mgr
+		.remove_skill_planned("shared", false, true, false)
+		.expect("a preview must not error");
+	assert!(
+		preview.plan.shared_master_kept,
+		"the preview must disclose that the Master is what keeps serving it"
+	);
+
+	let error = mgr
+		.remove_skill_planned("shared", false, false, true)
+		.expect_err("removing grok's Referrer alone changes nothing it reads");
+	assert!(
+		error.to_string().contains("shared master"),
+		"the error must say why, got: {error}"
+	);
+
+	// Disk state is the real assertion: neither path may be touched.
+	assert!(
+		std::fs::symlink_metadata(&referrer).is_ok(),
+		"the Referrer must survive a refused removal"
+	);
+	assert!(master.join("SKILL.md").exists(), "the Master must survive");
+}
+
 /// A skill whose FOLDER name differs from its frontmatter `name` must not be
 /// reported as removed when the agent still reads it afterwards.
 ///
