@@ -33,17 +33,14 @@ export function NewToolsModal({
 						<Modal.Heading>{t("newToolsTitle")}</Modal.Heading>
 					</Modal.Header>
 					<Modal.Body className="grid gap-3 p-4">
+						{/* The body already names every agent via {{agents}};
+						    a bullet list under it just repeated them. */}
 						<p className="text-sm text-muted">
 							{t("newToolsBody", {
 								agents: agentLabels.join(", "),
 								count: skillCount,
 							})}
 						</p>
-						<ul className="list-inside list-disc text-sm text-foreground">
-							{agentLabels.map((label) => (
-								<li key={label}>{label}</li>
-							))}
-						</ul>
 					</Modal.Body>
 					<Modal.Footer>
 						<Button

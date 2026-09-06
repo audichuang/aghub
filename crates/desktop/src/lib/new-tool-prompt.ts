@@ -95,3 +95,57 @@ export function reconcileAddsForNewAgents(
 	}
 	return plans;
 }
+
+/** What a link attempt amounted to, and therefore whether the offer is done. */
+export type LinkAttemptOutcome =
+	/** Linked, or there was genuinely nothing left to link. Advance `lastKnown`. */
+	| "success"
+	/** Discovery has not caught up. Keep the offer alive; do not advance. */
+	| "retry"
+	/** Every link failed. */
+	| "failed"
+	/** Some links failed. */
+	| "partial";
+
+/**
+ * Decide the outcome of one "link existing skills to the new agent" run.
+ *
+ * `attempted === 0` has TWO causes and collapsing them into an error is what
+ * made the prompt unescapable: either discovery has not caught up (retry), or
+ * the new agent ALREADY reads every managed skill because its read paths
+ * include a shared directory — omp reads `~/.agents/skills` on top of its own
+ * `~/.omp/agent/skills`, so every locked skill is already visible to it and
+ * `reconcileAddsForNewAgents` correctly plans nothing. Only `success` advances
+ * `lastKnown`, so reporting that second case as an error left the modal open
+ * behind a red toast on every click, with 'skip' the only way out.
+ *
+ * `sawLockedSkills` is the discriminator: discovery returned at least one row
+ * for a lock-owned skill, so its silence is not the reason nothing was planned.
+ */
+export function linkAttemptOutcome(args: {
+	lockedCount: number;
+	attempted: number;
+	failed: number;
+	sawLockedSkills: boolean;
+}): LinkAttemptOutcome {
+	// No managed skills at all: nothing to link, and nothing failed.
+	if (args.lockedCount === 0) return "success";
+	if (args.attempted === 0) {
+		return args.sawLockedSkills ? "success" : "retry";
+	}
+	if (args.failed >= args.attempted) return "failed";
+	if (args.failed > 0) return "partial";
+	return "success";
+}
+
+/**
+ * Did discovery return any row for a skill the lock owns?
+ *
+ * Rows without an agent cannot be a reconcile source, so they do not count.
+ */
+export function sawLockedSkills(
+	skills: SkillAgentRow[],
+	lockedNames: ReadonlySet<string>,
+): boolean {
+	return skills.some((row) => !!row.agent && lockedNames.has(row.name));
+}

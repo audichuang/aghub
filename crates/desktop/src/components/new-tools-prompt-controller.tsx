@@ -9,8 +9,10 @@ import {
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
 import {
+	linkAttemptOutcome,
 	newToolPromptDelta,
 	reconcileAddsForNewAgents,
+	sawLockedSkills,
 	type NewToolPromptAgent,
 } from "../lib/new-tool-prompt";
 import {
@@ -204,26 +206,30 @@ export function NewToolsPromptController() {
 		// Advancing `lastKnown` marks this agent handled FOREVER, so it may only
 		// happen when there was nothing to do or everything succeeded. On any
 		// failure the prompt must stay available — otherwise one bad network
-		// moment permanently costs the user the offer.
-		if (lockedNames.size === 0) {
-			// No managed skills at all: nothing to link, and nothing failed.
-			toast.success(t("newToolsLinkSuccess"));
-		} else if (attempted === 0) {
-			// Locked skills exist but discovery has not caught up, so no plan
-			// was built. Not a success, and not something to record as done.
+		// moment permanently costs the user the offer. The verdict has ONE home
+		// (`linkAttemptOutcome`) so this branch cannot drift back into treating
+		// "already covered" as an error.
+		const outcome = linkAttemptOutcome({
+			lockedCount: lockedNames.size,
+			attempted,
+			failed,
+			sawLockedSkills: sawLockedSkills(skills, lockedNames),
+		});
+		if (outcome === "retry") {
 			toast.danger(t("newToolsLinkError"));
 			return;
-		} else if (failed === attempted) {
+		}
+		if (outcome === "failed") {
 			toast.danger(t("newToolsLinkError"));
 			return;
-		} else if (failed > 0) {
+		}
+		if (outcome === "partial") {
 			toast.danger(
 				t("newToolsLinkPartial", { failed, total: attempted }),
 			);
 			return;
-		} else {
-			toast.success(t("newToolsLinkSuccess"));
 		}
+		toast.success(t("newToolsLinkSuccess"));
 		await persistSeed(pendingSeed);
 	};
 

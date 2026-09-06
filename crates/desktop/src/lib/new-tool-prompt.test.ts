@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	eligibleAgentIds,
+	linkAttemptOutcome,
 	newToolPromptDelta,
 	reconcileAddsForNewAgents,
+	sawLockedSkills,
 	type NewToolPromptAgent,
 } from "./new-tool-prompt.ts";
 
@@ -135,5 +137,76 @@ test("an empty lock produces no plans at all", () => {
 			new Set(),
 		),
 		[],
+	);
+});
+
+test("an agent that already reads every managed skill is a success, not an error", () => {
+	// omp reads `~/.agents/skills` on top of its own dir, so discovery already
+	// lists every lock-owned skill under it and no plan has anything to add.
+	// Treating that as an error left the modal open forever: only a success
+	// advances `lastKnown`.
+	const skills = [
+		{ name: "pdf", agent: "omp" },
+		{ name: "pptx", agent: "omp" },
+	];
+	const locked = new Set(["pdf", "pptx"]);
+	const plans = reconcileAddsForNewAgents(skills, ["omp"], locked);
+	assert.deepEqual(plans, []);
+	assert.equal(
+		linkAttemptOutcome({
+			lockedCount: locked.size,
+			attempted: 0,
+			failed: 0,
+			sawLockedSkills: sawLockedSkills(skills, locked),
+		}),
+		"success",
+	);
+});
+
+test("no discovery row for any locked skill stays retryable", () => {
+	const locked = new Set(["pdf"]);
+	assert.equal(
+		linkAttemptOutcome({
+			lockedCount: locked.size,
+			attempted: 0,
+			failed: 0,
+			sawLockedSkills: sawLockedSkills([], locked),
+		}),
+		"retry",
+	);
+});
+
+test("a discovery row without an agent is not a usable source", () => {
+	assert.equal(
+		sawLockedSkills([{ name: "pdf", agent: null }], new Set(["pdf"])),
+		false,
+	);
+});
+
+test("link outcomes report failure and partial failure", () => {
+	const base = { lockedCount: 3, sawLockedSkills: true };
+	assert.equal(
+		linkAttemptOutcome({ ...base, attempted: 3, failed: 3 }),
+		"failed",
+	);
+	assert.equal(
+		linkAttemptOutcome({ ...base, attempted: 3, failed: 1 }),
+		"partial",
+	);
+	assert.equal(
+		linkAttemptOutcome({ ...base, attempted: 3, failed: 0 }),
+		"success",
+	);
+});
+
+test("an empty lock is a success even with nothing discovered", () => {
+	assert.equal(
+		linkAttemptOutcome({
+			lockedCount: 0,
+			attempted: 0,
+			failed: 0,
+			sawLockedSkills: false,
+		}),
+		"success",
 	);
 });
