@@ -1,14 +1,13 @@
 ---
 name: verify-desktop-ui
-description: Run aghub's desktop frontend headlessly against a real aghub-api and assert on what it actually renders — screenshots, DOM state, URL after a click. Use when a change to crates/desktop needs checking beyond typecheck/lint/unit tests, when reviewing someone else's desktop diff, when a claim like "clicking X opens Y" needs settling, or when a UI bug cannot be reproduced by reading code. Also use before shipping a desktop release.
+description: Verify aghub's desktop UI by launching the real frontend in headless Chromium (Playwright) against a real aghub-api — run it, screenshot it, and assert on the rendered DOM and on the URL after a click. Use when a change under crates/desktop needs checking beyond typecheck/lint/unit tests, when reviewing a desktop diff, when a claim like "clicking X opens Y" needs settling, or when a desktop UI bug cannot be reproduced by reading code; also on 跑一下桌面版 / 截圖看看 / 這頁點下去會怎樣 / 驗證桌面 UI. Not for aghub's CLI or its skill-install chain — that is the `verify` skill.
 ---
 
 # Verifying the desktop UI without opening a window
 
-`bun run typecheck && bun run lint:check && bun run test` all pass on a page
-that renders an empty list. They check types and pure helpers; they say nothing
-about what the app draws. `tauri dev` shows you, but it needs a display, throws
-a window onto the user's desktop, and cannot be scripted.
+`typecheck`, `lint` and the unit tests all pass on a page that renders an empty
+list; they never look at what is drawn. `tauri dev` does, but it needs a
+display, throws a window onto the user's desktop, and cannot be scripted.
 
 This runs the real frontend in headless Chromium against a real `aghub-api`, so
 you can screenshot it and assert on the DOM.
@@ -22,30 +21,55 @@ a plain browser and the app hangs on connection. Inject
 `window.__TAURI_INTERNALS__` before the page's first script and it believes it
 is inside Tauri — that is all `scripts/run-scenarios.mjs` does.
 
+## Before you start
+
+- `playwright-core` plus a downloaded chromium. The script hunts a few known
+  locations and exits 2 with instructions if it finds none; you can point it
+  with `PLAYWRIGHT_PATH`, or install with
+  `npx playwright@1.58.2 install chromium`.
+- `crates/desktop/node_modules` populated (`bun install`). Bun only.
+- **Ports 1420 and 8899 free.** This matters more than it sounds: vite uses
+  `strictPort`, so a busy 1420 kills it with the error buried in its log — and
+  the harness then happily drives whatever else is serving 1420. Another aghub
+  build there looks completely normal in the screenshot.
+
 ## Run it
 
 ```bash
-# 1. The API. Use the REPO's build, not ~/.cargo/bin — a stale installed copy
-#    404s on routes this branch added, and it looks like a frontend bug.
+ss -ltn | grep -E ':(1420|8899) ' && { echo "port busy"; exit 1; }
+
 cargo build -p aghub-api --bin aghub-api
+# The REPO's build, not ~/.cargo/bin — an older installed copy 404s on routes
+# this branch added, which reads as a frontend bug. It may also already be
+# running (the desktop app embeds one), so confirm 8899 is yours.
 setsid nohup ./target/debug/aghub-api --port 8899 > /tmp/api.log 2>&1 < /dev/null & disown
 
-# 2. The frontend (vite pins 1420, strictPort).
 cd crates/desktop && setsid nohup bun run dev > /tmp/vite.log 2>&1 < /dev/null & disown
+sleep 5 && grep -q "ready in" /tmp/vite.log || { cat /tmp/vite.log; exit 1; }
+curl -sf localhost:8899/api/v1/agents > /dev/null || { echo "api down"; exit 1; }
 
-# 3. Scenarios.
-node .claude/skills/verify-desktop-ui/scripts/run-scenarios.mjs scenarios.json --out shots
+# Write your scenarios first (shape below), then:
+node .claude/skills/verify-desktop-ui/scripts/run-scenarios.mjs \
+  /tmp/scenarios.json --out /tmp/aghub-shots
 ```
 
-`API_PORT`, `DEV_URL` and `PROJECTS` (a JSON file of `{id,name,path}` to seed as
-open projects, which is how you reach project scope) are the env knobs.
+Keep the scenarios file and the output under `/tmp` — neither is gitignored at
+the repo root. `API_PORT`, `DEV_URL` and `PROJECTS` (a JSON file of
+`{id,name,path}` seeded as open projects, which is how you reach project scope)
+are the env knobs.
 
-The API reads the real `~/.agents` and `~/.claude`, so **read-only scenarios are
-safe and mutating ones are not** — a scenario that installs or deletes a skill
-is operating on the user's actual machine. Keep scenarios to navigation and
-assertions unless the user asked for a mutation test.
+**Read-only scenarios do not mean read-only HTTP.** Simply loading `/skills`
+POSTs to `/skills/repair` several times; that is safe only because the endpoint
+defaults `dry_run` to true. The API reads the user's real `~/.agents` and
+`~/.claude`, so a scenario that installs, deletes or updates a skill is
+operating on their actual machine. Keep to navigation and assertions. If you
+genuinely must test a mutation, bring the API up under an isolated `HOME` + XDG
+the way the `verify` skill does, not against the real home.
 
 ## Scenario shape
+
+The acceptance scenarios in a `.scratch/<feature>/spec.md` written by
+`plan-desktop-ui` are what you translate into this format.
 
 ```json
 [
@@ -53,6 +77,7 @@ assertions unless the user asked for a mutation test.
 		"name": "source-deeplink",
 		"url": "/skills?source=owner/repo",
 		"settle": 4000,
+		"dark": false,
 		"steps": [
 			{
 				"eval": "({url: location.search, h1: document.querySelector('h1')?.innerText})"
@@ -66,40 +91,58 @@ assertions unless the user asked for a mutation test.
 ]
 ```
 
-Steps: `click` / `clickLast` (add `role` + `exact` for `getByRole`), `fill` +
-`value`, `eval` (any expression, promises awaited), `screenshot`, `wait`.
-Exit code is non-zero if any scenario threw.
+Per scenario: `url`, `settle`, optional `dark` and `viewport`. Steps: `click` /
+`clickLast` (add `role` + `exact` to go through `getByRole`), `fill` + `value`,
+`eval` (any expression, promises awaited), `screenshot`, `wait`. A key the
+dispatcher does not recognise is skipped silently, so a typo like `screenShot`
+produces a green scenario that did nothing.
 
 ## Traps, each of which cost real time here
 
-| Symptom                                  | Cause                                                                                                                                                                                                               |
-| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Every `goto` times out                   | `waitUntil: "networkidle"`. A source panel really fetches a git remote and the online update check takes ~40s. The script uses `domcontentloaded` + an explicit `settle`; raise `settle` rather than switching back |
-| Page stuck behind a welcome overlay      | `onboardingProgress` not seeded complete. The script seeds it; keep it if you edit the store                                                                                                                        |
-| Every store read is `undefined`          | `plugin:store\|get` must return `[value, exists]`, not the value                                                                                                                                                    |
-| `object null is not iterable` on startup | `plugin:menu\|*` must return `[rid, id]`                                                                                                                                                                            |
-| Clicked the wrong element                | aria-labels repeat: a list group header and the detail panel can share one. Use `clickLast`, or scope the selector                                                                                                  |
-| A click silently does nothing            | Raw `el.click()` inside `eval` does not drive React Aria. Use a `click` step                                                                                                                                        |
-| Rollup/badge assertions all read 0       | The online update check is real network. Those scenarios need `settle` around 45000                                                                                                                                 |
-| Your own shell dies, exit 144            | `pkill -f "aghub-api --port 8899"` matches the shell command string that contains it. Kill by PID from `pgrep`                                                                                                      |
+| Symptom                                    | Cause                                                                                                                                                                     |
+| ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Every `goto` times out                     | `waitUntil: "networkidle"`. A source panel really fetches a git remote. The script uses `domcontentloaded` + an explicit `settle`; raise `settle` rather than reverting   |
+| Page blank, `rows: 0`, no obvious error    | `plugin:store\|get` returned a bare value instead of `[value, exists]` — the plugin destructures it and throws `is not iterable` during store init, killing the whole app |
+| `object null is not iterable` on startup   | `plugin:menu\|*` must return `[rid, id]`                                                                                                                                  |
+| Clicks fail but `eval` assertions all pass | A welcome overlay: `onboardingProgress` was not seeded complete. Pure-`eval` scenarios stay green through this, so it hides well                                          |
+| Clicked the wrong element                  | aria-labels repeat — `在來源中檢視` appears 8 times on the skills page. Use `clickLast` for the detail panel, or scope the selector                                       |
+| A click times out at 8s on a visible thing | Something invisible is over it, usually a popover left open by the previous step. Close it, or click through a different affordance                                       |
+| Update badges / rollups all read absent    | The online check is real network and takes about a minute. Raise `settle` until the badge appears; ~45s was not always enough                                             |
+| Your own shell dies, exit 144              | A `pkill -f` or `pgrep -f` pattern that also matches the shell command string containing it. See Cleaning up                                                              |
 
 ## Reading the result
 
-The output is evidence, so treat it as evidence. When a line contradicts what
-you expected, the default is that **the output is right and your explanation is
-wrong**. Explaining an anomaly away as test noise ("probably clicked the wrong
-row") discards the one thing that would have found the bug — that exact mistake
-happened here, and the regression was caught two reviews later by someone
-reading code.
+Read `<out>/results.json`, and then **open the screenshots themselves**
+(`<out>/<scenario>.png`, plus `<scenario>-ERROR.png` for a failure). The step
+log says what the harness did; only the image says what the page looked like.
 
-This is also the reason the skill exists: a claim about _behavior_ ("clicking X
-opens Y", "this state updates when Z") is not settled by reading code. Two
-independent reviewers read the same sources here and produced a fluent, detailed,
-wrong mechanism. Running it took a minute and settled it.
+Two things the exit code will not tell you, so check them by eye:
+
+- **Console errors do not fail the run.** A page that threw into an error
+  boundary still exits 0. The last line of each scenario block starts with
+  `console:` — read it.
+- **A dead API does not fail the run either.** The shim answers `start_server`
+  unconditionally, so with no API up every request fails, the page renders its
+  empty state, and every assertion "passes". That is why the readiness checks
+  are in Run it.
+
+Exit codes: **2** means the harness never started (no Playwright, missing
+scenarios file); **1** means a scenario threw; **0** means every scenario ran to
+the end, which is not the same as every scenario being right.
+
+When a line contradicts what you expected, the default is that **the output is
+right and your explanation is wrong**. Explaining an anomaly away as test noise
+("probably clicked the wrong row") discards the one thing that would have found
+the bug — that exact mistake happened here, and the regression surfaced two
+reviews later instead.
 
 ## Cleaning up
 
+Kill by PID, and get the PID from the port rather than from a pattern — a
+pattern wide enough to match the process is also wide enough to match the shell
+you are typing it into, and that is the exit-144 trap above.
+
 ```bash
-pgrep -f "bin/vite" | xargs -r kill
-pgrep -f "target/debug/aghub-api --port 8899" | xargs -r kill
+ss -ltnp 'sport = :1420' 'sport = :8899' |
+  grep -oP 'pid=\K[0-9]+' | sort -u | xargs -r kill
 ```
