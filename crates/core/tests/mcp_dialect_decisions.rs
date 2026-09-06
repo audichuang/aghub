@@ -433,6 +433,19 @@ const ROWS: &[Row] = &[
 		Rejected,
 		Rejected
 	),
+	// omp introduces no new dialect — it is `json_map` with a `transport` tag
+	// and a native `enabled` toggle — and still owes a row: the requirement is
+	// registry-driven precisely so "it's just the shared parser" cannot be the
+	// reason nobody wrote down what it does.
+	row!(
+		"omp",
+		MAP,
+		Rejected,
+		PresenceFallback,
+		PreservedVerbatim,
+		NotApplicable,
+		Spelled
+	),
 ];
 
 // ── Probes ───────────────────────────────────────────────────────────────────

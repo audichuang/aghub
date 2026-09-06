@@ -62,14 +62,25 @@ fn save_mcps(
 	)
 }
 
+// Grok's own docs (`~/.grok/docs/user-guide/08-skills.md`) say it scans
+// `.agents/skills/` "at each tier (alongside `.grok/`)" — so the universal
+// Master slot is read at BOTH global and project scope, not just project.
+// Its `[compat.claude]`/`[compat.cursor]` scanning of `~/.claude/skills` and
+// `~/.cursor/skills` is deliberately NOT modelled: decision #11 in
+// `docs/specs/2026-08-30-skills-hub-borrow-path.md` — an agent never reads
+// another agent's private dir. Own dir stays FIRST (first-dir-wins decides
+// `source_path`, i.e. what `remove_skill` deletes).
 fn global_skills_paths() -> Vec<PathBuf> {
-	grok_home()
-		.map(|home| vec![home.join("skills")])
-		.unwrap_or_default()
+	let (Some(grok), Some(home)) = (grok_home(), home_dir()) else {
+		return grok_home()
+			.map(|grok| vec![grok.join("skills")])
+			.unwrap_or_default();
+	};
+	vec![grok.join("skills"), home.join(".agents/skills")]
 }
 
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".grok/skills")]
+	vec![root.join(".grok/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -161,8 +172,11 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	cli_name: "grok",
 	validate_args: &["--version"],
 	project_markers: &[".grok"],
-	// Grok is not an `npx skills` registry target (same as hermes/zed).
-	skills_cli_name: None,
+	// `vercel-labs/skills` registers grok as `grok`
+	// (`skillsDir: '.grok/skills'`, `globalSkillsDir: join(grokHome, 'skills')`).
+	// Inert metadata today: nothing in the workspace builds a command from
+	// `skills_cli_name` — only the descriptor regression table reads it.
+	skills_cli_name: Some("grok"),
 };
 
 #[cfg(test)]

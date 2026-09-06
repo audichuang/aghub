@@ -15,6 +15,7 @@ pub mod kilocode;
 pub mod kimi;
 pub mod kiro;
 pub mod mistral;
+pub mod omp;
 pub mod openclaw;
 pub mod opencode;
 pub mod pi;
@@ -62,4 +63,5 @@ pub const ALL_DESCRIPTORS: &[&AgentDescriptor] = &[
 	&warp::DESCRIPTOR,
 	&hermes::DESCRIPTOR,
 	&grok::DESCRIPTOR,
+	&omp::DESCRIPTOR,
 ];

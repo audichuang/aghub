@@ -44,7 +44,33 @@
 9. **破壞性預設 dry-run 不變。** `apply-update` 無 `--yes` 仍拒絕。
 10. **跨行程 `MutationGuard` 不可繞過。** 排程／reconcile／install 都走既有持鎖路徑。
 11. **一個 agent 讀自己的 dir + 映射的 Master，永不讀別的 agent 私有 dir。**
-12. **路徑 SSOT 是 npx `agents.ts` + vendor + 已核過的 aghub descriptor，不是 skills-hub 的 `tool_adapters` 表。** 尤其：Antigravity 全域是 `.gemini/antigravity/skills`（不是 skills-hub 的 `.gemini/config/skills`）；Trae 無 attested global skills（`UPSTREAM.md` `b95e1f61`）；OpenClaw 已 fallback clawdbot／moltbot，不當新 `AgentType`；Junie ≠ JetBrains AI。
+12. **路徑 SSOT 是 npx `agents.ts` + vendor + 已核過的 aghub descriptor，不是 skills-hub 的 `tool_adapters` 表。** 尤其：~~Antigravity 全域是 `.gemini/antigravity/skills`（不是 skills-hub 的 `.gemini/config/skills`）~~（**2026-09-06 推翻，見下**）；Trae 無 attested global skills（`UPSTREAM.md` `b95e1f61`）；OpenClaw 已 fallback clawdbot／moltbot，不當新 `AgentType`；Junie ≠ JetBrains AI。
+
+    > **2026-09-06 修訂 — Antigravity 全域 skills 改為 `.gemini/config/skills`。**
+    > 當初選 `.gemini/antigravity/skills` 是因為 npx `agents.ts` 這麼寫，而把
+    > skills-hub 的 `.gemini/config/skills` 當成不可信的第二來源。重查後發現**這條
+    > 決策自己排的 SSOT 順序就指向反面**：vendor 排在 `agents.ts` 前面，而 vendor
+    > 現行文件明寫全域是 `.gemini/config/skills`。
+    >
+    > 證據：
+    > - `antigravity.google/docs/skills/`（現行合併頁）：全域
+    >   `~/.gemini/config/skills/<skill-folder>/`，並註明「Available across all
+    >   Antigravity products（Antigravity、Antigravity IDE、Antigravity CLI）」。
+    > - Antigravity CLI（`agy`）二進位內嵌的官方 docs：「**Global Discovery**:
+    >   `~/.gemini/config/`」，migrate 對照表寫 `~/.gemini/config/skills/<name>/SKILL.md`。
+    > - `antigravity.google/docs/ide/skills/`（IDE 專頁，舊）仍寫
+    >   `~/.gemini/antigravity/skills/`；`agents.ts` 抄的是這一個。
+    > - `antigravity.google/docs/cli/plugins/`：CLI 另有
+    >   `~/.gemini/antigravity-cli/skills/`。
+    > - 旁證：同一個 descriptor 的 MCP 全域路徑早就是
+    >   `.gemini/config/mcp_config.json`，`agy` changelog 也記載
+    >   `~/.gemini/antigravity/mcp_config.json` 是 legacy 已 migrate 過去。
+    >   skills 留在舊路徑等於同一個 descriptor 自相矛盾。
+    >
+    > 新形狀：**寫**入 `.gemini/config/skills`；**讀**三個都讀
+    > （`.gemini/config/skills` → `.gemini/antigravity/skills` →
+    > `.gemini/antigravity-cli/skills`），已發佈版本裝進舊路徑的技能不會被孤立。
+    > 決策 #11（不讀別的 agent 私有 dir）不受影響 — 這三個都是 Antigravity 自己的。
 
 ---
 

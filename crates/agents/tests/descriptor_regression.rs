@@ -198,7 +198,7 @@ fn descriptor_matrix_covers_every_agent_type() {
 #[test]
 fn test_cli_names() {
 	// Expected values from main branch descriptor files
-	let expected: [(AgentType, &str); 25] = [
+	let expected: [(AgentType, &str); 26] = [
 		(AgentType::Claude, "claude"),
 		(AgentType::Codex, "codex"),
 		(AgentType::Openclaw, "openclaw"),
@@ -224,6 +224,7 @@ fn test_cli_names() {
 		(AgentType::Factory, "factory"),
 		(AgentType::Hermes, "hermes"),
 		(AgentType::Grok, "grok"),
+		(AgentType::Omp, "omp"),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -244,7 +245,7 @@ fn test_cli_names() {
 
 #[test]
 fn test_skills_cli_names() {
-	let expected: [(AgentType, Option<&str>); 25] = [
+	let expected: [(AgentType, Option<&str>); 26] = [
 		(AgentType::Claude, Some("claude-code")), // main branch: "claude-code"
 		(AgentType::Codex, Some("codex")),
 		(AgentType::Openclaw, Some("openclaw")),
@@ -269,7 +270,8 @@ fn test_skills_cli_names() {
 		(AgentType::Warp, Some("warp")),
 		(AgentType::Factory, Some("factory")),
 		(AgentType::Hermes, None),
-		(AgentType::Grok, None),
+		(AgentType::Grok, Some("grok")),
+		(AgentType::Omp, None),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -290,7 +292,7 @@ fn test_skills_cli_names() {
 
 #[test]
 fn test_display_names() {
-	let expected: [(AgentType, &str); 25] = [
+	let expected: [(AgentType, &str); 26] = [
 		(AgentType::Claude, "Claude Code"), // main branch: "Claude Code"
 		(AgentType::Codex, "OpenAI Codex"),
 		(AgentType::Openclaw, "OpenClaw"),
@@ -316,6 +318,7 @@ fn test_display_names() {
 		(AgentType::Factory, "Factory"),
 		(AgentType::Hermes, "Hermes"),
 		(AgentType::Grok, "Grok"),
+		(AgentType::Omp, "Oh My Pi"),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -336,7 +339,7 @@ fn test_display_names() {
 
 #[test]
 fn test_project_markers() {
-	let expected: [(AgentType, &[&str]); 25] = [
+	let expected: [(AgentType, &[&str]); 26] = [
 		(AgentType::Claude, &[".claude", ".mcp.json"]), // main branch has both
 		(AgentType::Codex, &[".codex"]),
 		(AgentType::Openclaw, &[".openclaw"]),
@@ -368,6 +371,7 @@ fn test_project_markers() {
 		(AgentType::Factory, &[".factory"]),
 		(AgentType::Hermes, &[]),
 		(AgentType::Grok, &[".grok"]),
+		(AgentType::Omp, &[".omp"]),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -390,7 +394,7 @@ fn test_project_markers() {
 #[test]
 fn test_mcp_global_paths() {
 	let _env = default_env();
-	let expected: [(AgentType, Option<&str>); 25] = [
+	let expected: [(AgentType, Option<&str>); 26] = [
 		(AgentType::Claude, Some(".claude.json")),
 		(AgentType::Codex, Some(".codex/config.toml")),
 		(AgentType::Openclaw, Some(".openclaw/openclaw.json")),
@@ -426,6 +430,7 @@ fn test_mcp_global_paths() {
 		// Platform-dependent home — asserted explicitly below.
 		(AgentType::Hermes, Some("")),
 		(AgentType::Grok, Some(".grok/config.toml")),
+		(AgentType::Omp, Some(".omp/agent/mcp.json")),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -505,7 +510,7 @@ fn test_mcp_global_paths() {
 
 #[test]
 fn test_mcp_project_paths() {
-	let expected: [(AgentType, Option<&str>); 25] = [
+	let expected: [(AgentType, Option<&str>); 26] = [
 		(AgentType::Claude, Some(".mcp.json")),
 		(AgentType::Codex, Some(".codex/config.toml")),
 		(AgentType::Openclaw, None), // Openclaw has no project MCP path
@@ -531,6 +536,7 @@ fn test_mcp_project_paths() {
 		(AgentType::Warp, Some(".warp/.mcp.json")),
 		(AgentType::Hermes, None),
 		(AgentType::Grok, Some(".grok/config.toml")),
+		(AgentType::Omp, Some(".omp/mcp.json")),
 	];
 
 	let root = PathBuf::from("/project");
@@ -663,7 +669,7 @@ fn opencode_project_mcp_defaults_to_root_config() {
 #[test]
 fn test_global_data_dirs() {
 	let _env = default_env();
-	let expected: [(AgentType, Option<&str>); 21] = [
+	let expected: [(AgentType, Option<&str>); 22] = [
 		(AgentType::Claude, Some(".claude")),
 		(AgentType::Codex, Some(".codex")),
 		(AgentType::Openclaw, Some(".openclaw")),
@@ -688,6 +694,7 @@ fn test_global_data_dirs() {
 		(AgentType::Factory, Some(".factory")),
 		// Hermes uses a platform-dependent home — asserted after the loop.
 		(AgentType::Grok, Some(".grok")),
+		(AgentType::Omp, Some(".omp/agent")),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -749,7 +756,7 @@ fn test_global_data_dirs() {
 
 #[test]
 fn test_mcp_capabilities_stdio() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -775,6 +782,7 @@ fn test_mcp_capabilities_stdio() {
 		(AgentType::Factory, true),
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -794,7 +802,7 @@ fn test_mcp_capabilities_stdio() {
 
 #[test]
 fn test_mcp_capabilities_remote() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -820,6 +828,7 @@ fn test_mcp_capabilities_remote() {
 		(AgentType::Factory, true),
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -839,7 +848,7 @@ fn test_mcp_capabilities_remote() {
 
 #[test]
 fn test_mcp_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -865,6 +874,7 @@ fn test_mcp_capabilities_scopes_global() {
 		(AgentType::Factory, true),
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -884,7 +894,7 @@ fn test_mcp_capabilities_scopes_global() {
 
 #[test]
 fn test_mcp_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false), // Openclaw has no project MCP
@@ -910,6 +920,7 @@ fn test_mcp_capabilities_scopes_project() {
 		(AgentType::Factory, true),
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -929,7 +940,7 @@ fn test_mcp_capabilities_scopes_project() {
 
 #[test]
 fn test_mcp_capabilities_enable_disable() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, false),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -957,6 +968,7 @@ fn test_mcp_capabilities_enable_disable() {
 		(AgentType::Factory, false),
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -979,7 +991,7 @@ fn test_mcp_capabilities_enable_disable() {
 
 #[test]
 fn test_skills_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -1005,6 +1017,7 @@ fn test_skills_capabilities_scopes_global() {
 		(AgentType::Factory, true),
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1024,7 +1037,7 @@ fn test_skills_capabilities_scopes_global() {
 
 #[test]
 fn test_skills_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false), // Openclaw has no project skills
@@ -1050,6 +1063,7 @@ fn test_skills_capabilities_scopes_project() {
 		(AgentType::Factory, true),
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
+		(AgentType::Omp, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1069,7 +1083,7 @@ fn test_skills_capabilities_scopes_project() {
 
 #[test]
 fn test_skills_capabilities_universal() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, false),
 		(AgentType::Codex, false),
 		(AgentType::Openclaw, false),
@@ -1095,6 +1109,7 @@ fn test_skills_capabilities_universal() {
 		(AgentType::Factory, false),
 		(AgentType::Hermes, false),
 		(AgentType::Grok, false),
+		(AgentType::Omp, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1118,16 +1133,16 @@ fn test_skills_capabilities_universal() {
 
 #[test]
 fn test_sub_agent_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true), // Claude has global sub-agents
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false),
 		(AgentType::OpenCode, true),
 		(AgentType::Gemini, false),
 		(AgentType::Cline, false),
-		(AgentType::Copilot, false),
+		(AgentType::Copilot, true),
 		(AgentType::Cursor, false),
-		(AgentType::Antigravity, false),
+		(AgentType::Antigravity, true),
 		(AgentType::Kiro, false),
 		(AgentType::Windsurf, false),
 		(AgentType::Trae, false),
@@ -1144,6 +1159,7 @@ fn test_sub_agent_capabilities_scopes_global() {
 		(AgentType::Factory, false),
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
+		(AgentType::Omp, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1163,16 +1179,16 @@ fn test_sub_agent_capabilities_scopes_global() {
 
 #[test]
 fn test_sub_agent_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 25] = [
+	let expected: [(AgentType, bool); 26] = [
 		(AgentType::Claude, true), // Claude has project sub-agents
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false),
 		(AgentType::OpenCode, true),
 		(AgentType::Gemini, false),
 		(AgentType::Cline, false),
-		(AgentType::Copilot, false),
+		(AgentType::Copilot, true),
 		(AgentType::Cursor, false),
-		(AgentType::Antigravity, false),
+		(AgentType::Antigravity, true),
 		(AgentType::Kiro, false),
 		(AgentType::Windsurf, false),
 		(AgentType::Trae, false),
@@ -1189,6 +1205,7 @@ fn test_sub_agent_capabilities_scopes_project() {
 		(AgentType::Factory, false),
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
+		(AgentType::Omp, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1214,7 +1231,7 @@ fn test_sub_agent_capabilities_scopes_project() {
 fn test_global_skill_paths() {
 	let _env = default_env();
 	// Most agents have single skill path, Claude has dynamic plugin discovery
-	let expected: [(AgentType, Option<&[&str]>); 25] = [
+	let expected: [(AgentType, Option<&[&str]>); 26] = [
 		// Claude: dynamic plugin discovery, base path is .claude/skills
 		(AgentType::Claude, Some(&[".claude/skills"])),
 		(
@@ -1229,7 +1246,11 @@ fn test_global_skill_paths() {
 		),
 		(AgentType::Gemini, Some(&[".gemini/skills"])),
 		(AgentType::Cline, Some(&[".agents/skills"])),
-		(AgentType::Copilot, Some(&[".copilot/skills"])),
+		(
+			AgentType::Copilot,
+			// Own dir + universal Master only — no foreign-agent private dirs.
+			Some(&[".copilot/skills", ".agents/skills"]),
+		),
 		(
 			AgentType::Cursor,
 			// Own dir + universal Master only — no foreign-agent private dirs.
@@ -1237,7 +1258,13 @@ fn test_global_skill_paths() {
 		),
 		(
 			AgentType::Antigravity,
-			Some(&[".gemini/antigravity/skills"]),
+			// Vendor moved the global root to `.gemini/config/`; the two older
+			// dirs stay READ-only so shipped installs are not stranded.
+			Some(&[
+				".gemini/config/skills",
+				".gemini/antigravity/skills",
+				".gemini/antigravity-cli/skills",
+			]),
 		),
 		(AgentType::Kiro, Some(&[".kiro/skills"])),
 		(AgentType::Windsurf, Some(&[".codeium/windsurf/skills"])),
@@ -1250,7 +1277,7 @@ fn test_global_skill_paths() {
 			Some(&[".config/agents/skills", ".config/agents/skills"]),
 		), // universal=true adds extra path
 		(AgentType::Mistral, Some(&[".vibe/skills"])),
-		(AgentType::Pi, Some(&[".pi/agent/skills"])),
+		(AgentType::Pi, Some(&[".pi/agent/skills", ".agents/skills"])),
 		(AgentType::AugmentCode, Some(&[".augment/skills"])),
 		(AgentType::KiloCode, Some(&[".kilocode/skills"])),
 		(
@@ -1259,7 +1286,11 @@ fn test_global_skill_paths() {
 		), // universal=true adds extra path
 		(AgentType::Warp, Some(&[".agents/skills"])),
 		(AgentType::Factory, Some(&[".factory/skills"])),
-		(AgentType::Grok, Some(&[".grok/skills"])),
+		(AgentType::Grok, Some(&[".grok/skills", ".agents/skills"])),
+		(
+			AgentType::Omp,
+			Some(&[".omp/agent/skills", ".agents/skills"]),
+		),
 		// Hermes has a platform-dependent home — asserted after the loop.
 		(AgentType::Hermes, Some(&[])),
 	];
@@ -1346,7 +1377,7 @@ fn test_global_skill_paths() {
 fn test_project_skill_paths() {
 	let root = PathBuf::from("/project");
 
-	let expected: [(AgentType, Option<&[&str]>); 25] = [
+	let expected: [(AgentType, Option<&[&str]>); 26] = [
 		(AgentType::Claude, Some(&[".claude/skills"])),
 		(AgentType::Codex, Some(&[".agents/skills"])),
 		(AgentType::Openclaw, None), // Openclaw has no project skills
@@ -1356,13 +1387,20 @@ fn test_project_skill_paths() {
 		),
 		(AgentType::Gemini, Some(&[".agents/skills"])),
 		(AgentType::Cline, Some(&[".agents/skills"])),
-		(AgentType::Copilot, Some(&[".agents/skills"])),
+		(
+			AgentType::Copilot,
+			Some(&[".agents/skills", ".github/skills"]),
+		),
 		(
 			AgentType::Cursor,
 			// Own dir + universal Master only — no foreign-agent private dirs.
 			Some(&[".cursor/skills", ".agents/skills"]),
 		),
-		(AgentType::Antigravity, Some(&[".agents/skills"])),
+		(
+			AgentType::Antigravity,
+			// `.agent/` is the vendor's own backward-compat alias.
+			Some(&[".agents/skills", ".agent/skills"]),
+		),
 		(AgentType::Kiro, Some(&[".kiro/skills"])),
 		(AgentType::Windsurf, Some(&[".windsurf/skills"])),
 		(AgentType::Trae, Some(&[".trae/skills"])),
@@ -1371,13 +1409,14 @@ fn test_project_skill_paths() {
 		(AgentType::RooCode, Some(&[".roo/skills"])),
 		(AgentType::Kimi, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
 		(AgentType::Mistral, Some(&[".vibe/skills"])),
-		(AgentType::Pi, Some(&[".pi/skills"])),
+		(AgentType::Pi, Some(&[".pi/skills", ".agents/skills"])),
 		(AgentType::AugmentCode, Some(&[".augment/skills"])),
 		(AgentType::KiloCode, Some(&[".kilocode/skills"])),
 		(AgentType::Amp, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
 		(AgentType::Warp, Some(&[".agents/skills"])),
 		(AgentType::Factory, Some(&[".factory/skills"])),
-		(AgentType::Grok, Some(&[".grok/skills"])),
+		(AgentType::Grok, Some(&[".grok/skills", ".agents/skills"])),
+		(AgentType::Omp, Some(&[".omp/skills", ".agents/skills"])),
 		(AgentType::Hermes, None),
 	];
 

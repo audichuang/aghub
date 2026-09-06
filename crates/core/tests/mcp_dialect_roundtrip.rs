@@ -35,6 +35,7 @@ const NATIVE_TOGGLE: &[&str] = &[
 	"kilocode",
 	"kiro",
 	"mistral",
+	"omp",
 	"openclaw",
 	"opencode",
 	"roocode",

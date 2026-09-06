@@ -413,6 +413,7 @@ pub enum AgentType {
 	JetBrainsAi,
 	Hermes,
 	Grok,
+	Omp,
 }
 
 impl AgentType {
@@ -442,6 +443,7 @@ impl AgentType {
 		AgentType::JetBrainsAi,
 		AgentType::Hermes,
 		AgentType::Grok,
+		AgentType::Omp,
 	];
 
 	pub fn as_str(&self) -> &'static str {
@@ -471,6 +473,7 @@ impl AgentType {
 			AgentType::JetBrainsAi => "jetbrains-ai",
 			AgentType::Hermes => "hermes",
 			AgentType::Grok => "grok",
+			AgentType::Omp => "omp",
 		}
 	}
 
@@ -563,6 +566,7 @@ impl std::str::FromStr for AgentType {
 			"jetbrains-ai" | "jetbrains" | "jb" => Ok(AgentType::JetBrainsAi),
 			"hermes" => Ok(AgentType::Hermes),
 			"grok" => Ok(AgentType::Grok),
+			"omp" | "oh-my-pi" => Ok(AgentType::Omp),
 			_ => Err(format!("Unknown agent type: {s}")),
 		}
 	}

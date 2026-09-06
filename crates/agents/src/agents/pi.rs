@@ -22,14 +22,21 @@ fn save_mcps(
 		"pi",
 	))
 }
+// Pi's own skills doc lists the universal Master slot alongside its private dir
+// at BOTH scopes: global `~/.pi/agent/skills` + `~/.agents/skills`, project
+// `.pi/skills` + `.agents/skills`. Own dir FIRST (first-dir-wins decides
+// `source_path`). Pi's configurable compat scanning of `~/.claude/skills` /
+// `~/.codex/skills` is deliberately not modelled — decision #11.
 fn global_skills_paths() -> Vec<PathBuf> {
 	match home_dir() {
-		Some(home) => vec![home.join(".pi/agent/skills")],
+		Some(home) => {
+			vec![home.join(".pi/agent/skills"), home.join(".agents/skills")]
+		}
 		None => Vec::new(),
 	}
 }
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".pi/skills")]
+	vec![root.join(".pi/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {

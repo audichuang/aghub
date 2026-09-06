@@ -974,6 +974,65 @@ url = "https://example.test/sse""#,
 toggled-off stdio run-off enabled=false
 untagged-plain streamable-http https://example.test/plain enabled=true"#
 	),
+	// omp is the FIRST `ToggleKey::Enabled` agent in `json_map`, and the only
+	// one whose tag is `transport`. Every shared const above therefore spells
+	// something omp does not, so it gets its own three — derived from the
+	// vendor contract, NOT from running the serializer:
+	//   "transport" in e && (e.transport === "stdio" | "sse" | "http")
+	//   e.transport ?? (e.command ? "stdio" : e.url ? "http" : "stdio")
+	// The `off` server MUST survive as `enabled: false`; a no-toggle dialect
+	// drops it entirely, which would silently remount a server the user
+	// switched off the next time aghub saved.
+	row!(
+		"omp",
+		MAP_READ,
+		r#"{
+  "mcpServers": {
+    "local": {
+      "args": [
+        "--flag",
+        "value"
+      ],
+      "command": "run-local",
+      "enabled": true,
+      "env": {
+        "TOKEN": "secret"
+      },
+      "transport": "stdio"
+    },
+    "off": {
+      "command": "run-off",
+      "enabled": false,
+      "transport": "stdio"
+    },
+    "remote": {
+      "enabled": true,
+      "headers": {
+        "Authorization": "Bearer t"
+      },
+      "transport": "http",
+      "url": "https://example.test/mcp"
+    }
+  }
+}"#,
+		r#"{
+  "mcpServers": {
+    "stream": {
+      "enabled": true,
+      "transport": "sse",
+      "url": "https://example.test/sse"
+    }
+  }
+}"#,
+		// `enabled` is read and `disabled` ignored, so `toggled-off` (which
+		// carries BOTH, in conflict) is OFF and `toggled-on` is ON — the
+		// opposite of what a `ToggleKey::Disabled` agent makes of the same file.
+		r#"http-key streamable-http https://example.test/sse/legacy enabled=true
+toggled-off stdio run-off enabled=false
+toggled-on stdio run-on enabled=true
+untagged-plain streamable-http https://example.test/plain enabled=true
+untagged-sse streamable-http https://example.test/sse/stream enabled=true"#
+	),
 ];
 
 // ── Assertions ───────────────────────────────────────────────────────────────
