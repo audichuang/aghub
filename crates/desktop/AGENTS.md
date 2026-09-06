@@ -57,6 +57,24 @@ codegen and a stale checkout ships a lying TypeScript contract. Everything else
       `"assertive"`) so it is announced without requiring focus to land on it —
       an inline error `<div>` with no live-region semantics is silent to a
       screen reader.
+- **`setLocation` does not move nuqs state on the SAME route.** The app pairs
+  wouter with `nuqs/adapters/react`: nuqs re-reads the query string on
+  `popstate` and on its own emitter, while wouter's navigate dispatches a custom
+  `pushState` event. Navigate to a different pathname and the page remounts, so
+  it works; navigate to the page you are already on and the address bar changes
+  while every `useQueryState` keeps its old value — the URL and the screen
+  disagree, which is worse than a dead button. A component that may be rendered
+  by the page owning those params (e.g. `SkillDetail` inside
+  `pages/settings/skills.tsx`) takes a callback and lets that page use its own
+  nuqs setter; `setLocation` stays as the cross-route fallback.
+- **Several ListBoxes sharing one selection must each receive only their own
+  keys.** Hand a per-group `ListBox` the global `selectedKeys` and React Aria
+  echoes the other groups' names back on every toggle, so the handler reads one
+  of THOSE as the row that was clicked — clicking a row in one group selects a
+  row in another. `useMultiSelect`'s `createGroupedSelectionHandler` is
+  necessary but NOT sufficient: also pass the intersection
+  (`plugin-list.tsx` and `skill-list.tsx` both show the shape). A single ListBox
+  owning the whole list keeps the plain `createSelectionHandler`.
 
 ### Desktop Integration
 
