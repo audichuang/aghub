@@ -16,7 +16,7 @@
 [English Version](./README.md)
 
 aghub 是一款桌面端应用**兼**命令行工具，用于跨全部
-[25 个支持的助手](#支持的助手)统一管理 **MCP 服务器、技能、子代理、推理供应商
+[26 个支持的助手](#支持的助手)统一管理 **MCP 服务器、技能、子代理、推理供应商
 以及 Claude Code 插件**。一次配置某项能力，即可部署到各处 —— aghub 直接读取你
 真实的配置文件，且只改动你明确要求的部分。
 
@@ -82,7 +82,7 @@ sudo xattr -dr com.apple.quarantine /Applications/aghub.app
 
 **统一 MCP 管理** —— 一次配置，部署到所有助手
 
-- 一次配置，部署到全部 25 个支持的助手
+- 一次配置，部署到全部 26 个支持的助手
 - 支持本地 Stdio 和远程（SSE 和 StreamableHttp）连线方式
 - 无需删除即可启用或禁用服务器
 - 单条命令查看和审计所有助手的服务器
@@ -131,12 +131,12 @@ sudo xattr -dr com.apple.quarantine /Applications/aghub.app
 
 ## 支持的助手
 
-25 个助手，一套统一界面：
+26 个助手，一套统一界面：
 
 Claude Code · Cursor · Windsurf · GitHub Copilot · Gemini CLI · OpenAI Codex ·
 OpenCode · Zed · Warp · Cline · RooCode · KiloCode · AugmentCode · Amp · Kiro ·
 Trae · Factory · Kimi Code CLI · Mistral Le Chat · Pi Coding Agent ·
-JetBrains AI · Hermes · Grok · Antigravity · OpenClaw
+JetBrains AI · Hermes · Grok · Antigravity · OpenClaw · Oh My Pi
 
 ## 贡献
 

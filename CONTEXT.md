@@ -25,7 +25,7 @@ A layout where a skill lives once as a shared Master and each agent's skills dir
 _Avoid_: "symlink mode" / "linked skill" as the canonical name.
 
 **Master**:
-The single `.aghub/<sanitized-name>` directory that every per-agent symlink resolves to. It lives in a store **no agent reads**, so materializing it grants nothing on its own; renaming or removing it is the operation that must account for every Referrer. It used to live at `.agents/skills/<name>` — a directory ten agent/scope combinations scan — which is why storing a skill there granted it to all of them.
+The single `.aghub/<sanitized-name>` directory that every per-agent symlink resolves to. It lives in a store **no agent reads**, so materializing it grants nothing on its own; renaming or removing it is the operation that must account for every Referrer. It used to live at `.agents/skills/<name>` — a directory many agent/scope combinations scan — which is why storing a skill there granted it to all of them.
 _Avoid_: "canonical dir" (that is the storage key), "source".
 
 **Master GC (on removal)**:
@@ -33,7 +33,7 @@ Removing a skill deletes the Master **only** once no view still references it. R
 _Avoid_: "removing any referrer GCs the Master" — a removal that leaves another Referrer standing does not, and the shared `.agents/skills` slot counts as one. Two authoritative rules, both in `crates/core/src/skills/removal.rs`: `plan_symlink_removal` for a Referrer-layout entry (`canonical_path` set), and `single_agent_keep_reason` for a Master discovered as a plain dir — the latter is shared verbatim by `plan_copy_removal` and by the `ConfigManager::remove_skill` seam, so no caller of the copy rule can take a Master — the GC above happens through `remove_skill_planned` (or `--all-agents`), never through the plain `remove_skill` seam.
 
 **Referrer**:
-An agent's skills entry that is a symlink resolving to a Master. When the Master is renamed or removed, its Referrers must be re-pointed or pruned. For GC purposes a real directory in the shared `.agents/skills` slot also counts as a referrer that keeps the Master alive — up to ten agents read it by scanning, leaving no link of their own.
+An agent's skills entry that is a symlink resolving to a Master. When the Master is renamed or removed, its Referrers must be re-pointed or pruned. For GC purposes a real directory in the shared `.agents/skills` slot also counts as a referrer that keeps the Master alive — many agents read it by scanning, leaving no link of their own.
 _Avoid_: "link", "alias".
 
 **Relink**:

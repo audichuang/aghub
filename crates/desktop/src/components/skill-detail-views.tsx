@@ -10,11 +10,8 @@ import * as pathe from "pathe";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { SkillTreeNodeResponse } from "../generated/dto";
-import {
-	formatAgentName,
-	getNodeChildren,
-	type LocationGroup,
-} from "./skill-detail-helpers";
+import { useAgentName } from "../hooks/use-agent-name";
+import { getNodeChildren, type LocationGroup } from "./skill-detail-helpers";
 
 export function SkillTree({ root }: { root: SkillTreeNodeResponse }) {
 	const items = flattenTree(root);
@@ -40,6 +37,7 @@ export function LocationRow({
 	onEditFolder: () => void;
 }) {
 	const { t } = useTranslation();
+	const agentName = useAgentName();
 	const folderPath = useMemo(
 		() => pathe.dirname(group.sourcePath),
 		[group.sourcePath],
@@ -84,7 +82,7 @@ export function LocationRow({
 					{Array.from(
 						new Set(
 							group.installations.map((installation) =>
-								formatAgentName(installation.agent),
+								agentName(installation.agent),
 							),
 						),
 					).join(", ")}

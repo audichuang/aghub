@@ -1,12 +1,9 @@
 import { Tooltip } from "@heroui/react";
 import { useMemo } from "react";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
+import { useAgentName } from "../hooks/use-agent-name";
 import { AgentIcon } from "../lib/agent-icons";
-import {
-	filterItemsByAgentIds,
-	formatAgentName,
-	sortAgents,
-} from "../lib/utils";
+import { filterItemsByAgentIds, sortAgents } from "../lib/utils";
 
 interface AgentIconsProps<T extends { agent?: string | null }> {
 	items: T[];
@@ -18,6 +15,7 @@ export function AgentIcons<T extends { agent?: string | null }>({
 	overflowVariant = "circle",
 }: AgentIconsProps<T>) {
 	const { allAgents, availableAgents } = useAgentAvailability();
+	const agentName = useAgentName();
 	const enabledAgentIds = useMemo(
 		() =>
 			new Set(
@@ -49,14 +47,12 @@ export function AgentIcons<T extends { agent?: string | null }>({
 					>
 						<AgentIcon
 							id={agentId}
-							name={formatAgentName(agentId)}
+							name={agentName(agentId)}
 							size="xs"
 							variant="ghost"
 						/>
 					</div>
-					<Tooltip.Content>
-						{formatAgentName(agentId)}
-					</Tooltip.Content>
+					<Tooltip.Content>{agentName(agentId)}</Tooltip.Content>
 				</Tooltip>
 			))}
 			{agents.length > 3 && (

@@ -17,7 +17,7 @@
 
 aghub is a desktop app **and** CLI for managing **MCP servers, skills,
 sub-agents, inference providers, and Claude Code plugins** across all
-[25 supported agents](#supported-agents). Configure a capability once and deploy
+[26 supported agents](#supported-agents). Configure a capability once and deploy
 it everywhere — aghub reads your real config files and changes only what you ask
 it to.
 
@@ -88,7 +88,7 @@ Then open the app normally. (Adjust the path if you haven't moved it to
 
 **Unified MCP Management** — one config, deployed to every agent
 
-- Configure once, deploy to any of the 25 supported agents
+- Configure once, deploy to any of the 26 supported agents
 - Stdio, SSE, and StreamableHttp transports
 - Enable or disable servers without removing them
 - View and audit servers across all agents in one command
@@ -138,12 +138,12 @@ Then open the app normally. (Adjust the path if you haven't moved it to
 
 ## Supported Agents
 
-25 agents, one interface:
+26 agents, one interface:
 
 Claude Code · Cursor · Windsurf · GitHub Copilot · Gemini CLI · OpenAI Codex ·
 OpenCode · Zed · Warp · Cline · RooCode · KiloCode · AugmentCode · Amp · Kiro ·
 Trae · Factory · Kimi Code CLI · Mistral Le Chat · Pi Coding Agent ·
-JetBrains AI · Hermes · Grok · Antigravity · OpenClaw
+JetBrains AI · Hermes · Grok · Antigravity · OpenClaw · Oh My Pi
 
 ## Contributing
 

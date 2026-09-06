@@ -30,6 +30,7 @@ import type {
 	UpdateSubAgentRequest,
 } from "../../generated/dto";
 import { useAgentAvailability } from "../../hooks/use-agent-availability";
+import { useAgentName } from "../../hooks/use-agent-name";
 import { useApi } from "../../hooks/use-api";
 import { AgentIcon } from "../../lib/agent-icons";
 import {
@@ -52,12 +53,9 @@ type PanelState =
 	| { type: "detail"; mergeKey: string }
 	| { type: "edit"; mergeKey: string };
 
-function formatAgentName(agent: string): string {
-	return agent.charAt(0).toUpperCase() + agent.slice(1).toLowerCase();
-}
-
 function SubAgentAgentIcons({ items }: { items: SubAgentResponse[] }) {
 	const { allAgents, availableAgents } = useAgentAvailability();
+	const agentName = useAgentName();
 	const enabledAgentIds = useMemo(
 		() =>
 			new Set(
@@ -88,15 +86,13 @@ function SubAgentAgentIcons({ items }: { items: SubAgentResponse[] }) {
 						>
 							<AgentIcon
 								id={agentId}
-								name={formatAgentName(agentId)}
+								name={agentName(agentId)}
 								size="xs"
 								variant="ghost"
 							/>
 						</div>
 					</Tooltip.Trigger>
-					<Tooltip.Content>
-						{formatAgentName(agentId)}
-					</Tooltip.Content>
+					<Tooltip.Content>{agentName(agentId)}</Tooltip.Content>
 				</Tooltip>
 			))}
 			{agents.length > 3 && (

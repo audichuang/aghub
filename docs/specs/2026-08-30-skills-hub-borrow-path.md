@@ -53,6 +53,7 @@
     > 現行文件明寫全域是 `.gemini/config/skills`。
     >
     > 證據：
+    >
     > - `antigravity.google/docs/skills/`（現行合併頁）：全域
     >   `~/.gemini/config/skills/<skill-folder>/`，並註明「Available across all
     >   Antigravity products（Antigravity、Antigravity IDE、Antigravity CLI）」。
@@ -387,7 +388,14 @@ crates/agents/src/agents/augmentcode.rs
 
 skills-hub／npx／vendor write path：`~/.augment/skills` 與 `<workspace>/.augment/skills`。aghub 現在完全不寫、不讀，所以在 Augment 裡「已裝」的 Master 是隱形的。
 
-**不要**比照 `cursor.rs` 把 `~/.agents/skills` 加進 read paths。Cursor 加 Master 是因為 Cursor **真的**讀 `.agents/skills`，classify 會變成 NativeReader、**不**建 `~/.cursor/skills` Referrer。Augment CLI 只掃 `.augment/skills`；若誤標 NativeReader，Referrer 不會被建，洞補不上。
+~~**不要**比照 `cursor.rs` 把 `~/.agents/skills` 加進 read paths。Cursor 加 Master 是因為 Cursor **真的**讀 `.agents/skills`，classify 會變成 NativeReader、**不**建 `~/.cursor/skills` Referrer。Augment CLI 只掃 `.augment/skills`；若誤標 NativeReader，Referrer 不會被建，洞補不上。~~
+
+> **2026-09-06 作廢。** `LinkNeed::NativeReader` 已從
+> `crates/core/src/skills/linker/classify.rs` 刪除 —— Master 搬到 `.aghub`
+> 之後不再有「直接讀 Master」的情形，每個支援的 agent 都是 `NeedsLink`。把
+> Master 加進 read paths **不會**抑制 Referrer 建立：grok / pi / copilot / omp
+> 現在都這麼做。Augment 該不該讀 `.agents/skills`，現在純粹是 vendor 事實
+> 問題，與 classify 無關。
 
 Zed（`zed.rs` skills 全關、`skills_cli_name: None`）**本 PR 不碰**。
 

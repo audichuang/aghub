@@ -1,7 +1,11 @@
 import { Card, Switch, Tooltip } from "@heroui/react";
 import { useTranslation } from "react-i18next";
 import type { AvailableAgent } from "../contexts/agent-availability";
-import { supportsMcp, supportsSkill } from "../lib/agent-capabilities";
+import {
+	supportsMcp,
+	supportsSkill,
+	supportsSubAgent,
+} from "../lib/agent-capabilities";
 import { AgentIcon } from "../lib/agent-icons";
 
 interface AgentCardProps {
@@ -21,6 +25,7 @@ export function AgentCard({ agent, isUpdating, onToggle }: AgentCardProps) {
 	const capabilityLabels: string[] = [];
 	if (supportsSkill(agent)) capabilityLabels.push(t("skills"));
 	if (supportsMcp(agent)) capabilityLabels.push(t("mcpServers"));
+	if (supportsSubAgent(agent)) capabilityLabels.push(t("subAgents"));
 
 	return (
 		<Tooltip delay={500}>

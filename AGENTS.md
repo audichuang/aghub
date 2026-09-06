@@ -111,8 +111,10 @@ round-trip, what a rewrite preserves) live with the descriptors:
   `<root>/.aghub` project), a directory **no agent reads** — storing a skill
   must not grant it. Every grant is a symlink Referrer in an agent's own skills
   dir. `.agents/skills` is now an ordinary Referrer slot, except that it is
-  **shared**: ten agent/scope combinations read it and eight of those have no
-  private dir, so granting to one grants to all of them. `classify` computes
+  **shared**: many agent/scope combinations read it and several of those have
+  no other slot, so granting to one grants to all of them. The roster is
+  per-descriptor — `crates/agents/tests/descriptor_regression.rs`
+  `test_global_skill_paths` / `test_project_skill_paths`. `classify` computes
   that sharing once and carries it as `shared_with`; never re-derive it per
   consumer. Read the descriptor, never a list — per-agent AND per-scope.
   `capabilities.skills.universal: true` ALSO appends XDG
@@ -204,7 +206,8 @@ Non-obvious invariants:
 - **Narrowed resource args**: `check`/`apply-update` take skills ONLY and
   `enable`/`disable` take mcps ONLY — enforced by their own clap value_enums, so
   the rejection is a parse error naming the valid values. (`enable`/`disable
-skills` was dead for all 25 agents; core still refuses it for the API path.)
+skills` was dead for every agent in the roster; core still refuses it for the
+  API path.)
 - **`transfer`** / **`reconcile`**: cross-agent copy / reconcile of
   skills·mcps·sub-agents (reconcile-with-removals is dry-run — see above).
   `reconcile` needs at least one `--add`/`--remove`; `-a/--agent` is ignored.
@@ -283,8 +286,9 @@ conformance; two canonicalize `Err`s must never compare equal; and identity
 
 ## Adding / Removing an Agent
 
-One agent = one file. Miss a step and the `registry::get()` fallback above takes
-over silently — no compile error, no runtime error, just Claude's behavior.
+One agent = one **descriptor** file, plus seven registration and contract spots
+below. Miss a step and the `registry::get()` fallback above takes over
+silently — no compile error, no runtime error, just Claude's behavior.
 
 1. `crates/agents/src/agents/<name>.rs` — descriptor (naming gotchas:
    `crates/agents/AGENTS.md`)
@@ -300,6 +304,19 @@ over silently — no compile error, no runtime error, just Claude's behavior.
    unknown transport tag, a field the model does not own, a value that does not
    fit, and an SSE server it cannot spell. Also required for a `json_map` agent
    that introduces no new dialect at all
+6. `crates/core/tests/mcp_dialect_roundtrip.rs` — `NATIVE_TOGGLE`, if the agent
+   has a native enabled/disabled flag. The list is exhaustive BOTH ways: a
+   listed agent that drops a disabled server fails, and an unlisted one that
+   keeps it fails naming the fix. It cannot be skipped, only got wrong
+7. `crates/agents/tests/descriptor_regression.rs` — a row in **every** table,
+   and each table's hard-coded array length bumps by one. The miss is a runtime
+   `.expect` panic, not a compile error, and its message is a static literal
+   that does not name the agent
+8. `crates/desktop/src/assets/agent/<id>.svg` — the ONLY silent step.
+   `agent-icons.tsx` globs `../assets/agent/*.svg` and keys it by `${id}.svg`;
+   a missing file falls through to a first-letter avatar with no build, lint,
+   typecheck or test error. (`jetbrains-ai` has been in that state for
+   releases: the asset is `jetbrains_ai.svg`, so the key never matches.)
 
 Steps 2 and 3 are asserted bijective in `crates/core/tests/registry_bijection.rs`,
 so a missed roster entry fails loudly instead of silently serving Claude.

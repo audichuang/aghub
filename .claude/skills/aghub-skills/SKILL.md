@@ -43,9 +43,12 @@ Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use 
 - Agent descriptors/models/format → `crates/agents` (NOT `crates/core`).
 - All config mutation goes through **`ConfigManager`** (`crates/core/src/manager/`);
   never bypass it. Disk-discovered skills (Claude) barely use `save_current`.
-- Adding/removing an agent touches **5 places** across `crates/agents` +
-  `crates/core/src/registry` — the cross-crate registry step is the easy miss.
-  See the root `CLAUDE.md` "Adding/Removing Agents" checklist.
+- Adding/removing an agent touches **7 places**: the descriptor, two
+  registration spots in `crates/agents`, and four test contracts (three
+  `crates/core/tests/mcp_dialect_*`, plus every table in
+  `crates/agents/tests/descriptor_regression.rs`). `crates/core/src/registry`
+  needs NO edit — `ALL_AGENTS` IS `aghub_agents::agents::ALL_DESCRIPTORS`.
+  See the root `AGENTS.md` "Adding / Removing an Agent" checklist.
 - Removal/prune logic clusters in `crates/core/src/skills/`; the transactional
   Master **rename** (`rename_skill_master`) lives in
   `crates/core/src/manager/skill.rs`; the lock store is `crates/skill/src/lock/`.

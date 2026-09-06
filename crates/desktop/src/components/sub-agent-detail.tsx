@@ -18,11 +18,11 @@ import {
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
+import { useAgentName } from "../hooks/use-agent-name";
 import { AgentIcon } from "../lib/agent-icons";
 import { filterItemsByAgentIds, sortAgentObjects } from "../lib/utils";
 import type { SubAgentGroup } from "./manage-sub-agent-agents-dialog";
 import { ManageSubAgentAgentsDialog } from "./manage-sub-agent-agents-dialog";
-import { formatAgentName } from "./skill-detail-helpers";
 import { TransferDialog } from "./transfer-dialog";
 
 export type { SubAgentGroup };
@@ -44,6 +44,7 @@ export function SubAgentDetail({
 }: SubAgentDetailProps) {
 	const { t } = useTranslation();
 	const { allAgents, availableAgents } = useAgentAvailability();
+	const agentName = useAgentName();
 	const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 	const [transferDialogOpen, setTransferDialogOpen] = useState(false);
 	const [manageDialogOpen, setManageDialogOpen] = useState(false);
@@ -139,7 +140,7 @@ export function SubAgentDetail({
 															item.agent ??
 															"default"
 														}
-														name={formatAgentName(
+														name={agentName(
 															item.agent ??
 																"default",
 														)}
@@ -147,7 +148,7 @@ export function SubAgentDetail({
 														variant="ghost"
 													/>
 													<span className="truncate">
-														{formatAgentName(
+														{agentName(
 															item.agent ??
 																"default",
 														)}

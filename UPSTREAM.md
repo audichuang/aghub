@@ -137,6 +137,11 @@ or a needed feature lands upstream.
 - **Hermes agent** (2026-07-14): Nous Research Hermes Agent — global-only, YAML
   MCP at `~/.hermes/config.yaml`. Spec:
   `docs/specs/2026-07-14-hermes-agent-support.md`. Does not exist upstream.
+- **Oh My Pi (`omp`) agent** (2026-09-06): `can1357/oh-my-pi`, a fork of pi.
+  `json_map` MCP on the default `type` tag with a native `enabled` bool, at
+  `~/.omp/agent/mcp.json` / `.omp/mcp.json`; skills at `.omp/agent/skills` +
+  `~/.agents/skills` (global) and `.omp/skills` + `.agents/skills` (project).
+  Does not exist upstream.
 - **Coverage matrix page + MCP bulk-manage-agents** (2026-07-16, v2.7.0):
   desktop `/coverage` grid (skill·mcp × agent, click-to-reconcile, name filter)
   and generalizing the skill bulk-manage-agents dialog to MCP. Spec:

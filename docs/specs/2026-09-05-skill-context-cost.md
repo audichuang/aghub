@@ -109,6 +109,10 @@ truncated_description_chars_per_skill, truncated_skill_descriptions
 
 ## 其餘 22 個 agent
 
+> **2026-09-06 補充**:`omp`(Oh My Pi)在本文寫成的隔天加入 roster,
+> `AgentType::ALL` 已是 26。omp 是 pi 的 fork,skills 啟動載入行為**未另行
+> 調查**;下面的結論(不加 `startup_load` 欄位)在 omp 被查證前仍屬待確認。
+
 平行查了 `AgentType::ALL` 剩下的每一個(amp / antigravity / augmentcode /
 cline / copilot / cursor / factory / gemini / hermes / jetbrains_ai /
 kilocode / kimi / kiro / mistral / openclaw / opencode / pi / roocode /

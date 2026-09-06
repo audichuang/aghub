@@ -54,10 +54,6 @@ export function countTreeNodes(node: SkillTreeNodeResponse): number {
 	);
 }
 
-export function formatAgentName(agent: string): string {
-	return agent.charAt(0).toUpperCase() + agent.slice(1).toLowerCase();
-}
-
 export function buildLocationGroups(
 	items: SkillResponse[],
 	allAgents: AgentInfo[],
