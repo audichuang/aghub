@@ -1,6 +1,6 @@
 ---
 name: verify
-description: Runtime-verify aghub's skill fetch/install/update chain end-to-end — build the CLI + API binaries, run them under an isolated HOME + XDG environment, install from a real GitHub repo and from a local git daemon (gix shallow path), and observe lock/symlink/disk state. Use when verifying changes to skill install, source sync, check, or apply-update.
+description: Runtime-verify aghub's skill fetch/install/update/migrate chain end-to-end — build the CLI + API binaries, run them under an isolated HOME + XDG + per-agent-override environment, install from a real GitHub repo and from a local git daemon (gix shallow path), stage the pre-2.18 layout to exercise `repair`, and observe lock/symlink/disk state. Use when verifying changes to skill install, source sync, check, apply-update, or repair.
 ---
 
 # Verifying aghub skill fetch/install end-to-end
@@ -22,6 +22,20 @@ export GITHUB_TOKEN="${GITHUB_TOKEN:-$(gh auth token)}"
 export VHOME=$(mktemp -d)
 unset "${!XDG_@}"
 export HOME=$VHOME XDG_STATE_HOME=$VHOME/state XDG_CONFIG_HOME=$VHOME/config
+
+# AND the per-agent overrides, which outrank both. Several descriptors read their
+# own variable BEFORE $XDG_CONFIG_HOME/$HOME — opencode's `config_dir()` is the
+# one that bites here, because Orca exports OPENCODE_CONFIG_DIR into every shell
+# on this machine, so a `repair --yes` or `source sync --yes` writes referrers
+# into the REAL ~/.config/orca/... while everything else looks sandboxed. (Two
+# dead symlinks sat in that real directory for a day before anyone noticed.)
+export OPENCODE_CONFIG_DIR=$VHOME/config/opencode
+
+# Do not trust the exports — PROVE containment before any --yes. Every REFERRER
+# DIR must be under $VHOME; a single line outside it means another descriptor has
+# an override this recipe has not pinned:
+aghub-cli -g -a all coverage | grep -v "$VHOME" | grep '/' && \
+  { echo "LEAK: a referrer dir escapes the sandbox" >&2; exit 1; }
 
 # --port 0 + the liftoff port line: readiness comes from OUR child's stdout, so a
 # stale aghub-api (running against the real HOME) on a fixed port can never be
@@ -77,8 +91,10 @@ curl -fs --max-time 30 -X POST "http://127.0.0.1:$API_PORT/api/v1/skills/install
 
 Observe: lock at `$XDG_STATE_HOME/skills/.skill-lock.json` (or `$VHOME/.agents/.skill-lock.json`
 when XDG_STATE_HOME is unset) — v3; `refCommit` must equal `git ls-remote <url> HEAD`;
-`contentHash` set, `skillFolderHash` empty per npx contract; master dir
-`$VHOME/.agents/skills/<name>/`; symlink `$VHOME/.claude/skills/<name>`.
+`contentHash` set, `skillFolderHash` empty per npx contract; **master dir
+`$VHOME/.aghub/<name>/`** (a real directory in the store NO agent reads — since
+v2.18.0; `.agents/skills` is now just another, shared, Referrer slot); symlink
+`$VHOME/.claude/skills/<name>` resolving to that master in one hop.
 
 ## gix shallow path + update chain (controllable upstream)
 
@@ -108,14 +124,49 @@ aghub-cli -g apply-update skills hello-world        # dry-run: refuses without -
 aghub-cli -g apply-update skills hello-world --yes  # disk v1→v2, lock refCommit advances
 ```
 
+## Migration path (`repair`) — the shape real users arrive in
+
+Everything above installs into a clean sandbox, which is the one state upgraders
+are NOT in. A machine that installed before v2.18.0 has its content in
+`.agents/skills/<name>` with no `.aghub` store at all, and every command that
+needs a Master is broken until `repair` migrates it. Build that state instead of
+waiting to meet it:
+
+```bash
+# from a completed install above, fake the pre-2.18 layout
+mkdir -p $VHOME/.agents/skills
+mv $VHOME/.aghub/<name> $VHOME/.agents/skills/<name>
+rm -rf $VHOME/.aghub
+rm -f $VHOME/.claude/skills/<name>
+ln -s ../../.agents/skills/<name> $VHOME/.claude/skills/<name>
+
+aghub-cli -g -a claude doctor --verify-links --json   # health orphan-lock, claude dangling
+aghub-cli -g repair <name> --json                     # preview: shape unmigrated_copy
+aghub-cli -g repair <name> --yes --json               # outcome migrated
+aghub-cli -g -a claude doctor --verify-links --json   # health ok, claude linked
+```
+
+`dangling` here does NOT mean a broken symlink — the link resolves fine, it is
+the absent `.aghub/<name>` that fails to canonicalize. Paired with
+`orphan-lock` and content still on disk, that pair IS the un-migrated layout.
+Read the preview's `referrers[]` before `--yes`: repair links every agent that
+can READ the skill today, which is wider than the one you installed for.
+
 ## Expected non-obvious behavior (NOT bugs)
 
 - `check skills` is **offline by default** → remote sources report `uncheckable/network`.
   Pass `--online` for a real answer.
 - `check --online` on a `git://` source → `uncheckable/unsupportedScheme` (https-only path, by spec).
-- Re-installing an already-installed skill: response is `success:false` with all per-agent rows
-  `success:true` (aggregate = `any_installed && all rows ok`; idempotent no-op sets no
-  `installed` flag). Pre-existing on main.
+- Re-installing an already-installed skill now reports SUCCESS on both surfaces —
+  re-verified against 2.18.2 on 2026-09-06, and the opposite of what this file used to say:
+  the CLI row is `applied:true` with `agents:[{installed:true}]`, and the API answers
+  `{"success":true,"agents":[{...,"success":true,"error":null}]}`. An already-correct slot
+  folds into the installed set on purpose (`install_fetched.rs` `present_dirs`), because
+  eight agents sharing one `.agents/skills` slot would otherwise report one `installed:true`
+  and seven bare `installed:false`. Do NOT assert the old `success:false`.
+  (Shape note: a FIRST install answered `{"success":true,"results":[]}` — `results` empty,
+  no `agents` key — while the re-install carried `agents`. Observed, not spec'd; read the
+  response you get rather than assuming one shape.)
 - Observed without a token on a PUBLIC github source: `source diff` says "needs a
   credential… GIT_PASSWORD/GITHUB_TOKEN". (A private source may classify as
   `uncheckable/auth` instead — `check.rs` supports both reasons; verify before asserting.)
