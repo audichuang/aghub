@@ -280,6 +280,21 @@ pub fn remote_api_upload_path(nonce: &str) -> String {
 ///
 /// The forward is explicitly bound to `127.0.0.1` on both ends regardless of
 /// the server's `GatewayPorts` setting.
+///
+/// **Multiplexing is disabled deliberately, and the tunnel's whole lifecycle
+/// depends on it.** With a user `ControlMaster auto` + `ControlPersist` entry
+/// for the host — a common, sensible thing to have in `~/.ssh/config` — this
+/// process would not open its own connection at all: it hands the forward to
+/// the existing master and **exits 0 immediately**, while the forward stays up
+/// under the master. Every caller here reads the child process as the tunnel
+/// (bring-up treats an early exit as a failed forward, the watcher treats its
+/// exit as a disconnect, and teardown kills it to close the forward), so all
+/// three silently mean the wrong thing — bring-up reported
+/// `ssh tunnel exited early (exit status: 0)` and tore down a remote server
+/// whose forward was in fact working. `ControlPath=none` restores the
+/// invariant that this child owns the forward; `ControlMaster=no` keeps it from
+/// becoming a master for anyone else. Only the TUNNEL needs this — the one-shot
+/// remote commands are free to reuse the user's master.
 pub fn build_tunnel_args(
 	conn: &Connection,
 	local_port: u16,
@@ -295,6 +310,10 @@ pub fn build_tunnel_args(
 		"StrictHostKeyChecking=accept-new".to_string(),
 		"-o".to_string(),
 		"ExitOnForwardFailure=yes".to_string(),
+		"-o".to_string(),
+		"ControlPath=none".to_string(),
+		"-o".to_string(),
+		"ControlMaster=no".to_string(),
 		"-L".to_string(),
 		format!("127.0.0.1:{local_port}:127.0.0.1:{remote_port}"),
 	];
@@ -1036,6 +1055,10 @@ mod tests {
 				"StrictHostKeyChecking=accept-new",
 				"-o",
 				"ExitOnForwardFailure=yes",
+				"-o",
+				"ControlPath=none",
+				"-o",
+				"ControlMaster=no",
 				"-L",
 				"127.0.0.1:5000:127.0.0.1:8080",
 				"-p",
@@ -1062,6 +1085,10 @@ mod tests {
 				"StrictHostKeyChecking=accept-new",
 				"-o",
 				"ExitOnForwardFailure=yes",
+				"-o",
+				"ControlPath=none",
+				"-o",
+				"ControlMaster=no",
 				"-L",
 				"127.0.0.1:6000:127.0.0.1:9090",
 				"example.com"
@@ -1075,6 +1102,24 @@ mod tests {
 		assert!(args.contains(&"127.0.0.1:1:127.0.0.1:2".to_string()));
 		assert!(args.iter().any(|a| a == "ExitOnForwardFailure=yes"));
 		assert!(args.iter().any(|a| a == "BatchMode=yes"));
+	}
+
+	/// Without this the tunnel silently joins a user `ControlMaster auto` +
+	/// `ControlPersist` session: `ssh -N -L ...` hands the forward to the
+	/// running master and exits 0 at once, and bring-up reads that as
+	/// `ssh tunnel exited early (exit status: 0)` — killing a remote server
+	/// whose forward was working. Observed against a real Mac -> VM pair.
+	#[test]
+	fn tunnel_args_never_multiplex_onto_a_user_control_master() {
+		let args = build_tunnel_args(&conn_full(), 1, 2);
+		assert!(
+			args.iter().any(|a| a == "ControlPath=none"),
+			"tunnel must own its own connection: {args:?}"
+		);
+		assert!(
+			args.iter().any(|a| a == "ControlMaster=no"),
+			"tunnel must not become a master either: {args:?}"
+		);
 	}
 
 	// --- shell_quote_single ------------------------------------------------
