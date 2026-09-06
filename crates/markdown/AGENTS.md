@@ -20,7 +20,10 @@ Frontmatter is delimited by `---` lines at the very top of the document.
 
 ## DEPENDENTS
 
-`aghub-agents` (`sub_agents.rs` — `SubAgentFrontmatter { name, description }`).
+`aghub-agents` (`sub_agents.rs` — `SubAgentFrontmatter { name (defaulted),
+description, extra }`, where `extra` is a `#[serde(flatten)]` `serde_yaml::Mapping`
+carrying every key aghub does not model into `SubAgent::extra_frontmatter`, so a
+save cannot strip them).
 Keep this crate generic over `T` — agent-specific schema (required fields,
 string-only validation) lives in the descriptor/parser layers, **not** here.
 

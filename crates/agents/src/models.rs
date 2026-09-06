@@ -350,6 +350,19 @@ pub struct SubAgent {
 	/// Which config scope this sub-agent was loaded from (set at load time).
 	#[serde(skip)]
 	pub config_source: Option<ConfigSource>,
+	/// Frontmatter keys aghub does not model, carried verbatim from load to
+	/// save.
+	///
+	/// It lives on the MODEL, not just in the writer, because the two paths that
+	/// lose it otherwise are the two that matter: a RENAME writes to a path that
+	/// does not exist yet (nothing to read back), and a `transfer` / `reconcile`
+	/// writes into another agent's directory (likewise). A save also rewrites
+	/// every sibling in the directory, not just the edited entry — so without
+	/// this, creating one sub-agent strips `tools`, `model`, `target`,
+	/// `mcp-servers`, … off all the others. `#[serde(skip)]` keeps it off the
+	/// wire, exactly like `instruction` and `config_source`.
+	#[serde(skip)]
+	pub extra_frontmatter: serde_yaml::Mapping,
 }
 
 impl SubAgent {
@@ -360,6 +373,7 @@ impl SubAgent {
 			instruction: None,
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: serde_yaml::Mapping::new(),
 		}
 	}
 }

@@ -20,6 +20,7 @@ impl From<CreateSubAgentRequest> for SubAgent {
 			instruction: Some(req.instruction),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		}
 	}
 }

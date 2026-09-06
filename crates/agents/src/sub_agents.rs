@@ -67,6 +67,22 @@ impl SubAgentLayout {
 		.map(str::to_string)
 	}
 
+	/// Whether the on-disk name outranks the frontmatter `name`.
+	///
+	/// Copilot's reference is explicit: "The configuration file's name (minus
+	/// `.md` or `.agent.md`) is used for deduplication" — its frontmatter `name`
+	/// is only a display name. Antigravity keys on the per-agent DIRECTORY the
+	/// same way. Taking the frontmatter name for those two means a save writes
+	/// `<display-name>.agent.md` BESIDE the file it loaded, and the vendor then
+	/// lists the same agent twice.
+	///
+	/// The plain `.md` layout (Claude, Grok, OpenCode) keeps the historical
+	/// frontmatter-wins behaviour; changing it there would rename files aghub
+	/// has been managing for releases.
+	fn filename_is_identity(&self) -> bool {
+		!matches!(self, Self::Flat { suffix } if *suffix == ".md")
+	}
+
 	/// Where a sub-agent called `name` lives under `dir`.
 	fn path_in(&self, dir: &Path, name: &str) -> PathBuf {
 		match self {
@@ -160,6 +176,7 @@ pub fn parse_sub_agent_file_named(
 				instruction: Some(body.to_string()),
 				source_path: Some(path.to_string_lossy().into_owned()),
 				config_source: None,
+				extra_frontmatter: front.extra,
 			},
 			Ok((None, body)) => SubAgent {
 				name: stem,
@@ -167,6 +184,7 @@ pub fn parse_sub_agent_file_named(
 				instruction: Some(body.to_string()),
 				source_path: Some(path.to_string_lossy().into_owned()),
 				config_source: None,
+				extra_frontmatter: Default::default(),
 			},
 			Err(_) => SubAgent {
 				name: stem,
@@ -174,14 +192,19 @@ pub fn parse_sub_agent_file_named(
 				instruction: Some(content),
 				source_path: Some(path.to_string_lossy().into_owned()),
 				config_source: None,
+				extra_frontmatter: Default::default(),
 			},
 		},
 	))
 }
 
 /// Format a [`SubAgent`] as markdown with YAML frontmatter.
+///
+/// Re-emits [`SubAgent::extra_frontmatter`] alongside the fields aghub owns, so
+/// a rename or a cross-agent copy — neither of which has a file at the
+/// destination to read back from — keeps the vendor's own keys.
 pub fn format_sub_agent(agent: &SubAgent) -> Result<String> {
-	format_sub_agent_preserving(agent, serde_yaml::Mapping::new())
+	format_sub_agent_preserving(agent, agent.extra_frontmatter.clone())
 }
 
 /// Read back the frontmatter keys aghub does not own from an existing file.
@@ -218,6 +241,24 @@ pub fn format_sub_agent_preserving(
 	};
 	aghub_markdown::render(&front, body)
 		.map_err(|e| ConfigError::InvalidConfig(e.to_string()))
+}
+
+/// Reject a sanitized name that is not a usable single path component.
+///
+/// `sanitize_filename` keeps `.`, so `".."` survives it intact — harmless for
+/// the flat layout (`"...md"` is just an oddly named file) but an ESCAPE for the
+/// nested one: `dir.join("..").join("agent.md")` writes into the agents dir's
+/// PARENT, and `ensure_safe_sub_agent_dir` waves it through because the parent
+/// really is a directory. An empty result (a name of only symbols or emoji) is
+/// the other half: it collapses to `dir/agent.md` — a file neither the vendor
+/// nor this module's own loader will ever find again.
+fn ensure_usable_component(safe: &str, name: &str) -> Result<()> {
+	if safe.is_empty() || safe == "." || safe == ".." {
+		return Err(ConfigError::InvalidConfig(format!(
+			"Sub-agent name {name:?} has no usable file name"
+		)));
+	}
+	Ok(())
 }
 
 fn sanitize_filename(name: &str) -> String {
@@ -407,7 +448,10 @@ pub fn load_sub_agents_from_dir_with(
 			}
 		}
 		let file = layout.path_in(dir, &name);
-		if let Some(agent) = parse_sub_agent_file_named(&file, &name)? {
+		if let Some(mut agent) = parse_sub_agent_file_named(&file, &name)? {
+			if layout.filename_is_identity() {
+				agent.name = name;
+			}
 			agents.push(agent);
 		}
 	}
@@ -433,13 +477,21 @@ pub fn save_sub_agent_to_dir_with(
 ) -> Result<()> {
 	ensure_safe_sub_agent_dir(dir)?;
 	let safe = sanitize_filename(&agent.name);
+	ensure_usable_component(&safe, &agent.name)?;
 	let file = layout.path_in(dir, &safe);
 	if let SubAgentLayout::Nested { .. } = layout {
 		// The per-agent dir gets the same symlink hardening as its parent: a
 		// planted `<name>` symlink must not redirect the write out of tree.
 		ensure_safe_sub_agent_dir(&dir.join(&safe))?;
 	}
-	let extra = unowned_frontmatter(&file);
+	// The model's own keys win; the file is only consulted for a `SubAgent`
+	// that never came from one (e.g. the API's create DTO), so an in-place edit
+	// of an entry aghub did not load still keeps what it does not model.
+	let extra = if agent.extra_frontmatter.is_empty() {
+		unowned_frontmatter(&file)
+	} else {
+		agent.extra_frontmatter.clone()
+	};
 	write_sub_agent_file(&file, &format_sub_agent_preserving(agent, extra)?)?;
 	Ok(())
 }
@@ -645,6 +697,7 @@ mod tests {
 			instruction: Some("Do X.".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 		save_sub_agent_to_dir(&dir_path, &agent).unwrap();
 
@@ -662,6 +715,7 @@ mod tests {
 			instruction: Some("Do X.".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		}
 	}
 
@@ -767,7 +821,10 @@ mod tests {
 		let loaded =
 			load_sub_agents_from_dir_with(&dir_path, ANTIGRAVITY).unwrap();
 		assert_eq!(loaded.len(), 1);
-		assert_eq!(loaded[0].name, "Code Reviewer");
+		// The DIRECTORY is the identity here, so the name comes back sanitized
+		// — and a re-save therefore lands on the same directory instead of
+		// creating a second one next to it.
+		assert_eq!(loaded[0].name, "code-reviewer");
 		// `source_path` is the INNER FILE so the manager's `remove_file` /
 		// `with_extension` operations keep working against a directory layout.
 		assert_eq!(
@@ -820,6 +877,108 @@ mod tests {
 		);
 	}
 
+	// `sanitize_filename` keeps `.`, so `".."` survives it whole. Harmless for a
+	// flat layout ("...md" is just a file) and an ESCAPE for a nested one:
+	// `dir.join("..").join("agent.md")` writes into the agents dir's PARENT, and
+	// the safety check waves it through because the parent IS a directory.
+	// Copilot's reference: the identity is the file name minus `.agent.md`; the
+	// frontmatter `name` is a DISPLAY name. Taking the frontmatter name means
+	// the next save writes `code-reviewer.agent.md` BESIDE the file it loaded
+	// (saves never delete stale files), and Copilot lists the agent twice.
+	#[test]
+	fn filename_outranks_the_frontmatter_name_where_the_vendor_says_so() {
+		let dir = TempDir::new().unwrap();
+		fs::write(
+			dir.path().join("reviewer.agent.md"),
+			"---\nname: Code Reviewer\ndescription: d\n---\n\nBody.\n",
+		)
+		.unwrap();
+
+		let loaded =
+			load_sub_agents_from_dir_with(dir.path(), COPILOT).unwrap();
+		assert_eq!(loaded[0].name, "reviewer");
+
+		// Round-tripping the loaded agent must not spawn a second file.
+		save_sub_agent_to_dir_with(dir.path(), &loaded[0], COPILOT).unwrap();
+		assert!(!dir.path().join("code-reviewer.agent.md").exists());
+
+		// The plain `.md` layout keeps the historical frontmatter-wins rule.
+		let flat = TempDir::new().unwrap();
+		fs::write(
+			flat.path().join("reviewer.md"),
+			"---\nname: Code Reviewer\ndescription: d\n---\n\nBody.\n",
+		)
+		.unwrap();
+		let claude = load_sub_agents_from_dir(flat.path()).unwrap();
+		assert_eq!(claude[0].name, "Code Reviewer");
+	}
+
+	#[test]
+	fn nested_layout_refuses_a_name_that_escapes_the_agents_dir() {
+		let dir = TempDir::new().unwrap();
+		let agents = dir.path().join("agents");
+		fs::create_dir(&agents).unwrap();
+
+		let result =
+			save_sub_agent_to_dir_with(&agents, &agent(".."), ANTIGRAVITY);
+
+		assert!(result.is_err(), "a traversing name must be refused");
+		assert!(
+			!dir.path().join("agent.md").exists(),
+			"nothing may be written outside the agents dir"
+		);
+	}
+
+	// A name of only symbols sanitizes to "", which for the nested layout
+	// collapses to `<dir>/agent.md` — a file neither the vendor nor this
+	// module's own loader will ever find again.
+	#[test]
+	fn a_name_with_no_usable_characters_is_refused_not_written() {
+		let dir = TempDir::new().unwrap();
+
+		let result =
+			save_sub_agent_to_dir_with(dir.path(), &agent("🤖"), ANTIGRAVITY);
+
+		assert!(result.is_err());
+		assert!(
+			!dir.path().join("agent.md").exists(),
+			"a ghost file is worse than a refusal"
+		);
+		assert!(
+			save_sub_agent_to_dir_with(dir.path(), &agent("🤖"), COPILOT)
+				.is_err()
+		);
+		assert!(!dir.path().join(".agent.md").exists());
+	}
+
+	// A rename writes to a path that does not exist yet, so a read-back-before-
+	// write preserves nothing. Only carrying the keys on the MODEL survives it.
+	#[test]
+	fn a_rename_keeps_the_frontmatter_keys_aghub_does_not_model() {
+		let dir = TempDir::new().unwrap();
+		fs::write(
+			dir.path().join("reviewer.agent.md"),
+			"---\nname: reviewer\ndescription: d\ntools: [\"read\"]\nmodel: gpt-5.2\n---\n\nBody.\n",
+		)
+		.unwrap();
+
+		let loaded =
+			load_sub_agents_from_dir_with(dir.path(), COPILOT).unwrap();
+		let mut renamed = loaded.into_iter().next().unwrap();
+		renamed.name = "code-reviewer".to_string();
+		save_sub_agent_to_dir_with(dir.path(), &renamed, COPILOT).unwrap();
+
+		let text =
+			fs::read_to_string(dir.path().join("code-reviewer.agent.md"))
+				.expect("the renamed file must exist");
+		assert!(
+			text.contains("model: gpt-5.2"),
+			"the destination had no file to read back from, so this can only \
+			 come off the model; got:\n{text}"
+		);
+		assert!(text.contains("read"), "got:\n{text}");
+	}
+
 	#[test]
 	fn sanitize_filename_basic() {
 		assert_eq!(sanitize_filename("My Agent!"), "my-agent");
@@ -859,6 +1018,7 @@ mod tests {
 			instruction: Some("OVERWRITE".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 
 		let result = save_sub_agent_to_dir(dir.path(), &agent);
@@ -890,6 +1050,7 @@ mod tests {
 			instruction: Some("body".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 
 		// Save must succeed despite the symlinked ancestor, and load back.

@@ -54,6 +54,7 @@ fn parse_file(path: &Path) -> Option<SubAgent> {
 		instruction,
 		source_path: Some(path.to_string_lossy().into_owned()),
 		config_source: None,
+		extra_frontmatter: Default::default(),
 	})
 }
 
@@ -396,6 +397,7 @@ mod tests {
 			instruction: Some("New instructions.".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 
 		let out = format(&updated, Some(original)).unwrap();
@@ -414,6 +416,7 @@ mod tests {
 			instruction: Some("Do X.".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 		save_to_dir(dir.path(), &agent).unwrap();
 
@@ -464,6 +467,7 @@ mod tests {
 			instruction: Some("clobber".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 
 		let err = save_to_dir(&agents_dir, &agent).unwrap_err();
@@ -493,6 +497,7 @@ mod tests {
 			instruction: Some("Do X.".to_string()),
 			source_path: None,
 			config_source: None,
+			extra_frontmatter: Default::default(),
 		};
 
 		save_to_dir(&agents_dir, &agent).unwrap();

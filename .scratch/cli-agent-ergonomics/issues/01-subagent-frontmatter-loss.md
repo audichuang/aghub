@@ -1,6 +1,17 @@
 # 01 — Saving any sub-agent drops every unmodeled frontmatter key from all of them
 
-**Status:** open · pre-existing · deferred from the v2.15.0 release
+**Status:** fixed (2026-09-06, `wip: agent descriptor corrections + omp`)
+
+**Fixed by round-tripping the unknown keys** — the first of the two designs
+below. Two mechanisms, in this order: `SubAgent::extra_frontmatter` carries the
+keys aghub does not model from load to save (`SubAgentFrontmatter` deserializes
+them through a `#[serde(flatten)]` `serde_yaml::Mapping`), so the save-all loop
+re-emits each sibling's own keys — and a rename keeps the renamed agent's keys
+too, because they ride the in-memory model rather than the destination file.
+When the model carries none — an API create DTO, or an in-place edit of an entry
+aghub never loaded — `save_sub_agent_to_dir_with` falls back to reading the
+destination file (`unowned_frontmatter`). The model's own keys win over the
+file's.
 
 **What happens:** `SubAgentFrontmatter` (`crates/agents/src/sub_agents.rs:20-24`)
 models only `name` + `description`. `format_sub_agent` (:74) re-serializes from
