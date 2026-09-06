@@ -724,6 +724,74 @@ mod tests {
 		);
 	}
 
+	/// The migration path out of a read-only compatibility dir.
+	///
+	/// Antigravity reads `.agent/skills` (singular) but writes `.agents/skills`,
+	/// so a skill an older release parked in the compat dir audits as `withheld`
+	/// in `doctor --verify-links` and cannot be removed for antigravity alone.
+	/// Both are documented costs — this pins the way OUT of them, because the
+	/// descriptor comment tells the user to relink and a comment is not a test.
+	///
+	/// `repair` never sees the compat dir: `candidate_referrers` is built from
+	/// WRITE dirs only. What carries the fact across is `readers_of`, which asks
+	/// the READ paths — so the compat dir is why antigravity lands in `grant_to`
+	/// and its absent write slot is planned `Create` instead of `Leave`.
+	/// Drop `.agent/skills` from antigravity's read paths and this goes red at
+	/// the `readers` premise.
+	#[test]
+	fn repair_relinks_a_skill_stranded_in_a_read_only_compat_dir() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		// The shape a user upgrading actually has: the Master in the store and
+		// a Referrer in the dir aghub now only READS.
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "stranded");
+		let compat = root.join(".agent").join("skills");
+		fs::create_dir_all(&compat).unwrap();
+		Linker::symlink(&master, &compat.join(name)).unwrap();
+
+		let readers = crate::skills::shape::readers_of(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			name,
+		);
+		assert!(
+			readers.contains(&"antigravity"),
+			"the compat dir is what makes antigravity a reader, got {readers:?}"
+		);
+
+		let write_slot = root.join(".agents").join("skills").join(name);
+		assert!(
+			!write_slot.exists(),
+			"fixture premise: the write slot must start empty"
+		);
+
+		let p = plan_repair(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			name,
+			true,
+			&readers,
+		)
+		.unwrap();
+		execute_repair(&p, false).unwrap();
+
+		assert!(
+			Linker::is_link(&write_slot),
+			"repair owes the stranded reader a Referrer in the dir it WRITES"
+		);
+		assert_eq!(
+			fs::canonicalize(&write_slot).unwrap(),
+			fs::canonicalize(&master).unwrap()
+		);
+		// The compat dir is left exactly as found: repair plans write dirs, and
+		// removing the old link is a delete nobody asked for.
+		assert!(
+			compat.join(name).symlink_metadata().is_ok(),
+			"repair must not delete a Referrer it never planned"
+		);
+	}
+
 	/// A diverged fork must leave the disk EXACTLY as it found it. This is the
 	/// test that fails if the hash comparison is ever moved after the adopt.
 	#[test]

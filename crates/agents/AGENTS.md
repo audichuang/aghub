@@ -55,7 +55,11 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
   `.mcp.json` Claude and Copilot share
 - **Antigravity**: global skills WRITE `~/.gemini/config/skills`; READ that plus
   the legacy `.gemini/antigravity/skills` and `.gemini/antigravity-cli/skills`.
-  Project READ `.agents/skills` (the write dir) + `.agent/skills`. Sub-agents
+  Project READ `.agents/skills` (the write dir) + `.agent/skills`. A skill an
+  older release left in a compat dir is migrated with `aghub repair`, never
+  `aghub add` (which refuses `resource_exists` — the skill already loads);
+  `repair` plans WRITE dirs but `readers_of` asks the READ paths, which is the
+  only reason the stranded agent reaches `grant_to`. Sub-agents
   are a DIRECTORY per agent (`SubAgentLayout::Nested`):
   `.agents/agents/<name>/agent.md` and `~/.gemini/config/agents/<name>/agent.md`
 - **Hermes** (Nous Research): global-only — no project scope, no sub-agents.

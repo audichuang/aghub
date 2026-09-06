@@ -44,7 +44,15 @@ define_mcp_paths! {
 // than left to be rediscovered:
 //  * `doctor --verify-links` inspects the WRITE slot only, so a skill an older
 //    release installed into `.gemini/antigravity/skills` audits as `withheld`
-//    even though Antigravity really does read it. Relink to clear it.
+//    even though Antigravity really does read it. `aghub repair [name] --yes`
+//    clears it: `repair` plans WRITE dirs so it never sees the compat dir, but
+//    `readers_of` asks the READ paths, so the stranded skill puts antigravity
+//    in `grant_to` and its empty write slot is planned `Create`. `aghub add`
+//    is NOT the way — the skill already loads, so both its branches refuse
+//    `resource_exists`. The test
+//    (`repair.rs::repair_relinks_a_skill_stranded_in_a_read_only_compat_dir`)
+//    exercises the PROJECT twin `.agent/skills`, which needs no real home; the
+//    global dirs run the same two functions on the same 2-state.
 //  * A Referrer parked in one of those dirs cannot be removed for antigravity
 //    ALONE — the planner schedules only the write dir, so `delete --yes`
 //    answers `outcome: kept` with the file in place
