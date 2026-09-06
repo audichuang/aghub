@@ -6,7 +6,7 @@
 //! `source list` + `check` + `prune-lock`. Never writes.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aghub_core::{
 	models::{AgentSelection, AgentType, ResourceScope},
@@ -259,6 +259,44 @@ fn inspect_agent_link(
 	}
 }
 
+/// The agent's own read dirs, minus the one it writes and minus every dir any
+/// OTHER descriptor also reads.
+///
+/// An agent can read more dirs than it writes: Antigravity keeps
+/// `.gemini/antigravity/skills` and `.gemini/antigravity-cli/skills` readable so
+/// installs from before the write slot moved to `.gemini/config/skills` are not
+/// stranded, and reads `.agent/skills` as the vendor's own project alias.
+/// Auditing the write slot ALONE calls those installs `withheld` — an issue the
+/// user cannot act on, because the agent really is loading the skill.
+///
+/// SHARED dirs are excluded deliberately: `.agents/skills` is read by most of
+/// the roster, and "present in the shared slot with no Referrer of my own" is
+/// exactly the withheld state this audit exists to surface. Only a dir nobody
+/// else reads is this agent's alternative home.
+fn private_fallback_dirs(
+	agent: AgentType,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	write_dir: &Path,
+) -> Vec<PathBuf> {
+	let descriptor = registry::get(agent);
+	descriptor
+		.skill_read_paths(project_root, scope)
+		.into_iter()
+		.filter(|dir| dir != write_dir)
+		.filter(|dir| {
+			!registry::iter_all()
+				.filter(|other| other.id != descriptor.id)
+				.any(|other| {
+					other
+						.skill_read_paths(project_root, scope)
+						.iter()
+						.any(|other_dir| other_dir == dir)
+				})
+		})
+		.collect()
+}
+
 fn resolve_roster(agent: &str) -> Result<Vec<AgentType>> {
 	match AgentSelection::parse(agent).map_err(|error| {
 		anyhow!("invalid --agent for doctor link audit: {error}")
@@ -291,12 +329,37 @@ fn audit_agent_links(
 			let (state, path) = match need {
 				LinkNeed::Unsupported => (AgentLinkState::Unsupported, None),
 				LinkNeed::NeedsLink { referrer_dir } => {
-					let agent_skills_dir = referrer_dir;
+					let mut agent_skills_dir = referrer_dir;
 					let mut state = inspect_agent_link(
 						&master_skill,
 						&agent_skills_dir,
 						skill_name,
 					);
+					// Nothing in the write slot is not the whole answer for an
+					// agent that reads a private dir it does not write — an
+					// install from before Antigravity's write slot moved lives
+					// in one, and calling it `withheld` reports an issue the
+					// user cannot act on. Report where it was actually FOUND,
+					// so the path in the audit row is the one on disk.
+					if state == AgentLinkState::Missing {
+						for dir in private_fallback_dirs(
+							*agent,
+							scope,
+							project_root,
+							&agent_skills_dir,
+						) {
+							let found = inspect_agent_link(
+								&master_skill,
+								&dir,
+								skill_name,
+							);
+							if found != AgentLinkState::Missing {
+								state = found;
+								agent_skills_dir = dir;
+								break;
+							}
+						}
+					}
 					// An absent slot for an UNTRACKED master is a leftover, not
 					// a missing link — there is no source to relink from, and
 					// the blanket sync-repair advice would reinstall a skill the
@@ -893,6 +956,66 @@ mod tests {
 		assert_eq!(
 			inspect_agent_link(&master, &conflict_dir, "foo"),
 			AgentLinkState::RealPathConflict
+		);
+	}
+
+	// Antigravity reads `.agent/skills` but writes `.agents/skills`. A Referrer
+	// parked in the read-only dir must audit as LINKED, not `withheld` — the
+	// agent really is loading it, and `withheld` is an issue the user cannot
+	// act on. Revert-prove by deleting the `private_fallback_dirs` loop in
+	// `audit_agent_links`: this goes `withheld`.
+	#[cfg(unix)]
+	#[test]
+	fn a_referrer_in_a_private_read_only_dir_is_linked_not_withheld() {
+		use std::os::unix::fs::symlink;
+
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let master = root.join(".aghub");
+		write_skill(&master.join("foo"), "foo");
+		let legacy = root.join(".agent/skills");
+		std::fs::create_dir_all(&legacy).unwrap();
+		symlink(master.join("foo"), legacy.join("foo")).unwrap();
+
+		let audit = audit_agent_links(
+			"foo",
+			&master,
+			ResourceScope::ProjectOnly,
+			Some(root),
+			&[AgentType::Antigravity],
+			true,
+		);
+
+		let LinkAudit::Verified { agents } = &audit else {
+			panic!("a readable Referrer is not an issue: {audit:?}");
+		};
+		assert_eq!(agents[0].state, AgentLinkState::Linked);
+		assert!(
+			agents[0]
+				.path
+				.as_deref()
+				.is_some_and(|p| p.contains(".agent/skills")),
+			"the row must name where it was FOUND, got {:?}",
+			agents[0].path
+		);
+	}
+
+	// The shared `.agents/skills` slot must NOT get the same treatment: "in the
+	// shared slot with no Referrer of my own" is exactly the withheld state
+	// this audit exists to surface, and most of the roster reads that dir.
+	#[test]
+	fn the_shared_slot_does_not_count_as_a_private_fallback() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let dirs = private_fallback_dirs(
+			AgentType::Grok,
+			ResourceScope::ProjectOnly,
+			Some(root),
+			&root.join(".grok/skills"),
+		);
+		assert!(
+			dirs.is_empty(),
+			"grok's only extra read dir is the shared slot, got {dirs:?}"
 		);
 	}
 

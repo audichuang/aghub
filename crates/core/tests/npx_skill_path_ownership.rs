@@ -435,6 +435,67 @@ fn grok_delete_refuses_when_the_master_slot_still_serves_it() {
 	assert!(master.join("SKILL.md").exists(), "the Master must survive");
 }
 
+/// A Referrer that lives ONLY in a read-only compatibility dir cannot be
+/// removed for that agent alone — pinned, because it is the price of reading
+/// those dirs at all.
+///
+/// Antigravity reads more dirs than it writes: `.agent/skills` at project scope
+/// and the two legacy `~/.gemini/antigravity*` dirs at global scope. That is
+/// what keeps skills a shipped release installed visible after the write slot
+/// moved to `.gemini/config/skills`. The planner targets the agent's OWN WRITE
+/// dir, so a Referrer parked in a read-only dir is never scheduled: the plan
+/// comes back with no paths and `shared_master_kept`, and the CLI reports
+/// `outcome: kept` — success, entity still there, which is the documented
+/// honest answer, not a lie.
+///
+/// The alternative was to not read those dirs, which strands the skills
+/// entirely. Removing one is a relink (or `--all-agents`), not a delete.
+#[cfg(unix)]
+#[test]
+fn a_referrer_in_a_read_only_compat_dir_is_reported_kept_not_removed() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	// The shape a user upgrading actually has: a symlink Referrer in a dir aghub
+	// now only READS, pointing at the Master in the store.
+	let master = root.join(".aghub/legacy-skill");
+	write_skill_md(&master, "legacy-skill");
+	let legacy = root.join(".agent/skills/legacy-skill");
+	std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+	symlink(&master, &legacy);
+
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Antigravity),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+	assert!(
+		mgr.get_skill("legacy-skill").is_some(),
+		"the compat dir must be discovered, or reading it is pointless"
+	);
+
+	let outcome = mgr
+		.remove_skill_planned("legacy-skill", false, false, true)
+		.expect("a kept skill is an outcome, not an error");
+
+	assert!(
+		outcome.plan.paths.is_empty(),
+		"nothing in a read-only dir may be scheduled: {:?}",
+		outcome.plan.paths
+	);
+	assert!(
+		outcome.plan.shared_master_kept,
+		"the plan must DISCLOSE that it took nothing away"
+	);
+	// Disk state is the assertion that matters: a report of `kept` must mean
+	// kept.
+	assert!(
+		legacy.symlink_metadata().is_ok(),
+		"the Referrer must survive"
+	);
+	assert!(master.join("SKILL.md").exists(), "the Master must survive");
+}
+
 /// A skill whose FOLDER name differs from its frontmatter `name` must not be
 /// reported as removed when the agent still reads it afterwards.
 ///

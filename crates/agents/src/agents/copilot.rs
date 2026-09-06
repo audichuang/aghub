@@ -295,18 +295,48 @@ mod tests {
 
 	// aghub wrote `"type": "stdio"` into `~/.copilot/mcp-config.json` up to now,
 	// and Copilot also reads the project `.mcp.json` that Claude writes with the
-	// same spelling. Whatever the vendor docs prefer, those files must keep
-	// parsing.
+	// same spelling. Whatever the vendor docs prefer (`local`), those files must
+	// keep parsing — and the tag must be what DECIDES it.
+	//
+	// A `command`-only assertion cannot show that: `json_map`'s presence
+	// fallback makes ANY tag (or none) parse as stdio when `command` is set, so
+	// the same assertion stays green with the tag deleted or spelled `bogus`.
+	// The falsifiable half is the REMOTE case, where the tag is the only thing
+	// separating SSE from streamable HTTP.
 	#[test]
-	fn copilot_still_reads_the_stdio_spelling_it_has_been_writing() {
-		let config = (DESCRIPTOR.mcp_parse_config.unwrap())(
-			r#"{"mcpServers":{"s":{"type":"stdio","command":"c"}}}"#,
+	fn copilot_dispatches_on_the_type_tag_it_has_been_writing() {
+		let parse = DESCRIPTOR.mcp_parse_config.unwrap();
+		let stdio =
+			parse(r#"{"mcpServers":{"s":{"type":"stdio","command":"c"}}}"#)
+				.unwrap();
+		assert!(
+			matches!(stdio.mcps[0].transport, McpTransport::Stdio { .. }),
+			"got {:?}",
+			stdio.mcps[0].transport
+		);
+
+		// Same URL, two tags, two answers — only the tag can produce that.
+		// `untyped_remote: StreamableHttp` means the path heuristic cannot.
+		let sse = parse(
+			r#"{"mcpServers":{"s":{"type":"sse","url":"https://x.test/mcp"}}}"#,
 		)
 		.unwrap();
 		assert!(
-			matches!(config.mcps[0].transport, McpTransport::Stdio { .. }),
+			matches!(sse.mcps[0].transport, McpTransport::Sse { .. }),
 			"got {:?}",
-			config.mcps[0].transport
+			sse.mcps[0].transport
+		);
+		let http = parse(
+			r#"{"mcpServers":{"s":{"type":"http","url":"https://x.test/mcp"}}}"#,
+		)
+		.unwrap();
+		assert!(
+			matches!(
+				http.mcps[0].transport,
+				McpTransport::StreamableHttp { .. }
+			),
+			"got {:?}",
+			http.mcps[0].transport
 		);
 	}
 

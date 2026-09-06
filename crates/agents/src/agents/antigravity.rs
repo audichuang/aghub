@@ -39,6 +39,18 @@ define_mcp_paths! {
 // Decision #12 in `docs/specs/2026-08-30-skills-hub-borrow-path.md` was revised
 // on 2026-09-06 with the evidence; #11 still holds — all three are Antigravity's
 // own dirs, never another agent's private one.
+//
+// Two known costs of the read-only legacy dirs, both pinned by tests rather
+// than left to be rediscovered:
+//  * `doctor --verify-links` inspects the WRITE slot only, so a skill an older
+//    release installed into `.gemini/antigravity/skills` audits as `withheld`
+//    even though Antigravity really does read it. Relink to clear it.
+//  * A Referrer parked in one of those dirs cannot be removed for antigravity
+//    ALONE — the planner schedules only the write dir, so `delete --yes`
+//    answers `outcome: kept` with the file in place
+//    (`npx_skill_path_ownership.rs::a_referrer_in_a_read_only_compat_dir_…`).
+// Both beat the alternative, which was not reading the dirs and stranding the
+// skills outright.
 fn global_skills_paths() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();
@@ -76,6 +88,11 @@ fn sub_agent_global_dir() -> Option<PathBuf> {
 	home_dir().map(|home| home.join(".gemini/config/agents"))
 }
 
+// Only `.agents/agents`, not the `.agent/agents` alias the skills side reads:
+// the sub-agent path model is ONE dir per scope (`fn(&Path) -> Option<PathBuf>`)
+// with no read/write split, so a second dir would mean making that model plural
+// for every sub-agent-capable agent. Not worth it for a compat alias the vendor
+// no longer defaults to — revisit if workspaces actually use it.
 fn sub_agent_project_dir(root: &Path) -> Option<PathBuf> {
 	Some(root.join(".agents/agents"))
 }

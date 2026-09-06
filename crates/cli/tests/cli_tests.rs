@@ -9765,8 +9765,9 @@ fn fourth_review_name_only_decisions_stay_closed() {
 /// adds to one while removing from the other deletes it from both.
 ///
 /// The reason the earlier rounds missed this is worth keeping: enumerating the
-/// four descriptors that implement sub-agents shows four distinct directories,
-/// which looks like a proof. It is not. `agents/src/sub_agents.rs` deliberately
+/// descriptors that implement sub-agents shows a distinct directory for each,
+/// which looks like a proof. It is not. (Do not write the count down — it moved
+/// from four to six the moment copilot and antigravity gained the capability.) `agents/src/sub_agents.rs` deliberately
 /// refuses only symlinked LEAVES, so a symlinked ancestor (or an agent-home env
 /// override) makes two of those "distinct" directories the same directory.
 /// The copy then finds its own file, reports `already_present` truthfully, the

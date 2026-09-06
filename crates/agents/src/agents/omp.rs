@@ -1,30 +1,41 @@
 use crate::descriptor::*;
-use crate::format::{json_map, mcp_policy};
+use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 use std::path::{Path, PathBuf};
 
 // Oh My Pi (`can1357/oh-my-pi`, a fork of `earendil-works/pi`). Its native MCP
-// config is an `mcpServers` map whose transport tag is `transport` (NOT `type`),
-// accepting exactly `stdio` | `sse` | `http`:
+// config is an `mcpServers` map tagged `type` — `stdio` | `sse` | `http`.
 //
-//     if ("transport" in e && (e.transport === "stdio" || e.transport === "sse"
-//                              || e.transport === "http"))
+// omp reads TWO tag keys and validates only ONE, so `type` is the sole spelling
+// that works everywhere. Its loader prefers `transport`:
 //
-// and an untagged entry resolves by which field is present:
+//     function Yge(e) {
+//       if ("transport" in e && (e.transport === "stdio"|"sse"|"http")) return e.transport;
+//       if ("type" in e && (e.type === "stdio"|"sse"|"http")) return e.type;
+//       if ("url" in e && ...) return "http";
+//       return "stdio";
+//     }
 //
-//     e.transport ?? (e.command ? "stdio" : e.url ? "http" : "stdio")
+// but its validator — run by `mcp add`, `mcp update` AND by `connectServers` on
+// every entry at startup — looks at `type` alone:
 //
-// so an untagged remote is streamable HTTP, never SSE. The per-server toggle is
-// a native `enabled` bool — omp's own importers propagate `enabled: false` from
-// every foreign config it reads, so dropping it would remount a server the user
-// switched off. Fields omp owns that aghub does not (`cwd`, `oauth`, `auth`,
+//     function GY(e, t) { const o = t.type ?? "stdio"; ... }
+//
+// so an entry tagged only `transport: "http"` defaults to `stdio`, fails
+// `stdio server requires "command" field`, and is SKIPPED at connect time
+// rather than reported. Writing `type` satisfies `GY` and `Yge` falls through
+// to it. A hand-written `transport: "sse"` is the one thing aghub cannot see:
+// it reads as streamable HTTP via the URL fallback. Narrow, and the alternative
+// is a config omp silently refuses to mount.
+//
+// An untagged entry resolves by which field is present, so an untagged remote
+// is streamable HTTP, never SSE. The per-server toggle is a native `enabled`
+// bool — omp's own importers propagate `enabled: false` from every foreign
+// config they read, so dropping it would remount a server the user switched
+// off. Fields omp owns that aghub does not (`cwd`, `oauth`, `auth`,
 // `requestIdFormat`, `envPolicy`) survive because `json_map` rewrites only the
 // transport keys.
 json_map_dialect!(json_map::Dialect {
-	vocab: mcp_policy::TransportVocabulary {
-		tag_key: "transport",
-		..json_map::MCP_SERVERS.vocab
-	},
 	toggle_key: json_map::ToggleKey::Enabled,
 	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
@@ -157,7 +168,7 @@ mod tests {
 	}
 
 	#[test]
-	fn omp_tags_transport_and_keeps_a_disabled_server() {
+	fn omp_tags_type_and_keeps_a_disabled_server() {
 		let mut config = AgentConfig::new();
 		config.mcps = vec![
 			McpServer::new("local", McpTransport::stdio("run-local", vec![])),
@@ -171,10 +182,12 @@ mod tests {
 		let output = (DESCRIPTOR.mcp_serialize_config.unwrap())(&config, None)
 			.expect("omp MCP config should serialize");
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
-		// `transport`, not `type` — the whole point of omp's dialect.
-		assert_eq!(value["mcpServers"]["local"]["transport"], "stdio");
-		assert!(value["mcpServers"]["local"].get("type").is_none());
-		assert_eq!(value["mcpServers"]["api"]["transport"], "http");
+		// `type`, not `transport`: omp's `GY` validator reads ONLY `type` and
+		// runs on every entry at connect time, so a `transport`-only tag makes
+		// omp default the server to stdio and skip it for want of a `command`.
+		assert_eq!(value["mcpServers"]["local"]["type"], "stdio");
+		assert!(value["mcpServers"]["local"].get("transport").is_none());
+		assert_eq!(value["mcpServers"]["api"]["type"], "http");
 		// A disabled server must SURVIVE the write with its flag, not vanish.
 		assert_eq!(value["mcpServers"]["local"]["enabled"], false);
 		assert_eq!(value["mcpServers"]["api"]["enabled"], true);
@@ -207,7 +220,7 @@ mod tests {
 		let original = r#"{
 			"mcpServers": {
 				"local": {
-					"transport": "stdio",
+					"type": "stdio",
 					"command": "uvx",
 					"cwd": "/workspace/service",
 					"requestIdFormat": "string",

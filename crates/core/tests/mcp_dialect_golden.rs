@@ -974,12 +974,18 @@ url = "https://example.test/sse""#,
 toggled-off stdio run-off enabled=false
 untagged-plain streamable-http https://example.test/plain enabled=true"#
 	),
-	// omp is the FIRST `ToggleKey::Enabled` agent in `json_map`, and the only
-	// one whose tag is `transport`. Every shared const above therefore spells
-	// something omp does not, so it gets its own three — derived from the
-	// vendor contract, NOT from running the serializer:
-	//   "transport" in e && (e.transport === "stdio" | "sse" | "http")
-	//   e.transport ?? (e.command ? "stdio" : e.url ? "http" : "stdio")
+	// omp is the FIRST `ToggleKey::Enabled` agent in `json_map`, so no shared
+	// const above carries its toggle. Derived from the vendor contract, NOT
+	// from running the serializer.
+	//
+	// The tag is `type`, not `transport`, and that is load-bearing: omp's
+	// loader `Yge` prefers `transport` and falls through to `type`, but its
+	// validator `GY` reads `type` ALONE — and `connectServers` runs `GY` over
+	// every entry at startup, SKIPPING each one that fails. A remote tagged
+	// only `transport: "http"` therefore defaults to stdio, fails
+	// `stdio server requires "command" field`, and never mounts. `type` is the
+	// only spelling both halves accept.
+	//
 	// The `off` server MUST survive as `enabled: false`; a no-toggle dialect
 	// drops it entirely, which would silently remount a server the user
 	// switched off the next time aghub saved.
@@ -998,19 +1004,19 @@ untagged-plain streamable-http https://example.test/plain enabled=true"#
       "env": {
         "TOKEN": "secret"
       },
-      "transport": "stdio"
+      "type": "stdio"
     },
     "off": {
       "command": "run-off",
       "enabled": false,
-      "transport": "stdio"
+      "type": "stdio"
     },
     "remote": {
       "enabled": true,
       "headers": {
         "Authorization": "Bearer t"
       },
-      "transport": "http",
+      "type": "http",
       "url": "https://example.test/mcp"
     }
   }
@@ -1019,7 +1025,7 @@ untagged-plain streamable-http https://example.test/plain enabled=true"#
   "mcpServers": {
     "stream": {
       "enabled": true,
-      "transport": "sse",
+      "type": "sse",
       "url": "https://example.test/sse"
     }
   }
