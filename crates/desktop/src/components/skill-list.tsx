@@ -1,6 +1,5 @@
 import {
 	ArrowTopRightOnSquareIcon,
-	BookOpenIcon,
 	ChevronDownIcon,
 	ChevronRightIcon,
 	StarIcon as StarIconSolid,
@@ -13,19 +12,31 @@ import { useMemo, useState } from "react";
 import { useMultiSelect } from "../hooks/use-multi-select";
 import { useTranslation } from "react-i18next";
 import type { SkillResponse, SkillUpdateResponse } from "../generated/dto";
-import { AgentIcons } from "./agent-icons";
 import { SkillStatusBadge } from "./skill-update-badge";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
 import { useSkillTags } from "../hooks/use-skill-tags";
 import { filterGroupsByAgent } from "../lib/skill-agent-filter";
+import {
+	isGroupExpanded,
+	toggleGroupExpansion,
+} from "../lib/skill-group-expansion";
+import {
+	sharedUncheckableReason,
+	uncheckableTooltipKey,
+} from "../lib/skill-group-status";
 import { matchesTagFilter } from "../lib/skill-tags";
-import { filterItemsByAgentIds } from "../lib/utils";
+import { cn, filterItemsByAgentIds } from "../lib/utils";
 import {
 	globalSkillLockQueryOptions,
 	projectSkillLockQueryOptions,
 } from "../requests/skills";
+
+/** Sentinel key for the "no lock record" bucket — never a real lock source
+ * id, so it can share the same collapse-state Set and never collides with
+ * one. */
+const UNRECORDED_GROUP_KEY = "__unrecorded__";
 
 interface SkillGroup {
 	name: string;
@@ -59,6 +70,14 @@ interface SkillListProps {
 	/** When set, source group headers show a button that opens the Sources
 	 * view for that source, where uninstalled skills can be installed. */
 	onOpenSourceView?: (source: string) => void;
+	/**
+	 * The lock source id (`sg.source`, NOT a clone URL) of the group the page
+	 * currently has open in the right panel. The caller resolves the URL's
+	 * `source` param to a row first — comparing it against `sg.source`
+	 * directly would silently never match, since a clone URL and a lock id
+	 * are different strings for the same source.
+	 */
+	selectedSource?: string | null;
 	/** Local tag filter (AND). Empty/absent shows everything. */
 	tagFilter?: ReadonlySet<string>;
 	/**
@@ -86,6 +105,7 @@ export function SkillList({
 	onResolveAuth,
 	onManageGroupAgents,
 	onOpenSourceView,
+	selectedSource = null,
 	tagFilter,
 	agentFilter = null,
 }: SkillListProps) {
@@ -190,7 +210,11 @@ export function SkillList({
 		agentFilter,
 	]);
 
-	const { sourceGroups, singleItemGroups, unknownGroups } = useMemo(() => {
+	// Every source is its own group — including a source with only one
+	// skill. A skill the lock has no entry for at all (never installed
+	// through aghub/npx) is the ONE case that still gets collected into a
+	// single bucket, since there is no source identity to group it by.
+	const { sourceGroups, unrecordedGroup } = useMemo(() => {
 		const findSkillSource = (
 			skillName: string,
 		): { source: string; sourceType: string } | null => {
@@ -209,19 +233,11 @@ export function SkillList({
 		};
 
 		if (!groupBySource) {
-			return {
-				sourceGroups: [],
-				singleItemGroups: [],
-				unknownGroups: filteredByName,
-			};
+			return { sourceGroups: [] as SourceGroup[], unrecordedGroup: null };
 		}
 
 		const groups = new Map<string, SourceGroup>();
-		const singleItems: (SkillGroup & {
-			source: string;
-			sourceType: string;
-		})[] = [];
-		const unknown: SkillGroup[] = [];
+		const unrecorded: SkillGroup[] = [];
 
 		for (const group of filteredByName) {
 			const sourceInfo = findSkillSource(group.name);
@@ -237,56 +253,31 @@ export function SkillList({
 					});
 				}
 			} else {
-				unknown.push(group);
+				unrecorded.push(group);
 			}
 		}
 
-		const multiItemGroups: SourceGroup[] = [];
-		for (const sg of groups.values()) {
-			if (sg.skills.length === 1) {
-				singleItems.push({
-					...sg.skills[0],
-					source: sg.source,
-					sourceType: sg.sourceType,
-				});
-			} else {
-				multiItemGroups.push(sg);
-			}
-		}
+		const starThenName = (a: SkillGroup, b: SkillGroup) => {
+			const aStarred = isSkillStarred(a.name);
+			const bStarred = isSkillStarred(b.name);
+			if (aStarred && !bStarred) return -1;
+			if (!aStarred && bStarred) return 1;
+			return a.name.localeCompare(b.name);
+		};
 
-		const sortedSourceGroups = multiItemGroups
+		const sortedSourceGroups = [...groups.values()]
 			.map((sg) => ({
 				...sg,
-				skills: [...sg.skills].sort((a, b) => {
-					const aStarred = isSkillStarred(a.name);
-					const bStarred = isSkillStarred(b.name);
-					if (aStarred && !bStarred) return -1;
-					if (!aStarred && bStarred) return 1;
-					return a.name.localeCompare(b.name);
-				}),
+				skills: [...sg.skills].sort(starThenName),
 			}))
 			.sort((a, b) => a.source.localeCompare(b.source));
 
-		const sortedSingleItems = singleItems.sort((a, b) => {
-			const aStarred = isSkillStarred(a.name);
-			const bStarred = isSkillStarred(b.name);
-			if (aStarred && !bStarred) return -1;
-			if (!aStarred && bStarred) return 1;
-			return a.name.localeCompare(b.name);
-		});
-
-		const sortedUnknown = unknown.sort((a, b) => {
-			const aStarred = isSkillStarred(a.name);
-			const bStarred = isSkillStarred(b.name);
-			if (aStarred && !bStarred) return -1;
-			if (!aStarred && bStarred) return 1;
-			return a.name.localeCompare(b.name);
-		});
+		const sortedUnrecorded = [...unrecorded].sort(starThenName);
 
 		return {
 			sourceGroups: sortedSourceGroups,
-			singleItemGroups: sortedSingleItems,
-			unknownGroups: sortedUnknown,
+			unrecordedGroup:
+				sortedUnrecorded.length > 0 ? sortedUnrecorded : null,
 		};
 	}, [
 		filteredByName,
@@ -297,33 +288,31 @@ export function SkillList({
 		isSkillStarred,
 	]);
 
-	const [expandedSources, setExpandedSources] = useState<Set<string>>(() => {
-		if (sourceGroups.length <= 5) {
-			return new Set(sourceGroups.map((sg) => sg.source));
-		}
-		return new Set();
-	});
+	// Only what the user explicitly collapsed or reopened; every other group
+	// follows the "open" default. See `lib/skill-group-expansion.ts` for why
+	// this is NOT seeded from `sourceGroups`.
+	const [expandOverrides, setExpandOverrides] = useState<
+		ReadonlyMap<string, boolean>
+	>(() => new Map());
 
-	const toggleSource = (source: string) => {
-		setExpandedSources((prev) => {
-			const next = new Set(prev);
-			if (next.has(source)) {
-				next.delete(source);
-			} else {
-				next.add(source);
-			}
-			return next;
-		});
+	const toggleSource = (key: string) => {
+		setExpandOverrides((prev) => toggleGroupExpansion(prev, key));
 	};
 
-	const { createSelectionHandler } = useMultiSelect({
-		selectedKeys,
-		onSelectionChange,
-		isMultiSelectMode,
-	});
+	const { createSelectionHandler, createGroupedSelectionHandler } =
+		useMultiSelect({
+			selectedKeys,
+			onSelectionChange,
+			isMultiSelectMode,
+		});
 
-	// Helper to render a skill item
-	const renderSkillItem = (skillGroup: SkillGroup) => (
+	// Helper to render a skill item. `suppressStatusBadge` is set when the
+	// group this row belongs to already said the shared reason once on its
+	// header — repeating a badge on every row below it would be noise.
+	const renderSkillItem = (
+		skillGroup: SkillGroup,
+		opts: { suppressStatusBadge: boolean },
+	) => (
 		<ListBox.Item
 			key={skillGroup.name}
 			id={skillGroup.name}
@@ -331,26 +320,226 @@ export function SkillList({
 			className="data-selected:bg-surface"
 		>
 			<div className="flex w-full items-center gap-2">
-				<div className="relative inline-flex size-4 shrink-0 items-center justify-center">
-					<BookOpenIcon className="size-4 text-muted" />
+				{/* Fixed-width slot regardless of starred state — an absent
+				    icon must not shift the title flush left while a starred
+				    row's title sits one icon+gap further right. */}
+				<span className="flex size-3.5 shrink-0 items-center justify-center">
 					{isSkillStarred(skillGroup.name) && (
-						<StarIconSolid className="absolute -bottom-1 -left-1 size-2.5 text-warning" />
+						<StarIconSolid className="size-3.5 text-warning" />
 					)}
-				</div>
+				</span>
 				<Label className="flex-1 truncate">{skillGroup.name}</Label>
 				<SkillTagChips tags={tagsFor(skillGroup.name)} />
-				<SkillStatusBadge
-					status={updateStatuses?.get(skillGroup.name)}
-					onResolveAuth={
-						onResolveAuth
-							? () => onResolveAuth(skillGroup.name)
-							: undefined
-					}
-				/>
-				<AgentIcons items={skillGroup.items} overflowVariant="square" />
+				{!opts.suppressStatusBadge && (
+					<SkillStatusBadge
+						status={updateStatuses?.get(skillGroup.name)}
+						onResolveAuth={
+							onResolveAuth
+								? () => onResolveAuth(skillGroup.name)
+								: undefined
+						}
+					/>
+				)}
+				{!agentFilter && (
+					<span
+						className="shrink-0 text-xs text-muted tabular-nums"
+						title={t("skillInstalledAgentCount", {
+							count: skillGroup.items.length,
+						})}
+					>
+						{skillGroup.items.length}
+					</span>
+				)}
 			</div>
 		</ListBox.Item>
 	);
+
+	// One group block: a header (collapse chevron, name/count that opens the
+	// source panel, shared-uncheckable rollup, ↗ and Users actions) plus its
+	// skill list. Shared by every real source group AND the "no lock record"
+	// bucket — `sourceIdForActions: null` is what turns off the source-only
+	// affordances (opening a panel, bulk-managing agents) for the latter,
+	// since there is no real source behind it.
+	const renderGroupBlock = ({
+		groupKey,
+		title,
+		sourceIdForActions,
+		skills: groupSkills,
+		sourceGroupForManage,
+	}: {
+		groupKey: string;
+		title: string;
+		sourceIdForActions: string | null;
+		skills: SkillGroup[];
+		sourceGroupForManage?: SourceGroup;
+	}) => {
+		const isOpen = isGroupExpanded(expandOverrides, groupKey);
+		const groupKeySet = new Set(groupSkills.map((s) => s.name));
+		// Only THIS group's keys. Handing a ListBox the global set
+		// makes React Aria echo back the other groups' names on every
+		// toggle, and the handler then reads one of THOSE as the row
+		// that was clicked — so clicking a row in one group selects a
+		// row in another. Same shape as `plugin-list.tsx`.
+		const groupSelectedKeys = new Set(
+			[...selectedKeys].filter((k) => groupKeySet.has(k)),
+		);
+		const isSelected =
+			sourceIdForActions !== null &&
+			sourceIdForActions === selectedSource;
+		const names = groupSkills.map((s) => s.name);
+		const shared = updateStatuses
+			? sharedUncheckableReason(names, updateStatuses)
+			: ({ kind: "none" } as const);
+		const canOpen =
+			Boolean(onOpenSourceView) && sourceIdForActions !== null;
+
+		return (
+			<div key={groupKey} className="border-y border-separator">
+				<div className="flex w-full items-center gap-1 px-3 py-2 transition-colors hover:bg-surface-secondary">
+					<button
+						type="button"
+						onClick={() => toggleSource(groupKey)}
+						aria-expanded={isOpen}
+						aria-label={
+							isOpen
+								? t("collapseSourceGroup")
+								: t("expandSourceGroup")
+						}
+						className="flex size-6 shrink-0 items-center justify-center rounded-md text-muted hover:bg-surface hover:text-foreground"
+					>
+						{isOpen ? (
+							<ChevronDownIcon className="size-4" />
+						) : (
+							<ChevronRightIcon className="size-4" />
+						)}
+					</button>
+					{canOpen && sourceIdForActions !== null ? (
+						<button
+							type="button"
+							onClick={() =>
+								onOpenSourceView?.(sourceIdForActions)
+							}
+							className="flex min-w-0 flex-1 items-center gap-2 text-left"
+						>
+							<span
+								className={cn(
+									"truncate text-sm font-medium",
+									isSelected
+										? "text-accent"
+										: "text-foreground",
+								)}
+							>
+								{title}
+							</span>
+							<Chip size="sm" variant="secondary">
+								{groupSkills.length}
+							</Chip>
+						</button>
+					) : (
+						// The "no lock record" bucket opens no panel. A
+						// `disabled` button announces itself as a dimmed
+						// control the user could have pressed; this is a
+						// heading.
+						<div className="flex min-w-0 flex-1 items-center gap-2">
+							<span className="truncate text-sm font-medium text-foreground">
+								{title}
+							</span>
+							<Chip size="sm" variant="secondary">
+								{groupSkills.length}
+							</Chip>
+						</div>
+					)}
+					{shared.kind === "auth" && (
+						<Button
+							size="sm"
+							variant="ghost"
+							className="shrink-0"
+							onPress={() => onResolveAuth?.(names[0])}
+						>
+							{t("credentialBind")}
+						</Button>
+					)}
+					{shared.kind === "other" && (
+						<Tooltip delay={0}>
+							<Tooltip.Trigger>
+								<span className="shrink-0 cursor-default text-xs text-muted">
+									{t("skillGroupAllUncheckable")}
+								</span>
+							</Tooltip.Trigger>
+							<Tooltip.Content>
+								{t(uncheckableTooltipKey(shared.reason))}
+							</Tooltip.Content>
+						</Tooltip>
+					)}
+					{canOpen && sourceIdForActions !== null && (
+						<Tooltip delay={500}>
+							<Tooltip.Trigger>
+								<Button
+									isIconOnly
+									size="sm"
+									variant="ghost"
+									className="shrink-0"
+									aria-label={t("viewSkillSource")}
+									onPress={() =>
+										onOpenSourceView?.(sourceIdForActions)
+									}
+								>
+									<ArrowTopRightOnSquareIcon className="size-4 text-muted" />
+								</Button>
+							</Tooltip.Trigger>
+							<Tooltip.Content>
+								{t("viewSkillSource")}
+							</Tooltip.Content>
+						</Tooltip>
+					)}
+					{onManageGroupAgents && sourceGroupForManage && (
+						<Tooltip delay={500}>
+							<Tooltip.Trigger>
+								<Button
+									isIconOnly
+									size="sm"
+									variant="ghost"
+									className="shrink-0"
+									aria-label={t("bulkManageGroupAgents")}
+									onPress={() =>
+										onManageGroupAgents(
+											sourceGroupForManage,
+										)
+									}
+								>
+									<UsersIcon className="size-4 text-muted" />
+								</Button>
+							</Tooltip.Trigger>
+							<Tooltip.Content>
+								{t("bulkManageGroupAgents")}
+							</Tooltip.Content>
+						</Tooltip>
+					)}
+				</div>
+
+				{isOpen && (
+					<ListBox
+						aria-label={t("skillsFromSource", { source: title })}
+						selectionMode={selectionMode}
+						selectionBehavior="toggle"
+						selectedKeys={groupSelectedKeys}
+						// Grouped: each source renders its own ListBox, so a
+						// range-select here must keep the checks made in the
+						// OTHER groups (plain `createSelectionHandler`
+						// replaces the whole set and silently drops them).
+						onSelectionChange={createGroupedSelectionHandler(names)}
+						className="p-2 pl-6"
+					>
+						{groupSkills.map((s) =>
+							renderSkillItem(s, {
+								suppressStatusBadge: shared.kind !== "none",
+							}),
+						)}
+					</ListBox>
+				)}
+			</div>
+		);
+	};
 
 	if (groupBySource) {
 		if (isGroupingLoading) {
@@ -361,10 +550,7 @@ export function SkillList({
 			);
 		}
 
-		const hasItems =
-			sourceGroups.length > 0 ||
-			singleItemGroups.length > 0 ||
-			unknownGroups.length > 0;
+		const hasItems = sourceGroups.length > 0 || unrecordedGroup !== null;
 		if (!hasItems) {
 			return (
 				<p className="px-3 py-6 text-center text-sm text-muted">
@@ -375,109 +561,22 @@ export function SkillList({
 
 		return (
 			<div className="flex-1 overflow-y-auto [transform:translateZ(0)]">
-				{sourceGroups.map((sg) => (
-					<div key={sg.source} className="border-y border-separator">
-						<div className="flex w-full items-center gap-1 px-3 py-2 transition-colors hover:bg-surface-secondary">
-							<button
-								type="button"
-								onClick={() => toggleSource(sg.source)}
-								className="flex min-w-0 flex-1 items-center gap-2 text-left"
-							>
-								{expandedSources.has(sg.source) ? (
-									<ChevronDownIcon className="size-4 shrink-0 text-muted" />
-								) : (
-									<ChevronRightIcon className="size-4 shrink-0 text-muted" />
-								)}
-								<div className="min-w-0 flex-1">
-									<p className="truncate text-sm font-medium text-foreground">
-										{sg.source}
-									</p>
-								</div>
-								<Chip size="sm" variant="secondary">
-									{sg.skills.length}
-								</Chip>
-							</button>
-							{onOpenSourceView && (
-								<Tooltip delay={500}>
-									<Tooltip.Trigger>
-										<Button
-											isIconOnly
-											size="sm"
-											variant="ghost"
-											className="shrink-0"
-											aria-label={t("viewSkillSource")}
-											onPress={() =>
-												onOpenSourceView(sg.source)
-											}
-										>
-											<ArrowTopRightOnSquareIcon className="size-4 text-muted" />
-										</Button>
-									</Tooltip.Trigger>
-									<Tooltip.Content>
-										{t("viewSkillSource")}
-									</Tooltip.Content>
-								</Tooltip>
-							)}
-							{onManageGroupAgents && (
-								<Tooltip delay={500}>
-									<Tooltip.Trigger>
-										<Button
-											isIconOnly
-											size="sm"
-											variant="ghost"
-											className="shrink-0"
-											aria-label={t(
-												"bulkManageGroupAgents",
-											)}
-											onPress={() =>
-												onManageGroupAgents(sg)
-											}
-										>
-											<UsersIcon className="size-4 text-muted" />
-										</Button>
-									</Tooltip.Trigger>
-									<Tooltip.Content>
-										{t("bulkManageGroupAgents")}
-									</Tooltip.Content>
-								</Tooltip>
-							)}
-						</div>
-
-						{expandedSources.has(sg.source) && (
-							<ListBox
-								aria-label={`Skills from ${sg.source}`}
-								selectionMode={selectionMode}
-								selectionBehavior="toggle"
-								selectedKeys={selectedKeys}
-								onSelectionChange={createSelectionHandler(
-									sg.skills.map((s) => s.name),
-								)}
-								className="p-2 pl-6"
-							>
-								{sg.skills.map(renderSkillItem)}
-							</ListBox>
-						)}
-					</div>
-				))}
-
-				{(singleItemGroups.length > 0 || unknownGroups.length > 0) && (
-					<ListBox
-						aria-label="Ungrouped skills"
-						selectionMode={selectionMode}
-						selectionBehavior="toggle"
-						selectedKeys={selectedKeys}
-						onSelectionChange={createSelectionHandler(
-							[...singleItemGroups, ...unknownGroups].map(
-								(s) => s.name,
-							),
-						)}
-						className="p-2"
-					>
-						{[...singleItemGroups, ...unknownGroups].map(
-							renderSkillItem,
-						)}
-					</ListBox>
+				{sourceGroups.map((sg) =>
+					renderGroupBlock({
+						groupKey: sg.source,
+						title: sg.source,
+						sourceIdForActions: sg.source,
+						skills: sg.skills,
+						sourceGroupForManage: sg,
+					}),
 				)}
+				{unrecordedGroup &&
+					renderGroupBlock({
+						groupKey: UNRECORDED_GROUP_KEY,
+						title: t("skillsUnrecordedSource"),
+						sourceIdForActions: null,
+						skills: unrecordedGroup,
+					})}
 			</div>
 		);
 	}
@@ -502,14 +601,16 @@ export function SkillList({
 				)}
 				className="p-2"
 			>
-				{filteredByName.map(renderSkillItem)}
+				{filteredByName.map((s) =>
+					renderSkillItem(s, { suppressStatusBadge: false }),
+				)}
 			</ListBox>
 		</div>
 	);
 }
 
 /** Up to two tag chips per row, then a `+N` counter — a long tag list must not
- * push the agent icons off the row. */
+ * push the status badge and agent count off the row. */
 function SkillTagChips({ tags }: { tags: string[] }) {
 	if (tags.length === 0) return null;
 	const shown = tags.slice(0, 2);

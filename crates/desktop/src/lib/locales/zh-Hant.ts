@@ -404,8 +404,9 @@ export default {
 	skillContextCostTooltipNoBudget:
 		"這個 agent 會把每個技能的名稱與描述各一行放進系統提示,每回合都算;完整的 SKILL.md 只有技能真的被呼叫時才載入。這裡不顯示預算:我們能精確量到的字元預算是 Claude Code 的,而這個 agent 的清單包裝方式不同。token 數字是估計值 —— 拉丁文字約 4.75 個字元 1 個 token,漢字約 1 個字元 1 個 token。",
 	skillContextOverBudget: "超出預算:至少 {{count}} 個描述會被拿掉",
+	skillInstalledAgentCount: "安裝於 {{count}} 個 agent",
 	// --- 從 agent 檢視批次更新 ---
-	updateAllSkills: "全部更新({{count}})",
+	updateAllSkills: "{{count}} 個技能可更新",
 	updateAllSkillsNone: "全部都是最新的",
 	skillUpdateRenamedExcluded:
 		"{{count}} 個已改名的技能不在這批裡,請到來源檢視處理。",
@@ -712,8 +713,7 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
-	backgroundCheckFoundUpdates:
-		"背景排程檢查發現 {{count}} 個可更新。重新整理以顯示是哪些技能。",
+	backgroundCheckFoundUpdates: "背景檢查發現 {{count}} 個更新",
 	manageTags: "標籤",
 	untagged: "未標記",
 	noTagsYet: "還沒有標籤。",
@@ -1150,8 +1150,6 @@ export default {
 	connSaveError: "儲存連線失敗。",
 	connRemoveError: "移除連線失敗。",
 	sources: "來源",
-	searchSources: "搜尋來源…",
-	sourcesEmpty: "尚無來源。從 repo 安裝技能後會出現在這裡。",
 	scopeGlobal: "全域",
 	scopeProject: "專案",
 	needsCredential: "需要憑證",
@@ -1238,7 +1236,7 @@ export default {
 	sourceInstallNoLinkTargets: "此處沒有 Agent 可以接收技能。",
 	sourceInstallSharedSlotHint:
 		"這些 Agent 沒有自己的技能目錄,共用同一個 —— 勾選其中一個等於全部勾選,之後移除也會一起移除。",
-	selectSource: "選擇一個來源",
+	sourceNotInCurrentScope: "這個範圍裡沒有這個來源",
 	// SourceDetail summary bar
 	summaryUpdatable: "{{count}} 可更新",
 	summaryInstallable: "{{count}} 可安裝",
@@ -1252,9 +1250,14 @@ export default {
 	credentialBind: "綁定憑證",
 	// Phase 2 — Unified skills page
 	skillCenter: "技能",
-	viewByAgent: "依 Agent",
-	viewBySource: "依來源",
 	scope: "範圍",
+	filterByAgent: "依 agent 篩選",
+	skillsFromSource: "來自 {{source}} 的技能",
+	sourceListLoadFailed: "讀不到這個範圍的來源清單。請確認連線後重新整理。",
+	skillsUnrecordedSource: "本機自建（未記錄來源）",
+	skillGroupAllUncheckable: "全部無法檢查",
+	expandSourceGroup: "展開",
+	collapseSourceGroup: "收合",
 	scopeSwitchGlobal: "全域",
 	scopeSwitchProject: "專案",
 	// Bulk manage group agents
@@ -1287,6 +1290,8 @@ export default {
 	skillLayoutOutdatedTitle: "有技能仍使用共用版面",
 	skillLayoutOutdatedHint:
 		"有 {{count}} 個技能放在所有 agent 都會讀的共用資料夾,因此無法針對單一 agent 授權或撤銷。遷移會把它們移到獨立的儲存區,並為每個 agent 建立各自的連結。",
+	skillLayoutOutdatedRowHint: "{{count}} 個技能仍用舊版面",
+	skillLayoutPreviewMigration: "預覽遷移",
 	skillLayoutReview: "檢視",
 	skillLayoutMigrateTitle: "遷移技能版面",
 	skillLayoutMigrateExplain:

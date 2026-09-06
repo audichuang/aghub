@@ -1,4 +1,5 @@
 import { ArrowPathIcon } from "@heroicons/react/24/outline";
+import { ExclamationTriangleIcon } from "@heroicons/react/24/solid";
 import { Alert, Button, Checkbox, Modal, Spinner, toast } from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useMemo, useState } from "react";
@@ -20,6 +21,14 @@ import {
 interface SkillLayoutMigrationBannerProps {
 	scope: "global" | "project";
 	projectPath?: string;
+	/**
+	 * `"alert"` (default) is the existing full `Alert` banner —
+	 * `pages/project/detail.tsx` renders that variant and does not change.
+	 * `"row"` renders a single compact status-strip segment instead, for
+	 * `SkillStatusStrip` on the skills page. Both variants share the SAME
+	 * data query and Modal — only the always-visible summary chrome differs.
+	 */
+	variant?: "alert" | "row";
 }
 
 /**
@@ -39,6 +48,7 @@ interface SkillLayoutMigrationBannerProps {
 export function SkillLayoutMigrationBanner({
 	scope,
 	projectPath,
+	variant = "alert",
 }: SkillLayoutMigrationBannerProps) {
 	const { t } = useTranslation();
 	const api = useApi();
@@ -116,41 +126,68 @@ export function SkillLayoutMigrationBanner({
 		return null;
 	}
 
+	// The dialog reads the last run's rows when there are any, so without
+	// this reset a re-open shows the PREVIOUS result — "3 migrated" — instead
+	// of the fresh preview of what is still left. Only visible once a partial
+	// run became possible. Shared by both variants' trigger.
+	const openReview = () => {
+		repair.reset();
+		setPicked(null);
+		setIsOpen(true);
+	};
+
 	return (
 		<>
-			<Alert status="warning" role="alert" aria-live="polite">
-				<Alert.Indicator />
-				<Alert.Content>
-					<Alert.Title>{t("skillLayoutOutdatedTitle")}</Alert.Title>
-					<Alert.Description>
-						{t("skillLayoutOutdatedHint", { count: rows.length })}
-					</Alert.Description>
-					{/* Inside Alert.Content, wrapped — the shape every other
-					    Alert-with-action in this app uses (see
-					    `source-detail.tsx`'s orphan-lock and prune-retry
-					    alerts). A Button as a direct sibling of Alert.Content
-					    is not a layout HeroUI v3 promises anything about. */}
-					<div className="mt-3">
-						<Button
-							variant="secondary"
-							size="sm"
-							onPress={() => {
-								// The dialog reads the last run's rows when
-								// there are any, so without this a re-open
-								// shows the PREVIOUS result — "3 migrated" —
-								// instead of the fresh preview of what is
-								// still left. Only visible once a partial run
-								// became possible.
-								repair.reset();
-								setPicked(null);
-								setIsOpen(true);
-							}}
-						>
-							{t("skillLayoutReview")}
-						</Button>
-					</div>
-				</Alert.Content>
-			</Alert>
+			{variant === "alert" ? (
+				<Alert status="warning" role="alert" aria-live="polite">
+					<Alert.Indicator />
+					<Alert.Content>
+						<Alert.Title>
+							{t("skillLayoutOutdatedTitle")}
+						</Alert.Title>
+						<Alert.Description>
+							{t("skillLayoutOutdatedHint", {
+								count: rows.length,
+							})}
+						</Alert.Description>
+						{/* Inside Alert.Content, wrapped — the shape every other
+						    Alert-with-action in this app uses (see
+						    `source-detail.tsx`'s orphan-lock and prune-retry
+						    alerts). A Button as a direct sibling of Alert.Content
+						    is not a layout HeroUI v3 promises anything about. */}
+						<div className="mt-3">
+							<Button
+								variant="secondary"
+								size="sm"
+								onPress={openReview}
+							>
+								{t("skillLayoutReview")}
+							</Button>
+						</div>
+					</Alert.Content>
+				</Alert>
+			) : (
+				// Compact status-strip segment: same shape as the strip's other
+				// rows (icon, flex-1 text, right-aligned button) so the three
+				// facts read as one list, not two different components glued
+				// together.
+				<div className="flex items-center gap-2 px-3 py-2">
+					<ExclamationTriangleIcon className="size-4 shrink-0 text-warning" />
+					<span className="min-w-0 flex-1 truncate text-foreground">
+						{t("skillLayoutOutdatedRowHint", {
+							count: rows.length,
+						})}
+					</span>
+					<Button
+						size="sm"
+						variant="ghost"
+						className="shrink-0"
+						onPress={openReview}
+					>
+						{t("skillLayoutPreviewMigration")}
+					</Button>
+				</div>
+			)}
 
 			<Modal.Backdrop
 				isOpen={isOpen}

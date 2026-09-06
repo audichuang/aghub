@@ -1,29 +1,14 @@
 import {
 	ArrowPathIcon,
 	CheckCircleIcon,
-	GlobeAltIcon,
 	PlusIcon,
 	RectangleStackIcon,
 } from "@heroicons/react/24/solid";
-import {
-	Button,
-	Dropdown,
-	Spinner,
-	ToggleButton,
-	ToggleButtonGroup,
-	Tooltip,
-	toast,
-} from "@heroui/react";
-import {
-	useMutation,
-	useQueries,
-	useQuery,
-	useQueryClient,
-} from "@tanstack/react-query";
+import { Button, Dropdown, Spinner, Tooltip, toast } from "@heroui/react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
-import { SkillLayoutMigrationBanner } from "../../components/skill-layout-migration-banner";
 import { BulkDeleteDialog } from "../../components/bulk-delete-dialog";
 import { BulkManageGroupAgentsDialog } from "../../components/bulk-manage-group-agents-dialog";
 import { CreateSkillPanel } from "../../components/create-skill-panel";
@@ -38,27 +23,33 @@ import {
 import { useSkillTags } from "../../hooks/use-skill-tags";
 import { allTags, UNTAGGED } from "../../lib/skill-tags";
 import { MultiSelectFloatingBar } from "../../components/multi-select-floating-bar";
+import { ScopeControl } from "../../components/scope-control";
 import {
-	PROJECT_KEY_PREFIX,
-	ScopeControl,
-} from "../../components/scope-control";
-import { SkillAgentFilterRow } from "../../components/skill-agent-filter-row";
+	SkillAgentCostLine,
+	SkillAgentSelect,
+	useSkillAgentFilterData,
+} from "../../components/skill-agent-filter-row";
 import { SkillDetail } from "../../components/skill-detail";
 import { SkillList } from "../../components/skill-list";
 import type { SourceGroup } from "../../components/skill-list";
+import { SkillStatusStrip } from "../../components/skill-status-strip";
 import { SourceDetail } from "../../components/source-detail";
 import type { SourceRow } from "../../components/source-detail";
-import type {
-	SkillResponse,
-	SkillUpdateResponse,
-	SourcesListResponse,
-} from "../../generated/dto";
+import type { SkillResponse, SkillUpdateResponse } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { useApplyAllSkillUpdates } from "../../hooks/use-apply-all-skill-updates";
 import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
 import { filterGroupsByAgent } from "../../lib/skill-agent-filter";
+import {
+	clearSelectionParams,
+	parseScopeParam,
+	resolveSourceRow,
+	selectSkillParams,
+	selectSourceParams,
+	serializeScopeParam,
+} from "../../lib/skills-page-url";
 import {
 	batchedSkillCount,
 	groupUpdatesBySource,
@@ -74,166 +65,6 @@ import {
 import { sourcesListQueryOptions } from "../../requests/sources";
 import { queryKeys } from "../../requests/keys";
 
-// ─── Types ───────────────────────────────────────────────────────────────────
-
-type ViewMode = "agent" | "source";
-
-const TRAILING_SLASH_RE = /\/+$/;
-
-function sourceDisplayName(row: SourceRow): string {
-	if (row.sourceType !== "local") return row.source;
-	const trimmed = row.source.replace(TRAILING_SLASH_RE, "");
-	return trimmed.split("/").filter(Boolean).pop() ?? row.source;
-}
-
-function sourceRowKey(r: SourceRow) {
-	// Keyed on `sourceUrl`, not `source`: rows are grouped by repository origin,
-	// so two forges serving one `owner/repo` are two rows that SHARE the
-	// host-blind `source`. `sourceUrl` is unique per origin by construction.
-	// Falls back for entries with no recorded URL (local sources).
-	return `${r.rowScope}:${r.projectRoot ?? ""}:${r.sourceUrl || r.source}`;
-}
-
-// ─── Source list panel (view=source) ─────────────────────────────────────────
-
-interface SourceListPanelProps {
-	scope: "global" | "project";
-	projectPath: string | null;
-	selectedKey: string | null;
-	onSelectKey: (key: string) => void;
-	searchQuery: string;
-}
-
-function SourceListPanel({
-	scope,
-	projectPath,
-	selectedKey,
-	onSelectKey,
-	searchQuery,
-}: SourceListPanelProps) {
-	const { t } = useTranslation();
-	const api = useApi();
-	const { data: projects = [] } = useProjects();
-
-	// Guard: do not query project sources until a project is actually selected.
-	const projectIsReady = scope !== "project" || projectPath !== null;
-
-	const sourceQueries = useQueries({
-		queries:
-			scope === "global"
-				? [sourcesListQueryOptions({ api, scope: "global" })]
-				: projects
-						.filter((p) => !projectPath || p.path === projectPath)
-						.map((p) =>
-							sourcesListQueryOptions({
-								api,
-								scope: "project",
-								projectRoot: p.path,
-								enabled: projectIsReady,
-							}),
-						),
-	});
-
-	const isLoading = sourceQueries.some((q) => q.isLoading);
-
-	const rows = useMemo<SourceRow[]>(() => {
-		if (scope === "global") {
-			const data = sourceQueries[0]?.data as
-				| SourcesListResponse
-				| undefined;
-			return (data?.sources ?? []).map((s) => ({
-				...s,
-				rowScope: "global" as const,
-			}));
-		}
-		const filtered = projectPath
-			? projects.filter((p) => p.path === projectPath)
-			: projects;
-		return filtered.flatMap((project, index) => {
-			const data = sourceQueries[index]?.data as
-				| SourcesListResponse
-				| undefined;
-			return (data?.sources ?? []).map((s) => ({
-				...s,
-				rowScope: "project" as const,
-				projectRoot: project.path,
-				projectName: project.name,
-			}));
-		});
-	}, [sourceQueries, projects, scope, projectPath]);
-
-	const filteredRows = useMemo(() => {
-		const q = searchQuery.trim().toLowerCase();
-		if (!q) return rows;
-		return rows.filter((r) => r.source.toLowerCase().includes(q));
-	}, [rows, searchQuery]);
-
-	// Show "select a project" prompt before firing any project-scoped query.
-	if (scope === "project" && projectPath === null) {
-		return (
-			<p className="px-4 py-8 text-center text-sm text-muted">
-				{t("selectProject")}
-			</p>
-		);
-	}
-
-	if (isLoading) {
-		return (
-			<div className="flex flex-1 items-center justify-center">
-				<Spinner />
-			</div>
-		);
-	}
-
-	if (filteredRows.length === 0) {
-		return (
-			<p className="px-4 py-8 text-center text-sm text-muted">
-				{t("sourcesEmpty")}
-			</p>
-		);
-	}
-
-	return (
-		<div className="min-h-0 flex-1 overflow-y-auto [transform:translateZ(0)]">
-			<ul className="space-y-1 p-2">
-				{filteredRows.map((row) => {
-					const key = sourceRowKey(row);
-					const isActive = key === selectedKey;
-					return (
-						<li key={key}>
-							<button
-								type="button"
-								onClick={() => onSelectKey(key)}
-								aria-current={isActive ? "page" : undefined}
-								className={cn(
-									"group flex h-12 w-full items-center gap-3 rounded-xl px-3 text-left outline-none transition-colors hover:bg-surface-secondary focus-visible:ring-2 focus-visible:ring-accent/35",
-									isActive && "bg-surface",
-								)}
-							>
-								<GlobeAltIcon
-									className={cn(
-										"size-5 shrink-0 text-muted",
-										isActive && "text-foreground",
-									)}
-								/>
-								<span
-									className="min-w-0 flex-1 truncate text-base font-semibold leading-6 text-foreground"
-									title={row.source}
-								>
-									{sourceDisplayName(row)}
-								</span>
-								<span className="ml-auto shrink-0 rounded-full bg-surface-tertiary px-2 font-mono text-sm leading-7 text-muted tabular-nums">
-									{row.skillCount}
-								</span>
-							</button>
-						</li>
-					);
-				})}
-			</ul>
-		</div>
-	);
-}
-
 // ─── Main page ───────────────────────────────────────────────────────────────
 
 export default function SkillsPage() {
@@ -242,66 +73,34 @@ export default function SkillsPage() {
 	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
 	const queryClient = useQueryClient();
 
-	// ── URL state (nuqs) ──
-	const [view, setView] = useQueryState<ViewMode>("view", {
-		defaultValue: "agent",
-		parse: (v): ViewMode => (v === "source" ? "source" : "agent"),
-		serialize: (v) => v,
+	// ── Scope: the page's single data root (see lib/skills-page-url.ts) ──
+	// `clearOnDefault` is what keeps a global scope out of the URL — this
+	// component never special-cases "no param" by hand.
+	const [scopeRaw, setScopeRaw] = useQueryState("scope", {
+		defaultValue: "global",
+		clearOnDefault: true,
 	});
 	const [selectedSkillName, setSelectedSkillName] = useQueryState("skill");
-	const [selectedSourceKey, setSelectedSourceKey] = useQueryState("source");
+	const [selectedSourceParam, setSelectedSourceParam] =
+		useQueryState("source");
 
-	const handleSetView = (newView: ViewMode) => {
-		// Clear the other view's param when switching
-		if (newView === "source") {
-			void setSelectedSkillName(null);
-		} else {
-			void setSelectedSourceKey(null);
-		}
-		void setView(newView);
-	};
-
-	// ── Scope / project state — derived from URL source key on initial load ──
-	// Parse scope and projectRoot from a composite source key "scope:projectRoot:source".
-	const parseScopeFromKey = (key: string | null): "global" | "project" =>
-		key?.startsWith("project:") ? "project" : "global";
-	const parseProjectFromKey = (key: string | null): string | null => {
-		if (!key?.startsWith("project:")) return null;
-		// key format: "project:<projectRoot>:<source>" where projectRoot may be empty
-		const afterPrefix = key.slice("project:".length);
-		const colonIdx = afterPrefix.indexOf(":");
-		return colonIdx === -1 ? null : afterPrefix.slice(0, colonIdx) || null;
-	};
-
-	const [scope, setScope] = useState<"global" | "project">(() =>
-		parseScopeFromKey(selectedSourceKey),
+	const { data: projects = [] } = useProjects();
+	const knownProjectPaths = useMemo(
+		() => new Set(projects.map((p) => p.path)),
+		[projects],
 	);
-	const [selectedProjectPath, setSelectedProjectPath] = useState<
-		string | null
-	>(() => parseProjectFromKey(selectedSourceKey));
-
-	const handleScopeSelect = (
-		newScope: "global" | "project",
-		newProjectPath: string | null,
-	) => {
-		setScope(newScope);
-		setSelectedProjectPath(newProjectPath);
-		// Clear a selected source that no longer belongs to the new scope/project.
-		if (selectedSourceKey !== null) {
-			if (newScope === "global") {
-				if (selectedSourceKey.startsWith(PROJECT_KEY_PREFIX)) {
-					void setSelectedSourceKey(null);
-				}
-			} else if (
-				parseProjectFromKey(selectedSourceKey) !== newProjectPath
-			) {
-				void setSelectedSourceKey(null);
-			}
-		}
-	};
+	const pageScope = useMemo(
+		() => parseScopeParam(scopeRaw, knownProjectPaths),
+		[scopeRaw, knownProjectPaths],
+	);
+	const scope = pageScope.scope;
+	const selectedProjectPath =
+		pageScope.scope === "project" ? pageScope.projectPath : null;
 
 	// ── Skills data ──
-	// Guard: do not fire project-scoped skill query until a project is selected.
+	// Guard: do not fire project-scoped API calls without a project selected —
+	// this also covers a `project:<path>` scope whose path is not registered
+	// (parseScopeParam already reduced that to `projectPath: null`).
 	const projectIsReady = scope !== "project" || selectedProjectPath !== null;
 
 	const skillQueryProjectRoot = useMemo(
@@ -502,8 +301,8 @@ export default function SkillsPage() {
 		// Guard: do not fire project-scoped API calls without a project selected.
 		if (isRefreshingSkills || !projectIsReady) return;
 		await refetch();
-		// The source view's list + per-source diff carry their own staleTime, so
-		// without this a refresh in that view keeps serving cached rows. Not
+		// The source panel's per-source diff carries its own staleTime, so
+		// without this a refresh keeps serving cached source rows. Not
 		// awaited: a stuck/offline source must not hold the button spinning.
 		void queryClient.invalidateQueries({
 			queryKey: queryKeys.skills.sources.all(),
@@ -527,11 +326,13 @@ export default function SkillsPage() {
 		return rtf.format(-diffDay, "day");
 	};
 
-	// ── Agent-view state ──
+	// ── List state ──
 	const [searchQuery, setSearchQuery] = useState("");
 	const [tagFilter, setTagFilter] = useState<Set<string>>(() => new Set());
 	// Which agent's skills to show. `null` = every agent. Answers "what does
 	// Claude Code actually have installed", which the flat list cannot.
+	// Local state, not a URL param: kept across a scope switch (see
+	// `handleScopeSelect`), but never worth deep-linking.
 	const [agentFilter, setAgentFilter] = useState<string | null>(null);
 	// Non-null while the tag dialog is open; holds the names it edits.
 	const [tagDialogNames, setTagDialogNames] = useState<string[] | null>(null);
@@ -551,6 +352,25 @@ export default function SkillsPage() {
 	const [panelMode, setPanelMode] = useState<
 		"create" | "import" | "import-github" | null
 	>(null);
+	// True while the source panel's own "import this" sub-flow is active.
+	const [sourceImporting, setSourceImporting] = useState(false);
+
+	const handleScopeSelect = (
+		newScope: "global" | "project",
+		newProjectPath: string | null,
+	) => {
+		void setScopeRaw(serializeScopeParam(newScope, newProjectPath));
+		const cleared = clearSelectionParams();
+		void setSelectedSkillName(cleared.skill);
+		void setSelectedSourceParam(cleared.source);
+		// A checked-row name from the OLD scope can collide with a
+		// same-named skill in the new one (e.g. a skill installed both
+		// globally and in a project) and silently look selected there too —
+		// multi-select state does not carry meaning across a data-root
+		// switch, so it does not survive one either.
+		setSelectedKeys(new Set());
+		setIsMultiSelectMode(false);
+	};
 
 	const groupedSkills = useMemo(() => {
 		const map = new Map<string, SkillResponse[]>();
@@ -574,6 +394,10 @@ export default function SkillsPage() {
 	);
 
 	const activeGroup = useMemo(() => {
+		// The right panel shows the source view (found, loading, or "not in
+		// this scope") whenever a source is selected — no skill row should be
+		// highlighted underneath it, so this must not fall back to group 0.
+		if (selectedSourceParam) return null;
 		// Resolved within the VISIBLE set, including the explicit selection:
 		// filtering to an agent that does not have the selected skill would
 		// otherwise leave the detail panel showing a skill the list no longer
@@ -585,7 +409,7 @@ export default function SkillsPage() {
 			if (selected) return selected;
 		}
 		return visibleGroups[0] ?? null;
-	}, [selectedSkillName, visibleGroups]);
+	}, [selectedSourceParam, selectedSkillName, visibleGroups]);
 
 	const selectedGroups = useMemo(
 		() => groupedSkills.filter((g) => selectedKeys.has(g.name)),
@@ -593,17 +417,62 @@ export default function SkillsPage() {
 	);
 
 	const effectiveSelectedKeys = useMemo(() => {
-		if (selectedKeys.size > 0) return selectedKeys;
-		if (activeGroup && !isMultiSelectMode) {
-			return new Set([activeGroup.name]);
+		// Outside multi-select the highlight has exactly ONE owner: whatever
+		// the right panel is showing (`activeGroup`, already null while a
+		// source is open). `selectedKeys` only records row CLICKS, so reading
+		// it here splits the two whenever something else moves the selection —
+		// the group header's credential button, or a browser back/forward —
+		// leaving the panel on one skill and the highlight on another.
+		// Multi-select's checkboxes ARE that mode's selection, so they own it
+		// there.
+		if (!isMultiSelectMode) {
+			return activeGroup
+				? new Set([activeGroup.name])
+				: new Set<string>();
 		}
-		return new Set<string>();
-	}, [selectedKeys, activeGroup, isMultiSelectMode]);
+		return selectedKeys;
+	}, [isMultiSelectMode, selectedKeys, activeGroup]);
+
+	/**
+	 * Everything that opens a skill in the right panel goes through here: a row
+	 * click, the group header's credential button. Anything that only sets the
+	 * `skill` param leaves whatever else owns that panel (a create/import form,
+	 * the source import sub-flow) in place, and the click reads as dead.
+	 */
+	const showSkillDetail = (name: string) => {
+		const next = selectSkillParams(name);
+		void setSelectedSkillName(next.skill);
+		void setSelectedSourceParam(next.source);
+		setPanelMode(null);
+		setSourceImporting(false);
+	};
+
+	/**
+	 * Multi-select starts from what is on screen, never from the set the last
+	 * single-select left behind: outside multi-select `selectedKeys` is not
+	 * what the list draws (see `effectiveSelectedKeys`), so restoring it would
+	 * silently check a row the user last touched several navigations ago — and
+	 * hand the bulk delete/tag bar that row.
+	 */
+	const toggleMultiSelect = () => {
+		setPanelMode(null);
+		if (isMultiSelectMode) {
+			setIsMultiSelectMode(false);
+			setSelectedKeys(new Set());
+			return;
+		}
+		setIsMultiSelectMode(true);
+		setSelectedKeys(
+			activeGroup && !selectedSourceParam
+				? new Set([activeGroup.name])
+				: new Set(),
+		);
+	};
 
 	const handleSelectionChange = (keys: Set<string>, clickedKey?: string) => {
 		setSelectedKeys(keys);
 		if (clickedKey && !isMultiSelectMode) {
-			void setSelectedSkillName(clickedKey);
+			showSkillDetail(clickedKey);
 		}
 		if (keys.size > 1 && !isMultiSelectMode) {
 			setIsMultiSelectMode(true);
@@ -614,74 +483,80 @@ export default function SkillsPage() {
 		setPanelMode(null);
 	};
 
-	// ── Source-view state ──
-	const [sourceImporting, setSourceImporting] = useState(false);
+	// ── Sources (current scope only) ──
+	const currentProjectName = useMemo(
+		() => projects.find((p) => p.path === selectedProjectPath)?.name,
+		[projects, selectedProjectPath],
+	);
 
-	// When selecting a source, also sync the scope/project segments from the key.
-	// Key format: "scope:projectRoot:source"
-	const handleSourceSelect = (key: string) => {
-		void setSelectedSourceKey(key);
-		setSourceImporting(false);
-		const keyScope = parseScopeFromKey(key);
-		const keyProject = parseProjectFromKey(key);
-		setScope(keyScope);
-		setSelectedProjectPath(keyProject);
-	};
-	const { data: projects = [] } = useProjects();
+	const {
+		data: sourceRowsData,
+		isLoading: isSourceRowsLoading,
+		isError: isSourceRowsError,
+	} = useQuery(
+		sourcesListQueryOptions({
+			api,
+			scope,
+			projectRoot:
+				scope === "project"
+					? (selectedProjectPath ?? undefined)
+					: undefined,
+			// Guard: an unregistered/not-yet-selected project must not fire a
+			// request with `projectRoot: undefined` (that would silently ask
+			// for a DIFFERENT scope's sources).
+			enabled: scope === "global" || Boolean(selectedProjectPath),
+		}),
+	);
 
-	// Load all sources so we can resolve a full SourceRow from the URL key.
-	const allSourcesQuery = useQueries({
-		queries: [
-			sourcesListQueryOptions({ api, scope: "global" }),
-			...projects.map((p) =>
-				sourcesListQueryOptions({
-					api,
-					scope: "project",
-					projectRoot: p.path,
-				}),
-			),
-		],
-	});
-
-	const allSourceRows = useMemo<SourceRow[]>(() => {
-		const globalData = allSourcesQuery[0]?.data as
-			| SourcesListResponse
-			| undefined;
-		const globalRows: SourceRow[] = (globalData?.sources ?? []).map(
-			(s) => ({ ...s, rowScope: "global" as const }),
-		);
-		const projectRows: SourceRow[] = projects.flatMap((p, i) => {
-			const data = allSourcesQuery[i + 1]?.data as
-				| SourcesListResponse
-				| undefined;
-			return (data?.sources ?? []).map((s) => ({
+	const sourceRows = useMemo<SourceRow[]>(
+		() =>
+			(sourceRowsData?.sources ?? []).map((s) => ({
 				...s,
-				rowScope: "project" as const,
-				projectRoot: p.path,
-				projectName: p.name,
-			}));
-		});
-		return [...globalRows, ...projectRows];
-	}, [allSourcesQuery, projects]);
+				rowScope: scope,
+				...(scope === "project"
+					? {
+							projectRoot: selectedProjectPath ?? undefined,
+							projectName: currentProjectName,
+						}
+					: {}),
+			})),
+		[sourceRowsData, scope, selectedProjectPath, currentProjectName],
+	);
 
-	const resolvedSourceRow = useMemo<SourceRow | null>(() => {
-		if (!selectedSourceKey) return null;
-		return (
-			allSourceRows.find((r) => sourceRowKey(r) === selectedSourceKey) ??
-			null
-		);
-	}, [selectedSourceKey, allSourceRows]);
+	const resolvedSourceRow = useMemo<SourceRow | null>(
+		() => resolveSourceRow(sourceRows, selectedSourceParam),
+		[sourceRows, selectedSourceParam],
+	);
 
 	// Update-check states ONLY — a plain skill-list refetch (isFetching) must
 	// not trigger the credential speed hint.
 	useCredentialSpeedHint({
 		checking: isAutoChecking || checkUpdatesMutation.isPending,
-		sources: allSourceRows,
+		sources: sourceRows,
 	});
 
-	// Refresh control, shared by the agent + source toolbars. The last-checked
-	// time lives in its tooltip so it never competes for room in the narrow
-	// header row.
+	const handleOpenSourceView = (source: string) => {
+		// `source` is the lock's source id (what group headers carry, never a
+		// clone URL). Prefer the resolved row's clone URL so a deep link
+		// built from this URL later matches by `sourceUrl` too — but still
+		// set SOMETHING when the row can't be found in this scope's list, so
+		// the right panel can say so instead of silently doing nothing.
+		const row = resolveSourceRow(sourceRows, source);
+		const nextValue = row ? row.sourceUrl || row.source : source;
+		const next = selectSourceParams(nextValue);
+		void setSelectedSkillName(next.skill);
+		void setSelectedSourceParam(next.source);
+		setSourceImporting(false);
+		setPanelMode(null);
+	};
+
+	// Agent-select + token-cost data, computed once and shared by Row A's
+	// Select and the cost line below it.
+	const agentFilterData = useSkillAgentFilterData(skills, agentFilter);
+
+	// Refresh control, shared by the search header and the status strip's
+	// tooltip. The last-checked time lives in its tooltip so it never
+	// competes for room in the narrow header row.
 	const refreshButton = (
 		<Tooltip delay={0}>
 			<Button
@@ -719,372 +594,310 @@ export default function SkillsPage() {
 
 	return (
 		<div className="flex h-full flex-col">
-			{/* Above the panels, not inside the list: the layout is a property
-			    of the whole scope, not of whichever skill happens to be
-			    selected. Renders nothing when there is nothing to migrate. */}
-			<div className="px-3 pt-3 empty:hidden">
-				<SkillLayoutMigrationBanner scope="global" />
-			</div>
 			<div className="flex min-h-0 flex-1">
 				{/* Left panel: list */}
 				<div className="relative flex w-80 shrink-0 flex-col border-r border-border">
-					{/* Row A — view + scope (replaces the old full-width
-					    header + view-toggle + segmented scope rows) */}
-					<div className="flex items-center justify-between gap-2 px-3 pt-3">
-						<ToggleButtonGroup
-							selectedKeys={[view]}
-							onSelectionChange={(keys) =>
-								handleSetView([...keys][0] as ViewMode)
-							}
-							selectionMode="single"
-							disallowEmptySelection
-							size="sm"
-						>
-							<ToggleButton id="agent">
-								{t("viewByAgent")}
-							</ToggleButton>
-							<ToggleButtonGroup.Separator />
-							<ToggleButton id="source">
-								{t("viewBySource")}
-							</ToggleButton>
-						</ToggleButtonGroup>
-						<ScopeControl
-							scope={scope}
-							selectedProjectPath={selectedProjectPath}
-							onChange={handleScopeSelect}
-						/>
-					</div>
-
-					{backgroundNews !== null && (
-						<button
-							type="button"
-							className="mx-3 mb-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-surface"
-							onClick={() => {
-								void handleRefreshSkills();
-							}}
-						>
-							{t("backgroundCheckFoundUpdates", {
-								count: backgroundNews,
-							})}
-						</button>
-					)}
-
-					{view === "agent" ? (
-						<>
-							<ListSearchHeader
-								searchValue={searchQuery}
-								onSearchChange={setSearchQuery}
-								placeholder={t("searchSkills")}
-								ariaLabel={t("searchSkills")}
-							>
-								<Tooltip delay={0}>
-									<Tooltip.Trigger>
-										<div
-											role="button"
-											tabIndex={0}
-											className={cn(
-												"flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted transition-colors hover:bg-default hover:text-foreground focus:outline-none focus:ring-2 focus:ring-accent/40",
-												isMultiSelectMode &&
-													"bg-accent/10 text-accent",
-											)}
-											aria-label={
-												isMultiSelectMode
-													? t("doneSelecting")
-													: t("multiSelect")
-											}
-											onClick={() => {
-												setIsMultiSelectMode(
-													(prev) => !prev,
-												);
-												if (isMultiSelectMode) {
-													handleSelectionChange(
-														new Set(),
-													);
-												}
-											}}
-											onKeyDown={(event) => {
-												if (
-													event.key !== "Enter" &&
-													event.key !== " "
-												) {
-													return;
-												}
-												event.preventDefault();
-												setIsMultiSelectMode(
-													(prev) => !prev,
-												);
-												if (isMultiSelectMode) {
-													handleSelectionChange(
-														new Set(),
-													);
-												}
-											}}
-										>
-											{isMultiSelectMode ? (
-												<CheckCircleIcon className="size-4" />
-											) : (
-												<RectangleStackIcon className="size-4" />
-											)}
-										</div>
-									</Tooltip.Trigger>
-									<Tooltip.Content>
-										{isMultiSelectMode
-											? t("doneSelecting")
-											: t("multiSelect")}
-									</Tooltip.Content>
-								</Tooltip>
-								<Dropdown>
-									<Button
-										isIconOnly
-										variant="ghost"
-										size="sm"
-										className="shrink-0"
-										aria-label={t("addSkill")}
-									>
-										<PlusIcon className="size-4" />
-									</Button>
-									<Dropdown.Popover placement="bottom end">
-										<Dropdown.Menu
-											onAction={(key) => {
-												if (key === "create") {
-													setSelectedKeys(new Set());
-													void setSelectedSkillName(
-														null,
-													);
-													setPanelMode("create");
-												} else if (key === "import") {
-													setSelectedKeys(new Set());
-													void setSelectedSkillName(
-														null,
-													);
-													setPanelMode("import");
-												} else if (
-													key === "import-github"
-												) {
-													setSelectedKeys(new Set());
-													void setSelectedSkillName(
-														null,
-													);
-													setPanelMode(
-														"import-github",
-													);
-												}
-											}}
-										>
-											<Dropdown.Item
-												id="create"
-												textValue={t(
-													"createCustomSkill",
-												)}
-											>
-												{t("createCustomSkill")}
-											</Dropdown.Item>
-											<Dropdown.Item
-												id="import"
-												textValue={t("importFromFile")}
-											>
-												{t("importFromFile")}
-											</Dropdown.Item>
-											<Dropdown.Item
-												id="import-github"
-												textValue={t(
-													"importRemoteSource",
-												)}
-											>
-												{t("importRemoteSource")}
-											</Dropdown.Item>
-										</Dropdown.Menu>
-									</Dropdown.Popover>
-								</Dropdown>
-								{refreshButton}
-							</ListSearchHeader>
-
-							{pendingUpdateCount > 0 && (
-								<button
-									type="button"
-									disabled={isApplying || isRefreshingSkills}
-									className="mx-3 mb-2 flex items-center gap-2 rounded-md border border-separator bg-surface-secondary px-3 py-2 text-left text-xs text-foreground transition-colors hover:bg-surface disabled:opacity-60"
-									onClick={() => {
-										void handleUpdateAll();
-									}}
-								>
-									{isApplying ? (
-										<Spinner size="sm" />
-									) : (
-										<ArrowPathIcon className="size-4 shrink-0 text-warning" />
-									)}
-									<span>
-										{t("updateAllSkills", {
-											count: pendingUpdateCount,
-										})}
-									</span>
-								</button>
+					{/* Row A — ScopeControl + agent filter, side by side. The
+					    agent Select drops out entirely (and ScopeControl takes
+					    the full row) when there are fewer than two agents with
+					    skills and no filter is active. */}
+					<div className="px-3 pt-3">
+						<div
+							className={cn(
+								"grid gap-1.5",
+								agentFilterData.showSelect
+									? "grid-cols-[42fr_58fr]"
+									: "grid-cols-1",
 							)}
-
-							<SkillAgentFilterRow
-								skills={skills}
-								selected={agentFilter}
-								onChange={setAgentFilter}
+						>
+							<ScopeControl
+								scope={scope}
+								selectedProjectPath={selectedProjectPath}
+								onChange={handleScopeSelect}
+								// `max-w-none` cancels the default
+								// `max-w-[48%]` (coverage.tsx's constraint) —
+								// the grid track (either half the row or the
+								// whole row) is what should size this here,
+								// not a percentage of it.
+								className="min-w-0 max-w-none"
 							/>
-
-							<SkillTagFilterRow
-								selected={tagFilter}
-								onChange={setTagFilter}
-							/>
-
-							<SkillList
-								skills={skills}
-								agentFilter={agentFilter}
-								selectedKeys={effectiveSelectedKeys}
-								searchQuery={searchQuery}
-								tagFilter={tagFilter}
-								onSelectionChange={handleSelectionChange}
-								selectionMode="multiple"
-								isMultiSelectMode={isMultiSelectMode}
-								groupBySource={true}
-								projectPath={
-									scope === "project"
-										? (selectedProjectPath ?? undefined)
-										: undefined
-								}
-								updateStatuses={updateStatuses}
-								onResolveAuth={(skillName: string) => {
-									void setSelectedSkillName(skillName);
-									setPendingAuthSkill(skillName);
-								}}
-								onManageGroupAgents={setBulkAgentsGroup}
-								onOpenSourceView={(source) => {
-									// Reuse the real SourceRow's key so we never
-									// re-encode the composite-key format (which is
-									// not colon-safe) by hand.
-									const row = allSourceRows.find(
-										(r) =>
-											r.rowScope === scope &&
-											r.source === source &&
-											(scope === "global" ||
-												(r.projectRoot ?? null) ===
-													(selectedProjectPath ??
-														null)),
-									);
-									setSearchQuery("");
-									if (row)
-										handleSourceSelect(sourceRowKey(row));
-									handleSetView("source");
-								}}
-							/>
-
-							{isMultiSelectMode && selectedKeys.size > 0 && (
-								<MultiSelectFloatingBar
-									selectedCount={selectedKeys.size}
-									totalCount={groupedSkills.length}
-									onManageTags={() =>
-										setTagDialogNames([...selectedKeys])
-									}
-									onDelete={() =>
-										setIsBulkDeleteDialogOpen(true)
-									}
+							{agentFilterData.showSelect && (
+								<SkillAgentSelect
+									data={agentFilterData}
+									selected={agentFilter}
+									onChange={setAgentFilter}
 								/>
 							)}
-						</>
-					) : (
-						<>
-							<ListSearchHeader
-								searchValue={searchQuery}
-								onSearchChange={setSearchQuery}
-								placeholder={t("searchSources")}
-								ariaLabel={t("searchSources")}
+						</div>
+						{agentFilterData.showCost && (
+							<div className="pt-1.5">
+								<SkillAgentCostLine data={agentFilterData} />
+							</div>
+						)}
+					</div>
+
+					<ListSearchHeader
+						searchValue={searchQuery}
+						onSearchChange={setSearchQuery}
+						placeholder={t("searchSkills")}
+						ariaLabel={t("searchSkills")}
+					>
+						<Tooltip delay={0}>
+							<Tooltip.Trigger>
+								<div
+									role="button"
+									tabIndex={0}
+									className={cn(
+										"flex size-8 shrink-0 cursor-pointer items-center justify-center rounded-full text-muted transition-colors hover:bg-default hover:text-foreground focus:outline-none focus:ring-2 focus:ring-accent/40",
+										isMultiSelectMode &&
+											"bg-accent/10 text-accent",
+									)}
+									aria-label={
+										isMultiSelectMode
+											? t("doneSelecting")
+											: t("multiSelect")
+									}
+									onClick={toggleMultiSelect}
+									onKeyDown={(event) => {
+										if (
+											event.key !== "Enter" &&
+											event.key !== " "
+										) {
+											return;
+										}
+										event.preventDefault();
+										toggleMultiSelect();
+									}}
+								>
+									{isMultiSelectMode ? (
+										<CheckCircleIcon className="size-4" />
+									) : (
+										<RectangleStackIcon className="size-4" />
+									)}
+								</div>
+							</Tooltip.Trigger>
+							<Tooltip.Content>
+								{isMultiSelectMode
+									? t("doneSelecting")
+									: t("multiSelect")}
+							</Tooltip.Content>
+						</Tooltip>
+						<Dropdown>
+							<Button
+								isIconOnly
+								variant="ghost"
+								size="sm"
+								className="shrink-0"
+								aria-label={t("addSkill")}
 							>
-								{refreshButton}
-							</ListSearchHeader>
-							<SourceListPanel
-								scope={scope}
-								projectPath={selectedProjectPath}
-								selectedKey={selectedSourceKey}
-								onSelectKey={handleSourceSelect}
-								searchQuery={searchQuery}
-							/>
-						</>
+								<PlusIcon className="size-4" />
+							</Button>
+							<Dropdown.Popover placement="bottom end">
+								<Dropdown.Menu
+									onAction={(key) => {
+										// A source panel (or a stale one) must
+										// not keep showing over the panel the
+										// user just asked for.
+										const cleared = clearSelectionParams();
+										setSelectedKeys(new Set());
+										void setSelectedSkillName(
+											cleared.skill,
+										);
+										void setSelectedSourceParam(
+											cleared.source,
+										);
+										if (key === "create") {
+											setPanelMode("create");
+										} else if (key === "import") {
+											setPanelMode("import");
+										} else if (key === "import-github") {
+											setPanelMode("import-github");
+										}
+									}}
+								>
+									<Dropdown.Item
+										id="create"
+										textValue={t("createCustomSkill")}
+									>
+										{t("createCustomSkill")}
+									</Dropdown.Item>
+									<Dropdown.Item
+										id="import"
+										textValue={t("importFromFile")}
+									>
+										{t("importFromFile")}
+									</Dropdown.Item>
+									<Dropdown.Item
+										id="import-github"
+										textValue={t("importRemoteSource")}
+									>
+										{t("importRemoteSource")}
+									</Dropdown.Item>
+								</Dropdown.Menu>
+							</Dropdown.Popover>
+						</Dropdown>
+						{refreshButton}
+					</ListSearchHeader>
+
+					<SkillStatusStrip
+						scope={scope}
+						projectPath={selectedProjectPath ?? undefined}
+						pendingUpdateCount={pendingUpdateCount}
+						onUpdateAll={() => {
+							void handleUpdateAll();
+						}}
+						isApplyingUpdates={isApplying}
+						backgroundNews={backgroundNews}
+						onRefresh={() => {
+							void handleRefreshSkills();
+						}}
+						isRefreshing={isRefreshingSkills}
+					/>
+
+					<SkillTagFilterRow
+						selected={tagFilter}
+						onChange={setTagFilter}
+					/>
+
+					<SkillList
+						skills={skills}
+						agentFilter={agentFilter}
+						selectedKeys={effectiveSelectedKeys}
+						searchQuery={searchQuery}
+						tagFilter={tagFilter}
+						onSelectionChange={handleSelectionChange}
+						selectionMode="multiple"
+						isMultiSelectMode={isMultiSelectMode}
+						groupBySource={true}
+						projectPath={
+							scope === "project"
+								? (selectedProjectPath ?? undefined)
+								: undefined
+						}
+						updateStatuses={updateStatuses}
+						selectedSource={resolvedSourceRow?.source ?? null}
+						onResolveAuth={(skillName: string) => {
+							showSkillDetail(skillName);
+							setPendingAuthSkill(skillName);
+						}}
+						onManageGroupAgents={setBulkAgentsGroup}
+						onOpenSourceView={handleOpenSourceView}
+					/>
+
+					{isMultiSelectMode && selectedKeys.size > 0 && (
+						<MultiSelectFloatingBar
+							selectedCount={selectedKeys.size}
+							totalCount={groupedSkills.length}
+							onManageTags={() =>
+								setTagDialogNames([...selectedKeys])
+							}
+							onDelete={() => setIsBulkDeleteDialogOpen(true)}
+						/>
 					)}
 				</div>
 
 				{/* Right panel: detail */}
 				<div className="relative flex-1 overflow-hidden">
-					{view === "agent" && !projectIsReady ? (
+					{!projectIsReady ? (
 						<div className="flex h-full flex-col items-center justify-center gap-4">
 							<p className="text-sm text-muted">
 								{t("selectProject")}
 							</p>
 						</div>
-					) : view === "agent" ? (
-						panelMode === "create" ? (
-							<CreateSkillPanel
-								onDone={() => setPanelMode(null)}
-								projectPath={selectedProjectPath ?? undefined}
-							/>
-						) : panelMode === "import" ? (
-							<ImportSkillPanel
-								onDone={() => setPanelMode(null)}
-								projectPath={selectedProjectPath ?? undefined}
-							/>
-						) : panelMode === "import-github" ? (
-							<ImportGithubSkillPanel
-								onDone={() => setPanelMode(null)}
-								projectPath={selectedProjectPath ?? undefined}
-							/>
-						) : activeGroup ? (
-							<SkillDetail
-								key={
-									pendingAuthSkill === activeGroup.name
-										? `${activeGroup.name}-cred`
-										: activeGroup.name
-								}
-								group={activeGroup}
-								projectPath={selectedProjectPath ?? undefined}
-								openCredDialog={
-									pendingAuthSkill === activeGroup.name
-								}
-								onCredDialogClose={() => {
-									setPendingAuthSkill(null);
-								}}
-							/>
+					) : selectedSourceParam ? (
+						isSourceRowsLoading ? (
+							<div className="flex h-full items-center justify-center">
+								<Spinner />
+							</div>
+						) : isSourceRowsError ? (
+							// A failed query leaves `sources` empty, which is
+							// NOT the same claim as "this scope has no such
+							// source" (src/AGENTS.md: `!isLoading` is not "the
+							// data is trustworthy").
+							<div className="flex h-full flex-col items-center justify-center gap-4">
+								<p
+									role="alert"
+									aria-live="polite"
+									className="text-sm text-muted"
+								>
+									{t("sourceListLoadFailed")}
+								</p>
+							</div>
+						) : resolvedSourceRow ? (
+							sourceImporting ? (
+								<ImportGithubSkillPanel
+									initialUrl={resolvedSourceRow.sourceUrl}
+									projectPath={
+										resolvedSourceRow.rowScope === "project"
+											? resolvedSourceRow.projectRoot
+											: undefined
+									}
+									onDone={() => {
+										setSourceImporting(false);
+										void queryClient.invalidateQueries({
+											queryKey:
+												queryKeys.skills.sources.all(),
+										});
+									}}
+								/>
+							) : (
+								<SourceDetail
+									// Keyed so per-source state (a running "Update
+									// all") cannot leak into another source's panel
+									// and disable its buttons.
+									key={
+										resolvedSourceRow.sourceUrl ||
+										resolvedSourceRow.source
+									}
+									row={resolvedSourceRow}
+									onImport={() => setSourceImporting(true)}
+								/>
+							)
 						) : (
 							<div className="flex h-full flex-col items-center justify-center gap-4">
 								<p className="text-sm text-muted">
-									{t("selectSkill")}
+									{t("sourceNotInCurrentScope")}
 								</p>
 							</div>
 						)
-					) : resolvedSourceRow ? (
-						sourceImporting ? (
-							<ImportGithubSkillPanel
-								initialUrl={resolvedSourceRow.sourceUrl}
-								projectPath={
-									resolvedSourceRow.rowScope === "project"
-										? resolvedSourceRow.projectRoot
-										: undefined
-								}
-								onDone={() => {
-									setSourceImporting(false);
-									void queryClient.invalidateQueries({
-										queryKey:
-											queryKeys.skills.sources.all(),
-									});
-								}}
-							/>
-						) : (
-							<SourceDetail
-								// Keyed so per-source state (a running "Update
-								// all") cannot leak into another source's panel
-								// and disable its buttons.
-								key={sourceRowKey(resolvedSourceRow)}
-								row={resolvedSourceRow}
-								onImport={() => setSourceImporting(true)}
-							/>
-						)
+					) : panelMode === "create" ? (
+						<CreateSkillPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={selectedProjectPath ?? undefined}
+						/>
+					) : panelMode === "import" ? (
+						<ImportSkillPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={selectedProjectPath ?? undefined}
+						/>
+					) : panelMode === "import-github" ? (
+						<ImportGithubSkillPanel
+							onDone={() => setPanelMode(null)}
+							projectPath={selectedProjectPath ?? undefined}
+						/>
+					) : activeGroup ? (
+						<SkillDetail
+							key={
+								pendingAuthSkill === activeGroup.name
+									? `${activeGroup.name}-cred`
+									: activeGroup.name
+							}
+							group={activeGroup}
+							projectPath={selectedProjectPath ?? undefined}
+							// Same route: `setLocation` would push a URL nuqs
+							// never re-reads, so the panel would not change.
+							onOpenSource={handleOpenSourceView}
+							openCredDialog={
+								pendingAuthSkill === activeGroup.name
+							}
+							onCredDialogClose={() => {
+								setPendingAuthSkill(null);
+							}}
+						/>
 					) : (
 						<div className="flex h-full flex-col items-center justify-center gap-4">
 							<p className="text-sm text-muted">
-								{t("selectSource")}
+								{t("selectSkill")}
 							</p>
 						</div>
 					)}

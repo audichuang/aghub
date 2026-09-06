@@ -422,8 +422,13 @@ export default {
 		"This agent puts one line per skill — its name and description — into the system prompt on every turn, and loads the full SKILL.md only when the skill runs. No budget is shown: the character budget we could measure exactly is Claude Code's, and this agent wraps its listing differently. The token figure is an estimate — about 4.75 characters per token for Latin text and about 1 for Han.",
 	skillContextOverBudget:
 		"over budget: at least {{count}} description(s) will be dropped",
+	/** A skill row's right-side count and its tooltip — how many agents
+	 * have it installed. Hidden while an agent filter is active. */
+	skillInstalledAgentCount: "Installed for {{count}} agent(s)",
 	// --- Bulk update from the agent view ---
-	updateAllSkills: "Update all ({{count}})",
+	/** Status-strip row text — count only, the action is a separate button
+	 * (`sourceUpdateAll`). */
+	updateAllSkills: "{{count}} skill(s) can update",
 	updateAllSkillsNone: "Everything is up to date",
 	skillUpdateRenamedExcluded:
 		"{{count}} renamed skill(s) are not included — handle those in the source view.",
@@ -751,8 +756,10 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
+	/** Status-strip row text — count only, the action is a separate button
+	 * (`refreshSkills`). */
 	backgroundCheckFoundUpdates:
-		"The scheduled background check found {{count}} update(s). Refresh to see which skills.",
+		"The scheduled background check found {{count}} update(s).",
 	manageTags: "Tags",
 	untagged: "Untagged",
 	noTagsYet: "No tags yet.",
@@ -1196,9 +1203,6 @@ export default {
 	connSaveError: "Failed to save connection.",
 	connRemoveError: "Failed to remove connection.",
 	sources: "Sources",
-	searchSources: "Search sources…",
-	sourcesEmpty:
-		"No sources yet. Install skills from a repo to see them here.",
 	scopeGlobal: "Global",
 	scopeProject: "Project",
 	needsCredential: "Needs credential",
@@ -1285,7 +1289,9 @@ export default {
 		"These agents get a symlink pointing at the .aghub master.",
 	sourceInstallNoLinkTargets:
 		"No agents need a link here — the master is written on its own.",
-	selectSource: "Select a source",
+	/** The URL's `source` param did not resolve to a row in the CURRENT
+	 * scope's source list (wrong scope, or the source is gone). */
+	sourceNotInCurrentScope: "There is no such source in this scope",
 	// SourceDetail summary bar
 	summaryUpdatable: "{{count}} updatable",
 	summaryInstallable: "{{count}} installable",
@@ -1299,9 +1305,19 @@ export default {
 	credentialBind: "Bind credential",
 	// Phase 2 — Unified skills page
 	skillCenter: "Skills",
-	viewByAgent: "By Agent",
-	viewBySource: "By Source",
 	scope: "Scope",
+	/** The "no lock record" group heading (skills never installed through
+	 * aghub/npx — there is no source identity to group them by). */
+	filterByAgent: "Filter by agent",
+	skillsFromSource: "Skills from {{source}}",
+	sourceListLoadFailed:
+		"Could not load this scope's sources. Check the connection and refresh.",
+	skillsUnrecordedSource: "Locally created (no recorded source)",
+	/** Group header muted text when every visible skill shares a
+	 * non-auth uncheckable reason (the tooltip carries the actual reason). */
+	skillGroupAllUncheckable: "None of these can be checked",
+	expandSourceGroup: "Expand",
+	collapseSourceGroup: "Collapse",
 	scopeSwitchGlobal: "Global",
 	scopeSwitchProject: "Project",
 	// Bulk manage group agents
@@ -1336,6 +1352,13 @@ export default {
 	skillLayoutOutdatedTitle: "Some skills still use the shared layout",
 	skillLayoutOutdatedHint:
 		"{{count}} skill(s) are stored in the shared folder every agent reads, so they cannot be granted or revoked per agent. Migrating moves them to a private store and gives each agent its own link.",
+	/** Compact status-strip row text (variant="row") — same fact as
+	 * `skillLayoutOutdatedHint`, said in one short line instead of a
+	 * paragraph. */
+	skillLayoutOutdatedRowHint: "{{count}} skill(s) still use the old layout",
+	/** Status-strip row button — opens the same review Modal as
+	 * `skillLayoutReview` (the Alert variant's button). */
+	skillLayoutPreviewMigration: "Preview migration",
 	skillLayoutReview: "Review",
 	skillLayoutMigrateTitle: "Migrate skill layout",
 	skillLayoutMigrateExplain:

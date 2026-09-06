@@ -7,6 +7,7 @@ import {
 import { Chip, Tooltip } from "@heroui/react";
 import { useTranslation } from "react-i18next";
 import type { SkillUpdateResponse } from "../generated/dto";
+import { uncheckableTooltipKey } from "../lib/skill-group-status";
 
 interface SkillStatusBadgeProps {
 	/**
@@ -18,27 +19,6 @@ interface SkillStatusBadgeProps {
 	status?: SkillUpdateResponse;
 	/** Called when an `uncheckable { reason: "auth" }` badge is activated. */
 	onResolveAuth?: () => void;
-}
-
-/** Human-readable tooltip key for an `uncheckable` reason. */
-function uncheckableTooltipKey(reason: string): string {
-	switch (reason) {
-		case "auth":
-			return "skillUncheckableAuth";
-		case "network":
-			return "skillUncheckableNetwork";
-		case "local":
-			return "skillUncheckableLocal";
-		case "ssh":
-		case "unsupportedScheme":
-			return "skillUncheckableUnsupported";
-		case "noPath":
-			return "skillUncheckableNoPath";
-		case "timeout":
-			return "skillUncheckableTimeout";
-		default:
-			return "skillUncheckableGeneric";
-	}
 }
 
 /**

@@ -405,8 +405,9 @@ export default {
 	skillContextCostTooltipNoBudget:
 		"这个 agent 会把每个技能的名称与描述各一行放进系统提示,每轮都算;完整的 SKILL.md 只有技能真的被调用时才加载。这里不显示预算:我们能精确量到的字符预算是 Claude Code 的,而这个 agent 的清单包装方式不同。token 数字是估计值 —— 拉丁文字约 4.75 个字符 1 个 token,汉字约 1 个字符 1 个 token。",
 	skillContextOverBudget: "超出预算:至少 {{count}} 个描述会被拿掉",
+	skillInstalledAgentCount: "安装于 {{count}} 个 agent",
 	// --- 从 agent 视图批量更新 ---
-	updateAllSkills: "全部更新({{count}})",
+	updateAllSkills: "{{count}} 个技能可更新",
 	updateAllSkillsNone: "全部都是最新的",
 	skillUpdateRenamedExcluded:
 		"{{count}} 个已改名的技能不在这批里,请到来源视图处理。",
@@ -713,8 +714,7 @@ export default {
 		'{\n  "mcpServers": {\n    "server-name": {\n      "command": "npx",\n      "args": ["-y", "package-name"]\n    }\n  }\n}',
 
 	// Manage Agents Dialog
-	backgroundCheckFoundUpdates:
-		"背景排程检查发现 {{count}} 个可更新。重新整理以显示是哪些技能。",
+	backgroundCheckFoundUpdates: "后台检查发现 {{count}} 个更新",
 	manageTags: "标签",
 	untagged: "未标记",
 	noTagsYet: "还没有标签。",
@@ -1154,8 +1154,6 @@ export default {
 	connSaveError: "保存连接失败。",
 	connRemoveError: "删除连接失败。",
 	sources: "来源",
-	searchSources: "搜索来源…",
-	sourcesEmpty: "暂无来源。从仓库安装技能后会出现在这里。",
 	scopeGlobal: "全局",
 	scopeProject: "项目",
 	needsCredential: "需要凭证",
@@ -1243,7 +1241,7 @@ export default {
 	sourceInstallNoLinkTargets: "此处没有 Agent 可以接收技能。",
 	sourceInstallSharedSlotHint:
 		"这些 Agent 没有自己的技能目录,共用同一个 —— 勾选其中一个等于全部勾选,之后移除也会一起移除。",
-	selectSource: "选择一个来源",
+	sourceNotInCurrentScope: "这个范围里没有这个来源",
 	// SourceDetail summary bar
 	summaryUpdatable: "{{count}} 可更新",
 	summaryInstallable: "{{count}} 可安装",
@@ -1257,9 +1255,14 @@ export default {
 	credentialBind: "绑定凭证",
 	// Phase 2 — Unified skills page
 	skillCenter: "技能",
-	viewByAgent: "按 Agent",
-	viewBySource: "按来源",
 	scope: "范围",
+	filterByAgent: "按 agent 筛选",
+	skillsFromSource: "来自 {{source}} 的技能",
+	sourceListLoadFailed: "读不到这个范围的来源列表。请确认连接后刷新。",
+	skillsUnrecordedSource: "本机自建（未记录来源）",
+	skillGroupAllUncheckable: "全部无法检查",
+	expandSourceGroup: "展开",
+	collapseSourceGroup: "收起",
 	scopeSwitchGlobal: "全局",
 	scopeSwitchProject: "项目",
 	// Bulk manage group agents
@@ -1292,6 +1295,8 @@ export default {
 	skillLayoutOutdatedTitle: "有技能仍使用共用布局",
 	skillLayoutOutdatedHint:
 		"有 {{count}} 个技能放在所有 agent 都会读取的共用文件夹,因此无法针对单一 agent 授权或撤销。迁移会把它们移到独立的存储区,并为每个 agent 建立各自的链接。",
+	skillLayoutOutdatedRowHint: "{{count}} 个技能仍用旧布局",
+	skillLayoutPreviewMigration: "预览迁移",
 	skillLayoutReview: "查看",
 	skillLayoutMigrateTitle: "迁移技能布局",
 	skillLayoutMigrateExplain:

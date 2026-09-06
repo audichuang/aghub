@@ -71,6 +71,18 @@ interface SkillDetailProps {
 	/** Called when the credential binding dialog closes, so the parent can
 	 * clear its `pendingAuthSkill` state. */
 	onCredDialogClose?: () => void;
+	/**
+	 * Open this skill's source in the caller's own source view.
+	 *
+	 * REQUIRED whenever this panel is rendered by a page that shows the source
+	 * view at the SAME route: navigating with `setLocation` there only pushes
+	 * history, and nuqs (whose react adapter listens for `popstate` and its own
+	 * emitter, never wouter's custom `pushState` event) never re-reads the
+	 * query string — the URL changes and the panel does not, which reads as a
+	 * dead button. A page on a DIFFERENT route remounts on navigation, so it
+	 * can leave this unset and get the `setLocation` fallback.
+	 */
+	onOpenSource?: (sourceValue: string) => void;
 }
 
 const GITHUB_PREFIX_REGEX = /^github\//;
@@ -80,6 +92,7 @@ export function SkillDetail({
 	projectPath,
 	openCredDialog = false,
 	onCredDialogClose,
+	onOpenSource,
 }: SkillDetailProps) {
 	const { t } = useTranslation();
 	const [, setLocation] = useLocation();
@@ -656,16 +669,50 @@ export function SkillDetail({
 																"viewSkillSource",
 															)}
 															onPress={() => {
-																const scope =
+																// `||`, not `??`: a global lock entry with
+																// no recorded URL (a local source) carries
+																// sourceUrl as the EMPTY STRING sentinel,
+																// not null — `??` would let that empty
+																// string through as the param value.
+																const sourceValue =
+																	currentSkillSource.sourceUrl ||
+																	currentSkillSource.source;
+																// Same-route caller: it owns the query
+																// string, so hand it the value instead of
+																// pushing history nuqs will not observe.
+																if (
+																	onOpenSource
+																) {
+																	onOpenSource(
+																		sourceValue,
+																	);
+																	return;
+																}
+																// Cross-route fallback: the target page
+																// mounts fresh and reads the URL itself.
+																// Only "project" carries a scope segment;
+																// global is the page's default and stays
+																// unwritten.
+																const params =
+																	new URLSearchParams();
+																if (
 																	group
 																		.items[0]
 																		?.source ===
-																	"project"
-																		? "project"
-																		: "global";
-																const key = `${scope}:${projectPath ?? ""}:${currentSkillSource.source}`;
+																		"project" &&
+																	projectPath
+																) {
+																	params.set(
+																		"scope",
+																		`project:${projectPath}`,
+																	);
+																}
+																params.set(
+																	"source",
+																	sourceValue,
+																);
 																setLocation(
-																	`/sources?source=${encodeURIComponent(key)}`,
+																	`/skills?${params.toString()}`,
 																);
 															}}
 														>

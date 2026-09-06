@@ -1,13 +1,24 @@
 import { ListBox, Select } from "@heroui/react";
 import { useTranslation } from "react-i18next";
 import { useProjects } from "../hooks/use-projects";
+import { cn } from "../lib/utils";
 
-export const PROJECT_KEY_PREFIX = "project:";
+// Internal to this component's own Select item ids — not a general-purpose
+// URL encoding. Callers that need to parse a "project:<path>" URL param use
+// `lib/skills-page-url.ts`'s own copy of this prefix instead of importing it
+// from here (a pure `lib/*.ts` module cannot import a `.tsx` file).
+const PROJECT_KEY_PREFIX = "project:";
 
 interface ScopeControlProps {
 	scope: "global" | "project";
 	selectedProjectPath: string | null;
 	onChange: (scope: "global" | "project", projectPath: string | null) => void;
+	/**
+	 * Override the trigger's width constraint. Defaults to `max-w-[48%]`,
+	 * which `pages/settings/coverage.tsx` relies on and must keep getting
+	 * when it does not pass this prop.
+	 */
+	className?: string;
 }
 
 /**
@@ -20,6 +31,7 @@ export function ScopeControl({
 	scope,
 	selectedProjectPath,
 	onChange,
+	className,
 }: ScopeControlProps) {
 	const { t } = useTranslation();
 	const { data: projects = [] } = useProjects();
@@ -37,7 +49,7 @@ export function ScopeControl({
 	return (
 		<Select
 			aria-label={t("scope")}
-			className="min-w-0 max-w-[48%]"
+			className={cn("min-w-0 max-w-[48%]", className)}
 			variant="secondary"
 			selectedKey={selectedKey}
 			placeholder={t("scopeSwitchProject")}

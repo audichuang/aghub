@@ -21,6 +21,7 @@ import {
 } from "@heroui/react";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
+import { useLocation } from "wouter";
 import type {
 	McpResponse,
 	SkillResponse,
@@ -85,6 +86,7 @@ export function UnifiedResourceList({
 	onDeleteSelected,
 }: UnifiedResourceListProps) {
 	const { t } = useTranslation();
+	const [, setLocation] = useLocation();
 	const { availableAgents } = useAgentAvailability();
 	const enabledAgentIds = useMemo(
 		() =>
@@ -428,6 +430,23 @@ export function UnifiedResourceList({
 									projectPath={projectPath}
 									selectionMode="multiple"
 									isMultiSelectMode={isMultiSelectMode}
+									onOpenSourceView={(source) => {
+										// This page has no source panel of its
+										// own — hand off to the skills page,
+										// scoped to THIS project, so a group
+										// header here can still reach it.
+										const params = new URLSearchParams();
+										if (projectPath) {
+											params.set(
+												"scope",
+												`project:${projectPath}`,
+											);
+										}
+										params.set("source", source);
+										setLocation(
+											`/skills?${params.toString()}`,
+										);
+									}}
 								/>
 							</>
 						)}

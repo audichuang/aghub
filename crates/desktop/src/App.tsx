@@ -71,15 +71,6 @@ function DefaultSidebarRoute() {
 	return <Redirect to={defaultHref} />;
 }
 
-function SourcesRedirect() {
-	const params = new URLSearchParams(window.location.search);
-	const source = params.get("source");
-	const to = source
-		? `/skills?view=source&source=${encodeURIComponent(source)}`
-		: "/skills?view=source";
-	return <Redirect to={to} />;
-}
-
 function App() {
 	const [isStoreReady, setIsStoreReady] = useState(false);
 	const [pendingIntents, setPendingIntents] = useState<
@@ -277,9 +268,6 @@ function App() {
 										</Route>
 										<Route path="/projects/:id">
 											<ProjectDetailPage />
-										</Route>
-										<Route path="/sources">
-											<SourcesRedirect />
 										</Route>
 										<Route>
 											<DefaultSidebarRoute />
