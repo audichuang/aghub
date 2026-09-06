@@ -6,6 +6,7 @@ members = [
 	"crates/api",
 	"crates/skills-sh",
 	"crates/skill",
+	"crates/skill-audit",
 	"crates/skill-update",
 	"crates/git",
 	"crates/json",
@@ -50,6 +51,11 @@ colored = "3.0"
 reqwest = { version = "0.13", features = [ "json", "gzip" ] }
 url = "2.5"
 base64 = "0.22"
+
+# Skill security audit. yara-x is a git rev (no crates.io release with the
+# feature set we compile against); default-features off keeps the modules we
+# do not use — and their C deps — out of the build.
+yara-x = { git = "https://github.com/VirusTotal/yara-x", rev = "e0096cd41fe16be76ca5321618ac880d1894b086", default-features = false, features = [ "constant-folding", "exact-atoms", "fast-regexp" ] }
 
 # Testing dependencies
 tempfile = "3.10"
