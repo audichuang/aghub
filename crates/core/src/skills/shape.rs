@@ -231,6 +231,17 @@ pub enum SkillShape {
 	/// un-migrated layout or content aghub never installed; only the caller can
 	/// tell those apart.
 	UnmigratedCopy,
+	/// A real directory sits at the Referrer path and is NOT a skill at all —
+	/// it has no root `SKILL.md`. Almost always a NAME COLLISION: several
+	/// agents group their own skills under a category directory, so
+	/// `~/.hermes/skills/research/` holds fourteen sub-skills and a
+	/// `DESCRIPTION.md` while aghub happens to manage a skill called
+	/// `research`. Distinguished from `ForkedCopy` because the remedies are
+	/// opposites: a fork is compared and quarantined, whereas this must be left
+	/// strictly alone. Quarantining it would move somebody's entire skill
+	/// collection aside — and before this existed, `repair` did exactly that in
+	/// its `fix:` line, telling the user to "keep the one you want".
+	ForeignDir,
 	/// Referrer and Master are the SAME object reached by different paths,
 	/// because a parent of the Referrer is a symlink. Refuse: the "duplicate"
 	/// is the original.
@@ -244,6 +255,10 @@ impl SkillShape {
 	/// state, and refusing it would refuse the migration that fixes it. D7 then
 	/// requires that flow to migrate the skill inside its own transaction —
 	/// "may proceed" is not "may ignore".
+	/// `ForeignDir` is excluded with the other occupied-slot shapes: aghub
+	/// cannot put a Referrer where somebody else's directory already sits, and
+	/// pretending otherwise would have a mutating flow plan a write that must
+	/// never happen.
 	pub fn is_actionable(&self) -> bool {
 		matches!(self, Self::Conformant | Self::Absent | Self::UnmigratedCopy)
 	}
@@ -345,6 +360,30 @@ pub fn classify_shape(referrer: &Path, master: &Path) -> SkillShape {
 	// neither, and calling it either is how a file got offered up as a Master.
 	if !referrer.is_dir() {
 		return SkillShape::Violation(ViolationKind::ReferrerIsNotADir);
+	}
+	// A directory with no root `SKILL.md` is not a skill, so it cannot be a
+	// COPY of this one — it only shares the name. Same marker
+	// `prune::top_level_skill_dirs` uses, and `metadata` follows links, so a
+	// link to a real skill still passes.
+	//
+	// Asked BEFORE the fork/unmigrated split because both of those lead
+	// somewhere destructive: a fork gets hashed and quarantined, and an
+	// unmigrated copy in the shared slot gets ADOPTED as the Master. Neither is
+	// a thing to do to a directory that belongs to another tool.
+	//
+	// ABSENT is not UNREADABLE, and folding them is fail-OPEN. A bare
+	// `is_file()` is false for both, so a `chmod 000` skill directory — a real
+	// skill aghub installed — classified as somebody else's content and was
+	// silently left alone, turning a permission fault into a no-op instead of
+	// the `Failed` report that tells the user to fix the permission. Only a
+	// definite `NotFound` demotes the directory; anything undecidable falls
+	// through to the old, conservative answer.
+	let not_a_skill = match std::fs::metadata(referrer.join("SKILL.md")) {
+		Ok(meta) => !meta.is_file(),
+		Err(e) => e.kind() == std::io::ErrorKind::NotFound,
+	};
+	if not_a_skill {
+		return SkillShape::ForeignDir;
 	}
 	if master_exists {
 		SkillShape::Violation(ViolationKind::ForkedCopy)
@@ -506,6 +545,93 @@ mod tests {
 			shape.is_actionable(),
 			"a mutating flow must be able to proceed and migrate it, not \
 			 refuse the state it exists to fix"
+		);
+	}
+
+	/// A directory sharing the NAME of a skill is not a copy of it.
+	///
+	/// Several agents group their own skills under a category directory:
+	/// `~/.hermes/skills/research/` holds a `DESCRIPTION.md` and fourteen
+	/// sub-skills, and no root `SKILL.md`. Classifying that as `ForkedCopy`
+	/// sent it to `CompareThenQuarantine`, which hashed it, found it different
+	/// and refused with "compare them, then keep the one you want" — advice
+	/// that, followed, moves fourteen of somebody else's skills aside.
+	#[test]
+	fn a_directory_that_is_not_a_skill_is_foreign_not_a_fork() {
+		let (_tmp, master, agent_dir) = fixture();
+		let category = agent_dir.join("foo");
+		fs::create_dir_all(category.join("arxiv")).unwrap();
+		fs::write(category.join("DESCRIPTION.md"), "a group of skills\n")
+			.unwrap();
+		// The sub-skill has one; the category directory itself does not.
+		fs::write(
+			category.join("arxiv").join("SKILL.md"),
+			"---\nname: arxiv\n---\n",
+		)
+		.unwrap();
+
+		assert_eq!(
+			classify_shape(&category, &master),
+			SkillShape::ForeignDir,
+			"no root SKILL.md means it is not this skill at all"
+		);
+		assert!(
+			!SkillShape::ForeignDir.is_actionable(),
+			"the slot is occupied, so no mutating flow may plan a write there"
+		);
+		assert_eq!(
+			action_for(&SkillShape::ForeignDir, false, true, true, &[], &[]),
+			ReferrerAction::LeaveForeign,
+			"report only — never hash it, never move it"
+		);
+	}
+
+	/// ABSENT is not UNREADABLE — folding the two is fail-OPEN.
+	///
+	/// A bare `is_file()` probe answers false for a `SKILL.md` inside a
+	/// `chmod 000` directory just as it does for one that is not there, so a
+	/// real skill aghub installed classified as somebody else's content and got
+	/// `LeaveForeign`: a permission fault turned into a silent no-op instead of
+	/// the `Failed` report that names it. Only a definite `NotFound` may demote
+	/// the directory.
+	#[test]
+	fn an_unreadable_directory_is_not_mistaken_for_a_foreign_one() {
+		use std::os::unix::fs::PermissionsExt;
+		let (_tmp, master, agent_dir) = fixture();
+		let fork = agent_dir.join("foo");
+		fs::create_dir_all(&fork).unwrap();
+		fs::write(fork.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+		fs::set_permissions(&fork, fs::Permissions::from_mode(0o000)).unwrap();
+		// Root ignores the mode bits, so the probe would still succeed there.
+		let enforced = fs::read_dir(&fork).is_err();
+		let shape = classify_shape(&fork, &master);
+		fs::set_permissions(&fork, fs::Permissions::from_mode(0o755)).unwrap();
+
+		if !enforced {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		assert_eq!(
+			shape,
+			SkillShape::Violation(ViolationKind::ForkedCopy),
+			"an undecidable probe must fall through to the conservative \
+			 answer, never to ForeignDir"
+		);
+	}
+
+	/// The other half of the same rule: a real directory that IS a skill beside
+	/// a live Master is still a fork, and still gets compared. Without this the
+	/// probe above could be widened until nothing was ever a fork again.
+	#[test]
+	fn a_real_skill_directory_beside_the_master_is_still_a_fork() {
+		let (_tmp, master, agent_dir) = fixture();
+		let fork = agent_dir.join("foo");
+		fs::create_dir_all(&fork).unwrap();
+		fs::write(fork.join("SKILL.md"), "---\nname: foo\n---\n").unwrap();
+
+		assert_eq!(
+			classify_shape(&fork, &master),
+			SkillShape::Violation(ViolationKind::ForkedCopy)
 		);
 	}
 
@@ -1295,6 +1421,11 @@ fn action_for(
 				ReferrerAction::LeaveForeign
 			}
 		}
+		// Report only, never touch (D5). The slot is occupied by content aghub
+		// did not install, so this agent simply does not get a Referrer — the
+		// honest answer, and the one that stops `repair` demanding a decision
+		// nobody can make correctly.
+		SkillShape::ForeignDir => ReferrerAction::LeaveForeign,
 		SkillShape::AliasedMaster => ReferrerAction::Refuse {
 			reason: RefuseReason::AliasedMaster,
 		},
@@ -1414,6 +1545,7 @@ impl PlannedReferrer {
 			SkillShape::Conformant => "a conformant referrer",
 			SkillShape::Absent => "nothing",
 			SkillShape::UnmigratedCopy => "an un-migrated copy",
+			SkillShape::ForeignDir => "a directory that is not a skill",
 			SkillShape::AliasedMaster => "an aliased master",
 			SkillShape::Violation(kind) => match kind {
 				ViolationKind::Chain { .. } => "a link chain",

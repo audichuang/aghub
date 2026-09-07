@@ -363,6 +363,23 @@ Three traps with their own tests: `symlink_metadata` alone cannot decide
 conformance; two canonicalize `Err`s must never compare equal; and identity
 (same inode through a symlinked parent) comes before any content comparison.
 
+**A real directory is only a fork if it IS a skill.** `SkillShape::ForeignDir`
+(→ `LeaveForeign`) is a directory at the Referrer path with no root `SKILL.md`,
+and it is checked BEFORE the `ForkedCopy` / `UnmigratedCopy` split because both
+of those lead somewhere destructive (hash-and-quarantine, or adopt as the
+Master). Several agents group their OWN skills under a category directory —
+Hermes walks `~/.hermes/skills` RECURSIVELY (`os.walk`, `followlinks=True`, no
+depth cap), so `research/` there holds thirteen sub-skills and a
+`DESCRIPTION.md` and is not a skill at all — and a skill aghub manages under the
+same name made `repair` refuse with "compare them, then keep the one you want",
+advice that moves somebody's whole collection aside. **Never use `DESCRIPTION.md`
+as the marker**: Hermes has no group concept, computes the category from the
+path, and skips a `DESCRIPTION.md` with no frontmatter `description` entirely.
+The probe distinguishes ABSENT from UNREADABLE — only a definite `NotFound`
+demotes the directory, because a bare `is_file()` is false for both and that
+turned a `chmod 000` skill into "somebody else's content", silently skipping a
+permission fault that must be reported as `Failed`.
+
 ## Adding / Removing an Agent
 
 One agent = one **descriptor** file, plus seven registration and contract spots

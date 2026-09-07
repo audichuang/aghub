@@ -337,6 +337,7 @@ fn inspect_agent_link(
 		// `ForkedCopy` (beside a live Master) differ for repair, not for a
 		// reader: both are "something real sits where a link belongs".
 		SkillShape::UnmigratedCopy
+		| SkillShape::ForeignDir
 		| SkillShape::AliasedMaster
 		| SkillShape::Violation(
 			ViolationKind::ForkedCopy | ViolationKind::ReferrerIsNotADir,

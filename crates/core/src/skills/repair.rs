@@ -1049,6 +1049,72 @@ mod tests {
 		);
 	}
 
+	/// A name collision must not turn `repair` into an unanswerable question.
+	///
+	/// The end-to-end shape behind `SkillShape::ForeignDir`: an agent groups
+	/// its OWN skills under a category directory whose name happens to match a
+	/// skill aghub manages. That used to classify as a forked copy, hash
+	/// differently (of course it does — it is a different thing) and refuse
+	/// with `fix: compare them, then keep the one you want`. Following that
+	/// advice moves the agent's whole skill collection aside.
+	#[test]
+	fn a_name_colliding_category_dir_is_left_alone_not_refused() {
+		let (_tmp, root) = fixture();
+		let name = "research";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "the skill aghub manages");
+		// Every other agent is linked correctly; only this one collides.
+		let claude = root.join(".claude").join("skills").join(name);
+		fs::create_dir_all(claude.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &claude).unwrap();
+		// The collision: a category directory with sub-skills and no root
+		// SKILL.md, exactly the `~/.hermes/skills/research/` layout. Staged in
+		// a PROJECT-scope private dir, which needs no real home; hermes's own
+		// dir is global-only and runs the same two functions on the same state.
+		let category = root.join(".grok").join("skills").join(name);
+		fs::create_dir_all(category.join("arxiv")).unwrap();
+		fs::write(category.join("DESCRIPTION.md"), "grouped skills\n").unwrap();
+		fs::write(
+			category.join("arxiv").join("SKILL.md"),
+			"---\nname: arxiv\ndescription: d\n---\n",
+		)
+		.unwrap();
+
+		let p = plan(&root, name, true);
+		let row = p
+			.actions
+			.iter()
+			.find(|a| a.path == category)
+			.expect("the colliding slot must still be reported");
+		assert_eq!(row.shape, crate::skills::shape::SkillShape::ForeignDir);
+		assert_eq!(
+			row.action,
+			crate::skills::shape::ReferrerAction::LeaveForeign
+		);
+		assert!(
+			p.refusals().is_empty(),
+			"a name collision is not a decision the user can make: {:?}",
+			p.refusals()
+		);
+		assert!(
+			p.is_noop(),
+			"nothing to do here, so the migration banner must stop asking"
+		);
+
+		let report = execute_repair(&p, false).unwrap();
+		assert_eq!(report.outcome, RepairOutcome::Conformant);
+		// The whole point: somebody else's fourteen skills stay where they are.
+		assert!(
+			category.join("DESCRIPTION.md").is_file(),
+			"the category directory must be untouched"
+		);
+		assert!(
+			category.join("arxiv").join("SKILL.md").is_file(),
+			"and so must every skill inside it"
+		);
+		assert!(report.quarantined.is_none(), "nothing may be quarantined");
+	}
+
 	/// A diverged fork must leave the disk EXACTLY as it found it. This is the
 	/// test that fails if the hash comparison is ever moved after the adopt.
 	#[test]
