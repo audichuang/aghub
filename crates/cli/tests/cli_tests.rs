@@ -5120,6 +5120,483 @@ fn reconcile_mcp_add_then_remove() {
 	);
 }
 
+/// The protect list must cover an agent this reconcile never NAMED.
+///
+/// Claude and Copilot both resolve a PROJECT MCP to `<root>/.mcp.json` once
+/// that file exists, and removing the server rewrites that one file — taking it
+/// from both. Copilot appears nowhere in this command, so the old protect list
+/// (copy targets plus the source) could never see it: neither list held it, the
+/// backing comparison never ran, and the row reported success while copilot
+/// silently lost the server.
+///
+/// Asserted for the PREVIEW as well as the commit — a preview that green-lights
+/// what the commit refuses is the shape this file's doctrine exists to stop.
+#[test]
+fn reconcile_mcp_refuses_when_an_unnamed_agent_shares_the_file() {
+	let project = mcp_project();
+	let shared = project.path().join(".mcp.json");
+	let before = std::fs::read(&shared)
+		.expect("claude's project MCP config is <root>/.mcp.json");
+
+	for confirm in [false, true] {
+		let mut cmd = transfer_cli(project.path());
+		cmd.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--remove",
+			"claude",
+			"--json",
+		]);
+		if confirm {
+			cmd.arg("--yes");
+		}
+		let out = cmd.output().unwrap();
+
+		assert!(
+			!out.status.success(),
+			"confirm={confirm}: removing from a file an unnamed agent shares \
+			 must be refused, not reported as success: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["error"]["code"], "INVALID_CONFIG", "{json}");
+		let message = json["error"]["message"].as_str().unwrap_or_default();
+		assert!(
+			message.contains("copilot"),
+			"the refusal must NAME the sharer the caller never typed: \
+			 {message}"
+		);
+		assert!(
+			message.contains("Add 'copilot' to --remove"),
+			"the refusal must name the remedy that actually works: {message}"
+		);
+		assert_eq!(
+			std::fs::read(&shared).unwrap(),
+			before,
+			"confirm={confirm}: the shared file must be byte-identical"
+		);
+	}
+
+	// The remedy the refusal just printed must LEAD somewhere. Both rows
+	// rewrite `<root>/.mcp.json`; the second one finds the entry already gone,
+	// and reporting that as a failure would leave this reconcile with no clean
+	// spelling at all — the caller would fall back to `delete mcps`, which
+	// takes copilot's server with no warning whatsoever.
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--remove",
+			"claude",
+			"--remove",
+			"copilot",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"the printed remedy must exit 0: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["failed_count"], 0, "{json}");
+	assert_eq!(json["success_count"], 2, "{json}");
+	// The outcome, not just the exit code: the entry is actually gone.
+	let after: Value =
+		serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+	assert!(
+		after["mcpServers"].get("filesystem").is_none(),
+		"the server must be gone from the shared file: {after}"
+	);
+}
+
+/// Sibling forgiveness must be a CREDENTIAL, not list membership.
+///
+/// Claude and Copilot both resolve a project MCP to `<root>/.mcp.json` —
+/// copilot falls back to that same primary path when neither it nor
+/// `.github/mcp.json` exists — so while the file is ABSENT the two removal rows
+/// share a backing that has never held anything. Blessing a `ResourceNotFound`
+/// on shared-backing MEMBERSHIP alone reported `success_count: 2` for two
+/// deletions that never happened. Forgiveness is owed only to a row whose
+/// backing an EARLIER row of this same command really emptied.
+#[test]
+fn reconcile_mcp_does_not_bless_a_removal_nothing_ever_held() {
+	let project = transfer_project("placeholder-skill");
+	// The source lives in cursor's own file; `<root>/.mcp.json` stays absent.
+	let add = transfer_cli(project.path())
+		.args([
+			"-p",
+			"-a",
+			"cursor",
+			"add",
+			"mcp",
+			"--name",
+			"filesystem",
+			"--command",
+			"npx mcp-filesystem",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		add.status.success(),
+		"seed add mcp failed: {}",
+		String::from_utf8_lossy(&add.stderr)
+	);
+	let shared = project.path().join(".mcp.json");
+	assert!(
+		!shared.exists(),
+		"the fixture must start with no <root>/.mcp.json"
+	);
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"cursor",
+			"--name",
+			"filesystem",
+			"--remove",
+			"claude",
+			"--remove",
+			"copilot",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		json["success_count"], 0,
+		"neither agent ever held the server, so no row may report a \
+		 removal: {json}"
+	);
+	assert_eq!(json["failed_count"], 2, "{json}");
+	assert!(
+		!out.status.success(),
+		"a reconcile that removed nothing must not exit 0: {json}"
+	);
+	assert!(
+		!shared.exists(),
+		"a failed removal must not create the shared config file"
+	);
+}
+
+/// The credential is PER BACKING — "some earlier row succeeded" is not enough.
+///
+/// Claude and Copilot share `<root>/.mcp.json`, so claude's real deletion is
+/// what earns copilot's forgiveness. Cursor reads `<root>/.cursor/mcp.json`,
+/// which no row of this command ever emptied, so its `ResourceNotFound` stays a
+/// failure. Forgiving on "the batch deleted something somewhere" reports
+/// `success_count: 3` for a server cursor never had — the same bug one agent
+/// along.
+#[test]
+fn reconcile_mcp_credits_only_the_backing_a_row_emptied() {
+	let project = mcp_project();
+	let shared = project.path().join(".mcp.json");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"mcp",
+			"--from-agent",
+			"claude",
+			"--name",
+			"filesystem",
+			"--remove",
+			"claude",
+			"--remove",
+			"copilot",
+			"--remove",
+			"cursor",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		json["success_count"], 2,
+		"only the two rows sharing the emptied file may succeed: {json}"
+	);
+	assert_eq!(json["failed_count"], 1, "{json}");
+	assert!(
+		!out.status.success(),
+		"a batch with a failed row must not exit 0: {json}"
+	);
+	let cursor = json["results"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|row| row["agent"] == "cursor")
+		.expect("cursor must have a row: {json}")
+		.clone();
+	assert_eq!(cursor["success"], false, "{json}");
+	assert!(
+		cursor["error"]
+			.as_str()
+			.unwrap_or_default()
+			.contains("not found"),
+		"cursor's row must say the server was not there: {json}"
+	);
+	// The forgiven half really ran — this is not a batch that failed early.
+	let after: Value =
+		serde_json::from_slice(&std::fs::read(&shared).unwrap()).unwrap();
+	assert!(
+		after["mcpServers"].get("filesystem").is_none(),
+		"claude and copilot's rows must have emptied the shared file: {after}"
+	);
+}
+
+/// The SKILL delete arm owes the same credential as the other two.
+///
+/// It used to read EVERY `ResourceNotFound` as a success — not even scoped to a
+/// shared backing — so removing a skill from two agents that had never held it
+/// exited 0 reporting two deletions with the disk untouched. Several
+/// project-scope agents really do share `<root>/.agents/skills`, which is why
+/// the arm forgives at all; it may only forgive a row whose directory an
+/// earlier row of the same command actually emptied.
+#[test]
+fn reconcile_skill_does_not_bless_a_removal_nothing_ever_held() {
+	let project = transfer_project("placeholder-skill");
+	let source = project
+		.path()
+		.join(".claude/skills/placeholder-skill/SKILL.md");
+
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"placeholder-skill",
+			"--remove",
+			"cursor",
+			"--remove",
+			"windsurf",
+			"--yes",
+			"--json",
+		])
+		.output()
+		.unwrap();
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(
+		json["success_count"], 0,
+		"neither agent ever held the skill, so no row may report a \
+		 removal: {json}"
+	);
+	assert_eq!(json["failed_count"], 2, "{json}");
+	assert!(
+		!out.status.success(),
+		"a reconcile that removed nothing must not exit 0: {json}"
+	);
+	assert!(
+		source.exists(),
+		"the skill must still be on disk after a removal that took nothing"
+	);
+}
+
+/// …and the credential the skill arm DOES owe: the Master, not the write dir.
+///
+/// Naming every reader makes the removal exhaustive, so the first row takes
+/// both Referrers AND the shared Master with it and the second finds nothing
+/// left. What the two rows share is `~/.aghub/demo` — no agent's own skills
+/// directory — so keying the credential on write dirs (what
+/// `ensure_removals_spare` asks about) leaves cursor's row reporting
+/// `RESOURCE_NOT_FOUND` for a skill this very command just took from it.
+#[cfg(unix)]
+#[test]
+fn reconcile_skill_forgives_the_row_whose_master_a_sibling_took() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = home.path().join("src/demo");
+	std::fs::create_dir_all(&src).unwrap();
+	std::fs::write(
+		src.join("SKILL.md"),
+		"---\nname: demo\ndescription: d\n---\n\nBODY\n",
+	)
+	.unwrap();
+	for agent in ["claude", "cursor"] {
+		assert!(
+			isolated_cli(home.path(), state.path())
+				.args([
+					"-g",
+					"-a",
+					agent,
+					"add",
+					"skills",
+					"--from",
+					src.to_str().unwrap(),
+				])
+				.output()
+				.unwrap()
+				.status
+				.success(),
+			"seeding {agent} failed"
+		);
+	}
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"demo",
+			"--remove",
+			"claude",
+			"--remove",
+			"cursor",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert!(
+		out.status.success(),
+		"removing from every reader must exit 0: {json}"
+	);
+	assert_eq!(json["success_count"], 2, "{json}");
+	assert_eq!(json["failed_count"], 0, "{json}");
+	// The outcome, not just the exit code: nobody reads it any more.
+	assert!(
+		!home.path().join(".aghub/demo").exists(),
+		"the Master must go with the last reader"
+	);
+	for agent in [".claude", ".cursor"] {
+		let referrer = home.path().join(agent).join("skills/demo");
+		assert!(
+			std::fs::symlink_metadata(&referrer).is_err(),
+			"{agent}'s referrer must be gone: {}",
+			referrer.display()
+		);
+	}
+}
+
+/// The roster protect list on the SUB-AGENT arm, and the remedy it prints.
+///
+/// Sub-agent directories are all distinct on paper, so the only way two of them
+/// become one is a symlinked ancestor or an agent-home env override — which
+/// `agents/src/sub_agents.rs` deliberately allows (it refuses symlinked LEAVES
+/// only). `~/.grok -> ~/.claude` and a remove-only reconcile that never
+/// mentions grok: before the roster list, nothing compared the file to grok's,
+/// the single `.md` was deleted and the run exited 0.
+#[cfg(unix)]
+#[test]
+fn reconcile_sub_agent_refuses_when_an_unnamed_agent_shares_the_file() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let agents = home.path().join(".claude/agents");
+	std::fs::create_dir_all(&agents).unwrap();
+	// grok's home IS claude's home here, and grok is named NOWHERE below.
+	std::os::unix::fs::symlink(
+		home.path().join(".claude"),
+		home.path().join(".grok"),
+	)
+	.unwrap();
+	let file = agents.join("reviewer.md");
+	std::fs::write(
+		&file,
+		"---\nname: reviewer\ndescription: d\n---\n\nREVIEWER-BODY\n",
+	)
+	.unwrap();
+
+	for confirm in [false, true] {
+		let mut cmd = isolated_cli(home.path(), state.path());
+		cmd.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"sub-agent",
+			"--from-agent",
+			"claude",
+			"--name",
+			"reviewer",
+			"--remove",
+			"claude",
+		]);
+		if confirm {
+			cmd.arg("--yes");
+		}
+		let out = cmd.output().unwrap();
+
+		assert!(
+			!out.status.success(),
+			"confirm={confirm}: removing a file an unnamed agent shares must \
+			 be refused: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert_eq!(json["error"]["code"], "INVALID_CONFIG", "{json}");
+		let message = json["error"]["message"].as_str().unwrap_or_default();
+		assert!(
+			message.contains("grok"),
+			"the refusal must NAME the sharer the caller never typed: \
+			 {message}"
+		);
+		assert!(
+			std::fs::read_to_string(&file)
+				.is_ok_and(|body| body.contains("REVIEWER-BODY")),
+			"confirm={confirm}: the one file both agents read must survive"
+		);
+	}
+
+	// And the remedy it printed must work: both rows resolve to the one file,
+	// so the second finds it already gone — a success, not a failure.
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"--json",
+			"reconcile",
+			"sub-agent",
+			"--from-agent",
+			"claude",
+			"--name",
+			"reviewer",
+			"--remove",
+			"claude",
+			"--remove",
+			"grok",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"the printed remedy must exit 0: {}",
+		String::from_utf8_lossy(&out.stdout)
+	);
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(json["failed_count"], 0, "{json}");
+	assert!(
+		!file.exists(),
+		"the sub-agent file must actually be gone afterwards"
+	);
+}
+
 /// Seed a Claude project sub-agent file, then return the project dir.
 fn sub_agent_project(name: &str) -> tempfile::TempDir {
 	let project = transfer_project("placeholder-skill");
@@ -10671,6 +11148,12 @@ fn identity_not_path_and_unknown_not_absent() {
 	}
 
 	// --- …and naming every reader still removes the master, as designed.
+	//
+	// claude is the ONLY reader here, so `--remove claude` alone is what
+	// "naming every reader" means. This used to spell it as six `--remove`s;
+	// five of those agents had never held the skill, and the skill delete arm
+	// blessed their `ResourceNotFound` into success — the bug
+	// `reconcile_skill_does_not_bless_a_removal_nothing_ever_held` now pins.
 	{
 		let home = tempfile::TempDir::new().unwrap();
 		let state = tempfile::TempDir::new().unwrap();
@@ -10707,16 +11190,6 @@ fn identity_not_path_and_unknown_not_absent() {
 				"demo",
 				"--remove",
 				"claude",
-				"--remove",
-				"codex",
-				"--remove",
-				"opencode",
-				"--remove",
-				"cline",
-				"--remove",
-				"warp",
-				"--remove",
-				"cursor",
 				"--yes",
 			])
 			.output()
@@ -10841,18 +11314,12 @@ fn the_new_guards_do_not_refuse_legitimate_work() {
 				"claude",
 				"--name",
 				"holdertest",
+				// claude is the only holder, so this alone is exhaustive. The
+				// five other agents this used to name had never held the skill
+				// — rows the delete arm silently blessed until
+				// `reconcile_skill_does_not_bless_a_removal_nothing_ever_held`.
 				"--remove",
 				"claude",
-				"--remove",
-				"codex",
-				"--remove",
-				"opencode",
-				"--remove",
-				"cline",
-				"--remove",
-				"cursor",
-				"--remove",
-				"warp",
 				"--yes",
 			])
 			.output()

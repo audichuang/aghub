@@ -247,18 +247,51 @@ true`) for both verbs — a skill because the shared Master is what "already
   Master its OWN copies would create — "add windsurf, remove cursor" cannot
   hand cursor the skill back through a Master the same command just made. Its
   **preview runs that same check**: a `--remove` without `--yes` that exits 0
-  is a commit that will run. Both spellings report
+  is a commit that will RUN — not one whose every row succeeds. The preview is a
+  plan echo (`{dry_run, add, remove}`, no per-row results), so a `--remove`
+  naming an agent that never held the skill previews as "would remove" and exits
+  0 while the commit fails that row and exits 1 — the same preview/commit shape
+  `reconcile mcp` has, and the reason it is not a refusal is that
+  `preflight_delete` returning `Err` aborts the WHOLE batch. Both spellings report
   `UNSUPPORTED_OPERATION` / HTTP 422 — batching is transport and must not
-  relabel the refusal as bad parameters. **`reconcile mcp`'s guard is narrower
-  than it looks**: `ensure_removals_spare` DOES compare resolved backing paths
-  (preflight, then re-checked at delete time), but its protect set is only the
-  COPY TARGETS + the source. An agent that shares the backing file and is named
-  NOWHERE in the command is in neither list, so `reconcile mcp --remove claude`
-  still takes the server from copilot too when both resolve project MCPs to
-  `<root>/.mcp.json`, reported as success — verified, unfixed. `reconcile skill`
-  builds its protect set from the SAME `protected_targets`, so do not assume the
-  skill side is closed against an unnamed dir-sharer without testing it; what IS
-  closed there is the shared-Master case, by the keep rules
+  relabel the refusal as bad parameters. **`reconcile mcp` / `reconcile
+  sub-agent` protect the whole ROSTER, not just the agents you named**:
+  `protected_targets` adds every `registry::iter_all()` agent that is not itself
+  being removed, and `ensure_removals_spare` compares resolved backing paths
+  (preflight, then re-checked at delete time). Consequence at project scope:
+  claude and copilot both resolve a project MCP to `<root>/.mcp.json`, so
+  `reconcile mcp --remove claude -p` is now ALWAYS refused — the message names
+  copilot and tells you to add it to `--remove` too (repeat the flag; it takes
+  no comma list). That pair is the only project MCP collision in the roster
+  today. **Following that remedy exits 0**, verified: both rows report success
+  and the entry is gone. It has to, or the refusal would leave this reconcile
+  with no clean spelling at all — so `sibling_already_took_it` reads a delete
+  whose entry a SIBLING ROW of the same command already took as a success
+  instead of `RESOURCE_NOT_FOUND`. **That forgiveness is a CREDENTIAL, not
+  membership of the removal set** (`RemovalCredits`): only a row that REALLY
+  emptied a backing vouches for the later rows reading that same backing.
+  Sharing a backing is not itself forgiveness — claude and copilot share
+  `<root>/.mcp.json` even while it does not exist, so "scoped to the removal
+  set" blessed `--remove claude --remove copilot` on an absent file as
+  `success_count: 2` for a server neither ever held. A `--remove` naming an
+  agent whose backing no row emptied still fails THAT ROW (exit 1), whether it
+  shares nothing (a typo) or shares an untouched file. All three reconcile delete arms
+  go through that one helper — `reconcile skill` used to forgive EVERY
+  `ResourceNotFound` with no scoping at all, so `reconcile skill --remove <an
+  agent that never held it>` now FAILS that row where it used to exit 0
+  claiming a deletion (the batch is still not rejected, and nothing else in it
+  changes). Its credential is keyed on the ENTRY a row takes — the shared
+  Master under `.aghub`, via `canonical_path` — not on the write dir
+  `ensure_removals_spare` compares: an exhaustive removal takes the Master
+  every named reader links to, and that lives in no agent's own dir. **`delete mcps <name> -a claude -p --yes`
+  has no such guard** — it reports `outcome: "removed"` and copilot loses the
+  server too (verified; left alone deliberately, turning that everyday command
+  into a refusal is a UX decision nobody has made). `reconcile skill`
+  deliberately passes `roster: false`: eight project-scope agents share
+  `<root>/.agents/skills` as their write dir BY DESIGN, so a roster protect list
+  would refuse every removal from any of them — what a skill removal really
+  takes away is `remove_skill_planned` / `read_effect_after`'s call, and the
+  shared-Master case is closed there by the keep rules
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
   reads the key from stdin; nothing else does

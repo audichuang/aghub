@@ -493,48 +493,101 @@ fn node_id(_path: &Path) -> Option<(u64, u64)> {
 /// missed the whole source half of it: `reconcile --from-agent claude --remove
 /// grok` with `~/.grok` symlinked to `~/.claude` deleted the source's only copy
 /// and exited 0, because `grok != claude` as an id.
+/// What a backing lookup could determine about one target.
+///
+/// `Option<PathBuf>` conflated the two answers that matter to a PROTECTIVE
+/// check: "this agent definitely does not hold it" and "its config would not
+/// parse, so I cannot tell". `sub_agent_backing_path` loads a whole
+/// `ConfigManager`, which parses MCPs too — an unrelated broken `config.toml`
+/// on a sharing agent made the roster guard read it as a non-holder and delete
+/// the file both of them read. A guard that exists to prevent data loss must
+/// fail CLOSED on the second answer.
+enum Backed {
+	/// The resolved backing path this target reads.
+	At(PathBuf),
+	/// Determined: this target holds no such resource.
+	Absent,
+	/// Undeterminable — treat as a collision wherever that is the safe read.
+	Unknown,
+}
+
 fn ensure_removals_spare<F>(
-	protect: &[InstallTarget],
+	protect: &[Protected],
 	removing: &[InstallTarget],
 	source_agent: AgentType,
 	backing: F,
 ) -> Result<()>
 where
-	F: Fn(&InstallTarget) -> Option<PathBuf>,
+	F: Fn(&InstallTarget) -> Backed,
 {
 	for delete in removing {
-		let Some(delete_backing) = backing(delete).map(Backing::of) else {
+		// The delete side stays permissive: a target whose own backing cannot
+		// be read will fail its own row anyway, and refusing here would turn
+		// that into a whole-batch abort.
+		let Backed::At(delete_path) = backing(delete) else {
 			continue;
 		};
+		let delete_backing = Backing::of(delete_path);
 		for kept in protect {
 			// The caller asked to remove it from THIS agent; that it also
 			// holds it is the point, not a collision.
-			if kept.agent == delete.agent {
+			if kept.target.agent == delete.agent {
 				continue;
 			}
-			let Some(kept_backing) = backing(kept).map(Backing::of) else {
-				continue;
+			let kept_backing = match backing(&kept.target) {
+				Backed::At(path) => Backing::of(path),
+				Backed::Absent => continue,
+				// Cannot tell whether this agent shares the file being
+				// rewritten. Skipping is the answer that loses data.
+				Backed::Unknown => {
+					return Err(ConfigError::InvalidConfig(format!(
+						"cannot tell whether '{}' shares the same file as \
+						 '{}' — its configuration failed to load, so removing \
+						 from '{}' might take it from '{}' as well. Fix that \
+						 agent's config, or name it in this reconcile too.",
+						kept.target.agent.as_str(),
+						delete.agent.as_str(),
+						delete.agent.as_str(),
+						kept.target.agent.as_str(),
+					)));
+				}
 			};
 			if delete_backing.is(&kept_backing) {
-				// Name WHY the partner is in the protect list. Without it the
+				// Name WHY the partner is in the protect list, and give the
+				// remedy that actually applies to it. Without the role the
 				// message can cite an agent the caller never typed:
 				// `--from-agent warp --add claude --remove cline` answering
-				// "'cline' and 'warp'" reads as a non sequitur.
-				let role = if kept.agent == source_agent {
-					" (the --from-agent source of this reconcile)"
+				// "'cline' and 'warp'" reads as a non sequitur. And an agent
+				// the command never named cannot be "dropped from this
+				// reconcile" — the only way forward is to remove it too.
+				let drop_it = format!(
+					"Drop '{}' from this reconcile.",
+					delete.agent.as_str()
+				);
+				let (role, remedy) = if kept.target.agent == source_agent {
+					(" (the --from-agent source of this reconcile)", drop_it)
+				} else if kept.named {
+					("", drop_it)
 				} else {
-					""
+					(
+						" — an agent this reconcile never named —",
+						format!(
+							"Add '{}' to --remove as well (repeat the flag; \
+							 it takes no comma list), or drop '{}' from this \
+							 reconcile.",
+							kept.target.agent.as_str(),
+							delete.agent.as_str()
+						),
+					)
 				};
 				return Err(ConfigError::InvalidConfig(format!(
 					"'{}' and '{}'{} resolve to the same place on disk ({}), \
 					 so removing it from the first would take it from the \
-					 second as well — not a state that can exist. Drop '{}' \
-					 from this reconcile.",
+					 second as well — not a state that can exist. {remedy}",
 					delete.agent.as_str(),
-					kept.agent.as_str(),
+					kept.target.agent.as_str(),
 					role,
 					delete_backing.path.display(),
-					delete.agent.as_str(),
 				)));
 			}
 		}
@@ -555,10 +608,11 @@ fn ensure_reconcile_spares<F>(
 	source: &ResourceLocator,
 	added: &[AgentType],
 	removed: &[AgentType],
+	roster: bool,
 	backing: F,
 ) -> Result<()>
 where
-	F: Fn(&InstallTarget) -> Option<PathBuf>,
+	F: Fn(&InstallTarget) -> Backed,
 {
 	let (copies, deletes) = reconcile_plans(
 		added.to_vec(),
@@ -566,10 +620,15 @@ where
 		source.scope,
 		source.project_root.clone(),
 	);
-	let protect =
-		protected_targets(&copies, source, removed.contains(&source.agent));
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
+	let protect = protected_targets(
+		&copies,
+		source,
+		removed.contains(&source.agent),
+		&removing,
+		roster,
+	);
 	ensure_removals_spare(&protect, &removing, source.agent, backing)
 }
 
@@ -579,7 +638,7 @@ pub fn ensure_skill_reconcile_spares(
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, skill_backing_dir)
+	ensure_reconcile_spares(source, added, removed, false, skill_backing_dir)
 }
 
 /// [`ensure_reconcile_spares`] for an MCP — the preview seam.
@@ -588,7 +647,7 @@ pub fn ensure_mcp_reconcile_spares(
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, mcp_backing_path)
+	ensure_reconcile_spares(source, added, removed, true, mcp_backing_path)
 }
 
 /// [`ensure_reconcile_spares`] for a sub-agent — the preview seam.
@@ -597,28 +656,208 @@ pub fn ensure_sub_agent_reconcile_spares(
 	added: &[AgentType],
 	removed: &[AgentType],
 ) -> Result<()> {
-	ensure_reconcile_spares(source, added, removed, |target| {
+	ensure_reconcile_spares(source, added, removed, true, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})
 }
 
+/// One entry of the protect list, plus whether the caller NAMED it.
+///
+/// The flag exists for the refusal message only: a named partner is dropped
+/// from the command, an agent the command never mentioned can only be added to
+/// `--remove`.
+struct Protected {
+	target: InstallTarget,
+	named: bool,
+}
+
 /// Everything a reconcile must not destroy: the copy targets, plus the source
-/// unless the caller asked to remove the source too.
+/// unless the caller asked to remove the source too — and with `roster`, every
+/// OTHER agent in the registry that is not itself being removed.
+///
+/// The named-partners-only list was blind in exactly the case that destroys
+/// silently: an agent that shares the backing file but appears NOWHERE in the
+/// command is in neither list, so the backing comparison never runs for it.
+/// Claude and Copilot both resolve a project MCP to `<root>/.mcp.json`, and
+/// `reconcile mcp --remove claude` rewrote that one file and reported success
+/// while copilot lost the server too.
+///
+/// The roster is the REGISTRY, not the installed agents — same source as
+/// `skill_holders`, and for the same reason: an agent we cannot see is not an
+/// agent that does not read the file.
+///
+/// Skills deliberately pass `roster: false`. Eight project-scope agents share
+/// `<root>/.agents/skills` as their own write dir BY DESIGN (granting to one
+/// grants to all), so a roster protect list would refuse every removal from any
+/// of them. What a skill removal really takes away is decided by
+/// `remove_skill_planned` / `removal::read_effect_after`, not here.
 fn protected_targets(
 	copies: &[OperationPlan],
 	source: &ResourceLocator,
 	source_removed: bool,
-) -> Vec<InstallTarget> {
-	let mut protect: Vec<InstallTarget> =
-		copies.iter().map(|plan| plan.target.clone()).collect();
+	removing: &[InstallTarget],
+	roster: bool,
+) -> Vec<Protected> {
+	let mut protect: Vec<Protected> = copies
+		.iter()
+		.map(|plan| Protected {
+			target: plan.target.clone(),
+			named: true,
+		})
+		.collect();
 	if !source_removed {
-		protect.push(InstallTarget {
-			agent: source.agent,
-			scope: source.scope,
-			project_root: source.project_root.clone(),
+		protect.push(Protected {
+			target: InstallTarget {
+				agent: source.agent,
+				scope: source.scope,
+				project_root: source.project_root.clone(),
+			},
+			named: true,
 		});
 	}
+	if roster {
+		for descriptor in registry::iter_all() {
+			let Ok(agent) = descriptor.id.parse::<AgentType>() else {
+				continue;
+			};
+			if removing.iter().any(|target| target.agent == agent)
+				|| protect.iter().any(|kept| kept.target.agent == agent)
+			{
+				continue;
+			}
+			protect.push(Protected {
+				target: InstallTarget {
+					agent,
+					scope: source.scope,
+					project_root: source.project_root.clone(),
+				},
+				named: false,
+			});
+		}
+	}
 	protect
+}
+
+/// The removal rows of ONE reconcile, each with the backing it resolved to at
+/// PREFLIGHT, plus the credential half: which of them actually took something
+/// out.
+///
+/// This is the other half of [`ensure_removals_spare`]. That guard refuses a
+/// removal whose file something else still reads, and the remedy it prints is
+/// "add the sharer to `--remove` as well" — so the shape it sends the caller
+/// back with must actually work. It did not: two rows rewriting one file means
+/// the first takes the entry out and the second finds nothing to remove, so a
+/// reconcile that did exactly what was asked reported `failed_count: 1` and
+/// exited 1. A row whose resource a SIBLING ROW of this same command already
+/// took is a success — for all three delete arms, `reconcile_skill`'s included,
+/// where several project-scope agents share one write dir by design.
+///
+/// Sharing a backing is NOT on its own that credential. Copilot's project MCP
+/// path falls back to claude's `<root>/.mcp.json` while neither that file nor
+/// `.github/mcp.json` exists, so `--remove claude --remove copilot` against an
+/// absent file made the two rows "siblings" of a deletion that never happened,
+/// and both `ResourceNotFound`s were blessed: `success_count: 2` for removing
+/// something nobody ever had. Only a row that REALLY emptied the backing
+/// vouches for the later rows reading it.
+///
+/// Scoped to this command's own removal set, so it cannot bless a misspelled
+/// agent that simply never held the resource: that agent shares its backing
+/// with nobody and its row still errors.
+///
+/// Backings are resolved at PREFLIGHT, before any row runs, because a
+/// sub-agent's backing IS the resource file — once the first row deletes it
+/// there is nothing left to compare, and a delete-time answer would be `None`
+/// for both.
+struct RemovalCredits {
+	/// One entry per removal target that resolves to a backing at all, in
+	/// input order.
+	resolved: Vec<(AgentType, Backing)>,
+	/// The agents whose row returned a real deletion.
+	credited: Vec<AgentType>,
+}
+
+impl RemovalCredits {
+	fn new<F>(removing: &[InstallTarget], backing: F) -> Self
+	where
+		F: Fn(&InstallTarget) -> Backed,
+	{
+		Self {
+			resolved: removing
+				.iter()
+				.filter_map(|target| match backing(target) {
+					Backed::At(path) => Some((target.agent, Backing::of(path))),
+					// No key means no credit and no forgiveness — the safe
+					// direction for an undeterminable backing.
+					Backed::Absent | Backed::Unknown => None,
+				})
+				.collect(),
+			credited: Vec::new(),
+		}
+	}
+
+	fn backing_of(&self, agent: AgentType) -> Option<&Backing> {
+		self.resolved
+			.iter()
+			.find(|(candidate, _)| *candidate == agent)
+			.map(|(_, backing)| backing)
+	}
+
+	/// This row really took the resource out, so its backing now vouches for
+	/// the later rows that share it.
+	fn credit(&mut self, agent: AgentType) {
+		if !self.credited.contains(&agent) {
+			self.credited.push(agent);
+		}
+	}
+
+	/// Has an EARLIER row of this same command already emptied the backing this
+	/// agent reads?
+	fn already_taken(&self, agent: AgentType) -> bool {
+		let Some(mine) = self.backing_of(agent) else {
+			return false;
+		};
+		self.credited.iter().any(|credited| {
+			self.backing_of(*credited).is_some_and(|took| took.is(mine))
+		})
+	}
+}
+
+/// Read a removal that found nothing as the success it is when a SIBLING ROW of
+/// the same reconcile already took the entry out of the file both share — and
+/// record a real deletion, so the later rows have something to claim.
+///
+/// `took` is the caller's OWN answer to "did this row really empty its
+/// backing?", because only the caller can tell: `remove_mcp`/`remove_sub_agent`
+/// delete or error, so their `Ok` is `true`, while `remove_skill_planned`
+/// returns an unexecuted outcome for a removal it deliberately spared
+/// (`shared_master_kept`) — success that took nothing, and no credential. The
+/// return is always `Ok(false)`: a Delete row is never `already_present`, that
+/// vocabulary belongs to the Copy direction.
+///
+/// One definition for ALL THREE reconcile delete arms (MCP, sub-agent, skill).
+/// They answered this differently before — the skill arm blessed EVERY
+/// `ResourceNotFound` unconditionally, reporting `success_count: 2` for two
+/// agents that had never held the skill — and that is exactly the
+/// hand-mirroring that drifts.
+fn sibling_already_took_it(
+	removed: Result<bool>,
+	agent: AgentType,
+	credits: &mut RemovalCredits,
+) -> Result<bool> {
+	match removed {
+		Ok(took) => {
+			if took {
+				credits.credit(agent);
+			}
+			Ok(false)
+		}
+		Err(ConfigError::ResourceNotFound { .. })
+			if credits.already_taken(agent) =>
+		{
+			Ok(false)
+		}
+		Err(error) => Err(error),
+	}
 }
 
 /// The directory an agent writes ITS OWN skills into, for
@@ -627,18 +866,72 @@ fn protected_targets(
 /// Deliberately the agent's own dir and NOT the shared `.agents/skills` Master.
 /// Several agents linking to one Master is the normal supported state, and
 /// removing one agent's link is exactly what `remove_skill_planned` does — it
-/// keeps the Master (`shared_master_kept`). What is NOT a state the world can
-/// be in is two agent IDS whose own skills DIRECTORY is one directory, which a
-/// symlinked home or an agent-home env override produces: `~/.gemini ->
-/// ~/.claude` made "remove from gemini" delete claude's private skill, on a
-/// reconcile that never named claude, and exit 0.
-fn skill_backing_dir(target: &InstallTarget) -> Option<PathBuf> {
-	skill_target_dir(target).ok()
+/// keeps the Master (`shared_master_kept`).
+///
+/// Two agent IDs whose own skills DIRECTORY is one directory IS a state the
+/// world can be in — two of them, in fact. By design: eight project-scope
+/// agents write into `<root>/.agents/skills`, and granting to one grants to
+/// all. By accident: a symlinked home or an agent-home env override collapses
+/// two declared-distinct dirs (`~/.gemini -> ~/.claude` made "remove from
+/// gemini" delete claude's private skill and exit 0).
+///
+/// What this guard refuses is only the pair the caller NAMED — an add and a
+/// remove that land in one directory cannot both be honoured, whichever of the
+/// two reasons put them there. Unnamed sharers are deliberately unprotected
+/// (`protected_targets` is called with `roster: false` for skills): on the
+/// shared slot that sharing IS the grant model, and what a removal really takes
+/// away is decided by `remove_skill_planned` / `removal::read_effect_after`.
+fn skill_backing_dir(target: &InstallTarget) -> Backed {
+	// A pure path derivation — it reads no agent config, so a failure here is
+	// "this scope has no skills dir for that agent", not "cannot tell".
+	match skill_target_dir(target) {
+		Ok(dir) => Backed::At(dir),
+		Err(_) => Backed::Absent,
+	}
+}
+
+/// The folder one agent's skill of this name is actually READ FROM, for
+/// [`RemovalCredits`].
+///
+/// A DIFFERENT question from [`skill_backing_dir`] above, and the two must not
+/// be swapped: that one answers "which directory does this row rewrite", which
+/// is what `ensure_removals_spare` needs. The credential needs "what does this
+/// row TAKE" — and what a skill removal takes can be the shared Master, which
+/// lives in NO agent's write dir. Keyed on write dirs, an exhaustive removal
+/// (every reader named, so the Master goes) had its first row delete the Master
+/// and every later row report `RESOURCE_NOT_FOUND` for a skill that command had
+/// just taken from it.
+///
+/// `skill_root` prefers `canonical_path`, so a Referrer and the Master it points
+/// at are ONE backing — which is exactly what that first row emptied.
+///
+/// `None` when this target has no such skill: it never held it, so no sibling's
+/// deletion can vouch for its row.
+fn skill_entry_backing(target: &InstallTarget, name: &str) -> Backed {
+	let mut manager = build_manager(target);
+	// Same reason as `sub_agent_backing_path`: `load()` parses this agent's
+	// MCPs too, so an unrelated malformed config must not read as "no skill".
+	if ensure_loaded(&mut manager).is_err() {
+		return Backed::Unknown;
+	}
+	match manager
+		.get_skill(name)
+		.and_then(crate::skills::removal::skill_root)
+	{
+		Some(root) => Backed::At(root),
+		None => Backed::Absent,
+	}
 }
 
 /// The file an agent's MCP entries live in, for [`ensure_removals_spare`].
-fn mcp_backing_path(target: &InstallTarget) -> Option<PathBuf> {
-	build_manager(target).config_path()
+fn mcp_backing_path(target: &InstallTarget) -> Backed {
+	// `config_path()` asks the descriptor where the file WOULD be; it does not
+	// open or parse it, so `None` means "this agent has no MCP file at this
+	// scope" and never "unreadable".
+	match build_manager(target).config_path() {
+		Some(path) => Backed::At(path),
+		None => Backed::Absent,
+	}
 }
 
 /// The file one agent's sub-agent of this name lives in, for
@@ -655,14 +948,22 @@ fn mcp_backing_path(target: &InstallTarget) -> Option<PathBuf> {
 /// `None` when the target has no such sub-agent — the ordinary copy case, and
 /// not a collision: two targets resolving to one directory either both see the
 /// file or neither does.
-fn sub_agent_backing_path(
-	target: &InstallTarget,
-	name: &str,
-) -> Option<PathBuf> {
+fn sub_agent_backing_path(target: &InstallTarget, name: &str) -> Backed {
 	let mut manager = build_manager(target);
-	ensure_loaded(&mut manager).ok()?;
-	let path = manager.get_sub_agent(name)?.source_path.clone()?;
-	Some(PathBuf::from(path))
+	// `load()` parses this agent's MCPs too, so an unrelated malformed config
+	// lands here. That is NOT "no such sub-agent" — reading it as one let a
+	// roster-protected agent drop out of the guard and lose the file it shared
+	// with the removal target.
+	if ensure_loaded(&mut manager).is_err() {
+		return Backed::Unknown;
+	}
+	match manager
+		.get_sub_agent(name)
+		.and_then(|s| s.source_path.clone())
+	{
+		Some(path) => Backed::At(PathBuf::from(path)),
+		None => Backed::Absent,
+	}
 }
 
 /// Copy one MCP into a target. `Ok(true)` = the target already had an
@@ -926,17 +1227,28 @@ fn reconcile_plans(
 			action: OperationAction::Copy,
 		})
 		.collect();
-	let deletes = removed
-		.into_iter()
-		.map(|agent| OperationPlan {
-			target: InstallTarget {
+	// Deduplicate BEFORE any row exists, so no `RemovalCredits` receipt can be
+	// issued that a later duplicate of the same target then spends on itself:
+	// `--remove claude --remove claude` used to delete once, credit the
+	// backing, and let row two's `ResourceNotFound` be forgiven by row one —
+	// reporting two successes for one deletion. This is the single place rows
+	// are built, so preview and commit dedupe identically.
+	let deletes = unique_targets(
+		removed
+			.into_iter()
+			.map(|agent| InstallTarget {
 				agent,
 				scope,
 				project_root: project_root.clone(),
-			},
-			action: OperationAction::Delete,
-		})
-		.collect();
+			})
+			.collect(),
+	)
+	.into_iter()
+	.map(|target| OperationPlan {
+		target,
+		action: OperationAction::Delete,
+	})
+	.collect();
 	(copies, deletes)
 }
 
@@ -1136,17 +1448,27 @@ pub fn reconcile_mcp(
 		source.project_root.clone(),
 	);
 	// Before ANY write: an add and a remove that resolve to the same file
-	// cannot both be honoured, and attempting it deletes from both.
-	let protect = protected_targets(&copies, &source, source_removed);
+	// cannot both be honoured, and attempting it deletes from both. The protect
+	// list is the ROSTER, not just the agents this command named — see
+	// `protected_targets`.
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
+	let protect =
+		protected_targets(&copies, &source, source_removed, &removing, true);
 	ensure_removals_spare(&protect, &removing, source.agent, mcp_backing_path)?;
+	// The remedy that refusal prints — "add the sharer to --remove too" — has
+	// to lead somewhere: the row that finds the entry already gone because a
+	// sibling row rewrote the shared file first is a success. It is a success
+	// only once that sibling row has actually taken it, so the backings are
+	// resolved here and the credentials are earned below.
+	let mut credits = RemovalCredits::new(&removing, mcp_backing_path);
 	// The copy targets, remembered for the RE-CHECK inside the delete arm. Some
-	// resolvers are existence-dependent — Copilot's project path is
-	// `.mcp.json` when that file exists and `.github/mcp.json` otherwise — so
-	// the preflight above is a SNAPSHOT: a copy that creates `.mcp.json` flips
-	// the delete target onto it afterwards, and the preflight saw two different
-	// files. Re-resolving at delete time is the only point where the paths are
+	// resolvers are existence-dependent — Copilot's project path is `.mcp.json`
+	// when that file exists, `.github/mcp.json` when only that one does, and
+	// `.mcp.json` again when NEITHER exists — so the preflight above is a
+	// SNAPSHOT: a copy that creates `.github/mcp.json` flips the delete target
+	// onto it afterwards, and the preflight saw two different files.
+	// Re-resolving at delete time is the only point where the paths are
 	// settled.
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&copies,
@@ -1170,8 +1492,9 @@ pub fn reconcile_mcp(
 						// Re-check now that every copy has run: this target
 						// may have been resolved onto a file one of them just
 						// created. Copilot's project path is `.mcp.json` when
-						// that file exists and `.github/mcp.json` otherwise, so
-						// the preflight above is only a SNAPSHOT.
+						// that file exists, `.github/mcp.json` when only that
+						// one does, and `.mcp.json` again when neither exists,
+						// so the preflight above is only a SNAPSHOT.
 						ensure_removals_spare(
 							&protect,
 							std::slice::from_ref(&plan.target),
@@ -1180,7 +1503,13 @@ pub fn reconcile_mcp(
 						)?;
 						let mut manager = build_manager(&plan.target);
 						ensure_loaded(&mut manager)?;
-						manager.remove_mcp(&source.name).map(|()| false)
+						// `remove_mcp` errors when the entry is not there, so
+						// its `Ok` is a real deletion — the credential.
+						sibling_already_took_it(
+							manager.remove_mcp(&source.name).map(|()| true),
+							plan.target.agent,
+							&mut credits,
+						)
 					}
 				}
 			})();
@@ -1284,12 +1613,21 @@ pub fn reconcile_sub_agent(
 	// truthfully, the staged gate only asks whether the copy ERRORED, and the
 	// delete then removes the one file both targets were reading. Two success
 	// rows, resource gone from both.
-	let protect = protected_targets(&copies, &source, source_removed);
 	let removing: Vec<InstallTarget> =
 		deletes.iter().map(|plan| plan.target.clone()).collect();
+	let protect =
+		protected_targets(&copies, &source, source_removed, &removing, true);
 	ensure_removals_spare(&protect, &removing, source.agent, |target| {
 		sub_agent_backing_path(target, &source.name)
 	})?;
+	// Same reason as the MCP arm: the refusal above tells the caller to add the
+	// sharer to --remove, and that command has to be able to succeed. Here the
+	// preflight is the ONLY place the backings can be resolved — the backing IS
+	// the file, so after the first row deletes it neither target resolves to
+	// anything.
+	let mut credits = RemovalCredits::new(&removing, |target| {
+		sub_agent_backing_path(target, &source.name)
+	});
 	// …and that preflight is only a SNAPSHOT, which for sub-agents is barely a
 	// guard at all: the backing IS the resource file, so two agents sharing one
 	// directory both resolve to `None` until a copy writes it. The real check is
@@ -1324,7 +1662,15 @@ pub fn reconcile_sub_agent(
 						)?;
 						let mut manager = build_manager(&plan.target);
 						ensure_loaded(&mut manager)?;
-						manager.remove_sub_agent(&source.name).map(|()| false)
+						// Same as the MCP arm: `Ok` only ever follows a real
+						// delete, so it is the credential.
+						sibling_already_took_it(
+							manager
+								.remove_sub_agent(&source.name)
+								.map(|()| true),
+							plan.target.agent,
+							&mut credits,
+						)
 					}
 				}
 			})();
@@ -1870,15 +2216,31 @@ pub fn reconcile_skill(
 	// we are removing from. A DIFFERENT question from `plan.preflight`, which
 	// refuses an unreachable END STATE: this one refuses a target whose backing
 	// dir another row in the same batch is about to delete. Both still asked.
-	let protect = protected_targets(&plan.copies, &source, deletes_source);
 	let removing: Vec<InstallTarget> =
 		plan.deletes.iter().map(|row| row.target.clone()).collect();
+	let protect = protected_targets(
+		&plan.copies,
+		&source,
+		deletes_source,
+		&removing,
+		false,
+	);
 	ensure_removals_spare(
 		&protect,
 		&removing,
 		source.agent,
 		skill_backing_dir,
 	)?;
+	// Same credential as the MCP and sub-agent arms. Two removal rows really can
+	// be one entry — eight project-scope agents share `<root>/.agents/skills`,
+	// and an exhaustive removal takes the Master every named reader links to —
+	// so the second row finding nothing left is a success. Only once an EARLIER
+	// row actually took that entry: this arm used to forgive every
+	// `ResourceNotFound`, so removing from two agents that had never held the
+	// skill exited 0 reporting two deletions with the disk untouched.
+	let mut credits = RemovalCredits::new(&removing, |target| {
+		skill_entry_backing(target, &plan.skill.name)
+	});
 	let report = crate::batch::run_staged_multi_target_mutation(
 		&plan.copies,
 		&plan.deletes,
@@ -2015,27 +2377,60 @@ pub fn reconcile_skill(
 					)?;
 					let mut manager = build_manager(&row.target);
 					ensure_loaded(&mut manager)?;
-					match manager.remove_skill_planned(
-						&plan.skill.name,
-						plan.exhaustive,
-						false,
-						true,
-					) {
-						// `remove_skill_planned` REFUSES an executing removal
-						// that would take nothing while keeping a shared
-						// Master, so that shape arrives here as an `Err` and
-						// never as an `Ok` to re-inspect. Do not add a second
-						// copy of the check here: it is unreachable, and a
-						// reader who spots the duplicate may delete the wrong
-						// one of the two.
-						//
-						// A Delete row is never `already_present` — that
-						// vocabulary belongs to the Copy direction.
-						Ok(_) | Err(ConfigError::ResourceNotFound { .. }) => {
-							Ok(false)
-						}
-						Err(error) => Err(error),
-					}
+					// `remove_skill_planned` REFUSES an executing removal that
+					// would take nothing while keeping a shared Master, so that
+					// shape arrives here as an `Err` and never as an `Ok` to
+					// re-inspect. Do not add a second copy of the check here: it
+					// is unreachable, and a reader who spots the duplicate may
+					// delete the wrong one of the two.
+					//
+					// `executed` alone is NOT the credential:
+					// `RemovalOutcome::commit` sets it for the whole execute
+					// branch even when every `remove_dir_all` returned
+					// `EACCES` (its own doc says so), so a row that left the
+					// Master on disk reported a deletion AND vouched for the
+					// sibling rows reading that same Master — exit 0 with the
+					// skill still there. `failed_paths` is the truthful half,
+					// and a row that could not empty its backing is a FAILED
+					// row: reconcile has no `outcome` field to carry `delete`'s
+					// `partial`, so `Err` is the only honest carrier. Never
+					// `ResourceNotFound` — that is the one variant
+					// `sibling_already_took_it` forgives.
+					//
+					// What remains a credential-free `Ok(false)`: the
+					// `spared_everything` preview (kept because a peer links
+					// into this agent's own dir) leaves `executed` false. The
+					// executing "takes nothing away" shape never arrives here
+					// at all — `remove_skill_planned` refuses it.
+					sibling_already_took_it(
+						manager
+							.remove_skill_planned(
+								&plan.skill.name,
+								plan.exhaustive,
+								false,
+								true,
+							)
+							.and_then(|outcome| {
+								if outcome.failed_paths.is_empty() {
+									return Ok(outcome.executed);
+								}
+								Err(ConfigError::InvalidConfig(format!(
+									"failed to remove skill '{}' for agent \
+									 '{}': {} path(s) could not be deleted: {}",
+									plan.skill.name,
+									row.target.agent.as_str(),
+									outcome.failed_paths.len(),
+									outcome
+										.failed_paths
+										.iter()
+										.map(|path| path.display().to_string())
+										.collect::<Vec<_>>()
+										.join(", "),
+								)))
+							}),
+						row.target.agent,
+						&mut credits,
+					)
 				})(),
 			};
 			log_operation_outcome(
@@ -2344,6 +2739,11 @@ mod tests {
 		);
 	}
 
+	// Cursor, NOT Claude: Claude and Copilot both resolve a project MCP to
+	// `<root>/.mcp.json`, so removing from Claude here is refused by
+	// `protected_targets`' roster list — copilot would lose the server too.
+	// Cursor owns `<root>/.cursor/mcp.json` alone, which is what this test
+	// needs to say anything about deletion at all.
 	#[test]
 	fn reconcile_mcp_deletes_when_removed() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -2352,7 +2752,7 @@ mod tests {
 		fs::create_dir_all(&root).unwrap();
 
 		let mut manager = ConfigManager::new(
-			create_adapter(AgentType::Claude),
+			create_adapter(AgentType::Cursor),
 			false,
 			Some(&root),
 		);
@@ -2366,13 +2766,13 @@ mod tests {
 
 		let result = reconcile_mcp(
 			ResourceLocator {
-				agent: AgentType::Claude,
+				agent: AgentType::Cursor,
 				scope: InstallScope::Project,
 				project_root: Some(root.clone()),
 				name: "filesystem".to_string(),
 			},
 			vec![],                  // added
-			vec![AgentType::Claude], // removed
+			vec![AgentType::Cursor], // removed
 			true,                    // confirm
 		)
 		.unwrap();
@@ -2381,7 +2781,7 @@ mod tests {
 		assert_eq!(result.results[0].action, OperationAction::Delete);
 
 		let mut manager = ConfigManager::new(
-			create_adapter(AgentType::Claude),
+			create_adapter(AgentType::Cursor),
 			false,
 			Some(&root),
 		);
@@ -2390,16 +2790,22 @@ mod tests {
 	}
 
 	// Fix A regression test: a Copy that fails at RUNTIME (after preflight
-	// already passed) must not let its paired Delete run. Cursor supports
+	// already passed) must not let its paired Delete run. Claude supports
 	// project-scope stdio MCPs (so `mcp_supported_for_target` preflight is
-	// clean), but Cursor's OWN mcp config already holds an unrelated MCP
+	// clean), but Claude's OWN mcp config already holds an unrelated MCP
 	// named "filesystem" — `add_mcp`'s duplicate-name guard rejects the copy
 	// only once it actually runs. Before the fix, `reconcile_mcp` built one
 	// flat Copy-then-Delete plan and attempted every row regardless, so the
-	// Claude delete still ran: the MCP would vanish from Claude without ever
-	// landing on Cursor — gone from every agent. This test fails on that
-	// regression because `claude_manager.get_mcp("filesystem")` would be
+	// Cursor delete still ran: the MCP would vanish from Cursor without ever
+	// landing on Claude — gone from every agent. This test fails on that
+	// regression because `cursor_manager.get_mcp("filesystem")` would be
 	// `None` afterward.
+	//
+	// The source is Cursor and the failing copy target is Claude — the reverse
+	// of the obvious pairing, because Claude shares `<root>/.mcp.json` with
+	// Copilot and `protected_targets`' roster list refuses a removal from it
+	// before any row runs. Nothing about the staging this pins depends on which
+	// agent is which.
 	#[test]
 	fn reconcile_mcp_keeps_source_when_a_copy_fails_at_runtime() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -2407,21 +2813,6 @@ mod tests {
 		let root = temp.path().join("project");
 		fs::create_dir_all(&root).unwrap();
 
-		let mut claude_manager = ConfigManager::new(
-			create_adapter(AgentType::Claude),
-			false,
-			Some(&root),
-		);
-		claude_manager.load().unwrap();
-		claude_manager
-			.add_mcp(McpServer::new(
-				"filesystem",
-				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
-			))
-			.unwrap();
-
-		// Pre-populate Cursor's OWN project config with an unrelated MCP of
-		// the same name so its copy fails at write time, not at preflight.
 		let mut cursor_manager = ConfigManager::new(
 			create_adapter(AgentType::Cursor),
 			false,
@@ -2431,19 +2822,34 @@ mod tests {
 		cursor_manager
 			.add_mcp(McpServer::new(
 				"filesystem",
+				McpTransport::stdio("npx", vec!["mcp-filesystem".to_string()]),
+			))
+			.unwrap();
+
+		// Pre-populate Claude's OWN project config with an unrelated MCP of
+		// the same name so its copy fails at write time, not at preflight.
+		let mut claude_manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		claude_manager.load().unwrap();
+		claude_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
 				McpTransport::stdio("echo", vec!["conflict".to_string()]),
 			))
 			.unwrap();
 
 		let result = reconcile_mcp(
 			ResourceLocator {
-				agent: AgentType::Claude,
+				agent: AgentType::Cursor,
 				scope: InstallScope::Project,
 				project_root: Some(root.clone()),
 				name: "filesystem".to_string(),
 			},
-			vec![AgentType::Cursor], // added: fails at runtime
-			vec![AgentType::Claude], // removed: must be skipped
+			vec![AgentType::Claude], // added: fails at runtime
+			vec![AgentType::Cursor], // removed: must be skipped
 			true,                    // confirm
 		)
 		.unwrap();
@@ -2454,7 +2860,7 @@ mod tests {
 			.iter()
 			.find(|r| r.action == OperationAction::Copy)
 			.expect("a copy row must be present");
-		assert!(!copy_row.success, "the Cursor copy must fail");
+		assert!(!copy_row.success, "the Claude copy must fail");
 
 		let delete_row = result
 			.results
@@ -2463,7 +2869,7 @@ mod tests {
 			.expect("a delete row must be present");
 		assert!(
 			!delete_row.success,
-			"the Claude delete must be skipped, not attempted"
+			"the Cursor delete must be skipped, not attempted"
 		);
 		assert!(
 			delete_row
@@ -2477,14 +2883,14 @@ mod tests {
 
 		// The critical assertion: the source MCP must survive. Before the
 		// fix this was deleted even though its only copy destination failed.
-		let mut claude_manager = ConfigManager::new(
-			create_adapter(AgentType::Claude),
+		let mut cursor_manager = ConfigManager::new(
+			create_adapter(AgentType::Cursor),
 			false,
 			Some(&root),
 		);
-		claude_manager.load().unwrap();
+		cursor_manager.load().unwrap();
 		assert!(
-			claude_manager.get_mcp("filesystem").is_some(),
+			cursor_manager.get_mcp("filesystem").is_some(),
 			"source MCP must survive a reconcile whose only copy failed"
 		);
 	}
@@ -2588,13 +2994,23 @@ mod tests {
 		assert!(manager.get_skill("repo-helper").is_none());
 	}
 
-	// Removing an agent that never held the skill is a per-row SUCCESS, and has
-	// to stay one: the planner answers `ResourceNotFound` for it, and the
-	// preflight added for the shared-master guard must map that to "allow", not
-	// to "reject the whole batch". Written before that guard existed, exactly to
-	// pin the contract it could break.
+	// Removing an agent that never held the skill FAILS THAT ROW and rejects
+	// nothing else. Two halves, and the batch half is the one this test was
+	// written for: the planner answers `ResourceNotFound`, and the preflight
+	// added for the shared-master guard must map that to "allow" rather than
+	// aborting the whole batch before any write — so `reconcile_skill` still
+	// returns `Ok(batch)` and an untouched disk.
+	//
+	// The ROW half used to be a success, because the delete arm blessed every
+	// `ResourceNotFound` it saw. That is what let `--remove cursor --remove
+	// windsurf` against two agents that had never held the skill exit 0
+	// reporting two deletions — the same misreport `reconcile mcp` had, one
+	// subcommand over. Forgiveness now needs a credential (`RemovalCredits`):
+	// an earlier row of this same command must really have taken the entry
+	// these two share. A never-holder shares nothing and holds nothing, so its
+	// row errors, exactly as the MCP and sub-agent arms already answered it.
 	#[test]
-	fn reconcile_skill_removing_a_never_holder_still_succeeds() {
+	fn reconcile_skill_never_holder_fails_its_own_row_only() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
 		let root = temp.path().join("project");
@@ -2619,17 +3035,129 @@ mod tests {
 			vec![AgentType::Windsurf],
 			true, // confirm
 		)
-		.expect("removing a never-holder must not fail the batch");
+		.expect("a never-holder row must not abort the batch");
 
 		assert_eq!(result.results.len(), 1);
 		assert!(
-			result.results[0].success,
-			"a never-holder removal stays a success row, got: {:?}",
+			!result.results[0].success,
+			"a removal that took nothing must not report a deletion"
+		);
+		assert!(
+			result.results[0]
+				.error
+				.as_deref()
+				.unwrap_or_default()
+				.contains("not found"),
+			"the row must say the skill was not there, got: {:?}",
 			result.results[0].error
 		);
 		assert!(
 			private.join("SKILL.md").exists(),
 			"claude's own copy must not be touched"
+		);
+	}
+
+	// A delete row whose backing SURVIVED is not a deletion, and it vouches for
+	// nobody. `RemovalOutcome::executed` is true for the whole execute branch
+	// even when every `remove_dir_all` returned `EACCES` — its own doc says so
+	// — so mapping it straight to the credential let a FAILED row bless the
+	// sibling rows that share the Master: exit 0, two reported deletions, and
+	// `SKILL.md` still on disk.
+	//
+	// The Master dir is `0o555`: discovery still reads `SKILL.md` through the
+	// referrers (so both rows get planned and the removal is exhaustive), while
+	// unlinking the file inside it fails. Running as ROOT defeats that — the
+	// unlink succeeds and the fixture measures nothing — so the surviving
+	// `SKILL.md` is asserted FIRST, with a message naming root as the cause,
+	// rather than letting the test pass quietly.
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_skill_failed_master_delete_credits_no_sibling() {
+		use std::os::unix::fs::PermissionsExt;
+
+		// Restore on unwind too: a panic before a plain chmod-back leaves the
+		// tempdir undeletable.
+		struct RestorePerms(PathBuf);
+		impl Drop for RestorePerms {
+			fn drop(&mut self) {
+				let _ = fs::set_permissions(
+					&self.0,
+					fs::Permissions::from_mode(0o755),
+				);
+			}
+		}
+
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let master = root.join(".aghub/my-skill");
+		fs::create_dir_all(&master).unwrap();
+		fs::write(
+			master.join("SKILL.md"),
+			"---\nname: my-skill\ndescription: Shared\n---\n\n# My Skill\n",
+		)
+		.unwrap();
+		// Two agents with PRIVATE skill dirs, each linking to the one Master:
+		// they share a backing (so a credit from one would forgive the other)
+		// and naming both is what makes the removal exhaustive. The shared
+		// `.agents/skills` slot is deliberately absent — it would make eight
+		// more agents holders and the removal non-exhaustive.
+		for dir in [".claude/skills", ".windsurf/skills"] {
+			let referrer_dir = root.join(dir);
+			fs::create_dir_all(&referrer_dir).unwrap();
+			std::os::unix::fs::symlink(&master, referrer_dir.join("my-skill"))
+				.unwrap();
+		}
+		fs::set_permissions(&master, fs::Permissions::from_mode(0o555))
+			.unwrap();
+		let _restore = RestorePerms(master.clone());
+
+		let result = reconcile_skill(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "my-skill".to_string(),
+			},
+			vec![],
+			vec![AgentType::Claude, AgentType::Windsurf],
+			true, // confirm
+		)
+		.expect("a failed delete must not abort the batch");
+
+		assert!(
+			master.join("SKILL.md").exists(),
+			"fixture broken: the Master went away under 0o555 — this test \
+			 cannot run as root, where the unlink succeeds"
+		);
+		let row = |agent: AgentType| {
+			result
+				.results
+				.iter()
+				.find(|r| r.target.agent == agent)
+				.unwrap_or_else(|| panic!("no row for {}", agent.as_str()))
+		};
+		let failed = row(AgentType::Claude);
+		assert!(
+			!failed.success,
+			"a row that left the Master on disk must not report a deletion, \
+			 got: {failed:?}"
+		);
+		assert!(
+			!failed
+				.error
+				.as_deref()
+				.unwrap_or_default()
+				.contains("not found"),
+			"the failing row must name the delete failure, not a missing \
+			 skill, got: {:?}",
+			failed.error
+		);
+		let sibling = row(AgentType::Windsurf);
+		assert!(
+			!sibling.success,
+			"the sibling found nothing only because the first row FAILED, so \
+			 no credential may forgive it, got: {sibling:?}"
 		);
 	}
 
@@ -2973,6 +3501,64 @@ mod tests {
 	// grows, and deliberately NOT `skill_holders` — a test that asks the code
 	// under test for its own expectation proves nothing.
 	#[cfg(unix)]
+	/// A protective check must fail CLOSED on "cannot tell".
+	///
+	/// `sub_agent_backing_path` / `skill_entry_backing` load a whole
+	/// `ConfigManager`, which parses the agent's MCPs too — so an unrelated
+	/// malformed config on a roster-protected agent used to answer `None`,
+	/// indistinguishable from "holds nothing". The guard skipped it and the
+	/// removal rewrote the file they shared, reporting success. `Backed`
+	/// separates the two answers; this pins that the undeterminable one refuses.
+	#[test]
+	fn an_undeterminable_protected_backing_refuses_the_removal() {
+		let target = |agent| InstallTarget {
+			agent,
+			scope: InstallScope::Global,
+			project_root: None,
+		};
+		let removing = vec![target(AgentType::Claude)];
+		let protect = vec![Protected {
+			target: target(AgentType::Grok),
+			// Not named by the command — exactly the case the roster protect
+			// list exists for.
+			named: false,
+		}];
+
+		let refusal = ensure_removals_spare(
+			&protect,
+			&removing,
+			AgentType::Claude,
+			|t: &InstallTarget| match t.agent {
+				AgentType::Claude => {
+					Backed::At(PathBuf::from("/tmp/shared.md"))
+				}
+				// Grok's config would not parse: unknown, not absent.
+				_ => Backed::Unknown,
+			},
+		)
+		.expect_err("an undeterminable sharer must not be skipped");
+		let message = refusal.to_string();
+		assert!(
+			message.contains("grok") && message.contains("claude"),
+			"the refusal must name both agents so it is actionable: {message}"
+		);
+
+		// The same shape, but Grok is KNOWN to hold nothing: that is a real
+		// answer and must stay permissive, or every reconcile refuses.
+		ensure_removals_spare(
+			&protect,
+			&removing,
+			AgentType::Claude,
+			|t: &InstallTarget| match t.agent {
+				AgentType::Claude => {
+					Backed::At(PathBuf::from("/tmp/shared.md"))
+				}
+				_ => Backed::Absent,
+			},
+		)
+		.expect("a determined non-holder must not block the removal");
+	}
+
 	fn holders_via_agent_roster(
 		root: &std::path::Path,
 		name: &str,
