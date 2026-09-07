@@ -465,16 +465,33 @@ enum Commands {
 		/// dangling referrer — the findings only ever went to stderr.
 		///
 		/// Counts BOTH axes: an ACTIONABLE `health` — `orphan-lock` (a lock
-		/// entry with no master on disk) or `invalid-skill` (a master whose
-		/// SKILL.md does not parse) — and, when `--verify-links` is given, any
-		/// per-agent referrer problem.
+		/// entry with no master on disk), `invalid-skill` (a master whose
+		/// SKILL.md does not parse) or `master-is-symlink` — and, when
+		/// `--verify-links` is given, any per-agent referrer problem.
 		///
 		/// Deliberately NOT every non-`ok` health. `untracked` (a master with no
-		/// lock entry — a skill placed by hand) and `master-is-symlink` are
-		/// supported resting states, and failing CI over them would only teach
-		/// you to append `|| true`. `withheld` and `unsupported` are likewise
-		/// correct — a skill deliberately not granted to that agent, or an
-		/// agent that cannot hold a skill at all.
+		/// lock entry — a skill placed by hand) is a supported resting state,
+		/// and failing CI over it would only teach you to append `|| true`.
+		/// `withheld` and `unsupported` are likewise correct — a skill
+		/// deliberately not granted to that agent, or an agent that cannot hold
+		/// a skill at all.
+		///
+		/// `master-is-symlink` DOES fail: the store must hold the skill's own
+		/// bytes, so a linked master violates the store invariant and `repair`
+		/// refuses it — normalize the store entry into a real directory by
+		/// hand, then re-run.
+		// Two claims that were here do NOT hold, and public help is the worst
+		// place to guess. "aghub refuses to repair, relink or delete":
+		// `verify_shape`'s blockers are a shared `ForkedCopy` and an
+		// `AliasedMaster`, NOT the master-side violations, so the delete guard
+		// never fires on a linked master. "`source sync` will not act on it
+		// either": `verify_shape` is called only from `removal.rs`, so the
+		// resync path has no shape gate at all and what it does to a linked
+		// master is UNPINNED, not refused. `repair` is the one that IS pinned
+		// (`plan_repair` -> `Refuse { MasterIsLink }`, rendered as "the store
+		// holds a link where it must hold a real directory"). `//`, not `///`:
+		// clap concatenates only the doc comments, and this is maintainer
+		// context.
 		#[arg(long)]
 		fail_on_issues: bool,
 	},

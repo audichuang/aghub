@@ -185,7 +185,20 @@ Non-obvious invariants:
   no lock entry and no slot — do NOT offer `source sync --install-missing` for
   it, there is no source, and `delete --yes` produces exactly that state when it
   keeps a master another agent still reads. Exit code is unchanged by default;
-  `--fail-on-issues` opts into a non-zero exit
+  `--fail-on-issues` opts into a non-zero exit. **The per-agent verdict is
+  `skills::shape::classify_shape`'s, renamed — doctor derives none of its own**,
+  so two states exist that no endpoint comparison can see: `chain` (a referrer
+  reaching the master through ANOTHER link — `repair` relinks it, while
+  `--install-missing` cannot, its endpoint already being the master) and
+  `masterUnusable` (the store holds a link or a file where the skill's bytes
+  must be — repair REFUSES, so it is a hand fix). Each has its own note; do not
+  fold either back into the sync one. `master-is-symlink` is the same fact on
+  the `health` axis and therefore ALSO fails `--fail-on-issues` — the two axes
+  must not answer it differently. Only `untracked` is still excused.
+  `foreignLink` also widened: a slot link that resolves while the store master
+  is gone used to read `dangling`. Its commonest instance is the pre-2.18
+  layout (`.claude/skills/<n>` → a real `.agents/skills/<n>`, no `.aghub/<n>`),
+  which `repair` MIGRATES — the sync note does not know that yet
 - **`check` is offline by default** — `checked: false`, and the reason is the
   ORCHESTRATOR's, not the surface's: a source nothing could fetch keeps its
   permanent reason (`local` / `ssh` / `unsupportedScheme`) and everything else

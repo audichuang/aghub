@@ -10040,9 +10040,12 @@ fn third_review_sibling_shapes_stay_fixed() {
 			"{row}"
 		);
 	};
-	// A working symlink master is a SUPPORTED layout. With no referrer for
-	// cursor and no lock entry, it reports as a leftover master rather than a
-	// missing link — the two have opposite remedies.
+	// This arm pins the ABSENCE of a referrer, not support for the layout: a
+	// symlink master is an issue in its own right (health `master-is-symlink`,
+	// and `masterUnusable` for any agent that does hold a slot — see
+	// `doctor_master_is_symlink_fails_both_axes`). With no referrer for cursor
+	// and no lock entry it still reports as a leftover master rather than a
+	// missing link — those two have opposite remedies.
 	audit("orphanMaster");
 	// A broken one is not covered, however it is spelled on disk.
 	std::fs::remove_dir_all(&live).unwrap();
@@ -12767,5 +12770,249 @@ fn doctor_ignores_the_repair_quarantine_after_a_migration() {
 		out.status.code(),
 		Some(0),
 		"a clean migrated tree must not fail --fail-on-issues: {stdout}"
+	);
+}
+
+/// A symlink master must read the SAME on both of doctor's columns.
+///
+/// The link audit now routes its verdict through `skills::shape`, where a
+/// linked master is `Violation(MasterIsLink)`, which `plan_repair` refuses —
+/// so `repair` will not normalize the store entry. The `health`
+/// column meanwhile excused `master-is-symlink` as "a SUPPORTED layout, as the
+/// NativeReader branch says" — a branch that has since been deleted. One row
+/// therefore printed `master-is-symlink` (not an issue) beside
+/// `claude:master-unusable` (an issue), and `--fail-on-issues` flipped from 0
+/// to 1 depending on which column you read.
+///
+/// `third_review_sibling_shapes_stay_fixed` pins only the arm where the agent
+/// has NO slot (leftover master); this pins the arm where it has one.
+#[cfg(unix)]
+#[test]
+fn doctor_master_is_symlink_fails_both_axes() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// The skill's bytes live outside the store; the store holds only a link to
+	// them, and claude holds a healthy one-hop referrer to that link.
+	let outside = tempfile::TempDir::new().unwrap();
+	let real = write_source_skill(outside.path(), "linked", "linked");
+	let master = home.path().join(".aghub/linked");
+	std::fs::create_dir_all(home.path().join(".aghub")).unwrap();
+	std::os::unix::fs::symlink(&real, &master).unwrap();
+	let claude = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&claude).unwrap();
+	std::os::unix::fs::symlink(&master, claude.join("linked")).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "--json", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|r| r["skill"] == "linked")
+		.unwrap_or_else(|| panic!("the linked master must be reported: {json}"))
+		.clone();
+	assert_eq!(row["health"], "master-is-symlink", "{row}");
+	assert_eq!(
+		row["linkAudit"]["agents"][0]["state"], "masterUnusable",
+		"core refuses to act on a linked master; the audit must say so: {row}"
+	);
+
+	// The links axis gates.
+	let both = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"--json",
+			"doctor",
+			"--verify-links",
+			"--fail-on-issues",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!both.status.success(),
+		"a master aghub cannot act on must gate: {}",
+		String::from_utf8_lossy(&both.stderr)
+	);
+
+	// And so does the health axis ALONE — this is the half that used to
+	// disagree with it, and the half a caller gets without `--verify-links`.
+	let health_only = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "doctor", "--fail-on-issues"])
+		.output()
+		.unwrap();
+	assert!(
+		!health_only.status.success(),
+		"`master-is-symlink` must gate on the health axis too, or doctor's two \
+		 columns answer one fact both ways: {}",
+		String::from_utf8_lossy(&health_only.stderr)
+	);
+
+	// ...and that half must SAY something. The remedy note counted only
+	// `LinkAudit::Issues`, which is `NotRequested` here, so a plain
+	// `doctor --fail-on-issues` handed back a non-zero exit and zero guidance.
+	// No `--json`: the JSON branch returns before any note is printed.
+	let health_only_human = isolated_cli(home.path(), state.path())
+		.args(["-g", "doctor", "--fail-on-issues"])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&health_only_human.stderr);
+	assert!(
+		stderr.contains("not a real directory"),
+		"a health-axis failure without `--verify-links` must still print the \
+		 remedy: {stderr}"
+	);
+
+	// The note must not send the user to a command that refuses this layout.
+	let human = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&human.stderr);
+	assert!(
+		stderr.contains("not a real directory")
+			&& stderr.contains("refuses it, naming this layout"),
+		"a master that is a link needs its own note, and it may claim only the \
+		 refusal core actually makes — `plan_repair` -> `Refuse{{MasterIsLink}}`: \
+		 {stderr}"
+	);
+	// The sync note's own opening line — the chain / master notes quote
+	// `--install-missing` themselves, to say it does NOT apply.
+	assert!(
+		!stderr.contains("agent referrer issue(s)"),
+		"`source sync --install-missing` does not touch the master; offering \
+		 it here is the doctor/repair contradiction moved into the advice: \
+		 {stderr}"
+	);
+}
+
+/// A linked master must produce ONE remedy, not two that contradict.
+///
+/// The per-agent states on such a row are symptoms of the master, so the notes
+/// they fall into are advice the master note says will not work. With NO slot
+/// the agent reads `orphan-master`, whose note says "remove the master
+/// directory" — printed one line from a note saying to replace that same entry
+/// with a real directory. Let the master link DANGLE and the same slot reads
+/// `missing` instead, drawing the `source sync --install-missing` note — the
+/// command the master note says will not act on it. Both halves are checked
+/// here; the occupied-slot fixture above cannot see either, because
+/// `master-unusable` is neither bucket.
+///
+/// A plain read: no `--fail-on-issues`, and no `--json` — the JSON branch
+/// returns before any note is printed, so it cannot see this at all.
+#[cfg(unix)]
+#[test]
+fn doctor_linked_master_prints_one_remedy_not_two() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	// Untracked (no lock) linked master, and claude holds no referrer at all.
+	let outside = tempfile::TempDir::new().unwrap();
+	let real = write_source_skill(outside.path(), "linked", "linked");
+	std::fs::create_dir_all(home.path().join(".aghub")).unwrap();
+	std::os::unix::fs::symlink(&real, home.path().join(".aghub/linked"))
+		.unwrap();
+	std::fs::create_dir_all(home.path().join(".claude/skills")).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		stderr.contains("not a real directory"),
+		"the master's own fault is the remedy this row gets: {stderr}"
+	);
+	assert!(
+		!stderr.contains("remove the master directory"),
+		"the orphan-master note tells the user to delete the entry the master \
+		 note tells them to replace — one row, two opposite instructions: \
+		 {stderr}"
+	);
+	assert_eq!(
+		stderr.matches("note:").count(),
+		1,
+		"one fault, one note: {stderr}"
+	);
+
+	// Same row, dangling master link: `master_skill.exists()` is now false, so
+	// the slotless agent stays `missing` and lands in the sync bucket instead.
+	std::fs::remove_file(home.path().join(".aghub/linked")).unwrap();
+	std::os::unix::fs::symlink(
+		outside.path().join("gone"),
+		home.path().join(".aghub/linked"),
+	)
+	.unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&out.stderr);
+	assert!(
+		!stderr.contains("agent referrer issue(s)"),
+		"`source sync --install-missing` cannot repair a referrer whose master \
+		 is a link — offering it beside the note that says so is the same \
+		 contradiction: {stderr}"
+	);
+	assert_eq!(
+		stderr.matches("note:").count(),
+		1,
+		"one fault, one note: {stderr}"
+	);
+}
+
+/// A two-hop chain must be sent to `repair`, not to `source sync`.
+///
+/// `Linker::link` compares canonicalized endpoints, and a chain's endpoint IS
+/// the master — so `--install-missing` reports `AlreadyLinked` and writes
+/// nothing. doctor was printing that command for every referrer issue,
+/// including this one: a non-zero exit plus an instruction proven not to fix
+/// it. `plan_repair` schedules a `Relink` for a chain, so `repair` is the verb.
+#[cfg(unix)]
+#[test]
+fn doctor_points_a_chain_at_repair_not_at_sync() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+
+	let master = write_source_skill(&home.path().join(".aghub"), "hop", "hop");
+	let shared = home.path().join(".agents/skills");
+	std::fs::create_dir_all(&shared).unwrap();
+	std::os::unix::fs::symlink(&master, shared.join("hop")).unwrap();
+	let claude = home.path().join(".claude/skills");
+	std::fs::create_dir_all(&claude).unwrap();
+	std::os::unix::fs::symlink(shared.join("hop"), claude.join("hop")).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "--json", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
+	let row = json
+		.as_array()
+		.unwrap()
+		.iter()
+		.find(|r| r["skill"] == "hop")
+		.unwrap_or_else(|| panic!("the chained skill must be reported: {json}"))
+		.clone();
+	assert_eq!(row["linkAudit"]["agents"][0]["state"], "chain", "{row}");
+
+	let human = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "claude", "doctor", "--verify-links"])
+		.output()
+		.unwrap();
+	let stderr = String::from_utf8_lossy(&human.stderr);
+	assert!(
+		stderr.contains("aghub-cli -g repair"),
+		"a chain is relinked by `repair`; the note must say so: {stderr}"
+	);
+	assert!(
+		!stderr.contains("agent referrer issue(s)"),
+		"a chain is the ONLY referrer issue here, so the sync note must not \
+		 fire at all — it cannot fix one: {stderr}"
 	);
 }
