@@ -3559,6 +3559,12 @@ mod tests {
 		.expect("a determined non-holder must not block the removal");
 	}
 
+	// Its three callers are all `#[cfg(unix)]` (they build symlinked or
+	// chmod-ed layouts), so an ungated definition is dead code on Windows and
+	// `-D warnings` fails there — a gap only the push-to-main Windows lint
+	// sees, because a local `--target x86_64-pc-windows-msvc` cannot build
+	// `zstd-sys`/`aws-lc-sys` without an MSVC C toolchain.
+	#[cfg(unix)]
 	fn holders_via_agent_roster(
 		root: &std::path::Path,
 		name: &str,
