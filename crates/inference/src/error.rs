@@ -93,10 +93,6 @@ pub enum InferenceProviderError {
 		/// Parse or validation message.
 		message: String,
 	},
-
-	/// Tauri app data directory could not be resolved.
-	#[error("failed to resolve Tauri app data directory: {0}")]
-	AppDataDir(String),
 }
 
 /// `true` iff `err` means the credential backend itself is unreachable

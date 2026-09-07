@@ -56,11 +56,6 @@ pub(crate) fn print_value(value: &serde_json::Value, json: bool) -> Result<()> {
 	Ok(())
 }
 
-/// Override for the app data dir; when set, takes precedence over the platform
-/// default. Lets tests pin the SQLite root to a throwaway tempdir without
-/// guessing each OS's `dirs::data_dir()` location.
-const DATA_DIR_ENV: &str = "AGHUB_DATA_DIR";
-
 /// When set, the CLI stores inference API keys in this plaintext JSON file
 /// instead of the OS keyring. Test-only: it lets headless CI exercise the full
 /// inference path where no keyring (linux secret-service/dbus) is available.
@@ -118,18 +113,12 @@ pub(crate) fn read_locks_checked(
 
 /// App data directory shared by the CLI, desktop, and HTTP API.
 ///
-/// Defaults to `dirs::data_dir()/aghub` — byte-identical to
-/// `api::default_app_data_dir` so all three surfaces open the same SQLite db and
-/// credential-keyring namespace (a key stored by the desktop is readable by the
-/// CLI and vice-versa). `$AGHUB_DATA_DIR` overrides it for isolated test runs.
-// ponytail: mirrors api::default_app_data_dir; keep in sync.
+/// One formula, owned by [`aghub_core::paths::app_data_dir`]: `$AGHUB_DATA_DIR`
+/// else `dirs::data_dir()/aghub`. All three surfaces open the same SQLite db and
+/// credential-keyring namespace, so a provider added by the desktop is listed by
+/// the CLI and their shared keyring key still has a row to belong to.
 pub(crate) fn app_data_dir() -> PathBuf {
-	if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
-		return PathBuf::from(dir);
-	}
-	dirs::data_dir()
-		.unwrap_or_else(std::env::temp_dir)
-		.join("aghub")
+	aghub_core::paths::app_data_dir()
 }
 
 /// Credential backend the CLI uses for inference API keys: the OS keyring in
@@ -340,23 +329,39 @@ mod tests {
 		LOCK.lock().unwrap_or_else(|e| e.into_inner())
 	}
 
+	/// The CLI half of the cross-surface parity pin: the CLI, the API and the
+	/// desktop must open ONE app data root, or a provider added in the desktop
+	/// UI is invisible to `aghub-cli inference list` while both surfaces share
+	/// one keyring namespace.
+	///
+	/// Compares the real functions, not two hand-written literals — the old
+	/// version of this test re-spelled the formula, so it could not notice the
+	/// API resolving somewhere else. The API half is
+	/// `aghub_api::tests::default_app_data_dir_matches_core_seam`; both pin
+	/// against `aghub_core::paths::app_data_dir`, which is where the two meet
+	/// (`aghub-cli` is bin-only, so nothing can link this function directly).
 	#[test]
-	fn app_data_dir_matches_api_default_formula() {
-		// With no override, must stay byte-identical to api::default_app_data_dir
-		// so the CLI, desktop, and API share one SQLite db + keyring namespace.
+	fn app_data_dir_matches_core_seam() {
 		let _g = env_lock();
-		let restore = std::env::var_os(DATA_DIR_ENV);
-		std::env::remove_var(DATA_DIR_ENV);
-		let expected = dirs::data_dir()
-			.unwrap_or_else(std::env::temp_dir)
-			.join("aghub");
-		assert_eq!(app_data_dir(), expected);
+		let restore = std::env::var_os(aghub_core::paths::DATA_DIR_ENV);
+
+		std::env::remove_var(aghub_core::paths::DATA_DIR_ENV);
+		assert_eq!(app_data_dir(), aghub_core::paths::app_data_dir());
 		assert_eq!(
 			app_data_dir().file_name().and_then(|n| n.to_str()),
 			Some("aghub")
 		);
-		if let Some(v) = restore {
-			std::env::set_var(DATA_DIR_ENV, v);
+
+		std::env::set_var(
+			aghub_core::paths::DATA_DIR_ENV,
+			"/tmp/aghub-seam-xyz",
+		);
+		assert_eq!(app_data_dir(), aghub_core::paths::app_data_dir());
+		assert_eq!(app_data_dir(), PathBuf::from("/tmp/aghub-seam-xyz"));
+
+		match restore {
+			Some(v) => std::env::set_var(aghub_core::paths::DATA_DIR_ENV, v),
+			None => std::env::remove_var(aghub_core::paths::DATA_DIR_ENV),
 		}
 	}
 
@@ -365,15 +370,18 @@ mod tests {
 		// `$AGHUB_DATA_DIR` takes precedence so tests can pin the SQLite root to a
 		// throwaway dir without guessing each platform's dirs::data_dir().
 		let _g = env_lock();
-		let restore = std::env::var_os(DATA_DIR_ENV);
-		std::env::set_var(DATA_DIR_ENV, "/tmp/aghub-override-xyz");
+		let restore = std::env::var_os(aghub_core::paths::DATA_DIR_ENV);
+		std::env::set_var(
+			aghub_core::paths::DATA_DIR_ENV,
+			"/tmp/aghub-override-xyz",
+		);
 		assert_eq!(
 			app_data_dir(),
 			std::path::PathBuf::from("/tmp/aghub-override-xyz")
 		);
 		match restore {
-			Some(v) => std::env::set_var(DATA_DIR_ENV, v),
-			None => std::env::remove_var(DATA_DIR_ENV),
+			Some(v) => std::env::set_var(aghub_core::paths::DATA_DIR_ENV, v),
+			None => std::env::remove_var(aghub_core::paths::DATA_DIR_ENV),
 		}
 	}
 

@@ -53,16 +53,20 @@ impl ApiOptions {
 	}
 }
 
-/// `dirs::data_dir()/aghub` — the root the CLI (`commands::app_data_dir`) and
-/// the desktop's skill-check sidecar also resolve to. Public because the
-/// desktop needs the SAME root the scheduled CLI writes into; Tauri's own
-/// `app_data_dir()` is identifier-scoped (`<data>/com.akrc.aghub`) and would
-/// point somewhere else.
+/// The shared app data root — see [`aghub_core::paths::app_data_dir`], which
+/// owns the one formula every surface uses. Public because the desktop needs
+/// the SAME root the scheduled CLI writes into, without depending on
+/// `aghub-core` itself; Tauri's own `app_data_dir()` is identifier-scoped
+/// (`<data>/com.akrc.aghub`) and would point somewhere else.
 pub fn default_app_data_dir() -> PathBuf {
-	dirs::data_dir()
-		.unwrap_or_else(std::env::temp_dir)
-		.join("aghub")
+	aghub_core::paths::app_data_dir()
 }
+
+/// The inference db's file name. Re-exported so the desktop can NAME the copy
+/// in the legacy Tauri app data dir it points users at, without depending on
+/// `aghub-inference` itself. It never opens or moves that file: the migration
+/// that did was removed — see `commands/server.rs`.
+pub use aghub_inference::INFERENCE_PROVIDERS_FILE;
 
 struct ApiLogFairing;
 
@@ -444,6 +448,44 @@ mod tests {
 			let _ = log::set_logger(&CapturingLogger);
 			log::set_max_level(log::LevelFilter::Trace);
 		});
+	}
+
+	/// The API and the CLI must resolve the SAME app data root, or a provider
+	/// added through one surface is invisible to the other while both share one
+	/// keyring namespace (a stored key pointing at a row the CLI cannot see).
+	///
+	/// Compares the two REAL functions, not two hand-written literals: both
+	/// `default_app_data_dir` and `aghub-cli`'s `commands::app_data_dir`
+	/// delegate to `aghub_core::paths::app_data_dir`, so pinning each surface
+	/// against core pins them against each other. (`aghub-cli` is bin-only, so
+	/// nothing can link its function directly; core is where the two meet.)
+	/// The CLI half lives in `aghub-cli`'s
+	/// `commands::tests::app_data_dir_matches_core_seam`.
+	///
+	/// `$AGHUB_DATA_DIR` is what makes this a real assertion: the API used to
+	/// ignore the var while the CLI honored it, so a pinned test root split the
+	/// two surfaces apart.
+	#[test]
+	fn default_app_data_dir_matches_core_seam() {
+		let _env = crate::routes::test_env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let restore = std::env::var_os(aghub_core::paths::DATA_DIR_ENV);
+
+		std::env::remove_var(aghub_core::paths::DATA_DIR_ENV);
+		assert_eq!(default_app_data_dir(), aghub_core::paths::app_data_dir());
+
+		let pinned = tempfile::tempdir().expect("tempdir");
+		std::env::set_var(aghub_core::paths::DATA_DIR_ENV, pinned.path());
+		assert_eq!(default_app_data_dir(), aghub_core::paths::app_data_dir());
+		assert_eq!(default_app_data_dir(), pinned.path());
+
+		match restore {
+			Some(value) => {
+				std::env::set_var(aghub_core::paths::DATA_DIR_ENV, value)
+			}
+			None => std::env::remove_var(aghub_core::paths::DATA_DIR_ENV),
+		}
 	}
 
 	/// Regression test for the log-redaction invariant on `ApiLogFairing`: the

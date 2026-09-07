@@ -58,6 +58,25 @@ fn credential_lock_for(app_data_dir: &Path) -> Arc<Mutex<()>> {
 		.clone()
 }
 
+/// Bridge a future to synchronous callers.
+///
+/// Safe to call from `spawn_blocking` threads (Rocket handlers) or from plain
+/// synchronous code that has no active runtime. Must NOT be called from within
+/// an async task — use `block_in_place` for that.
+fn block_on<F>(fut: F) -> F::Output
+where
+	F: Future,
+{
+	match tokio::runtime::Handle::try_current() {
+		Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
+		Err(_) => tokio::runtime::Builder::new_current_thread()
+			.enable_all()
+			.build()
+			.expect("failed to build tokio runtime")
+			.block_on(fut),
+	}
+}
+
 /// CRUD interface for inference provider metadata and API keys.
 pub trait InferenceProviderRepository {
 	/// List all providers.
@@ -125,19 +144,6 @@ impl InferenceProviderStore<NativeCredentialStore> {
 	pub fn new(app_data_dir: impl Into<PathBuf>) -> Self {
 		Self::with_credentials(app_data_dir, NativeCredentialStore)
 	}
-
-	/// Create a store from the current Tauri app handle.
-	#[cfg(feature = "tauri")]
-	pub fn from_tauri<R: tauri::Runtime>(
-		app: &tauri::AppHandle<R>,
-	) -> Result<Self> {
-		use tauri::Manager;
-
-		let app_data_dir = app.path().app_data_dir().map_err(|error| {
-			InferenceProviderError::AppDataDir(error.to_string())
-		})?;
-		Ok(Self::new(app_data_dir))
-	}
 }
 
 impl<C> InferenceProviderStore<C> {
@@ -162,23 +168,12 @@ impl<C> InferenceProviderStore<C> {
 		self.app_data_dir.join(INFERENCE_PROVIDERS_FILE)
 	}
 
-	/// Bridge a future to synchronous callers.
-	///
-	/// Safe to call from `spawn_blocking` threads (Rocket handlers) or from
-	/// plain synchronous code that has no active runtime. Must NOT be called
-	/// from within an async task — use `block_in_place` for that.
+	/// Bridge a future to synchronous callers. See the free [`block_on`].
 	fn block_on<F>(&self, fut: F) -> F::Output
 	where
 		F: Future,
 	{
-		match tokio::runtime::Handle::try_current() {
-			Ok(handle) => tokio::task::block_in_place(|| handle.block_on(fut)),
-			Err(_) => tokio::runtime::Builder::new_current_thread()
-				.enable_all()
-				.build()
-				.expect("failed to build tokio runtime")
-				.block_on(fut),
-		}
+		block_on(fut)
 	}
 }
 

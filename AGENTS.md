@@ -72,17 +72,35 @@ Only where the obvious guess is wrong; everything else, ask CodeGraph. The one
 that catches everybody: the `AgentAdapter` **trait** is in
 `crates/core/src/adapters/mod.rs`, but the impl is in `core/src/adapter.rs`.
 
-**Three different "app data roots" exist.** `aghub-cli`'s `app_data_dir()` is
-`$AGHUB_DATA_DIR` else `dirs::data_dir()/aghub`; `aghub_api::default_app_data_dir()`
-is the SAME formula **minus the env override** — it never reads `$AGHUB_DATA_DIR`,
-so pinning that var isolates the CLI (and the desktop's own hand-rolled copy in
-`skill_check.rs`) while a standalone `aghub-api` keeps writing the real root. The
-parity test says so itself: it removes the var before asserting equality. The
-desktop starts its embedded api with **Tauri's**
-`app_data_dir()`, which is identifier-scoped (`<data>/com.akrc.aghub`). Any file
-one surface WRITES and another READS must use the CLI formula — Tauri's, or a
-hand-rolled `$XDG_DATA_HOME` guess, agrees on Linux and diverges on
-macOS/Windows, so the mismatch never shows up locally.
+**ONE app data root: `aghub_core::paths::app_data_dir()`** — `$AGHUB_DATA_DIR`
+else `dirs::data_dir()/aghub`. `aghub-cli`'s `commands::app_data_dir()` and
+`aghub_api::default_app_data_dir()` are one-line delegations to it (the desktop
+reaches it through the api re-export, having no `aghub-core` dep), so pinning
+that env var isolates every surface at once. Never re-spell the formula: a
+hand-rolled `$XDG_DATA_HOME` guess, or Tauri's identifier-scoped
+`app_data_dir()` (`<data>/com.akrc.aghub`), agrees on Linux and diverges on
+macOS/Windows, so the split never shows up locally — the desktop used to start
+its embedded api on the Tauri root, which put every UI-added inference provider
+in a db the CLI could not see while both shared one keyring namespace. The
+parity is pinned by two tests meeting at core (`aghub-cli` is bin-only, so
+nothing can link its function): `aghub_api::tests::default_app_data_dir_matches_core_seam`
+and the CLI's `commands::tests::app_data_dir_matches_core_seam`. A desktop
+upgrading from before that unification finds its inference db still in the
+legacy Tauri dir, and **aghub does not move it** — `commands/server.rs`
+`legacy_inference_db_hint` only logs a warning naming both paths and the manual
+steps. It was a real migration once; it is deleted, not forgotten. The shared db
+has writers the desktop cannot coordinate with (`aghub-cli`, a standalone
+`aghub-api`, a second desktop — none of them takes a desktop-side lock, and a
+lock timeout started the API anyway), so an automatic copy-and-rename had a
+reproducible sequence that dropped a provider one of them had just committed.
+The split is what mattered and the shared root fixes it; the copy was pure
+convenience carrying all the risk. Cost of the trade: an upgrading user's
+provider list stays empty until they copy the file by hand. The hint keys on the
+LEGACY FILE EXISTING, so copying does not silence it — the message tells the
+user to rename the original aside, and that is the only step that stops it. Do
+not "fix" it to stop after a copy it cannot observe: a notice still firing after
+a successful migration is what invites the copy a second time, putting the
+pre-upgrade list back over everything added since.
 
 ## Key Design Patterns
 

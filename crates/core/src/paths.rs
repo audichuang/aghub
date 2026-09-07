@@ -1,5 +1,29 @@
 use std::path::{Path, PathBuf};
 
+/// Override for the app data dir; when set, takes precedence over the platform
+/// default. Lets tests pin the SQLite root to a throwaway tempdir without
+/// guessing each OS's `dirs::data_dir()` location.
+pub const DATA_DIR_ENV: &str = "AGHUB_DATA_DIR";
+
+/// The ONE app data root every surface opens: `$AGHUB_DATA_DIR`, else
+/// `dirs::data_dir()/aghub`.
+///
+/// The CLI (`commands::app_data_dir`), the HTTP API
+/// (`aghub_api::default_app_data_dir`) and the desktop all delegate here, so
+/// an inference provider added in the desktop UI is the same SQLite row the
+/// CLI lists, and the shared keyring namespace has a matching db row on both
+/// sides. Tauri's own `app_data_dir()` is identifier-scoped
+/// (`<data>/com.akrc.aghub`) and must NOT be used for this — the desktop
+/// migrates away from it on startup.
+pub fn app_data_dir() -> PathBuf {
+	if let Some(dir) = std::env::var_os(DATA_DIR_ENV) {
+		return PathBuf::from(dir);
+	}
+	dirs::data_dir()
+		.unwrap_or_else(std::env::temp_dir)
+		.join("aghub")
+}
+
 /// Check if a project config exists for the given agent (data-driven via registry)
 pub fn project_config_exists(
 	agent_type: super::AgentType,

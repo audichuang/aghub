@@ -196,8 +196,7 @@ impl From<InferenceProviderError> for ApiError {
 				)
 			}
 			InferenceProviderError::Io(_)
-			| InferenceProviderError::Database(_)
-			| InferenceProviderError::AppDataDir(_) => ApiError::new(
+			| InferenceProviderError::Database(_) => ApiError::new(
 				Status::InternalServerError,
 				e.to_string(),
 				"INFERENCE_PROVIDER_STORE_ERROR",

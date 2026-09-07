@@ -85,15 +85,12 @@ fn checked_argv(cli: &Path, sidecar: &Path) -> Result<Vec<String>, String> {
 	Ok(argv)
 }
 
-/// The sidecar the SCHEDULED CLI writes, so the root must be the CLI's
-/// (`aghub-cli`'s `commands::app_data_dir`): `$AGHUB_DATA_DIR`, else
-/// `dirs::data_dir()/aghub`. Deliberately NOT Tauri's `app_data_dir()`, which
-/// is identifier-scoped (`<data>/com.akrc.aghub`) and would read a file the CLI
-/// never writes.
+/// The sidecar the SCHEDULED CLI writes, so the root must be the shared one
+/// (`aghub_core::paths::app_data_dir`, reached here through `aghub-api`):
+/// `$AGHUB_DATA_DIR`, else `dirs::data_dir()/aghub`. Deliberately NOT Tauri's
+/// `app_data_dir()`, which is identifier-scoped (`<data>/com.akrc.aghub`) and
+/// would read a file the CLI never writes.
 pub fn default_sidecar_path() -> PathBuf {
-	if let Some(dir) = std::env::var_os("AGHUB_DATA_DIR") {
-		return PathBuf::from(dir).join(SIDECAR_NAME);
-	}
 	aghub_api::default_app_data_dir().join(SIDECAR_NAME)
 }
 

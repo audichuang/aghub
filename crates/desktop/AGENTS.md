@@ -9,7 +9,7 @@
 Role map (not a full tree):
 
 - `src/` — React frontend (`pages/`, `components/`, `lib/`, generated DTOs under `src/generated/`)
-- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI). Commands under `commands/` (credentials/logging/remote/server/window). Embeds `aghub-api` on localhost; uses `aghub-remote` for SSH — does **not** depend on `aghub-core` directly.
+- `src-tauri/` — Tauri backend; Cargo package name is **`aghub`** (`-p aghub` builds this, not the CLI). Commands under `commands/` (credentials/logging/remote/server/window). Embeds `aghub-api` on localhost; uses `aghub-remote` for SSH — does **not** depend on `aghub-core` or `aghub-inference` directly; it goes through `aghub-api`, which re-exports the shared app data root (`default_app_data_dir`) and the inference db's file NAME (`INFERENCE_PROVIDERS_FILE`, used only to spell the legacy-db hint's paths). It never opens that db: the provider list comes over HTTP from the embedded API. (The credential wrappers it also imports — `resolve_git_token_for_source` / `list_bound_sources` — DO read the OS keyring in-process.)
 - `src-tauri/capabilities/` — permission manifests (read `default.json`; don't restate the list here)
 
 Frontend form patterns: `project-form-patterns` in the universal Master

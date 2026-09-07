@@ -25,7 +25,6 @@ tabled = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-dirs = { workspace = true }
 tokio = { version = "1", features = [
 	"rt",
 	"rt-multi-thread",
