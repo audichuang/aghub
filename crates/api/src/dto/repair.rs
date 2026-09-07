@@ -21,8 +21,8 @@ pub struct RepairReportDto {
 	/// The shape found, snake_case (`unmigrated_copy`, `conformant`, …), or
 	/// null when the scope named no candidate directory at all.
 	pub shape: Option<String>,
-	/// `conformant` | `migrated` | `relinked` | `reconciled` | `refused` |
-	/// `failed`.
+	/// `conformant` | `migrated` | `relinked` | `reconciled` | `tidied` |
+	/// `refused` | `failed`.
 	pub outcome: String,
 	/// Set for `refused` and `failed`: why, and the literal next step. Kept as
 	/// prose the UI can show verbatim — neither may read as a bare diagnosis.
@@ -30,6 +30,11 @@ pub struct RepairReportDto {
 	pub fix: Option<String>,
 	pub master: String,
 	pub referrers: Vec<String>,
+	/// Referrers DETACHED from read-only compat dirs. Kept apart from
+	/// `referrers` so the preview can say a symlink is about to be removed —
+	/// the user may have created it by hand, and a migration dialog that only
+	/// lists what it ADDS is the one that surprises them.
+	pub unlinked: Vec<String>,
 	pub quarantined: Option<String>,
 	pub fused: Vec<String>,
 }
@@ -56,6 +61,7 @@ impl From<&aghub_core::skills::repair::RepairReport> for RepairReportDto {
 			RepairOutcome::Migrated => ("migrated", None, None),
 			RepairOutcome::Relinked => ("relinked", None, None),
 			RepairOutcome::Reconciled => ("reconciled", None, None),
+			RepairOutcome::Tidied => ("tidied", None, None),
 			RepairOutcome::Refused { reason, fix } => {
 				("refused", Some(reason.clone()), Some(fix.clone()))
 			}
@@ -88,6 +94,11 @@ impl From<&aghub_core::skills::repair::RepairReport> for RepairReportDto {
 				.iter()
 				.map(|p| p.display().to_string())
 				.collect(),
+			unlinked: r
+				.unlinked
+				.iter()
+				.map(|p| p.display().to_string())
+				.collect(),
 			quarantined: r
 				.quarantined
 				.as_ref()
@@ -113,6 +124,7 @@ mod tests {
 			outcome,
 			master: std::path::PathBuf::from("/store/demo"),
 			referrers: vec![std::path::PathBuf::from("/a/demo")],
+			unlinked: Vec::new(),
 			quarantined: None,
 			fused: vec!["codex".to_string()],
 			dry_run: false,

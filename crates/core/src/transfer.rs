@@ -1973,16 +1973,24 @@ impl ReconcileSkillPlan {
 		}
 		// A dry-run plans under the guard this reconcile already holds and
 		// writes nothing.
-		let shared_master_kept = match manager.remove_skill_planned(
-			&self.skill.name,
-			self.exhaustive,
-			true, // dry_run
-			true,
-		) {
-			Ok(outcome) => outcome.plan.shared_master_kept,
+		// `still_read_from` rides along on the same dry run for the same reason
+		// `shared_master_kept` does — it is the ONE owner's answer. Re-deriving
+		// it here from the target's own read dirs is exactly the second
+		// derivation the paragraph below warns about.
+		let (shared_master_kept, still_read_from) = match manager
+			.remove_skill_planned(
+				&self.skill.name,
+				self.exhaustive,
+				true, // dry_run
+				true,
+			) {
+			Ok(outcome) => (
+				outcome.plan.shared_master_kept,
+				outcome.plan.still_read_from,
+			),
 			// The copy may make an absent target present before its delete row
 			// runs, so absence only answers the on-disk half of this preflight.
-			Err(ConfigError::ResourceNotFound { .. }) => false,
+			Err(ConfigError::ResourceNotFound { .. }) => (false, Vec::new()),
 			Err(error) => return Err(error),
 		};
 
@@ -1998,7 +2006,10 @@ impl ReconcileSkillPlan {
 		// and could not see that split, which is precisely how a preflight
 		// green-lights a row the commit then refuses.
 		if shared_master_kept || self.a_copy_restores_it(target) {
-			return Err(self.refuse_shared_master(target.agent.as_str()));
+			return Err(self.refuse_shared_master(
+				target.agent.as_str(),
+				&still_read_from,
+			));
 		}
 		Ok(())
 	}
@@ -2105,7 +2116,11 @@ impl ReconcileSkillPlan {
 	/// Naming WHY the master stays is not decoration: without it the message
 	/// names the delete target while the real reason is a different agent, and
 	/// the user has nothing to act on.
-	fn refuse_shared_master(&self, agent: &str) -> ConfigError {
+	fn refuse_shared_master(
+		&self,
+		agent: &str,
+		still_read_from: &[PathBuf],
+	) -> ConfigError {
 		let ConfigError::UnsupportedOperation(mut message) =
 			ConfigError::unsupported_operation(
 				"remove for this agent alone",
@@ -2128,6 +2143,20 @@ impl ReconcileSkillPlan {
 				"; this reconcile also adds the skill to another agent, so the \
 				 shared master stays",
 			);
+		}
+		// Keepers and survivors answer DIFFERENT questions: who else reads the
+		// Master, versus where THIS agent still reads it from. The second is the
+		// only one the caller can act on when the blocker is a leftover Referrer
+		// in the agent's own compat dir, and it used to be missing entirely.
+		if !still_read_from.is_empty() {
+			message.push_str(&format!(
+				"; it is still served to this agent from '{}'",
+				still_read_from
+					.iter()
+					.map(|path| path.display().to_string())
+					.collect::<Vec<_>>()
+					.join("', '")
+			));
 		}
 		if !self.unreadable.is_empty() {
 			message.push_str(&format!(

@@ -371,7 +371,7 @@ function MigrationRow({
 	const { t } = useTranslation();
 	// Derived in `lib/skill-migration`, which node can test — this component
 	// only lays the facts out.
-	const { refused, linkCount } = migrationRowFacts(row);
+	const { refused, linkCount, unlinkCount } = migrationRowFacts(row);
 
 	if (refused) {
 		return (
@@ -428,6 +428,8 @@ function MigrationRow({
 				{t(`skillRepairOutcome_${done ? "done_" : ""}${row.outcome}`)}
 				{linkCount > 0 &&
 					` · ${t("skillLayoutRowLinks", { count: linkCount })}`}
+				{unlinkCount > 0 &&
+					` · ${t("skillLayoutRowUnlinked", { count: unlinkCount })}`}
 			</span>
 		</li>
 	);

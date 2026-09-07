@@ -1313,6 +1313,7 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} 个技能已移到 {{path}},并建立 {{links}} 个各自的 agent 链接。",
 	skillLayoutRowLinks: "{{count}} 个链接",
+	skillLayoutRowUnlinked: "移除 {{count}} 个失效链接",
 	skillLayoutApplyN: "迁移 {{count}} 个",
 	skillLayoutSummaryBlocked:
 		"有 {{count}} 个技能需要你处理,下面列出了该怎么做。",

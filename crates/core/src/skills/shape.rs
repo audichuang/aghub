@@ -98,6 +98,30 @@ fn skill_write_dir(
 	}
 }
 
+/// One agent's skills READ dirs for a scope: its write dir plus every
+/// compat/legacy dir the descriptor still reads.
+///
+/// Routed through the adapter for the same reason [`skill_write_dir`] is —
+/// otherwise the test path override is bypassed and a fixture's dirs are
+/// invisible.
+fn skill_read_dirs(
+	descriptor: &aghub_agents::AgentDescriptor,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Vec<PathBuf> {
+	match crate::AgentType::from_str(descriptor.id) {
+		Ok(agent_type) => crate::create_adapter(agent_type)
+			.get_skills_paths(project_root, scope),
+		Err(_) => match scope {
+			ResourceScope::GlobalOnly => descriptor.global_skill_read_paths(),
+			ResourceScope::ProjectOnly => project_root
+				.map(|root| descriptor.project_skill_read_paths(root))
+				.unwrap_or_default(),
+			ResourceScope::Both => Vec::new(),
+		},
+	}
+}
+
 /// Which root the STORE resolves against for a scope.
 ///
 /// A project root is only the store's root under `ProjectOnly`; under
@@ -917,6 +941,11 @@ pub enum ReferrerAction {
 	CompareThenQuarantine,
 	/// Content aghub did not install and must not move (D5). Report only.
 	LeaveForeign,
+	/// A stale Referrer in a dir this agent only READS. Detach it — the write
+	/// slot serves the same Master, so nothing is lost, and leaving it makes
+	/// "remove for this agent alone" refuse forever. Symlink-only: execution
+	/// re-checks and refuses a real directory, which may hold the only copy.
+	Unlink,
 	/// Nothing may be written for this pair until a human intervenes.
 	Refuse { reason: RefuseReason },
 }
@@ -1024,8 +1053,9 @@ pub fn plan_repair(
 		return None;
 	}
 	let master = master_path(scope, project_root, name)?;
+	let safe = skill::sanitize_name(name);
 	let shared_slot = shared_referrer_dir(store_root(scope, project_root))
-		.map(|d| d.join(skill::sanitize_name(name)));
+		.map(|d| d.join(&safe));
 
 	// Collapse the candidates by PATH: the shared slot is one directory that up
 	// to eight agents resolve to. Compare the constructed paths, never resolved
@@ -1111,11 +1141,119 @@ pub fn plan_repair(
 		}
 	}
 
+	// Stale Referrers in dirs this agent only READS.
+	//
+	// `candidate_referrers` is WRITE-dir derived by design, so a link an older
+	// release left in a compat dir is invisible to every other part of this
+	// plan — and it is not harmless: the agent goes on reading the skill from
+	// it, so "remove for this agent alone" can never take anything away and
+	// refuses forever. Observed on antigravity, whose global write slot moved to
+	// `.gemini/config/skills` while `.gemini/antigravity/skills` kept the link.
+	//
+	// THREE guards, all required, none loosenable:
+	//  1. LINK ONLY. A real directory there may hold the only copy of bytes
+	//     aghub never installed; `CompareThenQuarantine` is the verb for those.
+	//  2. RESOLVES TO THIS MASTER (`same_object`, so two unresolvable paths
+	//     never compare equal), or to the directory this run is about to ADOPT
+	//     as the Master. The second half is not a loosening, it is what makes
+	//     the sweep single-pass: during a MIGRATION the store does not exist
+	//     yet, so `same_object` against it is false for everything and the
+	//     detach was deferred to a second `repair` run — leaving the agent
+	//     reading the skill from two places, and its toggle refusing, after a
+	//     run that reported `migrated`. The adopted directory becomes a link to
+	//     the Master in step 5, so an entry resolving to it resolves to the
+	//     Master by the time step 6 detaches anything. A link pointing anywhere
+	//     ELSE is somebody else's — D5 says report, do not move.
+	//  3. THE WRITE SLOT COVERS IT AFTERWARDS. Without this the "cleanup"
+	//     silently REVOKES the skill for an agent whose only Referrer was the
+	//     compat one — the pre-2.18 shape `repair` exists to rescue.
+	//  4. IT IS NOBODY'S WRITE SLOT. Read-only is a per-AGENT property, not a
+	//     property of the directory: `.agents/skills` is codex's second READ
+	//     dir and eight other agents' only WRITE dir. Without this guard the
+	//     sweep read "codex already has `.codex/skills`" and deleted the shared
+	//     slot out from under cline, warp and six more — revoking the skill for
+	//     every agent that has no private dir. Caught by
+	//     `a_second_bulk_run_reports_nothing_left_to_do`; do not weaken it to a
+	//     name check on `.agents/skills`, the question is whether ANY agent in
+	//     the roster writes there, and `planned` is exactly that set.
+	//
+	// Guard 3 reads the PLAN, not the disk: a slot this run is about to Create
+	// or Relink covers the agent just as well as one that already resolves, and
+	// demanding the disk state would make the cleanup need a SECOND repair run.
+	let adopt_source = planned
+		.iter()
+		.find(|row| row.action == ReferrerAction::AdoptAsMaster)
+		.map(|row| row.path.clone());
+	let mut unlink: Vec<PlannedReferrer> = Vec::new();
+	for descriptor in crate::registry::ALL_AGENTS.iter() {
+		let Some(write_dir) = skill_write_dir(descriptor, scope, project_root)
+		else {
+			continue;
+		};
+		let slot = write_dir.join(&safe);
+		let covered = planned.iter().any(|row| {
+			row.path == slot
+				&& match row.action {
+					ReferrerAction::Create | ReferrerAction::Relink => true,
+					// Step 5 swaps the adopted directory for a link to the
+					// Master, so an agent whose write slot IS the adopt source
+					// ends up covered exactly like one being linked. Missing
+					// this still cost a second run at PROJECT scope, where
+					// antigravity's write dir and the shared slot are the same
+					// directory.
+					ReferrerAction::AdoptAsMaster => true,
+					ReferrerAction::Leave => {
+						row.shape == SkillShape::Conformant
+					}
+					_ => false,
+				}
+		});
+		if !covered {
+			continue;
+		}
+		for read_dir in skill_read_dirs(descriptor, scope, project_root) {
+			if read_dir == write_dir {
+				continue;
+			}
+			let entry = read_dir.join(&safe);
+			if planned.iter().any(|row| row.path == entry) {
+				continue; // guard 4
+			}
+			let serves_this_master = same_object(&entry, &master)
+				|| adopt_source
+					.as_deref()
+					.is_some_and(|src| same_object(&entry, src));
+			if !Linker::is_link(&entry) || !serves_this_master {
+				continue;
+			}
+			// Collapse by PATH like `by_path` above: one compat dir several
+			// agents read is one row naming all of them, never one row each.
+			if let Some(row) = unlink.iter_mut().find(|r| r.path == entry) {
+				if !row.agents.contains(&descriptor.id) {
+					row.agents.push(descriptor.id);
+				}
+				continue;
+			}
+			unlink.push(PlannedReferrer {
+				agents: vec![descriptor.id],
+				shape: classify_shape(&entry, &master),
+				path: entry,
+				action: ReferrerAction::Unlink,
+				shared: false,
+			});
+		}
+	}
+	planned.extend(unlink);
+
 	// Execution order: adopt the Master, then private Referrers, then the shared
-	// slot. Reversing this is the difference between a crash that leaves the old
-	// directory serving the skill and one that leaves it readable from nowhere.
+	// slot, then the compat-dir detaches. Reversing this is the difference
+	// between a crash that leaves the old directory serving the skill and one
+	// that leaves it readable from nowhere — and the detaches go LAST for the
+	// same reason: until the write slot is really on disk, the compat link is
+	// the only thing still handing the agent the skill.
 	planned.sort_by_key(|p| match p.action {
 		ReferrerAction::AdoptAsMaster => 0,
+		ReferrerAction::Unlink => 3,
 		_ if p.shared => 2,
 		_ => 1,
 	});

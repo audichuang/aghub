@@ -45,6 +45,7 @@ export function migrationRowFacts(row: RepairReportDto): {
 	refused: boolean;
 	master: string | null;
 	linkCount: number;
+	unlinkCount: number;
 	fused: string[];
 } {
 	const refused = isBlocked(row);
@@ -52,6 +53,10 @@ export function migrationRowFacts(row: RepairReportDto): {
 		refused,
 		master: refused ? null : row.master,
 		linkCount: refused ? 0 : row.referrers.length,
+		// Counted and shown separately from `linkCount`: these are symlinks the
+		// migration REMOVES, and a preview that only lists what it adds is the
+		// one that surprises a user who created that link by hand.
+		unlinkCount: refused ? 0 : row.unlinked.length,
 		fused: refused ? [] : row.fused,
 	};
 }
@@ -77,13 +82,16 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 	refused: number;
 	masterParent: string | null;
 	totalLinks: number;
+	totalUnlinked: number;
 	fused: string[];
 } {
 	const acting = rows.filter((r) => !isBlocked(r));
 	const fused = new Set<string>();
 	let totalLinks = 0;
+	let totalUnlinked = 0;
 	for (const row of acting) {
 		totalLinks += row.referrers.length;
+		totalUnlinked += row.unlinked.length;
 		for (const agent of row.fused) fused.add(agent);
 	}
 	// Cut at the last separator of either flavour: these paths come from the
@@ -97,6 +105,7 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 	return {
 		migrating: acting.length,
 		refused: rows.length - acting.length,
+		totalUnlinked,
 		masterParent: first === null || cut <= 0 ? first : first.slice(0, cut),
 		totalLinks,
 		fused: [...fused].sort(),

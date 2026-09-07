@@ -892,38 +892,61 @@ impl ConfigManager {
 			}
 		}
 
+		// Name WHERE, computed ONCE and carried on the plan so every surface
+		// reads the same answer. A bare "still discoverable somewhere" is the
+		// dead end `skipped` was added to avoid: one place was not taken, and
+		// the only thing the caller can act on is which one. Survivors are what
+		// still hands out the skill; `skipped` adds what the sweep could not
+		// even look at (an agent dir it failed to list leaves no survivor to
+		// report, precisely because it could not be read).
+		//
+		// Set AFTER the `effect.changed` fold above, so `skipped` is complete.
+		// Order-preserving `contains` rather than `dedup()`: that fold may have
+		// pushed the survivors into `skipped` already, and `dedup()` drops only
+		// CONSECUTIVE repeats, so survivors-then-skipped printed each one twice.
+		if blocks {
+			let mut still: Vec<std::path::PathBuf> = Vec::new();
+			for path in effect.survivors.iter().chain(plan.skipped.iter()) {
+				if !still.contains(path) {
+					still.push(path.clone());
+				}
+			}
+			plan.still_read_from = still;
+		}
+
 		if executed && blocks {
+			let where_ = plan
+				.still_read_from
+				.iter()
+				.map(|path| path.display().to_string())
+				.collect::<Vec<_>>()
+				.join(", ");
 			// The `--all-agents` refusal is a DIFFERENT failure — the sweep left
 			// a copy behind somewhere — and "remove for this agent alone …
 			// reads from the shared master" describes neither the request the
 			// user made nor the reason, leaving them nothing to act on.
 			let (operation, reason) = if all_agents {
-				// Name WHERE. A bare "still discoverable somewhere" is the
-				// same dead end `skipped` was added to avoid: the caller asked
-				// for everywhere, one place was not taken, and the only thing
-				// they can act on is which one. Survivors are what still hands
-				// out the skill; `skipped` adds what the sweep could not even
-				// look at (an agent dir it failed to list leaves no survivor
-				// to report, precisely because it could not be read).
-				let mut where_: Vec<String> = effect
-					.survivors
-					.iter()
-					.chain(plan.skipped.iter())
-					.map(|path| path.display().to_string())
-					.collect();
-				where_.dedup();
 				(
 					"remove from every agent".to_string(),
-					format!(
-						"skill still discoverable afterwards in: {}",
-						where_.join(", ")
-					),
+					format!("skill still discoverable afterwards in: {where_}"),
 				)
 			} else {
-				(
-					"remove for this agent alone".to_string(),
-					"skill it reads from the shared master".to_string(),
-				)
+				// The single-agent refusal had the SAME dead end and did not get
+				// the same treatment: it named the other AGENTS reading the
+				// Master while staying silent about the paths, so the one thing
+				// the user could act on — a leftover Referrer in this agent's
+				// own second read dir — was invisible. Observed on antigravity,
+				// whose write slot moved while `.gemini/antigravity/skills` kept
+				// a link the planner never schedules.
+				let reason = if where_.is_empty() {
+					"skill it reads from the shared master".to_string()
+				} else {
+					format!(
+						"skill it reads from the shared master; it is still \
+						 served to this agent from: {where_}"
+					)
+				};
+				("remove for this agent alone".to_string(), reason)
 			};
 			return Err(ConfigError::unsupported_operation(
 				&operation,

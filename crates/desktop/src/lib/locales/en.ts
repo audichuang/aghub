@@ -1375,6 +1375,7 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} skill(s) moved to {{path}}, creating {{links}} per-agent link(s).",
 	skillLayoutRowLinks: "{{count}} link(s)",
+	skillLayoutRowUnlinked: "{{count}} stale link(s) removed",
 	skillLayoutApplyN: "Migrate {{count}}",
 	skillLayoutSummaryBlocked:
 		"{{count}} skill(s) need your attention — listed below with what to do.",

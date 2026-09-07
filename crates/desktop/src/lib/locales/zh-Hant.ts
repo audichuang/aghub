@@ -1308,6 +1308,7 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} 個技能已移到 {{path}},並建立 {{links}} 個各自的 agent 連結。",
 	skillLayoutRowLinks: "{{count}} 個連結",
+	skillLayoutRowUnlinked: "移除 {{count}} 個失效連結",
 	skillLayoutApplyN: "遷移 {{count}} 個",
 	skillLayoutSummaryBlocked:
 		"有 {{count}} 個技能需要你處理,下面列出了該怎麼做。",

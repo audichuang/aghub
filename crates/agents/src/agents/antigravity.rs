@@ -57,6 +57,11 @@ define_mcp_paths! {
 //    ALONE — the planner schedules only the write dir, so `delete --yes`
 //    answers `outcome: kept` with the file in place
 //    (`npx_skill_path_ownership.rs::a_referrer_in_a_read_only_compat_dir_…`).
+//    `repair` now DETACHES the common instance of this: a stale LINK the write
+//    slot already covers (`ReferrerAction::Unlink`). What is left is a real
+//    DIRECTORY or a link to somebody else's content, which repair must not
+//    move — and the refusal names the path now, so it is a hand fix with an
+//    address instead of a dead end.
 // Both beat the alternative, which was not reading the dirs and stranding the
 // skills outright.
 fn global_skills_paths() -> Vec<PathBuf> {

@@ -20,6 +20,7 @@ function row(over: Partial<RepairReportDto> = {}): RepairReportDto {
 		fix: null,
 		master: "/home/u/.aghub/my-skill",
 		referrers: ["/home/u/.cursor/skills/my-skill"],
+		unlinked: [],
 		quarantined: null,
 		fused: [],
 		...over,

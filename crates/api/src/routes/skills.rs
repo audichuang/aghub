@@ -534,6 +534,7 @@ pub async fn delete_skill_by_path(
 							skipped: vec![skill_dir.clone()],
 							needs_confirm: false,
 							shared_master_kept: true,
+							still_read_from: Vec::new(),
 							incomplete: false,
 						},
 						executed: false,
@@ -550,6 +551,7 @@ pub async fn delete_skill_by_path(
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
+				still_read_from: Vec::new(),
 				incomplete: false,
 			};
 			// Preview and commit both go through the core-owned producers —

@@ -246,6 +246,22 @@ pub struct RemovalPlan {
 	/// agent seeing it" when the agent reads the Master directly, so the caller
 	/// must fail loudly instead of reporting a removal that did not happen.
 	pub shared_master_kept: bool,
+	/// Where the skill is STILL served from after this removal — the reason a
+	/// refusal refuses, named.
+	///
+	/// A separate field rather than a fold into `skipped`, which already carries
+	/// two other meanings ("deliberately not taken" and "could not be read") and
+	/// is read back by `all_survivors_reported` to decide whether the planner
+	/// understood the request. Overloading it a third time would change that
+	/// verdict under its own consumer.
+	///
+	/// Populated ONLY when the removal is refused, and by the ONE place that
+	/// owns the verdict (`read_effect_after`, via `remove_skill_planned`), so
+	/// `delete`, the API delete route and `reconcile skill` name the same paths.
+	/// A second derivation in the reconcile preflight is what let its message
+	/// list "who else reads the Master" while staying silent about the agent's
+	/// OWN second read dir — the only thing the user could have acted on.
+	pub still_read_from: Vec<std::path::PathBuf>,
 }
 
 /// A path's identity for comparison, with the FINAL component left unresolved.
@@ -619,6 +635,7 @@ fn plan_symlink_removal(
 		skipped,
 		needs_confirm: true,
 		shared_master_kept: false,
+		still_read_from: Vec::new(),
 		incomplete: incomplete_scan,
 	}
 }
@@ -661,6 +678,7 @@ fn plan_copy_removal(
 			skipped,
 			needs_confirm: true,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: incomplete_scan,
 		}
 	} else {
@@ -703,6 +721,7 @@ fn plan_copy_removal(
 			skipped,
 			needs_confirm: false,
 			shared_master_kept,
+			still_read_from: Vec::new(),
 			// The single-agent copy path asks `single_agent_keep_reason`, which
 			// fails CLOSED on an unfinished listing by keeping the directory —
 			// so an incomplete scan can only produce a KEEP here, never a short
@@ -1127,6 +1146,7 @@ impl RemovalOutcome {
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
+				still_read_from: Vec::new(),
 				incomplete: false,
 			},
 			executed: false,
@@ -1716,6 +1736,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: true,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 		let report =
@@ -1740,6 +1761,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 		execute_removal(&plan, std::slice::from_ref(&skills)).unwrap();
@@ -1759,6 +1781,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 		let report = execute_removal(&plan, &[skills]).unwrap();
@@ -1777,6 +1800,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 		let report =
@@ -1815,6 +1839,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 		let report =
@@ -1865,6 +1890,7 @@ mod tests {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 
@@ -1903,6 +1929,7 @@ mod tests {
 				skipped: vec![],
 				needs_confirm: false,
 				shared_master_kept: false,
+				still_read_from: Vec::new(),
 				incomplete: false,
 			},
 			executed: false,

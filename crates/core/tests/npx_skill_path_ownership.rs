@@ -989,3 +989,104 @@ fn reconcile_removes_a_private_copy_that_shadows_the_master() {
 		"and the shared Master must survive it"
 	);
 }
+
+/// The SINGLE-AGENT refusal must NAME where the skill is still served from.
+///
+/// Shape: the agent's write slot AND a read-only compat dir both link to the
+/// same Master, so unlinking the write slot changes nothing the agent reads and
+/// the refusal is correct. What was missing is the only thing the user can act
+/// on — WHICH path keeps serving it. The `--all-agents` branch had named its
+/// paths since it was written; this one said "reads from the shared master" and
+/// then listed the OTHER AGENTS, which is a different question and not
+/// actionable.
+///
+/// Observed on antigravity: its global write slot moved to
+/// `.gemini/config/skills` while `.gemini/antigravity/skills` kept a Referrer
+/// `plan_repair` never schedules, so the desktop's agent toggle refused forever
+/// with no path to chase. Exercised here on the PROJECT twin
+/// (`.agents/skills` write + `.agent/skills` compat), which needs no real home.
+#[cfg(unix)]
+#[test]
+fn a_single_agent_refusal_names_the_compat_dir_still_serving_the_skill() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let master = root.join(".aghub/legacy-skill");
+	write_skill_md(&master, "legacy-skill");
+
+	let write_slot = root.join(".agents/skills/legacy-skill");
+	std::fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+	symlink(&master, &write_slot);
+	let compat = root.join(".agent/skills/legacy-skill");
+	std::fs::create_dir_all(compat.parent().unwrap()).unwrap();
+	symlink(&master, &compat);
+
+	let mut mgr = ConfigManager::new(
+		create_adapter(AgentType::Antigravity),
+		false,
+		Some(root),
+	);
+	mgr.load().unwrap();
+
+	let error = mgr
+		.remove_skill_planned("legacy-skill", false, false, true)
+		.expect_err("unlinking the write slot takes nothing away — refuse");
+	let message = error.to_string();
+	assert!(
+		message.contains(&compat.display().to_string()),
+		"the refusal must name the path still serving the skill, got: {message}"
+	);
+	// A refusal writes nothing — the message is the whole change.
+	assert!(
+		write_slot.symlink_metadata().is_ok(),
+		"the write slot must survive a refusal"
+	);
+	assert!(
+		compat.symlink_metadata().is_ok(),
+		"the compat Referrer must survive a refusal"
+	);
+	assert!(master.join("SKILL.md").exists(), "the Master must survive");
+}
+
+/// The RECONCILE preflight must name the same path the manager's refusal does.
+///
+/// `preflight_delete` runs a dry `remove_skill_planned` and then builds its OWN
+/// message, so the survivor list the manager computed was dropped on the floor:
+/// the desktop agent toggle — the only surface that reaches this path — showed
+/// "the shared master is still read by '<13 other agents>'" and nothing the user
+/// could act on. The paths now ride along on the plan, so both spellings answer
+/// from the ONE verdict rather than each deriving its own.
+#[cfg(unix)]
+#[test]
+fn the_reconcile_preflight_names_the_compat_dir_too() {
+	use aghub_core::transfer::{reconcile_skill_preview, ResourceLocator};
+
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let master = root.join(".aghub/legacy-skill");
+	write_skill_md(&master, "legacy-skill");
+
+	let write_slot = root.join(".agents/skills/legacy-skill");
+	std::fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+	symlink(&master, &write_slot);
+	let compat = root.join(".agent/skills/legacy-skill");
+	std::fs::create_dir_all(compat.parent().unwrap()).unwrap();
+	symlink(&master, &compat);
+
+	let error = reconcile_skill_preview(
+		&ResourceLocator {
+			agent: AgentType::Antigravity,
+			scope: aghub_core::transfer::InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "legacy-skill".to_string(),
+		},
+		&[],
+		&[AgentType::Antigravity],
+	)
+	.expect_err("removing the write slot alone takes nothing away");
+	let message = error.to_string();
+	assert!(
+		message.contains(&compat.display().to_string()),
+		"the reconcile refusal must name the path still serving the skill, \
+		 got: {message}"
+	);
+}

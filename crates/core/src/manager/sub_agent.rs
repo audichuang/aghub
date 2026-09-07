@@ -142,6 +142,7 @@ impl ConfigManager {
 			skipped: vec![],
 			needs_confirm: false,
 			shared_master_kept: false,
+			still_read_from: Vec::new(),
 			incomplete: false,
 		};
 

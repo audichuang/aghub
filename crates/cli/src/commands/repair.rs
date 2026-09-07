@@ -89,6 +89,9 @@ fn render(reports: &[RepairReport], dry_run: bool) {
 			RepairOutcome::Reconciled => {
 				println!("  reconciled {}", r.name);
 			}
+			RepairOutcome::Tidied => {
+				println!("  tidied    {}", r.name);
+			}
 			RepairOutcome::Refused { reason, fix } => {
 				println!("  REFUSED   {}", r.name);
 				println!("            why: {reason}");
@@ -105,6 +108,12 @@ fn render(reports: &[RepairReport], dry_run: bool) {
 		}
 		for referrer in &r.referrers {
 			println!("            link: {}", referrer.display());
+		}
+		for stale in &r.unlinked {
+			// A DETACH, spelled differently from `link:` — these lines are the
+			// only notice the user gets that a path they may have created by
+			// hand went away.
+			println!("            unlinked: {}", stale.display());
 		}
 		if let Some(q) = &r.quarantined {
 			println!("            kept:  {}", q.display());

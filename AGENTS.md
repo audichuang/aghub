@@ -199,6 +199,21 @@ Non-obvious invariants:
   is gone used to read `dangling`. Its commonest instance is the pre-2.18
   layout (`.claude/skills/<n>` → a real `.agents/skills/<n>`, no `.aghub/<n>`),
   which `repair` MIGRATES — the sync note does not know that yet
+- **`repair` also DETACHES stale Referrers in read-only compat dirs**
+  (`ReferrerAction::Unlink`, outcome `tidied`, printed as `unlinked:`). Left
+  alone they are not cosmetic: the agent goes on reading the skill from two
+  places, so `remove for this agent alone` can never take anything away and
+  REFUSES forever — antigravity's toggle was permanently stuck this way after
+  its global write slot moved to `.gemini/config/skills` while
+  `.gemini/antigravity/skills` kept the link. FOUR guards, all in
+  `plan_repair`, none loosenable: symlink only (a real directory may hold the
+  only copy); resolves to this Master **or to the directory this run adopts as
+  one** (without that half the detach needed a SECOND `repair` run, after the
+  first reported `migrated`); the agent's own write slot covers it afterwards
+  (`Create`/`Relink`/`AdoptAsMaster`, or an already-`Conformant` `Leave`);
+  and **the path is nobody's write slot** — `.agents/skills` is codex's second
+  READ dir and eight other agents' ONLY write dir, so without that last guard
+  the sweep deleted the shared slot out from under all eight
 - **`check` is offline by default** — `checked: false`, and the reason is the
   ORCHESTRATOR's, not the surface's: a source nothing could fetch keeps its
   permanent reason (`local` / `ssh` / `unsupportedScheme`) and everything else

@@ -49,6 +49,12 @@ pub enum RepairOutcome {
 	/// npx-clobbered and hash-equal: the fork was quarantined and the Referrer
 	/// restored.
 	Reconciled,
+	/// Nothing was wrong with the Master or the write slots; what this run did
+	/// was detach stale Referrers from dirs the agent only READS. A distinct
+	/// outcome because `Conformant` says "nothing written", and reporting a
+	/// write as "already correct" is the same lie the removal side added
+	/// `Partial` to stop telling.
+	Tidied,
 	/// Nothing written. `reason` says why, `fix` is the literal next command or
 	/// path — a refused row must read as an instruction, not a diagnosis.
 	Refused { reason: String, fix: String },
@@ -74,6 +80,11 @@ pub struct RepairReport {
 	pub master: PathBuf,
 	/// Referrers created or repointed.
 	pub referrers: Vec<PathBuf>,
+	/// Stale Referrers detached from read-only compat dirs. Separate from
+	/// `referrers`: those are grants this run MADE, these are duplicates it
+	/// took away, and folding them together would read as granting the skill
+	/// twice.
+	pub unlinked: Vec<PathBuf>,
 	/// Where a fork was moved, when one was.
 	pub quarantined: Option<PathBuf>,
 	/// Agents that STILL share one directory after this repair — they have no
@@ -300,6 +311,7 @@ fn failed_report(name: &str, dry_run: bool, e: &ConfigError) -> RepairReport {
 		},
 		master: PathBuf::new(),
 		referrers: Vec::new(),
+		unlinked: Vec::new(),
 		quarantined: None,
 		fused: Vec::new(),
 		dry_run,
@@ -325,6 +337,7 @@ pub fn execute_repair(
 		outcome: RepairOutcome::Conformant,
 		master: plan.master.clone(),
 		referrers: Vec::new(),
+		unlinked: Vec::new(),
 		quarantined: None,
 		fused: plan
 			.actions
@@ -473,6 +486,34 @@ pub fn execute_repair(
 			continue;
 		}
 		swap_slot(&action.path, &plan.master, &dest)?;
+	}
+
+	// 6. Compat-dir detaches LAST. Until step 4/5 really put a Referrer in the
+	//    agent's own slot, the stale link here is the only thing still handing
+	//    it the skill — a crash before this point leaves the agent reading it,
+	//    which is the safe direction.
+	for action in &plan.actions {
+		if action.action != ReferrerAction::Unlink {
+			continue;
+		}
+		if report.outcome == RepairOutcome::Conformant {
+			report.outcome = RepairOutcome::Tidied;
+		}
+		report.unlinked.push(action.path.clone());
+		if dry_run {
+			continue;
+		}
+		// Re-checked at write time, not trusted from plan time: the planner's
+		// link-only guard was evaluated against a disk that may have changed
+		// under a long preview, and `unlink` on a real directory would take
+		// bytes. `Linker::unlink` uses `remove_dir`, never `remove_dir_all`, so
+		// even a wrong answer here can only detach — it can never recurse into
+		// the Master.
+		if !Linker::is_link(&action.path) {
+			continue;
+		}
+		Linker::unlink(&action.path)
+			.map_err(|e| io_err("unlink stale compat referrer", e))?;
 	}
 
 	Ok(report)
@@ -784,11 +825,227 @@ mod tests {
 			fs::canonicalize(&write_slot).unwrap(),
 			fs::canonicalize(&master).unwrap()
 		);
-		// The compat dir is left exactly as found: repair plans write dirs, and
-		// removing the old link is a delete nobody asked for.
+		// The compat Referrer is now a DUPLICATE of the write slot, and repair
+		// detaches it. This assertion used to be its opposite ("left exactly as
+		// found"), which was right while nothing else served the skill and
+		// wrong the moment the write slot did: the leftover keeps the agent
+		// reading the skill from two places, so `remove for this agent alone`
+		// can never take anything away and refuses forever. That is the
+		// antigravity bug this pair of tests exists for.
 		assert!(
-			compat.join(name).symlink_metadata().is_ok(),
-			"repair must not delete a Referrer it never planned"
+			compat.join(name).symlink_metadata().is_err(),
+			"the stale compat Referrer must be detached once the write slot \
+			 serves the same Master"
+		);
+		assert!(
+			master.join("SKILL.md").is_file(),
+			"detaching a Referrer must never touch the Master"
+		);
+	}
+
+	/// The compat-dir sweep fires when the write slot ALREADY serves the skill.
+	///
+	/// The sibling test above covers guard 3's `Create` branch (an empty write
+	/// slot this run fills). This is the `Leave` branch: nothing else about the
+	/// skill is wrong, so the whole repair IS the detach — which is why it needs
+	/// an outcome of its own instead of reporting `conformant` after a write.
+	#[test]
+	fn a_stale_compat_referrer_is_detached_once_the_write_slot_is_conformant() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		// antigravity PROJECT pair: `.agents/skills` writes, `.agent/skills` is
+		// read-only compat.
+		let write_slot = root.join(".agents").join("skills").join(name);
+		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &write_slot).unwrap();
+		let compat = root.join(".agent").join("skills").join(name);
+		fs::create_dir_all(compat.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &compat).unwrap();
+
+		let p = plan(&root, name, true);
+		let row = p
+			.actions
+			.iter()
+			.find(|a| a.path == compat)
+			.expect("the compat Referrer must be planned");
+		assert_eq!(
+			row.action,
+			crate::skills::shape::ReferrerAction::Unlink,
+			"a duplicate the write slot already covers is a detach"
+		);
+
+		let report = execute_repair(&p, false).unwrap();
+		assert_eq!(report.outcome, RepairOutcome::Tidied);
+		assert_eq!(report.unlinked, vec![compat.clone()]);
+		assert!(
+			compat.symlink_metadata().is_err(),
+			"the duplicate must be gone"
+		);
+		assert!(
+			Linker::is_link(&write_slot),
+			"the agent must still reach the skill through its own slot"
+		);
+		assert!(
+			master.join("SKILL.md").is_file(),
+			"a detach must never touch the Master"
+		);
+	}
+
+	/// A MIGRATION detaches the stale compat Referrer in the SAME run.
+	///
+	/// The exact sequence a real upgrader hits, and the one that made this
+	/// whole change necessary: content in the shared slot, no store, and a
+	/// Referrer an older release left in a dir the agent now only reads. It
+	/// took TWO `repair` runs before guard 2 learned about the adopt source —
+	/// the first reported `migrated` while the compat link stayed, so the
+	/// agent kept reading the skill twice over and its toggle went on refusing
+	/// after a run that said it was fixed.
+	#[test]
+	fn a_migration_detaches_the_compat_referrer_in_the_same_run() {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		// Pre-2.18: the bytes live in the shared slot, `.aghub` does not exist.
+		let slot = root.join(".agents").join("skills").join(name);
+		write_skill(&slot, name, "pre-2.18");
+		let compat = root.join(".agent").join("skills").join(name);
+		fs::create_dir_all(compat.parent().unwrap()).unwrap();
+		Linker::symlink(&slot, &compat).unwrap();
+
+		let readers = crate::skills::shape::readers_of(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			name,
+		);
+		let p = plan_repair(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			name,
+			true,
+			&readers,
+		)
+		.unwrap();
+		let report = execute_repair(&p, false).unwrap();
+
+		assert_eq!(report.outcome, RepairOutcome::Migrated);
+		assert_eq!(
+			report.unlinked,
+			vec![compat.clone()],
+			"one run must migrate AND detach"
+		);
+		assert!(
+			compat.symlink_metadata().is_err(),
+			"the stale compat Referrer must be gone after ONE run"
+		);
+		// The shared slot is eight agents' only way in — it becomes a link,
+		// never a casualty of the sweep.
+		assert!(
+			Linker::is_link(&slot),
+			"the shared slot must survive as an ordinary Referrer"
+		);
+		let master = root.join(".aghub").join(name);
+		assert_eq!(
+			fs::canonicalize(&slot).unwrap(),
+			fs::canonicalize(&master).unwrap()
+		);
+		assert!(
+			root.join(".agents").join("skills").join(name).exists(),
+			"and it must still resolve"
+		);
+	}
+
+	/// The three things the sweep must NEVER take. Each is its own way to lose
+	/// a skill, and each guard was written against a real failure:
+	///  * a real DIRECTORY may hold the only copy of bytes aghub never installed
+	///  * a link pointing somewhere else is not ours to move (D5)
+	///  * `.agents/skills` is codex's second READ dir and eight other agents'
+	///    only WRITE dir — sweeping it revokes the skill for all eight. That one
+	///    really was planned before guard 4 existed.
+	#[test]
+	fn the_compat_sweep_never_takes_what_it_must_not() {
+		// (a) a real directory in the compat dir
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let write_slot = root.join(".agents").join("skills").join(name);
+		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &write_slot).unwrap();
+		let compat = root.join(".agent").join("skills").join(name);
+		write_skill(&compat, name, "bytes aghub never installed");
+
+		let p = plan(&root, name, true);
+		assert!(
+			!p.actions.iter().any(|a| a.path == compat
+				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
+			"a real directory is never a detach: {:?}",
+			p.actions
+		);
+
+		// (b) a link pointing somewhere that is not this Master
+		let (_tmp2, root) = fixture();
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let elsewhere = root.join("elsewhere");
+		write_skill(&elsewhere, name, "someone else's");
+		let write_slot = root.join(".agents").join("skills").join(name);
+		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &write_slot).unwrap();
+		let foreign = root.join(".agent").join("skills").join(name);
+		fs::create_dir_all(foreign.parent().unwrap()).unwrap();
+		Linker::symlink(&elsewhere, &foreign).unwrap();
+
+		let p = plan(&root, name, true);
+		assert!(
+			!p.actions.iter().any(|a| a.path == foreign
+				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
+			"a link to somebody else's content is never a detach: {:?}",
+			p.actions
+		);
+
+		// (c) the SHARED slot, reachable as a read-only dir for an agent that
+		//     has its own private one
+		let (_tmp3, root) = fixture();
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let shared = root.join(".agents").join("skills").join(name);
+		fs::create_dir_all(shared.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &shared).unwrap();
+		let codex = root.join(".codex").join("skills").join(name);
+		fs::create_dir_all(codex.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &codex).unwrap();
+
+		let p = plan(&root, name, true);
+		assert!(
+			!p.actions.iter().any(|a| a.path == shared
+				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
+			"the shared slot is eight agents' only slot, never a detach: {:?}",
+			p.actions
+		);
+
+		// (d) the compat link is the agent's ONLY Referrer and this run is not
+		//     granting it one (`grant_to` is empty here). Detaching would leave
+		//     the agent unable to read a skill it reads today — the exact
+		//     pre-2.18 shape `repair` exists to rescue, not to finish off.
+		let (_tmp4, root) = fixture();
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let only = root.join(".agent").join("skills").join(name);
+		fs::create_dir_all(only.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &only).unwrap();
+		assert!(
+			!root.join(".agents").join("skills").join(name).exists(),
+			"fixture premise: the write slot must start empty"
+		);
+
+		let p = plan(&root, name, true);
+		assert!(
+			!p.actions.iter().any(|a| a.path == only
+				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
+			"an uncovered write slot must not let the only Referrer be taken: \
+			 {:?}",
+			p.actions
 		);
 	}
 

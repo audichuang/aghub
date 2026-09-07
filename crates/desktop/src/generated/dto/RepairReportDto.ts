@@ -11,8 +11,8 @@ export type RepairReportDto = {
 	 */
 	shape: string | null;
 	/**
-	 * `conformant` | `migrated` | `relinked` | `reconciled` | `refused` |
-	 * `failed`.
+	 * `conformant` | `migrated` | `relinked` | `reconciled` | `tidied` |
+	 * `refused` | `failed`.
 	 */
 	outcome: string;
 	/**
@@ -23,6 +23,13 @@ export type RepairReportDto = {
 	fix: string | null;
 	master: string;
 	referrers: Array<string>;
+	/**
+	 * Referrers DETACHED from read-only compat dirs. Kept apart from
+	 * `referrers` so the preview can say a symlink is about to be removed —
+	 * the user may have created it by hand, and a migration dialog that only
+	 * lists what it ADDS is the one that surprises them.
+	 */
+	unlinked: Array<string>;
 	quarantined: string | null;
 	fused: Array<string>;
 };
