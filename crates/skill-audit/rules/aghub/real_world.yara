@@ -3,19 +3,37 @@
 // generics use very specific verb sets and miss common variants; these are
 // broader, matching the behaviour rather than one phrasing.
 
-// Shared by the blocking rule and the cross-file source detector. A property
-// access such as process.env is not a .env file, and a fixture's bare "token"
-// is not evidence of reading credentials.
-private rule aghub_credential_source {
+// ONE expression names a credential file, or reads an env map with a
+// secret-shaped key. This is the only evidence the Critical blocking rule may
+// act on: `verdict.rs` keeps Critical deliberately narrow because Critical is
+// what REFUSES an install, while everything below it installs with a warning.
+// A property access such as process.env is not a .env file, and a fixture's
+// bare "token" is not evidence of reading credentials.
+private rule aghub_credential_source_direct {
 	strings:
 		$file = /(^|[^a-zA-Z0-9_])(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b)/ nocase
 		$named_file = /["'\/\\](credentials|id_rsa|id_ed25519)(\b|[.])/ nocase
 		$env = /(process\.env|os\.environ|getenv)[ \t]*(\??\.(get[ \t]*\()?|(\?\.)?\[|\()[ \t]*["']?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
 		$destructure = /\{[ \t\r\n]*([^{}]{0,256},[ \t\r\n]*)?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)[a-zA-Z0-9_]*[ \t\r\n]*([,:=][^{}]{0,256})?\}[ \t\r\n]*=[ \t\r\n]*process\.env\b/ nocase
+	condition:
+		any of them
+}
+
+// Adds the aliased read — `env = process.env` in one place, `env['API_TOKEN']`
+// in another. The two halves are UNCORRELATED (yara has no backreference), so
+// any secret-shaped lookup anywhere in the file pairs with any env alias
+// anywhere else: an ordinary OAuth client reading `body['access_token']`, or a
+// README code fence showing `config['API_KEY']`, both match. That ambiguity is
+// affordable for the `low` dataflow source in dataflow.yara — worst case
+// Suspicious, which still installs — and must NEVER reach the Critical rule.
+// Cost of the split, accepted deliberately: a real aliased exfil is reported
+// as Suspicious rather than refused.
+private rule aghub_credential_source {
+	strings:
 		$env_alias = /\b[a-zA-Z_$][a-zA-Z0-9_$]*[ \t]*=[ \t]*(process\.env|os\.environ)\b/
 		$secret_lookup = /\b[a-zA-Z_$][a-zA-Z0-9_$]*[ \t]*(\[|\.get[ \t]*\()[ \t]*["'][a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)[a-zA-Z0-9_]*["']/ nocase
 	condition:
-		$file or $named_file or $env or $destructure or ($env_alias and $secret_lookup)
+		aghub_credential_source_direct or ($env_alias and $secret_lookup)
 }
 
 rule aghub_credential_file_exfil {
@@ -28,7 +46,7 @@ rule aghub_credential_file_exfil {
 		$read = /readFileSync|read_to_string|read_text|fs\.read|open\s*\(|getenv|os\.environ|process\.env|\bcat\s/ nocase
 		$net = /\bfetch\s*\(|axios|requests\.(post|get)|http\.request|urllib|XMLHttpRequest|\.post\s*\(|\bcurl\b|\bwget\b|webhook/ nocase
 	condition:
-		$read and aghub_credential_source and $net
+		$read and aghub_credential_source_direct and $net
 }
 
 rule aghub_download_pipe_execute {

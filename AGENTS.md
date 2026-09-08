@@ -223,6 +223,14 @@ Non-obvious invariants:
   real update check. Its scope defaults to BOTH, like
   `doctor`/`source list`/`source diff` (it followed the global default and
   answered "this project is up to date" without reading the project lock)
+- **"Update available" includes a LOCAL edit, not just an upstream move.** Both
+  `check` and `source diff` compare the readable installed copy against
+  upstream, so a skill you edited and have not pushed reports
+  `update-available`, and `apply-update --yes` OVERWRITES that edit. The two
+  digests in the row are comparison hashes (a standard CPython cache whose
+  source `.py` is present is excluded) and deliberately need NOT equal the
+  lock's `computedHash` — locks, healing and the security audit all stay on the
+  raw hash. Mechanics and the rules: `crates/skill-update/AGENTS.md`
 - **`check` never writes, and `--write-result` is why that needs a guard.** The
   sidecar path is arbitrary, so the write is refused by **file NAME**
   (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`), by an
