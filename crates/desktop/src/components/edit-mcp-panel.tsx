@@ -25,7 +25,11 @@ import {
 	validatePositiveInteger,
 } from "../lib/form-utils";
 import { objectToKeyPairs } from "../lib/key-pair-utils";
-import { buildTransportFromForm, capitalize } from "../lib/mcp-utils";
+import {
+	buildTransportFromForm,
+	capitalize,
+	formatArgs,
+} from "../lib/mcp-utils";
 import { getMcpMergeKey } from "../lib/utils";
 import { invalidateMcpQueries } from "../requests/mcps";
 import type { EnvVar } from "./env-editor";
@@ -82,7 +86,7 @@ export function EditMcpPanel({
 			args:
 				primaryServer.transport.type === "stdio" &&
 				primaryServer.transport.args
-					? primaryServer.transport.args.join(" ")
+					? formatArgs(primaryServer.transport.args)
 					: "",
 			envVars:
 				primaryServer.transport.type === "stdio" &&
