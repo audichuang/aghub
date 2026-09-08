@@ -382,6 +382,14 @@ mod tests {
 		fs::write(path, body).unwrap();
 	}
 
+	/// Built through serde_json, never `format!` — a Windows `installLocation`
+	/// (`C:\Users\a`) pasted straight into a JSON string literal makes `\U` an
+	/// invalid escape and the fixture stops parsing.
+	fn registry_json(location: &Path) -> String {
+		serde_json::json!({ "ui-test-market": { "installLocation": location } })
+			.to_string()
+	}
+
 	fn registry(plugins_dir: PathBuf) -> UnifiedPluginRegistry {
 		UnifiedPluginRegistry {
 			plugins: HashMap::new(),
@@ -411,10 +419,7 @@ mod tests {
 		write(&external.join("plugins/ui-fixture/.keep"), "");
 		write(
 			&plugins_dir.join("known_marketplaces.json"),
-			&format!(
-				r#"{{"ui-test-market":{{"installLocation":"{}"}}}}"#,
-				external.display()
-			),
+			&registry_json(&external),
 		);
 
 		let mut registry = registry(plugins_dir);
@@ -428,6 +433,38 @@ mod tests {
 		assert_eq!(
 			plugin.local_path.as_deref(),
 			Some(external.join("plugins/ui-fixture").as_path())
+		);
+	}
+
+	/// Same name, two different roots: the registry's content is what the
+	/// catalog shows. `marketplace_path_for` in the installer must answer with
+	/// the same root — the two used to disagree, so a plugin was listed from
+	/// the external marketplace while its repository URL and `can_reinstall`
+	/// came off the stale copy.
+	#[tokio::test]
+	async fn the_registry_outranks_a_stale_copy_of_the_same_name() {
+		let temp_dir = tempdir().unwrap();
+		let plugins_dir = temp_dir.path().join(".claude/plugins");
+		let stale = plugins_dir.join("marketplaces/ui-test-market");
+		let external = temp_dir.path().join("elsewhere/market");
+		write(
+			&stale.join(".claude-plugin/marketplace.json"),
+			r#"{"name":"ui-test-market","owner":{"name":"UI"},
+            "plugins":[{"name":"stale-only","source":"./plugins/stale-only"}]}"#,
+		);
+		write(&external.join(".claude-plugin/marketplace.json"), MANIFEST);
+		write(
+			&plugins_dir.join("known_marketplaces.json"),
+			&registry_json(&external),
+		);
+
+		let mut registry = registry(plugins_dir);
+		registry.scan_marketplaces().await.unwrap();
+
+		assert!(registry.get_plugin("ui-fixture@ui-test-market").is_some());
+		assert!(
+			registry.get_plugin("stale-only@ui-test-market").is_none(),
+			"the stale copy under marketplaces/ must not win the name"
 		);
 	}
 
@@ -447,10 +484,7 @@ mod tests {
 		// Register that very same directory as well.
 		write(
 			&plugins_dir.join("known_marketplaces.json"),
-			&format!(
-				r#"{{"ui-test-market":{{"installLocation":"{}"}}}}"#,
-				inside.display()
-			),
+			&registry_json(&inside),
 		);
 		let mut both_ways = registry(plugins_dir);
 		both_ways.scan_marketplaces().await.unwrap();

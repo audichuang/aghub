@@ -283,6 +283,19 @@ mod tests {
 		std::fs::write(path, body).unwrap();
 	}
 
+	/// Built through serde_json, never `format!` — a Windows `installLocation`
+	/// (`C:\Users\a`) pasted straight into a JSON string literal makes `\U` an
+	/// invalid escape and the fixture stops parsing.
+	fn registry_json(location: &Path) -> String {
+		serde_json::json!({
+			"ui-test-market": {
+				"source": { "source": "directory", "path": location },
+				"installLocation": location,
+			}
+		})
+		.to_string()
+	}
+
 	const MANIFEST: &str = r#"{"name":"ui-test-market","owner":{"name":"UI"},
         "plugins":[{"name":"ui-fixture","source":"./plugins/ui-fixture"}]}"#;
 
@@ -297,10 +310,7 @@ mod tests {
 		write(&external.join(".claude-plugin/marketplace.json"), MANIFEST);
 		write(
 			&plugins_dir.join("known_marketplaces.json"),
-			&format!(
-				r#"{{"ui-test-market":{{"source":{{"source":"directory","path":"{p}"}},"installLocation":"{p}"}}}}"#,
-				p = external.display()
-			),
+			&registry_json(&external),
 		);
 
 		let known = known_marketplaces(&plugins_dir);
@@ -308,6 +318,23 @@ mod tests {
 		assert_eq!(
 			load_marketplace(&external).await.unwrap().name,
 			"ui-test-market"
+		);
+	}
+
+	/// The fixture builder itself: a Windows `installLocation` must survive into
+	/// valid JSON. Interpolating it with `format!` made `\U` an invalid escape,
+	/// so these tests could only ever have run on Unix.
+	#[test]
+	fn the_fixture_builder_survives_a_windows_path() {
+		let win = Path::new(r"C:\Users\a\Temp\market");
+		let json = registry_json(win);
+		let parsed: serde_json::Value = serde_json::from_str(&json)
+			.expect("fixture JSON must parse with a backslashed path");
+		assert_eq!(
+			parsed["ui-test-market"]["installLocation"]
+				.as_str()
+				.map(Path::new),
+			Some(win)
 		);
 	}
 

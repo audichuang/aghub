@@ -148,35 +148,32 @@ pub(in crate::installer::marketplace) async fn materialize_marketplace_plugin(
 
 // ── Repository ──
 
-/// Where a marketplace's checkout lives. The conventional layout is a sibling
-/// of `marketplace_root` (i.e. `<plugins_dir>/marketplaces/<name>`), but an
-/// external `directory` source is registered by PATH and never copied there —
-/// so fall back to what the `claude` CLI recorded. Without that fallback such a
-/// plugin reports no repository URL and `can_reinstall: false`, even though the
-/// CLI installs it fine.
+/// Where a marketplace's checkout lives. `known_marketplaces.json` is what the
+/// `claude` CLI itself reads, so it wins; the conventional sibling of
+/// `marketplace_root` (`<plugins_dir>/marketplaces/<name>`) is the fallback for
+/// a marketplace with no registry entry — a hand-copied one, or a `claude` old
+/// enough to keep no registry.
+///
+/// The order is NOT interchangeable, and it must match
+/// `UnifiedPluginRegistry::marketplace_roots`. A stale `marketplaces/<name>`
+/// left behind while the registry points at a new external path is exactly the
+/// case where the two disagree: reading it conventional-first made the catalog
+/// list the external marketplace's plugins while the repository URL and
+/// `can_reinstall` were answered from the stale copy.
 pub(in crate::installer) fn marketplace_path_for(
 	marketplace_root: &Path,
 	marketplace: &str,
 ) -> PathBuf {
-	let conventional = marketplace_root
-		.parent()
-		.unwrap_or(marketplace_root)
-		.join(marketplace);
+	let registered = marketplace_root.parent().and_then(Path::parent).and_then(
+		|plugins_dir| known_marketplaces(plugins_dir).remove(marketplace),
+	);
 
-	if conventional
-		.join(".claude-plugin/marketplace.json")
-		.exists()
-	{
-		return conventional;
-	}
-
-	marketplace_root
-		.parent()
-		.and_then(Path::parent)
-		.and_then(|plugins_dir| {
-			known_marketplaces(plugins_dir).remove(marketplace)
-		})
-		.unwrap_or(conventional)
+	registered.unwrap_or_else(|| {
+		marketplace_root
+			.parent()
+			.unwrap_or(marketplace_root)
+			.join(marketplace)
+	})
 }
 
 fn marketplace_origin_url_from_git(
@@ -369,12 +366,15 @@ mod tests {
 		let external = temp_dir.path().join("elsewhere/market");
 		write_manifest(&external);
 		std::fs::create_dir_all(&marketplace_root).unwrap();
+		// Built through serde_json, never `format!` — a Windows
+		// `installLocation` (`C:\Users\a`) pasted straight into a JSON string
+		// literal makes `\U` an invalid escape and the fixture stops parsing.
 		std::fs::write(
 			plugins_dir.join("known_marketplaces.json"),
-			format!(
-				r#"{{"ui-test-market":{{"installLocation":"{}"}}}}"#,
-				external.display()
-			),
+			serde_json::json!({
+				"ui-test-market": { "installLocation": &external }
+			})
+			.to_string(),
 		)
 		.unwrap();
 
@@ -383,6 +383,34 @@ mod tests {
 			external
 		);
 		assert!(is_marketplace_source(&marketplace_root, "ui-test-market"));
+	}
+
+	/// A stale copy under `marketplaces/<name>` must not outrank the registry —
+	/// this is the case where the catalog and the repository/reinstall lookup
+	/// used to disagree about which marketplace a plugin came from.
+	#[test]
+	fn the_registry_outranks_a_stale_conventional_copy() {
+		let temp_dir = tempfile::tempdir().unwrap();
+		let plugins_dir = temp_dir.path().join(".claude/plugins");
+		let marketplace_root =
+			plugins_dir.join("marketplaces/claude-plugins-official");
+		let stale = marketplace_root.with_file_name("ui-test-market");
+		let external = temp_dir.path().join("elsewhere/market");
+		write_manifest(&stale);
+		write_manifest(&external);
+		std::fs::write(
+			plugins_dir.join("known_marketplaces.json"),
+			serde_json::json!({
+				"ui-test-market": { "installLocation": &external }
+			})
+			.to_string(),
+		)
+		.unwrap();
+
+		assert_eq!(
+			marketplace_path_for(&marketplace_root, "ui-test-market"),
+			external
+		);
 	}
 
 	/// The conventional sibling layout wins, and an unknown name still resolves
