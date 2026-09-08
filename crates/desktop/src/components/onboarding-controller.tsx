@@ -1,6 +1,7 @@
 import {
 	ArrowsPointingOutIcon,
 	BookOpenIcon,
+	VideoCameraSlashIcon,
 	FolderIcon,
 	ServerIcon,
 } from "@heroicons/react/24/solid";
@@ -586,8 +587,12 @@ const WIZARD_VIDEOS: Record<string, string> = {
 };
 
 function WizardIllustration({ stepId }: { stepId: string }) {
+	const { t } = useTranslation();
 	const videoSrc = WIZARD_VIDEOS[stepId];
 	const [isLoading, setIsLoading] = useState(true);
+	// The clips come off a CDN and need a codec WebKitGTK may not have, so a
+	// step can sit on a spinner forever. Show why instead.
+	const [hasFailed, setHasFailed] = useState(false);
 	const videoRef = useRef<HTMLVideoElement>(null);
 
 	const handleFullscreen = () => {
@@ -602,12 +607,18 @@ function WizardIllustration({ stepId }: { stepId: string }) {
 
 	return (
 		<div className="group relative flex min-h-80 items-center justify-center overflow-hidden rounded-2xl border border-border bg-surface-secondary/60">
-			{isLoading && (
+			{isLoading && !hasFailed && (
 				<div className="absolute inset-0 flex items-center justify-center">
 					<Spinner size="lg" />
 				</div>
 			)}
-			{videoSrc && (
+			{hasFailed && (
+				<div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center text-muted">
+					<VideoCameraSlashIcon className="size-8" />
+					<p className="text-sm">{t("onboardingVideoFailed")}</p>
+				</div>
+			)}
+			{videoSrc && !hasFailed && (
 				<video
 					ref={videoRef}
 					key={stepId}
@@ -621,16 +632,23 @@ function WizardIllustration({ stepId }: { stepId: string }) {
 					muted
 					playsInline
 					onCanPlay={() => setIsLoading(false)}
-					onLoadStart={() => setIsLoading(true)}
+					onLoadStart={() => {
+						setIsLoading(true);
+						setHasFailed(false);
+					}}
+					onError={() => setHasFailed(true)}
 				/>
 			)}
-			<button
-				type="button"
-				className="absolute right-2 top-2 flex size-8 items-center justify-center rounded-lg bg-foreground/70 text-background opacity-0 backdrop-blur-sm transition-opacity hover:bg-foreground/90 group-hover:opacity-100"
-				onClick={handleFullscreen}
-			>
-				<ArrowsPointingOutIcon className="size-4" />
-			</button>
+			{videoSrc && !hasFailed && (
+				<button
+					type="button"
+					aria-label={t("onboardingVideoFullscreen")}
+					className="absolute right-2 top-2 flex size-8 items-center justify-center rounded-lg bg-foreground/70 text-background opacity-0 backdrop-blur-sm transition-opacity hover:bg-foreground/90 group-hover:opacity-100"
+					onClick={handleFullscreen}
+				>
+					<ArrowsPointingOutIcon className="size-4" />
+				</button>
+			)}
 		</div>
 	);
 }
