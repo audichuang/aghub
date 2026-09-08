@@ -33,7 +33,9 @@ use std::path::{Path, PathBuf};
 
 use crate::errors::{ConfigError, Result};
 use crate::skills::linker::Linker;
-use crate::skills::shape::{ReferrerAction, RefuseReason, RepairPlan};
+use crate::skills::shape::{
+	compat_unlink_permitted, ReferrerAction, RefuseReason, RepairPlan,
+};
 
 /// What repair DID, not what the skill IS. One per shape, per the spec table.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -496,24 +498,62 @@ pub fn execute_repair(
 		if action.action != ReferrerAction::Unlink {
 			continue;
 		}
-		if report.outcome == RepairOutcome::Conformant {
-			report.outcome = RepairOutcome::Tidied;
-		}
-		report.unlinked.push(action.path.clone());
+		// A dry run reports the PLAN, not a fresh disk read — it never calls
+		// `Linker::unlink`, so re-probing here would just be a second opinion
+		// with nothing behind it.
 		if dry_run {
+			if report.outcome == RepairOutcome::Conformant {
+				report.outcome = RepairOutcome::Tidied;
+			}
+			report.unlinked.push(action.path.clone());
 			continue;
 		}
-		// Re-checked at write time, not trusted from plan time: the planner's
-		// link-only guard was evaluated against a disk that may have changed
-		// under a long preview, and `unlink` on a real directory would take
-		// bytes. `Linker::unlink` uses `remove_dir`, never `remove_dir_all`, so
-		// even a wrong answer here can only detach — it can never recurse into
-		// the Master.
-		if !Linker::is_link(&action.path) {
+		// Re-checked at write time, not trusted from plan time — but only
+		// THREE of the compat-Referrer sweep's four guards (the ones actually
+		// inside `compat_unlink_permitted`: link-only, resolves to this
+		// master or the adopt source, nobody-else's-write-slot) live in this
+		// recheck: the disk it was decided against can move in between, npx
+		// rewriting the same directories or a user retargeting a link by
+		// hand onto private content or a protected write directory, and this
+		// call answers those three fresh. Only a
+		// row this recheck STILL permits gets unlinked and reported;
+		// recording the path BEFORE the check (as this used to) is how an
+		// entry that was left untouched still reported itself removed.
+		//
+		// The FOURTH guard — "the write slot covers it afterwards" — is NOT
+		// re-asked here. It lives in `plan_repair`'s "THE WRITE SLOT COVERS
+		// IT AFTERWARDS" comment, decided once against the PLAN (not the
+		// disk) before this loop ever runs, and `RepairPlan` carries no
+		// `scope`/`project_root` for this call to re-derive a write slot's
+		// path and re-classify it fresh. The gap that leaves: a `Leave` +
+		// `Conformant` write slot the plan is trusting as coverage could, in
+		// the narrow window between that plan-time read and this loop
+		// running (real writes in steps 3-5 take measurable time; nothing
+		// aghub's own mutation lock excludes runs here, since the lock only
+		// serializes aghub against aghub), be broken by something outside
+		// aghub — and this recheck would still detach the compat referrer
+		// that was the agent's only surviving link. Left unclosed this round:
+		// closing it means threading `scope`/`project_root` onto `RepairPlan`
+		// (or into this fn) so each `Unlink` row's covering write slot(s) can
+		// be re-classified here, which is more plumbing than the risk (an
+		// external actor racing inside one locked `execute_repair` call)
+		// currently buys back.
+		if !compat_unlink_permitted(
+			&action.path,
+			&plan.master,
+			adopt.as_deref(),
+			&plan.actions,
+		)
+		.map_err(|e| io_err("recheck compat referrer before unlink", e))?
+		{
 			continue;
 		}
 		Linker::unlink(&action.path)
 			.map_err(|e| io_err("unlink stale compat referrer", e))?;
+		if report.outcome == RepairOutcome::Conformant {
+			report.outcome = RepairOutcome::Tidied;
+		}
+		report.unlinked.push(action.path.clone());
 	}
 
 	Ok(report)
@@ -609,6 +649,11 @@ fn describe(reason: &RefuseReason, at: &Path) -> String {
 			"there is no master and nothing that may be adopted as one"
 				.to_string()
 		}
+		RefuseReason::UnreadableCompatDir { path } => format!(
+			"{} could not be read, so it is undecided whether it is safe to \
+			 detach",
+			path.display()
+		),
 	}
 }
 
@@ -631,6 +676,13 @@ fn fix_for(reason: &RefuseReason, at: &Path, name: &str) -> String {
 			"nothing to repair from — install it again with `aghub skills add \
 			 <source> -a <agent>`, or delete the dead referrer at {}",
 			at.display()
+		),
+		RefuseReason::UnreadableCompatDir { path } => format!(
+			"fix the permission on {} (or one of its parent directories), or \
+			 move it aside if it is not yours to change or its mount is \
+			 unreachable — repair proceeds once the path is readable or gone; \
+			 then re-run `aghub skills repair {name}`",
+			path.display()
 		),
 	}
 }
@@ -952,6 +1004,57 @@ mod tests {
 		assert!(
 			root.join(".agents").join("skills").join(name).exists(),
 			"and it must still resolve"
+		);
+	}
+
+	/// Codex 5.6 blocker 2 (DO-NOT-SHIP review): the write-time step recorded
+	/// `Tidied` and pushed the path into `report.unlinked` BEFORE checking
+	/// whether the entry could still be unlinked at all — so a disk that
+	/// changed between planning and writing (npx's `cleanAndCreateDirectory`,
+	/// or a user replacing the stale link by hand) was reported as removed
+	/// while the directory sat there completely untouched.
+	#[test]
+	fn a_compat_entry_that_changed_since_planning_is_never_reported_as_unlinked(
+	) {
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "shared");
+		let write_slot = root.join(".agents").join("skills").join(name);
+		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &write_slot).unwrap();
+		let compat = root.join(".agent").join("skills").join(name);
+		fs::create_dir_all(compat.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &compat).unwrap();
+
+		let p = plan(&root, name, true);
+		assert_eq!(
+			p.actions
+				.iter()
+				.find(|a| a.path == compat)
+				.map(|a| a.action.clone()),
+			Some(crate::skills::shape::ReferrerAction::Unlink),
+			"fixture premise: the compat referrer must be planned for detach"
+		);
+
+		// Between planning and writing, the compat slot stopped being a
+		// link — exactly what npx's `cleanAndCreateDirectory` does, or a user
+		// manually replacing it. `execute_repair` must re-observe this, not
+		// trust the plan it was handed.
+		fs::remove_file(&compat).unwrap();
+		write_skill(&compat, name, "content that appeared after planning");
+
+		let report = execute_repair(&p, false).unwrap();
+
+		assert!(
+			!report.unlinked.contains(&compat),
+			"a row that was never actually removed must not be reported as \
+			 unlinked: {:?}",
+			report.unlinked
+		);
+		assert!(
+			compat.join("SKILL.md").is_file(),
+			"a real directory must never be deleted by the compat-detach step"
 		);
 	}
 

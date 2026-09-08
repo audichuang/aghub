@@ -1299,6 +1299,12 @@ export default {
 	skillLayoutApply: "開始遷移",
 	skillLayoutRunAgain: "再執行一次",
 	skillLayoutMigrated: "已遷移 {{count}} 個技能",
+	// No "另外" (a separate group): tidied rows can be the SAME skills counted
+	// in migrated (a row can both gain a link and lose a stale one), so
+	// implying two disjoint groups would lie about the commonest run.
+	skillLayoutMigratedAndTidied:
+		"已遷移 {{migrated}} 個技能,{{tidied}} 個技能也移除了失效連結。",
+	skillLayoutNothingToMigrate: "沒有需要遷移的項目",
 	skillLayoutMasterMovesTo: "將移動到 {{path}}",
 	skillLayoutNewLinks: "將建立 {{count}} 個各自的 agent 連結",
 	skillLayoutStillShared:
@@ -1308,10 +1314,17 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} 個技能已移到 {{path}},並建立 {{links}} 個各自的 agent 連結。",
 	skillLayoutRowLinks: "{{count}} 個連結",
-	skillLayoutRowUnlinked: "移除 {{count}} 個失效連結",
+	skillLayoutRowUnlinked: "將移除 {{count}} 個失效連結",
+	skillLayoutRowUnlinkedDone: "已移除 {{count}} 個失效連結",
 	skillLayoutApplyN: "遷移 {{count}} 個",
 	skillLayoutSummaryBlocked:
 		"有 {{count}} 個技能需要你處理,下面列出了該怎麼做。",
+	// Deliberately silent on whether a new link was ALSO created: a row lands
+	// here whenever it detaches a stale compat link, even one that
+	// simultaneously gained its own Referrer (the compat-dir migration's
+	// central case) — claiming "no new link" would be false for that row.
+	skillLayoutSummaryTidied: "有 {{count}} 個技能將移除失效連結。",
+	skillLayoutSummaryTidiedDone: "有 {{count}} 個技能已移除失效連結。",
 	skillRepairOutcome_failed: "沒能遷移",
 	skillRepairOutcome_done_failed: "沒能遷移",
 	skillLayoutMigrateFailed:
@@ -1321,6 +1334,7 @@ export default {
 	skillRepairOutcome_relinked: "將重新連結",
 	skillRepairOutcome_reconciled: "將協調",
 	skillRepairOutcome_refused: "需要你處理",
+	skillRepairOutcome_tidied: "將移除失效連結",
 	skillLayoutMasterMovedTo: "已移動到 {{path}}",
 	skillLayoutNewLinksDone: "已建立 {{count}} 個各自的 agent 連結",
 	skillRepairOutcome_done_conformant: "已經正確",
@@ -1328,4 +1342,5 @@ export default {
 	skillRepairOutcome_done_relinked: "已重新連結",
 	skillRepairOutcome_done_reconciled: "已協調",
 	skillRepairOutcome_done_refused: "需要你處理",
+	skillRepairOutcome_done_tidied: "已移除失效連結",
 };

@@ -1366,6 +1366,12 @@ export default {
 	skillLayoutApply: "Migrate",
 	skillLayoutRunAgain: "Run again",
 	skillLayoutMigrated: "Migrated {{count}} skill(s)",
+	// No "N more": tidied rows can be the SAME skills counted in `migrated`
+	// (a row can both gain a link and lose a stale one), so wording that
+	// implies two disjoint groups would lie about the commonest run.
+	skillLayoutMigratedAndTidied:
+		"Migrated {{migrated}} skill(s); {{tidied}} also had a stale link removed.",
+	skillLayoutNothingToMigrate: "Nothing left to migrate",
 	skillLayoutMasterMovesTo: "Moves to {{path}}",
 	skillLayoutNewLinks: "Creates {{count}} per-agent link(s)",
 	skillLayoutStillShared:
@@ -1375,10 +1381,19 @@ export default {
 	skillLayoutSummaryDone:
 		"{{count}} skill(s) moved to {{path}}, creating {{links}} per-agent link(s).",
 	skillLayoutRowLinks: "{{count}} link(s)",
-	skillLayoutRowUnlinked: "{{count}} stale link(s) removed",
+	skillLayoutRowUnlinked: "{{count}} stale link(s) to remove",
+	skillLayoutRowUnlinkedDone: "{{count}} stale link(s) removed",
 	skillLayoutApplyN: "Migrate {{count}}",
 	skillLayoutSummaryBlocked:
 		"{{count}} skill(s) need your attention — listed below with what to do.",
+	// Deliberately silent on whether a new link was ALSO created: a row
+	// lands here whenever it detaches a stale compat link, even one that
+	// simultaneously gained its own Referrer (the compat-dir migration's
+	// central case) — claiming "no new link" would be false for that row.
+	skillLayoutSummaryTidied:
+		"{{count}} skill(s) will have a stale link removed.",
+	skillLayoutSummaryTidiedDone:
+		"{{count}} skill(s) had a stale link removed.",
 	skillRepairOutcome_failed: "could not be migrated",
 	skillRepairOutcome_done_failed: "could not be migrated",
 	skillLayoutMigrateFailed:
@@ -1388,6 +1403,7 @@ export default {
 	skillRepairOutcome_relinked: "will relink",
 	skillRepairOutcome_reconciled: "will reconcile",
 	skillRepairOutcome_refused: "needs your attention",
+	skillRepairOutcome_tidied: "will detach stale link",
 	skillLayoutMasterMovedTo: "Moved to {{path}}",
 	skillLayoutNewLinksDone: "Created {{count}} per-agent link(s)",
 	skillRepairOutcome_done_conformant: "already correct",
@@ -1395,4 +1411,5 @@ export default {
 	skillRepairOutcome_done_relinked: "relinked",
 	skillRepairOutcome_done_reconciled: "reconciled",
 	skillRepairOutcome_done_refused: "needs your attention",
+	skillRepairOutcome_done_tidied: "detached stale link",
 };

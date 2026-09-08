@@ -271,7 +271,14 @@ pub struct RemovalPlan {
 /// would read as "the Master is being deleted". The parent still gets resolved
 /// so two spellings of the same directory (macOS `/var`, Windows short names)
 /// compare equal.
-fn entry_identity(path: &Path) -> PathBuf {
+///
+/// `pub(crate)` because `skills::shape`'s compat-Referrer sweep shares this
+/// exact trap: a read-only compat dir reached through a symlinked ANCESTOR
+/// (`.agent/skills` -> `.agents/skills`) is a different `PathBuf` from the
+/// write slot it aliases, and plain `==` cannot see they are the same
+/// directory. Re-deriving the same parent-resolved comparison a second time
+/// is how the two copies drift; there is exactly one identity rule.
+pub(crate) fn entry_identity(path: &Path) -> PathBuf {
 	match (path.parent(), path.file_name()) {
 		(Some(parent), Some(leaf)) => {
 			crate::skills::linker::classify::canonicalize_lenient(parent)

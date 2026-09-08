@@ -425,6 +425,26 @@ you are lucky, and silently pass a real write if you are not. Grep the agent's
 id across `crates/*/tests/` and `crates/api/src/routes/` BEFORE changing its
 capabilities, and move the sentinel rather than deleting the assertion.
 
+**A new agent (or a scope change on an existing one) must not create a
+shared read-only dir with no writer.** `skills::shape::compat_unlink_permitted`'s
+"nobody's write slot" guard asks "is this dir somebody's WRITE slot", but what
+it is actually protecting is every agent still READING that dir — the two
+happen to coincide for every compat/shared dir in today's roster (at global
+scope, `~/.agents/skills` is cline's and warp's write dir, so the guard's
+write-slot check also shields every OTHER global reader of that same dir —
+today codex, opencode, copilot, cursor, pi, grok and omp per
+`crates/agents/tests/descriptor_regression.rs` `test_global_skill_paths`; ask
+that test, never this prose, since a roster edit here rots the moment a
+descriptor changes), and that coincidence is unproven, not designed. Add an
+agent whose only shared dir is READ-ONLY, or flip an existing descriptor's
+scope so a shared dir loses its last writer, and the guard stops protecting
+it: a `repair` run for a DIFFERENT agent that owns that dir as its OWN write
+slot will detach the compat referrer there, silently costing every read-only
+co-reader the skill. Verified unreachable today only by accident, not by
+design — before adding a shared dir with no writer in the new roster, read
+`compat_unlink_permitted`'s own comment (`crates/core/src/skills/shape.rs`)
+and either give the guard a real fix or update both places.
+
 ## Testing
 
 **Do not pollute real home**: clearing `set_skills_path_override` under

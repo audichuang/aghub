@@ -352,21 +352,56 @@ impl Linker {
 	/// lstat-based reparse-point detection: true for a Unix symlink OR a
 	/// Windows symlink/junction (FILE_ATTRIBUTE_REPARSE_POINT 0x0400). Never
 	/// follows the link. Ported from SM `is_symlink_or_junction`.
+	///
+	/// Lossy wrapper over [`Self::is_link_checked`]: every I/O error, `NotFound`
+	/// included, folds to `false`. That is exactly right for this fn's many
+	/// read-only callers (they only ever want a yes/no), and exactly wrong for
+	/// a caller that must fail CLOSED on a permission fault — that caller wants
+	/// [`Self::is_link_checked`] instead, not a hand-rolled copy of this match.
 	pub fn is_link(path: &Path) -> bool {
-		if let Ok(meta) = path.symlink_metadata() {
-			if meta.file_type().is_symlink() {
-				return true;
-			}
-			#[cfg(windows)]
-			{
-				use std::os::windows::fs::MetadataExt;
-				const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
-				if meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-					return true;
+		Self::is_link_checked(path).unwrap_or(false)
+	}
+
+	/// The fallible form of [`Self::is_link`]: same reparse-point detection,
+	/// but a `NotFound` is `Ok(false)` (nothing to call a link one way or the
+	/// other) while every OTHER I/O error — most often a permission fault on
+	/// an ancestor directory — is returned rather than swallowed.
+	///
+	/// The ONE place both directions are needed. `compat_unlink_permitted`
+	/// (`skills::shape`) used to re-spell this exact match inline so it could
+	/// fail closed instead of folding to `false` like [`Self::is_link`] — a
+	/// second copy the root `AGENTS.md` "never hand-mirror" rule forbids.
+	/// Extracted here so a change to the Windows reparse-point test only ever
+	/// has one call site to get right.
+	pub fn is_link_checked(path: &Path) -> io::Result<bool> {
+		match path.symlink_metadata() {
+			Ok(meta) => {
+				if meta.file_type().is_symlink() {
+					return Ok(true);
+				}
+				#[cfg(windows)]
+				{
+					use std::os::windows::fs::MetadataExt;
+					const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x0400;
+					Ok(meta.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT
+						!= 0)
+				}
+				#[cfg(not(windows))]
+				{
+					Ok(false)
 				}
 			}
+			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
+			Err(e) if e.kind() == io::ErrorKind::NotADirectory => Ok(false),
+			// A component of the path is not a directory, so nothing can live
+			// under it — as definite an absence as `NotFound`, and the same
+			// call `skills::shape`'s marker probe makes (`NotADirectory =>
+			// Absent`). Folding it into `Err` instead made a single regular
+			// file sitting where a compat read DIR belongs refuse `repair` for
+			// every skill at that scope, with a `fix:` line offering a
+			// permission to change and a path to move aside that do not exist.
+			Err(e) => Err(e),
 		}
-		false
 	}
 
 	/// Remove a link without touching its target: on Windows `remove_dir` then
@@ -658,6 +693,80 @@ mod tests {
 		assert!(
 			!Linker::is_link(&tmp.path().join("missing")),
 			"a missing path is not a link"
+		);
+	}
+
+	/// A non-directory component is a DEFINITE absence, not an ambiguity.
+	///
+	/// Folding `NotADirectory` into `Err` made one regular file sitting where a
+	/// compat read DIR belongs refuse `repair` for every skill at that scope —
+	/// `compat_unlink_permitted` fails closed, `plan_repair` turns that into
+	/// `RefuseReason::UnreadableCompatDir` and any refusal blocks the whole
+	/// plan. The `fix:` line then offered a permission to change and a path to
+	/// move aside, neither of which exists. `skills::shape`'s marker probe
+	/// already answers `Absent` for the same error kind; these two must agree.
+	#[cfg(unix)]
+	#[test]
+	fn is_link_checked_reads_a_non_directory_component_as_absent() {
+		let tmp = tempfile::tempdir().unwrap();
+		let file = tmp.path().join("not-a-dir");
+		std::fs::write(&file, b"regular file").unwrap();
+
+		// `<file>/entry` cannot exist, and saying so must not be an error.
+		let under = file.join("entry");
+		assert!(
+			!Linker::is_link_checked(&under).unwrap(),
+			"a path under a regular file is absent, not undecidable"
+		);
+		// The file itself is still just "not a link".
+		assert!(!Linker::is_link_checked(&file).unwrap());
+	}
+
+	/// G-D: the shared fallible probe [`Linker::is_link_checked`] must fail
+	/// CLOSED on a permission fault — the one thing [`Linker::is_link`] (its
+	/// lossy wrapper, kept for the many read-only callers that only ever want
+	/// a bare bool) is not allowed to do.
+	#[cfg(unix)]
+	#[test]
+	fn is_link_checked_fails_closed_on_an_unreadable_parent() {
+		use std::os::unix::fs::PermissionsExt;
+		use tempfile::tempdir;
+		let tmp = tempdir().unwrap();
+		let locked = tmp.path().join("locked");
+		std::fs::create_dir_all(&locked).unwrap();
+		let entry = locked.join("child");
+
+		std::fs::set_permissions(
+			&locked,
+			std::fs::Permissions::from_mode(0o000),
+		)
+		.unwrap();
+		// `entry` never exists, so probing IT would read as an error (NotFound)
+		// even under root, where the chmod below is not enforced at all —
+		// probing `locked` itself (which DOES exist) is what actually tells
+		// enforced and root-bypassed apart.
+		let enforced = std::fs::read_dir(&locked).is_err();
+		let checked = Linker::is_link_checked(&entry);
+		let lossy = Linker::is_link(&entry);
+		std::fs::set_permissions(
+			&locked,
+			std::fs::Permissions::from_mode(0o755),
+		)
+		.unwrap();
+
+		if !enforced {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+		assert!(
+			checked.is_err(),
+			"an unreadable parent must fail closed, not fold to Ok(false): \
+			 {checked:?}"
+		);
+		assert!(
+			!lossy,
+			"the lossy wrapper is allowed to fold the SAME error to false — \
+			 that is its whole point"
 		);
 	}
 

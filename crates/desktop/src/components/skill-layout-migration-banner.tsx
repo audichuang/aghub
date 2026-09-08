@@ -11,6 +11,8 @@ import {
 	migrationBannerModel,
 	migrationRowFacts,
 	migrationSummary,
+	repairScope,
+	migrationToastMessage,
 } from "../lib/skill-migration";
 import { queryKeys } from "../requests/keys";
 import {
@@ -80,10 +82,14 @@ export function SkillLayoutMigrationBanner({
 					// away the only place the user can read it.
 					return;
 				}
-				setIsOpen(false);
-				toast.success(
-					t("skillLayoutMigrated", { count: result.skills.length }),
-				);
+				// Deliberately NOT auto-closing here either, for the same
+				// reason: the rows just switched to their done-state wording
+				// (`skillRepairOutcome_done_*`, the `*Done`/`*TidiedDone`
+				// summary lines) to say what actually happened, and closing
+				// before the user sees that throws the receipt away. The
+				// toast is a quick confirmation on top, not the only account.
+				const msg = migrationToastMessage(result.skills);
+				toast.success(t(msg.key, msg));
 			},
 			// A bulk repair aborts on the first failing skill, so this fires
 			// with an unknown number of skills ALREADY migrated. The banner
@@ -110,21 +116,34 @@ export function SkillLayoutMigrationBanner({
 	const done = result ? !result.dry_run : false;
 	// A blocked row is not something the user can choose to migrate, so it is
 	// never selectable and never counted in the button.
+	//
+	// Derived from the live PREVIEW (`rows`), never from `shown`. `shown` is the
+	// last run's RESULT once there is one, and basing the button's scope on it
+	// silently widened a narrowed re-run into a bulk one: preview [a, b], the
+	// user unchecks b, the commit posts `names: [a]`, and afterwards
+	// `shown === result.skills === [a]` makes `pickedNames.length ===
+	// selectable.length` true, so "Run again" posted NO names at all and
+	// migrated the row the user had explicitly deselected. `shown` still drives
+	// the row LIST — that must show what happened — but what the button will
+	// WRITE is only ever what is still outstanding.
 	const selectable = useMemo(
-		() => shown.filter((r) => !isBlocked(r)).map((r) => r.name),
-		[shown],
+		() => rows.filter((r) => !isBlocked(r)).map((r) => r.name),
+		[rows],
 	);
 	const isPicked = (name: string) => picked === null || picked.has(name);
-	const pickedNames = selectable.filter(isPicked);
+	// ONE place decides what the button writes — see `repairScope`. It is given
+	// BOTH candidate bases on purpose: the outstanding preview, which it uses,
+	// and the last run's rows, which it may only SUBTRACT.
+	const scopeToWrite = repairScope(
+		rows,
+		result ? result.skills : null,
+		picked,
+	);
 	// The summary describes what the BUTTON will do, so before a run it counts
 	// only the selected rows; after one it describes what happened to all.
 	const summary = migrationSummary(
 		done ? shown : shown.filter((r) => isBlocked(r) || isPicked(r.name)),
 	);
-
-	if (!visible) {
-		return null;
-	}
 
 	// The dialog reads the last run's rows when there are any, so without
 	// this reset a re-open shows the PREVIOUS result — "3 migrated" — instead
@@ -136,58 +155,69 @@ export function SkillLayoutMigrationBanner({
 		setIsOpen(true);
 	};
 
+	// `visible` gates only the trigger chrome below, NOT the Modal further
+	// down: a full commit invalidates the preview query, and once it refetches
+	// to empty (everything is now conformant) `visible` flips false. The
+	// Modal must survive that — it renders the done-state receipt for the
+	// run that just finished, and an open dialog vanishing out from under the
+	// user mid-read is worse than the trigger disappearing. `Modal.Backdrop`
+	// with `isOpen={false}` renders nothing of its own (react-aria-components
+	// bails before creating its portal), so a closed dialog still costs
+	// `SkillStatusStrip`'s `:empty` container nothing — same as returning
+	// `null` used to.
 	return (
 		<>
-			{variant === "alert" ? (
-				<Alert status="warning" role="alert" aria-live="polite">
-					<Alert.Indicator />
-					<Alert.Content>
-						<Alert.Title>
-							{t("skillLayoutOutdatedTitle")}
-						</Alert.Title>
-						<Alert.Description>
-							{t("skillLayoutOutdatedHint", {
-								count: rows.length,
-							})}
-						</Alert.Description>
-						{/* Inside Alert.Content, wrapped — the shape every other
+			{visible &&
+				(variant === "alert" ? (
+					<Alert status="warning" role="alert" aria-live="polite">
+						<Alert.Indicator />
+						<Alert.Content>
+							<Alert.Title>
+								{t("skillLayoutOutdatedTitle")}
+							</Alert.Title>
+							<Alert.Description>
+								{t("skillLayoutOutdatedHint", {
+									count: rows.length,
+								})}
+							</Alert.Description>
+							{/* Inside Alert.Content, wrapped — the shape every other
 						    Alert-with-action in this app uses (see
 						    `source-detail.tsx`'s orphan-lock and prune-retry
 						    alerts). A Button as a direct sibling of Alert.Content
 						    is not a layout HeroUI v3 promises anything about. */}
-						<div className="mt-3">
-							<Button
-								variant="secondary"
-								size="sm"
-								onPress={openReview}
-							>
-								{t("skillLayoutReview")}
-							</Button>
-						</div>
-					</Alert.Content>
-				</Alert>
-			) : (
-				// Compact status-strip segment: same shape as the strip's other
-				// rows (icon, flex-1 text, right-aligned button) so the three
-				// facts read as one list, not two different components glued
-				// together.
-				<div className="flex items-center gap-2 px-3 py-2">
-					<ExclamationTriangleIcon className="size-4 shrink-0 text-warning" />
-					<span className="min-w-0 flex-1 truncate text-foreground">
-						{t("skillLayoutOutdatedRowHint", {
-							count: rows.length,
-						})}
-					</span>
-					<Button
-						size="sm"
-						variant="ghost"
-						className="shrink-0"
-						onPress={openReview}
-					>
-						{t("skillLayoutPreviewMigration")}
-					</Button>
-				</div>
-			)}
+							<div className="mt-3">
+								<Button
+									variant="secondary"
+									size="sm"
+									onPress={openReview}
+								>
+									{t("skillLayoutReview")}
+								</Button>
+							</div>
+						</Alert.Content>
+					</Alert>
+				) : (
+					// Compact status-strip segment: same shape as the strip's other
+					// rows (icon, flex-1 text, right-aligned button) so the three
+					// facts read as one list, not two different components glued
+					// together.
+					<div className="flex items-center gap-2 px-3 py-2">
+						<ExclamationTriangleIcon className="size-4 shrink-0 text-warning" />
+						<span className="min-w-0 flex-1 truncate text-foreground">
+							{t("skillLayoutOutdatedRowHint", {
+								count: rows.length,
+							})}
+						</span>
+						<Button
+							size="sm"
+							variant="ghost"
+							className="shrink-0"
+							onPress={openReview}
+						>
+							{t("skillLayoutPreviewMigration")}
+						</Button>
+					</div>
+				))}
 
 			<Modal.Backdrop
 				isOpen={isOpen}
@@ -230,6 +260,23 @@ export function SkillLayoutMigrationBanner({
 												path: summary.masterParent,
 												links: summary.totalLinks,
 											},
+										)}
+									</p>
+								)}
+								{summary.tidying > 0 && (
+									// A row core calls `tidied` can still have
+									// gained its own link (the compat-dir
+									// migration's central case), so this
+									// count is NOT "moves nothing, creates
+									// nothing" — it only ever claims the
+									// detach, never "no new link" (see the
+									// locale key's own comment).
+									<p>
+										{t(
+											done
+												? "skillLayoutSummaryTidiedDone"
+												: "skillLayoutSummaryTidied",
+											{ count: summary.tidying },
 										)}
 									</p>
 								)}
@@ -311,17 +358,17 @@ export function SkillLayoutMigrationBanner({
 										// request — the common case must not
 										// become fifty round trips just
 										// because the dialog can now narrow.
-										names:
-											pickedNames.length ===
-											selectable.length
-												? undefined
-												: pickedNames,
+										names: scopeToWrite.names,
 										dryRun: false,
 									})
 								}
+								// An empty selection must DISABLE the button
+								// even after a run: `names: []` compares equal
+								// to an empty `selectable` and would post no
+								// names, i.e. a bulk repair — the same silent
+								// widening the comment above describes.
 								isDisabled={
-									repair.isPending ||
-									(!done && pickedNames.length === 0)
+									repair.isPending || scopeToWrite.count === 0
 								}
 								className="min-h-[44px] min-w-[140px]"
 							>
@@ -336,7 +383,7 @@ export function SkillLayoutMigrationBanner({
 										result
 											? "skillLayoutRunAgain"
 											: "skillLayoutApplyN",
-										{ count: pickedNames.length },
+										{ count: scopeToWrite.count },
 									)
 								)}
 							</Button>
@@ -429,7 +476,15 @@ function MigrationRow({
 				{linkCount > 0 &&
 					` · ${t("skillLayoutRowLinks", { count: linkCount })}`}
 				{unlinkCount > 0 &&
-					` · ${t("skillLayoutRowUnlinked", { count: unlinkCount })}`}
+					// Keyed by `done` like the outcome label above it: a
+					// PREVIEW row must not say a link was already removed —
+					// nothing has run yet.
+					` · ${t(
+						done
+							? "skillLayoutRowUnlinkedDone"
+							: "skillLayoutRowUnlinked",
+						{ count: unlinkCount },
+					)}`}
 			</span>
 		</li>
 	);
