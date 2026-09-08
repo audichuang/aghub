@@ -1,4 +1,6 @@
-export default {
+import type en from "./en";
+
+const zhHant: typeof en = {
 	pluginStateInstalled: "已安裝",
 	select: "選取",
 	pluginSelectedCount: "已選 {{count}} 個",
@@ -760,6 +762,7 @@ export default {
 	uninstallFailed: "解除安裝失敗",
 	selectAgentsForMcp: "選擇哪些代理應安裝此 MCP 伺服器：",
 	noTargetAgents: "沒有可用的代理。",
+	alreadyInstalled: "已安裝",
 	installed: "已安裝",
 	globalScope: "全域範圍",
 	unknownError: "發生未知錯誤",
@@ -867,11 +870,15 @@ export default {
 	searchOnSkillsSh: "在 skills.sh 中搜尋",
 	delete: "刪除",
 	deleteSkill: "刪除技能",
+	deleteSkillTitle: "刪除技能",
 	deleteSkillForAgentTitle: "從 {{agent}} 刪除技能",
 	deleteSkillForAgentWarning:
 		"這只會刪除 {{agent}} 上的「{{name}}」，其他 Agent 的安裝不會受影響。",
+	deleteSkillForAgentsWarning:
+		'這會從所有 Agent 移除 "{{name}}"：{{agents}}。',
 	deleteSharedLocationWarning:
 		"這個位置被多個 Agent 共用。請選擇要刪除的那個 Agent。",
+	sharedLocation: "共用位置",
 	selectAgentToDelete: "要刪除的 Agent",
 	deleteSkillWarning: "這將刪除 {{count}} 個技能安裝。此操作無法復原。",
 	deleteAll: "全部刪除",
@@ -902,6 +909,13 @@ export default {
 		valuePlaceholder: "值",
 		importFromClipboard: "從剪貼簿匯入",
 	},
+
+	onboardingVideoFailed: "這段影片在這台機器上無法播放，導覽不受影響。",
+	onboardingVideoFullscreen: "全螢幕",
+
+	// Window controls (accessible names for the title-bar buttons)
+	windowMaximize: "最大化",
+	windowRestore: "還原",
 
 	// Key Pair Editor
 	keyPairEditor: {
@@ -1166,15 +1180,12 @@ export default {
 		"檢查孤兒 lock 時發生錯誤，請重試以重新掃描此來源。",
 	sourceCheckingOrphans: "檢查孤兒 lock 中...",
 	sourceOrphanTitle: "找到孤兒 lock",
-	sourceOrphanHint:
-		"此範圍有 {{count}} 個孤兒 lock。清理只會移除 lock 中的中繼資料，不會刪除技能資料夾。",
 	sourceOrphanHintOne:
 		"此範圍有 1 個孤兒 lock。清理只會移除 lock 中的中繼資料，不會刪除技能資料夾。",
 	sourceOrphanHintMany:
 		"此範圍有 {{count}} 個孤兒 lock。清理只會移除 lock 中的中繼資料，不會刪除技能資料夾。",
 	sourceCleanOrphans: "清理",
 	sourceCleaningOrphans: "清理中...",
-	sourceOrphansCleaned: "已清理 {{count}} 個孤兒 lock。",
 	sourceOrphansCleanedOne: "已清理 1 個孤兒 lock。",
 	sourceOrphansCleanedMany: "已清理 {{count}} 個孤兒 lock。",
 	sourceOrphansCleanedZero: "已是乾淨狀態，沒有需要清理的孤兒 lock。",
@@ -1215,7 +1226,6 @@ export default {
 	sourceUpdateAll: "全部更新",
 	sourceUpdating: "更新中...",
 	sourceUpdatesApplied: "已更新 {{count}} 個技能。",
-	sourceUpdateSomeFailed: "有 {{count}} 個技能更新失敗。",
 	sourceUpdateSomeFailedOne: "有 1 個技能更新失敗。",
 	sourceUpdateSomeFailedMany: "有 {{count}} 個技能更新失敗。",
 	sourceUpdateUnconfirmed:
@@ -1344,3 +1354,5 @@ export default {
 	skillRepairOutcome_done_refused: "需要你處理",
 	skillRepairOutcome_done_tidied: "已移除失效連結",
 };
+
+export default zhHant;

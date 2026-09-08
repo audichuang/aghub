@@ -1,4 +1,6 @@
-export default {
+import type en from "./en";
+
+const zhHans: typeof en = {
 	pluginStateInstalled: "已安装",
 	select: "选取",
 	pluginSelectedCount: "已选 {{count}} 个",
@@ -909,6 +911,13 @@ export default {
 		importFromClipboard: "从剪贴板导入",
 	},
 
+	onboardingVideoFailed: "这段视频在这台机器上无法播放，导览不受影响。",
+	onboardingVideoFullscreen: "全屏",
+
+	// Window controls (accessible names for the title-bar buttons)
+	windowMaximize: "最大化",
+	windowRestore: "还原",
+
 	// Key Pair Editor
 	keyPairEditor: {
 		keyPlaceholder: "键",
@@ -1041,6 +1050,7 @@ export default {
 		window: "窗口",
 		minimize: "最小化",
 		zoom: "缩放",
+		toggleFullscreen: "切换全屏",
 		close: "关闭",
 	},
 	showingPluginsCount: "显示 {{filtered}} / {{total}} 个插件",
@@ -1170,15 +1180,12 @@ export default {
 		"检查孤儿 lock 时发生错误，请重试以重新扫描此来源。",
 	sourceCheckingOrphans: "检查孤儿 lock 中...",
 	sourceOrphanTitle: "找到孤儿 lock",
-	sourceOrphanHint:
-		"此范围有 {{count}} 个孤儿 lock。清理只会移除 lock 中的元数据，不会删除技能文件夹。",
 	sourceOrphanHintOne:
 		"此范围有 1 个孤儿 lock。清理只会移除 lock 中的元数据，不会删除技能文件夹。",
 	sourceOrphanHintMany:
 		"此范围有 {{count}} 个孤儿 lock。清理只会移除 lock 中的元数据，不会删除技能文件夹。",
 	sourceCleanOrphans: "清理",
 	sourceCleaningOrphans: "清理中...",
-	sourceOrphansCleaned: "已清理 {{count}} 个孤儿 lock。",
 	sourceOrphansCleanedOne: "已清理 1 个孤儿 lock。",
 	sourceOrphansCleanedMany: "已清理 {{count}} 个孤儿 lock。",
 	sourceOrphansCleanedZero: "已是干净状态，没有需要清理的孤儿 lock。",
@@ -1219,7 +1226,6 @@ export default {
 	sourceUpdateAll: "全部更新",
 	sourceUpdating: "更新中...",
 	sourceUpdatesApplied: "已更新 {{count}} 个技能。",
-	sourceUpdateSomeFailed: "有 {{count}} 个技能更新失败。",
 	sourceUpdateSomeFailedOne: "有 1 个技能更新失败。",
 	sourceUpdateSomeFailedMany: "有 {{count}} 个技能更新失败。",
 	sourceUpdateUnconfirmed:
@@ -1349,3 +1355,5 @@ export default {
 	skillRepairOutcome_done_refused: "需要你处理",
 	skillRepairOutcome_done_tidied: "已移除失效链接",
 };
+
+export default zhHans;

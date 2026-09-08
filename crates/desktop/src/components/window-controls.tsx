@@ -2,6 +2,7 @@ import { MinusIcon, XMarkIcon } from "@heroicons/react/24/outline";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { isMacOS, isWindows } from "../lib/platform";
 
 function MaximizeIcon({ className }: { className?: string }) {
@@ -41,6 +42,7 @@ function RestoreIcon({ className }: { className?: string }) {
 }
 
 export function WindowControls() {
+	const { t } = useTranslation();
 	const [isMaximized, setIsMaximized] = useState(false);
 	const [isTauri, setIsTauri] = useState(true);
 
@@ -72,6 +74,7 @@ export function WindowControls() {
 		<div className="flex h-full items-stretch">
 			<button
 				type="button"
+				aria-label={t("menu.minimize")}
 				className="inline-flex w-12 cursor-default items-center justify-center text-muted transition-colors hover:bg-surface-secondary hover:text-foreground"
 				onClick={async () => {
 					try {
@@ -88,6 +91,9 @@ export function WindowControls() {
 			</button>
 			<button
 				type="button"
+				aria-label={
+					isMaximized ? t("windowRestore") : t("windowMaximize")
+				}
 				className="inline-flex w-12 cursor-default items-center justify-center text-muted transition-colors hover:bg-surface-secondary hover:text-foreground"
 				onClick={async () => {
 					try {
@@ -109,6 +115,7 @@ export function WindowControls() {
 			</button>
 			<button
 				type="button"
+				aria-label={t("menu.close")}
 				className="inline-flex w-12 cursor-default items-center justify-center text-muted transition-colors hover:bg-danger hover:text-white"
 				onClick={async () => {
 					try {

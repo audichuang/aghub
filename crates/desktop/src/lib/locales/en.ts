@@ -1048,6 +1048,27 @@ export default {
 		writing: "Writing",
 	},
 
+	onboardingVideoFailed:
+		"This clip couldn't be played here. The walkthrough works without it.",
+	onboardingVideoFullscreen: "Fullscreen",
+
+	// Window controls (accessible names for the title-bar buttons)
+	windowMaximize: "Maximize",
+	windowRestore: "Restore",
+
+	// Key Pair Editor
+	keyPairEditor: {
+		keyPlaceholder: "Key",
+		valuePlaceholder: "Value",
+		addPair: "Add pair",
+	},
+
+	// HTTP Header Editor
+	httpHeaderEditor: {
+		keyPlaceholder: "Header name",
+		valuePlaceholder: "Header value",
+	},
+
 	// Team
 	team: "Team",
 	headDev: "Head Dev",
@@ -1289,6 +1310,8 @@ export default {
 		"These agents get a symlink pointing at the .aghub master.",
 	sourceInstallNoLinkTargets:
 		"No agents need a link here — the master is written on its own.",
+	sourceInstallSharedSlotHint:
+		"These agents have no skills directory of their own and share one — ticking any of them ticks them all, and a later removal takes the skill from all of them too.",
 	/** The URL's `source` param did not resolve to a row in the CURRENT
 	 * scope's source list (wrong scope, or the source is gone). */
 	sourceNotInCurrentScope: "There is no such source in this scope",
