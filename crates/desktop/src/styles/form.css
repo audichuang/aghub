@@ -2,3 +2,20 @@
 form.react-aria-Form fieldset + fieldset {
 	margin-top: 1rem;
 }
+
+/*
+ * A `<fieldset>` carries `min-inline-size: min-content` from the UA stylesheet,
+ * which is a hard floor no flex shrinking can get under. HeroUI's own
+ * `.fieldset` says `shrink grow basis-0`, so it already means for these to
+ * flex — this completes that intent.
+ *
+ * Measured on the MCP create form at a 1024px window (the supported minimum):
+ * the form's content box is 384px while the stdio fieldset's min-content is
+ * 408px, so the fieldset — and every `w-full` field inside it — rendered 24px
+ * wider than its card and the page grew a horizontal scrollbar. With this rule
+ * the fieldset is 384px, nothing sticks out past the form, and no field is
+ * squeezed below its own min-content.
+ */
+form.react-aria-Form fieldset {
+	min-inline-size: 0;
+}
