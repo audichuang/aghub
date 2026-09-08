@@ -22,6 +22,10 @@ export interface McpImportServerConfig {
 	/** Widened past `McpImportTransportType`: the JSON is somebody else's
 	 * config, so it carries the agent's native spelling (e.g. `"http"`). */
 	type?: string;
+	/** Some agents key the transport as `transport` instead of `type`, either
+	 * as a bare string or as `{ type }` — see `nested_transport` in
+	 * `crates/agents/src/format/json_map.rs`. */
+	transport?: string | { type?: string };
 	command?: string;
 	args?: string[];
 	env?: Record<string, string>;
@@ -164,6 +168,16 @@ export function capitalize(str: string): string {
 	return str.charAt(0).toUpperCase() + str.slice(1).toLowerCase();
 }
 
+function readTransportTag(
+	transport: McpImportServerConfig["transport"],
+): string | undefined {
+	if (typeof transport === "string") {
+		return transport;
+	}
+
+	return transport?.type;
+}
+
 export function getImportedMcpTransportType(
 	config: McpImportServerConfig,
 ): McpImportTransportType | null {
@@ -172,7 +186,11 @@ export function getImportedMcpTransportType(
 	}
 
 	if (config.url) {
-		return config.type && HTTP_TYPE_ALIASES.includes(config.type)
+		// `type` first, then `transport` — the same fallback chain the Rust
+		// parser uses for a `type`-keyed dialect, which is what this form
+		// ultimately writes.
+		const tag = config.type ?? readTransportTag(config.transport);
+		return tag && HTTP_TYPE_ALIASES.includes(tag)
 			? "streamable_http"
 			: "sse";
 	}
