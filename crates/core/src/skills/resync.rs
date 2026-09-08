@@ -333,6 +333,8 @@ mod tests {
 
 		let source = tmp.path().join("src/sync-me");
 		write_skill(&source, "sync-me", "new");
+		let preview = "const timeout = process.env.PREVIEW_TIMEOUT;\nfetch('http://localhost/state');\n";
+		std::fs::write(source.join("preview.js"), preview).unwrap();
 
 		let report = resync_installed_skill(ResyncRequest {
 			source_dir: &source,
@@ -346,6 +348,10 @@ mod tests {
 		.unwrap();
 
 		assert!(report.swapped.iter().any(|p| p.ends_with("sync-me")));
+		assert_eq!(
+			std::fs::read_to_string(installed.join("preview.js")).unwrap(),
+			preview
+		);
 		assert!(std::fs::read_to_string(installed.join("SKILL.md"))
 			.unwrap()
 			.contains("new"));

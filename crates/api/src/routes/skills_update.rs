@@ -1835,6 +1835,7 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			local_comparison_hash: None,
 			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
@@ -1979,10 +1980,13 @@ mod tests {
 					lock.skills.insert("legacy".into(), updated);
 					skill::lock::global::write_skill_lock(&lock).unwrap();
 					// The disk hash the check read: still the pre-npx tree.
-					HashMap::from([(
-						"legacy".to_string(),
-						"disk-hash-a".to_string(),
-					)])
+					projection::LocalHashes {
+						hashes: HashMap::from([(
+							"legacy".to_string(),
+							"disk-hash-a".to_string(),
+						)]),
+						..Default::default()
+					}
 				},
 			);
 
@@ -2304,6 +2308,7 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			local_comparison_hash: None,
 			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());
@@ -2342,6 +2347,7 @@ mod tests {
 			skill_path: Some("SKILL.md".to_string()),
 			stored_hash: None,
 			local_hash: None,
+			local_comparison_hash: None,
 			ref_commit: None,
 		}];
 		let fetcher: Arc<dyn Fetcher> = Arc::new(GitFetcher::new());

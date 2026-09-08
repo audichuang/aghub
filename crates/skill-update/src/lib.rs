@@ -75,9 +75,10 @@ pub struct EntryInput {
 	pub skill_path: Option<String>,
 	/// Stored `content_hash`/`computed_hash`. `None`/placeholder → auto-heal.
 	pub stored_hash: Option<String>,
-	/// Hash of the currently installed local skill folder, computed by the route
-	/// before checking upstream. Used as the comparison baseline for legacy locks.
+	/// Raw installed-folder hash, used for preflight integrity and lock healing.
 	pub local_hash: Option<String>,
+	/// Hash with generated caches excluded, used for local/upstream comparison.
+	pub local_comparison_hash: Option<String>,
 	/// Stored repo-level commit OID (`refCommit`) from the lock, when present.
 	/// Drives the tip preflight: an unchanged tip lets the group skip the
 	/// fetch. `None` (project lock / npx / legacy) → never a preflight skip.
@@ -135,7 +136,11 @@ pub(crate) enum CachedGroup {
 
 #[derive(Clone, Debug)]
 pub(crate) enum HashProbe {
-	Fresh { hash: String, name: Option<String> },
+	Fresh {
+		hash: String,
+		comparison_hash: String,
+		name: Option<String>,
+	},
 	Uncheckable(UncheckableReason),
 }
 
@@ -377,9 +382,16 @@ fn probe_skill_hash_in_repo(
 	};
 	let folder = skill_file.parent().unwrap_or(repo_root);
 	let name = skill::parse(&skill_file).ok().map(|skill| skill.name);
-	match skill::compute_skill_folder_hash(folder) {
-		Ok(hash) => HashProbe::Fresh { hash, name },
-		Err(_) => HashProbe::Uncheckable(UncheckableReason::Local),
+	match (
+		skill::compute_skill_folder_hash(folder),
+		skill::compute_skill_folder_comparison_hash(folder),
+	) {
+		(Ok(hash), Ok(comparison_hash)) => HashProbe::Fresh {
+			hash,
+			comparison_hash,
+			name,
+		},
+		_ => HashProbe::Uncheckable(UncheckableReason::Local),
 	}
 }
 
@@ -445,6 +457,7 @@ pub(crate) fn preflight_can_skip(members: &[EntryInput]) -> bool {
 fn locally_intact(m: &EntryInput) -> bool {
 	!lock_hash_unknown(m.stored_hash.as_deref())
 		&& m.local_hash.is_some()
+		&& m.local_comparison_hash.is_some()
 		&& m.local_hash == m.stored_hash
 }
 
@@ -466,6 +479,10 @@ pub(crate) fn preflight_decision(
 				.entry(m.skill_path.clone())
 				.or_insert(HashProbe::Fresh {
 					hash: stored,
+					comparison_hash: m
+						.local_comparison_hash
+						.clone()
+						.unwrap_or_default(),
 					name: None,
 				});
 		}
@@ -493,6 +510,7 @@ fn classify_member_from_probe(
 		},
 		HashProbe::Fresh {
 			hash: fresh_hash,
+			comparison_hash,
 			name,
 		} => {
 			if let Some(parsed_name) = name {
@@ -507,10 +525,14 @@ fn classify_member_from_probe(
 				}
 			}
 			let unknown = lock_hash_unknown(member.stored_hash.as_deref());
-			let baseline = if unknown {
-				member.local_hash.as_deref()
-			} else {
-				member.stored_hash.as_deref()
+			// Compare actual content when readable; stored lock digests remain raw.
+			let (baseline, upstream) = match member
+				.local_comparison_hash
+				.as_deref()
+			{
+				Some(local) => (Some(local), comparison_hash),
+				None if !unknown => (member.stored_hash.as_deref(), fresh_hash),
+				None => (None, fresh_hash),
 			};
 			let Some(baseline) = baseline else {
 				return CheckOutput {
@@ -522,11 +544,8 @@ fn classify_member_from_probe(
 					heal_oid: None,
 				};
 			};
-			let status = compare_known_hashes(
-				baseline,
-				fresh_hash,
-				upstream_commit_time,
-			);
+			let status =
+				compare_known_hashes(baseline, upstream, upstream_commit_time);
 			// The lock agreeing with upstream does NOT mean the installed copy is
 			// current — it means upstream has not moved since we recorded it. With
 			// no readable local copy (folder deleted, unreadable, or two agent
@@ -534,19 +553,20 @@ fn classify_member_from_probe(
 			// not on disk, which is the one answer a user acts on by doing
 			// nothing. `UpdateAvailable` stays as-is: an update really does exist,
 			// and applying it restores the folder.
-			let status = if status == SkillUpdateStatus::UpToDate
-				&& !unknown && member.local_hash.is_none()
-			{
-				SkillUpdateStatus::Uncheckable {
-					reason: UncheckableReason::Local,
-				}
-			} else {
-				status
-			};
+			let status =
+				if status == SkillUpdateStatus::UpToDate
+					&& !unknown && member.local_comparison_hash.is_none()
+				{
+					SkillUpdateStatus::Uncheckable {
+						reason: UncheckableReason::Local,
+					}
+				} else {
+					status
+				};
 			CheckOutput {
 				key,
 				status,
-				heal_hash: unknown.then(|| baseline.to_string()),
+				heal_hash: unknown.then(|| member.local_hash.clone()).flatten(),
 				heal_oid: None,
 			}
 		}
@@ -1081,6 +1101,7 @@ mod tests {
 			skill_path: Some("SKILL.md".into()),
 			stored_hash: None,
 			local_hash: None,
+			local_comparison_hash: None,
 			ref_commit: None,
 		}
 	}
@@ -1092,6 +1113,7 @@ mod tests {
 		a.ref_commit = Some(tip.to_string());
 		a.stored_hash = Some("hash_a".to_string());
 		a.local_hash = Some("hash_a".to_string());
+		a.local_comparison_hash = a.local_hash.clone();
 		a.skill_path = Some("SKILL.md".into());
 		match preflight_decision(&[a], tip) {
 			PreflightResult::Skip(CachedGroup::Hashes(map)) => {
@@ -1109,6 +1131,7 @@ mod tests {
 		m.ref_commit = Some(tip.to_string());
 		m.stored_hash = Some("hash_a".to_string());
 		m.local_hash = Some("hash_a".to_string());
+		m.local_comparison_hash = m.local_hash.clone();
 		m
 	}
 
@@ -1117,6 +1140,7 @@ mod tests {
 		let tip = "abc123def456abc123def456abc123def456abc1";
 		let mut m = trustworthy_member(tip);
 		m.local_hash = Some("DRIFTED".to_string()); // installed copy edited
+		m.local_comparison_hash = m.local_hash.clone();
 		assert!(matches!(
 			preflight_decision(&[m], tip),
 			PreflightResult::Fetch
@@ -1209,6 +1233,7 @@ mod tests {
 		a.ref_commit = Some(tip.to_string());
 		a.stored_hash = Some(hash.clone());
 		a.local_hash = Some(hash);
+		a.local_comparison_hash = a.local_hash.clone();
 		let out = check_updates(vec![a], deps).await;
 		assert_eq!(out.len(), 1);
 		assert_eq!(out[0].status, SkillUpdateStatus::UpToDate);
@@ -1263,6 +1288,7 @@ mod tests {
 			a.ref_commit = Some(tip.to_string());
 			a.stored_hash = Some(hash.clone());
 			a.local_hash = Some(hash);
+			a.local_comparison_hash = a.local_hash.clone();
 
 			let out = check_updates(vec![a], deps).await;
 
@@ -1327,6 +1353,7 @@ mod tests {
 			a.ref_commit = Some(tip.to_string());
 			a.stored_hash = Some(hash.clone());
 			a.local_hash = Some(hash);
+			a.local_comparison_hash = a.local_hash.clone();
 			break_it(&mut a);
 
 			check_updates(vec![a], deps).await;
@@ -1396,6 +1423,7 @@ mod tests {
 		a.ref_commit = None; // project lock / npx / legacy → never a skip
 		a.stored_hash = Some(hash.clone());
 		a.local_hash = Some(hash);
+		a.local_comparison_hash = a.local_hash.clone();
 
 		check_updates(vec![a], deps).await;
 
@@ -1442,6 +1470,7 @@ mod tests {
 		a.ref_commit = Some(tip.to_string());
 		a.stored_hash = Some("STORED_OLD".to_string());
 		a.local_hash = Some("DRIFTED".to_string());
+		a.local_comparison_hash = a.local_hash.clone();
 		let out = check_updates(vec![a], deps).await;
 		assert_eq!(
 			*fetcher.calls.lock().unwrap(),
@@ -1480,6 +1509,7 @@ mod tests {
 		g.ref_commit = Some(old_oid.to_string());
 		g.stored_hash = Some("INSTALLED_HASH".to_string());
 		g.local_hash = Some("INSTALLED_HASH".to_string());
+		g.local_comparison_hash = g.local_hash.clone();
 
 		let mut cache = ResultCache::new(Duration::from_secs(300));
 		let first = check_updates(
@@ -1556,6 +1586,7 @@ mod tests {
 		let mut g = entry("g", "o/r", Some("main"));
 		g.stored_hash = Some(hash.clone());
 		g.local_hash = Some(hash);
+		g.local_comparison_hash = g.local_hash.clone();
 		let out = check_updates(vec![g], deps).await;
 		assert_eq!(out.len(), 1);
 		// A fresh fetch records the resolved tip so the next check can preflight.
@@ -1619,6 +1650,7 @@ mod tests {
 		let mut g = entry("g", "o/r", Some("main"));
 		g.stored_hash = Some(hash.clone());
 		g.local_hash = Some(hash);
+		g.local_comparison_hash = g.local_hash.clone();
 		let out = check_updates(vec![g], deps).await;
 		assert_eq!(out.len(), 1);
 		assert_eq!(
@@ -1744,6 +1776,7 @@ mod tests {
 			e.source_type = source_type.into();
 			e.stored_hash = Some("h".to_string());
 			e.local_hash = Some("h".to_string());
+			e.local_comparison_hash = e.local_hash.clone();
 			e
 		};
 		assert_eq!(
@@ -1826,6 +1859,7 @@ mod tests {
 		};
 		let mut input = entry("a", "o/r", Some("main"));
 		input.local_hash = Some("abc".to_string());
+		input.local_comparison_hash = input.local_hash.clone();
 
 		let out = check_updates(vec![input], deps).await;
 
@@ -1928,6 +1962,7 @@ mod tests {
 		let mut a = entry("a", "o/r", Some(sha));
 		a.stored_hash = Some("H".into());
 		a.local_hash = Some("H".into());
+		a.local_comparison_hash = a.local_hash.clone();
 		let out = check_updates(vec![a], deps).await;
 		assert_eq!(out.len(), 1);
 		assert_eq!(out[0].status, SkillUpdateStatus::UpToDate);
@@ -1965,6 +2000,7 @@ mod tests {
 		let mut a = entry("a", "o/r", Some(sha));
 		a.stored_hash = Some(upstream);
 		a.local_hash = None; // the folder is gone
+		a.local_comparison_hash = a.local_hash.clone();
 
 		let out = check_updates(vec![a], deps).await;
 
@@ -2036,8 +2072,10 @@ mod tests {
 		};
 		let mut a = entry("a", "o/r", Some("main"));
 		a.local_hash = Some(hash.clone());
+		a.local_comparison_hash = a.local_hash.clone();
 		let mut b = entry("b", "o/r", Some("main"));
 		b.local_hash = Some(hash.clone());
+		b.local_comparison_hash = b.local_hash.clone();
 		let out = check_updates(vec![a, b], deps).await;
 		// Both members resolve; legacy locks heal from their local baseline.
 		assert_eq!(out.len(), 2);
@@ -2117,6 +2155,7 @@ mod tests {
 		};
 		let mut e = entry("a", "o/r", Some("main"));
 		e.local_hash = Some(local_hash.clone());
+		e.local_comparison_hash = e.local_hash.clone();
 		let out = check_updates(vec![e], deps).await;
 		assert_eq!(out.len(), 1);
 		assert_eq!(out[0].heal_hash, Some(local_hash.clone()));
@@ -2274,10 +2313,12 @@ mod tests {
 		a.skill_path = Some("a/SKILL.md".into());
 		a.stored_hash = Some(hash_a.clone());
 		a.local_hash = Some(hash_a);
+		a.local_comparison_hash = a.local_hash.clone();
 		let mut b = entry("b", "o/r", Some("main"));
 		b.skill_path = Some("b/SKILL.md".into());
 		b.stored_hash = Some("old".into());
 		b.local_hash = Some("old".into());
+		b.local_comparison_hash = b.local_hash.clone();
 		let out = check_updates(vec![a, b], deps).await;
 		let by_name: HashMap<_, _> =
 			out.into_iter().map(|o| (o.key.name.clone(), o)).collect();
@@ -2318,6 +2359,7 @@ mod tests {
 		local.source_type = "local".to_string();
 		let mut github = entry("github", "o/r", Some("main"));
 		github.local_hash = Some(hash);
+		github.local_comparison_hash = github.local_hash.clone();
 
 		let out = check_updates(vec![local, github], deps).await;
 		let by_name: HashMap<_, _> =
@@ -2389,6 +2431,7 @@ mod tests {
 				let mut e =
 					entry(&format!("skill-{i}"), &format!("o/r-{i}"), None);
 				e.local_hash = Some(hash.clone());
+				e.local_comparison_hash = e.local_hash.clone();
 				e
 			})
 			.collect();

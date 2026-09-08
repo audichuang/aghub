@@ -466,7 +466,7 @@ export default {
 	skillCheckCompleteAllGood: "All skills are up to date",
 	/** Throttled toast shown while a check runs without a GitHub credential. */
 	credentialSpeedHint:
-		"Tip: add a GitHub credential in Integrations to speed up skill update checks.",
+		"Add a GitHub credential in Integrations for a higher request allowance.",
 	/** List header label. {{time}} is a human-readable relative string
 	 *  like "3 minutes ago" produced by the component. */
 	lastCheckedAgo: "Last checked {{time}}",
@@ -1305,9 +1305,9 @@ export default {
 	sourceInstallSomeFailedOne: "Couldn't install 1 target.",
 	sourceInstallSomeFailedMany: "Couldn't install {{count}} targets.",
 	sourceInstallFailed: "Failed to install skill.",
-	sourceInstallLinkTargetsTitle: "Will be linked",
+	sourceInstallLinkTargetsTitle: "Install for these AI tools",
 	sourceInstallLinkTargetsHint:
-		"These agents get a symlink pointing at the .aghub master.",
+		"Select the AI tools that should be able to use this skill.",
 	sourceInstallNoLinkTargets:
 		"No agents need a link here — the master is written on its own.",
 	sourceInstallSharedSlotHint:
@@ -1323,6 +1323,15 @@ export default {
 	summaryLatest: "{{count}} up to date",
 	// SourceDetail action headings
 	sourceNeedsAction: "Needs action",
+	sourceViewSkill: "View skill",
+	sourceViewSkillLabel: "View {{name}} on GitHub (opens browser)",
+	sourceViewSkillFailed: "Could not open the skill document.",
+	sourceAccessAnonymous: "No GitHub credential in use.",
+	sourceAccessConfigure: "Configure credential",
+	sourceConfirmInstallTitle: "Install {{count}} skill(s)?",
+	sourceConfirmInstallAction: "Confirm installation",
+	sourceChooseAgents: "Select at least one AI tool.",
+	sourceSharedAgentGroup: "Shared folder: selected together",
 	sourceAllLatest: "All skills are up to date.",
 	// Credential binding
 	credentialBind: "Bind credential",

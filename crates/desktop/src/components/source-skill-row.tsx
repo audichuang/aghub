@@ -1,10 +1,15 @@
-import { Chip, Checkbox } from "@heroui/react";
+import { ArrowTopRightOnSquareIcon } from "@heroicons/react/24/outline";
+import { Chip, Checkbox, toast } from "@heroui/react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useTranslation } from "react-i18next";
 import type { SourceSkillDiff } from "../generated/dto";
 import { cn } from "../lib/utils";
+import { sourceSkillUrl } from "../lib/source-skill-url";
 
 export interface SourceSkillRowProps {
 	skill: SourceSkillDiff;
+	sourceUrl?: string;
+	gitRef?: string;
 	isExpanded: boolean;
 	onToggle: () => void;
 	action?: React.ReactNode;
@@ -17,6 +22,8 @@ export interface SourceSkillRowProps {
 
 export function SourceSkillRow({
 	skill,
+	sourceUrl,
+	gitRef,
 	isExpanded,
 	onToggle,
 	action,
@@ -28,6 +35,10 @@ export function SourceSkillRow({
 }: SourceSkillRowProps) {
 	const { t } = useTranslation();
 	const detailText = skill.description || skill.skillPath;
+	const documentUrl =
+		skill.state === "removed"
+			? null
+			: sourceSkillUrl(sourceUrl, skill.skillPath, gitRef);
 
 	return (
 		<li className="flex items-center gap-3 border-b border-border px-3 py-2.5 last:border-b-0 hover:bg-surface-secondary/70">
@@ -94,6 +105,27 @@ export function SourceSkillRow({
 					</p>
 				)}
 			</button>
+			{documentUrl && (
+				<a
+					href={documentUrl}
+					target="_blank"
+					rel="noopener noreferrer"
+					aria-label={t("sourceViewSkillLabel", { name: skill.name })}
+					className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-accent hover:bg-surface-secondary focus-visible:outline-2 focus-visible:outline-focus"
+					onClick={(event) => {
+						event.preventDefault();
+						void openUrl(documentUrl).catch(() =>
+							toast.danger(t("sourceViewSkillFailed")),
+						);
+					}}
+				>
+					<ArrowTopRightOnSquareIcon
+						aria-hidden="true"
+						className="size-3.5"
+					/>
+					{t("sourceViewSkill")}
+				</a>
+			)}
 			{action && <div className="shrink-0">{action}</div>}
 		</li>
 	);

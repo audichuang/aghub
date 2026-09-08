@@ -18,11 +18,9 @@ rule aghub_reads_secret {
 		flow = "source"
 		description = "reads credential files or harvests secret environment variables"
 	strings:
-		$cred_file = /\.env\b|\.ssh\/|\.aws\/credentials|\.aws\/config|\.netrc|\.git-credentials/ nocase
-		$env_secret = /(os\.environ|getenv|process\.env)[^\n]{0,80}(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
 		$cred_kw = /aws_secret_access_key|private[_-]?key|mnemonic|seed[_-]?phrase/ nocase
 	condition:
-		any of them
+		aghub_credential_source or $cred_kw
 }
 
 rule aghub_network_egress {
@@ -33,7 +31,7 @@ rule aghub_network_egress {
 		flow = "sink"
 		description = "sends data to a network endpoint"
 	strings:
-		$http = /requests\.(post|put|patch)\s*\(|axios\b|fetch\s*\(|urllib|http\.client|httpx\.|\.post\s*\(/ nocase
+		$http = /requests\.(post|put|patch)\s*\(|axios\b|\bfetch\s*\(|urllib|http\.client|httpx\.|\.post\s*\(/ nocase
 		$socket = /socket\.socket|\.sendall\s*\(|\.send\s*\(/ nocase
 		$cli = /\bcurl\b|\bwget\b/ nocase
 	condition:

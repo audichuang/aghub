@@ -6,6 +6,15 @@ import type { SourceSkillDiff } from "./SourceSkillDiff";
  */
 export type SourceDiffResponse = {
 	source: string;
+	/**
+	 * Whether the fetch actually received a credential. Omitted if no fetch
+	 * ran or cohorts used mixed authentication; never inferred from storage.
+	 */
+	usedCredential?: boolean;
+	/**
+	 * Total source-check time, including credential resolution and comparison.
+	 */
+	elapsedMs?: number;
 	gitRef?: string;
 	/**
 	 * A fresh git-clone session id usable with `POST /skills/git/install` to

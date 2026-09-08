@@ -53,11 +53,14 @@ test("applying an update refetches the open skill's content and file tree", asyn
 	const client = freshClient();
 	const content = seedActive(client, queryKeys.skills.content("a/SKILL.md"));
 	const tree = seedActive(client, queryKeys.skills.tree("a/SKILL.md"));
+	const repair = seedActive(client, queryKeys.skills.repairPreview("global"));
 	await content.settled;
 	await tree.settled;
+	await repair.settled;
 	const before = {
 		content: content.state.fetches,
 		tree: tree.state.fetches,
+		repair: repair.state.fetches,
 	};
 
 	const api = {
@@ -86,6 +89,11 @@ test("applying an update refetches the open skill's content and file tree", asyn
 	);
 	content.unsubscribe();
 	tree.unsubscribe();
+	assert.ok(
+		repair.state.fetches > before.repair,
+		"updating divergent copies must refresh the migration conflict preview",
+	);
+	repair.unsubscribe();
 });
 
 test("a credential change invalidates the source answers computed with it", async () => {

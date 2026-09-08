@@ -85,7 +85,7 @@ pub struct SourceSkillDiff {
 pub(crate) struct BaselineEntry {
 	pub installed_name: String,
 	pub stored_hash: String,
-	pub local_hashes: Vec<String>,
+	pub local_comparison_hashes: Vec<String>,
 	pub scope_label: String,
 	/// The ref THIS entry is pinned to. A Sources row is one repository, but its
 	/// entries need not share a branch/tag, and an entry may only be judged
@@ -569,7 +569,9 @@ fn local_hashes_for_installed(
 ) -> Vec<String> {
 	aghub_core::skills::removal::installed_skill_roots_in(agents, name)
 		.into_iter()
-		.filter_map(|root| skill::compute_skill_folder_hash(&root).ok())
+		.filter_map(|root| {
+			skill::compute_skill_folder_comparison_hash(&root).ok()
+		})
 		.collect()
 }
 
@@ -613,14 +615,14 @@ fn insert_scope_entries(
 							None,
 						)
 					});
-					let local_hashes =
+					let local_comparison_hashes =
 						local_hashes_for_installed(agents, &name);
 					baseline.insert(
 						skill_path,
 						BaselineEntry {
 							installed_name: name,
 							stored_hash: hash,
-							local_hashes,
+							local_comparison_hashes,
 							scope_label: "global".to_string(),
 							ref_name: entry.ref_name.clone(),
 						},
@@ -651,14 +653,14 @@ fn insert_scope_entries(
 							Some(root),
 						)
 					});
-					let local_hashes =
+					let local_comparison_hashes =
 						local_hashes_for_installed(agents, &name);
 					baseline.insert(
 						skill_path,
 						BaselineEntry {
 							installed_name: name,
 							stored_hash: entry.computed_hash,
-							local_hashes,
+							local_comparison_hashes,
 							scope_label: "project".to_string(),
 							ref_name: entry.ref_name.clone(),
 						},
@@ -1162,15 +1164,15 @@ fn classify_installed(
 	entry: &BaselineEntry,
 	skill_dir: &Path,
 ) -> (SourceSkillState, Option<String>) {
-	let fresh = match skill::compute_skill_folder_hash(skill_dir) {
+	let fresh = match skill::compute_skill_folder_comparison_hash(skill_dir) {
 		Ok(hash) => hash,
 		Err(_) => {
 			return (SourceSkillState::Uncheckable, Some("local".to_string()))
 		}
 	};
 
-	if !entry.local_hashes.is_empty() {
-		if entry.local_hashes.iter().all(|hash| {
+	if !entry.local_comparison_hashes.is_empty() {
+		if entry.local_comparison_hashes.iter().all(|hash| {
 			compare_known_hashes(hash, &fresh, None)
 				== SkillUpdateStatus::UpToDate
 		}) {
@@ -1178,6 +1180,13 @@ fn classify_installed(
 		}
 		return (SourceSkillState::InstalledOutdated, None);
 	}
+
+	let fresh = match skill::compute_skill_folder_hash(skill_dir) {
+		Ok(hash) => hash,
+		Err(_) => {
+			return (SourceSkillState::Uncheckable, Some("local".to_string()))
+		}
+	};
 
 	let baseline = if entry.stored_hash.is_empty()
 		|| skill::is_placeholder_digest(&entry.stored_hash)
@@ -2004,6 +2013,90 @@ mod classify_tests {
 	use std::fs;
 	use tempfile::tempdir;
 
+	#[test]
+	fn source_and_update_check_agree_on_python_cache_and_real_changes() {
+		let project = tempdir().unwrap();
+		let upstream = tempdir().unwrap();
+		let local = project.path().join(".claude/skills/cache-test");
+		write_skill(project.path(), ".claude/skills/cache-test", "cache-test");
+		write_skill(upstream.path(), "", "cache-test");
+		for root in [&local, &upstream.path().to_path_buf()] {
+			fs::write(root.join("run.py"), "print('original')").unwrap();
+			fs::create_dir(root.join("__pycache__")).unwrap();
+		}
+		let raw = skill::compute_skill_folder_hash(upstream.path()).unwrap();
+		let mut lock = skill::lock::local::LocalSkillLockFile::new();
+		lock.skills.insert(
+			"cache-test".into(),
+			skill::LocalSkillLockEntry {
+				source: "owner/repo".into(),
+				source_url: None,
+				source_type: "github".into(),
+				ref_name: None,
+				computed_hash: raw.clone(),
+				skill_path: Some("SKILL.md".into()),
+				ref_commit: None,
+			},
+		);
+		fs::write(local.join("__pycache__/run.cpython-312.pyc"), "local cache")
+			.unwrap();
+		for (remote_cache, edited, expected) in [
+			(false, false, SourceSkillState::InstalledCurrent),
+			(true, false, SourceSkillState::InstalledCurrent),
+			(true, true, SourceSkillState::InstalledOutdated),
+		] {
+			if remote_cache {
+				fs::write(
+					upstream.path().join("__pycache__/run.cpython-312.pyc"),
+					"different upstream cache",
+				)
+				.unwrap();
+			}
+			if edited {
+				fs::write(local.join("run.py"), "print('local edit')").unwrap();
+			}
+			let (entries, _) = crate::projection::project_lock_entries(
+				false,
+				Some(project.path()),
+				|| lock.clone(),
+			);
+			let entry = &entries[0];
+			assert_ne!(entry.local_hash, entry.local_comparison_hash);
+			let baseline = BaselineEntry {
+				installed_name: "cache-test".into(),
+				stored_hash: raw.clone(),
+				local_comparison_hashes: vec![entry
+					.local_comparison_hash
+					.clone()
+					.unwrap()],
+				scope_label: "project".into(),
+				ref_name: None,
+			};
+			assert_eq!(
+				classify_installed(&baseline, upstream.path()).0,
+				expected
+			);
+			let probe = crate::probe_skill_hash_in_repo(
+				upstream.path(),
+				Some("SKILL.md"),
+			);
+			let result = crate::classify_member_from_probe(entry, &probe, None);
+			assert_eq!(
+				result.status == SkillUpdateStatus::UpToDate,
+				expected == SourceSkillState::InstalledCurrent
+			);
+			assert_eq!(result.heal_hash, None);
+			let mut legacy = entry.clone();
+			legacy.stored_hash = None;
+			assert_eq!(
+				crate::classify_member_from_probe(&legacy, &probe, None)
+					.heal_hash,
+				legacy.local_hash,
+				"healing must preserve the raw local baseline"
+			);
+		}
+	}
+
 	fn write_skill(root: &Path, relative_dir: &str, name: &str) {
 		let dir = root.join(relative_dir);
 		fs::create_dir_all(&dir).unwrap();
@@ -2022,7 +2115,7 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
-			local_hashes: vec![fresh],
+			local_comparison_hashes: vec![fresh],
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2040,7 +2133,7 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
-			local_hashes: Vec::new(),
+			local_comparison_hashes: Vec::new(),
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2058,7 +2151,7 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: skill::EMPTY_SKILLS_LOCK_DIGEST.to_string(),
-			local_hashes: Vec::new(),
+			local_comparison_hashes: Vec::new(),
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2077,7 +2170,7 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "skill".to_string(),
 			stored_hash: fresh.clone(),
-			local_hashes: vec![fresh, "older-install".to_string()],
+			local_comparison_hashes: vec![fresh, "older-install".to_string()],
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2095,7 +2188,7 @@ mod classify_tests {
 		let entry = BaselineEntry {
 			installed_name: "old-skill".to_string(),
 			stored_hash: "stale-lock-hash".to_string(),
-			local_hashes: Vec::new(),
+			local_comparison_hashes: Vec::new(),
 			scope_label: "project".to_string(),
 			ref_name: None,
 		};
@@ -2129,7 +2222,7 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "diagnose".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_hashes: Vec::new(),
+				local_comparison_hashes: Vec::new(),
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2178,7 +2271,7 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "only".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_hashes: Vec::new(),
+				local_comparison_hashes: Vec::new(),
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2243,7 +2336,7 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "diagnose".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_hashes: Vec::new(),
+				local_comparison_hashes: Vec::new(),
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2298,7 +2391,7 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "write-a-skill".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_hashes: Vec::new(),
+				local_comparison_hashes: Vec::new(),
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2394,7 +2487,7 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "legacy".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_hashes: Vec::new(),
+				local_comparison_hashes: Vec::new(),
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},
@@ -2451,7 +2544,7 @@ mod classify_tests {
 			BaselineEntry {
 				installed_name: "old-qa".to_string(),
 				stored_hash: "old-hash".to_string(),
-				local_hashes: Vec::new(),
+				local_comparison_hashes: Vec::new(),
 				scope_label: "global".to_string(),
 				ref_name: None,
 			},

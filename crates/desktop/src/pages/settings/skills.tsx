@@ -307,6 +307,9 @@ export default function SkillsPage() {
 		void queryClient.invalidateQueries({
 			queryKey: queryKeys.skills.sources.all(),
 		});
+		void queryClient.invalidateQueries({
+			queryKey: queryKeys.skills.repairPreviews(),
+		});
 		checkUpdatesMutation.mutate(updateCheckParams);
 	};
 

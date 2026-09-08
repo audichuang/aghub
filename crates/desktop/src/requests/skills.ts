@@ -196,6 +196,12 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 		queryKey: queryKeys.skills.lock.all(),
 		type: "active",
 	});
+	// Updates can resolve divergent copies; do not leave the migration dialog
+	// showing a conflict that no longer exists on disk.
+	void queryClient.refetchQueries({
+		queryKey: queryKeys.skills.repairPreviews(),
+		type: "active",
+	});
 }
 
 /// An applied update changes whether a skill IS outdated, and the badge that

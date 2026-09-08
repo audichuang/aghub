@@ -2,6 +2,16 @@ interface SkillPathLike {
 	skillPath: string;
 }
 
+/** A shared directory must be granted/revoked as one selectable group. */
+export function toggleAgentGroup(
+	selected: string[],
+	group: string[],
+): string[] {
+	return group.every((id) => selected.includes(id))
+		? selected.filter((id) => !group.includes(id))
+		: [...new Set([...selected, ...group])];
+}
+
 export function allSkillPaths(skills: SkillPathLike[]): string[] {
 	return skills.map((skill) => skill.skillPath);
 }

@@ -21,10 +21,12 @@ use crate::{EntryInput, SourceRef};
 /// Folder hashes for the installed copies of the locked names, plus the two
 /// counters that make the sweep's cost assertable in a test (a timing-based
 /// assertion cannot tell a memo hit from a fast disk).
-struct LocalHashes {
+#[derive(Default)]
+pub struct LocalHashes {
 	/// Hash per skill name. A name whose copies disagree across agents is
 	/// dropped as ambiguous rather than reported with an arbitrary one.
 	pub hashes: HashMap<String, String>,
+	pub comparison_hashes: HashMap<String, String>,
 	/// Folders actually read off disk.
 	pub folders_hashed: usize,
 	/// Copies served from the per-root memo instead of a fresh tree read.
@@ -52,16 +54,19 @@ fn local_hashes_for_scope(
 ) -> LocalHashes {
 	let mut out = LocalHashes {
 		hashes: HashMap::new(),
+		comparison_hashes: HashMap::new(),
 		folders_hashed: 0,
 		roots_reused: 0,
 	};
 	let mut ambiguous = HashSet::new();
+	let mut raw_ambiguous = HashSet::new();
 	let started = std::time::Instant::now();
 	// Agents that link to the same universal master resolve to the SAME root,
 	// and a folder hash is a pure function of that folder — so the second agent
 	// carrying a linked skill costs a map lookup instead of a full tree read.
 	// One master was observed being re-hashed 19 times without this.
-	let mut hash_by_root: HashMap<std::path::PathBuf, String> = HashMap::new();
+	let mut hash_by_root: HashMap<std::path::PathBuf, (String, String)> =
+		HashMap::new();
 	// The sweep — the agent scan AND every folder hash — is what `offline` skips.
 	// The log line below is emitted either way, so `folders_hashed=0` is the
 	// observable a caller's offline flag can be pinned by: it is otherwise
@@ -77,27 +82,46 @@ fn local_hashes_for_scope(
 				let Some(root) = skill_root(&skill) else {
 					continue;
 				};
-				let hash = if let Some(known) = hash_by_root.get(&root) {
-					out.roots_reused += 1;
-					known.clone()
-				} else {
-					out.folders_hashed += 1;
-					let Ok(fresh) = skill::compute_skill_folder_hash(&root)
-					else {
-						continue;
+				let (hash, comparison_hash) =
+					if let Some(known) = hash_by_root.get(&root) {
+						out.roots_reused += 1;
+						known.clone()
+					} else {
+						out.folders_hashed += 1;
+						let Ok(fresh) = skill::compute_skill_folder_hash(&root)
+						else {
+							continue;
+						};
+						let Ok(comparison) =
+							skill::compute_skill_folder_comparison_hash(&root)
+						else {
+							continue;
+						};
+						hash_by_root.insert(
+							root.clone(),
+							(fresh.clone(), comparison.clone()),
+						);
+						(fresh, comparison)
 					};
-					hash_by_root.insert(root.clone(), fresh.clone());
-					fresh
-				};
-				match out.hashes.get(&skill.name) {
-					Some(existing) if existing != &hash => {
+				if let Some(existing) = out.hashes.get(&skill.name) {
+					if existing != &hash {
 						out.hashes.remove(&skill.name);
+						raw_ambiguous.insert(skill.name.clone());
+					}
+				} else if !raw_ambiguous.contains(&skill.name) {
+					out.hashes.insert(skill.name.clone(), hash);
+				}
+				match out.comparison_hashes.get(&skill.name) {
+					Some(existing) if existing != &comparison_hash => {
+						out.comparison_hashes.remove(&skill.name);
 						ambiguous.insert(skill.name);
 					}
 					Some(_) => {}
-					None => {
-						out.hashes.insert(skill.name, hash);
+					None if !ambiguous.contains(&skill.name) => {
+						out.comparison_hashes
+							.insert(skill.name.clone(), comparison_hash);
 					}
+					None => {}
 				}
 			}
 		}
@@ -186,7 +210,7 @@ pub type Identities = HashMap<String, HealPrecondition>;
 /// with no sleep.
 pub fn global_lock_entries_with(
 	read_lock: impl FnOnce() -> skill::SkillLockFile,
-	read_hashes: impl FnOnce(&HashSet<String>) -> HashMap<String, String>,
+	read_hashes: impl FnOnce(&HashSet<String>) -> LocalHashes,
 ) -> (Vec<EntryInput>, Identities) {
 	let lock = read_lock();
 	// The lock snapshot decides which names are worth hashing. Deriving the set
@@ -205,7 +229,11 @@ pub fn global_lock_entries_with(
 				HealPrecondition::of_global_entry(&entry),
 			);
 			EntryInput {
-				local_hash: local_hashes.get(&name).cloned(),
+				local_hash: local_hashes.hashes.get(&name).cloned(),
+				local_comparison_hash: local_hashes
+					.comparison_hashes
+					.get(&name)
+					.cloned(),
 				name,
 				scope: "global".to_string(),
 				source_ref: SourceRef {
@@ -230,7 +258,7 @@ pub fn global_lock_entries_with(
 /// same reason both reads are closures.
 fn project_lock_entries_with(
 	read_lock: impl FnOnce() -> skill::lock::local::LocalSkillLockFile,
-	read_hashes: impl FnOnce(&HashSet<String>) -> HashMap<String, String>,
+	read_hashes: impl FnOnce(&HashSet<String>) -> LocalHashes,
 ) -> (Vec<EntryInput>, Identities) {
 	let lock = read_lock();
 	let wanted: HashSet<String> = lock.skills.keys().cloned().collect();
@@ -245,7 +273,11 @@ fn project_lock_entries_with(
 				HealPrecondition::of_project_entry(&entry),
 			);
 			EntryInput {
-				local_hash: local_hashes.get(&name).cloned(),
+				local_hash: local_hashes.hashes.get(&name).cloned(),
+				local_comparison_hash: local_hashes
+					.comparison_hashes
+					.get(&name)
+					.cloned(),
 				name,
 				scope: "project".to_string(),
 				source_ref: SourceRef {
@@ -282,7 +314,6 @@ pub fn global_lock_entries(
 ) -> (Vec<EntryInput>, Identities) {
 	global_lock_entries_with(read_lock, |wanted| {
 		local_hashes_for_scope(offline, ResourceScope::GlobalOnly, None, wanted)
-			.hashes
 	})
 }
 
@@ -299,13 +330,46 @@ pub fn project_lock_entries(
 			project_root,
 			wanted,
 		)
-		.hashes
 	})
 }
 
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn copies_with_different_caches_share_comparison_but_not_raw_hash() {
+		let project = tempfile::tempdir().unwrap();
+		for agent in [".claude", ".cursor", ".opencode"] {
+			let root = project.path().join(agent).join("skills/shared");
+			write_skill(&root, "shared");
+			std::fs::write(root.join("run.py"), "print('same')").unwrap();
+			std::fs::create_dir(root.join("__pycache__")).unwrap();
+			std::fs::write(root.join("__pycache__/run.cpython-312.pyc"), agent)
+				.unwrap();
+		}
+		let wanted = HashSet::from(["shared".to_string()]);
+		let hashes = local_hashes_for_scope(
+			false,
+			ResourceScope::ProjectOnly,
+			Some(project.path()),
+			&wanted,
+		);
+		assert!(!hashes.hashes.contains_key("shared"));
+		assert!(hashes.comparison_hashes.contains_key("shared"));
+		std::fs::write(
+			project.path().join(".cursor/skills/shared/run.py"),
+			"print('edited')",
+		)
+		.unwrap();
+		let hashes = local_hashes_for_scope(
+			false,
+			ResourceScope::ProjectOnly,
+			Some(project.path()),
+			&wanted,
+		);
+		assert!(!hashes.comparison_hashes.contains_key("shared"));
+	}
 
 	/// Write `name` as a plain skill folder under `dir`.
 	fn write_skill(dir: &Path, name: &str) {
@@ -468,7 +532,7 @@ mod tests {
 			|wanted| {
 				order.borrow_mut().push("hashes");
 				*seen.borrow_mut() = wanted.clone();
-				HashMap::new()
+				LocalHashes::default()
 			},
 		);
 
@@ -519,7 +583,7 @@ mod tests {
 			|wanted| {
 				order.borrow_mut().push("hashes");
 				*seen.borrow_mut() = wanted.clone();
-				HashMap::new()
+				LocalHashes::default()
 			},
 		);
 

@@ -136,6 +136,15 @@ pub struct SourceSkillDiff {
 #[serde(rename_all = "camelCase")]
 pub struct SourceDiffResponse {
 	pub source: String,
+	/// Whether the fetch actually received a credential. Omitted if no fetch
+	/// ran or cohorts used mixed authentication; never inferred from storage.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub used_credential: Option<bool>,
+	/// Total source-check time, including credential resolution and comparison.
+	#[serde(skip_serializing_if = "Option::is_none")]
+	#[ts(optional)]
+	pub elapsed_ms: Option<f64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub git_ref: Option<String>,

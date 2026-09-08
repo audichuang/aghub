@@ -11,7 +11,7 @@ import {
 	LockClosedIcon,
 	TrashIcon,
 } from "@heroicons/react/24/solid";
-import { Alert, Button, Chip, Spinner, toast } from "@heroui/react";
+import { Alert, Button, Chip, Modal, Spinner, toast } from "@heroui/react";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
@@ -31,6 +31,7 @@ import {
 	allSkillPaths,
 	selectedSkills,
 	toggleSkillPath,
+	toggleAgentGroup,
 } from "../lib/source-skill-selection";
 import { cn } from "../lib/utils";
 import { useSkillCoverage } from "../requests/agents";
@@ -127,6 +128,8 @@ function SummaryBar({
 // ─── SkillSection (local — collapsible section with skill rows) ──────────────
 
 interface SkillSectionProps {
+	sourceUrl: string;
+	gitRef?: string;
 	title: string;
 	icon: React.ReactNode;
 	skills: SourceSkillDiff[];
@@ -137,6 +140,8 @@ interface SkillSectionProps {
 }
 
 function SkillSection({
+	sourceUrl,
+	gitRef,
 	title,
 	icon,
 	skills,
@@ -181,6 +186,8 @@ function SkillSection({
 				<ul className="overflow-hidden rounded-lg border border-border">
 					{skills.map((skill) => (
 						<SourceSkillRow
+							sourceUrl={sourceUrl}
+							gitRef={gitRef}
 							key={skill.skillPath}
 							skill={skill}
 							isExpanded={expandedSkillPath === skill.skillPath}
@@ -336,6 +343,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		Set<string>
 	>(() => new Set());
 	const [isCredentialDialogOpen, setIsCredentialDialogOpen] = useState(false);
+	const [pendingInstall, setPendingInstall] = useState<{
+		skills: SourceSkillDiff[];
+		agentIds: string[];
+		groups: { ids: string[]; label: string; shared: boolean }[];
+	} | null>(null);
 
 	// P1-c: use the recorded clone URL as the network/credential coordinate.
 	// `row.source` is the row's ORIGIN (`host[:port]/path`) — a unique identity
@@ -344,7 +356,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	// none (e.g. local sources).
 	const diffSource = row.sourceUrl || row.source;
 
-	const { data, isLoading, isFetching } = useQuery(
+	const { data, isLoading, isFetching, isError } = useQuery(
 		sourceDiffQueryOptions({
 			api,
 			source: diffSource,
@@ -417,18 +429,6 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 	const slotGroups = useMemo(
 		() => groupAgentsBySlot(installableAgents, coverage),
 		[installableAgents, coverage],
-	);
-	const linkTargets = useMemo(
-		() => slotGroups.flatMap((g) => g.members),
-		[slotGroups],
-	);
-	const sharedGroups = useMemo(
-		() => slotGroups.filter((g) => g.shared),
-		[slotGroups],
-	);
-	const linkTargetAgentIds = useMemo(
-		() => linkTargets.map((a) => a.id),
-		[linkTargets],
 	);
 
 	const applyUpdateMutation = useMutation(
@@ -706,9 +706,23 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			? "."
 			: skill.skillPath.replace(SKILL_FILE_SUFFIX_RE, "");
 
-	const installFromSource = async (skills: SourceSkillDiff[]) => {
+	const requestInstall = (skills: SourceSkillDiff[]) =>
+		setPendingInstall({
+			skills,
+			agentIds: [],
+			groups: slotGroups.map((group) => ({
+				ids: group.members.map((a) => a.id),
+				label: group.members.map((a) => a.display_name).join(" / "),
+				shared: group.shared,
+			})),
+		});
+	const installFromSource = async (
+		skills: SourceSkillDiff[],
+		agents: string[],
+	) => {
 		if (
 			skills.length === 0 ||
+			agents.length === 0 ||
 			isInstallingAll ||
 			installingSkillPath !== null
 		) {
@@ -749,7 +763,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			const result = await api.skills.gitInstall({
 				session_id: scan.session_id,
 				skill_paths: skillPaths,
-				agents: linkTargetAgentIds,
+				agents,
 				scope: updateScope,
 				project_root: updateProjectRoot,
 			});
@@ -852,6 +866,26 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 					<p className="mt-1 truncate font-mono text-xs text-muted">
 						{row.sourceUrl}
 					</p>
+					{row.sourceType === "github" &&
+						!isFetching &&
+						!isError &&
+						data?.usedCredential === false && (
+							<p
+								className="mt-2 text-xs text-muted"
+								role="status"
+							>
+								{t("sourceAccessAnonymous")}{" "}
+								<button
+									type="button"
+									className="text-accent underline"
+									onClick={() =>
+										setIsCredentialDialogOpen(true)
+									}
+								>
+									{t("sourceAccessConfigure")}
+								</button>
+							</p>
+						)}
 				</div>
 				<Button className="shrink-0" onPress={onImport}>
 					<ArrowDownTrayIcon className="size-4" />
@@ -1016,7 +1050,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 														isCoverageLoading
 													}
 													onPress={() =>
-														installFromSource(
+														requestInstall(
 															hasSelectedInstallSkills
 																? selectedInstallSkills
 																: notInstalled,
@@ -1074,6 +1108,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 												.name === skill.name;
 										return (
 											<SourceSkillRow
+												sourceUrl={diffSource}
+												gitRef={data?.gitRef}
 												key={skill.skillPath}
 												skill={skill}
 												isExpanded={
@@ -1122,6 +1158,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											skill.skillPath;
 										return (
 											<SourceSkillRow
+												sourceUrl={diffSource}
+												gitRef={data?.gitRef}
 												key={skill.skillPath}
 												skill={skill}
 												isExpanded={
@@ -1160,7 +1198,7 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 															isCoverageLoading
 														}
 														onPress={() =>
-															installFromSource([
+															requestInstall([
 																skill,
 															])
 														}
@@ -1193,6 +1231,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 										const rowBusy = isDeleting || isCopying;
 										return (
 											<SourceSkillRow
+												sourceUrl={diffSource}
+												gitRef={data?.gitRef}
 												key={skill.skillPath}
 												skill={skill}
 												isExpanded={
@@ -1265,6 +1305,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 												?.skillPath === skill.skillPath;
 										return (
 											<SourceSkillRow
+												sourceUrl={diffSource}
+												gitRef={data?.gitRef}
 												key={skill.skillPath}
 												skill={skill}
 												isExpanded={
@@ -1316,6 +1358,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 												?.skillPath === skill.skillPath;
 										return (
 											<SourceSkillRow
+												sourceUrl={diffSource}
+												gitRef={data?.gitRef}
 												key={skill.skillPath}
 												skill={skill}
 												isExpanded={
@@ -1366,6 +1410,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 									    an info note, not action rows. */}
 									{uncheckableAuth.map((skill) => (
 										<SourceSkillRow
+											sourceUrl={diffSource}
+											gitRef={data?.gitRef}
 											key={skill.skillPath}
 											skill={skill}
 											isExpanded={
@@ -1405,6 +1451,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 						{/* Non-auth uncheckable: info-only, no action */}
 						{uncheckableNonAuth.length > 0 && (
 							<SkillSection
+								sourceUrl={diffSource}
+								gitRef={data?.gitRef}
 								title={t("summaryUnchecked", {
 									count: uncheckableNonAuth.length,
 								})}
@@ -1420,6 +1468,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 
 						{/* "Installed (latest)" — collapsed by default */}
 						<SkillSection
+							sourceUrl={diffSource}
+							gitRef={data?.gitRef}
 							title={t("sourceStateCurrent")}
 							icon={
 								<CheckCircleIcon className="size-4 text-success" />
@@ -1447,44 +1497,110 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 									</div>
 								</div>
 							)}
-
-						{/* Agent coverage hint. The old version counted an
-						 * "already covered" bucket beside the link targets —
-						 * agents that received the skill whether or not the
-						 * user picked them. That bucket is empty by
-						 * construction now; what is worth surfacing instead is
-						 * which agents cannot be chosen apart. */}
-						{linkTargets.length > 0 && notInstalled.length > 0 && (
-							<div className="flex flex-wrap items-center gap-1.5 text-xs text-muted">
-								<span>
-									{linkTargets.length}{" "}
-									{t("sourceInstallLinkTargetsTitle")}
-								</span>
-								{sharedGroups.length > 0 && (
-									<>
-										<span className="mx-1 text-muted/50">
-											·
-										</span>
-										{sharedGroups.map((group) => (
-											<Chip
-												key={group.members
-													.map((a) => a.id)
-													.join("+")}
-												size="sm"
-												variant="secondary"
-											>
-												{group.members
-													.map((a) => a.display_name)
-													.join(" + ")}
-											</Chip>
-										))}
-									</>
-								)}
-							</div>
-						)}
 					</div>
 				)}
 			</div>
+
+			<Modal.Backdrop
+				isOpen={pendingInstall !== null}
+				onOpenChange={(open) => {
+					if (!open) setPendingInstall(null);
+				}}
+			>
+				<Modal.Container>
+					<Modal.Dialog className="w-[calc(100vw-2rem)] max-w-lg">
+						<Modal.CloseTrigger />
+						<Modal.Header>
+							<Modal.Heading>
+								{t("sourceConfirmInstallTitle", {
+									count: pendingInstall?.skills.length ?? 0,
+								})}
+							</Modal.Heading>
+						</Modal.Header>
+						<Modal.Body className="space-y-3">
+							<p className="text-sm">
+								{pendingInstall?.skills
+									.map((skill) => skill.name)
+									.join(", ")}
+							</p>
+							<fieldset className="space-y-3">
+								<legend className="text-sm font-medium">
+									{t("sourceInstallLinkTargetsTitle")}
+								</legend>
+								<p className="text-xs text-muted">
+									{t("sourceChooseAgents")}
+								</p>
+								<div className="grid grid-cols-2 gap-3">
+									{pendingInstall?.groups.map((group) => (
+										<label
+											key={group.ids.join("+")}
+											className="flex cursor-pointer items-start gap-2 text-sm"
+										>
+											<input
+												type="checkbox"
+												className="mt-0.5 size-4 shrink-0 accent-accent"
+												checked={group.ids.every((id) =>
+													pendingInstall.agentIds.includes(
+														id,
+													),
+												)}
+												onChange={() =>
+													setPendingInstall(
+														(previous) =>
+															previous
+																? {
+																		...previous,
+																		agentIds:
+																			toggleAgentGroup(
+																				previous.agentIds,
+																				group.ids,
+																			),
+																	}
+																: null,
+													)
+												}
+											/>
+											<span>
+												{group.label}
+												{group.shared && (
+													<span className="block text-xs text-muted">
+														{t(
+															"sourceSharedAgentGroup",
+														)}
+													</span>
+												)}
+											</span>
+										</label>
+									))}
+								</div>
+							</fieldset>
+						</Modal.Body>
+						<Modal.Footer>
+							<Button
+								variant="secondary"
+								onPress={() => setPendingInstall(null)}
+							>
+								{t("cancel")}
+							</Button>
+							<Button
+								isDisabled={!pendingInstall?.agentIds.length}
+								onPress={() => {
+									if (pendingInstall?.agentIds.length) {
+										const request = pendingInstall;
+										setPendingInstall(null);
+										void installFromSource(
+											request.skills,
+											request.agentIds,
+										);
+									}
+								}}
+							>
+								{t("sourceConfirmInstallAction")}
+							</Button>
+						</Modal.Footer>
+					</Modal.Dialog>
+				</Modal.Container>
+			</Modal.Backdrop>
 
 			{/* Credential dialog also mounts at root level for uncheckable rows */}
 			<SourceCredentialBindingDialog

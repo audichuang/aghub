@@ -7,7 +7,17 @@ import {
 	allSkillPaths,
 	selectedSkills,
 	toggleSkillPath,
+	toggleAgentGroup,
 } from "./source-skill-selection.ts";
+
+test("agent choices preserve only selected targets and toggle shared groups together", () => {
+	const codex = toggleAgentGroup([], ["codex"]);
+	assert.deepEqual(codex, ["codex"]);
+	const shared = toggleAgentGroup(codex, ["cline", "warp"]);
+	assert.deepEqual(shared, ["codex", "cline", "warp"]);
+	assert.deepEqual(toggleAgentGroup(shared, ["cline", "warp"]), ["codex"]);
+	assert.deepEqual(toggleAgentGroup(codex, ["codex"]), []);
+});
 
 const skills = [
 	{ name: "cad-viewer", skillPath: "plugins/cad/cad-viewer/SKILL.md" },

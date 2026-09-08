@@ -435,8 +435,7 @@ const zhHant: typeof en = {
 	skillCheckCompleteWithUpdates: "檢查完成，{{count}} 個可更新",
 	skillCheckCompleteSomeUncheckable: "檢查完成，{{count}} 個技能無法驗證",
 	skillCheckCompleteAllGood: "全部都是最新",
-	credentialSpeedHint:
-		"提示：在「整合」設定新增 GitHub 憑證，可加快技能更新檢查。",
+	credentialSpeedHint: "可在「整合」設定 GitHub 憑證，提高請求額度。",
 	lastCheckedAgo: "上次檢查 {{time}}",
 	lastCheckedNever: "尚未檢查",
 	recheck: "重新檢查",
@@ -1241,8 +1240,8 @@ const zhHant: typeof en = {
 	sourceInstallSomeFailedOne: "有 1 個安裝目標失敗。",
 	sourceInstallSomeFailedMany: "有 {{count}} 個安裝目標失敗。",
 	sourceInstallFailed: "安裝技能失敗。",
-	sourceInstallLinkTargetsTitle: "將建立連結",
-	sourceInstallLinkTargetsHint: "這些 Agent 會取得指向 .aghub 主檔的軟連結。",
+	sourceInstallLinkTargetsTitle: "安裝給哪些 AI 工具",
+	sourceInstallLinkTargetsHint: "選擇要使用這個技能的 AI 工具。",
 	sourceInstallNoLinkTargets: "此處沒有 Agent 可以接收技能。",
 	sourceInstallSharedSlotHint:
 		"這些 Agent 沒有自己的技能目錄,共用同一個 —— 勾選其中一個等於全部勾選,之後移除也會一起移除。",
@@ -1255,6 +1254,15 @@ const zhHant: typeof en = {
 	summaryLatest: "{{count}} 最新",
 	// SourceDetail action headings
 	sourceNeedsAction: "需要動作",
+	sourceViewSkill: "查看技能",
+	sourceViewSkillLabel: "在 GitHub 查看 {{name}}（開啟瀏覽器）",
+	sourceViewSkillFailed: "無法開啟技能文件。",
+	sourceAccessAnonymous: "尚未使用 GitHub 憑證。",
+	sourceAccessConfigure: "設定憑證",
+	sourceConfirmInstallTitle: "安裝 {{count}} 個技能？",
+	sourceConfirmInstallAction: "確認安裝",
+	sourceChooseAgents: "請勾選至少一個要使用此技能的 AI 工具。",
+	sourceSharedAgentGroup: "共用技能目錄，需一起選取",
 	sourceAllLatest: "所有技能均為最新版本。",
 	// Credential binding
 	credentialBind: "綁定憑證",

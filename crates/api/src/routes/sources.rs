@@ -67,12 +67,26 @@ static LAST_FETCH_TOKEN: std::sync::Mutex<Option<Option<String>>> =
 /// caches; see `GitFetcher` for why this must not outlive the request.
 struct ApiFetcher {
 	inner: GitFetcher,
+	// Bits: 1 = anonymous attempt, 2 = credentialed attempt. No secrets stored.
+	authentication: std::sync::atomic::AtomicU8,
 }
 
 impl ApiFetcher {
 	fn new() -> Self {
 		Self {
 			inner: GitFetcher::new(),
+			authentication: std::sync::atomic::AtomicU8::new(0),
+		}
+	}
+
+	fn used_credential(&self) -> Option<bool> {
+		match self
+			.authentication
+			.load(std::sync::atomic::Ordering::Relaxed)
+		{
+			1 => Some(false),
+			2 => Some(true),
+			_ => None,
 		}
 	}
 }
@@ -84,6 +98,10 @@ impl Fetcher for ApiFetcher {
 		token: Option<&str>,
 		selection: skill_update::FetchSelection<'_>,
 	) -> Result<FetchedRepo, FetchError> {
+		self.authentication.fetch_or(
+			if token.is_some() { 2 } else { 1 },
+			std::sync::atomic::Ordering::Relaxed,
+		);
 		#[cfg(test)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
 			// When `AGHUB_TEST_REQUIRE_TOKEN` is set, a missing token fails so the
@@ -170,6 +188,7 @@ pub async fn diff_source(
 	forwarded: ForwardedGitTokens,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<SourceDiffResponse> {
+	let started = std::time::Instant::now();
 	let scope_params = ScopeParams {
 		scope: query.scope.clone(),
 		project_root: query.project_root.clone(),
@@ -199,27 +218,30 @@ pub async fn diff_source(
 		aghub_git::redact_source_credentials(&source),
 		auth_started.elapsed()
 	);
-	let outcome = rocket::tokio::task::spawn_blocking(move || {
-		// ONE fetcher for this diff's whole cohort loop — that is what lets a
-		// second cohort resolving to the same commit reuse the first one's
-		// fetched tree instead of downloading it again.
-		let fetcher = ApiFetcher::new();
-		sources::diff_source(
-			input,
-			SourceDiffDeps {
-				fetcher: &fetcher,
-				resolver: &resolver,
-			},
-		)
-	})
-	.await
-	.map_err(|e| {
-		ApiError::from_join_error(
-			e,
-			"Source diff task failed",
-			"DIFF_TASK_PANIC",
-		)
-	})?;
+	let (outcome, used_credential) =
+		rocket::tokio::task::spawn_blocking(move || {
+			// ONE fetcher for this diff's whole cohort loop — that is what lets a
+			// second cohort resolving to the same commit reuse the first one's
+			// fetched tree instead of downloading it again.
+			let fetcher = ApiFetcher::new();
+			let outcome = sources::diff_source(
+				input,
+				SourceDiffDeps {
+					fetcher: &fetcher,
+					resolver: &resolver,
+				},
+			);
+			(outcome, fetcher.used_credential())
+		})
+		.await
+		.map_err(|e| {
+			ApiError::from_join_error(
+				e,
+				"Source diff task failed",
+				"DIFF_TASK_PANIC",
+			)
+		})?;
+	let elapsed_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
 
 	match outcome {
 		// `source` in the response stays the caller's own argument — the DTO is
@@ -228,6 +250,8 @@ pub async fn diff_source(
 			git_ref, skills, ..
 		} => Ok(Json(SourceDiffResponse {
 			source,
+			used_credential,
+			elapsed_ms,
 			git_ref,
 			session_id: None,
 			needs_credential: false,
@@ -237,6 +261,8 @@ pub async fn diff_source(
 		SourceDiffOutcome::NeedsCredential { git_ref } => {
 			Ok(Json(SourceDiffResponse {
 				source,
+				used_credential,
+				elapsed_ms,
 				git_ref,
 				session_id: None,
 				needs_credential: true,
@@ -268,6 +294,8 @@ pub async fn diff_source(
 		SourceDiffOutcome::UncheckableSource { git_ref, reason } => {
 			Ok(Json(SourceDiffResponse {
 				source,
+				used_credential,
+				elapsed_ms,
 				git_ref,
 				session_id: None,
 				needs_credential: false,
@@ -432,6 +460,7 @@ mod tests {
 			"an uncheckable source must say why, got {value}"
 		);
 		assert_eq!(value["needsCredential"], false);
+		assert!(value.get("usedCredential").is_none());
 	}
 
 	/// `scope=all` judges a host-blind source against the UNION of both locks,
@@ -659,6 +688,9 @@ mod tests {
 		// The forwarded token satisfied the auth-required fetch, so the source
 		// is NOT reported as needing a credential.
 		assert_eq!(value["needsCredential"], false);
+		assert_eq!(value["usedCredential"], true);
+		assert!(value["elapsedMs"].as_f64().is_some_and(|ms| ms >= 0.0));
+		assert!(!body.contains("FWD-TOKEN"));
 		// The forwarded token is exactly what reached the fetch.
 		assert_eq!(
 			take_recorded_token(),
@@ -696,6 +728,7 @@ mod tests {
 		let value: Value = serde_json::from_str(&body).expect("valid JSON");
 		// No forwarded token, empty keyring → unchanged keyring behaviour.
 		assert_eq!(value["needsCredential"], true);
+		assert_eq!(value["usedCredential"], false);
 		// The anonymous attempt fails before the test seam records a token.
 		assert_eq!(
 			take_recorded_token(),

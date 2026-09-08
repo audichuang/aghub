@@ -3,6 +3,18 @@
 // generics use very specific verb sets and miss common variants; these are
 // broader, matching the behaviour rather than one phrasing.
 
+// Shared by the blocking rule and the cross-file source detector. A property
+// access such as process.env is not a .env file, and a fixture's bare "token"
+// is not evidence of reading credentials.
+private rule aghub_credential_source {
+	strings:
+		$file = /(^|[^a-zA-Z0-9_])(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b)/ nocase
+		$named_file = /["'\/\\](credentials|id_rsa|id_ed25519)(\b|[.])/ nocase
+		$env = /(process\.env|os\.environ|getenv)[ \t]*(\.|\[|\()[ \t]*["']?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
+	condition:
+		any of them
+}
+
 rule aghub_credential_file_exfil {
 	meta:
 		author = "aghub"
@@ -11,10 +23,9 @@ rule aghub_credential_file_exfil {
 		description = "reads a credential/.env/.ssh file and sends it over the network"
 	strings:
 		$read = /readFileSync|read_to_string|read_text|fs\.read|open\s*\(|getenv|os\.environ|process\.env|\bcat\s/ nocase
-		$cred = /\.env\b|\.ssh\/|\.aws\/|credentials|secret|token|api[_-]?key|private[_-]?key|mnemonic|seed[_-]?phrase/ nocase
-		$net = /fetch\s*\(|axios|requests\.(post|get)|http\.request|urllib|XMLHttpRequest|\.post\s*\(|\bcurl\b|\bwget\b|webhook/ nocase
+		$net = /\bfetch\s*\(|axios|requests\.(post|get)|http\.request|urllib|XMLHttpRequest|\.post\s*\(|\bcurl\b|\bwget\b|webhook/ nocase
 	condition:
-		$read and $cred and $net
+		$read and aghub_credential_source and $net
 }
 
 rule aghub_download_pipe_execute {

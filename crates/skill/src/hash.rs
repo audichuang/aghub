@@ -40,10 +40,65 @@ pub fn is_placeholder_digest(hash: &str) -> bool {
 /// then for each file in order `update(relative_path_bytes)` + `update(file_bytes)`
 /// with no delimiter.
 pub fn compute_skill_folder_hash(dir: &Path) -> Result<String, HashError> {
-	let mut files: Vec<(String, std::path::PathBuf)> = Vec::new();
-	let mut total_bytes: u64 = 0;
-	collect(dir, dir, 0, &mut files, &mut total_bytes)?;
+	hash_files(collect_skill_files(dir)?)
+}
 
+/// Compare installed and upstream content without CPython's generated cache.
+/// Never use this digest for locks or security: those retain every file.
+pub fn compute_skill_folder_comparison_hash(
+	dir: &Path,
+) -> Result<String, HashError> {
+	let files = collect_skill_files(dir)?;
+	let paths: std::collections::HashSet<&str> =
+		files.iter().map(|(path, _)| path.as_str()).collect();
+	let compared = files
+		.iter()
+		.filter(|(path, _)| !generated_python_cache(path, &paths))
+		.cloned()
+		.collect();
+	hash_files(compared)
+}
+
+fn generated_python_cache(
+	path: &str,
+	paths: &std::collections::HashSet<&str>,
+) -> bool {
+	let Some((parent, file)) = path.rsplit_once('/') else {
+		return false;
+	};
+	let source_dir = if parent == "__pycache__" {
+		""
+	} else if let Some(dir) = parent.strip_suffix("/__pycache__") {
+		dir
+	} else {
+		return false;
+	};
+	let Some((module, tag)) = file
+		.strip_suffix(".pyc")
+		.and_then(|stem| stem.rsplit_once(".cpython-"))
+	else {
+		return false;
+	};
+	let (version, optimization) = tag.split_once(".opt-").unwrap_or((tag, "0"));
+	if module.is_empty()
+		|| version.len() < 2
+		|| !version.bytes().all(|b| b.is_ascii_digit())
+		|| optimization.len() != 1
+		|| !optimization.bytes().all(|b| b.is_ascii_digit())
+	{
+		return false;
+	}
+	let source = if source_dir.is_empty() {
+		format!("{module}.py")
+	} else {
+		format!("{source_dir}/{module}.py")
+	};
+	paths.contains(source.as_str())
+}
+
+fn hash_files(
+	mut files: Vec<(String, std::path::PathBuf)>,
+) -> Result<String, HashError> {
 	// Sort like npx `computeSkillFolderHash`, which uses JS `localeCompare`
 	// (ICU CLDR-root, punctuation NON-IGNORABLE). feruca's default uses the
 	// "shifted" approach (punctuation ignorable), which reorders punctuation /
@@ -173,6 +228,57 @@ mod tests {
 	use sha2::{Digest, Sha256};
 	use std::fs;
 	use tempfile::tempdir;
+
+	#[test]
+	fn comparison_ignores_generated_cache_but_raw_hash_and_collection_keep_it()
+	{
+		let dir = tempdir().unwrap();
+		fs::create_dir_all(dir.path().join("scripts/__pycache__")).unwrap();
+		fs::write(dir.path().join("scripts/run.py"), "print('hello')").unwrap();
+		let before = compute_skill_folder_hash(dir.path()).unwrap();
+		for cache in ["run.cpython-312.pyc", "run.cpython-313.opt-1.pyc"] {
+			fs::write(
+				dir.path().join("scripts/__pycache__").join(cache),
+				cache,
+			)
+			.unwrap();
+		}
+		assert_eq!(
+			compute_skill_folder_comparison_hash(dir.path()).unwrap(),
+			before
+		);
+		assert_ne!(compute_skill_folder_hash(dir.path()).unwrap(), before);
+		assert_eq!(collect_skill_files(dir.path()).unwrap().len(), 3);
+		fs::write(dir.path().join("scripts/run.py"), "print('changed')")
+			.unwrap();
+		assert_ne!(
+			compute_skill_folder_comparison_hash(dir.path()).unwrap(),
+			before
+		);
+	}
+
+	#[test]
+	fn comparison_keeps_orphan_bytecode_and_other_cache_directory_files() {
+		for path in [
+			"__pycache__/orphan.cpython-312.pyc",
+			"__pycache__/run.pyc",
+			"__pycache__/run.cpython-invalid.pyc",
+			"__pycache__/instructions.md",
+			"run.pyc",
+		] {
+			let dir = tempdir().unwrap();
+			fs::create_dir(dir.path().join("__pycache__")).unwrap();
+			fs::write(dir.path().join("run.py"), "print('hello')").unwrap();
+			let before =
+				compute_skill_folder_comparison_hash(dir.path()).unwrap();
+			fs::write(dir.path().join(path), "extra content").unwrap();
+			assert_ne!(
+				compute_skill_folder_comparison_hash(dir.path()).unwrap(),
+				before,
+				"{path}"
+			);
+		}
+	}
 
 	fn hex(bytes: &[u8]) -> String {
 		let mut h = Sha256::new();
