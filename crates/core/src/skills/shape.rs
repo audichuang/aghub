@@ -217,11 +217,36 @@ pub fn readers_of(
 				.any(|dir| {
 					let entry = dir.join(&safe);
 					has_skill_marker(&entry) == SkillMarker::Present
-						|| Linker::is_link(&entry)
+						|| is_dangling_link(&entry)
 				})
 		})
 		.map(|descriptor| descriptor.id)
 		.collect()
+}
+
+/// A link whose target is DEFINITIVELY gone.
+///
+/// The narrow half of the dangling-referrer rescue. `readers_of` counts such an
+/// entry because a link at the skill's name is evidence this agent was granted
+/// the skill once, and `repair`'s whole job is to mend that — the marker probe
+/// alone reads it as `Absent` (`fs::metadata` follows the link and gets
+/// `NotFound`), which silently removed the escape hatch
+/// `agents/antigravity.rs` documents.
+///
+/// `is_link` ALONE was too wide, and the difference is a real multi-agent
+/// grant, not a nicety: a link to an existing directory that holds no
+/// `SKILL.md` counted as a prior grant, so `repair --yes` created
+/// `.agents/skills/<name>` and handed the managed skill to all EIGHT agents
+/// that read the shared slot. Verified by running, not reasoned.
+///
+/// Only `NotFound` qualifies. An unresolvable-for-any-other-reason target
+/// (EACCES, ELOOP, a dead mount) is UNKNOWN, and unknown must not seed a grant
+/// — the same direction `readers_of` takes for `SkillMarker::Unknown`.
+fn is_dangling_link(entry: &Path) -> bool {
+	Linker::is_link(entry)
+		&& std::fs::metadata(entry)
+			.err()
+			.is_some_and(|e| e.kind() == std::io::ErrorKind::NotFound)
 }
 
 /// Why a `(referrer, master)` pair is not usable as-is.
@@ -700,6 +725,62 @@ mod tests {
 			ReferrerAction::LeaveForeign,
 			"report only — never hash it, never move it"
 		);
+	}
+
+	/// A link is only a prior grant when its target is DEFINITIVELY gone.
+	///
+	/// Asked THROUGH `readers_of`, not of the helper: the helper being right
+	/// buys nothing if the call site widens again, and that is exactly what
+	/// happened — `is_link` alone made every link at the name count, so a link
+	/// to an existing directory holding no `SKILL.md` seeded `grant_to` and
+	/// `repair --yes` handed the managed skill to all EIGHT agents that read
+	/// the shared slot. An external reviewer reproduced that by running it.
+	#[test]
+	fn readers_of_counts_only_a_definitively_dangling_link() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = fs::canonicalize(tmp.path()).unwrap();
+		fs::create_dir_all(root.join(".claude")).unwrap();
+		let name = "demo";
+		let write_skill_dir = |dir: &Path| {
+			fs::create_dir_all(dir).unwrap();
+			fs::write(dir.join("SKILL.md"), "---\nname: demo\n---\n").unwrap();
+		};
+		write_skill_dir(&root.join(".aghub").join(name));
+		// antigravity's PROJECT compat alias; its write dir is `.agents/skills`.
+		let compat = root.join(".agent").join("skills");
+		fs::create_dir_all(&compat).unwrap();
+		let entry = compat.join(name);
+		let readers = |root: &Path| {
+			readers_of(ResourceScope::ProjectOnly, Some(root), name)
+		};
+
+		// (a) the rescue: the target is gone, so the link is the only evidence
+		//     this agent was ever granted the skill.
+		unix_fs::symlink(root.join("gone"), &entry).unwrap();
+		assert!(
+			readers(&root).contains(&"antigravity"),
+			"a link to a missing target is the shape repair exists to mend"
+		);
+		fs::remove_file(&entry).unwrap();
+
+		// (b) a link to a real directory serving NO skill — NOT a grant. This
+		//     is the assertion the reviewer's experiment turned red.
+		let not_a_skill = root.join("not-a-skill");
+		fs::create_dir_all(&not_a_skill).unwrap();
+		unix_fs::symlink(&not_a_skill, &entry).unwrap();
+		assert!(
+			!readers(&root).contains(&"antigravity"),
+			"a link to content that is not this skill must not seed a grant, \
+			 got {:?}",
+			readers(&root)
+		);
+		fs::remove_file(&entry).unwrap();
+
+		// (c) a link to a real skill dir needs no OR-clause — already Present.
+		let other = root.join("other");
+		write_skill_dir(&other);
+		unix_fs::symlink(&other, &entry).unwrap();
+		assert!(readers(&root).contains(&"antigravity"));
 	}
 
 	/// ABSENT is not UNREADABLE — folding the two is fail-OPEN.
@@ -1930,9 +2011,15 @@ pub fn plan_repair(
 					_ => false,
 				}
 		});
-		if !covered {
-			continue;
-		}
+		// NOT an early `continue`. The fallible probe below has to run even for
+		// an UNCOVERED agent: it is the only thing that notices an unreadable
+		// compat dir, and skipping the whole loop reported `ok` with a stale
+		// referrer sitting right there — so the round that added
+		// `UnreadableCompatDir` only actually refused when some OTHER agent's
+		// write slot happened to be covered. Verified by running. What
+		// `covered` still gates is the DESTRUCTIVE half: an uncovered agent
+		// never gets an `Unlink` row, because removing its only way in is
+		// exactly what guard 3 exists to prevent.
 		for read_dir in skill_read_dirs(descriptor, scope, project_root) {
 			// Identity, not spelling — see the guards note above.
 			if entry_identity(&read_dir) == entry_identity(&write_dir) {
@@ -1945,8 +2032,10 @@ pub fn plan_repair(
 				adopt_source.as_deref(),
 				&planned,
 			) {
-				Ok(true) => {}
-				Ok(false) => continue,
+				// Permitted, but only an agent whose own slot will serve the
+				// skill afterwards may actually lose the compat entry.
+				Ok(true) if covered => {}
+				Ok(true) | Ok(false) => continue,
 				// Fail CLOSED: an unreadable compat dir is a DECISION for a
 				// human (fix the permission), not a transient write failure —
 				// see `RefuseReason::UnreadableCompatDir`. This blocks the

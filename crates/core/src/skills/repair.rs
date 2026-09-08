@@ -216,6 +216,34 @@ pub fn repair_all(
 	name: Option<&str>,
 	dry_run: bool,
 ) -> Result<Vec<RepairReport>> {
+	// ONE guard around the whole bulk run, not one per skill, and taken BEFORE
+	// the lock read below — `crates/core/AGENTS.md`'s "guard before the
+	// deciding read". The lock decides which directory may be ADOPTED as a
+	// Master, so a snapshot taken outside the guard can authorize a swap the
+	// current lock no longer permits: this run reads `demo` as locked, another
+	// aghub deletes that entry and releases, npx drops a fresh real
+	// `.agents/skills/demo` in place, and this run resumes with a stale
+	// `in_lock = true` and adopts content nobody authorized. Dry runs take no
+	// guard (they write nothing), so a PREVIEW still reads outside it —
+	// deliberate, and the reason a preview is authority for nothing.
+	//
+	// It is also ONE guard for the whole batch: `repair_skill` takes its own
+	// (reentrant per thread, so the inner acquire is free), but without this
+	// outer one a fifty-skill migration is fifty independently racing
+	// mutations another aghub could interleave halfway through.
+	let _bulk_guard = if dry_run {
+		None
+	} else {
+		Some(
+			crate::skills::lock::mutation_guard(
+				"skill repair (bulk)",
+				scope,
+				project_root,
+			)
+			.map_err(|e| io_err("acquire the mutation lock", e))?,
+		)
+	};
+
 	// Fail CLOSED. The lock IS the worklist and it decides which directories may
 	// be adopted as a Master, so an unreadable lock must not come back as
 	// "nothing to repair" — that answer looks like success and the user would
@@ -245,24 +273,6 @@ pub fn repair_all(
 	let worklist: Vec<String> = match name {
 		Some(one) => vec![one.to_string()],
 		None => in_lock.iter().cloned().collect(),
-	};
-
-	// ONE guard around the whole bulk run, not one per skill. `repair_skill`
-	// takes its own (reentrant per thread, so the inner acquire is free), but
-	// without this outer one a fifty-skill migration is fifty independently
-	// racing mutations another aghub could interleave halfway through. Dry runs
-	// take none, matching the seam.
-	let _bulk_guard = if dry_run {
-		None
-	} else {
-		Some(
-			crate::skills::lock::mutation_guard(
-				"skill repair (bulk)",
-				scope,
-				project_root,
-			)
-			.map_err(|e| io_err("acquire the mutation lock", e))?,
-		)
 	};
 
 	let mut reports = Vec::new();
@@ -548,8 +558,24 @@ pub fn execute_repair(
 		{
 			continue;
 		}
-		Linker::unlink(&action.path)
+		// `unlink_reporting`, not `unlink`: the latter folds `NotFound` into
+		// success so step 4 can be idempotent, and a RECEIPT must not inherit
+		// that. An entry another process removed between the recheck above and
+		// this call came back `Ok(())` and was then reported as unlinked by
+		// THIS run — a removal attributed to the wrong actor. Nothing is
+		// recorded unless this call is what removed it.
+		//
+		// Residual, deliberately left: the check and the removal are two
+		// syscalls, so a replacement placed at the path inside that window is
+		// what gets removed. Narrowing it further needs `unlinkat` against a
+		// directory fd (or an inode compare that is itself racy), and the
+		// window is bounded by these two adjacent statements. The receipt half
+		// — the part that told the user something untrue — is closed here.
+		let removed = Linker::unlink_reporting(&action.path)
 			.map_err(|e| io_err("unlink stale compat referrer", e))?;
+		if !removed {
+			continue;
+		}
 		if report.outcome == RepairOutcome::Conformant {
 			report.outcome = RepairOutcome::Tidied;
 		}
@@ -1148,6 +1174,49 @@ mod tests {
 				&& a.action == crate::skills::shape::ReferrerAction::Unlink),
 			"an uncovered write slot must not let the only Referrer be taken: \
 			 {:?}",
+			p.actions
+		);
+	}
+
+	/// An unreadable compat dir REFUSES even when no write slot is covered.
+	///
+	/// The round that added `UnreadableCompatDir` put `if !covered { continue }`
+	/// BEFORE the fallible probe, so the refusal only fired when some other
+	/// agent's slot happened to be covered — with nothing covered the run
+	/// reported `ok` and left the stale referrer in place. An external reviewer
+	/// reproduced that by running it.
+	#[cfg(unix)]
+	#[test]
+	fn an_unreadable_compat_dir_refuses_even_with_no_covered_slot() {
+		use std::os::unix::fs::PermissionsExt;
+		let (_tmp, root) = fixture();
+		let name = "demo";
+		let master = root.join(".aghub").join(name);
+		write_skill(&master, name, "master");
+		// Nothing is granted anywhere: no write slot, and `grant_to` empty, so
+		// every candidate row is `Leave` and NOTHING is covered.
+		let compat_dir = root.join(".agent").join("skills");
+		fs::create_dir_all(&compat_dir).unwrap();
+		Linker::symlink(&master, &compat_dir.join(name)).unwrap();
+		fs::set_permissions(&compat_dir, fs::Permissions::from_mode(0o000))
+			.unwrap();
+		let enforced = fs::read_dir(&compat_dir).is_err();
+
+		let p = plan(&root, name, true);
+		fs::set_permissions(&compat_dir, fs::Permissions::from_mode(0o755))
+			.unwrap();
+		if !enforced {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+
+		assert!(
+			p.refusals().iter().any(|(_, reason)| matches!(
+				reason,
+				RefuseReason::UnreadableCompatDir { .. }
+			)),
+			"a dir that might hold a referrer and cannot be read must refuse, \
+			 not report the skill conformant: {:?}",
 			p.actions
 		);
 	}

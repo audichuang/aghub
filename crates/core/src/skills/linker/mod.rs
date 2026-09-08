@@ -410,6 +410,18 @@ impl Linker {
 	/// `remove_symlink_or_junction`. Uses `remove_dir`, NEVER `remove_dir_all`,
 	/// so it only unlinks the reparse point and never recurses into the Master.
 	pub fn unlink(path: &Path) -> io::Result<()> {
+		Self::unlink_reporting(path).map(|_| ())
+	}
+
+	/// [`Self::unlink`], but says whether THIS call is what removed the entry.
+	///
+	/// `unlink` folds `NotFound` into success because step 4 unlinks a stale
+	/// link before re-creating it and must be idempotent. A RECEIPT cannot use
+	/// that answer: a compat entry another process removed between the guard
+	/// and here came back as `Ok(())`, and `report.unlinked` then attributed
+	/// somebody else's removal to this run. Callers that only want the
+	/// idempotence keep using `unlink`; callers that report use this.
+	pub fn unlink_reporting(path: &Path) -> io::Result<bool> {
 		let result = {
 			#[cfg(windows)]
 			{
@@ -426,8 +438,8 @@ impl Linker {
 			}
 		};
 		match result {
-			Ok(()) => Ok(()),
-			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+			Ok(()) => Ok(true),
+			Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
 			Err(e) => Err(e),
 		}
 	}
@@ -694,6 +706,34 @@ mod tests {
 			!Linker::is_link(&tmp.path().join("missing")),
 			"a missing path is not a link"
 		);
+	}
+
+	/// A receipt must not claim a removal somebody else performed.
+	///
+	/// `unlink` folds `NotFound` into success so step 4 can be idempotent. Step
+	/// 6 REPORTS, and inheriting that fold made a compat entry another process
+	/// had already removed come back `Ok(())` and land in `report.unlinked` as
+	/// this run's work.
+	#[cfg(unix)]
+	#[test]
+	fn unlink_reporting_separates_removed_from_already_gone() {
+		let tmp = tempfile::tempdir().unwrap();
+		let target = tmp.path().join("target");
+		std::fs::create_dir_all(&target).unwrap();
+		let link = tmp.path().join("link");
+		std::os::unix::fs::symlink(&target, &link).unwrap();
+
+		assert!(
+			Linker::unlink_reporting(&link).unwrap(),
+			"this call removed it"
+		);
+		assert!(
+			!Linker::unlink_reporting(&link).unwrap(),
+			"already gone is NOT this run's removal"
+		);
+		assert!(target.is_dir(), "the target must never be touched");
+		// The lossy wrapper still has to stay idempotent for step 4.
+		assert!(Linker::unlink(&link).is_ok());
 	}
 
 	/// A non-directory component is a DEFINITE absence, not an ambiguity.
