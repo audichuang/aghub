@@ -39,7 +39,15 @@ export interface McpImportJson {
 // and saving it back must not change its argv — a plain `split(/\s+/)` used to
 // shred any arg containing a space (`/p q` → `/p`, `q`) even when the user
 // never touched the field.
-const NEEDS_QUOTING_REGEX = /[\s"'\\]/;
+//
+// A backslash OUTSIDE quotes is literal, deliberately: `C:\Users\x` typed bare
+// is a normal Windows arg and treating `\U` as an escape would eat it. Inside
+// `"…"` a backslash only escapes `"` or another backslash, so a hand-typed
+// `"C:\Program Files\x"` also survives; `formatArgs` prefers single quotes so
+// it never has to escape a Windows path at all.
+// ponytail: `"C:\dir\"` (trailing backslash inside double quotes) reads that
+// `\"` as an escape. formatArgs never emits it; only hand-typed input hits it.
+const NEEDS_QUOTING_REGEX = /[\s"']/;
 
 export function parseArgs(input: string): string[] {
 	const args: string[] = [];
@@ -50,9 +58,12 @@ export function parseArgs(input: string): string[] {
 	for (let i = 0; i < input.length; i++) {
 		const ch = input[i];
 
-		if (ch === "\\" && quote !== "'" && i + 1 < input.length) {
+		if (
+			quote === '"' &&
+			ch === "\\" &&
+			(input[i + 1] === '"' || input[i + 1] === "\\")
+		) {
 			current += input[++i];
-			started = true;
 			continue;
 		}
 
@@ -93,11 +104,17 @@ export function parseArgs(input: string): string[] {
 
 export function formatArgs(args: string[]): string {
 	return args
-		.map((arg) =>
-			arg === "" || NEEDS_QUOTING_REGEX.test(arg)
+		.map((arg) => {
+			if (arg !== "" && !NEEDS_QUOTING_REGEX.test(arg)) {
+				return arg;
+			}
+			// Single quotes need no inner escaping, which keeps Windows paths
+			// readable; fall back to double quotes only for an arg that
+			// contains a single quote itself.
+			return arg.includes("'")
 				? `"${arg.replace(/(["\\])/g, "\\$1")}"`
-				: arg,
-		)
+				: `'${arg}'`;
+		})
 		.join(" ");
 }
 

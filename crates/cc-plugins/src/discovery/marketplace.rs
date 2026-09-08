@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use serde::{Deserialize, Deserializer};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 
 // ── Types ──
@@ -163,35 +163,39 @@ struct KnownMarketplaceEntry {
 	install_location: Option<String>,
 }
 
-/// Marketplace roots the `claude` CLI recorded. A `directory` source stays
-/// wherever the user pointed at it — nothing is copied under `marketplaces/` —
-/// so scanning that one directory misses every external source, and the plugin
-/// catalog comes back empty for a marketplace the sources page just listed.
-pub async fn known_marketplace_roots(plugins_dir: &Path) -> Vec<PathBuf> {
+/// Marketplace name → root, as the `claude` CLI recorded it in
+/// `known_marketplaces.json`. A `directory` source stays wherever the user
+/// pointed at it — nothing is copied under `marketplaces/` — so any code that
+/// derives a marketplace's path from that one directory misses every external
+/// source. Sync (the file is small and local) so both the async discovery scan
+/// and the installer's sync path lookups share ONE reader; ordered so a
+/// duplicate name resolves the same way on every run.
+pub fn known_marketplaces(plugins_dir: &Path) -> BTreeMap<String, PathBuf> {
 	let path = plugins_dir.join("known_marketplaces.json");
 
-	let content = match tokio::fs::read_to_string(&path).await {
+	let content = match std::fs::read_to_string(&path) {
 		Ok(content) => content,
 		Err(e) => {
 			if e.kind() != std::io::ErrorKind::NotFound {
 				log::warn!("Cannot read {}: {}", path.display(), e);
 			}
-			return Vec::new();
+			return BTreeMap::new();
 		}
 	};
 
-	match serde_json::from_str::<HashMap<String, KnownMarketplaceEntry>>(
+	match serde_json::from_str::<BTreeMap<String, KnownMarketplaceEntry>>(
 		&content,
 	) {
 		Ok(entries) => entries
-			.into_values()
-			.filter_map(|entry| entry.install_location)
-			.filter(|location| !location.is_empty())
-			.map(PathBuf::from)
+			.into_iter()
+			.filter_map(|(name, entry)| {
+				let location = entry.install_location?;
+				(!location.is_empty()).then(|| (name, PathBuf::from(location)))
+			})
 			.collect(),
 		Err(e) => {
 			log::warn!("Failed to parse {}: {}", path.display(), e);
-			Vec::new()
+			BTreeMap::new()
 		}
 	}
 }
@@ -271,7 +275,7 @@ pub async fn scan_marketplaces(
 
 #[cfg(test)]
 mod tests {
-	use super::{known_marketplace_roots, load_marketplace, MarketplaceConfig};
+	use super::{known_marketplaces, load_marketplace, MarketplaceConfig};
 	use std::path::Path;
 
 	fn write(path: &Path, body: &str) {
@@ -299,8 +303,8 @@ mod tests {
 			),
 		);
 
-		let roots = known_marketplace_roots(&plugins_dir).await;
-		assert_eq!(roots, vec![external.clone()]);
+		let known = known_marketplaces(&plugins_dir);
+		assert_eq!(known.get("ui-test-market"), Some(&external));
 		assert_eq!(
 			load_marketplace(&external).await.unwrap().name,
 			"ui-test-market"
@@ -313,16 +317,16 @@ mod tests {
 	async fn a_missing_or_broken_registry_yields_no_roots() {
 		let tmp = tempfile::tempdir().unwrap();
 		let plugins_dir = tmp.path().join("plugins");
-		assert!(known_marketplace_roots(&plugins_dir).await.is_empty());
+		assert!(known_marketplaces(&plugins_dir).is_empty());
 
 		write(&plugins_dir.join("known_marketplaces.json"), "{ not json");
-		assert!(known_marketplace_roots(&plugins_dir).await.is_empty());
+		assert!(known_marketplaces(&plugins_dir).is_empty());
 
 		write(
 			&plugins_dir.join("known_marketplaces.json"),
 			r#"{"m":{"source":{"source":"github","repo":"o/r"}}}"#,
 		);
-		assert!(known_marketplace_roots(&plugins_dir).await.is_empty());
+		assert!(known_marketplaces(&plugins_dir).is_empty());
 	}
 
 	#[tokio::test]

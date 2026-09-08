@@ -1,7 +1,7 @@
 use super::super::registry::{copy_dir_all, normalize_repository_url};
 use crate::claude::types::{PluginAuthor, PluginManifest};
 use crate::discovery::{
-	MarketplaceConfig, MarketplacePlugin, MarketplaceSource,
+	known_marketplaces, MarketplaceConfig, MarketplacePlugin, MarketplaceSource,
 };
 use anyhow::Result;
 use std::collections::HashMap;
@@ -148,14 +148,35 @@ pub(in crate::installer::marketplace) async fn materialize_marketplace_plugin(
 
 // ── Repository ──
 
+/// Where a marketplace's checkout lives. The conventional layout is a sibling
+/// of `marketplace_root` (i.e. `<plugins_dir>/marketplaces/<name>`), but an
+/// external `directory` source is registered by PATH and never copied there —
+/// so fall back to what the `claude` CLI recorded. Without that fallback such a
+/// plugin reports no repository URL and `can_reinstall: false`, even though the
+/// CLI installs it fine.
 pub(in crate::installer) fn marketplace_path_for(
 	marketplace_root: &Path,
 	marketplace: &str,
 ) -> PathBuf {
-	marketplace_root
+	let conventional = marketplace_root
 		.parent()
 		.unwrap_or(marketplace_root)
-		.join(marketplace)
+		.join(marketplace);
+
+	if conventional
+		.join(".claude-plugin/marketplace.json")
+		.exists()
+	{
+		return conventional;
+	}
+
+	marketplace_root
+		.parent()
+		.and_then(Path::parent)
+		.and_then(|plugins_dir| {
+			known_marketplaces(plugins_dir).remove(marketplace)
+		})
+		.unwrap_or(conventional)
 }
 
 fn marketplace_origin_url_from_git(
@@ -322,7 +343,69 @@ fn marketplace_plugin_repository(plugin: &MarketplacePlugin) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-	use super::github_owner_repo;
+	use super::{
+		github_owner_repo, is_marketplace_source, marketplace_path_for,
+	};
+	use std::path::Path;
+
+	const MANIFEST: &str = r#"{"name":"m","owner":{"name":"o"},"plugins":[]}"#;
+
+	fn write_manifest(root: &Path) {
+		std::fs::create_dir_all(root.join(".claude-plugin")).unwrap();
+		std::fs::write(root.join(".claude-plugin/marketplace.json"), MANIFEST)
+			.unwrap();
+	}
+
+	/// An external `directory` marketplace lives wherever the user pointed at
+	/// it, so its path has to come off `known_marketplaces.json` — otherwise it
+	/// reports `can_reinstall: false` and no repository URL even though the
+	/// CLI installs it fine.
+	#[test]
+	fn an_external_marketplace_is_found_through_the_registry() {
+		let temp_dir = tempfile::tempdir().unwrap();
+		let plugins_dir = temp_dir.path().join(".claude/plugins");
+		let marketplace_root =
+			plugins_dir.join("marketplaces/claude-plugins-official");
+		let external = temp_dir.path().join("elsewhere/market");
+		write_manifest(&external);
+		std::fs::create_dir_all(&marketplace_root).unwrap();
+		std::fs::write(
+			plugins_dir.join("known_marketplaces.json"),
+			format!(
+				r#"{{"ui-test-market":{{"installLocation":"{}"}}}}"#,
+				external.display()
+			),
+		)
+		.unwrap();
+
+		assert_eq!(
+			marketplace_path_for(&marketplace_root, "ui-test-market"),
+			external
+		);
+		assert!(is_marketplace_source(&marketplace_root, "ui-test-market"));
+	}
+
+	/// The conventional sibling layout wins, and an unknown name still resolves
+	/// there (so the caller's "no manifest" verdict is unchanged).
+	#[test]
+	fn the_conventional_layout_still_wins() {
+		let temp_dir = tempfile::tempdir().unwrap();
+		let marketplace_root = temp_dir
+			.path()
+			.join(".claude/plugins/marketplaces/claude-plugins-official");
+		let sibling = marketplace_root.with_file_name("in-place");
+		write_manifest(&sibling);
+
+		assert_eq!(
+			marketplace_path_for(&marketplace_root, "in-place"),
+			sibling
+		);
+		assert_eq!(
+			marketplace_path_for(&marketplace_root, "nowhere"),
+			marketplace_root.with_file_name("nowhere")
+		);
+		assert!(!is_marketplace_source(&marketplace_root, "nowhere"));
+	}
 
 	#[test]
 	fn github_owner_repo_accepts_github_sources() {

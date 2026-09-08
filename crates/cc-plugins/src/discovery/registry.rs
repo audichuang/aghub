@@ -6,9 +6,7 @@
 //! - L3: Remote install statistics
 
 use super::{
-	marketplace::{
-		known_marketplace_roots, load_marketplace, scan_marketplaces,
-	},
+	marketplace::{known_marketplaces, load_marketplace, scan_marketplaces},
 	DiscoveryConfig, InstallCountsCache, MarketplaceSource, PluginAuthor,
 	PluginCatalogCache, PluginInfo, PluginSource,
 };
@@ -234,7 +232,10 @@ impl UnifiedPluginRegistry {
 	/// lives) first, then whatever sits under `marketplaces/` — the second half
 	/// keeps a hand-copied marketplace working even with no registry entry.
 	async fn marketplace_roots(&self) -> Vec<PathBuf> {
-		let mut roots = known_marketplace_roots(&self.config.plugins_dir).await;
+		let mut roots: Vec<PathBuf> =
+			known_marketplaces(&self.config.plugins_dir)
+				.into_values()
+				.collect();
 
 		let marketplaces_dir = self
 			.config

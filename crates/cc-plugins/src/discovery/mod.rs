@@ -2,7 +2,7 @@ mod marketplace;
 mod registry;
 
 pub(crate) use marketplace::{
-	MarketplaceConfig, MarketplacePlugin, MarketplaceSource,
+	known_marketplaces, MarketplaceConfig, MarketplacePlugin, MarketplaceSource,
 };
 pub use registry::UnifiedPluginRegistry;
 

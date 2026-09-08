@@ -16,6 +16,10 @@ const ROUND_TRIPS = [
 	["--dir", "/p q"],
 	['a"b'],
 	["--flag=a b", "'quoted'", "back\\slash"],
+	["C:\\Users\\x"],
+	["C:\\Program Files\\node.exe"],
+	["a\"b'c"],
+	['say "hi"', "it's"],
 	[""],
 	[],
 ];
@@ -30,6 +34,22 @@ test("a hand-typed quoted arg keeps its boundary", () => {
 	assert.deepEqual(parseArgs('"hello world" second'), [
 		"hello world",
 		"second",
+	]);
+});
+
+// A bare backslash outside quotes is literal: a Windows path typed straight
+// into the field must come back byte-for-byte.
+test("a bare Windows path is not treated as escapes", () => {
+	assert.deepEqual(parseArgs("C:\\Users\\x --flag"), [
+		"C:\\Users\\x",
+		"--flag",
+	]);
+});
+
+test("a hand-typed quoted Windows path survives", () => {
+	assert.deepEqual(parseArgs('"C:\\Program Files\\node.exe" --flag'), [
+		"C:\\Program Files\\node.exe",
+		"--flag",
 	]);
 });
 

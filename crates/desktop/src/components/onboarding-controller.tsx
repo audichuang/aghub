@@ -591,8 +591,13 @@ function WizardIllustration({ stepId }: { stepId: string }) {
 	const videoSrc = WIZARD_VIDEOS[stepId];
 	const [isLoading, setIsLoading] = useState(true);
 	// The clips come off a CDN and need a codec WebKitGTK may not have, so a
-	// step can sit on a spinner forever. Show why instead.
-	const [hasFailed, setHasFailed] = useState(false);
+	// step can sit on a spinner forever. Show why instead. Keyed by step, not a
+	// bare boolean: this component is NOT remounted between steps (no `key` at
+	// the call site), so one bad clip would otherwise mark every later step
+	// failed — and with the video unmounted nothing would fire `loadStart` to
+	// clear it again.
+	const [failedStepId, setFailedStepId] = useState<string | null>(null);
+	const hasFailed = failedStepId === stepId;
 	const videoRef = useRef<HTMLVideoElement>(null);
 
 	const handleFullscreen = () => {
@@ -632,11 +637,8 @@ function WizardIllustration({ stepId }: { stepId: string }) {
 					muted
 					playsInline
 					onCanPlay={() => setIsLoading(false)}
-					onLoadStart={() => {
-						setIsLoading(true);
-						setHasFailed(false);
-					}}
-					onError={() => setHasFailed(true)}
+					onLoadStart={() => setIsLoading(true)}
+					onError={() => setFailedStepId(stepId)}
 				/>
 			)}
 			{videoSrc && !hasFailed && (
