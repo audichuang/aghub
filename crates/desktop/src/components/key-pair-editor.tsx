@@ -90,6 +90,11 @@ export function KeyPairEditor({
 	void errors;
 
 	return (
+		// `min-w-0` on the inputs is load-bearing: without it each one is
+		// floored at its intrinsic ~20-character width, the row cannot shrink,
+		// and a `<fieldset>` ancestor picks that up as its own
+		// `min-inline-size: min-content` — which overflowed the MCP form's card
+		// at the 1024px minimum window width.
 		<div className="space-y-2">
 			{displayPairs.map((pair) => (
 				<div key={pair.id} className="flex items-start gap-2">
@@ -104,7 +109,7 @@ export function KeyPairEditor({
 						onChange={(e) =>
 							handleChange(pair.id, "key", e.target.value)
 						}
-						className="flex-1"
+						className="min-w-0 flex-1"
 						variant={variant}
 					/>
 					<Input
@@ -120,7 +125,7 @@ export function KeyPairEditor({
 						onChange={(e) =>
 							handleChange(pair.id, "value", e.target.value)
 						}
-						className="flex-1"
+						className="min-w-0 flex-1"
 						variant={variant}
 					/>
 					<Button
