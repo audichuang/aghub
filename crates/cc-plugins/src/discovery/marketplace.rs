@@ -3,7 +3,7 @@
 use anyhow::Result;
 use serde::{Deserialize, Deserializer};
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 // ── Types ──
 
@@ -154,11 +154,88 @@ where
 	}
 }
 
+/// One entry of `~/.claude/plugins/known_marketplaces.json` (keyed by
+/// marketplace name). Every field is optional so an unknown source kind or a
+/// shape change does not cost us the whole file.
+#[derive(Debug, Deserialize)]
+struct KnownMarketplaceEntry {
+	#[serde(rename = "installLocation")]
+	install_location: Option<String>,
+}
+
+/// Marketplace roots the `claude` CLI recorded. A `directory` source stays
+/// wherever the user pointed at it — nothing is copied under `marketplaces/` —
+/// so scanning that one directory misses every external source, and the plugin
+/// catalog comes back empty for a marketplace the sources page just listed.
+pub async fn known_marketplace_roots(plugins_dir: &Path) -> Vec<PathBuf> {
+	let path = plugins_dir.join("known_marketplaces.json");
+
+	let content = match tokio::fs::read_to_string(&path).await {
+		Ok(content) => content,
+		Err(e) => {
+			if e.kind() != std::io::ErrorKind::NotFound {
+				log::warn!("Cannot read {}: {}", path.display(), e);
+			}
+			return Vec::new();
+		}
+	};
+
+	match serde_json::from_str::<HashMap<String, KnownMarketplaceEntry>>(
+		&content,
+	) {
+		Ok(entries) => entries
+			.into_values()
+			.filter_map(|entry| entry.install_location)
+			.filter(|location| !location.is_empty())
+			.map(PathBuf::from)
+			.collect(),
+		Err(e) => {
+			log::warn!("Failed to parse {}: {}", path.display(), e);
+			Vec::new()
+		}
+	}
+}
+
+/// Read the manifest of ONE marketplace root. `None` when there is no manifest
+/// there or it does not parse — both are logged, neither is fatal.
+pub async fn load_marketplace(root: &Path) -> Option<MarketplaceConfig> {
+	let manifest_path = root.join(".claude-plugin/marketplace.json");
+
+	match tokio::fs::try_exists(&manifest_path).await {
+		Ok(true) => {}
+		Ok(false) => return None,
+		Err(e) => {
+			log::warn!(
+				"Cannot check manifest at {}: {}",
+				manifest_path.display(),
+				e
+			);
+			return None;
+		}
+	}
+
+	let content = match tokio::fs::read_to_string(&manifest_path).await {
+		Ok(content) => content,
+		Err(e) => {
+			log::warn!("Failed to read {}: {}", manifest_path.display(), e);
+			return None;
+		}
+	};
+
+	match serde_json::from_str::<MarketplaceConfig>(&content) {
+		Ok(config) => Some(config),
+		Err(e) => {
+			log::warn!("Failed to parse {}: {}", manifest_path.display(), e);
+			None
+		}
+	}
+}
+
 /// Scan all marketplaces in a directory
 pub async fn scan_marketplaces(
 	marketplaces_dir: &Path,
-) -> Result<Vec<(String, MarketplaceConfig)>> {
-	let mut results = Vec::new();
+) -> Result<Vec<PathBuf>> {
+	let mut results: Vec<PathBuf> = Vec::new();
 
 	match tokio::fs::try_exists(marketplaces_dir).await {
 		Ok(true) => {}
@@ -182,51 +259,11 @@ pub async fn scan_marketplaces(
 	let mut entries = tokio::fs::read_dir(marketplaces_dir).await?;
 
 	while let Some(entry) = entries.next_entry().await? {
-		let path = entry.path();
-
 		if !entry.file_type().await?.is_dir() {
 			continue;
 		}
 
-		let manifest_path = path.join(".claude-plugin/marketplace.json");
-
-		let exists = match tokio::fs::try_exists(&manifest_path).await {
-			Ok(v) => v,
-			Err(e) => {
-				log::warn!(
-					"Cannot check manifest at {}: {}",
-					manifest_path.display(),
-					e
-				);
-				false
-			}
-		};
-		if exists {
-			match tokio::fs::read_to_string(&manifest_path).await {
-				Ok(content) => {
-					match serde_json::from_str::<MarketplaceConfig>(&content) {
-						Ok(config) => {
-							let name = config.name.clone();
-							results.push((name, config));
-						}
-						Err(e) => {
-							log::warn!(
-								"Failed to parse {}: {}",
-								manifest_path.display(),
-								e
-							);
-						}
-					}
-				}
-				Err(e) => {
-					log::warn!(
-						"Failed to read {}: {}",
-						manifest_path.display(),
-						e
-					);
-				}
-			}
-		}
+		results.push(entry.path());
 	}
 
 	Ok(results)
@@ -234,7 +271,68 @@ pub async fn scan_marketplaces(
 
 #[cfg(test)]
 mod tests {
-	use super::MarketplaceConfig;
+	use super::{known_marketplace_roots, load_marketplace, MarketplaceConfig};
+	use std::path::Path;
+
+	fn write(path: &Path, body: &str) {
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(path, body).unwrap();
+	}
+
+	const MANIFEST: &str = r#"{"name":"ui-test-market","owner":{"name":"UI"},
+        "plugins":[{"name":"ui-fixture","source":"./plugins/ui-fixture"}]}"#;
+
+	/// A `directory` source is registered by PATH — nothing is copied under
+	/// `marketplaces/` — so the roots must come off `known_marketplaces.json`
+	/// or the catalog is empty for a source the sources page just listed.
+	#[tokio::test]
+	async fn external_directory_source_is_a_known_root() {
+		let tmp = tempfile::tempdir().unwrap();
+		let plugins_dir = tmp.path().join(".claude/plugins");
+		let external = tmp.path().join("elsewhere/plugin-market");
+		write(&external.join(".claude-plugin/marketplace.json"), MANIFEST);
+		write(
+			&plugins_dir.join("known_marketplaces.json"),
+			&format!(
+				r#"{{"ui-test-market":{{"source":{{"source":"directory","path":"{p}"}},"installLocation":"{p}"}}}}"#,
+				p = external.display()
+			),
+		);
+
+		let roots = known_marketplace_roots(&plugins_dir).await;
+		assert_eq!(roots, vec![external.clone()]);
+		assert_eq!(
+			load_marketplace(&external).await.unwrap().name,
+			"ui-test-market"
+		);
+	}
+
+	/// Fail open: no registry file, a malformed one, or an entry with no
+	/// `installLocation` yields no roots instead of an error.
+	#[tokio::test]
+	async fn a_missing_or_broken_registry_yields_no_roots() {
+		let tmp = tempfile::tempdir().unwrap();
+		let plugins_dir = tmp.path().join("plugins");
+		assert!(known_marketplace_roots(&plugins_dir).await.is_empty());
+
+		write(&plugins_dir.join("known_marketplaces.json"), "{ not json");
+		assert!(known_marketplace_roots(&plugins_dir).await.is_empty());
+
+		write(
+			&plugins_dir.join("known_marketplaces.json"),
+			r#"{"m":{"source":{"source":"github","repo":"o/r"}}}"#,
+		);
+		assert!(known_marketplace_roots(&plugins_dir).await.is_empty());
+	}
+
+	#[tokio::test]
+	async fn a_root_without_a_manifest_is_not_a_marketplace() {
+		let tmp = tempfile::tempdir().unwrap();
+		assert!(load_marketplace(tmp.path()).await.is_none());
+
+		write(&tmp.path().join(".claude-plugin/marketplace.json"), "{");
+		assert!(load_marketplace(tmp.path()).await.is_none());
+	}
 
 	#[test]
 	fn test_marketplace_config_parsing() {
