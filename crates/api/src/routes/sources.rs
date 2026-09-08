@@ -188,7 +188,6 @@ pub async fn diff_source(
 	forwarded: ForwardedGitTokens,
 	_origin: TrustedLocalOrigin,
 ) -> ApiResult<SourceDiffResponse> {
-	let started = std::time::Instant::now();
 	let scope_params = ScopeParams {
 		scope: query.scope.clone(),
 		project_root: query.project_root.clone(),
@@ -241,7 +240,6 @@ pub async fn diff_source(
 				"DIFF_TASK_PANIC",
 			)
 		})?;
-	let elapsed_ms = Some(started.elapsed().as_secs_f64() * 1000.0);
 
 	match outcome {
 		// `source` in the response stays the caller's own argument — the DTO is
@@ -251,7 +249,6 @@ pub async fn diff_source(
 		} => Ok(Json(SourceDiffResponse {
 			source,
 			used_credential,
-			elapsed_ms,
 			git_ref,
 			session_id: None,
 			needs_credential: false,
@@ -262,7 +259,6 @@ pub async fn diff_source(
 			Ok(Json(SourceDiffResponse {
 				source,
 				used_credential,
-				elapsed_ms,
 				git_ref,
 				session_id: None,
 				needs_credential: true,
@@ -295,7 +291,6 @@ pub async fn diff_source(
 			Ok(Json(SourceDiffResponse {
 				source,
 				used_credential,
-				elapsed_ms,
 				git_ref,
 				session_id: None,
 				needs_credential: false,
@@ -689,7 +684,6 @@ mod tests {
 		// is NOT reported as needing a credential.
 		assert_eq!(value["needsCredential"], false);
 		assert_eq!(value["usedCredential"], true);
-		assert!(value["elapsedMs"].as_f64().is_some_and(|ms| ms >= 0.0));
 		assert!(!body.contains("FWD-TOKEN"));
 		// The forwarded token is exactly what reached the fetch.
 		assert_eq!(

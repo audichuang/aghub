@@ -1164,7 +1164,12 @@ fn classify_installed(
 	entry: &BaselineEntry,
 	skill_dir: &Path,
 ) -> (SourceSkillState, Option<String>) {
-	let fresh = match skill::compute_skill_folder_comparison_hash(skill_dir) {
+	let hash = if entry.local_comparison_hashes.is_empty() {
+		skill::compute_skill_folder_hash(skill_dir)
+	} else {
+		skill::compute_skill_folder_comparison_hash(skill_dir)
+	};
+	let fresh = match hash {
 		Ok(hash) => hash,
 		Err(_) => {
 			return (SourceSkillState::Uncheckable, Some("local".to_string()))
@@ -1180,13 +1185,6 @@ fn classify_installed(
 		}
 		return (SourceSkillState::InstalledOutdated, None);
 	}
-
-	let fresh = match skill::compute_skill_folder_hash(skill_dir) {
-		Ok(hash) => hash,
-		Err(_) => {
-			return (SourceSkillState::Uncheckable, Some("local".to_string()))
-		}
-	};
 
 	let baseline = if entry.stored_hash.is_empty()
 		|| skill::is_placeholder_digest(&entry.stored_hash)

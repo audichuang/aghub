@@ -1307,7 +1307,7 @@ export default {
 	sourceInstallFailed: "Failed to install skill.",
 	sourceInstallLinkTargetsTitle: "Install for these AI tools",
 	sourceInstallLinkTargetsHint:
-		"Select the AI tools that should be able to use this skill.",
+		"Install and enable an AI tool that supports skills, then try again.",
 	sourceInstallNoLinkTargets:
 		"No agents need a link here — the master is written on its own.",
 	sourceInstallSharedSlotHint:

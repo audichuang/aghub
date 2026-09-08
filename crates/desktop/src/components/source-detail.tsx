@@ -869,7 +869,8 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 					{row.sourceType === "github" &&
 						!isFetching &&
 						!isError &&
-						data?.usedCredential === false && (
+						data?.usedCredential === false &&
+						!data.needsCredential && (
 							<p
 								className="mt-2 text-xs text-muted"
 								role="status"
@@ -1528,7 +1529,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 									{t("sourceInstallLinkTargetsTitle")}
 								</legend>
 								<p className="text-xs text-muted">
-									{t("sourceChooseAgents")}
+									{t(
+										pendingInstall?.groups.length
+											? "sourceChooseAgents"
+											: "sourceInstallLinkTargetsHint",
+									)}
 								</p>
 								<div className="grid grid-cols-2 gap-3">
 									{pendingInstall?.groups.map((group) => (

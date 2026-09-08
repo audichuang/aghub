@@ -32,6 +32,16 @@ routes and CLI `apply-update` / `source`. Network/credentials live here;
 - **`Fetcher` / `RefResolver` / `TokenResolver`**: injected seams for testability
 - **`CheckDeps`**: dependency bundle into `check_updates()`
 
+## 更新狀態的語意
+
+`check` 與 `source diff` 對可讀的本機副本採同一個內容比較基準。
+「可更新」也包含本機修改而上游未變，並不只表示上游有新版本；
+`apply-update --yes` 會用來源內容覆蓋本機修改。不要改回只比較 lock。
+`UpdateAvailable.current` / `available` 是 comparison hash，排除有來源 `.py`
+的標準 CPython 快取；它們不必等於 lock 的 raw hash。所有 lock 寫入、
+healing 與安全稽核仍使用 raw 內容。只有快取不同可判最新，但 preflight
+仍需 raw 完整性證明；不能拿 comparison hash 與 raw lock 相比來省略 fetch。
+
 ## PREFLIGHT (must stay correct)
 
 The tip preflight skips the treeless fetch **only when** upstream tip

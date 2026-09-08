@@ -11,10 +11,6 @@ export type SourceDiffResponse = {
 	 * ran or cohorts used mixed authentication; never inferred from storage.
 	 */
 	usedCredential?: boolean;
-	/**
-	 * Total source-check time, including credential resolution and comparison.
-	 */
-	elapsedMs?: number;
 	gitRef?: string;
 	/**
 	 * A fresh git-clone session id usable with `POST /skills/git/install` to

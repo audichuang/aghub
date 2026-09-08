@@ -10,9 +10,12 @@ private rule aghub_credential_source {
 	strings:
 		$file = /(^|[^a-zA-Z0-9_])(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b)/ nocase
 		$named_file = /["'\/\\](credentials|id_rsa|id_ed25519)(\b|[.])/ nocase
-		$env = /(process\.env|os\.environ|getenv)[ \t]*(\.|\[|\()[ \t]*["']?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
+		$env = /(process\.env|os\.environ|getenv)[ \t]*(\??\.(get[ \t]*\()?|(\?\.)?\[|\()[ \t]*["']?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
+		$destructure = /\{[ \t\r\n]*([^{}]{0,256},[ \t\r\n]*)?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)[a-zA-Z0-9_]*[ \t\r\n]*([,:=][^{}]{0,256})?\}[ \t\r\n]*=[ \t\r\n]*process\.env\b/ nocase
+		$env_alias = /\b[a-zA-Z_$][a-zA-Z0-9_$]*[ \t]*=[ \t]*(process\.env|os\.environ)\b/
+		$secret_lookup = /\b[a-zA-Z_$][a-zA-Z0-9_$]*[ \t]*(\[|\.get[ \t]*\()[ \t]*["'][a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)[a-zA-Z0-9_]*["']/ nocase
 	condition:
-		any of them
+		$file or $named_file or $env or $destructure or ($env_alias and $secret_lookup)
 }
 
 rule aghub_credential_file_exfil {

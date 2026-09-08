@@ -141,10 +141,6 @@ pub struct SourceDiffResponse {
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub used_credential: Option<bool>,
-	/// Total source-check time, including credential resolution and comparison.
-	#[serde(skip_serializing_if = "Option::is_none")]
-	#[ts(optional)]
-	pub elapsed_ms: Option<f64>,
 	#[serde(skip_serializing_if = "Option::is_none")]
 	#[ts(optional)]
 	pub git_ref: Option<String>,

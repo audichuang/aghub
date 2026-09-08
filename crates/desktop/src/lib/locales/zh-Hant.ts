@@ -1241,7 +1241,8 @@ const zhHant: typeof en = {
 	sourceInstallSomeFailedMany: "有 {{count}} 個安裝目標失敗。",
 	sourceInstallFailed: "安裝技能失敗。",
 	sourceInstallLinkTargetsTitle: "安裝給哪些 AI 工具",
-	sourceInstallLinkTargetsHint: "選擇要使用這個技能的 AI 工具。",
+	sourceInstallLinkTargetsHint:
+		"請先安裝並啟用支援技能的 AI 工具，再回來安裝。",
 	sourceInstallNoLinkTargets: "此處沒有 Agent 可以接收技能。",
 	sourceInstallSharedSlotHint:
 		"這些 Agent 沒有自己的技能目錄,共用同一個 —— 勾選其中一個等於全部勾選,之後移除也會一起移除。",
