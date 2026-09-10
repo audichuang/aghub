@@ -680,6 +680,21 @@ fn describe(reason: &RefuseReason, at: &Path) -> String {
 			 detach",
 			path.display()
 		),
+		RefuseReason::GitTrackedSource { paths } => format!(
+			"git tracks {}, so it is authored in place rather than installed \
+			 — migrating would move it into the store and delete it from \
+			 version control",
+			paths
+				.iter()
+				.map(|p| p.display().to_string())
+				.collect::<Vec<_>>()
+				.join(", ")
+		),
+		RefuseReason::GitTrackingUndecided { path } => format!(
+			"{} is inside a git repository, but `git` could not say whether it \
+			 tracks the directory",
+			path.display()
+		),
 	}
 }
 
@@ -708,6 +723,22 @@ fn fix_for(reason: &RefuseReason, at: &Path, name: &str) -> String {
 			 move it aside if it is not yours to change or its mount is \
 			 unreachable — repair proceeds once the path is readable or gone; \
 			 then re-run `aghub skills repair {name}`",
+			path.display()
+		),
+		RefuseReason::GitTrackedSource { paths } => format!(
+			"keep authoring it there, or migrate it deliberately: `git rm -r \
+			 --cached {}` (and commit that), then re-run `aghub skills repair \
+			 {name}`",
+			paths
+				.iter()
+				.map(|p| p.display().to_string())
+				.collect::<Vec<_>>()
+				.join(" ")
+		),
+		RefuseReason::GitTrackingUndecided { path } => format!(
+			"make `git ls-files --error-unmatch {}` answer — install `git`, or \
+			 repair the repository above it — then re-run `aghub skills repair \
+			 {name}`",
 			path.display()
 		),
 	}

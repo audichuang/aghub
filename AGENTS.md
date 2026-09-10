@@ -214,6 +214,22 @@ Non-obvious invariants:
   and **the path is nobody's write slot** — `.agents/skills` is codex's second
   READ dir and eight other agents' ONLY write dir, so without that last guard
   the sweep deleted the shared slot out from under all eight
+- **`repair` REFUSES a real directory that git TRACKS.** Both moving actions
+  (`AdoptAsMaster`, `CompareThenQuarantine`) rename a real directory into the
+  ignored store, so on a repo whose skills are authored IN PLACE that was 39
+  deletions in `git status`, exit 0 and doctor green. Shape cannot separate
+  authored source from a pre-2.18 install (both `UnmigratedCopy`) and neither
+  can the lock (aghub's own 22 hand-edited skills are in `skills-lock.json`) —
+  D7's "migration deliberately leaves alone" only ever held for the LAZY path.
+  Tracking is the one available signal, so `plan_repair` asks the system `git`
+  binary (`crates/core` grows no git dep for a yes/no question; exit code only,
+  because `ls-files` prints matches on stdout and its messages are localized).
+  THREE states, like `UnreadableCompatDir`: tracked → refuse; untracked, or no
+  `.git` above the path → migrate, because that is what `repair` is FOR and
+  "inside a repo" must never become the question; a `.git` present but
+  unanswerable → refuse too, with its own reason. Scope-blind on purpose — a
+  global `~/.agents/skills/<n>` sits in plenty of dotfiles repos. No opt-in
+  flag: the escape is `git rm -r --cached <path>`, which the refusal prints
 - **`check` is offline by default** — `checked: false`, and the reason is the
   ORCHESTRATOR's, not the surface's: a source nothing could fetch keeps its
   permanent reason (`local` / `ssh` / `unsupportedScheme`) and everything else

@@ -967,6 +967,128 @@ mod tests {
 		);
 	}
 
+	/// `git -C <root> <args>`, asserted to succeed. No commit anywhere below:
+	/// `git ls-files` reads the INDEX, so `git add` alone is what "tracked"
+	/// means — and it needs no `user.name`/`user.email`, which a fresh CI
+	/// container does not have.
+	fn git(root: &Path, args: &[&str]) {
+		let status = std::process::Command::new("git")
+			.arg("-C")
+			.arg(root)
+			.args(args)
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null())
+			.status()
+			.expect("this test needs the `git` binary");
+		assert!(
+			status.success(),
+			"git {args:?} failed in {}",
+			root.display()
+		);
+	}
+
+	/// B6, the bug this guard exists for: `.agents/skills/<n>` written IN PLACE
+	/// and committed has the very same shape as a pre-2.18 install
+	/// (`UnmigratedCopy`), and the lock names it either way — so `repair -p
+	/// --yes` renamed 39 tracked skill files into an ignored store and exited 0
+	/// with doctor green. Git tracking is the only signal that separates
+	/// authored source from an install, so the plan has to ask.
+	#[test]
+	fn a_git_tracked_shared_slot_refuses_instead_of_migrating() {
+		let (_tmp, root) = project_fixture();
+		let slot = shared_slot(&root);
+		write_skill(&slot, "---\nname: foo\n---\n");
+		git(&root, &["init", "-q"]);
+		git(&root, &["add", "--", ".agents/skills/foo/SKILL.md"]);
+
+		let p = plan(&root, true, &[]);
+		assert_eq!(
+			action_at(&p, &slot),
+			&ReferrerAction::Refuse {
+				reason: RefuseReason::GitTrackedSource {
+					paths: vec![slot.clone()]
+				}
+			},
+			"a tracked real directory is authored source: renaming it away \
+			 deletes the skill from version control"
+		);
+		assert_eq!(
+			p.adopts(),
+			None,
+			"nothing may be adopted out of a tracked directory"
+		);
+		assert!(!p.refusals().is_empty(), "the whole plan must be blocked");
+	}
+
+	/// The other half, and the reason the verdict is "tracked" and not "inside
+	/// a repo": migrating an UNtracked real directory is exactly what `repair`
+	/// is for. Widen the guard to the repository and this goes red.
+	#[test]
+	fn an_untracked_shared_slot_inside_a_repo_still_migrates() {
+		let (_tmp, root) = project_fixture();
+		let slot = shared_slot(&root);
+		write_skill(&slot, "---\nname: foo\n---\n");
+		git(&root, &["init", "-q"]);
+
+		let p = plan(&root, true, &[]);
+		assert_eq!(action_at(&p, &slot), &ReferrerAction::AdoptAsMaster);
+		assert_eq!(p.adopts(), Some(slot.as_path()));
+		assert!(
+			p.refusals().is_empty(),
+			"untracked content is aghub's to move"
+		);
+	}
+
+	/// `CompareThenQuarantine` moves a real directory too — into
+	/// `.aghub/.quarantine/` — so guarding only `AdoptAsMaster` would leave
+	/// half of B6 in place. On the VM this was the arm that actually ran.
+	#[test]
+	fn a_git_tracked_fork_is_not_quarantined() {
+		let (_tmp, root) = project_fixture();
+		write_skill(&root.join(".aghub").join("foo"), "---\nname: foo\n---\n");
+		let fork = root.join(".claude").join("skills").join("foo");
+		write_skill(&fork, "---\nname: foo\n---\n# authored here\n");
+		git(&root, &["init", "-q"]);
+		git(&root, &["add", "--", ".claude/skills/foo/SKILL.md"]);
+
+		let p = plan(&root, true, &[]);
+		assert_eq!(
+			action_at(&p, &fork),
+			&ReferrerAction::Refuse {
+				reason: RefuseReason::GitTrackedSource {
+					paths: vec![fork.clone()]
+				}
+			},
+			"quarantining a tracked fork loses it from version control just \
+			 like adopting one"
+		);
+	}
+
+	/// Third state, not a bool: a repository is right there but `git` cannot
+	/// answer. Migrating on an unanswered probe is how B6 happened, so it
+	/// refuses — with its OWN reason, because the remedy is different.
+	#[test]
+	fn an_unanswerable_git_probe_refuses_rather_than_migrating() {
+		let (_tmp, root) = project_fixture();
+		let slot = shared_slot(&root);
+		write_skill(&slot, "---\nname: foo\n---\n");
+		// A gitfile git refuses to parse: `.git` exists, every `git` command
+		// below it exits 128. Same shape as a missing `git` binary, without
+		// mutating `PATH` for the whole test process.
+		fs::write(root.join(".git"), "not a gitfile\n").unwrap();
+
+		let p = plan(&root, true, &[]);
+		assert_eq!(
+			action_at(&p, &slot),
+			&ReferrerAction::Refuse {
+				reason: RefuseReason::GitTrackingUndecided {
+					path: slot.clone()
+				}
+			},
+			"undecided is not permission to migrate"
+		);
+	}
+
 	/// D5: aghub must not relocate content it did not install. A directory the
 	/// lock does not name is reported, never adopted and never rewritten.
 	#[test]
@@ -1694,6 +1816,21 @@ pub enum RefuseReason {
 	/// at all, and the next run repeats the same answer until a human fixes
 	/// the permission — exactly what a refusal promises and `Failed` does not.
 	UnreadableCompatDir { path: PathBuf },
+	/// The real directory a moving action would rename away is TRACKED by the
+	/// surrounding git repository, so it is in-place authored SOURCE, not a
+	/// pre-2.18 install. Migrating it takes the skill out of version control:
+	/// `git status` fills with deletions and the bytes now live only in an
+	/// ignored store. Every tracked path in the plan is listed, so one
+	/// `git rm -r --cached` round clears them all instead of the user
+	/// discovering the next one on every re-run.
+	GitTrackedSource { paths: Vec<PathBuf> },
+	/// A repository is right there (a `.git` above `path`) but `git` could not
+	/// answer whether it tracks the directory — no `git` binary, an unusable
+	/// gitfile, any non-`0`/`1` exit. Refused rather than migrated: knowing we
+	/// are inside a repo and guessing "untracked" is exactly how B6 happened,
+	/// and this repo's rule is that an undecided probe refuses (see
+	/// [`Self::UnreadableCompatDir`]) instead of reporting `Failed`.
+	GitTrackingUndecided { path: PathBuf },
 }
 
 /// One planned change.
@@ -1753,6 +1890,67 @@ impl RepairPlan {
 			.iter()
 			.find(|a| a.action == ReferrerAction::AdoptAsMaster)
 			.map(|a| a.path.as_path())
+	}
+}
+
+/// Does the surrounding git repository TRACK this path — three states.
+///
+/// Only the two actions that RENAME a real directory away (`AdoptAsMaster`,
+/// `CompareThenQuarantine`) ask. A tracked directory is authored source, and
+/// moving it deletes the skill from version control (B6); an untracked one is
+/// precisely what `repair` exists to migrate, so "inside a repo" is NOT the
+/// question and must never become it.
+///
+/// Shells out to the `git` binary on purpose: `aghub-core` has no git
+/// dependency and must not grow one for a yes/no question (`crates/git`'s
+/// `system_git` and `cc-plugins`' registry installer set the precedent). Only
+/// the EXIT CODE is read — `ls-files` prints every match on stdout, which
+/// would land in the middle of a `repair --json` run, and its messages are
+/// localized, so parsing them is not an option.
+enum GitTracked {
+	Yes,
+	No,
+	Undecided,
+}
+
+fn git_tracked(path: &Path) -> GitTracked {
+	let Some(parent) = path.parent() else {
+		return GitTracked::No;
+	};
+	// No repository above it: nothing can be tracked and no process needs to
+	// run. `exists()` follows the link, so a linked WORKTREE's `.git` FILE
+	// counts too — B6 was reported against a worktree. This walk is also what
+	// keeps a missing `git` binary from refusing every repair everywhere:
+	// outside a repo the answer is decided without asking git at all.
+	if !parent.ancestors().any(|dir| dir.join(".git").exists()) {
+		return GitTracked::No;
+	}
+	// ponytail: one process per moving row (at most one adopt plus the forks),
+	// re-asked per skill. Cache by repository if a bulk `repair` ever measures
+	// slow.
+	let mut cmd = std::process::Command::new("git");
+	cmd.arg("-C")
+		.arg(parent)
+		.args(["ls-files", "--error-unmatch", "--"])
+		.arg(path)
+		.stdin(std::process::Stdio::null())
+		.stdout(std::process::Stdio::null())
+		.stderr(std::process::Stdio::null());
+	#[cfg(windows)]
+	{
+		use std::os::windows::process::CommandExt;
+		// CREATE_NO_WINDOW — same reason as `system_git`: no console flash per
+		// skill when the desktop app runs a bulk repair.
+		cmd.creation_flags(0x0800_0000);
+	}
+	match cmd.status() {
+		Ok(s) if s.success() => GitTracked::Yes,
+		// Exactly 1 is "no pathspec matched": the definite negative.
+		Ok(s) if s.code() == Some(1) => GitTracked::No,
+		// 128 (not a repository, an unusable gitfile, a path outside the repo),
+		// a signal, or no `git` binary at all. We know a repository is there
+		// and cannot say — see `RefuseReason::GitTrackingUndecided`.
+		Ok(_) | Err(_) => GitTracked::Undecided,
 	}
 }
 
@@ -1951,6 +2149,59 @@ pub fn plan_repair(
 					reason: RefuseReason::MasterMissing,
 				};
 			}
+		}
+	}
+
+	// B6: a real directory git TRACKS is authored IN PLACE, not installed.
+	//
+	// Both moving actions rename that directory away — `AdoptAsMaster` into the
+	// store, `CompareThenQuarantine` into `.aghub/.quarantine/` — and the store
+	// is ignored, so the skill's source leaves version control: 39 deletions in
+	// `git status`, exit 0, doctor green. Shape cannot tell the two apart
+	// (authored source and a pre-2.18 install are both `UnmigratedCopy`) and
+	// neither can the lock (aghub's own repo has 22 of its hand-edited skills
+	// in `skills-lock.json`), so tracking is the only available signal. Root
+	// `AGENTS.md`'s D7 "migration deliberately leaves alone" was only ever true
+	// of the lazy path; bulk `repair` is documented to migrate every
+	// lock-named skill, and this is the guard that promise was missing.
+	//
+	// Deliberately NOT "is it inside a repo": migrating an untracked real
+	// directory is the entire point of `repair`, so widening this refuses the
+	// command's main job. Scope-blind on purpose too — a global
+	// `~/.agents/skills/<n>` lives in plenty of dotfiles repos.
+	//
+	// Every tracked path is listed on ONE refusal because `execute_repair`
+	// reports only the first: per-path reasons would make the user re-run after
+	// each `git rm --cached`.
+	let mut tracked: Vec<PathBuf> = Vec::new();
+	let mut undecided: Vec<PathBuf> = Vec::new();
+	for entry in &planned {
+		if !matches!(
+			entry.action,
+			ReferrerAction::AdoptAsMaster
+				| ReferrerAction::CompareThenQuarantine
+		) {
+			continue;
+		}
+		match git_tracked(&entry.path) {
+			GitTracked::No => {}
+			GitTracked::Yes => tracked.push(entry.path.clone()),
+			GitTracked::Undecided => undecided.push(entry.path.clone()),
+		}
+	}
+	for entry in &mut planned {
+		if tracked.contains(&entry.path) {
+			entry.action = ReferrerAction::Refuse {
+				reason: RefuseReason::GitTrackedSource {
+					paths: tracked.clone(),
+				},
+			};
+		} else if undecided.contains(&entry.path) {
+			entry.action = ReferrerAction::Refuse {
+				reason: RefuseReason::GitTrackingUndecided {
+					path: entry.path.clone(),
+				},
+			};
 		}
 	}
 
