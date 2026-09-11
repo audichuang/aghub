@@ -1,4 +1,3 @@
-use crate::define_skill_paths;
 use crate::descriptor::*;
 use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
@@ -17,9 +16,23 @@ define_mcp_paths! {
 	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
-define_skill_paths! {
-	global: ".gemini/skills",
-	project: ".agents/skills",
+// Prefer the vendor-specific project entry; retain the shared read path for
+// discovery and migration of existing installs.
+fn global_skills_paths() -> Vec<std::path::PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".gemini/skills")])
+		.unwrap_or_default()
+}
+fn global_skill_write_path() -> Option<std::path::PathBuf> {
+	home_dir().map(|home| home.join(".gemini/skills"))
+}
+fn project_skills_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+	vec![root.join(".gemini/skills"), root.join(".agents/skills")]
+}
+fn project_skill_write_path(
+	root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+	Some(root.join(".gemini/skills"))
 }
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {

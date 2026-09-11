@@ -279,10 +279,13 @@ mod tests {
 	/// silently loses a skill on removal.
 	#[test]
 	fn slot_sharing_is_symmetric_and_excludes_self() {
+		let _guard = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
 		let tmp = tempfile::tempdir().unwrap();
-		let root = std::fs::canonicalize(tmp.path()).unwrap();
-		let cline = plan_for("cline", ResourceScope::ProjectOnly, Some(&root));
-		let warp = plan_for("warp", ResourceScope::ProjectOnly, Some(&root));
+		let _root = std::fs::canonicalize(tmp.path()).unwrap();
+		let cline = plan_for("cline", ResourceScope::GlobalOnly, None);
+		let warp = plan_for("warp", ResourceScope::GlobalOnly, None);
 
 		assert!(cline.shared_with.contains(&"warp"));
 		assert!(warp.shared_with.contains(&"cline"));
@@ -301,17 +304,9 @@ mod tests {
 	fn amp_and_kimi_share_the_project_slot_and_a_second_one_at_global() {
 		let tmp = tempfile::tempdir().unwrap();
 		let root = std::fs::canonicalize(tmp.path()).unwrap();
-		let shared = root.join(".agents").join("skills");
-		for id in ["amp", "kimi"] {
-			let plan = plan_for(id, ResourceScope::ProjectOnly, Some(&root));
-			assert_eq!(dir_of(&plan), shared, "{id} @project");
-		}
-		let amp = plan_for("amp", ResourceScope::ProjectOnly, Some(&root));
-		assert!(
-			amp.shared_with.len() >= 7,
-			"the project slot is read by eight agents, got {:?}",
-			amp.shared_with
-		);
+		let kimi = plan_for("kimi", ResourceScope::ProjectOnly, Some(&root));
+		assert_eq!(dir_of(&kimi), root.join(".kimi/skills"));
+		assert!(kimi.shared_with.is_empty());
 
 		let _env = crate::skills::prune::test_lock::env_lock();
 		let amp_g = plan_for("amp", ResourceScope::GlobalOnly, None);
@@ -397,7 +392,7 @@ mod tests {
 
 		assert!(view.needs_link && view.supported);
 		assert!(
-			view.shared_with.contains(&"warp".to_string()),
+			view.shared_with.is_empty(),
 			"the UI cannot present a shared slot honestly without this: {:?}",
 			view.shared_with
 		);

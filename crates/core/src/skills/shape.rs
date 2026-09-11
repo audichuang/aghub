@@ -1305,7 +1305,7 @@ mod tests {
 		let rows: Vec<_> = p.actions.iter().filter(|a| a.shared).collect();
 		assert_eq!(rows.len(), 1, "one directory, one row: {:?}", rows);
 		assert!(
-			rows[0].agents.len() > 1,
+			rows[0].agents == vec!["amp"],
 			"and it must name every agent that shares it, got {:?}",
 			rows[0].agents
 		);
@@ -1625,19 +1625,19 @@ mod tests {
 
 		// antigravity's read-only compat dir: a Referrer whose target no
 		// longer resolves.
-		let compat = root.join(".agent").join("skills");
+		let compat = root.join(".clinerules").join("skills");
 		fs::create_dir_all(&compat).unwrap();
 		unix_fs::symlink(root.join("nonexistent-target"), compat.join(name))
 			.unwrap();
 
 		let readers = readers_of(ResourceScope::ProjectOnly, Some(&root), name);
 		assert!(
-			readers.contains(&"antigravity"),
+			readers.contains(&"cline"),
 			"a dangling compat referrer is still evidence this agent was \
 			 granted the skill, got {readers:?}"
 		);
 
-		let write_slot = root.join(".agents").join("skills").join(name);
+		let write_slot = root.join(".cline").join("skills").join(name);
 		// `readers` as `grant_to`, exactly like `repair_skill` wires them.
 		let p = plan_repair(
 			ResourceScope::ProjectOnly,
@@ -1680,7 +1680,7 @@ mod tests {
 
 		// antigravity's read-only compat dir, but this time occupied by a
 		// real, unreadable directory rather than a dangling link.
-		let compat = root.join(".agent").join("skills").join(name);
+		let compat = root.join(".clinerules").join("skills").join(name);
 		fs::create_dir_all(&compat).unwrap();
 		fs::set_permissions(&compat, fs::Permissions::from_mode(0o000))
 			.unwrap();
@@ -1695,7 +1695,7 @@ mod tests {
 			return;
 		}
 		assert!(
-			!readers.contains(&"antigravity"),
+			!readers.contains(&"cline"),
 			"an unreadable real directory must not count as a reader, got \
 			 {readers:?}"
 		);
@@ -1721,7 +1721,7 @@ mod tests {
 		// antigravity's compat dir holds a stale referrer, then its PARENT
 		// becomes unreadable — `chmod 000` denies the traversal needed to
 		// `symlink_metadata` the entry itself, not just a `stat` on the dir.
-		let compat_dir = root.join(".agent").join("skills");
+		let compat_dir = root.join(".clinerules").join("skills");
 		fs::create_dir_all(&compat_dir).unwrap();
 		unix_fs::symlink(&master, compat_dir.join(name)).unwrap();
 		fs::set_permissions(&compat_dir, fs::Permissions::from_mode(0o000))

@@ -1861,6 +1861,7 @@ struct ReconcileSkillPlan {
 	unreadable: Vec<&'static str>,
 	copies: Vec<OperationPlan>,
 	deletes: Vec<OperationPlan>,
+	deletion_paths: Vec<(AgentType, Vec<PathBuf>)>,
 }
 
 fn plan_reconcile_skill(
@@ -1910,12 +1911,61 @@ fn plan_reconcile_skill(
 		)));
 	}
 
-	let (copies, deletes) = reconcile_plans(
+	let (copies, mut deletes) = reconcile_plans(
 		added.to_vec(),
 		removed.to_vec(),
 		source.scope,
 		source.project_root.clone(),
 	);
+	// Shared slots must go first: a private Referrer cannot be revoked while
+	// the same agent still reads the shared slot this batch is removing.
+	deletes.sort_by_cached_key(|row| {
+		let scope = target_resource_scope(&row.target);
+		let peers = create_adapter(row.target.agent)
+			.target_skills_dir(row.target.project_root.as_deref(), scope)
+			.map(|dir| {
+				let dir =
+					crate::skills::linker::classify::canonicalize_lenient(&dir);
+				registry::iter_all()
+					.filter_map(|descriptor| {
+						descriptor.id.parse::<AgentType>().ok()
+					})
+					.filter(|agent| {
+						create_adapter(*agent)
+							.get_skills_paths(
+								row.target.project_root.as_deref(),
+								scope,
+							)
+							.iter()
+							.any(|read| {
+								crate::skills::linker::classify::canonicalize_lenient(read) == dir
+							})
+					})
+					.count()
+			})
+			.unwrap_or(0);
+		std::cmp::Reverse(peers)
+	});
+
+	let deletion_paths = deletes
+		.iter()
+		.map(|row| {
+			let mut manager = build_manager(&row.target);
+			let paths = ensure_loaded(&mut manager)
+				.and_then(|()| {
+					manager.remove_skill_planned(
+						&skill.name,
+						exhaustive,
+						true,
+						true,
+					)
+				})
+				.map(|outcome| outcome.plan.paths)
+				.unwrap_or_default();
+			(row.target.agent, paths)
+		})
+		.collect();
+
 	Ok(ReconcileSkillPlan {
 		skill,
 		source_root,
@@ -1932,6 +1982,7 @@ fn plan_reconcile_skill(
 		unreadable,
 		copies,
 		deletes,
+		deletion_paths,
 	})
 }
 
@@ -1977,34 +2028,62 @@ impl ReconcileSkillPlan {
 		// `shared_master_kept` does — it is the ONE owner's answer. Re-deriving
 		// it here from the target's own read dirs is exactly the second
 		// derivation the paragraph below warns about.
-		let (shared_master_kept, still_read_from) = match manager
-			.remove_skill_planned(
+		let (mut shared_master_kept, still_read_from, mut deleting) =
+			match manager.remove_skill_planned(
 				&self.skill.name,
 				self.exhaustive,
 				true, // dry_run
 				true,
 			) {
-			Ok(outcome) => (
-				outcome.plan.shared_master_kept,
-				outcome.plan.still_read_from,
-			),
-			// The copy may make an absent target present before its delete row
-			// runs, so absence only answers the on-disk half of this preflight.
-			Err(ConfigError::ResourceNotFound { .. }) => (false, Vec::new()),
-			Err(error) => return Err(error),
-		};
+				Ok(outcome) => (
+					outcome.plan.shared_master_kept,
+					outcome.plan.still_read_from,
+					outcome.plan.paths,
+				),
+				// The copy may make an absent target present before its delete row
+				// runs, so absence only answers the on-disk half of this preflight.
+				Err(ConfigError::ResourceNotFound { .. }) => {
+					(false, Vec::new(), Vec::new())
+				}
+				Err(error) => return Err(error),
+			};
+
+		if shared_master_kept && !self.exhaustive && self.unreadable.is_empty()
+		{
+			// Preflight sees the disk BEFORE any row runs. Include earlier rows'
+			// planned removals; the executing manager still rechecks the REAL disk,
+			// so a failed earlier unlink cannot authorize a false success here.
+			let own_path_count = deleting.len();
+			for (_, paths) in self
+				.deletion_paths
+				.iter()
+				.take_while(|(agent, _)| *agent != target.agent)
+			{
+				deleting.extend(paths.iter().cloned());
+			}
+			let dirs = create_adapter(target.agent).get_skills_paths(
+				target.project_root.as_deref(),
+				target_resource_scope(target),
+			);
+			let effect = crate::skills::removal::read_effect_after(
+				&dirs,
+				&self.skill.name,
+				&deleting,
+			);
+			if deleting.len() > own_path_count
+				&& !effect.incomplete
+				&& (effect.changed || effect.survivors.is_empty())
+			{
+				shared_master_kept = false;
+			}
+		}
 
 		// Two ways this row takes nothing away, and only the first is visible
 		// on the disk the preflight can see.
 		//
-		// The first is READ OFF the dry-run above rather than re-asked:
-		// `remove_skill_planned` folds its own "this removal takes nothing
-		// away" verdict into `shared_master_kept` before returning an
-		// unexecuted outcome, so this inherits the commit's exact answer —
-		// including its `--all-agents`/single-agent split — by construction. A
-		// second call here re-derived it from the target's own read dirs alone
-		// and could not see that split, which is precisely how a preflight
-		// green-lights a row the commit then refuses.
+		// The first starts with the manager's dry-run verdict, adjusted above
+		// only for earlier removals in this batch. The all-agents verdict is
+		// never narrowed to one agent's read dirs.
 		if shared_master_kept || self.a_copy_restores_it(target) {
 			return Err(self.refuse_shared_master(
 				target.agent.as_str(),
@@ -2982,6 +3061,72 @@ mod tests {
 	}
 
 	#[test]
+	fn project_private_grants_can_be_removed_independently() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		for agent in [
+			AgentType::Codex,
+			AgentType::Antigravity,
+			AgentType::Gemini,
+			AgentType::Cline,
+			AgentType::Copilot,
+			AgentType::Kimi,
+			AgentType::Warp,
+		] {
+			let temp = tempdir().unwrap();
+			let root = temp.path();
+			let mut manager =
+				ConfigManager::new(create_adapter(agent), false, Some(root));
+			manager.load().unwrap();
+			manager.add_skill(Skill::new("independent")).unwrap();
+			assert!(
+				!root.join(".agents/skills/independent").exists(),
+				"{agent:?}"
+			);
+			let holders = crate::load_all_agents(
+				crate::models::ResourceScope::ProjectOnly,
+				Some(root),
+			);
+			let holders: Vec<_> = holders
+				.iter()
+				.filter(|row| {
+					row.skills.iter().any(|skill| skill.name == "independent")
+				})
+				.map(|row| row.agent_id)
+				.collect();
+			assert_eq!(
+				holders,
+				vec![agent.as_str()],
+				"grant leaked from {agent:?}"
+			);
+			let result = transfer_skill(
+				ResourceLocator {
+					agent,
+					scope: InstallScope::Project,
+					project_root: Some(root.to_path_buf()),
+					name: "independent".into(),
+				},
+				vec![InstallTarget {
+					agent: AgentType::Claude,
+					scope: InstallScope::Project,
+					project_root: Some(root.to_path_buf()),
+				}],
+			);
+			assert!(result.unwrap().results.iter().all(|row| row.success));
+			let removed = manager
+				.remove_skill_planned("independent", false, false, true)
+				.unwrap();
+			assert!(removed.failed_paths.is_empty());
+			manager.load().unwrap();
+			assert!(
+				manager.get_skill("independent").is_none(),
+				"{agent:?} still reads it"
+			);
+			assert!(root.join(".claude/skills/independent/SKILL.md").is_file());
+			assert!(root.join(".aghub/independent/SKILL.md").is_file());
+		}
+	}
+
+	#[test]
 	fn reconcile_skill_deletes_when_removed() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 		let temp = tempdir().unwrap();
@@ -3220,6 +3365,68 @@ mod tests {
 		std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_removes_shared_referrers_before_private_fallback_readers() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		master_with_claude_referrer(root, "notebooklm");
+		let master = root.join(".aghub/notebooklm");
+		let original = fs::read(master.join("SKILL.md")).unwrap();
+		for dir in [".opencode", ".cursor", ".pi", ".grok", ".omp"] {
+			let slot = root.join(dir).join("skills");
+			fs::create_dir_all(&slot).unwrap();
+			std::os::unix::fs::symlink(&master, slot.join("notebooklm"))
+				.unwrap();
+		}
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "notebooklm".into(),
+		};
+		// Private readers deliberately precede the shared-slot writers.
+		let removed = vec![
+			AgentType::OpenCode,
+			AgentType::Cursor,
+			AgentType::Pi,
+			AgentType::Grok,
+			AgentType::Omp,
+			AgentType::Codex,
+			AgentType::Antigravity,
+			AgentType::Gemini,
+			AgentType::Cline,
+			AgentType::Copilot,
+			AgentType::Kimi,
+			AgentType::Amp,
+			AgentType::Warp,
+		];
+		reconcile_skill_preview(&source, &[], &removed).unwrap();
+		assert!(root.join(".agents/skills/notebooklm").is_symlink());
+		let result =
+			reconcile_skill(source, vec![], removed.clone(), true).unwrap();
+		assert!(result.results.iter().all(|row| row.success), "{result:?}");
+		for agent in removed {
+			let dirs = create_adapter(agent).get_skills_paths(
+				Some(root),
+				crate::models::ResourceScope::ProjectOnly,
+			);
+			let effect = crate::skills::removal::read_effect_after(
+				&dirs,
+				"notebooklm",
+				&[],
+			);
+			assert!(
+				effect.survivors.is_empty(),
+				"{agent:?}: {:?}",
+				effect.survivors
+			);
+		}
+		assert_eq!(fs::read(master.join("SKILL.md")).unwrap(), original);
+		assert!(root.join(".claude/skills/notebooklm/SKILL.md").is_file());
+	}
+
 	// G3: "add to claude, remove from cursor" is an END STATE that cannot exist
 	// — cursor reads the Master directly, and the add guarantees the Master
 	// stays, so the removal can never take effect. It used to be discovered
@@ -3286,7 +3493,7 @@ mod tests {
 	// dropping the LAST holder and took the Master with it, deleting the
 	// Referrer of an agent the user never named and exiting 0. Reading the
 	// skill dirs directly is what stops an unrelated MCP file from hiding a
-	// holder; the refusal then names claude as the reason the Master stays.
+	// holder. Revoking the other agents must leave Claude and the Master intact.
 	#[cfg(unix)]
 	#[test]
 	fn reconcile_skill_will_not_gc_the_master_when_a_holder_is_unreadable() {
@@ -3345,17 +3552,9 @@ mod tests {
 			std::fs::symlink_metadata(&claude_referrer).is_ok(),
 			"the Referrer of an agent the user never named must survive"
 		);
-		let message = outcome
-			.expect_err(
-				"an unverifiable holder must block the Master's removal",
-			)
-			.to_string();
-		assert!(message.contains("nothing was written"), "got: {message}");
-		assert!(
-			message.contains("claude"),
-			"the refusal must name the holder that keeps the Master alive, or \
-			 the user has no way to act on it; got: {message}"
-		);
+		let result = outcome.expect("the readable skills can be revoked without collecting Claude's Master");
+		assert!(result.results.iter().all(|row| row.success), "{result:?}");
+		assert!(!root.join(".agents/skills/mover").exists());
 	}
 
 	// Fail-CLOSED is not fail-shut: one unreadable config makes `exhaustive`
@@ -3497,7 +3696,7 @@ mod tests {
 				project_root: Some(root.clone()),
 				name: "solo".to_string(),
 			},
-			vec![AgentType::Cline],
+			vec![AgentType::Amp],
 			vec![AgentType::Cursor],
 			true, // confirm
 		);
@@ -4952,6 +5151,7 @@ mod tests {
 				})
 				.collect(),
 			deletes: vec![],
+			deletion_paths: vec![],
 		}
 	}
 

@@ -1379,17 +1379,23 @@ fn test_project_skill_paths() {
 
 	let expected: [(AgentType, Option<&[&str]>); 26] = [
 		(AgentType::Claude, Some(&[".claude/skills"])),
-		(AgentType::Codex, Some(&[".agents/skills"])),
+		(AgentType::Codex, Some(&[".codex/skills", ".agents/skills"])),
 		(AgentType::Openclaw, None), // Openclaw has no project skills
 		(
 			AgentType::OpenCode,
 			Some(&[".opencode/skills", ".agents/skills"]),
 		),
-		(AgentType::Gemini, Some(&[".agents/skills"])),
-		(AgentType::Cline, Some(&[".agents/skills"])),
+		(
+			AgentType::Gemini,
+			Some(&[".gemini/skills", ".agents/skills"]),
+		),
+		(
+			AgentType::Cline,
+			Some(&[".cline/skills", ".clinerules/skills", ".agents/skills"]),
+		),
 		(
 			AgentType::Copilot,
-			Some(&[".agents/skills", ".github/skills"]),
+			Some(&[".github/skills", ".agents/skills"]),
 		),
 		(
 			AgentType::Cursor,
@@ -1399,7 +1405,7 @@ fn test_project_skill_paths() {
 		(
 			AgentType::Antigravity,
 			// `.agent/` is the vendor's own backward-compat alias.
-			Some(&[".agents/skills", ".agent/skills"]),
+			Some(&[".agent/skills", ".agents/skills"]),
 		),
 		(AgentType::Kiro, Some(&[".kiro/skills"])),
 		(AgentType::Windsurf, Some(&[".windsurf/skills"])),
@@ -1407,13 +1413,16 @@ fn test_project_skill_paths() {
 		(AgentType::Zed, None), // Zed has no skills
 		(AgentType::JetBrainsAi, None),
 		(AgentType::RooCode, Some(&[".roo/skills"])),
-		(AgentType::Kimi, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
+		(
+			AgentType::Kimi,
+			Some(&[".kimi/skills", ".agents/skills", ".agents/skills"]),
+		), // universal=true adds extra .agents/skills
 		(AgentType::Mistral, Some(&[".vibe/skills"])),
 		(AgentType::Pi, Some(&[".pi/skills", ".agents/skills"])),
 		(AgentType::AugmentCode, Some(&[".augment/skills"])),
 		(AgentType::KiloCode, Some(&[".kilocode/skills"])),
 		(AgentType::Amp, Some(&[".agents/skills", ".agents/skills"])), // universal=true adds extra .agents/skills
-		(AgentType::Warp, Some(&[".agents/skills"])),
+		(AgentType::Warp, Some(&[".warp/skills", ".agents/skills"])),
 		(AgentType::Factory, Some(&[".factory/skills"])),
 		(AgentType::Grok, Some(&[".grok/skills", ".agents/skills"])),
 		(AgentType::Omp, Some(&[".omp/skills", ".agents/skills"])),

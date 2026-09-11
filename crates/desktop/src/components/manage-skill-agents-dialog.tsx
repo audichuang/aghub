@@ -4,7 +4,10 @@ import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
-import { supportsSkillMutation } from "../lib/agent-capabilities";
+import {
+	changeSharedSelection,
+	supportsSkillMutation,
+} from "../lib/agent-capabilities";
 import type { InstallResult } from "../lib/install-utils";
 import type { Scope } from "../lib/skills-path-group";
 import {
@@ -12,6 +15,7 @@ import {
 	wouldOrphanSkill,
 } from "../lib/group-agent-plan";
 import { cn } from "../lib/utils";
+import { useSkillCoverage } from "../requests/agents";
 import { reconcileSkillsMutationOptions } from "../requests/skills";
 import type { AgentState } from "./agent-list";
 import { SharedSkillInstallModal } from "./shared-skill-install-modal";
@@ -59,6 +63,11 @@ export function ManageSkillAgentsDialog({
 		return primary?.source ?? "global";
 	}, [hasValidGroup, group]);
 
+	const { coverage, isSuccess: coverageReady } = useSkillCoverage(
+		scope,
+		projectPath,
+	);
+
 	// Include installed agents so the user can uncheck them to remove — the
 	// dialog manages both add AND remove. The reconcile API takes `added` +
 	// `removed`, and core removal keeps shared masters intact. An installed
@@ -103,7 +112,14 @@ export function ManageSkillAgentsDialog({
 	const hasChanges = added.length > 0 || removed.length > 0;
 
 	const handleSelectionChange = (keys: string[]) => {
-		const keySet = new Set(keys);
+		const keySet = new Set(
+			changeSharedSelection(
+				selectedAgents,
+				keys,
+				coverage,
+				usableAgents.map((agent) => agent.id),
+			),
+		);
 		const before = new Set(selectedAgents);
 		// Only record agents whose checked state actually flipped. Recording
 		// every agent would freeze untouched ones against the live installed
@@ -135,6 +151,7 @@ export function ManageSkillAgentsDialog({
 
 	const runApply = async () => {
 		setConfirmRemoveOpen(false);
+		if (!coverageReady) return;
 		if (!hasValidGroup || group.items.length === 0) {
 			toast.danger(t("invalidConfiguration"));
 			return;
@@ -214,7 +231,7 @@ export function ManageSkillAgentsDialog({
 
 			const errorStates: Record<string, AgentState> = {};
 			for (const id of touched) {
-				errorStates[id] = { status: "error", error: errorMessage };
+				errorStates[id] = { status: "error" };
 			}
 			setAgentStates(errorStates);
 		} finally {
@@ -248,9 +265,10 @@ export function ManageSkillAgentsDialog({
 				selectedKeys={selectedAgents}
 				onSelectionChange={handleSelectionChange}
 				scope={scope}
+				coverage={coverage}
 				agentStates={agentStates}
 				diffLabels={diffLabels}
-				disabled={isApplying}
+				disabled={isApplying || !coverageReady}
 				label={t("selectAgentsForSkill")}
 				emptyMessage={t("noTargetAgents")}
 			/>
@@ -272,7 +290,7 @@ export function ManageSkillAgentsDialog({
 				isInstalling={isApplying}
 				showTargetSelector={false}
 				confirmLabel={isApplying ? t("applying") : t("applyChanges")}
-				isConfirmDisabled={!hasChanges}
+				isConfirmDisabled={!hasChanges || !coverageReady}
 				onConfirm={handleApply}
 			/>
 

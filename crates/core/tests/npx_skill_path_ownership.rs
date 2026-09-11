@@ -459,15 +459,12 @@ fn a_referrer_in_a_read_only_compat_dir_is_reported_kept_not_removed() {
 	// now only READS, pointing at the Master in the store.
 	let master = root.join(".aghub/legacy-skill");
 	write_skill_md(&master, "legacy-skill");
-	let legacy = root.join(".agent/skills/legacy-skill");
+	let legacy = root.join(".clinerules/skills/legacy-skill");
 	std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
 	symlink(&master, &legacy);
 
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Antigravity),
-		false,
-		Some(root),
-	);
+	let mut mgr =
+		ConfigManager::new(create_adapter(AgentType::Cline), false, Some(root));
 	mgr.load().unwrap();
 	assert!(
 		mgr.get_skill("legacy-skill").is_some(),
@@ -1013,18 +1010,15 @@ fn a_single_agent_refusal_names_the_compat_dir_still_serving_the_skill() {
 	let master = root.join(".aghub/legacy-skill");
 	write_skill_md(&master, "legacy-skill");
 
-	let write_slot = root.join(".agents/skills/legacy-skill");
+	let write_slot = root.join(".cline/skills/legacy-skill");
 	std::fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
 	symlink(&master, &write_slot);
-	let compat = root.join(".agent/skills/legacy-skill");
+	let compat = root.join(".clinerules/skills/legacy-skill");
 	std::fs::create_dir_all(compat.parent().unwrap()).unwrap();
 	symlink(&master, &compat);
 
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Antigravity),
-		false,
-		Some(root),
-	);
+	let mut mgr =
+		ConfigManager::new(create_adapter(AgentType::Cline), false, Some(root));
 	mgr.load().unwrap();
 
 	let error = mgr
@@ -1065,22 +1059,26 @@ fn the_reconcile_preflight_names_the_compat_dir_too() {
 	let master = root.join(".aghub/legacy-skill");
 	write_skill_md(&master, "legacy-skill");
 
-	let write_slot = root.join(".agents/skills/legacy-skill");
+	let write_slot = root.join(".cline/skills/legacy-skill");
 	std::fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
 	symlink(&master, &write_slot);
-	let compat = root.join(".agent/skills/legacy-skill");
+	let compat = root.join(".clinerules/skills/legacy-skill");
 	std::fs::create_dir_all(compat.parent().unwrap()).unwrap();
 	symlink(&master, &compat);
 
+	let keeper = root.join(".claude/skills/legacy-skill");
+	std::fs::create_dir_all(keeper.parent().unwrap()).unwrap();
+	symlink(&master, &keeper);
+
 	let error = reconcile_skill_preview(
 		&ResourceLocator {
-			agent: AgentType::Antigravity,
+			agent: AgentType::Cline,
 			scope: aghub_core::transfer::InstallScope::Project,
 			project_root: Some(root.to_path_buf()),
 			name: "legacy-skill".to_string(),
 		},
 		&[],
-		&[AgentType::Antigravity],
+		&[AgentType::Cline],
 	)
 	.expect_err("removing the write slot alone takes nothing away");
 	let message = error.to_string();

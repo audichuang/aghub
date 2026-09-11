@@ -26,7 +26,7 @@ fn global_skills_paths() -> Vec<PathBuf> {
 }
 
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".agents/skills")]
+	vec![root.join(".codex/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -34,7 +34,7 @@ fn global_skill_write_path() -> Option<PathBuf> {
 }
 
 fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
-	Some(root.join(".agents/skills"))
+	Some(root.join(".codex/skills"))
 }
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {

@@ -1,5 +1,4 @@
 use crate::define_mcp_paths;
-use crate::define_skill_paths;
 use crate::descriptor::*;
 
 define_mcp_paths! {
@@ -8,8 +7,23 @@ define_mcp_paths! {
 			  mcp_strategy::serialize_json_map_mcp_servers,
 }
 
-define_skill_paths! {
-	symmetric: ".agents/skills",
+// Prefer the vendor-specific project entry; retain the shared read path for
+// discovery and migration of existing installs.
+fn global_skills_paths() -> Vec<std::path::PathBuf> {
+	home_dir()
+		.map(|home| vec![home.join(".agents/skills")])
+		.unwrap_or_default()
+}
+fn global_skill_write_path() -> Option<std::path::PathBuf> {
+	home_dir().map(|home| home.join(".agents/skills"))
+}
+fn project_skills_paths(root: &std::path::Path) -> Vec<std::path::PathBuf> {
+	vec![root.join(".warp/skills"), root.join(".agents/skills")]
+}
+fn project_skill_write_path(
+	root: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+	Some(root.join(".warp/skills"))
 }
 
 pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {

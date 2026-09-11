@@ -24,6 +24,15 @@ Role map (not a full file tree — `ls` / codegraph for that):
 
 **`McpTransport`**: `Stdio { command, args, env }` | `Sse { url, headers }` | `StreamableHttp { url, headers }`. **`from_inputs` + `validate_values` are the single validation seam shared by CLI and API** (reject empty command/url, stdio-with-headers, …) — never validate MCP values anywhere else.
 
+## Project skill grants
+
+Prefer a vendor-supported private write directory even when the vendor defaults
+to `.agents/skills`. Keep shared directories in the read set for discovery and
+legacy migration; do not treat that as authorization to write grants there.
+Changing the read order also changes which copy wins discovery. Evidence and
+migration constraints: `docs/specs/2026-09-11-private-project-skill-slots.md` at
+the repository root.
+
 ## AGENT-SPECIFIC GOTCHAS
 
 The cross-crate rules (universal-master read matrix, `registry::get()` fallback)
@@ -38,7 +47,7 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
   **no** `type` key — only SSE has `type = "sse"`; native `enabled` flag; other
   top-level keys preserved on rewrite
 - **Copilot**: skills — global `~/.copilot/skills` + `~/.agents/skills`;
-  project `.agents/skills` (the WRITE dir, first) + `.github/skills`.
+  project `.github/skills` (the WRITE dir, first) + `.agents/skills`.
   `.claude/skills` is documented by the vendor but deliberately NOT read
   (decision #11). Sub-agents at both scopes: `~/.copilot/agents/<name>.agent.md`
   and `.github/agents/<name>.agent.md` — the `.agent.md` suffix is load-bearing
@@ -55,7 +64,7 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
   `.mcp.json` Claude and Copilot share
 - **Antigravity**: global skills WRITE `~/.gemini/config/skills`; READ that plus
   the legacy `.gemini/antigravity/skills` and `.gemini/antigravity-cli/skills`.
-  Project READ `.agents/skills` (the write dir) + `.agent/skills`. A skill an
+  Project READ `.agent/skills` (the write dir) + `.agents/skills`. A skill an
   older release left in a compat dir is migrated with `aghub repair`, never
   `aghub add` (which refuses `resource_exists` — the skill already loads);
   `repair` plans WRITE dirs but `readers_of` asks the READ paths, which is the

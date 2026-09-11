@@ -158,3 +158,21 @@ export function expandSelection(
 	}
 	return [...out];
 }
+
+/** Apply a checkbox change to every member of its shared write slot. */
+export function changeSharedSelection(
+	selected: string[],
+	next: string[],
+	coverage: Record<string, AgentSkillCoverageDto>,
+	agentIds: string[],
+): string[] {
+	const result = new Set(selected);
+	for (const id of agentIds) {
+		if (selected.includes(id) === next.includes(id)) continue;
+		for (const peer of expandSelection([id], coverage, agentIds)) {
+			if (next.includes(id)) result.add(peer);
+			else result.delete(peer);
+		}
+	}
+	return agentIds.filter((id) => result.has(id));
+}

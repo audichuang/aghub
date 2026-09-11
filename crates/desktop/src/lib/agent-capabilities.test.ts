@@ -9,6 +9,7 @@ import {
 	groupAgentsBySlot,
 	needsMasterLink,
 	sharedWith,
+	changeSharedSelection,
 } from "./agent-capabilities.ts";
 
 function cov(
@@ -126,4 +127,34 @@ test("expansion never names an agent outside the installable set", () => {
 	assert.deepEqual(expandSelection(["cline"], coverage, ["cline"]), [
 		"cline",
 	]);
+});
+
+test("manage selection removes shared peers together while preserving private agents", () => {
+	const coverage = {
+		codex: cov("codex", { needs_link: true, shared_with: ["antigravity"] }),
+		antigravity: cov("antigravity", {
+			needs_link: true,
+			shared_with: ["codex"],
+		}),
+		claude: cov("claude", { needs_link: true }),
+	};
+	const selected = ["claude", "codex", "antigravity"];
+	assert.deepEqual(
+		changeSharedSelection(
+			selected,
+			["claude", "antigravity"],
+			coverage,
+			selected,
+		),
+		["claude"],
+	);
+	assert.deepEqual(
+		changeSharedSelection(
+			["claude"],
+			["claude", "codex"],
+			coverage,
+			selected,
+		),
+		selected,
+	);
 });

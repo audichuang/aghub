@@ -129,8 +129,9 @@ round-trip, what a rewrite preserves) live with the descriptors:
   `<root>/.aghub` project), a directory **no agent reads** — storing a skill
   must not grant it. Every grant is a symlink Referrer in an agent's own skills
   dir. `.agents/skills` is now an ordinary Referrer slot, except that it is
-  **shared**: many agent/scope combinations read it and several of those have
-  no other slot, so granting to one grants to all of them. The roster is
+  **shared**: many agent/scope combinations read it, so granting there reaches all of
+  them. Prefer supported private write slots; shared read compatibility does
+  not imply a shared write slot. The roster is
   per-descriptor — `crates/agents/tests/descriptor_regression.rs`
   `test_global_skill_paths` / `test_project_skill_paths`. `classify` computes
   that sharing once and carries it as `shared_with`; never re-derive it per
@@ -339,9 +340,8 @@ true`) for both verbs — a skill because the shared Master is what "already
   has no such guard** — it reports `outcome: "removed"` and copilot loses the
   server too (verified; left alone deliberately, turning that everyday command
   into a refusal is a UX decision nobody has made). `reconcile skill`
-  deliberately passes `roster: false`: eight project-scope agents share
-  `<root>/.agents/skills` as their write dir BY DESIGN, so a roster protect list
-  would refuse every removal from any of them — what a skill removal really
+  deliberately passes `roster: false`: legacy shared directories have overlapping readers, so protecting every
+  reader as though it owned a private write slot would prevent shared removals — what a skill removal really
   takes away is `remove_skill_planned` / `read_effect_after`'s call, and the
   shared-Master case is closed there by the keep rules
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are

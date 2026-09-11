@@ -1459,7 +1459,7 @@ fn install_attributes_the_referrer_dir_it_created_never_the_master() {
 		"this call claimed and wrote the Master"
 	);
 	// Codex's grant IS the shared slot, and this call created it.
-	let shared = project_root.join(".agents/skills");
+	let shared = project_root.join(".codex/skills");
 	assert_eq!(
 		report.created_referrer_dirs,
 		vec![shared.clone()],

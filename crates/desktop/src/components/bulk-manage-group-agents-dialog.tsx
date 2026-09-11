@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import {
+	expandSelection,
 	supportsMcpScope,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
@@ -13,6 +14,7 @@ import {
 	computeGroupAgentStats,
 } from "../lib/group-agent-plan";
 import { cn } from "../lib/utils";
+import { useSkillCoverage } from "../requests/agents";
 import { reconcileMcpsMutationOptions } from "../requests/mcps";
 import { reconcileSkillsMutationOptions } from "../requests/skills";
 
@@ -45,6 +47,11 @@ export function BulkManageGroupAgentsDialog({
 	const queryClient = useQueryClient();
 	const { availableAgents } = useAgentAvailability();
 	const isMcp = kind === "mcp";
+	const { coverage, isSuccess: coverageReady } = useSkillCoverage(
+		scope,
+		projectPath,
+	);
+	const selectionReady = isMcp || coverageReady;
 
 	const skillReconcile = useMutation(
 		reconcileSkillsMutationOptions({ api, queryClient }),
@@ -60,12 +67,19 @@ export function BulkManageGroupAgentsDialog({
 		() =>
 			(availableAgents ?? []).filter(
 				(a) =>
-					a?.isUsable &&
+					a != null &&
+					(a.isUsable ||
+						(!isMcp &&
+							resources.some((resource) =>
+								resource.items.some(
+									(item) => item.agent === a.id,
+								),
+							))) &&
 					(isMcp
 						? supportsMcpScope(a, scope)
 						: supportsSkillMutation(a, scope)),
 			),
-		[availableAgents, isMcp, scope],
+		[availableAgents, isMcp, resources, scope],
 	);
 	const usableAgentIds = useMemo(
 		() => usableAgents.map((a) => a.id),
@@ -127,6 +141,7 @@ export function BulkManageGroupAgentsDialog({
 
 	const runApply = async () => {
 		setConfirmRemoveOpen(false);
+		if (!selectionReady) return;
 		setIsApplying(true);
 		setDone(0);
 		let success = 0;
@@ -240,11 +255,25 @@ export function BulkManageGroupAgentsDialog({
 											className="flex w-full items-center justify-between gap-3 rounded-lg px-2 py-1.5 hover:bg-surface-secondary"
 											isSelected={isSelected}
 											isIndeterminate={isIndeterminate}
-											isDisabled={isApplying}
+											isDisabled={
+												isApplying || !selectionReady
+											}
 											onChange={(next) =>
 												setDesired((prev) => ({
 													...prev,
-													[agent.id]: next,
+													...Object.fromEntries(
+														(isMcp
+															? [agent.id]
+															: expandSelection(
+																	[agent.id],
+																	coverage,
+																	usableAgentIds,
+																)
+														).map((id) => [
+															id,
+															next,
+														]),
+													),
 												}))
 											}
 										>
@@ -254,6 +283,17 @@ export function BulkManageGroupAgentsDialog({
 											<Checkbox.Content className="flex flex-1 items-center justify-between gap-2">
 												<span className="text-sm text-foreground">
 													{agent.display_name}
+													{!isMcp &&
+														(coverage[agent.id]
+															?.shared_with
+															.length ?? 0) >
+															0 && (
+															<span className="block text-xs text-muted">
+																{t(
+																	"sourceSharedAgentGroup",
+																)}
+															</span>
+														)}
 												</span>
 												<span className="text-xs text-muted">
 													{stat?.installed ?? 0}/
@@ -282,7 +322,9 @@ export function BulkManageGroupAgentsDialog({
 							</Button>
 							<Button
 								onPress={handleApply}
-								isDisabled={!hasChanges || isApplying}
+								isDisabled={
+									!hasChanges || isApplying || !selectionReady
+								}
 							>
 								{confirmLabel}
 							</Button>

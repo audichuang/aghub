@@ -454,9 +454,7 @@ pub fn execute_repair(
 			ReferrerAction::Create | ReferrerAction::Relink => {}
 			_ => continue,
 		}
-		if action.action == ReferrerAction::Relink
-			&& report.outcome == RepairOutcome::Conformant
-		{
+		if report.outcome == RepairOutcome::Conformant {
 			report.outcome = RepairOutcome::Relinked;
 		}
 		report.referrers.push(action.path.clone());
@@ -775,6 +773,42 @@ mod tests {
 			.expect("project scope always names a store")
 	}
 
+	#[test]
+	fn creating_private_referrers_is_reported_as_a_repair() {
+		let (_tmp, root) = fixture();
+		let master = root.join(".aghub/demo");
+		write_skill(&master, "demo", "shared");
+		let shared = root.join(".agents/skills/demo");
+		fs::create_dir_all(shared.parent().unwrap()).unwrap();
+		Linker::symlink(&master, &shared).unwrap();
+		let preview = repair_skill(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			"demo",
+			true,
+			true,
+		)
+		.unwrap()
+		.unwrap();
+		assert_eq!(preview.outcome, RepairOutcome::Relinked);
+		assert!(preview.referrers.contains(&root.join(".codex/skills/demo")));
+		assert!(!root.join(".codex/skills/demo").exists());
+		let committed = repair_skill(
+			ResourceScope::ProjectOnly,
+			Some(&root),
+			"demo",
+			true,
+			false,
+		)
+		.unwrap()
+		.unwrap();
+		assert_eq!(committed.outcome, RepairOutcome::Relinked);
+		assert_eq!(
+			fs::canonicalize(root.join(".codex/skills/demo")).unwrap(),
+			master
+		);
+	}
+
 	/// The migration this whole change exists for: a real directory in the
 	/// shared slot becomes the Master, and the slot becomes a link to it.
 	#[test]
@@ -896,7 +930,7 @@ mod tests {
 		// a Referrer in the dir aghub now only READS.
 		let master = root.join(".aghub").join(name);
 		write_skill(&master, name, "stranded");
-		let compat = root.join(".agent").join("skills");
+		let compat = root.join(".clinerules").join("skills");
 		fs::create_dir_all(&compat).unwrap();
 		Linker::symlink(&master, &compat.join(name)).unwrap();
 
@@ -906,11 +940,11 @@ mod tests {
 			name,
 		);
 		assert!(
-			readers.contains(&"antigravity"),
+			readers.contains(&"cline"),
 			"the compat dir is what makes antigravity a reader, got {readers:?}"
 		);
 
-		let write_slot = root.join(".agents").join("skills").join(name);
+		let write_slot = root.join(".cline").join("skills").join(name);
 		assert!(
 			!write_slot.exists(),
 			"fixture premise: the write slot must start empty"
@@ -966,10 +1000,10 @@ mod tests {
 		write_skill(&master, name, "shared");
 		// antigravity PROJECT pair: `.agents/skills` writes, `.agent/skills` is
 		// read-only compat.
-		let write_slot = root.join(".agents").join("skills").join(name);
+		let write_slot = root.join(".cline").join("skills").join(name);
 		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &write_slot).unwrap();
-		let compat = root.join(".agent").join("skills").join(name);
+		let compat = root.join(".clinerules").join("skills").join(name);
 		fs::create_dir_all(compat.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &compat).unwrap();
 
@@ -1018,7 +1052,7 @@ mod tests {
 		// Pre-2.18: the bytes live in the shared slot, `.aghub` does not exist.
 		let slot = root.join(".agents").join("skills").join(name);
 		write_skill(&slot, name, "pre-2.18");
-		let compat = root.join(".agent").join("skills").join(name);
+		let compat = root.join(".clinerules").join("skills").join(name);
 		fs::create_dir_all(compat.parent().unwrap()).unwrap();
 		Linker::symlink(&slot, &compat).unwrap();
 
@@ -1077,10 +1111,10 @@ mod tests {
 		let name = "demo";
 		let master = root.join(".aghub").join(name);
 		write_skill(&master, name, "shared");
-		let write_slot = root.join(".agents").join("skills").join(name);
+		let write_slot = root.join(".cline").join("skills").join(name);
 		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &write_slot).unwrap();
-		let compat = root.join(".agent").join("skills").join(name);
+		let compat = root.join(".clinerules").join("skills").join(name);
 		fs::create_dir_all(compat.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &compat).unwrap();
 
@@ -1129,10 +1163,10 @@ mod tests {
 		let name = "demo";
 		let master = root.join(".aghub").join(name);
 		write_skill(&master, name, "shared");
-		let write_slot = root.join(".agents").join("skills").join(name);
+		let write_slot = root.join(".cline").join("skills").join(name);
 		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &write_slot).unwrap();
-		let compat = root.join(".agent").join("skills").join(name);
+		let compat = root.join(".clinerules").join("skills").join(name);
 		write_skill(&compat, name, "bytes aghub never installed");
 
 		let p = plan(&root, name, true);
@@ -1149,10 +1183,10 @@ mod tests {
 		write_skill(&master, name, "shared");
 		let elsewhere = root.join("elsewhere");
 		write_skill(&elsewhere, name, "someone else's");
-		let write_slot = root.join(".agents").join("skills").join(name);
+		let write_slot = root.join(".cline").join("skills").join(name);
 		fs::create_dir_all(write_slot.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &write_slot).unwrap();
-		let foreign = root.join(".agent").join("skills").join(name);
+		let foreign = root.join(".clinerules").join("skills").join(name);
 		fs::create_dir_all(foreign.parent().unwrap()).unwrap();
 		Linker::symlink(&elsewhere, &foreign).unwrap();
 
@@ -1191,7 +1225,7 @@ mod tests {
 		let (_tmp4, root) = fixture();
 		let master = root.join(".aghub").join(name);
 		write_skill(&master, name, "shared");
-		let only = root.join(".agent").join("skills").join(name);
+		let only = root.join(".clinerules").join("skills").join(name);
 		fs::create_dir_all(only.parent().unwrap()).unwrap();
 		Linker::symlink(&master, &only).unwrap();
 		assert!(
@@ -1226,7 +1260,7 @@ mod tests {
 		write_skill(&master, name, "master");
 		// Nothing is granted anywhere: no write slot, and `grant_to` empty, so
 		// every candidate row is `Leave` and NOTHING is covered.
-		let compat_dir = root.join(".agent").join("skills");
+		let compat_dir = root.join(".clinerules").join("skills");
 		fs::create_dir_all(&compat_dir).unwrap();
 		Linker::symlink(&master, &compat_dir.join(name)).unwrap();
 		fs::set_permissions(&compat_dir, fs::Permissions::from_mode(0o000))

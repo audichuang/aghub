@@ -1239,7 +1239,12 @@ mod tests {
 		assert_eq!(agents[0].state, AgentLinkState::Missing);
 		assert_eq!(
 			agents[0].path.as_deref(),
-			Some(master.join("gone").to_string_lossy().as_ref())
+			Some(
+				tmp.path()
+					.join(".codex/skills/gone")
+					.to_string_lossy()
+					.as_ref()
+			)
 		);
 	}
 
@@ -1360,10 +1365,10 @@ mod tests {
 		let root = std::fs::canonicalize(tmp.path()).unwrap();
 		let master = root.join(".aghub");
 		write_skill(&master.join("foo"), "foo");
-		std::fs::create_dir_all(root.join(".agents")).unwrap();
-		symlink(&master, root.join(".agents/skills")).unwrap();
+		std::fs::create_dir_all(root.join(".cline")).unwrap();
+		symlink(&master, root.join(".cline/skills")).unwrap();
 
-		let slot = root.join(".agents/skills/foo");
+		let slot = root.join(".cline/skills/foo");
 		assert!(
 			!Linker::is_link(&slot) && slot.is_dir(),
 			"precondition: the leaf lstats as a real directory"

@@ -101,7 +101,7 @@ fn global_skills_paths() -> Vec<PathBuf> {
 }
 
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".agents/skills"), root.join(".github/skills")]
+	vec![root.join(".github/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -109,7 +109,7 @@ fn global_skill_write_path() -> Option<PathBuf> {
 }
 
 fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
-	Some(root.join(".agents/skills"))
+	Some(root.join(".github/skills"))
 }
 
 // Copilot CLI custom agents: `~/.copilot/agents/` (personal) and
@@ -260,8 +260,8 @@ mod tests {
 		assert_eq!(
 			project_skills_paths(Path::new("/workspace")),
 			vec![
-				PathBuf::from("/workspace/.agents/skills"),
 				PathBuf::from("/workspace/.github/skills"),
+				PathBuf::from("/workspace/.agents/skills"),
 			],
 			"the WRITE dir must stay first — first-dir-wins decides source_path"
 		);
@@ -269,7 +269,7 @@ mod tests {
 			(DESCRIPTOR.project_skill_paths.unwrap().write)(Path::new(
 				"/workspace"
 			)),
-			Some(PathBuf::from("/workspace/.agents/skills"))
+			Some(PathBuf::from("/workspace/.github/skills"))
 		);
 	}
 

@@ -75,9 +75,10 @@ fn global_skills_paths() -> Vec<PathBuf> {
 	]
 }
 
-// `.agent/` (singular) is the vendor's own backward-compat alias for `.agents/`.
+// The vendor supports `.agent/skills`. Prefer that private entry for grants;
+// the default `.agents/skills` remains readable for legacy installs.
 fn project_skills_paths(root: &Path) -> Vec<PathBuf> {
-	vec![root.join(".agents/skills"), root.join(".agent/skills")]
+	vec![root.join(".agent/skills"), root.join(".agents/skills")]
 }
 
 fn global_skill_write_path() -> Option<PathBuf> {
@@ -85,7 +86,7 @@ fn global_skill_write_path() -> Option<PathBuf> {
 }
 
 fn project_skill_write_path(root: &Path) -> Option<PathBuf> {
-	Some(root.join(".agents/skills"))
+	Some(root.join(".agent/skills"))
 }
 
 // Antigravity custom sub-agents are a DIRECTORY per agent holding `agent.md`
@@ -238,16 +239,16 @@ mod tests {
 		assert_eq!(
 			project_skills_paths(Path::new("/workspace")),
 			vec![
-				PathBuf::from("/workspace/.agents/skills"),
 				PathBuf::from("/workspace/.agent/skills"),
+				PathBuf::from("/workspace/.agents/skills"),
 			]
 		);
 		assert_eq!(
 			(DESCRIPTOR.project_skill_paths.unwrap().write)(Path::new(
 				"/workspace"
 			)),
-			Some(PathBuf::from("/workspace/.agents/skills")),
-			"the project write slot must NOT move to the .agent alias"
+			Some(PathBuf::from("/workspace/.agent/skills")),
+			"the supported private alias preserves independent grants"
 		);
 	}
 

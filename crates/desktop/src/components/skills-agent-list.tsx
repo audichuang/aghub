@@ -5,6 +5,7 @@ import {
 } from "@heroicons/react/24/solid";
 import { Checkbox, CheckboxGroup, Description, Label } from "@heroui/react";
 import { useTranslation } from "react-i18next";
+import type { AgentSkillCoverageDto } from "../generated/dto";
 import type { AvailableAgent } from "../contexts/agent-availability";
 import { AgentIcon } from "../lib/agent-icons";
 import type { Scope } from "../lib/skills-path-group";
@@ -23,6 +24,7 @@ interface SkillsAgentListProps {
 	selectedKeys: string[];
 	onSelectionChange: (keys: string[]) => void;
 	scope: Scope;
+	coverage: Record<string, AgentSkillCoverageDto>;
 	agentStates?: Record<string, AgentState>;
 	diffLabels?: Record<string, AgentDiffLabel>;
 	disabled?: boolean;
@@ -72,6 +74,7 @@ export function SkillsAgentList({
 	selectedKeys,
 	onSelectionChange,
 	scope: _scope,
+	coverage,
 	agentStates = {},
 	diffLabels = {},
 	disabled = false,
@@ -99,6 +102,7 @@ export function SkillsAgentList({
 			{label && <Label className="sr-only">{label}</Label>}
 			<div className="flex flex-col gap-1">
 				{agents.map((agent) => {
+					const peers = coverage[agent.id]?.shared_with ?? [];
 					const state = agentStates[agent.id];
 					const diffLabel = diffLabels[agent.id];
 					const isDisabled = disabledAgents.has(agent.id);
@@ -128,6 +132,20 @@ export function SkillsAgentList({
 									<Label className="truncate text-sm">
 										{agent.display_name}
 									</Label>
+									{peers.length > 0 && (
+										<p className="text-xs text-muted">
+											{t("sourceSharedAgentGroup")} ·{" "}
+											{peers
+												.map(
+													(id) =>
+														agents.find(
+															(peer) =>
+																peer.id === id,
+														)?.display_name ?? id,
+												)
+												.join(" / ")}
+										</p>
+									)}
 									{state?.status === "pending" && (
 										<span
 											aria-live="polite"

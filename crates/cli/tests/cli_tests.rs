@@ -4620,7 +4620,7 @@ fn transfer_skill_second_run_is_idempotent_and_says_so() {
 /// there is nothing to do.
 #[cfg(unix)]
 #[test]
-fn transfer_skill_to_shared_slot_agent_first_use_is_idempotent() {
+fn transfer_skill_to_private_slot_is_independent_then_idempotent() {
 	let project = transfer_project("repo-helper");
 
 	// Materialize the Master + the shared-slot Referrer via one agent.
@@ -4648,13 +4648,13 @@ fn transfer_skill_to_shared_slot_agent_first_use_is_idempotent() {
 		.expect("the seed transfer must have written the Master");
 	assert!(
 		std::fs::symlink_metadata(
-			project.path().join(".agents/skills/repo-helper")
+			project.path().join(".cline/skills/repo-helper")
 		)
 		.is_ok(),
-		"the seed must have written the shared-slot Referrer warp reads"
+		"the seed must have written Cline’s private Referrer"
 	);
 
-	// warp has never been transferred to — but its Referrer dir IS that slot.
+	// Warp needs a distinct grant even though Cline already holds the Master.
 	let out = transfer_cli(project.path())
 		.args([
 			"-p",
@@ -4672,7 +4672,7 @@ fn transfer_skill_to_shared_slot_agent_first_use_is_idempotent() {
 		.unwrap();
 	assert!(
 		out.status.success(),
-		"a shared-slot agent's first transfer must not fail: {} {}",
+		"a private-slot agent's first transfer must not fail: {} {}",
 		String::from_utf8_lossy(&out.stdout),
 		String::from_utf8_lossy(&out.stderr)
 	);
@@ -4683,7 +4683,7 @@ fn transfer_skill_to_shared_slot_agent_first_use_is_idempotent() {
 		.and_then(|a| a.iter().find(|r| r["agent"] == "warp"))
 		.expect("warp row present");
 	assert_eq!(row["success"], true, "{row}");
-	assert_eq!(row["already_present"], true, "{row}");
+	assert_eq!(row["already_present"], false, "{row}");
 	assert!(row["error"].is_null(), "{row}");
 
 	assert_eq!(
@@ -4691,6 +4691,29 @@ fn transfer_skill_to_shared_slot_agent_first_use_is_idempotent() {
 		before,
 		"an already-present transfer must rewrite nothing"
 	);
+	assert!(project
+		.path()
+		.join(".warp/skills/repo-helper/SKILL.md")
+		.is_file());
+	assert!(!project.path().join(".agents/skills/repo-helper").exists());
+	let repeated = transfer_cli(project.path())
+		.args([
+			"-p",
+			"transfer",
+			"skill",
+			"--from-agent",
+			"claude",
+			"--name",
+			"repo-helper",
+			"--to",
+			"warp",
+			"--json",
+		])
+		.output()
+		.unwrap();
+	assert!(repeated.status.success());
+	let repeated: Value = serde_json::from_slice(&repeated.stdout).unwrap();
+	assert_eq!(repeated["results"][0]["already_present"], true);
 }
 
 #[test]
