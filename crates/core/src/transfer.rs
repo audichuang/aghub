@@ -686,10 +686,11 @@ struct Protected {
 /// `skill_holders`, and for the same reason: an agent we cannot see is not an
 /// agent that does not read the file.
 ///
-/// Skills deliberately pass `roster: false`. Eight project-scope agents share
-/// `<root>/.agents/skills` as their own write dir BY DESIGN (granting to one
-/// grants to all), so a roster protect list would refuse every removal from any
-/// of them. What a skill removal really takes away is decided by
+/// Skills deliberately pass `roster: false`. `<root>/.agents/skills` is a
+/// SHARED read path for most of the project-scope roster (amp writes it; the
+/// rest keep it as a compat read dir since their write slots moved to private
+/// directories), so a roster protect list would refuse every removal that
+/// touches it. What a skill removal really takes away is decided by
 /// `remove_skill_planned` / `removal::read_effect_after`, not here.
 fn protected_targets(
 	copies: &[OperationPlan],
@@ -1864,6 +1865,32 @@ struct ReconcileSkillPlan {
 	deletion_paths: Vec<(AgentType, Vec<PathBuf>)>,
 }
 
+/// The paths rows running BEFORE `target` will already have removed.
+///
+/// Credited by POSITION: `deletion_paths` is built 1:1 with `deletes`, in the
+/// order the rows execute, so "earlier" is a prefix — not "everything up to
+/// wherever the target turns up".
+///
+/// A target ABSENT from the list credits NOTHING. The `take_while` this
+/// replaces credited the ENTIRE list in that case, counting removals from rows
+/// that had not run yet; that flips `shared_master_kept` to false, the preflight
+/// green-lights the row, and the commit then refuses it — the half-applied
+/// reconcile the preflight exists to prevent. Nothing passes an out-of-plan
+/// target today (both callers feed `plan.deletes` straight back), so this is
+/// the fail-CLOSED reading of a state that should not arise.
+fn earlier_row_removals(
+	deletion_paths: &[(AgentType, Vec<PathBuf>)],
+	target: AgentType,
+) -> impl Iterator<Item = &PathBuf> {
+	let earlier = deletion_paths
+		.iter()
+		.position(|(agent, _)| *agent == target)
+		.unwrap_or(0);
+	deletion_paths[..earlier]
+		.iter()
+		.flat_map(|(_, paths)| paths.iter())
+}
+
 fn plan_reconcile_skill(
 	source: &ResourceLocator,
 	added: &[AgentType],
@@ -1919,32 +1946,31 @@ fn plan_reconcile_skill(
 	);
 	// Shared slots must go first: a private Referrer cannot be revoked while
 	// the same agent still reads the shared slot this batch is removing.
+	//
+	// "How many agents read this dir" is asked of the one helper that owns it
+	// (`skill_dir_readers_outside`, with an empty exclusion list so the count
+	// spans the whole roster), never re-derived here. The inline version this
+	// replaces was a SEVENTH independent spelling of slot sharing and it
+	// disagreed with the others on two axes — it counted the row's own agent
+	// where `classify::shared_with` excludes self, and it matched read dirs by
+	// equality where the owner uses containment, so a Master under
+	// `.agents/skills/<team>/<name>` counted zero readers instead of every
+	// agent scanning `.agents/skills`.
 	deletes.sort_by_cached_key(|row| {
 		let scope = target_resource_scope(&row.target);
-		let peers = create_adapter(row.target.agent)
+		let readers = create_adapter(row.target.agent)
 			.target_skills_dir(row.target.project_root.as_deref(), scope)
 			.map(|dir| {
-				let dir =
-					crate::skills::linker::classify::canonicalize_lenient(&dir);
-				registry::iter_all()
-					.filter_map(|descriptor| {
-						descriptor.id.parse::<AgentType>().ok()
-					})
-					.filter(|agent| {
-						create_adapter(*agent)
-							.get_skills_paths(
-								row.target.project_root.as_deref(),
-								scope,
-							)
-							.iter()
-							.any(|read| {
-								crate::skills::linker::classify::canonicalize_lenient(read) == dir
-							})
-					})
-					.count()
+				crate::skills::removal::skill_dir_readers_outside(
+					&dir,
+					scope,
+					row.target.project_root.as_deref(),
+					&[],
+				)
+				.len()
 			})
 			.unwrap_or(0);
-		std::cmp::Reverse(peers)
+		std::cmp::Reverse(readers)
 	});
 
 	let deletion_paths = deletes
@@ -2054,13 +2080,10 @@ impl ReconcileSkillPlan {
 			// planned removals; the executing manager still rechecks the REAL disk,
 			// so a failed earlier unlink cannot authorize a false success here.
 			let own_path_count = deleting.len();
-			for (_, paths) in self
-				.deletion_paths
-				.iter()
-				.take_while(|(agent, _)| *agent != target.agent)
-			{
-				deleting.extend(paths.iter().cloned());
-			}
+			deleting.extend(
+				earlier_row_removals(&self.deletion_paths, target.agent)
+					.cloned(),
+			);
 			let dirs = create_adapter(target.agent).get_skills_paths(
 				target.project_root.as_deref(),
 				target_resource_scope(target),
@@ -5124,6 +5147,41 @@ mod tests {
 		result.expect_err(
 			"a copy below the delete target's recursively-read root must be refused",
 		);
+	}
+
+	/// Earlier rows are credited by POSITION, and an unplaceable target credits
+	/// nothing.
+	///
+	/// The `take_while` this replaced walked until it met the target, so a
+	/// target ABSENT from the list consumed every row — crediting removals that
+	/// had not happened. That is the direction that green-lights a row the
+	/// commit then refuses, so the absent case is asserted first.
+	#[test]
+	fn earlier_rows_are_credited_by_position_not_by_scanning() {
+		let rows = vec![
+			(AgentType::Amp, vec![PathBuf::from("/first")]),
+			(AgentType::Codex, vec![PathBuf::from("/second")]),
+			(AgentType::Cursor, vec![PathBuf::from("/third")]),
+		];
+		let credited = |target| {
+			earlier_row_removals(&rows, target)
+				.map(|p| p.to_string_lossy().into_owned())
+				.collect::<Vec<_>>()
+		};
+
+		// THE DEFECT: a target the list cannot place must credit NOTHING.
+		// `take_while` returned all three here.
+		assert!(
+			credited(AgentType::Claude).is_empty(),
+			"a target outside the plan must not inherit other rows' removals"
+		);
+
+		assert!(
+			credited(AgentType::Amp).is_empty(),
+			"the first row has none"
+		);
+		assert_eq!(credited(AgentType::Codex), vec!["/first"]);
+		assert_eq!(credited(AgentType::Cursor), vec!["/first", "/second"]);
 	}
 
 	fn global_target(agent: AgentType) -> InstallTarget {
