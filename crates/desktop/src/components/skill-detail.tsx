@@ -339,9 +339,9 @@ export function SkillDetail({
 			<div className="h-full overflow-y-auto">
 				<div className="w-full space-y-4 p-4 sm:p-6">
 					<Card>
-						<Card.Header className="flex flex-row items-start justify-between gap-3">
-							<div className="min-w-0 flex-1">
-								<h2 className="text-xl font-semibold text-foreground truncate">
+						<Card.Header className="flex flex-col gap-3">
+							<div className="min-w-0">
+								<h2 className="text-xl font-semibold break-words text-foreground">
 									{skill.name}
 								</h2>
 								{skill.description && (
@@ -376,7 +376,7 @@ export function SkillDetail({
 									</div>
 								)}
 							</div>
-							<div className="flex items-center gap-2">
+							<div className="flex flex-wrap items-center gap-2">
 								<Tooltip delay={0}>
 									<Button
 										isIconOnly

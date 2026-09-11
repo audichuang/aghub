@@ -4,11 +4,19 @@ import {
 	PlusIcon,
 	RectangleStackIcon,
 } from "@heroicons/react/24/solid";
-import { Button, Dropdown, Spinner, Tooltip, toast } from "@heroui/react";
+import {
+	Alert,
+	Button,
+	Dropdown,
+	Spinner,
+	Tooltip,
+	toast,
+} from "@heroui/react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useLocation } from "wouter";
 import { BulkDeleteDialog } from "../../components/bulk-delete-dialog";
 import { BulkManageGroupAgentsDialog } from "../../components/bulk-manage-group-agents-dialog";
 import { CreateSkillPanel } from "../../components/create-skill-panel";
@@ -63,12 +71,14 @@ import {
 	skillListQueryOptions,
 } from "../../requests/skills";
 import { sourcesListQueryOptions } from "../../requests/sources";
+import { createSkillSearch } from "../../lib/skill-search";
 import { queryKeys } from "../../requests/keys";
 
 // ─── Main page ───────────────────────────────────────────────────────────────
 
 export default function SkillsPage() {
 	const { t, i18n } = useTranslation();
+	const [, setLocation] = useLocation();
 	const api = useApi();
 	const { forBoundSources: forwardForBoundSources } = useGitForwarding();
 	const queryClient = useQueryClient();
@@ -413,6 +423,28 @@ export default function SkillsPage() {
 		}
 		return visibleGroups[0] ?? null;
 	}, [selectedSourceParam, selectedSkillName, visibleGroups]);
+
+	// SkillList runs its own fuzzy search internally (see skill-list.tsx) —
+	// this page never filters `activeGroup` by `searchQuery`, so a search
+	// that excludes the active group used to leave its full detail (delete
+	// included) showing with no hint that it fell out of the results.
+	//
+	// The index is shared with SkillList's filter (`createSkillSearch`) rather
+	// than hand-copied: the banner exists to explain a skill the LIST is not
+	// showing, so a threshold that drifts between the two makes it lie. It is
+	// memoized on the DATA, never on the query — the old copy listed
+	// `searchQuery` in its deps and rebuilt the whole index on every keystroke.
+	const skillSearch = useMemo(
+		() => createSkillSearch(groupedSkills),
+		[groupedSkills],
+	);
+	const activeGroupMatchesSearch = useMemo(() => {
+		const query = searchQuery.trim();
+		if (!query || !activeGroup) return true;
+		return skillSearch
+			.search(query)
+			.some((result) => result.item.name === activeGroup.name);
+	}, [searchQuery, activeGroup, skillSearch]);
 
 	const selectedGroups = useMemo(
 		() => groupedSkills.filter((g) => selectedKeys.has(g.name)),
@@ -879,24 +911,76 @@ export default function SkillsPage() {
 							projectPath={selectedProjectPath ?? undefined}
 						/>
 					) : activeGroup ? (
-						<SkillDetail
-							key={
-								pendingAuthSkill === activeGroup.name
-									? `${activeGroup.name}-cred`
-									: activeGroup.name
-							}
-							group={activeGroup}
-							projectPath={selectedProjectPath ?? undefined}
-							// Same route: `setLocation` would push a URL nuqs
-							// never re-reads, so the panel would not change.
-							onOpenSource={handleOpenSourceView}
-							openCredDialog={
-								pendingAuthSkill === activeGroup.name
-							}
-							onCredDialogClose={() => {
-								setPendingAuthSkill(null);
-							}}
-						/>
+						<div className="flex h-full flex-col">
+							{!activeGroupMatchesSearch && (
+								<div
+									role="alert"
+									aria-live="polite"
+									className="border-b border-border p-3"
+								>
+									<Alert status="accent">
+										<Alert.Indicator />
+										<Alert.Content>
+											<Alert.Description>
+												{t("skillOutsideSearchResults")}
+											</Alert.Description>
+											<div className="mt-2">
+												<Button
+													size="sm"
+													variant="secondary"
+													onPress={() =>
+														setSearchQuery("")
+													}
+												>
+													{t("clearSearch")}
+												</Button>
+											</div>
+										</Alert.Content>
+									</Alert>
+								</div>
+							)}
+							<div className="min-h-0 flex-1">
+								<SkillDetail
+									key={
+										pendingAuthSkill === activeGroup.name
+											? `${activeGroup.name}-cred`
+											: activeGroup.name
+									}
+									group={activeGroup}
+									projectPath={
+										selectedProjectPath ?? undefined
+									}
+									// Same route: `setLocation` would push a URL nuqs
+									// never re-reads, so the panel would not change.
+									onOpenSource={handleOpenSourceView}
+									openCredDialog={
+										pendingAuthSkill === activeGroup.name
+									}
+									onCredDialogClose={() => {
+										setPendingAuthSkill(null);
+									}}
+								/>
+							</div>
+						</div>
+					) : groupedSkills.length === 0 ? (
+						<div className="flex h-full flex-col items-center justify-center gap-4 p-6 text-center">
+							<p className="text-sm text-muted">
+								{t("skillsEmptyStateHint")}
+							</p>
+							<div className="flex gap-2">
+								<Button
+									onPress={() => setLocation("/skills-sh")}
+								>
+									{t("discoverSkills")}
+								</Button>
+								<Button
+									variant="secondary"
+									onPress={() => setPanelMode("import")}
+								>
+									{t("importFromFile")}
+								</Button>
+							</div>
+						</div>
 					) : (
 						<div className="flex h-full flex-col items-center justify-center gap-4">
 							<p className="text-sm text-muted">

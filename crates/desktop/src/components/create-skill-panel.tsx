@@ -373,7 +373,7 @@ export function CreateSkillPanel({
 							</Fieldset.Group>
 						</Fieldset>
 
-						<div className="flex justify-end gap-2 pt-2">
+						<div className="sticky bottom-0 z-10 flex justify-end gap-2 bg-surface py-3">
 							<Button
 								type="button"
 								variant="secondary"

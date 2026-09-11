@@ -42,6 +42,7 @@ const zhHant: typeof en = {
 	pluginsDescription: "管理 Claude Code 外掛 — 啟用或停用已安裝的外掛。",
 	noPluginsInstalled: "暫無已安裝的外掛。",
 	noPluginsMatch: "沒有匹配的外掛",
+	pluginsEmptyStateHint: "尚未安裝任何外掛。",
 	enablePlugin: "啟用外掛",
 	disablePlugin: "停用外掛",
 	pluginEnabled: "已啟用",
@@ -541,6 +542,9 @@ const zhHant: typeof en = {
 	refreshSkills: "重新整理技能",
 	noSkillsMatch: "沒有符合的技能",
 	selectSkill: "選擇一個技能檢視詳情",
+	skillOutsideSearchResults: "此技能不在目前的搜尋結果中。",
+	clearSearch: "清除搜尋",
+	skillsEmptyStateHint: "尚未安裝任何技能。",
 	skillInstallFailed: "安裝技能失敗。",
 	deleteSelected: "刪除已選",
 	itemsSelected: "已選取 {{count}} 項",
@@ -676,6 +680,7 @@ const zhHant: typeof en = {
 		"失敗：{{failures}}——選取範圍已收斂到失敗的 agent，可重試或取消。",
 	advanced: "進階設定",
 	agents: "代理",
+	mcpAliasSummary: "{{nameCount}} 個設定名稱／{{agentCount}} 個代理",
 	noAgentsAvailable: "沒有可用的代理",
 	noAgentsAvailableHelp: "請先安裝或啟用至少一個支援元件管理的代理外掛。",
 	validationNameRequired: "請輸入伺服器名稱。",
@@ -765,6 +770,10 @@ const zhHant: typeof en = {
 	installed: "已安裝",
 	globalScope: "全域範圍",
 	unknownError: "發生未知錯誤",
+	errorBoundaryTitle: "發生錯誤",
+	errorBoundaryDescription:
+		"這個畫面載入失敗。你可以重試,或展開下方查看技術細節。",
+	errorBoundaryDetailsToggle: "顯示技術細節",
 	universalSkills: "通用",
 	universalSkillsTooltip: "共享給: {{agents}}",
 	universalSkillsDescription: "{{count}} 個代理共享此技能路徑",
@@ -1302,6 +1311,9 @@ const zhHant: typeof en = {
 	coverageLastInstallBlocked:
 		"這是最後一個代理,移除會等於完全解除安裝。請改用刪除功能。",
 	coverageToggleFailed: "更新覆蓋失敗,請再試一次。",
+	coverageCellLabel: "{{resource}} — {{agent}}：{{state}}",
+	coverageStateInstalled: "已安裝",
+	coverageStateAvailable: "可新增",
 	manageAgentsConfirmRemoveBody:
 		"這會從 {{count}} 個代理移除此技能，且無法復原。",
 	manageAgentsAddThenRemove:

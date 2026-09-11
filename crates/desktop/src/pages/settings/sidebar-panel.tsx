@@ -106,9 +106,6 @@ export default function SidebarPanel() {
 												{t(item.labelKey)}
 											</span>
 										</div>
-										<span className="block text-xs text-muted">
-											{item.href}
-										</span>
 									</Checkbox.Content>
 								</Checkbox>
 

@@ -7,7 +7,6 @@ import {
 } from "@heroicons/react/24/solid";
 import { Button, Chip, Label, ListBox, Spinner, Tooltip } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
-import Fuse from "fuse.js";
 import { useMemo, useState } from "react";
 import { useMultiSelect } from "../hooks/use-multi-select";
 import { useTranslation } from "react-i18next";
@@ -17,6 +16,7 @@ import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useFavorites } from "../hooks/use-favorites";
 import { useSkillTags } from "../hooks/use-skill-tags";
+import { createSkillSearch } from "../lib/skill-search";
 import { filterGroupsByAgent } from "../lib/skill-agent-filter";
 import {
 	isGroupExpanded,
@@ -165,15 +165,7 @@ export function SkillList({
 	}, [visibleSkills]);
 
 	const fuse = useMemo(
-		() =>
-			new Fuse(groupedByName, {
-				keys: [
-					{ name: "name", weight: 2 },
-					{ name: "description", weight: 1 },
-				],
-				threshold: 0.4,
-				includeScore: true,
-			}),
+		() => createSkillSearch(groupedByName),
 		[groupedByName],
 	);
 

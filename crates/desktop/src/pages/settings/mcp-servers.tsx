@@ -133,7 +133,20 @@ export default function MCPServersPage() {
 		setPanel({ type: "import" });
 	};
 
-	const handlePanelDone = () => {
+	const handlePanelDone = (createdMergeKey?: string) => {
+		if (createdMergeKey) {
+			// The just-created group may not be in `mcps` yet on THIS render
+			// (the create mutation's own invalidate/refetch resolves before
+			// this callback runs, but the resulting re-render has not
+			// happened yet) — select by the merge key computed from the
+			// submitted transport rather than searching `groupedMcps` here,
+			// so the detail panel resolves it correctly once fresh data
+			// arrives instead of staying on whatever was selected before.
+			setSelectedKeys(new Set());
+			setSelectedKey(createdMergeKey);
+			setPanel({ type: "detail", selectedKey: createdMergeKey });
+			return;
+		}
 		setPanel({ type: "empty" });
 	};
 

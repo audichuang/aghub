@@ -42,6 +42,7 @@ export default {
 		"Manage Claude Code plugins — enable or disable installed plugins.",
 	noPluginsInstalled: "No plugins installed.",
 	noPluginsMatch: "No plugins match",
+	pluginsEmptyStateHint: "No plugins installed yet.",
 	enablePlugin: "Enable plugin",
 	disablePlugin: "Disable plugin",
 	pluginEnabled: "Enabled",
@@ -578,6 +579,10 @@ export default {
 	refreshSkills: "Refresh skills",
 	noSkillsMatch: "No skills match",
 	selectSkill: "Select a skill to view details",
+	skillOutsideSearchResults:
+		"This skill isn't in your current search results.",
+	clearSearch: "Clear search",
+	skillsEmptyStateHint: "No skills installed yet.",
 	skillInstallFailed: "Failed to install skill.",
 	deleteSelected: "Delete Selected",
 	itemsSelected: "{{count}} items selected",
@@ -716,6 +721,7 @@ export default {
 		"Failed on {{failures}} — the selection now targets only the failed agents; retry or cancel.",
 	advanced: "Advanced",
 	agents: "Agents",
+	mcpAliasSummary: "{{nameCount}} config names / {{agentCount}} agent(s)",
 	noAgentsAvailable: "No agents available",
 	noAgentsAvailableHelp:
 		"Install or enable at least one agent to create MCP servers or skills.",
@@ -810,6 +816,10 @@ export default {
 	installed: "Installed",
 	globalScope: "Global Scope",
 	unknownError: "Something went wrong",
+	errorBoundaryTitle: "Something went wrong",
+	errorBoundaryDescription:
+		"This part of the app couldn't load. You can try again, or check the technical details below.",
+	errorBoundaryDetailsToggle: "Show technical details",
 	universalSkills: "Universal",
 	universalSkillsTooltip: "Shared with: {{agents}}",
 	universalSkillsDescription: "{{count}} agents share this skills path",
@@ -1377,6 +1387,9 @@ export default {
 	coverageLastInstallBlocked:
 		"That is the last agent — removing it would uninstall the item. Use delete instead.",
 	coverageToggleFailed: "Couldn't update coverage. Please try again.",
+	coverageCellLabel: "{{resource}} — {{agent}}: {{state}}",
+	coverageStateInstalled: "Installed",
+	coverageStateAvailable: "Available",
 	manageAgentsConfirmRemoveBody:
 		"This removes the skill from {{count}} agent(s). This cannot be undone.",
 	manageAgentsAddThenRemove:

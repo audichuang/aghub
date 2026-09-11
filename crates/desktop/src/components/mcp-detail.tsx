@@ -142,6 +142,36 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 		() => filterItemsByAgentIds(group.items, enabledAgentIds),
 		[group.items, enabledAgentIds],
 	);
+	// Equivalent-transport MCPs can be created under different names (e.g. a
+	// batch of test fixtures) and still merge into one group — one chip per
+	// ITEM would then render the same agent's name several indistinguishable
+	// times. Collapsing to one chip per agent, with its distinct config names
+	// disclosed via tooltip, keeps the merge legible instead of hiding it.
+	const agentGroups = useMemo(() => {
+		const sorted = sortAgentObjects(visibleItems, allAgents);
+		const byAgent = new Map<string, McpResponse[]>();
+		for (const item of sorted) {
+			const key = item.agent ?? "default";
+			const existing = byAgent.get(key);
+			if (existing) {
+				existing.push(item);
+			} else {
+				byAgent.set(key, [item]);
+			}
+		}
+		return [...byAgent.entries()].map(([agentId, items]) => ({
+			agentId,
+			items,
+		}));
+	}, [visibleItems, allAgents]);
+	// Counted over `visibleItems`, NOT `group.items`: `agentGroups` below is
+	// built from the filtered set, so counting names across the unfiltered one
+	// rendered "3 config names / 1 agent(s)" — two of those names belonging to
+	// agents the panel is not showing at all.
+	const uniqueConfigNameCount = useMemo(
+		() => new Set(visibleItems.map((item) => item.name)).size,
+		[visibleItems],
+	);
 
 	const handleCopyConfig = async () => {
 		const primary = group.items[0];
@@ -199,13 +229,13 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 					{/* Unified Detail Card */}
 					<Card>
 						{/* Header: Name + Actions */}
-						<Card.Header className="flex flex-row items-start justify-between gap-3">
-							<div className="min-w-0 flex-1">
-								<h2 className="text-xl font-semibold text-foreground truncate">
+						<Card.Header className="flex flex-col gap-3">
+							<div className="min-w-0">
+								<h2 className="text-xl font-semibold break-words text-foreground">
 									{primaryItem.name}
 								</h2>
 							</div>
-							<div className="flex items-center gap-2">
+							<div className="flex flex-wrap items-center gap-2">
 								<Tooltip delay={0}>
 									<Button
 										isIconOnly
@@ -278,48 +308,100 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 							{/* Agents Section */}
 							{visibleItems.length > 0 && (
 								<div className="space-y-3">
-									<h3 className="text-xs font-medium tracking-wider text-muted uppercase">
-										{t("agents")}
-									</h3>
+									<div className="flex items-center gap-2">
+										<h3 className="text-xs font-medium tracking-wider text-muted uppercase">
+											{t("agents")}
+										</h3>
+										{uniqueConfigNameCount > 1 && (
+											<span className="text-xs text-muted">
+												{t("mcpAliasSummary", {
+													nameCount:
+														uniqueConfigNameCount,
+													agentCount:
+														agentGroups.length,
+												})}
+											</span>
+										)}
+									</div>
 									<div className="flex flex-wrap gap-2">
-										{sortAgentObjects(
-											visibleItems,
-											allAgents,
-										).map((item) => (
-											<Chip
-												key={item.agent ?? "default"}
-												size="sm"
-												variant={
-													item.enabled
-														? "soft"
-														: "tertiary"
-												}
-												color="default"
-												className="pr-3 max-w-full"
-											>
-												<span className="flex items-center gap-1.5 truncate">
-													<AgentIcon
-														id={
-															item.agent ??
-															"default"
-														}
-														name={getAgentName(
-															item,
-														)}
+										{agentGroups.map(
+											({ agentId, items }) => {
+												const label = getAgentName(
+													items[0],
+												);
+												const allDisabled = items.every(
+													(item) => !item.enabled,
+												);
+												const chip = (
+													<Chip
 														size="sm"
-														variant="ghost"
-													/>
-													<span className="truncate">
-														{getAgentName(item)}
-													</span>
-													{!item.enabled && (
-														<span className="shrink-0 text-xs text-warning">
-															({t("disabled")})
+														variant={
+															allDisabled
+																? "tertiary"
+																: "soft"
+														}
+														color="default"
+														className="pr-3 max-w-full"
+													>
+														<span className="flex items-center gap-1.5 truncate">
+															<AgentIcon
+																id={agentId}
+																name={label}
+																size="sm"
+																variant="ghost"
+															/>
+															<span className="truncate">
+																{label}
+															</span>
+															{items.length >
+																1 && (
+																<span className="shrink-0 text-xs text-muted">
+																	(
+																	{
+																		items.length
+																	}
+																	)
+																</span>
+															)}
+															{allDisabled && (
+																<span className="shrink-0 text-xs text-warning">
+																	(
+																	{t(
+																		"disabled",
+																	)}
+																	)
+																</span>
+															)}
 														</span>
-													)}
-												</span>
-											</Chip>
-										))}
+													</Chip>
+												);
+												if (items.length <= 1) {
+													return (
+														<span key={agentId}>
+															{chip}
+														</span>
+													);
+												}
+												return (
+													<Tooltip
+														key={agentId}
+														delay={0}
+													>
+														<Tooltip.Trigger>
+															{chip}
+														</Tooltip.Trigger>
+														<Tooltip.Content>
+															{items
+																.map(
+																	(item) =>
+																		item.name,
+																)
+																.join(", ")}
+														</Tooltip.Content>
+													</Tooltip>
+												);
+											},
+										)}
 									</div>
 								</div>
 							)}

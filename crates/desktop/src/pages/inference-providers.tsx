@@ -1829,7 +1829,7 @@ function ProviderForm({
 								</Fieldset.Group>
 							</Fieldset>
 
-							<div className="mt-4 flex justify-end gap-2">
+							<div className="sticky bottom-0 z-10 mt-4 flex justify-end gap-2 bg-surface py-3">
 								<Button
 									type="button"
 									variant="tertiary"

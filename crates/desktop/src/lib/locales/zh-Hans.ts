@@ -41,6 +41,7 @@ const zhHans: typeof en = {
 	plugins: "插件",
 	pluginsDescription: "管理 Claude Code 插件 — 启用或禁用已安装的插件。",
 	noPluginsInstalled: "暂无已安装的插件。",
+	pluginsEmptyStateHint: "尚未安装任何插件。",
 	noPluginsMatch: "没有匹配的插件",
 	enablePlugin: "启用插件",
 	disablePlugin: "禁用插件",
@@ -542,6 +543,9 @@ const zhHans: typeof en = {
 	refreshSkills: "刷新技能",
 	noSkillsMatch: "没有匹配的技能",
 	selectSkill: "选择一个技能查看详情",
+	skillOutsideSearchResults: "此技能不在目前的搜索结果中。",
+	clearSearch: "清除搜索",
+	skillsEmptyStateHint: "尚未安装任何技能。",
 	skillInstallFailed: "安装技能失败。",
 	deleteSelected: "删除所选",
 	itemsSelected: "已选择 {{count}} 项",
@@ -677,6 +681,7 @@ const zhHans: typeof en = {
 		"失败：{{failures}}——选择范围已收敛到失败的 agent，可重试或取消。",
 	advanced: "高级设置",
 	agents: "代理",
+	mcpAliasSummary: "{{nameCount}} 个配置名称／{{agentCount}} 个代理",
 	noAgentsAvailable: "没有可用的代理",
 	noAgentsAvailableHelp: "请先安装或启用至少一个支持组件管理的代理插件。",
 	validationNameRequired: "请输入服务器名称。",
@@ -766,6 +771,10 @@ const zhHans: typeof en = {
 	installed: "已安装",
 	globalScope: "全局范围",
 	unknownError: "发生了未知错误",
+	errorBoundaryTitle: "发生错误",
+	errorBoundaryDescription:
+		"这个画面加载失败。你可以重试,或展开下方查看技术细节。",
+	errorBoundaryDetailsToggle: "显示技术细节",
 	universalSkills: "通用",
 	universalSkillsTooltip: "共享给: {{agents}}",
 	universalSkillsDescription: "{{count}} 个代理共享此技能路径",
@@ -1302,6 +1311,9 @@ const zhHans: typeof en = {
 	coverageLastInstallBlocked:
 		"这是最后一个代理,移除会等于完全卸载。请改用删除功能。",
 	coverageToggleFailed: "更新覆盖失败,请再试一次。",
+	coverageCellLabel: "{{resource}} — {{agent}}：{{state}}",
+	coverageStateInstalled: "已安装",
+	coverageStateAvailable: "可新增",
 	manageAgentsConfirmRemoveBody:
 		"这会从 {{count}} 个代理移除此技能，且无法复原。",
 	manageAgentsAddThenRemove:

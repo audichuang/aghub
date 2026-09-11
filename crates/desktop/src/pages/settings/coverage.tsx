@@ -233,6 +233,18 @@ export default function CoveragePage() {
 					{row.cells.map((cell) => {
 						const cellKey = `${kind}:${row.name}:${cell.agentId}`;
 						const isPending = pendingCell === cellKey;
+						const agentDisplayName =
+							columns.find((c) => c.id === cell.agentId)
+								?.display_name ?? cell.agentId;
+						const cellLabel = t("coverageCellLabel", {
+							resource: row.name,
+							agent: agentDisplayName,
+							state: t(
+								cell.installed
+									? "coverageStateInstalled"
+									: "coverageStateAvailable",
+							),
+						});
 						return (
 							<td
 								key={cell.agentId}
@@ -247,7 +259,7 @@ export default function CoveragePage() {
 												pendingCell !== null
 											}
 											aria-pressed={cell.installed}
-											aria-label={row.name}
+											aria-label={cellLabel}
 											onClick={() =>
 												void handleToggle(
 													kind,
@@ -256,10 +268,10 @@ export default function CoveragePage() {
 												)
 											}
 											className={cn(
-												"inline-flex size-6 items-center justify-center rounded-md border transition-all duration-200 shadow-xs",
+												"inline-flex size-6 items-center justify-center rounded-md border transition-all duration-200 shadow-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent/50",
 												cell.installed
 													? "border-accent bg-accent/15 text-accent hover:bg-accent/25 hover:border-accent"
-													: "border-separator bg-surface-secondary/40 text-muted/50 hover:border-accent/50 hover:bg-accent/10 hover:text-accent",
+													: "border-separator bg-surface-secondary/40 text-muted hover:border-accent/50 hover:bg-accent/10 hover:text-accent",
 												pendingCell !== null &&
 													"cursor-not-allowed opacity-60",
 											)}
@@ -269,7 +281,7 @@ export default function CoveragePage() {
 											) : cell.installed ? (
 												<CheckIcon className="size-3.5" />
 											) : (
-												<PlusIcon className="size-3.5 opacity-60 group-hover:opacity-100 transition-opacity" />
+												<PlusIcon className="size-3.5" />
 											)}
 										</button>
 									) : (

@@ -27,6 +27,7 @@ import {
 	validatePositiveInteger,
 } from "../lib/form-utils";
 import { buildTransportFromForm } from "../lib/mcp-utils";
+import { getMcpMergeKey } from "../lib/utils";
 import { createMcpBatchMutationOptions } from "../requests/mcps";
 import { AgentSelector } from "./agent-selector";
 import type { EnvVar } from "./env-editor";
@@ -35,7 +36,10 @@ import type { HttpHeader } from "./http-header-editor";
 import { HttpHeaderEditor } from "./http-header-editor";
 
 interface CreateMcpPanelProps {
-	onDone: () => void;
+	/** Called with the newly created group's merge key on success, so the
+	 * caller can select it instead of leaving the previously-viewed server
+	 * showing. Called with no argument for a plain cancel. */
+	onDone: (createdMergeKey?: string) => void;
 	projectPath?: string;
 }
 
@@ -176,7 +180,7 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 				);
 				return;
 			}
-			onDone();
+			onDone(getMcpMergeKey(transport));
 		} catch (error) {
 			const errorMessage =
 				error instanceof Error ? error.message : String(error);
@@ -591,11 +595,11 @@ export function CreateMcpPanel({ onDone, projectPath }: CreateMcpPanelProps) {
 							</Disclosure.Content>
 						</Disclosure>
 
-						<div className="flex justify-end gap-2 pt-2">
+						<div className="sticky bottom-0 z-10 flex justify-end gap-2 bg-surface py-3">
 							<Button
 								type="button"
 								variant="secondary"
-								onPress={onDone}
+								onPress={() => onDone()}
 							>
 								{t("cancel")}
 							</Button>

@@ -1,7 +1,7 @@
 "use client";
 
 import { PuzzlePieceIcon } from "@heroicons/react/24/solid";
-import { toast } from "@heroui/react";
+import { Button, toast } from "@heroui/react";
 import {
 	useMutation,
 	useQueryClient,
@@ -259,9 +259,16 @@ export default function PluginsPage() {
 						<EmptyHeader>
 							<EmptyTitle>{t("plugins")}</EmptyTitle>
 							<EmptyDescription>
-								{t("selectPlugin")}
+								{plugins.length === 0
+									? t("pluginsEmptyStateHint")
+									: t("selectPlugin")}
 							</EmptyDescription>
 						</EmptyHeader>
+						{plugins.length === 0 && (
+							<Button onPress={() => setIsMarketDialogOpen(true)}>
+								{t("browseMarketplace")}
+							</Button>
+						)}
 					</Empty>
 				)}
 			</div>
