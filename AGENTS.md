@@ -210,11 +210,26 @@ Non-obvious invariants:
   `plan_repair`, none loosenable: symlink only (a real directory may hold the
   only copy); resolves to this Master **or to the directory this run adopts as
   one** (without that half the detach needed a SECOND `repair` run, after the
-  first reported `migrated`); the agent's own write slot covers it afterwards
+  first reported `migrated`); **every agent that READS the entry** still has
+  its own write slot covering it afterwards
   (`Create`/`Relink`/`AdoptAsMaster`, or an already-`Conformant` `Leave`);
-  and **the path is nobody's write slot** — `.agents/skills` is codex's second
-  READ dir and eight other agents' ONLY write dir, so without that last guard
-  the sweep deleted the shared slot out from under all eight
+  and **the path is nobody's write slot**. The last two are ANDed and protect
+  disjoint populations — do not collapse them. The reader quorum
+  (`compat_unlink_authorized`) is universally quantified on purpose: it used to
+  ask only about the descriptor whose loop iteration reached the entry first,
+  which authorized a GLOBAL unlink of a SHARED entry on one agent's coverage
+  while every other reader was `continue`d before it was ever recorded. The
+  write-slot guard covers what the quorum structurally cannot: an agent never
+  records itself as a reader of its OWN slot, and at project scope
+  `.agents/skills` is amp's write slot while every other reader has a private
+  one — so all of them are covered, the quorum passes, and only that guard
+  stops step 6 deleting the Referrer step 4 just created. Neither guard's red
+  light is the other's: `creating_private_referrers_is_reported_as_a_repair`
+  pins the write-slot half, `a_shared_compat_entry_is_spared_unless_every_reader_is_covered`
+  the quorum. **That second one takes its roster as data** because the real one
+  cannot stage the failure — no directory today is read by two agents and
+  written by none, and `set_skills_path_override` cannot invent one (it
+  replaces an agent's read paths AND write path with the same single dir)
 - **`repair` REFUSES a real directory that git TRACKS.** Both moving actions
   (`AdoptAsMaster`, `CompareThenQuarantine`) rename a real directory into the
   ignored store, so on a repo whose skills are authored IN PLACE that was 39
@@ -449,25 +464,30 @@ you are lucky, and silently pass a real write if you are not. Grep the agent's
 id across `crates/*/tests/` and `crates/api/src/routes/` BEFORE changing its
 capabilities, and move the sentinel rather than deleting the assertion.
 
-**A new agent (or a scope change on an existing one) must not create a
-shared read-only dir with no writer.** `skills::shape::compat_unlink_permitted`'s
-"nobody's write slot" guard asks "is this dir somebody's WRITE slot", but what
-it is actually protecting is every agent still READING that dir — the two
-happen to coincide for every compat/shared dir in today's roster (at global
-scope, `~/.agents/skills` is cline's and warp's write dir, so the guard's
-write-slot check also shields every OTHER global reader of that same dir —
-today codex, opencode, copilot, cursor, pi, grok and omp per
-`crates/agents/tests/descriptor_regression.rs` `test_global_skill_paths`; ask
-that test, never this prose, since a roster edit here rots the moment a
-descriptor changes), and that coincidence is unproven, not designed. Add an
-agent whose only shared dir is READ-ONLY, or flip an existing descriptor's
-scope so a shared dir loses its last writer, and the guard stops protecting
-it: a `repair` run for a DIFFERENT agent that owns that dir as its OWN write
-slot will detach the compat referrer there, silently costing every read-only
-co-reader the skill. Verified unreachable today only by accident, not by
-design — before adding a shared dir with no writer in the new roster, read
-`compat_unlink_permitted`'s own comment (`crates/core/src/skills/shape.rs`)
-and either give the guard a real fix or update both places.
+**A shared read-only dir with no writer is now SAFE, and that is load-bearing
+rather than incidental.** It used to be the roster's sharpest edge:
+`compat_unlink_permitted`'s "nobody's write slot" guard was the only thing
+shielding a shared dir's readers, so a dir with no writer at all fell straight
+through it and a `repair` run for a DIFFERENT agent detached the compat
+referrer, silently costing every read-only co-reader the skill. The coincidence
+that every shared dir happened to have a writer was unproven, not designed —
+and it had already run out in one place (`$XDG_CONFIG_HOME/agents/skills` under
+a non-default XDG is read by amp and kimi and written by neither, because both
+descriptors hard-code `.config` in their global write path while the READ path
+honours the variable).
+
+`skills::shape::compat_unlink_authorized` now asks the question that was
+actually meant — **every agent reading the entry must still be served by its
+own write slot afterwards**, with no write slot at all counting as "not
+served". A dir nobody writes is therefore protected by its readers, not by its
+writer. The write-slot guard stays, ANDed, for the disjoint case it alone
+covers (see the `repair` bullet above).
+
+Still true, and still the reason to read the descriptor rather than this prose:
+membership of a shared slot is per-agent AND per-scope, so ask
+`crates/agents/tests/descriptor_regression.rs`
+`test_global_skill_paths` / `test_project_skill_paths`. A roster edit rots any
+list written here the moment a descriptor changes.
 
 ## Testing
 

@@ -807,6 +807,19 @@ mod tests {
 			fs::canonicalize(root.join(".codex/skills/demo")).unwrap(),
 			master
 		);
+		// GUARD 1's only remaining red light. This fixture is the state space
+		// guard 4 cannot police: the shared entry resolves to the Master, so
+		// `readers_of` grants to EVERY reader and all of them end up covered —
+		// `compat_unlink_authorized` therefore says yes, nobody is stranded.
+		// The one thing left stopping step 6 from deleting the referrer step 4
+		// just created is "the path is nobody's write slot" (amp's, here).
+		// Without this line, deleting guard 1 keeps the whole suite green while
+		// a dozen project-scope agents silently lose the skill.
+		assert!(
+			Linker::is_link(&shared),
+			"the shared slot is amp's write slot — the sweep must not detach \
+			 the Referrer this same run relinked"
+		);
 	}
 
 	/// The migration this whole change exists for: a real directory in the

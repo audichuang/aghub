@@ -1386,13 +1386,141 @@ mod tests {
 			.unwrap();
 
 		let p = plan(&root, true, &[]);
+		// Assert on IDENTITY, not on the alias spelling. Since antigravity's
+		// project write dir became `.agent/skills` the sweep skips that read
+		// dir as its own slot, so the alias path is never even constructed and
+		// a `== aliased_entry` assertion passes without testing anything. What
+		// must stay protected is the PHYSICAL shared slot, whichever spelling
+		// reaches it.
+		let shared_entry = shared_dir.join("foo");
 		let aliased_entry = root.join(".agent").join("skills").join("foo");
+		for entry in [&shared_entry, &aliased_entry] {
+			assert!(
+				!p.actions
+					.iter()
+					.any(|a| entry_identity(&a.path) == entry_identity(entry)
+						&& a.action == ReferrerAction::Unlink),
+				"an entry reached through a symlinked ancestor must never \
+				 schedule the directory it aliases for unlink ({}): {:?}",
+				entry.display(),
+				p.actions
+			);
+		}
+	}
+
+	// GUARD 4, and the only place it can be made to go red.
+	//
+	// The sweep authorizes a detach on behalf of EVERY agent reading the entry,
+	// but the real roster cannot stage disagreement: there is no directory read
+	// by two agents and written by none, and `set_skills_path_override` cannot
+	// invent one (it is a single thread-local pair that replaces an agent's read
+	// paths AND its write path with the same dir, which the sweep then skips as
+	// that agent's own slot). So the roster arrives as data — that is what the
+	// `compat_unlink_authorized` seam is for. An end-to-end test here would be
+	// green before and after the fix: exactly the false green root `AGENTS.md`
+	// Testing warns about.
+	#[test]
+	fn a_shared_compat_entry_is_spared_unless_every_reader_is_covered() {
+		let (_tmp, root) = project_fixture();
+		let shared = root.join("shared-read-only").join("skills");
+		fs::create_dir_all(&shared).unwrap();
+		let entry = shared.join("demo");
+
+		// `d` has a private slot and also reads the shared dir; `e` reads the
+		// shared dir and nothing else.
+		let roster = vec![
+			AgentDirs {
+				id: "d",
+				write: Some(root.join("d").join("skills")),
+				read: vec![root.join("d").join("skills"), shared.clone()],
+			},
+			AgentDirs {
+				id: "e",
+				write: Some(root.join("e").join("skills")),
+				read: vec![shared.clone()],
+			},
+		];
+
+		// THE DEFECT: `d` is covered and used to authorize the detach by
+		// itself. `e` reads the skill from this entry alone, so detaching it
+		// revokes the skill for an agent that never got a vote.
+		let only_d: std::collections::HashSet<&'static str> =
+			std::iter::once("d").collect();
 		assert!(
-			!p.actions.iter().any(|a| a.path == aliased_entry
-				&& a.action == ReferrerAction::Unlink),
-			"an entry reached only through a symlinked ancestor must never be \
-			 scheduled to unlink the directory it aliases: {:?}",
-			p.actions
+			!compat_unlink_authorized(&entry, "demo", &roster, &only_d),
+			"a covered reader must not authorize detaching the only entry an \
+			 uncovered co-reader has"
+		);
+
+		// And the fix must not simply switch the sweep off: with every reader
+		// covered the antigravity/pre-2.18 cleanup still has to fire.
+		let both: std::collections::HashSet<&'static str> =
+			["d", "e"].into_iter().collect();
+		assert!(
+			compat_unlink_authorized(&entry, "demo", &roster, &both),
+			"with every reader served afterwards the detach must still happen"
+		);
+
+		// An agent with no write slot at this scope can never be served, so it
+		// vetoes rather than being skipped.
+		let slotless = vec![
+			AgentDirs {
+				id: "d",
+				write: Some(root.join("d").join("skills")),
+				read: vec![root.join("d").join("skills"), shared.clone()],
+			},
+			AgentDirs {
+				id: "e",
+				write: None,
+				read: vec![shared.clone()],
+			},
+		];
+		assert!(
+			!compat_unlink_authorized(&entry, "demo", &slotless, &both),
+			"an agent with no write slot has nothing to fall back on"
+		);
+
+		// Readers are matched by IDENTITY, not spelling. A co-reader that
+		// reaches the same directory through a symlinked ANCESTOR is still a
+		// co-reader; matching on `dir.join(leaf) == entry` would drop it out of
+		// the quorum and reintroduce the very defect this predicate closes, one
+		// level down. Without this case a naive `==` passes every other
+		// assertion here unchanged.
+		let aliased = root.join("aliased-skills");
+		unix_fs::symlink(&shared, &aliased).unwrap();
+		let through_alias = vec![
+			AgentDirs {
+				id: "d",
+				write: Some(root.join("d").join("skills")),
+				read: vec![root.join("d").join("skills"), shared.clone()],
+			},
+			AgentDirs {
+				id: "e",
+				write: Some(root.join("e").join("skills")),
+				read: vec![aliased.clone()],
+			},
+		];
+		assert!(
+			!compat_unlink_authorized(&entry, "demo", &through_alias, &only_d),
+			"an uncovered co-reader that spells the dir through a symlinked \
+			 ancestor still vetoes"
+		);
+		assert!(
+			compat_unlink_authorized(&entry, "demo", &through_alias, &both),
+			"and the same aliased reader, once covered, must not block the \
+			 cleanup"
+		);
+
+		// Vacuous truth is the one answer this must never give: `all()` over an
+		// empty reader set is `true`, which would detach entries nobody claims.
+		assert!(
+			!compat_unlink_authorized(
+				&root.join("unread").join("demo"),
+				"demo",
+				&roster,
+				&both
+			),
+			"an entry no agent reads is not detachable"
 		);
 	}
 
@@ -1987,18 +2115,27 @@ pub(crate) fn compat_unlink_permitted(
 	adopt_source: Option<&Path>,
 	planned: &[PlannedReferrer],
 ) -> std::io::Result<bool> {
-	// NOBODY'S WRITE SLOT. `.agents/skills` is codex's second read dir and
-	// eight other agents' only write dir; detaching it revokes the skill for
-	// all eight — this is the guard that check was missing.
+	// NOBODY'S WRITE SLOT. This asks one narrow question — "is this path the
+	// PLAN'S OWN OUTPUT?" — and it is the only thing standing between the
+	// sweep and the Referrer steps 4-5 of the same run just wrote. Take
+	// `.agents/skills/<name>` at project scope: amp writes it, every other
+	// reader has a private slot, and because the entry resolves to the Master
+	// `readers_of` puts them ALL in `grant_to`, so every one of them is
+	// covered. [`compat_unlink_authorized`] therefore PASSES on that entry —
+	// nobody would be stranded — and only this guard stops step 6 from
+	// deleting what step 4 created.
 	//
-	// This asks "is this a WRITE slot", but what it must actually protect is
-	// every agent still READING this dir — the two coincide for every shared
-	// dir in today's roster only by accident, not by design: a shared dir
-	// with no writer at all would pass this guard and still get unlinked out
-	// from under its read-only co-readers. Root `AGENTS.md` "Adding /
-	// Removing an Agent" records the constraint a new roster entry (or a
-	// scope change) must not break; read it before adding a read-only-only
-	// shared dir. NOT fixed this round — deliberately deferred, not missed.
+	// It used to carry a second job it could not actually do: protecting the
+	// agents still READING a shared dir. That only worked while every shared
+	// dir happened to have a writer, which is an accident of the roster, not
+	// a design — and an accident that has already run out at project scope,
+	// where `.agents/skills` is now amp's ALONE against a dozen readers.
+	// [`compat_unlink_authorized`] owns that question now, quantified over
+	// every reader of the entry. The two protect disjoint populations and are
+	// ANDed, never substituted: a writer never records itself as a reader of
+	// its own slot (the sweep skips the identity-equal read dir), so the
+	// reader quorum cannot see the case above, and this guard cannot see an
+	// uncovered co-reader of a dir nobody writes.
 	let entry_id = entry_identity(entry);
 	if planned
 		.iter()
@@ -2035,6 +2172,79 @@ pub(crate) fn compat_unlink_permitted(
 	let serves_this_master = same_object(entry, master)
 		|| adopt_source.is_some_and(|src| same_object(entry, src));
 	Ok(serves_this_master)
+}
+
+/// One agent's skills directories for a scope, snapshotted once before the
+/// compat sweep runs.
+///
+/// The sweep used to read these per descriptor inside its own loop, which is
+/// what made guard 4 answerable only about the descriptor whose iteration
+/// reached an entry first. Collecting them up front is what lets
+/// [`compat_unlink_authorized`] quantify over every READER of an entry.
+pub(crate) struct AgentDirs {
+	pub(crate) id: &'static str,
+	/// `None` when this scope gives the agent no write slot at all. Such an
+	/// agent can never be covered — nothing at this scope can serve it — so a
+	/// compat entry it reads is its only way in and it vetoes the detach.
+	pub(crate) write: Option<PathBuf>,
+	pub(crate) read: Vec<PathBuf>,
+}
+
+/// GUARD 4: will every agent that reads `entry` still be served by its OWN
+/// write slot once the plan has run?
+///
+/// Pure on purpose — no registry, no filesystem, no scope. The roster and the
+/// coverage set arrive as data, because the defect this closes cannot be
+/// staged through the real roster: there is no directory today that is read by
+/// two agents and written by none (`set_skills_path_override` cannot
+/// manufacture one either — it is a single thread-local pair that replaces an
+/// agent's read paths AND its write path with the same one dir). The interface
+/// is the only test surface this rule has.
+///
+/// The quantifier is the whole point. The sweep used to ask "is the descriptor
+/// I am currently looping over covered?" and detach on the first `true` — an
+/// EXISTENTIAL test authorizing a GLOBAL action on a possibly-shared entry.
+/// Every other reader was `continue`d before it was ever recorded, so an agent
+/// whose only way in was that entry lost the skill without a vote.
+///
+/// Readers are matched by [`entry_identity`], the same ruler guard 1 uses: a
+/// co-reader that spells the dir differently through a symlinked ancestor is
+/// still a co-reader, and missing it would reintroduce the same hole one level
+/// down.
+///
+/// An entry nobody was observed reading is NOT detachable — `all()` over an
+/// empty set is vacuously true, and that is the one answer this must never
+/// give.
+///
+/// Deliberate ceiling: this asks "the agent's OWN slot serves it", which is
+/// strictly stronger than "the agent still reads it from somewhere". The
+/// looser form needs a fixpoint — a surviving third read dir may itself be an
+/// entry this same sweep detaches — for a layout nobody has. Refusing an
+/// exotic detach leaves a stale link, which is the safe direction.
+pub(crate) fn compat_unlink_authorized(
+	entry: &Path,
+	leaf: &str,
+	roster: &[AgentDirs],
+	covered: &std::collections::HashSet<&'static str>,
+) -> bool {
+	let id = entry_identity(entry);
+	let mut observed = false;
+	for agent in roster.iter().filter(|agent| {
+		agent
+			.read
+			.iter()
+			.any(|dir| entry_identity(&dir.join(leaf)) == id)
+	}) {
+		observed = true;
+		// `write.is_none()` is checked HERE rather than trusted to the caller's
+		// coverage set: an agent this scope gives no write slot has nothing to
+		// fall back on, and that is a property of the agent, not of how the
+		// set happened to be built.
+		if agent.write.is_none() || !covered.contains(agent.id) {
+			return false;
+		}
+	}
+	observed
 }
 
 /// Compute the repair plan for one skill. Pure: reads the filesystem, writes
@@ -2226,54 +2436,85 @@ pub fn plan_repair(
 	// which is how an earlier version of this sweep planned an `Unlink` for
 	// the PHYSICAL shared slot itself, reached through the alias.
 	//
-	// THE WRITE SLOT COVERS IT AFTERWARDS is the fourth guard and lives here,
-	// not in the predicate: it decides whether a descriptor's read dirs get
-	// swept AT ALL, and it reads the PLAN rather than the disk — a slot this
-	// run is about to Create or Relink covers the agent just as well as one
-	// that already resolves, and demanding disk state would make the cleanup
-	// need a SECOND repair run. Without it the "cleanup" silently REVOKES the
-	// skill for an agent whose only Referrer was the compat one — the
-	// pre-2.18 shape `repair` exists to rescue.
+	// THE WRITE SLOT COVERS IT AFTERWARDS is the fourth guard. It is decided
+	// here rather than in `compat_unlink_permitted` — the coverage table below
+	// reads the PLAN, not the disk, so a slot this run is about to Create or
+	// Relink covers the agent just as well as one that already resolves, and
+	// demanding disk state would make the cleanup need a SECOND repair run.
+	// Being plan-shaped is also why `execute_repair` cannot re-ask it: a
+	// `RepairPlan` carries no scope or project root.
+	//
+	// It does NOT gate whether a descriptor's read dirs get swept — every
+	// agent's are, so the fallible probe can still notice an unreadable compat
+	// dir. What it gates is the DESTRUCTIVE half, from inside
+	// [`compat_unlink_authorized`], and it is asked about every agent READING
+	// the entry rather than only the one whose iteration reached it first: the
+	// unlink is one physical act on a possibly-shared entry, so one agent's
+	// coverage is not consent for the rest. Without it the "cleanup" silently
+	// REVOKES the skill for an agent whose only Referrer was the compat one —
+	// the pre-2.18 shape `repair` exists to rescue.
 	let adopt_source = planned
 		.iter()
 		.find(|row| row.action == ReferrerAction::AdoptAsMaster)
 		.map(|row| row.path.clone());
+	// Snapshot every agent's dirs BEFORE sweeping. Guard 4 has to be asked
+	// about each entry's whole reader set, and a per-descriptor loop can only
+	// ever answer for the descriptor it is currently on.
+	let roster: Vec<AgentDirs> = crate::registry::ALL_AGENTS
+		.iter()
+		.map(|descriptor| AgentDirs {
+			id: descriptor.id,
+			write: skill_write_dir(descriptor, scope, project_root),
+			read: skill_read_dirs(descriptor, scope, project_root),
+		})
+		.collect();
+	// The coverage test itself is unchanged — only WHO it gets asked about is.
+	// An agent with no write slot at this scope is absent from the set, so it
+	// is never covered and always vetoes.
+	let covered: std::collections::HashSet<&'static str> = roster
+		.iter()
+		.filter(|agent| {
+			let Some(slot) = agent.write.as_ref().map(|dir| dir.join(&safe))
+			else {
+				return false;
+			};
+			planned.iter().any(|row| {
+				row.path == slot
+					&& match row.action {
+						ReferrerAction::Create | ReferrerAction::Relink => true,
+						// Step 5 swaps the adopted directory for a link to the
+						// Master, so an agent whose write slot IS the adopt
+						// source ends up covered exactly like one being
+						// linked. Missing this still cost a second run at
+						// PROJECT scope, where antigravity's write dir and the
+						// shared slot are the same directory.
+						ReferrerAction::AdoptAsMaster => true,
+						ReferrerAction::Leave => {
+							row.shape == SkillShape::Conformant
+						}
+						_ => false,
+					}
+			})
+		})
+		.map(|agent| agent.id)
+		.collect();
+
 	let mut unlink: Vec<PlannedReferrer> = Vec::new();
-	for descriptor in crate::registry::ALL_AGENTS.iter() {
-		let Some(write_dir) = skill_write_dir(descriptor, scope, project_root)
-		else {
+	for agent in &roster {
+		let Some(write_dir) = agent.write.as_ref() else {
 			continue;
 		};
-		let slot = write_dir.join(&safe);
-		let covered = planned.iter().any(|row| {
-			row.path == slot
-				&& match row.action {
-					ReferrerAction::Create | ReferrerAction::Relink => true,
-					// Step 5 swaps the adopted directory for a link to the
-					// Master, so an agent whose write slot IS the adopt source
-					// ends up covered exactly like one being linked. Missing
-					// this still cost a second run at PROJECT scope, where
-					// antigravity's write dir and the shared slot are the same
-					// directory.
-					ReferrerAction::AdoptAsMaster => true,
-					ReferrerAction::Leave => {
-						row.shape == SkillShape::Conformant
-					}
-					_ => false,
-				}
-		});
-		// NOT an early `continue`. The fallible probe below has to run even for
-		// an UNCOVERED agent: it is the only thing that notices an unreadable
-		// compat dir, and skipping the whole loop reported `ok` with a stale
-		// referrer sitting right there — so the round that added
+		// NOT an early `continue` on coverage. The fallible probe below has to
+		// run even for an UNCOVERED agent: it is the only thing that notices an
+		// unreadable compat dir, and skipping the whole loop reported `ok` with
+		// a stale referrer sitting right there — so the round that added
 		// `UnreadableCompatDir` only actually refused when some OTHER agent's
-		// write slot happened to be covered. Verified by running. What
-		// `covered` still gates is the DESTRUCTIVE half: an uncovered agent
-		// never gets an `Unlink` row, because removing its only way in is
-		// exactly what guard 3 exists to prevent.
-		for read_dir in skill_read_dirs(descriptor, scope, project_root) {
+		// write slot happened to be covered. Verified by running. Coverage now
+		// gates the destructive half from inside
+		// [`compat_unlink_authorized`], which is reached only on `Ok(true)`.
+		for read_dir in &agent.read {
 			// Identity, not spelling — see the guards note above.
-			if entry_identity(&read_dir) == entry_identity(&write_dir) {
+			if entry_identity(read_dir) == entry_identity(write_dir) {
 				continue;
 			}
 			let entry = read_dir.join(&safe);
@@ -2283,9 +2524,13 @@ pub fn plan_repair(
 				adopt_source.as_deref(),
 				&planned,
 			) {
-				// Permitted, but only an agent whose own slot will serve the
-				// skill afterwards may actually lose the compat entry.
-				Ok(true) if covered => {}
+				// Permitted, but detaching is authorized only when EVERY agent
+				// reading this entry keeps a way in afterwards — not merely the
+				// one whose iteration happened to reach it first.
+				Ok(true)
+					if compat_unlink_authorized(
+						&entry, &safe, &roster, &covered,
+					) => {}
 				Ok(true) | Ok(false) => continue,
 				// Fail CLOSED: an unreadable compat dir is a DECISION for a
 				// human (fix the permission), not a transient write failure —
@@ -2295,7 +2540,7 @@ pub fn plan_repair(
 				// conformant while a stale link sits right there.
 				Err(_) => {
 					unlink.push(PlannedReferrer {
-						agents: vec![descriptor.id],
+						agents: vec![agent.id],
 						shape: classify_shape(&entry, &master),
 						path: entry.clone(),
 						action: ReferrerAction::Refuse {
@@ -2316,13 +2561,13 @@ pub fn plan_repair(
 				.iter_mut()
 				.find(|r| entry_identity(&r.path) == entry_identity(&entry))
 			{
-				if !row.agents.contains(&descriptor.id) {
-					row.agents.push(descriptor.id);
+				if !row.agents.contains(&agent.id) {
+					row.agents.push(agent.id);
 				}
 				continue;
 			}
 			unlink.push(PlannedReferrer {
-				agents: vec![descriptor.id],
+				agents: vec![agent.id],
 				shape: classify_shape(&entry, &master),
 				path: entry,
 				action: ReferrerAction::Unlink,
