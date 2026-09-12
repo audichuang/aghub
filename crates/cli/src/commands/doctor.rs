@@ -1237,11 +1237,19 @@ mod tests {
 		};
 		assert_eq!(agents.len(), 1);
 		assert_eq!(agents[0].state, AgentLinkState::Missing);
+		// Built with the SAME joins production uses — the descriptor's
+		// `root.join(".codex/skills")`, then the skill name — because this
+		// compares STRINGS. Collapsing the tail into one
+		// `join(".codex/skills/gone")` is identical on Unix but yields
+		// `...\.codex/skills/gone` on Windows against production's
+		// `...\.codex/skills\gone`, so it passes every local preflight and
+		// fails only on the CI Windows leg.
 		assert_eq!(
 			agents[0].path.as_deref(),
 			Some(
 				tmp.path()
-					.join(".codex/skills/gone")
+					.join(".codex/skills")
+					.join("gone")
 					.to_string_lossy()
 					.as_ref()
 			)
