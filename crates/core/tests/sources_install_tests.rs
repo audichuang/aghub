@@ -17,6 +17,8 @@ use aghub_core::skills::install_fetched::{
 	install_fetched_skill_and_lock, FetchedSkillInstallRequest,
 };
 use aghub_core::skills::linker::LinkTarget;
+#[cfg(unix)]
+use aghub_core::skills::repair::{repair_all, repair_skill, RepairOutcome};
 use aghub_core::AgentType;
 use tempfile::{tempdir, TempDir};
 
@@ -66,6 +68,7 @@ impl GlobalLockGuard {
 
 impl Drop for GlobalLockGuard {
 	fn drop(&mut self) {
+		set_skills_path_override("openclaw", None);
 		match &self.old_home {
 			Some(v) => std::env::set_var("HOME", v),
 			None => std::env::remove_var("HOME"),
@@ -107,6 +110,133 @@ fn sample_source() -> skill::InstallLockSource {
 		source_url: "https://github.com/owner/repo.git".to_string(),
 		ref_name: Some("main".to_string()),
 	}
+}
+
+#[test]
+#[cfg(unix)]
+fn imported_skill_does_not_overwrite_same_named_openclaw_skill() {
+	let _g = GlobalLockGuard::new();
+	let project = tempdir().unwrap();
+	let project_root = project.path().to_path_buf();
+	let fetched = tempdir().unwrap();
+	let skill_md = write_skill_with_body(
+		fetched.path(),
+		"agent-reach",
+		"agent-reach",
+		"imported bytes",
+	);
+	let openclaw = project_root.join(".openclaw").join("skills");
+	set_skills_path_override("openclaw", Some(openclaw.clone()));
+	let existing = write_skill_with_body(
+		&openclaw,
+		"agent-reach",
+		"agent-reach",
+		"OpenClaw bytes",
+	);
+	let before = std::fs::read(&existing).unwrap();
+
+	let report = install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+		skill_file: &skill_md,
+		source: &sample_source(),
+		lock_skill_path: "agent-reach/SKILL.md".to_string(),
+		ref_commit: None,
+		scope: ResourceScope::ProjectOnly,
+		project_root: Some(&project_root),
+		target_agents: &[AgentType::Claude],
+		expected_name: None,
+		target: LinkTarget::Relative,
+		force_unsafe: false,
+	})
+	.expect("Claude import should succeed while OpenClaw is not selected");
+	assert!(report.agent_results[0].installed);
+	assert!(aghub_core::skills::linker::Linker::is_link(
+		&project_root
+			.join(".claude")
+			.join("skills")
+			.join("agent-reach")
+	));
+	assert_eq!(std::fs::read(&existing).unwrap(), before);
+
+	let selected_openclaw =
+		install_fetched_skill_and_lock(FetchedSkillInstallRequest {
+			skill_file: &skill_md,
+			source: &sample_source(),
+			lock_skill_path: "agent-reach/SKILL.md".to_string(),
+			ref_commit: None,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project_root),
+			target_agents: &[AgentType::Openclaw],
+			expected_name: None,
+			target: LinkTarget::Relative,
+			force_unsafe: false,
+		})
+		.unwrap();
+	assert!(!selected_openclaw.agent_results[0].installed);
+	assert!(selected_openclaw.agent_results[0].error.is_some());
+	assert_eq!(std::fs::read(&existing).unwrap(), before);
+	assert!(aghub_core::skills::linker::Linker::is_link(
+		&project_root
+			.join(".claude")
+			.join("skills")
+			.join("agent-reach")
+	));
+
+	let legacy = project_root.join(".agents").join("skills").join("other");
+	let legacy_md = write_skill_with_body(
+		&project_root.join(".agents").join("skills"),
+		"other",
+		"other",
+		"legacy bytes",
+	);
+	let legacy_source = sample_source();
+	skill::write_project_install_lock(
+		"other",
+		&legacy_source,
+		Some("other/SKILL.md".to_string()),
+		legacy_md.parent().unwrap(),
+		&project_root,
+		None,
+	)
+	.unwrap();
+	let legacy_before = std::fs::read(&legacy_md).unwrap();
+
+	let repaired = repair_skill(
+		ResourceScope::ProjectOnly,
+		Some(&project_root),
+		"agent-reach",
+		true,
+		false,
+	)
+	.unwrap()
+	.unwrap();
+	assert!(matches!(repaired.outcome, RepairOutcome::Refused { .. }));
+	assert_eq!(std::fs::read(&existing).unwrap(), before);
+	assert!(project_root.join(".aghub/agent-reach/SKILL.md").is_file());
+
+	let reports = repair_all(
+		ResourceScope::ProjectOnly,
+		Some(&project_root),
+		None,
+		false,
+	)
+	.unwrap();
+	assert!(reports.iter().any(|r| {
+		r.name == "agent-reach"
+			&& matches!(r.outcome, RepairOutcome::Refused { .. })
+	}));
+	let migrated = reports
+		.iter()
+		.find(|r| r.name == "other")
+		.expect("independent legacy skill must be reported");
+	assert!(matches!(migrated.outcome, RepairOutcome::Migrated));
+	assert_eq!(
+		std::fs::read_to_string(
+			project_root.join(".aghub").join("other").join("SKILL.md")
+		)
+		.unwrap(),
+		String::from_utf8(legacy_before).unwrap()
+	);
+	assert!(aghub_core::skills::linker::Linker::is_link(&legacy));
 }
 
 #[test]

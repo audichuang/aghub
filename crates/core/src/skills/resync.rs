@@ -64,6 +64,8 @@ pub enum ResyncError {
 	/// mutated). Distinct from every other variant because it is the one a
 	/// caller can legitimately override, with `--force-unsafe`.
 	Audit(String),
+	/// A distinct real copy would be overwritten alongside the Master.
+	Conflict(String),
 	/// An installed target resolved outside the allow-listed skill roots.
 	OutOfTree(String),
 	/// One or more installed targets failed to swap; completed swaps were rolled
@@ -88,6 +90,7 @@ impl std::fmt::Display for ResyncError {
 			Self::Parse(e) => write!(f, "failed to parse fetched skill: {e}"),
 			Self::Hash(e) => write!(f, "failed to hash fetched skill: {e}"),
 			Self::Audit(e) => write!(f, "{e}"),
+			Self::Conflict(e) => write!(f, "{e}"),
 			Self::OutOfTree(e) => write!(f, "{e}"),
 			Self::Swap(e) => {
 				write!(f, "failed to replace installed skill: {e}")
@@ -117,6 +120,7 @@ pub fn resync_error_code(error: &ResyncError) -> &'static str {
 		}
 		ResyncError::Parse(_) => "SKILL_PARSE_FAILED",
 		ResyncError::Audit(_) => "VALIDATION_FAILED",
+		ResyncError::Conflict(_) => "SKILL_UPDATE_CONFLICT",
 		ResyncError::OutOfTree(_) => "SKILL_TARGET_OUT_OF_TREE",
 		ResyncError::Hash(_) | ResyncError::Swap(_) => "SKILL_SYNC_ERROR",
 		ResyncError::LockUpdate(_) => "SKILL_LOCK_ERROR",
@@ -138,11 +142,9 @@ pub fn resync_installed_skill(
 	)
 	.map_err(|e| ResyncError::Locked(e.to_string()))?;
 
-	let targets = crate::skills::removal::installed_skill_roots(
-		req.name,
-		req.scope,
-		req.project_root,
-	);
+	let agents = crate::load_all_agents(req.scope, req.project_root);
+	let targets =
+		crate::skills::removal::installed_skill_roots_in(&agents, req.name);
 	if targets.is_empty() {
 		return Err(ResyncError::NotInstalled);
 	}
@@ -179,6 +181,12 @@ pub fn resync_installed_skill(
 
 	let updated_hash = skill::compute_skill_folder_hash(req.source_dir)
 		.map_err(|e| ResyncError::Hash(e.to_string()))?;
+
+	// Updating a shared Master must never overwrite a separate real copy of
+	// unknown history. The copy may be identical (safe) or the only
+	// installed layout with no Master (legacy, safe); only a differing copy
+	// beside an existing Master is ambiguous and is refused before staging.
+	refuse_conflicting_copy(req.name, req.scope, req.project_root, &agents)?;
 
 	let agent_dirs = crate::skills::removal::agent_skill_dirs_in_scope(
 		req.scope,
@@ -233,6 +241,91 @@ pub fn resync_installed_skill(
 	})
 }
 
+fn refuse_conflicting_copy(
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	agents: &[crate::AgentResources],
+) -> Result<(), ResyncError> {
+	let Some(store) = crate::skills::linker::master_store_dir(
+		if scope == ResourceScope::ProjectOnly {
+			project_root
+		} else {
+			None
+		},
+	) else {
+		return Ok(());
+	};
+	let store = match store.canonicalize() {
+		Ok(path) => path,
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+			return Ok(())
+		}
+		Err(error) => {
+			return Err(ResyncError::Hash(format!(
+				"failed to resolve Master store: {error}"
+			)))
+		}
+	};
+	let masters = crate::skills::discovery::load_master_skills(&store)
+		.map_err(|e| {
+			ResyncError::Hash(format!("failed to inspect Master store: {e}"))
+		})?
+		.into_iter()
+		.filter(|skill| skill.name == name)
+		.filter_map(|skill| crate::skills::removal::skill_root(&skill))
+		.map(|path| path.canonicalize())
+		.collect::<Result<Vec<_>, _>>()
+		.map_err(|e| {
+			ResyncError::Hash(format!("failed to resolve Master: {e}"))
+		})?;
+	if masters.len() > 1 {
+		return Err(ResyncError::Conflict(
+			"skill has multiple Master copies in its store".to_string(),
+		));
+	}
+	let Some(master) = masters.into_iter().next() else {
+		return Ok(());
+	};
+	let master_hash =
+		skill::compute_skill_folder_hash(&master).map_err(|e| {
+			ResyncError::Hash(format!("failed to hash Master: {e}"))
+		})?;
+
+	for agent in agents {
+		for skill in agent.skills.iter().filter(|skill| skill.name == name) {
+			if skill.canonical_path.is_some() {
+				continue;
+			}
+			let Some(root) = crate::skills::removal::skill_root(skill) else {
+				continue;
+			};
+			let root = root.canonicalize().map_err(|e| {
+				ResyncError::Hash(format!(
+					"failed to resolve installed copy: {e}"
+				))
+			})?;
+			if root == master {
+				continue;
+			}
+			let hash =
+				skill::compute_skill_folder_hash(&root).map_err(|e| {
+					ResyncError::Hash(format!(
+						"failed to hash installed copy {}: {e}",
+						root.display()
+					))
+				})?;
+			if hash != master_hash {
+				return Err(ResyncError::Conflict(format!(
+					"skill has a different installed copy alongside its Master: {}",
+					root.display()
+				)));
+			}
+		}
+	}
+	Ok(())
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -256,6 +349,7 @@ mod tests {
 				"SKILL_RENAMED_IN_SOURCE",
 			),
 			(ResyncError::Parse("x".into()), "SKILL_PARSE_FAILED"),
+			(ResyncError::Conflict("x".into()), "SKILL_UPDATE_CONFLICT"),
 			(
 				ResyncError::OutOfTree("x".into()),
 				"SKILL_TARGET_OUT_OF_TREE",
@@ -322,6 +416,52 @@ mod tests {
 		}
 	}
 
+	fn project_request<'a>(
+		source: &'a Path,
+		name: &'a str,
+		project: &'a Path,
+		commit: &'a str,
+	) -> ResyncRequest<'a> {
+		ResyncRequest {
+			source_dir: source,
+			name,
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(project),
+			ref_commit: Some(commit),
+			expected: captured(name, project),
+			force_unsafe: false,
+		}
+	}
+
+	#[cfg(unix)]
+	struct GlobalHome {
+		_guard: crate::skills::prune::test_lock::GlobalLockGuard,
+		old_home: Option<std::ffi::OsString>,
+	}
+
+	#[cfg(unix)]
+	impl GlobalHome {
+		fn new(home: &Path) -> Self {
+			let guard = crate::skills::prune::test_lock::GlobalLockGuard::new();
+			let old_home = std::env::var_os("HOME");
+			std::env::set_var("HOME", home);
+			Self {
+				_guard: guard,
+				old_home,
+			}
+		}
+	}
+
+	#[cfg(unix)]
+	impl Drop for GlobalHome {
+		fn drop(&mut self) {
+			match &self.old_home {
+				Some(home) => std::env::set_var("HOME", home),
+				None => std::env::remove_var("HOME"),
+			}
+		}
+	}
+
 	#[test]
 	fn swaps_installed_skill_and_restamps_lock() {
 		let tmp = tempfile::tempdir().unwrap();
@@ -360,6 +500,257 @@ mod tests {
 			lock.skills["sync-me"].ref_commit.as_deref(),
 			Some("deadbeefcafef00d")
 		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn identical_real_duplicate_updates_and_advances_lock() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let master = project.join(".aghub/sync-me");
+		let duplicate = project.join(".cursor/skills/sync-me");
+		write_skill(&master, "sync-me", "old");
+		write_skill(&duplicate, "sync-me", "old");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+		symlink(&master, project.join(".claude/skills/sync-me")).unwrap();
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "new");
+		let expected_hash = skill::compute_skill_folder_hash(&source).unwrap();
+
+		resync_installed_skill(project_request(
+			&source,
+			"sync-me",
+			&project,
+			"new-commit",
+		))
+		.unwrap();
+
+		assert!(std::fs::read_to_string(master.join("SKILL.md"))
+			.unwrap()
+			.contains("new"));
+		assert!(std::fs::read_to_string(duplicate.join("SKILL.md"))
+			.unwrap()
+			.contains("new"));
+		assert_eq!(
+			skill::compute_skill_folder_hash(&master).unwrap(),
+			expected_hash
+		);
+		assert_eq!(
+			skill::lock::local::read_local_lock(Some(&project)).skills
+				["sync-me"]
+				.computed_hash,
+			expected_hash
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn edited_master_with_healthy_referrer_updates() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let master = project.join(".aghub/sync-me");
+		write_skill(&master, "sync-me", "edited locally");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+		symlink(&master, project.join(".claude/skills/sync-me")).unwrap();
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "upstream");
+
+		resync_installed_skill(project_request(
+			&source,
+			"sync-me",
+			&project,
+			"upstream-commit",
+		))
+		.unwrap();
+
+		assert_eq!(
+			std::fs::read_to_string(master.join("SKILL.md")).unwrap(),
+			std::fs::read_to_string(source.join("SKILL.md")).unwrap()
+		);
+		assert_eq!(
+			std::fs::read_link(project.join(".claude/skills/sync-me")).unwrap(),
+			master
+		);
+		assert_eq!(
+			skill::lock::local::read_local_lock(Some(&project)).skills
+				["sync-me"]
+				.ref_commit
+				.as_deref(),
+			Some("upstream-commit")
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn legacy_real_copies_and_symlink_update_without_master() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let first = project.join(".claude/skills/sync-me");
+		let second = project.join(".cursor/skills/sync-me");
+		write_skill(&first, "sync-me", "old");
+		write_skill(&second, "sync-me", "old");
+		std::fs::create_dir_all(project.join(".codex/skills")).unwrap();
+		symlink(&first, project.join(".codex/skills/sync-me")).unwrap();
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "new legacy");
+
+		resync_installed_skill(project_request(
+			&source,
+			"sync-me",
+			&project,
+			"legacy-commit",
+		))
+		.unwrap();
+
+		assert!(!project.join(".aghub/sync-me").exists());
+		assert!(std::fs::read_to_string(first.join("SKILL.md"))
+			.unwrap()
+			.contains("new legacy"));
+		assert!(std::fs::read_to_string(second.join("SKILL.md"))
+			.unwrap()
+			.contains("new legacy"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn project_update_does_not_touch_global_same_name_master_or_lock() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let home = tmp.path().join("home");
+		std::fs::create_dir_all(&home).unwrap();
+		let _global = GlobalHome::new(&home);
+		let global_master = home.join(".aghub/sync-me");
+		write_skill(&global_master, "sync-me", "global");
+		let mut global_entry = skill::SkillLockEntry {
+			source: "o/r".into(),
+			source_type: "github".into(),
+			source_url: "https://github.com/o/r".into(),
+			ref_name: None,
+			skill_path: None,
+			skill_folder_hash: "h".into(),
+			content_hash: None,
+			ref_commit: Some("global-old".into()),
+			installed_at: "t".into(),
+			updated_at: "t".into(),
+			plugin_name: None,
+		};
+		skill::lock::global::add_skill_to_lock("sync-me", global_entry.clone())
+			.unwrap();
+		let global_lock_before =
+			std::fs::read(skill::lock::global::get_skill_lock_path()).unwrap();
+
+		let project = tmp.path().join("project");
+		let master = project.join(".aghub/sync-me");
+		write_skill(&master, "sync-me", "project-old");
+		std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+		symlink(&master, project.join(".claude/skills/sync-me")).unwrap();
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "project-new");
+
+		resync_installed_skill(project_request(
+			&source,
+			"sync-me",
+			&project,
+			"project-new-commit",
+		))
+		.unwrap();
+
+		assert_eq!(
+			std::fs::read_to_string(global_master.join("SKILL.md")).unwrap(),
+			"---\nname: sync-me\ndescription: global\n---\n\nglobal\n"
+		);
+		assert_eq!(
+			std::fs::read(skill::lock::global::get_skill_lock_path()).unwrap(),
+			global_lock_before
+		);
+		global_entry =
+			skill::lock::global::get_skill_from_lock("sync-me").unwrap();
+		assert_eq!(global_entry.ref_commit.as_deref(), Some("global-old"));
+	}
+
+	#[test]
+	fn quarantine_copy_is_not_a_live_master() {
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let installed = project.join(".claude/skills/sync-me");
+		write_skill(&installed, "sync-me", "old");
+		write_skill(
+			&project.join(".aghub/.quarantine/sync-me/stamp"),
+			"sync-me",
+			"quarantined",
+		);
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "new");
+
+		resync_installed_skill(project_request(
+			&source,
+			"sync-me",
+			&project,
+			"quarantine-commit",
+		))
+		.unwrap();
+
+		assert!(std::fs::read_to_string(installed.join("SKILL.md"))
+			.unwrap()
+			.contains("new"));
+		assert!(std::fs::read_to_string(
+			project.join(".aghub/.quarantine/sync-me/stamp/SKILL.md")
+		)
+		.unwrap()
+		.contains("quarantined"));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn refuses_update_when_master_has_a_different_real_copy() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let master = project.join(".aghub/sync-me");
+		let cursor = project.join(".cursor/skills");
+		write_skill(&master, "sync-me", "master");
+		write_skill(&cursor.join("sync-me"), "sync-me", "foreign copy");
+		let claude = project.join(".claude/skills");
+		std::fs::create_dir_all(&claude).unwrap();
+		symlink(&master, claude.join("sync-me")).unwrap();
+		skill::add_skill_to_local_lock("sync-me", lock_entry(), Some(&project))
+			.unwrap();
+		let lock_path = project.join("skills-lock.json");
+		let lock_before = std::fs::read(&lock_path).unwrap();
+		let source = tmp.path().join("src/sync-me");
+		write_skill(&source, "sync-me", "new upstream");
+		let err = resync_installed_skill(ResyncRequest {
+			source_dir: &source,
+			name: "sync-me",
+			scope: ResourceScope::ProjectOnly,
+			project_root: Some(&project),
+			ref_commit: Some("new-commit"),
+			expected: captured("sync-me", &project),
+			force_unsafe: false,
+		})
+		.unwrap_err();
+		assert!(matches!(err, ResyncError::Conflict(_)), "got {err:?}");
+		assert!(std::fs::read_to_string(master.join("SKILL.md"))
+			.unwrap()
+			.contains("master"));
+		assert!(std::fs::read_to_string(cursor.join("sync-me/SKILL.md"))
+			.unwrap()
+			.contains("foreign copy"));
+		assert_eq!(std::fs::read_link(claude.join("sync-me")).unwrap(), master);
+		assert_eq!(std::fs::read(&lock_path).unwrap(), lock_before);
 	}
 
 	/// The supply-chain shape an install-only audit would miss entirely:

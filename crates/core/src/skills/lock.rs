@@ -201,8 +201,17 @@ impl EntryIdentity {
 	/// syncs — the same false-negative trap that comparing a RECONSTRUCTED source
 	/// URL fell into for npx-written project entries.
 	pub fn describes(&self, source: &str, skill_path: &str) -> bool {
+		// Catalogs name the folder; install locks may name its SKILL.md.
+		fn folder(path: &str) -> &str {
+			let path = path.trim();
+			if path == "SKILL.md" {
+				""
+			} else {
+				path.strip_suffix("/SKILL.md").unwrap_or(path)
+			}
+		}
 		if let Some(recorded) = self.skill_path.as_deref() {
-			if recorded.trim() != skill_path.trim() {
+			if folder(recorded) != folder(skill_path) {
 				return false;
 			}
 		}
@@ -352,6 +361,24 @@ mod tests {
 		let entry = identity("owner/repo", "mine/SKILL.md");
 		assert!(!entry.describes("owner/repo", "theirs/SKILL.md"));
 		assert!(entry.describes("owner/repo", "mine/SKILL.md"));
+	}
+
+	#[test]
+	fn folder_and_skill_file_describe_the_same_location() {
+		for (recorded, claimed) in [
+			("s/SKILL.md", "s"),
+			("s", "s/SKILL.md"),
+			("SKILL.md", ""),
+			("", "SKILL.md"),
+		] {
+			assert!(identity("owner/repo", recorded)
+				.describes("owner/repo", claimed));
+		}
+		assert!(!identity("owner/repo", "s/SKILL.md")
+			.describes("owner/repo", "s/other"));
+		assert!(
+			!identity("owner/repo", "s/SKILL.md").describes("other/repo", "s")
+		);
 	}
 
 	/// An unresolvable spelling proves nothing, so it must not refuse: a

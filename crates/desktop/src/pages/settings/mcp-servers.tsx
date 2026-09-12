@@ -151,6 +151,7 @@ export default function MCPServersPage() {
 	};
 
 	const handleEditDone = (mergeKey: string) => {
+		setSelectedKey(mergeKey);
 		setPanel({ type: "detail", selectedKey: mergeKey });
 	};
 
@@ -303,7 +304,7 @@ export default function MCPServersPage() {
 					<EditMcpPanel
 						key={activeGroup.mergeKey}
 						group={activeGroup}
-						onDone={() => handleEditDone(activeGroup.mergeKey)}
+						onDone={handleEditDone}
 					/>
 				)}
 				{showDetail && activeGroup && (

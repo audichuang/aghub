@@ -211,6 +211,12 @@ export default function ProjectDetailPage() {
 		setPanelMode(null);
 	};
 
+	const handleEditMcpDone = (mergeKey: string) => {
+		setSelectedResource(mergeKey);
+		setResourceType("mcp");
+		setPanelMode(null);
+	};
+
 	const handleMultiSelectModeChange = (value: boolean) => {
 		setIsMultiSelectMode(value);
 		if (!value) {
@@ -417,7 +423,7 @@ export default function ProjectDetailPage() {
 						<EditMcpPanel
 							key={selectedMcpGroup.mergeKey}
 							group={selectedMcpGroup}
-							onDone={() => setPanelMode(null)}
+							onDone={handleEditMcpDone}
 							projectPath={project.path}
 						/>
 					)}

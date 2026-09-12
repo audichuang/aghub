@@ -60,6 +60,11 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 			code,
 			status: Status::BadRequest,
 		},
+		ResyncError::Conflict(_) => SafeResyncError {
+			message: "The update was refused because a separate installed copy differs from its Master. Both copies were kept; compare them before consolidating.",
+			code,
+			status: Status::Conflict,
+		},
 		ResyncError::OutOfTree(_) => SafeResyncError {
 			message: "Refusing to sync out-of-tree target",
 			code,
@@ -94,6 +99,7 @@ mod tests {
 			ResyncError::LockUpdate(sentinel.to_string()),
 			ResyncError::Locked(sentinel.to_string()),
 			ResyncError::StaleFetch(sentinel.to_string()),
+			ResyncError::Conflict(sentinel.to_string()),
 			// Carries a caller-supplied name, and used to be the one arm with a
 			// hand-written code of its own.
 			ResyncError::Renamed {

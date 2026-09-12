@@ -14,7 +14,17 @@ use std::path::{Path, PathBuf};
 /// shared master is deleted. Same silent data loss, with less signal than the
 /// malformed-config case it sits next to.
 pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
-	let (skills, failure, _) = walk_dir(skills_dir);
+	let (skills, failure, _) = walk_dir(skills_dir, None);
+	match failure {
+		Some(error) => Err(error),
+		None => Ok(skills),
+	}
+}
+
+/// Discover live Masters without traversing repair's retained backups.
+pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
+	let (skills, failure, _) =
+		walk_dir(store, Some(&store.join(".quarantine")));
 	match failure {
 		Some(error) => Err(error),
 		None => Ok(skills),
@@ -35,7 +45,7 @@ pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
 /// destructive decision — dropping the partial list hides a live Referrer,
 /// while refusing outright makes one odd sibling block every deletion.
 pub fn load_skills_from_dir_partial(skills_dir: &Path) -> (Vec<Skill>, bool) {
-	let (skills, _, unlisted) = walk_dir(skills_dir);
+	let (skills, _, unlisted) = walk_dir(skills_dir, None);
 	(skills, unlisted)
 }
 
@@ -96,11 +106,20 @@ fn collect_entry_paths(
 	}
 }
 
-fn walk_dir(skills_dir: &Path) -> (Vec<Skill>, Option<std::io::Error>, bool) {
+fn walk_dir(
+	skills_dir: &Path,
+	excluded: Option<&Path>,
+) -> (Vec<Skill>, Option<std::io::Error>, bool) {
 	let mut skills = Vec::new();
 	let mut failure = None;
 	let mut unlisted = false;
-	collect_skills(skills_dir, &mut skills, &mut failure, &mut unlisted);
+	collect_skills(
+		skills_dir,
+		&mut skills,
+		&mut failure,
+		&mut unlisted,
+		excluded,
+	);
 	skills.sort_by(|a, b| a.name.cmp(&b.name));
 	(skills, failure, unlisted)
 }
@@ -114,7 +133,7 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> std::io::Result<Vec<Skill>> {
 		let mut skills = Vec::new();
 		let mut failure = None;
 		let mut unlisted = false;
-		collect_skills(dir, &mut skills, &mut failure, &mut unlisted);
+		collect_skills(dir, &mut skills, &mut failure, &mut unlisted, None);
 		if let Some(error) = failure {
 			return Err(error);
 		}
@@ -154,6 +173,7 @@ fn collect_skills(
 	skills: &mut Vec<Skill>,
 	failure: &mut Option<std::io::Error>,
 	unlisted: &mut bool,
+	excluded: Option<&Path>,
 ) {
 	/// Keep the FIRST failure: it is the one nearest the caller's own path,
 	/// and a later one adds nothing a caller can act on.
@@ -203,6 +223,9 @@ fn collect_skills(
 			}
 		};
 		let path = entry.path();
+		if excluded == Some(path.as_path()) {
+			continue;
+		}
 		match fs::metadata(&path) {
 			Ok(meta) if meta.is_dir() => {}
 			// A file, or a referrer pointing at nothing: both are real
@@ -271,7 +294,9 @@ fn collect_skills(
 				// broken skill keep every OTHER agent's directory alive.
 				note(failure, at_path(&path, error));
 			}
-			Err(_) => collect_skills(&path, skills, failure, unlisted),
+			Err(_) => {
+				collect_skills(&path, skills, failure, unlisted, excluded)
+			}
 		}
 	}
 }

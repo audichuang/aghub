@@ -389,9 +389,10 @@ pub fn execute_repair(
 						plan.master.display()
 					),
 					fix: format!(
-						"compare them, then keep the one you want: `diff -r \
-						 {} {}`. Move the copy you do not want aside and \
-						 re-run `aghub skills repair {}`",
+						"both copies are preserved; aghub will not choose which one \
+							to discard. Compare them first: `diff -r {} {}`. If you \
+							choose to consolidate them, move the copy you do not want \
+							aside and re-run `aghub skills repair {}`",
 						fork.display(),
 						plan.master.display(),
 						plan.name
@@ -1387,6 +1388,7 @@ mod tests {
 					fix.contains("diff -r"),
 					"a refusal must read as an instruction: {fix}"
 				);
+				assert!(fix.contains("both copies are preserved"), "{fix}");
 			}
 			other => panic!("expected a refusal, got {other:?}"),
 		}

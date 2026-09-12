@@ -39,11 +39,15 @@ import {
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
 import { useSkillCoverage } from "../requests/agents";
+import { findSkillCollisions } from "../lib/skill-collision";
 import { cn } from "../lib/utils";
 import { CreateCredentialDialog } from "../pages/settings/components/create-credential-dialog";
 import { credentialsListQueryOptions } from "../requests/credentials";
 import { queryKeys } from "../requests/keys";
-import { gitInstallSkillsMutationOptions } from "../requests/skills";
+import {
+	gitInstallSkillsMutationOptions,
+	skillListQueryOptions,
+} from "../requests/skills";
 import { useConnection } from "../hooks/use-connection";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import { AgentSelector } from "./agent-selector";
@@ -107,6 +111,13 @@ export function ImportGithubSkillPanel({
 		scope,
 		projectPath ?? null,
 	);
+	const existingSkillsQuery = useQuery({
+		...skillListQueryOptions({
+			api,
+			scope,
+			projectRoot: projectPath,
+		}),
+	});
 	// One row per independently-selectable unit. Agents that share a directory
 	// come back as ONE group: checking any member checks them all, because the
 	// write is one directory. The old `autoCovered` bucket is gone — it listed
@@ -407,6 +418,26 @@ export function ImportGithubSkillPanel({
 
 	const successCount = installResults.filter((r) => r.success).length;
 	const failCount = installResults.filter((r) => !r.success).length;
+	const collisions = useMemo(
+		() =>
+			findSkillCollisions(
+				scannedSkills
+					.filter((skill) => selectedPaths.has(skill.path))
+					.map((skill) => skill.name),
+				existingSkillsQuery.data ?? [],
+			),
+		[existingSkillsQuery.data, scannedSkills, selectedPaths],
+	);
+	const agentNames = useMemo(
+		() =>
+			new Map(
+				availableAgents.map((agent) => [agent.id, agent.display_name]),
+			),
+		[availableAgents],
+	);
+	const advisoryCollisions = collisions.filter(
+		(collision) => collision.requiresAdvisory,
+	);
 
 	// Derived disabled / active states
 	const card1Active = phase === "scanning";
@@ -950,6 +981,85 @@ export function ImportGithubSkillPanel({
 										))}
 									</div>
 								)}
+
+								{existingSkillsQuery.isError ? (
+									<Alert
+										className="mt-4"
+										status="warning"
+										role="alert"
+										aria-live="polite"
+									>
+										<Alert.Indicator />
+										<Alert.Content>
+											<Alert.Description>
+												{t(
+													"existingSkillCollisionCheckFailed",
+												)}
+											</Alert.Description>
+										</Alert.Content>
+									</Alert>
+								) : existingSkillsQuery.isSuccess &&
+								  advisoryCollisions.length > 0 ? (
+									<Alert
+										className="mt-4"
+										status="warning"
+										role="alert"
+										aria-live="polite"
+									>
+										<Alert.Indicator />
+										<Alert.Content>
+											<Alert.Title>
+												{t(
+													"existingSkillCollisionTitle",
+												)}
+											</Alert.Title>
+											<Alert.Description>
+												{t(
+													"existingSkillCollisionDescription",
+												)}
+											</Alert.Description>
+											<ul className="mt-2 space-y-1 text-xs">
+												{advisoryCollisions.map(
+													(collision) => (
+														<li
+															key={collision.name}
+														>
+															<strong>
+																{collision.name}
+															</strong>
+															<ul className="ml-4 list-disc">
+																{collision.locations.map(
+																	(
+																		location,
+																	) => (
+																		<li
+																			key={`${location.agent ?? "unknown"}:${location.source_path ?? location.canonical_path ?? "unknown"}`}
+																		>
+																			{location.agent
+																				? (agentNames.get(
+																						location.agent,
+																					) ??
+																					location.agent)
+																				: t(
+																						"unknownAgent",
+																					)}{" "}
+																			/{" "}
+																			{location.source_path ??
+																				location.canonical_path ??
+																				t(
+																					"unknownLocation",
+																				)}
+																		</li>
+																	),
+																)}
+															</ul>
+														</li>
+													),
+												)}
+											</ul>
+										</Alert.Content>
+									</Alert>
+								) : null}
 
 								<Controller
 									name="selectedAgents"

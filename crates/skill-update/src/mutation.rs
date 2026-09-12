@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use aghub_core::models::{AgentType, ResourceScope};
 
@@ -66,11 +66,17 @@ pub fn fetched_skill_path_exists(
 	fetched: &FetchedSource,
 	lock_skill_path: &str,
 ) -> bool {
-	aghub_core::skills::update::sanitize_skill_path(
-		fetched.root(),
-		lock_skill_path,
-	)
-	.is_some()
+	fetched_skill_file(fetched, lock_skill_path).is_some()
+}
+
+fn fetched_skill_file(fetched: &FetchedSource, path: &str) -> Option<PathBuf> {
+	let folder = skill_folder_from_lock_path(path)?;
+	let marker = if folder.is_root() {
+		"SKILL.md".to_string()
+	} else {
+		format!("{}/SKILL.md", folder.as_str())
+	};
+	aghub_core::skills::update::sanitize_skill_path(fetched.root(), &marker)
 }
 
 /// Run the existing core rename transaction against one commit-pinned fetched
@@ -126,11 +132,8 @@ pub fn install_fetched_source(
 	};
 	use aghub_core::skills::linker::LinkTarget;
 
-	let skill_file = aghub_core::skills::update::sanitize_skill_path(
-		fetched.root(),
-		request.lock_skill_path,
-	)
-	.ok_or(InstallMutationError::InvalidSkillPath)?;
+	let skill_file = fetched_skill_file(fetched, request.lock_skill_path)
+		.ok_or(InstallMutationError::InvalidSkillPath)?;
 	install_fetched_skill_and_lock(FetchedSkillInstallRequest {
 		skill_file: &skill_file,
 		source: request.source,
@@ -262,11 +265,8 @@ pub fn resync_fetched_source(
 	fetched: &FetchedSource,
 	request: FetchedResyncRequest<'_>,
 ) -> Result<aghub_core::skills::resync::ResyncReport, ResyncMutationError> {
-	let skill_file = aghub_core::skills::update::sanitize_skill_path(
-		fetched.root(),
-		request.skill_path,
-	)
-	.ok_or(ResyncMutationError::InvalidSkillPath)?;
+	let skill_file = fetched_skill_file(fetched, request.skill_path)
+		.ok_or(ResyncMutationError::InvalidSkillPath)?;
 	let source_dir = skill_file.parent().unwrap_or_else(|| fetched.root());
 	aghub_core::skills::resync::resync_installed_skill(
 		aghub_core::skills::resync::ResyncRequest {
@@ -919,69 +919,71 @@ mod tests {
 
 	#[test]
 	fn resync_uses_the_fetched_source_content_and_commit_identity() {
-		let temporary = tempfile::tempdir().unwrap();
-		let project = temporary.path().join("project");
-		let installed = project.join(".claude/skills/sync-me");
-		write_skill(&installed, "sync-me", "old");
-		skill::add_skill_to_local_lock(
-			"sync-me",
-			skill::LocalSkillLockEntry {
-				source_url: None,
-				source: "owner/repo".to_string(),
-				ref_name: Some("main".to_string()),
-				source_type: "github".to_string(),
-				computed_hash: "old".to_string(),
-				skill_path: Some("skills/sync-me/SKILL.md".to_string()),
-				ref_commit: None,
-			},
-			Some(&project),
-		)
-		.unwrap();
-
-		let fetched_root = temporary.path().join("fetched");
-		write_skill(&fetched_root.join("skills/sync-me"), "sync-me", "new");
-		let fetched = FetchedSource {
-			repo: crate::FetchedRepo {
-				root: fetched_root,
-				snapshot: aghub_git::RepoSnapshot {
-					commit_oid: "new-commit".to_string(),
-					tree_oid: "new-tree".to_string(),
-					commit_time: None,
+		for skill_path in ["skills/sync-me/SKILL.md", "skills/sync-me"] {
+			let temporary = tempfile::tempdir().unwrap();
+			let project = temporary.path().join("project");
+			let installed = project.join(".claude/skills/sync-me");
+			write_skill(&installed, "sync-me", "old");
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("skills/sync-me/SKILL.md".to_string()),
+					ref_commit: None,
 				},
-				_guard: None,
-			},
-		};
+				Some(&project),
+			)
+			.unwrap();
 
-		let report = resync_fetched_source(
-			&fetched,
-			FetchedResyncRequest {
-				skill_path: "skills/sync-me/SKILL.md",
-				name: "sync-me",
-				scope: ResourceScope::ProjectOnly,
-				project_root: Some(&project),
-				// The lock entry has no `source_url`, so its effective source is
-				// `source` — the verbatim value a real caller's pre-fetch read
-				// would have returned.
-				expected: aghub_core::skills::lock::EntryIdentity::capture(
-					"sync-me",
-					ResourceScope::ProjectOnly,
-					Some(&project),
-				)
-				.expect("fixture entry exists"),
-				force_unsafe: false,
-			},
-		)
-		.expect("Fetched Source should Resync the installed skill");
+			let fetched_root = temporary.path().join("fetched");
+			write_skill(&fetched_root.join("skills/sync-me"), "sync-me", "new");
+			let fetched = FetchedSource {
+				repo: crate::FetchedRepo {
+					root: fetched_root,
+					snapshot: aghub_git::RepoSnapshot {
+						commit_oid: "new-commit".to_string(),
+						tree_oid: "new-tree".to_string(),
+						commit_time: None,
+					},
+					_guard: None,
+				},
+			};
 
-		assert!(report.swapped.iter().any(|path| path == &installed));
-		assert!(std::fs::read_to_string(installed.join("SKILL.md"))
-			.unwrap()
-			.contains("new"));
-		let lock = skill::lock::local::read_local_lock(Some(&project));
-		assert_eq!(
-			lock.skills["sync-me"].ref_commit.as_deref(),
-			Some("new-commit"),
-		);
+			let report = resync_fetched_source(
+				&fetched,
+				FetchedResyncRequest {
+					skill_path,
+					name: "sync-me",
+					scope: ResourceScope::ProjectOnly,
+					project_root: Some(&project),
+					// The lock entry has no `source_url`, so its effective source is
+					// `source` — the verbatim value a real caller's pre-fetch read
+					// would have returned.
+					expected: aghub_core::skills::lock::EntryIdentity::capture(
+						"sync-me",
+						ResourceScope::ProjectOnly,
+						Some(&project),
+					)
+					.expect("fixture entry exists"),
+					force_unsafe: false,
+				},
+			)
+			.expect("Fetched Source should Resync the installed skill");
+
+			assert!(report.swapped.iter().any(|path| path == &installed));
+			assert!(std::fs::read_to_string(installed.join("SKILL.md"))
+				.unwrap()
+				.contains("new"));
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert_eq!(
+				lock.skills["sync-me"].ref_commit.as_deref(),
+				Some("new-commit"),
+			);
+		}
 	}
 
 	/// The batch must call [`ScopeLock::read`] and [`scan_agents`] ONCE each, not

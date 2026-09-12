@@ -592,9 +592,10 @@ mod tests {
 		// (foreign Origin) and a DNS-rebinding request (foreign Host, no Origin)
 		// must both get 403 before the handler runs; a trusted origin must not
 		// be blocked by the guard.
+		let iso = IsolatedApiTest::new();
 		let client = Client::tracked(build_rocket(
 			rocket::Config::default(),
-			default_app_data_dir(),
+			iso.app_data.path().to_path_buf(),
 		))
 		.expect("client");
 
@@ -618,16 +619,16 @@ mod tests {
 			"a foreign Host (DNS-rebinding) must be rejected by the guard",
 		);
 
-		// A trusted origin passes the guard (handler may then 200/500 depending
-		// on the keyring, but the guard itself must not forbid it).
+		// A trusted origin passes the guard and the isolated mock keyring makes
+		// the credential handler deterministic.
 		let trusted = client
 			.get("/api/v1/credentials")
 			.header(Header::new("Origin", "tauri://localhost"))
 			.dispatch();
-		assert_ne!(
+		assert_eq!(
 			trusted.status(),
-			Status::Forbidden,
-			"a trusted local origin must pass the guard",
+			Status::Ok,
+			"a trusted local origin must pass the guard and read the mock keyring",
 		);
 	}
 

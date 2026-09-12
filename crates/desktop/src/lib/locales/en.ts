@@ -816,6 +816,16 @@ export default {
 	installed: "Installed",
 	globalScope: "Global Scope",
 	unknownError: "Something went wrong",
+	existingSkillCollisionTitle: "Existing same-name skill(s)",
+	existingSkillCollisionDescription:
+		"Selecting an agent with an existing standalone copy will be refused; its existing content will not be overwritten. You can keep both copies. Compare them only if you want to consolidate versions.",
+	unknownAgent: "unknown agent",
+	unknownLocation: "unknown location",
+	skillLayoutNeedsReviewTitle: "Skill installation status needs review",
+	skillLayoutNeedsReviewHint:
+		"{{count}} skill(s) need confirmation. Existing content stays protected; compare copies only if you want to consolidate versions.",
+	existingSkillCollisionCheckFailed:
+		"Couldn't check existing skills; installation will still protect existing content.",
 	errorBoundaryTitle: "Something went wrong",
 	errorBoundaryDescription:
 		"This part of the app couldn't load. You can try again, or check the technical details below.",

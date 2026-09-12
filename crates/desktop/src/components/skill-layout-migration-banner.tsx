@@ -110,6 +110,7 @@ export function SkillLayoutMigrationBanner({
 	});
 
 	const { visible, rows } = migrationBannerModel(data, isSuccess);
+	const allBlocked = rows.length > 0 && rows.every(isBlocked);
 
 	const result = repair.data;
 	const shown: RepairReportDto[] = result ? result.skills : rows;
@@ -173,12 +174,21 @@ export function SkillLayoutMigrationBanner({
 						<Alert.Indicator />
 						<Alert.Content>
 							<Alert.Title>
-								{t("skillLayoutOutdatedTitle")}
+								{t(
+									allBlocked
+										? "skillLayoutNeedsReviewTitle"
+										: "skillLayoutOutdatedTitle",
+								)}
 							</Alert.Title>
 							<Alert.Description>
-								{t("skillLayoutOutdatedHint", {
-									count: rows.length,
-								})}
+								{t(
+									allBlocked
+										? "skillLayoutNeedsReviewHint"
+										: "skillLayoutOutdatedHint",
+									{
+										count: rows.length,
+									},
+								)}
 							</Alert.Description>
 							{/* Inside Alert.Content, wrapped — the shape every other
 						    Alert-with-action in this app uses (see
@@ -204,9 +214,14 @@ export function SkillLayoutMigrationBanner({
 					<div className="flex items-center gap-2 px-3 py-2">
 						<ExclamationTriangleIcon className="size-4 shrink-0 text-warning" />
 						<span className="min-w-0 flex-1 truncate text-foreground">
-							{t("skillLayoutOutdatedRowHint", {
-								count: rows.length,
-							})}
+							{t(
+								allBlocked
+									? "skillLayoutNeedsReviewHint"
+									: "skillLayoutOutdatedRowHint",
+								{
+									count: rows.length,
+								},
+							)}
 						</span>
 						<Button
 							size="sm"

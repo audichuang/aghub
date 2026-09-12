@@ -771,6 +771,16 @@ const zhHans: typeof en = {
 	installed: "已安装",
 	globalScope: "全局范围",
 	unknownError: "发生了未知错误",
+	existingSkillCollisionTitle: "已有同名技能",
+	existingSkillCollisionDescription:
+		"若选择已有独立副本的代理，该代理安装会被拒绝，现有内容不会覆盖。你可以保留两份；只有要统一版本时才需比较。",
+	unknownAgent: "未知 agent",
+	unknownLocation: "未知位置",
+	skillLayoutNeedsReviewTitle: "有技能的安装状态需确认",
+	skillLayoutNeedsReviewHint:
+		"有 {{count}} 个技能的安装状态需确认。现有内容会受到保护；只有要统一版本时才需比较。",
+	existingSkillCollisionCheckFailed:
+		"无法检查既有技能；安装时仍会保护既有内容。",
 	errorBoundaryTitle: "发生错误",
 	errorBoundaryDescription:
 		"这个画面加载失败。你可以重试,或展开下方查看技术细节。",
