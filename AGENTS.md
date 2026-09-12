@@ -20,7 +20,7 @@ inference providers, Claude Code plugins, and SSH-based remote deployment.
 Stateless design — it reads the actual config files, tracks capability sources,
 and requires explicit opt-in for changes.
 
-## Maps & Decisions (read these first)
+## Maps & Decisions
 
 - **Design specs**: `docs/specs/` — the current design corpus; rationale, not
   current-state truth (code wins)
@@ -31,9 +31,12 @@ and requires explicit opt-in for changes.
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) (Source hash, Master, Referrer, Relink, …)
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/)
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — port / skip from `AkaraChen/aghub`
-- **Deep domain playbooks**: project skills under `.claude/skills/` (auto-register in
-  Claude Code; do not re-list the catalog here)
-- `.impeccable.md` — Rust style; `cliff.toml` — git-cliff for releases
+- **Deep domain playbooks**: project skills under `.agents/skills/`, mirrored as
+  symlinks in `.claude/skills/` — Claude Code auto-registers them, and every other
+  agent in the roster reads the `.agents/skills/` copy (do not re-list the catalog here)
+- `.impeccable.md` — the desktop frontend's design context (users, brand voice,
+  aesthetic direction, type and color strategy), NOT Rust style; `cliff.toml` —
+  git-cliff for releases
 
 ## Structure
 
@@ -59,8 +62,11 @@ crates/
   markdown/      # YAML frontmatter helpers
 ```
 
-Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills —
-a legacy real-directory layout that migration deliberately leaves alone, D7) and `justfile` (task runner).
+Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills — a
+legacy real-directory layout that LAZY migration deliberately leaves alone, D7)
+and `justfile` (task runner). `repair` still moves a real directory there into the
+store when git does NOT track it; a tracked one is refused, and the refusal prints
+the escape (`git rm -r --cached <path>`).
 
 Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `api`
 (+ `remote`), not core directly. Tool crates used laterally.
@@ -157,6 +163,36 @@ round-trip, what a rewrite preserves) live with the descriptors:
   points at other people's repos and rots on their schedule
 - Prefer file-scoped over the full suite: `cargo test -p aghub-core <name> -- --exact`
 - Desktop frontend commands run from `crates/desktop` via `bun run …`
+
+## Definition of done
+
+Done is a green gate, not a first implementation that compiles. Pick the gate by
+blast radius, run it yourself, and do not come back for review between
+implementing and verifying.
+
+- **Scoped change**: the change's own test exists and
+  `cargo test -p <crate> <full::module::path::name> -- --exact` is green. A bare
+  short name under `--exact` runs ZERO tests and exits 0 — check the test count.
+- **Before push or tag**: `just preflight` AND `bun run format:check` from the
+  REPO ROOT. Neither alone is a pushable tree — preflight runs no
+  prettier/eslint, and `crates/desktop`'s own `format:check` never sees root
+  files; the pre-push hook runs no tests.
+- **Before tagging a release**: tag `v*` only after green CI.
+- **Bump a dependency in its OWN commit, never inside a feature or fix commit.**
+  `@heroui/react` 3.0.1 → 3.2.5 rode along in a `fix(skills)` commit and shipped
+  in v2.23.1 with every Checkbox and Switch in the app broken — 10 rendering no
+  `<input>` at all, 9 with the visible box outside the clickable label. A bump
+  reviewed as a bump gets the one question that catches this ("what changed in
+  the components we call?"); a bump buried under a title about something else
+  does not. It also keeps the revert cheap when the answer is bad.
+- **After editing `crates/desktop/src/data/featured-skills.json`**:
+  `just featured-check`. It needs the network and a `gh` login, which is why it
+  sits outside preflight — the catalog points at other people's repos and rots
+  on their schedule.
+
+Return early only when an ask-first item below blocks you, or when the gate
+fails for a reason outside the requested change. A failure you caused is part of
+the task, not a reason to stop.
 
 ## CLI Command Surface
 
@@ -362,9 +398,6 @@ true`) for both verbs — a skill because the shared Master is what "already
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
   reads the key from stdin; nothing else does
-- **`--json` failures are JSON too**: `{"error":{code,message,retryable}}` on
-  stdout, exit 1. `code` is `aghub_core::error_codes` — the SAME vocabulary the
-  HTTP API sends. clap usage errors stay exit 2 with prose
 - **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
   `partial` | `kept` (shared Master another agent still reads — `success: true`
   but THE ENTITY IS STILL THERE; the API adds an api-only `failed` for early
@@ -491,14 +524,24 @@ list written here the moment a descriptor changes.
 
 ## Testing
 
-**Do not pollute real home**: clearing `set_skills_path_override` under
-**global** scope still writes the master to `dirs::home_dir()/.aghub`, and
-Referrers into the agents' own dirs. Overriding `$HOME` alone is NOT enough —
-`dirs::config_dir()` prefers `$XDG_CONFIG_HOME` and several descriptors honour
-their own variable ahead of both, so a developer's real `~/.config` leaks in
-(observed: a live `~/.config/orca/...` in a test's allow-listed roots).
-Isolate `$HOME` (Unix) or use a project `tempdir` + teardown — mechanics and the
-env-lock rule in `crates/core/AGENTS.md` Testing.
+**The suite is designed to write only into temp dirs, an isolated `$HOME` and
+`$AGHUB_DATA_DIR` — a leak into the real home is a bug in that test, not a reason
+to ask before running the suite.** The Rust tests make no outbound network calls:
+the git-backed ones serve `git://` from a loopback `git daemon`. What reaches
+outside a plain `cargo test` is `just featured-check` (public GitHub plus a `gh`
+login) and the `verify` chain; `--features agent-validation` needs real agent CLIs
+on `PATH`, not the network. Run `cargo test`, `cargo test --workspace` or
+`just preflight` freely, fix the failures your change caused, and rerun without
+asking for approval at each step. What keeps this true is a rule, not a question:
+`crates/core/AGENTS.md` ANTI-PATTERNS forbids clearing `skills_path_override` for
+a global write without isolating `$HOME`. Honour it in the tests you WRITE, and
+the suite stays free to RUN.
+
+When you write a new test, the isolation is yours to get right. **Never pollute
+the real home**: a global-scope write still lands in `~/.aghub` plus each agent's
+own skills dir, and overriding `$HOME` alone is not enough. Isolation mechanics,
+the one-env-mutex-per-binary rule and the inode-assertion trap:
+`crates/core/AGENTS.md` Testing.
 
 **A test must be able to FAIL on a real regression** — a green test that can't
 is worse than none (it reads as "covered"). Assert observable OUTCOMES (values,
@@ -515,21 +558,25 @@ shape from an existing test rather than hand-writing a minimal one. Worked examp
 
 ## Agent permissions / approval boundaries
 
-| AI may do autonomously                            | Ask first                                         |
-| ------------------------------------------------- | ------------------------------------------------- |
-| Edit code; `just fmt` / `just lint`; scoped tests | `git push`, force-push, amend published history   |
-| Read-only under temp dirs                         | Release tags, `just bump`, Homebrew tap           |
-|                                                   | Real `~/.agents`, keyring, `tauri` updater pubkey |
-|                                                   | New workspace deps without a clear need           |
+Reasons are given so you can generalize to the case not listed here.
 
-Never commit secrets.
+| Tier                                                     | What                                                                                                                                                                                                                                                        | Why                                                                                                                                                 |
+| -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Free — do it, do not ask**                             | Editing code; `just fmt` / `just lint`; `cargo build`; `bun run typecheck` / `lint:check` / `format:check`; the Rust test suite at any scope, `just preflight` included; reading and writing under a temp dir, `$AGHUB_DATA_DIR`, or a tempdir project root | Run it, fix the failures your change caused, and rerun. Stop and ask only if a test would need the real `~/.agents`, the OS keyring, or the network |
+| **Ask first — legitimate, but external or irreversible** | `git push`, force-push, amending published history; release tags, `just bump`, the Homebrew tap; touching the developer's REAL `~/.aghub`, `~/.agents`, agent skill dirs or the system keyring; adding any new workspace dependency without a clear need    | These leave the machine or cannot be undone; the dependency budget is the maintainer's call                                                         |
+| **Never — no task reaches these**                        | Changing the shipped `tauri.conf.json` updater `pubkey`, or pointing its `endpoints` elsewhere. Committing secrets                                                                                                                                          | It bricks auto-update for every installed user                                                                                                      |
 
 ## Anti-Patterns
 
 > Formatting and lint are not listed here — `rustfmt.toml` and CI
 > (`cargo fmt --check`, `clippy -D warnings`) enforce them deterministically.
+>
+> These are correctness invariants, not approval boundaries: they constrain WHICH
+> design you pick, never WHETHER you proceed. None is a reason to stop and ask —
+> and none is negotiable either; pick a design that satisfies them. The same holds
+> for every `NEVER` in a per-crate `AGENTS.md`. Approval boundaries are the section
+> above; a project skill may add its own gate for its own workflow.
 
-- NEVER bypass `ConfigManager`
 - NEVER return arbitrary internal temp/lock/keyring paths in API **errors**;
   skill DTOs may expose intentional `source_path` / `canonical_path` for UI
 - NEVER hand-mirror a mutating/transactional flow across surfaces (CLI ↔ API, or

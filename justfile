@@ -54,7 +54,20 @@ lint:
 preflight:
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
+    # Sync node_modules to the LOCKFILE before any frontend gate runs. CI always
+    # installs frozen, so without this the local gates can pass against a
+    # different dependency set than the one that ships — which is exactly how a
+    # HeroUI bump that killed every Checkbox/Switch got through preflight,
+    # typecheck and lint untouched: the lockfile said 3.2.5, node_modules was
+    # still 3.0.2. Frozen, so a package.json edit with a stale lockfile FAILS
+    # here instead of resolving something new behind your back.
+    bun install --frozen-lockfile
+    cd ./crates/desktop && bun install --frozen-lockfile
     cd ./crates/desktop && bun run typecheck
+    # The frontend unit tests, incl. the source-scan guards under src/lib, run
+    # in CI but were absent from the release gate — so the guard for the bug
+    # class above would not have been consulted before a tag.
+    cd ./crates/desktop && bun run test
     cargo test --workspace
     cargo test --workspace --doc
 
