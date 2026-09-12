@@ -228,10 +228,10 @@ export function SyncGithubSkillDialog({
 									if (!checked) setCredentialId("");
 								}}
 							>
-								<Checkbox.Control>
-									<Checkbox.Indicator />
-								</Checkbox.Control>
 								<Checkbox.Content>
+									<Checkbox.Control>
+										<Checkbox.Indicator />
+									</Checkbox.Control>
 									<Label>{t("privateRepo")}</Label>
 								</Checkbox.Content>
 							</Checkbox>

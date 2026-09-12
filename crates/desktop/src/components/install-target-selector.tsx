@@ -31,18 +31,20 @@ export function InstallTargetSelector({
 				onChange={(isSelected) => onInstallToProjectChange(isSelected)}
 				variant="secondary"
 			>
-				<Checkbox.Control>
-					<Checkbox.Indicator />
-				</Checkbox.Control>
-				<Checkbox.Content className="flex flex-col items-start gap-0.5">
-					<Label className="text-sm font-medium">
-						{t("installToProject")}
-					</Label>
-					<span className="text-xs text-muted">
-						{canInstallToProject
-							? t("installToProjectDescription")
-							: t("noProjectsHelp")}
-					</span>
+				<Checkbox.Content>
+					<Checkbox.Control>
+						<Checkbox.Indicator />
+					</Checkbox.Control>
+					<div className="flex flex-col items-start gap-0.5">
+						<Label className="text-sm font-medium">
+							{t("installToProject")}
+						</Label>
+						<span className="text-xs text-muted">
+							{canInstallToProject
+								? t("installToProjectDescription")
+								: t("noProjectsHelp")}
+						</span>
+					</div>
 				</Checkbox.Content>
 			</Checkbox>
 

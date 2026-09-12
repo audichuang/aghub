@@ -465,20 +465,23 @@ function MigrationRow({
 	return (
 		<li className="flex items-center gap-3 px-1 py-1 text-sm">
 			{picked !== null && (
-				/* Compound children with no label slot, and the root width
-				   pinned: a bare `<Checkbox aria-label>` renders a ~35px root
-				   that reserves room for a label, which throws the name column
-				   out of line with the refused rows above it. Desktop
-				   AGENTS.md names this trap. */
+				/* `.Control` MUST stay inside `.Content` — since HeroUI 3.2.x
+				   the root is a context div and the clickable label + input
+				   live in `.Content`, so a bare `.Control` renders a box that
+				   ignores every click. The root width is still pinned because
+				   this control has no label and shares a row with the name
+				   column; the exact figure wants re-measuring on 3.2.x. */
 				<Checkbox
 					aria-label={row.name}
 					className="size-4 shrink-0"
 					isSelected={picked}
 					onChange={onToggle}
 				>
-					<Checkbox.Control>
-						<Checkbox.Indicator />
-					</Checkbox.Control>
+					<Checkbox.Content>
+						<Checkbox.Control>
+							<Checkbox.Indicator />
+						</Checkbox.Control>
+					</Checkbox.Content>
 				</Checkbox>
 			)}
 			<span className="min-w-0 flex-1 truncate">{row.name}</span>

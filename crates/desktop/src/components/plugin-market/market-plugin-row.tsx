@@ -158,9 +158,11 @@ export function MarketInstalledRow({
 								: t("enablePlugin")
 						}
 					>
-						<Switch.Control>
-							<Switch.Thumb />
-						</Switch.Control>
+						<Switch.Content>
+							<Switch.Control>
+								<Switch.Thumb />
+							</Switch.Control>
+						</Switch.Content>
 					</Switch>
 				</div>
 			</div>
@@ -208,9 +210,11 @@ export function MarketAvailableRow({
 				isDisabled={installState === "installed"}
 				className="size-4 shrink-0"
 			>
-				<Checkbox.Control>
-					<Checkbox.Indicator />
-				</Checkbox.Control>
+				<Checkbox.Content>
+					<Checkbox.Control>
+						<Checkbox.Indicator />
+					</Checkbox.Control>
+				</Checkbox.Content>
 			</Checkbox>
 			<div className="min-w-0 flex-1">
 				<span className="truncate text-sm font-medium text-foreground">

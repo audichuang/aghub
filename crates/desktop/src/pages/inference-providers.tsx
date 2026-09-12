@@ -549,9 +549,11 @@ function ProviderModelsEditor({
 					onChange={(selected) => toggleSelected(model.id, selected)}
 					className="shrink-0"
 				>
-					<Checkbox.Control>
-						<Checkbox.Indicator />
-					</Checkbox.Control>
+					<Checkbox.Content>
+						<Checkbox.Control>
+							<Checkbox.Indicator />
+						</Checkbox.Control>
+					</Checkbox.Content>
 				</Checkbox>
 				<Input
 					value={model.name}
@@ -667,10 +669,10 @@ function ProviderModelsEditor({
 						isDisabled={filteredModels.length === 0}
 						onChange={handleToggleAllFiltered}
 					>
-						<Checkbox.Control>
-							<Checkbox.Indicator />
-						</Checkbox.Control>
 						<Checkbox.Content>
+							<Checkbox.Control>
+								<Checkbox.Indicator />
+							</Checkbox.Control>
 							<span className="text-xs text-muted">
 								{t("selectedProviderModelsCount", {
 									selected: totalSelectedCount,

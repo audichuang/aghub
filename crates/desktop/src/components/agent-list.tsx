@@ -114,82 +114,84 @@ export function AgentList({
 								"data-[selected=true]:bg-surface-secondary",
 							)}
 						>
-							<Checkbox.Control className="absolute top-1/2 right-3 -translate-y-1/2 rounded-full before:rounded-full">
-								<Checkbox.Indicator />
-							</Checkbox.Control>
-							<Checkbox.Content className="flex flex-row items-start justify-start gap-3">
-								<AgentIcon
-									id={agent.id}
-									name={agent.display_name}
-									size="sm"
-									variant="ghost"
-								/>
-								<div className="flex flex-1 flex-col gap-0.5">
-									<Label className="truncate text-sm">
-										{agent.display_name}
-									</Label>
-									{state?.status === "pending" && (
-										<span
-											aria-live="polite"
-											className="flex items-center gap-1"
-										>
-											<ArrowPathIcon
-												className="size-3.5 animate-spin text-muted"
-												aria-hidden="true"
-											/>
-											<span className="sr-only">
-												{t("processing")}
-											</span>
-										</span>
-									)}
-									{state?.status === "success" && (
-										<span
-											aria-live="polite"
-											className="flex items-center gap-1"
-										>
-											<CheckCircleIcon
-												className="size-3.5 text-success"
-												aria-hidden="true"
-											/>
-											<span className="sr-only">
-												{t("success")}
-											</span>
-										</span>
-									)}
-									{state?.status === "error" && (
-										<span
-											aria-live="assertive"
-											className="flex items-center gap-1"
-										>
-											<XCircleIcon
-												className="size-3.5 text-danger"
-												aria-hidden="true"
-											/>
-											<span className="sr-only">
-												{t("failed")}
-											</span>
-										</span>
-									)}
-									{state?.status === "error" &&
-										state.error && (
-											<Description
-												className="text-xs text-danger"
-												role="alert"
-												aria-live="assertive"
+							<Checkbox.Content>
+								<Checkbox.Control className="absolute top-1/2 right-3 -translate-y-1/2 rounded-full before:rounded-full">
+									<Checkbox.Indicator />
+								</Checkbox.Control>
+								<div className="flex flex-row items-start justify-start gap-3">
+									<AgentIcon
+										id={agent.id}
+										name={agent.display_name}
+										size="sm"
+										variant="ghost"
+									/>
+									<div className="flex flex-1 flex-col gap-0.5">
+										<Label className="truncate text-sm">
+											{agent.display_name}
+										</Label>
+										{state?.status === "pending" && (
+											<span
+												aria-live="polite"
+												className="flex items-center gap-1"
 											>
-												{state.error}
+												<ArrowPathIcon
+													className="size-3.5 animate-spin text-muted"
+													aria-hidden="true"
+												/>
+												<span className="sr-only">
+													{t("processing")}
+												</span>
+											</span>
+										)}
+										{state?.status === "success" && (
+											<span
+												aria-live="polite"
+												className="flex items-center gap-1"
+											>
+												<CheckCircleIcon
+													className="size-3.5 text-success"
+													aria-hidden="true"
+												/>
+												<span className="sr-only">
+													{t("success")}
+												</span>
+											</span>
+										)}
+										{state?.status === "error" && (
+											<span
+												aria-live="assertive"
+												className="flex items-center gap-1"
+											>
+												<XCircleIcon
+													className="size-3.5 text-danger"
+													aria-hidden="true"
+												/>
+												<span className="sr-only">
+													{t("failed")}
+												</span>
+											</span>
+										)}
+										{state?.status === "error" &&
+											state.error && (
+												<Description
+													className="text-xs text-danger"
+													role="alert"
+													aria-live="assertive"
+												>
+													{state.error}
+												</Description>
+											)}
+										{!state && diffLabel && (
+											<DiffLabelDisplay
+												diffLabel={diffLabel}
+											/>
+										)}
+										{!state && isDisabled && !diffLabel && (
+											<Description className="text-xs text-muted">
+												{t("alreadyAdded")}
 											</Description>
 										)}
-									{!state && diffLabel && (
-										<DiffLabelDisplay
-											diffLabel={diffLabel}
-										/>
-									)}
-									{!state && isDisabled && !diffLabel && (
-										<Description className="text-xs text-muted">
-											{t("alreadyAdded")}
-										</Description>
-									)}
+									</div>
 								</div>
 							</Checkbox.Content>
 						</Checkbox>

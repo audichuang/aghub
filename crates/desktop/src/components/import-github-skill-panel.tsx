@@ -627,10 +627,10 @@ export function ImportGithubSkillPanel({
 												setValue("credentialId", "");
 										}}
 									>
-										<Checkbox.Control>
-											<Checkbox.Indicator />
-										</Checkbox.Control>
 										<Checkbox.Content>
+											<Checkbox.Control>
+												<Checkbox.Indicator />
+											</Checkbox.Control>
 											<Label>{t("privateRepo")}</Label>
 										</Checkbox.Content>
 									</Checkbox>
@@ -923,9 +923,11 @@ export function ImportGithubSkillPanel({
 													}
 													aria-label={skill.name}
 												>
-													<Checkbox.Control>
-														<Checkbox.Indicator />
-													</Checkbox.Control>
+													<Checkbox.Content>
+														<Checkbox.Control>
+															<Checkbox.Indicator />
+														</Checkbox.Control>
+													</Checkbox.Content>
 												</Checkbox>
 												<div className="min-w-0 flex-1">
 													<div className="flex flex-wrap items-center gap-2">

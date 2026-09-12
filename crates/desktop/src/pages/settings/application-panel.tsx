@@ -259,9 +259,11 @@ export default function ApplicationPanel() {
 								}
 								aria-label={t("settingsAutostartToggleLabel")}
 							>
-								<Switch.Control>
-									<Switch.Thumb />
-								</Switch.Control>
+								<Switch.Content>
+									<Switch.Control>
+										<Switch.Thumb />
+									</Switch.Control>
+								</Switch.Content>
 							</Switch>
 						</div>
 					) : null}
@@ -513,9 +515,11 @@ function SkillCheckScheduleRow() {
 				// visible control, which throws off this row's right edge.
 				className="w-10 shrink-0"
 			>
-				<Switch.Control>
-					<Switch.Thumb />
-				</Switch.Control>
+				<Switch.Content>
+					<Switch.Control>
+						<Switch.Thumb />
+					</Switch.Control>
+				</Switch.Content>
 			</Switch>
 		</div>
 	);

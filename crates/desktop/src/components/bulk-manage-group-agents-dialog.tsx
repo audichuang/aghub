@@ -277,29 +277,31 @@ export function BulkManageGroupAgentsDialog({
 												}))
 											}
 										>
-											<Checkbox.Control>
-												<Checkbox.Indicator />
-											</Checkbox.Control>
-											<Checkbox.Content className="flex flex-1 items-center justify-between gap-2">
-												<span className="text-sm text-foreground">
-													{agent.display_name}
-													{!isMcp &&
-														(coverage[agent.id]
-															?.shared_with
-															.length ?? 0) >
-															0 && (
-															<span className="block text-xs text-muted">
-																{t(
-																	"sourceSharedAgentGroup",
-																)}
-															</span>
-														)}
-												</span>
-												<span className="text-xs text-muted">
-													{stat?.installed ?? 0}/
-													{stat?.total ??
-														resources.length}
-												</span>
+											<Checkbox.Content>
+												<Checkbox.Control>
+													<Checkbox.Indicator />
+												</Checkbox.Control>
+												<div className="flex flex-1 items-center justify-between gap-2">
+													<span className="text-sm text-foreground">
+														{agent.display_name}
+														{!isMcp &&
+															(coverage[agent.id]
+																?.shared_with
+																.length ?? 0) >
+																0 && (
+																<span className="block text-xs text-muted">
+																	{t(
+																		"sourceSharedAgentGroup",
+																	)}
+																</span>
+															)}
+													</span>
+													<span className="text-xs text-muted">
+														{stat?.installed ?? 0}/
+														{stat?.total ??
+															resources.length}
+													</span>
+												</div>
 											</Checkbox.Content>
 										</Checkbox>
 									);

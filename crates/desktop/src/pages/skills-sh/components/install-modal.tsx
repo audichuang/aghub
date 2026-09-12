@@ -67,16 +67,18 @@ export function InstallModal({
 			onChange={(isSelected) => onInstallAllChange(isSelected)}
 			variant="secondary"
 		>
-			<Checkbox.Control>
-				<Checkbox.Indicator />
-			</Checkbox.Control>
-			<Checkbox.Content className="flex flex-col items-start gap-0.5">
-				<Label className="text-sm font-medium">
-					{t("installAllSkills")}
-				</Label>
-				<span className="text-xs text-muted">
-					{t("installAllSkillsDescription")}
-				</span>
+			<Checkbox.Content>
+				<Checkbox.Control>
+					<Checkbox.Indicator />
+				</Checkbox.Control>
+				<div className="flex flex-col items-start gap-0.5">
+					<Label className="text-sm font-medium">
+						{t("installAllSkills")}
+					</Label>
+					<span className="text-xs text-muted">
+						{t("installAllSkillsDescription")}
+					</span>
+				</div>
 			</Checkbox.Content>
 		</Checkbox>
 	);

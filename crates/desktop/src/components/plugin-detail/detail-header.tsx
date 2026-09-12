@@ -137,9 +137,11 @@ export function PluginDetailHeader({
 										: t("enablePlugin")
 								}
 							>
-								<Switch.Control>
-									<Switch.Thumb />
-								</Switch.Control>
+								<Switch.Content>
+									<Switch.Control>
+										<Switch.Thumb />
+									</Switch.Control>
+								</Switch.Content>
 							</Switch>
 						</span>
 					</Tooltip.Trigger>

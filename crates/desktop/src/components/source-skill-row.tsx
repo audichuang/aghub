@@ -54,9 +54,11 @@ export function SourceSkillRow({
 					})}
 					className="shrink-0"
 				>
-					<Checkbox.Control>
-						<Checkbox.Indicator />
-					</Checkbox.Control>
+					<Checkbox.Content>
+						<Checkbox.Control>
+							<Checkbox.Indicator />
+						</Checkbox.Control>
+					</Checkbox.Content>
 				</Checkbox>
 			)}
 			<button

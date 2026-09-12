@@ -91,20 +91,22 @@ export default function SidebarPanel() {
 									variant="secondary"
 									className="min-w-0 flex-1"
 								>
-									<Checkbox.Control>
-										<Checkbox.Indicator />
-									</Checkbox.Control>
-									<Checkbox.Content className="min-w-0">
-										<div className="flex items-center gap-2">
-											<Icon className="size-4 text-muted" />
-											<span
-												className="
+									<Checkbox.Content>
+										<Checkbox.Control>
+											<Checkbox.Indicator />
+										</Checkbox.Control>
+										<div className="min-w-0">
+											<div className="flex items-center gap-2">
+												<Icon className="size-4 text-muted" />
+												<span
+													className="
 													text-sm font-medium
 													text-(--foreground)
 												"
-											>
-												{t(item.labelKey)}
-											</span>
+												>
+													{t(item.labelKey)}
+												</span>
+											</div>
 										</div>
 									</Checkbox.Content>
 								</Checkbox>
