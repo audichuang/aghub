@@ -69,21 +69,31 @@ Move the copy you do not want aside and re-run `aghub skills repair agent-reach`
 
 ---
 
-## 需要現場取證才能收斂的一點
+## 現場證據已滅失（2026-09-12 更新）
 
-程式碼上「匯入寫了副本」已排除，但沒有拿到現場狀態佐證。請回報者跑：
+原本這一節要回報者用目錄 mtime 判斷來源。**那條路已經走不通了**：
+`~/.openclaw/skills/agent-reach` 現在是一條指向 Master 的 symlink，時間戳
+`2026-09-12 13:44:23`——那是後來 repair／重裝留下的，不是原本那個實體目錄的
+時間。原始的分歧副本沒有留存，**不能再用 mtime 反推當初是誰寫的，也不能據此
+升 P0**。
 
-```sh
-ls -ld ~/.openclaw/skills/agent-reach
-head -5 ~/.openclaw/skills/agent-reach/SKILL.md          # name: 是什麼？
-diff -r ~/.openclaw/skills/agent-reach ~/.aghub/agent-reach | head -20
-aghub-cli skills doctor --verify-links --json | jq '.skills[] | select(.name=="agent-reach")'
-```
+所以「匯入是否曾經寫過實體副本」這個分歧點，目前**無法從那台機器收斂**。
+程式碼側的排除仍然成立（`Linker::link` 遇到實體目錄一律回 `Conflict` 且不覆蓋，
+`install_fetched.rs:772` 報 `installed: false`，API `success: false`），但那是
+推論不是現場佐證。
 
-- 目錄 mtime **早於**該次匯入 → 確認是 openclaw 自有技能，本 issue 成立如上。
-- 目錄 mtime 是匯入當下 → 上面的排除推論有漏，**改成 P0**，回頭追
-  `install_fetched` 以外還有沒有別的寫入路徑（例如從檔案／目錄匯入的
-  `add_skill_from_path`，那條是會 copy 的）。
+還可能discriminate的證據，都與那台機器的當下狀態無關：
+
+- **openclaw 上游本身有沒有一支叫 `agent-reach` 的技能**。有 → 撞名成立，本
+  issue 如下文；沒有 → 那個實體目錄只可能來自別處，排除推論要重驗。這是目前
+  最乾淨、且可離線查證的一條。
+- lock 檔（global 與 project 的 `skills-lock.json`）裡 `agent-reach` 的
+  entry 與 source。
+- repair 若曾 quarantine 過，store 旁會留下被搬開的目錄。
+
+在這之前，**本 issue 的三個缺口與撞名情境無關地都成立**：匯入前沒有同名碰撞
+檢查、`readers_of` 會把同名的別人技能算成 Master 的讀者、文案二選一會叫人搬走
+別人的東西。這三點不需要先釐清來源就能修。
 
 ## 修法方向（建議，不是結論）
 
