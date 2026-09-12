@@ -119,10 +119,10 @@ export function SkillsAgentList({
 							)}
 						>
 							<Checkbox.Content>
-								<Checkbox.Control className="absolute top-1/2 right-3 -translate-y-1/2 rounded-full before:rounded-full">
+								<Checkbox.Control className="absolute top-1/2 right-0 -translate-y-1/2 rounded-full before:rounded-full">
 									<Checkbox.Indicator />
 								</Checkbox.Control>
-								<div className="flex flex-row items-start justify-start gap-3">
+								<div className="flex w-full flex-row items-start justify-start gap-3">
 									<AgentIcon
 										id={agent.id}
 										name={agent.display_name}
