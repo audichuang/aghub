@@ -277,7 +277,7 @@ export function BulkManageGroupAgentsDialog({
 												}))
 											}
 										>
-											<Checkbox.Content>
+											<Checkbox.Content className="w-full">
 												<Checkbox.Control>
 													<Checkbox.Indicator />
 												</Checkbox.Control>
