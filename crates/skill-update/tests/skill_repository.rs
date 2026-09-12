@@ -586,6 +586,26 @@ fn post_resolve_rest_fallback_returns_clean_error_without_staging() {
 	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 0);
 }
 
+/// ONE env lock for this whole test binary.
+///
+/// `non_github_private_host_reaches_system_git_through_skill_repository`
+/// prepends a fake `git` shim onto the PROCESS-WIDE `PATH`, and libtest runs a
+/// binary's tests in parallel threads of one process — so every other test that
+/// spawns `git` is exposed to it. Two observed failure signatures, both this:
+/// `git rev-parse HEAD failed` (the shim ran after `EnvRestore` had already put
+/// `AGHUB_REAL_GIT` back, so it exec'd nothing) and
+/// `cannot open /tmp/.tmpXXXX/bin/git` (a sibling resolved the shim, then the
+/// tempdir was dropped out from under it).
+///
+/// The lock used to be a `static` INSIDE that one test, which serialized it
+/// against itself and nobody else — exactly the "one env mutex per test binary;
+/// two mutexes serialize nobody" trap in `crates/core/AGENTS.md`. Every test
+/// that shells out to `git` must take THIS one.
+fn env_lock() -> &'static Mutex<()> {
+	static ENV_LOCK: Mutex<()> = Mutex::new(());
+	&ENV_LOCK
+}
+
 struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl EnvRestore {
@@ -639,8 +659,7 @@ fn run_git(git: &Path, cwd: &Path, args: &[&str]) {
 fn non_github_private_host_reaches_system_git_through_skill_repository() {
 	use std::os::unix::fs::PermissionsExt;
 
-	static ENV_LOCK: Mutex<()> = Mutex::new(());
-	let _lock = ENV_LOCK.lock().unwrap();
+	let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let tmp = tempfile::tempdir().unwrap();
 	let real_git = String::from_utf8(
 		Command::new("sh")
@@ -1042,6 +1061,8 @@ fn spawn_git_daemon(
 
 #[test]
 fn gix_root_skill_over_limit_is_refused_before_materialization() {
+	// Shares the binary-wide PATH; see `env_lock`.
+	let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let tmp = tempfile::tempdir().unwrap();
 	let origin = tmp.path().join("large-root-origin");
 	fs::create_dir_all(origin.join("bulk")).unwrap();
@@ -1092,6 +1113,8 @@ fn gix_root_skill_over_limit_is_refused_before_materialization() {
 // gix-slot tests fake the backend or exercise a refusal.
 #[test]
 fn gix_daemon_roundtrip_fetches_content_and_sees_upstream_advance() {
+	// Shares the binary-wide PATH; see `env_lock`.
+	let _lock = env_lock().lock().unwrap_or_else(|e| e.into_inner());
 	let tmp = tempfile::tempdir().unwrap();
 	let origin = tmp.path().join("daemon-origin");
 	let skill_dir = origin.join("skills/hello");
