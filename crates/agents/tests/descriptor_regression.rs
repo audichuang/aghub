@@ -198,7 +198,7 @@ fn descriptor_matrix_covers_every_agent_type() {
 #[test]
 fn test_cli_names() {
 	// Expected values from main branch descriptor files
-	let expected: [(AgentType, &str); 26] = [
+	let expected: [(AgentType, &str); AgentType::ALL.len()] = [
 		(AgentType::Claude, "claude"),
 		(AgentType::Codex, "codex"),
 		(AgentType::Openclaw, "openclaw"),
@@ -228,14 +228,15 @@ fn test_cli_names() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, name)) = expected.iter().find(|(t, _)| *t == agent_type)
-		{
-			assert_eq!(
-				desc.cli_name, *name,
-				"cli_name mismatch for {:?}",
-				agent_type
-			);
-		}
+		let (_, name) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.unwrap_or_else(|| panic!("no cli_name row for {agent_type:?}"));
+		assert_eq!(
+			desc.cli_name, *name,
+			"cli_name mismatch for {:?}",
+			agent_type
+		);
 	}
 }
 
@@ -245,7 +246,7 @@ fn test_cli_names() {
 
 #[test]
 fn test_skills_cli_names() {
-	let expected: [(AgentType, Option<&str>); 26] = [
+	let expected: [(AgentType, Option<&str>); AgentType::ALL.len()] = [
 		(AgentType::Claude, Some("claude-code")), // main branch: "claude-code"
 		(AgentType::Codex, Some("codex")),
 		(AgentType::Openclaw, Some("openclaw")),
@@ -275,14 +276,17 @@ fn test_skills_cli_names() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, name)) = expected.iter().find(|(t, _)| *t == agent_type)
-		{
-			assert_eq!(
-				desc.skills_cli_name, *name,
-				"skills_cli_name mismatch for {:?}",
-				agent_type
-			);
-		}
+		let (_, name) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.unwrap_or_else(|| {
+				panic!("no skills_cli_name row for {agent_type:?}")
+			});
+		assert_eq!(
+			desc.skills_cli_name, *name,
+			"skills_cli_name mismatch for {:?}",
+			agent_type
+		);
 	}
 }
 
@@ -292,7 +296,7 @@ fn test_skills_cli_names() {
 
 #[test]
 fn test_display_names() {
-	let expected: [(AgentType, &str); 26] = [
+	let expected: [(AgentType, &str); AgentType::ALL.len()] = [
 		(AgentType::Claude, "Claude Code"), // main branch: "Claude Code"
 		(AgentType::Codex, "OpenAI Codex"),
 		(AgentType::Openclaw, "OpenClaw"),
@@ -322,14 +326,17 @@ fn test_display_names() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, name)) = expected.iter().find(|(t, _)| *t == agent_type)
-		{
-			assert_eq!(
-				desc.display_name, *name,
-				"display_name mismatch for {:?}",
-				agent_type
-			);
-		}
+		let (_, name) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.unwrap_or_else(|| {
+				panic!("no display_name row for {agent_type:?}")
+			});
+		assert_eq!(
+			desc.display_name, *name,
+			"display_name mismatch for {:?}",
+			agent_type
+		);
 	}
 }
 
@@ -339,7 +346,7 @@ fn test_display_names() {
 
 #[test]
 fn test_project_markers() {
-	let expected: [(AgentType, &[&str]); 26] = [
+	let expected: [(AgentType, &[&str]); AgentType::ALL.len()] = [
 		(AgentType::Claude, &[".claude", ".mcp.json"]), // main branch has both
 		(AgentType::Codex, &[".codex"]),
 		(AgentType::Openclaw, &[".openclaw"]),
@@ -375,15 +382,17 @@ fn test_project_markers() {
 	];
 
 	for (agent_type, desc) in all_descriptors() {
-		if let Some((_, markers)) =
-			expected.iter().find(|(t, _)| *t == agent_type)
-		{
-			assert_eq!(
-				desc.project_markers, *markers,
-				"project_markers mismatch for {:?}",
-				agent_type
-			);
-		}
+		let (_, markers) = expected
+			.iter()
+			.find(|(t, _)| *t == agent_type)
+			.unwrap_or_else(|| {
+				panic!("no project_markers row for {agent_type:?}")
+			});
+		assert_eq!(
+			desc.project_markers, *markers,
+			"project_markers mismatch for {:?}",
+			agent_type
+		);
 	}
 }
 
@@ -394,7 +403,7 @@ fn test_project_markers() {
 #[test]
 fn test_mcp_global_paths() {
 	let _env = default_env();
-	let expected: [(AgentType, Option<&str>); 26] = [
+	let expected: [(AgentType, Option<&str>); AgentType::ALL.len()] = [
 		(AgentType::Claude, Some(".claude.json")),
 		(AgentType::Codex, Some(".codex/config.toml")),
 		(AgentType::Openclaw, Some(".openclaw/openclaw.json")),
@@ -499,7 +508,7 @@ fn test_mcp_global_paths() {
 					agent_type
 				);
 			}
-			None => {}
+			None => panic!("no mcp_global_path row for {agent_type:?}"),
 		}
 	}
 }
@@ -510,7 +519,7 @@ fn test_mcp_global_paths() {
 
 #[test]
 fn test_mcp_project_paths() {
-	let expected: [(AgentType, Option<&str>); 26] = [
+	let expected: [(AgentType, Option<&str>); AgentType::ALL.len()] = [
 		(AgentType::Claude, Some(".mcp.json")),
 		(AgentType::Codex, Some(".codex/config.toml")),
 		(AgentType::Openclaw, None), // Openclaw has no project MCP path
@@ -587,7 +596,7 @@ fn test_mcp_project_paths() {
 					agent_type
 				);
 			}
-			None => {}
+			None => panic!("no mcp_project_path row for {agent_type:?}"),
 		}
 	}
 }
@@ -666,10 +675,21 @@ fn opencode_project_mcp_defaults_to_root_config() {
 // Global Data Dir Tests (from main branch actual values)
 // =============================================================================
 
+/// Agents whose global data dir is NOT a home dotfolder, asserted
+/// individually after the loop. Membership is the only sanctioned way
+/// out of the table.
+const OS_CONFIG_DIR_AGENTS: &[AgentType] = &[
+	AgentType::Zed,
+	AgentType::Trae,
+	AgentType::JetBrainsAi,
+	AgentType::Hermes,
+];
+
 #[test]
 fn test_global_data_dirs() {
 	let _env = default_env();
-	let expected: [(AgentType, Option<&str>); 22] = [
+	let expected: [(AgentType, Option<&str>);
+		AgentType::ALL.len() - OS_CONFIG_DIR_AGENTS.len()] = [
 		(AgentType::Claude, Some(".claude")),
 		(AgentType::Codex, Some(".codex")),
 		(AgentType::Openclaw, Some(".openclaw")),
@@ -721,7 +741,11 @@ fn test_global_data_dirs() {
 					agent_type
 				);
 			}
-			None => {}
+			None => assert!(
+				OS_CONFIG_DIR_AGENTS.contains(&agent_type),
+				"no global_data_dir row for {agent_type:?} — add one, or add \
+				 it to OS_CONFIG_DIR_AGENTS and assert it after the loop"
+			),
 		}
 	}
 
@@ -756,7 +780,7 @@ fn test_global_data_dirs() {
 
 #[test]
 fn test_mcp_capabilities_stdio() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -789,7 +813,7 @@ fn test_mcp_capabilities_stdio() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.mcp.stdio, *val,
@@ -802,7 +826,7 @@ fn test_mcp_capabilities_stdio() {
 
 #[test]
 fn test_mcp_capabilities_remote() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -835,7 +859,7 @@ fn test_mcp_capabilities_remote() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.mcp.remote, *val,
@@ -848,7 +872,7 @@ fn test_mcp_capabilities_remote() {
 
 #[test]
 fn test_mcp_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -881,7 +905,7 @@ fn test_mcp_capabilities_scopes_global() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.mcp.scopes.global, *val,
@@ -894,7 +918,7 @@ fn test_mcp_capabilities_scopes_global() {
 
 #[test]
 fn test_mcp_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false), // Openclaw has no project MCP
@@ -927,7 +951,7 @@ fn test_mcp_capabilities_scopes_project() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.mcp.scopes.project, *val,
@@ -940,7 +964,7 @@ fn test_mcp_capabilities_scopes_project() {
 
 #[test]
 fn test_mcp_capabilities_enable_disable() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, false),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -976,7 +1000,9 @@ fn test_mcp_capabilities_enable_disable() {
 			.iter()
 			.find(|(agent, _)| *agent == agent_type)
 			.map(|(_, value)| *value)
-			.expect("every descriptor must have an MCP capability contract");
+			.unwrap_or_else(|| {
+				panic!("no MCP capability row for {agent_type:?}")
+			});
 		assert_eq!(
 			desc.capabilities.mcp.enable_disable, expected,
 			"mcp.enable_disable mismatch for {:?}",
@@ -991,7 +1017,7 @@ fn test_mcp_capabilities_enable_disable() {
 
 #[test]
 fn test_skills_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, true),
@@ -1024,7 +1050,7 @@ fn test_skills_capabilities_scopes_global() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.skills.scopes.global, *val,
@@ -1037,7 +1063,7 @@ fn test_skills_capabilities_scopes_global() {
 
 #[test]
 fn test_skills_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true),
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false), // Openclaw has no project skills
@@ -1070,7 +1096,7 @@ fn test_skills_capabilities_scopes_project() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.skills.scopes.project, *val,
@@ -1083,7 +1109,7 @@ fn test_skills_capabilities_scopes_project() {
 
 #[test]
 fn test_skills_capabilities_universal() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, false),
 		(AgentType::Codex, false),
 		(AgentType::Openclaw, false),
@@ -1116,7 +1142,7 @@ fn test_skills_capabilities_universal() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.skills.universal, *val,
@@ -1133,7 +1159,7 @@ fn test_skills_capabilities_universal() {
 
 #[test]
 fn test_sub_agent_capabilities_scopes_global() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true), // Claude has global sub-agents
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false),
@@ -1166,7 +1192,7 @@ fn test_sub_agent_capabilities_scopes_global() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.sub_agents.scopes.global, *val,
@@ -1179,7 +1205,7 @@ fn test_sub_agent_capabilities_scopes_global() {
 
 #[test]
 fn test_sub_agent_capabilities_scopes_project() {
-	let expected: [(AgentType, bool); 26] = [
+	let expected: [(AgentType, bool); AgentType::ALL.len()] = [
 		(AgentType::Claude, true), // Claude has project sub-agents
 		(AgentType::Codex, true),
 		(AgentType::Openclaw, false),
@@ -1212,7 +1238,7 @@ fn test_sub_agent_capabilities_scopes_project() {
 		let (_, val) = expected
 			.iter()
 			.find(|(t, _)| *t == agent_type)
-			.expect("every descriptor must have a capability contract");
+			.unwrap_or_else(|| panic!("no capability row for {agent_type:?}"));
 		{
 			assert_eq!(
 				desc.capabilities.sub_agents.scopes.project, *val,
@@ -1231,7 +1257,7 @@ fn test_sub_agent_capabilities_scopes_project() {
 fn test_global_skill_paths() {
 	let _env = default_env();
 	// Most agents have single skill path, Claude has dynamic plugin discovery
-	let expected: [(AgentType, Option<&[&str]>); 26] = [
+	let expected: [(AgentType, Option<&[&str]>); AgentType::ALL.len()] = [
 		// Claude: dynamic plugin discovery, base path is .claude/skills
 		(AgentType::Claude, Some(&[".claude/skills"])),
 		(
@@ -1300,7 +1326,9 @@ fn test_global_skill_paths() {
 			let (_, paths) = expected
 				.iter()
 				.find(|(t, _)| *t == agent_type)
-				.expect("every descriptor must have a skill-path contract");
+				.unwrap_or_else(|| {
+					panic!("no skill-path row for {agent_type:?}")
+				});
 			if agent_type == AgentType::Hermes {
 				assert_eq!(
 					desc.global_skill_read_paths(),
@@ -1377,7 +1405,7 @@ fn test_global_skill_paths() {
 fn test_project_skill_paths() {
 	let root = PathBuf::from("/project");
 
-	let expected: [(AgentType, Option<&[&str]>); 26] = [
+	let expected: [(AgentType, Option<&[&str]>); AgentType::ALL.len()] = [
 		(AgentType::Claude, Some(&[".claude/skills"])),
 		(AgentType::Codex, Some(&[".codex/skills", ".agents/skills"])),
 		(AgentType::Openclaw, None), // Openclaw has no project skills
@@ -1434,7 +1462,9 @@ fn test_project_skill_paths() {
 			let (_, paths) = expected
 				.iter()
 				.find(|(t, _)| *t == agent_type)
-				.expect("every descriptor must have a skill-path contract");
+				.unwrap_or_else(|| {
+					panic!("no skill-path row for {agent_type:?}")
+				});
 			match paths {
 				Some(path_strs) => {
 					assert!(
