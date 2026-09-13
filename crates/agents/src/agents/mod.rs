@@ -99,6 +99,14 @@ macro_rules! agent_roster {
 		/// downstream `static` can initialise from it.
 		pub const ALL_DESCRIPTORS: &[&AgentDescriptor] =
 			&[$(&$module::DESCRIPTOR,)+];
+
+		/// Every declared alias with the variant it resolves to. Generated
+		/// so the alias test reads the SAME rows `from_str` was built from —
+		/// a hand-copied list would have to be kept in step with these rows
+		/// by hand, which is the duplication this macro exists to delete.
+		#[cfg(test)]
+		pub(crate) const ROSTER_ALIASES: &[(&str, AgentType)] =
+			&[$($(($alias, AgentType::$variant),)*)+];
 	};
 }
 

@@ -43,9 +43,11 @@ Referrer, Relink, …) are defined in [CONTEXT.md](../../../CONTEXT.md) — use 
 - Agent descriptors/models/format → `crates/agents` (NOT `crates/core`).
 - All config mutation goes through **`ConfigManager`** (`crates/core/src/manager/`);
   never bypass it. Disk-discovered skills (Claude) barely use `save_current`.
-- Adding/removing an agent touches **7 places**: the descriptor, two
-  registration spots in `crates/agents`, and four test contracts (three
-  `crates/core/tests/mcp_dialect_*`, plus every table in
+- Adding/removing an agent touches **6 places**: the descriptor, ONE
+  `agent_roster!` row in `crates/agents/src/agents/mod.rs` (it emits
+  `AgentType`, `ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and
+  `ALL_DESCRIPTORS`, so `models.rs` needs no edit either), and four test
+  contracts (three `crates/core/tests/mcp_dialect_*`, plus every table in
   `crates/agents/tests/descriptor_regression.rs`). `crates/core/src/registry`
   needs NO edit — `ALL_AGENTS` IS `aghub_agents::agents::ALL_DESCRIPTORS`.
   See the root `AGENTS.md` "Adding / Removing an Agent" checklist.

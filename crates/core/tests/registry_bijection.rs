@@ -19,9 +19,11 @@
 //! - `Grok => "grokk", grok, [];` — the row's id drifts from the `id:` field
 //!   inside `agents/grok.rs`, which is what every path and lock keys on
 //!
-//! Each of those is a live way back to the original failure, and each has its
-//! own test below. Nothing here is a tautology; delete one and the
-//! corresponding copy-paste ships.
+//! Each is a live way back to the original failure, and each is caught below.
+//! The tests deliberately OVERLAP — a wrong module trips three of them — because
+//! each names the fault differently and the clearest message is worth the
+//! redundancy. What is NOT here is an assertion that cannot fail: the length
+//! identity was removed once both rosters started expanding from the same rows.
 
 use aghub_agents::AgentType;
 use aghub_core::registry;
@@ -108,5 +110,4 @@ fn agent_type_all_lists_each_agent_exactly_once() {
 			agent.as_str()
 		);
 	}
-	assert_eq!(seen.len(), AgentType::ALL.len());
 }

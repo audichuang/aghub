@@ -818,43 +818,48 @@ mod tests {
 		assert!(AgentType::ALL.contains(&AgentType::Hermes));
 	}
 
-	/// Every `from_str` ALIAS — the ids themselves are pinned by
-	/// `aghub-core/tests/registry_bijection.rs`, but an alias exists only in
-	/// its `agent_roster!` row and is reachable from nothing else. Deleting
-	/// all seven left the whole workspace suite green, so this is the only
-	/// thing standing between `-a roo` / `-a jb` / `-a kimi-cli` and a
-	/// "unknown agent" error in a user's script.
+	/// Every `from_str` ALIAS, read from the roster rows themselves. The ids
+	/// are pinned by `aghub-core/tests/registry_bijection.rs`, but an alias
+	/// exists only in its `agent_roster!` row and is reachable from nothing
+	/// else — deleting all seven left the whole workspace suite green.
 	#[test]
 	fn every_from_str_alias_still_resolves() {
 		use std::str::FromStr;
-		let aliases = [
-			("jetbrains", AgentType::JetBrainsAi),
-			("jb", AgentType::JetBrainsAi),
-			("roo", AgentType::RooCode),
-			("kimi-cli", AgentType::Kimi),
-			("augment", AgentType::AugmentCode),
-			("kilo", AgentType::KiloCode),
-			("oh-my-pi", AgentType::Omp),
-		];
+
+		let aliases = crate::agents::ROSTER_ALIASES;
+		assert_eq!(
+			aliases.len(),
+			7,
+			"the roster declares {} aliases, not 7 — intentional? then \
+			 update this count, which is here so a DELETED alias cannot pass \
+			 by simply not being iterated: {aliases:?}",
+			aliases.len()
+		);
+
 		for (alias, expected) in aliases {
+			// `from_str` lowercases its INPUT but not the declared literal,
+			// so a literal with any uppercase in it is a match arm nothing
+			// can ever reach — green, and dead.
+			assert_eq!(
+				*alias,
+				alias.to_lowercase(),
+				"alias '{alias}' is not lowercase, so no input can reach it"
+			);
+			assert!(
+				!AgentType::ALL.iter().any(|a| a.as_str() == *alias),
+				"alias '{alias}' is also an id — an unreachable match arm"
+			);
 			assert_eq!(
 				AgentType::from_str(alias),
-				Ok(expected),
+				Ok(*expected),
 				"alias '{alias}' must still resolve"
 			);
-			// Uppercase reaches the same arm: `from_str` lowercases first.
 			assert_eq!(
 				AgentType::from_str(&alias.to_uppercase()),
-				Ok(expected),
+				Ok(*expected),
 				"alias '{alias}' must be case-insensitive"
 			);
 		}
-		assert!(
-			!aliases.iter().any(|(a, _)| AgentType::ALL
-				.iter()
-				.any(|agent| agent.as_str() == *a)),
-			"an alias that is also an id would be an unreachable match arm"
-		);
 	}
 
 	#[test]

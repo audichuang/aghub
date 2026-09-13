@@ -162,10 +162,11 @@ fn zed_config_dir() -> Option<PathBuf> {
 
 /// Every shipped descriptor, paired with the `AgentType` its own id names.
 ///
-/// DERIVED from `agents::ALL_DESCRIPTORS`, never hand-listed: a fourth
-/// hand-written roster is how "add an agent" turned into "update three lists
-/// and hope", and a matrix that carried its own copy stayed green while the
-/// registry was missing the agent entirely.
+/// DERIVED from `agents::ALL_DESCRIPTORS`, never hand-listed: a matrix
+/// carrying its own copy of the roster stayed green while the registry was
+/// missing the agent entirely. (There used to be four hand-written rosters;
+/// `agent_roster!` collapsed them into one, and this still must not become
+/// a second.)
 fn all_descriptors() -> Vec<(AgentType, &'static AgentDescriptor)> {
 	agents::ALL_DESCRIPTORS
 		.iter()
@@ -675,9 +676,11 @@ fn opencode_project_mcp_defaults_to_root_config() {
 // Global Data Dir Tests (from main branch actual values)
 // =============================================================================
 
-/// Agents whose global data dir is NOT a home dotfolder, asserted
-/// individually after the loop. Membership is the only sanctioned way
-/// out of the table.
+/// Agents whose global data dir is NOT a home dotfolder. Membership only
+/// buys a seat in the `None` arm's `match` below, which still has to assert
+/// something — listing an agent here and walking away is a compile error
+/// there, not a silent exemption. The const itself exists for the table's
+/// length; the `match` is the enforcement.
 const OS_CONFIG_DIR_AGENTS: &[AgentType] = &[
 	AgentType::Zed,
 	AgentType::Trae,
@@ -741,37 +744,42 @@ fn test_global_data_dirs() {
 					agent_type
 				);
 			}
-			None => assert!(
-				OS_CONFIG_DIR_AGENTS.contains(&agent_type),
-				"no global_data_dir row for {agent_type:?} — add one, or add \
-				 it to OS_CONFIG_DIR_AGENTS and assert it after the loop"
-			),
+			// No row: the agent must be one of the OS-config-dir exceptions
+			// AND have its own assertion right here. Asserting only
+			// membership let an agent be added to the exception list and
+			// never checked at all — the loop passed and the individual
+			// assertions were a detached block nothing tied back to it.
+			None => {
+				assert!(
+					OS_CONFIG_DIR_AGENTS.contains(&agent_type),
+					"no global_data_dir row for {agent_type:?} — add one, or \
+					 add it to OS_CONFIG_DIR_AGENTS and give it an arm below"
+				);
+				// Trae, JetBrains AI and Zed store data in the OS config dir
+				// (Application Support on macOS, .config on Linux), not a
+				// home dotfolder; Hermes follows its platform home.
+				let expected = match agent_type {
+					AgentType::Trae => {
+						dirs::config_dir().map(|c| c.join("Trae"))
+					}
+					AgentType::JetBrainsAi => {
+						dirs::config_dir().map(|c| c.join("JetBrains"))
+					}
+					AgentType::Zed => zed_config_dir(),
+					AgentType::Hermes => hermes_home(),
+					other => panic!(
+						"{other:?} is in OS_CONFIG_DIR_AGENTS with no \
+						 assertion — add its arm here"
+					),
+				};
+				assert_eq!(
+					(desc.global_data_dir)(),
+					expected,
+					"global_data_dir mismatch for {agent_type:?}"
+				);
+			}
 		}
 	}
-
-	// Trae and JetBrains AI store data in the OS config dir (Application
-	// Support on macOS, .config on Linux), not a home dotfolder.
-	use aghub_agents::agents;
-	assert_eq!(
-		(agents::trae::DESCRIPTOR.global_data_dir)(),
-		dirs::config_dir().map(|c| c.join("Trae")),
-		"trae global_data_dir should be the OS config dir"
-	);
-	assert_eq!(
-		(agents::jetbrains_ai::DESCRIPTOR.global_data_dir)(),
-		dirs::config_dir().map(|c| c.join("JetBrains")),
-		"jetbrains-ai global_data_dir should be the OS config dir"
-	);
-	assert_eq!(
-		(agents::zed::DESCRIPTOR.global_data_dir)(),
-		zed_config_dir(),
-		"zed global_data_dir should be the OS config dir"
-	);
-	assert_eq!(
-		(agents::hermes::DESCRIPTOR.global_data_dir)(),
-		hermes_home(),
-		"hermes global_data_dir follows its platform home"
-	);
 }
 
 // =============================================================================

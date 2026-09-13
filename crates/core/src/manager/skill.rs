@@ -2948,6 +2948,22 @@ mod tests {
 		// Claude in AgentType::ALL, so Claude's symlink is removed first, then
 		// RooCode's removal fails — forcing the rollback to RESTORE Claude's
 		// already-removed symlink).
+		//
+		// That ordering is the whole point of the test, and roster order is a
+		// knob `agent_roster!` invites you to turn. Flip it and RooCode's
+		// unlink fails BEFORE Claude's symlink is ever touched, so the
+		// restore assertion below passes on a link that was never removed —
+		// green, testing nothing. Pin the precondition rather than the row.
+		let pos = |agent: AgentType| {
+			AgentType::ALL.iter().position(|a| *a == agent).unwrap()
+		};
+		assert!(
+			pos(AgentType::Claude) < pos(AgentType::RooCode),
+			"this test needs Claude's referrer removed before RooCode's — \
+			 the roster now puts RooCode first, so the rollback it exercises \
+			 never happens"
+		);
+
 		let master = root.join(".aghub/roll2-old");
 		let roo_dir = root.join(".roo/skills");
 		std::fs::create_dir_all(&roo_dir).unwrap();
