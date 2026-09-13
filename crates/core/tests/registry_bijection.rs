@@ -1,17 +1,27 @@
-//! `registry::ALL_AGENTS` and `AgentType::ALL` must be a BIJECTION.
+//! Every `agent_roster!` row must name its OWN descriptor, under its OWN id.
 //!
-//! `registry::get` is a linear find-by-id that ends in
-//! `.unwrap_or(&claude::DESCRIPTOR)` — a SILENT fallback. An agent missing from
-//! the roster therefore gets Claude's descriptor at runtime: its MCP servers
-//! are written into `~/.claude.json` and its skills linked into Claude's
-//! directory, with no compile error and no runtime error. Every registry-driven
-//! test (`mcp_dialect_roundtrip`, `mcp_dialect_golden`, `test_agent_paths`) is
-//! vacuously green for an agent the roster never mentions, and the CRUD suites
-//! are worse than vacuous: they silently exercise Claude and pass.
+//! `registry::ALL_AGENTS` and `AgentType::ALL` are now generated from the one
+//! declaration in `crates/agents/src/agents/mod.rs`, so they can no longer
+//! disagree on MEMBERSHIP — a variant with no descriptor entry does not
+//! compile, and `registry::get` has no `.unwrap_or(&claude::DESCRIPTOR)` left.
+//! That closes the failure this file was written for: an agent absent from the
+//! roster used to be served Claude's descriptor at runtime, writing its MCP
+//! servers into `~/.claude.json` and linking its skills into Claude's
+//! directory, with every registry-driven suite vacuously green.
 //!
-//! Length alone is not the check — a duplicated entry pads the length back to
-//! matching while an agent stays missing — so identity and uniqueness are
-//! asserted too.
+//! What the macro still cannot check is the OTHER TWO fields of a row. Only
+//! the variant is compiler-enforced; the id literal and the module path are
+//! free text, and a copy-pasted row compiles:
+//!
+//! - `Grok => "grok", claude, [];` — Grok is handed CLAUDE's descriptor, and
+//!   `claude::DESCRIPTOR` appears in `ALL_DESCRIPTORS` twice
+//! - `Grok => "claude", grok, [];` — two variants answer to the same id
+//! - `Grok => "grokk", grok, [];` — the row's id drifts from the `id:` field
+//!   inside `agents/grok.rs`, which is what every path and lock keys on
+//!
+//! Each of those is a live way back to the original failure, and each has its
+//! own test below. Nothing here is a tautology; delete one and the
+//! corresponding copy-paste ships.
 
 use aghub_agents::AgentType;
 use aghub_core::registry;
@@ -24,8 +34,9 @@ fn every_agent_type_has_its_own_descriptor_in_the_registry() {
 		assert_eq!(
 			descriptor.id,
 			agent.as_str(),
-			"registry::get({agent:?}) fell back to '{}' — add \
-			 &agents::…::DESCRIPTOR to agents::ALL_DESCRIPTORS",
+			"registry::get({agent:?}) returned the descriptor whose id is \
+			 '{}' — the agent_roster! row's id literal and the `id:` field in \
+			 agents/<module>.rs must be the same string",
 			descriptor.id
 		);
 	}
@@ -33,9 +44,11 @@ fn every_agent_type_has_its_own_descriptor_in_the_registry() {
 
 #[test]
 fn no_agent_type_is_served_the_claude_fallback_by_accident() {
-	// The id check above cannot see this on its own: Claude's descriptor IS the
-	// fallback, so an agent whose id happened to match would still slip past.
-	// Pointer identity names the failure for what it is.
+	// A row naming the wrong MODULE (`Grok => "grok", claude, [];`) compiles:
+	// the id check above still passes for Claude's own row, and Grok's row
+	// fails it only because the descriptor it reaches has Claude's id. Pointer
+	// identity names the failure for what it is — Grok's config would be
+	// written to Claude's files, which is exactly the old fallback bug.
 	let claude = registry::get(AgentType::Claude);
 	for agent in AgentType::ALL {
 		if matches!(agent, AgentType::Claude) {
@@ -55,8 +68,9 @@ fn the_registry_holds_no_duplicate_and_no_unknown_agents() {
 	for descriptor in registry::iter_all() {
 		assert!(
 			seen.insert(descriptor.id),
-			"'{}' appears twice in ALL_DESCRIPTORS — a duplicate pads the \
-			 length back to matching while another agent is missing",
+			"'{}' appears twice in ALL_DESCRIPTORS — two agent_roster! rows \
+			 name the same descriptor module, so one agent is being served \
+			 another's config files",
 			descriptor.id
 		);
 		let agent: AgentType = descriptor.id.parse().unwrap_or_else(|_| {
@@ -73,7 +87,9 @@ fn the_registry_holds_no_duplicate_and_no_unknown_agents() {
 	assert_eq!(
 		seen.len(),
 		AgentType::ALL.len(),
-		"registry holds {} agents, AgentType::ALL declares {}",
+		"registry holds {} agents, AgentType::ALL declares {} — both expand \
+		 from the same agent_roster! rows, so this can only mean \
+		 registry::ALL_AGENTS is no longer `= agents::ALL_DESCRIPTORS`",
 		seen.len(),
 		AgentType::ALL.len()
 	);
@@ -81,8 +97,9 @@ fn the_registry_holds_no_duplicate_and_no_unknown_agents() {
 
 #[test]
 fn agent_type_all_lists_each_agent_exactly_once() {
-	// The other direction of the same roster problem: a duplicate here would
-	// let the counts above agree while an agent is absent from BOTH lists.
+	// The id LITERAL side: two rows may not answer to the same id. A duplicate
+	// variant is a compile error, but `Grok => "claude", grok, [];` is not —
+	// and `from_str("claude")` would then be decided by match-arm order.
 	let mut seen = BTreeSet::new();
 	for agent in AgentType::ALL {
 		assert!(

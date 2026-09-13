@@ -1434,4 +1434,25 @@ mod tests {
 			"slot present: now the unusable Master IS this row's answer"
 		);
 	}
+
+	/// `doctor -a all` expands through `AgentType::ALL` while every other
+	/// `-a all` surface (source sync, the API, the desktop list) expands
+	/// through `registry::ALL_AGENTS`. Those were two hand-written rosters in
+	/// DIFFERENT orders, so `doctor` printed cursor-first while `source sync`
+	/// printed claude-first for the same `-a all`. `agent_roster!` now emits
+	/// both from one declaration; this pins that they stay one order, since
+	/// nothing else would notice a second roster growing back.
+	#[test]
+	fn all_expands_in_the_same_order_as_the_registry() {
+		let doctor: Vec<&str> = resolve_roster("all")
+			.expect("'all' is a valid selection")
+			.iter()
+			.map(|agent| agent.as_str())
+			.collect();
+		let registry: Vec<&str> = registry::iter_all().map(|d| d.id).collect();
+		assert_eq!(
+			doctor, registry,
+			"doctor's -a all roster must match registry order exactly"
+		);
+	}
 }

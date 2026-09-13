@@ -9,8 +9,8 @@ Role map (not a full file tree — `ls` / codegraph for that):
 
 - `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
 - `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns)
-- `models.rs` — `AgentConfig`, `AgentType`, `McpServer`, `McpTransport`, `Skill`
-- `agents/` — one descriptor per agent (authoritative list: `AgentType::ALL` in `models.rs`); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
+- `models.rs` — `AgentConfig`, `McpServer`, `McpTransport`, `Skill`, `AgentSelection`, and `AgentType`'s re-export plus `parse_list` (the enum itself comes from `agents/mod.rs`)
+- `agents/` — one descriptor per agent, plus the `agent_roster!` macro in `mod.rs` that declares the roster ONCE and emits `AgentType`, `AgentType::ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and `ALL_DESCRIPTORS` from it (so `models.rs` re-exports `AgentType` rather than defining it); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `sub_agents.rs` — markdown sub-agent I/O + `SubAgentLayout`: `Flat { suffix }` (`.md` for Claude/Grok/OpenCode, `.agent.md` for Copilot) vs `Nested { file_name }` (Antigravity's `<name>/agent.md`). The layout decides the read filter, the NAME and the written filename at once — get one wrong and aghub round-trips with itself while the vendor sees nothing. Frontmatter keys aghub does not model ride the model as `SubAgent::extra_frontmatter` (deserialized through a flattened `extra`), with the destination file read back only when the model carries none — a save rewrites EVERY sub-agent in the directory, not just the edited one, so without this creating one strips its siblings' `tools`/`model`/`color`. Codex is not here: its sub-agents are TOML (`agents/codex/sub_agent.rs`)
 - `format/` — serializers: OpenCode native, JSON map MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). Every dialect keeps its own engine (no two share a `Value` type). **All 24 MCP-capable agents** declare the answers they must not differ on in `mcp_policy.rs` — `TransportVocabulary` (its word for each transport; `sse: ""` is what `refuse_unwritable` turns into a refusal — but the dialect still has to CALL it, declaring alone writes an empty tag; `mcp_dialect_roundtrip` is what catches a missing call, NOT `mcp_dialect_decisions`), `OwnedKeys`, `reject_mixed_transport`, `remote_transport`, `transport_fields`, `reads_http` (the one "is this tag streamable HTTP?" condition — `json_map` shares ONE wide alias list across its 17 agents, so narrowing it per dialect is a behaviour change). The seven hand-written dialects declare a `TransportVocabulary` each; the **17 `json_map` agents** declare one inside `json_map::Dialect`, which is the SAME type (it was a second copy, `Discriminator`, until it was merged). Only the mixed-entry WORDING is still split, by `MixedWording` — those 17 agents' users already see `cannot contain both command and url`. Read `mcp_policy.rs` before touching any parser, and add a row to `crates/core/tests/mcp_dialect_decisions.rs` when you add an **MCP-capable agent** (a `json_map` agent introduces no dialect and still owes a row)
 
@@ -35,7 +35,7 @@ the repository root.
 
 ## AGENT-SPECIFIC GOTCHAS
 
-The cross-crate rules (universal-master read matrix, `registry::get()` fallback)
+The cross-crate rules (universal-master read matrix, `registry::get()`)
 are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps:
 
 - **Claude**: skills from `~/.claude/skills/` SKILL.md (not JSON). Disabled MCPs
@@ -85,9 +85,14 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
 Wiring steps: root AGENTS.md "Adding / Removing an Agent". Crate-level detail:
 the descriptor is `pub const DESCRIPTOR: AgentDescriptor = …`, and the roster
 it must join is `agents::ALL_DESCRIPTORS` in this crate (`core`'s `ALL_AGENTS`
-is that same const). Dispatch is find-by-id over the array — no match arm to
-edit, which is exactly why the miss is silent; `registry_bijection.rs` is what
-makes it loud.
+is that same const, emitted with the `AgentType` enum, `ALL`, `as_str`,
+`FromStr` and `AgentType::descriptor` by the `agent_roster!` macro right above
+it). Add ONE row — `Variant => "id", module, ["alias", …];` — and nothing in
+`models.rs`, which only re-exports `AgentType`. Dispatch is that generated
+`match`, so a variant with no descriptor no longer compiles and `registry::get`
+has no Claude fallback left. Only the VARIANT is compiler-checked though: the
+id literal and the module path are free text, so a copy-pasted row builds fine
+and `registry_bijection.rs` is what catches it.
 
 ## ANTI-PATTERNS
 

@@ -398,104 +398,13 @@ pub enum ResourceScope {
 	Both,
 }
 
-/// Agent types supported by the system
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentType {
-	Cursor,
-	Windsurf,
-	Copilot,
-	Claude,
-	RooCode,
-	Cline,
-	Gemini,
-	Codex,
-	Antigravity,
-	Openclaw,
-	OpenCode,
-	// New agents
-	AugmentCode,
-	KiloCode,
-	Amp,
-	Zed,
-	Kiro,
-	Warp,
-	Trae,
-	Factory,
-	Kimi,
-	Mistral,
-	Pi,
-	JetBrainsAi,
-	Hermes,
-	Grok,
-	Omp,
-}
+/// Generated, with `ALL_DESCRIPTORS`, by `agent_roster!` in `agents/mod.rs` —
+/// one row per agent, so a variant can no longer exist without its descriptor.
+/// Re-exported here because this is where the rest of the crate imports it
+/// from, and where the impl below adds the parsing helpers.
+pub use crate::agents::AgentType;
 
 impl AgentType {
-	pub const ALL: &[AgentType] = &[
-		AgentType::Cursor,
-		AgentType::Windsurf,
-		AgentType::Copilot,
-		AgentType::Claude,
-		AgentType::RooCode,
-		AgentType::Cline,
-		AgentType::Gemini,
-		AgentType::Codex,
-		AgentType::Antigravity,
-		AgentType::Openclaw,
-		AgentType::OpenCode,
-		AgentType::AugmentCode,
-		AgentType::KiloCode,
-		AgentType::Amp,
-		AgentType::Zed,
-		AgentType::Kiro,
-		AgentType::Warp,
-		AgentType::Trae,
-		AgentType::Factory,
-		AgentType::Kimi,
-		AgentType::Mistral,
-		AgentType::Pi,
-		AgentType::JetBrainsAi,
-		AgentType::Hermes,
-		AgentType::Grok,
-		AgentType::Omp,
-	];
-
-	pub fn as_str(&self) -> &'static str {
-		match self {
-			AgentType::Cursor => "cursor",
-			AgentType::Windsurf => "windsurf",
-			AgentType::Copilot => "copilot",
-			AgentType::Claude => "claude",
-			AgentType::RooCode => "roocode",
-			AgentType::Cline => "cline",
-			AgentType::Gemini => "gemini",
-			AgentType::Codex => "codex",
-			AgentType::Antigravity => "antigravity",
-			AgentType::Openclaw => "openclaw",
-			AgentType::OpenCode => "opencode",
-			AgentType::AugmentCode => "augmentcode",
-			AgentType::KiloCode => "kilocode",
-			AgentType::Amp => "amp",
-			AgentType::Zed => "zed",
-			AgentType::Kiro => "kiro",
-			AgentType::Warp => "warp",
-			AgentType::Trae => "trae",
-			AgentType::Factory => "factory",
-			AgentType::Kimi => "kimi",
-			AgentType::Mistral => "mistral",
-			AgentType::Pi => "pi",
-			AgentType::JetBrainsAi => "jetbrains-ai",
-			AgentType::Hermes => "hermes",
-			AgentType::Grok => "grok",
-			AgentType::Omp => "omp",
-		}
-	}
-
-	pub fn next(&self) -> AgentType {
-		let idx = Self::ALL.iter().position(|a| a == self).unwrap_or(0);
-		Self::ALL[(idx + 1) % Self::ALL.len()]
-	}
-
 	/// Parse a single agent id or a comma-separated list ("claude,grok"),
 	/// preserving order and dropping duplicates. Every token must be a known
 	/// agent id; the error names the offending token and the valid ids.
@@ -547,42 +456,6 @@ impl AgentSelection {
 			));
 		}
 		Ok(Self::List(AgentType::parse_list(s)?))
-	}
-}
-
-impl std::str::FromStr for AgentType {
-	type Err = String;
-
-	fn from_str(s: &str) -> Result<Self, Self::Err> {
-		match s.to_lowercase().as_str() {
-			"cursor" => Ok(AgentType::Cursor),
-			"windsurf" => Ok(AgentType::Windsurf),
-			"copilot" => Ok(AgentType::Copilot),
-			"claude" => Ok(AgentType::Claude),
-			"roocode" | "roo" => Ok(AgentType::RooCode),
-			"cline" => Ok(AgentType::Cline),
-			"gemini" => Ok(AgentType::Gemini),
-			"codex" => Ok(AgentType::Codex),
-			"antigravity" => Ok(AgentType::Antigravity),
-			"openclaw" => Ok(AgentType::Openclaw),
-			"opencode" => Ok(AgentType::OpenCode),
-			"augmentcode" | "augment" => Ok(AgentType::AugmentCode),
-			"kilocode" | "kilo" => Ok(AgentType::KiloCode),
-			"amp" => Ok(AgentType::Amp),
-			"zed" => Ok(AgentType::Zed),
-			"kiro" => Ok(AgentType::Kiro),
-			"warp" => Ok(AgentType::Warp),
-			"trae" => Ok(AgentType::Trae),
-			"factory" => Ok(AgentType::Factory),
-			"kimi" | "kimi-cli" => Ok(AgentType::Kimi),
-			"mistral" => Ok(AgentType::Mistral),
-			"pi" => Ok(AgentType::Pi),
-			"jetbrains-ai" | "jetbrains" | "jb" => Ok(AgentType::JetBrainsAi),
-			"hermes" => Ok(AgentType::Hermes),
-			"grok" => Ok(AgentType::Grok),
-			"omp" | "oh-my-pi" => Ok(AgentType::Omp),
-			_ => Err(format!("Unknown agent type: {s}")),
-		}
 	}
 }
 
@@ -943,6 +816,45 @@ mod tests {
 		assert_eq!(a, AgentType::Hermes);
 		assert_eq!(a.as_str(), "hermes");
 		assert!(AgentType::ALL.contains(&AgentType::Hermes));
+	}
+
+	/// Every `from_str` ALIAS — the ids themselves are pinned by
+	/// `aghub-core/tests/registry_bijection.rs`, but an alias exists only in
+	/// its `agent_roster!` row and is reachable from nothing else. Deleting
+	/// all seven left the whole workspace suite green, so this is the only
+	/// thing standing between `-a roo` / `-a jb` / `-a kimi-cli` and a
+	/// "unknown agent" error in a user's script.
+	#[test]
+	fn every_from_str_alias_still_resolves() {
+		use std::str::FromStr;
+		let aliases = [
+			("jetbrains", AgentType::JetBrainsAi),
+			("jb", AgentType::JetBrainsAi),
+			("roo", AgentType::RooCode),
+			("kimi-cli", AgentType::Kimi),
+			("augment", AgentType::AugmentCode),
+			("kilo", AgentType::KiloCode),
+			("oh-my-pi", AgentType::Omp),
+		];
+		for (alias, expected) in aliases {
+			assert_eq!(
+				AgentType::from_str(alias),
+				Ok(expected),
+				"alias '{alias}' must still resolve"
+			);
+			// Uppercase reaches the same arm: `from_str` lowercases first.
+			assert_eq!(
+				AgentType::from_str(&alias.to_uppercase()),
+				Ok(expected),
+				"alias '{alias}' must be case-insensitive"
+			);
+		}
+		assert!(
+			!aliases.iter().any(|(a, _)| AgentType::ALL
+				.iter()
+				.any(|agent| agent.as_str() == *a)),
+			"an alias that is also an id would be an unreachable match arm"
+		);
 	}
 
 	#[test]

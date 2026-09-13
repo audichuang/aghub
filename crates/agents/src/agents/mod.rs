@@ -27,41 +27,108 @@ pub mod zed;
 
 use crate::AgentDescriptor;
 
-/// Every agent descriptor that ships, in the order the registry used to list
-/// them. THE list — `aghub_core::registry::ALL_AGENTS` points here and the
-/// descriptor matrix test derives from it, so "add an agent" cannot mean
-/// "update three hand-written lists and hope". A `const` (not a `static`) so a
-/// downstream `static` can initialise from it.
+/// Declare the agent roster ONCE and generate everything that used to be a
+/// separate hand-written list from it: the `AgentType` enum, `AgentType::ALL`,
+/// `as_str`, `FromStr` (ids plus aliases), `AgentType::descriptor`, and
+/// `ALL_DESCRIPTORS`.
 ///
-/// Membership is asserted bijective against `AgentType::ALL` in
-/// `aghub-core/tests/registry_bijection.rs`; without that, an entry missing
-/// here makes `registry::get` fall back to Claude's descriptor SILENTLY and
-/// the new agent's MCPs land in `~/.claude.json`.
-pub const ALL_DESCRIPTORS: &[&AgentDescriptor] = &[
-	&claude::DESCRIPTOR,
-	&codex::DESCRIPTOR,
-	&openclaw::DESCRIPTOR,
-	&opencode::DESCRIPTOR,
-	&gemini::DESCRIPTOR,
-	&cline::DESCRIPTOR,
-	&copilot::DESCRIPTOR,
-	&cursor::DESCRIPTOR,
-	&antigravity::DESCRIPTOR,
-	&kiro::DESCRIPTOR,
-	&windsurf::DESCRIPTOR,
-	&trae::DESCRIPTOR,
-	&zed::DESCRIPTOR,
-	&jetbrains_ai::DESCRIPTOR,
-	&roocode::DESCRIPTOR,
-	&kimi::DESCRIPTOR,
-	&mistral::DESCRIPTOR,
-	&pi::DESCRIPTOR,
-	&augmentcode::DESCRIPTOR,
-	&kilocode::DESCRIPTOR,
-	&amp::DESCRIPTOR,
-	&factory::DESCRIPTOR,
-	&warp::DESCRIPTOR,
-	&hermes::DESCRIPTOR,
-	&grok::DESCRIPTOR,
-	&omp::DESCRIPTOR,
-];
+/// Four lists is how "add an agent" became "update three of them and hope":
+/// a variant with no descriptor entry was served **Claude's** descriptor by
+/// `registry::get` — silently, so its MCP servers landed in `~/.claude.json`
+/// and its skills in Claude's directory. One row per agent makes the pairing
+/// structural: `AgentType::descriptor` is a total `match`, so `registry::get`
+/// has no fallback left to reach.
+///
+/// What the macro still CANNOT see, and `registry_bijection.rs` therefore
+/// still owns: only `$variant` is compiler-checked. Two copy-paste mistakes
+/// build clean — a row naming ANOTHER agent's module (that agent is then
+/// served the wrong descriptor: the old fallback bug, by hand), and an `$id`
+/// that drifts from the `id:` field inside `agents/<module>.rs`.
+///
+/// A repeated STRING — one row's id or alias equal to another's — is the one
+/// the compiler catches unaided: `from_str` emits the arms in row order, so
+/// the loser is an `unreachable_patterns` warning, which `just preflight`'s
+/// `clippy -D warnings` turns into a failure.
+///
+/// The order of these rows is the order of BOTH rosters — the desktop agent
+/// list, `-a all` expansion, batch row order and first-error all read it.
+macro_rules! agent_roster {
+	($(
+		$variant:ident => $id:literal, $module:ident, [$($alias:literal),* $(,)?];
+	)+) => {
+		/// Agent types supported by the system
+		#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+		pub enum AgentType {
+			$($variant,)+
+		}
+
+		impl AgentType {
+			/// Every agent, in roster order. Paired with [`ALL_DESCRIPTORS`]
+			/// index for index — both come from the same declaration.
+			pub const ALL: &[AgentType] = &[$(AgentType::$variant,)+];
+
+			pub fn as_str(&self) -> &'static str {
+				match self {
+					$(AgentType::$variant => $id,)+
+				}
+			}
+
+			/// This agent's descriptor. Total by construction — the reason
+			/// `aghub_core::registry::get` needs no fallback.
+			pub fn descriptor(&self) -> &'static AgentDescriptor {
+				match self {
+					$(AgentType::$variant => &$module::DESCRIPTOR,)+
+				}
+			}
+		}
+
+		impl std::str::FromStr for AgentType {
+			type Err = String;
+
+			fn from_str(s: &str) -> Result<Self, Self::Err> {
+				match s.to_lowercase().as_str() {
+					$($id $(| $alias)* => Ok(AgentType::$variant),)+
+					_ => Err(format!("Unknown agent type: {s}")),
+				}
+			}
+		}
+
+		/// Every agent descriptor that ships, in roster order. THE list —
+		/// `aghub_core::registry::ALL_AGENTS` points here and the descriptor
+		/// matrix test derives from it. A `const` (not a `static`) so a
+		/// downstream `static` can initialise from it.
+		pub const ALL_DESCRIPTORS: &[&AgentDescriptor] =
+			&[$(&$module::DESCRIPTOR,)+];
+	};
+}
+
+// Variant => id, descriptor module, [`from_str` aliases beyond the id].
+// Order is claude-first, matching the desktop's agent list.
+agent_roster! {
+	Claude      => "claude",       claude,       [];
+	Codex       => "codex",        codex,        [];
+	Openclaw    => "openclaw",     openclaw,     [];
+	OpenCode    => "opencode",     opencode,     [];
+	Gemini      => "gemini",       gemini,       [];
+	Cline       => "cline",        cline,        [];
+	Copilot     => "copilot",      copilot,      [];
+	Cursor      => "cursor",       cursor,       [];
+	Antigravity => "antigravity",  antigravity,  [];
+	Kiro        => "kiro",         kiro,         [];
+	Windsurf    => "windsurf",     windsurf,     [];
+	Trae        => "trae",         trae,         [];
+	Zed         => "zed",          zed,          [];
+	JetBrainsAi => "jetbrains-ai", jetbrains_ai, ["jetbrains", "jb"];
+	RooCode     => "roocode",      roocode,      ["roo"];
+	Kimi        => "kimi",         kimi,         ["kimi-cli"];
+	Mistral     => "mistral",      mistral,      [];
+	Pi          => "pi",           pi,           [];
+	AugmentCode => "augmentcode",  augmentcode,  ["augment"];
+	KiloCode    => "kilocode",     kilocode,     ["kilo"];
+	Amp         => "amp",          amp,          [];
+	Factory     => "factory",      factory,      [];
+	Warp        => "warp",         warp,         [];
+	Hermes      => "hermes",       hermes,       [];
+	Grok        => "grok",         grok,         [];
+	Omp         => "omp",          omp,          ["oh-my-pi"];
+}

@@ -2373,9 +2373,14 @@ fn source_sync_all_agents_repairs_missing_links_after_single_agent_install() {
 #[cfg(unix)]
 #[test]
 fn source_sync_all_agents_output_follows_registry_order() {
-	// `-a all` must list agents in registry::ALL_AGENTS order (claude-first) —
-	// NOT AgentType::ALL order (cursor-first). Locks the ordering so a future
-	// switch back to AgentType::ALL can't silently reorder output/first-error.
+	// `-a all` must list agents in roster order (claude-first). This used to be
+	// the DIFFERENCE between two rosters — registry::ALL_AGENTS was claude-first
+	// while AgentType::ALL was cursor-first — and locked which one the CLI read.
+	// `agent_roster!` now emits both from one declaration, so the two can no
+	// longer disagree. What is left to pin is that the CLI's `-a all` reads
+	// that roster at all: claude leads it and precedes cursor. Two positions
+	// out of 26 — a full order pin would just restate the macro rows, and
+	// reordering them is allowed (it moves the desktop list too, by design).
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
 	let src = tempfile::TempDir::new().unwrap();
@@ -2411,15 +2416,16 @@ fn source_sync_all_agents_output_follows_registry_order() {
 		.map(|a| a["agent"].as_str().unwrap())
 		.collect();
 	let pos = |name: &str| order.iter().position(|a| *a == name);
-	// claude leads registry::ALL_AGENTS; cursor leads AgentType::ALL.
+	// claude leads the roster; cursor is eighth. Both facts come from the one
+	// `agent_roster!` declaration in crates/agents/src/agents/mod.rs.
 	assert_eq!(
 		order.first().copied(),
 		Some("claude"),
-		"registry order → claude first, got {order:?}"
+		"roster order → claude first, got {order:?}"
 	);
 	assert!(
 		pos("claude") < pos("cursor"),
-		"claude must precede cursor (registry, not AgentType::ALL order): {order:?}"
+		"claude must precede cursor in roster order: {order:?}"
 	);
 }
 
