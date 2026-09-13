@@ -1,6 +1,6 @@
 import { Spinner } from "@heroui/react";
 import { useQuery } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import type {
 	AgentAvailabilityContextValue,
 	AgentAvailabilityProviderProps,
@@ -9,6 +9,7 @@ import type {
 import { AgentAvailabilityContext } from "../contexts/agent-availability";
 import type { AgentAvailabilityDto, AgentInfo } from "../generated/dto";
 import { useApi } from "../hooks/use-api";
+import { useConnection } from "../hooks/use-connection";
 import { getDisabledAgents } from "../lib/store";
 import {
 	agentAvailabilityQueryOptions,
@@ -19,10 +20,7 @@ export function AgentAvailabilityProvider({
 	children,
 }: AgentAvailabilityProviderProps) {
 	const api = useApi();
-	const [disabledAgents, setDisabledAgents] = useState<Set<string>>(
-		() => new Set(),
-	);
-	const [disabledAgentsLoaded, setDisabledAgentsLoaded] = useState(false);
+	const { activeId } = useConnection();
 
 	// Fetch all agents
 	const {
@@ -44,18 +42,21 @@ export function AgentAvailabilityProvider({
 		...agentAvailabilityQueryOptions({ api }),
 	});
 
-	// Load disabled agents from store
-	useEffect(() => {
-		getDisabledAgents().then((disabled: string[]) => {
-			setDisabledAgents(new Set(disabled));
-			setDisabledAgentsLoaded(true);
+	// The selection is per connection: keyed by `activeId`, so switching
+	// connections reads that connection's own list instead of reusing the
+	// previous one.
+	const { data: disabledAgentIds = [], refetch: refetchDisabledAgents } =
+		useQuery({
+			queryKey: ["disabledAgents", activeId],
+			queryFn: () => getDisabledAgents(activeId),
 		});
-	}, []);
+	const disabledAgents = useMemo(
+		() => new Set(disabledAgentIds),
+		[disabledAgentIds],
+	);
 
-	// Function to refresh disabled agents from store
 	const refreshDisabledAgents = async () => {
-		const disabled = await getDisabledAgents();
-		setDisabledAgents(new Set(disabled));
+		await refetchDisabledAgents();
 	};
 
 	// Combine data
@@ -103,7 +104,6 @@ export function AgentAvailabilityProvider({
 		availableAgents,
 		allAgents,
 		isLoading,
-		disabledAgentsLoaded,
 		agentsReady: agentsLoaded && availabilityLoaded,
 		refetch,
 		refreshDisabledAgents,

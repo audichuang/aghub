@@ -9,11 +9,14 @@ import { useState } from "react";
 import { useTranslation } from "react-i18next";
 import { AgentCard } from "../../components/agent-card";
 import { useAgentAvailability } from "../../hooks/use-agent-availability";
+import { useConnection } from "../../hooks/use-connection";
 import { disableAgent, enableAgent } from "../../lib/store";
 
 export default function AgentsPanel() {
 	const { t } = useTranslation();
 	const { availableAgents, refreshDisabledAgents } = useAgentAvailability();
+	// Toggling while connected to a remote must not rewrite Local's selection.
+	const { activeId } = useConnection();
 	const [updating, setUpdating] = useState<string | null>(null);
 	const [agentFilter, setAgentFilter] = useState<
 		"all" | "enabled" | "disabled"
@@ -27,9 +30,9 @@ export default function AgentsPanel() {
 		setUpdating(agentId);
 		try {
 			if (currentlyDisabled) {
-				await enableAgent(agentId);
+				await enableAgent(activeId, agentId);
 			} else {
-				await disableAgent(agentId);
+				await disableAgent(activeId, agentId);
 			}
 			await refreshDisabledAgents();
 		} finally {
