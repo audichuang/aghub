@@ -104,6 +104,12 @@
 
 ---
 
+> **2026-09-14 更新**：PR3 的「偵測到新代理」彈窗已整個移除（`NewToolsModal`、
+> `new-tool-prompt.ts`、`lastKnownAvailableAgents` 皆已刪除）。代理要不要用改由
+> 設定→代理頁決定，且該選擇改為**每個連線各一份**（本機 `disabledAgents`，遠端
+> `disabledAgents:<connectionId>`，遠端首次連上繼承本機）。以下 PR3 段落只留作當時的
+> 理由紀錄，不要照著復原。
+
 ## 產品對照（只保留會驅動這五個 PR 的列）
 
 | 缺口           | skills-hub                                        | aghub 現況                                              | 本路徑怎麼接                                   |

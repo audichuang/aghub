@@ -10,10 +10,6 @@ export {
 	getIntegrationPreferences,
 	saveIntegrationPreferences,
 } from "./store/integrations";
-export {
-	getLastKnownAvailableAgents,
-	setLastKnownAvailableAgents,
-} from "./store/new-tools";
 export { getAghubCliPath, setAghubCliPath } from "./store/cli-path";
 export { getSkillTags, setSkillTags } from "./store/tags";
 export {

@@ -12,7 +12,6 @@ import { useKeyBindings } from "rooks";
 import { Route, Router, Switch, useLocation } from "wouter";
 import { ConnectionGate } from "./components/connection-gate";
 import { DeepLinkImportModal } from "./components/deep-link-import-modal";
-import { NewToolsPromptController } from "./components/new-tools-prompt-controller";
 import { OnboardingController } from "./components/onboarding-controller";
 import { Redirect } from "./components/redirect";
 import { ErrorBoundary } from "./components/ui/error-boundary";
@@ -179,7 +178,6 @@ function App() {
 							<OnboardingController />
 							<MainLayout>
 								<ConnectionGate>
-									<NewToolsPromptController />
 									<Switch>
 										<Route path="/">
 											<DefaultSidebarRoute />
