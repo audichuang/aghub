@@ -368,7 +368,7 @@ mod tests {
 	}
 
 	#[test]
-	fn write_skill_lock_is_atomic_no_partial() {
+	fn write_skill_lock_leaves_a_parseable_file() {
 		let _g = crate::lock::test_utils::TestLockGuard::new();
 		let mut lock = super::super::types::SkillLockFile::default();
 		lock.skills.insert("a".into(), sample_entry());
@@ -378,6 +378,50 @@ mod tests {
 		let raw = std::fs::read_to_string(&path).unwrap();
 		let _: super::super::types::SkillLockFile =
 			serde_json::from_str(&raw).unwrap();
+	}
+
+	/// The test above passes against a plain truncating `File::create` — it only
+	/// looks at the file AFTER a completed write, which is the one moment every
+	/// implementation looks the same. This one asks the question the atomicity
+	/// claim actually rests on: was the destination REPLACED, or mutated in
+	/// place?
+	///
+	/// A hard link is the cheapest way to tell. `persist` renames a finished
+	/// temp file over the path, so the old inode — still reachable through the
+	/// link — keeps the OLD bytes. A truncate-and-write mutates that same inode,
+	/// so the link would show the NEW bytes, and any concurrent reader (the
+	/// desktop polling the lock, a second aghub process) could observe the file
+	/// half-written. Unix-only because the check is about inode identity.
+	#[cfg(unix)]
+	#[test]
+	fn write_skill_lock_replaces_the_file_rather_than_truncating_it() {
+		let _g = crate::lock::test_utils::TestLockGuard::new();
+		let path = super::get_skill_lock_path();
+
+		let mut first = super::super::types::SkillLockFile::default();
+		first.skills.insert("before".into(), sample_entry());
+		super::write_skill_lock(&first).unwrap();
+		let before = std::fs::read_to_string(&path).unwrap();
+
+		// A second name for the inode the lock currently occupies.
+		let witness = path.with_extension("witness");
+		std::fs::hard_link(&path, &witness).expect("hard link the lock");
+
+		let mut second = super::super::types::SkillLockFile::default();
+		second.skills.insert("after".into(), sample_entry());
+		super::write_skill_lock(&second).unwrap();
+
+		assert!(
+			std::fs::read_to_string(&path).unwrap().contains("after"),
+			"the write must land on the lock path"
+		);
+		assert_eq!(
+			std::fs::read_to_string(&witness).unwrap(),
+			before,
+			"the old inode changed under the hard link, so the lock was \
+			 truncated and rewritten in place instead of replaced by a rename \
+			 — a reader can observe it half-written"
+		);
 	}
 
 	#[test]

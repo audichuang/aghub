@@ -174,6 +174,34 @@ mod tests {
 			.starts_with("https://skills.sh/api"));
 	}
 
+	/// `SKILLS_API_URL` is process-wide and cargo runs these on threads of ONE
+	/// process, so the two tests that drive it must not overlap.
+	static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+	#[test]
+	fn from_env_without_the_var_uses_the_shipped_default() {
+		let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		std::env::remove_var("SKILLS_API_URL");
+
+		let client = Client::from_env().expect("a client with no override");
+		// The observable outcome, not `is_ok()`: an `is_ok()` assertion passes
+		// even if `from_env` ignores the variable entirely, which is the only
+		// thing this function does.
+		assert_eq!(client.base_url.as_str(), DEFAULT_API_URL);
+	}
+
+	#[test]
+	fn from_env_honours_the_var() {
+		let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+		std::env::set_var("SKILLS_API_URL", "https://custom.skills.sh/api/");
+
+		let client = Client::from_env().expect("a client from the override");
+		let url = client.base_url.as_str().to_string();
+
+		std::env::remove_var("SKILLS_API_URL");
+		assert_eq!(url, "https://custom.skills.sh/api/");
+	}
+
 	#[test]
 	fn test_client_builder_invalid_url() {
 		let result = ClientBuilder::new().api_url("not a valid url").build();
