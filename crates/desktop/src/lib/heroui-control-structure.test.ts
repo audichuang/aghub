@@ -43,6 +43,7 @@ function stripComments(source: string): string {
  */
 test("every Checkbox/Switch renders .Control inside .Content", () => {
 	const offenders: string[] = [];
+	let inspected = 0;
 	for (const file of tsxFiles(SRC)) {
 		const source = stripComments(readFileSync(file, "utf8"));
 		for (const comp of ["Checkbox", "Switch"] as const) {
@@ -52,6 +53,7 @@ test("every Checkbox/Switch renders .Control inside .Content", () => {
 				if (close === -1) continue;
 				const body = source.slice(m.index, close);
 				if (!body.includes(`<${comp}.Control`)) continue;
+				inspected++;
 				const rel = file.slice(SRC.length + 1);
 				if (!body.includes(`<${comp}.Content`)) {
 					offenders.push(
@@ -70,6 +72,18 @@ test("every Checkbox/Switch renders .Control inside .Content", () => {
 			}
 		}
 	}
+	// An empty scan is the one way this guard fails open: every assertion below
+	// is "no offenders", which a regex that stopped matching, a moved src/ or a
+	// refactor that hides these controls behind a wrapper all satisfy. The app
+	// has 19 compound call sites; a floor well under that stays quiet for
+	// ordinary edits and goes red if the scan finds nothing to check.
+	assert.ok(
+		inspected >= 10,
+		`this guard inspected ${inspected} compound Checkbox/Switch call sites, ` +
+			"expected at least 10 — it is scanning nothing and would pass no " +
+			"matter how the controls are nested. Fix the scan (or lower this " +
+			"floor deliberately if the app really stopped using them).",
+	);
 	assert.deepEqual(
 		offenders,
 		[],

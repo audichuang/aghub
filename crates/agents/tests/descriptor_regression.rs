@@ -33,6 +33,8 @@ const PATH_OVERRIDES: &[&str] = aghub_agents::PATH_OVERRIDE_VARS;
 fn path_override_vars_covers_every_descriptor_read() {
 	let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
 	let mut missing: Vec<(String, String)> = Vec::new();
+	let mut scanned = 0usize;
+	let mut reads = 0usize;
 	let mut stack = vec![dir];
 	while let Some(dir) = stack.pop() {
 		for entry in std::fs::read_dir(&dir).expect("read src dir") {
@@ -44,8 +46,10 @@ fn path_override_vars_covers_every_descriptor_read() {
 			if path.extension().and_then(|e| e.to_str()) != Some("rs") {
 				continue;
 			}
+			scanned += 1;
 			let src = std::fs::read_to_string(&path).expect("read source");
 			for var in env_vars_read(&src) {
+				reads += 1;
 				// $HOME and the XDG bases are the platform's own, isolated by
 				// every harness on their own terms (one is SET, not cleared).
 				if matches!(
@@ -66,6 +70,19 @@ fn path_override_vars_covers_every_descriptor_read() {
 			}
 		}
 	}
+	// The assertion below is "nothing is missing", which an empty walk and a
+	// parser that stopped recognising `env::var("…")` both satisfy. Those are
+	// the two ways this guard fails OPEN, and neither is visible in a green
+	// run — so pin the population it actually looked at. The floors sit well
+	// under today's numbers (45 files, 15 reads); they catch a scan that broke,
+	// not an ordinary edit.
+	assert!(
+		scanned >= 20 && reads >= 8,
+		"this guard scanned {scanned} .rs file(s) and recognised {reads} env \
+		 read(s) — too few to be looking at the descriptors. Either the walk \
+		 lost its root or `env_vars_read` stopped matching, and 'no missing \
+		 overrides' now means 'nothing was checked'."
+	);
 	assert!(
 		missing.is_empty(),
 		"these descriptor env reads are not in aghub_agents::PATH_OVERRIDE_VARS, \
