@@ -1,35 +1,27 @@
 import { getStore } from ".";
-
-const LOCAL_DISABLED_AGENTS_KEY = "disabledAgents";
-
-/** Mirrors `projectsKey`: the bare key stays Local's, remotes get a suffix. */
-function disabledAgentsKey(connectionId: string): string {
-	if (connectionId === "local") {
-		return LOCAL_DISABLED_AGENTS_KEY;
-	}
-	return `${LOCAL_DISABLED_AGENTS_KEY}:${connectionId}`;
-}
+import {
+	disabledAgentsKey,
+	LOCAL_DISABLED_AGENTS_KEY,
+	resolveDisabledAgents,
+} from "./disabled-agents.ts";
 
 /**
  * The agent selection for one connection.
  *
- * A remote that has never been configured inherits Local's selection, so the
- * choice made here carries over the first time you connect; the first toggle
- * on that remote materializes its own key and the two diverge from then on.
- *
- * The `undefined` check is load-bearing and must not become `?? []` or a
- * length test: a remote where the user re-enabled every inherited agent stores
- * `[]`, and treating that as "unconfigured" would fall back to Local and
- * silently disable them again.
+ * The inheritance rule and the `undefined`-vs-`[]` trap live with
+ * `resolveDisabledAgents`, which is where they are tested.
  */
 export async function getDisabledAgents(
 	connectionId: string,
 ): Promise<string[]> {
 	const store = await getStore();
 	const own = await store.get<string[]>(disabledAgentsKey(connectionId));
-	if (own !== undefined && own !== null) return own;
-	if (connectionId === "local") return [];
-	return (await store.get<string[]>(LOCAL_DISABLED_AGENTS_KEY)) ?? [];
+	// Local's own key IS the Local key — no second read, and no fallback loop.
+	const local =
+		connectionId === "local"
+			? own
+			: await store.get<string[]>(LOCAL_DISABLED_AGENTS_KEY);
+	return resolveDisabledAgents(own, local);
 }
 
 async function setDisabledAgents(

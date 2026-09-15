@@ -44,4 +44,5 @@ Role map:
   flushes the edit that just failed, and a re-read hands back the unpersisted
   value. Snapshot the previous value and restore it in the catch — do not
   recover by re-reading.
-- **Pure logic gets a colocated `*.test.ts`** (node:test, run via `bun run test`). When you add a pure helper to `lib/` (or a pure type-contract next to a component), add the test beside it — CI runs the whole `src/**/*.test.ts` glob.
+- **Pure logic gets a colocated `*.test.ts`** (node:test, run via `bun run test`). When you add a pure helper to `lib/` (or a pure type-contract next to a component), add the test beside it — CI runs the whole `src/**/*.test.ts` + `src/**/*.test.tsx` glob. Anything importing `lib/store/` cannot be tested here (the Tauri store plugin loads at module scope and a node test process cannot resolve it) — keep the decision in a Tauri-free sibling and test that, as `store/disabled-agents.ts` does for `store/agents.ts`.
+- **`node --test` exits 0 when its glob matches NOTHING**, so the gate cannot report its own disappearance. `scripts/assert-tests-discovered.mjs` runs first in the `test` script and fails on a count below a floor; if you move the test files, fix the globs in `package.json` rather than lowering it.
