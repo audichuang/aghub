@@ -166,11 +166,21 @@ jobs:
             - name: Cargo clippy (warnings as errors, all targets)
               run: cargo clippy --workspace --all-targets -- -D warnings
 
-    # Frontend lint (ESLint, warnings as errors)
+    # Frontend lint (ESLint, warnings as errors) + the frontend unit tests
     lint-frontend:
         name: Frontend Lint
         needs: changes
-        if: needs.changes.outputs.desktop == 'true' || needs.changes.outputs.workflows == 'true'
+        # ALWAYS run on push to main, for the same reason the `test` job does:
+        # this is the ONLY job that runs the frontend unit tests, and
+        # release.yml's verify-ci only checks the RUN's conclusion — a skipped
+        # job leaves that conclusion `success`, so a tag on a commit whose
+        # frontend gate never ran would be accepted (skipped != passed). PRs
+        # keep the path filter (cheap).
+        if: |
+            github.event_name == 'push' ||
+            github.event_name == 'workflow_dispatch' ||
+            needs.changes.outputs.desktop == 'true' ||
+            needs.changes.outputs.workflows == 'true'
         runs-on: ubuntu-latest
         steps:
             - uses: actions/checkout@v6
