@@ -517,6 +517,102 @@ mod tests {
 		);
 	}
 
+	/// The test above reaches `read_lock_for_modify` through `from_str` — merge
+	/// conflict text is perfectly readable UTF-8, so `read_to_string` SUCCEEDS
+	/// and only the parse arm runs. The `Err` arm of the read itself had no
+	/// coverage at all: collapsing it to `Err(_) => Ok(T::default())` left the
+	/// entire workspace green (2421 passed), while a lock that merely failed to
+	/// READ was silently replaced by a fresh one holding only the new entry.
+	///
+	/// 0xFF is never valid UTF-8, so this fails in `read_to_string` before
+	/// serde is ever reached — the one arm the merge-conflict fixture cannot
+	/// enter. Platform- and root-independent, unlike the permissions twin below.
+	#[test]
+	fn modify_local_lock_refuses_to_overwrite_a_non_utf8_lock() {
+		let dir = TempDir::new().unwrap();
+		let path = dir.path().join("skills-lock.json");
+		write_local_lock(
+			&LocalSkillLockFile {
+				version: CURRENT_VERSION,
+				skills: [("keep-me".to_string(), sample_local_entry())]
+					.into_iter()
+					.collect(),
+			},
+			Some(dir.path()),
+		)
+		.unwrap();
+		let mut bytes = fs::read(&path).unwrap();
+		bytes.push(0xFF);
+		fs::write(&path, &bytes).unwrap();
+
+		let error = modify_local_lock(Some(dir.path()), |lock| {
+			lock.skills
+				.insert("newcomer".to_string(), sample_local_entry());
+		})
+		.expect_err("a lock that cannot be read must not be overwritten");
+
+		assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+		// The assertion that actually fails on the regression: `expect_err`
+		// alone would still pass if the file had already been clobbered.
+		assert_eq!(
+			fs::read(&path).unwrap(),
+			bytes,
+			"the unreadable lock must be left byte-for-byte as found"
+		);
+		// The read-only leg `check` / `doctor` / prune-preview depend on: an
+		// unreadable lock must not come back as "nothing installed" on exit 0.
+		assert!(
+			read_local_lock_checked(Some(dir.path())).is_err(),
+			"the checked reader must report an unreadable lock, not answer empty"
+		);
+	}
+
+	/// The other way into that same arm, and the one a user actually hits: a
+	/// lock they cannot read (0o000, or root-owned 0600 on a shared box).
+	#[cfg(unix)]
+	#[test]
+	fn modify_local_lock_refuses_to_overwrite_an_unreadable_lock() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = TempDir::new().unwrap();
+		let path = dir.path().join("skills-lock.json");
+		write_local_lock(
+			&LocalSkillLockFile {
+				version: CURRENT_VERSION,
+				skills: [("keep-me".to_string(), sample_local_entry())]
+					.into_iter()
+					.collect(),
+			},
+			Some(dir.path()),
+		)
+		.unwrap();
+		let before = fs::read_to_string(&path).unwrap();
+
+		fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+		if fs::read(&path).is_ok() {
+			eprintln!("skip: perms not enforced (root)");
+			return;
+		}
+
+		let result = modify_local_lock(Some(dir.path()), |lock| {
+			lock.skills
+				.insert("newcomer".to_string(), sample_local_entry());
+		});
+
+		// Restore before asserting so a failed assert never leaks a temp dir
+		// the harness cannot clean up.
+		fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+
+		let error =
+			result.expect_err("an unreadable lock must not be overwritten");
+		assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+		assert_eq!(
+			fs::read_to_string(&path).unwrap(),
+			before,
+			"the unreadable lock must be left exactly as found"
+		);
+	}
+
 	// `skills-lock.json` is a project-root marker, so `touch`ing one to mark a
 	// root is a deliberate state. It holds nothing to lose, so writes proceed.
 	#[test]
