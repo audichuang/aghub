@@ -127,8 +127,56 @@ pub fn resync_error_code(error: &ResyncError) -> &'static str {
 	}
 }
 
-/// Replace every installed copy of `name` with the content at `source_dir` and
-/// re-stamp the lock. See the module docs for the seam and the ordering.
+/// Resolve update targets independently of agent grants. Unlike removal's
+/// agent-only resolver, this also includes a valid stored Master.
+pub fn resync_targets_in(
+	agents: &[crate::AgentResources],
+	name: &str,
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+) -> Result<Vec<PathBuf>, ResyncError> {
+	let mut targets =
+		crate::skills::removal::installed_skill_roots_in(agents, name);
+	let root = match scope {
+		ResourceScope::GlobalOnly => None,
+		ResourceScope::ProjectOnly if project_root.is_some() => project_root,
+		_ => {
+			return Err(ResyncError::Conflict(
+				"resync requires one resolved scope".into(),
+			))
+		}
+	};
+	if let Some(store) = crate::skills::linker::master_store_dir(root) {
+		let master = store.join(skill::sanitize_name(name));
+		match std::fs::symlink_metadata(&master) {
+			Ok(metadata) => {
+				if !metadata.is_dir() {
+					return Err(ResyncError::Conflict(
+						"Master must be a real directory".into(),
+					));
+				}
+				let parsed = skill::parse(&master.join("SKILL.md"))
+					.map_err(|e| ResyncError::Parse(e.to_string()))?;
+				if parsed.name != name {
+					return Err(ResyncError::Conflict(
+						"Master belongs to a different skill".into(),
+					));
+				}
+				let master = master
+					.canonicalize()
+					.map_err(|e| ResyncError::Hash(e.to_string()))?;
+				if !targets.contains(&master) {
+					targets.push(master);
+				}
+			}
+			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+			Err(error) => return Err(ResyncError::Hash(error.to_string())),
+		}
+	}
+	Ok(targets)
+}
+
+/// Replace installed copies and the stored Master without granting agent access.
 pub fn resync_installed_skill(
 	req: ResyncRequest,
 ) -> Result<ResyncReport, ResyncError> {
@@ -144,7 +192,7 @@ pub fn resync_installed_skill(
 
 	let agents = crate::load_all_agents(req.scope, req.project_root);
 	let targets =
-		crate::skills::removal::installed_skill_roots_in(&agents, req.name);
+		resync_targets_in(&agents, req.name, req.scope, req.project_root)?;
 	if targets.is_empty() {
 		return Err(ResyncError::NotInstalled);
 	}
@@ -838,6 +886,42 @@ mod tests {
 		.expect("--force-unsafe must still apply");
 
 		assert!(installed.join("steal.js").exists());
+	}
+
+	#[test]
+	fn master_target_requires_matching_skill_identity() {
+		let tmp = tempfile::tempdir().unwrap();
+		let master = tmp.path().join(".aghub/sync-me");
+		write_skill(&master, "different-skill", "keep");
+		assert!(matches!(
+			resync_targets_in(
+				&[],
+				"sync-me",
+				ResourceScope::ProjectOnly,
+				Some(tmp.path())
+			),
+			Err(ResyncError::Conflict(_))
+		));
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn master_target_refuses_symlinks() {
+		let tmp = tempfile::tempdir().unwrap();
+		let foreign = tmp.path().join("foreign");
+		write_skill(&foreign, "sync-me", "keep");
+		std::fs::create_dir_all(tmp.path().join(".aghub")).unwrap();
+		std::os::unix::fs::symlink(&foreign, tmp.path().join(".aghub/sync-me"))
+			.unwrap();
+		assert!(matches!(
+			resync_targets_in(
+				&[],
+				"sync-me",
+				ResourceScope::ProjectOnly,
+				Some(tmp.path())
+			),
+			Err(ResyncError::Conflict(_))
+		));
 	}
 
 	#[test]

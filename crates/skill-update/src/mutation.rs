@@ -467,6 +467,8 @@ fn prepare_locked_resync(
 	name: &str,
 	lock: &ScopeLock,
 	agents: &[aghub_core::AgentResources],
+	scope: ResourceScope,
+	project_root: Option<&Path>,
 ) -> Result<(EntrySource, PreparedLockedResync), LockedResyncError> {
 	// Coordinates and identity must come from the SAME entry observation. A
 	// second lookup could straddle another process's repoint and let a stale
@@ -536,15 +538,16 @@ fn prepare_locked_resync(
 		}
 	};
 
-	// Advisory: the transaction re-checks this authoritatively under the lock, so
-	// this is not the guard. What it buys is narrow — when EVERY name in a fetch
-	// group is uninstalled, the group is never built and the batch skips that
-	// remote round trip. With any installed sibling the group is fetched anyway,
-	// and this only moves the identical failure earlier. It is worth keeping only
-	// because it now costs nothing per name: the agent scan is hoisted to ONE per
-	// batch (`agents`), where it used to be one per name.
-	if aghub_core::skills::removal::installed_skill_roots_in(agents, name)
-		.is_empty()
+	// Advisory only: the transaction resolves targets again under the lock.
+	// Include withheld Masters, but skip fetching when no copy exists at all.
+	if aghub_core::skills::resync::resync_targets_in(
+		agents,
+		name,
+		scope,
+		project_root,
+	)
+	.map_err(LockedResyncError::Resync)?
+	.is_empty()
 	{
 		return Err(LockedResyncError::NotInstalled);
 	}
@@ -614,49 +617,54 @@ pub fn resync_locked_skills(
 	let mut rows = Vec::with_capacity(names.len());
 
 	for name in names {
-		let prepared = prepare_locked_resync(name, &lock, &agents).and_then(
-			|(entry, mut item)| {
-				let EntrySource {
+		let prepared = prepare_locked_resync(
+			name,
+			&lock,
+			&agents,
+			request.scope,
+			request.project_root,
+		)
+		.and_then(|(entry, mut item)| {
+			let EntrySource {
+				source_ref,
+				grouping_source,
+				source_type,
+			} = entry;
+			if request.source_group.is_some_and(|group| {
+				!crate::sources::source_matches(
+					group,
+					&grouping_source,
+					Some(&source_ref.source),
+					&source_type,
+				)
+			}) {
+				return Err(LockedResyncError::SourceGroupMismatch);
+			}
+			let folder = skill_folder_from_lock_path(&item.skill_path)
+				.ok_or(LockedResyncError::InvalidSkillPath)?;
+			let group_index = if let Some(index) = groups
+				.iter()
+				.position(|group| group.source_ref == source_ref)
+			{
+				index
+			} else {
+				groups.push(PreparedFetchGroup {
 					source_ref,
-					grouping_source,
-					source_type,
-				} = entry;
-				if request.source_group.is_some_and(|group| {
-					!crate::sources::source_matches(
-						group,
-						&grouping_source,
-						Some(&source_ref.source),
-						&source_type,
-					)
-				}) {
-					return Err(LockedResyncError::SourceGroupMismatch);
-				}
-				let folder = skill_folder_from_lock_path(&item.skill_path)
-					.ok_or(LockedResyncError::InvalidSkillPath)?;
-				let group_index = if let Some(index) = groups
-					.iter()
-					.position(|group| group.source_ref == source_ref)
-				{
-					index
-				} else {
-					groups.push(PreparedFetchGroup {
-						source_ref,
-						folders: Vec::new(),
-					});
-					groups.len() - 1
-				};
-				let group = &mut groups[group_index];
-				if !group
-					.folders
-					.iter()
-					.any(|seen| seen.as_str() == folder.as_str())
-				{
-					group.folders.push(folder);
-				}
-				item.group_index = group_index;
-				Ok(item)
-			},
-		);
+					folders: Vec::new(),
+				});
+				groups.len() - 1
+			};
+			let group = &mut groups[group_index];
+			if !group
+				.folders
+				.iter()
+				.any(|seen| seen.as_str() == folder.as_str())
+			{
+				group.folders.push(folder);
+			}
+			item.group_index = group_index;
+			Ok(item)
+		});
 		rows.push(ResyncRow {
 			name: name.clone(),
 			prepared,
@@ -1126,55 +1134,72 @@ mod tests {
 			}
 		}
 
-		let temporary = tempfile::tempdir().unwrap();
-		let project = temporary.path().join("project");
-		let installed = project.join(".claude/skills/sync-me");
-		write_skill(&installed, "sync-me", "old");
-		skill::add_skill_to_local_lock(
-			"sync-me",
-			skill::LocalSkillLockEntry {
-				source_url: Some(
-					"https://git.example/owner/repo.git".to_string(),
-				),
-				source: "owner/repo".to_string(),
-				ref_name: Some("main".to_string()),
-				source_type: "git".to_string(),
-				computed_hash: "old".to_string(),
-				skill_path: Some("skills/sync-me/SKILL.md".to_string()),
-				ref_commit: None,
-			},
-			Some(&project),
-		)
-		.unwrap();
-		let fetched_root = temporary.path().join("locked-fetched");
-		write_skill(&fetched_root.join("skills/sync-me"), "sync-me", "new");
-		let fetcher = RecordingFetcher {
-			root: fetched_root,
-			seen: Mutex::new(None),
-		};
+		for layout in [".claude/skills/sync-me", ".aghub/sync-me"] {
+			let temporary = tempfile::tempdir().unwrap();
+			let project = temporary.path().join("project");
+			let installed = project.join(layout);
+			write_skill(&installed, "sync-me", "old");
+			skill::add_skill_to_local_lock(
+				"sync-me",
+				skill::LocalSkillLockEntry {
+					source_url: Some(
+						"https://git.example/owner/repo.git".to_string(),
+					),
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "git".to_string(),
+					computed_hash: "old".to_string(),
+					skill_path: Some("skills/sync-me/SKILL.md".to_string()),
+					ref_commit: None,
+				},
+				Some(&project),
+			)
+			.unwrap();
+			let fetched_root = temporary.path().join("locked-fetched");
+			write_skill(&fetched_root.join("skills/sync-me"), "sync-me", "new");
+			let fetcher = RecordingFetcher {
+				root: fetched_root,
+				seen: Mutex::new(None),
+			};
 
-		let report = resync_locked_skill(
-			LockedResyncRequest {
-				name: "sync-me",
-				scope: ResourceScope::ProjectOnly,
-				project_root: Some(&project),
-				force_unsafe: false,
-			},
-			&fetcher,
-			&Token,
-		)
-		.expect("locked Resync should succeed");
+			let report = resync_locked_skill(
+				LockedResyncRequest {
+					name: "sync-me",
+					scope: ResourceScope::ProjectOnly,
+					project_root: Some(&project),
+					force_unsafe: false,
+				},
+				&fetcher,
+				&Token,
+			)
+			.expect("locked Resync should succeed");
 
-		assert!(report.swapped.iter().any(|path| path == &installed));
-		let seen = fetcher.seen.lock().unwrap();
-		let (source_ref, token) = seen.as_ref().expect("fetch call");
-		assert_eq!(source_ref.source, "https://git.example/owner/repo.git");
-		assert_eq!(source_ref.ref_.as_deref(), Some("main"));
-		assert_eq!(token.as_deref(), Some("secret"));
-		let lock = skill::lock::local::read_local_lock(Some(&project));
-		assert_eq!(
-			lock.skills["sync-me"].ref_commit.as_deref(),
-			Some("locked-commit"),
-		);
+			assert_eq!(report.swapped.len(), 1);
+			assert_eq!(
+				report.swapped[0].canonicalize().unwrap(),
+				installed.canonicalize().unwrap()
+			);
+			if layout.starts_with(".aghub") {
+				assert!(aghub_core::load_all_agents(
+					ResourceScope::ProjectOnly,
+					Some(&project)
+				)
+				.iter()
+				.all(|agent| agent.skills.is_empty()));
+			}
+			assert!(std::fs::read_to_string(installed.join("SKILL.md"))
+				.unwrap()
+				.contains("new"));
+			let seen = fetcher.seen.lock().unwrap();
+			let (source_ref, token) = seen.as_ref().expect("fetch call");
+			assert_eq!(source_ref.source, "https://git.example/owner/repo.git");
+			assert_eq!(source_ref.ref_.as_deref(), Some("main"));
+			assert_eq!(token.as_deref(), Some("secret"));
+			let lock = skill::lock::local::read_local_lock(Some(&project));
+			assert_eq!(
+				lock.skills["sync-me"].ref_commit.as_deref(),
+				Some("locked-commit"),
+			);
+		}
 	}
 }
