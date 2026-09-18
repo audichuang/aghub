@@ -1042,6 +1042,35 @@ impl ConfigManager {
 					return Ok(skill);
 				}
 			}
+
+			// A Master without Referrers is invisible to every agent. Source
+			// cleanup still owns it: otherwise it reports `absent` while both
+			// the bytes and the lock entry survive. Reuse discovery so repair's
+			// quarantine is excluded, then use the normal Master removal plan.
+			use crate::models::ResourceScope;
+			use crate::skills::{
+				discovery::load_master_skills, linker::master_store_dir,
+			};
+			let mut stores = Vec::new();
+			if self.scope != ResourceScope::GlobalOnly {
+				if let Some(root) = self.project_root.as_deref() {
+					stores.extend(master_store_dir(Some(root)));
+				}
+			}
+			if self.scope != ResourceScope::ProjectOnly {
+				stores.extend(master_store_dir(None));
+			}
+			for store in stores {
+				if let Some(mut skill) = load_master_skills(&store)?
+					.into_iter()
+					.find(|skill| skill.name == name)
+				{
+					if skill.canonical_path.is_none() {
+						skill.canonical_path = skill.source_path.clone();
+					}
+					return Ok(skill);
+				}
+			}
 		}
 
 		Err(ConfigError::resource_not_found("skill", name))
@@ -3897,6 +3926,76 @@ mod tests {
 			skill_path: None,
 			ref_commit: None,
 		}
+	}
+
+	#[test]
+	fn remove_skill_planned_all_agents_collects_unlinked_master() {
+		use crate::skills::removal::PruneStatus;
+		use crate::{create_adapter, models::AgentType};
+		let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+		let master = root.join(".aghub/retired-skill");
+		let backup = root.join(".aghub/.quarantine/retired-skill");
+		#[cfg(unix)]
+		{
+			let agent_dir = root.join(".claude/skills");
+			std::fs::create_dir_all(&agent_dir).unwrap();
+			std::os::unix::fs::symlink(
+				root.join("missing"),
+				agent_dir.join("unrelated"),
+			)
+			.unwrap();
+		}
+		for dir in [&master, &backup] {
+			std::fs::create_dir_all(dir).unwrap();
+			std::fs::write(
+				dir.join("SKILL.md"),
+				"---\nname: retired-skill\ndescription: fixture\n---\n",
+			)
+			.unwrap();
+		}
+		skill::lock::local::add_skill_to_local_lock(
+			"retired-skill",
+			local_entry(),
+			Some(root),
+		)
+		.unwrap();
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+		assert!(manager.get_skill("retired-skill").is_none());
+		assert!(manager
+			.remove_skill_planned("retired-skill", false, false, true)
+			.is_err());
+		let preview = manager
+			.remove_skill_planned("retired-skill", true, true, false)
+			.unwrap();
+		assert!(preview.plan.paths.iter().any(|p| p == &master));
+		assert!(master.exists());
+		let outcome = manager
+			.remove_skill_planned("retired-skill", true, false, true)
+			.unwrap();
+		assert!(outcome.executed);
+		assert!(
+			!master.exists(),
+			"source cleanup must remove the unlinked Master"
+		);
+		assert!(backup.exists(), "repair backups are not live Masters");
+		#[cfg(unix)]
+		assert!(root.join(".claude/skills/unrelated").is_symlink());
+		assert!(
+			matches!(outcome.prune, PruneStatus::Pruned(ref keys) if keys.contains(&"retired-skill".to_string()))
+		);
+		assert!(!skill::lock::local::read_local_lock(Some(root))
+			.skills
+			.contains_key("retired-skill"));
+		assert!(manager
+			.remove_skill_planned("retired-skill", true, true, false)
+			.is_err());
 	}
 
 	#[test]

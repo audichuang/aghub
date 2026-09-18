@@ -508,8 +508,8 @@ pub fn plan_removal(
 
 /// Symlink/`.agents` layout: unlink the targeted per-agent symlinks, and delete
 /// the canonical dir only when (a) it is inside an allow-listed root and (b) no
-/// other view still references it (a canonicalize failure counts as "might still
-/// reference" — keep, never silently treat as no-match).
+/// other view still references it (an inspection error other than NotFound
+/// counts as "might still reference" — keep, never treat it as no-match).
 fn plan_symlink_removal(
 	skill: &crate::models::Skill,
 	safe: &str,
@@ -600,15 +600,15 @@ fn plan_symlink_removal(
 					// Resolves to a DIFFERENT target => a same-named but unrelated
 					// skill; never touch it (match by canonical identity, not name).
 				}
-				Err(_) => {
+				Err(error) => {
 					// Dangling/broken link: it resolves to NOTHING, so identity
 					// cannot clear it the way the arm above clears a live one.
 					// The wide list makes that decisive — "is a link, and we
 					// are targeted" would unlink every unrelated broken link in
 					// this agent's skills dir, and mark the removal effective
 					// for having done it. Only a link this removal NAMES may
-					// go; the canonical is kept either way, because a dangling
-					// link cannot be proven innocent.
+					// go. NotFound cannot reference a Master that exists; other
+					// errors leave its identity unknown and must keep the Master.
 					if named.contains(&entry)
 						&& Linker::is_link(&entry)
 						&& targeted
@@ -616,7 +616,8 @@ fn plan_symlink_removal(
 						paths.push(entry);
 						targeted_anything = true;
 					}
-					unresolvable = true;
+					unresolvable |=
+						error.kind() != std::io::ErrorKind::NotFound;
 				}
 			}
 		}
@@ -626,9 +627,9 @@ fn plan_symlink_removal(
 		let keep = other_refs || unresolvable;
 		if keep {
 			skipped.push(canon);
-		} else if !targeted_anything {
-			// No targeted link/direct-reader was found, so there is no removal
-			// effect to pair with deleting the canonical master.
+		} else if !targeted_anything && !all_agents {
+			// A single-agent removal needs a targeted Referrer. An exhaustive
+			// removal may also collect an unlinked Master from the store.
 		} else if assert_contained(&canon, roots).is_some() {
 			paths.push(canon);
 		} else {
@@ -636,12 +637,15 @@ fn plan_symlink_removal(
 		}
 	}
 
+	// An exhaustive cleanup that kept everything must not report `removed`.
+	let shared_master_kept =
+		all_agents && paths.is_empty() && !skipped.is_empty();
 	RemovalPlan {
 		layout: Layout::Symlink,
 		paths,
 		skipped,
 		needs_confirm: true,
-		shared_master_kept: false,
+		shared_master_kept,
 		still_read_from: Vec::new(),
 		incomplete: incomplete_scan,
 	}
@@ -1617,8 +1621,10 @@ mod tests {
 		std::fs::create_dir_all(&claude).unwrap();
 		std::fs::create_dir_all(&cursor).unwrap();
 		symlink(&canonical, &claude.join("foo"));
-		// Dangling symlink: target does not exist -> canonicalize() fails.
-		symlink(&tmp.path().join("gone"), &cursor.join("foo"));
+		// ENOTDIR is an inspection failure, unlike a definitively absent target.
+		let opaque = tmp.path().join("not-a-directory");
+		std::fs::write(&opaque, "file").unwrap();
+		symlink(&opaque.join("foo"), &cursor.join("other"));
 		let agent_dirs = vec![claude.clone(), cursor.clone()];
 		let skill = symlink_skill(&canonical, &claude);
 		let plan =
@@ -1628,6 +1634,14 @@ mod tests {
 			"canonicalize failure => conservatively keep canonical"
 		);
 		assert!(plan.skipped.iter().any(|p| p == &canonical));
+		std::fs::remove_file(claude.join("foo")).unwrap();
+		let orphan_plan =
+			plan_removal(&skill, None, &agent_dirs, Some(tmp.path()), true);
+		assert!(orphan_plan.paths.is_empty());
+		assert!(
+			orphan_plan.shared_master_kept,
+			"an unlinked Master blocked by an inspection error is kept, not removed"
+		);
 	}
 
 	#[test]
