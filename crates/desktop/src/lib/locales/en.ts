@@ -1295,6 +1295,8 @@ export default {
 	deleteSkillKeptSharedMaster:
 		"`{{name}}` was not deleted: another agent still reads the shared .agents/skills master. Remove it from those agents first, or delete it for all agents.",
 	sourceRemovedCleanFailed: "Failed to clean `{{name}}`.",
+	sourceRemovedCleanLockOnly:
+		"`{{name}}` is already gone from disk, so nothing was removed. The list has been refreshed: if the row disappeared, something else already cleaned it; if it is still there, only a stale lock entry remains — use the stale lock cleanup above.",
 	sourceRemovedCleanSomeFailedOne: "Couldn't clean 1 removed skill.",
 	sourceRemovedCleanSomeFailedMany:
 		"Couldn't clean {{count}} removed skills.",

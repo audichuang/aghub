@@ -27,6 +27,8 @@ import {
 	groupAgentsBySlot,
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
+import { bulkFailureItemsLabel } from "../lib/bulk-errors";
+import { cleanVerdict } from "../lib/clean-outcome";
 import {
 	allSkillPaths,
 	selectedSkills,
@@ -506,11 +508,15 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		if (result.error) {
 			throw new Error(result.error);
 		}
-		// This helper's post-condition is "the skill is gone", so `absent` is a
-		// success. `!executed` could not express that — nor tell it apart from
-		// `kept`, where the shared master is still there and the skill is still
-		// installed.
-		if (result.outcome !== "removed" && result.outcome !== "absent") {
+		// The three-way verdict lives in `lib/clean-outcome.ts` so it can be
+		// tested — this decision IS the reported bug ("cleaned" on a skill that
+		// never goes away), and it is unreachable from a test while it sits
+		// inline in a component closure.
+		const verdict = cleanVerdict(result.outcome);
+		if (verdict === "lock-only") {
+			throw new Error(t("sourceRemovedCleanLockOnly", { name }));
+		}
+		if (verdict !== "cleaned") {
 			throw new Error(t("sourceRemovedCleanFailed", { name }));
 		}
 	};
@@ -523,11 +529,18 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			}
 			await deleteInstalledSkillByName(oldName);
 		},
-		onSuccess: async (_data, skill) => {
+		onSuccess: (_data, skill) => {
 			if (!skill.previousName) return;
 			toast.success(
 				t("sourceRenamedDeleted", { oldName: skill.previousName }),
 			);
+		},
+		// `onSettled`, not `onSuccess`: a row that answers `absent` throws
+		// here, and an `absent` is ALSO what a concurrent delete-and-prune in
+		// another window (or the CLI) honestly returns. Refreshing only on
+		// success left that row on screen behind a "stale lock entry" message
+		// that was no longer true.
+		onSettled: async () => {
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
 			});
@@ -551,8 +564,13 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		mutationFn: async (skill: SourceSkillDiff) => {
 			await deleteInstalledSkillByName(skill.name);
 		},
-		onSuccess: async (_data, skill) => {
+		onSuccess: (_data, skill) => {
 			toast.success(t("sourceRemovedCleaned", { name: skill.name }));
+		},
+		// See `deleteRenamedSkillMutation` — an `absent` throw must still
+		// refresh, because `absent` is also the honest answer when something
+		// else already removed and pruned this row.
+		onSettled: async () => {
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
 			});
@@ -661,20 +679,32 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		setIsDeletingAllRemoved(true);
 		setBatchDone(0);
 		let cleaned = 0;
-		let failed = 0;
+		const failures: { name: string; message: string }[] = [];
 		try {
 			for (const skill of skills) {
 				try {
 					await deleteInstalledSkillByName(skill.name);
 					cleaned += 1;
-				} catch {
-					failed += 1;
+				} catch (error) {
+					// The reason is the only actionable part — a 422 naming
+					// where the skill is still read from needs a different
+					// response from a transport failure, and a lock-only
+					// leftover needs the orphan banner. Same as the per-row
+					// button, which already surfaces it.
+					failures.push({
+						name: skill.name,
+						message:
+							error instanceof Error
+								? error.message
+								: String(error),
+					});
 				}
-				setBatchDone(cleaned + failed);
+				setBatchDone(cleaned + failures.length);
 			}
 			await queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.all(),
 			});
+			const failed = failures.length;
 			if (failed > 0) {
 				toast.danger(
 					failed === 1
@@ -684,6 +714,13 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 						: t("sourceRemovedCleanSomeFailedMany", {
 								count: failed,
 							}),
+					{
+						description: bulkFailureItemsLabel(
+							failures.map((failure) => ({
+								name: `${failure.name}: ${failure.message}`,
+							})),
+						).items,
+					},
 				);
 			} else {
 				toast.success(

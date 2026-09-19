@@ -955,7 +955,23 @@ impl ConfigManager {
 			));
 		}
 
-		if spared_everything {
+		// The SECOND disjunct is the planner's OWN keep, and it must land here
+		// rather than in `commit` for the same reason the first one does. The
+		// planner sets `shared_master_kept` when an exhaustive sweep finished
+		// with nothing to take and something reported in `skipped`, and `blocks`
+		// cannot always see that: `read_effect_after` stops at a directory whose
+		// root `SKILL.md` parses (`collect_skills`), while the planner's own
+		// sweep recurses into it (`collect_entry_paths`), so a broken link
+		// NESTED inside an unrelated healthy skill folder makes the planner keep
+		// the Master while leaving `effect.incomplete` false and `survivors`
+		// empty. That fell through to `commit`, which reported `kept` with
+		// `executed: true` AND ran a scope-wide lock GC the preview had just
+		// promised would not run (`RemovalOutcome::preview` gates its prune
+		// disclosure on exactly this flag) — dropping an unrelated skill's
+		// source provenance on a delete that removed nothing.
+		if spared_everything
+			|| (all_agents && plan.shared_master_kept && plan.paths.is_empty())
+		{
 			// NOT `commit`, even for a confirmed call. `commit` sets
 			// `executed: true` for the whole branch, so a run that removed
 			// nothing serialized as `outcome: "removed"` with the skill still
@@ -963,11 +979,8 @@ impl ConfigManager {
 			// is still installed, taking the source provenance with it.
 			//
 			// `shared_master_kept` is what `RemovalView` keys `kept` off, and
-			// that is what this IS: kept because another agent shares it. It
-			// is set HERE rather than in the planner because only this layer
-			// knows the removal took nothing away; the planner's own flag
-			// stays reserved for the universal Master, which `blocks` above
-			// still reads before this line.
+			// that is what this IS: kept because something else still holds
+			// the skill, or because the sweep could not prove nothing does.
 			plan.shared_master_kept = true;
 			return removal::RemovalOutcome::preview(
 				plan,
@@ -1045,8 +1058,10 @@ impl ConfigManager {
 
 			// A Master without Referrers is invisible to every agent. Source
 			// cleanup still owns it: otherwise it reports `absent` while both
-			// the bytes and the lock entry survive. Reuse discovery so repair's
-			// quarantine is excluded, then use the normal Master removal plan.
+			// the bytes and the lock entry survive. Discovery answers "which
+			// Master is this" — never a `dir.join(name)` guess — so a Master
+			// whose FOLDER name differs from its frontmatter `name` is still
+			// found, and aghub's own bookkeeping in the store is still skipped.
 			use crate::models::ResourceScope;
 			use crate::skills::{
 				discovery::load_master_skills, linker::master_store_dir,
@@ -1061,14 +1076,47 @@ impl ConfigManager {
 				stores.extend(master_store_dir(None));
 			}
 			for store in stores {
-				if let Some(mut skill) = load_master_skills(&store)?
+				// FAIL CLOSED on a store this cannot fully read, and note what
+				// that rules out: an entry whose `SKILL.md` will not open has
+				// an UNKNOWN frontmatter name, so it may be this very skill —
+				// under a folder name that is not `sanitize_name(name)`, which
+				// is a shape aghub supports. Trusting the partial list there
+				// buys one convenience (an unreadable sibling no longer fails
+				// an unrelated delete) and sells three lies for it: a hidden
+				// same-name Master slips past the duplicate refusal below, an
+				// unreadable non-canonical Master answers `absent` with its
+				// bytes still on disk, and a probe of the canonical slot alone
+				// cannot see either. `load_master_skills` is `Err`-or-nothing
+				// on purpose; the error names the path, which is the whole
+				// remedy.
+				let mut found = load_master_skills(&store)?
 					.into_iter()
-					.find(|skill| skill.name == name)
-				{
-					if skill.canonical_path.is_none() {
-						skill.canonical_path = skill.source_path.clone();
+					.filter(|skill| skill.name == name);
+				match (found.next(), found.next()) {
+					(Some(mut skill), None) => {
+						if skill.canonical_path.is_none() {
+							skill.canonical_path = skill.source_path.clone();
+						}
+						return Ok(skill);
 					}
-					return Ok(skill);
+					// Two live Masters under one frontmatter name. `find()`
+					// would pick by `read_dir` order and delete one of them
+					// arbitrarily; `resync::refuse_conflicting_copy` already
+					// refuses this shape, and a DELETE has even less licence
+					// to guess.
+					(Some(first), Some(second)) => {
+						return Err(ConfigError::InvalidConfig(format!(
+							"skill '{name}' has two Masters in {}: '{}' and \
+							 '{}'. Remove or rename one of them, then re-run.",
+							store.display(),
+							first.source_path.as_deref().unwrap_or("<unknown>"),
+							second
+								.source_path
+								.as_deref()
+								.unwrap_or("<unknown>"),
+						)));
+					}
+					(None, _) => {}
 				}
 			}
 		}
@@ -1388,7 +1436,7 @@ impl ConfigManager {
 		)
 		.ok_or_else(|| {
 			ConfigError::InvalidConfig(
-				"Cannot resolve .agents canonical skills directory".into(),
+				"Cannot resolve the .aghub Master store directory".into(),
 			)
 		})?;
 		// Where THIS agent's Referrer goes, with the same scope/root that derived
@@ -3926,6 +3974,309 @@ mod tests {
 			skill_path: None,
 			ref_commit: None,
 		}
+	}
+
+	/// Seed a Master in the store with a frontmatter name of its own.
+	#[cfg(test)]
+	fn seed_master(dir: &std::path::Path, name: &str) {
+		std::fs::create_dir_all(dir).unwrap();
+		std::fs::write(
+			dir.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: fixture\n---\n"),
+		)
+		.unwrap();
+	}
+
+	/// An exhaustive cleanup that KEPT everything must not commit.
+	///
+	/// The planner keeps the Master when its sweep hits an entry it cannot
+	/// resolve, and `blocks` cannot always see that: `read_effect_after` stops
+	/// at a directory whose root `SKILL.md` parses, while the planner's sweep
+	/// recurses INTO it — so a broken link nested inside an unrelated healthy
+	/// skill folder leaves `effect.incomplete` false and `survivors` empty.
+	/// That fell through to `commit`, which reported `kept` with
+	/// `executed: true` and ran the scope-wide lock GC the preview had just
+	/// promised would not run, dropping an UNRELATED skill's source
+	/// provenance on a delete that removed nothing.
+	///
+	/// Revert proof: drop the `|| (all_agents && plan.shared_master_kept &&
+	/// plan.paths.is_empty())` disjunct in `remove_skill_planned` and
+	/// `second-orphan` disappears from the lock while `executed` flips true.
+	#[test]
+	#[cfg(unix)]
+	fn all_agents_keep_previews_instead_of_running_an_undisclosed_prune() {
+		use crate::dto::removal::{RemovalKind, RemovalView};
+		use crate::skills::removal::PruneStatus;
+		use crate::{create_adapter, models::AgentType};
+		let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+
+		let master = root.join(".aghub/orphan");
+		seed_master(&master, "orphan");
+
+		// An unrelated, perfectly healthy skill in an in-scope agent dir,
+		// holding a NESTED link whose canonicalize fails with ENOTDIR — not
+		// NotFound, so the planner must keep the Master.
+		let healthy = root.join(".claude/skills/healthy");
+		seed_master(&healthy, "healthy");
+		let plain = root.join("regular-file");
+		std::fs::write(&plain, "f").unwrap();
+		std::os::unix::fs::symlink(plain.join("y"), healthy.join("broken"))
+			.unwrap();
+
+		for key in ["orphan", "second-orphan"] {
+			skill::lock::local::add_skill_to_local_lock(
+				key,
+				local_entry(),
+				Some(root),
+			)
+			.unwrap();
+		}
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+
+		let preview = manager
+			.remove_skill_planned("orphan", true, true, false)
+			.unwrap();
+		// Fixture assertion first, so the test cannot pass vacuously.
+		assert!(
+			preview.plan.shared_master_kept && preview.plan.paths.is_empty(),
+			"fixture must reach the planner's keep, got {:?}",
+			preview.plan
+		);
+		assert!(matches!(preview.prune, PruneStatus::NotRun));
+
+		let outcome = manager
+			.remove_skill_planned("orphan", true, false, true)
+			.unwrap();
+		assert!(
+			!outcome.executed,
+			"a confirmed run that takes nothing must not execute"
+		);
+		assert!(matches!(
+			RemovalView::from_outcome(&outcome, false).outcome,
+			RemovalKind::Kept
+		));
+		assert!(
+			matches!(outcome.prune, PruneStatus::NotRun),
+			"the preview promised no prune; the commit must not run one, got \
+			 {:?}",
+			outcome.prune
+		);
+		assert!(master.exists(), "nothing was removed");
+		let lock = skill::lock::local::read_local_lock(Some(root));
+		assert!(
+			lock.skills.contains_key("second-orphan"),
+			"an unrelated skill's source provenance must survive a delete \
+			 that removed nothing"
+		);
+		assert!(lock.skills.contains_key("orphan"));
+	}
+
+	/// A failed `apply-update` leaves `.aghub-backup-<pid>-<n>/target/` beside
+	/// the Master, holding a full `SKILL.md` with the SAME frontmatter name.
+	/// Every enumerator of the store must skip aghub's own bookkeeping, or the
+	/// delete target is picked by `read_dir` order.
+	///
+	/// Revert proof: drop the `is_store_bookkeeping` skip in `collect_skills`
+	/// and the store yields two Masters, so the fallback refuses instead.
+	#[test]
+	fn a_retained_update_backup_is_not_a_second_master() {
+		use crate::{create_adapter, models::AgentType};
+		let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+
+		let master = root.join(".aghub/twinned");
+		seed_master(&master, "twinned");
+		let backup = root.join(".aghub/.aghub-backup-4242-0/target");
+		seed_master(&backup, "twinned");
+		let staged = root.join(".aghub/.aghub-stage-4242-0/skill");
+		seed_master(&staged, "twinned");
+
+		skill::lock::local::add_skill_to_local_lock(
+			"twinned",
+			local_entry(),
+			Some(root),
+		)
+		.unwrap();
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+
+		let outcome = manager
+			.remove_skill_planned("twinned", true, false, true)
+			.unwrap();
+		assert!(outcome.executed);
+		assert!(!master.exists(), "the Master is what a cleanup collects");
+		assert!(
+			backup.exists() && staged.exists(),
+			"aghub's own bookkeeping is not a Master and is never deleted"
+		);
+	}
+
+	/// Two live Masters under ONE frontmatter name must be refused, not picked
+	/// by `read_dir` order.
+	///
+	/// `skill_for_planned_removal`'s fallback used `.find()`, so whichever
+	/// entry the filesystem happened to list first became the delete target —
+	/// on a DESTRUCTIVE path, with the other copy left behind and the outcome
+	/// reported as `removed`. `resync::refuse_conflicting_copy` already refuses
+	/// this shape for updates; a delete has even less licence to guess.
+	///
+	/// Revert proof: replace the `(Some(first), Some(second))` arm in
+	/// `skill_for_planned_removal` with a plain `.find()` and this goes green
+	/// the wrong way — one of the two directories is deleted and `executed` is
+	/// true.
+	#[test]
+	fn two_masters_under_one_name_are_refused_not_picked_by_read_dir_order() {
+		use crate::{create_adapter, models::AgentType};
+		let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+
+		// Both declare `name: twin`; only one sits at the sanitized slot, so a
+		// `dir.join(sanitize_name(name))` probe would not see the conflict
+		// either.
+		let canonical = root.join(".aghub/twin");
+		seed_master(&canonical, "twin");
+		let other = root.join(".aghub/twin-from-elsewhere");
+		seed_master(&other, "twin");
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+
+		let error = manager
+			.remove_skill_planned("twin", true, false, true)
+			.expect_err("two Masters for one name must be refused");
+		assert!(
+			canonical.exists() && other.exists(),
+			"a refusal must leave BOTH on disk"
+		);
+		let message = error.to_string();
+		assert!(
+			message.contains("twin-from-elsewhere") && message.contains("twin"),
+			"the refusal must name both paths so the user can act, got: \
+			 {message}"
+		);
+
+		// The preview must refuse identically — a preview that printed a plan
+		// the commit refuses is the drift `RemovalOutcome::preview` exists to
+		// prevent.
+		assert!(manager
+			.remove_skill_planned("twin", true, true, false)
+			.is_err());
+	}
+
+	/// An unreadable entry in the store must not be answered AROUND.
+	///
+	/// Its frontmatter `name` is unknown, so it may BE the skill being
+	/// removed — under a folder name that is not `sanitize_name(name)`, which
+	/// this layout allows. Two lies follow from trusting a partial list: a
+	/// hidden same-name Master slips past the duplicate refusal and the
+	/// readable copy is deleted as if it were the only one, and an unreadable
+	/// Master answers `absent` (a success no-op) with its bytes still on disk.
+	/// Both are answered by failing closed and naming the path.
+	///
+	/// Revert proof: swap `load_master_skills(&store)?` back to a partial
+	/// reader in `skill_for_planned_removal` and both halves below go green
+	/// the wrong way — the first returns `removed`, the second
+	/// `ResourceNotFound`.
+	#[test]
+	#[cfg(unix)]
+	fn an_unreadable_store_entry_fails_closed_instead_of_guessing() {
+		use crate::{create_adapter, models::AgentType};
+		use std::os::unix::fs::PermissionsExt;
+		let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+
+		// A readable Master, plus a SECOND directory whose SKILL.md declares
+		// the SAME frontmatter name and cannot be opened. Discovery sees one;
+		// the disk holds two.
+		let readable = root.join(".aghub/demo");
+		seed_master(&readable, "demo");
+		let hidden = root.join(".aghub/old-folder");
+		seed_master(&hidden, "demo");
+		std::fs::set_permissions(
+			hidden.join("SKILL.md"),
+			std::fs::Permissions::from_mode(0o000),
+		)
+		.unwrap();
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+
+		let error = manager
+			.remove_skill_planned("demo", true, false, true)
+			.expect_err("an unreadable peer may BE a second Master");
+		assert!(
+			readable.exists(),
+			"nothing may be deleted while the store cannot be read"
+		);
+		assert!(
+			error.to_string().contains("old-folder"),
+			"the error must name the unreadable path, got: {error}"
+		);
+
+		// Same store, a name nothing declares: still not `absent`, because the
+		// unreadable entry could have been declaring exactly that name.
+		let error = manager
+			.remove_skill_planned("some-other-name", true, false, true)
+			.expect_err("an unreadable entry cannot prove a name absent");
+		assert!(
+			!matches!(error, ConfigError::ResourceNotFound { .. }),
+			"got {error:?}"
+		);
+
+		std::fs::set_permissions(
+			hidden.join("SKILL.md"),
+			std::fs::Permissions::from_mode(0o644),
+		)
+		.unwrap();
+	}
+
+	/// The fallback sits between "no agent holds it" and the not-found arm, so
+	/// the idempotent-delete contract now runs through it. A name present in
+	/// no store must still answer not-found, which the API turns into
+	/// `absent` — the desktop "clean all" loop hits this on every already
+	/// cleaned row.
+	#[test]
+	fn all_agents_delete_of_an_absent_name_is_still_not_found() {
+		use crate::{create_adapter, models::AgentType};
+		let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+		seed_master(&root.join(".aghub/present"), "present");
+
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(root),
+		);
+		manager.load().unwrap();
+		assert!(matches!(
+			manager.remove_skill_planned("absent-name", true, false, true),
+			Err(ConfigError::ResourceNotFound { .. })
+		));
 	}
 
 	#[test]

@@ -9366,6 +9366,135 @@ fn delete_preview_discloses_the_lock_entries_it_would_prune() {
 	assert!(pruned.contains(&"ghosted"), "{cj}");
 }
 
+/// The GLOBAL half of `skill_for_planned_removal`'s Master-store fallback: an
+/// `--all-agents` delete must collect a `~/.aghub/<name>` Master that NO agent
+/// links to, and drop its lock entry with it.
+///
+/// The fallback has two branches and only the project one was covered
+/// (`aghub_core::manager::skill::tests::
+/// remove_skill_planned_all_agents_collects_unlinked_master`). The global
+/// branch is what the desktop Sources page and `aghub-cli -g` actually take,
+/// and it cannot be tested in core: a core test with `confirm: true` under
+/// `GlobalOnly` resolves `dirs::home_dir()/.aghub` and would delete out of the
+/// developer's REAL store. `isolated_cli` is the only place that override
+/// holds, hence a CLI test.
+///
+/// Fixture via `run_sync_install` + unlinking claude's Referrer — the same
+/// "skill vanished without going through aghub" shape `ghosted` uses above.
+/// Installing for real is what keeps the lock fixture honest: a hand-written
+/// lock missing a required field makes the command bail while READING it, and
+/// every assertion below would pass with the fallback never reached.
+///
+/// Revert proof: delete `stores.extend(master_store_dir(None));` (the
+/// `if self.scope != ResourceScope::ProjectOnly` block in
+/// `crates/core/src/manager/skill.rs`) and `-g` is left with an empty store
+/// list, so the fallback answers `ResourceNotFound` → `outcome: "absent"` on
+/// the FIRST run with the Master and its lock entry still on disk. That red
+/// shape was observed, not reasoned: dropping `--all-agents` from this same
+/// fixture skips the whole fallback block and prints exactly it.
+///
+/// `#[cfg(unix)]`: `dirs::home_dir()` ignores `USERPROFILE` on Windows, so
+/// `isolated_cli` does not redirect the global store there — see
+/// `a_delete_preview_refuses_the_npx_clobbered_shape` for the same note.
+#[cfg(unix)]
+#[test]
+fn all_agents_delete_collects_an_unlinked_global_master_and_its_lock_entry() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let src = tempfile::TempDir::new().unwrap();
+	// Folder name and frontmatter `name` agree: the store fallback matches on
+	// the FRONTMATTER name, so a mismatch here would test a different path.
+	write_source_skill(src.path(), "orphaned", "orphaned");
+
+	let install = run_sync_install(
+		home.path(),
+		state.path(),
+		src.path(),
+		"claude",
+		"orphaned",
+	);
+	assert!(
+		install.status.success(),
+		"seed install: {}",
+		String::from_utf8_lossy(&install.stderr)
+	);
+
+	let master = home.path().join(".aghub/orphaned");
+	let lock = state.path().join("skills/.skill-lock.json");
+	assert!(master.join("SKILL.md").is_file(), "setup: Master installed");
+
+	// Orphan it: the Referrer goes, the Master and its lock entry stay. That is
+	// exactly the state no agent can see and only the store fallback reaches.
+	std::fs::remove_file(home.path().join(".claude/skills/orphaned")).unwrap();
+	assert_eq!(
+		count_symlinks_named(home.path(), "orphaned"),
+		0,
+		"setup: no agent may link the Master, or this tests the agent walk \
+		 instead of the store fallback"
+	);
+	assert!(
+		std::fs::read_to_string(&lock).unwrap().contains("orphaned"),
+		"setup: the lock entry outlives the Referrer"
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"--json",
+			"delete",
+			"skills",
+			"orphaned",
+			"--all-agents",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	let stdout = String::from_utf8_lossy(&out.stdout);
+	assert!(
+		out.status.success(),
+		"an unlinked global Master is collectable: {stdout} {}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let view: Value = serde_json::from_str(&stdout).unwrap();
+	assert_eq!(
+		view["outcome"], "removed",
+		"the store fallback must find the Master nothing links to: {stdout}"
+	);
+	assert!(
+		!master.exists(),
+		"`removed` with the bytes still on disk is the lie this pins: {stdout}"
+	);
+	assert!(
+		!std::fs::read_to_string(&lock).unwrap().contains("orphaned"),
+		"the lock entry must go with the Master, or `source sync` reinstalls \
+		 a skill that is gone: {}",
+		std::fs::read_to_string(&lock).unwrap()
+	);
+
+	// The idempotent half: nothing is left, so the same command answers
+	// `absent` — not an error, and not a `preview` inviting a pointless retry.
+	let again = isolated_cli(home.path(), state.path())
+		.args([
+			"-g",
+			"-a",
+			"claude",
+			"--json",
+			"delete",
+			"skills",
+			"orphaned",
+			"--all-agents",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	let stdout = String::from_utf8_lossy(&again.stdout);
+	assert!(again.status.success(), "delete stays idempotent: {stdout}");
+	let view: Value = serde_json::from_str(&stdout).unwrap();
+	assert_eq!(view["outcome"], "absent", "{stdout}");
+}
+
 /// A KEPT shared Master must not promise a prune the commit will never run.
 ///
 /// Found by cross-checking two independently-written plans that each looked

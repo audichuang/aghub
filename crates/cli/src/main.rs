@@ -291,15 +291,18 @@ enum Commands {
 	/// key on purpose, so a preview can never read as "these were dropped".
 	///
 	/// Read `outcome`, not `dry_run`/`executed`: `preview` | `removed` |
-	/// `absent` | `partial` | `kept`. `kept` means the `.aghub/<name>` master
-	/// was left because another agent still reads it — `success: true` AND THE
-	/// SKILL IS STILL THERE; the payload's `skipped` names what was kept.
+	/// `absent` | `partial` | `kept`. `kept` means nothing was removed and the
+	/// `.aghub/<name>` master is still there — either another agent still
+	/// reads it, or an `--all-agents` sweep could not clear everything holding
+	/// it. `success: true` AND THE SKILL IS STILL THERE; the payload's
+	/// `skipped` names what stayed.
 	Delete {
 		#[arg(value_enum)]
 		resource: ResourceType,
 		name: String,
 
-		/// For skills: remove it from EVERY agent, not just --agent
+		/// For skills: remove it from EVERY agent, not just --agent, and
+		/// take the `.aghub/<name>` master even when no agent links to it
 		/// (destructive; still needs --yes)
 		#[arg(long = "all-agents")]
 		all_agents: bool,
@@ -1131,8 +1134,15 @@ fn render_mutation(command: &Commands, payload: &serde_json::Value) -> String {
 			resource,
 			yes,
 			dry_run,
+			all_agents,
 			..
-		} => render_removal(*resource, name, payload, !yes || *dry_run),
+		} => render_removal(
+			*resource,
+			name,
+			payload,
+			!yes || *dry_run,
+			*all_agents,
+		),
 		// `run_for_agent` only returns a payload for the six arms above.
 		_ => format!("{name}\n"),
 	}
@@ -1154,14 +1164,66 @@ fn render_removal(
 	name: &str,
 	payload: &serde_json::Value,
 	is_preview: bool,
+	all_agents: bool,
 ) -> String {
-	// `kept` is terminal: the master is shared and an executing call REFUSES.
-	// Checked before the preview branch, which would otherwise print "re-run
-	// with --yes to remove" — and `--yes` then fails with
-	// `Unsupported operation`. That is the never-terminating hint
-	// `RemovalKind::Kept` was introduced to eliminate; the JSON and the three
-	// desktop consumers were fixed and the CLI's own human output was not.
+	let kind = resource.singular();
+	let flag = |key: &str| payload.get(key).and_then(|v| v.as_bool());
+	let list = |key: &str| -> Vec<&str> {
+		payload
+			.get(key)
+			.and_then(|v| v.as_array())
+			.map(|a| a.iter().filter_map(|p| p.as_str()).collect())
+			.unwrap_or_default()
+	};
+	// `kept` is terminal, and it now covers TWO worlds. Checked before the
+	// preview branch, which would otherwise print "re-run with --yes to
+	// remove" — the never-terminating hint `RemovalKind::Kept` exists to kill.
+	//
+	// Single agent: the master is shared and an executing call REFUSES.
+	// `--all-agents`: since 5437da3c the sweep can also finish having taken
+	// NOTHING. A commit whose `blocks` is true still refuses; the planner's
+	// OWN keep does not, and reports `kept` with `--yes` given. Neither half
+	// of the single-agent sentence is true there: no agent reads a `.aghub`
+	// master at all (root AGENTS.md, "a directory no agent reads"), and
+	// "re-run with --all-agents" is the dead end itself when `--all-agents` is
+	// what just ran. All the caller can act on is the list, which the early
+	// `return` below never let them see.
 	if payload.get("outcome").and_then(|v| v.as_str()) == Some("kept") {
+		if all_agents {
+			let skipped = list("skipped");
+			let mut out = format!(
+				"{kind} '{name}' was NOT removed: the sweep across every \
+				 agent took nothing, so it is all still on disk.\n"
+			);
+			if !skipped.is_empty() {
+				// `skipped` is the only carrier — `still_read_from` is a
+				// `RemovalPlan` field and never reaches the wire. It holds the
+				// kept master together with whatever the sweep could not
+				// clear, and the heading does NOT claim which is which: the
+				// payload cannot tell them apart, and re-deriving it here by
+				// testing a path for `.aghub` would be a second answer, free
+				// to drift from the planner's.
+				//
+				// NEVER tell the user to delete these. `plan_symlink_removal`
+				// pushes an agent's whole SKILLS DIRECTORY here when it could
+				// not list it, so "clear these by hand" on
+				// `~/.claude/skills` reads as "delete every Claude skill".
+				// The remedy is the one root AGENTS.md states: make the
+				// unreadable ones readable and re-run.
+				out.push_str("left in place:\n");
+				for p in &skipped {
+					out.push_str(&format!("  {p}\n"));
+				}
+				out.push_str(
+					"note: some of these are paths the sweep could not read, \
+					 not necessarily copies of the skill — a whole agent \
+					 skills directory can appear here. Make them readable and \
+					 re-run; `doctor --verify-links` names what still holds \
+					 the skill.\n",
+				);
+			}
+			return out;
+		}
 		return format!(
 			// Deliberately does NOT name a directory. The Master moved to the
 			// `.aghub` store, and this string still said `.agents/skills` —
@@ -1175,15 +1237,6 @@ fn render_removal(
 			resource.singular()
 		);
 	}
-	let kind = resource.singular();
-	let flag = |key: &str| payload.get(key).and_then(|v| v.as_bool());
-	let list = |key: &str| -> Vec<&str> {
-		payload
-			.get(key)
-			.and_then(|v| v.as_array())
-			.map(|a| a.iter().filter_map(|p| p.as_str()).collect())
-			.unwrap_or_default()
-	};
 	let paths = list("paths");
 	let skipped = list("skipped");
 
@@ -2677,5 +2730,58 @@ mod tests {
 				"{argv:?}"
 			);
 		}
+	}
+
+	/// `kept` has two worlds and one renderer. The `--all-agents` one used to
+	/// borrow the single-agent sentence, which asserts a master "shared with
+	/// other agents" (no agent reads a `.aghub` master at all) and points at
+	/// `--all-agents` — the flag that just ran. It also returned before the
+	/// `skipped` block, so the one list naming what stayed never printed.
+	///
+	/// Revert proof: drop the `if all_agents` arm in `render_removal` and the
+	/// all-agents half goes red on both the path and the `--all-agents` hint.
+	#[test]
+	fn an_all_agents_keep_does_not_advise_rerunning_with_all_agents() {
+		let payload = serde_json::json!({
+			"outcome": "kept",
+			"success": true,
+			"dry_run": false,
+			"executed": false,
+			"needs_confirm": true,
+			"paths": [],
+			"skipped": ["/h/.aghub/demo"],
+			"deleted_path": serde_json::Value::Null,
+		});
+
+		let all =
+			render_removal(ResourceType::Skills, "demo", &payload, false, true);
+		assert!(
+			all.contains("/h/.aghub/demo"),
+			"the sweep's leftovers are the only thing to act on: {all}"
+		);
+		assert!(
+			!all.contains("--all-agents"),
+			"telling an --all-agents run to re-run with --all-agents is the \
+			 dead end `kept` exists to kill: {all}"
+		);
+		assert!(
+			!all.contains("shared with other agents"),
+			"no agent reads a `.aghub` master, so nothing is shared here: \
+			 {all}"
+		);
+
+		// The single-agent wording is unchanged and still says neither.
+		let single = render_removal(
+			ResourceType::Skills,
+			"demo",
+			&payload,
+			false,
+			false,
+		);
+		assert!(
+			single.contains("master shared with other agents")
+				&& single.contains("(--all-agents)"),
+			"the single-agent remedy is correct there and must stay: {single}"
+		);
 	}
 }

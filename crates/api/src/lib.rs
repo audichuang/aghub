@@ -863,6 +863,150 @@ mod tests {
 		assert!(!file.exists(), "confirm=true must remove the backing file");
 	}
 
+	// --- DELETE skill over the real HTTP wire ------------------------------
+	//
+	// `DELETE /agents/<agent>/skills/<name>?<params..>` had no test of any kind
+	// — not a direct call, not a wire test — while its MCP and sub-agent
+	// siblings above each had a dry-run/confirm pair. It is the route the
+	// desktop Sources page's "clean / clean all" calls, and the ONLY place
+	// `all_agents` is read off the wire.
+	//
+	// That query-parameter SPELLING exists in exactly two unconnected places:
+	// `crates/desktop/src/lib/api.ts` and `DeleteSkillParams` in
+	// `routes/skills.rs`. Rename or typo either one and `all_agents=true`
+	// parses as absent -> `false`, the orphan-Master store fallback in
+	// `skill_for_planned_removal` is never reached, and the confirmed test
+	// below goes red with `outcome: "absent"` and the Master still on disk.
+	// That is what pins the two spellings together.
+
+	/// Seed a Master in the PROJECT store (`<root>/.aghub/<name>`) with no
+	/// Referrer in any agent skills dir — the shape the desktop's cleanup hits.
+	///
+	/// The store fallback matches the `name:` in SKILL.md FRONTMATTER, not the
+	/// folder name, so frontmatter == folder == the URL segment here; letting
+	/// them drift makes a test pass for the wrong reason.
+	fn seed_orphan_master(
+		root: &std::path::Path,
+		name: &str,
+	) -> std::path::PathBuf {
+		let master = root.join(".aghub").join(name);
+		std::fs::create_dir_all(&master).expect("master dir");
+		std::fs::write(
+			master.join("SKILL.md"),
+			format!("---\nname: {name}\ndescription: fixture\n---\n\n# Body\n"),
+		)
+		.expect("write SKILL.md");
+		master
+	}
+
+	/// `claude` + `scope=project` is deliberate: anything else trips
+	/// `check_skills_mutable` / `require_writable_scope` before the route does
+	/// any work, and the assertion would be reading a refusal. Project scope
+	/// also keeps every path under the temp root (master store, agent skill
+	/// dirs, the mutation lock and the pruned lock), so no `$HOME` or
+	/// `$AGHUB_DATA_DIR` pinning is needed — same isolation as the MCP pair.
+	fn delete_skill_uri(
+		root: &std::path::Path,
+		name: &str,
+		query: &str,
+	) -> String {
+		format!(
+			"/api/v1/agents/claude/skills/{name}?scope=project&project_root={}{query}",
+			urlencoding(&root.to_string_lossy()),
+		)
+	}
+
+	#[test]
+	fn delete_skill_wire_orphan_master_confirm_removes_it() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let master = seed_orphan_master(root, "orphan");
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let resp = client
+			.delete(delete_skill_uri(
+				root,
+				"orphan",
+				"&all_agents=true&confirm=true",
+			))
+			.dispatch();
+		assert_eq!(resp.status(), Status::Ok);
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		// Read `outcome`, never `success`/`executed` alone — an unlinked Master
+		// used to answer the `absent` false-success this pins against.
+		assert_eq!(json["outcome"], "removed", "body was {json}");
+		assert_eq!(json["executed"], true);
+		assert!(!json["deleted_path"].is_null(), "body was {json}");
+		// The JSON is not the claim; the disk is.
+		assert!(
+			!master.exists(),
+			"a confirmed all-agents delete must really remove the Master"
+		);
+		// `skipped` is a non-optional Vec on the DTO and the desktop reads it
+		// to say what still serves the skill; nothing else pins that it is
+		// serialized. (`still_read_from` is NOT on this wire — see the report.)
+		assert!(json["skipped"].is_array(), "body was {json}");
+	}
+
+	#[test]
+	fn delete_skill_wire_orphan_master_without_confirm_is_a_preview() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let master = seed_orphan_master(root, "orphan");
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let resp = client
+			.delete(delete_skill_uri(root, "orphan", "&all_agents=true"))
+			.dispatch();
+		assert_eq!(resp.status(), Status::Ok);
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["outcome"], "preview", "body was {json}");
+		assert_eq!(json["executed"], false);
+		assert!(json["deleted_path"].is_null());
+		assert!(
+			master.join("SKILL.md").exists(),
+			"an unconfirmed delete must leave the Master on disk"
+		);
+	}
+
+	#[test]
+	fn delete_skill_wire_missing_name_is_an_idempotent_absent() {
+		// The desktop's "clean all" runs this on every already-clean row, so it
+		// must be a 200 no-op, not an error.
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let resp = client
+			.delete(delete_skill_uri(
+				root,
+				"nothing-here",
+				"&all_agents=true&confirm=true",
+			))
+			.dispatch();
+		assert_eq!(resp.status(), Status::Ok);
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		assert_eq!(json["outcome"], "absent", "body was {json}");
+		assert_eq!(json["success"], true);
+		assert_eq!(json["executed"], false);
+		assert!(json["error"].is_null(), "body was {json}");
+	}
+
 	#[tokio::test]
 	async fn port_reporter_fires_after_bind_with_real_ephemeral_port() {
 		use super::{start_with_port_reporter, ApiOptions};

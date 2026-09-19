@@ -241,10 +241,19 @@ pub struct RemovalPlan {
 	/// True when destructive execution requires an explicit confirm flag
 	/// (symlink-layout full removal, or copy `--all-agents`).
 	pub needs_confirm: bool,
-	/// The targeted removal resolved to the SHARED universal Master and was
-	/// therefore refused. A single-agent removal cannot express "stop only this
-	/// agent seeing it" when the agent reads the Master directly, so the caller
-	/// must fail loudly instead of reporting a removal that did not happen.
+	/// This removal took NOTHING, and the caller must not report otherwise.
+	///
+	/// TWO producers, and they are not interchangeable. The original: the
+	/// targeted removal resolved to the SHARED universal Master and was
+	/// therefore refused — a single-agent removal cannot express "stop only
+	/// this agent seeing it" when the agent reads the Master directly, so the
+	/// caller must fail loudly instead of reporting a removal that did not
+	/// happen. The second: an EXHAUSTIVE sweep that finished with nothing to
+	/// take and something in `skipped`, i.e. it could not prove nothing still
+	/// holds the skill. `remove_skill_planned` answers that one with a
+	/// PREVIEW even on a confirmed call rather than with `commit`, because
+	/// `commit` would set `executed: true` and run the scope-wide lock GC on a
+	/// run that removed nothing.
 	pub shared_master_kept: bool,
 	/// Where the skill is STILL served from after this removal — the reason a
 	/// refusal refuses, named.
@@ -1067,9 +1076,12 @@ impl RemovalOutcome {
 		name: &str,
 	) -> crate::errors::Result<Self> {
 		crate::skills::shape::verify_shape(scope, project_root, name)?;
-		// Load-bearing: for a kept shared Master the COMMIT does not prune, it
-		// REFUSES. Promising `would_prune_lock_entries` there would describe a
-		// commit that can never happen.
+		// Load-bearing: a kept Master never reaches `commit`. A single-agent
+		// keep REFUSES; an exhaustive keep comes back here as a preview even
+		// when it was confirmed (`remove_skill_planned`). Either way promising
+		// `would_prune_lock_entries` would describe a prune that never runs —
+		// and the second shape is one `blocks` alone cannot see, which is why
+		// the plan flag stays in this condition.
 		let prune =
 			if blocks || (plan.shared_master_kept && plan.paths.is_empty()) {
 				PruneStatus::NotRun

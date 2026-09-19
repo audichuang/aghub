@@ -14,17 +14,35 @@ use std::path::{Path, PathBuf};
 /// shared master is deleted. Same silent data loss, with less signal than the
 /// malformed-config case it sits next to.
 pub fn load_skills_from_dir(skills_dir: &Path) -> std::io::Result<Vec<Skill>> {
-	let (skills, failure, _) = walk_dir(skills_dir, None);
+	let (skills, failure, _) = walk_dir(skills_dir, false);
 	match failure {
 		Some(error) => Err(error),
 		None => Ok(skills),
 	}
 }
 
-/// Discover live Masters without traversing repair's retained backups.
+/// Discover live Masters, skipping aghub's own bookkeeping in the store.
+///
+/// The skip is [`crate::skills::linker::is_store_bookkeeping`], not a named
+/// path: `.quarantine/` is only ONE of the dot-prefixed entries the store
+/// holds. A failed `apply-update` leaves `.aghub-stage-<pid>-<n>/skill/` and
+/// `.aghub-backup-<pid>-<n>/target/` beside the Master — deliberately, so the
+/// user can recover by hand — and a slot swap that died mid-way leaves
+/// `.<name>.aghub-migrating`. Each of those holds a full `SKILL.md`, and
+/// `collect_skills` recurses into any directory with no ROOT `SKILL.md`, so
+/// without this predicate the store enumerates the SAME frontmatter name
+/// twice: `resync` then refuses the update as a multi-Master conflict, and
+/// the removal fallback picks its delete target by `read_dir` order.
+///
+/// `Err`-or-nothing, and deliberately so for a DESTRUCTIVE caller: an entry
+/// whose `SKILL.md` will not open has an unknown frontmatter `name`, so it may
+/// be the very skill being removed under a folder name that is not
+/// `sanitize_name(name)`. A partial list cannot rule that out, which makes
+/// "not in the list" unusable as "not there" and makes a uniqueness check
+/// unsound. There is no `_partial` twin here on purpose — one existed briefly
+/// and bought an unrelated delete's convenience with three false answers.
 pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
-	let (skills, failure, _) =
-		walk_dir(store, Some(&store.join(".quarantine")));
+	let (skills, failure, _) = walk_dir(store, true);
 	match failure {
 		Some(error) => Err(error),
 		None => Ok(skills),
@@ -45,7 +63,7 @@ pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
 /// destructive decision — dropping the partial list hides a live Referrer,
 /// while refusing outright makes one odd sibling block every deletion.
 pub fn load_skills_from_dir_partial(skills_dir: &Path) -> (Vec<Skill>, bool) {
-	let (skills, _, unlisted) = walk_dir(skills_dir, None);
+	let (skills, _, unlisted) = walk_dir(skills_dir, false);
 	(skills, unlisted)
 }
 
@@ -108,7 +126,7 @@ fn collect_entry_paths(
 
 fn walk_dir(
 	skills_dir: &Path,
-	excluded: Option<&Path>,
+	store_layout: bool,
 ) -> (Vec<Skill>, Option<std::io::Error>, bool) {
 	let mut skills = Vec::new();
 	let mut failure = None;
@@ -118,7 +136,7 @@ fn walk_dir(
 		&mut skills,
 		&mut failure,
 		&mut unlisted,
-		excluded,
+		store_layout,
 	);
 	skills.sort_by(|a, b| a.name.cmp(&b.name));
 	(skills, failure, unlisted)
@@ -133,7 +151,7 @@ pub fn load_skills_from_dirs(dirs: &[PathBuf]) -> std::io::Result<Vec<Skill>> {
 		let mut skills = Vec::new();
 		let mut failure = None;
 		let mut unlisted = false;
-		collect_skills(dir, &mut skills, &mut failure, &mut unlisted, None);
+		collect_skills(dir, &mut skills, &mut failure, &mut unlisted, false);
 		if let Some(error) = failure {
 			return Err(error);
 		}
@@ -173,7 +191,7 @@ fn collect_skills(
 	skills: &mut Vec<Skill>,
 	failure: &mut Option<std::io::Error>,
 	unlisted: &mut bool,
-	excluded: Option<&Path>,
+	store_layout: bool,
 ) {
 	/// Keep the FIRST failure: it is the one nearest the caller's own path,
 	/// and a later one adds nothing a caller can act on.
@@ -223,7 +241,16 @@ fn collect_skills(
 			}
 		};
 		let path = entry.path();
-		if excluded == Some(path.as_path()) {
+		// Only at the store's TOP level, which is where every skill in it sits
+		// and where all of aghub's own entries sit. `to_string_lossy` rather
+		// than `to_str`: a non-UTF8 name must still be testable for the leading
+		// dot, and a `None` there would let the entry through.
+		if store_layout
+			&& path.file_name().is_some_and(|name| {
+				crate::skills::linker::is_store_bookkeeping(
+					&name.to_string_lossy(),
+				)
+			}) {
 			continue;
 		}
 		match fs::metadata(&path) {
@@ -294,9 +321,7 @@ fn collect_skills(
 				// broken skill keep every OTHER agent's directory alive.
 				note(failure, at_path(&path, error));
 			}
-			Err(_) => {
-				collect_skills(&path, skills, failure, unlisted, excluded)
-			}
+			Err(_) => collect_skills(&path, skills, failure, unlisted, false),
 		}
 	}
 }

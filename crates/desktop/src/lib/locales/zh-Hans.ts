@@ -1230,6 +1230,8 @@ const zhHans: typeof en = {
 	deleteSkillKeptSharedMaster:
 		"`{{name}}` 没有被删除:还有其他 agent 在读共用的 .agents/skills master。请先从那些 agent 移除,或改成对所有 agent 删除。",
 	sourceRemovedCleanFailed: "清理 `{{name}}` 失败。",
+	sourceRemovedCleanLockOnly:
+		"`{{name}}` 的文件已经不在磁盘上,所以这次没有移除任何东西。列表已刷新:若这一行消失,表示它已被别处清掉;若还在,代表只剩 lock 里的残留记录,请用上方的孤儿 lock 清理把它移除。",
 	sourceRemovedCleanSomeFailedOne: "有 1 个已移除技能清理失败。",
 	sourceRemovedCleanSomeFailedMany: "有 {{count}} 个已移除技能清理失败。",
 	importFromThisSource: "从此来源导入",

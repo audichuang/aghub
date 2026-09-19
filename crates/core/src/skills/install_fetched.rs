@@ -650,7 +650,8 @@ pub fn materialize_universal_master(
 				agent,
 				installed: false,
 				error: Some(
-					"Cannot resolve .agents canonical directory".to_string(),
+					"Cannot resolve the .aghub Master store directory"
+						.to_string(),
 				),
 			})
 			.collect();
