@@ -32,8 +32,13 @@ and requires explicit opt-in for changes.
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/)
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — port / skip from `AkaraChen/aghub`
 - **Deep domain playbooks**: project skills under `.agents/skills/`, mirrored as
-  symlinks in `.claude/skills/` — Claude Code auto-registers them, and every other
-  agent in the roster reads the `.agents/skills/` copy (do not re-list the catalog here)
+  symlinks in `.claude/skills/` — Claude Code auto-registers them, and the other
+  agents that READ `.agents/skills` see the same copy. That membership is
+  per-agent AND per-scope and changes with every roster edit, so ask the
+  descriptors, never a list written here:
+  `crates/agents/tests/descriptor_regression.rs`
+  `test_global_skill_paths` / `test_project_skill_paths` (do not re-list the
+  catalog here either)
 - `.impeccable.md` — the desktop frontend's design context (users, brand voice,
   aesthetic direction, type and color strategy), NOT Rust style; `cliff.toml` —
   git-cliff for releases
@@ -405,9 +410,17 @@ true`) for both verbs — a skill because the shared Master is what "already
   desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
   reads the key from stdin; nothing else does
 - **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
-  `partial` | `kept` (shared Master another agent still reads — `success: true`
-  but THE ENTITY IS STILL THERE; the API adds an api-only `failed` for early
-  errors). A preview also carries `would_prune_lock_entries`: the lock keys the
+  `partial` | `kept` (`success: true` but THE ENTITY IS STILL THERE; the API
+  adds an api-only `failed` for early errors). `kept` carries TWO situations
+  and the advice differs: a shared Master another agent still reads, and an
+  `--all-agents` sweep that took NOTHING because it could not prove nothing
+  still holds the skill (a Referrer it could not resolve or a read dir it
+  could not list — `skipped` names them; `still_read_from` is a PLAN field
+  that reaches no wire, `RemovalView` never copied it). The second one
+  never reaches `commit`: `remove_skill_planned` returns a preview for it even
+  on a confirmed call, so it runs no lock prune. Fixing what the sweep could
+  not read and re-running is the way through; there is no flag that overrides
+  it. A preview also carries `would_prune_lock_entries`: the lock keys the
   commit would drop, separate from the committed `pruned_lock_entries` because a
   preview must not claim entries were dropped. Read that, not `dry_run`/`executed`: those two cannot separate a
   refused preview from an already-gone resource, and `executed: true` is set for
@@ -498,13 +511,17 @@ reference, so nothing goes wrong except that the agent is absent), and step 7.
    Seven tables used to skip a missing row entirely and pass. `test_global_data_dirs` is the one table an agent may sit out,
    and only by joining `OS_CONFIG_DIR_AGENTS` and being asserted after the
    loop
-7. `crates/desktop/src/assets/agent/<id>.svg` — the ONLY silent step.
-   `agent-icons.tsx` globs `../assets/agent/*.svg` and keys it by `${id}.svg`;
-   a missing file falls through to a first-letter avatar with no build, lint,
-   typecheck or test error. (`jetbrains-ai` was in that state for releases —
-   its asset is `jetbrains_ai.svg` — until `a15972b3` gave the lookup an
+7. `crates/desktop/src/assets/agent/<id>.svg`. `agent-icons.tsx` globs
+   `../assets/agent/*.svg` and keys it by `${id}.svg`; a missing file falls
+   through to a first-letter avatar, which no build, lint or typecheck notices.
+   It USED to be the only silent step —
+   `crates/desktop/src/lib/agent-icons.test.ts` now closes it by parsing
+   `agent_roster!` for every id and asserting the asset exists (with a vacuity
+   floor so the regex cannot quietly match nothing), and `just preflight` runs
+   it. (`jetbrains-ai` was silently broken for releases — its asset is
+   `jetbrains_ai.svg` — until `a15972b3` gave the lookup an
    `id.replaceAll("-", "_")` fallback, so an id with a dash may ship either
-   spelling. All 26 agents have an asset today.)
+   spelling.)
 
 `crates/core/tests/registry_bijection.rs` covers the three row mistakes the
 compiler cannot: a row naming the wrong MODULE (that agent is handed another's

@@ -33,7 +33,7 @@ All under `/api/v1/`. **Source of truth: `lib.rs` + `routes/*.rs`.** Module → 
 | `skills`        | skill CRUD/import/transfer/reconcile/by-path/prune/install/content/tree/lock/git                         |
 | `skills_update` | check-updates, apply-update, accept-rename                                                               |
 | `sources`       | source list + diff                                                                                       |
-| `coverage`      | per-agent coverage of `.agents/skills` master                                                            |
+| `coverage`      | static per-agent capability matrix (`classify_all`) — reads no master, names no skill                    |
 | `sub_agents`    | sub-agent CRUD + transfer/reconcile                                                                      |
 | `credentials`   | credential store + source bindings                                                                       |
 | `inference`     | provider inventory, keyring keys, per-agent bindings/routing/presets                                     |
