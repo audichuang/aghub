@@ -6,6 +6,7 @@ pub mod cline;
 pub mod codex;
 pub mod copilot;
 pub mod cursor;
+pub mod dsh;
 pub mod factory;
 pub mod gemini;
 pub mod grok;
@@ -23,6 +24,7 @@ pub mod roocode;
 pub mod trae;
 pub mod warp;
 pub mod windsurf;
+pub mod zcode;
 pub mod zed;
 
 use crate::AgentDescriptor;
@@ -139,4 +141,6 @@ agent_roster! {
 	Hermes      => "hermes",       hermes,       [];
 	Grok        => "grok",         grok,         [];
 	Omp         => "omp",          omp,          ["oh-my-pi"];
+	ZCode       => "zcode",        zcode,        [];
+	Dsh         => "dsh",          dsh,          [];
 }

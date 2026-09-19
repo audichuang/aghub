@@ -4,7 +4,7 @@ use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 
 json_map_dialect!(json_map::Dialect {
-	toggle_key: json_map::ToggleKey::Disabled,
+	toggle_key: json_map::ToggleKey::Disabled("disabled"),
 	..json_map::MCP_SERVERS
 });
 

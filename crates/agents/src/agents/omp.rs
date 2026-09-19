@@ -36,7 +36,7 @@ use std::path::{Path, PathBuf};
 // `requestIdFormat`, `envPolicy`) survive because `json_map` rewrites only the
 // transport keys.
 json_map_dialect!(json_map::Dialect {
-	toggle_key: json_map::ToggleKey::Enabled,
+	toggle_key: json_map::ToggleKey::Enabled("enabled"),
 	untyped_remote: json_map::UntypedRemote::StreamableHttp,
 	..json_map::MCP_SERVERS
 });

@@ -19,11 +19,25 @@ use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde::Deserialize;
 use std::collections::HashMap;
 
+/// The per-server on/off field: its SENSE and its SPELLING. The spelling used
+/// to be hard-coded in the serializer, which made `enabled` / `disabled` the
+/// only two words any `json_map` agent could have — ZCode's is `enable`, and an
+/// agent whose toggle aghub writes under a name it does not read is an agent
+/// whose disabled servers come back on.
+///
+/// The canonical pair is also what aghub itself has always written, so a
+/// dialect spelling its toggle `enabled` still reads `disabled` as a legacy or
+/// foreign value (and strips it on save — read it, own it). A dialect with its
+/// OWN spelling reads that key ALONE: the vendor ignores the canonical pair, so
+/// honouring one would report an on/off state the agent does not have, and the
+/// next save would make it real.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum ToggleKey {
 	None,
-	Enabled,
-	Disabled,
+	/// `true` means enabled (`"enabled"`, ZCode's `"enable"`).
+	Enabled(&'static str),
+	/// `true` means DISabled (`"disabled"`).
+	Disabled(&'static str),
 }
 
 /// How a remote server with a URL but no explicit transport tag is read.
@@ -381,14 +395,35 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 		// writes `disabled: false` — silently turning the server back on. A
 		// toggle the dialect cannot write back is not reported at all, since
 		// aghub would be showing a state the user can never change.
+		let flag = |key: &str| -> Result<Option<bool>> {
+			match key {
+				// serde consumed these two into typed fields, so they are
+				// never in `rest`.
+				"enabled" => Ok(enabled),
+				"disabled" => Ok(disabled),
+				key => match rest.get(key) {
+					None => Ok(None),
+					Some(value) => value.as_bool().map(Some).ok_or_else(|| {
+						ConfigError::InvalidConfig(format!(
+							"MCP server '{name}' field '{key}' must be a \
+								 boolean"
+						))
+					}),
+				},
+			}
+		};
 		let enabled = match dialect.toggle_key {
 			ToggleKey::None => true,
-			ToggleKey::Enabled => {
-				enabled.unwrap_or_else(|| !disabled.unwrap_or(false))
+			ToggleKey::Enabled(key) => {
+				let legacy =
+					(key == "enabled").then(|| !disabled.unwrap_or(false));
+				flag(key)?.or(legacy).unwrap_or(true)
 			}
-			ToggleKey::Disabled => disabled
-				.map(|disabled| !disabled)
-				.unwrap_or_else(|| enabled.unwrap_or(true)),
+			ToggleKey::Disabled(key) => {
+				let legacy =
+					(key == "disabled").then(|| enabled.unwrap_or(true));
+				flag(key)?.map(|off| !off).or(legacy).unwrap_or(true)
+			}
 		};
 		config.mcps.push(McpServer {
 			name,
@@ -504,15 +539,23 @@ pub fn serialize(
 		{
 			entry.remove(key);
 		}
+		// Strip only what the parse above READ: the opposite canonical spelling
+		// is a legacy value this dialect honours, so it must not survive next
+		// to the key aghub writes. A dialect with its own spelling never read
+		// the canonical pair, and an unread key is unmanaged data.
 		match dialect.toggle_key {
 			ToggleKey::None => {}
-			ToggleKey::Enabled => {
-				entry.remove("disabled");
-				entry.insert("enabled".into(), mcp.enabled.into());
+			ToggleKey::Enabled(key) => {
+				if key == "enabled" {
+					entry.remove("disabled");
+				}
+				entry.insert(key.into(), mcp.enabled.into());
 			}
-			ToggleKey::Disabled => {
-				entry.remove("enabled");
-				entry.insert("disabled".into(), (!mcp.enabled).into());
+			ToggleKey::Disabled(key) => {
+				if key == "disabled" {
+					entry.remove("enabled");
+				}
+				entry.insert(key.into(), (!mcp.enabled).into());
 			}
 		}
 		match &mcp.transport {
@@ -588,7 +631,7 @@ mod tests {
 	use crate::models::{McpServer, McpTransport, Skill};
 
 	const DISABLED: Dialect = Dialect {
-		toggle_key: ToggleKey::Disabled,
+		toggle_key: ToggleKey::Disabled("disabled"),
 		..MCP_SERVERS
 	};
 	/// No transport tag at all — what `Option<Discriminator>::None` used to say.
@@ -772,6 +815,67 @@ mod tests {
 		assert!(parse(json, &MCP_SERVERS).unwrap().mcps[0].enabled);
 		// Native toggle: honoured.
 		assert!(!parse(json, &DISABLED).unwrap().mcps[0].enabled);
+	}
+
+	/// The toggle's SPELLING belongs to the dialect, and what a save STRIPS
+	/// follows what the parse READ. Lose the first half and a server the user
+	/// switched off comes back on, written under a name the vendor ignores.
+	/// Lose the second and `enabled` survives next to `disabled` with opposite
+	/// values, so the next reader honours whichever one it happens to know.
+	#[test]
+	fn the_toggle_spelling_is_the_dialects_and_a_save_strips_only_what_it_read()
+	{
+		const ENABLE: Dialect = Dialect {
+			toggle_key: ToggleKey::Enabled("enable"),
+			..MCP_SERVERS
+		};
+		const ENABLED: Dialect = Dialect {
+			toggle_key: ToggleKey::Enabled("enabled"),
+			..MCP_SERVERS
+		};
+		let original = r#"{"mcpServers":{"s":{"command":"run","disabled":true,"enabled":false}}}"#;
+
+		// Canonical spelling: the opposite key is one this dialect READS, so it
+		// must not survive the rewrite.
+		let config = parse(original, &ENABLED).unwrap();
+		assert!(!config.mcps[0].enabled);
+		let value: serde_json::Value = serde_json::from_str(
+			&serialize(&config, Some(original), &ENABLED).unwrap(),
+		)
+		.unwrap();
+		assert_eq!(value["mcpServers"]["s"]["enabled"], false);
+		assert!(value["mcpServers"]["s"].get("disabled").is_none());
+
+		// Own spelling: neither canonical key is read, so neither is touched —
+		// and an entry with no toggle field of its own is ON.
+		let config = parse(original, &ENABLE).unwrap();
+		assert!(config.mcps[0].enabled);
+		let value: serde_json::Value = serde_json::from_str(
+			&serialize(&config, Some(original), &ENABLE).unwrap(),
+		)
+		.unwrap();
+		assert_eq!(value["mcpServers"]["s"]["enable"], true);
+		assert_eq!(value["mcpServers"]["s"]["disabled"], true);
+		assert_eq!(value["mcpServers"]["s"]["enabled"], false);
+	}
+
+	#[test]
+	fn a_toggle_that_is_not_a_boolean_is_reported_never_guessed() {
+		const ENABLE: Dialect = Dialect {
+			toggle_key: ToggleKey::Enabled("enable"),
+			..MCP_SERVERS
+		};
+		// Defaulting a malformed toggle either way silently changes whether
+		// the server mounts.
+		let error = parse(
+			r#"{"mcpServers":{"s":{"command":"run","enable":"yes"}}}"#,
+			&ENABLE,
+		)
+		.unwrap_err();
+		assert!(
+			error.to_string().contains("must be a boolean"),
+			"got: {error}"
+		);
 	}
 
 	#[test]
@@ -1122,7 +1226,7 @@ mod tests {
 				http: "streamable-http",
 				..MCP_SERVERS.vocab
 			},
-			toggle_key: ToggleKey::Disabled,
+			toggle_key: ToggleKey::Disabled("disabled"),
 			..MCP_SERVERS
 		};
 		let mut server = McpServer::new(

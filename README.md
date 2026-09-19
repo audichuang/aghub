@@ -138,12 +138,13 @@ Then open the app normally. (Adjust the path if you haven't moved it to
 
 ## Supported Agents
 
-26 agents, one interface:
+28 agents, one interface:
 
 Claude Code · Cursor · Windsurf · GitHub Copilot · Gemini CLI · OpenAI Codex ·
 OpenCode · Zed · Warp · Cline · RooCode · KiloCode · AugmentCode · Amp · Kiro ·
 Trae · Factory · Kimi Code CLI · Mistral Le Chat · Pi Coding Agent ·
-JetBrains AI · Hermes · Grok · Antigravity · OpenClaw · Oh My Pi
+JetBrains AI · Hermes · Grok · Antigravity · OpenClaw · Oh My Pi · ZCode ·
+DeepSeek Harness
 
 ## Contributing
 

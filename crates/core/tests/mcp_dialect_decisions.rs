@@ -180,6 +180,17 @@ const MISTRAL: Fixtures = Fixtures {
 	),
 };
 
+/// ZCode nests its map under `mcp.servers` and tags with `type`, so the shape
+/// differs from `MAP` above and from OpenClaw (same nesting, `transport` tag).
+const ZCODE: Fixtures = Fixtures {
+	mixed: r#"{"mcp":{"servers":{"m":{"command":"run","url":"https://example.test/mcp"}}}}"#,
+	unknown_tag: Some(
+		r#"{"mcp":{"servers":{"t":{"type":"grpc","url":"https://example.test/mcp"}}}}"#,
+	),
+	unmodeled: r#"{"mcp":{"servers":{"u":{"command":"run","keep-me":"vendor-owned"}}}}"#,
+	unfittable: None,
+};
+
 const HERMES: Fixtures = Fixtures {
 	mixed: "mcp_servers:\n  m:\n    command: run\n    url: https://example.test/mcp\n",
 	unknown_tag: Some(
@@ -440,6 +451,15 @@ const ROWS: &[Row] = &[
 	row!(
 		"omp",
 		MAP,
+		Rejected,
+		PresenceFallback,
+		PreservedVerbatim,
+		NotApplicable,
+		Spelled
+	),
+	row!(
+		"zcode",
+		ZCODE,
 		Rejected,
 		PresenceFallback,
 		PreservedVerbatim,

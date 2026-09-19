@@ -13,7 +13,7 @@ json_map_dialect!(json_map::Dialect {
 		stdio: "",
 		..json_map::MCP_SERVERS.vocab
 	},
-	toggle_key: json_map::ToggleKey::Disabled,
+	toggle_key: json_map::ToggleKey::Disabled("disabled"),
 	..json_map::MCP_SERVERS
 });
 

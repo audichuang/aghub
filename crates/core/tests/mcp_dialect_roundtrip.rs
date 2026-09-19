@@ -39,6 +39,7 @@ const NATIVE_TOGGLE: &[&str] = &[
 	"openclaw",
 	"opencode",
 	"roocode",
+	"zcode",
 ];
 
 fn config_with(server: McpServer) -> AgentConfig {

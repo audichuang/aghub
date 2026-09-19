@@ -244,6 +244,32 @@ const OPENCLAW_READ: &str = r#"{
   }
 }"#;
 
+/// ZCode's own nesting (`mcp.servers`), and the one fixture that can tell the
+/// parameterised `ToggleKey` from the hard-coded one it replaced: `off` carries
+/// the VENDOR spelling `enable`, while `canonical-only` carries `enabled` and
+/// `disabled` — the two words ZCode itself ignores. Read the canonical pair and
+/// `canonical-only` comes back OFF, and the next save writes `enable: false`
+/// over a server ZCode was happily mounting. `http-key` pins the same foreign
+/// `httpUrl` every non-Gemini agent must leave alone.
+const ZCODE_READ: &str = r#"{
+  "mcp": {
+    "servers": {
+      "untagged-plain": { "url": "https://example.test/plain" },
+      "untagged-sse": { "url": "https://example.test/sse/stream" },
+      "http-key": {
+        "url": "https://example.test/sse/legacy",
+        "httpUrl": "https://example.test/preferred"
+      },
+      "off": { "command": "run-off", "enable": false },
+      "canonical-only": {
+        "command": "run-canon",
+        "disabled": true,
+        "enabled": false
+      }
+    }
+  }
+}"#;
+
 const OPENCODE_READ: &str = r#"{
   "mcp": {
     "untagged-plain": { "type": "remote", "url": "https://example.test/plain" },
@@ -1036,6 +1062,67 @@ untagged-plain streamable-http https://example.test/plain enabled=true"#
 		r#"http-key streamable-http https://example.test/sse/legacy enabled=true
 toggled-off stdio run-off enabled=false
 toggled-on stdio run-on enabled=true
+untagged-plain streamable-http https://example.test/plain enabled=true
+untagged-sse streamable-http https://example.test/sse/stream enabled=true"#
+	),
+	// ZCode: `json_map` under a nested `mcp.servers` key, with the toggle spelled
+	// `enable` — one letter off the canonical `enabled`, and the reason
+	// `ToggleKey` carries its spelling as data. Derived from the vendor
+	// contract, NOT from running the serializer. The transport tag is `type`
+	// (the family default: the vendor documents stdio/HTTP/SSE but never names
+	// the field, so aghub does not invent one), and an untagged remote is
+	// streamable HTTP — inferring SSE from an `/sse/` path would rewrite the
+	// user's server as a transport no vendor document supports.
+	row!(
+		"zcode",
+		ZCODE_READ,
+		r#"{
+  "mcp": {
+    "servers": {
+      "local": {
+        "args": [
+          "--flag",
+          "value"
+        ],
+        "command": "run-local",
+        "enable": true,
+        "env": {
+          "TOKEN": "secret"
+        },
+        "type": "stdio"
+      },
+      "off": {
+        "command": "run-off",
+        "enable": false,
+        "type": "stdio"
+      },
+      "remote": {
+        "enable": true,
+        "headers": {
+          "Authorization": "Bearer t"
+        },
+        "type": "http",
+        "url": "https://example.test/mcp"
+      }
+    }
+  }
+}"#,
+		r#"{
+  "mcp": {
+    "servers": {
+      "stream": {
+        "enable": true,
+        "type": "sse",
+        "url": "https://example.test/sse"
+      }
+    }
+  }
+}"#,
+		// `canonical-only` is ON: ZCode reads neither `enabled` nor `disabled`,
+		// so aghub must not report an on/off state the vendor does not have.
+		r#"canonical-only stdio run-canon enabled=true
+http-key streamable-http https://example.test/sse/legacy enabled=true
+off stdio run-off enabled=false
 untagged-plain streamable-http https://example.test/plain enabled=true
 untagged-sse streamable-http https://example.test/sse/stream enabled=true"#
 	),

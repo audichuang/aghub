@@ -243,6 +243,8 @@ fn test_cli_names() {
 		(AgentType::Hermes, "hermes"),
 		(AgentType::Grok, "grok"),
 		(AgentType::Omp, "omp"),
+		(AgentType::ZCode, "zcode"),
+		(AgentType::Dsh, "dsh"),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -291,6 +293,8 @@ fn test_skills_cli_names() {
 		(AgentType::Hermes, None),
 		(AgentType::Grok, Some("grok")),
 		(AgentType::Omp, None),
+		(AgentType::ZCode, None),
+		(AgentType::Dsh, None),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -341,6 +345,8 @@ fn test_display_names() {
 		(AgentType::Hermes, "Hermes"),
 		(AgentType::Grok, "Grok"),
 		(AgentType::Omp, "Oh My Pi"),
+		(AgentType::ZCode, "ZCode"),
+		(AgentType::Dsh, "DeepSeek Harness"),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -397,6 +403,8 @@ fn test_project_markers() {
 		(AgentType::Hermes, &[]),
 		(AgentType::Grok, &[".grok"]),
 		(AgentType::Omp, &[".omp"]),
+		(AgentType::ZCode, &[".zcode"]),
+		(AgentType::Dsh, &[".dsh"]),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -458,6 +466,8 @@ fn test_mcp_global_paths() {
 		(AgentType::Hermes, Some("")),
 		(AgentType::Grok, Some(".grok/config.toml")),
 		(AgentType::Omp, Some(".omp/agent/mcp.json")),
+		(AgentType::ZCode, Some(".zcode/cli/config.json")),
+		(AgentType::Dsh, None),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -564,6 +574,8 @@ fn test_mcp_project_paths() {
 		(AgentType::Hermes, None),
 		(AgentType::Grok, Some(".grok/config.toml")),
 		(AgentType::Omp, Some(".omp/mcp.json")),
+		(AgentType::ZCode, Some(".zcode/config.json")),
+		(AgentType::Dsh, None),
 	];
 
 	let root = PathBuf::from("/project");
@@ -735,6 +747,8 @@ fn test_global_data_dirs() {
 		// Hermes uses a platform-dependent home — asserted after the loop.
 		(AgentType::Grok, Some(".grok")),
 		(AgentType::Omp, Some(".omp/agent")),
+		(AgentType::ZCode, Some(".zcode")),
+		(AgentType::Dsh, Some(".dsh")),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -832,6 +846,8 @@ fn test_mcp_capabilities_stdio() {
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -878,6 +894,8 @@ fn test_mcp_capabilities_remote() {
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -924,6 +942,8 @@ fn test_mcp_capabilities_scopes_global() {
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -970,6 +990,8 @@ fn test_mcp_capabilities_scopes_project() {
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1018,6 +1040,8 @@ fn test_mcp_capabilities_enable_disable() {
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1069,6 +1093,8 @@ fn test_skills_capabilities_scopes_global() {
 		(AgentType::Hermes, true),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1115,6 +1141,8 @@ fn test_skills_capabilities_scopes_project() {
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
 		(AgentType::Omp, true),
+		(AgentType::ZCode, true),
+		(AgentType::Dsh, true),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1161,6 +1189,8 @@ fn test_skills_capabilities_universal() {
 		(AgentType::Hermes, false),
 		(AgentType::Grok, false),
 		(AgentType::Omp, false),
+		(AgentType::ZCode, false),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1211,6 +1241,8 @@ fn test_sub_agent_capabilities_scopes_global() {
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
 		(AgentType::Omp, false),
+		(AgentType::ZCode, false),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1257,6 +1289,8 @@ fn test_sub_agent_capabilities_scopes_project() {
 		(AgentType::Hermes, false),
 		(AgentType::Grok, true),
 		(AgentType::Omp, false),
+		(AgentType::ZCode, false),
+		(AgentType::Dsh, false),
 	];
 
 	for (agent_type, desc) in all_descriptors() {
@@ -1342,6 +1376,8 @@ fn test_global_skill_paths() {
 			AgentType::Omp,
 			Some(&[".omp/agent/skills", ".agents/skills"]),
 		),
+		(AgentType::ZCode, Some(&[".zcode/skills", ".agents/skills"])),
+		(AgentType::Dsh, Some(&[".dsh/skills", ".agents/skills"])),
 		// Hermes has a platform-dependent home — asserted after the loop.
 		(AgentType::Hermes, Some(&[])),
 	];
@@ -1479,6 +1515,8 @@ fn test_project_skill_paths() {
 		(AgentType::Factory, Some(&[".factory/skills"])),
 		(AgentType::Grok, Some(&[".grok/skills", ".agents/skills"])),
 		(AgentType::Omp, Some(&[".omp/skills", ".agents/skills"])),
+		(AgentType::ZCode, Some(&[".zcode/skills", ".agents/skills"])),
+		(AgentType::Dsh, Some(&[".dsh/skills", ".agents/skills"])),
 		(AgentType::Hermes, None),
 	];
 

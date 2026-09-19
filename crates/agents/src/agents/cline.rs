@@ -9,7 +9,7 @@ json_map_dialect!(json_map::Dialect {
 		http: "streamableHttp",
 		..json_map::MCP_SERVERS.vocab
 	},
-	toggle_key: json_map::ToggleKey::Disabled,
+	toggle_key: json_map::ToggleKey::Disabled("disabled"),
 	..json_map::MCP_SERVERS
 });
 
