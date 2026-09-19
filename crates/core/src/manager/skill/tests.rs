@@ -2340,6 +2340,130 @@ fn all_agents_delete_of_an_absent_name_is_still_not_found() {
 	));
 }
 
+/// An agent Referrer must not buy the store a pass.
+///
+/// `skill_for_planned_removal` answers from the caller's own config first and
+/// from a peer agent's second, and both returns sat BEFORE the store scan — so
+/// the duplicate refusal and the fail-closed read only ever ran for an ORPHAN
+/// Master. Link either Master into any agent and `--all-agents --yes` deleted
+/// one of the two, reported `removed`, and pruned the lock key while the other
+/// Master stayed on disk.
+///
+/// Both store refusals are exercised, because they are different arms: a
+/// second readable Master under the same frontmatter name, and a peer whose
+/// `SKILL.md` will not open (so its name cannot be ruled out).
+///
+/// Revert proof: move the store scan back below the two early returns and
+/// every iteration here reports `Ok(.. executed: true, Pruned(["twin"]) ..)`.
+#[test]
+#[cfg(unix)]
+fn linked_masters_do_not_bypass_exhaustive_store_validation() {
+	use crate::{create_adapter, models::AgentType};
+	use std::os::unix::fs::PermissionsExt;
+	let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+	// `.claude` is the caller's own agent (the config hit), `.cursor` a peer
+	// reached through `load_all_agents` — one early return each.
+	for agent_dir in [".claude", ".cursor"] {
+		for unreadable in [false, true] {
+			let project = tempfile::tempdir().unwrap();
+			let root = project.path();
+			// Running as root makes a 0o000 file readable anyway, which would
+			// turn the fail-closed half into a false green.
+			if unreadable && !perms_enforced(root) {
+				continue;
+			}
+			let master = root.join(".aghub/twin");
+			let other = root.join(".aghub/other-folder");
+			seed_master(&master, "twin");
+			seed_master(&other, "twin");
+			if unreadable {
+				std::fs::set_permissions(
+					other.join("SKILL.md"),
+					std::fs::Permissions::from_mode(0o000),
+				)
+				.unwrap();
+			}
+			let link = root.join(agent_dir).join("skills/twin");
+			std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+			std::os::unix::fs::symlink(&master, &link).unwrap();
+			skill::lock::local::add_skill_to_local_lock(
+				"twin",
+				local_entry(),
+				Some(root),
+			)
+			.unwrap();
+			let lock_before =
+				std::fs::read(root.join("skills-lock.json")).unwrap();
+			let mut manager = ConfigManager::new(
+				create_adapter(AgentType::Claude),
+				false,
+				Some(root),
+			);
+			manager.load().unwrap();
+
+			for dry_run in [false, true] {
+				let result = manager
+					.remove_skill_planned("twin", true, dry_run, !dry_run);
+				assert!(
+					master.join("SKILL.md").is_file()
+						&& other.exists() && link.exists(),
+					"{agent_dir}, unreadable={unreadable}: a refusal must \
+					 preserve both Masters and the Referrer; got {result:?}"
+				);
+				let error = result.expect_err(
+					"an agent link must not bypass store validation",
+				);
+				assert!(
+					error.to_string().contains("other-folder"),
+					"{agent_dir}, unreadable={unreadable}: the refusal must \
+					 name the other store entry, got: {error}"
+				);
+				assert_eq!(
+					std::fs::read(root.join("skills-lock.json")).unwrap(),
+					lock_before,
+					"{agent_dir}, unreadable={unreadable}: a refusal prunes \
+					 no lock key"
+				);
+			}
+
+			if unreadable {
+				std::fs::set_permissions(
+					other.join("SKILL.md"),
+					std::fs::Permissions::from_mode(0o644),
+				)
+				.unwrap();
+			}
+		}
+	}
+}
+
+/// The store scan now runs on EVERY `--all-agents` removal, including the
+/// pre-2.18 shape that has no store at all. A missing `.aghub` must read as
+/// "holds nothing" (`collect_skills` returns on `NotFound`), not as a store
+/// this cannot read — otherwise moving the scan in front of the early returns
+/// turns an everyday delete into an IO error.
+#[test]
+fn all_agents_delete_works_with_no_master_store_at_all() {
+	use crate::{create_adapter, models::AgentType};
+	let _env = crate::skills::prune::test_lock::env_lock().lock().unwrap();
+	let project = tempfile::tempdir().unwrap();
+	let root = project.path();
+	let copy = root.join(".claude/skills/legacy");
+	seed_master(&copy, "legacy");
+	assert!(!root.join(".aghub").exists(), "fixture must have no store");
+
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	manager.load().unwrap();
+	let outcome = manager
+		.remove_skill_planned("legacy", true, false, true)
+		.expect("a missing store is not an unreadable one");
+	assert!(outcome.executed && !copy.exists(), "got {outcome:?}");
+}
+
 #[test]
 fn remove_skill_planned_all_agents_collects_unlinked_master() {
 	use crate::skills::removal::PruneStatus;

@@ -1037,91 +1037,110 @@ impl ConfigManager {
 		let config = self.config.as_ref().ok_or_else(|| {
 			ConfigError::InvalidConfig("No configuration loaded".to_string())
 		})?;
-		if let Some(skill) = config.skills.iter().find(|s| s.name == name) {
-			return Ok(skill.clone());
+		let from_caller =
+			config.skills.iter().find(|s| s.name == name).cloned();
+		if !all_agents {
+			return from_caller
+				.ok_or_else(|| ConfigError::resource_not_found("skill", name));
 		}
 
-		if all_agents {
-			for resources in
-				crate::load_all_agents(self.scope, self.project_root.as_deref())
+		// The store scan runs BEFORE either early return, and its refusals are
+		// the reason. Both of them — the duplicate Master below and the
+		// fail-closed read — judge THE STORE, and an agent Referrer says
+		// nothing about what else is in it. They used to sit past the caller's
+		// own hit and a peer agent's, so they only ever ran for a Master no
+		// agent linked: link either Master into any agent and
+		// `--all-agents --yes` deleted one of the two, reported `removed` and
+		// pruned the lock key while the other stayed on disk.
+		//
+		// A Master without Referrers is invisible to every agent. Source
+		// cleanup still owns it: otherwise it reports `absent` while both
+		// the bytes and the lock entry survive. Discovery answers "which
+		// Master is this" — never a `dir.join(name)` guess — so a Master
+		// whose FOLDER name differs from its frontmatter `name` is still
+		// found, and aghub's own bookkeeping in the store is still skipped.
+		use crate::models::ResourceScope;
+		use crate::skills::{
+			discovery::load_master_skills, linker::master_store_dir,
+		};
+		let mut stores = Vec::new();
+		if self.scope != ResourceScope::GlobalOnly {
+			if let Some(root) = self.project_root.as_deref() {
+				stores.extend(master_store_dir(Some(root)));
+			}
+		}
+		if self.scope != ResourceScope::ProjectOnly {
+			stores.extend(master_store_dir(None));
+		}
+		// The orphan fallback, taken only if neither agent path answers. The
+		// first store to hold exactly one match wins and stops the scan, as
+		// before — widening it to every store would make a duplicate in the
+		// GLOBAL store refuse a project removal that never touched it.
+		let mut orphan_master = None;
+		for store in stores {
+			// FAIL CLOSED on a store this cannot fully read, and note what
+			// that rules out: an entry whose `SKILL.md` will not open has
+			// an UNKNOWN frontmatter name, so it may be this very skill —
+			// under a folder name that is not `sanitize_name(name)`, which
+			// is a shape aghub supports. Trusting the partial list there
+			// buys one convenience (an unreadable sibling no longer fails
+			// an unrelated delete) and sells three lies for it: a hidden
+			// same-name Master slips past the duplicate refusal below, an
+			// unreadable non-canonical Master answers `absent` with its
+			// bytes still on disk, and a probe of the canonical slot alone
+			// cannot see either. `load_master_skills` is `Err`-or-nothing
+			// on purpose; the error names the path, which is the whole
+			// remedy.
+			let mut found = load_master_skills(&store)?
+				.into_iter()
+				.filter(|skill| skill.name == name);
+			match (found.next(), found.next()) {
+				(Some(mut skill), None) => {
+					if skill.canonical_path.is_none() {
+						skill.canonical_path = skill.source_path.clone();
+					}
+					orphan_master = Some(skill);
+					break;
+				}
+				// Two live Masters under one frontmatter name. `find()`
+				// would pick by `read_dir` order and delete one of them
+				// arbitrarily; `resync::refuse_conflicting_copy` already
+				// refuses this shape, and a DELETE has even less licence
+				// to guess.
+				(Some(first), Some(second)) => {
+					return Err(ConfigError::InvalidConfig(format!(
+						"skill '{name}' has two Masters in {}: '{}' and \
+						 '{}'. Remove or rename one of them, then re-run.",
+						store.display(),
+						first.source_path.as_deref().unwrap_or("<unknown>"),
+						second.source_path.as_deref().unwrap_or("<unknown>"),
+					)));
+				}
+				(None, _) => {}
+			}
+		}
+
+		// Selection order is unchanged: the caller's own agent, then a peer,
+		// then the unlinked Master.
+		if let Some(skill) = from_caller {
+			return Ok(skill);
+		}
+		for resources in
+			crate::load_all_agents(self.scope, self.project_root.as_deref())
+		{
+			if let Some(skill) =
+				resources.skills.into_iter().find(|s| s.name == name)
 			{
-				if let Some(skill) =
-					resources.skills.into_iter().find(|s| s.name == name)
-				{
-					debug!(
-						"using '{}' skill from agent '{}' for all-agent removal",
-						name, resources.agent_id
-					);
-					return Ok(skill);
-				}
-			}
-
-			// A Master without Referrers is invisible to every agent. Source
-			// cleanup still owns it: otherwise it reports `absent` while both
-			// the bytes and the lock entry survive. Discovery answers "which
-			// Master is this" — never a `dir.join(name)` guess — so a Master
-			// whose FOLDER name differs from its frontmatter `name` is still
-			// found, and aghub's own bookkeeping in the store is still skipped.
-			use crate::models::ResourceScope;
-			use crate::skills::{
-				discovery::load_master_skills, linker::master_store_dir,
-			};
-			let mut stores = Vec::new();
-			if self.scope != ResourceScope::GlobalOnly {
-				if let Some(root) = self.project_root.as_deref() {
-					stores.extend(master_store_dir(Some(root)));
-				}
-			}
-			if self.scope != ResourceScope::ProjectOnly {
-				stores.extend(master_store_dir(None));
-			}
-			for store in stores {
-				// FAIL CLOSED on a store this cannot fully read, and note what
-				// that rules out: an entry whose `SKILL.md` will not open has
-				// an UNKNOWN frontmatter name, so it may be this very skill —
-				// under a folder name that is not `sanitize_name(name)`, which
-				// is a shape aghub supports. Trusting the partial list there
-				// buys one convenience (an unreadable sibling no longer fails
-				// an unrelated delete) and sells three lies for it: a hidden
-				// same-name Master slips past the duplicate refusal below, an
-				// unreadable non-canonical Master answers `absent` with its
-				// bytes still on disk, and a probe of the canonical slot alone
-				// cannot see either. `load_master_skills` is `Err`-or-nothing
-				// on purpose; the error names the path, which is the whole
-				// remedy.
-				let mut found = load_master_skills(&store)?
-					.into_iter()
-					.filter(|skill| skill.name == name);
-				match (found.next(), found.next()) {
-					(Some(mut skill), None) => {
-						if skill.canonical_path.is_none() {
-							skill.canonical_path = skill.source_path.clone();
-						}
-						return Ok(skill);
-					}
-					// Two live Masters under one frontmatter name. `find()`
-					// would pick by `read_dir` order and delete one of them
-					// arbitrarily; `resync::refuse_conflicting_copy` already
-					// refuses this shape, and a DELETE has even less licence
-					// to guess.
-					(Some(first), Some(second)) => {
-						return Err(ConfigError::InvalidConfig(format!(
-							"skill '{name}' has two Masters in {}: '{}' and \
-							 '{}'. Remove or rename one of them, then re-run.",
-							store.display(),
-							first.source_path.as_deref().unwrap_or("<unknown>"),
-							second
-								.source_path
-								.as_deref()
-								.unwrap_or("<unknown>"),
-						)));
-					}
-					(None, _) => {}
-				}
+				debug!(
+					"using '{}' skill from agent '{}' for all-agent removal",
+					name, resources.agent_id
+				);
+				return Ok(skill);
 			}
 		}
 
-		Err(ConfigError::resource_not_found("skill", name))
+		orphan_master
+			.ok_or_else(|| ConfigError::resource_not_found("skill", name))
 	}
 
 	/// Refuse: there is no writer for a skill's enabled flag.
