@@ -259,13 +259,35 @@ jobs:
               uses: tauri-apps/tauri-action@v0
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  # Apple code-signing: leave commented while no Apple Developer certs exist.
-                  # Passing these as empty strings makes Tauri attempt `security import` on an
-                  # empty cert and fail the macOS build. Uncomment + set the secrets once you
-                  # have an Apple Developer account to ship signed/notarized dmgs.
+                  # Ad-hoc code signing. A literal "-", NOT a secret: an unset
+                  # secret expands to the empty string, and tauri-cli's read is
+                  # `var_os(...)` -> `Some("")`, which becomes `codesign -s ""`.
+                  # That empty-identity path is the macOS build failure the
+                  # commented-out block below used to cause.
+                  #
+                  # Why this is here at all: without any identity, tauri does
+                  # not run codesign, and the shipped .app was only
+                  # linker-signed -- `codesign --verify --deep --strict` failed
+                  # with "code has no resources but signature indicates they
+                  # must be present", because nothing sealed the bundle's
+                  # resources. Ad-hoc signing seals them. It is NOT notarization
+                  # and NOT a Developer ID: Gatekeeper still treats the app as
+                  # unidentified on a clean Mac. It only makes the bundle
+                  # internally consistent, so tampering after download
+                  # invalidates it instead of going unnoticed.
+                  #
+                  # No cert import happens: tauri only calls `security import`
+                  # when APPLE_CERTIFICATE *and* APPLE_CERTIFICATE_PASSWORD are
+                  # both set (tauri-bundler `macos/sign.rs::keychain`). With
+                  # only an identity it takes the `with_signing_identity` branch
+                  # and runs `codesign --force -s - <target>` over each nested
+                  # binary and framework, inner to outer.
+                  APPLE_SIGNING_IDENTITY: "-"
+                  # Real Apple certs + notarization: uncomment and set these
+                  # once an Apple Developer account exists, and DROP the literal
+                  # identity above (the cert's own identity replaces it).
                   # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
                   # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-                  # APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
                   # APPLE_ID: ${{ secrets.APPLE_ID }}
                   # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
                   # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
@@ -287,6 +309,27 @@ jobs:
                   args: ${{ (matrix.target == 'x86_64-pc-windows-msvc' && contains(github.ref_name, '-')) && format('--target {0} --bundles nsis --config src-tauri/tauri.bundle.conf.json', matrix.target) || format('--target {0} --config src-tauri/tauri.bundle.conf.json', matrix.target) }}
                   includeUpdaterJson: true
                   projectPath: crates/desktop
+
+            - name: Verify macOS bundle signature
+              if: runner.os == 'macOS'
+              shell: bash
+              run: |
+                  set -eu
+                  # Exactly one, asserted: `find` matching nothing exits 0, so a
+                  # renamed bundle dir would turn this gate into a no-op that
+                  # reports success -- the failure mode the gate exists to stop.
+                  # `-prune` keeps it from descending into the bundle and
+                  # matching a nested .app. No `mapfile`: macOS /bin/bash is 3.2.
+                  found=$(find target -type d -path '*/bundle/macos/*.app' -prune)
+                  count=$(printf '%s' "$found" | grep -c . || true)
+                  if [ "$count" -ne 1 ]; then
+                      echo "expected exactly one bundled .app, found $count:" >&2
+                      echo "$found" >&2
+                      exit 1
+                  fi
+                  echo "verifying $found"
+                  codesign --verify --deep --strict --verbose=2 "$found"
+                  codesign --display --verbose=2 "$found" 2>&1 | sed 's/^/  /'
 
             - name: Prepare Generic Artifact
               shell: bash
