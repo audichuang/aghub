@@ -21,7 +21,7 @@ use std::sync::Mutex;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
-use rocket::http::Header;
+use rocket::http::{ContentType, Header, Status};
 use rocket::local::blocking::Client;
 
 static LOG_BUFFER: Mutex<Vec<String>> = Mutex::new(Vec::new());
@@ -63,13 +63,25 @@ fn api_log_fairing_never_logs_the_forwarded_token_header() {
 	.expect("client");
 
 	let header_value =
-		BASE64.encode(format!("{{\"owner/repo\":\"{SECRET}\"}}"));
+		BASE64.encode(format!("{{\"owner/repo\":{{\"token\":\"{SECRET}\"}}}}"));
 
 	// Any mounted route triggers the request/response logging fairing.
 	let _ = client
 		.get("/api/v1/agents")
 		.header(Header::new("X-Aghub-Git-Tokens", header_value.clone()))
 		.dispatch();
+
+	// Batch-level HTTP 200 must not hide refused target rows from diagnostics.
+	let response = client
+		.post("/api/v1/skills/install")
+		.header(ContentType::JSON)
+		.header(Header::new("X-Aghub-Git-Tokens", header_value.clone()))
+		.body(r#"{"source":"owner/repo","skills":["audit-fixture"],"agents":["unknown-one","unknown-two"],"scope":"global"}"#)
+		.dispatch();
+	assert_eq!(response.status(), Status::Ok);
+	let body: serde_json::Value = response.into_json().expect("batch response");
+	assert_eq!(body["success"], false);
+	assert_eq!(body["agents"].as_array().unwrap().len(), 2);
 
 	let logs = LOG_BUFFER.lock().unwrap_or_else(|e| e.into_inner());
 
@@ -83,6 +95,16 @@ fn api_log_fairing_never_logs_the_forwarded_token_header() {
 		 assertions below would prove nothing (buffer len = {})",
 		logs.len()
 	);
+
+	for agent in ["unknown-one", "unknown-two"] {
+		assert!(
+			logs.iter().any(|line| line.contains("skill install failed")
+				&& line.contains(agent)
+				&& line.contains("GlobalOnly")
+				&& line.contains("Unknown agent")),
+			"missing failed-target diagnostic for {agent}"
+		);
+	}
 
 	assert!(
 		!logs.iter().any(|line| line.contains(SECRET)),

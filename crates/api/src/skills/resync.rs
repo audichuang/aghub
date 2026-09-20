@@ -56,7 +56,7 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 		// `&'static str` by design, and the surface that should render a rule
 		// list is a UI, not an error string.
 		ResyncError::Audit(_) => SafeResyncError {
-			message: "Skill update was refused by the security audit",
+			message: "Skill update was refused by the security audit. Open Settings > Logs and search for the skill name to review the flagged rules and files; nothing was updated.",
 			code,
 			status: Status::BadRequest,
 		},
@@ -100,6 +100,7 @@ mod tests {
 			ResyncError::Locked(sentinel.to_string()),
 			ResyncError::StaleFetch(sentinel.to_string()),
 			ResyncError::Conflict(sentinel.to_string()),
+			ResyncError::Audit(sentinel.to_string()),
 			// Carries a caller-supplied name, and used to be the one arm with a
 			// hand-written code of its own.
 			ResyncError::Renamed {

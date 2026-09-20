@@ -28,6 +28,7 @@ import {
 	supportsSkillMutation,
 } from "../lib/agent-capabilities";
 import { bulkFailureItemsLabel } from "../lib/bulk-errors";
+import { describeRequestFailure } from "../lib/request-failure";
 import { cleanVerdict } from "../lib/clean-outcome";
 import {
 	allSkillPaths,
@@ -448,7 +449,13 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 					queryKey: queryKeys.skills.sources.all(),
 				});
 			},
-			onError: () => toast.danger(t("skillUpdateApplyError")),
+			onError: (error) => {
+				const description = describeRequestFailure(error).description;
+				toast.danger(
+					t("skillUpdateApplyError"),
+					description ? { description } : undefined,
+				);
+			},
 		}),
 	);
 
@@ -491,7 +498,13 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				);
 			}
 		},
-		onError: () => toast.danger(t("sourcePruneFailed")),
+		onError: (error) => {
+			const description = describeRequestFailure(error).description;
+			toast.danger(
+				t("sourcePruneFailed"),
+				description ? { description } : undefined,
+			);
+		},
 	});
 
 	const deleteInstalledSkillByName = async (name: string) => {
@@ -822,6 +835,17 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 						: t("sourceInstallSomeFailedMany", {
 								count: failed.length,
 							}),
+					{
+						description: bulkFailureItemsLabel(
+							failed.map((entry) => ({
+								name: entry.name,
+								agent: entry.agent,
+								error:
+									entry.error?.trim() ||
+									t("sourceInstallFailed"),
+							})),
+						).items,
+					},
 				);
 			} else {
 				toast.success(

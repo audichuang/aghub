@@ -127,6 +127,12 @@ export default function LogsPanel() {
 			setDraftConfig(null);
 			toast.success(t("logConfigSaved"));
 		},
+		onError: (error) => {
+			toast.danger(t("logConfigSaveError"), {
+				description:
+					error instanceof Error ? error.message : String(error),
+			});
+		},
 	});
 
 	const exportMutation = useMutation({
@@ -164,10 +170,17 @@ export default function LogsPanel() {
 			queryClient.invalidateQueries({ queryKey: ["log-entries"] });
 			toast.success(t("logsClearedSuccess", { count: String(count) }));
 		},
+		onError: (error) => {
+			toast.danger(t("logsClearError"), {
+				description:
+					error instanceof Error ? error.message : String(error),
+			});
+		},
 	});
 
 	const entries = entriesQuery.data?.entries ?? [];
 	const totalCount = entriesQuery.data?.total_count ?? 0;
+	const hasMoreEntries = entriesQuery.data?.has_more ?? false;
 	const logDirPath = statsQuery.data?.log_dir_path ?? "";
 
 	const savedConfig = configQuery.data ?? null;
@@ -207,6 +220,7 @@ export default function LogsPanel() {
 							<Tooltip.Trigger>
 								<Button
 									isIconOnly
+									aria-label={t("logRotationSettings")}
 									variant="ghost"
 									size="sm"
 									onPress={() => setShowSettingsDialog(true)}
@@ -222,6 +236,7 @@ export default function LogsPanel() {
 							<Tooltip.Trigger>
 								<Button
 									isIconOnly
+									aria-label={t("openLogFolder")}
 									variant="ghost"
 									size="sm"
 									onPress={() => {
@@ -240,6 +255,7 @@ export default function LogsPanel() {
 							<Tooltip.Trigger>
 								<Button
 									isIconOnly
+									aria-label={t("exportLogs")}
 									variant="ghost"
 									size="sm"
 									isPending={exportMutation.isPending}
@@ -254,6 +270,7 @@ export default function LogsPanel() {
 							<Tooltip.Trigger>
 								<Button
 									isIconOnly
+									aria-label={t("clearLogs")}
 									variant="ghost"
 									size="sm"
 									onPress={() => setShowClearDialog(true)}
@@ -267,6 +284,7 @@ export default function LogsPanel() {
 							<Tooltip.Trigger>
 								<Button
 									isIconOnly
+									aria-label={t("refresh")}
 									variant="ghost"
 									size="sm"
 									onPress={handleRefresh}
@@ -284,6 +302,29 @@ export default function LogsPanel() {
 						</Tooltip>
 					</div>
 				</div>
+
+				{statsQuery.isError && (
+					<div
+						className="flex items-center justify-between gap-3 border-b border-border px-4 py-2 text-xs text-danger"
+						role="alert"
+						aria-live="polite"
+					>
+						<p>
+							{t("logStatsLoadError")}:{" "}
+							{statsQuery.error instanceof Error
+								? statsQuery.error.message
+								: String(statsQuery.error)}
+						</p>
+						<Button
+							variant="secondary"
+							size="sm"
+							isDisabled={statsQuery.isFetching}
+							onPress={() => statsQuery.refetch()}
+						>
+							{t("retry")}
+						</Button>
+					</div>
+				)}
 
 				<Card.Content className="p-0">
 					<div className="flex items-center gap-2 border-b border-border p-3">
@@ -358,11 +399,24 @@ export default function LogsPanel() {
 							<Spinner />
 						</div>
 					) : entriesQuery.isError ? (
-						<div className="py-12 text-center text-sm text-red-500">
-							{t("logLoadError")}:{" "}
-							{entriesQuery.error instanceof Error
-								? entriesQuery.error.message
-								: String(entriesQuery.error)}
+						<div
+							className="flex flex-col items-center gap-3 py-12 text-center text-sm text-red-500"
+							role="alert"
+							aria-live="polite"
+						>
+							<p>
+								{t("logLoadError")}:{" "}
+								{entriesQuery.error instanceof Error
+									? entriesQuery.error.message
+									: String(entriesQuery.error)}
+							</p>
+							<Button
+								variant="secondary"
+								isDisabled={entriesQuery.isFetching}
+								onPress={() => entriesQuery.refetch()}
+							>
+								{t("retry")}
+							</Button>
 						</div>
 					) : entries.length === 0 ? (
 						<div className="py-12 text-center text-sm text-muted">
@@ -406,10 +460,15 @@ export default function LogsPanel() {
 				{totalCount > 0 && (
 					<Card.Footer className="px-4 py-2">
 						<span className="ml-auto text-xs text-muted">
-							{t("showingEntries", {
-								shown: entries.length,
-								total: totalCount,
-							})}
+							{t(
+								hasMoreEntries
+									? "showingLatestEntries"
+									: "showingEntries",
+								{
+									shown: entries.length,
+									total: totalCount,
+								},
+							)}
 						</span>
 					</Card.Footer>
 				)}
@@ -433,6 +492,27 @@ export default function LogsPanel() {
 							</Modal.Heading>
 						</Modal.Header>
 						<Modal.Body className="space-y-4">
+							{configQuery.isError && (
+								<div
+									className="flex flex-col items-start gap-2"
+									role="alert"
+									aria-live="polite"
+								>
+									<p className="text-sm text-danger">
+										{t("logConfigLoadError")}:{" "}
+										{configQuery.error instanceof Error
+											? configQuery.error.message
+											: String(configQuery.error)}
+									</p>
+									<Button
+										variant="secondary"
+										isDisabled={configQuery.isFetching}
+										onPress={() => configQuery.refetch()}
+									>
+										{t("retry")}
+									</Button>
+								</div>
+							)}
 							{currentConfig && (
 								<>
 									<div className="space-y-1">

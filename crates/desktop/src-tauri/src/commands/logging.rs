@@ -1,5 +1,5 @@
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
@@ -69,15 +69,28 @@ fn log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 		.map_err(|e| format!("failed to resolve log directory: {e}"))
 }
 
-fn collect_log_files(dir: &PathBuf) -> Vec<PathBuf> {
-	let Ok(entries) = fs::read_dir(dir) else {
-		return Vec::new();
-	};
+fn collect_log_files(dir: &PathBuf) -> Result<Vec<PathBuf>, String> {
+	let entries = fs::read_dir(dir).map_err(|e| {
+		format!("failed to read log directory '{}': {e}", dir.display())
+	})?;
 	entries
-		.filter_map(Result::ok)
-		.map(|e| e.path())
-		.filter(|p| p.extension().is_some_and(|ext| ext == "log"))
-		.collect()
+		.map(|entry| {
+			entry.map(|entry| entry.path()).map_err(|e| {
+				format!("failed to read log directory '{}': {e}", dir.display())
+			})
+		})
+		.filter_map(|entry| match entry {
+			Ok(path) if path.extension().is_some_and(|ext| ext == "log") => {
+				Some(Ok(path))
+			}
+			Ok(_) => None,
+			Err(error) => Some(Err(error)),
+		})
+		.collect::<Result<Vec<_>, _>>()
+		.map(|mut files| {
+			files.sort();
+			files
+		})
 }
 
 #[tauri::command]
@@ -86,7 +99,7 @@ pub async fn export_diagnostic_logs(
 	save_path: String,
 ) -> Result<String, String> {
 	let log_dir = log_dir(&app)?;
-	let log_files = collect_log_files(&log_dir);
+	let log_files = collect_log_files(&log_dir)?;
 
 	let version = app
 		.config()
@@ -113,10 +126,9 @@ pub async fn export_diagnostic_logs(
 			.unwrap_or_default();
 		let entry_path = format!("logs/{name}");
 
-		let mut buf = Vec::new();
-		if let Ok(mut f) = fs::File::open(path) {
-			let _ = f.read_to_end(&mut buf);
-		}
+		let buf = fs::read(path).map_err(|e| {
+			format!("failed to read log file '{}': {e}", path.display())
+		})?;
 		total_size += buf.len() as u64;
 		file_names.push(name);
 
@@ -181,21 +193,37 @@ fn parse_log_line(line: &str) -> Option<LogEntry> {
 	})
 }
 
-fn read_all_entries(log_dir: &PathBuf) -> Vec<LogEntry> {
-	let mut files = collect_log_files(log_dir);
+fn read_all_entries(log_dir: &PathBuf) -> Result<Vec<LogEntry>, String> {
+	let mut files = collect_log_files(log_dir)?;
 	files.sort();
 	let mut entries = Vec::new();
 	for path in &files {
-		let Ok(file) = fs::File::open(path) else {
-			continue;
-		};
-		for line in BufReader::new(file).lines().map_while(Result::ok) {
+		let file = fs::File::open(path).map_err(|e| {
+			format!("failed to open log file '{}': {e}", path.display())
+		})?;
+		for line in BufReader::new(file).lines() {
+			let line = line.map_err(|e| {
+				format!("failed to read log file '{}': {e}", path.display())
+			})?;
 			if let Some(entry) = parse_log_line(&line) {
 				entries.push(entry);
 			}
 		}
 	}
-	entries
+	entries.sort_by_cached_key(|entry| {
+		let timestamp = time::OffsetDateTime::parse(
+			&entry.timestamp,
+			&time::format_description::well_known::Rfc3339,
+		)
+		.ok()
+		.map(|timestamp| timestamp.unix_timestamp_nanos());
+		(
+			timestamp.is_none(),
+			std::cmp::Reverse(timestamp),
+			std::cmp::Reverse(entry.timestamp.clone()),
+		)
+	});
+	Ok(entries)
 }
 
 #[derive(Deserialize)]
@@ -213,14 +241,10 @@ pub struct GetLogEntriesResponse {
 	pub has_more: bool,
 }
 
-#[tauri::command]
-pub async fn get_log_entries(
-	app: tauri::AppHandle,
+fn page_log_entries(
+	all: &[LogEntry],
 	params: GetLogEntriesParams,
-) -> Result<GetLogEntriesResponse, String> {
-	let log_dir = log_dir(&app)?;
-	let all = read_all_entries(&log_dir);
-
+) -> GetLogEntriesResponse {
 	let filtered: Vec<&LogEntry> = all
 		.iter()
 		.filter(|e| {
@@ -253,11 +277,23 @@ pub async fn get_log_entries(
 		.collect();
 	let has_more = offset + entries.len() < total_count;
 
-	Ok(GetLogEntriesResponse {
+	GetLogEntriesResponse {
 		entries,
 		total_count,
 		has_more,
-	})
+	}
+}
+
+#[tauri::command]
+pub async fn get_log_entries(
+	app: tauri::AppHandle,
+	params: GetLogEntriesParams,
+) -> Result<GetLogEntriesResponse, String> {
+	let log_dir = log_dir(&app)?;
+	let all = tokio::task::spawn_blocking(move || read_all_entries(&log_dir))
+		.await
+		.map_err(|e| format!("log read task failed: {e}"))??;
+	Ok(page_log_entries(&all, params))
 }
 
 #[derive(Serialize)]
@@ -269,29 +305,30 @@ pub struct LogStats {
 	pub log_dir_path: String,
 }
 
-#[tauri::command]
-pub async fn get_log_stats(app: tauri::AppHandle) -> Result<LogStats, String> {
-	let dir = log_dir(&app)?;
-	let files = collect_log_files(&dir);
+fn read_log_stats(dir: &PathBuf) -> Result<LogStats, String> {
+	let files = collect_log_files(dir)?;
 	let mut total_size = 0u64;
 	let mut file_names = Vec::new();
+	let mut total_entries = 0usize;
+	let mut entries_by_level = std::collections::HashMap::new();
+
 	for path in &files {
-		if let Ok(meta) = fs::metadata(path) {
-			total_size += meta.len();
-		}
+		total_size += fs::metadata(path)
+			.map_err(|e| {
+				format!("failed to inspect log file '{}': {e}", path.display())
+			})?
+			.len();
 		if let Some(name) = path.file_name() {
 			file_names.push(name.to_string_lossy().to_string());
 		}
-	}
 
-	// Count entries and levels in a single pass without full parsing.
-	let mut total_entries = 0usize;
-	let mut entries_by_level = std::collections::HashMap::new();
-	for path in &files {
-		let Ok(file) = fs::File::open(path) else {
-			continue;
-		};
-		for line in BufReader::new(file).lines().map_while(Result::ok) {
+		let file = fs::File::open(path).map_err(|e| {
+			format!("failed to open log file '{}': {e}", path.display())
+		})?;
+		for line in BufReader::new(file).lines() {
+			let line = line.map_err(|e| {
+				format!("failed to read log file '{}': {e}", path.display())
+			})?;
 			// Extract level from format: "{timestamp} {LEVEL} [{target}] {msg}"
 			if let Some(rest) = line.split_once(' ').map(|(_, r)| r) {
 				if let Some(level) = rest.split_once(' ').map(|(l, _)| l) {
@@ -313,26 +350,52 @@ pub async fn get_log_stats(app: tauri::AppHandle) -> Result<LogStats, String> {
 	})
 }
 
+#[tauri::command]
+pub async fn get_log_stats(app: tauri::AppHandle) -> Result<LogStats, String> {
+	let dir = log_dir(&app)?;
+	tokio::task::spawn_blocking(move || read_log_stats(&dir))
+		.await
+		.map_err(|e| format!("log stats task failed: {e}"))?
+}
+
 // -- Log management commands --
+
+fn clear_log_files_in(dir: &PathBuf) -> Result<usize, String> {
+	let files = collect_log_files(dir)?;
+	let mut cleared = 0;
+	for path in &files {
+		let is_current = path.file_name().is_some_and(|n| n == "aghub.log");
+		let result = if is_current {
+			// The logging plugin holds the current file open, so truncate it.
+			fs::write(path, b"")
+		} else {
+			fs::remove_file(path)
+		};
+		if let Err(error) = result {
+			let partial = if cleared == 0 {
+				String::new()
+			} else {
+				format!(
+					"{cleared} log file{} cleared before failure; ",
+					if cleared == 1 { "" } else { "s" }
+				)
+			};
+			return Err(format!(
+				"{partial}failed to clear log file '{}': {error}",
+				path.display()
+			));
+		}
+		cleared += 1;
+	}
+	Ok(cleared)
+}
 
 #[tauri::command]
 pub async fn clear_log_files(app: tauri::AppHandle) -> Result<usize, String> {
 	let dir = log_dir(&app)?;
-	let files = collect_log_files(&dir);
-	let mut cleared = 0;
-	for path in &files {
-		let is_current = path.file_name().is_some_and(|n| n == "aghub.log");
-		if is_current {
-			// Truncate the current file instead of deleting it,
-			// because tauri-plugin-log holds the file handle open.
-			if fs::write(path, b"").is_ok() {
-				cleared += 1;
-			}
-		} else if fs::remove_file(path).is_ok() {
-			cleared += 1;
-		}
-	}
-	Ok(cleared)
+	tokio::task::spawn_blocking(move || clear_log_files_in(&dir))
+		.await
+		.map_err(|e| format!("log clear task failed: {e}"))?
 }
 
 /// Log rotation config read from `store.json` at startup.
@@ -399,7 +462,7 @@ mod tests {
 		fs::write(dir.path().join("store.json"), "{}").unwrap();
 		fs::write(dir.path().join("notes.txt"), "text").unwrap();
 
-		let files = collect_log_files(&dir.path().to_path_buf());
+		let files = collect_log_files(&dir.path().to_path_buf()).unwrap();
 		let names: Vec<String> = files
 			.iter()
 			.filter_map(|p| p.file_name())
@@ -428,9 +491,86 @@ mod tests {
 		)
 		.unwrap();
 
-		let entries = read_all_entries(&dir.path().to_path_buf());
+		let entries = read_all_entries(&dir.path().to_path_buf()).unwrap();
 		assert_eq!(entries.len(), 2);
-		assert_eq!(entries[0].level, "INFO");
-		assert_eq!(entries[1].level, "WARN");
+		assert_eq!(entries[0].level, "WARN");
+		assert_eq!(entries[1].level, "INFO");
+	}
+
+	#[test]
+	fn newest_filtered_page_keeps_recent_failure() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::write(
+			dir.path().join("aghub_old.log"),
+			"2026-05-02T10:00:00Z ERROR [app] older failure\n\
+			 2026-05-02T10:00:01Z INFO [app] old info\n",
+		)
+		.unwrap();
+		fs::write(
+			dir.path().join("aghub.log"),
+			"2026-05-02T07:00:00-04:00 ERROR [app] latest failure\n",
+		)
+		.unwrap();
+		let entries = read_all_entries(&dir.path().to_path_buf()).unwrap();
+		assert_eq!(entries.len(), 3);
+		assert_eq!(entries[0].message, "latest failure");
+		let response = page_log_entries(
+			&entries,
+			GetLogEntriesParams {
+				offset: Some(0),
+				limit: Some(1),
+				level_filter: Some(vec!["ERROR".into()]),
+				search: None,
+			},
+		);
+		assert_eq!(response.entries[0].message, "latest failure");
+		assert_eq!(response.total_count, 2);
+		assert!(response.has_more);
+	}
+
+	#[test]
+	fn log_stats_returns_errors_for_unreadable_log_files() {
+		let dir = tempfile::tempdir().unwrap();
+		fs::create_dir(dir.path().join("aghub.log")).unwrap();
+		let error = match read_log_stats(&dir.path().to_path_buf()) {
+			Ok(_) => {
+				panic!("a directory named as a log file must fail to read")
+			}
+			Err(error) => error,
+		};
+		assert!(
+			error.contains("failed to open log file")
+				|| error.contains("failed to read log file"),
+			"{error}"
+		);
+	}
+
+	#[test]
+	fn clear_log_files_reports_partial_progress_on_failure() {
+		let dir = tempfile::tempdir().unwrap();
+		let removed_first = dir.path().join("aaa.log");
+		fs::write(&removed_first, "old log").unwrap();
+		fs::create_dir(dir.path().join("aghub.log")).unwrap();
+		let error = match clear_log_files_in(&dir.path().to_path_buf()) {
+			Ok(_) => {
+				panic!("a directory named as the active log must fail to clear")
+			}
+			Err(error) => error,
+		};
+		assert!(
+			error.contains("1 log file cleared before failure"),
+			"{error}"
+		);
+		assert!(!removed_first.exists());
+	}
+
+	#[test]
+	fn log_read_failure_is_returned() {
+		let dir = tempfile::tempdir().unwrap();
+		let missing = dir.path().join("missing");
+		let Err(error) = read_all_entries(&missing) else {
+			panic!("missing log directory should fail");
+		};
+		assert!(error.contains("failed to read log directory"));
 	}
 }

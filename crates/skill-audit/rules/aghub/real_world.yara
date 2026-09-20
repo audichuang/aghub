@@ -43,10 +43,17 @@ rule aghub_credential_file_exfil {
 		category = "credential_exfil"
 		description = "reads a credential/.env/.ssh file and sends it over the network"
 	strings:
-		$read = /readFileSync|read_to_string|read_text|fs\.read|open\s*\(|getenv|os\.environ|process\.env|\bcat\s/ nocase
+		// Require an actual read of a credential, not unrelated mentions elsewhere
+		// in the file (for example, writing `.env` then curling a health endpoint).
+		$read_file = /(readFileSync|read_to_string|read_text|fs\.read)\s*\([^;\r\n]{0,160}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)/ nocase
+		$read_open_file = /open\s*\(\s*["'][^"'\r\n]{0,120}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)[^"'\r\n]{0,80}["']\s*(,\s*["']r[b]?["']\s*)?\)([\s\S]{0,200}\.read\s*\()/ nocase
+		$read_path_file = /Path\s*\(\s*["'][^"'\r\n]{0,120}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)[^"'\r\n]{0,80}["']\s*\)\s*\.read_(text|bytes)\s*\(/ nocase
+		$read_cat = /\bcat\s+[^<> \t\r\n|;]*(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)/ nocase
+		$read_env = /(process\.env|os\.environ|getenv)[ \t]*(\??\.(get[ \t]*\()?|(\?\.)?\[|\()[ \t]*["']?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
+		$read_destructure = /\{[ \t\r\n]*([^{}]{0,256},[ \t\r\n]*)?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)[a-zA-Z0-9_]*[ \t\r\n]*([,:=][^{}]{0,256})?\}[ \t\r\n]*=[ \t\r\n]*process\.env\b/ nocase
 		$net = /\bfetch\s*\(|axios|requests\.(post|get)|http\.request|urllib|XMLHttpRequest|\.post\s*\(|\bcurl\b|\bwget\b|webhook/ nocase
 	condition:
-		$read and aghub_credential_source_direct and $net
+		($read_file or $read_open_file or $read_path_file or $read_cat or $read_env or $read_destructure) and aghub_credential_source_direct and $net
 }
 
 rule aghub_download_pipe_execute {
