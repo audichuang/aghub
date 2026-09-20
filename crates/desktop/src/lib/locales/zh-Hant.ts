@@ -1333,7 +1333,7 @@ const zhHant: typeof en = {
 		"請先新增到新代理並套用，再移除原有代理；否則複製失敗時技能會無處可留。",
 	skillLayoutMissingLinksTitle: "有技能缺少各自的 agent 連結",
 	skillLayoutMissingLinksHint:
-		"有 {{count}} 個技能已經在獨立的儲存區裡,但有些 agent 還沒有自己的連結指過去,因此無法針對那些 agent 授權或撐销。不會搜動任何內容 —— 這只會補上缺的連結。",
+		"有 {{count}} 個技能已經在獨立的儲存區裡,但有些 agent 還沒有自己的連結指過去,因此無法針對那些 agent 授權或撤銷。不會移動任何內容 —— 這只會補上缺的連結。",
 	skillLayoutMissingLinksRowHint: "{{count}} 個技能缺各自的 agent 連結",
 	skillLayoutLinkN: "補上 {{count}} 個",
 	skillLayoutOutdatedTitle: "有技能仍使用共用版面",
