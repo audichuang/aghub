@@ -579,6 +579,8 @@ export default {
 	refreshSkills: "Refresh skills",
 	noSkillsMatch: "No skills match",
 	selectSkill: "Select a skill to view details",
+	mcpOutsideSearchResults:
+		"This server is not in the current search results.",
 	skillOutsideSearchResults:
 		"This skill isn't in your current search results.",
 	clearSearch: "Clear search",

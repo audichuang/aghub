@@ -543,6 +543,7 @@ const zhHans: typeof en = {
 	refreshSkills: "刷新技能",
 	noSkillsMatch: "没有匹配的技能",
 	selectSkill: "选择一个技能查看详情",
+	mcpOutsideSearchResults: "此服务器不在当前的搜索结果中。",
 	skillOutsideSearchResults: "此技能不在目前的搜索结果中。",
 	clearSearch: "清除搜索",
 	skillsEmptyStateHint: "尚未安装任何技能。",

@@ -4,7 +4,7 @@ import {
 	PlusIcon,
 	RectangleStackIcon,
 } from "@heroicons/react/24/solid";
-import { Button, Dropdown, Tooltip } from "@heroui/react";
+import { Alert, Button, Dropdown, Tooltip } from "@heroui/react";
 import { useSuspenseQuery } from "@tanstack/react-query";
 import { useQueryState } from "nuqs";
 import { useMemo, useState } from "react";
@@ -22,6 +22,7 @@ import { MultiSelectFloatingBar } from "../../components/multi-select-floating-b
 import { useAgentAvailability } from "../../hooks/use-agent-availability";
 import { useApi } from "../../hooks/use-api";
 import { supportsMcp } from "../../lib/agent-capabilities";
+import { createMcpSearch, mcpGroupMatchesSearch } from "../../lib/mcp-search";
 import { cn, getMcpMergeKey } from "../../lib/utils";
 import { mcpListQueryOptions } from "../../requests/mcps";
 
@@ -87,6 +88,23 @@ export default function MCPServersPage() {
 		}
 		return groupedMcps[0] ?? null;
 	}, [selectedKey, groupedMcps]);
+
+	// Built on the group DATA alone, never on the query — memoizing on the
+	// query rebuilds the index on every keystroke. Same index the list filters
+	// with (lib/mcp-search.ts), so the banner below cannot contradict it.
+	const mcpSearch = useMemo(
+		() => createMcpSearch(groupedMcps),
+		[groupedMcps],
+	);
+	const activeGroupMatchesSearch = useMemo(
+		() =>
+			mcpGroupMatchesSearch(
+				mcpSearch,
+				searchQuery,
+				activeGroup?.mergeKey ?? null,
+			),
+		[mcpSearch, searchQuery, activeGroup],
+	);
 
 	// 多选模式下被选中的所有 groups（用于批量删除）
 	const selectedGroups = useMemo(() => {
@@ -308,15 +326,51 @@ export default function MCPServersPage() {
 					/>
 				)}
 				{showDetail && activeGroup && (
-					<McpDetail
-						group={activeGroup}
-						onEdit={() =>
-							setPanel({
-								type: "edit",
-								selectedKey: activeGroup.mergeKey,
-							})
-						}
-					/>
+					<div className="flex h-full flex-col">
+						{!activeGroupMatchesSearch && (
+							// The list says "no matching servers" while this
+							// panel keeps edit / delete / duplicate pointed at
+							// a server outside the results. Skills has said so
+							// for a while; this page kept the write actions
+							// with no explanation at all.
+							<div
+								role="alert"
+								aria-live="polite"
+								className="border-b border-border p-3"
+							>
+								<Alert status="accent">
+									<Alert.Indicator />
+									<Alert.Content>
+										<Alert.Description>
+											{t("mcpOutsideSearchResults")}
+										</Alert.Description>
+										<div className="mt-2">
+											<Button
+												size="sm"
+												variant="secondary"
+												onPress={() =>
+													setSearchQuery("")
+												}
+											>
+												{t("clearSearch")}
+											</Button>
+										</div>
+									</Alert.Content>
+								</Alert>
+							</div>
+						)}
+						<div className="min-h-0 flex-1">
+							<McpDetail
+								group={activeGroup}
+								onEdit={() =>
+									setPanel({
+										type: "edit",
+										selectedKey: activeGroup.mergeKey,
+									})
+								}
+							/>
+						</div>
+					</div>
 				)}
 				{showDetail && !activeGroup && !hasMcpCapableAgents && (
 					<div className="flex h-full flex-col items-center justify-center gap-3">

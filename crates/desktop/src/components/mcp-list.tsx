@@ -4,7 +4,6 @@ import {
 	StarIcon as StarIconSolid,
 } from "@heroicons/react/24/solid";
 import { Label, ListBox } from "@heroui/react";
-import Fuse from "fuse.js";
 import { useMemo } from "react";
 import { useTranslation } from "react-i18next";
 import type { McpResponse } from "../generated/dto";
@@ -12,6 +11,7 @@ import { useMultiSelect } from "../hooks/use-multi-select";
 import { AgentIcons } from "./agent-icons";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useFavorites } from "../hooks/use-favorites";
+import { createMcpSearch } from "../lib/mcp-search";
 import { filterItemsByAgentIds, getMcpMergeKey } from "../lib/utils";
 
 interface McpGroup {
@@ -69,19 +69,9 @@ export function McpList({
 		}));
 	}, [visibleMcps]);
 
-	const fuse = useMemo(
-		() =>
-			new Fuse(groupedMcps, {
-				keys: [
-					{ name: "items.0.name", weight: 2 },
-					{ name: "items.0.source", weight: 1 },
-					{ name: "items.0.agent", weight: 1 },
-				],
-				threshold: 0.4,
-				includeScore: true,
-			}),
-		[groupedMcps],
-	);
+	// Shared with the detail panel's out-of-results banner (lib/mcp-search.ts);
+	// the two must not drift, or the banner contradicts this filter.
+	const fuse = useMemo(() => createMcpSearch(groupedMcps), [groupedMcps]);
 
 	const filteredGroups = useMemo(() => {
 		if (!searchQuery) return groupedMcps;

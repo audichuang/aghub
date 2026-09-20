@@ -542,6 +542,7 @@ const zhHant: typeof en = {
 	refreshSkills: "重新整理技能",
 	noSkillsMatch: "沒有符合的技能",
 	selectSkill: "選擇一個技能檢視詳情",
+	mcpOutsideSearchResults: "此伺服器不在目前的搜尋結果中。",
 	skillOutsideSearchResults: "此技能不在目前的搜尋結果中。",
 	clearSearch: "清除搜尋",
 	skillsEmptyStateHint: "尚未安裝任何技能。",
