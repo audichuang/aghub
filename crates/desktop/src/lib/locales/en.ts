@@ -402,6 +402,8 @@ export default {
 	noUpdatesAvailable: "No updates available",
 	updateAvailable: "Version {{version}} available",
 	checkingForUpdates: "Checking for updates...",
+	downloadingUpdatePercent: "Downloading update... {{percent}}%",
+	updateReadyRestart: "Update installed — restart to finish",
 	downloadingUpdate: "Downloading update...",
 	installingUpdate: "Installing update...",
 	updateError: "Update error",

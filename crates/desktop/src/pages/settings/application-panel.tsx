@@ -16,10 +16,9 @@ import {
 	isEnabled as isAutostartEnabled,
 } from "@tauri-apps/plugin-autostart";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { check } from "@tauri-apps/plugin-updater";
 import { useState } from "react";
 import { useTranslation } from "react-i18next";
+import { useAppUpdate } from "../../hooks/use-app-update";
 import { useLastSkillCheck } from "../../hooks/use-last-skill-check";
 import { dispatchOnboardingCommand } from "../../lib/onboarding";
 import { getAghubCliPath, setAghubCliPath } from "../../lib/store";
@@ -74,57 +73,28 @@ export default function ApplicationPanel() {
 		},
 	});
 
-	const checkMutation = useMutation({
-		mutationFn: async () => {
-			const update = await check();
-			if (update) {
-				return {
-					available: true,
-					version: update.version,
-					currentVersion: update.currentVersion,
-				};
-			}
-			return { available: false };
-		},
-	});
+	// The flow itself lives in <AppUpdateProvider>, which outlives this panel:
+	// a download keeps running while the user navigates, and the two
+	// `useMutation`s that used to live here were destroyed on unmount. Coming
+	// back showed "Check for updates" over a download in flight, pressing it
+	// started a second one, and a slow download's success toast never fired
+	// because nothing was mounted to receive it.
+	const {
+		available,
+		checkForUpdate,
+		downloadAndInstall,
+		error: updateError,
+		percent,
+		phase,
+		restart,
+	} = useAppUpdate();
 
-	const downloadMutation = useMutation({
-		mutationFn: async () => {
-			const update = await check();
-			if (!update) throw new Error("No update available");
-
-			await update.downloadAndInstall();
-		},
-		onSuccess: () => {
-			toast.success(t("updateInstalledSuccess"), {
-				timeout: 0,
-				actionProps: {
-					onPress: () => relaunch(),
-					variant: "tertiary",
-					children: t("restartNow"),
-				},
-				description: t("restartToUpdate"),
-			});
-		},
-		onError: (error) => {
-			toast.danger(`${t("updateError")}: ${error.message}`);
-		},
-	});
-
-	const handleCheckUpdates = () => {
-		checkMutation.mutate();
-	};
-
-	const handleDownloadAndInstall = () => {
-		downloadMutation.mutate();
-	};
-
-	const updateCheckResult = checkMutation.data;
-	const isChecking = checkMutation.isPending;
-	const isDownloading = downloadMutation.isPending;
-	const hasError = checkMutation.isError || downloadMutation.isError;
-	const errorMessage =
-		checkMutation.error?.message || downloadMutation.error?.message;
+	const isChecking = phase === "checking";
+	const isDownloading = phase === "downloading";
+	const hasError = phase === "error";
+	const hasUpdate = phase === "available" || phase === "installed";
+	const checkedAndCurrent = phase === "up-to-date";
+	const neverChecked = phase === "idle";
 
 	const teamMembers = [
 		{
@@ -180,59 +150,60 @@ export default function ApplicationPanel() {
 							</span>
 							<span className="block text-xs text-muted">
 								{hasError &&
-									`${t("updateError")}: ${errorMessage}`}
+									`${t("updateError")}: ${updateError}`}
 								{isChecking && t("checkingForUpdates")}
-								{isDownloading && t("downloadingUpdate")}
-								{!isChecking &&
-									!isDownloading &&
-									!hasError &&
-									updateCheckResult?.available &&
+								{/* The percentage is the point: a slow download
+								    with no number reads as a hang, which is what
+								    made a second press tempting. `null` means
+								    the server sent no Content-Length, so there
+								    is genuinely nothing to show. */}
+								{isDownloading &&
+									(percent === null
+										? t("downloadingUpdate")
+										: t("downloadingUpdatePercent", {
+												percent,
+											}))}
+								{phase === "installed" &&
+									t("updateReadyRestart")}
+								{phase === "available" &&
+									available &&
 									t("updateAvailable", {
-										version: updateCheckResult.version,
+										version: available.version,
 									})}
-								{!isChecking &&
-									!isDownloading &&
-									!hasError &&
-									updateCheckResult &&
-									!updateCheckResult.available &&
-									t("noUpdatesAvailable")}
-								{!isChecking &&
-									!isDownloading &&
-									!hasError &&
-									!updateCheckResult &&
-									t("clickToCheckUpdates")}
+								{checkedAndCurrent && t("noUpdatesAvailable")}
+								{neverChecked && t("clickToCheckUpdates")}
 							</span>
 						</div>
 						<div className="flex gap-2">
-							{!updateCheckResult && (
+							{!hasUpdate && (
 								<Button
 									variant="secondary"
 									size="sm"
-									onPress={handleCheckUpdates}
+									onPress={checkForUpdate}
 									isDisabled={isChecking || isDownloading}
 								>
-									{t("checkForUpdates")}
+									{neverChecked
+										? t("checkForUpdates")
+										: t("checkAgain")}
 								</Button>
 							)}
-							{updateCheckResult &&
-								!updateCheckResult.available && (
-									<Button
-										variant="secondary"
-										size="sm"
-										onPress={handleCheckUpdates}
-										isDisabled={isChecking || isDownloading}
-									>
-										{t("checkAgain")}
-									</Button>
-								)}
-							{updateCheckResult?.available && (
+							{phase === "available" && (
 								<Button
 									variant="primary"
 									size="sm"
-									onPress={handleDownloadAndInstall}
+									onPress={downloadAndInstall}
 									isDisabled={isDownloading}
 								>
 									{t("downloadAndInstall")}
+								</Button>
+							)}
+							{phase === "installed" && (
+								<Button
+									variant="primary"
+									size="sm"
+									onPress={restart}
+								>
+									{t("restartNow")}
 								</Button>
 							)}
 						</div>

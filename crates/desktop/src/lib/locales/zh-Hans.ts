@@ -389,6 +389,8 @@ const zhHans: typeof en = {
 	noUpdatesAvailable: "暂无更新",
 	updateAvailable: "有新版本 {{version}} 可用",
 	checkingForUpdates: "正在检查更新...",
+	downloadingUpdatePercent: "正在下载更新... {{percent}}%",
+	updateReadyRestart: "更新已安装 —— 重新启动即完成",
 	downloadingUpdate: "正在下载更新...",
 	installingUpdate: "正在安装更新...",
 	updateError: "更新错误",

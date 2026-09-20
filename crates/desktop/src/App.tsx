@@ -32,6 +32,7 @@ import SkillsPage from "./pages/settings/skills";
 import SubAgentsPage from "./pages/settings/sub-agents";
 import SkillsShPage from "./pages/skills-sh";
 import SkillsSearchPage from "./pages/skills-sh/search";
+import { AppUpdateProvider } from "./providers/app-update";
 import { ConnectionProvider } from "./providers/connection";
 import { ThemeProvider } from "./providers/theme";
 import "./lib/i18n";
@@ -173,112 +174,118 @@ function App() {
 			<Toast.Provider placement="bottom end" />
 			<ThemeProvider>
 				<ConnectionProvider>
-					<NuqsAdapter>
-						<Router>
-							<OnboardingController />
-							<MainLayout>
-								<ConnectionGate>
-									<Switch>
-										<Route path="/">
-											<DefaultSidebarRoute />
-										</Route>
-										<Route path="/skills">
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<SkillsPage />
-												</Suspense>
-											</ErrorBoundary>
-										</Route>
-										<Route path="/coverage">
-											<ErrorBoundary>
-												<CoveragePage />
-											</ErrorBoundary>
-										</Route>
-										<Route path="/mcp">
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<MCPServersPage />
-												</Suspense>
-											</ErrorBoundary>
-										</Route>
-										<Route path="/inference-providers">
-											<ErrorBoundary>
-												<InferenceProvidersPage />
-											</ErrorBoundary>
-										</Route>
-										<Route path="/skills-sh/search">
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<SkillsSearchPage />
-												</Suspense>
-											</ErrorBoundary>
-										</Route>
-										<Route path="/skills-sh">
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<SkillsShPage />
-												</Suspense>
-											</ErrorBoundary>
-										</Route>
-										<Route path="/cc-plugins">
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<PluginsPage />
-												</Suspense>
-											</ErrorBoundary>
-										</Route>
-										<Route path="/settings">
-											<SettingsPage />
-										</Route>
-										<Route path="/settings/custom-agents">
-											<CustomAgentsPage />
-										</Route>
-										<Route path="/sub-agents">
-											<ErrorBoundary>
-												<Suspense
-													fallback={
-														<SkillsPageSkeleton />
-													}
-												>
-													<SubAgentsPage />
-												</Suspense>
-											</ErrorBoundary>
-										</Route>
-										<Route path="/projects/:id">
-											<ProjectDetailPage />
-										</Route>
-										<Route>
-											<DefaultSidebarRoute />
-										</Route>
-									</Switch>
-									<DeepLinkImportModal
-										intent={currentIntent}
-										onComplete={processNextIntent}
-									/>
-								</ConnectionGate>
-							</MainLayout>
-						</Router>
-					</NuqsAdapter>
+					{/* Above the Router: an app update keeps downloading while
+					    the user navigates, so its state must outlive every
+					    page. Owned by the About panel, it died with the panel
+					    and a slow download's success toast never fired. */}
+					<AppUpdateProvider>
+						<NuqsAdapter>
+							<Router>
+								<OnboardingController />
+								<MainLayout>
+									<ConnectionGate>
+										<Switch>
+											<Route path="/">
+												<DefaultSidebarRoute />
+											</Route>
+											<Route path="/skills">
+												<ErrorBoundary>
+													<Suspense
+														fallback={
+															<SkillsPageSkeleton />
+														}
+													>
+														<SkillsPage />
+													</Suspense>
+												</ErrorBoundary>
+											</Route>
+											<Route path="/coverage">
+												<ErrorBoundary>
+													<CoveragePage />
+												</ErrorBoundary>
+											</Route>
+											<Route path="/mcp">
+												<ErrorBoundary>
+													<Suspense
+														fallback={
+															<SkillsPageSkeleton />
+														}
+													>
+														<MCPServersPage />
+													</Suspense>
+												</ErrorBoundary>
+											</Route>
+											<Route path="/inference-providers">
+												<ErrorBoundary>
+													<InferenceProvidersPage />
+												</ErrorBoundary>
+											</Route>
+											<Route path="/skills-sh/search">
+												<ErrorBoundary>
+													<Suspense
+														fallback={
+															<SkillsPageSkeleton />
+														}
+													>
+														<SkillsSearchPage />
+													</Suspense>
+												</ErrorBoundary>
+											</Route>
+											<Route path="/skills-sh">
+												<ErrorBoundary>
+													<Suspense
+														fallback={
+															<SkillsPageSkeleton />
+														}
+													>
+														<SkillsShPage />
+													</Suspense>
+												</ErrorBoundary>
+											</Route>
+											<Route path="/cc-plugins">
+												<ErrorBoundary>
+													<Suspense
+														fallback={
+															<SkillsPageSkeleton />
+														}
+													>
+														<PluginsPage />
+													</Suspense>
+												</ErrorBoundary>
+											</Route>
+											<Route path="/settings">
+												<SettingsPage />
+											</Route>
+											<Route path="/settings/custom-agents">
+												<CustomAgentsPage />
+											</Route>
+											<Route path="/sub-agents">
+												<ErrorBoundary>
+													<Suspense
+														fallback={
+															<SkillsPageSkeleton />
+														}
+													>
+														<SubAgentsPage />
+													</Suspense>
+												</ErrorBoundary>
+											</Route>
+											<Route path="/projects/:id">
+												<ProjectDetailPage />
+											</Route>
+											<Route>
+												<DefaultSidebarRoute />
+											</Route>
+										</Switch>
+										<DeepLinkImportModal
+											intent={currentIntent}
+											onComplete={processNextIntent}
+										/>
+									</ConnectionGate>
+								</MainLayout>
+							</Router>
+						</NuqsAdapter>
+					</AppUpdateProvider>
 				</ConnectionProvider>
 			</ThemeProvider>
 		</QueryClientProvider>
