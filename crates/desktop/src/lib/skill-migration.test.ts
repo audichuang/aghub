@@ -210,13 +210,53 @@ test("a mixed migrating + tidying scope counts both and keeps the store path", (
 	);
 });
 
-// Pins `migrating`'s new `outcome !== "tidied"` guard against narrowing too
-// far: `relinked` and `reconciled` rows are real migration actions and must
-// not fall out of `migrating` just because they are not literally
-// `outcome === "migrated"`.
-test("a relinked row still counts as migrating", () => {
+// The QA finding this split exists for. A `relinked` row is real WORK — it
+// must never silently fall out of the summary — but its Master was already in
+// the store, so counting it as a content move is what told a fully-migrated
+// user that 50 skills were about to move. It belongs in `linking`, and both
+// halves are asserted so neither can be dropped: narrowing `linking` back out
+// loses the row, widening `migrating` back re-tells the lie.
+test("a relinked row is link work, not a content move", () => {
 	const s = migrationSummary([row({ outcome: "relinked" })]);
+	assert.equal(s.migrating, 0, "the Master never moved");
+	assert.equal(s.linking, 1, "but the row is still counted, and still shown");
+	assert.equal(s.linkingLinks, 1);
+	assert.equal(
+		s.masterParent,
+		null,
+		"no store path is promised when nothing moves there",
+	);
+});
+
+// Same for `reconciled` — an npx-clobbered fork was quarantined and the
+// Referrer restored. Also not a content move into the store.
+test("a reconciled row is link work too", () => {
+	const s = migrationSummary([row({ outcome: "reconciled" })]);
+	assert.equal(s.migrating, 0);
+	assert.equal(s.linking, 1);
+});
+
+// The QA report's two acceptance fixtures, side by side, because the whole
+// point is that they must read DIFFERENTLY.
+test("an already-migrated store that only lacks two private slots moves nothing", () => {
+	const s = migrationSummary([
+		row({
+			outcome: "relinked",
+			referrers: [
+				"/home/u/.zcode/skills/my-skill",
+				"/home/u/.dsh/skills/my-skill",
+			],
+		}),
+	]);
+	assert.equal(s.migrating, 0, "0 content moves");
+	assert.equal(s.linkingLinks, 2, "2 links");
+});
+
+test("a genuine old shared-directory layout still reports one master move", () => {
+	const s = migrationSummary([row({ outcome: "migrated" })]);
 	assert.equal(s.migrating, 1);
+	assert.equal(s.linking, 0, "a migrated row is not double-counted as links");
+	assert.equal(s.masterParent, "/home/u/.aghub");
 });
 
 // THE bug this whole helper exists to fix: a commit that ONLY detached stale
@@ -313,15 +353,30 @@ test("a row that grants a referrer AND detaches a compat link previews as tidyin
 // Commit path: the toast must not read "Migrated 1 skill(s)" for a row core
 // itself calls `tidied` — that is the exact false claim this whole helper
 // exists to remove, re-surfacing for the commonest run the feature has.
-test("the same row's commit toasts as tidied, never as migrated", () => {
+test("the same row's commit toasts link-and-tidy, never migrated", () => {
 	const msg = migrationToastMessage([grantedAndDetachedRow()]);
 	assert.notEqual(
 		msg.key,
 		"skillLayoutMigrated",
 		"a link was granted, but core did not call this row a migration",
 	);
-	assert.equal(msg.key, "skillLayoutSummaryTidiedDone");
+	// It granted a Referrer AND detached a stale one, so it says both. The
+	// tidied-only key is deliberately silent about the new link, which was
+	// tolerable while link work had nowhere else to be reported and is not
+	// any more.
+	assert.equal(msg.key, "skillLayoutLinkedAndTidied");
+	assert.equal(msg.linked, 1);
+	assert.equal(msg.tidied, 1);
+});
+
+// A pure link run — no move, no detach — is the commonest commit this feature
+// now sees, and it must not fall through to "nothing left to migrate".
+test("a pure relink commit toasts the link sentence, not 'nothing left'", () => {
+	const msg = migrationToastMessage([row({ outcome: "relinked" })]);
+	assert.equal(msg.key, "skillLayoutSummaryLinkedDone");
 	assert.equal(msg.count, 1);
+	assert.equal(msg.links, 1);
+	assert.notEqual(msg.key, "skillLayoutNothingToMigrate");
 });
 
 // The OTHER shape that is genuinely BOTH: shape.rs's compat sweep can detach

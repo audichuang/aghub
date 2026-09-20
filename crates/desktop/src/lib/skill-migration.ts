@@ -76,34 +76,51 @@ export function migrationRowFacts(row: RepairReportDto): {
  * care whether repair declined or the OS did.
  * `fused` is the UNION — a mixed scope shows the superset, which is the honest
  * reading of "these agents stay fused".
- * `migrating` and `tidying` are NOT a partition of `acting` — a row can count
- * in both (see the comment on `migrating` below) or in neither (an already
- * conformant row that needed no action at all).
+ * `migrating`, `linking` and `tidying` are NOT a partition of `acting` — a row
+ * can count in several (see the comments below) or in none (an already
+ * conformant row that needed no action at all). `migrating` is content moving
+ * into the store; `linking` is agent Referrers being created or repointed at a
+ * Master that never moved. Keeping them apart is the whole point: they used to
+ * be one number, and it read as "your skills are about to move".
  */
 export function migrationSummary(rows: readonly RepairReportDto[]): {
 	migrating: number;
+	linking: number;
 	tidying: number;
 	refused: number;
 	masterParent: string | null;
 	totalLinks: number;
+	migratingLinks: number;
+	linkingLinks: number;
 	totalUnlinked: number;
 	fused: string[];
 } {
 	const acting = rows.filter((r) => !isBlocked(r));
-	// Gated on `outcome`, not on `referrers.length`: `Create` never promotes
-	// core's outcome away from `conformant`/`tidied` (only `Relink` does — see
-	// crates/core/src/skills/repair.rs step 4 vs step 6), so the compat-dir
-	// sweep's central case — an agent's write slot was Absent and read the
-	// skill only through a read-only compat dir — grants it a brand-new
-	// Referrer AND detaches the compat link IN THE SAME ROW, and core still
-	// reports `outcome: "tidied"`. The Master pre-existed there; nothing
-	// moved to the store, so `referrers.length > 0` alone would wrongly call
-	// that row a migration. `outcome === "migrated"` stays in the OR so an
-	// adopt that happens to grant zero referrers is still counted.
-	const migrating = acting.filter(
-		(r) =>
-			r.outcome !== "tidied" &&
-			(r.referrers.length > 0 || r.outcome === "migrated"),
+	// `migrated` is the ONLY outcome that means the skill's CONTENT moved into
+	// the store — see `RepairOutcome` in crates/core/src/skills/repair.rs, where
+	// `relinked` and `reconciled` both describe a Master that was ALREADY there
+	// and a Referrer being repointed at it.
+	//
+	// This used to also count any non-`tidied` row with referrers, which swept
+	// both of those in. A user whose skills were already in `.aghub` and who
+	// merely lacked the private slots of two newly added agents was told
+	// "50 skills move to ~/.aghub" — false, and false in the direction that
+	// invites a manual re-sort of a store that is already correct. The old
+	// reading deliberately excluded `tidied`; it never asked what `relinked`
+	// meant, because until a second agent joined the roster the two answers
+	// agreed on every row anyone had looked at.
+	const migrating = acting.filter((r) => r.outcome === "migrated");
+	// The other half of that split: real writes that create or repoint an
+	// agent's Referrer while the Master stays where it is.
+	//
+	// NOT the complement of `migrating` — an already-conformant row that needed
+	// nothing is in neither — and deliberately NOT disjoint from `tidying`: the
+	// compat-dir sweep's central case (write slot Absent, skill read only
+	// through a read-only compat dir) grants a brand-new Referrer AND detaches
+	// the compat link in the SAME row, and core still reports `tidied`. That
+	// row did create a link, so it belongs here too.
+	const linking = acting.filter(
+		(r) => r.outcome !== "migrated" && r.referrers.length > 0,
 	);
 	// Independent of `migrating`, not its complement: shape.rs's compat sweep
 	// can ALSO detach a stale link in the same pass that adopts a brand-new
@@ -134,11 +151,17 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 			: Math.max(first.lastIndexOf("/"), first.lastIndexOf("\\"));
 	return {
 		migrating: migrating.length,
+		linking: linking.length,
 		tidying: tidying.length,
 		refused: rows.length - acting.length,
 		totalUnlinked,
 		masterParent: first === null || cut <= 0 ? first : first.slice(0, cut),
 		totalLinks,
+		// Split per bucket so each sentence counts only the links IT is about.
+		// One shared `totalLinks` made the move sentence claim links that a
+		// link-only row contributed, which is the same conflation one level down.
+		migratingLinks: migrating.reduce((n, r) => n + r.referrers.length, 0),
+		linkingLinks: linking.reduce((n, r) => n + r.referrers.length, 0),
 		fused: [...fused].sort(),
 	};
 }
@@ -165,10 +188,13 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 export function migrationToastMessage(skills: readonly RepairReportDto[]): {
 	key: string;
 	count?: number;
+	links?: number;
 	migrated?: number;
+	linked?: number;
 	tidied?: number;
 } {
-	const { migrating, tidying } = migrationSummary(skills);
+	const { migrating, linking, linkingLinks, tidying } =
+		migrationSummary(skills);
 	if (migrating > 0 && tidying > 0) {
 		return {
 			key: "skillLayoutMigratedAndTidied",
@@ -176,13 +202,31 @@ export function migrationToastMessage(skills: readonly RepairReportDto[]): {
 			tidied: tidying,
 		};
 	}
+	if (migrating > 0) {
+		return { key: "skillLayoutMigrated", count: migrating };
+	}
+	// Above the tidied arms, and separate from the migrated ones: a run that
+	// only created or repointed Referrers WROTE something, so "nothing left to
+	// migrate" would be as false here as "migrated 50 skills" was.
+	if (linking > 0 && tidying > 0) {
+		return {
+			key: "skillLayoutLinkedAndTidied",
+			linked: linking,
+			tidied: tidying,
+		};
+	}
+	if (linking > 0) {
+		// Reuses the dialog's own done-state sentence, like the tidied arm does.
+		return {
+			key: "skillLayoutSummaryLinkedDone",
+			count: linking,
+			links: linkingLinks,
+		};
+	}
 	if (tidying > 0) {
 		// Reuses the dialog's own done-state sentence rather than minting a
 		// near-duplicate — it already says exactly this.
 		return { key: "skillLayoutSummaryTidiedDone", count: tidying };
-	}
-	if (migrating > 0) {
-		return { key: "skillLayoutMigrated", count: migrating };
 	}
 	return { key: "skillLayoutNothingToMigrate" };
 }

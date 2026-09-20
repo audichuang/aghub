@@ -1349,6 +1349,12 @@ const zhHant: typeof en = {
 		"{{count}} 個技能將移到 {{path}},並建立 {{links}} 個各自的 agent 連結。",
 	skillLayoutSummaryDone:
 		"{{count}} 個技能已移到 {{path}},並建立 {{links}} 個各自的 agent 連結。",
+	skillLayoutSummaryLinked:
+		"{{count}} 個技能將補上 {{links}} 個各自的 agent 連結,內容不會移動。",
+	skillLayoutSummaryLinkedDone:
+		"{{count}} 個技能已補上 {{links}} 個各自的 agent 連結,內容沒有移動。",
+	skillLayoutLinkedAndTidied:
+		"已為 {{linked}} 個技能補上連結;其中 {{tidied}} 個同時移除了失效連結。",
 	skillLayoutRowLinks: "{{count}} 個連結",
 	skillLayoutRowUnlinked: "將移除 {{count}} 個失效連結",
 	skillLayoutRowUnlinkedDone: "已移除 {{count}} 個失效連結",

@@ -1430,6 +1430,15 @@ export default {
 		"{{count}} skill(s) move to {{path}}, creating {{links}} per-agent link(s).",
 	skillLayoutSummaryDone:
 		"{{count}} skill(s) moved to {{path}}, creating {{links}} per-agent link(s).",
+	// The counterpart to `skillLayoutSummary`, for rows whose Master is ALREADY
+	// in the store: they only gain or repoint agent links. It says "no content
+	// moves" out loud because the sentence it replaces said the opposite.
+	skillLayoutSummaryLinked:
+		"{{count}} skill(s) get {{links}} per-agent link(s); no content moves.",
+	skillLayoutSummaryLinkedDone:
+		"{{count}} skill(s) got {{links}} per-agent link(s); no content moved.",
+	skillLayoutLinkedAndTidied:
+		"Linked {{linked}} skill(s); {{tidied}} also had a stale link removed.",
 	skillLayoutRowLinks: "{{count}} link(s)",
 	skillLayoutRowUnlinked: "{{count}} stale link(s) to remove",
 	skillLayoutRowUnlinkedDone: "{{count}} stale link(s) removed",

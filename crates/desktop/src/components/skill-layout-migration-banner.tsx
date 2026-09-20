@@ -264,16 +264,37 @@ export function SkillLayoutMigrationBanner({
 								{t("skillLayoutMigrateExplain")}
 							</p>
 							<div className="mb-3 space-y-1 rounded-md border border-default bg-surface-secondary p-3 text-muted text-xs">
-								{summary.masterParent !== null && (
-									<p className="break-all">
+								{summary.migrating > 0 &&
+									summary.masterParent !== null && (
+										<p className="break-all">
+											{t(
+												done
+													? "skillLayoutSummaryDone"
+													: "skillLayoutSummary",
+												{
+													count: summary.migrating,
+													path: summary.masterParent,
+													links: summary.migratingLinks,
+												},
+											)}
+										</p>
+									)}
+								{summary.linking > 0 && (
+									// Said as its own sentence, never folded
+									// into the one above: these rows create or
+									// repoint an agent's Referrer at a Master
+									// that is already in the store. Counting
+									// them as moves is what told a
+									// fully-migrated user that 50 skills were
+									// about to move.
+									<p>
 										{t(
 											done
-												? "skillLayoutSummaryDone"
-												: "skillLayoutSummary",
+												? "skillLayoutSummaryLinkedDone"
+												: "skillLayoutSummaryLinked",
 											{
-												count: summary.migrating,
-												path: summary.masterParent,
-												links: summary.totalLinks,
+												count: summary.linking,
+												links: summary.linkingLinks,
 											},
 										)}
 									</p>
