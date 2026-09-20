@@ -9,7 +9,7 @@
 //! hook for tests, dry-run/`--yes` gating, and output rendering.
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use aghub_core::models::{AgentSelection, AgentType, ResourceScope};
 
@@ -101,7 +101,7 @@ impl skill_update::Fetcher for CliFetcher {
 	) -> Result<skill_update::FetchedRepo, FetchError> {
 		#[cfg(debug_assertions)]
 		if let Some(root) = std::env::var_os("AGHUB_TEST_SOURCE_FETCH_ROOT") {
-			let root = PathBuf::from(root);
+			let root = std::path::PathBuf::from(root);
 			return if root.is_dir() {
 				Ok(skill_update::FetchedRepo {
 					root,
@@ -1618,12 +1618,13 @@ fn narrow_by_name<T>(
 mod tests {
 	use super::{
 		diff_with, narrow_by_name, plan_target_agents, resync_row_error,
-		select_env_token, FetchError, PathBuf, SyncActionView,
+		select_env_token, FetchError, SyncActionView,
 	};
 	use aghub_core::models::AgentType;
 	use skill_update::sources::{
 		SourceScope, SourceSkillDiff, SourceSkillState,
 	};
+	use std::path::PathBuf;
 
 	fn s(v: &str) -> Option<String> {
 		Some(v.to_string())
