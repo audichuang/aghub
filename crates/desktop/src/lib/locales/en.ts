@@ -150,6 +150,8 @@ export default {
 	// Integrations
 	integrations: "Integrations",
 	codeEditors: "Code Editor",
+	codeEditorsLoadError: "Could not load the installed editors.",
+	codeEditorSaveError: "Failed to save your editor choice",
 	codeEditorsDescription:
 		"Choose your preferred code editor for opening files",
 	inferenceProviders: "Inference Providers",
@@ -385,6 +387,8 @@ export default {
 	resetSidebar: "Reset Sidebar",
 	sidebarMinimumVisibleHint:
 		"Keep at least one primary page visible so aghub always has a landing page.",
+	sidebarLoadError:
+		"Could not read your sidebar settings, so they cannot be changed right now — saving would overwrite them with defaults.",
 	sidebarSaveError: "Failed to update sidebar settings",
 	sidebarResetError: "Failed to reset sidebar settings",
 	moveUp: "Move up",

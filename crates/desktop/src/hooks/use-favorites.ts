@@ -1,6 +1,11 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useMemo } from "react";
 import {
+	PreferenceNotReadError,
+	preferenceWriteBasis,
+	writePreference,
+} from "../lib/preference-write";
+import {
 	getStarredMcps,
 	getStarredSkills,
 	setStarredMcps,
@@ -10,12 +15,16 @@ import {
 export function useFavorites() {
 	const queryClient = useQueryClient();
 
-	const { data: starredSkills = [] } = useQuery({
+	// The `= []` defaults are for RENDERING only. A failed read also lands
+	// there, and treating it as "nothing is starred" is how one click used to
+	// wipe every star: the toggle wrote `[thatOne]` over the real list. The
+	// `isSuccess` flags below are what the writes gate on.
+	const { data: starredSkills = [], isSuccess: skillsRead } = useQuery({
 		queryKey: ["starredSkills"],
 		queryFn: getStarredSkills,
 	});
 
-	const { data: starredMcps = [] } = useQuery({
+	const { data: starredMcps = [], isSuccess: mcpsRead } = useQuery({
 		queryKey: ["starredMcps"],
 		queryFn: getStarredMcps,
 	});
@@ -38,28 +47,58 @@ export function useFavorites() {
 
 	const toggleSkillStar = useCallback(
 		async (name: string) => {
-			const next = new Set(starredSkillsSet);
+			const basis = preferenceWriteBasis(
+				skillsRead,
+				queryClient.getQueryData(["starredSkills"]) as
+					| string[]
+					| undefined,
+				[],
+			);
+			if (basis === null) {
+				throw new PreferenceNotReadError("starredSkills");
+			}
+
+			const next = new Set(basis);
 			if (next.has(name)) next.delete(name);
 			else next.add(name);
 
-			const arr = Array.from(next);
-			queryClient.setQueryData(["starredSkills"], arr);
-			await setStarredSkills(arr);
+			await writePreference({
+				previous: basis,
+				next: Array.from(next),
+				setCache: (value) =>
+					queryClient.setQueryData(["starredSkills"], value),
+				save: setStarredSkills,
+			});
 		},
-		[starredSkillsSet, queryClient],
+		[skillsRead, queryClient],
 	);
 
 	const toggleMcpStar = useCallback(
 		async (mergeKey: string) => {
-			const next = new Set(starredMcpsSet);
+			const basis = preferenceWriteBasis(
+				mcpsRead,
+				queryClient.getQueryData(["starredMcps"]) as
+					| string[]
+					| undefined,
+				[],
+			);
+			if (basis === null) {
+				throw new PreferenceNotReadError("starredMcps");
+			}
+
+			const next = new Set(basis);
 			if (next.has(mergeKey)) next.delete(mergeKey);
 			else next.add(mergeKey);
 
-			const arr = Array.from(next);
-			queryClient.setQueryData(["starredMcps"], arr);
-			await setStarredMcps(arr);
+			await writePreference({
+				previous: basis,
+				next: Array.from(next),
+				setCache: (value) =>
+					queryClient.setQueryData(["starredMcps"], value),
+				save: setStarredMcps,
+			});
 		},
-		[starredMcpsSet, queryClient],
+		[mcpsRead, queryClient],
 	);
 
 	return {

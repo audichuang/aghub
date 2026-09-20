@@ -8,6 +8,11 @@ import {
 	type SidebarItemPreference,
 } from "../lib/store";
 import {
+	PreferenceNotReadError,
+	preferenceWriteBasis,
+	writePreference,
+} from "../lib/preference-write";
+import {
 	getDefaultSidebarHref,
 	normalizeSidebarItems,
 	resolveSidebarItems,
@@ -17,11 +22,14 @@ const SIDEBAR_NAVIGATION_QUERY_KEY = ["sidebar-navigation"];
 
 export function useSidebarNavigation() {
 	const queryClient = useQueryClient();
-	const { data, isLoading } = useQuery({
+	const { data, isLoading, isSuccess, isError, refetch } = useQuery({
 		queryKey: SIDEBAR_NAVIGATION_QUERY_KEY,
 		queryFn: getSidebarItems,
 	});
 
+	// A RENDERING fallback only. The app still needs a sidebar to draw when the
+	// preference read fails, but nothing below may treat this as the user's
+	// saved state — see `preferenceWriteBasis`.
 	const sidebarItems = useMemo(
 		() => normalizeSidebarItems(data ?? DEFAULT_SIDEBAR_ITEMS),
 		[data],
@@ -45,26 +53,35 @@ export function useSidebarNavigation() {
 				current: SidebarItemPreference[],
 			) => SidebarItemPreference[],
 		) => {
-			const previous = normalizeSidebarItems(
-				(queryClient.getQueryData(SIDEBAR_NAVIGATION_QUERY_KEY) as
+			// `sidebarItems` used to be the fallback here, which is how a
+			// failed read got persisted: it resolves to DEFAULT_SIDEBAR_ITEMS,
+			// so one checkbox click wrote the defaults over a list the user had
+			// hidden and reordered. There is no basis until the read succeeds.
+			const basis = preferenceWriteBasis(
+				isSuccess,
+				queryClient.getQueryData(SIDEBAR_NAVIGATION_QUERY_KEY) as
 					| SidebarItemPreference[]
-					| undefined) ?? sidebarItems,
+					| undefined,
+				DEFAULT_SIDEBAR_ITEMS,
 			);
+			if (basis === null) {
+				throw new PreferenceNotReadError("sidebar");
+			}
+			const previous = normalizeSidebarItems(basis);
 			const next = normalizeSidebarItems(updater(previous));
 
-			queryClient.setQueryData(SIDEBAR_NAVIGATION_QUERY_KEY, next);
-
-			try {
-				await saveSidebarItems(next);
-			} catch (error) {
-				queryClient.setQueryData(
-					SIDEBAR_NAVIGATION_QUERY_KEY,
-					previous,
-				);
-				throw error;
-			}
+			await writePreference({
+				previous,
+				next,
+				setCache: (value) =>
+					queryClient.setQueryData(
+						SIDEBAR_NAVIGATION_QUERY_KEY,
+						value,
+					),
+				save: saveSidebarItems,
+			});
 		},
-		[queryClient, sidebarItems],
+		[queryClient, isSuccess],
 	);
 
 	const setItemVisibility = useCallback(
@@ -116,24 +133,35 @@ export function useSidebarNavigation() {
 	);
 
 	const resetSidebarItems = useCallback(async () => {
-		const previous = sidebarItems;
-
-		queryClient.setQueryData(
-			SIDEBAR_NAVIGATION_QUERY_KEY,
+		// Same gate as `updateSidebarItems`. "Reset" writes the defaults on
+		// purpose, but only as something the user ASKED for after seeing their
+		// real settings — not as the accident of a failed read.
+		const previous = preferenceWriteBasis(
+			isSuccess,
+			queryClient.getQueryData(SIDEBAR_NAVIGATION_QUERY_KEY) as
+				| SidebarItemPreference[]
+				| undefined,
 			DEFAULT_SIDEBAR_ITEMS,
 		);
-
-		try {
-			await saveSidebarItems(DEFAULT_SIDEBAR_ITEMS);
-		} catch (error) {
-			queryClient.setQueryData(SIDEBAR_NAVIGATION_QUERY_KEY, previous);
-			throw error;
+		if (previous === null) {
+			throw new PreferenceNotReadError("sidebar");
 		}
-	}, [queryClient, sidebarItems]);
+
+		await writePreference({
+			previous,
+			next: DEFAULT_SIDEBAR_ITEMS,
+			setCache: (value) =>
+				queryClient.setQueryData(SIDEBAR_NAVIGATION_QUERY_KEY, value),
+			save: saveSidebarItems,
+		});
+	}, [queryClient, isSuccess]);
 
 	return {
+		canEditSidebarItems: isSuccess,
 		defaultHref,
 		isLoading,
+		isSidebarError: isError,
+		retrySidebarItems: refetch,
 		moveItem,
 		resetSidebarItems,
 		resolvedSidebarItems,

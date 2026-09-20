@@ -145,6 +145,8 @@ const zhHans: typeof en = {
 	// Integrations
 	integrations: "集成",
 	codeEditors: "代码编辑器",
+	codeEditorsLoadError: "读不到已安装的编辑器。",
+	codeEditorSaveError: "无法保存你选的编辑器",
 	codeEditorsDescription: "选择用于打开文件的首选代码编辑器",
 	inferenceProviders: "推理 Provider",
 	codingAgents: "Coding Agents",
@@ -372,6 +374,8 @@ const zhHans: typeof en = {
 	resetSidebar: "重置侧边栏",
 	sidebarMinimumVisibleHint:
 		"请至少保留一个主页面可见，这样 aghub 才始终有可用的默认落点。",
+	sidebarLoadError:
+		"读不到你的侧边栏设置,所以现在不能修改 —— 存档会把它们覆盖成默认值。",
 	sidebarSaveError: "更新侧边栏设置失败",
 	sidebarResetError: "重置侧边栏设置失败",
 	moveUp: "上移",

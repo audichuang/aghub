@@ -1,5 +1,5 @@
 import { ChevronDownIcon, ChevronUpIcon } from "@heroicons/react/24/solid";
-import { Button, Card, Checkbox, Tooltip, toast } from "@heroui/react";
+import { Alert, Button, Card, Checkbox, Tooltip, toast } from "@heroui/react";
 import { useTranslation } from "react-i18next";
 import { useSidebarNavigation } from "../../hooks/use-sidebar-navigation";
 import type { SidebarItemId } from "../../lib/store";
@@ -7,9 +7,11 @@ import type { SidebarItemId } from "../../lib/store";
 export default function SidebarPanel() {
 	const { t } = useTranslation();
 	const {
+		isSidebarError,
 		moveItem,
 		resetSidebarItems,
 		resolvedSidebarItems,
+		retrySidebarItems,
 		setItemVisibility,
 		visibleSidebarItems,
 	} = useSidebarNavigation();
@@ -42,6 +44,36 @@ export default function SidebarPanel() {
 			toast.danger(t("sidebarResetError"));
 		}
 	};
+
+	// The controls are not merely disabled here, they are replaced. A disabled
+	// list still SHOWS the defaults, and showing defaults as "your settings"
+	// is the same lie in a quieter font — the read failed, so the app does not
+	// know what the user chose.
+	if (isSidebarError) {
+		return (
+			<Card className="p-0">
+				<Card.Content className="p-4">
+					<Alert status="danger" role="alert" aria-live="polite">
+						<Alert.Indicator />
+						<Alert.Content>
+							<Alert.Description>
+								{t("sidebarLoadError")}
+							</Alert.Description>
+							<div className="mt-2">
+								<Button
+									size="sm"
+									variant="secondary"
+									onPress={() => void retrySidebarItems()}
+								>
+									{t("retry")}
+								</Button>
+							</div>
+						</Alert.Content>
+					</Alert>
+				</Card.Content>
+			</Card>
+		);
+	}
 
 	return (
 		<Card className="p-0">

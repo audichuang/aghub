@@ -145,6 +145,8 @@ const zhHant: typeof en = {
 	// Integrations
 	integrations: "整合",
 	codeEditors: "程式碼編輯器",
+	codeEditorsLoadError: "讀不到已安裝的編輯器。",
+	codeEditorSaveError: "無法儲存你選的編輯器",
 	codeEditorsDescription: "選擇用於開啟檔案的偏好程式碼編輯器",
 	inferenceProviders: "推理 Provider",
 	codingAgents: "Coding Agents",
@@ -371,6 +373,8 @@ const zhHant: typeof en = {
 	resetSidebar: "重設側邊欄",
 	sidebarMinimumVisibleHint:
 		"請至少保留一個主頁面可見，這樣 aghub 才始終有可用的預設落點。",
+	sidebarLoadError:
+		"讀不到你的側邊欄設定,所以現在不能修改 —— 存檔會把它們覆蓋成預設值。",
 	sidebarSaveError: "更新側邊欄設定失敗",
 	sidebarResetError: "重設側邊欄設定失敗",
 	moveUp: "上移",

@@ -73,8 +73,14 @@ function EditorIcon({ id, name }: { id: string; name: string }) {
 
 export default function IntegrationsPanel() {
 	const { t } = useTranslation();
-	const { codeEditors, isLoading, selectedEditor, setCurrentEditor } =
-		useCurrentCodeEditor();
+	const {
+		codeEditors,
+		isEditorsError,
+		isLoading,
+		retryCodeEditors,
+		selectedEditor,
+		setCurrentEditor,
+	} = useCurrentCodeEditor();
 
 	const api = useApi();
 	const queryClient = useQueryClient();
@@ -115,7 +121,13 @@ export default function IntegrationsPanel() {
 	const handleEditorChange = async (value: Key | null) => {
 		if (!value) return;
 		const editor = value as CodeEditorType;
-		await setCurrentEditor(editor || undefined);
+		try {
+			await setCurrentEditor(editor || undefined);
+		} catch {
+			// Previously unhandled, so a rejected write surfaced as an unhandled
+			// rejection and the Select silently snapped back.
+			toast.danger(t("codeEditorSaveError"));
+		}
 	};
 
 	if (isLoading) {
@@ -141,37 +153,67 @@ export default function IntegrationsPanel() {
 								{t("codeEditorsDescription")}
 							</span>
 						</div>
-						<Select
-							variant="secondary"
-							selectedKey={selectedEditor || null}
-							onSelectionChange={handleEditorChange}
-							aria-label={t("codeEditors")}
-							className="min-w-56"
-						>
-							<Select.Trigger>
-								<Select.Value />
-								<Select.Indicator />
-							</Select.Trigger>
-							<Select.Popover>
-								<ListBox>
-									{installedEditors.map((editor) => (
-										<ListBox.Item
-											key={editor.id}
-											id={editor.id}
-											textValue={editor.name}
-										>
-											<div className="flex items-center gap-2">
-												<EditorIcon
-													id={editor.id}
-													name={editor.name}
-												/>
-												{editor.name}
-											</div>
-										</ListBox.Item>
-									))}
-								</ListBox>
-							</Select.Popover>
-						</Select>
+						{isEditorsError ? (
+							// Without this the failed query settles with
+							// `codeEditors` undefined and `isLoading` false, so
+							// the Select renders EMPTY with nothing saying why
+							// and no way to try again — it reads as "you have no
+							// editors installed". Same persistent-banner
+							// exception as the credentials list below.
+							<Empty
+								role="alert"
+								aria-live="polite"
+								className="flex-row items-center gap-3 rounded-md border-solid border-danger/30 bg-danger/5 p-3 text-left md:p-3"
+							>
+								<EmptyHeader className="flex-row items-center gap-2 text-left">
+									<EmptyMedia>
+										<ExclamationCircleIcon className="size-5 shrink-0 text-danger" />
+									</EmptyMedia>
+									<EmptyTitle className="text-sm font-normal text-foreground">
+										{t("codeEditorsLoadError")}
+									</EmptyTitle>
+								</EmptyHeader>
+								<Button
+									variant="secondary"
+									size="sm"
+									onPress={() => void retryCodeEditors()}
+								>
+									{t("retry")}
+								</Button>
+							</Empty>
+						) : (
+							<Select
+								variant="secondary"
+								selectedKey={selectedEditor || null}
+								onSelectionChange={handleEditorChange}
+								aria-label={t("codeEditors")}
+								className="min-w-56"
+							>
+								<Select.Trigger>
+									<Select.Value />
+									<Select.Indicator />
+								</Select.Trigger>
+								<Select.Popover>
+									<ListBox>
+										{installedEditors.map((editor) => (
+											<ListBox.Item
+												key={editor.id}
+												id={editor.id}
+												textValue={editor.name}
+											>
+												<div className="flex items-center gap-2">
+													<EditorIcon
+														id={editor.id}
+														name={editor.name}
+													/>
+													{editor.name}
+												</div>
+											</ListBox.Item>
+										))}
+									</ListBox>
+								</Select.Popover>
+							</Select>
+						)}
 					</div>
 				</Card.Content>
 			</Card>
