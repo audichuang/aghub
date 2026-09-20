@@ -565,6 +565,7 @@ const zhHans: typeof en = {
 		"确定要从当前项目中删除这 {{count}} 个被选中的资源吗？",
 	bulkDeleteFailed: "批量删除失败",
 	bulkDeleteFailedItems: "{{count}} 项删除失败: {{items}}",
+	favoriteSaveError: "无法更新你的收藏",
 	starSkill: "收藏技能",
 	unstarSkill: "取消收藏",
 	starServer: "收藏服务",
@@ -1330,6 +1331,11 @@ const zhHans: typeof en = {
 		"这会从 {{count}} 个代理移除此技能，且无法复原。",
 	manageAgentsAddThenRemove:
 		"请先添加到新代理并应用，再移除原有代理；否则复制失败时技能会无处可留。",
+	skillLayoutMissingLinksTitle: "有技能缺少各自的 agent 链接",
+	skillLayoutMissingLinksHint:
+		"有 {{count}} 个技能已经在独立的存储区里,但有些 agent 还没有自己的链接指过去,因此无法针对那些 agent 授权或撤销。不会搜动任何内容 —— 这只会补上缺的链接。",
+	skillLayoutMissingLinksRowHint: "{{count}} 个技能缺各自的 agent 链接",
+	skillLayoutLinkN: "补上 {{count}} 个",
 	skillLayoutOutdatedTitle: "有技能仍使用共用布局",
 	skillLayoutOutdatedHint:
 		"有 {{count}} 个技能放在所有 agent 都会读取的共用文件夹,因此无法针对单一 agent 授权或撤销。迁移会把它们移到独立的存储区,并为每个 agent 建立各自的链接。",

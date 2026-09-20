@@ -603,6 +603,7 @@ export default {
 		"Are you sure you want to delete the {{count}} selected resources from this project?",
 	bulkDeleteFailed: "Bulk delete failed",
 	bulkDeleteFailedItems: "{{count}} item(s) failed to delete: {{items}}",
+	favoriteSaveError: "Failed to update your favourites",
 	starSkill: "Favorite",
 	unstarSkill: "Unfavorite",
 	starServer: "Favorite",
@@ -1407,6 +1408,16 @@ export default {
 		"This removes the skill from {{count}} agent(s). This cannot be undone.",
 	manageAgentsAddThenRemove:
 		"Add the skill to the new agent(s) and apply first, then remove the existing ones — otherwise a failed copy could leave the skill installed nowhere.",
+	/** The relink-only shape: every Master is already in the store and all that
+	 * is missing are per-agent links (commonly after a new agent joins the
+	 * roster). Saying "still use the old layout" there tells a user who already
+	 * migrated that fifty skills are about to move, which invites a manual
+	 * re-sort of a store that is correct. */
+	skillLayoutMissingLinksTitle: "Some skills are missing per-agent links",
+	skillLayoutMissingLinksHint:
+		"{{count}} skill(s) are already in the private store, but some agents have no link of their own to them yet, so they cannot be granted or revoked for those agents. Nothing moves — this only creates the missing links.",
+	skillLayoutMissingLinksRowHint: "{{count}} skill(s) need per-agent links",
+	skillLayoutLinkN: "Link {{count}}",
 	skillLayoutOutdatedTitle: "Some skills still use the shared layout",
 	skillLayoutOutdatedHint:
 		"{{count}} skill(s) are stored in the shared folder every agent reads, so they cannot be granted or revoked per agent. Migrating moves them to a private store and gives each agent its own link.",

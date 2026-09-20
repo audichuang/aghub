@@ -128,6 +128,17 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 	});
 
 	const { isMcpStarred, toggleMcpStar } = useFavorites();
+	// `toggleMcpStar` rejects when the stored list was never read (it refuses to
+	// overwrite it with an empty one) or when the save itself fails. A bare
+	// `onPress={() => toggleMcpStar(...)}` turned either into an unhandled
+	// rejection with a star that silently snapped back.
+	const handleStarPress = async (mergeKey: string) => {
+		try {
+			await toggleMcpStar(mergeKey);
+		} catch {
+			toast.danger(t("favoriteSaveError"));
+		}
+	};
 	const isStarred = isMcpStarred(group.mergeKey);
 	const enabledAgentIds = useMemo(
 		() =>
@@ -251,7 +262,7 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 												: t("starServer")
 										}
 										onPress={() =>
-											toggleMcpStar(group.mergeKey)
+											void handleStarPress(group.mergeKey)
 										}
 									>
 										{isStarred ? (

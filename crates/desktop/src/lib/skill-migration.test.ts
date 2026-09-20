@@ -252,6 +252,21 @@ test("an already-migrated store that only lacks two private slots moves nothing"
 	assert.equal(s.linkingLinks, 2, "2 links");
 });
 
+// The trigger banner reads `migrating` too: "50 skills still use the old
+// layout" over a set whose Masters are all already in the store is the same
+// false claim, on the line the user sees first. Pinned here because the banner
+// itself cannot be rendered by this runner.
+test("a relink-only set reports no master moves for the trigger to claim", () => {
+	const s = migrationSummary([
+		row({ outcome: "relinked", name: "a" }),
+		row({ outcome: "reconciled", name: "b" }),
+		row({ outcome: "tidied", name: "c", referrers: [], unlinked: ["x"] }),
+	]);
+	assert.equal(s.migrating, 0, "nothing here moves a Master");
+	assert.equal(s.linking, 2);
+	assert.equal(s.tidying, 1);
+});
+
 test("a genuine old shared-directory layout still reports one master move", () => {
 	const s = migrationSummary([row({ outcome: "migrated" })]);
 	assert.equal(s.migrating, 1);

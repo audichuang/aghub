@@ -145,6 +145,13 @@ export function SkillLayoutMigrationBanner({
 	const summary = migrationSummary(
 		done ? shown : shown.filter((r) => isBlocked(r) || isPicked(r.name)),
 	);
+	// The TRIGGER describes the whole outstanding set, not the picked subset,
+	// and it has to know whether anything really moves: "still use the old
+	// layout" over a set whose Masters are all already in the store is the
+	// same false claim the summary sentence used to make, on the line the user
+	// reads first.
+	const outstanding = migrationSummary(rows);
+	const anyMasterMoves = outstanding.migrating > 0;
 
 	// The dialog reads the last run's rows when there are any, so without
 	// this reset a re-open shows the PREVIOUS result — "3 migrated" — instead
@@ -177,14 +184,18 @@ export function SkillLayoutMigrationBanner({
 								{t(
 									allBlocked
 										? "skillLayoutNeedsReviewTitle"
-										: "skillLayoutOutdatedTitle",
+										: anyMasterMoves
+											? "skillLayoutOutdatedTitle"
+											: "skillLayoutMissingLinksTitle",
 								)}
 							</Alert.Title>
 							<Alert.Description>
 								{t(
 									allBlocked
 										? "skillLayoutNeedsReviewHint"
-										: "skillLayoutOutdatedHint",
+										: anyMasterMoves
+											? "skillLayoutOutdatedHint"
+											: "skillLayoutMissingLinksHint",
 									{
 										count: rows.length,
 									},
@@ -217,7 +228,9 @@ export function SkillLayoutMigrationBanner({
 							{t(
 								allBlocked
 									? "skillLayoutNeedsReviewHint"
-									: "skillLayoutOutdatedRowHint",
+									: anyMasterMoves
+										? "skillLayoutOutdatedRowHint"
+										: "skillLayoutMissingLinksRowHint",
 								{
 									count: rows.length,
 								},
@@ -418,7 +431,9 @@ export function SkillLayoutMigrationBanner({
 									t(
 										result
 											? "skillLayoutRunAgain"
-											: "skillLayoutApplyN",
+											: anyMasterMoves
+												? "skillLayoutApplyN"
+												: "skillLayoutLinkN",
 										{ count: scopeToWrite.count },
 									)
 								)}

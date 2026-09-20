@@ -117,6 +117,15 @@ export function SkillDetail({
 	const [credDialogOpen, setCredDialogOpen] = useState(openCredDialog);
 
 	const { isSkillStarred, toggleSkillStar } = useFavorites();
+	// See `mcp-detail.tsx`: the toggle rejects on an unread list or a failed
+	// save, and an unhandled rejection just snaps the star back with no reason.
+	const handleStarPress = async (name: string) => {
+		try {
+			await toggleSkillStar(name);
+		} catch {
+			toast.danger(t("favoriteSaveError"));
+		}
+	};
 	const isStarred = isSkillStarred(group.items[0].name);
 	const { selectedEditor } = useCurrentCodeEditor();
 
@@ -408,7 +417,7 @@ export function SkillDetail({
 												: t("starSkill")
 										}
 										onPress={() =>
-											toggleSkillStar(skill.name)
+											void handleStarPress(skill.name)
 										}
 									>
 										{isStarred ? (
