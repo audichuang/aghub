@@ -12,8 +12,8 @@ Role map:
 - `requests/` — single data-access seam (query/mutation options + invalidate helpers)
 - `lib/` — helpers (mostly pure; also the api client, i18n, and `store/`
   persist); `hooks/` / `contexts/` / `providers/` — React wiring
-  (`providers/` is connection/theme/agent-availability context — **not** QueryClient;
-  QueryClient lives in `App.tsx`; persist store under `lib/store`)
+  (`providers/` is app-level context — **not** QueryClient, which lives in
+  `App.tsx`; persist store under `lib/store`)
 - `pages/` · `components/` · `layouts/` · `styles/` · `assets/`
 
 ## WHERE TO LOOK
