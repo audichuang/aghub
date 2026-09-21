@@ -4,13 +4,102 @@
 this one**; this crate is `-p aghub-cli`.
 
 `src/main.rs` holds `Cli`/`Commands` + dispatch; `src/commands/` is one file per
-subcommand. User-facing semantics (`-a`, scope flags, destructive defaults,
-creds) live in root AGENTS.md "CLI Command Surface" and are not repeated here.
+subcommand. Authoritative surface: clap (`just start -- --help`). This crate
+OWNS the user-facing semantics below — the root AGENTS.md no longer repeats
+them, and the WHY behind each flow is in the knowledge pages named per section.
+
+## Surface semantics (this crate is where they are written down)
+
+Aliases: `skills`/`skill`, `mcps`/`mcp`. Scope: `-a` (one id, a comma-separated
+list, or `all`), `-g`/`-p`, `--all`.
+
+- **Destructive defaults**: `delete`, `apply-update`, `prune-lock`,
+  `source sync`, `source accept-rename`, reconcile-with-removals → **dry-run
+  unless `--yes`**. `apply-update` refuses outright instead of previewing, and
+  rejects `--all` from the scope table, i.e. BEFORE the `--yes` refusal
+- **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
+  `partial` | `kept` (`success: true` but THE ENTITY IS STILL THERE; the API
+  adds an api-only `failed`). Read `outcome`, never `dry_run`/`executed` —
+  `executed: true` is set for the whole execute branch even when every delete
+  failed (`partial`), and `absent` outranks the caller's intent. `kept` covers
+  two situations: a shared Master another agent still reads, and an
+  `--all-agents` sweep that took NOTHING because it could not prove nothing
+  still holds the skill (`skipped` names what it could not read). The second
+  never reaches commit and runs no lock prune — fix what it could not read and
+  re-run; no flag overrides it. A preview carries `would_prune_lock_entries`,
+  deliberately separate from the committed `pruned_lock_entries`.
+  Why: knowledge page `技能移除與 Master 回收`
+- **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
+  needs `--verify-links`, and `linkAudit.state` is `verified` ONLY when every
+  agent row is healthy. The per-agent verdict is `skills::shape::classify_shape`'s,
+  renamed; doctor derives none of its own, so `chain` and `masterUnusable` must
+  not be folded back into the sync note, `orphanMaster` must NOT be offered
+  `source sync --install-missing` (there is no source), and `master-is-symlink`
+  ALSO fails `--fail-on-issues` — the two axes must never answer one fact
+  differently. Only `untracked` is excused. Default exit is unchanged;
+  `--fail-on-issues` opts into a non-zero one.
+  States, remedies and the four buckets: knowledge page `技能連結形狀與 repair 鏈`
+- **`repair`** also DETACHES stale Referrers in read-only compat dirs (outcome
+  `tidied`, printed `unlinked:`) under four guards that must not be loosened,
+  and REFUSES a real directory that git TRACKS (the refusal prints
+  `git rm -r --cached <path>`). Same page.
+- **`check` is offline by default** (`checked: false`): a source nothing could
+  fetch keeps its permanent reason (`local` / `ssh` / `unsupportedScheme`),
+  everything else reports `network` = "we did not look", so `--online` is only
+  ever suggested for rows it would really answer. Offline hashes NO skill
+  folder. Scope defaults to BOTH, like `doctor` / `source list` / `source diff`
+- **"Update available" includes a LOCAL edit**, not just an upstream move — and
+  `apply-update --yes` OVERWRITES that edit. The row's two digests are
+  comparison hashes and deliberately need NOT equal the lock's `computedHash`.
+  Mechanics: `crates/skill-update/AGENTS.md`
+- **`check` never writes; `--write-result` is why that needs a guard.** The
+  sidecar path is arbitrary, so the write is refused by file NAME
+  (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`), by an
+  `.aghub` path SEGMENT, and by `.agents/skills` as adjacent SEGMENTS, BEFORE
+  any resolved-path comparison — `-g` resolves no project root at all, so the
+  project lock one `../` away is invisible to a resolved-path check. Normalize
+  with `skill::lock::resolve_existing`. Why each round of "simplify this":
+  knowledge page `check --write-result 的受管狀態守衛`
+- **`source diff` ALWAYS fetches** (no offline mode); `--online` is accepted as
+  a no-op alias so the `check` habit is not a clap error. It judges each read
+  scope against the origin THAT scope's lock records; ambiguity within ONE scope
+  is still a refusal. The API's `?scope=all` answers differently on purpose —
+  see `crates/api/AGENTS.md`
+- **`transfer` / `reconcile`**: cross-agent copy / reconcile of
+  skills·mcps·sub-agents. `reconcile` needs at least one `--add`/`--remove`;
+  `-a/--agent` is ignored. An already-present target is an idempotent success
+  (`already_present: true`) — for an MCP/sub-agent only when the existing value
+  is EQUIVALENT. Removing a skill refuses an end state that cannot exist (the
+  agent would read it from the same set of places afterwards), and
+  `reconcile skill` refuses BEFORE the first write so the disk is untouched.
+  `reconcile mcp` / `reconcile sub-agent` protect the whole ROSTER, not just the
+  agents you named, so `reconcile mcp --remove claude -p` is always refused —
+  the message names copilot (both resolve `<root>/.mcp.json`; repeat `--remove`,
+  it takes no comma list). Following that remedy exits 0. A `--remove` naming an
+  agent whose backing no row emptied FAILS that row. Both refusals report
+  `UNSUPPORTED_OPERATION` / HTTP 422 — batching is transport and must not
+  relabel a refusal as bad parameters.
+  **`delete mcps <name> -a claude -p --yes` has no such guard** — copilot loses
+  the server too (verified; left alone deliberately). Why:
+  knowledge page `多目標突變的 scope 閘門與批次歸因`
+- **`skill-usage`**: Claude-global only; rejects project/`--all`.
+  **`coverage`**: rejects `--all`, scope `-g` or `-p` only, and is a static
+  CAPABILITY matrix — no skill names, no counts (use `doctor --verify-links`)
+- **Narrowed resource args**: `check`/`apply-update` take skills ONLY,
+  `enable`/`disable` take mcps ONLY — their own clap value_enums, so the
+  rejection is a parse error naming the valid values
+- **`inference`**: provider inventory + keyring keys. Bindings/routing are
+  desktop/API-only — there is no `inference bind` here. `--api-key -` reads the
+  key from stdin; nothing else does
+- Skill install is **always symlink-only**; `--universal` is a hidden no-op
+- Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 
 ## Two dispatch funnels — keep both halves in step
 
-**Scope.** ONE table (`scope_policy`), ONE resolver (`resolve_scope`), ONE
-resolved value (`Scope`). `scope_policy` is **exhaustive** over `Commands` and
+**Scope.** Scope flags are mutually exclusive, enforced MANUALLY in `main()`
+before every dispatch (a clap `ArgGroup` does not propagate to `global = true`
+args), so that rejection is exit **1**, not clap's exit 2. ONE table
+(`scope_policy`), ONE resolver (`resolve_scope`), ONE resolved value (`Scope`). `scope_policy` is **exhaustive** over `Commands` and
 over `SourceAction`, so a new subcommand does not COMPILE until it is
 classified — it used to end in `_ => AllowBoth` and rely on a comment. `None`
 means the command ignores scope entirely (`inference`, `plugin`) and must not

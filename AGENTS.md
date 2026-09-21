@@ -7,9 +7,15 @@
 > Every `CLAUDE.md` here is a one-line `@AGENTS.md` import (a real file, not a
 > symlink) — edit the sibling `AGENTS.md`.
 >
-> This is the **navigation layer**: what each crate is for and the invariants you
-> must not break. Deliberately coarse — for structure, ask CodeGraph
-> (`.codegraph/` is indexed).
+> This is the **navigation layer**: what each crate is for, the rules that span
+> crates, and the approval boundaries. A rule that belongs to ONE crate lives in
+> that crate's `AGENTS.md`. The WHY behind a flow — what it used to do, what was
+> deliberately not done, which test pins it — lives in the Hindsight knowledge
+> pages (their list is injected every session; read the page before changing the
+> flow) and in `docs/`. For structure, ask CodeGraph (`.codegraph/` is indexed).
+>
+> Priority when they disagree: the user's current instruction > this file > a
+> per-crate `AGENTS.md` > a skill. If something here blocks you, say which line.
 
 ## Overview
 
@@ -22,23 +28,17 @@ and requires explicit opt-in for changes.
 
 ## Maps & Decisions
 
-- **Design specs**: `docs/specs/` — the current design corpus; rationale, not
-  current-state truth (code wins)
-- **`docs/plans/` + `docs/superpowers/`**: historical checkbox plans from the
-  retired superpowers workflow (dead since 2026-07-14). A same-named file is
-  that spec's _plan_, not a rival copy — except `docs/superpowers/specs/`, which
-  holds the ONLY design docs for remote-SSH and the api origin guard
+- **Design specs**: `docs/specs/` — rationale, not current-state truth (code wins)
+- **`docs/plans/` + `docs/superpowers/`**: historical checkbox plans from a
+  retired workflow. A same-named file is that spec's _plan_, not a rival copy —
+  except `docs/superpowers/specs/`, which holds the ONLY design docs for
+  remote-SSH and the api origin guard
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) (Source hash, Master, Referrer, Relink, …)
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/)
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — port / skip from `AkaraChen/aghub`
 - **Deep domain playbooks**: project skills under `.agents/skills/`, mirrored as
-  symlinks in `.claude/skills/` — Claude Code auto-registers them, and the other
-  agents that READ `.agents/skills` see the same copy. That membership is
-  per-agent AND per-scope and changes with every roster edit, so ask the
-  descriptors, never a list written here:
-  `crates/agents/tests/descriptor_regression.rs`
-  `test_global_skill_paths` / `test_project_skill_paths` (do not re-list the
-  catalog here either)
+  symlinks in `.claude/skills/`. They trigger on their own `description` — never
+  keep a catalog of them here
 - `.impeccable.md` — the desktop frontend's design context (users, brand voice,
   aesthetic direction, type and color strategy), NOT Rust style; `cliff.toml` —
   git-cliff for releases
@@ -46,17 +46,19 @@ and requires explicit opt-in for changes.
 ## Structure
 
 Module map (crate → why it exists). Authoritative member list: `Cargo.toml`.
+Each crate carries its own `AGENTS.md` with its rules.
 
 ```
 crates/
   agents/        # SSOT for agent behavior: descriptors, AgentType, models, format/
   core/          # orchestration: ConfigManager, registry, skills, transfer
-  cli/           # `aghub-cli` — the clap command surface
+  cli/           # `aghub-cli` — the clap command surface + its semantics
   api/           # `aghub-api` — Rocket v0.5 under /api/v1/ (mounted set is
                  #   lib.rs + routes/; never hardcode a route count)
   desktop/       # Tauri v2 + React, embeds aghub-api on localhost;
                  #   src-tauri package name is `aghub` (−p aghub ≠ CLI)
   skill/         # .skill zip + npx-compatible locks + hashing
+  skill-audit/   # the install-time security gate: Critical verdict REFUSES
   skill-update/  # shared update-check + Sources domain + source-mutation seam (API + CLI)
   skills-sh/     # skills.sh registry client (search only)
   inference/     # providers: SQLite meta + keyring
@@ -68,10 +70,10 @@ crates/
 ```
 
 Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills — a
-legacy real-directory layout that LAZY migration deliberately leaves alone, D7)
-and `justfile` (task runner). `repair` still moves a real directory there into the
-store when git does NOT track it; a tracked one is refused, and the refusal prints
-the escape (`git rm -r --cached <path>`).
+real-directory layout that LAZY migration deliberately leaves alone, D7) and
+`justfile` (task runner). `repair` still moves a real directory there into the
+store when git does NOT track it; a tracked one is refused, and the refusal
+prints the escape (`git rm -r --cached <path>`).
 
 Cargo graph (depends-on): `agents` ← `core` ← `{cli, api}`; `desktop` → `api`
 (+ `remote`), not core directly. Tool crates used laterally.
@@ -87,31 +89,17 @@ that catches everybody: the `AgentAdapter` **trait** is in
 else `dirs::data_dir()/aghub`. `aghub-cli`'s `commands::app_data_dir()` and
 `aghub_api::default_app_data_dir()` are one-line delegations to it (the desktop
 reaches it through the api re-export, having no `aghub-core` dep), so pinning
-that env var isolates every surface at once. Never re-spell the formula: a
+that env var isolates every surface at once. **Never re-spell the formula** — a
 hand-rolled `$XDG_DATA_HOME` guess, or Tauri's identifier-scoped
 `app_data_dir()` (`<data>/com.akrc.aghub`), agrees on Linux and diverges on
-macOS/Windows, so the split never shows up locally — the desktop used to start
-its embedded api on the Tauri root, which put every UI-added inference provider
-in a db the CLI could not see while both shared one keyring namespace. The
-parity is pinned by two tests meeting at core (`aghub-cli` is bin-only, so
-nothing can link its function): `aghub_api::tests::default_app_data_dir_matches_core_seam`
-and the CLI's `commands::tests::app_data_dir_matches_core_seam`. A desktop
-upgrading from before that unification finds its inference db still in the
-legacy Tauri dir, and **aghub does not move it** — `commands/server.rs`
-`legacy_inference_db_hint` only logs a warning naming both paths and the manual
-steps. It was a real migration once; it is deleted, not forgotten. The shared db
-has writers the desktop cannot coordinate with (`aghub-cli`, a standalone
-`aghub-api`, a second desktop — none of them takes a desktop-side lock, and a
-lock timeout started the API anyway), so an automatic copy-and-rename had a
-reproducible sequence that dropped a provider one of them had just committed.
-The split is what mattered and the shared root fixes it; the copy was pure
-convenience carrying all the risk. Cost of the trade: an upgrading user's
-provider list stays empty until they copy the file by hand. The hint keys on the
-LEGACY FILE EXISTING, so copying does not silence it — the message tells the
-user to rename the original aside, and that is the only step that stops it. Do
-not "fix" it to stop after a copy it cannot observe: a notice still firing after
-a successful migration is what invites the copy a second time, putting the
-pre-upgrade list back over everything added since.
+macOS/Windows, so the split never shows up locally. Parity is pinned by
+`aghub_api::tests::default_app_data_dir_matches_core_seam` and the CLI's
+`commands::tests::app_data_dir_matches_core_seam`. A desktop upgrading from
+before the unification keeps its inference db in the legacy Tauri dir and
+**aghub does not move it** — `commands/server.rs` `legacy_inference_db_hint`
+only warns, and the hint keys on the LEGACY FILE EXISTING, so a copy does not
+silence it. Do not "fix" that. Why an automatic migration was rejected:
+knowledge page `推論供應商與 app data root`.
 
 ## Key Design Patterns
 
@@ -123,51 +111,50 @@ pre-upgrade list back over everything added since.
 - **ConfigManager**: CRUD for resources. MCP delete (`remove_mcp_planned`)
   rewrites shared config and deletes **no** disk path — `RemovalPlan.paths` is
   deliberately empty.
+- **Security gate**: a fetched skill is audited before install
+  (`crates/skill-audit`); a **Critical** finding refuses the install, everything
+  below it installs with a warning.
 
 ## Agent-Specific Behavior
 
 Each agent's **descriptor** lives in `crates/agents/src/agents/<name>.rs` (not
 core) and owns that agent's config paths — there is no path table to maintain
 anywhere else. The MCP **parse/serialize** logic it points at lives in
-`crates/agents/src/format/`. Change either as the case needs.
+`crates/agents/src/format/`. Per-agent dialect gotchas: `crates/agents/AGENTS.md`.
 
-Per-agent dialect gotchas (which key holds MCPs, which transports survive a
-round-trip, what a rewrite preserves) live with the descriptors:
-**`crates/agents/AGENTS.md`**. The two rules that span crates stay here:
+The two rules that span crates stay here:
 
 - **Master store vs Referrer (`.aghub` vs `.agents/skills`)**: the ONE physical
-  copy lives in `.aghub/<sanitized-name>` (`~/.aghub` global,
-  `<root>/.aghub` project), a directory **no agent reads** — storing a skill
-  must not grant it. Every grant is a symlink Referrer in an agent's own skills
-  dir. `.agents/skills` is now an ordinary Referrer slot, except that it is
-  **shared**: many agent/scope combinations read it, so granting there reaches all of
-  them. Prefer supported private write slots; shared read compatibility does
-  not imply a shared write slot. The roster is
-  per-descriptor — `crates/agents/tests/descriptor_regression.rs`
-  `test_global_skill_paths` / `test_project_skill_paths`. `classify` computes
-  that sharing once and carries it as `shared_with`; never re-derive it per
-  consumer. Read the descriptor, never a list — per-agent AND per-scope.
-  `capabilities.skills.universal: true` ALSO appends XDG
-  `$XDG_CONFIG_HOME/agents/skills` (default `~/.config/agents/skills`) — a
-  SECOND shared slot (amp + kimi at global), and **not** `~/.agents/skills`.
-- **`registry::get()` has NO fallback any more.** It is
-  `agent_type.descriptor()`, a total `match` generated by `agent_roster!`
-  alongside the variant, so "unknown id → Claude's descriptor silently" is
-  gone. What replaced it as the way in is a mistyped roster ROW — only the
-  variant is compiler-checked, the id literal and the module path are free
-  text — and `crates/core/tests/registry_bijection.rs` is what catches all
-  three spellings of that.
+  copy lives in `.aghub/<sanitized-name>` (`~/.aghub` global, `<root>/.aghub`
+  project), a directory **no agent reads** — storing a skill must not grant it.
+  Every grant is a symlink Referrer in an agent's own skills dir.
+  `.agents/skills` is an ordinary Referrer slot that is **shared**: granting
+  there reaches every agent/scope that reads it. Prefer supported private write
+  slots; shared read compatibility does not imply a shared write slot. Slot
+  membership is per-agent AND per-scope — read the descriptor, never a list
+  (`crates/agents/tests/descriptor_regression.rs`
+  `test_global_skill_paths` / `test_project_skill_paths`). `classify` computes
+  the sharing once and carries it as `shared_with`; never re-derive it per
+  consumer. Full layout + shape/repair chain: knowledge page
+  `技能連結形狀與 repair 鏈`.
+- **`registry::get()` has NO fallback.** It is `agent_type.descriptor()`, a
+  total `match` generated by `agent_roster!`, so "unknown id → Claude's
+  descriptor silently" is gone. The way in now is a mistyped roster ROW — only
+  the variant is compiler-checked, the id literal and the module path are free
+  text — and `crates/core/tests/registry_bijection.rs` catches all three
+  spellings of that.
 
 ## Commands
 
 `just --list` is the catalog. What it doesn't tell you:
 
-- `just preflight` = fmt + clippy + **desktop typecheck** + workspace tests +
-  doc tests. It is the release gate; its `just --list` blurb is truncated
+- `just preflight` = fmt + clippy + `bun install --frozen-lockfile` (root AND
+  desktop) + desktop typecheck + **desktop frontend unit tests** + workspace
+  tests + doc tests. It is the release gate; its `just --list` blurb is truncated
 - **preflight does NOT run prettier or eslint** — the pre-push hook does, and it
   runs `bun run format:check` from the REPO ROOT (`prettier --check .`), so it
-  covers `scripts/` and `docs/`. A green preflight is not a pushable tree;
-  `crates/desktop`'s own `format:check` never sees root files
+  covers `scripts/` and `docs/`. `crates/desktop`'s own `format:check` never
+  sees root files
 - `just featured-check` (bundled skills-sh catalog still installable) needs the
   network and a `gh` login, so it is deliberately outside preflight. Run it
   after editing `crates/desktop/src/data/featured-skills.json` — the catalog
@@ -186,250 +173,42 @@ implementing and verifying.
   short name under `--exact` runs ZERO tests and exits 0 — check the test count.
 - **Before push or tag**: `just preflight` AND `bun run format:check` from the
   REPO ROOT. Neither alone is a pushable tree — preflight runs no
-  prettier/eslint, and `crates/desktop`'s own `format:check` never sees root
-  files; the pre-push hook runs no tests.
+  prettier/eslint, and the pre-push hook runs no tests.
 - **Before tagging a release**: tag `v*` only after green CI.
-- **Bump a dependency in its OWN commit, never inside a feature or fix commit.**
-  `@heroui/react` 3.0.1 → 3.2.5 rode along in a `fix(skills)` commit and shipped
-  in v2.23.1 with every Checkbox and Switch in the app broken — 10 rendering no
-  `<input>` at all, 9 with the visible box outside the clickable label. A bump
-  reviewed as a bump gets the one question that catches this ("what changed in
-  the components we call?"); a bump buried under a title about something else
-  does not. It also keeps the revert cheap when the answer is bad.
+- **Bump a dependency in its OWN commit**, never inside a feature or fix commit.
+  A bump reviewed as a bump gets the question that catches a breaking change
+  ("what changed in the components we call?"); one buried under another title
+  does not, and the revert is no longer cheap. (`@heroui/react` 3.0.1 → 3.2.5
+  rode along in a `fix(skills)` commit and shipped every Checkbox and Switch in
+  the app broken.)
 - **After editing `crates/desktop/src/data/featured-skills.json`**:
-  `just featured-check`. It needs the network and a `gh` login, which is why it
-  sits outside preflight — the catalog points at other people's repos and rots
-  on their schedule.
+  `just featured-check`.
 
 Return early only when an ask-first item below blocks you, or when the gate
 fails for a reason outside the requested change. A failure you caused is part of
 the task, not a reason to stop.
 
-## CLI Command Surface
+## Surfaces
 
-Authoritative: clap (`just start -- --help`, `crates/cli/src/commands/`).
-Aliases: `skills`/`skill`, `mcps`/`mcp`. Scope: `-a` (one id, a comma-separated
-list, or `all` — one `AgentSelection` parser; multi-target runs emit a batch
-envelope, policy in `core/src/batch.rs`), `-g`/`-p`, `--all`.
+Authoritative for the CLI: clap (`just start -- --help`, `crates/cli/src/commands/`).
+Authoritative for the API: `crates/api/src/lib.rs` + `routes/`.
 
-Non-obvious invariants:
+The user-facing semantics a surface must not get wrong — destructive defaults,
+scope resolution, `-a` parsing, what each `outcome` means, which commands refuse
+what — live with the surface that owns them: **`crates/cli/AGENTS.md`** and
+**`crates/api/AGENTS.md`**. The behaviour they implement, and why it is that way,
+lives in the knowledge pages (`技能移除與 Master 回收`,
+`多目標突變的 scope 閘門與批次歸因`, `Skill update pipeline`,
+`check --write-result 的受管狀態守衛`, `CLI 與 API 的共用錯誤契約`).
 
-- **Destructive defaults**: `delete`, `apply-update`, `prune-lock`, `source sync`,
-  `source accept-rename`, reconcile-with-removals → **dry-run unless `--yes`**
-  (`apply-update` refuses outright instead of printing a preview; it also
-  rejects `--all` — core never supported it, and the refusal now arrives from
-  the scope table, i.e. BEFORE the `--yes` one)
-- **Scope flags are mutually exclusive**, enforced MANUALLY in `main()` before
-  every dispatch (a clap `ArgGroup` does not propagate to `global = true` args —
-  so this is exit **1**, not clap's exit 2). A generic mutation must resolve
-  exactly ONE write scope: `--all` is rejected, and **`-p` with no project root
-  bails BEFORE anything happens — for reads too**, so `get`/`check`/`describe`
-  cannot answer `[]` from a non-project directory. ONE exception:
-  `transfer`/`reconcile` let a rootless `-p` reach core, so their `--json`
-  failure keeps `code: RESOURCE_NOT_FOUND` instead of the bail's `CLI_ERROR`
-- **`doctor`'s `health` covers lock ↔ Master only** — per-agent referrer state
-  needs `--verify-links`. `linkAudit.state` is `verified` ONLY when every agent
-  row is healthy (`issues` otherwise); `orphanMaster` is a leftover master with
-  no lock entry and no slot — do NOT offer `source sync --install-missing` for
-  it, there is no source, and `delete --yes` produces exactly that state when it
-  keeps a master another agent still reads. Exit code is unchanged by default;
-  `--fail-on-issues` opts into a non-zero exit. **The per-agent verdict is
-  `skills::shape::classify_shape`'s, renamed — doctor derives none of its own**,
-  so two states exist that no endpoint comparison can see: `chain` (a referrer
-  reaching the master through ANOTHER link — `repair` relinks it, while
-  `--install-missing` cannot, its endpoint already being the master) and
-  `masterUnusable` (the store holds a link or a file where the skill's bytes
-  must be — repair REFUSES, so it is a hand fix). Each has its own note; do not
-  fold either back into the sync one. `master-is-symlink` is the same fact on
-  the `health` axis and therefore ALSO fails `--fail-on-issues` — the two axes
-  must not answer it differently. Only `untracked` is still excused.
-  `foreignLink` also widened: a slot link that resolves while the store master
-  is gone used to read `dangling`. Its commonest instance is the pre-2.18
-  layout (`.claude/skills/<n>` → a real `.agents/skills/<n>`, no `.aghub/<n>`),
-  which `repair` MIGRATES — the sync note does not know that yet
-- **`repair` also DETACHES stale Referrers in read-only compat dirs**
-  (`ReferrerAction::Unlink`, outcome `tidied`, printed as `unlinked:`). Left
-  alone they are not cosmetic: the agent goes on reading the skill from two
-  places, so `remove for this agent alone` can never take anything away and
-  REFUSES forever — antigravity's toggle was permanently stuck this way after
-  its global write slot moved to `.gemini/config/skills` while
-  `.gemini/antigravity/skills` kept the link. FOUR guards, all in
-  `plan_repair`, none loosenable: symlink only (a real directory may hold the
-  only copy); resolves to this Master **or to the directory this run adopts as
-  one** (without that half the detach needed a SECOND `repair` run, after the
-  first reported `migrated`); **every agent that READS the entry** still has
-  its own write slot covering it afterwards
-  (`Create`/`Relink`/`AdoptAsMaster`, or an already-`Conformant` `Leave`);
-  and **the path is nobody's write slot**. The last two are ANDed and protect
-  disjoint populations — do not collapse them. The reader quorum
-  (`compat_unlink_authorized`) is universally quantified on purpose: it used to
-  ask only about the descriptor whose loop iteration reached the entry first,
-  which authorized a GLOBAL unlink of a SHARED entry on one agent's coverage
-  while every other reader was `continue`d before it was ever recorded. The
-  write-slot guard covers what the quorum structurally cannot: an agent never
-  records itself as a reader of its OWN slot, and at project scope
-  `.agents/skills` is amp's write slot while every other reader has a private
-  one — so all of them are covered, the quorum passes, and only that guard
-  stops step 6 deleting the Referrer step 4 just created. Neither guard's red
-  light is the other's: `creating_private_referrers_is_reported_as_a_repair`
-  pins the write-slot half, `a_shared_compat_entry_is_spared_unless_every_reader_is_covered`
-  the quorum. **That second one takes its roster as data** because the real one
-  cannot stage the failure — no directory today is read by two agents and
-  written by none, and `set_skills_path_override` cannot invent one (it
-  replaces an agent's read paths AND write path with the same single dir)
-- **`repair` REFUSES a real directory that git TRACKS.** Both moving actions
-  (`AdoptAsMaster`, `CompareThenQuarantine`) rename a real directory into the
-  ignored store, so on a repo whose skills are authored IN PLACE that was 39
-  deletions in `git status`, exit 0 and doctor green. Shape cannot separate
-  authored source from a pre-2.18 install (both `UnmigratedCopy`) and neither
-  can the lock (aghub's own 22 hand-edited skills are in `skills-lock.json`) —
-  D7's "migration deliberately leaves alone" only ever held for the LAZY path.
-  Tracking is the one available signal, so `plan_repair` asks the system `git`
-  binary (`crates/core` grows no git dep for a yes/no question; exit code only,
-  because `ls-files` prints matches on stdout and its messages are localized).
-  THREE states, like `UnreadableCompatDir`: tracked → refuse; untracked, or no
-  `.git` above the path → migrate, because that is what `repair` is FOR and
-  "inside a repo" must never become the question; a `.git` present but
-  unanswerable → refuse too, with its own reason. Scope-blind on purpose — a
-  global `~/.agents/skills/<n>` sits in plenty of dotfiles repos. No opt-in
-  flag: the escape is `git rm -r --cached <path>`, which the refusal prints
-- **`check` is offline by default** — `checked: false`, and the reason is the
-  ORCHESTRATOR's, not the surface's: a source nothing could fetch keeps its
-  permanent reason (`local` / `ssh` / `unsupportedScheme`) and everything else
-  reports `network`, meaning "we did not look". `network` is reserved for rows an
-  `--online` run really would answer, so `--online` is only ever suggested for
-  those. Offline hashes NO skill folder on either surface. Pass `--online` for a
-  real update check. Its scope defaults to BOTH, like
-  `doctor`/`source list`/`source diff` (it followed the global default and
-  answered "this project is up to date" without reading the project lock)
-- **"Update available" includes a LOCAL edit, not just an upstream move.** Both
-  `check` and `source diff` compare the readable installed copy against
-  upstream, so a skill you edited and have not pushed reports
-  `update-available`, and `apply-update --yes` OVERWRITES that edit. The two
-  digests in the row are comparison hashes (a standard CPython cache whose
-  source `.py` is present is excluded) and deliberately need NOT equal the
-  lock's `computedHash` — locks, healing and the security audit all stay on the
-  raw hash. Mechanics and the rules: `crates/skill-update/AGENTS.md`
-- **`check` never writes, and `--write-result` is why that needs a guard.** The
-  sidecar path is arbitrary, so the write is refused by **file NAME**
-  (`.skill-lock.json`, `skills-lock.json`, `.aghub-mutation.lock`), by an
-  `.aghub` path SEGMENT, and by `.agents/skills` as adjacent SEGMENTS, before any
-  resolved-path comparison. Do not "simplify" it back to comparing resolved
-  paths: three review rounds each found a new spelling that slipped through,
-  because the scope never resolved the target (`-g` resolves no project root at
-  all, so the project lock one `../` away was invisible). Normalize with
-  `skill::lock::resolve_existing`
-- **`source diff` ALWAYS fetches** (no offline mode); `--online` is accepted as a
-  no-op alias so the `check` habit does not become a clap error. It judges each
-  read scope against the origin THAT scope's lock records, so a host-blind
-  `owner/repo` spanning two forges is reported per scope instead of refused —
-  every JSON scope view carries `origin`, and the human table gets a stderr note
-  when the origins disagree. Ambiguity within ONE scope is still a refusal.
-  `GET /skills/sources/diff?scope=all` deliberately answers DIFFERENTLY: it
-  judges the union of both locks and refuses (`SOURCE_AMBIGUOUS`), because its
-  response is one flat merged list with a single `source` field and has nowhere
-  to attribute a forge per scope — a consequence of the merged-vs-per-scope
-  shapes, not a second ambiguity rule. Both sides are pinned by tests
-- Skill install is **always symlink-only**; `--universal` is a hidden no-op
-- Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
-- **`skill-usage`**: Claude-global only; rejects project/`--all`
-- **`coverage`**: rejects `--all`; scope `-g` or `-p` only. It is a static agent
-  CAPABILITY matrix — no skill names, no counts; use `doctor --verify-links` for
-  per-skill link state
-- **Narrowed resource args**: `check`/`apply-update` take skills ONLY and
-  `enable`/`disable` take mcps ONLY — enforced by their own clap value_enums, so
-  the rejection is a parse error naming the valid values. (`enable`/`disable
-skills` was dead for every agent in the roster; core still refuses it for the
-  API path.)
-- **`transfer`** / **`reconcile`**: cross-agent copy / reconcile of
-  skills·mcps·sub-agents (reconcile-with-removals is dry-run — see above).
-  `reconcile` needs at least one `--add`/`--remove`; `-a/--agent` is ignored.
-  An already-present target is an **idempotent success** (`already_present:
-true`) for both verbs — a skill because the shared Master is what "already
-  there" means, an MCP/sub-agent only when the existing value is EQUIVALENT (a
-  same-named entry holding a different command is still a hard conflict).
-  **Removing a skill refuses an end state that cannot exist** — if the agent
-  reads the skill from exactly the same set of places afterwards, the removal
-  took nothing away (a private copy shadowing a Master DOES take something
-  away, and stays legal — the Master it falls back to is disclosed in
-  `skipped`). That verdict has ONE home
-  (`removal::read_effect_after`, asked of discovery, never of a
-  `dir.join(name)` guess), so `delete`, the API delete route and
-  `reconcile skill` cannot answer it differently — they used to, and `delete`
-  was the one reporting `removed` for a skill still on disk. `reconcile skill`
-  additionally refuses BEFORE the first write, so the whole batch errors and
-  the disk is untouched (no half-applied copy-then-failed-delete), counting the
-  Master its OWN copies would create — "add windsurf, remove cursor" cannot
-  hand cursor the skill back through a Master the same command just made. Its
-  **preview runs that same check**: a `--remove` without `--yes` that exits 0
-  is a commit that will RUN — not one whose every row succeeds. The preview is a
-  plan echo (`{dry_run, add, remove}`, no per-row results), so a `--remove`
-  naming an agent that never held the skill previews as "would remove" and exits
-  0 while the commit fails that row and exits 1 — the same preview/commit shape
-  `reconcile mcp` has, and the reason it is not a refusal is that
-  `preflight_delete` returning `Err` aborts the WHOLE batch. Both spellings report
-  `UNSUPPORTED_OPERATION` / HTTP 422 — batching is transport and must not
-  relabel the refusal as bad parameters. **`reconcile mcp` / `reconcile
-  sub-agent` protect the whole ROSTER, not just the agents you named**:
-  `protected_targets` adds every `registry::iter_all()` agent that is not itself
-  being removed, and `ensure_removals_spare` compares resolved backing paths
-  (preflight, then re-checked at delete time). Consequence at project scope:
-  claude and copilot both resolve a project MCP to `<root>/.mcp.json`, so
-  `reconcile mcp --remove claude -p` is now ALWAYS refused — the message names
-  copilot and tells you to add it to `--remove` too (repeat the flag; it takes
-  no comma list). That pair is the only project MCP collision in the roster
-  today. **Following that remedy exits 0**, verified: both rows report success
-  and the entry is gone. It has to, or the refusal would leave this reconcile
-  with no clean spelling at all — so `sibling_already_took_it` reads a delete
-  whose entry a SIBLING ROW of the same command already took as a success
-  instead of `RESOURCE_NOT_FOUND`. **That forgiveness is a CREDENTIAL, not
-  membership of the removal set** (`RemovalCredits`): only a row that REALLY
-  emptied a backing vouches for the later rows reading that same backing.
-  Sharing a backing is not itself forgiveness — claude and copilot share
-  `<root>/.mcp.json` even while it does not exist, so "scoped to the removal
-  set" blessed `--remove claude --remove copilot` on an absent file as
-  `success_count: 2` for a server neither ever held. A `--remove` naming an
-  agent whose backing no row emptied still fails THAT ROW (exit 1), whether it
-  shares nothing (a typo) or shares an untouched file. All three reconcile delete arms
-  go through that one helper — `reconcile skill` used to forgive EVERY
-  `ResourceNotFound` with no scoping at all, so `reconcile skill --remove <an
-  agent that never held it>` now FAILS that row where it used to exit 0
-  claiming a deletion (the batch is still not rejected, and nothing else in it
-  changes). Its credential is keyed on the ENTRY a row takes — the shared
-  Master under `.aghub`, via `canonical_path` — not on the write dir
-  `ensure_removals_spare` compares: an exhaustive removal takes the Master
-  every named reader links to, and that lives in no agent's own dir. **`delete mcps <name> -a claude -p --yes`
-  has no such guard** — it reports `outcome: "removed"` and copilot loses the
-  server too (verified; left alone deliberately, turning that everyday command
-  into a refusal is a UX decision nobody has made). `reconcile skill`
-  deliberately passes `roster: false`: legacy shared directories have overlapping readers, so protecting every
-  reader as though it owned a private write slot would prevent shared removals — what a skill removal really
-  takes away is `remove_skill_planned` / `read_effect_after`'s call, and the
-  shared-Master case is closed there by the keep rules
-- **`inference`**: provider inventory + keyring keys. Bindings/routing are
-  desktop/API-only — there is no `inference bind` on the CLI. `--api-key -`
-  reads the key from stdin; nothing else does
-- **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
-  `partial` | `kept` (`success: true` but THE ENTITY IS STILL THERE; the API
-  adds an api-only `failed` for early errors). `kept` carries TWO situations
-  and the advice differs: a shared Master another agent still reads, and an
-  `--all-agents` sweep that took NOTHING because it could not prove nothing
-  still holds the skill (a Referrer it could not resolve or a read dir it
-  could not list — `skipped` names them; `still_read_from` is a PLAN field
-  that reaches no wire, `RemovalView` never copied it). The second one
-  never reaches `commit`: `remove_skill_planned` returns a preview for it even
-  on a confirmed call, so it runs no lock prune. Fixing what the sweep could
-  not read and re-running is the way through; there is no flag that overrides
-  it. A preview also carries `would_prune_lock_entries`: the lock keys the
-  commit would drop, separate from the committed `pruned_lock_entries` because a
-  preview must not claim entries were dropped. Read that, not `dry_run`/`executed`: those two cannot separate a
-  refused preview from an already-gone resource, and `executed: true` is set for
-  the whole execute branch even when every single delete failed (`partial`).
-  `absent` outranks the caller's intent — an unconfirmed delete of something
-  that does not exist is not a preview of any change
+Two cross-surface invariants that neither file owns alone:
+
 - **An unreadable lock fails the commands that report it** (`check`, `doctor`,
-  `source list`/`diff`). The lock read paths fail OPEN by design; those three
-  present lock contents AS their answer, so they probe first
+  `source list`/`diff`). The lock read paths fail OPEN by design; those commands
+  present lock contents AS their answer, so they probe first.
+- **A verdict has ONE home.** "Did that removal take anything away?" is
+  `removal::read_effect_after`, asked of discovery — `delete`, the API delete
+  route and `reconcile skill` must not answer it differently.
 
 ## Skills Discovery
 
@@ -440,142 +219,76 @@ serializes aghub against aghub only. Invariants and the call-site rule:
 
 **Link decision**: `classify_agent` / `agent_link_need`
 (`crates/core/src/skills/linker/classify.rs`). Every supported agent takes a
-Referrer — there is no "reads the Master directly" case any more, and the
-`LinkNeed::NativeReader` variant was DELETED rather than left unreachable
-(a variant still constructed but never produced draws no dead-code warning and
-silently kills every `matches!` arm testing for it). Both install paths must use
-it — CLI `add_skill_universal` / `add_skill_from_path_universal` and fetched
+Referrer — there is no "reads the Master directly" case, and `LinkNeed::NativeReader`
+was DELETED rather than left unreachable. Both install paths must use it — CLI
+`add_skill_universal` / `add_skill_from_path_universal` and fetched
 `install_universal`.
 
 **Shape classification**: `skills::shape` — `classify_shape` (one
 `(referrer, master)` pair), `candidate_referrers` (each agent's Referrer PATH,
 derived from its write dir, never from what is on disk) and `plan_repair`.
-Three traps with their own tests: `symlink_metadata` alone cannot decide
-conformance; two canonicalize `Err`s must never compare equal; and identity
-(same inode through a symlinked parent) comes before any content comparison.
-
-**A real directory is only a fork if it IS a skill.** `SkillShape::ForeignDir`
-(→ `LeaveForeign`) is a directory at the Referrer path with no root `SKILL.md`,
-and it is checked BEFORE the `ForkedCopy` / `UnmigratedCopy` split because both
-of those lead somewhere destructive (hash-and-quarantine, or adopt as the
-Master). Several agents group their OWN skills under a category directory —
-Hermes walks `~/.hermes/skills` RECURSIVELY (`os.walk`, `followlinks=True`, no
-depth cap), so `research/` there holds thirteen sub-skills and a
-`DESCRIPTION.md` and is not a skill at all — and a skill aghub manages under the
-same name made `repair` refuse with "compare them, then keep the one you want",
-advice that moves somebody's whole collection aside. **Never use `DESCRIPTION.md`
-as the marker**: Hermes has no group concept, computes the category from the
-path, and skips a `DESCRIPTION.md` with no frontmatter `description` entirely.
-The probe distinguishes ABSENT from UNREADABLE — only a definite `NotFound`
-demotes the directory, because a bare `is_file()` is false for both and that
-turned a `chmod 000` skill into "somebody else's content", silently skipping a
-permission fault that must be reported as `Failed`.
+`repair`, `doctor --verify-links`, the pre-mutation guard and migration all read
+that ONE classification; none may derive its own. The shape order, the three
+traps with their own tests, the four compat-unlink guards and doctor's two axes:
+knowledge page `技能連結形狀與 repair 鏈` — read it before touching any of them.
 
 ## Adding / Removing an Agent
 
-One agent = one **descriptor** file, plus six registration and contract spots
-below. A step-2 row naming a module with no `pub mod`, and a missing step-6
-row, fail the BUILD. Two omissions the gate cannot see: a roster row never
-WRITTEN (the agent simply does not exist — no variant, no id, nothing to
-reference, so nothing goes wrong except that the agent is absent), and step 7.
+One agent = one **descriptor** file plus seven registration spots. A step-2 row
+naming a module with no `pub mod`, and a missing step-6 row, fail the BUILD;
+step 7 fails nothing.
 
 1. `crates/agents/src/agents/<name>.rs` — descriptor (naming gotchas:
    `crates/agents/AGENTS.md`)
 2. `crates/agents/src/agents/mod.rs` — `pub mod`, **and ONE `agent_roster!`
    row**: `Variant => "id", module, ["alias", …];`. That macro emits the
    `AgentType` enum, `ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and
-   `ALL_DESCRIPTORS` — there is no second list to update, and no
-   `AgentType` edit in `models.rs` (it re-exports). **Row position is the
-   order of everything**: the desktop agent list, `-a all` expansion, batch
-   row order and first-error. Only the VARIANT is compiler-checked; the id
-   literal and the module path are free text, so a copy-pasted row compiles
-   and `registry_bijection.rs` is what refuses it
+   `ALL_DESCRIPTORS` — there is no second list, and no `AgentType` edit in
+   `models.rs` (it re-exports). **Row position is the order of everything**: the
+   desktop agent list, `-a all` expansion, batch row order and first-error
 3. `crates/core/tests/mcp_dialect_golden.rs` — a `row!` naming what the agent
-   writes and how it reads a config aghub did not write. There is no way to
-   skip this: the row is REQUIRED for any agent claiming MCP support
-4. `crates/core/tests/mcp_dialect_decisions.rs` — a second `row!`, same
-   registry-driven requirement, naming what it does with a mixed entry, an
-   unknown transport tag, a field the model does not own, a value that does not
-   fit, and an SSE server it cannot spell. Also required for a `json_map` agent
-   that introduces no new dialect at all
+   writes and how it reads a config aghub did not write. REQUIRED for any agent
+   claiming MCP support
+4. `crates/core/tests/mcp_dialect_decisions.rs` — a second `row!`: a mixed entry,
+   an unknown transport tag, a field the model does not own, a value that does
+   not fit, an SSE server it cannot spell. Required even for a `json_map` agent
+   that introduces no new dialect
 5. `crates/core/tests/mcp_dialect_roundtrip.rs` — `NATIVE_TOGGLE`, if the agent
-   has a native enabled/disabled flag. The list is exhaustive BOTH ways: a
-   listed agent that drops a disabled server fails, and an unlisted one that
-   keeps it fails naming the fix. It cannot be skipped, only got wrong
+   has a native enabled/disabled flag. Exhaustive BOTH ways: a listed agent that
+   drops a disabled server fails, an unlisted one that keeps it fails too
 6. `crates/agents/tests/descriptor_regression.rs` — a row in **every** table.
-   The lengths are derived (`AgentType::ALL.len()`), so there is nothing to
-   bump and a missing row is a COMPILE error. A row naming the WRONG agent
-   (a copy-paste duplicate keeps the count right) is a runtime panic naming
-   the agent it could not find — every table, including the capability and
-   skill-path ones, whose `.expect` used to print a static literal instead.
-   Seven tables used to skip a missing row entirely and pass. `test_global_data_dirs` is the one table an agent may sit out,
-   and only by joining `OS_CONFIG_DIR_AGENTS` and being asserted after the
-   loop
-7. `crates/desktop/src/assets/agent/<id>.svg`. `agent-icons.tsx` globs
-   `../assets/agent/*.svg` and keys it by `${id}.svg`; a missing file falls
-   through to a first-letter avatar, which no build, lint or typecheck notices.
-   It USED to be the only silent step —
-   `crates/desktop/src/lib/agent-icons.test.ts` now closes it by parsing
-   `agent_roster!` for every id and asserting the asset exists (with a vacuity
-   floor so the regex cannot quietly match nothing), and `just preflight` runs
-   it. (`jetbrains-ai` was silently broken for releases — its asset is
-   `jetbrains_ai.svg` — until `a15972b3` gave the lookup an
-   `id.replaceAll("-", "_")` fallback, so an id with a dash may ship either
-   spelling.)
+   Lengths are derived from `AgentType::ALL.len()`, so a missing row is a COMPILE
+   error and a row naming the WRONG agent is a runtime panic.
+   `test_global_data_dirs` is the one table an agent may sit out, and only by
+   joining `OS_CONFIG_DIR_AGENTS`
+7. `crates/desktop/src/assets/agent/<id>.svg` — `agent-icons.tsx` globs
+   `../assets/agent/*.svg` and keys it by `${id}.svg`; a missing file silently
+   falls back to a first-letter avatar. `crates/desktop/src/lib/agent-icons.test.ts`
+   closes that (it parses `agent_roster!` and asserts the asset exists) and
+   `just preflight` runs it. An id with a dash may ship either spelling — the
+   lookup has an `id.replaceAll("-", "_")` fallback
 
 `crates/core/tests/registry_bijection.rs` covers the three row mistakes the
-compiler cannot: a row naming the wrong MODULE (that agent is handed another's
-descriptor — the old fallback bug, by hand), two rows sharing an ID, and a row
-whose id literal drifts from the `id:` field inside `agents/<module>.rs`. Each
-has its own test; none is a tautology.
+compiler cannot: a row naming the wrong MODULE, two rows sharing an ID, and a
+row whose id literal drifts from the `id:` field inside `agents/<module>.rs`.
 
 **Opening a capability on an EXISTING agent has a hidden blast radius**: tests
 across `cli`, `core` and `api` pick some agent that does not support skills as
-their "unsupported target" sentinel, and assert that a mutation is refused. Give
-that agent the capability and those tests stop testing anything — they go red if
-you are lucky, and silently pass a real write if you are not. Grep the agent's
-id across `crates/*/tests/` and `crates/api/src/routes/` BEFORE changing its
-capabilities, and move the sentinel rather than deleting the assertion.
-
-**A shared read-only dir with no writer is now SAFE, and that is load-bearing
-rather than incidental.** It used to be the roster's sharpest edge:
-`compat_unlink_permitted`'s "nobody's write slot" guard was the only thing
-shielding a shared dir's readers, so a dir with no writer at all fell straight
-through it and a `repair` run for a DIFFERENT agent detached the compat
-referrer, silently costing every read-only co-reader the skill. The coincidence
-that every shared dir happened to have a writer was unproven, not designed —
-and it had already run out in one place (`$XDG_CONFIG_HOME/agents/skills` under
-a non-default XDG is read by amp and kimi and written by neither, because both
-descriptors hard-code `.config` in their global write path while the READ path
-honours the variable).
-
-`skills::shape::compat_unlink_authorized` now asks the question that was
-actually meant — **every agent reading the entry must still be served by its
-own write slot afterwards**, with no write slot at all counting as "not
-served". A dir nobody writes is therefore protected by its readers, not by its
-writer. The write-slot guard stays, ANDed, for the disjoint case it alone
-covers (see the `repair` bullet above).
-
-Still true, and still the reason to read the descriptor rather than this prose:
-membership of a shared slot is per-agent AND per-scope, so ask
-`crates/agents/tests/descriptor_regression.rs`
-`test_global_skill_paths` / `test_project_skill_paths`. A roster edit rots any
-list written here the moment a descriptor changes.
+their "unsupported target" sentinel. Give that agent the capability and those
+tests stop testing anything. Grep the agent's id across `crates/*/tests/` and
+`crates/api/src/routes/` BEFORE changing its capabilities, and move the sentinel
+rather than deleting the assertion.
 
 ## Testing
 
 **The suite is designed to write only into temp dirs, an isolated `$HOME` and
 `$AGHUB_DATA_DIR` — a leak into the real home is a bug in that test, not a reason
-to ask before running the suite.** The Rust tests make no outbound network calls:
-the git-backed ones serve `git://` from a loopback `git daemon`. What reaches
-outside a plain `cargo test` is `just featured-check` (public GitHub plus a `gh`
-login) and the `verify` chain; `--features agent-validation` needs real agent CLIs
-on `PATH`, not the network. Run `cargo test`, `cargo test --workspace` or
-`just preflight` freely, fix the failures your change caused, and rerun without
-asking for approval at each step. What keeps this true is a rule, not a question:
-`crates/core/AGENTS.md` ANTI-PATTERNS forbids clearing `skills_path_override` for
-a global write without isolating `$HOME`. Honour it in the tests you WRITE, and
-the suite stays free to RUN.
+to ask before running the suite.** The Rust tests make no outbound network calls
+(the git-backed ones serve `git://` from a loopback `git daemon`). What reaches
+outside a plain `cargo test` is `just featured-check` and the `verify` chain;
+`--features agent-validation` needs real agent CLIs on `PATH`, not the network.
+Run `cargo test`, `cargo test --workspace` or `just preflight` freely, fix the
+failures your change caused, and rerun without asking at each step.
 
 When you write a new test, the isolation is yours to get right. **Never pollute
 the real home**: a global-scope write still lands in `~/.aghub` plus each agent's
@@ -583,18 +296,15 @@ own skills dir, and overriding `$HOME` alone is not enough. Isolation mechanics,
 the one-env-mutex-per-binary rule and the inode-assertion trap:
 `crates/core/AGENTS.md` Testing.
 
-**A test must be able to FAIL on a real regression** — a green test that can't
-is worse than none (it reads as "covered"). Assert observable OUTCOMES (values,
-on-disk / lock state), not a variant or `is_err()`; for a safety-critical flow
-exercise the FAILURE path (rollback AFTER the destructive step, not just the
-happy path). PROVE it: revert the fix, watch the assertion go red, restore —
-reasoning that it _would_ fail is how false greens survive. **A malformed
-fixture is the sneakiest false green here**: the lock read paths fail CLOSED for
-the commands that report lock contents (`check`, `doctor`, `source list`/`diff`),
-so a lock fixture missing a required field makes the command bail while READING
-and the assertion passes with the code under test never reached. Copy a fixture
-shape from an existing test rather than hand-writing a minimal one. Worked example:
-`docs/specs/2026-07-15-skill-rename-transaction-deepening.md`.
+**A test must be able to FAIL on a real regression** — a green test that can't is
+worse than none. Assert observable OUTCOMES (values, on-disk / lock state), not a
+variant or `is_err()`; for a safety-critical flow exercise the FAILURE path
+(rollback AFTER the destructive step). PROVE it: revert the fix, watch the
+assertion go red, restore. **A malformed fixture is the sneakiest false green**:
+the lock read paths fail CLOSED for the commands that report lock contents, so a
+fixture missing a required field makes the command bail while READING and the
+assertion passes with the code under test never reached — copy a fixture shape
+from an existing test.
 
 ## Agent permissions / approval boundaries
 
@@ -613,9 +323,8 @@ Reasons are given so you can generalize to the case not listed here.
 >
 > These are correctness invariants, not approval boundaries: they constrain WHICH
 > design you pick, never WHETHER you proceed. None is a reason to stop and ask —
-> and none is negotiable either; pick a design that satisfies them. The same holds
-> for every `NEVER` in a per-crate `AGENTS.md`. Approval boundaries are the section
-> above; a project skill may add its own gate for its own workflow.
+> and none is negotiable either. The same holds for every `NEVER` in a per-crate
+> `AGENTS.md`.
 
 - NEVER return arbitrary internal temp/lock/keyring paths in API **errors**;
   skill DTOs may expose intentional `source_path` / `canonical_path` for UI
@@ -628,8 +337,7 @@ Reasons are given so you can generalize to the case not listed here.
   `skill::lock::resolve_existing` (the one the mutation lock uses): it resolves
   the longest existing prefix so the FILESYSTEM answers `..` after a symlink,
   then treats only the unresolvable tail lexically. A `parent()`/`file_name()`
-  walk is the trap — `file_name()` is `None` for a path ending in `..`, so the
-  walk abandons and returns the path unnormalized
+  walk is the trap — `file_name()` is `None` for a path ending in `..`
 - When promoting a **private** flow to a **public** seam, re-assert the
   preconditions the old callers used to guarantee (e.g. `accept_rename`
   re-checks the lock itself) — a public entry point is only as safe as its own
@@ -637,14 +345,9 @@ Reasons are given so you can generalize to the case not listed here.
 
 ## Release & Packaging
 
-Full runbook (versioning, `just bump`, signing secrets, Homebrew tap, workflow
+Runbook (versioning, `just bump`, signing secrets, Homebrew tap, workflow
 failures): project skill **`releasing-aghub`** + `.github/workflows/release.yml`.
-Two things the skill won't stop you from getting wrong:
-
-- Tag `v*` only after green CI, and run `just preflight` first — **the pre-push
-  hook does NOT run tests**
-- **Never change** shipped `tauri.conf.json` updater `pubkey`, or point
-  `endpoints` elsewhere — it bricks auto-update for installed users
+The two release rules that are also approval boundaries are in the table above.
 
 ## Project Root Detection
 

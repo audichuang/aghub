@@ -89,6 +89,19 @@ line** — don't reword it). Pass `--port N` to pin one.
   capability → validate → writable): refactoring a route into shared helpers
   must not reorder which error wins on compound-invalid requests
 
+## SURFACE SEMANTICS THAT DIFFER FROM THE CLI
+
+- **`GET /skills/sources/diff?scope=all` refuses an origin-ambiguous source**
+  (`SOURCE_AMBIGUOUS`) where the CLI reports it per scope. The response is ONE
+  flat merged list with a single `source` field, so it has nowhere to attribute
+  a forge per scope — a consequence of the merged-vs-per-scope shapes, not a
+  second ambiguity rule. Both sides are pinned by tests.
+- `delete`'s `outcome` gains an api-only `failed` for early errors; the rest of
+  the vocabulary is the CLI's (`crates/cli/AGENTS.md`).
+- Batch routes answer HTTP 200 for a handled batch whose rows failed — the row's
+  `error` is the answer, and failed rows are also logged (never the source URL
+  or a forwarded token).
+
 ## ANTI-PATTERNS
 
 - NEVER widen CORS or add new mutating routes without considering the no-auth posture above
