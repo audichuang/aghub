@@ -45,8 +45,16 @@ rule aghub_credential_file_exfil {
 	strings:
 		// Require an actual read of a credential, not unrelated mentions elsewhere
 		// in the file (for example, writing `.env` then curling a health endpoint).
-		$read_file = /(readFileSync|read_to_string|read_text|fs\.read)\s*\([^;\r\n]{0,160}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)/ nocase
-		$read_open_file = /open\s*\(\s*["'][^"'\r\n]{0,120}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)[^"'\r\n]{0,80}["']\s*(,\s*["']r[b]?["']\s*)?\)([\s\S]{0,200}\.read\s*\()/ nocase
+		// The read and the path must meet in ONE expression, which is also the
+		// ceiling: a two-step read (`p = join(home, '.ssh/id_rsa')` … `open(p)`,
+		// or a call broken across lines) falls to the `low` dataflow source and
+		// is reported Suspicious — it installs with a warning. Same trade-off,
+		// and the same reason, as the aliased env read above. `open(` therefore
+		// may take ANY expression, not just a quoted literal (`expanduser`,
+		// `Path.home() /`, an f-string): what keeps the write-mode
+		// `open('.env', 'w')` out is the trailing `.read(`, not the quote.
+		$read_file = /(readFileSync|readFile|read_to_string|read_text|read_bytes|fs\.read)\s*\([^;\r\n]{0,160}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)/ nocase
+		$read_open_file = /open\s*\([^;\r\n]{0,140}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)[^;\r\n]{0,80}\)([\s\S]{0,200}\.read\s*\()/ nocase
 		$read_path_file = /Path\s*\(\s*["'][^"'\r\n]{0,120}(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)[^"'\r\n]{0,80}["']\s*\)\s*\.read_(text|bytes)\s*\(/ nocase
 		$read_cat = /\bcat\s+[^<> \t\r\n|;]*(\.env\b|\.ssh[\/\\]|\.aws[\/\\]|\.netrc\b|\.git-credentials\b|credentials|id_rsa|id_ed25519)/ nocase
 		$read_env = /(process\.env|os\.environ|getenv)[ \t]*(\??\.(get[ \t]*\()?|(\?\.)?\[|\()[ \t]*["']?[a-zA-Z0-9_]*(SECRET|TOKEN|PASSWORD|API[_-]?KEY|CREDENTIAL|PRIVATE[_-]?KEY)/ nocase
