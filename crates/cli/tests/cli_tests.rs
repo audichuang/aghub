@@ -5925,20 +5925,22 @@ fn coverage_default_table_lists_agents() {
 	);
 }
 
-// ── Docs: '## CLI Command Surface' must enumerate the Phase-7 subcommands ─────
+// ── Docs: '## Surface semantics' must enumerate the Phase-7 subcommands ──────
 
-/// Slice the `## CLI Command Surface` section out of the repo-root AGENTS.md.
+/// Slice the `## Surface semantics` section out of THIS crate's AGENTS.md.
 /// Keeps the assertion scoped to that block so a stray mention elsewhere in the
-/// doc can't make the test pass.
-fn cli_command_surface_block() -> String {
+/// doc can't make the test pass. The surface used to be enumerated in the
+/// repo-root AGENTS.md; it moved here when that file became a navigation layer,
+/// and this crate is now where the semantics are written down.
+fn cli_surface_semantics_block() -> String {
 	let agents_md = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-		.join("../../AGENTS.md")
+		.join("AGENTS.md")
 		.canonicalize()
 		.unwrap();
 	let text = std::fs::read_to_string(&agents_md).unwrap();
-	let start = text
-		.find("## CLI Command Surface")
-		.expect("AGENTS.md must have a '## CLI Command Surface' section");
+	let start = text.find("## Surface semantics").expect(
+		"crates/cli/AGENTS.md must have a '## Surface semantics' section",
+	);
 	let rest = &text[start..];
 	// Section ends at the next top-level heading.
 	let end = rest[1..].find("\n## ").map(|i| i + 1).unwrap_or(rest.len());
@@ -5946,14 +5948,14 @@ fn cli_command_surface_block() -> String {
 }
 
 #[test]
-fn agents_md_command_surface_lists_phase7_subcommands() {
+fn agents_md_surface_semantics_lists_phase7_subcommands() {
 	// Every Phase-7 subcommand dispatched in main.rs must be enumerated in the
-	// CLI command-surface block so the doc stays in sync with the binary.
-	let block = cli_command_surface_block();
+	// surface-semantics block so the doc stays in sync with the binary.
+	let block = cli_surface_semantics_block();
 	for cmd in ["inference", "transfer", "reconcile", "coverage"] {
 		assert!(
 			block.contains(cmd),
-			"'## CLI Command Surface' must document the `{cmd}` subcommand; \
+			"'## Surface semantics' must document the `{cmd}` subcommand; \
 			 block:\n{block}"
 		);
 	}
