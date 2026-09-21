@@ -36,7 +36,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   not be folded back into the sync note, `orphanMaster` must NOT be offered
   `source sync --install-missing` (there is no source), and `master-is-symlink`
   ALSO fails `--fail-on-issues` — the two axes must never answer one fact
-  differently. Only `untracked` is excused. Default exit is unchanged;
+  differently. On the health axis only `untracked` is excused; on the link axis
+  `withheld` / `unsupported` / `linked` are not issues either. Default exit is
+  unchanged;
   `--fail-on-issues` opts into a non-zero one.
   States, remedies and the four buckets: knowledge page `技能連結形狀與 repair 鏈`
 - **`repair`** also DETACHES stale Referrers in read-only compat dirs (outcome
@@ -72,13 +74,17 @@ list, or `all`), `-g`/`-p`, `--all`.
   is EQUIVALENT. Removing a skill refuses an end state that cannot exist (the
   agent would read it from the same set of places afterwards), and
   `reconcile skill` refuses BEFORE the first write so the disk is untouched.
+  The preview is a plan echo (`{dry_run, add, remove}`, no per-row results) and
+  does NOT check that a `--remove` target ever held the thing: a typo previews as
+  "would remove" and exits 0, then fails that row on commit and exits 1.
   `reconcile mcp` / `reconcile sub-agent` protect the whole ROSTER, not just the
   agents you named, so `reconcile mcp --remove claude -p` is always refused —
   the message names copilot (both resolve `<root>/.mcp.json`; repeat `--remove`,
   it takes no comma list). Following that remedy exits 0. A `--remove` naming an
-  agent whose backing no row emptied FAILS that row. Both refusals report
-  `UNSUPPORTED_OPERATION` / HTTP 422 — batching is transport and must not
-  relabel a refusal as bad parameters.
+  agent whose backing no row emptied FAILS that row. That refusal is
+  `INVALID_CONFIG` / HTTP 400; the SKILL removal refusal is the other code —
+  `delete` and `reconcile skill` both report `UNSUPPORTED_OPERATION` / HTTP 422.
+  Batching is transport and must not relabel either as bad parameters.
   **`delete mcps <name> -a claude -p --yes` has no such guard** — copilot loses
   the server too (verified; left alone deliberately). Why:
   knowledge page `多目標突變的 scope 閘門與批次歸因`
@@ -90,7 +96,7 @@ list, or `all`), `-g`/`-p`, `--all`.
   rejection is a parse error naming the valid values
 - **`inference`**: provider inventory + keyring keys. Bindings/routing are
   desktop/API-only — there is no `inference bind` here. `--api-key -` reads the
-  key from stdin; nothing else does
+  key from stdin on `inference add` ONLY — `update` stores a literal `-`
 - Skill install is **always symlink-only**; `--universal` is a hidden no-op
 - Source creds: `GIT_PASSWORD` (any host) / `GITHUB_TOKEN` (github.com https-only)
 
@@ -141,7 +147,8 @@ that a new subcommand cannot escape the case table —
 `every_subcommand_has_a_policy_case` asks clap for the subcommand list rather
 than a second hand-written one.
 
-**Early dispatch.** `source`, `apply-update`, `inference`, `transfer`,
+**Early dispatch.** `check`, `repair`, `prune-lock`, `plugin`, `source`,
+`apply-update`, `inference`, `transfer`,
 `reconcile`, `coverage`, `doctor` and `skill-usage` run BEFORE any adapter or
 `ConfigManager` exists, so a missing or malformed agent config cannot block a
 command that never needed one. The `unreachable!()` arms in `run_for_agent`'s

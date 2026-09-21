@@ -17,8 +17,9 @@ discovery + git/tarball materialization are in-crate.
 ## GOTCHAS / ANTI-PATTERNS
 
 - **Test seam is `ClaudeCli` (process boundary)**, not installers — lifecycle is
-  thin over `claude plugin …`. `ClaudeCli::new()` runs `which`; tests must avoid
-  real spawns
+  thin over `claude plugin …`. `ClaudeCli::new()` resolves the binary via `which` and then a list of
+  candidate install dirs (`~/.local/bin`, `~/.bun/bin`, homebrew, …), so
+  emptying `PATH` does not neutralize it; tests must avoid real spawns
 - CLI has **no "check for updates"** semantics — update = install-latest; no diff step
 - `manager.rs` (`load_via_cli`) and `lifecycle.rs` (`fetch_installed`) parse the
   same `plugin list` into **different** types (discovery vs management) — intentional

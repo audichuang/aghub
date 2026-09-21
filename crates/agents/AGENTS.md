@@ -8,11 +8,11 @@
 Role map (not a full file tree — `ls` / codegraph for that):
 
 - `descriptor.rs` — `AgentDescriptor` + capabilities + path fn types
-- `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns)
+- `macros.rs` — `define_mcp_paths!` / `define_skill_paths!` (prefer these over hand-written path fns) and `json_map_dialect!` (every `json_map` agent uses it)
 - `models.rs` — `AgentConfig`, `McpServer`, `McpTransport`, `Skill`, `AgentSelection`, and `AgentType`'s re-export plus `parse_list` (the enum itself comes from `agents/mod.rs`)
 - `agents/` — one descriptor per agent, plus the `agent_roster!` macro in `mod.rs` that declares the roster ONCE and emits `AgentType`, `AgentType::ALL`, `as_str`, `FromStr`, `AgentType::descriptor` and `ALL_DESCRIPTORS` from it (so `models.rs` re-exports `AgentType` rather than defining it); `codex/` is a subdirectory; `factory.rs` is the Factory-AI agent (NOT a dispatch factory)
 - `sub_agents.rs` — markdown sub-agent I/O + `SubAgentLayout`: `Flat { suffix }` (`.md` for Claude/Grok/OpenCode, `.agent.md` for Copilot) vs `Nested { file_name }` (Antigravity's `<name>/agent.md`). The layout decides the read filter, the NAME and the written filename at once — get one wrong and aghub round-trips with itself while the vendor sees nothing. Frontmatter keys aghub does not model ride the model as `SubAgent::extra_frontmatter` (deserialized through a flattened `extra`), with the destination file read back only when the model carries none — a save rewrites EVERY sub-agent in the directory, not just the edited one, so without this creating one strips its siblings' `tools`/`model`/`color`. Codex is not here: its sub-agents are TOML (`agents/codex/sub_agent.rs`)
-- `format/` — serializers: OpenCode native, JSON map MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). Every dialect keeps its own engine (no two share a `Value` type). **Every MCP-capable agent** declares the answers they must not differ on in `mcp_policy.rs` — `TransportVocabulary` (its word for each transport; `sse: ""` is what `refuse_unwritable` turns into a refusal — but the dialect still has to CALL it, declaring alone writes an empty tag; `mcp_dialect_roundtrip` is what catches a missing call, NOT `mcp_dialect_decisions`), `OwnedKeys`, `reject_mixed_transport`, `remote_transport`, `transport_fields`, `reads_http` (the one "is this tag streamable HTTP?" condition — `json_map` shares ONE wide alias list across every agent that inherits it, so narrowing it per dialect is a behaviour change). The seven hand-written dialects declare a `TransportVocabulary` each; the `json_map` agents declare one inside `json_map::Dialect`, which is the SAME type (it was a second copy, `Discriminator`, until it was merged). Only the mixed-entry WORDING is still split, by `MixedWording` — a `json_map` agent's users already see `cannot contain both command and url`. (Counts rot on every roster edit: ask `agent_roster!` in `agents/mod.rs` and the capability tables in `tests/descriptor_regression.rs` for who is in which set.) Read `mcp_policy.rs` before touching any parser, and add a row to `crates/core/tests/mcp_dialect_decisions.rs` when you add an **MCP-capable agent** (a `json_map` agent introduces no dialect and still owes a row)
+- `format/` — serializers: OpenCode native, JSON map MCP, TOML (Codex/Mistral/Grok), YAML (Hermes). Every dialect keeps its own engine (no two share a `Value` type). **Every MCP-capable agent** declares the answers they must not differ on in `mcp_policy.rs` — `TransportVocabulary` (its word for each transport; `sse: ""` is what `refuse_unwritable` turns into a refusal — but the dialect still has to CALL it, declaring alone writes an empty tag; `mcp_dialect_roundtrip` is what catches a missing call, NOT `mcp_dialect_decisions`), `OwnedKeys`, `reject_mixed_transport`, `remote_transport`, `transport_fields`, `reads_http` (the one "is this tag streamable HTTP?" condition — `json_map` shares ONE wide alias list across every agent that inherits it, so narrowing it per dialect is a behaviour change). Each hand-written dialect module declares one `TransportVocabulary`; the `json_map` agents declare theirs inside `json_map::Dialect`, which is the SAME type (it was a second copy, `Discriminator`, until it was merged). Only the mixed-entry WORDING is still split, by `MixedWording` — a `json_map` agent's users already see `cannot contain both command and url`. (Counts rot on every roster edit: ask `agent_roster!` in `agents/mod.rs` and the capability tables in `tests/descriptor_regression.rs` for who is in which set.) Read `mcp_policy.rs` before touching any parser, and add a row to `crates/core/tests/mcp_dialect_decisions.rs` when you add an **MCP-capable agent** (a `json_map` agent introduces no dialect and still owes a row)
 
 ## KEY TYPES
 
@@ -27,11 +27,10 @@ Role map (not a full file tree — `ls` / codegraph for that):
 ## Project skill grants
 
 Prefer a vendor-supported private write directory even when the vendor defaults
-to `.agents/skills`. Keep shared directories in the read set for discovery and
-legacy migration; do not treat that as authorization to write grants there.
-Changing the read order also changes which copy wins discovery. Evidence and
-migration constraints: `docs/specs/2026-09-11-private-project-skill-slots.md` at
-the repository root.
+to `.agents/skills` (the root AGENTS.md states the rule; the per-agent choice is
+made here). Changing the READ order also changes which copy wins discovery.
+Evidence and migration constraints:
+`docs/specs/2026-09-11-private-project-skill-slots.md`.
 
 ## AGENT-SPECIFIC GOTCHAS
 
@@ -40,8 +39,11 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
 
 - **Claude**: skills from `~/.claude/skills/` SKILL.md (not JSON). Disabled MCPs
   omitted on serialize; URL MCPs as `"type": "sse"/"http"`
-- **OpenCode**: `mcp` object key; SSE + StreamableHttp unify as
-  `"type": "remote"` — **SSE identity is lost** on round-trip
+- **OpenCode**: `mcp` object key; `"type": "remote"` is streamable HTTP, and an
+  SSE server is **REFUSED on write** ("cannot express; use streamable HTTP"),
+  not silently downgraded. The authoritative list of agents that refuse SSE is
+  `NO_NATIVE_SSE` in `crates/core/tests/mcp_dialect_roundtrip.rs` — today codex,
+  opencode, kilocode and mistral
 - **Codex/Mistral/Grok**: TOML. Grok: MCP under `mcp_servers` in
   `~/.grok/config.toml` (project: `.grok/config.toml`); streamable HTTP carries
   **no** `type` key — only SSE has `type = "sse"`; native `enabled` flag; other
@@ -74,8 +76,10 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
   `.agents/agents/<name>/agent.md` and `~/.gemini/config/agents/<name>/agent.md`
 - **Hermes** (Nous Research): global-only — no project scope, no sub-agents.
   Skills from `~/.hermes/skills/` (SKILL.md). MCP under `mcp_servers` in
-  `~/.hermes/config.yaml` — the **only YAML MCP agent**; one remote transport
-  (`url`, no sse/http split), native `enabled` flag (`enable_disable: true`);
+  `~/.hermes/config.yaml` — the **only YAML MCP agent**. Remote transports are
+  tagged `transport` (not `type`): only SSE carries `transport = "sse"`,
+  streamable HTTP writes a bare `url`, and it is the one dialect that also READS
+  the spelled-out `streamable-http`. Native `enabled` flag (`enable_disable: true`);
   other top-level keys preserved on rewrite (comments are **not**). Windows home
   is `%LOCALAPPDATA%\hermes`
 - **ZCode**: `json_map` under a NESTED `mcp.servers` key, and the toggle is
@@ -94,24 +98,23 @@ are in the **root AGENTS.md** — not repeated here. The per-agent dialect traps
   `.agents/mcp.json` per scope, but only while its `.zcode` config defines NO
   server — aghub implements the `.zcode` side only, exactly like ZCode's own
   settings panel, so the first `mcp add` makes a user's `.agents`-only servers
-  stop loading. The transport tag and the untagged-remote reading are the
-  family defaults (`type`, streamable HTTP): the vendor documents neither
-- **SSE transport**: Deprecated in `models.rs` — use `StreamableHttp` instead
+  stop loading. The transport tag `type` is the `json_map` family default, but
+  the untagged-remote reading is an OVERRIDE to streamable HTTP — the family
+  default is `InferSseFromUrl`, and only four agents override it (kimi, omp,
+  copilot, zcode). The vendor documents neither
+- **SSE transport**: prefer `StreamableHttp` for anything new, but `Sse` is a
+  LIVE variant (no `#[deprecated]`) — whether a given agent can write one is
+  decided by its `vocab.sse`, and the roundtrip test exercises SSE for every
+  agent
 - **Descriptors are macro-built — until they can't be**: path mappings come from `define_mcp_paths!`/`define_skill_paths!` in `macros.rs` — read those before hand-writing a path fn. `define_skill_paths!` expresses exactly ONE dir per scope, so every agent that also reads the shared `.agents/skills` slot, a vendor alias or a legacy dir hand-writes the fns instead. **When you hand-write them the WRITE dir goes FIRST**: `load_skills_from_dirs` is first-dir-wins and the winner becomes `source_path` — the path `remove_skill` deletes and `check` hashes
 
 ## ADDING AN AGENT
 
-Wiring steps: root AGENTS.md "Adding / Removing an Agent". Crate-level detail:
-the descriptor is `pub const DESCRIPTOR: AgentDescriptor = …`, and the roster
-it must join is `agents::ALL_DESCRIPTORS` in this crate (`core`'s `ALL_AGENTS`
-is that same const, emitted with the `AgentType` enum, `ALL`, `as_str`,
-`FromStr` and `AgentType::descriptor` by the `agent_roster!` macro right above
-it). Add ONE row — `Variant => "id", module, ["alias", …];` — and nothing in
-`models.rs`, which only re-exports `AgentType`. Dispatch is that generated
-`match`, so a variant with no descriptor no longer compiles and `registry::get`
-has no Claude fallback left. Only the VARIANT is compiler-checked though: the
-id literal and the module path are free text, so a copy-pasted row builds fine
-and `registry_bijection.rs` is what catches it.
+Wiring steps: root AGENTS.md "Adding / Removing an Agent" — not repeated here.
+Crate-level detail only: the descriptor is
+`pub const DESCRIPTOR: AgentDescriptor = …`, and the roster it joins is
+`agents::ALL_DESCRIPTORS` in this crate (`core`'s `ALL_AGENTS` is that same
+const).
 
 ## ANTI-PATTERNS
 

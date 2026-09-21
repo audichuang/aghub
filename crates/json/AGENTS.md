@@ -26,8 +26,10 @@ Built on `jsonc-parser`'s CST API. The point of this crate over plain
 
 ## DEPENDENTS
 
-`aghub-inference` (SQLite/keyring-backed provider config). Keep the API minimal
-and general — this is a shared low-level helper, not inference-specific.
+`aghub-agents` (`format/json_{map,opencode,openclaw}.rs` — the MCP dialects,
+i.e. the comment-preserving case this crate exists for) and `aghub-inference`
+(`opencode/files.rs`). Keep the API minimal and general — this is a shared
+low-level helper, not specific to either.
 
 ## ANTI-PATTERNS
 

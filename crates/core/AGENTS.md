@@ -10,7 +10,10 @@ Role map (directory → purpose; for the file list `ls` the dir or ask
 codegraph — enumerated trees drift):
 
 - `lib.rs` — re-exports aghub-agents + `convert_skill()`
-- `adapter.rs` / `adapters/` — adapter dispatch (`AgentAdapter` trait, `create_adapter()`)
+- `adapters/mod.rs` — the `AgentAdapter` trait + `create_adapter()`;
+  `adapter.rs` — the `impl` for `&'static AgentDescriptor` plus the thread-local
+  test overrides (`set_skills_path_override` / `set_mcp_path_override`). Root
+  AGENTS.md calls this split the one that catches everybody
 - `all_agents.rs` — `load_all_agents()` → `AgentResources` bulk load
 - `availability.rs` — which agent CLIs are installed
 - `batch.rs` — multi-target mutation policy: preflight-before-any-write +
@@ -19,12 +22,16 @@ codegraph — enumerated trees drift):
   thin maps over it — extend it here, never per surface
 - `manager/` — `ConfigManager` CRUD, split per resource: `mod.rs` / `skill.rs` / `mcp.rs` / `sub_agent.rs`
 - `dto/` — CLI/API shared wire views (`removal.rs` `RemovalView`, `skill.rs` `SkillView`) — single source for both surfaces
-- `paths.rs` — project-root detection (agent-marker walk-up); `registry/` — `get()` + `ALL_AGENTS`, which is just `aghub_agents::agents::ALL_DESCRIPTORS`; add agents THERE
-- `skills/` — the skill subsystem (`ls` for the full list). Load-bearing:
-  `discovery.rs` (SKILL.md frontmatter walk), `linker/classify.rs`
-  (universal-master link decisions), `rename.rs` (the transactional skill
-  rename — rollback lives here, not in surfaces), `update.rs`
-  (`stage_and_swap_dir` + `RecoveryHint` rollback hints)
+- `paths.rs` — project-root detection (agent-marker walk-up) AND
+  `app_data_dir()`, the one app data root every surface delegates to; `registry/` — `get()` + `ALL_AGENTS`, which is just `aghub_agents::agents::ALL_DESCRIPTORS`; add agents THERE
+- `skills/` — the skill subsystem (`ls` for the full list). Load-bearing, and
+  the three biggest files are the ones the root AGENTS.md keeps pointing at:
+  `shape.rs` (`classify_shape` / `candidate_referrers` / `plan_repair`),
+  `removal.rs` (`read_effect_after` / `plan_removal`), `repair.rs`. Then
+  `discovery.rs` (SKILL.md frontmatter walk), `linker/classify.rs` (which
+  Referrer each agent needs), `lock.rs` (`EntryIdentity` + the `mutation_guard`
+  forward), `rename.rs` (the transactional skill rename — rollback lives here,
+  not in surfaces), `update.rs` (`stage_and_swap_dir` + `RecoveryHint`)
 - `transfer.rs` — batch install/copy/delete + `reconcile_{skill,mcp,sub_agent}` (`ensure_disjoint` rejects an agent in both add and remove)
 - `testing.rs` — `TestConfig` (feature = "testing")
 
@@ -38,7 +45,7 @@ codegraph — enumerated trees drift):
 
 **"Did that removal take anything away?"** is `removal::read_effect_after(read_dirs, name, deleting)` — re-run DISCOVERY over the read dirs, drop the doomed entries, and report `{survivors, changed}`. `changed` is the set of RESOLVED locations (leaf canonicalized too, unlike `entry_identity`) getting smaller, and it is what separates the two shapes survivors alone cannot: unlinking an npx-era Referrer beside the Master it points at resolves to the same location and takes nothing away (refuse), while deleting a private copy that shadows a Master really does shrink the set (allow, and disclose the Master in `skipped`). Reading survivors alone left NO verb able to drop a stale private copy. `--all-agents` reads the OTHER field — its promise is "gone everywhere", so any survivor blocks. Never re-derive any of it from a plan: `paths.is_empty() && shared_master_kept` was the old stand-in and missed in both directions (a Referrer has a real path to unlink, so the plan looked effective; a skill whose FOLDER name differs from its frontmatter `name` planned nothing with `shared_master_kept` false, so `--yes` reported `removed` with the files untouched). A `dir.join(sanitize_name(name))` existence probe is not a substitute either — it cannot see a grouped/renamed layout, and an empty same-named folder reads as a live skill and vetoes a legitimate removal. Its three readers in `remove_skill_planned` (the `shared_master_kept` fold, the executing refusal, and the `would_prune_lock_entries` gate) all read ONE `blocks` variable; `transfer`'s preflight reads the resulting `shared_master_kept` off the dry-run rather than re-asking, so it cannot green-light a row the commit refuses.
 
-**Mutation attribution**: a flow that may roll its own writes back takes what to undo from the mutating call's OWN receipt — the linker's `created_master` / `created_referrer_dirs`, the lock write's replaced entry — never from a pre-write observation, and never from `installed` (an agent whose slot was ALREADY correctly linked is `installed` without this call having created anything — `created_referrer_dirs` deliberately excludes `already_linked`, or a rollback removes a grant it did not make). Those receipts are trustworthy across aghub processes: every mutating flow (install / prune / rename / resync / manager add-remove-update / `transfer::reconcile_skill`, plus the API's by-path delete and import routes) holds the **interprocess mutation lock** (`skills::lock::mutation_guard`, implemented in `skill::lock::guard`) for its whole check → write → rollback span, so a `modify_*_lock` insert underneath is a genuine compare-and-set. Reentrant per thread, keyed on ONE identity per scope (its resolved lock-file path — used for the held-set, the ordering and the inversion check alike; ordering by anything else is a deadlock), a nested acquire in the wrong order is REFUSED rather than deadlocked, and the OS releases it if the holder dies. Acquisition NEVER degrades to unlocked — that once masked a total Windows failure. The 10s bound covers waits on FOREIGN processes only (one deadline for all scopes); queueing behind another thread of this process is unbounded on purpose, because bounding it turns ordinary queued work into spurious failures.
+**Mutation attribution**: a flow that may roll its own writes back takes what to undo from the mutating call's OWN receipt — the linker's `created_master` / `created_referrer_dirs`, the lock write's replaced entry — never from a pre-write observation, and never from `installed` (an agent whose slot was ALREADY correctly linked is `installed` without this call having created anything — `created_referrer_dirs` deliberately excludes `already_linked`, or a rollback removes a grant it did not make). Those receipts are trustworthy across aghub processes: every mutating flow (install / prune / rename / resync / repair / manager add-remove-update / `transfer::reconcile_skill`, plus the API's by-path delete and import routes) holds the **interprocess mutation lock** (`skills::lock::mutation_guard`, implemented in `skill::lock::guard`) for its whole check → write → rollback span, so a `modify_*_lock` insert underneath is a genuine compare-and-set. Reentrant per thread, keyed on ONE identity per scope (its resolved lock-file path — used for the held-set, the ordering and the inversion check alike; ordering by anything else is a deadlock), a nested acquire in the wrong order is REFUSED rather than deadlocked, and the OS releases it if the holder dies. Acquisition NEVER degrades to unlocked — that once masked a total Windows failure. The 10s bound covers waits on FOREIGN processes only (one deadline for all scopes); queueing behind another thread of this process is unbounded on purpose, because bounding it turns ordinary queued work into spurious failures.
 
 Take the guard **before the state read that decides the mutation**, not just before the write, and re-read under it: a target, plan or referrer sweep chosen outside the lock (including from a `ConfigManager` whose `load()` predates the guard) is a view another process may already have invalidated. Every guarded `ConfigManager` mutation therefore goes through `guard_and_reload` (`manager/skill.rs`), which takes the lock and re-reads config as ONE step — calling `mutation_guard` directly there is how the stale-view half gets forgotten. A dry-run takes neither. ONE exception, documented at its call site: `update_skill` takes the guard WITHOUT re-reading, because the re-read regressed universal-rename relinking on macOS only and the condition does not reproduce on Linux; its stale-view window is still open.
 
@@ -78,5 +85,4 @@ A "was this file re-created?" assertion must pin the inode with an OPEN handle: 
 - NEVER bypass `ConfigManager` for config mutations
 - NEVER skip `source_path` on Skill — required for provenance tracking
 - NEVER hand-build home paths — always use the `dirs` crate; `~` display formatting goes through `lib.rs` `format_path_with_tilde`
-- NEVER add to `registry/mod.rs` without first adding to `crates/agents`
 - NEVER clear `skills_path_override` for a global write without isolating `$HOME` (or using a project `tempdir`) and tearing down written skill dirs

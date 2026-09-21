@@ -31,8 +31,9 @@ and requires explicit opt-in for changes.
 - **Design specs**: `docs/specs/` — rationale, not current-state truth (code wins)
 - **`docs/plans/` + `docs/superpowers/`**: historical checkbox plans from a
   retired workflow. A same-named file is that spec's _plan_, not a rival copy —
-  except `docs/superpowers/specs/`, which holds the ONLY design docs for
-  remote-SSH and the api origin guard
+  except `docs/superpowers/specs/`, which holds the only design docs for the
+  remote-SSH **bring-up/VM-management** flow and the api origin guard (other
+  `remote-*` designs are in `docs/specs/`)
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) (Source hash, Master, Referrer, Relink, …)
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/)
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — port / skip from `AkaraChen/aghub`
@@ -46,7 +47,6 @@ and requires explicit opt-in for changes.
 ## Structure
 
 Module map (crate → why it exists). Authoritative member list: `Cargo.toml`.
-Each crate carries its own `AGENTS.md` with its rules.
 
 ```
 crates/
@@ -69,9 +69,9 @@ crates/
   markdown/      # YAML frontmatter helpers
 ```
 
-Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills — a
-real-directory layout that LAZY migration deliberately leaves alone, D7) and
-`justfile` (task runner). `repair` still moves a real directory there into the
+Also at the repo root: `.agents/skills/` (this repo's own hand-edited skills, a
+real-directory layout lazy migration leaves alone — it moves only the one skill
+it mutates) and `justfile` (task runner). `repair` still moves a real directory there into the
 store when git does NOT track it; a tracked one is refused, and the refusal
 prints the escape (`git rm -r --cached <path>`).
 
@@ -111,9 +111,6 @@ knowledge page `推論供應商與 app data root`.
 - **ConfigManager**: CRUD for resources. MCP delete (`remove_mcp_planned`)
   rewrites shared config and deletes **no** disk path — `RemovalPlan.paths` is
   deliberately empty.
-- **Security gate**: a fetched skill is audited before install
-  (`crates/skill-audit`); a **Critical** finding refuses the install, everything
-  below it installs with a warning.
 
 ## Agent-Specific Behavior
 
@@ -159,7 +156,8 @@ The two rules that span crates stay here:
   network and a `gh` login, so it is deliberately outside preflight. Run it
   after editing `crates/desktop/src/data/featured-skills.json` — the catalog
   points at other people's repos and rots on their schedule
-- Prefer file-scoped over the full suite: `cargo test -p aghub-core <name> -- --exact`
+- Prefer file-scoped over the full suite:
+  `cargo test -p aghub-core <full::module::path::name> -- --exact`
 - Desktop frontend commands run from `crates/desktop` via `bun run …`
 
 ## Definition of done
@@ -178,11 +176,10 @@ implementing and verifying.
 - **Bump a dependency in its OWN commit**, never inside a feature or fix commit.
   A bump reviewed as a bump gets the question that catches a breaking change
   ("what changed in the components we call?"); one buried under another title
-  does not, and the revert is no longer cheap. (`@heroui/react` 3.0.1 → 3.2.5
-  rode along in a `fix(skills)` commit and shipped every Checkbox and Switch in
-  the app broken.)
+  does not, and the revert is no longer cheap. It has cost this repo a release
+  once already.
 - **After editing `crates/desktop/src/data/featured-skills.json`**:
-  `just featured-check`.
+  `just featured-check` (see Commands).
 
 Return early only when an ask-first item below blocks you, or when the gate
 fails for a reason outside the requested change. A failure you caused is part of
@@ -234,9 +231,10 @@ knowledge page `技能連結形狀與 repair 鏈` — read it before touching an
 
 ## Adding / Removing an Agent
 
-One agent = one **descriptor** file plus seven registration spots. A step-2 row
-naming a module with no `pub mod`, and a missing step-6 row, fail the BUILD;
-step 7 fails nothing.
+One agent = one **descriptor** file plus six registration and contract spots. A
+step-2 row naming a module with no `pub mod`, and a missing step-6 row, fail the
+BUILD. A missing step-7 asset fails no build, lint or typecheck — only
+`just preflight`'s desktop unit tests catch it.
 
 1. `crates/agents/src/agents/<name>.rs` — descriptor (naming gotchas:
    `crates/agents/AGENTS.md`)
@@ -260,7 +258,9 @@ step 7 fails nothing.
    Lengths are derived from `AgentType::ALL.len()`, so a missing row is a COMPILE
    error and a row naming the WRONG agent is a runtime panic.
    `test_global_data_dirs` is the one table an agent may sit out, and only by
-   joining `OS_CONFIG_DIR_AGENTS`
+   joining `OS_CONFIG_DIR_AGENTS` **and getting its own arm after the loop** —
+   membership alone is a `panic!`, because an agent added to the exception list
+   and never asserted was how that table stopped checking anything
 7. `crates/desktop/src/assets/agent/<id>.svg` — `agent-icons.tsx` globs
    `../assets/agent/*.svg` and keys it by `${id}.svg`; a missing file silently
    falls back to a first-letter avatar. `crates/desktop/src/lib/agent-icons.test.ts`
@@ -301,10 +301,11 @@ worse than none. Assert observable OUTCOMES (values, on-disk / lock state), not 
 variant or `is_err()`; for a safety-critical flow exercise the FAILURE path
 (rollback AFTER the destructive step). PROVE it: revert the fix, watch the
 assertion go red, restore. **A malformed fixture is the sneakiest false green**:
-the lock read paths fail CLOSED for the commands that report lock contents, so a
+the commands that report lock contents probe the lock before answering, so a
 fixture missing a required field makes the command bail while READING and the
 assertion passes with the code under test never reached — copy a fixture shape
-from an existing test.
+from an existing test. Worked example:
+`docs/specs/2026-07-15-skill-rename-transaction-deepening.md`.
 
 ## Agent permissions / approval boundaries
 

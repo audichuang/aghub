@@ -2,14 +2,11 @@
 
 **Crate**: `skills-sh` — HTTP client for the skills.sh registry (search only).
 
-**Used by**: `aghub-api` market route only — **not** `aghub-core`.
+Thin reqwest wrapper: `Client` / `ClientBuilder` + search DTOs. Almost everything
+about it is visible from `src/` or enforced by the dependency graph; the one
+thing that is not:
 
-## ROLE
-
-Thin reqwest wrapper: `Client` / `ClientBuilder` + search DTOs. Override base URL
-with `ClientBuilder::api_url(...)` or `Client::from_env()` (`SKILLS_API_URL`).
-
-## ANTI-PATTERNS
-
-- NEVER call skills.sh HTTP directly from other crates — go through `Client`
-- NEVER hardcode the registry URL in callers — use env / builder for tests
+- The base URL is overridable for tests — `ClientBuilder::api_url(...)` or
+  `Client::from_env()` (`SKILLS_API_URL`). That variable is **process-wide** and
+  cargo runs tests as threads of one process, so two tests driving it must share
+  a lock (`ENV_LOCK` in `client.rs`), not just set and reset it.

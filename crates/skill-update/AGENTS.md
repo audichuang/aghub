@@ -68,10 +68,13 @@ each of those used to report `UpToDate` for a skill whose folder was gone.
 `/commits/<ref>` on github hosts — ONE request on the pooled client — else a git
 ref advertisement. NOT `RepoFetchBackend::resolve`, which the gix backend answers
 by performing the depth-1 fetch, i.e. exactly the cost the preflight exists to
-avoid. It runs for EVERY source group including the all-clear case, so its cost
-is the floor of a check: a `git ls-refs` handshake is cheap in bytes and ~0.6s in
-time against github.com, and that was most of a check's wall clock before REST
-took over the github path.
+avoid. It runs only for groups that COULD still skip (`preflight_can_skip`): a
+group with no `ref_commit`, with members recording different commits, or whose
+local copy has drifted can never skip whatever the remote answers, so it must not
+spend a request to be told so. That gate is a QUOTA decision as much as a speed
+one — the REST path spends anonymous GitHub's 60/hr. A `git ls-refs` handshake is
+cheap in bytes and ~0.6s against github.com, and that was most of a check's wall
+clock before REST took over the github path.
 
 ## GIT ADAPTER GOTCHAS
 

@@ -16,6 +16,7 @@ map the normalized model into each agent's config format.
 | Add/list providers, bindings | `store.rs`                                     |
 | API key get/set              | `credentials.rs`                               |
 | Provider delete teardown     | `cascade.rs` (shared by API + CLI; never fork) |
+| Provider-format abstraction  | `agent.rs` (`AgentProviderAdapter`)            |
 | Per-agent config write       | `<agent>/files.rs`                             |
 | Normalize ↔ agent schema     | `<agent>/mapping.rs` (Claude: `claude/mod.rs`) |
 | Schema migrations            | `migrations/*.sql` (sqlx)                      |
