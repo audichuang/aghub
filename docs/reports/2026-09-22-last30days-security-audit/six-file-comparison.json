@@ -1,0 +1,38 @@
+[
+	{
+		"file": "SKILL.md",
+		"installed_sha256": "8720df178dd2290775c20d1913a9e3ce4bcc3b6004ce2897bf08f6f3465d218b",
+		"upstream_sha256": "bdde67d5df7fd7f73dbfff4ee7f9fea919babedd5a5b17690e6d216fc1769bc6",
+		"identical": false
+	},
+	{
+		"file": "scripts/lib/prescriptions.py",
+		"installed_sha256": "cf2eeb69b184e0da006f5a1349f74aa8a4a9e4f764dc0aa81094ac9922e0917b",
+		"upstream_sha256": "bc06ccf16c33407de14d41d0d3983e0ac6b19aa5d1158862242d23e903bab883",
+		"identical": false
+	},
+	{
+		"file": "scripts/lib/grok_x.py",
+		"installed_sha256": "bcaf024a2896fd78881476fde9feb54e73893dd7fc768421f4b1f26f59c38b8b",
+		"upstream_sha256": "89e85cbb6de21fcf4f6f4515b974dbc78639e9b08118810926babab466549a7d",
+		"identical": false
+	},
+	{
+		"file": "scripts/lib/health.py",
+		"installed_sha256": "710a72039d0cf61015c14f72d4499a2b2fd724d53c560eca2b719289c96479ec",
+		"upstream_sha256": "166139e6412cfc3cfd649ae20e48144d0d8298f9b5c3a20bc2b5354fe478caa5",
+		"identical": false
+	},
+	{
+		"file": "scripts/lib/backends.py",
+		"installed_sha256": "0f02b64b85086670ef8137460502b09ac0f446553ba597b367619943c79d292c",
+		"upstream_sha256": "e0f5f7d0441adfea4a493a09e730fb47b2b0b58d44de17f4a4b64c46806e2eb2",
+		"identical": false
+	},
+	{
+		"file": "scripts/evaluate_search_quality.py",
+		"installed_sha256": "2b99b95551089ec9b5dec24c46989666a85225ecb9536dd6476034e92ee9b474",
+		"upstream_sha256": "2b99b95551089ec9b5dec24c46989666a85225ecb9536dd6476034e92ee9b474",
+		"identical": true
+	}
+]

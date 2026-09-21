@@ -1,0 +1,633 @@
+{
+	"observed_utc": "2026-09-21T20:37:47.220828+00:00",
+	"host": "ubuntu",
+	"api_version": "2.26.4",
+	"log_path": "/run/user/1000/aghub-api.41ddbf33-84cc-40fe-8a89-7474b394e2ec.log",
+	"log_sha256": "a6d5a2d15a9b61c0ea3cab9e17e79c079d44c17ba97379cdcdac483267beaf88",
+	"counts": {
+		"critical": 6,
+		"high": 15,
+		"low": 23,
+		"info": 43
+	},
+	"findings": [
+		{
+			"log_line": 822,
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical",
+			"file": "SKILL.md",
+			"rule_description": "downloads a remote payload and pipes it straight into a shell"
+		},
+		{
+			"log_line": 823,
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high",
+			"file": "SKILL.md",
+			"rule_description": "connects to or fetches from a hard-coded raw IP address"
+		},
+		{
+			"log_line": 824,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "SKILL.md",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 825,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "SKILL.md",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 826,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "SKILL.md",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 827,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/test_device_auth.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 828,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/test_device_auth.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 829,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/last30days.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 830,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/truthsocial.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 831,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/html_publish.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 832,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/reddit_rss.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 833,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "scripts/lib/render.py",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 834,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/render.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 835,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "scripts/lib/doctor.py",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 836,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/doctor.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 837,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/doctor.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 838,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/permission_preflight.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 839,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/instagram.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 840,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "scripts/lib/freshness.py",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 841,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "scripts/lib/youtube_yt.py",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 842,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/youtube_yt.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 843,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/youtube_yt.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 844,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/brightdata.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 845,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/ui.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 846,
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical",
+			"file": "scripts/lib/prescriptions.py",
+			"rule_description": "downloads a remote payload and pipes it straight into a shell"
+		},
+		{
+			"log_line": 847,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/prescriptions.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 848,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/prescriptions.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 849,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/vendor/bird-search/lib/twitter-client-base.js",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 850,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/digg.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 851,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/normalize.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 852,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/web_search_keyless.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 853,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/fusion.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 854,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/reddit_enrich.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 855,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/xiaohongshu_api.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 856,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/pipeline.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 857,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/bluesky.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 858,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/bluesky.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 859,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/setup_wizard.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 860,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/setup_wizard.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 861,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/polymarket.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 862,
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical",
+			"file": "scripts/lib/grok_x.py",
+			"rule_description": "downloads a remote payload and pipes it straight into a shell"
+		},
+		{
+			"log_line": 863,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/grok_x.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 864,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/grok_x.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 865,
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical",
+			"file": "scripts/lib/health.py",
+			"rule_description": "downloads a remote payload and pipes it straight into a shell"
+		},
+		{
+			"log_line": 866,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "scripts/lib/health.py",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 867,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/health.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 868,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/dripstack.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 869,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/hosted.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 870,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/providers.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 871,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/providers.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 872,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/bird_x.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 873,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/bird_x.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 874,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/reddit_public.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 875,
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high",
+			"file": "scripts/lib/chrome_cdp.py",
+			"rule_description": "connects to or fetches from a hard-coded raw IP address"
+		},
+		{
+			"log_line": 876,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/chrome_cdp.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 877,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/http.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 878,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/http.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 879,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/amazon.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 880,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/web_fetch_keyless.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 881,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/grounding.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 882,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/x_envelope.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 883,
+			"rule": "aghub_external_payload_instruction",
+			"severity": "high",
+			"file": "scripts/lib/github.py",
+			"rule_description": "doc instructs downloading and running an external binary/script"
+		},
+		{
+			"log_line": 884,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/github.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 885,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/xquik.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 886,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/quality_nudge.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 887,
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high",
+			"file": "scripts/lib/env.py",
+			"rule_description": "connects to or fetches from a hard-coded raw IP address"
+		},
+		{
+			"log_line": 888,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/env.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 889,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/jobs.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 890,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/transcribe.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 891,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/perplexity.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 892,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/xai_x.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 893,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/hackernews.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 894,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/parallel_mcp.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 895,
+			"rule": "aghub_download_pipe_execute",
+			"severity": "critical",
+			"file": "scripts/lib/backends.py",
+			"rule_description": "downloads a remote payload and pipes it straight into a shell"
+		},
+		{
+			"log_line": 896,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/lib/backends.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 897,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/backends.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 898,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/lib/stocktwits.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 899,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/watchlist.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 900,
+			"rule": "aghub_credential_file_exfil",
+			"severity": "critical",
+			"file": "scripts/evaluate_search_quality.py",
+			"rule_description": "reads a credential/.env/.ssh file and sends it over the network"
+		},
+		{
+			"log_line": 901,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/evaluate_search_quality.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 902,
+			"rule": "aghub_network_egress",
+			"severity": "info",
+			"file": "scripts/evaluate_search_quality.py",
+			"rule_description": "sends data to a network endpoint"
+		},
+		{
+			"log_line": 903,
+			"rule": "aghub_raw_ip_payload",
+			"severity": "high",
+			"file": "scripts/box_chrome_login.py",
+			"rule_description": "connects to or fetches from a hard-coded raw IP address"
+		},
+		{
+			"log_line": 904,
+			"rule": "aghub_reads_secret",
+			"severity": "low",
+			"file": "scripts/box_chrome_login.py",
+			"rule_description": "reads credential files or harvests secret environment variables"
+		},
+		{
+			"log_line": 905,
+			"rule": "prompt_injection_unicode_steganography",
+			"severity": "high",
+			"file": "assets/swimmom-mockup.jpeg",
+			"rule_description": "Detects hidden Unicode characters used for invisible prompt injection and steganography"
+		},
+		{
+			"log_line": 906,
+			"rule": "injection_hidden_comment",
+			"severity": "high",
+			"file": "scripts/lib/topic_shape.py",
+			"rule_description": "instruction hidden inside an HTML comment"
+		},
+		{
+			"log_line": 907,
+			"rule": "injection_hidden_comment",
+			"severity": "high",
+			"file": "scripts/lib/x_envelope.py",
+			"rule_description": "instruction hidden inside an HTML comment"
+		},
+		{
+			"log_line": 908,
+			"rule": "aghub_dataflow_chain",
+			"severity": "high",
+			"file": "SKILL.md",
+			"rule_description": "reads secrets in `SKILL.md` and sends to network in `SKILL.md` \u2014 possible exfiltration chain"
+		}
+	],
+	"installed_lock": {
+		"source": "mvanhorn/last30days-skill",
+		"ref": "main",
+		"skillPath": "skills/last30days/SKILL.md",
+		"contentHash": "a441a90ac2e64063bf3e0aa4ffa2d61de8c70aef36dc1c9a4e84533de6665c7d",
+		"refCommit": "56ba5ace27e4697aedc60aa0b1e1bfdcd592ff20",
+		"installedAt": "2026-07-16T20:15:15.843128357+00:00",
+		"updatedAt": "2026-09-05T01:42:21.470488423+00:00"
+	}
+}
