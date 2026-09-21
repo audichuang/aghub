@@ -3050,7 +3050,6 @@ fn cli_add_and_fetched_install_produce_identical_master_and_link() {
 		target_agents: &[AgentType::Claude],
 		expected_name: None,
 		target: LinkTarget::Relative,
-		force_unsafe: false,
 	};
 	install_fetched_skill_and_lock(req).unwrap();
 

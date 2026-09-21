@@ -1,5 +1,23 @@
 # Where the skill security audit gates, and how it is overridden
 
+> **Superseded 2026-09-22 — the gate and the `skill-audit` crate were removed
+> entirely.** Nothing audits fetched skill content now; `--force-unsafe` and
+> `ResyncError::Audit` are gone with it.
+>
+> Why, in one line: a byte-pattern rule set cannot separate an ordinary install
+> instruction from an attack. `curl … | sh` appears verbatim in vendors' own
+> documentation, an `os.environ.get("…API_KEY")` beside an `import urllib` was
+> enough for `Critical` with no request anywhere in the file, and a `Critical`
+> finding was wired straight through to a refusal — so the gate blocked real
+> updates that were not malicious. Meanwhile reading the same secret through a
+> variable alias dropped to `Suspicious` and installed. Widening the rules costs
+> more false refusals; narrowing them lets the equivalent attack through. That
+> trade is inherent to matching text, not a tuning problem.
+>
+> The decision below is kept for its reasoning and its rejected alternatives —
+> they are the argument against re-porting upstream's `1b510d77`, not a
+> description of current behaviour (`UPSTREAM.md`, ⏭️ Skipped).
+
 `skill-audit` runs on exactly two paths, both in `aghub-core`:
 `install_fetched_skill_and_lock` and `resync_installed_skill`, through the one
 entry point `skills::audit::guard_fetched_source`. A `Malicious` verdict is a

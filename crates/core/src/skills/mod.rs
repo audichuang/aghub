@@ -1,4 +1,3 @@
-pub mod audit;
 pub mod discovery;
 pub mod install_fetched;
 pub mod linker;

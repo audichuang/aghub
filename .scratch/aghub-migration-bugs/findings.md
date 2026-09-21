@@ -9,7 +9,11 @@
 
 ## B1 — `accept-rename` 沒有 `--force-unsafe`，被稽核擋住的技能永遠改不了名
 
-**Status:** open · 影響：中 · 證據等級：實測
+**Status:** moot (2026-09-22) · 影響：中 · 證據等級：實測
+
+> 整個稽核閘門與 `skill-audit` crate 已移除，`--force-unsafe` 隨之消失。沒有稽核
+> 會擋住 rename，也就沒有需要 override 的一端。下方保留原始觀察，因為它本身就是
+> 「Critical 直接等於拒絕」這個設計的代價之一。
 
 `--force-unsafe` 只在 `apply-update` 與 `source sync` 上（`add` 刻意沒有，ADR 0002）。
 但 `accept-rename` 也走同一條 `skill-update/src/mutation.rs` 的 source-mutation seam，

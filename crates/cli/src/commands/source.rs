@@ -331,7 +331,6 @@ pub fn execute(
 			skills,
 			universal,
 			yes,
-			force_unsafe,
 		} => sync(SyncArgs {
 			source,
 			git_ref: git_ref.as_deref(),
@@ -340,7 +339,6 @@ pub fn execute(
 			skills,
 			universal: *universal,
 			yes: *yes,
-			force_unsafe: *force_unsafe,
 			json,
 			scope,
 			agent,
@@ -683,7 +681,6 @@ struct SyncArgs<'a> {
 	skills: &'a [String],
 	universal: bool,
 	yes: bool,
-	force_unsafe: bool,
 	json: bool,
 	scope: &'a Scope,
 	agent: &'a str,
@@ -1017,7 +1014,6 @@ fn sync(args: SyncArgs) -> Result<()> {
 					project_root.as_deref(),
 					&target_agents,
 					&lock_source,
-					args.force_unsafe,
 				),
 				"update" => apply_update_row(
 					&fetched,
@@ -1025,7 +1021,6 @@ fn sync(args: SyncArgs) -> Result<()> {
 					scope,
 					project_root.as_deref(),
 					&pre_fetch_identities,
-					args.force_unsafe,
 				),
 				_ => unreachable!(),
 			})
@@ -1271,7 +1266,6 @@ fn apply_install(
 	project_root: Option<&Path>,
 	target_agents: &[AgentType],
 	lock_source: &skill::InstallLockSource,
-	force_unsafe: bool,
 ) -> SyncActionView {
 	use skill_update::mutation::{
 		install_fetched_source, FetchedInstallRequest, InstallMutationError,
@@ -1284,7 +1278,6 @@ fn apply_install(
 		scope,
 		project_root,
 		target_agents,
-		force_unsafe,
 	};
 
 	match install_fetched_source(fetched, req) {
@@ -1338,7 +1331,6 @@ fn apply_update_row(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
 	pre_fetch: &std::collections::BTreeMap<String, EntryIdentity>,
-	force_unsafe: bool,
 ) -> SyncActionView {
 	use skill_update::mutation::{resync_fetched_source, FetchedResyncRequest};
 
@@ -1374,7 +1366,6 @@ fn apply_update_row(
 			scope,
 			project_root,
 			expected,
-			force_unsafe,
 		},
 	) {
 		Ok(report) => SyncActionView {

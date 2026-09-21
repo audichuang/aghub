@@ -153,7 +153,6 @@ fn changed_source_fails_its_rows_without_fetching_anything() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&PanicFetcher,
 		&NoToken,
@@ -193,7 +192,6 @@ fn missing_fetched_skill_fails_only_its_own_row() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -242,7 +240,6 @@ fn unresolvable_entry_fails_only_its_own_row() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -290,7 +287,6 @@ fn one_groups_fetch_failure_leaves_the_other_group_updatable() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		// `main` is the SECOND group fetched, so a regression that fetched
 		// lazily per row would have swapped beta before this failure and the
@@ -339,7 +335,6 @@ fn repeated_name_is_attempted_once() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -368,7 +363,6 @@ fn stale_first_entry_does_not_prevent_later_runtime_attempts() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -422,7 +416,6 @@ fn repointed_entry_fails_without_costing_its_sibling() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&FixtureFetcher {
 			root: fetched,
@@ -474,7 +467,6 @@ fn a_locked_but_uninstalled_name_fails_before_any_fetch() {
 			names: &names,
 			scope: ResourceScope::ProjectOnly,
 			project_root: Some(&project),
-			force_unsafe: false,
 		},
 		&PanicFetcher,
 		&NoToken,

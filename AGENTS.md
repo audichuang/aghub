@@ -58,7 +58,6 @@ crates/
   desktop/       # Tauri v2 + React, embeds aghub-api on localhost;
                  #   src-tauri package name is `aghub` (−p aghub ≠ CLI)
   skill/         # .skill zip + npx-compatible locks + hashing
-  skill-audit/   # the install-time security gate: Critical verdict REFUSES
   skill-update/  # shared update-check + Sources domain + source-mutation seam (API + CLI)
   skills-sh/     # skills.sh registry client (search only)
   inference/     # providers: SQLite meta + keyring
