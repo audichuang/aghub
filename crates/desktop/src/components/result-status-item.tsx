@@ -30,7 +30,13 @@ export function ResultStatusItem({
 			)}
 			<div className="min-w-0">
 				<p className="text-sm font-medium">{displayName}</p>
-				<p className="text-xs text-muted">{error || statusText}</p>
+				<p
+					className="text-xs text-muted"
+					role={error ? "alert" : undefined}
+					aria-live={error ? "assertive" : undefined}
+				>
+					{error || statusText}
+				</p>
 			</div>
 		</div>
 	);

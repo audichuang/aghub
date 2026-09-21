@@ -340,6 +340,8 @@ export function ImportGithubSkillPanel({
 					setInstallError(
 						error instanceof Error ? error.message : String(error),
 					);
+					setCard3Open(false);
+					setCard2Open(true);
 					setPhase("selecting");
 				},
 			},
@@ -1301,9 +1303,9 @@ export function ImportGithubSkillPanel({
 												const hasError = results.some(
 													(r) => !r.success,
 												);
-												const errorMsg = results.find(
-													(r) => r.error,
-												)?.error;
+												const errors = results.filter(
+													(r) => !r.success,
+												);
 												return (
 													<div
 														key={skillName}
@@ -1326,10 +1328,24 @@ export function ImportGithubSkillPanel({
 																	)
 																	.join(", ")}
 															</p>
-															{errorMsg && (
-																<p className="text-xs text-danger">
-																	{errorMsg}
-																</p>
+															{errors.map(
+																(result) => (
+																	<p
+																		key={
+																			result.agent
+																		}
+																		className="text-xs text-danger"
+																	>
+																		{
+																			result.agent
+																		}
+																		:{" "}
+																		{result.error?.trim() ||
+																			t(
+																				"skillInstallFailed",
+																			)}
+																	</p>
+																),
 															)}
 														</div>
 													</div>
