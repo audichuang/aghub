@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 // No FE test runner is installed here; pure logic uses Node's runner, matching
 // the other desktop helper tests.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import { queryKeys } from "./keys.ts";
 

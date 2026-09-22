@@ -1,4 +1,3 @@
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {

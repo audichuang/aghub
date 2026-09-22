@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 // task forbids adding dependencies, so this pure-logic test uses Node's
 // built-in runner (`node --test --experimental-strip-types`). The antfu config
 // enforces vitest over node:test, which does not apply here.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import {
 	boundSourceTokenMap,

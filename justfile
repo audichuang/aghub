@@ -42,7 +42,7 @@ lint:
 
 # Pre-release gate: run everything the CI / release test gate runs, locally.
 # Run this BEFORE you push or tag. The pre-push hook only does
-# prettier/clippy/eslint/tsc — it does NOT run tests, so tests can still fail
+# prettier/clippy/oxlint/tsc — it does NOT run tests, so tests can still fail
 # in CI after a clean push. This closes that gap.
 #
 # IMPORTANT: this runs on YOUR platform only. It CANNOT reproduce

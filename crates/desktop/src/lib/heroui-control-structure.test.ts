@@ -3,7 +3,6 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 // No FE test runner (no vitest/jest) is installed here; this pure-logic test
 // uses Node's built-in runner, matching the other desktop helper tests.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 
 const SRC = join(import.meta.dirname, "..");

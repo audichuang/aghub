@@ -147,7 +147,7 @@ The two rules that span crates stay here:
 - `just preflight` = fmt + clippy + `bun install --frozen-lockfile` (root AND
   desktop) + desktop typecheck + **desktop frontend unit tests** + workspace
   tests + doc tests. It is the release gate; its `just --list` blurb is truncated
-- **preflight does NOT run prettier or eslint** — the pre-push hook does, and it
+- **preflight does NOT run prettier or oxlint** — the pre-push hook does, and it
   runs `bun run format:check` from the REPO ROOT (`prettier --check .`), so it
   covers `scripts/` and `docs/`. `crates/desktop`'s own `format:check` never
   sees root files
@@ -170,7 +170,7 @@ implementing and verifying.
   short name under `--exact` runs ZERO tests and exits 0 — check the test count.
 - **Before push or tag**: `just preflight` AND `bun run format:check` from the
   REPO ROOT. Neither alone is a pushable tree — preflight runs no
-  prettier/eslint, and the pre-push hook runs no tests.
+  prettier/oxlint, and the pre-push hook runs no tests.
 - **Before tagging a release**: tag `v*` only after green CI.
 - **Bump a dependency in its OWN commit**, never inside a feature or fix commit.
   A bump reviewed as a bump gets the question that catches a breaking change

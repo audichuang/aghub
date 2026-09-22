@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 // No FE test runner (no vitest/jest) is installed here; use Node's built-in
 // runner, same as the sibling tests.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import type { SkillUpdateResponse } from "../generated/dto";
 import type { LockSourceEntry } from "./skill-update-batches.ts";

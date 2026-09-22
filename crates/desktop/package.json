@@ -8,13 +8,13 @@
 		"preview": "vite preview",
 		"tauri": "tauri",
 		"start": "tauri dev",
-		"lint": "eslint --fix .",
-		"lint:check": "eslint .",
+		"lint": "oxlint --fix",
+		"lint:check": "oxlint",
 		"format": "prettier --write .",
 		"format:check": "prettier --check .",
 		"generate:dto": "cargo run --manifest-path ../api/Cargo.toml --bin export-dto",
 		"test": "node scripts/assert-tests-discovered.mjs && node --experimental-strip-types --test 'src/**/*.test.ts' 'src/**/*.test.tsx'",
-		"typecheck": "node ./node_modules/@typescript/native/bin/tsc -p tsconfig.json --noEmit"
+		"typecheck": "node ./node_modules/@typescript/native/bin/tsc -p tsconfig.json --noEmit && node ./node_modules/@typescript/native/bin/tsc -p tsconfig.node.json --noEmit --composite false --incremental false"
 	},
 	"dependencies": {
 		"@heroicons/react": "^2.2.0",
@@ -58,7 +58,6 @@
 		"wouter": "^3.11.0"
 	},
 	"devDependencies": {
-		"@antfu/eslint-config": "^8.3.0",
 		"@eslint-react/eslint-plugin": "^5.19.0",
 		"@tailwindcss/vite": "^4.3.3",
 		"@tauri-apps/cli": "^2.11.4",
@@ -67,15 +66,13 @@
 		"@types/react-dom": "^19.3.0",
 		"@typescript/native": "npm:typescript@^7.0.2",
 		"@vitejs/plugin-react": "^6.1.1",
-		"eslint": "^10.10.0",
 		"eslint-plugin-better-tailwindcss": "^4.7.0",
-		"eslint-plugin-react-hooks": "^7.1.1",
-		"eslint-plugin-react-refresh": "^0.5.6",
 		"knip": "^6.35.1",
 		"nano-staged": "^1.0.2",
+		"oxlint": "1.85.0",
+		"oxlint-tsgolint": "7.0.2002",
 		"prettier": "3.8.3",
 		"tailwindcss": "^4.3.3",
-		"typescript": "~6.0.3",
 		"vite": "^8.3.0"
 	},
 	"knip": {

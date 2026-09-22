@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 // No FE test runner (no vitest/jest) is installed here; this drives a REAL
 // QueryClient with Node's built-in runner, like cache-invalidation.test.ts.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import { queryKeys } from "./keys.ts";

@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 // This project uses Node's built-in test runner.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import { findSkillCollisions } from "./skill-collision.ts";
 

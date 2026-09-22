@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import {
 	asMarketSkill,
@@ -39,7 +38,11 @@ test("shipped featured catalog sources are install-shaped github/owner/repo", ()
 test("shipped featured catalog has no duplicate source|name (React key + double card)", () => {
 	const skills = parseFeaturedCatalog(loadShippedCatalog());
 	const keys = skills.map((skill) => `${skill.source}|${skill.name}`);
-	assert.equal(new Set(keys).size, keys.length, `duplicate in ${keys}`);
+	assert.equal(
+		new Set(keys).size,
+		keys.length,
+		`duplicate in ${keys.join(", ")}`,
+	);
 });
 
 test("isInstallShapedSource rejects tree URLs and incomplete sources", () => {

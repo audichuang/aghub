@@ -56,9 +56,9 @@ test-fe: ## 跑前端測試（node:test，src/**/*.test.ts）
 check: ## 前端 typecheck（tsc）
 	bun run --cwd $(DESKTOP) typecheck
 
-lint: ## clippy（-D warnings）+ eslint
+lint: ## clippy（-D warnings）+ oxlint（型別感知 + 型別檢查）
 	cargo clippy --workspace -- -D warnings
-	cd $(DESKTOP) && bunx eslint src --max-warnings=0
+	cd $(DESKTOP) && bun run lint:check -- --max-warnings 0
 
 fmt: ## 格式化（rustfmt + prettier）
 	cargo fmt --all

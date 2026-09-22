@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { existsSync, readFileSync } from "node:fs";
 // No FE test runner (no vitest/jest) is installed here; this pure-logic test
 // uses Node's built-in runner, matching the other desktop helper tests.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 
 /**

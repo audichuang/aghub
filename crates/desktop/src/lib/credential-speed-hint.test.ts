@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 // No FE test runner (vitest/jest) is installed; this pure-logic test uses
 // Node's built-in runner (`node --test --experimental-strip-types`), matching
 // git-token-forwarding.test.ts. The antfu rule preferring vitest doesn't apply.
-// eslint-disable-next-line test/no-import-node-test
 import { describe, it } from "node:test";
 import { claimCredentialSpeedHint } from "./credential-speed-hint.ts";
 

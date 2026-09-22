@@ -166,7 +166,7 @@ jobs:
             - name: Cargo clippy (warnings as errors, all targets)
               run: cargo clippy --workspace --all-targets -- -D warnings
 
-    # Frontend lint (ESLint, warnings as errors) + the frontend unit tests
+    # Frontend lint (oxlint: type-aware + type-check, warnings as errors) + the frontend unit tests
     lint-frontend:
         name: Frontend Lint
         needs: changes
@@ -192,7 +192,7 @@ jobs:
               run: bun install --frozen-lockfile
             - name: Install desktop deps (frozen)
               run: cd crates/desktop && bun install --frozen-lockfile
-            - name: ESLint check (warnings as errors)
+            - name: Oxlint check (warnings as errors)
               run: cd crates/desktop && bun run lint:check -- --max-warnings 0
             - name: Setup Node (node:test runner for src/lib unit tests)
               uses: actions/setup-node@v4

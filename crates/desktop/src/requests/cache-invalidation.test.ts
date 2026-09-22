@@ -3,7 +3,6 @@ import assert from "node:assert/strict";
 // built-in runner, matching the other desktop tests. They drive a REAL
 // QueryClient — the thing under test is which cached answers a mutation
 // invalidates, which is not observable from the mutation's return value.
-// eslint-disable-next-line test/no-import-node-test
 import { test } from "node:test";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 import type { ApiClient } from "./client.ts";
