@@ -260,6 +260,13 @@ A `RestFallback` that surfaces **after** a successful resolve (chiefly tree
 limitations (gix 0.84 cannot re-fetch a pinned commit by OID; the trigger cannot
 occur for a real single-skill repo).
 
+> **Superseded for `fetch`/`fetch_pinned` (2026-09-23).** Blob admission made the
+> "cannot occur" premise false: a 135-file skill is refused on every attempt by an
+> anonymous 60/hr budget. A post-resolve decline during a fetch now re-resolves
+> the same ref over gix and materializes only if the tip is the SAME commit;
+> otherwise it errors without staging (`SkillRepository::fetch_or_regix`).
+> `list` keeps the clean-error rule.
+
 ### Two distinct materializers — do NOT merge them
 
 There are **two** materialization steps with **deliberately different** semantics;

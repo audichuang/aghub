@@ -42,6 +42,15 @@ impl GitFetcher {
 		}
 	}
 
+	/// Wrap an already-built repository — the seam route tests use to run the
+	/// real fetch composite over injected backends.
+	#[doc(hidden)]
+	pub fn with_repository(repo: SkillRepository) -> Self {
+		Self {
+			repo: Arc::new(repo),
+		}
+	}
+
 	/// A [`RefResolver`] over THIS fetcher's repository, so the tip the preflight
 	/// reads is resolved by the same composite (and the same token context) that
 	/// a following fetch would use. Callers that want the preflight must build it

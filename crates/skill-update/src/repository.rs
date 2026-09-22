@@ -117,6 +117,35 @@ pub struct SkillRepository {
 	/// carries its own backend, which is what keeps two sources landing on one
 	/// commit from routing each other's operations.
 	memo: Mutex<HashMap<String, BackendKind>>,
+	/// `commit_oid` → the coordinates REST resolved it from. Lets a download
+	/// that REST refuses AFTER resolving (blob admission) be re-served by gix,
+	/// which can only fetch a ref tip — so the re-served tip must name this
+	/// same commit, or nothing is staged.
+	rest_origins:
+		Mutex<HashMap<String, (aghub_git::SourceRef, Option<Credentials>)>>,
+}
+
+/// A backend operation's outcome, keeping REST's "declined" apart from real
+/// failures so the fetch path can re-serve it over gix. Every other caller
+/// folds it back into [`SkillRepoError::Network`].
+enum Attempt {
+	RestDeclined(String),
+	Failed(SkillRepoError),
+}
+
+impl From<SkillRepoError> for Attempt {
+	fn from(error: SkillRepoError) -> Self {
+		Self::Failed(error)
+	}
+}
+
+impl From<Attempt> for SkillRepoError {
+	fn from(attempt: Attempt) -> Self {
+		match attempt {
+			Attempt::RestDeclined(reason) => Self::Network(reason),
+			Attempt::Failed(error) => error,
+		}
+	}
 }
 
 /// An immutable snapshot together with the backend slot that produced it.
@@ -186,6 +215,7 @@ impl SkillRepository {
 			rest,
 			gix,
 			memo: Mutex::new(HashMap::new()),
+			rest_origins: Mutex::new(HashMap::new()),
 		}
 	}
 
@@ -214,6 +244,11 @@ impl SkillRepository {
 						started.elapsed()
 					);
 					self.remember(&snap.commit_oid, BackendKind::Rest)?;
+					self.remember_rest_origin(
+						&snap.commit_oid,
+						&git_sr,
+						&auth,
+					)?;
 					return Ok(snap);
 				}
 				Err(GitError::RestFallback(_)) => {
@@ -278,6 +313,11 @@ impl SkillRepository {
 						started.elapsed()
 					);
 					self.remember(&snap.commit_oid, BackendKind::Rest)?;
+					self.remember_rest_origin(
+						&snap.commit_oid,
+						&git_sr,
+						&auth,
+					)?;
 					return Ok((
 						snap.commit_oid.clone(),
 						Some(PinnedSnapshot {
@@ -331,7 +371,7 @@ impl SkillRepository {
 		pinned: &PinnedSnapshot,
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
-		self.fetch_with_backend(&pinned.snapshot, pinned.backend, selection)
+		self.fetch_or_regix(&pinned.snapshot, pinned.backend, selection)
 	}
 
 	/// Shared fetch coordinate for [`Self::resolve`] / [`Self::resolve_tip`]:
@@ -458,7 +498,63 @@ impl SkillRepository {
 		selection: FetchSelection<'_>,
 	) -> Result<FetchedRepo, SkillRepoError> {
 		let backend = self.memo_for(&snapshot.commit_oid)?;
-		self.fetch_with_backend(snapshot, backend, selection)
+		self.fetch_or_regix(snapshot, backend, selection)
+	}
+
+	/// Fetch on `backend`; when REST declines a download it already resolved,
+	/// re-serve the SAME commit over gix instead of failing.
+	///
+	/// The spec made a post-resolve decline a clean error on the premise that
+	/// it "cannot occur for a real single-skill repo". Blob admission broke that
+	/// premise: a skill with more files than the remaining budget (135 files
+	/// against an anonymous 60/hr) was refused on every attempt. gix still
+	/// cannot fetch a commit by OID, so the commit equality below is what keeps
+	/// the caller on the snapshot it decided about.
+	fn fetch_or_regix(
+		&self,
+		snapshot: &RepoSnapshot,
+		backend: BackendKind,
+		selection: FetchSelection<'_>,
+	) -> Result<FetchedRepo, SkillRepoError> {
+		let reason = match self.fetch_with_backend(snapshot, backend, selection)
+		{
+			Ok(fetched) => return Ok(fetched),
+			Err(Attempt::RestDeclined(reason)) => reason,
+			Err(Attempt::Failed(error)) => return Err(error),
+		};
+		let origin = self
+			.rest_origins
+			.lock()
+			.map_err(|_| {
+				SkillRepoError::Network("rest origin lock poisoned".to_string())
+			})?
+			.get(&snapshot.commit_oid)
+			.cloned();
+		let Some((git_sr, auth)) = origin else {
+			return Err(SkillRepoError::Network(reason));
+		};
+		log::info!(
+			"skill repo fetch: rest declined after resolve ({reason}), \
+			 re-resolving over gix"
+		);
+		let started = Instant::now();
+		let tip = self
+			.gix
+			.resolve(&git_sr, auth.as_ref())
+			.map_err(map_git_error)?;
+		log::info!(
+			"skill repo resolve: backend=gix ref={:?} took={:?}",
+			git_sr.ref_,
+			started.elapsed()
+		);
+		if tip.commit_oid != snapshot.commit_oid {
+			return Err(SkillRepoError::Network(format!(
+				"source moved while fetching: resolved {} but the tip is now \
+				 {}; retry",
+				snapshot.commit_oid, tip.commit_oid
+			)));
+		}
+		Ok(self.fetch_with_backend(&tip, BackendKind::Gix, selection)?)
 	}
 
 	fn fetch_with_backend(
@@ -466,7 +562,7 @@ impl SkillRepository {
 		snapshot: &RepoSnapshot,
 		backend: BackendKind,
 		selection: FetchSelection<'_>,
-	) -> Result<FetchedRepo, SkillRepoError> {
+	) -> Result<FetchedRepo, Attempt> {
 		let path_owned: Vec<String> = match selection {
 			FetchSelection::Skills(paths) => {
 				paths.iter().map(|p| p.as_str().to_string()).collect()
@@ -523,6 +619,19 @@ impl SkillRepository {
 		Ok(())
 	}
 
+	fn remember_rest_origin(
+		&self,
+		commit_oid: &str,
+		git_sr: &aghub_git::SourceRef,
+		auth: &Option<Credentials>,
+	) -> Result<(), SkillRepoError> {
+		let mut origins = self.rest_origins.lock().map_err(|_| {
+			SkillRepoError::Network("rest origin lock poisoned".to_string())
+		})?;
+		origins.insert(commit_oid.to_string(), (git_sr.clone(), auth.clone()));
+		Ok(())
+	}
+
 	/// Run `operation` on `backend`. Callers reach this either through a
 	/// [`PinnedSnapshot`] claim (which names its own backend) or through
 	/// [`Self::memo_for`] — the memo is keyed by commit oid alone, so prefer a
@@ -536,11 +645,10 @@ impl SkillRepository {
 			&dyn RepoFetchBackend,
 			&RepoSnapshot,
 		) -> aghub_git::Result<T>,
-	) -> Result<T, SkillRepoError> {
+	) -> Result<T, Attempt> {
 		match backend {
-			BackendKind::Gix => {
-				operation(self.gix.as_ref(), snapshot).map_err(map_git_error)
-			}
+			BackendKind::Gix => Ok(operation(self.gix.as_ref(), snapshot)
+				.map_err(map_git_error)?),
 			BackendKind::Rest => {
 				let rest = self.rest.as_ref().ok_or_else(|| {
 					SkillRepoError::Network(
@@ -552,9 +660,9 @@ impl SkillRepository {
 				match operation(rest.as_ref(), snapshot) {
 					Ok(value) => Ok(value),
 					Err(GitError::RestFallback(msg)) => {
-						Err(SkillRepoError::Network(msg))
+						Err(Attempt::RestDeclined(msg))
 					}
-					Err(error) => Err(map_git_error(error)),
+					Err(error) => Err(map_git_error(error).into()),
 				}
 			}
 		}

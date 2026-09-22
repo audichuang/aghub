@@ -313,6 +313,7 @@ impl RepoFetchBackend for AlwaysFallbackRest {
 /// so a test can prove the fallback landed here exactly once.
 struct LocalDirBackend {
 	base: std::path::PathBuf,
+	commit_oid: String,
 	resolve_calls: AtomicUsize,
 	materialize_calls: AtomicUsize,
 }
@@ -320,8 +321,18 @@ impl LocalDirBackend {
 	fn new(base: &Path) -> Self {
 		Self {
 			base: base.to_path_buf(),
+			commit_oid: "9999999999999999999999999999999999999999".into(),
 			resolve_calls: AtomicUsize::new(0),
 			materialize_calls: AtomicUsize::new(0),
+		}
+	}
+
+	/// Serve a DIFFERENT tip than the REST slot pinned — the branch moved
+	/// between REST's resolve and the gix re-resolve.
+	fn with_commit(base: &Path, commit_oid: &str) -> Self {
+		Self {
+			commit_oid: commit_oid.into(),
+			..Self::new(base)
 		}
 	}
 }
@@ -346,7 +357,7 @@ impl RepoFetchBackend for LocalDirBackend {
 	) -> aghub_git::Result<RepoSnapshot> {
 		self.resolve_calls.fetch_add(1, Ordering::SeqCst);
 		Ok(RepoSnapshot {
-			commit_oid: "9999999999999999999999999999999999999999".into(),
+			commit_oid: self.commit_oid.clone(),
 			tree_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
 			commit_time: None,
 		})
@@ -584,6 +595,141 @@ fn post_resolve_rest_fallback_returns_clean_error_without_staging() {
 
 	assert!(matches!(error, SkillRepoError::Network(_)));
 	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 0);
+}
+
+/// A REST slot that resolves fine but then refuses the download — exactly
+/// what `GithubRest`'s blob admission does when a skill has more files than
+/// the remaining rate-limit budget (an anonymous 60/hr budget cannot pay for
+/// a 135-file skill no matter when the window resets).
+#[derive(Default)]
+struct AdmissionDeclinedRest {
+	materialize_calls: AtomicUsize,
+}
+
+impl RepoFetchBackend for AdmissionDeclinedRest {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		Ok(RepoSnapshot {
+			commit_oid: "9999999999999999999999999999999999999999".into(),
+			tree_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+			commit_time: None,
+		})
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Ok(RepoTree {
+			entries: Vec::new(),
+		})
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Ok(Vec::new())
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		_p: &[&str],
+		_d: &Path,
+	) -> aghub_git::Result<()> {
+		self.materialize_calls.fetch_add(1, Ordering::SeqCst);
+		Err(GitError::rest_fallback(
+			"blob admission needs 135 requests and 17266008 bytes, but only \
+			 28 requests remain",
+		))
+	}
+}
+
+fn music_fixture() -> tempfile::TempDir {
+	let fixture = tempfile::tempdir().unwrap();
+	let music = fixture.path().join("skills/music");
+	fs::create_dir_all(&music).unwrap();
+	fs::write(music.join("SKILL.md"), b"gix-served body\n").unwrap();
+	fixture
+}
+
+#[test]
+fn fetch_refused_by_rest_budget_after_resolve_is_served_by_gix_at_the_same_commit(
+) {
+	let fixture = music_fixture();
+	let rest = Arc::new(AdmissionDeclinedRest::default());
+	let gix = Arc::new(LocalDirBackend::new(fixture.path()));
+	let repo = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	let path = SkillPath::parse("skills/music").unwrap();
+	let fetched = repo
+		.fetch(&snap, FetchSelection::Skills(&[path]))
+		.expect("a budget refusal must not fail an update gix can serve");
+
+	assert_eq!(rest.materialize_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.resolve_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
+	assert_eq!(fetched.oid(), snap.commit_oid);
+	assert_eq!(
+		fs::read(fetched.root.join("skills/music/SKILL.md")).unwrap(),
+		b"gix-served body\n"
+	);
+}
+
+#[test]
+fn fetch_refused_by_rest_budget_errors_when_gix_sees_a_moved_tip() {
+	let fixture = music_fixture();
+	let rest = Arc::new(AdmissionDeclinedRest::default());
+	let gix = Arc::new(LocalDirBackend::with_commit(
+		fixture.path(),
+		"8888888888888888888888888888888888888888",
+	));
+	let repo = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	let path = SkillPath::parse("skills/music").unwrap();
+	let error = repo
+		.fetch(&snap, FetchSelection::Skills(&[path]))
+		.expect_err(
+			"a different tip is not the snapshot the caller decided on",
+		);
+
+	assert!(matches!(error, SkillRepoError::Network(_)));
+	assert_eq!(
+		gix.materialize_calls.load(Ordering::SeqCst),
+		0,
+		"nothing may be staged from a commit nobody resolved"
+	);
+}
+
+#[test]
+fn pinned_fetch_refused_by_rest_budget_is_served_by_gix_at_the_same_commit() {
+	let fixture = music_fixture();
+	let rest = Arc::new(AdmissionDeclinedRest::default());
+	let gix = Arc::new(LocalDirBackend::new(fixture.path()));
+	let repo = SkillRepository::with_backends(
+		Some(rest.clone() as Arc<dyn RepoFetchBackend>),
+		gix.clone() as Arc<dyn RepoFetchBackend>,
+	);
+
+	// The update check's route: a tip preflight pins the claim, the fetch
+	// its verdict triggers consumes it.
+	let (tip, pinned) = repo.resolve_tip(&github_source(), None).unwrap();
+	let pinned = pinned.expect("REST served the tip, so it pins a claim");
+	let path = SkillPath::parse("skills/music").unwrap();
+	let fetched = repo
+		.fetch_pinned(&pinned, FetchSelection::Skills(&[path]))
+		.expect("the check must not report a budget refusal as unreachable");
+
+	assert_eq!(fetched.oid(), tip);
+	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
+	assert!(fetched.root.join("skills/music/SKILL.md").exists());
 }
 
 /// ONE env lock for this whole test binary.

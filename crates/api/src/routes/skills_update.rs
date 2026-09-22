@@ -649,9 +649,24 @@ pub(crate) async fn apply_skill_update_inner(
 			fetcher,
 			resolver,
 		);
-		apply_locked_resync_outcome(name, &scope, outcome).map(Json)
+		apply_locked_resync_outcome(name, &scope, outcome)
+			.inspect(log_failed_row)
+			.map(Json)
 	})
 	.await
+}
+
+/// A failed row is still HTTP 200, so without this the log cannot tell a
+/// write from a refusal. The message is the redacted client text, safe to log.
+fn log_failed_row(row: &ApplySkillUpdateResponse) {
+	if !row.success {
+		log::warn!(
+			"apply-update failed: skill={} code={:?} error={:?}",
+			row.name,
+			row.code,
+			row.error
+		);
+	}
 }
 
 /// `POST /skills/apply-updates` — update several locked skills from Sources.
@@ -746,6 +761,7 @@ pub(crate) async fn apply_skill_updates_inner(
 					item.outcome,
 				)
 			})
+			.inspect(log_failed_row)
 			.collect();
 		Ok(Json(ApplySkillUpdatesResponse { results }))
 	})
@@ -1300,6 +1316,181 @@ mod tests {
 					"{name} lock must record the fetched commit"
 				);
 			}
+		});
+	}
+
+	/// The REST slot of the real fetch composite: resolves, then refuses the
+	/// download the way blob admission does when a skill has more files than
+	/// the remaining (anonymous) budget.
+	#[cfg(unix)]
+	struct BudgetRefusingRest;
+
+	#[cfg(unix)]
+	const BUDGET_COMMIT: &str = "1111111111111111111111111111111111111111";
+
+	#[cfg(unix)]
+	impl aghub_git::RepoFetchBackend for BudgetRefusingRest {
+		fn resolve(
+			&self,
+			_source: &aghub_git::SourceRef,
+			_auth: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			Ok(aghub_git::RepoSnapshot {
+				commit_oid: BUDGET_COMMIT.to_string(),
+				tree_oid: "budget-tree".to_string(),
+				commit_time: None,
+			})
+		}
+		fn read_tree(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			Ok(aghub_git::RepoTree {
+				entries: Vec::new(),
+			})
+		}
+		fn read_blobs(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			Ok(Vec::new())
+		}
+		fn materialize(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_p: &[&str],
+			_d: &Path,
+		) -> aghub_git::Result<()> {
+			Err(aghub_git::GitError::rest_fallback(
+				"blob admission needs 135 requests and 17266008 bytes, but \
+				 only 28 requests remain",
+			))
+		}
+	}
+
+	/// The gix slot: serves the same commit from a prebuilt tree.
+	#[cfg(unix)]
+	struct TreeServingGix {
+		root: PathBuf,
+	}
+
+	#[cfg(unix)]
+	impl aghub_git::RepoFetchBackend for TreeServingGix {
+		fn resolve(
+			&self,
+			_source: &aghub_git::SourceRef,
+			_auth: Option<&aghub_git::Credentials>,
+		) -> aghub_git::Result<aghub_git::RepoSnapshot> {
+			Ok(aghub_git::RepoSnapshot {
+				commit_oid: BUDGET_COMMIT.to_string(),
+				tree_oid: "budget-tree".to_string(),
+				commit_time: None,
+			})
+		}
+		fn read_tree(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+		) -> aghub_git::Result<aghub_git::RepoTree> {
+			Ok(aghub_git::RepoTree {
+				entries: Vec::new(),
+			})
+		}
+		fn read_blobs(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			_o: &[String],
+		) -> aghub_git::Result<Vec<aghub_git::Blob>> {
+			Ok(Vec::new())
+		}
+		fn materialize(
+			&self,
+			_s: &aghub_git::RepoSnapshot,
+			paths: &[&str],
+			dest: &Path,
+		) -> aghub_git::Result<()> {
+			for path in paths {
+				let target = dest.join(path);
+				std::fs::create_dir_all(&target).unwrap();
+				std::fs::copy(
+					self.root.join(path).join("SKILL.md"),
+					target.join("SKILL.md"),
+				)
+				.unwrap();
+			}
+			Ok(())
+		}
+	}
+
+	/// The incident: an anonymous REST budget cannot pay for a large skill, so
+	/// every "update all" returned 200 with this row failed and nothing
+	/// written. The same commit is reachable over git, so it must update.
+	#[cfg(unix)]
+	#[test]
+	fn apply_skill_updates_writes_a_skill_the_rest_budget_refused() {
+		with_isolated_state(|| {
+			let home = tempfile::tempdir().unwrap();
+			let old_home = std::env::var("HOME").ok();
+			std::env::set_var("HOME", home.path());
+			prepare_global_batch_names(home.path(), ["alpha"]);
+
+			let upstream = tempfile::tempdir().unwrap();
+			let directory = upstream.path().join("skills/alpha");
+			std::fs::create_dir_all(&directory).unwrap();
+			std::fs::write(
+				directory.join("SKILL.md"),
+				"---\nname: alpha\ndescription: new\n---\nnew\n",
+			)
+			.unwrap();
+			let fetcher = skill_update::GitFetcher::with_repository(
+				skill_update::SkillRepository::with_backends(
+					Some(Arc::new(BudgetRefusingRest)),
+					Arc::new(TreeServingGix {
+						root: upstream.path().to_path_buf(),
+					}),
+				),
+			);
+			let resolver = empty_keyring_resolver();
+			let result = rocket::tokio::runtime::Builder::new_current_thread()
+				.enable_all()
+				.build()
+				.unwrap()
+				.block_on(apply_skill_updates_inner(
+					ApplySkillUpdatesRequest {
+						source: "https://github.com/owner/repo".to_string(),
+						names: vec!["alpha".to_string()],
+						scope: "global".to_string(),
+						project_root: None,
+						confirm: Some(true),
+					},
+					&fetcher,
+					&resolver,
+				));
+
+			match old_home {
+				Some(value) => std::env::set_var("HOME", value),
+				None => std::env::remove_var("HOME"),
+			}
+
+			let response = match result {
+				Ok(json) => json.into_inner(),
+				Err(error) => {
+					panic!("batch apply should return Ok: {}", error.body.error)
+				}
+			};
+			let row = &response.results[0];
+			assert!(row.success, "row failed: {:?} {:?}", row.error, row.code);
+			let installed = std::fs::read_to_string(
+				home.path().join(".claude/skills/alpha/SKILL.md"),
+			)
+			.unwrap();
+			assert!(installed.contains("new"), "alpha was not updated");
+			assert_eq!(
+				skill::lock::global::read_skill_lock().skills["alpha"]
+					.ref_commit
+					.as_deref(),
+				Some(BUDGET_COMMIT)
+			);
 		});
 	}
 
