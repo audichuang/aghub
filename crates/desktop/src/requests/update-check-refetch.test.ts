@@ -2,9 +2,17 @@ import assert from "node:assert/strict";
 // No FE test runner (no vitest/jest) is installed here; this drives a REAL
 // QueryClient with Node's built-in runner, like cache-invalidation.test.ts.
 import { test } from "node:test";
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import {
+	MutationObserver,
+	QueryClient,
+	QueryObserver,
+} from "@tanstack/react-query";
+import type { ApiClient } from "./client.ts";
 import { queryKeys } from "./keys.ts";
-import { refetchUpdateChecksAfterWrites } from "./skills.ts";
+import {
+	applySkillUpdatesMutationOptions,
+	refetchUpdateChecksAfterWrites,
+} from "./skills.ts";
 
 function deferred() {
 	let resolve!: () => void;
@@ -80,5 +88,52 @@ test("with nothing in flight it runs exactly one check", async () => {
 		1,
 		"an every-source check is too expensive to double",
 	);
+	unsubscribe();
+});
+
+// The real call path of a single-source "update all": the batch mutation's
+// onSuccess ran, THEN applyAll's final refetch. If the batch still started its
+// own check, the final helper saw it in flight and paid for a second full
+// every-source check — each one spending anonymous REST budget, the very thing
+// this incident ran out of.
+test("one batch plus the final refetch runs exactly one check", async () => {
+	const client = new QueryClient({
+		defaultOptions: {
+			queries: { retry: false },
+			mutations: { retry: false },
+		},
+	});
+	let fetches = 0;
+	const observer = new QueryObserver(client, {
+		queryKey: [...queryKeys.skills.updateChecksAll(), "global"],
+		queryFn: async () => {
+			fetches += 1;
+			return fetches;
+		},
+		staleTime: Number.POSITIVE_INFINITY,
+	});
+	const unsubscribe = observer.subscribe(() => {});
+	await observer.refetch();
+	fetches = 0;
+
+	const api = {
+		skills: { applyUpdates: async () => ({ results: [] }) },
+	} as unknown as ApiClient;
+	const batch = new MutationObserver(
+		client,
+		applySkillUpdatesMutationOptions({ api, queryClient: client }),
+	);
+	await batch.mutate({
+		body: {
+			source: "https://github.com/o/r",
+			names: ["a"],
+			scope: "global",
+			projectRoot: null,
+			confirm: true,
+		},
+	});
+	await refetchUpdateChecksAfterWrites(client);
+
+	assert.equal(fetches, 1);
 	unsubscribe();
 });

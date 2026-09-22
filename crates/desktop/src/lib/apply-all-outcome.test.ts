@@ -96,6 +96,13 @@ test("a definite 4xx with no rows still counts as a failure", () => {
 	assert.equal(toast.description, "names must not exceed 256 per batch");
 });
 
+test("a row without an error message falls back to the localized text", () => {
+	const nameless = { ...row("last30days", "x"), error: null, success: false };
+	const toast = applyAllToast(outcome([nameless]), t);
+
+	assert.equal(toast.description, "last30days: unknownError()");
+});
+
 test("a clean run is a transient success", () => {
 	const toast = applyAllToast(outcome([row("a"), row("b")]), t);
 

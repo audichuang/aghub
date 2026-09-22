@@ -21,7 +21,7 @@ export function applyAllToast(
 	t: Translate,
 ): ApplyAllToast {
 	const lines = outcome.failures.map(
-		(failure) => `${failure.name}: ${failure.error ?? "unknown error"}`,
+		(failure) => `${failure.name}: ${failure.error ?? t("unknownError")}`,
 	);
 	if (outcome.failureDescription) lines.push(outcome.failureDescription);
 	const description = lines.length > 0 ? lines.join("\n") : undefined;

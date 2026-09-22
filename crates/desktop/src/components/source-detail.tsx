@@ -643,7 +643,10 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 		if (!outcome) return;
 		const view = applyAllToast(outcome, t);
 		toast[view.kind](view.title, {
-			description: view.description,
+			// One failure per line: the helper joins rows with "\n".
+			description: view.description && (
+				<span className="whitespace-pre-line">{view.description}</span>
+			),
 			...(view.persistent ? { timeout: 0 } : {}),
 		});
 	};

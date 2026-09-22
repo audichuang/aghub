@@ -655,7 +655,9 @@ export function applySkillUpdatesMutationOptions({
 			applySkillUpdatesRequest(api, forwardForSource, variables),
 		onSuccess: async (data) => {
 			await invalidateSkillQueries(queryClient);
-			refetchUpdateChecks(queryClient);
+			// No per-batch update check: `applyAll` runs ONE after its last
+			// batch (`refetchUpdateChecksAfterWrites`). A check started here
+			// would be in flight then and cost a second every-source check.
 			refetchSkillBodies(queryClient);
 			await onSuccess?.(data);
 		},
