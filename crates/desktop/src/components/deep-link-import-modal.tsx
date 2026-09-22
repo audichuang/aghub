@@ -188,11 +188,11 @@ export function DeepLinkImportModal({
 		},
 		onSuccess: () => {
 			if (intent?.kind === "skill-market-install") {
-				queryClient.invalidateQueries({
+				void queryClient.invalidateQueries({
 					queryKey: queryKeys.skills.all(),
 				});
 			} else {
-				queryClient.invalidateQueries({
+				void queryClient.invalidateQueries({
 					queryKey: queryKeys.mcps.all(),
 				});
 			}

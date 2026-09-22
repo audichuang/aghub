@@ -88,8 +88,8 @@ export function AgentAvailabilityProvider({
 	const isLoading = isLoadingAgents || isLoadingAvailability;
 
 	const refetch = () => {
-		refetchAgents();
-		refetchAvailability();
+		void refetchAgents();
+		void refetchAvailability();
 	};
 
 	if (isLoading) {

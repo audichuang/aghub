@@ -63,6 +63,7 @@ export function remoteErrorMessage(error: unknown): string {
 			try {
 				return JSON.stringify(error);
 			} catch {
+				// oxlint-disable-next-line typescript/no-base-to-string -- last resort once JSON.stringify threw (a cycle); "[object Object]" beats throwing inside an error path
 				return String(error);
 			}
 	}

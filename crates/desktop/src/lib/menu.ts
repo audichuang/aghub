@@ -16,7 +16,7 @@ export async function setupAppMenu(t: TFunction) {
 			id: "about",
 			text: t("menu.about"),
 			action: () => {
-				emit("navigate", "/settings?tab=application");
+				void emit("navigate", "/settings?tab=application");
 			},
 		});
 
@@ -25,7 +25,7 @@ export async function setupAppMenu(t: TFunction) {
 			text: t("menu.settings"),
 			accelerator: "CmdOrControl+,",
 			action: () => {
-				emit("navigate", "/settings");
+				void emit("navigate", "/settings");
 			},
 		});
 
@@ -97,7 +97,7 @@ export async function setupAppMenu(t: TFunction) {
 			text: t("menu.search"),
 			accelerator: "CmdOrControl+F",
 			action: () => {
-				emit("window-search-requested");
+				void emit("window-search-requested");
 			},
 		});
 

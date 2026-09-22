@@ -86,7 +86,7 @@ function App() {
 	}, []);
 
 	useEffect(() => {
-		setupAppMenu(t);
+		void setupAppMenu(t);
 	}, [t, i18n.language]);
 
 	useEffect(() => {
@@ -102,7 +102,7 @@ function App() {
 			setLocation(event.payload);
 		});
 		return () => {
-			unlisten.then((fn) => fn());
+			void unlisten.then((fn) => fn());
 		};
 	}, [setLocation]);
 

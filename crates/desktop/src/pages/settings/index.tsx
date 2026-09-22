@@ -19,7 +19,7 @@ export default function SettingsPage() {
 				<Tabs
 					selectedKey={selectedTab}
 					onSelectionChange={(key) => {
-						setSelectedTab(key as string);
+						void setSelectedTab(key as string);
 					}}
 				>
 					<div className="mb-2 flex items-center justify-between">

@@ -124,7 +124,7 @@ export default function MCPServersPage() {
 		setSelectedKeys(keys);
 
 		if (clickedKey && !isMultiSelectMode) {
-			setSelectedKey(clickedKey);
+			void setSelectedKey(clickedKey);
 			setPanel({
 				type: "detail",
 				selectedKey: clickedKey,
@@ -141,13 +141,13 @@ export default function MCPServersPage() {
 
 	const handleCreate = () => {
 		setSelectedKeys(new Set());
-		setSelectedKey(null);
+		void setSelectedKey(null);
 		setPanel({ type: "create" });
 	};
 
 	const handleImport = () => {
 		setSelectedKeys(new Set());
-		setSelectedKey(null);
+		void setSelectedKey(null);
 		setPanel({ type: "import" });
 	};
 
@@ -161,7 +161,7 @@ export default function MCPServersPage() {
 			// so the detail panel resolves it correctly once fresh data
 			// arrives instead of staying on whatever was selected before.
 			setSelectedKeys(new Set());
-			setSelectedKey(createdMergeKey);
+			void setSelectedKey(createdMergeKey);
 			setPanel({ type: "detail", selectedKey: createdMergeKey });
 			return;
 		}
@@ -169,7 +169,7 @@ export default function MCPServersPage() {
 	};
 
 	const handleEditDone = (mergeKey: string) => {
-		setSelectedKey(mergeKey);
+		void setSelectedKey(mergeKey);
 		setPanel({ type: "detail", selectedKey: mergeKey });
 	};
 
@@ -405,7 +405,7 @@ export default function MCPServersPage() {
 					}))}
 					onSuccess={() => {
 						handleSelectionChange(new Set());
-						refetch();
+						void refetch();
 					}}
 					resourceType="mcp"
 				/>

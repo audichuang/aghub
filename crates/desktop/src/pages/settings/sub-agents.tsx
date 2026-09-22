@@ -112,7 +112,7 @@ export default function SubAgentsPage() {
 	const [searchQuery, setSearchQuery] = useState("");
 	const [panel, setPanel] = useState<PanelState>({ type: "empty" });
 
-	const { data: subAgents = [] } = useSuspenseQuery({
+	const { data: subAgents } = useSuspenseQuery({
 		...subAgentListQueryOptions({ api, scope: "global" }),
 	});
 

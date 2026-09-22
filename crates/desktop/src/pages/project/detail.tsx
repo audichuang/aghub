@@ -198,22 +198,22 @@ export default function ProjectDetailPage() {
 		}
 
 		const key = keys.size === 1 ? [...keys][0] : null;
-		setSelectedResource(key);
-		setResourceType(key ? type : "");
+		void setSelectedResource(key);
+		void setResourceType(key ? type : "");
 		setPanelMode(null);
 	};
 
 	const handleSubAgentSelectionChange = (key: string) => {
-		setSelectedResource(key);
-		setResourceType("sub-agent");
+		void setSelectedResource(key);
+		void setResourceType("sub-agent");
 		setSelectedMcpKeys(new Set());
 		setSelectedSkillKeys(new Set());
 		setPanelMode(null);
 	};
 
 	const handleEditMcpDone = (mergeKey: string) => {
-		setSelectedResource(mergeKey);
-		setResourceType("mcp");
+		void setSelectedResource(mergeKey);
+		void setResourceType("mcp");
 		setPanelMode(null);
 	};
 
@@ -247,9 +247,9 @@ export default function ProjectDetailPage() {
 	}, [groupedMcps, groupedSkills, selectedMcpKeys, selectedSkillKeys]);
 
 	const handleRefresh = () => {
-		refetchMcps();
-		refetchSkills();
-		refetchSubAgents();
+		void refetchMcps();
+		void refetchSkills();
+		void refetchSubAgents();
 	};
 
 	const isRefreshing =
@@ -285,8 +285,8 @@ export default function ProjectDetailPage() {
 			);
 			return;
 		}
-		setSelectedResource(null);
-		setResourceType("");
+		void setSelectedResource(null);
+		void setResourceType("");
 	};
 
 	if (!project) {
@@ -464,8 +464,8 @@ export default function ProjectDetailPage() {
 						onSuccess={() => {
 							setSelectedMcpKeys(new Set());
 							setSelectedSkillKeys(new Set());
-							setSelectedResource(null);
-							setResourceType("");
+							void setSelectedResource(null);
+							void setResourceType("");
 							setIsMultiSelectMode(false);
 						}}
 						resourceType="mixed"

@@ -135,7 +135,7 @@ export default function SkillsSearchPage() {
 			);
 			const remaining = searchResults.length - visibleCount;
 			if (remaining < FETCH_SIZE && hasNextPage && !isFetchingNextPage) {
-				fetchNextPage();
+				void fetchNextPage();
 			}
 		}
 	}, [
@@ -162,7 +162,7 @@ export default function SkillsSearchPage() {
 						size="compact"
 						initialQuery={submittedQuery}
 						onSearch={(query) => {
-							setUrlQuery(query);
+							void setUrlQuery(query);
 							setVisibleCount(BATCH_SIZE);
 						}}
 						showSearchButton={true}

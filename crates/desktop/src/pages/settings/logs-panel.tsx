@@ -150,7 +150,7 @@ export default function LogsPanel() {
 		},
 		onSuccess: (path) => {
 			if (!path) return;
-			revealItemInDir(path);
+			void revealItemInDir(path);
 			toast.success(t("exportLogsSuccess"), {
 				description: path,
 			});
@@ -166,8 +166,8 @@ export default function LogsPanel() {
 		mutationFn: () => invoke<number>("clear_log_files"),
 		onSuccess: (count) => {
 			setShowClearDialog(false);
-			queryClient.invalidateQueries({ queryKey: ["log-stats"] });
-			queryClient.invalidateQueries({ queryKey: ["log-entries"] });
+			void queryClient.invalidateQueries({ queryKey: ["log-stats"] });
+			void queryClient.invalidateQueries({ queryKey: ["log-entries"] });
 			toast.success(t("logsClearedSuccess", { count: String(count) }));
 		},
 		onError: (error) => {
@@ -192,8 +192,8 @@ export default function LogsPanel() {
 			currentConfig.max_archives !== savedConfig.max_archives);
 
 	const handleRefresh = useCallback(() => {
-		statsQuery.refetch();
-		entriesQuery.refetch();
+		void statsQuery.refetch();
+		void entriesQuery.refetch();
 	}, [statsQuery, entriesQuery]);
 
 	return (
@@ -241,7 +241,7 @@ export default function LogsPanel() {
 									size="sm"
 									onPress={() => {
 										if (logDirPath)
-											revealItemInDir(logDirPath);
+											void revealItemInDir(logDirPath);
 									}}
 								>
 									<FolderOpenIcon className="size-4" />

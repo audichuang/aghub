@@ -53,10 +53,12 @@ const CJK_RE =
 /** Estimate tokens for a string, bucketing CJK separately from everything else. */
 export function estimateTokens(text: string): number {
 	let cjk = 0;
+	let codePoints = 0;
 	for (const char of text) {
+		codePoints += 1;
 		if (CJK_RE.test(char)) cjk += 1;
 	}
-	const latin = [...text].length - cjk;
+	const latin = codePoints - cjk;
 	return Math.ceil(cjk / CHARS_PER_TOKEN_CJK + latin / CHARS_PER_TOKEN_LATIN);
 }
 

@@ -61,7 +61,7 @@ export function WindowControls() {
 				setIsTauri(false);
 			}
 		};
-		setup();
+		void setup();
 
 		return () => {
 			if (unlisten) unlisten();

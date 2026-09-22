@@ -55,7 +55,7 @@ export default function ApplicationPanel() {
 			return enabled;
 		},
 		onSuccess: (enabled) => {
-			queryClient.invalidateQueries({
+			void queryClient.invalidateQueries({
 				queryKey: ["windows-autostart"],
 			});
 			toast.success(

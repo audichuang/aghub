@@ -1190,7 +1190,7 @@ export function ImportGithubSkillPanel({
 												isCoverageLoading
 											}
 											onPress={() => {
-												handleSubmit((values) => {
+												void handleSubmit((values) => {
 													handleInstall(
 														values.selectedAgents,
 													);

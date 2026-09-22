@@ -1716,7 +1716,7 @@ function ProviderForm({
 																if (
 																	selectedPreset?.homepage
 																) {
-																	openUrl(
+																	void openUrl(
 																		selectedPreset.homepage,
 																	);
 																}
