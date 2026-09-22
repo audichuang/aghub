@@ -22,6 +22,7 @@ import type { SourceSkillDiff } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
 import { useApi } from "../hooks/use-api";
 import { useApplyAllSkillUpdates } from "../hooks/use-apply-all-skill-updates";
+import { applyAllToast } from "../lib/apply-all-outcome";
 import { useGitForwarding } from "../hooks/use-git-forwarding";
 import {
 	groupAgentsBySlot,
@@ -640,40 +641,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 			},
 		]);
 		if (!outcome) return;
-		if (outcome.unconfirmed) {
-			// Chunks the server already answered are confirmed; only what came
-			// after the failure is unknown.
-			toast.danger(
-				outcome.updated > 0
-					? t("sourceUpdatePartialUnconfirmed", {
-							count: outcome.updated,
-						})
-					: t("sourceUpdateUnconfirmed"),
-				{ description: outcome.failureDescription },
-			);
-			return;
-		}
-		const failureCount =
-			outcome.failures.length + outcome.definiteFailureCount;
-		if (failureCount > 0) {
-			// Per-row reasons are the only actionable part — a repointed
-			// source or a skill missing upstream needs a different response
-			// from the user than a network failure. Same as the per-row
-			// button, which already surfaces `result.error`.
-			toast.danger(
-				failureCount === 1
-					? t("sourceUpdateSomeFailedOne", { count: 1 })
-					: t("sourceUpdateSomeFailedMany", { count: failureCount }),
-				{
-					description:
-						outcome.failures[0]?.error ??
-						outcome.failureDescription ??
-						undefined,
-				},
-			);
-			return;
-		}
-		toast.success(t("sourceUpdatesApplied", { count: outcome.updated }));
+		const view = applyAllToast(outcome, t);
+		toast[view.kind](view.title, {
+			description: view.description,
+			...(view.persistent ? { timeout: 0 } : {}),
+		});
 	};
 
 	const deleteAllRemovedSkills = async (skills: SourceSkillDiff[]) => {

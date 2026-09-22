@@ -225,6 +225,23 @@ function refetchUpdateChecks(queryClient: QueryClient) {
 	);
 }
 
+/// After a multi-batch "update all": the per-batch refetches all JOIN whichever
+/// check was already running (`cancelRefetch: false`), and that check may have
+/// read the lock before the later batches wrote — leaving the badge on a
+/// pre-write answer for the whole staleTime. So join the in-flight one, then
+/// run one that provably started after every write. Nothing in flight means
+/// one check, never two: each re-fetches every source over the network.
+export async function refetchUpdateChecksAfterWrites(queryClient: QueryClient) {
+	const filters = {
+		queryKey: queryKeys.skills.updateChecksAll(),
+		type: "active" as const,
+	};
+	if (queryClient.isFetching(filters) > 0) {
+		await queryClient.refetchQueries(filters, { cancelRefetch: false });
+	}
+	await queryClient.refetchQueries(filters, { cancelRefetch: false });
+}
+
 /// A flow that REWRITES a skill's files (apply-update, sync) leaves the open
 /// detail panel showing pre-update text: the skill path is unchanged, so the
 /// content/tree keys are unchanged, and `invalidateSkillQueries` only marks

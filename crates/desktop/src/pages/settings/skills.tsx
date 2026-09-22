@@ -46,6 +46,7 @@ import type { SourceRow } from "../../components/source-detail";
 import type { SkillResponse, SkillUpdateResponse } from "../../generated/dto";
 import { useApi } from "../../hooks/use-api";
 import { useApplyAllSkillUpdates } from "../../hooks/use-apply-all-skill-updates";
+import { applyAllToast } from "../../lib/apply-all-outcome";
 import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
@@ -251,41 +252,12 @@ export default function SkillsPage() {
 	const handleUpdateAll = async () => {
 		const outcome = await applyAll(pendingUpdates.batches);
 		if (!outcome) return;
-		if (outcome.unconfirmed) {
-			// Rows an earlier source already returned are confirmed outcomes;
-			// only what came after the failure is unknown. Reporting the whole
-			// run as unconfirmed would understate what actually happened.
-			toast.danger(
-				outcome.updated > 0
-					? t("sourceUpdatePartialUnconfirmed", {
-							count: outcome.updated,
-						})
-					: t("sourceUpdateUnconfirmed"),
-				{ description: outcome.failureDescription },
-			);
-			return;
-		}
-		const failureCount =
-			outcome.failures.length + outcome.definiteFailureCount;
-		if (failureCount > 0) {
-			// Per-row reasons are the only actionable part — a repointed
-			// source needs a different response from a network failure.
-			toast.danger(
-				failureCount === 1
-					? t("sourceUpdateSomeFailedOne", { count: 1 })
-					: t("sourceUpdateSomeFailedMany", { count: failureCount }),
-				{
-					description:
-						outcome.failures[0]?.error ??
-						outcome.failureDescription ??
-						undefined,
-				},
-			);
-		} else {
-			toast.success(
-				t("sourceUpdatesApplied", { count: outcome.updated }),
-			);
-		}
+		const view = applyAllToast(outcome, t);
+		toast[view.kind](view.title, {
+			description: view.description,
+			...(view.persistent ? { timeout: 0 } : {}),
+		});
+		if (outcome.unconfirmed) return;
 		// Both are reported AFTER the batch result: they are things this run
 		// deliberately did not touch, not failures of what it did.
 		if (pendingUpdates.renamed.length > 0) {

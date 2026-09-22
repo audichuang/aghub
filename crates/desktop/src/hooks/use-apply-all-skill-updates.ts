@@ -9,6 +9,7 @@ import { queryKeys } from "../requests/keys";
 import {
 	applySkillUpdatesMutationOptions,
 	invalidateSkillQueries,
+	refetchUpdateChecksAfterWrites,
 } from "../requests/skills";
 
 /**
@@ -106,7 +107,10 @@ export function useApplyAllSkillUpdates() {
 				);
 			}
 			const failures = results.filter((result) => !result.success);
-			await queryClient.invalidateQueries({
+			// Not awaited, like the error path below: the sources prefix covers
+			// the network-heavy diff, and awaiting it held the buttons disabled
+			// until that refetch finished.
+			void queryClient.invalidateQueries({
 				queryKey: queryKeys.skills.sources.all(),
 			});
 			return {
@@ -151,6 +155,8 @@ export function useApplyAllSkillUpdates() {
 				failureDescription: failure.description,
 			};
 		} finally {
+			// Fire-and-forget: a slow source must not hold the buttons.
+			void refetchUpdateChecksAfterWrites(queryClient);
 			setIsApplying(false);
 		}
 	};
