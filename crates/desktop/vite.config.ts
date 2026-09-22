@@ -46,11 +46,12 @@ function vendorChunk(id: string) {
 // https://vite.dev/config/
 export default defineConfig(async () => ({
 	plugins: [
-		react({
-			babel: {
-				plugins: [["babel-plugin-react-compiler", { target: "19" }]],
-			},
-		}),
+		// React Compiler is NOT enabled: plugin-react v6 dropped the `babel`
+		// option, so the old config was silently ignored since that bump.
+		// Re-enabling (`compiler: true` or `@rolldown/plugin-babel` +
+		// `reactCompilerPreset`) changes runtime memoization app-wide — do it as
+		// its own change with UI verification.
+		react(),
 		tailwindcss(),
 	],
 
