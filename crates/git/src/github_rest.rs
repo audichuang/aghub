@@ -7,9 +7,10 @@
 //! and record the exact request set. Any transient / unsupported / not-GitHub
 //! condition surfaces as [`GitError::RestFallback`]. The CALLER decides by
 //! timing: a `RestFallback` at **resolve** re-routes to the gix fallback; one
-//! that surfaces **after** a successful resolve (chiefly a `truncated` tree) is
-//! turned into a clean error by `SkillRepository`, not re-routed (gix 0.84
-//! cannot re-fetch a pinned commit by OID). A security-validation failure is a
+//! that surfaces **after** a successful resolve (a `truncated` tree, blob
+//! admission) is a clean error from `SkillRepository::list`, while its `fetch`
+//! re-resolves over gix and materializes only if the tip is the SAME commit
+//! (gix 0.84 cannot fetch a commit by OID). A security-validation failure is a
 //! hard error and is never reported as a fallback.
 
 use std::collections::{HashMap, HashSet};

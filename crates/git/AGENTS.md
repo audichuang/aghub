@@ -24,10 +24,12 @@ fetch backends (`RepoFetchBackend`: gix shallow / GitHub REST).
   separately.** `GithubRest` yields to `GixShallow` on any non-2xx **at resolve**
   — a rate-limited anonymous request included — so a token-less dev machine
   routinely exercises gix while a user with a token exercises REST. **Timing is
-  the whole rule**: a `RestFallback` raised AFTER a successful resolve (chiefly a
-  `truncated` tree) becomes a clean error, never a re-route, because gix cannot
-  re-fetch a pinned commit by OID; and `resolve_tip` falls back to ls-refs, not
-  to `GixShallow::resolve`. A
+  the whole rule**: a `RestFallback` raised AFTER a successful resolve (a
+  `truncated` tree, or blob admission refusing a skill bigger than the remaining
+  budget) is a clean error from `SkillRepository::list`, but `fetch` /
+  `fetch_pinned` re-resolve the same ref over gix and materialize ONLY if the tip
+  is the same commit (gix cannot fetch a commit by OID, so the equality is the
+  pin); and `resolve_tip` falls back to ls-refs, not to `GixShallow::resolve`. A
   fetch/caching change verified on one path says NOTHING about the other.
   Assert on request COUNT through the `HttpTransport` seam, never on
   wall-clock: a timing only measures whichever path that machine happened

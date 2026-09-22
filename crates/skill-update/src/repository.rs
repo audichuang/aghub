@@ -411,14 +411,16 @@ impl SkillRepository {
 		snapshot: &RepoSnapshot,
 	) -> Result<SkillCatalog, SkillRepoError> {
 		let backend = self.memo_for(&snapshot.commit_oid)?;
-		self.list_with_backend(snapshot, backend)
+		// A decline here stays a clean error (`From<Attempt>`); only the fetch
+		// path re-serves it over gix.
+		Ok(self.list_with_backend(snapshot, backend)?)
 	}
 
 	fn list_with_backend(
 		&self,
 		snapshot: &RepoSnapshot,
 		backend: BackendKind,
-	) -> Result<SkillCatalog, SkillRepoError> {
+	) -> Result<SkillCatalog, Attempt> {
 		let started = Instant::now();
 		let (tree, blobs) =
 			self.run_on(backend, snapshot, |backend, snapshot| {
@@ -501,8 +503,9 @@ impl SkillRepository {
 		self.fetch_or_regix(snapshot, backend, selection)
 	}
 
-	/// Fetch on `backend`; when REST declines a download it already resolved,
-	/// re-serve the SAME commit over gix instead of failing.
+	/// Fetch on `backend`; when REST declines a snapshot it already resolved —
+	/// listing the catalog or downloading the selection — re-serve the SAME
+	/// commit over gix instead of failing. Public `list` keeps the clean error.
 	///
 	/// The spec made a post-resolve decline a clean error on the premise that
 	/// it "cannot occur for a real single-skill repo". Blob admission broke that
@@ -554,7 +557,11 @@ impl SkillRepository {
 				snapshot.commit_oid, tip.commit_oid
 			)));
 		}
-		Ok(self.fetch_with_backend(&tip, BackendKind::Gix, selection)?)
+		let mut fetched =
+			self.fetch_with_backend(&tip, BackendKind::Gix, selection)?;
+		// Same commit, so same content — but only REST knew its time.
+		fetched.snapshot = snapshot.clone();
+		Ok(fetched)
 	}
 
 	fn fetch_with_backend(

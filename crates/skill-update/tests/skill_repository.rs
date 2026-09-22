@@ -25,7 +25,7 @@ use std::time::{Duration, Instant};
 use aghub_git::{
 	Blob, Credentials, GitError, GithubRest, GixShallow, HttpRequest,
 	HttpResponse, HttpTransport, RepoFetchBackend, RepoSnapshot, RepoTree,
-	ReqwestTransport, SourceRef as GitSourceRef,
+	ReqwestTransport, SourceRef as GitSourceRef, StagedEntryMode, TreeEntry,
 };
 use skill::SkillPath;
 use skill_update::{
@@ -730,6 +730,136 @@ fn pinned_fetch_refused_by_rest_budget_is_served_by_gix_at_the_same_commit() {
 	assert_eq!(fetched.oid(), tip);
 	assert_eq!(gix.materialize_calls.load(Ordering::SeqCst), 1);
 	assert!(fetched.root.join("skills/music/SKILL.md").exists());
+}
+
+const REST_COMMIT_TIME: &str = "2026-09-18T21:22:31-07:00";
+
+/// A REST slot that resolves (with the commit time only REST knows) and then
+/// declines to LIST the tree — a truncated tree, or a catalog with more
+/// SKILL.md blobs than the remaining budget.
+struct ListDeclinedRest;
+
+impl RepoFetchBackend for ListDeclinedRest {
+	fn resolve(
+		&self,
+		_source: &GitSourceRef,
+		_auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		Ok(RepoSnapshot {
+			commit_oid: "9999999999999999999999999999999999999999".into(),
+			tree_oid: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+			commit_time: Some(REST_COMMIT_TIME.into()),
+		})
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Err(GitError::rest_fallback("blob admission needs 30 requests"))
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Err(GitError::rest_fallback("blob admission needs 30 requests"))
+	}
+	fn materialize(
+		&self,
+		_s: &RepoSnapshot,
+		_p: &[&str],
+		_d: &Path,
+	) -> aghub_git::Result<()> {
+		unreachable!(
+			"a catalog REST could not list is never materialized over REST"
+		)
+	}
+}
+
+/// A gix slot that can list: one skill, `skills/music`.
+struct CatalogGix {
+	inner: LocalDirBackend,
+}
+
+const MUSIC_SKILL_MD: &[u8] = b"---\nname: music\ndescription: d\n---\nbody\n";
+
+impl RepoFetchBackend for CatalogGix {
+	fn resolve(
+		&self,
+		source: &GitSourceRef,
+		auth: Option<&Credentials>,
+	) -> aghub_git::Result<RepoSnapshot> {
+		self.inner.resolve(source, auth)
+	}
+	fn read_tree(&self, _s: &RepoSnapshot) -> aghub_git::Result<RepoTree> {
+		Ok(RepoTree {
+			entries: vec![TreeEntry {
+				path: "skills/music/SKILL.md".into(),
+				mode: StagedEntryMode::Regular,
+				oid: "b100000000000000000000000000000000000001".into(),
+				size: Some(MUSIC_SKILL_MD.len() as u64),
+			}],
+		})
+	}
+	fn read_blobs(
+		&self,
+		_s: &RepoSnapshot,
+		_o: &[String],
+	) -> aghub_git::Result<Vec<Blob>> {
+		Ok(vec![Blob {
+			oid: "b100000000000000000000000000000000000001".into(),
+			bytes: MUSIC_SKILL_MD.to_vec(),
+		}])
+	}
+	fn materialize(
+		&self,
+		s: &RepoSnapshot,
+		paths: &[&str],
+		dest: &Path,
+	) -> aghub_git::Result<()> {
+		let known: Vec<&str> = paths
+			.iter()
+			.copied()
+			.filter(|p| *p == "skills/music")
+			.collect();
+		self.inner.materialize(s, &known, dest)
+	}
+}
+
+#[test]
+fn catalog_fetch_refused_by_rest_while_listing_is_served_by_gix() {
+	let fixture = tempfile::tempdir().unwrap();
+	let music = fixture.path().join("skills/music");
+	fs::create_dir_all(&music).unwrap();
+	fs::write(music.join("SKILL.md"), MUSIC_SKILL_MD).unwrap();
+	let repo = SkillRepository::with_backends(
+		Some(Arc::new(ListDeclinedRest)),
+		Arc::new(CatalogGix {
+			inner: LocalDirBackend::new(fixture.path()),
+		}),
+	);
+
+	// Source sync / diff / rename take this route; apply-update takes the
+	// Skills route. Both must survive the same refusal.
+	let snap = repo.resolve(&github_source(), None).unwrap();
+	let fetched = repo
+		.fetch(&snap, FetchSelection::CatalogSnapshot)
+		.expect("a listing REST declined must be re-served over gix");
+
+	assert!(fetched.root.join("skills/music/SKILL.md").exists());
+	assert_eq!(
+		fetched.upstream_commit_time().as_deref(),
+		Some(REST_COMMIT_TIME),
+		"gix never knows the commit time; the re-serve must keep REST's"
+	);
+}
+
+#[test]
+fn public_list_refused_by_rest_stays_a_clean_error() {
+	let repo = SkillRepository::with_backends(
+		Some(Arc::new(ListDeclinedRest)),
+		Arc::new(NeverBackend),
+	);
+	let snap = repo.resolve(&github_source(), None).unwrap();
+
+	assert!(matches!(repo.list(&snap), Err(SkillRepoError::Network(_))));
 }
 
 /// ONE env lock for this whole test binary.
