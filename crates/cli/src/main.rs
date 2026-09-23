@@ -375,10 +375,24 @@ enum Commands {
 		/// Skills only — see [`SkillResource`].
 		#[arg(value_enum)]
 		resource: SkillResource,
-		name: String,
+		/// The skill to update. Omit it and pass --outdated to update every
+		/// skill `check --online` reports as update-available.
+		#[arg(
+			required_unless_present = "outdated",
+			conflicts_with = "outdated"
+		)]
+		name: Option<String>,
+
+		/// Update EVERY skill in the selected scope that `check --online`
+		/// reports as update-available, across all sources. Without --yes it
+		/// only lists them. Renamed skills are skipped (use `source
+		/// accept-rename`). One scope per run: `-g` (default) or `-p`.
+		#[arg(long)]
+		outdated: bool,
 
 		/// Actually overwrite installed skill files. Without it apply-update
-		/// refuses outright — it has no preview mode.
+		/// refuses outright for a single name, and only previews with
+		/// --outdated.
 		#[arg(short = 'y', long = "yes")]
 		yes: bool,
 	},
@@ -872,10 +886,20 @@ fn run(cli: Cli) -> Result<()> {
 	if let Commands::ApplyUpdate {
 		resource,
 		name,
+		outdated: _,
 		yes,
 	} = &cli.command
 	{
 		let resolved = resolve_cli_scope(&cli)?;
+		// clap guarantees exactly one of NAME / --outdated.
+		let Some(name) = name else {
+			return commands::apply_update::execute_outdated(
+				resolved.resource_scope(),
+				resolved.project_root(),
+				*yes,
+				cli.json,
+			);
+		};
 		return commands::apply_update::execute(
 			(*resource).into(),
 			name.clone(),

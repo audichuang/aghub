@@ -1,7 +1,9 @@
+use crate::commands::check::{self, SkillUpdateView, StatusView};
 use crate::ResourceType;
 use aghub_core::models::ResourceScope;
 use anyhow::{anyhow, bail, Result};
 use serde_json::json;
+use skill_update::mutation::LockedSkillsResyncError;
 use std::path::Path;
 
 pub fn execute(
@@ -56,6 +58,183 @@ pub fn execute(
 	}
 	println!("hash: {updated_hash}");
 	Ok(())
+}
+
+/// What `apply-update --outdated` would do, picked from the SAME views
+/// `check --online` prints: every update-available row is a target, every
+/// renamed row is reported and left alone (a rename is `source
+/// accept-rename`'s transaction, not an in-place resync).
+#[derive(Debug, Default, PartialEq)]
+struct OutdatedPlan {
+	names: Vec<String>,
+	renamed: Vec<(String, String)>,
+}
+
+fn outdated_plan(views: &[SkillUpdateView]) -> OutdatedPlan {
+	let mut plan = OutdatedPlan::default();
+	for view in views {
+		match &view.status {
+			StatusView::UpdateAvailable { .. } => {
+				plan.names.push(view.name.clone())
+			}
+			StatusView::Renamed { new_name } => {
+				plan.renamed.push((view.name.clone(), new_name.clone()))
+			}
+			StatusView::UpToDate | StatusView::Uncheckable { .. } => {}
+		}
+	}
+	plan
+}
+
+/// `apply-update skills --outdated`: the CLI's "update all" — check every
+/// locked skill in ONE scope online, then resync the outdated ones through the
+/// same batch seam the desktop's update-all uses. Without `--yes` it previews.
+pub fn execute_outdated(
+	scope: ResourceScope,
+	project_root: Option<&Path>,
+	yes: bool,
+	json: bool,
+) -> Result<()> {
+	let want_global = match scope {
+		ResourceScope::GlobalOnly => true,
+		ResourceScope::ProjectOnly => false,
+		// The scope table rejects --all before dispatch.
+		ResourceScope::Both => {
+			bail!("apply-update requires --global or --project, not --all")
+		}
+	};
+	let locks = crate::commands::read_locks_checked(
+		want_global,
+		if want_global { None } else { project_root },
+	)?;
+	let views = check::collect_update_views(locks, project_root, true)?;
+	let plan = outdated_plan(&views);
+	let renamed_json: Vec<_> = plan
+		.renamed
+		.iter()
+		.map(|(name, new_name)| json!({ "name": name, "newName": new_name }))
+		.collect();
+
+	if !yes || plan.names.is_empty() {
+		if json {
+			println!(
+				"{}",
+				serde_json::to_string_pretty(&json!({
+					"dryRun": !yes,
+					"scope": scope_name(scope),
+					"skills": plan.names,
+					"renamed": renamed_json,
+					"results": [],
+				}))?
+			);
+			return Ok(());
+		}
+		if plan.names.is_empty() {
+			println!("Nothing to update ({} scope).", scope_name(scope));
+		} else {
+			println!(
+				"{} skill(s) can be updated ({} scope; pass --yes to apply — \
+				 this OVERWRITES local edits to them):",
+				plan.names.len(),
+				scope_name(scope)
+			);
+			for name in &plan.names {
+				println!("  would update: {name}");
+			}
+		}
+		print_renamed_note(&plan.renamed);
+		return Ok(());
+	}
+
+	let outcomes = skill_update::mutation::resync_locked_skills(
+		skill_update::mutation::LockedSkillsResyncRequest {
+			// The names come from this run's own lock read, so there is no
+			// independent Sources row to assert against.
+			source_group: None,
+			names: &plan.names,
+			scope,
+			project_root,
+		},
+		&skill_update::GitFetcher::new(),
+		&crate::commands::source::EnvTokenResolver,
+	)
+	.map_err(|error| match error {
+		LockedSkillsResyncError::EmptyRequest => {
+			anyhow!("no skills to update")
+		}
+		LockedSkillsResyncError::Preflight(error) => {
+			locked_resync_error("", error)
+		}
+	})?;
+
+	let rows: Vec<(String, Result<String, String>)> = outcomes
+		.into_iter()
+		.map(|row| {
+			let result = row.outcome.map(|report| report.updated_hash).map_err(
+				|error| locked_resync_error(&row.name, error).to_string(),
+			);
+			(row.name, result)
+		})
+		.collect();
+	let failed = rows.iter().filter(|(_, r)| r.is_err()).count();
+
+	if json {
+		let results: Vec<_> = rows
+			.iter()
+			.map(|(name, result)| match result {
+				Ok(hash) => json!({
+					"name": name,
+					"success": true,
+					"updatedHash": hash,
+					"error": null,
+				}),
+				Err(error) => json!({
+					"name": name,
+					"success": false,
+					"updatedHash": null,
+					"error": error,
+				}),
+			})
+			.collect();
+		println!(
+			"{}",
+			serde_json::to_string_pretty(&json!({
+				"dryRun": false,
+				"scope": scope_name(scope),
+				"skills": plan.names,
+				"renamed": renamed_json,
+				"results": results,
+			}))?
+		);
+	} else {
+		for (name, result) in &rows {
+			match result {
+				Ok(_) => println!("updated: {name}"),
+				Err(error) => println!("failed: {name} — {error}"),
+			}
+		}
+		println!(
+			"{} updated, {failed} failed ({} scope)",
+			rows.len() - failed,
+			scope_name(scope)
+		);
+		print_renamed_note(&plan.renamed);
+	}
+
+	if failed > 0 {
+		crate::note_answer_on_stdout();
+		bail!("{failed} skill update(s) failed (see the results above)");
+	}
+	Ok(())
+}
+
+fn print_renamed_note(renamed: &[(String, String)]) {
+	for (name, new_name) in renamed {
+		println!(
+			"skipped: {name} was renamed upstream to '{new_name}' — run \
+			 `aghub-cli source accept-rename {name} {new_name}`"
+		);
+	}
 }
 
 fn locked_resync_error(
@@ -258,6 +437,52 @@ mod tests {
 		let entry = &lock.skills["legacy"];
 		assert_eq!(entry.computed_hash, "content-v2");
 		assert_eq!(entry.ref_commit.as_deref(), Some("deadbeefcafef00d"));
+	}
+
+	#[test]
+	fn outdated_plan_targets_update_available_and_reports_renamed() {
+		let view = |name: &str, status: StatusView| SkillUpdateView {
+			name: name.to_string(),
+			scope: "global".to_string(),
+			checked: true,
+			status,
+		};
+		let views = [
+			view(
+				"stale",
+				StatusView::UpdateAvailable {
+					current: "a".to_string(),
+					available: "b".to_string(),
+				},
+			),
+			view("fresh", StatusView::UpToDate),
+			view(
+				"moved",
+				StatusView::Renamed {
+					new_name: "moved-v2".to_string(),
+				},
+			),
+			view(
+				"offline",
+				StatusView::Uncheckable {
+					reason: "network".to_string(),
+				},
+			),
+			view(
+				"stale-too",
+				StatusView::UpdateAvailable {
+					current: "c".to_string(),
+					available: "d".to_string(),
+				},
+			),
+		];
+		assert_eq!(
+			outdated_plan(&views),
+			OutdatedPlan {
+				names: vec!["stale".to_string(), "stale-too".to_string()],
+				renamed: vec![("moved".to_string(), "moved-v2".to_string())],
+			}
+		);
 	}
 
 	// Pin the PRODUCTION variant→message mapping used by `execute`. A

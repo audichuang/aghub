@@ -1695,6 +1695,64 @@ fn apply_update_without_yes_or_dry_run_refuses() {
 	);
 }
 
+/// `apply-update` takes exactly one of NAME / `--outdated`.
+#[test]
+fn apply_update_needs_exactly_one_of_name_or_outdated() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	for (args, named) in [
+		(&["-g", "apply-update", "skills"][..], "<NAME>"),
+		(
+			&["-g", "apply-update", "skills", "mytool", "--outdated"][..],
+			"--outdated",
+		),
+	] {
+		let out = isolated_cli(home.path(), state.path())
+			.args(args)
+			.output()
+			.unwrap();
+		let stderr = String::from_utf8_lossy(&out.stderr);
+		assert_eq!(out.status.code(), Some(2), "{args:?}: {stderr}");
+		assert!(stderr.contains(named), "{args:?}: {stderr}");
+	}
+}
+
+/// `--outdated` only updates what the online check calls update-available: an
+/// entry nothing could fetch (a `file://` source is `local`, answered without
+/// the network) is not a target, so even `--yes` writes nothing and exits 0.
+#[cfg(unix)]
+#[test]
+fn apply_update_outdated_skips_uncheckable_and_leaves_lock_alone() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	write_claude_skill(home.path(), "mytool");
+	let lock = seed_unresolvable_global_lock(state.path(), "mytool");
+	let before = std::fs::read(&lock).unwrap();
+
+	let preview = isolated_cli(home.path(), state.path())
+		.args(["-g", "--json", "apply-update", "skills", "--outdated"])
+		.output()
+		.unwrap();
+	assert!(
+		preview.status.success(),
+		"{}",
+		String::from_utf8_lossy(&preview.stderr)
+	);
+	let v: Value = serde_json::from_slice(&preview.stdout).unwrap();
+	assert_eq!(v["dryRun"], true, "{v}");
+	assert_eq!(v["scope"], "global", "{v}");
+	assert_eq!(v["skills"], serde_json::json!([]), "{v}");
+
+	let applied = isolated_cli(home.path(), state.path())
+		.args(["-g", "apply-update", "skills", "--outdated", "--yes"])
+		.output()
+		.unwrap();
+	let stdout = String::from_utf8_lossy(&applied.stdout);
+	assert!(applied.status.success(), "{stdout}");
+	assert!(stdout.contains("Nothing to update"), "{stdout}");
+	assert_eq!(std::fs::read(&lock).unwrap(), before);
+}
+
 // ==================== Task 3.2-3.5: `source` subcommand ====================
 
 #[test]

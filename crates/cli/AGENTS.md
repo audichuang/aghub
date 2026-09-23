@@ -15,8 +15,12 @@ list, or `all`), `-g`/`-p`, `--all`.
 
 - **Destructive defaults**: `delete`, `apply-update`, `prune-lock`,
   `source sync`, `source accept-rename`, reconcile-with-removals → **dry-run
-  unless `--yes`**. `apply-update` refuses outright instead of previewing, and
-  rejects `--all` from the scope table, i.e. BEFORE the `--yes` refusal
+  unless `--yes`**. `apply-update <name>` refuses outright instead of previewing, and
+  rejects `--all` from the scope table, i.e. BEFORE the `--yes` refusal.
+  `apply-update --outdated` (the CLI's "update all") DOES preview: it runs the
+  online check for ONE scope and resyncs every `updateAvailable` row through
+  `resync_locked_skills` (`source_group: None`, all Sources in one batch);
+  renamed rows are skipped with an `accept-rename` hint
 - **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
   `partial` | `kept` (`success: true` but THE ENTITY IS STILL THERE; the API
   adds an api-only `failed`). Read `outcome`, never `dry_run`/`executed` —

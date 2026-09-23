@@ -40,7 +40,7 @@ use tabled::settings::Style;
 #[serde(tag = "status", rename_all = "camelCase")]
 // Mirrors `aghub-api`'s `SkillUpdateStatusResponse`. The offline path only ever
 // emits `Uncheckable`; `--online` emits all three.
-enum StatusView {
+pub(crate) enum StatusView {
 	UpToDate,
 	UpdateAvailable {
 		current: String,
@@ -59,9 +59,9 @@ enum StatusView {
 /// `aghub-api`'s `SkillUpdateResponse`.
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct SkillUpdateView {
-	name: String,
-	scope: String,
+pub(crate) struct SkillUpdateView {
+	pub(crate) name: String,
+	pub(crate) scope: String,
 	/// Did this row involve a real upstream lookup?
 	///
 	/// `false` for every row of the OFFLINE default, where `reason: "network"`
@@ -69,9 +69,9 @@ struct SkillUpdateView {
 	/// make. The human renderer said so in a trailing note; the JSON branch
 	/// returns before that note is even computed, so a stored or forwarded
 	/// payload read as "the network failed" when nothing was attempted.
-	checked: bool,
+	pub(crate) checked: bool,
 	#[serde(flatten)]
-	status: StatusView,
+	pub(crate) status: StatusView,
 }
 
 /// Render the update statuses as a table, or the exact `SkillUpdateView` array
@@ -124,7 +124,7 @@ fn print_updates(
 	if outdated > 0 {
 		println!(
 			"{outdated} skill(s) can be updated: aghub-cli apply-update \
-skills <name> --yes"
+skills <name> --yes (or --outdated for all of them)"
 		);
 	}
 	if should_suggest_online(views, online) {
@@ -308,6 +308,44 @@ fn run_check(
 	// Stamped before any fetch so the sidecar's `startedAt` is the real start,
 	// not a second copy of `finishedAt`.
 	let started_at = chrono::Utc::now().to_rfc3339();
+	let views = collect_update_views(locks, project_root, online)?;
+
+	print_updates(&views, json, online)?;
+	if let Some(path) = write_result {
+		let path = if path.as_os_str().is_empty() {
+			default_sidecar_path()
+		} else {
+			path
+		};
+		if let Err(error) = write_check_sidecar(
+			&path,
+			project_root,
+			started_at,
+			online,
+			scope_label(scope),
+			&views,
+		) {
+			// stdout already carries the check answer under `--json`; the
+			// shared failure reporter must not append a second JSON document
+			// (see `note_answer_on_stdout`). The prose still goes to stderr and
+			// the exit code is still non-zero.
+			if json {
+				crate::note_answer_on_stdout();
+			}
+			return Err(error);
+		}
+	}
+	Ok(())
+}
+
+/// Run the shared orchestrator over the already-read locks and flatten its
+/// answer into sorted views. `check` renders them; `apply-update --outdated`
+/// picks its batch from them, so both judge "outdated" the same way.
+pub(crate) fn collect_update_views(
+	locks: crate::commands::LockSnapshot,
+	project_root: Option<&Path>,
+	online: bool,
+) -> Result<Vec<SkillUpdateView>> {
 	// The SHARED projection: `wanted`-scoped hashing, the per-root memo, and the
 	// lock-before-disk read order all come from `skill_update::projection`
 	// rather than a private copy that drifted from the API's.
@@ -370,32 +408,7 @@ fn run_check(
 		.collect();
 	views.sort_by(|a, b| a.scope.cmp(&b.scope).then(a.name.cmp(&b.name)));
 
-	print_updates(&views, json, online)?;
-	if let Some(path) = write_result {
-		let path = if path.as_os_str().is_empty() {
-			default_sidecar_path()
-		} else {
-			path
-		};
-		if let Err(error) = write_check_sidecar(
-			&path,
-			project_root,
-			started_at,
-			online,
-			scope_label(scope),
-			&views,
-		) {
-			// stdout already carries the check answer under `--json`; the
-			// shared failure reporter must not append a second JSON document
-			// (see `note_answer_on_stdout`). The prose still goes to stderr and
-			// the exit code is still non-zero.
-			if json {
-				crate::note_answer_on_stdout();
-			}
-			return Err(error);
-		}
-	}
-	Ok(())
+	Ok(views)
 }
 
 fn scope_label(scope: ResourceScope) -> &'static str {
