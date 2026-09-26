@@ -16,6 +16,5 @@ dirs = { workspace = true }
 libc = { workspace = true }
 which = "8"
 aghub-markdown = { path = "../markdown" }
-
-[dev-dependencies]
 tempfile = { workspace = true }
+
