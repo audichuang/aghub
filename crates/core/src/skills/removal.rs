@@ -20,8 +20,10 @@ use crate::skills::linker::Linker;
 /// [`allowed_skill_roots`] would refuse every Master deletion as out-of-tree, and
 /// [`is_universal_master`] would let a single-agent removal `remove_dir_all` the
 /// Master itself. See `.scratch/aghub-skill-store/spec.md` "Day-one hazards".
-/// A linked store is omitted: its target must not become an allowed mutation
-/// root simply because a project can point `.aghub` outside itself.
+/// A linked PROJECT store is omitted: its target must not become an allowed
+/// mutation root simply because a project can point `.aghub` outside itself.
+/// The global store stays even when the user symlinked it (dotfiles); roots are
+/// canonicalized by their consumers, so the link's target is what is allowed.
 pub fn skill_store_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 	let mut roots: Vec<PathBuf> = Vec::new();
 	// Universal global root: $XDG_CONFIG_HOME/agents/skills (dirs resolves XDG).
@@ -33,10 +35,7 @@ pub fn skill_store_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 		roots.push(home.join(".config").join("agents").join("skills"));
 		// Legacy ~/.agents/skills — a shared Referrer root, no longer the Master.
 		roots.push(home.join(".agents").join("skills"));
-		let store = home.join(crate::skills::linker::MASTER_STORE_DIR_NAME);
-		if !Linker::is_link(&store) {
-			roots.push(store);
-		}
+		roots.push(home.join(crate::skills::linker::MASTER_STORE_DIR_NAME));
 	}
 	if let Some(root) = project_root {
 		roots.push(root.join(".agents").join("skills"));

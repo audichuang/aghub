@@ -207,10 +207,38 @@ pub fn unmanaged_mcp_source_fields(
 	let preserved_entry = entry(&preserved, &path)?;
 	Ok(preserved_entry != canonical_entry
 		|| raw_entry.iter().any(|(key, value)| {
-			canonical_entry
-				.get(key)
-				.is_none_or(|known| has_unrepresented_shape(value, known))
+			match canonical_entry.get(key) {
+				Some(known) => has_unrepresented_shape(value, known),
+				None => !carries_nothing_new(
+					key,
+					value,
+					canonical_entry,
+					preserved_entry,
+				),
+			}
 		}))
+}
+
+/// A raw key the canonical entry does not spell still carries no data when it
+/// is empty (`args: []`, `env: {}`), or when the dialect itself dropped it on
+/// rewrite (absent from `preserved`) and its scalar reappears under the key the
+/// dialect writes instead (Windsurf's legacy `url` → `serverUrl`).
+fn carries_nothing_new(
+	key: &str,
+	value: &serde_json::Value,
+	canonical: &serde_json::Map<String, serde_json::Value>,
+	preserved: &serde_json::Map<String, serde_json::Value>,
+) -> bool {
+	use serde_json::Value;
+	match value {
+		Value::Null => true,
+		Value::Array(items) => items.is_empty(),
+		Value::Object(map) => map.is_empty(),
+		_ => {
+			!preserved.contains_key(key)
+				&& canonical.values().any(|v| v == value)
+		}
+	}
 }
 
 #[cfg(test)]
@@ -266,6 +294,40 @@ mod native_source_tests {
 			assert!(!unmanaged_mcp_source_fields(&server, clean, serialize).unwrap(), "{} clean", descriptor.id);
 			assert!(unmanaged_mcp_source_fields(&server, extra, serialize).unwrap(), "{} native extra", descriptor.id);
 		}
+	}
+
+	#[test]
+	fn empty_containers_and_legacy_aliases_are_not_unmanaged_fields() {
+		let stdio = McpServer::new("srv", McpTransport::stdio("run", vec![]));
+		let cursor = crate::agents::cursor::DESCRIPTOR
+			.mcp_serialize_config
+			.unwrap();
+		for raw in [
+			r#"{"mcpServers":{"srv":{"command":"run","args":[]}}}"#,
+			r#"{"mcpServers":{"srv":{"command":"run","env":{}}}}"#,
+		] {
+			assert!(
+				!unmanaged_mcp_source_fields(&stdio, raw, cursor).unwrap(),
+				"{raw}"
+			);
+		}
+		// A non-empty foreign value is still data the model cannot carry.
+		assert!(unmanaged_mcp_source_fields(
+			&stdio,
+			r#"{"mcpServers":{"srv":{"command":"run","cwd":"/x"}}}"#,
+			cursor,
+		)
+		.unwrap());
+
+		let windsurf = &crate::agents::windsurf::DESCRIPTOR;
+		let raw = r#"{"mcpServers":{"srv":{"url":"https://x.test/mcp"}}}"#;
+		let parsed = (windsurf.mcp_parse_config.unwrap())(raw).unwrap();
+		assert!(!unmanaged_mcp_source_fields(
+			&parsed.mcps[0],
+			raw,
+			windsurf.mcp_serialize_config.unwrap(),
+		)
+		.unwrap());
 	}
 
 	#[test]

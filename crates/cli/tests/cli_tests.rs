@@ -5355,6 +5355,38 @@ fn delete_mcp_refuses_to_remove_an_unnamed_shared_reader() {
 	}
 }
 
+/// The remedy that refusal names — `-a claude,copilot` — must actually work.
+#[test]
+fn delete_mcp_naming_every_shared_reader_removes_it() {
+	let project = mcp_project();
+	let shared = project.path().join(".mcp.json");
+	let out = transfer_cli(project.path())
+		.args([
+			"-p",
+			"--json",
+			"-a",
+			"claude,copilot",
+			"delete",
+			"mcps",
+			"filesystem",
+			"--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"naming both readers must be allowed: {}{}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		!std::fs::read_to_string(&shared)
+			.unwrap()
+			.contains("filesystem"),
+		"the shared entry must be gone"
+	);
+}
+
 #[test]
 fn transfer_mcp_copies_claude_to_cursor_project() {
 	let project = mcp_project();
@@ -12840,6 +12872,61 @@ fn skill_usage_refuses_project_and_all_scopes() {
 // `removal::tests::commit_refuses_a_forked_copy_before_deleting_anything`.
 // Each test's own doc comment carries the detail.
 // ---------------------------------------------------------------------------
+
+/// The other half of the rule above: naming EVERY reader of the shared slot in
+/// one `-a` list authorizes the removal. Each row used to reach core as a
+/// single-agent request, so no list — not even the complete one — could ever
+/// remove a shared Referrer, while the API with the same set could.
+#[cfg(unix)]
+#[test]
+fn naming_every_reader_of_a_shared_slot_removes_it() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let name = "aghub-full-group-fixture";
+
+	let master = home.path().join(".aghub").join(name);
+	std::fs::create_dir_all(&master).unwrap();
+	std::fs::write(
+		master.join("SKILL.md"),
+		format!("---\nname: {name}\ndescription: master\n---\n"),
+	)
+	.unwrap();
+	let shared = home.path().join(".agents").join("skills");
+	std::fs::create_dir_all(&shared).unwrap();
+	std::os::unix::fs::symlink(&master, shared.join(name)).unwrap();
+
+	// Every agent that reads the global `~/.agents/skills` slot. A new reader
+	// joining the roster makes this list incomplete and the delete refuse —
+	// add it here.
+	let readers =
+		"codex,opencode,cline,copilot,cursor,pi,warp,grok,omp,zcode,dsh";
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"-g", "-a", readers, "--json", "delete", "skills", name, "--yes",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"naming every reader must be allowed: {}{}",
+		String::from_utf8_lossy(&out.stdout),
+		String::from_utf8_lossy(&out.stderr)
+	);
+	assert!(
+		std::fs::symlink_metadata(shared.join(name)).is_err(),
+		"the shared Referrer must be removed"
+	);
+	let after = isolated_cli(home.path(), state.path())
+		.args(["-g", "-a", "cursor", "--json", "get", "skills"])
+		.output()
+		.unwrap();
+	assert!(
+		!String::from_utf8_lossy(&after.stdout).contains(name),
+		"no named reader may still see the skill"
+	);
+	// Nobody reads the Master any more, so the removal reclaims it.
+	assert!(!master.exists(), "the unread Master must be reclaimed");
+}
 
 /// `#[cfg(unix)]` because this fixture CANNOT be isolated on Windows, not
 /// because the behaviour differs there. `dirs::home_dir()` on Windows resolves

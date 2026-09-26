@@ -141,13 +141,45 @@ impl CreateMcpRequest {
 	}
 }
 
+/// The request-level `timeout` duplicates the transport's own: desktop sends
+/// both. No dialect writes the model-level field, so keeping it there would make
+/// every edit "lose a field"; fold it into the transport, whose fit the dialect
+/// probe actually answers. A timeout the transport already spells wins.
+fn fold_timeout(transport: McpTransport, timeout: Option<u64>) -> McpTransport {
+	let own = transport_timeout(&transport);
+	set_timeout(transport, own.or(timeout))
+}
+
+fn transport_timeout(transport: &McpTransport) -> Option<u64> {
+	match transport {
+		McpTransport::Stdio { timeout, .. }
+		| McpTransport::Sse { timeout, .. }
+		| McpTransport::StreamableHttp { timeout, .. } => *timeout,
+	}
+}
+
+/// Replace the transport's timeout; `None` leaves it untouched.
+fn set_timeout(
+	mut transport: McpTransport,
+	value: Option<u64>,
+) -> McpTransport {
+	if let Some(value) = value {
+		match &mut transport {
+			McpTransport::Stdio { timeout, .. }
+			| McpTransport::Sse { timeout, .. }
+			| McpTransport::StreamableHttp { timeout, .. } => *timeout = Some(value),
+		}
+	}
+	transport
+}
+
 impl From<CreateMcpRequest> for McpServer {
 	fn from(req: CreateMcpRequest) -> Self {
 		McpServer {
 			name: req.name,
 			enabled: true,
-			transport: req.transport.into(),
-			timeout: req.timeout,
+			transport: fold_timeout(req.transport.into(), req.timeout),
+			timeout: None,
 			config_source: None,
 		}
 	}
@@ -182,11 +214,13 @@ impl UpdateMcpRequest {
 		McpServer {
 			name: self.name.unwrap_or(existing.name),
 			enabled: self.enabled.unwrap_or(existing.enabled),
-			transport: self
-				.transport
-				.map(Into::into)
-				.unwrap_or(existing.transport),
-			timeout: self.timeout.or(existing.timeout),
+			// A supplied transport carries its own timeout first; without one,
+			// the request-level timeout is an edit of the existing transport's.
+			transport: match self.transport {
+				Some(transport) => fold_timeout(transport.into(), self.timeout),
+				None => set_timeout(existing.transport, self.timeout),
+			},
+			timeout: existing.timeout,
 			config_source: existing.config_source,
 		}
 	}

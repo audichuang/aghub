@@ -434,10 +434,8 @@ pub fn execute_repair(
 		// would delete the user's only intact copy, which is why the cleanup
 		// lives inside this branch and nowhere else.
 		if !dry_run && !plan.master.exists() {
-			if let Some(parent) = plan.master.parent() {
-				std::fs::create_dir_all(parent)
-					.map_err(|e| io_err("create master store", e))?;
-			}
+			crate::skills::linker::ensure_master_store_parent(&plan.master)
+				.map_err(|e| io_err("create master store", e))?;
 			if let Err(e) = Linker::copy_preserving_links(src, &plan.master) {
 				// Without this the failed run leaves an EMPTY master behind,
 				// and the next run compares the intact slot against it, calls

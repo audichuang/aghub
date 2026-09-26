@@ -98,6 +98,10 @@ line** — don't reword it). Pass `--port N` to pin one.
   second ambiguity rule. Both sides are pinned by tests.
 - `delete`'s `outcome` gains an api-only `failed` for early errors; the rest of
   the vocabulary is the CLI's (`crates/cli/AGENTS.md`).
+- The by-name skill and MCP delete routes take `?agents=a,b`: every agent ONE
+  user action deletes from. A shared config file / Referrer is removed only
+  when all of its readers are in it; desktop sends the group's agents. Absent
+  means the path agent alone; an unknown id is a 400.
 - Batch routes answer HTTP 200 for a handled batch whose rows failed — the row's
   `error` is the answer, and failed rows are also logged (never the source URL
   or a forwarded token).

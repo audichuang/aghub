@@ -100,6 +100,34 @@ pub(crate) fn noop_removal_response(
 	)
 }
 
+/// Parse a delete route's optional `agents` query (comma list): every agent
+/// ONE user action removes the resource from, so a shared file or Referrer
+/// may go when all of its readers are in the set. Absent means only the path
+/// agent; the path agent is always included; an unknown id is a 400.
+pub(crate) fn requested_delete_agents(
+	agent: aghub_core::models::AgentType,
+	agents: Option<&str>,
+) -> Result<Vec<aghub_core::models::AgentType>, ApiError> {
+	let mut requested = vec![agent];
+	for id in agents
+		.unwrap_or_default()
+		.split(',')
+		.map(str::trim)
+		.filter(|id| !id.is_empty())
+	{
+		let parsed =
+			id.parse::<aghub_core::models::AgentType>().map_err(|_| {
+				ApiError::bad_request(format!(
+					"unknown agent in `agents`: {id}"
+				))
+			})?;
+		if !requested.contains(&parsed) {
+			requested.push(parsed);
+		}
+	}
+	Ok(requested)
+}
+
 /// The API's **idempotent-delete contract**, owned in ONE place so the skill,
 /// MCP and sub-agent delete routes apply it identically instead of each
 /// open-coding an `Err(ResourceNotFound) => noop` arm.

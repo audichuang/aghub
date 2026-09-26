@@ -348,7 +348,10 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 			}
 		} else {
 			match tag {
-				Some("stdio") => McpTransport::Stdio {
+				// Copilot CLI's own docs spell stdio `local` and it writes that
+				// into `~/.copilot/mcp-config.json`; refusing it would make the
+				// whole config unreadable.
+				Some("stdio" | "local") => McpTransport::Stdio {
 					command: command.ok_or_else(|| {
 						ConfigError::InvalidConfig(format!(
 							"MCP server '{name}' is missing command"
@@ -554,8 +557,11 @@ pub fn serialize(
 				))
 			})?,
 		};
-		// If the native discriminator is present, the other key is foreign
-		// data; preserve it instead of silently dropping it on a rewrite.
+		// If the native discriminator is present, a scalar under the other
+		// key is foreign data; preserve it instead of silently dropping it.
+		// An OBJECT there is the nested transport the parser flattens, so it
+		// is aghub's to rewrite — keeping it would re-surface the old url or
+		// command on the next read.
 		let has_native_tag = !dialect.vocab.tag_key.is_empty()
 			&& entry.contains_key(dialect.vocab.tag_key);
 		for key in [
@@ -570,6 +576,7 @@ pub fn serialize(
 			if has_native_tag
 				&& matches!(key, "type" | "transport")
 				&& key != dialect.vocab.tag_key
+				&& !entry.get(key).is_some_and(serde_json::Value::is_object)
 			{
 				continue;
 			}

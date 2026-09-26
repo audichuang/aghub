@@ -72,6 +72,33 @@ test("skills.delete sends scope, confirm and all_agents", async () => {
 	);
 });
 
+// A shared config file or Referrer is removed only when every reader is in the
+// request; the group's agent set rides along as one comma list.
+test("mcps.delete and skills.delete send the requested agent set", async () => {
+	const { calls, restore } = stubFetchCapturingUrl();
+	try {
+		const api = createApi("http://api.test/");
+		await api.mcps.delete("wire", "claude", "project", "/p", [
+			"claude",
+			"copilot",
+			"copilot",
+		]);
+		await api.skills.delete("cline", "s", "global", undefined, false, [
+			"cursor",
+			"cline",
+		]);
+		await api.mcps.delete("solo", "claude", "global", undefined, [
+			"claude",
+		]);
+	} finally {
+		restore();
+	}
+	assert.equal(calls.length, 3);
+	assert.equal(calls[0].searchParams.get("agents"), "claude,copilot");
+	assert.equal(calls[1].searchParams.get("agents"), "cline,cursor");
+	assert.equal(calls[2].searchParams.has("agents"), false);
+});
+
 test("subAgents.delete sends confirm=true so the backend executes", async () => {
 	const { calls, restore } = stubFetchCapturingUrl();
 	try {

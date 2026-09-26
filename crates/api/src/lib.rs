@@ -781,6 +781,63 @@ mod tests {
 		assert!(!cfg.contains("wire"), "confirm=true must remove the mcp");
 	}
 
+	/// Claude and Copilot both read the project `.mcp.json`. Deleting from one
+	/// alone must refuse (Copilot would silently lose it); naming both in
+	/// `agents` — what desktop sends for a group — rewrites the file.
+	#[test]
+	fn delete_mcp_wire_shared_file_needs_every_reader_in_agents() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+		let body = serde_json::json!({
+			"name": "wire",
+			"transport": { "type": "stdio", "command": "echo", "args": [] },
+		})
+		.to_string();
+		let root_q = urlencoding(&root.to_string_lossy());
+		let resp = client
+			.post(format!(
+				"/api/v1/agents/claude/mcps?scope=project&project_root={root_q}"
+			))
+			.header(rocket::http::ContentType::JSON)
+			.body(body)
+			.dispatch();
+		assert!(resp.status().code < 300, "seed failed: {}", resp.status());
+		let cfg = || std::fs::read_to_string(root.join(".mcp.json")).unwrap();
+
+		let alone = client
+			.delete(format!(
+				"/api/v1/agents/claude/mcps/wire?scope=project&project_root={root_q}&confirm=true"
+			))
+			.dispatch();
+		assert!(alone.status().code >= 400, "{}", alone.status());
+		let error = alone.into_string().unwrap();
+		assert!(error.contains("copilot"), "{error}");
+		assert!(cfg().contains("wire"), "a refused delete must not write");
+
+		let both = client
+			.delete(format!(
+				"/api/v1/agents/claude/mcps/wire?scope=project&project_root={root_q}&confirm=true&agents=claude,copilot"
+			))
+			.dispatch();
+		assert_eq!(both.status(), Status::Ok);
+		let json: serde_json::Value =
+			serde_json::from_str(&both.into_string().unwrap()).unwrap();
+		assert_eq!(json["executed"], true);
+		assert!(!cfg().contains("wire"), "the shared entry must be removed");
+
+		let unknown = client
+			.delete(format!(
+				"/api/v1/agents/claude/mcps/wire?scope=project&project_root={root_q}&agents=nope"
+			))
+			.dispatch();
+		assert_eq!(unknown.status(), Status::BadRequest);
+	}
+
 	/// Seed one Claude sub-agent over HTTP, returning its backing file path.
 	fn seed_sub_agent_http(
 		client: &Client,

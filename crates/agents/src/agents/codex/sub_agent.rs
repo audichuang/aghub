@@ -285,6 +285,20 @@ fn save_to_dir(dir: &Path, agent: &SubAgent) -> Result<()> {
 	let safe = sanitize_filename(&agent.name);
 	let file = dir.join(format!("{safe}.toml"));
 	let original = read_original(&file, &canonical_dir)?;
+	// Same rule as the markdown layouts: an existing file at the destination is
+	// only replaced when it IS this sub-agent (its own source, or the same
+	// name), never a differently named entry that sanitizes to this path.
+	if original.is_some() {
+		let same_source = agent.source_path.as_deref().is_some_and(|source| {
+			crate::sub_agents::same_file(Path::new(source), &file)
+		});
+		let same_name = agent.source_path.is_none()
+			&& parse_file(&file)
+				.is_some_and(|existing| existing.name == agent.name);
+		if !same_source && !same_name {
+			return Err(ConfigError::resource_exists("sub-agent", &agent.name));
+		}
+	}
 	let content = format(agent, original.as_deref())?;
 	write_replace(&file, &content)?;
 	// Defense-in-depth invariant check: the real symlink guard already ran

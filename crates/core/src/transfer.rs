@@ -588,6 +588,33 @@ fn ensure_removals_spare<F>(
 where
 	F: Fn(&InstallTarget) -> Backed,
 {
+	ensure_removals_spare_for(
+		protect,
+		removing,
+		source_agent,
+		backing,
+		Caller::Reconcile,
+	)
+}
+
+/// Which command the refusal is addressed to: its remedy has to name a step
+/// that command can actually take.
+#[derive(Clone, Copy, PartialEq)]
+enum Caller {
+	Reconcile,
+	Delete,
+}
+
+fn ensure_removals_spare_for<F>(
+	protect: &[Protected],
+	removing: &[InstallTarget],
+	source_agent: AgentType,
+	backing: F,
+	caller: Caller,
+) -> Result<()>
+where
+	F: Fn(&InstallTarget) -> Backed,
+{
 	for delete in removing {
 		// The delete side stays permissive: a target whose own backing cannot
 		// be read will fail its own row anyway, and refusing here would turn
@@ -608,11 +635,15 @@ where
 				// Cannot tell whether this agent shares the file being
 				// rewritten. Skipping is the answer that loses data.
 				Backed::Unknown => {
+					let remedy = match caller {
+						Caller::Reconcile => "name it in this reconcile too",
+						Caller::Delete => "include it in this delete too",
+					};
 					return Err(ConfigError::InvalidConfig(format!(
 						"cannot tell whether '{}' shares the same file as \
 						 '{}' — its configuration failed to load, so removing \
 						 from '{}' might take it from '{}' as well. Fix that \
-						 agent's config, or name it in this reconcile too.",
+						 agent's config, or {remedy}.",
 						kept.target.agent.as_str(),
 						delete.agent.as_str(),
 						delete.agent.as_str(),
@@ -632,7 +663,18 @@ where
 					"Drop '{}' from this reconcile.",
 					delete.agent.as_str()
 				);
-				let (role, remedy) = if kept.target.agent == source_agent {
+				let (role, remedy) = if caller == Caller::Delete {
+					(
+						"",
+						format!(
+							"Delete it from both in one request (CLI: \
+							 `-a {},{}`; desktop: select both agents), or \
+							 leave it in place.",
+							delete.agent.as_str(),
+							kept.target.agent.as_str()
+						),
+					)
+				} else if kept.target.agent == source_agent {
 					(" (the --from-agent source of this reconcile)", drop_it)
 				} else if kept.named {
 					("", drop_it)
@@ -698,6 +740,32 @@ where
 		roster,
 	);
 	ensure_removals_spare(&protect, &removing, source.agent, backing)
+}
+
+/// The shared-reader guard for a direct MCP delete. `requested` is every agent
+/// this one request removes the server from (a CLI `-a` list, a desktop
+/// multi-select); an agent reading the same file outside that set must not
+/// lose it behind the caller's back.
+pub fn ensure_mcp_delete_spares(
+	source: &ResourceLocator,
+	requested: &[AgentType],
+) -> Result<()> {
+	let (_, deletes) = reconcile_plans(
+		Vec::new(),
+		requested.to_vec(),
+		source.scope,
+		source.project_root.clone(),
+	);
+	let removing: Vec<InstallTarget> =
+		deletes.iter().map(|plan| plan.target.clone()).collect();
+	let protect = protected_targets(&[], source, true, &removing, true);
+	ensure_removals_spare_for(
+		&protect,
+		&removing,
+		source.agent,
+		mcp_backing_path,
+		Caller::Delete,
+	)
 }
 
 /// [`ensure_reconcile_spares`] for a skill — the preview seam.
@@ -1172,6 +1240,31 @@ fn copy_sub_agent_into(
 	}
 	manager.add_sub_agent(sub_agent.clone())?;
 	Ok(false)
+}
+
+/// Before a reconcile deletes a sub-agent's source, confirm each copy target
+/// still holds the copied content; a copy changed or removed since the copy
+/// row ran would otherwise make the source's deletion lose the resource.
+fn ensure_sub_agent_copies_hold(
+	copies: &[OperationPlan],
+	sub_agent: &SubAgent,
+) -> Result<()> {
+	for copy in copies {
+		let mut copied = build_manager(&copy.target);
+		ensure_loaded(&mut copied)?;
+		let holds = copied.get_sub_agent(&sub_agent.name).is_some_and(|held| {
+			held.description == sub_agent.description
+				&& held.instruction == sub_agent.instruction
+		});
+		if !holds {
+			return Err(ConfigError::InvalidConfig(format!(
+				"Sub-agent '{}' changed in target '{}' during reconcile; source kept",
+				sub_agent.name,
+				copy.target.agent.as_str()
+			)));
+		}
+	}
+	Ok(())
 }
 
 fn ensure_loaded(manager: &mut ConfigManager) -> Result<()> {
@@ -1832,9 +1925,15 @@ pub fn reconcile_sub_agent(
 								}
 								_ => false,
 							};
-						let removed = if plan.target.agent == source.agent
-							|| (source_removed && shares_source)
-						{
+						let removes_source = plan.target.agent == source.agent
+							|| (source_removed && shares_source);
+						if removes_source {
+							// Same guard as the MCP arm: the source is the
+							// last copy only if every target still holds what
+							// was copied into it.
+							ensure_sub_agent_copies_hold(&copies, &sub_agent)?;
+						}
+						let removed = if removes_source {
 							manager.remove_sub_agent_if_unchanged(
 								&source.name,
 								&sub_agent,
@@ -2776,6 +2875,39 @@ mod tests {
 	// (and made `manager::skill`'s prune tests resolve the wrong lock file).
 	use crate::skills::prune::test_lock::env_lock;
 	use tempfile::tempdir;
+
+	/// A reconcile deletes a sub-agent's source only while every copy still
+	/// holds what was copied; a copy edited or removed in between keeps it.
+	#[test]
+	fn sub_agent_source_delete_requires_every_copy_to_hold() {
+		let project = tempdir().unwrap();
+		let root = project.path();
+		let mut agent = SubAgent::new("mover");
+		agent.instruction = Some("body".into());
+		let copies = vec![OperationPlan {
+			target: InstallTarget {
+				agent: AgentType::OpenCode,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+			},
+			action: OperationAction::Copy,
+		}];
+		assert!(ensure_sub_agent_copies_hold(&copies, &agent).is_err());
+		copy_sub_agent_into(&copies[0].target, &agent).unwrap();
+		ensure_sub_agent_copies_hold(&copies, &agent).unwrap();
+		let mut edited = build_manager(&copies[0].target);
+		ensure_loaded(&mut edited).unwrap();
+		edited
+			.update_sub_agent(
+				"mover",
+				crate::manager::sub_agent::SubAgentPatch {
+					instruction: Some("edited".into()),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		assert!(ensure_sub_agent_copies_hold(&copies, &agent).is_err());
+	}
 
 	#[cfg(unix)]
 	struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);

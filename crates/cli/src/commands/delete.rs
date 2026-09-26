@@ -9,6 +9,8 @@ pub struct DeleteOptions {
 	pub all_agents: bool,
 	pub dry_run: bool,
 	pub yes: bool,
+	/// Every agent this command deletes from; always contains the manager's.
+	pub requested_agents: Vec<aghub_core::models::AgentType>,
 }
 
 /// Delete a resource.
@@ -43,11 +45,12 @@ pub fn execute(
 			// missing skill is an idempotent no-op (matches the API), not an
 			// error — see `plan_or_noop`.
 			let outcome = plan_or_noop(manager, |m| {
-				m.remove_skill_planned(
+				m.remove_skill_planned_for_agents(
 					&name,
 					options.all_agents,
 					is_dry_run,
 					options.yes,
+					&options.requested_agents,
 				)
 			})?;
 			// Serialize the shared core builder so the removal fields
@@ -80,6 +83,7 @@ pub fn execute(
 					&name,
 					is_dry_run,
 					options.yes,
+					&options.requested_agents,
 				)
 			})?;
 			// Reuse the shared core RemovalView so the removal fields stay

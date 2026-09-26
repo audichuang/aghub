@@ -91,8 +91,12 @@ list, or `all`), `-g`/`-p`, `--all`.
   `INVALID_CONFIG` / HTTP 400; the SKILL removal refusal is the other code —
   `delete` and `reconcile skill` both report `UNSUPPORTED_OPERATION` / HTTP 422.
   Batching is transport and must not relabel either as bad parameters.
-  Direct `delete mcps <name> -a claude -p` uses the same shared-reader guard:
-  it refuses before preview or commit when copilot would lose the server.
+  Direct `delete` judges sharing against the WHOLE `-a` list (core's
+  `requested_agents`), not each row alone: `delete mcps <name> -a claude -p`
+  refuses before preview or commit because copilot reads the same
+  `<root>/.mcp.json`, and `-a claude,copilot` removes it (exit 0). Same for
+  skills: a shared Referrer goes only when every reader of that slot is in the
+  list. The API's by-name delete routes take the same set as `?agents=a,b`.
   Why:
   knowledge page `多目標突變的 scope 閘門與批次歸因`
 - **`skill-usage`**: Claude-global only; rejects project/`--all`.

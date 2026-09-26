@@ -6,10 +6,6 @@ use crate::{
 	transfer::{self, InstallScope, ResourceLocator},
 };
 use log::info;
-use std::fs::{File, OpenOptions};
-use std::io;
-use std::path::Path;
-use std::time::{Duration, Instant};
 
 impl ConfigManager {
 	/// Direct creates promise that every supplied field survives a reload.
@@ -171,14 +167,22 @@ impl ConfigManager {
 		self.remove_mcp_planned_checked(name, dry_run, confirm, |_| Ok(()))
 	}
 
-	/// Single-agent delete protects every other agent that reads this backing.
-	/// Reconcile uses `remove_mcp_planned` after its own full-set preflight.
+	/// Direct delete protects every agent outside `requested` that reads this
+	/// backing. `requested` is the whole set one request removes the server
+	/// from and must include this manager's agent. Reconcile uses
+	/// `remove_mcp_planned` after its own full-set preflight.
 	pub fn remove_mcp_planned_single_guarded(
 		&mut self,
 		name: &str,
 		dry_run: bool,
 		confirm: bool,
+		requested: &[crate::models::AgentType],
 	) -> Result<RemovalOutcome> {
+		if !requested.contains(&self.agent_type()) {
+			return Err(ConfigError::InvalidConfig(
+				"removal request does not include the target agent".into(),
+			));
+		}
 		let scope = match self.write_scope {
 			crate::models::ResourceScope::GlobalOnly => InstallScope::Global,
 			crate::models::ResourceScope::ProjectOnly => InstallScope::Project,
@@ -196,11 +200,7 @@ impl ConfigManager {
 		};
 		self.remove_mcp_planned_checked(name, dry_run, confirm, |mcps| {
 			if mcps.iter().any(|server| server.name == name) {
-				transfer::ensure_mcp_reconcile_spares(
-					&source,
-					&[],
-					&[source.agent],
-				)
+				transfer::ensure_mcp_delete_spares(&source, requested)
 			} else {
 				Ok(())
 			}
@@ -365,95 +365,36 @@ impl ConfigManager {
 		Ok(result)
 	}
 
-	pub(super) fn mcp_write_guards(&self) -> Result<Vec<File>> {
-		let mut guards = Vec::new();
-		let deadline = Instant::now() + Duration::from_secs(10);
-		let config_path = self.config_path();
-		if self.write_scope == crate::models::ResourceScope::GlobalOnly
-			&& config_path.as_ref().is_some_and(|path| {
-				crate::registry::get(self.agent_type())
-					.mcp_path(None, self.write_scope)
-					.as_ref() == Some(path)
-			}) {
-			// ponytail: one HOME lock serializes unrelated global MCP files;
-			// split by a sorted set of backing locks if this contends.
-			// TestConfig's path override uses an isolated backing instead.
-			let home = dirs::home_dir().ok_or_else(|| {
-				ConfigError::InvalidConfig(
-					"cannot resolve home for global MCP lock".to_string(),
-				)
-			})?;
-			let path =
-				skill::lock::resolve_existing(&home).join(".aghub-mcp.lock");
-			guards.push(lock_file(&path, deadline)?);
+	/// Lock an MCP write through [`ConfigManager::scoped_write_guard`].
+	///
+	/// `None` when this manager writes an overridden path (`TestConfig`): the
+	/// file is private to that manager and has no scope lock to share.
+	pub(super) fn mcp_write_guards(
+		&self,
+	) -> Result<Option<::skill::lock::MutationGuard>> {
+		let Some(path) = self.config_path() else {
+			return Ok(None);
+		};
+		let descriptor = crate::registry::get(self.agent_type());
+		let native =
+			descriptor.mcp_path(self.project_root.as_deref(), self.write_scope);
+		if native.as_ref() != Some(&path) {
+			return Ok(None);
 		}
-		if self.write_scope == crate::models::ResourceScope::ProjectOnly {
-			if let Some(root) = self.project_root.as_deref() {
-				// ponytail: one project lock serializes unrelated MCP files too;
-				// split by stable path only if project write contention matters.
-				let root = skill::lock::resolve_existing(root);
-				let path = root.join(".agents/.aghub-mcp.lock");
-				guards.push(lock_file(&path, deadline)?);
-			}
-		}
-		if let Some(path) = config_path {
-			let backing = aghub_agents::descriptor::mcp_backing_path(&path)?;
-			let mut name = backing
-				.file_name()
-				.ok_or_else(|| {
-					io::Error::new(
-						io::ErrorKind::InvalidInput,
-						"MCP backing has no filename",
-					)
-				})?
-				.to_os_string();
-			name.push(".aghub-mcp.lock");
-			guards.push(lock_file(&backing.with_file_name(name), deadline)?);
-		}
-		Ok(guards)
-	}
-}
-
-pub(super) fn lock_file(path: &Path, deadline: Instant) -> Result<File> {
-	if let Some(parent) = path.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
-	let file = OpenOptions::new()
-		.read(true)
-		.write(true)
-		.create(true)
-		.truncate(false)
-		.open(path)?;
-	loop {
-		match file.try_lock() {
-			Ok(()) => return Ok(file),
-			Err(std::fs::TryLockError::WouldBlock) => {
-				if Instant::now() >= deadline {
-					return Err(io::Error::new(
-						io::ErrorKind::WouldBlock,
-						"Agent configuration is busy; retry the operation",
-					)
-					.into());
-				}
-				std::thread::sleep(Duration::from_millis(25));
-			}
-			Err(std::fs::TryLockError::Error(error)) => {
-				return Err(error.into())
-			}
-		}
+		self.scoped_write_guard("MCP write").map(Some)
 	}
 }
 
 #[cfg(all(test, unix))]
 mod tests {
-	use super::*;
+	use crate::models::{AgentType, ResourceScope};
 	use crate::skills::prune::test_lock::env_lock;
-	use crate::{create_adapter, models::AgentType};
+	use crate::{create_adapter, ConfigManager};
 
 	struct EnvVarGuard(&'static str, Option<std::ffi::OsString>);
 
 	impl EnvVarGuard {
-		fn set(key: &'static str, value: &Path) -> Self {
+		fn set(key: &'static str, value: &std::path::Path) -> Self {
 			let old = std::env::var_os(key);
 			std::env::set_var(key, value);
 			Self(key, old)
@@ -469,32 +410,43 @@ mod tests {
 		}
 	}
 
+	/// Acquisition never degrades to unlocked: every real descriptor, in every
+	/// scope it can write MCPs to, takes the mutation lock. Only a manager
+	/// whose adapter overrides the path (`TestConfig`) goes without.
 	#[test]
-	fn global_mcp_writers_share_one_home_lock() {
+	fn every_mcp_writer_takes_the_mutation_lock() {
 		let _env = env_lock().lock().unwrap_or_else(|e| e.into_inner());
-		let temp = tempfile::tempdir().unwrap();
-		let _home = EnvVarGuard::set("HOME", temp.path());
+		let home = tempfile::tempdir().unwrap();
+		let _home = EnvVarGuard::set("HOME", home.path());
 		let _config =
-			EnvVarGuard::set("XDG_CONFIG_HOME", &temp.path().join(".config"));
-		let lock_path = temp.path().join(".aghub-mcp.lock");
-		let cursor =
-			ConfigManager::new(create_adapter(AgentType::Cursor), true, None);
-		let opencode =
-			ConfigManager::new(create_adapter(AgentType::OpenCode), true, None);
-		assert_ne!(cursor.config_path(), opencode.config_path());
-		for manager in [&cursor, &opencode] {
-			let guards = manager.mcp_write_guards().unwrap();
-			let probe = OpenOptions::new()
-				.read(true)
-				.write(true)
-				.open(&lock_path)
-				.unwrap();
-			assert!(matches!(
-				probe.try_lock(),
-				Err(std::fs::TryLockError::WouldBlock)
-			));
-			drop(guards);
-			probe.try_lock().unwrap();
+			EnvVarGuard::set("XDG_CONFIG_HOME", &home.path().join(".config"));
+		let _state =
+			EnvVarGuard::set("XDG_STATE_HOME", &home.path().join(".state"));
+		let project = tempfile::tempdir().unwrap();
+		let mut checked = 0;
+		for &agent in AgentType::ALL {
+			for (global, scope) in [
+				(true, ResourceScope::GlobalOnly),
+				(false, ResourceScope::ProjectOnly),
+			] {
+				let manager = ConfigManager::new(
+					create_adapter(agent),
+					global,
+					(!global).then_some(project.path()),
+				);
+				if !manager.adapter.supports_mcp_scope(scope)
+					|| manager.config_path().is_none()
+				{
+					continue;
+				}
+				checked += 1;
+				assert!(
+					manager.mcp_write_guards().unwrap().is_some(),
+					"{} {scope:?} writes MCPs without the mutation lock",
+					agent.as_str()
+				);
+			}
 		}
+		assert!(checked > 20, "only {checked} writers checked");
 	}
 }

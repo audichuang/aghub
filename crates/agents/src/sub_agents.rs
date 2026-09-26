@@ -347,7 +347,7 @@ fn write_sub_agent_file(file: &Path, content: &str) -> Result<()> {
 		))
 	})?;
 	let existed = assert_safe_destination(file)?;
-	let mut staged = tempfile::NamedTempFile::new_in(dir)?;
+	let mut staged = crate::descriptor::staged_replacement(dir)?;
 	if existed {
 		let permissions = fs::metadata(file)?.permissions();
 		if permissions.readonly() {
@@ -445,6 +445,27 @@ pub fn load_sub_agents_from_dir_with(
 	Ok(agents)
 }
 
+/// Whether two paths name the same existing file. Compared by identity, not by
+/// spelling: a case-insensitive filesystem or a symlinked parent spells one
+/// file two ways, and a string compare would then refuse every edit of it.
+pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::MetadataExt;
+		if let (Ok(a), Ok(b)) = (fs::metadata(a), fs::metadata(b)) {
+			return a.dev() == b.dev() && a.ino() == b.ino();
+		}
+		false
+	}
+	#[cfg(not(unix))]
+	{
+		match (a.canonicalize(), b.canonicalize()) {
+			(Ok(a), Ok(b)) => a == b,
+			_ => false,
+		}
+	}
+}
+
 /// Write a single sub-agent to `dir` as a `*.md` file.
 ///
 /// The directory is created if absent.
@@ -474,7 +495,7 @@ pub fn save_sub_agent_to_dir_with(
 		let same_source = agent
 			.source_path
 			.as_deref()
-			.is_some_and(|source| Path::new(source) == file);
+			.is_some_and(|source| same_file(Path::new(source), &file));
 		let same_name = agent.source_path.is_none()
 			&& parse_sub_agent_file_named(&file, &safe)?
 				.is_some_and(|existing| existing.name == agent.name);

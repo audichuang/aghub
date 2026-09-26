@@ -110,6 +110,21 @@ interface ApiErrorBody {
  */
 export type GitForwardHeaders = Record<string, string>;
 
+/**
+ * The `agents` query for a delete: every agent one user action removes the
+ * resource from. Omitted when it names only the path agent, so a single-agent
+ * delete keeps its exact query string.
+ */
+function requestedAgentsParam(
+	agent: string,
+	agents: readonly string[],
+): { agents?: string } {
+	const others = agents.filter((id) => id !== agent);
+	return others.length === 0
+		? {}
+		: { agents: [agent, ...new Set(others)].join(",") };
+}
+
 export function createApi(baseUrl: string) {
 	const client = ky.create({
 		prefix: baseUrl,
@@ -276,6 +291,9 @@ export function createApi(baseUrl: string) {
 				scope: "global" | "project" = "global",
 				projectRoot?: string,
 				allAgents = false,
+				// Every agent this one action deletes from: a shared Referrer
+				// may go only when all of its readers are in the set.
+				agents: readonly string[] = [],
 			): Promise<DeleteSkillByPathResponse> {
 				return client
 					.delete(`agents/${agent}/skills/${name}`, {
@@ -286,6 +304,7 @@ export function createApi(baseUrl: string) {
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
+							...requestedAgentsParam(agent, agents),
 						},
 					})
 					.json();
@@ -603,6 +622,10 @@ export function createApi(baseUrl: string) {
 				agent: string,
 				scope: "global" | "project",
 				projectRoot?: string,
+				// Every agent this one action deletes from: a config file
+				// shared with another agent is rewritten only when every
+				// reader is in the set.
+				agents: readonly string[] = [],
 			): Promise<void> {
 				return client
 					.delete(`agents/${agent}/mcps/${name}`, {
@@ -616,6 +639,7 @@ export function createApi(baseUrl: string) {
 							...(projectRoot
 								? { project_root: projectRoot }
 								: {}),
+							...requestedAgentsParam(agent, agents),
 						},
 					})
 					.then(() => undefined);

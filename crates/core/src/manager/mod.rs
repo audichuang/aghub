@@ -308,6 +308,43 @@ impl ConfigManager {
 		Ok(self.config.as_ref().unwrap())
 	}
 
+	/// The interprocess lock for an MCP or sub-agent write: the SAME mutation
+	/// lock skill flows hold (`skills::lock::mutation_guard`), so the scope
+	/// identity, reentrancy, 10s foreign-process bound and the project lock's
+	/// home under `.agents/` are one contract, not a second copy of it.
+	///
+	/// A project root can be `$HOME`, and then a project write IS the global
+	/// file (Codex's `.codex/config.toml`, Claude's `.claude/agents`). So a
+	/// global write also takes the lock of `$HOME` as a project, in the guard's
+	/// fixed global-first order; project writes never need to read `$HOME`.
+	pub(crate) fn scoped_write_guard(
+		&self,
+		op: &str,
+	) -> Result<::skill::lock::MutationGuard> {
+		let guard = match self.write_scope {
+			ResourceScope::GlobalOnly => {
+				let home = dirs::home_dir();
+				let scope = if home.is_some() {
+					ResourceScope::Both
+				} else {
+					ResourceScope::GlobalOnly
+				};
+				crate::skills::lock::mutation_guard(op, scope, home.as_deref())
+			}
+			ResourceScope::ProjectOnly => crate::skills::lock::mutation_guard(
+				op,
+				ResourceScope::ProjectOnly,
+				self.project_root.as_deref(),
+			),
+			ResourceScope::Both => {
+				return Err(ConfigError::InvalidConfig(format!(
+					"{op} requires one write scope"
+				)))
+			}
+		};
+		Ok(guard?)
+	}
+
 	/// Explicitly replace the persisted MCP list with `config.mcps`.
 	/// This serializes the write, but does not merge an older caller snapshot;
 	/// use the resource CRUD methods for concurrent add or partial update.

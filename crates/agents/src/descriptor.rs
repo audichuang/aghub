@@ -319,16 +319,20 @@ pub fn save_mcps_to_file(
 	let parent = backing.parent().ok_or_else(|| {
 		io::Error::new(io::ErrorKind::InvalidInput, "MCP backing has no parent")
 	})?;
-	let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+	let mut staged = staged_replacement(parent)?;
 	match fs::metadata(&backing) {
 		Ok(metadata) => {
 			#[cfg(unix)]
 			{
 				use std::os::unix::fs::MetadataExt;
 				if metadata.nlink() > 1 {
-					return Err(ConfigError::InvalidConfig(
-						"MCP backing has hard links; atomic replacement would split them".to_string(),
-					));
+					// A rename would split the link (`cp -l` / rdfind trees),
+					// so rewrite in place as before. Not atomic against a
+					// crash mid-write, but the caller holds the mutation lock,
+					// so no aghub writer interleaves.
+					drop(staged);
+					fs::write(&backing, content)?;
+					return Ok(());
 				}
 			}
 			if metadata.permissions().readonly() {
@@ -347,6 +351,25 @@ pub fn save_mcps_to_file(
 	staged.as_file().sync_all()?;
 	staged.persist(&backing).map_err(|error| error.error)?;
 	Ok(())
+}
+
+/// A temp file beside a config file, to be persisted over it. A NEW config
+/// file gets the mode a plain create would (`0o666 & !umask`), not tempfile's
+/// private `0o600` default; an existing file's mode is copied by the caller.
+pub(crate) fn staged_replacement(
+	parent: &Path,
+) -> io::Result<tempfile::NamedTempFile> {
+	#[cfg(unix)]
+	{
+		use std::os::unix::fs::PermissionsExt;
+		tempfile::Builder::new()
+			.permissions(fs::Permissions::from_mode(0o666))
+			.tempfile_in(parent)
+	}
+	#[cfg(not(unix))]
+	{
+		tempfile::NamedTempFile::new_in(parent)
+	}
 }
 
 /// Resolve the actual MCP backing before choosing the lock and replacement
@@ -690,7 +713,8 @@ mod tests {
 
 	#[cfg(unix)]
 	#[test]
-	fn atomic_mcp_save_refuses_to_split_hard_links() {
+	fn mcp_save_keeps_hard_links_intact() {
+		use std::os::unix::fs::MetadataExt;
 		fn ser(_: &AgentConfig, _: Option<&str>) -> Result<String> {
 			Ok("updated".to_string())
 		}
@@ -699,8 +723,29 @@ mod tests {
 		let alias = dir.path().join("alias.json");
 		fs::write(&target, "before").unwrap();
 		fs::hard_link(&target, &alias).unwrap();
-		assert!(save_mcps_to_file(&alias, &[], ser).is_err());
-		assert_eq!(fs::read_to_string(&target).unwrap(), "before");
-		assert_eq!(fs::read_to_string(&alias).unwrap(), "before");
+		save_mcps_to_file(&alias, &[], ser).unwrap();
+		assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+		assert_eq!(fs::read_to_string(&alias).unwrap(), "updated");
+		assert_eq!(fs::metadata(&target).unwrap().nlink(), 2);
+	}
+
+	/// A config file aghub creates must be as readable as one a plain create
+	/// makes, not tempfile's owner-only default.
+	#[cfg(unix)]
+	#[test]
+	fn mcp_save_creates_a_new_file_with_umask_mode() {
+		use std::os::unix::fs::PermissionsExt;
+		fn ser(_: &AgentConfig, _: Option<&str>) -> Result<String> {
+			Ok("{}".to_string())
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let plain = dir.path().join("plain.json");
+		fs::write(&plain, "").unwrap();
+		let created = dir.path().join("created.json");
+		save_mcps_to_file(&created, &[], ser).unwrap();
+		assert_eq!(
+			fs::metadata(&created).unwrap().permissions().mode() & 0o777,
+			fs::metadata(&plain).unwrap().permissions().mode() & 0o777
+		);
 	}
 }

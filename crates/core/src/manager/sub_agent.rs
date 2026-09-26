@@ -4,18 +4,17 @@ use crate::{
 	skills::removal::{Layout, PruneStatus, RemovalOutcome, RemovalPlan},
 };
 use log::{info, warn};
-use std::fs::File;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
 
 use super::ConfigManager;
 
 impl ConfigManager {
-	/// Every sub-agent mutation reloads after locking its physical backing
-	/// directory. Two descriptors may reach the same directory through different
-	/// symlinked paths, and a manager's earlier `load()` may predate another
-	/// aghub process's write.
-	fn guard_and_reload_sub_agents(&mut self) -> Result<File> {
+	/// Every sub-agent mutation reloads after taking the scope's mutation lock
+	/// (see [`ConfigManager::scoped_write_guard`]): a manager's earlier
+	/// `load()` may predate another aghub process's write.
+	fn guard_and_reload_sub_agents(
+		&mut self,
+	) -> Result<::skill::lock::MutationGuard> {
 		if self.config.is_none() {
 			return Err(ConfigError::InvalidConfig(
 				"No configuration loaded".to_string(),
@@ -28,11 +27,7 @@ impl ConfigManager {
 				self.adapter.name(),
 			));
 		}
-		let path = self.sub_agent_lock_path()?;
-		let guard = super::mcp::lock_file(
-			&path,
-			Instant::now() + Duration::from_secs(10),
-		)?;
+		let guard = self.scoped_write_guard("sub-agent write")?;
 		self.reload_sub_agents()?;
 		Ok(guard)
 	}
@@ -43,28 +38,6 @@ impl ConfigManager {
 			.load_sub_agents(self.project_root.as_deref(), self.write_scope)?;
 		self.config_mut()?.sub_agents = current;
 		Ok(())
-	}
-
-	fn sub_agent_lock_path(&self) -> Result<PathBuf> {
-		let dir = self
-			.adapter
-			.sub_agent_dir(self.project_root.as_deref(), self.write_scope)
-			.ok_or_else(|| {
-				ConfigError::InvalidConfig(format!(
-					"Sub-agent directory unavailable for {:?} scope",
-					self.write_scope
-				))
-			})?;
-		let physical_dir = skill::lock::resolve_existing(&dir);
-		let name = physical_dir.file_name().ok_or_else(|| {
-			ConfigError::InvalidConfig(format!(
-				"Sub-agent directory has no name: {}",
-				physical_dir.display()
-			))
-		})?;
-		let mut lock_name = name.to_os_string();
-		lock_name.push(".aghub-sub-agents.lock");
-		Ok(physical_dir.with_file_name(lock_name))
 	}
 
 	/// List all loaded sub-agents.
@@ -193,8 +166,8 @@ impl ConfigManager {
 							"Renamed sub-agent '{effective_name}' could not be read back"
 						))
 					})?;
-				if skill::lock::resolve_existing(Path::new(&old_path))
-					!= skill::lock::resolve_existing(Path::new(&new_path))
+				if ::skill::lock::resolve_existing(Path::new(&old_path))
+					!= ::skill::lock::resolve_existing(Path::new(&new_path))
 				{
 					match std::fs::remove_file(&old_path) {
 						Ok(()) => {}
@@ -406,20 +379,7 @@ impl ConfigManager {
 		// `.md.aghub-tomb` is litter, not data loss (the agent IS gone), so a
 		// cleanup failure must NOT be reported as a clean success: surface it as
 		// an actionable error (an already-gone tomb is benign NotFound).
-		for (_, tomb) in &tombstones {
-			match std::fs::remove_file(tomb) {
-				Ok(()) => {}
-				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-				Err(e) => {
-					warn!(
-						"failed to clean up tombstone '{}': {}",
-						tomb.display(),
-						e
-					);
-					return Err(ConfigError::Io(e));
-				}
-			}
-		}
+		drop_tombstones(&tombstones)?;
 
 		Ok(RemovalOutcome {
 			plan,
@@ -447,6 +407,26 @@ impl ConfigManager {
 	}
 }
 
+/// Delete the tombstones of a removal whose save succeeded. A leftover tomb is
+/// litter the caller must hear about, so any failure but NotFound surfaces.
+fn drop_tombstones(tombstones: &[(PathBuf, PathBuf)]) -> Result<()> {
+	for (_, tomb) in tombstones {
+		match std::fs::remove_file(tomb) {
+			Ok(()) => {}
+			Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+			Err(e) => {
+				warn!(
+					"failed to clean up tombstone '{}': {}",
+					tomb.display(),
+					e
+				);
+				return Err(ConfigError::Io(e));
+			}
+		}
+	}
+	Ok(())
+}
+
 /// Best-effort restore of `(orig, tomb)` pairs on a removal error path: rename
 /// each tombstone back to its original. Used only when an earlier error is
 /// already being returned, so a restore that itself fails is logged (the file
@@ -471,8 +451,8 @@ fn same_sub_agent_source(current: &SubAgent, expected: &SubAgent) -> bool {
 		expected.source_path.as_deref(),
 	) {
 		(Some(current), Some(expected)) => {
-			skill::lock::resolve_existing(Path::new(current))
-				== skill::lock::resolve_existing(Path::new(expected))
+			::skill::lock::resolve_existing(Path::new(current))
+				== ::skill::lock::resolve_existing(Path::new(expected))
 		}
 		(None, None) => true,
 		_ => false,
@@ -511,6 +491,23 @@ impl SubAgentPatch {
 mod tests {
 	use super::*;
 	use crate::{create_adapter, models::AgentType};
+
+	/// A tomb that cannot be removed (here: it is a directory, EISDIR on every
+	/// platform and as root) must not be reported as a clean success; an
+	/// already-gone tomb is.
+	#[test]
+	fn tombstone_cleanup_failure_is_not_clean_success() {
+		let tmp = tempfile::tempdir().unwrap();
+		let stuck = tmp.path().join("stuck.md.aghub-tomb");
+		std::fs::create_dir(&stuck).unwrap();
+		let gone = tmp.path().join("gone.md.aghub-tomb");
+		assert!(matches!(
+			drop_tombstones(&[(PathBuf::new(), stuck.clone())]),
+			Err(ConfigError::Io(_))
+		));
+		assert!(stuck.exists());
+		drop_tombstones(&[(PathBuf::new(), gone)]).unwrap();
+	}
 
 	fn manager(root: &Path, agent: AgentType) -> ConfigManager {
 		let mut manager =
@@ -578,21 +575,5 @@ mod tests {
 		assert!(matches!(error, ConfigError::InvalidConfig(_)));
 		let content = std::fs::read_to_string(&file).unwrap();
 		assert!(content.contains("newer-native-value"), "{content}");
-	}
-
-	#[cfg(unix)]
-	#[test]
-	fn symlinked_ancestor_backing_has_one_lock_identity_across_agents() {
-		use std::os::unix::fs::symlink;
-		let tmp = tempfile::tempdir().unwrap();
-		let root = tmp.path();
-		std::fs::create_dir_all(root.join(".claude/agents")).unwrap();
-		symlink(".claude", root.join(".opencode")).unwrap();
-		let claude = manager(root, AgentType::Claude);
-		let opencode = manager(root, AgentType::OpenCode);
-		assert_eq!(
-			claude.sub_agent_lock_path().unwrap(),
-			opencode.sub_agent_lock_path().unwrap(),
-		);
 	}
 }

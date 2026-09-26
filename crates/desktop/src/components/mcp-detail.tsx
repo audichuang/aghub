@@ -105,11 +105,18 @@ export function McpDetail({ group, onEdit, projectPath }: McpDetailProps) {
 			return Promise.all(
 				g.items.map((item) => {
 					const scope = item.source ?? "global";
+					// Deleting the group deletes it from every listed agent at
+					// this scope; agents sharing one config file must be sent
+					// together or the backend refuses to rewrite it.
+					const agents = g.items
+						.filter((other) => (other.source ?? "global") === scope)
+						.flatMap((other) => (other.agent ? [other.agent] : []));
 					return api.mcps.delete(
 						item.name,
 						item.agent ?? "default",
 						scope,
 						projectPath,
+						agents,
 					);
 				}),
 			);

@@ -1925,3 +1925,117 @@ fn concurrent_mcp_adds_keep_every_server() {
 		.collect();
 	assert_eq!(names.len(), 8, "every successful add must survive");
 }
+
+/// A tagged entry whose nested `transport` object the parser flattens must not
+/// keep that object when aghub rewrites the transport: the stale url would
+/// resurface next to the new command and make the whole file unreadable.
+#[test]
+fn update_drops_a_flattened_nested_transport_object() {
+	let project = tempfile::tempdir().unwrap();
+	let root = project.path();
+	std::fs::create_dir_all(root.join(".cursor")).unwrap();
+	std::fs::write(
+		root.join(".cursor/mcp.json"),
+		r#"{"mcpServers":{"s":{"type":"http","transport":{"url":"https://a.test/mcp"}}}}"#,
+	)
+	.unwrap();
+	let mut manager = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	manager.load().unwrap();
+	manager
+		.update_mcp_with("s", |server| {
+			server.transport = McpTransport::stdio("run", vec![]);
+			Ok(())
+		})
+		.unwrap();
+
+	let mut reloaded = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(AgentType::Cursor),
+		false,
+		Some(root),
+	);
+	let mcps = reloaded.load().unwrap().mcps.clone();
+	assert_eq!(mcps.len(), 1);
+	assert_eq!(mcps[0].transport, McpTransport::stdio("run", vec![]));
+}
+
+/// MCP and sub-agent writes share the skill mutation lock, whose project file
+/// lives under `.agents/`. Nothing may be left beside the user's config files
+/// or at the repo root, where it would show up in `git status`.
+#[test]
+fn mcp_and_sub_agent_writes_leave_no_lock_beside_config_files() {
+	let project = tempfile::tempdir().unwrap();
+	let root = project.path();
+	let mut claude = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	claude.load().unwrap();
+	claude.add_mcp(mcp_stdio("x")).unwrap();
+	claude
+		.add_sub_agent(aghub_core::models::SubAgent::new("helper"))
+		.unwrap();
+
+	let mut stray = Vec::new();
+	let mut stack = vec![root.to_path_buf()];
+	while let Some(dir) = stack.pop() {
+		for entry in std::fs::read_dir(&dir).unwrap() {
+			let path = entry.unwrap().path();
+			if path.is_dir() {
+				stack.push(path);
+			} else if path.to_string_lossy().contains(".lock")
+				&& path.parent() != Some(&root.join(".agents"))
+			{
+				stray.push(path);
+			}
+		}
+	}
+	assert!(stray.is_empty(), "lock files outside .agents/: {stray:?}");
+}
+
+/// A hand-written `env: {}` carries no data. Moving that server to a dialect
+/// that normalizes it away must succeed and remove the source, not report the
+/// copy as changed or the source as holding unmovable fields.
+#[test]
+fn reconcile_moves_a_server_with_an_empty_env_object() {
+	use aghub_core::transfer::{reconcile_mcp, InstallScope, ResourceLocator};
+	let project = tempfile::tempdir().unwrap();
+	let root = project.path();
+	std::fs::create_dir_all(root.join(".cursor")).unwrap();
+	std::fs::write(
+		root.join(".cursor/mcp.json"),
+		r#"{"mcpServers":{"srv":{"type":"stdio","command":"run","env":{}}}}"#,
+	)
+	.unwrap();
+	let result = reconcile_mcp(
+		ResourceLocator {
+			agent: AgentType::Cursor,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "srv".into(),
+		},
+		vec![AgentType::OpenCode],
+		vec![AgentType::Cursor],
+		true,
+	)
+	.unwrap();
+	assert_eq!(
+		result.failed_count(),
+		0,
+		"{:?}",
+		result
+			.results
+			.iter()
+			.map(|row| row.error.clone())
+			.collect::<Vec<_>>()
+	);
+	let source =
+		std::fs::read_to_string(root.join(".cursor/mcp.json")).unwrap();
+	assert!(!source.contains("\"srv\""), "source kept: {source}");
+	let target = std::fs::read_to_string(root.join("opencode.json")).unwrap();
+	assert!(target.contains("srv"), "target missing: {target}");
+}

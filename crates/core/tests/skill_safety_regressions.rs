@@ -297,3 +297,87 @@ fn project_store_symlink_cannot_redirect_update() {
 	assert!(result.is_err(), "update escaped through project/.aghub");
 	assert_eq!(std::fs::read(master.join("SKILL.md")).unwrap(), before);
 }
+
+#[test]
+fn project_store_symlink_cannot_redirect_repair_adoption() {
+	let _lock = env_lock();
+	let tmp = tempfile::tempdir().unwrap();
+	let _env = isolated_home(&tmp.path().join("home"));
+	let project = tmp.path().join("project");
+	let outside = tmp.path().join("outside");
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+	std::fs::create_dir_all(&outside).unwrap();
+	std::os::unix::fs::symlink(&outside, project.join(".aghub")).unwrap();
+	write_skill(&project.join(".agents/skills/legacy"), "legacy");
+
+	let result = aghub_core::skills::repair::repair_skill(
+		aghub_core::models::ResourceScope::ProjectOnly,
+		Some(&project),
+		"legacy",
+		true,
+		false,
+	);
+	assert!(
+		!matches!(
+			result,
+			Ok(Some(aghub_core::skills::repair::RepairReport {
+				outcome: aghub_core::skills::repair::RepairOutcome::Migrated,
+				..
+			}))
+		),
+		"repair adopted through project/.aghub: {result:?}"
+	);
+	assert!(
+		!outside.join("legacy").exists(),
+		"repair wrote the Master outside the project"
+	);
+	assert!(
+		project.join(".agents/skills/legacy/SKILL.md").is_file(),
+		"the only copy must stay in place"
+	);
+}
+
+/// The user's own `~/.aghub` may be a symlink into dotfiles; only a
+/// project-controlled store is refused.
+#[test]
+fn global_store_symlink_keeps_install_update_and_delete_working() {
+	let _lock = env_lock();
+	let tmp = tempfile::tempdir().unwrap();
+	let home = tmp.path().join("home");
+	let _env = isolated_home(&home);
+	let dotfiles = tmp.path().join("dotfiles/aghub");
+	std::fs::create_dir_all(&dotfiles).unwrap();
+	std::fs::create_dir_all(&home).unwrap();
+	std::os::unix::fs::symlink(&dotfiles, home.join(".aghub")).unwrap();
+	let source = tmp.path().join("source/dotted");
+	write_skill(&source, "dotted");
+
+	let mut claude =
+		ConfigManager::new(create_adapter(AgentType::Claude), true, None);
+	claude.load().unwrap();
+	claude
+		.add_skill_from_path_universal(&source, None)
+		.expect("global install through a user-linked store");
+	assert!(dotfiles.join("dotted/SKILL.md").is_file());
+
+	claude.load().unwrap();
+	let mut updated = claude.get_skill("dotted").unwrap().clone();
+	updated.description = Some("changed".into());
+	claude
+		.update_skill("dotted", updated)
+		.expect("global update through a user-linked store");
+	assert!(std::fs::read_to_string(dotfiles.join("dotted/SKILL.md"))
+		.unwrap()
+		.contains("changed"));
+
+	claude.load().unwrap();
+	let outcome = claude
+		.remove_skill_planned("dotted", true, false, true)
+		.expect("global delete through a user-linked store");
+	assert!(outcome.executed);
+	assert!(
+		!dotfiles.join("dotted").exists(),
+		"the Master must be removed, not skipped as out-of-tree"
+	);
+	assert!(!home.join(".claude/skills/dotted").exists());
+}

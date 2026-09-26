@@ -1070,7 +1070,7 @@ fn run(cli: Cli) -> Result<()> {
 	}
 	let agent_type = agents[0];
 	eprintln_verbose!("Agent type: {}", cli.agent);
-	match run_for_agent(&cli, agent_type)? {
+	match run_for_agent(&cli, agent_type, &[agent_type])? {
 		Some(payload) => {
 			if cli.json {
 				println!("{}", serde_json::to_string_pretty(&payload)?);
@@ -1790,9 +1790,14 @@ fn row_from_payload(
 /// Mutating commands return `Some(payload)` — the caller prints it
 /// (single-agent) or wraps it in the batch envelope (multi-agent). Commands
 /// that manage their own output return `None`.
+///
+/// `batch` is every agent this invocation targets (`-a` list, or just
+/// `agent_type`). Only `delete` reads it: a shared config file or Referrer may
+/// go only when every agent reading it was named in the same command.
 fn run_for_agent(
 	cli: &Cli,
 	agent_type: AgentType,
+	batch: &[AgentType],
 ) -> Result<Option<serde_json::Value>> {
 	let resolved = resolve_cli_scope(cli)?;
 	let scope = resolved.resource_scope();
@@ -1949,6 +1954,7 @@ fn run_for_agent(
 				all_agents,
 				dry_run,
 				yes,
+				requested_agents: batch.to_vec(),
 			},
 		)
 		.map(Some),
@@ -2147,8 +2153,8 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							"Running for agent: {}",
 							agent.as_str()
 						);
-						let result =
-							run_for_agent(cli, agent).and_then(|payload| {
+						let result = run_for_agent(cli, agent, agents)
+							.and_then(|payload| {
 								row_from_payload(payload)
 									.map_err(anyhow::Error::msg)
 							});
@@ -2191,7 +2197,7 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							"Running for agent: {}",
 							agent.as_str()
 						);
-						run_for_agent(cli, agent)
+						run_for_agent(cli, agent, agents)
 							.map_err(|e| format!("{e:#}"))
 							// Mutating commands always yield a payload; Null keeps
 							// the row well-formed if that invariant ever slips.

@@ -353,11 +353,14 @@ fn apply_update_mcp(
 
 /// Query params for `delete_mcp`. Mirrors the skill `DeleteSkillParams`
 /// dry-run/confirm gate but without `all_agents` (MCP removal is single-scope).
+/// `agents` (comma list) names every agent this one action deletes from, so a
+/// config file shared with another agent may be rewritten when both are in it.
 #[derive(rocket::FromForm)]
 pub struct DeleteMcpParams {
 	scope: Option<String>,
 	project_root: Option<String>,
 	confirm: Option<bool>,
+	agents: Option<String>,
 }
 
 #[delete("/agents/<agent>/mcps/<name>?<params..>")]
@@ -383,6 +386,10 @@ fn delete_mcp_inner(
 	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
 	check_mcp_supported(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
+	let requested = crate::routes::requested_delete_agents(
+		agent.0,
+		params.agents.as_deref(),
+	)?;
 	let confirm = params.confirm.unwrap_or(false);
 	let dry_run = !confirm;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
@@ -403,7 +410,9 @@ fn delete_mcp_inner(
 	// Idempotent-delete contract (a missing MCP is a success no-op, any other
 	// error propagates) is owned once in `routes::removal_or_noop`.
 	crate::routes::removal_or_noop(
-		manager.remove_mcp_planned_single_guarded(name, dry_run, confirm),
+		manager.remove_mcp_planned_single_guarded(
+			name, dry_run, confirm, &requested,
+		),
 		dry_run,
 	)
 }
@@ -782,6 +791,67 @@ mod tests {
 		.is_err());
 	}
 
+	/// Desktop sends the timeout twice (request level and inside the
+	/// transport). A dialect that stores a transport timeout must accept it.
+	#[test]
+	fn desktop_timeout_shape_persists_for_a_dialect_that_stores_it() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		let timeout_of = |transport: TransportDto| match transport {
+			TransportDto::Stdio { timeout, .. } => timeout,
+			other => panic!("unexpected transport {other:?}"),
+		};
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::OpenCode),
+			scope(),
+			Json(CreateMcpRequest {
+				name: "timed".to_string(),
+				transport: TransportDto::Stdio {
+					command: "echo".to_string(),
+					args: vec![],
+					env: None,
+					timeout: Some(45),
+				},
+				timeout: Some(45),
+			}),
+		)
+		.ok()
+		.expect("opencode stores a stdio timeout");
+		let read = || {
+			get_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::OpenCode),
+				"timed",
+				scope(),
+			)
+			.ok()
+			.expect("server persisted")
+			.into_inner()
+		};
+		assert_eq!(timeout_of(read().transport), Some(45));
+
+		// A request-level timeout alone edits the stored transport timeout.
+		update_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::OpenCode),
+			"timed",
+			scope(),
+			Json(UpdateMcpRequest {
+				name: None,
+				transport: None,
+				enabled: None,
+				timeout: Some(60),
+			}),
+		)
+		.ok()
+		.expect("timeout-only edit");
+		assert_eq!(timeout_of(read().transport), Some(60));
+	}
+
 	#[test]
 	fn update_mcp_rejects_timeout_cursor_cannot_persist() {
 		let project = tempfile::tempdir().unwrap();
@@ -956,6 +1026,7 @@ mod tests {
 			scope: Some("project".to_string()),
 			project_root: Some(root.display().to_string()),
 			confirm,
+			agents: None,
 		}
 	}
 

@@ -5,6 +5,7 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 
 use crate::{
+	blocking::in_mutation_pool,
 	dto::skill::DeleteSkillByPathResponse,
 	dto::sub_agent::{
 		CreateSubAgentRequest, SubAgentResponse, UpdateSubAgentRequest,
@@ -39,8 +40,14 @@ fn check_sub_agent_supported(
 }
 
 #[post("/sub-agents/transfer", data = "<body>")]
-pub fn transfer_sub_agent_route(
+pub async fn transfer_sub_agent_route(
 	_origin: TrustedLocalOrigin,
+	body: Json<TransferRequest>,
+) -> ApiResult<OperationBatchResponse> {
+	in_mutation_pool(|| transfer_sub_agent_route_inner(body)).await
+}
+
+fn transfer_sub_agent_route_inner(
 	body: Json<TransferRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -56,8 +63,14 @@ pub fn transfer_sub_agent_route(
 }
 
 #[post("/sub-agents/reconcile", data = "<body>")]
-pub fn reconcile_sub_agent_route(
+pub async fn reconcile_sub_agent_route(
 	_origin: TrustedLocalOrigin,
+	body: Json<ReconcileRequest>,
+) -> ApiResult<OperationBatchResponse> {
+	in_mutation_pool(|| reconcile_sub_agent_route_inner(body)).await
+}
+
+fn reconcile_sub_agent_route_inner(
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -188,8 +201,16 @@ pub fn get_sub_agent(
 }
 
 #[post("/agents/<agent>/sub-agents?<scope..>", data = "<body>")]
-pub fn create_sub_agent(
+pub async fn create_sub_agent(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	scope: ScopeParams,
+	body: Json<CreateSubAgentRequest>,
+) -> ApiCreated<SubAgentResponse> {
+	in_mutation_pool(|| create_sub_agent_inner(agent, scope, body)).await
+}
+
+fn create_sub_agent_inner(
 	agent: AgentParam,
 	scope: ScopeParams,
 	body: Json<CreateSubAgentRequest>,
@@ -208,8 +229,17 @@ pub fn create_sub_agent(
 }
 
 #[put("/agents/<agent>/sub-agents/<name>?<scope..>", data = "<body>")]
-pub fn update_sub_agent(
+pub async fn update_sub_agent(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	name: String,
+	scope: ScopeParams,
+	body: Json<UpdateSubAgentRequest>,
+) -> ApiResult<SubAgentResponse> {
+	in_mutation_pool(|| update_sub_agent_inner(agent, name, scope, body)).await
+}
+
+fn update_sub_agent_inner(
 	agent: AgentParam,
 	name: String,
 	scope: ScopeParams,
@@ -256,8 +286,16 @@ pub struct DeleteSubAgentParams {
 }
 
 #[delete("/agents/<agent>/sub-agents/<name>?<params..>")]
-pub fn delete_sub_agent(
+pub async fn delete_sub_agent(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	name: String,
+	params: DeleteSubAgentParams,
+) -> ApiResult<DeleteSkillByPathResponse> {
+	in_mutation_pool(|| delete_sub_agent_inner(agent, name, params)).await
+}
+
+fn delete_sub_agent_inner(
 	agent: AgentParam,
 	name: String,
 	params: DeleteSubAgentParams,
@@ -288,6 +326,26 @@ mod tests {
 	use super::*;
 	use crate::dto::sub_agent::CreateSubAgentRequest;
 	use aghub_core::models::AgentType;
+
+	// Route wrappers only hand blocking work to the shared pool; exercise the
+	// synchronous bodies here, as the MCP route tests do.
+	fn create_sub_agent(
+		_: TrustedLocalOrigin,
+		agent: AgentParam,
+		scope: ScopeParams,
+		body: Json<CreateSubAgentRequest>,
+	) -> ApiCreated<SubAgentResponse> {
+		create_sub_agent_inner(agent, scope, body)
+	}
+
+	fn delete_sub_agent(
+		_: TrustedLocalOrigin,
+		agent: AgentParam,
+		name: String,
+		params: DeleteSubAgentParams,
+	) -> ApiResult<DeleteSkillByPathResponse> {
+		delete_sub_agent_inner(agent, name, params)
+	}
 
 	/// Seed one Claude sub-agent in a project-scoped temp root so delete tests
 	/// have real on-disk state without touching the real home dir.

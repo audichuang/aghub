@@ -305,6 +305,24 @@ mod tests {
 	// the same assertion stays green with the tag deleted or spelled `bogus`.
 	// The falsifiable half is the REMOTE case, where the tag is the only thing
 	// separating SSE from streamable HTTP.
+	// Copilot CLI writes `"type": "local"` for stdio itself; an unreadable
+	// entry fails the whole config load, skills and sub-agents included.
+	#[test]
+	fn copilot_reads_its_vendor_local_spelling_as_stdio() {
+		let parse = DESCRIPTOR.mcp_parse_config.unwrap();
+		let config =
+			parse(r#"{"mcpServers":{"s":{"type":"local","command":"c"}}}"#)
+				.unwrap();
+		assert!(
+			matches!(
+				&config.mcps[0].transport,
+				McpTransport::Stdio { command, .. } if command == "c"
+			),
+			"got {:?}",
+			config.mcps[0].transport
+		);
+	}
+
 	#[test]
 	fn copilot_dispatches_on_the_type_tag_it_has_been_writing() {
 		let parse = DESCRIPTOR.mcp_parse_config.unwrap();

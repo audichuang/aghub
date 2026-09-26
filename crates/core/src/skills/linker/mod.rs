@@ -35,41 +35,46 @@ pub fn master_store_dir(project_root: Option<&Path>) -> Option<PathBuf> {
 	}
 }
 
-/// Refuse a redirected Master store before reading or changing its contents.
+/// Error text for a refused redirected project store; install reports carry
+/// errors as strings, so callers match on this to surface the real cause.
+pub const LINKED_STORE_ERROR: &str = "project Master store (.aghub) is a link";
+
+fn linked_store_error() -> io::Error {
+	io::Error::new(io::ErrorKind::PermissionDenied, LINKED_STORE_ERROR)
+}
+
+/// Refuse a redirected PROJECT Master store before reading or changing its
+/// contents: a cloned repo can point `<root>/.aghub` anywhere. The global
+/// `~/.aghub` is the user's own and may legitimately be a symlink (dotfiles),
+/// exactly like the global sub-agent dirs, so `None` is never refused.
 pub fn reject_linked_master_store(
 	project_root: Option<&Path>,
 ) -> io::Result<()> {
-	if master_store_dir(project_root)
-		.as_deref()
-		.is_some_and(Linker::is_link)
+	if project_root.is_some()
+		&& master_store_dir(project_root)
+			.as_deref()
+			.is_some_and(Linker::is_link)
 	{
-		return Err(io::Error::new(
-			io::ErrorKind::PermissionDenied,
-			"Master store is a link",
-		));
+		return Err(linked_store_error());
 	}
 	Ok(())
 }
 
-/// Create the Master store without following a redirected store directory.
+/// Create the Master store without following a redirected project store.
 /// A project-controlled `.aghub` link can otherwise write Master bytes outside
-/// the selected project before any Referrer is created.
+/// the selected project before any Referrer is created. The global store is
+/// exempt for the reason given on [`reject_linked_master_store`].
 pub fn ensure_master_store_parent(canonical: &Path) -> io::Result<()> {
 	let parent = canonical.parent().ok_or_else(|| {
 		io::Error::new(io::ErrorKind::InvalidInput, "Master has no parent")
 	})?;
-	if Linker::is_link(parent) {
-		return Err(io::Error::new(
-			io::ErrorKind::PermissionDenied,
-			"Master store is a link",
-		));
+	let global = master_store_dir(None).is_some_and(|store| store == parent);
+	if !global && Linker::is_link(parent) {
+		return Err(linked_store_error());
 	}
 	std::fs::create_dir_all(parent)?;
-	if Linker::is_link(parent) {
-		return Err(io::Error::new(
-			io::ErrorKind::PermissionDenied,
-			"Master store is a link",
-		));
+	if !global && Linker::is_link(parent) {
+		return Err(linked_store_error());
 	}
 	Ok(())
 }

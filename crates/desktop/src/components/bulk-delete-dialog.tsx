@@ -58,6 +58,12 @@ export function BulkDeleteDialog({
 					const scope: "global" | "project" = item.source ?? "global";
 					const projectRoot =
 						scope === "project" ? projectPath : undefined;
+					// Every agent this group is deleted from at this scope. A
+					// shared config file or Referrer is removed only when all
+					// of its readers ride in the same request.
+					const agents = group.items
+						.filter((other) => (other.source ?? "global") === scope)
+						.flatMap((other) => (other.agent ? [other.agent] : []));
 					const dedupKey =
 						groupResourceType === "skill" && item.source_path
 							? `skill:${item.source_path}:${scope}`
@@ -73,6 +79,7 @@ export function BulkDeleteDialog({
 								item.agent,
 								scope,
 								projectRoot,
+								agents,
 							),
 						);
 					} else {
@@ -83,6 +90,8 @@ export function BulkDeleteDialog({
 									group.key,
 									scope,
 									projectRoot,
+									false,
+									agents,
 								)
 								.then(() => undefined),
 						);

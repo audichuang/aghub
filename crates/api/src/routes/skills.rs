@@ -64,6 +64,9 @@ pub struct DeleteSkillParams {
 	project_root: Option<String>,
 	confirm: Option<bool>,
 	all_agents: Option<bool>,
+	/// Comma list of every agent this one action deletes from; see
+	/// `routes::requested_delete_agents`.
+	agents: Option<String>,
 }
 
 impl DeleteSkillParams {
@@ -1351,6 +1354,8 @@ pub async fn delete_skill(
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "delete").await?;
 	}
+	let requested =
+		super::requested_delete_agents(agent.0, params.agents.as_deref())?;
 	let confirm = params.confirm.unwrap_or(false);
 	let dry_run = !confirm;
 	let name = name.to_string();
@@ -1364,7 +1369,9 @@ pub async fn delete_skill(
 		// `routes::removal_or_noop` — this was its third hand-rolled copy, and
 		// the copy returned no `outcome` at all.
 		super::removal_or_noop(
-			manager.remove_skill_planned(&name, all_agents, dry_run, confirm),
+			manager.remove_skill_planned_for_agents(
+				&name, all_agents, dry_run, confirm, &requested,
+			),
 			dry_run,
 		)
 	})
@@ -3514,6 +3521,77 @@ mod tests {
 					all_agents: None,
 					confirm: Some(true),
 				}),
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+			assert_eq!(
+				response.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Removed,
+				"{response:?}"
+			);
+			assert!(std::fs::symlink_metadata(&shared).is_err());
+			assert!(!master.exists());
+		});
+	}
+
+	/// The by-name route desktop's bulk delete uses: one agent alone may not
+	/// take a shared Referrer from the rest of its readers, and `agents`
+	/// naming every reader lets the same request remove it.
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_name_removes_shared_referrer_only_with_every_reader() {
+		with_isolated_env(|home, _state| {
+			let master = home.join(".aghub/by-name-group");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: by-name-group\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let shared = home.join(".agents/skills/by-name-group");
+			std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+			std::os::unix::fs::symlink(&master, &shared).unwrap();
+			let readers =
+				aghub_core::skills::removal::skill_dir_readers_outside(
+					shared.parent().unwrap(),
+					ResourceScope::GlobalOnly,
+					None,
+					&[],
+				);
+			assert!(readers.len() > 1, "fixture requires a shared reader set");
+			let params = |agents: Option<String>| DeleteSkillParams {
+				scope: Some("global".to_string()),
+				project_root: None,
+				confirm: Some(true),
+				all_agents: None,
+				agents,
+			};
+
+			let alone = block_on(delete_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cline),
+				"by-name-group",
+				params(None),
+			));
+			assert!(
+				alone.as_ref().map_or(true, |r| r.outcome
+					!= crate::dto::skill::RemovalOutcomeKind::Removed),
+				"one agent removed a shared grant"
+			);
+			assert!(std::fs::symlink_metadata(&shared).is_ok());
+			assert!(master.exists());
+
+			let all = readers
+				.iter()
+				.map(|id| id.to_string())
+				.collect::<Vec<_>>()
+				.join(",");
+			let response = block_on(delete_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cline),
+				"by-name-group",
+				params(Some(all)),
 			))
 			.ok()
 			.expect("handler returned ok")

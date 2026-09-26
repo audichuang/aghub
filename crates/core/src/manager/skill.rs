@@ -1553,6 +1553,15 @@ impl ConfigManager {
 		}
 		match results.first() {
 			Some(r) if r.error.is_none() => Ok(()),
+			Some(r)
+				if r.error.as_deref().is_some_and(|e| {
+					e.contains(crate::skills::linker::LINKED_STORE_ERROR)
+				}) =>
+			{
+				Err(ConfigError::InvalidConfig(
+					crate::skills::linker::LINKED_STORE_ERROR.to_string(),
+				))
+			}
 			_ => Err(ConfigError::resource_exists("skill", skill_name)),
 		}
 	}

@@ -99,6 +99,47 @@ fn add_does_not_replace_a_differently_named_file_at_its_destination() {
 	assert!(!agent_md_path(root, "blocked").exists());
 }
 
+/// Codex stores sub-agents as TOML through its own writer; the destination
+/// check must hold there too, not only for the markdown layouts.
+#[test]
+fn codex_add_does_not_replace_a_differently_named_file_at_its_destination() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let file = root.join(".codex/agents/keeper.toml");
+	std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+	let original = "name = \"blocked\"\ndescription = \"b\"\nmodel = \"o3\"\n";
+	std::fs::write(&file, original).unwrap();
+	let mut manager =
+		ConfigManager::new(create_adapter(AgentType::Codex), false, Some(root));
+	manager.load().unwrap();
+	assert!(manager.get_sub_agent("blocked").is_some());
+	let error = manager
+		.add_sub_agent(agent_with_instruction("keeper", "new body"))
+		.unwrap_err();
+	assert!(
+		matches!(error, ConfigError::ResourceExists { .. }),
+		"unexpected error: {error:?}"
+	);
+	assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+
+	// Editing an entry in the file it was loaded from still works.
+	let own = root.join(".codex/agents/worker.toml");
+	std::fs::write(&own, "name = \"worker\"\nmodel = \"o3\"\n").unwrap();
+	manager.load().unwrap();
+	manager
+		.update_sub_agent(
+			"worker",
+			SubAgentPatch {
+				instruction: Some("edited".into()),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	let content = std::fs::read_to_string(&own).unwrap();
+	assert!(content.contains("edited"), "{content}");
+	assert!(content.contains("model = \"o3\""), "{content}");
+}
+
 #[test]
 fn patch_from_a_stale_manager_preserves_a_concurrent_field_update() {
 	let tmp = tempfile::tempdir().unwrap();
@@ -558,4 +599,97 @@ fn remove_sub_agent_wrapper_missing_is_not_found() {
 
 	let err = mgr.remove_sub_agent("ghost").unwrap_err();
 	assert!(matches!(err, ConfigError::ResourceNotFound { .. }));
+}
+
+/// Antigravity keeps one directory per sub-agent, so a read-only per-agent
+/// directory blocks exactly the unlink/rename inside it while the sibling
+/// directory a rename writes to stays writable. Every mutation re-reads the
+/// disk under the lock, so a planted `source_path` cannot inject the failure.
+#[cfg(unix)]
+fn antigravity_agent(root: &std::path::Path, name: &str) -> std::path::PathBuf {
+	let dir = root.join(".agents/agents").join(name);
+	std::fs::create_dir_all(&dir).unwrap();
+	std::fs::write(
+		dir.join("agent.md"),
+		format!("---\nname: {name}\ndescription: d\n---\nbody"),
+	)
+	.unwrap();
+	dir
+}
+
+#[cfg(unix)]
+fn antigravity_manager(root: &std::path::Path) -> ConfigManager {
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Antigravity),
+		false,
+		Some(root),
+	);
+	manager.load().unwrap();
+	manager
+}
+
+#[cfg(unix)]
+fn with_read_only<T>(dir: &std::path::Path, run: impl FnOnce() -> T) -> T {
+	use std::os::unix::fs::PermissionsExt;
+	let original = std::fs::metadata(dir).unwrap().permissions();
+	std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555))
+		.unwrap();
+	let result = run();
+	std::fs::set_permissions(dir, original).unwrap();
+	result
+}
+
+#[cfg(unix)]
+#[test]
+fn update_sub_agent_rename_stale_file_delete_failure_errors() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	if !perms_enforced(root) {
+		eprintln!("skip: root bypasses 0o555");
+		return;
+	}
+	let old_dir = antigravity_agent(root, "reviewer");
+	let mut manager = antigravity_manager(root);
+	let result = with_read_only(&old_dir, || {
+		manager.update_sub_agent(
+			"reviewer",
+			SubAgentPatch {
+				name: Some("auditor".into()),
+				..Default::default()
+			},
+		)
+	});
+	let error = result.expect_err(
+		"a failed stale-file delete on rename must surface, not be swallowed",
+	);
+	assert!(matches!(error, ConfigError::Io(_)), "got {error:?}");
+	assert!(
+		old_dir.join("agent.md").exists(),
+		"the stale file lingers; the error is what tells the caller"
+	);
+}
+
+#[cfg(unix)]
+#[test]
+fn remove_sub_agent_planned_failed_delete_errors_without_mutating() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	if !perms_enforced(root) {
+		eprintln!("skip: root bypasses 0o555");
+		return;
+	}
+	let dir = antigravity_agent(root, "reviewer");
+	let before = std::fs::read(dir.join("agent.md")).unwrap();
+	let mut manager = antigravity_manager(root);
+	let result = with_read_only(&dir, || {
+		manager.remove_sub_agent_planned("reviewer", false, true)
+	});
+	let error = result.expect_err("an undeletable backing file must surface");
+	assert!(matches!(error, ConfigError::Io(_)), "got {error:?}");
+	assert!(
+		manager.get_sub_agent("reviewer").is_some(),
+		"a failed delete must not drop the agent from memory"
+	);
+	assert_eq!(std::fs::read(dir.join("agent.md")).unwrap(), before);
+	assert!(!dir.join("agent.md.aghub-tomb").exists());
 }
