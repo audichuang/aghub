@@ -52,6 +52,7 @@ lint:
 # you touch path/fs code, add a test that SIMULATES the platform condition on
 # Linux (e.g. operate through a symlinked temp dir to mimic macOS /private).
 preflight:
+    bash scripts/check-test-tmpdir.sh
     cargo fmt --all --check
     cargo clippy --workspace --all-targets -- -D warnings
     # Sync node_modules to the LOCKFILE before any frontend gate runs. CI always
