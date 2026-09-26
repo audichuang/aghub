@@ -261,6 +261,22 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 	};
 
 	for (name, mut mcp_val) in servers_map {
+		// The normalizer flattens and later removes this whole object. Refuse
+		// fields it cannot carry so an unrelated edit cannot silently erase them.
+		if let Some(nested) =
+			mcp_val.get("transport").and_then(|v| v.as_object())
+		{
+			if let Some(key) = nested.keys().find(|key| {
+				!matches!(
+					key.as_str(),
+					"type" | "command" | "args" | "env" | "url" | "headers"
+				)
+			}) {
+				return Err(ConfigError::InvalidConfig(format!(
+					"MCP server '{name}' has unsupported transport field '{key}'"
+				)));
+			}
+		}
 		flatten_nested_transport(&mut mcp_val);
 		let MapMcpServer {
 			server_type,
@@ -311,6 +327,19 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 			_ => None,
 		};
 		let tag = own_tag.or(server_type.as_deref()).or(nested_transport);
+		if declared_http {
+			if let Some(tag) = tag {
+				// Gemini gives httpUrl precedence over known type words,
+				// including sse. An unknown word still cannot be rewritten.
+				if !matches!(tag, "stdio" | "sse")
+					&& !dialect.vocab.reads_http(tag)
+				{
+					return Err(ConfigError::InvalidConfig(format!(
+						"MCP server '{name}' transport '{tag}' conflicts with httpUrl"
+					)));
+				}
+			}
+		}
 		let transport = if declared_http {
 			McpTransport::StreamableHttp {
 				url: url.expect("httpUrl was present"),
@@ -351,10 +380,15 @@ pub fn parse(content: &str, dialect: &Dialect) -> Result<AgentConfig> {
 				}
 				Some("ws" | "websocket") => {
 					return Err(ConfigError::InvalidConfig(format!(
-					"MCP server '{name}' uses unsupported WebSocket transport"
-				)));
+						"MCP server '{name}' uses unsupported WebSocket transport"
+					)));
 				}
-				None | Some(_) => {
+				Some(tag) => {
+					return Err(ConfigError::InvalidConfig(format!(
+						"MCP server '{name}' uses unknown transport '{tag}'"
+					)));
+				}
+				None => {
 					if let Some(command) = command {
 						McpTransport::Stdio {
 							command,
@@ -520,6 +554,10 @@ pub fn serialize(
 				))
 			})?,
 		};
+		// If the native discriminator is present, the other key is foreign
+		// data; preserve it instead of silently dropping it on a rewrite.
+		let has_native_tag = !dialect.vocab.tag_key.is_empty()
+			&& entry.contains_key(dialect.vocab.tag_key);
 		for key in [
 			"type",
 			"transport",
@@ -529,6 +567,12 @@ pub fn serialize(
 			"environment",
 			"headers",
 		] {
+			if has_native_tag
+				&& matches!(key, "type" | "transport")
+				&& key != dialect.vocab.tag_key
+			{
+				continue;
+			}
 			entry.remove(key);
 		}
 		// Only the URL spellings this dialect OWNS. Removing a foreign one
@@ -900,12 +944,37 @@ mod tests {
 			serialize(&config, Some(json), &OWN_TAG_TRANSPORT).unwrap();
 		let value: serde_json::Value = serde_json::from_str(&output).unwrap();
 		assert_eq!(value["mcpServers"]["s"]["transport"], "http");
+		assert_eq!(value["mcpServers"]["s"]["type"], "sse");
 
 		// The `type` dialect reads the same file the other way round.
 		assert!(matches!(
 			parse(json, &MCP_SERVERS).unwrap().mcps[0].transport,
 			McpTransport::Sse { .. }
 		));
+	}
+
+	#[test]
+	fn unknown_tag_is_refused_even_when_http_url_declares_the_transport() {
+		const HTTP_URL: Dialect = Dialect {
+			http_url_key: Some("httpUrl"),
+			..MCP_SERVERS
+		};
+		let error = parse(
+			r#"{"mcpServers":{"s":{"type":"grpc","httpUrl":"https://host/mcp"}}}"#,
+			&HTTP_URL,
+		)
+		.unwrap_err();
+		assert!(error.to_string().contains("grpc"), "got: {error}");
+	}
+
+	#[test]
+	fn nested_transport_with_unmodelled_fields_is_refused() {
+		let error = parse(
+			r#"{"mcpServers":{"s":{"transport":{"type":"http","url":"https://host/mcp","retryPolicy":"strict"}}}}"#,
+			&MCP_SERVERS,
+		)
+		.unwrap_err();
+		assert!(error.to_string().contains("retryPolicy"), "got: {error}");
 	}
 
 	#[test]

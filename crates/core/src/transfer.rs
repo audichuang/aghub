@@ -7,7 +7,6 @@ use crate::{
 };
 use log::{info, warn};
 use std::collections::HashSet;
-#[cfg(test)]
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -230,16 +229,30 @@ fn mcp_supported_for_target(
 	}
 }
 
-fn sub_agent_supported_for_target(target: &InstallTarget) -> Result<()> {
+fn sub_agent_supported_for_target(
+	target: &InstallTarget,
+	sub_agent: &SubAgent,
+	lossless: bool,
+) -> Result<()> {
 	let descriptor = registry::get(target.agent);
-	if descriptor.supports_sub_agent_scope(target_resource_scope(target)) {
-		return Ok(());
+	if !descriptor.supports_sub_agent_scope(target_resource_scope(target)) {
+		return Err(ConfigError::unsupported_operation(
+			"copy",
+			"sub-agent",
+			descriptor.id,
+		));
 	}
-	Err(ConfigError::unsupported_operation(
-		"copy",
-		"sub-agent",
-		descriptor.id,
-	))
+	if lossless
+		&& target.agent == AgentType::Codex
+		&& !sub_agent.extra_frontmatter.is_empty()
+	{
+		return Err(ConfigError::unsupported_operation(
+			"copy without losing fields",
+			"sub-agent",
+			descriptor.id,
+		));
+	}
+	Ok(())
 }
 
 fn load_source_mcp(source: &ResourceLocator) -> Result<McpServer> {
@@ -252,6 +265,61 @@ fn load_source_mcp(source: &ResourceLocator) -> Result<McpServer> {
 	manager.get_mcp(&source.name).cloned().ok_or_else(|| {
 		ConfigError::resource_not_found("MCP server", &source.name)
 	})
+}
+
+fn ensure_mcp_source_fields_representable(
+	source: &ResourceLocator,
+	mcp: &McpServer,
+) -> Result<()> {
+	let path = build_manager(&InstallTarget {
+		agent: source.agent,
+		scope: source.scope,
+		project_root: source.project_root.clone(),
+	})
+	.config_path()
+	.ok_or_else(|| {
+		ConfigError::InvalidConfig("MCP source path unavailable".to_string())
+	})?;
+	let content = fs::read_to_string(path)?;
+	let serialize = registry::get(source.agent)
+		.mcp_serialize_config
+		.ok_or_else(|| {
+			ConfigError::InvalidConfig(
+				"MCP source serializer unavailable".to_string(),
+			)
+		})?;
+	if aghub_agents::format::unmanaged_mcp_source_fields(
+		mcp, &content, serialize,
+	)? {
+		return Err(ConfigError::InvalidConfig(format!(
+			"MCP server '{}' has unmanaged fields that cannot be copied before removing its source",
+			source.name
+		)));
+	}
+	Ok(())
+}
+
+fn ensure_sub_agent_source_fields_representable(
+	source: &ResourceLocator,
+	sub_agent: &SubAgent,
+) -> Result<()> {
+	if source.agent != AgentType::Codex {
+		return Ok(());
+	}
+	let path = sub_agent.source_path.as_deref().ok_or_else(|| {
+		ConfigError::InvalidConfig(
+			"Codex sub-agent source path unavailable".to_string(),
+		)
+	})?;
+	if aghub_agents::agents::codex::sub_agent_has_unmanaged_fields(Path::new(
+		path,
+	))? {
+		return Err(ConfigError::InvalidConfig(format!(
+			"Codex sub-agent '{}' has unmanaged fields that cannot be copied before removing its source",
+			source.name
+		)));
+	}
+	Ok(())
 }
 
 fn load_source_skill(source: &ResourceLocator) -> Result<Skill> {
@@ -421,11 +489,11 @@ fn resolve_through_links(path: PathBuf) -> PathBuf {
 /// A backing file's identity — NOT its path.
 ///
 /// `canonicalize` collapses symlinks but NOT hard links: two directory entries,
-/// one inode. Every writer under here truncates in place (`fs::write`), so a
-/// removal through one name empties the other, while comparing resolved path
-/// strings sees two unrelated files. This is not exotic — dotfile setups make
-/// them deliberately (`cp -l`), and de-duplicators (rdfind, jdupes) make them
-/// by accident out of any two identical config files. Verified: with
+/// one inode. Before writing, the shared backing must be recognized even when
+/// the path strings differ; replacing a file changes which link owns the copy,
+/// while an in-place rewrite changes both. Dotfile setups make hard links
+/// deliberately (`cp -l`), and de-duplicators (rdfind, jdupes) make them
+/// by accident out of any two identical config files. Previously, with
 /// `~/.claude.json` hard-linked to `~/.cursor/mcp.json`, a reconcile that named
 /// claude as a COPY TARGET emptied claude's config and reported
 /// "2 succeeded, 0 failed".
@@ -988,16 +1056,100 @@ fn copy_mcp_into(target: &InstallTarget, mcp: &McpServer) -> Result<bool> {
 	ensure_loaded(&mut manager)?;
 	if let Some(existing) = manager.get_mcp(&mcp.name) {
 		// `config_source` is load-time provenance, not part of the value.
-		let equivalent = existing.enabled == mcp.enabled
-			&& existing.transport == mcp.transport
-			&& existing.timeout == mcp.timeout;
-		if equivalent {
+		if mcp_value_matches(existing, mcp) {
 			return Ok(true);
 		}
 		return Err(ConfigError::resource_exists("MCP server", &mcp.name));
 	}
 	manager.add_mcp(mcp.clone())?;
 	Ok(false)
+}
+
+fn mcp_value_matches(actual: &McpServer, expected: &McpServer) -> bool {
+	actual.name == expected.name
+		&& actual.enabled == expected.enabled
+		&& actual.transport == expected.transport
+		&& actual.timeout == expected.timeout
+}
+
+fn delete_reconciled_mcp(
+	source: &ResourceLocator,
+	target: &InstallTarget,
+	expected: &McpServer,
+	protect: &[Protected],
+	copies: &[OperationPlan],
+	source_removed: bool,
+) -> Result<bool> {
+	let mut manager = build_manager(target);
+	ensure_loaded(&mut manager)?;
+	manager
+		.remove_mcp_planned_checked(&source.name, false, true, |current| {
+			// Re-resolve the backing after copies, under the same lock as the
+			// fresh read and rewrite. A newly created config can change it.
+			ensure_removals_spare(
+				protect,
+				std::slice::from_ref(target),
+				source.agent,
+				mcp_backing_path,
+			)?;
+			if source_removed
+				&& current.iter().any(|server| server.name == source.name)
+			{
+				let source_target = InstallTarget {
+					agent: source.agent,
+					scope: source.scope,
+					project_root: source.project_root.clone(),
+				};
+				let same_backing = match (
+					mcp_backing_path(&source_target),
+					mcp_backing_path(target),
+				) {
+					(Backed::At(source_path), Backed::At(target_path)) => {
+						Backing::of(source_path).is(&Backing::of(target_path))
+					}
+					_ => {
+						return Err(ConfigError::InvalidConfig(
+							"cannot verify MCP source backing during reconcile"
+								.into(),
+						));
+					}
+				};
+				if same_backing {
+					// A sibling agent can delete the source first when both
+					// descriptors read one file. Compare through the source's
+					// dialect even when this delete row names the sibling.
+					let actual = load_source_mcp(source)?;
+					if !mcp_value_matches(&actual, expected) {
+						return Err(ConfigError::InvalidConfig(format!(
+							"MCP server '{}' changed in its source during reconcile; retry",
+							source.name
+						)));
+					}
+					if !copies.is_empty() {
+						ensure_mcp_source_fields_representable(
+							source, &actual,
+						)?;
+						for copy in copies {
+							let mut copied = build_manager(&copy.target);
+							ensure_loaded(&mut copied)?;
+							if !copied.get_mcp(&source.name).is_some_and(
+								|server| mcp_value_matches(server, expected),
+							) {
+								return Err(ConfigError::InvalidConfig(
+									format!(
+									"MCP server '{}' changed in target '{}' during reconcile; source kept",
+									source.name,
+									copy.target.agent.as_str()
+								),
+								));
+							}
+						}
+					}
+				}
+			}
+			Ok(())
+		})
+		.map(|_| true)
 }
 
 /// Copy one sub-agent into a target. See [`copy_mcp_into`] for why equivalence
@@ -1011,7 +1163,8 @@ fn copy_sub_agent_into(
 	ensure_loaded(&mut manager)?;
 	if let Some(existing) = manager.get_sub_agent(&sub_agent.name) {
 		let equivalent = existing.description == sub_agent.description
-			&& existing.instruction == sub_agent.instruction;
+			&& existing.instruction == sub_agent.instruction
+			&& existing.extra_frontmatter == sub_agent.extra_frontmatter;
 		if equivalent {
 			return Ok(true);
 		}
@@ -1448,6 +1601,9 @@ pub fn reconcile_mcp(
 		source.scope,
 		source.project_root.clone(),
 	);
+	if deletes_source && !copies.is_empty() {
+		ensure_mcp_source_fields_representable(&source, &mcp)?;
+	}
 	// Before ANY write: an add and a remove that resolve to the same file
 	// cannot both be honoured, and attempting it deletes from both. The protect
 	// list is the ROSTER, not just the agents this command named — see
@@ -1484,36 +1640,27 @@ pub fn reconcile_mcp(
 			Ok(())
 		},
 		|plan| {
-			let outcome = (|| -> Result<bool> {
-				match plan.action {
-					// Same helper as `transfer_mcp` — the two must not disagree
-					// about what "already there" means.
-					OperationAction::Copy => copy_mcp_into(&plan.target, &mcp),
-					OperationAction::Delete => {
-						// Re-check now that every copy has run: this target
-						// may have been resolved onto a file one of them just
-						// created. Copilot's project path is `.mcp.json` when
-						// that file exists, `.github/mcp.json` when only that
-						// one does, and `.mcp.json` again when neither exists,
-						// so the preflight above is only a SNAPSHOT.
-						ensure_removals_spare(
+			let outcome = match plan.action {
+				// Same helper as `transfer_mcp` — the two must not disagree
+				// about what "already there" means.
+				OperationAction::Copy => copy_mcp_into(&plan.target, &mcp),
+				OperationAction::Delete => {
+					// The fresh value and shared-reader policy must be checked
+					// while holding the same lock as the deletion.
+					sibling_already_took_it(
+						delete_reconciled_mcp(
+							&source,
+							&plan.target,
+							&mcp,
 							&protect,
-							std::slice::from_ref(&plan.target),
-							source.agent,
-							mcp_backing_path,
-						)?;
-						let mut manager = build_manager(&plan.target);
-						ensure_loaded(&mut manager)?;
-						// `remove_mcp` errors when the entry is not there, so
-						// its `Ok` is a real deletion — the credential.
-						sibling_already_took_it(
-							manager.remove_mcp(&source.name).map(|()| true),
-							plan.target.agent,
-							&mut credits,
-						)
-					}
+							&copies,
+							source_removed,
+						),
+						plan.target.agent,
+						&mut credits,
+					)
 				}
-			})();
+			};
 			let name = if plan.action == OperationAction::Copy {
 				&mcp.name
 			} else {
@@ -1570,7 +1717,7 @@ pub fn transfer_sub_agent(
 		&plans,
 		|plan| {
 			validate_target(&plan.target)?;
-			sub_agent_supported_for_target(&plan.target)
+			sub_agent_supported_for_target(&plan.target, &sub_agent, false)
 		},
 		|plan| {
 			let outcome = copy_sub_agent_into(&plan.target, &sub_agent);
@@ -1609,6 +1756,9 @@ pub fn reconcile_sub_agent(
 		source.scope,
 		source.project_root.clone(),
 	);
+	if source_removed && !copies.is_empty() {
+		ensure_sub_agent_source_fields_representable(&source, &sub_agent)?;
+	}
 	// Same shape as the MCP guard above, and the same destruction when it is
 	// missing: the copy finds its OWN file, reports `already_present`
 	// truthfully, the staged gate only asks whether the copy ERRORED, and the
@@ -1639,42 +1789,68 @@ pub fn reconcile_sub_agent(
 		|plan| {
 			validate_target(&plan.target)?;
 			if plan.action == OperationAction::Copy {
-				sub_agent_supported_for_target(&plan.target)?;
+				sub_agent_supported_for_target(
+					&plan.target,
+					&sub_agent,
+					source_removed,
+				)?;
 			}
 			Ok(())
 		},
 		|plan| {
-			let outcome = (|| -> Result<bool> {
-				match plan.action {
-					// Same helper as `transfer_sub_agent`.
-					OperationAction::Copy => {
-						copy_sub_agent_into(&plan.target, &sub_agent)
-					}
-					OperationAction::Delete => {
-						// Re-check now that every copy has run: the file this
-						// target resolves to may be one a copy just created.
-						ensure_removals_spare(
-							&protect,
-							std::slice::from_ref(&plan.target),
-							source.agent,
-							|target| {
-								sub_agent_backing_path(target, &source.name)
-							},
-						)?;
+			let outcome = match plan.action {
+				// Same helper as `transfer_sub_agent`.
+				OperationAction::Copy => {
+					copy_sub_agent_into(&plan.target, &sub_agent)
+				}
+				OperationAction::Delete => {
+					// Re-check now that every copy has run: the file this
+					// target resolves to may be one a copy just created.
+					ensure_removals_spare(
+						&protect,
+						std::slice::from_ref(&plan.target),
+						source.agent,
+						|target| sub_agent_backing_path(target, &source.name),
+					)
+					.and_then(|()| {
 						let mut manager = build_manager(&plan.target);
 						ensure_loaded(&mut manager)?;
 						// Same as the MCP arm: `Ok` only ever follows a real
 						// delete, so it is the credential.
+						let source_backing = sub_agent.source_path.as_deref();
+						let current_backing = manager
+							.get_sub_agent(&source.name)
+							.and_then(|agent| agent.source_path.as_deref());
+						let shares_source =
+							match (source_backing, current_backing) {
+								(Some(source_path), Some(current_path)) => {
+									skill::lock::resolve_existing(Path::new(
+										source_path,
+									)) == skill::lock::resolve_existing(
+										Path::new(current_path),
+									)
+								}
+								_ => false,
+							};
+						let removed = if plan.target.agent == source.agent
+							|| (source_removed && shares_source)
+						{
+							manager.remove_sub_agent_if_unchanged(
+								&source.name,
+								&sub_agent,
+								!copies.is_empty(),
+							)
+						} else {
+							manager.remove_sub_agent(&source.name)
+						};
 						sibling_already_took_it(
-							manager
-								.remove_sub_agent(&source.name)
-								.map(|()| true),
+							removed.map(|()| true),
 							plan.target.agent,
 							&mut credits,
 						)
-					}
+					})
 				}
-			})();
+			};
 			let name = if plan.action == OperationAction::Copy {
 				&sub_agent.name
 			} else {
@@ -1848,6 +2024,7 @@ fn skill_holders(
 struct ReconcileSkillPlan {
 	skill: Skill,
 	source_root: PathBuf,
+	requested_removals: Vec<AgentType>,
 	/// Does this reconcile drop the skill from EVERY agent that holds it? Then
 	/// the shared Master has no remaining reader and must go with it. Removing
 	/// it per-agent instead refuses on every target (an agent reading the
@@ -1979,11 +2156,12 @@ fn plan_reconcile_skill(
 			let mut manager = build_manager(&row.target);
 			let paths = ensure_loaded(&mut manager)
 				.and_then(|()| {
-					manager.remove_skill_planned(
+					manager.remove_skill_planned_for_agents(
 						&skill.name,
 						exhaustive,
 						true,
 						true,
+						removed,
 					)
 				})
 				.map(|outcome| outcome.plan.paths)
@@ -1995,6 +2173,7 @@ fn plan_reconcile_skill(
 	Ok(ReconcileSkillPlan {
 		skill,
 		source_root,
+		requested_removals: removed.to_vec(),
 		exhaustive,
 		// Unreadable agents get their own clause in the refusal, so leaving
 		// them out here keeps a message from naming the same agent twice.
@@ -2055,11 +2234,12 @@ impl ReconcileSkillPlan {
 		// it here from the target's own read dirs is exactly the second
 		// derivation the paragraph below warns about.
 		let (mut shared_master_kept, still_read_from, mut deleting) =
-			match manager.remove_skill_planned(
+			match manager.remove_skill_planned_for_agents(
 				&self.skill.name,
 				self.exhaustive,
 				true, // dry_run
 				true,
+				&self.requested_removals,
 			) {
 				Ok(outcome) => (
 					outcome.plan.shared_master_kept,
@@ -2535,11 +2715,12 @@ pub fn reconcile_skill(
 					// at all — `remove_skill_planned` refuses it.
 					sibling_already_took_it(
 						manager
-							.remove_skill_planned(
+							.remove_skill_planned_for_agents(
 								&plan.skill.name,
 								plan.exhaustive,
 								false,
 								true,
+								&plan.requested_removals,
 							)
 							.and_then(|outcome| {
 								if outcome.failed_paths.is_empty() {
@@ -2870,11 +3051,310 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn reconcile_mcp_refuses_unmodelled_opencode_options_before_writing() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = root.join("opencode.json");
+		let target = root.join(".cursor/mcp.json");
+		let original = r#"{"mcp":{"remote-srv":{"type":"remote","url":"https://example.com/mcp","oauth":{"clientId":"client-id"}}}}"#;
+		fs::write(&source, original).unwrap();
+
+		let error = reconcile_mcp(
+			ResourceLocator {
+				agent: AgentType::OpenCode,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "remote-srv".to_string(),
+			},
+			vec![AgentType::Cursor],
+			vec![AgentType::OpenCode],
+			true,
+		).expect_err("native OAuth options cannot be copied through the normalized model");
+
+		assert!(error.to_string().contains("unmanaged"), "got: {error}");
+		assert_eq!(fs::read_to_string(&source).unwrap(), original);
+		assert!(
+			!target.exists(),
+			"preflight refusal must precede destination writes"
+		);
+
+		fs::write(&source, r#"{"mcp":{"remote-srv":{"type":"remote","url":"https://example.com/mcp"}}}"#).unwrap();
+		let result = reconcile_mcp(
+			ResourceLocator {
+				agent: AgentType::OpenCode,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "remote-srv".to_string(),
+			},
+			vec![AgentType::Cursor],
+			vec![AgentType::OpenCode],
+			true,
+		)
+		.unwrap();
+		assert_eq!(result.success_count(), 2);
+		assert!(target.exists());
+	}
+
+	#[test]
+	fn reconcile_mcp_refuses_unmodelled_json_map_options_before_writing() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = root.join(".cursor/mcp.json");
+		let target = root.join("opencode.json");
+		fs::create_dir_all(source.parent().unwrap()).unwrap();
+		let original = r#"{"mcpServers":{"remote-srv":{"type":"http","url":"https://example.com/mcp","oauth":{"clientId":"client-id"}}}}"#;
+		fs::write(&source, original).unwrap();
+
+		let error = reconcile_mcp(
+			ResourceLocator {
+				agent: AgentType::Cursor,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "remote-srv".to_string(),
+			},
+			vec![AgentType::OpenCode],
+			vec![AgentType::Cursor],
+			true,
+		).expect_err("native JSON-map options cannot be copied through the normalized model");
+
+		assert!(error.to_string().contains("unmanaged"), "got: {error}");
+		assert_eq!(fs::read_to_string(&source).unwrap(), original);
+		assert!(!target.exists());
+	}
+
+	#[test]
+	fn reconcile_mcp_refuses_unmodelled_toml_options_before_writing() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = root.join(".codex/config.toml");
+		let target = root.join(".cursor/mcp.json");
+		fs::create_dir_all(source.parent().unwrap()).unwrap();
+		let original = "[mcp_servers.remote-srv]\nurl = \"https://example.com/mcp\"\nbearer_token_env_var = \"TOKEN\"\n";
+		fs::write(&source, original).unwrap();
+
+		let error = reconcile_mcp(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "remote-srv".to_string(),
+			},
+			vec![AgentType::Cursor],
+			vec![AgentType::Codex],
+			true,
+		)
+		.expect_err("Codex auth field cannot survive cross-agent reconcile");
+
+		assert!(error.to_string().contains("unmanaged"), "got: {error}");
+		assert_eq!(fs::read_to_string(&source).unwrap(), original);
+		assert!(!target.exists());
+	}
+
 	// Cursor, NOT Claude: Claude and Copilot both resolve a project MCP to
 	// `<root>/.mcp.json`, so removing from Claude here is refused by
 	// `protected_targets`' roster list — copilot would lose the server too.
 	// Cursor owns `<root>/.cursor/mcp.json` alone, which is what this test
 	// needs to say anything about deletion at all.
+	#[test]
+	fn reconcile_mcp_preserves_a_source_or_copy_changed_after_copy() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = ResourceLocator {
+			agent: AgentType::Cursor,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "filesystem".to_string(),
+		};
+		let target = InstallTarget {
+			agent: AgentType::OpenCode,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+		};
+		let copies = vec![OperationPlan {
+			target: target.clone(),
+			action: OperationAction::Copy,
+		}];
+		let mut source_manager = build_manager(&InstallTarget {
+			agent: source.agent,
+			scope: source.scope,
+			project_root: source.project_root.clone(),
+		});
+		ensure_loaded(&mut source_manager).unwrap();
+		source_manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("old-command", vec![]),
+			))
+			.unwrap();
+		let original = load_source_mcp(&source).unwrap();
+		copy_mcp_into(&target, &original).unwrap();
+
+		// A second manager changes the source between the copy and delete.
+		source_manager
+			.update_mcp(
+				"filesystem",
+				McpServer::new(
+					"filesystem",
+					McpTransport::stdio("new-command", vec![]),
+				),
+			)
+			.unwrap();
+		let error = delete_reconciled_mcp(
+			&source,
+			&InstallTarget {
+				agent: source.agent,
+				scope: source.scope,
+				project_root: source.project_root.clone(),
+			},
+			&original,
+			&[],
+			&copies,
+			true,
+		)
+		.expect_err("a stale reconcile must not delete a newly edited source");
+		assert!(error.to_string().contains("changed in its source"));
+		let latest = load_source_mcp(&source).unwrap();
+		assert!(matches!(
+			latest.transport,
+			McpTransport::Stdio { ref command, .. } if command == "new-command"
+		));
+
+		// The copied target can also be changed after its copy succeeds.
+		let error = delete_reconciled_mcp(
+			&source,
+			&InstallTarget {
+				agent: source.agent,
+				scope: source.scope,
+				project_root: source.project_root.clone(),
+			},
+			&latest,
+			&[],
+			&copies,
+			true,
+		)
+		.expect_err(
+			"the source must survive if its destination no longer matches",
+		);
+		assert!(error.to_string().contains("changed in target"));
+		assert!(load_source_mcp(&source).is_ok());
+	}
+
+	#[test]
+	fn reconcile_mcp_shared_sibling_cannot_delete_a_changed_source_first() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = ResourceLocator {
+			agent: AgentType::Claude,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "filesystem".to_string(),
+		};
+		let sibling = InstallTarget {
+			agent: AgentType::Copilot,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+		};
+		let target = InstallTarget {
+			agent: AgentType::Cursor,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+		};
+		let mut manager = build_manager(&InstallTarget {
+			agent: source.agent,
+			scope: source.scope,
+			project_root: source.project_root.clone(),
+		});
+		ensure_loaded(&mut manager).unwrap();
+		manager
+			.add_mcp(McpServer::new(
+				"filesystem",
+				McpTransport::stdio("old-command", vec![]),
+			))
+			.unwrap();
+		let original = load_source_mcp(&source).unwrap();
+		copy_mcp_into(&target, &original).unwrap();
+		manager
+			.update_mcp(
+				"filesystem",
+				McpServer::new(
+					"filesystem",
+					McpTransport::stdio("new-command", vec![]),
+				),
+			)
+			.unwrap();
+		let error = delete_reconciled_mcp(
+			&source,
+			&sibling,
+			&original,
+			&[],
+			&[OperationPlan {
+				target,
+				action: OperationAction::Copy,
+			}],
+			true,
+		)
+		.expect_err("shared sibling must not bypass source compare-and-delete");
+		assert!(error.to_string().contains("changed in its source"));
+		let latest = load_source_mcp(&source).unwrap();
+		assert!(matches!(
+			latest.transport,
+			McpTransport::Stdio { ref command, .. } if command == "new-command"
+		));
+	}
+
+	#[test]
+	fn reconcile_mcp_rechecks_native_source_fields_before_removal() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = ResourceLocator {
+			agent: AgentType::Cursor,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+			name: "remote-srv".to_string(),
+		};
+		let target = InstallTarget {
+			agent: AgentType::OpenCode,
+			scope: InstallScope::Project,
+			project_root: Some(root.to_path_buf()),
+		};
+		let source_path = root.join(".cursor/mcp.json");
+		fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+		fs::write(
+			&source_path,
+			r#"{"mcpServers":{"remote-srv":{"type":"http","url":"https://example.com/mcp"}}}"#,
+		)
+		.unwrap();
+		let expected = load_source_mcp(&source).unwrap();
+		copy_mcp_into(&target, &expected).unwrap();
+		let changed = r#"{"mcpServers":{"remote-srv":{"type":"http","url":"https://example.com/mcp","oauth":{"clientId":"new-secret"}}}}"#;
+		fs::write(&source_path, changed).unwrap();
+		let error = delete_reconciled_mcp(
+			&source,
+			&InstallTarget {
+				agent: source.agent,
+				scope: source.scope,
+				project_root: source.project_root.clone(),
+			},
+			&expected,
+			&[],
+			&[OperationPlan {
+				target,
+				action: OperationAction::Copy,
+			}],
+			true,
+		)
+		.expect_err("native fields added after preflight must stay on disk");
+		assert!(error.to_string().contains("unmanaged"));
+		assert_eq!(fs::read_to_string(&source_path).unwrap(), changed);
+	}
+
 	#[test]
 	fn reconcile_mcp_deletes_when_removed() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -3424,6 +3904,8 @@ mod tests {
 			AgentType::Kimi,
 			AgentType::Amp,
 			AgentType::Warp,
+			AgentType::ZCode,
+			AgentType::Dsh,
 		];
 		reconcile_skill_preview(&source, &[], &removed).unwrap();
 		assert!(root.join(".agents/skills/notebooklm").is_symlink());
@@ -3527,6 +4009,11 @@ mod tests {
 		master_with_claude_referrer(&root, "mover");
 		let master = root.join(".aghub/mover");
 		let claude_referrer = root.join(".claude/skills/mover");
+		// Copilot shares Claude's malformed `.mcp.json`; it is also an
+		// unselected reader, so give it a private surviving Referrer.
+		let copilot_private = root.join(".github/skills/mover");
+		fs::create_dir_all(copilot_private.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(&master, &copilot_private).unwrap();
 		// Claude's project MCP config exists but cannot be parsed, so its whole
 		// config load fails and its Referrer used to become invisible.
 		fs::write(root.join(".mcp.json"), "{ not json").unwrap();
@@ -4710,6 +5197,161 @@ mod tests {
 		assert!(result.results.iter().all(|r| r.success));
 	}
 
+	#[cfg(unix)]
+	#[test]
+	fn reconcile_sub_agent_checks_shared_source_even_when_alias_deletes_first()
+	{
+		use std::os::unix::fs::symlink;
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path().join("project");
+		fs::create_dir_all(root.join(".claude/agents")).unwrap();
+		symlink(".claude", root.join(".opencode")).unwrap();
+		let mut manager = ConfigManager::new(
+			create_adapter(AgentType::Claude),
+			false,
+			Some(&root),
+		);
+		manager.load().unwrap();
+		let mut sub_agent = SubAgent::new("coder");
+		sub_agent.instruction = Some("shared source".into());
+		manager.add_sub_agent(sub_agent).unwrap();
+		let source_file = root.join(".claude/agents/coder.md");
+		let result = reconcile_sub_agent(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.clone()),
+				name: "coder".into(),
+			},
+			vec![AgentType::Codex],
+			vec![AgentType::OpenCode, AgentType::Claude],
+			true,
+		)
+		.unwrap();
+		assert_eq!(result.success_count(), 3);
+		assert_eq!(result.failed_count(), 0);
+		assert!(!source_file.exists());
+		assert!(root.join(".codex/agents/coder.toml").exists());
+	}
+
+	#[test]
+	fn reconcile_sub_agent_keeps_source_when_existing_frontmatter_differs() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = root.join(".claude/agents/coder.md");
+		let target = root.join(".opencode/agents/coder.md");
+		fs::create_dir_all(source.parent().unwrap()).unwrap();
+		fs::create_dir_all(target.parent().unwrap()).unwrap();
+		fs::write(&source, "---\nname: coder\ndescription: Coder\ntools: Read\n---\n\nDo work.\n").unwrap();
+		fs::write(&target, "---\nname: coder\ndescription: Coder\ntools: Write\n---\n\nDo work.\n").unwrap();
+
+		let result = reconcile_sub_agent(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "coder".to_string(),
+			},
+			vec![AgentType::OpenCode],
+			vec![AgentType::Claude],
+			true,
+		)
+		.unwrap();
+
+		assert!(
+			source.exists(),
+			"a different target must not authorize source deletion"
+		);
+		assert_eq!(
+			result.failed_count(),
+			2,
+			"copy conflict must also skip the delete"
+		);
+		assert!(fs::read_to_string(target).unwrap().contains("tools: Write"));
+	}
+
+	#[test]
+	fn reconcile_sub_agent_refuses_unmodelled_codex_fields_before_writing() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = root.join(".codex/agents/coder.toml");
+		let target = root.join(".opencode/agents/coder.md");
+		fs::create_dir_all(source.parent().unwrap()).unwrap();
+		fs::write(&source, "name = \"coder\"\ndescription = \"Coder\"\ndeveloper_instructions = \"Do work.\"\nmodel = \"gpt-5.4\"\n").unwrap();
+
+		let error = reconcile_sub_agent(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "coder".to_string(),
+			},
+			vec![AgentType::OpenCode],
+			vec![AgentType::Codex],
+			true,
+		)
+		.expect_err(
+			"native Codex fields cannot be copied through the normalized model",
+		);
+
+		assert!(error.to_string().contains("unmanaged"), "got: {error}");
+		assert!(source.exists());
+		assert!(
+			!target.exists(),
+			"preflight refusal must precede destination writes"
+		);
+
+		fs::write(&source, "name = \"coder\"\ndescription = \"Coder\"\ndeveloper_instructions = \"Do work.\"\n").unwrap();
+		let result = reconcile_sub_agent(
+			ResourceLocator {
+				agent: AgentType::Codex,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "coder".to_string(),
+			},
+			vec![AgentType::OpenCode],
+			vec![AgentType::Codex],
+			true,
+		)
+		.unwrap();
+		assert_eq!(result.success_count(), 2);
+		assert!(target.exists());
+	}
+
+	#[test]
+	fn reconcile_sub_agent_refuses_markdown_extras_for_codex_target() {
+		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
+		let temp = tempdir().unwrap();
+		let root = temp.path();
+		let source = root.join(".claude/agents/coder.md");
+		let target = root.join(".codex/agents/coder.toml");
+		fs::create_dir_all(source.parent().unwrap()).unwrap();
+		fs::write(&source, "---\nname: coder\ndescription: Coder\ntools: Read\n---\n\nDo work.\n").unwrap();
+
+		let error = reconcile_sub_agent(
+			ResourceLocator {
+				agent: AgentType::Claude,
+				scope: InstallScope::Project,
+				project_root: Some(root.to_path_buf()),
+				name: "coder".to_string(),
+			},
+			vec![AgentType::Codex],
+			vec![AgentType::Claude],
+			true,
+		)
+		.expect_err("Codex cannot write Markdown frontmatter extras");
+
+		assert!(
+			error.to_string().contains("without losing fields"),
+			"got: {error}"
+		);
+		assert!(source.exists());
+		assert!(!target.exists());
+	}
+
 	#[test]
 	fn transfer_mcp_to_multiple_targets() {
 		let _guard = env_lock().lock().unwrap_or_else(|e| e.into_inner());
@@ -5198,6 +5840,7 @@ mod tests {
 		ReconcileSkillPlan {
 			skill: Skill::new("x"),
 			source_root: PathBuf::from("/nonexistent/x"),
+			requested_removals: vec![],
 			exhaustive: false,
 			keepers: vec![],
 			unreadable: vec![],

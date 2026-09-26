@@ -695,7 +695,7 @@ mod tests {
 	// client so the status code, `confirm` query parsing, route mounting and the
 	// on-disk effect are all exercised end-to-end.
 
-	/// Seed one Claude MCP over HTTP into a project-scoped temp root.
+	/// Seed one Cursor MCP over HTTP into a project-scoped temp root.
 	fn seed_mcp_http(client: &Client, root: &std::path::Path) {
 		let body = serde_json::json!({
 			"name": "wire",
@@ -703,7 +703,7 @@ mod tests {
 		})
 		.to_string();
 		let uri = format!(
-			"/api/v1/agents/claude/mcps?scope=project&project_root={}",
+			"/api/v1/agents/cursor/mcps?scope=project&project_root={}",
 			urlencoding(&root.to_string_lossy()),
 		);
 		let resp = client
@@ -734,7 +734,7 @@ mod tests {
 		seed_mcp_http(&client, root);
 
 		let uri = format!(
-			"/api/v1/agents/claude/mcps/wire?scope=project&project_root={}",
+			"/api/v1/agents/cursor/mcps/wire?scope=project&project_root={}",
 			urlencoding(&root.to_string_lossy()),
 		);
 		// No `confirm` => default dry-run.
@@ -748,8 +748,8 @@ mod tests {
 		assert_eq!(json["executed"], false);
 		assert!(json["deleted_path"].is_null());
 		// The MCP config file still holds the entry after a dry-run.
-		let cfg =
-			std::fs::read_to_string(root.join(".mcp.json")).unwrap_or_default();
+		let cfg = std::fs::read_to_string(root.join(".cursor/mcp.json"))
+			.unwrap_or_default();
 		assert!(cfg.contains("wire"), "dry-run must leave the mcp on disk");
 	}
 
@@ -765,7 +765,7 @@ mod tests {
 		seed_mcp_http(&client, root);
 
 		let uri = format!(
-			"/api/v1/agents/claude/mcps/wire?scope=project&project_root={}&confirm=true",
+			"/api/v1/agents/cursor/mcps/wire?scope=project&project_root={}&confirm=true",
 			urlencoding(&root.to_string_lossy()),
 		);
 		let resp = client.delete(&uri).dispatch();
@@ -776,8 +776,8 @@ mod tests {
 		assert_eq!(json["executed"], true, "confirm=true must execute");
 		assert_eq!(json["dry_run"], false);
 		// The entry is gone from disk.
-		let cfg =
-			std::fs::read_to_string(root.join(".mcp.json")).unwrap_or_default();
+		let cfg = std::fs::read_to_string(root.join(".cursor/mcp.json"))
+			.unwrap_or_default();
 		assert!(!cfg.contains("wire"), "confirm=true must remove the mcp");
 	}
 

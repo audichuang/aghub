@@ -308,7 +308,15 @@ impl ConfigManager {
 		Ok(self.config.as_ref().unwrap())
 	}
 
+	/// Explicitly replace the persisted MCP list with `config.mcps`.
+	/// This serializes the write, but does not merge an older caller snapshot;
+	/// use the resource CRUD methods for concurrent add or partial update.
 	pub fn save(&self, config: &AgentConfig) -> Result<()> {
+		let _guards = self.mcp_write_guards()?;
+		self.save_unlocked(config)
+	}
+
+	pub(crate) fn save_unlocked(&self, config: &AgentConfig) -> Result<()> {
 		debug!(
 			"saving config for agent '{}' to scope {:?}",
 			self.adapter.name(),
@@ -342,6 +350,8 @@ impl ConfigManager {
 		Ok(())
 	}
 
+	/// Replace persisted MCPs with this manager's current snapshot. See
+	/// [`Self::save`] before using it after a separate process may have written.
 	pub fn save_current(&self) -> Result<()> {
 		match &self.config {
 			Some(config) => self.save(config),

@@ -35,6 +35,45 @@ pub fn master_store_dir(project_root: Option<&Path>) -> Option<PathBuf> {
 	}
 }
 
+/// Refuse a redirected Master store before reading or changing its contents.
+pub fn reject_linked_master_store(
+	project_root: Option<&Path>,
+) -> io::Result<()> {
+	if master_store_dir(project_root)
+		.as_deref()
+		.is_some_and(Linker::is_link)
+	{
+		return Err(io::Error::new(
+			io::ErrorKind::PermissionDenied,
+			"Master store is a link",
+		));
+	}
+	Ok(())
+}
+
+/// Create the Master store without following a redirected store directory.
+/// A project-controlled `.aghub` link can otherwise write Master bytes outside
+/// the selected project before any Referrer is created.
+pub fn ensure_master_store_parent(canonical: &Path) -> io::Result<()> {
+	let parent = canonical.parent().ok_or_else(|| {
+		io::Error::new(io::ErrorKind::InvalidInput, "Master has no parent")
+	})?;
+	if Linker::is_link(parent) {
+		return Err(io::Error::new(
+			io::ErrorKind::PermissionDenied,
+			"Master store is a link",
+		));
+	}
+	std::fs::create_dir_all(parent)?;
+	if Linker::is_link(parent) {
+		return Err(io::Error::new(
+			io::ErrorKind::PermissionDenied,
+			"Master store is a link",
+		));
+	}
+	Ok(())
+}
+
 /// Resolve the shared `.agents/skills` Referrer root for a scope.
 ///
 /// Once the Master moves to [`master_store_dir`], this directory is an ordinary
@@ -275,9 +314,7 @@ pub fn install_universal(
 	// have created it -- an exists-check first would report creation for a
 	// master another process wrote in the gap.
 	let mut created_master = false;
-	if let Some(parent) = canonical.parent() {
-		std::fs::create_dir_all(parent)?;
-	}
+	ensure_master_store_parent(canonical)?;
 	match std::fs::create_dir(canonical) {
 		Ok(()) => {
 			created_master = true;

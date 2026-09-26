@@ -48,8 +48,8 @@ enum Answer {
 	/// `no_row_may_declare_a_known_defect_shape`.
 	NotAttachedToServer,
 	/// The tag is ignored and the transport is inferred from which keys are
-	/// present. Not a refusal: the user's declared tag is silently replaced on
-	/// the next save. `json_map` does this; the hand-written dialects refuse.
+	/// present. No row may claim this: the next save would replace the declared
+	/// tag, changing the user's transport without warning.
 	PresenceFallback,
 	/// The entry was HALF-READ: something that carried transport meaning went
 	/// nowhere, so the next save deletes it (the writers rebuild every server
@@ -229,13 +229,12 @@ macro_rules! row {
 use Answer::*;
 
 const ROWS: &[Row] = &[
-	// The `json_map` family: 16 agents, ONE parser, ONE serializer. Its unknown
-	// tag answer is the odd one out — see `PresenceFallback`.
+	// The `json_map` family shares one parser and one serializer.
 	row!(
 		"claude",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -244,7 +243,7 @@ const ROWS: &[Row] = &[
 		"gemini",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -253,7 +252,7 @@ const ROWS: &[Row] = &[
 		"copilot",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -262,7 +261,7 @@ const ROWS: &[Row] = &[
 		"cursor",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -271,7 +270,7 @@ const ROWS: &[Row] = &[
 		"windsurf",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -280,7 +279,7 @@ const ROWS: &[Row] = &[
 		"trae",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -289,7 +288,7 @@ const ROWS: &[Row] = &[
 		"augmentcode",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -298,7 +297,7 @@ const ROWS: &[Row] = &[
 		"warp",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -307,7 +306,7 @@ const ROWS: &[Row] = &[
 		"cline",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -316,7 +315,7 @@ const ROWS: &[Row] = &[
 		"kiro",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -325,7 +324,7 @@ const ROWS: &[Row] = &[
 		"roocode",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -334,7 +333,7 @@ const ROWS: &[Row] = &[
 		"factory",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -343,7 +342,7 @@ const ROWS: &[Row] = &[
 		"kimi",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -352,7 +351,7 @@ const ROWS: &[Row] = &[
 		"antigravity",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -361,7 +360,7 @@ const ROWS: &[Row] = &[
 		"zed",
 		ZED,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -370,7 +369,7 @@ const ROWS: &[Row] = &[
 		"amp",
 		AMP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -452,7 +451,7 @@ const ROWS: &[Row] = &[
 		"omp",
 		MAP,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -461,7 +460,7 @@ const ROWS: &[Row] = &[
 		"zcode",
 		ZCODE,
 		Rejected,
-		PresenceFallback,
+		Rejected,
 		PreservedVerbatim,
 		NotApplicable,
 		Spelled
@@ -623,7 +622,7 @@ fn not_applicable_always_means_the_dialect_has_no_such_concept() {
 	}
 }
 
-/// `DropsRemote`, `Approximated` and `NotAttachedToServer` are things the
+/// `PresenceFallback`, `DropsRemote`, `Approximated` and `NotAttachedToServer` are things the
 /// probes REPORT when a dialect went soft — never answers a dialect may claim.
 /// Without this, a red `mixed entry: table says Rejected, dialect does
 /// DropsRemote` could be cleared by editing the CELL instead of the dialect,
@@ -644,10 +643,12 @@ fn no_row_may_declare_a_known_defect_shape() {
 			assert!(
 				!matches!(
 					answer,
-					DropsRemote | Approximated | NotAttachedToServer
+					PresenceFallback
+						| DropsRemote | Approximated
+						| NotAttachedToServer
 				),
 				"'{}' declares {answer:?} for `{question}`. Fix the dialect, \
-				 not the table — those three are defect shapes the probes \
+				 not the table — these are defect shapes the probes \
 				 report, not answers a dialect is allowed to give.",
 				row.id
 			);

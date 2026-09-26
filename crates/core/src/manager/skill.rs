@@ -328,6 +328,7 @@ impl ConfigManager {
 
 		let safe_name = sanitize_name(&skill.name);
 		let canonical = canonical_dir.join(&safe_name);
+		crate::skills::linker::ensure_master_store_parent(&canonical)?;
 		// This path has a `Skill` struct, not a source tree, so the from-struct
 		// SKILL.md is serialized here (intrinsic to this entry point). A
 		// pre-existing master is reused without overwriting.
@@ -457,6 +458,17 @@ impl ConfigManager {
 			.position(|s| s.name == name)
 			.ok_or_else(|| ConfigError::resource_not_found("skill", name))?;
 		let existing_skill = config.skills[index].clone();
+		if existing_skill.canonical_path.is_some() {
+			let store_root = if matches!(
+				write_scope,
+				crate::models::ResourceScope::ProjectOnly
+			) {
+				project_root.as_deref()
+			} else {
+				None
+			};
+			crate::skills::linker::reject_linked_master_store(store_root)?;
+		}
 
 		let config = self.config_mut()?;
 		info!(
@@ -719,7 +731,70 @@ impl ConfigManager {
 		dry_run: bool,
 		confirm: bool,
 	) -> Result<crate::skills::removal::RemovalOutcome> {
+		let requested = [self.agent_type()];
+		self.remove_skill_planned_for_agents(
+			name, all_agents, dry_run, confirm, &requested,
+		)
+	}
+
+	/// Batch-aware removal: `requested_agents` is the complete set authorized by
+	/// this request to lose a shared Referrer. It must include this manager's
+	/// agent; readers outside the set keep the Referrer if they need it.
+	pub fn remove_skill_planned_for_agents(
+		&mut self,
+		name: &str,
+		all_agents: bool,
+		dry_run: bool,
+		confirm: bool,
+		requested_agents: &[crate::models::AgentType],
+	) -> Result<crate::skills::removal::RemovalOutcome> {
+		self.remove_skill_planned_inner(
+			name,
+			None,
+			all_agents,
+			dry_run,
+			confirm,
+			requested_agents,
+		)
+	}
+
+	/// Remove one exact discovered location. Its in-scope read directory is
+	/// derived here, so a same-name skill at another location cannot be chosen
+	/// by the manager's name-deduplicated view.
+	pub fn remove_skill_planned_at_dir_for_agents(
+		&mut self,
+		name: &str,
+		target_entry: &std::path::Path,
+		all_agents: bool,
+		dry_run: bool,
+		confirm: bool,
+		requested_agents: &[crate::models::AgentType],
+	) -> Result<crate::skills::removal::RemovalOutcome> {
+		self.remove_skill_planned_inner(
+			name,
+			Some(target_entry),
+			all_agents,
+			dry_run,
+			confirm,
+			requested_agents,
+		)
+	}
+
+	fn remove_skill_planned_inner(
+		&mut self,
+		name: &str,
+		target_entry: Option<&std::path::Path>,
+		all_agents: bool,
+		dry_run: bool,
+		confirm: bool,
+		requested_agents: &[crate::models::AgentType],
+	) -> Result<crate::skills::removal::RemovalOutcome> {
 		use crate::skills::removal;
+		if !requested_agents.contains(&self.agent_type()) {
+			return Err(ConfigError::InvalidConfig(
+				"removal request does not include the target agent".into(),
+			));
+		}
 
 		// Taken FIRST on any executing path — before the target is even looked up,
 		// let alone planned. Everything downstream is a decision about what to
@@ -740,7 +815,6 @@ impl ConfigManager {
 
 		let skill = self.skill_for_planned_removal(name, all_agents)?;
 
-		let own_agent_dir = self.target_skills_dir();
 		let scope = self.scope;
 		let project_root = self.project_root.clone();
 		let all_agent_dirs =
@@ -749,12 +823,69 @@ impl ConfigManager {
 			&all_agent_dirs,
 			project_root.as_deref(),
 		);
-		let mut plan = removal::plan_removal(
+		let own_agent_dir = if let Some(target_entry) = target_entry {
+			let requested_entry = removal::entry_identity(target_entry);
+			let target_dir = requested_agents
+				.iter()
+				.flat_map(|agent| {
+					crate::create_adapter(*agent)
+						.get_skills_paths(project_root.as_deref(), scope)
+				})
+				.filter(|dir| {
+					let root = skill::lock::resolve_existing(dir);
+					requested_entry != root
+						&& requested_entry.starts_with(root)
+						&& removal::assert_contained(dir, &roots).is_some()
+				})
+				.max_by_key(|dir| dir.components().count())
+				.ok_or_else(|| {
+					ConfigError::InvalidConfig(
+						"requested skill location is not in an in-scope read directory"
+							.into(),
+					)
+				})?;
+			let (found, incomplete) =
+				crate::skills::discovery::load_skills_from_dir_partial(
+					&target_dir,
+				);
+			if incomplete {
+				return Err(ConfigError::InvalidConfig(
+					"requested skill location could not be fully read".into(),
+				));
+			}
+			let distinct_masters: std::collections::HashSet<_> = found
+				.iter()
+				.filter(|found| found.name == name)
+				.filter_map(removal::skill_root)
+				.map(|root| skill::lock::resolve_existing(&root))
+				.collect();
+			if distinct_masters.len() > 1 {
+				return Err(ConfigError::InvalidConfig(
+					"requested skill location is ambiguous: multiple Masters have this name"
+						.into(),
+				));
+			}
+			let selected_master = removal::skill_root(&skill)
+				.map(|path| skill::lock::resolve_existing(&path));
+			let requested_master = skill::lock::resolve_existing(target_entry);
+			if selected_master.as_deref() != Some(requested_master.as_path()) {
+				return Err(ConfigError::InvalidConfig(
+					"requested skill location does not match the loaded Master"
+						.into(),
+				));
+			}
+			Some(target_dir)
+		} else {
+			self.target_skills_dir()
+		};
+		let mut plan = removal::plan_removal_for_agents(
 			&skill,
 			own_agent_dir.as_deref(),
 			&all_agent_dirs,
 			project_root.as_deref(),
+			scope,
 			all_agents,
+			requested_agents,
 		);
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);

@@ -165,7 +165,7 @@ pub fn execute(
 
 			eprintln_verbose!("Adding MCP server: {}", mcp_name);
 			let mcp = McpServer::new(mcp_name, transport);
-			manager.add_mcp(mcp.clone())?;
+			manager.add_mcp_exact(mcp.clone())?;
 			eprintln_verbose!("MCP server added successfully");
 			serde_json::to_value(&mcp)?
 		}

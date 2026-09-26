@@ -68,6 +68,7 @@ pub fn execute(
 struct OutdatedPlan {
 	names: Vec<String>,
 	renamed: Vec<(String, String)>,
+	uncheckable: Vec<(String, String)>,
 }
 
 fn outdated_plan(views: &[SkillUpdateView]) -> OutdatedPlan {
@@ -80,7 +81,10 @@ fn outdated_plan(views: &[SkillUpdateView]) -> OutdatedPlan {
 			StatusView::Renamed { new_name } => {
 				plan.renamed.push((view.name.clone(), new_name.clone()))
 			}
-			StatusView::UpToDate | StatusView::Uncheckable { .. } => {}
+			StatusView::Uncheckable { reason } => {
+				plan.uncheckable.push((view.name.clone(), reason.clone()))
+			}
+			StatusView::UpToDate => {}
 		}
 	}
 	plan
@@ -114,6 +118,11 @@ pub fn execute_outdated(
 		.iter()
 		.map(|(name, new_name)| json!({ "name": name, "newName": new_name }))
 		.collect();
+	let uncheckable_json: Vec<_> = plan
+		.uncheckable
+		.iter()
+		.map(|(name, reason)| json!({ "name": name, "reason": reason }))
+		.collect();
 
 	if !yes || plan.names.is_empty() {
 		if json {
@@ -124,13 +133,21 @@ pub fn execute_outdated(
 					"scope": scope_name(scope),
 					"skills": plan.names,
 					"renamed": renamed_json,
+					"uncheckable": uncheckable_json,
 					"results": [],
 				}))?
 			);
 			return Ok(());
 		}
 		if plan.names.is_empty() {
-			println!("Nothing to update ({} scope).", scope_name(scope));
+			if plan.renamed.is_empty() && plan.uncheckable.is_empty() {
+				println!("Nothing to update ({} scope).", scope_name(scope));
+			} else {
+				println!(
+					"No update candidates confirmed ({} scope).",
+					scope_name(scope)
+				);
+			}
 		} else {
 			println!(
 				"{} skill(s) can be updated ({} scope; pass --yes to apply — \
@@ -143,6 +160,7 @@ pub fn execute_outdated(
 			}
 		}
 		print_renamed_note(&plan.renamed);
+		print_uncheckable_note(&plan.uncheckable);
 		return Ok(());
 	}
 
@@ -203,6 +221,7 @@ pub fn execute_outdated(
 				"scope": scope_name(scope),
 				"skills": plan.names,
 				"renamed": renamed_json,
+				"uncheckable": uncheckable_json,
 				"results": results,
 			}))?
 		);
@@ -219,6 +238,7 @@ pub fn execute_outdated(
 			scope_name(scope)
 		);
 		print_renamed_note(&plan.renamed);
+		print_uncheckable_note(&plan.uncheckable);
 	}
 
 	if failed > 0 {
@@ -234,6 +254,12 @@ fn print_renamed_note(renamed: &[(String, String)]) {
 			"skipped: {name} was renamed upstream to '{new_name}' — run \
 			 `aghub-cli source accept-rename {name} {new_name}`"
 		);
+	}
+}
+
+fn print_uncheckable_note(uncheckable: &[(String, String)]) {
+	for (name, reason) in uncheckable {
+		println!("could not check: {name} ({reason})");
 	}
 }
 
@@ -481,6 +507,10 @@ mod tests {
 			OutdatedPlan {
 				names: vec!["stale".to_string(), "stale-too".to_string()],
 				renamed: vec![("moved".to_string(), "moved-v2".to_string())],
+				uncheckable: vec![(
+					"offline".to_string(),
+					"network".to_string()
+				)],
 			}
 		);
 	}

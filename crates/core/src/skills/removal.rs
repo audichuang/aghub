@@ -16,10 +16,12 @@ use crate::skills::linker::Linker;
 /// because "may this path be deleted at all" and "is this path SHARED" are
 /// different questions: a private per-agent copy is deletable, a Master is not.
 ///
-/// Both consumers need the `.aghub` entries and neither tolerates their absence:
+/// Both consumers need real `.aghub` entries and neither tolerates their absence:
 /// [`allowed_skill_roots`] would refuse every Master deletion as out-of-tree, and
 /// [`is_universal_master`] would let a single-agent removal `remove_dir_all` the
 /// Master itself. See `.scratch/aghub-skill-store/spec.md` "Day-one hazards".
+/// A linked store is omitted: its target must not become an allowed mutation
+/// root simply because a project can point `.aghub` outside itself.
 pub fn skill_store_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 	let mut roots: Vec<PathBuf> = Vec::new();
 	// Universal global root: $XDG_CONFIG_HOME/agents/skills (dirs resolves XDG).
@@ -31,11 +33,17 @@ pub fn skill_store_roots(project_root: Option<&Path>) -> Vec<PathBuf> {
 		roots.push(home.join(".config").join("agents").join("skills"));
 		// Legacy ~/.agents/skills — a shared Referrer root, no longer the Master.
 		roots.push(home.join(".agents").join("skills"));
-		roots.push(home.join(crate::skills::linker::MASTER_STORE_DIR_NAME));
+		let store = home.join(crate::skills::linker::MASTER_STORE_DIR_NAME);
+		if !Linker::is_link(&store) {
+			roots.push(store);
+		}
 	}
 	if let Some(root) = project_root {
 		roots.push(root.join(".agents").join("skills"));
-		roots.push(root.join(crate::skills::linker::MASTER_STORE_DIR_NAME));
+		let store = root.join(crate::skills::linker::MASTER_STORE_DIR_NAME);
+		if !Linker::is_link(&store) {
+			roots.push(store);
+		}
 	}
 	roots
 }
@@ -491,10 +499,42 @@ pub fn plan_removal(
 	project_root: Option<&Path>,
 	all_agents: bool,
 ) -> RemovalPlan {
+	plan_removal_for_agents(
+		skill,
+		own_agent_dir,
+		all_agent_dirs,
+		project_root,
+		crate::models::ResourceScope::Both,
+		all_agents,
+		&[],
+	)
+}
+
+/// The planner with the complete set of agents authorized by one batch.
+/// A shared Referrer may go only when no reader outside that set uses it.
+pub(crate) fn plan_removal_for_agents(
+	skill: &crate::models::Skill,
+	own_agent_dir: Option<&Path>,
+	all_agent_dirs: &[PathBuf],
+	project_root: Option<&Path>,
+	scope: crate::models::ResourceScope,
+	all_agents: bool,
+	requested_agents: &[crate::models::AgentType],
+) -> RemovalPlan {
 	let roots = allowed_skill_roots(all_agent_dirs, project_root);
 	let safe = skill::sanitize::sanitize_name(&skill.name);
 
 	if skill.canonical_path.is_some() {
+		let unselected_needs = |dir: &Path, deleting: &[PathBuf]| {
+			unselected_reader_needs_referrer(
+				dir,
+				&skill.name,
+				scope,
+				project_root,
+				requested_agents,
+				deleting,
+			)
+		};
 		plan_symlink_removal(
 			skill,
 			&safe,
@@ -502,6 +542,7 @@ pub fn plan_removal(
 			all_agent_dirs,
 			&roots,
 			all_agents,
+			&unselected_needs,
 		)
 	} else {
 		plan_copy_removal(
@@ -526,6 +567,7 @@ fn plan_symlink_removal(
 	all_agent_dirs: &[PathBuf],
 	roots: &[PathBuf],
 	all_agents: bool,
+	unselected_needs: &impl Fn(&Path, &[PathBuf]) -> bool,
 ) -> RemovalPlan {
 	let canonical = crate::transfer::skill_root_unchecked(skill);
 	let canonical_real = canonical.as_ref().and_then(|c| c.canonicalize().ok());
@@ -536,6 +578,8 @@ fn plan_symlink_removal(
 	let mut unresolvable = false;
 	let mut targeted_anything = false;
 	let mut incomplete_scan = false;
+	let mut shared_referrer_kept = false;
+	let mut targeted_entries: Vec<(PathBuf, PathBuf)> = Vec::new();
 
 	// The union `candidate_entries` returns, not the `<dir>/<safe>` slot alone:
 	// `npx skills` and older aghub releases wrote `<dir>/<folder>` under a
@@ -565,6 +609,8 @@ fn plan_symlink_removal(
 				skipped.push(dir.clone());
 			}
 		}
+		let targeted =
+			all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
 		for entry in entries {
 			// NotFound means this agent simply does not hold it. Any other error
 			// means the entry is THERE and we could not look — dropping it out of
@@ -592,15 +638,17 @@ fn plan_symlink_removal(
 					continue;
 				}
 			}
-			let targeted =
-				all_agents || own_agent_dir.is_some_and(|d| d == dir.as_path());
 			match entry.canonicalize() {
 				Ok(resolved) => {
 					if canonical_real.as_deref() == Some(resolved.as_path()) {
-						if Linker::is_link(&entry) && targeted {
-							paths.push(entry);
-							targeted_anything = true;
-						} else if targeted {
+						if targeted {
+							if !all_agents {
+								targeted_entries
+									.push((dir.clone(), entry.clone()));
+							}
+							if Linker::is_link(&entry) {
+								paths.push(entry);
+							}
 							targeted_anything = true;
 						} else {
 							other_refs = true;
@@ -622,12 +670,35 @@ fn plan_symlink_removal(
 						&& Linker::is_link(&entry)
 						&& targeted
 					{
+						if !all_agents {
+							targeted_entries.push((dir.clone(), entry.clone()));
+						}
 						paths.push(entry);
 						targeted_anything = true;
 					}
 					unresolvable |=
 						error.kind() != std::io::ErrorKind::NotFound;
 				}
+			}
+		}
+	}
+
+	// Decide shared-reader safety against the WHOLE candidate deletion set.
+	// Checking each Referrer alone lets two links to the same Master serve as
+	// each other's apparent fallback, then schedules both and revokes an
+	// unselected reader. Include the Master too: a real shared entry can be
+	// taken through the canonical path rather than a link row.
+	if !all_agents && !targeted_entries.is_empty() {
+		let mut deleting = paths.clone();
+		deleting.extend(canonical.iter().cloned());
+		for (dir, entry) in targeted_entries {
+			if unselected_needs(&dir, &deleting) {
+				other_refs = true;
+				shared_referrer_kept = true;
+				if !skipped.contains(&entry) {
+					skipped.push(entry.clone());
+				}
+				paths.retain(|path| path != &entry);
 			}
 		}
 	}
@@ -647,8 +718,8 @@ fn plan_symlink_removal(
 	}
 
 	// An exhaustive cleanup that kept everything must not report `removed`.
-	let shared_master_kept =
-		all_agents && paths.is_empty() && !skipped.is_empty();
+	let shared_master_kept = shared_referrer_kept
+		|| (all_agents && paths.is_empty() && !skipped.is_empty());
 	RemovalPlan {
 		layout: Layout::Symlink,
 		paths,
@@ -814,6 +885,33 @@ pub fn skill_dir_readers_outside(
 		})
 		.map(|agent| crate::registry::get(*agent).id)
 		.collect()
+}
+
+/// A shared Referrer is still needed when an unselected reader has no other
+/// discovered copy after this entry goes away. An unreadable directory keeps
+/// the grant: this check authorizes deletion, so uncertainty fails closed.
+fn unselected_reader_needs_referrer(
+	dir: &Path,
+	name: &str,
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+	requested_agents: &[crate::models::AgentType],
+	deleting: &[PathBuf],
+) -> bool {
+	if skill_dir_readers_outside(dir, scope, project_root, &[]).len() < 2 {
+		return false;
+	}
+	skill_dir_readers_outside(dir, scope, project_root, requested_agents)
+		.into_iter()
+		.any(|id| {
+			let Ok(agent) = id.parse::<crate::models::AgentType>() else {
+				return true;
+			};
+			let read_dirs = crate::create_adapter(agent)
+				.get_skills_paths(project_root, scope);
+			let effect = read_effect_after(&read_dirs, name, deleting);
+			effect.incomplete || effect.survivors.is_empty()
+		})
 }
 
 /// True when some in-scope agent skills dir holds a discovered Referrer for

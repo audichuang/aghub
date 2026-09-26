@@ -2112,7 +2112,21 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 			// the policy itself (which capabilities, all-before-any-write)
 			// lives in core; MCPs share it with the API's /mcps/batch.
 			let view = if matches!(resource, ResourceType::Mcps) {
-				let write_scope = resolve_cli_scope(cli)?.resource_scope();
+				let resolved = resolve_cli_scope(cli)?;
+				let write_scope = resolved.resource_scope();
+				let actual_write_scope = if resolved.writes_global() {
+					ResourceScope::GlobalOnly
+				} else {
+					ResourceScope::ProjectOnly
+				};
+				let mut attribution = match &cli.command {
+					Commands::Add {
+						name: Some(name), ..
+					} => {
+						Some(aghub_core::batch::McpCreateAttribution::new(name))
+					}
+					_ => None,
+				};
 				let is_toggle = matches!(
 					cli.command,
 					Commands::Enable { .. } | Commands::Disable { .. }
@@ -2133,9 +2147,37 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 							"Running for agent: {}",
 							agent.as_str()
 						);
-						run_for_agent(cli, agent)
-							.map_err(|e| format!("{e:#}"))
-							.and_then(row_from_payload)
+						let result =
+							run_for_agent(cli, agent).and_then(|payload| {
+								row_from_payload(payload)
+									.map_err(anyhow::Error::msg)
+							});
+						let duplicate =
+							result.as_ref().err().is_some_and(|error| {
+								error.chain().any(|cause| {
+									matches!(
+										cause.downcast_ref::<ConfigError>(),
+										Some(
+											ConfigError::ResourceExists { .. }
+										)
+									)
+								})
+							});
+						let result = result.map_err(|e| format!("{e:#}"));
+						match attribution.as_mut() {
+							Some(attribution) => attribution.attribute(
+								agent,
+								resolved.project_root(),
+								actual_write_scope,
+								result,
+								duplicate,
+								|mcp| {
+									serde_json::to_value(mcp)
+										.unwrap_or(serde_json::Value::Null)
+								},
+							),
+							None => result,
+						}
 					},
 				)
 				.map_err(|e| anyhow::anyhow!("{e}"))?

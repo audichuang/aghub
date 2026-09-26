@@ -1,5 +1,6 @@
 mod mcp;
 mod sub_agent;
+pub use sub_agent::has_unmanaged_fields as sub_agent_has_unmanaged_fields;
 
 use crate::descriptor::*;
 use std::path::{Path, PathBuf};
@@ -81,6 +82,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	}),
 	load_sub_agents: sub_agent::load,
 	save_sub_agents: sub_agent::save,
+	sub_agent_global_dir: Some(sub_agent::global_dir),
+	sub_agent_project_dir: Some(sub_agent::project_dir),
 	cli_name: "codex",
 	validate_args: &["--version"],
 	project_markers: &[".codex"],

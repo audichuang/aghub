@@ -6,10 +6,82 @@
 //! their own wire views; preflight, attempt-all execution, and attribution
 //! ordering live here once.
 
-use std::fmt;
+use std::{
+	collections::HashMap,
+	fmt,
+	path::{Path, PathBuf},
+};
 
-use crate::models::{AgentType, ResourceScope};
+use crate::models::{AgentType, McpServer, ResourceScope};
 use crate::registry;
+
+/// Attribute one MCP create to every selected agent that reads the same
+/// physical config. A duplicate counts as this batch's success only when an
+/// earlier row wrote that backing and both agents can read the same complete
+/// persisted server. A server present before the batch remains a conflict.
+pub struct McpCreateAttribution {
+	name: String,
+	written_backings: HashMap<PathBuf, McpServer>,
+}
+
+impl McpCreateAttribution {
+	pub fn new(name: impl Into<String>) -> Self {
+		Self {
+			name: name.into(),
+			written_backings: HashMap::new(),
+		}
+	}
+
+	pub fn attribute<O, E>(
+		&mut self,
+		agent: AgentType,
+		project_root: Option<&Path>,
+		write_scope: ResourceScope,
+		result: Result<O, E>,
+		is_resource_exists: bool,
+		credited_output: impl FnOnce(&McpServer) -> O,
+	) -> Result<O, E> {
+		let adapter = crate::create_adapter(agent);
+		let backing = adapter
+			.mcp_config_path(project_root, write_scope)
+			.and_then(|path| crate::descriptor::mcp_backing_path(&path).ok());
+		let name = self.name.clone();
+		let read = || {
+			adapter.load_mcps(project_root, write_scope).ok().and_then(
+				|servers| {
+					servers.into_iter().find(|server| server.name == name)
+				},
+			)
+		};
+		match result {
+			Ok(output) => {
+				if let Some(backing) = backing {
+					if let Some(persisted) = read() {
+						let output = credited_output(&persisted);
+						self.written_backings.insert(backing, persisted);
+						return Ok(output);
+					}
+				}
+				Ok(output)
+			}
+			Err(error) => {
+				if is_resource_exists {
+					if let Some(persisted) = backing
+						.as_ref()
+						.and_then(|path| self.written_backings.get(path))
+					{
+						if let Some(observed) = read() {
+							if &observed == persisted {
+								return Ok(credited_output(&observed));
+							}
+						}
+					}
+				}
+				Err(error)
+			}
+		}
+	}
+}
 
 /// Why a batch was rejected up front: every named agent that cannot receive
 /// the operation, with its reason. Nothing was written.

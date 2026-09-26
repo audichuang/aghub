@@ -162,6 +162,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_skill_paths: None,
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
+	sub_agent_global_dir: None,
+	sub_agent_project_dir: None,
 	cli_name: "openclaw",
 	validate_args: &["--version"],
 	project_markers: &[".openclaw"],

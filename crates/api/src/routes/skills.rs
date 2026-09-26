@@ -448,6 +448,11 @@ pub async fn delete_skill_by_path(
 			.and_then(|skill| skill.canonical_path.as_ref())
 			.is_some()
 			|| path_is_link;
+		let requested_agents: Vec<AgentType> = req
+			.agents
+			.iter()
+			.filter_map(|a| a.parse::<AgentType>().ok())
+			.collect();
 
 		if !canonical_layout {
 			// Guard: this non-link branch bypasses `plan_removal`'s referrer
@@ -476,11 +481,6 @@ pub async fn delete_skill_by_path(
 			// the request that names only SOME of that location's readers: the
 			// leftovers are what a `remove_dir_all` would rob. So ask who is
 			// left over, and let a request covering the whole set through.
-			let requested_agents: Vec<AgentType> = req
-				.agents
-				.iter()
-				.filter_map(|a| a.parse::<AgentType>().ok())
-				.collect();
 			let all_in_scope =
 				aghub_core::skills::removal::agent_skill_dirs_in_scope(
 					resource_scope,
@@ -602,8 +602,14 @@ pub async fn delete_skill_by_path(
 			return Ok(Json(super::removal_response(outcome, dry_run)));
 		}
 
-		match manager.remove_skill_planned(&skill_name, false, dry_run, confirm)
-		{
+		match manager.remove_skill_planned_at_dir_for_agents(
+			&skill_name,
+			&skill_dir,
+			false,
+			dry_run,
+			confirm,
+			&requested_agents,
+		) {
 			// `remove_skill_planned` already prunes the lock (core-owned seam) and
 			// records the status in `outcome.prune`; no route-level re-prune.
 			Ok(outcome) => Ok(Json(super::removal_response(outcome, dry_run))),
@@ -3472,6 +3478,138 @@ mod tests {
 				"`removed` must mean removed: the desktop closes its dialog \
 				 and drops the row on this outcome"
 			);
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_removes_shared_referrer_when_every_reader_is_requested() {
+		with_isolated_env(|home, _state| {
+			let master = home.join(".aghub/full-group-link");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: full-group-link\ndescription: d\n---\n",
+			)
+			.unwrap();
+			let shared = home.join(".agents/skills/full-group-link");
+			std::fs::create_dir_all(shared.parent().unwrap()).unwrap();
+			std::os::unix::fs::symlink(&master, &shared).unwrap();
+			let readers =
+				aghub_core::skills::removal::skill_dir_readers_outside(
+					shared.parent().unwrap(),
+					ResourceScope::GlobalOnly,
+					None,
+					&[],
+				);
+			assert!(readers.len() > 1, "fixture requires a shared reader set");
+
+			let response = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(DeleteSkillByPathRequest {
+					source_path: shared.join("SKILL.md").display().to_string(),
+					agents: readers.iter().map(|id| id.to_string()).collect(),
+					scope: "global".to_string(),
+					project_root: None,
+					all_agents: None,
+					confirm: Some(true),
+				}),
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+			assert_eq!(
+				response.outcome,
+				crate::dto::skill::RemovalOutcomeKind::Removed,
+				"{response:?}"
+			);
+			assert!(std::fs::symlink_metadata(&shared).is_err());
+			assert!(!master.exists());
+		});
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn delete_by_path_never_removes_a_different_same_name_master() {
+		with_isolated_env(|home, _state| {
+			let name = "same-frontmatter-name";
+			let shared_dir = home.join(".agents/skills");
+			std::fs::create_dir_all(&shared_dir).unwrap();
+			let mut entries = Vec::new();
+			for (folder, master_name) in [
+				("first-link", "first-master"),
+				("second-link", "second-master"),
+			] {
+				let master = home.join(".aghub").join(master_name);
+				std::fs::create_dir_all(&master).unwrap();
+				std::fs::write(
+					master.join("SKILL.md"),
+					format!("---\nname: {name}\ndescription: d\n---\n"),
+				)
+				.unwrap();
+				let entry = shared_dir.join(folder);
+				std::os::unix::fs::symlink(&master, &entry).unwrap();
+				entries.push((entry, master));
+			}
+			let mut manager = aghub_core::manager::ConfigManager::new(
+				aghub_core::create_adapter(AgentType::Cline),
+				true,
+				None,
+			);
+			manager.load().unwrap();
+			let selected = manager
+				.get_skill(name)
+				.unwrap()
+				.source_path
+				.as_ref()
+				.unwrap();
+			let target = if selected.ends_with("first-link/SKILL.md") {
+				&entries[1].0
+			} else {
+				assert!(
+					selected.ends_with("second-link/SKILL.md"),
+					"{selected}"
+				);
+				&entries[0].0
+			};
+			let readers =
+				aghub_core::skills::removal::skill_dir_readers_outside(
+					&shared_dir,
+					ResourceScope::GlobalOnly,
+					None,
+					&[],
+				);
+			assert!(readers.contains(&"cline"));
+			let response = block_on(delete_skill_by_path(
+				TrustedLocalOrigin,
+				Json(DeleteSkillByPathRequest {
+					source_path: target.join("SKILL.md").display().to_string(),
+					agents: readers.iter().map(|id| id.to_string()).collect(),
+					scope: "global".to_string(),
+					project_root: None,
+					all_agents: None,
+					confirm: Some(true),
+				}),
+			))
+			.ok()
+			.expect("handler returned ok")
+			.into_inner();
+			assert!(
+				!response.success,
+				"ambiguous request deleted a Master: selected={selected} target={} {response:?}",
+				target.display(),
+			);
+			assert!(
+				response.error.as_deref().unwrap_or_default().contains("requested skill location"),
+				"request must fail at exact-location identity check: {response:?}",
+			);
+			for (entry, master) in entries {
+				assert!(
+					entry.symlink_metadata().is_ok(),
+					"Referrer was deleted"
+				);
+				assert!(master.join("SKILL.md").exists(), "Master was deleted");
+			}
 		});
 	}
 

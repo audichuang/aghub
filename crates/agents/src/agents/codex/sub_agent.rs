@@ -199,6 +199,24 @@ fn read_regular_file(path: &Path) -> Result<String> {
 	Ok(content)
 }
 
+/// A cross-agent reconcile cannot carry Codex-only TOML keys through `SubAgent`.
+pub fn has_unmanaged_fields(path: &Path) -> Result<bool> {
+	let content = read_regular_file(path)?;
+	let table = toml::from_str::<toml::Value>(&content)
+		.map_err(|error| ConfigError::InvalidConfig(error.to_string()))?;
+	let toml::Value::Table(table) = table else {
+		return Err(ConfigError::InvalidConfig(
+			"Codex sub-agent is not a TOML table".to_string(),
+		));
+	};
+	Ok(table.keys().any(|key| {
+		!matches!(
+			key.as_str(),
+			"name" | "description" | "developer_instructions"
+		)
+	}))
+}
+
 fn read_original(file: &Path, canonical_dir: &Path) -> Result<Option<String>> {
 	match fs::symlink_metadata(file) {
 		Ok(_) => {}

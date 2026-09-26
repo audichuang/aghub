@@ -169,6 +169,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	}),
 	load_sub_agents,
 	save_sub_agents,
+	sub_agent_global_dir: Some(sub_agent_global_dir),
+	sub_agent_project_dir: Some(sub_agent_project_dir),
 	cli_name: "grok",
 	validate_args: &["--version"],
 	project_markers: &[".grok"],

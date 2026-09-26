@@ -34,6 +34,14 @@ impl AgentAdapter for &'static AgentDescriptor {
 		self.id
 	}
 
+	fn sub_agent_dir(
+		&self,
+		project_root: Option<&Path>,
+		scope: ResourceScope,
+	) -> Option<PathBuf> {
+		AgentDescriptor::sub_agent_dir(self, project_root, scope)
+	}
+
 	fn supports_skill_scope(&self, scope: ResourceScope) -> bool {
 		AgentDescriptor::supports_skill_scope(self, scope)
 	}

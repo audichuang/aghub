@@ -3,6 +3,7 @@ use crate::models::{
 	AgentConfig, McpServer, McpTransport, ResourceScope, SubAgent,
 };
 use std::fs;
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 /// Parse function type for MCP-backed agent configuration content
@@ -103,6 +104,10 @@ pub struct AgentDescriptor {
 	/// Persist sub-agents for the requested scope.
 	/// Implementation is fully internal — no path information is exposed.
 	pub save_sub_agents: SaveSubAgentsFn,
+	/// Backing directory used by both sub-agent load and save. Exposed so
+	/// mutations can lock the physical directory, including symlink aliases.
+	pub sub_agent_global_dir: Option<OptionalPathFn>,
+	pub sub_agent_project_dir: Option<OptionalProjectPathFn>,
 	pub cli_name: &'static str,
 	pub validate_args: &'static [&'static str],
 	/// Directory/file markers that indicate this agent's project root
@@ -113,6 +118,22 @@ pub struct AgentDescriptor {
 }
 
 impl AgentDescriptor {
+	pub fn sub_agent_dir(
+		&self,
+		project_root: Option<&Path>,
+		scope: ResourceScope,
+	) -> Option<PathBuf> {
+		match scope {
+			ResourceScope::GlobalOnly => {
+				self.sub_agent_global_dir.and_then(|path| path())
+			}
+			ResourceScope::ProjectOnly => project_root.and_then(|root| {
+				self.sub_agent_project_dir.and_then(|path| path(root))
+			}),
+			ResourceScope::Both => None,
+		}
+	}
+
 	pub fn supports_skill_scope(&self, scope: ResourceScope) -> bool {
 		match scope {
 			ResourceScope::GlobalOnly => self.capabilities.skills.scopes.global,
@@ -284,11 +305,9 @@ pub fn save_mcps_to_file(
 	mcps: &[McpServer],
 	serialize: McpSerializeFn,
 ) -> Result<()> {
-	if let Some(parent) = path.parent() {
-		fs::create_dir_all(parent)?;
-	}
+	let backing = mcp_backing_path(path)?;
 
-	let original_content = match fs::read_to_string(path) {
+	let original_content = match fs::read_to_string(&backing) {
 		Ok(content) => Some(content),
 		Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
 		Err(e) => return Err(e.into()),
@@ -297,8 +316,65 @@ pub fn save_mcps_to_file(
 	config.mcps = mcps.to_vec();
 
 	let content = serialize(&config, original_content.as_deref())?;
-	fs::write(path, content)?;
+	let parent = backing.parent().ok_or_else(|| {
+		io::Error::new(io::ErrorKind::InvalidInput, "MCP backing has no parent")
+	})?;
+	let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+	match fs::metadata(&backing) {
+		Ok(metadata) => {
+			#[cfg(unix)]
+			{
+				use std::os::unix::fs::MetadataExt;
+				if metadata.nlink() > 1 {
+					return Err(ConfigError::InvalidConfig(
+						"MCP backing has hard links; atomic replacement would split them".to_string(),
+					));
+				}
+			}
+			if metadata.permissions().readonly() {
+				return Err(io::Error::new(
+					io::ErrorKind::PermissionDenied,
+					"MCP backing is read-only",
+				)
+				.into());
+			}
+			staged.as_file().set_permissions(metadata.permissions())?;
+		}
+		Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+		Err(error) => return Err(error.into()),
+	}
+	staged.write_all(content.as_bytes())?;
+	staged.as_file().sync_all()?;
+	staged.persist(&backing).map_err(|error| error.error)?;
 	Ok(())
+}
+
+/// Resolve the actual MCP backing before choosing the lock and replacement
+/// target. A symlink is preserved; an unresolved symlink is an error.
+pub fn mcp_backing_path(path: &Path) -> io::Result<PathBuf> {
+	let parent = path.parent().ok_or_else(|| {
+		io::Error::new(io::ErrorKind::InvalidInput, "MCP path has no parent")
+	})?;
+	fs::create_dir_all(parent)?;
+	match fs::canonicalize(path) {
+		Ok(path) => Ok(path),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => {
+			match fs::symlink_metadata(path) {
+				Ok(_) => Err(error),
+				Err(missing) if missing.kind() == io::ErrorKind::NotFound => {
+					let name = path.file_name().ok_or_else(|| {
+						io::Error::new(
+							io::ErrorKind::InvalidInput,
+							"MCP path has no filename",
+						)
+					})?;
+					Ok(fs::canonicalize(parent)?.join(name))
+				}
+				Err(other) => Err(other),
+			}
+		}
+		Err(error) => Err(error),
+	}
 }
 
 pub fn load_scoped_mcps(
@@ -584,5 +660,47 @@ mod tests {
 		save_mcps_to_file(&path, &[], ser).unwrap();
 		let out = std::fs::read_to_string(&path).unwrap();
 		assert_eq!(out, "model: gpt\n KEEP");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn atomic_mcp_save_preserves_symlink_and_permissions() {
+		use std::os::unix::fs::{symlink, PermissionsExt};
+		fn ser(_: &AgentConfig, _: Option<&str>) -> Result<String> {
+			Ok("updated".to_string())
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("target.json");
+		let alias = dir.path().join("alias.json");
+		fs::write(&target, "before").unwrap();
+		fs::set_permissions(&target, fs::Permissions::from_mode(0o600))
+			.unwrap();
+		symlink(&target, &alias).unwrap();
+		save_mcps_to_file(&alias, &[], ser).unwrap();
+		assert!(fs::symlink_metadata(&alias)
+			.unwrap()
+			.file_type()
+			.is_symlink());
+		assert_eq!(fs::read_to_string(&target).unwrap(), "updated");
+		assert_eq!(
+			fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+			0o600
+		);
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn atomic_mcp_save_refuses_to_split_hard_links() {
+		fn ser(_: &AgentConfig, _: Option<&str>) -> Result<String> {
+			Ok("updated".to_string())
+		}
+		let dir = tempfile::tempdir().unwrap();
+		let target = dir.path().join("target.json");
+		let alias = dir.path().join("alias.json");
+		fs::write(&target, "before").unwrap();
+		fs::hard_link(&target, &alias).unwrap();
+		assert!(save_mcps_to_file(&alias, &[], ser).is_err());
+		assert_eq!(fs::read_to_string(&target).unwrap(), "before");
+		assert_eq!(fs::read_to_string(&alias).unwrap(), "before");
 	}
 }

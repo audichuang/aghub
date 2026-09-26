@@ -781,6 +781,197 @@ fn add_mcp_agent_list_writes_each_agent_config() {
 	}
 }
 
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_credits_both_readers_of_shared_project_backing() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = home.path().join("project");
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(&project)
+		.args([
+			"--json",
+			"-p",
+			"-a",
+			"claude,copilot",
+			"add",
+			"mcps",
+			"--name",
+			"shared",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		out.status.success(),
+		"{}",
+		String::from_utf8_lossy(&out.stderr)
+	);
+	let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(envelope["success_count"], 2, "{envelope}");
+	assert_eq!(envelope["failed_count"], 0, "{envelope}");
+	assert_eq!(
+		envelope["results"][0]["output"], envelope["results"][1]["output"],
+		"both rows must report the same persisted server"
+	);
+	for (row, agent) in envelope["results"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.zip(["claude", "copilot"])
+	{
+		assert_eq!(row["agent"], agent, "{row}");
+		assert_eq!(row["ok"], true, "{row}");
+		assert_eq!(row["output"]["name"], "shared", "{row}");
+	}
+	for agent in ["claude", "copilot"] {
+		let get = isolated_cli(home.path(), state.path())
+			.current_dir(&project)
+			.args(["--json", "-p", "-a", agent, "get", "mcps"])
+			.output()
+			.unwrap();
+		assert!(
+			get.status.success(),
+			"{}",
+			String::from_utf8_lossy(&get.stderr)
+		);
+		let mcps: Value = serde_json::from_slice(&get.stdout).unwrap();
+		assert!(mcps
+			.as_array()
+			.unwrap()
+			.iter()
+			.any(|m| m["name"] == "shared"));
+	}
+}
+
+#[cfg(unix)]
+#[test]
+fn add_mcp_agent_list_preserves_preexisting_shared_conflicts() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = home.path().join("project");
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+	let add_args = [
+		"--json",
+		"-p",
+		"-a",
+		"claude",
+		"add",
+		"mcps",
+		"--name",
+		"already-there",
+		"--url",
+		"http://h",
+	];
+	let seed = isolated_cli(home.path(), state.path())
+		.current_dir(&project)
+		.args(add_args)
+		.output()
+		.unwrap();
+	assert!(
+		seed.status.success(),
+		"{}",
+		String::from_utf8_lossy(&seed.stderr)
+	);
+
+	let out = isolated_cli(home.path(), state.path())
+		.current_dir(&project)
+		.args([
+			"--json",
+			"-p",
+			"-a",
+			"claude,copilot",
+			"add",
+			"mcps",
+			"--name",
+			"already-there",
+			"--url",
+			"http://h",
+		])
+		.output()
+		.unwrap();
+	assert!(!out.status.success());
+	let envelope: Value = serde_json::from_slice(&out.stdout).unwrap();
+	assert_eq!(envelope["success_count"], 0, "{envelope}");
+	assert_eq!(envelope["failed_count"], 2, "{envelope}");
+	assert!(envelope["results"]
+		.as_array()
+		.unwrap()
+		.iter()
+		.all(|row| !row["ok"].as_bool().unwrap()));
+}
+
+#[cfg(unix)]
+#[test]
+fn concurrent_cli_mcp_adds_keep_every_server() {
+	let home = tempfile::TempDir::new().unwrap();
+	let state = tempfile::TempDir::new().unwrap();
+	let project = home.path().join("project");
+	std::fs::create_dir_all(project.join(".claude")).unwrap();
+	let program = Command::cargo_bin("aghub-cli")
+		.unwrap()
+		.get_program()
+		.to_os_string();
+	let mut children = Vec::new();
+	for index in 0..12 {
+		let name = format!("parallel-{index}");
+		let mut command = std::process::Command::new(&program);
+		command
+			.env("HOME", home.path())
+			.env("USERPROFILE", home.path())
+			.env("APPDATA", home.path())
+			.env("XDG_STATE_HOME", state.path());
+		for key in aghub_core::PATH_OVERRIDE_VARS {
+			command.env_remove(key);
+		}
+		let child = command
+			.current_dir(&project)
+			.args([
+				"--json", "-p", "-a", "claude", "add", "mcps", "--name", &name,
+				"--url", "http://h",
+			])
+			.stdout(std::process::Stdio::piped())
+			.stderr(std::process::Stdio::piped())
+			.spawn()
+			.unwrap();
+		children.push(child);
+	}
+	for child in children {
+		let output = child.wait_with_output().unwrap();
+		assert!(
+			output.status.success(),
+			"concurrent add failed: {}",
+			String::from_utf8_lossy(&output.stderr)
+		);
+	}
+	let get = isolated_cli(home.path(), state.path())
+		.current_dir(&project)
+		.args(["--json", "-p", "-a", "claude", "get", "mcps"])
+		.output()
+		.unwrap();
+	assert!(
+		get.status.success(),
+		"{}",
+		String::from_utf8_lossy(&get.stderr)
+	);
+	let servers: Value = serde_json::from_slice(&get.stdout).unwrap();
+	let names: std::collections::HashSet<&str> = servers
+		.as_array()
+		.unwrap()
+		.iter()
+		.filter_map(|server| server["name"].as_str())
+		.collect();
+	for index in 0..12 {
+		assert!(
+			names.contains(format!("parallel-{index}").as_str()),
+			"missing server {index}: {names:?}"
+		);
+	}
+}
+
 /// A batch naming an agent with NO MCP support (pi) must be rejected by the
 /// preflight BEFORE any write — claude's config must stay untouched.
 #[cfg(unix)]
@@ -1742,6 +1933,11 @@ fn apply_update_outdated_skips_uncheckable_and_leaves_lock_alone() {
 	assert_eq!(v["dryRun"], true, "{v}");
 	assert_eq!(v["scope"], "global", "{v}");
 	assert_eq!(v["skills"], serde_json::json!([]), "{v}");
+	assert_eq!(
+		v["uncheckable"],
+		serde_json::json!([{"name": "mytool", "reason": "local"}]),
+		"the bulk result must explain why this skill was not checked: {v}"
+	);
 
 	let applied = isolated_cli(home.path(), state.path())
 		.args(["-g", "apply-update", "skills", "--outdated", "--yes"])
@@ -1749,7 +1945,11 @@ fn apply_update_outdated_skips_uncheckable_and_leaves_lock_alone() {
 		.unwrap();
 	let stdout = String::from_utf8_lossy(&applied.stdout);
 	assert!(applied.status.success(), "{stdout}");
-	assert!(stdout.contains("Nothing to update"), "{stdout}");
+	assert!(
+		stdout.contains("could not check: mytool (local)"),
+		"{stdout}"
+	);
+	assert!(!stdout.contains("Nothing to update"), "{stdout}");
 	assert_eq!(std::fs::read(&lock).unwrap(), before);
 }
 
@@ -3657,7 +3857,7 @@ fn add_mcp_url_with_timeout_succeeds_and_sets_it() {
 		.args([
 			"--json",
 			"-a",
-			"claude",
+			"opencode",
 			"add",
 			"mcps",
 			"--name",
@@ -3678,6 +3878,45 @@ fn add_mcp_url_with_timeout_succeeds_and_sets_it() {
 	assert_eq!(
 		v["transport"]["timeout"], 30,
 		"printed transport must carry timeout:30, got: {v}"
+	);
+	let stored: Value = serde_json::from_str(
+		&std::fs::read_to_string(
+			home.path().join(".config/opencode/opencode.json"),
+		)
+		.unwrap(),
+	)
+	.unwrap();
+	assert_eq!(stored["mcp"]["m"]["timeout"], 30, "{stored}");
+}
+
+#[cfg(unix)]
+#[test]
+fn add_mcp_refuses_timeout_that_dialect_cannot_persist() {
+	let home = tempfile::tempdir().unwrap();
+	let state = tempfile::tempdir().unwrap();
+	let out = isolated_cli(home.path(), state.path())
+		.args([
+			"--json",
+			"-a",
+			"claude",
+			"add",
+			"mcps",
+			"--name",
+			"m",
+			"--url",
+			"http://h",
+			"--timeout",
+			"30",
+		])
+		.output()
+		.unwrap();
+	assert!(
+		!out.status.success(),
+		"a timeout Claude cannot store must be refused"
+	);
+	assert!(
+		!home.path().join(".claude.json").exists(),
+		"refusal must leave no config file behind"
 	);
 }
 
@@ -3718,7 +3957,7 @@ fn update_mcp_timeout_flag_overrides_existing() {
 		.args([
 			"--json",
 			"-a",
-			"claude",
+			"opencode",
 			"add",
 			"mcps",
 			"--name",
@@ -3740,7 +3979,7 @@ fn update_mcp_timeout_flag_overrides_existing() {
 		.args([
 			"--json",
 			"-a",
-			"claude",
+			"opencode",
 			"update",
 			"mcps",
 			"m",
@@ -3759,6 +3998,14 @@ fn update_mcp_timeout_flag_overrides_existing() {
 		v["transport"]["timeout"], 45,
 		"updated transport must carry timeout:45, got: {v}"
 	);
+	let stored: Value = serde_json::from_str(
+		&std::fs::read_to_string(
+			home.path().join(".config/opencode/opencode.json"),
+		)
+		.unwrap(),
+	)
+	.unwrap();
+	assert_eq!(stored["mcp"]["m"]["timeout"], 45, "{stored}");
 }
 
 #[cfg(unix)] // Windows: global MCP config not HOME-isolated
@@ -3773,16 +4020,7 @@ fn update_mcp_zero_timeout_is_rejected() {
 	let state = tempfile::tempdir().unwrap();
 	let add = isolated_cli(home.path(), state.path())
 		.args([
-			"-a",
-			"claude",
-			"add",
-			"mcps",
-			"--name",
-			"m",
-			"--url",
-			"http://h",
-			"--timeout",
-			"10",
+			"-a", "claude", "add", "mcps", "--name", "m", "--url", "http://h",
 		])
 		.output()
 		.unwrap();
@@ -5077,6 +5315,44 @@ fn mcp_project() -> tempfile::TempDir {
 		String::from_utf8_lossy(&add.stderr)
 	);
 	project
+}
+
+#[test]
+fn delete_mcp_refuses_to_remove_an_unnamed_shared_reader() {
+	let project = mcp_project();
+	let shared = project.path().join(".mcp.json");
+	let before = std::fs::read(&shared).unwrap();
+
+	for yes in [false, true] {
+		let mut cmd = transfer_cli(project.path());
+		cmd.args([
+			"-p",
+			"--json",
+			"-a",
+			"claude",
+			"delete",
+			"mcps",
+			"filesystem",
+		]);
+		if yes {
+			cmd.arg("--yes");
+		}
+		let out = cmd.output().unwrap();
+		assert!(
+			!out.status.success(),
+			"single-agent delete must not revoke copilot's shared MCP: {}",
+			String::from_utf8_lossy(&out.stdout)
+		);
+		let result: Value = serde_json::from_slice(&out.stdout).unwrap();
+		assert!(
+			result["error"]["message"]
+				.as_str()
+				.unwrap_or_default()
+				.contains("copilot"),
+			"refusal should identify the other reader: {result}"
+		);
+		assert_eq!(std::fs::read(&shared).unwrap(), before);
+	}
 }
 
 #[test]
@@ -8665,13 +8941,32 @@ fn delete_json_distinguishes_preview_removed_and_absent() {
 	// that can tell its three cases apart.
 	let seeded_mcp = isolated_cli(home.path(), state.path())
 		.current_dir(project.path())
-		.args(["-p", "add", "mcps", "-n", "doomed-mcp", "-c", "echo"])
+		.args([
+			"-p",
+			"-a",
+			"cursor",
+			"add",
+			"mcps",
+			"-n",
+			"doomed-mcp",
+			"-c",
+			"echo",
+		])
 		.output()
 		.unwrap();
 	assert!(seeded_mcp.status.success());
-	let mcp_absent =
-		delete(&["-p", "--json", "delete", "mcps", "ghost", "--yes"]);
-	let mcp_preview = delete(&["-p", "--json", "delete", "mcps", "doomed-mcp"]);
+	let mcp_absent = delete(&[
+		"-p", "-a", "cursor", "--json", "delete", "mcps", "ghost", "--yes",
+	]);
+	let mcp_preview = delete(&[
+		"-p",
+		"-a",
+		"cursor",
+		"--json",
+		"delete",
+		"mcps",
+		"doomed-mcp",
+	]);
 	assert_eq!(mcp_absent["outcome"], "absent", "{mcp_absent}");
 	assert_eq!(mcp_preview["outcome"], "preview", "{mcp_preview}");
 	assert_ne!(mcp_absent["outcome"], mcp_preview["outcome"]);
@@ -12710,24 +13005,11 @@ fn removing_for_a_non_owner_keeps_the_shared_master_and_names_it() {
 	}
 }
 
-/// KNOWN GAP, verified and deliberately unfixed — pinned so a future fix is a
-/// visible red rather than a silent behaviour change.
-///
-/// Naming the shared slot's WRITERS (`-a cline,warp`) deletes the Master, which
-/// takes the skill from cursor and codex as well — they read `.agents/skills`
-/// but the command never mentioned them, and the result reports plain success.
-/// Same shape as the documented `reconcile mcp --remove` gap in the root
-/// `AGENTS.md`: the protect set is built from the agents NAMED, so a
-/// slot-sharer nobody named is in neither list.
-///
-/// `--all-agents` is unaffected — it promises "gone everywhere" and delivers it.
-///
-/// ponytail: the fix is to build the protect set from READERS of each doomed
-/// path rather than from the named agents; out of scope here because it changes
-/// the multi-agent batch policy in `core/src/batch.rs`, not just this verb.
+/// Naming only the shared slot's writers must not take the skill from an
+/// unselected reader of `.agents/skills`.
 #[cfg(unix)]
 #[test]
-fn naming_only_a_slots_writers_still_takes_it_from_unnamed_readers() {
+fn naming_only_a_slots_writers_keeps_unnamed_readers() {
 	let home = tempfile::tempdir().unwrap();
 	let state = tempfile::tempdir().unwrap();
 	let name = "aghub-withhold-fixture";
@@ -12767,21 +13049,23 @@ fn naming_only_a_slots_writers_still_takes_it_from_unnamed_readers() {
 		])
 		.output()
 		.unwrap();
-	assert_eq!(out.status.code(), Some(0));
+	assert!(!out.status.success(), "a partial delete must refuse");
 
-	// The gap: cursor was never named, and lost the skill anyway.
 	assert!(
-		!master.exists(),
-		"documenting today's behaviour: the master goes with the writers"
+		master.join("SKILL.md").is_file(),
+		"the Master must remain for cursor"
+	);
+	assert!(
+		std::fs::symlink_metadata(shared.join(name)).is_ok(),
+		"the shared Referrer must remain"
 	);
 	let after = isolated_cli(home.path(), state.path())
 		.args(["-g", "-a", "cursor", "--json", "get", "skills"])
 		.output()
 		.unwrap();
 	assert!(
-		!String::from_utf8_lossy(&after.stdout).contains(name),
-		"if this goes GREEN-to-RED someone fixed the gap — update the doc \
-		 comment above rather than restoring this assertion"
+		String::from_utf8_lossy(&after.stdout).contains(name),
+		"cursor must retain the skill it had before the refused delete"
 	);
 }
 

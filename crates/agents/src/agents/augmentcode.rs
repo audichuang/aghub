@@ -87,6 +87,8 @@ pub const DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	}),
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
+	sub_agent_global_dir: None,
+	sub_agent_project_dir: None,
 	cli_name: "augmentcode",
 	validate_args: &["--version"],
 	project_markers: &[".augment"],

@@ -21,6 +21,8 @@ list, or `all`), `-g`/`-p`, `--all`.
   online check for ONE scope and resyncs every `updateAvailable` row through
   `resync_locked_skills` (`source_group: None`, all Sources in one batch);
   renamed rows are skipped with an `accept-rename` hint
+  and uncheckable rows are reported by name and reason, never presented as
+  proof that nothing is outdated
 - **`delete`'s JSON carries `outcome`**: `preview` | `removed` | `absent` |
   `partial` | `kept` (`success: true` but THE ENTITY IS STILL THERE; the API
   adds an api-only `failed`). Read `outcome`, never `dry_run`/`executed` —
@@ -89,8 +91,9 @@ list, or `all`), `-g`/`-p`, `--all`.
   `INVALID_CONFIG` / HTTP 400; the SKILL removal refusal is the other code —
   `delete` and `reconcile skill` both report `UNSUPPORTED_OPERATION` / HTTP 422.
   Batching is transport and must not relabel either as bad parameters.
-  **`delete mcps <name> -a claude -p --yes` has no such guard** — copilot loses
-  the server too (verified; left alone deliberately). Why:
+  Direct `delete mcps <name> -a claude -p` uses the same shared-reader guard:
+  it refuses before preview or commit when copilot would lose the server.
+  Why:
   knowledge page `多目標突變的 scope 閘門與批次歸因`
 - **`skill-usage`**: Claude-global only; rejects project/`--all`.
   **`coverage`**: rejects `--all`, scope `-g` or `-p` only, and is a static

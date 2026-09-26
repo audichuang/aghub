@@ -101,6 +101,8 @@ static ADAPTER_TEST_DESCRIPTOR: AgentDescriptor = AgentDescriptor {
 	project_skill_paths: None,
 	load_sub_agents: load_sub_agents_noop,
 	save_sub_agents: save_sub_agents_noop,
+	sub_agent_global_dir: None,
+	sub_agent_project_dir: None,
 	cli_name: "adapter-test",
 	validate_args: &[],
 	project_markers: &[],
@@ -1266,6 +1268,27 @@ fn test_mcp_update_replaces_target_only() {
 	}
 }
 
+#[test]
+fn failed_mcp_patch_restores_loaded_state_before_save_current() {
+	let test = TestConfig::new(AgentType::Cursor).unwrap();
+	let mut manager = test.create_manager();
+	manager.load().unwrap();
+	manager.add_mcp(mcp_stdio("server")).unwrap();
+	let original = manager.get_mcp("server").unwrap().clone();
+
+	let error = manager
+		.update_mcp_with("server", |server| {
+			server.transport = McpTransport::stdio("uncommitted", vec![]);
+			Err(ConfigError::ValidationFailed("invalid patch".into()))
+		})
+		.unwrap_err();
+	assert!(error.to_string().contains("invalid patch"));
+	assert_eq!(manager.get_mcp("server"), Some(&original));
+	manager.save_current().unwrap();
+	manager.load().unwrap();
+	assert_eq!(manager.get_mcp("server"), Some(&original));
+}
+
 /// Overwrite via remove-all + re-add: results in clean state
 /// Corresponds to ruler test: overwrites existing native config when --mcp-overwrite is used
 #[test]
@@ -1858,4 +1881,47 @@ fn test_adapter_mcp_config_path_hides_both_scope() {
 		adapter.mcp_config_path(Some(temp.path()), ResourceScope::Both),
 		None
 	);
+}
+
+#[test]
+fn concurrent_mcp_adds_keep_every_server() {
+	use std::sync::{Arc, Barrier};
+
+	let project = tempfile::tempdir().unwrap();
+	let root = project.path();
+	let barrier = Arc::new(Barrier::new(8));
+	std::thread::scope(|scope| {
+		let mut tasks = Vec::new();
+		for index in 0..8 {
+			let barrier = Arc::clone(&barrier);
+			tasks.push(scope.spawn(move || {
+				let mut manager = aghub_core::ConfigManager::new(
+					aghub_core::create_adapter(AgentType::Claude),
+					false,
+					Some(root),
+				);
+				manager.load().unwrap();
+				barrier.wait();
+				manager
+					.add_mcp(mcp_stdio(&format!("server-{index}")))
+					.unwrap();
+			}));
+		}
+		for task in tasks {
+			task.join().unwrap();
+		}
+	});
+	let mut manager = aghub_core::ConfigManager::new(
+		aghub_core::create_adapter(AgentType::Claude),
+		false,
+		Some(project.path()),
+	);
+	let names: std::collections::HashSet<_> = manager
+		.load()
+		.unwrap()
+		.mcps
+		.iter()
+		.map(|server| server.name.as_str())
+		.collect();
+	assert_eq!(names.len(), 8, "every successful add must survive");
 }

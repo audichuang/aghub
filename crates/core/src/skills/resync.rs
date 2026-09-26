@@ -180,6 +180,23 @@ pub fn resync_installed_skill(
 		req.project_root,
 	)
 	.map_err(|e| ResyncError::Locked(e.to_string()))?;
+	let store_root = match req.scope {
+		ResourceScope::GlobalOnly => None,
+		ResourceScope::ProjectOnly => {
+			Some(req.project_root.ok_or_else(|| {
+				ResyncError::Conflict(
+					"resync requires one resolved scope".into(),
+				)
+			})?)
+		}
+		ResourceScope::Both => {
+			return Err(ResyncError::Conflict(
+				"resync requires one resolved scope".into(),
+			))
+		}
+	};
+	crate::skills::linker::reject_linked_master_store(store_root)
+		.map_err(|e| ResyncError::OutOfTree(e.to_string()))?;
 
 	let agents = crate::load_all_agents(req.scope, req.project_root);
 	let targets =
@@ -458,6 +475,42 @@ mod tests {
 			ref_commit: Some(commit),
 			expected: captured(name, project),
 		}
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn linked_project_store_cannot_redirect_resync() {
+		let _env = crate::skills::prune::test_lock::env_lock()
+			.lock()
+			.unwrap_or_else(|e| e.into_inner());
+		let tmp = tempfile::tempdir().unwrap();
+		let project = tmp.path().join("project");
+		let outside = tmp.path().join("outside");
+		std::fs::create_dir_all(&project).unwrap();
+		write_skill(&outside.join("escaped"), "escaped", "old");
+		std::os::unix::fs::symlink(&outside, project.join(".aghub")).unwrap();
+		let referrer = project.join(".claude/skills/escaped");
+		std::fs::create_dir_all(referrer.parent().unwrap()).unwrap();
+		std::os::unix::fs::symlink(project.join(".aghub/escaped"), &referrer)
+			.unwrap();
+		skill::add_skill_to_local_lock("escaped", lock_entry(), Some(&project))
+			.unwrap();
+		let source = tmp.path().join("source/escaped");
+		write_skill(&source, "escaped", "new");
+		let before = std::fs::read(outside.join("escaped/SKILL.md")).unwrap();
+
+		let error = resync_installed_skill(project_request(
+			&source,
+			"escaped",
+			&project,
+			"new-commit",
+		))
+		.expect_err("linked store must not redirect a resync outside project");
+		assert!(matches!(error, ResyncError::OutOfTree(_)), "{error}");
+		assert_eq!(
+			std::fs::read(outside.join("escaped/SKILL.md")).unwrap(),
+			before,
+		);
 	}
 
 	#[cfg(unix)]

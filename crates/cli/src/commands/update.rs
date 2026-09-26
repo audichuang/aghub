@@ -67,42 +67,162 @@ pub fn execute(
 		}
 		ResourceType::Mcps => {
 			eprintln_verbose!("Updating MCP server: {}", name);
-			// Get existing MCP
-			let existing = manager.get_mcp(&name).ok_or_else(|| {
-				ConfigError::resource_not_found("MCP server", &name)
+			// Parse input errors before taking the mutation lock. The existing
+			// server and its inherited timeout are read only after fresh reload.
+			let parsed_transport = parse_mcp_transport(
+				command, url, &transport, headers, env_vars, timeout,
+			)?;
+			let mcp = manager.update_mcp_with(&name, move |mcp| {
+				let inherited_timeout = match &mcp.transport {
+					McpTransport::Stdio { timeout, .. }
+					| McpTransport::Sse { timeout, .. }
+					| McpTransport::StreamableHttp { timeout, .. } => *timeout,
+				};
+				if let Some(mut new_transport) = parsed_transport {
+					if timeout.is_none() {
+						set_transport_timeout(
+							&mut new_transport,
+							inherited_timeout,
+						);
+					}
+					mcp.transport = new_transport;
+				} else if timeout.is_some() {
+					set_transport_timeout(&mut mcp.transport, timeout);
+				}
+				Ok(())
 			})?;
-
-			let mut mcp = existing.clone();
-
-			// Preserve existing timeout unless --timeout overrides it.
-			let existing_timeout = match &mcp.transport {
-				McpTransport::Stdio { timeout, .. } => *timeout,
-				McpTransport::Sse { timeout, .. } => *timeout,
-				McpTransport::StreamableHttp { timeout, .. } => *timeout,
-			};
-			let effective_timeout = timeout.or(existing_timeout);
-
-			// Rebuild the transport when --command/--url are given; this also
-			// validates timeout (incl. timeout==0) on that path.
-			if let Some(new_transport) = parse_mcp_transport(
-				command,
-				url,
-				&transport,
-				headers,
-				env_vars,
-				effective_timeout,
-			)? {
-				mcp.transport = new_transport;
-			} else if timeout.is_some() {
-				// --timeout alone: patch the existing transport in place.
-				set_transport_timeout(&mut mcp.transport, effective_timeout);
-			}
-
-			manager.update_mcp(&name, mcp.clone())?;
 			eprintln_verbose!("MCP server updated successfully");
 			serde_json::to_value(&mcp)?
 		}
 	};
 
 	Ok(payload)
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use aghub_core::{
+		adapters::create_adapter,
+		models::{AgentType, McpServer},
+	};
+
+	#[test]
+	fn mcp_timeout_patch_preserves_a_command_changed_after_its_manager_loaded()
+	{
+		let project = tempfile::tempdir().unwrap();
+		let path = project.path().join(".codex/config.toml");
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		std::fs::write(&path, "").unwrap();
+		let manager = || {
+			ConfigManager::new(
+				create_adapter(AgentType::Codex),
+				false,
+				Some(project.path()),
+			)
+		};
+		let mut seed = manager();
+		seed.load().unwrap();
+		seed.add_mcp(McpServer::new(
+			"server",
+			McpTransport::stdio("old", vec![]),
+		))
+		.unwrap();
+		let mut first = manager();
+		let mut stale = manager();
+		first.load().unwrap();
+		stale.load().unwrap();
+
+		execute(
+			&mut first,
+			ResourceType::Mcps,
+			"server".into(),
+			Some("new".into()),
+			None,
+			"stdio".into(),
+			vec![],
+			vec![],
+			None,
+			None,
+			None,
+			None,
+			vec![],
+		)
+		.unwrap();
+		execute(
+			&mut stale,
+			ResourceType::Mcps,
+			"server".into(),
+			None,
+			None,
+			"stdio".into(),
+			vec![],
+			vec![],
+			Some(45),
+			None,
+			None,
+			None,
+			vec![],
+		)
+		.unwrap();
+
+		let mut observed = manager();
+		observed.load().unwrap();
+		let actual = observed.get_mcp("server").unwrap();
+		assert!(
+			matches!(&actual.transport, McpTransport::Stdio { command, timeout: Some(45), .. } if command == "new"),
+			"both independent updates must survive: {actual:?}"
+		);
+	}
+
+	#[test]
+	fn mcp_timeout_patch_refuses_cursor_when_timeout_cannot_persist() {
+		let project = tempfile::tempdir().unwrap();
+		let manager = || {
+			ConfigManager::new(
+				create_adapter(AgentType::Cursor),
+				false,
+				Some(project.path()),
+			)
+		};
+		let mut seed = manager();
+		seed.load().unwrap();
+		seed.add_mcp(McpServer::new(
+			"server",
+			McpTransport::stdio("echo", vec![]),
+		))
+		.unwrap();
+		let path = project.path().join(".cursor/mcp.json");
+		let original = std::fs::read_to_string(&path).unwrap();
+		let mut updater = manager();
+		updater.load().unwrap();
+		let error = execute(
+			&mut updater,
+			ResourceType::Mcps,
+			"server".into(),
+			None,
+			None,
+			"stdio".into(),
+			vec![],
+			vec![],
+			Some(45),
+			None,
+			None,
+			None,
+			vec![],
+		)
+		.expect_err("unpersistable timeout must fail");
+		assert!(
+			error.to_string().contains("without losing fields"),
+			"{error}"
+		);
+		assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+		let mut observed = manager();
+		observed.load().unwrap();
+		let actual = observed.get_mcp("server").unwrap();
+		assert!(matches!(
+			&actual.transport,
+			McpTransport::Stdio { timeout: None, .. }
+		));
+	}
 }

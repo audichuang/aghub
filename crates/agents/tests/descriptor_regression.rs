@@ -10,6 +10,21 @@ use aghub_agents::{
 };
 use std::path::PathBuf;
 
+#[test]
+fn sub_agent_project_backing_path_matches_capability() {
+	let root = std::path::Path::new("/virtual-project");
+	for descriptor in agents::ALL_DESCRIPTORS {
+		assert_eq!(
+			descriptor
+				.sub_agent_dir(Some(root), ResourceScope::ProjectOnly)
+				.is_some(),
+			descriptor.supports_sub_agent_scope(ResourceScope::ProjectOnly),
+			"{} sub-agent backing path/capability mismatch",
+			descriptor.id,
+		);
+	}
+}
+
 /// Helper to get home directory for path assertions
 fn home() -> PathBuf {
 	dirs::home_dir().expect("home dir should exist")

@@ -38,6 +38,11 @@ pub trait AgentAdapter: Send + Sync {
 		scope: ResourceScope,
 		agents: &[SubAgent],
 	) -> Result<()>;
+	fn sub_agent_dir(
+		&self,
+		project_root: Option<&Path>,
+		scope: ResourceScope,
+	) -> Option<PathBuf>;
 
 	/// Load complete configuration: MCPs from file + Skills from directories
 	/// + Sub-agents via the descriptor's own loader.

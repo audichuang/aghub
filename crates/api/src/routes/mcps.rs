@@ -5,6 +5,7 @@ use rocket::http::Status;
 use rocket::serde::json::Json;
 
 use crate::{
+	blocking::in_mutation_pool,
 	dto::mcp::{
 		AgentBatchResponse, BatchCreateMcpRequest, CreateMcpRequest,
 		McpResponse, UpdateMcpRequest,
@@ -63,8 +64,14 @@ pub fn list_mcps(
 }
 
 #[post("/mcps/transfer", data = "<body>")]
-pub fn transfer_mcp_route(
+pub async fn transfer_mcp_route(
 	_origin: TrustedLocalOrigin,
+	body: Json<TransferRequest>,
+) -> ApiResult<OperationBatchResponse> {
+	in_mutation_pool(|| transfer_mcp_route_inner(body)).await
+}
+
+fn transfer_mcp_route_inner(
 	body: Json<TransferRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -80,8 +87,14 @@ pub fn transfer_mcp_route(
 }
 
 #[post("/mcps/reconcile", data = "<body>")]
-pub fn reconcile_mcp_route(
+pub async fn reconcile_mcp_route(
 	_origin: TrustedLocalOrigin,
+	body: Json<ReconcileRequest>,
+) -> ApiResult<OperationBatchResponse> {
+	in_mutation_pool(|| reconcile_mcp_route_inner(body)).await
+}
+
+fn reconcile_mcp_route_inner(
 	body: Json<ReconcileRequest>,
 ) -> ApiResult<OperationBatchResponse> {
 	let req = body.into_inner();
@@ -143,13 +156,21 @@ fn create_mcp_for_agent(
 	}
 	let mcp = McpServer::from(req);
 	let response = McpResponse::from(&mcp);
-	manager.add_mcp(mcp).map_err(ApiError::from)?;
+	manager.add_mcp_exact(mcp).map_err(ApiError::from)?;
 	Ok(response)
 }
 
 #[post("/agents/<agent>/mcps?<scope..>", data = "<body>")]
-pub fn create_mcp(
+pub async fn create_mcp(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	scope: ScopeParams,
+	body: Json<CreateMcpRequest>,
+) -> ApiCreated<McpResponse> {
+	in_mutation_pool(|| create_mcp_inner(agent, scope, body)).await
+}
+
+fn create_mcp_inner(
 	agent: AgentParam,
 	scope: ScopeParams,
 	body: Json<CreateMcpRequest>,
@@ -173,14 +194,21 @@ pub fn create_mcp(
 /// A partial failure is a 200 with `failed_count > 0` — the caller decides
 /// how to surface it.
 #[post("/mcps/batch?<scope..>", data = "<body>")]
-pub fn batch_create_mcp(
+pub async fn batch_create_mcp(
 	_origin: TrustedLocalOrigin,
+	scope: ScopeParams,
+	body: Json<BatchCreateMcpRequest>,
+) -> ApiResult<AgentBatchResponse> {
+	in_mutation_pool(|| batch_create_mcp_inner(scope, body)).await
+}
+
+fn batch_create_mcp_inner(
 	scope: ScopeParams,
 	body: Json<BatchCreateMcpRequest>,
 ) -> ApiResult<AgentBatchResponse> {
 	let req = body.into_inner();
 	let resolved = scope.resolve()?;
-	let (resource_scope, _) = resolved_to_resource_scope(&resolved);
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
 	req.mcp.validate()?;
 	require_writable_scope(&resolved)?;
 	if req.agents.is_empty() {
@@ -211,18 +239,37 @@ pub fn batch_create_mcp(
 	// already succeeded holding the server.
 	let probe_transport =
 		aghub_core::models::McpTransport::from(req.mcp.transport.clone());
+	let mut attribution =
+		aghub_core::batch::McpCreateAttribution::new(&req.mcp.name);
 	let view = aghub_core::batch::run_mcp_agent_mutation(
 		&agents,
 		resource_scope,
 		false,
 		Some(&probe_transport),
 		|agent| {
-			create_mcp_for_agent(&AgentParam(agent), &resolved, req.mcp.clone())
-				.map(|resp| {
-					serde_json::to_value(&resp)
+			let result = create_mcp_for_agent(
+				&AgentParam(agent),
+				&resolved,
+				req.mcp.clone(),
+			);
+			let duplicate = result
+				.as_ref()
+				.err()
+				.is_some_and(|error| error.body.code == "RESOURCE_EXISTS");
+			let response = attribution.attribute(
+				agent,
+				project_root.as_deref(),
+				resource_scope,
+				result,
+				duplicate,
+				|mcp| McpResponse::from(mcp),
+			);
+			response
+				.map(|response| {
+					serde_json::to_value(&response)
 						.unwrap_or(serde_json::Value::Null)
 				})
-				.map_err(|e| e.body.error)
+				.map_err(|error| error.body.error)
 		},
 	)
 	.map_err(|e| {
@@ -264,8 +311,17 @@ pub fn get_mcp(
 }
 
 #[put("/agents/<agent>/mcps/<name>?<scope..>", data = "<body>")]
-pub fn update_mcp(
+pub async fn update_mcp(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	name: &str,
+	scope: ScopeParams,
+	body: Json<UpdateMcpRequest>,
+) -> ApiResult<McpResponse> {
+	in_mutation_pool(|| update_mcp_inner(agent, name, scope, body)).await
+}
+
+fn update_mcp_inner(
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -278,16 +334,21 @@ pub fn update_mcp(
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	manager.load().map_err(ApiError::from)?;
-	let existing = manager
-		.get_mcp(name)
-		.ok_or_else(|| {
-			ApiError::from(ConfigError::resource_not_found("mcp", name))
-		})?
-		.clone();
-	let updated = body.into_inner().apply_to(existing);
-	let response = McpResponse::from(&updated);
-	manager.update_mcp(name, updated).map_err(ApiError::from)?;
-	Ok(Json(response))
+	apply_update_mcp(&mut manager, name, body.into_inner())
+}
+
+fn apply_update_mcp(
+	manager: &mut aghub_core::manager::ConfigManager,
+	name: &str,
+	request: UpdateMcpRequest,
+) -> ApiResult<McpResponse> {
+	let updated = manager
+		.update_mcp_with(name, |current| {
+			*current = request.apply_to(current.clone());
+			Ok(())
+		})
+		.map_err(ApiError::from)?;
+	Ok(Json(McpResponse::from(&updated)))
 }
 
 /// Query params for `delete_mcp`. Mirrors the skill `DeleteSkillParams`
@@ -300,8 +361,16 @@ pub struct DeleteMcpParams {
 }
 
 #[delete("/agents/<agent>/mcps/<name>?<params..>")]
-pub fn delete_mcp(
+pub async fn delete_mcp(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	name: &str,
+	params: DeleteMcpParams,
+) -> ApiResult<DeleteSkillByPathResponse> {
+	in_mutation_pool(|| delete_mcp_inner(agent, name, params)).await
+}
+
+fn delete_mcp_inner(
 	agent: AgentParam,
 	name: &str,
 	params: DeleteMcpParams,
@@ -334,14 +403,22 @@ pub fn delete_mcp(
 	// Idempotent-delete contract (a missing MCP is a success no-op, any other
 	// error propagates) is owned once in `routes::removal_or_noop`.
 	crate::routes::removal_or_noop(
-		manager.remove_mcp_planned(name, dry_run, confirm),
+		manager.remove_mcp_planned_single_guarded(name, dry_run, confirm),
 		dry_run,
 	)
 }
 
 #[post("/agents/<agent>/mcps/<name>/enable?<scope..>")]
-pub fn enable_mcp(
+pub async fn enable_mcp(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	name: &str,
+	scope: ScopeParams,
+) -> ApiResult<McpResponse> {
+	in_mutation_pool(|| enable_mcp_inner(agent, name, scope)).await
+}
+
+fn enable_mcp_inner(
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -358,8 +435,16 @@ pub fn enable_mcp(
 }
 
 #[post("/agents/<agent>/mcps/<name>/disable?<scope..>")]
-pub fn disable_mcp(
+pub async fn disable_mcp(
 	_origin: TrustedLocalOrigin,
+	agent: AgentParam,
+	name: &str,
+	scope: ScopeParams,
+) -> ApiResult<McpResponse> {
+	in_mutation_pool(|| disable_mcp_inner(agent, name, scope)).await
+}
+
+fn disable_mcp_inner(
 	agent: AgentParam,
 	name: &str,
 	scope: ScopeParams,
@@ -401,6 +486,44 @@ mod tests {
 		dto::mcp::{CreateMcpRequest, TransportDto},
 		extractors::AgentParam,
 	};
+
+	// Route wrappers only hand blocking work to the shared pool; exercise the
+	// synchronous body here while `blocking` tests cover the handoff itself.
+	fn create_mcp(
+		_: TrustedLocalOrigin,
+		agent: AgentParam,
+		scope: ScopeParams,
+		body: Json<CreateMcpRequest>,
+	) -> ApiCreated<McpResponse> {
+		create_mcp_inner(agent, scope, body)
+	}
+
+	fn batch_create_mcp(
+		_: TrustedLocalOrigin,
+		scope: ScopeParams,
+		body: Json<BatchCreateMcpRequest>,
+	) -> ApiResult<AgentBatchResponse> {
+		batch_create_mcp_inner(scope, body)
+	}
+
+	fn update_mcp(
+		_: TrustedLocalOrigin,
+		agent: AgentParam,
+		name: &str,
+		scope: ScopeParams,
+		body: Json<UpdateMcpRequest>,
+	) -> ApiResult<McpResponse> {
+		update_mcp_inner(agent, name, scope, body)
+	}
+
+	fn delete_mcp(
+		_: TrustedLocalOrigin,
+		agent: AgentParam,
+		name: &str,
+		params: DeleteMcpParams,
+	) -> ApiResult<DeleteSkillByPathResponse> {
+		delete_mcp_inner(agent, name, params)
+	}
 
 	#[test]
 	fn test_create_mcp_rejects_pi_agent() {
@@ -541,14 +664,255 @@ mod tests {
 		assert!(err.body.error.contains("timeout"));
 	}
 
+	#[test]
+	fn update_mcp_refuses_rename_onto_an_existing_server() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		for name in ["alpha", "beta"] {
+			create_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				scope(),
+				Json(stdio_req(name)),
+			)
+			.ok()
+			.expect("seed MCP");
+		}
+		let error = update_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			"alpha",
+			scope(),
+			Json(UpdateMcpRequest {
+				name: Some("beta".to_string()),
+				transport: None,
+				enabled: None,
+				timeout: None,
+			}),
+		)
+		.expect_err("rename collision must fail");
+		assert_eq!(error.body.code, "RESOURCE_EXISTS");
+		for name in ["alpha", "beta"] {
+			get_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				name,
+				scope(),
+			)
+			.ok()
+			.expect("both original servers must remain");
+		}
+	}
+
+	#[test]
+	fn update_mcp_rename_preserves_unmodelled_native_fields() {
+		let project = tempfile::tempdir().unwrap();
+		let path = project.path().join(".cursor/mcp.json");
+		std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+		let original = r#"{"mcpServers":{"alpha":{"type":"stdio","command":"echo","oauth":{"clientId":"native"}}}}"#;
+		std::fs::write(&path, original).unwrap();
+		let error = update_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			"alpha",
+			ScopeParams {
+				scope: Some("project".to_string()),
+				project_root: Some(project.path().display().to_string()),
+			},
+			Json(UpdateMcpRequest {
+				name: Some("beta".to_string()),
+				transport: None,
+				enabled: None,
+				timeout: None,
+			}),
+		)
+		.expect_err("rename must refuse native fields it cannot carry");
+		assert_eq!(error.body.code, "INVALID_CONFIG");
+		assert_eq!(std::fs::read_to_string(path).unwrap(), original);
+	}
+
+	#[test]
+	fn update_mcp_rename_without_native_extras_still_succeeds() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			scope(),
+			Json(stdio_req("alpha")),
+		)
+		.ok()
+		.expect("seed server");
+		let renamed = update_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			"alpha",
+			scope(),
+			Json(UpdateMcpRequest {
+				name: Some("beta".to_string()),
+				transport: None,
+				enabled: None,
+				timeout: None,
+			}),
+		)
+		.ok()
+		.expect("clean rename")
+		.into_inner();
+		assert_eq!(renamed.name, "beta");
+		get_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			"beta",
+			scope(),
+		)
+		.ok()
+		.expect("renamed server must persist");
+		assert!(get_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			"alpha",
+			scope(),
+		)
+		.is_err());
+	}
+
+	#[test]
+	fn update_mcp_rejects_timeout_cursor_cannot_persist() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Cursor),
+			scope(),
+			Json(stdio_req("alpha")),
+		)
+		.ok()
+		.expect("seed server");
+		let path = project.path().join(".cursor/mcp.json");
+		let original = std::fs::read_to_string(&path).unwrap();
+		for request in [
+			UpdateMcpRequest {
+				name: None,
+				transport: Some(TransportDto::Stdio {
+					command: "echo".into(),
+					args: vec![],
+					env: None,
+					timeout: Some(45),
+				}),
+				enabled: None,
+				timeout: None,
+			},
+			UpdateMcpRequest {
+				name: None,
+				transport: None,
+				enabled: None,
+				timeout: Some(45),
+			},
+		] {
+			let error = update_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				"alpha",
+				scope(),
+				Json(request),
+			)
+			.expect_err("unpersistable timeout must fail");
+			assert_eq!(error.body.code, "UNSUPPORTED_OPERATION");
+			assert_eq!(std::fs::read_to_string(&path).unwrap(), original);
+			let observed = get_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Cursor),
+				"alpha",
+				scope(),
+			)
+			.ok()
+			.expect("original server remains")
+			.into_inner();
+			assert_eq!(observed.timeout, None);
+			assert!(matches!(
+				observed.transport,
+				TransportDto::Stdio { timeout: None, .. }
+			));
+		}
+	}
+
+	#[test]
+	fn update_mcp_patch_uses_fresh_value_after_manager_was_loaded() {
+		let project = tempfile::tempdir().unwrap();
+		let manager = || {
+			aghub_core::manager::ConfigManager::new(
+				aghub_core::adapters::create_adapter(AgentType::Kiro),
+				false,
+				Some(project.path()),
+			)
+		};
+		let mut seed = manager();
+		seed.load().unwrap();
+		seed.add_mcp(McpServer::new(
+			"server",
+			aghub_core::models::McpTransport::stdio("old", vec![]),
+		))
+		.unwrap();
+		let mut first = manager();
+		let mut stale = manager();
+		first.load().unwrap();
+		stale.load().unwrap();
+		apply_update_mcp(
+			&mut first,
+			"server",
+			UpdateMcpRequest {
+				name: None,
+				transport: Some(TransportDto::Stdio {
+					command: "new".into(),
+					args: vec![],
+					env: None,
+					timeout: None,
+				}),
+				enabled: None,
+				timeout: None,
+			},
+		)
+		.ok()
+		.expect("first patch");
+		apply_update_mcp(
+			&mut stale,
+			"server",
+			UpdateMcpRequest {
+				name: None,
+				transport: None,
+				enabled: Some(false),
+				timeout: None,
+			},
+		)
+		.ok()
+		.expect("second patch");
+		let mut observed = manager();
+		observed.load().unwrap();
+		let actual = observed.get_mcp("server").unwrap();
+		assert!(!actual.enabled, "toggle must survive");
+		assert!(
+			matches!(&actual.transport, aghub_core::models::McpTransport::Stdio { command, .. } if command == "new"),
+			"transport update must survive: {actual:?}"
+		);
+	}
+
 	// --- delete_mcp dry-run/confirm gate (Phase 3 #5) -----------------------
 
-	/// Seed one Claude MCP in a project-scoped temp root so delete tests have
+	/// Seed one Cursor MCP in a project-scoped temp root so delete tests have
 	/// real on-disk state without touching the real home dir.
 	fn seed_mcp(root: &std::path::Path, name: &str) {
 		create_mcp(
 			TrustedLocalOrigin,
-			AgentParam(AgentType::Claude),
+			AgentParam(AgentType::Cursor),
 			ScopeParams {
 				scope: Some("project".to_string()),
 				project_root: Some(root.display().to_string()),
@@ -571,7 +935,7 @@ mod tests {
 	fn mcp_exists(root: &std::path::Path, name: &str) -> bool {
 		list_mcps(
 			TrustedLocalOrigin,
-			AgentParam(AgentType::Claude),
+			AgentParam(AgentType::Cursor),
 			ScopeParams {
 				scope: Some("project".to_string()),
 				project_root: Some(root.display().to_string()),
@@ -603,7 +967,7 @@ mod tests {
 
 		let resp = delete_mcp(
 			TrustedLocalOrigin,
-			AgentParam(AgentType::Claude),
+			AgentParam(AgentType::Cursor),
 			"keepme",
 			delete_params(root, None),
 		)
@@ -630,7 +994,7 @@ mod tests {
 
 		let resp = delete_mcp(
 			TrustedLocalOrigin,
-			AgentParam(AgentType::Claude),
+			AgentParam(AgentType::Cursor),
 			"goner",
 			delete_params(root, Some(true)),
 		)
@@ -645,6 +1009,56 @@ mod tests {
 	}
 
 	#[test]
+	fn delete_mcp_refuses_to_remove_unnamed_shared_reader() {
+		let project = tempfile::tempdir().unwrap();
+		let root = project.path();
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Claude),
+			ScopeParams {
+				scope: Some("project".to_string()),
+				project_root: Some(root.display().to_string()),
+			},
+			Json(stdio_req("shared")),
+		)
+		.ok()
+		.expect("seed shared MCP");
+		for confirm in [None, Some(true)] {
+			let error = delete_mcp(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Claude),
+				"shared",
+				delete_params(root, confirm),
+			)
+			.expect_err("single-agent delete must refuse shared backing");
+			assert_eq!(error.body.code, "INVALID_CONFIG");
+		}
+		let missing = delete_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Claude),
+			"absent",
+			delete_params(root, Some(true)),
+		)
+		.ok()
+		.expect("missing name remains an idempotent no-op")
+		.into_inner();
+		assert!(!missing.executed);
+		for agent in [AgentType::Claude, AgentType::Copilot] {
+			get_mcp(
+				TrustedLocalOrigin,
+				AgentParam(agent),
+				"shared",
+				ScopeParams {
+					scope: Some("project".to_string()),
+					project_root: Some(root.display().to_string()),
+				},
+			)
+			.ok()
+			.expect("shared MCP remains readable");
+		}
+	}
+
+	#[test]
 	fn delete_mcp_missing_is_dry_run_shaped_ok() {
 		// Missing name is not an error: it returns a dry-run-shaped success body
 		// (success:true, executed:false), matching delete_skill's NotFound path.
@@ -654,7 +1068,7 @@ mod tests {
 
 		let resp = delete_mcp(
 			TrustedLocalOrigin,
-			AgentParam(AgentType::Claude),
+			AgentParam(AgentType::Cursor),
 			"absent",
 			delete_params(root, Some(true)),
 		)
@@ -680,7 +1094,7 @@ mod tests {
 
 		let resp = delete_mcp(
 			TrustedLocalOrigin,
-			AgentParam(AgentType::Claude),
+			AgentParam(AgentType::Cursor),
 			"anything",
 			delete_params(root, None),
 		)
@@ -852,5 +1266,100 @@ mod tests {
 		let err = result.expect_err("empty agent list must 400");
 		assert_eq!(err.status, Status::BadRequest);
 		assert_eq!(err.body.code, "INVALID_PARAM");
+	}
+
+	#[test]
+	fn batch_create_mcp_attributes_shared_project_backing_to_both_agents() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		let response = batch_create_mcp(
+			TrustedLocalOrigin,
+			scope(),
+			Json(BatchCreateMcpRequest {
+				agents: vec!["claude".to_string(), "copilot".to_string()],
+				mcp: stdio_req("shared-server"),
+			}),
+		)
+		.ok()
+		.expect("batch create")
+		.into_inner();
+		assert_eq!(response.success_count, 2);
+		assert_eq!(response.failed_count, 0);
+		assert!(response.results.iter().all(|row| row.ok));
+		for agent in [AgentType::Claude, AgentType::Copilot] {
+			let server = get_mcp(
+				TrustedLocalOrigin,
+				AgentParam(agent),
+				"shared-server",
+				scope(),
+			)
+			.ok()
+			.expect("both agents read shared backing")
+			.into_inner();
+			assert_eq!(server.name, "shared-server");
+		}
+	}
+
+	#[test]
+	fn batch_create_mcp_refuses_timeout_the_shared_dialects_cannot_persist() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		let mut request = stdio_req("timed-shared");
+		request.timeout = Some(45);
+		let response = batch_create_mcp(
+			TrustedLocalOrigin,
+			scope(),
+			Json(BatchCreateMcpRequest {
+				agents: vec!["claude".to_string(), "copilot".to_string()],
+				mcp: request,
+			}),
+		)
+		.ok()
+		.expect("batch create")
+		.into_inner();
+		assert_eq!(response.success_count, 0);
+		assert_eq!(response.failed_count, 2);
+		assert!(response.results.iter().all(|row| !row.ok));
+		assert!(
+			!project.path().join(".mcp.json").exists(),
+			"a timeout neither dialect can store must not create a shared config"
+		);
+	}
+
+	#[test]
+	fn batch_create_mcp_keeps_preexisting_shared_conflict() {
+		let project = tempfile::tempdir().unwrap();
+		let scope = || ScopeParams {
+			scope: Some("project".to_string()),
+			project_root: Some(project.path().display().to_string()),
+		};
+		create_mcp(
+			TrustedLocalOrigin,
+			AgentParam(AgentType::Claude),
+			scope(),
+			Json(stdio_req("already-there")),
+		)
+		.ok()
+		.expect("seed MCP");
+		let response = batch_create_mcp(
+			TrustedLocalOrigin,
+			scope(),
+			Json(BatchCreateMcpRequest {
+				agents: vec!["claude".to_string(), "copilot".to_string()],
+				mcp: stdio_req("already-there"),
+			}),
+		)
+		.ok()
+		.expect("batch returns per-agent conflicts")
+		.into_inner();
+		assert_eq!(response.success_count, 0);
+		assert_eq!(response.failed_count, 2);
+		assert!(response.results.iter().all(|row| !row.ok));
 	}
 }

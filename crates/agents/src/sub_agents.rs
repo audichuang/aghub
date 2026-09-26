@@ -20,7 +20,6 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 // ── On-disk layout ───────────────────────────────────────────────────────────
 
@@ -340,14 +339,6 @@ fn assert_safe_destination(file: &Path) -> Result<bool> {
 	}
 }
 
-fn unique_temp_path(dir: &Path, safe: &str) -> PathBuf {
-	let nanos = SystemTime::now()
-		.duration_since(UNIX_EPOCH)
-		.map(|d| d.as_nanos())
-		.unwrap_or_default();
-	dir.join(format!(".{safe}.{}.{}.tmp", std::process::id(), nanos))
-}
-
 fn write_sub_agent_file(file: &Path, content: &str) -> Result<()> {
 	let dir = file.parent().ok_or_else(|| {
 		ConfigError::InvalidConfig(format!(
@@ -356,27 +347,22 @@ fn write_sub_agent_file(file: &Path, content: &str) -> Result<()> {
 		))
 	})?;
 	let existed = assert_safe_destination(file)?;
-	let safe = file
-		.file_stem()
-		.and_then(|n| n.to_str())
-		.unwrap_or("sub-agent");
-	let temp = unique_temp_path(dir, safe);
-	let mut handle = fs::OpenOptions::new()
-		.write(true)
-		.create_new(true)
-		.open(&temp)?;
-	handle.write_all(content.as_bytes())?;
-	handle.sync_all()?;
-	drop(handle);
-
+	let mut staged = tempfile::NamedTempFile::new_in(dir)?;
 	if existed {
-		assert_safe_destination(file)?;
-		fs::remove_file(file)?;
+		let permissions = fs::metadata(file)?.permissions();
+		if permissions.readonly() {
+			return Err(std::io::Error::new(
+				std::io::ErrorKind::PermissionDenied,
+				"Sub-agent file is read-only",
+			)
+			.into());
+		}
+		staged.as_file().set_permissions(permissions)?;
 	}
-	if let Err(e) = fs::rename(&temp, file) {
-		let _ = fs::remove_file(&temp);
-		return Err(e.into());
-	}
+	staged.write_all(content.as_bytes())?;
+	staged.as_file().sync_all()?;
+	assert_safe_destination(file)?;
+	staged.persist(file).map_err(|error| error.error)?;
 	Ok(())
 }
 
@@ -483,6 +469,18 @@ pub fn save_sub_agent_to_dir_with(
 		// The per-agent dir gets the same symlink hardening as its parent: a
 		// planted `<name>` symlink must not redirect the write out of tree.
 		ensure_safe_sub_agent_dir(&dir.join(&safe))?;
+	}
+	if assert_safe_destination(&file)? {
+		let same_source = agent
+			.source_path
+			.as_deref()
+			.is_some_and(|source| Path::new(source) == file);
+		let same_name = agent.source_path.is_none()
+			&& parse_sub_agent_file_named(&file, &safe)?
+				.is_some_and(|existing| existing.name == agent.name);
+		if !same_source && !same_name {
+			return Err(ConfigError::resource_exists("sub-agent", &agent.name));
+		}
 	}
 	// The model's own keys win; the file is only consulted for a `SubAgent`
 	// that never came from one (e.g. the API's create DTO), so an in-place edit
@@ -1025,6 +1023,28 @@ mod tests {
 
 		assert!(result.is_err());
 		assert_eq!(fs::read_to_string(&target).unwrap(), "ORIGINAL");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn save_preserves_existing_mode_and_refuses_read_only_file() {
+		use std::os::unix::fs::PermissionsExt;
+
+		let dir = TempDir::new().unwrap();
+		let file = dir.path().join("reviewer.md");
+		fs::write(&file, "ORIGINAL").unwrap();
+		fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+		let mut agent = SubAgent::new("reviewer");
+		agent.instruction = Some("updated".to_string());
+		save_sub_agent_to_dir(dir.path(), &agent).unwrap();
+		assert_eq!(
+			fs::metadata(&file).unwrap().permissions().mode() & 0o777,
+			0o640
+		);
+		let saved = fs::read_to_string(&file).unwrap();
+		fs::set_permissions(&file, fs::Permissions::from_mode(0o400)).unwrap();
+		assert!(save_sub_agent_to_dir(dir.path(), &agent).is_err());
+		assert_eq!(fs::read_to_string(&file).unwrap(), saved);
 	}
 
 	// Regression: a symlinked ANCESTOR of the agents dir (e.g. macOS

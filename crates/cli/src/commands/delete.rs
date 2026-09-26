@@ -76,7 +76,11 @@ pub fn execute(
 			// Missing config / missing MCP is an idempotent no-op (matches the
 			// API), not an error — see `plan_or_noop`.
 			let outcome = plan_or_noop(manager, |m| {
-				m.remove_mcp_planned(&name, is_dry_run, options.yes)
+				m.remove_mcp_planned_single_guarded(
+					&name,
+					is_dry_run,
+					options.yes,
+				)
 			})?;
 			// Reuse the shared core RemovalView so the removal fields stay
 			// snake_case and byte-identical to the skills branch + the API +

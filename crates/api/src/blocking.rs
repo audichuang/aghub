@@ -1,7 +1,7 @@
-//! Running blocking skill mutations off the async executor.
+//! Running blocking config mutations off the async executor.
 //!
-//! Every mutating skill flow takes the interprocess mutation lock
-//! (`skill::lock::guard`), and acquiring it BLOCKS: it waits on the process mutex
+//! Skill and MCP mutations take interprocess locks, and acquiring one BLOCKS:
+//! skill flows first wait on the process mutex
 //! (unbounded, by design — bounding it turns ordinary queued work into spurious
 //! failures) and then polls `flock` with `thread::sleep` for up to 10s.
 //!
@@ -24,9 +24,9 @@
 
 use crate::error::ApiError;
 
-/// Run one blocking skill mutation without parking an async worker.
+/// Run one blocking mutation without parking an async worker.
 ///
-/// Use this for any handler whose body takes the skill mutation lock, directly or
+/// Use this for any handler whose body takes a mutation lock, directly or
 /// through `aghub-core`. A handler that only READS needs nothing: read paths are
 /// deliberately unlocked.
 ///

@@ -4,11 +4,69 @@ use crate::{
 	skills::removal::{Layout, PruneStatus, RemovalOutcome, RemovalPlan},
 };
 use log::{info, warn};
-use std::path::PathBuf;
+use std::fs::File;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use super::ConfigManager;
 
 impl ConfigManager {
+	/// Every sub-agent mutation reloads after locking its physical backing
+	/// directory. Two descriptors may reach the same directory through different
+	/// symlinked paths, and a manager's earlier `load()` may predate another
+	/// aghub process's write.
+	fn guard_and_reload_sub_agents(&mut self) -> Result<File> {
+		if self.config.is_none() {
+			return Err(ConfigError::InvalidConfig(
+				"No configuration loaded".to_string(),
+			));
+		}
+		if !self.adapter.supports_sub_agent_scope(self.write_scope) {
+			return Err(ConfigError::unsupported_operation(
+				"mutate",
+				"sub-agent",
+				self.adapter.name(),
+			));
+		}
+		let path = self.sub_agent_lock_path()?;
+		let guard = super::mcp::lock_file(
+			&path,
+			Instant::now() + Duration::from_secs(10),
+		)?;
+		self.reload_sub_agents()?;
+		Ok(guard)
+	}
+
+	fn reload_sub_agents(&mut self) -> Result<()> {
+		let current = self
+			.adapter
+			.load_sub_agents(self.project_root.as_deref(), self.write_scope)?;
+		self.config_mut()?.sub_agents = current;
+		Ok(())
+	}
+
+	fn sub_agent_lock_path(&self) -> Result<PathBuf> {
+		let dir = self
+			.adapter
+			.sub_agent_dir(self.project_root.as_deref(), self.write_scope)
+			.ok_or_else(|| {
+				ConfigError::InvalidConfig(format!(
+					"Sub-agent directory unavailable for {:?} scope",
+					self.write_scope
+				))
+			})?;
+		let physical_dir = skill::lock::resolve_existing(&dir);
+		let name = physical_dir.file_name().ok_or_else(|| {
+			ConfigError::InvalidConfig(format!(
+				"Sub-agent directory has no name: {}",
+				physical_dir.display()
+			))
+		})?;
+		let mut lock_name = name.to_os_string();
+		lock_name.push(".aghub-sub-agents.lock");
+		Ok(physical_dir.with_file_name(lock_name))
+	}
+
 	/// List all loaded sub-agents.
 	pub fn list_sub_agents(&self) -> Vec<&SubAgent> {
 		self.config
@@ -26,6 +84,8 @@ impl ConfigManager {
 
 	/// Add a new sub-agent and persist via the adapter.
 	pub fn add_sub_agent(&mut self, agent: SubAgent) -> Result<()> {
+		let _guard = self.guard_and_reload_sub_agents()?;
+		let previous = self.config_mut()?.sub_agents.clone();
 		{
 			let config = self.config_mut()?;
 			if config.sub_agents.iter().any(|a| a.name == agent.name) {
@@ -41,20 +101,31 @@ impl ConfigManager {
 			self.adapter.name(),
 			self.write_scope
 		);
-		self.save_sub_agents_current()
+		let updated = self
+			.config
+			.as_ref()
+			.and_then(|config| config.sub_agents.last())
+			.expect("agent pushed above");
+		if let Err(error) = self.save_sub_agent_entry(updated) {
+			self.config_mut()?.sub_agents = previous;
+			return Err(error);
+		}
+		Ok(())
 	}
 
 	/// Patch an existing sub-agent by name and persist via the adapter.
 	///
 	/// Only the fields present in `patch` are overwritten; omitted fields keep
-	/// their current value (true PATCH semantics — the config file is **not**
-	/// re-scanned before the write).
+	/// their current value from a fresh read under the backing-directory lock.
 	pub fn update_sub_agent(
 		&mut self,
 		name: &str,
 		patch: SubAgentPatch,
 	) -> Result<()> {
-		// If the name changes we need to remove the old file first.
+		let _guard = self.guard_and_reload_sub_agents()?;
+		let previous = self.config_mut()?.sub_agents.clone();
+		// Capture the old path before patching; a rename may write to a
+		// different file, or to this same file when names sanitize identically.
 		let old_source_path = self
 			.config
 			.as_ref()
@@ -62,6 +133,16 @@ impl ConfigManager {
 			.and_then(|a| a.source_path.clone());
 		let name_changed =
 			patch.name.as_deref().map(|n| n != name).unwrap_or(false);
+		let effective_name =
+			patch.name.clone().unwrap_or_else(|| name.to_string());
+		if let Some(new_name) = patch.name.as_deref().filter(|_| name_changed) {
+			if self.get_sub_agent(new_name).is_some() {
+				return Err(ConfigError::resource_exists(
+					"sub_agent",
+					new_name,
+				));
+			}
+		}
 
 		{
 			let config = self.config_mut()?;
@@ -81,10 +162,16 @@ impl ConfigManager {
 			self.adapter.name(),
 			self.write_scope
 		);
-		self.save_sub_agents_current()?;
+		let updated = self
+			.get_sub_agent(&effective_name)
+			.expect("agent patched above");
+		if let Err(error) = self.save_sub_agent_entry(updated) {
+			self.config_mut()?.sub_agents = previous;
+			return Err(error);
+		}
 
 		// Remove stale file when the name changed (a new file was written
-		// under the new name by save_sub_agents_current). `save_scoped_sub_agents`
+		// under the new name by save_sub_agent_entry). `save_scoped_sub_agents`
 		// does NOT delete stale files, so a left-behind old `.md` reappears as a
 		// phantom agent on reload. A non-NotFound delete failure is therefore
 		// actionable — surface it (do not report success) so the caller knows the
@@ -92,15 +179,33 @@ impl ConfigManager {
 		// removal contract in `remove_sub_agent_planned`.
 		if name_changed {
 			if let Some(old_path) = old_source_path {
-				match std::fs::remove_file(&old_path) {
-					Ok(()) => {}
-					Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-					Err(e) => {
-						warn!(
-							"failed to delete stale sub-agent file '{}': {}",
-							old_path, e
-						);
-						return Err(ConfigError::Io(e));
+				let new_path = self
+					.adapter
+					.load_sub_agents(
+						self.project_root.as_deref(),
+						self.write_scope,
+					)?
+					.into_iter()
+					.find(|agent| agent.name == effective_name)
+					.and_then(|agent| agent.source_path)
+					.ok_or_else(|| {
+						ConfigError::InvalidConfig(format!(
+							"Renamed sub-agent '{effective_name}' could not be read back"
+						))
+					})?;
+				if skill::lock::resolve_existing(Path::new(&old_path))
+					!= skill::lock::resolve_existing(Path::new(&new_path))
+				{
+					match std::fs::remove_file(&old_path) {
+						Ok(()) => {}
+						Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+						Err(e) => {
+							warn!(
+								"failed to delete stale sub-agent file '{}': {}",
+								old_path, e
+							);
+							return Err(ConfigError::Io(e));
+						}
 					}
 				}
 			}
@@ -125,6 +230,42 @@ impl ConfigManager {
 		dry_run: bool,
 		confirm: bool,
 	) -> Result<RemovalOutcome> {
+		self.remove_sub_agent_planned_checked(name, dry_run, confirm, None)
+	}
+
+	/// Reconcile captured `expected` before copying it elsewhere. Refuse to
+	/// remove that source if it changed during the copy stage.
+	pub(crate) fn remove_sub_agent_if_unchanged(
+		&mut self,
+		name: &str,
+		expected: &SubAgent,
+		copying: bool,
+	) -> Result<()> {
+		self.remove_sub_agent_planned_checked(
+			name,
+			false,
+			true,
+			Some((expected, copying)),
+		)
+		.map(|_| ())
+	}
+
+	fn remove_sub_agent_planned_checked(
+		&mut self,
+		name: &str,
+		dry_run: bool,
+		confirm: bool,
+		expected: Option<(&SubAgent, bool)>,
+	) -> Result<RemovalOutcome> {
+		// The executing path holds the physical backing lock across the fresh
+		// read, source comparison, tombstone move, save, and rollback. Preview
+		// refreshes without blocking another writer.
+		let _guard = if dry_run {
+			self.reload_sub_agents()?;
+			None
+		} else {
+			Some(self.guard_and_reload_sub_agents()?)
+		};
 		// Capture the source path before mutating so we can delete the file.
 		let source_path = self
 			.config
@@ -155,6 +296,29 @@ impl ConfigManager {
 		{
 			return Err(ConfigError::resource_not_found("sub_agent", name));
 		}
+		if let Some((expected, copying)) = expected {
+			let current =
+				self.get_sub_agent(name).expect("presence checked above");
+			if !same_sub_agent_source(current, expected) {
+				return Err(ConfigError::InvalidConfig(format!(
+					"Sub-agent '{name}' changed during reconcile; the original was not removed"
+				)));
+			}
+			if copying && self.agent_type() == crate::models::AgentType::Codex {
+				let path = current.source_path.as_deref().ok_or_else(|| {
+					ConfigError::InvalidConfig(
+						"Codex sub-agent source path unavailable".to_string(),
+					)
+				})?;
+				if aghub_agents::agents::codex::sub_agent_has_unmanaged_fields(
+					Path::new(path),
+				)? {
+					return Err(ConfigError::InvalidConfig(format!(
+						"Sub-agent '{name}' gained unmanaged fields during reconcile; the original was not removed"
+					)));
+				}
+			}
+		}
 
 		let executed = !dry_run && (!plan.needs_confirm || confirm);
 		if !executed {
@@ -182,6 +346,16 @@ impl ConfigManager {
 		let mut tombstones: Vec<(PathBuf, PathBuf)> = Vec::new();
 		for path in &plan.paths {
 			let tomb = path.with_extension("md.aghub-tomb");
+			match std::fs::symlink_metadata(&tomb) {
+				Ok(_) => {
+					return Err(ConfigError::InvalidConfig(format!(
+						"Sub-agent recovery tombstone already exists: {}",
+						tomb.display()
+					)));
+				}
+				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+				Err(e) => return Err(ConfigError::Io(e)),
+			}
 			match std::fs::rename(path, &tomb) {
 				Ok(()) => tombstones.push((path.clone(), tomb)),
 				Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -260,6 +434,17 @@ impl ConfigManager {
 	pub fn remove_sub_agent(&mut self, name: &str) -> Result<()> {
 		self.remove_sub_agent_planned(name, false, true).map(|_| ())
 	}
+
+	/// Each built-in descriptor saves sub-agents as individual files. Writing
+	/// only the changed entry avoids touching unrelated siblings and prevents a
+	/// failed create from leaving renamed copies of those siblings behind.
+	fn save_sub_agent_entry(&self, agent: &SubAgent) -> Result<()> {
+		self.adapter.save_sub_agents(
+			self.project_root.as_deref(),
+			self.write_scope,
+			std::slice::from_ref(agent),
+		)
+	}
 }
 
 /// Best-effort restore of `(orig, tomb)` pairs on a removal error path: rename
@@ -278,6 +463,25 @@ fn restore_tombstones(tombstones: &[(PathBuf, PathBuf)]) {
 			);
 		}
 	}
+}
+
+fn same_sub_agent_source(current: &SubAgent, expected: &SubAgent) -> bool {
+	let same_path = match (
+		current.source_path.as_deref(),
+		expected.source_path.as_deref(),
+	) {
+		(Some(current), Some(expected)) => {
+			skill::lock::resolve_existing(Path::new(current))
+				== skill::lock::resolve_existing(Path::new(expected))
+		}
+		(None, None) => true,
+		_ => false,
+	};
+	current.name == expected.name
+		&& current.description == expected.description
+		&& current.instruction == expected.instruction
+		&& current.extra_frontmatter == expected.extra_frontmatter
+		&& same_path
 }
 
 /// Patch DTO used by `update_sub_agent` — all fields are optional so only
@@ -300,5 +504,95 @@ impl SubAgentPatch {
 		if let Some(instr) = self.instruction {
 			agent.instruction = Some(instr);
 		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+	use crate::{create_adapter, models::AgentType};
+
+	fn manager(root: &Path, agent: AgentType) -> ConfigManager {
+		let mut manager =
+			ConfigManager::new(create_adapter(agent), false, Some(root));
+		manager.load().unwrap();
+		manager
+	}
+
+	#[test]
+	fn conditional_removal_preserves_a_source_changed_after_copy_snapshot() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let mut original = manager(root, AgentType::Claude);
+		let mut agent = SubAgent::new("reviewer");
+		agent.instruction = Some("original".into());
+		original.add_sub_agent(agent).unwrap();
+		original.load().unwrap();
+		let expected = original.get_sub_agent("reviewer").unwrap().clone();
+		let mut concurrent = manager(root, AgentType::Claude);
+		concurrent
+			.update_sub_agent(
+				"reviewer",
+				SubAgentPatch {
+					instruction: Some("newer change".into()),
+					..Default::default()
+				},
+			)
+			.unwrap();
+		let error = original
+			.remove_sub_agent_if_unchanged("reviewer", &expected, true)
+			.unwrap_err();
+		assert!(matches!(error, ConfigError::InvalidConfig(_)));
+		let content =
+			std::fs::read_to_string(root.join(".claude/agents/reviewer.md"))
+				.unwrap();
+		assert!(content.contains("newer change"), "{content}");
+	}
+
+	#[test]
+	fn conditional_removal_rechecks_unmodelled_codex_fields() {
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		let file = root.join(".codex/agents/reviewer.toml");
+		std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+		std::fs::write(
+			&file,
+			"name = \"reviewer\"\ndescription = \"review\"\ndeveloper_instructions = \"original\"\n",
+		)
+		.unwrap();
+		let mut original = manager(root, AgentType::Codex);
+		let expected = original.get_sub_agent("reviewer").unwrap().clone();
+		std::fs::write(
+			&file,
+			"name = \"reviewer\"\ndescription = \"review\"\ndeveloper_instructions = \"original\"\nmodel = \"newer-native-value\"\n",
+		)
+		.unwrap();
+		let fresh = manager(root, AgentType::Codex);
+		assert!(same_sub_agent_source(
+			fresh.get_sub_agent("reviewer").unwrap(),
+			&expected,
+		));
+		let error = original
+			.remove_sub_agent_if_unchanged("reviewer", &expected, true)
+			.unwrap_err();
+		assert!(matches!(error, ConfigError::InvalidConfig(_)));
+		let content = std::fs::read_to_string(&file).unwrap();
+		assert!(content.contains("newer-native-value"), "{content}");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn symlinked_ancestor_backing_has_one_lock_identity_across_agents() {
+		use std::os::unix::fs::symlink;
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		std::fs::create_dir_all(root.join(".claude/agents")).unwrap();
+		symlink(".claude", root.join(".opencode")).unwrap();
+		let claude = manager(root, AgentType::Claude);
+		let opencode = manager(root, AgentType::OpenCode);
+		assert_eq!(
+			claude.sub_agent_lock_path().unwrap(),
+			opencode.sub_agent_lock_path().unwrap(),
+		);
 	}
 }

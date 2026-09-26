@@ -7,10 +7,131 @@
 
 use aghub_core::{
 	create_adapter,
+	manager::sub_agent::SubAgentPatch,
 	models::{AgentType, SubAgent},
 	skills::removal::{Layout, PruneStatus},
 	ConfigError, ConfigManager,
 };
+
+fn project_manager(root: &std::path::Path) -> ConfigManager {
+	let mut manager = ConfigManager::new(
+		create_adapter(AgentType::Claude),
+		false,
+		Some(root),
+	);
+	manager.load().unwrap();
+	manager
+}
+
+fn agent_with_instruction(name: &str, instruction: &str) -> SubAgent {
+	let mut agent = SubAgent::new(name);
+	agent.instruction = Some(instruction.to_string());
+	agent
+}
+
+#[test]
+fn adding_from_a_stale_manager_keeps_a_concurrent_sibling_update() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	project_manager(root)
+		.add_sub_agent(agent_with_instruction("reviewer", "old instruction"))
+		.unwrap();
+	let mut stale = project_manager(root);
+	let mut fresh = project_manager(root);
+	fresh
+		.update_sub_agent(
+			"reviewer",
+			SubAgentPatch {
+				instruction: Some("new instruction".into()),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	stale
+		.add_sub_agent(agent_with_instruction("other", "unrelated"))
+		.unwrap();
+	let content =
+		std::fs::read_to_string(agent_md_path(root, "reviewer")).unwrap();
+	assert!(content.contains("new instruction"), "{content}");
+	assert!(!content.contains("old instruction"), "{content}");
+}
+
+#[test]
+fn adding_same_name_from_a_stale_manager_does_not_overwrite() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let mut stale = project_manager(root);
+	let mut fresh = project_manager(root);
+	fresh
+		.add_sub_agent(agent_with_instruction("coder", "first committed value"))
+		.unwrap();
+	let error = stale
+		.add_sub_agent(agent_with_instruction("coder", "stale overwrite"))
+		.unwrap_err();
+	assert!(matches!(error, ConfigError::ResourceExists { .. }));
+	let content =
+		std::fs::read_to_string(agent_md_path(root, "coder")).unwrap();
+	assert!(content.contains("first committed value"), "{content}");
+	assert!(!content.contains("stale overwrite"), "{content}");
+}
+
+#[test]
+fn add_does_not_replace_a_differently_named_file_at_its_destination() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let file = agent_md_path(root, "keeper");
+	std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+	let original = "---\nname: blocked\n---\noriginal keeper body";
+	std::fs::write(&file, original).unwrap();
+	let mut manager = project_manager(root);
+	assert!(manager.get_sub_agent("blocked").is_some());
+	let error = manager
+		.add_sub_agent(agent_with_instruction("keeper", "new body"))
+		.unwrap_err();
+	assert!(
+		matches!(
+			error,
+			ConfigError::ResourceExists { .. } | ConfigError::InvalidConfig(_)
+		),
+		"unexpected error: {error:?}"
+	);
+	assert_eq!(std::fs::read_to_string(&file).unwrap(), original);
+	assert!(!agent_md_path(root, "blocked").exists());
+}
+
+#[test]
+fn patch_from_a_stale_manager_preserves_a_concurrent_field_update() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	project_manager(root)
+		.add_sub_agent(agent_with_instruction("coder", "old instruction"))
+		.unwrap();
+	let mut stale = project_manager(root);
+	let mut fresh = project_manager(root);
+	fresh
+		.update_sub_agent(
+			"coder",
+			SubAgentPatch {
+				instruction: Some("new instruction".into()),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	stale
+		.update_sub_agent(
+			"coder",
+			SubAgentPatch {
+				description: Some("new description".into()),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	let content =
+		std::fs::read_to_string(agent_md_path(root, "coder")).unwrap();
+	assert!(content.contains("new instruction"), "{content}");
+	assert!(content.contains("new description"), "{content}");
+	assert!(!content.contains("old instruction"), "{content}");
+}
 
 /// Root probe: a `0o555` dir blocks creating/removing entries inside it unless
 /// we are root (which bypasses the bits). Returns false so the test self-skips
@@ -119,9 +240,9 @@ fn remove_sub_agent_planned_executes_deletes_file() {
 }
 
 #[test]
-fn remove_sub_agent_planned_config_only_has_empty_paths() {
-	// An agent with no source_path (never persisted to a file) executes with an
-	// empty plan path set and no fs error.
+fn remove_sub_agent_planned_reloads_backing_path_before_delete() {
+	// add_sub_agent has persisted the file even though its in-memory DTO has
+	// no source_path yet. Removal must re-read the physical backing first.
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
 	let mut mgr = ConfigManager::new(
@@ -138,66 +259,39 @@ fn remove_sub_agent_planned_config_only_has_empty_paths() {
 		.source_path
 		.is_none());
 
+	let file = agent_md_path(root, "ephemeral");
+	assert!(file.exists());
 	let outcome = mgr
 		.remove_sub_agent_planned("ephemeral", false, true)
 		.unwrap();
 
 	assert!(outcome.executed);
-	assert!(
-		outcome.plan.paths.is_empty(),
-		"config-only agent has no backing path to delete"
-	);
+	assert_eq!(outcome.plan.paths, vec![file.clone()]);
+	assert!(!file.exists());
 	assert!(mgr.get_sub_agent("ephemeral").is_none());
 }
 
-// Unix-only: the ENOTDIR trick (remove_file on `<file>/agent.md`) yields a
-// non-NotFound IO error only on unix. On Windows that path resolves to a
-// NotFound, which the best-effort delete correctly treats as success — so the
-// failure can't be forced there. The same contract is covered cross-platform
-// on unix by remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent.
-#[cfg(unix)]
 #[test]
-fn remove_sub_agent_planned_failed_delete_errors_without_mutating() {
-	// A backing-file deletion failure must surface as an actionable error and
-	// NOT mutate in-memory state. Sub-agents differ from skills: there is no
-	// post-delete save that cleans up stale files, so a "report skipped and
-	// succeed" contract would leave the file on disk to reappear on reload.
-	//
-	// ENOTDIR trick: point the agent's source_path at `<file>/agent.md` where
-	// `<file>` is a regular file, so `remove_file` fails with NotADirectory
-	// deterministically (root-safe — no chmod).
+fn remove_sub_agent_ignores_stale_in_memory_source_path() {
+	// A source_path supplied before an earlier save is not the on-disk identity.
+	// Removal must reload the descriptor's actual backing before deleting.
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
+	let mut mgr = project_manager(root);
 
 	let blocker = root.join("not-a-dir");
 	std::fs::write(&blocker, "x").unwrap();
-	let undeletable = blocker.join("agent.md");
-	assert!(
-		std::fs::remove_file(&undeletable).is_err(),
-		"precondition: ENOTDIR makes remove_file fail"
-	);
-
 	let mut agent = SubAgent::new("corrupt");
-	agent.source_path = Some(undeletable.to_string_lossy().into_owned());
+	agent.source_path =
+		Some(blocker.join("agent.md").to_string_lossy().into_owned());
 	mgr.add_sub_agent(agent).unwrap();
-
-	let err = mgr
+	let actual = agent_md_path(root, "corrupt");
+	let result = mgr
 		.remove_sub_agent_planned("corrupt", false, true)
-		.unwrap_err();
-	assert!(
-		matches!(err, ConfigError::Io(_)),
-		"undeletable backing file must surface an IO error, got {err:?}"
-	);
-	assert!(
-		mgr.get_sub_agent("corrupt").is_some(),
-		"a failed delete must not drop the agent from memory"
-	);
+		.unwrap();
+	assert_eq!(result.plan.paths, vec![actual.clone()]);
+	assert!(!actual.exists());
+	assert_eq!(std::fs::read_to_string(blocker).unwrap(), "x");
 }
 
 #[cfg(unix)]
@@ -211,10 +305,7 @@ fn remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent() {
 	// removal moves the file out FIRST (tombstone); a non-NotFound failure
 	// surfaces as an error and leaves the agent loaded + on disk (consistent).
 	//
-	// Force the removal to fail (root-safe): park the real backing file in a
-	// `0o555` dir so the tombstone rename inside it is blocked. A directory
-	// swap no longer works — rename succeeds on a directory — so we block the
-	// unlink/rename via dir perms, mirroring the rename-stale-file test below.
+	// Force the real backing directory to refuse the tombstone rename.
 	use std::os::unix::fs::PermissionsExt;
 
 	let tmp = tempfile::tempdir().unwrap();
@@ -223,22 +314,9 @@ fn remove_sub_agent_planned_stale_file_failure_errors_and_keeps_agent() {
 		eprintln!("skip: root bypasses 0o555");
 		return;
 	}
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-
-	// A real, existing backing file inside a dir we lock against rename/unlink.
-	let locked_dir = root.join("locked");
-	std::fs::create_dir(&locked_dir).unwrap();
-	let file = locked_dir.join("reviewer.md");
-	std::fs::write(&file, "real").unwrap();
-
-	let mut agent = SubAgent::new("reviewer");
-	agent.source_path = Some(file.to_string_lossy().into_owned());
-	mgr.add_sub_agent(agent).unwrap();
+	let mut mgr = manager_with_persisted_agent(root, "reviewer");
+	let locked_dir = root.join(".claude/agents");
+	let file = agent_md_path(root, "reviewer");
 
 	let orig = std::fs::metadata(&locked_dir).unwrap().permissions();
 	std::fs::set_permissions(
@@ -280,10 +358,10 @@ fn remove_sub_agent_planned_save_failure_restores_deleted_file() {
 	// removed file is restored and the agent stays loaded, so a reported failure
 	// means nothing changed.
 	//
-	// Force the save to fail AFTER the target's file is removed: keep a second
-	// agent loaded and pre-create ITS backing path as a directory, so the
-	// save's `fs::write` to "<dir>/keeper.md" hits IsADirectory/ENOTDIR
-	// deterministically (root-safe — no chmod).
+	// The loader accepts a frontmatter name different from the filename.
+	// `keeper.md` declares `blocked`, while `blocked.md` is a directory. After
+	// the target moves to a tombstone, saving the remaining `blocked` entry
+	// must fail against that real directory (root-safe, no injected state).
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
 	let mut mgr = manager_with_persisted_agent(root, "reviewer");
@@ -293,15 +371,18 @@ fn remove_sub_agent_planned_save_failure_restores_deleted_file() {
 		"precondition: target backing file written"
 	);
 
-	// A second agent that stays loaded; its save write is what we sabotage.
-	mgr.add_sub_agent(SubAgent::new("keeper")).unwrap();
 	let keeper_file = agent_md_path(root, "keeper");
-	// Replace the keeper's file with a directory so `fs::write` to it fails
-	// during save, AFTER the target file has already been removed.
-	std::fs::remove_file(&keeper_file).unwrap();
-	std::fs::create_dir(&keeper_file).unwrap();
+	std::fs::write(
+		&keeper_file,
+		"---\nname: blocked\n---\nkeeper instructions",
+	)
+	.unwrap();
+	let blocked_file = agent_md_path(root, "blocked");
+	std::fs::create_dir(&blocked_file).unwrap();
+	mgr.load().unwrap();
+	assert!(mgr.get_sub_agent("blocked").is_some());
 	assert!(
-		std::fs::write(&keeper_file, b"x").is_err(),
+		std::fs::write(&blocked_file, b"x").is_err(),
 		"precondition: save write to keeper must fail"
 	);
 
@@ -365,124 +446,103 @@ fn remove_sub_agent_wrapper_still_deletes_immediately() {
 	assert!(mgr.get_sub_agent("reviewer").is_none());
 }
 
-#[cfg(unix)]
 #[test]
-fn update_sub_agent_rename_stale_file_delete_failure_errors() {
-	// Regression (Codex blocking): a rename writes the new-name `.md` then
-	// deletes the OLD file. Because `save_scoped_sub_agents` never deletes stale
-	// files, a swallowed old-file delete failure leaves the old `.md` on disk to
-	// reappear as a phantom agent on reload while the API reports success. The
-	// fix surfaces a non-NotFound delete failure as an actionable error.
-	//
-	// Isolate the OLD file's delete from the new-name write: the rename writes
-	// the new `.md` into the canonical `.claude/agents` dir (must stay writable)
-	// and deletes the old file at the agent's `source_path`. Park the old file
-	// in a SEPARATE `0o555` dir so only the unlink is blocked, on an EXISTING
-	// file. Root-skip + restore perms before asserting.
-	use std::os::unix::fs::PermissionsExt;
-
-	use aghub_core::manager::sub_agent::SubAgentPatch;
-
+fn renaming_to_an_existing_sub_agent_refuses_to_overwrite_it() {
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
-	if !perms_enforced(root) {
-		eprintln!("skip: root bypasses 0o555");
-		return;
-	}
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
-
-	// A real, existing old file inside a dir we will lock against unlink.
-	let locked_dir = root.join("locked");
-	std::fs::create_dir(&locked_dir).unwrap();
-	let old_file = locked_dir.join("reviewer.md");
-	std::fs::write(&old_file, "stale").unwrap();
-
-	let mut agent = SubAgent::new("reviewer");
-	agent.source_path = Some(old_file.to_string_lossy().into_owned());
-	mgr.add_sub_agent(agent).unwrap();
-
-	let orig = std::fs::metadata(&locked_dir).unwrap().permissions();
-	std::fs::set_permissions(
-		&locked_dir,
-		std::fs::Permissions::from_mode(0o555),
-	)
-	.unwrap();
-
-	let res = mgr.update_sub_agent(
-		"reviewer",
-		SubAgentPatch {
-			name: Some("auditor".to_string()),
-			description: None,
-			instruction: None,
-		},
-	);
-
-	// RESTORE perms before any assertion so a failure can't leak the temp dir.
-	std::fs::set_permissions(&locked_dir, orig).unwrap();
-
-	let err = res.expect_err(
-		"a failed stale-file delete on rename must surface, not be swallowed",
-	);
-	assert!(
-		matches!(err, ConfigError::Io(_)),
-		"undeletable stale file must surface an IO error, got {err:?}"
-	);
-	// The orphan old file is still on disk — surfacing the error lets the caller
-	// know it lingers rather than silently claiming success.
-	assert!(
-		old_file.exists(),
-		"stale file remains; the error is what tells the caller it lingers"
-	);
+	let mut mgr = project_manager(root);
+	mgr.add_sub_agent(agent_with_instruction("reviewer", "reviewer body"))
+		.unwrap();
+	mgr.add_sub_agent(agent_with_instruction("auditor", "auditor body"))
+		.unwrap();
+	let error = mgr
+		.update_sub_agent(
+			"reviewer",
+			SubAgentPatch {
+				name: Some("auditor".to_string()),
+				..Default::default()
+			},
+		)
+		.unwrap_err();
+	assert!(matches!(error, ConfigError::ResourceExists { .. }));
+	assert!(std::fs::read_to_string(agent_md_path(root, "reviewer"))
+		.unwrap()
+		.contains("reviewer body"));
+	assert!(std::fs::read_to_string(agent_md_path(root, "auditor"))
+		.unwrap()
+		.contains("auditor body"));
 }
 
 #[test]
-fn remove_sub_agent_planned_tombstone_cleanup_failure_is_not_clean_success() {
-	// Site-3 regression: after a successful tombstone rename + save, the
-	// post-success cleanup must NOT swallow a `remove_file` failure and report
-	// a clean `executed:true` success. A surviving `.aghub-tomb` is litter the
-	// caller should learn about, so a non-NotFound cleanup error surfaces.
-	//
-	// Deterministic, root-safe: point source_path at a DIRECTORY. The rename to
-	// the tomb then makes the tomb a directory too, so `remove_file(tomb)` fails
-	// with EISDIR while the rename + save still succeed.
+fn rename_to_a_new_file_keeps_the_body_and_removes_the_old_path() {
 	let tmp = tempfile::tempdir().unwrap();
 	let root = tmp.path();
-	let mut mgr = ConfigManager::new(
-		create_adapter(AgentType::Claude),
-		false,
-		Some(root),
-	);
-	mgr.load().unwrap();
+	let mut manager = project_manager(root);
+	manager
+		.add_sub_agent(agent_with_instruction(
+			"reviewer",
+			"original instructions",
+		))
+		.unwrap();
+	manager
+		.update_sub_agent(
+			"reviewer",
+			SubAgentPatch {
+				name: Some("auditor".into()),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	assert!(!agent_md_path(root, "reviewer").exists());
+	let content =
+		std::fs::read_to_string(agent_md_path(root, "auditor")).unwrap();
+	assert!(content.contains("original instructions"), "{content}");
+}
 
-	// Backing "file" is actually a directory: rename moves it to a tomb dir,
-	// which `remove_file` cannot delete.
-	let backing_dir = root.join("backing.md");
-	std::fs::create_dir(&backing_dir).unwrap();
-	let tomb = root.join("backing.md.aghub-tomb");
+#[test]
+fn rename_that_maps_to_the_same_file_keeps_the_only_copy() {
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let mut manager = project_manager(root);
+	manager
+		.add_sub_agent(agent_with_instruction("Reviewer", "keep this body"))
+		.unwrap();
+	let file = agent_md_path(root, "reviewer");
+	assert!(file.exists());
+	manager
+		.update_sub_agent(
+			"Reviewer",
+			SubAgentPatch {
+				name: Some("reviewer".into()),
+				..Default::default()
+			},
+		)
+		.unwrap();
+	let content = std::fs::read_to_string(&file).unwrap();
+	assert!(content.contains("name: reviewer"), "{content}");
+	assert!(content.contains("keep this body"), "{content}");
+}
 
-	let mut agent = SubAgent::new("reviewer");
-	agent.source_path = Some(backing_dir.to_string_lossy().into_owned());
-	mgr.add_sub_agent(agent).unwrap();
-
-	let err = mgr
+#[test]
+fn existing_recovery_tombstone_is_not_overwritten() {
+	// A previous interrupted removal may leave the only copy in this fixed
+	// tombstone path. Refuse the next removal rather than rename over it.
+	let tmp = tempfile::tempdir().unwrap();
+	let root = tmp.path();
+	let mut mgr = manager_with_persisted_agent(root, "reviewer");
+	let source = agent_md_path(root, "reviewer");
+	let tomb = source.with_extension("md.aghub-tomb");
+	std::fs::write(&tomb, "older unrecovered data").unwrap();
+	let error = mgr
 		.remove_sub_agent_planned("reviewer", false, true)
-		.expect_err("a tombstone cleanup failure must not be a clean success");
-	assert!(
-		matches!(err, ConfigError::Io(_)),
-		"cleanup failure must surface an actionable IO error, got {err:?}"
+		.unwrap_err();
+	assert!(matches!(error, ConfigError::InvalidConfig(_)));
+	assert_eq!(
+		std::fs::read_to_string(&tomb).unwrap(),
+		"older unrecovered data"
 	);
-	// The removal itself happened (file moved out + saved): the leftover tomb
-	// is exactly the litter the surfaced error tells the caller about.
-	assert!(tomb.exists(), "the un-cleaned tombstone is left on disk");
-	assert!(
-		mgr.get_sub_agent("reviewer").is_none(),
-		"the agent was genuinely removed before cleanup failed"
-	);
+	assert!(source.exists());
+	assert!(mgr.get_sub_agent("reviewer").is_some());
 }
 
 #[test]
