@@ -52,6 +52,14 @@ export const queryKeys = {
 		/// this. Hand-rolling the array at the call site is how the string and
 		/// the key drift apart.
 		repairPreviews: () => ["skills", "repair-preview"] as const,
+		/// Masters no agent reads at this scope. Under `skills.all()` so the
+		/// reconcile that unticks the last agent marks it stale.
+		withheld: (
+			scope: "global" | "project" = "global",
+			projectRoot?: string,
+		) => ["skills", "withheld", scope, projectRoot ?? null] as const,
+		/// Prefix covering every scope's withheld list.
+		withhelds: () => ["skills", "withheld"] as const,
 		/// Prefixes for a skill's rendered BODY — the SKILL.md text and its file
 		/// tree. A flow that rewrites files on disk owes these a refetch: the
 		/// path (and so the key) is unchanged, so nothing else brings the open

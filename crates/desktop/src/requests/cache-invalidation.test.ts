@@ -11,7 +11,10 @@ import {
 	deleteCredentialMutationOptions,
 } from "./credentials.ts";
 import { queryKeys } from "./keys.ts";
-import { applySkillUpdateMutationOptions } from "./skills.ts";
+import {
+	applySkillUpdateMutationOptions,
+	invalidateSkillQueries,
+} from "./skills.ts";
 
 /** A client whose queries never refetch on their own, so staleness is visible. */
 function freshClient() {
@@ -93,6 +96,26 @@ test("applying an update refetches the open skill's content and file tree", asyn
 		"updating divergent copies must refresh the migration conflict preview",
 	);
 	repair.unsubscribe();
+});
+
+// Unticking a skill's last agent (a reconcile) is what makes it withheld. The
+// skills page never unmounts, so if every skill mutation did not actively
+// refetch the withheld list, its status-strip row would not appear until some
+// unrelated refetch happened to run.
+test("every skill mutation refetches the withheld-skill list", async () => {
+	const client = freshClient();
+	const withheld = seedActive(client, queryKeys.skills.withheld("global"));
+	await withheld.settled;
+	const before = withheld.state.fetches;
+
+	await invalidateSkillQueries(client);
+	await new Promise((resolve) => setTimeout(resolve, 50));
+
+	assert.ok(
+		withheld.state.fetches > before,
+		"the withheld list must refetch after a skill mutation",
+	);
+	withheld.unsubscribe();
 });
 
 test("a credential change invalidates the source answers computed with it", async () => {

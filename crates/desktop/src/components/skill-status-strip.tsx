@@ -3,6 +3,7 @@ import { Button, Spinner } from "@heroui/react";
 import type { ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import { SkillLayoutMigrationBanner } from "./skill-layout-migration-banner";
+import { WithheldSkillsRow } from "./withheld-skills-row";
 
 interface SkillStatusStripProps {
 	scope: "global" | "project";
@@ -89,6 +90,7 @@ export function SkillStatusStrip({
 				projectPath={projectPath}
 				variant="row"
 			/>
+			<WithheldSkillsRow scope={scope} projectPath={projectPath} />
 		</div>
 	);
 }

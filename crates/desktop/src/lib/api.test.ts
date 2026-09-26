@@ -72,6 +72,26 @@ test("skills.delete sends scope, confirm and all_agents", async () => {
 	);
 });
 
+// The route and param spellings are pinned on the Rust side by
+// `withheld_skills_wire_lists_only_the_ungranted_master`; this pins ours.
+test("skills.withheld sends scope and project_root", async () => {
+	const { calls, restore } = stubFetchCapturingUrl();
+	try {
+		await createApi("http://api.test/").skills.withheld(
+			"project",
+			"/work/repo",
+		);
+	} finally {
+		restore();
+	}
+	assert.equal(calls.length, 1);
+	assert.equal(calls[0].pathname, "/skills/withheld");
+	assert.equal(
+		calls[0].searchParams.toString(),
+		"scope=project&project_root=%2Fwork%2Frepo",
+	);
+});
+
 // A shared config file or Referrer is removed only when every reader is in the
 // request; the group's agent set rides along as one comma list.
 test("mcps.delete and skills.delete send the requested agent set", async () => {

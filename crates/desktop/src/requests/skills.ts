@@ -202,6 +202,13 @@ export async function invalidateSkillQueries(queryClient: QueryClient) {
 		queryKey: queryKeys.skills.repairPreviews(),
 		type: "active",
 	});
+	// Unticking a skill's last agent is exactly what makes it withheld; the
+	// strip row must appear right after that reconcile, not on some later
+	// unrelated refetch.
+	void queryClient.refetchQueries({
+		queryKey: queryKeys.skills.withhelds(),
+		type: "active",
+	});
 }
 
 /// An applied update changes whether a skill IS outdated, and the badge that
@@ -822,5 +829,25 @@ export function repairPreviewQueryOptions({
 		// Project scope without a root cannot resolve a store; asking anyway
 		// would surface a 400 as a broken banner.
 		enabled: enabled && (scope === "global" || Boolean(projectRoot)),
+	});
+}
+
+interface WithheldSkillsParams {
+	api: ApiClient;
+	scope: "global" | "project";
+	projectRoot?: string;
+}
+
+/** Masters no agent reads — invisible to every per-agent skill list. */
+export function withheldSkillsQueryOptions({
+	api,
+	scope,
+	projectRoot,
+}: WithheldSkillsParams) {
+	return queryOptions({
+		queryKey: queryKeys.skills.withheld(scope, projectRoot),
+		queryFn: () => api.skills.withheld(scope, projectRoot),
+		// Same guard as the repair preview: no root, no project store.
+		enabled: scope === "global" || Boolean(projectRoot),
 	});
 }

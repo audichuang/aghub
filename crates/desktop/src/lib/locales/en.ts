@@ -476,6 +476,19 @@ export default {
 		"Check complete — {{count}} skill(s) could not be verified",
 	/** Last line of the uncheckable toast when more skills were left out. */
 	skillUncheckableMore: "and {{count}} more that could not be checked",
+	withheldSkillsRow: "{{count}} skill(s) granted to no agent",
+	withheldSkillsReview: "Review",
+	withheldSkillsTitle: "Skills not granted to any agent",
+	withheldSkillsExplain:
+		"These skills are still stored in .aghub and keep receiving updates, but every agent was unticked, so none of them can read it. Grant each one to an agent again, or delete it for good.",
+	withheldSkillsPickAgents: "Grant to:",
+	withheldSkillsGrant: "Grant",
+	withheldSkillsGranted: "Granted {{name}} to {{count}} agent(s).",
+	withheldSkillsGrantFailed: "Could not grant {{name}} to every agent.",
+	withheldSkillsConfirmDelete: "Delete permanently",
+	withheldSkillsDeleted: "Deleted {{name}}.",
+	withheldSkillsDeleteFailed: "Could not delete {{name}}.",
+	withheldSkillsClose: "Close",
 	/** Toast when check completes and everything is current. */
 	skillCheckCompleteAllGood: "All skills are up to date",
 	/** Throttled toast shown while a check runs without a GitHub credential. */

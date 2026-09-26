@@ -49,6 +49,47 @@ pub(crate) fn load_master_skills(store: &Path) -> std::io::Result<Vec<Skill>> {
 	}
 }
 
+/// Masters in ONE scope's store that no agent reads — every agent unticked,
+/// so the skill is stored (and still updated) but granted to nobody.
+///
+/// Invisible to every per-agent listing by construction, which is why it needs
+/// its own question: without it a user can neither see, re-grant nor delete
+/// such a skill from the UI. "Reads" is by frontmatter name, the same rule the
+/// update check uses to fall back to the Master. `Err` as for the store walk.
+///
+/// Advisory only: `load_all_agents` fails OPEN, so a Master read solely by an
+/// agent whose config cannot be loaded lists here too. Deleting from this list
+/// is still safe — the removal plan re-derives readers and fails closed.
+pub fn withheld_masters(
+	scope: crate::models::ResourceScope,
+	project_root: Option<&Path>,
+) -> std::io::Result<Vec<Skill>> {
+	use crate::models::ResourceScope;
+	let store_root = match scope {
+		ResourceScope::GlobalOnly => None,
+		ResourceScope::ProjectOnly if project_root.is_some() => project_root,
+		_ => return Ok(Vec::new()),
+	};
+	let Some(store) = crate::skills::linker::master_store_dir(store_root)
+	else {
+		return Ok(Vec::new());
+	};
+	let masters = load_master_skills(&store)?;
+	if masters.is_empty() {
+		return Ok(masters);
+	}
+	let read: std::collections::HashSet<String> =
+		crate::load_all_agents(scope, project_root)
+			.into_iter()
+			.flat_map(|agent| agent.skills)
+			.map(|skill| skill.name)
+			.collect();
+	Ok(masters
+		.into_iter()
+		.filter(|master| !read.contains(&master.name))
+		.collect())
+}
+
 /// [`load_skills_from_dir`], but keeping what it COULD read alongside the fact
 /// that something was missed.
 ///
@@ -330,6 +371,39 @@ fn collect_skills(
 mod tests {
 	use super::*;
 	use std::fs;
+
+	/// A Master every agent was unticked from is listed; one an agent still
+	/// links to is not.
+	#[cfg(unix)]
+	#[test]
+	fn withheld_masters_lists_only_the_ungranted_master() {
+		use crate::models::ResourceScope;
+		let tmp = tempfile::tempdir().unwrap();
+		let root = tmp.path();
+		for name in ["granted", "withheld"] {
+			let master = root.join(".aghub").join(name);
+			fs::create_dir_all(&master).unwrap();
+			fs::write(
+				master.join("SKILL.md"),
+				format!("---\nname: {name}\ndescription: d\n---\n"),
+			)
+			.unwrap();
+		}
+		fs::create_dir_all(root.join(".claude/skills")).unwrap();
+		std::os::unix::fs::symlink(
+			root.join(".aghub/granted"),
+			root.join(".claude/skills/granted"),
+		)
+		.unwrap();
+
+		let names: Vec<String> =
+			withheld_masters(ResourceScope::ProjectOnly, Some(root))
+				.unwrap()
+				.into_iter()
+				.map(|skill| skill.name)
+				.collect();
+		assert_eq!(names, vec!["withheld".to_string()]);
+	}
 
 	#[test]
 	fn test_recursive_skills_discovery() {

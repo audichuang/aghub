@@ -260,6 +260,7 @@ fn build_rocket_with_state_factories(
 				routes::skills::list_all_agents_skills,
 				routes::skills::list_skills,
 				routes::skills::list_skill_usage,
+				routes::skills::list_withheld_skills,
 				routes::skills::create_skill,
 				routes::skills::import_skill,
 				routes::skills::get_skill,
@@ -971,6 +972,50 @@ mod tests {
 			"/api/v1/agents/claude/skills/{name}?scope=project&project_root={}{query}",
 			urlencoding(&root.to_string_lossy()),
 		)
+	}
+
+	/// The desktop's only way to see a Master every agent was unticked from.
+	/// Spelling of the route and its `scope` / `project_root` params is pinned
+	/// here, against a store holding one withheld and one granted Master.
+	#[cfg(unix)]
+	#[test]
+	fn withheld_skills_wire_lists_only_the_ungranted_master() {
+		let project = tempfile::tempdir().expect("project dir");
+		let root = project.path();
+		seed_orphan_master(root, "orphan");
+		let granted = seed_orphan_master(root, "granted");
+		std::fs::create_dir_all(root.join(".claude/skills")).unwrap();
+		std::os::unix::fs::symlink(
+			&granted,
+			root.join(".claude/skills/granted"),
+		)
+		.unwrap();
+		let client = Client::tracked(build_rocket(
+			rocket::Config::default(),
+			default_app_data_dir(),
+		))
+		.expect("client");
+
+		let resp = client
+			.get(format!(
+				"/api/v1/skills/withheld?scope=project&project_root={}",
+				urlencoding(&root.to_string_lossy()),
+			))
+			.dispatch();
+		assert_eq!(resp.status(), Status::Ok);
+		let json: serde_json::Value =
+			serde_json::from_str(&resp.into_string().unwrap()).unwrap();
+		let names: Vec<&str> = json
+			.as_array()
+			.expect("an array")
+			.iter()
+			.map(|skill| skill["name"].as_str().unwrap())
+			.collect();
+		assert_eq!(names, vec!["orphan"], "body was {json}");
+		assert!(
+			json[0]["source_path"].as_str().is_some(),
+			"the desktop re-grants from this path; body was {json}"
+		);
 	}
 
 	#[test]

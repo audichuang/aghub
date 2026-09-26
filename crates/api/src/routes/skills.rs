@@ -1080,6 +1080,26 @@ pub fn list_skills(
 	Ok(Json(skills))
 }
 
+/// Masters in one scope's store that NO agent reads (every agent unticked).
+///
+/// Every per-agent listing misses them by construction, so this is the one
+/// place the desktop learns they exist — and can offer to re-grant or delete
+/// them. Empty for the `all` scope: a store belongs to exactly one scope.
+#[get("/skills/withheld?<scope..>")]
+pub fn list_withheld_skills(
+	_origin: TrustedLocalOrigin,
+	scope: ScopeParams,
+) -> ApiResult<Vec<SkillResponse>> {
+	let resolved = scope.resolve()?;
+	let (resource_scope, project_root) = resolved_to_resource_scope(&resolved);
+	let masters = aghub_core::skills::discovery::withheld_masters(
+		resource_scope,
+		project_root.as_deref(),
+	)
+	.map_err(|e| ApiError::from(ConfigError::Io(e)))?;
+	Ok(Json(masters.iter().map(SkillResponse::from).collect()))
+}
+
 /// Usage counts for the installed global Claude skills, from Claude Code's
 /// `skillUsage` map. Never-dispatched skills surface as `usage_count: 0`;
 /// sorted least-used first. Claude-only (no other agent keeps a counter).

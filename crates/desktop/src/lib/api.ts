@@ -359,6 +359,22 @@ export function createApi(baseUrl: string) {
 			usage(): Promise<SkillUsageResponse[]> {
 				return client.get("skills/usage").json();
 			},
+			/** Masters at this scope that no agent reads (all unticked). */
+			withheld(
+				scope: "global" | "project",
+				projectRoot?: string,
+			): Promise<SkillResponse[]> {
+				return client
+					.get("skills/withheld", {
+						searchParams: {
+							scope,
+							...(projectRoot
+								? { project_root: projectRoot }
+								: {}),
+						},
+					})
+					.json();
+			},
 			getProjectLock(
 				projectPath?: string,
 			): Promise<ProjectSkillLockResponse> {
