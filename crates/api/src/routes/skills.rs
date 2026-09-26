@@ -1153,7 +1153,11 @@ pub async fn import_skill(
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
-	let request = body.into_inner();
+	let mut request = body.into_inner();
+	// Expand `~/` ONCE, up front: the hash step below already did, while the
+	// parse and the install read the raw string — so a home-abbreviated path
+	// (what every skill listing returns) hashed fine and then failed to parse.
+	request.path = expand_tilde_path(&request.path).display().to_string();
 
 	in_mutation_pool(move || {
 		// ONE transaction for load + materialize + hash + lock write. The load is
@@ -1225,17 +1229,19 @@ pub async fn import_skill(
 		// `existing_owner.is_none() && covered_any`, guarded by a Master-hash
 		// check):
 		//
-		// - a real install always writes;
-		// - a no-op MUST NOT overwrite an existing entry — that entry may be a
-		//   `git` source, and replacing it with `source_type: "local"` silently
-		//   disables `check`/`apply-update` for that skill forever;
-		// - a no-op over an UNTRACKED Master may adopt it, but only when the
+		// - a call that WROTE the Master always writes;
+		// - one that did not (a no-op, or only a new Referrer to a Master that
+		//   was already there — e.g. re-granting a skill every agent had been
+		//   unticked from) MUST NOT overwrite an existing entry — that entry may
+		//   be a `git` source, and replacing it with `source_type: "local"`
+		//   silently disables `check`/`apply-update` for that skill forever;
+		// - such a call over an UNTRACKED Master may adopt it, but only when the
 		//   Master is byte-identical to the folder being submitted. Without
 		//   that check the entry would record a hash for content that is not
 		//   what is installed. Refusing outright was worse: `add`/import is the
 		//   only adoption path there is, so an untracked Master would stay
 		//   untracked forever with nothing the user could do about it.
-		let may_write_lock = if !added.already_installed {
+		let may_write_lock = if added.wrote_master {
 			true
 		} else if locked_entry_exists(
 			&imported.name,
@@ -4208,6 +4214,89 @@ mod tests {
 				locked_after_first.computed_hash,
 				"a no-op re-import must not restamp the hash"
 			);
+		});
+	}
+
+	/// The desktop re-grants a withheld skill by importing the `source_path`
+	/// the withheld listing returned — which is home-abbreviated (`~/…`). The
+	/// round trip must link it, or the only way back from "every agent
+	/// unticked" answers 400.
+	#[cfg(unix)]
+	#[test]
+	fn a_withheld_master_is_regranted_from_its_listed_path() {
+		with_isolated_env(|home, _state| {
+			let project = home.join("withheld-project");
+			let master = project.join(".aghub/parked");
+			std::fs::create_dir_all(&master).unwrap();
+			std::fs::write(
+				master.join("SKILL.md"),
+				"---\nname: parked\ndescription: d\n---\n\nbody\n",
+			)
+			.unwrap();
+			std::fs::create_dir_all(project.join(".claude/skills")).unwrap();
+			// Installed from upstream before every agent was unticked.
+			skill::add_skill_to_local_lock(
+				"parked",
+				skill::LocalSkillLockEntry {
+					source_url: None,
+					ref_commit: None,
+					source: "owner/repo".to_string(),
+					ref_name: Some("main".to_string()),
+					source_type: "github".to_string(),
+					computed_hash: "recorded".to_string(),
+					skill_path: Some("parked/SKILL.md".to_string()),
+				},
+				Some(&project),
+			)
+			.unwrap();
+			let scope = || ScopeParams {
+				scope: Some("project".to_string()),
+				project_root: Some(project.display().to_string()),
+			};
+
+			let listed = list_withheld_skills(TrustedLocalOrigin, scope())
+				.ok()
+				.expect("withheld listing")
+				.into_inner();
+			let path = listed
+				.iter()
+				.find(|skill| skill.name == "parked")
+				.and_then(|skill| skill.source_path.clone())
+				.expect("the parked Master is listed with a path");
+
+			block_on(import_skill(
+				TrustedLocalOrigin,
+				AgentParam(AgentType::Claude),
+				scope(),
+				Json(crate::dto::skill::ImportSkillRequest { path }),
+			))
+			.ok()
+			.expect("re-granting from the listed path succeeds");
+
+			assert_eq!(
+				std::fs::canonicalize(project.join(".claude/skills/parked"))
+					.unwrap(),
+				std::fs::canonicalize(&master).unwrap(),
+				"claude must now reach the Master through a Referrer"
+			);
+			let after = list_withheld_skills(TrustedLocalOrigin, scope())
+				.ok()
+				.expect("withheld listing")
+				.into_inner();
+			assert!(after.is_empty(), "no longer withheld: {after:?}");
+			// Linking an existing Master writes no content, so it must not
+			// repoint the lock at the Master as a `local` source — that
+			// silently ends update checks for the skill.
+			let entry = skill::lock::local::read_local_lock(Some(&project))
+				.skills
+				.get("parked")
+				.cloned()
+				.expect("the lock entry survives a re-grant");
+			assert_eq!(
+				(entry.source.as_str(), entry.source_type.as_str()),
+				("owner/repo", "github"),
+			);
+			assert_eq!(entry.computed_hash, "recorded");
 		});
 	}
 
