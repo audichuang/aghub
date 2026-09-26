@@ -9,16 +9,25 @@ description: Runbook for cutting a desktop + CLI release of this aghub fork (aud
 
 ```bash
 just release X.Y.Z          # e.g. just release 2.3.8   (add --yes to skip the confirm)
+just release verify X.Y.Z   # re-check a published release (read-only)
 ```
+
+**Interrupted? Re-run the same command.** Killing the script (a timeout, another
+agent's `pkill`) never affects the release — `release.yml` runs on GitHub. Once
+`vX.Y.Z` is on the fork at HEAD, `just release X.Y.Z --yes` skips push/CI/tag
+and RESUMES at "watch the run, then verify". Never tag by hand to "finish" it.
 
 `just release` wraps `scripts/release.sh`, which automates the whole mechanical
 flow so the model doesn't burn tokens re-deriving it each time and can't fumble
 the gotchas: it validates the version, **pushes to `fork` (never origin =
 upstream)**, waits for the HEAD commit's `ci.yml` to go **green** before tagging,
 tags `vX.Y.Z`, watches `release.yml` (**auto-reruns once** on a transient CI
-dispatch flake — jobs stuck `queued` with nothing published), then verifies the
-artifacts (`latest.json` URLs, Homebrew cask sha256). You still pick the version
-and confirm go/no-go — a tag triggers a real public release.
+dispatch flake — jobs stuck `queued` with nothing published), then runs
+`scripts/verify-release.sh`: assets, `latest.json` (version, 4 signed
+platforms, URLs on this tag), `releases/latest`, the live updater endpoint, and
+the Homebrew cask + formula (version AND sha256 equal to GitHub's asset
+digests). You still pick the version and confirm go/no-go — a tag triggers a
+real public release.
 
 The rest of this file is the **reference** behind that script — read it to
 understand the model, debug a failure the script surfaces, or do something the
@@ -26,7 +35,16 @@ script does not cover (notably **re-releasing a botched tag**, which needs a
 manual delete + retag — see the last section).
 
 Releases are **tag-driven**: pushing a `v*` tag runs `.github/workflows/release.yml`, which fans out to
-`verify-ci` (gate) → `changelog` → `build-tauri` (4 targets) + `build-cli` (4 targets) → `publish-homebrew`.
+`verify-ci` (gate) → `changelog` (creates the Release as a **draft**) → `build-tauri` (4 targets) + `build-cli`
+(4 targets), all uploading into the draft → `publish` (runs `verify-release.sh --pre-publish` on the draft, then
+makes it public / latest) → `publish-homebrew`.
+
+**Nothing is public until `publish` passes.** Before this, the Release went public — and became
+`releases/latest`, which is the updater endpoint — before any asset existed: on v2.30.0 the endpoint 404'd for
+~15 min, then served a `latest.json` with only one platform for ~13 more, and a failed build left it like that. Now
+a failed build, a red macOS signature check, or a `latest.json` that lost a platform to the upload race leaves a
+**draft**: users keep getting the previous version. Every `softprops/action-gh-release` step must pass
+`draft: true` — without it, finding the existing draft makes softprops publish it.
 `verify-ci` gates everything: it asserts the tagged commit already has a **green push-to-main `ci.yml` run** (ci.yml's
 `test` job runs the ubuntu/macOS/Windows suite unconditionally on every push to main). It does **not** re-run the suite
 — a tag whose CI isn't green, or that never landed on main, produces **no** artifacts and fails fast at `verify-ci`.
@@ -102,14 +120,17 @@ not just the commit message. (Distinct from the npx `skills` ecosystem upstream 
 ## Verify after green
 
 ```bash
-gh release view vX.Y.Z --repo audichuang/aghub --json assets --jq '.assets[].name'
-gh release download vX.Y.Z --repo audichuang/aghub --pattern latest.json --output -   # urls must be audichuang/aghub
-gh api repos/audichuang/homebrew-tap/contents/Casks/aghub.rb --jq .content | base64 -d | grep -E 'version|sha256'
-gh api repos/audichuang/homebrew-tap/contents/Formula/aghub-cli.rb --jq .content | base64 -d | grep -m1 version
+just release verify X.Y.Z    # = bash scripts/verify-release.sh vX.Y.Z
 ```
 
-- Expect dmg (arm+x64), nsis `setup.exe`, msi, AppImage/deb/rpm, 4 CLI archives, `latest.json`.
-- `latest.json` urls + signatures must point at **this** repo; cask `sha256` must be non-empty.
+One script, two call sites: `release.yml`'s `publish` job runs it with
+`--pre-publish` on the draft (assets + `latest.json`), and `release.sh` runs the
+full mode after the run (plus `releases/latest`, the live updater endpoint and
+the Homebrew cask + formula — version and sha256, compared against GitHub's own
+per-asset `digest`, so nothing is downloaded). Add a check THERE, never as a
+one-off grep in a runbook: a check that lives only in prose is skipped by the
+next hand-pushed tag.
+
 - Install path for users: `brew install --cask audichuang/tap/aghub` (CLI: `audichuang/tap/aghub-cli`).
 
 ## Invariants (don't break these)
@@ -130,19 +151,24 @@ gh api repos/audichuang/homebrew-tap/contents/Formula/aghub-cli.rb --jq .content
 
 ## Troubleshooting
 
-| Symptom                                                                                                                                                       | Cause                                                                                                                                                                                                        | Fix                                                                                                                                                                                                                                                                                                  |
-| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| macOS `failed codesign … security import: failed to import keychain certificate`                                                                              | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri tries to import an empty cert                                                                                                                 | Keep the `APPLE_*` env lines **commented out** in `release.yml`; unsigned dmg builds fine. Only uncomment once real Apple Developer certs + secrets exist.                                                                                                                                           |
-| `Cargo Fetch` fails: `sccache: Server startup failed … dns error … Try again`                                                                                 | Transient GitHub infra/DNS flake reaching the cache backend                                                                                                                                                  | Re-run the job: `gh run rerun --failed <run-id> --repo audichuang/aghub`. Not a code issue.                                                                                                                                                                                                          |
-| Homebrew job fails on push to tap                                                                                                                             | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                                                                                                                         | Reset the PAT secret; rest of the release is unaffected.                                                                                                                                                                                                                                             |
-| `ci.yml` `test` (push to main) fails on a test that passes locally and under `-p <crate>` — and so blocks the release (verify-ci stays red until CI is green) | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test under `cargo test --workspace` (heavier parallel load than `-p` surfaces the race)                                                          | Serialize it: hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH the HOME/XDG-mutating test AND the home-reading test; `#[cfg(unix)]`-gate unix-only tests; canonicalize both path sides for macOS `/var`→`/private`. Reproduce with `cargo test --workspace`, not just `-p`. |
-| `just release` aborts `timed out waiting for ci.yml to go green` while CI is still running / eventually goes green                                            | 3-OS matrix cold compile ran longer than the script's CI-wait window                                                                                                                                         | **Re-run** `just release X.Y.Z --yes` once CI is green — HEAD is already pushed, so it skips the wait and tags immediately. Wait window raised 20→40 min, so this should be rare.                                                                                                                    |
-| One `Build Desktop (<target>)` job fails at `Uploading latest.json...` with `Not Found — update-a-release-asset`, everything else green                       | The 4 desktop jobs each read-modify-write the SAME `latest.json` asset (tauri-action `includeUpdaterJson`); two interleaved and one lost the race                                                            | Not a code issue — re-release the tag (below). `release.sh` now asserts the manifest carries all 4 `{os}-{arch}` keys, so a bad one can't pass verification silently. Bit v2.11.1 once in ~13 releases.                                                                                              |
-| A platform's desktop app never offers an update, no error anywhere, release run was green                                                                     | Same race, silent shape: a lost update dropped that platform's key from `latest.json`. The endpoint is `releases/latest/download/latest.json`, so the updater is simply told "no update" — nobody reports it | `curl -sL .../releases/download/vX.Y.Z/latest.json \| jq '.platforms \| keys'` — expect 11 keys spanning darwin/linux/windows. Short? Re-release the tag. **Only `just release` runs this check** — a hand-pushed tag (every pre-release) bypasses it, so check by hand there.                       |
+| Symptom                                                                                                                                                       | Cause                                                                                                                                                                                           | Fix                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS `failed codesign … security import: failed to import keychain certificate`                                                                              | Unset `APPLE_*` secrets resolve to **empty strings**, so Tauri tries to import an empty cert                                                                                                    | Keep the `APPLE_*` env lines **commented out** in `release.yml`; unsigned dmg builds fine. Only uncomment once real Apple Developer certs + secrets exist.                                                                                                                                           |
+| `Cargo Fetch` fails: `sccache: Server startup failed … dns error … Try again`                                                                                 | Transient GitHub infra/DNS flake reaching the cache backend                                                                                                                                     | Re-run the job: `gh run rerun --failed <run-id> --repo audichuang/aghub`. Not a code issue.                                                                                                                                                                                                          |
+| Homebrew job fails on push to tap                                                                                                                             | Missing/expired `HOMEBREW_TAP_TOKEN`                                                                                                                                                            | Reset the PAT secret; rest of the release is unaffected.                                                                                                                                                                                                                                             |
+| `ci.yml` `test` (push to main) fails on a test that passes locally and under `-p <crate>` — and so blocks the release (verify-ci stays red until CI is green) | A test reading `dirs::home_dir()` raced a HOME/XDG-mutating test under `cargo test --workspace` (heavier parallel load than `-p` surfaces the race)                                             | Serialize it: hold the shared lock (`test_env_lock` in api, `env_lock` in core) in BOTH the HOME/XDG-mutating test AND the home-reading test; `#[cfg(unix)]`-gate unix-only tests; canonicalize both path sides for macOS `/var`→`/private`. Reproduce with `cargo test --workspace`, not just `-p`. |
+| `just release` aborts `timed out waiting for ci.yml to go green` while CI is still running / eventually goes green                                            | 3-OS matrix cold compile ran longer than the script's CI-wait window                                                                                                                            | **Re-run** `just release X.Y.Z --yes` once CI is green — HEAD is already pushed, so it skips the wait and tags immediately. Wait window raised 20→40 min, so this should be rare.                                                                                                                    |
+| One `Build Desktop (<target>)` job fails at `Uploading latest.json...` with `Not Found — update-a-release-asset`, everything else green                       | The 4 desktop jobs each read-modify-write the SAME `latest.json` asset (tauri-action `includeUpdaterJson`); two interleaved and one lost the race                                               | Nothing shipped — the release is still a draft. `gh run rerun <run-id> --failed`, then resume with `just release X.Y.Z --yes`. Bit v2.11.1 once in ~13 releases.                                                                                                                                     |
+| `publish` fails with `latest.json has no signed '<platform>' entry`, every build green                                                                        | Same race, silent shape: a lost update dropped that platform's key. It used to ship like that (the updater just says "no update" forever); `publish` now blocks it while the release is a draft | Rerun that platform's `Build Desktop` job (`gh run view <run-id>` → rerun it from the UI or `gh run rerun <run-id> --job <job-id>`), then rerun `publish`. Holds for hand-pushed tags and pre-releases too — the check is in the workflow now, not only in `just release`.                           |
+| `publish-homebrew` fails with `no usable sha256 for release asset …`                                                                                          | An expected asset is missing or has no digest. It used to `wget … \|\| echo`, and a failed download shipped the empty-file sha256 `e3b0c442…` to the tap (v2.3.0)                               | Check the release's asset list; rerun the job once the asset exists. Never hand-write a checksum.                                                                                                                                                                                                    |
+| Local `just preflight` fails first thing: `'/…/.git' exists above the test temp dir`                                                                          | A stray `.git` in an ancestor of `$TMPDIR` makes test fixtures look like they sit in a broken repo, and the skill repair tests fail (an empty `/tmp/.git` did this on 2026-09-26)               | Remove it if stray (`rmdir` when empty), or `TMPDIR=/var/tmp just preflight`.                                                                                                                                                                                                                        |
 
 ## Re-release a botched tag
 
-If a run half-fails and leaves a partial Release, redo the **same** version cleanly:
+A failed run now leaves a **draft**, which usually needs no delete at all: fix,
+`gh run rerun <run-id> --failed`, then `just release X.Y.Z --yes` resumes. Delete
+and retag only when the tagged commit itself must change. If a run half-fails and
+leaves a partial Release, redo the **same** version cleanly:
 
 ```bash
 gh run cancel <run-id> --repo audichuang/aghub

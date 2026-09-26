@@ -9,6 +9,12 @@
 #
 # Usage:
 #   scripts/release.sh <X.Y.Z> [--yes]      # or: just release X.Y.Z [--yes]
+#   scripts/release.sh verify <X.Y.Z>       # re-check a published release
+#
+# Re-running the same version after an interruption RESUMES: once the tag is
+# on the fork at HEAD, the push/CI/tag steps are skipped and it goes straight
+# to watching the run and verifying. (Killing this script never affects the
+# release itself — release.yml runs on GitHub; only the local watch stops.)
 #
 # The version + go/no-go are deliberately a human decision (a tag triggers a
 # real public release: Homebrew + the auto-update endpoint). This script only
@@ -46,6 +52,10 @@ watch_run() {
 	return 1
 }
 
+if [ "${1:-}" = "verify" ]; then
+	exec bash "$(dirname "$0")/verify-release.sh" "v${2#v}"
+fi
+
 VERSION="${1:-}"
 ASSUME_YES=0
 [ "${2:-}" = "--yes" ] && ASSUME_YES=1
@@ -69,6 +79,24 @@ echo "$REMOTE_URL" | grep -q "audichuang/aghub" || {
 	exit 1
 }
 
+# One release at a time from this clone. Two concurrent runs of the same
+# version both waited on CI and raced to `git tag` (the second died with 128).
+# mkdir is atomic and exists on macOS, unlike flock.
+LOCK_DIR="$(git rev-parse --git-common-dir)/aghub-release.lock"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+	err "another release is running from this clone ($LOCK_DIR). Remove it if that run is dead."
+	exit 1
+fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+
+# Judge "latest" and "already tagged" against the FORK's tags, not whatever
+# this clone happened to fetch last — another machine may have released.
+git fetch --quiet --tags "$REMOTE" || {
+	err "fetching tags from $REMOTE failed — usually a local tag that differs from the fork's."
+	err "Reconcile it (never force-overwrite a published tag) and re-run."
+	exit 1
+}
+
 BRANCH="$(git rev-parse --abbrev-ref HEAD)"
 [ "$BRANCH" = "main" ] || {
 	err "not on main (on: $BRANCH)"
@@ -79,12 +107,24 @@ git diff --quiet && git diff --cached --quiet || {
 	exit 1
 }
 
-# tag must not already exist (locally or on the fork)
-if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1 ||
-	git ls-remote --tags "$REMOTE" "$TAG" 2>/dev/null | grep -q "$TAG"; then
-	err "tag $TAG already exists. To re-release a botched tag, delete it first (see releasing-aghub)."
-	exit 1
+HEAD_SHA="$(git rev-parse HEAD)"
+
+# An existing tag AT HEAD means this release was already cut and the script
+# was interrupted afterwards: resume at the watch. Anywhere else is a real
+# conflict. (The fetch above brought the fork's tag in locally.)
+RESUME=0
+if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null 2>&1; then
+	if [ "$(git rev-parse "$TAG^{commit}")" = "$HEAD_SHA" ] &&
+		git ls-remote --tags "$REMOTE" "$TAG" | grep -q "refs/tags/$TAG"; then
+		RESUME=1
+		info "$TAG is already on $REMOTE at HEAD — resuming: watch the release run, then verify"
+	else
+		err "tag $TAG already exists on another commit (or only locally). To re-release a botched tag, delete it first (see releasing-aghub)."
+		exit 1
+	fi
 fi
+
+if [ "$RESUME" = 0 ]; then
 
 # must be strictly newer than the latest existing STABLE tag. Pre-release
 # tags (v2.4.0-rc.N) are excluded: both `sort -V` and git's v:refname sort
@@ -102,7 +142,6 @@ fi
 ok "version $TAG validated (latest was ${LATEST:-none})"
 
 # 2. push HEAD and wait for ci.yml to be green -------------------------------
-HEAD_SHA="$(git rev-parse HEAD)"
 info "ensuring HEAD ($(git rev-parse --short HEAD)) is on $REMOTE/main..."
 git push "$REMOTE" main
 
@@ -175,6 +214,10 @@ PRIOR_RUN_ID="$(gh run list --repo "$REPO" --workflow release.yml --limit 1 \
 git tag "$TAG"
 git push "$REMOTE" "$TAG"
 ok "pushed $TAG to $REMOTE — release.yml triggered"
+else
+	# Resuming: the run already exists, so any id qualifies.
+	PRIOR_RUN_ID=0
+fi
 
 # 5. watch release.yml; auto-rerun once on a transient dispatch flake --------
 # Poll for the run THIS push triggered: same head sha + push event + a newer id
@@ -202,15 +245,14 @@ if ! watch_run "$RUN_ID"; then
 	# "queued"/cancelled, nothing concluded "failure") from a real test/build
 	# failure (a job whose conclusion is "failure"). Only the former is worth an
 	# auto-rerun — rerunning a real failure just wastes ~20 min reproducing it.
-	PUBLISHED="$(gh release view "$TAG" --repo "$REPO" --json url --jq .url 2>/dev/null || true)"
 	REAL_FAIL="$(gh run view "$RUN_ID" --repo "$REPO" --json jobs \
-		--jq '[.jobs[] | select(.conclusion=="failure")] | length' 2>/dev/null || echo 0)"
-	if [ -n "$PUBLISHED" ]; then
-		err "release run failed but a partial release exists — see the re-release flow in releasing-aghub."
-		exit 1
-	elif [ "${REAL_FAIL:-0}" != "0" ]; then
-		err "release run failed: a job actually failed (not a dispatch flake)."
+		--jq '[.jobs[] | select(.conclusion=="failure") | .name] | join(", ")' 2>/dev/null || echo "")"
+	if [ -n "$REAL_FAIL" ]; then
+		# Nothing is public: the release stays a DRAFT until release.yml's
+		# `publish` job passes, so users keep getting the previous version.
+		err "release run failed in: $REAL_FAIL — the release is still a draft (nothing shipped)."
 		err "Inspect: gh run view $RUN_ID --repo $REPO --log-failed"
+		err "Then:    gh run rerun $RUN_ID --repo $REPO --failed   and resume with: just release $VERSION --yes"
 		exit 1
 	else
 		err "release run failed with no job concluding 'failure' (transient dispatch flake) — rerunning once..."
@@ -228,73 +270,15 @@ fi
 ok "release.yml succeeded"
 
 # 6. verify the artifacts ----------------------------------------------------
-info "verifying artifacts for $TAG..."
-VERIFY_FAILED=0
-ASSETS="$(gh release view "$TAG" --repo "$REPO" --json assets --jq '.assets[].name')"
-echo "$ASSETS" | sed 's/^/    /'
-# .msi is required because this script only ever runs for STABLE tags (the
-# X.Y.Z regex above rejects any pre-release `-rc.N`), and stable Windows
-# bundles ship both NSIS setup.exe AND the WiX .msi. Pre-releases (NSIS-only,
-# no .msi) are tagged by hand and never reach this verification.
-for must in latest.json .dmg .AppImage setup.exe .msi; do
-	echo "$ASSETS" | grep -q -- "$must" || {
-		err "missing asset matching '$must'"
-		VERIFY_FAILED=1
-	}
-done
-CLI_COUNT="$(echo "$ASSETS" | grep -cE 'aghub-cli|\.tar\.gz$|\.zip$' || true)"
-info "CLI/archive assets: $CLI_COUNT (expect ~4)"
-
-# latest.json must reference this repo (auto-update endpoint integrity)
-LJ="$(gh release download "$TAG" --repo "$REPO" --pattern latest.json --output - 2>/dev/null || true)"
-if echo "$LJ" | grep -q "audichuang/aghub"; then
-	ok "latest.json points at $REPO"
-else
-	err "latest.json does not reference $REPO"
-	VERIFY_FAILED=1
-fi
-
-# ...and it must carry a signed entry for every platform the updater asks for.
-# The four desktop build jobs run CONCURRENTLY and each read-modify-writes this
-# ONE asset (tauri-action `includeUpdaterJson`). When two interleave, one loses
-# its platform. That has two shapes: the job 404s and the run goes red (v2.11.1's
-# first cut — caught), or every job stays green and the manifest silently ships
-# short. The second is the reason this check exists: the endpoint is
-# `releases/latest/download/latest.json`, so a missing key means that platform's
-# updater is told "no update available" forever, and nobody files a bug for an
-# app that simply never updates. Asserting only the four `{os}-{arch}` keys the
-# updater actually queries — the `-app`/`-appimage`/`-deb`/`-rpm`/`-msi`/`-nsis`
-# aliases are extras whose set is tauri-action's business, not ours.
-for plat in darwin-aarch64 darwin-x86_64 linux-x86_64 windows-x86_64; do
-	echo "$LJ" | jq -e --arg p "$plat" \
-		'(.platforms[$p].signature // "") | length > 0' >/dev/null 2>&1 || {
-		err "latest.json has no signed entry for '$plat' — auto-update is dead for it"
-		VERIFY_FAILED=1
-	}
-done
-# A wrong version here is the same class of silent break: the updater compares
-# against THIS field, not the tag.
-echo "$LJ" | jq -e --arg v "$VERSION" '.version == $v' >/dev/null 2>&1 ||
-	{
-		err "latest.json version is not $VERSION"
-		VERIFY_FAILED=1
-	}
-
-# Homebrew cask sha256 — informational only (the tap push can lag a moment).
-# The cask is arm/intel dual, so the hash line reads `sha256 arm:   "..."`; the
-# old bare-`sha256 "..."` pattern could never match it and this always reported
-# "could not confirm", which reads as a real problem and is just noise.
-CASK="$(gh api "repos/audichuang/homebrew-tap/contents/Casks/aghub.rb" --jq .content 2>/dev/null | base64 -d 2>/dev/null || true)"
-if echo "$CASK" | grep -qE 'sha256 +(arm:|intel:)? *"[0-9a-f]{64}"'; then
-	ok "Homebrew cask sha256 present"
-else
-	info "(could not confirm Homebrew cask sha256 — check manually)"
-fi
-
-if [ "$VERIFY_FAILED" != "0" ]; then
-	err "Release $TAG built, but artifact verification found problems (see above)."
+# The same script release.yml's `publish` job ran on the draft, now in its
+# full mode: also releases/latest, the updater endpoint and the Homebrew tap
+# (version AND checksums, not merely "some sha256 is present").
+info "verifying $TAG..."
+bash "$(dirname "$0")/verify-release.sh" "$TAG" || {
+	err "Release $TAG built, but verification found problems (see above)."
+	err "Re-check later with: just release verify $VERSION"
 	exit 1
-fi
+}
 
 echo
 ok "Release $TAG complete."
