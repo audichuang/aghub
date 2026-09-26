@@ -137,34 +137,52 @@ pub fn resync_targets_in(
 			))
 		}
 	};
-	if let Some(store) = crate::skills::linker::master_store_dir(root) {
-		let master = store.join(skill::sanitize_name(name));
-		match std::fs::symlink_metadata(&master) {
-			Ok(metadata) => {
-				if !metadata.is_dir() {
-					return Err(ResyncError::Conflict(
-						"Master must be a real directory".into(),
-					));
-				}
-				let parsed = skill::parse(&master.join("SKILL.md"))
-					.map_err(|e| ResyncError::Parse(e.to_string()))?;
-				if parsed.name != name {
-					return Err(ResyncError::Conflict(
-						"Master belongs to a different skill".into(),
-					));
-				}
-				let master = master
-					.canonicalize()
-					.map_err(|e| ResyncError::Hash(e.to_string()))?;
-				if !targets.contains(&master) {
-					targets.push(master);
-				}
-			}
-			Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-			Err(error) => return Err(ResyncError::Hash(error.to_string())),
+	if let Some(master) = stored_master_root(name, root)? {
+		if !targets.contains(&master) {
+			targets.push(master);
 		}
 	}
 	Ok(targets)
+}
+
+/// The canonical `.aghub/<name>` Master of one scope (`None` = global), or
+/// `Ok(None)` when there is none.
+///
+/// The ONE answer to "which stored Master does an update of `name` touch" —
+/// shared by resync and by the update check's local hash, so a Master with
+/// zero Referrers is checked against the same folder `apply-update` would
+/// replace instead of reading as having no local copy at all.
+pub fn stored_master_root(
+	name: &str,
+	project_root: Option<&Path>,
+) -> Result<Option<PathBuf>, ResyncError> {
+	let Some(store) = crate::skills::linker::master_store_dir(project_root)
+	else {
+		return Ok(None);
+	};
+	let master = store.join(skill::sanitize_name(name));
+	match std::fs::symlink_metadata(&master) {
+		Ok(metadata) => {
+			if !metadata.is_dir() {
+				return Err(ResyncError::Conflict(
+					"Master must be a real directory".into(),
+				));
+			}
+			let parsed = skill::parse(&master.join("SKILL.md"))
+				.map_err(|e| ResyncError::Parse(e.to_string()))?;
+			if parsed.name != name {
+				return Err(ResyncError::Conflict(
+					"Master belongs to a different skill".into(),
+				));
+			}
+			master
+				.canonicalize()
+				.map(Some)
+				.map_err(|e| ResyncError::Hash(e.to_string()))
+		}
+		Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+		Err(error) => Err(ResyncError::Hash(error.to_string())),
+	}
 }
 
 /// Replace installed copies and the stored Master without granting agent access.

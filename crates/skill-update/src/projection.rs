@@ -15,6 +15,7 @@ use std::path::Path;
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::lock::EntryIdentity;
 use aghub_core::skills::removal::skill_root;
+use aghub_core::skills::resync::stored_master_root;
 
 use crate::{EntryInput, SourceRef};
 
@@ -60,6 +61,9 @@ fn local_hashes_for_scope(
 	};
 	let mut ambiguous = HashSet::new();
 	let mut raw_ambiguous = HashSet::new();
+	// Names some agent reported at all, hashable or not: only a name NO agent
+	// carries may fall back to its stored Master below.
+	let mut seen = HashSet::new();
 	let started = std::time::Instant::now();
 	// Agents that link to the same universal master resolve to the SAME root,
 	// and a folder hash is a pure function of that folder — so the second agent
@@ -79,6 +83,7 @@ fn local_hashes_for_scope(
 				{
 					continue;
 				}
+				seen.insert(skill.name.clone());
 				let Some(root) = skill_root(&skill) else {
 					continue;
 				};
@@ -124,6 +129,35 @@ fn local_hashes_for_scope(
 					None => {}
 				}
 			}
+		}
+		// A Master with zero Referrers (every agent unticked) is invisible to
+		// the agent scan, yet `apply-update` still replaces it. Hash the same
+		// folder resync would touch, or the check reads "no local copy" and
+		// reports it uncheckable forever.
+		// Exactly one store, as resync resolves it: never let a project check
+		// with no root fall through to the GLOBAL store.
+		let store_root = match resource_scope {
+			ResourceScope::GlobalOnly => Some(None),
+			ResourceScope::ProjectOnly => project_root.map(Some),
+			_ => None,
+		};
+		let fallback = store_root
+			.map(|root| wanted.difference(&seen).map(move |name| (name, root)))
+			.into_iter()
+			.flatten();
+		for (name, store_root) in fallback {
+			let Ok(Some(root)) = stored_master_root(name, store_root) else {
+				continue;
+			};
+			out.folders_hashed += 1;
+			let (Ok(hash), Ok(comparison)) = (
+				skill::compute_skill_folder_hash(&root),
+				skill::compute_skill_folder_comparison_hash(&root),
+			) else {
+				continue;
+			};
+			out.hashes.insert(name.clone(), hash);
+			out.comparison_hashes.insert(name.clone(), comparison);
 		}
 	}
 	log::info!(
@@ -379,6 +413,44 @@ mod tests {
 			format!("---\nname: {name}\ndescription: d\n---\nbody {name}\n"),
 		)
 		.unwrap();
+	}
+
+	/// Unticking every agent leaves the Master and its lock entry behind with
+	/// zero Referrers. `apply-update` still replaces that Master, so the check
+	/// must hash it too — otherwise the row reads "no local copy" and is
+	/// reported uncheckable with no way out. A locked name with no Master at all
+	/// must still carry nothing, so the "folder gone" downgrade keeps working.
+	#[test]
+	fn a_master_with_zero_referrers_is_hashed_from_the_store() {
+		let project = tempfile::tempdir().unwrap();
+		let master = project.path().join(".aghub/withheld");
+		write_skill(&master, "withheld");
+
+		let wanted: HashSet<String> =
+			["withheld", "gone"].into_iter().map(String::from).collect();
+		let out = local_hashes_for_scope(
+			false,
+			ResourceScope::ProjectOnly,
+			Some(project.path()),
+			&wanted,
+		);
+
+		assert_eq!(
+			out.hashes.get("withheld"),
+			Some(&skill::compute_skill_folder_hash(&master).unwrap()),
+			"a withheld Master must carry its own folder hash"
+		);
+		assert_eq!(
+			out.comparison_hashes.get("withheld"),
+			Some(
+				&skill::compute_skill_folder_comparison_hash(&master).unwrap()
+			),
+		);
+		assert!(
+			!out.hashes.contains_key("gone")
+				&& !out.comparison_hashes.contains_key("gone"),
+			"a locked name with no copy anywhere must stay unhashed"
+		);
 	}
 
 	/// The hash sweep must cover EXACTLY the locked names — and carry the right
