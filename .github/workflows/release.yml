@@ -25,6 +25,22 @@ concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: false
 
+# ONE definition of "which tag" and "is it a pre-release", so a
+# workflow_dispatch run (where github.ref_name is the BRANCH, not the tag)
+# builds, gates and labels the tag it was asked for.
+env:
+    RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+    IS_PRERELEASE: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.event.inputs.version || github.ref_name, '-') }}
+
+# Publication model: the Release is created as a DRAFT and every build uploads
+# into it; only the `publish` job — after scripts/verify-release.sh passed on
+# the draft — makes it public. Before this, the Release went public (and
+# became releases/latest) before a single asset existed: the updater endpoint
+# 404'd for ~15 min, then served a latest.json missing platforms for another
+# ~13 (measured on v2.30.0), and a failed build left it that way. Every
+# softprops upload below MUST pass `draft: true`: without it, finding an
+# existing draft makes softprops publish it (its finalizeRelease).
+
 jobs:
     # Release gate: the tagged commit must already be GREEN on ci.yml from its
     # push to main. ci.yml's `test` job runs UNCONDITIONALLY on every push to
@@ -50,10 +66,12 @@ jobs:
             - name: Assert ci.yml passed for the tagged commit
               env:
                   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  SHA: ${{ github.sha }}
                   REPO: ${{ github.repository }}
               run: |
                   set -euo pipefail
+                  # The commit the TAG points at. github.sha is only that for a
+                  # tag push; a workflow_dispatch run would gate the branch head.
+                  SHA=$(gh api "/repos/$REPO/commits/$RELEASE_TAG" --jq .sha)
                   N=$(gh api \
                     "/repos/$REPO/actions/workflows/ci.yml/runs?head_sha=$SHA&status=completed&event=push" \
                     --jq '[.workflow_runs[] | select(.conclusion == "success")] | length')
@@ -71,10 +89,13 @@ jobs:
         runs-on: ubuntu-latest
         permissions:
             contents: write
+        outputs:
+            release_id: ${{ steps.release.outputs.id }}
         steps:
             - name: Checkout
               uses: actions/checkout@v6
               with:
+                  ref: ${{ env.RELEASE_TAG }}
                   fetch-depth: 0
             - name: Generate Changelog
               uses: orhun/git-cliff-action@v4
@@ -86,14 +107,15 @@ jobs:
                   OUTPUT: CHANGES.md
                   GITHUB_REPO: ${{ github.repository }}
 
-            - name: Create GitHub Release
+            - name: Create GitHub Release (draft)
+              id: release
               uses: softprops/action-gh-release@v3
               with:
-                  tag_name: ${{ github.event.inputs.version || github.ref_name }}
-                  name: "aghub ${{ github.event.inputs.version || github.ref_name }}"
+                  tag_name: ${{ env.RELEASE_TAG }}
+                  name: "aghub ${{ env.RELEASE_TAG }}"
                   body_path: CHANGES.md
-                  draft: false
-                  prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
+                  draft: true
+                  prerelease: ${{ env.IS_PRERELEASE }}
 
     build-tauri:
         needs: [verify-ci, changelog]
@@ -119,6 +141,8 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.RELEASE_TAG }}
 
             - name: Exclude build dirs from Windows Defender (compile speedup)
               if: matrix.os == 'windows-latest'
@@ -294,10 +318,13 @@ jobs:
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
               with:
-                  tagName: ${{ github.event.inputs.version || github.ref_name }}
-                  releaseName: "aghub ${{ github.event.inputs.version || github.ref_name }}"
-                  releaseDraft: false
-                  prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
+                  # Upload into the changelog job's draft by id. tagName is still
+                  # passed: tauri-action rewrites the draft's `untagged-…`
+                  # download URLs to /download/<tagName>/ in latest.json.
+                  releaseId: ${{ needs.changelog.outputs.release_id }}
+                  tagName: ${{ env.RELEASE_TAG }}
+                  releaseDraft: true
+                  prerelease: ${{ env.IS_PRERELEASE }}
                   # Windows MSI (WiX) rejects a non-numeric pre-release identifier
                   # (e.g. -rc.1): "pre-release identifier ... must be numeric-only".
                   # NSIS handles it fine, so for pre-release tags build NSIS only on
@@ -306,7 +333,7 @@ jobs:
                   # Both arms pass the bundle overlay so the staged aghub-api
                   # sidecar ships inside the desktop bundle (see "Stage
                   # version-locked aghub-api" above).
-                  args: ${{ (matrix.target == 'x86_64-pc-windows-msvc' && contains(github.ref_name, '-')) && format('--target {0} --bundles nsis --config src-tauri/tauri.bundle.conf.json', matrix.target) || format('--target {0} --config src-tauri/tauri.bundle.conf.json', matrix.target) }}
+                  args: ${{ (matrix.target == 'x86_64-pc-windows-msvc' && contains(env.RELEASE_TAG, '-')) && format('--target {0} --bundles nsis --config src-tauri/tauri.bundle.conf.json', matrix.target) || format('--target {0} --config src-tauri/tauri.bundle.conf.json', matrix.target) }}
                   includeUpdaterJson: true
                   projectPath: crates/desktop
 
@@ -351,11 +378,14 @@ jobs:
             - name: Upload Generic Release Asset
               uses: softprops/action-gh-release@v3
               with:
-                  tag_name: ${{ github.event.inputs.version || github.ref_name }}
+                  tag_name: ${{ env.RELEASE_TAG }}
+                  draft: true
                   files: ${{ env.GENERIC_ASSET }}
 
     build-cli:
-        needs: verify-ci
+        # Waits for the draft: uploading first would make softprops CREATE a
+        # second release for the tag.
+        needs: [verify-ci, changelog]
         name: Build CLI (${{ matrix.target }})
         runs-on: ${{ matrix.os }}
         env:
@@ -378,6 +408,8 @@ jobs:
 
         steps:
             - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.RELEASE_TAG }}
 
             - name: Exclude build dirs from Windows Defender (compile speedup)
               if: matrix.os == 'windows-latest'
@@ -500,22 +532,63 @@ jobs:
             - name: Upload CLI to Release
               uses: softprops/action-gh-release@v3
               with:
-                  tag_name: ${{ github.event.inputs.version || github.ref_name }}
-                  prerelease: ${{ (github.event_name == 'workflow_dispatch' && inputs.prerelease) || contains(github.ref_name, '-') }}
+                  tag_name: ${{ env.RELEASE_TAG }}
+                  draft: true
+                  prerelease: ${{ env.IS_PRERELEASE }}
                   files: |
                       aghub-cli-*
                       aghub-api-*
 
+    # The only step that makes the release visible. It runs the SAME check
+    # scripts/release.sh runs afterwards, but on the draft: a missing asset, a
+    # latest.json that lost a platform to the upload race, or a URL that is not
+    # on this tag leaves the release a draft, and every installed app keeps
+    # being offered the previous version. Fix by rerunning the named Build job;
+    # this job then passes and publishes.
+    publish:
+        name: Verify draft and publish
+        needs: [changelog, build-tauri, build-cli]
+        runs-on: ubuntu-latest
+        permissions:
+            contents: write
+        env:
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        steps:
+            - uses: actions/checkout@v6
+              with:
+                  ref: ${{ env.RELEASE_TAG }}
+
+            - name: Verify the draft
+              run: bash scripts/verify-release.sh "$RELEASE_TAG" --pre-publish
+
+            # A pre-release is published as prerelease and explicitly NOT
+            # latest: the updater endpoint is releases/latest/download/…, so an
+            # RC marked latest would be pushed to every stable install.
+            - name: Publish
+              env:
+                  RELEASE_ID: ${{ needs.changelog.outputs.release_id }}
+              run: |
+                  set -euo pipefail
+                  if [ "$IS_PRERELEASE" = "true" ]; then
+                      flags=(-F draft=false -F prerelease=true -f make_latest=false)
+                  else
+                      flags=(-F draft=false -F prerelease=false -f make_latest=true)
+                  fi
+                  gh api -X PATCH "repos/${{ github.repository }}/releases/$RELEASE_ID" \
+                      "${flags[@]}" --jq '"published \(.tag_name) draft=\(.draft) prerelease=\(.prerelease)"'
+
     publish-homebrew:
         name: Update Homebrew Tap
-        needs: [build-tauri, build-cli]
+        # After `publish`: the tap points users at public download URLs,
+        # which do not exist while the release is a draft.
+        needs: publish
         # Skip the stable Homebrew bump for pre-releases (tags with a '-' suffix,
         # e.g. vX.Y.Z-rc.N). RC testers download the prerelease assets directly;
         # `brew install aghub` must keep pointing at the last STABLE version.
         if: ${{ !contains(github.event.inputs.version || github.ref_name, '-') }}
         runs-on: ubuntu-latest
         env:
-            RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
+            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         steps:
             - name: Validate release tag
               shell: bash
@@ -533,22 +606,32 @@ jobs:
                   path: tap
 
             - name: Update Formula and Cask
-              env:
-                  VERSION: ${{ env.RELEASE_TAG }}
+              shell: bash
               run: |
-                  VERSION="${VERSION#v}"
+                  set -euo pipefail
+                  VERSION="${RELEASE_TAG#v}"
                   echo "Updating for version: ${VERSION}"
 
-                  # Download CLI assets to compute checksums
-                  echo "Downloading CLI assets..."
-                  wget -q "https://github.com/audichuang/aghub/releases/download/v${VERSION}/aghub-cli-x86_64-apple-darwin.tar.gz" -O aghub-cli_mac_intel.tar.gz || echo "Failed to download x86_64 CLI"
-                  wget -q "https://github.com/audichuang/aghub/releases/download/v${VERSION}/aghub-cli-aarch64-apple-darwin.tar.gz" -O aghub-cli_mac_arm.tar.gz || echo "Failed to download aarch64 CLI"
-                  wget -q "https://github.com/audichuang/aghub/releases/download/v${VERSION}/aghub-cli-x86_64-unknown-linux-gnu.tar.gz" -O aghub-cli_linux.tar.gz || echo "Failed to download linux CLI"
-
-                  AGENT_MAC_INTEL_SHA=$(sha256sum aghub-cli_mac_intel.tar.gz | awk '{print $1}')
-                  AGENT_MAC_ARM_SHA=$(sha256sum aghub-cli_mac_arm.tar.gz | awk '{print $1}')
-                  AGENT_LINUX_SHA=$(sha256sum aghub-cli_linux.tar.gz | awk '{print $1}')
-
+                  # Checksums come from GitHub's own per-asset digest, computed
+                  # server-side from the uploaded bytes. This used to wget each
+                  # asset with `|| echo`, and a failed download left an EMPTY
+                  # file whose sha256 (e3b0c442…) shipped to the tap (v2.3.0).
+                  # Now any missing or empty digest fails the job instead.
+                  ASSETS_JSON="$(gh api "repos/${{ github.repository }}/releases/tags/${RELEASE_TAG}" --jq '.assets')"
+                  sha_of() {
+                      local sha
+                      sha="$(jq -r --arg n "$1" '.[] | select(.name == $n) | (.digest // "") | sub("^sha256:"; "")' <<<"$ASSETS_JSON")"
+                      if ! [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || [ "$sha" = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" ]; then
+                          echo "::error::no usable sha256 for release asset $1 (got '${sha}')" >&2
+                          exit 1
+                      fi
+                      printf '%s' "$sha"
+                  }
+                  AGENT_MAC_INTEL_SHA="$(sha_of aghub-cli-x86_64-apple-darwin.tar.gz)"
+                  AGENT_MAC_ARM_SHA="$(sha_of aghub-cli-aarch64-apple-darwin.tar.gz)"
+                  AGENT_LINUX_SHA="$(sha_of aghub-cli-x86_64-unknown-linux-gnu.tar.gz)"
+                  AGHUB_MAC_INTEL_SHA="$(sha_of "aghub_${VERSION}_x64.dmg")"
+                  AGHUB_MAC_ARM_SHA="$(sha_of "aghub_${VERSION}_aarch64.dmg")"
                   # Formula MUST live in Formula/ — modern Homebrew ignores
                   # formulae at the tap root (installs silently resolve to the
                   # keg's cached copy and never see updates).
@@ -588,14 +671,6 @@ jobs:
                   INNEREOF
                   # NOTE: download URLs + homepage below point at audichuang/aghub (this fork)
 
-                  # Download Desktop assets to compute checksums
-                  echo "Downloading Desktop App assets..."
-                  wget -q "https://github.com/audichuang/aghub/releases/download/v${VERSION}/aghub_${VERSION}_x64.dmg" -O aghub_mac_intel.dmg || echo "Failed to download x64 dmg"
-                  wget -q "https://github.com/audichuang/aghub/releases/download/v${VERSION}/aghub_${VERSION}_aarch64.dmg" -O aghub_mac_arm.dmg || echo "Failed to download aarch64 dmg"
-
-                  AGHUB_MAC_INTEL_SHA=$(sha256sum aghub_mac_intel.dmg | awk '{print $1}')
-                  AGHUB_MAC_ARM_SHA=$(sha256sum aghub_mac_arm.dmg | awk '{print $1}')
-
                   mkdir -p tap/Casks
                   cat << INNEREOF > tap/Casks/aghub.rb
                   cask "aghub" do
@@ -628,32 +703,3 @@ jobs:
                   git add Formula/aghub-cli.rb Casks/aghub.rb
                   git commit -m "Update Homebrew formula and cask for aghub ${RELEASE_TAG}" || echo "No changes to commit"
                   git push
-
-    # Belt-and-suspenders for pre-releases (vX.Y.Z-rc.N): explicitly re-assert
-    # the GitHub Release as a prerelease and NOT "latest", after all build/upload
-    # steps. A release builder can flip the prerelease flag back to false (orca
-    # hit exactly this — an RC briefly became "latest"), which would let the
-    # Tauri updater (endpoint = releases/latest/download/latest.json) push the RC
-    # to every installed stable app. Gating on the tag shape, not the flag, is
-    # the robust contract.
-    finalize-prerelease:
-        name: Mark RC as prerelease (not latest)
-        needs: [build-tauri, build-cli]
-        # !cancelled(): run even when a build job failed — a builder may have
-        # already flipped the release to latest before the failure, and skipping
-        # this job would leave the RC pinned at releases/latest (which the Tauri
-        # updater serves to every stable user).
-        if: ${{ !cancelled() && contains(github.event.inputs.version || github.ref_name, '-') }}
-        runs-on: ubuntu-latest
-        permissions:
-            contents: write
-        env:
-            RELEASE_TAG: ${{ github.event.inputs.version || github.ref_name }}
-            GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        steps:
-            - name: Force prerelease + not-latest
-              run: |
-                  gh release edit "$RELEASE_TAG" \
-                      --repo "${{ github.repository }}" \
-                      --prerelease \
-                      --latest=false
