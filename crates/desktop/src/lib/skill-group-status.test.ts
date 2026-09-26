@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { SkillUpdateResponse } from "../generated/dto";
 import {
 	sharedUncheckableReason,
+	uncheckableDetails,
 	uncheckableTooltipKey,
 } from "./skill-group-status.ts";
 
@@ -147,4 +148,24 @@ test("uncheckableTooltipKey maps known reasons and falls back for unknown ones",
 		uncheckableTooltipKey("something-else"),
 		"skillUncheckableGeneric",
 	);
+});
+
+test("uncheckable details name each skill with its reason, capped", () => {
+	const rows: SkillUpdateResponse[] = [
+		{ name: "ok", scope: "global", status: "upToDate" },
+		{ name: "a", scope: "global", status: "uncheckable", reason: "auth" },
+		{ name: "a", scope: "project", status: "uncheckable", reason: "auth" },
+		{ name: "b", scope: "global", status: "uncheckable", reason: "noPath" },
+		{ name: "c", scope: "global", status: "uncheckable", reason: "weird" },
+		{ name: "d", scope: "global", status: "uncheckable", reason: "local" },
+	];
+	assert.deepEqual(uncheckableDetails(rows), {
+		items: [
+			{ name: "a", reasonKey: "skillUncheckableAuth" },
+			{ name: "b", reasonKey: "skillUncheckableNoPath" },
+			{ name: "c", reasonKey: "skillUncheckableGeneric" },
+		],
+		more: 1,
+	});
+	assert.deepEqual(uncheckableDetails([rows[0]]), { items: [], more: 0 });
 });

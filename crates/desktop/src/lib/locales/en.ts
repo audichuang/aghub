@@ -474,6 +474,8 @@ export default {
 	/** Toast when check completes but some skills could not be checked. */
 	skillCheckCompleteSomeUncheckable:
 		"Check complete — {{count}} skill(s) could not be verified",
+	/** Last line of the uncheckable toast when more skills were left out. */
+	skillUncheckableMore: "and {{count}} more that could not be checked",
 	/** Toast when check completes and everything is current. */
 	skillCheckCompleteAllGood: "All skills are up to date",
 	/** Throttled toast shown while a check runs without a GitHub credential. */

@@ -447,6 +447,7 @@ const zhHans: typeof en = {
 	skillUpdateApplyError: "无法应用技能更新。",
 	skillCheckCompleteWithUpdates: "检查完成，{{count}} 个可更新",
 	skillCheckCompleteSomeUncheckable: "检查完成，{{count}} 个技能无法验证",
+	skillUncheckableMore: "另有 {{count}} 个无法检查的技能",
 	skillCheckCompleteAllGood: "全部都是最新版本",
 	credentialSpeedHint: "可在“集成”设置 GitHub 凭证，提高请求额度。",
 	lastCheckedAgo: "上次检查 {{time}}",

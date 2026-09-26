@@ -51,6 +51,7 @@ import { useCredentialSpeedHint } from "../../hooks/use-credential-speed-hint";
 import { useGitForwarding } from "../../hooks/use-git-forwarding";
 import { useProjects } from "../../hooks/use-projects";
 import { filterGroupsByAgent } from "../../lib/skill-agent-filter";
+import { uncheckableDetails } from "../../lib/skill-group-status";
 import {
 	clearSelectionParams,
 	parseScopeParam,
@@ -186,17 +187,45 @@ export default function SkillsPage() {
 				const uncheckableCount = data.filter(
 					(s) => s.status === "uncheckable",
 				).length;
+				// A bare count leaves the user nothing to act on: name the
+				// skills and why each could not be checked.
+				const { items, more } = uncheckableDetails(data);
+				// One skill per line; HeroUI's description drops "\n" unless
+				// wrapped, same as the apply-all toast.
+				const uncheckableDescription =
+					items.length === 0 ? undefined : (
+						<span className="whitespace-pre-line">
+							{[
+								...items.map(
+									(item) =>
+										`${item.name} — ${t(item.reasonKey)}`,
+								),
+								...(more > 0
+									? [
+											t("skillUncheckableMore", {
+												count: more,
+											}),
+										]
+									: []),
+							].join("\n")}
+						</span>
+					);
 				if (updateCount > 0) {
 					toast.info(
 						t("skillCheckCompleteWithUpdates", {
 							count: updateCount,
 						}),
+						uncheckableDescription
+							? { description: uncheckableDescription }
+							: undefined,
 					);
 				} else if (uncheckableCount > 0) {
+					// Stays until dismissed: it names what to fix.
 					toast.warning(
 						t("skillCheckCompleteSomeUncheckable", {
 							count: uncheckableCount,
 						}),
+						{ description: uncheckableDescription, timeout: 0 },
 					);
 				} else {
 					toast.success(t("skillCheckCompleteAllGood"));

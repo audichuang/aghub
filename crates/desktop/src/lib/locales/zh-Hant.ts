@@ -446,6 +446,7 @@ const zhHant: typeof en = {
 	skillUpdateApplyError: "無法套用技能更新。",
 	skillCheckCompleteWithUpdates: "檢查完成，{{count}} 個可更新",
 	skillCheckCompleteSomeUncheckable: "檢查完成，{{count}} 個技能無法驗證",
+	skillUncheckableMore: "另有 {{count}} 個無法檢查的技能",
 	skillCheckCompleteAllGood: "全部都是最新",
 	credentialSpeedHint: "可在「整合」設定 GitHub 憑證，提高請求額度。",
 	lastCheckedAgo: "上次檢查 {{time}}",

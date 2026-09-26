@@ -67,3 +67,29 @@ export function uncheckableTooltipKey(reason: string): string {
 			return "skillUncheckableGeneric";
 	}
 }
+
+/**
+ * Which skills a check could not verify, and why — so the "N could not be
+ * verified" toast can name them instead of leaving only a count. Capped at
+ * `limit` entries; `more` is how many were left out. Duplicate names (the same
+ * skill reported for two scopes with one reason) are listed once.
+ */
+export function uncheckableDetails(
+	rows: readonly SkillUpdateResponse[],
+	limit = 3,
+): { items: { name: string; reasonKey: string }[]; more: number } {
+	const seen = new Set<string>();
+	const all: { name: string; reasonKey: string }[] = [];
+	for (const row of rows) {
+		if (row.status !== "uncheckable") continue;
+		const reasonKey = uncheckableTooltipKey(row.reason);
+		const key = `${row.name}\u0000${reasonKey}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		all.push({ name: row.name, reasonKey });
+	}
+	return {
+		items: all.slice(0, limit),
+		more: Math.max(0, all.length - limit),
+	};
+}
