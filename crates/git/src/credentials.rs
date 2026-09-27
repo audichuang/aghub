@@ -210,7 +210,12 @@ mod tests {
 
 		let err = noninteractive_credentials(action).unwrap_err();
 
-		assert!(matches!(err, gix::credentials::protocol::Error::Quit));
+		// gix >= 0.88 reports quit as an error message, not an enum variant;
+		// it must be the quit path, not "could not obtain identity".
+		assert!(
+			err.to_string().contains("asked to stop"),
+			"expected the quit error, got: {err}"
+		);
 	}
 
 	#[test]
