@@ -96,6 +96,11 @@ fn generated_python_cache(
 	paths.contains(source.as_str())
 }
 
+/// Lowercase hex of a digest; sha2 0.11 output no longer implements `LowerHex`.
+fn lower_hex(digest: &[u8]) -> String {
+	digest.iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn hash_files(
 	mut files: Vec<(String, std::path::PathBuf)>,
 ) -> Result<String, HashError> {
@@ -122,7 +127,7 @@ fn hash_files(
 			MAX_TOTAL_BYTES,
 		)?;
 	}
-	Ok(format!("{:x}", hasher.finalize()))
+	Ok(lower_hex(&hasher.finalize()))
 }
 
 /// Every regular file under `dir`, as `(path relative to `dir`, absolute path)`.
@@ -283,7 +288,7 @@ mod tests {
 	fn hex(bytes: &[u8]) -> String {
 		let mut h = Sha256::new();
 		h.update(bytes);
-		format!("{:x}", h.finalize())
+		lower_hex(&h.finalize())
 	}
 
 	#[test]
@@ -310,7 +315,7 @@ mod tests {
 		expected.update(b"hello world");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", expected.finalize())
+			lower_hex(&expected.finalize())
 		);
 	}
 
@@ -329,7 +334,7 @@ mod tests {
 		}
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -352,7 +357,7 @@ mod tests {
 		}
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -377,7 +382,7 @@ mod tests {
 		e.update(b"x");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -396,7 +401,7 @@ mod tests {
 		e.update(b"s");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -414,7 +419,7 @@ mod tests {
 		e.update(b"apple");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -432,7 +437,7 @@ mod tests {
 		e.update(b"zebra");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -451,7 +456,7 @@ mod tests {
 		}
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -495,7 +500,7 @@ mod tests {
 		e.update(b"deep");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
@@ -529,7 +534,7 @@ mod tests {
 		e.update(b"r");
 		assert_eq!(
 			compute_skill_folder_hash(dir.path()).unwrap(),
-			format!("{:x}", e.finalize())
+			lower_hex(&e.finalize())
 		);
 	}
 
