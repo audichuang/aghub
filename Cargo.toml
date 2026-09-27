@@ -51,6 +51,9 @@ reqwest = { version = "0.13", features = [ "json", "gzip" ] }
 url = "2.5"
 base64 = "0.23"
 
+# Native stores are chosen only in aghub-inference.
+keyring-core = "1"
+
 # Testing dependencies
 tempfile = "3.10"
 assert_cmd = "2.2"

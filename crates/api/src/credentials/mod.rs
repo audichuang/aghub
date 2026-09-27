@@ -33,7 +33,7 @@ use std::marker::PhantomData;
 /// mutation should be assumed to have happened) from every other failure
 /// (corrupt JSON, bad encoding, ...). Delegates to
 /// `aghub_inference::keyring_backend_unavailable` so this and
-/// `InferenceProviderError`'s equivalent `From<keyring::Error>` never diverge
+/// `InferenceProviderError`'s equivalent `From<keyring_core::Error>` never diverge
 /// on the classification. Both funnel into the same `KEYCHAIN_UNAVAILABLE`
 /// status/code/message in `crate::error::ApiError`.
 /// `Clone` so a failed read can be REMEMBERED with its classification intact.
@@ -57,8 +57,8 @@ impl std::fmt::Display for CredentialStoreError {
 	}
 }
 
-impl From<keyring::Error> for CredentialStoreError {
-	fn from(error: keyring::Error) -> Self {
+impl From<keyring_core::Error> for CredentialStoreError {
+	fn from(error: keyring_core::Error) -> Self {
 		if aghub_inference::keyring_backend_unavailable(&error) {
 			CredentialStoreError::Unavailable(error.to_string())
 		} else {
@@ -120,8 +120,8 @@ impl<T: KeyringPayload> KeyringJson<T> {
 		}
 	}
 
-	fn entry(&self) -> Result<keyring::Entry, CredentialStoreError> {
-		Ok(keyring::Entry::new(self.service, self.user)?)
+	fn entry(&self) -> Result<keyring_core::Entry, CredentialStoreError> {
+		Ok(aghub_inference::keyring_entry(self.service, self.user)?)
 	}
 
 	/// Like [`load`](Self::load) but keeps "the entry does not exist" distinct
@@ -196,7 +196,7 @@ impl<T: KeyringPayload> KeyringJson<T> {
 		);
 		match read {
 			Ok(json) => Ok(ReadState::Value(json)),
-			Err(keyring::Error::NoEntry) => Ok(ReadState::Absent),
+			Err(keyring_core::Error::NoEntry) => Ok(ReadState::Absent),
 			Err(e) => Err(e.into()),
 		}
 	}
@@ -208,7 +208,7 @@ impl<T: KeyringPayload> KeyringJson<T> {
 		let entry = self.entry()?;
 		if payload.is_empty() {
 			match entry.delete_credential() {
-				Ok(()) | Err(keyring::Error::NoEntry) => {
+				Ok(()) | Err(keyring_core::Error::NoEntry) => {
 					cache_put(self.service, self.user, CachedRead::Absent);
 					Ok(())
 				}
@@ -466,42 +466,40 @@ fn legacy_bindings_store() -> KeyringJson<resolve::SourceBindings> {
 	KeyringJson::new("aghub", "skill_source_bindings")
 }
 
-/// Test-only injection for "the credential backend is unreachable", used by
-/// `routes::skills`/`routes::skills_update` 503/fail-closed regression tests.
-///
-/// Rather than a hook the production code checks (the previous
-/// `test_hooks::credential_backend_forced_unavailable`), this installs a REAL
-/// faulty `keyring` credential builder via
-/// `keyring::set_default_credential_builder` — so a test using this guard
-/// exercises the actual `From<keyring::Error>` classification end to end,
-/// exactly like a real unreachable secret-service backend would.
+/// Test keyring backends. Both guards swap keyring-core's process-global
+/// default store, so callers must hold `crate::routes::test_env_lock()`.
 #[cfg(test)]
 pub(crate) mod test_hooks {
-	use keyring::credential::{CredentialBuilderApi, CredentialPersistence};
-	use keyring::Credential;
+	use std::collections::HashMap;
+	use std::sync::Arc;
 
-	/// Counts how many times the faulty backend was actually reached. A cached
-	/// verdict must NOT reach it, and only a counter can tell "replayed the
-	/// remembered failure" apart from "asked again and failed again" — both
-	/// produce the same `Err`.
+	use keyring_core::api::CredentialStoreApi;
+
+	/// How often the faulty backend was reached (a cached verdict must not).
 	pub(crate) static FAULTY_BUILDS: std::sync::atomic::AtomicUsize =
 		std::sync::atomic::AtomicUsize::new(0);
 
-	/// A credential builder whose `build()` always fails with
-	/// `NoStorageAccess`, simulating "the OS keyring backend is unreachable"
-	/// without ever constructing a real credential or touching any real
-	/// backend.
-	struct FaultyCredentialBuilder;
+	/// Every entry fails with `NoStorageAccess`, like an unreachable backend.
+	#[derive(Debug)]
+	struct FaultyCredentialStore;
 
-	impl CredentialBuilderApi for FaultyCredentialBuilder {
+	impl CredentialStoreApi for FaultyCredentialStore {
+		fn vendor(&self) -> String {
+			"aghub test: always unavailable".to_string()
+		}
+
+		fn id(&self) -> String {
+			"faulty".to_string()
+		}
+
 		fn build(
 			&self,
-			_target: Option<&str>,
 			_service: &str,
 			_user: &str,
-		) -> keyring::Result<Box<Credential>> {
+			_modifiers: Option<&HashMap<&str, &str>>,
+		) -> keyring_core::Result<keyring_core::Entry> {
 			FAULTY_BUILDS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-			Err(keyring::Error::NoStorageAccess(Box::new(
+			Err(keyring_core::Error::NoStorageAccess(Box::new(
 				std::io::Error::other("forced unavailable (test)"),
 			)))
 		}
@@ -509,65 +507,33 @@ pub(crate) mod test_hooks {
 		fn as_any(&self) -> &dyn std::any::Any {
 			self
 		}
-
-		fn persistence(&self) -> CredentialPersistence {
-			CredentialPersistence::EntryOnly
-		}
 	}
 
-	/// RAII guard: installs [`FaultyCredentialBuilder`] as the process-global
-	/// default keyring credential builder for its lifetime, restoring the
-	/// platform default builder (the true pre-guard state at this guard's
-	/// call sites, which use `with_isolated_state`/`test_env_lock`, not
-	/// `IsolatedApiTest`) on drop.
-	///
-	/// Process-global (`keyring::set_default_credential_builder` has no
-	/// thread-local variant and the actual keyring read runs inside
-	/// `tokio::task::spawn_blocking`, on a different OS thread than the one
-	/// that installs this guard) — the caller MUST hold
-	/// `crate::routes::test_env_lock()` for this guard's entire lifetime, the
-	/// same requirement `IsolatedApiTest` carries for the identical
-	/// process-global builder swap, or it can race a concurrent test that
-	/// expects the mock/real backend.
 	pub(crate) struct ForceCredentialBackendUnavailable;
 
 	impl ForceCredentialBackendUnavailable {
 		pub(crate) fn new() -> Self {
-			// Swapping the builder is not enough on its own: a value cached
-			// from the PREVIOUS backend would answer the read this guard exists
-			// to make fail, and the fail-closed assertion would pass for the
-			// wrong reason. Clear on the way in and on the way out, so neither
-			// backend can answer for the other.
+			// Otherwise a value cached from the previous backend answers.
 			super::clear_cache_for_test();
-			keyring::set_default_credential_builder(Box::new(
-				FaultyCredentialBuilder,
-			));
+			keyring_core::set_default_store(Arc::new(FaultyCredentialStore));
 			Self
 		}
 	}
 
 	impl Drop for ForceCredentialBackendUnavailable {
 		fn drop(&mut self) {
-			keyring::set_default_credential_builder(
-				keyring::default::default_credential_builder(),
-			);
+			keyring_core::unset_default_store();
 			super::clear_cache_for_test();
 		}
 	}
 
-	/// RAII guard: installs the in-memory mock keyring builder so credential
-	/// reads deterministically SUCCEED with an empty store — independent of
-	/// whether the host has a reachable secret-service/keychain (CI runners
-	/// do not; a developer machine may even hold real aghub credentials).
-	/// Same process-global contract as [`ForceCredentialBackendUnavailable`]:
-	/// the caller MUST hold `crate::routes::test_env_lock()` for this guard's
-	/// entire lifetime. Restores the platform default builder on drop.
+	/// A fresh, empty in-memory store.
 	pub(crate) struct MockKeyringBackend;
 
 	impl MockKeyringBackend {
 		pub(crate) fn new() -> Self {
-			keyring::set_default_credential_builder(
-				keyring::mock::default_credential_builder(),
+			keyring_core::set_default_store(
+				keyring_core::mock::Store::new().expect("mock keyring store"),
 			);
 			super::clear_cache_for_test();
 			Self
@@ -576,9 +542,7 @@ pub(crate) mod test_hooks {
 
 	impl Drop for MockKeyringBackend {
 		fn drop(&mut self) {
-			keyring::set_default_credential_builder(
-				keyring::default::default_credential_builder(),
-			);
+			keyring_core::unset_default_store();
 			super::clear_cache_for_test();
 		}
 	}

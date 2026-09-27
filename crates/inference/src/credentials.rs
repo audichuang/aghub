@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use crate::error::Result;
 
@@ -19,6 +20,33 @@ pub trait CredentialStore {
 	fn delete_api_key(&self, provider_id: &str) -> Result<()>;
 }
 
+/// Open a keyring entry, installing the native store if none is set.
+/// Every aghub keyring access goes through here.
+pub fn keyring_entry(
+	service: &str,
+	user: &str,
+) -> keyring_core::Result<keyring_core::Entry> {
+	if keyring_core::get_default_store().is_none() {
+		keyring_core::set_default_store(native_store()?);
+	}
+	keyring_core::Entry::new(service, user)
+}
+
+#[cfg(target_os = "macos")]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+	Ok(apple_native_keyring_store::keychain::Store::new()?)
+}
+
+#[cfg(target_os = "windows")]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+	Ok(windows_native_keyring_store::Store::new()?)
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+	Ok(zbus_secret_service_keyring_store::Store::new()?)
+}
+
 /// Platform-native keyring implementation.
 ///
 /// OS keyring backends may not support concurrent writes reliably. Callers
@@ -27,9 +55,9 @@ pub trait CredentialStore {
 pub struct NativeCredentialStore;
 
 impl NativeCredentialStore {
-	fn entry(provider_id: &str) -> Result<keyring::Entry> {
+	fn entry(provider_id: &str) -> Result<keyring_core::Entry> {
 		let user = format!("provider:{provider_id}:api_key");
-		Ok(keyring::Entry::new(KEYRING_SERVICE, &user)?)
+		Ok(keyring_entry(KEYRING_SERVICE, &user)?)
 	}
 }
 
@@ -38,7 +66,7 @@ impl CredentialStore for NativeCredentialStore {
 		let entry = Self::entry(provider_id)?;
 		match entry.get_password() {
 			Ok(api_key) => Ok(Some(api_key)),
-			Err(keyring::Error::NoEntry) => Ok(None),
+			Err(keyring_core::Error::NoEntry) => Ok(None),
 			Err(error) => Err(error.into()),
 		}
 	}
@@ -61,7 +89,7 @@ impl CredentialStore for NativeCredentialStore {
 	fn delete_api_key(&self, provider_id: &str) -> Result<()> {
 		let entry = Self::entry(provider_id)?;
 		match entry.delete_credential() {
-			Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+			Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
 			Err(error) => {
 				log::warn!(
 					"ignoring keyring delete error for provider {provider_id}: \

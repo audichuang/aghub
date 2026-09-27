@@ -1,26 +1,7 @@
-//! Real Secret Service smoke test (GitHub #15 P1-4).
-//!
-//! `NativeCredentialStore`'s Linux backend is the pure-Rust zbus/async-io
-//! secret-service backend (`async-secret-service` + `crypto-rust` +
-//! `async-io` — see this crate's `Cargo.toml` and `crates/api/Cargo.toml`,
-//! which carries the full reasoning). It was chosen specifically because it
-//! must never touch tokio's runtime machinery, so it cannot panic with
-//! "Cannot start a runtime from within a runtime" no matter which thread it
-//! runs on — which matters because `aghub-api` drives it from exactly that
-//! kind of thread (a Rocket handler running inline inside the route's async
-//! future, or explicitly via `tokio::task::spawn_blocking`).
-//!
-//! Every OTHER credential-store test in this workspace either mocks the
-//! store entirely (deterministic, no real keyring involved) or runs under
-//! the process-global `keyring::mock` builder installed by `aghub-api`'s
-//! `IsolatedApiTest`. This is the ONLY test that drives the REAL native
-//! backend end-to-end, so it needs an actual Secret Service session
-//! (gnome-keyring under `dbus-run-session` — see
-//! `.github/workflows/ci.yml`'s dedicated smoke step) and is therefore
-//! `#[ignore]`d by default: a normal `cargo test` run, with no keyring
-//! reachable, must never depend on it.
-
-#![cfg(target_os = "linux")]
+//! Round trip through the REAL native keyring (keychain, Credential Manager,
+//! Secret Service), from a `spawn_blocking` thread inside a tokio runtime —
+//! where aghub-api calls it. Every other keyring test uses a mock store.
+//! Ignored by default; CI runs it on all three platforms.
 
 use aghub_inference::{
 	CredentialStore, InferenceProviderError, NativeCredentialStore,
@@ -36,8 +17,7 @@ use aghub_inference::{
 /// on directly rather than swallowed, so a nested-runtime regression fails
 /// this test loudly instead of silently vanishing.
 #[test]
-#[ignore = "requires a real Secret Service session (gnome-keyring); run \
-            under dbus-run-session — see .github/workflows/ci.yml"]
+#[ignore = "touches the real OS keyring"]
 fn native_store_round_trips_under_spawn_blocking() {
 	let runtime = tokio::runtime::Builder::new_multi_thread()
 		.enable_all()
@@ -84,31 +64,23 @@ fn native_store_round_trips_under_spawn_blocking() {
 
 		match result {
 			Ok(Ok(())) => {}
-			Ok(Err(error)) => panic!(
-				"real Secret Service round trip failed: {error} -- is \
-				 gnome-keyring unlocked under dbus-run-session? see \
-				 .github/workflows/ci.yml"
-			),
+			Ok(Err(error)) => {
+				panic!("native keyring round trip failed: {error}")
+			}
 			Err(join_error) => panic!(
-				"spawn_blocking task panicked (is_panic={}, is_cancelled={}) \
-				 -- a nested-runtime panic here would mean the async-io \
-				 secret-service backend regressed to touching tokio's \
-				 runtime machinery: {join_error}",
-				join_error.is_panic(),
-				join_error.is_cancelled()
+				"keyring call panicked inside the tokio runtime: {join_error}"
 			),
 		}
 	});
 }
 
-/// Missing entries must report as `Ok(None)` (`keyring::Error::NoEntry`),
+/// Missing entries must report as `Ok(None)` (`keyring_core::Error::NoEntry`),
 /// never an error — the baseline "no credential" outcome every caller
 /// (`InferenceProviderStore::get_api_key`, the cascade's reachability
 /// precondition, ...) depends on to distinguish "backend unreachable" from
 /// "there just isn't a key yet".
 #[test]
-#[ignore = "requires a real Secret Service session (gnome-keyring); run \
-            under dbus-run-session — see .github/workflows/ci.yml"]
+#[ignore = "touches the real OS keyring"]
 fn native_store_missing_entry_is_ok_none() {
 	let runtime = tokio::runtime::Builder::new_multi_thread()
 		.enable_all()

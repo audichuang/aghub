@@ -28,7 +28,7 @@ pub use codex::{
 	DEFAULT_PROFILE_ID as CODEX_DEFAULT_PROFILE_ID,
 };
 pub use credentials::{
-	CredentialStore, FileCredentialStore, NativeCredentialStore,
+	keyring_entry, CredentialStore, FileCredentialStore, NativeCredentialStore,
 };
 pub use error::{keyring_backend_unavailable, InferenceProviderError, Result};
 pub use model::{

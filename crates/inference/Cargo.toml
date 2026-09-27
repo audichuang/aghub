@@ -15,17 +15,7 @@ thiserror = { workspace = true }
 log = "0.4.31"
 dirs = { workspace = true }
 url = { workspace = true }
-# Linux: secret-service (pure-Rust zbus/async-io backend), not linux-native
-# (keyutils) — same reasoning as `crates/api/Cargo.toml` (non-persistent
-# kernel keyring + panics if zbus's tokio backend were picked instead from
-# inside a tokio runtime). Keep this feature list identical to `aghub-api`'s.
-keyring = { version = "3", features = [
-	"apple-native",
-	"windows-native",
-	"async-secret-service",
-	"crypto-rust",
-	"async-io",
-] }
+keyring-core = { workspace = true }
 uuid = { version = "1", features = [ "v4" ] }
 sqlx = { version = "0.9", features = [ "sqlite", "runtime-tokio", "migrate" ] }
 tokio = { version = "1", features = [ "rt", "rt-multi-thread" ] }
@@ -33,3 +23,16 @@ tokio = { version = "1", features = [ "rt", "rt-multi-thread" ] }
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = { workspace = true }
+
+# Native stores; same item layout as keyring 3, so existing keys stay readable.
+[target.'cfg(target_os = "macos")'.dependencies]
+apple-native-keyring-store = { version = "1", features = [ "keychain" ] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-native-keyring-store = "1"
+
+# async-io, not tokio: the tokio flavour panics inside Rocket's runtime.
+[target.'cfg(all(unix, not(target_os = "macos")))'.dependencies]
+zbus-secret-service-keyring-store = { version = "1", features = [
+	"rt-async-io-crypto-rust",
+] }

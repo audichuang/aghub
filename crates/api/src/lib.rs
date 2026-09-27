@@ -1186,7 +1186,7 @@ mod tests {
 
 	/// Triple isolation for handler-side side effects if a route ever omits the
 	/// Layer-2 guard: (a) env → temp HOME/XDG/PATH under `test_env_lock`,
-	/// (b) temp app_data for inference SQLite, (c) mock keyring builder so the
+	/// (b) temp app_data for inference SQLite, (c) mock keyring store so the
 	/// native OS keychain is never touched.
 	struct IsolatedApiTest {
 		_lock: std::sync::MutexGuard<'static, ()>,
@@ -1206,20 +1206,8 @@ mod tests {
 			let lock = crate::routes::test_env_lock()
 				.lock()
 				.unwrap_or_else(|e| e.into_inner());
-			// Process-global; safe under the same lock that serializes env
-			// tests -- but `keyring::set_default_credential_builder` has no
-			// "unset" API, only "set to something else". Left unrestored
-			// (as before this fix), the mock stayed the process-global
-			// default for the rest of the test binary, racing any other
-			// test that expects the platform's real keyring backend
-			// depending on run order (GitHub #15 P1-1: `cargo test` order
-			// determined whether the DBUS-tampering fail-closed test in
-			// `routes::inference` saw a real secret-service failure or a
-			// trivially-succeeding mock). `Drop` below puts the platform's
-			// real default builder back so this guard's effect is scoped to
-			// its own lifetime, not the rest of the process.
-			keyring::set_default_credential_builder(
-				keyring::mock::default_credential_builder(),
+			keyring_core::set_default_store(
+				keyring_core::mock::Store::new().expect("mock keyring store"),
 			);
 
 			let home = tempfile::tempdir().expect("home tempdir");
@@ -1263,12 +1251,7 @@ mod tests {
 
 	impl Drop for IsolatedApiTest {
 		fn drop(&mut self) {
-			// Restore the platform's real default builder -- see the
-			// comment in `new()`. Still under `_lock` (dropped after this
-			// fn returns), so this can't race another `IsolatedApiTest`.
-			keyring::set_default_credential_builder(
-				keyring::default::default_credential_builder(),
-			);
+			keyring_core::unset_default_store();
 			Self::restore_var("HOME", &self.old_home);
 			Self::restore_var("XDG_CONFIG_HOME", &self.old_xdg_config);
 			Self::restore_var("XDG_STATE_HOME", &self.old_xdg_state);
@@ -1300,41 +1283,14 @@ mod tests {
 		}
 	}
 
-	/// Regression (GitHub #15 P1-1, Codex-found): `IsolatedApiTest::new()`
-	/// used to leave keyring's process-global default credential builder
-	/// permanently set to the mock, with no restore -- so whichever test ran
-	/// afterward in the same `cargo test` process would silently see the
-	/// in-memory mock instead of a real (or really-erroring) backend,
-	/// regardless of what it expected. Drive a full `IsolatedApiTest`
-	/// lifecycle, then -- strictly after it drops -- point
-	/// `DBUS_SESSION_BUS_ADDRESS` at a socket that does not exist and
-	/// attempt a real keyring round trip. Before the `Drop` fix this
-	/// spuriously SUCCEEDS (the leaked mock ignores D-Bus entirely and just
-	/// round-trips in memory); after the fix the real platform builder is
-	/// back in place, so a broken D-Bus session must produce a real
-	/// `PlatformFailure`, proving the guard's mock was actually swapped back
-	/// out and not left process-global.
-	///
-	/// **Linux-only** (GitHub #15 round-2 Codex finding): this test's whole
-	/// point is proving the REAL platform keyring builder is active, which
-	/// on this crate's feature set (see `Cargo.toml`) is Linux
-	/// secret-service/D-Bus. `DBUS_SESSION_BUS_ADDRESS` does nothing on
-	/// macOS Keychain / Windows Credential Manager, so on those CI runners
-	/// this test would get a non-error result and fail — there is no
-	/// equivalent env-var lever to break the real backend on those
-	/// platforms, so cross-platform coverage of THIS SPECIFIC property is
-	/// intentionally not attempted (unlike the two 503 tests in
-	/// `routes::skills_update`/`routes::skills`, which inject a fake
-	/// backend-unavailable result instead of touching any real backend at
-	/// all, and so stay fully cross-platform).
+	/// After `IsolatedApiTest` drops, the real store must be back: with an
+	/// unreachable D-Bus session a keyring write has to fail, not succeed
+	/// against a leaked mock. Linux-only: the env var is the only lever.
 	#[cfg(target_os = "linux")]
 	#[test]
 	fn isolated_api_test_restores_real_builder_after_drop() {
 		{
 			let _iso = IsolatedApiTest::new();
-			// `_iso` drops at the end of this block, releasing
-			// `test_env_lock` too -- the lock is re-acquired below only
-			// after that has happened, so this can't deadlock.
 		}
 
 		let _env = crate::routes::test_env_lock()
@@ -1349,25 +1305,20 @@ mod tests {
 			"unix:path=/tmp/aghub-test-no-such-bus-lib",
 		);
 
-		let entry =
-			keyring::Entry::new("aghub-test-restore-probe", "probe").unwrap();
-		let result = entry.set_password("probe-value");
-		if result.is_ok() {
-			// Only reachable if the bug is back, or this environment somehow
-			// still resolves a bus despite the bogus address -- clean up
-			// either way rather than leaving a stray real keyring entry.
-			let _ = entry.delete_credential();
-		}
+		let result =
+			aghub_inference::keyring_entry("aghub-test-restore-probe", "probe")
+				.and_then(|entry| {
+					let written = entry.set_password("probe-value");
+					if written.is_ok() {
+						let _ = entry.delete_credential();
+					}
+					written
+				});
 
 		assert!(
 			result.is_err(),
-			"after IsolatedApiTest drops, the REAL platform credential \
-			 builder must be active again -- an unreachable D-Bus session \
-			 must produce a real error, not a silently-successful leaked \
-			 mock"
+			"a leaked mock answered instead of the real store"
 		);
-		// `_restore_dbus` drops here (even if the assert above panicked,
-		// since it runs during unwind), restoring the env var.
 	}
 
 	/// The desktop posts to this exact path (`src/lib/api.ts`,

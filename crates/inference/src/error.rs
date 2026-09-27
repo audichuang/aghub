@@ -99,18 +99,19 @@ pub enum InferenceProviderError {
 /// (e.g. no D-Bus session on Linux secret-service, a locked/inaccessible
 /// platform keychain) rather than a normal, data-shaped outcome (no entry,
 /// bad encoding, ...). Shared by every keyring-touching crate (this crate's
-/// `From<keyring::Error>` below, and `aghub-api`'s
+/// `From<keyring_core::Error>` below, and `aghub-api`'s
 /// `credentials::CredentialStoreError`) so they classify the same platform
 /// error identically.
-pub fn keyring_backend_unavailable(err: &keyring::Error) -> bool {
+pub fn keyring_backend_unavailable(err: &keyring_core::Error) -> bool {
 	matches!(
 		err,
-		keyring::Error::PlatformFailure(_) | keyring::Error::NoStorageAccess(_)
+		keyring_core::Error::PlatformFailure(_)
+			| keyring_core::Error::NoStorageAccess(_)
 	)
 }
 
-impl From<keyring::Error> for InferenceProviderError {
-	fn from(error: keyring::Error) -> Self {
+impl From<keyring_core::Error> for InferenceProviderError {
+	fn from(error: keyring_core::Error) -> Self {
 		if keyring_backend_unavailable(&error) {
 			Self::KeyringUnavailable(error.to_string())
 		} else {
@@ -142,20 +143,20 @@ mod tests {
 	fn platform_failure_and_no_storage_access_are_unavailable() {
 		let io_err = || Box::new(std::io::Error::other("boom"));
 		assert!(keyring_backend_unavailable(
-			&keyring::Error::PlatformFailure(io_err())
+			&keyring_core::Error::PlatformFailure(io_err())
 		));
 		assert!(keyring_backend_unavailable(
-			&keyring::Error::NoStorageAccess(io_err())
+			&keyring_core::Error::NoStorageAccess(io_err())
 		));
 	}
 
 	#[test]
 	fn other_variants_are_not_unavailable() {
-		assert!(!keyring_backend_unavailable(&keyring::Error::NoEntry));
-		assert!(!keyring_backend_unavailable(&keyring::Error::BadEncoding(
-			vec![0xff]
-		)));
-		assert!(!keyring_backend_unavailable(&keyring::Error::TooLong(
+		assert!(!keyring_backend_unavailable(&keyring_core::Error::NoEntry));
+		assert!(!keyring_backend_unavailable(
+			&keyring_core::Error::BadEncoding(vec![0xff])
+		));
+		assert!(!keyring_backend_unavailable(&keyring_core::Error::TooLong(
 			"attr".to_string(),
 			10
 		)));
