@@ -1,2 +1,5 @@
 src-tauri/gen/
 dist/
+
+# Cargo manifests keep their own style; the formatter never owned TOML.
+*.toml

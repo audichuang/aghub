@@ -84,7 +84,7 @@ jobs:
               shell: bash
               run: actionlint -color
 
-    # Format check (rustfmt + prettier)
+    # Format check (rustfmt + oxfmt)
     format:
         name: Format Check
         needs: changes

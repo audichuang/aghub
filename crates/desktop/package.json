@@ -10,8 +10,8 @@
 		"start": "tauri dev",
 		"lint": "oxlint --fix",
 		"lint:check": "oxlint",
-		"format": "prettier --write .",
-		"format:check": "prettier --check .",
+		"format": "oxfmt .",
+		"format:check": "oxfmt --check .",
 		"generate:dto": "cargo run --manifest-path ../api/Cargo.toml --bin export-dto",
 		"test": "node scripts/assert-tests-discovered.mjs && node --experimental-strip-types --test 'src/**/*.test.ts' 'src/**/*.test.tsx'",
 		"typecheck": "node ./node_modules/@typescript/native/bin/tsc -p tsconfig.json --noEmit && node ./node_modules/@typescript/native/bin/tsc -p tsconfig.node.json --noEmit --composite false --incremental false"
@@ -69,9 +69,9 @@
 		"eslint-plugin-better-tailwindcss": "^4.7.0",
 		"knip": "^6.38.0",
 		"nano-staged": "^1.0.2",
+		"oxfmt": "0.70.0",
 		"oxlint": "1.85.0",
 		"oxlint-tsgolint": "7.0.2003",
-		"prettier": "3.8.3",
 		"tailwindcss": "^4.3.3",
 		"typescript": "~6.0.3",
 		"vite": "^8.3.1"
@@ -79,11 +79,10 @@
 	"knip": {
 		"ignoreDependencies": [
 			"react-grab",
-			"nano-staged",
-			"prettier"
+			"nano-staged"
 		]
 	},
 	"nano-staged": {
-		"*.{js,ts,jsx,tsx,json,md,css,html}": "prettier --write"
+		"*.{js,ts,jsx,tsx,json,md,css,html}": "oxfmt"
 	}
 }

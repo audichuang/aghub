@@ -60,7 +60,7 @@ lint: ## clippy（-D warnings）+ oxlint（型別感知 + 型別檢查）
 	cargo clippy --workspace -- -D warnings
 	cd $(DESKTOP) && bun run lint:check -- --max-warnings 0
 
-fmt: ## 格式化（rustfmt + prettier）
+fmt: ## 格式化（rustfmt + oxfmt）
 	cargo fmt --all
 	bun run --cwd $(DESKTOP) format
 

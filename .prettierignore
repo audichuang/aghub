@@ -25,8 +25,8 @@ coverage/
 # lint them; they carry their own branch's files, including byte-exact fixtures).
 .claude/worktrees/
 
-# Session history scratch (git-ignored already, but prettier doesn't read
-# .gitignore — keep these transient notes/dumps out of the format gate).
+# Session history scratch (git-ignored already; listed here too so the
+# format gate never depends on .gitignore being read).
 .remember/
 
 # OS
@@ -44,3 +44,6 @@ crates/desktop/src-tauri/binaries/
 
 # Logs
 *.log
+
+# Cargo manifests keep their own style; the formatter never owned TOML.
+*.toml

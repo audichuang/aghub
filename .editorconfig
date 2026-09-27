@@ -1,4 +1,4 @@
-# EditorConfig - using hard tabs for all files (aligned with prettier/rustfmt)
+# EditorConfig - using hard tabs for all files (aligned with oxfmt/rustfmt)
 # https://editorconfig.org
 
 root = true
@@ -13,7 +13,7 @@ indent_size = 4
 tab_width = 4
 max_line_length = 80
 
-# Keep repository text files on LF so Git, rustfmt, and prettier agree.
+# Keep repository text files on LF so Git, rustfmt, and oxfmt agree.
 [*.{rs,js,jsx,ts,tsx,mjs,cjs,json,md,css,html,toml,yml,yaml}]
 end_of_line = lf
 

@@ -25,19 +25,19 @@
 
 ## File Structure
 
-| File                                     | Status              | Responsibility                                                                                                                                                          |
+| File | Status | Responsibility |
 | ---------------------------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --- | -------------------------------------- |
-| `crates/api/src/dto/skill.rs`            | Modified            | Add `upstream_commit_time` field to `SkillUpdateStatusResponse::UpdateAvailable`; add new `AcceptRenameRequest` / `AcceptRenameResponse` DTOs                           |
-| `crates/api/src/dto/sources.rs`          | Modified            | Replace `pub state: String` with `pub state: SourceSkillStateDto`; add `SourceSkillStateDto` enum with `#[derive(TS)]`; add `upstream_commit_time` to `SourceSkillDiff` |
-| `crates/api/src/routes/skills_update.rs` | Modified            | Add `accept_skill_rename()` route handler + `accept_rename_inner()` testable inner function                                                                             |
-| `crates/api/src/routes/sources.rs`       | Modified            | Map domain `SourceSkillState` → `SourceSkillStateDto` when constructing `SourceSkillDiff` DTOs                                                                          |
-| `crates/api/src/lib.rs`                  | Modified            | Mount `routes::skills_update::accept_skill_rename` in `build_rocket()` `routes![...]` (§12-GAP6)                                                                        |
-| `crates/skill-update/src/lib.rs`         | Modified            | Add `upstream_commit_time: Option<String>` to `FetchedRepo`; thread it through `CheckOutput` for `UpdateAvailable`                                                      |
-| `crates/skill-update/src/git.rs`         | Modified            | Populate `upstream_commit_time` from tip commit author-time via gix at fetch time                                                                                       |
-| `crates/skill-update/src/sources.rs`     | Modified            | Add `upstream_commit_time: Option<String>` to domain `SourceSkillDiff` struct                                                                                           |
-| `crates/desktop/src/generated/dto/`      | Regenerated         | ts-rs output after DTO changes — run `cargo test -p aghub-api --features ts-rs-export 2>/dev/null                                                                       |     | cargo test -p aghub-api` then prettier |
-| `crates/cli/src/commands/source.rs`      | Modified (optional) | Add `accept-rename` subcommand to `source` for CLI/app parity (Task 6, optional)                                                                                        |
-| `crates/cli/src/commands/mod.rs`         | Modified (optional) | Wire optional `accept-rename` dispatch (Task 6, optional)                                                                                                               |
+| `crates/api/src/dto/skill.rs` | Modified | Add `upstream_commit_time` field to `SkillUpdateStatusResponse::UpdateAvailable`; add new `AcceptRenameRequest` / `AcceptRenameResponse` DTOs |
+| `crates/api/src/dto/sources.rs` | Modified | Replace `pub state: String` with `pub state: SourceSkillStateDto`; add `SourceSkillStateDto` enum with `#[derive(TS)]`; add `upstream_commit_time` to `SourceSkillDiff` |
+| `crates/api/src/routes/skills_update.rs` | Modified | Add `accept_skill_rename()` route handler + `accept_rename_inner()` testable inner function |
+| `crates/api/src/routes/sources.rs` | Modified | Map domain `SourceSkillState` → `SourceSkillStateDto` when constructing `SourceSkillDiff` DTOs |
+| `crates/api/src/lib.rs` | Modified | Mount `routes::skills_update::accept_skill_rename` in `build_rocket()` `routes![...]` (§12-GAP6) |
+| `crates/skill-update/src/lib.rs` | Modified | Add `upstream_commit_time: Option<String>` to `FetchedRepo`; thread it through `CheckOutput` for `UpdateAvailable` |
+| `crates/skill-update/src/git.rs` | Modified | Populate `upstream_commit_time` from tip commit author-time via gix at fetch time |
+| `crates/skill-update/src/sources.rs` | Modified | Add `upstream_commit_time: Option<String>` to domain `SourceSkillDiff` struct |
+| `crates/desktop/src/generated/dto/` | Regenerated | ts-rs output after DTO changes — run `cargo test -p aghub-api --features ts-rs-export 2>/dev/null                                                                       |     | cargo test -p aghub-api` then prettier |
+| `crates/cli/src/commands/source.rs` | Modified (optional) | Add `accept-rename` subcommand to `source` for CLI/app parity (Task 6, optional) |
+| `crates/cli/src/commands/mod.rs` | Modified (optional) | Wire optional `accept-rename` dispatch (Task 6, optional) |
 
 ---
 

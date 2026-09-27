@@ -2061,8 +2061,7 @@ The existing `skills.tsx` is rewritten. Key design choices driven by spec §12:
     	const rows = useMemo<SourceRow[]>(() => {
     		if (scope === "global") {
     			const data = sourceQueries[0]?.data as
-    				| SourcesListResponse
-    				| undefined;
+    				SourcesListResponse | undefined;
     			return (data?.sources ?? []).map((s) => ({
     				...s,
     				rowScope: "global" as const,
@@ -2073,8 +2072,7 @@ The existing `skills.tsx` is rewritten. Key design choices driven by spec §12:
     			: projects;
     		return filtered.flatMap((project, index) => {
     			const data = sourceQueries[index]?.data as
-    				| SourcesListResponse
-    				| undefined;
+    				SourcesListResponse | undefined;
     			return (data?.sources ?? []).map((s) => ({
     				...s,
     				rowScope: "project" as const,
@@ -2407,8 +2405,7 @@ The existing `skills.tsx` is rewritten. Key design choices driven by spec §12:
     	});
     	const allSourceRows = useMemo<SourceRow[]>(() => {
     		const global = allSourcesQuery[0]?.data as
-    			| SourcesListResponse
-    			| undefined;
+    			SourcesListResponse | undefined;
     		const globalRows: SourceRow[] = (global?.sources ?? []).map(
     			(s) => ({
     				...s,
@@ -2417,8 +2414,7 @@ The existing `skills.tsx` is rewritten. Key design choices driven by spec §12:
     		);
     		const projectRows: SourceRow[] = projects.flatMap((p, i) => {
     			const data = allSourcesQuery[i + 1]?.data as
-    				| SourcesListResponse
-    				| undefined;
+    				SourcesListResponse | undefined;
     			return (data?.sources ?? []).map((s) => ({
     				...s,
     				rowScope: "project" as const,

@@ -108,7 +108,7 @@ gh run watch <run-id> --repo audichuang/aghub --exit-status
 
 Step 0 is mandatory, not advisory: `verify-ci` fails the release if the tagged commit has no green push-to-main CI
 run — it does not re-test. `just release` already waits for green before tagging; a manual tag must too.
-`git push` is gated by a **pre-push hook** (prettier `--check` + clippy `-D warnings` + eslint + tsc) — note it does
+`git push` is gated by a **pre-push hook** (oxfmt `--check` + clippy `-D warnings` + oxlint + tsc) — note it does
 **NOT** run tests; that gap is why `just preflight` exists. `just preflight` runs on your platform only and cannot
 reproduce macOS/Windows-specific behavior — for that, rely on the CI matrix and write tests that simulate the platform
 condition on Linux (e.g. operate through a symlinked temp dir to mimic macOS `/var` → `/private` canonicalize).
