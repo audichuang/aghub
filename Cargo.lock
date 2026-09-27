@@ -65,7 +65,7 @@ version = "1.1.1"
 dependencies = [
  "aghub-json",
  "aghub-markdown",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "libc",
  "serde",
  "serde_json",
@@ -86,7 +86,7 @@ dependencies = [
  "aghub-inference",
  "base64 0.23.1",
  "chrono",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "gix",
  "keyring",
  "log",
@@ -115,7 +115,7 @@ dependencies = [
  "aghub-git",
  "anyhow",
  "chrono",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "flate2",
  "log",
  "reqwest",
@@ -161,7 +161,7 @@ version = "1.1.1"
 dependencies = [
  "aghub-agents",
  "chrono",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "libc",
  "log",
  "serde",
@@ -194,7 +194,7 @@ name = "aghub-inference"
 version = "1.1.1"
 dependencies = [
  "aghub-json",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "keyring",
  "log",
  "serde",
@@ -231,7 +231,7 @@ dependencies = [
 name = "aghub-remote"
 version = "1.1.1"
 dependencies = [
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "serde",
  "serde_json",
  "tempfile",
@@ -6783,7 +6783,7 @@ name = "skill"
 version = "1.1.1"
 dependencies = [
  "chrono",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "feruca",
  "ignore",
  "log",
@@ -6804,7 +6804,7 @@ version = "1.1.1"
 dependencies = [
  "aghub-core",
  "aghub-git",
- "dirs 6.0.0",
+ "dirs 7.0.0",
  "libc",
  "log",
  "skill",
