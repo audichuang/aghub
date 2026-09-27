@@ -7,10 +7,12 @@ on:
         branches: ["main"]
     workflow_dispatch:
 
-# Cancel in-progress runs for the same ref to save CI minutes
+# Cancel superseded PR runs to save CI minutes, but never a main-branch run:
+# release.yml's verify-ci only accepts a tag whose commit has a GREEN
+# push-to-main run, so a cancelled main run leaves that commit untaggable.
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
-    cancel-in-progress: true
+    cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Default to least-privilege permissions; individual jobs may override
 permissions:
@@ -35,6 +37,7 @@ jobs:
     changes:
         name: Detect Changes
         runs-on: ubuntu-latest
+        timeout-minutes: 5
         outputs:
             rust: ${{ steps.filter.outputs.rust }}
             desktop: ${{ steps.filter.outputs.desktop }}
@@ -70,6 +73,7 @@ jobs:
         needs: changes
         if: needs.changes.outputs.workflows == 'true'
         runs-on: ubuntu-latest
+        timeout-minutes: 10
         steps:
             - uses: actions/checkout@v6
             - name: Download actionlint (pinned)
@@ -84,16 +88,13 @@ jobs:
               shell: bash
               run: actionlint -color
 
-    # Format check (rustfmt + oxfmt)
+    # Format check (rustfmt + oxfmt). Unfiltered: it takes seconds, and root
+    # files (scripts/, docs/, .github/, formatter config) belong to no path
+    # filter above, so a filter here let them skip the check entirely.
     format:
         name: Format Check
-        needs: changes
-        if: |
-            needs.changes.outputs.rust == 'true' ||
-            needs.changes.outputs.desktop == 'true' ||
-            needs.changes.outputs.docs == 'true' ||
-            needs.changes.outputs.workflows == 'true'
         runs-on: ubuntu-latest
+        timeout-minutes: 15
         steps:
             - uses: actions/checkout@v6
             - name: Install Rust toolchain
@@ -110,8 +111,10 @@ jobs:
               run: cd crates/desktop && bun install --frozen-lockfile
             - name: Rust format
               run: cargo fmt --all -- --check
-            - name: Frontend format
-              run: cd crates/desktop && bun run format:check
+            # From the REPO ROOT, like the pre-push hook: crates/desktop's own
+            # format:check never sees scripts/, docs/ or .github/.
+            - name: Frontend + docs format (whole repo)
+              run: bun run format:check
 
     # Rust lint (clippy + audit) - 3 OS matrix
     lint-rust:
@@ -119,6 +122,7 @@ jobs:
         needs: changes
         if: needs.changes.outputs.rust == 'true' || needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
+        timeout-minutes: 40
         strategy:
             fail-fast: false
             matrix:
@@ -160,11 +164,19 @@ jobs:
               run: bun install --frozen-lockfile
             - name: Install desktop deps (frozen)
               run: cd crates/desktop && bun install --frozen-lockfile
-            - name: Cargo audit (advisories; non-blocking until tree is clean)
-              continue-on-error: true
+            # Blocking: fails on a vulnerability advisory (unmaintained /
+            # unsound notices stay warnings). To accept one deliberately, add
+            # its ID with a reason to .cargo/audit.toml — never re-add
+            # continue-on-error, which hid every advisory, not just that one.
+            # One OS is enough: all three read the same Cargo.lock, and each
+            # extra run is one more advisory-DB download that can flake.
+            - name: Cargo audit (vulnerabilities fail the job)
+              if: matrix.os == 'ubuntu-latest'
               run: cargo audit
+            # --locked: fail if Cargo.lock is out of sync with the manifests
+            # instead of silently resolving (and linting) a different graph.
             - name: Cargo clippy (warnings as errors, all targets)
-              run: cargo clippy --workspace --all-targets -- -D warnings
+              run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
     # Frontend lint (oxlint: type-aware + type-check, warnings as errors) + the frontend unit tests
     lint-frontend:
@@ -182,6 +194,7 @@ jobs:
             needs.changes.outputs.desktop == 'true' ||
             needs.changes.outputs.workflows == 'true'
         runs-on: ubuntu-latest
+        timeout-minutes: 15
         steps:
             - uses: actions/checkout@v6
             - name: Setup Bun
@@ -218,6 +231,7 @@ jobs:
             needs.changes.outputs.desktop == 'true' ||
             needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
@@ -256,8 +270,10 @@ jobs:
                   # the real Secret Service smoke test step below, not the
                   # main test suite (GitHub #15 P1-4) — see that step's comment.
                   sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
-            - name: Cargo fetch
-              run: cargo fetch
+            # --locked: fail if Cargo.lock is out of sync with the manifests.
+            # The test steps below then run against exactly the committed graph.
+            - name: Cargo fetch (lockfile must be in sync)
+              run: cargo fetch --locked
             - name: Install root deps (frozen)
               run: bun install --frozen-lockfile
             - name: Install desktop deps (frozen)
@@ -325,6 +341,7 @@ jobs:
             needs.changes.outputs.desktop == 'true' ||
             needs.changes.outputs.workflows == 'true'
         runs-on: ${{ matrix.os }}
+        timeout-minutes: 40
         strategy:
             fail-fast: false
             matrix:
