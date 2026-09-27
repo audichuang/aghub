@@ -49,7 +49,7 @@ colored = "3.0"
 # consumer in the graph, so it must live here rather than in one crate.
 reqwest = { version = "0.13", features = [ "json", "gzip" ] }
 url = "2.5"
-base64 = "0.22"
+base64 = "0.23"
 
 # Testing dependencies
 tempfile = "3.10"
