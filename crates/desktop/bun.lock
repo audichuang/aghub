@@ -35,7 +35,7 @@
         "react": "19.3.0",
         "react-aria-components": "^1.21.1",
         "react-dom": "19.3.0",
-        "react-grab": "^0.1.50",
+        "react-grab": "^0.2.0",
         "react-hook-form": "^7.89.0",
         "react-i18next": "^17.0.15",
         "react-virtuoso": "^4.18.15",
@@ -351,7 +351,7 @@
 
     "@react-aria/utils": ["@react-aria/utils@3.34.1", "", { "dependencies": { "@swc/helpers": "^0.5.0", "react-aria": "^3.48.0", "react-stately": "^3.46.0" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0-rc.1 || ^18.0.0 || ^19.0.0-rc.1", "react-dom": "^16.8.0 || ^17.0.0-rc.1 || ^18.0.0 || ^19.0.0-rc.1" } }, "sha512-H6+rGZL+0f58bBNaUMfctEnT+NogqwAk+nHiB8sR3K+YlQ37GTuCijy2U/pPvQtFMS5mURrjZeBH5JNNXsx14A=="],
 
-    "@react-grab/cli": ["@react-grab/cli@0.1.50", "", { "dependencies": { "agent-install": "^0.0.6", "commander": "^14.0.3", "ignore": "^7.0.5", "ora": "^9.4.0", "package-manager-detector": "^1.6.0", "picocolors": "^1.1.1", "prompts": "^2.4.2", "tinyexec": "^1.1.2" }, "bin": { "react-grab": "bin/cli.js" } }, "sha512-Px/Hwhhyk2PubCA4ZaRFsfvwxhbxXsetJyvqC6aFFi8WhJhA+oVC33aTzuAeWmM3fhb4/8ce8YsHXI1d6ChcKg=="],
+    "@react-grab/cli": ["@react-grab/cli@0.2.0", "", { "dependencies": { "agent-install": "^0.0.6", "commander": "^14.0.3", "ignore": "^7.0.5", "ora": "^9.4.0", "package-manager-detector": "^1.6.0", "picocolors": "^1.1.1", "prompts": "^2.4.2", "tinyexec": "^1.1.2" }, "bin": { "react-grab": "bin/cli.js" } }, "sha512-LVfA+j5cFT0Szd958WRD8W/B8ucCtz4ViiveDKWLqAwBkZFW9VRW1ZvwOUhp/M3SmVPtjDaRkW12GvAuTArP+Q=="],
 
     "@react-spectrum/color": ["@react-spectrum/color@3.2.1", "", { "dependencies": { "@adobe/react-spectrum": "^3.47.0", "@swc/helpers": "^0.5.0", "react-stately": "^3.46.0" }, "peerDependencies": { "react": "^16.8.0 || ^17.0.0-rc.1 || ^18.0.0 || ^19.0.0-rc.1", "react-dom": "^16.8.0 || ^17.0.0-rc.1 || ^18.0.0 || ^19.0.0-rc.1" } }, "sha512-FbB+GaVufsN+obNJmUAe8XGZTeJjEWvEf/k/7nxDxoDCBdg/o6eEPONAZyID5Dj1f8BZKNym8VURxDZx7IIyuQ=="],
 
@@ -849,7 +849,7 @@
 
     "react-dom": ["react-dom@19.3.0", "", { "dependencies": { "scheduler": "^0.28.0" }, "peerDependencies": { "react": "^19.3.0" } }, "sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q=="],
 
-    "react-grab": ["react-grab@0.1.50", "", { "dependencies": { "@react-grab/cli": "0.1.50", "bippy": "^0.6.1" }, "peerDependencies": { "react": ">=17.0.0" }, "optionalPeers": ["react"], "bin": { "react-grab": "bin/cli.js" } }, "sha512-zRkHKq/8a1msCpEOp8BDROeQZT50m0OH2XPrP6jk5op+JAHrlsm3pj7eAQMOsct87EZDeGNnu4r+sGsJJzyw1Q=="],
+    "react-grab": ["react-grab@0.2.0", "", { "dependencies": { "@react-grab/cli": "0.2.0", "bippy": "^0.6.1" }, "peerDependencies": { "react": ">=17.0.0" }, "optionalPeers": ["react"], "bin": { "react-grab": "bin/cli.js" } }, "sha512-ohhsfXD4qN0j6cMQd56aaVJBPDF3kUdviF/Od1Eak/rEIXQ3svQ4gjkwTfuTZwTBnxHRL16p9JqdlVQO5nUHqA=="],
 
     "react-hook-form": ["react-hook-form@7.89.0", "", { "peerDependencies": { "@types/react": "*", "react": "^16.8.0 || ^17 || ^18 || ^19" }, "optionalPeers": ["@types/react"] }, "sha512-vKcoCfy8RKZDrhSdqsRFp0uEOdS1AhLjOL6hR7Wmfzg1akNxEhaPf5WORx8SgEQPVXakdDyDkqQp+KNxVnnPHg=="],
 
