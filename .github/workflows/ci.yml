@@ -7,9 +7,7 @@ on:
         branches: ["main"]
     workflow_dispatch:
 
-# Cancel superseded PR runs to save CI minutes, but never a main-branch run:
-# release.yml's verify-ci only accepts a tag whose commit has a GREEN
-# push-to-main run, so a cancelled main run leaves that commit untaggable.
+# Never cancel a main run: release.yml's verify-ci needs a green run per commit.
 concurrency:
     group: ${{ github.workflow }}-${{ github.ref }}
     cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -88,9 +86,7 @@ jobs:
               shell: bash
               run: actionlint -color
 
-    # Format check (rustfmt + oxfmt). Unfiltered: it takes seconds, and root
-    # files (scripts/, docs/, .github/, formatter config) belong to no path
-    # filter above, so a filter here let them skip the check entirely.
+    # Format check (rustfmt + oxfmt) over the whole repo, on every change.
     format:
         name: Format Check
         runs-on: ubuntu-latest
@@ -111,8 +107,6 @@ jobs:
               run: cd crates/desktop && bun install --frozen-lockfile
             - name: Rust format
               run: cargo fmt --all -- --check
-            # From the REPO ROOT, like the pre-push hook: crates/desktop's own
-            # format:check never sees scripts/, docs/ or .github/.
             - name: Frontend + docs format (whole repo)
               run: bun run format:check
 
@@ -164,17 +158,9 @@ jobs:
               run: bun install --frozen-lockfile
             - name: Install desktop deps (frozen)
               run: cd crates/desktop && bun install --frozen-lockfile
-            # Blocking: fails on a vulnerability advisory (unmaintained /
-            # unsound notices stay warnings). To accept one deliberately, add
-            # its ID with a reason to .cargo/audit.toml — never re-add
-            # continue-on-error, which hid every advisory, not just that one.
-            # One OS is enough: all three read the same Cargo.lock, and each
-            # extra run is one more advisory-DB download that can flake.
             - name: Cargo audit (vulnerabilities fail the job)
               if: matrix.os == 'ubuntu-latest'
               run: cargo audit
-            # --locked: fail if Cargo.lock is out of sync with the manifests
-            # instead of silently resolving (and linting) a different graph.
             - name: Cargo clippy (warnings as errors, all targets)
               run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
@@ -266,12 +252,8 @@ jobs:
               shell: bash
               run: |
                   sudo apt-get update
-                  # gnome-keyring + dbus-x11 (for `dbus-run-session`) are for
-                  # the real Secret Service smoke test step below, not the
-                  # main test suite (GitHub #15 P1-4) — see that step's comment.
+                  # gnome-keyring + dbus-x11: the native keyring smoke test.
                   sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libappindicator3-dev librsvg2-dev patchelf gnome-keyring dbus-x11
-            # --locked: fail if Cargo.lock is out of sync with the manifests.
-            # The test steps below then run against exactly the committed graph.
             - name: Cargo fetch (lockfile must be in sync)
               run: cargo fetch --locked
             - name: Install root deps (frozen)
@@ -284,32 +266,19 @@ jobs:
               run: just test
             - name: Doc tests
               run: cargo test --workspace --doc
-            # Real Secret Service smoke test (GitHub #15 P1-4): every OTHER
-            # keyring-touching test in the workspace mocks/injects the
-            # credential store on purpose (deterministic, no real backend
-            # needed — see GitHub #15 P1-1). This is the ONE test that drives
-            # the REAL `NativeCredentialStore` end-to-end, so it needs an
-            # actual Secret Service session, which `ubuntu-latest` does not
-            # have by default. `dbus-run-session` gives it a throwaway D-Bus
-            # session bus; `gnome-keyring-daemon --unlock` (fed an empty
-            # password over stdin, since there's no pre-existing keyring on a
-            # fresh runner) starts+registers `org.freedesktop.secrets` on
-            # that bus. Deliberately scoped to ONLY this one test binary —
-            # the main `just test` step above must keep running its
-            # deterministic, keyring-free path unchanged.
-            - name: Real Secret Service smoke test (keyring, ubuntu only)
-              if: matrix.os == 'ubuntu-latest'
+            # The only test against the REAL OS keyring; everything else mocks it.
+            - name: Native keyring smoke test
               shell: bash
               run: |
-                  # Single quotes below are intentional: this is a nested
-                  # `bash -c '...'` script, and the inner `$(...)` must be
-                  # expanded by that inner shell, not the outer runner shell
-                  # composing this run: block.
-                  # shellcheck disable=SC2016
-                  dbus-run-session -- bash -c '
-                    eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
-                    cargo test -p aghub-inference --test keyring_smoke -- --ignored
-                  '
+                  if [ "$RUNNER_OS" = "Linux" ]; then
+                      # shellcheck disable=SC2016
+                      dbus-run-session -- bash -c '
+                        eval "$(printf "\n" | gnome-keyring-daemon --unlock --components=secrets)"
+                        cargo test -p aghub-inference --test keyring_smoke -- --ignored
+                      '
+                  else
+                      cargo test -p aghub-inference --test keyring_smoke -- --ignored
+                  fi
             # Real-network REST E2E: authenticated GitHub API via the runner's
             # ephemeral GITHUB_TOKEN (no PAT to manage). The test self-skips
             # without a token, so it ONLY exercises the authenticated path here.
