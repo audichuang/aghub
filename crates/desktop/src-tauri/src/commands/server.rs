@@ -15,24 +15,15 @@ pub(crate) fn find_available_port() -> Result<u16, String> {
 /// identifier-scoped app data dir (`<data>/com.akrc.aghub`) before every
 /// surface agreed on [`aghub_api::default_app_data_dir`].
 ///
-/// A message, never a move. aghub USED to copy the db across on startup; that
-/// migration is gone on purpose. The shared db has writers this process cannot
-/// coordinate with — `aghub-cli inference …`, a standalone `aghub-api`, a
-/// second desktop — so any automatic publish has a real interleaving that drops
-/// a provider committed by one of them (the desktop's own lock never bound
-/// them, and a lock timeout started the API anyway). The split itself is fixed
-/// by every surface resolving ONE root; carrying the old bytes over is a
-/// convenience, and the convenience was the entire risk.
+/// A message, never a move: the shared db has writers this process cannot
+/// coordinate with (`aghub-cli inference …`, a standalone `aghub-api`, a second
+/// desktop), so any automatic copy can drop a provider one of them committed.
 ///
-/// So this reads two paths and formats a string. It creates nothing, opens
-/// nothing, and leaves both roots byte-identical — including the legacy db,
-/// which is never opened, so a schema-only leftover produces the same message a
-/// populated one does. There is no marker either: the hint keys on the legacy
-/// file EXISTING, so copying it across does not silence it — only renaming the
-/// original aside does, and the message says so. Getting that wrong is not
-/// cosmetic: a notice that still fires after a successful hand-migration invites
-/// the copy a second time, which would restore the pre-upgrade list over
-/// everything added since.
+/// Reads two paths and formats a string — creates, opens and changes nothing.
+/// It keys on the legacy file EXISTING, with no marker: a copy does not silence
+/// it, only renaming the original aside does (and the message says so). A hint
+/// that stopped after a copy would invite a second copy over newer providers.
+/// See docs/history/desktop-tauri.md#legacy-inference-db-migration-removed
 fn legacy_inference_db_hint(
 	old_root: &Path,
 	new_root: &Path,
@@ -63,11 +54,9 @@ fn legacy_inference_db_hint(
 /// The app data root the embedded API opens, plus the legacy root the hint
 /// above points at.
 ///
-/// A seam, not decoration: nothing else pins WHICH root reaches `ApiOptions`,
-/// and handing it `tauri_dir` — Tauri's identifier-scoped
-/// `<data>/com.akrc.aghub` — is exactly the bug this module exists to fix.
-/// `tauri_dir` is `None` only when Tauri cannot resolve its own dir, and then
-/// there is simply nothing to point at.
+/// A seam: nothing else pins WHICH root reaches `ApiOptions`, and handing it
+/// `tauri_dir` (`<data>/com.akrc.aghub`) is the bug this module fixes.
+/// `tauri_dir` is `None` only when Tauri cannot resolve its own dir.
 fn embedded_api_roots(
 	tauri_dir: Option<PathBuf>,
 ) -> (PathBuf, Option<PathBuf>) {

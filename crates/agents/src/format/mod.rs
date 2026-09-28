@@ -15,32 +15,16 @@
 //!
 //! No two dialects share a `Value` type (serde_json vs serde_yaml vs toml differ
 //! on key types, null semantics, comment retention and numeric fit), so each
-//! keeps its own engine. What ALL 23 MCP-capable agents share is the ANSWERS to
-//! a handful of questions, and those live in [`mcp_policy`] as DATA each dialect
-//! declares: a `TransportVocabulary` (which word it has for each transport — an
-//! empty SSE spelling is what `refuse_unwritable` turns into a refusal, so no
-//! dialect restates the CONDITION, though each still has to call it), an
-//! `OwnedKeys` (which keys a transport owns), plus `reject_mixed_transport`,
-//! `remote_transport`, `missing_transport_error` and `transport_fields` over the
-//! neutral `FieldValue`. The seven hand-written dialects declare a vocabulary
-//! each; the 16 `json_map` agents declare one INSIDE their
-//! [`json_map::Dialect`], which is the same type — it used to be a second
-//! declaration (`Discriminator`, field-for-field the same, plus its own
-//! `writes_sse` and its own mixed-entry rule). What stays split is only the
-//! WORDING: `MixedWording::CommandAndUrl` keeps the sentence 16 agents' users
-//! already see, because unifying the text is a user-visible change, not a merge.
-//! Each dialect keeps its own SYNTAX and phase order
-//! (validate `enabled` → reject mixed on key presence → dispatch on presence →
-//! extract the chosen branch → build), so error precedence is byte-identical to
-//! before the extraction. This is NOT a `ConfigDoc` trait abstracting the whole
-//! document — the shared surface is a handful of pure functions over primitives.
+//! keeps its own engine and its own SYNTAX and phase order. What EVERY
+//! MCP-capable agent shares is the ANSWERS to a handful of questions — those
+//! live in [`mcp_policy`] as data each dialect declares (read its module doc).
+//! Only the mixed-entry WORDING stays split (`MixedWording`), because unifying
+//! the text is a user-visible change, not a merge.
 //!
-//! A shared function nobody is FORCED to call does not propagate: the mixed-key
-//! rule existed from the first review and was still found missing in three
-//! dialects at the sixth. `crates/core/tests/mcp_dialect_decisions.rs` is the
-//! forcing half — registry-driven, one row per MCP-capable AGENT (`json_map`
-//! agents included, so adding one needs a row even though it adds no dialect) —
-//! and `tests/format_tests.rs` carries the cross-dialect contract test.
+//! `crates/core/tests/mcp_dialect_decisions.rs` is the forcing half —
+//! registry-driven, one row per MCP-capable AGENT (`json_map` agents included,
+//! so adding one needs a row even though it adds no dialect) — and
+//! `tests/format_tests.rs` carries the cross-dialect contract test.
 
 pub mod json_map;
 pub mod json_openclaw;

@@ -1,15 +1,16 @@
-//! Orchestrates F1: group entries by (source, ref), resolve creds, fetch (treeless)
-//! with a TTL result cache, bounded concurrency, per-fetch timeout, offline skip.
+//! The skill update check: group entries by (source, ref), resolve creds, fetch
+//! (treeless) with a TTL result cache, bounded concurrency, per-fetch timeout,
+//! offline skip.
 //!
 //! `crates/core` stays pure (hash/compare); the network fetch and credential
 //! resolution live here. The fetch is injected via [`Fetcher`] so the
 //! grouping/cache/timeout/concurrency logic is unit-testable without a network
-//! (the real network paths are covered by the `#[ignore]` E2E tests in F1.7).
+//! (real network paths: the `#[ignore]` E2E tests).
 //!
-//! Extracted from `crates/api` into its own crate so both the desktop API
-//! (`GET /skills/check-updates`) and the CLI (`aghub-cli check --online`) can
-//! share one orchestrator. Each surface supplies its own [`TokenResolver`]; the
-//! default git adapters ([`GitFetcher`]/[`GitRefResolver`]) live in [`mod@git`].
+//! ONE orchestrator for the desktop API (`GET /skills/check-updates`) and the
+//! CLI (`aghub-cli check --online`). Each surface supplies its own
+//! [`TokenResolver`]; the default git adapters ([`GitFetcher`] /
+//! [`GitRefResolver`]) live in [`mod@git`].
 
 mod git;
 pub use git::{GitFetcher, GitRefResolver};
@@ -413,25 +414,13 @@ pub(crate) enum PreflightResult {
 	Fetch,
 }
 
-/// Decide whether a `(source, ref)` group can skip the fetch given the remote
-/// tip OID. Skips ONLY when EVERY member has `ref_commit == Some(tip)`, a known
-/// (non-placeholder) `stored_hash`, and `local_hash == stored_hash` (the
-/// installed copy has not drifted). Any failure → `Fetch`.
-///
-/// `Skip` carries a synthesized `CachedGroup::Hashes` (`HashProbe::Fresh(stored)`
-/// per `skill_path`) so the normal `classify_member_from_probe` path runs
-/// unchanged — yielding `UpToDate` with `heal_hash: None` — instead of a blanket
-/// terminal status that would bypass the per-member heal logic.
 /// The part of [`preflight_decision`] that needs NO network: whether any tip
 /// value at all could produce a `Skip`.
 ///
 /// A member with no `ref_commit`, an unknown `stored_hash`, or a drifted local
-/// copy forces `Fetch` whatever the remote says — so asking the remote first is
-/// a round trip whose answer cannot change the outcome. That used to be free
-/// (a git ref advertisement costs no API quota); since the preflight resolves
-/// tips over the GitHub REST API it spends one request from a 60/hour anonymous
-/// budget, so the wasted call is now the difference between a working check and
-/// `uncheckable/network`.
+/// copy forces `Fetch` whatever the remote says, so asking first would spend a
+/// request from REST's 60/hour anonymous budget on an answer that cannot change
+/// the outcome (`an_unskippable_group_spends_no_preflight_round_trip`).
 pub(crate) fn preflight_can_skip(members: &[EntryInput]) -> bool {
 	let mut recorded: Option<&str> = None;
 	members.iter().all(|m| {
@@ -461,6 +450,15 @@ fn locally_intact(m: &EntryInput) -> bool {
 		&& m.local_hash == m.stored_hash
 }
 
+/// Decide whether a `(source, ref)` group can skip the fetch given the remote
+/// tip OID. Skips ONLY when EVERY member has `ref_commit == Some(tip)`, a known
+/// (non-placeholder) `stored_hash`, and `local_hash == stored_hash` (the
+/// installed copy has not drifted). Any failure → `Fetch`.
+///
+/// `Skip` carries a synthesized `CachedGroup::Hashes` (`HashProbe::Fresh(stored)`
+/// per `skill_path`) so the normal `classify_member_from_probe` path runs
+/// unchanged — yielding `UpToDate` with `heal_hash: None` — instead of a blanket
+/// terminal status that would bypass the per-member heal logic.
 pub(crate) fn preflight_decision(
 	members: &[EntryInput],
 	tip_oid: &str,
@@ -643,14 +641,11 @@ pub async fn check_updates(
 
 	for (sr, members) in groups {
 		// 1) Precheck: a source nothing can fetch over HTTPS (local, ssh,
-		//    unsupported scheme) gets its PERMANENT reason — and it gets it
-		//    offline too, because `precheck_source` is a pure string decision
-		//    that does not change with connectivity. Running it first is what
-		//    stops `offline` from overwriting a permanent answer with
-		//    `network`: "we did not look" is only the honest reason when
-		//    looking WOULD have produced an answer, and it was the sole reason
-		//    a `local` entry got from this surface while the CLI's own offline
-		//    path called the same entry `local`.
+		//    unsupported scheme) gets its PERMANENT reason, offline too — it is
+		//    a pure string decision. Running it first stops `offline` from
+		//    overwriting it with `network` ("we did not look" is only honest
+		//    when looking WOULD have answered;
+		//    `offline_keeps_a_local_sources_permanent_reason`).
 		let mut fetch_members = Vec::new();
 		for member in members {
 			if let Some(reason) = aghub_core::skills::update::precheck_source(
@@ -670,13 +665,9 @@ pub async fn check_updates(
 		}
 
 		// 2) Offline → Uncheckable{Network}; do not cache (transient).
-		//
 		//    Ahead of the pinned-SHA shortcut on purpose: that shortcut reads
-		//    `local_hash`, and making the default-offline path depend on it
-		//    would drag a full disk hash sweep back into a check that never goes
-		//    to the network. Neither surface hashes disk offline, and this
-		//    ordering is what keeps that true without both callers having to
-		//    remember to pass an empty hash map.
+		//    `local_hash`, and this ordering is what keeps an offline check
+		//    from ever hashing disk.
 		if deps.offline {
 			for m in &fetch_members {
 				out.push(terminal_output(
@@ -692,14 +683,11 @@ pub async fn check_updates(
 		// 3) Pinned SHA → UpToDate without fetching, but ONLY while every
 		//    installed copy still matches its baseline.
 		//
-		//    A commit pin means upstream cannot have moved, so skipping the
-		//    network is sound. It says nothing about the local copy, and this
-		//    shortcut used to answer `UpToDate` for a pinned skill whose folder
-		//    had been deleted. It is also the only thing standing behind
-		//    `is_pinned_sha`, which infers immutability from SPELLING — a branch
-		//    or force-moved tag named like a 40-hex OID lands here too, so
-		//    falling through on local drift is what stops that inference from
-		//    also skipping every other check.
+		//    A commit pin says upstream cannot have moved, nothing about the
+		//    local copy (`pinned_sha_does_not_excuse_a_missing_local_copy`).
+		//    `is_pinned_sha` also infers immutability from SPELLING — a branch
+		//    or tag named like a 40-hex OID lands here too — so falling through
+		//    on local drift keeps that inference from skipping every check.
 		if let Some(r) = &sr.ref_ {
 			if is_pinned_sha(r) && fetch_members.iter().all(locally_intact) {
 				deps.cache.put(

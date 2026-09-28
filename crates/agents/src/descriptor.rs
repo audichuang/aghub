@@ -455,14 +455,6 @@ pub fn save_scoped_mcps(
 	save_mcps_to_file(&path, mcps, serialize)
 }
 
-/// Can this agent actually receive a server on this transport?
-///
-/// The capability bits collapse SSE and streamable HTTP into one `remote` flag,
-/// but several dialects have a native word for only one of them and refuse the
-/// other rather than silently rewriting it. So after the advertised bit says
-/// yes, ASK THE REAL SERIALIZER: a preflight that answers from a bit the writer
-/// does not consult can promise a write that then fails halfway through a
-/// multi-agent batch, leaving partial cross-agent state.
 /// How completely an agent can hold a given server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum McpFit {
@@ -574,6 +566,10 @@ pub fn supports_mcp_server(
 	mcp_fit(descriptor, server) != McpFit::Unsupported
 }
 
+/// Can this agent actually receive a server on this transport? The `remote`
+/// capability bit collapses SSE and streamable HTTP, so this ASKS THE REAL
+/// SERIALIZER — a preflight that trusts the bit can promise a write that fails
+/// halfway through a multi-agent batch.
 pub fn supports_mcp_transport(
 	descriptor: &AgentDescriptor,
 	transport: &McpTransport,

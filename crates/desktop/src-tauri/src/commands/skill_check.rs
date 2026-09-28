@@ -47,10 +47,8 @@ pub fn build_check_argv(program: &Path, sidecar: &Path) -> Vec<String> {
 	argv
 }
 
-/// Judge the ARGV, never the joined string. A substring test asked whether the
-/// text "apply-update" appears anywhere — so a data directory named
-/// `.../apply-update/` would refuse a perfectly good schedule, while a mutating
-/// verb spelled differently could have passed.
+/// Judge the ARGV, never the joined string: a substring test refuses a data dir
+/// named `.../apply-update/` yet passes a mutating verb spelled differently.
 pub fn schedule_is_check_only(argv: &[String]) -> bool {
 	// argv[0] is the program; the VERB must be exactly `check`.
 	let Some(verb) = argv.get(1) else {

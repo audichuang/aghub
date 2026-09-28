@@ -32,20 +32,7 @@ impl Credentials {
 
 /// Read git credentials from environment variables.
 ///
-/// Returns `None` if either `GIT_USERNAME` or `GIT_PASSWORD` is not set.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use aghub_git::credentials::read_credentials;
-///
-/// // Set env vars before calling
-/// std::env::set_var("GIT_USERNAME", "myuser");
-/// std::env::set_var("GIT_PASSWORD", "mytoken");
-///
-/// let creds = read_credentials();
-/// assert!(creds.is_some());
-/// ```
+/// Returns `None` if either `GIT_USERNAME` or `GIT_PASSWORD` is unset or empty.
 pub fn read_credentials() -> Option<Credentials> {
 	let username = env::var(GIT_USERNAME_ENV).ok()?;
 	let password = env::var(GIT_PASSWORD_ENV).ok()?;
@@ -57,33 +44,13 @@ pub fn read_credentials() -> Option<Credentials> {
 	Some(Credentials::new(username, password))
 }
 
-/// Inject credentials into an HTTPS URL.
-///
-/// Transforms `https://github.com/user/repo.git` into
-/// `https://username:password@github.com/user/repo.git`.
+/// Inject credentials into an HTTPS URL:
+/// `https://github.com/user/repo.git` → `https://user:token@github.com/user/repo.git`.
 ///
 /// # Errors
 ///
-/// Returns `GitError::InvalidUrl` if the URL cannot be parsed.
-/// Returns `GitError::NotHttps` if the URL is not HTTPS.
-///
-/// # Example
-///
-/// ```rust,no_run
-/// use aghub_git::credentials::{inject_credentials, Credentials};
-///
-/// let creds = Credentials {
-///     username: "myuser".to_string(),
-///     password: "mytoken".to_string(),
-/// };
-///
-/// let url = inject_credentials(
-///     "https://github.com/user/repo.git",
-///     &creds
-/// ).unwrap();
-///
-/// assert_eq!(url, "https://myuser:mytoken@github.com/user/repo.git");
-/// ```
+/// `GitError::InvalidUrl` if the URL cannot be parsed; `GitError::NotHttps`
+/// for any non-HTTPS scheme (SSH/scp-style remotes are never injected into).
 pub fn inject_credentials(url: &str, creds: &Credentials) -> Result<String> {
 	let parsed = url::Url::parse(url).map_err(GitError::from)?;
 
@@ -104,7 +71,6 @@ pub fn inject_credentials(url: &str, creds: &Credentials) -> Result<String> {
 	Ok(with_creds.to_string())
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) fn noninteractive_credentials(
 	action: gix::credentials::helper::Action,
 ) -> gix::credentials::protocol::Result {

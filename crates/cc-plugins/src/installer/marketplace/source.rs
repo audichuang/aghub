@@ -154,12 +154,10 @@ pub(in crate::installer::marketplace) async fn materialize_marketplace_plugin(
 /// a marketplace with no registry entry — a hand-copied one, or a `claude` old
 /// enough to keep no registry.
 ///
-/// The order is NOT interchangeable, and it must match
-/// `UnifiedPluginRegistry::marketplace_roots`. A stale `marketplaces/<name>`
-/// left behind while the registry points at a new external path is exactly the
-/// case where the two disagree: reading it conventional-first made the catalog
-/// list the external marketplace's plugins while the repository URL and
-/// `can_reinstall` were answered from the stale copy.
+/// The order is NOT interchangeable and must match
+/// `UnifiedPluginRegistry::marketplace_roots`: with a stale `marketplaces/<name>`
+/// left behind, conventional-first answers the repository URL and
+/// `can_reinstall` from the stale copy while the catalog lists the new one.
 pub(in crate::installer) fn marketplace_path_for(
 	marketplace_root: &Path,
 	marketplace: &str,

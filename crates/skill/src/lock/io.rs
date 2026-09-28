@@ -4,9 +4,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// The interprocess mutation lock for the global lock file, so concurrent
-/// writers never interleave or observe a partially written file — and, unlike
-/// the process mutex this replaced, so two aghub PROCESSES cannot both be told
-/// they created the same entry. Reentrant, so a core flow holding it for a whole
+/// writers never interleave or observe a partially written file, and two aghub
+/// PROCESSES cannot both be told they created the same entry. Reentrant, so a core flow holding it for a whole
 /// transaction composes with these writers. Combined with temp+rename, readers
 /// always see either the old or the fully written new file.
 fn global_guard(op: &str) -> std::io::Result<super::guard::MutationGuard> {
@@ -136,26 +135,17 @@ where
 /// Read the GLOBAL skill lock, failing CLOSED. `Ok` when it parses, is absent,
 /// or is empty; `Err` naming the problem otherwise. Takes no mutation lock.
 ///
-/// Returns the PARSED LOCK, not a verdict. A predicate-only probe left the
-/// caller to read the file a second time through the fail-open reader, and
-/// between those two reads a non-aghub writer (an editor, `npx skills`) can
-/// truncate it — the second read then falls open to an empty lock and the
-/// command answers `[]` on exit 0, which is exactly the failure the probe was
-/// added to prevent. One read, no window.
-///
-/// The read paths above fail OPEN so a corrupt lock does not break every query.
-/// A caller that presents the lock's CONTENTS as its answer needs the
-/// difference, or it reports "nothing installed" for "I could not read the
-/// file": `check skills`, `source list` and `doctor` each did exactly that, on
-/// exit 0 with an empty stderr, and `doctor` went on to recommend deleting the
-/// skills it had just failed to see.
+/// For callers that present the lock's CONTENTS as their answer (`check`,
+/// `source list`, `doctor`): the fail-open readers would report "nothing
+/// installed" for "could not read the file". Returns the PARSED lock, not a
+/// verdict, so there is one read and no window for a non-aghub writer to
+/// truncate the file between probe and read. See
+/// docs/history/skill.md#fail-closed-lock-reads-for-reporting-commands
 pub fn read_global_lock_checked() -> std::io::Result<SkillLockFile> {
 	// `_versioned`, NOT the bare `read_lock_for_modify`: the bare one skips the
-	// old-format wipe that `read_skill_lock` applies. While this only answered
-	// yes/no that difference was invisible; now that the parsed value is handed
-	// to the caller, using the bare reader would resurrect v2 entries the
-	// fail-open reader treats as an empty lock — a silent behaviour change from
-	// a function that exists to REMOVE a silent behaviour change.
+	// old-format wipe `read_skill_lock` applies, and would hand the caller v2
+	// entries the fail-open reader treats as an empty lock
+	// (`checked_read_applies_the_old_format_wipe`).
 	read_lock_for_modify_versioned()
 		.map_err(|error| unreadable_for_reading(GLOBAL_LOCK_FILE, &error))
 }

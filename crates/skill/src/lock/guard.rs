@@ -14,16 +14,12 @@
 //! scheme would have to invent staleness detection, and a crashed aghub would
 //! then wedge the user's skills until they deleted a file by hand.
 //!
-//! The two platforms differ in ways this design deliberately does not depend on.
-//! `flock` is advisory and whole-file; `LockFileEx` is MANDATORY over a byte
-//! range (std locks `0..u32::MAX:u32::MAX`, i.e. all of it), so on Windows a
-//! foreign handle's reads and writes inside the range fail outright. That never
-//! matters here because the lock file's CONTENTS are never used: nothing is ever
-//! written to it and it stays 0 bytes (it IS opened read+write, because Windows
-//! cannot lock an append-only handle at all — see `lock_file`). What both
-//! platforms do share is what the reentrancy below relies on — a lock belongs to
-//! the open handle, not the process, so a second `open` of the same path from
-//! this very process blocks against itself.
+//! `flock` is advisory; `LockFileEx` is MANDATORY over the whole file, so on
+//! Windows a foreign handle's I/O on it fails. That never matters: the lock file
+//! stays 0 bytes and its contents are never used (it is opened read+write only
+//! because Windows cannot lock an append-only handle — see `lock_file`). Both
+//! platforms tie the lock to the open HANDLE, so a second `open` of the same
+//! path in this process blocks against itself — which the reentrancy relies on.
 //!
 //! Scope: this serializes aghub against aghub only. `npx skills` takes no lock
 //! of ours, so a concurrent `npx skills` run is still unserialized. Read paths
@@ -196,12 +192,9 @@ pub fn resolve_existing(path: &Path) -> PathBuf {
 	lexical
 }
 
-/// Serializes mutations between THREADS of this process, replacing the two
-/// per-module write mutexes the lock writers used to take: one lock, held for the
-/// whole flow, so an in-process race cannot slip between a check and its write
-/// either. It also makes in-process contention a WAIT rather than a timeout —
-/// two threads racing for one path through the file lock alone would have one of
-/// them fail after the bound.
+/// Serializes mutations between THREADS of this process: one lock held for the
+/// whole flow, so an in-process race cannot slip between a check and its write.
+/// It also makes in-process contention a WAIT rather than a file-lock timeout.
 ///
 /// ponytail: ONE process-wide mutex, not one per lock path. The ceiling: it is
 /// held across the file-lock wait, so while thread A waits on an EXTERNAL aghub
@@ -339,19 +332,13 @@ pub fn mutation_guard_with_timeout(
 
 /// Take [`PROCESS_LOCK`], queueing behind any other mutation on this process.
 ///
-/// Deliberately UNBOUNDED, unlike the file wait. The two are not the same kind of
-/// wait: the file lock waits on a FOREIGN process that may be hung or gone, so a
-/// bound is the only protection there. This one waits on OUR own code, which will
-/// finish or fail on its own — and bounding it turns ordinary queued work into
-/// spurious failures. Measured, not assumed: a bounded version made a 200ms
-/// acquire in this crate's own suite fail as soon as the other lock tests ran
-/// alongside it, which is the exact shape of a desktop bulk operation over N
-/// skills (the last one queues behind the other N-1). A genuinely hung flow is a
-/// bug to fix in that flow; failing an unrelated thread would not fix it.
+/// Deliberately UNBOUNDED, unlike the file wait: the file lock waits on a FOREIGN
+/// process that may be hung or gone, this waits on OUR own code, and bounding it
+/// turns ordinary queued work (a desktop bulk operation over N skills) into
+/// spurious failures. See docs/history/skill.md#bounded-process-mutex-failed-queued-work
 fn lock_process() -> MutexGuard<'static, ()> {
 	// Poisoned: a previous holder panicked mid-mutation. The data it was writing is
-	// not this lock's business, and refusing every later mutation would be worse,
-	// so adopt it exactly as the write mutex this replaced did.
+	// not this lock's business, and refusing every later mutation would be worse.
 	PROCESS_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -408,15 +395,10 @@ impl Drop for MutationGuard {
 /// Open `path` and take its OS lock, waiting until `deadline`.
 ///
 /// EVERY failure is an error — there is deliberately no "proceed unlocked"
-/// fallback. An earlier revision degraded to a `log::warn` when the file could
-/// not be created or the filesystem rejected locking, on the theory that
-/// refusing to work was worse than the pre-lock status quo. That was wrong twice
-/// over: a warning is invisible in the desktop/API, and it masked a total
-/// failure — opening append-only made `try_lock` fail on ALL of Windows, so the
-/// degrade path would have shipped Windows with no interprocess lock at all and
-/// no visible symptom. A stale root-owned lock file, or a mount that allows I/O
-/// but rejects locking, deserve the same actionable error rather than silent
-/// loss of the exclusion every receipt in this subsystem now assumes.
+/// fallback: a warning is invisible in the desktop/API, and every receipt in
+/// this subsystem assumes the exclusion (pinned by
+/// `an_unlockable_location_refuses_instead_of_running_unlocked`). See
+/// docs/history/skill.md#mutation-lock-no-unlocked-fallback
 fn lock_file(path: &Path, op: &str, deadline: Instant) -> io::Result<File> {
 	if let Some(parent) = path.parent() {
 		std::fs::create_dir_all(parent).map_err(|error| {

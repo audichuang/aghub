@@ -64,23 +64,13 @@ const TEST_CREDENTIAL_FILE_ENV: &str = "AGHUB_TEST_CREDENTIAL_FILE";
 /// The skill locks a read-only command is about to REPORT ON, read exactly
 /// once and failing CLOSED.
 ///
-/// The lock read paths fail OPEN to an empty lock, deliberately, so one corrupt
-/// file does not break every query. But `check` and `doctor` present the lock's
-/// CONTENTS as their answer, and an empty view there reads as "nothing is
-/// installed" — they answered `[]` on exit 0 with an empty stderr for a
-/// `skills-lock.json` full of entries they simply could not parse, and `doctor`
-/// went on to classify the still-present skills `untracked` and recommend
-/// deleting them.
+/// The normal read paths fail OPEN to an empty lock, but `check`/`doctor`
+/// present lock CONTENTS as their answer, where empty reads as "nothing is
+/// installed". Returns the PARSED locks, not a verdict, so no second fail-open
+/// read can reopen the window. See docs/history/cli.md#lock-snapshot-fails-closed
 ///
-/// This returns the PARSED locks rather than a verdict. A predicate-only probe
-/// left each command to read the file a second time through the fail-open
-/// reader, and a non-aghub writer (an editor, `npx skills`) that truncates it
-/// between the two reads puts the empty answer back — the same bug, in a
-/// narrower window. One read, consumed directly.
-///
-/// `None` means the scope was not requested, NOT that its file is missing: an
-/// absent lock parses as an empty one, exactly as the fail-open reader would
-/// have produced.
+/// `None` means the scope was not requested, NOT that its file is missing (an
+/// absent lock parses as empty).
 #[derive(Debug, Default)]
 pub(crate) struct LockSnapshot {
 	pub global: Option<skill::lock::SkillLockFile>,
@@ -92,10 +82,9 @@ pub(crate) fn read_locks_checked(
 	want_global: bool,
 	project_root: Option<&std::path::Path>,
 ) -> Result<LockSnapshot> {
-	// Mapped to `ConfigError::Io` rather than passed through as a raw
-	// `io::Error`: `report_failure` recovers the shared error code by
-	// downcasting to `ConfigError`, and a bare `io::Error` in the anyhow chain
-	// degrades `IO_ERROR` into the `CLI_ERROR` fallback.
+	// Wrapped in `ConfigError::Io`: `report_failure` downcasts to
+	// `ConfigError`, so a bare `io::Error` would degrade `IO_ERROR` to
+	// `CLI_ERROR`.
 	let typed = |error: std::io::Error| {
 		anyhow::Error::from(aghub_core::errors::ConfigError::Io(error))
 	};

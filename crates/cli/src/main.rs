@@ -319,8 +319,8 @@ enum Commands {
 	},
 	/// Disable an MCP server (keeps it in config).
 	///
-	/// MCP servers only — see [`McpResource`]. Supported by codex, opencode and
-	/// amp; every other agent's descriptor refuses it.
+	/// MCP servers only. Only agents whose config has a
+	/// native per-server toggle support it; the others refuse.
 	Disable {
 		#[arg(value_enum)]
 		resource: McpResource,
@@ -328,8 +328,8 @@ enum Commands {
 	},
 	/// Re-enable a previously disabled MCP server.
 	///
-	/// MCP servers only — see [`McpResource`]. Supported by codex, opencode and
-	/// amp; every other agent's descriptor refuses it.
+	/// MCP servers only. Only agents whose config has a
+	/// native per-server toggle support it; the others refuse.
 	Enable {
 		#[arg(value_enum)]
 		resource: McpResource,
@@ -345,14 +345,12 @@ enum Commands {
 	///
 	/// Scope defaults to BOTH global and the current project, like the other
 	/// read-only diagnostics (`doctor`, `source list`, `source diff`); `-g` /
-	/// `-p` still narrow it. It used to follow the plain global default and so,
-	/// run inside a project, answered "up to date" from the global lock alone
-	/// without ever reading the project's.
+	/// `-p` still narrow it.
 	///
 	/// Offline by default: remote sources report `uncheckable`/`network` with
 	/// `checked: false`. Pass `--online` for a real update check.
 	Check {
-		/// Skills only — see [`SkillResource`].
+		/// Skills only.
 		#[arg(value_enum)]
 		resource: SkillResource,
 
@@ -372,7 +370,7 @@ enum Commands {
 	},
 	/// Apply an available skill update from the lock's source/ref/skillPath.
 	ApplyUpdate {
-		/// Skills only — see [`SkillResource`].
+		/// Skills only.
 		#[arg(value_enum)]
 		resource: SkillResource,
 		/// The skill to update. Omit it and pass --outdated to update every
@@ -467,41 +465,22 @@ enum Commands {
 		verify_links: bool,
 
 		/// Exit non-zero when any issue is found, so `doctor` can gate a
-		/// script or a CI step.
+		/// script or a CI step. Opt-in: the default exit code is unchanged.
 		///
-		/// Opt-in on purpose: the default exit code is unchanged, so anyone
-		/// already running `doctor` in CI is unaffected. Without it,
-		/// `doctor --verify-links && echo healthy` prints healthy over a
-		/// dangling referrer — the findings only ever went to stderr.
-		///
-		/// Counts BOTH axes: an ACTIONABLE `health` — `orphan-lock` (a lock
+		/// Counts BOTH axes: an actionable `health` — `orphan-lock` (a lock
 		/// entry with no master on disk), `invalid-skill` (a master whose
-		/// SKILL.md does not parse) or `master-is-symlink` — and, when
-		/// `--verify-links` is given, any per-agent referrer problem.
+		/// SKILL.md does not parse) or `master-is-symlink` (the store must hold
+		/// the skill's own bytes; `repair` refuses it, so replace it with a real
+		/// directory by hand) — and, with `--verify-links`, any per-agent
+		/// referrer problem.
 		///
-		/// Deliberately NOT every non-`ok` health. `untracked` (a master with no
-		/// lock entry — a skill placed by hand) is a supported resting state,
-		/// and failing CI over it would only teach you to append `|| true`.
-		/// `withheld` and `unsupported` are likewise correct — a skill
-		/// deliberately not granted to that agent, or an agent that cannot hold
-		/// a skill at all.
-		///
-		/// `master-is-symlink` DOES fail: the store must hold the skill's own
-		/// bytes, so a linked master violates the store invariant and `repair`
-		/// refuses it — normalize the store entry into a real directory by
-		/// hand, then re-run.
-		// Two claims that were here do NOT hold, and public help is the worst
-		// place to guess. "aghub refuses to repair, relink or delete":
-		// `verify_shape`'s blockers are a shared `ForkedCopy` and an
-		// `AliasedMaster`, NOT the master-side violations, so the delete guard
-		// never fires on a linked master. "`source sync` will not act on it
-		// either": `verify_shape` is called only from `removal.rs`, so the
-		// resync path has no shape gate at all and what it does to a linked
-		// master is UNPINNED, not refused. `repair` is the one that IS pinned
-		// (`plan_repair` -> `Refuse { MasterIsLink }`, rendered as "the store
-		// holds a link where it must hold a real directory"). `//`, not `///`:
-		// clap concatenates only the doc comments, and this is maintainer
-		// context.
+		/// Not counted, because they are correct resting states: `untracked`
+		/// (a master placed by hand, with no lock entry), `withheld` (not
+		/// granted to that agent) and `unsupported` (the agent cannot hold a
+		/// skill).
+		// Only `repair` is pinned to refuse a linked master (`plan_repair` ->
+		// `Refuse { MasterIsLink }`); do not claim here that delete or
+		// `source sync` refuse it — neither has that gate.
 		#[arg(long)]
 		fail_on_issues: bool,
 	},
@@ -532,12 +511,8 @@ pub enum SourceAction {
 		/// locked ref)
 		#[arg(long = "ref", alias = "git-ref")]
 		git_ref: Option<String>,
-		/// Accepted and ignored: `diff` always goes to the network.
-		///
-		/// Here only because `check --online` exists, so a caller reasonably
-		/// tries the same flag here and used to get a clap exit 2 whose "to
-		/// pass '--online' as a value, use '-- --online'" tip reads like a
-		/// quoting problem.
+		/// Accepted and ignored: `diff` always goes to the network. Exists so
+		/// the `check --online` habit is not a clap error.
 		#[arg(long, hide = true)]
 		online: bool,
 	},
@@ -550,11 +525,6 @@ pub enum SourceAction {
 	/// only) from the environment. Runnable examples are at the end of this
 	/// help.
 	#[command(visible_alias = "install")]
-	// The examples live in `after_long_help`, NOT in the doc comment above:
-	// clap re-wraps a `///` paragraph, which joined the two example lines into
-	// ONE unrunnable command (`… --yes aghub-cli -p source sync …`). It was the
-	// only worked example in the whole CLI, and it sat on the install entry
-	// point. `after_long_help` is emitted verbatim.
 	#[command(after_long_help = SYNC_EXAMPLES)]
 	Sync {
 		/// Repo to sync from: `owner/repo`, an https git URL, or a source id
@@ -619,13 +589,9 @@ enum ResourceType {
 
 /// Resource arg for the commands that ONLY work on skills.
 ///
-/// `check` and `apply-update` shared the full `ResourceType`, so clap advertised
-/// `[possible values: skills, mcps]` and their long help never said otherwise —
-/// then the runtime bailed with bare prose on stderr and an EMPTY stdout, even
-/// under `--json`. clap's `[possible values]` is the most authoritative
-/// machine-readable signal there is; an agent enumerates the surface from it and
-/// built `check mcps`. Rejecting at parse time makes the error precise and
-/// self-correcting.
+/// Its own value_enum so clap's `[possible values]` — what an agent enumerates
+/// the surface from — is exact, and `check mcps` is a parse error.
+/// See docs/history/cli.md#narrowed-resource-args
 #[derive(Copy, Clone, ValueEnum)]
 enum SkillResource {
 	#[value(alias = "skill")]
@@ -640,12 +606,9 @@ impl From<SkillResource> for ResourceType {
 
 /// Resource arg for the commands that ONLY work on MCP servers.
 ///
-/// `enable`/`disable skills` was a DEAD command: `set_skill_enabled` has no
-/// success branch for any of the 25 agents (deliberately — `save()` serializes
-/// MCPs only, so flipping `Skill::enabled` would silently rewrite `.mcp.json`
-/// and strip fields aghub does not model; core calls that "worse than an honest
-/// refusal", and it is right). But clap still advertised `skills`, so the only
-/// way to learn no agent supports it was to enumerate agent ids by hand.
+/// No agent can enable/disable a skill (deliberately: `save()` serializes MCPs
+/// only, so flipping `Skill::enabled` would rewrite `.mcp.json` lossily), so
+/// clap must not advertise `skills`. See docs/history/cli.md#narrowed-resource-args
 #[derive(Copy, Clone, ValueEnum)]
 enum McpResource {
 	#[value(alias = "mcp")]
@@ -670,10 +633,9 @@ impl ResourceType {
 
 /// Reject `-a all` for a command that does not fan out.
 ///
-/// The generic path rejects it inside `handle_all_agents`. `check` and
-/// `prune-lock` are now dispatched BEFORE that, so they need the same refusal
-/// explicitly — without it, moving them silently turned `-a all` into a no-op,
-/// which is the exact shape of defect this whole change set is removing.
+/// The generic path rejects it in `handle_all_agents`; `check` and
+/// `prune-lock` dispatch before that, so without this `-a all` would be a
+/// silent no-op for them.
 fn reject_agent_all(agent: &str) -> Result<()> {
 	if matches!(AgentSelection::parse(agent), Ok(AgentSelection::All)) {
 		anyhow::bail!(
@@ -701,18 +663,12 @@ fn fanout_resource(command: &Commands) -> Option<ResourceType> {
 	}
 }
 
-/// Routes the `log` crate to stderr.
+/// Routes the `log` crate to stderr: warnings and errors always, info/debug
+/// under `-v` (like `eprintln_verbose!`).
 ///
-/// Nothing in this workspace installed a logger outside its own tests, so every
-/// `log::warn!` in `aghub-core` / `aghub-skill` / `aghub-git` went to the
-/// no-op logger and vanished. That silence had teeth: both lock read paths
-/// (`skill::lock::io` and `skill::lock::local`) fail OPEN on an unparseable
-/// lock and announce it *only* through `log::warn!`, so a corrupt
-/// `skills-lock.json` read as "no skills installed" with nothing on either
-/// stream to contradict it.
-///
-/// Warnings and errors always print; `-v` opens it up to info/debug, matching
-/// what `eprintln_verbose!` already does.
+/// Load-bearing: both lock read paths (`skill::lock::io`, `skill::lock::local`)
+/// fail OPEN on an unparseable lock and announce it only via `log::warn!`.
+/// See docs/history/cli.md#stderr-logger
 struct StderrLogger;
 
 impl log::Log for StderrLogger {
@@ -753,22 +709,12 @@ fn main() -> std::process::ExitCode {
 	}
 }
 
-/// Print a failure. Under `--json` it goes to STDOUT as JSON, matching where
-/// the success payload goes.
+/// Print a failure. Under `--json` it goes to STDOUT (where the success
+/// payload goes) as `{"error":{code,message,retryable}}`; the prose goes to
+/// stderr either way.
 ///
-/// A caller in `--json` mode used to get nothing on stdout and one line of
-/// English on stderr, and every runtime failure — a policy refusal
-/// (`apply-update` without `--yes`), a missing resource, an invalid agent id, a
-/// rejected scope combination, a genuine failed write — was exit 1. The only
-/// way to tell them apart was matching the prose, which is not stable and is
-/// not even consistent: the same "resource is missing" condition reads
-/// `Skill 'x' not found` from `describe` and `Resource not found: skill 'x'`
-/// from `disable`.
-///
-/// `code` comes from `aghub_core::error_codes`, the same vocabulary the HTTP
-/// API sends, and `retryable` answers the one question an automating caller
-/// actually has to decide. The prose stays on stderr either way, for humans and
-/// for anything already scraping it.
+/// `code` is `aghub_core::error_codes`, the HTTP API's vocabulary, so a caller
+/// never has to match unstable prose. See docs/history/cli.md#json-failure-envelope
 fn report_failure(error: &anyhow::Error, json: bool) {
 	if json && !ANSWER_ON_STDOUT.load(Ordering::Relaxed) {
 		// `anyhow` erases the type, so recover the `ConfigError` when it is in
@@ -786,11 +732,8 @@ fn report_failure(error: &anyhow::Error, json: bool) {
 		let payload = serde_json::json!({
 			"error": {
 				"code": code,
-				// `{:#}` walks the whole anyhow chain. `to_string()` returns
-				// only the outermost context, so a wrapped failure read as
-				// "Failed to load config" with the actual cause (which file,
-				// which parse error, which line) stranded in the `Caused by:`
-				// block that only stderr gets.
+				// `{:#}` walks the whole anyhow chain; `to_string()` keeps only
+				// the outermost context and drops the cause.
 				"message": format!("{error:#}"),
 				"retryable": retryable,
 			}
@@ -818,12 +761,10 @@ fn run(cli: Cli) -> Result<()> {
 		log::LevelFilter::Warn
 	});
 
-	// The scope flags are `global = true` so they can be written before OR
-	// after the subcommand. clap does NOT propagate an ArgGroup to
-	// subcommands, so the old `ArgGroup::new("scope")` would have silently
-	// stopped enforcing exclusivity the moment the args went global — the
-	// check has to be manual, and it has to run for EVERY command, including
-	// the ones dispatched early below.
+	// The scope flags are `global = true` (usable before OR after the
+	// subcommand) and clap does not propagate an ArgGroup to global args, so
+	// exclusivity is checked by hand, for EVERY command, early dispatches
+	// included.
 	let picked: Vec<&str> = [
 		(cli.global, "-g/--global"),
 		(cli.project, "-p/--project"),
@@ -853,20 +794,10 @@ fn run(cli: Cli) -> Result<()> {
 		);
 	}
 
-	// Validate the agent flag ONCE, here, before every early dispatch below.
-	//
-	// The full parse further down cannot move: `AgentSelection::All` routes into
-	// `handle_all_agents`, which only the generic commands want. But VALIDITY is
-	// universal, and it used to be checked only after eight early returns — so
-	// `-a bogus` exited 1 on `get`/`check`/`prune-lock`/`delete` and exited 0,
-	// silently ignoring the typo, on `coverage`/`doctor`/`source list`/
-	// `skill-usage`. `doctor` and `doctor --verify-links` — the SAME
-	// subcommand — disagreed about the same bad id. That left no command an
-	// agent could use to check an id it had composed: a cheap read-only probe
-	// said `bogus` was fine, and the wall came later, mid-write.
-	//
-	// Commands that ignore the agent flag keep ignoring it; only an invalid id
-	// changes behaviour, and it now fails the same way everywhere.
+	// Validate `-a` ONCE, before every early dispatch, so an invalid id fails
+	// the same way on every command (a command that ignores `-a` still ignores
+	// a valid one). The full parse below cannot move: `AgentSelection::All`
+	// routes into `handle_all_agents`. See docs/history/cli.md#agent-id-validated-up-front
 	AgentSelection::parse(&cli.agent)
 		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
@@ -916,13 +847,10 @@ fn run(cli: Cli) -> Result<()> {
 		return commands::inference::execute(action, cli.json);
 	}
 
-	// `plugin` manages Claude Code's plugin store, not per-scope agent config —
-	// root `--help` says outright that it IGNORES the scope flags. It therefore
-	// must not go through `resolve_scope_and_root`: once the project-root guard
-	// became unconditional (so read paths stop answering `[]` outside a
-	// project), the generic path started failing `-p plugin list` with "no
-	// project root found" for a command that never wanted a scope. Claude-only
-	// is still enforced, here, where the message can name the fix.
+	// `plugin` manages Claude Code's plugin store and IGNORES the scope flags
+	// (root `--help` says so), so it must not reach the scope resolver, whose
+	// unconditional project-root guard would fail `-p plugin list`.
+	// Claude-only is enforced here, where the message can name the fix.
 	if let Commands::Plugin { action } = &cli.command {
 		let agents = AgentSelection::parse(&cli.agent)
 			.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
@@ -985,23 +913,15 @@ fn run(cli: Cli) -> Result<()> {
 	// `skill-usage` reads Claude's global `skillUsage` counter — it is
 	// Claude-global, not single-agent scoped, so dispatch before adapter setup.
 	if let Commands::SkillUsage = &cli.command {
-		// The resolved scope is passed in even though `skill-usage` has only
-		// one: a dispatch that merely CALLED the resolver for its rejections
-		// and dropped the result could be deleted without a compile error, so
-		// the one command whose scope is pure validation was also the one that
-		// could silently skip the policy table.
+		// Passed in although `skill-usage` has one scope: a call made only for
+		// its rejections could be deleted without a compile error.
 		let resolved = resolve_cli_scope(&cli)?;
 		return commands::skill_usage::execute(&resolved, cli.json);
 	}
 
-	// `check` and `prune-lock` answer from the SKILL LOCK alone — they never
-	// read or write an agent's config. Dispatched here, before the
-	// adapter/ConfigManager setup, for the same reason the commands above are:
-	// a malformed agent config must not block a command that never needed one.
-	// Tightening `tolerate_missing` to only absorb NotFound (so a corrupt
-	// config stops reading as an empty one) otherwise made a broken
-	// `.mcp.json` fail `check skills` and `prune-lock`, which is unrelated to
-	// either.
+	// `check` and `prune-lock` answer from the SKILL LOCK alone, so they
+	// dispatch before adapter setup too: a malformed agent config (an error
+	// now, not an empty read) must not fail them.
 	if let Commands::Check {
 		resource,
 		online,
@@ -1077,12 +997,9 @@ fn run(cli: Cli) -> Result<()> {
 			} else {
 				print!("{}", render_mutation(&cli.command, &payload));
 			}
-			// A payload that says `success: false` must not exit 0. Today that is
-			// `RemovalKind::Partial`: the removal RAN and at least one path could
-			// not be deleted, so the resource is wholly or partly still there.
-			// `delete --yes` on a read-only directory exited 0 with the skill
-			// untouched. The report above IS the answer, so suppress the failure
-			// renderer's second document.
+			// `success: false` (today: `RemovalKind::Partial`, some path could
+			// not be deleted) must not exit 0. The report above IS the answer,
+			// so suppress the failure renderer's second document.
 			if payload.get("success").and_then(serde_json::Value::as_bool)
 				== Some(false)
 			{
@@ -1158,16 +1075,12 @@ fn render_mutation(command: &Commands, payload: &serde_json::Value) -> String {
 }
 
 /// Render a `RemovalView` payload. A preview MUST say how to commit it and a
-/// commit MUST disclose the Master left behind — the JSON carried both facts in
-/// `needs_confirm` / `skipped`, where a human running `delete` never saw them
-/// and could read `"success": true` as "it was removed".
+/// commit MUST disclose the Master left behind (`needs_confirm` / `skipped`),
+/// or a human reads `"success": true` as "it was removed".
 ///
-/// It must NOT claim the resource is absent. `RemovalView` cannot express that:
-/// an MCP that exists and one that does not serialize IDENTICALLY (MCP removal
-/// rewrites shared config and deletes no disk path, so `paths` is deliberately
-/// always empty — root AGENTS.md "MCP removal contract"), and a skill's noop
-/// looks the same as a skill whose files are already gone. So the wording stays
-/// inside what the payload proves: which paths, if any, are involved.
+/// It must NOT claim the resource is absent: an existing and a missing MCP
+/// serialize identically (MCP removal deletes no disk path, so `paths` is
+/// always empty), as do a skill noop and a skill already gone.
 fn render_removal(
 	resource: ResourceType,
 	name: &str,
@@ -1184,19 +1097,12 @@ fn render_removal(
 			.map(|a| a.iter().filter_map(|p| p.as_str()).collect())
 			.unwrap_or_default()
 	};
-	// `kept` is terminal, and it now covers TWO worlds. Checked before the
-	// preview branch, which would otherwise print "re-run with --yes to
-	// remove" — the never-terminating hint `RemovalKind::Kept` exists to kill.
-	//
-	// Single agent: the master is shared and an executing call REFUSES.
-	// `--all-agents`: since 5437da3c the sweep can also finish having taken
-	// NOTHING. A commit whose `blocks` is true still refuses; the planner's
-	// OWN keep does not, and reports `kept` with `--yes` given. Neither half
-	// of the single-agent sentence is true there: no agent reads a `.aghub`
-	// master at all (root AGENTS.md, "a directory no agent reads"), and
-	// "re-run with --all-agents" is the dead end itself when `--all-agents` is
-	// what just ran. All the caller can act on is the list, which the early
-	// `return` below never let them see.
+	// `kept` is terminal; checked before the preview branch, whose "re-run
+	// with --yes" hint would never terminate. Two cases: a single agent whose
+	// master is shared (the commit refuses), and an `--all-agents` sweep that
+	// took NOTHING. For the sweep the single-agent message is false — no agent
+	// reads a `.aghub` master, and `--all-agents` is what just ran — so show
+	// the list instead.
 	if payload.get("outcome").and_then(|v| v.as_str()) == Some("kept") {
 		if all_agents {
 			let skipped = list("skipped");
@@ -1205,20 +1111,14 @@ fn render_removal(
 				 agent took nothing, so it is all still on disk.\n"
 			);
 			if !skipped.is_empty() {
-				// `skipped` is the only carrier — `still_read_from` is a
-				// `RemovalPlan` field and never reaches the wire. It holds the
-				// kept master together with whatever the sweep could not
-				// clear, and the heading does NOT claim which is which: the
-				// payload cannot tell them apart, and re-deriving it here by
-				// testing a path for `.aghub` would be a second answer, free
-				// to drift from the planner's.
+				// `skipped` is the only carrier (`still_read_from` never reaches
+				// the wire). It mixes the kept master with what the sweep could
+				// not clear; do not tell them apart by testing for `.aghub` —
+				// that is a second answer free to drift from the planner's.
 				//
-				// NEVER tell the user to delete these. `plan_symlink_removal`
-				// pushes an agent's whole SKILLS DIRECTORY here when it could
-				// not list it, so "clear these by hand" on
-				// `~/.claude/skills` reads as "delete every Claude skill".
-				// The remedy is the one root AGENTS.md states: make the
-				// unreadable ones readable and re-run.
+				// NEVER tell the user to delete these: `plan_symlink_removal`
+				// puts a whole agent SKILLS DIRECTORY here when it could not
+				// list it. Remedy: make them readable and re-run.
 				out.push_str("left in place:\n");
 				for p in &skipped {
 					out.push_str(&format!("  {p}\n"));
@@ -1234,11 +1134,8 @@ fn render_removal(
 			return out;
 		}
 		return format!(
-			// Deliberately does NOT name a directory. The Master moved to the
-			// `.aghub` store, and this string still said `.agents/skills` —
-			// sending anyone who followed it to look in the wrong place. The
-			// path is not needed to act on the message anyway; the two
-			// remedies are.
+			// Names no directory: the remedies suffice, and a hardcoded path
+			// went stale once the Master moved to `.aghub`.
 			"{} '{name}' was NOT removed: this agent still reads it from a \
 			 master shared with other agents. Delete it for all agents \
 			 (--all-agents), or remove it from the other agents sharing that \
@@ -1249,12 +1146,9 @@ fn render_removal(
 	let paths = list("paths");
 	let skipped = list("skipped");
 
-	// `partial` is terminal in the other direction from `kept`: the removal RAN
-	// and at least one path could not be deleted. Falling through would print
-	// two lies at once — with every path failing, `paths` is empty, so the
-	// branch below says "removed … : no installed files to remove", and then
-	// every path that FAILED gets listed under "kept (shared with other
-	// agents)", which is a different thing entirely.
+	// `partial` is terminal too (the removal RAN, some path failed). Falling
+	// through would print "no installed files to remove" and list the FAILED
+	// paths as "kept (shared with other agents)".
 	if payload.get("outcome").and_then(|v| v.as_str()) == Some("partial") {
 		let mut out = format!(
 			"{} '{name}' was only PARTIALLY removed — see the warnings above \
@@ -1298,10 +1192,9 @@ fn render_removal(
 		}
 		out.push_str("re-run with --yes to remove\n");
 	} else if flag("executed") != Some(true) {
-		// `--yes` was given and nothing ran: the resource was already gone
-		// (`RemovalOutcome::noop`). Telling the caller to "re-run with --yes"
-		// there is a loop that never terminates — a script retrying on that
-		// hint would spin forever. Delete stays idempotent (exit 0).
+		// `--yes` given and nothing ran: already gone (`RemovalOutcome::noop`).
+		// No "re-run with --yes" hint — a script retrying on it would spin
+		// forever. Delete stays idempotent (exit 0).
 		out.push_str(&format!("{kind} '{name}': nothing to remove\n"));
 	} else if paths.is_empty() {
 		out.push_str(&format!("removed {kind} '{name}': {target}\n"));
@@ -1318,8 +1211,7 @@ fn render_removal(
 			out.push_str(&format!("  {p}\n"));
 		}
 		out.push_str(
-			// The path is printed immediately above, so naming a directory
-			// here was redundant AND wrong once the store moved to `.aghub`.
+			// No directory named: the path is printed just above.
 			"note: the Master listed above is NOT removed. `source sync` \
 			 refuses to overwrite an existing Master, so delete it by hand \
 			 before reinstalling this skill from git.\n",
@@ -1355,9 +1247,8 @@ fn takes_agent_list(command: &Commands) -> bool {
 //
 // ONE table (`scope_policy`), ONE resolver (`resolve_scope`), ONE resolved
 // value (`Scope`). Command modules receive the `Scope`, never the three
-// booleans, so there is nothing left for them to re-derive — which is what
-// used to grow a private resolver, and its own project-root bail, inside
-// `source`, `coverage` and `transfer`.
+// booleans, so none can regrow a private resolver. Rules: crates/cli/AGENTS.md
+// "Two dispatch funnels".
 
 /// The scope flags exactly as parsed. Only [`resolve_scope`] reads them.
 #[derive(Clone, Copy, Default, Debug)]
@@ -1377,8 +1268,7 @@ impl From<&Cli> for ScopeFlags {
 	}
 }
 
-/// The one project-root failure. It used to be copied, in five different
-/// wordings, into every module that resolved a scope of its own.
+/// The one project-root failure message, for every scope policy.
 const NO_PROJECT_ROOT: &str =
 	"no project root found from the current directory; run this inside a \
 	 project (a directory with an agent config marker, e.g. .claude/, \
@@ -1403,12 +1293,10 @@ struct ScopePolicy {
 	/// Let a `-p` with NO project root through as `ProjectOnly` + no root
 	/// instead of failing with [`NO_PROJECT_ROOT`].
 	///
-	/// True ONLY for `transfer`/`reconcile`, which never resolved the root in
-	/// the CLI at all: they hand the scope to core, whose source lookup fails
-	/// with a typed `ResourceNotFound` — so `--json` reports
-	/// `code: RESOURCE_NOT_FOUND`, not the untyped `CLI_ERROR` an early bail
-	/// here would produce. Bailing early reads better but silently rewrites a
-	/// machine-readable error code that the HTTP API shares.
+	/// True ONLY for `transfer`/`reconcile`: core's source lookup then fails
+	/// with a typed `ResourceNotFound`, so `--json` keeps
+	/// `code: RESOURCE_NOT_FOUND` (shared with the HTTP API) instead of the
+	/// untyped `CLI_ERROR` an early bail here would produce.
 	rootless_project_passthrough: bool,
 }
 
@@ -1422,9 +1310,8 @@ const READ_ANY_SCOPE: ScopePolicy = ScopePolicy {
 };
 
 /// Read-only diagnostic: no flag means global PLUS the current project.
-/// `doctor`, `source list`, `source diff` and `check` all share this — `check`
-/// following the plain global default meant "this project is up to date" was
-/// answered without ever reading the project lock.
+/// `doctor`, `source list`, `source diff` and `check` share this.
+/// See docs/history/cli.md#check-scope-defaults-to-both
 const READ_BOTH_BY_DEFAULT: ScopePolicy = ScopePolicy {
 	reject_all: None,
 	reject_project: None,
@@ -1484,11 +1371,9 @@ const SOURCE_SYNC_SCOPE: ScopePolicy = ScopePolicy {
 	rootless_project_passthrough: false,
 };
 
-/// `apply-update` reads the lock, but it REWRITES the skill on disk, and core
-/// (`LockedResyncError::UnsupportedScope`) has always refused `Both`. Saying so
-/// here, with core's own sentence verbatim, is what makes "every rejection runs
-/// before the cwd is touched" true for it too: the refusal used to arrive after
-/// a project-root lookup and a lock read.
+/// `apply-update` REWRITES the skill on disk and core
+/// (`LockedResyncError::UnsupportedScope`) refuses `Both`. Rejecting it here,
+/// with core's sentence verbatim, keeps the refusal before the cwd is touched.
 const APPLY_UPDATE_SCOPE: ScopePolicy = ScopePolicy {
 	reject_all: Some("apply-update requires --global or --project, not --all"),
 	reject_project: None,
@@ -1521,19 +1406,13 @@ const CLAUDE_GLOBAL_ONLY_SCOPE: ScopePolicy = ScopePolicy {
 	rootless_project_passthrough: false,
 };
 
-/// THE scope policy table.
+/// THE scope policy table. Exhaustive on purpose: a new subcommand does not
+/// COMPILE until it is classified here (the compiler forces a classification,
+/// review checks it is the right one).
 ///
-/// Exhaustive on purpose. The old table ended in `_ => AllowBoth` and relied
-/// on a comment ("Any new MUTATING subcommand must be added to the SingleWrite
-/// arm above, or it silently bypasses the project-root guard") to keep itself
-/// correct; now a new subcommand does not COMPILE until it is classified here.
-/// The compiler forces a classification, not a correct one — but silence is no
-/// longer an option.
-///
-/// `None` means the command ignores the scope flags entirely and must NOT go
-/// through the resolver: `inference` and `plugin` manage a shared store, not
-/// per-scope agent config, and `-p plugin list` would otherwise fail with "no
-/// project root found" for a command that never wanted a scope.
+/// `None`: the command ignores the scope flags and must NOT reach the
+/// resolver — `inference` and `plugin` manage a shared store, and `-p plugin
+/// list` would otherwise fail with "no project root found".
 fn scope_policy(command: &Commands) -> Option<ScopePolicy> {
 	Some(match command {
 		Commands::Add { .. }
@@ -1567,15 +1446,10 @@ fn scope_policy(command: &Commands) -> Option<ScopePolicy> {
 	})
 }
 
-/// The seal around [`Scope`]'s fields.
-///
-/// Rust privacy is per-DEFINING-module and reaches every DESCENDANT, so a
-/// `Scope` declared in the crate root has "private" fields that
-/// `commands::source` can still write: a command module could forge
-/// `Scope { scope: ProjectOnly, project_root: None }` and skip the policy
-/// table entirely — the exact state `write_target` calls unreachable. Inside
-/// its own module the fields are reachable only here, so `resolve_scope` is
-/// the only way to obtain one.
+/// The seal around [`Scope`]'s fields. Rust privacy reaches every DESCENDANT
+/// of the defining module, so a crate-root `Scope` could be forged by
+/// `commands::source` (`Scope { ProjectOnly, None }`) to skip the policy
+/// table. In this module, `resolve_scope` is the only way to build one.
 mod scope {
 	use super::*;
 
@@ -1608,11 +1482,9 @@ mod scope {
 
 		/// Which config file the SINGLE-AGENT path writes. `Both` writes the
 		/// GLOBAL config when a project root exists (`with_scope(global = true)`
-		/// sets `write_scope = GlobalOnly`) — surprising, but it is verbatim the
-		/// answer the hand-rolled `use_global_config` ladder in `run_for_agent`
-		/// gave from the raw flags, and `--all` is refused by every generic
-		/// mutation anyway. Do NOT "fix" the arm to match a nicer sentence: it
-		/// would flip which config `--all get mcps` reads.
+		/// sets `write_scope = GlobalOnly`); `--all` is refused by every generic
+		/// mutation anyway. Do NOT "fix" the arm: it would flip which config
+		/// `--all get mcps` reads.
 		pub fn writes_global(&self) -> bool {
 			match self.scope {
 				ResourceScope::GlobalOnly => true,
@@ -1624,11 +1496,10 @@ mod scope {
 		/// THE single write target for the commands that have exactly one:
 		/// `Some(root)` = that project's store, `None` = the global one.
 		///
-		/// Fails for a scope no writing policy should ever produce. `source`'s
-		/// `write_scope`, `accept-rename`'s `RenameScope` and `transfer`'s
-		/// `install_scope` each used to close this same match with
-		/// `_ => …::Global`, so a scope that slipped past the policy table became
-		/// a silent write to the GLOBAL lock. Now it is an error, in one place.
+		/// Fails for a scope no writing policy should produce — never a
+		/// `_ => Global` fallback, which once made a slipped scope a silent
+		/// write to the GLOBAL lock (crates/cli/AGENTS.md "Two dispatch
+		/// funnels").
 		pub fn write_target(&self) -> Result<Option<&std::path::Path>> {
 			match (self.scope, self.project_root.as_deref()) {
 				(ResourceScope::GlobalOnly, _) => Ok(None),
@@ -1689,15 +1560,10 @@ mod scope {
 		if flags.project {
 			let project_root = find_root()?;
 			// THE project-root guard: `-p` with no root fails here, before any
-			// config is touched, rather than silently falling back to the global
-			// write. NOT limited to mutations — gating it on writes let
-			// `-p get skills --json` answer `[]` on exit 0 from a directory that
-			// is not a project at all, byte-identical on all three channels to a
-			// real project holding no skills.
-			//
-			// `transfer`/`reconcile` opt out (`rootless_project_passthrough`):
-			// they never resolved a root in the CLI, so bailing here would swap
-			// core's typed `RESOURCE_NOT_FOUND` for an untyped `CLI_ERROR`.
+			// config is touched — reads included, or `-p get skills --json`
+			// answers `[]` from a non-project dir, indistinguishable from an
+			// empty project. `transfer`/`reconcile` opt out; see
+			// `rootless_project_passthrough`.
 			if project_root.is_none() && !policy.rootless_project_passthrough {
 				anyhow::bail!("{NO_PROJECT_ROOT}");
 			}
@@ -1752,14 +1618,9 @@ fn resolve_cli_scope(cli: &Cli) -> Result<Scope> {
 	resolve_scope_and_root(cli, policy)
 }
 
-/// One batch row's outcome from `run_for_agent`'s payload.
-///
-/// A payload that says `success: false` is a FAILED row. The batch envelope
-/// only knows what this closure tells it, and it used to be told that any
-/// `Ok(_)` was a success — so `delete skills foo -a claude,cursor` where every
-/// path failed with EACCES reported "2 succeeded, 0 failed" and exited 0, with
-/// the skill still on disk for both. The single-agent path reads the same key;
-/// this is the fan-out half of the same rule.
+/// One batch row's outcome from `run_for_agent`'s payload: `success: false`
+/// is a FAILED row — the fan-out half of the single-agent rule, or an
+/// all-EACCES `delete -a claude,cursor` reports "2 succeeded" and exits 0.
 fn row_from_payload(
 	payload: Option<serde_json::Value>,
 ) -> Result<serde_json::Value, String> {
@@ -1827,17 +1688,10 @@ fn run_for_agent(
 			eprintln_verbose!("Configuration loaded successfully");
 		}
 		Err(e) => {
-			// If config not found and we're adding, that's okay - we'll create it.
-			// `check` is read-only and reads the lock file, not the agent config,
-			// so a missing config is also fine.
-			//
-			// The error KIND decides, not just the command: this used to match on
-			// the command alone, so a config that EXISTS but does not parse was
-			// tolerated exactly like an absent one. `delete --yes` then took
-			// `config().is_none()` as "already gone" and reported
-			// `{success:true, executed:false}` on exit 0 while the entry stayed
-			// in the file — a silent failed removal. A malformed config is a
-			// hard error for every command (`get` already reported it correctly).
+			// Only a MISSING config is tolerated, and only by commands that
+			// create it or never read it. The error KIND decides: a config that
+			// exists but does not parse is a hard error for every command.
+			// See docs/history/cli.md#malformed-config-is-not-missing
 			let missing = match &e {
 				ConfigError::NotFound { .. } => true,
 				ConfigError::Io(io) => {
@@ -1858,12 +1712,9 @@ fn run_for_agent(
 					"No existing config found, will create new configuration"
 				);
 			} else {
-				// `anyhow!("… {}", e)` STRINGIFIES the ConfigError, so
-				// `report_failure`'s downcast finds nothing and the shared
-				// code degrades to `CLI_ERROR` — a malformed config reported
-				// itself as an unclassified CLI error instead of
-				// `JSON_PARSE_ERROR`. `Error::from(..).context(..)` keeps the
-				// typed error in the chain, where the downcast can reach it.
+				// `Error::from(..).context(..)`, not `anyhow!("… {}", e)`:
+				// stringifying drops the typed ConfigError, so `report_failure`
+				// would say `CLI_ERROR` instead of e.g. `JSON_PARSE_ERROR`.
 				return Err(
 					anyhow::Error::from(e).context("Failed to load config")
 				);
@@ -1896,19 +1747,21 @@ fn run_for_agent(
 		} => add::execute(
 			&mut manager,
 			resource,
-			name,
-			from,
-			command,
-			url,
-			transport,
-			headers,
-			env_vars,
-			timeout,
-			description,
-			author,
-			version,
-			tools,
-			universal,
+			add::AddArgs {
+				name,
+				from,
+				command,
+				url,
+				transport,
+				headers,
+				env_vars,
+				timeout,
+				description,
+				author,
+				version,
+				tools,
+				universal,
+			},
 		)
 		.map(Some),
 		Commands::Update {
@@ -1928,16 +1781,18 @@ fn run_for_agent(
 			&mut manager,
 			resource,
 			name,
-			command,
-			url,
-			transport,
-			headers,
-			env_vars,
-			timeout,
-			description,
-			author,
-			version,
-			tools,
+			update::UpdateArgs {
+				command,
+				url,
+				transport,
+				headers,
+				env_vars,
+				timeout,
+				description,
+				author,
+				version,
+				tools,
+			},
 		)
 		.map(Some),
 		Commands::Delete {
@@ -2016,12 +1871,9 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 	let resource = match &cli.command {
 		Commands::Get { resource } => *resource,
 		_ => {
-			// Must match the `-a` long help verbatim. It used to say
-			// "supports only 'get'", which contradicted both the help (`all`
-			// also works with `doctor --verify-links` and `source sync`) and
-			// the behaviour — and its suggested remedy was wrong too: a
-			// comma-separated list is REJECTED by check, describe, coverage,
-			// prune-lock and apply-update.
+			// Must match the `-a` long help and `reject_agent_all` verbatim.
+			// No "use a comma list" remedy: most single-agent commands reject
+			// lists too.
 			return Err(anyhow::anyhow!(
 				"--agent all is accepted by `get`, `doctor --verify-links` \
 				 and `source sync` only. This command takes a single agent \
@@ -2037,13 +1889,6 @@ fn handle_all_agents(cli: &Cli) -> Result<()> {
 	get::execute_all(resources, resource, cli.json)
 }
 
-// Handle a comma-separated --agent list: fan the command across the named
-// agents. `get` aggregates (same JSON shape as `--agent all`); mutating
-// commands map onto the SHARED core batch policy (`aghub_core::batch`):
-// preflight before any write, attempt every agent, one JSON envelope on
-// stdout, non-zero exit if any failed. (`source sync` is dispatched earlier
-// and resolves the list itself; the top-of-main guard rejects lists on
-// every other command.)
 /// The transport an add/update batch is about to write, when the flags spell
 /// one out. Returns `None` for commands that carry no transport and for input
 /// the shared validator rejects — the batch preflight only decides whether
@@ -2084,6 +1929,11 @@ fn mcp_transport_for_preflight(
 	.flatten()
 }
 
+/// Fan a comma-separated `-a` list across the named agents. `get` aggregates
+/// (same JSON shape as `-a all`); mutations go through the SHARED core batch
+/// policy (`aghub_core::batch`): preflight before any write, attempt every
+/// agent, one JSON envelope, non-zero exit if any failed. (`source sync`
+/// resolves its list itself; `run` rejects lists on every other command.)
 fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 	match &cli.command {
 		Commands::Get { resource } => {
@@ -2102,11 +1952,8 @@ fn handle_agent_list(cli: &Cli, agents: &[AgentType]) -> Result<()> {
 		| Commands::Delete { .. }
 		| Commands::Enable { .. }
 		| Commands::Disable { .. } => {
-			// Normalized here because `enable`/`disable` carry the narrowed
-			// `McpResource` (clap rejects `skills` for them at parse time —
-			// no agent supports it) while the other three carry the full
-			// `ResourceType`. Same contract as the `unreachable!()` arms
-			// below: the pattern above is what makes this total.
+			// `enable`/`disable` carry the narrowed `McpResource`; normalize.
+			// The arm pattern above is what makes this total.
 			let Some(resource) = fanout_resource(&cli.command) else {
 				unreachable!(
 					"the arm above matches exactly the commands \
@@ -2272,13 +2119,9 @@ mod describe {
 
 		match resource {
 			ResourceType::Skills => {
-				// A ConfigError, not an ad-hoc `anyhow` string: it carries
-				// the shared `RESOURCE_NOT_FOUND` code into `--json`, and it
-				// gives this the SAME wording every other command uses for the
-				// same condition. `describe` said "Skill 'x' not found" while
-				// `disable`/`transfer` said "Resource not found: skill 'x'", so
-				// a caller matching one missed the other and read a plain
-				// missing skill as an unknown fatal error.
+				// A ConfigError, not an ad-hoc string: it carries
+				// `RESOURCE_NOT_FOUND` into `--json` with the same wording every
+				// other command uses. See docs/history/cli.md#json-failure-envelope
 				let skill =
 					config.skills.iter().find(|s| s.name == name).ok_or_else(
 						|| ConfigError::resource_not_found("skill", &name),

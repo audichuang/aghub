@@ -7,18 +7,9 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use zip::ZipArchive;
 
-/// Parse a .skill file (zip format).
+/// Parse a .skill file (zip format), including its directory structure info.
 ///
-/// # Arguments
-/// * `path` - Path to the .skill file
-///
-/// # Returns
-/// * `Ok(Skill)` - Parsed skill with directory structure info
-///
-/// # Errors
-/// * `SkillError::Io` - If file operations fail
-/// * `SkillError::Zip` - If zip reading fails
-/// * `SkillError::Parse` - If SKILL.md parsing fails
+/// Errors: `Io`, `Zip`, or `Parse` if SKILL.md does not parse.
 pub fn parse_skill_file(path: &Path) -> Result<Skill> {
 	if !path.exists() {
 		return Err(SkillError::NotFound(format!(
@@ -111,17 +102,9 @@ fn scan_archive_structure(
 	Ok(())
 }
 
-/// Parse a skill directory.
+/// Parse a skill directory, including its directory structure info.
 ///
-/// # Arguments
-/// * `path` - Path to the skill directory
-///
-/// # Returns
-/// * `Ok(Skill)` - Parsed skill with directory structure info
-///
-/// # Errors
-/// * `SkillError::Io` - If file operations fail
-/// * `SkillError::Parse` - If SKILL.md parsing fails
+/// Errors: `Io`, or `Parse` if SKILL.md does not parse.
 pub fn parse_skill_dir(path: &Path) -> Result<Skill> {
 	if !path.exists() {
 		return Err(SkillError::NotFound(format!(
@@ -178,16 +161,8 @@ fn scan_directory_structure(path: &Path, skill: &mut Skill) -> Result<()> {
 	Ok(())
 }
 
-/// Parse SKILL.md content into a Skill struct.
-///
-/// # Arguments
-/// * `content` - Raw content of SKILL.md file
-///
-/// # Returns
-/// * `Ok(Skill)` - Parsed skill
-///
-/// # Errors
-/// * `SkillError::Parse` - If frontmatter parsing fails
+/// Parse raw SKILL.md content into a [`Skill`]; `Parse` if the frontmatter
+/// does not parse.
 pub fn parse_skill_md(content: &str) -> Result<Skill> {
 	// Use skills-ref parser for frontmatter
 	let (metadata, body) = skills_ref::parser::parse_frontmatter(content)
@@ -261,18 +236,8 @@ pub fn parse_skill_md(content: &str) -> Result<Skill> {
 	})
 }
 
-/// Auto-detect format and parse skill.
-///
-/// This function automatically detects the input format based on the path:
-/// - If it's a directory → parse as skill directory
-/// - If it ends with .skill or .zip → parse as skill file
-/// - If it ends with .md or is named SKILL.md → parse as single SKILL.md file
-///
-/// # Arguments
-/// * `path` - Path to skill (directory, .skill file, .zip file, or .md file)
-///
-/// # Returns
-/// * `Ok(Skill)` - Parsed skill
+/// Auto-detect the format from `path` and parse it: a directory → skill dir,
+/// `.skill`/`.zip` → skill file, `.md` / `SKILL.md` → a single SKILL.md.
 pub fn parse(path: &Path) -> Result<Skill> {
 	if !path.exists() {
 		return Err(SkillError::NotFound(format!(

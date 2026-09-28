@@ -3,14 +3,10 @@
 //! Every descriptor that honours a private home/config variable reads it from
 //! this list's vocabulary, and those variables outrank `$HOME` — so a test that
 //! resolves ANY global agent path must clear all of them first, or it silently
-//! reads and writes the developer's real config. That has happened three times
-//! in three different test harnesses (an ambient `OPENCODE_CONFIG_DIR` wrote MCP
-//! servers into a live `opencode.json`; a real `~/.config/orca/...` turned up in
-//! an api test's allow-listed roots), each time because the harness kept its own
-//! hand-copied list and missed a variable.
-//!
-//! So there is ONE list, here, next to the descriptors that read it. Isolating
-//! `$HOME` alone is NOT isolation.
+//! reads and writes the developer's real config. There is ONE list, here, next
+//! to the descriptors that read it — never a hand-copied one in a harness.
+//! Isolating `$HOME` alone is NOT isolation.
+//! See docs/history/agents.md#hand-copied-env-override-lists-leaked-into-real-configs.
 
 /// Variables a descriptor consults ahead of `$HOME` when resolving its global
 /// config or skills directory.

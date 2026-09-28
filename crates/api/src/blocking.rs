@@ -1,44 +1,26 @@
 //! Running blocking config mutations off the async executor.
 //!
-//! Skill and MCP mutations take interprocess locks, and acquiring one BLOCKS:
-//! skill flows first wait on the process mutex
-//! (unbounded, by design — bounding it turns ordinary queued work into spurious
-//! failures) and then polls `flock` with `thread::sleep` for up to 10s.
+//! Acquiring a mutation lock BLOCKS (unbounded process mutex, then up to 10s of
+//! `flock` polling). Done on a Rocket worker it parks that worker; enough
+//! contended mutations park all of them and even unlocked read routes stop
+//! answering (measurements: `crates/api/AGENTS.md` ANTI-PATTERNS).
 //!
-//! Called straight from a Rocket handler, that parks an async worker for the whole
-//! wait. Rocket's default worker count is the CPU count, so enough contended
-//! mutations occupy every worker and the server stops answering **everything** —
-//! including read-only routes that take no lock at all. Measured on this repo: an
-//! external process holding the global lock plus 25 concurrent delete requests
-//! took `GET /api/v1/agents` from 0.00s to a 30s client timeout, while the same 25
-//! requests with no contention stayed at 0.00s.
-//!
-//! `block_in_place` is the mechanism: it hands the current worker over to blocking
-//! work and has tokio bring up a replacement, so the remaining routes keep being
-//! served. `spawn_blocking` would also work but demands `Send + 'static`, and
-//! several of these transactions hold borrowed trait objects (`&dyn Fetcher`) that
-//! are neither — reshaping every one of those signatures buys nothing here.
-//! `MutationGuard` is `!Send`, so the whole transaction stays inside the closure
-//! either way; it is created and dropped on one thread and never crosses a
-//! boundary.
+//! `block_in_place` hands the worker to blocking work and tokio spawns a
+//! replacement. Not `spawn_blocking`: several transactions borrow `!Send` /
+//! non-`'static` values (`&dyn Fetcher`, `MutationGuard`), so the whole
+//! transaction stays inside the closure on one thread.
 
 use crate::error::ApiError;
 
 /// Run one blocking mutation without parking an async worker.
 ///
-/// Use this for any handler whose body takes a mutation lock, directly or
-/// through `aghub-core`. A handler that only READS needs nothing: read paths are
-/// deliberately unlocked.
+/// Use for any handler whose body takes a mutation lock, directly or through
+/// `aghub-core`; read-only handlers need nothing. Generic over the whole `Ok`
+/// type so it fits `ApiResult<T>`, `ApiCreated<T>` and `ApiNoContent`.
 ///
-/// Generic over the whole `Ok` type rather than over `ApiResult<T>`'s payload, so
-/// it fits `ApiResult<T>`, `ApiCreated<T>` and `ApiNoContent` alike.
-///
-/// A `.await` cannot live inside `f`; split the awaits (a git fetch, plugin
-/// detection) out of the locked transaction and pass their results in.
-///
-/// A panic inside `f` propagates to Rocket exactly as it would from any handler
-/// body (answered as a 500) — it is deliberately NOT converted into an error here,
-/// because a lock error is retryable and a panic is not.
+/// No `.await` inside `f`: do the git fetch / plugin detection first and pass
+/// the results in. A panic in `f` propagates as a 500, deliberately not mapped
+/// to an error — a lock error is retryable, a panic is not.
 pub async fn in_mutation_pool<R, F>(f: F) -> Result<R, ApiError>
 where
 	F: FnOnce() -> Result<R, ApiError>,

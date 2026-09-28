@@ -11,13 +11,9 @@ pub struct ErrorBody {
 	pub code: &'static str,
 }
 
-/// Fixed, safe-to-expose message for "the OS credential backend itself is
-/// unreachable" (Linux secret-service with no D-Bus session, a locked
-/// keychain with no prompt path, ...). The underlying cause is logged
-/// server-side only — never put backend/platform detail (which can include
-/// internal paths) in a response body. Shared by every keyring-touching
-/// surface (github credentials, source bindings, inference provider keys)
-/// so they never diverge on status/code/message for the same failure class.
+/// Fixed, safe message for "the OS credential backend is unreachable". The
+/// cause is logged server-side only — backend detail can carry internal paths.
+/// Shared by every keyring-touching surface so they answer identically.
 const KEYCHAIN_UNAVAILABLE_MSG: &str =
 	"Credential storage is temporarily unavailable. Please try again.";
 
@@ -58,15 +54,9 @@ impl ApiError {
 		message: &'static str,
 		code: &'static str,
 	) -> Self {
-		// Boundary: the HTTP RESPONSE (fixed safe `message`) and OUR structured
-		// log records carry NO panic payload. `JoinError::Display` embeds the
-		// panic payload (which can contain paths/internal detail), so never log
-		// it raw — record only the redacted classification below.
-		// NOT in scope: the process-global default Rust panic hook still prints
-		// the panic message to stderr when the blocking task panics. That is
-		// standard runtime behavior, server-side, and needed for debugging; we
-		// deliberately do NOT install a panic-suppressing global hook (it would
-		// harm observability for a non-client-facing stderr line).
+		// Neither the response nor our log carries the panic payload
+		// (`JoinError::Display` embeds it and it can hold paths). The default
+		// panic hook still prints it to stderr — deliberately left alone.
 		log::error!(
 			"{code}: blocking task failed (is_panic={}, is_cancelled={})",
 			error.is_panic(),
@@ -117,13 +107,9 @@ impl From<ConfigError> for ApiError {
 			ConfigError::Json(e) => {
 				ApiError::new(Status::BadRequest, e.to_string(), code)
 			}
-			// Skill mutation-lock contention arrives as `Io(WouldBlock)` — see
-			// `skill::lock::guard`, which is the only producer of that kind here.
-			// It is a RETRYABLE conflict, not a server fault: 500 `IO_ERROR` tells
-			// the desktop nothing is worth retrying, when in fact another aghub
-			// process simply held the lock. `lock_unavailable` (a state dir that
-			// cannot hold a lock at all) stays a 500 on purpose — retrying that
-			// does not help.
+			// Mutation-lock contention (`Io(WouldBlock)`, produced only by
+			// `skill::lock::guard`) is a RETRYABLE 409, not a 500.
+			// `lock_unavailable` (no lock possible at all) stays 500 on purpose.
 			ConfigError::Io(e)
 				if e.kind() == std::io::ErrorKind::WouldBlock =>
 			{
@@ -230,14 +216,9 @@ impl From<crate::credentials::CredentialStoreError> for ApiError {
 /// Run `f` on Rocket's blocking-task pool and map a panicked/cancelled task
 /// to a safe, generic error.
 ///
-/// Every route whose body performs OS keyring I/O (secret-service on Linux,
-/// or any other slow synchronous credential-store call) MUST go through this
-/// instead of running that I/O inline on the route's async worker thread —
-/// Rocket 0.5 does not `spawn_blocking` a sync handler fn on its own (see the
-/// `keyring` feature comment in `crates/api/Cargo.toml`). Shared by every
-/// keyring-touching route module (`routes::credentials`, `routes::inference`)
-/// so they don't each hand-roll the same `spawn_blocking` + error-mapping
-/// boilerplate.
+/// Every route whose body does OS keyring I/O MUST go through this: Rocket 0.5
+/// does not offload a sync handler itself (see the `keyring` feature comment in
+/// `crates/api/Cargo.toml`).
 pub(crate) async fn run_blocking<F, T>(f: F) -> Result<T, ApiError>
 where
 	F: FnOnce() -> Result<T, ApiError> + Send + 'static,

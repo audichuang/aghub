@@ -120,16 +120,12 @@ fn parse_agent(value: &str) -> Result<AgentType, String> {
 
 /// The transfer-local [`InstallScope`] for an already-resolved [`crate::Scope`].
 ///
-/// `--all` is refused by `TRANSFER_SCOPE` in `main`'s ONE policy table; this
-/// used to be a private resolver that re-read `cli.global`/`cli.project`.
+/// `--all` is refused by `TRANSFER_SCOPE` in `main`'s policy table.
 ///
-/// It maps the resolved scope rather than calling
-/// [`crate::Scope::write_target`], because `transfer`/`reconcile` are the one
-/// policy with `rootless_project_passthrough`: a `-p` with no root stays
-/// `ProjectOnly` + `project_root: None` and core's source lookup answers with a
-/// typed `RESOURCE_NOT_FOUND`, exactly as it did before the scope flags were
-/// centralized. Total match, no `_ => Global` catch-all — that arm is how a
-/// scope the table let through became a silent write to the GLOBAL lock.
+/// Maps the scope itself rather than calling [`crate::Scope::write_target`]:
+/// this is the one `rootless_project_passthrough` policy, so a rootless `-p`
+/// must reach core and get a typed `RESOURCE_NOT_FOUND`. Total match, never a
+/// `_ => Global` catch-all.
 fn install_scope(resolved: &crate::Scope) -> Result<InstallScope> {
 	match resolved.resource_scope() {
 		ResourceScope::GlobalOnly => Ok(InstallScope::Global),
@@ -211,15 +207,9 @@ pub fn execute_reconcile(
 		),
 	};
 
-	// A reconcile with no target set is a usage error, not a successful no-op.
-	// Without this guard it fell through to `run(source, [], [], false)`, which
-	// returns an empty batch that `render` reports as
-	// `{"success_count":0,"failed_count":0,"results":[]}` on exit 0 — and
-	// `--agent` is the shape a caller lands on first, because clap's own
-	// "a similar argument exists: '--agent'" tip for a mistyped `--agents`
-	// points there and the usage line it prints never mentions `--add`.
-	// Indistinguishable from a real single-agent copy for anything keyed on the
-	// exit code or `failed_count`.
+	// A reconcile with no target set is a usage error, not an empty exit-0
+	// batch (clap's "similar argument: '--agent'" tip steers callers here).
+	// See docs/history/cli.md#reconcile-without-targets
 	if args.add.is_empty() && args.remove.is_empty() {
 		bail!(
 			"reconcile needs at least one --add <agent> or --remove <agent>; \
@@ -240,23 +230,15 @@ pub fn execute_reconcile(
 	// alone are non-destructive and run immediately (like `transfer`), unless
 	// --dry-run is asked for explicitly.
 	if args.dry_run || (!args.remove.is_empty() && !args.yes) {
-		// Run the read-only preflights BEFORE reporting a plan. The preview is
-		// the step an agent takes to decide whether to commit, so anything the
-		// commit will refuse must be refused here too — otherwise the preview
-		// green-lights a plan that cannot execute and the caller only finds out
-		// on the `--yes` run. Three checks qualify: the source must exist, the
-		// add/remove sets must be disjoint, and no removal may take the resource
-		// from a copy target or from the source. The third is THE check that
-		// exists to prevent data loss, and it was the one the preview skipped.
+		// Anything the commit will refuse, the preview refuses too: the source
+		// exists, add/remove are disjoint, and no removal takes the resource
+		// from a copy target or the source (THE data-loss check).
 		exists(&source)?;
 		ensure_disjoint(&args.add, &args.remove)?;
 		spares(&source, &args.add, &args.remove)?;
-		// Skills have a third refusal the commit makes and a preview cannot
-		// reconstruct: an end state that cannot exist (removing an agent that
-		// reads the shared Master while the Master stays). Ask core for it
-		// rather than restating it here — otherwise the preview exits 0 on a
-		// plan `--yes` rejects. MCP/sub-agent reconcile have no equivalent
-		// end-state check to preview yet.
+		// Skills also refuse an end state that cannot exist (removing an agent
+		// that reads the shared Master while it stays) — ask core, never
+		// restate it. MCP/sub-agent have no such preview check yet.
 		if let ReconcileAction::Skill(_) = action {
 			reconcile_skill_preview(&source, &args.add, &args.remove)?;
 		}
@@ -302,11 +284,6 @@ fn render_dry_run(args: &ReconcileArgs, json: bool) -> Result<()> {
 	}
 	Ok(())
 }
-
-// Scope note: transfer carries its own `InstallScope` (Global/Project), NOT the
-// `ResourceScope` (GlobalOnly/ProjectOnly/Both) the single-agent path uses —
-// `resolve_scope` maps the top-level -g/-p flags into `InstallScope` directly so
-// the two enums never get mixed.
 
 /// Render an [`OperationBatchResult`] as a table (default) or JSON (`--json`),
 /// then fail with a non-zero exit when any target failed.

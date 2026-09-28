@@ -2,51 +2,11 @@ use crate::descriptor::*;
 use crate::format::json_map;
 use crate::{define_mcp_paths, json_map_dialect};
 
-// ZCode. Its MCP servers live under `mcp.servers` in a native `config.json` —
-// `json_map`'s `server_key` is a DOTTED path, so the nesting needs no parser.
-//
-// The per-server toggle is spelled `enable`, NOT `enabled`: writing `false`
-// switches the server off and a server WITHOUT the field counts as ENABLED.
-// That one letter is why `ToggleKey` carries its spelling as data — a toggle
-// aghub wrote under a name ZCode does not read is a server the user switched
-// off that comes back on.
-//
-// TWO answers the vendor documentation does not give, chosen conservatively and
-// recorded here so the next reader knows they were chosen, not attested:
-//
-//   * The TRANSPORT TAG. The docs name stdio, HTTP and SSE but never say which
-//     field distinguishes them, and the one worked example (stdio) carries no
-//     tag at all. This inherits `MCP_SERVERS` — `type: stdio | sse | http`, the
-//     spelling 17 of aghub's agents already use — rather than inventing a key.
-//   * An UNTAGGED remote is streamable HTTP. `InferSseFromUrl` would make a URL
-//     with an `/sse/` path segment parse as SSE and the next save write
-//     `type: "sse"` over it; that heuristic is a guess about a vendor whose
-//     docs say nothing, so the one transport aghub can read back unchanged wins.
-//
-// HOW TO CLOSE THE FIRST ONE, because no test in this repo can. `MCP_SERVERS`
-// READS `http`, `streamable-http` and `streamableHttp` alike, but WRITES
-// `http`, and a save rebuilds EVERY server in the file — so if ZCode validates
-// a different spelling, one `aghub mcps add` retags a remote server the user
-// already had working, silently. The family default has been wrong twice
-// already (`cline` writes `streamableHttp`, `roocode` writes `streamable-http`,
-// both overriding it). The probe: put
-// `{"mcp":{"servers":{"probe":{"type":"http","url":"https://example.test/mcp"}}}}`
-// in `~/.zcode/cli/config.json`, open a ZCode session and check Settings → MCP
-// for that server; repeat with `"streamable-http"`. Whichever one connects is
-// the answer, and the fix is one line here:
-// `vocab: TransportVocabulary { http: "<answer>", ..MCP_SERVERS.vocab }`.
-//
-// `.agents` COMPATIBILITY, deliberately NOT implemented. ZCode also reads
-// `~/.agents/mcp.json` and `<root>/.agents/mcp.json` under an `mcpServers` key,
-// but only as a FALLBACK: within a scope, if the `.zcode` config defines any
-// server at all, the `.agents` file for that scope is skipped ENTIRELY — no
-// merging. ZCode's own settings panel always writes back to the `.zcode` native
-// config and never touches `.agents`, and aghub does the same. The footgun the
-// vendor calls out: a user who keeps their servers only in `.agents/mcp.json`
-// stops loading ALL of them the moment anything writes one server into the
-// `.zcode` config — including the first `aghub mcp add`. Reading both and
-// merging them would write a file ZCode reads differently than aghub does, so
-// the split stays visible instead.
+// ZCode: `json_map` under the nested `mcp.servers` key; the toggle is spelled
+// `enable` (missing = enabled). The `type` tag and "untagged remote = streamable
+// HTTP" are chosen, not vendor-attested; the `.agents/mcp.json` fallback is
+// deliberately not implemented. See docs/agents/zcode.md (incl. the probe that
+// settles the HTTP tag spelling).
 json_map_dialect!(json_map::Dialect {
 	server_key: "mcp.servers",
 	toggle_key: json_map::ToggleKey::Enabled("enable"),
@@ -54,9 +14,7 @@ json_map_dialect!(json_map::Dialect {
 	..json_map::MCP_SERVERS
 });
 
-// The depths differ and that is the vendor's, not a typo: the USER config sits
-// under `.zcode/cli/`, the WORKSPACE one directly under `.zcode/`. Both are
-// named `config.json`.
+// User and workspace `config.json` sit at different depths — the vendor's layout.
 define_mcp_paths! {
 	global: ".zcode/cli/config.json",
 	project: ".zcode/config.json",
@@ -64,27 +22,10 @@ define_mcp_paths! {
 	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
-// ZCode reads FOUR skill roots, and the private one comes first at each scope.
-// Its own `zcode-configuration-guide` gives the discovery order: user
-// `~/.zcode/skills` → user `~/.agents/skills` → workspace `<root>/.zcode/skills`
-// → workspace `<root>/.agents/skills` → plugin roots, and "within a level,
-// `.zcode` is scanned before `.agents`".
-//
-// So the WRITE slot is the private `.zcode/skills` — that is what makes a grant
-// visible to ZCode alone — while `.agents/skills` must still be listed as a
-// READ path. That second half is not cosmetic: root `AGENTS.md` keeps the whole
-// shared-slot section because an agent missing from a shared dir's reader set
-// is an agent `skills::shape::compat_unlink_authorized` does not count, and a
-// `repair` run for a DIFFERENT agent may then detach a compat Referrer that
-// ZCode is still reading. Covered reader, not read-only co-reader: ZCode has
-// its own write slot at both scopes, so the quorum passes on its own coverage.
-//
-// NOT `universal: true`: that flag appends `$XDG_CONFIG_HOME/agents/skills`,
-// which ZCode never names. Its shared root is `~/.agents/skills`, spelled here.
-//
-// Symlinked skill directories are supported by the vendor — importing skills
-// from other agents that way is a documented feature — which is what aghub's
-// symlink-only install needs.
+// Write the private `.zcode/skills` first; `.agents/skills` must stay a READ
+// path so `compat_unlink_authorized` counts ZCode as a reader of the shared slot.
+// Not `universal: true` — ZCode names `~/.agents/skills`, never XDG.
+// See docs/agents/zcode.md#skill-roots.
 fn global_skills_paths() -> Vec<std::path::PathBuf> {
 	match home_dir() {
 		Some(home) => {

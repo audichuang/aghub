@@ -28,7 +28,7 @@ pub enum CredentialStatus {
 /// TypeScript-exported union mirroring
 /// `skill_update::sources::SourceSkillState::as_wire()`. Declared here (in the
 /// API DTO crate, which has ts-rs) rather than in `skill-update` (which does
-/// not) — approach B from the Phase 3 plan §12-C4/GAP5.
+/// not).
 #[derive(Debug, Clone, Serialize, TS)]
 #[ts(export)]
 #[serde(rename_all = "camelCase")]

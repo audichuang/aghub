@@ -726,16 +726,10 @@ pub async fn delete_inference_provider(
 ) -> ApiNoContent {
 	let store = store(state);
 	let provider = find_by_latin_name(&store, latin_name)?;
-	// Shared use case: tears down every agent reference, then deletes the
-	// provider. The CLI routes its delete through the same fn so neither
-	// surface can leave an agent config pointing at a removed provider.
-	//
-	// Runs on Rocket's blocking pool via the shared `run_blocking` helper:
-	// the cascade's precondition check and every step below it are OS
-	// keyring reads/writes (D-Bus secret-service on Linux), which must never
-	// block the async worker thread directly — Rocket does not
-	// spawn_blocking sync handlers on its own (see the `keyring` feature
-	// comment in `crates/api/Cargo.toml`).
+	// Shared with the CLI: tears down every agent reference, then deletes the
+	// provider, so no surface leaves a config pointing at a removed provider.
+	// On the blocking pool: every step is an OS keyring call (D-Bus on Linux)
+	// and Rocket does not offload sync handlers itself.
 	run_blocking(move || {
 		aghub_inference::delete_provider_cascade(&store, &provider)
 			.map_err(ApiError::from)
@@ -965,16 +959,10 @@ pub async fn clear_codex_state(
 	.await
 }
 
-// This module drives inference routes through an INJECTED credential store
-// (`InferenceProviderState::credentials`, wired via
-// `crate::build_rocket_with_inference_credentials`) instead of the real OS
-// keyring. That makes these tests deterministic on every OS/CI (no
-// gnome-keyring/dbus needed) and lets the fail-closed test simulate a broken
-// backend directly, instead of tampering with `DBUS_SESSION_BUS_ADDRESS` /
-// racing the process-global mock keyring builder used elsewhere in this
-// crate's tests (GitHub #15 P1-1). The platform-agnostic cascade LOGIC is
-// covered separately at the `delete_provider_references` seam with mock
-// stores (crates/inference/src/cascade.rs).
+// These tests use an INJECTED credential store
+// (`crate::build_rocket_with_inference_credentials`), not the OS keyring, so
+// they are deterministic without dbus and can simulate a broken backend
+// (GitHub #15). Cascade logic is covered in crates/inference/src/cascade.rs.
 #[cfg(test)]
 mod tests {
 	use std::sync::{Arc, Mutex};

@@ -24,7 +24,7 @@ use crate::ssh::{
 };
 
 // ---------------------------------------------------------------------------
-// IPC types (camelCase to match the W2 `Connection` convention)
+// IPC types (camelCase, matching `ssh::Connection`)
 // ---------------------------------------------------------------------------
 
 /// Lifecycle of a single remote connection's bring-up. Projected by the desktop
@@ -56,13 +56,10 @@ pub struct TestResult {
 	pub compatible: bool,
 	/// Human-facing summary (carries ssh stderr on failure).
 	pub message: String,
-	/// The remote `aghub-api` advertises controller-side git-credential
-	/// forwarding (the `X-Aghub-Git-Tokens` header). Probed over SSH via
-	/// `--capabilities`; **fail-safe** — `false` whenever support cannot be
-	/// confirmed (old binary, transport failure, missing marker), so the
-	/// desktop only forwards credentials to a remote that genuinely honors
-	/// them. Always `false` when the remote is unreachable or the api is
-	/// absent.
+	/// The remote `aghub-api` advertises git-credential forwarding (the
+	/// `X-Aghub-Git-Tokens` header), probed via `--capabilities`. Fail-safe:
+	/// `false` whenever support cannot be confirmed, including an unreachable
+	/// remote or absent api.
 	#[serde(default)]
 	pub supports_credential_forwarding: bool,
 	/// The probe attempted to install `aghub-api` automatically.
@@ -212,11 +209,10 @@ fn resolved_path(conn: &Connection) -> String {
 /// auth refused, BatchMode failure, unknown/changed host key) rather than
 /// at the *remote command* level?
 ///
-/// OpenSSH reports its OWN failures with exit code 255; any other code
-/// means the remote command actually ran, so its relayed stderr must NOT
-/// be read as a transport failure (e.g. a non-executable binary exits 126
-/// with "permission denied"). A missing code (ssh killed by signal) is
-/// treated as transport-level.
+/// OpenSSH reports its OWN failures as 255; any other code means the remote
+/// command ran, so its stderr is not a transport failure (a non-executable
+/// binary exits 126 "permission denied"). No code (killed by signal) counts
+/// as transport-level.
 fn is_transport_failure(status_code: Option<i32>) -> bool {
 	matches!(status_code, Some(255) | None)
 }
@@ -279,10 +275,8 @@ pub fn probe_connection<R: CommandRunner>(
 					None => "aghub-api responded without a parseable version"
 						.to_string(),
 				};
-				// Additive capability probe (D7): a second `--capabilities`
-				// round-trip, only worth running when the binary is actually
-				// present. Fail-safe inside the probe, and irrelevant when
-				// absent, so an absent/garbled response stays `false`.
+				// Additive capability probe: a second round-trip, only when
+				// the binary is present; fail-safe inside the probe.
 				let supports_forwarding = present
 					&& probe_supports_credential_forwarding(runner, conn, &bin);
 				return TestResult::new(
@@ -316,21 +310,13 @@ pub fn probe_connection<R: CommandRunner>(
 /// `LocalBinary` source is same-platform-gated; `CargoGit`/`ReleaseDeb`
 /// build/download on the VM and are un-gated), then re-probes.
 ///
-/// Two best-effort fallbacks exist so a failed upgrade never severs an
-/// already-usable connection, each gated on the SAME condition — the PRE-
-/// install probe was present + compatible (only the patch differs):
-/// - a cross-platform `LocalBinary` source cannot deploy at all, so the
-///   attempt is refused before any mutation, and we proceed on the
-///   old-but-compatible binary with a note that auto-upgrade is unavailable;
-/// - any source whose install actually RUNS but FAILS (missing `.deb` asset,
-///   no `dpkg-deb`, network error, cargo build failure, …) falls back to the
-///   pre-install probe result with a note, instead of propagating the error.
-///
-/// An absent or present-but-incompatible remote has nothing usable to fall
-/// back to, so both paths still hard-fail in that case. With no source, a
-/// present-but-incompatible binary returns the probe so the caller surfaces
-/// the Incompatible screen; an absent binary errors. The final [`TestResult`]
-/// is returned so callers can still reject incompatible versions.
+/// A failed upgrade never severs an already-usable connection: when the
+/// PRE-install probe was present + compatible (only the patch differs), a
+/// cross-platform `LocalBinary` is refused before any mutation and a failing
+/// install (missing `.deb`, no `dpkg-deb`, network, cargo) falls back to the
+/// pre-install result — both with a note. Absent or incompatible remotes have
+/// nothing to fall back to and hard-fail. With no source, an incompatible
+/// binary returns the probe (Incompatible screen) and an absent one errors.
 pub fn ensure_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -379,11 +365,8 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			.map(|(os, arch)| os == local.0 && arch == local.1)
 			.unwrap_or(false);
 		if !same {
-			// Reaching here with api_present && compatible means only the
-			// patch differs (the exact-match/no-source case already returned
-			// above). A cross-platform LocalBinary source cannot auto-upgrade
-			// it, but the old binary is still wire-compatible — proceed on it
-			// instead of failing the connection outright.
+			// Only the patch differs here, and the old binary is still
+			// wire-compatible — proceed on it rather than fail the connection.
 			if first.api_present && first.compatible {
 				let mut result = first;
 				result.message.push_str(&format!(
@@ -395,12 +378,9 @@ pub fn ensure_remote_api<R: CommandRunner>(
 			let remote_platform = remote
 				.map(|(os, arch)| format!("{os}/{arch}"))
 				.unwrap_or_else(|| "unknown".to_string());
-			// Cross-platform: a wrong-arch bundled binary cannot run on the VM,
-			// so refuse the deploy for BOTH the absent and the present-but-
-			// incompatible remote and let the desktop surface the manual-install
-			// hint (via CrossPlatformRedeploy). Returning `Ok(first)` for the
-			// present case would instead render an actionable "Force redeploy"
-			// button that can only fail the very same cross-platform gate.
+			// Refuse for BOTH absent and incompatible remotes so the desktop
+			// shows the manual-install hint; `Ok(first)` would render a "Force
+			// redeploy" button that can only fail this same gate.
 			return Err(ConnectError::CrossPlatformDeploy { remote_platform });
 		}
 	}
@@ -411,10 +391,8 @@ pub fn ensure_remote_api<R: CommandRunner>(
 	if let Err(e) =
 		install_remote_api(runner, conn, &bin, local_version, source)
 	{
-		// A compatible remote is already usable; a failed patch upgrade
-		// (missing .deb asset, no dpkg-deb, network, cargo error) must NOT
-		// sever the connection. Absent/incompatible remotes still hard-fail —
-		// they have nothing usable to fall back to.
+		// A failed patch upgrade must NOT sever a compatible connection;
+		// absent/incompatible remotes still hard-fail.
 		if first.api_present && first.compatible {
 			let mut result = first;
 			let have = result.api_version.clone().unwrap_or_default();
@@ -445,10 +423,8 @@ pub fn ensure_remote_api<R: CommandRunner>(
 
 /// Install `aghub-api` on the remote by uploading a binary or running cargo.
 ///
-/// `local_version` stamps the `CargoGit` build (via `AGHUB_RELEASE_VERSION`)
-/// so a from-source VM build reports the desktop's own version instead of
-/// falling back to the workspace manifest placeholder; the other sources
-/// ignore it.
+/// `local_version` stamps the `CargoGit` build (`AGHUB_RELEASE_VERSION`); the
+/// other sources ignore it.
 pub fn install_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -495,25 +471,15 @@ pub fn install_remote_api<R: CommandRunner>(
 	}
 }
 
-/// Generate a per-install unique suffix so two installs racing against the
-/// same remote account (e.g. an auto `ensure_remote_api` upgrade overlapping
-/// a user-triggered "Reinstall") never share the fixed staging path — scp and
-/// the finish step are separate round-trips, so a shared path lets install A
-/// validate the staged file just as install B overwrites it mid-copy, then A
-/// renames B's truncated upload into place (TOCTOU).
+/// Per-install unique suffix, so two installs racing against one remote
+/// account (auto-upgrade vs. "Reinstall") never share a staging path — scp and
+/// finish are separate round-trips, so a shared path lets A rename B's
+/// truncated upload into place.
 ///
-/// Collision model: `<pid>-<nanos>-<counter>`.
-/// - the counter differs across installs within the SAME process (it alone
-///   would NOT catch two SEPARATE processes, since it always restarts at 0);
-/// - `std::process::id` differs across separate desktop process runs on ONE
-///   machine, but pids are a small, OS-recycled space, so two desktops on
-///   DIFFERENT machines targeting the same remote account can coincidentally
-///   share a pid;
-/// - the UNIX-epoch nanosecond timestamp closes that gap: a cross-machine
-///   collision now additionally requires both processes to call this within
-///   the SAME nanosecond, which — combined with the shared-pid requirement —
-///   is astronomically unlikely without a remote-side `mktemp` round-trip
-///   (an extra ssh round-trip; deliberately out of scope here).
+/// `<pid>-<nanos>-<counter>`: the counter separates installs in one process,
+/// the pid separates processes on one machine, and the nanosecond timestamp
+/// makes a cross-machine pid collision need the same nanosecond too. A
+/// remote-side `mktemp` would cost an extra round-trip; out of scope.
 fn install_nonce() -> String {
 	use std::sync::atomic::{AtomicU64, Ordering};
 	static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -528,9 +494,7 @@ fn install_nonce() -> String {
 /// Stage a local binary on the remote: `mkdir -p` the cache dir, then `scp` the
 /// binary to its nonce'd `.upload.<nonce>` staging path. Does NOT move it into
 /// place — call [`finish_remote_api_upload`] with the SAME `nonce` for the
-/// atomic swap. Splitting the upload from the swap lets a redeploy stage the
-/// new binary BEFORE killing the running server, so a staging failure can
-/// never leave the remote with no server.
+/// atomic swap, so a staging failure never touches the installed binary.
 fn stage_remote_api_upload<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -578,24 +542,14 @@ fn finish_remote_api_upload<R: CommandRunner>(
 /// incompatible remote one, then re-probe and return the fresh result. The
 /// caller proceeds only when `compatible`.
 ///
-/// We deliberately do NOT kill the running server first. The old, incompatible
-/// server is left as a harmless orphan: it stays bound to its ephemeral
-/// (`--port 0`) port that this redeploy never tunnels to, and the next
-/// connection starts its OWN fresh `--port 0` server against the new binary.
-/// Replacing the binary in place is safe on its own —
-/// `finish_remote_api_upload` does an atomic `mv` of the staged upload, which
-/// the kernel handles cleanly even while the old process holds the previous
-/// inode open (no `ETXTBSY`). A
-/// `pkill`-by-name/path here would inevitably be collateral: we have no pid for
-/// the incompatible server (this connection did not start it), so any by-path
-/// kill on a shared host would also reap a sibling connection's server running
-/// the same binary path (the original self-DoS). Compatibility is still
-/// confirmed regardless of the orphan, because the re-probe runs
-/// `$target --version` — a fresh exec of the NEW binary. For a `LocalBinary`
-/// source the new binary is STAGED first (prepare → scp) and only THEN moved
-/// into place (atomic `mv`), so a failed/slow upload aborts with the old server
-/// still serving — the remote is never left with no server. `CargoGit` builds
-/// in place on the VM.
+/// Deliberately NO kill of the running server: with no pid for it, a by-path
+/// `pkill` on a shared host would also reap a sibling connection's server.
+/// The old server stays a harmless orphan on its own `--port 0`; the next
+/// connection starts a fresh server on the new binary. Replacing the binary in
+/// place is safe — the atomic `mv` never hits `ETXTBSY` — and the re-probe
+/// execs the NEW binary. A `LocalBinary` is staged before the swap, so a
+/// failed upload leaves the old server serving; `CargoGit` builds in place.
+/// See docs/history/remote.md#redeploy-pkill-self-dos
 pub fn force_redeploy_remote_api<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -640,7 +594,7 @@ fn force_install_remote_api<R: CommandRunner>(
 	match source {
 		RemoteInstallSource::LocalBinary(local) => {
 			// Stage before the swap: a staging failure must not
-			// down the server. One nonce shared by both halves (Fix C).
+			// down the server. One nonce shared by both halves.
 			let nonce = install_nonce();
 			stage_remote_api_upload(runner, conn, local, &nonce)?;
 			finish_remote_api_upload(runner, conn, &bin, &nonce)?;
@@ -1660,7 +1614,7 @@ mod tests {
 		// — NOT result.compatible, which this single-key seam cannot flip.
 		//
 		// The scp destination and finish command embed a per-install nonce
-		// (Fix C) this test cannot predict, so both fall back to a
+		// this test cannot predict, so both fall back to a
 		// program-wide default response instead of an exact key; the
 		// assertions below check the RECORDED calls' shape instead.
 		let probe = probe_args();
@@ -1735,7 +1689,7 @@ mod tests {
 		// error change accidentally widening to the same-platform path too.
 		//
 		// The scp destination and finish command embed a per-install nonce
-		// (Fix C) this test cannot predict, so both fall back to a
+		// this test cannot predict, so both fall back to a
 		// program-wide default response instead of an exact key.
 		let probe = probe_args();
 		let caps = capabilities_args();
@@ -1896,7 +1850,7 @@ mod tests {
 		// is exercised by ..._same_platform_upgrades above).
 		//
 		// The scp destination and finish command embed a per-install nonce
-		// (Fix C) this test cannot predict, so both fall back to a
+		// this test cannot predict, so both fall back to a
 		// program-wide default response instead of an exact key.
 		let probe = probe_args();
 		let uname_args = build_ssh_args(&conn(), "uname -sm");
@@ -2075,7 +2029,7 @@ mod tests {
 		};
 		let caps_args = capabilities_args();
 		// The scp destination and finish command embed a per-install nonce
-		// (Fix C) this test cannot predict, so both fall back to a
+		// this test cannot predict, so both fall back to a
 		// program-wide default response instead of an exact key.
 		let runner = MockRunner::new()
 			.script("ssh", &args_as_str(&prepare_args), ok())
@@ -2120,7 +2074,7 @@ mod tests {
 		// If staging fails (here: scp upload errors), the swap must NOT
 		// happen — the remote keeps serving the old binary, no `mv` runs.
 		//
-		// The scp destination embeds a per-install nonce (Fix C) this test
+		// The scp destination embeds a per-install nonce this test
 		// cannot predict, so the failure is scripted via a program-wide
 		// default instead of an exact key.
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
@@ -2181,7 +2135,7 @@ mod tests {
 		};
 		let caps_args = capabilities_args();
 		// The scp destination and finish command embed a per-install nonce
-		// (Fix C) this test cannot predict, so both fall back to a
+		// this test cannot predict, so both fall back to a
 		// program-wide default response instead of an exact key.
 		let runner = MockRunner::new()
 			.script("ssh", &args_as_str(&prepare_args), ok())
@@ -2217,7 +2171,7 @@ mod tests {
 	#[test]
 	fn install_remote_api_from_local_binary_uploads_then_installs() {
 		// The scp destination and finish command embed a per-install nonce
-		// (Fix C) this test cannot predict, so both fall back to a
+		// this test cannot predict, so both fall back to a
 		// program-wide default response instead of an exact key.
 		let source = RemoteInstallSource::LocalBinary("/tmp/aghub-api".into());
 		let prepare_args =
@@ -2270,7 +2224,7 @@ mod tests {
 		assert_scp_and_finish_share_staged_path(&calls);
 	}
 
-	// --- install_nonce / staged-path uniqueness (Fix C) --------------------
+	// --- install_nonce / staged-path uniqueness ---------------------------
 
 	#[test]
 	fn install_nonce_differs_across_consecutive_calls() {

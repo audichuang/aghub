@@ -55,17 +55,6 @@ impl<'a> CloneOptions<'a> {
 ///
 /// Uses explicit credentials from [`CloneOptions`] when present,
 /// otherwise falls back to `GIT_USERNAME` and `GIT_PASSWORD`.
-///
-/// ```rust,no_run
-/// use aghub_git::{clone_to_temp, CloneOptions};
-///
-/// let temp_dir = clone_to_temp(
-///     CloneOptions::new("https://github.com/user/repo.git")
-///         .with_branch("main")
-/// ).unwrap();
-///
-/// println!("Cloned to: {}", temp_dir.path().display());
-/// ```
 pub fn clone_to_temp(options: CloneOptions<'_>) -> Result<TempDir> {
 	let url = resolve_remote_url(&options.remote, true)?;
 	let temp_dir =

@@ -1,19 +1,14 @@
 //! Tauri command layer for remote SSH management.
 //!
-//! All the testable transport + bring-up logic lives in the tauri-free
-//! `aghub-remote` crate (unit-tested with a `MockRunner`). This module is the
-//! thin glue: it deserializes the `Connection` payload from the frontend,
-//! drives the bring-up via a real [`SystemRunner`], owns the local tunnel
-//! child + a
-//! watcher thread that reports unexpected disconnects, and tracks live handles
-//! so they can be torn down on disconnect and on app exit.
+//! Testable transport + bring-up logic lives in the tauri-free `aghub-remote`
+//! crate. This module is thin glue: it deserializes the frontend's
+//! `Connection`, drives bring-up via a real [`SystemRunner`], owns the local
+//! tunnel child plus a watcher thread reporting unexpected disconnects, and
+//! tracks live handles for teardown on disconnect and app exit.
 //!
-//! Command threading: Tauri runs a **sync** `#[tauri::command] fn` ON THE MAIN
-//! (UI) thread, so a blocking sync command freezes the webview (the macOS
-//! spinning beachball). `connect_remote` is therefore an `async fn` that runs
-//! its blocking ssh/tunnel `bring_up` via `async_runtime::spawn_blocking` — off
-//! BOTH the UI thread and the single-thread tokio runtime. The other ssh/process
-//! commands here use the same pattern so remote operations do not block the UI.
+//! Threading: a sync `#[tauri::command] fn` runs ON THE MAIN (UI) thread and a
+//! blocking one freezes the webview, so every ssh/process command here is an
+//! `async fn` wrapping its blocking work in `async_runtime::spawn_blocking`.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -72,11 +67,9 @@ struct RemoteHandle {
 	remote_pid: u32,
 	/// The local port the tunnel listens on (== the frontend baseUrl port).
 	local_port: u16,
-	/// Whether the remote `aghub-api` advertised controller-side git-credential
-	/// forwarding during bring-up. Cached on the handle so a reused connection
-	/// reports the SAME capability it was brought up with, and so the frontend
-	/// learns it AT THE SAME TIME as the tunnel port (no separate late probe).
-	/// Fail-safe `false` whenever the bring-up probe could not confirm it.
+	/// Git-credential forwarding capability probed at bring-up. Cached so a
+	/// reused connection reports the SAME value, delivered with the port.
+	/// Fail-safe `false` when the probe could not confirm it.
 	supports_credential_forwarding: bool,
 	/// The connection definition (needed to re-issue ssh for remote cleanup).
 	connection: Connection,
@@ -370,11 +363,8 @@ pub async fn connect_remote(
 	// guard releases it on every exit path (including a panic in `bring_up`).
 	let _slot = SlotGuard::claim(&state.connecting, id.clone())?;
 
-	// Do the slow ssh work (connect + tunnel + settle sleep) OFF the UI thread:
-	// Tauri runs sync commands ON the main thread, so a blocking bring-up freezes
-	// the webview (the macOS spinning-beachball). `spawn_blocking` moves it to a
-	// blocking pool; we only touch `state` before/after the await (never hold a
-	// MutexGuard across it). `bring_up` holds no lock, so this is race-free.
+	// Slow ssh work runs OFF the UI thread (see module doc). `state` is touched
+	// only before/after the await, never with a MutexGuard held across it.
 	let handle = {
 		let app = app.clone();
 		let connection = connection.clone();
@@ -421,19 +411,15 @@ pub async fn force_redeploy_remote(
 		let app = app.clone();
 		let connection = connection.clone();
 		tauri::async_runtime::spawn_blocking(move || {
-			// Resolve the install source (dev fallback until bundling lands).
+			// Resolve the install source (bundled, else dev fallback).
 			let source = remote_install_source(&app).ok_or_else(|| {
 				RemoteError::RemoteApiMissing {
 					install_hint: install_hint(),
 				}
 			})?;
-			// Same-platform gate BEFORE any mutation, but ONLY for a bundled/local
-			// binary: a wrong-arch binary would not run on the VM. VM-native install
-			// sources (`ReleaseDeb`, `CargoGit`) are arch-safe for the supported remote
-			// platform, so skip the refusal once `deployable_install_source` has picked
-			// one for the common Mac-desktop -> Linux-VM case.
-			// Mirrors the connect path (`ensure_remote_api`), which gates only
-			// `LocalBinary`.
+			// Same-platform gate BEFORE any mutation, only for `LocalBinary`
+			// (a wrong-arch binary cannot run); VM-native sources (`ReleaseDeb`,
+			// `CargoGit`) are arch-safe. Mirrors `ensure_remote_api`.
 			let runner = SystemRunner;
 			let source =
 				deployable_install_source(&runner, &connection, source)?;
@@ -986,11 +972,9 @@ fn spawn_tunnel_watcher(
 /// Kill the local tunnel (which wakes the watcher) and the remote server.
 fn teardown(handle: &RemoteHandle) {
 	handle.intentional.store(true, Ordering::SeqCst);
-	// Kill the local tunnel directly via the owned `Child`. This is
-	// cross-platform (`SIGKILL` on Unix, `TerminateProcess` on Windows) and,
-	// because we still hold the live child, there is no pid-reuse window — we
-	// always signal exactly this process, never a recycled pid. Killing it also
-	// wakes the watcher's `try_wait` poll, which then runs the remote cleanup.
+	// Kill the tunnel via the owned `Child`: cross-platform, and holding the
+	// live child means no pid-reuse window. It also wakes the watcher's
+	// `try_wait` poll, which then runs the remote cleanup.
 	let _ = handle.tunnel.kill();
 	// Guarded remote kill (idempotent with the watcher's own cleanup).
 	let runner = SystemRunner;

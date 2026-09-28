@@ -86,13 +86,9 @@ impl Fairing for ApiLogFairing {
 	// this fairing does not log `request.headers()`, that header (and any
 	// future secret header) is safe by construction.
 	//
-	// The guard is `tests/log_fairing_redaction.rs`, and it lives in its OWN
-	// test binary for a reason: `log::set_logger` succeeds once per PROCESS, so
-	// a capturing logger sharing a binary with any test that builds a Rocket
-	// first loses the race and records nothing. The previous in-lib guard did
-	// exactly that — its buffer was empty, every `!logs.contains(secret)`
-	// assertion was vacuously true, and dumping the whole header map plus the
-	// token by name still passed. Do not move that test back in here.
+	// Guarded by `tests/log_fairing_redaction.rs`, which must stay in its OWN
+	// test binary (`log::set_logger` wins once per process). Do not move it
+	// back in here. See docs/history/api.md#log-fairing-redaction-test-binary
 	async fn on_request(&self, request: &mut Request<'_>, _: &mut Data<'_>) {
 		info!(
 			"api request started: {} {}",
@@ -171,12 +167,9 @@ pub(crate) fn build_rocket_with_skill_repository_factory(
 }
 
 /// Test-only entry point: same as [`build_rocket`], but lets a test inject a
-/// deterministic credential store (e.g. an in-memory store) for
-/// `routes::inference`, instead of the real OS keyring. Route tests that
-/// exercise inference provider delete/create/etc. should build their client
-/// through this, not `build_rocket` — a hardcoded `NativeCredentialStore`
-/// coupled those tests to a real, reachable keyring backend, which CI (no
-/// gnome-keyring/dbus) does not have (GitHub #15 P1a).
+/// deterministic credential store for `routes::inference` instead of the real
+/// OS keyring. Inference route tests must build through this: CI has no
+/// reachable keyring backend (GitHub #15).
 #[cfg(test)]
 pub(crate) fn build_rocket_with_inference_credentials(
 	config: rocket::Config,
@@ -197,16 +190,10 @@ fn build_rocket_with_state_factories(
 	skill_repositories: crate::state::SkillRepositoryFactory,
 	credentials: Arc<dyn aghub_inference::CredentialStore + Send + Sync>,
 ) -> rocket::Rocket<rocket::Build> {
-	// Only the desktop webview is a legitimate browser origin. Allow-listing it
-	// (instead of `AllOrSome::All`) makes a cross-origin JSON POST — e.g. a
-	// malicious page driving `git/scan` against the localhost API — fail its
-	// CORS preflight, so the request never reaches the handler. Covers the
-	// webview on every platform: `tauri://localhost` (macOS/Linux prod),
-	// `http(s)://tauri.localhost` (Windows prod), `http://localhost:1420`
-	// (vite dev). Non-browser clients (CLI, curl, the SSH-tunnel proxy) don't
-	// do CORS, so they are unaffected. build_rocket is the single construction
-	// point for both the standalone bin and the desktop-embedded server, so
-	// this one change covers every launch path.
+	// Only the desktop webview is a legitimate browser origin, so a
+	// cross-origin JSON POST fails CORS preflight: `tauri://localhost`
+	// (macOS/Linux), `http(s)://tauri.localhost` (Windows), `localhost:1420`
+	// (vite dev). This is the single construction point for every launch path.
 	let cors = rocket_cors::CorsOptions {
 		allowed_origins: rocket_cors::AllowedOrigins::some(
 			&[

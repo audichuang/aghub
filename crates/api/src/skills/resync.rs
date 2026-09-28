@@ -36,12 +36,9 @@ pub(crate) fn safe_resync_error(error: &ResyncError) -> SafeResyncError {
 			code,
 			status: Status::NotFound,
 		},
-		// Both shipped callers intercept `Renamed` in an EARLIER arm to build the
-		// name-carrying message, so nothing in production reaches this one — and
-		// a caller that ever does must still name the failure the way every
-		// other surface does. This used to hold a hand-written `SKILL_RENAMED`
-		// literal defended by a claim about a shipped client matching on it; no
-		// shipped path can observe it, and the literal matched no other surface.
+		// Unreached in production (both callers intercept `Renamed` earlier to
+		// build the name-carrying message); if reached, it uses the shared
+		// `code` like every other arm, not a hand-written literal.
 		ResyncError::Renamed { .. } => SafeResyncError {
 			message: "Source skill was renamed",
 			code,

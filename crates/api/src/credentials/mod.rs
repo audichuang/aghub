@@ -4,8 +4,8 @@
 //! core receives an already-resolved `Option<token>` and never touches the
 //! keyring or the network.
 
-// The resolver and binding store are consumed by the update-check orchestration
-// (Task F1.5) via the `routes::skills_update` route.
+// The resolver and binding store are consumed by the update-check
+// orchestration via the `routes::skills_update` route.
 pub(crate) mod resolve;
 pub(crate) mod source_auth;
 
@@ -28,18 +28,13 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::marker::PhantomData;
 
-/// Classifies a github-credential/source-binding keyring failure so callers
-/// can distinguish "the OS backend itself isn't reachable" (retryable, no
-/// mutation should be assumed to have happened) from every other failure
-/// (corrupt JSON, bad encoding, ...). Delegates to
-/// `aghub_inference::keyring_backend_unavailable` so this and
-/// `InferenceProviderError`'s equivalent `From<keyring_core::Error>` never diverge
-/// on the classification. Both funnel into the same `KEYCHAIN_UNAVAILABLE`
-/// status/code/message in `crate::error::ApiError`.
-/// `Clone` so a failed read can be REMEMBERED with its classification intact.
-/// The distinction is load-bearing: `Unavailable` makes callers fail closed,
-/// while `Other` lets some of them degrade to anonymous — replaying the wrong
-/// variant silently flips that decision.
+/// Classifies a credential/binding keyring failure: "the OS backend is
+/// unreachable" (retryable, assume no mutation) vs everything else (corrupt
+/// JSON, bad encoding, ...). Classified by
+/// `aghub_inference::keyring_backend_unavailable`, the same predicate
+/// `InferenceProviderError` uses; both map to `KEYCHAIN_UNAVAILABLE`.
+/// `Clone` so a remembered failure keeps its variant — `Unavailable` fails
+/// closed while `Other` may degrade to anonymous.
 #[derive(Clone)]
 pub(crate) enum CredentialStoreError {
 	/// The backend itself could not be reached.
@@ -73,10 +68,8 @@ impl From<serde_json::Error> for CredentialStoreError {
 	}
 }
 
-/// Distinguishes the "empty" (delete-worthy) state of a keyring-backed JSON
-/// payload. This is the only difference between the github-credentials store
-/// and the source-bindings store besides the `(service, user)` pair each
-/// closes over — see [`KeyringJson`].
+/// The "empty" (delete-worthy) state of a keyring-backed JSON payload — see
+/// [`KeyringJson`].
 pub(crate) trait KeyringPayload:
 	Default + Serialize + DeserializeOwned
 {
@@ -95,16 +88,12 @@ impl KeyringPayload for resolve::SourceBindings {
 	}
 }
 
-/// A single JSON-blob-in-one-keyring-entry seam: round-trips a
-/// [`KeyringPayload`] `T` through one `(service, user)` keyring entry as a
-/// JSON string, deleting the entry when `T::is_empty()`. Backs the combined
-/// credential bundle and the two legacy entries it migrates from (see
-/// `bundle_store`/`read_bundle` below) — the only difference between them is
-/// the `(service, user)` pair.
+/// Round-trips a [`KeyringPayload`] `T` through one `(service, user)` keyring
+/// entry as JSON, deleting the entry when `T::is_empty()`. Backs the bundle and
+/// the two legacy entries it migrates from.
 ///
-/// Deliberately does NOT lock. Serialization lives one level up, in
-/// `update_bundle`/`read_bundle`, because the flows that need it span a
-/// load+store pair (and, for the first-use migration, three entries).
+/// Deliberately does NOT lock: `update_bundle`/`read_bundle` serialize the
+/// flows that span a load+store pair (and the three-entry migration).
 pub(crate) struct KeyringJson<T> {
 	service: &'static str,
 	user: &'static str,
@@ -127,10 +116,8 @@ impl<T: KeyringPayload> KeyringJson<T> {
 	/// Like [`load`](Self::load) but keeps "the entry does not exist" distinct
 	/// from "the entry holds an empty value".
 	///
-	/// `load` collapses both to `T::default()`, which is right for every read
-	/// path but wrong for the legacy migration: an absent bundle means "look for
-	/// the old entries", whereas a bundle that exists and is empty means the
-	/// user really has no credentials and the migration already ran.
+	/// Needed by the legacy migration: an absent bundle means "look for the old
+	/// entries", an empty one means "migration ran, no credentials".
 	pub(crate) fn load_optional(
 		&self,
 	) -> Result<Option<T>, CredentialStoreError> {
@@ -146,27 +133,20 @@ impl<T: KeyringPayload> KeyringJson<T> {
 
 	/// The single keyring read, cache in front of it.
 	///
-	/// One primitive for both accessors above: they differ only in how they
-	/// render "the entry is absent", and having two copies of the caching and
-	/// logging was an invitation for the two to drift.
+	/// One primitive for both accessors above, so caching and logging exist
+	/// once.
 	fn read_state(&self) -> Result<ReadState, CredentialStoreError> {
 		if let Some(cached) = cache_get(self.service, self.user) {
 			return match cached {
-				// A remembered failure is replayed rather than retried — that
-				// is the whole point of caching it (see FAILURE_TTL). It is
-				// replayed VERBATIM: `Unavailable` and `Other` drive different
-				// caller behaviour (fail closed vs degrade), so rebuilding the
-				// error as one fixed variant would change what callers do.
+				// Replay a remembered failure VERBATIM (see FAILURE_TTL):
+				// `Unavailable` vs `Other` drive fail-closed vs degrade.
 				CachedRead::Failed(error) => Err(error),
 				CachedRead::Value(json) => Ok(ReadState::Value(json)),
 				CachedRead::Absent => Ok(ReadState::Absent),
 			};
 		}
-		// EVERY outcome is recorded, including the failures. Both ways this can
-		// fail cost the user something: opening the entry fails when the backend
-		// is unreachable, and reading it fails when they dismiss the
-		// authorization dialog. Letting either escape uncached is what turned a
-		// single dismissal into one dialog per caller.
+		// Record EVERY outcome, failures included (unreachable backend, a
+		// dismissed dialog) — an uncached failure re-prompts each caller.
 		match self.read_backend() {
 			Ok(state) => {
 				cache_put(self.service, self.user, CachedRead::from(&state));
@@ -228,39 +208,24 @@ impl<T: KeyringPayload> KeyringJson<T> {
 
 /// How long a keyring entry read stays reusable.
 ///
-/// The OS credential store is not a cheap local read: on macOS it serializes
-/// concurrent access from one process and can block for SECONDS on the first
-/// touch after the keychain locks. Startup alone issues several credential
-/// reads (the credentials route, the update check, a source diff), and paying
-/// that price once per read made a single check-updates spend 22.9s in
-/// credential resolution.
-///
-/// The window is short on purpose. Writes THROUGH this type refresh the entry
-/// immediately, so the only staleness left is another process (`aghub-cli`, or
-/// `npx skills`) changing a credential behind our back — bounded by this TTL
-/// rather than lasting until the app restarts.
+/// A keyring read is not cheap (macOS serializes access and can block for
+/// seconds after the keychain locks), and startup issues several.
+/// Short on purpose: writes through this type refresh the entry at once, so
+/// the TTL only bounds staleness from ANOTHER process changing a credential.
+/// See docs/history/api.md#keyring-read-cache
 const CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// How long a FAILED read is remembered.
 ///
-/// Much shorter than a successful one, and it exists for a different reason.
-/// On macOS a locked keychain shows an authorization dialog, and a user who
-/// dismisses it produces `User canceled the operation`. Startup issues several
-/// independent credential reads (the credentials route, the update check, a
-/// source diff); without remembering the refusal, each one re-opens the dialog,
-/// so a single cancel became three prompts and ~10s of waiting.
-///
-/// Remembering it briefly turns that into one prompt: the reads that follow
-/// take the same answer instead of asking again. The window stays small so a
-/// genuinely transient backend failure — or the user simply deciding to
-/// authorize after all — recovers on its own within seconds.
+/// Exists so one dismissed macOS keychain dialog (`User canceled the
+/// operation`) is not re-opened by each of startup's independent reads. Short
+/// so a transient failure, or the user authorizing after all, recovers in
+/// seconds. See docs/history/api.md#keyring-read-cache
 const FAILURE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
 
 type CacheKey = (&'static str, &'static str);
 
-/// A SUCCESSFUL read's outcome. Deliberately has no failure variant: a failed
-/// read is an `Err`, so callers cannot be handed one to unwrap and no
-/// `unreachable!` is needed to explain why.
+/// A SUCCESSFUL read's outcome. No failure variant: a failed read is an `Err`.
 enum ReadState {
 	/// The entry holds this JSON payload.
 	Value(String),
@@ -325,12 +290,9 @@ pub(crate) fn clear_cache_for_test() {
 
 /// Everything credential-related in ONE keyring entry.
 ///
-/// macOS asks for authorization per keychain ITEM, and this app is shipped
-/// ad-hoc signed, so its signature changes on every release and the ACL of a
-/// previously-authorized item no longer matches. The user is therefore
-/// re-prompted after each upgrade — once per item. Holding both payloads in a
-/// single item makes that one password prompt instead of two. It also halves
-/// the number of round trips on every other platform.
+/// macOS authorizes per keychain ITEM, and the ad-hoc-signed app's ACL breaks
+/// on every release, so each item re-prompts after an upgrade. One item = one
+/// prompt (and half the round trips elsewhere).
 #[derive(Default, Serialize, serde::Deserialize)]
 pub(crate) struct CredentialBundle {
 	#[serde(default)]
@@ -342,15 +304,10 @@ pub(crate) struct CredentialBundle {
 impl KeyringPayload for CredentialBundle {
 	/// NEVER "empty" — the bundle entry must survive becoming empty.
 	///
-	/// `KeyringJson::store` deletes the entry for an empty payload, which is
-	/// right for the legacy entries but catastrophic here: deleting the bundle
-	/// turns `Present(empty)` back into `Missing`, and `Missing` is exactly what
-	/// re-triggers the legacy migration. A user who deleted their last
-	/// credential would have a stale legacy copy resurrected on the next read
-	/// (the legacy cleanup is best-effort and may have failed).
-	///
-	/// So an empty bundle is written as a tombstone: it records "the migration
-	/// already ran and the user has nothing", which `Missing` cannot express.
+	/// `KeyringJson::store` deletes an empty payload's entry, but a missing
+	/// bundle re-triggers the legacy migration and could resurrect a stale
+	/// legacy copy of the user's last deleted credential. An empty bundle is a
+	/// tombstone: "migration ran, the user has nothing".
 	fn is_empty(&self) -> bool {
 		false
 	}
@@ -364,12 +321,10 @@ pub(crate) fn bundle_store() -> KeyringJson<CredentialBundle> {
 /// Serializes every bundle read-modify-write, INCLUDING the first-read
 /// migration.
 ///
-/// The migration writes, and it is reachable from an unlocked read path
-/// (`SourceAuth::load`). Without this covering both, a check request could read
-/// the legacy pair, a concurrent create-credential route could write a new
-/// bundle, and the check's migration would then overwrite it with the older
-/// snapshot — losing the credential just created. Cross-process races remain a
-/// documented known limitation, as before.
+/// The migration writes from an unlocked read path (`SourceAuth::load`); if
+/// this did not cover it, a check's migration could overwrite a credential a
+/// concurrent route just created with the older legacy snapshot.
+/// Cross-process races remain a known limitation.
 static BUNDLE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn lock_bundle() -> std::sync::MutexGuard<'static, ()> {
@@ -406,11 +361,9 @@ pub(crate) fn update_bundle<T, E>(
 	}
 }
 
-/// Migration is idempotent and convergent: it only runs while the bundle entry
-/// is ABSENT, and it stops being reachable the moment the bundle is written. If
-/// clearing the legacy entries fails (they are best-effort — a delete can be
-/// denied independently of a read), the bundle still wins every later read,
-/// because nothing consults the legacy entries once the bundle exists.
+/// Migration is idempotent and convergent: it runs only while the bundle is
+/// ABSENT. A failed (best-effort) legacy clear is harmless — once the bundle
+/// exists nothing consults the legacy entries.
 fn read_bundle_locked() -> Result<CredentialBundle, CredentialStoreError> {
 	if let Some(bundle) = bundle_store().load_optional()? {
 		return Ok(bundle);
@@ -429,11 +382,9 @@ fn read_bundle_locked() -> Result<CredentialBundle, CredentialStoreError> {
 		return Ok(legacy);
 	}
 	bundle_store().store(&legacy)?;
-	// Best effort, and deliberately not retried on later reads — a retry would
-	// touch both legacy items again and can re-prompt for authorization. A
-	// failure leaves a stale copy of the tokens in the keychain but cannot make
-	// a later read wrong, because the bundle now exists and wins. Never log the
-	// error's contents beyond this: it can carry entry identifiers.
+	// Best effort, never retried (a retry can re-prompt for authorization); a
+	// stale legacy copy cannot make a later read wrong. Do not log the error
+	// contents: they can carry entry identifiers.
 	if legacy_credentials_store().store(&Vec::new()).is_err()
 		|| legacy_bindings_store()
 			.store(&resolve::SourceBindings::default())

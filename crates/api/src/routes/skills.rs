@@ -307,16 +307,9 @@ pub async fn delete_skill_by_path(
 	}
 
 	if !skill_dir.exists() {
-		// Idempotent: nothing on disk to remove.
-		//
-		// Through the SHARED no-op seam, not a hand-built body. The hand-built
-		// one set `deleted_path: Some(skill_dir)` with `executed: false`, which
-		// contradicts that field's own contract ("only when `executed`; null
-		// otherwise") and tells the desktop a path was deleted that was never
-		// touched — it did not even exist. It also derived `dry_run` from
-		// `!confirm`, so a confirmed delete of an absent skill reported a
-		// dry-run. `noop_removal_response` gives this the same
-		// `outcome: "absent"` shape every other already-gone path uses.
+		// Idempotent: nothing on disk to remove. Answer through the shared
+		// no-op seam (`outcome: "absent"`), never a hand-built body.
+		// See docs/history/api.md#delete-by-path-absent-body
 		return Ok(Json(super::noop_removal_response(
 			vec![],
 			vec![],
@@ -334,22 +327,13 @@ pub async fn delete_skill_by_path(
 		}));
 	}
 
-	// Acquired here: after the last `.await` in this route, and before every read
-	// that decides WHAT gets deleted (the containment resolve, the SKILL.md name
-	// parse, the manager load, and the copy-branch referrer sweep). Any of those
-	// taken outside the lock is a view another aghub process can invalidate before
-	// the delete lands — it reinstalls the same name, or links a new Referrer to
-	// the Master, and we delete its work.
-	//
-	// It cannot go earlier: `MutationGuard` is deliberately `!Send`, so holding it
-	// across the plugin-ownership `.await` above would not compile (and would be
-	// unsound — the thread-local bookkeeping belongs to one thread). The two reads
-	// left outside are safe to leave there: the existence probe only drives an
-	// idempotent "already gone" reply, and the plugin check only decides whether to
-	// REFUSE, never what to remove. A dry-run mutates nothing and takes no lock.
-	//
-	// Everything from here down is synchronous, so it runs on the blocking pool —
-	// acquiring the lock parks its thread, and that must not be an async worker.
+	// Lock here: after the last `.await` (`MutationGuard` is `!Send`) and before
+	// every read that decides WHAT gets deleted (containment resolve, SKILL.md
+	// name, manager load, referrer sweep) — a read outside the lock can be
+	// invalidated by another aghub process and we would delete its work. The two
+	// reads above are safe outside: the existence probe only answers "already
+	// gone", the plugin check only refuses. Dry-run takes no lock. Synchronous
+	// from here, so it runs on the blocking pool.
 	in_mutation_pool(move || {
 		let _mutation_guard = if req.confirm.unwrap_or(false) {
 			match aghub_core::skills::lock::mutation_guard(
@@ -459,31 +443,13 @@ pub async fn delete_skill_by_path(
 
 		if !canonical_layout {
 			// Guard: this non-link branch bypasses `plan_removal`'s referrer
-			// sweep (`Linker::is_link` covers symlinks AND Windows junctions),
-			// so re-apply it here. If the targeted dir is a real directory in
-			// the SHARED `.agents/skills` slot that other in-scope agents read
-			// (discovered as a plain dir, so canonical_path=None), refuse to
-			// `remove_dir_all` it — that would take the skill from every one of
-			// them, none of which the request named.
-			//
-			// The referrer sweep alone is NOT that guard: a shared slot is read
-			// by scanning the directory, so up to ten project agents can be
-			// reading it with ZERO links pointing at it, and the sweep answers
-			// "nobody references it". This route then `remove_dir_all`'d it and
-			// reported `removed`, while `DELETE /agents/<a>/skills/<n>` and the
-			// CLI `delete` refused the same request — the one delete surface
-			// that never came through `remove_skill_planned`.
-			//
-			// The second half is `skill_dir_readers_outside`, NOT "is this a
-			// Master?": a Master is shared BY CONSTRUCTION, so that question
-			// answers yes for every one of them and made this route — the
-			// desktop's per-LOCATION delete — unable to drop any Master at
-			// all. The dialog groups installs by exact `source_path` and sends
-			// every agent installed there, which is the user saying "drop this
-			// location" with nobody left to surprise. What must be refused is
-			// the request that names only SOME of that location's readers: the
-			// leftovers are what a `remove_dir_all` would rob. So ask who is
-			// left over, and let a request covering the whole set through.
+			// sweep, so re-apply it. Refuse to `remove_dir_all` a real dir that
+			// is still referenced OR read by an in-scope agent the request did
+			// not name. Two halves because a shared slot is read by SCANNING —
+			// its readers leave no link for the sweep to find. Ask "who is left
+			// over" (`skill_dir_readers_outside`), not "is this a Master": a
+			// request naming every reader of the location goes through.
+			// See docs/history/api.md#delete-by-path-shared-slot-guard
 			let all_in_scope =
 				aghub_core::skills::removal::agent_skill_dirs_in_scope(
 					resource_scope,
@@ -504,10 +470,6 @@ pub async fn delete_skill_by_path(
 					referrer.display()
 				);
 			}
-			// A directory-scanning reader leaves NO symlink behind, so the
-			// referrer sweep alone is blind to a second agent reading the same
-			// shared slot — `skill_dir_readers_outside` is the half that sees
-			// it.
 			if referrer.is_some()
 				|| !aghub_core::skills::removal::skill_dir_readers_outside(
 					&skill_dir,
@@ -517,18 +479,10 @@ pub async fn delete_skill_by_path(
 				)
 				.is_empty()
 			{
-				// Kept because SHARED — routed through the same `RemovalView`
-				// seam every other branch uses, so it carries
-				// `outcome: "kept"` instead of a hand-built `success: true`
-				// that reads as "deleted". This was the one branch that
-				// returned success for an entity that is still present, and
-				// the desktop's delete dialog closed on it.
-				//
-				// `shared_master_kept: true` is the API's OWN judgement here:
-				// this path detected an external referrer itself
-				// (`dir_has_external_referrer`), whereas core sets that flag in
-				// `plan_copy_removal`. Same wire answer, different producer —
-				// do not read core's flag and conclude it was missed there.
+				// Kept because SHARED: through the `RemovalView` seam so it
+				// reads `outcome: "kept"`, never a success that means "deleted".
+				// `shared_master_kept: true` is this route's OWN judgement
+				// (core sets the same flag in `plan_copy_removal`).
 				return Ok(Json(super::removal_response(
 					aghub_core::skills::removal::RemovalOutcome {
 						plan: aghub_core::skills::removal::RemovalPlan {
@@ -557,11 +511,9 @@ pub async fn delete_skill_by_path(
 				still_read_from: Vec::new(),
 				incomplete: false,
 			};
-			// Preview and commit both go through the core-owned producers —
-			// this route used to assemble a `RemovalOutcome` by hand, and it
-			// had drifted from the manager's twice over: the preview
-			// hard-coded `PruneStatus::NotRun`, and the commit hard-coded
-			// `failed_paths` empty, which made `partial` unreachable here.
+			// Preview and commit both go through the core-owned producers; a
+			// hand-built `RemovalOutcome` drifts from the manager's.
+			// See docs/history/api.md#delete-by-path-hand-built-outcome
 			if dry_run {
 				let preview =
 					match aghub_core::skills::removal::RemovalOutcome::preview(
@@ -943,13 +895,10 @@ fn detect_available_editor() -> Option<CodeEditorType> {
 
 /// Build the skill file tree rooted at `path`.
 ///
-/// Symlinks are NOT blanket-rejected: this fork's universal-install layout
-/// intentionally symlinks `<agent>/skills/<name>` at the `.agents/skills`
-/// master, so the master must show up in the tree. For each symlink entry we
-/// canonicalize the target and only recurse into it when it stays inside one of
-/// the allow-listed `roots`; a symlink escaping the roots is skipped silently
-/// (it never errors the whole tree). The caller has already asserted the
-/// top-level `path` is contained, so it is rendered even if it is itself a link.
+/// Symlinks are NOT blanket-rejected: a Referrer is a symlink at the Master, so
+/// the Master must show up. A symlink is followed only when its canonical
+/// target stays inside the allow-listed `roots`; one escaping them is skipped
+/// silently. The top-level `path` is already asserted contained by the caller.
 fn build_skill_tree_node(
 	path: &std::path::Path,
 	roots: &[PathBuf],
@@ -977,9 +926,7 @@ fn build_skill_tree_node(
 				)
 			})?
 			.filter_map(|entry| entry.ok())
-			// Skip symlink entries whose canonical target escapes the roots,
-			// instead of erroring the whole tree (hides escaping links while
-			// keeping in-tree universal-install links).
+			// Skip escaping symlinks instead of erroring the whole tree.
 			.filter(|entry| entry_allowed(&entry.path(), roots))
 			.collect();
 
@@ -1018,13 +965,11 @@ fn build_skill_tree_node(
 	})
 }
 
-/// A directory entry is renderable in the skill tree if it is a real
-/// (non-symlink) entry, OR a symlink whose canonical target stays inside one of
-/// the allow-listed skills `roots` (the universal-install case). Escaping
-/// symlinks are silently excluded so they cannot leak out-of-tree paths.
+/// A tree entry is renderable if it is not a link, OR a link whose canonical
+/// target stays inside `roots`. Escaping links are excluded silently.
 fn entry_allowed(path: &std::path::Path, roots: &[PathBuf]) -> bool {
-	// Recognize a windows junction too (is_symlink() == false for junctions);
-	// without this a junction entry would skip the containment guard (P1-E2).
+	// Recognize a Windows junction too (`is_symlink()` is false for one), or it
+	// would skip the containment guard.
 	if !aghub_core::skills::linker::Linker::is_link(path) {
 		return true;
 	}
@@ -1154,26 +1099,17 @@ pub async fn import_skill(
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
 	let mut request = body.into_inner();
-	// Expand `~/` ONCE, up front: the hash step below already did, while the
-	// parse and the install read the raw string — so a home-abbreviated path
-	// (what every skill listing returns) hashed fine and then failed to parse.
+	// Expand `~/` ONCE, up front, so the parse, install and hash all read the
+	// same path (skill listings return home-abbreviated paths).
 	request.path = expand_tilde_path(&request.path).display().to_string();
 
 	in_mutation_pool(move || {
 		// ONE transaction for load + materialize + hash + lock write. The load is
-		// INSIDE the guard on purpose: the manager's duplicate-name check decides
-		// whether to write, so a config read taken outside the lock lets another
-		// process install the same name in between — this route would then accept
-		// its own install, keep the other Master, and replace that entry with its
-		// own source and hash. Holding it also stops the Master write and the lock
-		// write from being two transactions with a removal in between (a ghost
-		// lock entry).
-		//
-		// Because the guard spans both writes it necessarily precedes the source
-		// path's validation inside `add_skill_from_path`, so a request that is BOTH
-		// unusable and contended answers with the contention. That is a transient
-		// reordering — the retry reports the path error — and splitting the guard
-		// to avoid it would reintroduce the ghost-entry window.
+		// inside the guard because its duplicate-name check decides whether to
+		// write; one guard over both writes leaves no window for a removal to
+		// strand a ghost lock entry. Side effect: an invalid AND contended
+		// request reports contention first (the retry reports the path error) —
+		// do not split the guard to "fix" that.
 		let _mutation_guard = aghub_core::skills::lock::mutation_guard(
 			"import skill",
 			resource_scope,
@@ -1185,17 +1121,11 @@ pub async fn import_skill(
 
 		manager.load().map_err(ApiError::from)?;
 
-		// This route installs BEFORE it stamps the lock, and the lock writer
-		// refuses an unparseable file. Prove the lock is usable now, while
-		// nothing has been written — otherwise a conflicted `skills-lock.json`
-		// answers 500 with the skill already installed and untracked.
-		//
-		// Only when this request can actually materialize. A re-import of a
-		// skill that is already present writes NOTHING and may never touch the
-		// lock at all, so refusing it on the lock's account would break the
-		// no-op contract below. The name comes from the SAME parse of the SAME
-		// raw path `add_skill_from_path` uses, so the two cannot disagree; if
-		// it fails to parse, fall through and let that call report it.
+		// Prove the lock is writable BEFORE installing, or a conflicted
+		// `skills-lock.json` answers 500 with the skill installed and untracked.
+		// Only when this request can materialize: a re-import of a present skill
+		// writes nothing and must stay a no-op. Same parse as
+		// `add_skill_from_path`; a parse failure falls through to that call.
 		let submitted_name =
 			skill::parser::parse(std::path::Path::new(&request.path))
 				.ok()
@@ -1224,23 +1154,15 @@ pub async fn import_skill(
 		// Hash the local source folder (the SKILL.md's directory).
 		let source_dir = get_skill_root(expand_tilde_path(&request.path));
 
-		// Whether this import may stamp the lock. Mirrors the rule core already
-		// settled for fetched installs (`skills::install_fetched`: write when
-		// `existing_owner.is_none() && covered_any`, guarded by a Master-hash
-		// check):
-		//
+		// Whether this import may stamp the lock (same rule as core's
+		// `skills::install_fetched`):
 		// - a call that WROTE the Master always writes;
-		// - one that did not (a no-op, or only a new Referrer to a Master that
-		//   was already there — e.g. re-granting a skill every agent had been
-		//   unticked from) MUST NOT overwrite an existing entry — that entry may
-		//   be a `git` source, and replacing it with `source_type: "local"`
-		//   silently disables `check`/`apply-update` for that skill forever;
-		// - such a call over an UNTRACKED Master may adopt it, but only when the
-		//   Master is byte-identical to the folder being submitted. Without
-		//   that check the entry would record a hash for content that is not
-		//   what is installed. Refusing outright was worse: `add`/import is the
-		//   only adoption path there is, so an untracked Master would stay
-		//   untracked forever with nothing the user could do about it.
+		// - one that did not MUST NOT overwrite an existing entry — it may be a
+		//   `git` source, and `source_type: "local"` would disable
+		//   `check`/`apply-update` for it forever;
+		// - over an UNTRACKED Master it may adopt, but only when the Master is
+		//   byte-identical to the submitted folder (import is the only adoption
+		//   path, so refusing outright would strand it untracked).
 		let may_write_lock = if added.wrote_master {
 			true
 		} else if locked_entry_exists(
@@ -1254,12 +1176,9 @@ pub async fn import_skill(
 		};
 
 		if may_write_lock {
-			// This route materializes BEFORE it stamps the lock, so a failure
-			// here would leave an untracked install behind — the preflight
-			// above rejects an unparseable lock but cannot rule out a late I/O
-			// failure (unwritable parent, full disk) or a foreign writer. Undo
-			// exactly what THIS call created, from the materializer's own
-			// receipt, and only then report the failure.
+			// Materialized before the lock stamp, so a late lock-write failure
+			// would strand an untracked install: undo exactly what THIS call
+			// created (the materializer's receipt), then report the failure.
 			if let Err(error) = write_skill_install_lock(
 				&imported.name,
 				resource_scope,
@@ -1370,12 +1289,8 @@ pub async fn delete_skill(
 	check_skills_mutable(&agent, resource_scope)?;
 	require_writable_scope(&resolved)?;
 	let mut manager = build_manager_from_resolved(&agent, &resolved)?;
-	// No `ConfigError::NotFound` arm: that variant is NEVER constructed
-	// anywhere in the workspace (its only constructor,
-	// `crates/agents/src/errors.rs`'s `not_found`, has no callers), so the arm
-	// this replaces was dead code that also happened to return a `success:
-	// true` body with no removal state. A genuinely missing config surfaces as
-	// `Io(NotFound)` and belongs in the error path like any other load failure.
+	// No `ConfigError::NotFound` arm: nothing constructs that variant; a missing
+	// config surfaces as `Io(NotFound)` and takes the normal error path.
 	manager.load().map_err(ApiError::from)?;
 	if let Some(skill) = manager.get_skill(name) {
 		ensure_skill_not_plugin_managed(skill, "delete").await?;
@@ -1389,11 +1304,8 @@ pub async fn delete_skill(
 	// Only the lock-taking call moves to the blocking pool; every check above
 	// stays exactly where it was, so which error wins is unchanged.
 	in_mutation_pool(move || {
-		// `remove_skill_planned` already prunes the lock and records the status
-		// in `outcome.prune`; no route-level re-prune. The idempotent-delete
-		// contract (ResourceNotFound is a success no-op) is owned ONCE in
-		// `routes::removal_or_noop` — this was its third hand-rolled copy, and
-		// the copy returned no `outcome` at all.
+		// `remove_skill_planned` already prunes the lock (`outcome.prune`); the
+		// idempotent-delete contract is owned ONCE in `routes::removal_or_noop`.
 		super::removal_or_noop(
 			manager.remove_skill_planned_for_agents(
 				&name, all_agents, dry_run, confirm, &requested,
@@ -1421,10 +1333,8 @@ pub async fn enable_skill(
 		ensure_skill_not_plugin_managed(skill, "enable").await?;
 	}
 	manager.enable_skill(name).map_err(ApiError::from)?;
-	// Unreachable today — `enable_skill` always refuses, because nothing
-	// persists a skill's enabled flag. The call stays HERE rather than short-
-	// circuiting at the top so the plugin-managed check above still decides the
-	// error first; that precedence is route contract.
+	// `enable_skill` always refuses (nothing persists the flag); the call stays
+	// here so the plugin-managed check above keeps error precedence.
 	let skill = manager.get_skill(name).expect("skill present after enable");
 	Ok(Json(SkillResponse::from(skill)))
 }
@@ -2010,9 +1920,8 @@ pub(crate) async fn install_skill_with_repo(
 			}
 		}
 
-		// Aggregate over OUTCOMES, not over "did we write bytes". `installed` is
-		// false for an idempotent re-install (the agent was already correctly
-		// linked), and folding it in here reported that success as a failure.
+		// Aggregate over OUTCOMES: `installed` is false for an idempotent
+		// re-install, which is still a success.
 		let success =
 			!agent_rows.is_empty() && agent_rows.iter().all(|r| r.success);
 		log_install_results("skills/install", resource_scope, &agent_rows);
@@ -2087,15 +1996,10 @@ fn skill_read_roots(
 	aghub_core::skills::removal::allowed_skill_roots(&agent_dirs, project_root)
 }
 
-/// Resolve the allow-listed skills roots for a (scope, project_root) pair and
-/// assert `path` canonicalizes to inside one of them. Mirrors the containment
-/// guard used by `delete_skill_by_path`, so content/tree reads cannot escape
-/// the skills tree (incl. via `..` or a symlink whose target is out of tree).
-///
-/// A path that does NOT exist yields `Status::NotFound` (with `not_found_code`)
-/// rather than Forbidden, so a missing/just-deleted skill reads as 404 — only a
-/// path that EXISTS yet resolves outside the roots is a 403. Mirrors how
-/// `removal::assert_targets_strictly_contained` distinguishes not-found targets.
+/// Assert `path` canonicalizes inside the scope's allow-listed skills roots —
+/// the same containment as `delete_skill_by_path`, so content/tree reads cannot
+/// escape via `..` or an out-of-tree symlink. A path that does NOT exist is 404
+/// (`not_found_code`); only an existing path outside the roots is 403.
 fn assert_skill_read_allowed(
 	path: &Path,
 	resource_scope: ResourceScope,
@@ -2184,10 +2088,8 @@ pub fn get_skill_tree(
 		project_root.as_deref(),
 		"SKILL_PATH_NOT_FOUND",
 	)?;
-	// Thread the allow-listed roots down so symlink ENTRIES (e.g. the
-	// universal-install `<agent>/skills/foo -> .aghub/foo`) are
-	// included when their canonical target stays inside the roots, and silently
-	// skipped (not 400'd) when they escape.
+	// Thread the roots down so a Referrer entry (`<agent>/skills/foo ->
+	// .aghub/foo`) is included when it stays inside them, skipped otherwise.
 	let roots = skill_read_roots(resource_scope, project_root.as_deref());
 	let tree = build_skill_tree_node(&safe_root, &roots)?;
 	Ok(Json(tree))
@@ -2522,6 +2424,9 @@ fn forwarded_token_for_url(
 	SourceAuth::forwarded_for_scan(forwarded, url)
 }
 
+/// `(valid (raw, parsed), invalid (raw, message))`, both in request order.
+type InstallAgentPartition = (Vec<(String, AgentType)>, Vec<(String, String)>);
+
 /// Partition `agents` (raw strings from the request) into valid/invalid
 /// entries in request order. Invalid entries carry the error message to
 /// surface back to the caller.
@@ -2530,12 +2435,11 @@ fn forwarded_token_for_url(
 /// here: the deep install seam must see every known requested target so its
 /// all-target preflight can reject a mixed list before writing the Master.
 /// Invalid means an unknown raw agent id.
-#[allow(clippy::type_complexity)]
 fn partition_install_agents_in_request_order(
 	agents: &[String],
 	_scope: ResourceScope,
 	_project_root: Option<&std::path::Path>,
-) -> (Vec<(String, AgentType)>, Vec<(String, String)>) {
+) -> InstallAgentPartition {
 	let mut valid: Vec<(String, AgentType)> = Vec::new();
 	let mut invalid: Vec<(String, String)> = Vec::new();
 	for agent_str in agents {
@@ -5463,26 +5367,13 @@ mod tests {
 		assert_eq!(body["code"], "KEYCHAIN_UNAVAILABLE");
 	}
 
-	/// Regression (GitHub #15 P2-3, Codex-found): git-scan's host-scoped
-	/// keyring fallback (no explicit `credential_id`) used to read the
-	/// keyring via `.ok()?` / `.unwrap_or_default()`, silently degrading ANY
-	/// failure — including "the backend itself is unreachable" — to "no
-	/// credential bound". That let a private-source request proceed as if
-	/// public and fail with a confusing clone/network error instead of a
-	/// stable, retryable 503.
+	/// git-scan's host-scoped keyring fallback (no `credential_id`) must answer
+	/// a retryable 503 on a keyring outage, not proceed as "no credential"
+	/// (GitHub #15). See docs/history/api.md#apply-update-keyring-fail-closed
 	///
-	/// Forces the backend-unavailable path via
-	/// `crate::credentials::test_hooks::ForceCredentialBackendUnavailable`
-	/// (deterministic, cross-platform) instead of the previous
-	/// `DBUS_SESSION_BUS_ADDRESS` tampering: that env var only affects Linux
-	/// secret-service, so a macOS/Windows CI runner would see a non-503
-	/// result (GitHub #15 round-2 Codex finding). Omit `credential_id` so
-	/// resolution falls through to the host-fallback branch. The target URL
-	/// points at a closed local port (connection refused instantly) so if
-	/// this regresses back to "swallow and attempt a clone", the test fails
-	/// fast on a connection error rather than hanging on a real network
-	/// timeout — it must never reach the network at all now that
-	/// `load_or_unavailable` fails first.
+	/// Uses `ForceCredentialBackendUnavailable` (cross-platform). The URL is a
+	/// closed local port, so a regression that swallows the error and clones
+	/// fails fast instead of hanging on the network.
 	#[test]
 	fn git_scan_host_fallback_fails_closed_when_keyring_backend_unreachable() {
 		let _env = crate::routes::test_env_lock()

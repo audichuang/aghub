@@ -34,10 +34,9 @@ pub struct ScopeParams {
 	pub project_root: Option<String>,
 }
 
-/// Resolve a possibly-relative project root to an ABSOLUTE path so the
-/// universal-master canonical dir is absolute (junction targets require it —
-/// spec Decision 6 / P0-C). Uses `canonicalize` when the path exists, else
-/// joins onto the current dir without requiring existence.
+/// Resolve a possibly-relative project root to an ABSOLUTE path so the Master's
+/// canonical dir is absolute (Windows junction targets require it). Uses
+/// `canonicalize` when the path exists, else joins onto the current dir.
 pub fn absolutize_root(root: &str) -> PathBuf {
 	let p = PathBuf::from(root);
 	if p.is_absolute() {
@@ -50,20 +49,11 @@ pub fn absolutize_root(root: &str) -> PathBuf {
 }
 
 impl ScopeParams {
-	/// Resolve the request scope. A MISSING `scope` defaults to `global` — this
-	/// is INTENTIONALLY different from the CLI, whose unscoped `source
-	/// list`/`diff` default to `All` (global + the detected project).
-	///
-	/// The two surfaces differ on purpose: the CLI runs in a user's working
-	/// directory and can cheaply detect a project root, so "everything in
-	/// scope here" (`All`) is the useful default. The API is a stateless
-	/// localhost server with no meaningful cwd — `All` would have to guess a
-	/// project root from the server process's directory, which is not the
-	/// caller's project. The desktop client (the only real consumer) always
-	/// sends an explicit `scope`, so this default only affects raw HTTP
-	/// callers, for whom `global` is the safe, unambiguous choice.
-	/// `routes::sources::tests::missing_scope_defaults_to_global_not_all` pins
-	/// this; the CLI's `All` default lives in `resolve_read_scopes`.
+	/// Resolve the request scope. A MISSING `scope` defaults to `global` —
+	/// INTENTIONALLY unlike the CLI's `All` (`resolve_read_scopes`): the server's
+	/// cwd is not the caller's project, so `All` would guess the wrong root.
+	/// The desktop always sends a scope; this only affects raw HTTP callers.
+	/// Pinned by `routes::sources::tests::missing_scope_defaults_to_global_not_all`.
 	pub fn resolve(&self) -> Result<ResolvedScope, ApiError> {
 		let scope = self.scope.as_deref().unwrap_or("global");
 		match scope {
@@ -102,23 +92,17 @@ impl ScopeParams {
 	}
 }
 
-/// Request guard that blocks browser cross-origin / DNS-rebinding attacks on the
-/// localhost API without a shared token (a token would collide with this fork's
-/// SSH-remote / multi-connection model — see api/AGENTS.md). Two header checks,
-/// both LENIENT when the header is absent so non-browser clients (CLI, curl, the
-/// SSH-tunnel proxy, Rocket's local test client) are unaffected — only a browser
-/// reliably attaches these:
+/// Request guard against browser cross-origin / DNS-rebinding attacks on the
+/// localhost API, without a shared token (see `crates/api/AGENTS.md` CORS).
+/// Both checks are LENIENT when the header is absent, so non-browser clients
+/// (CLI, curl, the SSH-tunnel proxy, the local test client) pass:
 ///
-/// - `Origin` present and NOT a trusted local origin → 403. A malicious page's
-///   cross-origin request always carries its own Origin; a same-origin webview
-///   call carries the trusted `tauri://localhost` / `http://localhost:1420`.
-/// - `Host` present and NOT a trusted local host → 403. Closes DNS-rebinding,
-///   where the attacker page is same-origin (no Origin sent) but the Host is the
-///   attacker's rebound domain. (Layer-1 CORS can't see this; upstream's guard
-///   omitted the Host check.)
+/// - `Origin` present and not a trusted local origin → 403 (cross-origin page).
+/// - `Host` present and not a trusted local host → 403 (DNS-rebinding: same
+///   origin, no Origin header, attacker's Host — CORS cannot see it).
 ///
-/// Mounted on every `/api/v1` route except OPTIONS preflight. Enumerated by
-/// `all_routes_reject_foreign_host` so new routes cannot silently omit it.
+/// Mounted on every `/api/v1` route except OPTIONS; enforced by
+/// `all_routes_reject_foreign_host`.
 pub struct TrustedLocalOrigin;
 
 /// Extract the host from an `authority` (`host`, `host:port`, or `[::1]:port`).

@@ -592,7 +592,7 @@ fn delete_skill_dry_run_is_default_and_lists_paths() {
 		String::from_utf8_lossy(&out.stderr)
 	);
 	let json: Value = serde_json::from_slice(&out.stdout).unwrap();
-	// Task 10: delete JSON is now the snake_case RemovalView shape.
+	// delete JSON is the snake_case RemovalView shape.
 	assert_eq!(json["dry_run"], true);
 	assert_eq!(json["executed"], false);
 	let paths = json["paths"].as_array().unwrap();
@@ -671,8 +671,8 @@ fn delete_skill_yes_prunes_and_reports() {
 // ==================== #5: MCP delete dry-run/confirm gate ====================
 //
 // MCP delete now routes through `remove_mcp_planned` with the same
-// `--yes`/`--dry-run` gate + snake_case `RemovalView` JSON shape as skills
-// (Task 14). MCP removal is a flat config-file rewrite (no symlink/allowlist),
+// `--yes`/`--dry-run` gate + snake_case `RemovalView` JSON shape as skills.
+// MCP removal is a flat config-file rewrite (no symlink/allowlist),
 // so these are platform-agnostic — NOT unix-gated.
 
 /// Seed an MCP via `add mcps`, returning the isolated HOME/STATE temp dirs so
@@ -1953,7 +1953,7 @@ fn apply_update_outdated_skips_uncheckable_and_leaves_lock_alone() {
 	assert_eq!(std::fs::read(&lock).unwrap(), before);
 }
 
-// ==================== Task 3.2-3.5: `source` subcommand ====================
+// ==================== `source` subcommand ====================
 
 #[test]
 fn source_list_runs_with_no_agent_config() {
@@ -3476,10 +3476,9 @@ fn source_sync_help_renders() {
 		.success();
 }
 
-// ===== Task 25 [#2]: scope-mapper end-to-end message contract =====
+// ===== scope-mapper end-to-end message contract =====
 // These pin the three `source sync` scope rejections to their exact CLI
-// messages so the collapse onto `skill_update::sources::write_scope`
-// (ScopeError Display) stays behavior-preserving end to end.
+// messages.
 
 #[test]
 fn source_sync_all_is_rejected() {
@@ -4042,9 +4041,9 @@ fn update_mcp_zero_timeout_is_rejected() {
 	);
 }
 
-// ============ Task 10: CLI emits core RemovalView/SkillView builders ============
+// ============ CLI emits core RemovalView/SkillView builders ============
 
-/// CONTRACT (Task 10): CLI `delete skills` now serializes the shared
+/// CONTRACT: CLI `delete skills` now serializes the shared
 /// `aghub_core::dto::RemovalView`, so the JSON keys are snake_case
 /// (`dry_run`/`needs_confirm`) matching the API + desktop, NOT the old camelCase
 /// `dryRun`/`needsConfirm`. This pins the breaking key flip.
@@ -4666,7 +4665,7 @@ fn inference_update_each_branch_applies() {
 	);
 }
 
-// ==================== Task 30: transfer + reconcile ====================
+// ==================== transfer + reconcile ====================
 //
 // Thin CLI adapters over `aghub_core::transfer`. The core fns are already tested
 // inline in transfer.rs; these e2e tests pin only the CLI wiring: scope/agent
@@ -9037,9 +9036,8 @@ fn agent_facing_message_and_flag_fixes() {
 		 {stderr}"
 	);
 
-	// C1: the `-a all` rejection must match the `-a` long help. It used to say
-	// "supports only 'get'", contradicting both the help and the behaviour, and
-	// its suggested remedy (a comma list) is itself rejected by this command.
+	// The `-a all` rejection must match the `-a` long help and suggest no comma
+	// list. See docs/history/cli.md#all-agents-message
 	let all_rejected = isolated_cli(home.path(), state.path())
 		.args(["-a", "all", "check", "skills"])
 		.output()
@@ -9055,9 +9053,7 @@ fn agent_facing_message_and_flag_fixes() {
 		"it must not suggest a list this command also rejects: {msg}"
 	);
 
-	// B10: `source diff --online` must parse. It exists only because
-	// `check --online` does, so a caller reasonably tries it here; clap's
-	// exit-2 "to pass '--online' as a value" tip reads like a quoting problem.
+	// `source diff --online` must parse. See docs/history/cli.md#diff-accepts-online
 	let diff_online = isolated_cli(home.path(), state.path())
 		.args(["source", "diff", "owner/repo", "--online"])
 		.output()
@@ -10387,8 +10383,7 @@ fn second_review_found_gaps_stay_fixed() {
 		"an orphaned lock entry is an issue even without --verify-links: {}",
 		String::from_utf8_lossy(&gated.stdout)
 	);
-	// The message must name the axis that actually ran — it used to say
-	// "agent referrer issue(s)" while the link audit had never been requested.
+	// The message must name the axis that actually ran.
 	let stderr = String::from_utf8_lossy(&gated.stderr);
 	assert!(
 		stderr.contains("skill health"),
@@ -10396,8 +10391,7 @@ fn second_review_found_gaps_stay_fixed() {
 	);
 
 	// --- A `kept` delete must not tell the human to re-run with --yes: that
-	// run fails with `Unsupported operation`. The JSON and the desktop were
-	// fixed; the CLI's own human renderer still printed the dead-end hint.
+	// run fails with `Unsupported operation`.
 	//
 	// cline + codex is the shape that still reaches `kept`, and both halves are
 	// written by aghub itself: cline has no private dir, so its grant IS
@@ -12239,9 +12233,7 @@ fn an_unreadable_sub_agent_file_is_not_an_absent_one() {
 ///
 /// This pair covers the COPY layout only — `canonical_path` is None, so
 /// `plan_removal` routes to `plan_copy_removal` and `plan_symlink_removal` is
-/// never entered. The symlink sweep has its own pair below; an earlier version
-/// of this comment claimed both, and reverting the symlink fix left every test
-/// here green.
+/// never entered. The symlink sweep has its own pair below.
 #[cfg(unix)]
 #[test]
 fn a_referrer_we_cannot_stat_still_counts_as_a_referrer() {

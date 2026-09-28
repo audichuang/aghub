@@ -2,12 +2,11 @@
 //! entries a check looks at, which folders it hashes, and in what order it
 //! reads the two.
 //!
-//! Both surfaces consume it. The API route (`GET /skills/check-updates`) also
-//! consumes the [`Identities`] half — it is the only surface that heals the
-//! lock afterwards — while the CLI (`aghub-cli check`) ignores it. The rules
-//! that used to live in the route file and were absent from the CLI's private
-//! copies: the `wanted` filter, the per-root hash memo, the offline skip, and
-//! the lock-before-disk read order.
+//! Both surfaces consume it: the `wanted` filter, the per-root hash memo, the
+//! offline skip, and the lock-before-disk read order live only here. The API
+//! route (`GET /skills/check-updates`) also consumes the [`Identities`] half —
+//! it is the only surface that heals the lock afterwards — while the CLI
+//! (`aghub-cli check`) ignores it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -36,17 +35,14 @@ pub struct LocalHashes {
 
 /// Folder hashes for the installed copies of `wanted`, keyed by skill name.
 ///
-/// `wanted` is the lock's key set, and restricting the sweep to it is what keeps
-/// this off every unlocked skill on the machine: folder-hashing reads every file
-/// of every skill folder, and a real host measured 464 folders hashed to answer
-/// 34 locked names — 10.4s of the check's 18.6s, ~93% of it discarded.
+/// `wanted` is the lock's key set: restricting the sweep to it keeps this off
+/// every unlocked skill on the machine (folder-hashing reads every file; one
+/// real host hashed 464 folders for 34 locked names, d22de58c). The filter is
+/// by NAME only, so every agent's copy of a wanted name is still seen for the
+/// ambiguity detection (`local_hashes_cover_exactly_the_locked_names`).
 ///
-/// The filter is by NAME only, so every agent's copy of a wanted name is still
-/// seen and the ambiguity detection below is unchanged.
-///
-/// `offline` returns empty without touching disk. A check that did not go to the
-/// network has nothing to compare a local hash against, and hashing anyway is
-/// what made the CLI's default-offline `check` pay for a full sweep it discarded.
+/// `offline` returns empty without touching disk: an offline check has nothing
+/// to compare a local hash against (`offline_does_not_hash_anything`).
 fn local_hashes_for_scope(
 	offline: bool,
 	resource_scope: ResourceScope,
@@ -223,25 +219,15 @@ pub type Identities = HashMap<String, HealPrecondition>;
 /// Project the global skill lock into the orchestrator's per-entry inputs, plus
 /// the identity of each entry AS READ HERE (the read that decides what to fetch).
 ///
-/// The lock read and the disk read are both closures so the ORDER of the two
-/// cannot be got wrong by a caller. The lock snapshot must not be NEWER than the
-/// disk hashes paired with it: hashing disk first lets a concurrent `npx skills
-/// update` land in between, and the check then pairs the OLD disk hash with a
-/// lock snapshot that already reflects npx's write. The heal derived from that
-/// stale hash matches the live lock, passes the precondition, and overwrites
-/// npx's newer state. Snapshotting the lock first inverts that: any interleaved
-/// write leaves the live lock ahead of the snapshot, so the precondition
-/// rejects the heal instead.
+/// Both reads are closures so a caller cannot get their ORDER wrong: lock
+/// FIRST, then disk. Hashing disk first lets a concurrent `npx skills update`
+/// land in between, and the stale-hash heal would then pass its precondition
+/// and overwrite npx's newer state; lock-first leaves any interleaved write
+/// ahead of the snapshot, so the precondition rejects the heal
+/// (`the_lock_is_read_before_the_hashes_and_names_them`).
 ///
-/// `read_lock` is a closure rather than a fixed read because the two surfaces
-/// disagree on purpose: the API reads the lock fail-open, while the CLI hands in
-/// a snapshot it already probed fail-closed (an unreadable lock must fail
-/// `check`, not read as "no skills installed").
-///
-/// It is also the seam the order above is testable through: a test supplies a
-/// `read_hashes` that performs an npx-style write before returning, which is
-/// exactly the interleaving the ordering defends against — deterministically,
-/// with no sleep.
+/// `read_lock` is a closure because the surfaces differ on purpose: the API
+/// reads fail-open, the CLI hands in a snapshot it probed fail-closed.
 pub fn global_lock_entries_with(
 	read_lock: impl FnOnce() -> skill::SkillLockFile,
 	read_hashes: impl FnOnce(&HashSet<String>) -> LocalHashes,
@@ -337,11 +323,9 @@ fn project_lock_entries_with(
 
 /// [`global_lock_entries_with`] wired to the real sweep.
 ///
-/// `offline` reaches [`local_hashes_for_scope`] HERE, once — not through a
-/// closure each surface writes beside its own call. A surface that passed the
-/// wrong flag would still return the right statuses (the orchestrator's offline
-/// gate never reads `local_hash`), so the mistake is invisible everywhere
-/// downstream; the only defence is having one place to get it right.
+/// `offline` reaches [`local_hashes_for_scope`] HERE, once: a wrong flag would
+/// still yield the right statuses, so the mistake would be invisible downstream
+/// (`offline_is_wired_to_the_sweep_by_the_projection`).
 pub fn global_lock_entries(
 	offline: bool,
 	read_lock: impl FnOnce() -> skill::SkillLockFile,

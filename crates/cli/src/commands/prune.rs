@@ -17,12 +17,10 @@
 //! already pruned something, the reported JSON carries those keys tagged with an
 //! `error` field, and the command still exits non-zero.
 //!
-//! The concurrency window that used to be third here is CLOSED: core's
-//! `prune_lock_from_dirs` holds the interprocess mutation lock across its scan
-//! AND its rewrite, so a skill another aghub process installs can no longer be
-//! pruned by a disk set that predates it. `npx skills` still takes no lock of
-//! ours. Windows 1/2 are per-scope-sequential, not concurrency — one lock per
-//! scope cannot make two independent lock files commit atomically.
+//! Concurrency is NOT one of the windows: core's `prune_lock_from_dirs` holds
+//! the interprocess mutation lock across scan AND rewrite (`npx skills` takes
+//! no lock of ours). Windows 1/2 are per-scope-sequential — one lock per scope
+//! cannot make two lock files commit atomically.
 
 use crate::eprintln_verbose;
 use aghub_core::models::ResourceScope;
@@ -46,18 +44,10 @@ pub fn execute(
 
 	let mut pruned: Vec<String> = Vec::new();
 
-	// Committing (`!dry_run`) BOTH scopes: scan-check both up front, before
-	// mutating either lock. `preview_prune` runs the exact same disk scan
-	// `prune_lock_scanning` does, minus the write, so a scan error on either
-	// side surfaces here instead of after the global lock below is already
-	// committed. This buys back the documented all-or-nothing-on-scan-error
-	// contract at the cost of scanning disk twice. See the module doc for the
-	// two residual non-atomic windows this does NOT close: the scan-to-commit
-	// TOCTOU and the lock WRITE itself. Both are handled below by reporting
-	// whatever the global scope already pruned alongside an `error` field
-	// instead of bailing with empty stdout. Neither is concurrency — core's
-	// prune holds the interprocess mutation lock over scan+rewrite — so this
-	// preflight stays: the lock cannot make two lock files commit atomically.
+	// Committing BOTH scopes: scan-check both up front (`preview_prune` is the
+	// same scan minus the write), so a scan error surfaces before the global
+	// lock is committed — all-or-nothing on scan errors, at the cost of a
+	// second scan. The two residual windows are in the module doc.
 	if !dry_run && want_global && want_project {
 		if let Some(root) = project_root {
 			preview_prune(PruneScope::Global, None)?;
@@ -95,15 +85,9 @@ pub fn execute(
 			match prune_lock_scanning(PruneScope::Project, Some(root)) {
 				Ok(names) => names,
 				Err(e) => {
-					// Disclose ONLY a real partial mutation: a non-empty
-					// `pruned` means the global scope above already
-					// committed those keys, and bailing with empty
-					// stdout would hide that. With nothing committed
-					// (single-scope run, or a `Both` run that pruned no
-					// global key) there is no partial state to report,
-					// so stdout stays empty as before -- a caller that
-					// treats "stdout parses as JSON" as success must not
-					// start reading a failed prune as a clean one.
+					// Disclose ONLY a real partial mutation (global keys
+					// already committed). With nothing committed stdout stays
+					// empty, so "stdout parses as JSON" never reads as success.
 					if !pruned.is_empty() {
 						report(&pruned, dry_run, Some(&e.to_string()), json)?;
 						// That report IS the answer for this run; a second

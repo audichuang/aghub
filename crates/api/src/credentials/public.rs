@@ -30,13 +30,9 @@ pub struct ResolvedToken {
 /// Resolve a git token for a skill `source`, returning the token and the origin
 /// it is pinned to.
 ///
-/// Loads the local credential bindings + stored credentials from the keyring,
-/// then delegates the pure resolution + origin derivation to the testable inner
-/// [`resolve_token_with`]. Returns `None` when the keyring cannot be read or no
-/// credential matches the source.
-///
-/// This reads the OS keyring, so it is not unit-tested directly; the pure inner
-/// fn is.
+/// Loads bindings + credentials from the keyring and delegates to the pure,
+/// unit-tested [`resolve_token_with`]. `None` when the keyring cannot be read
+/// or no credential matches.
 pub fn resolve_git_token_for_source(source: &str) -> Option<ResolvedToken> {
 	let bindings = load_source_bindings().ok()?;
 	let creds = load_credentials().ok()?;

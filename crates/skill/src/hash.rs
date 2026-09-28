@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 use std::io::{self, Read};
 use std::path::Path;
 
-/// Bounds guard (F1 hashes untrusted fetched content).
+/// Bounds guard: the hash runs over untrusted fetched content.
 pub const MAX_FILES: usize = 10_000;
 pub const MAX_TOTAL_BYTES: u64 = 256 * 1024 * 1024; // 256 MiB
 pub const MAX_DEPTH: usize = 64;
@@ -285,12 +285,6 @@ mod tests {
 		}
 	}
 
-	fn hex(bytes: &[u8]) -> String {
-		let mut h = Sha256::new();
-		h.update(bytes);
-		lower_hex(&h.finalize())
-	}
-
 	#[test]
 	fn placeholder_digest_detected() {
 		assert!(is_placeholder_digest(EMPTY_SKILLS_LOCK_DIGEST));
@@ -558,10 +552,5 @@ mod tests {
 			compute_skill_folder_hash(dir.path()),
 			Err(HashError::Bounds(_))
 		));
-	}
-
-	#[allow(dead_code)]
-	fn _hex_used(_: &[u8]) {
-		let _ = hex;
 	}
 }

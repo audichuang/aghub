@@ -8,13 +8,10 @@
 //! its permanent reason (`local`, `ssh`, `unsupportedScheme`) and everything
 //! else is reported `Uncheckable { network }` — "we did not look".
 //!
-//! **`--online` (alias `--check-remote`).** Opt-in network check that runs the
-//! shared [`skill_update`] orchestrator with the same env token resolver as
-//! the `source` commands (`GIT_PASSWORD` on any host, `GITHUB_TOKEN` bound to
-//! github.com): a tip preflight that downloads no objects skips the fetch when
-//! the upstream tip is unchanged and the installed copy is provably unmodified,
-//! otherwise a treeless fetch + hash compare yields real
-//! `upToDate`/`updateAvailable`.
+//! **`--online` (alias `--check-remote`).** Runs the shared [`skill_update`]
+//! orchestrator with the `source` commands' env token resolver: a tip
+//! preflight skips the fetch when the tip is unchanged and the copy provably
+//! unmodified, else a treeless fetch + hash compare.
 //!
 //! Either way `check` is **read-only**: it never mutates either lock (the
 //! desktop API owns global-lock self-heal; the project lock is VCS-tracked).
@@ -138,12 +135,9 @@ by default; pass --online for a real check"
 
 /// Whether to tell the user to re-run with `--online`.
 ///
-/// Only for the OFFLINE default, where `network` means "we did not look".
-/// After `--online` the same reason is a REAL fetch failure, and pointing that
-/// user at the flag they already passed is both wrong and a dead end.
-///
-/// Split out from the renderer so it is testable without a network round-trip:
-/// reaching the `--online` branch for real needs a live (failing) fetch.
+/// Only for the OFFLINE default, where `network` means "we did not look";
+/// after `--online` it is a REAL fetch failure. Split out so it is testable
+/// without a network round-trip.
 fn should_suggest_online(views: &[SkillUpdateView], online: bool) -> bool {
 	!online
 		&& views.iter().any(|v| {
@@ -288,15 +282,9 @@ use super::source::EnvTokenResolver;
 /// Run the shared `skill-update` orchestrator over the already-read locks, with
 /// the env token resolver and the default git adapters.
 ///
-/// `online == false` is the DEFAULT `check`: the orchestrator is told `offline`
-/// and answers every row without touching the network — a source it could never
-/// fetch (local / ssh / unsupported scheme) still gets its permanent reason,
-/// everything else gets `network`, meaning "we did not look". That distinction
-/// is the orchestrator's, not this file's.
-///
-/// **Read-only** either way — it never heals either lock (the desktop API owns
-/// global-lock self-heal; the CLI `check` stays non-mutating, and the project
-/// lock is VCS-tracked).
+/// `online == false` runs the orchestrator `offline` (see the module doc; the
+/// `network` vs permanent-reason split is the orchestrator's). Read-only
+/// either way.
 fn run_check(
 	locks: crate::commands::LockSnapshot,
 	project_root: Option<&Path>,
@@ -482,11 +470,8 @@ fn sidecar_from_views(
 /// Managed filenames. A sidecar has no business being named any of these
 /// ANYWHERE, so the first test is the name — not a path comparison.
 ///
-/// Three review rounds broke a comparison-only guard, each through a spelling
-/// or a scope the comparison did not enumerate (a `..` through a missing
-/// component; a bare relative path; and `-g` from a subdirectory, where the
-/// project lock the command never resolved is still one `../` away). A name
-/// test does not care how the caller spelled it or which scope was asked for.
+/// A name test does not care how the caller spelled the path or which scope
+/// was asked for. Why: knowledge page `check --write-result 的受管狀態守衛`.
 const MANAGED_FILE_NAMES: &[&str] = &[
 	".skill-lock.json",     // global lock
 	"skills-lock.json",     // project lock (npx-compatible)
@@ -499,11 +484,8 @@ const MANAGED_FILE_NAMES: &[&str] = &[
 /// Segment-wise, never a substring: `~/my.agents/skills-notes` and
 /// `~/notes.aghub.md` are the user's own files and must stay writable.
 ///
-/// `.aghub` is a SECOND managed directory, and every prior review round found a
-/// new spelling that slipped past a narrower test — so it is checked here, by
-/// segment, rather than by resolving and comparing paths. A resolved comparison
-/// cannot work: `-g` resolves no project root at all, so a project store one
-/// `../` away is invisible to it.
+/// By segment, not by resolved comparison: `-g` resolves no project root, so
+/// a project store one `../` away is invisible to a comparison.
 fn is_inside_master(path: &Path) -> bool {
 	let segments: Vec<String> = path
 		.components()

@@ -32,10 +32,8 @@ use crate::{Scope, SourceAction};
 /// shell buffer. `aghub_git` already redacts what IT builds; this covers the
 /// strings the CLI echoes itself.
 ///
-/// Scheme-less scp-like sources are covered too — see
-/// [`aghub_git::redact_source_credentials`], which owns that shape for every
-/// surface (this used to be a private copy here, and the copy is exactly why the
-/// update-check log later grew the same hole).
+/// Scheme-less scp-like sources are covered too: [`aghub_git::redact_source_credentials`]
+/// owns that shape for every surface — never re-copy it here.
 fn safe_source(source: &str) -> String {
 	aghub_git::redact_source_credentials(source)
 }
@@ -127,16 +125,11 @@ impl skill_update::Fetcher for CliFetcher {
 /// What makes two fetches the same fetch: the repository's IDENTITY and the ref
 /// — never the coordinate string.
 ///
-/// The two calls being deduplicated resolve their coordinate independently, per
-/// scope, and a scope with no matching lock entry falls back to the string the
-/// user typed while a scope that HAS one resolves the entry's recorded clone
-/// URL. `owner/repo` and `https://github.com/owner/repo(.git)` are then two
-/// spellings of one repository, and a key of raw strings would fetch it twice —
-/// the exact shape of "installed globally, run from a project", which is the
-/// common case, not a corner.
-///
-/// `host` stays IN the key. Two forges serving the same `owner/repo` are two
-/// repositories, and each scope diffing its own is the point.
+/// Each scope resolves its coordinate independently (typed string vs the
+/// lock's recorded clone URL), so `owner/repo` and
+/// `https://github.com/owner/repo(.git)` must key the same — the common
+/// "installed globally, run from a project" case. `host` stays IN the key:
+/// two forges serving one `owner/repo` are two repositories.
 #[derive(PartialEq, Eq, Hash)]
 struct FetchKey {
 	host: Option<String>,
@@ -164,12 +157,9 @@ fn fetch_key(sr: &SourceRef) -> FetchKey {
 
 /// Fetch at most once per `(repository, ref)` for the whole command.
 ///
-/// The deep entry points own their fetches, and `source diff` calls
-/// [`sources::diff_source`] once per read scope — so without this a two-scope
-/// diff of one source pays two identical round trips. `FetchedRepo`'s temp-dir
-/// guard is an `Arc`, so a memo hit hands back the same root with a clone of the
-/// same keep-alive: the tree cannot be dropped while a later caller is reading
-/// it.
+/// `source diff` calls [`sources::diff_source`] once per read scope; without
+/// this a two-scope diff pays two identical round trips. `FetchedRepo`'s
+/// temp-dir guard is an `Arc`, so a memo hit shares the same keep-alive.
 struct MemoFetcher<'a> {
 	inner: &'a dyn skill_update::Fetcher,
 	seen: std::sync::Mutex<HashMap<FetchKey, skill_update::FetchedRepo>>,
@@ -223,11 +213,7 @@ impl skill_update::Fetcher for MemoFetcher<'_> {
 
 /// The `source`-flavoured view of an already-resolved [`Scope`].
 ///
-/// TOTAL — it cannot fail. Every rejection (`-g` with `-p`, `--all` where it
-/// is meaningless, `-p` with no project root) happened in `main`'s ONE
-/// resolver, before this is reached. This file used to carry four private
-/// resolvers of its own and three hand-copied versions of the same
-/// "no project root found" sentence.
+/// TOTAL — it cannot fail: every rejection happened in `main`'s ONE resolver.
 pub(crate) fn read_scopes(scope: &Scope) -> Vec<SourceScope> {
 	match (scope.resource_scope(), scope.project_root()) {
 		(ResourceScope::GlobalOnly, _) => vec![SourceScope::Global],
@@ -253,9 +239,8 @@ pub(crate) fn read_scopes(scope: &Scope) -> Vec<SourceScope> {
 /// The single writing scope for `sync` / `accept-rename`.
 ///
 /// `--all` and an unscoped invocation are refused by their scope policies in
-/// `main`; [`Scope::write_target`] refuses anything else rather than falling
-/// back to a silent GLOBAL write, which is what the `_ =>` arm this replaced
-/// did.
+/// `main`; [`Scope::write_target`] refuses anything else — never a silent
+/// GLOBAL fallback.
 fn write_scope(scope: &Scope) -> Result<SourceScope> {
 	Ok(match scope.write_target()? {
 		Some(root) => SourceScope::Project {
@@ -271,10 +256,10 @@ fn write_scope(scope: &Scope) -> Result<SourceScope> {
 /// their answer, so an unreadable lock must fail here instead of surfacing as
 /// "no sources installed" / "untracked".
 ///
-/// `doctor` CONSUMES the returned snapshot; the two `source` commands route
-/// their reads through `skill_update::sources`, which owns its own lock access,
-/// so they discard it and keep the narrow re-read window. Honest partial, not
-/// an oversight.
+/// `doctor` CONSUMES the returned snapshot. The two `source` commands read
+/// through `skill_update::sources`, which owns its lock access and has no
+/// snapshot injection point, so they keep only the fail-closed CHECK and the
+/// narrow re-read window. Honest partial, not an oversight.
 pub(crate) fn read_scope_locks_checked(
 	scopes: &[SourceScope],
 ) -> Result<crate::commands::LockSnapshot> {
@@ -283,12 +268,6 @@ pub(crate) fn read_scope_locks_checked(
 		SourceScope::Project { root } => Some(root.as_path()),
 		SourceScope::Global => None,
 	});
-	// `source list` / `source diff` route their reads through
-	// `skill_update::sources`, which owns its own lock access — there is no
-	// injection point for a snapshot without reshaping that shared crate. So
-	// they keep the fail-closed CHECK (a corrupt lock still fails loudly rather
-	// than reading as "no sources installed") and keep the narrow re-read
-	// window that `check` no longer has. Honest partial, not an oversight.
 	crate::commands::read_locks_checked(want_global, project_root)
 }
 
@@ -445,11 +424,9 @@ struct DiffScopeView {
 	scope: &'static str,
 	/// The repository THIS scope was judged against.
 	///
-	/// A host-blind `owner/repo` resolves per scope, from that scope's own lock,
-	/// so two scopes can legitimately diff two different forges. This used to be
-	/// refused outright as an ambiguous source; judging each scope against its
-	/// own recorded origin is the better answer, but only if the rows say which
-	/// origin that was.
+	/// A host-blind `owner/repo` resolves per scope, from that scope's own
+	/// lock, so two scopes can legitimately diff two forges; the rows must say
+	/// which.
 	origin: String,
 	skills: Vec<DiffSkillView>,
 }
@@ -488,12 +465,9 @@ fn diff(
 
 /// `diff` with its network seams injected.
 ///
-/// The memo is built HERE rather than in `diff`, so a test that counts round
-/// trips drives the same wiring production does. Constructing a `MemoFetcher`
-/// beside the call under test instead only proves the type compiles: dropping
-/// the wrap from `diff` was invisible to the suite, and the cost of dropping it
-/// is one full round trip per scope (a token-holding user's `source diff` spends
-/// GitHub REST quota, 60/hr).
+/// The memo is built HERE so a test that counts round trips drives the
+/// production wiring; dropping it costs one round trip per scope (GitHub REST
+/// quota for a token-holding user).
 fn diff_with(
 	source: &str,
 	git_ref: Option<&str>,
@@ -504,14 +478,9 @@ fn diff_with(
 ) -> Result<()> {
 	let source = source.trim().to_string();
 
-	// ONE call into the deep entry point per read scope. It owns the whole
-	// pre-fetch settlement (coordinate resolution, the ambiguous-source refusal,
-	// the precheck) AND the per-ref cohort split, so a source whose entries are
-	// pinned to different refs is reported row by row instead of refused —
-	// the answer `/sources/diff` has always given.
-	//
-	// The fetcher is shared and memoizing, so N scopes over one ref still cost
-	// one round trip.
+	// ONE deep-entry-point call per read scope; it owns pre-fetch settlement
+	// and the per-ref cohort split (mixed refs report row by row, as
+	// `/sources/diff` does). The shared memo makes N scopes one round trip.
 	let fetcher = MemoFetcher::new(inner);
 
 	let mut per_scope: Vec<(&SourceScope, String, Vec<SourceSkillDiff>)> =
@@ -601,11 +570,9 @@ fn diff_outcome_skills(
 
 /// The wording for every pre-write refusal both deep entry points can return.
 ///
-/// It lives HERE, not in the domain: these are the strings the CLI has always
-/// printed, and they name flags (`--ref`, `GIT_PASSWORD`) that exist only on
-/// this surface. ONE copy, so `diff` and `sync` cannot word the same refusal
-/// two ways — which is exactly what they did while each owned its own
-/// three-branch `FetchError` match.
+/// HERE, not in the domain: they name flags (`--ref`, `GIT_PASSWORD`) that
+/// exist only on this surface. ONE copy, so `diff` and `sync` cannot word the
+/// same refusal two ways.
 fn refusal_error(
 	source: &str,
 	outcome: sources::SourceDiffOutcome,
@@ -799,14 +766,8 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let selection = AgentSelection::parse(args.agent)
 		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
-	// Same reason, one line earlier in the flow: `--yes` with NO action flag is
-	// a caller who believes they asked for a write. `source sync <repo> --yes`
-	// is the most natural spelling of "install this repo's skills", and it used
-	// to fall through to the no-action overview — exit 0, no `dryRun` key at
-	// all, and a THIRD payload shape, so a consumer keyed on `dryRun == false`
-	// (missing → falsy) concluded the install had been applied. Refused here,
-	// before the fetch, so it costs no network round-trip and reports the real
-	// problem instead of a credential/network error.
+	// `--yes` with NO action flag is a caller who believes they asked for a
+	// write; refuse it before the fetch. See docs/history/cli.md#source-sync-yes-without-action
 	if args.yes && !args.update && !args.install_missing {
 		bail!(
 			"--yes needs an action: pass --install-missing (install missing \
@@ -815,11 +776,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 		);
 	}
 
-	// ONE call into the deep entry point. It owns the identity snapshot, the
-	// coordinate resolution, the single-tree assertion, the ambiguous-source and
-	// precheck refusals, the single fetch, and the classification — the sequence
-	// this file used to re-assemble here and again in `diff`, with the branches
-	// copied word for word.
+	// ONE call into the deep entry point: identity snapshot, coordinate
+	// resolution, single-tree assertion, refusals, the single fetch and the
+	// classification — never re-assembled here.
 	let inner = CliFetcher;
 	let sync_plan = match sources::plan_source_sync(
 		sources::SourceSyncInput {
@@ -892,12 +851,9 @@ fn sync(args: SyncArgs) -> Result<()> {
 	let target_agents: Vec<AgentType> = match &selection {
 		AgentSelection::All => {
 			use aghub_core::skills::linker::{agent_link_need, LinkNeed};
-			// Iterate the registry in its stable order (claude first) and
-			// keep agents that can hold a skill here. `agent_link_need` is
-			// the probe-free classifier — no per-agent availability
-			// subprocess, since we only need the link decision, not whether
-			// the CLI is installed. (`classify_all` would run that probe for
-			// every agent.)
+			// Registry order; keep agents that can hold a skill here.
+			// `agent_link_need` is probe-free (`classify_all` would spawn an
+			// availability subprocess per agent).
 			aghub_core::registry::ALL_AGENTS
 				.iter()
 				.copied()
@@ -961,12 +917,10 @@ fn sync(args: SyncArgs) -> Result<()> {
 		);
 	}
 
-	// Resolve the normalized lock source ONCE from the RECOVERED fetch
-	// coordinate (recorded `sourceUrl` for a non-github host, else the arg) —
-	// NOT the raw shorthand, or a TFS `Collection/_git/repo` would fail
-	// github-shorthand parsing and a 2-segment non-github source would
-	// normalize to the wrong github lock source. Normalization lives in
-	// `aghub_git`; we never re-implement it.
+	// Resolve the lock source ONCE from the RECOVERED fetch coordinate
+	// (recorded `sourceUrl` for a non-github host, else the arg), NOT the raw
+	// shorthand — a TFS `Collection/_git/repo` would misparse as github.
+	// Normalization lives in `aghub_git`.
 	let fetch_source = sync_plan.fetch_source.clone();
 	let resolved =
 		aghub_git::resolve_remote_source(&fetch_source).map_err(|e| {
@@ -975,18 +929,13 @@ fn sync(args: SyncArgs) -> Result<()> {
 				safe_source(&fetch_source)
 			)
 		})?;
-	// Record the RESOLVED ref (explicit `--ref` OR the source's recorded lock
-	// ref), not just the explicit flag — so re-installing a source pinned to a
-	// tag/branch persists that pin, matching what the API records.
+	// Record the RESOLVED ref (explicit `--ref` or the lock's), so a pinned
+	// source keeps its pin, as the API does.
 	//
-	// Residual API divergence: when neither an explicit `--ref` nor a recorded
-	// ref exists, the CLI records `None` here, whereas the API records the scan
-	// session's resolved default-branch name (`session.current_branch`). The
-	// CLI's `FetchedRepo` exposes only the tip OID (`repo.oid`), not the
-	// branch/ref name, so the default-branch name is not cheaply available
-	// without a second ls-refs round-trip; we record `None` rather than invent a
-	// branch name. Both still fetch the same tree (the default branch), and the
-	// recorded-ref fallback simply has nothing to fall back to in this case.
+	// Known divergence: with neither, the CLI records `None` while the API
+	// records the default-branch name — `FetchedRepo` exposes only the tip
+	// OID, and a second ls-refs round trip is not worth it. Same tree either
+	// way.
 	let lock_source = skill::InstallLockSource {
 		source: resolved.lock_source(),
 		source_type: resolved.source_type.as_str().to_string(),
@@ -1384,11 +1333,9 @@ fn apply_update_row(
 /// Map a sync update-row resync failure to its row MESSAGE plus the shared
 /// machine CODE.
 ///
-/// Only the wording is this surface's: a CLI row can name the skill and quote
-/// the underlying detail, where the HTTP API owes a path-free sentence. The
-/// classification is `aghub_core::skills::resync::resync_error_code`, so a
-/// `StaleFetch` — the source moving mid-fetch — now reaches a script here as
-/// `SKILL_SOURCE_CHANGED_DURING_FETCH` instead of untyped prose.
+/// Only the wording is this surface's (a CLI row may name the skill and quote
+/// detail; the API owes a path-free sentence). The code is
+/// `aghub_core::skills::resync::resync_error_code`'s.
 fn resync_row_error(
 	name: &str,
 	error: skill_update::mutation::ResyncMutationError,
@@ -1454,13 +1401,8 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 	};
 	let scope_label = args.scope.label();
 
-	// P0-2 guard (a): refuse a degenerate rename before any lock read / fetch.
-	//
-	// Both this guard and the lock read below used to sit AFTER the dry-run
-	// return, so the preview green-lit a rename of a name that is not in the
-	// lock at all (and a degenerate `a → a`); the caller only hit the wall on
-	// the `--yes` run. They validate, they do not write, so they belong in
-	// front of the preview.
+	// Refuse a degenerate rename (and, below, a name not in the lock) BEFORE
+	// the preview, so the preview never green-lights what `--yes` refuses.
 	rename::ensure_distinct_names(args.old_name, args.new_name)
 		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
 
@@ -1469,13 +1411,8 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
 
 	if !args.yes {
-		// The preview MUST honour --json. This branch used to `println!` prose
-		// unconditionally and return Ok(()) — a destructive command's DEFAULT
-		// path emitting unparseable text on exit 0, which a strict parser reads
-		// as a crash on the success path and a lenient one reads as "the rename
-		// was committed". Every sibling preview (delete, prune-lock, source
-		// sync, reconcile) already emits JSON here. Keys match the --yes
-		// payload below, plus `applied` so the two are machine-distinguishable.
+		// The preview MUST honour --json like every sibling preview. Keys
+		// match the --yes payload, plus `applied` to tell the two apart.
 		if args.json {
 			println!(
 				"{}",

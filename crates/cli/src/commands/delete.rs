@@ -105,7 +105,7 @@ pub fn execute(
 
 /// Run a planned-removal closure, mapping the two "already gone" cases to a
 /// shared no-op [`RemovalOutcome`] (`success:true, executed:false`) so the CLI
-/// matches the API's idempotent-delete contract instead of erroring (#5 audit):
+/// matches the API's idempotent-delete contract instead of erroring:
 ///
 /// - **No config loaded** (the file never existed; `main.rs` tolerated the
 ///   missing config for `delete`): nothing to remove.
@@ -144,10 +144,8 @@ fn plan_or_noop(
 fn apply_prune_fields(payload: &mut serde_json::Value, prune: &PruneStatus) {
 	match prune {
 		PruneStatus::NotRun => {}
-		// A PREVIEW's disclosure, under its own key. Reusing
-		// `pruned_lock_entries` would make `outcome` the only thing separating
-		// "about to drop these" from "dropped these" — and the whole finding
-		// was that a preview must not claim entries were dropped.
+		// A PREVIEW's disclosure, under its own key: a preview must never
+		// read as "dropped these".
 		PruneStatus::WouldPrune(keys) => {
 			payload["would_prune_lock_entries"] = json!(keys);
 		}

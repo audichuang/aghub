@@ -1,10 +1,8 @@
-//! Test-only support shared across this crate's modules (W2 + W3).
+//! Test-only support shared across this crate's modules.
 //!
 //! `MockRunner` implements [`crate::ssh::CommandRunner`] by replaying scripted
 //! [`crate::ssh::CommandOutput`] keyed on `(program, args)` and recording every
-//! call so tests can assert what was invoked (e.g. that a guarded remote kill
-//! was issued). It is `pub(crate)` so the W3 bring-up tests in this same crate
-//! can reuse it without a real `ssh`.
+//! call so tests can assert what was invoked (e.g. a guarded remote kill).
 
 use std::cell::RefCell;
 use std::collections::HashMap;

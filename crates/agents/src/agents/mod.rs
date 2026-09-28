@@ -29,31 +29,20 @@ pub mod zed;
 
 use crate::AgentDescriptor;
 
-/// Declare the agent roster ONCE and generate everything that used to be a
-/// separate hand-written list from it: the `AgentType` enum, `AgentType::ALL`,
-/// `as_str`, `FromStr` (ids plus aliases), `AgentType::descriptor`, and
-/// `ALL_DESCRIPTORS`.
+/// Declare the agent roster ONCE and generate from it: the `AgentType` enum,
+/// `AgentType::ALL`, `as_str`, `FromStr` (ids plus aliases),
+/// `AgentType::descriptor` (a total `match`, so `registry::get` has no
+/// fallback), and `ALL_DESCRIPTORS`.
+/// See docs/history/agents.md#four-hand-written-roster-lists.
 ///
-/// Four lists is how "add an agent" became "update three of them and hope":
-/// a variant with no descriptor entry was served **Claude's** descriptor by
-/// `registry::get` — silently, so its MCP servers landed in `~/.claude.json`
-/// and its skills in Claude's directory. One row per agent makes the pairing
-/// structural: `AgentType::descriptor` is a total `match`, so `registry::get`
-/// has no fallback left to reach.
+/// Only `$variant` is compiler-checked. A row naming ANOTHER agent's module,
+/// or an `$id` drifting from the `id:` inside `agents/<module>.rs`, builds
+/// clean — `registry_bijection.rs` owns those. A repeated id/alias string is
+/// caught unaided: the loser is an `unreachable_patterns` warning, which
+/// `clippy -D warnings` fails.
 ///
-/// What the macro still CANNOT see, and `registry_bijection.rs` therefore
-/// still owns: only `$variant` is compiler-checked. Two copy-paste mistakes
-/// build clean — a row naming ANOTHER agent's module (that agent is then
-/// served the wrong descriptor: the old fallback bug, by hand), and an `$id`
-/// that drifts from the `id:` field inside `agents/<module>.rs`.
-///
-/// A repeated STRING — one row's id or alias equal to another's — is the one
-/// the compiler catches unaided: `from_str` emits the arms in row order, so
-/// the loser is an `unreachable_patterns` warning, which `just preflight`'s
-/// `clippy -D warnings` turns into a failure.
-///
-/// The order of these rows is the order of BOTH rosters — the desktop agent
-/// list, `-a all` expansion, batch row order and first-error all read it.
+/// Row order is the order of BOTH rosters — the desktop agent list, `-a all`
+/// expansion, batch row order and first-error all read it.
 macro_rules! agent_roster {
 	($(
 		$variant:ident => $id:literal, $module:ident, [$($alias:literal),* $(,)?];

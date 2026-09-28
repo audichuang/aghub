@@ -28,9 +28,9 @@ use skill_update::sources::{
 };
 use skill_update::{FetchError, FetchedRepo, Fetcher, GitFetcher, SourceRef};
 
-/// Resolve a request scope into the domain's per-scope list. Mirrors the old
-/// route: `Global` → `[Global]`, `Project` → `[Project]`, `All` → `[Global]`
-/// plus the project scope when a project root is known.
+/// Resolve a request scope into the domain's per-scope list: `Global` →
+/// `[Global]`, `Project` → `[Project]`, `All` → `[Global]` plus the project
+/// scope when a project root is known.
 fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
 	match resolved {
 		ResolvedScope::Global => vec![SourceScope::Global],
@@ -55,13 +55,9 @@ fn scopes_for(resolved: &ResolvedScope) -> Vec<SourceScope> {
 static LAST_FETCH_TOKEN: std::sync::Mutex<Option<Option<String>>> =
 	std::sync::Mutex::new(None);
 
-/// Production fetch is [`GitFetcher`]. Under `cfg(test)` an env hook
-/// (`AGHUB_TEST_SOURCE_FETCH_ROOT`) lets the route-level HTTP-shape tests point
-/// the diff at a local dir instead of hitting the network — preserving the old
-/// route's `test_fetch_source_from_env` behavior now that the route delegates
-/// to the shared `diff_source`. In test mode it also records the token the fetch
-/// was called with so the forwarding tests can assert which credential reached
-/// the fetch.
+/// Under `cfg(test)` the `AGHUB_TEST_SOURCE_FETCH_ROOT` env hook points the diff
+/// at a local dir instead of the network, and records which credential reached
+/// the fetch for the forwarding tests.
 /// Request-scoped wrapper over [`GitFetcher`]. Carries the fetcher rather than
 /// building one per call so every ref-cohort of ONE diff shares its snapshot
 /// caches; see `GitFetcher` for why this must not outlive the request.
@@ -204,12 +200,9 @@ pub async fn diff_source(
 		git_ref: query.git_ref.clone(),
 		scopes,
 	};
-	// Forwarded tokens (header) take precedence over the local keyring: a remote
-	// api has no keyring of its own, so the controller-resolved token must win.
-	// An absent/empty header degrades to the keyring path (backward compatible).
-	// Timed separately: this reads the OS keychain, which can block for seconds
-	// on its first unlock — indistinguishable from a slow network in a log that
-	// only brackets the whole route.
+	// Forwarded tokens win over the local keyring (a remote api has none); an
+	// absent header degrades to the keyring. Timed separately: a first keychain
+	// unlock can block for seconds and would look like a slow network.
 	let auth_started = std::time::Instant::now();
 	let resolver = SourceAuth::load(forwarded).await;
 	log::info!(

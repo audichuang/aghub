@@ -79,13 +79,10 @@ impl CredentialStore for NativeCredentialStore {
 
 	/// Delete is **idempotent and best-effort across platforms**.
 	///
-	/// Removing a provider must succeed even if its keychain entry is absent or
-	/// the backend is unreachable — the inventory removal is the real
-	/// operation; the key is being discarded either way. `NoEntry` is the
-	/// "already gone" case (Linux secret-service); other backends (e.g. the
-	/// macOS keychain) report an absent/locked entry as a *different* error, so
-	/// we log and swallow any error rather than fail the delete. `get`/`set`
-	/// keep surfacing errors — only delete is best-effort.
+	/// Removing a provider must succeed even if its key is absent or the
+	/// backend unreachable — the key is discarded either way. Backends spell
+	/// "absent" differently (`NoEntry` on Linux, other errors on macOS), so any
+	/// error is logged and swallowed. `get`/`set` keep surfacing errors.
 	fn delete_api_key(&self, provider_id: &str) -> Result<()> {
 		let entry = Self::entry(provider_id)?;
 		match entry.delete_credential() {
@@ -122,11 +119,9 @@ impl CredentialStore for std::sync::Arc<dyn CredentialStore + Send + Sync> {
 /// Plaintext-JSON credential store for headless environments (tests, CI) where
 /// no OS keyring is available.
 ///
-/// This is NOT a security backend — keys are stored unencrypted in a file the
-/// caller names. It exists so the CLI/API inference paths can be exercised
-/// end-to-end without a real keyring (on Linux the native backend needs a
-/// running secret-service / dbus session). Selected at runtime by the CLI via
-/// `$AGHUB_TEST_CREDENTIAL_FILE`; never the default.
+/// NOT a security backend — keys are stored unencrypted in a caller-named
+/// file, so the CLI/API inference paths can run end-to-end without a keyring.
+/// Selected by the CLI via `$AGHUB_TEST_CREDENTIAL_FILE`; never the default.
 #[derive(Debug, Clone)]
 pub struct FileCredentialStore {
 	path: PathBuf,

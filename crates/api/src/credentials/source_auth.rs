@@ -34,13 +34,10 @@ impl CredentialSnapshot {
 		),
 		tokio::task::JoinError,
 	> {
-		// Deliberately SEQUENTIAL on one blocking task. Splitting these into two
-		// concurrent tasks was tried and measured WORSE on macOS — 5.3s became
-		// 22.9s — because the OS keychain serializes concurrent access from one
-		// process anyway, and the app already has other in-flight credential
-		// reads at startup; adding more contenders only deepened the queue. The
-		// cost that mattered was the number of round trips, not their
-		// arrangement, so it is the cache in `KeyringJson::load` that fixes this.
+		// Deliberately SEQUENTIAL on one blocking task: the macOS keychain
+		// serializes a process's access anyway, and parallel reads measured
+		// slower. Round-trip count is what matters — the `KeyringJson` cache.
+		// See docs/history/api.md#keyring-read-cache
 		tokio::task::spawn_blocking(|| {
 			(load_credentials(), load_source_bindings())
 		})

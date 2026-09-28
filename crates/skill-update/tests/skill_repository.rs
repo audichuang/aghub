@@ -1,7 +1,7 @@
 //! Ticket 07: the `SkillRepository` contract — the skill-aware composite that
 //! owns snapshot pinning and the SINGLE REST→gix fallback route.
 //!
-//! Every REST call goes through the T06 injectable [`HttpTransport`] fed canned
+//! Every REST call goes through the injectable [`HttpTransport`] fed canned
 //! GitHub API JSON, and the seam RECORDS the request set — so these tests assert
 //! observable outcomes (what was and was NOT requested, which condition routes
 //! to the gix fallback, the pinned commit) with no network.

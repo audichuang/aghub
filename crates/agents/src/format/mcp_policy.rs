@@ -1,13 +1,10 @@
 //! The MCP decisions that are the same for every dialect, expressed as DATA the
 //! dialect declares rather than code it re-states.
 //!
-//! ALL 23 MCP-capable agents route through here: the seven hand-written
-//! dialects declare a [`TransportVocabulary`] each, and the 16 `json_map` agents
-//! declare one inside their [`json_map::Dialect`]. There is no second copy —
-//! there used to be (`json_map::Discriminator`, field-for-field the same, with
-//! its own `writes_sse` and its own mixed-entry rule), and the drift it invites
-//! is on the record: the mixed-key rule landed in Grok and had to be hand-ported
-//! to Hermes.
+//! EVERY MCP-capable agent routes through here: each hand-written dialect
+//! declares a [`TransportVocabulary`], and each `json_map` agent declares one
+//! inside its [`json_map::Dialect`] — the same type, never a second copy.
+//! See docs/history/agents.md#json-map-discriminator-merged-into-transportvocabulary.
 //!
 //! [`json_map::Dialect`]: crate::format::json_map::Dialect
 //!
@@ -19,20 +16,13 @@
 //! - [`TransportVocabulary`] — the words a dialect has for each transport.
 //!   [`TransportVocabulary::writes_sse`] is DERIVED from `sse` being non-empty,
 //!   so [`TransportVocabulary::refuse_unwritable`] is the only place that
-//!   decides WHEN an SSE server must be refused (`json_map` calls it too, for
-//!   the sentence its 16 agents already emit). Declaring is only half of it: a
-//!   dialect still has to CALL it (all seven do, at the top of their serialize
-//!   loop, as does `json_map`). Declaring `sse: ""` without the call does not
-//!   refuse — it writes an EMPTY tag, which the dialect's own reader then
-//!   rejects or calls some other transport. `mcp_dialect_roundtrip` is what
-//!   forces the call, NOT `mcp_dialect_decisions`: emptying Grok's `sse` and
-//!   neutering the call leaves the decisions table green (its row says
-//!   `Spelled`, and writing an empty tag still "succeeds"), while
-//!   `every_agent_reads_back_the_transport_it_wrote` fails with `grok cannot
-//!   read back its own output`. That guard is registry-driven and bidirectional
-//!   — its `NO_NATIVE_SSE` list also fails an agent that starts refusing SSE
-//!   without being listed — so a new dialect is covered the day it lands. The
-//!   decisions table forces the other four answers, not this one.
+//!   decides WHEN an SSE server must be refused. Declaring is only half of it:
+//!   every dialect (and `json_map`) must also CALL it at the top of its
+//!   serialize loop — `sse: ""` without the call writes an EMPTY tag instead of
+//!   refusing. `mcp_dialect_roundtrip`'s
+//!   `every_agent_reads_back_the_transport_it_wrote` (registry-driven, and its
+//!   `NO_NATIVE_SSE` list is checked both ways) forces the call;
+//!   `mcp_dialect_decisions` does NOT — it forces the other four answers.
 //! - [`reject_mixed_transport`] — an entry carrying both families is refused,
 //!   and the message is built from the keys the dialect ACTUALLY probes.
 //! - [`remote_transport`] / [`missing_transport_error`] — the `url` → Sse /
@@ -40,28 +30,19 @@
 //! - [`OwnedKeys`] + [`transport_fields`] — which keys a transport owns, and
 //!   which key/value pairs to write, over the neutral [`FieldValue`].
 //!
-//! ## Why the parameters name FACTS, never dialects
+//! Parameters name FACTS (tag key, SSE spelling, probed keys), never dialects,
+//! so one dialect cannot borrow another's answer to get its message.
+//! See docs/history/agents.md#single-remote-bool-replaced-by-fact-parameters.
 //!
-//! The previous shape passed a single `single_remote: bool`. One bit had to
-//! answer four independent questions — is the tag spelled `type` or `transport`,
-//! is SSE spellable at all, which remote keys appear in the mixed-entry message,
-//! and is `streamable-http` readable — and it only fit because the two dialects
-//! it was written for happened to answer all four the same way. The third
-//! dialect broke the collinearity: `json_openclaw` writes `transport: "sse"` yet
-//! passed `single_remote: true`, purely to borrow a message. `toml_mistral` and
-//! `json_opencode` passed the same lie for the same reason. A parameter that
-//! names a fact cannot be borrowed like that.
+//! Deliberately NOT a `ConfigDoc` trait over the whole document. Strip loops,
+//! write order, phase order (validate `enabled` → reject mixed families →
+//! dispatch on presence → extract the chosen branch) and every emitter stay in
+//! the dialects, so error behaviour on malformed input is byte-identical to
+//! before the extraction.
 //!
-//! This is deliberately NOT a `ConfigDoc` trait abstracting the whole document
-//! (which would be a leaky seam hiding little). Strip loops, write order, phase
-//! order (validate `enabled` → reject mixed families → dispatch on presence →
-//! extract the chosen branch) and every emitter stay in the dialects, so error
-//! behaviour on malformed input is byte-identical to before the extraction.
-//!
-//! The companion half is `crates/core/tests/mcp_dialect_decisions.rs`: a shared
-//! function nobody is FORCED to call does not propagate — the sixth adversarial
-//! review found the same half-parsed mixed entry in three dialects at once, all
-//! of which could have called `reject_mixed_transport` since the first review.
+//! The forcing half is `crates/core/tests/mcp_dialect_decisions.rs`: a shared
+//! function nobody is FORCED to call does not propagate.
+//! See docs/history/agents.md#mixed-entry-rule-missing-in-three-dialects.
 
 use crate::errors::{ConfigError, Result};
 use crate::models::McpTransport;
@@ -72,8 +53,7 @@ use std::collections::HashMap;
 /// An EMPTY string means "this dialect has no such word", which is a fact about
 /// the vendor's format, not an instruction about where to `return Err`. Declare
 /// what you can spell; the refusals follow. An ALL-EMPTY vocabulary is a dialect
-/// with no transport tag whatsoever — the shape `json_map` used to spell as a
-/// second `Option::None` case.
+/// with no transport tag whatsoever.
 #[derive(Clone, Copy)]
 pub struct TransportVocabulary {
 	/// The per-server key the transport is tagged with (`type`, `transport`).
@@ -85,8 +65,7 @@ pub struct TransportVocabulary {
 	/// How this dialect spells stdio under `tag_key`. EMPTY means it tags a
 	/// stdio server not at all and lets `command`'s presence say so (Grok,
 	/// Hermes, Codex, Amp). A dialect that DISPATCHES on the tag must spell it
-	/// here rather than inline the literal at its two call sites: Mistral did,
-	/// and the two literals only agreed by luck.
+	/// here, never inline the literal at each call site (inlined copies drift).
 	pub stdio: &'static str,
 	/// How this dialect spells SSE. EMPTY means it has no word for SSE, so
 	/// aghub must refuse to write one instead of downgrading it to HTTP behind
@@ -100,11 +79,9 @@ pub struct TransportVocabulary {
 	/// spelling. Only Hermes understands the spelled-out `streamable-http`;
 	/// Grok would reject it.
 	///
-	/// `json_map` shares ONE wide list across all 16 of its agents — the
-	/// universal set (`http` / `streamable-http` / `streamableHttp`) its parser
-	/// used to hardcode. Narrowing it per dialect would change what those agents
-	/// parse, so the list stays wide; it lives here so the DECLARATION is the
-	/// truth rather than a comment about the truth.
+	/// `json_map` shares ONE wide list (`http` / `streamable-http` /
+	/// `streamableHttp`) across all of its agents; narrowing it per dialect
+	/// would change what those agents parse, so it stays wide.
 	///
 	/// [`http`]: TransportVocabulary::http
 	pub http_read_aliases: &'static [&'static str],
@@ -112,19 +89,16 @@ pub struct TransportVocabulary {
 
 impl TransportVocabulary {
 	/// Whether the dialect can round-trip an SSE server. DERIVED from the
-	/// spelling, never restated by the dialect, and this is the ONLY definition
-	/// — `json_map::Dialect` used to carry a second one that said the same thing
-	/// through an `Option`.
+	/// spelling, never restated by the dialect, and this is the ONLY definition.
 	pub const fn writes_sse(&self) -> bool {
 		!self.sse.is_empty()
 	}
 
 	/// Whether `tag` READS as streamable HTTP here: the dialect's own writing
 	/// spelling, or one of the extra spellings it accepts. The ONE definition —
-	/// `json_map`, Mistral and OpenCode each used to spell this condition out
-	/// for themselves, which is three places to forget when a dialect gains a
-	/// word. An EMPTY `http` matches nothing (Grok, Hermes and Codex write a
-	/// bare `url`), so a `""` tag never lands here.
+	/// no dialect spells this condition out for itself. An EMPTY `http` matches
+	/// nothing (Grok, Hermes and Codex write a bare `url`), so a `""` tag never
+	/// lands here.
 	///
 	/// [`remote_transport`] deliberately does NOT route through this: it treats
 	/// an absent tag as HTTP too, which is a rule about the tag's absence rather
@@ -193,41 +167,34 @@ impl OwnedKeys {
 ///
 /// ## How wide to probe: PROBE ⊇ BLANKET STRIP, or own the normalisation
 ///
-/// A dialect that strips BOTH families before writing either deletes every key
-/// in its strip set, so anything in there it does not probe is a key it deletes
-/// without ever having read one. Three shapes exist, and only the first pays
-/// nothing for it:
+/// A dialect that strips BOTH families before writing deletes every key in its
+/// strip set, so any key there it does not probe is deleted unread:
 ///
-/// - **Grok** strips `OwnedKeys::transport()` and probes those exact two lists.
-///   Probe == strip, so widening either widens both — deliberately, since the
-///   alternative is silent deletion. Pinned from both sides, by
+/// - **Grok**: probe == strip (`OwnedKeys::transport()`), so widening either
+///   widens both. Pinned by
 ///   `an_unowned_vendor_table_is_readable_and_survives_a_rewrite` (remote) and
 ///   `a_remote_entry_with_an_unowned_stdio_side_key_stays_readable` (stdio).
-/// - **Hermes** strips the same way but leaves its TAG key out of the probe
-///   (`REMOTE_PROBE`), so a vendor `transport: stdio` on a stdio entry stays
-///   readable and is normalised away on the rewrite. One key, deliberate, and
-///   pinned by `a_stdio_entry_that_spells_out_its_transport_tag_stays_readable`;
-///   the probe/strip pair itself by
+/// - **Hermes**: same, but its TAG key is left out of the probe
+///   (`REMOTE_PROBE`), so a vendor `transport: stdio` stays readable and is
+///   normalised away on rewrite. Pinned by
+///   `a_stdio_entry_that_spells_out_its_transport_tag_stays_readable`; the
+///   probe/strip pair by
 ///   `a_remote_entry_with_an_unowned_stdio_side_key_stays_readable` (stdio) and
-///   `serialize_preserves_per_server_extra_fields` (remote). Each pin covers
-///   the unowned key it names, not every future one — the point is that a
-///   widening edit cannot land without turning something red.
-/// - **OpenClaw** strips both families (`TRANSPORT_KEYS`) while probing only
-///   `command` × `url`, so an inert cross-family key — `headers` on a stdio
-///   entry, `env` on a remote one — is dropped on the next save without ever
-///   having been read. That ceiling predates this module and is NOT licensed by
-///   the rule above; it is written down rather than papered over, because
-///   closing it by widening the probe would refuse whole files that read fine
-///   today. Widening `TRANSPORT_KEYS` further widens the loss, not the guard.
+///   `serialize_preserves_per_server_extra_fields` (remote). Each pin covers the
+///   key it names, so a widening edit cannot land without turning red.
+/// - **OpenClaw**: strips both families (`TRANSPORT_KEYS`) but probes only
+///   `command` × `url`, so an inert cross-family key (`headers` on stdio, `env`
+///   on remote) is dropped unread on the next save. A known ceiling NOT
+///   licensed by this rule; widening the probe would refuse files that read
+///   fine today, and widening `TRANSPORT_KEYS` widens the loss, not the guard.
 ///
-/// Codex, Mistral and OpenCode strip only the OPPOSITE family (OpenCode strips
-/// nothing at all — serde's catch-all keeps what it never modelled), so their
-/// `command` × `url` probe costs nothing: an inert leftover is simply kept.
+/// Codex, Mistral and OpenCode strip only the OPPOSITE family (OpenCode nothing
+/// at all — serde's catch-all keeps it), so their `command` × `url` probe costs
+/// nothing.
 ///
-/// Do NOT read any of this as "always probe everything". Every dialect's real
-/// probe pair has a test in its own module that goes RED if the probe widens,
-/// because widening refuses the WHOLE file — every one of that agent's MCP
-/// servers — over a key that does nothing for the transport the entry declares.
+/// NOT "always probe everything": widening refuses the WHOLE file — every MCP
+/// server of that agent — over an inert key, and each dialect's probe pair has
+/// a test in its own module that goes RED if it widens.
 pub fn reject_mixed_transport(
 	stdio_probe: &[&str],
 	remote_probe: &[&str],
@@ -259,16 +226,16 @@ pub fn reject_mixed_transport(
 /// chosen here, the way [`TransportVocabulary::refuse_unwritable`] takes the
 /// caller's own noun phrase because the dialects quote server names
 /// differently. These two are NOT interchangeable — each is what that agent's
-/// users already see on disk today, and unifying them would change 23 agents'
-/// error text for tidiness.
+/// users already see on disk today, and unifying them would change every
+/// agent's error text for tidiness.
 pub enum MixedWording {
 	/// `` <dialect> MCP server `<name>` mixes stdio keys (…) with remote keys
-	/// (…) `` — the seven hand-written dialects. The key lists are DERIVED from
+	/// (…) `` — the hand-written dialects. The key lists are DERIVED from
 	/// the probes passed in, so a dialect cannot claim to have checked a key it
 	/// never read.
 	NamesTheProbedKeys(&'static str),
 	/// `MCP server '<name>' cannot contain both command and url` — verbatim what
-	/// the 16 `json_map` agents have always emitted. It names no key list, so
+	/// the `json_map` agents have always emitted. It names no key list, so
 	/// unlike the variant above it does NOT track a widened probe; `json_map`
 	/// probes exactly `command` × the URL it owns.
 	CommandAndUrl,
@@ -428,7 +395,7 @@ mod tests {
 	}
 
 	/// The `json_map` wording is the SAME condition with a different sentence —
-	/// the split the 16 agents' existing error text forces. Both must survive:
+	/// the split the `json_map` agents' existing error text forces. Both must survive:
 	/// unifying them would rewrite what those users see.
 	#[test]
 	fn the_json_map_wording_names_no_key_list() {
@@ -461,7 +428,7 @@ mod tests {
 	/// Every mixed-entry sentence, through the dialect's REAL parse path.
 	///
 	/// [`MixedWording`] is a free parameter: the two variants compile at any of
-	/// the seven call sites, so swapping one rewrites what up to 16 agents'
+	/// every call site, so swapping one rewrites what every `json_map` agent's
 	/// users see and nothing above notices —
 	/// [`the_json_map_wording_names_no_key_list`] pins the ENUM's sentence, not
 	/// that `json_map` is the caller passing it. This pins the pairing. The
@@ -521,7 +488,7 @@ mod tests {
 				 remote keys (url)",
 			),
 			(
-				// One call site, all 16 json_map agents.
+				// One call site, every json_map agent.
 				"json_map",
 				json_map::parse(
 					r#"{"mcpServers":{"m":{"command":"c","url":"u"}}}"#,

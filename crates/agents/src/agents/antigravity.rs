@@ -27,43 +27,10 @@ define_mcp_paths! {
 	strategy: parse_mcp_config, serialize_mcp_config,
 }
 
-// Antigravity's vendor docs moved the global customization root to
-// `~/.gemini/config/` — skills live at `~/.gemini/config/skills/<name>/SKILL.md`
-// and that dir is shared by Antigravity 2.0, the IDE and the CLI. Two older
-// dirs stay READ-ONLY so nothing a shipped aghub installed is stranded:
-// `.gemini/antigravity/skills` (the IDE-1.x path npx `agents.ts` still names,
-// and what aghub wrote up to v2.18.x) and `.gemini/antigravity-cli/skills`
-// (documented by the CLI's plugin page). Write dir FIRST: `load_skills_from_dirs`
-// dedups first-dir-wins and the winner becomes `source_path`, i.e. the path
-// `remove_skill` deletes and `check` hashes.
-// Decision #12 in `docs/specs/2026-08-30-skills-hub-borrow-path.md` was revised
-// on 2026-09-06 with the evidence; #11 still holds — all three are Antigravity's
-// own dirs, never another agent's private one.
-//
-// Two known costs of the read-only legacy dirs, both pinned by tests rather
-// than left to be rediscovered:
-//  * `doctor --verify-links` inspects the WRITE slot only, so a skill an older
-//    release installed into `.gemini/antigravity/skills` audits as `withheld`
-//    even though Antigravity really does read it. `aghub repair [name] --yes`
-//    clears it: `repair` plans WRITE dirs so it never sees the compat dir, but
-//    `readers_of` asks the READ paths, so the stranded skill puts antigravity
-//    in `grant_to` and its empty write slot is planned `Create`. `aghub add`
-//    is NOT the way — the skill already loads, so both its branches refuse
-//    `resource_exists`. The test
-//    (`repair.rs::repair_relinks_a_skill_stranded_in_a_read_only_compat_dir`)
-//    exercises the PROJECT twin `.agent/skills`, which needs no real home; the
-//    global dirs run the same two functions on the same 2-state.
-//  * A Referrer parked in one of those dirs cannot be removed for antigravity
-//    ALONE — the planner schedules only the write dir, so `delete --yes`
-//    answers `outcome: kept` with the file in place
-//    (`npx_skill_path_ownership.rs::a_referrer_in_a_read_only_compat_dir_…`).
-//    `repair` now DETACHES the common instance of this: a stale LINK the write
-//    slot already covers (`ReferrerAction::Unlink`). What is left is a real
-//    DIRECTORY or a link to somebody else's content, which repair must not
-//    move — and the refusal names the path now, so it is a hand fix with an
-//    address instead of a dead end.
-// Both beat the alternative, which was not reading the dirs and stranding the
-// skills outright.
+// Write `~/.gemini/config/skills` (the vendor's current root) FIRST; the two
+// older Antigravity dirs stay READ-ONLY so skills an older aghub installed are
+// not stranded. Known costs (doctor audits them `withheld`; `aghub repair`, not
+// `add`, migrates them): see docs/agents/antigravity.md.
 fn global_skills_paths() -> Vec<PathBuf> {
 	let Some(home) = home_dir() else {
 		return Vec::new();

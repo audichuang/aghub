@@ -1,23 +1,14 @@
-//! Skill packaging and parsing library.
-//!
-//! This library provides functionality to pack, unpack, parse, and validate
-//! skill packages in .skill (zip) format. It extends skills-ref with
-//! packaging capabilities.
-//!
-//! # Example
+//! Pack, unpack, parse and validate skill packages (`.skill` zip), plus
+//! npx-compatible lock files and content hashes. Extends `skills-ref`.
 //!
 //! ```rust,no_run
 //! use skill::package::{pack, unpack};
 //! use skill::parser::parse;
 //! use std::path::Path;
 //!
-//! // Pack a skill directory
 //! pack(Path::new("/path/to/skill"), Path::new("/output/skill.skill")).unwrap();
-//!
-//! // Unpack a .skill file
 //! unpack(Path::new("/path/to/skill.skill"), Path::new("/output/dir")).unwrap();
-//!
-//! // Parse any skill format (auto-detect)
+//! // Any on-disk form (dir / .skill / .zip / .md), auto-detected.
 //! let skill = parse(Path::new("/path/to/skill.skill")).unwrap();
 //! println!("Skill name: {}", skill.name);
 //! ```

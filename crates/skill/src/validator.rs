@@ -2,13 +2,7 @@
 
 use std::path::Path;
 
-/// Validate a .skill file.
-///
-/// # Arguments
-/// * `path` - Path to the .skill file
-///
-/// # Returns
-/// List of validation error messages. Empty list means valid.
+/// Validate a .skill file. Returns the error messages; empty means valid.
 pub fn validate_skill_file(path: &Path) -> Vec<String> {
 	let mut errors = Vec::new();
 
@@ -16,10 +10,8 @@ pub fn validate_skill_file(path: &Path) -> Vec<String> {
 		return vec![format!("File not found: {}", path.display())];
 	}
 
-	// Try to parse as skill file
 	match crate::parser::parse_skill_file(path) {
 		Ok(skill) => {
-			// Validate the parsed skill
 			errors.extend(validate_skill(&skill));
 		}
 		Err(e) => {
@@ -30,30 +22,17 @@ pub fn validate_skill_file(path: &Path) -> Vec<String> {
 	errors
 }
 
-/// Validate a .zip file as a skill package.
-///
-/// # Arguments
-/// * `path` - Path to the .zip file
-///
-/// # Returns
-/// List of validation error messages. Empty list means valid.
+/// Validate a .zip file as a skill package (same contract as
+/// [`validate_skill_file`]).
 pub fn validate_zip(path: &Path) -> Vec<String> {
 	validate_skill_file(path)
 }
 
-/// Validate a skill directory.
-///
-/// Delegates to skills-ref validator but also checks directory structure.
-///
-/// # Arguments
-/// * `path` - Path to the skill directory
-///
-/// # Returns
-/// List of validation error messages. Empty list means valid.
+/// Validate a skill directory: the skills-ref validator plus a directory
+/// structure check. Returns the error messages; empty means valid.
 pub fn validate_skill_dir(path: &Path) -> Vec<String> {
 	let mut errors = skills_ref::validator::validate(path);
 
-	// Additional structure validation
 	if let Ok(skill) = crate::parser::parse_skill_dir(path) {
 		errors.extend(validate_skill_structure(&skill));
 	}
@@ -61,13 +40,8 @@ pub fn validate_skill_dir(path: &Path) -> Vec<String> {
 	errors
 }
 
-/// Unified validation - auto-detect format and validate.
-///
-/// # Arguments
-/// * `path` - Path to skill (directory, .skill file, .zip file, or .md file)
-///
-/// # Returns
-/// List of validation error messages. Empty list means valid.
+/// Auto-detect the format (directory, .skill, .zip, .md) and validate it.
+/// Returns the error messages; empty means valid.
 pub fn validate(path: &Path) -> Vec<String> {
 	if !path.exists() {
 		return vec![format!("Path not found: {}", path.display())];

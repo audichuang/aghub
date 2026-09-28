@@ -71,19 +71,9 @@ fn get_archive_name(path: &Path, skill_root: &Path) -> Option<String> {
 		.map(|p| p.to_string_lossy().replace('\\', "/"))
 }
 
-/// Pack a skill directory into a .skill/.zip file.
+/// Pack `skill_dir` into the .skill/.zip file `output_path`.
 ///
-/// # Arguments
-/// * `skill_dir` - Path to the skill directory
-/// * `output_path` - Path for the output .skill file
-///
-/// # Returns
-/// * `Ok(())` - If packing succeeds
-///
-/// # Errors
-/// * `SkillError::Io` - If file operations fail
-/// * `SkillError::MissingSkillMd` - If SKILL.md is missing
-/// * `SkillError::Validation` - If skill validation fails
+/// Errors: `Io`, `MissingSkillMd`, or `Validation` if the skill is invalid.
 pub fn pack(skill_dir: &Path, output_path: &Path) -> Result<()> {
 	// Verify input directory exists
 	if !skill_dir.exists() {
@@ -165,18 +155,9 @@ pub fn pack(skill_dir: &Path, output_path: &Path) -> Result<()> {
 	Ok(())
 }
 
-/// Unpack a .skill/.zip file to a directory.
+/// Unpack the .skill/.zip file `skill_file` into `output_dir`.
 ///
-/// # Arguments
-/// * `skill_file` - Path to the .skill or .zip file
-/// * `output_dir` - Directory to extract to
-///
-/// # Returns
-/// * `Ok(())` - If unpacking succeeds
-///
-/// # Errors
-/// * `SkillError::Io` - If file operations fail
-/// * `SkillError::Zip` - If zip extraction fails
+/// Errors: `Io` or `Zip`.
 pub fn unpack(skill_file: &Path, output_dir: &Path) -> Result<()> {
 	if !skill_file.exists() {
 		return Err(SkillError::NotFound(format!(
@@ -185,14 +166,11 @@ pub fn unpack(skill_file: &Path, output_dir: &Path) -> Result<()> {
 		)));
 	}
 
-	// Create output directory
 	std::fs::create_dir_all(output_dir)?;
 
-	// Open zip file
 	let file = File::open(skill_file)?;
 	let mut archive = ZipArchive::new(file)?;
 
-	// Extract all files
 	for i in 0..archive.len() {
 		let mut file = archive.by_index(i)?;
 		let outpath = output_dir.join(file.mangled_name());
@@ -215,15 +193,7 @@ pub fn unpack(skill_file: &Path, output_dir: &Path) -> Result<()> {
 
 /// Read SKILL.md content directly from a .skill/.zip file without extracting.
 ///
-/// # Arguments
-/// * `skill_file` - Path to the .skill or .zip file
-///
-/// # Returns
-/// * `Ok(String)` - Content of SKILL.md
-///
-/// # Errors
-/// * `SkillError::MissingSkillMd` - If SKILL.md is not found in archive
-/// * `SkillError::Zip` - If zip reading fails
+/// Errors: `MissingSkillMd` if the archive has none, or `Zip`.
 pub fn read_skill_md(skill_file: &Path) -> Result<String> {
 	if !skill_file.exists() {
 		return Err(SkillError::NotFound(format!(

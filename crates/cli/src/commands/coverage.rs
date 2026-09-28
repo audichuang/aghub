@@ -1,12 +1,10 @@
 //! `aghub-cli coverage` — read-only projection of `classify_all`.
 //!
-//! Classifies every registered agent against the canonical `.agents/skills`
-//! master SKILLS-DIR for the requested scope and prints a per-agent coverage
-//! table (or JSON). A pure passthrough over `aghub_core::skills::linker`: it
-//! adds no write path. The `--json` shape comes from the SHARED
-//! `AgentSkillCoverageView` (core), the exact type the HTTP API's
-//! `AgentSkillCoverageDto` mirrors — so the two surfaces emit one wire shape
-//! defined in one place and can never drift.
+//! Classifies every registered agent for the requested scope and prints a
+//! per-agent coverage table (or JSON). A pure passthrough over
+//! `aghub_core::skills::linker`, with no write path. `--json` is the SHARED
+//! `AgentSkillCoverageView` (core) that the API's `AgentSkillCoverageDto`
+//! mirrors — one wire shape.
 
 use aghub_core::skills::linker::classify::{classify_all, LinkNeed};
 use aghub_core::skills::linker::AgentSkillCoverageView;

@@ -1,14 +1,12 @@
 //! `GET /skills/check-updates` — read-only update check for installed skills.
 //!
 //! Reads the global skill lock, projects each entry to the orchestrator's
-//! [`EntryInput`], then delegates to the pure-ish F1.5 runner
-//! ([`skill_update::check_updates`]).
+//! [`EntryInput`], then delegates to [`skill_update::check_updates`].
 //!
 //! Network + credential resolution stay in this crate (never in `crates/core`).
 //! The [`Fetcher`] materializes a worktree into a [`tempfile::TempDir`] (the
 //! documented worst-case fallback — a checkout into a temp dir, never the `git`
-//! binary), and the [`TokenResolver`] wraps the F1.4 keyring/keychain
-//! resolution. Every gix error string is redacted of URL userinfo upstream so a
+//! binary), and the [`TokenResolver`] wraps the keyring/keychain resolution. Every gix error string is redacted of URL userinfo upstream so a
 //! token can never leak into the response.
 
 use std::collections::HashMap;
@@ -53,16 +51,12 @@ const PER_FETCH: Duration = Duration::from_secs(30);
 const OVERALL_DEADLINE: Duration = Duration::from_secs(120);
 /// Default bounded concurrency for upstream fetches.
 ///
-/// Kept at 4 deliberately. Raising it looks free — each job is one HTTPS round
-/// trip, so a cap below the group count splits them into waves — but this is the
-/// OUTER cap over a fetch that itself runs `aghub_git::DEFAULT_CONCURRENCY` (16)
-/// blob workers, so N here permits N×16 concurrent requests against one forge.
-/// 8 would allow 128, past the 100-concurrent-stream ceiling `github_rest.rs`
-/// documents, and a 403 raised after the snapshot is pinned can no longer fall
-/// back to gix — it surfaces as `uncheckable/network`. The wave saving is also
-/// tiny now that a tip costs ~40ms instead of ~600ms: two waves of preflight is
-/// ~40ms, not ~700ms. Going above 4 needs the process-wide per-credential
-/// semaphore `github_rest.rs` names, not a bigger number here.
+/// Do not raise: this is the OUTER cap over fetches that each run
+/// `aghub_git::DEFAULT_CONCURRENCY` (16) blob workers, so N permits N×16
+/// requests against one forge; 8 would pass the 100-stream ceiling
+/// `github_rest.rs` documents, and a 403 after the snapshot is pinned cannot
+/// fall back to gix (`uncheckable/network`). Waves cost ~40ms each. Going
+/// higher needs the per-credential semaphore `github_rest.rs` names.
 const CONCURRENCY: usize = 4;
 /// TTL for the per-request result cache. The cache is request-scoped here, so
 /// this only dedups identical `(source, ref)` groups within one call.
@@ -183,10 +177,9 @@ fn write_auto_healed_hashes(
 	global_identities: &Identities,
 	project_identities: &Identities,
 ) -> Result<(), ApiError> {
-	// One record per global name: the hash and the OID are applied together
-	// under a SINGLE precondition check. Split across two passes, writing the
-	// hash would invalidate the very precondition the OID pass re-checks, so
-	// the OID silently never landed and the next check had to fetch again.
+	// One record per global name: hash and OID apply under a SINGLE
+	// precondition check (writing the hash first would invalidate the
+	// precondition a second OID pass re-checks, so the OID never lands).
 	let mut global_heals: HashMap<String, (Option<&String>, Option<&String>)> =
 		HashMap::new();
 	let mut project_heals = HashMap::new();
@@ -475,11 +468,9 @@ fn apply_locked_resync_batch_error(
 	}
 	match apply_locked_resync_error(name, scope, error) {
 		Ok(response) => response,
-		// Today only the credential-backend arm returns `Err`, and it is
-		// handled above. A future arm that projects to a top-level error must
-		// still not turn one row into a 500 that erases the whole batch — but
-		// it IS a wiring mistake, so fail loudly where that is free (tests,
-		// debug) and degrade to an attributed row in release.
+		// Only the credential-backend arm returns `Err` (handled above). Any
+		// future one is a wiring mistake: loud in debug, an attributed row in
+		// release — never a 500 that erases the batch.
 		Err(_) => {
 			debug_assert!(
 				false,
@@ -504,10 +495,8 @@ pub async fn check_skill_updates(
 	}
 	.resolve()?;
 	let offline = query.offline.unwrap_or(false);
-	// `offline` decides whether this route touches the network AND whether the
-	// local-hash sweep above runs at all, so log the resolved value: the two
-	// modes differ by orders of magnitude and the query string alone does not
-	// say which one ran.
+	// Log the resolved `offline`: the two modes differ by orders of magnitude
+	// and the query string alone does not say which one ran.
 	let route_started = std::time::Instant::now();
 	let inputs_started = std::time::Instant::now();
 	let CheckInputs {
@@ -554,10 +543,8 @@ pub async fn check_skill_updates(
 		outputs.len(),
 		check_started.elapsed()
 	);
-	// This WRITES the lock, so it takes the mutation lock and must not run on an
-	// async worker — a check racing a bulk update would otherwise park a Rocket
-	// worker for the whole batch (root AGENTS.md). The fetches above are already
-	// done and stay outside.
+	// Writes the lock under the mutation lock, so off the async worker
+	// (`crates/api/AGENTS.md`); the fetches above stay outside.
 	crate::blocking::in_mutation_pool(|| {
 		write_auto_healed_hashes(
 			&outputs,
@@ -740,11 +727,9 @@ pub(crate) async fn apply_skill_updates_inner(
 			fetcher,
 			resolver,
 		)
-		// Unreachable in practice: this route answers empty names above and
-		// `ScopeParams::resolve` answers every bad scope (including project
-		// without a root) before we get here. Kept as ONE generic arm rather
-		// than re-stating each condition's message, which would be a second
-		// written contract for something the extractor already owns.
+		// Unreachable in practice (empty names and bad scopes are answered
+		// earlier); ONE generic arm, not a second copy of the extractor's
+		// messages.
 		.map_err(|_| {
 			ApiError::new(
 				Status::BadRequest,
@@ -856,7 +841,7 @@ pub(crate) async fn accept_rename_inner(
 		}
 	};
 
-	// P0-2 guard (a): refuse a degenerate rename before any lock read / fetch.
+	// Refuse a degenerate rename before any lock read / fetch.
 	if let Err(e) = rename::ensure_distinct_names(&req.old_name, &req.new_name)
 	{
 		return Ok(Json(accept_rename_error_with_code(
@@ -925,9 +910,8 @@ pub(crate) async fn accept_rename_inner(
 		}
 	};
 
-	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core. The whole
-	// transaction holds the mutation lock and is synchronous — off the async
-	// worker; the fetch above already happened.
+	// The remaining steps, guards and rollback live in core. The transaction
+	// holds the mutation lock and is synchronous — off the async worker.
 	crate::blocking::in_mutation_pool(|| {
 		match accept_fetched_rename(
 			&prepared.fetched,
@@ -1792,37 +1776,16 @@ mod tests {
 		});
 	}
 
-	/// Regression (GitHub #15 P2-3, Codex-found): `apply_skill_update` once
-	/// loaded a permissive keyring snapshot, which
-	/// degrades ANY read failure -- including "the backend itself is
-	/// unreachable" -- to an empty snapshot. For this MUTATING route that
-	/// meant a keyring outage silently resolved "no credential" and the
-	/// request went on to fail later with a confusing error instead of a
-	/// stable, retryable 503.
+	/// A keyring outage on this MUTATING route must answer a retryable 503,
+	/// not degrade to "no credential" and fail later (GitHub #15).
+	/// See docs/history/api.md#apply-update-keyring-fail-closed
 	///
-	/// Forces the backend-unavailable path via
-	/// `crate::credentials::test_hooks::ForceCredentialBackendUnavailable`
-	/// (deterministic, cross-platform -- see its doc comment) instead of the
-	/// previous `DBUS_SESSION_BUS_ADDRESS` tampering: that env var only
-	/// affects Linux secret-service, so on a macOS/Windows CI runner it did
-	/// nothing and this test would silently observe a non-503 result
-	/// (GitHub #15 round-2 Codex finding, P1-1-adjacent).
-	///
-	/// A real lock entry + installed copy for `some-skill` is required: the
-	/// keyring fallback in `SourceAuth` is only
-	/// ever consulted once `apply_skill_update_inner` actually reaches its
-	/// `resolver.resolve(...)` call — which requires a real, locked,
-	/// installed skill to get past the earlier "not installed"/"no lock
-	/// entry" short-circuits. (The keyring read is eager/off-worker; only the
-	/// in-memory `resolve()` lookup is gated here.) Dispatches a real HTTP
-	/// request through the mounted route (not `apply_skill_update_inner`
-	/// directly, which bypasses this exact code path). No forwarded-token
-	/// header is sent, so the forwarded resolver misses and the keyring
-	/// fallback IS consulted, and must reject before any fetch is attempted
-	/// (see
-	/// `apply_update_forwarded_token_succeeds_even_when_keyring_backend_unreachable`
-	/// for the complementary case where forwarding covers the source and the
-	/// keyring must never even be touched).
+	/// Uses `ForceCredentialBackendUnavailable` (cross-platform), not
+	/// `DBUS_SESSION_BUS_ADDRESS`. Needs a real lock entry + installed copy so
+	/// the request reaches `resolver.resolve(...)`, and goes through the
+	/// mounted route with no forwarded header so the keyring IS consulted.
+	/// Complement:
+	/// `apply_update_forwarded_token_succeeds_even_when_keyring_backend_unreachable`.
 	#[cfg(unix)]
 	#[test]
 	fn apply_skill_update_route_fails_closed_when_keyring_backend_unreachable()

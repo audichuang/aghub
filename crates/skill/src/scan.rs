@@ -102,23 +102,12 @@ where
 	result
 }
 
-/// Scan for skill directories containing SKILL.md files.
+/// Scan `base_path` for skill directories containing SKILL.md, deduplicated
+/// by frontmatter name; `ScanError` if the path is missing or unreadable.
 ///
-/// # Arguments
-/// * `base_path` - Base path to search for skills
-/// * `options` - Scan options controlling behavior
-/// * `priority_dirs` - Priority directories to scan first (e.g., agent-specific skill dirs)
-///
-/// # Returns
-/// * `Ok(Vec<PathBuf>)` - Paths to directories containing SKILL.md (deduplicated by skill name)
-/// * `Err(ScanError)` - If scanning fails due to path not found or permission denied
-///
-/// # Algorithm
-/// 1. Check if base_path itself contains SKILL.md (return early unless full_depth)
-/// 2. Scan priority directories first (agent-specific + common paths)
-/// 3. If no skills found or full_depth=true, fall back to recursive search
-/// 4. Deduplicate by skill name (parsed from frontmatter)
-/// 5. Skip invalid/unparseable skills silently
+/// Order: `base_path` itself (early return unless `full_depth`), then
+/// `priority_dirs` (agent-specific + common paths), then — if nothing was found
+/// or `full_depth` — a recursive search. Unparseable skills are skipped silently.
 pub fn scan_skills(
 	base_path: &Path,
 	options: ScanOptions,

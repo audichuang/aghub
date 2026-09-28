@@ -1,21 +1,14 @@
 //! `repair` subcommand (alias `migrate`) — fix a skill's on-disk layout.
 //!
-//! **One verb for every non-conformant shape.** From inside an agent session the
-//! user does not know WHICH shape they hit — they know the skill is
-//! misbehaving. Migration is what repair does to an un-migrated skill; it is not
-//! a separate command.
+//! **One verb for every non-conformant shape** — the user knows the skill
+//! misbehaves, not which shape they hit; migration is just one of them.
 //!
-//! Designed to be driven by an agent, which is a real constraint on the output
-//! and not a nicety: `--json` carries the shape found, what was done, every path
-//! involved, and for a refusal a `fix` string that reads as an instruction
-//! rather than a diagnosis. Exit `0` when nothing needed doing or everything was
-//! repaired, `1` when something was refused OR failed — both mean a skill the
-//! user still has to deal with.
+//! Built to be driven by an agent: `--json` carries the shape found, what was
+//! done, every path involved, and for a refusal a `fix` that reads as an
+//! instruction. Exit `1` when something was refused OR failed.
 //!
-//! Dry-run unless `--yes`, per the house rule for layout-changing verbs. The
-//! preview is the same code path with the writes withheld — `execute_repair`
-//! takes a `dry_run` flag rather than the caller running a second, parallel
-//! "what would happen" implementation that drifts.
+//! Dry-run unless `--yes`; the preview is the same code path with writes
+//! withheld (`dry_run`), never a parallel implementation.
 
 use aghub_core::models::ResourceScope;
 use aghub_core::skills::repair::{repair_all, RepairOutcome, RepairReport};

@@ -291,11 +291,9 @@ pub struct LockedSkillsResyncRequest<'a> {
 	/// coordinates from the very Lock read this flow performs has nothing
 	/// independent to assert against.
 	///
-	/// Judged by `sources::source_matches`, the SAME predicate that decided
-	/// which skills that row contains — so its resolution is exactly the
-	/// grouping's, no finer. A stricter comparison here would reject rows the
-	/// caller was correctly shown, with an error no refresh could clear; the
-	/// resolution has to be raised in the grouping instead.
+	/// Judged by `sources::source_matches`, the SAME predicate the grouping
+	/// uses — never a stricter one (see
+	/// docs/history/skill-update.md#source-membership-has-one-definition).
 	pub source_group: Option<&'a str>,
 	pub names: &'a [String],
 	pub scope: ResourceScope,
@@ -415,8 +413,8 @@ thread_local! {
 /// cost `O(names × agents)`.
 ///
 /// `pub(crate)` so the Sources baseline builder shares the SAME counted entry
-/// point: it has the identical one-scan-per-batch property, and a scan that
-/// bypassed this function would be invisible to the tests that pin it.
+/// point — a scan that bypassed it would be invisible to the tests pinning
+/// one-scan-per-batch.
 pub(crate) fn scan_agents(
 	scope: ResourceScope,
 	project_root: Option<&Path>,
@@ -683,18 +681,13 @@ pub fn resync_locked_skills(
 		.collect();
 
 	// Each row takes the mutation lock for its own transaction; the batch
-	// deliberately does NOT hold one guard across all of them. The lock's
-	// process-wide half is held for its whole span, so a batch-long hold would
-	// queue every unrelated in-process mutation behind this batch and push
-	// other processes into their 10s bound — the measured way to make the API
-	// stop answering everything (root AGENTS.md). The cost is that the batch is
-	// NOT atomic: another aghub landing between two rows leaves this Source's
-	// entries on different commits with both batches reporting success, which
-	// the per-entry compare-after-fetch cannot catch (`EntryIdentity` compares
-	// coordinates, not the commit). Each row stays internally consistent
-	// (content and lock hash always agree) and the next check re-flags the
-	// drift, so this is a bounded, self-healing inconsistency — priced
-	// deliberately against never answering a request.
+	// deliberately does NOT hold one guard across all of them: a batch-long
+	// hold queues every unrelated in-process mutation and pushes other
+	// processes into their 10s bound (the API stops answering). Cost: the
+	// batch is NOT atomic — another aghub landing between rows can leave this
+	// Source's entries on different commits, undetected by `EntryIdentity`
+	// (coordinates, not commit). Each row stays internally consistent and the
+	// next check re-flags the drift: bounded and self-healing, by choice.
 	Ok(rows
 		.into_iter()
 		.map(|ResyncRow { name, prepared }| {

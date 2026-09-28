@@ -10,11 +10,6 @@ use super::parse_mcp_transport;
 
 /// After a skill add, tell the user when the Referrer just written is SHARED —
 /// several agents read the same directory, so this grant reached all of them.
-///
-/// This replaces the old "already covered" note. That note described the leak as
-/// a feature: those agents got the skill because storing it granted it, and the
-/// user had no way to opt out. Now they get it only when their slot is written,
-/// and the ones sharing that slot are named.
 fn note_shared_slot(manager: &ConfigManager) {
 	let shared = manager.skill_target_shares_with();
 	if !shared.is_empty() {
@@ -28,24 +23,43 @@ fn note_shared_slot(manager: &ConfigManager) {
 	}
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The `add` clap flags, forwarded as one value.
+pub struct AddArgs {
+	pub name: Option<String>,
+	pub from: Option<PathBuf>,
+	pub command: Option<String>,
+	pub url: Option<String>,
+	pub transport: String,
+	pub headers: Vec<String>,
+	pub env_vars: Vec<String>,
+	pub timeout: Option<u64>,
+	pub description: Option<String>,
+	pub author: Option<String>,
+	pub version: Option<String>,
+	pub tools: Vec<String>,
+	pub universal: bool,
+}
+
 pub fn execute(
 	manager: &mut ConfigManager,
 	resource: ResourceType,
-	name: Option<String>,
-	from: Option<PathBuf>,
-	command: Option<String>,
-	url: Option<String>,
-	transport: String,
-	headers: Vec<String>,
-	env_vars: Vec<String>,
-	timeout: Option<u64>,
-	description: Option<String>,
-	author: Option<String>,
-	version: Option<String>,
-	tools: Vec<String>,
-	universal: bool,
+	args: AddArgs,
 ) -> Result<serde_json::Value> {
+	let AddArgs {
+		name,
+		from,
+		command,
+		url,
+		transport,
+		headers,
+		env_vars,
+		timeout,
+		description,
+		author,
+		version,
+		tools,
+		universal,
+	} = args;
 	if universal {
 		eprintln!(
 			"warning: --universal is deprecated and ignored; \
@@ -62,14 +76,10 @@ pub fn execute(
 					"Importing skill from: {}",
 					from_path.display()
 				);
-				// `--name` is NOT a second step. It used to be
-				// import-then-`update_skill`-rename, which released the
-				// mutation lock between the halves and stranded the imported
-				// skill whenever the rename failed. The install now writes the
-				// requested name directly, so the duplicate check, the copy and
-				// the frontmatter fix are one span under one lock — and a
-				// conflict is refused BEFORE anything is written, which is why
-				// this flow needs no rollback of its own.
+				// `--name` is written by the install itself: duplicate check,
+				// copy and frontmatter fix are one span under one lock, and a
+				// conflict is refused BEFORE any write, so no rollback is
+				// needed. See docs/history/cli.md#add-from-with-name
 				let added = manager.add_skill_from_path_universal(
 					&from_path,
 					name.as_deref(),
@@ -81,7 +91,6 @@ pub fn execute(
 					// Say so, because the payload below reports that untouched
 					// Master and a user who just edited the source would
 					// otherwise read it as a successful overwrite.
-					//
 					eprintln!(
 						"note: nothing was written — the existing \
 						 master was left as-is. To take the \
@@ -105,9 +114,8 @@ pub fn execute(
 							.map(|s| (*s).to_string())
 							.collect(),
 					)
-					// No `&& !renamed` correction any more: an explicit
-					// `--name` that finds the name taken is now an ERROR, so a
-					// successful rename can never report `already_installed`.
+					// An explicit `--name` that is taken is an ERROR, so a
+					// successful rename never reports `already_installed`.
 					.with_already_installed(added.already_installed);
 				serde_json::to_value(&view)?
 			} else {
@@ -123,14 +131,9 @@ pub fn execute(
 				let added = manager.add_skill(skill)?;
 				eprintln_verbose!("Skill added successfully");
 				note_shared_slot(manager);
-				// Serialize the skill the manager reports on disk, NOT the one
-				// that was requested, and carry `already_installed` through.
-				// This branch used to build the view from the request and hard-
-				// code `already_installed: false`, on a comment claiming a
-				// manual add always errors on a duplicate. It does not: two of
-				// `add_skill_universal`'s branches are idempotent no-ops, so a
-				// re-add with a changed --description printed "added skill",
-				// echoed the NEW description back, and left the Master alone.
+				// Serialize the skill the manager reports on disk, NOT the
+				// request, and carry `already_installed`: a re-add is an
+				// idempotent no-op. See docs/history/cli.md#manual-add-reports-disk
 				if added.already_installed {
 					eprintln!(
 						"note: nothing was written — skill '{}' is already \

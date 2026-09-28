@@ -16,22 +16,38 @@ fn set_transport_timeout(transport: &mut McpTransport, value: Option<u64>) {
 	}
 }
 
-#[allow(clippy::too_many_arguments)]
+/// The `update` clap flags, forwarded as one value.
+pub struct UpdateArgs {
+	pub command: Option<String>,
+	pub url: Option<String>,
+	pub transport: String,
+	pub headers: Vec<String>,
+	pub env_vars: Vec<String>,
+	pub timeout: Option<u64>,
+	pub description: Option<String>,
+	pub author: Option<String>,
+	pub version: Option<String>,
+	pub tools: Vec<String>,
+}
+
 pub fn execute(
 	manager: &mut ConfigManager,
 	resource: ResourceType,
 	name: String,
-	command: Option<String>,
-	url: Option<String>,
-	transport: String,
-	headers: Vec<String>,
-	env_vars: Vec<String>,
-	timeout: Option<u64>,
-	description: Option<String>,
-	author: Option<String>,
-	version: Option<String>,
-	tools: Vec<String>,
+	args: UpdateArgs,
 ) -> Result<serde_json::Value> {
+	let UpdateArgs {
+		command,
+		url,
+		transport,
+		headers,
+		env_vars,
+		timeout,
+		description,
+		author,
+		version,
+		tools,
+	} = args;
 	// The caller prints the payload (single-agent) or wraps it in the batch
 	// envelope (multi-agent) — command logic stays print-free.
 	let payload = match resource {
@@ -137,32 +153,36 @@ mod tests {
 			&mut first,
 			ResourceType::Mcps,
 			"server".into(),
-			Some("new".into()),
-			None,
-			"stdio".into(),
-			vec![],
-			vec![],
-			None,
-			None,
-			None,
-			None,
-			vec![],
+			UpdateArgs {
+				command: Some("new".into()),
+				url: None,
+				transport: "stdio".into(),
+				headers: vec![],
+				env_vars: vec![],
+				timeout: None,
+				description: None,
+				author: None,
+				version: None,
+				tools: vec![],
+			},
 		)
 		.unwrap();
 		execute(
 			&mut stale,
 			ResourceType::Mcps,
 			"server".into(),
-			None,
-			None,
-			"stdio".into(),
-			vec![],
-			vec![],
-			Some(45),
-			None,
-			None,
-			None,
-			vec![],
+			UpdateArgs {
+				command: None,
+				url: None,
+				transport: "stdio".into(),
+				headers: vec![],
+				env_vars: vec![],
+				timeout: Some(45),
+				description: None,
+				author: None,
+				version: None,
+				tools: vec![],
+			},
 		)
 		.unwrap();
 
@@ -200,16 +220,18 @@ mod tests {
 			&mut updater,
 			ResourceType::Mcps,
 			"server".into(),
-			None,
-			None,
-			"stdio".into(),
-			vec![],
-			vec![],
-			Some(45),
-			None,
-			None,
-			None,
-			vec![],
+			UpdateArgs {
+				command: None,
+				url: None,
+				transport: "stdio".into(),
+				headers: vec![],
+				env_vars: vec![],
+				timeout: Some(45),
+				description: None,
+				author: None,
+				version: None,
+				tools: vec![],
+			},
 		)
 		.expect_err("unpersistable timeout must fail");
 		assert!(

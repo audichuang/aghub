@@ -19,18 +19,13 @@ use crate::{
 /// (REST→gix→system-git single owner) then materializes only the requested
 /// selection.
 ///
-/// Holds ONE [`SkillRepository`] for the fetcher's lifetime so that repeated
-/// fetches through the same instance reuse its per-snapshot caches. A source
-/// diff fetches once per ref-cohort, and cohorts that resolve to the SAME
-/// commit (typically `ref=Some("main")` alongside `ref=None`, where `None`
-/// means "the default branch" and the default branch IS `main`) would otherwise
-/// re-download an identical tree — measured at ~2.9s of pure duplication per
-/// source.
+/// Holds ONE [`SkillRepository`] for its lifetime so repeated fetches reuse its
+/// per-snapshot caches: ref-cohorts resolving to the SAME commit (`ref=None`
+/// beside the `main` it names) would otherwise re-download an identical tree.
 ///
-/// Construct one per request and drop it there. It must NEVER become a
-/// process-wide singleton: the REST backend's per-repo context holds the token
-/// it was built with, so a shared instance would let an unauthenticated
-/// request — or one for a different host — reuse another caller's credential.
+/// Construct one per request. NEVER a process-wide singleton: the REST
+/// backend's per-repo context holds its token, so a shared instance would let
+/// another request reuse that credential.
 pub struct GitFetcher {
 	repo: Arc<SkillRepository>,
 }
@@ -104,13 +99,10 @@ impl Fetcher for GitFetcher {
 /// branch/tag/default-branch via [`SkillRepository::resolve_tip`]. Any error maps
 /// to a soft failure so the orchestrator falls through to the full fetch.
 ///
-/// It resolves through the repository rather than owning a ref advertisement of
-/// its own because on github.com REST answers in one request on the pooled HTTP
-/// client, while a `git ls-refs` handshake — cheap in BYTES, expensive in TIME —
-/// costs a fresh TCP+TLS connection plus the whole heads+tags advertisement,
-/// measured at ~0.6s per source, every time. The preflight runs for EVERY source
-/// group, including the all-clear case where nothing else touches the network, so
-/// that difference was most of a check's wall clock.
+/// It resolves through the repository rather than its own ref advertisement:
+/// on github.com REST answers in one pooled request, while a `git ls-refs`
+/// handshake costs a fresh TCP+TLS connection (~0.6s per source), and the
+/// preflight runs for EVERY source group.
 ///
 /// Build it with [`GitFetcher::ref_resolver`] so it shares the fetcher's
 /// repository: the same fallback owner and the same token context decide the tip

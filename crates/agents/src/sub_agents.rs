@@ -370,13 +370,11 @@ fn write_sub_agent_file(file: &Path, content: &str) -> Result<()> {
 
 /// Load sub-agents from a directory of `*.md` files.
 ///
-/// `Err` when the directory EXISTS but cannot be read or traversed. "Absent"
-/// and "unreadable" are different answers and this used to return the same
-/// empty list for both, which turned an I/O anomaly into a confident
-/// `RESOURCE_NOT_FOUND` — and, in the skill loader that made the same mistake,
-/// into a silent deletion of a shared master a genuine holder was still
-/// reading. A refused sub-agent dir (a symlinked one) stays empty: that is a
-/// deliberate policy answer, not a failure to look.
+/// `Err` when the directory EXISTS but cannot be read or traversed: "absent"
+/// and "unreadable" are different answers, and conflating them reports an I/O
+/// anomaly as a confident `RESOURCE_NOT_FOUND`. A refused sub-agent dir (a
+/// symlinked one) stays empty: a deliberate policy answer, not a failure to
+/// look. See docs/history/agents.md#absent-vs-unreadable-sub-agent-dir.
 pub fn load_sub_agents_from_dir(dir: &Path) -> Result<Vec<SubAgent>> {
 	load_sub_agents_from_dir_with(dir, SubAgentLayout::MARKDOWN)
 }

@@ -218,7 +218,6 @@ impl McpTransport {
 	/// them, and validates `timeout`. `transport_type` is only consulted on
 	/// the url path. Returns `Ok(None)` when neither `command` nor `url` is
 	/// given (the caller decides whether that is an error).
-	#[allow(clippy::too_many_arguments)]
 	pub fn from_inputs(
 		command: Option<String>,
 		url: Option<String>,

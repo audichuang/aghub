@@ -30,11 +30,9 @@ fn format_last_used(last_used_at: Option<i64>) -> String {
 /// `-p`/`--project` and `--all` are rejected rather than silently ignored — by
 /// `CLAUDE_GLOBAL_ONLY_SCOPE` in `main`'s ONE policy table.
 ///
-/// The resolved scope is taken and ignored ON PURPOSE: it is the only thing
-/// making the dispatch site's call to the resolver load-bearing. Drop the
-/// parameter and `main` can stop consulting the policy table for this command
-/// without a compile error — which is exactly how `-p skill-usage` would go
-/// from "rejected" to "silently accepted".
+/// The resolved scope is taken and ignored ON PURPOSE: it makes the
+/// dispatch's resolver call load-bearing, so `-p skill-usage` cannot silently
+/// become accepted.
 pub fn execute(_scope: &crate::Scope, json: bool) -> Result<()> {
 	let rows = list_claude_skill_usage();
 

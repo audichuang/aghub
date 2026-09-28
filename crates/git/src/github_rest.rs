@@ -2,16 +2,11 @@
 //! via the GitHub REST API — no clone, no history, no unrelated blobs.
 //!
 //! Implements [`RepoFetchBackend`] for exact, normalized `github.com` (mapped
-//! to `api.github.com`). Every REST call goes through an injectable
-//! [`HttpTransport`] so tests feed canned GitHub API JSON without the network
-//! and record the exact request set. Any transient / unsupported / not-GitHub
-//! condition surfaces as [`GitError::RestFallback`]. The CALLER decides by
-//! timing: a `RestFallback` at **resolve** re-routes to the gix fallback; one
-//! that surfaces **after** a successful resolve (a `truncated` tree, blob
-//! admission) is a clean error from `SkillRepository::list`, while its `fetch`
-//! re-resolves over gix and materializes only if the tip is the SAME commit
-//! (gix 0.84 cannot fetch a commit by OID). A security-validation failure is a
-//! hard error and is never reported as a fallback.
+//! to `api.github.com`). Every call goes through the injectable
+//! [`HttpTransport`] so tests feed canned JSON and count requests. Transient /
+//! unsupported conditions surface as [`GitError::RestFallback`] (see its doc
+//! for what the caller does at resolve vs after resolve); a security-validation
+//! failure is a hard error, never a fallback.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -28,8 +23,7 @@ use crate::error::{GitError, Result};
 use crate::stage::{stage_tree_entries, StagedEntry, StagedEntryMode};
 use crate::RepoSnapshot;
 
-/// Default number of concurrent blob downloads (Decision: named constant, not a
-/// range).
+/// Default number of concurrent blob downloads.
 ///
 /// Measured on 41 blobs: 6 → 398ms, 16 → 253ms, 32 → 217ms — past 16 the gain
 /// is marginal because `reqwest::blocking` drives every stream from ONE
@@ -113,10 +107,9 @@ impl ReqwestTransport {
 	/// `reqwest::blocking::Client::new` panics when it runs on a Tokio worker
 	/// ("Cannot drop a runtime in a context where blocking is not allowed"),
 	/// and callers do construct one straight from an async handler — see
-	/// `git_scan_skills` in `aghub-api`. Before this was a `OnceLock` every
-	/// such call built its own client and every one of them was exposed; now
-	/// only the process's first call would be, which is worse to diagnose.
-	/// Owning the hop here means no caller has to know the rule.
+	/// `git_scan_skills` in `aghub-api`. With a shared `OnceLock` only the
+	/// process's FIRST call would panic — hard to diagnose — so the hop lives
+	/// here and no caller has to know the rule.
 	pub fn new() -> Self {
 		static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
 		Self {
@@ -493,23 +486,13 @@ impl RepoFetchBackend for GithubRest {
 				GitError::clone_failed("GithubRest cache lock poisoned")
 			})?;
 			// A context for a commit oid is written ONCE and never replaced.
-			//
-			// Two ref-cohorts of one source landing on the same commit — the
-			// common case, `ref=None` alongside the branch it names — must reuse
-			// it: overwriting handed the second caller empty caches and made it
-			// re-download everything the first had just fetched (measured as a
-			// duplicated ~1.2s tree read plus ~1.3s of blobs per source).
-			//
-			// A DIFFERENT repo or credential on the same commit is not that case.
-			// Identical content does not imply identical ACCESS: a public upstream
-			// and a private fork sit on one commit, share a tree, and do not share
-			// who may read it. Since `read_tree`/`read_blobs`/`materialize` recover
-			// their context by oid ALONE, letting the second resolve replace the
-			// entry made the first snapshot's later reads go out with the second's
-			// repo and token — and replacing nothing but declining the entry keeps
-			// both correct: this source simply loses the REST fast path and
-			// `SkillRepository` routes it to gix, which fetches the same content
-			// under its own credentials.
+			// Same repo+credential on the same commit (e.g. `ref=None` beside
+			// the branch it names) reuses it — overwriting re-downloaded the
+			// tree and every blob. A DIFFERENT repo or credential is declined,
+			// not replaced: identical content is not identical ACCESS, and
+			// later reads recover their context by oid alone, so a replace
+			// would send the first snapshot's reads with the second's token.
+			// The declined source falls back to gix under its own credentials.
 			match cache.get(&commit_oid) {
 				Some(existing)
 					if existing.owner != owner

@@ -267,11 +267,8 @@ pub fn build_scp_args(
 
 /// Remote upload target used before an install step moves it into place.
 ///
-/// `nonce` must be a per-install unique suffix (see `bringup::install_nonce`)
-/// so two installs racing against the same remote account never share (and
-/// corrupt) one fixed staging file: scp + finish are separate round-trips,
-/// so a fixed path lets install A validate the staged file just as install B
-/// overwrites it mid-copy, then A renames B's truncated upload into place.
+/// `nonce` must be per-install unique (`bringup::install_nonce`) so racing
+/// installs never share one staging file.
 pub fn remote_api_upload_path(nonce: &str) -> String {
 	format!(".cache/aghub/aghub-api.upload.{nonce}")
 }
@@ -281,20 +278,13 @@ pub fn remote_api_upload_path(nonce: &str) -> String {
 /// The forward is explicitly bound to `127.0.0.1` on both ends regardless of
 /// the server's `GatewayPorts` setting.
 ///
-/// **Multiplexing is disabled deliberately, and the tunnel's whole lifecycle
-/// depends on it.** With a user `ControlMaster auto` + `ControlPersist` entry
-/// for the host — a common, sensible thing to have in `~/.ssh/config` — this
-/// process would not open its own connection at all: it hands the forward to
-/// the existing master and **exits 0 immediately**, while the forward stays up
-/// under the master. Every caller here reads the child process as the tunnel
-/// (bring-up treats an early exit as a failed forward, the watcher treats its
-/// exit as a disconnect, and teardown kills it to close the forward), so all
-/// three silently mean the wrong thing — bring-up reported
-/// `ssh tunnel exited early (exit status: 0)` and tore down a remote server
-/// whose forward was in fact working. `ControlPath=none` restores the
-/// invariant that this child owns the forward; `ControlMaster=no` keeps it from
-/// becoming a master for anyone else. Only the TUNNEL needs this — the one-shot
-/// remote commands are free to reuse the user's master.
+/// **Multiplexing is disabled deliberately.** Under a user `ControlMaster auto`
+/// with `ControlPersist`, this process would hand the forward to the existing
+/// master and exit 0 at once, yet bring-up, the watcher and teardown all treat
+/// the child process AS the tunnel. `ControlPath=none` keeps this child owning
+/// the forward; `ControlMaster=no` keeps it from becoming anyone's master. Only
+/// the tunnel needs this — one-shot commands may reuse the user's master.
+/// See docs/history/remote.md#tunnel-joined-user-controlmaster
 pub fn build_tunnel_args(
 	conn: &Connection,
 	local_port: u16,
@@ -380,13 +370,9 @@ fn default_api_path_script() -> &'static str {
 
 /// Build a POSIX assignment that stores the resolved aghub-api path in `$bin`.
 ///
-/// An explicit `~/…` path expands `$HOME` so the probe and start resolve the
-/// SAME location the install target writes to (see
-/// [`assign_install_target_cmd`]); without this, an explicit
-/// `~/.local/bin/aghub-api` would be installed to `$HOME/.local/bin/aghub-api`
-/// but probed/started as a literal `~/…` token the remote shell never expands,
-/// so a freshly installed binary would never be found. Any other path is
-/// single-quote escaped verbatim.
+/// An explicit `~/…` path expands to `"$HOME"/…` so probe and start resolve the
+/// SAME location [`assign_install_target_cmd`] installs to — the remote shell
+/// never expands a quoted `~`. Any other path is single-quote escaped verbatim.
 fn assign_api_bin_cmd(resolved_path: &str) -> String {
 	if resolved_path == "aghub-api" {
 		format!("bin=\"$({})\";", default_api_path_script())
@@ -398,18 +384,12 @@ fn assign_api_bin_cmd(resolved_path: &str) -> String {
 }
 
 /// POSIX shell snippet that resolves WHERE to install the default `aghub-api`:
-/// overwrite the existing binary the probe would resolve (so a
-/// `cargo install`-ed `~/.cargo/bin/aghub-api` is upgraded IN PLACE rather than
-/// shadowed by a new `~/.local/bin` copy), falling back to
-/// `~/.local/bin/aghub-api` for a fresh install.
+/// the binary the probe would resolve (so `~/.cargo/bin` is upgraded IN PLACE),
+/// else `~/.local/bin/aghub-api` for a fresh install.
 ///
-/// Deliberately NOT a full mirror of [`default_api_path_script`]: this script
-/// omits the two linuxbrew fallback branches, so a binary the PROBE resolved
-/// from a linuxbrew prefix is NOT overwritten in place — an upgrade instead
-/// installs a fresh copy at `~/.local/bin/aghub-api`, leaving the older
-/// linuxbrew binary on disk (now shadowed on `PATH` by the new default
-/// location). This asymmetry is a deliberate, tracked deferral, not an
-/// oversight — see
+/// Deliberately NOT a full mirror of [`default_api_path_script`]: it omits the
+/// linuxbrew branches, so a linuxbrew binary is shadowed by a fresh
+/// `~/.local/bin` copy rather than upgraded in place. Tracked deferral:
 /// `.scratch/remote-version-hardening/issues/01-install-target-linuxbrew-parity.md`.
 fn default_install_target_script() -> &'static str {
 	"if command -v aghub-api >/dev/null 2>&1; then \
@@ -442,28 +422,17 @@ pub fn build_remote_prepare_upload_cmd() -> String {
 /// before it ever touches `$target`: chmod it executable and run `--version`
 /// on the staged path itself.
 ///
-/// The staged file scp uploaded normally lives under `$HOME/.cache`, which
-/// can be a DIFFERENT filesystem than `$target`'s directory — a cross-fs
-/// `mv` silently falls back to copy+remove, so a failure partway through
-/// (ENOSPC, I/O error) can destroy `$target` before the copy completes. To
-/// keep the swap atomic regardless of filesystem layout, this stages a
-/// SECOND copy into `$target`'s own directory (a `$target.tmp.<nonce>`
-/// sibling) and `mv`s THAT into `$target` — a same-directory rename is
-/// always an atomic inode swap on the same filesystem, never a partial
-/// copy+remove.
+/// The upload lives under `$HOME/.cache`, possibly a different filesystem from
+/// `$target`, where `mv` degrades to copy+remove and a partial failure can
+/// destroy `$target`. So a second copy is staged as a `$target.tmp.<nonce>`
+/// sibling and renamed into place — a same-directory rename is atomic.
 ///
-/// A failing self-check (corrupt download, glibc/ABI mismatch) exits
-/// non-zero WITHOUT ever `cp`/`mv`-ing into `$target`, so the previously
-/// working `$target` binary is never destroyed by a bad upload. (A
-/// `noexec`-mounted staging dir fails the same way — the exec attempt itself
-/// errors — so that degenerate case is fail-safe too.) `tmp` is initialized
-/// to empty up front, and the failure cleanup guards on `[ -n "$tmp" ]`
-/// before removing it — a login-shell-inherited `tmp` from `bash -lc` must
-/// never be deleted just because an earlier step in this script failed
-/// before `tmp` was ever assigned (see `build_remote_release_deb_install_cmd`
-/// for the same hygiene applied to `$stage`). `nonce` must be the SAME value
-/// passed to [`remote_api_upload_path`] for this install, so the staged path
-/// referenced here is the one scp actually uploaded to.
+/// A failing self-check (corrupt download, ABI mismatch, `noexec` staging)
+/// exits non-zero without touching `$target`. `tmp` starts empty and cleanup
+/// guards on `[ -n "$tmp" ]`, so a login-shell-inherited `tmp` is never
+/// deleted (same hygiene as `$stage` in
+/// [`build_remote_release_deb_install_cmd`]). `nonce` must match the one
+/// passed to [`remote_api_upload_path`] for this install.
 pub fn build_remote_finish_upload_cmd(
 	resolved_path: &str,
 	nonce: &str,
@@ -489,22 +458,15 @@ pub fn build_remote_finish_upload_cmd(
 /// bundle, extracts the packaged `aghub-api`, and installs it at the same path
 /// the probe/start commands resolve.
 ///
-/// Validates the extracted binary BEFORE it replaces `$target`: the staged
-/// copy is chmod'd executable and self-checked with `--version` in place; only
-/// a passing check `mv`s it onto `$target`, and a failing one removes the
-/// stray staged file and exits non-zero without touching `$target`. (A
-/// `noexec`-mounted target dir fails the self-check the same way, so that
-/// degenerate case is fail-safe too.)
+/// Validates the extracted binary BEFORE it replaces `$target`: the staged copy
+/// is self-checked with `--version`, and only a pass `mv`s it onto `$target`;
+/// a failure (including a `noexec` target dir) removes the stage and exits
+/// non-zero without touching `$target`.
 ///
-/// `stage` is initialized to empty at the VERY start of the script, before
-/// anything else runs. Without this, a failure early in the chain (e.g. the
-/// `mkdir -p "$target_dir"` before `stage` is ever assigned) would still
-/// reach the `|| { rm -f "$stage"; ... }` cleanup — and under `bash -lc`
-/// (the login shell this whole script runs through), an UNSET `stage` falls
-/// back to whatever the login environment happens to bind that name to
-/// (e.g. a stray `stage=~/.ssh/authorized_keys` in some profile script),
-/// which `rm -f` would then delete. The cleanup itself also guards on
-/// `[ -n "$stage" ]` so it never fires on an empty/unset value.
+/// `stage` is set to empty FIRST and cleanup guards on `[ -n "$stage" ]`:
+/// under `bash -lc`, an early failure would otherwise `rm -f` whatever the
+/// login profile happens to bind `stage` to.
+/// See docs/history/remote.md#remote-install-hardening
 pub fn build_remote_release_deb_install_cmd(
 	deb_url: &str,
 	resolved_path: &str,
@@ -543,24 +505,15 @@ pub fn build_remote_release_deb_install_cmd(
 
 /// Compose a remote install command that builds `aghub-api` on the VM itself.
 ///
-/// Stamps `AGHUB_RELEASE_VERSION=<release_version>` in the cargo invocation's
-/// own environment (the VAR=... prefix applies to `cargo` AND the `aghub-api`
-/// build script it runs). A `cargo install --git` checkout has no tag refs, so
-/// the build script's `git describe` fallback fails there and it falls all the
-/// way back to the workspace manifest placeholder (`1.1.1`) — a version the
-/// desktop never considers compatible, so it reinstalls forever. Stamping the
-/// desktop's own version here breaks that loop.
+/// Stamps `AGHUB_RELEASE_VERSION` in cargo's environment (it reaches the
+/// `aghub-api` build script too): a `cargo install --git` checkout has no tags,
+/// so `git describe` fails and the build falls back to the manifest
+/// placeholder, which the desktop never accepts and reinstalls forever.
 ///
-/// When an explicit `tag` is being installed AND no `branch` is also given,
-/// that tag names a SPECIFIC release which may differ from the desktop's own
-/// `release_version` — in that case stamp the tag's version (leading `v`
-/// stripped) instead, so the VM build reports the version it actually built
-/// rather than falsely advertising the desktop's. The stamp mirrors the SAME
-/// `branch`-beats-`tag` precedence `ref_arg` uses below: a `tag` is only the
-/// ref actually installed when `branch` is `None`, so a call supplying BOTH
-/// installs the branch but must stamp `release_version`, not the (unused)
-/// tag's version. `branch`/no-ref installs have no pinned version, so they
-/// keep stamping `release_version`.
+/// The stamp is the tag's version (leading `v` stripped) only when a `tag` is
+/// what gets installed, i.e. `branch` is `None` — the same branch-beats-tag
+/// precedence as `ref_arg`. Otherwise it is `release_version`.
+/// See docs/history/remote.md#remote-install-hardening
 pub fn build_remote_cargo_install_cmd(
 	git_url: &str,
 	branch: Option<&str>,
@@ -751,15 +704,12 @@ pub fn probe_remote_platform<R: CommandRunner>(
 	normalize_platform(s, m)
 }
 
-/// Probe whether the remote `aghub-api` advertises git-credential forwarding,
-/// over SSH and WITHOUT a running HTTP server, by running `<bin>
-/// --capabilities` and looking for the [`CAP_GIT_CREDENTIAL_FORWARDING`] token.
+/// Probe over SSH (no HTTP server needed) whether the remote `aghub-api`
+/// lists [`CAP_GIT_CREDENTIAL_FORWARDING`] in `<bin> --capabilities`.
 ///
-/// **Fail-safe:** returns `false` on ANY uncertainty — transport failure, a
-/// non-zero remote exit (an old binary that lacks the flag prints an
-/// unknown-flag error and exits non-zero), or output missing the marker. It
-/// never falsely claims support, so the desktop only forwards the credential
-/// header to a remote that genuinely honors it.
+/// **Fail-safe:** `false` on ANY uncertainty (transport failure, non-zero exit
+/// from an old binary lacking the flag, missing marker), so credentials are
+/// only forwarded to a remote that genuinely honors them.
 pub fn probe_supports_credential_forwarding<R: CommandRunner>(
 	runner: &R,
 	conn: &Connection,
@@ -794,10 +744,8 @@ fn parse_kv_after(s: &str, key: &str) -> Option<String> {
 	None
 }
 
-/// Return the substring after `key` on `line` iff `key` appears at the
-/// start of the trimmed line or immediately after whitespace (a left word
-/// boundary), so a longer token whose suffix is `key` (e.g. `OLDPID=`
-/// for `PID=`) is rejected.
+/// The substring after `key` on `line` iff `key` sits at a left word boundary
+/// (trimmed line start or after whitespace), so `OLDPID=` never matches `PID=`.
 fn key_value_rest<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 	let trimmed = line.trim_start();
 	if let Some(rest) = trimmed.strip_prefix(key) {
@@ -1608,14 +1556,14 @@ mod tests {
 		// The self-check runs on the STAGED copy, never on the live target.
 		assert!(!cmd.contains("\"$target\" --version"));
 		// A failed self-check/mv must clean up the stray staged file, guarded
-		// on a non-empty $stage (Fix A hygiene).
+		// on a non-empty $stage.
 		assert!(cmd.contains("[ -n \"$stage\" ] && rm -f -- \"$stage\""));
 		assert!(cmd.contains("$HOME/.local/bin/aghub-api"));
 	}
 
 	#[test]
 	fn remote_release_deb_install_cmd_initializes_stage_before_any_use() {
-		// Regression (Fix A): `stage=""` must be bound at the VERY start of
+		// Regression: `stage=""` must be bound at the VERY start of
 		// the script — before the dpkg-deb check, before the mkdir the
 		// staged-file mktemp depends on — so a failure early in the chain
 		// (e.g. `mkdir -p "$target_dir"` itself failing) still reaches the
@@ -1889,7 +1837,7 @@ mod tests {
 
 	#[test]
 	fn finish_upload_cmd_stages_into_target_dir_before_atomic_rename() {
-		// Fix B: the cache-staged upload may be on a DIFFERENT filesystem than
+		// The cache-staged upload may be on a DIFFERENT filesystem than
 		// $target's directory, so the swap must go through a SAME-DIRECTORY
 		// tmp file ("$target.tmp.<nonce>") rather than mv'ing the cache path
 		// straight into $target (a cross-fs mv silently falls back to
@@ -1948,7 +1896,7 @@ mod tests {
 
 	#[test]
 	fn finish_upload_cmd_failure_cleans_tmp_and_staged_with_guard() {
-		// Fix A hygiene applied to the NEW `$tmp` variable Fix B introduces:
+		// Staging hygiene applied to `$tmp`:
 		// `tmp` is bound empty up front, and the failure cleanup only removes
 		// it when non-empty — the same guard as `$stage` in
 		// build_remote_release_deb_install_cmd, and for the same reason (an

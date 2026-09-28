@@ -1,7 +1,7 @@
 //! `aghub-cli doctor` — read-only skill health across scopes.
 //!
-//! Reconciles each scope's skill lock against the on-disk universal master
-//! (`.agents/skills`): what's installed, where it came from (git repo vs local),
+//! Reconciles each scope's skill lock against the on-disk Master store
+//! (`.aghub`): what's installed, where it came from (git repo vs local),
 //! and whether disk and lock agree. One table instead of cross-referencing
 //! `source list` + `check` + `prune-lock`. Never writes.
 
@@ -25,7 +25,7 @@ use skill_update::sources::SourceScope;
 use tabled::builder::Builder;
 use tabled::settings::Style;
 
-/// On-disk state of a skill's master directory (`.agents/skills/<name>`).
+/// On-disk state of a skill's master directory (`.aghub/<name>`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 enum MasterState {
@@ -41,17 +41,12 @@ enum MasterState {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 enum AgentLinkState {
-	/// The agent holds no Referrer while the Master is healthy — the skill is
-	/// installed and deliberately NOT granted to this agent.
+	/// The agent holds no Referrer while the Master is healthy — installed and
+	/// deliberately NOT granted to this agent. Not an issue: it is the state
+	/// the `.aghub` store exists to express (it replaced `AutoCovered`).
 	///
-	/// This is the state the whole `.aghub` store exists to make expressible, so
-	/// it is NOT an issue. It replaces `AutoCovered`, whose question ("does this
-	/// agent read the Master without a link") stopped having an answer when the
-	/// Master moved to a store nothing reads.
-	///
-	/// Under D8 (no persisted authorization) `Withheld` is indistinguishable
-	/// from a grant the user removed by hand. Accepted: the alternative is a
-	/// second source of truth that drifts, and a doctor that cries wolf.
+	/// With no persisted authorization it is indistinguishable from a grant
+	/// removed by hand. Accepted: a second source of truth would drift.
 	Withheld,
 	Unsupported,
 	Linked,
@@ -59,10 +54,8 @@ enum AgentLinkState {
 	Dangling,
 	ForeignLink,
 	RealPathConflict,
-	/// The Referrer is a link whose target is ANOTHER link. Its endpoint is
-	/// still the Master, so comparing canonicalized endpoints calls it healthy —
-	/// which is exactly what `doctor` used to do while `repair` planned a
-	/// `Relink` for the same layout.
+	/// The Referrer is a link whose target is ANOTHER link. Its canonical
+	/// endpoint is still the Master, but `repair` plans a `Relink` for it.
 	Chain,
 	/// The Master itself is a link, or something that is not a directory. Not a
 	/// per-agent fault: `classify_shape` reports it for every pair against that
@@ -70,14 +63,10 @@ enum AgentLinkState {
 	MasterUnusable,
 	Inaccessible,
 	/// This agent has no slot for the skill AND the master is untracked — a
-	/// leftover, not a missing link.
-	///
-	/// Distinguished from `Missing` because the REMEDY is the opposite. A
-	/// `missing` referrer is repaired by re-linking from its source; an orphan
-	/// master has no source to re-link from, and doctor's blanket
-	/// "`source sync --install-missing`" advice would REINSTALL a skill the
-	/// user had just deleted — `delete --yes` deliberately keeps the master
-	/// when another agent still reads it, and that leftover landed here.
+	/// leftover (e.g. what `delete --yes` kept for another reader), not a
+	/// missing link. The remedy is opposite to `Missing`'s: there is no source
+	/// to re-link from, and `source sync --install-missing` would REINSTALL a
+	/// skill the user just deleted.
 	OrphanMaster,
 }
 
@@ -115,9 +104,8 @@ enum LinkAudit {
 	Verified {
 		agents: Vec<AgentLinkAudit>,
 	},
-	/// At least one agent row is not. Reported `verified` before, while its own
-	/// rows said `missing` — a summary that contradicted its own detail, and
-	/// the one an automated caller reads first.
+	/// At least one agent row is not. The summary must never contradict its
+	/// rows — it is what an automated caller reads first.
 	Issues {
 		agents: Vec<AgentLinkAudit>,
 	},
@@ -127,11 +115,9 @@ enum LinkAudit {
 /// the command a user copies actually fixes the state that produced it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Remedy {
-	/// The pre-existing merged note: reinstall from the source, or inspect it
-	/// by hand. Deliberately unchanged wording — narrowing THIS bucket is what
-	/// carving `chain` and `master-unusable` out of it accomplished; splitting
-	/// its remaining states (`repair` also relinks a dangling or foreign one)
-	/// is a separate change, not this fix.
+	/// Reinstall from the source, or inspect it by hand. (`repair` also
+	/// relinks a dangling or foreign one; splitting this bucket further is an
+	/// open follow-up.)
 	Reinstall,
 	/// Re-point the Referrer at the Master: `aghub-cli repair`.
 	Relink,
@@ -144,29 +130,21 @@ enum Remedy {
 impl AgentLinkState {
 	/// The remediation bucket for this state, or `None` when it is not an issue.
 	///
-	/// `withheld` and `unsupported` are not problems — they are the correct
-	/// resting state for a skill deliberately not granted to that agent, and
-	/// for an agent that cannot hold a skill at all. (This said `autoCovered`
-	/// and "reads the master directly" long after that state was renamed and
-	/// the concept deleted — the Master now lives in a store NOTHING reads.)
+	/// `withheld` and `unsupported` are correct resting states (not granted;
+	/// cannot hold a skill), not problems.
 	///
 	/// The notes iterate THIS, so a new state cannot inherit advice that does
-	/// not fix it — which is exactly what happened when `chain` and
-	/// `master-unusable` arrived while one note offered
-	/// `source sync --install-missing` for every issue. It fixes neither:
-	/// `Linker::link` compares canonicalized endpoints, and a chain's endpoint
-	/// IS the Master, so linking reports `AlreadyLinked` and writes nothing.
+	/// not fix it: `source sync --install-missing` fixes neither `chain` (its
+	/// canonical endpoint IS the Master, so `Linker::link` writes nothing) nor
+	/// `master-unusable`. See docs/history/cli.md#doctor-link-audit
 	fn remedy(self) -> Option<Remedy> {
 		match self {
 			Self::Withheld | Self::Unsupported | Self::Linked => None,
 			// `plan_repair` gives a chain a `Relink`; `repair` really does
 			// re-point it (`source sync` cannot — see above).
 			Self::Chain => Some(Remedy::Relink),
-			// `plan_repair` REFUSES this one, so `repair` will not normalize
-			// the store entry for you. Claim no more than that: `verify_shape`
-			// does NOT block on it — the master-side violations are repair
-			// problems, not delete hazards — and no other flow gates on the
-			// shape at all.
+			// `plan_repair` REFUSES this one. Claim no more: `verify_shape`
+			// does NOT block on it, and no other flow gates on the shape.
 			Self::MasterUnusable => Some(Remedy::ReplaceMaster),
 			Self::OrphanMaster => Some(Remedy::LeftoverMaster),
 			Self::Missing
@@ -230,21 +208,12 @@ struct DoctorRow {
 /// both [`DoctorRow::is_issue`] and [`DoctorRow::issue_axis`] — two copies
 /// disagreeing would report the wrong axis in the failure message.
 ///
-/// NOT simply `health != "ok"`. `untracked` — a master with no lock entry, i.e.
-/// a skill authored in place, which is this very repo's layout — is a
-/// legitimate resting state, and the note doctor prints for it ("back up, then
-/// delete before reinstalling via source sync") is the wrong advice for one,
-/// let alone a reason to fail CI.
+/// NOT simply `health != "ok"`: `untracked` (a skill authored in place, as in
+/// this very repo) is a legitimate resting state, not a reason to fail CI.
 ///
-/// `master-is-symlink` used to be excused beside it as "a SUPPORTED layout, as
-/// the NativeReader branch below says in so many words" — a branch that has
-/// since been DELETED, and a claim core contradicts: `classify_shape` calls a
-/// linked Master `Violation(MasterIsLink)` and `plan_repair` refuses it, so the
-/// store entry has to be normalized by hand. (`verify_shape` is NOT part of
-/// that argument — its blockers are a shared `ForkedCopy` and an
-/// `AliasedMaster`, so a delete still goes through.) Excusing it here while
-/// the link audit (which now reads core's verdict) calls it an issue had
-/// doctor's two columns answering the same fact both ways on one row.
+/// `master-is-symlink` IS an issue: `classify_shape` calls it
+/// `Violation(MasterIsLink)` and `plan_repair` refuses it, and the two axes
+/// must never answer one fact differently. See docs/history/cli.md#doctor-link-audit
 fn health_is_issue(health: &str) -> bool {
 	matches!(
 		health,
@@ -295,36 +264,26 @@ struct LockedSkill {
 /// occupant. The master argument is the canonical skill directory, not the
 /// universal-master parent.
 ///
-/// **The verdict comes from [`classify_shape`], not from here.** This used to
-/// re-derive it (`symlink_metadata` -> `is_link` -> two `canonicalize`s ->
-/// compare) in a parallel vocabulary, and the two answers disagreed: a two-hop
-/// chain resolves to the Master, so endpoint equality certified it `Linked`
-/// while `plan_repair` scheduled a `Relink` for the same directory — doctor said
-/// clean, repair said fix. Everything below is a rename of core's answer.
+/// **The verdict comes from [`classify_shape`], not from here** — everything
+/// below renames core's answer. See docs/history/cli.md#doctor-link-audit
 fn inspect_agent_link(
 	master_skill: &Path,
 	agent_skills_dir: &Path,
 	skill_name: &str,
 ) -> AgentLinkState {
 	let slot = agent_skills_dir.join(skill_name);
-	// `classify_shape` asks `symlink_metadata().is_ok()`, so an unreadable slot
-	// folds into "absent" — and reporting a permission-denied dir as a missing
-	// link sends the user to re-run sync against a dir aghub cannot read. This
-	// is the one question core does not answer; every other one comes from it.
+	// The one question core does not answer: `classify_shape` folds an
+	// unreadable slot into "absent", and a permission-denied dir must not be
+	// reported as a missing link.
 	match std::fs::symlink_metadata(&slot) {
 		Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
 			return AgentLinkState::Inaccessible;
 		}
-		// No slot at all: answer that BEFORE asking core. `classify_shape`
-		// checks the Master first on purpose — a linked Master makes every
-		// Referrer look like a chain, so it reports one cause instead of N
-		// symptoms — but that ordering also outranks `Absent`, and this row's
-		// absence is what the caller downgrades to `withheld` /
-		// `orphan-master`. Letting `MasterIsLink` win here erased the
-		// distinction between a leftover master and a missing link, whose
-		// remedies are opposite (pinned by
-		// `third_review_sibling_shapes_stay_fixed`). The Master's own fault is
-		// not lost: the row's `health` column names it once.
+		// No slot at all: answer BEFORE asking core, whose Master-first order
+		// would let `MasterIsLink` outrank `Absent` and erase the leftover vs
+		// missing-link distinction the caller needs (opposite remedies; pinned
+		// by `third_review_sibling_shapes_stay_fixed`). The Master's own fault
+		// is still named once, by the row's `health`.
 		Err(_) => return AgentLinkState::Missing,
 		Ok(_) => {}
 	}
@@ -360,17 +319,13 @@ fn inspect_agent_link(
 /// The agent's own read dirs, minus the one it writes and minus every dir any
 /// OTHER descriptor also reads.
 ///
-/// An agent can read more dirs than it writes: Antigravity keeps
-/// `.gemini/antigravity/skills` and `.gemini/antigravity-cli/skills` readable so
-/// installs from before the write slot moved to `.gemini/config/skills` are not
-/// stranded, and reads `.agent/skills` as the vendor's own project alias.
-/// Auditing the write slot ALONE calls those installs `withheld` — an issue the
-/// user cannot act on, because the agent really is loading the skill.
+/// An agent can read more dirs than it writes (e.g. Antigravity's pre-move
+/// `.gemini/antigravity/skills`, `.gemini/antigravity-cli/skills` and its
+/// `.agent/skills` alias); auditing the write slot alone would call those
+/// loaded installs `withheld`.
 ///
-/// SHARED dirs are excluded deliberately: `.agents/skills` is read by most of
-/// the roster, and "present in the shared slot with no Referrer of my own" is
-/// exactly the withheld state this audit exists to surface. Only a dir nobody
-/// else reads is this agent's alternative home.
+/// SHARED dirs are excluded: "present in `.agents/skills` with no Referrer of
+/// my own" IS the withheld state this audit exists to surface.
 fn private_fallback_dirs(
 	agent: AgentType,
 	scope: ResourceScope,
@@ -433,12 +388,8 @@ fn audit_agent_links(
 						&agent_skills_dir,
 						skill_name,
 					);
-					// Nothing in the write slot is not the whole answer for an
-					// agent that reads a private dir it does not write — an
-					// install from before Antigravity's write slot moved lives
-					// in one, and calling it `withheld` reports an issue the
-					// user cannot act on. Report where it was actually FOUND,
-					// so the path in the audit row is the one on disk.
+					// Empty write slot: also look in the agent's private read
+					// dirs, and report the path where it was actually FOUND.
 					if state == AgentLinkState::Missing {
 						for dir in private_fallback_dirs(
 							*agent,
@@ -458,28 +409,14 @@ fn audit_agent_links(
 							}
 						}
 					}
-					// An absent slot for an UNTRACKED master is a leftover, not
-					// a missing link — there is no source to relink from, and
-					// the blanket sync-repair advice would reinstall a skill the
-					// user just deleted. Gated on `!= Missing` rather than
-					// `== Dir` so a master that is itself a symlink (health
-					// `master-is-symlink`) also stays out of that bucket.
-					// `Dangling` deliberately does NOT downgrade: it is a real
-					// artifact a relink replaces.
-					// `exists()`, not `master_state(..) != Missing`:
-					// `master_state` uses `symlink_metadata`, so a DANGLING
-					// master symlink still reports `Link` and a broken tree got
-					// downgraded out of `missing` — the very false green
-					// `--verify-links` exists to prevent. `exists()` follows the
-					// link and answers whether a skill is actually reachable.
+					// An absent slot beside a REACHABLE Master is withheld
+					// (tracked) or a leftover (untracked), never a missing link.
+					// `exists()` follows links, so a dangling master symlink
+					// stays `missing` (`master_state` would say `Link`: a false
+					// green). `Dangling` referrers do NOT downgrade — a relink
+					// replaces them.
 					if state == AgentLinkState::Missing && master_skill.exists()
 					{
-						// An absent slot beside a live Master is either a
-						// leftover (untracked: nothing to relink FROM) or the
-						// withheld state this feature exists to create. Neither
-						// is a missing link, and the blanket
-						// `source sync --install-missing` advice would
-						// reinstall a skill the user deliberately narrowed.
 						state = if tracked {
 							AgentLinkState::Withheld
 						} else {
@@ -504,9 +441,7 @@ fn audit_agent_links(
 			}
 		})
 		.collect::<Vec<AgentLinkAudit>>();
-	// `verified` must not be reported while a row says otherwise — the summary
-	// contradicting its own detail is what let `doctor --verify-links && echo
-	// healthy` print healthy over a dangling referrer.
+	// `verified` only when no row is an issue.
 	if agents.iter().any(|audit| audit.state.is_issue()) {
 		LinkAudit::Issues { agents }
 	} else {
@@ -576,9 +511,8 @@ fn master_skills_on_disk(master: &Path) -> Vec<String> {
 	rd.filter_map(|e| e.ok())
 		.filter(|e| Linker::is_link(&e.path()) || e.path().is_dir())
 		.filter_map(|e| e.file_name().into_string().ok())
-		// aghub's own bookkeeping is not a skill. Without this, every user who
-		// had ever run `repair` got a permanent `invalid-skill` row for
-		// `.quarantine` and a non-zero `doctor --fail-on-issues` forever.
+		// aghub's own bookkeeping (e.g. `repair`'s `.quarantine`) is not a
+		// skill; listing it would fail `--fail-on-issues` forever.
 		.filter(|name| !is_store_bookkeeping(name))
 		.collect()
 }
@@ -635,11 +569,8 @@ fn build_rows(
 
 /// Global lock entries reduced to `(name → (source, source_type))`.
 ///
-/// Takes the ALREADY-READ lock. `doctor` presents these entries as its answer,
-/// so re-reading here after the fail-closed check left a window in which a
-/// non-aghub writer could truncate the file — the second read falls open to an
-/// empty lock and every still-installed skill is reported `untracked`, with
-/// remediation that says to delete it.
+/// Takes the ALREADY-READ lock: a second, fail-open read could see a
+/// truncated file. See docs/history/cli.md#lock-snapshot-fails-closed
 fn global_locked(
 	lock: skill::lock::SkillLockFile,
 ) -> BTreeMap<String, LockedSkill> {
@@ -689,10 +620,8 @@ pub fn execute_with_options(
 	fail_on_issues: bool,
 ) -> Result<()> {
 	let scopes = crate::commands::source::read_scopes(scope);
-	// doctor's whole point is reporting lock health, and it must not report a
-	// clean-but-empty world for a lock it could not parse — it classified the
-	// still-present skills `untracked` and told the caller to delete them.
-	// ONE read of each lock, consumed below — see `LockSnapshot`.
+	// Fail closed on an unparseable lock; ONE read, consumed below — see
+	// `LockSnapshot`.
 	let mut locks = crate::commands::source::read_scope_locks_checked(&scopes)?;
 	let roster = verify_links.then(|| resolve_roster(agent)).transpose()?;
 
@@ -732,19 +661,11 @@ pub fn execute_with_options(
 		}
 	}
 
-	// Counted before the JSON early-return: `--fail-on-issues` must mean the
-	// same thing in both output modes.
-	//
-	// Counts BOTH halves of what doctor reports. Deriving it from `link_audit`
-	// alone made the flag inert without `--verify-links` — every row is
-	// `notRequested` then — so `doctor --fail-on-issues` exited 0 over an
-	// `untracked` master or an `invalid-skill`: the same false green the flag
-	// exists to remove, one level up.
+	// Counted before the JSON early-return, so `--fail-on-issues` means the
+	// same in both output modes, and over BOTH axes (`DoctorRow::is_issue`).
 	let issue_count = rows.iter().filter(|row| row.is_issue()).count();
-	// Name the axis that actually failed. A hard-coded "agent referrer
-	// issue(s)" pointed at the link audit even when it had never run
-	// (`--fail-on-issues` without `--verify-links`), and contradicted doctor's
-	// own note two lines above.
+	// Name the axis that actually failed, not always the link audit (which
+	// may not have run).
 	let axes: std::collections::BTreeSet<&'static str> =
 		rows.iter().filter_map(DoctorRow::issue_axis).collect();
 	let gate = |issues: usize| -> Result<()> {
@@ -758,10 +679,8 @@ pub fn execute_with_options(
 			} else {
 				"skill health issues"
 			};
-			// Name the UNIT. This counts ROWS (skills); the note above counts
-			// per-agent referrer records, so one dangling skill across three
-			// agents legitimately prints "3 …" there and "1 …" here. Two bare
-			// "N issue(s)" lines disagreeing on screen read as a bug.
+			// Name the UNIT: this counts skills (rows); the notes count
+			// per-agent records, so the two numbers legitimately differ.
 			anyhow::bail!(
 				"{issues} skill(s) with {what} — see the report above"
 			);
@@ -815,11 +734,9 @@ pub fn execute_with_options(
 			 sync never overwrites an existing Master"
 		);
 	}
-	// An unusable master is ONE fault on ONE row, and the ReplaceMaster note at
-	// the bottom is its only remedy. Read on both axes because `health` is
-	// always computed while `link_audit` needs `--verify-links`: a plain
-	// `doctor --fail-on-issues` gates on `master-is-symlink` alone, so counting
-	// only `LinkAudit::Issues` left it exiting non-zero with no remedy at all.
+	// An unusable master is ONE fault on ONE row; the ReplaceMaster note is
+	// its only remedy. Read on both axes: without `--verify-links` only
+	// `health` names it, and it still fails `--fail-on-issues`.
 	let master_unusable = |row: &DoctorRow| {
 		row.health == "master-is-symlink"
 			|| matches!(&row.link_audit, LinkAudit::Issues { agents }
@@ -827,16 +744,10 @@ pub fn execute_with_options(
 				audit.state.remedy() == Some(Remedy::ReplaceMaster)
 			}))
 	};
-	// Such a row's per-agent states are SYMPTOMS, so it yields in every other
-	// bucket. An agent with no slot beside a linked master reads `orphan-master`
-	// ("remove the master directory") or, when the master link dangles,
-	// `missing` ("source sync … --install-missing") — both contradicting the
-	// note that says nothing aghub runs will act on it. `classify_shape`
-	// collapses the master before it looks at any referrer for the same reason.
-	// Filter the ROW: `audits()` flattens the rows away, so a per-audit filter
-	// no longer knows whose master it belongs to.
-	// Carries the ROW's scope, because the remedy commands below must name the
-	// scope of the thing they fix — see `scope_flag_for`.
+	// Such a row's per-agent states are SYMPTOMS (as in `classify_shape`,
+	// which collapses the master first), so the row is excluded from every
+	// other bucket — filtered per ROW, since `audits()` flattens rows away.
+	// Carries the row's scope for `scope_flag_for`.
 	let audits = || {
 		rows.iter()
 			.filter(|row| !master_unusable(row))
@@ -852,13 +763,9 @@ pub fn execute_with_options(
 
 	/// The scope flag for the rows in one remedy bucket.
 	///
-	/// Derived from the ROWS, never from the command's own scope: `doctor`
-	/// defaults to BOTH scopes (like `check` and `source list`), so one flag
-	/// taken from the command printed `-g` for a project-only fault. Running
-	/// that fixes nothing — and if a same-named skill is also broken at global
-	/// scope it repairs the wrong one. `<-g|-p>` when a bucket spans both, so
-	/// the reader takes the flag from the row's SCOPE column instead of a
-	/// command that is wrong for half of them.
+	/// Derived from the ROWS, never from the command's scope (which defaults
+	/// to both): a wrong flag fixes nothing, or the same-named skill in the
+	/// other scope. `<-g|-p>` when a bucket spans both — read the SCOPE column.
 	fn flag_of(global: bool, project: bool) -> &'static str {
 		match (global, project) {
 			(false, true) => "-p",
@@ -888,12 +795,8 @@ pub fn execute_with_options(
 			.count()
 	};
 
-	// Orphan masters get their OWN note. The blanket
-	// "source sync --install-missing" advice pointed at reinstalling them —
-	// and `delete --yes` deliberately keeps a master another agent still reads,
-	// so the leftover it produces landed in that bucket. doctor was telling the
-	// caller to put back what they had just removed, while a second note two
-	// lines up told them to delete it.
+	// Orphan masters get their OWN note: reinstall advice would put back what
+	// `delete --yes` just (partly) removed.
 	let orphan_masters = in_bucket(Remedy::LeftoverMaster);
 	if orphan_masters > 0 {
 		eprintln!(
@@ -908,10 +811,7 @@ pub fn execute_with_options(
 	let broken_links = in_bucket(Remedy::Reinstall);
 	if broken_links > 0 {
 		let scope_flag = scope_flag_for(Remedy::Reinstall);
-		// The old text was not a runnable command: `source sync` takes a
-		// required `<SOURCE>` positional and needs `--yes` to write, so copying
-		// it produced a clap usage error, and adding `--yes` alone produced
-		// another silent dry-run.
+		// Must stay a runnable command: `<source>` positional and `--yes`.
 		eprintln!(
 			"note: {broken_links} agent referrer issue(s) — repair a missing or \
 			 dangling link with:\n  aghub-cli {scope_flag} -a <agent> source \
@@ -922,11 +822,8 @@ pub fn execute_with_options(
 		);
 	}
 
-	// `chain` gets its OWN note, and it must not say `source sync`. A chain's
-	// endpoint IS the Master, so `Linker::link` answers `AlreadyLinked` and
-	// `--install-missing` writes nothing — doctor would hand out a command
-	// proven not to fix the state it printed beside it. `repair` is the verb
-	// core plans a `Relink` for.
+	// `chain` gets its OWN note, which must not say `source sync` (linking
+	// sees the Master endpoint and writes nothing); `repair` plans a `Relink`.
 	let chained = in_bucket(Remedy::Relink);
 	if chained > 0 {
 		let scope_flag = scope_flag_for(Remedy::Relink);
@@ -940,22 +837,11 @@ pub fn execute_with_options(
 		);
 	}
 
-	// Counted per SKILL, not per agent — `master_unusable` above is the row
-	// predicate, and the row's HEALTH column names the same thing once.
-	//
-	// Claims only what is pinned: `plan_repair` returns
-	// `Refuse { MasterIsLink }`, which `repair::describe`/`fix_for` render as
-	// "the store holds a link where it must hold a real directory" / "replace
-	// the store entry with a real directory" — the same advice, so the note
-	// really does hand over to a command that says it.
-	// `source sync` is deliberately NOT named — its
-	// resync path has no shape gate at all (`verify_shape`'s only callers are
-	// in `removal.rs`), so what it does to a linked master is unpinned, and an
-	// unverified promise is exactly the kind of note this bucket exists to
-	// stop. Nor does it say what `--verify-links` will print: an occupied slot
-	// reads `master-unusable`, but a slotless agent reads `withheld`,
-	// `orphan-master` or `missing` depending on the lock and on whether the
-	// master link resolves.
+	// Counted per SKILL. Claims only what is pinned: `plan_repair` returns
+	// `Refuse { MasterIsLink }`, rendered with this same advice. `source sync`
+	// is NOT named (its behaviour on a linked master is unpinned), nor what
+	// `--verify-links` prints for it (it varies by slot and lock).
+	// See docs/history/cli.md#doctor-fail-on-issues-claims
 	let unusable_masters =
 		rows.iter().filter(|row| master_unusable(row)).count();
 	if unusable_masters > 0 {

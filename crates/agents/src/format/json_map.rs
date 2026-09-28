@@ -19,11 +19,9 @@ use aghub_json::{parse_jsonc_opt, patch_jsonc_object};
 use serde::Deserialize;
 use std::collections::HashMap;
 
-/// The per-server on/off field: its SENSE and its SPELLING. The spelling used
-/// to be hard-coded in the serializer, which made `enabled` / `disabled` the
-/// only two words any `json_map` agent could have — ZCode's is `enable`, and an
-/// agent whose toggle aghub writes under a name it does not read is an agent
-/// whose disabled servers come back on.
+/// The per-server on/off field: its SENSE and its SPELLING (ZCode's is
+/// `enable`). A toggle written under a name the agent does not read is a
+/// disabled server that comes back on.
 ///
 /// The canonical pair is also what aghub itself has always written, so a
 /// dialect spelling its toggle `enabled` still reads `disabled` as a legacy or
@@ -52,10 +50,8 @@ pub enum UntypedRemote {
 pub struct Dialect {
 	/// Dotted path to the server map (`"mcpServers"`, `"amp.mcpServers"`, …).
 	pub server_key: &'static str,
-	/// The transport words, in the SAME type the seven hand-written dialects
-	/// declare. This used to be an `Option<Discriminator>` — the same fields
-	/// under different names, with its own `writes_sse` — and the `None` case
-	/// is now what it always meant: an all-empty vocabulary.
+	/// The transport words, in the SAME type the hand-written dialects
+	/// declare; "no tag at all" is an all-empty vocabulary.
 	pub vocab: TransportVocabulary,
 	/// The URL key this dialect WRITES.
 	pub url_key: &'static str,
@@ -537,7 +533,7 @@ pub fn serialize(
 	let mut servers_map = serde_json::Map::new();
 
 	for mcp in &config.mcps {
-		// Same sentence these 16 agents already emit, now built where every
+		// Same sentence these agents already emit, now built where every
 		// other dialect builds it.
 		dialect.vocab.refuse_unwritable(
 			&mcp.transport,

@@ -10,10 +10,9 @@ use aghub_core::skills::linker::AgentSkillCoverageView;
 
 /// `GET /api/v1/skills/coverage?scope=<global|project>&project_root=<path?>`
 ///
-/// Classifies every registered agent against the canonical `.agents/skills`
-/// master SKILLS-DIR for the requested scope and returns a per-agent coverage
-/// projection. Canonicalization stays server-side. `project_root` is
-/// absolutized by `ScopeParams::resolve` (P0-C) before reaching the classifier.
+/// Classifies every registered agent's skill slot for the requested scope and
+/// returns the static per-agent coverage matrix (reads no Master, names no
+/// skill). `project_root` is absolutized by `ScopeParams::resolve`.
 #[get("/skills/coverage?<params..>")]
 pub async fn skills_coverage(
 	_origin: TrustedLocalOrigin,

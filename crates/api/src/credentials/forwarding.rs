@@ -17,7 +17,7 @@
 //!
 //! The `origin` is the controller-resolved `(scheme, host, port)` the token is
 //! pinned to; it lets the resolver reject handing a token to a same-host but
-//! different-`(scheme,port)` request (origin pinning, D8).
+//! different-`(scheme,port)` request (origin pinning).
 //!
 //! Security invariants:
 //! - A token is never logged. The only `warn!` here (malformed header) must
@@ -183,8 +183,7 @@ impl TokenResolver for ForwardedTokenResolver {
 /// A two-stage [`TokenResolver`]: try `primary`, then fall back to `fallback`.
 ///
 /// Borrow-based so callers can compose any pair of resolvers without taking
-/// ownership; Task 3 wraps a [`ForwardedTokenResolver`] over the existing
-/// keyring resolver.
+/// ownership (e.g. a [`ForwardedTokenResolver`] over the keyring resolver).
 #[cfg(test)]
 pub(crate) struct ChainResolver<'a, P: TokenResolver> {
 	primary: P,

@@ -9,17 +9,9 @@ const MAX_NAME_LENGTH: usize = 255;
 
 /// Convert an arbitrary string into a safe skill directory name.
 ///
-/// Rules:
-/// - Lowercase
-/// - Replace spaces with hyphens, collapse multiple spaces into one hyphen
-/// - Preserve `.` and `_` in middle positions
-/// - Replace other non-`[a-z0-9._-]` characters with hyphens
-/// - Collapse multiple consecutive hyphens into one
-/// - Remove leading dots and hyphens
-/// - Remove trailing dots and hyphens
-/// - Apply Unicode lowercasing before filtering to match JS `.toLowerCase()`
-/// - Truncate to 255 chars
-/// - Return `"unnamed-skill"` if result is empty
+/// Unicode-lowercase first (matching JS `.toLowerCase()`), keep `[a-z0-9._]`,
+/// turn every other run of characters into ONE hyphen, strip leading/trailing
+/// dots and hyphens, truncate to 255 chars; `"unnamed-skill"` if empty.
 pub fn sanitize_name(input: &str) -> String {
 	// Process character by character:
 	// - Unicode lowercase first, matching JS `String.toLowerCase()`.

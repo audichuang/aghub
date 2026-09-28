@@ -142,29 +142,16 @@ pub fn delete_provider_references<C: CredentialStore>(
 /// inventory. Both the API and CLI surfaces route their delete through here so
 /// neither can leave an agent config pointing at a removed provider.
 ///
-/// **Precondition: the credential backend must be reachable.** The very
-/// first thing this does is read the provider's API key — the same read
-/// `remove_opencode_references` needs later for its (base_url, api_key)
-/// match, but done here FIRST, before any adapter is built or any binding
-/// row is touched. If the backend itself is unreachable (Linux
-/// secret-service with no D-Bus session, a locked keychain, ...), this
-/// returns `KeyringUnavailable` with the whole delete a no-op — no Claude,
-/// Codex, or OpenCode reference and no inventory row is touched, so a client
-/// gets a stable, retryable error instead of a half-finished delete (GitHub
-/// #15 P1a). Once the backend has answered — even `Ok(None)`, "no entry",
-/// still counts as reachable — the rest of the cascade keeps its existing
-/// partial-failure/idempotent-retry semantics (see
-/// [`delete_provider_references`]).
+/// **Precondition: the credential backend must be reachable.** The key read
+/// runs FIRST, before any adapter is built or any row is touched, so an
+/// unreachable backend (no D-Bus session, locked keychain, ...) returns
+/// `KeyringUnavailable` with the delete a no-op. `Ok(None)` still counts as
+/// reachable; after that, [`delete_provider_references`]' partial-failure /
+/// idempotent-retry semantics apply.
 ///
-/// The value read here is intentionally DISCARDED past the reachability
-/// check — it is only a precondition probe. `store.delete` re-reads the
-/// current key itself, under its own lock, immediately before it needs it
-/// for rollback. Threading this read's value into `delete` instead (the
-/// previous design) was a stale-read race (GitHub #15 P2-5): this read runs
-/// UNLOCKED, so a concurrent `set_api_key` committing a newer key between
-/// this read and `store.delete`'s lock acquisition could have its result
-/// clobbered by a rollback restoring this now-stale value. `delete`'s own
-/// lock-scoped read closes that window.
+/// The value read here is DISCARDED: `store.delete` re-reads the key under its
+/// own lock for rollback, because this read is unlocked and may be stale.
+/// See docs/history/inference.md#provider-delete-stale-key-rollback
 pub fn delete_provider_cascade<C: CredentialStore>(
 	store: &InferenceProviderStore<C>,
 	provider: &InferenceProvider,
@@ -421,13 +408,10 @@ mod tests {
 
 	#[test]
 	fn cascade_fails_closed_before_any_mutation_when_backend_unreachable() {
-		// Regression (GitHub #15 P1a, Codex-found): `delete_provider_cascade`
-		// used to read the API key for OpenCode matching only AFTER Claude
-		// and Codex bindings were already torn down, so an unreachable
-		// backend produced a HALF-finished delete. The precondition check
-		// must run first and leave every binding + the inventory row
-		// untouched. `BackendDownCredentialStore::delete_api_key` panics if
-		// called, so an accidental mutation attempt fails this test loudly.
+		// The precondition check must run first and leave every binding + the
+		// inventory row untouched; `BackendDownCredentialStore::delete_api_key`
+		// panics if called. See
+		// docs/history/inference.md#provider-delete-keyring-probe
 		let temp = tempfile::tempdir().unwrap();
 		let store = InferenceProviderStore::with_credentials(
 			temp.path(),
@@ -516,16 +500,9 @@ mod tests {
 		}
 	}
 
-	/// Regression (GitHub #15 P2-5, Codex-found): `delete_provider_cascade`
-	/// used to read the API key ONCE — via its own precondition check, which
-	/// runs UNLOCKED before any teardown — and thread THAT value into
-	/// `store.delete` for rollback. If a concurrent `set_api_key` committed
-	/// a NEWER key in the window between that read and `store.delete`
-	/// acquiring its lock, an SQL-delete failure would roll back to the
-	/// STALE precondition value, permanently clobbering the
-	/// concurrently-committed key. Fixed by making `store.delete` read the
-	/// current key itself, under its own lock, instead of trusting a value
-	/// read outside it.
+	/// `store.delete` must roll back to the key it read under its own lock, never
+	/// to the cascade's unlocked precondition read. See
+	/// docs/history/inference.md#provider-delete-stale-key-rollback
 	///
 	/// This test inlines `delete_provider_cascade`'s own steps (precondition
 	/// read -> `delete_provider_references` -> `store.delete`) with

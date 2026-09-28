@@ -15,17 +15,14 @@ pub const PORT_LINE_PREFIX: &str = "AGHUB_API_PORT=";
 /// Exact stdout line `--capabilities` emits, listing the wire features this
 /// binary supports as a single space-separated, stable token list.
 ///
-/// The desktop remote bring-up probes for this WITHOUT a running HTTP server
-/// (an old binary lacks `--capabilities`, so the probe fails and the desktop
-/// treats the remote as not-supporting the feature — see
-/// `aghub_remote::ssh::CAPABILITY_LINE_PREFIX`). The line is a cross-crate
-/// contract: `aghub-remote` matches the literal prefix + tokens, so any drift
-/// breaks a test rather than production.
+/// Probed by the desktop remote bring-up WITHOUT a running server (an old
+/// binary lacks the flag, so the feature reads as unsupported). Cross-crate
+/// contract with `aghub_remote::ssh::CAPABILITY_LINE_PREFIX`, pinned by tests.
 pub const CAPABILITIES_LINE_PREFIX: &str = "AGHUB_API_CAPABILITIES=";
 
 /// Capability token advertising controller-side git-credential forwarding
-/// (the `X-Aghub-Git-Tokens` header support added in this feature). Present in
-/// the `--capabilities` line iff this binary honors the forward header.
+/// (`X-Aghub-Git-Tokens`). Present in the `--capabilities` line iff this binary
+/// honors the forward header.
 pub const CAP_GIT_CREDENTIAL_FORWARDING: &str = "git-credential-forwarding";
 
 /// Parsed CLI configuration for the `aghub-api` binary.

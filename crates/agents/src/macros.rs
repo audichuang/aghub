@@ -8,10 +8,9 @@
 /// Declare an agent's map-based MCP dialect ONCE and generate the matching
 /// `parse_mcp_config` / `serialize_mcp_config` pair from it.
 ///
-/// Reading and writing must come from the same [`json_map::Dialect`]: when they
-/// were configured separately an agent could parse a transport or a toggle it
-/// had no way to write back, and the next save silently rewrote the user's
-/// config. Going through this macro makes that mismatch unrepresentable.
+/// Reading and writing must come from the same [`json_map::Dialect`], or an
+/// agent can parse a transport/toggle it cannot write back and the next save
+/// silently rewrites the user's config; this macro makes that unrepresentable.
 ///
 /// ```rust,ignore
 /// json_map_dialect!(json_map::Dialect {

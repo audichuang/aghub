@@ -27,17 +27,13 @@ use crate::error::ApiError;
 use crate::extractors::{AgentParam, ResolvedScope};
 
 /// Map a [`RemovalOutcome`] to the shared [`DeleteSkillByPathResponse`] wire
-/// shape. Owned ONCE here so the skill, MCP and sub-agent delete routes all
-/// serialize identically. The 7 core removal-outcome fields (success/dry_run/
-/// executed/needs_confirm/paths/skipped/deleted_path) and the PathBuf->String
-/// derivation live in `aghub_core::dto::RemovalView`; this layers the api-only
-/// lock-prune fields on top (always None for MCP/sub-agent, which never prune).
-/// `requested_dry_run` is the CALLER's intent — `!confirm` for every delete
-/// route here. It must be passed in, not inferred from `!outcome.executed`:
-/// inferring it reported `dry_run: true` for a CONFIRMED delete whose target was
-/// already absent, which reads as "your request was not carried out" when it was
-/// in fact already satisfied, and made an already-gone resource serialize
-/// identically to a refused preview.
+/// shape, owned ONCE so the skill, MCP and sub-agent delete routes serialize
+/// identically. The core fields come from `aghub_core::dto::RemovalView`; this
+/// adds the api-only lock-prune fields (always None for MCP/sub-agent).
+///
+/// `requested_dry_run` is the CALLER's intent (`!confirm`), never inferred from
+/// `!outcome.executed` — a confirmed delete of an absent target is not a
+/// preview. See docs/history/api.md#removal-response-dry-run-inference
 pub(crate) fn removal_response(
 	outcome: RemovalOutcome,
 	requested_dry_run: bool,
@@ -132,16 +128,11 @@ pub(crate) fn requested_delete_agents(
 /// MCP and sub-agent delete routes apply it identically instead of each
 /// open-coding an `Err(ResourceNotFound) => noop` arm.
 ///
-/// Deleting a resource that is already absent is a **success no-op**
-/// (`success:true, executed:false, deleted_path:null`), NOT an error — DELETE is
-/// idempotent, the post-condition ("resource gone") already holds. This matches
-/// the by-path skill route and the CLI's `plan_or_noop`, so all delete surfaces
-/// agree. Only `ResourceNotFound` is absorbed; every other error (IO, save
-/// failure, unsupported scope, …) propagates as an actionable API error so a
-/// genuine failure is never swallowed as success.
-///
-/// `outcome` is the result of a planned-removal call (already gated for
-/// dry-run/confirm by the manager).
+/// Deleting an already-absent resource is a **success no-op**
+/// (`success:true, executed:false, deleted_path:null`), matching the by-path
+/// route and the CLI's `plan_or_noop`. Only `ResourceNotFound` is absorbed;
+/// every other error propagates so a real failure is never reported as success.
+/// `outcome` is a planned-removal result (already dry-run/confirm gated).
 pub(crate) fn removal_or_noop(
 	outcome: aghub_core::errors::Result<RemovalOutcome>,
 	requested_dry_run: bool,

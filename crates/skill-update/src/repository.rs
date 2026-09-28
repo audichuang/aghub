@@ -150,15 +150,10 @@ impl From<Attempt> for SkillRepoError {
 
 /// An immutable snapshot together with the backend slot that produced it.
 ///
-/// This is the handoff from a tip preflight to the fetch its verdict triggers.
-/// It is a VALUE the caller carries, deliberately not an entry in a
-/// coordinate-keyed cache: a `(url, ref, token) -> snapshot` map is
-/// last-writer-wins, so a slow observation of an older tip could overwrite a
-/// newer one and the fetch would then operate on a tip nobody decided about —
-/// silently reporting `UpToDate` for a source that had moved on. Two source
-/// spellings normalizing to one coordinate (`acme/skills`, `github:acme/skills`
-/// and `https://github.com/acme/skills.git` all do) put two concurrent groups on
-/// exactly that key.
+/// The handoff from a tip preflight to the fetch its verdict triggers: a
+/// VALUE the caller carries, never a coordinate-keyed cache entry (that is
+/// last-writer-wins across source spellings — see crates/skill-update
+/// AGENTS.md "PREFLIGHT").
 ///
 /// Opaque on purpose: only [`SkillRepository`] can mint one, so a claim always
 /// names a snapshot this repository really resolved.
@@ -283,18 +278,13 @@ impl SkillRepository {
 	}
 
 	/// The tip commit OID of `sr.ref_` **without downloading objects** — the
-	/// update-check preflight's question ("has upstream moved?"), which is only
-	/// worth asking if answering it is cheaper than the fetch it may avoid.
+	/// update-check preflight's "has upstream moved?".
 	///
-	/// REST answers it in one request on the pooled HTTP client and memoizes the
-	/// snapshot, so a fetch that follows keeps the same backend slot. Off the
-	/// REST path this falls to a git ref advertisement (ls-refs), NOT to
-	/// [`RepoFetchBackend::resolve`]: the gix backend resolves by performing the
-	/// depth-1 fetch, so routing the preflight through it would pay the full cost
-	/// on exactly the sources it was meant to spare.
-	/// Returns the tip OID plus, when the REST slot served it, a
-	/// [`PinnedSnapshot`] claim the caller hands to [`Self::fetch_pinned`] so the
-	/// fetch operates on the very tip the decision was made about.
+	/// REST answers in one pooled request and memoizes the snapshot; off REST
+	/// this uses a git ref advertisement (ls-refs), NOT
+	/// [`RepoFetchBackend::resolve`], which on gix performs the depth-1 fetch the
+	/// preflight exists to avoid. Returns the OID plus, when REST served it, a
+	/// [`PinnedSnapshot`] claim for [`Self::fetch_pinned`].
 	pub fn resolve_tip(
 		&self,
 		sr: &SourceRef,
@@ -507,12 +497,9 @@ impl SkillRepository {
 	/// listing the catalog or downloading the selection — re-serve the SAME
 	/// commit over gix instead of failing. Public `list` keeps the clean error.
 	///
-	/// The spec made a post-resolve decline a clean error on the premise that
-	/// it "cannot occur for a real single-skill repo". Blob admission broke that
-	/// premise: a skill with more files than the remaining budget (135 files
-	/// against an anonymous 60/hr) was refused on every attempt. gix still
-	/// cannot fetch a commit by OID, so the commit equality below is what keeps
-	/// the caller on the snapshot it decided about.
+	/// gix cannot fetch a commit by OID, so the commit equality below is what
+	/// keeps the caller on the snapshot it decided about. See
+	/// docs/history/skill-update.md#rest-budget-decline-refetches-over-gix
 	fn fetch_or_regix(
 		&self,
 		snapshot: &RepoSnapshot,

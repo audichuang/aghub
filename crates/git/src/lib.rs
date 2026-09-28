@@ -1,35 +1,9 @@
-//! Git clone library with credential injection from environment variables.
+//! Git clone/fetch with credential injection, plus pluggable fetch backends
+//! ([`RepoFetchBackend`]: gix shallow / GitHub REST / system git).
 //!
-//! This library provides functionality to clone git repositories into
-//! temporary directories with credentials automatically injected from
-//! environment variables.
-//!
-//! # Environment Variables
-//!
-//! - `GIT_USERNAME`: Git username for authentication
-//! - `GIT_PASSWORD`: Git password or personal access token
-//!
-//! # Example
-//!
-//! ```rust,no_run
-//! use aghub_git::{clone_to_temp, CloneOptions};
-//!
-//! // Set credentials via environment (or set them before running)
-//! std::env::set_var("GIT_USERNAME", "myuser");
-//! std::env::set_var("GIT_PASSWORD", "mytoken");
-//!
-//! // Clone a repository
-//! let temp_dir = clone_to_temp(
-//!     CloneOptions::new("https://github.com/user/repo.git")
-//! ).unwrap();
-//! println!("Cloned to: {}", temp_dir.path().display());
-//!
-//! // The temp directory is cleaned up automatically when dropped
-//! ```
-//!
-//! # Explicit Credentials
-//!
-//! You can also provide credentials explicitly:
+//! Credentials come from [`CloneOptions::with_credentials`], else the
+//! `GIT_USERNAME` / `GIT_PASSWORD` env vars. Clones land in a [`tempfile::TempDir`]
+//! that is deleted on drop.
 //!
 //! ```rust,no_run
 //! use aghub_git::{clone_to_temp, CloneOptions};
@@ -38,6 +12,7 @@
 //!     CloneOptions::new("https://github.com/user/private-repo.git")
 //!         .with_credentials("myuser", "my_personal_access_token")
 //! ).unwrap();
+//! println!("Cloned to: {}", temp_dir.path().display());
 //! ```
 
 pub mod backend;
@@ -53,7 +28,6 @@ pub mod stage;
 pub mod system_git;
 pub mod tree;
 
-// Re-export commonly used items
 pub use backend::{
 	Blob, GixShallow, RepoFetchBackend, RepoTree, SourceRef, TreeEntry,
 };

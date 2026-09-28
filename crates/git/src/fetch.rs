@@ -1,27 +1,13 @@
 //! Treeless/bare ref fetch (no worktree checkout) + default-branch resolution via
 //! gix HEAD symref. Never shells out to the `git` binary.
 //!
-//! # Chosen gix 0.84 API
-//!
-//! gix does NOT expose a partial (`blob:none`) fetch filter on the blocking
-//! clone path, so we perform a **bare shallow (depth-1) fetch with no worktree
-//! checkout**:
-//!
-//! 1. `gix::clone::PrepareFetch::new(url, tmp, gix::create::Kind::Bare, ...)`
-//!    creates a bare repository (object DB lives at the temp-dir root, not under
-//!    `.git`).
-//! 2. `PrepareFetch::with_shallow(Shallow::DepthAtRemote(1))` limits history to
-//!    the tip commit only — parent commits are not fetched.
-//! 3. `PrepareFetch::fetch_only(progress, should_interrupt)` fetches the tip's
-//!    objects and packed refs WITHOUT calling `main_worktree()` — so there is
-//!    never a worktree checkout. This is the blocking variant (the crate enables
-//!    `blocking-network-client`, so `maybe_async` resolves to a blocking call).
-//! 4. During `fetch_only`, gix's `update_head` writes the local `HEAD` as a
-//!    symbolic ref to the remote default branch (e.g. `refs/heads/main`) and
-//!    materializes that branch ref at the fetched commit. We therefore resolve
-//!    the default branch purely from the local `HEAD` symref via
-//!    `repo.head_name()` — **no `std::process::Command`**.
-//! 5. The skill subtree is read from the populated object DB (no checkout).
+//! gix 0.84 has no `blob:none` filter on the blocking clone path, so this is a
+//! bare shallow (depth-1) fetch: `PrepareFetch::new(.., Kind::Bare, ..)` (object
+//! DB at the temp-dir root) + `with_shallow(DepthAtRemote(1))` +
+//! `fetch_only` (never calls `main_worktree()`). `fetch_only`'s `update_head`
+//! writes the local `HEAD` as a symref to the remote default branch, so the
+//! default branch is read from `repo.head_name()` — no `std::process::Command`.
+//! Skill subtrees are then read straight from the object DB.
 
 use tempfile::TempDir;
 
@@ -45,8 +31,8 @@ pub enum RefKind {
 /// A 40-character all-hex string is a pinned commit SHA. Any other `Some` value
 /// is treated as a branch name; `None` means the remote default branch.
 ///
-/// Tag-vs-branch disambiguation is intentionally left to the caller (F1.3),
-/// which decides "tag-as-pin" from the lock's recorded source metadata.
+/// Tag-vs-branch disambiguation is intentionally left to the caller, which
+/// decides "tag-as-pin" from the lock's recorded source metadata.
 pub fn classify_ref(r: Option<&str>) -> RefKind {
 	match r {
 		Some(s) if is_sha(s) => RefKind::Pinned(s.to_string()),

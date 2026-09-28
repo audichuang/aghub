@@ -285,17 +285,12 @@ fn project_sources(root: &Path) -> Vec<SourceSummary> {
 }
 
 /// The clone coordinate a lock entry's content comes from — the ONE answer every
-/// consumer must use. `owner/repo` is the shape EVERY forge's lock identifier
-/// takes, so whoever resolves it alone reads it as GitHub shorthand: while the
-/// Sources row reconstructed a GitLab URL and the bulk apply resolved the raw
-/// `group/repo` on its own, applying stamped GitHub's commit into a GitLab
-/// entry, silently, whenever a same-path repo existed there.
-///
-/// Callers that must agree, and only agree because they all call this: the
-/// Sources row's advertised `source_url`, the grouping origin, `diff_source`'s
-/// fetch, both update-check projections (API and CLI), CLI `source diff`/`sync`,
-/// and the bulk apply's `SourceRef`. Hand-mirroring
-/// `source_url.unwrap_or(source)` at each of them is what let them drift.
+/// consumer must use (`owner/repo` alone reads as GitHub shorthand on every
+/// forge). Callers that must agree: the Sources row's `source_url`, the grouping
+/// origin, `diff_source`'s fetch, both update-check projections, CLI `source
+/// diff`/`sync`, and the bulk apply's `SourceRef`. Never hand-mirror
+/// `source_url.unwrap_or(source)`. See
+/// docs/history/skill-update.md#one-clone-coordinate-per-lock-entry
 pub(crate) fn entry_clone_source(
 	source: &str,
 	source_url: Option<&str>,
@@ -454,10 +449,9 @@ mod fetch_with_resolver_tests {
 /// shorthand, or an origin echoed back from a previous response — all through
 /// [`reconstruct_source_url`], the same coordinate apply fetches.
 ///
-/// Unresolvable entries get a `unresolved:<type>:<spelling>` key rather than
-/// their bare spelling: a local directory can be named `github.com/owner/repo`
-/// (not GitHub shorthand — that is exactly two segments), and the bare spelling
-/// would then be byte-identical to a real GitHub entry's origin.
+/// Unresolvable entries get a `unresolved:<type>:<spelling>` key: a local
+/// directory named `github.com/owner/repo` would otherwise collide with a real
+/// GitHub entry's origin.
 ///
 /// Some legacy shapes remain undecidable: `sourceType: "git"` (or another
 /// custom type) plus no `sourceUrl` cannot reveal which self-hosted forge owns
@@ -478,22 +472,17 @@ pub(crate) fn source_origin(
 		})
 }
 
-/// `Some` when a host can be derived, `None` for a HOST-BLIND identifier — a
-/// lock `source` whose forge is not recoverable from the string alone (a TFS
-/// collection path, a local directory). Callers that must not merge two forges
-/// need that distinction: an unresolvable spelling cannot separate them, so
-/// treating its echo as an origin would compare unlike things.
+/// `Some` when a host can be derived, `None` for a HOST-BLIND identifier (a TFS
+/// collection path, a local directory) — which cannot separate two forges, so
+/// it must never be compared as an origin.
 fn resolvable_origin(
 	entry_source: &str,
 	entry_source_url: Option<&str>,
 	entry_source_type: &str,
 ) -> Option<String> {
-	// Recorded URLs first — they carry the real host. Reconstruction applies the
-	// recorded provider to a shorthand. The RAW `entry_source` is
-	// deliberately absent: `remote_owner_from_url` reads `host:8443/owner/repo` as
-	// an SCP-like URL whose path is `8443/owner/repo`, so feeding it a raw
-	// authority-bearing string yields a DIFFERENT origin than the URL it came
-	// from — the key would not be idempotent.
+	// Recorded URLs first — they carry the real host. The RAW `entry_source`
+	// is deliberately absent: `remote_owner_from_url` reads `host:8443/o/r` as
+	// SCP-like (path `8443/o/r`), which would make the key non-idempotent.
 	let candidates = [
 		entry_source_url.map(str::to_string),
 		entry_source_url
@@ -512,9 +501,8 @@ fn resolvable_origin(
 /// npx-written lock records exactly that and it IS GitHub — but wrong for a
 /// `want`: `resolve_remote_source` strips the host when it records `source`, so
 /// `owner/repo` is the shape EVERY forge's lock identifier takes, and it is what
-/// `aghub source list` prints. Reading it as GitHub made a caller naming a GitLab
-/// row select GitHub's tree instead, then report every skill as not-installed and
-/// offer to install from that unrelated repository.
+/// `aghub source list` prints. See
+/// docs/history/skill-update.md#source-membership-has-one-definition
 fn want_origin(want: &str) -> Option<String> {
 	let trimmed = want.trim();
 	// No transport and no authority separator ⇒ a host-blind identifier.
@@ -529,12 +517,10 @@ fn want_origin(want: &str) -> Option<String> {
 
 /// Whether a lock entry belongs to the requested source.
 ///
-/// This is the ONE definition of Source membership: the Sources list groups by
-/// it, `diff_source` selects by it, and `mutation.rs` checks a bulk caller's row
-/// identity with it. They MUST agree — when the grouping admitted an entry this
-/// predicate's own resolution could not, a row's diff judged against one
-/// repository while its apply installed from another, and a stricter check in
-/// `mutation.rs` rejected rows the caller was correctly shown.
+/// The ONE definition of Source membership: the Sources list groups by it,
+/// `diff_source` selects by it, and `mutation.rs` checks a bulk caller's row
+/// identity with it. They MUST agree. See
+/// docs/history/skill-update.md#source-membership-has-one-definition
 pub(crate) fn source_matches(
 	want: &str,
 	entry_source: &str,
@@ -737,16 +723,13 @@ pub(crate) fn baseline_for_scope(
 
 /// Discover only the recorded `source_type` + `ref_name` for a source across
 /// the given scopes, WITHOUT building a baseline (no folder hashing, no fetch).
-/// Mirrors the merged-baseline scan order (global first, then project) so the
-/// "first non-empty wins" result matches [`merged_baseline_for_source`] — and,
-/// for the fetch coordinate, matches the row `list_sources` advertises, which is
-/// first-wins too. Preferring an HTTPS spelling here instead would diverge from
-/// both, and with a host-blind `want` it could swap in another forge's URL.
-/// Returns `(source_type, recorded_ref, recorded_source_url)` — all empty/None
-/// when the source is not present in any lock. `recorded_source_url` is the
-/// matching entry's recorded clone URL (the fetch coordinate), so a caller that
-/// was handed a host-stripped `owner/repo` can recover the real non-github host
-/// (TFS/Azure DevOps) instead of reconstructing `github.com`.
+/// Scans global first, then project, first non-empty wins — the same order as
+/// [`merged_baseline_for_source`] and the row `list_sources` advertises
+/// (preferring an HTTPS spelling instead could swap in another forge's URL for
+/// a host-blind `want`). Returns `(source_type, recorded_ref,
+/// recorded_source_url, matched_origins)`, empty/None when no lock has the
+/// source; `recorded_source_url` lets a host-stripped `owner/repo` recover its
+/// real non-github host.
 fn recorded_meta_from(
 	locks: &[ScopeLock],
 	source: &str,
@@ -889,10 +872,8 @@ fn resolve_source_meta_from(
 /// crate boundary; cross-crate callers use [`classify_scope`] / [`diff_source`].
 ///
 /// Discovery (`skill::discover_repo_skills`) happens here so callers pass only
-/// `root`. A repo with no discoverable skills yields the baseline-only
-/// `removed` rows (matching the old route's empty-discovery early-return, which
-/// produced an empty diff before the changelog/removed pass ran on an empty
-/// discovered set).
+/// `root`. A repo with no discoverable skills yields every baseline entry as a
+/// `removed` row.
 pub(crate) fn classify_repo_skills(
 	root: &Path,
 	baseline: &Baseline,
@@ -900,10 +881,9 @@ pub(crate) fn classify_repo_skills(
 ) -> Vec<SourceSkillDiff> {
 	let discovered = match skill::discover_repo_skills(root, &[], true) {
 		Ok(discovered) => discovered,
-		// An upstream that carries no SKILL.md at all is a legitimate diff
-		// input, not a failure: every baseline entry belongs in the removed
-		// pass. Returning early here (as the old route did) hid the deletion of
-		// a source's LAST skill entirely — the caller saw an empty diff.
+		// An upstream with no SKILL.md at all is a legitimate diff input: every
+		// baseline entry belongs in the removed pass (an early return would
+		// hide the deletion of a source's LAST skill).
 		Err(skill::RepoDiscoveryError::NoSkillsFound) => Vec::new(),
 		// A scan / relative-path failure says nothing about upstream content.
 		// Reporting it as a wholesale deletion would be worse than silence, so
@@ -1402,10 +1382,10 @@ enum PrepareRefusal {
 	},
 }
 
-/// The one pre-fetch settlement. Extracted so `diff_source` and
-/// [`plan_source_sync`] cannot drift: the CLI used to re-assemble exactly this
-/// sequence — resolve meta, refuse an ambiguous source, refuse an unfetchable
-/// one — beside every call, twice, with the branches copied word for word.
+/// The one pre-fetch settlement — resolve meta, refuse an ambiguous source,
+/// refuse an unfetchable one — behind both `diff_source` and
+/// [`plan_source_sync`], so no call site re-assembles it (crates/skill-update
+/// AGENTS.md anti-patterns).
 fn prepare(
 	source: &str,
 	scopes: &[SourceScope],
@@ -1539,18 +1519,11 @@ pub fn plan_source_sync(
 	let source = input.source.trim().to_string();
 	let source_log = aghub_git::redact_source_credentials(&source);
 
-	// ONE snapshot of the write scope's lock. The identities this sync will
-	// verify against after the fetch, the coordinates it fetches, and the
-	// single-tree decision all come from THIS read — a second read could
-	// straddle another process's repoint and hand back an identity that matches
-	// the live entry while the bytes came from the other coordinates, which the
-	// compare-after-fetch would then wave through. Derived (never
-	// `EntryIdentity::capture`d) for the same reason.
-	//
-	// Note this is NOT "the lock is read once": the post-fetch classification
-	// re-reads it to build the baseline. That read only decides what to REPORT,
-	// and every write the caller then applies is still gated on the identities
-	// captured here.
+	// ONE snapshot of the write scope's lock: identities, fetch coordinates and
+	// the single-tree decision all come from THIS read (see [`ScopeLock`]);
+	// identities are derived, never `EntryIdentity::capture`d, for the same
+	// reason. The post-fetch classification re-reads the lock, but only to
+	// decide what to REPORT — every write stays gated on these identities.
 	let scope_lock = read_scope_lock(&input.scope);
 	let pre_fetch_identities = scope_lock.identities();
 
