@@ -23,7 +23,8 @@ export function chunkNames(names: string[]): string[][] {
  *
  * The chunking lives HERE, not inline at the call site, because this app has
  * no component-level test runner: an inline loop could be removed with every
- * test still green. Sequential on purpose — the server serializes them anyway.
+ * test still green. Sequential on purpose — each batch occupies a mutation
+ * worker for its whole span, and the server serializes them anyway.
  *
  * `onChunk` receives each chunk's rows AS THEY ARRIVE, so a throw on a later
  * chunk does not report names the server already wrote as failed.

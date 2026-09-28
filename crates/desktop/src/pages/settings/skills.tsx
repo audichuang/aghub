@@ -428,16 +428,11 @@ export default function SkillsPage() {
 		return visibleGroups[0] ?? null;
 	}, [selectedSourceParam, selectedSkillName, visibleGroups]);
 
-	// SkillList runs its own fuzzy search internally (see skill-list.tsx) —
-	// this page never filters `activeGroup` by `searchQuery`, so a search
-	// that excludes the active group used to leave its full detail (delete
-	// included) showing with no hint that it fell out of the results.
-	//
-	// The index is shared with SkillList's filter (`createSkillSearch`) rather
-	// than hand-copied: the banner exists to explain a skill the LIST is not
-	// showing, so a threshold that drifts between the two makes it lie. It is
-	// memoized on the DATA, never on the query — the old copy listed
-	// `searchQuery` in its deps and rebuilt the whole index on every keystroke.
+	// SkillList filters internally and this page never filters `activeGroup`,
+	// so the banner below flags an active group the search excludes. It shares
+	// SkillList's index (`createSkillSearch`) so the two cannot drift, and is
+	// memoized on the DATA, never on the query.
+	// See docs/history/desktop-frontend.md#skill-search-left-an-excluded-groups-detail-open
 	const skillSearch = useMemo(
 		() => createSkillSearch(groupedSkills),
 		[groupedSkills],

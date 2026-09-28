@@ -53,10 +53,9 @@ export function useSidebarNavigation() {
 				current: SidebarItemPreference[],
 			) => SidebarItemPreference[],
 		) => {
-			// `sidebarItems` used to be the fallback here, which is how a
-			// failed read got persisted: it resolves to DEFAULT_SIDEBAR_ITEMS,
-			// so one checkbox click wrote the defaults over a list the user had
-			// hidden and reordered. There is no basis until the read succeeds.
+			// No basis until the read succeeds: `sidebarItems` resolves to
+			// DEFAULT_SIDEBAR_ITEMS on a failed read and must never be written.
+			// See docs/history/desktop-frontend.md#preference-fallback-written-back-over-the-stored-value
 			const basis = preferenceWriteBasis(
 				isSuccess,
 				queryClient.getQueryData(SIDEBAR_NAVIGATION_QUERY_KEY) as

@@ -73,12 +73,9 @@ export default function ApplicationPanel() {
 		},
 	});
 
-	// The flow itself lives in <AppUpdateProvider>, which outlives this panel:
-	// a download keeps running while the user navigates, and the two
-	// `useMutation`s that used to live here were destroyed on unmount. Coming
-	// back showed "Check for updates" over a download in flight, pressing it
-	// started a second one, and a slow download's success toast never fired
-	// because nothing was mounted to receive it.
+	// The flow lives in <AppUpdateProvider>, which outlives this panel, so a
+	// download in flight survives navigation.
+	// See docs/history/desktop-frontend.md#update-downloaded-twice-after-switching-pages
 	const {
 		available,
 		checkForUpdate,

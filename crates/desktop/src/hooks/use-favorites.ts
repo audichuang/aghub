@@ -15,10 +15,9 @@ import {
 export function useFavorites() {
 	const queryClient = useQueryClient();
 
-	// The `= []` defaults are for RENDERING only. A failed read also lands
-	// there, and treating it as "nothing is starred" is how one click used to
-	// wipe every star: the toggle wrote `[thatOne]` over the real list. The
-	// `isSuccess` flags below are what the writes gate on.
+	// The `= []` defaults are for RENDERING only: a failed read also lands
+	// there, so writes gate on the `isSuccess` flags, never on the default.
+	// See docs/history/desktop-frontend.md#preference-fallback-written-back-over-the-stored-value
 	const { data: starredSkills = [], isSuccess: skillsRead } = useQuery({
 		queryKey: ["starredSkills"],
 		queryFn: getStarredSkills,

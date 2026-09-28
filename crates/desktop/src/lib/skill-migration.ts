@@ -96,15 +96,7 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 	// the store — see `RepairOutcome` in crates/core/src/skills/repair.rs, where
 	// `relinked` and `reconciled` both describe a Master that was ALREADY there
 	// and a Referrer being repointed at it.
-	//
-	// This used to also count any non-`tidied` row with referrers, which swept
-	// both of those in. A user whose skills were already in `.aghub` and who
-	// merely lacked the private slots of two newly added agents was told
-	// "50 skills move to ~/.aghub" — false, and false in the direction that
-	// invites a manual re-sort of a store that is already correct. The old
-	// reading deliberately excluded `tidied`; it never asked what `relinked`
-	// meant, because until a second agent joined the roster the two answers
-	// agreed on every row anyone had looked at.
+	// See docs/history/desktop-frontend.md#migration-preview-conflated-moves-and-links
 	const migrating = acting.filter((r) => r.outcome === "migrated");
 	// The other half of that split: real writes that create or repoint an
 	// agent's Referrer while the Master stays where it is.
@@ -122,10 +114,8 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 	// can ALSO detach a stale link in the same pass that adopts a brand-new
 	// Master (an entry resolving to the about-to-be-adopted directory is
 	// unlinked once step 5 turns that directory into the Master itself), so a
-	// row can be both migrating and tidying at once. Gating this on
-	// `referrers.length === 0` (as it used to) silently dropped such a row
-	// from here — count a row as tidying whenever it detached something,
-	// whatever else it also did.
+	// row can be both migrating and tidying at once. Count a row as tidying
+	// whenever it detached something, whatever else it also did.
 	const tidying = acting.filter((r) => r.unlinked.length > 0);
 	const fused = new Set<string>();
 	let totalLinks = 0;

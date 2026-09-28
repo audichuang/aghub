@@ -138,9 +138,8 @@ export function SkillLayoutMigrationBanner({
 	);
 	// The TRIGGER describes the whole outstanding set, not the picked subset,
 	// and it has to know whether anything really moves: "still use the old
-	// layout" over a set whose Masters are all already in the store is the
-	// same false claim the summary sentence used to make, on the line the user
-	// reads first.
+	// layout" over a set whose Masters are all already in the store is false.
+	// See docs/history/desktop-frontend.md#migration-preview-conflated-moves-and-links
 	const outstanding = migrationSummary(rows);
 	const anyMasterMoves = outstanding.migrating > 0;
 
@@ -161,9 +160,8 @@ export function SkillLayoutMigrationBanner({
 	// run that just finished, and an open dialog vanishing out from under the
 	// user mid-read is worse than the trigger disappearing. `Modal.Backdrop`
 	// with `isOpen={false}` renders nothing of its own (react-aria-components
-	// bails before creating its portal), so a closed dialog still costs
-	// `SkillStatusStrip`'s `:empty` container nothing — same as returning
-	// `null` used to.
+	// bails before creating its portal), so a closed dialog still leaves
+	// `SkillStatusStrip`'s `:empty` container empty.
 	return (
 		<>
 			{visible &&

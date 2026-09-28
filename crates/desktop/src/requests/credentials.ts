@@ -40,16 +40,19 @@ export function sourceCredentialBindingsQueryOptions({
 }
 
 /// EVERY credential mutation (delete, bind, AND create) changes which token a
-/// source resolves to — `resolve.rs` falls back to a credential whose NAME
-/// matches the host, so creating `github.com` authenticates every github
-/// source. Source diffs and update checks are computed with that token, so all
-/// three mutations invalidate them here.
+/// source resolves to — deleting one prunes its source bindings server side,
+/// and `resolve.rs` falls back to a credential whose NAME matches the host, so
+/// creating `github.com` authenticates every github source. Source diffs and
+/// update checks are computed with that token, so all three mutations
+/// invalidate them here; otherwise they keep serving the pre-change answer and
+/// the UI looks like nothing changed.
 ///
 /// NOTHING is awaited past marking stale: these are slow HTTP round trips (a
-/// source diff clones behind a 120s timeout), and awaiting a refetch would hold
-/// the dialog pending after the write succeeded. Update checks are not
-/// refetched at all — that refetches EVERY source, the price
-/// `invalidateSkillQueries` also declines to pay.
+/// source diff clones behind a 120s timeout; the credential list carries a 10s
+/// timeout plus a retry), and awaiting a refetch would hold the dialog pending
+/// after the write succeeded. Update checks are not refetched at all — that
+/// refetches EVERY source, the price `invalidateSkillQueries` also declines to
+/// pay. They stay stale until the user asks, which is the honest state.
 async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
 	for (const queryKey of [
 		queryKeys.credentials.all(),
