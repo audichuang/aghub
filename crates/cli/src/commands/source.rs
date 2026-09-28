@@ -32,8 +32,9 @@ use crate::{Scope, SourceAction};
 /// shell buffer. `aghub_git` already redacts what IT builds; this covers the
 /// strings the CLI echoes itself.
 ///
-/// Scheme-less scp-like sources are covered too: [`aghub_git::redact_source_credentials`]
-/// owns that shape for every surface — never re-copy it here.
+/// Scheme-less scp-like sources are covered too:
+/// [`aghub_git::redact_source_credentials`] owns that shape for every surface —
+/// never re-copy it here. See docs/history/cli.md#source-command-consolidation
 fn safe_source(source: &str) -> String {
 	aghub_git::redact_source_credentials(source)
 }
@@ -767,7 +768,8 @@ fn sync(args: SyncArgs) -> Result<()> {
 		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
 	// `--yes` with NO action flag is a caller who believes they asked for a
-	// write; refuse it before the fetch. See docs/history/cli.md#source-sync-yes-without-action
+	// write; refuse it before the fetch.
+	// See docs/history/cli.md#source-sync-yes-without-action
 	if args.yes && !args.update && !args.install_missing {
 		bail!(
 			"--yes needs an action: pass --install-missing (install missing \
@@ -1403,6 +1405,7 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 
 	// Refuse a degenerate rename (and, below, a name not in the lock) BEFORE
 	// the preview, so the preview never green-lights what `--yes` refuses.
+	// See docs/history/cli.md#accept-rename-preview
 	rename::ensure_distinct_names(args.old_name, args.new_name)
 		.map_err(|e| anyhow::anyhow!("{}", e.message()))?;
 
@@ -1480,7 +1483,7 @@ fn accept_rename(args: AcceptRenameArgs) -> Result<()> {
 		),
 	})?;
 
-	// Steps 2/4/5/6/7/8/9 + P0 guards + rollback all live in core.
+	// The remaining steps, guards and rollback live in core.
 	let outcome = accept_fetched_rename(
 		&prepared.fetched,
 		RenameRequest {

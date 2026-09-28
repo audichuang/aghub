@@ -1106,10 +1106,12 @@ pub async fn import_skill(
 	in_mutation_pool(move || {
 		// ONE transaction for load + materialize + hash + lock write. The load is
 		// inside the guard because its duplicate-name check decides whether to
-		// write; one guard over both writes leaves no window for a removal to
-		// strand a ghost lock entry. Side effect: an invalid AND contended
-		// request reports contention first (the retry reports the path error) —
-		// do not split the guard to "fix" that.
+		// write (read outside it, a concurrent same-name install would be
+		// accepted as ours, its Master kept and its lock entry overwritten with
+		// our source and hash); one guard over both writes leaves no window
+		// for a removal to strand a ghost lock entry. Side effect: an invalid
+		// AND contended request reports contention first (the retry reports
+		// the path error) — do not split the guard to "fix" that.
 		let _mutation_guard = aghub_core::skills::lock::mutation_guard(
 			"import skill",
 			resource_scope,

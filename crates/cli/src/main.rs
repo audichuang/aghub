@@ -150,7 +150,8 @@ accept-rename, reconcile with --remove) preview by default and only write with
 --yes.";
 
 /// Verbatim examples for `source sync --help`. Kept out of the doc comment
-/// because clap re-wraps those and ran the two lines together.
+/// because clap re-wraps those and would run the two lines together.
+/// See docs/history/cli.md#source-sync-examples
 const SYNC_EXAMPLES: &str = "\
 Examples:
   aghub-cli -p source sync <owner/repo> --install-missing --yes
@@ -319,8 +320,8 @@ enum Commands {
 	},
 	/// Disable an MCP server (keeps it in config).
 	///
-	/// MCP servers only. Only agents whose config has a
-	/// native per-server toggle support it; the others refuse.
+	/// MCP servers only. Not every agent supports it; an unsupported
+	/// one refuses and the error names it.
 	Disable {
 		#[arg(value_enum)]
 		resource: McpResource,
@@ -328,8 +329,8 @@ enum Commands {
 	},
 	/// Re-enable a previously disabled MCP server.
 	///
-	/// MCP servers only. Only agents whose config has a
-	/// native per-server toggle support it; the others refuse.
+	/// MCP servers only. Not every agent supports it; an unsupported
+	/// one refuses and the error names it.
 	Enable {
 		#[arg(value_enum)]
 		resource: McpResource,
@@ -478,9 +479,11 @@ enum Commands {
 		/// (a master placed by hand, with no lock entry), `withheld` (not
 		/// granted to that agent) and `unsupported` (the agent cannot hold a
 		/// skill).
-		// Only `repair` is pinned to refuse a linked master (`plan_repair` ->
+		// Maintainer note (`//` so clap keeps it out of --help): only `repair`
+		// is pinned to refuse a linked master (`plan_repair` ->
 		// `Refuse { MasterIsLink }`); do not claim here that delete or
 		// `source sync` refuse it — neither has that gate.
+		// See docs/history/cli.md#doctor-fail-on-issues-claims
 		#[arg(long)]
 		fail_on_issues: bool,
 	},
@@ -797,7 +800,8 @@ fn run(cli: Cli) -> Result<()> {
 	// Validate `-a` ONCE, before every early dispatch, so an invalid id fails
 	// the same way on every command (a command that ignores `-a` still ignores
 	// a valid one). The full parse below cannot move: `AgentSelection::All`
-	// routes into `handle_all_agents`. See docs/history/cli.md#agent-id-validated-up-front
+	// routes into `handle_all_agents`.
+	// See docs/history/cli.md#agent-id-validated-up-front
 	AgentSelection::parse(&cli.agent)
 		.map_err(|e| anyhow::anyhow!("invalid --agent: {e}"))?;
 
@@ -1000,6 +1004,7 @@ fn run(cli: Cli) -> Result<()> {
 			// `success: false` (today: `RemovalKind::Partial`, some path could
 			// not be deleted) must not exit 0. The report above IS the answer,
 			// so suppress the failure renderer's second document.
+			// See docs/history/cli.md#partial-removal-exits-nonzero
 			if payload.get("success").and_then(serde_json::Value::as_bool)
 				== Some(false)
 			{
@@ -1102,7 +1107,7 @@ fn render_removal(
 	// master is shared (the commit refuses), and an `--all-agents` sweep that
 	// took NOTHING. For the sweep the single-agent message is false — no agent
 	// reads a `.aghub` master, and `--all-agents` is what just ran — so show
-	// the list instead.
+	// the list instead. See docs/history/cli.md#all-agents-sweep-can-keep-all
 	if payload.get("outcome").and_then(|v| v.as_str()) == Some("kept") {
 		if all_agents {
 			let skipped = list("skipped");

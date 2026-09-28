@@ -196,7 +196,8 @@ pub fn require_writable_scope(scope: &ResolvedScope) -> Result<(), ApiError> {
 	Ok(())
 }
 
-/// Map a resolved scope to the (ResourceScope, project_root) pair used by load_all_agents.
+/// Map a resolved scope to the (ResourceScope, project_root) pair used by
+/// load_all_agents.
 pub fn resolved_to_resource_scope(
 	scope: &ResolvedScope,
 ) -> (ResourceScope, Option<PathBuf>) {

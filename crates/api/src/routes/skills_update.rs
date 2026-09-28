@@ -6,8 +6,9 @@
 //! Network + credential resolution stay in this crate (never in `crates/core`).
 //! The [`Fetcher`] materializes a worktree into a [`tempfile::TempDir`] (the
 //! documented worst-case fallback — a checkout into a temp dir, never the `git`
-//! binary), and the [`TokenResolver`] wraps the keyring/keychain resolution. Every gix error string is redacted of URL userinfo upstream so a
-//! token can never leak into the response.
+//! binary), and the [`TokenResolver`] wraps the keyring/keychain resolution.
+//! Every gix error string is redacted of URL userinfo upstream so a token can
+//! never leak into the response.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};

@@ -3470,10 +3470,21 @@ fn source_help_renders() {
 fn source_sync_help_renders() {
 	let home = tempfile::TempDir::new().unwrap();
 	let state = tempfile::TempDir::new().unwrap();
-	isolated_cli(home.path(), state.path())
+	let out = isolated_cli(home.path(), state.path())
 		.args(["source", "sync", "--help"])
-		.assert()
-		.success();
+		.output()
+		.unwrap();
+	assert!(out.status.success());
+	// Each example must stay on its own line; clap re-wrapping would join
+	// them into one unrunnable command.
+	let help = String::from_utf8_lossy(&out.stdout);
+	for example in [
+		"  aghub-cli -p source sync <owner/repo> --install-missing --yes\n",
+		"  aghub-cli -p source sync <owner/repo> --skill <name> \
+		 --install-missing --yes\n",
+	] {
+		assert!(help.contains(example), "missing verbatim example: {help}");
+	}
 }
 
 // ===== scope-mapper end-to-end message contract =====
@@ -5285,7 +5296,7 @@ fn reconcile_skill_preview_refuses_what_the_commit_refuses() {
 	);
 }
 
-// ── MCP + sub-agent transfer/reconcile arms (finding #2 coverage) ────────────
+// ── MCP + sub-agent transfer/reconcile arms ────────────────────────────────
 //
 // The skill arm above is the tracer; these pin the OTHER two resource kinds the
 // `transfer`/`reconcile` dispatch added, so a kind getting dropped from the
@@ -12233,7 +12244,9 @@ fn an_unreadable_sub_agent_file_is_not_an_absent_one() {
 ///
 /// This pair covers the COPY layout only — `canonical_path` is None, so
 /// `plan_removal` routes to `plan_copy_removal` and `plan_symlink_removal` is
-/// never entered. The symlink sweep has its own pair below.
+/// never entered. The symlink sweep has its own pair below:
+/// `an_agent_dir_we_cannot_stat_is_not_one_that_holds_nothing`.
+/// See docs/history/cli.md#unstatable-referrer-test-scope
 #[cfg(unix)]
 #[test]
 fn a_referrer_we_cannot_stat_still_counts_as_a_referrer() {
