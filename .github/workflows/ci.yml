@@ -142,7 +142,7 @@ jobs:
               with:
                   tool: just,cargo-audit
             - name: Setup sccache
-              uses: mozilla-actions/sccache-action@v0.0.10
+              uses: mozilla-actions/sccache-action@v0.0.11
             - name: Rust Cache
               uses: Swatinem/rust-cache@v2
               with:
@@ -241,7 +241,7 @@ jobs:
               with:
                   tool: just
             - name: Setup sccache
-              uses: mozilla-actions/sccache-action@v0.0.10
+              uses: mozilla-actions/sccache-action@v0.0.11
             - name: Rust Cache
               uses: Swatinem/rust-cache@v2
               with:
@@ -328,7 +328,7 @@ jobs:
               with:
                   tool: just
             - name: Setup sccache
-              uses: mozilla-actions/sccache-action@v0.0.10
+              uses: mozilla-actions/sccache-action@v0.0.11
             - name: Rust Cache
               uses: Swatinem/rust-cache@v2
               with:
