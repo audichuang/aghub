@@ -7,10 +7,10 @@
 //! tracks live handles for teardown on disconnect and app exit.
 //!
 //! Threading: a sync `#[tauri::command] fn` runs ON THE MAIN (UI) thread and a
-//! blocking one freezes the webview, so every ssh command here is an `async fn`
-//! wrapping its blocking work in `async_runtime::spawn_blocking`. Exception:
-//! `remote_install_source_available` is sync and runs local `git remote
-//! get-url` / `git branch --show-current` on the main thread.
+//! blocking one freezes the webview, so every command that runs a process
+//! (ssh, or local `git`) is an `async fn` wrapping its blocking work in
+//! `async_runtime::spawn_blocking`. Only instant ones (a constant, one map
+//! lookup) stay sync.
 
 use std::collections::{HashMap, HashSet};
 #[cfg(windows)]
@@ -991,9 +991,16 @@ fn teardown(handle: &RemoteHandle) {
 /// True in a bundled build (the embedded resource resolves) or a dev build
 /// with an env var / git checkout; false in a shipped build with none, so the
 /// UI can hide the otherwise-dead "Force redeploy" affordance.
+///
+/// Async: resolving the source spawns local `git` processes, which would
+/// freeze the webview on the main thread.
 #[tauri::command]
-pub fn remote_install_source_available(app: AppHandle) -> bool {
-	remote_install_source(&app).is_some()
+pub async fn remote_install_source_available(app: AppHandle) -> bool {
+	tauri::async_runtime::spawn_blocking(move || {
+		remote_install_source(&app).is_some()
+	})
+	.await
+	.unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
