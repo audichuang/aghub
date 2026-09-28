@@ -88,4 +88,15 @@ is in `package.json`; **bun only**.
 - NEVER expose system APIs without explicit permissions in `capabilities/`
 - NEVER do blocking I/O in a sync `#[tauri::command]` — it runs on the main
   thread and freezes the UI (beachball). Make the command `async fn` and wrap
-  blocking work in `spawn_blocking` (worked example: `commands/remote.rs`)
+  blocking work in `spawn_blocking`. Enforced by
+  `commands::tests::tauri_commands_are_async_unless_instant`; a new sync command
+  must be truly instant and added to its allowlist
+
+### Dependencies
+
+- `typescript` stays `~6.0.3` — it is ONLY the JS API `@eslint-react`'s parser
+  loads (`@typescript-eslint` requires `<6.1`; TS 7 ships none), so bumping it
+  breaks `oxlint`'s jsPlugin load. Type checking already runs TS 7 native via
+  the `@typescript/native` alias. `bun outdated` will keep offering 7: ignore it
+- `@types/node` tracks the Node **LTS** major that CI's `setup-node` pins (24
+  now), not npm latest; bump both together, only when a new major reaches LTS
