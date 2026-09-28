@@ -637,7 +637,6 @@ export function ImportGithubSkillPanel({
 										</Checkbox.Content>
 									</Checkbox>
 
-									{/* Credential dropdown */}
 									{isPrivateRepo && (
 										<Fieldset>
 											<Fieldset.Group>
@@ -840,7 +839,6 @@ export function ImportGithubSkillPanel({
 									</Alert>
 								)}
 
-								{/* Branch selector */}
 								{branches.length > 0 && (
 									<Select
 										className="w-full"

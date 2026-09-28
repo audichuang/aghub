@@ -6,6 +6,7 @@ import { AlertDialog, Button, Modal, Spinner, toast } from "@heroui/react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import * as pathe from "pathe";
 import { useTranslation } from "react-i18next";
+import type { SkillResponse } from "../generated/dto";
 import { useAgentName } from "../hooks/use-agent-name";
 import { useApi } from "../hooks/use-api";
 import { invalidateSkillQueries } from "../requests/skills";
@@ -207,7 +208,10 @@ export function DeleteSkillDialog({
 
 	const deleteMutation = useMutation({
 		mutationFn: async () => {
-			const itemsWithAgent = group.items.filter((item) => item.agent);
+			const itemsWithAgent = group.items.filter(
+				(item): item is SkillResponse & { agent: string } =>
+					!!item.agent,
+			);
 
 			const globalItems = itemsWithAgent.filter(
 				(item) => item.source === "global",
@@ -221,13 +225,13 @@ export function DeleteSkillDialog({
 			if (globalItems.length > 0) {
 				const result = await api.skills.reconcile({
 					source: {
-						agent: globalItems[0].agent!,
+						agent: globalItems[0].agent,
 						scope: "global",
 						project_root: null,
 						name: skill.name,
 					},
 					added: null,
-					removed: globalItems.map((item) => item.agent!),
+					removed: globalItems.map((item) => item.agent),
 					// This dialog is the "remove from these agents" confirmation.
 					confirm: true,
 				});
@@ -237,13 +241,13 @@ export function DeleteSkillDialog({
 			if (projectItems.length > 0) {
 				const result = await api.skills.reconcile({
 					source: {
-						agent: projectItems[0].agent!,
+						agent: projectItems[0].agent,
 						scope: "project",
 						project_root: projectPath ?? null,
 						name: skill.name,
 					},
 					added: null,
-					removed: projectItems.map((item) => item.agent!),
+					removed: projectItems.map((item) => item.agent),
 					// This dialog is the "remove from these agents" confirmation.
 					confirm: true,
 				});

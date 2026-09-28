@@ -39,24 +39,17 @@ export function sourceCredentialBindingsQueryOptions({
 	});
 }
 
-/// EVERY credential mutation changes which token a source can resolve to, so
-/// all three go through here. Deleting one prunes its source bindings server
-/// side; binding one repoints a source; and CREATING one is not neutral either
-/// — `resolve.rs` falls back to a credential whose NAME matches the host, so a
-/// credential called `github.com` starts authenticating every github source the
-/// moment it exists. Source diffs and update checks are computed WITH that
-/// token, so they stop being true at that instant; without this they keep
-/// serving the pre-change answer (diff 30-60s, update checks 10 min) and the UI
-/// looks like nothing changed.
+/// EVERY credential mutation (delete, bind, AND create) changes which token a
+/// source resolves to — `resolve.rs` falls back to a credential whose NAME
+/// matches the host, so creating `github.com` authenticates every github
+/// source. Source diffs and update checks are computed with that token, so all
+/// three mutations invalidate them here.
 ///
-/// NOTHING here is awaited past marking stale. Every one of these queries is an
-/// HTTP round trip — a source diff CLONES the repo behind a 120s timeout, and
-/// even the credential list carries a 10s timeout plus a retry — so awaiting any
-/// of their refetches would hold the mutation pending long after the write
-/// succeeded, and the dialog would sit there looking hung. Update checks are not
-/// refetched at all: re-running them refetches EVERY source, the price
-/// `invalidateSkillQueries` also declines to pay. They stay stale until the user
-/// asks, which is the honest state.
+/// NOTHING is awaited past marking stale: these are slow HTTP round trips (a
+/// source diff clones behind a 120s timeout), and awaiting a refetch would hold
+/// the dialog pending after the write succeeded. Update checks are not
+/// refetched at all — that refetches EVERY source, the price
+/// `invalidateSkillQueries` also declines to pay.
 async function invalidateSourceCredentialAnswers(queryClient: QueryClient) {
 	for (const queryKey of [
 		queryKeys.credentials.all(),

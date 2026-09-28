@@ -62,12 +62,8 @@ export function migrationRowFacts(row: RepairReportDto): {
 }
 
 /**
- * The facts that are the SAME for every row, hoisted out of the per-skill list.
- *
- * A fifty-skill preview repeated the store path and the fused-agent sentence
- * fifty times, which buried the two things that actually differ per skill (the
- * name, and whether it was refused). These are scope-wide facts, so they belong
- * in one sentence above the list.
+ * The facts that are the SAME for every row, hoisted out of the per-skill list
+ * into one sentence above it.
  *
  * `masterParent` is taken from the rows rather than composed from a home dir:
  * the store path is the backend's answer and the UI must not re-derive it.
@@ -80,8 +76,8 @@ export function migrationRowFacts(row: RepairReportDto): {
  * can count in several (see the comments below) or in none (an already
  * conformant row that needed no action at all). `migrating` is content moving
  * into the store; `linking` is agent Referrers being created or repointed at a
- * Master that never moved. Keeping them apart is the whole point: they used to
- * be one number, and it read as "your skills are about to move".
+ * Master that never moved. Merging them reads as "your skills are about to
+ * move". See docs/history/desktop-frontend.md#migration-preview-conflated-moves-and-links
  */
 export function migrationSummary(rows: readonly RepairReportDto[]): {
 	migrating: number;
@@ -158,8 +154,6 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
 		masterParent: first === null || cut <= 0 ? first : first.slice(0, cut),
 		totalLinks,
 		// Split per bucket so each sentence counts only the links IT is about.
-		// One shared `totalLinks` made the move sentence claim links that a
-		// link-only row contributed, which is the same conflation one level down.
 		migratingLinks: migrating.reduce((n, r) => n + r.referrers.length, 0),
 		linkingLinks: linking.reduce((n, r) => n + r.referrers.length, 0),
 		fused: [...fused].sort(),
@@ -170,20 +164,10 @@ export function migrationSummary(rows: readonly RepairReportDto[]): {
  * The toast a just-finished commit deserves — as a translation key plus its
  * interpolation params, so the component only has to call `t(...)`.
  *
- * `result.skills.length` alone (the previous message) is the bug this fixes:
- * a commit that only detached stale Referrers migrated NOTHING, so counting
- * every row as "migrated" is the exact false claim a pure-tidied run makes.
- * Reuses `migrationSummary`'s `migrating`/`tidying` split rather than
- * re-deriving it, so the toast and the dialog's own summary can never
- * disagree about which bucket a row landed in.
- *
- * The `migrating === 0 && tidying === 0` case is real, not hypothetical: once
- * the dialog stops auto-closing (see the banner), "Run again" stays
- * clickable after a clean commit, and a bulk re-run drops every
- * now-conformant skill from the report — `skills: []`. Claiming a migration
- * there would be exactly as false as the bug this function fixes, so it gets
- * its own honest "nothing left" key instead of falling through to
- * `skillLayoutMigrated` with `count: 0`.
+ * NEVER count every row as "migrated": a tidy-only commit moved nothing. Reuses
+ * `migrationSummary`'s split so the toast and the dialog cannot disagree. An
+ * empty result (a bulk "Run again" after a clean commit) is real and gets its
+ * own "nothing left" key. See docs/history/desktop-frontend.md#tidy-only-repair-toasted-as-migrated
  */
 export function migrationToastMessage(skills: readonly RepairReportDto[]): {
 	key: string;
@@ -232,23 +216,17 @@ export function migrationToastMessage(skills: readonly RepairReportDto[]): {
 }
 
 /**
- * What a repair button will actually WRITE.
+ * What a repair button will actually WRITE. `names: undefined` is a BULK
+ * repair (the API's contract), so both widening paths are decided here, where
+ * a test can reach them:
  *
- * `names: undefined` means a BULK repair — every skill the lock names at this
- * scope. That is the API's contract, and it is why this decision is a function
- * with BOTH candidate inputs rather than an inline ternary: it used to widen
- * silently in two different ways, and each one had to be reachable by a test.
+ *  - **Basis.** The scope is the OUTSTANDING work (`previewRows`), NEVER the
+ *    last run's rows; `lastRunRows` is only SUBTRACTED (a stale preview must
+ *    not re-offer completed names).
+ *  - **Empty.** Nothing checked stays empty, not "everything"; the caller
+ *    disables the button on `count === 0`.
  *
- *  - **Basis.** The scope is the OUTSTANDING work (`previewRows`), never the
- *    last run's rows. Basing it on the result meant that after a narrowed
- *    commit those rows were exactly what had just been committed, so
- *    `picked.length === selectable.length` turned true and "Run again" posted no
- *    names — a bulk repair that migrated the row the user had explicitly
- *    deselected. `lastRunRows` is taken so the completed names can be SUBTRACTED
- *    (a stale preview must not re-offer them), never used as the basis.
- *  - **Empty.** `0 === 0` is also "everything", so a press with nothing checked
- *    posted a bulk repair. Empty stays empty here; the caller disables the
- *    button on `count === 0`.
+ * See docs/history/desktop-frontend.md#repair-re-run-widened-to-a-bulk-repair
  */
 export function repairScope(
 	previewRows: readonly RepairReportDto[],

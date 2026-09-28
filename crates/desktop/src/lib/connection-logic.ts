@@ -78,14 +78,7 @@ export interface QueryStateLike {
 	data: number | null | undefined;
 }
 
-/**
- * Project a react-query result into the 4-state connection status.
- *
- * - error wins over everything (a failed bring-up).
- * - a resolved port (data) means connected.
- * - pending/fetching with no port yet means connecting.
- * - otherwise idle (not yet attempted / disabled query).
- */
+/** Project a react-query result into the 4-state connection status. */
 export function projectStatus(queryState: QueryStateLike): ConnectionStatus {
 	if (queryState.isError) return "error";
 	if (typeof queryState.data === "number") return "connected";
@@ -96,13 +89,7 @@ export function projectStatus(queryState: QueryStateLike): ConnectionStatus {
 /** The four content-area views rendered by the connection gate. */
 export type ConnectionView = "pending" | "error" | "incompatible" | "ready";
 
-/**
- * Project connection status into the content-area gate view:
- * - connected => ready
- * - error + incompatible => incompatible
- * - error => error
- * - everything else (connecting / idle) => pending
- */
+/** Project connection status into the content-area gate view. */
 export function selectConnectionView(
 	status: ConnectionStatus,
 	isIncompatible: boolean,

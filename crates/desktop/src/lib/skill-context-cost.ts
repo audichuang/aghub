@@ -5,19 +5,14 @@
  * the system prompt — the frontmatter `name` plus `description` — and loads
  * the SKILL.md body only when the skill actually runs. So a skill's startup
  * cost is bounded by its description, NOT by how big the skill is on disk.
- * Verified by reading the shipped binaries of Claude Code 2.1.261, Codex
- * 0.153.4 and Grok 1.0.13; the evidence and the per-agent differences are in
- * `docs/specs/2026-09-05-skill-context-cost.md`.
+ * Evidence and per-agent differences: `docs/specs/2026-09-05-skill-context-cost.md`.
  *
- * The arithmetic below is Claude Code's, because that is the one whose exact
- * algorithm we could read. Codex and Grok inject the same two fields with a
- * different wrapper, so their real numbers are near this one but not equal —
- * hence every value here is presented as an estimate.
+ * The arithmetic is Claude Code's (the one algorithm we could read); Codex and
+ * Grok wrap the same two fields differently, so every value is an estimate.
  *
- * One deliberate understatement: the budget is shared with slash commands,
- * which aghub does not manage and therefore cannot count. A listing that fits
- * here can still be demoted in the agent. The UI says so; do not "fix" it by
- * inventing a command count.
+ * Deliberate understatement: the budget is shared with slash commands, which
+ * aghub cannot count, so a listing that fits here can still be demoted. The UI
+ * says so; do not "fix" it by inventing a command count.
  */
 
 /** Claude Code's `skillListingMaxDescChars` default. */

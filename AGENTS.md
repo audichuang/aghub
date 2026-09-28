@@ -36,6 +36,9 @@ and requires explicit opt-in for changes.
   `remote-*` designs are in `docs/specs/`)
 - **Domain language**: [`CONTEXT.md`](CONTEXT.md) (Source hash, Master, Referrer, Relink, …)
 - **Load-bearing decisions**: [`docs/adr/`](docs/adr/)
+- **Incident history**: [`docs/history/`](docs/history/) — the story behind a
+  rule in the code (what it used to do, the finding, the pinning test). A code
+  comment states the rule and links there; never write the narrative inline
 - **Fork upstream sync log**: [`UPSTREAM.md`](UPSTREAM.md) — port / skip from `AkaraChen/aghub`
 - **Deep domain playbooks**: project skills under `.agents/skills/`, mirrored as
   symlinks in `.claude/skills/`. They trigger on their own `description` — never

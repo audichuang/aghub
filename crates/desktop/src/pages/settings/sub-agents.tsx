@@ -270,7 +270,6 @@ export default function SubAgentsPage() {
 
 	return (
 		<div className="flex h-full">
-			{/* List panel */}
 			<div className="relative flex w-80 shrink-0 flex-col border-r border-border">
 				<ListSearchHeader
 					searchValue={searchQuery}

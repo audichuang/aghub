@@ -39,7 +39,7 @@ import {
 	isFormValid,
 	validateConnectionForm,
 } from "../lib/connection-form";
-import { remoteOutputSummary } from "../lib/remote-errors";
+import { remoteOutputSummary, stringifyUnknown } from "../lib/remote-errors";
 import type { Connection } from "../lib/store";
 import { cn } from "../lib/utils";
 
@@ -169,12 +169,7 @@ function formatInvokeError(error: unknown): string {
 	});
 	if (message != null) return message;
 
-	try {
-		return JSON.stringify(error);
-	} catch {
-		// oxlint-disable-next-line typescript/no-base-to-string -- last resort once JSON.stringify threw (a cycle); "[object Object]" beats throwing inside an error path
-		return String(error);
-	}
+	return stringifyUnknown(error);
 }
 
 function buildTestSteps(

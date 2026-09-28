@@ -60,12 +60,18 @@ export function remoteErrorMessage(error: unknown): string {
 			if (remote.message != null) return remote.message;
 			if (remote.stderr != null) return remote.stderr;
 			if (remote.hint != null) return remote.hint;
-			try {
-				return JSON.stringify(error);
-			} catch {
-				// oxlint-disable-next-line typescript/no-base-to-string -- last resort once JSON.stringify threw (a cycle); "[object Object]" beats throwing inside an error path
-				return String(error);
-			}
+			return stringifyUnknown(error);
+	}
+}
+
+/** JSON for an unrecognised error payload, never throwing. */
+export function stringifyUnknown(error: unknown): string {
+	try {
+		return JSON.stringify(error);
+	} catch {
+		// Last resort once JSON.stringify threw (a cycle): "[object Object]" beats
+		// throwing inside an error path.
+		return String(error);
 	}
 }
 

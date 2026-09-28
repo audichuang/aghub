@@ -28,6 +28,7 @@ import {
 	EmptyTitle,
 } from "../../components/ui/empty";
 import { CreateCredentialDialog } from "./components/create-credential-dialog";
+import { InlineSvg } from "../../components/ui/inline-svg";
 
 const iconModules = import.meta.glob<{ default: string }>(
 	"../../assets/agent/*.svg",
@@ -52,12 +53,10 @@ function EditorIcon({ id, name }: { id: string; name: string }) {
 
 	if (svg) {
 		return (
-			<div
+			<InlineSvg
+				as="div"
 				className="flex size-5 shrink-0 items-center justify-center [&_svg]:size-4"
-				// eslint-disable-next-line @eslint-react/dom-no-dangerously-set-innerhtml
-				dangerouslySetInnerHTML={{
-					__html: (svg.default || svg) as string,
-				}}
+				svg={(svg.default || svg) as string}
 			/>
 		);
 	}

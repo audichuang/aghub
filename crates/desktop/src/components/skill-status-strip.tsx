@@ -21,22 +21,15 @@ interface SkillStatusStripProps {
 }
 
 /**
- * The three banners `pages/settings/skills.tsx` used to stack (update-all,
- * background-check, layout-migration) collapsed into ONE status strip: each
- * true fact gets a single row (icon, text, right-aligned button), and the
- * whole container renders nothing when there is nothing to report.
+ * The skills page's ONE status strip (update-all, background-check,
+ * layout-migration): each true fact gets a single row. Every row is a plain
+ * conditional or `SkillLayoutMigrationBanner` (which returns `null` when it
+ * has nothing), so with no rows the container is `:empty` and `empty:hidden`
+ * hides it — no visibility state to sync by hand.
  *
- * The container relies on the same `empty:hidden` idiom already used for the
- * migration Alert wrapper elsewhere in this file's siblings: every row here
- * is either a plain conditional (the two JS-computed facts) or
- * `SkillLayoutMigrationBanner` itself, which already returns `null` when its
- * own preview has nothing to report. When every row is absent the container
- * has no DOM children and `:empty` hides it — no extra visibility state to
- * keep in sync by hand.
- *
- * This is a *persistent* fact list, not a toast (desktop `AGENTS.md`
- * reserves toasts for transient events), so it carries `role="status"` +
- * `aria-live="polite"`.
+ * A *persistent* fact list, not a toast (desktop `AGENTS.md` reserves toasts
+ * for transient events), so it carries `role="status"` + `aria-live="polite"`.
+ * See docs/history/desktop-frontend.md#skills-page-stacked-three-banners
  */
 export function SkillStatusStrip({
 	scope,

@@ -36,13 +36,9 @@ export function downloadPercent(
 }
 
 /**
- * May a new check or download start?
- *
- * The finding this guards: the About panel's mutations were local to the
- * component, so switching pages destroyed the observer while the download
- * carried on. Coming back reset the UI to "check for updates", and pressing it
- * started a SECOND download of the same update. The phase now lives in a
- * provider that never unmounts, and this is the one place that decides.
+ * May a new check or download start? The ONE place that decides; the phase
+ * lives in a provider that never unmounts, so leaving the page cannot start a
+ * second download. See docs/history/desktop-frontend.md#update-downloaded-twice-after-switching-pages
  *
  * `installed` is terminal on purpose: the bytes are already staged and the
  * only thing left is a restart, so re-running the flow would download an

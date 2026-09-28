@@ -44,7 +44,6 @@ export default function AgentsPanel() {
 		(agent) => agent.availability.is_available,
 	);
 
-	// Apply search filter
 	if (agentSearch.trim()) {
 		const search = agentSearch.toLowerCase();
 		filteredAgents = filteredAgents.filter(
@@ -54,7 +53,6 @@ export default function AgentsPanel() {
 		);
 	}
 
-	// Apply status filter
 	if (agentFilter === "enabled") {
 		filteredAgents = filteredAgents.filter((agent) => !agent.isDisabled);
 	} else if (agentFilter === "disabled") {

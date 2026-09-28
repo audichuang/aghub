@@ -22,7 +22,6 @@ export function AgentAvailabilityProvider({
 	const api = useApi();
 	const { activeId } = useConnection();
 
-	// Fetch all agents
 	const {
 		data: allAgents = [],
 		isLoading: isLoadingAgents,
@@ -32,7 +31,6 @@ export function AgentAvailabilityProvider({
 		...agentsListQueryOptions({ api }),
 	});
 
-	// Fetch availability
 	const {
 		data: availabilityData = [],
 		isLoading: isLoadingAvailability,
@@ -59,7 +57,6 @@ export function AgentAvailabilityProvider({
 		await refetchDisabledAgents();
 	};
 
-	// Combine data
 	const availableAgents: AvailableAgent[] = allAgents.map(
 		(agent: AgentInfo) => {
 			const availability: AgentAvailabilityDto =

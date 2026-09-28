@@ -8,9 +8,10 @@ const WHITESPACE_REGEX = /\s+/;
 
 export type McpImportTransportType = "stdio" | "sse" | "streamable_http";
 
-// Aliases an agent's own config may use for streamable HTTP. Mirrors
-// `HTTP_READ_ALIASES` in `crates/agents/src/format/json_map.rs` — keep the two
-// in step; a spelling missing here silently imports as SSE.
+// Aliases an agent's own config may use for streamable HTTP. Mirrors the
+// `http_read_aliases` of `MCP_SERVERS` in `crates/agents/src/format/json_map.rs`
+// (plus aghub's own `streamable_http`) — keep the two in step; a spelling
+// missing here silently imports as SSE.
 const HTTP_TYPE_ALIASES = [
 	"streamable_http",
 	"http",

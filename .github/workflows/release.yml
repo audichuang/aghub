@@ -279,42 +279,16 @@ jobs:
                   fi
 
             - name: Build Tauri
-              # TODO: pin to a specific tauri-action release for supply-chain integrity
-              uses: tauri-apps/tauri-action@v0
+              uses: tauri-apps/tauri-action@v0.6.2
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-                  # Ad-hoc code signing. A literal "-", NOT a secret: an unset
-                  # secret expands to the empty string, and tauri-cli's read is
-                  # `var_os(...)` -> `Some("")`, which becomes `codesign -s ""`.
-                  # That empty-identity path is the macOS build failure the
-                  # commented-out block below used to cause.
-                  #
-                  # Why this is here at all: without any identity, tauri does
-                  # not run codesign, and the shipped .app was only
-                  # linker-signed -- `codesign --verify --deep --strict` failed
-                  # with "code has no resources but signature indicates they
-                  # must be present", because nothing sealed the bundle's
-                  # resources. Ad-hoc signing seals them. It is NOT notarization
-                  # and NOT a Developer ID: Gatekeeper still treats the app as
-                  # unidentified on a clean Mac. It only makes the bundle
-                  # internally consistent, so tampering after download
-                  # invalidates it instead of going unnoticed.
-                  #
-                  # No cert import happens: tauri only calls `security import`
-                  # when APPLE_CERTIFICATE *and* APPLE_CERTIFICATE_PASSWORD are
-                  # both set (tauri-bundler `macos/sign.rs::keychain`). With
-                  # only an identity it takes the `with_signing_identity` branch
-                  # and runs `codesign --force -s - <target>` over each nested
-                  # binary and framework, inner to outer.
+                  # Ad-hoc code signing: a literal "-", NEVER a secret (an unset
+                  # secret expands to "" and tauri runs `codesign -s ""`, which
+                  # fails). It seals the bundle so `codesign --verify --deep
+                  # --strict` passes; it is NOT notarization or a Developer ID.
+                  # Why, and the switch to real certs: docs/history/release.md#macos-ad-hoc-codesign
                   APPLE_SIGNING_IDENTITY: "-"
-                  # Real Apple certs + notarization: uncomment and set these
-                  # once an Apple Developer account exists, and DROP the literal
-                  # identity above (the cert's own identity replaces it).
-                  # APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-                  # APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-                  # APPLE_ID: ${{ secrets.APPLE_ID }}
-                  # APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-                  # APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+                  # Real Apple certs + notarization (APPLE_* secrets): see docs/history/release.md#macos-ad-hoc-codesign
                   TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
                   TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
               with:

@@ -21,18 +21,12 @@ export function chunkNames(names: string[]): string[][] {
  * Send `names` as request-sized batches, in order, and flatten the per-name
  * results.
  *
- * The chunking lives HERE rather than inline at the call site so a regression
- * to one oversized request is observable: a component-level test runner does
- * not exist in this app, so an inline loop could be removed with every test
- * still green.
+ * The chunking lives HERE, not inline at the call site, because this app has
+ * no component-level test runner: an inline loop could be removed with every
+ * test still green. Sequential on purpose — the server serializes them anyway.
  *
- * Sequential on purpose — each batch occupies a mutation worker for its whole
- * span, and the server serializes them anyway.
- *
- * `onChunk` receives each chunk's rows AS THEY ARRIVE. Without it, a throw on
- * chunk 2 discards chunk 1's rows even though the server already wrote them,
- * and the caller reports every name as failed — including the ones that are
- * now updated on disk.
+ * `onChunk` receives each chunk's rows AS THEY ARRIVE, so a throw on a later
+ * chunk does not report names the server already wrote as failed.
  */
 export async function sendInBatches<T>(
 	names: string[],

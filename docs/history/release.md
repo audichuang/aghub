@@ -1,0 +1,41 @@
+# release history
+
+Incident history moved out of `.github/workflows/release.yml` comments. The
+workflow keeps the current rule; each entry here keeps what happened and why.
+
+## macOS ad-hoc codesign
+
+`.github/workflows/release.yml` "Build Tauri" step — commit `5968b82f`.
+
+**Why a literal `-`, not a secret.** An unset secret expands to the empty
+string, and tauri-cli reads it with `var_os(...)` -> `Some("")`, which becomes
+`codesign -s ""`. That empty-identity path is the macOS build failure the
+commented-out `APPLE_*` block used to cause (the releasing-aghub skill's
+`security import: failed to import keychain certificate` row).
+
+**Why sign at all.** Without any identity tauri does not run codesign, and the
+shipped `.app` was only linker-signed: `codesign --verify --deep --strict`
+failed with "code has no resources but signature indicates they must be
+present", because nothing sealed the bundle's resources. Ad-hoc signing seals
+them. It is NOT notarization and NOT a Developer ID: Gatekeeper still treats
+the app as unidentified on a clean Mac. It only makes the bundle internally
+consistent, so tampering after download invalidates it instead of going
+unnoticed.
+
+**No cert import happens.** tauri only calls `security import` when
+`APPLE_CERTIFICATE` _and_ `APPLE_CERTIFICATE_PASSWORD` are both set
+(tauri-bundler `macos/sign.rs::keychain`). With only an identity it takes the
+`with_signing_identity` branch and runs `codesign --force -s - <target>` over
+each nested binary and framework, inner to outer.
+
+**Moving to real Apple certs + notarization.** Once an Apple Developer account
+exists, add these env entries to the step and DROP the literal
+`APPLE_SIGNING_IDENTITY: "-"` (the cert's own identity replaces it):
+
+```yaml
+APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+APPLE_ID: ${{ secrets.APPLE_ID }}
+APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+```

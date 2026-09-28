@@ -68,6 +68,7 @@ import type {
 	InferenceProviderPresetResponse,
 } from "../generated/dto";
 import { useAgentAvailability } from "../hooks/use-agent-availability";
+import { InlineSvg } from "../components/ui/inline-svg";
 
 type CodingAgentId = "opencode" | "codex" | "claude";
 
@@ -194,14 +195,13 @@ function ProviderFormatIcon({
 	const svg = format === "anthropic" ? anthropicLogo : openAiLogo;
 
 	return (
-		<span
+		<InlineSvg
 			className={cn(
 				"size-4 shrink-0 text-foreground [&>svg]:size-full",
 				className,
 			)}
 			aria-hidden
-			// eslint-disable-next-line @eslint-react/dom-no-dangerously-set-innerhtml
-			dangerouslySetInnerHTML={{ __html: svg }}
+			svg={svg}
 		/>
 	);
 }

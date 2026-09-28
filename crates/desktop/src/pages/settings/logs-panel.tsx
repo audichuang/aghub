@@ -474,7 +474,6 @@ export default function LogsPanel() {
 				)}
 			</Card>
 
-			{/* Settings dialog */}
 			<Modal.Backdrop
 				isOpen={showSettingsDialog}
 				onOpenChange={(open) => {
@@ -609,7 +608,6 @@ export default function LogsPanel() {
 				</Modal.Container>
 			</Modal.Backdrop>
 
-			{/* Clear dialog */}
 			<AlertDialog.Backdrop
 				isOpen={showClearDialog}
 				onOpenChange={(open) => {

@@ -874,12 +874,11 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 
 	const SourceIcon = row.sourceType === "local" ? FolderIcon : GlobeAltIcon;
 
-	// P2 correction: use sourceUrl for dialog so host resolution works
+	// The dialog needs sourceUrl (not the display name) so host resolution works
 	const credentialBindingSource = row.sourceUrl || row.source;
 
 	return (
 		<div className="flex h-full flex-col overflow-hidden">
-			{/* Header */}
 			<div className="relative z-10 flex items-start justify-between gap-3 border-b border-border p-4 [transform:translateZ(0)]">
 				<div className="min-w-0">
 					<div className="flex items-center gap-2">
@@ -930,7 +929,6 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 				</Button>
 			</div>
 
-			{/* Body */}
 			<div className="min-h-0 flex-1 overflow-y-auto p-4 [transform:translateZ(0)]">
 				{isChecking ? (
 					<div className="flex flex-col items-center gap-3 py-12">
@@ -1028,7 +1026,6 @@ export function SourceDetail({ row, onImport }: SourceDetailProps) {
 											{needsActionSkills.length}
 										</span>
 									</div>
-									{/* Batch buttons */}
 									<div className="flex flex-wrap items-center justify-end gap-1">
 										{outdated.length > 0 && (
 											<Button

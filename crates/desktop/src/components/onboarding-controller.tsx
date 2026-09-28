@@ -181,7 +181,7 @@ export function OnboardingController() {
 					side: "bottom",
 					align: "end",
 					doneBtnText: t("onboardingFinish"),
-					onNextClick: (_element: any, _step: any, opts: any) => {
+					onNextClick: (_element, _step, opts) => {
 						finishProjectTour();
 						opts.driver.destroy();
 					},
@@ -207,7 +207,7 @@ export function OnboardingController() {
 			onDestroyed: () => {
 				activeDriverRef.current = null;
 			},
-			onCloseClick: (_element: any, _step: any, opts: any) => {
+			onCloseClick: (_element, _step, opts) => {
 				opts.driver.destroy();
 			},
 			steps,
@@ -250,7 +250,7 @@ export function OnboardingController() {
 			onDestroyed: () => {
 				activeDriverRef.current = null;
 			},
-			onCloseClick: (_element: any, _step: any, opts: any) => {
+			onCloseClick: (_element, _step, opts) => {
 				opts.driver.destroy();
 			},
 			steps: [
@@ -262,7 +262,7 @@ export function OnboardingController() {
 						side: "right",
 						align: "start",
 						doneBtnText: t("done"),
-						onNextClick: (_element: any, _step: any, opts: any) => {
+						onNextClick: (_element, _step, opts) => {
 							opts.driver.destroy();
 						},
 					},
@@ -336,7 +336,7 @@ export function OnboardingController() {
 					side: "right",
 					align: "center",
 					doneBtnText: t("onboardingContinue"),
-					onNextClick: (_element: any, _step: any, opts: any) => {
+					onNextClick: (_element, _step, opts) => {
 						finishProductTour();
 						opts.driver.destroy();
 					},
@@ -369,7 +369,7 @@ export function OnboardingController() {
 			onDestroyed: () => {
 				activeDriverRef.current = null;
 			},
-			onCloseClick: (_element: any, _step: any, opts: any) => {
+			onCloseClick: (_element, _step, opts) => {
 				opts.driver.destroy();
 			},
 			steps: availableSteps,

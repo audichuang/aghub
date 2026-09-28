@@ -76,18 +76,14 @@ export function SkillLayoutMigrationBanner({
 				await queryClient.invalidateQueries({
 					queryKey: queryKeys.skills.repairPreviews(),
 				});
+				// Deliberately NOT auto-closing, refused or not: the rows are the
+				// only account of what happened — refusal rows carry the literal
+				// next command, done rows switch to their done-state wording
+				// (`skillRepairOutcome_done_*`, `*Done`/`*TidiedDone`). The toast
+				// is a confirmation on top, not the receipt.
 				if (result.refused) {
-					// Deliberately NOT auto-closing: the refusal rows carry the
-					// literal next command, and closing the dialog would throw
-					// away the only place the user can read it.
 					return;
 				}
-				// Deliberately NOT auto-closing here either, for the same
-				// reason: the rows just switched to their done-state wording
-				// (`skillRepairOutcome_done_*`, the `*Done`/`*TidiedDone`
-				// summary lines) to say what actually happened, and closing
-				// before the user sees that throws the receipt away. The
-				// toast is a quick confirmation on top, not the only account.
 				const msg = migrationToastMessage(result.skills);
 				toast.success(t(msg.key, msg));
 			},
@@ -118,15 +114,10 @@ export function SkillLayoutMigrationBanner({
 	// A blocked row is not something the user can choose to migrate, so it is
 	// never selectable and never counted in the button.
 	//
-	// Derived from the live PREVIEW (`rows`), never from `shown`. `shown` is the
-	// last run's RESULT once there is one, and basing the button's scope on it
-	// silently widened a narrowed re-run into a bulk one: preview [a, b], the
-	// user unchecks b, the commit posts `names: [a]`, and afterwards
-	// `shown === result.skills === [a]` makes `pickedNames.length ===
-	// selectable.length` true, so "Run again" posted NO names at all and
-	// migrated the row the user had explicitly deselected. `shown` still drives
-	// the row LIST — that must show what happened — but what the button will
-	// WRITE is only ever what is still outstanding.
+	// Derived from the live PREVIEW (`rows`), NEVER from `shown` (the last
+	// run's result): `shown` drives the row LIST, but what the button WRITES is
+	// only what is still outstanding, or a narrowed re-run widens to bulk.
+	// See docs/history/desktop-frontend.md#repair-re-run-widened-to-a-bulk-repair
 	const selectable = useMemo(
 		() => rows.filter((r) => !isBlocked(r)).map((r) => r.name),
 		[rows],

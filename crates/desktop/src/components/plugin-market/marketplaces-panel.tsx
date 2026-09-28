@@ -34,6 +34,7 @@ import {
 } from "../../requests/plugins";
 import { cn } from "../../lib/utils";
 import { Empty, EmptyHeader, EmptyMedia, EmptyTitle } from "../ui/empty";
+import { InlineSvg } from "../ui/inline-svg";
 
 const PROTECTED_MARKETPLACES = new Set(["claude-plugins-official"]);
 const OFFICIAL_GITHUB_URL = "https://github.com/anthropics/claude-code";
@@ -195,7 +196,7 @@ export function MarketplacesPanel({
 			// Since updateMarketplaceOne performs an all-update on the backend,
 			// we only call it once using the first marketplace to avoid concurrent
 			// process/file lock contention and deadlocks on the Tauri CLI.
-			const targetName = marketplaces[0]!.name;
+			const targetName = marketplaces[0].name;
 			await api.plugins.updateMarketplaceOne(targetName);
 
 			await floor;
@@ -475,10 +476,9 @@ function SourceLink({
 					void openUrl(OFFICIAL_GITHUB_URL);
 				}}
 			>
-				<span
+				<InlineSvg
 					className="inline-flex size-3.5 shrink-0 items-center [&_svg]:size-full"
-					// eslint-disable-next-line @eslint-react/dom-no-dangerously-set-innerhtml
-					dangerouslySetInnerHTML={{ __html: claudeCodeIcon }}
+					svg={claudeCodeIcon}
 				/>
 				<span>{OFFICIAL_GITHUB_REPO}</span>
 			</a>
@@ -497,10 +497,9 @@ function SourceLink({
 						void openUrl(`https://github.com/${source.repo}`);
 					}}
 				>
-					<span
+					<InlineSvg
 						className="inline-flex size-3.5 shrink-0 items-center [&_svg]:size-full"
-						// eslint-disable-next-line @eslint-react/dom-no-dangerously-set-innerhtml
-						dangerouslySetInnerHTML={{ __html: githubIcon }}
+						svg={githubIcon}
 					/>
 					<span>{source.repo}</span>
 				</a>
@@ -522,10 +521,9 @@ function SourceLink({
 							void openUrl(href);
 						}}
 					>
-						<span
+						<InlineSvg
 							className="inline-flex size-3.5 shrink-0 items-center [&_svg]:size-full"
-							// eslint-disable-next-line @eslint-react/dom-no-dangerously-set-innerhtml
-							dangerouslySetInnerHTML={{ __html: githubIcon }}
+							svg={githubIcon}
 						/>
 						<span>{githubRepo}</span>
 					</a>

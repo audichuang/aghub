@@ -1,4 +1,5 @@
 import { Avatar } from "@heroui/react";
+import { InlineSvg } from "../components/ui/inline-svg";
 
 // Import all agent icons as raw SVG strings
 const iconModules = import.meta.glob<{ default: string }>(
@@ -40,16 +41,14 @@ export function AgentIcon({
 	if (svg) {
 		// Render SVG inside a square container with border
 		return (
-			<div
+			<InlineSvg
+				as="div"
 				className={`
       flex items-center justify-center rounded-lg
       ${sizeClasses}
       ${variantClasses}
     `}
-				// eslint-disable-next-line @eslint-react/dom-no-dangerously-set-innerhtml
-				dangerouslySetInnerHTML={{
-					__html: (svg.default || svg) as string,
-				}}
+				svg={(svg.default || svg) as string}
 			/>
 		);
 	}

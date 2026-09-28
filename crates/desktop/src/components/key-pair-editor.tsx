@@ -30,7 +30,6 @@ export function KeyPairEditor({
 	const { t } = useTranslation();
 	const emptyPairId = useMemo(() => generateId(), []);
 
-	// Add new empty pair
 	const handleAdd = () => {
 		onChange(
 			produce(value, (draft) => {
@@ -39,7 +38,6 @@ export function KeyPairEditor({
 		);
 	};
 
-	// Remove pair by id
 	const handleRemove = (id: string) => {
 		onChange(
 			produce(value, (draft) => {

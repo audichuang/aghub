@@ -25,11 +25,11 @@ function marketplaceHeader(
 	githubUrl: string,
 	marketplace: string,
 ): { label: string; isGithub: boolean } {
-	const repoUrl = githubUrl ? githubUrl.split("/tree/")[0]! : "";
+	const repoUrl = githubUrl ? githubUrl.split("/tree/")[0] : "";
 	if (repoUrl) {
 		const match = repoUrl.match(GITHUB_REPO_RE);
 		if (match) {
-			return { label: match[1]!, isGithub: true };
+			return { label: match[1], isGithub: true };
 		}
 		return {
 			label: repoUrl.replace(HTTP_PREFIX_RE, ""),
@@ -103,7 +103,7 @@ export function PluginMarketTable({
 		if (withUninstalled.length > 0) {
 			return withUninstalled;
 		}
-		return groups.length > 0 ? [groups[0]!.key] : [];
+		return groups.length > 0 ? [groups[0].key] : [];
 	}, [groups, installedById]);
 
 	const expandedKeys = useMemo<Set<string>>(() => {
